@@ -8,6 +8,8 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "TimerManager.h"
+#include "DamageTypes/DamageType_Melee.h"
+#include "DamageTypes/DamageType_Ranged.h"
 
 AShooterDummy::AShooterDummy()
 {
@@ -42,6 +44,22 @@ float AShooterDummy::TakeDamage(float Damage, FDamageEvent const& DamageEvent, A
 	if (bIsDead)
 	{
 		return 0.0f;
+	}
+
+	// Check damage type filtering
+	if (DamageEvent.DamageTypeClass)
+	{
+		// Block melee damage if disabled
+		if (DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()) && !bCanBeHitByMelee)
+		{
+			return 0.0f;
+		}
+
+		// Block ranged damage if disabled
+		if (DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Ranged::StaticClass()) && !bCanBeHitByRanged)
+		{
+			return 0.0f;
+		}
 	}
 
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);

@@ -224,6 +224,35 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		if (!bHasHitThisAttack)
 		{
 			PlaySound(MissSound);
+
+			// ==================== Titanfall 2: Preserve Momentum on Miss ====================
+			// If player missed, restore their original momentum so they keep flying
+			// This is crucial for the Titanfall 2 feel - missing shouldn't punish your movement
+			if (Settings.bPreserveMomentum && OwnerCharacter)
+			{
+				if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+				{
+					// Restore the velocity we had when we started the attack
+					FVector RestoredVelocity = OwnerVelocityAtAttackStart * Settings.MomentumPreservationRatio;
+
+					// Keep current Z velocity if we're falling (don't fight gravity)
+					if (Movement->IsFalling())
+					{
+						RestoredVelocity.Z = Movement->Velocity.Z;
+					}
+
+					Movement->Velocity = RestoredVelocity;
+
+#if WITH_EDITOR
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Yellow,
+							FString::Printf(TEXT("Titanfall Melee Miss: Restored velocity %.0f"),
+								RestoredVelocity.Size()));
+					}
+#endif
+				}
+			}
 		}
 		break;
 
@@ -480,9 +509,43 @@ void UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitR
 		OwnerCharacter
 	);
 
-	// Calculate impulse with momentum multiplier
-	float FinalImpulse = Settings.HitImpulse * CalculateMomentumImpulseMultiplier();
+	// ==================== Titanfall 2 Momentum Transfer ====================
+	// When hitting an enemy while flying at high speed, transfer that momentum to them
+	// This creates the satisfying "flying kick" feel where enemies get launched
+
 	FVector ImpulseDirection = GetTraceDirection();
+	float FinalImpulse = Settings.HitImpulse * CalculateMomentumImpulseMultiplier();
+
+	if (Settings.bTransferMomentumOnHit)
+	{
+		// Calculate momentum-based impulse from player velocity
+		FVector MomentumImpulse = OwnerVelocityAtAttackStart * Settings.MomentumTransferMultiplier;
+
+		// Project player velocity onto attack direction for more directed knockback
+		float VelocityInAttackDir = FVector::DotProduct(OwnerVelocityAtAttackStart, ImpulseDirection);
+
+		if (VelocityInAttackDir > 0.0f)
+		{
+			// Player was moving toward target - add that momentum as extra knockback
+			// This makes high-speed attacks feel much more powerful
+			float MomentumBonus = VelocityInAttackDir * Settings.MomentumTransferMultiplier;
+			FinalImpulse += MomentumBonus;
+
+			// Also add some vertical lift based on speed for that Titanfall "pop" effect
+			ImpulseDirection.Z = FMath::Max(ImpulseDirection.Z, 0.3f);
+			ImpulseDirection.Normalize();
+		}
+
+		// Debug: Show momentum transfer
+#if WITH_EDITOR
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+				FString::Printf(TEXT("Titanfall Melee: Speed=%.0f, Impulse=%.0f"),
+					OwnerVelocityAtAttackStart.Size(), FinalImpulse));
+		}
+#endif
+	}
 
 	// Apply impulse - try character launch first, then physics
 	ApplyCharacterImpulse(HitActor, ImpulseDirection, FinalImpulse);
@@ -511,34 +574,78 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 		return;
 	}
 
-	if (Settings.LungeDistance <= 0.0f || Settings.LungeDuration <= 0.0f)
-	{
-		return;
-	}
-
 	if (!OwnerCharacter)
 	{
 		return;
 	}
 
-	// Calculate lunge progress
-	float TotalLungeTime = Settings.WindupTime + Settings.ActiveTime;
-	if (TotalLungeTime <= 0.0f)
+	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
+	if (!Movement)
 	{
 		return;
 	}
 
-	// Apply lunge velocity
-	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
-	if (Movement)
-	{
-		float LungeSpeed = Settings.LungeDistance / Settings.LungeDuration;
+	// ==================== Titanfall 2 Momentum System ====================
+	// Key principle: NEVER kill the player's momentum during melee
+	// This allows high-speed gameplay where you can punch while flying at 2000+ units/sec
 
-		// Only apply horizontal lunge
+	if (Settings.bPreserveMomentum)
+	{
+		// Titanfall 2 style: Preserve original velocity, optionally add lunge boost
+
+		// Start with the velocity we had when we started the attack
+		FVector PreservedVelocity = OwnerVelocityAtAttackStart * Settings.MomentumPreservationRatio;
+
+		// If we have a magnetism target and lunge-to-target is enabled, move toward them
+		if (Settings.bLungeToTarget && MagnetismTarget.IsValid())
+		{
+			AActor* Target = MagnetismTarget.Get();
+			FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+			float DistToTarget = ToTarget.Size();
+
+			// Only lunge if we're moving fast enough (prevents weak lunges when stationary)
+			float CurrentSpeed = OwnerVelocityAtAttackStart.Size();
+			if (CurrentSpeed >= Settings.MinSpeedForLungeToTarget && DistToTarget > 50.0f)
+			{
+				FVector LungeToTargetDir = ToTarget.GetSafeNormal();
+
+				// Blend our preserved momentum with direction toward target
+				// This creates the "magnetic lunge" feel of Titanfall 2
+				FVector LungeVelocity = LungeToTargetDir * Settings.LungeToTargetSpeed;
+
+				// Add lunge velocity to preserved velocity
+				// This means you go FASTER toward the target, not slower
+				PreservedVelocity += LungeVelocity;
+			}
+		}
+		else if (Settings.LungeDistance > 0.0f && Settings.LungeDuration > 0.0f)
+		{
+			// No magnetism target - apply standard lunge in movement direction
+			// But still PRESERVE momentum, just ADD lunge on top
+			float LungeSpeed = Settings.LungeDistance / Settings.LungeDuration;
+			FVector LungeBoost = LungeDirection * LungeSpeed;
+			LungeBoost.Z = 0.0f;
+
+			// Add lunge boost to preserved velocity
+			PreservedVelocity.X += LungeBoost.X;
+			PreservedVelocity.Y += LungeBoost.Y;
+		}
+
+		// Apply the final velocity
+		Movement->Velocity = PreservedVelocity;
+	}
+	else
+	{
+		// Legacy behavior: Override velocity with lunge (kills momentum)
+		if (Settings.LungeDistance <= 0.0f || Settings.LungeDuration <= 0.0f)
+		{
+			return;
+		}
+
+		float LungeSpeed = Settings.LungeDistance / Settings.LungeDuration;
 		FVector LungeVelocity = LungeDirection * LungeSpeed;
 		LungeVelocity.Z = 0.0f;
 
-		// Blend with existing velocity
 		FVector CurrentVelocity = Movement->Velocity;
 		CurrentVelocity.X = LungeVelocity.X;
 		CurrentVelocity.Y = LungeVelocity.Y;
@@ -901,29 +1008,69 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		return;
 	}
 
-	// Get impact center and target position
-	FVector ImpactCenter = GetImpactCenter();
-	FVector TargetPos = Target->GetActorLocation();
+	// ==================== Titanfall 2 Magnetism ====================
+	// In Titanfall 2, the PLAYER moves toward the target, not vice versa
+	// This creates the satisfying "magnetic kick" where you fly toward enemies
 
-	// Calculate direction to pull
-	FVector PullDirection = (ImpactCenter - TargetPos);
-	PullDirection.Z = 0.0f; // Keep horizontal only
-	float DistToCenter = PullDirection.Size();
-
-	// Stop if close enough
-	if (DistToCenter < 10.0f)
+	if (Settings.bLungeToTarget)
 	{
-		return;
+		// Titanfall 2 style: Player lunges toward target
+		// The actual velocity is applied in UpdateLunge() - this function just maintains
+		// the magnetism target and can do additional target tracking/rotation
+
+		// Optional: Rotate player to face target for better kick feel
+		if (OwnerCharacter && OwnerController)
+		{
+			FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+			ToTarget.Z = 0.0f;
+
+			if (ToTarget.SizeSquared() > 100.0f)
+			{
+				// Smoothly rotate view toward target (subtle aim assist)
+				FRotator TargetRotation = ToTarget.Rotation();
+				FRotator CurrentRotation = OwnerController->GetControlRotation();
+
+				// Very subtle rotation assist - don't override player's aim too much
+				float RotationAssistStrength = 0.1f; // 10% blend per frame
+				FRotator NewRotation = FMath::RInterpTo(CurrentRotation, TargetRotation, DeltaTime, RotationAssistStrength * 60.0f);
+
+				// Only adjust yaw, keep pitch and roll as player set them
+				NewRotation.Pitch = CurrentRotation.Pitch;
+				NewRotation.Roll = CurrentRotation.Roll;
+
+				// Uncomment below line if you want auto-aim assist during melee:
+				// OwnerController->SetControlRotation(NewRotation);
+			}
+		}
 	}
+	else
+	{
+		// Legacy behavior: Pull enemy toward player's attack center
 
-	PullDirection.Normalize();
+		// Get impact center and target position
+		FVector ImpactCenter = GetImpactCenter();
+		FVector TargetPos = Target->GetActorLocation();
 
-	// Calculate pull amount this frame
-	float PullAmount = FMath::Min(Settings.MagnetismPullSpeed * DeltaTime, DistToCenter);
+		// Calculate direction to pull
+		FVector PullDirection = (ImpactCenter - TargetPos);
+		PullDirection.Z = 0.0f; // Keep horizontal only
+		float DistToCenter = PullDirection.Size();
 
-	// Apply movement
-	FVector NewLocation = TargetPos + PullDirection * PullAmount;
-	Target->SetActorLocation(NewLocation, true);
+		// Stop if close enough
+		if (DistToCenter < 10.0f)
+		{
+			return;
+		}
+
+		PullDirection.Normalize();
+
+		// Calculate pull amount this frame
+		float PullAmount = FMath::Min(Settings.MagnetismPullSpeed * DeltaTime, DistToCenter);
+
+		// Apply movement
+		FVector NewLocation = TargetPos + PullDirection * PullAmount;
+		Target->SetActorLocation(NewLocation, true);
+	}
 }
 
 void UMeleeAttackComponent::StopMagnetism()

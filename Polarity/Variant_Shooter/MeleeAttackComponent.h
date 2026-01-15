@@ -125,6 +125,36 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Momentum Damage", meta = (ClampMin = "0"))
 	float MomentumImpulseMultiplier = 0.002f;
 
+	// ==================== Titanfall 2 Momentum System ====================
+
+	/** Enable Titanfall 2 style momentum preservation - player keeps velocity during melee */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum")
+	bool bPreserveMomentum = true;
+
+	/** How much of the original velocity to preserve during melee (1.0 = 100%) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "1.0", EditCondition = "bPreserveMomentum"))
+	float MomentumPreservationRatio = 1.0f;
+
+	/** Enable "lunge to target" - player moves toward magnetism target instead of target being pulled */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum")
+	bool bLungeToTarget = true;
+
+	/** Speed at which player lunges toward target (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", EditCondition = "bLungeToTarget"))
+	float LungeToTargetSpeed = 2000.0f;
+
+	/** Transfer player momentum to target on hit (Titanfall 2 flying kick feel) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum")
+	bool bTransferMomentumOnHit = true;
+
+	/** Multiplier for momentum transferred to target (1.0 = full velocity transfer) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "2.0", EditCondition = "bTransferMomentumOnHit"))
+	float MomentumTransferMultiplier = 1.0f;
+
+	/** Minimum speed to trigger lunge-to-target (prevents weak lunges when stationary) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", EditCondition = "bLungeToTarget"))
+	float MinSpeedForLungeToTarget = 300.0f;
+
 	// ==================== Target Magnetism ====================
 
 	/** Enable predictive target magnetism (pulls targets toward punch center) */

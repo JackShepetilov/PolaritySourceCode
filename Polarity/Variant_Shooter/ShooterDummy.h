@@ -57,6 +57,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dummy|Hitbox", meta = (ClampMin = "10.0"))
 	float HitboxHalfHeight = 88.0f;
 
+	// ==================== Damage Types ====================
+
+	/** Can this dummy be damaged by melee attacks */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dummy|Damage Types")
+	bool bCanBeHitByMelee = true;
+
+	/** Can this dummy be damaged by ranged attacks */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dummy|Damage Types")
+	bool bCanBeHitByRanged = true;
+
 	// ==================== Charge Rewards ====================
 
 	/** If true, melee hits grant stable (non-decaying) charge */
