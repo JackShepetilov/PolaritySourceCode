@@ -13,6 +13,7 @@ class UTutorialHintWidget;
 class UTutorialSlideWidget;
 class UInputAction;
 class APlayerController;
+struct FHintDisplayData;
 
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTutorialCompleted, FName, TutorialID);
@@ -158,6 +159,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Icons")
 	FKey GetFirstKeyForInputAction(const UInputAction* InputAction, APlayerController* PlayerController = nullptr) const;
 
+	/**
+	 * Get icons for multiple input actions
+	 * @param InputActions - Array of input actions to look up
+	 * @param PlayerController - Controller for key bindings
+	 * @return Array of icon data (same order as input)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Icons")
+	TArray<FTutorialInputIconData> GetIconsForInputActions(const TArray<UInputAction*>& InputActions, APlayerController* PlayerController = nullptr) const;
+
+	/**
+	 * Build complete display data for hint
+	 * @param HintData - Source hint data
+	 * @param PlayerController - Controller for key bindings
+	 * @return Ready-to-use display data
+	 */
+	FHintDisplayData BuildHintDisplayData(const FTutorialHintData& HintData, APlayerController* PlayerController) const;
+
 	// ==================== Events ====================
 
 	/** Fired when any tutorial is marked as completed */
@@ -217,4 +235,17 @@ protected:
 
 	/** Get the appropriate player controller */
 	APlayerController* GetPlayerController(APlayerController* Provided) const;
+
+	/**
+	 * Migrate deprecated single InputAction to array
+	 * Called automatically during ShowHint
+	 */
+	static void MigrateHintDataIfNeeded(FTutorialHintData& HintData);
+
+	/**
+	 * Validate subsystem configuration
+	 * @param OutError - Error message if validation fails
+	 * @return True if configured correctly
+	 */
+	bool ValidateConfiguration(FString& OutError) const;
 };

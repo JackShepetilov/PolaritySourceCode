@@ -179,8 +179,11 @@ UTutorialSubsystem* ATutorialTriggerVolume::GetTutorialSubsystem() const
 
 void ATutorialTriggerVolume::BindInputCompletion()
 {
-	if (!HintData.InputAction)
+	// Use primary input action for completion
+	UInputAction* PrimaryAction = HintData.GetPrimaryInputAction();
+	if (!PrimaryAction)
 	{
+		UE_LOG(LogPolarity, Log, TEXT("No input action for completion binding on tutorial: %s"), *TutorialID.ToString());
 		return;
 	}
 
@@ -205,8 +208,8 @@ void ATutorialTriggerVolume::BindInputCompletion()
 		return;
 	}
 
-	// Bind to the input action - use Started for single press detection
-	EnhancedInput->BindAction(HintData.InputAction, ETriggerEvent::Started, this, &ATutorialTriggerVolume::OnInputActionTriggered);
+	// Bind to the primary input action - use Started for single press detection
+	EnhancedInput->BindAction(PrimaryAction, ETriggerEvent::Started, this, &ATutorialTriggerVolume::OnInputActionTriggered);
 
 	UE_LOG(LogPolarity, Log, TEXT("Bound input completion for tutorial: %s"), *TutorialID.ToString());
 }

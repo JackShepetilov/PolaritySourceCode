@@ -54,6 +54,14 @@ void UTutorialSubsystem::SetWidgetClasses(TSubclassOf<UTutorialHintWidget> HintC
 
 bool UTutorialSubsystem::ShowHint(FName TutorialID, const FTutorialHintData& HintData, APlayerController* PlayerController)
 {
+	// Validate configuration first
+	FString ConfigError;
+	if (!ValidateConfiguration(ConfigError))
+	{
+		UE_LOG(LogPolarity, Error, TEXT("ShowHint failed: %s"), *ConfigError);
+		return false;
+	}
+
 	// Don't show if already completed
 	if (IsCompleted(TutorialID))
 	{
@@ -77,59 +85,72 @@ bool UTutorialSubsystem::ShowHint(FName TutorialID, const FTutorialHintData& Hin
 	APlayerController* PC = GetPlayerController(PlayerController);
 	if (!PC)
 	{
-		UE_LOG(LogPolarity, Error, TEXT("Cannot show hint - no valid PlayerController"));
+		UE_LOG(LogPolarity, Error, TEXT("Cannot show hint '%s' - no valid PlayerController"), *TutorialID.ToString());
 		return false;
 	}
 
-	if (!HintWidgetClass)
-	{
-		UE_LOG(LogPolarity, Error, TEXT("Cannot show hint - HintWidgetClass not set"));
-		return false;
-	}
+	// Create mutable copy for potential migration
+	FTutorialHintData MutableHintData = HintData;
+	MigrateHintDataIfNeeded(MutableHintData);
 
 	// Create widget
 	ActiveHintWidget = CreateWidget<UTutorialHintWidget>(PC, HintWidgetClass);
 	if (!ActiveHintWidget)
 	{
-		UE_LOG(LogPolarity, Error, TEXT("Failed to create hint widget"));
+		UE_LOG(LogPolarity, Error, TEXT("Failed to create hint widget for '%s'"), *TutorialID.ToString());
 		return false;
 	}
 
-	// Get icon for input action
-	UTexture2D* Icon = GetIconForInputAction(HintData.InputAction, PC);
+	// Build display data with resolved icons
+	FHintDisplayData DisplayData = BuildHintDisplayData(MutableHintData, PC);
+
+	// Convert TObjectPtr array to raw pointer array for function call
+	TArray<UInputAction*> RawActions;
+	for (const TObjectPtr<UInputAction>& Action : MutableHintData.InputActions)
+	{
+		RawActions.Add(Action.Get());
+	}
 
 	// Configure and show widget
-	ActiveHintWidget->SetupHint(HintData.HintText, Icon, HintData.InputAction);
+	ActiveHintWidget->SetupHintEx(DisplayData, RawActions);
 	ActiveHintWidget->AddToViewport(100); // High Z-order
 
+	// Set state AFTER successful widget creation
 	ActiveHintID = TutorialID;
 	bHintActive = true;
 
 	OnHintShown.Broadcast(TutorialID);
 
-	UE_LOG(LogPolarity, Log, TEXT("Showing hint: %s"), *TutorialID.ToString());
+	UE_LOG(LogPolarity, Log, TEXT("Showing hint: %s (icons: %d, combination: %s)"),
+		   *TutorialID.ToString(),
+		   DisplayData.Icons.Num(),
+		   DisplayData.bIsCombination ? TEXT("true") : TEXT("false"));
 
 	return true;
 }
 
 void UTutorialSubsystem::HideHint(bool bMarkCompleted)
 {
-	if (!bHintActive || !ActiveHintWidget)
+	if (!bHintActive)
 	{
 		return;
 	}
 
 	FName CompletedID = ActiveHintID;
 
-	// Hide widget
-	ActiveHintWidget->HideHint();
-	ActiveHintWidget = nullptr;
-
+	// Reset state FIRST to prevent re-entry issues
 	bHintActive = false;
 	ActiveHintID = NAME_None;
 
+	// Hide widget if valid
+	if (ActiveHintWidget)
+	{
+		ActiveHintWidget->HideHint();
+		ActiveHintWidget = nullptr;
+	}
+
 	// Mark completed if requested
-	if (bMarkCompleted)
+	if (bMarkCompleted && !CompletedID.IsNone())
 	{
 		MarkCompleted(CompletedID);
 	}
@@ -357,4 +378,86 @@ APlayerController* UTutorialSubsystem::GetPlayerController(APlayerController* Pr
 	}
 
 	return nullptr;
+}
+
+TArray<FTutorialInputIconData> UTutorialSubsystem::GetIconsForInputActions(const TArray<UInputAction*>& InputActions, APlayerController* PlayerController) const
+{
+	TArray<FTutorialInputIconData> Result;
+
+	for (UInputAction* Action : InputActions)
+	{
+		FTutorialInputIconData IconData;
+
+		if (Action)
+		{
+			IconData.Key = GetFirstKeyForInputAction(Action, PlayerController);
+
+			if (IconData.Key.IsValid())
+			{
+				IconData.Icon = GetIconForKey(IconData.Key);
+				IconData.bIsValid = (IconData.Icon != nullptr);
+			}
+		}
+
+		Result.Add(IconData); // Add even if invalid to maintain alignment
+	}
+
+	return Result;
+}
+
+FHintDisplayData UTutorialSubsystem::BuildHintDisplayData(const FTutorialHintData& HintData, APlayerController* PlayerController) const
+{
+	FHintDisplayData DisplayData;
+	DisplayData.HintText = HintData.HintText;
+	DisplayData.bIsCombination = HintData.bIsCombination;
+	DisplayData.bHasIcons = false;
+
+	// Convert TObjectPtr to raw pointers for the function call
+	TArray<UInputAction*> RawActions;
+	for (const TObjectPtr<UInputAction>& Action : HintData.InputActions)
+	{
+		RawActions.Add(Action.Get());
+	}
+
+	// Get icons for all input actions
+	DisplayData.Icons = GetIconsForInputActions(RawActions, PlayerController);
+
+	// Check if we have any valid icons
+	for (const FTutorialInputIconData& IconData : DisplayData.Icons)
+	{
+		if (IconData.bIsValid)
+		{
+			DisplayData.bHasIcons = true;
+			break;
+		}
+	}
+
+	return DisplayData;
+}
+
+void UTutorialSubsystem::MigrateHintDataIfNeeded(FTutorialHintData& HintData)
+{
+	// If old single InputAction is set but array is empty, migrate
+	if (HintData.InputAction_DEPRECATED && HintData.InputActions.Num() == 0)
+	{
+		HintData.InputActions.Add(HintData.InputAction_DEPRECATED);
+		UE_LOG(LogPolarity, Warning, TEXT("Migrated deprecated InputAction to InputActions array"));
+	}
+}
+
+bool UTutorialSubsystem::ValidateConfiguration(FString& OutError) const
+{
+	if (!HintWidgetClass)
+	{
+		OutError = TEXT("HintWidgetClass not set. Call SetWidgetClasses() first.");
+		return false;
+	}
+
+	if (!InputIconsAsset)
+	{
+		// Warning only - icons will be null but hint can still show text
+		UE_LOG(LogPolarity, Warning, TEXT("InputIconsAsset not set - icons will not be displayed"));
+	}
+
+	return true;
 }
