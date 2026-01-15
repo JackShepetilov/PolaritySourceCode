@@ -33,6 +33,28 @@ enum class ETutorialCompletionType : uint8
 };
 
 /**
+ * Single input action entry with resolved icon
+ * Used for passing icon data to Blueprint
+ */
+USTRUCT(BlueprintType)
+struct FTutorialInputIconData
+{
+	GENERATED_BODY()
+
+	/** Resolved icon texture for this input */
+	UPROPERTY(BlueprintReadOnly, Category = "Tutorial")
+	TObjectPtr<class UTexture2D> Icon = nullptr;
+
+	/** The key this icon represents (for debugging/display) */
+	UPROPERTY(BlueprintReadOnly, Category = "Tutorial")
+	FKey Key = EKeys::Invalid;
+
+	/** Is this icon valid (has texture)? */
+	UPROPERTY(BlueprintReadOnly, Category = "Tutorial")
+	bool bIsValid = false;
+};
+
+/**
  * Data for a hint-type tutorial
  */
 USTRUCT(BlueprintType)
@@ -44,13 +66,45 @@ struct FTutorialHintData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
 	FText HintText;
 
-	/** Input action associated with this hint (used for icon and completion) */
+	/**
+	 * Input actions associated with this hint
+	 * Can be single action (E to interact) or multiple (WASD for movement)
+	 * Empty array = text-only hint with no icons
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
-	TObjectPtr<class UInputAction> InputAction;
+	TArray<TObjectPtr<class UInputAction>> InputActions;
+
+	/**
+	 * If true, show "+" separator between icons (for key combinations like Ctrl+E)
+	 * If false, show icons side by side without separator (for alternatives like WASD)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
+	bool bIsCombination = false;
 
 	/** How this hint is completed/hidden */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
 	ETutorialCompletionType CompletionType = ETutorialCompletionType::OnInputAction;
+
+	// ==================== Backward Compatibility ====================
+
+	/**
+	 * DEPRECATED: Use InputActions array instead
+	 * Kept for backward compatibility - will be migrated to InputActions[0]
+	 */
+	UPROPERTY()
+	TObjectPtr<class UInputAction> InputAction_DEPRECATED;
+
+	/** Helper to get first input action (for completion detection) */
+	class UInputAction* GetPrimaryInputAction() const
+	{
+		return InputActions.Num() > 0 ? InputActions[0].Get() : nullptr;
+	}
+
+	/** Check if any input actions are defined */
+	bool HasInputActions() const
+	{
+		return InputActions.Num() > 0;
+	}
 };
 
 /**
