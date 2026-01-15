@@ -1,0 +1,20 @@
+# Visual Studio user files
+*.suo
+*.user
+*.userosscache
+.vs/
+
+# Compiled files
+*.obj
+*.pch
+*.pdb
+*.exp
+
+# Rider
+.idea/
+
+# Claude temp files
+tmpclaude-*
+
+# Windows reserved filename
+nul
