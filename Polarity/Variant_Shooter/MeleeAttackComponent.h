@@ -327,17 +327,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0", ClampMax = "2"))
 	float CameraShakeScale = 1.0f;
 
-	/** Enable camera focus on hit target (rotates camera toward hit enemy) */
+	/** Enable camera focus on lunge target (rotates camera toward enemy when lunge starts) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera")
-	bool bEnableCameraFocusOnHit = true;
+	bool bEnableCameraFocusOnLunge = true;
 
 	/** Duration of camera focus rotation (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnHit"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnLunge"))
 	float CameraFocusDuration = 0.2f;
 
 	/** Strength of camera focus (1.0 = instant snap, 0.5 = gentle rotation) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.1", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnHit"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.1", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnLunge"))
 	float CameraFocusStrength = 0.7f;
+
+	// ==================== Debug ====================
+
+	/** Enable debug visualization for all melee traces */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	bool bEnableDebugVisualization = false;
+
+	/** Duration for debug shapes (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0.1", ClampMax = "10.0", EditCondition = "bEnableDebugVisualization"))
+	float DebugShapeDuration = 2.0f;
 
 	// ==================== VFX ====================
 
@@ -424,6 +434,18 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsInputLocked() const { return bInputLocked; }
+
+	/**
+	 * Enable or disable debug visualization for melee traces
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Debug")
+	void SetDebugVisualizationEnabled(bool bEnabled) { bEnableDebugVisualization = bEnabled; }
+
+	/**
+	 * Check if debug visualization is enabled
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee|Debug")
+	bool IsDebugVisualizationEnabled() const { return bEnableDebugVisualization; }
 
 protected:
 	// ==================== State ====================

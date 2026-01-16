@@ -415,6 +415,25 @@ void UMeleeAttackComponent::PerformHitDetection()
 		QueryParams
 	);
 
+	// Debug visualization for hit detection trace
+	if (bEnableDebugVisualization)
+	{
+		FColor TraceColor = bHit ? FColor::Green : FColor::Red;
+		DrawDebugCapsule(
+			GetWorld(),
+			(Start + End) * 0.5f,
+			FVector::Dist(Start, End) * 0.5f,
+			Settings.AttackRadius,
+			FQuat::FindBetweenNormals(FVector::UpVector, (End - Start).GetSafeNormal()),
+			TraceColor,
+			false,
+			DebugShapeDuration
+		);
+		DrawDebugSphere(GetWorld(), Start, Settings.AttackRadius, 12, FColor::Blue, false, DebugShapeDuration);
+		DrawDebugSphere(GetWorld(), End, Settings.AttackRadius, 12, FColor::Yellow, false, DebugShapeDuration);
+		DrawDebugLine(GetWorld(), Start, End, TraceColor, false, DebugShapeDuration, 0, 2.0f);
+	}
+
 	if (bHit)
 	{
 		for (const FHitResult& Hit : HitResults)
@@ -461,19 +480,17 @@ void UMeleeAttackComponent::PerformHitDetection()
 			PlayCameraShake();
 			SpawnImpactFX(Hit.ImpactPoint, Hit.ImpactNormal);
 
-			// Start camera focus on hit target
-			StartCameraFocus(HitActor);
-
 			// Broadcast hit event
 			OnMeleeHit.Broadcast(HitActor, Hit.ImpactPoint, bHeadshot);
 
-			// Optional: Debug visualization
-#if WITH_EDITOR
-			if (GEngine && GEngine->GameViewport)
+			// Debug visualization for hit impact
+			if (bEnableDebugVisualization)
 			{
-				DrawDebugSphere(GetWorld(), Hit.ImpactPoint, 10.0f, 8, FColor::Red, false, 1.0f);
+				FColor HitColor = bHeadshot ? FColor::Red : FColor::White;
+				DrawDebugSphere(GetWorld(), Hit.ImpactPoint, 15.0f, 12, HitColor, false, DebugShapeDuration);
+				DrawDebugString(GetWorld(), Hit.ImpactPoint + FVector(0, 0, 30),
+					bHeadshot ? TEXT("HEADSHOT!") : TEXT("HIT"), nullptr, HitColor, DebugShapeDuration);
 			}
-#endif
 		}
 	}
 }
@@ -961,6 +978,25 @@ void UMeleeAttackComponent::StartMagnetism()
 		QueryParams
 	);
 
+	// Debug visualization for magnetism trace
+	if (bEnableDebugVisualization)
+	{
+		FColor MagnetismColor = bHit ? FColor::Magenta : FColor::Orange;
+		DrawDebugCapsule(
+			GetWorld(),
+			(Start + End) * 0.5f,
+			FVector::Dist(Start, End) * 0.5f,
+			Settings.MagnetismRadius,
+			FQuat::FindBetweenNormals(FVector::UpVector, (End - Start).GetSafeNormal()),
+			MagnetismColor,
+			false,
+			DebugShapeDuration
+		);
+		DrawDebugSphere(GetWorld(), Start, Settings.MagnetismRadius, 8, FColor::Cyan, false, DebugShapeDuration);
+		DrawDebugSphere(GetWorld(), End, Settings.MagnetismRadius, 8, FColor::Purple, false, DebugShapeDuration);
+		DrawDebugLine(GetWorld(), Start, End, MagnetismColor, false, DebugShapeDuration, 0, 3.0f);
+	}
+
 	if (bHit)
 	{
 		// Find the closest valid target
@@ -988,6 +1024,9 @@ void UMeleeAttackComponent::StartMagnetism()
 		if (ClosestTarget)
 		{
 			MagnetismTarget = ClosestTarget;
+
+			// Start camera focus when lunge target is found
+			StartCameraFocus(ClosestTarget);
 		}
 	}
 }
@@ -1021,6 +1060,25 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		// Titanfall 2 style: Player lunges toward target
 		// The actual velocity is applied in UpdateLunge() - this function just maintains
 		// the magnetism target and can do additional target tracking/rotation
+
+		// Debug visualization for lunge direction
+		if (bEnableDebugVisualization && OwnerCharacter)
+		{
+			FVector PlayerPos = OwnerCharacter->GetActorLocation();
+			FVector TargetPos = Target->GetActorLocation();
+			DrawDebugDirectionalArrow(
+				GetWorld(),
+				PlayerPos,
+				TargetPos,
+				50.0f,
+				FColor::Green,
+				false,
+				0.0f,  // Single frame
+				0,
+				4.0f
+			);
+			DrawDebugSphere(GetWorld(), TargetPos, 30.0f, 8, FColor::Green, false, 0.0f);
+		}
 
 		// Optional: Rotate player to face target for better kick feel
 		if (OwnerCharacter && OwnerController)
@@ -1523,7 +1581,7 @@ void UMeleeAttackComponent::AutoDetectMeshReferences()
 
 void UMeleeAttackComponent::StartCameraFocus(AActor* Target)
 {
-	if (!bEnableCameraFocusOnHit || !Target || !OwnerController)
+	if (!bEnableCameraFocusOnLunge || !Target || !OwnerController)
 	{
 		return;
 	}
