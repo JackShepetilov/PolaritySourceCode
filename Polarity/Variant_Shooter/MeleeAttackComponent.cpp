@@ -65,6 +65,7 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateMeshTransition(DeltaTime);
 	UpdateMeleeMeshRotation();
 	UpdateMontagePlayRate(DeltaTime);
+	UpdateCameraFocus(DeltaTime);
 }
 
 bool UMeleeAttackComponent::StartAttack()
@@ -459,6 +460,9 @@ void UMeleeAttackComponent::PerformHitDetection()
 			PlaySound(HitSound);
 			PlayCameraShake();
 			SpawnImpactFX(Hit.ImpactPoint, Hit.ImpactNormal);
+
+			// Start camera focus on hit target
+			StartCameraFocus(HitActor);
 
 			// Broadcast hit event
 			OnMeleeHit.Broadcast(HitActor, Hit.ImpactPoint, bHeadshot);
@@ -1266,6 +1270,38 @@ void UMeleeAttackComponent::SwitchToMeleeMesh()
 
 	if (MeleeMesh)
 	{
+		// ==================== Attach to Camera ====================
+		// This ensures perfect synchronization even at high speeds
+		// The mesh moves with the camera as a child component
+
+		UCameraComponent* Camera = nullptr;
+		if (APolarityCharacter* PolarityChar = Cast<APolarityCharacter>(OwnerCharacter))
+		{
+			Camera = PolarityChar->GetFirstPersonCameraComponent();
+		}
+
+		if (Camera)
+		{
+			// Attach to camera with snap to target
+			MeleeMesh->AttachToComponent(
+				Camera,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale
+			);
+
+			// Set relative transform (offset from camera)
+			const FMeleeAnimationData& AnimData = GetCurrentAnimationData();
+			MeleeMesh->SetRelativeLocation(AnimData.MeshLocationOffset);
+
+			// Combine global and per-attack rotation offsets
+			FRotator FinalRelativeRotation = MeleeMeshRotationOffset + AnimData.MeshRotationOffset;
+			MeleeMesh->SetRelativeRotation(FinalRelativeRotation);
+		}
+		else
+		{
+			// Fallback: if no camera found, use world positioning (old method)
+			UpdateMeleeMeshRotation();
+		}
+
 		MeleeMesh->SetVisibility(true);
 
 		// Get per-attack hidden bones
@@ -1277,9 +1313,6 @@ void UMeleeAttackComponent::SwitchToMeleeMesh()
 		{
 			MeleeMesh->HideBoneByName(BoneName, EPhysBodyOp::PBO_None);
 		}
-
-		// Set initial rotation to match camera
-		UpdateMeleeMeshRotation();
 	}
 }
 
@@ -1287,6 +1320,9 @@ void UMeleeAttackComponent::SwitchToFirstPersonMesh()
 {
 	if (MeleeMesh)
 	{
+		// Detach from camera
+		MeleeMesh->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
+
 		MeleeMesh->SetVisibility(false);
 
 		// Unhide bones that were hidden for this attack
@@ -1315,7 +1351,15 @@ void UMeleeAttackComponent::SwitchToFirstPersonMesh()
 
 void UMeleeAttackComponent::UpdateMeleeMeshRotation()
 {
-	// Only update during active melee phases
+	// ==================== Camera Attachment Solution ====================
+	// MeleeMesh is now attached directly to the camera component during melee
+	// This means it automatically follows the camera perfectly, even at high speeds
+	// No manual synchronization needed!
+
+	// This function is kept as a stub for compatibility and potential future use
+	// (e.g., dynamic offset adjustments, special effects, etc.)
+
+	// Only process if mesh is active and not attached (fallback mode)
 	if (CurrentState != EMeleeAttackState::InputDelay &&
 		CurrentState != EMeleeAttackState::Windup &&
 		CurrentState != EMeleeAttackState::Active &&
@@ -1324,45 +1368,38 @@ void UMeleeAttackComponent::UpdateMeleeMeshRotation()
 		return;
 	}
 
-	if (!MeleeMesh || !OwnerController)
+	if (!MeleeMesh || !OwnerController || !OwnerCharacter)
 	{
 		return;
 	}
 
-	// Get camera transform
+	// Check if mesh is attached to camera - if so, nothing to do
+	if (MeleeMesh->GetAttachParent() != nullptr)
+	{
+		// Mesh is attached to camera, perfect sync is automatic
+		return;
+	}
+
+	// Fallback: Manual positioning if not attached (shouldn't happen in normal flow)
 	FVector CameraLocation;
 	FRotator CameraRotation;
 	OwnerController->GetPlayerViewPoint(CameraLocation, CameraRotation);
 
-	// Get per-attack offsets
 	const FMeleeAnimationData& AnimData = GetCurrentAnimationData();
 
-	// Combine rotations: Camera + Global Offset + Per-Attack Offset
+	// Combine rotations
 	FQuat CameraQuat = CameraRotation.Quaternion();
 	FQuat GlobalOffsetQuat = MeleeMeshRotationOffset.Quaternion();
 	FQuat AttackOffsetQuat = AnimData.MeshRotationOffset.Quaternion();
 	FQuat FinalQuat = CameraQuat * GlobalOffsetQuat * AttackOffsetQuat;
 
-	FRotator FinalRotation = FinalQuat.Rotator();
-
-	// Calculate location: Camera position + offsets transformed by camera rotation
+	// Calculate location
 	FVector LocalOffset = AnimData.MeshLocationOffset;
 	FVector WorldOffset = CameraRotation.RotateVector(LocalOffset);
 	FVector FinalLocation = CameraLocation + WorldOffset;
 
-#if WITH_EDITOR
-	// Debug output
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Yellow,
-			FString::Printf(TEXT("MeleeOffset: P=%.1f Y=%.1f R=%.1f | AttackOffset: P=%.1f Y=%.1f R=%.1f"),
-				MeleeMeshRotationOffset.Pitch, MeleeMeshRotationOffset.Yaw, MeleeMeshRotationOffset.Roll,
-				AnimData.MeshRotationOffset.Pitch, AnimData.MeshRotationOffset.Yaw, AnimData.MeshRotationOffset.Roll));
-	}
-#endif
-
-	// Apply final transform to MeleeMesh
-	MeleeMesh->SetWorldLocationAndRotation(FinalLocation, FinalRotation);
+	// Apply transform
+	MeleeMesh->SetWorldLocationAndRotation(FinalLocation, FinalQuat.Rotator());
 }
 
 void UMeleeAttackComponent::PlaySwingCameraShake()
@@ -1480,4 +1517,83 @@ void UMeleeAttackComponent::AutoDetectMeshReferences()
 			}
 		}
 	}
+}
+
+// ==================== Camera Focus Implementation ====================
+
+void UMeleeAttackComponent::StartCameraFocus(AActor* Target)
+{
+	if (!bEnableCameraFocusOnHit || !Target || !OwnerController)
+	{
+		return;
+	}
+
+	CameraFocusTarget = Target;
+	CameraFocusTimeRemaining = CameraFocusDuration;
+
+	// Store current camera rotation
+	CameraFocusStartRotation = OwnerController->GetControlRotation();
+
+	// Calculate target rotation (look at target)
+	FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+	CameraFocusTargetRotation = ToTarget.Rotation();
+
+	// Preserve roll (usually zero for FPS)
+	CameraFocusTargetRotation.Roll = CameraFocusStartRotation.Roll;
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Cyan,
+			FString::Printf(TEXT("Camera Focus Started on %s"), *Target->GetName()));
+	}
+#endif
+}
+
+void UMeleeAttackComponent::UpdateCameraFocus(float DeltaTime)
+{
+	if (CameraFocusTimeRemaining <= 0.0f || !CameraFocusTarget.IsValid() || !OwnerController)
+	{
+		return;
+	}
+
+	CameraFocusTimeRemaining -= DeltaTime;
+
+	// Continuously update target rotation to track moving enemies
+	if (AActor* Target = CameraFocusTarget.Get())
+	{
+		FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+		CameraFocusTargetRotation = ToTarget.Rotation();
+		CameraFocusTargetRotation.Roll = CameraFocusStartRotation.Roll;
+	}
+
+	// Calculate interpolation alpha based on remaining time
+	float Alpha = 1.0f - (CameraFocusTimeRemaining / CameraFocusDuration);
+	Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
+
+	// Apply focus strength to alpha for smoother or snappier feel
+	Alpha = FMath::Pow(Alpha, 1.0f / CameraFocusStrength);
+
+	// Interpolate rotation
+	FRotator NewRotation = FMath::RInterpTo(
+		CameraFocusStartRotation,
+		CameraFocusTargetRotation,
+		Alpha,
+		1.0f / DeltaTime  // High interp speed since we're using custom alpha
+	);
+
+	// Apply rotation to controller
+	OwnerController->SetControlRotation(NewRotation);
+
+	// Stop focus when time runs out
+	if (CameraFocusTimeRemaining <= 0.0f)
+	{
+		StopCameraFocus();
+	}
+}
+
+void UMeleeAttackComponent::StopCameraFocus()
+{
+	CameraFocusTarget.Reset();
+	CameraFocusTimeRemaining = 0.0f;
 }

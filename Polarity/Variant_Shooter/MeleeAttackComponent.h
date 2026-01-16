@@ -12,6 +12,7 @@ class UAnimMontage;
 class USoundBase;
 class UDamageType;
 class UCameraShakeBase;
+class UCameraComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
 class USkeletalMeshComponent;
@@ -326,6 +327,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0", ClampMax = "2"))
 	float CameraShakeScale = 1.0f;
 
+	/** Enable camera focus on hit target (rotates camera toward hit enemy) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera")
+	bool bEnableCameraFocusOnHit = true;
+
+	/** Duration of camera focus rotation (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnHit"))
+	float CameraFocusDuration = 0.2f;
+
+	/** Strength of camera focus (1.0 = instant snap, 0.5 = gentle rotation) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.1", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnHit"))
+	float CameraFocusStrength = 0.7f;
+
 	// ==================== VFX ====================
 
 	/** Niagara effect for swing trail (spawned at attack start) */
@@ -486,6 +499,21 @@ protected:
 	/** Total duration of current montage at base rate */
 	float MontageTotalDuration = 0.0f;
 
+	// ==================== Camera Focus State ====================
+
+	/** Target actor for camera focus */
+	UPROPERTY()
+	TWeakObjectPtr<AActor> CameraFocusTarget;
+
+	/** Time remaining for camera focus */
+	float CameraFocusTimeRemaining = 0.0f;
+
+	/** Initial rotation when focus started */
+	FRotator CameraFocusStartRotation = FRotator::ZeroRotator;
+
+	/** Target rotation for camera focus */
+	FRotator CameraFocusTargetRotation = FRotator::ZeroRotator;
+
 	// ==================== Internal ====================
 
 	/** Transition to a new state */
@@ -598,4 +626,15 @@ protected:
 
 	/** Auto-detect mesh references if not set */
 	void AutoDetectMeshReferences();
+
+	// ==================== Camera Focus ====================
+
+	/** Start camera focus on target */
+	void StartCameraFocus(AActor* Target);
+
+	/** Update camera focus interpolation */
+	void UpdateCameraFocus(float DeltaTime);
+
+	/** Stop camera focus */
+	void StopCameraFocus();
 };
