@@ -164,7 +164,7 @@ void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, 
 		Hit.ImpactPoint = HitLocation;
 		Hit.Normal = HitDirection;
 		Hit.ImpactNormal = -HitDirection;
-		Hit.Actor = HitActor;
+		Hit.HitObjectHandle = FActorInstanceHandle(HitActor);
 		Hit.Component = HitComp;
 
 		BP_OnEMFHit(HitActor, ProjectileCharge, Hit);

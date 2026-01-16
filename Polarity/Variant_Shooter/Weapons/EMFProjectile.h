@@ -113,7 +113,7 @@ public:
 
 protected:
 	/** Override hit processing to add EMF effects */
-	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection) override;
+	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection);
 
 	/** Calculate damage with charge scaling */
 	float CalculateChargeDamage() const;
