@@ -8,6 +8,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "TimerManager.h"
+#include "Engine/DamageEvents.h"
 #include "DamageTypes/DamageType_Melee.h"
 #include "DamageTypes/DamageType_Ranged.h"
 
