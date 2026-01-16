@@ -623,7 +623,9 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 		if (Settings.bLungeToTarget && MagnetismTarget.IsValid())
 		{
 			AActor* Target = MagnetismTarget.Get();
-			FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+			FVector PlayerPos = OwnerCharacter->GetActorLocation();
+			FVector TargetPos = Target->GetActorLocation();
+			FVector ToTarget = TargetPos - PlayerPos;
 			float DistToTarget = ToTarget.Size();
 
 			// Only lunge if we're moving fast enough (prevents weak lunges when stationary)
@@ -632,13 +634,37 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 			{
 				FVector LungeToTargetDir = ToTarget.GetSafeNormal();
 
-				// Blend our preserved momentum with direction toward target
-				// This creates the "magnetic lunge" feel of Titanfall 2
-				FVector LungeVelocity = LungeToTargetDir * Settings.LungeToTargetSpeed;
+				// Calculate how close we are to the target (0 = far, 1 = close)
+				// Start slowing down when we get within 200 units
+				const float SlowdownDistance = 200.0f;
+				float SlowdownAlpha = 1.0f - FMath::Clamp(DistToTarget / SlowdownDistance, 0.0f, 1.0f);
 
-				// Add lunge velocity to preserved velocity
-				// This means you go FASTER toward the target, not slower
-				PreservedVelocity += LungeVelocity;
+				// Calculate current velocity direction
+				FVector CurrentVelocityDir = PreservedVelocity.GetSafeNormal();
+
+				// Redirect velocity toward target
+				FVector RedirectedVelocity = FMath::Lerp(CurrentVelocityDir, LungeToTargetDir, 0.5f).GetSafeNormal();
+				RedirectedVelocity *= PreservedVelocity.Size();
+
+				// Interpolate velocity to zero as we approach the target
+				float TargetSpeed = FMath::Lerp(Settings.LungeToTargetSpeed, 0.0f, SlowdownAlpha);
+				FVector LungeVelocity = LungeToTargetDir * TargetSpeed;
+
+				// Blend redirected velocity with lunge velocity
+				// As we get closer, prioritize lunge velocity (which goes to zero)
+				PreservedVelocity = FMath::Lerp(RedirectedVelocity, LungeVelocity, SlowdownAlpha);
+
+				// Preserve Z velocity from gravity
+				PreservedVelocity.Z = Movement->Velocity.Z;
+
+#if WITH_EDITOR
+				if (GEngine && bEnableDebugVisualization)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Cyan,
+						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f, Alpha=%.2f"),
+							DistToTarget, PreservedVelocity.Size(), SlowdownAlpha));
+				}
+#endif
 			}
 		}
 		else if (Settings.LungeDistance > 0.0f && Settings.LungeDuration > 0.0f)
@@ -1149,10 +1175,39 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 		return;
 	}
 
-	// Calculate knockback velocity - ImpulseStrength is already in cm/s units
-	// Add small vertical component to help launch character off ground
-	FVector KnockbackVelocity = ImpulseDirection * ImpulseStrength;
-	KnockbackVelocity.Z = FMath::Max(KnockbackVelocity.Z, ImpulseStrength * 0.2f); // At least 20% upward
+	// Check if target is airborne
+	bool bIsAirborne = false;
+	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	{
+		if (UCharacterMovementComponent* CharMovement = HitCharacter->GetCharacterMovement())
+		{
+			bIsAirborne = CharMovement->IsFalling();
+		}
+	}
+
+	// Calculate knockback velocity based on whether target is airborne or grounded
+	FVector KnockbackVelocity;
+
+	if (bIsAirborne)
+	{
+		// Target is in the air - apply normal 3D knockback
+		KnockbackVelocity = ImpulseDirection * ImpulseStrength;
+	}
+	else
+	{
+		// Target is grounded - make them slide along the ground
+		// Project impulse direction onto horizontal plane and add small upward component
+		FVector HorizontalDirection = ImpulseDirection;
+		HorizontalDirection.Z = 0.0f;
+		HorizontalDirection.Normalize();
+
+		// Horizontal velocity for sliding along ground
+		KnockbackVelocity = HorizontalDirection * ImpulseStrength;
+
+		// Add minimal vertical component just to lift them slightly off ground
+		// This prevents them from getting stuck on ground geometry
+		KnockbackVelocity.Z = ImpulseStrength * 0.1f; // 10% upward - just enough to slide smoothly
+	}
 
 	// Try ShooterNPC first (has ApplyKnockback with AI stun)
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
