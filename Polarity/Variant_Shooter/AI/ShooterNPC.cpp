@@ -776,18 +776,18 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// NormalImpulse is the collision impulse along the surface normal
-	// This IS the orthogonal component - high value means hard impact INTO the surface
-	// Sliding along a surface produces low NormalImpulse, hitting head-on produces high
-	float ImpulseMagnitude = NormalImpulse.Size();
+	// Calculate the impulse component perpendicular to the surface
+	// DotProduct projects NormalImpulse onto surface normal direction
+	// High value = hard impact INTO surface, low value = glancing blow or slide
+	float OrthogonalImpulse = FMath::Abs(FVector::DotProduct(NormalImpulse, Hit.ImpactNormal));
 
-	if (ImpulseMagnitude < WallSlamVelocityThreshold)
+	if (OrthogonalImpulse < WallSlamVelocityThreshold)
 	{
 		return;
 	}
 
-	// Calculate damage based on impulse above threshold
-	float ExcessImpulse = ImpulseMagnitude - WallSlamVelocityThreshold;
+	// Calculate damage based on orthogonal impulse above threshold
+	float ExcessImpulse = OrthogonalImpulse - WallSlamVelocityThreshold;
 	float WallSlamDamage = (ExcessImpulse / 100.0f) * WallSlamDamagePerVelocity;
 
 	if (WallSlamDamage > 0.0f)
@@ -821,8 +821,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("Wall Slam! Impulse=%.0f, Damage=%.1f"),
-					ImpulseMagnitude, WallSlamDamage));
+				FString::Printf(TEXT("Wall Slam! Orthogonal Impulse=%.0f, Damage=%.1f"),
+					OrthogonalImpulse, WallSlamDamage));
 		}
 #endif
 	}
