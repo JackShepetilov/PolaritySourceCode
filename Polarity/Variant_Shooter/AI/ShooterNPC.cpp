@@ -144,7 +144,7 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	if (DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
 	{
 		// Steal charge from attacker (opposite sign to what they gain)
-		if (FieldComponent && EventInstigator)
+		if (EMFVelocityModifier && EventInstigator)
 		{
 			APawn* Attacker = EventInstigator->GetPawn();
 			if (Attacker)
@@ -167,9 +167,8 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 					}
 				}
 
-				FEMSourceDescription CurrentSource = FieldComponent->GetSourceDescription();
-				float NewCharge = CurrentSource.Charge + ChargeToAdd;
-				FieldComponent->SetCharge(NewCharge);
+				// Add charge to EMFVelocityModifier (source of truth for NPC charge)
+				EMFVelocityModifier->AddBonusCharge(ChargeToAdd);
 			}
 		}
 	}
@@ -375,9 +374,9 @@ void AShooterNPC::Die()
 	bIsDead = true;
 
 	// Disable EM field emission (dead bodies don't emit charge)
-	if (FieldComponent)
+	if (EMFVelocityModifier)
 	{
-		FieldComponent->SetCharge(0.0f);
+		EMFVelocityModifier->SetCharge(0.0f);
 	}
 
 	// Stop shooting immediately
