@@ -204,11 +204,11 @@ protected:
 
 	// ==================== Wall Slam ====================
 
-	/** Minimum velocity (cm/s) to trigger wall slam damage */
+	/** Minimum impulse to trigger wall slam damage (only walls, not floor/ceiling) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam", meta = (ClampMin = "0"))
 	float WallSlamVelocityThreshold = 800.0f;
 
-	/** Damage dealt per 100 cm/s of velocity above threshold */
+	/** Damage dealt per 100 units of impulse above threshold */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam", meta = (ClampMin = "0"))
 	float WallSlamDamagePerVelocity = 10.0f;
 

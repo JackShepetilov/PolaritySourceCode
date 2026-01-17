@@ -776,26 +776,27 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// Check velocity against threshold
-	UCharacterMovementComponent* Movement = GetCharacterMovement();
-	if (!Movement)
+	// Check if this is a wall (surface normal is mostly horizontal)
+	// Floor/ceiling normals point up/down (high Z), wall normals are horizontal (low Z)
+	float VerticalComponent = FMath::Abs(Hit.ImpactNormal.Z);
+	if (VerticalComponent > 0.5f)
+	{
+		// This is floor or ceiling, not a wall - ignore
+		return;
+	}
+
+	// Use impulse magnitude for damage calculation
+	// NormalImpulse is the collision impulse, which correlates with impact force
+	float ImpulseMagnitude = NormalImpulse.Size();
+
+	if (ImpulseMagnitude < WallSlamVelocityThreshold)
 	{
 		return;
 	}
 
-	// Calculate velocity component orthogonal (perpendicular) to the surface
-	// This prevents damage from sliding along surfaces at high speed
-	// Dot product gives us how fast we're moving INTO the surface
-	float OrthogonalSpeed = FMath::Abs(FVector::DotProduct(Movement->Velocity, Hit.ImpactNormal));
-
-	if (OrthogonalSpeed < WallSlamVelocityThreshold)
-	{
-		return;
-	}
-
-	// Calculate damage based on orthogonal velocity above threshold
-	float ExcessVelocity = OrthogonalSpeed - WallSlamVelocityThreshold;
-	float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
+	// Calculate damage based on impulse above threshold
+	float ExcessImpulse = ImpulseMagnitude - WallSlamVelocityThreshold;
+	float WallSlamDamage = (ExcessImpulse / 100.0f) * WallSlamDamagePerVelocity;
 
 	if (WallSlamDamage > 0.0f)
 	{
@@ -828,8 +829,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("Wall Slam! Orthogonal Speed=%.0f, Damage=%.1f"),
-					OrthogonalSpeed, WallSlamDamage));
+				FString::Printf(TEXT("Wall Slam! Impulse=%.0f, Damage=%.1f"),
+					ImpulseMagnitude, WallSlamDamage));
 		}
 #endif
 	}
