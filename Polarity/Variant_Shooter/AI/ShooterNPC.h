@@ -201,6 +201,12 @@ protected:
 	/** Cached braking deceleration for restore after knockback */
 	float CachedBrakingDeceleration = 2048.0f;
 
+	// ==================== Melee Charge Transfer ====================
+
+	/** Charge change when hit by melee attack (opposite sign to player's gain) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Charge", meta = (ClampMin = "-100.0", ClampMax = "100.0"))
+	float ChargeChangeOnMeleeHit = -25.0f;
+
 public:
 
 	/** Delegate called when this NPC dies - can be bound in Blueprints */

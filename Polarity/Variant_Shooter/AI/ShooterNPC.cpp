@@ -20,6 +20,8 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Engine/DamageEvents.h"
+#include "../DamageTypes/DamageType_Melee.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -125,6 +127,18 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 
 	// Reduce HP
 	CurrentHP -= Damage;
+
+	// Check if damage is from melee attack and apply charge transfer
+	if (DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
+	{
+		// Apply opposite charge to what player gained
+		if (FieldComponent)
+		{
+			FEMSourceDescription CurrentSource = FieldComponent->GetSourceDescription();
+			float NewCharge = CurrentSource.Charge + ChargeChangeOnMeleeHit;
+			FieldComponent->SetCharge(NewCharge);
+		}
+	}
 
 	// Play hit reaction animation
 	if (DamageCauser)
