@@ -12,6 +12,7 @@
 #include "ChargeAnimationComponent.h"
 #include "ApexMovementComponent.h"
 #include "EMFVelocityModifier.h"
+#include "EMF_FieldComponent.h"
 #include "EnhancedInputComponent.h"
 #include "Components/InputComponent.h"
 #include "Components/PawnNoiseEmitterComponent.h"
@@ -85,6 +86,18 @@ void AShooterCharacter::BeginPlay()
 	if (MeleeAttackComponent)
 	{
 		MeleeAttackComponent->OnMeleeHit.AddDynamic(this, &AShooterCharacter::OnMeleeHit);
+	}
+
+	// Configure EMF components if they exist (created in Blueprint)
+	if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
+	{
+		EMFMod->SetOwnerType(EEMSourceOwnerType::Player);
+		// Player doesn't react to NPC EM forces
+		EMFMod->NPCForceMultiplier = 0.0f;
+	}
+	if (UEMF_FieldComponent* FieldComp = FindComponentByClass<UEMF_FieldComponent>())
+	{
+		FieldComp->SetOwnerType(EEMSourceOwnerType::Player);
 	}
 
 	// Bind movement SFX delegates
