@@ -470,6 +470,17 @@ void UMeleeAttackComponent::PerformHitDetection()
 			HitActorsThisAttack.Add(HitActor);
 
 			// Check for cool kick trigger (first hit, airborne, no lunge target)
+#if WITH_EDITOR
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow,
+					FString::Printf(TEXT("Hit Check: bHasHit=%d, AttackType=%d (Airborne=1), HasMagnetism=%d"),
+						bHasHitThisAttack ? 1 : 0,
+						(int32)CurrentAttackType,
+						MagnetismTarget.IsValid() ? 1 : 0));
+			}
+#endif
+
 			if (!bHasHitThisAttack && CurrentAttackType == EMeleeAttackType::Airborne && !MagnetismTarget.IsValid())
 			{
 				StartCoolKick();

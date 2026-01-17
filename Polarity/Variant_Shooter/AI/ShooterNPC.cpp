@@ -783,14 +783,18 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	float CurrentSpeed = Movement->Velocity.Size();
-	if (CurrentSpeed < WallSlamVelocityThreshold)
+	// Calculate velocity component orthogonal (perpendicular) to the surface
+	// This prevents damage from sliding along surfaces at high speed
+	// Dot product gives us how fast we're moving INTO the surface
+	float OrthogonalSpeed = FMath::Abs(FVector::DotProduct(Movement->Velocity, Hit.ImpactNormal));
+
+	if (OrthogonalSpeed < WallSlamVelocityThreshold)
 	{
 		return;
 	}
 
-	// Calculate damage based on velocity above threshold
-	float ExcessVelocity = CurrentSpeed - WallSlamVelocityThreshold;
+	// Calculate damage based on orthogonal velocity above threshold
+	float ExcessVelocity = OrthogonalSpeed - WallSlamVelocityThreshold;
 	float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
 
 	if (WallSlamDamage > 0.0f)
@@ -824,8 +828,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("Wall Slam! Speed=%.0f, Damage=%.1f"),
-					CurrentSpeed, WallSlamDamage));
+				FString::Printf(TEXT("Wall Slam! Orthogonal Speed=%.0f, Damage=%.1f"),
+					OrthogonalSpeed, WallSlamDamage));
 		}
 #endif
 	}
