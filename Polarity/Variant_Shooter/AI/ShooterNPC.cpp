@@ -780,6 +780,17 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 	// DotProduct projects NormalImpulse onto surface normal direction
 	// High value = hard impact INTO surface, low value = glancing blow or slide
 	float OrthogonalImpulse = FMath::Abs(FVector::DotProduct(NormalImpulse, Hit.ImpactNormal));
+	float ImpulseMagnitude = NormalImpulse.Size();
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+			FString::Printf(TEXT("Capsule Hit: Impulse=%.0f, Orthogonal=%.0f, Threshold=%.0f, Normal=(%.2f,%.2f,%.2f)"),
+				ImpulseMagnitude, OrthogonalImpulse, WallSlamVelocityThreshold,
+				Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z));
+	}
+#endif
 
 	if (OrthogonalImpulse < WallSlamVelocityThreshold)
 	{
