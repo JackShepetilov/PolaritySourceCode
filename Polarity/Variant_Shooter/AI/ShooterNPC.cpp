@@ -776,17 +776,9 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// Check if this is a wall (surface normal is mostly horizontal)
-	// Floor/ceiling normals point up/down (high Z), wall normals are horizontal (low Z)
-	float VerticalComponent = FMath::Abs(Hit.ImpactNormal.Z);
-	if (VerticalComponent > 0.5f)
-	{
-		// This is floor or ceiling, not a wall - ignore
-		return;
-	}
-
-	// Use impulse magnitude for damage calculation
-	// NormalImpulse is the collision impulse, which correlates with impact force
+	// NormalImpulse is the collision impulse along the surface normal
+	// This IS the orthogonal component - high value means hard impact INTO the surface
+	// Sliding along a surface produces low NormalImpulse, hitting head-on produces high
 	float ImpulseMagnitude = NormalImpulse.Size();
 
 	if (ImpulseMagnitude < WallSlamVelocityThreshold)
