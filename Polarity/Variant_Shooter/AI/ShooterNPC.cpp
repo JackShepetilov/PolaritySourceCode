@@ -18,12 +18,14 @@
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
 #include "Kismet/GameplayStatics.h"
+#include "../../EMFVelocityModifier.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	AccuracyComponent = CreateDefaultSubobject<UAIAccuracyComponent>(TEXT("AccuracyComponent"));
 	MeleeRetreatComponent = CreateDefaultSubobject<UMeleeRetreatComponent>(TEXT("MeleeRetreatComponent"));
+	EMFVelocityModifier = CreateDefaultSubobject<UEMFVelocityModifier>(TEXT("EMFVelocityModifier"));
 }
 
 void AShooterNPC::BeginPlay()
@@ -54,6 +56,39 @@ void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	// Unregister from coordinator
 	UnregisterFromCoordinator();
+}
+
+void AShooterNPC::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// Update Charge/Polarity - get charge from EMFVelocityModifier
+	float ChargeValue = 0.0f;
+	if (EMFVelocityModifier)
+	{
+		ChargeValue = EMFVelocityModifier->GetCharge();
+	}
+
+	// Determine current polarity (0=Neutral, 1=Positive, 2=Negative)
+	uint8 CurrentPolarity = 0; // Neutral
+	if (ChargeValue > KINDA_SMALL_NUMBER)
+	{
+		CurrentPolarity = 1; // Positive
+	}
+	else if (ChargeValue < -KINDA_SMALL_NUMBER)
+	{
+		CurrentPolarity = 2; // Negative
+	}
+
+	// Broadcast charge update every tick
+	OnChargeUpdated.Broadcast(ChargeValue, CurrentPolarity);
+
+	// Check if polarity changed
+	if (CurrentPolarity != PreviousPolarity)
+	{
+		OnPolarityChanged.Broadcast(CurrentPolarity, ChargeValue);
+		PreviousPolarity = CurrentPolarity;
+	}
 }
 
 float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)

@@ -8,6 +8,8 @@
 #include "ShooterNPC.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
 
 class AShooterWeapon;
 class UAnimMontage;
@@ -15,6 +17,7 @@ class UAIAccuracyComponent;
 class UMeleeRetreatComponent;
 class AAICombatCoordinator;
 class USoundBase;
+class UEMFVelocityModifier;
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -43,6 +46,10 @@ protected:
 	/** Melee retreat component for proximity-based retreat */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
 	TObjectPtr<UMeleeRetreatComponent> MeleeRetreatComponent;
+
+	/** EMF velocity modifier for charge-based interactions */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
+	TObjectPtr<UEMFVelocityModifier> EMFVelocityModifier;
 
 	/** Name of the collision profile to use during ragdoll death */
 	UPROPERTY(EditAnywhere, Category = "Damage")
@@ -167,11 +174,22 @@ protected:
 	/** Cached braking deceleration for restore after knockback */
 	float CachedBrakingDeceleration = 2048.0f;
 
+	/** Previous polarity state for change detection (0=Neutral, 1=Positive, 2=Negative) */
+	uint8 PreviousPolarity = 0;
+
 public:
 
 	/** Delegate called when this NPC dies - can be bound in Blueprints */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCDeath OnNPCDeath;
+
+	/** Called when polarity changes (0=Neutral, 1=Positive, 2=Negative) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FPolarityChangedDelegate_NPC OnPolarityChanged;
+
+	/** Called every tick with current charge and polarity */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FChargeUpdatedDelegate_NPC OnChargeUpdated;
 
 protected:
 
@@ -180,6 +198,9 @@ protected:
 
 	/** Gameplay cleanup */
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Update charge and polarity every frame */
+	virtual void Tick(float DeltaTime) override;
 
 public:
 
