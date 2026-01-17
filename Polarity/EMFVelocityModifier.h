@@ -82,6 +82,38 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Neutralization")
 	float NeutralizationCooldown = 1.0f;
 
+	// ==================== Force Filtering ====================
+
+	/** Multiplier for forces from NPC/Enemy sources.
+	 *  0.0 = ignore NPC forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float NPCForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Player sources.
+	 *  0.0 = ignore Player forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float PlayerForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Projectile sources.
+	 *  0.0 = ignore Projectile forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float ProjectileForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Environment/World sources.
+	 *  0.0 = ignore Environment forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float EnvironmentForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from sources with unknown/unspecified owner type.
+	 *  0.0 = ignore unknown forces, 1.0 = full effect
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float UnknownForceMultiplier = 1.0f;
+
 	// ==================== Debug ====================
 
 	/** Рисовать debug стрелки для сил и полей */
@@ -164,6 +196,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "EMF")
 	UEMF_FieldComponent* GetFieldComponent() const { return FieldComponent; }
 
+	/** Set the owner type of this entity's EM source (Player, NPC, Projectile, etc.)
+	 *  This determines how other entities filter forces from this source */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Source")
+	void SetOwnerType(EEMSourceOwnerType NewOwnerType);
+
+	/** Get the owner type of this entity's EM source */
+	UFUNCTION(BlueprintPure, Category = "EMF|Source")
+	EEMSourceOwnerType GetOwnerType() const;
+
 	// ==================== Charge Accumulation API ====================
 
 	/** Добавить бонусный заряд (от melee удара) - убывает со временем */
@@ -226,6 +267,9 @@ private:
 
 	/** Вычислить velocity delta на основе данных из FieldComponent */
 	FVector ComputeVelocityDelta(float DeltaTime, const FVector& CurrentVelocity);
+
+	/** Get force multiplier for a given source owner type */
+	float GetForceMultiplierForOwnerType(EEMSourceOwnerType OwnerType) const;
 
 	/** Debug визуализация */
 	void DrawDebugForces(const FVector& Position, const FVector& Force) const;

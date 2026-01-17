@@ -258,6 +258,23 @@ void UEMFVelocityModifier::NeutralizeCharge()
 	}
 }
 
+void UEMFVelocityModifier::SetOwnerType(EEMSourceOwnerType NewOwnerType)
+{
+	if (FieldComponent)
+	{
+		FieldComponent->SetOwnerType(NewOwnerType);
+	}
+}
+
+EEMSourceOwnerType UEMFVelocityModifier::GetOwnerType() const
+{
+	if (FieldComponent)
+	{
+		return FieldComponent->GetOwnerType();
+	}
+	return EEMSourceOwnerType::None;
+}
+
 // ==================== Private ====================
 
 FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVector& CurrentVelocity)
@@ -288,23 +305,53 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	float Charge = GetCharge();
 	float Mass = GetMass();
 
-	// ÃÂ ÃÂ°Ã‘ÂÃ‘ÂÃ‘â€¡ÃÂ¸Ã‘â€šÃÂ°Ã‘â€šÃ‘Å’ Ã‘ÂÃÂ¸ÃÂ»Ã‘Æ’ Ãâ€ºÃÂ¾Ã‘â‚¬ÃÂµÃÂ½Ã‘â€ ÃÂ°: F = q(E + v Ãƒâ€” B)
-	CurrentEMForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
-		Charge,
-		Position,
-		CurrentVelocity,
-		OtherSources,
-		true  // ÃÂ²ÃÂºÃÂ»Ã‘Å½Ã‘â€¡ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ¼ÃÂ°ÃÂ³ÃÂ½ÃÂ¸Ã‘â€šÃÂ½Ã‘Æ’Ã‘Å½ Ã‘ÂÃÂ¾Ã‘ÂÃ‘â€šÃÂ°ÃÂ²ÃÂ»Ã‘ÂÃ‘Å½Ã‘â€°Ã‘Æ’Ã‘Å½
-	);
+	// Calculate Lorentz force from each source individually with multipliers
+	FVector TotalForce = FVector::ZeroVector;
+
+	for (const FEMSourceDescription& Source : OtherSources)
+	{
+		// Get multiplier for this source's owner type
+		float Multiplier = GetForceMultiplierForOwnerType(Source.OwnerType);
+
+		// Skip sources with zero multiplier for optimization
+		if (FMath::IsNearlyZero(Multiplier))
+		{
+			continue;
+		}
+
+		// Calculate force from this single source
+		TArray<FEMSourceDescription> SingleSource;
+		SingleSource.Add(Source);
+
+		FVector SourceForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
+			Charge,
+			Position,
+			CurrentVelocity,
+			SingleSource,
+			true  // Include magnetic component
+		);
+
+		// Apply multiplier and add to total
+		TotalForce += SourceForce * Multiplier;
+
+		if (bLogForces && !SourceForce.IsNearlyZero())
+		{
+			UE_LOG(LogTemp, Log, TEXT("EMF: Source OwnerType=%d, Multiplier=%.2f, SourceForce=(%.4f, %.4f, %.4f)"),
+				static_cast<int32>(Source.OwnerType), Multiplier,
+				SourceForce.X, SourceForce.Y, SourceForce.Z);
+		}
+	}
+
+	CurrentEMForce = TotalForce;
 
 	if (bLogForces && OtherSources.Num() > 0)
 	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Sources=%d, Position=(%.0f, %.0f, %.0f), RawForce=(%.4f, %.4f, %.4f)"),
+		UE_LOG(LogTemp, Log, TEXT("EMF: Sources=%d, Position=(%.0f, %.0f, %.0f), TotalForce=(%.4f, %.4f, %.4f)"),
 			OtherSources.Num(), Position.X, Position.Y, Position.Z,
 			CurrentEMForce.X, CurrentEMForce.Y, CurrentEMForce.Z);
 	}
 
-	// Clamp ÃÂ¼ÃÂ°ÃÂºÃ‘ÂÃÂ¸ÃÂ¼ÃÂ°ÃÂ»Ã‘Å’ÃÂ½ÃÂ¾ÃÂ¹ Ã‘ÂÃÂ¸ÃÂ»Ã‘â€¹
+	// Clamp maximum force
 	if (CurrentEMForce.SizeSquared() > MaxForce * MaxForce)
 	{
 		CurrentEMForce = CurrentEMForce.GetSafeNormal() * MaxForce;
@@ -323,6 +370,24 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	}
 
 	return VelocityDelta;
+}
+
+float UEMFVelocityModifier::GetForceMultiplierForOwnerType(EEMSourceOwnerType OwnerType) const
+{
+	switch (OwnerType)
+	{
+	case EEMSourceOwnerType::Player:
+		return PlayerForceMultiplier;
+	case EEMSourceOwnerType::NPC:
+		return NPCForceMultiplier;
+	case EEMSourceOwnerType::Projectile:
+		return ProjectileForceMultiplier;
+	case EEMSourceOwnerType::Environment:
+		return EnvironmentForceMultiplier;
+	case EEMSourceOwnerType::None:
+	default:
+		return UnknownForceMultiplier;
+	}
 }
 
 bool UEMFVelocityModifier::CanBeNeutralized() const
