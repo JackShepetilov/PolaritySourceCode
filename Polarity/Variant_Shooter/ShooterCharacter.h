@@ -18,6 +18,7 @@ class UMeleeAttackComponent;
 class UChargeAnimationComponent;
 class UAudioComponent;
 class UCurveFloat;
+class UMaterialInterface;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamagedDelegate, float, LifePercent);
@@ -165,6 +166,24 @@ protected:
 
 	/** Previous polarity state for change detection (0=Neutral, 1=Positive, 2=Negative) */
 	uint8 PreviousPolarity = 0;
+
+	// ==================== Charge Overlay Materials ====================
+
+	/** If true, overlay material will be applied based on charge state */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay")
+	bool bUseChargeOverlay = false;
+
+	/** Overlay material to apply when charge is neutral (near zero) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> NeutralChargeOverlayMaterial;
+
+	/** Overlay material to apply when charge is positive */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> PositiveChargeOverlayMaterial;
+
+	/** Overlay material to apply when charge is negative */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> NegativeChargeOverlayMaterial;
 
 	// ==================== Mouse Input Tracking ====================
 
@@ -422,6 +441,9 @@ protected:
 
 	/** Update HP regeneration based on movement speed */
 	void UpdateRegeneration(float DeltaTime);
+
+	/** Update overlay material based on current charge polarity */
+	void UpdateChargeOverlay(uint8 NewPolarity);
 
 	/** Update first person view with recoil offsets */
 	virtual void UpdateFirstPersonView(float DeltaTime) override;

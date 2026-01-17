@@ -363,6 +363,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	if (CurrentPolarity != PreviousPolarity)
 	{
 		OnPolarityChanged.Broadcast(CurrentPolarity, ChargeValue);
+		UpdateChargeOverlay(CurrentPolarity);
 		PreviousPolarity = CurrentPolarity;
 	}
 }
@@ -542,6 +543,46 @@ void AShooterCharacter::UpdateRegeneration(float DeltaTime)
 	if (CurrentHP != OldHP)
 	{
 		OnDamaged.Broadcast(CurrentHP / MaxHP);
+	}
+}
+
+void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
+{
+	// Don't update if feature is disabled
+	if (!bUseChargeOverlay)
+	{
+		return;
+	}
+
+	// Select appropriate material based on polarity
+	UMaterialInterface* TargetMaterial = nullptr;
+
+	switch (NewPolarity)
+	{
+	case 0: // Neutral
+		TargetMaterial = NeutralChargeOverlayMaterial;
+		break;
+	case 1: // Positive
+		TargetMaterial = PositiveChargeOverlayMaterial;
+		break;
+	case 2: // Negative
+		TargetMaterial = NegativeChargeOverlayMaterial;
+		break;
+	default:
+		TargetMaterial = NeutralChargeOverlayMaterial;
+		break;
+	}
+
+	// Apply overlay material to third person mesh
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		TPMesh->SetOverlayMaterial(TargetMaterial);
+	}
+
+	// Apply overlay material to first person mesh
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetOverlayMaterial(TargetMaterial);
 	}
 }
 

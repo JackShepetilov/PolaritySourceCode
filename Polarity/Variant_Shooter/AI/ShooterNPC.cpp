@@ -17,6 +17,7 @@
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
+#include "EMFVelocityModifier.h"
 #include "Kismet/GameplayStatics.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
@@ -54,6 +55,39 @@ void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	// Unregister from coordinator
 	UnregisterFromCoordinator();
+}
+
+void AShooterNPC::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// Update Charge/Polarity - get charge from EMFVelocityModifier
+	if (bUseChargeOverlay)
+	{
+		float ChargeValue = 0.0f;
+		if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
+		{
+			ChargeValue = EMFMod->GetCharge();
+		}
+
+		// Determine current polarity (0=Neutral, 1=Positive, 2=Negative)
+		uint8 CurrentPolarity = 0; // Neutral
+		if (ChargeValue > KINDA_SMALL_NUMBER)
+		{
+			CurrentPolarity = 1; // Positive
+		}
+		else if (ChargeValue < -KINDA_SMALL_NUMBER)
+		{
+			CurrentPolarity = 2; // Negative
+		}
+
+		// Check if polarity changed
+		if (CurrentPolarity != PreviousPolarity)
+		{
+			UpdateChargeOverlay(CurrentPolarity);
+			PreviousPolarity = CurrentPolarity;
+		}
+	}
 }
 
 float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -460,6 +494,46 @@ void AShooterNPC::PlayHitReaction(const FVector& DamageDirection)
 				LastHitReactionTime = CurrentTime;
 			}
 		}
+	}
+}
+
+void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
+{
+	// Don't update if feature is disabled
+	if (!bUseChargeOverlay)
+	{
+		return;
+	}
+
+	// Select appropriate material based on polarity
+	UMaterialInterface* TargetMaterial = nullptr;
+
+	switch (NewPolarity)
+	{
+	case 0: // Neutral
+		TargetMaterial = NeutralChargeOverlayMaterial;
+		break;
+	case 1: // Positive
+		TargetMaterial = PositiveChargeOverlayMaterial;
+		break;
+	case 2: // Negative
+		TargetMaterial = NegativeChargeOverlayMaterial;
+		break;
+	default:
+		TargetMaterial = NeutralChargeOverlayMaterial;
+		break;
+	}
+
+	// Apply overlay material to third person mesh
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		TPMesh->SetOverlayMaterial(TargetMaterial);
+	}
+
+	// Apply overlay material to first person mesh (NPCs typically don't use this, but included for consistency)
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetOverlayMaterial(TargetMaterial);
 	}
 }
 

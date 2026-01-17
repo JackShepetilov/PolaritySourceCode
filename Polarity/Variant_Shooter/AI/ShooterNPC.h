@@ -15,6 +15,7 @@ class UAIAccuracyComponent;
 class UMeleeRetreatComponent;
 class AAICombatCoordinator;
 class USoundBase;
+class UMaterialInterface;
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -156,6 +157,27 @@ protected:
 	/** Deferred destruction on death timer */
 	FTimerHandle DeathTimer;
 
+	// ==================== Charge Overlay Materials ====================
+
+	/** If true, overlay material will be applied based on charge state */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay")
+	bool bUseChargeOverlay = false;
+
+	/** Overlay material to apply when charge is neutral (near zero) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> NeutralChargeOverlayMaterial;
+
+	/** Overlay material to apply when charge is positive */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> PositiveChargeOverlayMaterial;
+
+	/** Overlay material to apply when charge is negative */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> NegativeChargeOverlayMaterial;
+
+	/** Previous polarity state for change detection (0=Neutral, 1=Positive, 2=Negative) */
+	uint8 PreviousPolarity = 0;
+
 	// ==================== Knockback ====================
 
 	/** Timer for knockback stun recovery */
@@ -180,6 +202,9 @@ protected:
 
 	/** Gameplay cleanup */
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Per-frame updates */
+	virtual void Tick(float DeltaTime) override;
 
 public:
 
@@ -229,6 +254,9 @@ protected:
 
 	/** Play hit reaction animation based on damage direction */
 	void PlayHitReaction(const FVector& DamageDirection);
+
+	/** Update overlay material based on current charge polarity */
+	void UpdateChargeOverlay(uint8 NewPolarity);
 
 	// ==================== Coordinator Integration ====================
 
