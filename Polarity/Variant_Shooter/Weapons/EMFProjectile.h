@@ -68,6 +68,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
 	bool bLogEMForces = false;
 
+	// ==================== Force Filtering ====================
+
+	/** Multiplier for forces from NPC sources */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float NPCForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Player sources */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float PlayerForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Projectile sources */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float ProjectileForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Environment sources */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float EnvironmentForceMultiplier = 1.0f;
+
+	/** Multiplier for forces from Unknown/unset sources */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float UnknownForceMultiplier = 1.0f;
+
 	// ==================== Charge-Based Damage (Future) ====================
 
 	/** Enable charge-based damage scaling */

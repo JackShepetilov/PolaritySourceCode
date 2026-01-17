@@ -19,6 +19,12 @@ AEMFProjectile::AEMFProjectile()
 
 	// Create EMF Field Component - this is the only source of truth for charge/mass
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("EMFFieldComponent"));
+
+	// Set projectile owner type for EM force filtering
+	if (FieldComponent)
+	{
+		FieldComponent->SetOwnerType(EEMSourceOwnerType::Projectile);
+	}
 }
 
 void AEMFProjectile::BeginPlay()
@@ -267,14 +273,52 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 	FVector Velocity = ProjectileMovement->Velocity;
 	float Mass = GetProjectileMass();
 
-	// Calculate Lorentz force: F = q(E + v × B)
-	FVector EMForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
-		Charge,
-		Position,
-		Velocity,
-		OtherSources,
-		true  // Include magnetic component
-	);
+	// Calculate Lorentz force from each source with filtering
+	FVector EMForce = FVector::ZeroVector;
+	for (const FEMSourceDescription& Source : OtherSources)
+	{
+		// Get multiplier based on source owner type
+		float Multiplier = 1.0f;
+		switch (Source.OwnerType)
+		{
+		case EEMSourceOwnerType::Player:
+			Multiplier = PlayerForceMultiplier;
+			break;
+		case EEMSourceOwnerType::NPC:
+			Multiplier = NPCForceMultiplier;
+			break;
+		case EEMSourceOwnerType::Projectile:
+			Multiplier = ProjectileForceMultiplier;
+			break;
+		case EEMSourceOwnerType::Environment:
+			Multiplier = EnvironmentForceMultiplier;
+			break;
+		case EEMSourceOwnerType::None:
+		default:
+			Multiplier = UnknownForceMultiplier;
+			break;
+		}
+
+		// Skip if multiplier is zero (fully filtered)
+		if (FMath::IsNearlyZero(Multiplier))
+		{
+			continue;
+		}
+
+		// Calculate force from this single source
+		TArray<FEMSourceDescription> SingleSource;
+		SingleSource.Add(Source);
+		FVector SourceForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
+			Charge,
+			Position,
+			Velocity,
+			SingleSource,
+			true  // Include magnetic component
+		);
+
+		// Apply multiplier and accumulate
+		EMForce += SourceForce * Multiplier;
+	}
 
 	// Clamp maximum force
 	if (EMForce.SizeSquared() > MaxEMForce * MaxEMForce)
