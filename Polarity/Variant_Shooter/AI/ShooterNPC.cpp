@@ -18,6 +18,7 @@
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
 #include "EMFVelocityModifier.h"
+#include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
@@ -25,6 +26,9 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 {
 	AccuracyComponent = CreateDefaultSubobject<UAIAccuracyComponent>(TEXT("AccuracyComponent"));
 	MeleeRetreatComponent = CreateDefaultSubobject<UMeleeRetreatComponent>(TEXT("MeleeRetreatComponent"));
+
+	// Create EMF components for charge-based interactions
+	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
 	EMFVelocityModifier = CreateDefaultSubobject<UEMFVelocityModifier>(TEXT("EMFVelocityModifier"));
 }
 

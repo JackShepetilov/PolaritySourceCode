@@ -19,6 +19,7 @@ class AAICombatCoordinator;
 class USoundBase;
 class UMaterialInterface;
 class UEMFVelocityModifier;
+class UEMF_FieldComponent;
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -51,6 +52,10 @@ protected:
 	/** EMF velocity modifier for charge-based interactions */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
 	TObjectPtr<UEMFVelocityModifier> EMFVelocityModifier;
+
+	/** EMF field component for electromagnetic charge storage */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
+	TObjectPtr<UEMF_FieldComponent> FieldComponent;
 
 	/** Name of the collision profile to use during ragdoll death */
 	UPROPERTY(EditAnywhere, Category = "Damage")
