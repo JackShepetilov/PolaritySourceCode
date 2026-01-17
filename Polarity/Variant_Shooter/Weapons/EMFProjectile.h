@@ -86,7 +86,7 @@ public:
 
 	/** Transfer charge to hit target on impact */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Transfer")
-	bool bTransferChargeOnHit = false;
+	bool bTransferChargeOnHit = true;
 
 	/** Percentage of projectile charge to transfer (0.0 - 1.0) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Transfer", meta = (EditCondition = "bTransferChargeOnHit", ClampMin = "0.0", ClampMax = "1.0"))
