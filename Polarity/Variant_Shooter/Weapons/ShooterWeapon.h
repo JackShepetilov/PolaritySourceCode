@@ -56,6 +56,24 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing")
 	bool bUseHitscan = false;
 
+	// ==================== Charge-Based Firing ====================
+
+	/** If true, weapon consumes charge from owner to fire projectiles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Firing|Charge")
+	bool bUseChargeFiring = false;
+
+	/** Charge cost per shot (taken from owner's EMF charge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Firing|Charge", meta = (EditCondition = "bUseChargeFiring", ClampMin = "0.0"))
+	float ChargePerShot = 3.0f;
+
+	/** Minimum charge module allowed (can still fire weak shots below this) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Firing|Charge", meta = (EditCondition = "bUseChargeFiring", ClampMin = "0.0"))
+	float MinimumBaseCharge = 10.0f;
+
+	/** If true, prevent firing when charge is below minimum (otherwise fires weakened shot) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Firing|Charge", meta = (EditCondition = "bUseChargeFiring"))
+	bool bBlockFiringBelowMinimum = false;
+
 	// ==================== Projectile Settings ====================
 
 	UPROPERTY(EditAnywhere, Category = "Projectile", meta = (EditCondition = "!bUseHitscan"))
@@ -406,7 +424,7 @@ protected:
 
 	virtual void Fire();
 	void FireCooldownExpired();
-	virtual void FireProjectile(const FVector& TargetLocation);
+	virtual void FireProjectile(const FVector& TargetLocation, float ChargeMultiplier = 1.0f);
 	FTransform CalculateProjectileSpawnTransform(const FVector& TargetLocation) const;
 
 	virtual void FireHitscan(const FVector& TargetLocation);
@@ -414,6 +432,11 @@ protected:
 	bool IsMetal(const FHitResult& Hit) const;
 	FVector CalculateReflection(const FVector& Direction, const FVector& Normal) const;
 	void ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius);
+
+	// ==================== Charge-Based Firing ====================
+
+	/** Try to consume charge from owner. Returns false if cannot fire, sets OutChargeMultiplier for weak shots */
+	bool TryConsumeCharge(float& OutChargeMultiplier);
 	float CalculateWaveRadius(float Distance) const;
 	float CalculateDamageMultiplier(float Distance, float WaveRadius) const;
 

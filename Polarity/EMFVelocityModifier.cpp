@@ -529,7 +529,16 @@ void UEMFVelocityModifier::AddPermanentCharge(float Amount)
 
 	// Сохраняем знак заряда
 	float Sign = (BaseCharge >= 0.0f) ? 1.0f : -1.0f;
-	BaseCharge += Sign * FMath::Abs(Amount);
+	float CurrentModule = FMath::Abs(BaseCharge);
+
+	// Положительный Amount увеличивает модуль, отрицательный уменьшает
+	float NewModule = CurrentModule + Amount;
+
+	// Не позволяем модулю стать отрицательным (клампим до 0)
+	NewModule = FMath::Max(0.0f, NewModule);
+
+	// Восстанавливаем знак
+	BaseCharge = Sign * NewModule;
 	UpdateFieldComponentCharge();
 
 	if (bLogForces)
@@ -543,6 +552,47 @@ void UEMFVelocityModifier::SetBaseCharge(float NewBaseCharge)
 {
 	BaseCharge = NewBaseCharge;
 	UpdateFieldComponentCharge();
+}
+
+void UEMFVelocityModifier::DeductCharge(float Amount)
+{
+	if (Amount <= 0.0f)
+	{
+		return;
+	}
+
+	float RemainingToDeduct = Amount;
+
+	// Сначала вычитаем из бонусного заряда
+	if (CurrentBonusCharge > 0.0f)
+	{
+		float DeductFromBonus = FMath::Min(CurrentBonusCharge, RemainingToDeduct);
+		CurrentBonusCharge -= DeductFromBonus;
+		RemainingToDeduct -= DeductFromBonus;
+
+		if (bLogForces)
+		{
+			UE_LOG(LogTemp, Log, TEXT("EMF: Deducted %.2f from bonus charge. Remaining bonus: %.2f"),
+				DeductFromBonus, CurrentBonusCharge);
+		}
+	}
+
+	// Если остались невычтенные единицы - вычитаем из базового заряда
+	if (RemainingToDeduct > 0.0f)
+	{
+		AddPermanentCharge(-RemainingToDeduct);
+
+		if (bLogForces)
+		{
+			UE_LOG(LogTemp, Log, TEXT("EMF: Deducted %.2f from base charge. BaseCharge: %.2f"),
+				RemainingToDeduct, BaseCharge);
+		}
+	}
+	else
+	{
+		// Обновляем FieldComponent даже если вычли только из бонуса
+		UpdateFieldComponentCharge();
+	}
 }
 
 float UEMFVelocityModifier::GetTotalCharge() const

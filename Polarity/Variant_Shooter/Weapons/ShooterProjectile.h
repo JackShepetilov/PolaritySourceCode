@@ -18,16 +18,16 @@ UCLASS(abstract)
 class POLARITY_API AShooterProjectile : public AActor
 {
 	GENERATED_BODY()
-	
+
 	/** Provides collision detection for the projectile */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
 	USphereComponent* CollisionComponent;
 
-	/** Handles movement for the projectile */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
-	UProjectileMovementComponent* ProjectileMovement;
-
 protected:
+
+	/** Handles movement for the projectile */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components")
+	UProjectileMovementComponent* ProjectileMovement;
 
 	/** Loudness of the AI perception noise done by this projectile on hit */
 	UPROPERTY(EditAnywhere, Category="Projectile|Noise", meta = (ClampMin = 0, ClampMax = 100))

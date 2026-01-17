@@ -2,11 +2,11 @@
 // Electromagnetic field projectile implementation
 
 #include "EMFProjectile.h"
-#include "EMFVelocityModifier.h"
 #include "Components/SphereComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
+#include "DrawDebugHelpers.h"
 
 // EMF Plugin includes
 #include "EMF_FieldComponent.h"
@@ -14,39 +14,24 @@
 
 AEMFProjectile::AEMFProjectile()
 {
-	// Enable tick for EMF updates
+	// Enable tick for EMF force calculations
 	PrimaryActorTick.bCanEverTick = true;
 
-	// Create EMF Field Component
+	// Create EMF Field Component - this is the only source of truth for charge/mass
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("EMFFieldComponent"));
-	if (FieldComponent)
-	{
-		// Initialize with default values
-		// Note: Actual property names may differ based on EMF_Plugin implementation
-		// Adjust these based on your plugin's API
-	}
-
-	// Create EMF Velocity Modifier (for field interactions)
-	VelocityModifier = CreateDefaultSubobject<UEMFVelocityModifier>(TEXT("EMFVelocityModifier"));
-	if (VelocityModifier)
-	{
-		// Configure to work with projectile
-		VelocityModifier->bEnabled = true;
-	}
 }
 
 void AEMFProjectile::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Initialize charge and mass from defaults
-	SetProjectileCharge(DefaultCharge);
-	SetProjectileMass(DefaultMass);
-
-	// Enable/disable external field influence
-	if (VelocityModifier)
+	// Initialize charge and mass in FieldComponent (source of truth)
+	if (FieldComponent)
 	{
-		VelocityModifier->SetEnabled(bAffectedByExternalFields);
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		Desc.PointChargeParams.Charge = DefaultCharge;
+		Desc.Mass = DefaultMass;
+		FieldComponent->SetSourceDescription(Desc);
 	}
 
 	// Log initialization for debugging
@@ -58,40 +43,47 @@ void AEMFProjectile::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// EMF forces are automatically handled by VelocityModifier
-	// Additional per-frame logic can go here if needed
+	// Apply EMF forces to projectile velocity
+	if (bAffectedByExternalFields && FieldComponent && ProjectileMovement)
+	{
+		ApplyEMForces(DeltaTime);
+	}
 }
 
 void AEMFProjectile::SetProjectileCharge(float NewCharge)
 {
-	if (VelocityModifier)
+	if (FieldComponent)
 	{
-		VelocityModifier->SetCharge(NewCharge);
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		Desc.PointChargeParams.Charge = NewCharge;
+		FieldComponent->SetSourceDescription(Desc);
 	}
 }
 
 float AEMFProjectile::GetProjectileCharge() const
 {
-	if (VelocityModifier)
+	if (FieldComponent)
 	{
-		return VelocityModifier->GetCharge();
+		return FieldComponent->GetSourceDescription().PointChargeParams.Charge;
 	}
 	return 0.0f;
 }
 
 void AEMFProjectile::SetProjectileMass(float NewMass)
 {
-	if (VelocityModifier)
+	if (FieldComponent)
 	{
-		VelocityModifier->SetMass(NewMass);
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		Desc.Mass = NewMass;
+		FieldComponent->SetSourceDescription(Desc);
 	}
 }
 
 float AEMFProjectile::GetProjectileMass() const
 {
-	if (VelocityModifier)
+	if (FieldComponent)
 	{
-		return VelocityModifier->GetMass();
+		return FieldComponent->GetSourceDescription().Mass;
 	}
 	return 1.0f;
 }
@@ -104,13 +96,13 @@ void AEMFProjectile::InitializeFromPlayerCharge(AActor* PlayerActor, float Charg
 		return;
 	}
 
-	// Get player's EMFVelocityModifier to read excess charge
-	UEMFVelocityModifier* PlayerModifier = PlayerActor->FindComponentByClass<UEMFVelocityModifier>();
-	if (PlayerModifier)
+	// Get player's UEMF_FieldComponent to read charge sign
+	UEMF_FieldComponent* PlayerFieldComp = PlayerActor->FindComponentByClass<UEMF_FieldComponent>();
+	if (PlayerFieldComp)
 	{
-		// For now, just set the charge amount provided
-		// Future: Calculate based on player's bonus charge, extract it, etc.
-		float ChargeSign = FMath::Sign(PlayerModifier->GetCharge());
+		// Use player's charge sign
+		float PlayerCharge = PlayerFieldComp->GetSourceDescription().PointChargeParams.Charge;
+		float ChargeSign = FMath::Sign(PlayerCharge);
 		SetProjectileCharge(ChargeAmount * ChargeSign);
 
 		UE_LOG(LogTemp, Log, TEXT("EMFProjectile initialized from player charge: %.2f"), ChargeAmount * ChargeSign);
@@ -119,7 +111,7 @@ void AEMFProjectile::InitializeFromPlayerCharge(AActor* PlayerActor, float Charg
 	{
 		// Fallback: just use the provided charge
 		SetProjectileCharge(ChargeAmount);
-		UE_LOG(LogTemp, Warning, TEXT("EMFProjectile: Player has no EMFVelocityModifier, using raw charge %.2f"), ChargeAmount);
+		UE_LOG(LogTemp, Warning, TEXT("EMFProjectile: Player has no UEMF_FieldComponent, using raw charge %.2f"), ChargeAmount);
 	}
 }
 
@@ -197,16 +189,16 @@ void AEMFProjectile::TransferChargeToActor(AActor* HitActor)
 		return;
 	}
 
-	// Find target's EMF components
-	UEMFVelocityModifier* TargetModifier = HitActor->FindComponentByClass<UEMFVelocityModifier>();
-	if (!TargetModifier)
+	// Find target's EMF field component
+	UEMF_FieldComponent* TargetFieldComp = HitActor->FindComponentByClass<UEMF_FieldComponent>();
+	if (!TargetFieldComp)
 	{
 		// Target doesn't have EMF system, no charge transfer
 		return;
 	}
 
 	float ProjectileCharge = GetProjectileCharge();
-	float TargetCharge = TargetModifier->GetCharge();
+	float TargetCharge = TargetFieldComp->GetSourceDescription().PointChargeParams.Charge;
 	float ChargeToTransfer = ProjectileCharge * ChargeTransferRatio;
 
 	// Check if charges are opposite signs
@@ -221,14 +213,18 @@ void AEMFProjectile::TransferChargeToActor(AActor* HitActor)
 		if (AbsProjectileCharge >= AbsTargetCharge)
 		{
 			// Projectile charge neutralizes target completely
-			TargetModifier->SetCharge(0.0f);
+			FEMSourceDescription TargetDesc = TargetFieldComp->GetSourceDescription();
+			TargetDesc.PointChargeParams.Charge = 0.0f;
+			TargetFieldComp->SetSourceDescription(TargetDesc);
 			UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Target charge neutralized completely"));
 		}
 		else
 		{
 			// Partial neutralization
 			float NewTargetCharge = TargetCharge + ChargeToTransfer; // Signs cancel out
-			TargetModifier->SetCharge(NewTargetCharge);
+			FEMSourceDescription TargetDesc = TargetFieldComp->GetSourceDescription();
+			TargetDesc.PointChargeParams.Charge = NewTargetCharge;
+			TargetFieldComp->SetSourceDescription(TargetDesc);
 			UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Partial neutralization, target charge %.2f -> %.2f"),
 				TargetCharge, NewTargetCharge);
 		}
@@ -237,9 +233,81 @@ void AEMFProjectile::TransferChargeToActor(AActor* HitActor)
 	{
 		// Same sign or neutralization disabled: add charges
 		float NewTargetCharge = TargetCharge + ChargeToTransfer;
-		TargetModifier->SetCharge(NewTargetCharge);
+		FEMSourceDescription TargetDesc = TargetFieldComp->GetSourceDescription();
+		TargetDesc.PointChargeParams.Charge = NewTargetCharge;
+		TargetFieldComp->SetSourceDescription(TargetDesc);
 
 		UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Charge transferred to target: %.2f (target: %.2f -> %.2f)"),
 			ChargeToTransfer, TargetCharge, NewTargetCharge);
+	}
+}
+
+void AEMFProjectile::ApplyEMForces(float DeltaTime)
+{
+	if (!FieldComponent || !ProjectileMovement)
+	{
+		return;
+	}
+
+	float Charge = GetProjectileCharge();
+	if (FMath::IsNearlyZero(Charge))
+	{
+		return;
+	}
+
+	// Get all other EMF sources (excluding self)
+	TArray<FEMSourceDescription> OtherSources = FieldComponent->GetAllOtherSources();
+	if (OtherSources.Num() == 0)
+	{
+		// No external fields to interact with
+		return;
+	}
+
+	FVector Position = GetActorLocation();
+	FVector Velocity = ProjectileMovement->Velocity;
+	float Mass = GetProjectileMass();
+
+	// Calculate Lorentz force: F = q(E + v × B)
+	FVector EMForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
+		Charge,
+		Position,
+		Velocity,
+		OtherSources,
+		true  // Include magnetic component
+	);
+
+	// Clamp maximum force
+	if (EMForce.SizeSquared() > MaxEMForce * MaxEMForce)
+	{
+		EMForce = EMForce.GetSafeNormal() * MaxEMForce;
+	}
+
+	// Apply force: a = F/m, v_new = v_old + a*dt
+	FVector Acceleration = EMForce / FMath::Max(Mass, 0.001f);
+	FVector VelocityDelta = Acceleration * DeltaTime;
+
+	// Directly modify projectile velocity
+	ProjectileMovement->Velocity += VelocityDelta;
+
+	// Debug visualization
+	if (bDrawDebugForces)
+	{
+		DrawDebugDirectionalArrow(
+			GetWorld(),
+			Position,
+			Position + EMForce.GetSafeNormal() * FMath::Min(EMForce.Size(), 200.0f),
+			10.0f,
+			FColor::Cyan,
+			false,
+			-1.0f,
+			0,
+			2.0f
+		);
+	}
+
+	if (bLogEMForces && !EMForce.IsNearlyZero())
+	{
+		UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Charge=%.2f Force=(%.2f, %.2f, %.2f) Sources=%d"),
+			Charge, EMForce.X, EMForce.Y, EMForce.Z, OtherSources.Num());
 	}
 }

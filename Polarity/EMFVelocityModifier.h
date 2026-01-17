@@ -190,6 +190,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "EMF|Charge")
 	float GetTotalCharge() const;
 
+	/** Вычесть заряд (сначала из бонуса, потом из базы) */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Charge")
+	void DeductCharge(float Amount);
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;

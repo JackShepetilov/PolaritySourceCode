@@ -5,7 +5,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "ShooterProjectile.h"
+#include "EMFProjectile.h"
 #include "ShooterWeaponHolder.h"
+#include "EMF_FieldComponent.h"
+#include "EMFVelocityModifier.h"
 #include "Components/SceneComponent.h"
 #include "Camera/CameraComponent.h"
 #include "TimerManager.h"
@@ -193,6 +196,18 @@ void AShooterWeapon::Fire()
 		return;
 	}
 
+	// Check charge requirements if enabled
+	float ChargeMultiplier = 1.0f;
+	if (bUseChargeFiring)
+	{
+		if (!TryConsumeCharge(ChargeMultiplier))
+		{
+			// Not enough charge - stop firing
+			StopFiring();
+			return;
+		}
+	}
+
 	// Spawn muzzle flash effect for all weapon types
 	SpawnMuzzleFlashEffect();
 
@@ -215,7 +230,7 @@ void AShooterWeapon::Fire()
 	}
 	else
 	{
-		FireProjectile(TargetLocation);
+		FireProjectile(TargetLocation, ChargeMultiplier);
 	}
 
 	// update the time of our last shot
@@ -244,7 +259,7 @@ void AShooterWeapon::FireCooldownExpired()
 	WeaponOwner->OnSemiWeaponRefire();
 }
 
-void AShooterWeapon::FireProjectile(const FVector& TargetLocation)
+void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeMultiplier)
 {
 	// get the projectile transform
 	FTransform ProjectileTransform = CalculateProjectileSpawnTransform(TargetLocation);
@@ -257,6 +272,32 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation)
 	SpawnParams.Instigator = PawnOwner;
 
 	AShooterProjectile* Projectile = GetWorld()->SpawnActor<AShooterProjectile>(ProjectileClass, ProjectileTransform, SpawnParams);
+
+	// If charge-based firing, scale projectile charge and match player polarity
+	if (bUseChargeFiring && Projectile)
+	{
+		if (AEMFProjectile* EMFProj = Cast<AEMFProjectile>(Projectile))
+		{
+			// Get player's charge sign
+			AActor* WeaponOwnerActor = GetOwner();
+			if (WeaponOwnerActor)
+			{
+				UEMFVelocityModifier* EMFMod = WeaponOwnerActor->FindComponentByClass<UEMFVelocityModifier>();
+				if (EMFMod)
+				{
+					float PlayerCharge = EMFMod->GetCharge();
+					float PlayerSign = FMath::Sign(PlayerCharge);
+
+					// Set projectile charge with same sign as player
+					float BaseCharge = FMath::Abs(EMFProj->GetProjectileCharge());
+					EMFProj->SetProjectileCharge(PlayerSign * BaseCharge * ChargeMultiplier);
+
+					UE_LOG(LogTemp, Log, TEXT("ShooterWeapon: Projectile charge set to %.2f (player sign: %.0f, multiplier: %.2f)"),
+						PlayerSign * BaseCharge * ChargeMultiplier, PlayerSign, ChargeMultiplier);
+				}
+			}
+		}
+	}
 
 	// play the firing montage
 	WeaponOwner->PlayFiringMontage(FiringMontage);
@@ -1471,5 +1512,69 @@ void AShooterWeapon::UpdateADSTransition(float ADSAlpha, float DeltaTime)
 
 		FirstPersonMesh->SetRelativeLocation(NewLocation);
 		FirstPersonMesh->SetRelativeRotation(NewRotation);
+	}
+}
+
+// ==================== Charge-Based Firing ====================
+
+bool AShooterWeapon::TryConsumeCharge(float& OutChargeMultiplier)
+{
+	OutChargeMultiplier = 1.0f;
+
+	if (!bUseChargeFiring)
+	{
+		return true; // Not using charge system
+	}
+
+	// Find owner's EMFVelocityModifier
+	AActor* WeaponOwnerActor = GetOwner();
+	if (!WeaponOwnerActor)
+	{
+		return false;
+	}
+
+	UEMFVelocityModifier* EMFMod = WeaponOwnerActor->FindComponentByClass<UEMFVelocityModifier>();
+	if (!EMFMod)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShooterWeapon: Owner has no UEMFVelocityModifier for charge-based firing"));
+		return false;
+	}
+
+	// Get current total charge (base + bonus)
+	float ChargeModule = FMath::Abs(EMFMod->GetCharge());
+
+	// Check if we can afford full shot
+	if (ChargeModule >= ChargePerShot + MinimumBaseCharge)
+	{
+		// Full power shot - deduct charge (bonus first, then base)
+		OutChargeMultiplier = 1.0f;
+		EMFMod->DeductCharge(ChargePerShot);
+
+		UE_LOG(LogTemp, Log, TEXT("ShooterWeapon: Full power shot, charge module: %.2f -> %.2f"),
+			ChargeModule, FMath::Abs(EMFMod->GetCharge()));
+		return true;
+	}
+	else
+	{
+		// Not enough for full shot
+		float AvailableCharge = FMath::Max(0.0f, ChargeModule - MinimumBaseCharge);
+
+		if (AvailableCharge <= 0.0f || bBlockFiringBelowMinimum)
+		{
+			// Can't fire at all
+			UE_LOG(LogTemp, Warning, TEXT("ShooterWeapon: Not enough charge to fire (have %.2f, need %.2f + %.2f minimum)"),
+				ChargeModule, ChargePerShot, MinimumBaseCharge);
+			return false;
+		}
+
+		// Fire weakened shot
+		OutChargeMultiplier = AvailableCharge / ChargePerShot;
+
+		// Deduct all available charge (bonus first, then base, down to minimum)
+		EMFMod->DeductCharge(AvailableCharge);
+
+		UE_LOG(LogTemp, Log, TEXT("ShooterWeapon: Weakened shot (%.1f%% power), charge module: %.2f -> %.2f"),
+			OutChargeMultiplier * 100.0f, ChargeModule, FMath::Abs(EMFMod->GetCharge()));
+		return true;
 	}
 }

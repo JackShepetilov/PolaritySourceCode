@@ -8,7 +8,6 @@
 #include "EMFProjectile.generated.h"
 
 class UEMF_FieldComponent;
-class UEMFVelocityModifier;
 
 /**
  * Projectile with electromagnetic properties.
@@ -39,13 +38,9 @@ protected:
 public:
 	// ==================== EMF Components ====================
 
-	/** EMF Field Component - provides charge and mass properties */
+	/** EMF Field Component - provides charge and mass properties (source of truth) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "EMF")
 	TObjectPtr<UEMF_FieldComponent> FieldComponent;
-
-	/** EMF Velocity Modifier - allows projectile to be affected by external fields */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "EMF")
-	TObjectPtr<UEMFVelocityModifier> VelocityModifier;
 
 	// ==================== EMF Settings ====================
 
@@ -60,6 +55,18 @@ public:
 	/** If true, projectile velocity is affected by external electromagnetic fields */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Physics")
 	bool bAffectedByExternalFields = true;
+
+	/** Maximum EM force that can be applied (prevents extreme accelerations) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Physics")
+	float MaxEMForce = 100000.0f;
+
+	/** Draw debug arrows for EM forces */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
+	bool bDrawDebugForces = false;
+
+	/** Log EM force calculations */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
+	bool bLogEMForces = false;
 
 	// ==================== Charge-Based Damage (Future) ====================
 
@@ -120,6 +127,9 @@ protected:
 
 	/** Transfer charge to hit actor if applicable */
 	void TransferChargeToActor(AActor* HitActor);
+
+	/** Apply electromagnetic forces to projectile velocity */
+	void ApplyEMForces(float DeltaTime);
 
 	/** Apply EMF-specific hit effects */
 	UFUNCTION(BlueprintImplementableEvent, Category = "EMF", meta = (DisplayName = "On EMF Hit"))
