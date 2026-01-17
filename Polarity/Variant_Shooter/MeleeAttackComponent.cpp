@@ -571,9 +571,7 @@ void UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitR
 			float MomentumBonus = VelocityInAttackDir * Settings.MomentumTransferMultiplier;
 			FinalImpulse += MomentumBonus;
 
-			// Also add some vertical lift based on speed for that Titanfall "pop" effect
-			ImpulseDirection.Z = FMath::Max(ImpulseDirection.Z, 0.3f);
-			ImpulseDirection.Normalize();
+			// REMOVED: Vertical "pop" effect - now using friction reduction for smooth ground slide
 		}
 
 		// Debug: Show momentum transfer
@@ -1214,18 +1212,14 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	}
 	else
 	{
-		// Target is grounded - make them slide along the ground
-		// Project impulse direction onto horizontal plane and add small upward component
+		// Target is grounded - apply purely horizontal knockback
+		// ApplyKnockback in ShooterNPC handles friction reduction for smooth sliding
 		FVector HorizontalDirection = ImpulseDirection;
 		HorizontalDirection.Z = 0.0f;
 		HorizontalDirection.Normalize();
 
-		// Horizontal velocity for sliding along ground
+		// Purely horizontal velocity - friction reduction makes them slide
 		KnockbackVelocity = HorizontalDirection * ImpulseStrength;
-
-		// Add minimal vertical component just to lift them slightly off ground
-		// This prevents them from getting stuck on ground geometry
-		KnockbackVelocity.Z = ImpulseStrength * 0.1f; // 10% upward - just enough to slide smoothly
 	}
 
 	// Try ShooterNPC first (has ApplyKnockback with AI stun)

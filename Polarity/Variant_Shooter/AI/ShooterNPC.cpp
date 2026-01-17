@@ -94,6 +94,12 @@ void AShooterNPC::Tick(float DeltaTime)
 		ChargeValue = EMFVelocityModifier->GetCharge();
 	}
 
+	// Sync FieldComponent with EMFVelocityModifier charge
+	if (FieldComponent)
+	{
+		FieldComponent->SetCharge(ChargeValue);
+	}
+
 	// Determine current polarity (0=Neutral, 1=Positive, 2=Negative)
 	uint8 CurrentPolarity = 0; // Neutral
 	if (ChargeValue > KINDA_SMALL_NUMBER)
@@ -172,10 +178,17 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 					{
 						ChargeToAdd = ChargeChangeOnMeleeHit;
 					}
+
+					UE_LOG(LogTemp, Warning, TEXT("NPC Melee Hit: Attacker charge=%.2f, ChargeToAdd=%.2f, NPC old charge=%.2f"),
+						AttackerCharge, ChargeToAdd, EMFVelocityModifier->GetCharge());
 				}
 
-				// Add charge to EMFVelocityModifier (source of truth for NPC charge)
-				EMFVelocityModifier->AddBonusCharge(ChargeToAdd);
+				// Add charge to EMFVelocityModifier using SetCharge (allows negative values)
+				float OldCharge = EMFVelocityModifier->GetCharge();
+				float NewCharge = OldCharge + ChargeToAdd;
+				EMFVelocityModifier->SetCharge(NewCharge);
+
+				UE_LOG(LogTemp, Warning, TEXT("NPC Melee Hit: NPC new charge=%.2f"), EMFVelocityModifier->GetCharge());
 			}
 		}
 	}
@@ -621,6 +634,19 @@ void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDur
 	// bXYOverride=true replaces XY velocity, bZOverride=true replaces Z velocity
 	LaunchCharacter(KnockbackVelocity, true, true);
 
+	// Reduce ground friction temporarily to make NPC slide smoothly
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		// Save original friction if not already saved
+		if (CachedGroundFriction == 8.0f)  // Default value check
+		{
+			CachedGroundFriction = CharMovement->GroundFriction;
+		}
+
+		// Set very low friction for sliding (like ice)
+		CharMovement->GroundFriction = 0.2f;
+	}
+
 	// Clear any existing stun timer
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 
@@ -636,6 +662,12 @@ void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDur
 
 void AShooterNPC::EndKnockbackStun()
 {
+	// Restore original ground friction after knockback slide
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->GroundFriction = CachedGroundFriction;
+	}
+
 	// LaunchCharacter handles movement mode automatically
 	// AI will resume pathfinding on next StateTree tick
 }
@@ -776,30 +808,29 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// Calculate the impulse component perpendicular to the surface
-	// DotProduct projects NormalImpulse onto surface normal direction
-	// High value = hard impact INTO surface, low value = glancing blow or slide
-	float OrthogonalImpulse = FMath::Abs(FVector::DotProduct(NormalImpulse, Hit.ImpactNormal));
-	float ImpulseMagnitude = NormalImpulse.Size();
+	// Calculate velocity component perpendicular to the surface (how hard we're hitting INTO it)
+	FVector Velocity = GetVelocity();
+	float OrthogonalVelocity = FMath::Abs(FVector::DotProduct(Velocity, Hit.ImpactNormal));
+	float VelocityMagnitude = Velocity.Size();
 
 #if WITH_EDITOR
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
-			FString::Printf(TEXT("Capsule Hit: Impulse=%.0f, Orthogonal=%.0f, Threshold=%.0f, Normal=(%.2f,%.2f,%.2f)"),
-				ImpulseMagnitude, OrthogonalImpulse, WallSlamVelocityThreshold,
+			FString::Printf(TEXT("Capsule Hit: Velocity=%.0f, Orthogonal=%.0f, Threshold=%.0f, Normal=(%.2f,%.2f,%.2f)"),
+				VelocityMagnitude, OrthogonalVelocity, WallSlamVelocityThreshold,
 				Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z));
 	}
 #endif
 
-	if (OrthogonalImpulse < WallSlamVelocityThreshold)
+	if (OrthogonalVelocity < WallSlamVelocityThreshold)
 	{
 		return;
 	}
 
-	// Calculate damage based on orthogonal impulse above threshold
-	float ExcessImpulse = OrthogonalImpulse - WallSlamVelocityThreshold;
-	float WallSlamDamage = (ExcessImpulse / 100.0f) * WallSlamDamagePerVelocity;
+	// Calculate damage based on orthogonal velocity above threshold
+	float ExcessVelocity = OrthogonalVelocity - WallSlamVelocityThreshold;
+	float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
 
 	if (WallSlamDamage > 0.0f)
 	{
@@ -832,8 +863,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("Wall Slam! Orthogonal Impulse=%.0f, Damage=%.1f"),
-					OrthogonalImpulse, WallSlamDamage));
+				FString::Printf(TEXT("Wall Slam! Orthogonal Velocity=%.0f, Damage=%.1f"),
+					OrthogonalVelocity, WallSlamDamage));
 		}
 #endif
 	}
