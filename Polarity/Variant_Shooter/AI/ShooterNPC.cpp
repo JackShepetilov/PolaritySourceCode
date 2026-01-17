@@ -32,6 +32,18 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	// Create EMF components for charge-based interactions
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
 	EMFVelocityModifier = CreateDefaultSubobject<UEMFVelocityModifier>(TEXT("EMFVelocityModifier"));
+
+	// Set NPC owner type for EM force filtering
+	if (FieldComponent)
+	{
+		FieldComponent->SetOwnerType(EEMSourceOwnerType::NPC);
+	}
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetOwnerType(EEMSourceOwnerType::NPC);
+		// NPCs don't react to other NPCs' EM forces
+		EMFVelocityModifier->NPCForceMultiplier = 0.0f;
+	}
 }
 
 void AShooterNPC::BeginPlay()
