@@ -196,9 +196,6 @@ protected:
 	/** Cached braking deceleration for restore after knockback */
 	float CachedBrakingDeceleration = 2048.0f;
 
-	/** Previous polarity state for change detection (0=Neutral, 1=Positive, 2=Negative) */
-	uint8 PreviousPolarity = 0;
-
 public:
 
 	/** Delegate called when this NPC dies - can be bound in Blueprints */
