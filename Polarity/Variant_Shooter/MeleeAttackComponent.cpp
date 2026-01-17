@@ -62,6 +62,7 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateState(DeltaTime);
 	UpdateLunge(DeltaTime);
 	UpdateMagnetism(DeltaTime);
+	UpdateCoolKick(DeltaTime);
 	UpdateMeshTransition(DeltaTime);
 	UpdateMeleeMeshRotation();
 	UpdateMontagePlayRate(DeltaTime);
@@ -467,6 +468,13 @@ void UMeleeAttackComponent::PerformHitDetection()
 
 			// Valid hit!
 			HitActorsThisAttack.Add(HitActor);
+
+			// Check for cool kick trigger (first hit, airborne, no lunge target)
+			if (!bHasHitThisAttack && CurrentAttackType == EMeleeAttackType::Airborne && !MagnetismTarget.IsValid())
+			{
+				StartCoolKick();
+			}
+
 			bHasHitThisAttack = true;
 
 			// Apply damage
@@ -1711,6 +1719,92 @@ void UMeleeAttackComponent::StopCameraFocus()
 {
 	CameraFocusTarget.Reset();
 	CameraFocusTimeRemaining = 0.0f;
+}
+
+// ==================== Cool Kick Implementation ====================
+
+void UMeleeAttackComponent::StartCoolKick()
+{
+	if (Settings.CoolKickDuration <= 0.0f || Settings.CoolKickSpeedBoost <= 0.0f)
+	{
+		return;
+	}
+
+	if (!OwnerCharacter)
+	{
+		return;
+	}
+
+	CoolKickTimeRemaining = Settings.CoolKickDuration;
+
+	// Get current movement direction for the boost
+	if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+	{
+		FVector Velocity = Movement->Velocity;
+		Velocity.Z = 0.0f; // Only horizontal direction
+
+		if (Velocity.SizeSquared() > FMath::Square(50.0f))
+		{
+			CoolKickDirection = Velocity.GetSafeNormal();
+		}
+		else
+		{
+			// If not moving, use view direction
+			CoolKickDirection = GetTraceDirection();
+			CoolKickDirection.Z = 0.0f;
+			CoolKickDirection.Normalize();
+		}
+	}
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
+			FString::Printf(TEXT("Cool Kick Started! Duration=%.2fs, Boost=%.0f cm/s"),
+				Settings.CoolKickDuration, Settings.CoolKickSpeedBoost));
+	}
+#endif
+}
+
+void UMeleeAttackComponent::UpdateCoolKick(float DeltaTime)
+{
+	if (CoolKickTimeRemaining <= 0.0f)
+	{
+		return;
+	}
+
+	if (!OwnerCharacter)
+	{
+		CoolKickTimeRemaining = 0.0f;
+		return;
+	}
+
+	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
+	if (!Movement)
+	{
+		CoolKickTimeRemaining = 0.0f;
+		return;
+	}
+
+	// Calculate how much boost to add this frame
+	// Total boost is CoolKickSpeedBoost, distributed over CoolKickDuration
+	float BoostPerSecond = Settings.CoolKickSpeedBoost / Settings.CoolKickDuration;
+	float BoostThisFrame = BoostPerSecond * DeltaTime;
+
+	// Apply boost in movement direction
+	FVector BoostVelocity = CoolKickDirection * BoostThisFrame;
+	Movement->Velocity += BoostVelocity;
+
+	CoolKickTimeRemaining -= DeltaTime;
+
+#if WITH_EDITOR
+	if (GEngine && bEnableDebugVisualization)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Orange,
+			FString::Printf(TEXT("Cool Kick: %.2fs remaining, Speed=%.0f"),
+				CoolKickTimeRemaining, Movement->Velocity.Size()));
+	}
+#endif
 }
 
 // ==================== Animation Notify API ====================

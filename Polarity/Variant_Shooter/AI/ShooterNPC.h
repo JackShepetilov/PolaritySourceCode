@@ -20,6 +20,7 @@ class USoundBase;
 class UMaterialInterface;
 class UEMFVelocityModifier;
 class UEMF_FieldComponent;
+class UNiagaraSystem;
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -201,6 +202,28 @@ protected:
 	/** Cached braking deceleration for restore after knockback */
 	float CachedBrakingDeceleration = 2048.0f;
 
+	// ==================== Wall Slam ====================
+
+	/** Minimum velocity (cm/s) to trigger wall slam damage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam", meta = (ClampMin = "0"))
+	float WallSlamVelocityThreshold = 800.0f;
+
+	/** Damage dealt per 100 cm/s of velocity above threshold */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam", meta = (ClampMin = "0"))
+	float WallSlamDamagePerVelocity = 10.0f;
+
+	/** Sound to play on wall slam */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Effects")
+	TObjectPtr<USoundBase> WallSlamSound;
+
+	/** VFX to spawn on wall slam */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Effects")
+	TObjectPtr<UNiagaraSystem> WallSlamVFX;
+
+	/** Scale for wall slam VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Effects", meta = (ClampMin = "0.1", ClampMax = "5.0"))
+	float WallSlamVFXScale = 1.0f;
+
 	// ==================== Melee Charge Transfer ====================
 
 	/** Charge change when hit by melee attack (opposite sign to player's gain) */
@@ -347,4 +370,8 @@ protected:
 
 	/** Called when stun ends to restore AI movement */
 	void EndKnockbackStun();
+
+	/** Called when capsule hits something - checks for wall slam */
+	UFUNCTION()
+	void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
 };

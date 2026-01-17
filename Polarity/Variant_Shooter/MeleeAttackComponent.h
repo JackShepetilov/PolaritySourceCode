@@ -156,6 +156,16 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", EditCondition = "bLungeToTarget"))
 	float MinSpeedForLungeToTarget = 300.0f;
 
+	// ==================== Cool Kick ====================
+
+	/** Duration of the cool kick period (applied when hitting enemy in air without lunge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cool Kick", meta = (ClampMin = "0", ClampMax = "2.0"))
+	float CoolKickDuration = 0.3f;
+
+	/** Speed boost added gradually over the cool kick period (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cool Kick", meta = (ClampMin = "0", ClampMax = "2000.0"))
+	float CoolKickSpeedBoost = 400.0f;
+
 	// ==================== Target Magnetism ====================
 
 	/** Enable predictive target magnetism (pulls targets toward punch center) */
@@ -505,6 +515,14 @@ protected:
 	/** Cached owner velocity at attack start (for momentum calculations) */
 	FVector OwnerVelocityAtAttackStart = FVector::ZeroVector;
 
+	// ==================== Cool Kick State ====================
+
+	/** Time remaining in cool kick period */
+	float CoolKickTimeRemaining = 0.0f;
+
+	/** Direction for cool kick boost (movement direction at hit time) */
+	FVector CoolKickDirection = FVector::ZeroVector;
+
 	// ==================== Mesh Transition State ====================
 
 	/** Current attack type (determined at attack start) */
@@ -626,6 +644,12 @@ protected:
 
 	/** Get impact center for magnetism pull */
 	FVector GetImpactCenter() const;
+
+	/** Start cool kick period (called on airborne hit without lunge) */
+	void StartCoolKick();
+
+	/** Update cool kick boost */
+	void UpdateCoolKick(float DeltaTime);
 
 	// ==================== Mesh Transition ====================
 

@@ -22,6 +22,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/DamageEvents.h"
 #include "../DamageTypes/DamageType_Melee.h"
+#include "NiagaraFunctionLibrary.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -60,6 +61,12 @@ void AShooterNPC::BeginPlay()
 
 	// Register with combat coordinator
 	RegisterWithCoordinator();
+
+	// Bind capsule hit event for wall slam detection
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->OnComponentHit.AddDynamic(this, &AShooterNPC::OnCapsuleHit);
+	}
 }
 
 void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -757,4 +764,69 @@ void AShooterNPC::StartPermissionRetryTimer()
 void AShooterNPC::StopPermissionRetryTimer()
 {
 	GetWorld()->GetTimerManager().ClearTimer(PermissionRetryTimer);
+}
+
+// ==================== Wall Slam ====================
+
+void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
+{
+	// Ignore if dead
+	if (bIsDead)
+	{
+		return;
+	}
+
+	// Check velocity against threshold
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	if (!Movement)
+	{
+		return;
+	}
+
+	float CurrentSpeed = Movement->Velocity.Size();
+	if (CurrentSpeed < WallSlamVelocityThreshold)
+	{
+		return;
+	}
+
+	// Calculate damage based on velocity above threshold
+	float ExcessVelocity = CurrentSpeed - WallSlamVelocityThreshold;
+	float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
+
+	if (WallSlamDamage > 0.0f)
+	{
+		// Apply damage to self
+		FDamageEvent DamageEvent;
+		TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
+
+		// Play sound
+		if (WallSlamSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, Hit.ImpactPoint);
+		}
+
+		// Spawn VFX
+		if (WallSlamVFX)
+		{
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+				GetWorld(),
+				WallSlamVFX,
+				Hit.ImpactPoint,
+				Hit.ImpactNormal.Rotation(),
+				FVector(WallSlamVFXScale),
+				true,  // bAutoDestroy
+				true,  // bAutoActivate
+				ENCPoolMethod::None
+			);
+		}
+
+#if WITH_EDITOR
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
+				FString::Printf(TEXT("Wall Slam! Speed=%.0f, Damage=%.1f"),
+					CurrentSpeed, WallSlamDamage));
+		}
+#endif
+	}
 }
