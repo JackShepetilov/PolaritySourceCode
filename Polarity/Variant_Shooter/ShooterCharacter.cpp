@@ -47,6 +47,15 @@ AShooterCharacter::AShooterCharacter()
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 600.0f, 0.0f);
 }
 
+USkeletalMeshComponent* AShooterCharacter::GetMeleeMesh() const
+{
+	if (MeleeAttackComponent)
+	{
+		return MeleeAttackComponent->MeleeMesh;
+	}
+	return nullptr;
+}
+
 void AShooterCharacter::BeginPlay()
 {
 	Super::BeginPlay();

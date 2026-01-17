@@ -358,6 +358,10 @@ public:
 	/** Constructor */
 	AShooterCharacter();
 
+	/** Get the melee mesh component (can return nullptr if not set up) */
+	UFUNCTION(BlueprintPure, Category = "Character")
+	USkeletalMeshComponent* GetMeleeMesh() const;
+
 protected:
 
 	/** Gameplay initialization */
