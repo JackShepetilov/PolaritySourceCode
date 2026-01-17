@@ -131,12 +131,34 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// Check if damage is from melee attack and apply charge transfer
 	if (DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
 	{
-		// Apply opposite charge to what player gained
-		if (FieldComponent)
+		// Steal charge from attacker (opposite sign to what they gain)
+		if (FieldComponent && EventInstigator)
 		{
-			FEMSourceDescription CurrentSource = FieldComponent->GetSourceDescription();
-			float NewCharge = CurrentSource.Charge + ChargeChangeOnMeleeHit;
-			FieldComponent->SetCharge(NewCharge);
+			APawn* Attacker = EventInstigator->GetPawn();
+			if (Attacker)
+			{
+				// Try to get attacker's EMF component to determine their charge
+				UEMFVelocityModifier* AttackerEMF = Attacker->FindComponentByClass<UEMFVelocityModifier>();
+
+				// Calculate charge transfer: opposite sign to attacker's current charge
+				float ChargeToAdd = ChargeChangeOnMeleeHit;
+				if (AttackerEMF)
+				{
+					float AttackerCharge = AttackerEMF->GetCharge();
+					// If attacker has positive charge, give NPC negative (and vice versa)
+					ChargeToAdd = -FMath::Abs(ChargeChangeOnMeleeHit) * FMath::Sign(AttackerCharge);
+
+					// If attacker is neutral, use default negative value
+					if (FMath::Abs(AttackerCharge) < KINDA_SMALL_NUMBER)
+					{
+						ChargeToAdd = ChargeChangeOnMeleeHit;
+					}
+				}
+
+				FEMSourceDescription CurrentSource = FieldComponent->GetSourceDescription();
+				float NewCharge = CurrentSource.Charge + ChargeToAdd;
+				FieldComponent->SetCharge(NewCharge);
+			}
 		}
 	}
 
@@ -339,6 +361,12 @@ void AShooterNPC::Die()
 
 	// raise the dead flag
 	bIsDead = true;
+
+	// Disable EM field emission (dead bodies don't emit charge)
+	if (FieldComponent)
+	{
+		FieldComponent->SetCharge(0.0f);
+	}
 
 	// Stop shooting immediately
 	StopShooting();
