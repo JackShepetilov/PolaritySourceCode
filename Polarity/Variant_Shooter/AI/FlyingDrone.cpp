@@ -16,6 +16,7 @@
 #include "NiagaraComponent.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "ShooterGameMode.h"
+#include "EMFVelocityModifier.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
