@@ -68,6 +68,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
 	float SVAccelerate = 10.0f;
 
+	// ==================== Air Dive (camera-directed descent) ====================
+
+	/** Enable camera-directed dive when looking down in air */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air|Dive")
+	bool bEnableAirDive = true;
+
+	/** Camera pitch angle threshold to activate dive (negative = looking down). E.g. -15 means 15 degrees below horizon */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air|Dive", meta = (ClampMin = "-89.0", ClampMax = "0.0"))
+	float AirDiveAngleThreshold = -15.0f;
+
+	/** Multiplier for Z component of acceleration when diving. 1.0 = full camera direction, 0.0 = no vertical acceleration */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air|Dive", meta = (ClampMin = "0.0"))
+	float AirDiveZMultiplier = 0.5f;
+
 	// ==================== Jump ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Jump")

@@ -193,8 +193,19 @@ protected:
 
 	// ==================== Knockback ====================
 
+	/** Ground friction during knockback slide (lower = more slippery) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback", meta = (ClampMin = "0.0", ClampMax = "8.0"))
+	float KnockbackGroundFriction = 0.2f;
+
+	/** If true, disable EMF forces during knockback for consistent physics */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback")
+	bool bDisableEMFDuringKnockback = true;
+
 	/** Timer for knockback stun recovery */
 	FTimerHandle KnockbackStunTimer;
+
+	/** True when NPC is in knockback state */
+	bool bIsInKnockback = false;
 
 	/** Cached ground friction for restore after knockback */
 	float CachedGroundFriction = 8.0f;
@@ -357,6 +368,10 @@ public:
 	/** Apply knockback impulse with temporary AI stun */
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	virtual void ApplyKnockback(const FVector& KnockbackVelocity, float StunDuration = 0.3f);
+
+	/** Returns true if this NPC is currently in knockback state */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsInKnockback() const { return bIsInKnockback; }
 
 	/** Returns true if this NPC is dead */
 	UFUNCTION(BlueprintPure, Category = "Status")

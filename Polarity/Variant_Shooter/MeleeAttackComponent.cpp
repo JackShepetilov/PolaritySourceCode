@@ -1096,6 +1096,15 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		return;
 	}
 
+	// Skip magnetism if target NPC is in knockback state
+	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(Target))
+	{
+		if (TargetNPC->IsInKnockback())
+		{
+			return;
+		}
+	}
+
 	// ==================== Titanfall 2 Magnetism ====================
 	// In Titanfall 2, the PLAYER moves toward the target, not vice versa
 	// This creates the satisfying "magnetic kick" where you fly toward enemies

@@ -130,6 +130,13 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 	else if (IsFalling() && !bIsSliding)
 	{
+#if WITH_EDITOR
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(9996, 0.0f, FColor::Orange,
+				TEXT("IN FALLING BLOCK - ApplyAirStrafe will be called"));
+		}
+#endif
 		// Check wall bounce FIRST - only if forward is held
 		if (IsForwardHeld())
 		{
@@ -1498,17 +1505,93 @@ bool UApexMovementComponent::TraceMantleSurface(FHitResult& OutHit) const
 
 void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 {
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9995, 0.0f, FColor::Red,
+			FString::Printf(TEXT("ApplyAirStrafe: Settings=%d, AirStrafeMult=%.2f"),
+				MovementSettings ? 1 : 0,
+				MovementSettings ? MovementSettings->AirStrafeMultiplier : -1.0f));
+	}
+#endif
+
 	if (!MovementSettings || MovementSettings->AirStrafeMultiplier <= 0.0f)
 	{
 		return;
 	}
 
 	const FVector InputVector = GetLastInputVector();
+
+#if WITH_EDITOR
+	// Debug: show why air dive might not work
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(9997, 0.0f, FColor::Yellow,
+			FString::Printf(TEXT("AirStrafe: Input=(%.2f,%.2f,%.2f), Forward=%d, Controller=%d, DiveEnabled=%d"),
+				InputVector.X, InputVector.Y, InputVector.Z,
+				IsForwardHeld() ? 1 : 0,
+				OwnerController ? 1 : 0,
+				MovementSettings->bEnableAirDive ? 1 : 0));
+	}
+#endif
+
 	if (InputVector.IsNearlyZero())
 	{
 		return;
 	}
 
+	// Check for air dive: forward input + looking down + feature enabled
+	// Fallback: try to get controller if not cached (can happen if possessed after BeginPlay)
+	if (!OwnerController && OwnerCharacter)
+	{
+		OwnerController = Cast<APlayerController>(OwnerCharacter->GetController());
+	}
+
+	if (MovementSettings->bEnableAirDive && IsForwardHeld() && OwnerController)
+	{
+		const float CameraPitch = OwnerController->GetControlRotation().Pitch;
+		// Normalize pitch to -180 to 180 range (UE stores as 0-360)
+		const float NormalizedPitch = FMath::UnwindDegrees(CameraPitch);
+
+#if WITH_EDITOR
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(9999, 0.0f, FColor::Cyan,
+				FString::Printf(TEXT("AirDive: RawPitch=%.1f, Normalized=%.1f, Threshold=%.1f, Active=%s"),
+					CameraPitch, NormalizedPitch, MovementSettings->AirDiveAngleThreshold,
+					NormalizedPitch < MovementSettings->AirDiveAngleThreshold ? TEXT("YES") : TEXT("NO")));
+		}
+#endif
+
+		// If looking down past threshold, apply camera-directed acceleration
+		if (NormalizedPitch < MovementSettings->AirDiveAngleThreshold)
+		{
+			// Get camera forward direction (includes pitch)
+			const FRotator ControlRotation = OwnerController->GetControlRotation();
+			FVector CameraForward = ControlRotation.Vector();
+
+			// Calculate wish direction: XY from camera, Z scaled by multiplier
+			FVector DiveDir = FVector(CameraForward.X, CameraForward.Y, CameraForward.Z * MovementSettings->AirDiveZMultiplier);
+			DiveDir.Normalize();
+
+			// Apply acceleration in dive direction
+			const float DiveAccel = MovementSettings->AirAcceleration * MovementSettings->AirStrafeMultiplier * DeltaTime;
+			Velocity += DiveDir * DiveAccel;
+
+#if WITH_EDITOR
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(9998, 0.0f, FColor::Green,
+					FString::Printf(TEXT("DIVING! Accel=%.1f, DiveDir=(%.2f, %.2f, %.2f)"),
+						DiveAccel, DiveDir.X, DiveDir.Y, DiveDir.Z));
+			}
+#endif
+
+			return; // Skip normal air strafe when diving
+		}
+	}
+
+	// Normal air strafe (horizontal only)
 	FVector VelNorm = Velocity.GetSafeNormal2D();
 	FVector WishDir = InputVector.GetSafeNormal2D();
 	float VelDotWish = FVector::DotProduct(VelNorm, WishDir);

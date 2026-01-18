@@ -617,35 +617,50 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 
 void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDuration)
 {
-	// Stop AI pathfinding WITHOUT resetting velocity
+	// Mark as in knockback state
+	bIsInKnockback = true;
+
+	// Stop AI pathfinding completely
 	if (AController* MyController = GetController())
 	{
 		if (AAIController* AIController = Cast<AAIController>(MyController))
 		{
 			if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
 			{
-				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Keep);
+				// Use Reset mode to completely stop any velocity from pathfinding
+				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
 			}
+			// Stop any active movement request
+			AIController->StopMovement();
 		}
 	}
 
-	// Use LaunchCharacter - the correct way to apply impulse to characters
-	// It sets PendingLaunchVelocity and switches to Falling mode
-	// bXYOverride=true replaces XY velocity, bZOverride=true replaces Z velocity
-	LaunchCharacter(KnockbackVelocity, true, true);
+	// Disable EMF forces during knockback for consistent physics
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
 
 	// Reduce ground friction temporarily to make NPC slide smoothly
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
 		// Save original friction if not already saved
-		if (CachedGroundFriction == 8.0f)  // Default value check
+		if (CachedGroundFriction == 8.0f)
 		{
 			CachedGroundFriction = CharMovement->GroundFriction;
 		}
 
-		// Set very low friction for sliding (like ice)
-		CharMovement->GroundFriction = 0.2f;
+		// Set low friction for sliding (like ice)
+		CharMovement->GroundFriction = KnockbackGroundFriction;
+
+		// Stop any current acceleration from AI
+		CharMovement->StopActiveMovement();
 	}
+
+	// Use LaunchCharacter AFTER stopping AI movement
+	// It sets PendingLaunchVelocity and switches to Falling mode
+	// bXYOverride=true replaces XY velocity, bZOverride=true replaces Z velocity
+	LaunchCharacter(KnockbackVelocity, true, true);
 
 	// Clear any existing stun timer
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
@@ -662,10 +677,19 @@ void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDur
 
 void AShooterNPC::EndKnockbackStun()
 {
+	// Clear knockback state
+	bIsInKnockback = false;
+
 	// Restore original ground friction after knockback slide
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
 		CharMovement->GroundFriction = CachedGroundFriction;
+	}
+
+	// Re-enable EMF forces
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(true);
 	}
 
 	// LaunchCharacter handles movement mode automatically
@@ -808,28 +832,40 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// Calculate velocity component perpendicular to the surface (how hard we're hitting INTO it)
+	// Get current velocity
 	FVector Velocity = GetVelocity();
-	float OrthogonalVelocity = FMath::Abs(FVector::DotProduct(Velocity, Hit.ImpactNormal));
 	float VelocityMagnitude = Velocity.Size();
+
+	// Calculate velocity component perpendicular to the hit surface
+	// This is how fast we're moving DIRECTLY INTO the surface (not along it)
+	// Dot product of velocity with surface normal gives perpendicular component
+	// Negative value means moving away from surface, positive means moving into it
+	float PerpendicularVelocity = FVector::DotProduct(Velocity, -Hit.ImpactNormal);
+
+	// Only consider impacts where we're moving INTO the surface
+	if (PerpendicularVelocity < 0.0f)
+	{
+		PerpendicularVelocity = 0.0f;
+	}
 
 #if WITH_EDITOR
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
-			FString::Printf(TEXT("Capsule Hit: Velocity=%.0f, Orthogonal=%.0f, Threshold=%.0f, Normal=(%.2f,%.2f,%.2f)"),
-				VelocityMagnitude, OrthogonalVelocity, WallSlamVelocityThreshold,
+			FString::Printf(TEXT("Capsule Hit: TotalVelocity=%.0f, PerpendicularVelocity=%.0f, Threshold=%.0f, Normal=(%.2f,%.2f,%.2f)"),
+				VelocityMagnitude, PerpendicularVelocity, WallSlamVelocityThreshold,
 				Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z));
 	}
 #endif
 
-	if (OrthogonalVelocity < WallSlamVelocityThreshold)
+	// Check if perpendicular velocity exceeds damage threshold
+	if (PerpendicularVelocity < WallSlamVelocityThreshold)
 	{
 		return;
 	}
 
-	// Calculate damage based on orthogonal velocity above threshold
-	float ExcessVelocity = OrthogonalVelocity - WallSlamVelocityThreshold;
+	// Calculate damage based on perpendicular velocity above threshold
+	float ExcessVelocity = PerpendicularVelocity - WallSlamVelocityThreshold;
 	float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
 
 	if (WallSlamDamage > 0.0f)
@@ -863,8 +899,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("Wall Slam! Orthogonal Velocity=%.0f, Damage=%.1f"),
-					OrthogonalVelocity, WallSlamDamage));
+				FString::Printf(TEXT("Wall Slam! Perpendicular Velocity=%.0f, Damage=%.1f"),
+					PerpendicularVelocity, WallSlamDamage));
 		}
 #endif
 	}
