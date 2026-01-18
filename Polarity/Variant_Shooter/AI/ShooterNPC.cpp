@@ -625,7 +625,7 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 	}
 }
 
-void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration)
+void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
 {
 	// Apply NPC's knockback distance multiplier
 	float FinalDistance = Distance * KnockbackDistanceMultiplier;
@@ -646,6 +646,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	KnockbackTargetPosition = KnockbackStartPosition + KnockbackDirection * FinalDistance;
 	KnockbackTotalDuration = Duration;
 	KnockbackElapsedTime = 0.0f;
+	KnockbackAttackerPosition = AttackerLocation;
 
 	// Stop AI pathfinding completely
 	if (AController* MyController = GetController())
@@ -696,6 +697,19 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 		Duration + 0.1f,
 		false
 	);
+
+	// Play knockback animation montage if available
+	if (KnockbackMontage)
+	{
+		UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
+		if (AnimInstance && !AnimInstance->Montage_IsPlaying(KnockbackMontage))
+		{
+			// Calculate play rate to match knockback duration
+			// Montage is 1 second long, so PlayRate = 1.0 / Duration
+			float PlayRate = 1.0f / Duration;
+			AnimInstance->Montage_Play(KnockbackMontage, PlayRate);
+		}
+	}
 
 #if WITH_EDITOR
 	if (GEngine)
@@ -779,6 +793,18 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 
 	// Move the character to the interpolated position
 	SetActorLocation(NextPos, true);
+
+	// Rotate to face attacker during knockback (if attacker position was provided)
+	if (!KnockbackAttackerPosition.IsZero())
+	{
+		FVector ToAttacker = KnockbackAttackerPosition - NextPos;
+		ToAttacker.Z = 0.0f; // Keep rotation horizontal
+		if (!ToAttacker.IsNearlyZero())
+		{
+			FRotator TargetRotation = ToAttacker.Rotation();
+			SetActorRotation(TargetRotation);
+		}
+	}
 
 	// Update velocity for visual purposes (affects animations, etc.)
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())

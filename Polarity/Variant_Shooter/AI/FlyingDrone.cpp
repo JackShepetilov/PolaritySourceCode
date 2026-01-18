@@ -642,7 +642,7 @@ void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 	SetActorRotation(NewRotation);
 }
 
-void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration)
+void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
 {
 	// Apply NPC's knockback distance multiplier (inherited from ShooterNPC)
 	float FinalDistance = Distance * KnockbackDistanceMultiplier;

@@ -103,6 +103,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
 	TObjectPtr<UAnimMontage> HitReactionBackMontage;
 
+	/** Animation montage played during knockback */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
+	TObjectPtr<UAnimMontage> KnockbackMontage;
+
 	/** Minimum time between hit reaction animations */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions", meta = (ClampMin = "0"))
 	float HitReactionCooldown = 0.5f;
@@ -226,6 +230,9 @@ protected:
 
 	/** Direction of current knockback (for wall collision) */
 	FVector KnockbackDirection = FVector::ZeroVector;
+
+	/** Position of attacker during knockback (for facing during animation) */
+	FVector KnockbackAttackerPosition = FVector::ZeroVector;
 
 	/** Total duration of current knockback interpolation */
 	float KnockbackTotalDuration = 0.0f;
@@ -405,9 +412,10 @@ public:
 	 *  @param KnockbackDirection Direction to knock the NPC (normalized)
 	 *  @param Distance Total distance to travel in cm
 	 *  @param Duration Duration of the knockback interpolation in seconds
+	 *  @param AttackerLocation Position of the attacker (for rotation during knockback, optional)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration);
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector);
 
 	/** Legacy knockback using velocity (converts to distance-based internally)
 	 *  @param KnockbackVelocity Velocity vector for knockback

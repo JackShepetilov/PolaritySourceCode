@@ -1251,7 +1251,7 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 		// Note: NPC multiplier already applied to distance, so we pass it directly
 		// The NPC will apply its own multiplier again, so we need to divide it out
 		float DistanceForNPC = KnockbackDistance / NPCMultiplier;
-		NPC->ApplyKnockback(KnockbackDirection, DistanceForNPC, KnockbackDuration);
+		NPC->ApplyKnockback(KnockbackDirection, DistanceForNPC, KnockbackDuration, PlayerCenter);
 		return;
 	}
 
