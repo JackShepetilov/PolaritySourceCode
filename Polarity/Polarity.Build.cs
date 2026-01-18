@@ -23,7 +23,8 @@ public class Polarity : ModuleRules
             "PhysicsCore",
             "Niagara",
             "LevelSequence",
-            "MovieScene"
+            "MovieScene",
+            "IKRig"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin" });
