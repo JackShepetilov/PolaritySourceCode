@@ -85,6 +85,10 @@ void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AShooterNPC::Tick(float DeltaTime)
 {
+	// Store velocity BEFORE Super::Tick processes any movement/collisions
+	// This gives us the "pre-collision" velocity for impact damage calculation
+	PreviousTickVelocity = GetVelocity();
+
 	Super::Tick(DeltaTime);
 
 	// Update Charge/Polarity - get charge from EMFVelocityModifier
@@ -832,29 +836,48 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// Get current velocity
-	FVector Velocity = GetVelocity();
-	float VelocityMagnitude = Velocity.Size();
+	// Check cooldown to prevent multi-trigger on same impact
+	float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (CurrentTime - LastWallSlamTime < WallSlamCooldown)
+	{
+		return;
+	}
+
+	// Use the PRE-COLLISION velocity stored from Tick
+	// GetVelocity() here returns post-collision velocity which is unreliable
+	FVector ImpactVelocity = PreviousTickVelocity;
+	float VelocityMagnitude = ImpactVelocity.Size();
+
+	// Early exit if we weren't moving fast enough overall
+	// This filters out standing/slow movement before doing the perpendicular calculation
+	if (VelocityMagnitude < WallSlamVelocityThreshold * 0.5f)
+	{
+		return;
+	}
 
 	// Calculate velocity component perpendicular to the hit surface
-	// This is how fast we're moving DIRECTLY INTO the surface (not along it)
-	// Dot product of velocity with surface normal gives perpendicular component
-	// Negative value means moving away from surface, positive means moving into it
-	float PerpendicularVelocity = FVector::DotProduct(Velocity, -Hit.ImpactNormal);
+	// This is how fast we were moving DIRECTLY INTO the surface (not along it)
+	// Dot product of velocity with -normal gives perpendicular component
+	// (Normal points away from surface, so we negate it to point into surface)
+	float PerpendicularVelocity = FVector::DotProduct(ImpactVelocity, -Hit.ImpactNormal);
 
-	// Only consider impacts where we're moving INTO the surface
-	if (PerpendicularVelocity < 0.0f)
+	// Only consider impacts where we were moving INTO the surface
+	// Negative value means moving away from surface (shouldn't take damage)
+	if (PerpendicularVelocity <= 0.0f)
 	{
-		PerpendicularVelocity = 0.0f;
+		return;
 	}
 
 #if WITH_EDITOR
 	if (GEngine)
 	{
+		// Determine surface type for debug display
+		FString SurfaceType = Hit.ImpactNormal.Z > 0.7f ? TEXT("FLOOR") :
+		                      Hit.ImpactNormal.Z < -0.7f ? TEXT("CEILING") : TEXT("WALL");
+
 		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
-			FString::Printf(TEXT("Capsule Hit: TotalVelocity=%.0f, PerpendicularVelocity=%.0f, Threshold=%.0f, Normal=(%.2f,%.2f,%.2f)"),
-				VelocityMagnitude, PerpendicularVelocity, WallSlamVelocityThreshold,
-				Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z));
+			FString::Printf(TEXT("Hit %s: PreVelocity=%.0f, PerpendicularVelocity=%.0f, Threshold=%.0f"),
+				*SurfaceType, VelocityMagnitude, PerpendicularVelocity, WallSlamVelocityThreshold));
 	}
 #endif
 
@@ -870,6 +893,9 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 
 	if (WallSlamDamage > 0.0f)
 	{
+		// Mark cooldown to prevent multi-trigger
+		LastWallSlamTime = CurrentTime;
+
 		// Apply damage to self
 		FDamageEvent DamageEvent;
 		TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
@@ -898,9 +924,12 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 #if WITH_EDITOR
 		if (GEngine)
 		{
+			FString SurfaceType = Hit.ImpactNormal.Z > 0.7f ? TEXT("FLOOR (Fall Damage)") :
+			                      Hit.ImpactNormal.Z < -0.7f ? TEXT("CEILING") : TEXT("WALL");
+
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("Wall Slam! Perpendicular Velocity=%.0f, Damage=%.1f"),
-					PerpendicularVelocity, WallSlamDamage));
+				FString::Printf(TEXT("IMPACT DAMAGE on %s! Velocity=%.0f, Damage=%.1f"),
+					*SurfaceType, PerpendicularVelocity, WallSlamDamage));
 		}
 #endif
 	}

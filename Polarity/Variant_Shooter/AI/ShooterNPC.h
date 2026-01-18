@@ -235,6 +235,16 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Effects", meta = (ClampMin = "0.1", ClampMax = "5.0"))
 	float WallSlamVFXScale = 1.0f;
 
+	/** Cooldown between wall slam damage events (prevents multi-trigger) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float WallSlamCooldown = 0.2f;
+
+	/** Velocity from previous tick (used for impact damage calculation) */
+	FVector PreviousTickVelocity = FVector::ZeroVector;
+
+	/** Time of last wall slam damage (for cooldown) */
+	float LastWallSlamTime = -1.0f;
+
 	// ==================== Melee Charge Transfer ====================
 
 	/** Charge change when hit by melee attack (opposite sign to player's gain) */
