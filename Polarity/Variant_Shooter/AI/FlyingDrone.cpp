@@ -655,14 +655,10 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 
 	// Mark as in knockback state
 	bIsInKnockback = true;
-	bIsKnockbackInterpolating = true;
 
-	// Store knockback parameters (using inherited members from ShooterNPC)
-	KnockbackStartPosition = GetActorLocation();
-	KnockbackDirection = InKnockbackDirection.GetSafeNormal();
-	KnockbackTargetPosition = KnockbackStartPosition + KnockbackDirection * FinalDistance;
-	KnockbackTotalDuration = Duration;
-	KnockbackElapsedTime = 0.0f;
+	// Calculate velocity needed to cover the distance in the given duration
+	// Velocity = Distance / Time
+	FVector KnockbackVelocity = InKnockbackDirection.GetSafeNormal() * (FinalDistance / Duration);
 
 	// Stop flying movement
 	if (FlyingMovement)
@@ -676,22 +672,18 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Stop any velocity from CharacterMovementComponent
-	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
-	{
-		Movement->StopActiveMovement();
-		Movement->Velocity = FVector::ZeroVector;
-	}
+	// Apply knockback using LaunchCharacter (velocity-based, works with physics)
+	LaunchCharacter(KnockbackVelocity, true, true);
 
 	// Clear any existing stun timer
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 
-	// Schedule stun end (slightly longer than knockback duration)
+	// Schedule stun end
 	GetWorld()->GetTimerManager().SetTimer(
 		KnockbackStunTimer,
 		this,
 		&AFlyingDrone::EndKnockbackStun,
-		Duration + 0.1f,
+		Duration,
 		false
 	);
 
@@ -699,8 +691,8 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
-			FString::Printf(TEXT("Drone Knockback: Dir=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
-				KnockbackDirection.X, KnockbackDirection.Y, KnockbackDirection.Z,
+			FString::Printf(TEXT("Drone Knockback: Vel=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
+				KnockbackVelocity.X, KnockbackVelocity.Y, KnockbackVelocity.Z,
 				FinalDistance, Duration));
 	}
 #endif

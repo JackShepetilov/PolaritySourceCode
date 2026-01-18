@@ -750,9 +750,23 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 		EasedAlpha = 0.9f + EasedSegment;
 	}
 
-	// Calculate next position
+	// Calculate next position with horizontal knockback
 	FVector CurrentPos = GetActorLocation();
 	FVector NextPos = FMath::Lerp(KnockbackStartPosition, KnockbackTargetPosition, EasedAlpha);
+
+	// Apply gravity (only if not on ground)
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		if (!CharMovement->IsMovingOnGround())
+		{
+			// Get gravity from movement component
+			float GravityZ = CharMovement->GetGravityZ();
+
+			// Apply gravity delta for this frame
+			FVector GravityDelta = FVector(0.0f, 0.0f, GravityZ * DeltaTime);
+			NextPos += GravityDelta;
+		}
+	}
 
 	// Check for wall collision before moving
 	FHitResult WallHit;
