@@ -294,8 +294,12 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves)
 		FVector JumpVelocity = WallRunNormal * MovementSettings->WallJumpSideForce;
 		JumpVelocity.Z = MovementSettings->WallJumpUpForce;
 
-		// Add forward momentum from wall run
-		JumpVelocity += WallRunDirection * (WallRunEntryVelocity.Size2D() * 0.5f);
+		// Add forward momentum: current wallrun speed + exit boost
+		const float ForwardSpeed = WallRunCurrentSpeed + MovementSettings->WallRunExitBoost;
+		JumpVelocity += WallRunDirection * ForwardSpeed;
+
+		UE_LOG(LogWallRun, Warning, TEXT("WALL JUMP: ExitSpeed=%.1f (Current=%.1f + Boost=%.1f)"),
+			ForwardSpeed, WallRunCurrentSpeed, MovementSettings->WallRunExitBoost);
 
 		EndWallRun(EWallRunEndReason::JumpedOff);
 		Velocity = JumpVelocity;
@@ -866,31 +870,68 @@ void UApexMovementComponent::CheckForWallRun()
 		return;
 	}
 
+	// Check if player is holding movement input
+	if (CurrentMoveInput.SizeSquared() < 0.1f)
+	{
+		return; // No input = no wallrun
+	}
+
 	FHitResult LeftHit, RightHit;
 	bool bLeftWall = TraceForWall(EWallSide::Left, LeftHit);
 	bool bRightWall = TraceForWall(EWallSide::Right, RightHit);
 
-	FVector MoveDir = Velocity.GetSafeNormal2D();
+	// Convert input to world direction
+	FVector InputWorldDir = FVector::ZeroVector;
+	if (CharacterOwner)
+	{
+		const FRotator YawRotation(0, CharacterOwner->GetControlRotation().Yaw, 0);
+		const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+		const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+		InputWorldDir = (ForwardDir * CurrentMoveInput.Y + RightDir * CurrentMoveInput.X).GetSafeNormal();
+	}
+
+	auto CanStartOnWall = [&](const FHitResult& WallHit) -> bool
+	{
+		// Calculate wall direction
+		FVector AlongWall = FVector::CrossProduct(WallHit.Normal, FVector::UpVector);
+		if (FVector::DotProduct(Velocity, AlongWall) < 0)
+		{
+			AlongWall = -AlongWall;
+		}
+		// Check if input is roughly parallel to wall
+		float InputDot = FVector::DotProduct(InputWorldDir, AlongWall);
+		return InputDot >= MovementSettings->WallRunInputThreshold;
+	};
 
 	if (bLeftWall && bRightWall)
 	{
-		float LeftDot = FVector::DotProduct(MoveDir, -LeftHit.Normal);
-		float RightDot = FVector::DotProduct(MoveDir, -RightHit.Normal);
+		bool bCanLeft = CanStartOnWall(LeftHit);
+		bool bCanRight = CanStartOnWall(RightHit);
 
-		if (LeftDot > RightDot)
+		if (bCanLeft && bCanRight)
+		{
+			// Pick closer wall
+			float LeftDot = FVector::DotProduct(Velocity.GetSafeNormal2D(), -LeftHit.Normal);
+			float RightDot = FVector::DotProduct(Velocity.GetSafeNormal2D(), -RightHit.Normal);
+			if (LeftDot > RightDot)
+				StartWallRun(LeftHit, EWallSide::Left);
+			else
+				StartWallRun(RightHit, EWallSide::Right);
+		}
+		else if (bCanLeft)
 		{
 			StartWallRun(LeftHit, EWallSide::Left);
 		}
-		else
+		else if (bCanRight)
 		{
 			StartWallRun(RightHit, EWallSide::Right);
 		}
 	}
-	else if (bLeftWall)
+	else if (bLeftWall && CanStartOnWall(LeftHit))
 	{
 		StartWallRun(LeftHit, EWallSide::Left);
 	}
-	else if (bRightWall)
+	else if (bRightWall && CanStartOnWall(RightHit))
 	{
 		StartWallRun(RightHit, EWallSide::Right);
 	}
@@ -1036,7 +1077,7 @@ void UApexMovementComponent::StartWallRun(const FHitResult& WallHit, EWallSide S
 		}
 	}
 
-	// Calculate parallel speed for boost calculation
+	// Calculate parallel speed
 	const float ParallelSpeed = FMath::Abs(FVector::DotProduct(Velocity, WallDirection));
 
 	// Check if speed is too low for wallrun
@@ -1048,31 +1089,26 @@ void UApexMovementComponent::StartWallRun(const FHitResult& WallHit, EWallSide S
 	bIsWallRunning = true;
 	WallRunSide = Side;
 	WallRunNormal = WallHit.Normal;
-	WallRunTimeRemaining = MovementSettings->WallRunMaxDuration;
 	WallRunDirection = WallDirection;
 
-	// Store entry velocity for momentum preservation
-	WallRunEntryVelocity = Velocity;
+	// Titanfall 2 style: track elapsed time, entry speed, calculate peak
+	WallRunElapsedTime = 0.0f;
+	WallRunEntrySpeed = ParallelSpeed;
+	WallRunPeakSpeed = ParallelSpeed * MovementSettings->WallRunPeakSpeedMultiplier;
+	WallRunCurrentSpeed = ParallelSpeed;
+	WallRunDistanceTraveled = 0.0f;
+	WallRunHeadbobRoll = 0.0f;
 
 	// Reset jump count and wallrun end reason
 	CurrentJumpCount = 0;
 	LastWallRunEndReason = EWallRunEndReason::None;
 	LastWallRunActor = WallHit.GetActor();
 
-	// Calculate and apply speed boost
-	const float BoostAmount = CalculateWallRunBoost(ParallelSpeed);
-	if (BoostAmount > 0.0f)
-	{
-		// Apply boost in wall direction
-		Velocity += WallDirection * BoostAmount;
-		UE_LOG(LogWallRun, Log, TEXT("WallRun Boost: +%.1f (parallel speed was %.1f)"), BoostAmount, ParallelSpeed);
-	}
-
 	// Apply smaller capsule (Titanfall 2 style - NO TILT)
 	ApplyWallRunCapsule();
 
-	UE_LOG(LogWallRun, Warning, TEXT("=== WALLRUN STARTED === Speed=%.1f (after boost), Side=%s"),
-		Velocity.Size2D(), Side == EWallSide::Left ? TEXT("Left") : TEXT("Right"));
+	UE_LOG(LogWallRun, Warning, TEXT("=== WALLRUN STARTED === EntrySpeed=%.1f, PeakSpeed=%.1f, Side=%s"),
+		WallRunEntrySpeed, WallRunPeakSpeed, Side == EWallSide::Left ? TEXT("Left") : TEXT("Right"));
 
 	OnWallRunChanged.Broadcast(true, Side);
 	OnWallrunStarted.Broadcast(Side);
@@ -1125,11 +1161,35 @@ void UApexMovementComponent::UpdateWallRun(float DeltaTime)
 		return;
 	}
 
-	// Time limit (gravity stays disabled for this duration)
-	WallRunTimeRemaining -= DeltaTime;
-	if (WallRunTimeRemaining <= 0.0f)
+	// Update elapsed time
+	WallRunElapsedTime += DeltaTime;
+
+	// Time limit check
+	if (WallRunElapsedTime >= MovementSettings->WallRunMaxDuration)
 	{
 		EndWallRun(EWallRunEndReason::TimeExpired);
+		return;
+	}
+
+	// Check if player is still holding input parallel to wall
+	if (CurrentMoveInput.SizeSquared() >= 0.1f && CharacterOwner)
+	{
+		const FRotator YawRotation(0, CharacterOwner->GetControlRotation().Yaw, 0);
+		const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+		const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+		FVector InputWorldDir = (ForwardDir * CurrentMoveInput.Y + RightDir * CurrentMoveInput.X).GetSafeNormal();
+
+		float InputDot = FVector::DotProduct(InputWorldDir, WallRunDirection);
+		if (InputDot < MovementSettings->WallRunInputThreshold)
+		{
+			EndWallRun(EWallRunEndReason::LostWall);
+			return;
+		}
+	}
+	else
+	{
+		// No input = end wallrun
+		EndWallRun(EWallRunEndReason::LostWall);
 		return;
 	}
 
@@ -1152,24 +1212,34 @@ void UApexMovementComponent::UpdateWallRun(float DeltaTime)
 	}
 	WallRunDirection = AlongWall.GetSafeNormal();
 
-	// ===== MOMENTUM-BASED MOVEMENT (like floor slide) =====
-	float CurrentSpeed = FVector::DotProduct(Velocity, WallRunDirection);
+	// ===== TITANFALL 2 SPEED CURVE: Acceleration -> Peak -> Deceleration =====
+	const float PeakTime = MovementSettings->WallRunPeakTime;
 
-	// Apply deceleration
-	const float WallDecel = MovementSettings->WallRunDeceleration;
-	CurrentSpeed = FMath::Max(CurrentSpeed - WallDecel * DeltaTime, 0.0f);
+	if (WallRunElapsedTime < PeakTime)
+	{
+		// Phase 1: Acceleration towards peak speed
+		float AccelProgress = WallRunElapsedTime / PeakTime;
+		// Smooth acceleration curve (ease out)
+		AccelProgress = 1.0f - FMath::Pow(1.0f - AccelProgress, 2.0f);
+		WallRunCurrentSpeed = FMath::Lerp(WallRunEntrySpeed, WallRunPeakSpeed, AccelProgress);
+	}
+	else
+	{
+		// Phase 2: Deceleration from peak
+		WallRunCurrentSpeed -= MovementSettings->WallRunDeceleration * DeltaTime;
+	}
 
 	// End if too slow
-	if (CurrentSpeed < MovementSettings->WallRunEndSpeed)
+	if (WallRunCurrentSpeed < MovementSettings->WallRunEndSpeed)
 	{
 		UE_LOG(LogWallRun, Warning, TEXT("Wallrun ended: speed %.1f < min %.1f"),
-			CurrentSpeed, MovementSettings->WallRunEndSpeed);
+			WallRunCurrentSpeed, MovementSettings->WallRunEndSpeed);
 		EndWallRun(EWallRunEndReason::LostWall);
 		return;
 	}
 
 	// Apply velocity along wall direction
-	Velocity = WallRunDirection * CurrentSpeed;
+	Velocity = WallRunDirection * WallRunCurrentSpeed;
 
 	// NO GRAVITY during wallrun
 	Velocity.Z = 0.0f;
@@ -1178,7 +1248,30 @@ void UApexMovementComponent::UpdateWallRun(float DeltaTime)
 	FVector ToWall = -WallRunNormal * 50.0f;
 	Velocity += ToWall * DeltaTime;
 
-	UE_LOG(LogWallRun, Log, TEXT("WALLRUN: Speed=%.1f, TimeLeft=%.2f"), CurrentSpeed, WallRunTimeRemaining);
+	// ===== HEADBOB =====
+	// Accumulate distance traveled
+	WallRunDistanceTraveled += WallRunCurrentSpeed * DeltaTime;
+
+	// Calculate bob phase (0 to 2π per step)
+	const float StepLength = MovementSettings->WallRunHeadbobStepLength;
+	const float BobPhase = (WallRunDistanceTraveled / StepLength) * 2.0f * PI;
+
+	// Calculate amplitude based on speed (0 at EndSpeed, max at PeakSpeed)
+	const float SpeedRange = WallRunPeakSpeed - MovementSettings->WallRunEndSpeed;
+	const float SpeedRatio = FMath::Clamp(
+		(WallRunCurrentSpeed - MovementSettings->WallRunEndSpeed) / SpeedRange,
+		0.0f, 1.0f
+	);
+	const float MaxAmplitude = MovementSettings->WallRunHeadbobRollAmount;
+	const float CurrentAmplitude = MaxAmplitude * SpeedRatio;
+
+	// Calculate headbob roll
+	WallRunHeadbobRoll = FMath::Sin(BobPhase) * CurrentAmplitude;
+
+	UE_LOG(LogWallRun, Log, TEXT("WALLRUN: Speed=%.1f, Elapsed=%.2f, Phase=%s, Headbob=%.2f"),
+		WallRunCurrentSpeed, WallRunElapsedTime,
+		WallRunElapsedTime < PeakTime ? TEXT("Accel") : TEXT("Decel"),
+		WallRunHeadbobRoll);
 }
 
 void UApexMovementComponent::UpdateWallRunCameraTilt(float DeltaTime)
@@ -1186,6 +1279,8 @@ void UApexMovementComponent::UpdateWallRunCameraTilt(float DeltaTime)
 	if (!MovementSettings)
 	{
 		CurrentWallRunCameraRoll = 0.0f;
+		WallRunBaseCameraRoll = 0.0f;
+		WallRunHeadbobRoll = 0.0f;
 		CurrentWallRunCameraOffset = FVector::ZeroVector;
 		CurrentWallRunMeshRoll = 0.0f;
 		CurrentWallRunMeshPitch = 0.0f;
@@ -1227,14 +1322,22 @@ void UApexMovementComponent::UpdateWallRunCameraTilt(float DeltaTime)
 			TargetCameraOffset = MovementSettings->WallRunCameraOffsetRight;
 		}
 	}
+	else
+	{
+		// Not wallrunning - reset headbob immediately
+		WallRunHeadbobRoll = 0.0f;
+	}
 
-	// Interpolate camera roll
-	CurrentWallRunCameraRoll = FMath::FInterpTo(
-		CurrentWallRunCameraRoll,
+	// Interpolate base camera roll (without headbob)
+	WallRunBaseCameraRoll = FMath::FInterpTo(
+		WallRunBaseCameraRoll,
 		TargetCameraRoll,
 		DeltaTime,
 		MovementSettings->WallRunCameraTiltSpeed
 	);
+
+	// Final camera roll = base + headbob
+	CurrentWallRunCameraRoll = WallRunBaseCameraRoll + WallRunHeadbobRoll;
 
 	// Interpolate mesh roll - EXACT same as camera
 	CurrentWallRunMeshRoll = FMath::FInterpTo(

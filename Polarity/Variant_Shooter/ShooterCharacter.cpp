@@ -21,6 +21,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
 #include "Camera/CameraComponent.h"
+#include "IKRetargeter.h"
+#include "Animation/AnimInstance.h"
 #include "Camera/PlayerCameraManager.h"
 #include "TimerManager.h"
 #include "ShooterGameMode.h"
@@ -43,6 +45,24 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the charge animation component
 	ChargeAnimationComponent = CreateDefaultSubobject<UChargeAnimationComponent>(TEXT("Charge Animation Component"));
+
+	// ==================== UE4 Mesh System ====================
+
+	// Create UE4 First Person Mesh (visible, copies pose from FirstPersonMesh)
+	UE4_FPMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("UE4_FPMesh"));
+	UE4_FPMesh->SetupAttachment(GetMesh());
+	UE4_FPMesh->SetOnlyOwnerSee(true);
+	UE4_FPMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+	UE4_FPMesh->SetCollisionProfileName(FName("NoCollision"));
+	UE4_FPMesh->SetVisibility(false); // Hidden by default, enabled in BeginPlay if bUseUE4Meshes
+
+	// Create UE4 Melee Mesh (visible, copies pose from MeleeMesh)
+	UE4_MeleeMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("UE4_MeleeMesh"));
+	UE4_MeleeMesh->SetupAttachment(GetMesh());
+	UE4_MeleeMesh->SetOnlyOwnerSee(true);
+	UE4_MeleeMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+	UE4_MeleeMesh->SetCollisionProfileName(FName("NoCollision"));
+	UE4_MeleeMesh->SetVisibility(false); // Hidden by default, controlled by MeleeAttackComponent
 
 	// configure movement
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 600.0f, 0.0f);
@@ -86,6 +106,36 @@ void AShooterCharacter::BeginPlay()
 	if (MeleeAttackComponent)
 	{
 		MeleeAttackComponent->OnMeleeHit.AddDynamic(this, &AShooterCharacter::OnMeleeHit);
+	}
+
+	// ==================== Setup UE4 Mesh System ====================
+	if (bUseUE4Meshes)
+	{
+		// Hide original meshes (they become leader meshes)
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			FPMesh->SetVisibility(false);
+		}
+		if (USkeletalMeshComponent* MeleeMesh = GetMeleeMesh())
+		{
+			MeleeMesh->SetVisibility(false);
+		}
+
+		// Show and configure UE4_FPMesh (follower)
+		if (UE4_FPMesh)
+		{
+			UE4_FPMesh->SetVisibility(true);
+			// Animation Blueprint will be set in editor with Copy Pose from Mesh node
+			// that references GetFirstPersonMesh() as source and uses FPMeshRetargeter
+		}
+
+		// UE4_MeleeMesh visibility is controlled by MeleeAttackComponent
+		// We need to update MeleeAttackComponent to use UE4_MeleeMesh instead of MeleeMesh
+		if (UE4_MeleeMesh && MeleeAttackComponent)
+		{
+			// Override MeleeAttackComponent's mesh reference to use UE4_MeleeMesh
+			MeleeAttackComponent->MeleeMesh = UE4_MeleeMesh;
+		}
 	}
 
 	// Configure EMF components if they exist (created in Blueprint)
@@ -605,6 +655,19 @@ void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
 	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
 	{
 		FPMesh->SetOverlayMaterial(TargetMaterial);
+	}
+
+	// Apply overlay material to UE4 meshes if using them
+	if (bUseUE4Meshes)
+	{
+		if (UE4_FPMesh)
+		{
+			UE4_FPMesh->SetOverlayMaterial(TargetMaterial);
+		}
+		if (UE4_MeleeMesh)
+		{
+			UE4_MeleeMesh->SetOverlayMaterial(TargetMaterial);
+		}
 	}
 }
 

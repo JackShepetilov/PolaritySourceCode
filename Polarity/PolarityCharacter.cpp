@@ -348,9 +348,7 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 		return;
 	}
 
-	// ==================== Crouch/Slide Camera Offset ====================
-
-	FVector TargetCrouchOffset = FVector::ZeroVector;
+	// ==================== Movement State Detection ====================
 
 	bool bIsSliding = false;
 	bool bIsCrouching = false;
@@ -363,54 +361,65 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 		bIsWallrunning = ApexMovement->IsWallRunning();
 	}
 
-	if (MovementSettings->bEnableFirstPersonOffset && ApexMovement)
-	{
-		if (bIsSliding)
-		{
-			TargetCrouchOffset = MovementSettings->SlideCameraOffset;
-		}
-		else if (bIsCrouching)
-		{
-			TargetCrouchOffset = MovementSettings->CrouchCameraOffset;
-		}
-	}
+	// ==================== Crouch/Slide Tilt & Offset (Single Progress) ====================
+	// Use ONE interpolated progress for both offset and rotation.
+	// This ensures straight-line movement from start to end position.
 
-	// Interpolate crouch offset
-	CurrentCrouchOffset = FMath::VInterpTo(
-		CurrentCrouchOffset,
-		TargetCrouchOffset,
-		DeltaTime,
-		MovementSettings->CameraZOffsetInterpSpeed
-	);
+	float TargetProgress = 0.0f;
 
-	// ==================== Mesh Tilt (Crouch/Slide/Wallrun) ====================
-
-	FRotator TargetMeshTilt = FRotator::ZeroRotator;
-
-	// Crouch/Slide/Wallrun tilt - applied to weapon mesh
 	if (MovementSettings->bEnableWeaponTilt && ApexMovement)
 	{
 		if (bIsSliding)
 		{
-			TargetMeshTilt.Roll = MovementSettings->SlideWeaponTiltRoll;
-			TargetMeshTilt.Pitch = MovementSettings->SlideWeaponTiltPitch;
+			// Save target values when entering slide
+			SavedCrouchSlideTilt.Roll = MovementSettings->SlideWeaponTiltRoll;
+			SavedCrouchSlideTilt.Pitch = MovementSettings->SlideWeaponTiltPitch;
+			SavedCrouchSlideOffset = MovementSettings->SlideCameraOffset;
+			TargetProgress = 1.0f;
 		}
 		else if (bIsCrouching)
 		{
-			TargetMeshTilt.Roll = MovementSettings->CrouchWeaponTiltRoll;
-			TargetMeshTilt.Pitch = MovementSettings->CrouchWeaponTiltPitch;
+			// Save target values when entering crouch
+			SavedCrouchSlideTilt.Roll = MovementSettings->CrouchWeaponTiltRoll;
+			SavedCrouchSlideTilt.Pitch = MovementSettings->CrouchWeaponTiltPitch;
+			SavedCrouchSlideOffset = MovementSettings->CrouchCameraOffset;
+			TargetProgress = 1.0f;
 		}
-		else if (bIsWallrunning)
-		{
-			// Use the pre-calculated mesh tilt from ApexMovement (same logic as camera)
-			TargetMeshTilt.Roll = ApexMovement->CurrentWallRunMeshRoll;
-			TargetMeshTilt.Pitch = ApexMovement->CurrentWallRunMeshPitch;
+		// When not crouching/sliding, TargetProgress = 0 but we keep saved values for exit transition
+	}
 
-			UE_LOG(LogTemplateCharacter, Warning, TEXT("WallRun Mesh: Side=%s, MeshPitch=%.2f, CameraRoll=%.2f"),
-				ApexMovement->WallRunSide == EWallSide::Left ? TEXT("Left") : TEXT("Right"),
-				ApexMovement->CurrentWallRunMeshPitch,
-				ApexMovement->CurrentWallRunCameraRoll);
-		}
+	// Interpolate single progress value
+	CrouchSlideProgress = FMath::FInterpTo(
+		CrouchSlideProgress,
+		TargetProgress,
+		DeltaTime,
+		MovementSettings->WeaponTiltInterpSpeed
+	);
+
+	// Apply progress to saved targets - this creates straight-line motion in both directions
+	CurrentCrouchOffset = SavedCrouchSlideOffset * CrouchSlideProgress;
+	FRotator CrouchSlideTilt = SavedCrouchSlideTilt * CrouchSlideProgress;
+
+	// Clear saved values when fully returned to standing
+	if (CrouchSlideProgress < KINDA_SMALL_NUMBER)
+	{
+		SavedCrouchSlideOffset = FVector::ZeroVector;
+		SavedCrouchSlideTilt = FRotator::ZeroRotator;
+	}
+
+	// ==================== Wallrun Tilt ====================
+
+	FRotator WallrunMeshTilt = FRotator::ZeroRotator;
+	if (bIsWallrunning && ApexMovement && MovementSettings->bEnableWeaponTilt)
+	{
+		// Use the pre-calculated mesh tilt from ApexMovement
+		WallrunMeshTilt.Roll = ApexMovement->CurrentWallRunMeshRoll;
+		WallrunMeshTilt.Pitch = ApexMovement->CurrentWallRunMeshPitch;
+
+		UE_LOG(LogTemplateCharacter, Warning, TEXT("WallRun Mesh: Side=%s, MeshPitch=%.2f, CameraRoll=%.2f"),
+			ApexMovement->WallRunSide == EWallSide::Left ? TEXT("Left") : TEXT("Right"),
+			ApexMovement->CurrentWallRunMeshPitch,
+			ApexMovement->CurrentWallRunCameraRoll);
 	}
 
 	// Wallrun camera offset - use the pre-calculated offset from ApexMovement
@@ -420,23 +429,17 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 	}
 	else
 	{
-		// Reset offset when not wallrunning
 		TargetWallrunOffset = FVector::ZeroVector;
 	}
 
-	// Shake roll from camera shake component - applied to weapon mesh
+	// Combine all tilts: crouch/slide + wallrun + shake
+	CurrentWeaponTilt = CrouchSlideTilt + WallrunMeshTilt;
+
+	// Add shake roll
 	if (CameraShakeComponent)
 	{
-		TargetMeshTilt.Roll += CameraShakeComponent->GetCameraRotationOffset().Roll;
+		CurrentWeaponTilt.Roll += CameraShakeComponent->GetCameraRotationOffset().Roll;
 	}
-
-	// Interpolate mesh tilt
-	CurrentWeaponTilt = FMath::RInterpTo(
-		CurrentWeaponTilt,
-		TargetMeshTilt,
-		DeltaTime,
-		MovementSettings->WeaponTiltInterpSpeed
-	);
 
 	// ==================== Camera Roll (Wallrun) ====================
 

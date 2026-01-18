@@ -214,11 +214,43 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun", meta = (ToolTip = "How long gravity stays disabled"))
 	float WallRunMaxDuration = 1.5f;
 
-	/** [NEW] Deceleration during wallrun - like floor slide */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun", meta = (ToolTip = "How fast you slow down on wall"))
+	/** [NEW] Deceleration during wallrun - applied after peak time */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun", meta = (ToolTip = "How fast you slow down on wall after peak"))
 	float WallRunDeceleration = 300.0f;
 
-	// ==================== Wallrun Speed Boost ====================
+	// ==================== Wallrun Speed Curve (Titanfall 2 style) ====================
+
+	/** Acceleration during initial wallrun phase (before peak) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|SpeedCurve", meta = (ToolTip = "How fast speed builds up at start"))
+	float WallRunAcceleration = 600.0f;
+
+	/** Time to reach peak speed (seconds) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|SpeedCurve", meta = (ToolTip = "How long until max speed is reached"))
+	float WallRunPeakTime = 0.4f;
+
+	/** Peak speed multiplier (1.0 = entry speed, 1.5 = 50% faster than entry) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|SpeedCurve", meta = (ToolTip = "Max speed = entry speed * this"))
+	float WallRunPeakSpeedMultiplier = 1.4f;
+
+	/** Speed boost when jumping off wall */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|SpeedCurve", meta = (ToolTip = "Extra speed added when wall jumping"))
+	float WallRunExitBoost = 150.0f;
+
+	/** Minimum input dot product to wall direction to maintain wallrun (0.3 = ~70 degrees) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|SpeedCurve", meta = (ToolTip = "Must hold input roughly parallel to wall"))
+	float WallRunInputThreshold = 0.3f;
+
+	// ==================== Wallrun Headbob ====================
+
+	/** Maximum camera roll amplitude for wallrun headbob (degrees) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|Headbob", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float WallRunHeadbobRollAmount = 3.0f;
+
+	/** Distance traveled per full headbob cycle (cm) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|Headbob")
+	float WallRunHeadbobStepLength = 150.0f;
+
+	// ==================== Wallrun Speed Boost (Entry) ====================
 
 	/** Minimum speed boost when entering wallrun at high speed (near BoostCap) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Wallrun|Boost", meta = (ToolTip = "Boost given at speeds near BoostCap"))

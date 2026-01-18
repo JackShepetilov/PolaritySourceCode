@@ -19,6 +19,7 @@ class UChargeAnimationComponent;
 class UAudioComponent;
 class UCurveFloat;
 class UMaterialInterface;
+class UIKRetargeter;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamagedDelegate, float, LifePercent);
@@ -57,6 +58,16 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	/** Charge animation component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UChargeAnimationComponent* ChargeAnimationComponent;
+
+	// ==================== UE4 Mesh System (Copy Pose from Mesh) ====================
+
+	/** UE4 First Person Mesh (visible, copies pose from FirstPersonMesh via IK Retargeter) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components|UE4 Meshes", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USkeletalMeshComponent> UE4_FPMesh;
+
+	/** UE4 Melee Mesh (visible, copies pose from MeleeMesh via IK Retargeter) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components|UE4 Meshes", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USkeletalMeshComponent> UE4_MeleeMesh;
 
 protected:
 
@@ -157,6 +168,20 @@ protected:
 	float RespawnTime = 5.0f;
 
 	FTimerHandle RespawnTimer;
+
+	// ==================== UE4 Mesh System Settings ====================
+
+	/** Enable UE4 mesh system (uses Copy Pose from Mesh with IK Retargeting) */
+	UPROPERTY(EditDefaultsOnly, Category = "UE4 Meshes")
+	bool bUseUE4Meshes = false;
+
+	/** IK Retargeter for First Person Mesh (UE5 Mannequin -> UE4 Skeleton) */
+	UPROPERTY(EditDefaultsOnly, Category = "UE4 Meshes", meta = (EditCondition = "bUseUE4Meshes"))
+	TObjectPtr<UIKRetargeter> FPMeshRetargeter;
+
+	/** IK Retargeter for Melee Mesh (UE5 Mannequin -> UE4 Skeleton) */
+	UPROPERTY(EditDefaultsOnly, Category = "UE4 Meshes", meta = (EditCondition = "bUseUE4Meshes"))
+	TObjectPtr<UIKRetargeter> MeleeMeshRetargeter;
 
 	// ==================== UI Speed & Polarity ====================
 

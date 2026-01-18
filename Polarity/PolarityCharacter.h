@@ -185,6 +185,15 @@ protected:
 	/** Current weapon tilt rotation */
 	FRotator CurrentWeaponTilt = FRotator::ZeroRotator;
 
+	/** Crouch/slide transition progress (0.0 = standing, 1.0 = fully crouched/sliding) */
+	float CrouchSlideProgress = 0.0f;
+
+	/** Saved target offset for crouch/slide (used during exit transition) */
+	FVector SavedCrouchSlideOffset = FVector::ZeroVector;
+
+	/** Saved target tilt for crouch/slide (used during exit transition) */
+	FRotator SavedCrouchSlideTilt = FRotator::ZeroRotator;
+
 	// ==================== Weapon Run Sway State ====================
 
 	/** Accumulated distance for run sway phase calculation */

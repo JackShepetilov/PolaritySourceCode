@@ -360,12 +360,17 @@ protected:
 	float TargetCapsuleHalfHeight = 0.0f;
 	bool bWantsToCrouchSmooth = false;  // Our internal crouch flag
 
-	// WallRun state (now slide-style)
-	float WallRunTimeRemaining = 0.0f;
+	// WallRun state (Titanfall 2 style - acceleration -> peak -> deceleration)
+	float WallRunElapsedTime = 0.0f;       // Time since wallrun started
 	float WallRunSameWallCooldown = 0.0f;
 	FVector WallRunNormal;
 	FVector WallRunDirection;
-	FVector WallRunEntryVelocity;  // Entry velocity for momentum preservation
+	float WallRunEntrySpeed = 0.0f;        // Speed when entering wallrun (for peak calculation)
+	float WallRunPeakSpeed = 0.0f;         // Calculated peak speed
+	float WallRunCurrentSpeed = 0.0f;      // Current speed along wall
+	float WallRunDistanceTraveled = 0.0f;  // Accumulated distance for headbob
+	float WallRunHeadbobRoll = 0.0f;       // Current headbob roll offset
+	float WallRunBaseCameraRoll = 0.0f;    // Base camera roll (without headbob, for interpolation)
 	FRotator CurrentWallRunCameraTilt = FRotator::ZeroRotator;  // Internal, use GetWallRunCameraTilt()
 	TWeakObjectPtr<AActor> LastWallRunActor;
 

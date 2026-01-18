@@ -3,7 +3,10 @@
     "allow": [
       "Bash(git push:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "WebSearch",
+      "WebFetch(domain:titanfall.fandom.com)",
+      "WebFetch(domain:steamcommunity.com)"
     ]
   }
 }
