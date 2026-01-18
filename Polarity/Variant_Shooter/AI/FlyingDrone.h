@@ -145,8 +145,8 @@ protected:
 	/** Override aim calculation - drones aim from their center */
 	virtual FVector GetWeaponTargetLocation() override;
 
-	/** Override knockback for flying movement */
-	virtual void ApplyKnockback(const FVector& KnockbackVelocity, float StunDuration = 0.3f) override;
+	/** Override knockback for flying movement - uses distance-based interpolation */
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration) override;
 
 public:
 

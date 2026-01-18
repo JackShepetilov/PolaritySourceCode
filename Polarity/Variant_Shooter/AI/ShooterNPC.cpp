@@ -91,6 +91,12 @@ void AShooterNPC::Tick(float DeltaTime)
 
 	Super::Tick(DeltaTime);
 
+	// Update knockback interpolation if active
+	if (bIsKnockbackInterpolating)
+	{
+		UpdateKnockbackInterpolation(DeltaTime);
+	}
+
 	// Update Charge/Polarity - get charge from EMFVelocityModifier
 	float ChargeValue = 0.0f;
 	if (EMFVelocityModifier)
@@ -619,10 +625,27 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 	}
 }
 
-void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDuration)
+void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration)
 {
+	// Apply NPC's knockback distance multiplier
+	float FinalDistance = Distance * KnockbackDistanceMultiplier;
+
+	// Don't apply knockback if distance is negligible
+	if (FinalDistance < 1.0f)
+	{
+		return;
+	}
+
 	// Mark as in knockback state
 	bIsInKnockback = true;
+	bIsKnockbackInterpolating = true;
+
+	// Store knockback parameters
+	KnockbackStartPosition = GetActorLocation();
+	KnockbackDirection = InKnockbackDirection.GetSafeNormal();
+	KnockbackTargetPosition = KnockbackStartPosition + KnockbackDirection * FinalDistance;
+	KnockbackTotalDuration = Duration;
+	KnockbackElapsedTime = 0.0f;
 
 	// Stop AI pathfinding completely
 	if (AController* MyController = GetController())
@@ -645,7 +668,7 @@ void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDur
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Reduce ground friction temporarily to make NPC slide smoothly
+	// Disable CharacterMovementComponent during interpolation
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
 		// Save original friction if not already saved
@@ -654,40 +677,240 @@ void AShooterNPC::ApplyKnockback(const FVector& KnockbackVelocity, float StunDur
 			CachedGroundFriction = CharMovement->GroundFriction;
 		}
 
-		// Set low friction for sliding (like ice)
+		// Set low friction for any residual sliding
 		CharMovement->GroundFriction = KnockbackGroundFriction;
 
-		// Stop any current acceleration from AI
+		// Stop any current movement
 		CharMovement->StopActiveMovement();
+		CharMovement->Velocity = FVector::ZeroVector;
 	}
 
-	// Use LaunchCharacter AFTER stopping AI movement
-	// It sets PendingLaunchVelocity and switches to Falling mode
-	// bXYOverride=true replaces XY velocity, bZOverride=true replaces Z velocity
-	LaunchCharacter(KnockbackVelocity, true, true);
-
-	// Clear any existing stun timer
+	// Clear any existing timers
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 
-	// Schedule stun end
+	// Schedule stun end (slightly longer than knockback duration to ensure interpolation completes)
 	GetWorld()->GetTimerManager().SetTimer(
 		KnockbackStunTimer,
 		this,
 		&AShooterNPC::EndKnockbackStun,
-		StunDuration,
+		Duration + 0.1f,
 		false
 	);
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("Distance Knockback: Dir=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
+				KnockbackDirection.X, KnockbackDirection.Y, KnockbackDirection.Z,
+				FinalDistance, Duration));
+	}
+#endif
+}
+
+void AShooterNPC::ApplyKnockbackVelocity(const FVector& KnockbackVelocity, float StunDuration)
+{
+	// Convert velocity-based knockback to distance-based
+	// Estimate distance based on velocity magnitude and stun duration
+	float Speed = KnockbackVelocity.Size();
+	FVector Direction = KnockbackVelocity.GetSafeNormal();
+
+	// Estimate distance as speed * duration (simplified)
+	float EstimatedDistance = Speed * StunDuration;
+
+	// Use the new distance-based system
+	ApplyKnockback(Direction, EstimatedDistance, StunDuration);
+}
+
+void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
+{
+	if (!bIsKnockbackInterpolating || KnockbackTotalDuration <= 0.0f)
+	{
+		return;
+	}
+
+	// Update elapsed time
+	KnockbackElapsedTime += DeltaTime;
+
+	// Calculate interpolation alpha with easing (ease out for smooth deceleration)
+	float Alpha = FMath::Clamp(KnockbackElapsedTime / KnockbackTotalDuration, 0.0f, 1.0f);
+	float EasedAlpha = FMath::InterpEaseOut(0.0f, 1.0f, Alpha, 2.0f);
+
+	// Calculate next position
+	FVector CurrentPos = GetActorLocation();
+	FVector NextPos = FMath::Lerp(KnockbackStartPosition, KnockbackTargetPosition, EasedAlpha);
+
+	// Check for wall collision before moving
+	FHitResult WallHit;
+	if (CheckKnockbackWallCollision(CurrentPos, NextPos, WallHit))
+	{
+		// Wall hit - trigger damage and stop knockback
+		HandleKnockbackWallHit(WallHit);
+		return;
+	}
+
+	// Move the character to the interpolated position
+	SetActorLocation(NextPos, true);
+
+	// Update velocity for visual purposes (affects animations, etc.)
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		// Calculate apparent velocity for this frame
+		FVector FrameVelocity = (NextPos - CurrentPos) / DeltaTime;
+		CharMovement->Velocity = FrameVelocity;
+	}
+
+	// Check if knockback is complete
+	if (Alpha >= 1.0f)
+	{
+		bIsKnockbackInterpolating = false;
+
+		// Stop velocity
+		if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+		{
+			CharMovement->Velocity = FVector::ZeroVector;
+		}
+	}
+}
+
+bool AShooterNPC::CheckKnockbackWallCollision(const FVector& CurrentPos, const FVector& NextPos, FHitResult& OutHit)
+{
+	if (!GetWorld())
+	{
+		return false;
+	}
+
+	// Get capsule dimensions for sweep
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!Capsule)
+	{
+		return false;
+	}
+
+	float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+	float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+
+	// Set up collision query
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.bTraceComplex = false;
+
+	// Sweep from current to next position
+	bool bHit = GetWorld()->SweepSingleByChannel(
+		OutHit,
+		CurrentPos,
+		NextPos,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight),
+		QueryParams
+	);
+
+	if (bHit)
+	{
+		// Check if this is a wall (not floor - normal pointing mostly horizontal)
+		// Walls have normals with small Z component, floors have large positive Z
+		float NormalZ = FMath::Abs(OutHit.ImpactNormal.Z);
+
+		// Consider it a wall if Z component is less than 0.7 (about 45 degrees)
+		// This allows wall slams on walls and steep slopes, but not on flat ground
+		return NormalZ < 0.7f;
+	}
+
+	return false;
+}
+
+void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
+{
+	// Stop interpolation
+	bIsKnockbackInterpolating = false;
+
+	// Calculate impact velocity based on remaining distance and time
+	float RemainingDistance = FVector::Dist(GetActorLocation(), KnockbackTargetPosition);
+	float RemainingTime = KnockbackTotalDuration - KnockbackElapsedTime;
+	float ImpactSpeed = (RemainingTime > 0.0f) ? RemainingDistance / RemainingTime : 0.0f;
+
+	// Calculate perpendicular velocity component (how hard we hit the wall)
+	float PerpendicularVelocity = ImpactSpeed * FMath::Abs(FVector::DotProduct(KnockbackDirection, -WallHit.ImpactNormal));
+
+	// Move to wall position (slightly offset to avoid penetration)
+	FVector WallPosition = WallHit.Location;
+	SetActorLocation(WallPosition, false);
+
+	// Stop all velocity
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->Velocity = FVector::ZeroVector;
+	}
+
+	// Check if impact is strong enough for wall slam damage
+	if (PerpendicularVelocity >= WallSlamVelocityThreshold)
+	{
+		// Calculate damage based on perpendicular velocity above threshold
+		float ExcessVelocity = PerpendicularVelocity - WallSlamVelocityThreshold;
+		float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
+
+		if (WallSlamDamage > 0.0f)
+		{
+			// Apply damage to self
+			FDamageEvent DamageEvent;
+			TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
+
+			// Play sound
+			if (WallSlamSound)
+			{
+				UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, WallHit.ImpactPoint);
+			}
+
+			// Spawn VFX
+			if (WallSlamVFX)
+			{
+				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+					GetWorld(),
+					WallSlamVFX,
+					WallHit.ImpactPoint,
+					WallHit.ImpactNormal.Rotation(),
+					FVector(WallSlamVFXScale),
+					true,  // bAutoDestroy
+					true,  // bAutoActivate
+					ENCPoolMethod::None
+				);
+			}
+
+#if WITH_EDITOR
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
+					FString::Printf(TEXT("WALL SLAM during knockback! ImpactSpeed=%.0f, Damage=%.1f"),
+						PerpendicularVelocity, WallSlamDamage));
+			}
+#endif
+		}
+	}
+	else
+	{
+#if WITH_EDITOR
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+				FString::Printf(TEXT("Hit wall during knockback (no damage): ImpactSpeed=%.0f, Threshold=%.0f"),
+					PerpendicularVelocity, WallSlamVelocityThreshold));
+		}
+#endif
+	}
 }
 
 void AShooterNPC::EndKnockbackStun()
 {
 	// Clear knockback state
 	bIsInKnockback = false;
+	bIsKnockbackInterpolating = false;
 
 	// Restore original ground friction after knockback slide
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
 		CharMovement->GroundFriction = CachedGroundFriction;
+		CharMovement->Velocity = FVector::ZeroVector;
 	}
 
 	// Re-enable EMF forces
@@ -696,7 +919,6 @@ void AShooterNPC::EndKnockbackStun()
 		EMFVelocityModifier->SetEnabled(true);
 	}
 
-	// LaunchCharacter handles movement mode automatically
 	// AI will resume pathfinding on next StateTree tick
 }
 

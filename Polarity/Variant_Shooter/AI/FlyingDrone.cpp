@@ -641,31 +641,66 @@ void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 	SetActorRotation(NewRotation);
 }
 
-void AFlyingDrone::ApplyKnockback(const FVector& KnockbackVelocity, float StunDuration)
+void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration)
 {
+	// Apply NPC's knockback distance multiplier (inherited from ShooterNPC)
+	float FinalDistance = Distance * KnockbackDistanceMultiplier;
+
+	// Don't apply knockback if distance is negligible
+	if (FinalDistance < 1.0f)
+	{
+		return;
+	}
+
+	// Mark as in knockback state
+	bIsInKnockback = true;
+	bIsKnockbackInterpolating = true;
+
+	// Store knockback parameters (using inherited members from ShooterNPC)
+	KnockbackStartPosition = GetActorLocation();
+	KnockbackDirection = InKnockbackDirection.GetSafeNormal();
+	KnockbackTargetPosition = KnockbackStartPosition + KnockbackDirection * FinalDistance;
+	KnockbackTotalDuration = Duration;
+	KnockbackElapsedTime = 0.0f;
+
 	// Stop flying movement
 	if (FlyingMovement)
 	{
 		FlyingMovement->StopMovement();
 	}
 
-	// For flying enemies, directly set velocity - they're already in Flying mode
-	// Flying mode doesn't have GroundFriction issues like Walking mode
+	// Disable EMF forces during knockback for consistent physics
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	// Stop any velocity from CharacterMovementComponent
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
-		// Keep in Flying mode, just add velocity
-		Movement->Velocity = KnockbackVelocity;
+		Movement->StopActiveMovement();
+		Movement->Velocity = FVector::ZeroVector;
 	}
 
 	// Clear any existing stun timer
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 
-	// Schedule stun end (use inherited protected method via derived class pointer)
+	// Schedule stun end (slightly longer than knockback duration)
 	GetWorld()->GetTimerManager().SetTimer(
 		KnockbackStunTimer,
 		this,
 		&AFlyingDrone::EndKnockbackStun,
-		StunDuration,
+		Duration + 0.1f,
 		false
 	);
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("Drone Knockback: Dir=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
+				KnockbackDirection.X, KnockbackDirection.Y, KnockbackDirection.Z,
+				FinalDistance, Duration));
+	}
+#endif
 }

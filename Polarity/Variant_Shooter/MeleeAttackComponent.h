@@ -126,6 +126,24 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Momentum Damage", meta = (ClampMin = "0"))
 	float MomentumImpulseMultiplier = 0.002f;
 
+	// ==================== Distance-Based Knockback ====================
+
+	/** Base knockback distance in cm (applied regardless of player speed) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distance Knockback", meta = (ClampMin = "0"))
+	float BaseKnockbackDistance = 200.0f;
+
+	/** Additional knockback distance per unit of player velocity (cm per cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distance Knockback", meta = (ClampMin = "0"))
+	float KnockbackDistancePerVelocity = 0.15f;
+
+	/** Base duration for knockback interpolation in seconds (scales with distance) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distance Knockback", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float KnockbackBaseDuration = 0.3f;
+
+	/** Duration multiplier per 100cm of knockback distance */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distance Knockback", meta = (ClampMin = "0"))
+	float KnockbackDurationPerDistance = 0.001f;
+
 	// ==================== Titanfall 2 Momentum System ====================
 
 	/** Enable Titanfall 2 style momentum preservation - player keeps velocity during melee */

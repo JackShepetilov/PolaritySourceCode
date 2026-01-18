@@ -1196,51 +1196,70 @@ void UMeleeAttackComponent::StopMagnetism()
 
 void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVector& ImpulseDirection, float ImpulseStrength)
 {
-	if (!HitActor || ImpulseStrength <= 0.0f)
+	if (!HitActor || !OwnerCharacter)
 	{
 		return;
 	}
 
-	// Check if target is airborne
-	bool bIsAirborne = false;
-	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	// ==================== Distance-Based Knockback System ====================
+	// Calculate knockback using center-to-center direction from player to target
+	// This is more intuitive than camera direction for knockback physics
+
+	// Get center-to-center direction (horizontal only for consistent behavior)
+	FVector PlayerCenter = OwnerCharacter->GetActorLocation();
+	FVector TargetCenter = HitActor->GetActorLocation();
+	FVector KnockbackDirection = TargetCenter - PlayerCenter;
+	KnockbackDirection.Z = 0.0f; // Horizontal knockback only
+	KnockbackDirection.Normalize();
+
+	// Calculate player speed toward target for distance calculation
+	float PlayerSpeedTowardTarget = 0.0f;
+	if (!OwnerVelocityAtAttackStart.IsNearlyZero())
 	{
-		if (UCharacterMovementComponent* CharMovement = HitCharacter->GetCharacterMovement())
-		{
-			bIsAirborne = CharMovement->IsFalling();
-		}
+		PlayerSpeedTowardTarget = FMath::Max(0.0f, FVector::DotProduct(OwnerVelocityAtAttackStart, KnockbackDirection));
 	}
 
-	// Calculate knockback velocity based on whether target is airborne or grounded
-	FVector KnockbackVelocity;
+	// Calculate total knockback distance
+	// Distance = BaseDistance + (PlayerSpeed * DistancePerVelocity)
+	float KnockbackDistance = Settings.BaseKnockbackDistance + (PlayerSpeedTowardTarget * Settings.KnockbackDistancePerVelocity);
 
-	if (bIsAirborne)
-	{
-		// Target is in the air - apply normal 3D knockback
-		KnockbackVelocity = ImpulseDirection * ImpulseStrength;
-	}
-	else
-	{
-		// Target is grounded - apply purely horizontal knockback
-		// ApplyKnockback in ShooterNPC handles friction reduction for smooth sliding
-		FVector HorizontalDirection = ImpulseDirection;
-		HorizontalDirection.Z = 0.0f;
-		HorizontalDirection.Normalize();
+	// Calculate duration proportional to distance
+	float KnockbackDuration = Settings.KnockbackBaseDuration + (KnockbackDistance * Settings.KnockbackDurationPerDistance);
 
-		// Purely horizontal velocity - friction reduction makes them slide
-		KnockbackVelocity = HorizontalDirection * ImpulseStrength;
-	}
-
-	// Try ShooterNPC first (has ApplyKnockback with AI stun)
+	// Get NPC multiplier if applicable
+	float NPCMultiplier = 1.0f;
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
 	{
-		NPC->ApplyKnockback(KnockbackVelocity, 0.4f);
+		NPCMultiplier = NPC->GetKnockbackDistanceMultiplier();
+	}
+
+	// Apply NPC multiplier to distance (not duration - heavier enemies move same speed, just less distance)
+	KnockbackDistance *= NPCMultiplier;
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green,
+			FString::Printf(TEXT("Melee Knockback: PlayerSpeed=%.0f, Distance=%.0f, Duration=%.2f, NPCMult=%.2f"),
+				PlayerSpeedTowardTarget, KnockbackDistance, KnockbackDuration, NPCMultiplier));
+	}
+#endif
+
+	// Try ShooterNPC first (has distance-based ApplyKnockback)
+	if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
+	{
+		// Note: NPC multiplier already applied to distance, so we pass it directly
+		// The NPC will apply its own multiplier again, so we need to divide it out
+		float DistanceForNPC = KnockbackDistance / NPCMultiplier;
+		NPC->ApplyKnockback(KnockbackDirection, DistanceForNPC, KnockbackDuration);
 		return;
 	}
 
-	// Try generic character
+	// For generic characters, convert to velocity-based launch
 	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 	{
+		// Convert distance/duration to velocity
+		FVector KnockbackVelocity = KnockbackDirection * (KnockbackDistance / KnockbackDuration);
 		HitCharacter->LaunchCharacter(KnockbackVelocity, true, true);
 		return;
 	}
@@ -1250,7 +1269,10 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	{
 		if (RootPrimitive->IsSimulatingPhysics())
 		{
-			RootPrimitive->AddImpulse(ImpulseDirection * ImpulseStrength);
+			// Convert to impulse (mass * velocity)
+			float Mass = RootPrimitive->GetMass();
+			FVector Impulse = KnockbackDirection * (KnockbackDistance / KnockbackDuration) * Mass;
+			RootPrimitive->AddImpulse(Impulse);
 		}
 	}
 }

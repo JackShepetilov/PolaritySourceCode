@@ -193,6 +193,11 @@ protected:
 
 	// ==================== Knockback ====================
 
+	/** Multiplier for knockback distance (1.0 = normal, 0.5 = half distance, 2.0 = double distance).
+	 *  Use this to create "heavier" enemies that resist knockback without modifying mass. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float KnockbackDistanceMultiplier = 1.0f;
+
 	/** Ground friction during knockback slide (lower = more slippery) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback", meta = (ClampMin = "0.0", ClampMax = "8.0"))
 	float KnockbackGroundFriction = 0.2f;
@@ -204,8 +209,29 @@ protected:
 	/** Timer for knockback stun recovery */
 	FTimerHandle KnockbackStunTimer;
 
+	/** Timer for knockback position interpolation */
+	FTimerHandle KnockbackInterpTimer;
+
 	/** True when NPC is in knockback state */
 	bool bIsInKnockback = false;
+
+	/** True when NPC is being interpolated to knockback target position */
+	bool bIsKnockbackInterpolating = false;
+
+	/** Start position for knockback interpolation */
+	FVector KnockbackStartPosition = FVector::ZeroVector;
+
+	/** Target position for knockback interpolation */
+	FVector KnockbackTargetPosition = FVector::ZeroVector;
+
+	/** Direction of current knockback (for wall collision) */
+	FVector KnockbackDirection = FVector::ZeroVector;
+
+	/** Total duration of current knockback interpolation */
+	float KnockbackTotalDuration = 0.0f;
+
+	/** Elapsed time in current knockback interpolation */
+	float KnockbackElapsedTime = 0.0f;
 
 	/** Cached ground friction for restore after knockback */
 	float CachedGroundFriction = 8.0f;
@@ -375,9 +401,20 @@ protected:
 	bool bExternalPermissionGranted = false;
 
 public:
-	/** Apply knockback impulse with temporary AI stun */
+	/** Apply distance-based knockback with smooth interpolation to target position
+	 *  @param KnockbackDirection Direction to knock the NPC (normalized)
+	 *  @param Distance Total distance to travel in cm
+	 *  @param Duration Duration of the knockback interpolation in seconds
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	virtual void ApplyKnockback(const FVector& KnockbackVelocity, float StunDuration = 0.3f);
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration);
+
+	/** Legacy knockback using velocity (converts to distance-based internally)
+	 *  @param KnockbackVelocity Velocity vector for knockback
+	 *  @param StunDuration Duration of AI stun
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	virtual void ApplyKnockbackVelocity(const FVector& KnockbackVelocity, float StunDuration = 0.3f);
 
 	/** Returns true if this NPC is currently in knockback state */
 	UFUNCTION(BlueprintPure, Category = "Combat")
@@ -391,10 +428,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsCurrentlyShooting() const { return bIsShooting && !bIsDead; }
 
+	/** Get the knockback distance multiplier for this NPC */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	float GetKnockbackDistanceMultiplier() const { return KnockbackDistanceMultiplier; }
+
 protected:
 
 	/** Called when stun ends to restore AI movement */
 	void EndKnockbackStun();
+
+	/** Update knockback position interpolation (called from Tick) */
+	void UpdateKnockbackInterpolation(float DeltaTime);
+
+	/** Check for wall collision during knockback and handle it */
+	bool CheckKnockbackWallCollision(const FVector& CurrentPos, const FVector& NextPos, FHitResult& OutHit);
+
+	/** Handle wall collision during knockback - trigger damage and stop */
+	void HandleKnockbackWallHit(const FHitResult& WallHit);
 
 	/** Called when capsule hits something - checks for wall slam */
 	UFUNCTION()
