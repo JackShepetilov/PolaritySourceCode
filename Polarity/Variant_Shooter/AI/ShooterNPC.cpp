@@ -732,9 +732,23 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 	// Update elapsed time
 	KnockbackElapsedTime += DeltaTime;
 
-	// Calculate interpolation alpha with easing (ease out for smooth deceleration)
+	// Calculate interpolation alpha
 	float Alpha = FMath::Clamp(KnockbackElapsedTime / KnockbackTotalDuration, 0.0f, 1.0f);
-	float EasedAlpha = FMath::InterpEaseOut(0.0f, 1.0f, Alpha, 2.0f);
+
+	// Constant speed for 90% of the path, then ease out for the last 10%
+	float EasedAlpha;
+	if (Alpha < 0.9f)
+	{
+		// Linear interpolation (constant speed) for first 90%
+		EasedAlpha = Alpha;
+	}
+	else
+	{
+		// Ease out for last 10% - remap 0.9-1.0 to smooth deceleration
+		float LastSegmentAlpha = (Alpha - 0.9f) / 0.1f; // 0.0 to 1.0 in the last segment
+		float EasedSegment = FMath::InterpEaseOut(0.0f, 0.1f, LastSegmentAlpha, 2.0f);
+		EasedAlpha = 0.9f + EasedSegment;
+	}
 
 	// Calculate next position
 	FVector CurrentPos = GetActorLocation();
