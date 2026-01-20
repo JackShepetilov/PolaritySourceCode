@@ -1,0 +1,194 @@
+// MeleeStateTreeTasks.cpp
+// Implementation of StateTree Tasks and Conditions for MeleeNPC
+
+#include "MeleeStateTreeTasks.h"
+#include "MeleeNPC.h"
+#include "ShooterNPC.h"
+#include "AIController.h"
+#include "StateTreeExecutionContext.h"
+
+//////////////////////////////////////////////////////////////////
+// TASK: Melee Attack
+//////////////////////////////////////////////////////////////////
+
+EStateTreeRunStatus FStateTreeMeleeAttackTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	// Проверяем что всё валидно
+	if (!Data.Character || !Data.Target)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MeleeAttackTask: Invalid Character or Target"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Проверяем можем ли атаковать
+	if (!Data.Character->CanAttack())
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Cannot attack (cooldown or dead)"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Проверяем дистанцию
+	if (!Data.Character->IsTargetInAttackRange(Data.Target))
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Target not in range"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Начинаем атаку
+	Data.Character->StartMeleeAttack(Data.Target);
+
+	UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Started attack on %s"), *Data.Target->GetName());
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FStateTreeMeleeAttackTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Ждём пока атака закончится
+	if (Data.Character->IsAttacking())
+	{
+		return EStateTreeRunStatus::Running;
+	}
+
+	// Атака закончилась
+	UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Attack finished"));
+	return EStateTreeRunStatus::Succeeded;
+}
+
+void FStateTreeMeleeAttackTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	// Ничего особенного не нужно делать
+	// Атака сама завершится по таймеру/анимации
+}
+
+#if WITH_EDITOR
+FText FStateTreeMeleeAttackTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Execute melee attack on target"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Is In Melee Range
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeIsInMeleeRangeCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character || !Data.Target)
+	{
+		return false;
+	}
+
+	return Data.Character->IsTargetInAttackRange(Data.Target);
+}
+
+#if WITH_EDITOR
+FText FStateTreeIsInMeleeRangeCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Target is within melee attack range"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Can Melee Attack
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeCanMeleeAttackCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return false;
+	}
+
+	return Data.Character->CanAttack();
+}
+
+#if WITH_EDITOR
+FText FStateTreeCanMeleeAttackCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("NPC can perform melee attack (not in cooldown)"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Is NPC Dead
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeIsNPCDeadCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return true; // Если нет персонажа - считаем мёртвым
+	}
+
+	return Data.Character->IsDead();
+}
+
+#if WITH_EDITOR
+FText FStateTreeIsNPCDeadCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("NPC is dead"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Is In Knockback
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeIsInKnockbackCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return false;
+	}
+
+	return Data.Character->IsInKnockback();
+}
+
+#if WITH_EDITOR
+FText FStateTreeIsInKnockbackCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("NPC is in knockback state"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Has Valid Target
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeHasValidTargetCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	bool bIsValid = Data.Target != nullptr && IsValid(Data.Target);
+
+	UE_LOG(LogTemp, Verbose, TEXT("HasValidTarget: Target=%s, IsValid=%s"),
+		Data.Target ? *Data.Target->GetName() : TEXT("NULL"),
+		bIsValid ? TEXT("TRUE") : TEXT("FALSE"));
+
+	return bIsValid;
+}
+
+#if WITH_EDITOR
+FText FStateTreeHasValidTargetCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Has a valid target actor"));
+}
+#endif

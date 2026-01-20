@@ -387,8 +387,11 @@ void AShooterNPC::OnSemiWeaponRefire()
 		}
 
 		// fire the weapon
-		Weapon->StartFiring();
-		OnShotFired();
+		if (Weapon)
+		{
+			Weapon->StartFiring();
+			OnShotFired();
+		}
 	}
 }
 
@@ -519,8 +522,11 @@ void AShooterNPC::TryStartShooting()
 			}
 		}
 
-		Weapon->StartFiring();
-		OnShotFired();
+		if (Weapon)
+		{
+			Weapon->StartFiring();
+			OnShotFired();
+		}
 	}
 	else
 	{
@@ -539,7 +545,10 @@ void AShooterNPC::StopShooting()
 	StopPermissionRetryTimer();
 
 	// Signal the weapon
-	Weapon->StopFiring();
+	if (Weapon)
+	{
+		Weapon->StopFiring();
+	}
 
 	// Release attack permission
 	ReleaseAttackPermission();
@@ -1049,7 +1058,10 @@ void AShooterNPC::OnShotFired()
 	if (CurrentBurstShots >= BurstShotCount)
 	{
 		// Stop shooting and enter cooldown
-		Weapon->StopFiring();
+		if (Weapon)
+		{
+			Weapon->StopFiring();
+		}
 		bInBurstCooldown = true;
 
 		// Release attack permission during cooldown

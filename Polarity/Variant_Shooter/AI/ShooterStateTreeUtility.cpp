@@ -219,44 +219,58 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 		// get the instance data
 		FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
 
+		UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: EnterState - binding delegates"));
+
 		// bind the perception updated delegate on the controller
 		InstanceData.Controller->OnShooterPerceptionUpdated.BindLambda(
 			[WeakContext = Context.MakeWeakExecutionContext()](AActor* SensedActor, const FAIStimulus& Stimulus)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: PerceptionUpdated called for %s"), *SensedActor->GetName());
+
 				// get the instance data inside the lambda
 				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
 
 				if (FInstanceDataType* LambdaInstanceData = StrongContext.GetInstanceDataPtr<FInstanceDataType>())
 				{
+					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking tag '%s' on %s - HasTag: %s"),
+						*LambdaInstanceData->SenseTag.ToString(),
+						*SensedActor->GetName(),
+						SensedActor->ActorHasTag(LambdaInstanceData->SenseTag) ? TEXT("YES") : TEXT("NO"));
+
 					if (SensedActor->ActorHasTag(LambdaInstanceData->SenseTag))
 					{
 						bool bDirectLOS = false;
 
-						// calculate the direction of the stimulus
-						const FVector StimulusDir = (Stimulus.StimulusLocation - LambdaInstanceData->Character->GetActorLocation()).GetSafeNormal();
+						// Run a line trace between the character and the sensed actor
+						// (removed cone check - AIPerception already handles that)
+						FCollisionQueryParams QueryParams;
+						QueryParams.AddIgnoredActor(LambdaInstanceData->Character);
+						QueryParams.AddIgnoredActor(SensedActor);
 
-						// infer the angle from the dot product between the character facing and the stimulus direction
-						const float DirDot = FVector::DotProduct(StimulusDir, LambdaInstanceData->Character->GetActorForwardVector());
-						const float MaxDot = FMath::Cos(FMath::DegreesToRadians(LambdaInstanceData->DirectLineOfSightCone));
+						FHitResult OutHit;
 
-						// is the direction within our perception cone?
-						if (DirDot >= MaxDot)
-						{
-							// run a line trace between the character and the sensed actor
-							FCollisionQueryParams QueryParams;
-							QueryParams.AddIgnoredActor(LambdaInstanceData->Character);
-							QueryParams.AddIgnoredActor(SensedActor);
+						bool bHit = LambdaInstanceData->Character->GetWorld()->LineTraceSingleByChannel(
+							OutHit,
+							LambdaInstanceData->Character->GetActorLocation(),
+							SensedActor->GetActorLocation(),
+							ECC_Visibility,
+							QueryParams
+						);
+						bDirectLOS = !bHit;
 
-							FHitResult OutHit;
-
-							// we have direct line of sight if this trace is unobstructed
-							bDirectLOS = !LambdaInstanceData->Character->GetWorld()->LineTraceSingleByChannel(OutHit, LambdaInstanceData->Character->GetActorLocation(), SensedActor->GetActorLocation(), ECC_Visibility, QueryParams);
-
-						}
+						UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: LineTrace to %s - hit=%s, blocker=%s, DirectLOS=%s"),
+							*SensedActor->GetName(),
+							bHit ? TEXT("YES") : TEXT("NO"),
+							bHit && OutHit.GetActor() ? *OutHit.GetActor()->GetName() : TEXT("none"),
+							bDirectLOS ? TEXT("YES") : TEXT("NO"));
 
 						// check if we have a direct line of sight to the stimulus
+						UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: DirectLOS to %s = %s"), *SensedActor->GetName(), bDirectLOS ? TEXT("YES") : TEXT("NO"));
+
 						if (bDirectLOS)
 						{
+							UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Setting target to %s"), *SensedActor->GetName());
+
 							// set the controller's target
 							LambdaInstanceData->Controller->SetCurrentTarget(SensedActor);
 
