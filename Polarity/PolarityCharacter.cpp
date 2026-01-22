@@ -369,6 +369,10 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 
 	if (MovementSettings->bEnableWeaponTilt && ApexMovement)
 	{
+		// Check if crouch input is held (works in air too)
+		bool bCrouchInputHeld = ApexMovement->bWantsSlideOnLand;
+		bool bIsInAir = !ApexMovement->IsMovingOnGround();
+
 		if (bIsSliding)
 		{
 			// Save target values when entering slide
@@ -377,9 +381,9 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 			SavedCrouchSlideOffset = MovementSettings->SlideCameraOffset;
 			TargetProgress = 1.0f;
 		}
-		else if (bIsCrouching)
+		else if (bIsCrouching || (bCrouchInputHeld))
 		{
-			// Save target values when entering crouch
+			// Save target values when crouching OR when crouch button held in air
 			SavedCrouchSlideTilt.Roll = MovementSettings->CrouchWeaponTiltRoll;
 			SavedCrouchSlideTilt.Pitch = MovementSettings->CrouchWeaponTiltPitch;
 			SavedCrouchSlideOffset = MovementSettings->CrouchCameraOffset;

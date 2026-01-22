@@ -280,6 +280,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Apex|Input")
 	bool IsForwardHeld() const { return CurrentMoveInput.Y > 0.5f; }
 
+	/** Check if crouch input is held (regardless of actual crouch state) */
+	UFUNCTION(BlueprintPure, Category = "Apex|Input")
+	bool IsCrouchInputHeld() const { return bWantsToCrouchSmooth; }
+
 	/** Try to perform jump with all checks */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	bool TryJump();

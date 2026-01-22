@@ -1094,7 +1094,8 @@ void UApexMovementComponent::StartWallRun(const FHitResult& WallHit, EWallSide S
 	// Titanfall 2 style: track elapsed time, entry speed, calculate peak
 	WallRunElapsedTime = 0.0f;
 	WallRunEntrySpeed = ParallelSpeed;
-	WallRunPeakSpeed = ParallelSpeed * MovementSettings->WallRunPeakSpeedMultiplier;
+	//WallRunPeakSpeed = ParallelSpeed * MovementSettings->WallRunPeakSpeedMultiplier;
+	WallRunPeakSpeed = FMath::Max(MovementSettings->WallRunSpeed, ParallelSpeed);
 	WallRunCurrentSpeed = ParallelSpeed;
 	WallRunDistanceTraveled = 0.0f;
 	WallRunHeadbobRoll = 0.0f;

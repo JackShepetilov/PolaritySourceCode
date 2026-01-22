@@ -371,6 +371,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 
 	UpdateADS(DeltaTime);
 	UpdateRegeneration(DeltaTime);
+	UpdateLeftHandIK(DeltaTime);
 
 	// Update recoil component state
 	if (RecoilComponent)
@@ -438,6 +439,24 @@ void AShooterCharacter::Tick(float DeltaTime)
 		UpdateChargeOverlay(CurrentPolarity);
 		PreviousPolarity = CurrentPolarity;
 	}
+
+	/*bool bIsWallRunning = false;
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		bIsWallRunning = Apex->IsWallRunning();
+	}
+
+
+	if (bIsWallRunning)
+	{
+		SetLeftHandIKAlpha(0.0f);  // ���� ��������
+	}
+	else
+	{
+		SetLeftHandIKAlpha(1.0f);  // ���� �� ������
+
+	}*/
+	
 }
 
 void AShooterCharacter::DoStartADS()
@@ -1242,4 +1261,113 @@ void AShooterCharacter::Die()
 void AShooterCharacter::OnRespawn()
 {
 	Destroy();
+}
+
+void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
+{
+	// Determine target alpha based on state
+	bool bIsWallRunning = false;
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		bIsWallRunning = Apex->IsWallRunning();
+	}
+
+	TargetLeftHandIKAlpha = bIsWallRunning ? 0.0f : 1.0f;
+
+	// Interpolate alpha
+	CurrentLeftHandIKAlpha = FMath::FInterpTo(
+		CurrentLeftHandIKAlpha,
+		TargetLeftHandIKAlpha,
+		DeltaTime,
+		LeftHandIKAlphaInterpSpeed
+	);
+
+	// Get socket transform from weapon mesh (if available)
+	FTransform FinalTransform = FTransform::Identity;
+
+	if (CurrentWeapon)
+	{
+		if (USkeletalMeshComponent* WeaponMesh = CurrentWeapon->GetFirstPersonMesh())
+		{
+			if (WeaponMesh->DoesSocketExist(LeftHandGripSocket))
+			{
+				FTransform SocketTransform = WeaponMesh->GetSocketTransform(LeftHandGripSocket, ERelativeTransformSpace::RTS_World);
+				FinalTransform = LeftHandIKOffset * SocketTransform;
+			}
+		}
+	}
+
+	// Always pass the interpolated alpha value
+	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
+}
+
+void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, float Alpha)
+{
+	USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
+	if (!FPMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: No FPMesh!"));
+		return;
+	}
+
+	UAnimInstance* AnimInstance = FPMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: No AnimInstance!"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("LeftHandIK: AnimInstance=%s, Alpha=%.2f"), *AnimInstance->GetClass()->GetName(), Alpha);
+
+	// Set LeftHandIKTransform property via reflection
+	static FName LeftHandIKTransformName(TEXT("LeftHandIKTransform"));
+	FProperty* TransformProperty = AnimInstance->GetClass()->FindPropertyByName(LeftHandIKTransformName);
+
+	if (TransformProperty)
+	{
+		FStructProperty* StructProp = CastField<FStructProperty>(TransformProperty);
+		if (StructProp && StructProp->Struct == TBaseStructure<FTransform>::Get())
+		{
+			void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(AnimInstance);
+			if (ValuePtr)
+			{
+				*static_cast<FTransform*>(ValuePtr) = Transform;
+			}
+		}
+	}
+
+	// Set LeftHandIKAlpha property via reflection
+	static FName LeftHandIKAlphaName(TEXT("LeftHandIKAlpha"));
+	FProperty* AlphaProperty = AnimInstance->GetClass()->FindPropertyByName(LeftHandIKAlphaName);
+
+	if (!AlphaProperty)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property 'LeftHandIKAlpha' NOT FOUND in %s"), *AnimInstance->GetClass()->GetName());
+		return;
+	}
+
+	// Try as FFloatProperty first (UE4 style)
+	if (FFloatProperty* FloatProp = CastField<FFloatProperty>(AlphaProperty))
+	{
+		void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInstance);
+		if (ValuePtr)
+		{
+			*static_cast<float*>(ValuePtr) = Alpha;
+			UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as float = %.2f"), Alpha);
+		}
+	}
+	// Try as FDoubleProperty (UE5 may use double for Blueprint floats)
+	else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(AlphaProperty))
+	{
+		void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInstance);
+		if (ValuePtr)
+		{
+			*static_cast<double*>(ValuePtr) = static_cast<double>(Alpha);
+			UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as double = %.2f"), Alpha);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property found but wrong type!"));
+	}
 }

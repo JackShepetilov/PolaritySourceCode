@@ -95,6 +95,26 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons")
 	FName ThirdPersonWeaponSocket = FName("HandGrip_R");
 
+	// ==================== Left Hand IK ====================
+
+	/** Socket name on weapon mesh for left hand grip */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand IK")
+	FName LeftHandGripSocket = FName("GripPoint_002");
+
+	/** Offset applied to the left hand IK target relative to the socket */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand IK")
+	FTransform LeftHandIKOffset = FTransform::Identity;
+
+	/** Current left hand IK alpha (0 = no IK/detached, 1 = full IK). Blend this for wallrun etc. */
+	float CurrentLeftHandIKAlpha = 1.0f;
+
+	/** Target left hand IK alpha to interpolate towards */
+	float TargetLeftHandIKAlpha = 1.0f;
+
+	/** Interpolation speed for left hand IK alpha */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand IK")
+	float LeftHandIKAlphaInterpSpeed = 10.0f;
+
 	/** Max distance to use for aim traces */
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 100000, Units = "cm"))
 	float MaxAimDistance = 10000.0f;
@@ -463,6 +483,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	AShooterWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
 
+	/** Sets the target left hand IK alpha (0 = detached, 1 = fully attached). Use for wallrun, melee, etc. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons|Left Hand IK")
+	void SetLeftHandIKAlpha(float Alpha) { TargetLeftHandIKAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f); }
+
+	/** Gets the current left hand IK alpha */
+	UFUNCTION(BlueprintPure, Category = "Weapons|Left Hand IK")
+	float GetLeftHandIKAlpha() const { return CurrentLeftHandIKAlpha; }
+
 protected:
 
 	/** Update ADS state and apply effects */
@@ -587,6 +615,12 @@ public:
 	//~End IShooterWeaponHolder interface
 
 protected:
+
+	/** Updates left hand IK transform from weapon socket and passes it to AnimInstance */
+	void UpdateLeftHandIK(float DeltaTime);
+
+	/** Sets the left hand IK transform and alpha in the AnimInstance via reflection */
+	void SetAnimInstanceLeftHandIK(const FTransform& Transform, float Alpha);
 
 	/** Returns true if the character already owns a weapon of the given class */
 	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
