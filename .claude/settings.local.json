@@ -6,7 +6,9 @@
       "Bash(git commit:*)",
       "WebSearch",
       "WebFetch(domain:titanfall.fandom.com)",
-      "WebFetch(domain:steamcommunity.com)"
+      "WebFetch(domain:steamcommunity.com)",
+      "WebFetch(domain:dev.epicgames.com)",
+      "WebFetch(domain:forums.unrealengine.com)"
     ]
   }
 }

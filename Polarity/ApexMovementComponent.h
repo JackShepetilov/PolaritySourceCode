@@ -121,6 +121,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bWantsSlideOnLand = false;
 
+	/** True when player is crouched in air (reduces hitbox) */
+	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	bool bIsCrouchedInAir = false;
+
 	/** How the last wallrun ended - affects post-wallrun jump availability */
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	EWallRunEndReason LastWallRunEndReason = EWallRunEndReason::None;
@@ -389,6 +393,9 @@ protected:
 	// Jump state
 	float JumpHoldTimeRemaining = 0.0f;
 	bool bJumpHeld = false;
+
+	// Air crouch state
+	float AirCrouchHoldTime = 0.0f;
 
 	// Air Dash state
 	float AirDashCooldownRemaining = 0.0f;

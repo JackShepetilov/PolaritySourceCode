@@ -137,8 +137,8 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 				TEXT("IN FALLING BLOCK - ApplyAirStrafe will be called"));
 		}
 #endif
-		// Check wall bounce FIRST - only if forward is held
-		if (IsForwardHeld())
+		// Check wall bounce - if forward is held OR in crouch state
+		if (IsForwardHeld() || bIsCrouchedInAir)
 		{
 			CheckForWallBounce();
 		}
@@ -156,6 +156,28 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (bJumpHeld && IsFalling())
 	{
 		UpdateJumpHold(DeltaTime);
+	}
+
+	// Air crouch hold detection
+	if (bWantsSlideOnLand && IsFalling() && !bIsWallRunning && !bIsAirDashing && MovementSettings)
+	{
+		AirCrouchHoldTime += DeltaTime;
+
+		// If held longer than threshold and not yet crouched, enable air crouch
+		if (AirCrouchHoldTime >= MovementSettings->AirCrouchHoldThreshold && !bIsCrouchedInAir)
+		{
+			bIsCrouchedInAir = true;
+			StartCrouching();
+		}
+	}
+	else if (!IsFalling() || !bWantsSlideOnLand)
+	{
+		// Reset air crouch when landing or button released
+		if (bIsCrouchedInAir && !bIsSliding)
+		{
+			bIsCrouchedInAir = false;
+			// Don't call StopCrouching here - ProcessLanded will handle transition to slide
+		}
 	}
 
 	// Update camera tilt for wallrun
@@ -181,7 +203,16 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	// POST-TICK: Slide deceleration AFTER physics
 	if (bIsSliding)
 	{
+		// Check for wall bounce during slide
+		CheckForWallBounce();
+
 		UpdateSlide(DeltaTime);
+	}
+
+	// POST-TICK: Also check wall bounce for air crouch after physics
+	if (bIsCrouchedInAir && IsFalling())
+	{
+		CheckForWallBounce();
 	}
 
 	UpdateMovementState();
@@ -263,6 +294,9 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 		StartSlideFromAir(LastFallVelocity);
 		//bWantsSlideOnLand = false;
 	}
+
+	// Clear air crouch state
+	bIsCrouchedInAir = false;
 
 	OnLanded_Movement.Broadcast(Hit);
 }
@@ -423,10 +457,11 @@ void UApexMovementComponent::TryCrouchSlide()
 	{
 		bWantsSlideOnLand = true;
 
-		if (CanAirDash())
-		{
-			TryAirDash();
-		}
+		// Start tracking hold time for air crouch
+		AirCrouchHoldTime = 0.0f;
+
+		// Short tap = air dash (if available) - handled in StopCrouchSlide
+		// Hold = crouch in air (handled in TickComponent)
 		return;
 	}
 
@@ -442,7 +477,26 @@ void UApexMovementComponent::TryCrouchSlide()
 
 void UApexMovementComponent::StopCrouchSlide()
 {
+	// Check if this was a quick tap (released before threshold)
+	bool bWasQuickTap = false;
+	if (IsFalling() && !bIsWallRunning && !bIsCrouchedInAir && MovementSettings)
+	{
+		// If released before becoming crouched in air, it's a quick tap
+		if (AirCrouchHoldTime < MovementSettings->AirCrouchHoldThreshold)
+		{
+			bWasQuickTap = true;
+		}
+	}
+
 	bWantsSlideOnLand = false;
+	AirCrouchHoldTime = 0.0f;
+
+	// End air crouch
+	if (bIsCrouchedInAir)
+	{
+		bIsCrouchedInAir = false;
+		StopCrouching();
+	}
 
 	if (bIsSliding)
 	{
@@ -450,6 +504,12 @@ void UApexMovementComponent::StopCrouchSlide()
 	}
 
 	StopCrouching();
+
+	// If it was a quick tap in air, perform air dash
+	if (bWasQuickTap && CanAirDash())
+	{
+		TryAirDash();
+	}
 }
 
 // ==================== Slide ====================
@@ -840,7 +900,7 @@ bool UApexMovementComponent::CanWallRun() const
 		return false;
 	}
 
-	if (bIsSliding || bIsMantling || bIsWallRunning)
+	if (bIsSliding || bIsMantling || bIsWallRunning || bIsCrouchedInAir)
 	{
 		return false;
 	}
@@ -1436,7 +1496,16 @@ bool UApexMovementComponent::CanWallBounce() const
 		return false;
 	}
 
-	if (bIsSliding || bIsMantling || bIsWallRunning || !IsFalling())
+	// Block for mantling and wallrun
+	if (bIsMantling || bIsWallRunning)
+	{
+		return false;
+	}
+
+	// Wall bounce ONLY works in these cases:
+	// 1. Sliding (ground crouch with high speed)
+	// 2. Air crouch (bIsCrouchedInAir = holding crouch in air)
+	if (!bIsSliding && !bIsCrouchedInAir)
 	{
 		return false;
 	}
@@ -1456,14 +1525,16 @@ void UApexMovementComponent::CheckForWallBounce()
 		return;
 	}
 
-	// Trace forward in velocity direction
+	// Sweep forward in velocity direction (more reliable than line trace)
 	const FVector VelDir = Velocity.GetSafeNormal();
 	if (VelDir.IsNearlyZero())
 	{
 		return;
 	}
 
-	const float TraceDistance = CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius() + 30.0f;
+	UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
+	const float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+	const float TraceDistance = CapsuleRadius + 50.0f;
 	const FVector Start = CharacterOwner->GetActorLocation();
 	const FVector End = Start + VelDir * TraceDistance;
 
@@ -1471,7 +1542,9 @@ void UApexMovementComponent::CheckForWallBounce()
 	Params.AddIgnoredActor(CharacterOwner);
 
 	FHitResult Hit;
-	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	// Use sphere sweep for more reliable detection
+	const float SweepRadius = CapsuleRadius * 0.8f;
+	if (!GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(SweepRadius), Params))
 	{
 		return;
 	}
@@ -1482,21 +1555,8 @@ void UApexMovementComponent::CheckForWallBounce()
 		return;
 	}
 
-	// Calculate perpendicular velocity component
-	const float PerpendicularSpeed = FMath::Abs(FVector::DotProduct(Velocity, -Hit.Normal));
-
-	if (PerpendicularSpeed < MovementSettings->WallBounceMinSpeed)
-	{
-		return;
-	}
-
-	// Check angle
-	const float HitAngle = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(VelDir, -Hit.Normal)));
-	if (HitAngle > MovementSettings->WallBounceMinAngle)
-	{
-		return;
-	}
-
+	// Wall bounce происходит всегда при приседе в воздухе (bIsCrouchedInAir) или скольжении (bIsSliding)
+	// Никаких проверок на угол или скорость
 	PerformWallBounce(Hit);
 }
 

@@ -393,6 +393,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash")
 	int32 MaxAirDashCount = 1;
 
+	/** Time threshold to distinguish short tap (air dash) vs hold (air crouch) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash", meta = (ClampMin = "0.05", ClampMax = "0.5", ToolTip = "Short tap < this time = air dash, hold >= this time = crouch in air"))
+	float AirCrouchHoldThreshold = 0.15f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash|Decay", meta = (ToolTip = "Above this height - no decay"))
 	float AirDashDecayMaxHeight = 400.0f;
 
