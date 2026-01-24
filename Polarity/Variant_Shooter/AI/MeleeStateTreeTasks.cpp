@@ -6,6 +6,8 @@
 #include "ShooterNPC.h"
 #include "AIController.h"
 #include "StateTreeExecutionContext.h"
+#include "Navigation/PathFollowingComponent.h"
+#include "AITypes.h"
 
 //////////////////////////////////////////////////////////////////
 // TASK: Melee Attack
@@ -48,20 +50,39 @@ EStateTreeRunStatus FStateTreeMeleeAttackTask::Tick(FStateTreeExecutionContext& 
 {
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 
-	if (!Data.Character)
+	if (!Data.Character || !Data.Target)
 	{
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Ждём пока атака закончится
-	if (Data.Character->IsAttacking())
+	bool bIsAttacking = Data.Character->IsAttacking();
+	bool bCanAttack = Data.Character->CanAttack();
+	bool bInRange = Data.Character->IsTargetInAttackRange(Data.Target);
+	bool bInKnockback = Data.Character->IsInKnockback();
+
+	UE_LOG(LogTemp, Warning, TEXT("MeleeAttackTask::Tick - Attacking=%s, CanAttack=%s, InRange=%s, InKnockback=%s"),
+		bIsAttacking ? TEXT("Y") : TEXT("N"),
+		bCanAttack ? TEXT("Y") : TEXT("N"),
+		bInRange ? TEXT("Y") : TEXT("N"),
+		bInKnockback ? TEXT("Y") : TEXT("N"));
+
+	if (bIsAttacking)
 	{
 		return EStateTreeRunStatus::Running;
 	}
 
-	// Атака закончилась
-	UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Attack finished"));
-	return EStateTreeRunStatus::Succeeded;
+	if (bCanAttack && bInRange)
+	{
+		Data.Character->StartMeleeAttack(Data.Target);
+		return EStateTreeRunStatus::Running;
+	}
+
+	if (!bInRange)
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	return EStateTreeRunStatus::Running;
 }
 
 void FStateTreeMeleeAttackTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
@@ -190,5 +211,28 @@ bool FStateTreeHasValidTargetCondition::TestCondition(FStateTreeExecutionContext
 FText FStateTreeHasValidTargetCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("Has a valid target actor"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Is NOT In Knockback
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeIsNotInKnockbackCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return true; // Если нет персонажа - считаем что NOT in knockback (безопасный default)
+	}
+
+	return !Data.Character->IsInKnockback();
+}
+
+#if WITH_EDITOR
+FText FStateTreeIsNotInKnockbackCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("NPC is NOT in knockback state (recovered)"));
 }
 #endif

@@ -11,6 +11,7 @@
 class AMeleeNPC;
 class AShooterNPC;
 class AAIController;
+class AShooterAIController;
 
 //////////////////////////////////////////////////////////////////
 // TASK: Melee Attack
@@ -225,3 +226,39 @@ struct POLARITY_API FStateTreeHasValidTargetCondition : public FStateTreeConditi
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
 #endif
 };
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Is NOT In Knockback
+// Проверяет что NPC НЕ находится в состоянии knockback
+// Используется для transition из Stunned state обратно в Chase/Root
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeIsNotInKnockbackInstanceData
+{
+	GENERATED_BODY()
+
+	/** NPC для проверки (ShooterNPC или его наследник) */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> Character;
+};
+
+USTRUCT(DisplayName = "Is NOT In Knockback", Category = "Melee")
+struct POLARITY_API FStateTreeIsNotInKnockbackCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeIsNotInKnockbackInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
