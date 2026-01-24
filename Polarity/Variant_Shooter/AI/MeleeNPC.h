@@ -137,6 +137,8 @@ protected:
 	/** Cleanup on end play */
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
+	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector) override;
+
 public:
 
 	// ==================== Attack Interface ====================

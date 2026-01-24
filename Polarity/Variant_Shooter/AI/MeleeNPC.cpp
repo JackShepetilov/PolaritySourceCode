@@ -480,3 +480,22 @@ void AMeleeNPC::SpawnMeleeWeapon()
 			*GetName(), *MeleeWeaponActor->GetName(), *MeleeWeaponSocket.ToString());
 	}
 }
+
+void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
+{
+	// End damage window if still active
+	if (bDamageWindowActive)
+	{
+		OnDamageWindowEnd();
+	}
+
+	// Clear timers
+	GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
+	GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
+
+	// End attack state
+	bIsAttacking = false;
+	
+
+	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation);
+}
