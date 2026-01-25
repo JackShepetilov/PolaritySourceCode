@@ -1004,6 +1004,16 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 	// Apply knockback to myself (backwards)
 	ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
 
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green,
+			FString::Printf(TEXT("Applying knockback to OTHER NPC %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
+				*OtherNPC->GetName(), CollisionDirection.X, CollisionDirection.Y, CollisionDirection.Z,
+				KnockbackDistance, KnockbackDuration));
+	}
+#endif
+
 	// Apply knockback to other NPC (forwards)
 	OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
 
@@ -1220,6 +1230,15 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 	{
 		if (AShooterNPC* OtherNPC = Cast<AShooterNPC>(OtherActor))
 		{
+#if WITH_EDITOR
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
+					FString::Printf(TEXT("%s hit NPC %s - Dead=%d, Velocity=%.0f"),
+						*GetName(), *OtherNPC->GetName(), OtherNPC->IsDead(), PreviousTickVelocity.Size()));
+			}
+#endif
+
 			// Check if other NPC is alive and not already dead
 			if (!OtherNPC->IsDead())
 			{
@@ -1231,6 +1250,14 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 					HandleElasticNPCCollision(OtherNPC, Hit.ImpactPoint);
 					return;
 				}
+#if WITH_EDITOR
+				else if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+						FString::Printf(TEXT("NPC collision too slow: %.0f < %.0f"),
+							VelocityMagnitude, NPCCollisionMinVelocity));
+				}
+#endif
 			}
 		}
 	}
