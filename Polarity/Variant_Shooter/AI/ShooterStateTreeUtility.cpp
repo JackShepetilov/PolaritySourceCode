@@ -235,7 +235,6 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				if (FInstanceDataType* LambdaInstanceData = StrongContext.GetInstanceDataPtr<FInstanceDataType>())
 				{
 					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Got LambdaInstanceData successfully"));
-				{
 					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking tag '%s' on %s - HasTag: %s"),
 						*LambdaInstanceData->SenseTag.ToString(),
 						*SensedActor->GetName(),
