@@ -62,10 +62,16 @@ void AShooterNPC::BeginPlay()
 	// Register with combat coordinator
 	RegisterWithCoordinator();
 
-	// Bind capsule hit event for wall slam detection
+	// Bind capsule hit event for wall slam detection and NPC collision
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
 		Capsule->OnComponentHit.AddDynamic(this, &AShooterNPC::OnCapsuleHit);
+
+		// Ensure capsule generates hit events
+		Capsule->SetNotifyRigidBodyCollision(true);
+
+		// Make sure NPC capsules collide with each other (Block Pawn channel)
+		Capsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	}
 }
 
