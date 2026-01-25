@@ -1840,20 +1840,28 @@ void UMeleeAttackComponent::UpdateCameraFocus(float DeltaTime)
 
 	CameraFocusTimeRemaining -= DeltaTime;
 
-	// ==================== Fixed Camera Focus ====================
-	// CameraFocusTargetRotation is calculated ONCE in StartCameraFocus()
-	// No continuous tracking - just smooth interpolation to the initial target rotation
-	// This prevents the "tracking" effect where camera constantly follows the enemy
+	// ==================== Smooth Tracking Camera Focus ====================
+	// Continuously update target rotation to current enemy position (tracking)
+	// But use smooth interpolation instead of instant snap
+	if (AActor* Target = CameraFocusTarget.Get())
+	{
+		FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+		CameraFocusTargetRotation = ToTarget.Rotation();
+		CameraFocusTargetRotation.Roll = OwnerController->GetControlRotation().Roll;
+	}
 
-	// Calculate interpolation alpha based on remaining time
-	float Alpha = 1.0f - (CameraFocusTimeRemaining / CameraFocusDuration);
-	Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
+	// Get current camera rotation
+	FRotator CurrentRotation = OwnerController->GetControlRotation();
 
-	// Apply focus strength to alpha for smoother or snappier feel
-	Alpha = FMath::Pow(Alpha, 1.0f / CameraFocusStrength);
-
-	// Interpolate rotation from start to the FIXED target rotation
-	FRotator NewRotation = FMath::Lerp(CameraFocusStartRotation, CameraFocusTargetRotation, Alpha);
+	// Smooth interpolation to the (updating) target rotation
+	// InterpSpeed controls how fast camera follows - higher = snappier
+	float InterpSpeed = CameraFocusStrength * 10.0f; // CameraFocusStrength as base multiplier
+	FRotator NewRotation = FMath::RInterpTo(
+		CurrentRotation,
+		CameraFocusTargetRotation,
+		DeltaTime,
+		InterpSpeed
+	);
 
 	// Apply rotation to controller
 	OwnerController->SetControlRotation(NewRotation);
