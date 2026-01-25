@@ -855,9 +855,12 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 							UE_LOG(LogTemp, Warning, TEXT("[NPC Collision SWEEP] TRIGGERING elastic collision! Speed=%.0f >= Threshold=%.0f"),
 								KnockbackSpeed, NPCCollisionMinVelocity);
 
+							// Move to collision point first to prevent position snap-back
+							SetActorLocation(CollisionPoint, false);
+
 							// Handle elastic collision with computed knockback velocity
 							HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, KnockbackSpeed);
-							return; // Stop interpolation after collision
+							return; // Stop current interpolation (new one started in collision handler)
 						}
 						else
 						{
