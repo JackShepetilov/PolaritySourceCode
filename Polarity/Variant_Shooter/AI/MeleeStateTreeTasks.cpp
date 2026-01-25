@@ -236,3 +236,185 @@ FText FStateTreeIsNotInKnockbackCondition::GetDescription(const FGuid& ID, FStat
 	return FText::FromString(TEXT("NPC is NOT in knockback state (recovered)"));
 }
 #endif
+
+//////////////////////////////////////////////////////////////////
+// TASK: Melee Dash
+//////////////////////////////////////////////////////////////////
+
+EStateTreeRunStatus FStateTreeMeleeDashTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	// Проверяем валидность Character и Target
+	if (!Data.Character || !Data.Target)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MeleeDashTask: Invalid Character or Target"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Проверяем можем ли выполнить рывок
+	if (!Data.Character->CanDash())
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("MeleeDashTask: Cannot dash (cooldown or other state)"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Вычисляем направление к цели
+	FVector ToTarget = (Data.Target->GetActorLocation() - Data.Character->GetActorLocation()).GetSafeNormal2D();
+
+	if (ToTarget.IsNearlyZero())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MeleeDashTask: Target is at same location"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Вычисляем финальное направление рывка в зависимости от настройки
+	FVector FinalDirection;
+
+	switch (Data.DashDirection)
+	{
+	case EDashDirection::Forward:
+		// Рывок к цели
+		FinalDirection = ToTarget;
+		break;
+
+	case EDashDirection::Left:
+		// Перпендикуляр влево от направления на цель
+		FinalDirection = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+		break;
+
+	case EDashDirection::Right:
+		// Перпендикуляр вправо от направления на цель
+		FinalDirection = -FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+		break;
+
+	case EDashDirection::RandomSide:
+	default:
+		// Случайно влево или вправо
+		{
+			FVector Perpendicular = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+			FinalDirection = FMath::RandBool() ? Perpendicular : -Perpendicular;
+		}
+		break;
+	}
+
+	// Запускаем рывок
+	bool bDashStarted = Data.Character->StartDash(FinalDirection, Data.DashDistance);
+
+	if (!bDashStarted)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("MeleeDashTask: StartDash failed (path validation)"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("MeleeDashTask: Started dash, Direction=%s, Distance=%.1f"),
+		*FinalDirection.ToString(), Data.DashDistance);
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FStateTreeMeleeDashTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Проверяем выполняется ли ещё рывок
+	if (Data.Character->IsDashing())
+	{
+		return EStateTreeRunStatus::Running;
+	}
+
+	// Рывок завершён
+	return EStateTreeRunStatus::Succeeded;
+}
+
+void FStateTreeMeleeDashTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	// Ничего особенного не нужно - рывок сам завершится или отменится при knockback
+}
+
+#if WITH_EDITOR
+FText FStateTreeMeleeDashTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Execute dash movement towards or around target"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Can Dash
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeCanDashCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return false;
+	}
+
+	return Data.Character->CanDash();
+}
+
+#if WITH_EDITOR
+FText FStateTreeCanDashCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("MeleeNPC can perform dash (not in cooldown)"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Is Dashing
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeIsDashingCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character)
+	{
+		return false;
+	}
+
+	return Data.Character->IsDashing();
+}
+
+#if WITH_EDITOR
+FText FStateTreeIsDashingCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("MeleeNPC is currently dashing"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Distance To Target In Range
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeDistanceToTargetCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character || !Data.Target)
+	{
+		return false;
+	}
+
+	float Distance = FVector::Dist(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
+	bool bInRange = Distance >= Data.MinDistance && Distance <= Data.MaxDistance;
+
+	UE_LOG(LogTemp, Verbose, TEXT("DistanceToTarget: Distance=%.2f, Min=%.2f, Max=%.2f, InRange=%s"),
+		Distance, Data.MinDistance, Data.MaxDistance, bInRange ? TEXT("YES") : TEXT("NO"));
+
+	return bInRange;
+}
+
+#if WITH_EDITOR
+FText FStateTreeDistanceToTargetCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Distance to target is within specified range"));
+}
+#endif
