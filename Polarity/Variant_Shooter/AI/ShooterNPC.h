@@ -278,6 +278,24 @@ protected:
 	/** Time of last wall slam damage (for cooldown) */
 	float LastWallSlamTime = -1.0f;
 
+	// ==================== NPC Collision ====================
+
+	/** Enable explosion-like elastic collision between NPCs during knockback */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision")
+	bool bEnableNPCCollision = true;
+
+	/** Impulse multiplier when NPCs collide (both get this fraction of original speed) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision", meta = (ClampMin = "0.5", ClampMax = "1.5", EditCondition = "bEnableNPCCollision"))
+	float NPCCollisionImpulseMultiplier = 0.7f;
+
+	/** Damage multiplier relative to wall slam damage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableNPCCollision"))
+	float NPCCollisionDamageMultiplier = 0.4f;
+
+	/** Minimum velocity for NPC collision to trigger */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision", meta = (ClampMin = "0", EditCondition = "bEnableNPCCollision"))
+	float NPCCollisionMinVelocity = 300.0f;
+
 	// ==================== Melee Charge Transfer ====================
 
 	/** Charge change when hit by melee attack (opposite sign to player's gain) */
@@ -453,6 +471,9 @@ protected:
 
 	/** Handle wall collision during knockback - trigger damage and stop */
 	void HandleKnockbackWallHit(const FHitResult& WallHit);
+
+	/** Handle explosion-like elastic collision between two NPCs during knockback */
+	void HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector& CollisionPoint);
 
 	/** Called when capsule hits something - checks for wall slam */
 	UFUNCTION()

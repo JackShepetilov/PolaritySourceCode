@@ -963,6 +963,89 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 	}
 }
 
+void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector& CollisionPoint)
+{
+	if (!OtherNPC)
+	{
+		return;
+	}
+
+	// ==================== Explosion-Like Elastic Collision ====================
+	// Both NPCs get knocked back in opposite directions with multiplied original velocity
+
+	// Get current velocities
+	FVector MyVelocity = PreviousTickVelocity;
+	float MySpeed = MyVelocity.Size();
+
+	// Calculate collision direction (from me to other NPC)
+	FVector CollisionDirection = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+
+	// Calculate new velocities for explosion-like effect
+	// Both NPCs fly away from collision point with fraction of original speed
+	FVector MyNewVelocity = -CollisionDirection * MySpeed * NPCCollisionImpulseMultiplier; // I fly backwards
+	FVector OtherNewVelocity = CollisionDirection * MySpeed * NPCCollisionImpulseMultiplier; // Other flies forward
+
+	// Calculate collision damage based on original velocity
+	float CollisionDamage = 0.0f;
+	if (MySpeed >= WallSlamVelocityThreshold)
+	{
+		float ExcessVelocity = MySpeed - WallSlamVelocityThreshold;
+		float BaseDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
+		CollisionDamage = BaseDamage * NPCCollisionDamageMultiplier;
+	}
+
+	// Calculate knockback duration for both NPCs based on new velocity
+	// Use distance-based formula from ApplyKnockback
+	float NewSpeed = MySpeed * NPCCollisionImpulseMultiplier;
+	float KnockbackDistance = (NewSpeed * NewSpeed) / 2000.0f; // Simple physics approximation
+	float KnockbackDuration = KnockbackDistance / FMath::Max(NewSpeed, 1.0f);
+	KnockbackDuration = FMath::Clamp(KnockbackDuration, 0.3f, 2.0f); // Reasonable bounds
+
+	// Apply knockback to myself (backwards)
+	ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
+
+	// Apply knockback to other NPC (forwards)
+	OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
+
+	// Apply damage to both NPCs
+	if (CollisionDamage > 0.0f)
+	{
+		FDamageEvent DamageEvent;
+		TakeDamage(CollisionDamage, DamageEvent, nullptr, OtherNPC);
+		OtherNPC->TakeDamage(CollisionDamage, DamageEvent, nullptr, this);
+	}
+
+	// Play sound at collision point
+	if (WallSlamSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, CollisionPoint);
+	}
+
+	// Spawn VFX at collision point
+	if (WallSlamVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			WallSlamVFX,
+			CollisionPoint,
+			FRotator::ZeroRotator,
+			FVector(WallSlamVFXScale),
+			true,  // bAutoDestroy
+			true,  // bAutoActivate
+			ENCPoolMethod::None
+		);
+	}
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("NPC COLLISION! Speed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
+				MySpeed, NewSpeed, CollisionDamage, KnockbackDuration));
+	}
+#endif
+}
+
 void AShooterNPC::EndKnockbackStun()
 {
 	// Clear knockback state
@@ -1129,6 +1212,27 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 	if (!bIsInKnockback)
 	{
 		return;
+	}
+
+	// ==================== NPC-NPC Collision Detection ====================
+	// Check if we hit another ShooterNPC - handle elastic collision instead of wall slam
+	if (bEnableNPCCollision && OtherActor)
+	{
+		if (AShooterNPC* OtherNPC = Cast<AShooterNPC>(OtherActor))
+		{
+			// Check if other NPC is alive and not already dead
+			if (!OtherNPC->IsDead())
+			{
+				// Check minimum velocity threshold
+				float VelocityMagnitude = PreviousTickVelocity.Size();
+				if (VelocityMagnitude >= NPCCollisionMinVelocity)
+				{
+					// Handle elastic collision and early exit (skip wall slam logic)
+					HandleElasticNPCCollision(OtherNPC, Hit.ImpactPoint);
+					return;
+				}
+			}
+		}
 	}
 
 	// Check cooldown to prevent multi-trigger on same impact
