@@ -353,6 +353,70 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 
 			}
 		);
+
+		// ВАЖНО: Проверить уже известных актёров из AIPerception
+		// Это нужно потому что PerceptionUpdated может вызваться ДО того как мы забиндили делегаты
+		// В таком случае NPC не получит событие и не установит цель
+		UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking already known actors"));
+
+		if (UAIPerceptionComponent* PerceptionComp = InstanceData.Controller->GetPerceptionComponent())
+		{
+			TArray<AActor*> KnownActors;
+			PerceptionComp->GetKnownPerceivedActors(nullptr, KnownActors);
+
+			UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Found %d known actors"), KnownActors.Num());
+
+			for (AActor* KnownActor : KnownActors)
+			{
+				if (!KnownActor)
+				{
+					continue;
+				}
+
+				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Processing known actor %s"), *KnownActor->GetName());
+
+				// Проверяем тег
+				if (!KnownActor->ActorHasTag(InstanceData.SenseTag))
+				{
+					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Known actor %s doesn't have tag '%s'"),
+						*KnownActor->GetName(), *InstanceData.SenseTag.ToString());
+					continue;
+				}
+
+				// Проверяем Line of Sight
+				FCollisionQueryParams QueryParams;
+				QueryParams.AddIgnoredActor(InstanceData.Character);
+				QueryParams.AddIgnoredActor(KnownActor);
+
+				FHitResult OutHit;
+				bool bHit = InstanceData.Character->GetWorld()->LineTraceSingleByChannel(
+					OutHit,
+					InstanceData.Character->GetActorLocation(),
+					KnownActor->GetActorLocation(),
+					ECC_Visibility,
+					QueryParams
+				);
+
+				bool bDirectLOS = !bHit;
+
+				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Known actor %s - DirectLOS=%s"),
+					*KnownActor->GetName(), bDirectLOS ? TEXT("YES") : TEXT("NO"));
+
+				if (bDirectLOS)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Setting target to known actor %s"), *KnownActor->GetName());
+
+					// Устанавливаем цель
+					InstanceData.Controller->SetCurrentTarget(KnownActor);
+					InstanceData.TargetActor = KnownActor;
+					InstanceData.bHasTarget = true;
+					InstanceData.bHasInvestigateLocation = false;
+
+					// Нашли валидную цель - можно выходить
+					break;
+				}
+			}
+		}
 	}
 
 	return EStateTreeRunStatus::Running;
