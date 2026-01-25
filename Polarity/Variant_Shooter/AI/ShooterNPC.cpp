@@ -21,6 +21,7 @@
 #include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/DamageEvents.h"
+#include "Engine/OverlapResult.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "NiagaraFunctionLibrary.h"
 
