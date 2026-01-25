@@ -642,7 +642,7 @@ void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 	SetActorRotation(NewRotation);
 }
 
-void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
+void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {
 	// Apply NPC's knockback distance multiplier (inherited from ShooterNPC)
 	float FinalDistance = Distance * KnockbackDistanceMultiplier;
@@ -666,8 +666,8 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		FlyingMovement->StopMovement();
 	}
 
-	// Disable EMF forces during knockback for consistent physics
-	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	// Disable EMF forces during knockback for consistent physics (unless explicitly kept enabled)
+	if (bDisableEMFDuringKnockback && !bKeepEMFEnabled && EMFVelocityModifier)
 	{
 		EMFVelocityModifier->SetEnabled(false);
 	}
