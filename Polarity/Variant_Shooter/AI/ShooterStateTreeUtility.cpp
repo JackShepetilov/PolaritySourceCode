@@ -221,40 +221,50 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 
 		UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: EnterState - binding delegates"));
 
+		// Capture necessary data by value to avoid WeakContext invalidation issues
+		AShooterAIController* Controller = InstanceData.Controller;
+		AShooterNPC* Character = InstanceData.Character;
+		FName SenseTag = InstanceData.SenseTag;
+		AActor** TargetActorPtr = &InstanceData.TargetActor;
+		bool* bHasTargetPtr = &InstanceData.bHasTarget;
+		bool* bHasInvestigateLocationPtr = &InstanceData.bHasInvestigateLocation;
+		FVector* InvestigateLocationPtr = &InstanceData.InvestigateLocation;
+		float* LastStimulusStrengthPtr = &InstanceData.LastStimulusStrength;
+
 		// bind the perception updated delegate on the controller
 		InstanceData.Controller->OnShooterPerceptionUpdated.BindLambda(
-			[WeakContext = Context.MakeWeakExecutionContext()](AActor* SensedActor, const FAIStimulus& Stimulus)
+			[Controller, Character, SenseTag, TargetActorPtr, bHasTargetPtr, bHasInvestigateLocationPtr,
+			 InvestigateLocationPtr, LastStimulusStrengthPtr](AActor* SensedActor, const FAIStimulus& Stimulus)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: PerceptionUpdated called for %s"), *SensedActor->GetName());
 
-				// get the instance data inside the lambda
-				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
-
-				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: StrongContext IsValid=%s"), StrongContext.IsValid() ? TEXT("YES") : TEXT("NO"));
-
-				if (FInstanceDataType* LambdaInstanceData = StrongContext.GetInstanceDataPtr<FInstanceDataType>())
+				// Verify captured pointers are still valid
+				if (!IsValid(Controller) || !IsValid(Character))
 				{
-					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Got LambdaInstanceData successfully"));
-					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking tag '%s' on %s - HasTag: %s"),
-						*LambdaInstanceData->SenseTag.ToString(),
-						*SensedActor->GetName(),
-						SensedActor->ActorHasTag(LambdaInstanceData->SenseTag) ? TEXT("YES") : TEXT("NO"));
+					UE_LOG(LogTemp, Error, TEXT("SenseEnemies: Controller or Character invalid in lambda"));
+					return;
+				}
 
-					if (SensedActor->ActorHasTag(LambdaInstanceData->SenseTag))
+				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking tag '%s' on %s - HasTag: %s"),
+					*SenseTag.ToString(),
+					*SensedActor->GetName(),
+					SensedActor->ActorHasTag(SenseTag) ? TEXT("YES") : TEXT("NO"));
+
+				if (SensedActor->ActorHasTag(SenseTag))
 					{
 						bool bDirectLOS = false;
 
 						// Run a line trace between the character and the sensed actor
 						// (removed cone check - AIPerception already handles that)
 						FCollisionQueryParams QueryParams;
-						QueryParams.AddIgnoredActor(LambdaInstanceData->Character);
+						QueryParams.AddIgnoredActor(Character);
 						QueryParams.AddIgnoredActor(SensedActor);
 
 						FHitResult OutHit;
 
-						bool bHit = LambdaInstanceData->Character->GetWorld()->LineTraceSingleByChannel(
+						bool bHit = Character->GetWorld()->LineTraceSingleByChannel(
 							OutHit,
-							LambdaInstanceData->Character->GetActorLocation(),
+							Character->GetActorLocation(),
 							SensedActor->GetActorLocation(),
 							ECC_Visibility,
 							QueryParams
@@ -275,52 +285,45 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 							UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Setting target to %s"), *SensedActor->GetName());
 
 							// set the controller's target
-							LambdaInstanceData->Controller->SetCurrentTarget(SensedActor);
+							Controller->SetCurrentTarget(SensedActor);
 
 							// set the task output
-							LambdaInstanceData->TargetActor = SensedActor;
+							(*TargetActorPtr) = SensedActor;
 
 							// set the flags
-							LambdaInstanceData->bHasTarget = true;
-							LambdaInstanceData->bHasInvestigateLocation = false;
+							(*bHasTargetPtr) = true;
+							(*bHasInvestigateLocationPtr) = false;
 
 						// no direct line of sight to target
 						} else {
 
 							// if we already have a target, ignore the partial sense and keep on them
-							if (!IsValid(LambdaInstanceData->TargetActor))
+							if (!IsValid((*TargetActorPtr)))
 							{
 								// is this stimulus stronger than the last one we had?
-								if (Stimulus.Strength > LambdaInstanceData->LastStimulusStrength)
+								if (Stimulus.Strength > (*LastStimulusStrengthPtr))
 								{
 									// update the stimulus strength
-									LambdaInstanceData->LastStimulusStrength = Stimulus.Strength;
+									(*LastStimulusStrengthPtr) = Stimulus.Strength;
 
 									// set the investigate location
-									LambdaInstanceData->InvestigateLocation = Stimulus.StimulusLocation;
+									(*InvestigateLocationPtr) = Stimulus.StimulusLocation;
 
 									// set the investigate flag
-									LambdaInstanceData->bHasInvestigateLocation = true;
+									(*bHasInvestigateLocationPtr) = true;
 								}
 							}
 						}
 					}
-				}
-				else
-				{
-					UE_LOG(LogTemp, Error, TEXT("SenseEnemies: Failed to get LambdaInstanceData! StrongContext invalid or wrong type"));
 				}
 			}
 		);
 
 		// bind the perception forgotten delegate on the controller
 		InstanceData.Controller->OnShooterPerceptionForgotten.BindLambda(
-			[WeakContext = Context.MakeWeakExecutionContext()](AActor* SensedActor)
+			[Controller, TargetActorPtr, bHasTargetPtr, bHasInvestigateLocationPtr, LastStimulusStrengthPtr](AActor* SensedActor)
 			{
-				// get the instance data inside the lambda
-				FInstanceDataType* LambdaInstanceData = WeakContext.MakeStrongExecutionContext().GetInstanceDataPtr<FInstanceDataType>();
-
-				if (!LambdaInstanceData)
+				if (!IsValid(Controller))
 				{
 					return;
 				}
@@ -328,14 +331,14 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				bool bForget = false;
 
 				// are we forgetting the current target?
-				if (SensedActor == LambdaInstanceData->TargetActor)
+				if (SensedActor == (*TargetActorPtr))
 				{
 					bForget = true;
 
 				} else {
 
 					// are we forgetting about a partial sense?
-					if (!IsValid(LambdaInstanceData->TargetActor))
+					if (!IsValid((*TargetActorPtr)))
 					{
 						bForget = true;
 					}
@@ -344,18 +347,18 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				if (bForget)
 				{
 					// clear the target
-					LambdaInstanceData->TargetActor = nullptr;
+					(*TargetActorPtr) = nullptr;
 
 					// clear the flags
-					LambdaInstanceData->bHasInvestigateLocation = false;
-					LambdaInstanceData->bHasTarget = false;
+					(*bHasInvestigateLocationPtr) = false;
+					(*bHasTargetPtr) = false;
 
 					// reset the stimulus strength
-					LambdaInstanceData->LastStimulusStrength = 0.0f;
+					(*LastStimulusStrengthPtr) = 0.0f;
 
 					// clear the target on the controller
-					LambdaInstanceData->Controller->ClearCurrentTarget();
-					LambdaInstanceData->Controller->ClearFocus(EAIFocusPriority::Gameplay);
+					Controller->ClearCurrentTarget();
+					Controller->ClearFocus(EAIFocusPriority::Gameplay);
 				}
 
 			}
