@@ -225,7 +225,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 		AShooterAIController* Controller = InstanceData.Controller;
 		AShooterNPC* Character = InstanceData.Character;
 		FName SenseTag = InstanceData.SenseTag;
-		AActor** TargetActorPtr = &InstanceData.TargetActor;
+		TObjectPtr<AActor>* TargetActorPtr = &InstanceData.TargetActor;
 		bool* bHasTargetPtr = &InstanceData.bHasTarget;
 		bool* bHasInvestigateLocationPtr = &InstanceData.bHasInvestigateLocation;
 		FVector* InvestigateLocationPtr = &InstanceData.InvestigateLocation;
@@ -251,8 +251,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 					SensedActor->ActorHasTag(SenseTag) ? TEXT("YES") : TEXT("NO"));
 
 				if (SensedActor->ActorHasTag(SenseTag))
-					{
-						bool bDirectLOS = false;
+				{
+					bool bDirectLOS = false;
 
 						// Run a line trace between the character and the sensed actor
 						// (removed cone check - AIPerception already handles that)
@@ -315,7 +315,6 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 							}
 						}
 					}
-				}
 			}
 		);
 
