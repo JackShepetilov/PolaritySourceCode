@@ -246,6 +246,9 @@ protected:
 	/** Cached braking deceleration for restore after knockback */
 	float CachedBrakingDeceleration = 2048.0f;
 
+	/** Time of last EMF proximity knockback trigger (for cooldown) */
+	float LastEMFProximityTriggerTime = -10.0f;
+
 	// ==================== Wall Slam ====================
 
 	/** Minimum orthogonal impulse to trigger surface slam damage (any surface) */
@@ -295,6 +298,28 @@ protected:
 	/** Minimum velocity for NPC collision to trigger */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision", meta = (ClampMin = "0", EditCondition = "bEnableNPCCollision"))
 	float NPCCollisionMinVelocity = 300.0f;
+
+	// ==================== EMF Proximity Knockback ====================
+
+	/** Enable EMF-based attraction knockback when NPCs with opposite charges get close */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity")
+	bool bEnableEMFProximityKnockback = true;
+
+	/** Minimum EMF acceleration threshold to trigger proximity knockback (cm/s²) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFProximityAccelerationThreshold = 1000.0f;
+
+	/** Knockback distance for EMF proximity attraction */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFProximityKnockbackDistance = 100.0f;
+
+	/** Knockback duration for EMF proximity attraction */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFProximityKnockbackDuration = 0.5f;
+
+	/** Cooldown between EMF proximity knockback triggers (prevents spam) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFProximityTriggerCooldown = 0.5f;
 
 	// ==================== Melee Charge Transfer ====================
 
@@ -431,9 +456,10 @@ public:
 	 *  @param Distance Total distance to travel in cm
 	 *  @param Duration Duration of the knockback interpolation in seconds
 	 *  @param AttackerLocation Position of the attacker (for rotation during knockback, optional)
+	 *  @param bKeepEMFEnabled If true, don't disable EMF forces during knockback (for EMF attraction mechanic)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector);
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false);
 
 	/** Legacy knockback using velocity (converts to distance-based internally)
 	 *  @param KnockbackVelocity Velocity vector for knockback
@@ -477,6 +503,12 @@ protected:
 
 	/** Handle elastic NPC collision with explicit impact speed (used by overlap sweep detection) */
 	void HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed);
+
+	/** Check for EMF proximity with other NPCs and trigger attraction knockback if threshold exceeded */
+	void CheckEMFProximityCollision();
+
+	/** Trigger EMF-based attraction knockback towards another NPC */
+	void TriggerEMFProximityKnockback(AShooterNPC* OtherNPC);
 
 	/** Called when capsule hits something - checks for wall slam */
 	UFUNCTION()

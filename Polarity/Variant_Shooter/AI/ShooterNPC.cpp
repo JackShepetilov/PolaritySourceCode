@@ -137,6 +137,12 @@ void AShooterNPC::Tick(float DeltaTime)
 		OnPolarityChanged.Broadcast(CurrentPolarity, ChargeValue);
 		PreviousPolarity = CurrentPolarity;
 	}
+
+	// Check for EMF proximity collision (only when not already in knockback)
+	if (bEnableEMFProximityKnockback && !bIsInKnockback)
+	{
+		CheckEMFProximityCollision();
+	}
 }
 
 float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -641,7 +647,7 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 	}
 }
 
-void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
+void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {
 	// Apply NPC's knockback distance multiplier
 	float FinalDistance = Distance * KnockbackDistanceMultiplier;
@@ -679,8 +685,8 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 		}
 	}
 
-	// Disable EMF forces during knockback for consistent physics
-	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	// Disable EMF forces during knockback for consistent physics (unless explicitly kept enabled)
+	if (bDisableEMFDuringKnockback && !bKeepEMFEnabled && EMFVelocityModifier)
 	{
 		EMFVelocityModifier->SetEnabled(false);
 	}
@@ -1130,6 +1136,135 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 
 	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] COLLISION COMPLETE! ImpactSpeed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
 		ImpactSpeed, NewSpeed, CollisionDamage, KnockbackDuration);
+}
+
+void AShooterNPC::CheckEMFProximityCollision()
+{
+	// Don't check if feature is disabled or already in knockback
+	if (!bEnableEMFProximityKnockback || bIsInKnockback || !EMFVelocityModifier)
+	{
+		return;
+	}
+
+	// Check cooldown to prevent spam
+	float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (CurrentTime - LastEMFProximityTriggerTime < EMFProximityTriggerCooldown)
+	{
+		return;
+	}
+
+	// Get current EMF acceleration
+	FVector CurrentAcceleration = EMFVelocityModifier->CurrentAcceleration;
+	float AccelerationMagnitude = CurrentAcceleration.Size();
+
+	// Check if acceleration exceeds threshold
+	if (AccelerationMagnitude < EMFProximityAccelerationThreshold)
+	{
+		return;
+	}
+
+	// Find nearby NPCs using overlap sphere
+	// We need to find the NPC that's causing this strong EMF force
+	TArray<FOverlapResult> Overlaps;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.bTraceComplex = false;
+
+	// Use a large search radius since EMF forces work at distance
+	float SearchRadius = 2000.0f; // 20 meters
+
+	bool bFoundOverlaps = GetWorld()->OverlapMultiByChannel(
+		Overlaps,
+		GetActorLocation(),
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeSphere(SearchRadius),
+		QueryParams
+	);
+
+	if (!bFoundOverlaps)
+	{
+		return;
+	}
+
+	// Get my charge
+	float MyCharge = EMFVelocityModifier->GetCharge();
+
+	// Charges too weak - skip
+	if (FMath::Abs(MyCharge) < KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	// Look for NPCs with opposite charge
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AShooterNPC* OtherNPC = Cast<AShooterNPC>(Overlap.GetActor());
+		if (!OtherNPC || OtherNPC->IsDead())
+		{
+			continue;
+		}
+
+		// Get other NPC's charge
+		UEMFVelocityModifier* OtherEMF = OtherNPC->EMFVelocityModifier;
+		if (!OtherEMF)
+		{
+			continue;
+		}
+
+		float OtherCharge = OtherEMF->GetCharge();
+
+		// Check for opposite charges (product is negative)
+		if (MyCharge * OtherCharge >= 0)
+		{
+			continue; // Same sign or one is neutral
+		}
+
+		// Use pointer comparison to ensure only ONE NPC triggers the event
+		// This prevents double-activation when both NPCs detect each other
+		if (this > OtherNPC)
+		{
+			continue; // Let the "lower" pointer handle it
+		}
+
+		// Found a valid target - trigger EMF proximity knockback
+		UE_LOG(LogTemp, Warning, TEXT("[EMF Proximity] %s detected opposite charge NPC %s - Acceleration=%.0f >= Threshold=%.0f, MyCharge=%.1f, OtherCharge=%.1f"),
+			*GetName(), *OtherNPC->GetName(), AccelerationMagnitude, EMFProximityAccelerationThreshold, MyCharge, OtherCharge);
+
+		TriggerEMFProximityKnockback(OtherNPC);
+		return; // Only trigger once per check
+	}
+}
+
+void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
+{
+	if (!OtherNPC || !EMFVelocityModifier || !OtherNPC->EMFVelocityModifier)
+	{
+		return;
+	}
+
+	// Mark cooldown for both NPCs
+	float CurrentTime = GetWorld()->GetTimeSeconds();
+	LastEMFProximityTriggerTime = CurrentTime;
+	OtherNPC->LastEMFProximityTriggerTime = CurrentTime;
+
+	// Calculate direction between NPCs (attraction - towards each other)
+	FVector ToOther = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+
+	UE_LOG(LogTemp, Warning, TEXT("[EMF Proximity] Triggering attraction knockback: %s <-> %s, Distance=%.0f, Duration=%.2f"),
+		*GetName(), *OtherNPC->GetName(), EMFProximityKnockbackDistance, EMFProximityKnockbackDuration);
+
+	// Apply knockback to BOTH NPCs towards each other
+	// Keep EMF enabled so attraction force continues to pull them together
+	// This NPC moves towards OtherNPC
+	ApplyKnockback(ToOther, EMFProximityKnockbackDistance, EMFProximityKnockbackDuration, OtherNPC->GetActorLocation(), true);
+
+	// OtherNPC moves towards this NPC
+	OtherNPC->ApplyKnockback(-ToOther, EMFProximityKnockbackDistance, EMFProximityKnockbackDuration, GetActorLocation(), true);
+
+	// EMFVelocityModifier will continue applying attraction force during knockback
+	// (unless bDisableEMFDuringKnockback is true, but we want it active for this mechanic)
+	// The collision system in UpdateKnockbackInterpolation() will handle the "explosion" when they meet
 }
 
 void AShooterNPC::EndKnockbackStun()
