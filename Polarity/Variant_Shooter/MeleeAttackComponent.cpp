@@ -1195,6 +1195,26 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		// The actual velocity is applied in UpdateLunge() - this function just maintains
 		// the magnetism target and can do additional target tracking/rotation
 
+		// ==================== Dynamic Z-Alignment ====================
+		// Update Z-component of LungeTargetPosition each frame to match target's current height
+		// This prevents player from floating in air if target moves vertically
+		if (OwnerCharacter)
+		{
+			FVector TargetPos = Target->GetActorLocation();
+			FVector PlayerPos = OwnerCharacter->GetActorLocation();
+
+			// Recalculate lunge position with updated target Z
+			FVector DirectionFromTarget = (PlayerPos - TargetPos);
+			DirectionFromTarget.Z = 0.0f; // Keep horizontal direction
+			DirectionFromTarget.Normalize();
+
+			float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
+			FVector NewLungePos = TargetPos + DirectionFromTarget * StopDistance;
+
+			// Update only Z to match target's current height (keep XY from original path calculation)
+			LungeTargetPosition.Z = NewLungePos.Z;
+		}
+
 		// Debug visualization for lunge direction
 		if (bEnableDebugVisualization && OwnerCharacter)
 		{
@@ -1212,6 +1232,8 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 				4.0f
 			);
 			DrawDebugSphere(GetWorld(), TargetPos, 30.0f, 8, FColor::Green, false, 0.0f);
+			// Visualize lunge target position (where player will stop)
+			DrawDebugSphere(GetWorld(), LungeTargetPosition, 20.0f, 8, FColor::Yellow, false, 0.0f);
 		}
 
 		// Optional: Rotate player to face target for better kick feel
@@ -1818,13 +1840,10 @@ void UMeleeAttackComponent::UpdateCameraFocus(float DeltaTime)
 
 	CameraFocusTimeRemaining -= DeltaTime;
 
-	// Continuously update target rotation to track moving enemies
-	if (AActor* Target = CameraFocusTarget.Get())
-	{
-		FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
-		CameraFocusTargetRotation = ToTarget.Rotation();
-		CameraFocusTargetRotation.Roll = CameraFocusStartRotation.Roll;
-	}
+	// ==================== Fixed Camera Focus ====================
+	// CameraFocusTargetRotation is calculated ONCE in StartCameraFocus()
+	// No continuous tracking - just smooth interpolation to the initial target rotation
+	// This prevents the "tracking" effect where camera constantly follows the enemy
 
 	// Calculate interpolation alpha based on remaining time
 	float Alpha = 1.0f - (CameraFocusTimeRemaining / CameraFocusDuration);
@@ -1833,13 +1852,8 @@ void UMeleeAttackComponent::UpdateCameraFocus(float DeltaTime)
 	// Apply focus strength to alpha for smoother or snappier feel
 	Alpha = FMath::Pow(Alpha, 1.0f / CameraFocusStrength);
 
-	// Interpolate rotation
-	FRotator NewRotation = FMath::RInterpTo(
-		CameraFocusStartRotation,
-		CameraFocusTargetRotation,
-		Alpha,
-		1.0f / DeltaTime  // High interp speed since we're using custom alpha
-	);
+	// Interpolate rotation from start to the FIXED target rotation
+	FRotator NewRotation = FMath::Lerp(CameraFocusStartRotation, CameraFocusTargetRotation, Alpha);
 
 	// Apply rotation to controller
 	OwnerController->SetControlRotation(NewRotation);
