@@ -444,6 +444,29 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 	return EStateTreeRunStatus::Running;
 }
 
+EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	// Get the instance data
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	// Sync InstanceData with Controller's current target
+	// This handles the case where delegates update Controller but can't update InstanceData (due to WeakContext invalidation)
+	AActor* ControllerTarget = InstanceData.Controller->GetCurrentTarget();
+
+	if (ControllerTarget != InstanceData.TargetActor)
+	{
+		InstanceData.TargetActor = ControllerTarget;
+		InstanceData.bHasTarget = IsValid(ControllerTarget);
+
+		if (IsValid(ControllerTarget))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Tick synced target from Controller: %s"), *ControllerTarget->GetName());
+		}
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
 void FStateTreeSenseEnemiesTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
 	// have we transitioned to another state?

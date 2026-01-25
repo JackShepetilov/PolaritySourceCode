@@ -298,6 +298,9 @@ struct FStateTreeSenseEnemiesTask : public FStateTreeTaskCommonBase
 	/** Runs when the owning state is entered */
 	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
 
+	/** Runs every tick while in this state */
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+
 	/** Runs when the owning state is ended */
 	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
 
