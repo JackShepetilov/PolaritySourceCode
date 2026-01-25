@@ -321,6 +321,22 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableEMFProximityKnockback"))
 	float EMFProximityTriggerCooldown = 0.5f;
 
+	/** Impulse multiplier based on total charge magnitude when EMF NPCs collide */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0.0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFDischargeImpulsePerCharge = 10.0f;
+
+	/** VFX to spawn at EMF discharge collision point */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (EditCondition = "bEnableEMFProximityKnockback"))
+	TObjectPtr<UNiagaraSystem> EMFDischargeVFX;
+
+	/** Scale for EMF discharge VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0.1", ClampMax = "10.0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFDischargeVFXScale = 1.0f;
+
+	/** Sound to play at EMF discharge collision */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (EditCondition = "bEnableEMFProximityKnockback"))
+	TObjectPtr<USoundBase> EMFDischargeSound;
+
 	// ==================== Melee Charge Transfer ====================
 
 	/** Charge change when hit by melee attack (opposite sign to player's gain) */

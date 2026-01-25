@@ -1073,6 +1073,29 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// Calculate collision direction (from me to other NPC)
 	FVector CollisionDirection = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
 
+	// ==================== EMF Discharge Detection ====================
+	// Check if this is an EMF-induced collision (opposite charges)
+	bool bIsEMFDischarge = false;
+	float MyCharge = 0.0f;
+	float OtherCharge = 0.0f;
+	float TotalChargeMagnitude = 0.0f;
+
+	if (bEnableEMFProximityKnockback && EMFVelocityModifier && OtherNPC->EMFVelocityModifier)
+	{
+		MyCharge = EMFVelocityModifier->GetCharge();
+		OtherCharge = OtherNPC->EMFVelocityModifier->GetCharge();
+
+		// Check for opposite charges (product is negative)
+		if (MyCharge * OtherCharge < 0.0f)
+		{
+			bIsEMFDischarge = true;
+			TotalChargeMagnitude = FMath::Abs(MyCharge) + FMath::Abs(OtherCharge);
+
+			UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] EMF DISCHARGE detected! MyCharge=%.1f, OtherCharge=%.1f, Total=%.1f"),
+				MyCharge, OtherCharge, TotalChargeMagnitude);
+		}
+	}
+
 	// Calculate collision damage based on impact speed
 	float CollisionDamage = 0.0f;
 	if (ImpactSpeed >= WallSlamVelocityThreshold)
@@ -1085,6 +1108,17 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// Calculate knockback duration for both NPCs based on new velocity
 	// Use distance-based formula from ApplyKnockback
 	float NewSpeed = ImpactSpeed * NPCCollisionImpulseMultiplier;
+
+	// Add EMF discharge bonus impulse if applicable
+	if (bIsEMFDischarge)
+	{
+		float EMFBonusSpeed = TotalChargeMagnitude * EMFDischargeImpulsePerCharge;
+		NewSpeed += EMFBonusSpeed;
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] EMF Discharge bonus: %.0f -> %.0f (bonus=%.0f from charge=%.1f)"),
+			ImpactSpeed * NPCCollisionImpulseMultiplier, NewSpeed, EMFBonusSpeed, TotalChargeMagnitude);
+	}
+
 	float KnockbackDistance = (NewSpeed * NewSpeed) / 2000.0f; // Simple physics approximation
 	float KnockbackDuration = KnockbackDistance / FMath::Max(NewSpeed, 1.0f);
 	KnockbackDuration = FMath::Clamp(KnockbackDuration, 0.3f, 2.0f); // Reasonable bounds
@@ -1113,25 +1147,65 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applied damage: %.1f to both NPCs"), CollisionDamage);
 	}
 
-	// Play sound at collision point
-	if (WallSlamSound)
+	// ==================== EMF Discharge Effects ====================
+	if (bIsEMFDischarge)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, CollisionPoint);
-	}
+		// Neutralize charges on both NPCs
+		if (EMFVelocityModifier)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Neutralizing charge: %s (%.1f -> 0)"), *GetName(), MyCharge);
+			EMFVelocityModifier->SetCharge(0.0f);
+		}
+		if (OtherNPC->EMFVelocityModifier)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Neutralizing charge: %s (%.1f -> 0)"), *OtherNPC->GetName(), OtherCharge);
+			OtherNPC->EMFVelocityModifier->SetCharge(0.0f);
+		}
 
-	// Spawn VFX at collision point
-	if (WallSlamVFX)
+		// Play EMF discharge sound
+		if (EMFDischargeSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, EMFDischargeSound, CollisionPoint);
+		}
+
+		// Spawn EMF discharge VFX
+		if (EMFDischargeVFX)
+		{
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+				GetWorld(),
+				EMFDischargeVFX,
+				CollisionPoint,
+				FRotator::ZeroRotator,
+				FVector(EMFDischargeVFXScale),
+				true,  // bAutoDestroy
+				true,  // bAutoActivate
+				ENCPoolMethod::None
+			);
+		}
+	}
+	else
 	{
-		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(),
-			WallSlamVFX,
-			CollisionPoint,
-			FRotator::ZeroRotator,
-			FVector(WallSlamVFXScale),
-			true,  // bAutoDestroy
-			true,  // bAutoActivate
-			ENCPoolMethod::None
-		);
+		// Regular collision - use wall slam effects
+		// Play sound at collision point
+		if (WallSlamSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, CollisionPoint);
+		}
+
+		// Spawn VFX at collision point
+		if (WallSlamVFX)
+		{
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+				GetWorld(),
+				WallSlamVFX,
+				CollisionPoint,
+				FRotator::ZeroRotator,
+				FVector(WallSlamVFXScale),
+				true,  // bAutoDestroy
+				true,  // bAutoActivate
+				ENCPoolMethod::None
+			);
+		}
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] COLLISION COMPLETE! ImpactSpeed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
