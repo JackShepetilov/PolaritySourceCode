@@ -499,10 +499,20 @@ void AMeleeNPC::SpawnMeleeWeapon()
 
 void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
 {
-	// Отменить dash если активен
+	// Парирование: если NPC в dash, умножаем knockback
+	float DistanceMultiplier = 1.0f;
 	if (bIsDashing)
 	{
+		DistanceMultiplier = DashKnockbackMultiplier;
 		EndDash();
+
+#if WITH_EDITOR
+		if (bDebugMeleeTraces && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
+				FString::Printf(TEXT("%s: PARRIED! Knockback x%.1f"), *GetName(), DashKnockbackMultiplier));
+		}
+#endif
 	}
 
 	// End damage window if still active
@@ -518,8 +528,8 @@ void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distan
 	// End attack state
 	bIsAttacking = false;
 
-
-	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation);
+	// Применить knockback с множителем
+	Super::ApplyKnockback(InKnockbackDirection, Distance * DistanceMultiplier, Duration, AttackerLocation);
 }
 
 // ==================== Dash Implementation ====================
@@ -545,7 +555,7 @@ bool AMeleeNPC::CanDash() const
 	return true;
 }
 
-bool AMeleeNPC::StartDash(const FVector& Direction, float Distance)
+bool AMeleeNPC::StartDash(const FVector& Direction, float Distance, AActor* TargetActor)
 {
 	// Проверка возможности рывка
 	if (!CanDash())
@@ -561,9 +571,38 @@ bool AMeleeNPC::StartDash(const FVector& Direction, float Distance)
 		return false;
 	}
 
-	// Вычисление начальной и конечной позиции
+	// Вычисление начальной позиции
 	FVector StartPos = GetActorLocation();
-	FVector EndPos = StartPos + DashDir * Distance;
+
+	// Вычисление конечной позиции
+	FVector EndPos;
+	if (bDashTracksTarget && IsValid(TargetActor))
+	{
+		// Dash к цели: вычисляем точку на расстоянии (AttackRange - Buffer) от цели
+		FVector ToTarget = TargetActor->GetActorLocation() - StartPos;
+		float DistanceToTarget = ToTarget.Size2D();
+		float DesiredDistance = AttackRange - DashAttackRangeBuffer;
+
+		// Если уже в нужной дистанции, не делаем dash
+		if (DistanceToTarget <= DesiredDistance)
+		{
+			UE_LOG(LogTemp, Verbose, TEXT("MeleeNPC::StartDash - Already at desired distance from target"));
+			return false;
+		}
+
+		// Вычисляем конечную точку: от цели в направлении к нам на расстояние DesiredDistance
+		FVector DirFromTarget = (StartPos - TargetActor->GetActorLocation()).GetSafeNormal2D();
+		EndPos = TargetActor->GetActorLocation() + DirFromTarget * DesiredDistance;
+
+		// Сохраняем цель для tracking
+		DashTargetActor = TargetActor;
+	}
+	else
+	{
+		// Статичный dash в направлении
+		EndPos = StartPos + DashDir * Distance;
+		DashTargetActor = nullptr;
+	}
 
 	// Валидация пути (NavMesh + коллизии)
 	if (!ValidateDashPath(StartPos, EndPos))
@@ -649,6 +688,27 @@ void AMeleeNPC::UpdateDashInterpolation(float DeltaTime)
 
 	// Обновить прошедшее время
 	DashElapsedTime += DeltaTime;
+
+	// Обновить целевую позицию если tracking включен
+	if (bDashTracksTarget && DashTargetActor.IsValid())
+	{
+		AActor* Target = DashTargetActor.Get();
+		FVector CurrentPos = GetActorLocation();
+		FVector ToTarget = Target->GetActorLocation() - CurrentPos;
+		float DistanceToTarget = ToTarget.Size2D();
+		float DesiredDistance = AttackRange - DashAttackRangeBuffer;
+
+		// Обновляем целевую точку: от цели к нам на расстояние DesiredDistance
+		FVector DirFromTarget = (CurrentPos - Target->GetActorLocation()).GetSafeNormal2D();
+		DashTargetPosition = Target->GetActorLocation() + DirFromTarget * DesiredDistance;
+
+		// Если уже достигли нужной дистанции, завершаем dash
+		if (DistanceToTarget <= DesiredDistance * 1.1f) // 10% tolerance
+		{
+			EndDash();
+			return;
+		}
+	}
 
 	// Вычислить альфу интерполяции
 	float Alpha = FMath::Clamp(DashElapsedTime / DashTotalDuration, 0.0f, 1.0f);

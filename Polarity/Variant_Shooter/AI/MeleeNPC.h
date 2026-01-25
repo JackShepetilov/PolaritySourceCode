@@ -99,6 +99,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash")
 	TObjectPtr<UAnimMontage> DashMontage = nullptr;
 
+	/** Запас расстояния от AttackRange для dash-to-attack (остановится на AttackRange - Buffer) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash", meta = (ClampMin = "0", ClampMax = "100"))
+	float DashAttackRangeBuffer = 50.0f;
+
+	/** Множитель импульса knockback если NPC получает удар во время dash (парирование) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash", meta = (ClampMin = "1.0", ClampMax = "5.0"))
+	float DashKnockbackMultiplier = 2.5f;
+
+	/** Если true, dash следит за движением цели. Если false, dash идёт к статичной точке */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash")
+	bool bDashTracksTarget = true;
+
 	// ==================== Debug ====================
 
 	/** If true, draw debug spheres for melee traces */
@@ -151,6 +163,9 @@ protected:
 
 	/** Общая длительность текущего рывка */
 	float DashTotalDuration = 0.0f;
+
+	/** Цель, за которой следит dash (если bDashTracksTarget = true) */
+	TWeakObjectPtr<AActor> DashTargetActor;
 
 	// ==================== Timers ====================
 
@@ -205,10 +220,11 @@ public:
 	/** Начать рывок в указанном направлении на указанную дистанцию
 	 *  @param Direction Направление рывка (будет нормализовано)
 	 *  @param Distance Дистанция рывка в см
+	 *  @param TargetActor Опциональная цель для tracking (если bDashTracksTarget = true)
 	 *  @return true если рывок успешно начат, false если невозможен
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee|Dash")
-	bool StartDash(const FVector& Direction, float Distance);
+	bool StartDash(const FVector& Direction, float Distance, AActor* TargetActor = nullptr);
 
 	/** Returns true если NPC сейчас выполняет рывок */
 	UFUNCTION(BlueprintPure, Category = "Melee|Dash")
