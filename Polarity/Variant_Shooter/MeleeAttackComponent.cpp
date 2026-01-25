@@ -671,15 +671,30 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 				// As we get closer, prioritize lunge velocity (which goes to zero)
 				PreservedVelocity = FMath::Lerp(RedirectedVelocity, LungeVelocity, SlowdownAlpha);
 
-				// Preserve Z velocity from gravity
-				PreservedVelocity.Z = Movement->Velocity.Z;
+				// ==================== Z-Axis Alignment ====================
+				// Align player to target's Z position during lock-on
+				// This creates smooth vertical movement to match enemy height
+				float PlayerZ = PlayerPos.Z;
+				float TargetZ = TargetPos.Z;
+				float ZDifference = TargetZ - PlayerZ;
+
+				// Interpolate Z position using same speed as XY movement
+				// Use InterpSpeed based on lunge speed
+				float ZInterpSpeed = Settings.LungeToTargetSpeed / FMath::Max(DistToTarget, 1.0f);
+				float ZVelocity = ZDifference * ZInterpSpeed;
+
+				// Clamp Z velocity to prevent too fast vertical movement
+				const float MaxZVelocity = 1000.0f;
+				ZVelocity = FMath::Clamp(ZVelocity, -MaxZVelocity, MaxZVelocity);
+
+				PreservedVelocity.Z = ZVelocity;
 
 #if WITH_EDITOR
 				if (GEngine && bEnableDebugVisualization)
 				{
 					GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Cyan,
-						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f, Alpha=%.2f"),
-							DistToTarget, PreservedVelocity.Size(), SlowdownAlpha));
+						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f, ZDiff=%.0f"),
+							DistToTarget, PreservedVelocity.Size(), ZDifference));
 				}
 #endif
 			}
@@ -1072,6 +1087,22 @@ void UMeleeAttackComponent::StartMagnetism()
 
 			// Start camera focus when lunge target is found
 			StartCameraFocus(ClosestTarget);
+
+			// Disable gravity and EMF during lock-on for smooth Z-alignment
+			if (OwnerCharacter)
+			{
+				if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+				{
+					Movement->GravityScale = 0.0f;
+				}
+
+				// Disable EMF if available
+				if (APolarityCharacter* PolarityChar = Cast<APolarityCharacter>(OwnerCharacter))
+				{
+					// TODO: Add EMF disable call here when EMF component is accessible
+					// PolarityChar->DisableEMF();
+				}
+			}
 		}
 	}
 }
@@ -1192,6 +1223,22 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 void UMeleeAttackComponent::StopMagnetism()
 {
 	MagnetismTarget.Reset();
+
+	// Restore gravity and EMF after lock-on ends (after Recovery phase)
+	if (OwnerCharacter)
+	{
+		if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+		{
+			Movement->GravityScale = 1.0f;
+		}
+
+		// Re-enable EMF if available
+		if (APolarityCharacter* PolarityChar = Cast<APolarityCharacter>(OwnerCharacter))
+		{
+			// TODO: Add EMF enable call here when EMF component is accessible
+			// PolarityChar->EnableEMF();
+		}
+	}
 }
 
 void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVector& ImpulseDirection, float ImpulseStrength)
@@ -1682,19 +1729,37 @@ void UMeleeAttackComponent::AutoDetectMeshReferences()
 
 void UMeleeAttackComponent::StartCameraFocus(AActor* Target)
 {
-	if (!bEnableCameraFocusOnLunge || !Target || !OwnerController)
+	if (!bEnableCameraFocusOnLunge || !Target || !OwnerController || !OwnerCharacter)
 	{
 		return;
 	}
 
 	CameraFocusTarget = Target;
+
+	// Calculate dynamic focus duration based on distance to target and lunge speed
+	// Camera should finish focusing at the same time as we reach the target
+	FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
+	float DistanceToTarget = ToTarget.Size();
+
+	if (Settings.LungeToTargetSpeed > 0.0f && DistanceToTarget > 0.0f)
+	{
+		// Time to reach target = Distance / Speed
+		CameraFocusDuration = DistanceToTarget / Settings.LungeToTargetSpeed;
+		// Clamp to reasonable values (min 0.1s, max 1.0s)
+		CameraFocusDuration = FMath::Clamp(CameraFocusDuration, 0.1f, 1.0f);
+	}
+	else
+	{
+		// Fallback to default duration if no lunge speed
+		CameraFocusDuration = 0.3f;
+	}
+
 	CameraFocusTimeRemaining = CameraFocusDuration;
 
 	// Store current camera rotation
 	CameraFocusStartRotation = OwnerController->GetControlRotation();
 
 	// Calculate target rotation (look at target)
-	FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
 	CameraFocusTargetRotation = ToTarget.Rotation();
 
 	// Preserve roll (usually zero for FPS)
@@ -1704,7 +1769,8 @@ void UMeleeAttackComponent::StartCameraFocus(AActor* Target)
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Cyan,
-			FString::Printf(TEXT("Camera Focus Started on %s"), *Target->GetName()));
+			FString::Printf(TEXT("Camera Focus Started on %s (Duration: %.2fs, Dist: %.0f)"),
+				*Target->GetName(), CameraFocusDuration, DistanceToTarget));
 	}
 #endif
 }
