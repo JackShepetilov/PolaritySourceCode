@@ -174,6 +174,10 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", EditCondition = "bLungeToTarget"))
 	float MinSpeedForLungeToTarget = 300.0f;
 
+	/** Distance buffer from AttackRange where lunge stops (AttackRange - Buffer) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "100", EditCondition = "bLungeToTarget"))
+	float LungeStopDistanceBuffer = 40.0f;
+
 	// ==================== Cool Kick ====================
 
 	/** Duration of the cool kick period (applied when hitting enemy in air without lunge) */
@@ -529,6 +533,9 @@ protected:
 	/** Target being pulled by magnetism */
 	UPROPERTY()
 	TWeakObjectPtr<AActor> MagnetismTarget;
+
+	/** Target position for lunge (calculated during magnetism start with path validation) */
+	FVector LungeTargetPosition = FVector::ZeroVector;
 
 	/** Cached owner velocity at attack start (for momentum calculations) */
 	FVector OwnerVelocityAtAttackStart = FVector::ZeroVector;

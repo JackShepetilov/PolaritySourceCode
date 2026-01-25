@@ -639,62 +639,47 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 		// If we have a magnetism target and lunge-to-target is enabled, move toward them
 		if (Settings.bLungeToTarget && MagnetismTarget.IsValid())
 		{
-			AActor* Target = MagnetismTarget.Get();
+			// ==================== Lunge to Pre-Calculated Target Position ====================
+			// LungeTargetPosition was validated in StartMagnetism() via SweepSphere
 			FVector PlayerPos = OwnerCharacter->GetActorLocation();
-			FVector TargetPos = Target->GetActorLocation();
-			FVector ToTarget = TargetPos - PlayerPos;
-			float DistToTarget = ToTarget.Size();
+			FVector ToLungeTarget = LungeTargetPosition - PlayerPos;
+			float DistToLungeTarget = ToLungeTarget.Size();
 
 			// Only lunge if we're moving fast enough (prevents weak lunges when stationary)
 			float CurrentSpeed = OwnerVelocityAtAttackStart.Size();
-			if (CurrentSpeed >= Settings.MinSpeedForLungeToTarget && DistToTarget > 50.0f)
+			if (CurrentSpeed >= Settings.MinSpeedForLungeToTarget && DistToLungeTarget > 10.0f)
 			{
-				FVector LungeToTargetDir = ToTarget.GetSafeNormal();
+				// Interpolate position using LungeDuration
+				// Calculate what percentage of the lunge we've completed
+				float LungeAlpha = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
 
-				// Calculate how close we are to the target (0 = far, 1 = close)
-				// Start slowing down when we get within 200 units
-				const float SlowdownDistance = 200.0f;
-				float SlowdownAlpha = 1.0f - FMath::Clamp(DistToTarget / SlowdownDistance, 0.0f, 1.0f);
+				// Calculate velocity needed to reach target position
+				// Use simple linear interpolation based on time remaining
+				float TimeRemaining = Settings.LungeDuration * (1.0f - LungeAlpha);
+				if (TimeRemaining > 0.01f)
+				{
+					// Velocity = Distance / Time
+					PreservedVelocity = ToLungeTarget / TimeRemaining;
 
-				// Calculate current velocity direction
-				FVector CurrentVelocityDir = PreservedVelocity.GetSafeNormal();
-
-				// Redirect velocity toward target
-				FVector RedirectedVelocity = FMath::Lerp(CurrentVelocityDir, LungeToTargetDir, 0.5f).GetSafeNormal();
-				RedirectedVelocity *= PreservedVelocity.Size();
-
-				// Interpolate velocity to zero as we approach the target
-				float TargetSpeed = FMath::Lerp(Settings.LungeToTargetSpeed, 0.0f, SlowdownAlpha);
-				FVector LungeVelocity = LungeToTargetDir * TargetSpeed;
-
-				// Blend redirected velocity with lunge velocity
-				// As we get closer, prioritize lunge velocity (which goes to zero)
-				PreservedVelocity = FMath::Lerp(RedirectedVelocity, LungeVelocity, SlowdownAlpha);
-
-				// ==================== Z-Axis Alignment ====================
-				// Align player to target's Z position during lock-on
-				// This creates smooth vertical movement to match enemy height
-				float PlayerZ = PlayerPos.Z;
-				float TargetZ = TargetPos.Z;
-				float ZDifference = TargetZ - PlayerZ;
-
-				// Interpolate Z position using same speed as XY movement
-				// Use InterpSpeed based on lunge speed
-				float ZInterpSpeed = Settings.LungeToTargetSpeed / FMath::Max(DistToTarget, 1.0f);
-				float ZVelocity = ZDifference * ZInterpSpeed;
-
-				// Clamp Z velocity to prevent too fast vertical movement
-				const float MaxZVelocity = 1000.0f;
-				ZVelocity = FMath::Clamp(ZVelocity, -MaxZVelocity, MaxZVelocity);
-
-				PreservedVelocity.Z = ZVelocity;
+					// Clamp total velocity to prevent excessive speeds
+					float MaxSpeed = 3000.0f;
+					if (PreservedVelocity.Size() > MaxSpeed)
+					{
+						PreservedVelocity = PreservedVelocity.GetSafeNormal() * MaxSpeed;
+					}
+				}
+				else
+				{
+					// Almost there - stop moving
+					PreservedVelocity = FVector::ZeroVector;
+				}
 
 #if WITH_EDITOR
 				if (GEngine && bEnableDebugVisualization)
 				{
 					GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Cyan,
-						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f, ZDiff=%.0f"),
-							DistToTarget, PreservedVelocity.Size(), ZDifference));
+						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f, Progress=%.2f"),
+							DistToLungeTarget, PreservedVelocity.Size(), LungeAlpha));
 				}
 #endif
 			}
@@ -1081,28 +1066,92 @@ void UMeleeAttackComponent::StartMagnetism()
 			}
 		}
 
-		if (ClosestTarget)
+		if (ClosestTarget && Settings.bLungeToTarget)
 		{
-			MagnetismTarget = ClosestTarget;
+			// ==================== Calculate Lunge Target Position ====================
+			// Target position is on the line player->enemy at distance (AttackRange - Buffer) from enemy
+			FVector PlayerPos = OwnerCharacter->GetActorLocation();
+			FVector TargetPos = ClosestTarget->GetActorLocation();
+			FVector ToTarget = TargetPos - PlayerPos;
+			float DistanceToTarget = ToTarget.Size();
 
-			// Start camera focus when lunge target is found
-			StartCameraFocus(ClosestTarget);
+			// Calculate ideal stop position
+			float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
+			FVector DirectionFromTarget = (PlayerPos - TargetPos).GetSafeNormal();
+			FVector IdealLungePos = TargetPos + DirectionFromTarget * StopDistance;
 
-			// Disable gravity and EMF during lock-on for smooth Z-alignment
-			if (OwnerCharacter)
+			// ==================== Path Validation via SweepSphere ====================
+			// Sweep a sphere from player to ideal position to check for obstacles
+			FHitResult SweepHit;
+			FCollisionQueryParams SweepParams;
+			SweepParams.AddIgnoredActor(OwnerCharacter);
+			SweepParams.AddIgnoredActor(ClosestTarget); // Ignore target itself
+
+			bool bPathBlocked = GetWorld()->SweepSingleByChannel(
+				SweepHit,
+				PlayerPos,
+				IdealLungePos,
+				FQuat::Identity,
+				ECC_Visibility, // Check for walls/geometry
+				FCollisionShape::MakeSphere(Settings.LungeStopDistanceBuffer),
+				SweepParams
+			);
+
+			// Debug visualization for path validation
+			if (bEnableDebugVisualization)
 			{
+				FColor PathColor = bPathBlocked ? FColor::Red : FColor::Green;
+				DrawDebugSphere(GetWorld(), IdealLungePos, Settings.LungeStopDistanceBuffer, 12, PathColor, false, DebugShapeDuration);
+				DrawDebugLine(GetWorld(), PlayerPos, IdealLungePos, PathColor, false, DebugShapeDuration, 0, 2.0f);
+			}
+
+			// If path is clear, establish lock-on
+			if (!bPathBlocked)
+			{
+				MagnetismTarget = ClosestTarget;
+				LungeTargetPosition = IdealLungePos;
+
+				// Start camera focus when lunge target is found
+				StartCameraFocus(ClosestTarget);
+
+				// Disable gravity and EMF during lock-on for smooth Z-alignment
 				if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
 				{
 					Movement->GravityScale = 0.0f;
 				}
 
-				// Disable EMF if available
 				if (APolarityCharacter* PolarityChar = Cast<APolarityCharacter>(OwnerCharacter))
 				{
 					// TODO: Add EMF disable call here when EMF component is accessible
 					// PolarityChar->DisableEMF();
 				}
+
+#if WITH_EDITOR
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Green,
+						FString::Printf(TEXT("Lock-On: Distance=%.0f, StopAt=%.0f from target"),
+							DistanceToTarget, StopDistance));
+				}
+#endif
 			}
+			else
+			{
+				// Path blocked - cancel lock-on
+#if WITH_EDITOR
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Red,
+						TEXT("Lock-On FAILED: Path blocked"));
+				}
+#endif
+			}
+		}
+		else if (ClosestTarget)
+		{
+			// No lunge-to-target - simple magnetism without path validation
+			MagnetismTarget = ClosestTarget;
+			StartCameraFocus(ClosestTarget);
 		}
 	}
 }
@@ -1736,30 +1785,15 @@ void UMeleeAttackComponent::StartCameraFocus(AActor* Target)
 
 	CameraFocusTarget = Target;
 
-	// Calculate dynamic focus duration based on distance to target and lunge speed
-	// Camera should finish focusing at the same time as we reach the target
-	FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
-	float DistanceToTarget = ToTarget.Size();
-
-	if (Settings.LungeToTargetSpeed > 0.0f && DistanceToTarget > 0.0f)
-	{
-		// Time to reach target = Distance / Speed
-		CameraFocusDuration = DistanceToTarget / Settings.LungeToTargetSpeed;
-		// Clamp to reasonable values (min 0.1s, max 1.0s)
-		CameraFocusDuration = FMath::Clamp(CameraFocusDuration, 0.1f, 1.0f);
-	}
-	else
-	{
-		// Fallback to default duration if no lunge speed
-		CameraFocusDuration = 0.3f;
-	}
-
+	// Use LungeDuration for camera focus - camera and movement interpolate together
+	CameraFocusDuration = Settings.LungeDuration;
 	CameraFocusTimeRemaining = CameraFocusDuration;
 
 	// Store current camera rotation
 	CameraFocusStartRotation = OwnerController->GetControlRotation();
 
 	// Calculate target rotation (look at target)
+	FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
 	CameraFocusTargetRotation = ToTarget.Rotation();
 
 	// Preserve roll (usually zero for FPS)
@@ -1769,8 +1803,8 @@ void UMeleeAttackComponent::StartCameraFocus(AActor* Target)
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Cyan,
-			FString::Printf(TEXT("Camera Focus Started on %s (Duration: %.2fs, Dist: %.0f)"),
-				*Target->GetName(), CameraFocusDuration, DistanceToTarget));
+			FString::Printf(TEXT("Camera Focus Started on %s (Duration: %.2fs)"),
+				*Target->GetName(), CameraFocusDuration));
 	}
 #endif
 }
