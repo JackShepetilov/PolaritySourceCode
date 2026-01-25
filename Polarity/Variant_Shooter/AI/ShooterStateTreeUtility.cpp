@@ -230,7 +230,11 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				// get the instance data inside the lambda
 				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
 
+				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: StrongContext IsValid=%s"), StrongContext.IsValid() ? TEXT("YES") : TEXT("NO"));
+
 				if (FInstanceDataType* LambdaInstanceData = StrongContext.GetInstanceDataPtr<FInstanceDataType>())
+				{
+					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Got LambdaInstanceData successfully"));
 				{
 					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking tag '%s' on %s - HasTag: %s"),
 						*LambdaInstanceData->SenseTag.ToString(),
@@ -302,6 +306,10 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 							}
 						}
 					}
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("SenseEnemies: Failed to get LambdaInstanceData! StrongContext invalid or wrong type"));
 				}
 			}
 		);

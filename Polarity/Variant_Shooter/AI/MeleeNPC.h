@@ -85,6 +85,20 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Melee|Weapon")
 	TObjectPtr<AActor> MeleeWeaponActor;
 
+	// ==================== Dash Parameters ====================
+
+	/** Длительность рывка в секундах */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float DashDuration = 0.3f;
+
+	/** Кулдаун между рывками в секундах */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash", meta = (ClampMin = "0.5", ClampMax = "5.0"))
+	float DashCooldown = 2.0f;
+
+	/** Опциональная анимация рывка (может быть null - рывок работает без анимации) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash")
+	TObjectPtr<UAnimMontage> DashMontage = nullptr;
+
 	// ==================== Debug ====================
 
 	/** If true, draw debug spheres for melee traces */
@@ -114,6 +128,29 @@ protected:
 
 	/** Current attack target */
 	TWeakObjectPtr<AActor> CurrentMeleeTarget;
+
+	// ==================== Dash Runtime State ====================
+
+	/** True когда NPC выполняет рывок */
+	bool bIsDashing = false;
+
+	/** Время последнего рывка (для кулдауна) */
+	float LastDashTime = -1.0f;
+
+	/** Начальная позиция рывка */
+	FVector DashStartPosition = FVector::ZeroVector;
+
+	/** Целевая позиция рывка */
+	FVector DashTargetPosition = FVector::ZeroVector;
+
+	/** Направление рывка (нормализованное) */
+	FVector DashDirection = FVector::ZeroVector;
+
+	/** Прошедшее время рывка */
+	float DashElapsedTime = 0.0f;
+
+	/** Общая длительность текущего рывка */
+	float DashTotalDuration = 0.0f;
 
 	// ==================== Timers ====================
 
@@ -163,6 +200,24 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsAttacking() const { return bIsAttacking; }
 
+	// ==================== Dash Interface ====================
+
+	/** Начать рывок в указанном направлении на указанную дистанцию
+	 *  @param Direction Направление рывка (будет нормализовано)
+	 *  @param Distance Дистанция рывка в см
+	 *  @return true если рывок успешно начат, false если невозможен
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Dash")
+	bool StartDash(const FVector& Direction, float Distance);
+
+	/** Returns true если NPC сейчас выполняет рывок */
+	UFUNCTION(BlueprintPure, Category = "Melee|Dash")
+	bool IsDashing() const { return bIsDashing; }
+
+	/** Returns true если NPC может начать рывок (не в кулдауне, не мёртв, не в knockback, не в dash) */
+	UFUNCTION(BlueprintPure, Category = "Melee|Dash")
+	bool CanDash() const;
+
 	// ==================== AnimNotify Support ====================
 
 	/** Call from AnimNotify to start damage window (when not using timer) */
@@ -198,4 +253,19 @@ protected:
 
 	/** Spawn and attach melee weapon if class is set */
 	void SpawnMeleeWeapon();
+
+	// ==================== Internal Dash Logic ====================
+
+	/** Обновление интерполяции позиции во время рывка (вызывается из Tick) */
+	void UpdateDashInterpolation(float DeltaTime);
+
+	/** Завершить рывок и восстановить состояние */
+	void EndDash();
+
+	/** Валидация пути рывка - проверка NavMesh и коллизий
+	 *  @param StartPos Начальная позиция
+	 *  @param EndPos Конечная позиция
+	 *  @return true если путь валиден
+	 */
+	bool ValidateDashPath(const FVector& StartPos, const FVector& EndPos) const;
 };

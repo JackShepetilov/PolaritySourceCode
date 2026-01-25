@@ -3,9 +3,12 @@
 
 #include "MeleeNPC.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Animation/AnimInstance.h"
 #include "AIController.h"
+#include "Navigation/PathFollowingComponent.h"
+#include "NavigationSystem.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Engine/DamageEvents.h"
@@ -13,6 +16,7 @@
 #include "DrawDebugHelpers.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
+#include "EMFVelocityModifier.h"
 
 AMeleeNPC::AMeleeNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -44,6 +48,12 @@ void AMeleeNPC::BeginPlay()
 void AMeleeNPC::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Обновление интерполяции рывка если активен
+	if (bIsDashing)
+	{
+		UpdateDashInterpolation(DeltaTime);
+	}
 
 	// Perform melee trace if damage window is active
 	if (bDamageWindowActive && !bIsDead)
@@ -173,7 +183,8 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 
 bool AMeleeNPC::CanAttack() const
 {
-	if (bIsDead || bIsAttacking || bIsInKnockback)
+	// Нельзя атаковать если мёртв, уже атакует, в knockback или в dash
+	if (bIsDead || bIsAttacking || bIsInKnockback || bIsDashing)
 	{
 		return false;
 	}
@@ -196,7 +207,12 @@ bool AMeleeNPC::IsTargetInAttackRange(AActor* Target) const
 	}
 
 	float Distance = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
-	return Distance <= AttackRange;
+	bool bInRange = Distance <= AttackRange;
+
+	UE_LOG(LogTemp, Warning, TEXT("IsTargetInAttackRange: Distance=%.2f, AttackRange=%.2f, InRange=%s"),
+		Distance, AttackRange, bInRange ? TEXT("YES") : TEXT("NO"));
+
+	return bInRange;
 }
 
 void AMeleeNPC::NotifyDamageWindowStart()
@@ -483,6 +499,12 @@ void AMeleeNPC::SpawnMeleeWeapon()
 
 void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
 {
+	// Отменить dash если активен
+	if (bIsDashing)
+	{
+		EndDash();
+	}
+
 	// End damage window if still active
 	if (bDamageWindowActive)
 	{
@@ -495,7 +517,308 @@ void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distan
 
 	// End attack state
 	bIsAttacking = false;
-	
+
 
 	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation);
+}
+
+// ==================== Dash Implementation ====================
+
+bool AMeleeNPC::CanDash() const
+{
+	// Нельзя рывок если мёртв, уже в рывке, в knockback или атакует
+	if (bIsDead || bIsDashing || bIsInKnockback || bIsAttacking)
+	{
+		return false;
+	}
+
+	// Проверка кулдауна
+	if (LastDashTime > 0.0f)
+	{
+		float CurrentTime = GetWorld()->GetTimeSeconds();
+		if ((CurrentTime - LastDashTime) < DashCooldown)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool AMeleeNPC::StartDash(const FVector& Direction, float Distance)
+{
+	// Проверка возможности рывка
+	if (!CanDash())
+	{
+		return false;
+	}
+
+	// Нормализация направления (только горизонтальная плоскость)
+	FVector DashDir = Direction.GetSafeNormal2D();
+	if (DashDir.IsNearlyZero())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MeleeNPC::StartDash - Invalid direction (zero vector)"));
+		return false;
+	}
+
+	// Вычисление начальной и конечной позиции
+	FVector StartPos = GetActorLocation();
+	FVector EndPos = StartPos + DashDir * Distance;
+
+	// Валидация пути (NavMesh + коллизии)
+	if (!ValidateDashPath(StartPos, EndPos))
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("MeleeNPC::StartDash - Path validation failed"));
+		return false;
+	}
+
+	// Сохранение параметров рывка
+	DashStartPosition = StartPos;
+	DashTargetPosition = EndPos;
+	DashDirection = DashDir;
+	DashElapsedTime = 0.0f;
+	DashTotalDuration = DashDuration;
+	LastDashTime = GetWorld()->GetTimeSeconds();
+	bIsDashing = true;
+
+	// Остановить AI pathfinding
+	if (AController* MyController = GetController())
+	{
+		if (AAIController* AIController = Cast<AAIController>(MyController))
+		{
+			if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
+			{
+				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
+			}
+			AIController->StopMovement();
+		}
+	}
+
+	// Отключить EMF силы во время рывка (как в knockback)
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	// Остановить текущее движение
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->StopActiveMovement();
+		CharMovement->Velocity = FVector::ZeroVector;
+	}
+
+	// Воспроизвести анимацию рывка если указана
+	if (DashMontage)
+	{
+		if (USkeletalMeshComponent* TPMesh = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+			{
+				// Рассчитать скорость воспроизведения чтобы соответствовать длительности рывка
+				float MontageLength = DashMontage->GetPlayLength();
+				float PlayRate = (MontageLength > 0.0f) ? MontageLength / DashTotalDuration : 1.0f;
+				AnimInstance->Montage_Play(DashMontage, PlayRate);
+			}
+		}
+	}
+
+	// Повернуть в направлении рывка
+	if (!DashDir.IsNearlyZero())
+	{
+		SetActorRotation(DashDir.Rotation());
+	}
+
+#if WITH_EDITOR
+	if (bDebugMeleeTraces && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Blue,
+			FString::Printf(TEXT("%s: Started DASH - Dir=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
+				*GetName(), DashDir.X, DashDir.Y, DashDir.Z, Distance, DashTotalDuration));
+	}
+#endif
+
+	return true;
+}
+
+void AMeleeNPC::UpdateDashInterpolation(float DeltaTime)
+{
+	if (!bIsDashing || DashTotalDuration <= 0.0f)
+	{
+		return;
+	}
+
+	// Обновить прошедшее время
+	DashElapsedTime += DeltaTime;
+
+	// Вычислить альфу интерполяции
+	float Alpha = FMath::Clamp(DashElapsedTime / DashTotalDuration, 0.0f, 1.0f);
+
+	// Ease-out для плавного завершения (как в knockback)
+	// Линейная скорость для первых 90%, замедление для последних 10%
+	float EasedAlpha;
+	if (Alpha < 0.9f)
+	{
+		EasedAlpha = Alpha;
+	}
+	else
+	{
+		float LastSegmentAlpha = (Alpha - 0.9f) / 0.1f;
+		float EasedSegment = FMath::InterpEaseOut(0.0f, 0.1f, LastSegmentAlpha, 2.0f);
+		EasedAlpha = 0.9f + EasedSegment;
+	}
+
+	// Вычислить следующую позицию
+	FVector CurrentPos = GetActorLocation();
+	FVector NextPos = FMath::Lerp(DashStartPosition, DashTargetPosition, EasedAlpha);
+
+	// Проверка коллизий по пути
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	FHitResult Hit;
+
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	float CapsuleRadius = Capsule ? Capsule->GetScaledCapsuleRadius() : 34.0f;
+	float CapsuleHalfHeight = Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 88.0f;
+
+	bool bBlocked = GetWorld()->SweepSingleByChannel(
+		Hit,
+		CurrentPos,
+		NextPos,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight),
+		QueryParams
+	);
+
+	if (bBlocked && Hit.bBlockingHit)
+	{
+		// Столкнулись с препятствием - остановить рывок
+		NextPos = Hit.Location;
+		EndDash();
+
+#if WITH_EDITOR
+		if (bDebugMeleeTraces && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+				FString::Printf(TEXT("%s: Dash blocked by %s"),
+					*GetName(), Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("World")));
+		}
+#endif
+		return;
+	}
+
+	// Переместить персонажа
+	SetActorLocation(NextPos, true);
+
+	// Обновить velocity для визуала и анимаций
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		FVector FrameVelocity = (NextPos - CurrentPos) / DeltaTime;
+		CharMovement->Velocity = FrameVelocity;
+	}
+
+	// Проверка завершения рывка
+	if (Alpha >= 1.0f)
+	{
+		EndDash();
+	}
+}
+
+void AMeleeNPC::EndDash()
+{
+	if (!bIsDashing)
+	{
+		return;
+	}
+
+	bIsDashing = false;
+
+	// Остановить velocity
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->Velocity = FVector::ZeroVector;
+	}
+
+	// Включить EMF обратно
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(true);
+	}
+
+	// Остановить анимацию рывка если играет
+	if (DashMontage)
+	{
+		if (USkeletalMeshComponent* TPMesh = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+			{
+				if (AnimInstance->Montage_IsPlaying(DashMontage))
+				{
+					AnimInstance->Montage_Stop(0.2f, DashMontage);
+				}
+			}
+		}
+	}
+
+#if WITH_EDITOR
+	if (bDebugMeleeTraces && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Cyan,
+			FString::Printf(TEXT("%s: Dash ENDED"), *GetName()));
+	}
+#endif
+}
+
+bool AMeleeNPC::ValidateDashPath(const FVector& StartPos, const FVector& EndPos) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	// 1. Проверка NavMesh - конечная точка должна быть на навигационной сетке
+	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
+	if (NavSys)
+	{
+		FNavLocation NavLoc;
+		// Расширенный query extent для учёта высоты
+		FVector QueryExtent(50.0f, 50.0f, 100.0f);
+		bool bOnNavMesh = NavSys->ProjectPointToNavigation(EndPos, NavLoc, QueryExtent);
+
+		if (!bOnNavMesh)
+		{
+			UE_LOG(LogTemp, Verbose, TEXT("ValidateDashPath: End position not on NavMesh"));
+			return false;
+		}
+	}
+
+	// 2. Проверка коллизий по пути с помощью sphere trace
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.bTraceComplex = false;
+
+	FHitResult Hit;
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	float CapsuleRadius = Capsule ? Capsule->GetScaledCapsuleRadius() : 34.0f;
+
+	bool bBlocked = World->SweepSingleByChannel(
+		Hit,
+		StartPos,
+		EndPos,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeSphere(CapsuleRadius),
+		QueryParams
+	);
+
+	if (bBlocked && Hit.bBlockingHit)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("ValidateDashPath: Path blocked by %s at distance %.1f"),
+			Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("World"),
+			FVector::Dist(StartPos, Hit.Location));
+		return false;
+	}
+
+	return true;
 }
