@@ -1010,15 +1010,9 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 	// Apply knockback to myself (backwards)
 	ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
 
-#if WITH_EDITOR
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green,
-			FString::Printf(TEXT("Applying knockback to OTHER NPC %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
-				*OtherNPC->GetName(), CollisionDirection.X, CollisionDirection.Y, CollisionDirection.Z,
-				KnockbackDistance, KnockbackDuration));
-	}
-#endif
+	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to OTHER NPC %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
+		*OtherNPC->GetName(), CollisionDirection.X, CollisionDirection.Y, CollisionDirection.Z,
+		KnockbackDistance, KnockbackDuration);
 
 	// Apply knockback to other NPC (forwards)
 	OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
@@ -1052,14 +1046,8 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 		);
 	}
 
-#if WITH_EDITOR
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
-			FString::Printf(TEXT("NPC COLLISION! Speed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
-				MySpeed, NewSpeed, CollisionDamage, KnockbackDuration));
-	}
-#endif
+	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] COLLISION COMPLETE! Speed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
+		MySpeed, NewSpeed, CollisionDamage, KnockbackDuration);
 }
 
 void AShooterNPC::EndKnockbackStun()
@@ -1236,14 +1224,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 	{
 		if (AShooterNPC* OtherNPC = Cast<AShooterNPC>(OtherActor))
 		{
-#if WITH_EDITOR
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
-					FString::Printf(TEXT("%s hit NPC %s - Dead=%d, Velocity=%.0f"),
-						*GetName(), *OtherNPC->GetName(), OtherNPC->IsDead(), PreviousTickVelocity.Size()));
-			}
-#endif
+			UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] %s hit NPC %s - Dead=%d, Velocity=%.0f"),
+				*GetName(), *OtherNPC->GetName(), OtherNPC->IsDead(), PreviousTickVelocity.Size());
 
 			// Check if other NPC is alive and not already dead
 			if (!OtherNPC->IsDead())
@@ -1256,14 +1238,11 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 					HandleElasticNPCCollision(OtherNPC, Hit.ImpactPoint);
 					return;
 				}
-#if WITH_EDITOR
-				else if (GEngine)
+				else
 				{
-					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
-						FString::Printf(TEXT("NPC collision too slow: %.0f < %.0f"),
-							VelocityMagnitude, NPCCollisionMinVelocity));
+					UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Too slow: %.0f < %.0f"),
+						VelocityMagnitude, NPCCollisionMinVelocity);
 				}
-#endif
 			}
 		}
 	}
