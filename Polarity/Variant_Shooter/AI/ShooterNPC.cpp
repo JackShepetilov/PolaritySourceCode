@@ -1124,6 +1124,13 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
+	// Only apply wall slam damage during knockback
+	// This prevents damage from normal movement collisions
+	if (!bIsInKnockback)
+	{
+		return;
+	}
+
 	// Check cooldown to prevent multi-trigger on same impact
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 	if (CurrentTime - LastWallSlamTime < WallSlamCooldown)
