@@ -281,9 +281,14 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 						// Update InstanceData only if still in this state
 						if (InstanceData)
 						{
+							UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: InstanceData is valid, updating TargetActor and bHasTarget"));
 							InstanceData->TargetActor = SensedActor;
 							InstanceData->bHasTarget = true;
 							InstanceData->bHasInvestigateLocation = false;
+						}
+						else
+						{
+							UE_LOG(LogTemp, Error, TEXT("SenseEnemies: InstanceData is NULL! Cannot update StateTree output"));
 						}
 
 					// no direct line of sight to target
