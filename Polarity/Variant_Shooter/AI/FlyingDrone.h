@@ -146,7 +146,7 @@ protected:
 	virtual FVector GetWeaponTargetLocation() override;
 
 	/** Override knockback for flying movement - uses velocity-based launch */
-	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector) override;
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
 
 public:
 

@@ -497,7 +497,7 @@ void AMeleeNPC::SpawnMeleeWeapon()
 	}
 }
 
-void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation)
+void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {
 	// Парирование: если NPC в dash, умножаем knockback
 	float DistanceMultiplier = 1.0f;
@@ -529,7 +529,7 @@ void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distan
 	bIsAttacking = false;
 
 	// Применить knockback с множителем
-	Super::ApplyKnockback(InKnockbackDirection, Distance * DistanceMultiplier, Duration, AttackerLocation);
+	Super::ApplyKnockback(InKnockbackDirection, Distance * DistanceMultiplier, Duration, AttackerLocation, bKeepEMFEnabled);
 }
 
 // ==================== Dash Implementation ====================
