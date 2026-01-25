@@ -797,6 +797,72 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 		}
 	}
 
+	// ==================== NPC-NPC Collision Detection (Overlap Sweep) ====================
+	// Check for NPC collision BEFORE SetActorLocation() to get accurate velocity
+	// OnCapsuleHit fires AFTER physics contact when velocity is already dampened
+	if (bEnableNPCCollision && GetWorld())
+	{
+		UCapsuleComponent* Capsule = GetCapsuleComponent();
+		if (Capsule)
+		{
+			float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+			float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+
+			// Use slightly larger radius for early detection
+			float DetectionRadius = CapsuleRadius * 1.1f;
+
+			FCollisionQueryParams QueryParams;
+			QueryParams.AddIgnoredActor(this);
+			QueryParams.bTraceComplex = false;
+
+			TArray<FOverlapResult> Overlaps;
+			bool bHasOverlaps = GetWorld()->OverlapMultiByChannel(
+				Overlaps,
+				NextPos,
+				FQuat::Identity,
+				ECC_Pawn,
+				FCollisionShape::MakeCapsule(DetectionRadius, CapsuleHalfHeight),
+				QueryParams
+			);
+
+			if (bHasOverlaps)
+			{
+				for (const FOverlapResult& Overlap : Overlaps)
+				{
+					AShooterNPC* OtherNPC = Cast<AShooterNPC>(Overlap.GetActor());
+					if (OtherNPC && !OtherNPC->IsDead())
+					{
+						// Calculate knockback velocity from Distance/Duration (not PreviousTickVelocity)
+						// This gives us the TRUE knockback speed before any physics dampening
+						float TotalDistance = FVector::Dist(KnockbackStartPosition, KnockbackTargetPosition);
+						float KnockbackSpeed = (KnockbackTotalDuration > 0.0f) ? TotalDistance / KnockbackTotalDuration : 0.0f;
+
+						UE_LOG(LogTemp, Warning, TEXT("[NPC Collision SWEEP] %s detected NPC %s - KnockbackSpeed=%.0f (from Distance=%.0f / Duration=%.2f), MinVelocity=%.0f"),
+							*GetName(), *OtherNPC->GetName(), KnockbackSpeed, TotalDistance, KnockbackTotalDuration, NPCCollisionMinVelocity);
+
+						if (KnockbackSpeed >= NPCCollisionMinVelocity)
+						{
+							// Calculate collision point (midpoint between the two NPCs)
+							FVector CollisionPoint = (CurrentPos + OtherNPC->GetActorLocation()) * 0.5f;
+
+							UE_LOG(LogTemp, Warning, TEXT("[NPC Collision SWEEP] TRIGGERING elastic collision! Speed=%.0f >= Threshold=%.0f"),
+								KnockbackSpeed, NPCCollisionMinVelocity);
+
+							// Handle elastic collision with computed knockback velocity
+							HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, KnockbackSpeed);
+							return; // Stop interpolation after collision
+						}
+						else
+						{
+							UE_LOG(LogTemp, Warning, TEXT("[NPC Collision SWEEP] Too slow: %.0f < %.0f"),
+								KnockbackSpeed, NPCCollisionMinVelocity);
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Check for wall collision before moving
 	FHitResult WallHit;
 	if (CheckKnockbackWallCollision(CurrentPos, NextPos, WallHit))
@@ -971,6 +1037,21 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 
 void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector& CollisionPoint)
 {
+	// Legacy function - use computed knockback speed from Distance/Duration
+	if (!OtherNPC)
+	{
+		return;
+	}
+
+	// Calculate knockback speed from stored knockback parameters
+	float TotalDistance = FVector::Dist(KnockbackStartPosition, KnockbackTargetPosition);
+	float KnockbackSpeed = (KnockbackTotalDuration > 0.0f) ? TotalDistance / KnockbackTotalDuration : PreviousTickVelocity.Size();
+
+	HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, KnockbackSpeed);
+}
+
+void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed)
+{
 	if (!OtherNPC)
 	{
 		return;
@@ -979,33 +1060,31 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 	// ==================== Explosion-Like Elastic Collision ====================
 	// Both NPCs get knocked back in opposite directions with multiplied original velocity
 
-	// Get current velocities
-	FVector MyVelocity = PreviousTickVelocity;
-	float MySpeed = MyVelocity.Size();
+	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] HandleElasticNPCCollisionWithSpeed: %s -> %s, ImpactSpeed=%.0f"),
+		*GetName(), *OtherNPC->GetName(), ImpactSpeed);
 
 	// Calculate collision direction (from me to other NPC)
 	FVector CollisionDirection = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
 
-	// Calculate new velocities for explosion-like effect
-	// Both NPCs fly away from collision point with fraction of original speed
-	FVector MyNewVelocity = -CollisionDirection * MySpeed * NPCCollisionImpulseMultiplier; // I fly backwards
-	FVector OtherNewVelocity = CollisionDirection * MySpeed * NPCCollisionImpulseMultiplier; // Other flies forward
-
-	// Calculate collision damage based on original velocity
+	// Calculate collision damage based on impact speed
 	float CollisionDamage = 0.0f;
-	if (MySpeed >= WallSlamVelocityThreshold)
+	if (ImpactSpeed >= WallSlamVelocityThreshold)
 	{
-		float ExcessVelocity = MySpeed - WallSlamVelocityThreshold;
+		float ExcessVelocity = ImpactSpeed - WallSlamVelocityThreshold;
 		float BaseDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
 		CollisionDamage = BaseDamage * NPCCollisionDamageMultiplier;
 	}
 
 	// Calculate knockback duration for both NPCs based on new velocity
 	// Use distance-based formula from ApplyKnockback
-	float NewSpeed = MySpeed * NPCCollisionImpulseMultiplier;
+	float NewSpeed = ImpactSpeed * NPCCollisionImpulseMultiplier;
 	float KnockbackDistance = (NewSpeed * NewSpeed) / 2000.0f; // Simple physics approximation
 	float KnockbackDuration = KnockbackDistance / FMath::Max(NewSpeed, 1.0f);
 	KnockbackDuration = FMath::Clamp(KnockbackDuration, 0.3f, 2.0f); // Reasonable bounds
+
+	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to SELF %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
+		*GetName(), -CollisionDirection.X, -CollisionDirection.Y, -CollisionDirection.Z,
+		KnockbackDistance, KnockbackDuration);
 
 	// Apply knockback to myself (backwards)
 	ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
@@ -1023,6 +1102,8 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 		FDamageEvent DamageEvent;
 		TakeDamage(CollisionDamage, DamageEvent, nullptr, OtherNPC);
 		OtherNPC->TakeDamage(CollisionDamage, DamageEvent, nullptr, this);
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applied damage: %.1f to both NPCs"), CollisionDamage);
 	}
 
 	// Play sound at collision point
@@ -1046,8 +1127,8 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 		);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] COLLISION COMPLETE! Speed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
-		MySpeed, NewSpeed, CollisionDamage, KnockbackDuration);
+	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] COLLISION COMPLETE! ImpactSpeed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),
+		ImpactSpeed, NewSpeed, CollisionDamage, KnockbackDuration);
 }
 
 void AShooterNPC::EndKnockbackStun()
@@ -1218,33 +1299,15 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// ==================== NPC-NPC Collision Detection ====================
-	// Check if we hit another ShooterNPC - handle elastic collision instead of wall slam
-	if (bEnableNPCCollision && OtherActor)
-	{
-		if (AShooterNPC* OtherNPC = Cast<AShooterNPC>(OtherActor))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] %s hit NPC %s - Dead=%d, Velocity=%.0f"),
-				*GetName(), *OtherNPC->GetName(), OtherNPC->IsDead(), PreviousTickVelocity.Size());
+	// NOTE: NPC-NPC collision detection has been moved to UpdateKnockbackInterpolation()
+	// OnCapsuleHit fires AFTER physics contact when velocity is already dampened (e.g., 29 instead of 1000+)
+	// The overlap sweep in UpdateKnockbackInterpolation() detects collisions BEFORE SetActorLocation()
+	// and uses the computed knockback velocity (Distance/Duration) which is accurate
 
-			// Check if other NPC is alive and not already dead
-			if (!OtherNPC->IsDead())
-			{
-				// Check minimum velocity threshold
-				float VelocityMagnitude = PreviousTickVelocity.Size();
-				if (VelocityMagnitude >= NPCCollisionMinVelocity)
-				{
-					// Handle elastic collision and early exit (skip wall slam logic)
-					HandleElasticNPCCollision(OtherNPC, Hit.ImpactPoint);
-					return;
-				}
-				else
-				{
-					UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Too slow: %.0f < %.0f"),
-						VelocityMagnitude, NPCCollisionMinVelocity);
-				}
-			}
-		}
+	// Skip if we hit another NPC - collision is handled in UpdateKnockbackInterpolation()
+	if (OtherActor && Cast<AShooterNPC>(OtherActor))
+	{
+		return;
 	}
 
 	// Check cooldown to prevent multi-trigger on same impact

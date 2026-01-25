@@ -472,8 +472,11 @@ protected:
 	/** Handle wall collision during knockback - trigger damage and stop */
 	void HandleKnockbackWallHit(const FHitResult& WallHit);
 
-	/** Handle explosion-like elastic collision between two NPCs during knockback */
+	/** Handle explosion-like elastic collision between two NPCs during knockback (legacy - uses stored knockback params) */
 	void HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector& CollisionPoint);
+
+	/** Handle elastic NPC collision with explicit impact speed (used by overlap sweep detection) */
+	void HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed);
 
 	/** Called when capsule hits something - checks for wall slam */
 	UFUNCTION()
