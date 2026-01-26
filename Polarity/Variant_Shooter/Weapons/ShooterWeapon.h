@@ -25,6 +25,9 @@ class USoundAttenuation;
 // Delegate for heat updates (for UI binding)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHeatChanged, float, NewHeat);
 
+// Delegate called when weapon fires a shot (for NPC burst counting)
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponShotFired);
+
 /**
  *  Base class for a first person shooter weapon
  *
@@ -399,6 +402,10 @@ public:
 	/** Called when heat level changes */
 	UPROPERTY(BlueprintAssignable, Category = "Heat System")
 	FOnHeatChanged OnHeatChanged;
+
+	/** Called when weapon fires a shot (for NPC burst counting) */
+	UPROPERTY(BlueprintAssignable, Category = "Firing")
+	FOnWeaponShotFired OnShotFired;
 
 public:
 

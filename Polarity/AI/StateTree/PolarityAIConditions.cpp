@@ -7,6 +7,7 @@
 #include "../Coordination/AICombatCoordinator.h"
 #include "../Components/MeleeRetreatComponent.h"
 #include "../../ApexMovementComponent.h"
+#include "../../Variant_Shooter/AI/ShooterNPC.h"
 
 // ============================================================================
 // IsPlayerMovingFast
@@ -202,5 +203,62 @@ FText FSTCondition_CanRetreat::GetDescription(const FGuid& ID, FStateTreeDataVie
 	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return NSLOCTEXT("PolarityAI", "CanRetreatDesc", "Can retreat (off cooldown)");
+}
+#endif
+
+// ============================================================================
+// CanShoot
+// ============================================================================
+
+bool FSTCondition_CanShoot::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC)
+	{
+		return Data.bInvert;
+	}
+
+	// Check if dead
+	if (Data.NPC->IsDead())
+	{
+		return Data.bInvert;
+	}
+
+	// Check if already shooting
+	if (Data.NPC->IsCurrentlyShooting())
+	{
+		return Data.bInvert;
+	}
+
+	// Check if in burst cooldown
+	if (Data.NPC->IsInBurstCooldown())
+	{
+		return Data.bInvert;
+	}
+
+	// Check line of sight if required
+	if (Data.bRequireLineOfSight && Data.Target)
+	{
+		if (!Data.NPC->HasLineOfSightTo(Data.Target))
+		{
+			return Data.bInvert;
+		}
+	}
+
+	// Can shoot!
+	return !Data.bInvert;
+}
+
+#if WITH_EDITOR
+FText FSTCondition_CanShoot::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* Data = InstanceDataView.GetPtr<FInstanceDataType>();
+	if (Data->bInvert)
+	{
+		return NSLOCTEXT("PolarityAI", "CanShootDescInverted", "Cannot shoot (dead, in cooldown, or no LOS)");
+	}
+	return NSLOCTEXT("PolarityAI", "CanShootDesc", "Can shoot (not dead, off cooldown, has LOS)");
 }
 #endif

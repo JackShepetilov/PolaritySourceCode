@@ -11,6 +11,7 @@ class APawn;
 class AActor;
 class AAICombatCoordinator;
 class UMeleeRetreatComponent;
+class AShooterNPC;
 
 // ============================================================================
 // IsPlayerMovingFast - Check if target is moving above speed threshold
@@ -206,6 +207,48 @@ struct FSTCondition_CanRetreat : public FStateTreeConditionCommonBase
 	GENERATED_BODY()
 
 	using FInstanceDataType = FSTCondition_CanRetreat_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+// ============================================================================
+// CanShoot - Check if ShooterNPC can shoot (not dead, not in burst cooldown, has LOS)
+// ============================================================================
+
+USTRUCT()
+struct FSTCondition_CanShoot_Data
+{
+	GENERATED_BODY()
+
+	/** The ShooterNPC to check */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> NPC;
+
+	/** Target for line of sight check (optional) */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	TObjectPtr<AActor> Target;
+
+	/** If true, check line of sight to target */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	bool bRequireLineOfSight = true;
+
+	/** If true, invert the result (returns true when CANNOT shoot) */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	bool bInvert = false;
+};
+
+USTRUCT(DisplayName = "Can Shoot", Category = "Polarity|AI|Shooter")
+struct FSTCondition_CanShoot : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_CanShoot_Data;
 	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
 
 	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;

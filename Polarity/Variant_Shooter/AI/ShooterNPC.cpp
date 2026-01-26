@@ -60,6 +60,12 @@ void AShooterNPC::BeginPlay()
 
 	Weapon = GetWorld()->SpawnActor<AShooterWeapon>(WeaponClass, GetActorTransform(), SpawnParams);
 
+	// Subscribe to weapon's shot fired delegate for burst counting
+	if (Weapon)
+	{
+		Weapon->OnShotFired.AddDynamic(this, &AShooterNPC::OnWeaponShotFired);
+	}
+
 	// Register with combat coordinator
 	RegisterWithCoordinator();
 
@@ -128,8 +134,12 @@ void AShooterNPC::Tick(float DeltaTime)
 		CurrentPolarity = 2; // Negative
 	}
 
-	// Broadcast charge update every tick
-	OnChargeUpdated.Broadcast(ChargeValue, CurrentPolarity);
+	// Broadcast charge update only when charge actually changed
+	if (!FMath::IsNearlyEqual(ChargeValue, PreviousChargeValue, 0.001f))
+	{
+		OnChargeUpdated.Broadcast(ChargeValue, CurrentPolarity);
+		PreviousChargeValue = ChargeValue;
+	}
 
 	// Check if polarity changed
 	if (CurrentPolarity != PreviousPolarity)
@@ -399,11 +409,10 @@ void AShooterNPC::OnSemiWeaponRefire()
 			}
 		}
 
-		// fire the weapon
+		// fire the weapon (OnWeaponShotFired will be called via delegate)
 		if (Weapon)
 		{
 			Weapon->StartFiring();
-			OnShotFired();
 		}
 	}
 }
@@ -535,10 +544,10 @@ void AShooterNPC::TryStartShooting()
 			}
 		}
 
+		// Start firing (OnWeaponShotFired will be called via delegate)
 		if (Weapon)
 		{
 			Weapon->StartFiring();
-			OnShotFired();
 		}
 	}
 	else
@@ -565,6 +574,33 @@ void AShooterNPC::StopShooting()
 
 	// Release attack permission
 	ReleaseAttackPermission();
+}
+
+bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
+{
+	if (!Target || !GetWorld())
+	{
+		return false;
+	}
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.AddIgnoredActor(Target);
+
+	FHitResult HitResult;
+	const FVector Start = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f); // Offset up from feet
+	const FVector End = Target->GetActorLocation();
+
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(
+		HitResult,
+		Start,
+		End,
+		ECC_Visibility,
+		QueryParams
+	);
+
+	// No blocking hit means we have line of sight
+	return !bHit;
 }
 
 void AShooterNPC::PlayHitReaction(const FVector& DamageDirection)
@@ -1428,8 +1464,14 @@ void AShooterNPC::ReleaseAttackPermission()
 
 // ==================== Burst Fire ====================
 
-void AShooterNPC::OnShotFired()
+void AShooterNPC::OnWeaponShotFired()
 {
+	// Only count shots if we're actively shooting
+	if (!bIsShooting)
+	{
+		return;
+	}
+
 	CurrentBurstShots++;
 
 	// Check if burst complete

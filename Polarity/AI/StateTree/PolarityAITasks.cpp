@@ -5,7 +5,7 @@
 #include "AIController.h"
 #include "../Coordination/AICombatCoordinator.h"
 #include "../Components/MeleeRetreatComponent.h"
-#include "ShooterNPC.h"
+#include "../../Variant_Shooter/AI/ShooterNPC.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "AITypes.h"
 
@@ -391,5 +391,105 @@ FText FSTTask_MoveWithStrafe::GetDescription(const FGuid& ID, FStateTreeDataView
 	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return NSLOCTEXT("PolarityAI", "MoveWithStrafeDesc", "Move to destination while strafing (looking at focus target)");
+}
+#endif
+
+// ============================================================================
+// BurstFire
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_BurstFire::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC || !Data.Target)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Data.NPC->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	Data.bStartedShooting = false;
+
+	// Request permission from coordinator if needed
+	if (Data.bUseCoordinator)
+	{
+		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+		if (Coordinator && !Coordinator->RequestAttackPermission(Data.NPC))
+		{
+			// No permission - fail (let StateTree handle retry)
+			return EStateTreeRunStatus::Failed;
+		}
+	}
+
+	// Start shooting (with external permission flag since we already got it)
+	Data.NPC->StartShooting(Data.Target, true);
+	Data.bStartedShooting = true;
+
+	// Notify coordinator
+	if (Data.bUseCoordinator)
+	{
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+		{
+			Coordinator->NotifyAttackStarted(Data.NPC);
+		}
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FSTTask_BurstFire::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC || Data.NPC->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Check if burst completed (NPC entered burst cooldown)
+	if (Data.bStartedShooting && Data.NPC->IsInBurstCooldown())
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	// Also check if shooting stopped for any reason
+	if (Data.bStartedShooting && !Data.NPC->IsCurrentlyShooting())
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FSTTask_BurstFire::ExitState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (Data.NPC && Data.bStartedShooting)
+	{
+		Data.NPC->StopShooting();
+
+		// Release coordinator permission
+		if (Data.bUseCoordinator)
+		{
+			if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+			{
+				Coordinator->NotifyAttackComplete(Data.NPC);
+			}
+		}
+	}
+}
+
+#if WITH_EDITOR
+FText FSTTask_BurstFire::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return NSLOCTEXT("PolarityAI", "BurstFireDesc", "Fire burst at target (uses NPC burst settings)");
 }
 #endif

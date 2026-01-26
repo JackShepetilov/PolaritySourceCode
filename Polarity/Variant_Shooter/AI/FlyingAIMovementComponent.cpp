@@ -142,14 +142,30 @@ bool UFlyingAIMovementComponent::StartDash(const FVector& Direction)
 		return false;
 	}
 
-	bIsDashing = true;
-	DashStartTime = GetWorld()->GetTimeSeconds();
+	// Calculate start and end positions for interpolation
+	DashStartPosition = CharacterOwner->GetActorLocation();
 
-	// Temporarily boost speed
+	// Calculate dash distance based on speed and duration
+	const float DashDistance = DashSpeed * DashDuration;
+	DashTargetPosition = DashStartPosition + DashDirection * DashDistance;
+
+	// Validate target position height
+	DashTargetPosition = ValidateTargetHeight(DashTargetPosition);
+
+	bIsDashing = true;
+	DashElapsedTime = 0.0f;
+
+	// Stop any current movement
 	if (MovementComponent)
 	{
-		MovementComponent->MaxFlySpeed = DashSpeed;
+		MovementComponent->StopMovementImmediately();
+		MovementComponent->Velocity = FVector::ZeroVector;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("StartDash: From (%.0f,%.0f,%.0f) to (%.0f,%.0f,%.0f), Distance=%.0f"),
+		DashStartPosition.X, DashStartPosition.Y, DashStartPosition.Z,
+		DashTargetPosition.X, DashTargetPosition.Y, DashTargetPosition.Z,
+		DashDistance);
 
 	return true;
 }
@@ -343,38 +359,77 @@ void UFlyingAIMovementComponent::UpdateDash(float DeltaTime)
 {
 	if (!CharacterOwner || !MovementComponent)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("UpdateDash: Missing owner or movement component"));
 		CompleteDash();
 		return;
 	}
 
-	const float CurrentTime = GetWorld()->GetTimeSeconds();
-	const float DashElapsed = CurrentTime - DashStartTime;
+	// Update elapsed time
+	DashElapsedTime += DeltaTime;
 
 	// Check if dash is complete
-	if (DashElapsed >= DashDuration)
+	if (DashElapsedTime >= DashDuration)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("UpdateDash: Dash complete after %.2f seconds"), DashElapsedTime);
 		CompleteDash();
 		return;
 	}
 
-	// Apply dash movement
-	ApplyMovementInput(DashDirection, DashSpeed);
+	// Calculate interpolation alpha
+	float Alpha = FMath::Clamp(DashElapsedTime / DashDuration, 0.0f, 1.0f);
 
-	// Validate height during dash
-	const FVector CurrentLocation = CharacterOwner->GetActorLocation();
-	const float CurrentHeight = GetHeightAboveGround(CurrentLocation);
+	// Ease-out for smooth finish (like MeleeNPC knockback)
+	float EasedAlpha;
+	if (Alpha < 0.9f)
+	{
+		EasedAlpha = Alpha;
+	}
+	else
+	{
+		float LastSegmentAlpha = (Alpha - 0.9f) / 0.1f;
+		float EasedSegment = FMath::InterpEaseOut(0.0f, 0.1f, LastSegmentAlpha, 2.0f);
+		EasedAlpha = 0.9f + EasedSegment;
+	}
 
-	// Adjust if going out of bounds
-	if (CurrentHeight < MinHoverHeight)
+	// Calculate next position via interpolation
+	FVector CurrentPos = CharacterOwner->GetActorLocation();
+	FVector NextPos = FMath::Lerp(DashStartPosition, DashTargetPosition, EasedAlpha);
+
+	// Collision check along path
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(CharacterOwner);
+	FHitResult Hit;
+
+	bool bBlocked = GetWorld()->SweepSingleByChannel(
+		Hit,
+		CurrentPos,
+		NextPos,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeSphere(50.0f), // Approximate drone radius
+		QueryParams
+	);
+
+	if (bBlocked && Hit.bBlockingHit)
 	{
-		DashDirection.Z = FMath::Max(DashDirection.Z, 0.3f);
-		DashDirection.Normalize();
+		// Hit obstacle - stop at hit location
+		NextPos = Hit.Location;
+		UE_LOG(LogTemp, Warning, TEXT("UpdateDash: Blocked by %s"),
+			Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("World"));
+		CompleteDash();
+		return;
 	}
-	else if (CurrentHeight > MaxHoverHeight)
-	{
-		DashDirection.Z = FMath::Min(DashDirection.Z, -0.3f);
-		DashDirection.Normalize();
-	}
+
+	// Move drone via SetActorLocation (like MeleeNPC)
+	bool bMoved = CharacterOwner->SetActorLocation(NextPos, true);
+
+	UE_LOG(LogTemp, Warning, TEXT("UpdateDash: Alpha=%.2f, From (%.0f,%.0f,%.0f) To (%.0f,%.0f,%.0f), Moved=%s"),
+		EasedAlpha, CurrentPos.X, CurrentPos.Y, CurrentPos.Z,
+		NextPos.X, NextPos.Y, NextPos.Z, bMoved ? TEXT("YES") : TEXT("NO"));
+
+	// Update velocity for visuals/animations
+	FVector FrameVelocity = (NextPos - CurrentPos) / DeltaTime;
+	MovementComponent->Velocity = FrameVelocity;
 }
 
 void UFlyingAIMovementComponent::ApplyHoverOscillation(float DeltaTime)

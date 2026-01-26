@@ -81,30 +81,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
 	FName EnemyTag = FName("Player");
 
-	// ==================== Burst Fire Settings (for StateTree) ====================
-
-	/** Base number of shots per burst */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "1", ClampMax = "20"))
-	int32 BurstShotCountBase = 5;
-
-	/** Random variance for shot count (+/- this value) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0", ClampMax = "10"))
-	int32 BurstShotCountVariance = 2;
-
-	/** Base cooldown between bursts (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0.5", ClampMax = "10.0"))
-	float BurstCooldownBase = 2.0f;
-
-	/** Random variance for cooldown (+/- this value in seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0.0", ClampMax = "3.0"))
-	float BurstCooldownVariance = 0.5f;
-
-	/** Time when last burst ended (for cooldown tracking) */
-	float LastBurstEndTime = -100.0f;
-
-	/** Calculated cooldown for next burst (randomized when burst ends) */
-	float CurrentBurstCooldown = 0.0f;
-
 	// ==================== Evasive Dash Settings (for StateTree) ====================
 
 	/** Cooldown for evasive dash after taking damage (seconds) */
@@ -243,31 +219,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Drone|Combat")
 	void DisengageTarget();
 
-	/** Check if we have line of sight to target */
-	UFUNCTION(BlueprintPure, Category = "Drone|Combat")
-	bool HasLineOfSightTo(AActor* Target) const;
+	/** Check if we have line of sight to target (override from ShooterNPC) */
+	virtual bool HasLineOfSightTo(AActor* Target) const override;
 
 	/** Get current combat target */
 	UFUNCTION(BlueprintPure, Category = "Drone|Combat")
 	AActor* GetCombatTarget() const { return CurrentAimTarget.Get(); }
 
 	// ==================== StateTree Support ====================
-
-	/** Get randomized burst shot count (base +/- variance) */
-	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
-	int32 GetRandomizedBurstShotCount() const;
-
-	/** Get randomized burst cooldown (base +/- variance) */
-	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
-	float GetRandomizedBurstCooldown() const;
-
-	/** Check if burst is on cooldown */
-	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
-	bool IsBurstOnCooldown() const;
-
-	/** Notify that burst completed - starts cooldown timer */
-	UFUNCTION(BlueprintCallable, Category = "Drone|Combat|Burst")
-	void NotifyBurstComplete();
 
 	/** Check if evasive dash is off cooldown */
 	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Evasion")

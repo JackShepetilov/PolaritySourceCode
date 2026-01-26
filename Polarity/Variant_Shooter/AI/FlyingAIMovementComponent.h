@@ -284,8 +284,14 @@ protected:
 	/** Direction of current dash */
 	FVector DashDirection;
 
-	/** Time when dash started */
-	float DashStartTime = 0.0f;
+	/** Start position of dash (for interpolation) */
+	FVector DashStartPosition;
+
+	/** Target position of dash (for interpolation) */
+	FVector DashTargetPosition;
+
+	/** Elapsed time during dash */
+	float DashElapsedTime = 0.0f;
 
 	/** Time when last dash ended (for cooldown) */
 	float LastDashEndTime = 0.0f;

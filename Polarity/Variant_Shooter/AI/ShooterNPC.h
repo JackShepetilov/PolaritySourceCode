@@ -195,6 +195,9 @@ protected:
 	/** Previous polarity state for change detection (0=Neutral, 1=Positive, 2=Negative) */
 	uint8 PreviousPolarity = 0;
 
+	/** Previous charge value for change detection */
+	float PreviousChargeValue = 0.0f;
+
 	// ==================== Knockback ====================
 
 	/** Multiplier for knockback distance (1.0 = normal, 0.5 = half distance, 2.0 = double distance).
@@ -439,8 +442,9 @@ protected:
 	/** Called when burst cooldown ends */
 	void OnBurstCooldownEnd();
 
-	/** Increment burst shot counter and check if burst complete */
-	void OnShotFired();
+	/** Called when weapon fires a shot - increment burst counter and check if burst complete */
+	UFUNCTION()
+	void OnWeaponShotFired();
 
 	/** Try to start shooting (called periodically while waiting for permission) */
 	void TryStartShooting();
@@ -495,6 +499,14 @@ public:
 	/** Returns true if this NPC is currently shooting */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsCurrentlyShooting() const { return bIsShooting && !bIsDead; }
+
+	/** Returns true if this NPC is in burst cooldown (burst completed, waiting to fire again) */
+	UFUNCTION(BlueprintPure, Category = "Status")
+	bool IsInBurstCooldown() const { return bInBurstCooldown; }
+
+	/** Check if NPC has line of sight to target */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	virtual bool HasLineOfSightTo(AActor* Target) const;
 
 	/** Get the knockback distance multiplier for this NPC */
 	UFUNCTION(BlueprintPure, Category = "Combat")

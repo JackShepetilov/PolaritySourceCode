@@ -236,6 +236,9 @@ void AShooterWeapon::Fire()
 	// update the time of our last shot
 	TimeOfLastShot = GetWorld()->GetTimeSeconds();
 
+	// Notify listeners that a shot was fired (for NPC burst counting)
+	OnShotFired.Broadcast();
+
 	// make noise so the AI perception system can hear us
 	MakeNoise(ShotLoudness, PawnOwner, PawnOwner->GetActorLocation(), ShotNoiseRange, ShotNoiseTag);
 

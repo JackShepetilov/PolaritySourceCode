@@ -286,3 +286,48 @@ struct FSTTask_MoveWithStrafe : public FStateTreeTaskCommonBase
 		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
 #endif
 };
+
+// ============================================================================
+// BurstFire - Fire a burst of shots at target (uses ShooterNPC burst system)
+// ============================================================================
+
+USTRUCT()
+struct FSTTask_BurstFire_Data
+{
+	GENERATED_BODY()
+
+	/** The ShooterNPC that will shoot */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> NPC;
+
+	/** Target to shoot at */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	/** If true, use combat coordinator for attack permission */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	bool bUseCoordinator = true;
+
+	// Runtime state
+	bool bStartedShooting = false;
+};
+
+USTRUCT(DisplayName = "Burst Fire", Category = "Polarity|AI|Shooter")
+struct FSTTask_BurstFire : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_BurstFire_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};

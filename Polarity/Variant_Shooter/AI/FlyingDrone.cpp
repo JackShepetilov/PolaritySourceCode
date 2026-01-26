@@ -17,6 +17,7 @@
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "ShooterGameMode.h"
 #include "EMFVelocityModifier.h"
+#include "../DamageTypes/DamageType_Melee.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -127,6 +128,10 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 		return 0.0f;
 	}
 
+	// Mark damage taken for StateTree evasion trigger
+	bTookDamageThisFrame = true;
+	LastDamageTakenTime = GetWorld()->GetTimeSeconds();
+
 	// Ignore friendly fire from other NPCs (same logic as ShooterNPC)
 	if (DamageCauser)
 	{
@@ -145,12 +150,37 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 		}
 	}
 
-	// Mark damage taken for StateTree evasion trigger
-	bTookDamageThisFrame = true;
-	LastDamageTakenTime = GetWorld()->GetTimeSeconds();
-
 	// Reduce HP
 	CurrentHP -= Damage;
+
+	// Handle melee charge transfer (copied from ShooterNPC)
+	if (DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
+	{
+		if (EMFVelocityModifier && EventInstigator)
+		{
+			APawn* Attacker = EventInstigator->GetPawn();
+			if (Attacker)
+			{
+				UEMFVelocityModifier* AttackerEMF = Attacker->FindComponentByClass<UEMFVelocityModifier>();
+				float ChargeToAdd = ChargeChangeOnMeleeHit;
+
+				if (AttackerEMF)
+				{
+					float AttackerCharge = AttackerEMF->GetCharge();
+					ChargeToAdd = -FMath::Abs(ChargeChangeOnMeleeHit) * FMath::Sign(AttackerCharge);
+
+					if (FMath::Abs(AttackerCharge) < KINDA_SMALL_NUMBER)
+					{
+						ChargeToAdd = ChargeChangeOnMeleeHit;
+					}
+				}
+
+				float OldCharge = EMFVelocityModifier->GetCharge();
+				float NewCharge = OldCharge + ChargeToAdd;
+				EMFVelocityModifier->SetCharge(NewCharge);
+			}
+		}
+	}
 
 	// Check if we should die
 	if (CurrentHP <= 0.0f)
@@ -704,40 +734,6 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 
 // ==================== StateTree Support ====================
 
-int32 AFlyingDrone::GetRandomizedBurstShotCount() const
-{
-	const int32 MinShots = FMath::Max(1, BurstShotCountBase - BurstShotCountVariance);
-	const int32 MaxShots = BurstShotCountBase + BurstShotCountVariance;
-	return FMath::RandRange(MinShots, MaxShots);
-}
-
-float AFlyingDrone::GetRandomizedBurstCooldown() const
-{
-	const float MinCooldown = FMath::Max(0.1f, BurstCooldownBase - BurstCooldownVariance);
-	const float MaxCooldown = BurstCooldownBase + BurstCooldownVariance;
-	return FMath::RandRange(MinCooldown, MaxCooldown);
-}
-
-bool AFlyingDrone::IsBurstOnCooldown() const
-{
-	if (!GetWorld())
-	{
-		return false;
-	}
-
-	const float CurrentTime = GetWorld()->GetTimeSeconds();
-	return (CurrentTime - LastBurstEndTime) < CurrentBurstCooldown;
-}
-
-void AFlyingDrone::NotifyBurstComplete()
-{
-	if (GetWorld())
-	{
-		LastBurstEndTime = GetWorld()->GetTimeSeconds();
-		CurrentBurstCooldown = GetRandomizedBurstCooldown();
-	}
-}
-
 bool AFlyingDrone::CanPerformEvasiveDash() const
 {
 	if (!GetWorld() || bIsDead)
@@ -779,12 +775,17 @@ bool AFlyingDrone::PerformRandomEvasiveDash()
 	DashDirection.Normalize();
 
 	// Attempt dash
+	UE_LOG(LogTemp, Warning, TEXT("FlyingDrone::PerformRandomEvasiveDash - Attempting dash in direction (%.2f, %.2f, %.2f)"),
+		DashDirection.X, DashDirection.Y, DashDirection.Z);
+
 	if (FlyingMovement->StartDash(DashDirection))
 	{
 		LastEvasiveDashTime = GetWorld()->GetTimeSeconds();
+		UE_LOG(LogTemp, Warning, TEXT("FlyingDrone::PerformRandomEvasiveDash - Dash started successfully!"));
 		return true;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("FlyingDrone::PerformRandomEvasiveDash - StartDash returned false"));
 	return false;
 }
 
