@@ -1323,7 +1323,17 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 
 	// Restore EMF charge (reset to base/neutral)
 	CurrentCharge = Data.BaseEMFCharge;
-	OnChargeUpdated.Broadcast(CurrentCharge, GetPolarityByte());
+	// Calculate polarity byte: 0=neutral, 1=positive, 2=negative
+	uint8 RestoredPolarity = 0;
+	if (CurrentCharge > 0.01f)
+	{
+		RestoredPolarity = 1; // Positive
+	}
+	else if (CurrentCharge < -0.01f)
+	{
+		RestoredPolarity = 2; // Negative
+	}
+	OnChargeUpdated.Broadcast(CurrentCharge, RestoredPolarity);
 
 	// Restore weapon
 	if (OwnedWeapons.IsValidIndex(Data.CurrentWeaponIndex))
