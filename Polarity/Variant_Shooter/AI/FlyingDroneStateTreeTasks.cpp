@@ -107,6 +107,9 @@ EStateTreeRunStatus FStateTreeDroneBurstFireTask::Tick(FStateTreeExecutionContex
 		// Weapon stopped (burst complete or interrupted)
 		Data.bIsShooting = false;
 
+		// Start burst cooldown
+		Data.Drone->NotifyBurstComplete();
+
 		// Burst complete - success
 		return EStateTreeRunStatus::Succeeded;
 	}
@@ -335,6 +338,12 @@ bool FStateTreeDroneCanShootCondition::TestCondition(FStateTreeExecutionContext&
 
 	// Check if already shooting
 	if (Data.Drone->IsCurrentlyShooting())
+	{
+		return false;
+	}
+
+	// Check if burst is on cooldown
+	if (Data.Drone->IsBurstOnCooldown())
 	{
 		return false;
 	}

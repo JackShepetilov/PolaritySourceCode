@@ -113,7 +113,7 @@ struct FStateTreeDroneFlyToRandomPointInstanceData
 	TObjectPtr<AFlyingDrone> Drone;
 
 	/** Optional target to stay near (for combat positioning) */
-	UPROPERTY(EditAnywhere, Category = "Input")
+	UPROPERTY(EditAnywhere, Category = "Parameter")
 	TObjectPtr<AActor> TargetToOrbit;
 
 	/** Maximum distance from TargetToOrbit (if set), otherwise uses patrol radius */
@@ -160,12 +160,12 @@ struct FStateTreeDroneCanShootInstanceData
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<AFlyingDrone> Drone;
 
-	/** Target for line of sight check */
-	UPROPERTY(EditAnywhere, Category = "Input")
+	/** Target for line of sight check (optional - if not set, LOS check is skipped) */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
 	TObjectPtr<AActor> Target;
 
 	/** If true, also check line of sight to target */
-	UPROPERTY(EditAnywhere, Category = "Parameters")
+	UPROPERTY(EditAnywhere, Category = "Parameter")
 	bool bRequireLineOfSight = true;
 };
 

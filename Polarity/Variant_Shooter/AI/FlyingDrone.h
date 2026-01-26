@@ -99,6 +99,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0.0", ClampMax = "3.0"))
 	float BurstCooldownVariance = 0.5f;
 
+	/** Time when last burst ended (for cooldown tracking) */
+	float LastBurstEndTime = -100.0f;
+
+	/** Calculated cooldown for next burst (randomized when burst ends) */
+	float CurrentBurstCooldown = 0.0f;
+
 	// ==================== Evasive Dash Settings (for StateTree) ====================
 
 	/** Cooldown for evasive dash after taking damage (seconds) */
@@ -254,6 +260,14 @@ public:
 	/** Get randomized burst cooldown (base +/- variance) */
 	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
 	float GetRandomizedBurstCooldown() const;
+
+	/** Check if burst is on cooldown */
+	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
+	bool IsBurstOnCooldown() const;
+
+	/** Notify that burst completed - starts cooldown timer */
+	UFUNCTION(BlueprintCallable, Category = "Drone|Combat|Burst")
+	void NotifyBurstComplete();
 
 	/** Check if evasive dash is off cooldown */
 	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Evasion")

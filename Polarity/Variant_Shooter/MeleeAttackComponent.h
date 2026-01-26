@@ -456,6 +456,12 @@ public:
 	bool IsAttacking() const;
 
 	/**
+	 * Get current attack type (Ground, Airborne, or Sliding)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	EMeleeAttackType GetCurrentAttackType() const { return CurrentAttackType; }
+
+	/**
 	 * Get cooldown progress (0 = just started, 1 = ready)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")

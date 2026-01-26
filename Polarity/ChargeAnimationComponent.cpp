@@ -2,7 +2,7 @@
 // Charge toggle animation system implementation
 
 #include "ChargeAnimationComponent.h"
-#include "MeleeAttackComponent.h"
+#include "Variant_Shooter/MeleeAttackComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Camera/CameraComponent.h"
@@ -29,19 +29,18 @@ void UChargeAnimationComponent::BeginPlay()
 	if (OwnerCharacter)
 	{
 		OwnerController = Cast<APlayerController>(OwnerCharacter->GetController());
+
+		// Find camera component
+		CameraComponent = OwnerCharacter->FindComponentByClass<UCameraComponent>();
+
+		// Cache ShooterCharacter for LeftHandIK control
+		ShooterCharacter = Cast<AShooterCharacter>(OwnerCharacter);
 	}
 
 	// Auto-detect mesh references
 	AutoDetectMeshReferences();
 
-	// Store base transforms for FirstPersonMesh
-	if (FirstPersonMesh)
-	{
-		FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
-		FirstPersonMeshBaseRotation = FirstPersonMesh->GetRelativeRotation();
-	}
-
-	// Initially hide MeleeMesh (it should already be hidden by MeleeAttackComponent, but ensure it)
+	// Note: FirstPersonMesh position is not modified during charge animation
 	// Note: We don't control MeleeMesh visibility here as MeleeAttackComponent manages it
 }
 
@@ -51,7 +50,7 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 	UpdateState(DeltaTime);
 	UpdateMeshTransition(DeltaTime);
-	UpdateMeleeMeshRotation();
+	// UpdateMeleeMeshRotation() - no longer needed, MeleeMesh is attached to camera
 	UpdateMontagePlayRate(DeltaTime);
 }
 
@@ -87,6 +86,11 @@ bool UChargeAnimationComponent::CancelAnimation()
 	StopChargeAnimation();
 	StopChargeVFX();
 	SwitchToFirstPersonMesh();
+	// Restore left hand IK on cancel
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->SetLeftHandIKAlpha(1.0f);
+	}
 	bInputLocked = false;
 	SetState(EChargeAnimationState::Ready);
 
@@ -107,12 +111,16 @@ bool UChargeAnimationComponent::CanStartAnimation() const
 		return false;
 	}
 
-	// Don't start if melee attack is in progress
+	// Don't start if ground or sliding melee attack is in progress (allow air melee)
 	if (UMeleeAttackComponent* MeleeComp = OwnerCharacter->FindComponentByClass<UMeleeAttackComponent>())
 	{
 		if (MeleeComp->IsAttacking())
 		{
-			return false;
+			EMeleeAttackType AttackType = MeleeComp->GetCurrentAttackType();
+			if (AttackType == EMeleeAttackType::Ground || AttackType == EMeleeAttackType::Sliding)
+			{
+				return false;
+			}
 		}
 	}
 
@@ -144,6 +152,11 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 
 	case EChargeAnimationState::Playing:
 		StateTimeRemaining = AnimationDuration;
+		// Detach left hand from weapon during animation
+		if (ShooterCharacter)
+		{
+			ShooterCharacter->SetLeftHandIKAlpha(0.0f);
+		}
 		break;
 
 	case EChargeAnimationState::ShowingWeapon:
@@ -152,6 +165,11 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 		StopChargeAnimation();
 		StopChargeVFX();
 		SwitchToFirstPersonMesh();
+		// Restore left hand to weapon
+		if (ShooterCharacter)
+		{
+			ShooterCharacter->SetLeftHandIKAlpha(1.0f);
+		}
 		break;
 
 	case EChargeAnimationState::Cooldown:
@@ -207,32 +225,19 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 void UChargeAnimationComponent::BeginHideWeapon()
 {
 	MeshTransitionProgress = 0.0f;
-
-	// Store current FirstPersonMesh transform
-	if (FirstPersonMesh)
-	{
-		FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
-		FirstPersonMeshBaseRotation = FirstPersonMesh->GetRelativeRotation();
-	}
+	// Note: FirstPersonMesh position is not changed during charge animation
 }
 
 void UChargeAnimationComponent::UpdateMeshTransition(float DeltaTime)
 {
+	// Note: FirstPersonMesh is not moved during charge animation (remains at original position)
+	// Only update transition progress for state timing
 	if (CurrentState == EChargeAnimationState::HidingWeapon)
 	{
 		if (HideWeaponTime > 0.0f)
 		{
 			MeshTransitionProgress += DeltaTime / HideWeaponTime;
 			MeshTransitionProgress = FMath::Clamp(MeshTransitionProgress, 0.0f, 1.0f);
-
-			// Interpolate FirstPersonMesh down
-			if (FirstPersonMesh)
-			{
-				float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-				FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(FirstPersonMeshBaseLocation, TargetLocation, Alpha);
-				FirstPersonMesh->SetRelativeLocation(NewLocation);
-			}
 		}
 	}
 	else if (CurrentState == EChargeAnimationState::ShowingWeapon)
@@ -241,15 +246,6 @@ void UChargeAnimationComponent::UpdateMeshTransition(float DeltaTime)
 		{
 			MeshTransitionProgress += DeltaTime / ShowWeaponTime;
 			MeshTransitionProgress = FMath::Clamp(MeshTransitionProgress, 0.0f, 1.0f);
-
-			// Interpolate FirstPersonMesh back up
-			if (FirstPersonMesh)
-			{
-				float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-				FVector CurrentLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(CurrentLocation, FirstPersonMeshBaseLocation, Alpha);
-				FirstPersonMesh->SetRelativeLocation(NewLocation);
-			}
 		}
 	}
 }
@@ -261,14 +257,7 @@ void UChargeAnimationComponent::SwitchToMeleeMesh()
 		FirstPersonMesh->SetVisibility(false);
 	}
 
-	// Hide current weapon
-	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
-	{
-		if (AShooterWeapon* Weapon = ShooterChar->GetCurrentWeapon())
-		{
-			Weapon->SetActorHiddenInGame(true);
-		}
-	}
+	// Note: Weapon is NOT hidden during charge animation (only FirstPersonMesh is hidden)
 
 	if (MeleeMesh)
 	{
@@ -281,8 +270,21 @@ void UChargeAnimationComponent::SwitchToMeleeMesh()
 			MeleeMesh->HideBoneByName(BoneName, EPhysBodyOp::PBO_None);
 		}
 
-		// Set initial rotation to match camera
-		UpdateMeleeMeshRotation();
+		// Attach to camera for automatic synchronization
+		if (CameraComponent)
+		{
+			MeleeMesh->AttachToComponent(
+				CameraComponent,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale
+			);
+
+			// Set relative transform (offset from camera)
+			MeleeMesh->SetRelativeLocation(AnimationData.MeshLocationOffset);
+
+			// Combine global and per-animation rotation offsets
+			FRotator FinalRelativeRotation = MeleeMeshRotationOffset + AnimationData.MeshRotationOffset;
+			MeleeMesh->SetRelativeRotation(FinalRelativeRotation);
+		}
 	}
 }
 
@@ -290,6 +292,9 @@ void UChargeAnimationComponent::SwitchToFirstPersonMesh()
 {
 	if (MeleeMesh)
 	{
+		// Detach from camera
+		MeleeMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+
 		MeleeMesh->SetVisibility(false);
 
 		// Unhide bones
@@ -305,14 +310,7 @@ void UChargeAnimationComponent::SwitchToFirstPersonMesh()
 		FirstPersonMesh->SetVisibility(true);
 	}
 
-	// Show current weapon
-	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
-	{
-		if (AShooterWeapon* Weapon = ShooterChar->GetCurrentWeapon())
-		{
-			Weapon->SetActorHiddenInGame(false);
-		}
-	}
+	// Note: Weapon visibility is not changed (remains visible throughout)
 }
 
 void UChargeAnimationComponent::UpdateMeleeMeshRotation()

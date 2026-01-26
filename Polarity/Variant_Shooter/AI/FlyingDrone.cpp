@@ -718,6 +718,26 @@ float AFlyingDrone::GetRandomizedBurstCooldown() const
 	return FMath::RandRange(MinCooldown, MaxCooldown);
 }
 
+bool AFlyingDrone::IsBurstOnCooldown() const
+{
+	if (!GetWorld())
+	{
+		return false;
+	}
+
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	return (CurrentTime - LastBurstEndTime) < CurrentBurstCooldown;
+}
+
+void AFlyingDrone::NotifyBurstComplete()
+{
+	if (GetWorld())
+	{
+		LastBurstEndTime = GetWorld()->GetTimeSeconds();
+		CurrentBurstCooldown = GetRandomizedBurstCooldown();
+	}
+}
+
 bool AFlyingDrone::CanPerformEvasiveDash() const
 {
 	if (!GetWorld() || bIsDead)

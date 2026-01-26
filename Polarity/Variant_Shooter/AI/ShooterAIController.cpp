@@ -21,6 +21,23 @@ AShooterAIController::AShooterAIController()
 	AIPerception->OnTargetPerceptionForgotten.AddDynamic(this, &AShooterAIController::OnPerceptionForgotten);
 }
 
+void AShooterAIController::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Debug StateTree status after BeginPlay (when StateTree should be running)
+	FString StateTreeStatus = TEXT("NO COMPONENT");
+	if (StateTreeAI)
+	{
+		const bool bIsRunning = StateTreeAI->IsRunning();
+		StateTreeStatus = bIsRunning ? TEXT("RUNNING") : TEXT("NOT RUNNING");
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[%s] BeginPlay - Pawn=%s - StateTreeAI: %s"),
+		*GetName(),
+		GetPawn() ? *GetPawn()->GetName() : TEXT("NULL"),
+		*StateTreeStatus);
+}
+
 void AShooterAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);

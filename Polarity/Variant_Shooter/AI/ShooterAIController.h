@@ -54,6 +54,9 @@ public:
 
 protected:
 
+	/** Called when play begins */
+	virtual void BeginPlay() override;
+
 	/** Pawn initialization */
 	virtual void OnPossess(APawn* InPawn) override;
 

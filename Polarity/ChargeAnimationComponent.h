@@ -207,20 +207,22 @@ protected:
 	UPROPERTY()
 	TObjectPtr<APlayerController> OwnerController;
 
+	/** Cached camera component for mesh attachment */
+	UPROPERTY()
+	TObjectPtr<class UCameraComponent> CameraComponent;
+
+	/** Cached shooter character for LeftHandIK control */
+	UPROPERTY()
+	TObjectPtr<class AShooterCharacter> ShooterCharacter;
+
 	/** Active VFX component */
 	UPROPERTY()
 	TObjectPtr<UNiagaraComponent> ActiveChargeFX;
 
 	// ==================== Mesh Transition State ====================
 
-	/** Mesh transition progress (0-1) */
+	/** Mesh transition progress (0-1) - used for state timing only */
 	float MeshTransitionProgress = 0.0f;
-
-	/** Base location of FirstPersonMesh */
-	FVector FirstPersonMeshBaseLocation = FVector::ZeroVector;
-
-	/** Base rotation of FirstPersonMesh */
-	FRotator FirstPersonMeshBaseRotation = FRotator::ZeroRotator;
 
 	/** Current montage being played */
 	UPROPERTY()
