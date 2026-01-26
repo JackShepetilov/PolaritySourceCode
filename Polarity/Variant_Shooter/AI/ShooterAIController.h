@@ -86,4 +86,9 @@ protected:
 	/** Called when the AI perception component forgets a given actor */
 	UFUNCTION()
 	void OnPerceptionForgotten(AActor* Actor);
+
+public:
+	/** Force perception system to update immediately (use after respawn) */
+	UFUNCTION(BlueprintCallable, Category = "AI|Perception")
+	void ForcePerceptionUpdate();
 };

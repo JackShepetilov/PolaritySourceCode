@@ -91,3 +91,11 @@ void AShooterAIController::OnPerceptionForgotten(AActor* Actor)
 	// pass the data to the StateTree delegate hook
 	OnShooterPerceptionForgotten.ExecuteIfBound(Actor);
 }
+
+void AShooterAIController::ForcePerceptionUpdate()
+{
+	if (AIPerception)
+	{
+		AIPerception->RequestStimuliListenerUpdate();
+	}
+}

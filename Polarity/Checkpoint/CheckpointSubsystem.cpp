@@ -4,6 +4,7 @@
 #include "CheckpointActor.h"
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
+#include "Polarity/Variant_Shooter/AI/ShooterAIController.h"
 
 void UCheckpointSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -245,6 +246,12 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 				{
 					NewNPC->SetCheckpointSpawnID(SpawnID);
 					AliveNPCs.Add(NewNPC);
+
+					// Force AI perception update so NPC detects player immediately
+					if (AShooterAIController* AIController = Cast<AShooterAIController>(NewNPC->GetController()))
+					{
+						AIController->ForcePerceptionUpdate();
+					}
 				}
 			}
 		}
