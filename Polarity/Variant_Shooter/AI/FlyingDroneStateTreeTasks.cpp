@@ -119,10 +119,11 @@ EStateTreeRunStatus FStateTreeDroneFlyToRandomPointTask::EnterState(FStateTreeEx
 		CandidatePoint.Y += FMath::Sin(RandomAngle) * RandomDistance;
 		CandidatePoint.Z = Data.Drone->GetActorLocation().Z; // Keep current height initially
 
-		// Validate through FlyingMovement (handles NavMesh projection and height)
+		// Validate through FlyingMovement (handles NavMesh projection)
 		FVector ProjectedPoint;
 		if (FlyingMovement->ProjectToNavMesh(CandidatePoint, ProjectedPoint))
 		{
+			// FlyToLocation will call ValidateTargetHeight internally
 			TargetPoint = ProjectedPoint;
 			bFoundPoint = true;
 		}

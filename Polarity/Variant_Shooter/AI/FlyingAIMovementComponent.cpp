@@ -250,40 +250,57 @@ bool UFlyingAIMovementComponent::GetRandomPointInVolume(const FVector& Center, f
 			continue;
 		}
 
-		// Find ground height at projected XY position
+		// Find ground height at projected XY position - trace DOWN from center to find floor
 		FHitResult GroundHit;
-		FVector TraceStart = ProjectedPoint + FVector(0.0f, 0.0f, 10000.0f);
-		FVector TraceEnd = ProjectedPoint - FVector(0.0f, 0.0f, 10000.0f);
+		FVector TraceStart = FVector(ProjectedPoint.X, ProjectedPoint.Y, Center.Z + 100.0f);
+		FVector TraceEnd = FVector(ProjectedPoint.X, ProjectedPoint.Y, Center.Z - 10000.0f);
 
 		float GroundZ = Center.Z - DefaultHoverHeight; // Fallback
 
-		if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+		// Trace down to find floor (surface facing up)
+		if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams))
 		{
-			GroundZ = GroundHit.ImpactPoint.Z;
+			if (GroundHit.ImpactNormal.Z > 0.7f) // Floor faces up
+			{
+				GroundZ = GroundHit.ImpactPoint.Z;
+			}
 		}
 
-		// Find ceiling height
+		// Find ceiling height - trace UP from ground
 		FHitResult CeilingHit;
 		const FVector CeilingTraceStart = FVector(ProjectedPoint.X, ProjectedPoint.Y, GroundZ + 10.0f);
 		const FVector CeilingTraceEnd = FVector(ProjectedPoint.X, ProjectedPoint.Y, GroundZ + 10000.0f);
 
 		float MaxAllowedHeight = MaxHeight;
+		float ActualMinHeight = MinHeight;
 
-		if (GetWorld()->LineTraceSingleByChannel(CeilingHit, CeilingTraceStart, CeilingTraceEnd, ECC_Visibility, QueryParams))
+		// Trace up to find ceiling (surface facing down)
+		if (GetWorld()->LineTraceSingleByChannel(CeilingHit, CeilingTraceStart, CeilingTraceEnd, ECC_WorldStatic, QueryParams))
 		{
-			const float CeilingHeightAboveGround = CeilingHit.ImpactPoint.Z - GroundZ;
-			MaxAllowedHeight = FMath::Min(MaxHeight, CeilingHeightAboveGround - CeilingClearance);
+			if (CeilingHit.ImpactNormal.Z < -0.7f) // Ceiling faces down
+			{
+				const float CeilingHeightAboveGround = CeilingHit.ImpactPoint.Z - GroundZ;
+				const float CeilingLimitedHeight = CeilingHeightAboveGround - CeilingClearance;
+				MaxAllowedHeight = FMath::Min(MaxHeight, CeilingLimitedHeight);
+
+				// If ceiling is very low, adjust min height to fit
+				if (CeilingLimitedHeight < MinHeight)
+				{
+					ActualMinHeight = FMath::Max(50.0f, CeilingLimitedHeight * 0.5f);
+					MaxAllowedHeight = FMath::Max(ActualMinHeight, CeilingLimitedHeight);
+				}
+			}
 		}
 
 		// Ensure valid range exists
-		if (MaxAllowedHeight < MinHeight)
+		if (MaxAllowedHeight < ActualMinHeight)
 		{
-			// Not enough vertical space, try again
+			// Not enough vertical space even with adjusted limits, try again
 			continue;
 		}
 
 		// Generate random height within bounds
-		const float RandomHeight = FMath::RandRange(MinHeight, MaxAllowedHeight);
+		const float RandomHeight = FMath::RandRange(ActualMinHeight, MaxAllowedHeight);
 
 		OutPoint = FVector(ProjectedPoint.X, ProjectedPoint.Y, GroundZ + RandomHeight);
 
@@ -495,12 +512,17 @@ float UFlyingAIMovementComponent::GetHeightAboveGround(const FVector& Location) 
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
+	// Trace DOWN to find floor
 	const FVector TraceStart = Location;
 	const FVector TraceEnd = Location - FVector(0.0f, 0.0f, 10000.0f);
 
-	if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+	if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams))
 	{
-		return Location.Z - Hit.ImpactPoint.Z;
+		// Only count as floor if surface faces up
+		if (Hit.ImpactNormal.Z > 0.7f)
+		{
+			return Location.Z - Hit.ImpactPoint.Z;
+		}
 	}
 
 	return DefaultHoverHeight;
@@ -516,16 +538,36 @@ FVector UFlyingAIMovementComponent::ValidateTargetHeight(const FVector& TargetLo
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
-	// Find ground height at target XY (trace downward)
+	// Find ground (floor) by tracing DOWN from drone's current position
+	// This way we find the floor below us, not the ceiling above
 	FHitResult GroundHit;
-	const FVector GroundTraceStart = FVector(TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 10000.0f);
-	const FVector GroundTraceEnd = FVector(TargetLocation.X, TargetLocation.Y, TargetLocation.Z - 10000.0f);
+
+	// Start from current drone position (or target location) and trace DOWN
+	float StartZ = TargetLocation.Z;
+	if (CharacterOwner)
+	{
+		// Use drone's current Z as starting point for downward trace
+		StartZ = FMath::Max(TargetLocation.Z, CharacterOwner->GetActorLocation().Z);
+	}
+
+	const FVector GroundTraceStart = FVector(TargetLocation.X, TargetLocation.Y, StartZ + 100.0f);
+	const FVector GroundTraceEnd = FVector(TargetLocation.X, TargetLocation.Y, StartZ - 10000.0f);
 
 	float GroundZ = TargetLocation.Z - DefaultHoverHeight;
 
-	if (GetWorld()->LineTraceSingleByChannel(GroundHit, GroundTraceStart, GroundTraceEnd, ECC_Visibility, QueryParams))
+	// Trace DOWN to find the floor
+	if (GetWorld()->LineTraceSingleByChannel(GroundHit, GroundTraceStart, GroundTraceEnd, ECC_WorldStatic, QueryParams))
 	{
-		GroundZ = GroundHit.ImpactPoint.Z;
+		// Only accept surfaces facing UP (floors, not ceilings or walls)
+		if (GroundHit.ImpactNormal.Z > 0.7f) // Surface is mostly horizontal and facing up
+		{
+			GroundZ = GroundHit.ImpactPoint.Z;
+		}
+		else
+		{
+			// Hit a wall or ceiling while tracing down - unusual, use fallback
+			UE_LOG(LogTemp, Warning, TEXT("ValidateTargetHeight: Downward trace hit non-floor surface (Normal Z=%.2f)"), GroundHit.ImpactNormal.Z);
+		}
 	}
 
 	// Find ceiling height at target XY (trace upward from ground)
@@ -534,22 +576,36 @@ FVector UFlyingAIMovementComponent::ValidateTargetHeight(const FVector& TargetLo
 	const FVector CeilingTraceEnd = FVector(TargetLocation.X, TargetLocation.Y, GroundZ + 10000.0f);
 
 	float MaxAllowedHeight = MaxHoverHeight;
+	float ActualMinHeight = MinHoverHeight;
 
-	if (GetWorld()->LineTraceSingleByChannel(CeilingHit, CeilingTraceStart, CeilingTraceEnd, ECC_Visibility, QueryParams))
+	// Trace UP to find ceiling - use WorldStatic to hit actual geometry
+	if (GetWorld()->LineTraceSingleByChannel(CeilingHit, CeilingTraceStart, CeilingTraceEnd, ECC_WorldStatic, QueryParams))
 	{
-		// Ceiling found - limit max height to ceiling minus clearance
-		const float CeilingHeightAboveGround = CeilingHit.ImpactPoint.Z - GroundZ;
-		MaxAllowedHeight = FMath::Min(MaxHoverHeight, CeilingHeightAboveGround - CeilingClearance);
-	}
+		// Only count surfaces facing DOWN as ceilings
+		if (CeilingHit.ImpactNormal.Z < -0.7f)
+		{
+			// Ceiling found - limit max height to ceiling minus clearance
+			const float CeilingHeightAboveGround = CeilingHit.ImpactPoint.Z - GroundZ;
+			const float CeilingLimitedHeight = CeilingHeightAboveGround - CeilingClearance;
 
-	// Ensure we have at least MinHoverHeight available
-	MaxAllowedHeight = FMath::Max(MaxAllowedHeight, MinHoverHeight);
+			// If ceiling is very low, we must respect it even if below MinHoverHeight
+			MaxAllowedHeight = FMath::Min(MaxHoverHeight, CeilingLimitedHeight);
+
+			// Also adjust min height if ceiling is very low
+			if (CeilingLimitedHeight < MinHoverHeight)
+			{
+				// Ceiling is too low - hover at half the available space
+				ActualMinHeight = FMath::Max(50.0f, CeilingLimitedHeight * 0.5f);
+				MaxAllowedHeight = FMath::Max(ActualMinHeight, CeilingLimitedHeight);
+			}
+		}
+	}
 
 	// Calculate desired height above ground
 	float DesiredHeight = TargetLocation.Z - GroundZ;
 
 	// Clamp to valid range (considering ceiling)
-	DesiredHeight = FMath::Clamp(DesiredHeight, MinHoverHeight, MaxAllowedHeight);
+	DesiredHeight = FMath::Clamp(DesiredHeight, ActualMinHeight, MaxAllowedHeight);
 
 	return FVector(TargetLocation.X, TargetLocation.Y, GroundZ + DesiredHeight);
 }
@@ -708,12 +764,17 @@ float UFlyingAIMovementComponent::GetHeightToCeiling(const FVector& Location) co
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
+	// Trace UP to find ceiling
 	const FVector TraceStart = Location;
 	const FVector TraceEnd = Location + FVector(0.0f, 0.0f, 10000.0f);
 
-	if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+	if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams))
 	{
-		return Hit.Distance;
+		// Only count as ceiling if surface faces down
+		if (Hit.ImpactNormal.Z < -0.7f)
+		{
+			return Hit.Distance;
+		}
 	}
 
 	return MAX_FLT;

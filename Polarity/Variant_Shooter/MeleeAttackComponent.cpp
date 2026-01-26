@@ -11,6 +11,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
+#include "Engine/OverlapResult.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/DamageEvents.h"
 #include "NiagaraFunctionLibrary.h"
@@ -533,6 +534,9 @@ void UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitR
 	// Apply momentum bonus damage
 	FinalDamage += CalculateMomentumDamage(HitActor);
 
+	// Apply drop kick bonus damage
+	FinalDamage += CalculateDropKickBonusDamage();
+
 	// Create damage event
 	FPointDamageEvent DamageEvent(
 		FinalDamage,
@@ -1005,6 +1009,15 @@ void UMeleeAttackComponent::StartMagnetism()
 	}
 
 	MagnetismTarget.Reset();
+	bIsDropKick = false;
+	DropKickHeightDifference = 0.0f;
+
+	// Check for drop kick first (airborne + looking down)
+	if (ShouldPerformDropKick() && TryStartDropKick())
+	{
+		// Drop kick started successfully - skip normal magnetism
+		return;
+	}
 
 	const FVector Start = GetTraceStart();
 	const FVector End = Start + GetTraceDirection() * Settings.MagnetismRange;
@@ -1164,6 +1177,13 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		return;
 	}
 
+	// Handle drop kick movement separately
+	if (bIsDropKick)
+	{
+		UpdateDropKick(DeltaTime);
+		return;
+	}
+
 	if (!Settings.bEnableTargetMagnetism || !MagnetismTarget.IsValid())
 	{
 		return;
@@ -1294,6 +1314,11 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 void UMeleeAttackComponent::StopMagnetism()
 {
 	MagnetismTarget.Reset();
+
+	// Reset drop kick state
+	bIsDropKick = false;
+	DropKickHeightDifference = 0.0f;
+	DropKickTargetPosition = FVector::ZeroVector;
 
 	// Restore gravity and EMF after lock-on ends (after Recovery phase)
 	if (OwnerCharacter)
@@ -1983,4 +2008,369 @@ void UMeleeAttackComponent::DeactivateDamageWindowFromNotify()
 	{
 		SetState(EMeleeAttackState::Recovery);
 	}
+}
+
+// ==================== Drop Kick Implementation ====================
+
+bool UMeleeAttackComponent::ShouldPerformDropKick() const
+{
+	if (!Settings.bEnableDropKick || !OwnerCharacter || !OwnerController)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("DropKick: Settings disabled or no owner (bEnable=%d)"), Settings.bEnableDropKick);
+		return false;
+	}
+
+	// Must be airborne
+	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
+	if (!Movement)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("DropKick: No movement component"));
+		return false;
+	}
+
+	bool bIsOnGround = Movement->IsMovingOnGround();
+	bool bIsFalling = Movement->IsFalling();
+
+	UE_LOG(LogTemp, Warning, TEXT("DropKick: IsOnGround=%d, IsFalling=%d, MovementMode=%d"),
+		bIsOnGround, bIsFalling, (int32)Movement->MovementMode);
+
+	if (bIsOnGround)
+	{
+		return false;
+	}
+
+	// Check camera pitch (looking down)
+	FRotator CameraRotation = OwnerController->GetControlRotation();
+	// Normalize pitch to -180 to 180 range
+	float NormalizedPitch = FRotator::NormalizeAxis(CameraRotation.Pitch);
+	// In UE, negative pitch = looking down, positive = looking up
+	// We want positive value when looking down for comparison with threshold
+	float LookDownAngle = -NormalizedPitch;
+
+	UE_LOG(LogTemp, Warning, TEXT("DropKick: RawPitch=%.1f, Normalized=%.1f, LookDown=%.1f, Threshold=%.1f, Pass=%d"),
+		CameraRotation.Pitch, NormalizedPitch, LookDownAngle, Settings.DropKickPitchThreshold, LookDownAngle >= Settings.DropKickPitchThreshold);
+
+	return LookDownAngle >= Settings.DropKickPitchThreshold;
+}
+
+bool UMeleeAttackComponent::TryStartDropKick()
+{
+	if (!OwnerCharacter || !OwnerController)
+	{
+		return false;
+	}
+
+	const FVector Start = OwnerCharacter->GetActorLocation();
+	const FVector CameraForward = OwnerController->GetControlRotation().Vector();
+	const float ConeHalfAngleRad = FMath::DegreesToRadians(Settings.DropKickConeAngle);
+
+	// Calculate cone so that FAR EDGE of base touches the floor, not center
+	// First, trace to find floor distance
+	FHitResult FloorHit;
+	FCollisionQueryParams FloorQueryParams;
+	FloorQueryParams.AddIgnoredActor(OwnerCharacter);
+
+	// Trace straight down to find floor
+	float FloorZ = Start.Z - 5000.0f; // Default fallback
+	if (GetWorld()->LineTraceSingleByChannel(FloorHit, Start, Start - FVector(0, 0, 5000.0f), ECC_WorldStatic, FloorQueryParams))
+	{
+		FloorZ = FloorHit.Location.Z;
+	}
+
+	// Calculate where the camera forward ray hits floor level
+	float HeightAboveFloor = Start.Z - FloorZ;
+
+	// Adjust cone length so the FAR edge (upper/back part of base circle) touches the floor
+	// The far edge from player is the point on the base circle that is BEHIND the cone center
+	// relative to the look direction - this is the "upper" point when looking down
+	//
+	// Far edge Z = ConeCenter.Z + Radius * CosPitch (+ because it's above the center)
+	// We want: Start.Z + CameraForward.Z * Length + Radius * CosPitch = FloorZ
+	// Radius = Length * tan(ConeAngle)
+	// So: Start.Z + CameraForward.Z * Length + Length * tan(ConeAngle) * CosPitch = FloorZ
+	// Length * (CameraForward.Z + tan(ConeAngle) * CosPitch) = FloorZ - Start.Z
+	// Length = (FloorZ - Start.Z) / (CameraForward.Z + tan(ConeAngle) * CosPitch)
+
+	float ConeLengthToFloor;
+	if (CameraForward.Z < -0.1f) // Looking down
+	{
+		float SinPitch = -CameraForward.Z; // How much we're looking down (0-1)
+		float CosPitch = FMath::Sqrt(1.0f - SinPitch * SinPitch);
+
+		float TanCone = FMath::Tan(ConeHalfAngleRad);
+		float Denominator = CameraForward.Z + TanCone * CosPitch; // + for far edge (upper point)
+
+		if (FMath::Abs(Denominator) > 0.01f)
+		{
+			ConeLengthToFloor = (FloorZ - Start.Z) / Denominator;
+			ConeLengthToFloor = FMath::Clamp(ConeLengthToFloor, 100.0f, Settings.DropKickMaxRange);
+		}
+		else
+		{
+			ConeLengthToFloor = Settings.DropKickMaxRange;
+		}
+	}
+	else
+	{
+		ConeLengthToFloor = Settings.DropKickMaxRange;
+	}
+
+	const float ConeLength = ConeLengthToFloor;
+	const float ConeRadius = ConeLength * FMath::Tan(ConeHalfAngleRad);
+	const FVector ConeEnd = Start + CameraForward * ConeLength;
+
+	// Use OverlapMulti for more reliable detection instead of sweep
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(OwnerCharacter);
+
+	TArray<FOverlapResult> OverlapResults;
+	// Search in a large sphere that encompasses the entire cone
+	float SearchRadius = FMath::Max(ConeLength, ConeRadius) * 1.2f;
+	FVector SearchCenter = Start + CameraForward * (ConeLength * 0.5f);
+
+	GetWorld()->OverlapMultiByChannel(
+		OverlapResults,
+		SearchCenter,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeSphere(SearchRadius),
+		QueryParams
+	);
+
+	// Debug: Draw the adjusted cone
+	if (bEnableDebugVisualization)
+	{
+		const int32 NumSegments = 16;
+
+		// Get perpendicular vectors for cone circle
+		FVector Right = FVector::CrossProduct(CameraForward, FVector::UpVector).GetSafeNormal();
+		if (Right.IsNearlyZero())
+		{
+			Right = FVector::CrossProduct(CameraForward, FVector::RightVector).GetSafeNormal();
+		}
+		FVector Up = FVector::CrossProduct(Right, CameraForward);
+
+		// Draw cone outline
+		for (int32 i = 0; i < NumSegments; ++i)
+		{
+			float Angle1 = (float)i / NumSegments * 2.0f * PI;
+			float Angle2 = (float)(i + 1) / NumSegments * 2.0f * PI;
+
+			FVector Point1 = ConeEnd + (Right * FMath::Cos(Angle1) + Up * FMath::Sin(Angle1)) * ConeRadius;
+			FVector Point2 = ConeEnd + (Right * FMath::Cos(Angle2) + Up * FMath::Sin(Angle2)) * ConeRadius;
+
+			// Circle at cone base
+			DrawDebugLine(GetWorld(), Point1, Point2, FColor::Yellow, false, DebugShapeDuration, 0, 2.0f);
+			// Lines from apex to base
+			if (i % 4 == 0)
+			{
+				DrawDebugLine(GetWorld(), Start, Point1, FColor::Yellow, false, DebugShapeDuration, 0, 1.5f);
+			}
+		}
+
+		// Center line
+		DrawDebugLine(GetWorld(), Start, ConeEnd, FColor::Orange, false, DebugShapeDuration, 0, 3.0f);
+
+		// Floor reference
+		DrawDebugLine(GetWorld(), FVector(Start.X, Start.Y, FloorZ), FVector(ConeEnd.X, ConeEnd.Y, FloorZ), FColor::White, false, DebugShapeDuration, 0, 1.0f);
+	}
+
+	AActor* BestTarget = nullptr;
+	float BestDistanceToLookRay = FLT_MAX; // Closest to camera look ray wins
+	FVector BestTargetPos = FVector::ZeroVector;
+
+	UE_LOG(LogTemp, Warning, TEXT("DropKick TryStart: NumOverlaps=%d, ConeLength=%.1f, ConeRadius=%.1f"),
+		OverlapResults.Num(), ConeLength, ConeRadius);
+
+	for (const FOverlapResult& Overlap : OverlapResults)
+	{
+		AActor* HitActor = Overlap.GetActor();
+		if (!HitActor || HitActor == OwnerCharacter)
+		{
+			continue;
+		}
+
+		// Must be a character
+		ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
+		if (!HitCharacter)
+		{
+			continue;
+		}
+
+		FVector TargetPos = HitActor->GetActorLocation();
+		FVector ToTarget = TargetPos - Start;
+		float Distance = ToTarget.Size();
+
+		if (Distance < KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		// Check if target is within cone angle
+		FVector ToTargetNorm = ToTarget.GetSafeNormal();
+		float DotProduct = FVector::DotProduct(CameraForward, ToTargetNorm);
+		float AngleToTarget = FMath::Acos(FMath::Clamp(DotProduct, -1.0f, 1.0f));
+
+		// Also check if target is within cone length (project onto camera forward)
+		float DistanceAlongRay = FVector::DotProduct(ToTarget, CameraForward);
+		if (DistanceAlongRay < 0 || DistanceAlongRay > ConeLength * 1.1f) // Small tolerance
+		{
+			if (bEnableDebugVisualization)
+			{
+				DrawDebugSphere(GetWorld(), TargetPos, 25.0f, 4, FColor::Blue, false, DebugShapeDuration); // Out of range
+			}
+			continue;
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("DropKick: %s Angle=%.1f deg, ConeAngle=%.1f deg, DistAlongRay=%.1f"),
+			*HitActor->GetName(), FMath::RadiansToDegrees(AngleToTarget), Settings.DropKickConeAngle, DistanceAlongRay);
+
+		if (AngleToTarget <= ConeHalfAngleRad)
+		{
+			// Calculate perpendicular distance to camera look ray (closest point on ray to target)
+			// This is what we minimize to find target closest to crosshair
+			FVector ClosestPointOnRay = Start + CameraForward * DistanceAlongRay;
+			float DistanceToRay = FVector::Dist(TargetPos, ClosestPointOnRay);
+
+			UE_LOG(LogTemp, Warning, TEXT("DropKick: %s IN CONE! DistToRay=%.1f (best=%.1f)"),
+				*HitActor->GetName(), DistanceToRay, BestDistanceToLookRay);
+
+			if (DistanceToRay < BestDistanceToLookRay)
+			{
+				BestDistanceToLookRay = DistanceToRay;
+				BestTarget = HitActor;
+				BestTargetPos = TargetPos;
+			}
+
+			// Debug: mark valid targets
+			if (bEnableDebugVisualization)
+			{
+				DrawDebugSphere(GetWorld(), TargetPos, 50.0f, 8, FColor::Green, false, DebugShapeDuration);
+			}
+		}
+		else if (bEnableDebugVisualization)
+		{
+			// Debug: mark invalid targets (outside cone angle)
+			DrawDebugSphere(GetWorld(), TargetPos, 30.0f, 4, FColor::Red, false, DebugShapeDuration);
+		}
+	}
+
+	if (BestTarget)
+	{
+		// Start drop kick!
+		bIsDropKick = true;
+		MagnetismTarget = BestTarget;
+		DropKickTargetPosition = BestTargetPos;
+
+		// Calculate height difference for bonus damage
+		DropKickHeightDifference = Start.Z - BestTargetPos.Z;
+		if (DropKickHeightDifference < 0.0f)
+		{
+			DropKickHeightDifference = 0.0f; // No bonus if target is above us
+		}
+
+		// Calculate lunge target position
+		FVector DirectionFromTarget = (Start - BestTargetPos);
+		DirectionFromTarget.Z = 0.0f;
+		DirectionFromTarget.Normalize();
+
+		float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
+		LungeTargetPosition = BestTargetPos + DirectionFromTarget * StopDistance;
+		LungeTargetPosition.Z = BestTargetPos.Z;
+
+		// Start camera focus
+		StartCameraFocus(BestTarget);
+
+#if WITH_EDITOR
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+				FString::Printf(TEXT("DROP KICK! Target: %s, Height Diff: %.0f cm, Bonus Damage: %.0f"),
+					*BestTarget->GetName(), DropKickHeightDifference, CalculateDropKickBonusDamage()));
+		}
+#endif
+
+		// Debug: draw line to target
+		if (bEnableDebugVisualization)
+		{
+			DrawDebugLine(GetWorld(), Start, BestTargetPos, FColor::Yellow, false, DebugShapeDuration, 0, 5.0f);
+			DrawDebugSphere(GetWorld(), LungeTargetPosition, 30.0f, 8, FColor::Cyan, false, DebugShapeDuration);
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
+{
+	if (!bIsDropKick || !MagnetismTarget.IsValid() || !OwnerCharacter)
+	{
+		return;
+	}
+
+	AActor* Target = MagnetismTarget.Get();
+	FVector CurrentPos = OwnerCharacter->GetActorLocation();
+	FVector TargetPos = Target->GetActorLocation();
+
+	// Update lunge target position to track target
+	FVector DirectionFromTarget = (CurrentPos - TargetPos);
+	DirectionFromTarget.Z = 0.0f;
+	if (!DirectionFromTarget.IsNearlyZero())
+	{
+		DirectionFromTarget.Normalize();
+	}
+	else
+	{
+		DirectionFromTarget = -OwnerController->GetControlRotation().Vector();
+		DirectionFromTarget.Z = 0.0f;
+		DirectionFromTarget.Normalize();
+	}
+
+	float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
+	LungeTargetPosition = TargetPos + DirectionFromTarget * StopDistance;
+	LungeTargetPosition.Z = TargetPos.Z;
+
+	// Check if we've reached target
+	float DistanceToTarget = FVector::Dist(CurrentPos, LungeTargetPosition);
+	if (DistanceToTarget < 50.0f)
+	{
+		// Reached target - stop drop kick movement
+		return;
+	}
+
+	// Move toward target at drop kick speed
+	FVector MoveDirection = (LungeTargetPosition - CurrentPos).GetSafeNormal();
+	float MoveDistance = Settings.DropKickDiveSpeed * DeltaTime;
+	MoveDistance = FMath::Min(MoveDistance, DistanceToTarget);
+
+	FVector NewPos = CurrentPos + MoveDirection * MoveDistance;
+
+	// Apply movement
+	if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+	{
+		// Set velocity to match movement
+		Movement->Velocity = MoveDirection * Settings.DropKickDiveSpeed;
+	}
+
+	// Debug visualization
+	if (bEnableDebugVisualization)
+	{
+		DrawDebugLine(GetWorld(), CurrentPos, LungeTargetPosition, FColor::Yellow, false, 0.0f, 0, 3.0f);
+	}
+}
+
+float UMeleeAttackComponent::CalculateDropKickBonusDamage() const
+{
+	if (!bIsDropKick || DropKickHeightDifference <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Bonus damage per 100cm of height
+	float BonusDamage = (DropKickHeightDifference / 100.0f) * Settings.DropKickDamagePerHeight;
+
+	// Clamp to max
+	return FMath::Min(BonusDamage, Settings.DropKickMaxBonusDamage);
 }

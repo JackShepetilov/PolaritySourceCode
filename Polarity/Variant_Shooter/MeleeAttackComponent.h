@@ -188,6 +188,36 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cool Kick", meta = (ClampMin = "0", ClampMax = "2000.0"))
 	float CoolKickSpeedBoost = 400.0f;
 
+	// ==================== Drop Kick ====================
+
+	/** Enable drop kick - airborne attack when looking down, player dives toward enemy */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick")
+	bool bEnableDropKick = true;
+
+	/** Camera pitch threshold (degrees) - drop kick triggers when looking down more than this */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "10", ClampMax = "80", EditCondition = "bEnableDropKick"))
+	float DropKickPitchThreshold = 45.0f;
+
+	/** Cone angle for drop kick detection (half-angle in degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "5", ClampMax = "45", EditCondition = "bEnableDropKick"))
+	float DropKickConeAngle = 30.0f;
+
+	/** Maximum range for drop kick cone trace (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "100", ClampMax = "2000", EditCondition = "bEnableDropKick"))
+	float DropKickMaxRange = 1000.0f;
+
+	/** Bonus damage per 100cm of height difference */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "0", EditCondition = "bEnableDropKick"))
+	float DropKickDamagePerHeight = 10.0f;
+
+	/** Maximum bonus damage from height */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "0", EditCondition = "bEnableDropKick"))
+	float DropKickMaxBonusDamage = 100.0f;
+
+	/** Speed at which player dives toward drop kick target (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "500", ClampMax = "5000", EditCondition = "bEnableDropKick"))
+	float DropKickDiveSpeed = 2500.0f;
+
 	// ==================== Target Magnetism ====================
 
 	/** Enable predictive target magnetism (pulls targets toward punch center) */
@@ -554,6 +584,17 @@ protected:
 	/** Direction for cool kick boost (movement direction at hit time) */
 	FVector CoolKickDirection = FVector::ZeroVector;
 
+	// ==================== Drop Kick State ====================
+
+	/** True if current attack is a drop kick */
+	bool bIsDropKick = false;
+
+	/** Height difference at drop kick start (for bonus damage calculation) */
+	float DropKickHeightDifference = 0.0f;
+
+	/** Target position for drop kick dive */
+	FVector DropKickTargetPosition = FVector::ZeroVector;
+
 	// ==================== Mesh Transition State ====================
 
 	/** Current attack type (determined at attack start) */
@@ -681,6 +722,20 @@ protected:
 
 	/** Update cool kick boost */
 	void UpdateCoolKick(float DeltaTime);
+
+	// ==================== Drop Kick ====================
+
+	/** Check if drop kick conditions are met (airborne + looking down) */
+	bool ShouldPerformDropKick() const;
+
+	/** Perform cone trace for drop kick and find target */
+	bool TryStartDropKick();
+
+	/** Update drop kick dive movement */
+	void UpdateDropKick(float DeltaTime);
+
+	/** Calculate drop kick bonus damage based on height difference */
+	float CalculateDropKickBonusDamage() const;
 
 	// ==================== Mesh Transition ====================
 

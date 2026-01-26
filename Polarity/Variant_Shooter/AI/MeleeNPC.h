@@ -43,6 +43,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Timing", meta = (ClampMin = "0.1"))
 	float AttackCooldown = 1.0f;
 
+	// ==================== Attack Magnetism ====================
+
+	/** If true, NPC will be pulled towards target during attack animation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Magnetism")
+	bool bEnableAttackMagnetism = true;
+
+	/** Speed at which NPC is pulled towards target during attack (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableAttackMagnetism"))
+	float MagnetismSpeed = 600.0f;
+
+	/** Minimum distance to target to stop magnetism (prevents overshooting) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableAttackMagnetism"))
+	float MagnetismStopDistance = 80.0f;
+
 	// ==================== Damage Window (Timer-based) ====================
 
 	/** Time after attack start when damage window begins (seconds) */
@@ -269,6 +283,11 @@ protected:
 
 	/** Spawn and attach melee weapon if class is set */
 	void SpawnMeleeWeapon();
+
+	// ==================== Internal Attack Magnetism ====================
+
+	/** Update magnetism pull towards target during attack (called from Tick) */
+	void UpdateAttackMagnetism(float DeltaTime);
 
 	// ==================== Internal Dash Logic ====================
 

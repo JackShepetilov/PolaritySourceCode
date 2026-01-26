@@ -54,6 +54,11 @@ void AMeleeNPC::Tick(float DeltaTime)
 	{
 		UpdateDashInterpolation(DeltaTime);
 	}
+	// Attack magnetism (only if not dashing or in knockback)
+	else if (bIsAttacking && !bIsInKnockback)
+	{
+		UpdateAttackMagnetism(DeltaTime);
+	}
 
 	// Perform melee trace if damage window is active
 	if (bDamageWindowActive && !bIsDead)
@@ -530,6 +535,55 @@ void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distan
 
 	// Применить knockback с множителем
 	Super::ApplyKnockback(InKnockbackDirection, Distance * DistanceMultiplier, Duration, AttackerLocation, bKeepEMFEnabled);
+}
+
+// ==================== Attack Magnetism ====================
+
+void AMeleeNPC::UpdateAttackMagnetism(float DeltaTime)
+{
+	// Check if magnetism is enabled and we have a valid target
+	if (!bEnableAttackMagnetism || !CurrentMeleeTarget.IsValid())
+	{
+		return;
+	}
+
+	AActor* Target = CurrentMeleeTarget.Get();
+	if (!Target)
+	{
+		return;
+	}
+
+	// Get current positions (2D - horizontal only)
+	FVector CurrentPos = GetActorLocation();
+	FVector TargetPos = Target->GetActorLocation();
+
+	// Calculate horizontal distance to target
+	float DistanceToTarget = FVector::Dist2D(CurrentPos, TargetPos);
+
+	// Stop if already close enough
+	if (DistanceToTarget <= MagnetismStopDistance)
+	{
+		return;
+	}
+
+	// Calculate movement this frame
+	float MoveDistance = MagnetismSpeed * DeltaTime;
+
+	// Don't overshoot - clamp to remaining distance minus stop distance
+	float RemainingDistance = DistanceToTarget - MagnetismStopDistance;
+	MoveDistance = FMath::Min(MoveDistance, RemainingDistance);
+
+	// Calculate direction to target (horizontal only)
+	FVector DirectionToTarget = (TargetPos - CurrentPos).GetSafeNormal2D();
+
+	// Calculate new position
+	FVector NewPos = CurrentPos + DirectionToTarget * MoveDistance;
+
+	// Keep original Z height
+	NewPos.Z = CurrentPos.Z;
+
+	// Move using SetActorLocation with sweep for collision detection
+	SetActorLocation(NewPos, true);
 }
 
 // ==================== Dash Implementation ====================
