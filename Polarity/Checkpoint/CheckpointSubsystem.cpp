@@ -19,6 +19,7 @@ void UCheckpointSubsystem::Deinitialize()
 	SessionCompletedSequences.Empty();
 	RegisteredNPCs.Empty();
 	NPCsKilledAfterCheckpoint.Empty();
+	AliveNPCs.Empty();
 	Super::Deinitialize();
 }
 
@@ -109,15 +110,16 @@ bool UCheckpointSubsystem::RespawnAtCheckpoint(AShooterCharacter* Character)
 		return false;
 	}
 
+	// Respawn all NPCs to checkpoint state FIRST (before player restore)
+	// This ensures NPCs are reset before they can target the respawning player
+	RespawnAllNPCsToCheckpointState();
+
 	// Restore character state from checkpoint
 	if (!Character->RestoreFromCheckpoint(CurrentCheckpointData))
 	{
 		UE_LOG(LogTemp, Error, TEXT("CheckpointSubsystem: Failed to restore character from checkpoint"));
 		return false;
 	}
-
-	// Respawn NPCs that were killed after the checkpoint
-	RespawnKilledNPCs();
 
 	OnPlayerRespawned.Broadcast();
 	return true;
@@ -155,7 +157,16 @@ void UCheckpointSubsystem::RegisterNPC(AShooterNPC* NPC)
 		return;
 	}
 
-	// Create spawn data
+	// Check if this NPC already has a SpawnID (respawned NPC)
+	FGuid ExistingID = NPC->GetCheckpointSpawnID();
+	if (ExistingID.IsValid())
+	{
+		// Just track as alive, don't create new spawn data
+		AliveNPCs.Add(NPC);
+		return;
+	}
+
+	// Create spawn data for new NPC
 	FNPCSpawnData SpawnData;
 	SpawnData.NPCClass = NPC->GetClass();
 	SpawnData.SpawnTransform = NPC->GetActorTransform();
@@ -164,8 +175,9 @@ void UCheckpointSubsystem::RegisterNPC(AShooterNPC* NPC)
 	// Store on the NPC for later reference
 	NPC->SetCheckpointSpawnID(SpawnData.SpawnID);
 
-	// Register
+	// Register spawn data and track as alive
 	RegisteredNPCs.Add(SpawnData.SpawnID, SpawnData);
+	AliveNPCs.Add(NPC);
 }
 
 void UCheckpointSubsystem::NotifyNPCDeath(AShooterNPC* NPC)
@@ -174,6 +186,12 @@ void UCheckpointSubsystem::NotifyNPCDeath(AShooterNPC* NPC)
 	{
 		return;
 	}
+
+	// Remove from alive list
+	AliveNPCs.RemoveAll([NPC](const TWeakObjectPtr<AShooterNPC>& Ptr)
+	{
+		return !Ptr.IsValid() || Ptr.Get() == NPC;
+	});
 
 	FGuid SpawnID = NPC->GetCheckpointSpawnID();
 	if (!SpawnID.IsValid())
@@ -189,7 +207,7 @@ void UCheckpointSubsystem::NotifyNPCDeath(AShooterNPC* NPC)
 	}
 }
 
-void UCheckpointSubsystem::RespawnKilledNPCs()
+void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -197,6 +215,17 @@ void UCheckpointSubsystem::RespawnKilledNPCs()
 		return;
 	}
 
+	// Step 1: Destroy all currently alive NPCs
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		if (AShooterNPC* NPC = NPCPtr.Get())
+		{
+			NPC->Destroy();
+		}
+	}
+	AliveNPCs.Empty();
+
+	// Step 2: Respawn all NPCs that were killed after checkpoint
 	for (const FGuid& SpawnID : NPCsKilledAfterCheckpoint)
 	{
 		if (const FNPCSpawnData* SpawnData = RegisteredNPCs.Find(SpawnID))
@@ -214,8 +243,8 @@ void UCheckpointSubsystem::RespawnKilledNPCs()
 
 				if (NewNPC)
 				{
-					// Update the spawn ID mapping for the new NPC instance
 					NewNPC->SetCheckpointSpawnID(SpawnID);
+					AliveNPCs.Add(NewNPC);
 				}
 			}
 		}

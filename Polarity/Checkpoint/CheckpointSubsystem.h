@@ -170,6 +170,10 @@ protected:
 	UPROPERTY()
 	TArray<FGuid> NPCsKilledAfterCheckpoint;
 
-	/** Respawn all NPCs that were killed after checkpoint */
-	void RespawnKilledNPCs();
+	/** NPCs that are currently alive (tracked for respawn) */
+	UPROPERTY()
+	TArray<TWeakObjectPtr<AShooterNPC>> AliveNPCs;
+
+	/** Respawn all NPCs to checkpoint state (destroy survivors, respawn killed) */
+	void RespawnAllNPCsToCheckpointState();
 };
