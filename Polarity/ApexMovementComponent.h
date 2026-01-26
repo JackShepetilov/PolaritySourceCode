@@ -270,6 +270,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	int32 GetSlideFatigue() const { return SlideFatigueCounter; }
 
+	/** Reset all movement states (for respawn) */
+	UFUNCTION(BlueprintCallable, Category = "Apex|State")
+	void ResetMovementState();
+
 	// ==================== Input Tracking ====================
 
 	/** Set current move input for jump lurch calculations */

@@ -2020,3 +2020,49 @@ void UApexMovementComponent::PlayCameraShake(TSubclassOf<UCameraShakeBase> Camer
 
 	OwnerController->ClientStartCameraShake(CameraShake);
 }
+
+void UApexMovementComponent::ResetMovementState()
+{
+	// End any active movement states
+	if (bIsSliding)
+	{
+		bIsSliding = false;
+		SlideDuration = 0.0f;
+		GroundFriction = (DefaultGroundFriction > 0.0f) ? DefaultGroundFriction : 8.0f;
+		BrakingDecelerationWalking = (DefaultBrakingDeceleration > 0.0f) ? DefaultBrakingDeceleration : 2048.0f;
+	}
+
+	if (bIsWallRunning)
+	{
+		bIsWallRunning = false;
+		WallRunSide = EWallSide::None;
+		RestoreWallRunCapsule();
+	}
+
+	// Reset cooldowns
+	SlideCooldownRemaining = 0.0f;
+	SlideBoostCooldownRemaining = 0.0f;
+	WallRunSameWallCooldown = 0.0f;
+	AirDashCooldownRemaining = 0.0f;
+
+	// Reset fatigue
+	SlideFatigueCounter = 0;
+	SlideFatigueDecayTimer = 0.0f;
+
+	// Reset jump count
+	CurrentJumpCount = 0;
+
+	// Reset camera effects
+	CurrentWallRunCameraRoll = 0.0f;
+	CurrentWallRunCameraOffset = FVector::ZeroVector;
+	CurrentWallRunMeshRoll = 0.0f;
+	CurrentWallRunMeshPitch = 0.0f;
+	CurrentWallRunCameraTilt = FRotator::ZeroRotator;
+
+	// Reset input state
+	bWantsToSprint = false;
+	bWantsSlideOnLand = false;
+
+	// Stop velocity
+	Velocity = FVector::ZeroVector;
+}

@@ -20,6 +20,7 @@ class UAudioComponent;
 class UCurveFloat;
 class UMaterialInterface;
 class UIKRetargeter;
+struct FCheckpointData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamagedDelegate, float, LifePercent);
@@ -624,6 +625,37 @@ protected:
 
 	/** Returns true if the character already owns a weapon of the given class */
 	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
+
+	// ==================== Checkpoint System ====================
+public:
+	/**
+	 * Save current character state to checkpoint data.
+	 * Called by CheckpointSubsystem when checkpoint is activated.
+	 * @param OutData Structure to fill with character state
+	 * @return True if save was successful
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint")
+	bool SaveToCheckpoint(UPARAM(ref) FCheckpointData& OutData);
+
+	/**
+	 * Restore character state from checkpoint data.
+	 * Called by CheckpointSubsystem on respawn.
+	 * @param Data Checkpoint data to restore from
+	 * @return True if restore was successful
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint")
+	bool RestoreFromCheckpoint(const FCheckpointData& Data);
+
+	/** Blueprint event called after successful respawn at checkpoint */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Checkpoint", meta = (DisplayName = "On Respawn At Checkpoint"))
+	void BP_OnRespawnAtCheckpoint();
+
+protected:
+	/**
+	 * Reset character state to defaults (velocity, cooldowns, etc.)
+	 * Called during respawn before restoring checkpoint data.
+	 */
+	void ResetCharacterState();
 
 	/** Called when this character's HP is depleted */
 	void Die();

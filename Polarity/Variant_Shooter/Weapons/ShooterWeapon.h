@@ -500,6 +500,9 @@ public:
 	int32 GetMagazineSize() const { return MagazineSize; }
 	int32 GetBulletCount() const { return CurrentBullets; }
 
+	/** Set bullet count (used for checkpoint restore) */
+	void SetBulletCount(int32 NewCount) { CurrentBullets = FMath::Clamp(NewCount, 0, MagazineSize); }
+
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsHitscan() const { return bUseHitscan; }
 

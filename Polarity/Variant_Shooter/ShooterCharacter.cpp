@@ -28,6 +28,8 @@
 #include "ShooterGameMode.h"
 #include "Kismet/GameplayStatics.h"
 #include "Curves/CurveFloat.h"
+#include "Polarity/Checkpoint/CheckpointData.h"
+#include "Polarity/Checkpoint/CheckpointSubsystem.h"
 
 AShooterCharacter::AShooterCharacter()
 {
@@ -1260,7 +1262,142 @@ void AShooterCharacter::Die()
 
 void AShooterCharacter::OnRespawn()
 {
+	// Try to respawn at checkpoint first
+	if (UCheckpointSubsystem* CheckpointSubsystem = GetWorld()->GetSubsystem<UCheckpointSubsystem>())
+	{
+		if (CheckpointSubsystem->HasActiveCheckpoint())
+		{
+			if (CheckpointSubsystem->RespawnAtCheckpoint(this))
+			{
+				return; // Successfully respawned at checkpoint
+			}
+		}
+	}
+
+	// No checkpoint or respawn failed - destroy and let GameMode handle it
 	Destroy();
+}
+
+bool AShooterCharacter::SaveToCheckpoint(FCheckpointData& OutData)
+{
+	// Health
+	OutData.Health = CurrentHP;
+
+	// EMF - save base charge (0 for neutral, not bonus charge)
+	// Per requirements: reset bonus charge, keep base
+	OutData.BaseEMFCharge = 0.0f; // Player spawns neutral
+
+	// Weapon state
+	int32 CurrentWeaponIdx = OwnedWeapons.IndexOfByKey(CurrentWeapon);
+	OutData.CurrentWeaponIndex = (CurrentWeaponIdx != INDEX_NONE) ? CurrentWeaponIdx : 0;
+
+	// Save ammo for all weapons
+	OutData.WeaponAmmo.Empty();
+	for (int32 i = 0; i < OwnedWeapons.Num(); ++i)
+	{
+		if (AShooterWeapon* Weapon = OwnedWeapons[i])
+		{
+			OutData.WeaponAmmo.Add(i, Weapon->GetBulletCount());
+		}
+	}
+
+	return true;
+}
+
+bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
+{
+	if (!Data.bIsValid)
+	{
+		return false;
+	}
+
+	// Reset character state first
+	ResetCharacterState();
+
+	// Teleport to spawn point
+	SetActorTransform(Data.SpawnTransform);
+
+	// Restore health (per requirements: restore HP on respawn)
+	CurrentHP = Data.Health;
+	OnDamaged.Broadcast(CurrentHP / MaxHP);
+
+	// Restore EMF charge (reset to base/neutral)
+	CurrentCharge = Data.BaseEMFCharge;
+	OnChargeUpdated.Broadcast(CurrentCharge, GetPolarityByte());
+
+	// Restore weapon
+	if (OwnedWeapons.IsValidIndex(Data.CurrentWeaponIndex))
+	{
+		// Deactivate current weapon if different
+		if (CurrentWeapon && CurrentWeapon != OwnedWeapons[Data.CurrentWeaponIndex])
+		{
+			CurrentWeapon->DeactivateWeapon();
+		}
+
+		CurrentWeapon = OwnedWeapons[Data.CurrentWeaponIndex];
+		if (CurrentWeapon)
+		{
+			CurrentWeapon->ActivateWeapon();
+		}
+	}
+
+	// Restore ammo
+	for (const auto& AmmoPair : Data.WeaponAmmo)
+	{
+		if (OwnedWeapons.IsValidIndex(AmmoPair.Key))
+		{
+			if (AShooterWeapon* Weapon = OwnedWeapons[AmmoPair.Key])
+			{
+				Weapon->SetBulletCount(AmmoPair.Value);
+			}
+		}
+	}
+
+	// Re-enable input
+	EnableInput(Cast<APlayerController>(GetController()));
+
+	// Update UI
+	if (CurrentWeapon)
+	{
+		OnBulletCountUpdated.Broadcast(CurrentWeapon->GetMagazineSize(), CurrentWeapon->GetBulletCount());
+	}
+
+	// Blueprint event
+	BP_OnRespawnAtCheckpoint();
+
+	return true;
+}
+
+void AShooterCharacter::ResetCharacterState()
+{
+	// Stop all movement
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		MovementComp->StopMovementImmediately();
+		MovementComp->Velocity = FVector::ZeroVector;
+	}
+
+	// Reset apex movement state
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->ResetMovementState();
+	}
+
+	// Clear respawn timer
+	GetWorld()->GetTimerManager().ClearTimer(RespawnTimer);
+
+	// Reset regen delay (allow immediate regeneration)
+	TimeSinceLastDamage = RegenDelayAfterDamage;
+
+	// Stop looping sounds
+	StopSlideLoopSound();
+	StopWallRunLoopSound();
+
+	// Reactivate weapon if needed
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->ActivateWeapon();
+	}
 }
 
 void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)

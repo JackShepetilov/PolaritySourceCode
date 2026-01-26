@@ -35,6 +35,7 @@ public class Polarity : ModuleRules
             "Polarity/AI/Components",
             "Polarity/AI/Coordination",
             "Polarity/AI/StateTree",
+            "Polarity/Checkpoint",
             "Polarity/Variant_Horror",
             "Polarity/Variant_Horror/UI",
             "Polarity/Variant_Shooter",
