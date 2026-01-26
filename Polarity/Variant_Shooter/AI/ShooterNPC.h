@@ -541,4 +541,16 @@ protected:
 	/** Called when capsule hits something - checks for wall slam */
 	UFUNCTION()
 	void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+
+	// ==================== Checkpoint System ====================
+public:
+	/** Set checkpoint spawn ID (called by CheckpointSubsystem) */
+	void SetCheckpointSpawnID(const FGuid& InSpawnID) { CheckpointSpawnID = InSpawnID; }
+
+	/** Get checkpoint spawn ID */
+	FGuid GetCheckpointSpawnID() const { return CheckpointSpawnID; }
+
+private:
+	/** Unique ID for checkpoint respawn tracking */
+	FGuid CheckpointSpawnID;
 };

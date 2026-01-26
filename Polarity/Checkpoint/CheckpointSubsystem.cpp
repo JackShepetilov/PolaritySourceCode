@@ -3,6 +3,7 @@
 #include "CheckpointSubsystem.h"
 #include "CheckpointActor.h"
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
+#include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
 
 void UCheckpointSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -16,6 +17,8 @@ void UCheckpointSubsystem::Deinitialize()
 	ClearCheckpointData();
 	RegisteredCheckpoints.Empty();
 	SessionCompletedSequences.Empty();
+	RegisteredNPCs.Empty();
+	NPCsKilledAfterCheckpoint.Empty();
 	Super::Deinitialize();
 }
 
@@ -82,6 +85,11 @@ bool UCheckpointSubsystem::ActivateCheckpoint(ACheckpointActor* Checkpoint, ASho
 	}
 
 	CurrentCheckpointData = NewData;
+
+	// Clear the list of NPCs killed after checkpoint
+	// This "forgets" all NPCs killed before this checkpoint
+	NPCsKilledAfterCheckpoint.Empty();
+
 	OnCheckpointActivated.Broadcast(CurrentCheckpointData);
 
 	return true;
@@ -107,6 +115,9 @@ bool UCheckpointSubsystem::RespawnAtCheckpoint(AShooterCharacter* Character)
 		UE_LOG(LogTemp, Error, TEXT("CheckpointSubsystem: Failed to restore character from checkpoint"));
 		return false;
 	}
+
+	// Respawn NPCs that were killed after the checkpoint
+	RespawnKilledNPCs();
 
 	OnPlayerRespawned.Broadcast();
 	return true;
@@ -135,4 +146,81 @@ bool UCheckpointSubsystem::ShouldSkipSequence(FName SequenceName) const
 		return true;
 	}
 	return SessionCompletedSequences.Contains(SequenceName);
+}
+
+void UCheckpointSubsystem::RegisterNPC(AShooterNPC* NPC)
+{
+	if (!IsValid(NPC))
+	{
+		return;
+	}
+
+	// Create spawn data
+	FNPCSpawnData SpawnData;
+	SpawnData.NPCClass = NPC->GetClass();
+	SpawnData.SpawnTransform = NPC->GetActorTransform();
+	SpawnData.SpawnID = FGuid::NewGuid();
+
+	// Store on the NPC for later reference
+	NPC->SetCheckpointSpawnID(SpawnData.SpawnID);
+
+	// Register
+	RegisteredNPCs.Add(SpawnData.SpawnID, SpawnData);
+}
+
+void UCheckpointSubsystem::NotifyNPCDeath(AShooterNPC* NPC)
+{
+	if (!IsValid(NPC))
+	{
+		return;
+	}
+
+	FGuid SpawnID = NPC->GetCheckpointSpawnID();
+	if (!SpawnID.IsValid())
+	{
+		return;
+	}
+
+	// Only track if we have an active checkpoint
+	if (HasActiveCheckpoint())
+	{
+		// Add to killed list (will be respawned if player dies)
+		NPCsKilledAfterCheckpoint.AddUnique(SpawnID);
+	}
+}
+
+void UCheckpointSubsystem::RespawnKilledNPCs()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (const FGuid& SpawnID : NPCsKilledAfterCheckpoint)
+	{
+		if (const FNPCSpawnData* SpawnData = RegisteredNPCs.Find(SpawnID))
+		{
+			if (SpawnData->NPCClass)
+			{
+				FActorSpawnParameters SpawnParams;
+				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+				AShooterNPC* NewNPC = World->SpawnActor<AShooterNPC>(
+					SpawnData->NPCClass,
+					SpawnData->SpawnTransform,
+					SpawnParams
+				);
+
+				if (NewNPC)
+				{
+					// Update the spawn ID mapping for the new NPC instance
+					NewNPC->SetCheckpointSpawnID(SpawnID);
+				}
+			}
+		}
+	}
+
+	// Clear the killed list after respawning
+	NPCsKilledAfterCheckpoint.Empty();
 }

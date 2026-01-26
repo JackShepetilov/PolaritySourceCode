@@ -24,6 +24,7 @@
 #include "Engine/OverlapResult.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "NiagaraFunctionLibrary.h"
+#include "Polarity/Checkpoint/CheckpointSubsystem.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -68,6 +69,12 @@ void AShooterNPC::BeginPlay()
 
 	// Register with combat coordinator
 	RegisterWithCoordinator();
+
+	// Register with checkpoint subsystem for respawn tracking
+	if (UCheckpointSubsystem* CheckpointSubsystem = GetWorld()->GetSubsystem<UCheckpointSubsystem>())
+	{
+		CheckpointSubsystem->RegisterNPC(this);
+	}
 
 	// Bind capsule hit event for wall slam detection and NPC collision
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
@@ -445,6 +452,12 @@ void AShooterNPC::Die()
 
 	// Immediately unregister from coordinator to free attack slot
 	UnregisterFromCoordinator();
+
+	// Notify checkpoint subsystem of death (for respawn on player death)
+	if (UCheckpointSubsystem* CheckpointSubsystem = GetWorld()->GetSubsystem<UCheckpointSubsystem>())
+	{
+		CheckpointSubsystem->NotifyNPCDeath(this);
+	}
 
 	// increment the team score
 	if (AShooterGameMode* GM = Cast<AShooterGameMode>(GetWorld()->GetAuthGameMode()))

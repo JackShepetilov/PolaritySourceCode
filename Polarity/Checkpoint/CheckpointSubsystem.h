@@ -9,6 +9,28 @@
 
 class ACheckpointActor;
 class AShooterCharacter;
+class AShooterNPC;
+
+/**
+ * Stores data needed to respawn an NPC.
+ */
+USTRUCT()
+struct FNPCSpawnData
+{
+	GENERATED_BODY()
+
+	/** Class of the NPC to spawn */
+	UPROPERTY()
+	TSubclassOf<AShooterNPC> NPCClass;
+
+	/** Transform where NPC should spawn */
+	UPROPERTY()
+	FTransform SpawnTransform;
+
+	/** Unique ID to track this NPC instance */
+	UPROPERTY()
+	FGuid SpawnID;
+};
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCheckpointActivated, const FCheckpointData&, CheckpointData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerRespawned);
@@ -107,6 +129,24 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Checkpoint|Events")
 	FOnPlayerRespawned OnPlayerRespawned;
 
+	// ==================== NPC Respawn System ====================
+
+	/**
+	 * Register an NPC for checkpoint tracking.
+	 * Called by NPC on BeginPlay. Stores spawn data for potential respawn.
+	 * @param NPC The NPC to register
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint|NPC")
+	void RegisterNPC(AShooterNPC* NPC);
+
+	/**
+	 * Notify that an NPC has died.
+	 * NPC will be respawned if player dies and returns to checkpoint.
+	 * @param NPC The NPC that died
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint|NPC")
+	void NotifyNPCDeath(AShooterNPC* NPC);
+
 protected:
 	/** Currently active checkpoint data */
 	UPROPERTY()
@@ -119,4 +159,17 @@ protected:
 	/** Sequences completed during this session (persists across respawns) */
 	UPROPERTY()
 	TSet<FName> SessionCompletedSequences;
+
+	// ==================== NPC Tracking ====================
+
+	/** Map of registered NPCs: SpawnID -> SpawnData */
+	UPROPERTY()
+	TMap<FGuid, FNPCSpawnData> RegisteredNPCs;
+
+	/** NPCs killed after the last checkpoint activation (will be respawned on player death) */
+	UPROPERTY()
+	TArray<FGuid> NPCsKilledAfterCheckpoint;
+
+	/** Respawn all NPCs that were killed after checkpoint */
+	void RespawnKilledNPCs();
 };
