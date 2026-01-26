@@ -1363,8 +1363,14 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 		}
 	}
 
-	// Re-enable input
-	EnableInput(Cast<APlayerController>(GetController()));
+	// Re-enable input and reset camera
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		EnableInput(PC);
+
+		// Reset view target back to this character (in case death camera was active)
+		PC->SetViewTarget(this);
+	}
 
 	// Update UI
 	if (CurrentWeapon)
@@ -1372,7 +1378,7 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 		OnBulletCountUpdated.Broadcast(CurrentWeapon->GetMagazineSize(), CurrentWeapon->GetBulletCount());
 	}
 
-	// Blueprint event
+	// Blueprint event (use this to reset any death-related visual effects)
 	BP_OnRespawnAtCheckpoint();
 
 	return true;
@@ -1385,6 +1391,9 @@ void AShooterCharacter::ResetCharacterState()
 	{
 		MovementComp->StopMovementImmediately();
 		MovementComp->Velocity = FVector::ZeroVector;
+
+		// Reset movement mode to walking (in case we died mid-air or in weird state)
+		MovementComp->SetMovementMode(MOVE_Walking);
 	}
 
 	// Reset apex movement state
@@ -1402,6 +1411,21 @@ void AShooterCharacter::ResetCharacterState()
 	// Stop looping sounds
 	StopSlideLoopSound();
 	StopWallRunLoopSound();
+
+	// Reset mesh visibility and transforms (in case death animation modified them)
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetVisibility(true);
+		FPMesh->SetRelativeLocation(FirstPersonMeshBaseLocation);
+		FPMesh->SetRelativeRotation(FirstPersonMeshBaseRotation);
+	}
+
+	// Reset third person mesh if visible
+	if (GetMesh())
+	{
+		GetMesh()->SetVisibility(true);
+		GetMesh()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	}
 
 	// Reactivate weapon if needed
 	if (CurrentWeapon)
