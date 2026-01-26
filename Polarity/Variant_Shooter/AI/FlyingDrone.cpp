@@ -145,6 +145,10 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 		}
 	}
 
+	// Mark damage taken for StateTree evasion trigger
+	bTookDamageThisFrame = true;
+	LastDamageTakenTime = GetWorld()->GetTimeSeconds();
+
 	// Reduce HP
 	CurrentHP -= Damage;
 
@@ -696,4 +700,81 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 				FinalDistance, Duration));
 	}
 #endif
+}
+
+// ==================== StateTree Support ====================
+
+int32 AFlyingDrone::GetRandomizedBurstShotCount() const
+{
+	const int32 MinShots = FMath::Max(1, BurstShotCountBase - BurstShotCountVariance);
+	const int32 MaxShots = BurstShotCountBase + BurstShotCountVariance;
+	return FMath::RandRange(MinShots, MaxShots);
+}
+
+float AFlyingDrone::GetRandomizedBurstCooldown() const
+{
+	const float MinCooldown = FMath::Max(0.1f, BurstCooldownBase - BurstCooldownVariance);
+	const float MaxCooldown = BurstCooldownBase + BurstCooldownVariance;
+	return FMath::RandRange(MinCooldown, MaxCooldown);
+}
+
+bool AFlyingDrone::CanPerformEvasiveDash() const
+{
+	if (!GetWorld() || bIsDead)
+	{
+		return false;
+	}
+
+	// Check evasive dash cooldown
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (CurrentTime - LastEvasiveDashTime < EvasiveDashCooldown)
+	{
+		return false;
+	}
+
+	// Check if FlyingMovement dash is available
+	if (FlyingMovement && FlyingMovement->IsDashOnCooldown())
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool AFlyingDrone::PerformRandomEvasiveDash()
+{
+	if (!CanPerformEvasiveDash() || !FlyingMovement)
+	{
+		return false;
+	}
+
+	// Generate random direction (horizontal with slight vertical variance)
+	const float RandomAngle = FMath::RandRange(0.0f, 2.0f * PI);
+	const float VerticalComponent = FMath::RandRange(-0.3f, 0.3f);
+
+	FVector DashDirection;
+	DashDirection.X = FMath::Cos(RandomAngle);
+	DashDirection.Y = FMath::Sin(RandomAngle);
+	DashDirection.Z = VerticalComponent;
+	DashDirection.Normalize();
+
+	// Attempt dash
+	if (FlyingMovement->StartDash(DashDirection))
+	{
+		LastEvasiveDashTime = GetWorld()->GetTimeSeconds();
+		return true;
+	}
+
+	return false;
+}
+
+bool AFlyingDrone::TookDamageRecently(float GracePeriod) const
+{
+	if (!GetWorld())
+	{
+		return false;
+	}
+
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	return (CurrentTime - LastDamageTakenTime) <= GracePeriod;
 }

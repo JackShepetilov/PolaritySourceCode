@@ -65,9 +65,9 @@ protected:
 
 	// ==================== Combat Settings ====================
 
-	/** If true, drone will automatically shoot at visible enemies */
+	/** If true, drone will automatically shoot at visible enemies (legacy - disable for StateTree control) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
-	bool bAutoEngage = true;
+	bool bAutoEngage = false;
 
 	/** Distance at which drone can see and engage targets */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
@@ -80,6 +80,39 @@ protected:
 	/** Tag to identify enemies (usually "Player") */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
 	FName EnemyTag = FName("Player");
+
+	// ==================== Burst Fire Settings (for StateTree) ====================
+
+	/** Base number of shots per burst */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "1", ClampMax = "20"))
+	int32 BurstShotCountBase = 5;
+
+	/** Random variance for shot count (+/- this value) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0", ClampMax = "10"))
+	int32 BurstShotCountVariance = 2;
+
+	/** Base cooldown between bursts (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float BurstCooldownBase = 2.0f;
+
+	/** Random variance for cooldown (+/- this value in seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Burst", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float BurstCooldownVariance = 0.5f;
+
+	// ==================== Evasive Dash Settings (for StateTree) ====================
+
+	/** Cooldown for evasive dash after taking damage (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Evasion", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float EvasiveDashCooldown = 3.0f;
+
+	/** Time of last evasive dash (for cooldown tracking) */
+	float LastEvasiveDashTime = -100.0f;
+
+	/** If true, drone took damage this frame (reset each tick, for StateTree condition) */
+	bool bTookDamageThisFrame = false;
+
+	/** Time when last damage was taken (for StateTree condition with grace period) */
+	float LastDamageTakenTime = -100.0f;
 
 	// ==================== Visual Settings ====================
 
@@ -211,6 +244,32 @@ public:
 	/** Get current combat target */
 	UFUNCTION(BlueprintPure, Category = "Drone|Combat")
 	AActor* GetCombatTarget() const { return CurrentAimTarget.Get(); }
+
+	// ==================== StateTree Support ====================
+
+	/** Get randomized burst shot count (base +/- variance) */
+	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
+	int32 GetRandomizedBurstShotCount() const;
+
+	/** Get randomized burst cooldown (base +/- variance) */
+	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Burst")
+	float GetRandomizedBurstCooldown() const;
+
+	/** Check if evasive dash is off cooldown */
+	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Evasion")
+	bool CanPerformEvasiveDash() const;
+
+	/** Perform evasive dash in random direction and start cooldown */
+	UFUNCTION(BlueprintCallable, Category = "Drone|Combat|Evasion")
+	bool PerformRandomEvasiveDash();
+
+	/** Check if drone took damage recently (within grace period) */
+	UFUNCTION(BlueprintPure, Category = "Drone|Combat|Evasion")
+	bool TookDamageRecently(float GracePeriod = 0.5f) const;
+
+	/** Reset the damage taken flag (called by StateTree after handling) */
+	UFUNCTION(BlueprintCallable, Category = "Drone|Combat|Evasion")
+	void ClearDamageTakenFlag() { bTookDamageThisFrame = false; }
 
 protected:
 

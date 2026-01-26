@@ -133,6 +133,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flying|Avoidance", meta = (EditCondition = "bEnableObstacleAvoidance"))
 	TEnumAsByte<ECollisionChannel> ObstacleChannel = ECC_Visibility;
 
+	// ==================== Ceiling Detection ====================
+
+	/** Minimum clearance from ceiling (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flying|Height")
+	float CeilingClearance = 100.0f;
+
+	// ==================== NavMesh Projection ====================
+
+	/** If true, validate that movement targets project onto NavMesh */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flying|NavMesh")
+	bool bRequireNavMeshProjection = true;
+
+	/** Maximum distance to search for NavMesh projection (horizontal) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flying|NavMesh", meta = (EditCondition = "bRequireNavMeshProjection"))
+	float NavMeshProjectionRadius = 500.0f;
+
 public:
 
 	// ==================== Delegates ====================
@@ -231,6 +247,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flying|Patrol")
 	void SetHomeLocation(const FVector& NewHome) { SpawnLocation = NewHome; }
 
+	/** Check if XY position projects onto NavMesh, returns projected point */
+	UFUNCTION(BlueprintCallable, Category = "Flying|NavMesh")
+	bool ProjectToNavMesh(const FVector& Location, FVector& OutProjectedLocation) const;
+
 protected:
 
 	// ==================== Internal State ====================
@@ -290,8 +310,11 @@ protected:
 	/** Get height above ground at given location */
 	float GetHeightAboveGround(const FVector& Location) const;
 
-	/** Validate and adjust target location to be within height bounds */
+	/** Validate and adjust target location to be within height bounds (floor and ceiling) */
 	FVector ValidateTargetHeight(const FVector& TargetLocation) const;
+
+	/** Get height to ceiling at given location (returns MAX_FLT if no ceiling) */
+	float GetHeightToCeiling(const FVector& Location) const;
 
 	/** Apply movement input to character with collision checking */
 	void ApplyMovementInput(const FVector& Direction, float Speed);

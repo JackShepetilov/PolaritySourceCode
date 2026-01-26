@@ -4,6 +4,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "NavigationSystem.h"
 
 UFlyingAIMovementComponent::UFlyingAIMovementComponent()
 {
@@ -209,43 +210,81 @@ bool UFlyingAIMovementComponent::GetRandomPointInVolume(const FVector& Center, f
 		return false;
 	}
 
-	// Generate random point on XY plane
-	const float RandomAngle = FMath::RandRange(0.0f, 2.0f * PI);
-	const float RandomRadius = FMath::RandRange(0.0f, HorizontalRadius);
-
-	FVector GroundPoint = Center;
-	GroundPoint.X += FMath::Cos(RandomAngle) * RandomRadius;
-	GroundPoint.Y += FMath::Sin(RandomAngle) * RandomRadius;
-
-	// Find ground height at this XY position
-	FHitResult GroundHit;
-	FVector TraceStart = GroundPoint + FVector(0.0f, 0.0f, 10000.0f);
-	FVector TraceEnd = GroundPoint - FVector(0.0f, 0.0f, 10000.0f);
-
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
-	float GroundZ = Center.Z - DefaultHoverHeight; // Fallback
+	// Try multiple times to find a valid NavMesh-projected point
+	const int32 MaxAttempts = 10;
 
-	if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 	{
-		GroundZ = GroundHit.ImpactPoint.Z;
+		// Generate random point on XY plane
+		const float RandomAngle = FMath::RandRange(0.0f, 2.0f * PI);
+		const float RandomRadius = FMath::RandRange(0.0f, HorizontalRadius);
+
+		FVector GroundPoint = Center;
+		GroundPoint.X += FMath::Cos(RandomAngle) * RandomRadius;
+		GroundPoint.Y += FMath::Sin(RandomAngle) * RandomRadius;
+
+		// Check NavMesh projection
+		FVector ProjectedPoint;
+		if (!ProjectToNavMesh(GroundPoint, ProjectedPoint))
+		{
+			// Not on NavMesh, try again
+			continue;
+		}
+
+		// Find ground height at projected XY position
+		FHitResult GroundHit;
+		FVector TraceStart = ProjectedPoint + FVector(0.0f, 0.0f, 10000.0f);
+		FVector TraceEnd = ProjectedPoint - FVector(0.0f, 0.0f, 10000.0f);
+
+		float GroundZ = Center.Z - DefaultHoverHeight; // Fallback
+
+		if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+		{
+			GroundZ = GroundHit.ImpactPoint.Z;
+		}
+
+		// Find ceiling height
+		FHitResult CeilingHit;
+		const FVector CeilingTraceStart = FVector(ProjectedPoint.X, ProjectedPoint.Y, GroundZ + 10.0f);
+		const FVector CeilingTraceEnd = FVector(ProjectedPoint.X, ProjectedPoint.Y, GroundZ + 10000.0f);
+
+		float MaxAllowedHeight = MaxHeight;
+
+		if (GetWorld()->LineTraceSingleByChannel(CeilingHit, CeilingTraceStart, CeilingTraceEnd, ECC_Visibility, QueryParams))
+		{
+			const float CeilingHeightAboveGround = CeilingHit.ImpactPoint.Z - GroundZ;
+			MaxAllowedHeight = FMath::Min(MaxHeight, CeilingHeightAboveGround - CeilingClearance);
+		}
+
+		// Ensure valid range exists
+		if (MaxAllowedHeight < MinHeight)
+		{
+			// Not enough vertical space, try again
+			continue;
+		}
+
+		// Generate random height within bounds
+		const float RandomHeight = FMath::RandRange(MinHeight, MaxAllowedHeight);
+
+		OutPoint = FVector(ProjectedPoint.X, ProjectedPoint.Y, GroundZ + RandomHeight);
+
+		// Validate the point is not inside geometry
+		FHitResult ObstacleHit;
+		if (GetWorld()->LineTraceSingleByChannel(ObstacleHit, Center, OutPoint, ObstacleChannel, QueryParams))
+		{
+			// Point is blocked, try to find a valid point along the line
+			OutPoint = ObstacleHit.ImpactPoint - (OutPoint - Center).GetSafeNormal() * 100.0f;
+		}
+
+		return true;
 	}
 
-	// Generate random height within bounds
-	const float RandomHeight = FMath::RandRange(MinHeight, MaxHeight);
-
-	OutPoint = FVector(GroundPoint.X, GroundPoint.Y, GroundZ + RandomHeight);
-
-	// Validate the point is not inside geometry
-	FHitResult ObstacleHit;
-	if (GetWorld()->LineTraceSingleByChannel(ObstacleHit, Center, OutPoint, ObstacleChannel, QueryParams))
-	{
-		// Point is blocked, try to find a valid point along the line
-		OutPoint = ObstacleHit.ImpactPoint - (OutPoint - Center).GetSafeNormal() * 100.0f;
-	}
-
-	return true;
+	// Failed to find valid point - fall back to current location with adjusted height
+	OutPoint = ValidateTargetHeight(Center);
+	return false;
 }
 
 // ==================== State Queries ====================
@@ -419,26 +458,43 @@ FVector UFlyingAIMovementComponent::ValidateTargetHeight(const FVector& TargetLo
 		return TargetLocation;
 	}
 
-	// Find ground height at target XY
-	FHitResult Hit;
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
-	const FVector TraceStart = FVector(TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 10000.0f);
-	const FVector TraceEnd = FVector(TargetLocation.X, TargetLocation.Y, TargetLocation.Z - 10000.0f);
+	// Find ground height at target XY (trace downward)
+	FHitResult GroundHit;
+	const FVector GroundTraceStart = FVector(TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 10000.0f);
+	const FVector GroundTraceEnd = FVector(TargetLocation.X, TargetLocation.Y, TargetLocation.Z - 10000.0f);
 
 	float GroundZ = TargetLocation.Z - DefaultHoverHeight;
 
-	if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+	if (GetWorld()->LineTraceSingleByChannel(GroundHit, GroundTraceStart, GroundTraceEnd, ECC_Visibility, QueryParams))
 	{
-		GroundZ = Hit.ImpactPoint.Z;
+		GroundZ = GroundHit.ImpactPoint.Z;
 	}
+
+	// Find ceiling height at target XY (trace upward from ground)
+	FHitResult CeilingHit;
+	const FVector CeilingTraceStart = FVector(TargetLocation.X, TargetLocation.Y, GroundZ + 10.0f);
+	const FVector CeilingTraceEnd = FVector(TargetLocation.X, TargetLocation.Y, GroundZ + 10000.0f);
+
+	float MaxAllowedHeight = MaxHoverHeight;
+
+	if (GetWorld()->LineTraceSingleByChannel(CeilingHit, CeilingTraceStart, CeilingTraceEnd, ECC_Visibility, QueryParams))
+	{
+		// Ceiling found - limit max height to ceiling minus clearance
+		const float CeilingHeightAboveGround = CeilingHit.ImpactPoint.Z - GroundZ;
+		MaxAllowedHeight = FMath::Min(MaxHoverHeight, CeilingHeightAboveGround - CeilingClearance);
+	}
+
+	// Ensure we have at least MinHoverHeight available
+	MaxAllowedHeight = FMath::Max(MaxAllowedHeight, MinHoverHeight);
 
 	// Calculate desired height above ground
 	float DesiredHeight = TargetLocation.Z - GroundZ;
 
-	// Clamp to valid range
-	DesiredHeight = FMath::Clamp(DesiredHeight, MinHoverHeight, MaxHoverHeight);
+	// Clamp to valid range (considering ceiling)
+	DesiredHeight = FMath::Clamp(DesiredHeight, MinHoverHeight, MaxAllowedHeight);
 
 	return FVector(TargetLocation.X, TargetLocation.Y, GroundZ + DesiredHeight);
 }
@@ -584,4 +640,56 @@ FVector UFlyingAIMovementComponent::GetCollisionSafeDirection(const FVector& Des
 
 	// No collision - use desired direction
 	return DesiredDirection;
+}
+
+float UFlyingAIMovementComponent::GetHeightToCeiling(const FVector& Location) const
+{
+	if (!GetWorld())
+	{
+		return MAX_FLT;
+	}
+
+	FHitResult Hit;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(GetOwner());
+
+	const FVector TraceStart = Location;
+	const FVector TraceEnd = Location + FVector(0.0f, 0.0f, 10000.0f);
+
+	if (GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+	{
+		return Hit.Distance;
+	}
+
+	return MAX_FLT;
+}
+
+bool UFlyingAIMovementComponent::ProjectToNavMesh(const FVector& Location, FVector& OutProjectedLocation) const
+{
+	if (!bRequireNavMeshProjection)
+	{
+		OutProjectedLocation = Location;
+		return true;
+	}
+
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+	if (!NavSys)
+	{
+		// No navigation system - allow movement anyway
+		OutProjectedLocation = Location;
+		return true;
+	}
+
+	// Project XY position to NavMesh (ignore Z for flying units)
+	FNavLocation NavLocation;
+	const FVector ProjectionExtent(NavMeshProjectionRadius, NavMeshProjectionRadius, 10000.0f);
+
+	if (NavSys->ProjectPointToNavigation(Location, NavLocation, ProjectionExtent))
+	{
+		// Keep original Z, just validate XY is over NavMesh
+		OutProjectedLocation = FVector(NavLocation.Location.X, NavLocation.Location.Y, Location.Z);
+		return true;
+	}
+
+	return false;
 }
