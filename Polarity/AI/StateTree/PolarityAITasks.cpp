@@ -571,6 +571,23 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 		{
 			StartShooting(Data);
 		}
+#if WITH_EDITOR
+		else
+		{
+			// Debug: why can't we shoot?
+			static float LastDebugTime = 0.0f;
+			float CurrentTime = Data.Drone->GetWorld()->GetTimeSeconds();
+			if (CurrentTime - LastDebugTime > 1.0f) // Log once per second max
+			{
+				LastDebugTime = CurrentTime;
+				UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot CanShoot=false: Dead=%d, InCooldown=%d, IsShooting=%d, HasLOS=%d"),
+					Data.Drone->IsDead(),
+					Data.Drone->IsInBurstCooldown(),
+					Data.Drone->IsCurrentlyShooting(),
+					Data.Drone->HasLineOfSightTo(Data.Target));
+			}
+		}
+#endif
 	}
 	else
 	{
