@@ -81,6 +81,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
 	FName EnemyTag = FName("Player");
 
+	// ==================== Knockback Settings ====================
+
+	/** Velocity threshold below which knockback ends (cm/s). Set to 0 to use timer instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Knockback", meta = (ClampMin = "0.0"))
+	float KnockbackEndVelocityThreshold = 100.0f;
+
 	// ==================== Evasive Dash Settings (for StateTree) ====================
 
 	/** Cooldown for evasive dash after taking damage (seconds) */

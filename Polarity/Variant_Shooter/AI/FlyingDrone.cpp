@@ -118,6 +118,16 @@ void AFlyingDrone::Tick(float DeltaTime)
 	if (!bIsDead)
 	{
 		UpdateDroneVisuals(DeltaTime);
+
+		// Check if knockback should end based on velocity threshold
+		if (bIsInKnockback && KnockbackEndVelocityThreshold > 0.0f)
+		{
+			float CurrentSpeed = GetVelocity().Size();
+			if (CurrentSpeed <= KnockbackEndVelocityThreshold)
+			{
+				EndKnockbackStun();
+			}
+		}
 	}
 }
 
@@ -715,14 +725,18 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	// Clear any existing stun timer
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 
-	// Schedule stun end
-	GetWorld()->GetTimerManager().SetTimer(
-		KnockbackStunTimer,
-		this,
-		&AFlyingDrone::EndKnockbackStun,
-		Duration,
-		false
-	);
+	// Only use timer if velocity threshold is disabled (set to 0)
+	// Otherwise, Tick will check velocity and end knockback when below threshold
+	if (KnockbackEndVelocityThreshold <= 0.0f)
+	{
+		GetWorld()->GetTimerManager().SetTimer(
+			KnockbackStunTimer,
+			this,
+			&AFlyingDrone::EndKnockbackStun,
+			Duration,
+			false
+		);
+	}
 
 #if WITH_EDITOR
 	if (GEngine)
