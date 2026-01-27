@@ -719,7 +719,6 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	bIsInKnockback = true;
 
 	// Calculate velocity needed to cover the distance in the given duration
-	// Velocity = Distance / Time
 	FVector KnockbackVelocity = InKnockbackDirection.GetSafeNormal() * (FinalDistance / Duration);
 
 	// Stop flying movement
@@ -728,7 +727,7 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		FlyingMovement->StopMovement();
 	}
 
-	// Also stop AI controller movement
+	// Stop AI controller movement
 	if (AController* MyController = GetController())
 	{
 		if (AAIController* AIController = Cast<AAIController>(MyController))
@@ -741,6 +740,12 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	if (bDisableEMFDuringKnockback && !bKeepEMFEnabled && EMFVelocityModifier)
 	{
 		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	// Disable CharacterMovement processing to prevent interference
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->DisableMovement();
 	}
 
 	// Apply knockback using LaunchCharacter (velocity-based, works with physics)
@@ -771,6 +776,18 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 				FinalDistance, Duration));
 	}
 #endif
+}
+
+void AFlyingDrone::EndKnockbackStun()
+{
+	// Call parent implementation
+	Super::EndKnockbackStun();
+
+	// Restore flying movement mode
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->SetMovementMode(MOVE_Flying);
+	}
 }
 
 // ==================== StateTree Support ====================

@@ -169,6 +169,9 @@ protected:
 	/** Override knockback for flying movement - uses velocity-based launch */
 	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
 
+	/** Override to restore flying mode after knockback */
+	virtual void EndKnockbackStun() override;
+
 public:
 
 	// ==================== Flying Movement Interface ====================
