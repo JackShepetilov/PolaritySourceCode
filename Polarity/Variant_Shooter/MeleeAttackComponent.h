@@ -305,7 +305,7 @@ struct FMeleeAttackSettings
 
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackStarted);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnMeleeHit, AActor*, HitActor, const FVector&, HitLocation, bool, bHeadshot);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnMeleeHit, AActor*, HitActor, const FVector&, HitLocation, bool, bHeadshot, float, Damage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
 
 /**
@@ -651,8 +651,8 @@ protected:
 	/** Perform hit detection */
 	void PerformHitDetection();
 
-	/** Apply damage to hit actor */
-	void ApplyDamage(AActor* HitActor, const FHitResult& HitResult);
+	/** Apply damage to hit actor, returns final damage dealt */
+	float ApplyDamage(AActor* HitActor, const FHitResult& HitResult);
 
 	/** Check if hit is a headshot */
 	bool IsHeadshot(const FHitResult& HitResult) const;

@@ -489,19 +489,19 @@ void UMeleeAttackComponent::PerformHitDetection()
 
 			bHasHitThisAttack = true;
 
-			// Apply damage
-			ApplyDamage(HitActor, Hit);
-
 			// Check for headshot
 			bool bHeadshot = IsHeadshot(Hit);
+
+			// Apply damage and get final damage value
+			float FinalDamage = ApplyDamage(HitActor, Hit);
 
 			// Play effects
 			PlaySound(HitSound);
 			PlayCameraShake();
 			SpawnImpactFX(Hit.ImpactPoint, Hit.ImpactNormal);
 
-			// Broadcast hit event
-			OnMeleeHit.Broadcast(HitActor, Hit.ImpactPoint, bHeadshot);
+			// Broadcast hit event with actual damage dealt
+			OnMeleeHit.Broadcast(HitActor, Hit.ImpactPoint, bHeadshot, FinalDamage);
 
 			// Debug visualization for hit impact
 			if (bEnableDebugVisualization)
@@ -515,11 +515,11 @@ void UMeleeAttackComponent::PerformHitDetection()
 	}
 }
 
-void UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitResult)
+float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitResult)
 {
 	if (!HitActor || !OwnerCharacter)
 	{
-		return;
+		return 0.0f;
 	}
 
 	// Calculate base damage
@@ -591,6 +591,8 @@ void UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitR
 
 	// Apply impulse - try character launch first, then physics
 	ApplyCharacterImpulse(HitActor, ImpulseDirection, FinalImpulse);
+
+	return FinalDamage;
 }
 
 bool UMeleeAttackComponent::IsHeadshot(const FHitResult& HitResult) const

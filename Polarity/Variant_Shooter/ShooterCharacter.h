@@ -508,7 +508,7 @@ protected:
 
 	/** Called when melee attack hits something */
 	UFUNCTION()
-	void OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot);
+	void OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage);
 
 	// ==================== SFX Functions ====================
 
