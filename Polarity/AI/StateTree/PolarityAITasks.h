@@ -331,3 +331,83 @@ struct FSTTask_BurstFire : public FStateTreeTaskCommonBase
 		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
 #endif
 };
+
+// ============================================================================
+// FlyAndShoot - Continuous flying movement while shooting when ready
+// For FlyingDrone: picks random points around target, moves towards them,
+// and fires bursts whenever off cooldown and has LOS
+// ============================================================================
+
+class AFlyingDrone;
+
+USTRUCT()
+struct FSTTask_FlyAndShoot_Data
+{
+	GENERATED_BODY()
+
+	/** The FlyingDrone NPC */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AFlyingDrone> Drone;
+
+	/** Target to orbit and shoot at */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	/** Horizontal radius for point selection around target */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "100.0"))
+	float OrbitRadius = 800.0f;
+
+	/** Minimum height offset for patrol points */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.0"))
+	float MinHeight = 200.0f;
+
+	/** Maximum height offset for patrol points */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.0"))
+	float MaxHeight = 400.0f;
+
+	/** Acceptance radius for reaching waypoint */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "10.0"))
+	float AcceptanceRadius = 150.0f;
+
+	/** If true, use combat coordinator for attack permission */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	bool bUseCoordinator = true;
+
+	// Runtime state
+	FVector CurrentDestination = FVector::ZeroVector;
+	bool bHasDestination = false;
+	bool bIsShooting = false;
+};
+
+USTRUCT(DisplayName = "Fly And Shoot", Category = "Polarity|AI|Drone")
+struct FSTTask_FlyAndShoot : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_FlyAndShoot_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+
+private:
+	/** Pick a new random destination around target */
+	bool PickNewDestination(FInstanceDataType& Data) const;
+
+	/** Check if drone can shoot (not dead, off cooldown, has LOS, has permission) */
+	bool CanShoot(const FInstanceDataType& Data) const;
+
+	/** Start shooting at target */
+	void StartShooting(FInstanceDataType& Data) const;
+
+	/** Stop shooting */
+	void StopShooting(FInstanceDataType& Data) const;
+};

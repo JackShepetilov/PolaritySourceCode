@@ -278,6 +278,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float WallSlamCooldown = 0.2f;
 
+	// ==================== Wall Bounce ====================
+
+	/** Enable wall bounce during knockback (NPC bounces off walls instead of stopping) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Bounce")
+	bool bEnableWallBounce = true;
+
+	/** Elasticity coefficient for wall bounce (0 = no bounce, 1 = perfect bounce) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Bounce", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableWallBounce"))
+	float WallBounceElasticity = 0.5f;
+
+	/** Minimum velocity to trigger wall bounce (below this NPC just stops) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall Slam|Bounce", meta = (ClampMin = "0", EditCondition = "bEnableWallBounce"))
+	float WallBounceMinVelocity = 200.0f;
+
 	/** Velocity from previous tick (used for impact damage calculation) */
 	FVector PreviousTickVelocity = FVector::ZeroVector;
 
@@ -339,6 +353,17 @@ protected:
 	/** Sound to play at EMF discharge collision */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (EditCondition = "bEnableEMFProximityKnockback"))
 	TObjectPtr<USoundBase> EMFDischargeSound;
+
+	/** Damage dealt to both NPCs when EMF proximity knockback triggers */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFProximityDamage = 10.0f;
+
+	/** Delay before EMF proximity damage is applied (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|EMF Proximity", meta = (ClampMin = "0", ClampMax = "2.0", EditCondition = "bEnableEMFProximityKnockback"))
+	float EMFProximityDamageDelay = 0.2f;
+
+	/** Timer for delayed EMF proximity damage */
+	FTimerHandle EMFProximityDamageTimer;
 
 	// ==================== Melee Charge Transfer ====================
 

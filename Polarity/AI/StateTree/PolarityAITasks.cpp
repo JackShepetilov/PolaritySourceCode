@@ -6,6 +6,8 @@
 #include "../Coordination/AICombatCoordinator.h"
 #include "../Components/MeleeRetreatComponent.h"
 #include "../../Variant_Shooter/AI/ShooterNPC.h"
+#include "../../Variant_Shooter/AI/FlyingDrone.h"
+#include "../../Variant_Shooter/AI/FlyingAIMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "AITypes.h"
 
@@ -491,5 +493,244 @@ FText FSTTask_BurstFire::GetDescription(const FGuid& ID, FStateTreeDataView Inst
 	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return NSLOCTEXT("PolarityAI", "BurstFireDesc", "Fire burst at target (uses NPC burst settings)");
+}
+#endif
+
+// ============================================================================
+// FlyAndShoot
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_FlyAndShoot::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Drone || !Data.Target)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Data.Drone->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Reset state
+	Data.bHasDestination = false;
+	Data.bIsShooting = false;
+	Data.CurrentDestination = FVector::ZeroVector;
+
+	// Pick first destination
+	if (!PickNewDestination(Data))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot: Failed to pick initial destination"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Drone || Data.Drone->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (!Data.Target)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	UFlyingAIMovementComponent* FlyingMovement = Data.Drone->GetFlyingMovement();
+	if (!FlyingMovement)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Check if we reached destination and pick new one
+	if (Data.bHasDestination)
+	{
+		const FVector DroneLocation = Data.Drone->GetActorLocation();
+		const float DistanceToDestination = FVector::Dist(DroneLocation, Data.CurrentDestination);
+
+		if (DistanceToDestination <= Data.AcceptanceRadius || !FlyingMovement->IsMoving())
+		{
+			// Reached destination or movement stopped - pick new one
+			PickNewDestination(Data);
+		}
+	}
+
+	// Handle shooting - check if we can shoot
+	if (!Data.bIsShooting)
+	{
+		// Not currently shooting - check if we can start
+		if (CanShoot(Data))
+		{
+			StartShooting(Data);
+		}
+	}
+	else
+	{
+		// Currently shooting - check if burst completed
+		if (Data.Drone->IsInBurstCooldown() || !Data.Drone->IsCurrentlyShooting())
+		{
+			StopShooting(Data);
+		}
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FSTTask_FlyAndShoot::ExitState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (Data.Drone)
+	{
+		// Stop shooting
+		if (Data.bIsShooting)
+		{
+			StopShooting(Data);
+		}
+
+		// Stop movement
+		if (UFlyingAIMovementComponent* FlyingMovement = Data.Drone->GetFlyingMovement())
+		{
+			FlyingMovement->StopMovement();
+		}
+	}
+}
+
+bool FSTTask_FlyAndShoot::PickNewDestination(FInstanceDataType& Data) const
+{
+	if (!Data.Drone || !Data.Target)
+	{
+		return false;
+	}
+
+	UFlyingAIMovementComponent* FlyingMovement = Data.Drone->GetFlyingMovement();
+	if (!FlyingMovement)
+	{
+		return false;
+	}
+
+	// Get random point around target
+	const FVector TargetLocation = Data.Target->GetActorLocation();
+	FVector NewPoint;
+
+	if (FlyingMovement->GetRandomPointInVolume(TargetLocation, Data.OrbitRadius, Data.MinHeight, Data.MaxHeight, NewPoint))
+	{
+		Data.CurrentDestination = NewPoint;
+		Data.bHasDestination = true;
+
+		// Start flying to new destination
+		FlyingMovement->FlyToLocation(NewPoint, Data.AcceptanceRadius);
+
+		return true;
+	}
+
+	return false;
+}
+
+bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
+{
+	if (!Data.Drone || !Data.Target)
+	{
+		return false;
+	}
+
+	// Don't shoot if dead
+	if (Data.Drone->IsDead())
+	{
+		return false;
+	}
+
+	// Don't shoot if in burst cooldown
+	if (Data.Drone->IsInBurstCooldown())
+	{
+		return false;
+	}
+
+	// Don't shoot if already shooting
+	if (Data.Drone->IsCurrentlyShooting())
+	{
+		return false;
+	}
+
+	// Check line of sight
+	if (!Data.Drone->HasLineOfSightTo(Data.Target))
+	{
+		return false;
+	}
+
+	// Check coordinator permission if needed
+	if (Data.bUseCoordinator)
+	{
+		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone);
+		if (Coordinator && !Coordinator->RequestAttackPermission(Data.Drone))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void FSTTask_FlyAndShoot::StartShooting(FInstanceDataType& Data) const
+{
+	if (!Data.Drone || !Data.Target)
+	{
+		return;
+	}
+
+	// Start shooting (with external permission since we already checked coordinator)
+	Data.Drone->StartShooting(Data.Target, true);
+	Data.bIsShooting = true;
+
+	// Notify coordinator that attack started
+	if (Data.bUseCoordinator)
+	{
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone))
+		{
+			Coordinator->NotifyAttackStarted(Data.Drone);
+		}
+	}
+}
+
+void FSTTask_FlyAndShoot::StopShooting(FInstanceDataType& Data) const
+{
+	if (!Data.Drone)
+	{
+		return;
+	}
+
+	Data.Drone->StopShooting();
+	Data.bIsShooting = false;
+
+	// Notify coordinator that attack completed
+	if (Data.bUseCoordinator)
+	{
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone))
+		{
+			Coordinator->NotifyAttackComplete(Data.Drone);
+		}
+	}
+}
+
+#if WITH_EDITOR
+FText FSTTask_FlyAndShoot::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* Data = InstanceDataView.GetPtr<FInstanceDataType>();
+	if (Data)
+	{
+		return FText::Format(NSLOCTEXT("PolarityAI", "FlyAndShootDesc",
+			"Fly around target (radius: {0}) and shoot when ready"), FText::AsNumber(static_cast<int32>(Data->OrbitRadius)));
+	}
+	return NSLOCTEXT("PolarityAI", "FlyAndShootDescDefault", "Fly around target and shoot when ready");
 }
 #endif

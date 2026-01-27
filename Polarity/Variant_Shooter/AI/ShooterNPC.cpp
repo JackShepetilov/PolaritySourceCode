@@ -1013,47 +1013,40 @@ bool AShooterNPC::CheckKnockbackWallCollision(const FVector& CurrentPos, const F
 
 void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 {
-	// Stop interpolation
-	bIsKnockbackInterpolating = false;
-
 	// Calculate impact velocity based on remaining distance and time
 	float RemainingDistance = FVector::Dist(GetActorLocation(), KnockbackTargetPosition);
 	float RemainingTime = KnockbackTotalDuration - KnockbackElapsedTime;
 	float ImpactSpeed = (RemainingTime > 0.0f) ? RemainingDistance / RemainingTime : 0.0f;
 
-	// Calculate perpendicular velocity component (how hard we hit the wall)
-	float PerpendicularVelocity = ImpactSpeed * FMath::Abs(FVector::DotProduct(KnockbackDirection, -WallHit.ImpactNormal));
+	// Calculate incoming velocity vector
+	FVector IncomingVelocity = KnockbackDirection * ImpactSpeed;
 
-	// Move to wall position (slightly offset to avoid penetration)
-	FVector WallPosition = WallHit.Location;
+	// Calculate perpendicular velocity component (how hard we hit the wall)
+	const FVector Normal = WallHit.ImpactNormal;
+	float DotProduct = FVector::DotProduct(IncomingVelocity, Normal);
+	float PerpendicularVelocity = FMath::Abs(DotProduct);
+
+	// Move to wall position with offset based on capsule radius to avoid penetration
+	float CapsuleRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
+	FVector WallPosition = WallHit.Location + Normal * (CapsuleRadius + 5.0f);
 	SetActorLocation(WallPosition, false);
 
-	// Stop all velocity
-	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
-	{
-		CharMovement->Velocity = FVector::ZeroVector;
-	}
-
-	// Check if impact is strong enough for wall slam damage
+	// Apply wall slam damage first (if strong enough)
 	if (PerpendicularVelocity >= WallSlamVelocityThreshold)
 	{
-		// Calculate damage based on perpendicular velocity above threshold
 		float ExcessVelocity = PerpendicularVelocity - WallSlamVelocityThreshold;
 		float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
 
 		if (WallSlamDamage > 0.0f)
 		{
-			// Apply damage to self
 			FDamageEvent DamageEvent;
 			TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
 
-			// Play sound
 			if (WallSlamSound)
 			{
 				UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, WallHit.ImpactPoint);
 			}
 
-			// Spawn VFX
 			if (WallSlamVFX)
 			{
 				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
@@ -1062,30 +1055,96 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 					WallHit.ImpactPoint,
 					WallHit.ImpactNormal.Rotation(),
 					FVector(WallSlamVFXScale),
-					true,  // bAutoDestroy
-					true,  // bAutoActivate
+					true,
+					true,
 					ENCPoolMethod::None
 				);
 			}
+		}
+	}
+
+	// Check if NPC died from wall slam
+	if (bIsDead)
+	{
+		bIsKnockbackInterpolating = false;
+		return;
+	}
+
+	// Calculate reflected velocity for bounce
+	FVector ReflectedVelocity = IncomingVelocity - (1.0f + WallBounceElasticity) * DotProduct * Normal;
+	float ReflectedSpeed = ReflectedVelocity.Size();
+
+	// Check if we should bounce or stop
+	if (bEnableWallBounce && ReflectedSpeed >= WallBounceMinVelocity)
+	{
+		// Continue knockback in reflected direction
+		FVector ReflectedDirection = ReflectedVelocity.GetSafeNormal();
+
+		// Calculate remaining duration based on reflected speed
+		float ReflectedDistance = ReflectedSpeed * RemainingTime * WallBounceElasticity;
+		float BounceDuration = RemainingTime * WallBounceElasticity;
+
+		// Update knockback parameters for bounce
+		KnockbackStartPosition = WallPosition;
+		KnockbackDirection = ReflectedDirection;
+		KnockbackTargetPosition = WallPosition + ReflectedDirection * ReflectedDistance;
+		KnockbackElapsedTime = 0.0f;
+		KnockbackTotalDuration = BounceDuration;
+		bIsKnockbackInterpolating = true;
+		// bIsInKnockback stays true - movement remains blocked
+
+		// Ensure AI movement stays blocked during bounce
+		if (AController* MyController = GetController())
+		{
+			if (AAIController* AIController = Cast<AAIController>(MyController))
+			{
+				if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
+				{
+					PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
+				}
+				AIController->StopMovement();
+			}
+		}
+
+		// Clear stun timer and set new one for bounce duration
+		GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+		GetWorld()->GetTimerManager().SetTimer(
+			KnockbackStunTimer,
+			this,
+			&AShooterNPC::EndKnockbackStun,
+			BounceDuration + 0.1f,
+			false
+		);
 
 #if WITH_EDITOR
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-					FString::Printf(TEXT("WALL SLAM during knockback! ImpactSpeed=%.0f, Damage=%.1f"),
-						PerpendicularVelocity, WallSlamDamage));
-			}
-#endif
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+				FString::Printf(TEXT("WALL BOUNCE! InSpeed=%.0f, OutSpeed=%.0f, Elasticity=%.2f"),
+					ImpactSpeed, ReflectedSpeed, WallBounceElasticity));
 		}
+#endif
 	}
 	else
 	{
+		// Speed too low for bounce - stop knockback and restore state immediately
+		bIsKnockbackInterpolating = false;
+
+		if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+		{
+			CharMovement->Velocity = FVector::ZeroVector;
+		}
+
+		// Clear the stun timer and end knockback immediately
+		GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+		EndKnockbackStun();
+
 #if WITH_EDITOR
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
-				FString::Printf(TEXT("Hit wall during knockback (no damage): ImpactSpeed=%.0f, Threshold=%.0f"),
-					PerpendicularVelocity, WallSlamVelocityThreshold));
+				FString::Printf(TEXT("Wall hit - stopping (speed %.0f < min %.0f)"),
+					ReflectedSpeed, WallBounceMinVelocity));
 		}
 #endif
 	}
@@ -1374,8 +1433,8 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 	// Calculate direction between NPCs (attraction - towards each other)
 	FVector ToOther = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
 
-	UE_LOG(LogTemp, Warning, TEXT("[EMF Proximity] Triggering attraction knockback: %s <-> %s, Distance=%.0f, Duration=%.2f"),
-		*GetName(), *OtherNPC->GetName(), EMFProximityKnockbackDistance, EMFProximityKnockbackDuration);
+	UE_LOG(LogTemp, Warning, TEXT("[EMF Proximity] Triggering attraction knockback: %s <-> %s, Distance=%.0f, Duration=%.2f, Damage=%.1f"),
+		*GetName(), *OtherNPC->GetName(), EMFProximityKnockbackDistance, EMFProximityKnockbackDuration, EMFProximityDamage);
 
 	// Apply knockback to BOTH NPCs towards each other
 	// Keep EMF enabled so attraction force continues to pull them together
@@ -1384,6 +1443,47 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 
 	// OtherNPC moves towards this NPC
 	OtherNPC->ApplyKnockback(-ToOther, EMFProximityKnockbackDistance, EMFProximityKnockbackDuration, GetActorLocation(), true);
+
+	// Apply delayed damage to both NPCs
+	if (EMFProximityDamage > 0.0f && EMFProximityDamageDelay > 0.0f)
+	{
+		// Set timer for this NPC
+		GetWorld()->GetTimerManager().SetTimer(
+			EMFProximityDamageTimer,
+			[this]()
+			{
+				if (!bIsDead)
+				{
+					FDamageEvent DamageEvent;
+					TakeDamage(EMFProximityDamage, DamageEvent, nullptr, nullptr);
+				}
+			},
+			EMFProximityDamageDelay,
+			false
+		);
+
+		// Set timer for other NPC
+		GetWorld()->GetTimerManager().SetTimer(
+			OtherNPC->EMFProximityDamageTimer,
+			[OtherNPC]()
+			{
+				if (!OtherNPC->bIsDead)
+				{
+					FDamageEvent DamageEvent;
+					OtherNPC->TakeDamage(OtherNPC->EMFProximityDamage, DamageEvent, nullptr, nullptr);
+				}
+			},
+			OtherNPC->EMFProximityDamageDelay,
+			false
+		);
+	}
+	else if (EMFProximityDamage > 0.0f)
+	{
+		// No delay - apply immediately
+		FDamageEvent DamageEvent;
+		TakeDamage(EMFProximityDamage, DamageEvent, nullptr, nullptr);
+		OtherNPC->TakeDamage(OtherNPC->EMFProximityDamage, DamageEvent, nullptr, nullptr);
+	}
 
 	// EMFVelocityModifier will continue applying attraction force during knockback
 	// (unless bDisableEMFDuringKnockback is true, but we want it active for this mechanic)
