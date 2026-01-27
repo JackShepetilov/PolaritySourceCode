@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FlyingAIMovementComponent.h"
+#include "FlyingDrone.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -58,6 +59,15 @@ void UFlyingAIMovementComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	if (!CharacterOwner || !MovementComponent)
 	{
 		return;
+	}
+
+	// Check if owner is in knockback - don't interfere with knockback physics
+	if (AFlyingDrone* Drone = Cast<AFlyingDrone>(CharacterOwner))
+	{
+		if (Drone->IsInKnockback())
+		{
+			return; // Let knockback physics handle movement
+		}
 	}
 
 	// Ensure we stay in flying mode
