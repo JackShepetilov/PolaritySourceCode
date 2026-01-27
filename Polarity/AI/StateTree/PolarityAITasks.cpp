@@ -575,8 +575,24 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 	else
 	{
 		// Currently shooting - check if burst completed
-		if (Data.Drone->IsInBurstCooldown() || !Data.Drone->IsCurrentlyShooting())
+		if (Data.Drone->IsInBurstCooldown())
 		{
+			// Burst finished, entering cooldown - just update our state flag
+			// Don't call StopShooting() as that sets bWantsToShoot=false and prevents auto-resume
+			Data.bIsShooting = false;
+
+			// Release coordinator permission during cooldown
+			if (Data.bUseCoordinator)
+			{
+				if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone))
+				{
+					Coordinator->NotifyAttackComplete(Data.Drone);
+				}
+			}
+		}
+		else if (!Data.Drone->IsCurrentlyShooting())
+		{
+			// Stopped shooting for other reason (interrupted, etc.)
 			StopShooting(Data);
 		}
 	}
