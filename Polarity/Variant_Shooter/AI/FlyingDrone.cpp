@@ -67,6 +67,9 @@ AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 
 	// Drone doesn't use ragdoll
 	RagdollCollisionProfile = FName("NoCollision");
+
+	// Drones fly farther and faster when knocked back (lighter than ground NPCs)
+	KnockbackDistanceMultiplier = 1.5f;
 }
 
 void AFlyingDrone::BeginPlay()
@@ -737,6 +740,12 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 bool AFlyingDrone::CanPerformEvasiveDash() const
 {
 	if (!GetWorld() || bIsDead)
+	{
+		return false;
+	}
+
+	// Don't evade during knockback (conflicts with knockback physics)
+	if (bIsInKnockback)
 	{
 		return false;
 	}
