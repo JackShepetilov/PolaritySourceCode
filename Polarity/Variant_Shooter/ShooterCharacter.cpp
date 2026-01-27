@@ -716,13 +716,13 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	}
 }
 
-void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot)
+void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
 {
 	bool bKilled = false;
 	bool bIsDummyTarget = HitActor && HitActor->Implements<UShooterDummyTarget>();
 
 	// Forward melee hits to the hit marker system
-	if (HitMarkerComponent && MeleeAttackComponent)
+	if (HitMarkerComponent)
 	{
 		// Try to get remaining health from hit actor
 		APawn* HitPawn = Cast<APawn>(HitActor);
@@ -745,11 +745,11 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 		// Calculate hit direction
 		FVector HitDirection = (HitLocation - GetActorLocation()).GetSafeNormal();
 
-		// Register hit with hit marker component
+		// Register hit with hit marker component using actual damage dealt
 		HitMarkerComponent->RegisterHit(
 			HitLocation,
 			HitDirection,
-			MeleeAttackComponent->Settings.BaseDamage,
+			Damage,
 			bHeadshot,
 			bKilled
 		);
@@ -1314,8 +1314,16 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 	// Reset character state first
 	ResetCharacterState();
 
-	// Teleport to spawn point
+	// Teleport to spawn point and set view rotation
 	SetActorTransform(Data.SpawnTransform);
+
+	// Set controller rotation to match checkpoint direction (add 180 to face forward from checkpoint)
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		FRotator SpawnRotation = Data.SpawnTransform.GetRotation().Rotator();
+		SpawnRotation.Yaw += 180.0f;
+		PC->SetControlRotation(SpawnRotation);
+	}
 
 	// Restore health (per requirements: restore HP on respawn)
 	CurrentHP = Data.Health;

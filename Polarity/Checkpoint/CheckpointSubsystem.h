@@ -166,14 +166,14 @@ protected:
 	UPROPERTY()
 	TMap<FGuid, FNPCSpawnData> RegisteredNPCs;
 
-	/** NPCs killed after the last checkpoint activation (will be respawned on player death) */
+	/** NPCs that were alive when the checkpoint was activated (will all be respawned on player death) */
 	UPROPERTY()
-	TArray<FGuid> NPCsKilledAfterCheckpoint;
+	TArray<FGuid> NPCsAliveAtCheckpoint;
 
-	/** NPCs that are currently alive (tracked for respawn) */
+	/** NPCs that are currently alive (tracked for cleanup on respawn) */
 	UPROPERTY()
 	TArray<TWeakObjectPtr<AShooterNPC>> AliveNPCs;
 
-	/** Respawn all NPCs to checkpoint state (destroy survivors, respawn killed) */
+	/** Respawn all NPCs to checkpoint state (destroy all current, respawn all from checkpoint) */
 	void RespawnAllNPCsToCheckpointState();
 };

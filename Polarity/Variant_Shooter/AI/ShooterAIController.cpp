@@ -50,6 +50,15 @@ void AShooterAIController::OnPossess(APawn* InPawn)
 
 		// subscribe to the pawn's OnDeath delegate
 		NPC->OnNPCDeath.AddDynamic(this, &AShooterAIController::OnPawnDeath);
+
+		// Ensure StateTree is running (may not auto-start after dynamic spawn)
+		if (StateTreeAI && !StateTreeAI->IsRunning())
+		{
+			StateTreeAI->StartLogic();
+		}
+
+		// Force perception update on possess (needed for checkpoint respawn)
+		ForcePerceptionUpdate();
 	}
 }
 

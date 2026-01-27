@@ -5,6 +5,8 @@
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
 #include "Polarity/Variant_Shooter/AI/ShooterAIController.h"
+#include "Blueprint/AIBlueprintHelperLibrary.h"
+#include "Components/StateTreeAIComponent.h"
 
 void UCheckpointSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -19,7 +21,7 @@ void UCheckpointSubsystem::Deinitialize()
 	RegisteredCheckpoints.Empty();
 	SessionCompletedSequences.Empty();
 	RegisteredNPCs.Empty();
-	NPCsKilledAfterCheckpoint.Empty();
+	NPCsAliveAtCheckpoint.Empty();
 	AliveNPCs.Empty();
 	Super::Deinitialize();
 }
@@ -88,9 +90,19 @@ bool UCheckpointSubsystem::ActivateCheckpoint(ACheckpointActor* Checkpoint, ASho
 
 	CurrentCheckpointData = NewData;
 
-	// Clear the list of NPCs killed after checkpoint
-	// This "forgets" all NPCs killed before this checkpoint
-	NPCsKilledAfterCheckpoint.Empty();
+	// Snapshot all currently alive NPCs - these will be respawned if player dies
+	NPCsAliveAtCheckpoint.Empty();
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		if (AShooterNPC* NPC = NPCPtr.Get())
+		{
+			FGuid SpawnID = NPC->GetCheckpointSpawnID();
+			if (SpawnID.IsValid())
+			{
+				NPCsAliveAtCheckpoint.Add(SpawnID);
+			}
+		}
+	}
 
 	OnCheckpointActivated.Broadcast(CurrentCheckpointData);
 
@@ -193,19 +205,6 @@ void UCheckpointSubsystem::NotifyNPCDeath(AShooterNPC* NPC)
 	{
 		return !Ptr.IsValid() || Ptr.Get() == NPC;
 	});
-
-	FGuid SpawnID = NPC->GetCheckpointSpawnID();
-	if (!SpawnID.IsValid())
-	{
-		return;
-	}
-
-	// Only track if we have an active checkpoint
-	if (HasActiveCheckpoint())
-	{
-		// Add to killed list (will be respawned if player dies)
-		NPCsKilledAfterCheckpoint.AddUnique(SpawnID);
-	}
 }
 
 void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
@@ -216,38 +215,50 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 		return;
 	}
 
-	// Step 1: Destroy all currently alive NPCs
+	// Step 1: Destroy all currently alive NPCs (with proper controller/StateTree cleanup)
 	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
 	{
 		if (AShooterNPC* NPC = NPCPtr.Get())
 		{
+			// Get the controller and clean it up properly before destroying NPC
+			if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
+			{
+				// Stop StateTree first to clean up debug tags and state
+				if (UStateTreeAIComponent* StateTreeComp = AIController->FindComponentByClass<UStateTreeAIComponent>())
+				{
+					StateTreeComp->StopLogic(TEXT("CheckpointRespawn"));
+				}
+				AIController->UnPossess();
+				AIController->Destroy();
+			}
 			NPC->Destroy();
 		}
 	}
 	AliveNPCs.Empty();
 
-	// Step 2: Respawn all NPCs that were killed after checkpoint
-	for (const FGuid& SpawnID : NPCsKilledAfterCheckpoint)
+	// Step 2: Respawn ALL NPCs that were alive at checkpoint activation
+	// Use SpawnAIFromClass to properly initialize AI controller and StateTree
+	for (const FGuid& SpawnID : NPCsAliveAtCheckpoint)
 	{
 		if (const FNPCSpawnData* SpawnData = RegisteredNPCs.Find(SpawnID))
 		{
 			if (SpawnData->NPCClass)
 			{
-				FActorSpawnParameters SpawnParams;
-				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-				AShooterNPC* NewNPC = World->SpawnActor<AShooterNPC>(
+				APawn* SpawnedPawn = UAIBlueprintHelperLibrary::SpawnAIFromClass(
+					World,
 					SpawnData->NPCClass,
-					SpawnData->SpawnTransform,
-					SpawnParams
+					nullptr, // No BehaviorTree - we use StateTree configured on the controller
+					SpawnData->SpawnTransform.GetLocation(),
+					SpawnData->SpawnTransform.Rotator(),
+					true // bNoCollisionFail
 				);
 
-				if (NewNPC)
+				if (AShooterNPC* NewNPC = Cast<AShooterNPC>(SpawnedPawn))
 				{
 					NewNPC->SetCheckpointSpawnID(SpawnID);
 					AliveNPCs.Add(NewNPC);
 
-					// Force AI perception update so NPC detects player immediately
+					// Force perception update so NPC detects player immediately
 					if (AShooterAIController* AIController = Cast<AShooterAIController>(NewNPC->GetController()))
 					{
 						AIController->ForcePerceptionUpdate();
@@ -256,7 +267,4 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 			}
 		}
 	}
-
-	// Clear the killed list after respawning
-	NPCsKilledAfterCheckpoint.Empty();
 }
