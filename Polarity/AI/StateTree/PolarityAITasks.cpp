@@ -664,6 +664,9 @@ bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
 	// Check line of sight
 	if (!Data.Drone->HasLineOfSightTo(Data.Target))
 	{
+#if WITH_EDITOR
+		UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot: No LOS to target"));
+#endif
 		return false;
 	}
 
@@ -673,6 +676,9 @@ bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
 		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone);
 		if (Coordinator && !Coordinator->RequestAttackPermission(Data.Drone))
 		{
+#if WITH_EDITOR
+			UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot: Coordinator denied permission"));
+#endif
 			return false;
 		}
 	}
