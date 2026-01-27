@@ -18,6 +18,7 @@
 #include "ShooterGameMode.h"
 #include "EMFVelocityModifier.h"
 #include "../DamageTypes/DamageType_Melee.h"
+#include "AIController.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -700,6 +701,20 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		return;
 	}
 
+	// Don't apply new knockback if already in knockback (prevents jitter from multiple hits)
+	if (bIsInKnockback)
+	{
+#if WITH_EDITOR
+		UE_LOG(LogTemp, Warning, TEXT("Drone ApplyKnockback: BLOCKED - already in knockback"));
+#endif
+		return;
+	}
+
+#if WITH_EDITOR
+	UE_LOG(LogTemp, Warning, TEXT("Drone ApplyKnockback: Dir=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
+		InKnockbackDirection.X, InKnockbackDirection.Y, InKnockbackDirection.Z, FinalDistance, Duration);
+#endif
+
 	// Mark as in knockback state
 	bIsInKnockback = true;
 
@@ -711,6 +726,15 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	if (FlyingMovement)
 	{
 		FlyingMovement->StopMovement();
+	}
+
+	// Also stop AI controller movement
+	if (AController* MyController = GetController())
+	{
+		if (AAIController* AIController = Cast<AAIController>(MyController))
+		{
+			AIController->StopMovement();
+		}
 	}
 
 	// Disable EMF forces during knockback for consistent physics (unless explicitly kept enabled)
