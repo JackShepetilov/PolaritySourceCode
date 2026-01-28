@@ -21,6 +21,8 @@
 #include "PolarityCharacter.h"
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
+#include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
 
 UMeleeAttackComponent::UMeleeAttackComponent()
 {
@@ -522,36 +524,63 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 		return 0.0f;
 	}
 
-	// Calculate base damage
-	float FinalDamage = Settings.BaseDamage;
+	float TotalDamage = 0.0f;
+	FVector TraceDir = GetTraceDirection();
+	AController* InstigatorController = OwnerCharacter->GetController();
 
-	// Apply headshot multiplier
+	// ==================== 1. Apply Base Melee Damage ====================
+	float BaseDamage = Settings.BaseDamage;
+
+	// Apply headshot multiplier to base damage only
 	if (IsHeadshot(HitResult))
 	{
-		FinalDamage *= Settings.HeadshotMultiplier;
+		BaseDamage *= Settings.HeadshotMultiplier;
 	}
 
-	// Apply momentum bonus damage
-	FinalDamage += CalculateMomentumDamage(HitActor);
+	if (BaseDamage > 0.0f)
+	{
+		FPointDamageEvent BaseDamageEvent(
+			BaseDamage,
+			HitResult,
+			TraceDir,
+			Settings.DamageType  // DamageType_Melee - Base category
+		);
 
-	// Apply drop kick bonus damage
-	FinalDamage += CalculateDropKickBonusDamage();
+		HitActor->TakeDamage(BaseDamage, BaseDamageEvent, InstigatorController, OwnerCharacter);
+		TotalDamage += BaseDamage;
+	}
 
-	// Create damage event
-	FPointDamageEvent DamageEvent(
-		FinalDamage,
-		HitResult,
-		GetTraceDirection(),
-		Settings.DamageType
-	);
+	// ==================== 2. Apply Momentum Bonus Damage (Kinetic category) ====================
+	float MomentumDamage = CalculateMomentumDamage(HitActor);
+	if (MomentumDamage > 0.0f)
+	{
+		FPointDamageEvent MomentumDamageEvent(
+			MomentumDamage,
+			HitResult,
+			TraceDir,
+			UDamageType_MomentumBonus::StaticClass()  // Kinetic category
+		);
 
-	// Apply damage
-	HitActor->TakeDamage(
-		FinalDamage,
-		DamageEvent,
-		OwnerCharacter->GetController(),
-		OwnerCharacter
-	);
+		HitActor->TakeDamage(MomentumDamage, MomentumDamageEvent, InstigatorController, OwnerCharacter);
+		TotalDamage += MomentumDamage;
+	}
+
+	// ==================== 3. Apply Drop Kick Bonus Damage (Kinetic category) ====================
+	float DropKickDamage = CalculateDropKickBonusDamage();
+	if (DropKickDamage > 0.0f)
+	{
+		FPointDamageEvent DropKickDamageEvent(
+			DropKickDamage,
+			HitResult,
+			TraceDir,
+			UDamageType_Dropkick::StaticClass()  // Kinetic category
+		);
+
+		HitActor->TakeDamage(DropKickDamage, DropKickDamageEvent, InstigatorController, OwnerCharacter);
+		TotalDamage += DropKickDamage;
+	}
+
+	float FinalDamage = TotalDamage;
 
 	// ==================== Titanfall 2 Momentum Transfer ====================
 	// When hitting an enemy while flying at high speed, transfer that momentum to them
@@ -1350,12 +1379,30 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	// Calculate knockback using center-to-center direction from player to target
 	// This is more intuitive than camera direction for knockback physics
 
-	// Get center-to-center direction (horizontal only for consistent behavior)
+	// Get center-to-center direction
 	FVector PlayerCenter = OwnerCharacter->GetActorLocation();
 	FVector TargetCenter = HitActor->GetActorLocation();
 	FVector KnockbackDirection = TargetCenter - PlayerCenter;
-	KnockbackDirection.Z = 0.0f; // Horizontal knockback only
-	KnockbackDirection.Normalize();
+
+	// For dropkick, preserve vertical component (player is above target, so knockback goes down)
+	// For normal melee, keep horizontal only for consistent ground behavior
+	if (bIsDropKick)
+	{
+		// Dropkick: use full 3D direction but ensure some downward component
+		KnockbackDirection.Normalize();
+		// If somehow the direction is mostly upward, clamp it
+		if (KnockbackDirection.Z > 0.3f)
+		{
+			KnockbackDirection.Z = 0.0f;
+			KnockbackDirection.Normalize();
+		}
+	}
+	else
+	{
+		// Normal melee: horizontal knockback only
+		KnockbackDirection.Z = 0.0f;
+		KnockbackDirection.Normalize();
+	}
 
 	// Calculate player speed toward target for distance calculation
 	float PlayerSpeedTowardTarget = 0.0f;
@@ -2280,12 +2327,20 @@ bool UMeleeAttackComponent::TryStartDropKick()
 		LungeTargetPosition = BestTargetPos + DirectionFromTarget * StopDistance;
 		LungeTargetPosition.Z = BestTargetPos.Z;
 
+		// Update OwnerVelocityAtAttackStart with dropkick dive velocity
+		// This ensures knockback calculations and HP regen use the dive speed, not the cached velocity from attack start
+		FVector DiveDirection = (BestTargetPos - Start).GetSafeNormal();
+		OwnerVelocityAtAttackStart = DiveDirection * Settings.DropKickDiveSpeed;
+
 		// Start camera focus
 		StartCameraFocus(BestTarget);
 
 #if WITH_EDITOR
 		if (GEngine)
 		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+				FString::Printf(TEXT("DropKick Velocity Set: Speed=%.0f, Dir=(%.2f,%.2f,%.2f)"),
+					OwnerVelocityAtAttackStart.Size(), DiveDirection.X, DiveDirection.Y, DiveDirection.Z));
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
 				FString::Printf(TEXT("DROP KICK! Target: %s, Height Diff: %.0f cm, Bonus Damage: %.0f"),
 					*BestTarget->GetName(), DropKickHeightDifference, CalculateDropKickBonusDamage()));
@@ -2315,6 +2370,21 @@ void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 	AActor* Target = MagnetismTarget.Get();
 	FVector CurrentPos = OwnerCharacter->GetActorLocation();
 	FVector TargetPos = Target->GetActorLocation();
+
+	// If target NPC is in knockback, stop all drop kick movement to prevent jitter
+	// The hit already happened, no need to continue tracking
+	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(Target))
+	{
+		if (TargetNPC->IsInKnockback())
+		{
+			// Stop player movement velocity
+			if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+			{
+				Movement->Velocity = FVector::ZeroVector;
+			}
+			return;
+		}
+	}
 
 	// Update lunge target position to track target
 	FVector DirectionFromTarget = (CurrentPos - TargetPos);

@@ -10,6 +10,7 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnNPCDamageTaken, float, Damage, TSubclassOf<UDamageType>, DamageType, FVector, HitLocation, AActor*, DamageCauser);
 
 class AShooterWeapon;
 class UAnimMontage;
@@ -385,6 +386,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FChargeUpdatedDelegate_NPC OnChargeUpdated;
 
+	/** Called when this NPC takes damage - used for damage number display */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnNPCDamageTaken OnDamageTaken;
+
 protected:
 
 	/** Gameplay initialization */
@@ -540,7 +545,7 @@ public:
 protected:
 
 	/** Called when stun ends to restore AI movement */
-	void EndKnockbackStun();
+	virtual void EndKnockbackStun();
 
 	/** Update knockback position interpolation (called from Tick) */
 	void UpdateKnockbackInterpolation(float DeltaTime);

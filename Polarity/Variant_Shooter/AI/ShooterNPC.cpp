@@ -23,6 +23,9 @@
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
 #include "../DamageTypes/DamageType_Melee.h"
+#include "../DamageTypes/DamageType_Wallslam.h"
+#include "../DamageTypes/DamageType_EMFProximity.h"
+#include "../UI/DamageNumbersSubsystem.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 
@@ -87,6 +90,12 @@ void AShooterNPC::BeginPlay()
 		// Make sure NPC capsules collide with each other (Block Pawn channel)
 		Capsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	}
+
+	// Register with damage numbers subsystem for floating damage display
+	if (UDamageNumbersSubsystem* DamageNumbersSubsystem = GetWorld()->GetSubsystem<UDamageNumbersSubsystem>())
+	{
+		DamageNumbersSubsystem->RegisterNPC(this);
+	}
 }
 
 void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -101,6 +110,12 @@ void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	// Unregister from coordinator
 	UnregisterFromCoordinator();
+
+	// Unregister from damage numbers subsystem
+	if (UDamageNumbersSubsystem* DamageNumbersSubsystem = GetWorld()->GetSubsystem<UDamageNumbersSubsystem>())
+	{
+		DamageNumbersSubsystem->UnregisterNPC(this);
+	}
 }
 
 void AShooterNPC::Tick(float DeltaTime)
@@ -283,6 +298,22 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	{
 		Die();
 	}
+
+	// Broadcast damage taken event for damage numbers display
+	// Determine hit location from damage event
+	FVector HitLocation = GetActorLocation();  // Default to actor center
+	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+	{
+		const FPointDamageEvent* PointDamageEvent = static_cast<const FPointDamageEvent*>(&DamageEvent);
+		HitLocation = PointDamageEvent->HitInfo.ImpactPoint;
+	}
+	else if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
+	{
+		const FRadialDamageEvent* RadialDamageEvent = static_cast<const FRadialDamageEvent*>(&DamageEvent);
+		HitLocation = RadialDamageEvent->Origin;
+	}
+
+	OnDamageTaken.Broadcast(Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
 	return Damage;
 }
@@ -1040,6 +1071,7 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 		if (WallSlamDamage > 0.0f)
 		{
 			FDamageEvent DamageEvent;
+			DamageEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
 			TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
 
 			if (WallSlamSound)
@@ -1204,14 +1236,29 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 		}
 	}
 
-	// Calculate collision damage based on impact speed
-	float CollisionDamage = 0.0f;
+	// Calculate collision damage based on impact speed (Kinetic - Wallslam category)
+	float KineticCollisionDamage = 0.0f;
 	if (ImpactSpeed >= WallSlamVelocityThreshold)
 	{
 		float ExcessVelocity = ImpactSpeed - WallSlamVelocityThreshold;
 		float BaseDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
-		CollisionDamage = BaseDamage * NPCCollisionDamageMultiplier;
+		KineticCollisionDamage = BaseDamage * NPCCollisionDamageMultiplier;
 	}
+
+	// EMF discharge damage based on charge magnitude (EMF category)
+	float EMFCollisionDamage = 0.0f;
+	if (bIsEMFDischarge && EMFProximityDamage > 0.0f)
+	{
+		// Scale damage by total charge magnitude
+		EMFCollisionDamage = EMFProximityDamage * (TotalChargeMagnitude / 100.0f);
+		EMFCollisionDamage = FMath::Max(EMFCollisionDamage, EMFProximityDamage); // At least base damage
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] EMF Discharge damage added: %.1f (from charge=%.1f)"),
+			EMFCollisionDamage, TotalChargeMagnitude);
+	}
+
+	// Total collision damage for knockback calculations
+	float CollisionDamage = KineticCollisionDamage + EMFCollisionDamage;
 
 	// Calculate knockback duration for both NPCs based on new velocity
 	// Use distance-based formula from ApplyKnockback
@@ -1245,14 +1292,74 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// Apply knockback to other NPC (forwards)
 	OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
 
-	// Apply damage to both NPCs
+	// Apply damage to both NPCs with a short delay
+	// This allows the knockback impulse to be applied first, making deaths look better
+	// Pass nullptr as DamageCauser to bypass friendly fire check (NPC-NPC collision damage is intentional)
+	// Split damage by type: Kinetic (Wallslam) and EMF (EMFProximity)
 	if (CollisionDamage > 0.0f)
 	{
-		FDamageEvent DamageEvent;
-		TakeDamage(CollisionDamage, DamageEvent, nullptr, OtherNPC);
-		OtherNPC->TakeDamage(CollisionDamage, DamageEvent, nullptr, this);
+		const float DamageDelay = 0.1f;
+		float KineticDamage = KineticCollisionDamage;
+		float EMFDamage = EMFCollisionDamage;
 
-		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applied damage: %.1f to both NPCs"), CollisionDamage);
+		// Delay damage to self
+		FTimerHandle SelfDamageTimer;
+		GetWorld()->GetTimerManager().SetTimer(
+			SelfDamageTimer,
+			[this, KineticDamage, EMFDamage]()
+			{
+				if (!bIsDead)
+				{
+					// Apply Kinetic damage (Wallslam type)
+					if (KineticDamage > 0.0f)
+					{
+						FDamageEvent KineticEvent;
+						KineticEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
+						TakeDamage(KineticDamage, KineticEvent, nullptr, nullptr);
+					}
+					// Apply EMF damage (EMFProximity type)
+					if (EMFDamage > 0.0f)
+					{
+						FDamageEvent EMFEvent;
+						EMFEvent.DamageTypeClass = UDamageType_EMFProximity::StaticClass();
+						TakeDamage(EMFDamage, EMFEvent, nullptr, nullptr);
+					}
+				}
+			},
+			DamageDelay,
+			false
+		);
+
+		// Delay damage to other NPC
+		FTimerHandle OtherDamageTimer;
+		GetWorld()->GetTimerManager().SetTimer(
+			OtherDamageTimer,
+			[OtherNPC, KineticDamage, EMFDamage]()
+			{
+				if (OtherNPC && !OtherNPC->bIsDead)
+				{
+					// Apply Kinetic damage (Wallslam type)
+					if (KineticDamage > 0.0f)
+					{
+						FDamageEvent KineticEvent;
+						KineticEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
+						OtherNPC->TakeDamage(KineticDamage, KineticEvent, nullptr, nullptr);
+					}
+					// Apply EMF damage (EMFProximity type)
+					if (EMFDamage > 0.0f)
+					{
+						FDamageEvent EMFEvent;
+						EMFEvent.DamageTypeClass = UDamageType_EMFProximity::StaticClass();
+						OtherNPC->TakeDamage(EMFDamage, EMFEvent, nullptr, nullptr);
+					}
+				}
+			},
+			DamageDelay,
+			false
+		);
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying damage: Kinetic=%.1f, EMF=%.1f to both NPCs (delayed %.2fs)"),
+			KineticDamage, EMFDamage, DamageDelay);
 	}
 
 	// ==================== EMF Discharge Effects ====================
@@ -1433,8 +1540,8 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 	// Calculate direction between NPCs (attraction - towards each other)
 	FVector ToOther = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
 
-	UE_LOG(LogTemp, Warning, TEXT("[EMF Proximity] Triggering attraction knockback: %s <-> %s, Distance=%.0f, Duration=%.2f, Damage=%.1f"),
-		*GetName(), *OtherNPC->GetName(), EMFProximityKnockbackDistance, EMFProximityKnockbackDuration, EMFProximityDamage);
+	UE_LOG(LogTemp, Warning, TEXT("[EMF Proximity] Triggering attraction knockback: %s <-> %s, Distance=%.0f, Duration=%.2f"),
+		*GetName(), *OtherNPC->GetName(), EMFProximityKnockbackDistance, EMFProximityKnockbackDuration);
 
 	// Apply knockback to BOTH NPCs towards each other
 	// Keep EMF enabled so attraction force continues to pull them together
@@ -1444,50 +1551,8 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 	// OtherNPC moves towards this NPC
 	OtherNPC->ApplyKnockback(-ToOther, EMFProximityKnockbackDistance, EMFProximityKnockbackDuration, GetActorLocation(), true);
 
-	// Apply delayed damage to both NPCs
-	if (EMFProximityDamage > 0.0f && EMFProximityDamageDelay > 0.0f)
-	{
-		// Set timer for this NPC
-		GetWorld()->GetTimerManager().SetTimer(
-			EMFProximityDamageTimer,
-			[this]()
-			{
-				if (!bIsDead)
-				{
-					FDamageEvent DamageEvent;
-					TakeDamage(EMFProximityDamage, DamageEvent, nullptr, nullptr);
-				}
-			},
-			EMFProximityDamageDelay,
-			false
-		);
-
-		// Set timer for other NPC
-		GetWorld()->GetTimerManager().SetTimer(
-			OtherNPC->EMFProximityDamageTimer,
-			[OtherNPC]()
-			{
-				if (!OtherNPC->bIsDead)
-				{
-					FDamageEvent DamageEvent;
-					OtherNPC->TakeDamage(OtherNPC->EMFProximityDamage, DamageEvent, nullptr, nullptr);
-				}
-			},
-			OtherNPC->EMFProximityDamageDelay,
-			false
-		);
-	}
-	else if (EMFProximityDamage > 0.0f)
-	{
-		// No delay - apply immediately
-		FDamageEvent DamageEvent;
-		TakeDamage(EMFProximityDamage, DamageEvent, nullptr, nullptr);
-		OtherNPC->TakeDamage(OtherNPC->EMFProximityDamage, DamageEvent, nullptr, nullptr);
-	}
-
-	// EMFVelocityModifier will continue applying attraction force during knockback
-	// (unless bDisableEMFDuringKnockback is true, but we want it active for this mechanic)
-	// The collision system in UpdateKnockbackInterpolation() will handle the "explosion" when they meet
+	// Damage is NOT applied here - it will be applied when capsules actually collide
+	// via HandleNPCCollision() in UpdateKnockbackInterpolation()
 }
 
 void AShooterNPC::EndKnockbackStun()
@@ -1735,8 +1800,9 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		// Mark cooldown to prevent multi-trigger
 		LastWallSlamTime = CurrentTime;
 
-		// Apply damage to self
+		// Apply damage to self with Wallslam damage type (Kinetic category)
 		FDamageEvent DamageEvent;
+		DamageEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
 		TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
 
 		// Play sound

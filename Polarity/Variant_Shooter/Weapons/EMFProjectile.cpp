@@ -12,6 +12,9 @@
 #include "EMF_FieldComponent.h"
 #include "EMF_PluginBPLibrary.h"
 
+// Damage types
+#include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
+
 AEMFProjectile::AEMFProjectile()
 {
 	// Enable tick for EMF force calculations
@@ -25,6 +28,9 @@ AEMFProjectile::AEMFProjectile()
 	{
 		FieldComponent->SetOwnerType(EEMSourceOwnerType::Projectile);
 	}
+
+	// Set default damage type to EMFWeapon (EMF category for damage numbers)
+	HitDamageType = UDamageType_EMFWeapon::StaticClass();
 }
 
 void AEMFProjectile::BeginPlay()
@@ -297,6 +303,13 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 		default:
 			Multiplier = UnknownForceMultiplier;
 			break;
+		}
+
+		// Debug: Log source owner type and multiplier
+		if (bLogEMForces)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("EMFProjectile: Source OwnerType=%d, Multiplier=%.2f, Charge=%.2f"),
+				static_cast<int32>(Source.OwnerType), Multiplier, Source.PointChargeParams.Charge);
 		}
 
 		// Skip if multiplier is zero (fully filtered)
