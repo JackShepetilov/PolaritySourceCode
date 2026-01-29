@@ -238,6 +238,8 @@ bool ABossCharacter::StartArcDash(AActor* Target)
 {
 	if (!CanDash() || !Target)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartArcDash FAILED - CanDash=%d, Target=%s"),
+			CanDash(), Target ? *Target->GetName() : TEXT("NULL"));
 		return false;
 	}
 
@@ -254,6 +256,9 @@ bool ABossCharacter::StartArcDash(AActor* Target)
 	float ArcLength = DirectDistance * 1.3f; // Arc is roughly 30% longer than direct path
 	DashTotalDuration = ArcLength / DashSpeed;
 	DashElapsedTime = 0.0f;
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartArcDash: Start(%s) -> End(%s) via Control(%s), Duration=%.2fs"),
+		*DashStartPosition.ToString(), *DashTargetPosition.ToString(), *DashArcControlPoint.ToString(), DashTotalDuration);
 
 	// Start dash
 	bIsDashing = true;
@@ -290,32 +295,37 @@ FVector ABossCharacter::CalculateArcDashTarget(AActor* Target) const
 	FVector TargetLocation = Target->GetActorLocation();
 	FVector BossLocation = GetActorLocation();
 
-	// Direction from boss to player
-	FVector ToPlayer = (TargetLocation - BossLocation).GetSafeNormal2D();
+	// Direction from player to boss (we want to end up on the other side)
+	FVector FromPlayerToBoss = (BossLocation - TargetLocation).GetSafeNormal2D();
 
-	// Random angle offset (either side of the player)
+	// Random angle offset - pick a point around the player, offset from our current angle
+	// Positive angle = clockwise, Negative = counter-clockwise (looking down)
 	float AngleOffset = FMath::RandRange(MinDashAngleOffset, MaxDashAngleOffset);
 	if (FMath::RandBool())
 	{
 		AngleOffset = -AngleOffset;
 	}
 
-	// Rotate the direction by angle offset
-	FVector OffsetDirection = ToPlayer.RotateAngleAxis(AngleOffset, FVector::UpVector);
+	// Rotate to get direction from player to dash target position
+	FVector DirectionToTarget = FromPlayerToBoss.RotateAngleAxis(AngleOffset, FVector::UpVector);
 
-	// Target position is at attack range distance from player in the offset direction
-	FVector DashTarget = TargetLocation - OffsetDirection * DashTargetDistanceFromPlayer;
+	// Dash target is on a circle around the player at melee range
+	FVector DashTarget = TargetLocation + DirectionToTarget * DashTargetDistanceFromPlayer;
 
-	// Clamp distance from current position
+	// Clamp distance from current boss position to max dash distance
 	float DistanceToTarget = FVector::Dist2D(BossLocation, DashTarget);
 	if (DistanceToTarget > MaxDashDistance)
 	{
-		FVector DirectionToTarget = (DashTarget - BossLocation).GetSafeNormal2D();
-		DashTarget = BossLocation + DirectionToTarget * MaxDashDistance;
+		// If too far, move target closer along the line from boss to target
+		FVector DirectionFromBoss = (DashTarget - BossLocation).GetSafeNormal2D();
+		DashTarget = BossLocation + DirectionFromBoss * MaxDashDistance;
 	}
 
 	// Keep same Z height (ground phase)
 	DashTarget.Z = BossLocation.Z;
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] Target calc: Boss(%s) -> DashTarget(%s), Angle=%.1f, DistFromPlayer=%.1f"),
+		*BossLocation.ToString(), *DashTarget.ToString(), AngleOffset, FVector::Dist2D(TargetLocation, DashTarget));
 
 	return DashTarget;
 }
