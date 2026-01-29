@@ -144,6 +144,7 @@ void ABossCharacter::SetPhase(EBossPhase NewPhase)
 {
 	if (CurrentPhase != NewPhase)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase called with NewPhase=%d"), (int)NewPhase);
 		ExecutePhaseTransition(NewPhase);
 	}
 }
@@ -197,6 +198,13 @@ bool ABossCharacter::ShouldTransitionToGround() const
 void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 {
 	EBossPhase OldPhase = CurrentPhase;
+
+	// Debug: Print stack trace to see who called this
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	UE_LOG(LogTemp, Error, TEXT("[BOSS PHASE] >>> TRANSITION: %s -> %s (HP=%.0f/%.0f, DashCount=%d)"),
+		*PhaseNames[(int)OldPhase], *PhaseNames[(int)NewPhase],
+		CurrentHP, MaxHP, CurrentDashAttackCount);
+
 	CurrentPhase = NewPhase;
 
 	// Reset phase-specific counters
@@ -246,29 +254,45 @@ bool ABossCharacter::StartArcDash(AActor* Target)
 	// Store target
 	CurrentTarget = Target;
 
-	// Calculate dash parameters
-	DashStartPosition = GetActorLocation();
-	DashTargetPosition = CalculateArcDashTarget(Target);
-	DashArcControlPoint = CalculateArcControlPoint(DashStartPosition, DashTargetPosition, Target);
+	// Calculate initial angle from player to boss
+	FVector PlayerPos = Target->GetActorLocation();
+	FVector BossPos = GetActorLocation();
+	FVector TowardsBoss = (BossPos - PlayerPos).GetSafeNormal2D();
 
-	// Calculate dash duration based on arc length (approximate)
-	float DirectDistance = FVector::Dist(DashStartPosition, DashTargetPosition);
-	float ArcLength = DirectDistance * 1.3f; // Arc is roughly 30% longer than direct path
-	DashTotalDuration = ArcLength / DashSpeed;
+	// Store starting angle (in degrees, around player)
+	DashStartAngle = FMath::Atan2(TowardsBoss.Y, TowardsBoss.X) * (180.0f / PI);
+
+	// Calculate target angle - offset by MinDashAngleOffset to MaxDashAngleOffset degrees
+	float AngleOffset = FMath::RandRange(MinDashAngleOffset, MaxDashAngleOffset);
+	if (FMath::RandBool())
+	{
+		AngleOffset = -AngleOffset;
+	}
+	DashTargetAngle = DashStartAngle + AngleOffset;
+
+	// Store starting distance from player (we'll maintain roughly this distance during arc)
+	DashStartDistance = FVector::Dist2D(PlayerPos, BossPos);
+	// Clamp to reasonable range
+	DashStartDistance = FMath::Clamp(DashStartDistance, DashTargetDistanceFromPlayer, MaxDashDistance);
+
+	// Calculate duration based on arc length
+	float ArcLengthDegrees = FMath::Abs(AngleOffset);
+	float ArcLengthCm = (ArcLengthDegrees / 360.0f) * 2.0f * PI * DashStartDistance;
+	DashTotalDuration = FMath::Max(ArcLengthCm / DashSpeed, 0.2f); // Minimum 0.2s
 	DashElapsedTime = 0.0f;
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartArcDash: Start(%s) -> End(%s) via Control(%s), Duration=%.2fs"),
-		*DashStartPosition.ToString(), *DashTargetPosition.ToString(), *DashArcControlPoint.ToString(), DashTotalDuration);
+	// Store starting Z height to maintain ground level
+	DashStartPosition = BossPos;
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartArcDash: Angle %.1f -> %.1f (offset %.1f), Distance=%.0f, Duration=%.2fs"),
+		DashStartAngle, DashTargetAngle, AngleOffset, DashStartDistance, DashTotalDuration);
 
 	// Start dash
 	bIsDashing = true;
 	LastDashTime = GetWorld()->GetTimeSeconds();
 
-	// Disable regular movement during dash
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		MovementComp->SetMovementMode(MOVE_Flying);
-	}
+	// Keep walking mode - we'll move manually but stay grounded
+	// Don't use MOVE_Flying as it causes Z drift
 
 	return true;
 }
@@ -359,26 +383,54 @@ FVector ABossCharacter::CalculateArcControlPoint(const FVector& Start, const FVe
 
 void ABossCharacter::UpdateArcDash(float DeltaTime)
 {
-	if (!bIsDashing)
+	if (!bIsDashing || !CurrentTarget.IsValid())
 	{
+		if (bIsDashing)
+		{
+			EndDash();
+		}
 		return;
+	}
+
+	// Debug movement mode
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		FString ModeStr;
+		switch (MovementComp->MovementMode)
+		{
+		case MOVE_Walking: ModeStr = TEXT("Walking"); break;
+		case MOVE_Flying: ModeStr = TEXT("Flying"); break;
+		case MOVE_Falling: ModeStr = TEXT("Falling"); break;
+		case MOVE_None: ModeStr = TEXT("None"); break;
+		default: ModeStr = FString::Printf(TEXT("Other(%d)"), (int)MovementComp->MovementMode); break;
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] Tick - MovementMode=%s, Z=%.1f"), *ModeStr, GetActorLocation().Z);
 	}
 
 	DashElapsedTime += DeltaTime;
 	float Alpha = FMath::Clamp(DashElapsedTime / DashTotalDuration, 0.0f, 1.0f);
 
-	// Evaluate position on bezier curve
-	FVector NewPosition = EvaluateBezier(DashStartPosition, DashArcControlPoint, DashTargetPosition, Alpha);
+	// Get CURRENT player position - this makes the arc dynamic
+	FVector PlayerPos = CurrentTarget->GetActorLocation();
 
-	// Calculate facing direction (tangent of curve)
-	float TangentAlpha = FMath::Clamp(Alpha + 0.01f, 0.0f, 1.0f);
-	FVector TangentPosition = EvaluateBezier(DashStartPosition, DashArcControlPoint, DashTargetPosition, TangentAlpha);
-	FVector FacingDirection = (TangentPosition - NewPosition).GetSafeNormal();
+	// Interpolate angle around player
+	float CurrentAngle = FMath::Lerp(DashStartAngle, DashTargetAngle, Alpha);
+	float AngleRad = CurrentAngle * (PI / 180.0f);
 
-	// Face movement direction
-	if (!FacingDirection.IsNearlyZero())
+	// Calculate position on circle around player
+	// Distance decreases towards melee range as we approach target
+	float CurrentDistance = FMath::Lerp(DashStartDistance, DashTargetDistanceFromPlayer, Alpha);
+
+	FVector NewPosition;
+	NewPosition.X = PlayerPos.X + FMath::Cos(AngleRad) * CurrentDistance;
+	NewPosition.Y = PlayerPos.Y + FMath::Sin(AngleRad) * CurrentDistance;
+	NewPosition.Z = DashStartPosition.Z; // Keep original Z height (ground level)
+
+	// Face the player during dash
+	FVector ToPlayer = (PlayerPos - NewPosition).GetSafeNormal2D();
+	if (!ToPlayer.IsNearlyZero())
 	{
-		FRotator NewRotation = FacingDirection.Rotation();
+		FRotator NewRotation = ToPlayer.Rotation();
 		NewRotation.Pitch = 0.0f;
 		NewRotation.Roll = 0.0f;
 		SetActorRotation(NewRotation);
@@ -584,6 +636,8 @@ void ABossCharacter::ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitRes
 
 void ABossCharacter::StartHovering()
 {
+	UE_LOG(LogTemp, Error, TEXT("[BOSS] StartHovering() called! CurrentPhase=%d"), (int)CurrentPhase);
+
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->SetMovementMode(MOVE_Flying);

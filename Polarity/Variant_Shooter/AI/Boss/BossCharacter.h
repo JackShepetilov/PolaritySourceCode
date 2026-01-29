@@ -220,14 +220,17 @@ protected:
 
 	// ==================== Dash State ====================
 
-	/** Start position of current dash */
+	/** Start position of current dash (for Z height preservation) */
 	FVector DashStartPosition = FVector::ZeroVector;
 
-	/** Target position of current dash */
-	FVector DashTargetPosition = FVector::ZeroVector;
+	/** Starting angle around player (degrees) */
+	float DashStartAngle = 0.0f;
 
-	/** Arc control point for curved dash path */
-	FVector DashArcControlPoint = FVector::ZeroVector;
+	/** Target angle around player (degrees) */
+	float DashTargetAngle = 0.0f;
+
+	/** Starting distance from player */
+	float DashStartDistance = 0.0f;
 
 	/** Elapsed time in current dash */
 	float DashElapsedTime = 0.0f;
