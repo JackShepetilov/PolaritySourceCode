@@ -5,12 +5,43 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "Tickable.h"
 #include "Variant_Shooter/DamageCategory/PlayerDamageCategory.h"
 #include "DamageNumbersSubsystem.generated.h"
 
 class UDamageNumberWidget;
 class UCanvasPanel;
 class AShooterNPC;
+
+/**
+ * Key for identifying unique damage batches (per NPC + per category)
+ */
+struct FDamageBatchKey
+{
+	TWeakObjectPtr<AActor> TargetNPC;
+	EPlayerDamageCategory Category;
+
+	bool operator==(const FDamageBatchKey& Other) const
+	{
+		return TargetNPC == Other.TargetNPC && Category == Other.Category;
+	}
+
+	friend uint32 GetTypeHash(const FDamageBatchKey& Key)
+	{
+		return HashCombine(GetTypeHash(Key.TargetNPC), GetTypeHash(static_cast<uint8>(Key.Category)));
+	}
+};
+
+/**
+ * Active damage batch - tracks accumulated damage for a target+category
+ */
+struct FDamageBatch
+{
+	float AccumulatedDamage = 0.0f;
+	float TimeRemaining = 0.0f;
+	FVector WorldLocation = FVector::ZeroVector;
+	TObjectPtr<UDamageNumberWidget> ActiveWidget = nullptr;
+};
 
 /**
  * Settings for damage number appearance and behavior
@@ -77,14 +108,25 @@ struct FDamageNumberSettings
 	/** Maximum number of widgets in the pool */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pool", meta = (ClampMin = "5", ClampMax = "50"))
 	int32 PoolSize = 20;
+
+	// ==================== Batching ====================
+
+	/** Enable damage batching (TF2-style cumulative damage numbers) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Batching")
+	bool bEnableBatching = true;
+
+	/** Time window for batching damage (seconds). Damage within this window is combined. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Batching", meta = (ClampMin = "0.1", ClampMax = "3.0", EditCondition = "bEnableBatching"))
+	float BatchingWindow = 0.5f;
 };
 
 /**
  * World subsystem that manages floating damage numbers
  * Handles widget pooling and screen position updates
+ * Implements FTickableGameObject for per-frame batch timer updates
  */
 UCLASS()
-class POLARITY_API UDamageNumbersSubsystem : public UWorldSubsystem
+class POLARITY_API UDamageNumbersSubsystem : public UWorldSubsystem, public FTickableGameObject
 {
 	GENERATED_BODY()
 
@@ -94,6 +136,14 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
+
+	// ==================== FTickableGameObject Interface ====================
+
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(UDamageNumbersSubsystem, STATGROUP_Tickables); }
+	virtual bool IsTickable() const override { return !IsTemplate() && bEnabled; }
+	virtual bool IsTickableInEditor() const override { return false; }
+	virtual UWorld* GetTickableGameObjectWorld() const override { return GetWorld(); }
 
 	// ==================== Main API ====================
 
@@ -165,7 +215,7 @@ protected:
 
 	/** Handle damage taken by registered NPC */
 	UFUNCTION()
-	void OnNPCDamageTaken(float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser);
+	void OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser);
 
 	/** Registered NPCs for damage number display */
 	UPROPERTY()
@@ -208,4 +258,15 @@ public:
 
 	/** Check if a world location is visible on screen */
 	bool IsLocationVisible(const FVector& WorldLocation) const;
+
+	// ==================== Batching ====================
+
+	/** Active damage batches - keyed by NPC + Category */
+	TMap<FDamageBatchKey, FDamageBatch> ActiveBatches;
+
+	/** Process damage with batching logic */
+	void ProcessDamageWithBatching(AActor* TargetNPC, float Damage, EPlayerDamageCategory Category, const FVector& WorldLocation);
+
+	/** Finalize a batch (called when timer expires) */
+	void FinalizeBatch(const FDamageBatchKey& Key);
 };

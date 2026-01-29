@@ -52,6 +52,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSlideEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWallrunStarted, EWallSide, Side);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWallrunEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWallBounce, FVector, BounceDirection);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMantleStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMantleEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAirDashStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAirDashEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnJumpPerformed, bool, bIsDoubleJump);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPreVelocityUpdate, float, FVector&);
 
 /**
@@ -154,6 +159,21 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
 	FOnWallBounce OnWallBounce;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnMantleStarted OnMantleStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnMantleEnded OnMantleEnded;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnAirDashStarted OnAirDashStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnAirDashEnded OnAirDashEnded;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnJumpPerformed OnJumpPerformed;
 
 	FOnPreVelocityUpdate OnPreVelocityUpdate;
 
@@ -405,6 +425,13 @@ protected:
 	float AirDashCooldownRemaining = 0.0f;
 	float AirDashDecayTimeRemaining = 0.0f;
 
+	// Air Dash Redirect state
+	bool bIsRedirecting = false;
+	float AirDashRedirectTimeRemaining = 0.0f;
+	FVector AirDashRedirectStartDirection = FVector::ZeroVector;
+	FVector AirDashRedirectTargetDirection = FVector::ZeroVector;
+	float AirDashRedirectSpeed = 0.0f;
+
 	// Mantle state
 	FVector MantleStartLocation;
 	FVector MantleTargetLocation;
@@ -450,6 +477,7 @@ protected:
 	void UpdateJumpHold(float DeltaTime);
 	void UpdateAirDash(float DeltaTime);
 	void UpdateAirDashDecay(float DeltaTime);
+	void UpdateAirDashRedirect(float DeltaTime);
 
 	// EMF & Modifiers
 	void ApplyEMFForces(float DeltaTime);

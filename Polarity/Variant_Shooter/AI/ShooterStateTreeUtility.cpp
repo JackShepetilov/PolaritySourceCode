@@ -381,6 +381,9 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 		// В таком случае NPC не получит событие и не установит цель
 		UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking already known actors"));
 
+		// Force perception system to update immediately
+		InstanceData.Controller->ForcePerceptionUpdate();
+
 		if (UAIPerceptionComponent* PerceptionComp = InstanceData.Controller->GetPerceptionComponent())
 		{
 			TArray<AActor*> KnownActors;
@@ -461,6 +464,55 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 		if (IsValid(ControllerTarget))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Tick synced target from Controller: %s"), *ControllerTarget->GetName());
+		}
+	}
+
+	// Periodic perception polling - backup mechanism in case delegates don't fire reliably
+	InstanceData.TimeSinceLastPoll += DeltaTime;
+	if (InstanceData.TimeSinceLastPoll >= InstanceData.PerceptionPollInterval)
+	{
+		InstanceData.TimeSinceLastPoll = 0.0f;
+
+		// Only poll if we don't have a target yet
+		if (!InstanceData.bHasTarget)
+		{
+			if (UAIPerceptionComponent* PerceptionComp = InstanceData.Controller->GetPerceptionComponent())
+			{
+				TArray<AActor*> KnownActors;
+				PerceptionComp->GetKnownPerceivedActors(nullptr, KnownActors);
+
+				for (AActor* KnownActor : KnownActors)
+				{
+					if (!KnownActor || !KnownActor->ActorHasTag(InstanceData.SenseTag))
+					{
+						continue;
+					}
+
+					// Check Line of Sight
+					FCollisionQueryParams QueryParams;
+					QueryParams.AddIgnoredActor(InstanceData.Character);
+					QueryParams.AddIgnoredActor(KnownActor);
+
+					FHitResult OutHit;
+					bool bHit = InstanceData.Character->GetWorld()->LineTraceSingleByChannel(
+						OutHit,
+						InstanceData.Character->GetActorLocation(),
+						KnownActor->GetActorLocation(),
+						ECC_Visibility,
+						QueryParams
+					);
+
+					if (!bHit) // Direct LOS
+					{
+						UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Poll found target %s"), *KnownActor->GetName());
+						InstanceData.Controller->SetCurrentTarget(KnownActor);
+						InstanceData.TargetActor = KnownActor;
+						InstanceData.bHasTarget = true;
+						InstanceData.bHasInvestigateLocation = false;
+						break;
+					}
+				}
+			}
 		}
 	}
 

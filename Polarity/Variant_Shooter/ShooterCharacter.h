@@ -20,6 +20,8 @@ class UAudioComponent;
 class UCurveFloat;
 class UMaterialInterface;
 class UIKRetargeter;
+class UNiagaraSystem;
+class UNiagaraComponent;
 struct FCheckpointData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
@@ -29,6 +31,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FHeatUpdatedDelegate, float, HeatPe
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FSpeedUpdatedDelegate, float, SpeedPercent, float, CurrentSpeed, float, MaxSpeed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate, uint8, NewPolarity, float, ChargeValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate, float, ChargeValue, uint8, Polarity);
+// Extended charge delegate: TotalCharge, StableCharge, UnstableCharge, MaxStable, MaxUnstable, Polarity
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, TotalCharge, float, StableCharge, float, UnstableCharge, float, MaxStableCharge, float, MaxUnstableCharge, uint8, Polarity);
 
 /**
  *  A player controllable first person shooter character
@@ -213,6 +217,16 @@ protected:
 	/** Previous polarity state for change detection (0=Neutral, 1=Positive, 2=Negative) */
 	uint8 PreviousPolarity = 0;
 
+	// ==================== Charge Stability Thresholds ====================
+
+	/** Charge threshold below which state is considered Stable (0-1 absolute) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Charge", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ChargeStableThreshold = 0.3f;
+
+	/** Charge threshold above which state is considered Unstable (0-1 absolute) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Charge", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ChargeUnstableThreshold = 0.7f;
+
 	// ==================== Charge Overlay Materials ====================
 
 	/** If true, overlay material will be applied based on charge state */
@@ -376,6 +390,86 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UAudioComponent> WallRunLoopAudioComponent;
 
+	// ==================== SFX|Air Dash ====================
+
+	/** Sound played when performing an air dash */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Air Dash")
+	TObjectPtr<USoundBase> AirDashSound;
+
+	/** Minimum pitch for air dash sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Air Dash", meta = (ClampMin = "0.5", ClampMax = "2.0"))
+	float AirDashSoundPitchMin = 0.95f;
+
+	/** Maximum pitch for air dash sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Air Dash", meta = (ClampMin = "0.5", ClampMax = "2.0"))
+	float AirDashSoundPitchMax = 1.05f;
+
+	/** Volume for air dash sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Air Dash", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float AirDashSoundVolume = 1.0f;
+
+	// ==================== SFX|Mantle ====================
+
+	/** Sound played when mantling */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Mantle")
+	TObjectPtr<USoundBase> MantleSound;
+
+	/** Volume for mantle sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Mantle", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float MantleSoundVolume = 1.0f;
+
+	// ==================== SFX|Weapon ====================
+
+	/** Sound played when switching weapons */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Weapon")
+	TObjectPtr<USoundBase> WeaponSwitchSound;
+
+	/** Volume for weapon switch sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Weapon", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float WeaponSwitchSoundVolume = 0.8f;
+
+	// ==================== SFX|Low Health ====================
+
+	/** Warning sound played when health is critically low */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Low Health")
+	TObjectPtr<USoundBase> LowHealthWarningSound;
+
+	/** HP threshold (0-1) below which warning plays */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Low Health", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LowHealthThreshold = 0.25f;
+
+	/** Interval between warning sounds (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Low Health", meta = (ClampMin = "0.5", ClampMax = "5.0"))
+	float LowHealthWarningInterval = 2.0f;
+
+	/** Volume for low health warning sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Low Health", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float LowHealthWarningVolume = 0.7f;
+
+	/** Is currently in low health state */
+	bool bIsLowHealth = false;
+
+	/** Timer for low health warning sounds */
+	float LowHealthWarningTimer = 0.0f;
+
+	// ==================== VFX|Movement ====================
+
+	/** Niagara system for air dash trail effect */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Movement")
+	TObjectPtr<UNiagaraSystem> AirDashTrailFX;
+
+	/** Niagara system for double jump burst effect */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Movement")
+	TObjectPtr<UNiagaraSystem> DoubleJumpFX;
+
+	/** Scale for double jump VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Movement", meta = (ClampMin = "0.1", ClampMax = "5.0"))
+	float DoubleJumpFXScale = 1.0f;
+
+	/** Active air dash trail component */
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> ActiveAirDashTrailComponent;
+
 public:
 
 	/** Bullet count updated delegate */
@@ -398,6 +492,9 @@ public:
 
 	/** Charge updated delegate (fires every tick) */
 	FChargeUpdatedDelegate OnChargeUpdated;
+
+	/** Extended charge delegate with stable/unstable breakdown (fires every tick) */
+	FChargeExtendedDelegate OnChargeExtended;
 
 public:
 
@@ -578,6 +675,45 @@ protected:
 
 	/** ÃƒÆ’Ã…Â½ÃƒÆ’Ã‚Â²ÃƒÆ’Ã‚Â¢ÃƒÆ’Ã‚Â¿ÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚ÂªÃƒÆ’Ã‚Â  ÃƒÆ’Ã‚Â®ÃƒÆ’Ã‚Â² ÃƒÆ’Ã‚Â¤ÃƒÆ’Ã‚Â¥ÃƒÆ’Ã‚Â«ÃƒÆ’Ã‚Â¥ÃƒÆ’Ã‚Â£ÃƒÆ’Ã‚Â ÃƒÆ’Ã‚Â²ÃƒÆ’Ã‚Â®ÃƒÆ’Ã‚Â¢ ApexMovementComponent */
 	void UnbindMovementSFXDelegates();
+
+	// ==================== New Movement SFX/VFX Handlers ====================
+
+	/** Handler for jump events from ApexMovementComponent */
+	UFUNCTION()
+	void OnJumpPerformed_Handler(bool bIsDoubleJump);
+
+	/** Handler for mantle start event */
+	UFUNCTION()
+	void OnMantleStarted_Handler();
+
+	/** Handler for air dash start event - plays sound and starts VFX */
+	UFUNCTION()
+	void OnAirDashStarted_Handler();
+
+	/** Handler for air dash end event - stops VFX */
+	UFUNCTION()
+	void OnAirDashEnded_Handler();
+
+	/** Play air dash sound */
+	void PlayAirDashSound();
+
+	/** Play mantle sound */
+	void PlayMantleSound();
+
+	/** Play weapon switch sound */
+	void PlayWeaponSwitchSound();
+
+	/** Update low health warning state and play warning sounds */
+	void UpdateLowHealthWarning(float DeltaTime);
+
+	/** Spawn double jump VFX at character feet */
+	void SpawnDoubleJumpVFX();
+
+	/** Start air dash trail VFX attached to character */
+	void StartAirDashTrailVFX();
+
+	/** Stop air dash trail VFX */
+	void StopAirDashTrailVFX();
 
 public:
 

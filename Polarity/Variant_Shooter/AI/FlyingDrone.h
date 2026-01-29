@@ -83,9 +83,13 @@ protected:
 
 	// ==================== Knockback Settings ====================
 
-	/** Velocity threshold below which knockback ends (cm/s). Set to 0 to use timer instead. */
+	/** Velocity threshold below which knockback ends (cm/s). Set to 0 to disable velocity check. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Knockback", meta = (ClampMin = "0.0"))
 	float KnockbackEndVelocityThreshold = 100.0f;
+
+	/** If true, knockback ends when drone hits a wall */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Knockback")
+	bool bEndKnockbackOnWallHit = true;
 
 	// ==================== Evasive Dash Settings (for StateTree) ====================
 
@@ -171,6 +175,9 @@ protected:
 
 	/** Override to restore flying mode after knockback */
 	virtual void EndKnockbackStun() override;
+
+	/** Override to handle knockback wall collision for drones */
+	virtual void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit) override;
 
 public:
 
@@ -312,4 +319,7 @@ private:
 
 	/** If true, drone is in continuous patrol mode */
 	bool bIsPatrolling = false;
+
+	/** Actor to ignore collision with during knockback (typically the player who hit us) */
+	TWeakObjectPtr<AActor> KnockbackIgnoreActor;
 };

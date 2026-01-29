@@ -161,8 +161,9 @@ void AShooterWeapon::StartFiring()
 	// check how much time has passed since we last shot
 	// this may be under the refire rate if the weapon shoots slow enough and the player is spamming the trigger
 	const float TimeSinceLastShot = GetWorld()->GetTimeSeconds() - TimeOfLastShot;
+	const float CurrentRefireRate = GetCurrentRefireRate();
 
-	if (TimeSinceLastShot > RefireRate)
+	if (TimeSinceLastShot > CurrentRefireRate)
 	{
 		// fire the weapon right away
 		Fire();
@@ -243,15 +244,18 @@ void AShooterWeapon::Fire()
 	MakeNoise(ShotLoudness, PawnOwner, PawnOwner->GetActorLocation(), ShotNoiseRange, ShotNoiseTag);
 
 	// are we full auto?
+	// Use current refire rate which factors in heat
+	const float ActualRefireRate = GetCurrentRefireRate();
+
 	if (bFullAuto)
 	{
 		// schedule the next shot
-		GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, RefireRate, false);
+		GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, ActualRefireRate, false);
 	}
 	else {
 
 		// for semi-auto weapons, schedule the cooldown notification
-		GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::FireCooldownExpired, RefireRate, false);
+		GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::FireCooldownExpired, ActualRefireRate, false);
 
 	}
 }
@@ -1277,6 +1281,11 @@ void AShooterWeapon::UpdateHeat(float DeltaTime)
 {
 	if (CurrentHeat <= 0.0f)
 	{
+		// Deactivate VFX when cold
+		if (HeatVFXComponent && HeatVFXComponent->IsActive())
+		{
+			HeatVFXComponent->Deactivate();
+		}
 		return;
 	}
 
@@ -1287,6 +1296,56 @@ void AShooterWeapon::UpdateHeat(float DeltaTime)
 
 	// Apply decay
 	CurrentHeat = FMath::Max(0.0f, CurrentHeat - DecayRate * DeltaTime);
+
+	// Update Heat VFX
+	UpdateHeatVFX();
+}
+
+void AShooterWeapon::UpdateHeatVFX()
+{
+	// Skip if no VFX system configured
+	if (!HeatVFX)
+	{
+		return;
+	}
+
+	// Check if heat is above threshold
+	if (CurrentHeat >= HeatVFXThreshold)
+	{
+		// Spawn VFX if not active
+		if (!HeatVFXComponent)
+		{
+			USkeletalMeshComponent* AttachMesh = FirstPersonMesh;
+
+			HeatVFXComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				HeatVFX,
+				AttachMesh,
+				HeatVFXSocket,
+				FVector::ZeroVector,
+				FRotator::ZeroRotator,
+				EAttachLocation::SnapToTarget,
+				false // Don't auto-destroy, we manage lifecycle
+			);
+		}
+		else if (!HeatVFXComponent->IsActive())
+		{
+			HeatVFXComponent->Activate();
+		}
+
+		// Update heat parameter
+		if (HeatVFXComponent)
+		{
+			HeatVFXComponent->SetFloatParameter(HeatParameterName, CurrentHeat);
+		}
+	}
+	else
+	{
+		// Below threshold - deactivate VFX
+		if (HeatVFXComponent && HeatVFXComponent->IsActive())
+		{
+			HeatVFXComponent->Deactivate();
+		}
+	}
 }
 
 void AShooterWeapon::AddHeat(float Amount)
@@ -1313,6 +1372,22 @@ float AShooterWeapon::CalculateHeatDamageMultiplier() const
 {
 	// Lerp from 1.0 (no heat) to MinHeatDamageMultiplier (max heat)
 	return FMath::Lerp(1.0f, MinHeatDamageMultiplier, CurrentHeat);
+}
+
+float AShooterWeapon::CalculateHeatFireRateMultiplier() const
+{
+	if (!bUseHeatSystem)
+	{
+		return 1.0f;
+	}
+	// Lerp from 1.0 (no heat, normal fire rate) to MaxHeatFireRateMultiplier (max heat, slower fire rate)
+	return FMath::Lerp(1.0f, MaxHeatFireRateMultiplier, CurrentHeat);
+}
+
+float AShooterWeapon::GetCurrentRefireRate() const
+{
+	// Base refire rate multiplied by heat penalty
+	return RefireRate * CalculateHeatFireRateMultiplier();
 }
 
 // ==================== Z-Factor ====================

@@ -10,6 +10,8 @@ class USphereComponent;
 class UProjectileMovementComponent;
 class ACharacter;
 class UPrimitiveComponent;
+class UNiagaraSystem;
+class UNiagaraComponent;
 
 /**
  *  Simple projectile class for a first person shooter game
@@ -74,6 +76,16 @@ protected:
 
 	/** Timer to handle deferred destruction of this projectile */
 	FTimerHandle DestructionTimer;
+
+	// ==================== VFX|Trail ====================
+
+	/** Niagara system for projectile trail effect */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Projectile|VFX")
+	TObjectPtr<UNiagaraSystem> TrailFX;
+
+	/** Active trail component (spawned on BeginPlay) */
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> TrailComponent;
 
 public:	
 

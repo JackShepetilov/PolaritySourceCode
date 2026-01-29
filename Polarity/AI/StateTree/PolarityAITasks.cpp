@@ -9,6 +9,7 @@
 #include "../../Variant_Shooter/AI/FlyingDrone.h"
 #include "../../Variant_Shooter/AI/FlyingAIMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavigationSystem.h"
 #include "AITypes.h"
 
 // ============================================================================
@@ -320,6 +321,14 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::EnterState(FStateTreeExecutionContex
 
 	if (!Data.Controller)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("MoveWithStrafe: No Controller!"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Check if destination is valid (not zero vector)
+	if (Data.Destination.IsNearlyZero())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MoveWithStrafe: Destination is zero!"));
 		return EStateTreeRunStatus::Failed;
 	}
 
@@ -338,7 +347,23 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::EnterState(FStateTreeExecutionContex
 	MoveRequest.SetProjectGoalLocation(true);
 	MoveRequest.SetCanStrafe(true);  // Enable strafing!
 
-	Data.Controller->MoveTo(MoveRequest);
+	const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+
+	UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: MoveTo result=%d, Destination=%s"),
+		static_cast<int32>(Result.Code), *Data.Destination.ToString());
+
+	// Check immediate move result
+	if (Result.Code == EPathFollowingRequestResult::Failed)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("MoveWithStrafe: MoveTo failed immediately!"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Result.Code == EPathFollowingRequestResult::AlreadyAtGoal)
+	{
+		UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: Already at goal"));
+		return EStateTreeRunStatus::Succeeded;
+	}
 
 	return EStateTreeRunStatus::Running;
 }
@@ -361,14 +386,30 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::Tick(FStateTreeExecutionContext& Con
 	// Check if reached destination
 	if (UPathFollowingComponent* PathComp = Data.Controller->GetPathFollowingComponent())
 	{
+		const EPathFollowingStatus::Type Status = PathComp->GetStatus();
+
 		if (PathComp->DidMoveReachGoal())
 		{
+			UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: Reached goal"));
 			return EStateTreeRunStatus::Succeeded;
 		}
 
-		// Check if movement failed
-		if (PathComp->GetStatus() == EPathFollowingStatus::Idle)
+		// Only fail if we're idle AND we've been trying for a while
+		// (Idle right after MoveTo can happen if path is being calculated)
+		if (Status == EPathFollowingStatus::Idle)
 		{
+			// Check distance to destination - if we're close enough, consider it success
+			if (APawn* Pawn = Data.Controller->GetPawn())
+			{
+				const float DistToGoal = FVector::Dist(Pawn->GetActorLocation(), Data.Destination);
+				if (DistToGoal <= Data.AcceptanceRadius * 1.5f)
+				{
+					UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: Close enough to goal (dist=%.0f)"), DistToGoal);
+					return EStateTreeRunStatus::Succeeded;
+				}
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("MoveWithStrafe: PathFollowing is Idle - movement may have failed"));
 			return EStateTreeRunStatus::Failed;
 		}
 	}
@@ -771,5 +812,413 @@ FText FSTTask_FlyAndShoot::GetDescription(const FGuid& ID, FStateTreeDataView In
 			"Fly around target (radius: {0}) and shoot when ready"), FText::AsNumber(static_cast<int32>(Data->OrbitRadius)));
 	}
 	return NSLOCTEXT("PolarityAI", "FlyAndShootDescDefault", "Fly around target and shoot when ready");
+}
+#endif
+
+// ============================================================================
+// RunAndShoot
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_RunAndShoot::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC || !Data.Controller || !Data.Target)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Data.NPC->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Reset state
+	Data.bHasDestination = false;
+	Data.bIsShooting = false;
+	Data.CurrentDestination = FVector::ZeroVector;
+
+	// Set focus on target for strafing
+	Data.Controller->SetFocus(Data.Target);
+
+	// Pick first destination
+	if (!PickNewDestination(Data))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RunAndShoot: Failed to pick initial destination"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC || Data.NPC->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (!Data.Target || !Data.Controller)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Update focus to track moving target
+	Data.Controller->SetFocus(Data.Target);
+
+	// Check if we reached destination and pick new one
+	if (Data.bHasDestination)
+	{
+		const FVector NPCLocation = Data.NPC->GetActorLocation();
+		const float DistanceToDestination = FVector::Dist(NPCLocation, Data.CurrentDestination);
+
+		// Check PathFollowingComponent status
+		bool bReachedDestination = DistanceToDestination <= Data.AcceptanceRadius;
+
+		if (UPathFollowingComponent* PathComp = Data.Controller->GetPathFollowingComponent())
+		{
+			if (PathComp->DidMoveReachGoal() || PathComp->GetStatus() == EPathFollowingStatus::Idle)
+			{
+				bReachedDestination = true;
+			}
+		}
+
+		if (bReachedDestination)
+		{
+			// Reached destination - pick new one
+			PickNewDestination(Data);
+		}
+	}
+
+	// Handle shooting - check if we can shoot
+	if (!Data.bIsShooting)
+	{
+		// Not currently shooting - check if we can start
+		if (CanShoot(Data))
+		{
+			StartShooting(Data);
+		}
+	}
+	else
+	{
+		// Currently shooting - check if burst completed
+		if (Data.NPC->IsInBurstCooldown())
+		{
+			// Burst finished, entering cooldown
+			Data.bIsShooting = false;
+
+			// Release coordinator permission during cooldown
+			if (Data.bUseCoordinator)
+			{
+				if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+				{
+					Coordinator->NotifyAttackComplete(Data.NPC);
+				}
+			}
+		}
+		else if (!Data.NPC->IsCurrentlyShooting())
+		{
+			// Stopped shooting for other reason (interrupted, etc.)
+			StopShooting(Data);
+		}
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FSTTask_RunAndShoot::ExitState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (Data.NPC)
+	{
+		// Stop shooting
+		if (Data.bIsShooting)
+		{
+			StopShooting(Data);
+		}
+	}
+
+	if (Data.Controller)
+	{
+		// Stop movement
+		Data.Controller->StopMovement();
+		Data.Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	}
+}
+
+bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
+{
+	if (!Data.NPC || !Data.Target || !Data.Controller)
+	{
+		return false;
+	}
+
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.NPC->GetWorld());
+	if (!NavSys)
+	{
+		return false;
+	}
+
+	const FVector TargetLocation = Data.Target->GetActorLocation();
+	const FVector NPCLocation = Data.NPC->GetActorLocation();
+
+	// Try multiple times to find a valid point
+	constexpr int32 MaxAttempts = 15;
+	FNavLocation NavResult;
+
+	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
+	{
+		// Search around target within MaxDistanceFromTarget
+		if (NavSys->GetRandomReachablePointInRadius(TargetLocation, Data.MaxDistanceFromTarget, NavResult))
+		{
+			const float DistToTarget = FVector::Dist(NavResult.Location, TargetLocation);
+
+			// Check minimum distance from target
+			if (DistToTarget < Data.MinDistanceFromTarget)
+			{
+				continue;
+			}
+
+			// Check maximum distance from target
+			if (DistToTarget > Data.MaxDistanceFromTarget)
+			{
+				continue;
+			}
+
+			// Valid point found!
+			Data.CurrentDestination = NavResult.Location;
+			Data.bHasDestination = true;
+
+			// Start moving with strafe enabled
+			FAIMoveRequest MoveRequest;
+			MoveRequest.SetGoalLocation(NavResult.Location);
+			MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+			MoveRequest.SetUsePathfinding(true);
+			MoveRequest.SetAllowPartialPath(true);
+			MoveRequest.SetProjectGoalLocation(true);
+			MoveRequest.SetCanStrafe(true);
+
+			Data.Controller->MoveTo(MoveRequest);
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool FSTTask_RunAndShoot::CanShoot(const FInstanceDataType& Data) const
+{
+	if (!Data.NPC || !Data.Target)
+	{
+		return false;
+	}
+
+	// Don't shoot if dead
+	if (Data.NPC->IsDead())
+	{
+		return false;
+	}
+
+	// Don't shoot if in burst cooldown
+	if (Data.NPC->IsInBurstCooldown())
+	{
+		return false;
+	}
+
+	// Don't shoot if already shooting
+	if (Data.NPC->IsCurrentlyShooting())
+	{
+		return false;
+	}
+
+	// Check line of sight
+	if (!Data.NPC->HasLineOfSightTo(Data.Target))
+	{
+		return false;
+	}
+
+	// Check coordinator permission if needed
+	if (Data.bUseCoordinator)
+	{
+		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+		if (Coordinator && !Coordinator->RequestAttackPermission(Data.NPC))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void FSTTask_RunAndShoot::StartShooting(FInstanceDataType& Data) const
+{
+	if (!Data.NPC || !Data.Target)
+	{
+		return;
+	}
+
+	// Start shooting (with external permission since we already checked coordinator)
+	Data.NPC->StartShooting(Data.Target, true);
+	Data.bIsShooting = true;
+
+	// Notify coordinator that attack started
+	if (Data.bUseCoordinator)
+	{
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+		{
+			Coordinator->NotifyAttackStarted(Data.NPC);
+		}
+	}
+}
+
+void FSTTask_RunAndShoot::StopShooting(FInstanceDataType& Data) const
+{
+	if (!Data.NPC)
+	{
+		return;
+	}
+
+	Data.NPC->StopShooting();
+	Data.bIsShooting = false;
+
+	// Notify coordinator that attack completed
+	if (Data.bUseCoordinator)
+	{
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+		{
+			Coordinator->NotifyAttackComplete(Data.NPC);
+		}
+	}
+}
+
+#if WITH_EDITOR
+FText FSTTask_RunAndShoot::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* Data = InstanceDataView.GetPtr<FInstanceDataType>();
+	if (Data)
+	{
+		return FText::Format(NSLOCTEXT("PolarityAI", "RunAndShootDesc",
+			"Run around target ({0}-{1}) and shoot when ready"),
+			FText::AsNumber(static_cast<int32>(Data->MinDistanceFromTarget)),
+			FText::AsNumber(static_cast<int32>(Data->MaxDistanceFromTarget)));
+	}
+	return NSLOCTEXT("PolarityAI", "RunAndShootDescDefault", "Run around target and shoot when ready");
+}
+#endif
+
+// ============================================================================
+// GetRandomNavPoint
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_GetRandomNavPoint::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	Data.bFoundPoint = false;
+	Data.RandomPoint = FVector::ZeroVector;
+
+	if (!Data.Pawn)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("GetRandomNavPoint: No Pawn!"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.Pawn->GetWorld());
+	if (!NavSys)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("GetRandomNavPoint: No NavSystem!"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	const FVector PawnLocation = Data.Pawn->GetActorLocation();
+	const bool bHasTarget = IsValid(Data.Target);
+	const FVector TargetLocation = bHasTarget ? Data.Target->GetActorLocation() : FVector::ZeroVector;
+
+	// If we have a target, search around the TARGET (not pawn) within SearchRadius
+	// This ensures we find points that are actually near combat range
+	const FVector SearchOrigin = bHasTarget ? TargetLocation : PawnLocation;
+	const float EffectiveSearchRadius = bHasTarget ? Data.MaxDistanceFromTarget : Data.SearchRadius;
+
+	// Try multiple times to find a valid point
+	constexpr int32 MaxAttempts = 15;
+	FNavLocation NavResult;
+
+	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
+	{
+		// Get a random reachable point around the search origin
+		if (NavSys->GetRandomReachablePointInRadius(SearchOrigin, EffectiveSearchRadius, NavResult))
+		{
+			// If we have a target, verify distance constraints
+			if (bHasTarget)
+			{
+				const float DistToTarget = FVector::Dist(NavResult.Location, TargetLocation);
+
+				// Check minimum distance from target
+				if (DistToTarget < Data.MinDistanceFromTarget)
+				{
+					continue; // Too close to target, try again
+				}
+
+				// Check maximum distance from target
+				if (DistToTarget > Data.MaxDistanceFromTarget)
+				{
+					continue; // Too far from target, try again
+				}
+
+				// Also check that the point is reachable from pawn's current location
+				// (the point should be on connected navmesh)
+				const float DistFromPawn = FVector::Dist(NavResult.Location, PawnLocation);
+
+				// Skip points that are too far from current position (would take too long to reach)
+				if (DistFromPawn > Data.MaxDistanceFromTarget * 2.0f)
+				{
+					continue;
+				}
+			}
+
+			// Valid point found!
+			Data.RandomPoint = NavResult.Location;
+			Data.bFoundPoint = true;
+
+			UE_LOG(LogTemp, Log, TEXT("GetRandomNavPoint: Found point at %s (dist to target: %.0f, dist from pawn: %.0f)"),
+				*NavResult.Location.ToString(),
+				bHasTarget ? FVector::Dist(NavResult.Location, TargetLocation) : 0.0f,
+				FVector::Dist(NavResult.Location, PawnLocation));
+
+			return EStateTreeRunStatus::Succeeded;
+		}
+	}
+
+	// Failed to find a valid point - fall back to current location (don't move)
+	UE_LOG(LogTemp, Warning, TEXT("GetRandomNavPoint: Failed to find valid point after %d attempts! Pawn: %s, Target: %s"),
+		MaxAttempts,
+		*PawnLocation.ToString(),
+		bHasTarget ? *TargetLocation.ToString() : TEXT("None"));
+
+	// Return current pawn location as fallback so movement doesn't fail completely
+	Data.RandomPoint = PawnLocation;
+	Data.bFoundPoint = true;
+	return EStateTreeRunStatus::Succeeded;
+}
+
+#if WITH_EDITOR
+FText FSTTask_GetRandomNavPoint::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* Data = InstanceDataView.GetPtr<FInstanceDataType>();
+	if (Data)
+	{
+		return FText::Format(NSLOCTEXT("PolarityAI", "GetRandomNavPointDesc",
+			"Get random nav point (radius: {0})"), FText::AsNumber(static_cast<int32>(Data->SearchRadius)));
+	}
+	return NSLOCTEXT("PolarityAI", "GetRandomNavPointDescDefault", "Get random navigable point");
 }
 #endif

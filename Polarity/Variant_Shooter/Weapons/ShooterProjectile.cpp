@@ -12,6 +12,8 @@
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
 
 AShooterProjectile::AShooterProjectile()
 {
@@ -39,9 +41,33 @@ AShooterProjectile::AShooterProjectile()
 void AShooterProjectile::BeginPlay()
 {
 	Super::BeginPlay();
-	
+
 	// ignore the pawn that shot this projectile
-	CollisionComponent->IgnoreActorWhenMoving(GetInstigator(), true);
+	if (APawn* InstigatorPawn = GetInstigator())
+	{
+		CollisionComponent->IgnoreActorWhenMoving(InstigatorPawn, true);
+		CollisionComponent->MoveIgnoreActors.Add(InstigatorPawn);
+
+		// Also ignore instigator's collision with us
+		if (UPrimitiveComponent* InstigatorRoot = Cast<UPrimitiveComponent>(InstigatorPawn->GetRootComponent()))
+		{
+			InstigatorRoot->IgnoreActorWhenMoving(this, true);
+		}
+	}
+
+	// Spawn trail VFX if configured
+	if (TrailFX)
+	{
+		TrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			TrailFX,
+			CollisionComponent,
+			NAME_None,
+			FVector::ZeroVector,
+			FRotator::ZeroRotator,
+			EAttachLocation::KeepRelativeOffset,
+			true
+		);
+	}
 }
 
 void AShooterProjectile::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -64,6 +90,12 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 
 	// disable collision on the projectile
 	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Stop trail VFX on hit
+	if (TrailComponent)
+	{
+		TrailComponent->Deactivate();
+	}
 
 	// make AI perception noise
 	MakeNoise(NoiseLoudness, GetInstigator(), GetActorLocation(), NoiseRange, NoiseTag);

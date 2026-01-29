@@ -281,6 +281,13 @@ struct FStateTreeSenseEnemiesInstanceData
 	/** Strength of the last processed stimulus */
 	UPROPERTY(EditAnywhere)
 	float LastStimulusStrength = 0.0f;
+
+	/** How often to actively poll perception (in addition to delegate-based updates) */
+	UPROPERTY(EditAnywhere, Category = Parameter)
+	float PerceptionPollInterval = 0.5f;
+
+	/** Time since last perception poll */
+	float TimeSinceLastPoll = 0.0f;
 };
 
 /**

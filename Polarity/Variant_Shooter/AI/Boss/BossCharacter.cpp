@@ -9,6 +9,7 @@
 #include "EMFVelocityModifier.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
+#include "Engine/DamageEvents.h"
 #include "Components/CapsuleComponent.h"
 #include "Animation/AnimInstance.h"
 #include "Kismet/GameplayStatics.h"
@@ -633,8 +634,8 @@ void ABossCharacter::MatchOppositePolarity(AActor* Target)
 
 	// Get target's charge sign and set our charge to opposite
 	int32 TargetSign = TargetEMF->GetChargeSign();
-	float CurrentCharge = EMFVelocityModifier->GetCharge();
-	int32 CurrentSign = (CurrentCharge >= 0) ? 1 : -1;
+	float BossCurrentCharge = EMFVelocityModifier->GetCharge();
+	int32 CurrentSign = (BossCurrentCharge >= 0) ? 1 : -1;
 
 	// If same sign, toggle to opposite
 	if (CurrentSign == TargetSign)

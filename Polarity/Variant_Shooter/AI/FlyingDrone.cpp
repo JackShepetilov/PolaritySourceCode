@@ -99,6 +99,8 @@ void AFlyingDrone::BeginPlay()
 		FlyingMovement->OnMovementCompleted.AddDynamic(this, &AFlyingDrone::OnMovementCompleted);
 	}
 
+	// Note: OnCapsuleHit is subscribed in ShooterNPC::BeginPlay() and we override it
+
 	// Start combat check timer
 	if (bAutoEngage)
 	{
@@ -195,6 +197,11 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 			}
 		}
 	}
+
+	// Broadcast damage taken event for damage numbers system
+	// Use actor center + offset for hit location (same as ShooterNPC)
+	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
+	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
 	// Check if we should die
 	if (CurrentHP <= 0.0f)
@@ -742,10 +749,19 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Disable CharacterMovement processing to prevent interference
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	// Ignore collision with player during knockback to prevent jitter from dropkick
+	// Find player by proximity to attacker location
+	if (!AttackerLocation.IsZero())
 	{
-		CMC->DisableMovement();
+		if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(this, 0))
+		{
+			float DistToAttacker = FVector::Dist(PlayerChar->GetActorLocation(), AttackerLocation);
+			if (DistToAttacker < 300.0f) // Player is the attacker
+			{
+				KnockbackIgnoreActor = PlayerChar;
+				MoveIgnoreActorAdd(PlayerChar);
+			}
+		}
 	}
 
 	// Apply knockback using LaunchCharacter (velocity-based, works with physics)
@@ -754,18 +770,17 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	// Clear any existing stun timer
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 
-	// Only use timer if velocity threshold is disabled (set to 0)
-	// Otherwise, Tick will check velocity and end knockback when below threshold
-	if (KnockbackEndVelocityThreshold <= 0.0f)
-	{
-		GetWorld()->GetTimerManager().SetTimer(
-			KnockbackStunTimer,
-			this,
-			&AFlyingDrone::EndKnockbackStun,
-			Duration,
-			false
-		);
-	}
+	// Always set timer as a maximum duration fallback
+	// Knockback can also end early via:
+	// - Velocity threshold check in Tick (if KnockbackEndVelocityThreshold > 0)
+	// - Wall hit (if bEndKnockbackOnWallHit is true)
+	GetWorld()->GetTimerManager().SetTimer(
+		KnockbackStunTimer,
+		this,
+		&AFlyingDrone::EndKnockbackStun,
+		Duration,
+		false
+	);
 
 #if WITH_EDITOR
 	if (GEngine)
@@ -780,6 +795,16 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 
 void AFlyingDrone::EndKnockbackStun()
 {
+	// Restore collision with player
+	if (KnockbackIgnoreActor.IsValid())
+	{
+		MoveIgnoreActorRemove(KnockbackIgnoreActor.Get());
+		KnockbackIgnoreActor.Reset();
+	}
+
+	// Clear the knockback timer if it's still running (early exit via velocity or wall hit)
+	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+
 	// Call parent implementation
 	Super::EndKnockbackStun();
 
@@ -788,6 +813,38 @@ void AFlyingDrone::EndKnockbackStun()
 	{
 		CMC->SetMovementMode(MOVE_Flying);
 	}
+}
+
+void AFlyingDrone::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
+{
+	// Let parent handle wall slam damage
+	Super::OnCapsuleHit(HitComponent, OtherActor, OtherComp, NormalImpulse, Hit);
+
+	// Additionally for drones: end knockback on wall hit
+	if (!bIsInKnockback || !bEndKnockbackOnWallHit)
+	{
+		return;
+	}
+
+	// Ignore hits with the player we're being knocked back from
+	if (KnockbackIgnoreActor.IsValid() && OtherActor == KnockbackIgnoreActor.Get())
+	{
+		return;
+	}
+
+	// Ignore hits with other characters (only walls/world geometry)
+	if (Cast<ACharacter>(OtherActor) != nullptr)
+	{
+		return;
+	}
+
+#if WITH_EDITOR
+	UE_LOG(LogTemp, Warning, TEXT("Drone OnCapsuleHit: Hit %s during knockback - ending knockback"),
+		OtherActor ? *OtherActor->GetName() : TEXT("World"));
+#endif
+
+	// End knockback on wall hit
+	EndKnockbackStun();
 }
 
 // ==================== StateTree Support ====================

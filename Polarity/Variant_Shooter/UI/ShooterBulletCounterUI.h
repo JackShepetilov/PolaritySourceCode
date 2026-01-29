@@ -19,6 +19,7 @@ enum class EChargePolarity : uint8
 	Negative	UMETA(DisplayName = "Negative (-)")
 };
 
+
 /**
  *  Simple bullet counter UI widget for a first person shooter game
  *  Also displays Heat factor, Speed indicators, and Charge polarity
@@ -77,6 +78,22 @@ public:
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Polarity", meta = (DisplayName = "UpdateCharge"))
 	void BP_UpdateCharge(float ChargeValue, EChargePolarity Polarity);
+
+	/**
+	 * Extended charge update with stable/unstable breakdown.
+	 * Stable charge = permanent, does not decay (from melee dummies)
+	 * Unstable charge = temporary, decays over time (from enemy melee hits)
+	 * Use this for progress bar showing both sections.
+	 * @param TotalCharge - total charge value (base + bonus)
+	 * @param StableCharge - base/permanent charge (does not decay)
+	 * @param UnstableCharge - bonus charge (decays over time)
+	 * @param MaxStableCharge - maximum possible stable charge
+	 * @param MaxUnstableCharge - maximum possible unstable charge
+	 * @param Polarity - current polarity sign (Positive/Negative/Neutral)
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Polarity", meta = (DisplayName = "UpdateChargeExtended"))
+	void BP_UpdateChargeExtended(float TotalCharge, float StableCharge, float UnstableCharge,
+		float MaxStableCharge, float MaxUnstableCharge, EChargePolarity Polarity);
 
 	// ==================== Hit Marker ====================
 

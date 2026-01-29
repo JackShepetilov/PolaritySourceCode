@@ -411,3 +411,136 @@ private:
 	/** Stop shooting */
 	void StopShooting(FInstanceDataType& Data) const;
 };
+
+// ============================================================================
+// RunAndShoot - Ground NPC strafing movement while shooting when ready
+// For ShooterNPC: picks random nav points around target, moves via pathfinding
+// while facing target (strafing), and fires bursts when off cooldown and has LOS
+// ============================================================================
+
+USTRUCT()
+struct FSTTask_RunAndShoot_Data
+{
+	GENERATED_BODY()
+
+	/** The ShooterNPC */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> NPC;
+
+	/** AI Controller for movement */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AAIController> Controller;
+
+	/** Target to strafe around and shoot at */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	/** Maximum distance from target when selecting move points */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "100.0"))
+	float MaxDistanceFromTarget = 1200.0f;
+
+	/** Minimum distance from target when selecting move points */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.0"))
+	float MinDistanceFromTarget = 400.0f;
+
+	/** Acceptance radius for reaching waypoint */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "10.0"))
+	float AcceptanceRadius = 100.0f;
+
+	/** If true, use combat coordinator for attack permission */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	bool bUseCoordinator = true;
+
+	// Runtime state
+	FVector CurrentDestination = FVector::ZeroVector;
+	bool bHasDestination = false;
+	bool bIsShooting = false;
+};
+
+USTRUCT(DisplayName = "Run And Shoot", Category = "Polarity|AI|Shooter")
+struct FSTTask_RunAndShoot : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_RunAndShoot_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+
+private:
+	/** Pick a new random destination around target using NavMesh */
+	bool PickNewDestination(FInstanceDataType& Data) const;
+
+	/** Check if NPC can shoot (not dead, off cooldown, has LOS, has permission) */
+	bool CanShoot(const FInstanceDataType& Data) const;
+
+	/** Start shooting at target */
+	void StartShooting(FInstanceDataType& Data) const;
+
+	/** Stop shooting */
+	void StopShooting(FInstanceDataType& Data) const;
+};
+
+// ============================================================================
+// GetRandomNavPoint - Get a random navigable point around the NPC
+// ============================================================================
+
+USTRUCT()
+struct FSTTask_GetRandomNavPoint_Data
+{
+	GENERATED_BODY()
+
+	/** The pawn to find point around */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<APawn> Pawn;
+
+	/** Optional: Target to stay within range of */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	/** Radius to search for random point */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "100.0"))
+	float SearchRadius = 500.0f;
+
+	/** If Target is set, stay within this distance of target */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "100.0"))
+	float MaxDistanceFromTarget = 1500.0f;
+
+	/** If Target is set, stay at least this far from target */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.0"))
+	float MinDistanceFromTarget = 300.0f;
+
+	/** Output: The random point found */
+	UPROPERTY(EditAnywhere, Category = "Output")
+	FVector RandomPoint = FVector::ZeroVector;
+
+	/** Output: Whether a valid point was found */
+	UPROPERTY(EditAnywhere, Category = "Output")
+	bool bFoundPoint = false;
+};
+
+USTRUCT(DisplayName = "Get Random Nav Point", Category = "Polarity|AI")
+struct FSTTask_GetRandomNavPoint : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_GetRandomNavPoint_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};

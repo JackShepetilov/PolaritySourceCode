@@ -14,6 +14,7 @@
 #include "Animation/AnimInstance.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "ShooterAIController.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
@@ -95,6 +96,19 @@ void AShooterNPC::BeginPlay()
 	if (UDamageNumbersSubsystem* DamageNumbersSubsystem = GetWorld()->GetSubsystem<UDamageNumbersSubsystem>())
 	{
 		DamageNumbersSubsystem->RegisterNPC(this);
+	}
+}
+
+void AShooterNPC::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	// Subscribe to AI controller's perception events
+	if (AShooterAIController* ShooterAI = Cast<AShooterAIController>(NewController))
+	{
+		ShooterAI->OnEnemySpotted.AddDynamic(this, &AShooterNPC::OnEnemySpotted);
+		ShooterAI->OnEnemyLost.AddDynamic(this, &AShooterNPC::OnEnemyLost);
+		ShooterAI->OnTeamPerceptionReceived.AddDynamic(this, &AShooterNPC::OnTeamPerceptionReceived);
 	}
 }
 
@@ -300,20 +314,11 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	}
 
 	// Broadcast damage taken event for damage numbers display
-	// Determine hit location from damage event
-	FVector HitLocation = GetActorLocation();  // Default to actor center
-	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
-	{
-		const FPointDamageEvent* PointDamageEvent = static_cast<const FPointDamageEvent*>(&DamageEvent);
-		HitLocation = PointDamageEvent->HitInfo.ImpactPoint;
-	}
-	else if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
-	{
-		const FRadialDamageEvent* RadialDamageEvent = static_cast<const FRadialDamageEvent*>(&DamageEvent);
-		HitLocation = RadialDamageEvent->Origin;
-	}
+	// Use a consistent location slightly above NPC center for reliable screen positioning
+	// This ensures damage numbers always appear near the NPC regardless of where the hit landed
+	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);  // Above center
 
-	OnDamageTaken.Broadcast(Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
+	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
 	return Damage;
 }
@@ -1081,11 +1086,18 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 
 			if (WallSlamVFX)
 			{
+				// Build rotation so VFX lies flat on wall surface
+				FRotator VFXRotation = UKismetMathLibrary::MakeRotFromYZ(WallHit.ImpactNormal, FVector::UpVector);
+				VFXRotation.Roll += 90.0f;  // Rotate to lie flat on wall
+
+				// Offset slightly away from wall to prevent clipping
+				FVector VFXLocation = WallHit.ImpactPoint + WallHit.ImpactNormal * 5.0f;
+
 				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 					GetWorld(),
 					WallSlamVFX,
-					WallHit.ImpactPoint,
-					WallHit.ImpactNormal.Rotation(),
+					VFXLocation,
+					VFXRotation,
 					FVector(WallSlamVFXScale),
 					true,
 					true,
@@ -1811,14 +1823,20 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 			UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, Hit.ImpactPoint);
 		}
 
-		// Spawn VFX
+		// Spawn VFX - rotated so it lies flat on wall surface
 		if (WallSlamVFX)
 		{
+			FRotator VFXRotation = UKismetMathLibrary::MakeRotFromYZ(Hit.ImpactNormal, FVector::UpVector);
+			VFXRotation.Roll += 90.0f;  // Rotate to lie flat on wall
+
+			// Offset slightly away from wall to prevent clipping
+			FVector VFXLocation = Hit.ImpactPoint + Hit.ImpactNormal * 5.0f;
+
 			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 				GetWorld(),
 				WallSlamVFX,
-				Hit.ImpactPoint,
-				Hit.ImpactNormal.Rotation(),
+				VFXLocation,
+				VFXRotation,
 				FVector(WallSlamVFXScale),
 				true,  // bAutoDestroy
 				true,  // bAutoActivate
@@ -1838,4 +1856,32 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		}
 #endif
 	}
+}
+
+// ==================== AI Perception Handlers ====================
+
+void AShooterNPC::OnEnemySpotted_Implementation(AActor* SpottedEnemy, FVector LastKnownLocation)
+{
+	// Base C++ implementation - can be overridden in Blueprint
+	UE_LOG(LogTemp, Log, TEXT("[%s] OnEnemySpotted: %s at %s"),
+		*GetName(),
+		SpottedEnemy ? *SpottedEnemy->GetName() : TEXT("NULL"),
+		*LastKnownLocation.ToString());
+}
+
+void AShooterNPC::OnEnemyLost_Implementation(AActor* LostEnemy)
+{
+	// Base C++ implementation - can be overridden in Blueprint
+	UE_LOG(LogTemp, Log, TEXT("[%s] OnEnemyLost: %s"),
+		*GetName(),
+		LostEnemy ? *LostEnemy->GetName() : TEXT("NULL"));
+}
+
+void AShooterNPC::OnTeamPerceptionReceived_Implementation(AActor* ReportedEnemy, FVector LastKnownLocation)
+{
+	// Base C++ implementation - can be overridden in Blueprint
+	UE_LOG(LogTemp, Log, TEXT("[%s] OnTeamPerceptionReceived: %s at %s"),
+		*GetName(),
+		ReportedEnemy ? *ReportedEnemy->GetName() : TEXT("NULL"),
+		*LastKnownLocation.ToString());
 }

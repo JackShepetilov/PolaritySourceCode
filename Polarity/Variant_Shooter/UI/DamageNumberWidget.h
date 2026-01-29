@@ -20,6 +20,8 @@ class POLARITY_API UDamageNumberWidget : public UUserWidget
 	GENERATED_BODY()
 
 public:
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+
 	/**
 	 * Initialize the widget with damage data
 	 * @param InDamage The damage amount to display
@@ -34,13 +36,21 @@ public:
 	 * Returns the widget to the pool
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Damage Number")
-	void OnAnimationFinished();
+	void NotifyAnimationFinished();
 
 	/**
 	 * Reset the widget for reuse from pool
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Damage Number")
 	void ResetWidget();
+
+	/**
+	 * Update damage value (for batching - adds to existing damage)
+	 * Resets the float animation to make the number "pop"
+	 * @param AdditionalDamage Damage to add to current total
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Damage Number")
+	void UpdateDamage(float AdditionalDamage);
 
 	// ==================== Blueprint Events ====================
 
@@ -62,6 +72,15 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Damage Number",
 		meta = (DisplayName = "On Widget Reset"))
 	void BP_OnWidgetReset();
+
+	/**
+	 * Called when damage is added to an existing number (batching)
+	 * Implement in Blueprint to update the display and add a "pop" effect
+	 * @param NewTotalDamage The new accumulated damage total
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Damage Number",
+		meta = (DisplayName = "On Damage Updated"))
+	void BP_OnDamageUpdated(float NewTotalDamage);
 
 	// ==================== Getters ====================
 
@@ -103,7 +122,22 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Damage Number")
 	FLinearColor CategoryColor = FLinearColor::White;
 
+	/** Current vertical offset for floating animation (world units) */
+	UPROPERTY(BlueprintReadOnly, Category = "Damage Number")
+	float CurrentVerticalOffset = 0.0f;
+
+	/** Time elapsed since spawn */
+	float ElapsedTime = 0.0f;
+
 public:
 	/** Set the color for this damage number (called by subsystem) */
 	void SetCategoryColor(const FLinearColor& InColor) { CategoryColor = InColor; }
+
+	/** Speed at which numbers float upward (world units per second) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage Number|Animation")
+	float FloatSpeed = 100.0f;
+
+	/** Widget half-size for centering (pixels) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage Number|Layout")
+	FVector2D WidgetHalfSize = FVector2D(100.0f, 25.0f);
 };

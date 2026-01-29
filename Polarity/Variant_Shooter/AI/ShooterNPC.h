@@ -5,12 +5,13 @@
 #include "CoreMinimal.h"
 #include "PolarityCharacter.h"
 #include "ShooterWeaponHolder.h"
+#include "GenericTeamAgentInterface.h"
 #include "ShooterNPC.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnNPCDamageTaken, float, Damage, TSubclassOf<UDamageType>, DamageType, FVector, HitLocation, AActor*, DamageCauser);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnNPCDamageTaken, AShooterNPC*, DamagedNPC, float, Damage, TSubclassOf<UDamageType>, DamageType, FVector, HitLocation, AActor*, DamageCauser);
 
 class AShooterWeapon;
 class UAnimMontage;
@@ -29,7 +30,7 @@ class UNiagaraSystem;
  *  Holds and manages a weapon
  */
 UCLASS(abstract)
-class POLARITY_API AShooterNPC : public APolarityCharacter, public IShooterWeaponHolder
+class POLARITY_API AShooterNPC : public APolarityCharacter, public IShooterWeaponHolder, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -74,6 +75,14 @@ protected:
 	/** Team byte for this character */
 	UPROPERTY(EditAnywhere, Category = "Team")
 	uint8 TeamByte = 1;
+
+	// ==================== IGenericTeamAgentInterface ====================
+
+	/** Returns the TeamId for this NPC (used by AI Perception Team Sense) */
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(TeamByte); }
+
+	/** Sets the TeamId for this NPC */
+	virtual void SetGenericTeamId(const FGenericTeamId& NewTeamId) override { TeamByte = NewTeamId.GetId(); }
 
 	/** Pointer to the equipped weapon */
 	TObjectPtr<AShooterWeapon> Weapon;
@@ -395,6 +404,9 @@ protected:
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
 
+	/** Called when possessed by a controller */
+	virtual void PossessedBy(AController* NewController) override;
+
 	/** Gameplay cleanup */
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -570,7 +582,24 @@ protected:
 
 	/** Called when capsule hits something - checks for wall slam */
 	UFUNCTION()
-	void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+	virtual void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+
+	// ==================== AI Perception Handlers ====================
+
+	/** Called when AI controller spots an enemy - override in Blueprint */
+	UFUNCTION(BlueprintNativeEvent, Category = "AI|Perception")
+	void OnEnemySpotted(AActor* SpottedEnemy, FVector LastKnownLocation);
+	virtual void OnEnemySpotted_Implementation(AActor* SpottedEnemy, FVector LastKnownLocation);
+
+	/** Called when AI controller loses sight of an enemy - override in Blueprint */
+	UFUNCTION(BlueprintNativeEvent, Category = "AI|Perception")
+	void OnEnemyLost(AActor* LostEnemy);
+	virtual void OnEnemyLost_Implementation(AActor* LostEnemy);
+
+	/** Called when AI controller receives team perception about an enemy - override in Blueprint */
+	UFUNCTION(BlueprintNativeEvent, Category = "AI|Perception")
+	void OnTeamPerceptionReceived(AActor* ReportedEnemy, FVector LastKnownLocation);
+	virtual void OnTeamPerceptionReceived_Implementation(AActor* ReportedEnemy, FVector LastKnownLocation);
 
 	// ==================== Checkpoint System ====================
 public:

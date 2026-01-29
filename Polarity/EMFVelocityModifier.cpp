@@ -599,8 +599,8 @@ void UEMFVelocityModifier::AddPermanentCharge(float Amount)
 	// Положительный Amount увеличивает модуль, отрицательный уменьшает
 	float NewModule = CurrentModule + Amount;
 
-	// Не позволяем модулю стать отрицательным (клампим до 0)
-	NewModule = FMath::Max(0.0f, NewModule);
+	// Клампим модуль: минимум 0, максимум MaxBaseCharge
+	NewModule = FMath::Clamp(NewModule, 0.0f, MaxBaseCharge);
 
 	// Восстанавливаем знак
 	BaseCharge = Sign * NewModule;
@@ -608,14 +608,17 @@ void UEMFVelocityModifier::AddPermanentCharge(float Amount)
 
 	if (bLogForces)
 	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Added %.2f permanent charge. BaseCharge: %.2f, Total charge: %.2f"),
-			Amount, BaseCharge, GetTotalCharge());
+		UE_LOG(LogTemp, Log, TEXT("EMF: Added %.2f permanent charge. BaseCharge: %.2f (max: %.2f), Total charge: %.2f"),
+			Amount, BaseCharge, MaxBaseCharge, GetTotalCharge());
 	}
 }
 
 void UEMFVelocityModifier::SetBaseCharge(float NewBaseCharge)
 {
-	BaseCharge = NewBaseCharge;
+	// Клампим по модулю, сохраняя знак
+	float Sign = (NewBaseCharge >= 0.0f) ? 1.0f : -1.0f;
+	float Module = FMath::Min(FMath::Abs(NewBaseCharge), MaxBaseCharge);
+	BaseCharge = Sign * Module;
 	UpdateFieldComponentCharge();
 }
 

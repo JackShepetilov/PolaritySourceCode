@@ -412,6 +412,22 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash|Decay", meta = (ToolTip = "Speed won't drop below this"))
 	float AirDashMinSpeed = 1000.0f;
 
+	// ==================== Air Dash|Redirect ====================
+
+	/** Enable velocity redirect instead of standard dash when moving faster than AirDashSpeed.
+	 *  If disabled, dash always sets velocity to AirDashSpeed (original behavior). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash|Redirect")
+	bool bEnableAirDashRedirect = true;
+
+	/** Duration of velocity vector rotation during redirect (seconds) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash|Redirect", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "bEnableAirDashRedirect"))
+	float AirDashRedirectDuration = 0.2f;
+
+	/** Minimum speed to trigger redirect instead of standard dash.
+	 *  Below this speed, standard dash is used. Set to 0 to always redirect when faster than AirDashSpeed. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash|Redirect", meta = (ClampMin = "0.0", EditCondition = "bEnableAirDashRedirect"))
+	float AirDashRedirectMinSpeed = 0.0f;
+
 	// ==================== EMF ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "EMF")

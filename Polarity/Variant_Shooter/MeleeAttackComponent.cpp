@@ -17,6 +17,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "ApexMovementComponent.h"
 #include "PolarityCharacter.h"
 #include "ShooterCharacter.h"
@@ -392,6 +393,12 @@ void UMeleeAttackComponent::PerformHitDetection()
 		return;
 	}
 
+	// Only allow one hit per attack - exit if we already hit something
+	if (bHasHitThisAttack)
+	{
+		return;
+	}
+
 	const FVector Start = GetTraceStart();
 	const FVector End = GetTraceEnd();
 
@@ -505,6 +512,12 @@ void UMeleeAttackComponent::PerformHitDetection()
 			// Broadcast hit event with actual damage dealt
 			OnMeleeHit.Broadcast(HitActor, Hit.ImpactPoint, bHeadshot, FinalDamage);
 
+			// Broadcast drop kick specific event
+			if (bIsDropKick)
+			{
+				OnDropKickHit.Broadcast(HitActor, Hit.ImpactPoint, FinalDamage);
+			}
+
 			// Debug visualization for hit impact
 			if (bEnableDebugVisualization)
 			{
@@ -513,6 +526,9 @@ void UMeleeAttackComponent::PerformHitDetection()
 				DrawDebugString(GetWorld(), Hit.ImpactPoint + FVector(0, 0, 30),
 					bHeadshot ? TEXT("HEADSHOT!") : TEXT("HIT"), nullptr, HitColor, DebugShapeDuration);
 			}
+
+			// Only hit one target per attack
+			break;
 		}
 	}
 }
@@ -522,6 +538,18 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 	if (!HitActor || !OwnerCharacter)
 	{
 		return 0.0f;
+	}
+
+	// ==================== Boss Finisher Check ====================
+	// If hitting a boss in finisher phase, execute the finisher instead of normal damage
+	if (ABossCharacter* Boss = Cast<ABossCharacter>(HitActor))
+	{
+		if (Boss->IsInFinisherPhase())
+		{
+			Boss->ExecuteFinisher(OwnerCharacter);
+			// Return a symbolic damage value for UI/feedback purposes
+			return Settings.BaseDamage;
+		}
 	}
 
 	float TotalDamage = 0.0f;
@@ -2276,13 +2304,26 @@ bool UMeleeAttackComponent::TryStartDropKick()
 
 		if (AngleToTarget <= ConeHalfAngleRad)
 		{
+			// Check minimum height difference - player must be above target
+			float HeightDiff = Start.Z - TargetPos.Z;
+			if (HeightDiff < Settings.DropKickMinHeightDifference)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("DropKick: %s IN CONE but too low! HeightDiff=%.1f < Min=%.1f"),
+					*HitActor->GetName(), HeightDiff, Settings.DropKickMinHeightDifference);
+				if (bEnableDebugVisualization)
+				{
+					DrawDebugSphere(GetWorld(), TargetPos, 35.0f, 4, FColor::Yellow, false, DebugShapeDuration); // Too low
+				}
+				continue;
+			}
+
 			// Calculate perpendicular distance to camera look ray (closest point on ray to target)
 			// This is what we minimize to find target closest to crosshair
 			FVector ClosestPointOnRay = Start + CameraForward * DistanceAlongRay;
 			float DistanceToRay = FVector::Dist(TargetPos, ClosestPointOnRay);
 
-			UE_LOG(LogTemp, Warning, TEXT("DropKick: %s IN CONE! DistToRay=%.1f (best=%.1f)"),
-				*HitActor->GetName(), DistanceToRay, BestDistanceToLookRay);
+			UE_LOG(LogTemp, Warning, TEXT("DropKick: %s IN CONE! HeightDiff=%.1f, DistToRay=%.1f (best=%.1f)"),
+				*HitActor->GetName(), HeightDiff, DistanceToRay, BestDistanceToLookRay);
 
 			if (DistanceToRay < BestDistanceToLookRay)
 			{

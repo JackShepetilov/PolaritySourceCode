@@ -30,6 +30,9 @@
 #include "Curves/CurveFloat.h"
 #include "Polarity/Checkpoint/CheckpointData.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
+#include "Components/CapsuleComponent.h"
 
 AShooterCharacter::AShooterCharacter()
 {
@@ -234,7 +237,8 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	TimeSinceLastDamage = 0.0f;
 
 	// Calculate damage direction angle relative to player forward
-	if (DamageCauser)
+	// Only show damage direction for actual damage (positive value), not healing
+	if (DamageCauser && Damage > 0.0f)
 	{
 		// Get direction from damage source to player
 		FVector DamageDirection = (DamageCauser->GetActorLocation() - GetActorLocation()).GetSafeNormal();
@@ -344,6 +348,9 @@ void AShooterCharacter::DoSwitchWeapon()
 
 		// activate the new weapon
 		CurrentWeapon->ActivateWeapon();
+
+		// Play weapon switch sound
+		PlayWeaponSwitchSound();
 	}
 }
 
@@ -374,6 +381,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateADS(DeltaTime);
 	UpdateRegeneration(DeltaTime);
 	UpdateLeftHandIK(DeltaTime);
+	UpdateLowHealthWarning(DeltaTime);
 
 	// Update recoil component state
 	if (RecoilComponent)
@@ -415,9 +423,18 @@ void AShooterCharacter::Tick(float DeltaTime)
 
 	// Update Charge/Polarity UI - get charge from EMFVelocityModifier (not PolarityCharacter::CurrentCharge!)
 	float ChargeValue = 0.0f;
+	float StableCharge = 0.0f;
+	float UnstableCharge = 0.0f;
+	float MaxStableCharge = 0.0f;
+	float MaxUnstableCharge = 0.0f;
+
 	if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
 	{
 		ChargeValue = EMFMod->GetCharge();
+		StableCharge = EMFMod->GetBaseCharge();
+		UnstableCharge = EMFMod->GetBonusCharge();
+		MaxStableCharge = EMFMod->MaxBaseCharge;
+		MaxUnstableCharge = EMFMod->MaxBonusCharge;
 	}
 
 	// Determine current polarity (0=Neutral, 1=Positive, 2=Negative)
@@ -433,6 +450,10 @@ void AShooterCharacter::Tick(float DeltaTime)
 
 	// Broadcast charge update every tick
 	OnChargeUpdated.Broadcast(ChargeValue, CurrentPolarity);
+
+	// Broadcast extended charge info with stable/unstable breakdown
+	float TotalCharge = StableCharge + UnstableCharge;
+	OnChargeExtended.Broadcast(TotalCharge, StableCharge, UnstableCharge, MaxStableCharge, MaxUnstableCharge, CurrentPolarity);
 
 	// Check if polarity changed
 	if (CurrentPolarity != PreviousPolarity)
@@ -718,6 +739,11 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 
 void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[MeleeHit] %s hit %s - Damage=%.1f, Headshot=%d"),
+		*GetName(),
+		HitActor ? *HitActor->GetName() : TEXT("NULL"),
+		Damage, bHeadshot);
+
 	bool bKilled = false;
 	bool bIsDummyTarget = HitActor && HitActor->Implements<UShooterDummyTarget>();
 
@@ -762,12 +788,14 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 		if (bIsDummyTarget)
 		{
 			bool bGrantsStable = IShooterDummyTarget::Execute_GrantsStableCharge(HitActor);
-			
+
 			if (bGrantsStable)
 			{
 				float StableAmount = IShooterDummyTarget::Execute_GetStableChargeAmount(HitActor);
 				if (StableAmount > 0.0f)
 				{
+					UE_LOG(LogTemp, Warning, TEXT("[MeleeCharge] Dummy stable charge: +%.2f to %s"),
+						StableAmount, *GetName());
 					EMFMod->AddPermanentCharge(StableAmount);
 				}
 
@@ -777,6 +805,8 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 					float KillBonus = IShooterDummyTarget::Execute_GetKillChargeBonus(HitActor);
 					if (KillBonus > 0.0f)
 					{
+						UE_LOG(LogTemp, Warning, TEXT("[MeleeCharge] Dummy kill bonus: +%.2f to %s"),
+							KillBonus, *GetName());
 						EMFMod->AddPermanentCharge(KillBonus);
 					}
 				}
@@ -785,7 +815,13 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 		}
 
 		// Default: add decaying bonus charge for regular enemies
+		float OldCharge = EMFMod->GetCharge();
 		EMFMod->AddBonusCharge(EMFMod->ChargePerMeleeHit);
+		float NewCharge = EMFMod->GetCharge();
+
+		UE_LOG(LogTemp, Warning, TEXT("[MeleeCharge] Hit %s - Charge: %.2f -> %.2f (added %.2f bonus)"),
+			HitActor ? *HitActor->GetName() : TEXT("NULL"),
+			OldCharge, NewCharge, EMFMod->ChargePerMeleeHit);
 	}
 }
 
@@ -1070,6 +1106,12 @@ void AShooterCharacter::BindMovementSFXDelegates()
 		Apex->OnWallrunStarted.AddDynamic(this, &AShooterCharacter::OnWallRunStarted_SFX);
 		Apex->OnWallrunEnded.AddDynamic(this, &AShooterCharacter::OnWallRunEnded_SFX);
 		Apex->OnLanded_Movement.AddDynamic(this, &AShooterCharacter::OnLanded_SFX);
+
+		// New movement event delegates
+		Apex->OnJumpPerformed.AddDynamic(this, &AShooterCharacter::OnJumpPerformed_Handler);
+		Apex->OnMantleStarted.AddDynamic(this, &AShooterCharacter::OnMantleStarted_Handler);
+		Apex->OnAirDashStarted.AddDynamic(this, &AShooterCharacter::OnAirDashStarted_Handler);
+		Apex->OnAirDashEnded.AddDynamic(this, &AShooterCharacter::OnAirDashEnded_Handler);
 	}
 }
 
@@ -1082,6 +1124,12 @@ void AShooterCharacter::UnbindMovementSFXDelegates()
 		Apex->OnWallrunStarted.RemoveDynamic(this, &AShooterCharacter::OnWallRunStarted_SFX);
 		Apex->OnWallrunEnded.RemoveDynamic(this, &AShooterCharacter::OnWallRunEnded_SFX);
 		Apex->OnLanded_Movement.RemoveDynamic(this, &AShooterCharacter::OnLanded_SFX);
+
+		// New movement event delegates
+		Apex->OnJumpPerformed.RemoveDynamic(this, &AShooterCharacter::OnJumpPerformed_Handler);
+		Apex->OnMantleStarted.RemoveDynamic(this, &AShooterCharacter::OnMantleStarted_Handler);
+		Apex->OnAirDashStarted.RemoveDynamic(this, &AShooterCharacter::OnAirDashStarted_Handler);
+		Apex->OnAirDashEnded.RemoveDynamic(this, &AShooterCharacter::OnAirDashEnded_Handler);
 	}
 }
 
@@ -1548,5 +1596,162 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 	else
 	{
 		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property found but wrong type!"));
+	}
+}
+
+// ==================== New Movement SFX/VFX Handlers ====================
+
+void AShooterCharacter::OnJumpPerformed_Handler(bool bIsDoubleJump)
+{
+	// Play jump sound
+	PlayJumpSound(bIsDoubleJump);
+
+	// Spawn double jump VFX if this is a double jump
+	if (bIsDoubleJump)
+	{
+		SpawnDoubleJumpVFX();
+	}
+}
+
+void AShooterCharacter::OnMantleStarted_Handler()
+{
+	PlayMantleSound();
+}
+
+void AShooterCharacter::OnAirDashStarted_Handler()
+{
+	PlayAirDashSound();
+	StartAirDashTrailVFX();
+}
+
+void AShooterCharacter::OnAirDashEnded_Handler()
+{
+	StopAirDashTrailVFX();
+}
+
+void AShooterCharacter::PlayAirDashSound()
+{
+	if (AirDashSound)
+	{
+		const float Pitch = FMath::RandRange(AirDashSoundPitchMin, AirDashSoundPitchMax);
+		UGameplayStatics::PlaySoundAtLocation(
+			this,
+			AirDashSound,
+			GetActorLocation(),
+			AirDashSoundVolume,
+			Pitch
+		);
+	}
+}
+
+void AShooterCharacter::PlayMantleSound()
+{
+	if (MantleSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(
+			this,
+			MantleSound,
+			GetActorLocation(),
+			MantleSoundVolume
+		);
+	}
+}
+
+void AShooterCharacter::PlayWeaponSwitchSound()
+{
+	if (WeaponSwitchSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(
+			this,
+			WeaponSwitchSound,
+			GetActorLocation(),
+			WeaponSwitchSoundVolume
+		);
+	}
+}
+
+void AShooterCharacter::UpdateLowHealthWarning(float DeltaTime)
+{
+	const float HealthPercent = CurrentHP / MaxHP;
+	const bool bShouldBeInLowHealth = HealthPercent < LowHealthThreshold && HealthPercent > 0.0f;
+
+	if (bShouldBeInLowHealth)
+	{
+		if (!bIsLowHealth)
+		{
+			// Just entered low health state - play warning immediately
+			bIsLowHealth = true;
+			LowHealthWarningTimer = 0.0f;
+
+			if (LowHealthWarningSound)
+			{
+				UGameplayStatics::PlaySound2D(this, LowHealthWarningSound, LowHealthWarningVolume);
+			}
+		}
+		else
+		{
+			// Already in low health - update timer
+			LowHealthWarningTimer += DeltaTime;
+
+			if (LowHealthWarningTimer >= LowHealthWarningInterval)
+			{
+				LowHealthWarningTimer = 0.0f;
+
+				if (LowHealthWarningSound)
+				{
+					UGameplayStatics::PlaySound2D(this, LowHealthWarningSound, LowHealthWarningVolume);
+				}
+			}
+		}
+	}
+	else
+	{
+		// Reset low health state
+		bIsLowHealth = false;
+		LowHealthWarningTimer = 0.0f;
+	}
+}
+
+void AShooterCharacter::SpawnDoubleJumpVFX()
+{
+	if (DoubleJumpFX)
+	{
+		const FVector SpawnLocation = GetActorLocation() - FVector(0.0f, 0.0f, GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			DoubleJumpFX,
+			SpawnLocation,
+			GetActorRotation(),
+			FVector(DoubleJumpFXScale),
+			true,
+			true,
+			ENCPoolMethod::AutoRelease
+		);
+	}
+}
+
+void AShooterCharacter::StartAirDashTrailVFX()
+{
+	if (AirDashTrailFX && !ActiveAirDashTrailComponent)
+	{
+		ActiveAirDashTrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			AirDashTrailFX,
+			GetRootComponent(),
+			NAME_None,
+			FVector::ZeroVector,
+			FRotator::ZeroRotator,
+			EAttachLocation::KeepRelativeOffset,
+			true
+		);
+	}
+}
+
+void AShooterCharacter::StopAirDashTrailVFX()
+{
+	if (ActiveAirDashTrailComponent)
+	{
+		ActiveAirDashTrailComponent->Deactivate();
+		ActiveAirDashTrailComponent = nullptr;
 	}
 }

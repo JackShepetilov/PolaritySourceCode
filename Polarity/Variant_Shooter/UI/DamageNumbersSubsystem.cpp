@@ -36,6 +36,31 @@ bool UDamageNumbersSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 	return false;
 }
 
+void UDamageNumbersSubsystem::Tick(float DeltaTime)
+{
+	// FTickableGameObject::Tick - no Super call needed
+
+	// Update batch timers
+	TArray<FDamageBatchKey> BatchesToRemove;
+
+	for (auto& Pair : ActiveBatches)
+	{
+		FDamageBatch& Batch = Pair.Value;
+		Batch.TimeRemaining -= DeltaTime;
+
+		if (Batch.TimeRemaining <= 0.0f)
+		{
+			BatchesToRemove.Add(Pair.Key);
+		}
+	}
+
+	// Remove expired batches (widgets will finish their animations naturally)
+	for (const FDamageBatchKey& Key : BatchesToRemove)
+	{
+		FinalizeBatch(Key);
+	}
+}
+
 void UDamageNumbersSubsystem::SpawnDamageNumber(const FVector& WorldLocation, float Damage, EPlayerDamageCategory Category)
 {
 	if (!bEnabled)
@@ -62,11 +87,9 @@ void UDamageNumbersSubsystem::SpawnDamageNumber(const FVector& WorldLocation, fl
 		return;
 	}
 
-	// Check if location is on screen
-	if (!IsLocationVisible(WorldLocation))
-	{
-		return;
-	}
+	// Note: We don't check IsLocationVisible here anymore
+	// The widget handles visibility in its Tick based on camera direction
+	// This allows damage numbers to appear even for close-range melee hits
 
 	// Get widget from pool
 	UDamageNumberWidget* Widget = GetWidgetFromPool();
@@ -75,31 +98,22 @@ void UDamageNumbersSubsystem::SpawnDamageNumber(const FVector& WorldLocation, fl
 		return;
 	}
 
-	// Calculate screen position with offset
-	FVector OffsetLocation = WorldLocation + FVector(0.0f, 0.0f, Settings.VerticalOffset);
-	FVector2D ScreenPosition;
-	if (!WorldToScreen(OffsetLocation, ScreenPosition))
-	{
-		ReturnWidgetToPool(Widget);
-		return;
-	}
-
-	// Add random spread
-	ScreenPosition.X += FMath::RandRange(-Settings.RandomSpreadX, Settings.RandomSpreadX);
-	ScreenPosition.Y += FMath::RandRange(-Settings.RandomSpreadY, Settings.RandomSpreadY);
+	// Add random spread to world position (vertical offset now handled in ShooterNPC)
+	FVector SpreadLocation = WorldLocation + FVector(
+		FMath::RandRange(-Settings.RandomSpreadX, Settings.RandomSpreadX),
+		FMath::RandRange(-Settings.RandomSpreadY, Settings.RandomSpreadY),
+		0.0f
+	);
 
 	// Set color based on category
 	FLinearColor Color = GetColorForCategory(Category);
 	Widget->SetCategoryColor(Color);
 
-	// Position the widget
-	Widget->SetPositionInViewport(ScreenPosition, false);
-
 	// Calculate and apply scale
 	float Scale = CalculateScaleForDamage(Damage);
 	Widget->SetRenderScale(FVector2D(Scale, Scale));
 
-	// Show widget
+	// Show widget (position will be updated in widget's Tick)
 	Widget->SetVisibility(ESlateVisibility::HitTestInvisible);
 
 	// Bind callback for when animation finishes
@@ -108,8 +122,8 @@ void UDamageNumbersSubsystem::SpawnDamageNumber(const FVector& WorldLocation, fl
 		ReturnWidgetToPool(Widget);
 	});
 
-	// Initialize and play animation
-	Widget->Initialize(Damage, Category, WorldLocation);
+	// Initialize and play animation - widget will track this world location
+	Widget->Initialize(Damage, Category, SpreadLocation);
 
 	// Track as active
 	ActiveWidgets.Add(Widget);
@@ -161,18 +175,30 @@ void UDamageNumbersSubsystem::UnregisterNPC(AShooterNPC* NPC)
 	});
 }
 
-void UDamageNumbersSubsystem::OnNPCDamageTaken(float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser)
+void UDamageNumbersSubsystem::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser)
 {
-	// Only show damage numbers for damage caused by the player
+	if (!DamagedNPC)
+	{
+		return;
+	}
+
 	APlayerController* PC = GetLocalPlayerController();
 	if (!PC)
 	{
 		return;
 	}
 
-	// Check if damage was caused by player
-	bool bFromPlayer = false;
-	if (DamageCauser)
+	// Determine damage category to check if it's indirect (environmental) damage
+	EPlayerDamageCategory Category = UDamageCategoryHelper::GetCategoryFromDamageType(DamageType);
+
+	// Kinetic (wallslam, momentum, dropkick) and EMF damage are always shown
+	// because they're caused indirectly by player actions even when DamageCauser is null
+	bool bIsIndirectDamage = (Category == EPlayerDamageCategory::Kinetic || Category == EPlayerDamageCategory::EMF);
+
+	// For direct damage (melee, ranged), verify it came from the player
+	bool bFromPlayer = bIsIndirectDamage;  // Indirect damage is always "from player"
+
+	if (!bFromPlayer && DamageCauser)
 	{
 		// Check if the damage causer is the player's pawn
 		if (DamageCauser == PC->GetPawn())
@@ -196,8 +222,16 @@ void UDamageNumbersSubsystem::OnNPCDamageTaken(float Damage, TSubclassOf<UDamage
 		return;
 	}
 
-	// Spawn the damage number
-	SpawnDamageNumberFromType(HitLocation, Damage, DamageType);
+	// Use batching if enabled
+	if (Settings.bEnableBatching)
+	{
+		ProcessDamageWithBatching(DamagedNPC, Damage, Category, HitLocation);
+	}
+	else
+	{
+		// No batching - spawn immediately
+		SpawnDamageNumber(HitLocation, Damage, Category);
+	}
 }
 
 FLinearColor UDamageNumbersSubsystem::GetColorForCategory(EPlayerDamageCategory Category) const
@@ -361,4 +395,87 @@ bool UDamageNumbersSubsystem::IsLocationVisible(const FVector& WorldLocation) co
 	       ScreenPosition.X <= ViewportSizeX + Margin &&
 	       ScreenPosition.Y >= -Margin &&
 	       ScreenPosition.Y <= ViewportSizeY + Margin;
+}
+
+void UDamageNumbersSubsystem::ProcessDamageWithBatching(AActor* TargetNPC, float Damage, EPlayerDamageCategory Category, const FVector& WorldLocation)
+{
+	if (!TargetNPC)
+	{
+		return;
+	}
+
+	// Create batch key (NPC + Category - different damage types don't combine)
+	FDamageBatchKey Key;
+	Key.TargetNPC = TargetNPC;
+	Key.Category = Category;
+
+	// Check if we have an existing batch for this NPC+Category
+	FDamageBatch* ExistingBatch = ActiveBatches.Find(Key);
+
+	if (ExistingBatch && ExistingBatch->ActiveWidget && ExistingBatch->ActiveWidget->IsActive())
+	{
+		// Add damage to existing batch
+		ExistingBatch->AccumulatedDamage += Damage;
+		ExistingBatch->TimeRemaining = Settings.BatchingWindow;  // Reset timer
+
+		// Update the widget to show new total
+		ExistingBatch->ActiveWidget->UpdateDamage(Damage);
+
+		// Update scale based on new total damage
+		float Scale = CalculateScaleForDamage(ExistingBatch->AccumulatedDamage);
+		ExistingBatch->ActiveWidget->SetRenderScale(FVector2D(Scale, Scale));
+	}
+	else
+	{
+		// Create new batch
+		FDamageBatch NewBatch;
+		NewBatch.AccumulatedDamage = Damage;
+		NewBatch.TimeRemaining = Settings.BatchingWindow;
+		NewBatch.WorldLocation = WorldLocation;
+
+		// Get widget from pool
+		UDamageNumberWidget* Widget = GetWidgetFromPool();
+		if (!Widget)
+		{
+			return;
+		}
+
+		// Set color based on category
+		FLinearColor Color = GetColorForCategory(Category);
+		Widget->SetCategoryColor(Color);
+
+		// Calculate and apply scale
+		float Scale = CalculateScaleForDamage(Damage);
+		Widget->SetRenderScale(FVector2D(Scale, Scale));
+
+		// Show widget
+		Widget->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+		// Bind callback for when animation finishes
+		// Capture Key by value for the lambda
+		FDamageBatchKey CapturedKey = Key;
+		Widget->OnFinished.BindLambda([this, Widget, CapturedKey]()
+		{
+			// Remove from active batches when animation finishes
+			ActiveBatches.Remove(CapturedKey);
+			ReturnWidgetToPool(Widget);
+		});
+
+		// Initialize and play animation
+		Widget->Initialize(Damage, Category, WorldLocation);
+
+		// Track as active
+		ActiveWidgets.Add(Widget);
+
+		// Store in batch
+		NewBatch.ActiveWidget = Widget;
+		ActiveBatches.Add(Key, NewBatch);
+	}
+}
+
+void UDamageNumbersSubsystem::FinalizeBatch(const FDamageBatchKey& Key)
+{
+	// Just remove from map - the widget will finish its animation naturally
+	// and return to pool via the OnFinished delegate
+	ActiveBatches.Remove(Key);
 }

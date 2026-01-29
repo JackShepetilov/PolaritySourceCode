@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "AIController.h"
+#include "GenericTeamAgentInterface.h"
 #include "ShooterAIController.generated.h"
 
 class UStateTreeAIComponent;
@@ -13,6 +14,11 @@ class AShooterNPC;
 
 DECLARE_DELEGATE_TwoParams(FShooterPerceptionUpdatedDelegate, AActor*, const FAIStimulus&);
 DECLARE_DELEGATE_OneParam(FShooterPerceptionForgottenDelegate, AActor*);
+
+// Blueprint-compatible perception events
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEnemySpotted, AActor*, SpottedEnemy, FVector, LastKnownLocation);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyLost, AActor*, LostEnemy);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTeamPerceptionReceived, AActor*, ReportedEnemy, FVector, LastKnownLocation);
 
 /**
  *  Simple AI Controller for a first person shooter enemy
@@ -36,6 +42,18 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Shooter")
 	FName TeamTag = FName("Enemy");
 
+	/** Team ID for GenericTeamAgentInterface (all enemies share the same team) */
+	UPROPERTY(EditAnywhere, Category = "Shooter|Team Perception")
+	FGenericTeamId TeamId = FGenericTeamId(1);
+
+	/** Radius within which to notify teammates about detected enemies */
+	UPROPERTY(EditAnywhere, Category = "Shooter|Team Perception", meta = (ClampMin = "0.0"))
+	float TeamPerceptionRadius = 2000.0f;
+
+	/** Whether to broadcast enemy detections to teammates */
+	UPROPERTY(EditAnywhere, Category = "Shooter|Team Perception")
+	bool bSharePerceptionWithTeam = true;
+
 	/** Enemy currently being targeted */
 	TObjectPtr<AActor> TargetEnemy;
 
@@ -46,6 +64,20 @@ public:
 
 	/** Called when an AI perception has been forgotten. StateTree task delegate hook */
 	FShooterPerceptionForgottenDelegate OnShooterPerceptionForgotten;
+
+	// ==================== Blueprint Perception Events ====================
+
+	/** Called when this AI spots an enemy (via Sight sense) */
+	UPROPERTY(BlueprintAssignable, Category = "AI|Perception")
+	FOnEnemySpotted OnEnemySpotted;
+
+	/** Called when this AI loses sight of an enemy */
+	UPROPERTY(BlueprintAssignable, Category = "AI|Perception")
+	FOnEnemyLost OnEnemyLost;
+
+	/** Called when this AI receives a team perception about an enemy from a teammate */
+	UPROPERTY(BlueprintAssignable, Category = "AI|Perception")
+	FOnTeamPerceptionReceived OnTeamPerceptionReceived;
 
 public:
 
@@ -91,4 +123,12 @@ public:
 	/** Force perception system to update immediately (use after respawn) */
 	UFUNCTION(BlueprintCallable, Category = "AI|Perception")
 	void ForcePerceptionUpdate();
+
+	// IGenericTeamAgentInterface
+	virtual FGenericTeamId GetGenericTeamId() const override { return TeamId; }
+	virtual void SetGenericTeamId(const FGenericTeamId& NewTeamId) override { TeamId = NewTeamId; }
+
+protected:
+	/** Broadcast detected enemy to nearby teammates via Team Sense */
+	void BroadcastEnemyToTeam(AActor* DetectedEnemy, const FVector& LastKnownLocation);
 };

@@ -52,11 +52,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation")
 	float BaseCharge = 10.0f;
 
+	/** Максимальный базовый (стабильный) заряд - от Melee Dummy и т.п. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
+	float MaxBaseCharge = 30.0f;
+
 	/** Заряд, добавляемый за каждый успешный удар в ближнем бою */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float ChargePerMeleeHit = 2.0f;
 
-	/** Максимальный бонусный заряд от ударов */
+	/** Максимальный бонусный (нестабильный) заряд от ударов по врагам */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float MaxBonusCharge = 20.0f;
 

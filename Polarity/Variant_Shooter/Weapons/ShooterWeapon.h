@@ -128,9 +128,35 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heat System", meta = (EditCondition = "bUseHeatSystem", ClampMin = "0.1", ClampMax = "1.0"))
 	float MinHeatDamageMultiplier = 0.2f;
 
+	/** Maximum fire rate multiplier at maximum heat (2.0 = 2x slower fire rate at max heat) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heat System", meta = (EditCondition = "bUseHeatSystem", ClampMin = "1.0", ClampMax = "5.0"))
+	float MaxHeatFireRateMultiplier = 2.0f;
+
 	/** Current heat level (0-1), read-only in BP */
 	UPROPERTY(BlueprintReadOnly, Category = "Heat System")
 	float CurrentHeat = 0.0f;
+
+	// ==================== Heat VFX ====================
+
+	/** Niagara system for heat effect on weapon (e.g., glow, smoke, sparks) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heat System|VFX", meta = (EditCondition = "bUseHeatSystem"))
+	TObjectPtr<UNiagaraSystem> HeatVFX;
+
+	/** Socket name on weapon mesh to attach heat VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heat System|VFX", meta = (EditCondition = "bUseHeatSystem"))
+	FName HeatVFXSocket = NAME_None;
+
+	/** Niagara parameter name for heat coefficient (0-1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heat System|VFX", meta = (EditCondition = "bUseHeatSystem"))
+	FName HeatParameterName = FName("Heat");
+
+	/** Minimum heat level to spawn VFX (0-1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heat System|VFX", meta = (EditCondition = "bUseHeatSystem", ClampMin = "0.0", ClampMax = "1.0"))
+	float HeatVFXThreshold = 0.3f;
+
+	/** Active heat VFX component */
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> HeatVFXComponent;
 
 	// ==================== Z-Factor (Height Advantage) ====================
 
@@ -450,9 +476,12 @@ protected:
 	// ==================== Heat System ====================
 
 	void UpdateHeat(float DeltaTime);
+	void UpdateHeatVFX();
 	void AddHeat(float Amount);
 	float GetOwnerSpeed() const;
 	float CalculateHeatDamageMultiplier() const;
+	float CalculateHeatFireRateMultiplier() const;
+	float GetCurrentRefireRate() const;
 
 	// ==================== Z-Factor ====================
 
@@ -528,6 +557,14 @@ public:
 	/** ÃƒÂÃ¢â‚¬â„¢ÃƒÂÃ‚Â¾ÃƒÂÃ‚Â·ÃƒÂÃ‚Â²Ãƒâ€˜Ã¢â€šÂ¬ÃƒÂÃ‚Â°Ãƒâ€˜Ã¢â‚¬Â°ÃƒÂÃ‚Â°ÃƒÂÃ‚ÂµÃƒâ€˜Ã¢â‚¬Å¡ true ÃƒÂÃ‚ÂµÃƒâ€˜Ã‚ÂÃƒÂÃ‚Â»ÃƒÂÃ‚Â¸ Ãƒâ€˜Ã‚ÂÃƒÂÃ‚Â¸Ãƒâ€˜Ã‚ÂÃƒâ€˜Ã¢â‚¬Å¡ÃƒÂÃ‚ÂµÃƒÂÃ‚Â¼ÃƒÂÃ‚Â° ÃƒÂÃ‚Â½ÃƒÂÃ‚Â°ÃƒÂÃ‚Â³Ãƒâ€˜Ã¢â€šÂ¬ÃƒÂÃ‚ÂµÃƒÂÃ‚Â²ÃƒÂÃ‚Â° ÃƒÂÃ‚Â²ÃƒÂÃ‚ÂºÃƒÂÃ‚Â»Ãƒâ€˜Ã…Â½Ãƒâ€˜Ã¢â‚¬Â¡ÃƒÂÃ‚ÂµÃƒÂÃ‚Â½ÃƒÂÃ‚Â° */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Heat")
 	bool IsHeatSystemEnabled() const { return bUseHeatSystem; }
+
+	/** Returns the current fire rate multiplier based on heat (1.0 = normal, higher = slower) */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Heat")
+	float GetHeatFireRateMultiplier() const { return CalculateHeatFireRateMultiplier(); }
+
+	/** Returns the actual refire rate adjusted for heat */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Heat")
+	float GetActualRefireRate() const { return GetCurrentRefireRate(); }
 
 	// ==================== Z-Factor Getters ====================
 

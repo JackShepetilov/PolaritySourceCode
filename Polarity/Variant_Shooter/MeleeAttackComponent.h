@@ -194,6 +194,10 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick")
 	bool bEnableDropKick = true;
 
+	/** Minimum height difference (cm) - drop kick only triggers when player is at least this much higher than target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "0", ClampMax = "500", EditCondition = "bEnableDropKick"))
+	float DropKickMinHeightDifference = 100.0f;
+
 	/** Camera pitch threshold (degrees) - drop kick triggers when looking down more than this */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "10", ClampMax = "80", EditCondition = "bEnableDropKick"))
 	float DropKickPitchThreshold = 45.0f;
@@ -306,6 +310,7 @@ struct FMeleeAttackSettings
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnMeleeHit, AActor*, HitActor, const FVector&, HitLocation, bool, bHeadshot, float, Damage);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDropKickHit, AActor*, HitActor, const FVector&, HitLocation, float, Damage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
 
 /**
@@ -446,6 +451,10 @@ public:
 	/** Called when melee attack hits something */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnMeleeHit OnMeleeHit;
+
+	/** Called when drop kick hits an enemy */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnDropKickHit OnDropKickHit;
 
 	/** Called when melee attack ends (regardless of hit) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")

@@ -126,7 +126,14 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 	else if (bIsAirDashing)
 	{
-		UpdateAirDash(DeltaTime);
+		if (bIsRedirecting)
+		{
+			UpdateAirDashRedirect(DeltaTime);
+		}
+		else
+		{
+			UpdateAirDash(DeltaTime);
+		}
 	}
 	else if (IsFalling() && !bIsSliding)
 	{
@@ -348,6 +355,9 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves)
 			CharacterOwner->OnJumped();
 		}
 
+		// Broadcast jump event (wall jump is not considered double jump)
+		OnJumpPerformed.Broadcast(false);
+
 		return true;
 	}
 
@@ -366,6 +376,9 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves)
 		{
 			CharacterOwner->OnJumped();
 		}
+
+		// Broadcast jump event (post-wallrun jump is not double jump)
+		OnJumpPerformed.Broadcast(false);
 
 		return true;
 	}
@@ -411,6 +424,9 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves)
 			CharacterOwner->OnJumped();
 		}
 
+		// Broadcast jump event (slide jump counts as first jump)
+		OnJumpPerformed.Broadcast(CurrentJumpCount > 1);
+
 		return true;
 	}
 
@@ -432,6 +448,9 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves)
 		{
 			CharacterOwner->OnJumped();
 		}
+
+		// Broadcast jump event with double jump flag
+		OnJumpPerformed.Broadcast(CurrentJumpCount > 1);
 
 		return true;
 	}
@@ -1609,6 +1628,9 @@ void UApexMovementComponent::TryMantle()
 	MantleAlpha = 0.0f;
 	Velocity = FVector::ZeroVector;
 	SetMovementMode(MOVE_Flying);
+
+	// Broadcast mantle started event
+	OnMantleStarted.Broadcast();
 }
 
 void UApexMovementComponent::UpdateMantle(float DeltaTime)
@@ -1627,6 +1649,9 @@ void UApexMovementComponent::UpdateMantle(float DeltaTime)
 		CharacterOwner->SetActorLocation(MantleTargetLocation);
 		bIsMantling = false;
 		SetMovementMode(MOVE_Walking);
+
+		// Broadcast mantle ended event
+		OnMantleEnded.Broadcast();
 		return;
 	}
 
@@ -1812,16 +1837,15 @@ bool UApexMovementComponent::CanAirDash() const
 
 void UApexMovementComponent::TryAirDash()
 {
-	if (!CanAirDash() || !CharacterOwner)
+	if (!CanAirDash() || !CharacterOwner || !MovementSettings)
 	{
 		return;
 	}
 
-	bIsAirDashing = true;
 	RemainingAirDashCount--;
 
+	// Calculate target dash direction
 	FVector DashDirection;
-
 	const FVector InputDir = GetLastInputVector();
 	if (!InputDir.IsNearlyZero())
 	{
@@ -1831,15 +1855,44 @@ void UApexMovementComponent::TryAirDash()
 	{
 		DashDirection = CharacterOwner->GetActorForwardVector();
 	}
-
 	DashDirection.Z = 0.0f;
 	DashDirection.Normalize();
 
-	Velocity = DashDirection * MovementSettings->AirDashSpeed;
-	Velocity.Z = 0.0f;
+	// Get current horizontal speed
+	const FVector HorizontalVelocity = FVector(Velocity.X, Velocity.Y, 0.0f);
+	const float CurrentHorizontalSpeed = HorizontalVelocity.Size();
 
-	// Start decay timer
-	AirDashDecayTimeRemaining = MovementSettings->AirDashDecayDuration;
+	// Check if we should redirect or do standard dash
+	const bool bShouldRedirect = MovementSettings->bEnableAirDashRedirect
+		&& CurrentHorizontalSpeed > MovementSettings->AirDashSpeed
+		&& CurrentHorizontalSpeed >= MovementSettings->AirDashRedirectMinSpeed;
+
+	if (bShouldRedirect)
+	{
+		// Velocity Redirect: keep speed, rotate direction over time
+		bIsRedirecting = true;
+		bIsAirDashing = true;
+		AirDashRedirectTimeRemaining = MovementSettings->AirDashRedirectDuration;
+		AirDashRedirectSpeed = CurrentHorizontalSpeed;
+		AirDashRedirectStartDirection = HorizontalVelocity.GetSafeNormal();
+		AirDashRedirectTargetDirection = DashDirection;
+
+		// Immediately zero out vertical velocity for the redirect
+		Velocity.Z = 0.0f;
+	}
+	else
+	{
+		// Standard dash: set velocity to AirDashSpeed
+		bIsAirDashing = true;
+		Velocity = DashDirection * MovementSettings->AirDashSpeed;
+		Velocity.Z = 0.0f;
+
+		// Start decay timer
+		AirDashDecayTimeRemaining = MovementSettings->AirDashDecayDuration;
+	}
+
+	// Broadcast air dash started event
+	OnAirDashStarted.Broadcast();
 }
 
 void UApexMovementComponent::UpdateAirDash(float DeltaTime)
@@ -1850,6 +1903,9 @@ void UApexMovementComponent::UpdateAirDash(float DeltaTime)
 	{
 		AirDashCooldownRemaining = MovementSettings->AirDashCooldown;
 	}
+
+	// Broadcast air dash ended event
+	OnAirDashEnded.Broadcast();
 }
 
 void UApexMovementComponent::UpdateAirDashDecay(float DeltaTime)
@@ -1906,10 +1962,51 @@ void UApexMovementComponent::UpdateAirDashDecay(float DeltaTime)
 	}
 }
 
+void UApexMovementComponent::UpdateAirDashRedirect(float DeltaTime)
+{
+	if (!bIsRedirecting || !MovementSettings)
+	{
+		return;
+	}
+
+	AirDashRedirectTimeRemaining -= DeltaTime;
+
+	if (AirDashRedirectTimeRemaining <= 0.0f)
+	{
+		// Redirect complete - snap to target direction
+		Velocity = AirDashRedirectTargetDirection * AirDashRedirectSpeed;
+		Velocity.Z = 0.0f;
+
+		bIsRedirecting = false;
+		bIsAirDashing = false;
+		AirDashCooldownRemaining = MovementSettings->AirDashCooldown;
+
+		// Start decay timer after redirect completes
+		AirDashDecayTimeRemaining = MovementSettings->AirDashDecayDuration;
+		return;
+	}
+
+	// Calculate interpolation alpha (0 = start, 1 = end)
+	const float TotalDuration = MovementSettings->AirDashRedirectDuration;
+	const float Alpha = 1.0f - (AirDashRedirectTimeRemaining / TotalDuration);
+
+	// Smoothstep for nicer feel
+	const float SmoothAlpha = FMath::SmoothStep(0.0f, 1.0f, Alpha);
+
+	// Slerp between directions to maintain constant speed
+	const FVector CurrentDirection = FMath::Lerp(AirDashRedirectStartDirection, AirDashRedirectTargetDirection, SmoothAlpha).GetSafeNormal();
+
+	// Apply velocity with preserved speed
+	Velocity = CurrentDirection * AirDashRedirectSpeed;
+	Velocity.Z = 0.0f;  // Keep horizontal during redirect
+}
+
 void UApexMovementComponent::ResetAirAbilities()
 {
 	RemainingAirDashCount = MovementSettings ? MovementSettings->MaxAirDashCount : 1;
 	bIsAirDashing = false;
+	bIsRedirecting = false;
+	AirDashRedirectTimeRemaining = 0.0f;
 }
 
 // ==================== EMF ====================
@@ -2005,7 +2102,16 @@ void UApexMovementComponent::ApplyVelocityModifiers(float DeltaTime)
 
 			if (IVelocityModifier::Execute_ModifyVelocity(Modifier.GetObject(), DeltaTime, Velocity, VelocityDelta))
 			{
-				Velocity += VelocityDelta;
+				if (!VelocityDelta.IsNearlyZero())
+				{
+					// Convert velocity delta back to force: F = m * a = m * (dv / dt)
+					// AddForce expects force, and will apply it as: a = F/m, dv = a*dt
+					float CharMass = Mass > 0.0f ? Mass : 100.0f;
+					FVector Force = VelocityDelta * CharMass / DeltaTime;
+
+					// Use AddForce so CharacterMovement integrates it properly
+					AddForce(Force);
+				}
 			}
 		}
 	}
