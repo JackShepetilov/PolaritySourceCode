@@ -2,6 +2,7 @@
 // Hybrid boss character implementation
 
 #include "BossCharacter.h"
+#include "BossAIController.h"
 #include "Variant_Shooter/AI/FlyingAIMovementComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Variant_Shooter/Weapons/ShooterProjectile.h"
@@ -23,6 +24,9 @@ ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 {
 	// Create flying movement component
 	FlyingMovement = CreateDefaultSubobject<UFlyingAIMovementComponent>(TEXT("FlyingMovement"));
+
+	// Set AI Controller class
+	AIControllerClass = ABossAIController::StaticClass();
 
 	// Boss-specific defaults
 	CurrentHP = 1000.0f;

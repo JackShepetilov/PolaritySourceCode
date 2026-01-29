@@ -404,6 +404,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Target")
 	AActor* GetTarget() const { return CurrentTarget.Get(); }
 
+	// ==================== Component Getters ====================
+
+	/** Get flying movement component */
+	UFUNCTION(BlueprintPure, Category = "Boss|Components")
+	UFlyingAIMovementComponent* GetFlyingMovement() const { return FlyingMovement; }
+
 protected:
 
 	// ==================== Internal Methods ====================
