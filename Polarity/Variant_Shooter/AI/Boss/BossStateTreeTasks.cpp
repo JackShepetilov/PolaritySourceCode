@@ -13,17 +13,24 @@ EStateTreeRunStatus FStateTreeBossArcDashTask::EnterState(FStateTreeExecutionCon
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
+	UE_LOG(LogTemp, Warning, TEXT("[BossArcDash] EnterState - Boss=%s, Target=%s"),
+		InstanceData.Boss ? *InstanceData.Boss->GetName() : TEXT("NULL"),
+		InstanceData.Target ? *InstanceData.Target->GetName() : TEXT("NULL"));
+
 	if (!InstanceData.Boss || !InstanceData.Target)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[BossArcDash] FAILED - Missing Boss or Target"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	if (!InstanceData.Boss->CanDash())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossArcDash] FAILED - CanDash returned false"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	bool bStarted = InstanceData.Boss->StartArcDash(InstanceData.Target);
+	UE_LOG(LogTemp, Warning, TEXT("[BossArcDash] StartArcDash returned %s"), bStarted ? TEXT("TRUE") : TEXT("FALSE"));
 	return bStarted ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Failed;
 }
 

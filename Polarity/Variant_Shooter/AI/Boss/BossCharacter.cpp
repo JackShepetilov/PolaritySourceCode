@@ -125,8 +125,17 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 		return DamageToApply;
 	}
 
-	// Normal damage handling
-	return Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+	// Normal damage handling - but prevent auto-retaliation shooting in ground phase
+	bool bWasShootingBefore = bIsShooting;
+	float Result = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	// In ground phase, boss should NOT shoot - only melee
+	if (CurrentPhase == EBossPhase::Ground && !bWasShootingBefore)
+	{
+		StopShooting();
+	}
+
+	return Result;
 }
 
 // ==================== Phase Control ====================
