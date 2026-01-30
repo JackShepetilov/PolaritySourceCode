@@ -11,6 +11,7 @@ class UFlyingAIMovementComponent;
 class UAnimMontage;
 class UNiagaraSystem;
 class AShooterProjectile;
+class ABossProjectile;
 
 /** Boss phase enumeration */
 UENUM(BlueprintType)
@@ -75,6 +76,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions", meta = (ClampMin = "5.0"))
 	float MaxAerialPhaseDuration = 20.0f;
 
+	/** Time it takes to transition from Ground to Aerial (take off) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions", meta = (ClampMin = "0.5"))
+	float TakeOffDuration = 1.5f;
+
+	/** Time it takes to transition from Aerial to Ground (landing) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions", meta = (ClampMin = "0.5"))
+	float LandingDuration = 1.0f;
+
+	/** Is boss currently transitioning between phases (cannot attack during transition) */
+	UPROPERTY(BlueprintReadOnly, Category = "Boss|Phase")
+	bool bIsTransitioning = false;
+
 	// ==================== Ground Phase (Melee) Settings ====================
 
 	/** Maximum dash distance in cm */
@@ -117,6 +130,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "0.1"))
 	float MeleeAttackCooldown = 0.5f;
 
+	/** Speed at which boss is pulled towards player during melee attack (cm/s).
+	 *  This punishes slow players - if you stand still, boss will track you.
+	 *  Fast moving players can dodge by outrunning the pull. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "0.0"))
+	float MeleeAttackPullSpeed = 500.0f;
+
 	/** Radius of melee trace sphere */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "10.0"))
 	float MeleeTraceRadius = 50.0f;
@@ -150,6 +169,14 @@ protected:
 	/** If true, perform dash after parry detected */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase")
 	bool bDashAfterParry = true;
+
+	/** Projectile class to spawn (should be BossProjectile or subclass) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase")
+	TSubclassOf<ABossProjectile> BossProjectileClass;
+
+	/** Speed of boss projectiles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase", meta = (ClampMin = "100.0"))
+	float ProjectileSpeed = 2000.0f;
 
 	// ==================== Projectile Tracking Settings ====================
 
@@ -220,17 +247,26 @@ protected:
 
 	// ==================== Dash State ====================
 
-	/** Start position of current dash (for Z height preservation) */
+	/** True if current dash is approach (to player), false if circle (around player) */
+	bool bIsApproachDash = false;
+
+	/** Start position of current dash (world space, for Z height reference) */
 	FVector DashStartPosition = FVector::ZeroVector;
 
-	/** Starting angle around player (degrees) */
+	/** Starting angle around player (radians) */
 	float DashStartAngle = 0.0f;
 
-	/** Target angle around player (degrees) */
+	/** Target angle around player (radians) */
 	float DashTargetAngle = 0.0f;
 
 	/** Starting distance from player */
-	float DashStartDistance = 0.0f;
+	float DashStartRadius = 0.0f;
+
+	/** Target distance from player (approach dash ends at melee range) */
+	float DashTargetRadius = 0.0f;
+
+	/** Arc direction: 1 = counter-clockwise, -1 = clockwise */
+	float DashArcDirection = 1.0f;
 
 	/** Elapsed time in current dash */
 	float DashElapsedTime = 0.0f;
@@ -269,6 +305,7 @@ protected:
 	FTimerHandle DamageWindowEndTimer;
 	FTimerHandle AerialPhaseTimer;
 	FTimerHandle ParryCheckTimer;
+	FTimerHandle PhaseTransitionTimer;
 
 public:
 
@@ -319,11 +356,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Phase")
 	bool ShouldTransitionToGround() const;
 
+	/** Check if boss is currently transitioning between phases */
+	UFUNCTION(BlueprintPure, Category = "Boss|Phase")
+	bool IsTransitioning() const { return bIsTransitioning; }
+
 	// ==================== Ground Phase Interface ====================
 
-	/** Start an arc dash towards a point around the target */
+	/** Start approach dash - moves TOWARDS player to close distance */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Ground Phase")
-	bool StartArcDash(AActor* Target);
+	bool StartApproachDash(AActor* Target);
+
+	/** Start circle dash - moves AROUND player at current distance */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Ground Phase")
+	bool StartCircleDash(AActor* Target);
 
 	/** Returns true if boss can currently dash */
 	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
@@ -332,6 +377,10 @@ public:
 	/** Returns true if boss is currently dashing */
 	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
 	bool IsDashing() const { return bIsDashing; }
+
+	/** Returns true if target is far (needs approach dash) */
+	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
+	bool IsTargetFar(AActor* Target) const;
 
 	/** Start a melee attack against the target */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Ground Phase")
@@ -382,6 +431,10 @@ public:
 	/** Track a projectile for parry detection */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Aerial Phase")
 	void TrackProjectile(AShooterProjectile* Projectile);
+
+	/** Called by BossProjectile when parry is detected */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Aerial Phase")
+	void OnProjectileParried(ABossProjectile* Projectile);
 
 	// ==================== Finisher Phase Interface ====================
 
@@ -451,8 +504,14 @@ protected:
 	/** Apply melee damage to hit actor */
 	void ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitResult);
 
+	/** Pull boss towards player during melee attack */
+	void UpdateMeleeAttackPull(float DeltaTime);
+
 	/** Execute phase transition */
 	void ExecutePhaseTransition(EBossPhase NewPhase);
+
+	/** Called when phase transition animation/movement completes */
+	void OnPhaseTransitionComplete();
 
 	/** Check aerial phase duration timeout */
 	void CheckAerialPhaseTimeout();

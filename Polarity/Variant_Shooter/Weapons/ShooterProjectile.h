@@ -21,11 +21,11 @@ class POLARITY_API AShooterProjectile : public AActor
 {
 	GENERATED_BODY()
 
-	/** Provides collision detection for the projectile */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
-	USphereComponent* CollisionComponent;
-
 protected:
+
+	/** Provides collision detection for the projectile */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components")
+	USphereComponent* CollisionComponent;
 
 	/** Handles movement for the projectile */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components")
@@ -58,6 +58,10 @@ protected:
 	/** If true, the projectile can damage the character that shot it */
 	UPROPERTY(EditAnywhere, Category="Projectile|Hit")
 	bool bDamageOwner = false;
+
+	/** Damage multipliers based on target actor tags. Multiple matching tags multiply together. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Projectile|Hit")
+	TMap<FName, float> TagDamageMultipliers;
 
 	/** If true, the projectile will explode and apply radial damage to all actors in range */
 	UPROPERTY(EditAnywhere, Category="Projectile|Explosion")
@@ -109,7 +113,10 @@ protected:
 	void ExplosionCheck(const FVector& ExplosionCenter);
 
 	/** Processes a projectile hit for the given actor */
-	void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection);
+	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection);
+
+	/** Calculate damage multiplier based on target's tags */
+	float GetTagDamageMultiplier(AActor* Target) const;
 
 	/** Passes control to Blueprint to implement any effects on hit. */
 	UFUNCTION(BlueprintImplementableEvent, Category="Projectile", meta = (DisplayName = "On Projectile Hit"))

@@ -13,12 +13,12 @@ class ABossCharacter;
 class AActor;
 
 //////////////////////////////////////////////////////////////////
-// TASK: Boss Arc Dash
-// Executes arc dash towards a point around the target
+// TASK: Boss Approach Dash
+// Dashes TOWARDS the player to close distance
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
-struct FStateTreeBossArcDashInstanceData
+struct FStateTreeBossApproachDashInstanceData
 {
 	GENERATED_BODY()
 
@@ -26,17 +26,57 @@ struct FStateTreeBossArcDashInstanceData
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to dash around */
+	/** Target to dash towards */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
 
-USTRUCT(meta = (DisplayName = "Boss Arc Dash", Category = "Boss"))
-struct POLARITY_API FStateTreeBossArcDashTask : public FStateTreeTaskCommonBase
+USTRUCT(meta = (DisplayName = "Boss Approach Dash", Category = "Boss"))
+struct POLARITY_API FStateTreeBossApproachDashTask : public FStateTreeTaskCommonBase
 {
 	GENERATED_BODY()
 
-	using FInstanceDataType = FStateTreeBossArcDashInstanceData;
+	using FInstanceDataType = FStateTreeBossApproachDashInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Circle Dash
+// Dashes AROUND the player at current distance
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossCircleDashInstanceData
+{
+	GENERATED_BODY()
+
+	/** Boss performing the dash */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	/** Target to circle around */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+};
+
+USTRUCT(meta = (DisplayName = "Boss Circle Dash", Category = "Boss"))
+struct POLARITY_API FStateTreeBossCircleDashTask : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossCircleDashInstanceData;
 
 	virtual const UStruct* GetInstanceDataType() const override
 	{
@@ -120,6 +160,7 @@ struct POLARITY_API FStateTreeBossStartHoveringTask : public FStateTreeTaskCommo
 	}
 
 	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
 
 #if WITH_EDITOR
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
@@ -154,6 +195,7 @@ struct POLARITY_API FStateTreeBossStopHoveringTask : public FStateTreeTaskCommon
 	}
 
 	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
 
 #if WITH_EDITOR
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
@@ -625,6 +667,83 @@ struct POLARITY_API FStateTreeBossInMeleeRangeCondition : public FStateTreeCondi
 	GENERATED_BODY()
 
 	using FInstanceDataType = FStateTreeBossInMeleeRangeInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Target Is Far
+// Checks if target is far (needs approach dash)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossTargetIsFarInstanceData
+{
+	GENERATED_BODY()
+
+	/** Boss to check */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	/** Target to check distance to */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+};
+
+USTRUCT(DisplayName = "Boss Target Is Far", Category = "Boss")
+struct POLARITY_API FStateTreeBossTargetIsFarCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossTargetIsFarInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Target Is Close
+// Checks if target is close (no approach needed, can circle/attack)
+// NOTE: StateTree does NOT support condition inversion, so we need both Far and Close
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossTargetIsCloseInstanceData
+{
+	GENERATED_BODY()
+
+	/** Boss to check */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	/** Target to check distance to */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+};
+
+USTRUCT(DisplayName = "Boss Target Is Close", Category = "Boss")
+struct POLARITY_API FStateTreeBossTargetIsCloseCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossTargetIsCloseInstanceData;
 
 	virtual const UStruct* GetInstanceDataType() const override
 	{

@@ -696,10 +696,13 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			ZFactorMult = CalculateZFactorMultiplier(ShooterZ, TargetZ);
 		}
 
-		float FinalDamage = HitscanDamage * RemainingEnergy * AreaMultiplier * HeadshotMult * HeatMult * ZFactorMult;
+		// Tag-based damage multiplier
+		float TagMult = GetTagDamageMultiplier(HitActor);
 
-		UE_LOG(LogTemp, Warning, TEXT("    HIT! Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f = %.1f"),
-			HitscanDamage, RemainingEnergy, AreaMultiplier, HeadshotMult, HeatMult, ZFactorMult, FinalDamage);
+		float FinalDamage = HitscanDamage * RemainingEnergy * AreaMultiplier * HeadshotMult * HeatMult * ZFactorMult * TagMult;
+
+		UE_LOG(LogTemp, Warning, TEXT("    HIT! Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f x Tag:%.2f = %.1f"),
+			HitscanDamage, RemainingEnergy, AreaMultiplier, HeadshotMult, HeatMult, ZFactorMult, TagMult, FinalDamage);
 
 		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
 		FDamageEvent DamageEvent;
@@ -875,6 +878,26 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 			HitComp->AddImpulseAtLocation(ImpulseDirection * ImpulseForce, Hit.ImpactPoint);
 		}
 	}
+}
+
+float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
+{
+	if (!Target || TagDamageMultipliers.Num() == 0)
+	{
+		return 1.0f;
+	}
+
+	float Multiplier = 1.0f;
+
+	for (const auto& Pair : TagDamageMultipliers)
+	{
+		if (Target->ActorHasTag(Pair.Key))
+		{
+			Multiplier *= Pair.Value;
+		}
+	}
+
+	return Multiplier;
 }
 
 float AShooterWeapon::CalculateWaveRadius(float Distance) const

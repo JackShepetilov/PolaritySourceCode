@@ -6,35 +6,29 @@
 #include "StateTreeExecutionContext.h"
 
 //////////////////////////////////////////////////////////////////
-// TASK: Boss Arc Dash
+// TASK: Boss Approach Dash
 //////////////////////////////////////////////////////////////////
 
-EStateTreeRunStatus FStateTreeBossArcDashTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+EStateTreeRunStatus FStateTreeBossApproachDashTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossArcDash] EnterState - Boss=%s, Target=%s"),
-		InstanceData.Boss ? *InstanceData.Boss->GetName() : TEXT("NULL"),
-		InstanceData.Target ? *InstanceData.Target->GetName() : TEXT("NULL"));
-
 	if (!InstanceData.Boss || !InstanceData.Target)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[BossArcDash] FAILED - Missing Boss or Target"));
+		UE_LOG(LogTemp, Error, TEXT("[BossApproachDash] FAILED - Missing Boss or Target"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	if (!InstanceData.Boss->CanDash())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossArcDash] FAILED - CanDash returned false"));
 		return EStateTreeRunStatus::Failed;
 	}
 
-	bool bStarted = InstanceData.Boss->StartArcDash(InstanceData.Target);
-	UE_LOG(LogTemp, Warning, TEXT("[BossArcDash] StartArcDash returned %s"), bStarted ? TEXT("TRUE") : TEXT("FALSE"));
+	bool bStarted = InstanceData.Boss->StartApproachDash(InstanceData.Target);
 	return bStarted ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Failed;
 }
 
-EStateTreeRunStatus FStateTreeBossArcDashTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+EStateTreeRunStatus FStateTreeBossApproachDashTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
@@ -43,7 +37,6 @@ EStateTreeRunStatus FStateTreeBossArcDashTask::Tick(FStateTreeExecutionContext& 
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Check if dash is still in progress
 	if (InstanceData.Boss->IsDashing())
 	{
 		return EStateTreeRunStatus::Running;
@@ -52,15 +45,64 @@ EStateTreeRunStatus FStateTreeBossArcDashTask::Tick(FStateTreeExecutionContext& 
 	return EStateTreeRunStatus::Succeeded;
 }
 
-void FStateTreeBossArcDashTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+void FStateTreeBossApproachDashTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
-	// Dash cleanup handled by boss
 }
 
 #if WITH_EDITOR
-FText FStateTreeBossArcDashTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+FText FStateTreeBossApproachDashTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
-	return FText::FromString(TEXT("Boss: Arc Dash around Target"));
+	return FText::FromString(TEXT("Boss: Approach Dash (to player)"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Circle Dash
+//////////////////////////////////////////////////////////////////
+
+EStateTreeRunStatus FStateTreeBossCircleDashTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss || !InstanceData.Target)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BossCircleDash] FAILED - Missing Boss or Target"));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Note: Circle Dash does NOT check CanDash() cooldown
+	// This allows it to chain immediately after Approach Dash
+	// The cooldown is checked before the next Approach Dash instead
+
+	bool bStarted = InstanceData.Boss->StartCircleDash(InstanceData.Target);
+	return bStarted ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Failed;
+}
+
+EStateTreeRunStatus FStateTreeBossCircleDashTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (InstanceData.Boss->IsDashing())
+	{
+		return EStateTreeRunStatus::Running;
+	}
+
+	return EStateTreeRunStatus::Succeeded;
+}
+
+void FStateTreeBossCircleDashTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+}
+
+#if WITH_EDITOR
+FText FStateTreeBossCircleDashTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Boss: Circle Dash (around player)"));
 }
 #endif
 
@@ -129,14 +171,40 @@ EStateTreeRunStatus FStateTreeBossStartHoveringTask::EnterState(FStateTreeExecut
 		return EStateTreeRunStatus::Failed;
 	}
 
-	InstanceData.Boss->StartHovering();
+	// StartHovering is called by SetPhase/ExecutePhaseTransition when phase changes to Aerial
+	// If we're already transitioning, just wait for it
+	// If not transitioning and already in Aerial phase, we're done
+	if (!InstanceData.Boss->IsTransitioning())
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossStartHovering] Waiting for takeoff to complete..."));
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FStateTreeBossStartHoveringTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Wait for transition to complete
+	if (InstanceData.Boss->IsTransitioning())
+	{
+		return EStateTreeRunStatus::Running;
+	}
+
 	return EStateTreeRunStatus::Succeeded;
 }
 
 #if WITH_EDITOR
 FText FStateTreeBossStartHoveringTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
-	return FText::FromString(TEXT("Boss: Start Hovering"));
+	return FText::FromString(TEXT("Boss: Start Hovering (Wait for takeoff)"));
 }
 #endif
 
@@ -153,14 +221,40 @@ EStateTreeRunStatus FStateTreeBossStopHoveringTask::EnterState(FStateTreeExecuti
 		return EStateTreeRunStatus::Failed;
 	}
 
-	InstanceData.Boss->StopHovering();
+	// StopHovering is called by SetPhase/ExecutePhaseTransition when phase changes to Ground
+	// If we're already transitioning, just wait for it
+	// If not transitioning and already in Ground phase, we're done
+	if (!InstanceData.Boss->IsTransitioning())
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Waiting for landing to complete..."));
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FStateTreeBossStopHoveringTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Wait for transition to complete
+	if (InstanceData.Boss->IsTransitioning())
+	{
+		return EStateTreeRunStatus::Running;
+	}
+
 	return EStateTreeRunStatus::Succeeded;
 }
 
 #if WITH_EDITOR
 FText FStateTreeBossStopHoveringTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
-	return FText::FromString(TEXT("Boss: Stop Hovering"));
+	return FText::FromString(TEXT("Boss: Stop Hovering (Wait for landing)"));
 }
 #endif
 
@@ -296,8 +390,8 @@ EStateTreeRunStatus FStateTreeBossShootTask::EnterState(FStateTreeExecutionConte
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Use inherited ShooterNPC shooting functionality
-	InstanceData.Boss->StartShooting(InstanceData.Target, true);
+	// Use BossCharacter's custom projectile firing (spawns BossProjectile with parry detection)
+	InstanceData.Boss->FireEMFProjectile(InstanceData.Target);
 	return EStateTreeRunStatus::Succeeded;
 }
 
@@ -567,5 +661,52 @@ bool FStateTreeBossInFinisherCondition::TestCondition(FStateTreeExecutionContext
 FText FStateTreeBossInFinisherCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("Boss Is In Finisher Phase"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Target Is Far
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeBossTargetIsFarCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss || !InstanceData.Target)
+	{
+		return false;
+	}
+
+	return InstanceData.Boss->IsTargetFar(InstanceData.Target);
+}
+
+#if WITH_EDITOR
+FText FStateTreeBossTargetIsFarCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Boss Target Is Far"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Target Is Close
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeBossTargetIsCloseCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss || !InstanceData.Target)
+	{
+		return false;
+	}
+
+	// Opposite of IsTargetFar
+	return !InstanceData.Boss->IsTargetFar(InstanceData.Target);
+}
+
+#if WITH_EDITOR
+FText FStateTreeBossTargetIsCloseCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Boss Target Is Close"));
 }
 #endif

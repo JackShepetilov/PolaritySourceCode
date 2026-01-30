@@ -179,17 +179,41 @@ void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitCo
 		// ignore the owner of this projectile
 		if (HitCharacter != GetOwner() || bDamageOwner)
 		{
+			// Calculate tag-based damage multiplier
+			float TagMultiplier = GetTagDamageMultiplier(HitActor);
+			float FinalDamage = HitDamage * TagMultiplier;
+
 			// apply damage to the character
-			UGameplayStatics::ApplyDamage(HitCharacter, HitDamage, GetInstigator()->GetController(), this, HitDamageType);
+			UGameplayStatics::ApplyDamage(HitCharacter, FinalDamage, GetInstigator()->GetController(), this, HitDamageType);
 		}
 	}
 
 	// have we hit a physics object?
-	if (HitComp->IsSimulatingPhysics())
+	if (HitComp && HitComp->IsSimulatingPhysics())
 	{
 		// give some physics impulse to the object
 		HitComp->AddImpulseAtLocation(HitDirection * PhysicsForce, HitLocation);
 	}
+}
+
+float AShooterProjectile::GetTagDamageMultiplier(AActor* Target) const
+{
+	if (!Target || TagDamageMultipliers.Num() == 0)
+	{
+		return 1.0f;
+	}
+
+	float Multiplier = 1.0f;
+
+	for (const auto& Pair : TagDamageMultipliers)
+	{
+		if (Target->ActorHasTag(Pair.Key))
+		{
+			Multiplier *= Pair.Value;
+		}
+	}
+
+	return Multiplier;
 }
 
 void AShooterProjectile::OnDeferredDestruction()

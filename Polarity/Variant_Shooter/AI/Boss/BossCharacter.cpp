@@ -3,6 +3,7 @@
 
 #include "BossCharacter.h"
 #include "BossAIController.h"
+#include "BossProjectile.h"
 #include "Variant_Shooter/AI/FlyingAIMovementComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Variant_Shooter/Weapons/ShooterProjectile.h"
@@ -63,7 +64,11 @@ void ABossCharacter::Tick(float DeltaTime)
 		UpdateArcDash(DeltaTime);
 	}
 
-	// Perform melee trace if damage window is active
+	// Pull towards player and perform melee trace during attack
+	if (bIsAttacking && CurrentTarget.IsValid())
+	{
+		UpdateMeleeAttackPull(DeltaTime);
+	}
 	if (bDamageWindowActive)
 	{
 		PerformMeleeTrace();
@@ -117,7 +122,7 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 		CurrentHP = 1.0f;
 
 		// Broadcast damage taken event
-		OnDamageTaken.Broadcast(this, DamageToApply, nullptr, GetActorLocation(), DamageCauser);
+		OnDamageTaken.Broadcast(this, DamageToApply, TSubclassOf<UDamageType>(), GetActorLocation(), DamageCauser);
 
 		// Enter finisher phase
 		EnterFinisherPhase();
@@ -207,13 +212,18 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 
 	CurrentPhase = NewPhase;
 
-	// Reset phase-specific counters
+	// Start transition - boss cannot attack until complete
+	bIsTransitioning = true;
+	float TransitionDuration = 0.0f;
+
+	// Reset phase-specific counters and start movement
 	switch (NewPhase)
 	{
 	case EBossPhase::Ground:
 		CurrentDashAttackCount = 0;
 		StopHovering();
 		StopParryDetection();
+		TransitionDuration = LandingDuration;
 		break;
 
 	case EBossPhase::Aerial:
@@ -221,15 +231,51 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 		AerialPhaseStartTime = GetWorld()->GetTimeSeconds();
 		StartHovering();
 		StartParryDetection();
+		TransitionDuration = TakeOffDuration;
 		break;
 
 	case EBossPhase::Finisher:
 		// Finisher phase handled by EnterFinisherPhase()
+		bIsTransitioning = false; // No transition delay for finisher
 		break;
+	}
+
+	// Set timer to complete transition
+	if (TransitionDuration > 0.0f)
+	{
+		GetWorld()->GetTimerManager().SetTimer(
+			PhaseTransitionTimer,
+			this,
+			&ABossCharacter::OnPhaseTransitionComplete,
+			TransitionDuration,
+			false
+		);
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition started, duration: %.2f seconds"), TransitionDuration);
 	}
 
 	// Broadcast phase change
 	OnPhaseChanged.Broadcast(OldPhase, NewPhase);
+}
+
+void ABossCharacter::OnPhaseTransitionComplete()
+{
+	bIsTransitioning = false;
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack"));
+
+	// If we landed (transitioned to Ground), switch to walking mode
+	if (CurrentPhase == EBossPhase::Ground)
+	{
+		if (FlyingMovement)
+		{
+			FlyingMovement->StopMovement();
+		}
+
+		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+		{
+			MovementComp->SetMovementMode(MOVE_Walking);
+			MovementComp->Velocity = FVector::ZeroVector;
+		}
+	}
 }
 
 void ABossCharacter::CheckAerialPhaseTimeout()
@@ -240,66 +286,136 @@ void ABossCharacter::CheckAerialPhaseTimeout()
 	}
 }
 
-// ==================== Ground Phase: Arc Dash ====================
+// ==================== Ground Phase: Approach Dash ====================
 
-bool ABossCharacter::StartArcDash(AActor* Target)
+bool ABossCharacter::StartApproachDash(AActor* Target)
 {
 	if (!CanDash() || !Target)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartArcDash FAILED - CanDash=%d, Target=%s"),
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartApproachDash FAILED - CanDash=%d, Target=%s"),
 			CanDash(), Target ? *Target->GetName() : TEXT("NULL"));
 		return false;
 	}
 
-	// Store target
 	CurrentTarget = Target;
+	bIsApproachDash = true;
 
-	// Calculate initial angle from player to boss
 	FVector PlayerPos = Target->GetActorLocation();
 	FVector BossPos = GetActorLocation();
-	FVector TowardsBoss = (BossPos - PlayerPos).GetSafeNormal2D();
+	DashStartPosition = BossPos; // Keep for Z reference
 
-	// Store starting angle (in degrees, around player)
-	DashStartAngle = FMath::Atan2(TowardsBoss.Y, TowardsBoss.X) * (180.0f / PI);
+	// Calculate start position in polar coordinates (relative to player)
+	FVector PlayerToBoss = BossPos - PlayerPos;
+	DashStartRadius = PlayerToBoss.Size2D();
+	DashStartAngle = FMath::Atan2(PlayerToBoss.Y, PlayerToBoss.X);
 
-	// Calculate target angle - offset by MinDashAngleOffset to MaxDashAngleOffset degrees
-	float AngleOffset = FMath::RandRange(MinDashAngleOffset, MaxDashAngleOffset);
-	if (FMath::RandBool())
-	{
-		AngleOffset = -AngleOffset;
-	}
-	DashTargetAngle = DashStartAngle + AngleOffset;
+	// Target: random point on circle around player at melee range
+	DashTargetRadius = DashTargetDistanceFromPlayer;
 
-	// Store starting distance from player (we'll maintain roughly this distance during arc)
-	DashStartDistance = FVector::Dist2D(PlayerPos, BossPos);
-	// Clamp to reasonable range
-	DashStartDistance = FMath::Clamp(DashStartDistance, DashTargetDistanceFromPlayer, MaxDashDistance);
+	// Pick random target angle within ±120 degrees
+	float AngleOffsetDeg = FMath::RandRange(-120.0f, 120.0f);
+	float AngleOffsetRad = FMath::DegreesToRadians(AngleOffsetDeg);
+	DashTargetAngle = DashStartAngle + AngleOffsetRad;
 
-	// Calculate duration based on arc length
-	float ArcLengthDegrees = FMath::Abs(AngleOffset);
-	float ArcLengthCm = (ArcLengthDegrees / 360.0f) * 2.0f * PI * DashStartDistance;
-	DashTotalDuration = FMath::Max(ArcLengthCm / DashSpeed, 0.2f); // Minimum 0.2s
+	// Determine arc direction (shorter path around, but always outward from player)
+	// Positive offset = counter-clockwise, negative = clockwise
+	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
+
+	// Calculate approximate arc length for duration
+	// Arc travels from StartAngle to TargetAngle while radius shrinks from StartRadius to TargetRadius
+	float AngleDelta = FMath::Abs(AngleOffsetRad);
+	float AverageRadius = (DashStartRadius + DashTargetRadius) * 0.5f;
+	float ArcLength = AngleDelta * AverageRadius + FMath::Abs(DashStartRadius - DashTargetRadius);
+	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
 	DashElapsedTime = 0.0f;
 
-	// Store starting Z height to maintain ground level
-	DashStartPosition = BossPos;
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartArcDash: Angle %.1f -> %.1f (offset %.1f), Distance=%.0f, Duration=%.2fs"),
-		DashStartAngle, DashTargetAngle, AngleOffset, DashStartDistance, DashTotalDuration);
-
-	// Start dash
 	bIsDashing = true;
 	LastDashTime = GetWorld()->GetTimeSeconds();
 
-	// Keep walking mode - we'll move manually but stay grounded
-	// Don't use MOVE_Flying as it causes Z drift
+	// Disable EMF forces during dash
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH DYNAMIC: AngleOffset=%.1f, StartRadius=%.0f -> TargetRadius=%.0f, Duration=%.2fs"),
+		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration);
 
 	return true;
 }
 
+// ==================== Ground Phase: Circle Dash ====================
+
+bool ABossCharacter::StartCircleDash(AActor* Target)
+{
+	// Circle Dash does NOT check cooldown - it chains immediately after Approach Dash
+	// Only check basic state (not dead, not already dashing, etc.)
+	if (!Target || bIsDead || bIsDashing || bIsInKnockback || bIsInFinisherPhase)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartCircleDash FAILED - Target=%s, bIsDead=%d, bIsDashing=%d"),
+			Target ? *Target->GetName() : TEXT("NULL"), bIsDead, bIsDashing);
+		return false;
+	}
+
+	CurrentTarget = Target;
+	bIsApproachDash = false;
+
+	FVector PlayerPos = Target->GetActorLocation();
+	FVector BossPos = GetActorLocation();
+	DashStartPosition = BossPos; // Keep for Z reference
+
+	// Calculate start position in polar coordinates
+	FVector PlayerToBoss = BossPos - PlayerPos;
+	DashStartRadius = FMath::Max(PlayerToBoss.Size2D(), DashTargetDistanceFromPlayer);
+	DashStartAngle = FMath::Atan2(PlayerToBoss.Y, PlayerToBoss.X);
+
+	// Circle dash keeps the same radius
+	DashTargetRadius = DashStartRadius;
+
+	// Random angle offset (45-135 degrees either direction)
+	float AngleOffsetDeg = FMath::RandRange(MinDashAngleOffset, MaxDashAngleOffset);
+	if (FMath::RandBool())
+	{
+		AngleOffsetDeg = -AngleOffsetDeg;
+	}
+	float AngleOffsetRad = FMath::DegreesToRadians(AngleOffsetDeg);
+	DashTargetAngle = DashStartAngle + AngleOffsetRad;
+	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
+
+	// Calculate duration based on arc length
+	float ArcLength = FMath::Abs(AngleOffsetRad) * DashStartRadius;
+	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+	DashElapsedTime = 0.0f;
+
+	bIsDashing = true;
+	LastDashTime = GetWorld()->GetTimeSeconds();
+
+	// Disable EMF forces during dash
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE DYNAMIC: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs"),
+		AngleOffsetDeg, DashStartRadius, DashTotalDuration);
+
+	return true;
+}
+
+bool ABossCharacter::IsTargetFar(AActor* Target) const
+{
+	if (!Target)
+	{
+		return true;
+	}
+	float Distance = FVector::Dist2D(GetActorLocation(), Target->GetActorLocation());
+	// Consider "far" if beyond melee range + some buffer
+	return Distance > (MeleeAttackRange + 100.0f);
+}
+
 bool ABossCharacter::CanDash() const
 {
-	if (bIsDead || bIsDashing || bIsInKnockback || bIsInFinisherPhase)
+	if (bIsDead || bIsDashing || bIsInKnockback || bIsInFinisherPhase || bIsTransitioning)
 	{
 		return false;
 	}
@@ -392,52 +508,47 @@ void ABossCharacter::UpdateArcDash(float DeltaTime)
 		return;
 	}
 
-	// Debug movement mode
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		FString ModeStr;
-		switch (MovementComp->MovementMode)
-		{
-		case MOVE_Walking: ModeStr = TEXT("Walking"); break;
-		case MOVE_Flying: ModeStr = TEXT("Flying"); break;
-		case MOVE_Falling: ModeStr = TEXT("Falling"); break;
-		case MOVE_None: ModeStr = TEXT("None"); break;
-		default: ModeStr = FString::Printf(TEXT("Other(%d)"), (int)MovementComp->MovementMode); break;
-		}
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] Tick - MovementMode=%s, Z=%.1f"), *ModeStr, GetActorLocation().Z);
-	}
-
 	DashElapsedTime += DeltaTime;
 	float Alpha = FMath::Clamp(DashElapsedTime / DashTotalDuration, 0.0f, 1.0f);
 
-	// Get CURRENT player position - this makes the arc dynamic
 	FVector PlayerPos = CurrentTarget->GetActorLocation();
-
-	// Interpolate angle around player
-	float CurrentAngle = FMath::Lerp(DashStartAngle, DashTargetAngle, Alpha);
-	float AngleRad = CurrentAngle * (PI / 180.0f);
-
-	// Calculate position on circle around player
-	// Distance decreases towards melee range as we approach target
-	float CurrentDistance = FMath::Lerp(DashStartDistance, DashTargetDistanceFromPlayer, Alpha);
-
 	FVector NewPosition;
-	NewPosition.X = PlayerPos.X + FMath::Cos(AngleRad) * CurrentDistance;
-	NewPosition.Y = PlayerPos.Y + FMath::Sin(AngleRad) * CurrentDistance;
-	NewPosition.Z = DashStartPosition.Z; // Keep original Z height (ground level)
+
+	// Both dash types use polar coordinates relative to CURRENT player position
+	// This makes the dash dynamically track the player
+
+	// Interpolate angle and radius
+	float CurrentAngle = FMath::Lerp(DashStartAngle, DashTargetAngle, Alpha);
+	float CurrentRadius = FMath::Lerp(DashStartRadius, DashTargetRadius, Alpha);
+
+	// Convert polar to cartesian, centered on current player position
+	NewPosition.X = PlayerPos.X + FMath::Cos(CurrentAngle) * CurrentRadius;
+	NewPosition.Y = PlayerPos.Y + FMath::Sin(CurrentAngle) * CurrentRadius;
+	NewPosition.Z = DashStartPosition.Z;
 
 	// Face the player during dash
-	FVector ToPlayer = (PlayerPos - NewPosition).GetSafeNormal2D();
-	if (!ToPlayer.IsNearlyZero())
+	FVector ToPlayerDir = (PlayerPos - NewPosition).GetSafeNormal2D();
+	if (!ToPlayerDir.IsNearlyZero())
 	{
-		FRotator NewRotation = ToPlayer.Rotation();
+		FRotator NewRotation = ToPlayerDir.Rotation();
 		NewRotation.Pitch = 0.0f;
 		NewRotation.Roll = 0.0f;
 		SetActorRotation(NewRotation);
 	}
 
-	// Move to new position
-	SetActorLocation(NewPosition);
+	// Move to new position with sweep (like MeleeNPC does)
+	FVector CurrentPos = GetActorLocation();
+	SetActorLocation(NewPosition, true);
+
+	// Update velocity for visuals and animations (like MeleeNPC does)
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		if (DeltaTime > 0.0f)
+		{
+			FVector FrameVelocity = (NewPosition - CurrentPos) / DeltaTime;
+			MovementComp->Velocity = FrameVelocity;
+		}
+	}
 
 	// Check if dash complete
 	if (Alpha >= 1.0f)
@@ -450,10 +561,17 @@ void ABossCharacter::EndDash()
 {
 	bIsDashing = false;
 
-	// Restore walking movement
+	// Stop velocity and restore walking movement (like MeleeNPC does)
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
+		MovementComp->Velocity = FVector::ZeroVector;
 		MovementComp->SetMovementMode(MOVE_Walking);
+	}
+
+	// Re-enable EMF forces
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(true);
 	}
 
 	// Increment dash attack counter
@@ -482,8 +600,12 @@ void ABossCharacter::StartMeleeAttack(AActor* Target)
 {
 	if (!CanMeleeAttack() || !Target)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossMelee] StartMeleeAttack FAILED - CanMeleeAttack=%d, Target=%s, bIsAttacking=%d, bIsDashing=%d"),
+			CanMeleeAttack(), Target ? *Target->GetName() : TEXT("NULL"), bIsAttacking, bIsDashing);
 		return;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossMelee] StartMeleeAttack SUCCESS - Target=%s"), *Target->GetName());
 
 	CurrentTarget = Target;
 	bIsAttacking = true;
@@ -632,11 +754,56 @@ void ABossCharacter::ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitRes
 	HitActor->TakeDamage(MeleeAttackDamage, DamageEvent, GetController(), this);
 }
 
+void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
+{
+	if (!bIsAttacking || !CurrentTarget.IsValid() || MeleeAttackPullSpeed <= 0.0f)
+	{
+		return;
+	}
+
+	FVector BossLocation = GetActorLocation();
+	FVector PlayerLocation = CurrentTarget->GetActorLocation();
+
+	// Calculate direction to player (2D only, keep Z)
+	FVector ToPlayer = PlayerLocation - BossLocation;
+	ToPlayer.Z = 0.0f;
+
+	float DistanceToPlayer = ToPlayer.Size();
+
+	// Don't pull if already very close
+	if (DistanceToPlayer < 50.0f)
+	{
+		return;
+	}
+
+	// Calculate pull movement
+	FVector PullDirection = ToPlayer.GetSafeNormal();
+	float PullDistance = MeleeAttackPullSpeed * DeltaTime;
+
+	// Don't overshoot the player
+	PullDistance = FMath::Min(PullDistance, DistanceToPlayer - 50.0f);
+
+	FVector NewLocation = BossLocation + PullDirection * PullDistance;
+	NewLocation.Z = BossLocation.Z; // Keep same height
+
+	// Move with sweep to avoid going through walls
+	SetActorLocation(NewLocation, true);
+
+	// Face the player during pull
+	if (!PullDirection.IsNearlyZero())
+	{
+		FRotator NewRotation = PullDirection.Rotation();
+		NewRotation.Pitch = 0.0f;
+		NewRotation.Roll = 0.0f;
+		SetActorRotation(NewRotation);
+	}
+}
+
 // ==================== Aerial Phase ====================
 
 void ABossCharacter::StartHovering()
 {
-	UE_LOG(LogTemp, Error, TEXT("[BOSS] StartHovering() called! CurrentPhase=%d"), (int)CurrentPhase);
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StartHovering() called! CurrentPhase=%d"), (int)CurrentPhase);
 
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
@@ -650,22 +817,72 @@ void ABossCharacter::StartHovering()
 		FVector HoverLocation = CurrentLocation;
 		HoverLocation.Z += AerialHoverHeight;
 
+		// Calculate speed based on height and take off duration
+		float TakeOffSpeed = AerialHoverHeight / FMath::Max(TakeOffDuration, 0.1f);
+		FlyingMovement->FlySpeed = TakeOffSpeed;
 		FlyingMovement->FlyToLocation(HoverLocation);
+
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Taking off: Z %.1f -> %.1f (speed=%.1f)"),
+			CurrentLocation.Z, HoverLocation.Z, TakeOffSpeed);
 	}
 }
 
 void ABossCharacter::StopHovering()
 {
-	if (FlyingMovement)
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StopHovering() called! Current Z=%.1f"), GetActorLocation().Z);
+
+	// Find ground position with line trace
+	FVector CurrentLocation = GetActorLocation();
+	FVector TraceStart = CurrentLocation;
+	FVector TraceEnd = CurrentLocation - FVector(0.0f, 0.0f, 5000.0f); // Trace down 50m
+
+	FHitResult HitResult;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	bool bHitGround = GetWorld()->LineTraceSingleByChannel(
+		HitResult,
+		TraceStart,
+		TraceEnd,
+		ECC_Visibility,
+		QueryParams
+	);
+
+	if (bHitGround)
 	{
-		FlyingMovement->StopMovement();
+		// Get capsule half height to place feet on ground
+		float CapsuleHalfHeight = 0.0f;
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+		{
+			CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+		}
+
+		FVector GroundLocation = HitResult.Location + FVector(0.0f, 0.0f, CapsuleHalfHeight);
+
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landing to ground: Z %.1f -> %.1f"), CurrentLocation.Z, GroundLocation.Z);
+
+		// Use FlyToLocation for smooth landing
+		if (FlyingMovement)
+		{
+			// Calculate speed based on distance and landing duration
+			float Distance = FVector::Dist(CurrentLocation, GroundLocation);
+			float LandingSpeed = Distance / FMath::Max(LandingDuration, 0.1f);
+			FlyingMovement->FlySpeed = LandingSpeed;
+			FlyingMovement->FlyToLocation(GroundLocation);
+		}
+		else
+		{
+			// Fallback: teleport if no flying movement
+			SetActorLocation(GroundLocation);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BOSS] StopHovering: Could not find ground!"));
 	}
 
-	// Return to walking
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		MovementComp->SetMovementMode(MOVE_Walking);
-	}
+	// Note: Movement mode will be set to Walking in OnPhaseTransitionComplete
+	// after the landing animation/movement is done
 }
 
 void ABossCharacter::AerialStrafe(const FVector& Direction)
@@ -682,7 +899,7 @@ void ABossCharacter::AerialStrafe(const FVector& Direction)
 
 bool ABossCharacter::PerformAerialDash()
 {
-	if (!FlyingMovement || CurrentPhase != EBossPhase::Aerial)
+	if (!FlyingMovement || CurrentPhase != EBossPhase::Aerial || bIsTransitioning)
 	{
 		return false;
 	}
@@ -725,11 +942,8 @@ void ABossCharacter::RegisterParry()
 {
 	CurrentParryCount++;
 
-	// Change polarity when parried (so returning projectile hits us)
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->ToggleChargeSign();
-	}
+	UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] RegisterParry: ParryCount=%d/%d"),
+		CurrentParryCount, ParriesBeforeGroundPhase);
 
 	// Perform evasive dash after parry
 	if (bDashAfterParry)
@@ -742,6 +956,34 @@ void ABossCharacter::RegisterParry()
 	{
 		SetPhase(EBossPhase::Ground);
 	}
+}
+
+void ABossCharacter::OnProjectileParried(ABossProjectile* Projectile)
+{
+	if (!Projectile)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] OnProjectileParried called!"));
+
+	// Change boss polarity to OPPOSITE of projectile
+	// This ensures the projectile is ATTRACTED to boss (opposite charges attract)
+	if (EMFVelocityModifier)
+	{
+		float ProjectileCharge = Projectile->GetProjectileCharge();
+		float BossCharge = EMFVelocityModifier->GetCharge();
+
+		// If same sign (would repel), toggle to opposite
+		if ((ProjectileCharge * BossCharge) > 0.0f)
+		{
+			EMFVelocityModifier->ToggleChargeSign();
+			UE_LOG(LogTemp, Log, TEXT("[BossCharacter] Toggled polarity to attract parried projectile"));
+		}
+	}
+
+	// Register the parry (increments counter, does dash, checks phase transition)
+	RegisterParry();
 }
 
 // ==================== Finisher Phase ====================
@@ -826,27 +1068,61 @@ void ABossCharacter::SetTarget(AActor* NewTarget)
 
 void ABossCharacter::FireEMFProjectile(AActor* Target)
 {
-	if (!Target)
+	// Cannot shoot while transitioning between phases
+	if (bIsTransitioning)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] FireEMFProjectile: Cannot shoot while transitioning"));
 		return;
 	}
 
-	// Use inherited ShooterNPC shooting through weapon
-	// This will fire the weapon's configured projectile (should be EMFProjectile)
-	StartShooting(Target, true);
-
-	// The projectile tracking is done via TrackProjectile() which should be called
-	// after the weapon fires. For now, we rely on weapon's OnShotFired delegate
-	// or the weapon can call TrackProjectile directly.
-
-	// Record target's polarity at time of shot for parry detection
-	if (Target)
+	if (!Target)
 	{
-		UEMFVelocityModifier* TargetEMF = Target->FindComponentByClass<UEMFVelocityModifier>();
-		if (TargetEMF)
+		UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] FireEMFProjectile: No target"));
+		return;
+	}
+
+	if (!BossProjectileClass)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BossCharacter] FireEMFProjectile: BossProjectileClass not set!"));
+		return;
+	}
+
+	// Calculate spawn transform - from boss towards target
+	FVector MuzzleLocation = GetActorLocation() + GetActorForwardVector() * 100.0f + FVector(0, 0, 50.0f);
+	FVector DirectionToTarget = (Target->GetActorLocation() - MuzzleLocation).GetSafeNormal();
+	FRotator SpawnRotation = DirectionToTarget.Rotation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = this;
+
+	// Spawn BossProjectile
+	ABossProjectile* Projectile = GetWorld()->SpawnActor<ABossProjectile>(
+		BossProjectileClass,
+		MuzzleLocation,
+		SpawnRotation,
+		SpawnParams
+	);
+
+	if (Projectile)
+	{
+		// Initialize for boss - sets opposite charge to player, stores references
+		Projectile->InitializeForBoss(this, Target);
+
+		// Set projectile velocity
+		UProjectileMovementComponent* ProjMovement = Projectile->FindComponentByClass<UProjectileMovementComponent>();
+		if (ProjMovement)
 		{
-			// Store for later comparison (will be associated with projectile in TrackProjectile)
+			ProjMovement->Velocity = DirectionToTarget * ProjectileSpeed;
+			ProjMovement->InitialSpeed = ProjectileSpeed;
+			ProjMovement->MaxSpeed = ProjectileSpeed * 2.0f;
 		}
+
+		// Track for legacy parry detection (can be removed later)
+		TrackProjectile(Projectile);
+
+		UE_LOG(LogTemp, Log, TEXT("[BossCharacter] Fired BossProjectile at %s"), *Target->GetName());
 	}
 }
 

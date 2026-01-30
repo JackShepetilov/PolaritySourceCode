@@ -102,6 +102,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
 	bool bHitscanDamageOwner = false;
 
+	/** Damage multipliers based on target actor tags. Multiple matching tags multiply together. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
+	TMap<FName, float> TagDamageMultipliers;
+
 	// ==================== Heat System ====================
 
 	/** Enable heat system - weapon heats up when firing, damage decreases with heat */
@@ -465,6 +469,9 @@ protected:
 	bool IsMetal(const FHitResult& Hit) const;
 	FVector CalculateReflection(const FVector& Direction, const FVector& Normal) const;
 	void ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius);
+
+	/** Calculate damage multiplier based on target's tags */
+	float GetTagDamageMultiplier(AActor* Target) const;
 
 	// ==================== Charge-Based Firing ====================
 

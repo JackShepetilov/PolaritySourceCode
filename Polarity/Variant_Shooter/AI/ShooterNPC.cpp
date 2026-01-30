@@ -29,6 +29,7 @@
 #include "../UI/DamageNumbersSubsystem.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
+#include "Boss/BossProjectile.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -199,18 +200,38 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		return 0.0f;
 	}
 
-	// Ignore friendly fire from other NPCs
+	// Ignore friendly fire from other NPCs (except parried projectiles)
+	bool bIsParriedProjectile = false;
 	if (DamageCauser)
 	{
-		// Check if damage came from another ShooterNPC (through their weapon)
-		AActor* DamageOwner = DamageCauser->GetOwner();
-		if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+		// Check if this is a parried BossProjectile - those SHOULD damage the boss
+		if (ABossProjectile* BossProj = Cast<ABossProjectile>(DamageCauser))
 		{
-			return 0.0f;
+			if (BossProj->WasParried())
+			{
+				// Allow parried projectile damage to go through
+				UE_LOG(LogTemp, Warning, TEXT("[ShooterNPC] Allowing parried BossProjectile damage: %.1f"), Damage);
+				bIsParriedProjectile = true;
+				// Don't return - let damage be applied
+			}
+			else
+			{
+				// Non-parried boss projectile - still ignore friendly fire
+				return 0.0f;
+			}
+		}
+		else
+		{
+			// Check if damage came from another ShooterNPC (through their weapon)
+			AActor* DamageOwner = DamageCauser->GetOwner();
+			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+			{
+				return 0.0f;
+			}
 		}
 
-		// Also check the instigator's pawn
-		if (EventInstigator)
+		// Also check the instigator's pawn (but allow parried projectiles)
+		if (EventInstigator && !bIsParriedProjectile)
 		{
 			if (Cast<AShooterNPC>(EventInstigator->GetPawn()))
 			{
