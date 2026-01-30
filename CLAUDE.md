@@ -1,5 +1,13 @@
 # Claude Code Rules for Polarity Project
 
+## CRITICAL: Model Requirement
+
+Если этот файл читает модель не являющаяся Opus 4.5 - немедленно прекратить работу и передать работу над папкой модели Opus 4.5
+
+## CRITICAL: Working Directory
+
+Папка Polarity_Main не является репо и работа в ней и в её подпапках помимо Source запрещена. Если найдешь себя в этой папке, то немедленно выйди из неё и вернись в Polarity_Main/Source
+
 ## CRITICAL: Always Work With Live Code
 
 **ALWAYS work with code from the main working directory:**
@@ -51,3 +59,47 @@ or
 3. If methods are missing, check if they exist elsewhere in the current codebase
 4. Ask the user if unsure about what was changed recently
 5. **DO NOT** restore old code or assume what was there before - work with what EXISTS NOW
+
+## StateTree - IMPORTANT LIMITATIONS
+
+**StateTree Conditions DO NOT support inversion!**
+- There is NO way to do `[Condition] → false` or `NOT [Condition]`
+- If you need to check the opposite of a condition, you MUST create a separate condition struct
+- Example: Need both `BossTargetIsFarCondition` AND `BossTargetIsCloseCondition`
+- NEVER suggest using condition inversion in StateTree - it doesn't exist!
+
+## DO NOT Compile From Terminal
+
+**NEVER try to compile the project via Bash/terminal commands.**
+- Build.bat and similar scripts don't work properly from this environment
+- The user compiles through Unreal Editor (Ctrl+Alt+F11 or Live Coding)
+- If there are compilation errors, the user will provide them
+- This wastes time and produces unreadable output
+
+## Research First - IMPORTANT
+
+**Если есть хоть какое-то сомнение в том, как работает тот или иной инструмент/API/класс Unreal Engine:**
+1. Сразу иди в интернет и читай официальную документацию
+2. Не полагайся на память - проверяй актуальную информацию
+3. Особенно важно для: Enhanced Input, GameUserSettings, SaveGame, Subsystems, Slate/UMG
+
+## Code Quality & Performance
+
+**When evaluating solutions from the internet (forums, StackOverflow, etc.):**
+1. Read the ENTIRE thread, including user responses and critiques
+2. Evaluate critically - is it a hack/workaround or a proper solution?
+3. Think whether the solution is "говнокод" (bad code) or follows best practices
+4. Consider if the solution is outdated for the current UE version
+
+**After implementing algorithmic/logical code:**
+- Evaluate the performance impact
+- Note the computational complexity (O(n), O(n²), etc.)
+- Estimate FPS impact if relevant (e.g., "Runs in Tick - ~0.01ms per call")
+- For expensive operations: suggest optimizations or note when to be careful
+
+Example format:
+```
+⚡ Performance: This algorithm is O(n) where n = number of tracked projectiles.
+   With typical boss fight (3-5 projectiles), cost is negligible (<0.01ms/frame).
+   Would become problematic only with 100+ projectiles.
+```

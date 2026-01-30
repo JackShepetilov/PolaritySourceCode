@@ -6,6 +6,8 @@
 #include "Blueprint/UserWidget.h"
 #include "ShooterPauseMenuUI.generated.h"
 
+class UShooterOptionsMenuUI;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRestartFromCheckpointRequested);
 
 /**
@@ -40,6 +42,10 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|PauseMenu", meta = (DisplayName = "OnOpenSettings"))
 	void BP_OnOpenSettings();
 
+	/** Called when returning from settings menu */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|PauseMenu", meta = (DisplayName = "OnSettingsClosed"))
+	void BP_OnSettingsClosed();
+
 	// ==================== Menu Actions ====================
 
 	/** Resume game - hides menu and unpauses */
@@ -57,4 +63,22 @@ public:
 	/** Quit to main menu */
 	UFUNCTION(BlueprintCallable, Category = "Shooter|PauseMenu")
 	void QuitToMainMenu();
+
+	/** Check if options menu is currently open */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Shooter|PauseMenu")
+	bool IsOptionsMenuOpen() const;
+
+	/** Close options menu and return to pause menu */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|PauseMenu")
+	void CloseOptionsMenu();
+
+protected:
+
+	/** Options menu widget class to spawn */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|PauseMenu|Settings")
+	TSubclassOf<UShooterOptionsMenuUI> OptionsMenuWidgetClass;
+
+	/** Spawned options menu widget */
+	UPROPERTY(BlueprintReadOnly, Category = "Shooter|PauseMenu|Settings")
+	TObjectPtr<UShooterOptionsMenuUI> OptionsMenuWidget;
 };

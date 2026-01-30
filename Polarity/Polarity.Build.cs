@@ -27,7 +27,7 @@ public class Polarity : ModuleRules
             "IKRig"
         });
 
-        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI" });
 
         PublicIncludePaths.AddRange(new string[] {
             "Polarity",
