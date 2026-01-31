@@ -34,6 +34,49 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate, float, Char
 // Extended charge delegate: TotalCharge, StableCharge, UnstableCharge, MaxStable, MaxUnstable, Polarity
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, TotalCharge, float, StableCharge, float, UnstableCharge, float, MaxStableCharge, float, MaxUnstableCharge, uint8, Polarity);
 
+// Boss Finisher delegates
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherEnded);
+
+/**
+ * Settings for Boss Finisher cinematic attack
+ * All times are in seconds, distances in cm
+ */
+USTRUCT(BlueprintType)
+struct FBossFinisherSettings
+{
+	GENERATED_BODY()
+
+	/** Target point in world coordinates (set from Level BP) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target")
+	FVector TargetPoint = FVector::ZeroVector;
+
+	/** Total time to travel from current position to target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.5", ClampMax = "5.0"))
+	float TotalTravelTime = 2.0f;
+
+	/** Time before arrival to straighten trajectory (switch from curve to linear) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float StraightenTime = 0.5f;
+
+	/** Time before arrival to start melee animation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float AnimationStartTime = 0.3f;
+
+	/** Time to hang in the air after reaching target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float HangTime = 0.5f;
+
+	/** Approach offset relative to target - defines "from which side" to approach
+	 *  Example: (500, 0, 200) means approach from 500cm in front and 200cm above target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory")
+	FVector ApproachOffset = FVector(500.0f, 0.0f, 200.0f);
+
+	/** Speed when transitioning to linear movement (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "500", ClampMax = "5000"))
+	float ApproachSpeed = 1500.0f;
+};
+
 /**
  *  A player controllable first person shooter character
  *  Manages a weapon inventory through the IShooterWeaponHolder interface
@@ -837,4 +880,88 @@ protected:
 
 	/** Called from the respawn timer to destroy this character and force the PC to respawn */
 	void OnRespawn();
+
+	// ==================== Boss Finisher System ====================
+public:
+	/** Flag indicating boss finisher mode is active - set from Level BP */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss Finisher")
+	bool bIsOnBossFinisher = false;
+
+	/** Settings for the boss finisher - configure from Level BP */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss Finisher")
+	FBossFinisherSettings BossFinisherSettings;
+
+	/** Called when boss finisher starts */
+	UPROPERTY(BlueprintAssignable, Category = "Boss Finisher")
+	FOnBossFinisherStarted OnBossFinisherStarted;
+
+	/** Called when boss finisher ends */
+	UPROPERTY(BlueprintAssignable, Category = "Boss Finisher")
+	FOnBossFinisherEnded OnBossFinisherEnded;
+
+	/**
+	 * Start the boss finisher sequence.
+	 * Call this from Level BP after setting bIsOnBossFinisher and BossFinisherSettings.
+	 * Triggered by melee input when bIsOnBossFinisher is true.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Boss Finisher")
+	void StartBossFinisher();
+
+	/**
+	 * Abort the boss finisher and return to normal state.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Boss Finisher")
+	void StopBossFinisher();
+
+	/** Check if boss finisher is currently executing */
+	UFUNCTION(BlueprintPure, Category = "Boss Finisher")
+	bool IsBossFinisherActive() const { return bBossFinisherActive; }
+
+protected:
+	// ==================== Boss Finisher State ====================
+
+	/** True while finisher sequence is executing */
+	bool bBossFinisherActive = false;
+
+	/** Current phase of boss finisher */
+	enum class EBossFinisherPhase : uint8
+	{
+		None,
+		CurveMovement,		// Moving along Bezier curve
+		LinearMovement,		// Moving in straight line to target
+		Animation,			// Playing attack animation while moving
+		Hanging,			// Suspended at target point
+		Falling				// Falling down with gravity
+	};
+	EBossFinisherPhase BossFinisherPhase = EBossFinisherPhase::None;
+
+	/** Time elapsed since finisher started */
+	float BossFinisherElapsedTime = 0.0f;
+
+	/** Player position when finisher started */
+	FVector BossFinisherStartPosition = FVector::ZeroVector;
+
+	/** Bezier curve control points (P0=Start, P1, P2, P3=Target) */
+	FVector BezierP0, BezierP1, BezierP2, BezierP3;
+
+	/** Position when linear movement phase started */
+	FVector LinearStartPosition = FVector::ZeroVector;
+
+	/** Time when linear phase started */
+	float LinearStartTime = 0.0f;
+
+	/** Update boss finisher movement and state */
+	void UpdateBossFinisher(float DeltaTime);
+
+	/** Calculate position on cubic Bezier curve at time t (0-1) */
+	FVector EvaluateBezierCurve(float T) const;
+
+	/** Setup Bezier control points based on start position and settings */
+	void SetupBezierCurve();
+
+	/** Start the melee animation for boss finisher (uses Air Attack settings) */
+	void StartBossFinisherAnimation();
+
+	/** End boss finisher and restore normal state */
+	void EndBossFinisher();
 };

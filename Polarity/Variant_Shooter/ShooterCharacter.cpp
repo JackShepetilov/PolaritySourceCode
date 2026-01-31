@@ -362,6 +362,19 @@ void AShooterCharacter::DoMeleeAttack()
 		return;
 	}
 
+	// Check for boss finisher mode
+	if (bIsOnBossFinisher && !bBossFinisherActive)
+	{
+		StartBossFinisher();
+		return;
+	}
+
+	// Don't allow normal melee during boss finisher
+	if (bBossFinisherActive)
+	{
+		return;
+	}
+
 	if (MeleeAttackComponent)
 	{
 		// Stop firing if we're shooting
@@ -377,6 +390,13 @@ void AShooterCharacter::DoMeleeAttack()
 void AShooterCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Boss finisher has priority over everything
+	if (bBossFinisherActive)
+	{
+		UpdateBossFinisher(DeltaTime);
+		return; // Skip normal updates during finisher
+	}
 
 	UpdateADS(DeltaTime);
 	UpdateRegeneration(DeltaTime);
@@ -1784,4 +1804,305 @@ void AShooterCharacter::StopAirDashTrailVFX()
 		ActiveAirDashTrailComponent->Deactivate();
 		ActiveAirDashTrailComponent = nullptr;
 	}
+}
+
+// ==================== Boss Finisher Implementation ====================
+
+void AShooterCharacter::StartBossFinisher()
+{
+	if (bBossFinisherActive)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Starting finisher sequence"));
+
+	bBossFinisherActive = true;
+	BossFinisherPhase = EBossFinisherPhase::CurveMovement;
+	BossFinisherElapsedTime = 0.0f;
+	BossFinisherStartPosition = GetActorLocation();
+
+	// Setup Bezier curve
+	SetupBezierCurve();
+
+	// Stop any current weapon firing
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StopFiring();
+	}
+
+	// Disable gravity and movement input
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->GravityScale = 0.0f;
+		Movement->Velocity = FVector::ZeroVector;
+		Movement->SetMovementMode(MOVE_Flying);
+	}
+
+	// Disable player input (movement)
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		// We don't disable input completely - we still want camera control during most phases
+		// But movement is handled by the finisher system
+	}
+
+	// Broadcast start event
+	OnBossFinisherStarted.Broadcast();
+}
+
+void AShooterCharacter::StopBossFinisher()
+{
+	if (!bBossFinisherActive)
+	{
+		return;
+	}
+
+	EndBossFinisher();
+}
+
+void AShooterCharacter::SetupBezierCurve()
+{
+	// P0 = Start position (player current location)
+	BezierP0 = BossFinisherStartPosition;
+
+	// P3 = Target position
+	BezierP3 = BossFinisherSettings.TargetPoint;
+
+	// Calculate approach point (where the "straight line" phase begins)
+	// ApproachOffset is relative to target - we want player to come FROM this direction
+	FVector ApproachPoint = BezierP3 + BossFinisherSettings.ApproachOffset;
+
+	// P1 = Control point near start - creates initial curve away from direct path
+	// Place it roughly 1/3 of the way, but offset to create the curve shape
+	FVector StartToApproach = ApproachPoint - BezierP0;
+	FVector StartToTarget = BezierP3 - BezierP0;
+
+	// P1 creates the "swing out" at the beginning
+	// Cross product gives us perpendicular direction for the curve
+	FVector CurveDirection = FVector::CrossProduct(StartToTarget.GetSafeNormal(), FVector::UpVector);
+	if (CurveDirection.IsNearlyZero())
+	{
+		CurveDirection = FVector::RightVector;
+	}
+	CurveDirection.Normalize();
+
+	// Add some height and lateral offset for dramatic curve
+	BezierP1 = BezierP0 + StartToTarget * 0.33f + CurveDirection * StartToTarget.Size() * 0.3f + FVector(0, 0, 200.0f);
+
+	// P2 = Control point near approach point - creates the "diving in" feel
+	// This should be near the approach point but pulled toward P3
+	BezierP2 = ApproachPoint + (BezierP3 - ApproachPoint) * 0.3f;
+
+	UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Bezier curve setup - P0: %s, P1: %s, P2: %s, P3: %s"),
+		*BezierP0.ToString(), *BezierP1.ToString(), *BezierP2.ToString(), *BezierP3.ToString());
+}
+
+FVector AShooterCharacter::EvaluateBezierCurve(float T) const
+{
+	// Cubic Bezier: B(t) = (1-t)^3*P0 + 3*(1-t)^2*t*P1 + 3*(1-t)*t^2*P2 + t^3*P3
+	float OneMinusT = 1.0f - T;
+	float OneMinusT2 = OneMinusT * OneMinusT;
+	float OneMinusT3 = OneMinusT2 * OneMinusT;
+	float T2 = T * T;
+	float T3 = T2 * T;
+
+	return OneMinusT3 * BezierP0 +
+		   3.0f * OneMinusT2 * T * BezierP1 +
+		   3.0f * OneMinusT * T2 * BezierP2 +
+		   T3 * BezierP3;
+}
+
+void AShooterCharacter::UpdateBossFinisher(float DeltaTime)
+{
+	BossFinisherElapsedTime += DeltaTime;
+
+	const float TotalTime = BossFinisherSettings.TotalTravelTime;
+	const float StraightenTime = BossFinisherSettings.StraightenTime;
+	const float AnimStartTime = BossFinisherSettings.AnimationStartTime;
+	const float HangTime = BossFinisherSettings.HangTime;
+
+	// Calculate time remaining until reaching target
+	float TimeRemaining = TotalTime - BossFinisherElapsedTime;
+
+	// Always focus camera on target point during finisher
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		FVector ToTarget = BossFinisherSettings.TargetPoint - GetActorLocation();
+		FRotator TargetRotation = ToTarget.Rotation();
+		FRotator CurrentRotation = PC->GetControlRotation();
+
+		// Smooth interpolation to target
+		FRotator NewRotation = FMath::RInterpTo(CurrentRotation, TargetRotation, DeltaTime, 10.0f);
+		PC->SetControlRotation(NewRotation);
+	}
+
+	switch (BossFinisherPhase)
+	{
+	case EBossFinisherPhase::CurveMovement:
+		{
+			// Check if we should transition to linear movement
+			if (TimeRemaining <= StraightenTime)
+			{
+				BossFinisherPhase = EBossFinisherPhase::LinearMovement;
+				LinearStartPosition = GetActorLocation();
+				LinearStartTime = BossFinisherElapsedTime;
+				UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Transitioning to LinearMovement"));
+				break;
+			}
+
+			// Calculate T parameter for Bezier (0 to 1 during curve phase)
+			// Curve phase runs from 0 to (TotalTime - StraightenTime)
+			float CurvePhaseTime = TotalTime - StraightenTime;
+			float T = FMath::Clamp(BossFinisherElapsedTime / CurvePhaseTime, 0.0f, 1.0f);
+
+			FVector NewPosition = EvaluateBezierCurve(T);
+			SetActorLocation(NewPosition);
+
+			// Rotate character to face movement direction
+			FVector Velocity = EvaluateBezierCurve(T + 0.01f) - NewPosition;
+			if (!Velocity.IsNearlyZero())
+			{
+				SetActorRotation(FRotator(0, Velocity.Rotation().Yaw, 0));
+			}
+		}
+		break;
+
+	case EBossFinisherPhase::LinearMovement:
+		{
+			// Check if we should start animation
+			if (TimeRemaining <= AnimStartTime && BossFinisherPhase != EBossFinisherPhase::Animation)
+			{
+				BossFinisherPhase = EBossFinisherPhase::Animation;
+				StartBossFinisherAnimation();
+				UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Starting animation phase"));
+				// Fall through to animation phase
+			}
+			else if (TimeRemaining <= 0)
+			{
+				// Reached target - start hanging
+				BossFinisherPhase = EBossFinisherPhase::Hanging;
+				BossFinisherElapsedTime = 0.0f; // Reset for hang timer
+				SetActorLocation(BossFinisherSettings.TargetPoint);
+				UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Reached target, starting hang phase"));
+				break;
+			}
+			else
+			{
+				// Linear interpolation to target
+				float LinearPhaseTime = StraightenTime;
+				float LinearElapsed = BossFinisherElapsedTime - LinearStartTime;
+				float Alpha = FMath::Clamp(LinearElapsed / LinearPhaseTime, 0.0f, 1.0f);
+
+				FVector NewPosition = FMath::Lerp(LinearStartPosition, BossFinisherSettings.TargetPoint, Alpha);
+				SetActorLocation(NewPosition);
+
+				// Face target
+				FVector ToTarget = BossFinisherSettings.TargetPoint - NewPosition;
+				if (!ToTarget.IsNearlyZero())
+				{
+					SetActorRotation(FRotator(0, ToTarget.Rotation().Yaw, 0));
+				}
+			}
+		}
+		break;
+
+	case EBossFinisherPhase::Animation:
+		{
+			// Continue moving to target while animating
+			if (TimeRemaining <= 0)
+			{
+				// Reached target - start hanging
+				BossFinisherPhase = EBossFinisherPhase::Hanging;
+				BossFinisherElapsedTime = 0.0f; // Reset for hang timer
+				SetActorLocation(BossFinisherSettings.TargetPoint);
+				UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Reached target during animation, starting hang phase"));
+			}
+			else
+			{
+				// Continue linear movement
+				float LinearPhaseTime = StraightenTime;
+				float LinearElapsed = BossFinisherElapsedTime - LinearStartTime;
+				float Alpha = FMath::Clamp(LinearElapsed / LinearPhaseTime, 0.0f, 1.0f);
+
+				FVector NewPosition = FMath::Lerp(LinearStartPosition, BossFinisherSettings.TargetPoint, Alpha);
+				SetActorLocation(NewPosition);
+			}
+		}
+		break;
+
+	case EBossFinisherPhase::Hanging:
+		{
+			// Stay at target point
+			SetActorLocation(BossFinisherSettings.TargetPoint);
+
+			if (BossFinisherElapsedTime >= HangTime)
+			{
+				BossFinisherPhase = EBossFinisherPhase::Falling;
+
+				// Re-enable gravity
+				if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+				{
+					Movement->GravityScale = 1.0f;
+					Movement->SetMovementMode(MOVE_Falling);
+				}
+
+				UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Hang complete, starting fall"));
+			}
+		}
+		break;
+
+	case EBossFinisherPhase::Falling:
+		{
+			// Check if landed
+			if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+			{
+				if (Movement->IsMovingOnGround())
+				{
+					EndBossFinisher();
+					UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Landed, finisher complete"));
+				}
+			}
+		}
+		break;
+
+	default:
+		break;
+	}
+}
+
+void AShooterCharacter::StartBossFinisherAnimation()
+{
+	// Use MeleeAttackComponent's air attack animation
+	if (MeleeAttackComponent)
+	{
+		// Trigger the air attack animation through melee component
+		// This will apply all the mesh offsets, hidden bones, etc. from AirborneAttack settings
+		MeleeAttackComponent->StartAttack();
+	}
+}
+
+void AShooterCharacter::EndBossFinisher()
+{
+	UE_LOG(LogTemp, Warning, TEXT("BossFinisher: Ending finisher sequence"));
+
+	bBossFinisherActive = false;
+	BossFinisherPhase = EBossFinisherPhase::None;
+	bIsOnBossFinisher = false; // Reset flag so it needs to be set again for next finisher
+
+	// Restore normal movement
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->GravityScale = 1.0f;
+		if (!Movement->IsMovingOnGround())
+		{
+			Movement->SetMovementMode(MOVE_Falling);
+		}
+		else
+		{
+			Movement->SetMovementMode(MOVE_Walking);
+		}
+	}
+
+	// Broadcast end event
+	OnBossFinisherEnded.Broadcast();
 }
