@@ -214,6 +214,42 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|VFX", meta = (ClampMin = "0.1"))
 	float FinisherVFXScale = 1.5f;
 
+	// ==================== Finisher Teleport Settings ====================
+
+	/** World position where boss teleports when entering finisher phase */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Teleport")
+	FVector FinisherTeleportPosition = FVector::ZeroVector;
+
+	/** VFX spawned at old position when teleporting (disappear effect) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Teleport")
+	TObjectPtr<UNiagaraSystem> TeleportDisappearVFX;
+
+	/** VFX spawned at new position when teleporting (appear effect) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Teleport")
+	TObjectPtr<UNiagaraSystem> TeleportAppearVFX;
+
+	// ==================== Finisher Knockback Settings ====================
+
+	/** Direction of knockback when hit by player melee (world space, normalized) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Knockback")
+	FVector FinisherKnockbackDirection = FVector(1.0f, 0.0f, 0.0f);
+
+	/** Distance boss travels during knockback (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Knockback", meta = (ClampMin = "100.0"))
+	float FinisherKnockbackDistance = 500.0f;
+
+	/** Time it takes to complete knockback (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Knockback", meta = (ClampMin = "0.1"))
+	float FinisherKnockbackDuration = 0.5f;
+
+	/** Knockback animation montage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Knockback")
+	TObjectPtr<UAnimMontage> FinisherKnockbackMontage;
+
+	/** VFX spawned when boss dies after knockback */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Death")
+	TObjectPtr<UNiagaraSystem> FinisherDeathVFX;
+
 	// ==================== Runtime State ====================
 
 	/** Counter for dash attacks in current ground phase */
@@ -233,6 +269,18 @@ protected:
 
 	/** True if boss is in finisher phase and invulnerable */
 	bool bIsInFinisherPhase = false;
+
+	/** True if boss is currently being knocked back in finisher phase */
+	bool bIsFinisherKnockback = false;
+
+	/** Start position of finisher knockback */
+	FVector FinisherKnockbackStartPos = FVector::ZeroVector;
+
+	/** End position of finisher knockback */
+	FVector FinisherKnockbackEndPos = FVector::ZeroVector;
+
+	/** Elapsed time in knockback */
+	float FinisherKnockbackElapsed = 0.0f;
 
 	/** True if boss is currently dashing */
 	bool bIsDashing = false;
@@ -459,6 +507,25 @@ public:
 	/** Returns true if boss is in finisher phase */
 	UFUNCTION(BlueprintPure, Category = "Boss|Finisher Phase")
 	bool IsInFinisherPhase() const { return bIsInFinisherPhase; }
+
+	/** Returns true if boss is currently in finisher knockback */
+	UFUNCTION(BlueprintPure, Category = "Boss|Finisher Phase")
+	bool IsInFinisherKnockback() const { return bIsFinisherKnockback; }
+
+protected:
+	/** Teleport boss to finisher position with VFX */
+	void TeleportToFinisherPosition();
+
+	/** Start finisher knockback sequence */
+	void StartFinisherKnockback();
+
+	/** Update finisher knockback movement */
+	void UpdateFinisherKnockback(float DeltaTime);
+
+	/** Called when knockback completes - triggers death */
+	void OnFinisherKnockbackComplete();
+
+public:
 
 	// ==================== Target Management ====================
 

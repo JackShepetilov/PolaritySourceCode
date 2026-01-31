@@ -58,6 +58,13 @@ void ABossCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Update finisher knockback if in progress
+	if (bIsFinisherKnockback)
+	{
+		UpdateFinisherKnockback(DeltaTime);
+		return; // Skip all other updates during knockback
+	}
+
 	// Update arc dash if in progress
 	if (bIsDashing)
 	{
@@ -1021,20 +1028,8 @@ void ABossCharacter::EnterFinisherPhase()
 	// Transition to finisher phase
 	ExecutePhaseTransition(EBossPhase::Finisher);
 
-	// If on ground, take off
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		MovementComp->SetMovementMode(MOVE_Flying);
-	}
-
-	// Fly to finisher position
-	if (FlyingMovement)
-	{
-		FVector FinisherPosition = GetActorLocation() + FinisherHoverOffset;
-		FinisherPosition.Z = GetActorLocation().Z + FinisherHoverHeight;
-
-		FlyingMovement->FlyToLocation(FinisherPosition);
-	}
+	// Teleport to finisher position
+	TeleportToFinisherPosition();
 
 	// Spawn vulnerability VFX
 	if (FinisherVulnerabilityVFX)
@@ -1055,21 +1050,162 @@ void ABossCharacter::EnterFinisherPhase()
 	OnFinisherReady.Broadcast();
 }
 
+void ABossCharacter::TeleportToFinisherPosition()
+{
+	FVector OldPosition = GetActorLocation();
+
+	// Spawn disappear VFX at old position
+	if (TeleportDisappearVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			TeleportDisappearVFX,
+			OldPosition,
+			GetActorRotation(),
+			FVector(1.0f),
+			true,
+			true
+		);
+	}
+
+	// Teleport to finisher position
+	SetActorLocation(FinisherTeleportPosition);
+
+	// Set flying mode
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		MovementComp->SetMovementMode(MOVE_Flying);
+		MovementComp->Velocity = FVector::ZeroVector;
+	}
+
+	// Stop flying movement
+	if (FlyingMovement)
+	{
+		FlyingMovement->StopFlying();
+	}
+
+	// Spawn appear VFX at new position
+	if (TeleportAppearVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			TeleportAppearVFX,
+			FinisherTeleportPosition,
+			GetActorRotation(),
+			FVector(1.0f),
+			true,
+			true
+		);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Teleported to finisher position: %s"), *FinisherTeleportPosition.ToString());
+}
+
 void ABossCharacter::ExecuteFinisher(AActor* Attacker)
 {
-	if (!bIsInFinisherPhase)
+	if (!bIsInFinisherPhase || bIsFinisherKnockback)
 	{
 		return;
 	}
 
-	// Boss is defeated
-	bIsInFinisherPhase = false;
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisher called, starting knockback"));
+
+	// Start knockback sequence instead of instant death
+	StartFinisherKnockback();
+}
+
+void ABossCharacter::StartFinisherKnockback()
+{
+	bIsFinisherKnockback = true;
+	bIsInFinisherPhase = false; // No longer in finisher phase
+
+	// Calculate knockback positions
+	FinisherKnockbackStartPos = GetActorLocation();
+	FVector NormalizedDirection = FinisherKnockbackDirection.GetSafeNormal();
+	FinisherKnockbackEndPos = FinisherKnockbackStartPos + NormalizedDirection * FinisherKnockbackDistance;
+	FinisherKnockbackElapsed = 0.0f;
+
+	// Play knockback animation
+	if (FinisherKnockbackMontage)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+			{
+				AnimInstance->Montage_Play(FinisherKnockbackMontage);
+			}
+		}
+	}
+
+	// Disable movement
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		MovementComp->DisableMovement();
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Knockback started: %s -> %s over %.2f seconds"),
+		*FinisherKnockbackStartPos.ToString(), *FinisherKnockbackEndPos.ToString(), FinisherKnockbackDuration);
+}
+
+void ABossCharacter::UpdateFinisherKnockback(float DeltaTime)
+{
+	FinisherKnockbackElapsed += DeltaTime;
+
+	float Alpha = FMath::Clamp(FinisherKnockbackElapsed / FinisherKnockbackDuration, 0.0f, 1.0f);
+
+	// Use EaseOut for knockback (fast start, slow at end)
+	float EasedAlpha = 1.0f - FMath::Pow(1.0f - Alpha, 2.0f);
+
+	FVector NewPosition = FMath::Lerp(FinisherKnockbackStartPos, FinisherKnockbackEndPos, EasedAlpha);
+	SetActorLocation(NewPosition);
+
+	if (Alpha >= 1.0f)
+	{
+		OnFinisherKnockbackComplete();
+	}
+}
+
+void ABossCharacter::OnFinisherKnockbackComplete()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Knockback complete, triggering death"));
+
+	bIsFinisherKnockback = false;
+
+	// Spawn death VFX
+	if (FinisherDeathVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			FinisherDeathVFX,
+			GetActorLocation(),
+			GetActorRotation(),
+			FVector(1.0f),
+			true,
+			true
+		);
+	}
+
+	// Enable ragdoll on mesh
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->SetSimulatePhysics(true);
+		MeshComp->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+
+		// Apply small impulse in knockback direction for dramatic effect
+		FVector Impulse = FinisherKnockbackDirection.GetSafeNormal() * 500.0f;
+		MeshComp->AddImpulse(Impulse, NAME_None, true);
+	}
+
+	// Disable capsule collision
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
 
 	// Broadcast defeat event (for cutscene trigger)
 	OnBossDefeated.Broadcast();
 
-	// Actual death will be handled by cutscene/game flow
-	// For now, just mark as dead
+	// Mark as dead
 	CurrentHP = 0.0f;
 	bIsDead = true;
 }
