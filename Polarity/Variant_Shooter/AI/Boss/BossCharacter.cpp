@@ -1071,17 +1071,11 @@ void ABossCharacter::TeleportToFinisherPosition()
 	// Teleport to finisher position
 	SetActorLocation(FinisherTeleportPosition);
 
-	// Set flying mode
+	// Set flying mode and stop velocity - boss hovers in place
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->SetMovementMode(MOVE_Flying);
 		MovementComp->Velocity = FVector::ZeroVector;
-	}
-
-	// Stop flying movement
-	if (FlyingMovement)
-	{
-		FlyingMovement->StopFlying();
 	}
 
 	// Spawn appear VFX at new position
