@@ -1960,13 +1960,17 @@ void AShooterCharacter::UpdateBossFinisher(float DeltaTime)
 			// Calculate T parameter for Bezier (0 to 1 during curve phase)
 			// Curve phase runs from 0 to (TotalTime - StraightenTime)
 			float CurvePhaseTime = TotalTime - StraightenTime;
-			float T = FMath::Clamp(BossFinisherElapsedTime / CurvePhaseTime, 0.0f, 1.0f);
+			float LinearT = FMath::Clamp(BossFinisherElapsedTime / CurvePhaseTime, 0.0f, 1.0f);
+
+			// Apply EaseIn (quadratic) - slow start, accelerating toward end
+			// T^2 gives nice acceleration curve
+			float T = LinearT * LinearT;
 
 			FVector NewPosition = EvaluateBezierCurve(T);
 			SetActorLocation(NewPosition);
 
 			// Rotate character to face movement direction
-			FVector Velocity = EvaluateBezierCurve(T + 0.01f) - NewPosition;
+			FVector Velocity = EvaluateBezierCurve(FMath::Min(T + 0.01f, 1.0f)) - NewPosition;
 			if (!Velocity.IsNearlyZero())
 			{
 				SetActorRotation(FRotator(0, Velocity.Rotation().Yaw, 0));
@@ -1995,10 +1999,13 @@ void AShooterCharacter::UpdateBossFinisher(float DeltaTime)
 			}
 			else
 			{
-				// Linear interpolation to target
+				// Linear interpolation to target with EaseIn for acceleration effect
 				float LinearPhaseTime = StraightenTime;
 				float LinearElapsed = BossFinisherElapsedTime - LinearStartTime;
-				float Alpha = FMath::Clamp(LinearElapsed / LinearPhaseTime, 0.0f, 1.0f);
+				float LinearAlpha = FMath::Clamp(LinearElapsed / LinearPhaseTime, 0.0f, 1.0f);
+
+				// EaseIn (quadratic) - continues the acceleration from curve phase
+				float Alpha = LinearAlpha * LinearAlpha;
 
 				FVector NewPosition = FMath::Lerp(LinearStartPosition, BossFinisherSettings.TargetPoint, Alpha);
 				SetActorLocation(NewPosition);
@@ -2026,10 +2033,13 @@ void AShooterCharacter::UpdateBossFinisher(float DeltaTime)
 			}
 			else
 			{
-				// Continue linear movement
+				// Continue linear movement with EaseIn acceleration
 				float LinearPhaseTime = StraightenTime;
 				float LinearElapsed = BossFinisherElapsedTime - LinearStartTime;
-				float Alpha = FMath::Clamp(LinearElapsed / LinearPhaseTime, 0.0f, 1.0f);
+				float LinearAlpha = FMath::Clamp(LinearElapsed / LinearPhaseTime, 0.0f, 1.0f);
+
+				// EaseIn (quadratic) - accelerates toward target
+				float Alpha = LinearAlpha * LinearAlpha;
 
 				FVector NewPosition = FMath::Lerp(LinearStartPosition, BossFinisherSettings.TargetPoint, Alpha);
 				SetActorLocation(NewPosition);
