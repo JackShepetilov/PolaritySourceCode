@@ -71,10 +71,6 @@ struct FBossFinisherSettings
 	 *  Example: (500, 0, 200) means approach from 500cm in front and 200cm above target */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory")
 	FVector ApproachOffset = FVector(500.0f, 0.0f, 200.0f);
-
-	/** Speed when transitioning to linear movement (cm/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "500", ClampMax = "5000"))
-	float ApproachSpeed = 1500.0f;
 };
 
 /**
