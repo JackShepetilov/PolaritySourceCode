@@ -1925,9 +1925,16 @@ void AShooterCharacter::UpdateBossFinisher(float DeltaTime)
 	float TimeRemaining = TotalTime - BossFinisherElapsedTime;
 
 	// Always focus camera on target point during finisher
+	// Add 150 unit offset along approach direction to prevent 180 flip when passing through target
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
-		FVector ToTarget = BossFinisherSettings.TargetPoint - GetActorLocation();
+		// Calculate camera focus point with offset
+		// Offset is 150 units from TargetPoint in the direction from ApproachOffset toward TargetPoint
+		FVector ApproachPoint = BossFinisherSettings.TargetPoint + BossFinisherSettings.ApproachOffset;
+		FVector ApproachDirection = (BossFinisherSettings.TargetPoint - ApproachPoint).GetSafeNormal();
+		FVector CameraFocusPoint = BossFinisherSettings.TargetPoint + ApproachDirection * 150.0f;
+
+		FVector ToTarget = CameraFocusPoint - GetActorLocation();
 		FRotator TargetRotation = ToTarget.Rotation();
 		FRotator CurrentRotation = PC->GetControlRotation();
 
@@ -2075,9 +2082,22 @@ void AShooterCharacter::StartBossFinisherAnimation()
 	// Use MeleeAttackComponent's air attack animation
 	if (MeleeAttackComponent)
 	{
+		// Temporarily set movement mode to Falling so MeleeAttackComponent
+		// uses AirborneAttack animation instead of Ground
+		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+		{
+			Movement->SetMovementMode(MOVE_Falling);
+		}
+
 		// Trigger the air attack animation through melee component
 		// This will apply all the mesh offsets, hidden bones, etc. from AirborneAttack settings
 		MeleeAttackComponent->StartAttack();
+
+		// Return to Flying for controlled movement
+		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+		{
+			Movement->SetMovementMode(MOVE_Flying);
+		}
 	}
 }
 
