@@ -790,3 +790,36 @@ struct POLARITY_API FStateTreeBossInFinisherCondition : public FStateTreeConditi
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
 #endif
 };
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Is On Ground (Walking)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossIsOnGroundInstanceData
+{
+	GENERATED_BODY()
+
+	/** Boss to check */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+};
+
+USTRUCT(DisplayName = "Boss Is On Ground", Category = "Boss")
+struct POLARITY_API FStateTreeBossIsOnGroundCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossIsOnGroundInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};

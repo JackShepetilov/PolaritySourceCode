@@ -452,6 +452,38 @@ protected:
 	/** Timer for low health warning sounds */
 	float LowHealthWarningTimer = 0.0f;
 
+	// ==================== VFX|PostProcess ====================
+
+	/** Post process material instance for low health effect (vignette, desaturation, etc.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
+	TObjectPtr<UMaterialInstanceDynamic> LowHealthPPMaterial;
+
+	/** Post process material instance for high speed effect (motion blur, chromatic aberration, etc.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
+	TObjectPtr<UMaterialInstanceDynamic> HighSpeedPPMaterial;
+
+	/** Parameter name for intensity in post process materials */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
+	FName PPIntensityParameterName = FName("Intensity");
+
+	/** Speed threshold at which high speed effect starts (units/sec) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess", meta = (ClampMin = "0.0"))
+	float HighSpeedThreshold = 1500.0f;
+
+	/** Speed at which high speed effect reaches maximum intensity (units/sec) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess", meta = (ClampMin = "0.0"))
+	float HighSpeedMaxThreshold = 3000.0f;
+
+	/** Interpolation speed for post process effects (higher = snappier) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess", meta = (ClampMin = "1.0", ClampMax = "20.0"))
+	float PPInterpSpeed = 5.0f;
+
+	/** Current low health PP intensity (internal) */
+	float CurrentLowHealthPPIntensity = 0.0f;
+
+	/** Current high speed PP intensity (internal) */
+	float CurrentHighSpeedPPIntensity = 0.0f;
+
 	// ==================== VFX|Movement ====================
 
 	/** Niagara system for air dash trail effect */
@@ -705,6 +737,9 @@ protected:
 
 	/** Update low health warning state and play warning sounds */
 	void UpdateLowHealthWarning(float DeltaTime);
+
+	/** Update post process effects based on health and speed */
+	void UpdatePostProcessEffects(float DeltaTime);
 
 	/** Spawn double jump VFX at character feet */
 	void SpawnDoubleJumpVFX();

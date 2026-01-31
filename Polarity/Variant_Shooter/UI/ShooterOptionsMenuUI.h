@@ -10,6 +10,8 @@ class UShooterGameSettings;
 class UShooterSettingsSubsystem;
 class UShooterKeyBindingsUI;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnOptionsMenuClosed);
+
 /**
  * Settings category for tab navigation.
  */
@@ -39,6 +41,12 @@ class POLARITY_API UShooterOptionsMenuUI : public UUserWidget
 	GENERATED_BODY()
 
 public:
+
+	// ==================== Delegates ====================
+
+	/** Broadcast when options menu is closed (Back button pressed) */
+	UPROPERTY(BlueprintAssignable, Category = "Settings")
+	FOnOptionsMenuClosed OnOptionsMenuClosed;
 
 	// ==================== Initialization ====================
 
@@ -351,4 +359,10 @@ protected:
 
 	/** Mark that a setting has been modified */
 	void MarkSettingModified(FName SettingName);
+
+private:
+
+	/** Called when key bindings menu closes itself */
+	UFUNCTION()
+	void OnKeyBindingsMenuClosedHandler();
 };

@@ -42,13 +42,18 @@ void UShooterPauseMenuUI::OpenSettings()
 		OptionsMenuWidget = CreateWidget<UShooterOptionsMenuUI>(GetOwningPlayer(), OptionsMenuWidgetClass);
 		if (OptionsMenuWidget)
 		{
-			OptionsMenuWidget->AddToViewport(100); // Above pause menu
+			OptionsMenuWidget->AddToViewport(100);
+			// Subscribe to close event so we know when to show pause menu again
+			OptionsMenuWidget->OnOptionsMenuClosed.AddDynamic(this, &UShooterPauseMenuUI::OnOptionsMenuClosedHandler);
 		}
 	}
 	else if (OptionsMenuWidget)
 	{
 		OptionsMenuWidget->SetVisibility(ESlateVisibility::Visible);
 	}
+
+	// Hide pause menu while options are open
+	SetVisibility(ESlateVisibility::Hidden);
 
 	// Broadcast event for Blueprint to handle any additional setup
 	BP_OnOpenSettings();
@@ -77,9 +82,24 @@ void UShooterPauseMenuUI::CloseOptionsMenu()
 {
 	if (OptionsMenuWidget)
 	{
+		OptionsMenuWidget->OnOptionsMenuClosed.RemoveDynamic(this, &UShooterPauseMenuUI::OnOptionsMenuClosedHandler);
 		OptionsMenuWidget->RemoveFromParent();
 		OptionsMenuWidget = nullptr;
 
+		// Show pause menu again
+		SetVisibility(ESlateVisibility::Visible);
+
 		BP_OnSettingsClosed();
 	}
+}
+
+void UShooterPauseMenuUI::OnOptionsMenuClosedHandler()
+{
+	// Options menu closed itself via Back button
+	OptionsMenuWidget = nullptr;
+
+	// Show pause menu again
+	SetVisibility(ESlateVisibility::Visible);
+
+	BP_OnSettingsClosed();
 }

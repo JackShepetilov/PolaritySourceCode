@@ -382,6 +382,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateRegeneration(DeltaTime);
 	UpdateLeftHandIK(DeltaTime);
 	UpdateLowHealthWarning(DeltaTime);
+	UpdatePostProcessEffects(DeltaTime);
 
 	// Update recoil component state
 	if (RecoilComponent)
@@ -1709,6 +1710,35 @@ void AShooterCharacter::UpdateLowHealthWarning(float DeltaTime)
 		// Reset low health state
 		bIsLowHealth = false;
 		LowHealthWarningTimer = 0.0f;
+	}
+}
+
+void AShooterCharacter::UpdatePostProcessEffects(float DeltaTime)
+{
+	// Calculate target intensities
+	const float HealthPercent = CurrentHP / MaxHP;
+	const float TargetLowHealthIntensity = (HealthPercent < LowHealthThreshold && HealthPercent > 0.0f)
+		? FMath::GetMappedRangeValueClamped(FVector2D(0.0f, LowHealthThreshold), FVector2D(1.0f, 0.0f), HealthPercent)
+		: 0.0f;
+
+	const float CurrentSpeed = GetVelocity().Size();
+	const float TargetHighSpeedIntensity = (CurrentSpeed > HighSpeedThreshold)
+		? FMath::GetMappedRangeValueClamped(FVector2D(HighSpeedThreshold, HighSpeedMaxThreshold), FVector2D(0.0f, 1.0f), CurrentSpeed)
+		: 0.0f;
+
+	// Interpolate current values
+	CurrentLowHealthPPIntensity = FMath::FInterpTo(CurrentLowHealthPPIntensity, TargetLowHealthIntensity, DeltaTime, PPInterpSpeed);
+	CurrentHighSpeedPPIntensity = FMath::FInterpTo(CurrentHighSpeedPPIntensity, TargetHighSpeedIntensity, DeltaTime, PPInterpSpeed);
+
+	// Apply to materials
+	if (LowHealthPPMaterial)
+	{
+		LowHealthPPMaterial->SetScalarParameterValue(PPIntensityParameterName, CurrentLowHealthPPIntensity);
+	}
+
+	if (HighSpeedPPMaterial)
+	{
+		HighSpeedPPMaterial->SetScalarParameterValue(PPIntensityParameterName, CurrentHighSpeedPPIntensity);
 	}
 }
 

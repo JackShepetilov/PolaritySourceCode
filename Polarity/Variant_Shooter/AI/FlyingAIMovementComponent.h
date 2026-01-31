@@ -109,6 +109,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flying|Dash")
 	float MaxDashDistance = 500.0f;
 
+	// ==================== Flying Mode Control ====================
+
+	/** If true, component will enforce MOVE_Flying every tick. Set to false when landing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flying|Movement")
+	bool bEnforceFlyingMode = true;
+
 	// ==================== Patrol Settings ====================
 
 	/** Radius for random patrol point generation (horizontal) */

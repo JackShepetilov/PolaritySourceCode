@@ -4,6 +4,7 @@
 #include "BossStateTreeTasks.h"
 #include "BossCharacter.h"
 #include "StateTreeExecutionContext.h"
+#include "GameFramework/CharacterMovementComponent.h"
 
 //////////////////////////////////////////////////////////////////
 // TASK: Boss Approach Dash
@@ -168,14 +169,21 @@ EStateTreeRunStatus FStateTreeBossStartHoveringTask::EnterState(FStateTreeExecut
 
 	if (!InstanceData.Boss)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[BossStartHovering] FAILED - Boss is NULL"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// StartHovering is called by SetPhase/ExecutePhaseTransition when phase changes to Aerial
-	// If we're already transitioning, just wait for it
-	// If not transitioning and already in Aerial phase, we're done
-	if (!InstanceData.Boss->IsTransitioning())
+	// If we're already in Aerial phase and not transitioning - succeed immediately
+	bool bIsAerialPhase = (InstanceData.Boss->GetCurrentPhase() == EBossPhase::Aerial);
+	bool bIsTransitioning = InstanceData.Boss->IsTransitioning();
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossStartHovering] EnterState: Phase=%s, IsTransitioning=%d"),
+		bIsAerialPhase ? TEXT("Aerial") : TEXT("Other"), bIsTransitioning);
+
+	if (!bIsTransitioning)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossStartHovering] Not transitioning - returning Succeeded immediately"));
 		return EStateTreeRunStatus::Succeeded;
 	}
 
@@ -218,18 +226,21 @@ EStateTreeRunStatus FStateTreeBossStopHoveringTask::EnterState(FStateTreeExecuti
 
 	if (!InstanceData.Boss)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[BossStopHovering] FAILED - Boss is NULL"));
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// StopHovering is called by SetPhase/ExecutePhaseTransition when phase changes to Ground
-	// If we're already transitioning, just wait for it
-	// If not transitioning and already in Ground phase, we're done
-	if (!InstanceData.Boss->IsTransitioning())
+	// If already on ground and not transitioning - succeed immediately (initial game start)
+	if (InstanceData.Boss->GetCurrentPhase() == EBossPhase::Ground && !InstanceData.Boss->IsTransitioning())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Already on ground - returning Succeeded"));
 		return EStateTreeRunStatus::Succeeded;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Waiting for landing to complete..."));
+	// Start landing - call SetPhase to Ground which triggers StopHovering and gravity
+	UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Starting landing sequence..."));
+	InstanceData.Boss->SetPhase(EBossPhase::Ground);
+
 	return EStateTreeRunStatus::Running;
 }
 
@@ -242,12 +253,13 @@ EStateTreeRunStatus FStateTreeBossStopHoveringTask::Tick(FStateTreeExecutionCont
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Wait for transition to complete
+	// Wait for transition to complete (boss landed)
 	if (InstanceData.Boss->IsTransitioning())
 	{
 		return EStateTreeRunStatus::Running;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Landing complete!"));
 	return EStateTreeRunStatus::Succeeded;
 }
 
@@ -436,8 +448,12 @@ EStateTreeRunStatus FStateTreeBossSetPhaseTask::EnterState(FStateTreeExecutionCo
 
 	if (!InstanceData.Boss)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[BossSetPhase] FAILED - Boss is NULL"));
 		return EStateTreeRunStatus::Failed;
 	}
+
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	UE_LOG(LogTemp, Warning, TEXT("[BossSetPhase] Setting phase to %s"), *PhaseNames[(int)InstanceData.NewPhase]);
 
 	InstanceData.Boss->SetPhase(InstanceData.NewPhase);
 	return EStateTreeRunStatus::Succeeded;
@@ -708,5 +724,34 @@ bool FStateTreeBossTargetIsCloseCondition::TestCondition(FStateTreeExecutionCont
 FText FStateTreeBossTargetIsCloseCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("Boss Target Is Close"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Is On Ground (Walking)
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeBossIsOnGroundCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss)
+	{
+		return false;
+	}
+
+	// Check if boss is on ground (walking mode, not flying/falling)
+	if (UCharacterMovementComponent* MovementComp = InstanceData.Boss->GetCharacterMovement())
+	{
+		return MovementComp->IsMovingOnGround();
+	}
+
+	return false;
+}
+
+#if WITH_EDITOR
+FText FStateTreeBossIsOnGroundCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Boss Is On Ground"));
 }
 #endif

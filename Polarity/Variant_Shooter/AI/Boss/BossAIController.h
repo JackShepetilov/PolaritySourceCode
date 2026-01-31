@@ -47,12 +47,20 @@ public:
 	// ==================== Ground Phase Commands ====================
 
 	/**
-	 * Start arc dash towards target
+	 * Start approach dash towards target (linear, to close distance)
 	 * @param Target - Actor to dash towards
 	 * @return True if dash started successfully
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Boss AI|Ground")
-	bool StartArcDash(AActor* Target);
+	bool StartApproachDash(AActor* Target);
+
+	/**
+	 * Start circle dash around target (arc movement at fixed radius)
+	 * @param Target - Actor to circle around
+	 * @return True if dash started successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Boss AI|Ground")
+	bool StartCircleDash(AActor* Target);
 
 	/**
 	 * Start melee attack against target

@@ -5,9 +5,15 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "InputCoreTypes.h"
+#include "PlayerMappableKeySettings.h"
 #include "ShooterKeyBindingsUI.generated.h"
 
-class UShooterGameSettings;
+class UInputMappingContext;
+class UInputAction;
+class UEnhancedInputLocalPlayerSubsystem;
+class UEnhancedInputUserSettings;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnKeyBindingsMenuClosed);
 
 /**
  * Display information for a single key binding row.
@@ -17,7 +23,11 @@ struct FKeyBindingDisplayInfo
 {
 	GENERATED_BODY()
 
-	/** Internal action name */
+	/** The Input Action asset */
+	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
+	TObjectPtr<UInputAction> InputAction;
+
+	/** Internal action name (from asset name) */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	FName ActionName;
 
@@ -25,7 +35,7 @@ struct FKeyBindingDisplayInfo
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	FText DisplayName;
 
-	/** Category for grouping (Movement, Combat, etc.) */
+	/** Category for grouping (from IMC name) */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	FText Category;
 
@@ -33,7 +43,7 @@ struct FKeyBindingDisplayInfo
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	FKey PrimaryKey;
 
-	/** Secondary key currently bound */
+	/** Secondary key currently bound (if any) */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	FKey SecondaryKey;
 
@@ -42,7 +52,8 @@ struct FKeyBindingDisplayInfo
 	bool bCanRemap;
 
 	FKeyBindingDisplayInfo()
-		: ActionName(NAME_None)
+		: InputAction(nullptr)
+		, ActionName(NAME_None)
 		, DisplayName(FText::GetEmpty())
 		, Category(FText::GetEmpty())
 		, PrimaryKey(EKeys::Invalid)
@@ -53,6 +64,7 @@ struct FKeyBindingDisplayInfo
 
 /**
  * Key Bindings UI widget for remapping controls.
+ * Dynamically reads Input Actions from Input Mapping Contexts.
  *
  * Blueprint should:
  * - Display a list of key bindings using GetAllKeyBindings()
@@ -65,6 +77,12 @@ class POLARITY_API UShooterKeyBindingsUI : public UUserWidget
 	GENERATED_BODY()
 
 public:
+
+	// ==================== Delegates ====================
+
+	/** Broadcast when key bindings menu is closed (Back button pressed) */
+	UPROPERTY(BlueprintAssignable, Category = "KeyBindings")
+	FOnKeyBindingsMenuClosed OnKeyBindingsMenuClosed;
 
 	// ==================== Initialization ====================
 
@@ -105,9 +123,9 @@ public:
 
 	// ==================== Key Binding Data ====================
 
-	/** Get all key bindings for display */
+	/** Get all key bindings for display (reads from IMCs) */
 	UFUNCTION(BlueprintCallable, Category = "KeyBindings")
-	TArray<FKeyBindingDisplayInfo> GetAllKeyBindings() const;
+	TArray<FKeyBindingDisplayInfo> GetAllKeyBindings();
 
 	/** Get bindings for a specific category */
 	UFUNCTION(BlueprintCallable, Category = "KeyBindings")
@@ -175,6 +193,10 @@ public:
 
 protected:
 
+	/** Input Mapping Contexts to scan for bindings (set in Blueprint or auto-detected from PlayerController) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "KeyBindings|Config")
+	TArray<TObjectPtr<UInputMappingContext>> InputMappingContexts;
+
 	/** Whether we're currently listening for a key press */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBindings")
 	bool bIsListeningForKey;
@@ -182,6 +204,10 @@ protected:
 	/** The action we're rebinding */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBindings")
 	FName ActionBeingRebound;
+
+	/** The Input Action we're rebinding */
+	UPROPERTY()
+	TObjectPtr<UInputAction> ActionBeingReboundPtr;
 
 	/** Whether we're rebinding the secondary slot */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBindings")
@@ -195,22 +221,47 @@ protected:
 	UPROPERTY()
 	FName ConflictingActionName;
 
-	/** Get game settings */
-	UShooterGameSettings* GetGameSettings() const;
-
-	/** Process a key press during listening mode */
-	void ProcessKeyPress(FKey PressedKey);
-
-	/** Build the list of key binding display info */
-	void BuildKeyBindingsList();
-
 	/** Cached list of key bindings for display */
 	UPROPERTY()
 	TArray<FKeyBindingDisplayInfo> CachedBindings;
 
-	/** Static mapping of action names to display info */
-	static TMap<FName, FKeyBindingDisplayInfo> ActionDisplayInfoMap;
+	/** Map from action name to Input Action pointer */
+	UPROPERTY()
+	TMap<FName, TObjectPtr<UInputAction>> ActionNameToInputAction;
 
-	/** Initialize the action display info map */
-	static void InitializeActionDisplayInfoMap();
+	/** Get Enhanced Input subsystem */
+	UEnhancedInputLocalPlayerSubsystem* GetEnhancedInputSubsystem() const;
+
+	/** Get Enhanced Input User Settings (for key remapping) */
+	UEnhancedInputUserSettings* GetEnhancedInputUserSettings() const;
+
+	/** Process a key press during listening mode */
+	void ProcessKeyPress(FKey PressedKey);
+
+	/** Build the list of key binding display info from IMCs */
+	void BuildKeyBindingsList();
+
+	/**
+	 * Apply a new key binding using UEnhancedInputUserSettings::MapPlayerKey
+	 * @param Action The Input Action to rebind
+	 * @param NewKey The new key to bind
+	 * @param bIsSecondary Whether this is the secondary slot
+	 * @return True if successful
+	 */
+	bool ApplyKeyBinding(const UInputAction* Action, FKey NewKey, bool bIsSecondary);
+
+	/** Update the cached binding after a successful change */
+	void UpdateCachedBinding(FName ActionName, FKey NewKey, bool bIsSecondary);
+
+	/** Find which action a key is bound to */
+	bool FindKeyConflict(FKey Key, FName ExcludeAction, FName& OutConflictingAction) const;
+
+	/** Get the mapping name for an Input Action (from PlayerMappableKeySettings) */
+	FName GetMappingNameForAction(const UInputAction* Action) const;
+
+	/** Get display name for an Input Action */
+	FText GetActionDisplayName(const UInputAction* Action) const;
+
+	/** Get category name from IMC */
+	FText GetCategoryFromIMC(const UInputMappingContext* IMC) const;
 };

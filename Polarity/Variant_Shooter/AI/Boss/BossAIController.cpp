@@ -33,14 +33,24 @@ void ABossAIController::OnUnPossess()
 
 // ==================== Ground Phase Commands ====================
 
-bool ABossAIController::StartArcDash(AActor* Target)
+bool ABossAIController::StartApproachDash(AActor* Target)
 {
 	if (!ControlledBoss)
 	{
 		return false;
 	}
 
-	return ControlledBoss->StartArcDash(Target);
+	return ControlledBoss->StartApproachDash(Target);
+}
+
+bool ABossAIController::StartCircleDash(AActor* Target)
+{
+	if (!ControlledBoss)
+	{
+		return false;
+	}
+
+	return ControlledBoss->StartCircleDash(Target);
 }
 
 void ABossAIController::StartMeleeAttack(AActor* Target)

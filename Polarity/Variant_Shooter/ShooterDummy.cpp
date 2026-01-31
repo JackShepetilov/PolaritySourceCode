@@ -163,7 +163,14 @@ void AShooterDummy::Die(AActor* Killer)
 	}
 
 	// Broadcast death event for Level Blueprint
+	UE_LOG(LogTemp, Warning, TEXT("ShooterDummy::Die - %s DIED! Killer: %s, HP was: %.1f, MaxHP: %.1f (bound: %s)"),
+		*GetName(),
+		Killer ? *Killer->GetName() : TEXT("null"),
+		CurrentHP,
+		MaxHP,
+		OnDummyDeath.IsBound() ? TEXT("YES") : TEXT("NO"));
 	OnDummyDeath.Broadcast(this, Killer);
+	UE_LOG(LogTemp, Log, TEXT("ShooterDummy::Die - Broadcast complete"));
 
 	// Schedule respawn if enabled
 	if (bRespawnAfterDeath && RespawnDelay > 0.0f)

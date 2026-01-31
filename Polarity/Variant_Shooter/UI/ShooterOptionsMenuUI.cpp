@@ -46,6 +46,7 @@ void UShooterOptionsMenuUI::SwitchCategory(ESettingsCategory NewCategory)
 void UShooterOptionsMenuUI::CloseMenu()
 {
 	// If there are unsaved changes, Blueprint should handle confirmation dialog
+	OnOptionsMenuClosed.Broadcast();
 	RemoveFromParent();
 }
 
@@ -59,13 +60,18 @@ void UShooterOptionsMenuUI::OpenKeyBindings()
 		KeyBindingsWidget = CreateWidget<UShooterKeyBindingsUI>(GetOwningPlayer(), KeyBindingsWidgetClass);
 		if (KeyBindingsWidget)
 		{
-			KeyBindingsWidget->AddToViewport(100); // Above options menu
+			KeyBindingsWidget->AddToViewport(100);
+			// Subscribe to close event so we know when to show options menu again
+			KeyBindingsWidget->OnKeyBindingsMenuClosed.AddDynamic(this, &UShooterOptionsMenuUI::OnKeyBindingsMenuClosedHandler);
 		}
 	}
 	else if (KeyBindingsWidget)
 	{
 		KeyBindingsWidget->SetVisibility(ESlateVisibility::Visible);
 	}
+
+	// Hide options menu while key bindings are open
+	SetVisibility(ESlateVisibility::Hidden);
 }
 
 // ==================== Settings Actions ====================
@@ -743,4 +749,13 @@ void UShooterOptionsMenuUI::MarkSettingModified(FName SettingName)
 {
 	bHasUnsavedChanges = true;
 	BP_OnSettingModified(SettingName);
+}
+
+void UShooterOptionsMenuUI::OnKeyBindingsMenuClosedHandler()
+{
+	// Key bindings menu closed itself via Back button
+	KeyBindingsWidget = nullptr;
+
+	// Show options menu again
+	SetVisibility(ESlateVisibility::Visible);
 }

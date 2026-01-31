@@ -8,7 +8,9 @@
       "WebFetch(domain:titanfall.fandom.com)",
       "WebFetch(domain:steamcommunity.com)",
       "WebFetch(domain:dev.epicgames.com)",
-      "WebFetch(domain:forums.unrealengine.com)"
+      "WebFetch(domain:forums.unrealengine.com)",
+      "Bash(dir \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\" /B)",
+      "Bash(test:*)"
     ]
   }
 }

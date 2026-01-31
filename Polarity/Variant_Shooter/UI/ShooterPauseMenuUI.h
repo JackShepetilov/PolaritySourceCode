@@ -81,4 +81,10 @@ protected:
 	/** Spawned options menu widget */
 	UPROPERTY(BlueprintReadOnly, Category = "Shooter|PauseMenu|Settings")
 	TObjectPtr<UShooterOptionsMenuUI> OptionsMenuWidget;
+
+private:
+
+	/** Called when options menu closes itself */
+	UFUNCTION()
+	void OnOptionsMenuClosedHandler();
 };

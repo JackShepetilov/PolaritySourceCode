@@ -70,8 +70,8 @@ void UFlyingAIMovementComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		}
 	}
 
-	// Ensure we stay in flying mode
-	if (MovementComponent->MovementMode != MOVE_Flying)
+	// Ensure we stay in flying mode (can be disabled for landing)
+	if (bEnforceFlyingMode && MovementComponent->MovementMode != MOVE_Flying)
 	{
 		MovementComponent->SetMovementMode(MOVE_Flying);
 	}

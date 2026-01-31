@@ -84,6 +84,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions", meta = (ClampMin = "0.5"))
 	float LandingDuration = 1.0f;
 
+	/** Cooldown before boss can transition back to Aerial after landing (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions", meta = (ClampMin = "1.0"))
+	float GroundPhaseCooldown = 5.0f;
+
 	/** Is boss currently transitioning between phases (cannot attack during transition) */
 	UPROPERTY(BlueprintReadOnly, Category = "Boss|Phase")
 	bool bIsTransitioning = false;
@@ -220,6 +224,12 @@ protected:
 
 	/** Time when aerial phase started */
 	float AerialPhaseStartTime = 0.0f;
+
+	/** Time when ground phase started (for cooldown before returning to aerial) */
+	float GroundPhaseStartTime = 0.0f;
+
+	/** True if HP threshold already triggered aerial phase (prevents repeated triggers) */
+	bool bHPThresholdTriggered = false;
 
 	/** True if boss is in finisher phase and invulnerable */
 	bool bIsInFinisherPhase = false;

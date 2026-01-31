@@ -147,10 +147,17 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 
 void ABossCharacter::SetPhase(EBossPhase NewPhase)
 {
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase called: Current=%s, New=%s"),
+		*PhaseNames[(int)CurrentPhase], *PhaseNames[(int)NewPhase]);
+
 	if (CurrentPhase != NewPhase)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase called with NewPhase=%d"), (int)NewPhase);
 		ExecutePhaseTransition(NewPhase);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase: Already in %s phase, no transition needed"), *PhaseNames[(int)NewPhase]);
 	}
 }
 
@@ -161,9 +168,25 @@ bool ABossCharacter::ShouldTransitionToAerial() const
 		return false;
 	}
 
-	// Check HP threshold
+	// Check if still in cooldown after returning from aerial phase
+	if (GroundPhaseStartTime > 0.0f)
+	{
+		float TimeInGround = GetWorld()->GetTimeSeconds() - GroundPhaseStartTime;
+		if (TimeInGround < GroundPhaseCooldown)
+		{
+			return false;
+		}
+	}
+
+	// Check if currently transitioning
+	if (bIsTransitioning)
+	{
+		return false;
+	}
+
+	// Check HP threshold (only triggers once per fight)
 	float HPPercent = CurrentHP / MaxHP;
-	if (HPPercent <= AerialPhaseHPThreshold)
+	if (HPPercent <= AerialPhaseHPThreshold && !bHPThresholdTriggered)
 	{
 		return true;
 	}
@@ -179,22 +202,24 @@ bool ABossCharacter::ShouldTransitionToAerial() const
 
 bool ABossCharacter::ShouldTransitionToGround() const
 {
-	if (CurrentPhase != EBossPhase::Aerial)
-	{
-		return false;
-	}
-
 	// Check parry count
 	if (CurrentParryCount >= ParriesBeforeGroundPhase)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] ShouldTransitionToGround: TRUE (parry count %d >= %d)"),
+			CurrentParryCount, ParriesBeforeGroundPhase);
 		return true;
 	}
 
-	// Check timeout
-	float TimeInAerial = GetWorld()->GetTimeSeconds() - AerialPhaseStartTime;
-	if (TimeInAerial >= MaxAerialPhaseDuration)
+	// Check timeout (uses AerialPhaseStartTime set when entering aerial phase)
+	if (AerialPhaseStartTime > 0.0f)
 	{
-		return true;
+		float TimeInAerial = GetWorld()->GetTimeSeconds() - AerialPhaseStartTime;
+		if (TimeInAerial >= MaxAerialPhaseDuration)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BOSS] ShouldTransitionToGround: TRUE (timeout %.1f >= %.1f)"),
+				TimeInAerial, MaxAerialPhaseDuration);
+			return true;
+		}
 	}
 
 	return false;
@@ -210,6 +235,13 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 		*PhaseNames[(int)OldPhase], *PhaseNames[(int)NewPhase],
 		CurrentHP, MaxHP, CurrentDashAttackCount);
 
+	// On-screen debug message (red, 5 seconds)
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red,
+			FString::Printf(TEXT("BOSS PHASE: %s -> %s"), *PhaseNames[(int)OldPhase], *PhaseNames[(int)NewPhase]));
+	}
+
 	CurrentPhase = NewPhase;
 
 	// Start transition - boss cannot attack until complete
@@ -221,6 +253,7 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 	{
 	case EBossPhase::Ground:
 		CurrentDashAttackCount = 0;
+		GroundPhaseStartTime = GetWorld()->GetTimeSeconds();
 		StopHovering();
 		StopParryDetection();
 		TransitionDuration = LandingDuration;
@@ -229,6 +262,13 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 	case EBossPhase::Aerial:
 		CurrentParryCount = 0;
 		AerialPhaseStartTime = GetWorld()->GetTimeSeconds();
+		// Mark HP threshold as triggered so it doesn't keep firing
+		if (!bHPThresholdTriggered && (CurrentHP / MaxHP) <= AerialPhaseHPThreshold)
+		{
+			bHPThresholdTriggered = true;
+			UE_LOG(LogTemp, Warning, TEXT("[BOSS] HP threshold triggered (HP=%.0f/%.0f = %.1f%%), won't trigger again"),
+				CurrentHP, MaxHP, (CurrentHP / MaxHP) * 100.0f);
+		}
 		StartHovering();
 		StartParryDetection();
 		TransitionDuration = TakeOffDuration;
@@ -260,19 +300,27 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 void ABossCharacter::OnPhaseTransitionComplete()
 {
 	bIsTransitioning = false;
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack"));
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack. Phase=%d, Z=%.1f"),
+		(int)CurrentPhase, GetActorLocation().Z);
 
-	// If we landed (transitioned to Ground), switch to walking mode
+	// On-screen debug message (red, 5 seconds)
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red,
+			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *PhaseNames[(int)CurrentPhase], GetActorLocation().Z));
+	}
+
+	// If we landed (transitioned to Ground), ensure walking mode
 	if (CurrentPhase == EBossPhase::Ground)
 	{
-		if (FlyingMovement)
-		{
-			FlyingMovement->StopMovement();
-		}
-
 		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 		{
-			MovementComp->SetMovementMode(MOVE_Walking);
+			// Boss should already be on ground from falling, just ensure walking mode
+			if (MovementComp->IsMovingOnGround())
+			{
+				MovementComp->SetMovementMode(MOVE_Walking);
+			}
 			MovementComp->Velocity = FVector::ZeroVector;
 		}
 	}
@@ -805,9 +853,16 @@ void ABossCharacter::StartHovering()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StartHovering() called! CurrentPhase=%d"), (int)CurrentPhase);
 
+	// Enable forced flying mode for aerial phase
+	if (FlyingMovement)
+	{
+		FlyingMovement->bEnforceFlyingMode = true;
+	}
+
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->SetMovementMode(MOVE_Flying);
+		MovementComp->GravityScale = 0.0f; // Disable gravity for flying
 	}
 
 	// Fly to hover height
@@ -831,58 +886,20 @@ void ABossCharacter::StopHovering()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StopHovering() called! Current Z=%.1f"), GetActorLocation().Z);
 
-	// Find ground position with line trace
-	FVector CurrentLocation = GetActorLocation();
-	FVector TraceStart = CurrentLocation;
-	FVector TraceEnd = CurrentLocation - FVector(0.0f, 0.0f, 5000.0f); // Trace down 50m
-
-	FHitResult HitResult;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-
-	bool bHitGround = GetWorld()->LineTraceSingleByChannel(
-		HitResult,
-		TraceStart,
-		TraceEnd,
-		ECC_Visibility,
-		QueryParams
-	);
-
-	if (bHitGround)
+	// Disable forced flying mode so boss can fall
+	if (FlyingMovement)
 	{
-		// Get capsule half height to place feet on ground
-		float CapsuleHalfHeight = 0.0f;
-		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
-		{
-			CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
-		}
-
-		FVector GroundLocation = HitResult.Location + FVector(0.0f, 0.0f, CapsuleHalfHeight);
-
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landing to ground: Z %.1f -> %.1f"), CurrentLocation.Z, GroundLocation.Z);
-
-		// Use FlyToLocation for smooth landing
-		if (FlyingMovement)
-		{
-			// Calculate speed based on distance and landing duration
-			float Distance = FVector::Dist(CurrentLocation, GroundLocation);
-			float LandingSpeed = Distance / FMath::Max(LandingDuration, 0.1f);
-			FlyingMovement->FlySpeed = LandingSpeed;
-			FlyingMovement->FlyToLocation(GroundLocation);
-		}
-		else
-		{
-			// Fallback: teleport if no flying movement
-			SetActorLocation(GroundLocation);
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("[BOSS] StopHovering: Could not find ground!"));
+		FlyingMovement->bEnforceFlyingMode = false;
+		FlyingMovement->StopMovement();
 	}
 
-	// Note: Movement mode will be set to Walking in OnPhaseTransitionComplete
-	// after the landing animation/movement is done
+	// Switch to walking mode and enable gravity - boss will fall naturally
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		MovementComp->SetMovementMode(MOVE_Falling);
+		MovementComp->GravityScale = 1.0f;
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Gravity enabled, boss will fall to ground"));
+	}
 }
 
 void ABossCharacter::AerialStrafe(const FVector& Direction)
