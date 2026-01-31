@@ -88,6 +88,13 @@ float AShooterKey::TakeDamage(float Damage, FDamageEvent const& DamageEvent, ACo
 		EventInstigator ? *EventInstigator->GetName() : TEXT("null"),
 		TrackedEnemies.Num());
 
+	// Block damage if not from player
+	if (!EventInstigator || !EventInstigator->IsPlayerController())
+	{
+		UE_LOG(LogTemp, Log, TEXT("ShooterKey::TakeDamage - BLOCKED (not from player)"));
+		return 0.0f;
+	}
+
 	// Block damage if invulnerable
 	if (bIsInvulnerable)
 	{
