@@ -321,6 +321,22 @@ void AShooterKey::StopTrackingNPC(AShooterNPC* NPC)
 	UpdateInvulnerabilityState();
 }
 
+void AShooterKey::SetInvulnerable(bool bNewInvulnerable)
+{
+	// Only works in manual mode
+	if (!bManualMode)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShooterKey::SetInvulnerable - Ignored because bManualMode is false. Enable bManualMode to control invulnerability manually."));
+		return;
+	}
+
+	if (bIsInvulnerable != bNewInvulnerable)
+	{
+		bIsInvulnerable = bNewInvulnerable;
+		ApplyOverlayMaterial();
+	}
+}
+
 void AShooterKey::UpdateInvulnerabilityState()
 {
 	// Clean up any invalid weak pointers
@@ -333,10 +349,17 @@ void AShooterKey::UpdateInvulnerabilityState()
 	}
 
 	const int32 CurrentCount = TrackedEnemies.Num();
-	const bool bShouldBeInvulnerable = CurrentCount > EnemyThreshold;
 
-	// Broadcast event if count changed
+	// Broadcast event regardless of mode (enemy tracking still works)
 	OnEnemyCountChanged.Broadcast(CurrentCount, EnemyThreshold);
+
+	// In manual mode, don't automatically change invulnerability based on enemies
+	if (bManualMode)
+	{
+		return;
+	}
+
+	const bool bShouldBeInvulnerable = CurrentCount > EnemyThreshold;
 
 	// Check if state changed
 	if (bIsInvulnerable != bShouldBeInvulnerable)

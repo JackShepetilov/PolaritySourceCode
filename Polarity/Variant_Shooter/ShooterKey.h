@@ -29,10 +29,15 @@ public:
 
 	// ==================== Invulnerability Settings ====================
 
-	/** Number of enemies required to keep the key invulnerable.
+	/** When enabled, invulnerability is controlled manually via SetInvulnerable() instead of enemy detection.
+	 *  Enemy tracking still works but won't affect invulnerability state. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Key|Invulnerability")
+	bool bManualMode = false;
+
+	/** Number of enemies required to keep the key invulnerable (only used when bManualMode = false).
 	 *  If enemy count > this value, key is invulnerable.
 	 *  If enemy count <= this value, key is vulnerable. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Key|Invulnerability", meta = (ClampMin = "0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Key|Invulnerability", meta = (ClampMin = "0", EditCondition = "!bManualMode"))
 	int32 EnemyThreshold = 0;
 
 	// ==================== Detection Box ====================
@@ -74,6 +79,10 @@ public:
 	/** Check if key is currently invulnerable */
 	UFUNCTION(BlueprintPure, Category = "Key")
 	bool IsInvulnerable() const { return bIsInvulnerable; }
+
+	/** Manually set invulnerability state (only works when bManualMode = true) */
+	UFUNCTION(BlueprintCallable, Category = "Key")
+	void SetInvulnerable(bool bNewInvulnerable);
 
 	/** Manually refresh enemy detection (rescans all boxes) */
 	UFUNCTION(BlueprintCallable, Category = "Key")
