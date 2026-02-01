@@ -53,6 +53,10 @@ struct FMeleeAnimationData
 {
 	GENERATED_BODY()
 
+	/** Selection weight for random animation choice (probability = weight / sum of all weights) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection", meta = (ClampMin = "0.0"))
+	float Weight = 1.0f;
+
 	/** Animation montage for this attack type */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation")
 	TObjectPtr<UAnimMontage> AttackMontage;
@@ -340,17 +344,17 @@ public:
 
 	// ==================== Animation ====================
 
-	/** Animation data for ground attacks (standing, walking, running) */
+	/** Animation variants for ground attacks (standing, walking, running) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|Attack Types")
-	FMeleeAnimationData GroundAttack;
+	TArray<FMeleeAnimationData> GroundAttacks;
 
-	/** Animation data for airborne attacks (jumping, falling) */
+	/** Animation variants for airborne attacks (jumping, falling) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|Attack Types")
-	FMeleeAnimationData AirborneAttack;
+	TArray<FMeleeAnimationData> AirborneAttacks;
 
-	/** Animation data for sliding attacks */
+	/** Animation variants for sliding attacks */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|Attack Types")
-	FMeleeAnimationData SlidingAttack;
+	TArray<FMeleeAnimationData> SlidingAttacks;
 
 	/** Third person attack montage (optional, plays on character mesh) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation")
@@ -513,6 +517,19 @@ public:
 	bool IsInputLocked() const { return bInputLocked; }
 
 	/**
+	 * Lower the weapon (transition FirstPersonMesh down) without starting an attack.
+	 * Used for boss finisher approach phase.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee")
+	void LowerWeapon();
+
+	/**
+	 * Check if weapon is currently lowered
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	bool IsWeaponLowered() const { return bIsWeaponLowered; }
+
+	/**
 	 * Enable or disable debug visualization for melee traces
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee|Debug")
@@ -611,6 +628,12 @@ protected:
 
 	/** Mesh transition progress (0-1) */
 	float MeshTransitionProgress = 0.0f;
+
+	/** True if weapon is currently lowered (for boss finisher) */
+	bool bIsWeaponLowered = false;
+
+	/** True if we're only lowering weapon without starting an attack (boss finisher approach) */
+	bool bIsLoweringWeaponOnly = false;
 
 	/** Base rotation of FirstPersonMesh (stored for restoration) */
 	FRotator FirstPersonMeshBaseRotation = FRotator::ZeroRotator;
@@ -751,8 +774,17 @@ protected:
 	/** Determine attack type based on current movement state */
 	EMeleeAttackType DetermineAttackType() const;
 
-	/** Get animation data for the current attack type */
+	/** Select random animation from array based on weights */
+	const FMeleeAnimationData* SelectWeightedAnimation(const TArray<FMeleeAnimationData>& Animations);
+
+	/** Get animation data for the current attack type (selected at attack start) */
 	const FMeleeAnimationData& GetCurrentAnimationData() const;
+
+	/** Currently selected animation data (chosen at attack start) */
+	const FMeleeAnimationData* SelectedAnimationData = nullptr;
+
+	/** Default empty animation data for fallback */
+	FMeleeAnimationData DefaultAnimationData;
 
 	/** Begin hiding FirstPersonMesh (transition down) */
 	void BeginHideWeapon();

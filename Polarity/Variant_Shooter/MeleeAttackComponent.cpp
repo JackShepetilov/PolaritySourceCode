@@ -88,9 +88,25 @@ bool UMeleeAttackComponent::StartAttack()
 	HitActorsThisAttack.Empty();
 	MeshTransitionProgress = 0.0f;
 	MontageTimeElapsed = 0.0f;
+	bIsLoweringWeaponOnly = false; // This is a real attack, not just lowering
 
 	// Determine attack type based on movement state
 	CurrentAttackType = DetermineAttackType();
+
+	// Select random animation based on attack type and weights
+	switch (CurrentAttackType)
+	{
+	case EMeleeAttackType::Airborne:
+		SelectedAnimationData = SelectWeightedAnimation(AirborneAttacks);
+		break;
+	case EMeleeAttackType::Sliding:
+		SelectedAnimationData = SelectWeightedAnimation(SlidingAttacks);
+		break;
+	case EMeleeAttackType::Ground:
+	default:
+		SelectedAnimationData = SelectWeightedAnimation(GroundAttacks);
+		break;
+	}
 
 	// Cache owner velocity for momentum calculations
 	if (OwnerCharacter)
@@ -105,9 +121,37 @@ bool UMeleeAttackComponent::StartAttack()
 	LungeDirection = GetLungeDirection();
 	LungeProgress = 0.0f;
 
-	// Start with mesh transition (hiding weapon)
-	BeginHideWeapon();
-	SetState(EMeleeAttackState::HidingWeapon);
+	// Skip hiding weapon if already lowered (boss finisher case)
+	if (bIsWeaponLowered)
+	{
+		// Weapon already down - do all the things that normally happen after HidingWeapon
+		SwitchToMeleeMesh();
+		StartMagnetism();
+		PlayAttackAnimation();
+		PlaySwingCameraShake();
+		PlaySound(SwingSound);
+		OnMeleeAttackStarted.Broadcast();
+
+		// Go to appropriate next state
+		if (Settings.InputDelayTime > 0.0f)
+		{
+			SetState(EMeleeAttackState::InputDelay);
+		}
+		else if (Settings.WindupTime > 0.0f)
+		{
+			SetState(EMeleeAttackState::Windup);
+		}
+		else
+		{
+			SetState(EMeleeAttackState::Active);
+		}
+	}
+	else
+	{
+		// Start with mesh transition (hiding weapon)
+		BeginHideWeapon();
+		SetState(EMeleeAttackState::HidingWeapon);
+	}
 
 	return true;
 }
@@ -265,6 +309,8 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 	case EMeleeAttackState::ShowingWeapon:
 		StateTimeRemaining = Settings.ShowWeaponTime;
 		MeshTransitionProgress = 0.0f;
+		bIsWeaponLowered = false; // Reset lowered state when showing weapon
+		bIsLoweringWeaponOnly = false; // Also reset lowering-only flag
 		StopAttackAnimation();
 		SwitchToFirstPersonMesh();
 		break;
@@ -298,25 +344,41 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 		switch (CurrentState)
 		{
 		case EMeleeAttackState::HidingWeapon:
-			// Mesh transition complete - switch meshes and start attack
-			SwitchToMeleeMesh();
-			StartMagnetism();
-			PlayAttackAnimation();
-			PlaySwingCameraShake();
-			PlaySound(SwingSound);
-			OnMeleeAttackStarted.Broadcast();
-
-			if (Settings.InputDelayTime > 0.0f)
+			// If only lowering weapon (boss finisher approach), don't start attack
+			if (bIsLoweringWeaponOnly)
 			{
-				SetState(EMeleeAttackState::InputDelay);
-			}
-			else if (Settings.WindupTime > 0.0f)
-			{
-				SetState(EMeleeAttackState::Windup);
+				// Ensure weapon is fully lowered before going to Ready
+				if (FirstPersonMesh)
+				{
+					FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
+					FirstPersonMesh->SetRelativeLocation(TargetLocation);
+				}
+				// Stay in Ready state with weapon lowered, waiting for actual attack
+				SetState(EMeleeAttackState::Ready);
+				bInputLocked = false;
 			}
 			else
 			{
-				SetState(EMeleeAttackState::Active);
+				// Mesh transition complete - switch meshes and start attack
+				SwitchToMeleeMesh();
+				StartMagnetism();
+				PlayAttackAnimation();
+				PlaySwingCameraShake();
+				PlaySound(SwingSound);
+				OnMeleeAttackStarted.Broadcast();
+
+				if (Settings.InputDelayTime > 0.0f)
+				{
+					SetState(EMeleeAttackState::InputDelay);
+				}
+				else if (Settings.WindupTime > 0.0f)
+				{
+					SetState(EMeleeAttackState::Windup);
+				}
+				else
+				{
+					SetState(EMeleeAttackState::Active);
+				}
 			}
 			break;
 
@@ -506,7 +568,11 @@ void UMeleeAttackComponent::PerformHitDetection()
 
 			// Play effects
 			PlaySound(HitSound);
-			PlayCameraShake();
+			// Skip camera shake during boss finisher (weapon is pre-lowered)
+			if (!bIsWeaponLowered)
+			{
+				PlayCameraShake();
+			}
 			SpawnImpactFX(Hit.ImpactPoint, Hit.ImpactNormal);
 
 			// Broadcast hit event with actual damage dealt
@@ -1567,18 +1633,56 @@ EMeleeAttackType UMeleeAttackComponent::DetermineAttackType() const
 	return EMeleeAttackType::Ground;
 }
 
+const FMeleeAnimationData* UMeleeAttackComponent::SelectWeightedAnimation(const TArray<FMeleeAnimationData>& Animations)
+{
+	if (Animations.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	if (Animations.Num() == 1)
+	{
+		return &Animations[0];
+	}
+
+	// Calculate total weight
+	float TotalWeight = 0.0f;
+	for (const FMeleeAnimationData& Anim : Animations)
+	{
+		TotalWeight += FMath::Max(0.0f, Anim.Weight);
+	}
+
+	if (TotalWeight <= 0.0f)
+	{
+		// All weights are zero, pick first one
+		return &Animations[0];
+	}
+
+	// Random value in range [0, TotalWeight)
+	float RandomValue = FMath::FRand() * TotalWeight;
+
+	// Find animation based on cumulative weight
+	float CumulativeWeight = 0.0f;
+	for (const FMeleeAnimationData& Anim : Animations)
+	{
+		CumulativeWeight += FMath::Max(0.0f, Anim.Weight);
+		if (RandomValue < CumulativeWeight)
+		{
+			return &Anim;
+		}
+	}
+
+	// Fallback (shouldn't happen)
+	return &Animations.Last();
+}
+
 const FMeleeAnimationData& UMeleeAttackComponent::GetCurrentAnimationData() const
 {
-	switch (CurrentAttackType)
+	if (SelectedAnimationData)
 	{
-	case EMeleeAttackType::Airborne:
-		return AirborneAttack;
-	case EMeleeAttackType::Sliding:
-		return SlidingAttack;
-	case EMeleeAttackType::Ground:
-	default:
-		return GroundAttack;
+		return *SelectedAnimationData;
 	}
+	return DefaultAnimationData;
 }
 
 void UMeleeAttackComponent::BeginHideWeapon()
@@ -1591,6 +1695,19 @@ void UMeleeAttackComponent::BeginHideWeapon()
 		FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
 		FirstPersonMeshBaseRotation = FirstPersonMesh->GetRelativeRotation();
 	}
+}
+
+void UMeleeAttackComponent::LowerWeapon()
+{
+	if (bIsWeaponLowered)
+	{
+		return;
+	}
+
+	bIsWeaponLowered = true;
+	bIsLoweringWeaponOnly = true;
+	BeginHideWeapon();
+	SetState(EMeleeAttackState::HidingWeapon);
 }
 
 void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
@@ -1606,7 +1723,7 @@ void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
 			if (FirstPersonMesh)
 			{
 				float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-				FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f); // Move down
+				FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
 				FVector NewLocation = FMath::Lerp(FirstPersonMeshBaseLocation, TargetLocation, Alpha);
 				FirstPersonMesh->SetRelativeLocation(NewLocation);
 			}
@@ -1627,6 +1744,15 @@ void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
 				FVector NewLocation = FMath::Lerp(CurrentLocation, FirstPersonMeshBaseLocation, Alpha);
 				FirstPersonMesh->SetRelativeLocation(NewLocation);
 			}
+		}
+	}
+	else if (CurrentState == EMeleeAttackState::Ready && bIsWeaponLowered)
+	{
+		// Keep weapon lowered while waiting for boss finisher attack
+		if (FirstPersonMesh)
+		{
+			FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
+			FirstPersonMesh->SetRelativeLocation(TargetLocation);
 		}
 	}
 }

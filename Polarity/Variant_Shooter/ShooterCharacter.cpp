@@ -1831,6 +1831,12 @@ void AShooterCharacter::StartBossFinisher()
 		CurrentWeapon->StopFiring();
 	}
 
+	// Lower weapon immediately (will skip lowering phase when attack starts later)
+	if (MeleeAttackComponent)
+	{
+		MeleeAttackComponent->LowerWeapon();
+	}
+
 	// Disable gravity and movement input
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{

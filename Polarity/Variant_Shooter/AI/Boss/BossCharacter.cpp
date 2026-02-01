@@ -1025,6 +1025,18 @@ void ABossCharacter::EnterFinisherPhase()
 	bIsDashing = false;
 	bIsAttacking = false;
 
+	// Cancel knockback completely - both flag and interpolation
+	bIsInKnockback = false;
+	bIsKnockbackInterpolating = false;
+	KnockbackElapsedTime = 0.0f;
+
+	// Stop all movement/velocity BEFORE teleport
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		MovementComp->StopMovementImmediately();
+		MovementComp->Velocity = FVector::ZeroVector;
+	}
+
 	// Transition to finisher phase
 	ExecutePhaseTransition(EBossPhase::Finisher);
 
@@ -1050,6 +1062,18 @@ void ABossCharacter::EnterFinisherPhase()
 	OnFinisherReady.Broadcast();
 }
 
+void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
+{
+	// Ignore knockback in finisher phase - boss must stay at teleport position
+	if (bIsInFinisherPhase)
+	{
+		return;
+	}
+
+	// Call parent implementation
+	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled);
+}
+
 void ABossCharacter::TeleportToFinisherPosition()
 {
 	FVector OldPosition = GetActorLocation();
@@ -1071,11 +1095,20 @@ void ABossCharacter::TeleportToFinisherPosition()
 	// Teleport to finisher position
 	SetActorLocation(FinisherTeleportPosition);
 
-	// Set flying mode and stop velocity - boss hovers in place
+	// Set flying mode, stop velocity, and DISABLE movement completely - boss hovers frozen in place
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->SetMovementMode(MOVE_Flying);
-		MovementComp->Velocity = FVector::ZeroVector;
+		MovementComp->StopMovementImmediately();
+		MovementComp->DisableMovement();
+	}
+
+	// Stop FlyingAIMovementComponent and disable it completely
+	if (FlyingMovement)
+	{
+		FlyingMovement->StopMovement();
+		FlyingMovement->bEnforceFlyingMode = false;
+		FlyingMovement->SetComponentTickEnabled(false);
 	}
 
 	// Spawn appear VFX at new position

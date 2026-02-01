@@ -512,6 +512,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Finisher Phase")
 	bool IsInFinisherKnockback() const { return bIsFinisherKnockback; }
 
+	// ==================== Knockback Override ====================
+
+	/** Override to ignore knockback during finisher phase */
+	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
+
 protected:
 	/** Teleport boss to finisher position with VFX */
 	void TeleportToFinisherPosition();
