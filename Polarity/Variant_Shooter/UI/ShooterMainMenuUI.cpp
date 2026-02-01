@@ -20,6 +20,22 @@ void UShooterMainMenuUI::NativeConstruct()
 	BP_OnMenuShown();
 }
 
+void UShooterMainMenuUI::NativeDestruct()
+{
+	// Broadcast before destruction so Level BP can react
+	OnMainMenuRemoved.Broadcast();
+
+	// Clean up options menu if still exists
+	if (OptionsMenuWidget)
+	{
+		OptionsMenuWidget->OnOptionsMenuClosed.RemoveDynamic(this, &UShooterMainMenuUI::OnOptionsMenuClosedHandler);
+		OptionsMenuWidget->RemoveFromParent();
+		OptionsMenuWidget = nullptr;
+	}
+
+	Super::NativeDestruct();
+}
+
 void UShooterMainMenuUI::OpenSettings()
 {
 	// Spawn options menu if we have a class configured

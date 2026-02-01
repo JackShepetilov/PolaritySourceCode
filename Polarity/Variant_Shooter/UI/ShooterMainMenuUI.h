@@ -8,6 +8,8 @@
 
 class UShooterOptionsMenuUI;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMainMenuRemoved);
+
 /**
  * Main Menu UI widget for the shooter game.
  * Buttons: Settings, Tutorial, Level 1, Level 2, Quit Game
@@ -19,6 +21,12 @@ class POLARITY_API UShooterMainMenuUI : public UUserWidget
 	GENERATED_BODY()
 
 public:
+
+	// ==================== Delegates ====================
+
+	/** Broadcast when the main menu is removed from parent (Level BP can bind to this) */
+	UPROPERTY(BlueprintAssignable, Category = "Shooter|MainMenu")
+	FOnMainMenuRemoved OnMainMenuRemoved;
 
 	// ==================== Blueprint Events ====================
 
@@ -71,6 +79,7 @@ public:
 protected:
 
 	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
 
 	/** Options menu widget class to spawn */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|MainMenu|Settings")
