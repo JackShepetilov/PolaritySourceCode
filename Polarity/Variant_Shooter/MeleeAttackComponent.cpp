@@ -461,6 +461,77 @@ void UMeleeAttackComponent::PerformHitDetection()
 		return;
 	}
 
+	// Drop kick special case: use distance to target instead of camera trace
+	// This prevents missing when camera isn't looking directly at target
+	if (bIsDropKick && MagnetismTarget.IsValid())
+	{
+		AActor* Target = MagnetismTarget.Get();
+		FVector PlayerPos = OwnerCharacter->GetActorLocation();
+		FVector TargetPos = Target->GetActorLocation();
+		float DistanceToTarget = FVector::Dist(PlayerPos, TargetPos);
+
+		// Use AttackRange as hit threshold
+		if (DistanceToTarget <= Settings.AttackRange)
+		{
+			// Create a fake hit result for the target
+			FHitResult FakeHit;
+			FakeHit.ImpactPoint = TargetPos;
+			FakeHit.ImpactNormal = (PlayerPos - TargetPos).GetSafeNormal();
+			FakeHit.Location = TargetPos;
+			FakeHit.bBlockingHit = true;
+
+			// Set the hit actor through the component
+			if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(Target->GetRootComponent()))
+			{
+				FakeHit.Component = TargetRoot;
+			}
+
+			// Valid hit!
+			HitActorsThisAttack.Add(Target);
+			bHasHitThisAttack = true;
+
+			// Check for headshot (approximate - use upper part of target)
+			bool bHeadshot = IsHeadshot(FakeHit);
+
+			// Apply damage and get final damage value
+			float FinalDamage = ApplyDamage(Target, FakeHit);
+
+			// Play effects
+			PlaySound(HitSound);
+			if (!bIsWeaponLowered)
+			{
+				PlayCameraShake();
+			}
+			SpawnImpactFX(FakeHit.ImpactPoint, FakeHit.ImpactNormal);
+
+			// Broadcast hit events
+			OnMeleeHit.Broadcast(Target, FakeHit.ImpactPoint, bHeadshot, FinalDamage);
+			OnDropKickHit.Broadcast(Target, FakeHit.ImpactPoint, FinalDamage);
+
+#if WITH_EDITOR
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+					FString::Printf(TEXT("DropKick HIT! Distance=%.0f, Damage=%.0f"), DistanceToTarget, FinalDamage));
+			}
+#endif
+
+			// Debug visualization
+			if (bEnableDebugVisualization)
+			{
+				DrawDebugSphere(GetWorld(), TargetPos, Settings.AttackRange, 16, FColor::Green, false, DebugShapeDuration);
+			}
+
+			return; // Exit early - we hit the target
+		}
+
+		// Debug: show detection radius
+		if (bEnableDebugVisualization)
+		{
+			DrawDebugSphere(GetWorld(), TargetPos, Settings.AttackRange, 16, FColor::Yellow, false, 0.0f);
+		}
+	}
+
 	const FVector Start = GetTraceStart();
 	const FVector End = GetTraceEnd();
 
@@ -1438,12 +1509,84 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 
 void UMeleeAttackComponent::StopMagnetism()
 {
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Magenta,
+			FString::Printf(TEXT("StopMagnetism called: bIsDropKick=%d, DropKickVel=%.0f"),
+				bIsDropKick ? 1 : 0, DropKickVelocity.Size()));
+	}
+#endif
+
 	MagnetismTarget.Reset();
+
+	// Handle drop kick exit momentum before resetting state
+	if (bIsDropKick && OwnerCharacter)
+	{
+		if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+		{
+			// Check if player is holding forward input
+			// Use GetPendingInputVector which reflects current frame input, not last consumed input
+			FVector InputVector = Movement->GetPendingInputVector();
+
+			// If pending is zero, try last input as fallback
+			if (InputVector.IsNearlyZero())
+			{
+				InputVector = Movement->GetLastInputVector();
+			}
+
+			FVector ForwardDir = OwnerCharacter->GetActorForwardVector();
+			ForwardDir.Z = 0.0f;
+			ForwardDir.Normalize();
+
+			// Dot product > 0 means holding forward
+			float ForwardInput = FVector::DotProduct(InputVector, ForwardDir);
+
+#if WITH_EDITOR
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::White,
+					FString::Printf(TEXT("DropKick Debug: InputVec=(%.2f,%.2f,%.2f), ForwardDot=%.2f, DropKickVel=%.0f"),
+						InputVector.X, InputVector.Y, InputVector.Z, ForwardInput, DropKickVelocity.Size()));
+			}
+#endif
+
+			if (ForwardInput > 0.1f && !DropKickVelocity.IsNearlyZero())
+			{
+				// Player is holding forward - give them exit velocity in their facing direction
+				// Halve the speed to prevent excessive momentum
+				float ExitSpeed = DropKickVelocity.Size() * 0.5f;
+				Movement->Velocity = ForwardDir * ExitSpeed;
+
+#if WITH_EDITOR
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green,
+						FString::Printf(TEXT("DropKick Exit: Forward input, speed=%.0f (halved)"), ExitSpeed));
+				}
+#endif
+			}
+			else
+			{
+				// No forward input - zero out velocity
+				Movement->Velocity = FVector::ZeroVector;
+
+#if WITH_EDITOR
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
+						TEXT("DropKick Exit: No forward input, velocity zeroed"));
+				}
+#endif
+			}
+		}
+	}
 
 	// Reset drop kick state
 	bIsDropKick = false;
 	DropKickHeightDifference = 0.0f;
 	DropKickTargetPosition = FVector::ZeroVector;
+	DropKickVelocity = FVector::ZeroVector;
 
 	// Restore gravity and EMF after lock-on ends (after Recovery phase)
 	if (OwnerCharacter)
@@ -2591,6 +2734,9 @@ void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 	{
 		// Set velocity to match movement
 		Movement->Velocity = MoveDirection * Settings.DropKickDiveSpeed;
+
+		// Save velocity for exit momentum
+		DropKickVelocity = Movement->Velocity;
 	}
 
 	// Debug visualization

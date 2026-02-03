@@ -183,6 +183,23 @@ void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitCo
 			float TagMultiplier = GetTagDamageMultiplier(HitActor);
 			float FinalDamage = HitDamage * TagMultiplier;
 
+			UE_LOG(LogTemp, Warning, TEXT("Projectile::ProcessHit - Target: %s, BaseDamage: %.1f, TagMultiplier: %.2f, FinalDamage: %.1f, TagMultipliers count: %d"),
+				*HitActor->GetName(),
+				HitDamage,
+				TagMultiplier,
+				FinalDamage,
+				TagDamageMultipliers.Num());
+
+			// Log all tags on target and all configured multipliers
+			for (const auto& Pair : TagDamageMultipliers)
+			{
+				bool bHasTag = HitActor->ActorHasTag(Pair.Key);
+				UE_LOG(LogTemp, Warning, TEXT("  TagMultiplier: '%s' = %.2f, Target has tag: %s"),
+					*Pair.Key.ToString(),
+					Pair.Value,
+					bHasTag ? TEXT("YES") : TEXT("NO"));
+			}
+
 			// apply damage to the character
 			UGameplayStatics::ApplyDamage(HitCharacter, FinalDamage, GetInstigator()->GetController(), this, HitDamageType);
 		}

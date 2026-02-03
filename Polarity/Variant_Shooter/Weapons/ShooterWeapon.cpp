@@ -932,24 +932,57 @@ float AShooterWeapon::CalculateDamageMultiplier(float Distance, float WaveRadius
 
 // ==================== VFX ====================
 
+float AShooterWeapon::GetOwnerCharge() const
+{
+	if (!PawnOwner)
+	{
+		return 0.0f;
+	}
+
+	UEMF_FieldComponent* FieldComp = PawnOwner->FindComponentByClass<UEMF_FieldComponent>();
+	if (!FieldComp)
+	{
+		return 0.0f;
+	}
+
+	return FieldComp->GetSourceDescription().PointChargeParams.Charge;
+}
+
 void AShooterWeapon::SpawnMuzzleFlashEffect()
 {
-	if (!MuzzleFlashFX)
+	// Determine which VFX to use
+	UNiagaraSystem* VFXToSpawn = MuzzleFlashFX;
+
+	// Check if charge-based muzzle flash is enabled
+	if (bUseChargeMuzzleFlash)
+	{
+		float OwnerCharge = GetOwnerCharge();
+
+		if (OwnerCharge > 0.0f && PositiveMuzzleFlashFX)
+		{
+			VFXToSpawn = PositiveMuzzleFlashFX;
+		}
+		else if (OwnerCharge < 0.0f && NegativeMuzzleFlashFX)
+		{
+			VFXToSpawn = NegativeMuzzleFlashFX;
+		}
+		// If charge is neutral or appropriate VFX is not set, fall back to default MuzzleFlashFX
+	}
+
+	if (!VFXToSpawn)
 	{
 		return;
 	}
 
-	// Get muzzle location and rotation
-	const FVector MuzzleLocation = FirstPersonMesh->GetSocketLocation(MuzzleSocketName);
-	const FRotator MuzzleRotation = FirstPersonMesh->GetSocketRotation(MuzzleSocketName);
-
-	UNiagaraComponent* MuzzleComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-		GetWorld(),
-		MuzzleFlashFX,
-		MuzzleLocation,
-		MuzzleRotation,
+	// Spawn attached to muzzle socket so VFX follows weapon movement
+	UNiagaraComponent* MuzzleComp = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		VFXToSpawn,
+		FirstPersonMesh,
+		MuzzleSocketName,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
 		FVector(MuzzleFlashScale),
-		true,
+		EAttachLocation::SnapToTarget,
 		true,
 		ENCPoolMethod::None
 	);

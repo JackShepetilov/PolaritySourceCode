@@ -13,6 +13,7 @@ class UNiagaraSystem;
 class UNiagaraComponent;
 class USkeletalMeshComponent;
 class UCurveFloat;
+class UEMF_FieldComponent;
 
 /**
  * Charge animation state
@@ -109,9 +110,17 @@ public:
 
 	// ==================== VFX ====================
 
-	/** Niagara effect to spawn during charge toggle */
+	/** Niagara effect to spawn during charge toggle (legacy - used when polarity-based VFX not set) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
 	TObjectPtr<UNiagaraSystem> ChargeVFX;
+
+	/** VFX for positive charge - played when switching TO positive polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
+	TObjectPtr<UNiagaraSystem> PositiveChargeVFX;
+
+	/** VFX for negative charge - played when switching TO negative polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
+	TObjectPtr<UNiagaraSystem> NegativeChargeVFX;
 
 	/** Socket name on MeleeMesh to attach VFX */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
@@ -269,8 +278,11 @@ protected:
 	/** Update montage play rate based on curve */
 	void UpdateMontagePlayRate(float DeltaTime);
 
-	/** Spawn charge VFX */
+	/** Spawn charge VFX based on new polarity */
 	void SpawnChargeVFX();
+
+	/** Get owner's NEW charge value after toggle (inverted from current) */
+	float GetNewChargeAfterToggle() const;
 
 	/** Stop and destroy charge VFX */
 	void StopChargeVFX();

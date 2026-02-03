@@ -621,6 +621,9 @@ protected:
 	/** Target position for drop kick dive */
 	FVector DropKickTargetPosition = FVector::ZeroVector;
 
+	/** Velocity during drop kick (updated each tick, used for exit momentum) */
+	FVector DropKickVelocity = FVector::ZeroVector;
+
 	// ==================== Mesh Transition State ====================
 
 	/** Current attack type (determined at attack start) */

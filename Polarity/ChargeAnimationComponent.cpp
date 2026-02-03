@@ -13,6 +13,7 @@
 #include "PolarityCharacter.h"
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "EMF_FieldComponent.h"
 
 UChargeAnimationComponent::UChargeAnimationComponent()
 {
@@ -434,16 +435,57 @@ void UChargeAnimationComponent::UpdateMontagePlayRate(float DeltaTime)
 	AnimInstance->Montage_SetPlayRate(CurrentMontage, NewPlayRate);
 }
 
+float UChargeAnimationComponent::GetNewChargeAfterToggle() const
+{
+	if (!OwnerCharacter)
+	{
+		return 0.0f;
+	}
+
+	UEMF_FieldComponent* FieldComp = OwnerCharacter->FindComponentByClass<UEMF_FieldComponent>();
+	if (!FieldComp)
+	{
+		return 0.0f;
+	}
+
+	// Get current charge and invert it (since we're about to toggle)
+	float CurrentCharge = FieldComp->GetSourceDescription().PointChargeParams.Charge;
+	return -CurrentCharge;
+}
+
 void UChargeAnimationComponent::SpawnChargeVFX()
 {
-	if (!ChargeVFX || !MeleeMesh)
+	if (!MeleeMesh)
+	{
+		return;
+	}
+
+	// Determine which VFX to use based on the NEW charge (after toggle)
+	UNiagaraSystem* VFXToSpawn = nullptr;
+	float NewCharge = GetNewChargeAfterToggle();
+
+	if (NewCharge > 0.0f && PositiveChargeVFX)
+	{
+		VFXToSpawn = PositiveChargeVFX;
+	}
+	else if (NewCharge < 0.0f && NegativeChargeVFX)
+	{
+		VFXToSpawn = NegativeChargeVFX;
+	}
+	else
+	{
+		// Fallback to legacy ChargeVFX
+		VFXToSpawn = ChargeVFX;
+	}
+
+	if (!VFXToSpawn)
 	{
 		return;
 	}
 
 	// Spawn attached to socket
 	ActiveChargeFX = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		ChargeVFX,
+		VFXToSpawn,
 		MeleeMesh,
 		ChargeVFXSocket,
 		FVector::ZeroVector,

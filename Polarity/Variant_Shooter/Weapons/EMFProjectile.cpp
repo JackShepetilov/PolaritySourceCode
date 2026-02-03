@@ -7,6 +7,8 @@
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
 
 // EMF Plugin includes
 #include "EMF_FieldComponent.h"
@@ -46,6 +48,9 @@ void AEMFProjectile::BeginPlay()
 		FieldComponent->SetSourceDescription(Desc);
 	}
 
+	// Note: Trail VFX is spawned in SetProjectileCharge() after charge is set by weapon
+	// This ensures we use the correct polarity (player's charge sign)
+
 	// Log initialization for debugging
 	UE_LOG(LogTemp, Log, TEXT("EMFProjectile spawned: Charge=%.2f, Mass=%.2f, AffectedByFields=%d"),
 		GetProjectileCharge(), GetProjectileMass(), bAffectedByExternalFields);
@@ -62,6 +67,24 @@ void AEMFProjectile::Tick(float DeltaTime)
 	}
 }
 
+void AEMFProjectile::NotifyHit(UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp, bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit)
+{
+	// Spawn charge-based explosion VFX before parent processes the hit
+	// (parent may destroy the projectile)
+	if (bExplodeOnHit)
+	{
+		SpawnChargeBasedExplosionVFX(GetActorLocation());
+	}
+	else
+	{
+		// For non-explosive projectiles, spawn explosion VFX at impact point
+		SpawnChargeBasedExplosionVFX(Hit.ImpactPoint);
+	}
+
+	// Call parent implementation
+	Super::NotifyHit(MyComp, Other, OtherComp, bSelfMoved, HitLocation, HitNormal, NormalImpulse, Hit);
+}
+
 void AEMFProjectile::SetProjectileCharge(float NewCharge)
 {
 	if (FieldComponent)
@@ -70,6 +93,9 @@ void AEMFProjectile::SetProjectileCharge(float NewCharge)
 		Desc.PointChargeParams.Charge = NewCharge;
 		FieldComponent->SetSourceDescription(Desc);
 	}
+
+	// Update trail VFX to match new charge polarity
+	SpawnChargeBasedTrailVFX();
 }
 
 float AEMFProjectile::GetProjectileCharge() const
@@ -145,12 +171,31 @@ void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, 
 		if (HitCharacter != GetOwner() || bDamageOwner)
 		{
 			// Calculate damage with charge scaling
-			float FinalDamage = CalculateChargeDamage();
+			float ChargeDamage = CalculateChargeDamage();
+
+			// Apply tag-based damage multiplier (inherited from ShooterProjectile)
+			float TagMultiplier = GetTagDamageMultiplier(HitActor);
+			float FinalDamage = ChargeDamage * TagMultiplier;
+
+			UE_LOG(LogTemp, Warning, TEXT("EMFProjectile::ProcessHit - Target: %s, BaseDamage: %.1f, ChargeDamage: %.1f, TagMultiplier: %.2f, FinalDamage: %.1f, Charge: %.2f"),
+				*HitActor->GetName(),
+				HitDamage,
+				ChargeDamage,
+				TagMultiplier,
+				FinalDamage,
+				ProjectileCharge);
+
+			// Log all tags on target and all configured multipliers
+			for (const auto& Pair : TagDamageMultipliers)
+			{
+				bool bHasTag = HitActor->ActorHasTag(Pair.Key);
+				UE_LOG(LogTemp, Warning, TEXT("  EMFProjectile TagMultiplier: '%s' = %.2f, Target has tag: %s"),
+					*Pair.Key.ToString(),
+					Pair.Value,
+					bHasTag ? TEXT("YES") : TEXT("NO"));
+			}
 
 			UGameplayStatics::ApplyDamage(HitCharacter, FinalDamage, GetInstigator()->GetController(), this, HitDamageType);
-
-			UE_LOG(LogTemp, Log, TEXT("EMFProjectile hit: BaseDamage=%.1f, ChargeDamage=%.1f, Charge=%.2f"),
-				HitDamage, FinalDamage, ProjectileCharge);
 		}
 	}
 
@@ -367,4 +412,72 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 		UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Charge=%.2f Force=(%.2f, %.2f, %.2f) Sources=%d"),
 			Charge, EMForce.X, EMForce.Y, EMForce.Z, OtherSources.Num());
 	}
+}
+
+UNiagaraSystem* AEMFProjectile::GetChargeBasedVFX(UNiagaraSystem* PositiveVFX, UNiagaraSystem* NegativeVFX) const
+{
+	float Charge = GetProjectileCharge();
+
+	if (Charge > 0.0f)
+	{
+		return PositiveVFX;
+	}
+	else if (Charge < 0.0f)
+	{
+		return NegativeVFX;
+	}
+
+	// Neutral charge - return nullptr (no VFX)
+	return nullptr;
+}
+
+void AEMFProjectile::SpawnChargeBasedTrailVFX()
+{
+	// Get charge-based trail VFX
+	UNiagaraSystem* ChargeTrailVFX = GetChargeBasedVFX(PositiveTrailVFX, NegativeTrailVFX);
+
+	// If no charge-based VFX is set, parent's TrailFX will be used (already spawned in Super::BeginPlay)
+	if (!ChargeTrailVFX)
+	{
+		return;
+	}
+
+	// Stop parent's trail if it was spawned
+	if (TrailComponent)
+	{
+		TrailComponent->Deactivate();
+		TrailComponent = nullptr;
+	}
+
+	// Spawn charge-based trail
+	TrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		ChargeTrailVFX,
+		CollisionComponent,
+		NAME_None,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		EAttachLocation::KeepRelativeOffset,
+		true
+	);
+}
+
+void AEMFProjectile::SpawnChargeBasedExplosionVFX(const FVector& Location)
+{
+	UNiagaraSystem* ExplosionVFX = GetChargeBasedVFX(PositiveExplosionVFX, NegativeExplosionVFX);
+
+	if (!ExplosionVFX)
+	{
+		return;
+	}
+
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(),
+		ExplosionVFX,
+		Location,
+		FRotator::ZeroRotator,
+		FVector(1.0f),
+		true,
+		true,
+		ENCPoolMethod::None
+	);
 }

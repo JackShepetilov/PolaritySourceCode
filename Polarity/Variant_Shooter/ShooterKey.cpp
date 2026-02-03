@@ -323,6 +323,11 @@ void AShooterKey::StopTrackingNPC(AShooterNPC* NPC)
 
 void AShooterKey::SetInvulnerable(bool bNewInvulnerable)
 {
+	UE_LOG(LogTemp, Warning, TEXT("ShooterKey::SetInvulnerable - Called with %s, ManualMode: %s, Current: %s"),
+		bNewInvulnerable ? TEXT("TRUE") : TEXT("FALSE"),
+		bManualMode ? TEXT("YES") : TEXT("NO"),
+		bIsInvulnerable ? TEXT("INVULNERABLE") : TEXT("VULNERABLE"));
+
 	// Only works in manual mode
 	if (!bManualMode)
 	{
@@ -330,11 +335,10 @@ void AShooterKey::SetInvulnerable(bool bNewInvulnerable)
 		return;
 	}
 
-	if (bIsInvulnerable != bNewInvulnerable)
-	{
-		bIsInvulnerable = bNewInvulnerable;
-		ApplyOverlayMaterial();
-	}
+	bIsInvulnerable = bNewInvulnerable;
+
+	UE_LOG(LogTemp, Warning, TEXT("ShooterKey::SetInvulnerable - State is now: %s"),
+		bIsInvulnerable ? TEXT("INVULNERABLE") : TEXT("VULNERABLE"));
 }
 
 void AShooterKey::UpdateInvulnerabilityState()

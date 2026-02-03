@@ -8,6 +8,7 @@
 #include "EMFProjectile.generated.h"
 
 class UEMF_FieldComponent;
+class UNiagaraSystem;
 
 /**
  * Projectile with electromagnetic properties.
@@ -34,6 +35,7 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
+	virtual void NotifyHit(class UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp, bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit) override;
 
 public:
 	// ==================== EMF Components ====================
@@ -67,6 +69,24 @@ public:
 	/** Log EM force calculations */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
 	bool bLogEMForces = false;
+
+	// ==================== Charge-Based VFX ====================
+
+	/** Trail VFX for positive charge projectiles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|VFX")
+	TObjectPtr<UNiagaraSystem> PositiveTrailVFX;
+
+	/** Trail VFX for negative charge projectiles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|VFX")
+	TObjectPtr<UNiagaraSystem> NegativeTrailVFX;
+
+	/** Explosion VFX for positive charge projectiles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|VFX")
+	TObjectPtr<UNiagaraSystem> PositiveExplosionVFX;
+
+	/** Explosion VFX for negative charge projectiles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|VFX")
+	TObjectPtr<UNiagaraSystem> NegativeExplosionVFX;
 
 	// ==================== Force Filtering ====================
 
@@ -142,7 +162,16 @@ public:
 
 protected:
 	/** Override hit processing to add EMF effects */
-	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection);
+	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection) override;
+
+	/** Override to spawn charge-based trail VFX */
+	void SpawnChargeBasedTrailVFX();
+
+	/** Spawn charge-based explosion VFX */
+	void SpawnChargeBasedExplosionVFX(const FVector& Location);
+
+	/** Get appropriate VFX based on current charge sign */
+	UNiagaraSystem* GetChargeBasedVFX(UNiagaraSystem* PositiveVFX, UNiagaraSystem* NegativeVFX) const;
 
 	/** Calculate damage with charge scaling */
 	float CalculateChargeDamage() const;

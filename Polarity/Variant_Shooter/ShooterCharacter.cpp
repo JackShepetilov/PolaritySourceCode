@@ -19,6 +19,7 @@
 #include "Components/AudioComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "Camera/CameraComponent.h"
 #include "Retargeter/IKRetargeter.h"
@@ -158,6 +159,9 @@ void AShooterCharacter::BeginPlay()
 	// Bind movement SFX delegates
 	BindMovementSFXDelegates();
 
+	// Initialize first person mesh visibility (hidden if no weapon)
+	UpdateFirstPersonMeshVisibility();
+
 	// update the HUD
 	OnDamaged.Broadcast(1.0f);
 }
@@ -203,6 +207,15 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		if (MeleeAction)
 		{
 			EnhancedInputComponent->BindAction(MeleeAction, ETriggerEvent::Triggered, this, &AShooterCharacter::DoMeleeAttack);
+		}
+
+		// Weapon hotkeys
+		for (const auto& Hotkey : WeaponHotkeys)
+		{
+			if (Hotkey.Key && Hotkey.Value)
+			{
+				EnhancedInputComponent->BindAction(Hotkey.Key, ETriggerEvent::Triggered, this, &AShooterCharacter::DoWeaponHotkey, Hotkey.Value);
+			}
 		}
 	}
 }
@@ -287,6 +300,12 @@ void AShooterCharacter::DoStartFiring()
 		return;
 	}
 
+	// Don't fire if weapon switch in progress
+	if (bIsWeaponSwitchInProgress)
+	{
+		return;
+	}
+
 	// fire the current weapon
 	if (CurrentWeapon)
 	{
@@ -323,41 +342,207 @@ void AShooterCharacter::DoSwitchWeapon()
 		return;
 	}
 
-	// ensure we have at least two weapons two switch between
+	// Don't switch if already switching
+	if (bIsWeaponSwitchInProgress)
+	{
+		return;
+	}
+
+	// Ensure we have at least two weapons to switch between
 	if (OwnedWeapons.Num() > 1)
 	{
-		// deactivate the old weapon
-		CurrentWeapon->DeactivateWeapon();
-
-		// find the index of the current weapon in the owned list
+		// Find the index of the current weapon in the owned list
 		int32 WeaponIndex = OwnedWeapons.Find(CurrentWeapon);
 
-		// is this the last weapon?
+		// Is this the last weapon?
 		if (WeaponIndex == OwnedWeapons.Num() - 1)
 		{
-			// loop back to the beginning of the array
+			// Loop back to the beginning of the array
 			WeaponIndex = 0;
 		}
-		else {
-			// select the next weapon index
+		else
+		{
+			// Select the next weapon index
 			++WeaponIndex;
 		}
 
-		// set the new weapon as current
-		CurrentWeapon = OwnedWeapons[WeaponIndex];
-
-		// activate the new weapon
-		CurrentWeapon->ActivateWeapon();
-
-		// Play weapon switch sound
-		PlayWeaponSwitchSound();
+		// Start animated switch to the new weapon
+		StartWeaponSwitch(OwnedWeapons[WeaponIndex]);
 	}
+}
+
+void AShooterCharacter::DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass)
+{
+	// Don't switch if melee attacking
+	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
+	{
+		return;
+	}
+
+	// Don't switch if charge animating
+	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
+	{
+		return;
+	}
+
+	// Don't switch if already switching
+	if (bIsWeaponSwitchInProgress)
+	{
+		return;
+	}
+
+	// Find weapon of this class in our inventory
+	AShooterWeapon* TargetWeapon = FindWeaponOfType(WeaponClass);
+
+	// Only switch if we own this weapon and it's not already equipped
+	if (TargetWeapon && TargetWeapon != CurrentWeapon)
+	{
+		StartWeaponSwitch(TargetWeapon);
+	}
+}
+
+void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
+{
+	if (!NewWeapon || NewWeapon == CurrentWeapon)
+	{
+		return;
+	}
+
+	// Stop firing current weapon
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StopFiring();
+	}
+
+	// Store the weapon we're switching to
+	PendingWeapon = NewWeapon;
+
+	// Begin switch animation
+	bIsWeaponSwitchInProgress = true;
+	bIsWeaponLowering = true;
+	WeaponSwitchProgress = 0.0f;
+
+	// Store current mesh location for interpolation
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
+	}
+
+	// Play weapon switch sound
+	PlayWeaponSwitchSound();
+}
+
+void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
+{
+	if (!bIsWeaponSwitchInProgress)
+	{
+		return;
+	}
+
+	if (bIsWeaponLowering)
+	{
+		// Lowering phase
+		if (WeaponSwitchLowerTime > 0.0f)
+		{
+			WeaponSwitchProgress += DeltaTime / WeaponSwitchLowerTime;
+			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
+
+			// Interpolate mesh down
+			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+			{
+				float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
+				FVector TargetLocation = WeaponSwitchMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
+				FVector NewLocation = FMath::Lerp(WeaponSwitchMeshBaseLocation, TargetLocation, Alpha);
+				FPMesh->SetRelativeLocation(NewLocation);
+			}
+
+			// Lowering complete?
+			if (WeaponSwitchProgress >= 1.0f)
+			{
+				OnWeaponSwitchLowered();
+			}
+		}
+		else
+		{
+			// No lowering time, switch immediately
+			OnWeaponSwitchLowered();
+		}
+	}
+	else
+	{
+		// Raising phase
+		if (WeaponSwitchRaiseTime > 0.0f)
+		{
+			WeaponSwitchProgress += DeltaTime / WeaponSwitchRaiseTime;
+			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
+
+			// Interpolate mesh up
+			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+			{
+				float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
+				FVector LoweredLocation = WeaponSwitchMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
+				FVector NewLocation = FMath::Lerp(LoweredLocation, WeaponSwitchMeshBaseLocation, Alpha);
+				FPMesh->SetRelativeLocation(NewLocation);
+			}
+
+			// Raising complete?
+			if (WeaponSwitchProgress >= 1.0f)
+			{
+				OnWeaponSwitchRaised();
+			}
+		}
+		else
+		{
+			// No raising time, finish immediately
+			OnWeaponSwitchRaised();
+		}
+	}
+}
+
+void AShooterCharacter::OnWeaponSwitchLowered()
+{
+	// Deactivate old weapon
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->DeactivateWeapon();
+	}
+
+	// Activate new weapon
+	if (PendingWeapon)
+	{
+		CurrentWeapon = PendingWeapon;
+		CurrentWeapon->ActivateWeapon();
+		PendingWeapon = nullptr;
+	}
+
+	// Start raising phase
+	bIsWeaponLowering = false;
+	WeaponSwitchProgress = 0.0f;
+}
+
+void AShooterCharacter::OnWeaponSwitchRaised()
+{
+	// Restore mesh to exact base position
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetRelativeLocation(WeaponSwitchMeshBaseLocation);
+	}
+
+	// Switch complete
+	bIsWeaponSwitchInProgress = false;
+	PendingWeapon = nullptr;
 }
 
 void AShooterCharacter::DoMeleeAttack()
 {
 	// Don't melee if charge animating
 	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
+	{
+		return;
+	}
+
+	// Don't melee if weapon switch in progress
+	if (bIsWeaponSwitchInProgress)
 	{
 		return;
 	}
@@ -403,6 +588,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateLeftHandIK(DeltaTime);
 	UpdateLowHealthWarning(DeltaTime);
 	UpdatePostProcessEffects(DeltaTime);
+	UpdateWeaponSwitch(DeltaTime);
 
 	// Update recoil component state
 	if (RecoilComponent)
@@ -1163,7 +1349,30 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 
 	// attach the weapon meshes
 	Weapon->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonWeaponSocket);
-	Weapon->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, FirstPersonWeaponSocket);
+	Weapon->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, ThirdPersonWeaponSocket);
+
+	// If weapon has OptionalGrip socket, offset the mesh so that socket aligns with hand
+	static const FName OptionalGripSocket = FName("OptionalGrip");
+
+	if (USkeletalMeshComponent* FPMesh = Weapon->GetFirstPersonMesh())
+	{
+		if (FPMesh->DoesSocketExist(OptionalGripSocket))
+		{
+			FTransform SocketTransform = FPMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
+			FPMesh->SetRelativeLocation(-SocketTransform.GetLocation());
+			FPMesh->SetRelativeRotation(SocketTransform.GetRotation().Inverse());
+		}
+	}
+
+	if (USkeletalMeshComponent* TPMesh = Weapon->GetThirdPersonMesh())
+	{
+		if (TPMesh->DoesSocketExist(OptionalGripSocket))
+		{
+			FTransform SocketTransform = TPMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
+			TPMesh->SetRelativeLocation(-SocketTransform.GetLocation());
+			TPMesh->SetRelativeRotation(SocketTransform.GetRotation().Inverse());
+		}
+	}
 }
 
 void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
@@ -1233,6 +1442,9 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 
 		if (AddedWeapon)
 		{
+			// Check if this is the first weapon (for visibility update)
+			const bool bWasUnarmed = OwnedWeapons.Num() == 0;
+
 			OwnedWeapons.Add(AddedWeapon);
 
 			if (CurrentWeapon)
@@ -1242,6 +1454,12 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 
 			CurrentWeapon = AddedWeapon;
 			CurrentWeapon->ActivateWeapon();
+
+			// Update mesh visibility when picking up first weapon
+			if (bWasUnarmed)
+			{
+				UpdateFirstPersonMeshVisibility();
+			}
 		}
 	}
 }
@@ -1276,6 +1494,18 @@ void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
 	{
 		RecoilComponent->ResetRecoil();
 	}
+}
+
+void AShooterCharacter::UpdateFirstPersonMeshVisibility()
+{
+	USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
+	if (!FPMesh)
+	{
+		return;
+	}
+
+	const bool bHasWeapon = OwnedWeapons.Num() > 0;
+	FPMesh->SetVisibility(bHasWeapon, false);
 }
 
 void AShooterCharacter::OnSemiWeaponRefire()
@@ -1554,18 +1784,18 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 	USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
 	if (!FPMesh)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: No FPMesh!"));
+		//UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: No FPMesh!"));
 		return;
 	}
 
 	UAnimInstance* AnimInstance = FPMesh->GetAnimInstance();
 	if (!AnimInstance)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: No AnimInstance!"));
+		//UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: No AnimInstance!"));
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("LeftHandIK: AnimInstance=%s, Alpha=%.2f"), *AnimInstance->GetClass()->GetName(), Alpha);
+	//UE_LOG(LogTemp, Log, TEXT("LeftHandIK: AnimInstance=%s, Alpha=%.2f"), *AnimInstance->GetClass()->GetName(), Alpha);
 
 	// Set LeftHandIKTransform property via reflection
 	static FName LeftHandIKTransformName(TEXT("LeftHandIKTransform"));
@@ -1590,7 +1820,7 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 
 	if (!AlphaProperty)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property 'LeftHandIKAlpha' NOT FOUND in %s"), *AnimInstance->GetClass()->GetName());
+		//UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property 'LeftHandIKAlpha' NOT FOUND in %s"), *AnimInstance->GetClass()->GetName());
 		return;
 	}
 
@@ -1601,7 +1831,7 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 		if (ValuePtr)
 		{
 			*static_cast<float*>(ValuePtr) = Alpha;
-			UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as float = %.2f"), Alpha);
+			//UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as float = %.2f"), Alpha);
 		}
 	}
 	// Try as FDoubleProperty (UE5 may use double for Blueprint floats)
@@ -1611,12 +1841,12 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 		if (ValuePtr)
 		{
 			*static_cast<double*>(ValuePtr) = static_cast<double>(Alpha);
-			UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as double = %.2f"), Alpha);
+			//UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as double = %.2f"), Alpha);
 		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property found but wrong type!"));
+		//UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property found but wrong type!"));
 	}
 }
 

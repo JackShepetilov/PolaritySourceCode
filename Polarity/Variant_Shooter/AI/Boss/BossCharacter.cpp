@@ -105,6 +105,84 @@ void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+void ABossCharacter::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+
+	// Debug: log every Landed call
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landed() called! Z=%.1f, HitActor=%s, HitLocation=%.1f, Phase=%d, bIsTransitioning=%d"),
+		GetActorLocation().Z,
+		Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("NULL"),
+		Hit.Location.Z,
+		(int)CurrentPhase,
+		bIsTransitioning);
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
+			FString::Printf(TEXT("[BOSS] Landed Z=%.1f, HitZ=%.1f, Phase=%d"),
+				GetActorLocation().Z, Hit.Location.Z, (int)CurrentPhase));
+	}
+
+	// Complete ground phase transition when boss actually lands
+	if (bIsTransitioning && CurrentPhase == EBossPhase::Ground)
+	{
+		// Cancel the timer if any
+		GetWorld()->GetTimerManager().ClearTimer(PhaseTransitionTimer);
+
+		// Force walking mode
+		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+		{
+			MovementComp->SetMovementMode(MOVE_Walking);
+			MovementComp->Velocity = FVector::ZeroVector;
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landed - starting landing sequence"));
+
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
+				FString::Printf(TEXT("BOSS LANDED: Playing landing montage (Z=%.0f)"), GetActorLocation().Z));
+		}
+
+		// Play landing montage with highest priority, stop all other montages
+		if (LandingMontage)
+		{
+			if (USkeletalMeshComponent* MeshComp = GetMesh())
+			{
+				if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+				{
+					// Stop ALL currently playing montages first
+					AnimInstance->StopAllMontages(0.1f);
+					UE_LOG(LogTemp, Warning, TEXT("[BOSS] Stopped all montages for landing"));
+
+					// Play landing montage - transition completes when montage ends
+					AnimInstance->Montage_Play(LandingMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, true);
+
+					// Bind end delegate
+					FOnMontageEnded EndDelegate;
+					EndDelegate.BindUObject(this, &ABossCharacter::OnLandingMontageEnded);
+					AnimInstance->Montage_SetEndDelegate(EndDelegate, LandingMontage);
+
+					UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landing montage started, waiting for completion to finish transition"));
+				}
+			}
+		}
+		else
+		{
+			// No landing montage - complete transition immediately
+			bIsTransitioning = false;
+			UE_LOG(LogTemp, Warning, TEXT("[BOSS] No landing montage - transition complete immediately"));
+
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
+					FString::Printf(TEXT("BOSS LANDED: Ground phase ready (no montage)")));
+			}
+		}
+	}
+}
+
 // ==================== Damage Handling ====================
 
 float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -145,6 +223,22 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 	if (CurrentPhase == EBossPhase::Ground && !bWasShootingBefore)
 	{
 		StopShooting();
+	}
+
+	// Play aerial hit react montage when damaged in aerial phase
+	if (CurrentPhase == EBossPhase::Aerial && !bIsTransitioning && Result > 0.0f)
+	{
+		if (AerialHitReactMontage)
+		{
+			if (USkeletalMeshComponent* MeshComp = GetMesh())
+			{
+				if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+				{
+					AnimInstance->Montage_Play(AerialHitReactMontage);
+					UE_LOG(LogTemp, Warning, TEXT("[BOSS] Playing aerial hit react montage (damage=%.1f)"), Result);
+				}
+			}
+		}
 	}
 
 	return Result;
@@ -263,7 +357,22 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 		GroundPhaseStartTime = GetWorld()->GetTimeSeconds();
 		StopHovering();
 		StopParryDetection();
-		TransitionDuration = LandingDuration;
+		// Check if already on ground (e.g., starting in Ground phase or transition from non-aerial state)
+		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+		{
+			if (MovementComp->IsMovingOnGround() || !MovementComp->IsFalling())
+			{
+				// Already on ground - complete transition immediately
+				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Ground phase: already on ground, completing immediately"));
+				bIsTransitioning = false;
+				MovementComp->SetMovementMode(MOVE_Walking);
+			}
+			else
+			{
+				// In air - wait for Landed() callback
+				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Ground phase: falling, waiting for Landed() callback"));
+			}
+		}
 		break;
 
 	case EBossPhase::Aerial:
@@ -306,30 +415,36 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 
 void ABossCharacter::OnPhaseTransitionComplete()
 {
-	bIsTransitioning = false;
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack. Phase=%d, Z=%.1f"),
-		(int)CurrentPhase, GetActorLocation().Z);
-
-	// On-screen debug message (red, 5 seconds)
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red,
-			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *PhaseNames[(int)CurrentPhase], GetActorLocation().Z));
-	}
-
-	// If we landed (transitioned to Ground), ensure walking mode
+	// For Ground phase, only complete if we're actually on the ground
+	// (Landed() will call this when we touch down)
 	if (CurrentPhase == EBossPhase::Ground)
 	{
 		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 		{
-			// Boss should already be on ground from falling, just ensure walking mode
-			if (MovementComp->IsMovingOnGround())
+			// If still falling, don't complete yet - wait for Landed()
+			if (MovementComp->IsFalling())
 			{
-				MovementComp->SetMovementMode(MOVE_Walking);
+				UE_LOG(LogTemp, Warning, TEXT("[BOSS] OnPhaseTransitionComplete called but still falling (Z=%.1f) - waiting for Landed()"),
+					GetActorLocation().Z);
+				return;
 			}
+
+			// We're on the ground - set walking mode
+			MovementComp->SetMovementMode(MOVE_Walking);
 			MovementComp->Velocity = FVector::ZeroVector;
 		}
+	}
+
+	bIsTransitioning = false;
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack. Phase=%d, Z=%.1f"),
+		(int)CurrentPhase, GetActorLocation().Z);
+
+	// On-screen debug message (green for success)
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
+			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *PhaseNames[(int)CurrentPhase], GetActorLocation().Z));
 	}
 }
 
@@ -376,12 +491,23 @@ bool ABossCharacter::StartApproachDash(AActor* Target)
 	// Positive offset = counter-clockwise, negative = clockwise
 	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
 
-	// Calculate approximate arc length for duration
-	// Arc travels from StartAngle to TargetAngle while radius shrinks from StartRadius to TargetRadius
+	// Calculate approximate arc length for fallback duration
 	float AngleDelta = FMath::Abs(AngleOffsetRad);
 	float AverageRadius = (DashStartRadius + DashTargetRadius) * 0.5f;
 	float ArcLength = AngleDelta * AverageRadius + FMath::Abs(DashStartRadius - DashTargetRadius);
-	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+	float FallbackDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+
+	// Duration is determined by montage length if available, otherwise by arc calculation
+	if (ApproachDashMontage)
+	{
+		DashTotalDuration = ApproachDashMontage->GetPlayLength();
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] Using montage length for duration: %.2fs"), DashTotalDuration);
+	}
+	else
+	{
+		DashTotalDuration = FallbackDuration;
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] No montage, using calculated duration: %.2fs"), DashTotalDuration);
+	}
 	DashElapsedTime = 0.0f;
 
 	bIsDashing = true;
@@ -393,8 +519,20 @@ bool ABossCharacter::StartApproachDash(AActor* Target)
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH DYNAMIC: AngleOffset=%.1f, StartRadius=%.0f -> TargetRadius=%.0f, Duration=%.2fs"),
-		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration);
+	// Play approach dash montage
+	if (ApproachDashMontage)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+			{
+				AnimInstance->Montage_Play(ApproachDashMontage);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH DYNAMIC: AngleOffset=%.1f, StartRadius=%.0f -> TargetRadius=%.0f, Duration=%.2fs (Arc would be %.2fs)"),
+		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration, FallbackDuration);
 
 	return true;
 }
@@ -451,6 +589,18 @@ bool ABossCharacter::StartCircleDash(AActor* Target)
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
+	// Play circle dash montage
+	if (CircleDashMontage)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+			{
+				AnimInstance->Montage_Play(CircleDashMontage);
+			}
+		}
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE DYNAMIC: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs"),
 		AngleOffsetDeg, DashStartRadius, DashTotalDuration);
 
@@ -472,6 +622,8 @@ bool ABossCharacter::CanDash() const
 {
 	if (bIsDead || bIsDashing || bIsInKnockback || bIsInFinisherPhase || bIsTransitioning)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossDash] CanDash=FALSE: Dead=%d, Dashing=%d, Knockback=%d, Finisher=%d, Transitioning=%d"),
+			bIsDead, bIsDashing, bIsInKnockback, bIsInFinisherPhase, bIsTransitioning);
 		return false;
 	}
 
@@ -748,6 +900,22 @@ void ABossCharacter::OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupt
 	GetWorld()->GetTimerManager().SetTimer(MeleeCooldownTimer, this, &ABossCharacter::OnMeleeCooldownEnd, MeleeAttackCooldown, false);
 }
 
+void ABossCharacter::OnLandingMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landing montage ended (Interrupted=%d), completing ground transition"), bInterrupted);
+
+	// Now complete the transition
+	bIsTransitioning = false;
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
+			FString::Printf(TEXT("BOSS: Ground phase ready (landing complete)")));
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Ground phase transition COMPLETE - boss can now attack"));
+}
+
 void ABossCharacter::OnMeleeCooldownEnd()
 {
 	bMeleeOnCooldown = false;
@@ -860,9 +1028,28 @@ void ABossCharacter::StartHovering()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StartHovering() called! CurrentPhase=%d"), (int)CurrentPhase);
 
+	// Play take off montage with highest priority - stop all other montages first
+	if (TakeOffMontage)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+			{
+				// Stop ALL currently playing montages first
+				AnimInstance->StopAllMontages(0.1f);
+				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Stopped all montages for take off"));
+
+				// Play take off montage with highest priority
+				AnimInstance->Montage_Play(TakeOffMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, true);
+				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Take off montage started"));
+			}
+		}
+	}
+
 	// Enable forced flying mode for aerial phase
 	if (FlyingMovement)
 	{
+		FlyingMovement->SetComponentTickEnabled(true); // Re-enable tick (disabled in StopHovering)
 		FlyingMovement->bEnforceFlyingMode = true;
 	}
 
@@ -898,14 +1085,24 @@ void ABossCharacter::StopHovering()
 	{
 		FlyingMovement->bEnforceFlyingMode = false;
 		FlyingMovement->StopMovement();
+		FlyingMovement->SetComponentTickEnabled(false); // Полностью отключить tick
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] FlyingMovement disabled"));
 	}
 
-	// Switch to walking mode and enable gravity - boss will fall naturally
+	// Switch to falling mode and enable gravity - boss will fall naturally
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->SetMovementMode(MOVE_Falling);
 		MovementComp->GravityScale = 1.0f;
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Gravity enabled, boss will fall to ground"));
+		MovementComp->Velocity = FVector(0, 0, -100.0f); // Небольшой начальный импульс вниз
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Gravity enabled, MovementMode=%d, Velocity.Z=%.1f"),
+			(int)MovementComp->MovementMode, MovementComp->Velocity.Z);
+	}
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Cyan,
+			FString::Printf(TEXT("[BOSS] StopHovering Z=%.1f"), GetActorLocation().Z));
 	}
 }
 
@@ -1265,6 +1462,23 @@ void ABossCharacter::FireEMFProjectile(AActor* Target)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[BossCharacter] FireEMFProjectile: BossProjectileClass not set!"));
 		return;
+	}
+
+	// Play random aerial attack montage
+	if (AerialAttackMontages.Num() > 0)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+			{
+				int32 MontageIndex = FMath::RandRange(0, AerialAttackMontages.Num() - 1);
+				UAnimMontage* SelectedMontage = AerialAttackMontages[MontageIndex];
+				if (SelectedMontage)
+				{
+					AnimInstance->Montage_Play(SelectedMontage);
+				}
+			}
+		}
 	}
 
 	// Calculate spawn transform - from boss towards target

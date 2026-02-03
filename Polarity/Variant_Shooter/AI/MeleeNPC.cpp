@@ -99,6 +99,7 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 	bIsAttacking = true;
 	CurrentMeleeTarget = Target;
 	HitActorsThisAttack.Empty();
+	bHasDealtDamage = false;
 	LastAttackTime = GetWorld()->GetTimeSeconds();
 
 	// Face the target
@@ -460,6 +461,9 @@ void AMeleeNPC::ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitResult)
 		return;
 	}
 
+	// Mark that damage was dealt - stops magnetism
+	bHasDealtDamage = true;
+
 	// Create damage event
 	FPointDamageEvent DamageEvent;
 	DamageEvent.Damage = AttackDamage;
@@ -541,8 +545,8 @@ void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distan
 
 void AMeleeNPC::UpdateAttackMagnetism(float DeltaTime)
 {
-	// Check if magnetism is enabled and we have a valid target
-	if (!bEnableAttackMagnetism || !CurrentMeleeTarget.IsValid())
+	// Check if magnetism is enabled, we have a valid target, and haven't dealt damage yet
+	if (!bEnableAttackMagnetism || !CurrentMeleeTarget.IsValid() || bHasDealtDamage)
 	{
 		return;
 	}

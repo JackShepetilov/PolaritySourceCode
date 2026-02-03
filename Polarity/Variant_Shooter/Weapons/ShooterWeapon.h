@@ -21,6 +21,7 @@ class UPhysicalMaterial;
 class UDamageType;
 class UCharacterMovementComponent;
 class USoundAttenuation;
+class UEMF_FieldComponent;
 
 // Delegate for heat updates (for UI binding)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHeatChanged, float, NewHeat);
@@ -241,6 +242,20 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
 	TObjectPtr<UNiagaraSystem> MuzzleFlashFX;
+
+	// ==================== VFX|Charge-Based Muzzle Flash ====================
+
+	/** If true, use charge-based muzzle flash VFX instead of default MuzzleFlashFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Charge Muzzle Flash")
+	bool bUseChargeMuzzleFlash = false;
+
+	/** Muzzle flash VFX for positive charge (used when owner has positive EMF charge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Charge Muzzle Flash", meta = (EditCondition = "bUseChargeMuzzleFlash"))
+	TObjectPtr<UNiagaraSystem> PositiveMuzzleFlashFX;
+
+	/** Muzzle flash VFX for negative charge (used when owner has negative EMF charge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Charge Muzzle Flash", meta = (EditCondition = "bUseChargeMuzzleFlash"))
+	TObjectPtr<UNiagaraSystem> NegativeMuzzleFlashFX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<UNiagaraSystem> BeamFX;
@@ -498,6 +513,9 @@ protected:
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnMuzzleFlashEffect();
+
+	/** Get owner's EMF charge value. Returns 0 if owner has no EMF component. */
+	float GetOwnerCharge() const;
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier = 1.0f);

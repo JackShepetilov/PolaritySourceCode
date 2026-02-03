@@ -119,9 +119,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* FireAction;
 
-	/** Switch weapon input action */
+	/** Switch weapon input action (cycles through weapons) */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* SwitchWeaponAction;
+
+	/** Map of input actions to specific weapon classes (direct weapon hotkeys) */
+	UPROPERTY(EditAnywhere, Category = "Input|Weapon Hotkeys")
+	TMap<UInputAction*, TSubclassOf<AShooterWeapon>> WeaponHotkeys;
 
 	/** Aim down sights input action */
 	UPROPERTY(EditAnywhere, Category = "Input")
@@ -227,6 +231,32 @@ protected:
 
 	/** Weapon currently equipped and ready to shoot with */
 	TObjectPtr<AShooterWeapon> CurrentWeapon;
+
+	// ==================== Weapon Switch Animation ====================
+
+	/** True while weapon switch animation is in progress */
+	bool bIsWeaponSwitchInProgress = false;
+
+	/** Weapon to switch to after lowering animation completes */
+	UPROPERTY()
+	TObjectPtr<AShooterWeapon> PendingWeapon = nullptr;
+
+	/** Progress of weapon switch mesh transition (0-1) */
+	float WeaponSwitchProgress = 0.0f;
+
+	/** Base location of FirstPersonMesh for weapon switch (stored at switch start) */
+	FVector WeaponSwitchMeshBaseLocation = FVector::ZeroVector;
+
+	/** True during lowering phase, false during raising phase */
+	bool bIsWeaponLowering = true;
+
+	/** Time to lower weapon mesh during switch */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.05", ClampMax = "0.5"))
+	float WeaponSwitchLowerTime = 0.15f;
+
+	/** Time to raise weapon mesh during switch */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.05", ClampMax = "0.5"))
+	float WeaponSwitchRaiseTime = 0.15f;
 
 	UPROPERTY(EditAnywhere, Category = "Destruction", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
 	float RespawnTime = 5.0f;
@@ -608,9 +638,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoStopFiring();
 
-	/** Handles switch weapon input */
+	/** Handles switch weapon input (cycles through weapons) */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoSwitchWeapon();
+
+	/** Handles weapon hotkey input - switches to specific weapon class if owned */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass);
+
+	/** Returns true if weapon switch is currently in progress */
+	UFUNCTION(BlueprintPure, Category = "Weapons")
+	bool IsWeaponSwitchInProgress() const { return bIsWeaponSwitchInProgress; }
 
 	/** Handles start ADS input */
 	UFUNCTION(BlueprintCallable, Category = "Input")
@@ -665,6 +703,22 @@ protected:
 	/** Update ADS state and apply effects */
 	void UpdateADS(float DeltaTime);
 
+	/** Start weapon switch to specified weapon (with lowering/raising animation) */
+	void StartWeaponSwitch(AShooterWeapon* NewWeapon);
+
+	/** Update weapon switch animation */
+	void UpdateWeaponSwitch(float DeltaTime);
+
+	/** Called when weapon lowering completes - performs actual weapon swap */
+	void OnWeaponSwitchLowered();
+
+	/** Called when weapon raising completes - ends switch process */
+	void OnWeaponSwitchRaised();
+
+	/** Updates first person mesh visibility based on weapon ownership */
+	void UpdateFirstPersonMeshVisibility();
+
+	/** Checks if a bone is a child of (or is) any of the specified root bones */
 	/** Update HP regeneration based on movement speed */
 	void UpdateRegeneration(float DeltaTime);
 

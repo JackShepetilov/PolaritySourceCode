@@ -21,28 +21,19 @@ void UEMFVelocityModifier::BeginPlay()
 	AActor* Owner = GetOwner();
 	if (!Owner)
 	{
-		UE_LOG(LogTemp, Error, TEXT("EMFVelocityModifier: No Owner!"));
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: BeginPlay on %s"), *Owner->GetName());
-
-	// ÃÂÃÂ°ÃÂ¹Ã‘â€šÃÂ¸ UEMF_FieldComponent ÃÂ½ÃÂ° Ã‘â€šÃÂ¾ÃÂ¼ ÃÂ¶ÃÂµ ÃÂ°ÃÂºÃ‘â€šÃÂ¾Ã‘â‚¬ÃÂµ
+	// Find UEMF_FieldComponent on the same actor
 	FieldComponent = Owner->FindComponentByClass<UEMF_FieldComponent>();
-	if (!FieldComponent)
-	{
-		UE_LOG(LogTemp, Error, TEXT("EMFVelocityModifier: No UEMF_FieldComponent found on %s!"), *Owner->GetName());
-	}
-	else
+	if (FieldComponent)
 	{
 		PreviousCharge = GetCharge();
 		// Initialize charge from BaseCharge
 		UpdateFieldComponentCharge();
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Found UEMF_FieldComponent, Charge=%.2f, Mass=%.2f"),
-			GetCharge(), GetMass());
 	}
 
-	// ÃÂÃÂ°ÃÂ¹Ã‘â€šÃÂ¸ ÃÂ¸ ÃÂ·ÃÂ°Ã‘â‚¬ÃÂµÃÂ³ÃÂ¸Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’Ã‘ÂÃ‘Â ÃÂ² MovementComponent
+	// Find and register with MovementComponent
 	if (ACharacter* Character = Cast<ACharacter>(Owner))
 	{
 		MovementComponent = Cast<UApexMovementComponent>(Character->GetCharacterMovement());
@@ -50,31 +41,18 @@ void UEMFVelocityModifier::BeginPlay()
 		if (MovementComponent)
 		{
 			MovementComponent->RegisterVelocityModifier(this);
-			UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Registered with ApexMovementComponent on %s"), *Owner->GetName());
 		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("EMFVelocityModifier: %s has CharacterMovement but it's not ApexMovementComponent!"), *Owner->GetName());
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Owner %s is not a Character, skipping movement registration"), *Owner->GetName());
 	}
 
-	// ÃÅ¸ÃÂ¾ÃÂ´ÃÂ¿ÃÂ¸Ã‘ÂÃÂ°Ã‘â€šÃ‘Å’Ã‘ÂÃ‘Â ÃÂ½ÃÂ° overlap Ã‘ÂÃÂ¾ÃÂ±Ã‘â€¹Ã‘â€šÃÂ¸Ã‘Â ÃÂ²ÃÂ»ÃÂ°ÃÂ´ÃÂµÃÂ»Ã‘Å’Ã‘â€ ÃÂ°
+	// Subscribe to overlap events
 	Owner->OnActorBeginOverlap.AddDynamic(this, &UEMFVelocityModifier::OnOwnerBeginOverlap);
-	UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Subscribed to OnActorBeginOverlap"));
 }
 
 void UEMFVelocityModifier::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: EndPlay on %s"), GetOwner() ? *GetOwner()->GetName() : TEXT("null"));
-
 	if (MovementComponent)
 	{
 		MovementComponent->UnregisterVelocityModifier(this);
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Unregistered from ApexMovementComponent"));
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -84,16 +62,8 @@ void UEMFVelocityModifier::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 bool UEMFVelocityModifier::ModifyVelocity_Implementation(float DeltaTime, const FVector& CurrentVelocity, FVector& OutVelocityDelta)
 {
-	static bool bFirstCall = true;
-	if (bFirstCall)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: ModifyVelocity called for first time!"));
-		bFirstCall = false;
-	}
-
 	if (!bEnabled)
 	{
-		if (bLogForces) UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Disabled"));
 		OutVelocityDelta = FVector::ZeroVector;
 		CurrentEMForce = FVector::ZeroVector;
 		CurrentAcceleration = FVector::ZeroVector;
@@ -102,7 +72,6 @@ bool UEMFVelocityModifier::ModifyVelocity_Implementation(float DeltaTime, const 
 
 	if (!FieldComponent)
 	{
-		if (bLogForces) UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: No FieldComponent"));
 		OutVelocityDelta = FVector::ZeroVector;
 		CurrentEMForce = FVector::ZeroVector;
 		CurrentAcceleration = FVector::ZeroVector;
@@ -118,23 +87,15 @@ bool UEMFVelocityModifier::ModifyVelocity_Implementation(float DeltaTime, const 
 		return false;
 	}
 
-	// Ãâ€™Ã‘â€¹Ã‘â€¡ÃÂ¸Ã‘ÂÃÂ»ÃÂ¸Ã‘â€šÃ‘Å’ velocity delta ÃÂ¸Ã‘ÂÃÂ¿ÃÂ¾ÃÂ»Ã‘Å’ÃÂ·Ã‘Æ’Ã‘Â ÃÂ´ÃÂ°ÃÂ½ÃÂ½Ã‘â€¹ÃÂµ ÃÂ¸ÃÂ· FieldComponent
+	// Calculate velocity delta using data from FieldComponent
 	OutVelocityDelta = ComputeVelocityDelta(DeltaTime, CurrentVelocity);
 
-	// Ãâ€ÃÂ¾ÃÂ±ÃÂ°ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’ pending ÃÂ¸ÃÂ¼ÃÂ¿Ã‘Æ’ÃÂ»Ã‘Å’Ã‘ÂÃ‘â€¹
+	// Add pending impulses
 	OutVelocityDelta += PendingImpulse;
 	PendingImpulse = FVector::ZeroVector;
 
-	// ÃÅ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂµÃ‘â‚¬ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ¸ÃÂ·ÃÂ¼ÃÂµÃÂ½ÃÂµÃÂ½ÃÂ¸ÃÂµ ÃÂ·ÃÂ°Ã‘â‚¬Ã‘ÂÃÂ´ÃÂ°
+	// Check for charge changes
 	CheckChargeChanged();
-
-	if (bLogForces && !CurrentEMForce.IsNearlyZero())
-	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Charge=%.2f Force=(%.2f, %.2f, %.2f) VelDelta=(%.2f, %.2f, %.2f)"),
-			Charge,
-			CurrentEMForce.X, CurrentEMForce.Y, CurrentEMForce.Z,
-			OutVelocityDelta.X, OutVelocityDelta.Y, OutVelocityDelta.Z);
-	}
 
 	return !OutVelocityDelta.IsNearlyZero();
 }
@@ -155,7 +116,6 @@ float UEMFVelocityModifier::GetCharge() const
 {
 	if (FieldComponent)
 	{
-		// Ð‘ÐµÑ€Ñ‘Ð¼ Ð·Ð°Ñ€ÑÐ´ Ð¸Ð· PointChargeParams Ð²Ð¼ÐµÑÑ‚Ð¾ Charge
 		return FieldComponent->GetSourceDescription().PointChargeParams.Charge;
 	}
 	return 0.0f;
@@ -165,7 +125,6 @@ void UEMFVelocityModifier::SetCharge(float NewCharge)
 {
 	if (FieldComponent)
 	{
-		// Ð£ÑÑ‚Ð°Ð½Ð°Ð²Ð»Ð¸Ð²Ð°ÐµÐ¼ Ð·Ð°Ñ€ÑÐ´ Ð² PointChargeParams
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 		Desc.PointChargeParams.Charge = NewCharge;
 		FieldComponent->SetSourceDescription(Desc);
@@ -214,26 +173,16 @@ void UEMFVelocityModifier::AddEMImpulse(FVector Impulse)
 
 void UEMFVelocityModifier::ToggleChargeSign()
 {
-	// Ð˜Ð½Ð²ÐµÑ€Ñ‚Ð¸Ñ€ÑƒÐµÐ¼ Ð·Ð½Ð°Ðº Ð±Ð°Ð·Ð¾Ð²Ð¾Ð³Ð¾ Ð·Ð°Ñ€ÑÐ´Ð°
 	if (FMath::IsNearlyZero(BaseCharge))
 	{
-		// Ð•ÑÐ»Ð¸ Ð±Ð°Ð·Ð¾Ð²Ñ‹Ð¹ Ð·Ð°Ñ€ÑÐ´ Ð½ÑƒÐ»ÐµÐ²Ð¾Ð¹ - ÑƒÑÑ‚Ð°Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ Ð¿Ð¾Ð»Ð¾Ð¶Ð¸Ñ‚ÐµÐ»ÑŒÐ½Ñ‹Ð¹
 		BaseCharge = 10.0f;
-		UE_LOG(LogTemp, Warning, TEXT("EMF: BaseCharge was 0, set to 10.0"));
 	}
 	else
 	{
-		// Ð˜Ð½Ð°Ñ‡Ðµ Ð¸Ð½Ð²ÐµÑ€Ñ‚Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ Ð·Ð½Ð°Ðº
 		BaseCharge = -BaseCharge;
 	}
-	
+
 	UpdateFieldComponentCharge();
-	
-	if (bLogForces)
-	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Charge toggled. Base=%.2f, Bonus=%.2f, Total=%.2f"),
-			BaseCharge, CurrentBonusCharge, GetTotalCharge());
-	}
 }
 
 int32 UEMFVelocityModifier::GetChargeSign() const
@@ -248,14 +197,8 @@ int32 UEMFVelocityModifier::GetChargeSign() const
 
 void UEMFVelocityModifier::NeutralizeCharge()
 {
-	float PrevCharge = GetCharge();
 	SetCharge(0.0f);
 	LastNeutralizationTime = GetWorld()->GetTimeSeconds();
-
-	if (bLogForces)
-	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Charge neutralized (was %.2f)"), PrevCharge);
-	}
 }
 
 void UEMFVelocityModifier::SetOwnerType(EEMSourceOwnerType NewOwnerType)
@@ -290,12 +233,12 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		return FVector::ZeroVector;
 	}
 
-	// ÃÅ¸ÃÂ¾ÃÂ»Ã‘Æ’Ã‘â€¡ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ²Ã‘ÂÃÂµ ÃÂ´Ã‘â‚¬Ã‘Æ’ÃÂ³ÃÂ¸ÃÂµ ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¸ (ÃÂ¸Ã‘ÂÃÂºÃÂ»Ã‘Å½Ã‘â€¡ÃÂ°Ã‘Â Ã‘ÂÃÂµÃÂ±Ã‘Â)
+	// Get all other sources (excluding self)
 	TArray<FEMSourceDescription> OtherSources = FieldComponent->GetAllOtherSources();
 
 	if (OtherSources.Num() == 0)
 	{
-		// ÃÂÃÂµÃ‘â€š ÃÂ´Ã‘â‚¬Ã‘Æ’ÃÂ³ÃÂ¸Ã‘â€¦ ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¾ÃÂ² - ÃÂ½ÃÂµÃ‘â€š Ã‘ÂÃÂ¸ÃÂ»Ã‘â€¹
+		// No other sources - no force
 		CurrentEMForce = FVector::ZeroVector;
 		CurrentAcceleration = FVector::ZeroVector;
 		return FVector::ZeroVector;
@@ -333,23 +276,9 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 
 		// Apply multiplier and add to total
 		TotalForce += SourceForce * Multiplier;
-
-		if (bLogForces && !SourceForce.IsNearlyZero())
-		{
-			UE_LOG(LogTemp, Log, TEXT("EMF: Source OwnerType=%d, Multiplier=%.2f, SourceForce=(%.4f, %.4f, %.4f)"),
-				static_cast<int32>(Source.OwnerType), Multiplier,
-				SourceForce.X, SourceForce.Y, SourceForce.Z);
-		}
 	}
 
 	CurrentEMForce = TotalForce;
-
-	if (bLogForces && OtherSources.Num() > 0)
-	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Sources=%d, Position=(%.0f, %.0f, %.0f), TotalForce=(%.4f, %.4f, %.4f)"),
-			OtherSources.Num(), Position.X, Position.Y, Position.Z,
-			CurrentEMForce.X, CurrentEMForce.Y, CurrentEMForce.Z);
-	}
 
 	// Clamp maximum force
 	if (CurrentEMForce.SizeSquared() > MaxForce * MaxForce)
@@ -413,48 +342,36 @@ void UEMFVelocityModifier::CheckChargeChanged()
 
 void UEMFVelocityModifier::OnOwnerBeginOverlap(AActor* OverlappedActor, AActor* OtherActor)
 {
-	UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: OnOwnerBeginOverlap - %s overlapped with %s"),
-		OverlappedActor ? *OverlappedActor->GetName() : TEXT("null"),
-		OtherActor ? *OtherActor->GetName() : TEXT("null"));
-
 	if (!OtherActor || OtherActor == GetOwner() || !bCanNeutralizeOnContact)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Overlap ignored (null=%d, self=%d, canNeutralize=%d)"),
-			!OtherActor, OtherActor == GetOwner(), bCanNeutralizeOnContact);
 		return;
 	}
 
-	// ÃÅ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂµÃ‘â‚¬ÃÂ¸Ã‘â€šÃ‘Å’, ÃÂµÃ‘ÂÃ‘â€šÃ‘Å’ ÃÂ»ÃÂ¸ Ã‘Æ’ ÃÂ´Ã‘â‚¬Ã‘Æ’ÃÂ³ÃÂ¾ÃÂ³ÃÂ¾ ÃÂ°ÃÂºÃ‘â€šÃÂ¾Ã‘â‚¬ÃÂ° UEMF_FieldComponent
+	// Check if other actor has UEMF_FieldComponent
 	UEMF_FieldComponent* OtherFieldComp = OtherActor->FindComponentByClass<UEMF_FieldComponent>();
 	if (!OtherFieldComp)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: %s has no UEMF_FieldComponent"), *OtherActor->GetName());
 		return;
 	}
 
 	float MyCharge = GetCharge();
 	float OtherCharge = OtherFieldComp->GetSourceDescription().Charge;
 
-	UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: MyCharge=%.2f, OtherCharge=%.2f"), MyCharge, OtherCharge);
-
-	// ÃÅ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂµÃ‘â‚¬ÃÂ¸Ã‘â€šÃ‘Å’: ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘â€šÃÂ¸ÃÂ²ÃÂ¾ÃÂ¿ÃÂ¾ÃÂ»ÃÂ¾ÃÂ¶ÃÂ½Ã‘â€¹ÃÂµ ÃÂ·ÃÂ½ÃÂ°ÃÂºÃÂ¸?
+	// Check: opposite signs?
 	bool bOppositeSign = (MyCharge * OtherCharge) < 0.0f;
 
 	if (bOppositeSign && FMath::Abs(OtherCharge) >= MinChargeToNeutralize)
 	{
 		float PrevCharge = MyCharge;
 
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Opposite signs! Neutralizing... (bNeutralizeTargetOnly=%d)"), bNeutralizeTargetOnly);
-
-		// ÃÂÃÂµÃÂ¹Ã‘â€šÃ‘â‚¬ÃÂ°ÃÂ»ÃÂ¸ÃÂ·ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ Ã‘ÂÃÂµÃÂ±Ã‘Â ÃÂµÃ‘ÂÃÂ»ÃÂ¸ ÃÂ¼ÃÂ¾ÃÂ¶ÃÂµÃÂ¼
+		// Neutralize self if possible
 		if (CanBeNeutralized())
 		{
 			NeutralizeCharge();
 			OnChargeNeutralized.Broadcast(OtherActor, PrevCharge);
-			UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Self neutralized"));
 		}
 
-		// ÃÂÃÂµÃÂ¹Ã‘â€šÃ‘â‚¬ÃÂ°ÃÂ»ÃÂ¸ÃÂ·ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ Ã‘â€ ÃÂµÃÂ»Ã‘Å’ Ã‘â€šÃÂ¾ÃÂ»Ã‘Å’ÃÂºÃÂ¾ ÃÂµÃ‘ÂÃÂ»ÃÂ¸ bNeutralizeTargetOnly = false
+		// Neutralize target only if bNeutralizeTargetOnly = false
 		if (!bNeutralizeTargetOnly)
 		{
 			UEMFVelocityModifier* OtherModifier = OtherActor->FindComponentByClass<UEMFVelocityModifier>();
@@ -464,34 +381,14 @@ void UEMFVelocityModifier::OnOwnerBeginOverlap(AActor* OverlappedActor, AActor* 
 				{
 					OtherModifier->NeutralizeCharge();
 					OtherModifier->OnChargeNeutralized.Broadcast(GetOwner(), OtherCharge);
-					UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Target %s neutralized via Modifier"), *OtherActor->GetName());
 				}
 			}
 			else
 			{
-				// Ãâ€¢Ã‘ÂÃÂ»ÃÂ¸ ÃÂ½ÃÂµÃ‘â€š ÃÂ¼ÃÂ¾ÃÂ´ÃÂ¸Ã‘â€žÃÂ¸ÃÂºÃÂ°Ã‘â€šÃÂ¾Ã‘â‚¬ÃÂ° Ã¢â‚¬â€ ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘ÂÃ‘â€šÃÂ¾ ÃÂ¾ÃÂ±ÃÂ½Ã‘Æ’ÃÂ»ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ·ÃÂ°Ã‘â‚¬Ã‘ÂÃÂ´ ÃÂºÃÂ¾ÃÂ¼ÃÂ¿ÃÂ¾ÃÂ½ÃÂµÃÂ½Ã‘â€šÃÂ°
+				// If no modifier - just zero the charge on component
 				OtherFieldComp->SetCharge(0.0f);
-
-				// ÃÅ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂµÃ‘â‚¬ÃÂ¸Ã‘â€šÃ‘Å’ Ã‘â€¡Ã‘â€šÃÂ¾ ÃÂ·ÃÂ°Ã‘â‚¬Ã‘ÂÃÂ´ Ã‘â‚¬ÃÂµÃÂ°ÃÂ»Ã‘Å’ÃÂ½ÃÂ¾ ÃÂ¸ÃÂ·ÃÂ¼ÃÂµÃÂ½ÃÂ¸ÃÂ»Ã‘ÂÃ‘Â
-				float NewCharge = OtherFieldComp->GetSourceDescription().Charge;
-				UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: Target %s neutralized via FieldComponent. NewCharge=%.2f (should be 0)"),
-					*OtherActor->GetName(), NewCharge);
-
-				if (!FMath::IsNearlyZero(NewCharge))
-				{
-					UE_LOG(LogTemp, Error, TEXT("EMFVelocityModifier: SetCharge(0) didn't work! Check bUseOwnerInterface on %s"), *OtherActor->GetName());
-				}
 			}
 		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: bNeutralizeTargetOnly=true, target not neutralized"));
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFVelocityModifier: No neutralization (oppositeSign=%d, otherCharge=%.2f >= minCharge=%.2f: %d)"),
-			bOppositeSign, FMath::Abs(OtherCharge), MinChargeToNeutralize, FMath::Abs(OtherCharge) >= MinChargeToNeutralize);
 	}
 }
 
@@ -503,7 +400,7 @@ void UEMFVelocityModifier::DrawDebugForces(const FVector& Position, const FVecto
 		return;
 	}
 
-	// ÃÂ¡ÃÂ¸ÃÂ»ÃÂ° (ÃÂºÃ‘â‚¬ÃÂ°Ã‘ÂÃÂ½Ã‘â€¹ÃÂ¹)
+	// Force (red)
 	if (!Force.IsNearlyZero())
 	{
 		DrawDebugDirectionalArrow(
@@ -519,7 +416,7 @@ void UEMFVelocityModifier::DrawDebugForces(const FVector& Position, const FVecto
 		);
 	}
 
-	// E-ÃÂ¿ÃÂ¾ÃÂ»ÃÂµ (ÃÂ¶Ã‘â€˜ÃÂ»Ã‘â€šÃ‘â€¹ÃÂ¹)
+	// E-field (yellow)
 	FVector ElectricField = FieldComponent->ElectricField;
 	if (!ElectricField.IsNearlyZero())
 	{
@@ -536,7 +433,7 @@ void UEMFVelocityModifier::DrawDebugForces(const FVector& Position, const FVecto
 		);
 	}
 
-	// B-ÃÂ¿ÃÂ¾ÃÂ»ÃÂµ (Ã‘ÂÃÂ¸ÃÂ½ÃÂ¸ÃÂ¹)
+	// B-field (blue)
 	FVector MagneticField = FieldComponent->MagneticField;
 	if (!MagneticField.IsNearlyZero())
 	{
@@ -577,12 +474,6 @@ void UEMFVelocityModifier::AddBonusCharge(float Amount)
 
 	CurrentBonusCharge = FMath::Min(CurrentBonusCharge + Amount, MaxBonusCharge);
 	UpdateFieldComponentCharge();
-
-	if (bLogForces)
-	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Added %.2f bonus charge. Total bonus: %.2f, Total charge: %.2f"),
-			Amount, CurrentBonusCharge, GetTotalCharge());
-	}
 }
 
 void UEMFVelocityModifier::AddPermanentCharge(float Amount)
@@ -592,30 +483,24 @@ void UEMFVelocityModifier::AddPermanentCharge(float Amount)
 		return;
 	}
 
-	// Сохраняем знак заряда
+	// Keep the sign of the charge
 	float Sign = (BaseCharge >= 0.0f) ? 1.0f : -1.0f;
 	float CurrentModule = FMath::Abs(BaseCharge);
 
-	// Положительный Amount увеличивает модуль, отрицательный уменьшает
+	// Positive Amount increases module, negative decreases
 	float NewModule = CurrentModule + Amount;
 
-	// Клампим модуль: минимум 0, максимум MaxBaseCharge
+	// Clamp module: min 0, max MaxBaseCharge
 	NewModule = FMath::Clamp(NewModule, 0.0f, MaxBaseCharge);
 
-	// Восстанавливаем знак
+	// Restore sign
 	BaseCharge = Sign * NewModule;
 	UpdateFieldComponentCharge();
-
-	if (bLogForces)
-	{
-		UE_LOG(LogTemp, Log, TEXT("EMF: Added %.2f permanent charge. BaseCharge: %.2f (max: %.2f), Total charge: %.2f"),
-			Amount, BaseCharge, MaxBaseCharge, GetTotalCharge());
-	}
 }
 
 void UEMFVelocityModifier::SetBaseCharge(float NewBaseCharge)
 {
-	// Клампим по модулю, сохраняя знак
+	// Clamp by module, keeping sign
 	float Sign = (NewBaseCharge >= 0.0f) ? 1.0f : -1.0f;
 	float Module = FMath::Min(FMath::Abs(NewBaseCharge), MaxBaseCharge);
 	BaseCharge = Sign * Module;
@@ -631,41 +516,29 @@ void UEMFVelocityModifier::DeductCharge(float Amount)
 
 	float RemainingToDeduct = Amount;
 
-	// Сначала вычитаем из бонусного заряда
+	// First deduct from bonus charge
 	if (CurrentBonusCharge > 0.0f)
 	{
 		float DeductFromBonus = FMath::Min(CurrentBonusCharge, RemainingToDeduct);
 		CurrentBonusCharge -= DeductFromBonus;
 		RemainingToDeduct -= DeductFromBonus;
-
-		if (bLogForces)
-		{
-			UE_LOG(LogTemp, Log, TEXT("EMF: Deducted %.2f from bonus charge. Remaining bonus: %.2f"),
-				DeductFromBonus, CurrentBonusCharge);
-		}
 	}
 
-	// Если остались невычтенные единицы - вычитаем из базового заряда
+	// If remaining - deduct from base charge
 	if (RemainingToDeduct > 0.0f)
 	{
 		AddPermanentCharge(-RemainingToDeduct);
-
-		if (bLogForces)
-		{
-			UE_LOG(LogTemp, Log, TEXT("EMF: Deducted %.2f from base charge. BaseCharge: %.2f"),
-				RemainingToDeduct, BaseCharge);
-		}
 	}
 	else
 	{
-		// Обновляем FieldComponent даже если вычли только из бонуса
+		// Update FieldComponent even if only deducted from bonus
 		UpdateFieldComponentCharge();
 	}
 }
 
 float UEMFVelocityModifier::GetTotalCharge() const
 {
-	// Ð—Ð½Ð°Ðº Ð¾Ð¿Ñ€ÐµÐ´ÐµÐ»ÑÐµÑ‚ÑÑ BaseCharge, Ð±Ð¾Ð½ÑƒÑ Ð´Ð¾Ð±Ð°Ð²Ð»ÑÐµÑ‚ÑÑ Ð¿Ð¾ Ð¼Ð¾Ð´ÑƒÐ»ÑŽ
+	// Sign is determined by BaseCharge, bonus is added by module
 	float Sign = (BaseCharge >= 0.0f) ? 1.0f : -1.0f;
 	return BaseCharge + Sign * CurrentBonusCharge;
 }
@@ -675,11 +548,11 @@ void UEMFVelocityModifier::UpdateFieldComponentCharge()
 	if (FieldComponent)
 	{
 		float TotalCharge = GetTotalCharge();
-		
+
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 		Desc.PointChargeParams.Charge = TotalCharge;
 		FieldComponent->SetSourceDescription(Desc);
-		
+
 		CheckChargeChanged();
 	}
 }

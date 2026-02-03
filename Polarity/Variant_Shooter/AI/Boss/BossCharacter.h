@@ -118,9 +118,31 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "50.0"))
 	float DashTargetDistanceFromPlayer = 150.0f;
 
+	/** Montage played during approach dash (towards player) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash|Animation")
+	TObjectPtr<UAnimMontage> ApproachDashMontage;
+
+	/** Montage played during circle dash (around player) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash|Animation")
+	TObjectPtr<UAnimMontage> CircleDashMontage;
+
 	/** Array of melee attack montages */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee")
 	TArray<TObjectPtr<UAnimMontage>> MeleeAttackMontages;
+
+	// ==================== Phase Transition Animations ====================
+
+	/** Montage played when boss takes off (ground -> aerial) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions|Animation")
+	TObjectPtr<UAnimMontage> TakeOffMontage;
+
+	/** Montage played when boss lands (aerial -> ground) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Phase Transitions|Animation")
+	TObjectPtr<UAnimMontage> LandingMontage;
+
+	/** Montage played when boss takes damage while in aerial phase */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase|Animation")
+	TObjectPtr<UAnimMontage> AerialHitReactMontage;
 
 	/** Melee attack damage */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "0"))
@@ -177,6 +199,10 @@ protected:
 	/** Projectile class to spawn (should be BossProjectile or subclass) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase")
 	TSubclassOf<ABossProjectile> BossProjectileClass;
+
+	/** Array of attack montages for aerial shooting */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase|Animation")
+	TArray<TObjectPtr<UAnimMontage>> AerialAttackMontages;
 
 	/** Speed of boss projectiles */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Aerial Phase", meta = (ClampMin = "100.0"))
@@ -272,6 +298,12 @@ protected:
 
 	/** True if boss is currently being knocked back in finisher phase */
 	bool bIsFinisherKnockback = false;
+
+	/** True if boss is falling from aerial phase (for landing detection) */
+	bool bIsFallingFromAerial = false;
+
+	/** Z height when boss started falling (to verify real landing) */
+	float FallStartZ = 0.0f;
 
 	/** Start position of finisher knockback */
 	FVector FinisherKnockbackStartPos = FVector::ZeroVector;
@@ -388,6 +420,7 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void Landed(const FHitResult& Hit) override;
 
 	// ==================== Damage Handling ====================
 
@@ -582,6 +615,10 @@ protected:
 	/** Called when attack montage ends */
 	UFUNCTION()
 	void OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Called when landing montage ends */
+	UFUNCTION()
+	void OnLandingMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	/** Apply melee damage to hit actor */
 	void ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitResult);

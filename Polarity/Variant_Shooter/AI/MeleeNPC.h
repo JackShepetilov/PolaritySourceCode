@@ -155,6 +155,9 @@ protected:
 	/** Current attack target */
 	TWeakObjectPtr<AActor> CurrentMeleeTarget;
 
+	/** True if damage was dealt during current attack (stops magnetism) */
+	bool bHasDealtDamage = false;
+
 	// ==================== Dash Runtime State ====================
 
 	/** True когда NPC выполняет рывок */
