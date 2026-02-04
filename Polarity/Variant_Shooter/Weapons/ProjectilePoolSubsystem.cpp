@@ -148,8 +148,10 @@ AShooterProjectile* UProjectilePoolSubsystem::SpawnPooledProjectile(TSubclassOf<
 		return nullptr;
 	}
 
+	// Use deferred spawn to set bIsPooled BEFORE BeginPlay
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.bDeferConstruction = true;
 
 	AShooterProjectile* Projectile = World->SpawnActor<AShooterProjectile>(
 		ProjectileClass,
@@ -159,8 +161,14 @@ AShooterProjectile* UProjectilePoolSubsystem::SpawnPooledProjectile(TSubclassOf<
 
 	if (Projectile)
 	{
-		// Mark as pooled and deactivate immediately
-		Projectile->InitializeForPool();
+		// Mark as pooled BEFORE BeginPlay runs
+		Projectile->SetPooledFlag();
+
+		// Now finish spawning (this calls BeginPlay)
+		Projectile->FinishSpawning(FTransform::Identity);
+
+		// Deactivate for pool storage
+		Projectile->DeactivateToPool();
 	}
 
 	return Projectile;

@@ -110,8 +110,8 @@ public:
 	/** Get default pool size for this projectile class */
 	int32 GetDefaultPoolSize() const { return DefaultPoolSize; }
 
-	/** Called by pool when spawning - deactivates immediately */
-	void InitializeForPool();
+	/** Set pooled flag before BeginPlay (called by pool subsystem during deferred spawn) */
+	void SetPooledFlag() { bIsPooled = true; }
 
 	/** Called by pool to activate projectile for use */
 	void ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator);

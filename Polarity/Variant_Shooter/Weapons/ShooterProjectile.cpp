@@ -43,6 +43,14 @@ void AShooterProjectile::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// If this projectile is being spawned for pool, skip normal initialization
+	// InitializeForPool() will be called right after BeginPlay
+	if (bIsPooled)
+	{
+		return;
+	}
+
+	// Normal spawn path (not from pool)
 	// ignore the pawn that shot this projectile
 	if (APawn* InstigatorPawn = GetInstigator())
 	{
@@ -241,12 +249,6 @@ void AShooterProjectile::OnDeferredDestruction()
 }
 
 // ==================== Pooling Implementation ====================
-
-void AShooterProjectile::InitializeForPool()
-{
-	bIsPooled = true;
-	DeactivateToPool();
-}
 
 void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator)
 {
