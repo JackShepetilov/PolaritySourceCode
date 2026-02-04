@@ -72,37 +72,43 @@ void AShooterWeapon::BeginPlay()
 		CachedMovementComponent = CharOwner->GetCharacterMovement();
 	}
 
-	// Setup ADS camera - attach to socket if exists, otherwise use relative position
-	if (ADSCameraComponent && FirstPersonMesh)
+	// NPC optimization: Completely destroy ADS camera for non-player owners
+	// AI doesn't need ADS camera at all - it wastes memory and tick time
+	if (!PawnOwner || !PawnOwner->IsPlayerControlled())
 	{
-		// Disable pawn control rotation - we handle it manually
-		ADSCameraComponent->bUsePawnControlRotation = false;
-
-		if (FirstPersonMesh->DoesSocketExist(ADSSocketName))
+		if (ADSCameraComponent)
 		{
-			ADSCameraComponent->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ADSSocketName);
-			UE_LOG(LogTemp, Warning, TEXT("ADS Camera attached to socket: %s"), *ADSSocketName.ToString());
+			ADSCameraComponent->DestroyComponent();
+			ADSCameraComponent = nullptr;
 		}
-		else
+		// Also hide first person mesh for NPCs - they only need third person
+		if (FirstPersonMesh)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ADS Socket '%s' not found on weapon mesh. Using relative position."), *ADSSocketName.ToString());
+			FirstPersonMesh->SetVisibility(false);
+			FirstPersonMesh->SetComponentTickEnabled(false);
 		}
-
-		ADSCameraComponent->SetRelativeLocation(ADSCameraRelativeLocation);
-		ADSCameraComponent->SetRelativeRotation(ADSCameraRelativeRotation);
-
-		// Set FOV if custom FOV specified
-		if (CustomADSFOV > 0.0f)
+	}
+	else
+	{
+		// Setup ADS camera for player only - attach to socket if exists, otherwise use relative position
+		if (ADSCameraComponent && FirstPersonMesh)
 		{
-			ADSCameraComponent->SetFieldOfView(CustomADSFOV);
-		}
+			// Disable pawn control rotation - we handle it manually
+			ADSCameraComponent->bUsePawnControlRotation = false;
 
-		UE_LOG(LogTemp, Warning, TEXT("ADS Camera setup complete. World Location: %s"), *ADSCameraComponent->GetComponentLocation().ToString());
+			if (FirstPersonMesh->DoesSocketExist(ADSSocketName))
+			{
+				ADSCameraComponent->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ADSSocketName);
+			}
 
-		// Disable ADS camera tick for non-player owners (AI doesn't need it)
-		if (!PawnOwner || !PawnOwner->IsPlayerControlled())
-		{
-			ADSCameraComponent->SetComponentTickEnabled(false);
+			ADSCameraComponent->SetRelativeLocation(ADSCameraRelativeLocation);
+			ADSCameraComponent->SetRelativeRotation(ADSCameraRelativeRotation);
+
+			// Set FOV if custom FOV specified
+			if (CustomADSFOV > 0.0f)
+			{
+				ADSCameraComponent->SetFieldOfView(CustomADSFOV);
+			}
 		}
 	}
 
