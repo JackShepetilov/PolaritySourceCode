@@ -98,6 +98,12 @@ void AShooterWeapon::BeginPlay()
 		}
 
 		UE_LOG(LogTemp, Warning, TEXT("ADS Camera setup complete. World Location: %s"), *ADSCameraComponent->GetComponentLocation().ToString());
+
+		// Disable ADS camera tick for non-player owners (AI doesn't need it)
+		if (!PawnOwner || !PawnOwner->IsPlayerControlled())
+		{
+			ADSCameraComponent->SetComponentTickEnabled(false);
+		}
 	}
 
 	// fill the first ammo clip
