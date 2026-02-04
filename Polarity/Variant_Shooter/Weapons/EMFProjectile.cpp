@@ -153,6 +153,21 @@ void AEMFProjectile::InitializeFromPlayerCharge(AActor* PlayerActor, float Charg
 	}
 }
 
+void AEMFProjectile::ResetProjectileState()
+{
+	// Call parent to reset base state
+	Super::ResetProjectileState();
+
+	// Reset charge and mass to defaults
+	if (FieldComponent)
+	{
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		Desc.PointChargeParams.Charge = DefaultCharge;
+		Desc.Mass = DefaultMass;
+		FieldComponent->SetSourceDescription(Desc);
+	}
+}
+
 void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection)
 {
 	// Store projectile charge before processing

@@ -81,6 +81,15 @@ protected:
 	/** Timer to handle deferred destruction of this projectile */
 	FTimerHandle DestructionTimer;
 
+	// ==================== Pooling ====================
+
+	/** Default number of projectiles to prewarm in pool */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Pooling", meta = (ClampMin = "1", ClampMax = "200"))
+	int32 DefaultPoolSize = 20;
+
+	/** True if this projectile is managed by the pool system */
+	bool bIsPooled = false;
+
 	// ==================== VFX|Trail ====================
 
 	/** Niagara system for projectile trail effect */
@@ -91,10 +100,24 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UNiagaraComponent> TrailComponent;
 
-public:	
+public:
 
 	/** Constructor */
 	AShooterProjectile();
+
+	// ==================== Pooling Interface ====================
+
+	/** Get default pool size for this projectile class */
+	int32 GetDefaultPoolSize() const { return DefaultPoolSize; }
+
+	/** Called by pool when spawning - deactivates immediately */
+	void InitializeForPool();
+
+	/** Called by pool to activate projectile for use */
+	void ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator);
+
+	/** Called by pool to deactivate projectile for reuse */
+	void DeactivateToPool();
 
 protected:
 	
@@ -125,4 +148,9 @@ protected:
 	/** Called from the destruction timer to destroy this projectile */
 	void OnDeferredDestruction();
 
+	/** Reset projectile state for pool reuse. Override in subclasses for custom state. */
+	virtual void ResetProjectileState();
+
+	/** Return this projectile to pool (or destroy if not pooled) */
+	void ReturnToPoolOrDestroy();
 };

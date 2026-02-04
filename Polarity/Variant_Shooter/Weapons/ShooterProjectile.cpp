@@ -2,6 +2,7 @@
 
 
 #include "ShooterProjectile.h"
+#include "ProjectilePoolSubsystem.h"
 #include "Components/SphereComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "GameFramework/Character.h"
@@ -120,11 +121,11 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	if (DeferredDestructionTime > 0.0f)
 	{
 		GetWorld()->GetTimerManager().SetTimer(DestructionTimer, this, &AShooterProjectile::OnDeferredDestruction, DeferredDestructionTime, false);
-
-	} else {
-
-		// destroy the projectile right away
-		Destroy();
+	}
+	else
+	{
+		// Return to pool or destroy right away
+		ReturnToPoolOrDestroy();
 	}
 }
 
@@ -235,6 +236,126 @@ float AShooterProjectile::GetTagDamageMultiplier(AActor* Target) const
 
 void AShooterProjectile::OnDeferredDestruction()
 {
-	// destroy this actor
+	// Return to pool or destroy
+	ReturnToPoolOrDestroy();
+}
+
+// ==================== Pooling Implementation ====================
+
+void AShooterProjectile::InitializeForPool()
+{
+	bIsPooled = true;
+	DeactivateToPool();
+}
+
+void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator)
+{
+	// Reset state
+	ResetProjectileState();
+
+	// Set owner and instigator
+	SetOwner(NewOwner);
+	SetInstigator(NewInstigator);
+
+	// Set transform
+	SetActorTransform(SpawnTransform);
+
+	// Enable collision
+	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+	// Setup instigator ignore (same as BeginPlay)
+	if (NewInstigator)
+	{
+		CollisionComponent->IgnoreActorWhenMoving(NewInstigator, true);
+		CollisionComponent->MoveIgnoreActors.Add(NewInstigator);
+
+		if (UPrimitiveComponent* InstigatorRoot = Cast<UPrimitiveComponent>(NewInstigator->GetRootComponent()))
+		{
+			InstigatorRoot->IgnoreActorWhenMoving(this, true);
+		}
+	}
+
+	// Reset and activate projectile movement
+	ProjectileMovement->SetVelocityInLocalSpace(FVector(ProjectileMovement->InitialSpeed, 0.0f, 0.0f));
+	ProjectileMovement->SetUpdatedComponent(CollisionComponent);
+	ProjectileMovement->Activate(true);
+
+	// Show actor
+	SetActorHiddenInGame(false);
+	SetActorTickEnabled(true);
+
+	// Spawn trail VFX if configured
+	if (TrailFX && !TrailComponent)
+	{
+		TrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			TrailFX,
+			CollisionComponent,
+			NAME_None,
+			FVector::ZeroVector,
+			FRotator::ZeroRotator,
+			EAttachLocation::KeepRelativeOffset,
+			true
+		);
+	}
+	else if (TrailComponent)
+	{
+		TrailComponent->Activate(true);
+	}
+}
+
+void AShooterProjectile::DeactivateToPool()
+{
+	// Hide actor
+	SetActorHiddenInGame(true);
+	SetActorTickEnabled(false);
+
+	// Disable collision
+	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Stop movement
+	ProjectileMovement->Deactivate();
+	ProjectileMovement->Velocity = FVector::ZeroVector;
+
+	// Stop trail VFX
+	if (TrailComponent)
+	{
+		TrailComponent->Deactivate();
+	}
+
+	// Clear timers
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(DestructionTimer);
+	}
+
+	// Clear ignore actors for next use
+	CollisionComponent->ClearMoveIgnoreActors();
+}
+
+void AShooterProjectile::ResetProjectileState()
+{
+	// Reset hit flag
+	bHit = false;
+
+	// Clear previous instigator ignores
+	CollisionComponent->ClearMoveIgnoreActors();
+}
+
+void AShooterProjectile::ReturnToPoolOrDestroy()
+{
+	if (bIsPooled)
+	{
+		// Return to pool for reuse
+		if (UWorld* World = GetWorld())
+		{
+			if (UProjectilePoolSubsystem* Pool = World->GetSubsystem<UProjectilePoolSubsystem>())
+			{
+				Pool->ReturnProjectile(this);
+				return;
+			}
+		}
+	}
+
+	// Not pooled or pool not found - destroy normally
 	Destroy();
 }

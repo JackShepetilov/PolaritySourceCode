@@ -6,6 +6,7 @@
 #include "Engine/World.h"
 #include "ShooterProjectile.h"
 #include "EMFProjectile.h"
+#include "ProjectilePoolSubsystem.h"
 #include "ShooterWeaponHolder.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
@@ -283,14 +284,22 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 	// get the projectile transform
 	FTransform ProjectileTransform = CalculateProjectileSpawnTransform(TargetLocation);
 
-	// spawn the projectile
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
-	SpawnParams.Owner = GetOwner();
-	SpawnParams.Instigator = PawnOwner;
-
-	AShooterProjectile* Projectile = GetWorld()->SpawnActor<AShooterProjectile>(ProjectileClass, ProjectileTransform, SpawnParams);
+	// Get projectile from pool (or spawn new if pool empty)
+	AShooterProjectile* Projectile = nullptr;
+	if (UProjectilePoolSubsystem* Pool = GetWorld()->GetSubsystem<UProjectilePoolSubsystem>())
+	{
+		Projectile = Pool->GetProjectile(ProjectileClass, ProjectileTransform, GetOwner(), PawnOwner);
+	}
+	else
+	{
+		// Fallback to direct spawn if pool subsystem not available
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
+		SpawnParams.Owner = GetOwner();
+		SpawnParams.Instigator = PawnOwner;
+		Projectile = GetWorld()->SpawnActor<AShooterProjectile>(ProjectileClass, ProjectileTransform, SpawnParams);
+	}
 
 	// If charge-based firing, scale projectile charge and match player polarity
 	if (bUseChargeFiring && Projectile)

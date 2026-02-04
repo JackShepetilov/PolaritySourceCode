@@ -164,6 +164,9 @@ protected:
 	/** Override hit processing to add EMF effects */
 	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection) override;
 
+	/** Override to reset EMF-specific state for pool reuse */
+	virtual void ResetProjectileState() override;
+
 	/** Override to spawn charge-based trail VFX */
 	void SpawnChargeBasedTrailVFX();
 
