@@ -1613,14 +1613,11 @@ void AShooterWeapon::UpdateADSTransition(float ADSAlpha, float DeltaTime)
 			// === STEP 1: Align Front->Rear with CameraForward ===
 			FVector LocalAimDir = (FrontSocketLocal - RearSocketLocal).GetSafeNormal();
 
-			// Use CURRENT world rotation, not saved relative rotation
-			// This fixes pitch not working - HipFireRelativeTransform is relative to hands,
-			// not world space, so it doesn't contain camera pitch
-			FQuat CurrentWorldRotation = FirstPersonMesh->GetComponentQuat();
-			FVector CurrentAimDir = CurrentWorldRotation.RotateVector(LocalAimDir);
+			FQuat BaseRotation = HipFireRelativeTransform.GetRotation();
+			FVector CurrentAimDir = BaseRotation.RotateVector(LocalAimDir);
 
 			FQuat AimCorrection = FQuat::FindBetweenNormals(CurrentAimDir, CameraForward);
-			FQuat AfterAimRotation = AimCorrection * CurrentWorldRotation;
+			FQuat AfterAimRotation = AimCorrection * BaseRotation;
 
 			// === STEP 2: Fix roll using bottom socket ===
 			// Get Rear->Bottom direction in world space after aim correction
