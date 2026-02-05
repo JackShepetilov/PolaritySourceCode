@@ -1216,16 +1216,39 @@ void ABossCharacter::EnterFinisherPhase()
 		return;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] EnterFinisherPhase called! CurrentPhase=%d, bIsTransitioning=%d, Location=%s"),
+		(int)CurrentPhase, bIsTransitioning, *GetActorLocation().ToString());
+
 	bIsInFinisherPhase = true;
+
+	// FIX #1: Cancel ANY ongoing phase transition - this could cause issues
+	bIsTransitioning = false;
+	GetWorld()->GetTimerManager().ClearTimer(PhaseTransitionTimer);
 
 	// Stop any current actions
 	bIsDashing = false;
 	bIsAttacking = false;
+	bDamageWindowActive = false;
 
 	// Cancel knockback completely - both flag and interpolation
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
 	KnockbackElapsedTime = 0.0f;
+
+	// Stop all timers that could interfere
+	GetWorld()->GetTimerManager().ClearTimer(DashCooldownTimer);
+	GetWorld()->GetTimerManager().ClearTimer(MeleeCooldownTimer);
+	GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
+	GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
+
+	// Stop any montages that might be playing
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+		{
+			AnimInstance->StopAllMontages(0.1f);
+		}
+	}
 
 	// Stop all movement/velocity BEFORE teleport
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
@@ -1289,23 +1312,51 @@ void ABossCharacter::TeleportToFinisherPosition()
 		);
 	}
 
-	// Teleport to finisher position
-	SetActorLocation(FinisherTeleportPosition);
-
-	// Set flying mode, stop velocity, and DISABLE movement completely - boss hovers frozen in place
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	// Validate teleport position - if zero, use current position + hover height
+	FVector TeleportTarget = FinisherTeleportPosition;
+	if (TeleportTarget.IsNearlyZero())
 	{
-		MovementComp->SetMovementMode(MOVE_Flying);
-		MovementComp->StopMovementImmediately();
-		MovementComp->DisableMovement();
+		UE_LOG(LogTemp, Error, TEXT("[BOSS] FinisherTeleportPosition is zero! Using fallback position."));
+		TeleportTarget = OldPosition;
+		TeleportTarget.Z += FinisherHoverHeight;
 	}
 
-	// Stop FlyingAIMovementComponent and disable it completely
+	// Teleport to finisher position
+	SetActorLocation(TeleportTarget);
+
+	// FIX #3: Set flying mode BEFORE disabling movement - IsFalling() checks MovementMode
+	// MOVE_Flying means IsFalling() returns false, which is what we want for "in air" animation
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		// First set flying mode - this affects IsFalling() return value
+		MovementComp->SetMovementMode(MOVE_Flying);
+		MovementComp->GravityScale = 0.0f;
+		MovementComp->Velocity = FVector::ZeroVector;
+		// Don't call DisableMovement() - it can reset MovementMode
+		// Instead just stop the movement and zero velocity
+		MovementComp->StopMovementImmediately();
+	}
+
+	// Stop FlyingAIMovementComponent but keep bEnforceFlyingMode true
+	// so it maintains MOVE_Flying if it ticks
 	if (FlyingMovement)
 	{
 		FlyingMovement->StopMovement();
-		FlyingMovement->bEnforceFlyingMode = false;
+		FlyingMovement->bEnforceFlyingMode = true; // Keep flying mode enforced
 		FlyingMovement->SetComponentTickEnabled(false);
+	}
+
+	// FIX #2: Face the player after teleport
+	if (CurrentTarget.IsValid())
+	{
+		FVector DirectionToPlayer = (CurrentTarget->GetActorLocation() - TeleportTarget).GetSafeNormal2D();
+		if (!DirectionToPlayer.IsNearlyZero())
+		{
+			FRotator NewRotation = DirectionToPlayer.Rotation();
+			NewRotation.Pitch = 0.0f;
+			NewRotation.Roll = 0.0f;
+			SetActorRotation(NewRotation);
+		}
 	}
 
 	// Spawn appear VFX at new position
@@ -1314,7 +1365,7 @@ void ABossCharacter::TeleportToFinisherPosition()
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 			GetWorld(),
 			TeleportAppearVFX,
-			FinisherTeleportPosition,
+			TeleportTarget,
 			GetActorRotation(),
 			FVector(1.0f),
 			true,
@@ -1322,7 +1373,9 @@ void ABossCharacter::TeleportToFinisherPosition()
 		);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Teleported to finisher position: %s"), *FinisherTeleportPosition.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Teleported to finisher position: %s (IsFalling=%d)"),
+		*TeleportTarget.ToString(),
+		GetCharacterMovement() ? GetCharacterMovement()->IsFalling() : -1);
 }
 
 void ABossCharacter::ExecuteFinisher(AActor* Attacker)
