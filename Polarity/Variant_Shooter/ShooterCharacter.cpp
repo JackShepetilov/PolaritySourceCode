@@ -1415,8 +1415,21 @@ FVector AShooterCharacter::GetWeaponTargetLocation()
 {
 	FHitResult OutHit;
 
-	const FVector Start = GetFirstPersonCameraComponent()->GetComponentLocation();
-	const FVector End = Start + (GetFirstPersonCameraComponent()->GetForwardVector() * MaxAimDistance);
+	// Get aim direction from controller (works for both hip fire and ADS)
+	// GetFirstPersonCameraComponent() doesn't update rotation when ADS camera is active
+	FVector Start = GetFirstPersonCameraComponent()->GetComponentLocation();
+	FVector AimDirection;
+
+	if (AController* PC = GetController())
+	{
+		AimDirection = PC->GetControlRotation().Vector();
+	}
+	else
+	{
+		AimDirection = GetFirstPersonCameraComponent()->GetForwardVector();
+	}
+
+	const FVector End = Start + (AimDirection * MaxAimDistance);
 
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
