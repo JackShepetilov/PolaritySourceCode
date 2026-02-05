@@ -1324,25 +1324,25 @@ void ABossCharacter::TeleportToFinisherPosition()
 	// Teleport to finisher position
 	SetActorLocation(TeleportTarget);
 
-	// FIX #3: Set flying mode BEFORE disabling movement - IsFalling() checks MovementMode
-	// MOVE_Flying means IsFalling() returns false, which is what we want for "in air" animation
+	// Disable movement completely so boss stays frozen in place
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
-		// First set flying mode - this affects IsFalling() return value
-		MovementComp->SetMovementMode(MOVE_Flying);
 		MovementComp->GravityScale = 0.0f;
 		MovementComp->Velocity = FVector::ZeroVector;
-		// Don't call DisableMovement() - it can reset MovementMode
-		// Instead just stop the movement and zero velocity
 		MovementComp->StopMovementImmediately();
+		MovementComp->DisableMovement(); // Sets MOVE_None
+
+		// FIX #3: DisableMovement sets MOVE_None, but IsFalling() checks MovementMode
+		// AnimBP uses IsFalling() to determine air state
+		// Set MOVE_Flying AFTER DisableMovement so IsFalling() returns false
+		MovementComp->SetMovementMode(MOVE_Flying);
 	}
 
-	// Stop FlyingAIMovementComponent but keep bEnforceFlyingMode true
-	// so it maintains MOVE_Flying if it ticks
+	// Stop FlyingAIMovementComponent completely
 	if (FlyingMovement)
 	{
 		FlyingMovement->StopMovement();
-		FlyingMovement->bEnforceFlyingMode = true; // Keep flying mode enforced
+		FlyingMovement->bEnforceFlyingMode = false;
 		FlyingMovement->SetComponentTickEnabled(false);
 	}
 
