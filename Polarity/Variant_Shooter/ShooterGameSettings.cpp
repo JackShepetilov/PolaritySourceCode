@@ -93,13 +93,13 @@ void UShooterGameSettings::ApplyAudioSettings()
 		return;
 	}
 
-	// Get a world context for audio
+	// Get a world context for audio (Game for packaged, PIE for editor play)
 	UWorld* World = nullptr;
 	if (GEngine)
 	{
 		for (const FWorldContext& Context : GEngine->GetWorldContexts())
 		{
-			if (Context.World() && Context.WorldType == EWorldType::Game)
+			if (Context.World() && (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE))
 			{
 				World = Context.World();
 				break;
