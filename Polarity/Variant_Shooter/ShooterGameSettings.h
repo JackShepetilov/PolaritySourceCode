@@ -83,19 +83,19 @@ public:
 	// ==================== Audio Assets (Assign in Blueprint/DefaultGame.ini) ====================
 
 	/** Sound Mix to use for volume adjustments */
-	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
 	TSoftObjectPtr<class USoundMix> AudioSoundMix;
 
 	/** Sound Class for Music */
-	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
 	TSoftObjectPtr<class USoundClass> MusicSoundClass;
 
 	/** Sound Class for Sound Effects */
-	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
 	TSoftObjectPtr<class USoundClass> SFXSoundClass;
 
 	/** Sound Class for Voice/Dialogue */
-	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
 	TSoftObjectPtr<class USoundClass> VoiceSoundClass;
 
 	// ==================== Controls Settings ====================
