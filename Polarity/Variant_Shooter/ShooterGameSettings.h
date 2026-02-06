@@ -80,6 +80,24 @@ public:
 	UPROPERTY(Config, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float VoiceVolume;
 
+	// ==================== Audio Assets (Assign in Blueprint/DefaultGame.ini) ====================
+
+	/** Sound Mix to use for volume adjustments */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	TSoftObjectPtr<class USoundMix> AudioSoundMix;
+
+	/** Sound Class for Music */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	TSoftObjectPtr<class USoundClass> MusicSoundClass;
+
+	/** Sound Class for Sound Effects */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	TSoftObjectPtr<class USoundClass> SFXSoundClass;
+
+	/** Sound Class for Voice/Dialogue */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Audio|Assets")
+	TSoftObjectPtr<class USoundClass> VoiceSoundClass;
+
 	// ==================== Controls Settings ====================
 
 	/** Mouse sensitivity multiplier */
@@ -189,6 +207,10 @@ public:
 	/** Apply gameplay settings (FOV, etc.) */
 	UFUNCTION(BlueprintCallable, Category = "Settings")
 	void ApplyGameplaySettings();
+
+	/** Apply control settings (mouse sensitivity, etc.) */
+	UFUNCTION(BlueprintCallable, Category = "Settings")
+	void ApplyControlSettings();
 
 	/** Apply all custom settings */
 	UFUNCTION(BlueprintCallable, Category = "Settings")

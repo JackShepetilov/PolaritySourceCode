@@ -184,7 +184,7 @@ public:
 	virtual float GetMaxSpeed() const override;
 	virtual float GetMaxAcceleration() const override;
 	virtual void ProcessLanded(const FHitResult& Hit, float remainingTime, int32 Iterations) override;
-	virtual bool DoJump(bool bReplayingMoves) override;
+	virtual bool DoJump(bool bReplayingMoves, float DeltaTime = 0.f) override;
 
 	// ==================== Input ====================
 

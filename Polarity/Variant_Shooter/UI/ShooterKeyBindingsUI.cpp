@@ -8,6 +8,7 @@
 #include "EnhancedInputComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "GameplayTagContainer.h"
+#include "Framework/Application/SlateApplication.h"
 
 void UShooterKeyBindingsUI::NativeConstruct()
 {
@@ -29,6 +30,25 @@ void UShooterKeyBindingsUI::NativeConstruct()
 			// They should be configured in the Blueprint widget defaults
 			UE_LOG(LogTemp, Warning, TEXT("ShooterKeyBindingsUI: No InputMappingContexts configured. Please set them in the Blueprint defaults."));
 		}
+	}
+
+	// NOTE: We do NOT call RegisterInputMappingContexts here!
+	// It corrupts Vector2D mappings (like IA_Move) causing all directions to map to one.
+	// Instead, IMCs should be registered ONCE at game startup in your GameMode or PlayerController.
+	//
+	// To enable key remapping, add this to your PlayerController's BeginPlay:
+	//   if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+	//   {
+	//       if (UEnhancedInputUserSettings* UserSettings = Subsystem->GetUserSettings())
+	//       {
+	//           TSet<UInputMappingContext*> Contexts;
+	//           Contexts.Add(YourIMC);
+	//           UserSettings->RegisterInputMappingContexts(Contexts);
+	//       }
+	//   }
+	if (InputMappingContexts.Num() > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("ShooterKeyBindingsUI: Using %d Input Mapping Contexts (registration should happen in PlayerController)"), InputMappingContexts.Num());
 	}
 
 	BuildKeyBindingsList();
@@ -62,6 +82,16 @@ FReply UShooterKeyBindingsUI::NativeOnKeyDown(const FGeometry& InGeometry, const
 	return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
 }
 
+FReply UShooterKeyBindingsUI::NativeOnKeyUp(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
+{
+	// Consume key up events while listening to prevent them from propagating
+	if (bIsListeningForKey)
+	{
+		return FReply::Handled();
+	}
+	return Super::NativeOnKeyUp(InGeometry, InKeyEvent);
+}
+
 FReply UShooterKeyBindingsUI::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
 	if (bIsListeningForKey)
@@ -78,6 +108,12 @@ FReply UShooterKeyBindingsUI::NativeOnMouseButtonDown(const FGeometry& InGeometr
 	}
 
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
+}
+
+FReply UShooterKeyBindingsUI::NativeOnFocusReceived(const FGeometry& InGeometry, const FFocusEvent& InFocusEvent)
+{
+	UE_LOG(LogTemp, Log, TEXT("ShooterKeyBindingsUI: Focus received"));
+	return Super::NativeOnFocusReceived(InGeometry, InFocusEvent);
 }
 
 // ==================== Key Binding Data ====================
@@ -132,15 +168,40 @@ void UShooterKeyBindingsUI::StartListeningForKey(FName ActionName, bool bIsSecon
 	bIsListeningForKey = true;
 	ActionBeingRebound = ActionName;
 	bIsRebindingSecondary = bIsSecondary;
+	ActionBeingReboundPtr = nullptr;
 
 	// Store the Input Action pointer
 	if (TObjectPtr<UInputAction>* FoundAction = ActionNameToInputAction.Find(ActionName))
 	{
 		ActionBeingReboundPtr = *FoundAction;
+		UE_LOG(LogTemp, Log, TEXT("StartListeningForKey: Found Input Action for '%s'"), *ActionName.ToString());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("StartListeningForKey: Could NOT find Input Action for '%s'! Available actions:"), *ActionName.ToString());
+		for (const auto& Pair : ActionNameToInputAction)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  - %s"), *Pair.Key.ToString());
+		}
 	}
 
-	// Set keyboard focus to this widget
+	// CRITICAL: Set input mode to Game and UI and focus this widget
+	// This ensures keyboard events are routed to the widget
+	if (APlayerController* PC = GetOwningPlayer())
+	{
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(TakeWidget());
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		PC->SetInputMode(InputMode);
+	}
+
+	// Also try direct focus
 	SetKeyboardFocus();
+
+	UE_LOG(LogTemp, Log, TEXT("StartListeningForKey: Now listening for key press for action '%s' (secondary: %s), ActionPtr valid: %s"),
+		*ActionName.ToString(), bIsSecondary ? TEXT("true") : TEXT("false"),
+		ActionBeingReboundPtr ? TEXT("YES") : TEXT("NO"));
 
 	BP_StartKeyListening(ActionName, bIsSecondary);
 }
@@ -154,17 +215,20 @@ void UShooterKeyBindingsUI::CancelKeyListening()
 	PendingConflictKey = EKeys::Invalid;
 	ConflictingActionName = NAME_None;
 
+	// Restore normal UI input mode
+	if (APlayerController* PC = GetOwningPlayer())
+	{
+		FInputModeUIOnly InputMode;
+		InputMode.SetWidgetToFocus(TakeWidget());
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		PC->SetInputMode(InputMode);
+	}
+
 	BP_StopKeyListening();
 }
 
 void UShooterKeyBindingsUI::ClearBinding(FName ActionName, bool bIsSecondary)
 {
-	UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem();
-	if (!Subsystem)
-	{
-		return;
-	}
-
 	// Find the Input Action
 	TObjectPtr<UInputAction>* FoundAction = ActionNameToInputAction.Find(ActionName);
 	if (!FoundAction || !*FoundAction)
@@ -172,12 +236,38 @@ void UShooterKeyBindingsUI::ClearBinding(FName ActionName, bool bIsSecondary)
 		return;
 	}
 
-	// For clearing, we need to use PlayerMappableInputConfig or manual IMC manipulation
-	// Since UE5's Enhanced Input doesn't have built-in "clear single binding" for user settings,
-	// we'll handle this by storing custom bindings and rebuilding
+	// Clear the binding using EnhancedInputUserSettings
+	ClearBindingInternal(*FoundAction, bIsSecondary);
 
-	// For now, refresh the list to reflect any changes
-	BuildKeyBindingsList();
+	// Update cached binding
+	for (FKeyBindingDisplayInfo& Info : CachedBindings)
+	{
+		if (Info.ActionName == ActionName)
+		{
+			if (bIsSecondary)
+			{
+				Info.SecondaryKey = EKeys::Invalid;
+			}
+			else
+			{
+				Info.PrimaryKey = EKeys::Invalid;
+			}
+			break;
+		}
+	}
+
+	// Apply and save
+	if (UEnhancedInputUserSettings* UserSettings = GetEnhancedInputUserSettings())
+	{
+		UserSettings->ApplySettings();
+		UserSettings->SaveSettings();
+	}
+
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem())
+	{
+		Subsystem->RequestRebuildControlMappings();
+	}
+
 	BP_RefreshBindingsList();
 }
 
@@ -188,20 +278,47 @@ void UShooterKeyBindingsUI::ConfirmKeyConflict()
 		return;
 	}
 
-	UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem();
-	if (!Subsystem)
+	// First, clear the conflicting action's binding
+	if (ConflictingActionName != NAME_None)
 	{
-		CancelKeyListening();
-		return;
+		if (TObjectPtr<UInputAction>* ConflictingAction = ActionNameToInputAction.Find(ConflictingActionName))
+		{
+			if (*ConflictingAction)
+			{
+				// Find which slot has the conflict and clear it
+				for (FKeyBindingDisplayInfo& Info : CachedBindings)
+				{
+					if (Info.ActionName == ConflictingActionName)
+					{
+						if (Info.PrimaryKey == PendingConflictKey)
+						{
+							// Clear primary slot of conflicting action
+							ClearBindingInternal(*ConflictingAction, false);
+							Info.PrimaryKey = EKeys::Invalid;
+						}
+						else if (Info.SecondaryKey == PendingConflictKey)
+						{
+							// Clear secondary slot of conflicting action
+							ClearBindingInternal(*ConflictingAction, true);
+							Info.SecondaryKey = EKeys::Invalid;
+						}
+						break;
+					}
+				}
+			}
+		}
 	}
 
-	// Clear the conflicting binding first, then apply the new one
-	// This requires more complex logic with EnhancedInputUserSettings
-	// For now, just apply the new binding (which will override)
+	// Now apply the new binding
+	if (ActionBeingReboundPtr)
+	{
+		if (ApplyKeyBinding(ActionBeingReboundPtr, PendingConflictKey, bIsRebindingSecondary))
+		{
+			UpdateCachedBinding(ActionBeingRebound, PendingConflictKey, bIsRebindingSecondary);
+			BP_OnKeyBindingChanged(ActionBeingRebound, PendingConflictKey, bIsRebindingSecondary);
+		}
+	}
 
-	// Update UI
-	BuildKeyBindingsList();
-	BP_OnKeyBindingChanged(ActionBeingRebound, PendingConflictKey, bIsRebindingSecondary);
 	BP_RefreshBindingsList();
 
 	// Reset state
@@ -218,21 +335,29 @@ void UShooterKeyBindingsUI::CancelKeyConflict()
 
 void UShooterKeyBindingsUI::ResetAllToDefaults()
 {
-	UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem();
-	if (Subsystem)
+	UEnhancedInputUserSettings* UserSettings = GetEnhancedInputUserSettings();
+	if (UserSettings)
 	{
-		// Reset all IMCs to their default mappings
-		// This clears any player-specific remappings
-		for (UInputMappingContext* IMC : InputMappingContexts)
+		// Reset the current key profile to defaults
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		FGameplayTag CurrentProfileId = UserSettings->GetCurrentKeyProfileIdentifier();
+		FGameplayTagContainer FailureReason;
+		UserSettings->ResetKeyProfileToDefault(CurrentProfileId, FailureReason);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		if (!FailureReason.IsEmpty())
 		{
-			if (IMC)
-			{
-				// Re-add the IMC to refresh its mappings
-				// Priority 0 is default, adjust as needed
-				Subsystem->RemoveMappingContext(IMC);
-				Subsystem->AddMappingContext(IMC, 0);
-			}
+			UE_LOG(LogTemp, Warning, TEXT("ResetAllToDefaults: Some keys failed to reset: %s"), *FailureReason.ToString());
 		}
+
+		UserSettings->ApplySettings();
+		UserSettings->SaveSettings();
+	}
+
+	// Also request rebuild of control mappings
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem())
+	{
+		Subsystem->RequestRebuildControlMappings();
 	}
 
 	BuildKeyBindingsList();
@@ -357,6 +482,16 @@ void UShooterKeyBindingsUI::BuildKeyBindingsList()
 	ActionNameToInputAction.Empty();
 
 	UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem();
+	UEnhancedInputUserSettings* UserSettings = GetEnhancedInputUserSettings();
+
+	// NOTE: IMC registration moved to NativeConstruct (runs once per widget instance)
+	// to avoid corrupting input mappings on repeated BuildKeyBindingsList calls
+	if (!UserSettings)
+	{
+		UE_LOG(LogTemp, Error, TEXT("ShooterKeyBindingsUI: EnhancedInputUserSettings is NULL! "
+			"Make sure 'Enable User Settings' is checked in Project Settings -> Enhanced Input, "
+			"or add bEnableUserSettings=True to DefaultInput.ini under [/Script/EnhancedInput.EnhancedInputDeveloperSettings]"));
+	}
 
 	// Iterate through all configured Input Mapping Contexts
 	for (UInputMappingContext* IMC : InputMappingContexts)
@@ -421,6 +556,54 @@ void UShooterKeyBindingsUI::BuildKeyBindingsList()
 				CachedBindings.Add(Info);
 				ActionNameToInputAction.Add(ActionName, const_cast<UInputAction*>(Action));
 				ActionMappingCount.Add(Action, 1);
+			}
+		}
+	}
+
+	// Override with custom key mappings from UserSettings (player's remapped keys)
+	if (UserSettings)
+	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		if (UEnhancedPlayerMappableKeyProfile* KeyProfile = UserSettings->GetCurrentKeyProfile())
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		{
+			// Get all player-mapped keys from the current profile
+			const TMap<FName, FKeyMappingRow>& PlayerMappedRows = KeyProfile->GetPlayerMappingRows();
+
+			for (FKeyBindingDisplayInfo& Info : CachedBindings)
+			{
+				// Get the mapping name for this action
+				FName MappingName = GetMappingNameForAction(Info.InputAction);
+				if (MappingName == NAME_None)
+				{
+					MappingName = Info.ActionName;
+				}
+
+				// Check if there's a custom mapping for this action
+				if (const FKeyMappingRow* MappingRow = PlayerMappedRows.Find(MappingName))
+				{
+					// Mappings is a TSet<FPlayerKeyMapping>
+					const TSet<FPlayerKeyMapping>& Mappings = MappingRow->Mappings;
+
+					// Reset keys - we'll fill them from UserSettings
+					Info.PrimaryKey = EKeys::Invalid;
+					Info.SecondaryKey = EKeys::Invalid;
+
+					for (const FPlayerKeyMapping& PlayerMapping : Mappings)
+					{
+						// Get the current key (which might be remapped)
+						FKey CurrentKey = PlayerMapping.GetCurrentKey();
+
+						if (PlayerMapping.GetSlot() == EPlayerMappableKeySlot::First)
+						{
+							Info.PrimaryKey = CurrentKey;
+						}
+						else if (PlayerMapping.GetSlot() == EPlayerMappableKeySlot::Second)
+						{
+							Info.SecondaryKey = CurrentKey;
+						}
+					}
+				}
 			}
 		}
 	}
@@ -549,7 +732,9 @@ bool UShooterKeyBindingsUI::ApplyKeyBinding(const UInputAction* Action, FKey New
 	{
 		// Fallback to action name if no mapping name is set
 		MappingName = FName(*Action->GetName());
-		UE_LOG(LogTemp, Warning, TEXT("ApplyKeyBinding: No PlayerMappableKeySettings for action %s, using action name as mapping name"), *Action->GetName());
+		UE_LOG(LogTemp, Warning, TEXT("ApplyKeyBinding: No PlayerMappableKeySettings for action '%s'. "
+			"Open this Input Action asset and set 'User Settings' to 'Player Mappable Key Settings', "
+			"then fill in the 'Name' field. Using action name as fallback."), *Action->GetName());
 	}
 
 	// Set up the mapping args
@@ -568,8 +753,15 @@ bool UShooterKeyBindingsUI::ApplyKeyBinding(const UInputAction* Action, FKey New
 		return false;
 	}
 
-	// Save settings
+	// Apply and save settings
+	UserSettings->ApplySettings();
 	UserSettings->SaveSettings();
+
+	// Request rebuild of input mappings in the subsystem
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem())
+	{
+		Subsystem->RequestRebuildControlMappings();
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("Successfully remapped %s to %s (slot: %s)"),
 		*MappingName.ToString(),
@@ -612,4 +804,39 @@ FName UShooterKeyBindingsUI::GetMappingNameForAction(const UInputAction* Action)
 	}
 
 	return NAME_None;
+}
+
+void UShooterKeyBindingsUI::ClearBindingInternal(const UInputAction* Action, bool bIsSecondary)
+{
+	if (!Action)
+	{
+		return;
+	}
+
+	UEnhancedInputUserSettings* UserSettings = GetEnhancedInputUserSettings();
+	if (!UserSettings)
+	{
+		return;
+	}
+
+	FName MappingName = GetMappingNameForAction(Action);
+	if (MappingName == NAME_None)
+	{
+		MappingName = FName(*Action->GetName());
+	}
+
+	// Use UnMapPlayerKey to clear the binding
+	FMapPlayerKeyArgs Args;
+	Args.MappingName = MappingName;
+	Args.Slot = bIsSecondary ? EPlayerMappableKeySlot::Second : EPlayerMappableKeySlot::First;
+
+	FGameplayTagContainer FailureReason;
+	UserSettings->UnMapPlayerKey(Args, FailureReason);
+
+	if (FailureReason.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("Cleared binding for %s (slot: %s)"),
+			*MappingName.ToString(),
+			bIsSecondary ? TEXT("Secondary") : TEXT("Primary"));
+	}
 }

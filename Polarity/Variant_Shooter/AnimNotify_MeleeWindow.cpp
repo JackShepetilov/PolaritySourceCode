@@ -3,10 +3,11 @@
 
 #include "AnimNotify_MeleeWindow.h"
 #include "MeleeAttackComponent.h"
+#include "AI/MeleeNPC.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Character.h"
 
-// ==================== Helper Function ====================
+// ==================== Helper Functions ====================
 
 static UMeleeAttackComponent* GetMeleeComponentFromMesh(USkeletalMeshComponent* MeshComp)
 {
@@ -24,6 +25,16 @@ static UMeleeAttackComponent* GetMeleeComponentFromMesh(USkeletalMeshComponent* 
 	return Owner->FindComponentByClass<UMeleeAttackComponent>();
 }
 
+static AMeleeNPC* GetMeleeNPCFromMesh(USkeletalMeshComponent* MeshComp)
+{
+	if (!MeshComp)
+	{
+		return nullptr;
+	}
+
+	return Cast<AMeleeNPC>(MeshComp->GetOwner());
+}
+
 // ==================== UAnimNotify_MeleeActivate ====================
 
 UAnimNotify_MeleeActivate::UAnimNotify_MeleeActivate()
@@ -37,9 +48,17 @@ void UAnimNotify_MeleeActivate::Notify(USkeletalMeshComponent* MeshComp, UAnimSe
 {
 	Super::Notify(MeshComp, Animation, EventReference);
 
+	// Try player's MeleeAttackComponent first
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->ActivateDamageWindowFromNotify();
+		return;
+	}
+
+	// Try MeleeNPC
+	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
+	{
+		MeleeNPC->NotifyDamageWindowStart();
 	}
 }
 
@@ -61,9 +80,17 @@ void UAnimNotify_MeleeDeactivate::Notify(USkeletalMeshComponent* MeshComp, UAnim
 {
 	Super::Notify(MeshComp, Animation, EventReference);
 
+	// Try player's MeleeAttackComponent first
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->DeactivateDamageWindowFromNotify();
+		return;
+	}
+
+	// Try MeleeNPC
+	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
+	{
+		MeleeNPC->NotifyDamageWindowEnd();
 	}
 }
 
@@ -85,9 +112,17 @@ void UAnimNotifyState_MeleeDamageWindow::NotifyBegin(USkeletalMeshComponent* Mes
 {
 	Super::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
 
+	// Try player's MeleeAttackComponent first
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->ActivateDamageWindowFromNotify();
+		return;
+	}
+
+	// Try MeleeNPC
+	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
+	{
+		MeleeNPC->NotifyDamageWindowStart();
 	}
 }
 
@@ -95,9 +130,17 @@ void UAnimNotifyState_MeleeDamageWindow::NotifyEnd(USkeletalMeshComponent* MeshC
 {
 	Super::NotifyEnd(MeshComp, Animation, EventReference);
 
+	// Try player's MeleeAttackComponent first
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->DeactivateDamageWindowFromNotify();
+		return;
+	}
+
+	// Try MeleeNPC
+	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
+	{
+		MeleeNPC->NotifyDamageWindowEnd();
 	}
 }
 

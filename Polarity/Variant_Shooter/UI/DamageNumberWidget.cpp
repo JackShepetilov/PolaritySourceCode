@@ -71,7 +71,7 @@ void UDamageNumberWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 	}
 }
 
-void UDamageNumberWidget::Initialize(float InDamage, EPlayerDamageCategory InCategory, const FVector& InWorldLocation)
+void UDamageNumberWidget::InitializeDamageNumber(float InDamage, EPlayerDamageCategory InCategory, const FVector& InWorldLocation)
 {
 	DamageValue = InDamage;
 	DamageCategory = InCategory;

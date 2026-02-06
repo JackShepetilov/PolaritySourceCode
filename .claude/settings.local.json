@@ -11,7 +11,24 @@
       "WebFetch(domain:forums.unrealengine.com)",
       "Bash(dir \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\" /B)",
       "Bash(test:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(git checkout:*)",
+      "Bash(git init:*)",
+      "WebFetch(domain:interfaceingame.com)",
+      "WebFetch(domain:ian-hamilton.com)",
+      "WebFetch(domain:caniplaythat.com)",
+      "WebFetch(domain:alessandrotironigamedev.com)",
+      "WebFetch(domain:poweranimated.github.io)",
+      "WebFetch(domain:foro3d.com)",
+      "Bash(\"/c/Program Files/Epic Games/UE_5.6/Engine/Binaries/Win64/UnrealInsights.exe\" -OpenTraceFile=\"C:/Users/Professional/AppData/Local/UnrealEngine/Common/UnrealTrace/Store/001/20260203_222429.utrace\" -NoUI -AutoQuit -ExecOnAnalysisCompleteCmd=\"TimingInsights.ExportTimerStatistics C:/Матвей/Polarity/Traces/Export/TimerStats.csv\")",
+      "Bash(\"/c/Program Files/Epic Games/UE_5.6/Engine/Binaries/Win64/UnrealInsights.exe\" -OpenTraceFile=\"C:/Users/Professional/AppData/Local/UnrealEngine/Common/UnrealTrace/Store/001/20260203_125916.utrace\" -NoUI -AutoQuit -ExecOnAnalysisCompleteCmd=\"TimingInsights.ExportTimerStatistics C:/Матвей/Polarity/Traces/Export/TimerStats.csv\")",
+      "Bash(\"/c/Program Files/Epic Games/UE_5.6/Engine/Binaries/Win64/UnrealInsights.exe\" -OpenTraceFile=\"C:/Users/Professional/AppData/Local/UnrealEngine/Common/UnrealTrace/Store/001/20260204_093553.utrace\" -NoUI -AutoQuit -ExecOnAnalysisCompleteCmd=\"TimingInsights.ExportTimerStatistics C:/Матвей/Polarity/Traces/Export/TimerStats.csv\")",
+      "Bash(\"/c/Program Files/Epic Games/UE_5.6/Engine/Binaries/Win64/UnrealInsights.exe\" -OpenTraceFile=\"C:/Users/Professional/AppData/Local/UnrealEngine/Common/UnrealTrace/Store/001/20260204_093553.utrace\" -NoUI -AutoQuit -ExecOnAnalysisCompleteCmd=\"TimingInsights.ExportTimerStatistics C:/Матвей/Polarity/Traces/Export/TimerStats.csv -startTime=0.0 -endTime=30.0\")",
+      "Bash(\"/c/Program Files/Epic Games/UE_5.6/Engine/Binaries/Win64/UnrealInsights.exe\" -OpenTraceFile=\"C:/Users/Professional/AppData/Local/UnrealEngine/Common/UnrealTrace/Store/001/20260204_095050.utrace\" -NoUI -AutoQuit -ExecOnAnalysisCompleteCmd=\"TimingInsights.ExportTimerStatistics C:/Матвей/Polarity/Traces/Export/TimerStats.csv\")",
+      "Bash(git revert:*)",
+      "WebFetch(domain:blueprintue.com)",
+      "WebFetch(domain:zomgmoz.tv)",
+      "WebFetch(domain:medium.com)"
     ]
   }
 }

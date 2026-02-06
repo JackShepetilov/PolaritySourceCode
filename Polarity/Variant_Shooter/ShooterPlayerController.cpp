@@ -3,6 +3,7 @@
 
 #include "Variant_Shooter/ShooterPlayerController.h"
 #include "EnhancedInputSubsystems.h"
+#include "UserSettings/EnhancedInputUserSettings.h"
 #include "Engine/LocalPlayer.h"
 #include "InputMappingContext.h"
 #include "Kismet/GameplayStatics.h"
@@ -51,32 +52,53 @@ void AShooterPlayerController::BeginPlay()
 
 		}
 
+		// Setup IMCs and key remapping
+		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+		{
+			TSet<UInputMappingContext*> AllContexts;
+
+			// Collect all IMCs first
+			for (UInputMappingContext* CurrentContext : DefaultMappingContexts)
+			{
+				if (CurrentContext)
+				{
+					AllContexts.Add(CurrentContext);
+				}
+			}
+			if (!SVirtualJoystick::ShouldDisplayTouchInterface())
+			{
+				for (UInputMappingContext* CurrentContext : MobileExcludedMappingContexts)
+				{
+					if (CurrentContext)
+					{
+						AllContexts.Add(CurrentContext);
+					}
+				}
+			}
+
+			// Register FIRST (before AddMappingContext)
+			if (UEnhancedInputUserSettings* UserSettings = Subsystem->GetUserSettings())
+			{
+				UserSettings->RegisterInputMappingContexts(AllContexts);
+				UE_LOG(LogPolarity, Log, TEXT("ShooterPlayerController: Registered %d IMCs"), AllContexts.Num());
+			}
+
+			// THEN add mapping contexts
+			for (UInputMappingContext* CurrentContext : AllContexts)
+			{
+				Subsystem->AddMappingContext(CurrentContext, 0);
+			}
+			UE_LOG(LogPolarity, Log, TEXT("ShooterPlayerController: Added %d IMCs"), AllContexts.Num());
+		}
 	}
 }
 
 void AShooterPlayerController::SetupInputComponent()
 {
-	// only add IMCs for local player controllers
-	if (IsLocalPlayerController())
-	{
-		// add the input mapping contexts
-		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
-		{
-			for (UInputMappingContext* CurrentContext : DefaultMappingContexts)
-			{
-				Subsystem->AddMappingContext(CurrentContext, 0);
-			}
+	Super::SetupInputComponent();
 
-			// only add these IMCs if we're not using mobile touch input
-			if (!SVirtualJoystick::ShouldDisplayTouchInterface())
-			{
-				for (UInputMappingContext* CurrentContext : MobileExcludedMappingContexts)
-				{
-					Subsystem->AddMappingContext(CurrentContext, 0);
-				}
-			}
-		}
-	}
+	// NOTE: IMC setup moved to BeginPlay() to ensure AddMappingContext and
+	// RegisterInputMappingContexts happen together (prevents Vector2D corruption)
 }
 
 void AShooterPlayerController::OnPossess(APawn* InPawn)

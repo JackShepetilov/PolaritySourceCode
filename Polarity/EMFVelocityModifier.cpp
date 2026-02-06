@@ -248,11 +248,33 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	float Charge = GetCharge();
 	float Mass = GetMass();
 
+	// Pre-calculate squared max distance for faster comparison
+	const float MaxDistSq = MaxSourceDistance * MaxSourceDistance;
+
 	// Calculate Lorentz force from each source individually with multipliers
 	FVector TotalForce = FVector::ZeroVector;
 
 	for (const FEMSourceDescription& Source : OtherSources)
 	{
+		// OPTIMIZATION: Skip inactive sources
+		if (!Source.BasicParams.bIsActive)
+		{
+			continue;
+		}
+
+		// OPTIMIZATION: Skip sources with zero charge/current/field - they produce no force
+		if (IsSourceEffectivelyZero(Source))
+		{
+			continue;
+		}
+
+		// OPTIMIZATION: Distance culling - skip sources too far away
+		float DistSq = FVector::DistSquared(Position, Source.Position);
+		if (DistSq > MaxDistSq)
+		{
+			continue;
+		}
+
 		// Get multiplier for this source's owner type
 		float Multiplier = GetForceMultiplierForOwnerType(Source.OwnerType);
 
@@ -389,6 +411,73 @@ void UEMFVelocityModifier::OnOwnerBeginOverlap(AActor* OverlappedActor, AActor* 
 				OtherFieldComp->SetCharge(0.0f);
 			}
 		}
+	}
+}
+
+bool UEMFVelocityModifier::IsSourceEffectivelyZero(const FEMSourceDescription& Source)
+{
+	// Check based on source type - different types store "strength" differently
+	switch (Source.SourceType)
+	{
+	case EEMSourceType::PointCharge:
+		return FMath::IsNearlyZero(Source.PointChargeParams.Charge);
+
+	case EEMSourceType::LineCharge:
+		return FMath::IsNearlyZero(Source.LineChargeParams.LinearChargeDensity);
+
+	case EEMSourceType::ChargedRing:
+		return FMath::IsNearlyZero(Source.RingParams.TotalCharge);
+
+	case EEMSourceType::ChargedSphere:
+		return FMath::IsNearlyZero(Source.SphereParams.TotalCharge);
+
+	case EEMSourceType::ChargedBall:
+		return FMath::IsNearlyZero(Source.BallParams.TotalCharge);
+
+	case EEMSourceType::InfinitePlate:
+	case EEMSourceType::FinitePlate:
+		return FMath::IsNearlyZero(Source.PlateParams.SurfaceChargeDensity);
+
+	case EEMSourceType::Dipole:
+		return Source.DipoleParams.DipoleMoment.IsNearlyZero();
+
+	case EEMSourceType::CurrentWire:
+		return FMath::IsNearlyZero(Source.WireParams.Current);
+
+	case EEMSourceType::CurrentLoop:
+		return FMath::IsNearlyZero(Source.LoopParams.Current);
+
+	case EEMSourceType::Solenoid:
+		return FMath::IsNearlyZero(Source.SolenoidParams.Current);
+
+	case EEMSourceType::MagneticDipole:
+		return Source.MagneticDipoleParams.MagneticMoment.IsNearlyZero();
+
+	case EEMSourceType::SectorMagnet:
+		return FMath::IsNearlyZero(Source.SectorMagnetParams.FieldStrength);
+
+	case EEMSourceType::PlateMagnet:
+		return FMath::IsNearlyZero(Source.PlateMagnetParams.FieldStrength);
+
+	// Passive sources (dielectrics, grounded conductors) - they modify fields, not create them
+	// But they still need external sources to work, so skip them if no permittivity effect
+	case EEMSourceType::DielectricSphere:
+		return FMath::IsNearlyEqual(Source.DielectricSphereParams.RelativePermittivity, 1.0f);
+
+	case EEMSourceType::DielectricSlab:
+		return FMath::IsNearlyEqual(Source.DielectricSlabParams.RelativePermittivity, 1.0f);
+
+	case EEMSourceType::GroundedConductor:
+	case EEMSourceType::GroundedPlate:
+		// Grounded conductors always affect fields if present
+		return false;
+
+	case EEMSourceType::Antenna:
+	case EEMSourceType::WaveGuide:
+	case EEMSourceType::Custom:
+	default:
+		// For unknown/custom types, check legacy Charge field as fallback
+		return FMath::IsNearlyZero(Source.Charge) && FMath::IsNearlyZero(Source.PointChargeParams.Charge);
 	}
 }
 

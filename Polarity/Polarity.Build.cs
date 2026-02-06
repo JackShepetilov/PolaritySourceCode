@@ -24,7 +24,8 @@ public class Polarity : ModuleRules
             "Niagara",
             "LevelSequence",
             "MovieScene",
-            "IKRig"
+            "IKRig",
+            "AudioMixer"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags" });
@@ -36,8 +37,7 @@ public class Polarity : ModuleRules
             "Polarity/AI/Coordination",
             "Polarity/AI/StateTree",
             "Polarity/Checkpoint",
-            "Polarity/Variant_Horror",
-            "Polarity/Variant_Horror/UI",
+            "Polarity/Music",
             "Polarity/Variant_Shooter",
             "Polarity/Variant_Shooter/AI",
             "Polarity/Variant_Shooter/UI",

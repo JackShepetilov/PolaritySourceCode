@@ -28,6 +28,12 @@ void UShooterGameSettings::SetCustomDefaults()
 	SFXVolume = 1.0f;
 	VoiceVolume = 1.0f;
 
+	// Audio assets defaults
+	AudioSoundMix = TSoftObjectPtr<USoundMix>(FSoftObjectPath(TEXT("/Game/Audio/Classes/NewSoundMix.NewSoundMix")));
+	MusicSoundClass = TSoftObjectPtr<USoundClass>(FSoftObjectPath(TEXT("/Game/Audio/Classes/Music.Music")));
+	SFXSoundClass = TSoftObjectPtr<USoundClass>(FSoftObjectPath(TEXT("/Game/Audio/Classes/SFX.SFX")));
+	VoiceSoundClass = TSoftObjectPtr<USoundClass>(FSoftObjectPath(TEXT("/Game/Audio/Classes/Voice.Voice")));
+
 	// Controls defaults
 	MouseSensitivity = 1.0f;
 	MouseSensitivityX = 1.0f;
@@ -59,18 +65,59 @@ void UShooterGameSettings::SetCustomDefaults()
 
 void UShooterGameSettings::ApplyAudioSettings()
 {
-	// Audio is typically handled via Sound Mixes and Sound Classes in Blueprints
-	// This method can be extended to set audio parameters via code if needed
+	// Load audio assets if they're set
+	USoundMix* SoundMix = AudioSoundMix.LoadSynchronous();
+	USoundClass* MusicClass = MusicSoundClass.LoadSynchronous();
+	USoundClass* SFXClass = SFXSoundClass.LoadSynchronous();
+	USoundClass* VoiceClass = VoiceSoundClass.LoadSynchronous();
 
-	// For now, we broadcast that settings changed - Blueprint can listen and apply
-	// Alternatively, use Audio Modulation or direct SoundMix manipulation
+	if (!SoundMix)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShooterGameSettings: AudioSoundMix is not set! Audio volume settings will not work."));
+		return;
+	}
 
-	// Example approach using world's audio device (if needed):
-	// FAudioDevice* AudioDevice = GEngine->GetMainAudioDevice();
-	// if (AudioDevice)
-	// {
-	//     AudioDevice->SetSoundMixClassOverride(SoundMix, SoundClass, MasterVolume, 1.0f, 0.0f, true);
-	// }
+	// Get a world context for audio
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.World() && Context.WorldType == EWorldType::Game)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+
+	if (!World)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShooterGameSettings: No game world found for audio settings."));
+		return;
+	}
+
+	// Push the sound mix if not already active
+	UGameplayStatics::PushSoundMixModifier(World, SoundMix);
+
+	// Apply volume for each Sound Class (multiplied by MasterVolume)
+	if (MusicClass)
+	{
+		const float FinalMusicVolume = MusicVolume * MasterVolume;
+		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, MusicClass, FinalMusicVolume, 1.0f, 0.0f, true);
+	}
+
+	if (SFXClass)
+	{
+		const float FinalSFXVolume = SFXVolume * MasterVolume;
+		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, SFXClass, FinalSFXVolume, 1.0f, 0.0f, true);
+	}
+
+	if (VoiceClass)
+	{
+		const float FinalVoiceVolume = VoiceVolume * MasterVolume;
+		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, VoiceClass, FinalVoiceVolume, 1.0f, 0.0f, true);
+	}
 }
 
 void UShooterGameSettings::ApplyGameplaySettings()
@@ -97,10 +144,43 @@ void UShooterGameSettings::ApplyGameplaySettings()
 	}
 }
 
+void UShooterGameSettings::ApplyControlSettings()
+{
+	// Apply mouse sensitivity to all player controllers
+	// Note: In UE 5.0+ InputYawScale/InputPitchScale are deprecated
+	// We use the deprecated setters which still work if bEnableLegacyInputScales is true in InputSettings
+	// Alternatively, use Enhanced Input Scalar Modifier for modern approach
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (UWorld* World = Context.World())
+			{
+				if (APlayerController* PC = World->GetFirstPlayerController())
+				{
+					// Default values are typically 2.5 for both
+					// We multiply the base value by our sensitivity multipliers
+					const float BaseSensitivity = 2.5f;
+
+					const float YawScale = BaseSensitivity * MouseSensitivity * MouseSensitivityX * (bInvertMouseX ? -1.0f : 1.0f);
+					const float PitchScale = BaseSensitivity * MouseSensitivity * MouseSensitivityY * (bInvertMouseY ? -1.0f : 1.0f);
+
+					// Use deprecated setters (still work with bEnableLegacyInputScales=true)
+					PRAGMA_DISABLE_DEPRECATION_WARNINGS
+					PC->SetDeprecatedInputYawScale(YawScale);
+					PC->SetDeprecatedInputPitchScale(PitchScale);
+					PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				}
+			}
+		}
+	}
+}
+
 void UShooterGameSettings::ApplyAllCustomSettings()
 {
 	ApplyAudioSettings();
 	ApplyGameplaySettings();
+	ApplyControlSettings();
 	ApplyKeyBindings();
 
 	// Save to config file

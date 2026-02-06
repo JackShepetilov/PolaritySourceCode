@@ -492,12 +492,6 @@ void AShooterNPC::Die()
 	// raise the dead flag
 	bIsDead = true;
 
-	// Disable EM field emission (dead bodies don't emit charge)
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetCharge(0.0f);
-	}
-
 	// Stop shooting immediately
 	StopShooting();
 
@@ -522,7 +516,7 @@ void AShooterNPC::Die()
 		GM->IncrementTeamScore(TeamByte);
 	}
 
-	// broadcast death event
+	// broadcast death event (BP can spawn VFX here)
 	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::Die() - Broadcasting OnNPCDeath for %s"), *GetName());
 	OnNPCDeath.Broadcast(this);
 
@@ -532,20 +526,64 @@ void AShooterNPC::Die()
 		UGameplayStatics::PlaySoundAtLocation(this, DeathSound, GetActorLocation());
 	}
 
-	// disable capsule collision
+	// ============== AGGRESSIVE DEACTIVATION FOR PERFORMANCE ==============
+
+	// Disable ALL collision immediately
 	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	// stop movement
-	GetCharacterMovement()->StopMovementImmediately();
-	GetCharacterMovement()->StopActiveMovement();
+	// Stop movement completely
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
+		MoveComp->SetComponentTickEnabled(false);
+	}
 
-	// enable ragdoll physics on the third person mesh
-	GetMesh()->SetCollisionProfileName(RagdollCollisionProfile);
-	GetMesh()->SetSimulatePhysics(true);
-	GetMesh()->SetPhysicsBlendWeight(1.0f);
+	// Hide mesh instead of ragdoll (ragdoll is expensive)
+	GetMesh()->SetVisibility(false);
+	GetMesh()->SetComponentTickEnabled(false);
 
-	// schedule actor destruction
-	GetWorld()->GetTimerManager().SetTimer(DeathTimer, this, &AShooterNPC::DeferredDestruction, DeferredDestructionTime, false);
+	// Disable EMF components and unregister from registry immediately
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetCharge(0.0f);
+		EMFVelocityModifier->SetComponentTickEnabled(false);
+	}
+	if (FieldComponent)
+	{
+		FieldComponent->UnregisterFromRegistry();  // Immediately remove from EMF calculations
+		FieldComponent->SetComponentTickEnabled(false);
+	}
+
+	// Disable AI components
+	if (AccuracyComponent)
+	{
+		AccuracyComponent->SetComponentTickEnabled(false);
+	}
+	if (MeleeRetreatComponent)
+	{
+		MeleeRetreatComponent->SetComponentTickEnabled(false);
+	}
+
+	// Unpossess to stop AI controller
+	if (AController* MyController = GetController())
+	{
+		MyController->UnPossess();
+	}
+
+	// Disable actor tick
+	SetActorTickEnabled(false);
+
+	// Destroy weapon to free resources
+	if (Weapon)
+	{
+		Weapon->Destroy();
+		Weapon = nullptr;
+	}
+
+	// Schedule fast destruction (VFX should be detached by now)
+	GetWorld()->GetTimerManager().SetTimer(DeathTimer, this, &AShooterNPC::DeferredDestruction, 0.5f, false);
 }
 
 void AShooterNPC::DeferredDestruction()

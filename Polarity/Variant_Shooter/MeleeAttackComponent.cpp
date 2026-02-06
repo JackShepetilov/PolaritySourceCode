@@ -530,10 +530,17 @@ void UMeleeAttackComponent::PerformHitDetection()
 		{
 			DrawDebugSphere(GetWorld(), TargetPos, Settings.AttackRange, 16, FColor::Yellow, false, 0.0f);
 		}
+
+		// IMPORTANT: During drop kick with magnetism target, do NOT fall through to sweep trace.
+		// This prevents accidentally hitting other targets (like ShooterKey) while flying toward the intended target.
+		return;
 	}
 
 	const FVector Start = GetTraceStart();
 	const FVector End = GetTraceEnd();
+
+	UE_LOG(LogTemp, Warning, TEXT("[MeleeHitDetection] Sweep trace: bIsDropKick=%d, Start=(%.1f, %.1f, %.1f), End=(%.1f, %.1f, %.1f)"),
+		bIsDropKick, Start.X, Start.Y, Start.Z, End.X, End.Y, End.Z);
 
 	// Set up collision query
 	FCollisionQueryParams QueryParams;
@@ -596,6 +603,14 @@ void UMeleeAttackComponent::PerformHitDetection()
 				continue;
 			}
 
+			// FIX: During drop kick fallback (original target lost mid-flight), don't hit IShooterDummyTarget
+			// This prevents accidentally damaging ShooterKey when the intended NPC target dies during the dive
+			// Direct drop kick targeting of ShooterKey still works via MagnetismTarget path above
+			if (bIsDropKick && HitActor->Implements<UShooterDummyTarget>())
+			{
+				continue;
+			}
+
 			// Check angle if using cone detection
 			if (Settings.AttackAngle > 0.0f)
 			{
@@ -611,6 +626,10 @@ void UMeleeAttackComponent::PerformHitDetection()
 
 			// Valid hit!
 			HitActorsThisAttack.Add(HitActor);
+
+			UE_LOG(LogTemp, Warning, TEXT("[MeleeHitDetection] SWEEP HIT: %s [%s] at (%.1f, %.1f, %.1f)"),
+				*HitActor->GetName(), *HitActor->GetClass()->GetName(),
+				Hit.ImpactPoint.X, Hit.ImpactPoint.Y, Hit.ImpactPoint.Z);
 
 			// Check for cool kick trigger (first hit, airborne, no lunge target)
 #if WITH_EDITOR
@@ -2536,9 +2555,10 @@ bool UMeleeAttackComponent::TryStartDropKick()
 			continue;
 		}
 
-		// Must be a character
+		// Must be a character OR a valid dummy target (like ShooterKey)
 		ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
-		if (!HitCharacter)
+		bool bIsDummyTarget = HitActor->Implements<UShooterDummyTarget>();
+		if (!HitCharacter && !bIsDummyTarget)
 		{
 			continue;
 		}

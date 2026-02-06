@@ -89,7 +89,10 @@ public:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
+	virtual FReply NativeOnKeyUp(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
+	virtual FReply NativeOnFocusReceived(const FGeometry& InGeometry, const FFocusEvent& InFocusEvent) override;
+	virtual bool NativeSupportsKeyboardFocus() const override { return true; }
 
 	// ==================== Blueprint Events ====================
 
@@ -258,6 +261,9 @@ protected:
 
 	/** Get the mapping name for an Input Action (from PlayerMappableKeySettings) */
 	FName GetMappingNameForAction(const UInputAction* Action) const;
+
+	/** Clear a binding using EnhancedInputUserSettings */
+	void ClearBindingInternal(const UInputAction* Action, bool bIsSecondary);
 
 	/** Get display name for an Input Action */
 	FText GetActionDisplayName(const UInputAction* Action) const;

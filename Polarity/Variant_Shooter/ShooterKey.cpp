@@ -6,6 +6,7 @@
 #include "AI/ShooterNPC.h"
 #include "Checkpoint/CheckpointSubsystem.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/DamageEvents.h"
 
 AShooterKey::AShooterKey()
 {
@@ -79,32 +80,79 @@ void AShooterKey::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 float AShooterKey::TakeDamage(float Damage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
-	UE_LOG(LogTemp, Warning, TEXT("ShooterKey::TakeDamage - Key: %s, Damage: %.1f, Invulnerable: %s, IsDead: %s, Causer: %s, Instigator: %s, EnemyCount: %d"),
-		*GetName(),
-		Damage,
-		bIsInvulnerable ? TEXT("YES") : TEXT("NO"),
-		IsDead() ? TEXT("YES") : TEXT("NO"),
-		DamageCauser ? *DamageCauser->GetName() : TEXT("null"),
-		EventInstigator ? *EventInstigator->GetName() : TEXT("null"),
-		TrackedEnemies.Num());
+	// Detailed debug info for damage source
+	FString CauserInfo = TEXT("null");
+	FString InstigatorInfo = TEXT("null");
+	FString DamageTypeInfo = TEXT("null");
+
+	if (DamageCauser)
+	{
+		CauserInfo = FString::Printf(TEXT("%s [%s]"), *DamageCauser->GetName(), *DamageCauser->GetClass()->GetName());
+		if (AActor* CauserOwner = DamageCauser->GetOwner())
+		{
+			CauserInfo += FString::Printf(TEXT(" Owner: %s [%s]"), *CauserOwner->GetName(), *CauserOwner->GetClass()->GetName());
+		}
+	}
+
+	if (EventInstigator)
+	{
+		InstigatorInfo = FString::Printf(TEXT("%s [%s]"), *EventInstigator->GetName(), *EventInstigator->GetClass()->GetName());
+		if (APawn* Pawn = EventInstigator->GetPawn())
+		{
+			InstigatorInfo += FString::Printf(TEXT(" Pawn: %s [%s]"), *Pawn->GetName(), *Pawn->GetClass()->GetName());
+		}
+	}
+
+	if (DamageEvent.DamageTypeClass)
+	{
+		DamageTypeInfo = DamageEvent.DamageTypeClass->GetName();
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("========== ShooterKey::TakeDamage =========="));
+	UE_LOG(LogTemp, Warning, TEXT("  Key: %s"), *GetName());
+	UE_LOG(LogTemp, Warning, TEXT("  Damage: %.1f"), Damage);
+	UE_LOG(LogTemp, Warning, TEXT("  Invulnerable: %s"), bIsInvulnerable ? TEXT("YES") : TEXT("NO"));
+	UE_LOG(LogTemp, Warning, TEXT("  IsDead: %s"), IsDead() ? TEXT("YES") : TEXT("NO"));
+	UE_LOG(LogTemp, Warning, TEXT("  HP: %.1f / %.1f"), CurrentHP, MaxHP);
+	UE_LOG(LogTemp, Warning, TEXT("  EnemyCount: %d (Threshold: %d)"), TrackedEnemies.Num(), EnemyThreshold);
+	UE_LOG(LogTemp, Warning, TEXT("  DamageCauser: %s"), *CauserInfo);
+	UE_LOG(LogTemp, Warning, TEXT("  EventInstigator: %s"), *InstigatorInfo);
+	UE_LOG(LogTemp, Warning, TEXT("  DamageType: %s"), *DamageTypeInfo);
+	UE_LOG(LogTemp, Warning, TEXT("  IsPlayerController: %s"), (EventInstigator && EventInstigator->IsPlayerController()) ? TEXT("YES") : TEXT("NO"));
 
 	// Block damage if not from player
 	if (!EventInstigator || !EventInstigator->IsPlayerController())
 	{
-		UE_LOG(LogTemp, Log, TEXT("ShooterKey::TakeDamage - BLOCKED (not from player)"));
+		UE_LOG(LogTemp, Warning, TEXT("  >>> BLOCKED (not from player)"));
+		UE_LOG(LogTemp, Warning, TEXT("============================================="));
 		return 0.0f;
 	}
 
 	// Block damage if invulnerable
 	if (bIsInvulnerable)
 	{
-		UE_LOG(LogTemp, Log, TEXT("ShooterKey::TakeDamage - BLOCKED (invulnerable)"));
+		UE_LOG(LogTemp, Warning, TEXT("  >>> BLOCKED (invulnerable)"));
+		UE_LOG(LogTemp, Warning, TEXT("============================================="));
 		return 0.0f;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("  >>> ALLOWED - Calling Super::TakeDamage"));
+
+	// Print callstack to find where damage comes from
+	FString StackTrace = FFrame::GetScriptCallstack();
+	if (!StackTrace.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("  Blueprint Callstack:\n%s"), *StackTrace);
+	}
+
+	// C++ callstack
+	FDebug::DumpStackTraceToLog(ELogVerbosity::Warning);
+
 	// Let parent handle damage
 	float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
-	UE_LOG(LogTemp, Warning, TEXT("ShooterKey::TakeDamage - Applied: %.1f, HP remaining: %.1f"), ActualDamage, CurrentHP);
+
+	UE_LOG(LogTemp, Warning, TEXT("  >>> Applied: %.1f, HP remaining: %.1f"), ActualDamage, CurrentHP);
+	UE_LOG(LogTemp, Warning, TEXT("============================================="));
 
 	return ActualDamage;
 }

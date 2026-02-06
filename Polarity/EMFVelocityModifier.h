@@ -46,6 +46,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF")
 	bool bEnabled = true;
 
+	/** Maximum distance to consider EMF sources (sources further than this are ignored for performance) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Performance", meta = (ClampMin = "100.0", Units = "cm"))
+	float MaxSourceDistance = 10000.0f;
+
 	// ==================== Charge Accumulation ====================
 
 	/** Базовый заряд (постоянный, определяет знак полярности) */
@@ -277,6 +281,11 @@ private:
 
 	/** Debug визуализация */
 	void DrawDebugForces(const FVector& Position, const FVector& Force) const;
+
+	/** Check if source has effectively zero charge/current/field strength
+	 *  Handles different source types: PointCharge, LineCharge, CurrentWire, etc.
+	 *  @return true if source produces no force (zero charge/current/field) */
+	static bool IsSourceEffectivelyZero(const FEMSourceDescription& Source);
 
 	/** Обработчик overlap события */
 	UFUNCTION()

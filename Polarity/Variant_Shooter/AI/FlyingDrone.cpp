@@ -17,6 +17,7 @@
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "ShooterGameMode.h"
 #include "EMFVelocityModifier.h"
+#include "EMF_FieldComponent.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "AIController.h"
 
@@ -241,7 +242,7 @@ void AFlyingDrone::DroneDie()
 		GM->IncrementTeamScore(TeamByte);
 	}
 
-	// Broadcast death
+	// Broadcast death (BP can spawn VFX here)
 	UE_LOG(LogTemp, Warning, TEXT("FlyingDrone::DroneDie() - Broadcasting OnNPCDeath for %s"), *GetName());
 	OnNPCDeath.Broadcast(this);
 
@@ -254,12 +255,74 @@ void AFlyingDrone::DroneDie()
 		StartDeathFall();
 	}
 
-	// Schedule destruction
+	// ============== AGGRESSIVE DEACTIVATION FOR PERFORMANCE ==============
+
+	// Disable ALL collision immediately
+	if (DroneCollision)
+	{
+		DroneCollision->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Disable movement components
+	if (FlyingMovement)
+	{
+		FlyingMovement->SetComponentTickEnabled(false);
+	}
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->StopMovementImmediately();
+		CMC->DisableMovement();
+		CMC->SetComponentTickEnabled(false);
+	}
+
+	// Hide mesh
+	if (DroneMesh)
+	{
+		DroneMesh->SetVisibility(false);
+		DroneMesh->SetComponentTickEnabled(false);
+	}
+
+	// Disable EMF components and unregister from registry (inherited from ShooterNPC)
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetCharge(0.0f);
+		EMFVelocityModifier->SetComponentTickEnabled(false);
+	}
+	if (FieldComponent)
+	{
+		FieldComponent->UnregisterFromRegistry();  // Immediately remove from EMF calculations
+		FieldComponent->SetComponentTickEnabled(false);
+	}
+
+	// Disable AI components
+	if (AccuracyComponent)
+	{
+		AccuracyComponent->SetComponentTickEnabled(false);
+	}
+
+	// Unpossess to stop AI controller
+	if (AController* MyController = GetController())
+	{
+		MyController->UnPossess();
+	}
+
+	// Disable actor tick
+	SetActorTickEnabled(false);
+
+	// Destroy weapon
+	if (Weapon)
+	{
+		Weapon->Destroy();
+		Weapon = nullptr;
+	}
+
+	// Schedule fast destruction
 	GetWorld()->GetTimerManager().SetTimer(
 		DeathSequenceTimer,
 		this,
 		&AFlyingDrone::DeathDestroy,
-		DeathEffectDuration,
+		0.5f,  // Fast destruction instead of DeathEffectDuration
 		false
 	);
 }

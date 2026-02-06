@@ -123,7 +123,7 @@ void UDamageNumbersSubsystem::SpawnDamageNumber(const FVector& WorldLocation, fl
 	});
 
 	// Initialize and play animation - widget will track this world location
-	Widget->Initialize(Damage, Category, SpreadLocation);
+	Widget->InitializeDamageNumber(Damage, Category, SpreadLocation);
 
 	// Track as active
 	ActiveWidgets.Add(Widget);
@@ -462,7 +462,7 @@ void UDamageNumbersSubsystem::ProcessDamageWithBatching(AActor* TargetNPC, float
 		});
 
 		// Initialize and play animation
-		Widget->Initialize(Damage, Category, WorldLocation);
+		Widget->InitializeDamageNumber(Damage, Category, WorldLocation);
 
 		// Track as active
 		ActiveWidgets.Add(Widget);

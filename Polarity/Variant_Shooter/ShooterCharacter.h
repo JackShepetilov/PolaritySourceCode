@@ -18,6 +18,7 @@ class UMeleeAttackComponent;
 class UChargeAnimationComponent;
 class UAudioComponent;
 class UCurveFloat;
+class UCameraShakeBase;
 class UMaterialInterface;
 class UIKRetargeter;
 class UNiagaraSystem;
@@ -33,6 +34,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate, uint8, Ne
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate, float, ChargeValue, uint8, Polarity);
 // Extended charge delegate: TotalCharge, StableCharge, UnstableCharge, MaxStable, MaxUnstable, Polarity
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, TotalCharge, float, StableCharge, float, UnstableCharge, float, MaxStableCharge, float, MaxUnstableCharge, uint8, Polarity);
+// Chromatic aberration intensity delegate (called every tick while effect is active)
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamageChromaticAberrationDelegate, float, Intensity);
 
 // Boss Finisher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
@@ -258,8 +261,21 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.05", ClampMax = "0.5"))
 	float WeaponSwitchRaiseTime = 0.15f;
 
-	UPROPERTY(EditAnywhere, Category = "Destruction", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
-	float RespawnTime = 5.0f;
+	/** Time before respawn after death */
+	UPROPERTY(EditAnywhere, Category = "Death", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
+	float RespawnTime = 2.0f;
+
+	/** Duration of fade to black on death */
+	UPROPERTY(EditAnywhere, Category = "Death", meta = (ClampMin = 0.1, ClampMax = 3.0, Units = "s"))
+	float DeathFadeOutDuration = 0.5f;
+
+	/** Duration of fade from black on respawn */
+	UPROPERTY(EditAnywhere, Category = "Death", meta = (ClampMin = 0.1, ClampMax = 3.0, Units = "s"))
+	float RespawnFadeInDuration = 0.3f;
+
+	/** Color of death/respawn fade */
+	UPROPERTY(EditAnywhere, Category = "Death")
+	FLinearColor DeathFadeColor = FLinearColor::Black;
 
 	FTimerHandle RespawnTimer;
 
@@ -521,6 +537,106 @@ protected:
 	/** Timer for low health warning sounds */
 	float LowHealthWarningTimer = 0.0f;
 
+	// ==================== Damage Feedback ====================
+
+	/** Camera shake to play when taking damage. Intensity is scaled by DamageToCameraShakeCurve */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Camera Shake")
+	TSubclassOf<UCameraShakeBase> DamageCameraShake;
+
+	/** Curve mapping damage amount to camera shake intensity (X = damage, Y = intensity multiplier 0-1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Camera Shake")
+	TObjectPtr<UCurveFloat> DamageToCameraShakeCurve;
+
+	/** Maximum camera shake scale when curve returns 1.0 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Camera Shake", meta = (ClampMin = "0.1", ClampMax = "5.0"))
+	float MaxCameraShakeScale = 2.0f;
+
+	// --- Impact Sounds by Damage Type ---
+
+	/** Default impact sound when damage type is unknown */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Impact Sounds")
+	TObjectPtr<USoundBase> DefaultImpactSound;
+
+	/** Impact sound for ranged/bullet damage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Impact Sounds")
+	TObjectPtr<USoundBase> RangedImpactSound;
+
+	/** Impact sound for melee damage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Impact Sounds")
+	TObjectPtr<USoundBase> MeleeImpactSound;
+
+	/** Impact sound for explosion damage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Impact Sounds")
+	TObjectPtr<USoundBase> ExplosionImpactSound;
+
+	/** Impact sound for EMF/electric damage */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Impact Sounds")
+	TObjectPtr<USoundBase> EMFImpactSound;
+
+	/** Volume multiplier for damage impact sounds */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Impact Sounds", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float DamageImpactSoundVolume = 1.0f;
+
+	// --- Chromatic Aberration ---
+
+	/** Damage amount that results in maximum (1.0) chromatic aberration intensity. Higher damage is clamped to 1.0 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Chromatic Aberration", meta = (ClampMin = "1.0"))
+	float MaxDamageForFullChromaticAberration = 100.0f;
+
+	/** Duration of chromatic aberration effect (half sine wave: 0 → peak → 0) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Chromatic Aberration", meta = (ClampMin = "0.1", ClampMax = "3.0"))
+	float ChromaticAberrationDuration = 0.5f;
+
+	/** Chromatic aberration delegate - broadcasts intensity (0-1) every tick while effect is active */
+	UPROPERTY(BlueprintAssignable, Category = "Damage Feedback|Chromatic Aberration")
+	FDamageChromaticAberrationDelegate OnDamageChromaticAberration;
+
+	// --- Chromatic Aberration State (internal) ---
+
+	/** Base intensity calculated from damage (before sine modulation) */
+	float ChromaticAberrationBaseIntensity = 0.0f;
+
+	/** Elapsed time for current chromatic aberration effect */
+	float ChromaticAberrationElapsedTime = 0.0f;
+
+	/** True when chromatic aberration effect is active */
+	bool bChromaticAberrationActive = false;
+
+	// --- Melee Knockback (position interpolation, like NPC system) ---
+
+	/** Whether to apply knockback when hit by melee attacks */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Knockback")
+	bool bEnableMeleeKnockback = true;
+
+	/** Distance to knock back player on melee hit (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Knockback", meta = (ClampMin = "0.0", EditCondition = "bEnableMeleeKnockback"))
+	float MeleeKnockbackDistance = 200.0f;
+
+	/** Duration of knockback interpolation (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Knockback", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "bEnableMeleeKnockback"))
+	float MeleeKnockbackDuration = 0.2f;
+
+	/** If true, knockback can be cancelled by player actions (jump, dash, etc.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Knockback", meta = (EditCondition = "bEnableMeleeKnockback"))
+	bool bKnockbackCancellableByPlayer = true;
+
+	// --- Knockback State (internal) ---
+
+	/** True when player is being knocked back */
+	bool bIsInKnockback = false;
+
+	/** Start position for knockback interpolation */
+	FVector KnockbackStartPosition = FVector::ZeroVector;
+
+	/** Target position for knockback interpolation */
+	FVector KnockbackTargetPosition = FVector::ZeroVector;
+
+	/** Total duration of current knockback */
+	float KnockbackTotalDuration = 0.0f;
+
+	/** Elapsed time in current knockback */
+	float KnockbackElapsedTime = 0.0f;
+
 	// ==================== VFX|PostProcess ====================
 
 	/** Post process material instance for low health effect (vignette, desaturation, etc.) */
@@ -627,6 +743,34 @@ public:
 
 	/** Handle incoming damage */
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
+	/** Returns true if player is currently being knocked back */
+	UFUNCTION(BlueprintPure, Category = "Damage")
+	bool IsInKnockback() const { return bIsInKnockback; }
+
+	/** Cancel current knockback (called when player performs action like jump/dash) */
+	UFUNCTION(BlueprintCallable, Category = "Damage")
+	void CancelKnockback();
+
+protected:
+
+	/** Apply knockback from melee damage */
+	void ApplyMeleeKnockback(const FVector& KnockbackDirection, float Distance, float Duration);
+
+	/** Update knockback position interpolation (called from Tick) */
+	void UpdateKnockbackInterpolation(float DeltaTime);
+
+	/** Play damage feedback effects (camera shake, sound) based on damage type and amount */
+	void PlayDamageFeedback(float Damage, TSubclassOf<UDamageType> DamageTypeClass);
+
+	/** Get impact sound for damage type */
+	USoundBase* GetImpactSoundForDamageType(TSubclassOf<UDamageType> DamageTypeClass) const;
+
+	/** Start chromatic aberration effect based on damage amount */
+	void StartChromaticAberrationEffect(float Damage);
+
+	/** Update chromatic aberration effect (called from Tick) */
+	void UpdateChromaticAberration(float DeltaTime);
 
 public:
 

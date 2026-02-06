@@ -268,6 +268,9 @@ void AMeleeNPC::OnDamageWindowEnd()
 {
 	bDamageWindowActive = false;
 
+	// Stop magnetism when damage window ends (same flag used when damage is dealt)
+	bHasDealtDamage = true;
+
 #if WITH_EDITOR
 	if (bDebugMeleeTraces && GEngine)
 	{

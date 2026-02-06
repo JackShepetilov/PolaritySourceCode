@@ -34,6 +34,11 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Engine/DamageEvents.h"
+#include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
+#include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
+#include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
+#include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 
 AShooterCharacter::AShooterCharacter()
 {
@@ -249,29 +254,56 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	// Reset regeneration delay timer
 	TimeSinceLastDamage = 0.0f;
 
+	// Get damage type for feedback
+	TSubclassOf<UDamageType> DamageTypeClass = DamageEvent.DamageTypeClass;
+
 	// Calculate damage direction angle relative to player forward
 	// Only show damage direction for actual damage (positive value), not healing
+	FVector DamageDirection = FVector::ZeroVector;
 	if (DamageCauser && Damage > 0.0f)
 	{
 		// Get direction from damage source to player
-		FVector DamageDirection = (DamageCauser->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+		DamageDirection = (DamageCauser->GetActorLocation() - GetActorLocation()).GetSafeNormal();
 
 		// Get player's forward vector (ignore pitch)
 		FVector PlayerForward = GetActorForwardVector();
 		PlayerForward.Z = 0.0f;
 		PlayerForward.Normalize();
 
-		DamageDirection.Z = 0.0f;
-		DamageDirection.Normalize();
+		FVector DamageDir2D = DamageDirection;
+		DamageDir2D.Z = 0.0f;
+		DamageDir2D.Normalize();
 
 		// Calculate angle using atan2 for proper signed angle
 		// Positive = right side, Negative = left side
-		float DotProduct = FVector::DotProduct(PlayerForward, DamageDirection);
-		float CrossProduct = FVector::CrossProduct(PlayerForward, DamageDirection).Z;
+		float DotProduct = FVector::DotProduct(PlayerForward, DamageDir2D);
+		float CrossProduct = FVector::CrossProduct(PlayerForward, DamageDir2D).Z;
 		float AngleDegrees = FMath::RadiansToDegrees(FMath::Atan2(CrossProduct, DotProduct));
 
 		// Broadcast damage direction
 		OnDamageDirection.Broadcast(AngleDegrees, Damage);
+	}
+
+	// Play damage feedback (camera shake, impact sound)
+	if (Damage > 0.0f)
+	{
+		PlayDamageFeedback(Damage, DamageTypeClass);
+	}
+
+	// Apply knockback for melee damage
+	if (bEnableMeleeKnockback && Damage > 0.0f && DamageTypeClass)
+	{
+		if (DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
+		{
+			// Knockback direction is away from damage source
+			FVector KnockbackDir = -DamageDirection;
+			KnockbackDir.Z = 0.0f;
+			if (!KnockbackDir.IsNearlyZero())
+			{
+				KnockbackDir.Normalize();
+				ApplyMeleeKnockback(KnockbackDir, MeleeKnockbackDistance, MeleeKnockbackDuration);
+			}
+		}
 	}
 
 	// Have we depleted HP?
@@ -581,6 +613,18 @@ void AShooterCharacter::Tick(float DeltaTime)
 	{
 		UpdateBossFinisher(DeltaTime);
 		return; // Skip normal updates during finisher
+	}
+
+	// Update knockback interpolation if active
+	if (bIsInKnockback)
+	{
+		UpdateKnockbackInterpolation(DeltaTime);
+	}
+
+	// Update chromatic aberration effect if active
+	if (bChromaticAberrationActive)
+	{
+		UpdateChromaticAberration(DeltaTime);
 	}
 
 	UpdateADS(DeltaTime);
@@ -1547,6 +1591,183 @@ AShooterWeapon* AShooterCharacter::FindWeaponOfType(TSubclassOf<AShooterWeapon> 
 	return nullptr;
 }
 
+// ==================== Damage Feedback ====================
+
+void AShooterCharacter::PlayDamageFeedback(float Damage, TSubclassOf<UDamageType> DamageTypeClass)
+{
+	// Play camera shake scaled by damage
+	if (DamageCameraShake)
+	{
+		float ShakeScale = 1.0f;
+		if (DamageToCameraShakeCurve)
+		{
+			ShakeScale = DamageToCameraShakeCurve->GetFloatValue(Damage) * MaxCameraShakeScale;
+		}
+		else
+		{
+			// Default: linear scale up to MaxCameraShakeScale at 100 damage
+			ShakeScale = FMath::Clamp(Damage / 100.0f, 0.1f, 1.0f) * MaxCameraShakeScale;
+		}
+
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			PC->ClientStartCameraShake(DamageCameraShake, ShakeScale);
+		}
+	}
+
+	// Play impact sound based on damage type
+	USoundBase* ImpactSound = GetImpactSoundForDamageType(DamageTypeClass);
+	if (ImpactSound)
+	{
+		UGameplayStatics::PlaySound2D(this, ImpactSound, DamageImpactSoundVolume);
+	}
+
+	// Start chromatic aberration effect
+	StartChromaticAberrationEffect(Damage);
+}
+
+USoundBase* AShooterCharacter::GetImpactSoundForDamageType(TSubclassOf<UDamageType> DamageTypeClass) const
+{
+	if (!DamageTypeClass)
+	{
+		return DefaultImpactSound;
+	}
+
+	// Check for specific damage types
+	if (DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
+	{
+		return MeleeImpactSound ? MeleeImpactSound : DefaultImpactSound;
+	}
+	if (DamageTypeClass->IsChildOf(UDamageType_Ranged::StaticClass()))
+	{
+		return RangedImpactSound ? RangedImpactSound : DefaultImpactSound;
+	}
+	if (DamageTypeClass->IsChildOf(UDamageType_EMFWeapon::StaticClass()) ||
+		DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()))
+	{
+		return EMFImpactSound ? EMFImpactSound : DefaultImpactSound;
+	}
+
+	// Check if it's a radial damage (explosion)
+	// UE doesn't have a built-in explosion type, so we use default for now
+	// You can add UDamageType_Explosion if needed
+
+	return DefaultImpactSound;
+}
+
+// ==================== Melee Knockback ====================
+
+void AShooterCharacter::ApplyMeleeKnockback(const FVector& KnockbackDirection, float Distance, float Duration)
+{
+	if (Distance < 1.0f || Duration < 0.01f)
+	{
+		return;
+	}
+
+	bIsInKnockback = true;
+	KnockbackStartPosition = GetActorLocation();
+	KnockbackTargetPosition = KnockbackStartPosition + KnockbackDirection * Distance;
+	KnockbackTotalDuration = Duration;
+	KnockbackElapsedTime = 0.0f;
+}
+
+void AShooterCharacter::UpdateKnockbackInterpolation(float DeltaTime)
+{
+	if (!bIsInKnockback)
+	{
+		return;
+	}
+
+	KnockbackElapsedTime += DeltaTime;
+	float Alpha = FMath::Clamp(KnockbackElapsedTime / KnockbackTotalDuration, 0.0f, 1.0f);
+
+	// Use smooth step for more natural feel
+	Alpha = FMath::SmoothStep(0.0f, 1.0f, Alpha);
+
+	FVector NewPosition = FMath::Lerp(KnockbackStartPosition, KnockbackTargetPosition, Alpha);
+
+	// Simple collision check - sweep to new position
+	FHitResult Hit;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	float CapsuleRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
+	float CapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+	bool bHit = GetWorld()->SweepSingleByChannel(
+		Hit,
+		GetActorLocation(),
+		NewPosition,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight),
+		QueryParams
+	);
+
+	if (bHit)
+	{
+		// Stop at wall with small offset
+		NewPosition = Hit.Location + Hit.ImpactNormal * 2.0f;
+		bIsInKnockback = false; // End knockback on wall hit
+	}
+
+	SetActorLocation(NewPosition, false);
+
+	// End knockback when duration complete
+	if (KnockbackElapsedTime >= KnockbackTotalDuration)
+	{
+		bIsInKnockback = false;
+	}
+}
+
+void AShooterCharacter::CancelKnockback()
+{
+	if (bIsInKnockback && bKnockbackCancellableByPlayer)
+	{
+		bIsInKnockback = false;
+	}
+}
+
+// ==================== Chromatic Aberration ====================
+
+void AShooterCharacter::StartChromaticAberrationEffect(float Damage)
+{
+	// Calculate base intensity from damage (linear, clamped to 0-1)
+	ChromaticAberrationBaseIntensity = FMath::Clamp(Damage / MaxDamageForFullChromaticAberration, 0.0f, 1.0f);
+	ChromaticAberrationElapsedTime = 0.0f;
+	bChromaticAberrationActive = true;
+}
+
+void AShooterCharacter::UpdateChromaticAberration(float DeltaTime)
+{
+	if (!bChromaticAberrationActive)
+	{
+		return;
+	}
+
+	ChromaticAberrationElapsedTime += DeltaTime;
+
+	// Check if effect has finished
+	if (ChromaticAberrationElapsedTime >= ChromaticAberrationDuration)
+	{
+		bChromaticAberrationActive = false;
+		// Broadcast final zero intensity
+		OnDamageChromaticAberration.Broadcast(0.0f);
+		return;
+	}
+
+	// Calculate intensity using half sine wave (0 → 1 → 0)
+	// sin(t * PI / Duration) where t goes from 0 to Duration
+	float Alpha = ChromaticAberrationElapsedTime / ChromaticAberrationDuration;
+	float SineMultiplier = FMath::Sin(Alpha * PI);
+	float FinalIntensity = ChromaticAberrationBaseIntensity * SineMultiplier;
+
+	// Broadcast current intensity
+	OnDamageChromaticAberration.Broadcast(FinalIntensity);
+}
+
+// ==================== Death ====================
+
 void AShooterCharacter::Die()
 {
 	if (IsValid(CurrentWeapon))
@@ -1566,6 +1787,15 @@ void AShooterCharacter::Die()
 	// Stop any looping sounds
 	StopSlideLoopSound();
 	StopWallRunLoopSound();
+
+	// Start fade to black
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StartCameraFade(0.0f, 1.0f, DeathFadeOutDuration, DeathFadeColor, false, true);
+		}
+	}
 
 	BP_OnDeath();
 
@@ -1690,6 +1920,12 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 
 		// Reset view target back to this character (in case death camera was active)
 		PC->SetViewTarget(this);
+
+		// Fade in from black
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, RespawnFadeInDuration, DeathFadeColor, false, false);
+		}
 	}
 
 	// Update UI
@@ -1867,6 +2103,8 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 
 void AShooterCharacter::OnJumpPerformed_Handler(bool bIsDoubleJump)
 {
+	CancelKnockback(); // Player action cancels knockback
+
 	// Play jump sound
 	PlayJumpSound(bIsDoubleJump);
 
@@ -1884,6 +2122,7 @@ void AShooterCharacter::OnMantleStarted_Handler()
 
 void AShooterCharacter::OnAirDashStarted_Handler()
 {
+	CancelKnockback(); // Player action cancels knockback
 	PlayAirDashSound();
 	StartAirDashTrailVFX();
 }

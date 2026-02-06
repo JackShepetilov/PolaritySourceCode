@@ -29,7 +29,7 @@ public:
 	 * @param InWorldLocation The world position where damage occurred
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Damage Number")
-	void Initialize(float InDamage, EPlayerDamageCategory InCategory, const FVector& InWorldLocation);
+	void InitializeDamageNumber(float InDamage, EPlayerDamageCategory InCategory, const FVector& InWorldLocation);
 
 	/**
 	 * Called by Blueprint when animation is complete

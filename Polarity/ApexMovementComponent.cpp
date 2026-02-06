@@ -310,7 +310,7 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 
 bool UApexMovementComponent::TryJump()
 {
-	bool JumpResult = DoJump(false);
+	bool JumpResult = DoJump(false, 0.f);
 
 	if (JumpResult)
 	{
@@ -320,11 +320,11 @@ bool UApexMovementComponent::TryJump()
 	return JumpResult;
 }
 
-bool UApexMovementComponent::DoJump(bool bReplayingMoves)
+bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 {
 	if (!MovementSettings)
 	{
-		return Super::DoJump(bReplayingMoves);
+		return Super::DoJump(bReplayingMoves, DeltaTime);
 	}
 
 	const int32 MaxJumps = MovementSettings->MaxJumpCount;
@@ -666,7 +666,7 @@ void UApexMovementComponent::StartCrouching()
 
 	bWantsToCrouchSmooth = true;
 	bWantsToCrouch = true;
-	TargetCapsuleHalfHeight = CrouchedHalfHeight;
+	TargetCapsuleHalfHeight = GetCrouchedHalfHeight();
 
 	// Set the movement component's crouch flag immediately for IsCrouching() checks
 	CharacterOwner->bIsCrouched = true;
