@@ -161,7 +161,12 @@ void UShooterOptionsMenuUI::SetMasterVolume(float Value)
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
 		Settings->MasterVolume = FMath::Clamp(Value, 0.0f, 1.0f);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetMasterVolume: %.2f"), Settings->MasterVolume);
 		MarkSettingModified(FName("MasterVolume"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SetMasterVolume: GetGameSettings() returned null!"));
 	}
 }
 
@@ -179,7 +184,12 @@ void UShooterOptionsMenuUI::SetMusicVolume(float Value)
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
 		Settings->MusicVolume = FMath::Clamp(Value, 0.0f, 1.0f);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetMusicVolume: %.2f"), Settings->MusicVolume);
 		MarkSettingModified(FName("MusicVolume"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SetMusicVolume: GetGameSettings() returned null!"));
 	}
 }
 
@@ -197,7 +207,12 @@ void UShooterOptionsMenuUI::SetSFXVolume(float Value)
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
 		Settings->SFXVolume = FMath::Clamp(Value, 0.0f, 1.0f);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetSFXVolume: %.2f"), Settings->SFXVolume);
 		MarkSettingModified(FName("SFXVolume"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SetSFXVolume: GetGameSettings() returned null!"));
 	}
 }
 
@@ -215,7 +230,12 @@ void UShooterOptionsMenuUI::SetVoiceVolume(float Value)
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
 		Settings->VoiceVolume = FMath::Clamp(Value, 0.0f, 1.0f);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetVoiceVolume: %.2f"), Settings->VoiceVolume);
 		MarkSettingModified(FName("VoiceVolume"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SetVoiceVolume: GetGameSettings() returned null!"));
 	}
 }
 

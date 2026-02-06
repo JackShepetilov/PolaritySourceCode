@@ -65,15 +65,31 @@ void UShooterGameSettings::SetCustomDefaults()
 
 void UShooterGameSettings::ApplyAudioSettings()
 {
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] === ApplyAudioSettings called ==="));
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Values: Master=%.2f, Music=%.2f, SFX=%.2f, Voice=%.2f"),
+		MasterVolume, MusicVolume, SFXVolume, VoiceVolume);
+
+	// Log the asset paths being loaded
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SoundMix path: %s"), *AudioSoundMix.ToString());
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] MusicClass path: %s"), *MusicSoundClass.ToString());
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SFXClass path: %s"), *SFXSoundClass.ToString());
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] VoiceClass path: %s"), *VoiceSoundClass.ToString());
+
 	// Load audio assets if they're set
 	USoundMix* SoundMix = AudioSoundMix.LoadSynchronous();
 	USoundClass* MusicClass = MusicSoundClass.LoadSynchronous();
 	USoundClass* SFXClass = SFXSoundClass.LoadSynchronous();
 	USoundClass* VoiceClass = VoiceSoundClass.LoadSynchronous();
 
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Loaded: SoundMix=%s, Music=%s, SFX=%s, Voice=%s"),
+		SoundMix ? TEXT("OK") : TEXT("NULL"),
+		MusicClass ? TEXT("OK") : TEXT("NULL"),
+		SFXClass ? TEXT("OK") : TEXT("NULL"),
+		VoiceClass ? TEXT("OK") : TEXT("NULL"));
+
 	if (!SoundMix)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ShooterGameSettings: AudioSoundMix is not set! Audio volume settings will not work."));
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] AudioSoundMix FAILED to load! Path: %s"), *AudioSoundMix.ToString());
 		return;
 	}
 
@@ -93,31 +109,49 @@ void UShooterGameSettings::ApplyAudioSettings()
 
 	if (!World)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ShooterGameSettings: No game world found for audio settings."));
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] No game world found!"));
 		return;
 	}
 
 	// Push the sound mix if not already active
 	UGameplayStatics::PushSoundMixModifier(World, SoundMix);
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] PushSoundMixModifier done"));
 
 	// Apply volume for each Sound Class (multiplied by MasterVolume)
 	if (MusicClass)
 	{
 		const float FinalMusicVolume = MusicVolume * MasterVolume;
 		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, MusicClass, FinalMusicVolume, 1.0f, 0.0f, true);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Music applied: %.2f (%.2f * %.2f)"), FinalMusicVolume, MusicVolume, MasterVolume);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] MusicSoundClass is NULL - skipping"));
 	}
 
 	if (SFXClass)
 	{
 		const float FinalSFXVolume = SFXVolume * MasterVolume;
 		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, SFXClass, FinalSFXVolume, 1.0f, 0.0f, true);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SFX applied: %.2f (%.2f * %.2f)"), FinalSFXVolume, SFXVolume, MasterVolume);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SFXSoundClass is NULL - skipping"));
 	}
 
 	if (VoiceClass)
 	{
 		const float FinalVoiceVolume = VoiceVolume * MasterVolume;
 		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, VoiceClass, FinalVoiceVolume, 1.0f, 0.0f, true);
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Voice applied: %.2f (%.2f * %.2f)"), FinalVoiceVolume, VoiceVolume, MasterVolume);
 	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] VoiceSoundClass is NULL - skipping"));
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] === ApplyAudioSettings done ==="));
 }
 
 void UShooterGameSettings::ApplyGameplaySettings()
