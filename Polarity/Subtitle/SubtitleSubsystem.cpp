@@ -14,10 +14,15 @@
 void USubtitleSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+
+	// Subscribe to level transitions so we can reset widget state
+	FWorldDelegates::OnWorldCleanup.AddUObject(this, &USubtitleSubsystem::OnWorldCleanup);
 }
 
 void USubtitleSubsystem::Deinitialize()
 {
+	FWorldDelegates::OnWorldCleanup.RemoveAll(this);
+
 	HideAllSubtitles();
 
 	if (ActiveWidget)
@@ -311,4 +316,29 @@ APlayerController* USubtitleSubsystem::GetPlayerController() const
 	}
 
 	return World->GetFirstPlayerController();
+}
+
+void USubtitleSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
+{
+	// Only care about game/PIE worlds being cleaned up
+	if (!World || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SubtitleSubsystem: World cleanup - resetting widget state"));
+
+	// Cancel any active timer (it's tied to the old world's TimerManager)
+	if (bSubtitleActive)
+	{
+		World->GetTimerManager().ClearTimer(SubtitleTimerHandle);
+		bSubtitleActive = false;
+	}
+
+	// Clear the queue
+	SubtitleQueue.Empty();
+
+	// Widget will be destroyed by the engine during world cleanup.
+	// Just null our pointer so EnsureWidgetCreated() recreates it on the new level.
+	ActiveWidget = nullptr;
 }

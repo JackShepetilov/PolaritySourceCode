@@ -16,11 +16,15 @@ void UTutorialSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
+	FWorldDelegates::OnWorldCleanup.AddUObject(this, &UTutorialSubsystem::OnWorldCleanup);
+
 	UE_LOG(LogPolarity, Log, TEXT("TutorialSubsystem initialized"));
 }
 
 void UTutorialSubsystem::Deinitialize()
 {
+	FWorldDelegates::OnWorldCleanup.RemoveAll(this);
+
 	// Clean up any active widgets
 	if (ActiveHintWidget)
 	{
@@ -460,4 +464,24 @@ bool UTutorialSubsystem::ValidateConfiguration(FString& OutError) const
 	}
 
 	return true;
+}
+
+void UTutorialSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
+{
+	// Only care about game/PIE worlds
+	if (!World || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	{
+		return;
+	}
+
+	UE_LOG(LogPolarity, Log, TEXT("TutorialSubsystem: World cleanup - resetting widget state"));
+
+	// Widgets are destroyed by the engine during world cleanup.
+	// Null our pointers so they get recreated on the new level.
+	ActiveHintWidget = nullptr;
+	ActiveSlideWidget = nullptr;
+	bHintActive = false;
+	bSlideActive = false;
+	ActiveHintID = NAME_None;
+	ActiveSlideID = NAME_None;
 }

@@ -245,4 +245,10 @@ private:
 	void LogWarning(const FString& Message) const;
 	void LogError(const FString& Message) const;
 	FString StateToString(EMusicPlayerState State) const;
+
+	/**
+	 * Called when a world is being cleaned up (level transition).
+	 * Resets audio components and timing state for the new level.
+	 */
+	void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 };

@@ -189,4 +189,10 @@ protected:
 	 * Get appropriate player controller for widget creation.
 	 */
 	APlayerController* GetPlayerController() const;
+
+	/**
+	 * Called when a world is being cleaned up (level transition).
+	 * Resets widget and timer state so they are recreated on the new level.
+	 */
+	void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 };

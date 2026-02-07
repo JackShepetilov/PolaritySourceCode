@@ -248,4 +248,10 @@ protected:
 	 * @return True if configured correctly
 	 */
 	bool ValidateConfiguration(FString& OutError) const;
+
+	/**
+	 * Called when a world is being cleaned up (level transition).
+	 * Resets widget state so widgets are recreated on the new level.
+	 */
+	void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 };

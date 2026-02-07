@@ -18,6 +18,9 @@ const FName UMusicPlayerSubsystem::MusicClockName = FName("MusicPlayerClock");
 void UMusicPlayerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+
+	FWorldDelegates::OnWorldCleanup.AddUObject(this, &UMusicPlayerSubsystem::OnWorldCleanup);
+
 	LogDebug(TEXT("MusicPlayerSubsystem initialized"));
 }
 
@@ -57,6 +60,8 @@ void UMusicPlayerSubsystem::Deinitialize()
 	{
 		World->GetTimerManager().ClearTimer(StopTimerHandle);
 	}
+
+	FWorldDelegates::OnWorldCleanup.RemoveAll(this);
 
 	LogDebug(TEXT("MusicPlayerSubsystem deinitialized"));
 	Super::Deinitialize();
@@ -728,4 +733,35 @@ FString UMusicPlayerSubsystem::StateToString(EMusicPlayerState State) const
 	case EMusicPlayerState::FadingOut: return TEXT("FadingOut");
 	default:                           return TEXT("Unknown");
 	}
+}
+
+void UMusicPlayerSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
+{
+	if (!World || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	{
+		return;
+	}
+
+	LogDebug(TEXT("World cleanup - resetting audio components and timing state"));
+
+	// Clear timer tied to the old world
+	World->GetTimerManager().ClearTimer(StopTimerHandle);
+
+	// Audio components are owned by actors in the old world and will be destroyed.
+	// Null our pointers so EnsureAudioComponents() recreates them on the new level.
+	AudioComponentA = nullptr;
+	AudioComponentB = nullptr;
+	ClockHandle = nullptr;
+
+	// Reset scheduling state
+	bNextPartScheduled = false;
+	ScheduledNextPartID = NAME_None;
+	CurrentPartTimeRemaining = 0.0f;
+	CurrentPartDuration = 0.0f;
+
+	// Reset fading state
+	bIsFading = false;
+
+	// Keep CurrentTrack, CurrentPartID, bIsInIntenseZone, CurrentState —
+	// so music can resume on the new level if StartTrack/SetIntenseZone is called again.
 }
