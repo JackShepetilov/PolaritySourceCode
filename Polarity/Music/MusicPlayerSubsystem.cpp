@@ -742,7 +742,7 @@ void UMusicPlayerSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bo
 		return;
 	}
 
-	LogDebug(TEXT("World cleanup - resetting audio components and timing state"));
+	LogDebug(TEXT("World cleanup - full reset for level transition"));
 
 	// Clear timer tied to the old world
 	World->GetTimerManager().ClearTimer(StopTimerHandle);
@@ -753,7 +753,14 @@ void UMusicPlayerSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bo
 	AudioComponentB = nullptr;
 	ClockHandle = nullptr;
 
-	// Reset scheduling state
+	// CRITICAL: Set state to Stopped so Tick() doesn't try to schedule/transition
+	// while there's no valid world or audio components.
+	CurrentState = EMusicPlayerState::Stopped;
+
+	// Reset all playback state
+	CurrentTrack = nullptr;
+	CurrentPartID = NAME_None;
+	bIsInIntenseZone = false;
 	bNextPartScheduled = false;
 	ScheduledNextPartID = NAME_None;
 	CurrentPartTimeRemaining = 0.0f;
@@ -761,7 +768,9 @@ void UMusicPlayerSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bo
 
 	// Reset fading state
 	bIsFading = false;
-
-	// Keep CurrentTrack, CurrentPartID, bIsInIntenseZone, CurrentState —
-	// so music can resume on the new level if StartTrack/SetIntenseZone is called again.
+	CurrentVolume = 1.0f;
+	TargetVolume = 1.0f;
+	FadeStartVolume = 1.0f;
+	FadeDuration = 0.0f;
+	FadeElapsed = 0.0f;
 }
