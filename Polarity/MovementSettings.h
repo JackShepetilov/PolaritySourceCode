@@ -51,22 +51,10 @@ public:
 	float AirAcceleration = 800.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
-	float AirControl = 0.35f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
 	float AirStrafeMultiplier = 1.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
-	float MaxAirStrafeSpeed = 30.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
 	float AirSpeedCap = 2000.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
-	bool bUseSourceAirAcceleration = true;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
-	float SVAccelerate = 10.0f;
 
 	// ==================== Air Dive (camera-directed descent) ====================
 
@@ -133,13 +121,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Minimum speed required to start sliding. Titanfall default: 850"))
 	float SlideMinStartSpeed = 850.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide")
-	float SlideBoostSpeed = 200.0f;
-
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Ground friction during slide. Titanfall uses 0!"))
 	float SlideFriction = 0.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Downhill acceleration reduction. Higher = faster on slopes"))
 	float SlideSlopeAcceleration = 1500.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide")
@@ -154,29 +139,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide")
 	float SlidehopJumpZVelocity = 450.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Braking at slide start. Increases over time. Titanfall default: 375"))
-	float SlideBrakingDecelerationMin = 375.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Braking after ~2s of sliding. Titanfall default: 750"))
-	float SlideBrakingDecelerationMax = 750.0f;
-
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Speed boost at high entry speed. Titanfall default: 100"))
 	float SlideMinSpeedBurst = 100.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Speed boost at minimum entry speed. Titanfall default: 400"))
 	float SlideMaxSpeedBurst = 400.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "How much slopes affect slide. Higher = steeper slopes matter more"))
-	float SlideFloorInfluenceForce = 850.0f;
-
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Extra slowdown on flat ground. Works with progressive braking"))
 	float SlideFlatDeceleration = 200.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Additional slowdown when sliding uphill"))
 	float SlideUphillDeceleration = 600.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide")
-	float SlideEndSpeed = 225.0f;
 
 	// ==================== Mantle ====================
 

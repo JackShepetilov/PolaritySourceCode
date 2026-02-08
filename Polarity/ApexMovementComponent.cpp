@@ -235,8 +235,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 
 	if (bIsSliding || bIsWallRunning)
 	{
-		// No speed cap - momentum based
-		return 10000.0f;
+		return MovementSettings->SpeedCap;
 	}
 
 	if (IsCrouching())
@@ -563,7 +562,6 @@ void UApexMovementComponent::StartSlide()
 	SlideDirection = Velocity.GetSafeNormal2D();
 
 	GroundFriction = 0.0f;
-	BrakingDecelerationWalking = 100.0f;
 
 	if (SlideBoostCooldownRemaining <= 0.0f)
 	{
@@ -617,7 +615,7 @@ void UApexMovementComponent::EndSlide()
 
 void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 {
-	if (bIsSliding || bIsMantling || bIsWallRunning)
+	if (bIsSliding || bIsMantling || bIsWallRunning || SlideCooldownRemaining > 0.0f)
 	{
 		return;
 	}
@@ -627,7 +625,6 @@ void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 	SlideDirection = Velocity.GetSafeNormal2D();
 
 	GroundFriction = MovementSettings->SlideFriction;
-	BrakingDecelerationWalking = 100.0f;
 
 	const float CurrentSpeed = Velocity.Size2D();
 	const float MinBoost = MovementSettings->SlideMinSpeedBurst;
@@ -638,7 +635,7 @@ void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 	float BaseBoost = FMath::Lerp(MaxBoost, MinBoost, SpeedRatio);
 	const float FallBoostMultiplier = FMath::Clamp(FallSpeed / 1000.0f, 0.1f, 0.5f);
 	const float FallBoost = CurrentSpeed * FallBoostMultiplier;
-	const float TotalBoost = BaseBoost + FallBoost;
+	const float TotalBoost = FMath::Min(BaseBoost + FallBoost, MaxBoost);
 
 	if (SlideDirection.IsNearlyZero())
 	{
@@ -647,10 +644,14 @@ void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 
 	if (SlideBoostCooldownRemaining <= 0.0f)
 	{
-		Velocity += SlideDirection * TotalBoost;
+		// Apply fatigue to air slide boost (same as slidehop)
+		const float FatigueMultiplier = (SlideFatigueCounter < 5)
+			? FMath::Max(0.2f, 1.0f - SlideFatigueCounter * 0.15f)
+			: 0.0f;
+		Velocity += SlideDirection * TotalBoost * FatigueMultiplier;
 		SlideBoostCooldownRemaining = MovementSettings->SlideboostCooldown;
 	}
-	UE_LOG(LogSlide, Warning, TEXT("=== SLIDE FROM AIR === Speed=%.1f, Boost=%.1f slide cooldown = %.1f"), Velocity.Size2D(), TotalBoost, SlideBoostCooldownRemaining);
+	UE_LOG(LogSlide, Warning, TEXT("=== SLIDE FROM AIR === Speed=%.1f, Boost=%.1f, Fatigue=%d slide cooldown = %.1f"), Velocity.Size2D(), TotalBoost, SlideFatigueCounter, SlideBoostCooldownRemaining);
 
 	StartCrouching();
 
@@ -818,7 +819,6 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 	const float SlideFlatDecel = MovementSettings->SlideFlatDeceleration;
 	const float SlideUphillDecel = MovementSettings->SlideUphillDeceleration;
 	const float SlideDownhillDecel = MovementSettings->SlideSlopeAcceleration;
-	const float SlideFloorInfluence = MovementSettings->SlideFloorInfluenceForce;
 
 	if (!IsMovingOnGround())
 	{
@@ -838,22 +838,9 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 		return;
 	}
 
-	// Slope influence
-	const float SlopeAngle = GetSlopeAngle();
+	// Deceleration (single slope system: uphill adds decel, downhill reduces decel)
+	const float SlopeAngle = GetSlopeAngle(); // positive = uphill, negative = downhill
 
-	if (CurrentFloor.IsWalkableFloor() && FMath::Abs(SlopeAngle) > 3.0f)
-	{
-		const FVector FloorNormal = CurrentFloor.HitResult.Normal;
-		FVector SlopeDirection = FVector::CrossProduct(
-			FloorNormal,
-			FVector::CrossProduct(FVector::UpVector, FloorNormal)
-		).GetSafeNormal();
-
-		float SlopeInfluence = SlopeAngle / 45.0f;
-		Velocity += SlopeDirection * SlideFloorInfluence * SlopeInfluence * DeltaTime;
-	}
-
-	// Deceleration
 	float BrakingAlpha = FMath::Clamp(SlideDuration / 2.0f, 0.0f, 1.0f);
 	float DecelMultiplier = 0.3f + 0.7f * BrakingAlpha;
 
@@ -864,15 +851,16 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 	{
 		float DecelAmount = SlideFlatDecel * DecelMultiplier * DeltaTime;
 
-		if (SlopeAngle > 5.0f)
+		if (SlopeAngle > 3.0f)
 		{
+			// Uphill: extra deceleration
 			float SlopeMultiplier = SlopeAngle / 45.0f;
 			DecelAmount += SlideUphillDecel * SlopeMultiplier * DeltaTime;
 		}
-
-		if (SlopeAngle < 5.0f)
+		else if (SlopeAngle < -3.0f)
 		{
-			float SlopeMultiplier = SlopeAngle / 45.0f;
+			// Downhill: reduce deceleration (can go negative = acceleration)
+			float SlopeMultiplier = FMath::Abs(SlopeAngle) / 45.0f;
 			DecelAmount -= SlideDownhillDecel * SlopeMultiplier * DeltaTime;
 		}
 
