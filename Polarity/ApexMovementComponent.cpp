@@ -845,15 +845,12 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 	// Deceleration (single slope system: uphill adds decel, downhill reduces decel)
 	const float SlopeAngle = GetSlopeAngle(); // positive = uphill, negative = downhill
 
-	float BrakingAlpha = FMath::Clamp(SlideDuration / 2.0f, 0.0f, 1.0f);
-	float DecelMultiplier = 0.3f + 0.7f * BrakingAlpha;
-
 	FVector HorizontalVel = FVector(Velocity.X, Velocity.Y, 0.0f);
 	float HorizontalSpeed = HorizontalVel.Size();
 
 	if (HorizontalSpeed > 0.0f)
 	{
-		float DecelAmount = SlideFlatDecel * DecelMultiplier * DeltaTime;
+		float DecelAmount = SlideFlatDecel * DeltaTime;
 
 		if (SlopeAngle > 3.0f)
 		{
