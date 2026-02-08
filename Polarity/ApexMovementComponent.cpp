@@ -16,7 +16,7 @@ UApexMovementComponent::UApexMovementComponent()
 	bCanWalkOffLedgesWhenCrouching = true;
 	SetCrouchedHalfHeight(50.0f);
 
-	AirControl = 0.3f;
+	AirControl = 0.0f; // Disabled - using custom ApplyAirStrafe() instead
 	JumpZVelocity = 500.0f;
 	GravityScale = 1.5f;
 	MaxWalkSpeed = 600.0f;
@@ -59,7 +59,8 @@ void UApexMovementComponent::InitializeComponent()
 		MaxWalkSpeedCrouched = MovementSettings->CrouchSpeed;
 		GroundFriction = MovementSettings->GroundFriction;
 		BrakingDecelerationWalking = MovementSettings->BrakingDeceleration;
-		AirControl = MovementSettings->AirControl;
+		// Native AirControl disabled - all air movement handled by ApplyAirStrafe()
+		AirControl = 0.0f;
 
 		DefaultGroundFriction = MovementSettings->GroundFriction;
 		DefaultBrakingDeceleration = MovementSettings->BrakingDeceleration;
@@ -273,7 +274,8 @@ float UApexMovementComponent::GetMaxAcceleration() const
 		return Super::GetMaxAcceleration();
 	}
 
-	return IsFalling() ? MovementSettings->AirAcceleration : MovementSettings->GroundAcceleration;
+	// Air acceleration = 0 for native UE5 (all air movement handled by ApplyAirStrafe pre-tick)
+	return IsFalling() ? 0.0f : MovementSettings->GroundAcceleration;
 }
 
 void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainingTime, int32 Iterations)
