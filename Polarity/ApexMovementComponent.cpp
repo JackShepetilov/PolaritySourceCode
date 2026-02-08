@@ -1783,26 +1783,42 @@ void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 	}
 
 	// Normal air strafe (horizontal only)
-	FVector VelNorm = Velocity.GetSafeNormal2D();
-	FVector WishDir = InputVector.GetSafeNormal2D();
-	float VelDotWish = FVector::DotProduct(VelNorm, WishDir);
-
-	if (FMath::Abs(VelDotWish) > 0.9f)
+	// Player can always accelerate up to AirSpeedCap in any direction,
+	// and always brake (input opposite to velocity). Cannot exceed AirSpeedCap.
+	const FVector WishDir = InputVector.GetSafeNormal2D();
+	if (WishDir.IsNearlyZero())
 	{
 		return;
 	}
 
-	const float CurrentSpeed = Velocity.Size2D();
-	const float AddSpeed = FMath::Clamp(
-		MovementSettings->MaxAirStrafeSpeed - CurrentSpeed * VelDotWish,
-		0.0f,
-		MovementSettings->AirAcceleration * DeltaTime * MovementSettings->AirStrafeMultiplier
-	);
+	const FVector HorizontalVelocity = FVector(Velocity.X, Velocity.Y, 0.0f);
+	const float CurrentSpeed = HorizontalVelocity.Size();
+	const float MaxSpeed = MovementSettings->AirSpeedCap;
+	const float Accel = MovementSettings->AirAcceleration * MovementSettings->AirStrafeMultiplier * DeltaTime;
 
-	if (AddSpeed > 0.0f)
+	// Apply acceleration in wish direction
+	FVector NewHorizontalVelocity = HorizontalVelocity + WishDir * Accel;
+	const float NewSpeed = NewHorizontalVelocity.Size();
+
+	// Only clamp if we INCREASED speed AND are above cap.
+	// If we were already above cap (from slide/wallrun/dash), allow braking but not further acceleration.
+	if (NewSpeed > MaxSpeed && NewSpeed > CurrentSpeed)
 	{
-		Velocity += WishDir * AddSpeed;
+		// Were we already above cap before this frame?
+		if (CurrentSpeed > MaxSpeed)
+		{
+			// Already above cap - don't allow any speed increase, keep original speed
+			NewHorizontalVelocity = NewHorizontalVelocity.GetSafeNormal() * CurrentSpeed;
+		}
+		else
+		{
+			// Below cap, would go above - clamp to cap
+			NewHorizontalVelocity = NewHorizontalVelocity.GetSafeNormal() * MaxSpeed;
+		}
 	}
+
+	Velocity.X = NewHorizontalVelocity.X;
+	Velocity.Y = NewHorizontalVelocity.Y;
 }
 
 void UApexMovementComponent::UpdateJumpHold(float DeltaTime)
