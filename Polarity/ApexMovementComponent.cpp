@@ -561,7 +561,9 @@ void UApexMovementComponent::StartSlide()
 	SlideDuration = 0.0f;
 	SlideDirection = Velocity.GetSafeNormal2D();
 
+	// Disable native UE5 braking - all slide deceleration handled by UpdateSlide()
 	GroundFriction = 0.0f;
+	BrakingDecelerationWalking = 0.0f;
 
 	if (SlideBoostCooldownRemaining <= 0.0f)
 	{
@@ -624,7 +626,9 @@ void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 	SlideDuration = 0.0f;
 	SlideDirection = Velocity.GetSafeNormal2D();
 
+	// Disable native UE5 braking - all slide deceleration handled by UpdateSlide()
 	GroundFriction = MovementSettings->SlideFriction;
+	BrakingDecelerationWalking = 0.0f;
 
 	const float CurrentSpeed = Velocity.Size2D();
 	const float MinBoost = MovementSettings->SlideMinSpeedBurst;
