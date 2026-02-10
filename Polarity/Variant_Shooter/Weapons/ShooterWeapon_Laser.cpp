@@ -329,9 +329,10 @@ void AShooterWeapon_Laser::ActivateBeam()
 		// Set initial beam parameters before first render frame
 		if (ActiveBeamComponent)
 		{
-			// Use absolute world-space transforms so beam endpoints aren't affected by
-			// the weapon mesh movement (we set them explicitly each frame)
 			ActiveBeamComponent->SetAbsolute(false, false, false);
+
+			// Ensure Niagara ticks AFTER this actor so parameters are up-to-date
+			ActiveBeamComponent->AddTickPrerequisiteActor(this);
 
 			FHitResult InitHit;
 			FVector InitStart, InitEnd;
@@ -772,6 +773,7 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 	if (ActiveHarmonicBeamA)
 	{
 		ActiveHarmonicBeamA->SetAbsolute(false, false, false);
+		ActiveHarmonicBeamA->AddTickPrerequisiteActor(this);
 		ActiveHarmonicBeamA->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
 		ActiveHarmonicBeamA->SetFloatParameter(FName("Scale_E"), BeamScaleE);
 		ActiveHarmonicBeamA->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
@@ -803,6 +805,7 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 	if (ActiveHarmonicBeamB)
 	{
 		ActiveHarmonicBeamB->SetAbsolute(false, false, false);
+		ActiveHarmonicBeamB->AddTickPrerequisiteActor(this);
 		ActiveHarmonicBeamB->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
 		ActiveHarmonicBeamB->SetFloatParameter(FName("Scale_E"), BeamScaleE);
 		ActiveHarmonicBeamB->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
