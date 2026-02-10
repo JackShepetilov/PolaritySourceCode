@@ -752,8 +752,8 @@ bool AShooterWeapon_Laser::PerformSweepTrace(const FVector& Direction, FHitResul
 // =============================================================================
 void AShooterWeapon_Laser::SpawnHarmonicBeams()
 {
-	UNiagaraSystem* BeamFX = SecondHarmonicBeamFX ? SecondHarmonicBeamFX : LaserBeamFX;
-	if (!BeamFX)
+	UNiagaraSystem* HarmonicFX = SecondHarmonicBeamFX ? SecondHarmonicBeamFX : LaserBeamFX;
+	if (!HarmonicFX)
 	{
 		return;
 	}
@@ -763,7 +763,7 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 
 	// Spawn Beam A
 	ActiveHarmonicBeamA = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		BeamFX, AttachTarget, MuzzleSocketName,
+		HarmonicFX, AttachTarget, MuzzleSocketName,
 		FVector::ZeroVector, FRotator::ZeroRotator,
 		EAttachLocation::SnapToTarget,
 		false, false, ENCPoolMethod::None
@@ -794,7 +794,7 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 
 	// Spawn Beam B
 	ActiveHarmonicBeamB = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		BeamFX, AttachTarget, MuzzleSocketName,
+		HarmonicFX, AttachTarget, MuzzleSocketName,
 		FVector::ZeroVector, FRotator::ZeroRotator,
 		EAttachLocation::SnapToTarget,
 		false, false, ENCPoolMethod::None
