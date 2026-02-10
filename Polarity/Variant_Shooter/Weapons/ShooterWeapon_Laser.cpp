@@ -8,7 +8,6 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "../DamageTypes/DamageType_EMFWeapon.h"
-#include "DrawDebugHelpers.h"
 
 AShooterWeapon_Laser::AShooterWeapon_Laser()
 {
@@ -38,9 +37,6 @@ void AShooterWeapon_Laser::Fire()
 	{
 		return;
 	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[Laser] Fire() called. bBeamActive=%d, LaserBeamFX=%s"),
-		bBeamActive, LaserBeamFX ? *LaserBeamFX->GetName() : TEXT("NULL"));
 
 	// Activate beam on first fire
 	if (!bBeamActive)
@@ -82,37 +78,24 @@ void AShooterWeapon_Laser::Tick(float DeltaTime)
 	// 2. Perform beam trace
 	FHitResult HitResult;
 	FVector BeamStart, BeamEnd;
-	const bool bHit = PerformBeamTrace(HitResult, BeamStart, BeamEnd);
-
-	// DEBUG: Draw beam line (green = beam, blue sphere = start, red sphere = hit point)
-	DrawDebugLine(GetWorld(), BeamStart, BeamEnd, FColor::Green, false, -1.0f, 0, 2.0f);
-	DrawDebugSphere(GetWorld(), BeamStart, 5.0f, 6, FColor::Blue, false, -1.0f, 0, 1.0f);
-	if (bHit)
-	{
-		DrawDebugSphere(GetWorld(), BeamEnd, 10.0f, 8, FColor::Red, false, -1.0f, 0, 2.0f);
-	}
+	bool bHitPawn = false;
+	const bool bHit = PerformBeamTrace(HitResult, BeamStart, BeamEnd, bHitPawn);
 
 	// 3. Update beam VFX
 	UpdateBeamVFX(BeamStart, BeamEnd);
 
 	// 4. Handle hit
-	if (bHit && HitResult.GetActor())
+	if (bHit && bHitPawn && HitResult.GetActor())
 	{
-		// Damage
+		// Hit a pawn/character - apply damage, ionization, show impact
 		ApplyBeamDamage(HitResult, DeltaTime);
-
-		// Ionization
 		ApplyIonization(HitResult.GetActor(), DeltaTime);
-
-		// Impact VFX at hit point
 		UpdateImpactVFX(true, HitResult.ImpactPoint, HitResult.ImpactNormal);
-
-		// Track current target
 		CurrentHitActor = HitResult.GetActor();
 	}
 	else if (bHit)
 	{
-		// Hit a surface but no actor (wall, floor)
+		// Hit a surface (wall, floor) - impact VFX only, no damage/hitmarker
 		UpdateImpactVFX(true, HitResult.ImpactPoint, HitResult.ImpactNormal);
 		CurrentHitActor = nullptr;
 	}
@@ -129,8 +112,9 @@ void AShooterWeapon_Laser::Tick(float DeltaTime)
 // Two traces: ECC_Visibility for walls, ECC_Pawn for characters
 // Returns the closest hit (wall or pawn)
 // =============================================================================
-bool AShooterWeapon_Laser::PerformBeamTrace(FHitResult& OutHit, FVector& OutBeamStart, FVector& OutBeamEnd) const
+bool AShooterWeapon_Laser::PerformBeamTrace(FHitResult& OutHit, FVector& OutBeamStart, FVector& OutBeamEnd, bool& bOutHitPawn) const
 {
+	bOutHitPawn = false;
 	// Muzzle location for VFX start
 	USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
 	OutBeamStart = MuzzleMesh ? MuzzleMesh->GetSocketLocation(MuzzleSocketName) : GetActorLocation();
@@ -182,6 +166,7 @@ bool AShooterWeapon_Laser::PerformBeamTrace(FHitResult& OutHit, FVector& OutBeam
 	{
 		OutHit = PawnHit;
 		OutBeamEnd = PawnHit.ImpactPoint;
+		bOutHitPawn = true;
 		return true;
 	}
 	else if (bHitWall)
@@ -309,10 +294,6 @@ void AShooterWeapon_Laser::ActivateBeam()
 {
 	bBeamActive = true;
 
-	UE_LOG(LogTemp, Warning, TEXT("[Laser] ActivateBeam. LaserBeamFX=%s, LaserImpactFX=%s"),
-		LaserBeamFX ? *LaserBeamFX->GetName() : TEXT("NULL"),
-		LaserImpactFX ? *LaserImpactFX->GetName() : TEXT("NULL"));
-
 	// Spawn beam Niagara component ATTACHED to weapon mesh
 	// This eliminates 1-frame lag from tick ordering (component moves with weapon)
 	// Spawn DEACTIVATED first, set initial params, then activate to avoid 1-frame default flash
@@ -341,7 +322,8 @@ void AShooterWeapon_Laser::ActivateBeam()
 
 			FHitResult InitHit;
 			FVector InitStart, InitEnd;
-			PerformBeamTrace(InitHit, InitStart, InitEnd);
+			bool bInitHitPawn = false;
+			PerformBeamTrace(InitHit, InitStart, InitEnd, bInitHitPawn);
 			const FVector InitDir = (InitEnd - InitStart).GetSafeNormal();
 
 			ActiveBeamComponent->SetVectorParameter(FName("Beam Start"), InitStart);
@@ -405,7 +387,6 @@ void AShooterWeapon_Laser::ActivateBeam()
 // =============================================================================
 void AShooterWeapon_Laser::DeactivateBeam()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[Laser] DeactivateBeam"));
 	bBeamActive = false;
 
 	// Destroy beam VFX
@@ -445,42 +426,10 @@ void AShooterWeapon_Laser::UpdateBeamVFX(const FVector& Start, const FVector& En
 {
 	if (!ActiveBeamComponent)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[Laser] UpdateBeamVFX: ActiveBeamComponent is NULL!"));
 		return;
 	}
 
 	const FVector Direction = (End - Start).GetSafeNormal();
-	const float BeamLength = FVector::Dist(Start, End);
-
-	// DEBUG: Log parameters being sent to Niagara (throttled - every 30 frames)
-	static int32 DebugFrameCounter = 0;
-	if (++DebugFrameCounter % 30 == 0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[Laser] VFX Params: Start=(%.0f, %.0f, %.0f) End=(%.0f, %.0f, %.0f) Len=%.0f Axis=(%.2f, %.2f, %.2f) Scale_E=%.1f"),
-			Start.X, Start.Y, Start.Z,
-			End.X, End.Y, End.Z,
-			BeamLength,
-			Direction.X, Direction.Y, Direction.Z,
-			BeamScaleE);
-
-		UE_LOG(LogTemp, Warning, TEXT("[Laser] NiagaraComp: IsActive=%d, IsVisible=%d, IsRegistered=%d"),
-			ActiveBeamComponent->IsActive(),
-			ActiveBeamComponent->IsVisible(),
-			ActiveBeamComponent->IsRegistered());
-
-		// On-screen debug message
-		GEngine->AddOnScreenDebugMessage(100, 0.5f, FColor::Cyan,
-			FString::Printf(TEXT("LASER: Start=(%.0f,%.0f,%.0f) End=(%.0f,%.0f,%.0f) Len=%.0f"),
-				Start.X, Start.Y, Start.Z,
-				End.X, End.Y, End.Z,
-				BeamLength));
-
-		GEngine->AddOnScreenDebugMessage(101, 0.5f, FColor::Yellow,
-			FString::Printf(TEXT("LASER Niagara: Active=%d Visible=%d Scale_E=%.1f"),
-				ActiveBeamComponent->IsActive(),
-				ActiveBeamComponent->IsVisible(),
-				BeamScaleE));
-	}
 
 	// Core beam parameters (matching Niagara User Parameters - names with spaces as in editor)
 	ActiveBeamComponent->SetVectorParameter(FName("Beam Start"), Start);

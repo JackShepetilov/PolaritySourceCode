@@ -129,8 +129,8 @@ private:
 
 	// ==================== Internal Methods ====================
 
-	/** Perform the beam trace and return hit result. Returns true if something was hit. */
-	bool PerformBeamTrace(FHitResult& OutHit, FVector& OutBeamStart, FVector& OutBeamEnd) const;
+	/** Perform the beam trace and return hit result. Returns true if something was hit. bOutHitPawn is true only if a pawn was hit (not a wall). */
+	bool PerformBeamTrace(FHitResult& OutHit, FVector& OutBeamStart, FVector& OutBeamEnd, bool& bOutHitPawn) const;
 
 	/** Apply continuous damage to the hit actor */
 	void ApplyBeamDamage(const FHitResult& Hit, float DeltaTime);
