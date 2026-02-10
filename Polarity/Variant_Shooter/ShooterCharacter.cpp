@@ -747,6 +747,12 @@ void AShooterCharacter::DoStartADS()
 		return;
 	}
 
+	// Let weapon handle secondary action as ability (e.g. laser's Second Harmonic)
+	if (CurrentWeapon && CurrentWeapon->OnSecondaryAction())
+	{
+		return;
+	}
+
 	if (MovementSettings && MovementSettings->bEnableADS)
 	{
 		bWantsToAim = true;

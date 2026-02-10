@@ -472,6 +472,9 @@ public:
 	void StartFiring();
 	void StopFiring();
 
+	/** Called when ADS/secondary action button pressed. Return true to block normal ADS. */
+	virtual bool OnSecondaryAction() { return false; }
+
 protected:
 
 	virtual void Fire();

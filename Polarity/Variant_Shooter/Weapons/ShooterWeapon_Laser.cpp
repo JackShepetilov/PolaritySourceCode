@@ -38,6 +38,12 @@ void AShooterWeapon_Laser::Fire()
 		return;
 	}
 
+	// Don't activate main beam during Second Harmonic ability
+	if (CurrentHarmonicPhase != ESecondHarmonicPhase::None)
+	{
+		return;
+	}
+
 	// Activate beam on first fire
 	if (!bBeamActive)
 	{
@@ -54,6 +60,13 @@ void AShooterWeapon_Laser::Fire()
 void AShooterWeapon_Laser::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime); // Handles heat decay
+
+	// Second Harmonic ability takes priority over normal beam
+	if (CurrentHarmonicPhase != ESecondHarmonicPhase::None)
+	{
+		UpdateSecondHarmonic(DeltaTime);
+		return;
+	}
 
 	// Check if we should deactivate beam (player released trigger)
 	if (bBeamActive && !bIsFiring)
@@ -466,4 +479,381 @@ void AShooterWeapon_Laser::UpdateImpactVFX(bool bHitSurface, const FVector& Loca
 			ActiveImpactComponent->Deactivate();
 		}
 	}
+}
+
+// =============================================================================
+// SECOND HARMONIC GENERATION ABILITY
+// =============================================================================
+
+// =============================================================================
+// OnSecondaryAction - intercept ADS button to trigger ability
+// Returns true to block normal ADS behavior
+// =============================================================================
+bool AShooterWeapon_Laser::OnSecondaryAction()
+{
+	// Already running
+	if (CurrentHarmonicPhase != ESecondHarmonicPhase::None)
+	{
+		return true;
+	}
+
+	// Cooldown check
+	const float TimeSinceLastUse = GetWorld()->GetTimeSeconds() - LastHarmonicUseTime;
+	if (TimeSinceLastUse < SecondHarmonicCooldown)
+	{
+		return true; // Still block ADS even on cooldown
+	}
+
+	ActivateSecondHarmonic();
+	return true;
+}
+
+// =============================================================================
+// ActivateSecondHarmonic - start the vertical sweep phase
+// =============================================================================
+void AShooterWeapon_Laser::ActivateSecondHarmonic()
+{
+	// Remember main beam state so we can restore it after
+	bMainBeamWasActive = bBeamActive;
+
+	// Deactivate main beam during ability
+	if (bBeamActive)
+	{
+		DeactivateBeam();
+	}
+
+	// Start vertical sweep
+	CurrentHarmonicPhase = ESecondHarmonicPhase::VerticalSweep;
+	HarmonicPhaseElapsedTime = 0.0f;
+	HitActorsBeamA.Empty();
+	HitActorsBeamB.Empty();
+
+	// Spawn the two sweep beams
+	SpawnHarmonicBeams();
+}
+
+// =============================================================================
+// UpdateSecondHarmonic - per-frame ability logic
+// =============================================================================
+void AShooterWeapon_Laser::UpdateSecondHarmonic(float DeltaTime)
+{
+	HarmonicPhaseElapsedTime += DeltaTime;
+
+	// Determine current phase duration and rotation axis
+	const float PhaseDuration = (CurrentHarmonicPhase == ESecondHarmonicPhase::VerticalSweep)
+		? VerticalSweepDuration
+		: HorizontalSweepDuration;
+
+	const float Alpha = FMath::Clamp(HarmonicPhaseElapsedTime / PhaseDuration, 0.0f, 1.0f);
+	const float CurrentAngle = InitialSweepAngleDeg * (1.0f - Alpha);
+
+	// Get aim direction and rotation axes from owner
+	if (!PawnOwner)
+	{
+		DeactivateSecondHarmonic();
+		return;
+	}
+
+	const FRotator AimRot = PawnOwner->GetBaseAimRotation();
+	const FVector AimDir = AimRot.Vector();
+	const FVector RightAxis = FRotationMatrix(AimRot).GetUnitAxis(EAxis::Y);
+	const FVector UpAxis = FRotationMatrix(AimRot).GetUnitAxis(EAxis::Z);
+
+	// Choose rotation axis based on phase
+	const FVector& RotationAxis = (CurrentHarmonicPhase == ESecondHarmonicPhase::VerticalSweep)
+		? RightAxis   // Vertical: rotate around right axis (pitch up/down)
+		: UpAxis;     // Horizontal: rotate around up axis (yaw left/right)
+
+	// Calculate beam directions
+	const FVector DirA = AimDir.RotateAngleAxis(+CurrentAngle, RotationAxis);
+	const FVector DirB = AimDir.RotateAngleAxis(-CurrentAngle, RotationAxis);
+
+	// --- Beam A ---
+	{
+		FHitResult HitA;
+		FVector StartA, EndA;
+		bool bHitPawnA = false;
+		PerformSweepTrace(DirA, HitA, StartA, EndA, bHitPawnA);
+
+		// One-time damage on new targets
+		if (bHitPawnA && HitA.GetActor())
+		{
+			TWeakObjectPtr<AActor> HitActorWeak = HitA.GetActor();
+			if (!HitActorsBeamA.Contains(HitActorWeak))
+			{
+				HitActorsBeamA.Add(HitActorWeak);
+
+				// Apply one-time damage
+				const TSubclassOf<UDamageType> DmgType = SecondHarmonicDamageType ? SecondHarmonicDamageType : LaserDamageType;
+				UGameplayStatics::ApplyPointDamage(
+					HitA.GetActor(),
+					SecondHarmonicDamage,
+					DirA,
+					HitA,
+					PawnOwner ? PawnOwner->GetController() : nullptr,
+					this,
+					DmgType
+				);
+
+				// Hitmarker
+				if (WeaponOwner)
+				{
+					const bool bKilled = HitA.GetActor()->IsActorBeingDestroyed();
+					WeaponOwner->OnWeaponHit(HitA.ImpactPoint, DirA, SecondHarmonicDamage, false, bKilled);
+				}
+			}
+		}
+
+		UpdateHarmonicBeamVFX(ActiveHarmonicBeamA, StartA, EndA);
+	}
+
+	// --- Beam B ---
+	{
+		FHitResult HitB;
+		FVector StartB, EndB;
+		bool bHitPawnB = false;
+		PerformSweepTrace(DirB, HitB, StartB, EndB, bHitPawnB);
+
+		// One-time damage on new targets
+		if (bHitPawnB && HitB.GetActor())
+		{
+			TWeakObjectPtr<AActor> HitActorWeak = HitB.GetActor();
+			if (!HitActorsBeamB.Contains(HitActorWeak))
+			{
+				HitActorsBeamB.Add(HitActorWeak);
+
+				const TSubclassOf<UDamageType> DmgType = SecondHarmonicDamageType ? SecondHarmonicDamageType : LaserDamageType;
+				UGameplayStatics::ApplyPointDamage(
+					HitB.GetActor(),
+					SecondHarmonicDamage,
+					DirB,
+					HitB,
+					PawnOwner ? PawnOwner->GetController() : nullptr,
+					this,
+					DmgType
+				);
+
+				if (WeaponOwner)
+				{
+					const bool bKilled = HitB.GetActor()->IsActorBeingDestroyed();
+					WeaponOwner->OnWeaponHit(HitB.ImpactPoint, DirB, SecondHarmonicDamage, false, bKilled);
+				}
+			}
+		}
+
+		UpdateHarmonicBeamVFX(ActiveHarmonicBeamB, StartB, EndB);
+	}
+
+	// Check phase completion
+	if (Alpha >= 1.0f)
+	{
+		if (CurrentHarmonicPhase == ESecondHarmonicPhase::VerticalSweep)
+		{
+			TransitionToHorizontalSweep();
+		}
+		else
+		{
+			DeactivateSecondHarmonic();
+		}
+	}
+}
+
+// =============================================================================
+// TransitionToHorizontalSweep - switch from vertical to horizontal phase
+// =============================================================================
+void AShooterWeapon_Laser::TransitionToHorizontalSweep()
+{
+	CurrentHarmonicPhase = ESecondHarmonicPhase::HorizontalSweep;
+	HarmonicPhaseElapsedTime = 0.0f;
+
+	// Fresh hit tracking for the new pair of beams
+	HitActorsBeamA.Empty();
+	HitActorsBeamB.Empty();
+
+	// Beams stay alive - just change sweep direction next frame
+}
+
+// =============================================================================
+// DeactivateSecondHarmonic - end ability, restore main beam if needed
+// =============================================================================
+void AShooterWeapon_Laser::DeactivateSecondHarmonic()
+{
+	CurrentHarmonicPhase = ESecondHarmonicPhase::None;
+	LastHarmonicUseTime = GetWorld()->GetTimeSeconds();
+
+	DestroyHarmonicBeams();
+
+	HitActorsBeamA.Empty();
+	HitActorsBeamB.Empty();
+
+	// Restore main beam if it was active before and player is still holding fire
+	if (bMainBeamWasActive && bIsFiring)
+	{
+		ActivateBeam();
+	}
+}
+
+// =============================================================================
+// PerformSweepTrace - line trace for a single sweep beam in a given direction
+// Same two-trace approach as PerformBeamTrace (walls + pawns)
+// =============================================================================
+bool AShooterWeapon_Laser::PerformSweepTrace(const FVector& Direction, FHitResult& OutHit, FVector& OutBeamStart, FVector& OutBeamEnd, bool& bOutHitPawn) const
+{
+	bOutHitPawn = false;
+
+	// Muzzle location for VFX start (same as main beam)
+	USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
+	OutBeamStart = MuzzleMesh ? MuzzleMesh->GetSocketLocation(MuzzleSocketName) : GetActorLocation();
+
+	const FVector TraceStart = PawnOwner ? PawnOwner->GetPawnViewLocation() : OutBeamStart;
+	const FVector TraceEnd = TraceStart + Direction * MaxBeamRange;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.AddIgnoredActor(GetOwner());
+
+	// Trace 1: Walls/geometry
+	FHitResult WallHit;
+	const bool bHitWall = GetWorld()->LineTraceSingleByChannel(
+		WallHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams
+	);
+
+	// Trace 2: Pawns (limited by wall distance)
+	const FVector PawnTraceEnd = bHitWall ? WallHit.ImpactPoint : TraceEnd;
+	FHitResult PawnHit;
+	FCollisionObjectQueryParams PawnObjectParams;
+	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	const bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
+		PawnHit, TraceStart, PawnTraceEnd, PawnObjectParams, QueryParams
+	);
+
+	if (bHitPawn)
+	{
+		OutHit = PawnHit;
+		OutBeamEnd = PawnHit.ImpactPoint;
+		bOutHitPawn = true;
+		return true;
+	}
+	else if (bHitWall)
+	{
+		OutHit = WallHit;
+		OutBeamEnd = WallHit.ImpactPoint;
+		return true;
+	}
+
+	// No hit - beam goes to max range
+	OutBeamEnd = OutBeamStart + Direction * MaxBeamRange;
+	return false;
+}
+
+// =============================================================================
+// SpawnHarmonicBeams - create the two sweep beam Niagara components
+// =============================================================================
+void AShooterWeapon_Laser::SpawnHarmonicBeams()
+{
+	UNiagaraSystem* BeamFX = SecondHarmonicBeamFX ? SecondHarmonicBeamFX : LaserBeamFX;
+	if (!BeamFX)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* AttachMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
+	USceneComponent* AttachTarget = AttachMesh ? static_cast<USceneComponent*>(AttachMesh) : GetRootComponent();
+
+	// Spawn Beam A
+	ActiveHarmonicBeamA = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		BeamFX, AttachTarget, MuzzleSocketName,
+		FVector::ZeroVector, FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false, false, ENCPoolMethod::None
+	);
+
+	if (ActiveHarmonicBeamA)
+	{
+		ActiveHarmonicBeamA->SetAbsolute(false, false, false);
+		ActiveHarmonicBeamA->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
+		ActiveHarmonicBeamA->SetFloatParameter(FName("Scale_E"), BeamScaleE);
+		ActiveHarmonicBeamA->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
+
+		// Set initial positions before activating
+		FHitResult InitHit;
+		FVector InitStart, InitEnd;
+		bool bInitHitPawn = false;
+		const FVector AimDir = PawnOwner ? PawnOwner->GetBaseAimRotation().Vector() : FVector::ForwardVector;
+		const FRotator AimRot = PawnOwner ? PawnOwner->GetBaseAimRotation() : FRotator::ZeroRotator;
+		const FVector RotAxis = FRotationMatrix(AimRot).GetUnitAxis(EAxis::Y); // Vertical first
+		const FVector DirA = AimDir.RotateAngleAxis(+InitialSweepAngleDeg, RotAxis);
+
+		PerformSweepTrace(DirA, InitHit, InitStart, InitEnd, bInitHitPawn);
+		ActiveHarmonicBeamA->SetVectorParameter(FName("Beam Start"), InitStart);
+		ActiveHarmonicBeamA->SetVectorParameter(FName("Beam End"), InitEnd);
+		ActiveHarmonicBeamA->SetVectorParameter(FName("Axis"), (InitEnd - InitStart).GetSafeNormal());
+		ActiveHarmonicBeamA->Activate();
+	}
+
+	// Spawn Beam B
+	ActiveHarmonicBeamB = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		BeamFX, AttachTarget, MuzzleSocketName,
+		FVector::ZeroVector, FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false, false, ENCPoolMethod::None
+	);
+
+	if (ActiveHarmonicBeamB)
+	{
+		ActiveHarmonicBeamB->SetAbsolute(false, false, false);
+		ActiveHarmonicBeamB->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
+		ActiveHarmonicBeamB->SetFloatParameter(FName("Scale_E"), BeamScaleE);
+		ActiveHarmonicBeamB->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
+
+		FHitResult InitHit;
+		FVector InitStart, InitEnd;
+		bool bInitHitPawn = false;
+		const FVector AimDir = PawnOwner ? PawnOwner->GetBaseAimRotation().Vector() : FVector::ForwardVector;
+		const FRotator AimRot = PawnOwner ? PawnOwner->GetBaseAimRotation() : FRotator::ZeroRotator;
+		const FVector RotAxis = FRotationMatrix(AimRot).GetUnitAxis(EAxis::Y);
+		const FVector DirB = AimDir.RotateAngleAxis(-InitialSweepAngleDeg, RotAxis);
+
+		PerformSweepTrace(DirB, InitHit, InitStart, InitEnd, bInitHitPawn);
+		ActiveHarmonicBeamB->SetVectorParameter(FName("Beam Start"), InitStart);
+		ActiveHarmonicBeamB->SetVectorParameter(FName("Beam End"), InitEnd);
+		ActiveHarmonicBeamB->SetVectorParameter(FName("Axis"), (InitEnd - InitStart).GetSafeNormal());
+		ActiveHarmonicBeamB->Activate();
+	}
+}
+
+// =============================================================================
+// DestroyHarmonicBeams - clean up sweep beam components
+// =============================================================================
+void AShooterWeapon_Laser::DestroyHarmonicBeams()
+{
+	if (ActiveHarmonicBeamA)
+	{
+		ActiveHarmonicBeamA->DestroyComponent();
+		ActiveHarmonicBeamA = nullptr;
+	}
+
+	if (ActiveHarmonicBeamB)
+	{
+		ActiveHarmonicBeamB->DestroyComponent();
+		ActiveHarmonicBeamB = nullptr;
+	}
+}
+
+// =============================================================================
+// UpdateHarmonicBeamVFX - set Niagara parameters for a single harmonic beam
+// =============================================================================
+void AShooterWeapon_Laser::UpdateHarmonicBeamVFX(UNiagaraComponent* Comp, const FVector& Start, const FVector& End)
+{
+	if (!Comp)
+	{
+		return;
+	}
+
+	const FVector Direction = (End - Start).GetSafeNormal();
+
+	Comp->SetVectorParameter(FName("Beam Start"), Start);
+	Comp->SetVectorParameter(FName("Beam End"), End);
+	Comp->SetVectorParameter(FName("Axis"), Direction);
 }
