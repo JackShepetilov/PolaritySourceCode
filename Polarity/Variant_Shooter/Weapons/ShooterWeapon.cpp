@@ -1527,8 +1527,12 @@ void AShooterWeapon::AttachToCamera(UCameraComponent* Camera)
 		return;
 	}
 
-	// Save current relative transform for returning to hip fire
-	HipFireRelativeTransform = FirstPersonMesh->GetRelativeTransform();
+	// Save hip fire transform only if not already saved (prevents overwriting with mid-interpolation position)
+	if (!bHipFireTransformSaved)
+	{
+		HipFireRelativeTransform = FirstPersonMesh->GetRelativeTransform();
+		bHipFireTransformSaved = true;
+	}
 
 	// Detach from hands, keeping world position
 	FirstPersonMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
@@ -1655,23 +1659,31 @@ void AShooterWeapon::UpdateADSTransition(float ADSAlpha, float DeltaTime)
 		const float InterpSpeed = 12.0f;
 
 		FVector CurrentLocation = FirstPersonMesh->GetRelativeLocation();
+		FVector TargetLocation = HipFireRelativeTransform.GetLocation();
 		FVector NewLocation = FMath::VInterpTo(
 			CurrentLocation,
-			HipFireRelativeTransform.GetLocation(),
+			TargetLocation,
 			DeltaTime,
 			InterpSpeed
 		);
 
 		FRotator CurrentRotation = FirstPersonMesh->GetRelativeRotation();
+		FRotator TargetRotation = HipFireRelativeTransform.GetRotation().Rotator();
 		FRotator NewRotation = FMath::RInterpTo(
 			CurrentRotation,
-			HipFireRelativeTransform.GetRotation().Rotator(),
+			TargetRotation,
 			DeltaTime,
 			InterpSpeed
 		);
 
 		FirstPersonMesh->SetRelativeLocation(NewLocation);
 		FirstPersonMesh->SetRelativeRotation(NewRotation);
+
+		// Reset saved flag once weapon has fully returned to hip fire position
+		if (NewLocation.Equals(TargetLocation, 0.1f) && NewRotation.Equals(TargetRotation, 0.1f))
+		{
+			bHipFireTransformSaved = false;
+		}
 	}
 }
 

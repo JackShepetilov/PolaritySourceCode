@@ -644,6 +644,9 @@ protected:
 	/** True when weapon mesh is attached to camera instead of hands */
 	bool bIsAttachedToCamera = false;
 
+	/** True once the true hip fire transform has been saved */
+	bool bHipFireTransformSaved = false;
+
 	/** Saved transform relative to hands for returning from ADS */
 	FTransform HipFireRelativeTransform;
 
