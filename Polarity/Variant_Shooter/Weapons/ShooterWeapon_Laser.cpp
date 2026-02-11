@@ -19,9 +19,6 @@ AShooterWeapon_Laser::AShooterWeapon_Laser()
 
 	// Default damage type
 	LaserDamageType = UDamageType_EMFWeapon::StaticClass();
-
-	// Tick before physics so Niagara reads our parameters in the same frame
-	PrimaryActorTick.TickGroup = TG_PrePhysics;
 }
 
 void AShooterWeapon_Laser::BeginPlay()
@@ -310,74 +307,53 @@ void AShooterWeapon_Laser::ActivateBeam()
 {
 	bBeamActive = true;
 
-	// Spawn beam Niagara component ATTACHED to weapon mesh
-	// This eliminates 1-frame lag from tick ordering (component moves with weapon)
-	// Spawn DEACTIVATED first, set initial params, then activate to avoid 1-frame default flash
+	// Spawn beam Niagara attached to muzzle socket
 	if (LaserBeamFX)
 	{
-		USkeletalMeshComponent* AttachMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
+		USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
 
-		ActiveBeamComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-			LaserBeamFX,
-			AttachMesh ? AttachMesh : GetRootComponent(),
-			MuzzleSocketName,
-			FVector::ZeroVector,
-			FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget,
-			false,   // bAutoDestroy = false (we manage lifetime)
-			false,   // bAutoActivate = false (we activate after setting params)
-			ENCPoolMethod::None
-		);
+		if (MuzzleMesh)
+		{
+			ActiveBeamComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				LaserBeamFX,
+				MuzzleMesh,
+				MuzzleSocketName,
+				FVector::ZeroVector,
+				FRotator::ZeroRotator,
+				EAttachLocation::SnapToTarget,
+				false,   // bAutoDestroy = false (we manage lifetime)
+				false,   // bAutoActivate = false (we activate after setting params)
+				ENCPoolMethod::None
+			);
+		}
 
-		// Set initial beam parameters before first render frame
 		if (ActiveBeamComponent)
 		{
-			ActiveBeamComponent->SetAbsolute(false, false, false);
-
-			// Force Niagara to tick after weapon updates parameters
-			ActiveBeamComponent->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
+			// Niagara must tick after us so it reads freshly-set parameters
 			ActiveBeamComponent->AddTickPrerequisiteActor(this);
 
-			FHitResult InitHit;
-			FVector InitStart, InitEnd;
-			bool bInitHitPawn = false;
-			PerformBeamTrace(InitHit, InitStart, InitEnd, bInitHitPawn);
-			const FVector InitDir = (InitEnd - InitStart).GetSafeNormal();
-
-			ActiveBeamComponent->SetVectorParameter(FName("Beam Start"), InitStart);
-			ActiveBeamComponent->SetVectorParameter(FName("Beam End"), InitEnd);
-			ActiveBeamComponent->SetVectorParameter(FName("Axis"), InitDir);
 			ActiveBeamComponent->SetColorParameter(FName("ColorEnergy"), LaserColorEnergy);
 			ActiveBeamComponent->SetFloatParameter(FName("Scale_E"), BeamScaleE);
 			ActiveBeamComponent->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
 
-			// Now activate with correct params
 			ActiveBeamComponent->Activate();
 		}
 	}
 
-	// Spawn impact VFX attached to weapon (persistent, starts deactivated)
+	// Spawn impact VFX attached to weapon (we reposition it each frame)
 	if (LaserImpactFX)
 	{
-		USkeletalMeshComponent* AttachMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
-
 		ActiveImpactComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
 			LaserImpactFX,
-			AttachMesh ? AttachMesh : GetRootComponent(),
+			RootComponent,
 			NAME_None,
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget,
+			EAttachLocation::KeepWorldPosition,
 			false,
 			false,   // bAutoActivate = false (activated when beam hits something)
 			ENCPoolMethod::None
 		);
-
-		if (ActiveImpactComponent)
-		{
-			// Impact needs to be positioned in world space independently
-			ActiveImpactComponent->SetAbsolute(true, true, false);
-		}
 	}
 
 	// Play start sound
@@ -449,9 +425,8 @@ void AShooterWeapon_Laser::UpdateBeamVFX(const FVector& Start, const FVector& En
 
 	const FVector Direction = (End - Start).GetSafeNormal();
 
-	// Core beam parameters (matching Niagara User Parameters - names with spaces as in editor)
-	ActiveBeamComponent->SetVectorParameter(FName("Beam Start"), Start);
-	ActiveBeamComponent->SetVectorParameter(FName("Beam End"), End);
+	ActiveBeamComponent->SetVariablePosition(FName("Beam Start"), Start);
+	ActiveBeamComponent->SetVariablePosition(FName("Beam End"), End);
 	ActiveBeamComponent->SetVectorParameter(FName("Axis"), Direction);
 	ActiveBeamComponent->SetColorParameter(FName("ColorEnergy"), LaserColorEnergy);
 	ActiveBeamComponent->SetFloatParameter(FName("Scale_E"), BeamScaleE);
@@ -763,71 +738,49 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 		return;
 	}
 
-	USkeletalMeshComponent* AttachMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
-	USceneComponent* AttachTarget = AttachMesh ? static_cast<USceneComponent*>(AttachMesh) : GetRootComponent();
+	USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? GetFirstPersonMesh() : GetThirdPersonMesh();
+	if (!MuzzleMesh)
+	{
+		return;
+	}
 
-	// Spawn Beam A
+	// Spawn Beam A attached to muzzle
 	ActiveHarmonicBeamA = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		HarmonicFX, AttachTarget, MuzzleSocketName,
-		FVector::ZeroVector, FRotator::ZeroRotator,
+		HarmonicFX,
+		MuzzleMesh,
+		MuzzleSocketName,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
 		EAttachLocation::SnapToTarget,
 		false, false, ENCPoolMethod::None
 	);
 
 	if (ActiveHarmonicBeamA)
 	{
-		ActiveHarmonicBeamA->SetAbsolute(false, false, false);
-		ActiveHarmonicBeamA->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
 		ActiveHarmonicBeamA->AddTickPrerequisiteActor(this);
 		ActiveHarmonicBeamA->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
 		ActiveHarmonicBeamA->SetFloatParameter(FName("Scale_E"), BeamScaleE);
 		ActiveHarmonicBeamA->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
-
-		// Set initial positions before activating
-		FHitResult InitHit;
-		FVector InitStart, InitEnd;
-		bool bInitHitPawn = false;
-		const FVector AimDir = PawnOwner ? PawnOwner->GetBaseAimRotation().Vector() : FVector::ForwardVector;
-		const FRotator AimRot = PawnOwner ? PawnOwner->GetBaseAimRotation() : FRotator::ZeroRotator;
-		const FVector RotAxis = FRotationMatrix(AimRot).GetUnitAxis(EAxis::Y); // Vertical first
-		const FVector DirA = AimDir.RotateAngleAxis(+InitialSweepAngleDeg, RotAxis);
-
-		PerformSweepTrace(DirA, InitHit, InitStart, InitEnd, bInitHitPawn);
-		ActiveHarmonicBeamA->SetVectorParameter(FName("Beam Start"), InitStart);
-		ActiveHarmonicBeamA->SetVectorParameter(FName("Beam End"), InitEnd);
-		ActiveHarmonicBeamA->SetVectorParameter(FName("Axis"), (InitEnd - InitStart).GetSafeNormal());
 		ActiveHarmonicBeamA->Activate();
 	}
 
-	// Spawn Beam B
+	// Spawn Beam B attached to muzzle
 	ActiveHarmonicBeamB = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		HarmonicFX, AttachTarget, MuzzleSocketName,
-		FVector::ZeroVector, FRotator::ZeroRotator,
+		HarmonicFX,
+		MuzzleMesh,
+		MuzzleSocketName,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
 		EAttachLocation::SnapToTarget,
 		false, false, ENCPoolMethod::None
 	);
 
 	if (ActiveHarmonicBeamB)
 	{
-		ActiveHarmonicBeamB->SetAbsolute(false, false, false);
-		ActiveHarmonicBeamB->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
 		ActiveHarmonicBeamB->AddTickPrerequisiteActor(this);
 		ActiveHarmonicBeamB->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
 		ActiveHarmonicBeamB->SetFloatParameter(FName("Scale_E"), BeamScaleE);
 		ActiveHarmonicBeamB->SetVectorParameter(FName("Scale_E_Mesh"), FVector(BeamScaleEMesh));
-
-		FHitResult InitHit;
-		FVector InitStart, InitEnd;
-		bool bInitHitPawn = false;
-		const FVector AimDir = PawnOwner ? PawnOwner->GetBaseAimRotation().Vector() : FVector::ForwardVector;
-		const FRotator AimRot = PawnOwner ? PawnOwner->GetBaseAimRotation() : FRotator::ZeroRotator;
-		const FVector RotAxis = FRotationMatrix(AimRot).GetUnitAxis(EAxis::Y);
-		const FVector DirB = AimDir.RotateAngleAxis(-InitialSweepAngleDeg, RotAxis);
-
-		PerformSweepTrace(DirB, InitHit, InitStart, InitEnd, bInitHitPawn);
-		ActiveHarmonicBeamB->SetVectorParameter(FName("Beam Start"), InitStart);
-		ActiveHarmonicBeamB->SetVectorParameter(FName("Beam End"), InitEnd);
-		ActiveHarmonicBeamB->SetVectorParameter(FName("Axis"), (InitEnd - InitStart).GetSafeNormal());
 		ActiveHarmonicBeamB->Activate();
 	}
 }
@@ -862,7 +815,7 @@ void AShooterWeapon_Laser::UpdateHarmonicBeamVFX(UNiagaraComponent* Comp, const 
 
 	const FVector Direction = (End - Start).GetSafeNormal();
 
-	Comp->SetVectorParameter(FName("Beam Start"), Start);
-	Comp->SetVectorParameter(FName("Beam End"), End);
+	Comp->SetVariablePosition(FName("Beam Start"), Start);
+	Comp->SetVariablePosition(FName("Beam End"), End);
 	Comp->SetVectorParameter(FName("Axis"), Direction);
 }

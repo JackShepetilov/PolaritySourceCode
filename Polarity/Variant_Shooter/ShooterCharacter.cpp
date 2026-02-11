@@ -981,11 +981,27 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 		FVector RecoilOffset = RecoilComponent->GetWeaponOffset();
 		FRotator RecoilRotation = RecoilComponent->GetWeaponRotationOffset();
 
-		// Get current relative transform
+		// RecoilOffset and RecoilRotation are in world-logical space:
+		//   Position: X = forward/back, Y = right, Z = up
+		//   Rotation: Pitch = up/down, Yaw = left/right, Roll = tilt
+		// But SetRelativeLocation/Rotation works in PARENT space (3P Mesh),
+		// which is rotated -90° Yaw. We must transform both to parent-local axes.
+		if (USceneComponent* Parent = GetFirstPersonMesh()->GetAttachParent())
+		{
+			const FRotator ParentRot = Parent->GetRelativeRotation();
+			// Transform position: world-logical -> parent-local
+			RecoilOffset = ParentRot.UnrotateVector(RecoilOffset);
+			// Transform rotation: convert Pitch/Yaw/Roll the same way
+			// Treat rotation as a direction vector, unrotate, then read back
+			const FVector RotAsVec(RecoilRotation.Roll, RecoilRotation.Pitch, RecoilRotation.Yaw);
+			const FVector RotTransformed = ParentRot.UnrotateVector(RotAsVec);
+			RecoilRotation = FRotator(RotTransformed.Y, RotTransformed.Z, RotTransformed.X);
+		}
+
+		// Get current relative transform (already set by Super)
 		FVector CurrentLocation = GetFirstPersonMesh()->GetRelativeLocation();
 		FRotator CurrentRotation = GetFirstPersonMesh()->GetRelativeRotation();
 
-		// Add recoil offset (in local space)
 		FVector FinalLocation = CurrentLocation + RecoilOffset;
 		FRotator FinalRotation = CurrentRotation + RecoilRotation;
 
