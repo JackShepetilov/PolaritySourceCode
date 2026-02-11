@@ -19,6 +19,9 @@ AShooterWeapon_Laser::AShooterWeapon_Laser()
 
 	// Default damage type
 	LaserDamageType = UDamageType_EMFWeapon::StaticClass();
+
+	// Tick before physics so Niagara reads our parameters in the same frame
+	PrimaryActorTick.TickGroup = TG_PrePhysics;
 }
 
 void AShooterWeapon_Laser::BeginPlay()
@@ -331,7 +334,8 @@ void AShooterWeapon_Laser::ActivateBeam()
 		{
 			ActiveBeamComponent->SetAbsolute(false, false, false);
 
-			// Ensure Niagara ticks AFTER this actor so parameters are up-to-date
+			// Force Niagara to tick after weapon updates parameters
+			ActiveBeamComponent->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
 			ActiveBeamComponent->AddTickPrerequisiteActor(this);
 
 			FHitResult InitHit;
@@ -773,6 +777,7 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 	if (ActiveHarmonicBeamA)
 	{
 		ActiveHarmonicBeamA->SetAbsolute(false, false, false);
+		ActiveHarmonicBeamA->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
 		ActiveHarmonicBeamA->AddTickPrerequisiteActor(this);
 		ActiveHarmonicBeamA->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
 		ActiveHarmonicBeamA->SetFloatParameter(FName("Scale_E"), BeamScaleE);
@@ -805,6 +810,7 @@ void AShooterWeapon_Laser::SpawnHarmonicBeams()
 	if (ActiveHarmonicBeamB)
 	{
 		ActiveHarmonicBeamB->SetAbsolute(false, false, false);
+		ActiveHarmonicBeamB->SetTickBehavior(ENiagaraTickBehavior::ForceTickLast);
 		ActiveHarmonicBeamB->AddTickPrerequisiteActor(this);
 		ActiveHarmonicBeamB->SetColorParameter(FName("ColorEnergy"), SecondHarmonicColor);
 		ActiveHarmonicBeamB->SetFloatParameter(FName("Scale_E"), BeamScaleE);
