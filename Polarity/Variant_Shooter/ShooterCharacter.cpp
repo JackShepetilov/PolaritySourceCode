@@ -1448,9 +1448,22 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 		return;
 	}
 
+	// Play on third-person mesh (visible to other players)
 	if (USkeletalMeshComponent* TPMesh = GetMesh())
 	{
 		if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+		{
+			if (!AnimInstance->Montage_IsPlaying(Montage))
+			{
+				AnimInstance->Montage_Play(Montage);
+			}
+		}
+	}
+
+	// Play on first-person mesh (visible to local player)
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
 		{
 			if (!AnimInstance->Montage_IsPlaying(Montage))
 			{
