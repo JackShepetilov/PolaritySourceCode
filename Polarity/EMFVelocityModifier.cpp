@@ -2,6 +2,7 @@
 
 #include "EMFVelocityModifier.h"
 #include "ApexMovementComponent.h"
+#include "EMFChannelingPlateActor.h"
 #include "GameFramework/Character.h"
 #include "DrawDebugHelpers.h"
 
@@ -78,13 +79,17 @@ bool UEMFVelocityModifier::ModifyVelocity_Implementation(float DeltaTime, const 
 		return false;
 	}
 
-	float Charge = GetCharge();
-	if (FMath::IsNearlyZero(Charge))
+	// In proxy mode, skip charge-zero check (player's own charge may be unregistered)
+	if (!bChannelingProxyMode)
 	{
-		OutVelocityDelta = FVector::ZeroVector;
-		CurrentEMForce = FVector::ZeroVector;
-		CurrentAcceleration = FVector::ZeroVector;
-		return false;
+		float Charge = GetCharge();
+		if (FMath::IsNearlyZero(Charge))
+		{
+			OutVelocityDelta = FVector::ZeroVector;
+			CurrentEMForce = FVector::ZeroVector;
+			CurrentAcceleration = FVector::ZeroVector;
+			return false;
+		}
 	}
 
 	// Calculate velocity delta using data from FieldComponent
@@ -136,7 +141,7 @@ float UEMFVelocityModifier::GetMass() const
 {
 	if (FieldComponent)
 	{
-		return FieldComponent->GetSourceDescription().Mass;
+		return FieldComponent->GetSourceDescription().PhysicsParams.Mass;
 	}
 	return 70.0f; // Default
 }
@@ -233,6 +238,12 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		return FVector::ZeroVector;
 	}
 
+	// Channeling proxy mode: compute forces at plate position from Environment sources
+	if (bChannelingProxyMode && ProxyPlateActor.IsValid())
+	{
+		return ComputeProxyVelocityDelta(DeltaTime, CurrentVelocity);
+	}
+
 	// Get all other sources (excluding self)
 	TArray<FEMSourceDescription> OtherSources = FieldComponent->GetAllOtherSources();
 
@@ -256,12 +267,6 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 
 	for (const FEMSourceDescription& Source : OtherSources)
 	{
-		// OPTIMIZATION: Skip inactive sources
-		if (!Source.BasicParams.bIsActive)
-		{
-			continue;
-		}
-
 		// OPTIMIZATION: Skip sources with zero charge/current/field - they produce no force
 		if (IsSourceEffectivelyZero(Source))
 		{
@@ -377,7 +382,7 @@ void UEMFVelocityModifier::OnOwnerBeginOverlap(AActor* OverlappedActor, AActor* 
 	}
 
 	float MyCharge = GetCharge();
-	float OtherCharge = OtherFieldComp->GetSourceDescription().Charge;
+	float OtherCharge = OtherFieldComp->GetSourceDescription().PointChargeParams.Charge;
 
 	// Check: opposite signs?
 	bool bOppositeSign = (MyCharge * OtherCharge) < 0.0f;
@@ -477,8 +482,106 @@ bool UEMFVelocityModifier::IsSourceEffectivelyZero(const FEMSourceDescription& S
 	case EEMSourceType::Custom:
 	default:
 		// For unknown/custom types, check legacy Charge field as fallback
-		return FMath::IsNearlyZero(Source.Charge) && FMath::IsNearlyZero(Source.PointChargeParams.Charge);
+		return FMath::IsNearlyZero(Source.PointChargeParams.Charge);
 	}
+}
+
+// ==================== Channeling Proxy Mode ====================
+
+void UEMFVelocityModifier::SetChannelingProxyMode(bool bEnable, AEMFChannelingPlateActor* PlateActor)
+{
+	bChannelingProxyMode = bEnable;
+	ProxyPlateActor = PlateActor;
+
+	if (!bEnable)
+	{
+		// Clear force state when exiting proxy mode
+		CurrentEMForce = FVector::ZeroVector;
+		CurrentAcceleration = FVector::ZeroVector;
+	}
+}
+
+FVector UEMFVelocityModifier::ComputeProxyVelocityDelta(float DeltaTime, const FVector& CurrentVelocity)
+{
+	AEMFChannelingPlateActor* Plate = ProxyPlateActor.Get();
+	if (!Plate || !Plate->PlateFieldComponent)
+	{
+		CurrentEMForce = FVector::ZeroVector;
+		CurrentAcceleration = FVector::ZeroVector;
+		return FVector::ZeroVector;
+	}
+
+	// Get all sources visible to the plate (excluding the plate actor itself)
+	TArray<FEMSourceDescription> OtherSources = Plate->PlateFieldComponent->GetAllOtherSources();
+
+	if (OtherSources.Num() == 0)
+	{
+		CurrentEMForce = FVector::ZeroVector;
+		CurrentAcceleration = FVector::ZeroVector;
+		return FVector::ZeroVector;
+	}
+
+	FVector PlatePosition = Plate->GetActorLocation();
+	float PlateCharge = Plate->GetPlateChargeDensity();
+	float Mass = GetMass();
+
+	// Pre-calculate squared max distance
+	const float MaxDistSq = MaxSourceDistance * MaxSourceDistance;
+
+	FVector TotalForce = FVector::ZeroVector;
+
+	for (const FEMSourceDescription& Source : OtherSources)
+	{
+		// Only interact with Environment sources for player movement
+		if (Source.OwnerType != EEMSourceOwnerType::Environment)
+		{
+			continue;
+		}
+
+		if (IsSourceEffectivelyZero(Source))
+		{
+			continue;
+		}
+
+		float DistSq = FVector::DistSquared(PlatePosition, Source.Position);
+		if (DistSq > MaxDistSq)
+		{
+			continue;
+		}
+
+		// Calculate force on the plate from this environment source
+		TArray<FEMSourceDescription> SingleSource;
+		SingleSource.Add(Source);
+
+		FVector SourceForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
+			PlateCharge,
+			PlatePosition,
+			CurrentVelocity, // Use player's velocity for magnetic component
+			SingleSource,
+			true
+		);
+
+		TotalForce += SourceForce * EnvironmentForceMultiplier;
+	}
+
+	CurrentEMForce = TotalForce;
+
+	// Clamp maximum force
+	if (CurrentEMForce.SizeSquared() > MaxForce * MaxForce)
+	{
+		CurrentEMForce = CurrentEMForce.GetSafeNormal() * MaxForce;
+	}
+
+	CurrentAcceleration = CurrentEMForce / FMath::Max(Mass, 0.001f);
+	FVector VelocityDelta = CurrentAcceleration * DeltaTime;
+
+	if (bDrawDebug)
+	{
+		// Draw force at plate position pointing toward player
+		DrawDebugForces(PlatePosition, CurrentEMForce);
+	}
+
+	return VelocityDelta;
 }
 
 void UEMFVelocityModifier::DrawDebugForces(const FVector& Position, const FVector& Force) const

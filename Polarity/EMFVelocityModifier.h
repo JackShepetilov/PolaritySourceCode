@@ -10,6 +10,7 @@
 
 class UApexMovementComponent;
 class UEMF_FieldComponent;
+class AEMFChannelingPlateActor;
 
 // EMF Plugin - forward declaration
 struct FEMSourceDescription;
@@ -243,6 +244,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "EMF|Charge")
 	void DeductCharge(float Amount);
 
+	// ==================== Channeling Proxy Mode ====================
+
+	/** Enable/disable proxy mode. In proxy mode, forces are calculated at the plate's
+	 *  position from Environment sources, then applied to the player character. */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Channeling")
+	void SetChannelingProxyMode(bool bEnable, AEMFChannelingPlateActor* PlateActor = nullptr);
+
+	/** Is proxy mode currently active? */
+	UFUNCTION(BlueprintPure, Category = "EMF|Channeling")
+	bool IsInChannelingProxyMode() const { return bChannelingProxyMode; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -286,6 +298,18 @@ private:
 	 *  Handles different source types: PointCharge, LineCharge, CurrentWire, etc.
 	 *  @return true if source produces no force (zero charge/current/field) */
 	static bool IsSourceEffectivelyZero(const FEMSourceDescription& Source);
+
+	// ==================== Channeling Proxy State ====================
+
+	/** When true, forces are computed at plate position from Environment sources */
+	bool bChannelingProxyMode = false;
+
+	/** Reference to the active channeling plate actor */
+	UPROPERTY()
+	TWeakObjectPtr<AEMFChannelingPlateActor> ProxyPlateActor;
+
+	/** Compute velocity delta in proxy mode (plate-to-player force relay) */
+	FVector ComputeProxyVelocityDelta(float DeltaTime, const FVector& CurrentVelocity);
 
 	/** Обработчик overlap события */
 	UFUNCTION()

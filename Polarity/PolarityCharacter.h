@@ -136,9 +136,13 @@ protected:
 	void CrouchSlideStart(const FInputActionValue& Value);
 	void CrouchSlideStop(const FInputActionValue& Value);
 
-	/** Toggle charge sign handler */
+	/** Toggle charge button pressed */
 	UFUNCTION(BlueprintCallable, Category = "EMF")
-	void DoToggleCharge();
+	void DoToggleChargePressed();
+
+	/** Toggle charge button released */
+	UFUNCTION(BlueprintCallable, Category = "EMF")
+	void DoToggleChargeReleased();
 
 	/** Update camera effects (tilt, pitch offset from shakes) */
 	void UpdateCameraEffects(float DeltaTime);

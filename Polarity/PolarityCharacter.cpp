@@ -144,7 +144,8 @@ void APolarityCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 
 		if (ToggleChargeAction)
 		{
-			EnhancedInputComponent->BindAction(ToggleChargeAction, ETriggerEvent::Started, this, &APolarityCharacter::DoToggleCharge);
+			EnhancedInputComponent->BindAction(ToggleChargeAction, ETriggerEvent::Started, this, &APolarityCharacter::DoToggleChargePressed);
+			EnhancedInputComponent->BindAction(ToggleChargeAction, ETriggerEvent::Completed, this, &APolarityCharacter::DoToggleChargeReleased);
 		}
 	}
 }
@@ -313,29 +314,21 @@ void APolarityCharacter::AddCharge(float Delta)
 	SetCharge(CurrentCharge + Delta);
 }
 
-void APolarityCharacter::DoToggleCharge()
+void APolarityCharacter::DoToggleChargePressed()
 {
-	UEMFVelocityModifier* EMFModifier = FindComponentByClass<UEMFVelocityModifier>();
 	UChargeAnimationComponent* ChargeAnim = FindComponentByClass<UChargeAnimationComponent>();
-
-	// Try to start charge animation
-	if (ChargeAnim && ChargeAnim->CanStartAnimation())
+	if (ChargeAnim)
 	{
-		if (ChargeAnim->StartChargeAnimation())
-		{
-			// Toggle charge when animation starts playing (after mesh transition)
-			if (EMFModifier)
-			{
-				EMFModifier->ToggleChargeSign();
-			}
-			return;
-		}
+		ChargeAnim->OnChargeButtonPressed();
 	}
+}
 
-	// Fallback: toggle without animation if component not available
-	if (EMFModifier)
+void APolarityCharacter::DoToggleChargeReleased()
+{
+	UChargeAnimationComponent* ChargeAnim = FindComponentByClass<UChargeAnimationComponent>();
+	if (ChargeAnim)
 	{
-		EMFModifier->ToggleChargeSign();
+		ChargeAnim->OnChargeButtonReleased();
 	}
 }
 

@@ -1,5 +1,6 @@
 // ChargeAnimationComponent.h
-// Charge toggle animation system - plays mesh-switching animation with VFX when toggling charge
+// Charge toggle animation system with channeling ability
+// Supports tap (instant toggle) and hold (channeling plate) modes
 
 #pragma once
 
@@ -14,6 +15,8 @@ class UNiagaraComponent;
 class USkeletalMeshComponent;
 class UCurveFloat;
 class UEMF_FieldComponent;
+class UEMFVelocityModifier;
+class AEMFChannelingPlateActor;
 
 /**
  * Charge animation state
@@ -21,11 +24,17 @@ class UEMF_FieldComponent;
 UENUM(BlueprintType)
 enum class EChargeAnimationState : uint8
 {
-	Ready,			// Can activate
-	HidingWeapon,	// Transitioning FirstPersonMesh down
-	Playing,		// Animation playing, VFX active
-	ShowingWeapon,	// Transitioning back to FirstPersonMesh
-	Cooldown		// Brief cooldown before next activation
+	Ready,				// Can activate
+	HidingWeapon,		// Transitioning FirstPersonMesh down
+	// -- TAP PATH (press < TapThreshold) --
+	Playing,			// Toggle animation playing, VFX active
+	ShowingWeapon,		// Transitioning back to FirstPersonMesh
+	Cooldown,			// Brief cooldown before next activation
+	// -- CHANNELING PATH (hold >= TapThreshold) --
+	Channeling,			// Plate active, montage frozen, player field disabled
+	ChannelingRelease,	// Released — post-release window for reverse tap
+	ReverseChanneling,	// Post-release tap: plate with opposite charge, timed
+	FinishingAnimation,	// Montage resumes and plays to completion
 };
 
 /**
@@ -64,11 +73,18 @@ struct FChargeAnimationData
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChargeAnimationStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChargeAnimationEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChannelingStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChannelingEnded);
 
 /**
- * Component that handles charge toggle animation.
- * Uses the same mesh-switching system as MeleeAttackComponent.
- * Spawns VFX attached to a socket on MeleeMesh.
+ * Component that handles charge toggle animation and channeling ability.
+ *
+ * TAP: Quick press (< TapThreshold) toggles charge sign with animation + VFX.
+ * HOLD: Sustained press spawns an invisible charged plate in front of camera.
+ *       - Player's own EMF field is disabled during channeling
+ *       - Plate affects enemies and physics objects
+ *       - Player is moved by plate's interaction with static environment fields
+ *       - On release: short window to tap again for reverse-charge burst
  */
 UCLASS(ClassGroup = (Combat), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UChargeAnimationComponent : public UActorComponent
@@ -80,11 +96,12 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
-	// ==================== Settings ====================
+	// ==================== Animation Settings ====================
 
 	/** Animation data for charge toggle */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation")
@@ -100,13 +117,53 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.05", ClampMax = "0.5"))
 	float ShowWeaponTime = 0.15f;
 
-	/** Total animation play duration */
+	/** Total animation play duration (for tap toggle path) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float AnimationDuration = 0.5f;
 
 	/** Cooldown before next activation */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float Cooldown = 0.3f;
+
+	// ==================== Tap vs Hold ====================
+
+	/** Maximum press duration to count as "tap". Hold longer = channeling. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.05", ClampMax = "0.5"))
+	float TapThreshold = 0.15f;
+
+	// ==================== Channeling Settings ====================
+
+	/** Offset of the channeling plate from camera (local space). X = forward */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling")
+	FVector PlateOffset = FVector(200.0f, 0.0f, 0.0f);
+
+	/** Dimensions of the channeling plate (Width x Height in cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling")
+	FVector2D PlateDimensions = FVector2D(200.0f, 200.0f);
+
+	/** Multiplier applied to the player's charge to determine plate charge density */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.1"))
+	float PlateChargeDensityMultiplier = 1.0f;
+
+	/** Class to spawn for the channeling plate actor. If not set, default class is used. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling")
+	TSubclassOf<AEMFChannelingPlateActor> PlateActorClass;
+
+	/** Normalized montage position (0-1) at which to freeze during channeling */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ChannelingFreezeFrame = 0.5f;
+
+	/** Post-release window duration for reverse-charge tap */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.05", ClampMax = "0.5"))
+	float ReverseChargeWindow = 0.2f;
+
+	/** Duration of the reverse-charge channeling burst */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float ReverseChargeDuration = 0.4f;
+
+	/** Enable debug visualization of the channeling plate */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Debug")
+	bool bDrawDebugPlate = false;
 
 	// ==================== VFX ====================
 
@@ -148,7 +205,7 @@ public:
 
 	// ==================== Events ====================
 
-	/** Called when charge animation starts */
+	/** Called when charge animation starts (tap path) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnChargeAnimationStarted OnChargeAnimationStarted;
 
@@ -156,21 +213,23 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnChargeAnimationEnded OnChargeAnimationEnded;
 
-	// ==================== API ====================
+	/** Called when channeling starts */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnChannelingStarted OnChannelingStarted;
 
-	/**
-	 * Attempt to start charge animation
-	 * @return true if animation started successfully
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Charge")
-	bool StartChargeAnimation();
+	/** Called when channeling ends (including reverse charge) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnChannelingEnded OnChannelingEnded;
 
-	/**
-	 * Cancel current animation (if in early phases)
-	 * @return true if animation was cancelled
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Charge")
-	bool CancelAnimation();
+	// ==================== Input API ====================
+
+	/** Called when charge button is pressed (from PolarityCharacter) */
+	void OnChargeButtonPressed();
+
+	/** Called when charge button is released (from PolarityCharacter) */
+	void OnChargeButtonReleased();
+
+	// ==================== Query API ====================
 
 	/**
 	 * Check if animation can be started
@@ -185,16 +244,29 @@ public:
 	EChargeAnimationState GetAnimationState() const { return CurrentState; }
 
 	/**
-	 * Check if currently animating (any phase)
+	 * Check if currently animating (any active phase — blocks melee)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Charge")
 	bool IsAnimating() const;
+
+	/**
+	 * Check if currently channeling (Channeling or ReverseChanneling)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Charge")
+	bool IsChanneling() const;
 
 	/**
 	 * Check if input is currently locked
 	 */
 	UFUNCTION(BlueprintPure, Category = "Charge")
 	bool IsInputLocked() const { return bInputLocked; }
+
+	/**
+	 * Cancel current animation (if in early phases)
+	 * @return true if animation was cancelled
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Charge")
+	bool CancelAnimation();
 
 protected:
 	// ==================== State ====================
@@ -207,6 +279,42 @@ protected:
 
 	/** Input is locked */
 	bool bInputLocked = false;
+
+	// ==================== Tap/Hold Detection ====================
+
+	/** Time when button was pressed */
+	float ButtonPressTime = 0.0f;
+
+	/** Is the button currently held down? */
+	bool bButtonHeld = false;
+
+	/** Has this press been committed as a hold (passed threshold)? */
+	bool bCommittedAsHold = false;
+
+	/** Has tap toggle been performed for the current press? */
+	bool bTapToggleDone = false;
+
+	// ==================== Channeling State ====================
+
+	/** Spawned plate actor (valid during channeling) */
+	UPROPERTY()
+	TObjectPtr<AEMFChannelingPlateActor> ChannelingPlateActor;
+
+	/** Cached player charge sign at channeling start (1 or -1) */
+	int32 ChannelingChargeSign = 1;
+
+	/** Cached reference to EMFVelocityModifier */
+	UPROPERTY()
+	TObjectPtr<UEMFVelocityModifier> CachedEMFModifier;
+
+	/** Cached reference to UEMF_FieldComponent (player's own field) */
+	UPROPERTY()
+	TObjectPtr<UEMF_FieldComponent> CachedFieldComponent;
+
+	/** Was the player's field registered before channeling? */
+	bool bFieldWasRegistered = false;
+
+	// ==================== Cached References ====================
 
 	/** Cached owner character */
 	UPROPERTY()
@@ -228,9 +336,9 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UNiagaraComponent> ActiveChargeFX;
 
-	// ==================== Mesh Transition State ====================
+	// ==================== Montage State ====================
 
-	/** Mesh transition progress (0-1) - used for state timing only */
+	/** Mesh transition progress (0-1) */
 	float MeshTransitionProgress = 0.0f;
 
 	/** Current montage being played */
@@ -246,18 +354,18 @@ protected:
 	/** Total duration of current montage at base rate */
 	float MontageTotalDuration = 0.0f;
 
-	// ==================== Internal ====================
+	// ==================== Internal Methods ====================
 
 	/** Transition to a new state */
 	void SetState(EChargeAnimationState NewState);
 
-	/** Update current state */
+	/** Update current state each tick */
 	void UpdateState(float DeltaTime);
 
 	/** Begin hiding FirstPersonMesh */
 	void BeginHideWeapon();
 
-	/** Update mesh transition */
+	/** Update mesh transition progress */
 	void UpdateMeshTransition(float DeltaTime);
 
 	/** Switch to MeleeMesh */
@@ -269,14 +377,17 @@ protected:
 	/** Update MeleeMesh rotation to match camera */
 	void UpdateMeleeMeshRotation();
 
-	/** Play charge animation */
+	/** Play charge animation montage */
 	void PlayChargeAnimation();
 
-	/** Stop charge animation */
+	/** Stop charge animation montage */
 	void StopChargeAnimation();
 
-	/** Update montage play rate based on curve */
+	/** Update montage play rate based on curve (skips during channeling freeze) */
 	void UpdateMontagePlayRate(float DeltaTime);
+
+	/** Get camera view point (lazy-resolves controller if needed). Returns false if unavailable. */
+	bool GetCameraViewPoint(FVector& OutLocation, FRotator& OutRotation) const;
 
 	/** Spawn charge VFX based on new polarity */
 	void SpawnChargeVFX();
@@ -296,4 +407,30 @@ protected:
 
 	/** Auto-detect mesh references if not set */
 	void AutoDetectMeshReferences();
+
+	// ==================== Channeling Methods ====================
+
+	/** Enter channeling state: freeze montage, spawn plate, disable player field */
+	void EnterChanneling();
+
+	/** Exit channeling: destroy plate, disable proxy mode */
+	void ExitChanneling();
+
+	/** Spawn the channeling plate actor with given charge sign */
+	void SpawnPlate(int32 ChargeSign);
+
+	/** Destroy the active plate actor */
+	void DestroyPlate();
+
+	/** Update plate position to follow camera */
+	void UpdatePlatePosition();
+
+	/** Perform the tap toggle: switch charge sign */
+	void PerformTapToggle();
+
+	/** Enter the finishing animation state: re-enable field, resume montage */
+	void EnterFinishingAnimation();
+
+	/** Cleanup all channeling state (safety — called on EndPlay/cancel) */
+	void CleanupChanneling();
 };
