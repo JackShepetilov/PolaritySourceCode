@@ -974,6 +974,48 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FVector CurrentLocation = FPMesh->GetRelativeLocation();
 	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
 
+	// === ADS Pitch Follow ===
+	// FP Mesh is attached to 3P Mesh which only rotates by Yaw (no Pitch).
+	// Camera follows both Pitch and Yaw via ControlRotation.
+	// During ADS, the weapon must visually follow the camera pitch so sights
+	// align with where the player is looking. We add camera pitch to FP Mesh
+	// rotation in parent-local space, blended by ADS alpha.
+	if (CurrentADSAlpha > KINDA_SMALL_NUMBER)
+	{
+		float CameraPitch = GetControlRotation().Pitch;
+		// Normalize pitch to -180..180 range
+		if (CameraPitch > 180.0f) CameraPitch -= 360.0f;
+
+		// Blend pitch by ADS alpha
+		float ADSPitch = CameraPitch * CurrentADSAlpha;
+
+		// Camera pitch is rotation around World Right (Y) axis.
+		// We need to express this in parent-local space.
+		// Parent = 3P Mesh, its world rotation = ParentWorldRot.
+		// A world-space rotation of ADSPitch around world Y =
+		//   FQuat(FVector::RightVector, FMath::DegreesToRadians(ADSPitch))
+		// Convert to parent-local by: LocalQuat = ParentWorldQuat.Inverse() * WorldQuat * ParentWorldQuat
+		// But for additive rotation on relative transform, simpler:
+		//   NewWorldRot = PitchQuat * CurrentWorldRot
+		//   NewRelativeRot = Inverse(ParentWorld) * NewWorldRot
+		if (USceneComponent* Parent = FPMesh->GetAttachParent())
+		{
+			FQuat ParentWorldQuat = Parent->GetComponentQuat();
+			FQuat CurrentRelQuat = CurrentRotation.Quaternion();
+
+			// Current world rotation of FP Mesh
+			FQuat CurrentWorldQuat = ParentWorldQuat * CurrentRelQuat;
+
+			// Apply pitch rotation in world space (around world Right = Y axis)
+			FQuat PitchQuat(FVector::RightVector, FMath::DegreesToRadians(-ADSPitch));
+			FQuat NewWorldQuat = PitchQuat * CurrentWorldQuat;
+
+			// Convert back to parent-local
+			FQuat NewRelQuat = ParentWorldQuat.Inverse() * NewWorldQuat;
+			CurrentRotation = NewRelQuat.Rotator();
+		}
+	}
+
 	// === Recoil Visual Kick ===
 	// Camera goes to weapon via SetViewTarget + CalcCamera during ADS.
 	// Weapon stays in hands. Recoil visual kick makes the weapon/hands jump
