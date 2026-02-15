@@ -616,12 +616,13 @@ public:
 	// ==================== ADS Viewmodel Offset ====================
 
 	/**
-	 * Calculate the additive offset (location + rotation) to apply to the FP Mesh
-	 * so that the weapon sights align with screen center.
-	 * Returns the fully-aimed offset in parent-local space (relative to hands mesh).
-	 * Caller interpolates with ADSAlpha.
+	 * Calculate the target relative transform for the FP Mesh when fully aimed.
+	 * Returns the absolute relative transform (location + rotation) in parent-local space
+	 * that would place the weapon sights aligned with the camera center.
+	 * Caller lerps between current hip-fire transform and this target using ADSAlpha.
 	 */
-	void CalculateADSOffset(UCameraComponent* Camera, FVector& OutLocationOffset, FRotator& OutRotationOffset) const;
+	void CalculateADSTargetTransform(UCameraComponent* Camera, const FVector& HipFireLocation, const FRotator& HipFireRotation,
+		FVector& OutTargetLocation, FRotator& OutTargetRotation) const;
 
 public:
 	// ==================== Recoil Getters ====================

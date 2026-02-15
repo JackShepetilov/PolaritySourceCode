@@ -961,23 +961,27 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	}
 
 	// Get current relative transform (set by Super — the base hip-fire position)
-	FVector CurrentLocation = FPMesh->GetRelativeLocation();
-	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
+	FVector HipFireLocation = FPMesh->GetRelativeLocation();
+	FRotator HipFireRotation = FPMesh->GetRelativeRotation();
+
+	FVector CurrentLocation = HipFireLocation;
+	FRotator CurrentRotation = HipFireRotation;
 
 	// === ADS Viewmodel Offset ===
-	// Applied BEFORE recoil so visual kick works relative to ADS position
+	// Lerp between hip-fire and ADS target. Applied BEFORE recoil so visual kick is additive.
 	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
 	{
 		UCameraComponent* Camera = GetFirstPersonCameraComponent();
 		if (Camera)
 		{
-			FVector ADSLocationOffset;
-			FRotator ADSRotationOffset;
-			CurrentWeapon->CalculateADSOffset(Camera, ADSLocationOffset, ADSRotationOffset);
+			FVector ADSTargetLocation;
+			FRotator ADSTargetRotation;
+			CurrentWeapon->CalculateADSTargetTransform(Camera, HipFireLocation, HipFireRotation,
+				ADSTargetLocation, ADSTargetRotation);
 
-			// Lerp ADS offset by alpha
-			CurrentLocation += ADSLocationOffset * CurrentADSAlpha;
-			CurrentRotation += ADSRotationOffset * CurrentADSAlpha;
+			// Lerp between hip-fire and ADS target
+			CurrentLocation = FMath::Lerp(HipFireLocation, ADSTargetLocation, CurrentADSAlpha);
+			CurrentRotation = FMath::Lerp(HipFireRotation, ADSTargetRotation, CurrentADSAlpha);
 		}
 	}
 
