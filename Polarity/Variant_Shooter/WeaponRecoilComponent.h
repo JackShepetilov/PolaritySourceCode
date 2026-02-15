@@ -1,10 +1,11 @@
 // WeaponRecoilComponent.h
-// Advanced procedural recoil system with patterns, recovery, visual kick and camera punch
+// Advanced procedural recoil system with spring-based visual kick, camera punch, and organic sway
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "CameraShakeComponent.h"
 #include "WeaponRecoilComponent.generated.h"
 
 class AShooterWeapon;
@@ -80,35 +81,47 @@ struct FWeaponRecoilSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recovery")
 	bool bAllowManualRecovery = true;
 
-	// ==================== Visual Weapon Kick ====================
+	// ==================== Viewkick Split (Titanfall 2-style) ====================
 
-	/** Enable visual weapon kick (separate from camera) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick")
+	/** Enable visual weapon kick */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split")
 	bool bEnableVisualKick = true;
 
-	/** Weapon kick back distance (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick", meta = (ClampMin = "0.0", ClampMax = "20.0"))
+	/** Fraction of total recoil applied to weapon model instead of camera when hipfiring (0 = all camera, 1 = all visual) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HipfireWeaponFraction = 0.4f;
+
+	/** Visual amplification of the weapon model portion when hipfiring (e.g. 1.5 = 50% more visual bounce) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.1", ClampMax = "15.0"))
+	float HipfireVMScale = 1.5f;
+
+	/** Fraction of total recoil applied to weapon model when aiming (typically 0 = all kick to camera for precision) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ADSWeaponFraction = 0.0f;
+
+	/** Visual amplification of the weapon model portion when aiming */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.1", ClampMax = "15.0"))
+	float ADSVMScale = 1.0f;
+
+	/** Weapon kick back distance (cm) - positional recoil along barrel axis */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.0", ClampMax = "20.0"))
 	float KickBackDistance = 3.0f;
 
-	/** Weapon kick up rotation (degrees) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick", meta = (ClampMin = "0.0", ClampMax = "15.0"))
-	float KickUpRotation = 4.0f;
+	/** Minimum random roll per shot (degrees) - weapon twist around barrel axis */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float RollRandomMin = 0.3f;
 
-	/** Weapon kick side rotation (degrees, random +/-) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick", meta = (ClampMin = "0.0", ClampMax = "5.0"))
-	float KickSideRotation = 1.0f;
+	/** Maximum random roll per shot (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float RollRandomMax = 0.5f;
 
-	/** Visual kick return speed (higher = snappier) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick", meta = (ClampMin = "5.0", ClampMax = "50.0"))
-	float KickReturnSpeed = 20.0f;
+	/** Roll hard scale - multiplier for instant snap feel (higher = punchier twist per shot) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float RollHardScale = 1.85f;
 
-	/** Oscillation frequency for kick return */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick", meta = (ClampMin = "10.0", ClampMax = "40.0"))
-	float KickOscillationFrequency = 25.0f;
-
-	/** Damping for kick oscillation */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual Kick", meta = (ClampMin = "3.0", ClampMax = "15.0"))
-	float KickOscillationDamping = 8.0f;
+	/** Spring stiffness for visual kick recovery (higher = faster snap back to rest) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "20.0", ClampMax = "500.0"))
+	float KickSpringStiffness = 150.0f;
 
 	// ==================== Camera Punch ====================
 
@@ -146,13 +159,17 @@ struct FWeaponRecoilSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "1.0", ClampMax = "10.0"))
 	float MaxMouseSwayOffset = 3.0f;
 
-	/** Idle breathing sway intensity */
+	/** Slow breathing amplitude (degrees) - base heaving rhythm */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "2.0"))
-	float BreathingSwayIntensity = 0.3f;
+	float BreathingAmplitude = 0.3f;
 
-	/** Breathing frequency (Hz) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.1", ClampMax = "1.0"))
-	float BreathingFrequency = 0.25f;
+	/** Medium muscle tremor amplitude (degrees) - hand instability */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TremorAmplitude = 0.1f;
+
+	/** Fast micro-jitter amplitude (degrees) - nervous system noise */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float MicroJitterAmplitude = 0.04f;
 
 	/** Movement sway intensity multiplier */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "3.0"))
@@ -181,9 +198,9 @@ struct FWeaponRecoilSettings
  * Advanced weapon recoil component with:
  * - Learnable recoil patterns
  * - Recoil recovery with manual pull-down
- * - Visual weapon kick with damped oscillation
+ * - Spring-damper visual weapon kick (smooth, physically-based)
  * - Camera punch (micro-shake)
- * - Procedural weapon sway (mouse lag, breathing, movement)
+ * - Organic procedural weapon sway (multi-layered breathing + tremor + jitter)
  */
 UCLASS(ClassGroup = (Weapon), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UWeaponRecoilComponent : public UActorComponent
@@ -294,25 +311,19 @@ protected:
 	/** Is currently firing (for consecutive shots) */
 	bool bIsFiring = false;
 
-	// ==================== Visual Kick State ====================
+	// ==================== Visual Kick State (Spring-Damper) ====================
 
-	/** Current weapon position offset */
+	/** Current weapon position offset (read by ShooterCharacter) */
 	FVector CurrentWeaponOffset = FVector::ZeroVector;
 
-	/** Current weapon rotation offset */
+	/** Current weapon rotation offset (read by ShooterCharacter) */
 	FRotator CurrentWeaponRotation = FRotator::ZeroRotator;
 
-	/** Target weapon position (from kick) */
-	FVector TargetWeaponOffset = FVector::ZeroVector;
-
-	/** Target weapon rotation (from kick) */
-	FRotator TargetWeaponRotation = FRotator::ZeroRotator;
-
-	/** Kick oscillation time */
-	float KickOscillationTime = 0.0f;
-
-	/** Kick oscillation amplitude */
-	float KickOscillationAmplitude = 0.0f;
+	/** Spring states for each visual kick axis */
+	FBobSpringState KickSpringPitch;
+	FBobSpringState KickSpringYaw;
+	FBobSpringState KickSpringRoll;
+	FBobSpringState KickSpringBack;
 
 	// ==================== Camera Punch State ====================
 
@@ -364,7 +375,7 @@ protected:
 	/** Update recoil recovery */
 	void UpdateRecovery(float DeltaTime);
 
-	/** Update visual weapon kick */
+	/** Update visual weapon kick (spring-damper) */
 	void UpdateVisualKick(float DeltaTime);
 
 	/** Update camera punch */
@@ -373,8 +384,8 @@ protected:
 	/** Update weapon sway */
 	void UpdateWeaponSway(float DeltaTime);
 
-	/** Trigger visual kick effect */
-	void TriggerVisualKick();
+	/** Trigger visual kick from recoil-derived viewmodel portion + independent roll */
+	void TriggerVisualKick(const FRotator& ViewmodelRecoil, float RollKick);
 
 	/** Trigger camera punch effect */
 	void TriggerCameraPunch();

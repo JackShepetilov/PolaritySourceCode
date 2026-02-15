@@ -1,5 +1,5 @@
 // WeaponRecoilComponent.cpp
-// Advanced procedural recoil system implementation
+// Advanced procedural recoil system with spring-based visual kick and organic sway
 
 #include "WeaponRecoilComponent.h"
 #include "ApexMovementComponent.h"
@@ -76,17 +76,31 @@ void UWeaponRecoilComponent::OnWeaponFired()
 	TimeSinceLastShot = 0.0f;
 	bIsRecovering = false;
 
-	// Calculate and apply recoil
-	FRotator ShotRecoil = CalculateShotRecoil();
-	ApplyRecoilToController(ShotRecoil);
+	// Calculate total recoil for this shot
+	FRotator TotalRecoil = CalculateShotRecoil();
 
-	// Accumulate for recovery
-	AccumulatedRecoil += ShotRecoil;
+	// Split recoil between camera and viewmodel based on ADS state (Titanfall 2-style)
+	float Fraction = bIsAiming ? Settings.ADSWeaponFraction : Settings.HipfireWeaponFraction;
+	float VMScale = bIsAiming ? Settings.ADSVMScale : Settings.HipfireVMScale;
+
+	FRotator CameraRecoil = TotalRecoil * (1.0f - Fraction);
+	FRotator ViewmodelRecoil = TotalRecoil * Fraction * VMScale;
+
+	// Apply camera portion to controller (this moves the crosshair)
+	ApplyRecoilToController(CameraRecoil);
+
+	// Accumulate only camera portion for recovery
+	AccumulatedRecoil += CameraRecoil;
+
+	// Generate independent roll (Titanfall 2-style: random direction per shot, not part of weaponFraction)
+	float RollMagnitude = FMath::RandRange(Settings.RollRandomMin, Settings.RollRandomMax);
+	float RollSign = FMath::RandBool() ? 1.0f : -1.0f;
+	float ShotRoll = RollSign * RollMagnitude * Settings.RollHardScale;
 
 	// Trigger visual effects
 	if (Settings.bEnableVisualKick)
 	{
-		TriggerVisualKick();
+		TriggerVisualKick(ViewmodelRecoil, ShotRoll);
 	}
 
 	if (Settings.bEnableCameraPunch)
@@ -101,8 +115,11 @@ void UWeaponRecoilComponent::OnWeaponFired()
 		Settings.MaxConsecutiveMultiplier
 	);
 
-	UE_LOG(LogTemp, Verbose, TEXT("Recoil: Shot %d, Multiplier=%.2f, Recoil=(P:%.2f, Y:%.2f)"),
-		CurrentShotIndex, CurrentConsecutiveMultiplier, ShotRecoil.Pitch, ShotRecoil.Yaw);
+	UE_LOG(LogTemp, Verbose, TEXT("Recoil: Shot %d, Mult=%.2f, Total=(P:%.2f, Y:%.2f), Camera=(P:%.2f, Y:%.2f), VM=(P:%.2f, Y:%.2f)"),
+		CurrentShotIndex, CurrentConsecutiveMultiplier,
+		TotalRecoil.Pitch, TotalRecoil.Yaw,
+		CameraRecoil.Pitch, CameraRecoil.Yaw,
+		ViewmodelRecoil.Pitch, ViewmodelRecoil.Yaw);
 }
 
 void UWeaponRecoilComponent::OnFiringEnded()
@@ -120,8 +137,11 @@ void UWeaponRecoilComponent::ResetRecoil()
 
 	CurrentWeaponOffset = FVector::ZeroVector;
 	CurrentWeaponRotation = FRotator::ZeroRotator;
-	TargetWeaponOffset = FVector::ZeroVector;
-	TargetWeaponRotation = FRotator::ZeroRotator;
+
+	KickSpringPitch.Reset();
+	KickSpringYaw.Reset();
+	KickSpringRoll.Reset();
+	KickSpringBack.Reset();
 
 	CurrentCameraPunch = FRotator::ZeroRotator;
 	CurrentSwayOffset = FRotator::ZeroRotator;
@@ -298,61 +318,34 @@ void UWeaponRecoilComponent::UpdateRecovery(float DeltaTime)
 	}
 }
 
-// ==================== Visual Kick ====================
+// ==================== Visual Kick (Spring-Damper) ====================
 
-void UWeaponRecoilComponent::TriggerVisualKick()
+void UWeaponRecoilComponent::TriggerVisualKick(const FRotator& ViewmodelRecoil, float RollKick)
 {
-	// Set target kick position/rotation
-	float SituationalMult = GetSituationalMultiplier();
-
-	// Kick back
-	TargetWeaponOffset.X = -Settings.KickBackDistance * SituationalMult;
-
-	// Kick up rotation
-	TargetWeaponRotation.Pitch = Settings.KickUpRotation * SituationalMult;
-
-	// Random side rotation
-	TargetWeaponRotation.Yaw = FMath::RandRange(-Settings.KickSideRotation, Settings.KickSideRotation) * SituationalMult;
-	TargetWeaponRotation.Roll = FMath::RandRange(-Settings.KickSideRotation * 0.5f, Settings.KickSideRotation * 0.5f) * SituationalMult;
-
-	// Start oscillation
-	KickOscillationTime = 0.0f;
-	KickOscillationAmplitude = Settings.KickUpRotation * 0.3f * SituationalMult;
+	// Apply as velocity impulses to springs (not target positions)
+	// This preserves momentum from previous kicks, creating smooth continuous motion
+	KickSpringPitch.Velocity += ViewmodelRecoil.Pitch * 30.0f;
+	KickSpringYaw.Velocity += ViewmodelRecoil.Yaw * 30.0f;
+	KickSpringRoll.Velocity += RollKick * 30.0f;
+	KickSpringBack.Velocity += -Settings.KickBackDistance * 30.0f;
 }
 
 void UWeaponRecoilComponent::UpdateVisualKick(float DeltaTime)
 {
 	if (!Settings.bEnableVisualKick) return;
 
-	// Interpolate back to zero
-	TargetWeaponOffset = FMath::VInterpTo(TargetWeaponOffset, FVector::ZeroVector, DeltaTime, Settings.KickReturnSpeed);
-	TargetWeaponRotation = FMath::RInterpTo(TargetWeaponRotation, FRotator::ZeroRotator, DeltaTime, Settings.KickReturnSpeed);
+	// Update all springs toward rest position (0)
+	// Springs naturally handle momentum, overshoot, and smooth recovery
+	KickSpringPitch.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
+	KickSpringYaw.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
+	KickSpringRoll.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
+	KickSpringBack.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
 
-	// Add oscillation for organic feel
-	if (KickOscillationAmplitude > 0.01f)
-	{
-		KickOscillationTime += DeltaTime;
-
-		// Damped oscillation
-		float Decay = FMath::Exp(-Settings.KickOscillationDamping * KickOscillationTime);
-		float Phase = KickOscillationTime * Settings.KickOscillationFrequency * 2.0f * PI;
-		float Oscillation = KickOscillationAmplitude * Decay * FMath::Sin(Phase);
-
-		CurrentWeaponRotation = TargetWeaponRotation;
-		CurrentWeaponRotation.Pitch += Oscillation;
-
-		// Stop oscillation when negligible
-		if (Decay < 0.01f)
-		{
-			KickOscillationAmplitude = 0.0f;
-		}
-	}
-	else
-	{
-		CurrentWeaponRotation = TargetWeaponRotation;
-	}
-
-	CurrentWeaponOffset = TargetWeaponOffset;
+	// Read spring values into current weapon transform
+	CurrentWeaponRotation.Pitch = KickSpringPitch.Value;
+	CurrentWeaponRotation.Yaw = KickSpringYaw.Value;
+	CurrentWeaponRotation.Roll = KickSpringRoll.Value;
+	CurrentWeaponOffset.X = KickSpringBack.Value;
 }
 
 // ==================== Camera Punch ====================
@@ -422,14 +415,25 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 		Settings.MaxMouseSwayOffset
 	);
 
-	// Breathing sway (idle animation)
+	// Multi-layered organic breathing sway (irrational frequencies = never repeats visually)
 	BreathingTime += DeltaTime;
-	float BreathingPhase = BreathingTime * Settings.BreathingFrequency * 2.0f * PI;
+	float T = BreathingTime;
 
 	FRotator BreathingSway = FRotator::ZeroRotator;
-	BreathingSway.Pitch = FMath::Sin(BreathingPhase) * Settings.BreathingSwayIntensity;
-	BreathingSway.Yaw = FMath::Sin(BreathingPhase * 0.7f + 0.5f) * Settings.BreathingSwayIntensity * 0.5f;
-	BreathingSway.Roll = FMath::Sin(BreathingPhase * 0.5f + 1.0f) * Settings.BreathingSwayIntensity * 0.3f;
+
+	// Layer 1: Slow breathing rhythm (0.2-0.3 Hz) - base heaving
+	BreathingSway.Pitch = Settings.BreathingAmplitude * FMath::Sin(T * 1.37f);
+	BreathingSway.Yaw   = Settings.BreathingAmplitude * 0.6f * FMath::Sin(T * 0.93f + 0.7f);
+	BreathingSway.Roll  = Settings.BreathingAmplitude * 0.3f * FMath::Sin(T * 0.71f + 1.3f);
+
+	// Layer 2: Muscle tremor (1-3 Hz) - hand instability
+	BreathingSway.Pitch += Settings.TremorAmplitude * FMath::Sin(T * 8.73f);
+	BreathingSway.Yaw   += Settings.TremorAmplitude * 0.7f * FMath::Sin(T * 6.41f + 2.1f);
+	BreathingSway.Roll  += Settings.TremorAmplitude * 0.5f * FMath::Sin(T * 11.17f + 0.9f);
+
+	// Layer 3: Micro-jitter (5-8 Hz) - nervous system noise
+	BreathingSway.Pitch += Settings.MicroJitterAmplitude * FMath::Sin(T * 29.3f);
+	BreathingSway.Yaw   += Settings.MicroJitterAmplitude * FMath::Sin(T * 37.1f + 1.7f);
 
 	// Movement sway multiplier
 	float MovementMult = 1.0f;
@@ -445,7 +449,7 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 	FRotator TotalSway = (MouseSway + BreathingSway * MovementMult) * AimMult;
 
 	// Smooth interpolation to target sway
-	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, 10.0f);
+	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, Settings.MouseSwayLag);
 
 	// Add sway to weapon rotation
 	CurrentWeaponRotation += CurrentSwayOffset;
