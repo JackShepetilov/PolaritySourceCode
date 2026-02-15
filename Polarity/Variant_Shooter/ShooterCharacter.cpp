@@ -974,22 +974,41 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FVector CurrentLocation = FPMesh->GetRelativeLocation();
 	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
 
-	// === ADS Weapon Alignment ===
-	// FP Mesh is attached to 3P Mesh which only rotates by Yaw (no Pitch).
-	// During ADS, compute the target world transform that aligns weapon sights
-	// with the camera ray (using 3-socket geometry), then blend toward it.
-	//
-	// IMPORTANT: We cannot use GetSocketLocation / GetComponentQuat because
-	// the world transform may be stale (from previous frame's ADS offset).
-	// Instead, we compute the hip-fire world transform mathematically from
-	// the relative transform (set by Super) + parent world transform.
+	// === Recoil Visual Kick ===
+	if (RecoilComponent)
+	{
+		FVector RecoilOffset = RecoilComponent->GetWeaponOffset();
+		FRotator RecoilRotation = RecoilComponent->GetWeaponRotationOffset();
+
+		if (USceneComponent* Parent = FPMesh->GetAttachParent())
+		{
+			const FRotator ParentRot = Parent->GetRelativeRotation();
+			RecoilOffset = ParentRot.UnrotateVector(RecoilOffset);
+			const FVector RotAsVec(RecoilRotation.Roll, RecoilRotation.Pitch, RecoilRotation.Yaw);
+			const FVector RotTransformed = ParentRot.UnrotateVector(RotAsVec);
+			RecoilRotation = FRotator(RotTransformed.Y, RotTransformed.Z, RotTransformed.X);
+		}
+
+		CurrentLocation += RecoilOffset;
+		CurrentRotation += RecoilRotation;
+	}
+
+	// Apply hip-fire + recoil via relative transform
+	FPMesh->SetRelativeLocation(CurrentLocation);
+	FPMesh->SetRelativeRotation(CurrentRotation);
+
+	// === ADS Weapon Alignment (via SetWorldRotation/Location) ===
+	// After setting relative transform, override the world transform directly
+	// when in ADS. This avoids all feedback loop issues because we work in
+	// world space after all relative transforms are applied.
+	// Camera goes to weapon via SetViewTarget + CalcCamera.
+	// Here we just make the weapon VISUALLY follow pitch/aim direction.
 	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
 	{
 		USkeletalMeshComponent* WeaponMesh = CurrentWeapon->GetFirstPersonMesh();
 		UCameraComponent* Camera = GetFirstPersonCameraComponent();
-		USceneComponent* Parent = FPMesh->GetAttachParent();
 
-		if (WeaponMesh && Camera && Parent)
+		if (WeaponMesh && Camera)
 		{
 			FName SightSocket = FName("Sight");
 			FName RearSocket = FName("SightRear");
@@ -997,44 +1016,26 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 
 			if (WeaponMesh->DoesSocketExist(SightSocket) && WeaponMesh->DoesSocketExist(RearSocket))
 			{
-				// Compute hip-fire world transform mathematically (no stale data)
-				FTransform ParentWorld = Parent->GetComponentTransform();
-				FTransform HipFireRel(CurrentRotation.Quaternion(), CurrentLocation, FPMesh->GetRelativeScale3D());
-				FTransform HipFireWorld = HipFireRel * ParentWorld;
-				FQuat HipFireWorldQuat = HipFireWorld.GetRotation();
-				FVector HipFireWorldPos = HipFireWorld.GetTranslation();
+				// Read current world state (includes hip-fire + recoil from above)
+				FQuat CurWorldQuat = FPMesh->GetComponentQuat();
+				FVector CurWorldPos = FPMesh->GetComponentLocation();
 
-				// Socket positions in weapon's component-local space (bone-relative, stable)
-				FVector FrontLocal = WeaponMesh->GetSocketTransform(SightSocket, ERelativeTransformSpace::RTS_Component).GetLocation();
-				FVector RearLocal = WeaponMesh->GetSocketTransform(RearSocket, ERelativeTransformSpace::RTS_Component).GetLocation();
+				// Socket world positions (based on current world transform)
+				FVector FrontWorld = WeaponMesh->GetSocketLocation(SightSocket);
+				FVector RearWorld = WeaponMesh->GetSocketLocation(RearSocket);
 
-				// Chain: FPMesh → WeaponMesh (via socket attachment)
-				// WeaponMesh relative transform within FPMesh
-				FTransform WeaponRelToFP = WeaponMesh->GetRelativeTransform();
-				// Socket position in FPMesh component space
-				FVector FrontInFP = WeaponRelToFP.TransformPosition(FrontLocal);
-				FVector RearInFP = WeaponRelToFP.TransformPosition(RearLocal);
-
-				// Convert to world space using hip-fire world transform
-				FVector FrontWorld = HipFireWorld.TransformPosition(FrontInFP);
-				FVector RearWorld = HipFireWorld.TransformPosition(RearInFP);
-
-				// Camera data
 				FVector CamLoc = Camera->GetComponentLocation();
 				FVector CamFwd = GetControlRotation().Vector();
 
-				// Step 1: Align weapon aim direction (Rear→Front) with camera forward
+				// Step 1: Align Rear→Front with camera forward
 				FVector WorldAimDir = (FrontWorld - RearWorld).GetSafeNormal();
 				FQuat AimCorrection = FQuat::FindBetweenNormals(WorldAimDir, CamFwd);
 
-				// Step 2: Roll correction using Bottom socket
+				// Step 2: Roll correction
 				FQuat RollCorrection = FQuat::Identity;
 				if (WeaponMesh->DoesSocketExist(BottomSocket))
 				{
-					FVector BottomLocal = WeaponMesh->GetSocketTransform(BottomSocket, ERelativeTransformSpace::RTS_Component).GetLocation();
-					FVector BottomInFP = WeaponRelToFP.TransformPosition(BottomLocal);
-					FVector BottomWorld = HipFireWorld.TransformPosition(BottomInFP);
-
+					FVector BottomWorld = WeaponMesh->GetSocketLocation(BottomSocket);
 					FVector WorldDownDir = (BottomWorld - RearWorld).GetSafeNormal();
 					FVector CorrectedDown = AimCorrection.RotateVector(WorldDownDir);
 
@@ -1047,13 +1048,11 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 					}
 				}
 
-				// Step 3: Target world rotation for FP Mesh
-				FQuat TargetWorldQuat = RollCorrection * AimCorrection * HipFireWorldQuat;
+				// Step 3: Target world rotation
+				FQuat TargetWorldQuat = RollCorrection * AimCorrection * CurWorldQuat;
 
 				// Step 4: Position — place front socket on camera ray
-				// Front socket offset from FPMesh origin in hip-fire world space
-				FVector FrontOffset = FrontWorld - HipFireWorldPos;
-				// Apply the same rotation correction to this offset
+				FVector FrontOffset = FrontWorld - CurWorldPos;
 				FQuat TotalCorrection = RollCorrection * AimCorrection;
 				FVector FrontInTarget = TotalCorrection.RotateVector(FrontOffset);
 
@@ -1061,52 +1060,16 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 				FVector SightTarget = CamLoc + CamFwd * SightDist;
 				FVector TargetWorldPos = SightTarget - FrontInTarget;
 
-				// Step 5: Convert target world transform to parent-relative
-				FTransform TargetWorld(TargetWorldQuat, TargetWorldPos, FPMesh->GetRelativeScale3D());
-				FTransform TargetRel = TargetWorld.GetRelativeTransform(ParentWorld);
+				// Blend: lerp between current world and target world
+				FVector FinalWorldPos = FMath::Lerp(CurWorldPos, TargetWorldPos, CurrentADSAlpha);
+				FQuat FinalWorldQuat = FQuat::Slerp(CurWorldQuat, TargetWorldQuat, CurrentADSAlpha);
 
-				FVector ADSLocation = TargetRel.GetTranslation();
-				FRotator ADSRotation = TargetRel.GetRotation().Rotator();
-
-				// Blend between hip-fire and ADS target
-				CurrentLocation = FMath::Lerp(CurrentLocation, ADSLocation, CurrentADSAlpha);
-				CurrentRotation = FQuat::Slerp(CurrentRotation.Quaternion(), ADSRotation.Quaternion(), CurrentADSAlpha).Rotator();
+				// Apply directly in world space (bypasses parent-relative issues)
+				FPMesh->SetWorldLocation(FinalWorldPos);
+				FPMesh->SetWorldRotation(FinalWorldQuat);
 			}
 		}
 	}
-
-	// === Recoil Visual Kick ===
-	// Camera goes to weapon via SetViewTarget + CalcCamera during ADS.
-	// Weapon stays in hands. Recoil visual kick makes the weapon/hands jump
-	// relative to their base position. The camera (via CalcCamera) uses
-	// ControlRotation so it does NOT inherit this visual kick.
-	if (RecoilComponent)
-	{
-		FVector RecoilOffset = RecoilComponent->GetWeaponOffset();
-		FRotator RecoilRotation = RecoilComponent->GetWeaponRotationOffset();
-
-		// RecoilOffset and RecoilRotation are in world-logical space:
-		//   Position: X = forward/back, Y = right, Z = up
-		//   Rotation: Pitch = up/down, Yaw = left/right, Roll = tilt
-		// But SetRelativeLocation/Rotation works in PARENT space (3P Mesh),
-		// which is rotated -90° Yaw. We must transform both to parent-local axes.
-		if (USceneComponent* Parent = FPMesh->GetAttachParent())
-		{
-			const FRotator ParentRot = Parent->GetRelativeRotation();
-			// Transform position: world-logical -> parent-local
-			RecoilOffset = ParentRot.UnrotateVector(RecoilOffset);
-			// Transform rotation: convert Pitch/Yaw/Roll the same way
-			const FVector RotAsVec(RecoilRotation.Roll, RecoilRotation.Pitch, RecoilRotation.Yaw);
-			const FVector RotTransformed = ParentRot.UnrotateVector(RotAsVec);
-			RecoilRotation = FRotator(RotTransformed.Y, RotTransformed.Z, RotTransformed.X);
-		}
-
-		CurrentLocation += RecoilOffset;
-		CurrentRotation += RecoilRotation;
-	}
-
-	FPMesh->SetRelativeLocation(CurrentLocation);
-	FPMesh->SetRelativeRotation(CurrentRotation);
 }
 
 void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
