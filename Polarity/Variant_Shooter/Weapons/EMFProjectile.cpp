@@ -44,7 +44,7 @@ void AEMFProjectile::BeginPlay()
 	{
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 		Desc.PointChargeParams.Charge = DefaultCharge;
-		Desc.Mass = DefaultMass;
+		Desc.PhysicsParams.Mass = DefaultMass;
 		FieldComponent->SetSourceDescription(Desc);
 	}
 
@@ -112,7 +112,7 @@ void AEMFProjectile::SetProjectileMass(float NewMass)
 	if (FieldComponent)
 	{
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
-		Desc.Mass = NewMass;
+		Desc.PhysicsParams.Mass = NewMass;
 		FieldComponent->SetSourceDescription(Desc);
 	}
 }
@@ -121,7 +121,7 @@ float AEMFProjectile::GetProjectileMass() const
 {
 	if (FieldComponent)
 	{
-		return FieldComponent->GetSourceDescription().Mass;
+		return FieldComponent->GetSourceDescription().PhysicsParams.Mass;
 	}
 	return 1.0f;
 }
@@ -163,7 +163,7 @@ void AEMFProjectile::ResetProjectileState()
 	{
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 		Desc.PointChargeParams.Charge = DefaultCharge;
-		Desc.Mass = DefaultMass;
+		Desc.PhysicsParams.Mass = DefaultMass;
 		FieldComponent->SetSourceDescription(Desc);
 	}
 }

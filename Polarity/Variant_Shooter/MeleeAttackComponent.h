@@ -314,6 +314,7 @@ struct FMeleeAttackSettings
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnMeleeHit, AActor*, HitActor, const FVector&, HitLocation, bool, bHeadshot, float, Damage);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDropKickStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDropKickHit, AActor*, HitActor, const FVector&, HitLocation, float, Damage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
 
@@ -455,6 +456,10 @@ public:
 	/** Called when melee attack hits something */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnMeleeHit OnMeleeHit;
+
+	/** Called when drop kick starts (player begins diving toward target) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnDropKickStarted OnDropKickStarted;
 
 	/** Called when drop kick hits an enemy */
 	UPROPERTY(BlueprintAssignable, Category = "Events")

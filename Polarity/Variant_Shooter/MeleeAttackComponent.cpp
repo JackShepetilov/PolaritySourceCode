@@ -75,7 +75,22 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 bool UMeleeAttackComponent::StartAttack()
 {
-	if (!CanAttack())
+	// Drop kick can interrupt an ongoing attack:
+	// - Always interrupts a normal (non-dropkick) attack
+	// - Only interrupts another drop kick after it has dealt damage
+	if (!CanAttack() && IsAttacking() && (!bIsDropKick || bHasHitThisAttack) && ShouldPerformDropKick())
+	{
+		// Cleanup current attack
+		StopAttackAnimation();
+		StopSwingTrailFX();
+		StopMagnetism();
+		StopCameraFocus();
+		SwitchToFirstPersonMesh();
+		bInputLocked = false;
+		SetState(EMeleeAttackState::Ready);
+		// Fall through to start a new attack (which will become a drop kick via StartMagnetism)
+	}
+	else if (!CanAttack())
 	{
 		return false;
 	}
@@ -2683,6 +2698,8 @@ bool UMeleeAttackComponent::TryStartDropKick()
 			DrawDebugLine(GetWorld(), Start, BestTargetPos, FColor::Yellow, false, DebugShapeDuration, 0, 5.0f);
 			DrawDebugSphere(GetWorld(), LungeTargetPosition, 30.0f, 8, FColor::Cyan, false, DebugShapeDuration);
 		}
+
+		OnDropKickStarted.Broadcast();
 
 		return true;
 	}
