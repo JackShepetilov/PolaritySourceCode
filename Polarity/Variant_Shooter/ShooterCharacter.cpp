@@ -997,80 +997,23 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FPMesh->SetRelativeLocation(CurrentLocation);
 	FPMesh->SetRelativeRotation(CurrentRotation);
 
-	// === ADS Weapon Alignment (via SetWorldRotation/Location) ===
-	// After setting relative transform, override the world transform directly
-	// when in ADS. Camera goes to weapon via SetViewTarget + CalcCamera.
-	// Here we make the weapon VISUALLY follow pitch/aim direction.
-	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
+	// === ADS Pitch Follow ===
+	// FP Mesh parent (3P Mesh) only rotates by Yaw. During ADS, weapon must
+	// visually follow camera pitch. Simple approach: take the current world
+	// rotation, decompose it, add camera pitch blended by ADS alpha, recompose.
+	// No socket alignment, no position changes — just pitch.
+	if (CurrentADSAlpha > KINDA_SMALL_NUMBER)
 	{
-		USkeletalMeshComponent* WeaponMesh = CurrentWeapon->GetFirstPersonMesh();
-		UCameraComponent* Camera = GetFirstPersonCameraComponent();
+		float CameraPitch = GetControlRotation().Pitch;
+		if (CameraPitch > 180.0f) CameraPitch -= 360.0f;
 
-		if (WeaponMesh && Camera)
-		{
-			FName SightSocket = FName("Sight");
-			FName RearSocket = FName("SightRear");
-			FName BottomSocket = FName("SightBottom");
+		float PitchToAdd = CameraPitch * CurrentADSAlpha;
 
-			if (WeaponMesh->DoesSocketExist(SightSocket) && WeaponMesh->DoesSocketExist(RearSocket))
-			{
-				// Force world transform update so GetComponent*/GetSocket* return fresh data
-				FPMesh->UpdateComponentToWorld();
-				WeaponMesh->UpdateComponentToWorld();
-
-				// Read current world state (now guaranteed fresh after UpdateComponentToWorld)
-				FQuat CurWorldQuat = FPMesh->GetComponentQuat();
-				FVector CurWorldPos = FPMesh->GetComponentLocation();
-
-				// Socket world positions (based on current world transform)
-				FVector FrontWorld = WeaponMesh->GetSocketLocation(SightSocket);
-				FVector RearWorld = WeaponMesh->GetSocketLocation(RearSocket);
-
-				FVector CamLoc = Camera->GetComponentLocation();
-				FVector CamFwd = GetControlRotation().Vector();
-
-				// Step 1: Align Rear→Front with camera forward
-				FVector WorldAimDir = (FrontWorld - RearWorld).GetSafeNormal();
-				FQuat AimCorrection = FQuat::FindBetweenNormals(WorldAimDir, CamFwd);
-
-				// Step 2: Roll correction
-				FQuat RollCorrection = FQuat::Identity;
-				if (WeaponMesh->DoesSocketExist(BottomSocket))
-				{
-					FVector BottomWorld = WeaponMesh->GetSocketLocation(BottomSocket);
-					FVector WorldDownDir = (BottomWorld - RearWorld).GetSafeNormal();
-					FVector CorrectedDown = AimCorrection.RotateVector(WorldDownDir);
-
-					FVector CurrentDownProj = FVector::VectorPlaneProject(CorrectedDown, CamFwd).GetSafeNormal();
-					FVector TargetDownProj = FVector::VectorPlaneProject(-FVector::UpVector, CamFwd).GetSafeNormal();
-
-					if (!CurrentDownProj.IsNearlyZero() && !TargetDownProj.IsNearlyZero())
-					{
-						RollCorrection = FQuat::FindBetweenNormals(CurrentDownProj, TargetDownProj);
-					}
-				}
-
-				// Step 3: Target world rotation
-				FQuat TargetWorldQuat = RollCorrection * AimCorrection * CurWorldQuat;
-
-				// Step 4: Position — place front socket on camera ray
-				FVector FrontOffset = FrontWorld - CurWorldPos;
-				FQuat TotalCorrection = RollCorrection * AimCorrection;
-				FVector FrontInTarget = TotalCorrection.RotateVector(FrontOffset);
-
-				const float SightDist = 30.0f;
-				FVector SightTarget = CamLoc + CamFwd * SightDist;
-				FVector TargetWorldPos = SightTarget - FrontInTarget;
-
-				// Blend: lerp between current world and target world
-				FVector FinalWorldPos = FMath::Lerp(CurWorldPos, TargetWorldPos, CurrentADSAlpha);
-				FQuat FinalWorldQuat = FQuat::Slerp(CurWorldQuat, TargetWorldQuat, CurrentADSAlpha);
-
-				// Apply directly in world space (bypasses parent-relative issues)
-				FPMesh->SetWorldLocation(FinalWorldPos);
-				FPMesh->SetWorldRotation(FinalWorldQuat);
-			}
-		}
+		// Get current world rotation as Rotator (Yaw from parent, our custom Roll/Pitch from recoil)
+		FRotator WorldRot = FPMesh->GetComponentRotation();
+		// Add pitch directly to world rotation
+		WorldRot.Pitch += PitchToAdd;
+		FPMesh->SetWorldRotation(WorldRot);
 	}
 }
 
