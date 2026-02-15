@@ -978,8 +978,7 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	// FP Mesh is attached to 3P Mesh which only rotates by Yaw (no Pitch).
 	// Camera follows both Pitch and Yaw via ControlRotation.
 	// During ADS, the weapon must visually follow the camera pitch so sights
-	// align with where the player is looking. We add camera pitch to FP Mesh
-	// rotation in parent-local space, blended by ADS alpha.
+	// align with where the player is looking.
 	if (CurrentADSAlpha > KINDA_SMALL_NUMBER)
 	{
 		float CameraPitch = GetControlRotation().Pitch;
@@ -989,15 +988,9 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 		// Blend pitch by ADS alpha
 		float ADSPitch = CameraPitch * CurrentADSAlpha;
 
-		// Camera pitch is rotation around World Right (Y) axis.
-		// We need to express this in parent-local space.
-		// Parent = 3P Mesh, its world rotation = ParentWorldRot.
-		// A world-space rotation of ADSPitch around world Y =
-		//   FQuat(FVector::RightVector, FMath::DegreesToRadians(ADSPitch))
-		// Convert to parent-local by: LocalQuat = ParentWorldQuat.Inverse() * WorldQuat * ParentWorldQuat
-		// But for additive rotation on relative transform, simpler:
-		//   NewWorldRot = PitchQuat * CurrentWorldRot
-		//   NewRelativeRot = Inverse(ParentWorld) * NewWorldRot
+		// Pitch = rotation around the character's RIGHT vector (perpendicular to
+		// where they face horizontally). NOT world Y — because the 3P mesh is
+		// rotated by Yaw, world Y would be the mesh's forward (= barrel roll).
 		if (USceneComponent* Parent = FPMesh->GetAttachParent())
 		{
 			FQuat ParentWorldQuat = Parent->GetComponentQuat();
@@ -1006,8 +999,11 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 			// Current world rotation of FP Mesh
 			FQuat CurrentWorldQuat = ParentWorldQuat * CurrentRelQuat;
 
-			// Apply pitch rotation in world space (around world Right = Y axis)
-			FQuat PitchQuat(FVector::RightVector, FMath::DegreesToRadians(-ADSPitch));
+			// Character's right vector in world space — this is the axis we pitch around
+			FVector CharacterRight = FRotationMatrix(GetControlRotation()).GetUnitAxis(EAxis::Y);
+
+			// Apply pitch rotation around character's right axis in world space
+			FQuat PitchQuat(CharacterRight, FMath::DegreesToRadians(-ADSPitch));
 			FQuat NewWorldQuat = PitchQuat * CurrentWorldQuat;
 
 			// Convert back to parent-local
