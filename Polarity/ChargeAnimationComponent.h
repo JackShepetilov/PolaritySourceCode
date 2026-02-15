@@ -165,6 +165,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Debug")
 	bool bDrawDebugPlate = false;
 
+	// ==================== Capture Targeting ====================
+
+	/** Maximum distance from player to consider NPC for capture */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "100.0", Units = "cm"))
+	float CaptureSearchRadius = 2000.0f;
+
+	/** Max angle (degrees) from camera forward to consider NPC as target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "1.0", ClampMax = "90.0", Units = "deg"))
+	float CaptureMaxAngle = 30.0f;
+
 	// ==================== VFX ====================
 
 	/** Niagara effect to spawn during charge toggle (legacy - used when polarity-based VFX not set) */
@@ -424,6 +434,20 @@ protected:
 
 	/** Update plate position to follow camera */
 	void UpdatePlatePosition();
+
+	// ==================== Capture Methods ====================
+
+	/** Raycast from camera to find and capture NPCs during channeling */
+	void UpdateCaptureRaycast(const FVector& CameraLoc, const FRotator& CameraRot);
+
+	/** Capture a specific NPC */
+	void CaptureNPC(class AShooterNPC* NPC);
+
+	/** Release the currently captured NPC */
+	void ReleaseCapturedNPC();
+
+	/** Currently captured NPC (managed by raycast during channeling) */
+	TWeakObjectPtr<AActor> CurrentCapturedNPC;
 
 	/** Perform the tap toggle: switch charge sign */
 	void PerformTapToggle();

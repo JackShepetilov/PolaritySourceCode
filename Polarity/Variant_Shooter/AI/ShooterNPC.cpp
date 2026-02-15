@@ -147,6 +147,12 @@ void AShooterNPC::Tick(float DeltaTime)
 		UpdateKnockbackInterpolation(DeltaTime);
 	}
 
+	// Update launched state collision detection
+	if (bIsLaunched)
+	{
+		UpdateLaunchedCollision();
+	}
+
 	// Update Charge/Polarity - get charge from EMFVelocityModifier
 	float ChargeValue = 0.0f;
 	if (EMFVelocityModifier)
@@ -1632,6 +1638,20 @@ void AShooterNPC::EndKnockbackStun()
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
 
+	// Also clear launched state if active
+	if (bIsLaunched)
+	{
+		bIsLaunched = false;
+		if (ActiveLaunchedMontage)
+		{
+			if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+			{
+				AnimInstance->Montage_Stop(0.2f, ActiveLaunchedMontage);
+			}
+			ActiveLaunchedMontage = nullptr;
+		}
+	}
+
 	// Restore original ground friction after knockback slide
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
@@ -1646,6 +1666,243 @@ void AShooterNPC::EndKnockbackStun()
 	}
 
 	// AI will resume pathfinding on next StateTree tick
+}
+
+// ==================== Captured State (Channeling Plate) ====================
+
+void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
+{
+	if (bIsCaptured || bIsDead)
+	{
+		return;
+	}
+
+	bIsCaptured = true;
+	bIsInKnockback = true; // Blocks AI via StateTree IsInKnockback condition
+
+	// Stop AI pathfinding
+	if (AController* MyController = GetController())
+	{
+		if (AAIController* AIController = Cast<AAIController>(MyController))
+		{
+			if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
+			{
+				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
+			}
+			AIController->StopMovement();
+		}
+	}
+
+	// Do NOT zero velocity — viscosity manages it
+	// Do NOT disable EMF — viscous capture needs it
+	// Do NOT set knockback timer — capture duration managed externally
+
+	// Play captured montage (will loop via OnCapturedMontageEnded callback)
+	UAnimMontage* MontageToPlay = OverrideMontage ? OverrideMontage : CapturedMontage.Get();
+	if (MontageToPlay)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			ActiveCapturedMontage = MontageToPlay;
+			AnimInstance->Montage_Play(MontageToPlay, 1.0f);
+
+			FOnMontageEnded EndDelegate;
+			EndDelegate.BindUObject(this, &AShooterNPC::OnCapturedMontageEnded);
+			AnimInstance->Montage_SetEndDelegate(EndDelegate, MontageToPlay);
+		}
+	}
+}
+
+void AShooterNPC::OnCapturedMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	// If still captured and not interrupted — loop the montage
+	if (bIsCaptured && !bInterrupted && ActiveCapturedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			AnimInstance->Montage_Play(ActiveCapturedMontage, 1.0f);
+
+			FOnMontageEnded EndDelegate;
+			EndDelegate.BindUObject(this, &AShooterNPC::OnCapturedMontageEnded);
+			AnimInstance->Montage_SetEndDelegate(EndDelegate, ActiveCapturedMontage);
+		}
+	}
+}
+
+void AShooterNPC::ExitCapturedState()
+{
+	if (!bIsCaptured)
+	{
+		return;
+	}
+
+	bIsCaptured = false;
+	bIsInKnockback = false;
+
+	// Restore friction
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->GroundFriction = CachedGroundFriction;
+	}
+
+	// Stop captured montage
+	if (ActiveCapturedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			if (AnimInstance->Montage_IsPlaying(ActiveCapturedMontage))
+			{
+				AnimInstance->Montage_Stop(0.2f, ActiveCapturedMontage);
+			}
+		}
+		ActiveCapturedMontage = nullptr;
+	}
+
+	// If NPC is moving fast enough, transition to launched state
+	// (happens after reverse channeling flings NPC away)
+	const float CurrentSpeed = GetVelocity().Size();
+	if (CurrentSpeed >= LaunchedMinSpeed)
+	{
+		EnterLaunchedState();
+		return;
+	}
+
+	// AI will resume on next StateTree tick
+}
+
+// ==================== Launched State ====================
+
+void AShooterNPC::EnterLaunchedState()
+{
+	if (bIsLaunched || bIsDead)
+	{
+		return;
+	}
+
+	bIsLaunched = true;
+	bIsInKnockback = true; // Keep AI blocked
+
+	// Play launched montage (looping via callback)
+	UAnimMontage* MontageToPlay = LaunchedMontage.Get();
+	if (MontageToPlay)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			ActiveLaunchedMontage = MontageToPlay;
+			AnimInstance->Montage_Play(MontageToPlay, 1.0f);
+
+			FOnMontageEnded EndDelegate;
+			EndDelegate.BindUObject(this, &AShooterNPC::OnLaunchedMontageEnded);
+			AnimInstance->Montage_SetEndDelegate(EndDelegate, MontageToPlay);
+		}
+	}
+}
+
+void AShooterNPC::OnLaunchedMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	if (bIsLaunched && !bInterrupted && ActiveLaunchedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			AnimInstance->Montage_Play(ActiveLaunchedMontage, 1.0f);
+
+			FOnMontageEnded EndDelegate;
+			EndDelegate.BindUObject(this, &AShooterNPC::OnLaunchedMontageEnded);
+			AnimInstance->Montage_SetEndDelegate(EndDelegate, ActiveLaunchedMontage);
+		}
+	}
+}
+
+void AShooterNPC::ExitLaunchedState()
+{
+	if (!bIsLaunched)
+	{
+		return;
+	}
+
+	bIsLaunched = false;
+	bIsInKnockback = false;
+
+	// Stop launched montage
+	if (ActiveLaunchedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			if (AnimInstance->Montage_IsPlaying(ActiveLaunchedMontage))
+			{
+				AnimInstance->Montage_Stop(0.2f, ActiveLaunchedMontage);
+			}
+		}
+		ActiveLaunchedMontage = nullptr;
+	}
+}
+
+void AShooterNPC::UpdateLaunchedCollision()
+{
+	if (!bIsLaunched || bIsDead || !bEnableNPCCollision)
+	{
+		return;
+	}
+
+	// Use pre-collision velocity (stored before Super::Tick) for speed check
+	const float PreCollisionSpeed = PreviousTickVelocity.Size();
+	if (PreCollisionSpeed < LaunchedMinSpeed)
+	{
+		ExitLaunchedState();
+		return;
+	}
+
+	// Sweep from previous position to current to catch fast-moving collisions.
+	// CharacterMovement blocks capsule penetration, so static overlap won't detect
+	// NPC-NPC hits — we need a sweep along the movement path.
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!Capsule || !GetWorld())
+	{
+		return;
+	}
+
+	const FVector CurrentPos = GetActorLocation();
+	const float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+	const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+
+	// Estimate previous position from pre-collision velocity
+	const float DeltaTime = GetWorld()->GetDeltaSeconds();
+	const FVector SweepStart = CurrentPos - PreviousTickVelocity * DeltaTime;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.bTraceComplex = false;
+
+	TArray<FHitResult> Hits;
+	bool bHasHits = GetWorld()->SweepMultiByChannel(
+		Hits,
+		SweepStart,
+		CurrentPos,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeCapsule(CapsuleRadius * 1.1f, CapsuleHalfHeight),
+		QueryParams
+	);
+
+	if (!bHasHits)
+	{
+		return;
+	}
+
+	for (const FHitResult& Hit : Hits)
+	{
+		AShooterNPC* OtherNPC = Cast<AShooterNPC>(Hit.GetActor());
+		if (OtherNPC && !OtherNPC->IsDead())
+		{
+			if (PreCollisionSpeed >= NPCCollisionMinVelocity)
+			{
+				FVector CollisionPoint = Hit.ImpactPoint;
+				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, PreCollisionSpeed);
+				ExitLaunchedState();
+				return;
+			}
+		}
+	}
 }
 
 // ==================== Coordinator Integration ====================
@@ -1800,14 +2057,25 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
-	// NOTE: NPC-NPC collision detection has been moved to UpdateKnockbackInterpolation()
-	// OnCapsuleHit fires AFTER physics contact when velocity is already dampened (e.g., 29 instead of 1000+)
-	// The overlap sweep in UpdateKnockbackInterpolation() detects collisions BEFORE SetActorLocation()
-	// and uses the computed knockback velocity (Distance/Duration) which is accurate
-
-	// Skip if we hit another NPC - collision is handled in UpdateKnockbackInterpolation()
-	if (OtherActor && Cast<AShooterNPC>(OtherActor))
+	// NPC-NPC collision handling
+	if (AShooterNPC* OtherNPC = Cast<AShooterNPC>(OtherActor))
 	{
+		// Handle NPC-NPC collision for ANY fast-moving knockback NPC.
+		// Don't check bIsLaunched — it can be cleared by timing issues between
+		// Tick order and deferred hit events. Use PreviousTickVelocity instead.
+		if (!OtherNPC->IsDead())
+		{
+			const float ImpactSpeed = PreviousTickVelocity.Size();
+			if (ImpactSpeed >= NPCCollisionMinVelocity)
+			{
+				FVector CollisionPoint = (GetActorLocation() + OtherNPC->GetActorLocation()) * 0.5f;
+				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, ImpactSpeed);
+				if (bIsLaunched)
+				{
+					ExitLaunchedState();
+				}
+			}
+		}
 		return;
 	}
 

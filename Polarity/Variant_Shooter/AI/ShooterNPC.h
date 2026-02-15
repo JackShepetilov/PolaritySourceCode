@@ -117,6 +117,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
 	TObjectPtr<UAnimMontage> KnockbackMontage;
 
+	/** Animation montage played while captured by channeling plate */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
+	TObjectPtr<UAnimMontage> CapturedMontage;
+
+	/** Animation montage played while launched (in flight) after reverse channeling */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
+	TObjectPtr<UAnimMontage> LaunchedMontage;
+
+	/** Minimum speed to stay in launched state. Below this, launched state ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions", meta = (ClampMin = "50.0"))
+	float LaunchedMinSpeed = 200.0f;
+
 	/** Minimum time between hit reaction animations */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions", meta = (ClampMin = "0"))
 	float HitReactionCooldown = 0.5f;
@@ -231,6 +243,12 @@ protected:
 
 	/** True when NPC is in knockback state */
 	bool bIsInKnockback = false;
+
+	/** True when NPC is captured by channeling plate */
+	bool bIsCaptured = false;
+
+	/** True when NPC was launched by reverse channeling and is in flight */
+	bool bIsLaunched = false;
 
 	/** True when NPC is being interpolated to knockback target position */
 	bool bIsKnockbackInterpolating = false;
@@ -533,6 +551,48 @@ public:
 	/** Returns true if this NPC is currently in knockback state */
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool IsInKnockback() const { return bIsInKnockback; }
+
+	/** Enter captured state (channeling plate grab). Blocks AI, plays montage. */
+	void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr);
+
+	/** Exit captured state. Restores AI, stops montage. */
+	void ExitCapturedState();
+
+private:
+	/** Currently playing captured montage (for looping and stop) */
+	UPROPERTY()
+	TObjectPtr<UAnimMontage> ActiveCapturedMontage;
+
+	/** Callback to re-play captured montage when it ends (looping) */
+	UFUNCTION()
+	void OnCapturedMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Currently playing launched montage (for looping and stop) */
+	UPROPERTY()
+	TObjectPtr<UAnimMontage> ActiveLaunchedMontage;
+
+	/** Callback to re-play launched montage when it ends (looping) */
+	UFUNCTION()
+	void OnLaunchedMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Exit launched state — stop montage, clear flags */
+	void ExitLaunchedState();
+
+	/** Check for NPC collisions during launched flight */
+	void UpdateLaunchedCollision();
+
+public:
+
+	/** Returns true if captured by channeling plate */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsCaptured() const { return bIsCaptured; }
+
+	/** Enter launched state after reverse channeling release. Plays montage, enables NPC-NPC collision. */
+	void EnterLaunchedState();
+
+	/** Returns true if NPC is in flight after reverse channeling launch */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsLaunched() const { return bIsLaunched; }
 
 	/** Returns true if this NPC is dead */
 	UFUNCTION(BlueprintPure, Category = "Status")

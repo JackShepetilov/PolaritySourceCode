@@ -133,6 +133,55 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
 	bool bLogForces = false;
 
+	// ==================== Viscous Capture ====================
+
+	/** Enable viscous damping near Player-owned FinitePlate sources (channeling plate).
+	 *  Damps NPC velocity RELATIVE to the plate, so captured NPCs hover and move with the player. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture")
+	bool bEnableViscousCapture = false;
+
+	/** Viscosity coefficient (damping strength). Higher = faster capture, stickier.
+	 *  Units: 1/s. Value of 10 ≈ 90% damped in ~0.23s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
+	float ViscosityCoefficient = 10.0f;
+
+	/** Radius within which viscous capture activates (cm).
+	 *  Outside this radius, no viscosity is applied. Uses smoothstep falloff inside. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
+	float CaptureRadius = 500.0f;
+
+	/** Counteract gravity when captured (prevents NPC from sinking below plate) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (EditCondition = "bEnableViscousCapture"))
+	bool bCounterGravityWhenCaptured = true;
+
+	/** Gravity counteraction strength (0-1). 1.0 = fully cancel gravity. Scales with distance falloff. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableViscousCapture && bCounterGravityWhenCaptured"))
+	float GravityCounterStrength = 1.0f;
+
+	/** Mark this NPC as captured by the given plate. Enters knockback + plays montage. */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Viscous Capture")
+	void SetCapturedByPlate(AEMFChannelingPlateActor* Plate);
+
+	/** Release this NPC from capture. Exits knockback, stops montage. */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Viscous Capture")
+	void ReleasedFromCapture();
+
+	/** Is this NPC currently captured by a plate? */
+	UFUNCTION(BlueprintPure, Category = "EMF|Viscous Capture")
+	bool IsCapturedByPlate() const { return CapturingPlate.IsValid(); }
+
+	/** Detach from plate without exiting captured state (for plate swap during reverse channeling) */
+	void DetachFromPlate();
+
+	/** Minimum CaptureStrength to consider NPC as actively captured.
+	 *  Below this for CaptureReleaseTimeout seconds → auto-release. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableViscousCapture"))
+	float CaptureMinStrength = 0.05f;
+
+	/** Time (seconds) CaptureStrength must stay below CaptureMinStrength before auto-releasing NPC */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
+	float CaptureReleaseTimeout = 0.5f;
+
 	// ==================== Events ====================
 
 	/** Делегат: вызывается при изменении заряда */
@@ -298,6 +347,21 @@ private:
 	 *  Handles different source types: PointCharge, LineCharge, CurrentWire, etc.
 	 *  @return true if source produces no force (zero charge/current/field) */
 	static bool IsSourceEffectivelyZero(const FEMSourceDescription& Source);
+
+	// ==================== Viscous Capture State ====================
+
+	/** Plate that captured this NPC (set via SetCapturedByPlate) */
+	UPROPERTY()
+	TWeakObjectPtr<AEMFChannelingPlateActor> CapturingPlate;
+
+	/** Previous frame plate position (for velocity calculation via finite difference) */
+	FVector PreviousPlatePosition = FVector::ZeroVector;
+
+	/** Whether we had a valid plate position last frame */
+	bool bHasPreviousPlatePosition = false;
+
+	/** Accumulated time that CaptureStrength has been below CaptureMinStrength */
+	float WeakCaptureTimer = 0.0f;
 
 	// ==================== Channeling Proxy State ====================
 

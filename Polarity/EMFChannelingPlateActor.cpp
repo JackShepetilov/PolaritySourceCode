@@ -113,11 +113,12 @@ void AEMFChannelingPlateActor::UpdateTransformFromCamera(const FVector& CameraLo
 	SetActorLocationAndRotation(PlatePosition, CameraRotation);
 
 	// Update the plate normal direction to match camera forward
-	// (Position/Rotation in SourceParams will be synced from actor automatically by SetSourceDescription)
+	CachedPlateNormal = CameraRotation.RotateVector(FVector(1.0f, 0.0f, 0.0f));
+
 	if (PlateFieldComponent)
 	{
 		FEMSourceDescription Desc = PlateFieldComponent->GetSourceDescription();
-		Desc.PlateParams.Normal = CameraRotation.RotateVector(FVector(1.0f, 0.0f, 0.0f));
+		Desc.PlateParams.Normal = CachedPlateNormal;
 		PlateFieldComponent->SetSourceDescription(Desc);
 	}
 }

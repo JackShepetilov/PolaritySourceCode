@@ -3,6 +3,7 @@
 #include "EMFVelocityModifier.h"
 #include "ApexMovementComponent.h"
 #include "EMFChannelingPlateActor.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
 #include "GameFramework/Character.h"
 #include "DrawDebugHelpers.h"
 
@@ -162,6 +163,7 @@ void UEMFVelocityModifier::SetEnabled(bool bNewEnabled)
 	{
 		CurrentEMForce = FVector::ZeroVector;
 		CurrentAcceleration = FVector::ZeroVector;
+		bHasPreviousPlatePosition = false;
 	}
 }
 
@@ -264,6 +266,21 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 
 	// Calculate Lorentz force from each source individually with multipliers
 	FVector TotalForce = FVector::ZeroVector;
+	FVector PlateForce = FVector::ZeroVector; // Separated for viscous capture suppression
+
+	// Viscous capture: resolve plate position from direct reference (not registry search)
+	FVector NearestPlatePosition = FVector::ZeroVector;
+	float NearestPlateDistSq = MAX_FLT;
+	bool bFoundPlate = false;
+	AEMFChannelingPlateActor* CaptPlate = nullptr;
+
+	if (bEnableViscousCapture && CapturingPlate.IsValid())
+	{
+		CaptPlate = CapturingPlate.Get();
+		NearestPlatePosition = CaptPlate->GetActorLocation();
+		NearestPlateDistSq = FVector::DistSquared(Position, NearestPlatePosition);
+		bFoundPlate = true;
+	}
 
 	for (const FEMSourceDescription& Source : OtherSources)
 	{
@@ -279,6 +296,20 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		{
 			continue;
 		}
+
+		// Identify plate sources (player-owned finite plates from channeling)
+		const bool bIsChannelingPlate =
+			Source.SourceType == EEMSourceType::FinitePlate &&
+			Source.OwnerType == EEMSourceOwnerType::Player;
+
+		// Non-captured NPCs with viscous capture enabled: SKIP plate forces entirely.
+		// Only the captured NPC should feel the plate.
+		if (bIsChannelingPlate && bEnableViscousCapture && !bFoundPlate)
+		{
+			continue;
+		}
+
+		bool bIsPlateSource = bFoundPlate && bIsChannelingPlate;
 
 		// Get multiplier for this source's owner type
 		float Multiplier = GetForceMultiplierForOwnerType(Source.OwnerType);
@@ -301,8 +332,80 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			true  // Include magnetic component
 		);
 
-		// Apply multiplier and add to total
-		TotalForce += SourceForce * Multiplier;
+		SourceForce *= Multiplier;
+
+		// Separate plate forces for later suppression
+		if (bIsPlateSource)
+		{
+			PlateForce += SourceForce;
+		}
+		else
+		{
+			TotalForce += SourceForce;
+		}
+	}
+
+	// ===== Viscous Capture: suppress ALL EM forces + add viscosity =====
+	float CaptureStrength = 0.0f; // 0 = no capture, 1 = full capture
+
+	if (bFoundPlate)
+	{
+		const float Distance = FMath::Sqrt(NearestPlateDistSq);
+
+		if (Distance < CaptureRadius)
+		{
+			// Smoothstep falloff: 1 at plate → 0 at CaptureRadius edge
+			const float T = Distance / CaptureRadius;
+			CaptureStrength = 1.0f - T * T * (3.0f - 2.0f * T);
+		}
+
+		// Auto-release: if CaptureStrength too weak for too long, release NPC
+		if (CaptureStrength < CaptureMinStrength)
+		{
+			WeakCaptureTimer += DeltaTime;
+			if (WeakCaptureTimer >= CaptureReleaseTimeout)
+			{
+				ReleasedFromCapture();
+				// Continue with normal (non-captured) force calculation
+				bFoundPlate = false;
+				CaptPlate = nullptr;
+				CaptureStrength = 0.0f;
+			}
+		}
+		else
+		{
+			WeakCaptureTimer = 0.0f;
+		}
+
+		PreviousPlatePosition = NearestPlatePosition;
+		bHasPreviousPlatePosition = true;
+	}
+	else if (bEnableViscousCapture)
+	{
+		bHasPreviousPlatePosition = false;
+	}
+
+	// Suppress forces based on capture mode:
+	// Normal capture: suppress ALL forces (plate + others) to hold NPC in place.
+	// Reverse mode: plate force passes through fully (for launch), suppress only others.
+	const bool bReverse = CaptPlate && CaptPlate->IsInReverseMode();
+	const float PassThrough = (1.0f - CaptureStrength) * (1.0f - CaptureStrength);
+
+	if (bReverse)
+	{
+		// Reverse mode: suppress non-plate forces.
+		// Redirect full plate force magnitude along plate normal (camera forward)
+		// so NPC always launches straight away from player regardless of EM field shape.
+		TotalForce *= PassThrough;
+
+		const FVector PlateNormal = CaptPlate->GetPlateNormal();
+		TotalForce += PlateNormal * PlateForce.Size();
+	}
+	else
+	{
+		// Suppress everything (normal capture hold)
+		TotalForce += PlateForce;
+		TotalForce *= PassThrough;
 	}
 
 	CurrentEMForce = TotalForce;
@@ -318,6 +421,48 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 
 	// Euler: delta_v = a * dt
 	FVector VelocityDelta = CurrentAcceleration * DeltaTime;
+
+	// ===== Viscous Capture: damping + gravity compensation =====
+	if (CaptureStrength > 0.0f && CaptPlate)
+	{
+		// Plate velocity via finite difference
+		FVector PlateVelocity = FVector::ZeroVector;
+		if (bHasPreviousPlatePosition && DeltaTime > SMALL_NUMBER)
+		{
+			PlateVelocity = (NearestPlatePosition - PreviousPlatePosition) / DeltaTime;
+		}
+
+		// Relative velocity: NPC movement relative to plate
+		const FVector RelativeVelocity = CurrentVelocity - PlateVelocity;
+
+		// Exponential decay damping (unconditionally stable)
+		const float DampingFactor = 1.0f - FMath::Exp(-ViscosityCoefficient * CaptureStrength * DeltaTime);
+
+		FVector ViscousDelta;
+		if (CaptPlate->IsInReverseMode())
+		{
+			// Reverse mode: damp only tangential velocity, preserve normal (launch direction)
+			const FVector PlateNormal = CaptPlate->GetPlateNormal();
+			const float NormalSpeed = FVector::DotProduct(RelativeVelocity, PlateNormal);
+			const FVector V_tangential = RelativeVelocity - NormalSpeed * PlateNormal;
+			ViscousDelta = -V_tangential * DampingFactor;
+			// No gravity compensation in reverse mode — NPC launches freely
+		}
+		else
+		{
+			// Normal capture: damp all relative velocity
+			ViscousDelta = -RelativeVelocity * DampingFactor;
+
+			// Gravity counteraction (scaled by capture strength)
+			if (bCounterGravityWhenCaptured)
+			{
+				const float WorldGravityZ = GetWorld()->GetGravityZ(); // negative
+				VelocityDelta.Z += -WorldGravityZ * GravityCounterStrength * CaptureStrength * DeltaTime;
+			}
+		}
+
+		VelocityDelta += ViscousDelta;
+	}
 
 	// Debug
 	if (bDrawDebug)
@@ -484,6 +629,46 @@ bool UEMFVelocityModifier::IsSourceEffectivelyZero(const FEMSourceDescription& S
 		// For unknown/custom types, check legacy Charge field as fallback
 		return FMath::IsNearlyZero(Source.PointChargeParams.Charge);
 	}
+}
+
+// ==================== Viscous Capture API ====================
+
+void UEMFVelocityModifier::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
+{
+	if (!Plate)
+	{
+		return;
+	}
+
+	CapturingPlate = Plate;
+	bHasPreviousPlatePosition = false;
+	WeakCaptureTimer = 0.0f;
+
+	// Enter captured state on the NPC
+	if (AShooterNPC* NPC = Cast<AShooterNPC>(GetOwner()))
+	{
+		NPC->EnterCapturedState();
+	}
+}
+
+void UEMFVelocityModifier::ReleasedFromCapture()
+{
+	CapturingPlate = nullptr;
+	bHasPreviousPlatePosition = false;
+
+	// Exit captured state on the NPC
+	if (AShooterNPC* NPC = Cast<AShooterNPC>(GetOwner()))
+	{
+		NPC->ExitCapturedState();
+	}
+}
+
+void UEMFVelocityModifier::DetachFromPlate()
+{
+	CapturingPlate = nullptr;
+	bHasPreviousPlatePosition = false;
+	// NOTE: Does NOT call ExitCapturedState — NPC stays in knockback
+	// for plate swap during ExitChanneling → ReverseChanneling transition
 }
 
 // ==================== Channeling Proxy Mode ====================

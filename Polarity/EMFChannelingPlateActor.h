@@ -52,6 +52,26 @@ public:
 	/** Update position and rotation to follow camera */
 	void UpdateTransformFromCamera(const FVector& CameraLocation, const FRotator& CameraRotation, const FVector& LocalOffset);
 
+	// ==================== Capture ====================
+
+	/** Set the NPC currently captured by this plate */
+	void SetCapturedNPC(AActor* NPC) { CapturedNPC = NPC; }
+
+	/** Get the captured NPC (nullptr if none) */
+	AActor* GetCapturedNPC() const { return CapturedNPC.Get(); }
+
+	/** Clear the captured NPC reference */
+	void ClearCapturedNPC() { CapturedNPC.Reset(); }
+
+	/** Enable reverse mode (tangential-only damping for launch) */
+	void SetReverseMode(bool bReverse) { bReverseMode = bReverse; }
+
+	/** Is plate in reverse channeling mode? */
+	bool IsInReverseMode() const { return bReverseMode; }
+
+	/** Get plate normal (forward direction) */
+	FVector GetPlateNormal() const { return CachedPlateNormal; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -60,6 +80,16 @@ protected:
 private:
 	/** Cached dimensions for debug drawing */
 	FVector2D CachedDimensions = FVector2D(200.0f, 200.0f);
+
+	/** Cached plate normal (forward direction), updated each frame */
+	FVector CachedPlateNormal = FVector::ForwardVector;
+
+	/** NPC currently captured by this plate */
+	UPROPERTY()
+	TWeakObjectPtr<AActor> CapturedNPC;
+
+	/** Reverse channeling mode: tangential-only damping */
+	bool bReverseMode = false;
 
 	/** Draw debug visualization */
 	void DrawDebug() const;

@@ -3,6 +3,7 @@
 
 #include "ChargeAnimationComponent.h"
 #include "Variant_Shooter/MeleeAttackComponent.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
 #include "EMFChannelingPlateActor.h"
 #include "EMFVelocityModifier.h"
 #include "GameFramework/Character.h"
@@ -16,6 +17,7 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "EMF_FieldComponent.h"
+#include "Engine/OverlapResult.h"
 
 UChargeAnimationComponent::UChargeAnimationComponent()
 {
@@ -92,6 +94,31 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 	{
 		// Spawn plate with OPPOSITE charge sign
 		SpawnPlate(-ChannelingChargeSign);
+
+		// Flip player's charge sign (matches the new plate polarity)
+		if (CachedEMFModifier)
+		{
+			CachedEMFModifier->ToggleChargeSign();
+		}
+
+		// Set reverse mode on the new plate (tangential-only damping)
+		if (ChannelingPlateActor)
+		{
+			ChannelingPlateActor->SetReverseMode(true);
+		}
+
+		// Re-attach captured NPC to the new plate (NPC stayed in knockback)
+		if (CurrentCapturedNPC.IsValid() && ChannelingPlateActor)
+		{
+			if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+			{
+				if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
+				{
+					Mod->SetCapturedByPlate(ChannelingPlateActor);
+				}
+				ChannelingPlateActor->SetCapturedNPC(NPC);
+			}
+		}
 
 		// Enable proxy mode with the new plate
 		if (CachedEMFModifier)
@@ -246,12 +273,14 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 			break;
 
 		case EChargeAnimationState::ChannelingRelease:
-			// Window expired — no reverse tap. Finish animation.
+			// Window expired — no reverse tap. Fully release NPC.
+			ReleaseCapturedNPC();
 			EnterFinishingAnimation();
 			break;
 
 		case EChargeAnimationState::ReverseChanneling:
-			// Reverse channeling time expired
+			// Reverse channeling time expired — release NPC then cleanup
+			ReleaseCapturedNPC();
 			DestroyPlate();
 			if (CachedEMFModifier)
 			{
@@ -338,8 +367,6 @@ bool UChargeAnimationComponent::CancelAnimation()
 
 void UChargeAnimationComponent::EnterChanneling()
 {
-	UE_LOG(LogTemp, Warning, TEXT("=== EnterChanneling START ==="));
-
 	// Save the player's current charge sign
 	if (CachedEMFModifier)
 	{
@@ -348,11 +375,6 @@ void UChargeAnimationComponent::EnterChanneling()
 		{
 			ChannelingChargeSign = 1; // Default to positive if neutral
 		}
-		UE_LOG(LogTemp, Warning, TEXT("EnterChanneling: ChargeSign=%d"), ChannelingChargeSign);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("EnterChanneling: CachedEMFModifier is NULL!"));
 	}
 
 	// Freeze montage at the specified frame
@@ -376,16 +398,10 @@ void UChargeAnimationComponent::EnterChanneling()
 		{
 			CachedFieldComponent->UnregisterFromRegistry();
 		}
-		UE_LOG(LogTemp, Warning, TEXT("EnterChanneling: FieldWasRegistered=%d"), bFieldWasRegistered);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("EnterChanneling: CachedFieldComponent is NULL!"));
 	}
 
 	// Spawn the channeling plate with the same charge sign as the player
 	SpawnPlate(ChannelingChargeSign);
-	UE_LOG(LogTemp, Warning, TEXT("EnterChanneling: PlateSpawned=%d"), ChannelingPlateActor != nullptr);
 
 	// Enable proxy mode on EMFVelocityModifier
 	if (CachedEMFModifier)
@@ -395,11 +411,28 @@ void UChargeAnimationComponent::EnterChanneling()
 
 	SetState(EChargeAnimationState::Channeling);
 	OnChannelingStarted.Broadcast();
-	UE_LOG(LogTemp, Warning, TEXT("=== EnterChanneling DONE, state=Channeling ==="));
 }
 
 void UChargeAnimationComponent::ExitChanneling()
 {
+	// NPC stays in captured state (knockback) — it will be re-attached
+	// to the reverse plate if player taps, or fully released on timeout.
+	// Just clear the plate reference so weak ptr doesn't dangle.
+	if (CurrentCapturedNPC.IsValid())
+	{
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+		{
+			if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
+			{
+				Mod->DetachFromPlate();
+			}
+		}
+		if (ChannelingPlateActor)
+		{
+			ChannelingPlateActor->ClearCapturedNPC();
+		}
+	}
+
 	// Destroy the plate
 	DestroyPlate();
 
@@ -437,9 +470,6 @@ void UChargeAnimationComponent::SpawnPlate(int32 ChargeSign)
 	SpawnParams.Owner = OwnerCharacter;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	UE_LOG(LogTemp, Warning, TEXT("SpawnPlate: CameraLoc=%s CameraRot=%s SpawnLoc=%s"),
-		*CameraLoc.ToString(), *CameraRot.ToString(), *SpawnLocation.ToString());
-
 	ChannelingPlateActor = World->SpawnActor<AEMFChannelingPlateActor>(
 		ClassToSpawn, SpawnLocation, CameraRot, SpawnParams);
 
@@ -456,13 +486,6 @@ void UChargeAnimationComponent::SpawnPlate(int32 ChargeSign)
 		ChannelingPlateActor->SetPlateChargeDensity(Density);
 		ChannelingPlateActor->SetPlateDimensions(PlateDimensions);
 		ChannelingPlateActor->bDrawDebugPlate = bDrawDebugPlate;
-
-		UE_LOG(LogTemp, Warning, TEXT("SpawnPlate: SUCCESS! ActorLoc=%s Density=%.2f"),
-			*ChannelingPlateActor->GetActorLocation().ToString(), Density);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("SpawnPlate: SpawnActor FAILED!"));
 	}
 }
 
@@ -479,7 +502,6 @@ void UChargeAnimationComponent::UpdatePlatePosition()
 {
 	if (!ChannelingPlateActor)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("UpdatePlatePosition: ChannelingPlateActor is null!"));
 		return;
 	}
 
@@ -488,17 +510,13 @@ void UChargeAnimationComponent::UpdatePlatePosition()
 
 	if (!GetCameraViewPoint(CameraLoc, CameraRot))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("UpdatePlatePosition: GetCameraViewPoint FAILED!"));
-		return; // No valid camera — skip this frame
+		return;
 	}
-
-	UE_LOG(LogTemp, Log, TEXT("UpdatePlatePosition: CameraLoc=%s CameraRot=%s PlateOffset=%s"),
-		*CameraLoc.ToString(), *CameraRot.ToString(), *PlateOffset.ToString());
 
 	ChannelingPlateActor->UpdateTransformFromCamera(CameraLoc, CameraRot, PlateOffset);
 
-	UE_LOG(LogTemp, Log, TEXT("UpdatePlatePosition: PlateActorLoc=%s"),
-		*ChannelingPlateActor->GetActorLocation().ToString());
+	// Raycast for capture target
+	UpdateCaptureRaycast(CameraLoc, CameraRot);
 }
 
 bool UChargeAnimationComponent::GetCameraViewPoint(FVector& OutLocation, FRotator& OutRotation) const
@@ -522,6 +540,153 @@ bool UChargeAnimationComponent::GetCameraViewPoint(FVector& OutLocation, FRotato
 	}
 
 	return false;
+}
+
+// ==================== Capture ====================
+
+void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, const FRotator& CameraRot)
+{
+	if (!ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// Check if current captured NPC is still valid and still captured
+	if (CurrentCapturedNPC.IsValid())
+	{
+		AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get());
+		if (NPC)
+		{
+			UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>();
+			if (Mod && Mod->IsCapturedByPlate())
+			{
+				return; // Still captured — don't re-search
+			}
+		}
+		// NPC was auto-released or is invalid — clear and search for new target
+		CurrentCapturedNPC.Reset();
+		if (ChannelingPlateActor)
+		{
+			ChannelingPlateActor->ClearCapturedNPC();
+		}
+	}
+
+	UWorld* World = GetWorld();
+	if (!World || !OwnerCharacter)
+	{
+		return;
+	}
+
+	const FVector CameraForward = CameraRot.Vector();
+	const float MaxAngleCos = FMath::Cos(FMath::DegreesToRadians(CaptureMaxAngle));
+	const float SearchRadiusSq = CaptureSearchRadius * CaptureSearchRadius;
+	const FVector PlayerLoc = OwnerCharacter->GetActorLocation();
+
+	// Find all pawns in radius via overlap
+	FCollisionObjectQueryParams ObjectQuery(ECC_Pawn);
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(OwnerCharacter);
+	QueryParams.AddIgnoredActor(ChannelingPlateActor);
+
+	TArray<FOverlapResult> Overlaps;
+	World->OverlapMultiByObjectType(
+		Overlaps,
+		PlayerLoc,
+		FQuat::Identity,
+		ObjectQuery,
+		FCollisionShape::MakeSphere(CaptureSearchRadius),
+		QueryParams
+	);
+
+	AShooterNPC* BestNPC = nullptr;
+	float BestAngleCos = -1.0f; // worst possible (cos 180°)
+
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
+		if (!NPC)
+		{
+			continue;
+		}
+
+		UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
+		if (!NPCModifier || !NPCModifier->bEnableViscousCapture || NPCModifier->IsCapturedByPlate())
+		{
+			continue;
+		}
+
+		// Distance check from player
+		const FVector ToNPC = NPC->GetActorLocation() - CameraLoc;
+		const float DistSq = ToNPC.SizeSquared();
+		if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+		{
+			continue;
+		}
+
+		// Angle check from camera forward
+		const FVector DirToNPC = ToNPC.GetUnsafeNormal();
+		const float AngleCos = FVector::DotProduct(CameraForward, DirToNPC);
+
+		if (AngleCos < MaxAngleCos)
+		{
+			continue; // Outside cone
+		}
+
+		// Pick the closest to crosshair (highest cosine = smallest angle)
+		if (AngleCos > BestAngleCos)
+		{
+			BestAngleCos = AngleCos;
+			BestNPC = NPC;
+		}
+	}
+
+	if (BestNPC)
+	{
+		CaptureNPC(BestNPC);
+	}
+}
+
+void UChargeAnimationComponent::CaptureNPC(AShooterNPC* NPC)
+{
+	if (!NPC || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// Release previous if any
+	ReleaseCapturedNPC();
+
+	CurrentCapturedNPC = NPC;
+	ChannelingPlateActor->SetCapturedNPC(NPC);
+
+	if (UEMFVelocityModifier* Modifier = NPC->FindComponentByClass<UEMFVelocityModifier>())
+	{
+		Modifier->SetCapturedByPlate(ChannelingPlateActor);
+	}
+}
+
+void UChargeAnimationComponent::ReleaseCapturedNPC()
+{
+	if (!CurrentCapturedNPC.IsValid())
+	{
+		return;
+	}
+
+	AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get());
+	if (NPC)
+	{
+		if (UEMFVelocityModifier* Modifier = NPC->FindComponentByClass<UEMFVelocityModifier>())
+		{
+			Modifier->ReleasedFromCapture();
+		}
+	}
+
+	if (ChannelingPlateActor)
+	{
+		ChannelingPlateActor->ClearCapturedNPC();
+	}
+
+	CurrentCapturedNPC.Reset();
 }
 
 void UChargeAnimationComponent::PerformTapToggle()
@@ -581,6 +746,9 @@ void UChargeAnimationComponent::EnterFinishingAnimation()
 
 void UChargeAnimationComponent::CleanupChanneling()
 {
+	// Release any captured NPC first
+	ReleaseCapturedNPC();
+
 	// Destroy any lingering plate
 	DestroyPlate();
 
