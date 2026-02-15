@@ -998,10 +998,9 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FPMesh->SetRelativeRotation(CurrentRotation);
 
 	// === ADS Pitch Follow ===
-	// FP Mesh parent (3P Mesh) only rotates by Yaw. During ADS, weapon must
-	// visually follow camera pitch. Simple approach: take the current world
-	// rotation, decompose it, add camera pitch blended by ADS alpha, recompose.
-	// No socket alignment, no position changes — just pitch.
+	// FP Mesh parent (3P Mesh) has ~-90° Yaw. In that parent-local space,
+	// world pitch maps to a different axis. Use the same UnrotateVector
+	// conversion as recoil to correctly add pitch in parent-local space.
 	if (CurrentADSAlpha > KINDA_SMALL_NUMBER)
 	{
 		float CameraPitch = GetControlRotation().Pitch;
@@ -1009,11 +1008,20 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 
 		float PitchToAdd = CameraPitch * CurrentADSAlpha;
 
-		// Get current world rotation as Rotator (Yaw from parent, our custom Roll/Pitch from recoil)
-		FRotator WorldRot = FPMesh->GetComponentRotation();
-		// Add pitch directly to world rotation
-		WorldRot.Pitch += PitchToAdd;
-		FPMesh->SetWorldRotation(WorldRot);
+		// Convert world-logical pitch to parent-local rotation
+		// Same method as recoil: (Roll, Pitch, Yaw) vector through UnrotateVector
+		if (USceneComponent* Parent = FPMesh->GetAttachParent())
+		{
+			const FRotator ParentRot = Parent->GetRelativeRotation();
+			const FVector WorldRotVec(0.0f, PitchToAdd, 0.0f); // (Roll, Pitch, Yaw) in world
+			const FVector LocalRotVec = ParentRot.UnrotateVector(WorldRotVec);
+			FRotator PitchInLocal = FRotator(LocalRotVec.Y, LocalRotVec.Z, LocalRotVec.X);
+
+			CurrentLocation = FPMesh->GetRelativeLocation();
+			CurrentRotation = FPMesh->GetRelativeRotation();
+			CurrentRotation += PitchInLocal;
+			FPMesh->SetRelativeRotation(CurrentRotation);
+		}
 	}
 }
 
