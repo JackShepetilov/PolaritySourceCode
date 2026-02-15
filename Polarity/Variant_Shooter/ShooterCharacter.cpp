@@ -974,41 +974,83 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FVector CurrentLocation = FPMesh->GetRelativeLocation();
 	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
 
-	// === ADS Pitch Follow ===
+	// === ADS Weapon Alignment ===
 	// FP Mesh is attached to 3P Mesh which only rotates by Yaw (no Pitch).
-	// Camera follows both Pitch and Yaw via ControlRotation.
-	// During ADS, the weapon must visually follow the camera pitch so sights
-	// align with where the player is looking.
-	if (CurrentADSAlpha > KINDA_SMALL_NUMBER)
+	// During ADS, compute the target world transform that aligns weapon sights
+	// with the camera ray (using 3-socket geometry), then blend toward it.
+	// This handles both rotation AND position — weapon follows where player looks.
+	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
 	{
-		float CameraPitch = GetControlRotation().Pitch;
-		// Normalize pitch to -180..180 range
-		if (CameraPitch > 180.0f) CameraPitch -= 360.0f;
+		USkeletalMeshComponent* WeaponMesh = CurrentWeapon->GetFirstPersonMesh();
+		UCameraComponent* Camera = GetFirstPersonCameraComponent();
+		USceneComponent* Parent = FPMesh->GetAttachParent();
 
-		// Blend pitch by ADS alpha
-		float ADSPitch = CameraPitch * CurrentADSAlpha;
-
-		// Pitch = rotation around the character's RIGHT vector (perpendicular to
-		// where they face horizontally). NOT world Y — because the 3P mesh is
-		// rotated by Yaw, world Y would be the mesh's forward (= barrel roll).
-		if (USceneComponent* Parent = FPMesh->GetAttachParent())
+		if (WeaponMesh && Camera && Parent)
 		{
-			FQuat ParentWorldQuat = Parent->GetComponentQuat();
-			FQuat CurrentRelQuat = CurrentRotation.Quaternion();
+			FName SightSocket = FName("Sight");
+			FName RearSocket = FName("SightRear");
+			FName BottomSocket = FName("SightBottom");
 
-			// Current world rotation of FP Mesh
-			FQuat CurrentWorldQuat = ParentWorldQuat * CurrentRelQuat;
+			if (WeaponMesh->DoesSocketExist(SightSocket) && WeaponMesh->DoesSocketExist(RearSocket))
+			{
+				// Current world-space socket positions (FPMesh is in hip-fire pos from Super)
+				FVector FrontWorld = WeaponMesh->GetSocketLocation(SightSocket);
+				FVector RearWorld = WeaponMesh->GetSocketLocation(RearSocket);
 
-			// Character's right vector in world space — this is the axis we pitch around
-			FVector CharacterRight = FRotationMatrix(GetControlRotation()).GetUnitAxis(EAxis::Y);
+				// Current world rotation of FP Mesh (hip-fire)
+				FQuat FPMeshWorldQuat = FPMesh->GetComponentQuat();
 
-			// Apply pitch rotation around character's right axis in world space
-			FQuat PitchQuat(CharacterRight, FMath::DegreesToRadians(-ADSPitch));
-			FQuat NewWorldQuat = PitchQuat * CurrentWorldQuat;
+				// Camera data
+				FVector CamLoc = Camera->GetComponentLocation();
+				FVector CamFwd = GetControlRotation().Vector();
 
-			// Convert back to parent-local
-			FQuat NewRelQuat = ParentWorldQuat.Inverse() * NewWorldQuat;
-			CurrentRotation = NewRelQuat.Rotator();
+				// Step 1: Align weapon aim direction (Rear→Front) with camera forward
+				FVector WorldAimDir = (FrontWorld - RearWorld).GetSafeNormal();
+				FQuat AimCorrection = FQuat::FindBetweenNormals(WorldAimDir, CamFwd);
+
+				// Step 2: Roll correction using Bottom socket
+				FQuat RollCorrection = FQuat::Identity;
+				if (WeaponMesh->DoesSocketExist(BottomSocket))
+				{
+					FVector BottomWorld = WeaponMesh->GetSocketLocation(BottomSocket);
+					FVector WorldDownDir = (BottomWorld - RearWorld).GetSafeNormal();
+					FVector CorrectedDown = AimCorrection.RotateVector(WorldDownDir);
+
+					FVector CurrentDownProj = FVector::VectorPlaneProject(CorrectedDown, CamFwd).GetSafeNormal();
+					FVector TargetDownProj = FVector::VectorPlaneProject(-FVector::UpVector, CamFwd).GetSafeNormal();
+
+					if (!CurrentDownProj.IsNearlyZero() && !TargetDownProj.IsNearlyZero())
+					{
+						RollCorrection = FQuat::FindBetweenNormals(CurrentDownProj, TargetDownProj);
+					}
+				}
+
+				// Step 3: Target world rotation for FP Mesh
+				FQuat TargetWorldQuat = RollCorrection * AimCorrection * FPMeshWorldQuat;
+
+				// Step 4: Position — place front socket on camera ray at SightDist
+				// We need front socket position relative to FP Mesh origin in world space
+				FVector FrontOffset = FrontWorld - FPMesh->GetComponentLocation();
+				// Rotate that offset by the same correction we applied to rotation
+				FQuat TotalCorrection = RollCorrection * AimCorrection;
+				FVector FrontInTarget = TotalCorrection.RotateVector(FrontOffset);
+
+				const float SightDist = 30.0f;
+				FVector SightTarget = CamLoc + CamFwd * SightDist;
+				FVector TargetWorldPos = SightTarget - FrontInTarget;
+
+				// Step 5: Convert target world transform to parent-relative
+				FTransform ParentWorld = Parent->GetComponentTransform();
+				FTransform TargetWorld(TargetWorldQuat, TargetWorldPos, FPMesh->GetRelativeScale3D());
+				FTransform TargetRel = TargetWorld.GetRelativeTransform(ParentWorld);
+
+				FVector ADSLocation = TargetRel.GetTranslation();
+				FRotator ADSRotation = TargetRel.GetRotation().Rotator();
+
+				// Blend between hip-fire and ADS target
+				CurrentLocation = FMath::Lerp(CurrentLocation, ADSLocation, CurrentADSAlpha);
+				CurrentRotation = FQuat::Slerp(CurrentRotation.Quaternion(), ADSRotation.Quaternion(), CurrentADSAlpha).Rotator();
+			}
 		}
 	}
 
