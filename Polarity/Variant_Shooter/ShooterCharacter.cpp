@@ -968,7 +968,9 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FRotator CurrentRotation = HipFireRotation;
 
 	// === ADS Viewmodel Offset ===
-	// Lerp between hip-fire and ADS target. Applied BEFORE recoil so visual kick is additive.
+	// CalculateADSTargetTransform computes the relative transform that places
+	// the weapon sight on the camera ray. It handles pitch/yaw internally by
+	// computing everything in world space, then converting back to relative.
 	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
 	{
 		UCameraComponent* Camera = GetFirstPersonCameraComponent();
@@ -979,7 +981,7 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 			CurrentWeapon->CalculateADSTargetTransform(Camera, HipFireLocation, HipFireRotation,
 				ADSTargetLocation, ADSTargetRotation);
 
-			// Lerp between hip-fire and ADS target
+			// Lerp between hip-fire and fully-aimed positions
 			CurrentLocation = FMath::Lerp(HipFireLocation, ADSTargetLocation, CurrentADSAlpha);
 			CurrentRotation = FMath::Lerp(HipFireRotation, ADSTargetRotation, CurrentADSAlpha);
 		}

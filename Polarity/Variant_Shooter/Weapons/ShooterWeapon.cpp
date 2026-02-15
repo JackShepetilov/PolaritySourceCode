@@ -1489,48 +1489,48 @@ void AShooterWeapon::CalculateADSTargetTransform(UCameraComponent* Camera,
 		return;
 	}
 
-	// We need to compute where sockets WOULD BE if the mesh were at hip-fire position.
-	// To do this, we temporarily set the mesh to hip-fire transform, read socket world positions,
-	// compute the target, then restore.
-	// BUT: We can avoid SetRelative by using math — reconstruct world transform from parent + hip-fire relative.
+	// ========================================================================
+	// APPROACH: Compute target WORLD transform directly (same geometry as old
+	// UpdateADSTransition), then convert to parent-relative.
+	// This avoids feedback loops because we start from component-local socket
+	// positions and camera data, NOT from the mesh's current world position.
+	// ========================================================================
 
-	USceneComponent* Parent = FirstPersonMesh->GetAttachParent();
-	if (!Parent)
-	{
-		return;
-	}
-
-	FTransform ParentWorldTransform = Parent->GetSocketTransform(FirstPersonMesh->GetAttachSocketName());
-
-	// Reconstruct mesh world transform from hip-fire relative
-	FTransform HipFireRelative(HipFireRotation.Quaternion(), HipFireLocation, FirstPersonMesh->GetRelativeScale3D());
-	FTransform HipFireWorldTransform = HipFireRelative * ParentWorldTransform;
-
-	// Get socket positions in COMPONENT local space (these don't change with mesh transform)
+	// Socket positions in component local space (bone-relative, stable regardless of mesh world transform)
 	FVector FrontSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketName, ERelativeTransformSpace::RTS_Component).GetLocation();
 	FVector RearSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameRear, ERelativeTransformSpace::RTS_Component).GetLocation();
 
-	// Transform socket local positions to world space using hip-fire world transform
-	FVector FrontSocketWorld = HipFireWorldTransform.TransformPosition(FrontSocketLocal);
-	FVector RearSocketWorld = HipFireWorldTransform.TransformPosition(RearSocketLocal);
-
 	// Camera data
 	FVector CameraLocation = Camera->GetComponentLocation();
-	FVector CameraForward = Camera->GetForwardVector();
+	FRotator ControlRotation = PawnOwner->GetControlRotation();
+	FVector CameraForward = ControlRotation.Vector();
 
-	// === STEP 1: Aim correction — align Rear→Front with CameraForward ===
-	FVector CurrentAimDir = (FrontSocketWorld - RearSocketWorld).GetSafeNormal();
-	FQuat AimCorrection = FQuat::FindBetweenNormals(CurrentAimDir, CameraForward);
+	// === STEP 1: Align Rear→Front direction with CameraForward ===
+	// Local aim direction (in component space)
+	FVector LocalAimDir = (FrontSocketLocal - RearSocketLocal).GetSafeNormal();
 
-	// === STEP 2: Roll correction using bottom socket ===
+	// We need a BASE rotation to start from. Use the hip-fire world rotation of the mesh.
+	USceneComponent* Parent = FirstPersonMesh->GetAttachParent();
+	if (!Parent) return;
+
+	FTransform ParentWorldTransform = Parent->GetSocketTransform(FirstPersonMesh->GetAttachSocketName());
+	FTransform HipFireRelative(HipFireRotation.Quaternion(), HipFireLocation, FirstPersonMesh->GetRelativeScale3D());
+	FQuat HipFireWorldRot = (HipFireRelative * ParentWorldTransform).GetRotation();
+
+	// Transform local aim dir to world space using hip-fire rotation
+	FVector WorldAimDir = HipFireWorldRot.RotateVector(LocalAimDir);
+
+	// Aim correction: rotate worldAimDir → CameraForward
+	FQuat AimCorrection = FQuat::FindBetweenNormals(WorldAimDir, CameraForward);
+
+	// === STEP 2: Roll correction ===
 	FQuat RollCorrection = FQuat::Identity;
 	if (FirstPersonMesh->DoesSocketExist(ADSSocketNameBottom))
 	{
 		FVector BottomSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameBottom, ERelativeTransformSpace::RTS_Component).GetLocation();
-		FVector BottomSocketWorld = HipFireWorldTransform.TransformPosition(BottomSocketLocal);
-
-		FVector LocalDownDir = (BottomSocketWorld - RearSocketWorld).GetSafeNormal();
-		FVector CorrectedDownDir = AimCorrection.RotateVector(LocalDownDir);
+		FVector LocalDownDir = (BottomSocketLocal - RearSocketLocal).GetSafeNormal();
+		FVector WorldDownDir = HipFireWorldRot.RotateVector(LocalDownDir);
+		FVector CorrectedDownDir = AimCorrection.RotateVector(WorldDownDir);
 
 		FVector CurrentDownProjected = FVector::VectorPlaneProject(CorrectedDownDir, CameraForward).GetSafeNormal();
 		FVector TargetDownProjected = FVector::VectorPlaneProject(-FVector::UpVector, CameraForward).GetSafeNormal();
@@ -1541,22 +1541,20 @@ void AShooterWeapon::CalculateADSTargetTransform(UCameraComponent* Camera,
 		}
 	}
 
-	// === STEP 3: Combined rotation — apply to hip-fire world rotation ===
-	FQuat TotalCorrection = RollCorrection * AimCorrection;
-	FQuat HipFireWorldRot = HipFireWorldTransform.GetRotation();
-	FQuat TargetWorldRot = TotalCorrection * HipFireWorldRot;
+	// === STEP 3: Final world rotation ===
+	FQuat TargetWorldRot = RollCorrection * AimCorrection * HipFireWorldRot;
 
-	// === STEP 4: Position — place front socket on camera ray ===
-	FVector HipFireWorldPos = HipFireWorldTransform.GetTranslation();
-	FVector FrontSocketRelToMesh = FrontSocketWorld - HipFireWorldPos;
-	FVector RotatedFrontSocket = TotalCorrection.RotateVector(FrontSocketRelToMesh) + HipFireWorldPos;
+	// === STEP 4: Position — place front socket on camera ray at SightDistance ===
+	// Where would front socket be in world if mesh had TargetWorldRot and was at origin?
+	FVector FrontSocketInTargetRot = TargetWorldRot.RotateVector(FrontSocketLocal);
 
+	// We want: MeshWorldPos + FrontSocketInTargetRot = CameraLocation + CameraForward * SightDistance
 	const float SightDistance = 30.0f;
 	FVector SightTarget = CameraLocation + CameraForward * SightDistance;
-	FVector TargetWorldPos = HipFireWorldPos + (SightTarget - RotatedFrontSocket);
+	FVector TargetWorldPos = SightTarget - FrontSocketInTargetRot;
 
-	// === STEP 5: Convert target world transform back to parent-local (relative) ===
-	FTransform TargetWorldTransform(TargetWorldRot, TargetWorldPos, HipFireWorldTransform.GetScale3D());
+	// === STEP 5: Convert to parent-relative ===
+	FTransform TargetWorldTransform(TargetWorldRot, TargetWorldPos, FirstPersonMesh->GetRelativeScale3D());
 	FTransform TargetRelativeTransform = TargetWorldTransform.GetRelativeTransform(ParentWorldTransform);
 
 	OutTargetLocation = TargetRelativeTransform.GetTranslation();
