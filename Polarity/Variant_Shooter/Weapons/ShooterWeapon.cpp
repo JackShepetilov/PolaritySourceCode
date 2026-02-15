@@ -50,7 +50,10 @@ AShooterWeapon::AShooterWeapon()
 	ThirdPersonMesh->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::WorldSpaceRepresentation);
 	ThirdPersonMesh->bOwnerNoSee = true;
 
-	// ADS camera component removed — new system uses viewmodel offset
+	// Create ADS camera component on the first person mesh
+	// It will be attached to the Sight socket in BeginPlay after meshes are set up
+	ADSCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("ADS Camera"));
+	ADSCameraComponent->SetupAttachment(FirstPersonMesh);
 }
 
 void AShooterWeapon::BeginPlay()
@@ -85,6 +88,12 @@ void AShooterWeapon::BeginPlay()
 
 	// attach the meshes to the owner
 	WeaponOwner->AttachWeaponMeshes(this);
+
+	// Attach ADS camera to sight socket on the weapon's first person mesh
+	if (ADSCameraComponent && FirstPersonMesh && FirstPersonMesh->DoesSocketExist(ADSSocketName))
+	{
+		ADSCameraComponent->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ADSSocketName);
+	}
 }
 
 void AShooterWeapon::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -1461,104 +1470,66 @@ float AShooterWeapon::CalculateZFactorMultiplier(float ShooterZ, float TargetZ) 
 	return FMath::Lerp(1.0f, ZFactorMaxMultiplier, HeightRatio);
 }
 
-// ==================== ADS Viewmodel Offset ====================
+// ==================== ADS Camera ====================
 
-void AShooterWeapon::CalculateADSTargetTransform(UCameraComponent* Camera,
-	const FVector& HipFireLocation, const FRotator& HipFireRotation,
-	FVector& OutTargetLocation, FRotator& OutTargetRotation) const
+void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {
-	// Default: return hip-fire position unchanged
-	OutTargetLocation = HipFireLocation;
-	OutTargetRotation = HipFireRotation;
+	// This is called by PlayerCameraManager when this weapon is the ViewTarget (during ADS).
+	// We provide the sight socket's WORLD POSITION but use ControlRotation for camera direction.
+	// This way the camera sits at the weapon's sight, but does NOT inherit visual recoil kick
+	// from the hands mesh — only the spring-smoothed camera recoil via AddPitchInput affects it.
 
-	if (!FirstPersonMesh || !Camera || !PawnOwner)
+	if (!ADSCameraComponent || !PawnOwner)
 	{
+		Super::CalcCamera(DeltaTime, OutResult);
 		return;
 	}
 
-	// Custom manual offset — simply add to hip-fire position
-	if (bUseCustomADSOffset)
+	// Use the ADS camera component's world position (attached to Sight socket on FP mesh).
+	// This position includes the recoil visual kick (since FP mesh is moved by it).
+	// We subtract the recoil offset to get the "clean" sight position.
+	FVector SightWorldLocation = ADSCameraComponent->GetComponentLocation();
+
+	// Subtract recoil visual kick from the sight position.
+	// The weapon owner's RecoilComponent applies offsets to the FP Mesh,
+	// which moves the ADS camera too. We want the camera without that kick.
+	if (ACharacter* CharOwner = Cast<ACharacter>(PawnOwner))
 	{
-		OutTargetLocation = HipFireLocation + CustomADSOffset;
-		return;
-	}
-
-	// Need at least front and rear sockets
-	if (!FirstPersonMesh->DoesSocketExist(ADSSocketName) || !FirstPersonMesh->DoesSocketExist(ADSSocketNameRear))
-	{
-		return;
-	}
-
-	// ========================================================================
-	// APPROACH: Compute target WORLD transform directly (same geometry as old
-	// UpdateADSTransition), then convert to parent-relative.
-	// This avoids feedback loops because we start from component-local socket
-	// positions and camera data, NOT from the mesh's current world position.
-	// ========================================================================
-
-	// Socket positions in component local space (bone-relative, stable regardless of mesh world transform)
-	FVector FrontSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketName, ERelativeTransformSpace::RTS_Component).GetLocation();
-	FVector RearSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameRear, ERelativeTransformSpace::RTS_Component).GetLocation();
-
-	// Camera data
-	FVector CameraLocation = Camera->GetComponentLocation();
-	FRotator ControlRotation = PawnOwner->GetControlRotation();
-	FVector CameraForward = ControlRotation.Vector();
-
-	// === STEP 1: Align Rear→Front direction with CameraForward ===
-	// Local aim direction (in component space)
-	FVector LocalAimDir = (FrontSocketLocal - RearSocketLocal).GetSafeNormal();
-
-	// We need a BASE rotation to start from. Use the hip-fire world rotation of the mesh.
-	USceneComponent* Parent = FirstPersonMesh->GetAttachParent();
-	if (!Parent) return;
-
-	FTransform ParentWorldTransform = Parent->GetSocketTransform(FirstPersonMesh->GetAttachSocketName());
-	FTransform HipFireRelative(HipFireRotation.Quaternion(), HipFireLocation, FirstPersonMesh->GetRelativeScale3D());
-	FQuat HipFireWorldRot = (HipFireRelative * ParentWorldTransform).GetRotation();
-
-	// Transform local aim dir to world space using hip-fire rotation
-	FVector WorldAimDir = HipFireWorldRot.RotateVector(LocalAimDir);
-
-	// Aim correction: rotate worldAimDir → CameraForward
-	FQuat AimCorrection = FQuat::FindBetweenNormals(WorldAimDir, CameraForward);
-
-	// === STEP 2: Roll correction ===
-	FQuat RollCorrection = FQuat::Identity;
-	if (FirstPersonMesh->DoesSocketExist(ADSSocketNameBottom))
-	{
-		FVector BottomSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameBottom, ERelativeTransformSpace::RTS_Component).GetLocation();
-		FVector LocalDownDir = (BottomSocketLocal - RearSocketLocal).GetSafeNormal();
-		FVector WorldDownDir = HipFireWorldRot.RotateVector(LocalDownDir);
-		FVector CorrectedDownDir = AimCorrection.RotateVector(WorldDownDir);
-
-		FVector CurrentDownProjected = FVector::VectorPlaneProject(CorrectedDownDir, CameraForward).GetSafeNormal();
-		FVector TargetDownProjected = FVector::VectorPlaneProject(-FVector::UpVector, CameraForward).GetSafeNormal();
-
-		if (!CurrentDownProjected.IsNearlyZero() && !TargetDownProjected.IsNearlyZero())
+		if (UWeaponRecoilComponent* Recoil = CharOwner->FindComponentByClass<UWeaponRecoilComponent>())
 		{
-			RollCorrection = FQuat::FindBetweenNormals(CurrentDownProjected, TargetDownProjected);
+			// GetWeaponOffset returns offset in world-logical space (X=forward, Y=right, Z=up)
+			FVector RecoilWorldOffset = Recoil->GetWeaponOffset();
+			SightWorldLocation -= RecoilWorldOffset;
 		}
 	}
 
-	// === STEP 3: Final world rotation ===
-	FQuat TargetWorldRot = RollCorrection * AimCorrection * HipFireWorldRot;
+	// Use ControlRotation — this includes spring camera recoil (via AddPitchInput) but NOT
+	// the visual weapon kick (which only affects FP Mesh relative transform).
+	FRotator CameraRotation = PawnOwner->GetControlRotation();
 
-	// === STEP 4: Position — place front socket on camera ray at SightDistance ===
-	// Where would front socket be in world if mesh had TargetWorldRot and was at origin?
-	FVector FrontSocketInTargetRot = TargetWorldRot.RotateVector(FrontSocketLocal);
+	OutResult.Location = SightWorldLocation;
+	OutResult.Rotation = CameraRotation;
 
-	// We want: MeshWorldPos + FrontSocketInTargetRot = CameraLocation + CameraForward * SightDistance
-	const float SightDistance = 30.0f;
-	FVector SightTarget = CameraLocation + CameraForward * SightDistance;
-	FVector TargetWorldPos = SightTarget - FrontSocketInTargetRot;
-
-	// === STEP 5: Convert to parent-relative ===
-	FTransform TargetWorldTransform(TargetWorldRot, TargetWorldPos, FirstPersonMesh->GetRelativeScale3D());
-	FTransform TargetRelativeTransform = TargetWorldTransform.GetRelativeTransform(ParentWorldTransform);
-
-	OutTargetLocation = TargetRelativeTransform.GetTranslation();
-	OutTargetRotation = TargetRelativeTransform.GetRotation().Rotator();
+	// FOV — use weapon's custom ADS FOV if set, otherwise use ADSFOVMultiplier * base FOV.
+	// PlayerCameraManager blends between character camera FOV and this FOV automatically.
+	if (CustomADSFOV > 0.0f)
+	{
+		OutResult.FOV = CustomADSFOV;
+	}
+	else
+	{
+		// Get the character's base FOV and apply multiplier
+		float BaseFOV = 90.0f; // default fallback
+		if (ACharacter* CharOwner = Cast<ACharacter>(PawnOwner))
+		{
+			if (UCameraComponent* CharCamera = CharOwner->FindComponentByClass<UCameraComponent>())
+			{
+				// Use the camera's default FOV (not current, since it might be mid-blend)
+				BaseFOV = CharCamera->FieldOfView;
+			}
+		}
+		OutResult.FOV = BaseFOV * ADSFOVMultiplier;
+	}
 }
 
 // ==================== Charge-Based Firing ====================

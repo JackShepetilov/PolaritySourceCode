@@ -25,6 +25,7 @@
 #include "Retargeter/IKRetargeter.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
 #include "ShooterGameMode.h"
 #include "Kismet/GameplayStatics.h"
@@ -761,6 +762,18 @@ void AShooterCharacter::DoStartADS()
 		if (CurrentWeapon)
 		{
 			CurrentWeapon->PlayADSInSound();
+
+			// Set the weapon as the view target — PlayerCameraManager will blend
+			// to it and call Weapon->CalcCamera() which returns sight-socket position
+			// with ControlRotation (no recoil visual kick)
+			if (APlayerController* PC = Cast<APlayerController>(GetController()))
+			{
+				FViewTargetTransitionParams BlendParams;
+				BlendParams.BlendTime = CurrentWeapon->GetADSBlendInTime();
+				BlendParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
+				BlendParams.BlendExp = 2.0f;
+				PC->SetViewTarget(CurrentWeapon, BlendParams);
+			}
 		}
 
 		// Tell recoil component we're aiming
@@ -773,10 +786,20 @@ void AShooterCharacter::DoStartADS()
 
 void AShooterCharacter::DoStopADS()
 {
-	// Only play sound if we were actually aiming
+	// Only play sound and transition camera if we were actually aiming
 	if (bWantsToAim && CurrentWeapon)
 	{
 		CurrentWeapon->PlayADSOutSound();
+
+		// Blend camera back to the character (CameraComponent)
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			FViewTargetTransitionParams BlendParams;
+			BlendParams.BlendTime = CurrentWeapon->GetADSBlendOutTime();
+			BlendParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
+			BlendParams.BlendExp = 2.0f;
+			PC->SetViewTarget(this, BlendParams);
+		}
 	}
 
 	bWantsToAim = false;
@@ -798,7 +821,7 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	// Determine target alpha
 	float TargetAlpha = bWantsToAim ? 1.0f : 0.0f;
 
-	// Interpolate alpha
+	// Interpolate alpha (used by other systems like recoil WeaponFraction)
 	CurrentADSAlpha = FMath::FInterpTo(
 		CurrentADSAlpha,
 		TargetAlpha,
@@ -806,24 +829,13 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		MovementSettings->ADSInterpSpeed
 	);
 
-	// === FOV Transition ===
+	// Camera position/rotation is handled by SetViewTarget + CalcCamera blend
+	// (PlayerCameraManager blends between character camera and weapon CalcCamera).
+	// We still need to apply shake offset to the character's own camera component
+	// so it's correct when not in ADS.
 	UCameraComponent* Camera = GetFirstPersonCameraComponent();
 	if (Camera)
 	{
-		// Determine target ADS FOV
-		float ADSFOV = BaseCameraFOV * 0.75f; // default: 75% of base
-		if (CurrentWeapon)
-		{
-			float CustomFOV = CurrentWeapon->GetCustomADSFOV();
-			if (CustomFOV > 0.0f)
-			{
-				ADSFOV = CustomFOV;
-			}
-		}
-
-		float TargetFOV = FMath::Lerp(BaseCameraFOV, ADSFOV, CurrentADSAlpha);
-		Camera->SetFieldOfView(TargetFOV);
-
 		// Apply shake offset to camera (always, regardless of ADS state)
 		FVector ShakeOffset = FVector::ZeroVector;
 		if (UCameraShakeComponent* ShakeComp = GetCameraShake())
@@ -832,8 +844,6 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		}
 		Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset);
 	}
-
-	// ADS viewmodel offset is applied in UpdateFirstPersonView
 }
 
 void AShooterCharacter::UpdateRegeneration(float DeltaTime)
@@ -961,33 +971,14 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	}
 
 	// Get current relative transform (set by Super — the base hip-fire position)
-	FVector HipFireLocation = FPMesh->GetRelativeLocation();
-	FRotator HipFireRotation = FPMesh->GetRelativeRotation();
-
-	FVector CurrentLocation = HipFireLocation;
-	FRotator CurrentRotation = HipFireRotation;
-
-	// === ADS Viewmodel Offset ===
-	// CalculateADSTargetTransform computes the relative transform that places
-	// the weapon sight on the camera ray. It handles pitch/yaw internally by
-	// computing everything in world space, then converting back to relative.
-	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
-	{
-		UCameraComponent* Camera = GetFirstPersonCameraComponent();
-		if (Camera)
-		{
-			FVector ADSTargetLocation;
-			FRotator ADSTargetRotation;
-			CurrentWeapon->CalculateADSTargetTransform(Camera, HipFireLocation, HipFireRotation,
-				ADSTargetLocation, ADSTargetRotation);
-
-			// Lerp between hip-fire and fully-aimed positions
-			CurrentLocation = FMath::Lerp(HipFireLocation, ADSTargetLocation, CurrentADSAlpha);
-			CurrentRotation = FMath::Lerp(HipFireRotation, ADSTargetRotation, CurrentADSAlpha);
-		}
-	}
+	FVector CurrentLocation = FPMesh->GetRelativeLocation();
+	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
 
 	// === Recoil Visual Kick ===
+	// Camera goes to weapon via SetViewTarget + CalcCamera during ADS.
+	// Weapon stays in hands. Recoil visual kick makes the weapon/hands jump
+	// relative to their base position. The camera (via CalcCamera) uses
+	// ControlRotation so it does NOT inherit this visual kick.
 	if (RecoilComponent)
 	{
 		FVector RecoilOffset = RecoilComponent->GetWeaponOffset();

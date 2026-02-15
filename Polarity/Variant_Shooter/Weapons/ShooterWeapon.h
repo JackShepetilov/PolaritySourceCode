@@ -47,7 +47,9 @@ class POLARITY_API AShooterWeapon : public AActor
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	USkeletalMeshComponent* ThirdPersonMesh;
 
-	// ADSCameraComponent removed — new system uses viewmodel offset instead of camera attachment
+	/** Camera component placed at ADS sight socket — used as CalcCamera source during ADS */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	UCameraComponent* ADSCameraComponent;
 
 protected:
 
@@ -456,6 +458,10 @@ protected:
 	virtual void EndPlay(EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
+	/** Override CalcCamera so that SetViewTarget(Weapon) produces a clean ADS camera view.
+	 *  Uses the ADS sight socket position but ControlRotation (ignoring recoil visual kick). */
+	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
+
 	UFUNCTION()
 	void OnOwnerDestroyed(AActor* DestroyedActor);
 
@@ -613,16 +619,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	float GetADSBlendOutTime() const { return ADSBlendOutTime; }
 
-	// ==================== ADS Viewmodel Offset ====================
+	// ==================== ADS Camera ====================
 
-	/**
-	 * Calculate the target relative transform for the FP Mesh when fully aimed.
-	 * Returns the absolute relative transform (location + rotation) in parent-local space
-	 * that would place the weapon sights aligned with the camera center.
-	 * Caller lerps between current hip-fire transform and this target using ADSAlpha.
-	 */
-	void CalculateADSTargetTransform(UCameraComponent* Camera, const FVector& HipFireLocation, const FRotator& HipFireRotation,
-		FVector& OutTargetLocation, FRotator& OutTargetRotation) const;
+	/** Returns the ADS camera component (used for SetViewTarget blending) */
+	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
+	UCameraComponent* GetADSCamera() const { return ADSCameraComponent; }
 
 public:
 	// ==================== Recoil Getters ====================
