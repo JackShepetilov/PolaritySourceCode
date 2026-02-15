@@ -50,10 +50,7 @@ AShooterWeapon::AShooterWeapon()
 	ThirdPersonMesh->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::WorldSpaceRepresentation);
 	ThirdPersonMesh->bOwnerNoSee = true;
 
-	// create the ADS camera component
-	ADSCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("ADS Camera"));
-	ADSCameraComponent->SetupAttachment(FirstPersonMesh);
-	ADSCameraComponent->bAutoActivate = false;
+	// ADS camera component removed — new system uses viewmodel offset
 }
 
 void AShooterWeapon::BeginPlay()
@@ -73,43 +70,13 @@ void AShooterWeapon::BeginPlay()
 		CachedMovementComponent = CharOwner->GetCharacterMovement();
 	}
 
-	// NPC optimization: Completely destroy ADS camera for non-player owners
-	// AI doesn't need ADS camera at all - it wastes memory and tick time
+	// NPC optimization: hide first person mesh for non-player owners
 	if (!PawnOwner || !PawnOwner->IsPlayerControlled())
 	{
-		if (ADSCameraComponent)
-		{
-			ADSCameraComponent->DestroyComponent();
-			ADSCameraComponent = nullptr;
-		}
-		// Also hide first person mesh for NPCs - they only need third person
 		if (FirstPersonMesh)
 		{
 			FirstPersonMesh->SetVisibility(false);
 			FirstPersonMesh->SetComponentTickEnabled(false);
-		}
-	}
-	else
-	{
-		// Setup ADS camera for player only - attach to socket if exists, otherwise use relative position
-		if (ADSCameraComponent && FirstPersonMesh)
-		{
-			// Disable pawn control rotation - we handle it manually
-			ADSCameraComponent->bUsePawnControlRotation = false;
-
-			if (FirstPersonMesh->DoesSocketExist(ADSSocketName))
-			{
-				ADSCameraComponent->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ADSSocketName);
-			}
-
-			ADSCameraComponent->SetRelativeLocation(ADSCameraRelativeLocation);
-			ADSCameraComponent->SetRelativeRotation(ADSCameraRelativeRotation);
-
-			// Set FOV if custom FOV specified
-			if (CustomADSFOV > 0.0f)
-			{
-				ADSCameraComponent->SetFieldOfView(CustomADSFOV);
-			}
 		}
 	}
 
@@ -1494,196 +1461,111 @@ float AShooterWeapon::CalculateZFactorMultiplier(float ShooterZ, float TargetZ) 
 	return FMath::Lerp(1.0f, ZFactorMaxMultiplier, HeightRatio);
 }
 
-void AShooterWeapon::UpdateADSCameraRotation()
-{
-	// Rotation is now handled directly in CalcCamera using control rotation
-}
+// ==================== ADS Viewmodel Offset ====================
 
-void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
+void AShooterWeapon::CalculateADSOffset(UCameraComponent* Camera, FVector& OutLocationOffset, FRotator& OutRotationOffset) const
 {
-	if (ADSCameraComponent && PawnOwner)
+	OutLocationOffset = FVector::ZeroVector;
+	OutRotationOffset = FRotator::ZeroRotator;
+
+	if (!FirstPersonMesh || !Camera || !PawnOwner)
 	{
-		// Get base camera view (position from ADS camera component)
-		ADSCameraComponent->GetCameraView(DeltaTime, OutResult);
+		return;
+	}
 
-		// Override rotation with control rotation (so pitch works correctly)
-		if (AController* OwnerController = PawnOwner->GetController())
+	// Custom manual offset — bypass socket calculation
+	if (bUseCustomADSOffset)
+	{
+		OutLocationOffset = CustomADSOffset;
+		return;
+	}
+
+	// Need at least front and rear sockets
+	if (!FirstPersonMesh->DoesSocketExist(ADSSocketName) || !FirstPersonMesh->DoesSocketExist(ADSSocketNameRear))
+	{
+		return;
+	}
+
+	// Get socket positions in COMPONENT local space
+	FVector FrontSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketName, ERelativeTransformSpace::RTS_Component).GetLocation();
+	FVector RearSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameRear, ERelativeTransformSpace::RTS_Component).GetLocation();
+
+	// Get socket positions in WORLD space (using current mesh transform)
+	FVector FrontSocketWorld = FirstPersonMesh->GetSocketLocation(ADSSocketName);
+	FVector RearSocketWorld = FirstPersonMesh->GetSocketLocation(ADSSocketNameRear);
+
+	// Camera data
+	FVector CameraLocation = Camera->GetComponentLocation();
+	FVector CameraForward = Camera->GetForwardVector();
+
+	// === STEP 1: Calculate rotation correction ===
+	// Current weapon aim direction (rear -> front)
+	FVector CurrentAimDir = (FrontSocketWorld - RearSocketWorld).GetSafeNormal();
+
+	// We need to rotate the mesh so the aim direction aligns with camera forward
+	FQuat AimCorrection = FQuat::FindBetweenNormals(CurrentAimDir, CameraForward);
+
+	// === STEP 2: Roll correction using bottom socket ===
+	FQuat RollCorrection = FQuat::Identity;
+	if (FirstPersonMesh->DoesSocketExist(ADSSocketNameBottom))
+	{
+		FVector BottomSocketWorld = FirstPersonMesh->GetSocketLocation(ADSSocketNameBottom);
+		FVector LocalDownDir = (BottomSocketWorld - RearSocketWorld).GetSafeNormal();
+		FVector CorrectedDownDir = AimCorrection.RotateVector(LocalDownDir);
+
+		// Project onto plane perpendicular to camera forward
+		FVector CurrentDownProjected = FVector::VectorPlaneProject(CorrectedDownDir, CameraForward).GetSafeNormal();
+		FVector TargetDownProjected = FVector::VectorPlaneProject(-FVector::UpVector, CameraForward).GetSafeNormal();
+
+		if (!CurrentDownProjected.IsNearlyZero() && !TargetDownProjected.IsNearlyZero())
 		{
-			OutResult.Rotation = OwnerController->GetControlRotation();
+			RollCorrection = FQuat::FindBetweenNormals(CurrentDownProjected, TargetDownProjected);
 		}
+	}
+
+	// Combined rotation correction (world space)
+	FQuat TotalRotationCorrection = RollCorrection * AimCorrection;
+
+	// === STEP 3: Calculate position correction ===
+	// After rotation, where would the front socket end up?
+	FVector MeshWorldPos = FirstPersonMesh->GetComponentLocation();
+	FVector FrontSocketRelToMesh = FrontSocketWorld - MeshWorldPos;
+	FVector RotatedFrontSocket = TotalRotationCorrection.RotateVector(FrontSocketRelToMesh) + MeshWorldPos;
+
+	// We want the front socket on the camera ray at a fixed distance
+	const float SightDistance = 30.0f;
+	FVector SightTargetLocation = CameraLocation + CameraForward * SightDistance;
+
+	// Position offset in world space
+	FVector WorldPositionOffset = SightTargetLocation - RotatedFrontSocket;
+
+	// === STEP 4: Convert to parent-local space ===
+	// The FP Mesh is attached to hands mesh in a socket. We need offsets relative to parent.
+	if (USceneComponent* Parent = FirstPersonMesh->GetAttachParent())
+	{
+		FTransform ParentWorldTransform = Parent->GetSocketTransform(FirstPersonMesh->GetAttachSocketName());
+
+		// Convert world rotation to parent-local delta
+		FQuat ParentWorldRot = ParentWorldTransform.GetRotation();
+		FQuat CurrentMeshWorldRot = FirstPersonMesh->GetComponentQuat();
+		FQuat TargetMeshWorldRot = TotalRotationCorrection * CurrentMeshWorldRot;
+
+		// In parent local space: mesh rotation = ParentWorldRot.Inverse() * MeshWorldRot
+		FQuat CurrentLocalRot = ParentWorldRot.Inverse() * CurrentMeshWorldRot;
+		FQuat TargetLocalRot = ParentWorldRot.Inverse() * TargetMeshWorldRot;
+
+		// Delta rotation in local space
+		FQuat LocalRotDelta = CurrentLocalRot.Inverse() * TargetLocalRot;
+		OutRotationOffset = LocalRotDelta.Rotator();
+
+		// Convert world position offset to parent-local
+		OutLocationOffset = ParentWorldRot.Inverse().RotateVector(WorldPositionOffset);
 	}
 	else
 	{
-		Super::CalcCamera(DeltaTime, OutResult);
-	}
-}
-
-// ==================== ADS Weapon Attachment ====================
-
-void AShooterWeapon::AttachToCamera(UCameraComponent* Camera)
-{
-	if (!Camera || !FirstPersonMesh || bIsAttachedToCamera)
-	{
-		return;
-	}
-
-	// Save hip fire transform only if not already saved (prevents overwriting with mid-interpolation position)
-	if (!bHipFireTransformSaved)
-	{
-		HipFireRelativeTransform = FirstPersonMesh->GetRelativeTransform();
-		bHipFireTransformSaved = true;
-	}
-
-	// Detach from hands, keeping world position
-	FirstPersonMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-
-	// Attach to camera, keeping world position
-	FirstPersonMesh->AttachToComponent(
-		Camera,
-		FAttachmentTransformRules::KeepWorldTransform,
-		NAME_None
-	);
-
-	bIsAttachedToCamera = true;
-
-	UE_LOG(LogTemp, Log, TEXT("Weapon attached to camera for ADS"));
-}
-
-void AShooterWeapon::DetachFromCamera(USkeletalMeshComponent* HandsMesh, FName SocketName)
-{
-	if (!HandsMesh || !FirstPersonMesh || !bIsAttachedToCamera)
-	{
-		return;
-	}
-
-	// Detach from camera, keeping world position
-	FirstPersonMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-
-	// Attach back to hands, keeping world position (we'll interpolate to saved transform)
-	FirstPersonMesh->AttachToComponent(
-		HandsMesh,
-		FAttachmentTransformRules::KeepWorldTransform,
-		SocketName
-	);
-
-	// Current relative transform is our starting point for interpolation back
-	CurrentADSTransform = FirstPersonMesh->GetRelativeTransform();
-
-	bIsAttachedToCamera = false;
-
-	UE_LOG(LogTemp, Log, TEXT("Weapon detached from camera, reattached to hands."));
-}
-
-void AShooterWeapon::UpdateADSTransition(float ADSAlpha, float DeltaTime)
-{
-	if (!FirstPersonMesh)
-	{
-		return;
-	}
-
-	// When attached to camera - align both sockets on camera ray
-	if (bIsAttachedToCamera && PawnOwner)
-	{
-		if (AController* Controller = PawnOwner->GetController())
-		{
-			FRotator ControlRotation = Controller->GetControlRotation();
-			FVector CameraForward = ControlRotation.Vector();
-
-			// Get camera location
-			FVector CameraLocation = FVector::ZeroVector;
-			if (UCameraComponent* Camera = Cast<UCameraComponent>(FirstPersonMesh->GetAttachParent()))
-			{
-				CameraLocation = Camera->GetComponentLocation();
-			}
-
-			// Get socket positions in component local space
-			FVector FrontSocketLocal = FVector::ZeroVector;
-			FVector RearSocketLocal = FVector::ZeroVector;
-			FVector BottomSocketLocal = FVector::ZeroVector;
-
-			if (FirstPersonMesh->DoesSocketExist(ADSSocketName))
-			{
-				FrontSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketName, ERelativeTransformSpace::RTS_Component).GetLocation();
-			}
-			if (FirstPersonMesh->DoesSocketExist(ADSSocketNameRear))
-			{
-				RearSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameRear, ERelativeTransformSpace::RTS_Component).GetLocation();
-			}
-			if (FirstPersonMesh->DoesSocketExist(ADSSocketNameBottom))
-			{
-				BottomSocketLocal = FirstPersonMesh->GetSocketTransform(ADSSocketNameBottom, ERelativeTransformSpace::RTS_Component).GetLocation();
-			}
-
-			// === STEP 1: Align Front->Rear with CameraForward ===
-			FVector LocalAimDir = (FrontSocketLocal - RearSocketLocal).GetSafeNormal();
-
-			FQuat BaseRotation = HipFireRelativeTransform.GetRotation();
-			FVector CurrentAimDir = BaseRotation.RotateVector(LocalAimDir);
-
-			FQuat AimCorrection = FQuat::FindBetweenNormals(CurrentAimDir, CameraForward);
-			FQuat AfterAimRotation = AimCorrection * BaseRotation;
-
-			// === STEP 2: Fix roll using bottom socket ===
-			// Get Rear->Bottom direction in world space after aim correction
-			FVector LocalDownDir = (BottomSocketLocal - RearSocketLocal).GetSafeNormal();
-			FVector CurrentDownDir = AfterAimRotation.RotateVector(LocalDownDir);
-
-			// Project onto plane perpendicular to CameraForward
-			FVector CurrentDownProjected = FVector::VectorPlaneProject(CurrentDownDir, CameraForward).GetSafeNormal();
-
-			// Target down direction: -WorldUp projected onto same plane
-			FVector TargetDown = -FVector::UpVector;
-			FVector TargetDownProjected = FVector::VectorPlaneProject(TargetDown, CameraForward).GetSafeNormal();
-
-			// Find roll correction angle
-			FQuat RollCorrection = FQuat::FindBetweenNormals(CurrentDownProjected, TargetDownProjected);
-
-			// === STEP 3: Combine rotations ===
-			FQuat FinalRotation = RollCorrection * AfterAimRotation;
-			FirstPersonMesh->SetWorldRotation(FinalRotation);
-
-			// === Position weapon so front socket is on camera ray ===
-			const float SightDistance = 30.0f;
-			FVector SightTargetLocation = CameraLocation + CameraForward * SightDistance;
-
-			FVector FrontSocketWorld = FinalRotation.RotateVector(FrontSocketLocal);
-			FVector WeaponLocation = SightTargetLocation - FrontSocketWorld;
-			FirstPersonMesh->SetWorldLocation(WeaponLocation);
-		}
-		return;
-	}
-
-	// When attached to hands - interpolate back to hip fire position
-	if (!bIsAttachedToCamera)
-	{
-		const float InterpSpeed = 12.0f;
-
-		FVector CurrentLocation = FirstPersonMesh->GetRelativeLocation();
-		FVector TargetLocation = HipFireRelativeTransform.GetLocation();
-		FVector NewLocation = FMath::VInterpTo(
-			CurrentLocation,
-			TargetLocation,
-			DeltaTime,
-			InterpSpeed
-		);
-
-		FRotator CurrentRotation = FirstPersonMesh->GetRelativeRotation();
-		FRotator TargetRotation = HipFireRelativeTransform.GetRotation().Rotator();
-		FRotator NewRotation = FMath::RInterpTo(
-			CurrentRotation,
-			TargetRotation,
-			DeltaTime,
-			InterpSpeed
-		);
-
-		FirstPersonMesh->SetRelativeLocation(NewLocation);
-		FirstPersonMesh->SetRelativeRotation(NewRotation);
-
-		// Reset saved flag once weapon has fully returned to hip fire position
-		if (NewLocation.Equals(TargetLocation, 0.1f) && NewRotation.Equals(TargetRotation, 0.1f))
-		{
-			bHipFireTransformSaved = false;
-		}
+		// Fallback: no parent, use world-space offsets directly
+		OutLocationOffset = WorldPositionOffset;
+		OutRotationOffset = TotalRotationCorrection.Rotator();
 	}
 }
 

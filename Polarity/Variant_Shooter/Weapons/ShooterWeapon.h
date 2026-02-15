@@ -47,9 +47,7 @@ class POLARITY_API AShooterWeapon : public AActor
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	USkeletalMeshComponent* ThirdPersonMesh;
 
-	/** Camera component for ADS view - attached to weapon sight */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
-	UCameraComponent* ADSCameraComponent;
+	// ADSCameraComponent removed — new system uses viewmodel offset instead of camera attachment
 
 protected:
 
@@ -374,13 +372,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FName ADSSocketNameBottom = FName("SightBottom");
 
-	/** Relative location offset from socket for fine-tuning ADS camera position */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
-	FVector ADSCameraRelativeLocation = FVector::ZeroVector;
-
-	/** Relative rotation offset from socket for fine-tuning ADS camera orientation */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
-	FRotator ADSCameraRelativeRotation = FRotator::ZeroRotator;
+	/** Default FOV multiplier for ADS when CustomADSFOV is 0 (e.g. 0.75 = 75% of base FOV) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.3", ClampMax = "1.0"))
+	float ADSFOVMultiplier = 0.75f;
 
 	/** Blend time when entering ADS (seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
@@ -611,10 +605,6 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	float GetCustomADSFOV() const { return CustomADSFOV; }
 
-	/** Returns the ADS camera component */
-	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
-	UCameraComponent* GetADSCamera() const { return ADSCameraComponent; }
-
 	/** Returns ADS blend in time */
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	float GetADSBlendInTime() const { return ADSBlendInTime; }
@@ -623,38 +613,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	float GetADSBlendOutTime() const { return ADSBlendOutTime; }
 
-	/** Updates ADS camera rotation to match owner's control rotation */
-	void UpdateADSCameraRotation();
+	// ==================== ADS Viewmodel Offset ====================
 
-	/** Override to return ADS camera view for SetViewTarget */
-	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
-
-	// ==================== ADS Weapon Attachment ====================
-
-	/** Attach weapon mesh to camera for ADS (detaches from hands) */
-	void AttachToCamera(UCameraComponent* Camera);
-
-	/** Detach weapon mesh from camera and reattach to hands */
-	void DetachFromCamera(USkeletalMeshComponent* HandsMesh, FName SocketName);
-
-	/** Update weapon position during ADS transition */
-	void UpdateADSTransition(float ADSAlpha, float DeltaTime);
-
-	/** Returns true if weapon is currently attached to camera */
-	bool IsAttachedToCamera() const { return bIsAttachedToCamera; }
-
-protected:
-	/** True when weapon mesh is attached to camera instead of hands */
-	bool bIsAttachedToCamera = false;
-
-	/** True once the true hip fire transform has been saved */
-	bool bHipFireTransformSaved = false;
-
-	/** Saved transform relative to hands for returning from ADS */
-	FTransform HipFireRelativeTransform;
-
-	/** Current interpolated relative transform */
-	FTransform CurrentADSTransform;
+	/**
+	 * Calculate the additive offset (location + rotation) to apply to the FP Mesh
+	 * so that the weapon sights align with screen center.
+	 * Returns the fully-aimed offset in parent-local space (relative to hands mesh).
+	 * Caller interpolates with ADSAlpha.
+	 */
+	void CalculateADSOffset(UCameraComponent* Camera, FVector& OutLocationOffset, FRotator& OutRotationOffset) const;
 
 public:
 	// ==================== Recoil Getters ====================

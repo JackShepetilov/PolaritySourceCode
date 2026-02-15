@@ -757,29 +757,16 @@ void AShooterCharacter::DoStartADS()
 	{
 		bWantsToAim = true;
 
-		// Play ADS in sound on current weapon
+		// Play ADS in sound
 		if (CurrentWeapon)
 		{
 			CurrentWeapon->PlayADSInSound();
+		}
 
-			// Attach weapon to camera for proper pitch following
-			if (UCameraComponent* Camera = GetFirstPersonCameraComponent())
-			{
-				CurrentWeapon->AttachToCamera(Camera);
-			}
-
-			// Blend to weapon's ADS camera
-			if (UCameraComponent* ADSCamera = CurrentWeapon->GetADSCamera())
-			{
-				if (APlayerController* PC = Cast<APlayerController>(GetController()))
-				{
-					FViewTargetTransitionParams TransitionParams;
-					TransitionParams.BlendTime = CurrentWeapon->GetADSBlendInTime();
-					TransitionParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
-					TransitionParams.BlendExp = 2.0f;
-					PC->SetViewTarget(CurrentWeapon, TransitionParams);
-				}
-			}
+		// Tell recoil component we're aiming
+		if (RecoilComponent)
+		{
+			RecoilComponent->SetAiming(true);
 		}
 	}
 }
@@ -790,25 +777,15 @@ void AShooterCharacter::DoStopADS()
 	if (bWantsToAim && CurrentWeapon)
 	{
 		CurrentWeapon->PlayADSOutSound();
-
-		// Detach weapon from camera, reattach to hands
-		if (USkeletalMeshComponent* HandsMesh = GetFirstPersonMesh())
-		{
-			CurrentWeapon->DetachFromCamera(HandsMesh, FirstPersonWeaponSocket);
-		}
-
-		// Blend back to character's camera
-		if (APlayerController* PC = Cast<APlayerController>(GetController()))
-		{
-			FViewTargetTransitionParams TransitionParams;
-			TransitionParams.BlendTime = CurrentWeapon->GetADSBlendOutTime();
-			TransitionParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
-			TransitionParams.BlendExp = 2.0f;
-			PC->SetViewTarget(this, TransitionParams);
-		}
 	}
 
 	bWantsToAim = false;
+
+	// Tell recoil component we stopped aiming
+	if (RecoilComponent)
+	{
+		RecoilComponent->SetAiming(false);
+	}
 }
 
 void AShooterCharacter::UpdateADS(float DeltaTime)
@@ -821,7 +798,7 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	// Determine target alpha
 	float TargetAlpha = bWantsToAim ? 1.0f : 0.0f;
 
-	// Interpolate alpha (still used by other systems like recoil)
+	// Interpolate alpha
 	CurrentADSAlpha = FMath::FInterpTo(
 		CurrentADSAlpha,
 		TargetAlpha,
@@ -829,32 +806,34 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		MovementSettings->ADSInterpSpeed
 	);
 
-	// Update weapon position during ADS transition
-	if (CurrentWeapon)
-	{
-		CurrentWeapon->UpdateADSTransition(CurrentADSAlpha, DeltaTime);
-	}
-
-	// Note: FOV and camera position are now handled by SetViewTargetWithBlend
-	// when switching to weapon's ADS camera
-
-	// Only apply shake offset to main camera when not aiming
-	// (ADS camera follows weapon which has its own behavior)
+	// === FOV Transition ===
 	UCameraComponent* Camera = GetFirstPersonCameraComponent();
-	if (!Camera)
+	if (Camera)
 	{
-		return;
+		// Determine target ADS FOV
+		float ADSFOV = BaseCameraFOV * 0.75f; // default: 75% of base
+		if (CurrentWeapon)
+		{
+			float CustomFOV = CurrentWeapon->GetCustomADSFOV();
+			if (CustomFOV > 0.0f)
+			{
+				ADSFOV = CustomFOV;
+			}
+		}
+
+		float TargetFOV = FMath::Lerp(BaseCameraFOV, ADSFOV, CurrentADSAlpha);
+		Camera->SetFieldOfView(TargetFOV);
+
+		// Apply shake offset to camera (always, regardless of ADS state)
+		FVector ShakeOffset = FVector::ZeroVector;
+		if (UCameraShakeComponent* ShakeComp = GetCameraShake())
+		{
+			ShakeOffset = ShakeComp->GetCameraOffset();
+		}
+		Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset);
 	}
 
-	// Get shake offset from CameraShakeComponent
-	FVector ShakeOffset = FVector::ZeroVector;
-	if (UCameraShakeComponent* ShakeComp = GetCameraShake())
-	{
-		ShakeOffset = ShakeComp->GetCameraOffset();
-	}
-
-	// Apply only shake offset to main camera (no ADS offset - handled by view target blend)
-	Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset);
+	// ADS viewmodel offset is applied in UpdateFirstPersonView
 }
 
 void AShooterCharacter::UpdateRegeneration(float DeltaTime)
@@ -972,11 +951,38 @@ void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
 
 void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 {
-	// Call parent implementation first
+	// Call parent implementation first (sets base position of FP Mesh)
 	Super::UpdateFirstPersonView(DeltaTime);
 
-	// Apply recoil visual offsets to first person mesh
-	if (RecoilComponent && GetFirstPersonMesh())
+	USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
+	if (!FPMesh)
+	{
+		return;
+	}
+
+	// Get current relative transform (set by Super — the base hip-fire position)
+	FVector CurrentLocation = FPMesh->GetRelativeLocation();
+	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
+
+	// === ADS Viewmodel Offset ===
+	// Applied BEFORE recoil so visual kick works relative to ADS position
+	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
+	{
+		UCameraComponent* Camera = GetFirstPersonCameraComponent();
+		if (Camera)
+		{
+			FVector ADSLocationOffset;
+			FRotator ADSRotationOffset;
+			CurrentWeapon->CalculateADSOffset(Camera, ADSLocationOffset, ADSRotationOffset);
+
+			// Lerp ADS offset by alpha
+			CurrentLocation += ADSLocationOffset * CurrentADSAlpha;
+			CurrentRotation += ADSRotationOffset * CurrentADSAlpha;
+		}
+	}
+
+	// === Recoil Visual Kick ===
+	if (RecoilComponent)
 	{
 		FVector RecoilOffset = RecoilComponent->GetWeaponOffset();
 		FRotator RecoilRotation = RecoilComponent->GetWeaponRotationOffset();
@@ -986,28 +992,23 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 		//   Rotation: Pitch = up/down, Yaw = left/right, Roll = tilt
 		// But SetRelativeLocation/Rotation works in PARENT space (3P Mesh),
 		// which is rotated -90° Yaw. We must transform both to parent-local axes.
-		if (USceneComponent* Parent = GetFirstPersonMesh()->GetAttachParent())
+		if (USceneComponent* Parent = FPMesh->GetAttachParent())
 		{
 			const FRotator ParentRot = Parent->GetRelativeRotation();
 			// Transform position: world-logical -> parent-local
 			RecoilOffset = ParentRot.UnrotateVector(RecoilOffset);
 			// Transform rotation: convert Pitch/Yaw/Roll the same way
-			// Treat rotation as a direction vector, unrotate, then read back
 			const FVector RotAsVec(RecoilRotation.Roll, RecoilRotation.Pitch, RecoilRotation.Yaw);
 			const FVector RotTransformed = ParentRot.UnrotateVector(RotAsVec);
 			RecoilRotation = FRotator(RotTransformed.Y, RotTransformed.Z, RotTransformed.X);
 		}
 
-		// Get current relative transform (already set by Super)
-		FVector CurrentLocation = GetFirstPersonMesh()->GetRelativeLocation();
-		FRotator CurrentRotation = GetFirstPersonMesh()->GetRelativeRotation();
-
-		FVector FinalLocation = CurrentLocation + RecoilOffset;
-		FRotator FinalRotation = CurrentRotation + RecoilRotation;
-
-		GetFirstPersonMesh()->SetRelativeLocation(FinalLocation);
-		GetFirstPersonMesh()->SetRelativeRotation(FinalRotation);
+		CurrentLocation += RecoilOffset;
+		CurrentRotation += RecoilRotation;
 	}
+
+	FPMesh->SetRelativeLocation(CurrentLocation);
+	FPMesh->SetRelativeRotation(CurrentRotation);
 }
 
 void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
