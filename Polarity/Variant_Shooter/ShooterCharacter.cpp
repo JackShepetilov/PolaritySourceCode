@@ -999,10 +999,8 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 
 	// === ADS Weapon Alignment (via SetWorldRotation/Location) ===
 	// After setting relative transform, override the world transform directly
-	// when in ADS. This avoids all feedback loop issues because we work in
-	// world space after all relative transforms are applied.
-	// Camera goes to weapon via SetViewTarget + CalcCamera.
-	// Here we just make the weapon VISUALLY follow pitch/aim direction.
+	// when in ADS. Camera goes to weapon via SetViewTarget + CalcCamera.
+	// Here we make the weapon VISUALLY follow pitch/aim direction.
 	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
 	{
 		USkeletalMeshComponent* WeaponMesh = CurrentWeapon->GetFirstPersonMesh();
@@ -1016,7 +1014,11 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 
 			if (WeaponMesh->DoesSocketExist(SightSocket) && WeaponMesh->DoesSocketExist(RearSocket))
 			{
-				// Read current world state (includes hip-fire + recoil from above)
+				// Force world transform update so GetComponent*/GetSocket* return fresh data
+				FPMesh->UpdateComponentToWorld();
+				WeaponMesh->UpdateComponentToWorld();
+
+				// Read current world state (now guaranteed fresh after UpdateComponentToWorld)
 				FQuat CurWorldQuat = FPMesh->GetComponentQuat();
 				FVector CurWorldPos = FPMesh->GetComponentLocation();
 
