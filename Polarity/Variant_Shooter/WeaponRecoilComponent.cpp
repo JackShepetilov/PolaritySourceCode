@@ -18,6 +18,9 @@ void UWeaponRecoilComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Initialize random stream with unique seed per component instance
+	SwayRandomStream.Initialize(GetUniqueID());
+
 	// Try to get references from owner
 	if (AActor* Owner = GetOwner())
 	{
@@ -48,6 +51,7 @@ void UWeaponRecoilComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 
 	// Update all systems
+	UpdateCameraRecoilSpring(DeltaTime); // Must be before Recovery (feeds AccumulatedRecoil)
 	UpdateRecovery(DeltaTime);
 	UpdateVisualKick(DeltaTime);
 	UpdateCameraPunch(DeltaTime);
@@ -86,11 +90,11 @@ void UWeaponRecoilComponent::OnWeaponFired()
 	FRotator CameraRecoil = TotalRecoil * (1.0f - Fraction);
 	FRotator ViewmodelRecoil = TotalRecoil * Fraction * VMScale;
 
-	// Apply camera portion to controller (this moves the crosshair)
+	// Apply camera portion to controller (queued into spring for smooth delivery)
 	ApplyRecoilToController(CameraRecoil);
 
-	// Accumulate only camera portion for recovery
-	AccumulatedRecoil += CameraRecoil;
+	// NOTE: AccumulatedRecoil is now tracked per-frame in UpdateCameraRecoilSpring()
+	// instead of being accumulated instantly here
 
 	// Generate independent roll (Titanfall 2-style: random direction per shot, not part of weaponFraction)
 	float RollMagnitude = FMath::RandRange(Settings.RollRandomMin, Settings.RollRandomMax);
@@ -143,8 +147,15 @@ void UWeaponRecoilComponent::ResetRecoil()
 	KickSpringRoll.Reset();
 	KickSpringBack.Reset();
 
+	CameraRecoilSpringPitch.Reset();
+	CameraRecoilSpringYaw.Reset();
+
 	CurrentCameraPunch = FRotator::ZeroRotator;
 	CurrentSwayOffset = FRotator::ZeroRotator;
+
+	FMemory::Memzero(BreathingOU, sizeof(BreathingOU));
+	FMemory::Memzero(TremorOU, sizeof(TremorOU));
+	FMemory::Memzero(JitterOU, sizeof(JitterOU));
 }
 
 // ==================== Input ====================
@@ -172,8 +183,28 @@ FRotator UWeaponRecoilComponent::CalculateShotRecoil()
 	// Get base recoil from pattern or random
 	if (Settings.RecoilPattern.Num() > 0)
 	{
-		// Use pattern (loop if we exceed pattern length)
-		int32 PatternIndex = CurrentShotIndex % Settings.RecoilPattern.Num();
+		// Smart pattern looping: play full pattern once, then loop from mid-point
+		// This prevents repeating the aggressive opening climb
+		int32 PatternIndex;
+		if (CurrentShotIndex < Settings.RecoilPattern.Num())
+		{
+			PatternIndex = CurrentShotIndex;
+		}
+		else
+		{
+			int32 LoopStart;
+			if (Settings.PatternLoopStartIndex >= 0)
+			{
+				LoopStart = FMath::Clamp(Settings.PatternLoopStartIndex, 0, Settings.RecoilPattern.Num() - 1);
+			}
+			else
+			{
+				// Auto mid-point
+				LoopStart = Settings.RecoilPattern.Num() / 2;
+			}
+			int32 LoopLength = Settings.RecoilPattern.Num() - LoopStart;
+			PatternIndex = LoopStart + ((CurrentShotIndex - Settings.RecoilPattern.Num()) % LoopLength);
+		}
 		const FRecoilPatternPoint& PatternPoint = Settings.RecoilPattern[PatternIndex];
 
 		Recoil.Pitch = PatternPoint.Pitch;
@@ -261,12 +292,44 @@ bool UWeaponRecoilComponent::IsMoving() const
 
 void UWeaponRecoilComponent::ApplyRecoilToController(const FRotator& Recoil)
 {
+	// Instead of instant AddPitchInput/AddYawInput, queue velocity impulse into springs.
+	// The springs will smoothly deliver the recoil over 2-3 frames.
+	CameraRecoilSpringPitch.Velocity += Recoil.Pitch * 30.0f;
+	CameraRecoilSpringYaw.Velocity += Recoil.Yaw * 30.0f;
+}
+
+// ==================== Camera Recoil Spring ====================
+
+void UWeaponRecoilComponent::UpdateCameraRecoilSpring(float DeltaTime)
+{
 	if (!OwnerController) return;
 
-	// Apply as control rotation change
+	// Capture previous spring positions
+	float PrevPitch = CameraRecoilSpringPitch.Value;
+	float PrevYaw = CameraRecoilSpringYaw.Value;
+
+	// Update springs toward rest (0) — smoothly delivers queued recoil over 2-3 frames
+	CameraRecoilSpringPitch.Update(0.0f, Settings.CameraRecoilSpringStiffness, DeltaTime);
+	CameraRecoilSpringYaw.Update(0.0f, Settings.CameraRecoilSpringStiffness, DeltaTime);
+
+	// Calculate delta this frame (how much the spring moved)
+	float DeltaPitch = CameraRecoilSpringPitch.Value - PrevPitch;
+	float DeltaYaw = CameraRecoilSpringYaw.Value - PrevYaw;
+
+	// Apply smoothed delta to controller
 	// Negative pitch = look up (recoil goes up)
-	OwnerController->AddPitchInput(-Recoil.Pitch);
-	OwnerController->AddYawInput(Recoil.Yaw);
+	if (FMath::Abs(DeltaPitch) > KINDA_SMALL_NUMBER)
+	{
+		OwnerController->AddPitchInput(-DeltaPitch);
+	}
+	if (FMath::Abs(DeltaYaw) > KINDA_SMALL_NUMBER)
+	{
+		OwnerController->AddYawInput(DeltaYaw);
+	}
+
+	// Track accumulated recoil for recovery system
+	AccumulatedRecoil.Pitch += FMath::Abs(DeltaPitch);
+	AccumulatedRecoil.Yaw += DeltaYaw;
 }
 
 // ==================== Recovery ====================
@@ -278,6 +341,13 @@ void UWeaponRecoilComponent::UpdateRecovery(float DeltaTime)
 
 	// Wait for recovery delay
 	if (TimeSinceLastShot < Settings.RecoveryDelay) return;
+
+	// Don't recover while camera springs are still delivering recoil
+	if (FMath::Abs(CameraRecoilSpringPitch.Velocity) > 1.0f ||
+		FMath::Abs(CameraRecoilSpringYaw.Velocity) > 1.0f)
+	{
+		return;
+	}
 
 	// No recovery if nothing accumulated
 	if (AccumulatedRecoil.IsNearlyZero(0.01f))
@@ -415,25 +485,44 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 		Settings.MaxMouseSwayOffset
 	);
 
-	// Multi-layered organic breathing sway (irrational frequencies = never repeats visually)
-	BreathingTime += DeltaTime;
-	float T = BreathingTime;
+	// Ornstein-Uhlenbeck organic sway (truly stochastic, never repeats)
+	FRotator OrganicSway = FRotator::ZeroRotator;
 
-	FRotator BreathingSway = FRotator::ZeroRotator;
+	if (Settings.bEnableOrganicSway)
+	{
+		// Layer 1: Breathing (slow, large drift)
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			BreathingOU[Axis] = AdvanceOU(BreathingOU[Axis],
+				Settings.BreathingReversionSpeed, Settings.BreathingVolatility,
+				Settings.BreathingMaxAngle, DeltaTime);
+		}
+		OrganicSway.Pitch += BreathingOU[0] * Settings.BreathingAxisScale.X;
+		OrganicSway.Yaw   += BreathingOU[1] * Settings.BreathingAxisScale.Y;
+		OrganicSway.Roll  += BreathingOU[2] * Settings.BreathingAxisScale.Z;
 
-	// Layer 1: Slow breathing rhythm (0.2-0.3 Hz) - base heaving
-	BreathingSway.Pitch = Settings.BreathingAmplitude * FMath::Sin(T * 1.37f);
-	BreathingSway.Yaw   = Settings.BreathingAmplitude * 0.6f * FMath::Sin(T * 0.93f + 0.7f);
-	BreathingSway.Roll  = Settings.BreathingAmplitude * 0.3f * FMath::Sin(T * 0.71f + 1.3f);
+		// Layer 2: Tremor (medium speed, hand instability)
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			TremorOU[Axis] = AdvanceOU(TremorOU[Axis],
+				Settings.TremorReversionSpeed, Settings.TremorVolatility,
+				Settings.TremorMaxAngle, DeltaTime);
+		}
+		OrganicSway.Pitch += TremorOU[0] * Settings.TremorAxisScale.X;
+		OrganicSway.Yaw   += TremorOU[1] * Settings.TremorAxisScale.Y;
+		OrganicSway.Roll  += TremorOU[2] * Settings.TremorAxisScale.Z;
 
-	// Layer 2: Muscle tremor (1-3 Hz) - hand instability
-	BreathingSway.Pitch += Settings.TremorAmplitude * FMath::Sin(T * 8.73f);
-	BreathingSway.Yaw   += Settings.TremorAmplitude * 0.7f * FMath::Sin(T * 6.41f + 2.1f);
-	BreathingSway.Roll  += Settings.TremorAmplitude * 0.5f * FMath::Sin(T * 11.17f + 0.9f);
-
-	// Layer 3: Micro-jitter (5-8 Hz) - nervous system noise
-	BreathingSway.Pitch += Settings.MicroJitterAmplitude * FMath::Sin(T * 29.3f);
-	BreathingSway.Yaw   += Settings.MicroJitterAmplitude * FMath::Sin(T * 37.1f + 1.7f);
+		// Layer 3: Micro-jitter (fast, nervous system noise)
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			JitterOU[Axis] = AdvanceOU(JitterOU[Axis],
+				Settings.JitterReversionSpeed, Settings.JitterVolatility,
+				Settings.JitterMaxAngle, DeltaTime);
+		}
+		OrganicSway.Pitch += JitterOU[0] * Settings.JitterAxisScale.X;
+		OrganicSway.Yaw   += JitterOU[1] * Settings.JitterAxisScale.Y;
+		OrganicSway.Roll  += JitterOU[2] * Settings.JitterAxisScale.Z;
+	}
 
 	// Movement sway multiplier
 	float MovementMult = 1.0f;
@@ -443,14 +532,72 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 	}
 
 	// Reduce sway when aiming
-	float AimMult = bIsAiming ? 0.3f : 1.0f;
+	float AimMult = bIsAiming ? Settings.ADSSwayMultiplier : 1.0f;
 
 	// Combine all sway sources
-	FRotator TotalSway = (MouseSway + BreathingSway * MovementMult) * AimMult;
+	FRotator TotalSway = (MouseSway + OrganicSway * MovementMult) * AimMult;
 
 	// Smooth interpolation to target sway
 	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, Settings.MouseSwayLag);
 
 	// Add sway to weapon rotation
 	CurrentWeaponRotation += CurrentSwayOffset;
+}
+
+// ==================== Ornstein-Uhlenbeck Process ====================
+
+float UWeaponRecoilComponent::AdvanceOU(float CurrentValue, float ReversionSpeed, float Volatility, float MaxAngle, float DeltaTime)
+{
+	// Ornstein-Uhlenbeck: dX = θ(μ - X)dt + σ * dW
+	// μ = 0 (center), θ = ReversionSpeed, σ = Volatility
+	// Approximate Gaussian noise via Central Limit Theorem (sum of 3 uniforms)
+	float U1 = SwayRandomStream.FRandRange(-1.0f, 1.0f);
+	float U2 = SwayRandomStream.FRandRange(-1.0f, 1.0f);
+	float U3 = SwayRandomStream.FRandRange(-1.0f, 1.0f);
+	float GaussianApprox = (U1 + U2 + U3) / 1.732f; // ~N(0,1)
+
+	float Drift = ReversionSpeed * (0.0f - CurrentValue) * DeltaTime;
+	float Diffusion = Volatility * GaussianApprox * FMath::Sqrt(DeltaTime);
+
+	float NewValue = CurrentValue + Drift + Diffusion;
+	return FMath::Clamp(NewValue, -MaxAngle, MaxAngle);
+}
+
+// ==================== Default Pattern ====================
+
+TArray<FRecoilPatternPoint> UWeaponRecoilComponent::GetDefaultAssaultRiflePattern()
+{
+	TArray<FRecoilPatternPoint> Pattern;
+	Pattern.Reserve(20);
+
+	// R-201 style: moderate opening climb, then horizontal meander
+	// Phase 1: Shots 1-5 — moderate upward climb, slight rightward drift
+	Pattern.Add(FRecoilPatternPoint(0.30f,  0.05f));   // Shot 1
+	Pattern.Add(FRecoilPatternPoint(0.35f,  0.08f));   // Shot 2
+	Pattern.Add(FRecoilPatternPoint(0.30f,  0.12f));   // Shot 3
+	Pattern.Add(FRecoilPatternPoint(0.25f,  0.10f));   // Shot 4
+	Pattern.Add(FRecoilPatternPoint(0.28f, -0.05f));   // Shot 5
+
+	// Phase 2: Shots 6-10 — reduced vertical, alternating horizontal
+	Pattern.Add(FRecoilPatternPoint(0.18f, -0.15f));   // Shot 6
+	Pattern.Add(FRecoilPatternPoint(0.15f, -0.20f));   // Shot 7
+	Pattern.Add(FRecoilPatternPoint(0.20f,  0.10f));   // Shot 8
+	Pattern.Add(FRecoilPatternPoint(0.12f,  0.22f));   // Shot 9
+	Pattern.Add(FRecoilPatternPoint(0.15f,  0.18f));   // Shot 10
+
+	// Phase 3: Shots 11-15 — minimal vertical, wider horizontal oscillation
+	Pattern.Add(FRecoilPatternPoint(0.10f, -0.25f));   // Shot 11
+	Pattern.Add(FRecoilPatternPoint(0.08f, -0.30f));   // Shot 12
+	Pattern.Add(FRecoilPatternPoint(0.12f, -0.10f));   // Shot 13
+	Pattern.Add(FRecoilPatternPoint(0.10f,  0.20f));   // Shot 14
+	Pattern.Add(FRecoilPatternPoint(0.08f,  0.35f));   // Shot 15
+
+	// Phase 4: Shots 16-20 — near-zero vertical, horizontal meander
+	Pattern.Add(FRecoilPatternPoint(0.05f,  0.25f));   // Shot 16
+	Pattern.Add(FRecoilPatternPoint(0.10f, -0.15f));   // Shot 17
+	Pattern.Add(FRecoilPatternPoint(0.08f, -0.28f));   // Shot 18
+	Pattern.Add(FRecoilPatternPoint(0.05f,  0.10f));   // Shot 19
+	Pattern.Add(FRecoilPatternPoint(0.10f,  0.18f));   // Shot 20
+
+	return Pattern;
 }

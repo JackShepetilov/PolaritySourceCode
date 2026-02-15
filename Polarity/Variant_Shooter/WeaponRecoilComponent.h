@@ -45,7 +45,7 @@ struct FWeaponRecoilSettings
 
 	/** Base vertical recoil per shot (degrees) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pattern", meta = (ClampMin = "0.0", ClampMax = "10.0"))
-	float BaseVerticalRecoil = 0.8f;
+	float BaseVerticalRecoil = 0.3f;
 
 	/** Base horizontal recoil per shot (degrees, random +/-) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pattern", meta = (ClampMin = "0.0", ClampMax = "5.0"))
@@ -66,6 +66,10 @@ struct FWeaponRecoilSettings
 	/** Maximum recoil multiplier from consecutive shots */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pattern", meta = (ClampMin = "1.0", ClampMax = "5.0"))
 	float MaxConsecutiveMultiplier = 2.5f;
+
+	/** Shot index to loop from when pattern is exhausted (-1 = auto mid-point, 0 = loop entire pattern) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pattern", meta = (ClampMin = "-1"))
+	int32 PatternLoopStartIndex = -1;
 
 	// ==================== Recoil Recovery ====================
 
@@ -123,6 +127,12 @@ struct FWeaponRecoilSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Viewkick Split", meta = (ClampMin = "20.0", ClampMax = "500.0"))
 	float KickSpringStiffness = 150.0f;
 
+	// ==================== Camera Recoil Smoothing ====================
+
+	/** Spring stiffness for camera recoil smoothing (higher = snappier but still spread over 2-3 frames) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Recoil", meta = (ClampMin = "50.0", ClampMax = "800.0"))
+	float CameraRecoilSpringStiffness = 400.0f;
+
 	// ==================== Camera Punch ====================
 
 	/** Enable camera punch (micro-shake per shot) */
@@ -159,21 +169,73 @@ struct FWeaponRecoilSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "1.0", ClampMax = "10.0"))
 	float MaxMouseSwayOffset = 3.0f;
 
-	/** Slow breathing amplitude (degrees) - base heaving rhythm */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "2.0"))
-	float BreathingAmplitude = 0.3f;
-
-	/** Medium muscle tremor amplitude (degrees) - hand instability */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TremorAmplitude = 0.1f;
-
-	/** Fast micro-jitter amplitude (degrees) - nervous system noise */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "0.5"))
-	float MicroJitterAmplitude = 0.04f;
-
 	/** Movement sway intensity multiplier */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "3.0"))
 	float MovementSwayMultiplier = 1.0f;
+
+	/** Sway multiplier when aiming down sights (0 = no sway in ADS, 1 = full sway) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Sway", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ADSSwayMultiplier = 0.3f;
+
+	// ==================== Organic Sway (Ornstein-Uhlenbeck) ====================
+
+	/** Enable stochastic organic sway (replaces sinusoidal breathing) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway")
+	bool bEnableOrganicSway = true;
+
+	// --- Layer 1: Breathing (slow, large amplitude) ---
+
+	/** How quickly breathing sway returns to center (higher = more centered, less drift) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Breathing", meta = (ClampMin = "0.1", ClampMax = "5.0"))
+	float BreathingReversionSpeed = 0.8f;
+
+	/** Magnitude of random breathing fluctuations (higher = more movement) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Breathing", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float BreathingVolatility = 0.5f;
+
+	/** Maximum breathing sway deflection in degrees (hard clamp) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Breathing", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float BreathingMaxAngle = 0.4f;
+
+	/** Per-axis scale for breathing: X=Pitch, Y=Yaw, Z=Roll */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Breathing")
+	FVector BreathingAxisScale = FVector(1.0f, 0.6f, 0.3f);
+
+	// --- Layer 2: Tremor (medium speed, medium amplitude) ---
+
+	/** How quickly tremor returns to center */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Tremor", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float TremorReversionSpeed = 3.0f;
+
+	/** Magnitude of random tremor fluctuations */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Tremor", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float TremorVolatility = 0.3f;
+
+	/** Maximum tremor deflection in degrees */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Tremor", meta = (ClampMin = "0.0", ClampMax = "1.5"))
+	float TremorMaxAngle = 0.15f;
+
+	/** Per-axis scale for tremor: X=Pitch, Y=Yaw, Z=Roll */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|Tremor")
+	FVector TremorAxisScale = FVector(1.0f, 0.7f, 0.5f);
+
+	// --- Layer 3: Micro-jitter (fast, tiny amplitude) ---
+
+	/** How quickly micro-jitter returns to center */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|MicroJitter", meta = (ClampMin = "1.0", ClampMax = "20.0"))
+	float JitterReversionSpeed = 8.0f;
+
+	/** Magnitude of random micro-jitter fluctuations */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|MicroJitter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float JitterVolatility = 0.15f;
+
+	/** Maximum micro-jitter deflection in degrees */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|MicroJitter", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float JitterMaxAngle = 0.06f;
+
+	/** Per-axis scale for jitter: X=Pitch, Y=Yaw, Z=Roll (typically no roll for jitter) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Organic Sway|MicroJitter")
+	FVector JitterAxisScale = FVector(1.0f, 1.0f, 0.0f);
 
 	// ==================== Situational Multipliers ====================
 
@@ -196,11 +258,12 @@ struct FWeaponRecoilSettings
 
 /**
  * Advanced weapon recoil component with:
- * - Learnable recoil patterns
+ * - Learnable recoil patterns (R-201 style with smart loop)
+ * - Spring-smoothed camera recoil delivery (no instant jumps)
  * - Recoil recovery with manual pull-down
  * - Spring-damper visual weapon kick (smooth, physically-based)
  * - Camera punch (micro-shake)
- * - Organic procedural weapon sway (multi-layered breathing + tremor + jitter)
+ * - Ornstein-Uhlenbeck organic sway (truly stochastic breathing + tremor + jitter)
  */
 UCLASS(ClassGroup = (Weapon), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UWeaponRecoilComponent : public UActorComponent
@@ -325,6 +388,14 @@ protected:
 	FBobSpringState KickSpringRoll;
 	FBobSpringState KickSpringBack;
 
+	// ==================== Camera Recoil Spring State ====================
+
+	/** Spring-damper for smoothing camera pitch recoil */
+	FBobSpringState CameraRecoilSpringPitch;
+
+	/** Spring-damper for smoothing camera yaw recoil */
+	FBobSpringState CameraRecoilSpringYaw;
+
 	// ==================== Camera Punch State ====================
 
 	/** Current camera punch rotation */
@@ -347,8 +418,15 @@ protected:
 	/** Current sway offset */
 	FRotator CurrentSwayOffset = FRotator::ZeroRotator;
 
-	/** Breathing time accumulator */
-	float BreathingTime = 0.0f;
+	// ==================== Ornstein-Uhlenbeck Sway State ====================
+	// 3 layers x 3 axes (Pitch/Yaw/Roll) = 9 independent O-U processes
+
+	float BreathingOU[3] = {0.0f, 0.0f, 0.0f};
+	float TremorOU[3] = {0.0f, 0.0f, 0.0f};
+	float JitterOU[3] = {0.0f, 0.0f, 0.0f};
+
+	/** Random stream for unique sway per component instance */
+	FRandomStream SwayRandomStream;
 
 	// ==================== Character State ====================
 
@@ -369,8 +447,11 @@ protected:
 	/** Check if character is moving */
 	bool IsMoving() const;
 
-	/** Apply recoil to controller */
+	/** Queue recoil to camera spring (smoothed delivery over 2-3 frames) */
 	void ApplyRecoilToController(const FRotator& Recoil);
+
+	/** Update camera recoil springs and apply smoothed recoil to controller */
+	void UpdateCameraRecoilSpring(float DeltaTime);
 
 	/** Update recoil recovery */
 	void UpdateRecovery(float DeltaTime);
@@ -389,4 +470,12 @@ protected:
 
 	/** Trigger camera punch effect */
 	void TriggerCameraPunch();
+
+	/** Advance a single Ornstein-Uhlenbeck process by one tick */
+	float AdvanceOU(float CurrentValue, float ReversionSpeed, float Volatility, float MaxAngle, float DeltaTime);
+
+public:
+	/** Get a default R-201 style recoil pattern (20 shots, moderate climb, horizontal meander) */
+	UFUNCTION(BlueprintCallable, Category = "Recoil")
+	static TArray<FRecoilPatternPoint> GetDefaultAssaultRiflePattern();
 };
