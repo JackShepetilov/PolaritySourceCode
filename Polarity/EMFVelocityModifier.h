@@ -117,6 +117,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float EnvironmentForceMultiplier = 1.0f;
 
+	/** Multiplier for forces from Physics Prop sources.
+	 *  0.0 = ignore PhysicsProp forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float PhysicsPropForceMultiplier = 1.0f;
+
 	/** Multiplier for forces from sources with unknown/unspecified owner type.
 	 *  0.0 = ignore unknown forces, 1.0 = full effect
 	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */

@@ -359,6 +359,9 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 		case EEMSourceOwnerType::Environment:
 			Multiplier = EnvironmentForceMultiplier;
 			break;
+		case EEMSourceOwnerType::PhysicsProp:
+			Multiplier = PhysicsPropForceMultiplier;
+			break;
 		case EEMSourceOwnerType::None:
 		default:
 			Multiplier = UnknownForceMultiplier;

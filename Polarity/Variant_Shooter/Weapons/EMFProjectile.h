@@ -106,6 +106,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float EnvironmentForceMultiplier = 1.0f;
 
+	/** Multiplier for forces from Physics Prop sources */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	float PhysicsPropForceMultiplier = 1.0f;
+
 	/** Multiplier for forces from Unknown/unset sources */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float UnknownForceMultiplier = 1.0f;

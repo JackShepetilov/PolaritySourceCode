@@ -485,6 +485,8 @@ float UEMFVelocityModifier::GetForceMultiplierForOwnerType(EEMSourceOwnerType Ow
 		return ProjectileForceMultiplier;
 	case EEMSourceOwnerType::Environment:
 		return EnvironmentForceMultiplier;
+	case EEMSourceOwnerType::PhysicsProp:
+		return PhysicsPropForceMultiplier;
 	case EEMSourceOwnerType::None:
 	default:
 		return UnknownForceMultiplier;
