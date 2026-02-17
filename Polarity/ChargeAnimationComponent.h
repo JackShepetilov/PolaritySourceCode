@@ -17,6 +17,7 @@ class UCurveFloat;
 class UEMF_FieldComponent;
 class UEMFVelocityModifier;
 class AEMFChannelingPlateActor;
+class AEMFPhysicsProp;
 
 /**
  * Charge animation state
@@ -443,7 +444,10 @@ protected:
 	/** Capture a specific NPC */
 	void CaptureNPC(class AShooterNPC* NPC);
 
-	/** Release the currently captured NPC */
+	/** Capture a specific physics prop */
+	void CaptureProp(AEMFPhysicsProp* Prop);
+
+	/** Release the currently captured NPC or prop */
 	void ReleaseCapturedNPC();
 
 	/** Currently captured NPC (managed by raycast during channeling) */

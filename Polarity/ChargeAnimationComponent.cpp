@@ -17,6 +17,7 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "EMF_FieldComponent.h"
+#include "EMFPhysicsProp.h"
 #include "Engine/OverlapResult.h"
 
 UChargeAnimationComponent::UChargeAnimationComponent()
@@ -107,7 +108,7 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 			ChannelingPlateActor->SetReverseMode(true);
 		}
 
-		// Re-attach captured NPC to the new plate (NPC stayed in knockback)
+		// Re-attach captured target to the new plate (target stayed in knockback)
 		if (CurrentCapturedNPC.IsValid() && ChannelingPlateActor)
 		{
 			if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
@@ -117,6 +118,11 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 					Mod->SetCapturedByPlate(ChannelingPlateActor);
 				}
 				ChannelingPlateActor->SetCapturedNPC(NPC);
+			}
+			else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
+			{
+				Prop->SetCapturedByPlate(ChannelingPlateActor);
+				ChannelingPlateActor->SetCapturedNPC(Prop);
 			}
 		}
 
@@ -415,7 +421,7 @@ void UChargeAnimationComponent::EnterChanneling()
 
 void UChargeAnimationComponent::ExitChanneling()
 {
-	// NPC stays in captured state (knockback) — it will be re-attached
+	// Target stays in captured state (knockback) — it will be re-attached
 	// to the reverse plate if player taps, or fully released on timeout.
 	// Just clear the plate reference so weak ptr doesn't dangle.
 	if (CurrentCapturedNPC.IsValid())
@@ -426,6 +432,10 @@ void UChargeAnimationComponent::ExitChanneling()
 			{
 				Mod->DetachFromPlate();
 			}
+		}
+		else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
+		{
+			Prop->DetachFromPlate();
 		}
 		if (ChannelingPlateActor)
 		{
@@ -551,11 +561,11 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		return;
 	}
 
-	// Check if current captured NPC is still valid and still captured
+	// Check if current captured target is still valid and still captured
 	if (CurrentCapturedNPC.IsValid())
 	{
-		AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get());
-		if (NPC)
+		// Check NPC
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 		{
 			UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>();
 			if (Mod && Mod->IsCapturedByPlate())
@@ -563,7 +573,15 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still captured — don't re-search
 			}
 		}
-		// NPC was auto-released or is invalid — clear and search for new target
+		// Check Prop
+		else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
+		{
+			if (Prop->IsCapturedByPlate())
+			{
+				return; // Still captured — don't re-search
+			}
+		}
+		// Target was auto-released or is invalid — clear and search for new target
 		CurrentCapturedNPC.Reset();
 		if (ChannelingPlateActor)
 		{
@@ -582,8 +600,10 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	const float SearchRadiusSq = CaptureSearchRadius * CaptureSearchRadius;
 	const FVector PlayerLoc = OwnerCharacter->GetActorLocation();
 
-	// Find all pawns in radius via overlap
-	FCollisionObjectQueryParams ObjectQuery(ECC_Pawn);
+	// Find pawns and physics bodies in radius via overlap
+	FCollisionObjectQueryParams ObjectQuery;
+	ObjectQuery.AddObjectTypesToQuery(ECC_Pawn);
+	ObjectQuery.AddObjectTypesToQuery(ECC_PhysicsBody);
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(OwnerCharacter);
 	QueryParams.AddIgnoredActor(ChannelingPlateActor);
@@ -598,51 +618,93 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		QueryParams
 	);
 
-	AShooterNPC* BestNPC = nullptr;
+	// Unified scoring: best target (NPC or prop) closest to crosshair
+	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
+	bool bBestIsNPC = false;
 
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
-		AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
-		if (!NPC)
+		AActor* HitActor = Overlap.GetActor();
+		if (!HitActor)
 		{
 			continue;
 		}
 
-		UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
-		if (!NPCModifier || !NPCModifier->bEnableViscousCapture || NPCModifier->IsCapturedByPlate())
+		// Try NPC
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
 		{
+			UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
+			if (!NPCModifier || !NPCModifier->bEnableViscousCapture || NPCModifier->IsCapturedByPlate())
+			{
+				continue;
+			}
+
+			const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < MaxAngleCos)
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = NPC;
+				bBestIsNPC = true;
+			}
 			continue;
 		}
 
-		// Distance check from player
-		const FVector ToNPC = NPC->GetActorLocation() - CameraLoc;
-		const float DistSq = ToNPC.SizeSquared();
-		if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+		// Try Physics Prop
+		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
 		{
+			if (!Prop->bCanBeCaptured || Prop->IsCapturedByPlate() || Prop->IsDead())
+			{
+				continue;
+			}
+
+			const FVector ToTarget = Prop->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < MaxAngleCos)
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = Prop;
+				bBestIsNPC = false;
+			}
 			continue;
-		}
-
-		// Angle check from camera forward
-		const FVector DirToNPC = ToNPC.GetUnsafeNormal();
-		const float AngleCos = FVector::DotProduct(CameraForward, DirToNPC);
-
-		if (AngleCos < MaxAngleCos)
-		{
-			continue; // Outside cone
-		}
-
-		// Pick the closest to crosshair (highest cosine = smallest angle)
-		if (AngleCos > BestAngleCos)
-		{
-			BestAngleCos = AngleCos;
-			BestNPC = NPC;
 		}
 	}
 
-	if (BestNPC)
+	if (BestTarget)
 	{
-		CaptureNPC(BestNPC);
+		if (bBestIsNPC)
+		{
+			CaptureNPC(Cast<AShooterNPC>(BestTarget));
+		}
+		else
+		{
+			CaptureProp(Cast<AEMFPhysicsProp>(BestTarget));
+		}
 	}
 }
 
@@ -665,6 +727,21 @@ void UChargeAnimationComponent::CaptureNPC(AShooterNPC* NPC)
 	}
 }
 
+void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
+{
+	if (!Prop || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	CurrentCapturedNPC = Prop;
+	ChannelingPlateActor->SetCapturedNPC(Prop);
+	Prop->SetCapturedByPlate(ChannelingPlateActor);
+}
+
 void UChargeAnimationComponent::ReleaseCapturedNPC()
 {
 	if (!CurrentCapturedNPC.IsValid())
@@ -672,13 +749,16 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 		return;
 	}
 
-	AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get());
-	if (NPC)
+	if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 	{
 		if (UEMFVelocityModifier* Modifier = NPC->FindComponentByClass<UEMFVelocityModifier>())
 		{
 			Modifier->ReleasedFromCapture();
 		}
+	}
+	else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
+	{
+		Prop->ReleasedFromCapture();
 	}
 
 	if (ChannelingPlateActor)
