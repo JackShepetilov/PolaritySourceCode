@@ -92,6 +92,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float UnknownForceMultiplier = 1.0f;
 
+	/** Skip opposite-charge sources closer than OppositeChargeMinDistance to prevent Coulomb 1/r² singularity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	bool bEnableOppositeChargeDistanceCutoff = true;
+
+	/** Minimum distance (cm) for opposite-charge force cutoff */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "1.0", Units = "cm", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
+	float OppositeChargeMinDistance = 35.0f;
+
 	// ==================== Health ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health", meta = (ClampMin = "1.0"))
@@ -196,7 +204,7 @@ public:
 
 	/** Spring stiffness for pulling prop toward plate center (units/s²). Prevents prop from hanging below plate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "100.0", EditCondition = "bCanBeCaptured"))
-	float CaptureSpringStiffness = 15.0f;
+	float CaptureSpringStiffness = 50.0f;
 
 	/** Minimum CaptureStrength to stay captured */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured"))
@@ -328,4 +336,7 @@ private:
 
 	/** Check if source has effectively zero charge/field strength */
 	static bool IsSourceEffectivelyZero(const FEMSourceDescription& Source);
+
+	/** Get effective charge sign of source (+1, -1, or 0 for magnetic/neutral) */
+	static int32 GetSourceEffectiveChargeSign(const FEMSourceDescription& Source);
 };

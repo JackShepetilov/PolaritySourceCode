@@ -100,6 +100,8 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 	const FVector Position = GetActorLocation();
 	const FVector Velocity = PropMesh->GetPhysicsLinearVelocity();
 	const float MaxDistSq = MaxSourceDistance * MaxSourceDistance;
+	const float OppositeChargeMinDistSq = OppositeChargeMinDistance * OppositeChargeMinDistance;
+	const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
 
 	FVector TotalForce = FVector::ZeroVector;
 
@@ -110,9 +112,21 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			continue;
 		}
 
-		if (FVector::DistSquared(Position, Source.Position) > MaxDistSq)
+		const float DistSq = FVector::DistSquared(Position, Source.Position);
+
+		if (DistSq > MaxDistSq)
 		{
 			continue;
+		}
+
+		// Opposite-charge distance cutoff: skip close opposite-charge sources to prevent Coulomb 1/r² singularity
+		if (bEnableOppositeChargeDistanceCutoff && DistSq < OppositeChargeMinDistSq)
+		{
+			const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
+			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
+			{
+				continue;
+			}
 		}
 
 		const float Multiplier = GetForceMultiplierForOwnerType(Source.OwnerType);
@@ -136,6 +150,12 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			Charge, Position, Velocity, SingleSource, true);
 
 		TotalForce += SourceForce * Multiplier;
+	}
+
+	// Suppress all non-plate forces during reverse channeling launch (mirrors NPC PassThrough behavior)
+	if (CapturingPlate.IsValid() && CapturingPlate.Get()->IsInReverseMode())
+	{
+		TotalForce = FVector::ZeroVector;
 	}
 
 	// Clamp
@@ -667,4 +687,39 @@ bool AEMFPhysicsProp::IsSourceEffectivelyZero(const FEMSourceDescription& Source
 	default:
 		return FMath::IsNearlyZero(Source.PointChargeParams.Charge);
 	}
+}
+
+int32 AEMFPhysicsProp::GetSourceEffectiveChargeSign(const FEMSourceDescription& Source)
+{
+	float EffectiveCharge = 0.0f;
+
+	switch (Source.SourceType)
+	{
+	case EEMSourceType::PointCharge:
+		EffectiveCharge = Source.PointChargeParams.Charge;
+		break;
+	case EEMSourceType::LineCharge:
+		EffectiveCharge = Source.LineChargeParams.LinearChargeDensity;
+		break;
+	case EEMSourceType::ChargedRing:
+		EffectiveCharge = Source.RingParams.TotalCharge;
+		break;
+	case EEMSourceType::ChargedSphere:
+		EffectiveCharge = Source.SphereParams.TotalCharge;
+		break;
+	case EEMSourceType::ChargedBall:
+		EffectiveCharge = Source.BallParams.TotalCharge;
+		break;
+	case EEMSourceType::InfinitePlate:
+	case EEMSourceType::FinitePlate:
+		EffectiveCharge = Source.PlateParams.SurfaceChargeDensity;
+		break;
+	default:
+		// Magnetic sources, dielectrics, grounded conductors — no charge sign concept
+		return 0;
+	}
+
+	if (EffectiveCharge > KINDA_SMALL_NUMBER) return 1;
+	if (EffectiveCharge < -KINDA_SMALL_NUMBER) return -1;
+	return 0;
 }

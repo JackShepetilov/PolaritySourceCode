@@ -133,12 +133,12 @@ public:
 	 *  When enabled, sources closer than OppositeChargeMinDistance with opposite charge sign
 	 *  are ignored, preventing extreme forces from Coulomb 1/r² singularity. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
-	bool bEnableOppositeChargeDistanceCutoff = false;
+	bool bEnableOppositeChargeDistanceCutoff = true;
 
 	/** Minimum distance (cm) for opposite-charge force cutoff. Sources with opposite charge
 	 *  closer than this are ignored entirely. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "1.0", Units = "cm", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
-	float OppositeChargeMinDistance = 50.0f;
+	float OppositeChargeMinDistance = 35.0f;
 
 	// ==================== Debug ====================
 
