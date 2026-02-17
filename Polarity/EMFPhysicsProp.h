@@ -100,6 +100,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "1.0", Units = "cm", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
 	float OppositeChargeMinDistance = 35.0f;
 
+	/** Viscous damping coefficient when prop is within cutoff distance of opposite-charge source.
+	 *  Prevents prop from passing through after EM force cutoff. Units: 1/s. Higher = faster stop. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
+	float OppositeChargeProximityDamping = 10.0f;
+
 	// ==================== Health ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health", meta = (ClampMin = "1.0"))
@@ -202,9 +207,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured"))
 	float GravityCounterStrength = 1.0f;
 
-	/** Spring stiffness for pulling prop toward plate center (units/s²). Prevents prop from hanging below plate. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "100.0", EditCondition = "bCanBeCaptured"))
-	float CaptureSpringStiffness = 50.0f;
+	/** Hooke spring stiffness for pulling prop toward plate center. Force = ToPlate * k * CaptureStrength * Mass (proportional to distance). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
+	float CaptureSpringStiffness = 5.0f;
 
 	/** Minimum CaptureStrength to stay captured */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured"))

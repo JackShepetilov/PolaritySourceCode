@@ -104,6 +104,7 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 	const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
 
 	FVector TotalForce = FVector::ZeroVector;
+	bool bShouldApplyProximityDamping = false;
 
 	for (const FEMSourceDescription& Source : OtherSources)
 	{
@@ -125,6 +126,7 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
 			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
 			{
+				bShouldApplyProximityDamping = true;
 				continue;
 			}
 		}
@@ -168,6 +170,23 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 	if (!TotalForce.IsNearlyZero())
 	{
 		PropMesh->AddForce(TotalForce);
+	}
+
+	// Proximity damping: viscous braking when inside opposite-charge cutoff distance
+	// Prevents prop from passing through the source after EM force is suppressed
+	if (bShouldApplyProximityDamping && !CapturingPlate.IsValid() && OppositeChargeProximityDamping > 0.0f)
+	{
+		const float PhysMass = PropMesh->GetMass();
+		const FVector DampingForce = -Velocity * OppositeChargeProximityDamping * PhysMass;
+		PropMesh->AddForce(DampingForce);
+
+		if (bDrawDebugForces)
+		{
+			DrawDebugDirectionalArrow(
+				GetWorld(), Position,
+				Position + DampingForce.GetSafeNormal() * FMath::Min(DampingForce.Size() * 0.01f, 100.0f),
+				8.0f, FColor::Orange, false, -1.0f, 0, 2.0f);
+		}
 	}
 
 	// Debug
@@ -283,10 +302,16 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 	if (Plate->IsInReverseMode())
 	{
-		// Reverse mode: calculate plate EMF force and redirect along plate normal (launch)
+		// Reverse mode: direct velocity correction (mirrors NPC velocity-based damping)
 		const FVector PlateNormal = Plate->GetPlateNormal();
-		const float PropCharge = GetCharge();
 
+		// Zero tangential velocity directly, keep only forward (normal) component
+		const float NormalSpeed = FVector::DotProduct(PropVelocity, PlateNormal);
+		const FVector CorrectedVelocity = PlateNormal * FMath::Max(NormalSpeed, 0.0f);
+		PropMesh->SetPhysicsLinearVelocity(CorrectedVelocity);
+
+		// Apply launch force along plate normal (camera forward)
+		const float PropCharge = GetCharge();
 		if (!FMath::IsNearlyZero(PropCharge) && Plate->PlateFieldComponent)
 		{
 			FEMSourceDescription PlateSource = Plate->PlateFieldComponent->GetSourceDescription();
@@ -294,21 +319,10 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 			SingleSource.Add(PlateSource);
 
 			const FVector PlateForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
-				PropCharge, Position, PropVelocity, SingleSource, true);
+				PropCharge, Position, CorrectedVelocity, SingleSource, true);
 
-			// Redirect along plate normal (camera forward) — mirrors NPC launch behavior
-			const FVector LaunchForce = PlateNormal * PlateForce.Size();
-			PropMesh->AddForce(LaunchForce);
+			PropMesh->AddForce(PlateNormal * PlateForce.Size());
 		}
-
-		// Damp only tangential velocity, let normal (launch direction) pass through
-		const float NormalSpeed = FVector::DotProduct(RelativeVelocity, PlateNormal);
-		const FVector Tangential = RelativeVelocity - NormalSpeed * PlateNormal;
-
-		const float DampingFactor = 1.0f - FMath::Exp(-ViscosityCoefficient * CaptureStrength * DeltaTime);
-		const FVector TangentialDamping = -Tangential * DampingFactor * PhysMass / FMath::Max(DeltaTime, SMALL_NUMBER);
-
-		PropMesh->AddForce(TangentialDamping);
 		// No gravity compensation in reverse mode — prop launches freely
 	}
 	else
@@ -327,11 +341,11 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 			PropMesh->AddForce(FVector(0.0f, 0.0f, CounterForceZ));
 		}
 
-		// Spring force: pull prop toward plate center
+		// Hooke spring: force proportional to distance (stronger pull when far, gentle near center)
 		if (CaptureSpringStiffness > 0.0f)
 		{
 			const FVector ToPlate = PlatePos - Position;
-			const FVector SpringForce = ToPlate.GetSafeNormal() * CaptureSpringStiffness * CaptureStrength * PhysMass;
+			const FVector SpringForce = ToPlate * CaptureSpringStiffness * CaptureStrength * PhysMass;
 			PropMesh->AddForce(SpringForce);
 		}
 	}
