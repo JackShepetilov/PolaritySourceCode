@@ -24,8 +24,9 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	PropMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PropMesh"));
 	SetRootComponent(PropMesh);
 	PropMesh->SetSimulatePhysics(true);
-	PropMesh->SetNotifyRigidBodyCollision(true);
 	PropMesh->SetCollisionProfileName(TEXT("PhysicsActor"));
+	PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	PropMesh->SetGenerateOverlapEvents(true);
 	PropMesh->BodyInstance.bUseCCD = true;
 
 	// EMF field component
@@ -54,7 +55,7 @@ void AEMFPhysicsProp::BeginPlay()
 	if (PropMesh)
 	{
 		PropMesh->SetMassOverrideInKg(NAME_None, DefaultMass, true);
-		PropMesh->OnComponentHit.AddDynamic(this, &AEMFPhysicsProp::OnPropHit);
+		PropMesh->OnComponentBeginOverlap.AddDynamic(this, &AEMFPhysicsProp::OnPropOverlap);
 	}
 }
 
@@ -204,6 +205,26 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 	const FVector PlatePos = Plate->GetActorLocation();
 	const float Distance = FVector::Dist(Position, PlatePos);
 
+	// Wall check: if there's a wall between prop and plate, don't apply capture forces
+	{
+		FHitResult WallCheck;
+		FCollisionQueryParams WallParams;
+		WallParams.AddIgnoredActor(this);
+		WallParams.AddIgnoredActor(Plate);
+		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+			WallCheck, Position, PlatePos, ECC_Visibility, WallParams);
+
+		if (bBlocked)
+		{
+			WeakCaptureTimer += DeltaTime;
+			if (WeakCaptureTimer >= CaptureReleaseTimeout)
+			{
+				ReleasedFromCapture();
+			}
+			return;
+		}
+	}
+
 	// Smoothstep capture strength
 	float CaptureStrength = 0.0f;
 	if (Distance < CaptureRadius)
@@ -242,8 +263,25 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 	if (Plate->IsInReverseMode())
 	{
-		// Reverse mode: damp only tangential velocity, let normal (launch direction) pass through
+		// Reverse mode: calculate plate EMF force and redirect along plate normal (launch)
 		const FVector PlateNormal = Plate->GetPlateNormal();
+		const float PropCharge = GetCharge();
+
+		if (!FMath::IsNearlyZero(PropCharge) && Plate->PlateFieldComponent)
+		{
+			FEMSourceDescription PlateSource = Plate->PlateFieldComponent->GetSourceDescription();
+			TArray<FEMSourceDescription> SingleSource;
+			SingleSource.Add(PlateSource);
+
+			const FVector PlateForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
+				PropCharge, Position, PropVelocity, SingleSource, true);
+
+			// Redirect along plate normal (camera forward) — mirrors NPC launch behavior
+			const FVector LaunchForce = PlateNormal * PlateForce.Size();
+			PropMesh->AddForce(LaunchForce);
+		}
+
+		// Damp only tangential velocity, let normal (launch direction) pass through
 		const float NormalSpeed = FVector::DotProduct(RelativeVelocity, PlateNormal);
 		const FVector Tangential = RelativeVelocity - NormalSpeed * PlateNormal;
 
@@ -273,8 +311,8 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 // ==================== Collision Damage ====================
 
-void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
+void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
 	if (!bDealCollisionDamage || !OtherActor || bIsDead)
 	{
@@ -295,7 +333,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComponent, AActor* Other
 		return;
 	}
 
-	// Impact speed from prop's velocity projected onto hit normal
+	// Impact speed from prop's velocity
 	const FVector PropVelocity = PropMesh->GetPhysicsLinearVelocity();
 	const float ImpactSpeed = PropVelocity.Size();
 
@@ -322,6 +360,9 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComponent, AActor* Other
 		}
 	}
 
+	// Impact point: use midpoint between actors (overlap doesn't provide exact contact)
+	const FVector ImpactPoint = (GetActorLocation() + HitNPC->GetActorLocation()) * 0.5f;
+
 	// Apply kinetic damage
 	if (KineticDamage > 0.0f)
 	{
@@ -341,7 +382,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComponent, AActor* Other
 		if (EMFDischargeVFX)
 		{
 			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-				GetWorld(), EMFDischargeVFX, Hit.ImpactPoint,
+				GetWorld(), EMFDischargeVFX, ImpactPoint,
 				FRotator::ZeroRotator, FVector(EMFDischargeVFXScale),
 				true, true, ENCPoolMethod::None);
 		}
@@ -350,7 +391,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComponent, AActor* Other
 	// Impact sound
 	if (ImpactSound && (KineticDamage > 0.0f || EMFDamage > 0.0f))
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, Hit.ImpactPoint);
+		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, ImpactPoint);
 	}
 
 	LastCollisionDamageTime = CurrentTime;
