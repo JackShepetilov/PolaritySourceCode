@@ -7,6 +7,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Variant_Shooter/ShooterDummyInterface.h"
+#include "EMF_PluginBPLibrary.h"
 #include "EMFPhysicsProp.generated.h"
 
 class UEMF_FieldComponent;
@@ -14,7 +15,6 @@ class AEMFChannelingPlateActor;
 class AShooterNPC;
 class UNiagaraSystem;
 class USoundBase;
-struct FEMSourceDescription;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropDeath, AEMFPhysicsProp*, Prop, AActor*, Killer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*, Prop, float, Damage, AActor*, DamageCauser);

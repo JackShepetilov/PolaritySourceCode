@@ -2,6 +2,7 @@
 // Physics-simulated prop with full EMF system integration
 
 #include "EMFPhysicsProp.h"
+#include "Engine/DamageEvents.h"
 #include "EMFChannelingPlateActor.h"
 #include "EMF_FieldComponent.h"
 #include "EMF_PluginBPLibrary.h"
