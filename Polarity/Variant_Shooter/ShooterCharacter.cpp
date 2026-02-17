@@ -776,6 +776,16 @@ void AShooterCharacter::DoStartADS()
 			}
 		}
 
+		// Attach FP Mesh (hands + weapon) to CameraComponent so it follows pitch.
+		// FP Mesh was on 3P Mesh (Yaw only). Camera has Pitch + Yaw.
+		// KeepWorldTransform preserves current visual position during transition.
+		USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
+		UCameraComponent* Camera = GetFirstPersonCameraComponent();
+		if (FPMesh && Camera)
+		{
+			FPMesh->AttachToComponent(Camera, FAttachmentTransformRules::KeepWorldTransform);
+		}
+
 		// Tell recoil component we're aiming
 		if (RecoilComponent)
 		{
@@ -799,6 +809,13 @@ void AShooterCharacter::DoStopADS()
 			BlendParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
 			BlendParams.BlendExp = 2.0f;
 			PC->SetViewTarget(this, BlendParams);
+		}
+
+		// Reattach FP Mesh back to 3P Mesh (GetMesh) so it stops following pitch
+		USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
+		if (FPMesh)
+		{
+			FPMesh->AttachToComponent(GetMesh(), FAttachmentTransformRules::KeepWorldTransform);
 		}
 	}
 
