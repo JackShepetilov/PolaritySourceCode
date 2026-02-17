@@ -20,13 +20,9 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	// Scene root (stable root for future mesh swaps to GeometryCollection)
-	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
-	RootComponent = SceneRoot;
-
-	// Physics mesh
+	// Physics mesh as root (physics body drives actor transform)
 	PropMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PropMesh"));
-	PropMesh->SetupAttachment(SceneRoot);
+	SetRootComponent(PropMesh);
 	PropMesh->SetSimulatePhysics(true);
 	PropMesh->SetNotifyRigidBodyCollision(true);
 	PropMesh->SetCollisionProfileName(TEXT("PhysicsActor"));
@@ -80,6 +76,8 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	{
 		UpdateCaptureForces(DeltaTime);
 	}
+
+	UpdateChargeTracking();
 }
 
 // ==================== EMF Force Application ====================
@@ -499,6 +497,60 @@ float AEMFPhysicsProp::GetKillChargeBonus_Implementation() const
 bool AEMFPhysicsProp::IsDummyDead_Implementation() const
 {
 	return bIsDead;
+}
+
+// ==================== Charge Tracking & Overlay ====================
+
+void AEMFPhysicsProp::UpdateChargeTracking()
+{
+	const float Charge = GetCharge();
+
+	uint8 CurrentPolarity = 0;
+	if (Charge > KINDA_SMALL_NUMBER)
+	{
+		CurrentPolarity = 1;
+	}
+	else if (Charge < -KINDA_SMALL_NUMBER)
+	{
+		CurrentPolarity = 2;
+	}
+
+	if (!FMath::IsNearlyEqual(Charge, PreviousChargeValue, 0.001f))
+	{
+		OnChargeChanged.Broadcast(Charge, CurrentPolarity);
+		PreviousChargeValue = Charge;
+	}
+
+	if (CurrentPolarity != PreviousPolarity)
+	{
+		UpdateChargeOverlay(CurrentPolarity);
+		PreviousPolarity = CurrentPolarity;
+	}
+}
+
+void AEMFPhysicsProp::UpdateChargeOverlay(uint8 NewPolarity)
+{
+	if (!bUseChargeOverlay || !PropMesh)
+	{
+		return;
+	}
+
+	UMaterialInterface* TargetMaterial = nullptr;
+
+	switch (NewPolarity)
+	{
+	case 0:
+		TargetMaterial = NeutralChargeOverlayMaterial;
+		break;
+	case 1:
+		TargetMaterial = PositiveChargeOverlayMaterial;
+		break;
+	case 2:
+		TargetMaterial = NegativeChargeOverlayMaterial;
+		break;
+	}
+
+	PropMesh->SetOverlayMaterial(TargetMaterial);
 }
 
 // ==================== Force Filtering ====================

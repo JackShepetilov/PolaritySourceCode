@@ -161,10 +161,11 @@ bool AShooterWeapon_Laser::PerformBeamTrace(FHitResult& OutHit, FVector& OutBeam
 	// Determine max pawn trace distance (don't go past walls)
 	const FVector PawnTraceEnd = bHitWall ? WallHit.ImpactPoint : TraceEnd;
 
-	// Trace 2: Pawns (ECC_Pawn) - line trace by object type
+	// Trace 2: Pawns + PhysicsBody (ECC_Pawn, ECC_PhysicsBody) - line trace by object type
 	FHitResult PawnHit;
 	FCollisionObjectQueryParams PawnObjectParams;
 	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+	PawnObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody);
 
 	const bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
 		PawnHit,
@@ -698,11 +699,12 @@ bool AShooterWeapon_Laser::PerformSweepTrace(const FVector& Direction, FHitResul
 		WallHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams
 	);
 
-	// Trace 2: Pawns (limited by wall distance)
+	// Trace 2: Pawns + PhysicsBody (limited by wall distance)
 	const FVector PawnTraceEnd = bHitWall ? WallHit.ImpactPoint : TraceEnd;
 	FHitResult PawnHit;
 	FCollisionObjectQueryParams PawnObjectParams;
 	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+	PawnObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody);
 
 	const bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
 		PawnHit, TraceStart, PawnTraceEnd, PawnObjectParams, QueryParams

@@ -15,9 +15,11 @@ class AEMFChannelingPlateActor;
 class AShooterNPC;
 class UNiagaraSystem;
 class USoundBase;
+class UMaterialInterface;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropDeath, AEMFPhysicsProp*, Prop, AActor*, Killer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*, Prop, float, Damage, AActor*, DamageCauser);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropChargeChanged, float, NewCharge, uint8, NewPolarity);
 
 /**
  * Physics-simulated prop with full EMF system integration.
@@ -39,11 +41,7 @@ public:
 
 	// ==================== Components ====================
 
-	/** Root scene component (stable root for future mesh swaps) */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<USceneComponent> SceneRoot;
-
-	/** Physics mesh (simulates physics, generates hit events) */
+	/** Physics mesh — root component (simulates physics, generates hit events) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> PropMesh;
 
@@ -138,6 +136,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision Damage|Effects", meta = (ClampMin = "0.1", ClampMax = "10.0"))
 	float EMFDischargeVFXScale = 1.0f;
 
+	// ==================== Charge Overlay Materials ====================
+
+	/** If true, overlay material will be applied based on charge state */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay")
+	bool bUseChargeOverlay = false;
+
+	/** Overlay material to apply when charge is neutral (near zero) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> NeutralChargeOverlayMaterial;
+
+	/** Overlay material to apply when charge is positive */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> PositiveChargeOverlayMaterial;
+
+	/** Overlay material to apply when charge is negative */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Charge Overlay", meta = (EditCondition = "bUseChargeOverlay"))
+	TObjectPtr<UMaterialInterface> NegativeChargeOverlayMaterial;
+
 	// ==================== Melee Charge Transfer ====================
 
 	/** Charge added to prop when hit by melee (opposite sign to attacker's charge) */
@@ -202,6 +218,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnPropDamaged OnPropDamaged;
 
+	/** Called when charge value changes (for BP overlay/VFX) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnPropChargeChanged OnChargeChanged;
+
 	// ==================== Public API ====================
 
 	/** Get current charge */
@@ -264,6 +284,11 @@ private:
 	bool bIsDead = false;
 	float LastCollisionDamageTime = -1.0f;
 
+	// ==================== Charge Tracking State ====================
+
+	float PreviousChargeValue = 0.0f;
+	uint8 PreviousPolarity = 0;
+
 	// ==================== Channeling Capture State ====================
 
 	UPROPERTY()
@@ -287,6 +312,12 @@ private:
 
 	/** Called when HP reaches zero */
 	void Die(AActor* Killer);
+
+	/** Update charge tracking: fire delegates and update overlay */
+	void UpdateChargeTracking();
+
+	/** Update overlay material based on current charge polarity */
+	void UpdateChargeOverlay(uint8 NewPolarity);
 
 	/** Get force multiplier for a given source owner type */
 	float GetForceMultiplierForOwnerType(EEMSourceOwnerType OwnerType) const;
