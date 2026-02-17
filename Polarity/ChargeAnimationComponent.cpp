@@ -734,15 +734,12 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 		return;
 	}
 
-	// Charge sign validation: only capture opposite-charged or neutral props
+	// Charge validation: only capture charged props with OPPOSITE sign
+	// Neutral props can't be captured (no EM interaction), same-sign are repelled
 	const float PropCharge = Prop->GetCharge();
-	if (!FMath::IsNearlyZero(PropCharge))
+	if (FMath::IsNearlyZero(PropCharge) || PropCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
 	{
-		// Prop must have OPPOSITE sign to plate charge to be captured (attract)
-		if (PropCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
-		{
-			return; // Same sign — repel, don't capture
-		}
+		return;
 	}
 
 	// Release previous target if any

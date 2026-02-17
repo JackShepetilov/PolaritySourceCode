@@ -306,6 +306,14 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 			const float CounterForceZ = -GravityZ * GravityCounterStrength * CaptureStrength * PhysMass;
 			PropMesh->AddForce(FVector(0.0f, 0.0f, CounterForceZ));
 		}
+
+		// Spring force: pull prop toward plate center
+		if (CaptureSpringStiffness > 0.0f)
+		{
+			const FVector ToPlate = PlatePos - Position;
+			const FVector SpringForce = ToPlate.GetSafeNormal() * CaptureSpringStiffness * CaptureStrength * PhysMass;
+			PropMesh->AddForce(SpringForce);
+		}
 	}
 }
 

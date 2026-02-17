@@ -194,6 +194,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured"))
 	float GravityCounterStrength = 1.0f;
 
+	/** Spring stiffness for pulling prop toward plate center (units/s²). Prevents prop from hanging below plate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "100.0", EditCondition = "bCanBeCaptured"))
+	float CaptureSpringStiffness = 15.0f;
+
 	/** Minimum CaptureStrength to stay captured */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured"))
 	float CaptureMinStrength = 0.05f;
