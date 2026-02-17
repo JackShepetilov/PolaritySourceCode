@@ -261,8 +261,10 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	float Charge = GetCharge();
 	float Mass = GetMass();
 
-	// Pre-calculate squared max distance for faster comparison
+	// Pre-calculate squared distances for faster comparison
 	const float MaxDistSq = MaxSourceDistance * MaxSourceDistance;
+	const float OppositeChargeMinDistSq = bEnableOppositeChargeDistanceCutoff
+		? OppositeChargeMinDistance * OppositeChargeMinDistance : 0.0f;
 
 	// Calculate Lorentz force from each source individually with multipliers
 	FVector TotalForce = FVector::ZeroVector;
@@ -295,6 +297,18 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		if (DistSq > MaxDistSq)
 		{
 			continue;
+		}
+
+		// Opposite-charge distance cutoff: skip sources too close with opposite charge
+		// Prevents extreme forces from Coulomb 1/r² singularity
+		if (bEnableOppositeChargeDistanceCutoff && DistSq < OppositeChargeMinDistSq)
+		{
+			const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
+			const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
+			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
+			{
+				continue;
+			}
 		}
 
 		// Identify plate sources (player-owned finite plates from channeling)
@@ -631,6 +645,41 @@ bool UEMFVelocityModifier::IsSourceEffectivelyZero(const FEMSourceDescription& S
 		// For unknown/custom types, check legacy Charge field as fallback
 		return FMath::IsNearlyZero(Source.PointChargeParams.Charge);
 	}
+}
+
+int32 UEMFVelocityModifier::GetSourceEffectiveChargeSign(const FEMSourceDescription& Source)
+{
+	float EffectiveCharge = 0.0f;
+
+	switch (Source.SourceType)
+	{
+	case EEMSourceType::PointCharge:
+		EffectiveCharge = Source.PointChargeParams.Charge;
+		break;
+	case EEMSourceType::LineCharge:
+		EffectiveCharge = Source.LineChargeParams.LinearChargeDensity;
+		break;
+	case EEMSourceType::ChargedRing:
+		EffectiveCharge = Source.RingParams.TotalCharge;
+		break;
+	case EEMSourceType::ChargedSphere:
+		EffectiveCharge = Source.SphereParams.TotalCharge;
+		break;
+	case EEMSourceType::ChargedBall:
+		EffectiveCharge = Source.BallParams.TotalCharge;
+		break;
+	case EEMSourceType::InfinitePlate:
+	case EEMSourceType::FinitePlate:
+		EffectiveCharge = Source.PlateParams.SurfaceChargeDensity;
+		break;
+	default:
+		// Magnetic sources, dielectrics, grounded conductors — no charge sign concept
+		return 0;
+	}
+
+	if (EffectiveCharge > KINDA_SMALL_NUMBER) return 1;
+	if (EffectiveCharge < -KINDA_SMALL_NUMBER) return -1;
+	return 0;
 }
 
 // ==================== Viscous Capture API ====================

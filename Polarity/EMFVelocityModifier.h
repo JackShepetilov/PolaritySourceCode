@@ -129,6 +129,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float UnknownForceMultiplier = 1.0f;
 
+	/** Enable minimum distance cutoff for opposite-charge sources.
+	 *  When enabled, sources closer than OppositeChargeMinDistance with opposite charge sign
+	 *  are ignored, preventing extreme forces from Coulomb 1/r² singularity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	bool bEnableOppositeChargeDistanceCutoff = false;
+
+	/** Minimum distance (cm) for opposite-charge force cutoff. Sources with opposite charge
+	 *  closer than this are ignored entirely. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "1.0", Units = "cm", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
+	float OppositeChargeMinDistance = 50.0f;
+
 	// ==================== Debug ====================
 
 	/** Рисовать debug стрелки для сил и полей */
@@ -353,6 +364,9 @@ private:
 	 *  Handles different source types: PointCharge, LineCharge, CurrentWire, etc.
 	 *  @return true if source produces no force (zero charge/current/field) */
 	static bool IsSourceEffectivelyZero(const FEMSourceDescription& Source);
+
+	/** Get effective charge sign of source (+1, -1, or 0 for magnetic/neutral) */
+	static int32 GetSourceEffectiveChargeSign(const FEMSourceDescription& Source);
 
 	// ==================== Viscous Capture State ====================
 
