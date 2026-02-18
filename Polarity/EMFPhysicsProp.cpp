@@ -709,6 +709,8 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			*GetName(), FinalDamage, FinalRadius, FinalVFXScale, DamageMultiplier, RadiusMultiplier, VFXScaleMultiplier);
 	}
 
+	OnPropExploded.Broadcast(this, ExplosionLocation, DamageMultiplier);
+
 	// Kill the prop
 	Die(this);
 }

@@ -20,6 +20,7 @@ class UMaterialInterface;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropDeath, AEMFPhysicsProp*, Prop, AActor*, Killer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*, Prop, float, Damage, AActor*, DamageCauser);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropChargeChanged, float, NewCharge, uint8, NewPolarity);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropExploded, AEMFPhysicsProp*, Prop, FVector, Location, float, DamageMultiplier);
 
 /**
  * Physics-simulated prop with full EMF system integration.
@@ -292,6 +293,10 @@ public:
 	/** Called when charge value changes (for BP overlay/VFX) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnPropChargeChanged OnChargeChanged;
+
+	/** Called when prop explodes (for BP camera shake, particles, etc.) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnPropExploded OnPropExploded;
 
 	// ==================== Public API ====================
 
