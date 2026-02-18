@@ -664,7 +664,11 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 	// Radial damage
 	if (FinalDamage > 0.0f && FinalRadius > 0.0f)
 	{
-		TSubclassOf<UDamageType> DamageClass = ExplosionDamageType ? ExplosionDamageType : UDamageType::StaticClass();
+		TSubclassOf<UDamageType> DamageClass = ExplosionDamageType;
+		if (!DamageClass)
+		{
+			DamageClass = UDamageType::StaticClass();
+		}
 
 		TArray<AActor*> IgnoredActors;
 		IgnoredActors.Add(this);
