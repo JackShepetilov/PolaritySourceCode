@@ -324,9 +324,9 @@ private:
 	/** Apply viscous capture forces when held by channeling plate */
 	void UpdateCaptureForces(float DeltaTime);
 
-	/** Handle overlap with other actors (damage to NPCs) */
+	/** Handle blocking collision with other actors (damage to NPCs) */
 	UFUNCTION()
-	void OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+	void OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
 
 	/** Called when HP reaches zero */
 	void Die(AActor* Killer);

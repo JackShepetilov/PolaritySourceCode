@@ -15,6 +15,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "DrawDebugHelpers.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 
 AEMFPhysicsProp::AEMFPhysicsProp()
 {
@@ -25,9 +26,8 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	SetRootComponent(PropMesh);
 	PropMesh->SetSimulatePhysics(true);
 	PropMesh->SetCollisionProfileName(TEXT("PhysicsActor"));
-	PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
-	PropMesh->SetGenerateOverlapEvents(true);
 	PropMesh->BodyInstance.bUseCCD = true;
+	PropMesh->BodyInstance.bNotifyRigidBodyCollision = true;
 
 	// EMF field component
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
@@ -51,11 +51,18 @@ void AEMFPhysicsProp::BeginPlay()
 		FieldComponent->SetSourceDescription(Desc);
 	}
 
-	// Sync physics body mass with EMF mass
+	// Sync physics body mass with EMF mass + collision setup
 	if (PropMesh)
 	{
 		PropMesh->SetMassOverrideInKg(NAME_None, DefaultMass, true);
-		PropMesh->OnComponentBeginOverlap.AddDynamic(this, &AEMFPhysicsProp::OnPropOverlap);
+		PropMesh->OnComponentHit.AddDynamic(this, &AEMFPhysicsProp::OnPropHit);
+
+		// Zero-restitution physics material: prop stops on contact instead of bouncing
+		UPhysicalMaterial* PropPhysMat = NewObject<UPhysicalMaterial>(this);
+		PropPhysMat->Restitution = 0.0f;
+		PropPhysMat->Friction = 0.5f;
+		PropPhysMat->RestitutionCombineMode = EFrictionCombineMode::Min;
+		PropMesh->SetPhysMaterialOverride(PropPhysMat);
 	}
 }
 
@@ -328,7 +335,14 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 			PropMesh->AddForce(PlateNormal * PlateForce.Size());
 		}
-		// No gravity compensation in reverse mode — prop launches freely
+
+		// Per-frame tangential damping: remove sideways velocity from gravity/other forces
+		const FVector CurrentVel = PropMesh->GetPhysicsLinearVelocity();
+		const float FwdSpeed = FVector::DotProduct(CurrentVel, PlateNormal);
+		const FVector Tangential = CurrentVel - FwdSpeed * PlateNormal;
+		const float DampingFactor = 1.0f - FMath::Exp(-ViscosityCoefficient * CaptureStrength * DeltaTime);
+		const FVector TangentialDamping = -Tangential * DampingFactor * PhysMass / FMath::Max(DeltaTime, SMALL_NUMBER);
+		PropMesh->AddForce(TangentialDamping);
 	}
 	else
 	{
@@ -358,8 +372,8 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 // ==================== Collision Damage ====================
 
-void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
+void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
 	if (!bDealCollisionDamage || !OtherActor || bIsDead)
 	{
@@ -407,8 +421,7 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		}
 	}
 
-	// Impact point: use midpoint between actors (overlap doesn't provide exact contact)
-	const FVector ImpactPoint = (GetActorLocation() + HitNPC->GetActorLocation()) * 0.5f;
+	const FVector ImpactPoint = Hit.ImpactPoint;
 
 	// Apply kinetic damage
 	if (KineticDamage > 0.0f)
