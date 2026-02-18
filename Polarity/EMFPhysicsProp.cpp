@@ -31,8 +31,8 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 
 	// Limit depenetration velocity: prevents violent impulse when physics body touches kinematic capsule
 	// Default is huge (~infinity), causing prop to fly across map on contact with player
-	PropMesh->BodyInstance.bOverrideMaxDepenetrationVelocity = true;
-	PropMesh->BodyInstance.MaxDepenetrationVelocity = 100.0f;  // cm/s — gentle push instead of explosion
+	// SetMaxDepenetrationVelocity implicitly enables the override
+	PropMesh->BodyInstance.SetMaxDepenetrationVelocity(100.0f);  // cm/s — gentle push instead of explosion
 
 	// EMF field component
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
