@@ -314,6 +314,7 @@ private:
 	FVector PreviousPlatePosition = FVector::ZeroVector;
 	bool bHasPreviousPlatePosition = false;
 	float WeakCaptureTimer = 0.0f;
+	bool bReverseLaunchInitialized = false;
 
 	// ==================== Internal Methods ====================
 

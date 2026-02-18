@@ -217,6 +217,7 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 	CapturingPlate = Plate;
 	WeakCaptureTimer = 0.0f;
 	bHasPreviousPlatePosition = false;
+	bReverseLaunchInitialized = false;
 }
 
 void AEMFPhysicsProp::ReleasedFromCapture()
@@ -224,6 +225,7 @@ void AEMFPhysicsProp::ReleasedFromCapture()
 	CapturingPlate.Reset();
 	bHasPreviousPlatePosition = false;
 	WeakCaptureTimer = 0.0f;
+	bReverseLaunchInitialized = false;
 }
 
 void AEMFPhysicsProp::DetachFromPlate()
@@ -305,9 +307,13 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 		// Reverse mode: direct velocity correction (mirrors NPC velocity-based damping)
 		const FVector PlateNormal = Plate->GetPlateNormal();
 
-		// Zero all velocity — launch force will set the correct direction.
-		// Projecting onto PlateNormal caused sideways teleportation when camera rotated between frames.
-		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+		// On first reverse tick: zero all velocity to prevent sideways teleportation
+		// (projecting onto changing PlateNormal caused lateral drift each frame)
+		if (!bReverseLaunchInitialized)
+		{
+			PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+			bReverseLaunchInitialized = true;
+		}
 
 		// Apply launch force along plate normal (camera forward)
 		const float PropCharge = GetCharge();
