@@ -467,6 +467,15 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	float MaxDistance = bHitWall ? WallHitResult.Distance : SegmentMaxDistance;
 	FVector BeamEnd = bHitWall ? WallHitResult.ImpactPoint : End;
 
+	// DEBUG: Log what the Visibility line trace hit (helps diagnose EMFPhysicsProp hits)
+	if (bHitWall && WallHitResult.GetActor())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Hitscan DEBUG] Visibility trace hit: %s (Class: %s) at dist=%.0f"),
+			*WallHitResult.GetActor()->GetName(),
+			*WallHitResult.GetActor()->GetClass()->GetName(),
+			WallHitResult.Distance);
+	}
+
 #if DEBUG_CONE_HITSCAN
 	// ===== DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° =====
 	const float DebugDuration = 2.0f;

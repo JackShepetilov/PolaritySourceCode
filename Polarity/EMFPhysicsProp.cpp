@@ -453,6 +453,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	if (bCanExplode && bIsInReverseFlight && !bHasExploded && !bIsDead && PropMesh)
 	{
 		const float Speed = PropMesh->GetPhysicsLinearVelocity().Size();
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s::OnPropHit collision with %s, Speed=%.0f, Threshold=%.0f"),
+			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), Speed, ExplosionSpeedThreshold);
 		if (Speed >= ExplosionSpeedThreshold)
 		{
 			Explode(1.0f, 1.0f, 1.0f);
@@ -463,6 +465,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	// End reverse flight state on any blocking collision (wall, floor, etc.)
 	if (bIsInReverseFlight)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: bIsInReverseFlight set to FALSE due to collision with %s"),
+			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"));
 		bIsInReverseFlight = false;
 	}
 }
@@ -575,17 +579,33 @@ float AEMFPhysicsProp::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 
+	// DEBUG: Log ALL incoming damage to this prop
+	UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s::TakeDamage: Damage=%.1f, DamageCauser=%s, bCanExplode=%d, bIsInReverseFlight=%d, bHasExploded=%d, bIsDead=%d, DamageType=%s"),
+		*GetName(), Damage,
+		DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"),
+		bCanExplode, bIsInReverseFlight, bHasExploded, bIsDead,
+		DamageEvent.DamageTypeClass ? *DamageEvent.DamageTypeClass->GetName() : TEXT("NULL"));
+
 	// Shot-triggered detonation: hitscan hit (non-melee) during reverse flight = 2x explosion
 	if (bCanExplode && bIsInReverseFlight && !bHasExploded)
 	{
 		const bool bIsMeleeDamage = DamageEvent.DamageTypeClass &&
 			DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass());
 
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Shot-detonation check PASSED (bCanExplode && bIsInReverseFlight && !bHasExploded). bIsMeleeDamage=%d"),
+			*GetName(), bIsMeleeDamage);
+
 		if (!bIsMeleeDamage)
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: >>> TRIGGERING EXPLOSION 2x! <<<"), *GetName());
 			Explode(2.0f, 2.0f, 2.0f);
 			return ActualDamage;
 		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Shot-detonation check FAILED. bCanExplode=%d, bIsInReverseFlight=%d, bHasExploded=%d"),
+			*GetName(), bCanExplode, bIsInReverseFlight, bHasExploded);
 	}
 
 	// Melee charge transfer
