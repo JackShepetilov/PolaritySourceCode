@@ -449,7 +449,7 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		}
 	}
 
-	const FVector ImpactPoint = bFromSweep ? SweepResult.ImpactPoint : OtherActor->GetActorLocation();
+	const FVector ImpactPoint = bFromSweep ? FVector(SweepResult.ImpactPoint) : OtherActor->GetActorLocation();
 
 	// Apply kinetic damage
 	if (KineticDamage > 0.0f)
