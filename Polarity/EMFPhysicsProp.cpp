@@ -174,7 +174,7 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 
 	// Proximity damping: viscous braking when inside opposite-charge cutoff distance
 	// Prevents prop from passing through the source after EM force is suppressed
-	if (bShouldApplyProximityDamping && !CapturingPlate.IsValid() && OppositeChargeProximityDamping > 0.0f)
+	if (bShouldApplyProximityDamping && OppositeChargeProximityDamping > 0.0f)
 	{
 		const float PhysMass = PropMesh->GetMass();
 		const FVector DampingForce = -Velocity * OppositeChargeProximityDamping * PhysMass;
@@ -305,10 +305,9 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 		// Reverse mode: direct velocity correction (mirrors NPC velocity-based damping)
 		const FVector PlateNormal = Plate->GetPlateNormal();
 
-		// Zero tangential velocity directly, keep only forward (normal) component
-		const float NormalSpeed = FVector::DotProduct(PropVelocity, PlateNormal);
-		const FVector CorrectedVelocity = PlateNormal * FMath::Max(NormalSpeed, 0.0f);
-		PropMesh->SetPhysicsLinearVelocity(CorrectedVelocity);
+		// Zero all velocity — launch force will set the correct direction.
+		// Projecting onto PlateNormal caused sideways teleportation when camera rotated between frames.
+		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
 
 		// Apply launch force along plate normal (camera forward)
 		const float PropCharge = GetCharge();
@@ -319,7 +318,7 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 			SingleSource.Add(PlateSource);
 
 			const FVector PlateForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
-				PropCharge, Position, CorrectedVelocity, SingleSource, true);
+				PropCharge, Position, FVector::ZeroVector, SingleSource, true);
 
 			PropMesh->AddForce(PlateNormal * PlateForce.Size());
 		}
