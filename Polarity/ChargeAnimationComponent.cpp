@@ -342,6 +342,20 @@ bool UChargeAnimationComponent::IsAnimating() const
 	       CurrentState != EChargeAnimationState::Cooldown;
 }
 
+bool UChargeAnimationComponent::IsBlockingFiring() const
+{
+	// Allow firing during Channeling, ChannelingRelease, and ReverseChanneling
+	if (CurrentState == EChargeAnimationState::Channeling ||
+	    CurrentState == EChargeAnimationState::ChannelingRelease ||
+	    CurrentState == EChargeAnimationState::ReverseChanneling)
+	{
+		return false;
+	}
+
+	// All other active phases block firing
+	return IsAnimating();
+}
+
 bool UChargeAnimationComponent::IsChanneling() const
 {
 	return CurrentState == EChargeAnimationState::Channeling ||

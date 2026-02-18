@@ -392,6 +392,8 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 		{
 			PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
 			bReverseLaunchInitialized = true;
+			bIsInReverseFlight = true;
+			bHasExploded = false;
 		}
 
 		// Apply launch force along plate normal (camera forward)
@@ -447,8 +449,22 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// Block collisions: walls, floors, other physics bodies (NOT Pawns — those are Overlap)
-	// Reserved for future effects (impact sounds on walls, etc.)
+	// Explosive impact: detonate on high-speed collision during reverse channeling flight
+	if (bCanExplode && bIsInReverseFlight && !bHasExploded && !bIsDead && PropMesh)
+	{
+		const float Speed = PropMesh->GetPhysicsLinearVelocity().Size();
+		if (Speed >= ExplosionSpeedThreshold)
+		{
+			Explode(1.0f, 1.0f, 1.0f);
+			return;
+		}
+	}
+
+	// End reverse flight state on any blocking collision (wall, floor, etc.)
+	if (bIsInReverseFlight)
+	{
+		bIsInReverseFlight = false;
+	}
 }
 
 void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
@@ -559,6 +575,19 @@ float AEMFPhysicsProp::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 
+	// Shot-triggered detonation: hitscan hit (non-melee) during reverse flight = 2x explosion
+	if (bCanExplode && bIsInReverseFlight && !bHasExploded)
+	{
+		const bool bIsMeleeDamage = DamageEvent.DamageTypeClass &&
+			DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass());
+
+		if (!bIsMeleeDamage)
+		{
+			Explode(2.0f, 2.0f, 2.0f);
+			return ActualDamage;
+		}
+	}
+
 	// Melee charge transfer
 	if (DamageEvent.DamageTypeClass &&
 		DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
@@ -613,6 +642,71 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 	{
 		ReleasedFromCapture();
 	}
+}
+
+// ==================== Explosive Impact ====================
+
+void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, float VFXScaleMultiplier)
+{
+	if (bHasExploded || bIsDead)
+	{
+		return;
+	}
+
+	bHasExploded = true;
+	bIsInReverseFlight = false;
+
+	const FVector ExplosionLocation = GetActorLocation();
+	const float FinalDamage = ExplosionDamage * DamageMultiplier;
+	const float FinalRadius = ExplosionRadius * RadiusMultiplier;
+	const float FinalVFXScale = ExplosionVFXScale * VFXScaleMultiplier;
+
+	// Radial damage
+	if (FinalDamage > 0.0f && FinalRadius > 0.0f)
+	{
+		TSubclassOf<UDamageType> DamageClass = ExplosionDamageType ? ExplosionDamageType : UDamageType::StaticClass();
+
+		TArray<AActor*> IgnoredActors;
+		IgnoredActors.Add(this);
+
+		UGameplayStatics::ApplyRadialDamageWithFalloff(
+			GetWorld(),
+			FinalDamage,
+			FinalDamage * 0.1f,  // MinimumDamage = 10% at edge
+			ExplosionLocation,
+			FinalRadius * 0.3f,  // DamageInnerRadius (full damage zone)
+			FinalRadius,         // DamageOuterRadius
+			ExplosionDamageFalloff,
+			DamageClass,
+			IgnoredActors,
+			this,               // DamageCauser
+			nullptr             // InstigatedBy
+		);
+	}
+
+	// VFX
+	if (ExplosionVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(), ExplosionVFX, ExplosionLocation,
+			FRotator::ZeroRotator, FVector(FinalVFXScale),
+			true, true, ENCPoolMethod::None);
+	}
+
+	// SFX
+	if (ExplosionSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ExplosionSound, ExplosionLocation);
+	}
+
+	if (bLogEMForces)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s EXPLODED: Damage=%.0f Radius=%.0f VFXScale=%.1f (multipliers: %.1fx/%.1fx/%.1fx)"),
+			*GetName(), FinalDamage, FinalRadius, FinalVFXScale, DamageMultiplier, RadiusMultiplier, VFXScaleMultiplier);
+	}
+
+	// Kill the prop
+	Die(this);
 }
 
 // ==================== Charge API ====================

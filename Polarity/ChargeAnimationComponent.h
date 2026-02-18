@@ -261,6 +261,14 @@ public:
 	bool IsAnimating() const;
 
 	/**
+	 * Check if currently blocking weapon fire.
+	 * Unlike IsAnimating(), this returns false during Channeling and ReverseChanneling
+	 * so the player can shoot while using charge abilities.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Charge")
+	bool IsBlockingFiring() const;
+
+	/**
 	 * Check if currently channeling (Channeling or ReverseChanneling)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Charge")

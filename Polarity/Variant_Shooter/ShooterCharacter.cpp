@@ -327,8 +327,8 @@ void AShooterCharacter::DoStartFiring()
 		return;
 	}
 
-	// Don't fire if charge animating
-	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
+	// Don't fire if charge animating (but allow during channeling/reverse channeling)
+	if (ChargeAnimationComponent && ChargeAnimationComponent->IsBlockingFiring())
 	{
 		return;
 	}

@@ -80,7 +80,7 @@ public:
 
 	/** Friction coefficient for EMF forces against surfaces (μ). Higher = harder to drag.
 	 *  Force needed to slide = μ * Mass * Gravity. At μ=1.5, 10 kg prop needs ~14700 N horizontal EMF force. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Surface Friction", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bApplyEMFSurfaceFriction"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Surface Friction", meta = (ClampMin = "0.0", EditCondition = "bApplyEMFSurfaceFriction"))
 	float EMFSurfaceFriction = 1.5f;
 
 	/** Downward trace distance to detect ground surface (cm) */
@@ -164,6 +164,44 @@ public:
 	/** Scale for EMF discharge VFX */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision Damage|Effects", meta = (ClampMin = "0.1", ClampMax = "10.0"))
 	float EMFDischargeVFXScale = 1.0f;
+
+	// ==================== Explosive Impact ====================
+
+	/** If true, prop explodes on high-speed collision during reverse channeling flight */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact")
+	bool bCanExplode = false;
+
+	/** Minimum speed (cm/s) during reverse flight to trigger explosion on collision */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float ExplosionSpeedThreshold = 500.0f;
+
+	/** Base radial damage dealt by explosion */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float ExplosionDamage = 50.0f;
+
+	/** Base explosion radius (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bCanExplode"))
+	float ExplosionRadius = 300.0f;
+
+	/** Damage type for explosion */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (EditCondition = "bCanExplode"))
+	TSubclassOf<UDamageType> ExplosionDamageType;
+
+	/** VFX to spawn on explosion */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Effects", meta = (EditCondition = "bCanExplode"))
+	TObjectPtr<UNiagaraSystem> ExplosionVFX;
+
+	/** Base scale for explosion VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Effects", meta = (ClampMin = "0.1", EditCondition = "bCanExplode"))
+	float ExplosionVFXScale = 1.0f;
+
+	/** Sound to play on explosion */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Effects", meta = (EditCondition = "bCanExplode"))
+	TObjectPtr<USoundBase> ExplosionSound;
+
+	/** Damage falloff exponent (1 = linear, 2 = quadratic). Controls how damage decreases with distance from center. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bCanExplode"))
+	float ExplosionDamageFalloff = 1.0f;
 
 	// ==================== Charge Overlay Materials ====================
 
@@ -281,6 +319,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetHealthPercent() const { return MaxHP > 0.0f ? CurrentHP / MaxHP : 0.0f; }
 
+	/** Is this prop currently in reverse channeling flight? */
+	UFUNCTION(BlueprintPure, Category = "Explosive Impact")
+	bool IsInReverseFlight() const { return bIsInReverseFlight; }
+
+	/**
+	 * Trigger explosion at current location. Deals radial damage, spawns VFX/SFX, kills the prop.
+	 * @param DamageMultiplier  Multiplier for damage (e.g. 2.0 for shot-triggered detonation)
+	 * @param RadiusMultiplier  Multiplier for explosion radius
+	 * @param VFXScaleMultiplier  Multiplier for VFX scale
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Explosive Impact")
+	void Explode(float DamageMultiplier = 1.0f, float RadiusMultiplier = 1.0f, float VFXScaleMultiplier = 1.0f);
+
 	// ==================== Channeling Capture API ====================
 
 	/** Mark this prop as captured by the given plate */
@@ -316,6 +367,12 @@ protected:
 private:
 	bool bIsDead = false;
 	float LastCollisionDamageTime = -1.0f;
+
+	/** True while prop is being launched by reverse channeling */
+	bool bIsInReverseFlight = false;
+
+	/** True if prop has already exploded (prevents double explosion) */
+	bool bHasExploded = false;
 
 	// ==================== Charge Tracking State ====================
 
