@@ -476,6 +476,18 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			WallHitResult.Distance);
 	}
 
+	// Direct damage to non-Pawn physics actors hit by Visibility trace (e.g. EMFPhysicsProp).
+	// The cone sweep only queries ECC_Pawn, so PhysicsActor objects are invisible to it.
+	// Apply damage via the existing ApplyHitscanDamage path for these actors.
+	if (bHitWall && WallHitResult.GetActor() && !Cast<APawn>(WallHitResult.GetActor()))
+	{
+		AActor* WallActor = WallHitResult.GetActor();
+		if (WallActor->CanBeDamaged())
+		{
+			ApplyHitscanDamage(WallHitResult, RemainingEnergy, WallHitResult.Distance, 0.0f);
+		}
+	}
+
 #if DEBUG_CONE_HITSCAN
 	// ===== DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° =====
 	const float DebugDuration = 2.0f;
