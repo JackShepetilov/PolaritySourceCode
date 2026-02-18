@@ -29,9 +29,8 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	PropMesh->BodyInstance.bUseCCD = true;
 	PropMesh->BodyInstance.bNotifyRigidBodyCollision = true;
 
-	// Overlap with Pawns (player + NPC): no physics impulse, damage via OnPropOverlap
-	// Block remains for walls/floors/other physics bodies (PhysicsActor profile default)
-	PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	// Default: Block on Pawn (normal physics collision when free)
+	// Switched to Overlap dynamically when captured (see SetCapturedByPlate/ReleasedFromCapture)
 	PropMesh->SetGenerateOverlapEvents(true);
 
 	// EMF field component
@@ -240,6 +239,9 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 		const FVector PlatePos = Plate->GetActorLocation();
 		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
 		SetActorLocation(PlatePos);
+
+		// Switch to Overlap with Pawns: no physics impulse while captured near player
+		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
 	}
 }
 
@@ -249,6 +251,12 @@ void AEMFPhysicsProp::ReleasedFromCapture()
 	bHasPreviousPlatePosition = false;
 	WeakCaptureTimer = 0.0f;
 	bReverseLaunchInitialized = false;
+
+	// Restore Block with Pawns: normal physics collision when free
+	if (PropMesh)
+	{
+		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	}
 }
 
 void AEMFPhysicsProp::DetachFromPlate()
