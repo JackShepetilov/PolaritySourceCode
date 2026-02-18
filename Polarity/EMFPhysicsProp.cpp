@@ -161,8 +161,9 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 		TotalForce += SourceForce * Multiplier;
 	}
 
-	// Suppress all non-plate forces during reverse channeling launch (mirrors NPC PassThrough behavior)
-	if (CapturingPlate.IsValid() && CapturingPlate.Get()->IsInReverseMode())
+	// Suppress all EM forces when captured (mirrors NPC PassThrough ≈ 0 at full capture)
+	// Spring + damping in UpdateCaptureForces handle positioning; external EM forces interfere
+	if (CapturingPlate.IsValid())
 	{
 		TotalForce = FVector::ZeroVector;
 	}
@@ -375,7 +376,19 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	if (!bDealCollisionDamage || !OtherActor || bIsDead)
+	if (!OtherActor || bIsDead)
+	{
+		return;
+	}
+
+	// Player capsule is kinematic — full impulse goes to prop, causing violent bounce.
+	// Zero prop velocity on Pawn contact to prevent flying across the map.
+	if (Cast<APawn>(OtherActor) && PropMesh)
+	{
+		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+	}
+
+	if (!bDealCollisionDamage)
 	{
 		return;
 	}
