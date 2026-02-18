@@ -29,6 +29,11 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	PropMesh->BodyInstance.bUseCCD = true;
 	PropMesh->BodyInstance.bNotifyRigidBodyCollision = true;
 
+	// Limit depenetration velocity: prevents violent impulse when physics body touches kinematic capsule
+	// Default is huge (~infinity), causing prop to fly across map on contact with player
+	PropMesh->BodyInstance.bOverrideMaxDepenetrationVelocity = true;
+	PropMesh->BodyInstance.MaxDepenetrationVelocity = 100.0f;  // cm/s — gentle push instead of explosion
+
 	// EMF field component
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
 }
@@ -226,6 +231,15 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 	WeakCaptureTimer = 0.0f;
 	bHasPreviousPlatePosition = false;
 	bReverseLaunchInitialized = false;
+
+	// Teleport prop to plate center and zero velocity — prop must START at plate position
+	// so spring/damping work from zero offset, and reverse launch fires in correct direction
+	if (PropMesh && PropMesh->IsSimulatingPhysics())
+	{
+		const FVector PlatePos = Plate->GetActorLocation();
+		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+		SetActorLocation(PlatePos);
+	}
 }
 
 void AEMFPhysicsProp::ReleasedFromCapture()
@@ -379,13 +393,6 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	if (!OtherActor || bIsDead)
 	{
 		return;
-	}
-
-	// Player capsule is kinematic — full impulse goes to prop, causing violent bounce.
-	// Zero prop velocity on Pawn contact to prevent flying across the map.
-	if (Cast<APawn>(OtherActor) && PropMesh)
-	{
-		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
 	}
 
 	if (!bDealCollisionDamage)
