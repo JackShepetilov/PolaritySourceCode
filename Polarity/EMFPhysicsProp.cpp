@@ -179,6 +179,54 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 		TotalForce = TotalForce.GetSafeNormal() * MaxEMForce;
 	}
 
+	// EMF-specific Coulomb friction: subtract friction force from tangential EMF component
+	// when prop rests on a surface. Does NOT affect normal physics interactions.
+	if (bApplyEMFSurfaceFriction && EMFSurfaceFriction > 0.0f && !TotalForce.IsNearlyZero())
+	{
+		FHitResult GroundHit;
+		FCollisionQueryParams GroundParams;
+		GroundParams.AddIgnoredActor(this);
+
+		const FVector TraceStart = Position;
+		const FVector TraceEnd = Position - FVector(0.0f, 0.0f, EMFGroundTraceDistance);
+
+		if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, GroundParams))
+		{
+			const float GravityZ = FMath::Abs(GetWorld()->GetGravityZ());
+			const float PhysMass = PropMesh->GetMass();
+
+			// Normal force = mass * gravity * cos(surface angle)
+			const float NormalForce = PhysMass * GravityZ * FMath::Abs(GroundHit.Normal.Z);
+
+			// Tangential component of EMF force (parallel to surface)
+			const FVector NormalComponent = GroundHit.Normal * FVector::DotProduct(TotalForce, GroundHit.Normal);
+			const FVector TangentForce = TotalForce - NormalComponent;
+			const float TangentMag = TangentForce.Size();
+
+			const float FrictionMag = EMFSurfaceFriction * NormalForce;
+
+			if (FrictionMag >= TangentMag)
+			{
+				// Static friction: EMF force too weak to overcome — cancel tangential component
+				TotalForce = NormalComponent;
+			}
+			else
+			{
+				// Kinetic friction: reduce tangential EMF force by friction amount
+				TotalForce -= TangentForce.GetSafeNormal() * FrictionMag;
+			}
+
+			if (bDrawDebugForces && FrictionMag > 0.0f)
+			{
+				const FVector FrictionDir = TangentMag > KINDA_SMALL_NUMBER ? -TangentForce.GetSafeNormal() : FVector::ZeroVector;
+				DrawDebugDirectionalArrow(
+					GetWorld(), Position,
+					Position + FrictionDir * FMath::Min(FrictionMag * 0.01f, 100.0f),
+					6.0f, FColor::Yellow, false, -1.0f, 0, 2.0f);
+			}
+		}
+	}
+
 	// Apply as continuous force to physics body
 	if (!TotalForce.IsNearlyZero())
 	{

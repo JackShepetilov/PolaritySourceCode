@@ -71,6 +71,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Physics", meta = (ClampMin = "100.0", Units = "cm"))
 	float MaxSourceDistance = 10000.0f;
 
+	// ==================== EMF Surface Friction ====================
+
+	/** Apply Coulomb friction model against EMF forces when prop rests on a surface.
+	 *  Only affects EMF-driven sliding — normal physics friction is unchanged. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Surface Friction")
+	bool bApplyEMFSurfaceFriction = true;
+
+	/** Friction coefficient for EMF forces against surfaces (μ). Higher = harder to drag.
+	 *  Force needed to slide = μ * Mass * Gravity. At μ=1.5, 10 kg prop needs ~14700 N horizontal EMF force. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Surface Friction", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bApplyEMFSurfaceFriction"))
+	float EMFSurfaceFriction = 1.5f;
+
+	/** Downward trace distance to detect ground surface (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Surface Friction", meta = (ClampMin = "1.0", ClampMax = "50.0", Units = "cm", EditCondition = "bApplyEMFSurfaceFriction"))
+	float EMFGroundTraceDistance = 10.0f;
+
 	// ==================== Force Filtering ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
