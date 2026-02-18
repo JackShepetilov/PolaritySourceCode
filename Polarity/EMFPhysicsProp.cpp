@@ -29,10 +29,10 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	PropMesh->BodyInstance.bUseCCD = true;
 	PropMesh->BodyInstance.bNotifyRigidBodyCollision = true;
 
-	// Limit depenetration velocity: prevents violent impulse when physics body touches kinematic capsule
-	// Default is huge (~infinity), causing prop to fly across map on contact with player
-	// SetMaxDepenetrationVelocity implicitly enables the override
-	PropMesh->BodyInstance.SetMaxDepenetrationVelocity(100.0f);  // cm/s — gentle push instead of explosion
+	// Overlap with Pawns (player + NPC): no physics impulse, damage via OnPropOverlap
+	// Block remains for walls/floors/other physics bodies (PhysicsActor profile default)
+	PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	PropMesh->SetGenerateOverlapEvents(true);
 
 	// EMF field component
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
@@ -61,6 +61,7 @@ void AEMFPhysicsProp::BeginPlay()
 	{
 		PropMesh->SetMassOverrideInKg(NAME_None, DefaultMass, true);
 		PropMesh->OnComponentHit.AddDynamic(this, &AEMFPhysicsProp::OnPropHit);
+		PropMesh->OnComponentBeginOverlap.AddDynamic(this, &AEMFPhysicsProp::OnPropOverlap);
 
 		// Zero-restitution physics material: prop stops on contact instead of bouncing
 		UPhysicalMaterial* PropPhysMat = NewObject<UPhysicalMaterial>(this);
@@ -385,10 +386,17 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 	}
 }
 
-// ==================== Collision Damage ====================
+// ==================== Collision Callbacks ====================
 
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
+{
+	// Block collisions: walls, floors, other physics bodies (NOT Pawns — those are Overlap)
+	// Reserved for future effects (impact sounds on walls, etc.)
+}
+
+void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
 	if (!OtherActor || bIsDead)
 	{
@@ -415,7 +423,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	}
 
 	// Impact speed from prop's velocity
-	const FVector PropVelocity = PropMesh->GetPhysicsLinearVelocity();
+	const FVector PropVelocity = PropMesh ? PropMesh->GetPhysicsLinearVelocity() : FVector::ZeroVector;
 	const float ImpactSpeed = PropVelocity.Size();
 
 	// Kinetic damage
@@ -441,7 +449,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 		}
 	}
 
-	const FVector ImpactPoint = Hit.ImpactPoint;
+	const FVector ImpactPoint = bFromSweep ? SweepResult.ImpactPoint : OtherActor->GetActorLocation();
 
 	// Apply kinetic damage
 	if (KineticDamage > 0.0f)
@@ -478,7 +486,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 
 	if (bLogEMForces)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s hit NPC %s: Speed=%.0f, KineticDmg=%.1f, EMFDmg=%.1f"),
+		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s overlap NPC %s: Speed=%.0f, KineticDmg=%.1f, EMFDmg=%.1f"),
 			*GetName(), *HitNPC->GetName(), ImpactSpeed, KineticDamage, EMFDamage);
 	}
 }

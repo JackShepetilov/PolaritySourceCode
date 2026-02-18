@@ -324,9 +324,13 @@ private:
 	/** Apply viscous capture forces when held by channeling plate */
 	void UpdateCaptureForces(float DeltaTime);
 
-	/** Handle blocking collision with other actors (damage to NPCs) */
+	/** Handle blocking collision with walls/floors/physics bodies */
 	UFUNCTION()
 	void OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+
+	/** Handle overlap with Pawns (NPC damage — Pawns use ECR_Overlap to avoid physics impulse with player) */
+	UFUNCTION()
+	void OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 
 	/** Called when HP reaches zero */
 	void Die(AActor* Killer);
