@@ -150,58 +150,49 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
 	bool bLogForces = false;
 
-	// ==================== Viscous Capture ====================
+	// ==================== Capture (Hard Hold) ====================
 
-	/** Enable viscous damping near Player-owned FinitePlate sources (channeling plate).
-	 *  Damps NPC velocity RELATIVE to the plate, so captured NPCs hover and move with the player. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture")
+	/** Enable capture by channeling plate.
+	 *  When captured, NPC is pulled toward plate and held rigidly in place. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture")
 	bool bEnableViscousCapture = false;
 
-	/** Viscosity coefficient (damping strength). Higher = faster capture, stickier.
-	 *  Units: 1/s. Value of 10 ≈ 90% damped in ~0.23s. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
-	float ViscosityCoefficient = 10.0f;
+	/** Base pull-in speed (cm/s) when charges are minimal.
+	 *  Actual speed = BaseSpeed * (1 + ln(|q_player| * |q_npc| / NormCoeff)). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "100.0", ClampMax = "10000.0", Units = "cm/s", EditCondition = "bEnableViscousCapture"))
+	float CaptureBaseSpeed = 1500.0f;
 
-	/** Radius within which viscous capture activates (cm).
-	 *  Outside this radius, no viscosity is applied. Uses smoothstep falloff inside. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
+	/** Charge normalization coefficient for pull-in speed formula.
+	 *  Lower = faster at low charges, higher = needs more charge for same speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0", EditCondition = "bEnableViscousCapture"))
+	float CaptureChargeNormCoeff = 50.0f;
+
+	/** Distance (cm) at which NPC snaps to plate and enters hard hold.
+	 *  Below this, NPC position is locked to plate each frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "5.0", ClampMax = "200.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
+	float CaptureSnapDistance = 50.0f;
+
+	/** Maximum capture range (cm). Beyond this, auto-release triggers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
 	float CaptureRadius = 500.0f;
 
-	/** Counteract gravity when captured (prevents NPC from sinking below plate) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (EditCondition = "bEnableViscousCapture"))
-	bool bCounterGravityWhenCaptured = true;
-
-	/** Gravity counteraction strength (0-1). 1.0 = fully cancel gravity. Scales with distance falloff. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableViscousCapture && bCounterGravityWhenCaptured"))
-	float GravityCounterStrength = 1.0f;
-
-	/** Hooke spring stiffness pulling NPC toward plate center. Higher = snappier return.
-	 *  Force = ToPlate * Stiffness * CaptureStrength. 0 = no spring (damping only). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
-	float CaptureSpringStiffness = 5.0f;
-
 	/** Mark this NPC as captured by the given plate. Enters knockback + plays montage. */
-	UFUNCTION(BlueprintCallable, Category = "EMF|Viscous Capture")
+	UFUNCTION(BlueprintCallable, Category = "EMF|Capture")
 	void SetCapturedByPlate(AEMFChannelingPlateActor* Plate);
 
 	/** Release this NPC from capture. Exits knockback, stops montage. */
-	UFUNCTION(BlueprintCallable, Category = "EMF|Viscous Capture")
+	UFUNCTION(BlueprintCallable, Category = "EMF|Capture")
 	void ReleasedFromCapture();
 
 	/** Is this NPC currently captured by a plate? */
-	UFUNCTION(BlueprintPure, Category = "EMF|Viscous Capture")
+	UFUNCTION(BlueprintPure, Category = "EMF|Capture")
 	bool IsCapturedByPlate() const { return CapturingPlate.IsValid(); }
 
 	/** Detach from plate without exiting captured state (for plate swap during reverse channeling) */
 	void DetachFromPlate();
 
-	/** Minimum CaptureStrength to consider NPC as actively captured.
-	 *  Below this for CaptureReleaseTimeout seconds → auto-release. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableViscousCapture"))
-	float CaptureMinStrength = 0.05f;
-
-	/** Time (seconds) CaptureStrength must stay below CaptureMinStrength before auto-releasing NPC */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
+	/** Time (seconds) NPC must be outside CaptureRadius before auto-releasing */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
 	float CaptureReleaseTimeout = 0.5f;
 
 	// ==================== Events ====================
@@ -373,20 +364,24 @@ private:
 	/** Get effective charge sign of source (+1, -1, or 0 for magnetic/neutral) */
 	static int32 GetSourceEffectiveChargeSign(const FEMSourceDescription& Source);
 
-	// ==================== Viscous Capture State ====================
+	// ==================== Capture State ====================
 
 	/** Plate that captured this NPC (set via SetCapturedByPlate) */
 	UPROPERTY()
 	TWeakObjectPtr<AEMFChannelingPlateActor> CapturingPlate;
 
-	/** Previous frame plate position (for velocity calculation via finite difference) */
-	FVector PreviousPlatePosition = FVector::ZeroVector;
+	/** True when NPC reached plate and is rigidly held */
+	bool bHardHoldActive = false;
 
-	/** Whether we had a valid plate position last frame */
-	bool bHasPreviousPlatePosition = false;
-
-	/** Accumulated time that CaptureStrength has been below CaptureMinStrength */
+	/** Accumulated time that NPC has been outside CaptureRadius */
 	float WeakCaptureTimer = 0.0f;
+
+	/** Calculate pull-in speed based on player and NPC charges.
+	 *  Formula: BaseSpeed * max(1, 1 + ln(|q_player * q_npc| / NormCoeff)) */
+	float CalculateCapturePullSpeed() const;
+
+	/** Apply hard-hold capture logic: pull-in or rigid hold. Returns velocity delta to apply. */
+	FVector ComputeHardHoldDelta(float DeltaTime, const FVector& CurrentVelocity, AEMFChannelingPlateActor* Plate);
 
 	// ==================== Channeling Proxy State ====================
 
