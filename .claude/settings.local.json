@@ -68,7 +68,12 @@
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:karllewisdesign.com)",
       "WebFetch(domain:gameidea.org)",
-      "WebFetch(domain:www.neogaf.com)"
+      "WebFetch(domain:www.neogaf.com)",
+      "Bash(grep:*)",
+      "WebFetch(domain:notes.hzfishy.fr)",
+      "WebFetch(domain:venturousstudios.github.io)",
+      "WebFetch(domain:rystorm.com)",
+      "Bash(python -c:*)"
     ]
   }
 }
