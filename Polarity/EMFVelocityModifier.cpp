@@ -467,6 +467,13 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			// Normal capture: damp all relative velocity
 			ViscousDelta = -RelativeVelocity * DampingFactor;
 
+			// Hooke spring: pull NPC toward plate center (velocity-based, not force-based)
+			if (CaptureSpringStiffness > 0.0f)
+			{
+				const FVector ToPlate = NearestPlatePosition - Position;
+				ViscousDelta += ToPlate * CaptureSpringStiffness * CaptureStrength * DeltaTime;
+			}
+
 			// Gravity counteraction (scaled by capture strength)
 			if (bCounterGravityWhenCaptured)
 			{

@@ -175,6 +175,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableViscousCapture && bCounterGravityWhenCaptured"))
 	float GravityCounterStrength = 1.0f;
 
+	/** Hooke spring stiffness pulling NPC toward plate center. Higher = snappier return.
+	 *  Force = ToPlate * Stiffness * CaptureStrength. 0 = no spring (damping only). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Viscous Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
+	float CaptureSpringStiffness = 5.0f;
+
 	/** Mark this NPC as captured by the given plate. Enters knockback + plays montage. */
 	UFUNCTION(BlueprintCallable, Category = "EMF|Viscous Capture")
 	void SetCapturedByPlate(AEMFChannelingPlateActor* Plate);
