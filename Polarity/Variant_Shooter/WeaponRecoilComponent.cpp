@@ -308,9 +308,18 @@ void UWeaponRecoilComponent::UpdateCameraRecoilSpring(float DeltaTime)
 	float PrevPitch = CameraRecoilSpringPitch.Value;
 	float PrevYaw = CameraRecoilSpringYaw.Value;
 
-	// Update springs toward rest (0) — smoothly delivers queued recoil over 2-3 frames
-	CameraRecoilSpringPitch.Update(0.0f, Settings.CameraRecoilSpringStiffness, DeltaTime);
-	CameraRecoilSpringYaw.Update(0.0f, Settings.CameraRecoilSpringStiffness, DeltaTime);
+	// Sub-step the spring to prevent explosion on large DeltaTime (hitches, first frame, etc.)
+	// Euler integration of a stiff spring is unstable when dt is too large,
+	// causing massive single-frame camera kicks.
+	constexpr float MaxSubStep = 1.0f / 60.0f; // ~16.6ms max per step
+	float Remaining = DeltaTime;
+	while (Remaining > KINDA_SMALL_NUMBER)
+	{
+		float Step = FMath::Min(Remaining, MaxSubStep);
+		CameraRecoilSpringPitch.Update(0.0f, Settings.CameraRecoilSpringStiffness, Step);
+		CameraRecoilSpringYaw.Update(0.0f, Settings.CameraRecoilSpringStiffness, Step);
+		Remaining -= Step;
+	}
 
 	// Calculate delta this frame (how much the spring moved)
 	float DeltaPitch = CameraRecoilSpringPitch.Value - PrevPitch;
@@ -404,12 +413,18 @@ void UWeaponRecoilComponent::UpdateVisualKick(float DeltaTime)
 {
 	if (!Settings.bEnableVisualKick) return;
 
-	// Update all springs toward rest position (0)
-	// Springs naturally handle momentum, overshoot, and smooth recovery
-	KickSpringPitch.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
-	KickSpringYaw.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
-	KickSpringRoll.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
-	KickSpringBack.Update(0.0f, Settings.KickSpringStiffness, DeltaTime);
+	// Sub-step visual kick springs to prevent instability on large DeltaTime
+	constexpr float MaxSubStep = 1.0f / 60.0f;
+	float Remaining = DeltaTime;
+	while (Remaining > KINDA_SMALL_NUMBER)
+	{
+		float Step = FMath::Min(Remaining, MaxSubStep);
+		KickSpringPitch.Update(0.0f, Settings.KickSpringStiffness, Step);
+		KickSpringYaw.Update(0.0f, Settings.KickSpringStiffness, Step);
+		KickSpringRoll.Update(0.0f, Settings.KickSpringStiffness, Step);
+		KickSpringBack.Update(0.0f, Settings.KickSpringStiffness, Step);
+		Remaining -= Step;
+	}
 
 	// Read spring values into current weapon transform
 	CurrentWeaponRotation.Pitch = KickSpringPitch.Value;

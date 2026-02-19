@@ -100,7 +100,11 @@ void AFlyingDrone::BeginPlay()
 		FlyingMovement->OnMovementCompleted.AddDynamic(this, &AFlyingDrone::OnMovementCompleted);
 	}
 
-	// Note: OnCapsuleHit is subscribed in ShooterNPC::BeginPlay() and we override it
+	// OnCapsuleHit is bound in ShooterNPC::BeginPlay() via AddDynamic.
+	// UE dynamic delegates resolve by function name through reflection,
+	// so our override is called automatically (no rebinding needed).
+	// During knockback interpolation, our override blocks OnCapsuleHit to prevent
+	// duplicate damage (parent's UpdateKnockbackInterpolation handles wall hits via sweep).
 
 	// Start combat check timer
 	if (bAutoEngage)
@@ -122,16 +126,6 @@ void AFlyingDrone::Tick(float DeltaTime)
 	if (!bIsDead)
 	{
 		UpdateDroneVisuals(DeltaTime);
-
-		// Check if knockback should end based on velocity threshold
-		if (bIsInKnockback && KnockbackEndVelocityThreshold > 0.0f)
-		{
-			float CurrentSpeed = GetVelocity().Size();
-			if (CurrentSpeed <= KnockbackEndVelocityThreshold)
-			{
-				EndKnockbackStun();
-			}
-		}
 	}
 }
 
@@ -762,15 +756,6 @@ void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 
 void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {
-	// Apply NPC's knockback distance multiplier (inherited from ShooterNPC)
-	float FinalDistance = Distance * KnockbackDistanceMultiplier;
-
-	// Don't apply knockback if distance is negligible
-	if (FinalDistance < 1.0f)
-	{
-		return;
-	}
-
 	// Don't apply new knockback if already in knockback (prevents jitter from multiple hits)
 	if (bIsInKnockback)
 	{
@@ -780,40 +765,13 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		return;
 	}
 
-#if WITH_EDITOR
-	UE_LOG(LogTemp, Warning, TEXT("Drone ApplyKnockback: Dir=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
-		InKnockbackDirection.X, InKnockbackDirection.Y, InKnockbackDirection.Z, FinalDistance, Duration);
-#endif
-
-	// Mark as in knockback state
-	bIsInKnockback = true;
-
-	// Calculate velocity needed to cover the distance in the given duration
-	FVector KnockbackVelocity = InKnockbackDirection.GetSafeNormal() * (FinalDistance / Duration);
-
-	// Stop flying movement
+	// Stop FlyingAIMovementComponent before parent takes over
 	if (FlyingMovement)
 	{
 		FlyingMovement->StopMovement();
 	}
 
-	// Stop AI controller movement
-	if (AController* MyController = GetController())
-	{
-		if (AAIController* AIController = Cast<AAIController>(MyController))
-		{
-			AIController->StopMovement();
-		}
-	}
-
-	// Disable EMF forces during knockback for consistent physics (unless explicitly kept enabled)
-	if (bDisableEMFDuringKnockback && !bKeepEMFEnabled && EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetEnabled(false);
-	}
-
 	// Ignore collision with player during knockback to prevent jitter from dropkick
-	// Find player by proximity to attacker location
 	if (!AttackerLocation.IsZero())
 	{
 		if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(this, 0))
@@ -827,31 +785,23 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		}
 	}
 
-	// Apply knockback using LaunchCharacter (velocity-based, works with physics)
-	LaunchCharacter(KnockbackVelocity, true, true);
-
-	// Clear any existing stun timer
-	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
-
-	// Always set timer as a maximum duration fallback
-	// Knockback can also end early via:
-	// - Velocity threshold check in Tick (if KnockbackEndVelocityThreshold > 0)
-	// - Wall hit (if bEndKnockbackOnWallHit is true)
-	GetWorld()->GetTimerManager().SetTimer(
-		KnockbackStunTimer,
-		this,
-		&AFlyingDrone::EndKnockbackStun,
-		Duration,
-		false
-	);
+	// Delegate to parent's interpolation-based knockback system.
+	// This uses SetActorLocation() with capsule sweep each frame, which provides:
+	// - Reliable wall collision detection (CheckKnockbackWallCollision)
+	// - Reliable wall slam damage (HandleKnockbackWallHit with mathematically computed velocity)
+	// - Wall bounce with energy loss
+	// - NPC-NPC collision detection
+	// Gravity is automatically zero because our CMC has GravityScale = 0.
+	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled);
 
 #if WITH_EDITOR
 	if (GEngine)
 	{
+		float FinalDistance = Distance * KnockbackDistanceMultiplier;
+		float Speed = FinalDistance / Duration;
 		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
-			FString::Printf(TEXT("Drone Knockback: Vel=(%.2f,%.2f,%.2f), Dist=%.0f, Duration=%.2f"),
-				KnockbackVelocity.X, KnockbackVelocity.Y, KnockbackVelocity.Z,
-				FinalDistance, Duration));
+			FString::Printf(TEXT("Drone Knockback (interpolated): Dist=%.0f, Duration=%.2f, Speed=%.0f"),
+				FinalDistance, Duration, Speed));
 	}
 #endif
 }
@@ -865,13 +815,10 @@ void AFlyingDrone::EndKnockbackStun()
 		KnockbackIgnoreActor.Reset();
 	}
 
-	// Clear the knockback timer if it's still running (early exit via velocity or wall hit)
-	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
-
-	// Call parent implementation
+	// Call parent implementation (clears bIsInKnockback, restores friction, re-enables EMF)
 	Super::EndKnockbackStun();
 
-	// Restore flying movement mode
+	// Restore flying movement mode (parent may have left it in walking/falling)
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->SetMovementMode(MOVE_Flying);
@@ -880,34 +827,18 @@ void AFlyingDrone::EndKnockbackStun()
 
 void AFlyingDrone::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// Let parent handle wall slam damage
+	// During knockback interpolation, wall collisions are handled by the parent's
+	// CheckKnockbackWallCollision + HandleKnockbackWallHit in UpdateKnockbackInterpolation.
+	// OnCapsuleHit from CMC physics is unreliable (uses post-collision PreviousTickVelocity).
+	// So we skip parent's OnCapsuleHit during interpolation to avoid duplicate/incorrect damage.
+	if (bIsKnockbackInterpolating)
+	{
+		return;
+	}
+
+	// Outside of knockback interpolation, let parent handle normally
+	// (e.g. NPC-NPC collision during launched state)
 	Super::OnCapsuleHit(HitComponent, OtherActor, OtherComp, NormalImpulse, Hit);
-
-	// Additionally for drones: end knockback on wall hit
-	if (!bIsInKnockback || !bEndKnockbackOnWallHit)
-	{
-		return;
-	}
-
-	// Ignore hits with the player we're being knocked back from
-	if (KnockbackIgnoreActor.IsValid() && OtherActor == KnockbackIgnoreActor.Get())
-	{
-		return;
-	}
-
-	// Ignore hits with other characters (only walls/world geometry)
-	if (Cast<ACharacter>(OtherActor) != nullptr)
-	{
-		return;
-	}
-
-#if WITH_EDITOR
-	UE_LOG(LogTemp, Warning, TEXT("Drone OnCapsuleHit: Hit %s during knockback - ending knockback"),
-		OtherActor ? *OtherActor->GetName() : TEXT("World"));
-#endif
-
-	// End knockback on wall hit
-	EndKnockbackStun();
 }
 
 // ==================== StateTree Support ====================

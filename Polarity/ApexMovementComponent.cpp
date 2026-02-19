@@ -6,6 +6,7 @@
 #include "VelocityModifier.h"
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
+#include "DrawDebugHelpers.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSlide, Log, All);
 DEFINE_LOG_CATEGORY_STATIC(LogWallRun, Log, All);
@@ -165,6 +166,27 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	{
 		UpdateJumpHold(DeltaTime);
 	}
+
+#if ENABLE_DRAW_DEBUG
+	// Track max jump height while in air
+	if (bTrackingJump && IsFalling() && CharacterOwner)
+	{
+		const float CurrentZ = CharacterOwner->GetActorLocation().Z;
+		if (CurrentZ > JumpMaxZ)
+		{
+			JumpMaxZ = CurrentZ;
+		}
+
+		const float CurrentHeight = CurrentZ - JumpStartZ;
+		const float MaxHeight = JumpMaxZ - JumpStartZ;
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(8810, 0.0f, FColor::White,
+				FString::Printf(TEXT("JUMP [%s]: Current=%.0f UU (%.2fm) | Peak=%.0f UU (%.2fm) | Vel.Z=%.0f"),
+					*LastJumpType, CurrentHeight, CurrentHeight / 100.0f, MaxHeight, MaxHeight / 100.0f, Velocity.Z));
+		}
+	}
+#endif
 
 	// Air crouch hold detection
 	if (bWantsSlideOnLand && IsFalling() && !bIsWallRunning && !bIsAirDashing && MovementSettings)
@@ -349,6 +371,13 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 
 		// After wall jump, player cannot double jump (set to max jumps)
 		CurrentJumpCount = MaxJumps;
+
+#if ENABLE_DRAW_DEBUG
+		JumpStartZ = CharacterOwner->GetActorLocation().Z;
+		JumpMaxZ = JumpStartZ;
+		bTrackingJump = true;
+		LastJumpType = TEXT("WallJump");
+#endif
 
 		// Trigger Blueprint event
 		if (CharacterOwner)
@@ -1598,6 +1627,14 @@ bool UApexMovementComponent::CanMantle() const
 {
 	if (!MovementSettings || bIsMantling || bIsSliding || bIsWallRunning || !IsFalling())
 	{
+#if ENABLE_DRAW_DEBUG
+		if (GEngine && IsFalling())
+		{
+			GEngine->AddOnScreenDebugMessage(8799, 0.0f, FColor::Orange,
+				FString::Printf(TEXT("MANTLE BLOCKED: Settings=%d Mantling=%d Sliding=%d WallRun=%d Falling=%d"),
+					MovementSettings ? 1 : 0, bIsMantling, bIsSliding, bIsWallRunning, IsFalling()));
+		}
+#endif
 		return false;
 	}
 
@@ -1619,6 +1656,17 @@ void UApexMovementComponent::TryMantle()
 	MantleAlpha = 0.0f;
 	Velocity = FVector::ZeroVector;
 	SetMovementMode(MOVE_Flying);
+
+#if ENABLE_DRAW_DEBUG
+	if (GEngine)
+	{
+		const float MantleDist = FVector::Dist(MantleStartLocation, MantleTargetLocation);
+		GEngine->AddOnScreenDebugMessage(8804, 2.0f, FColor::Green,
+			FString::Printf(TEXT("MANTLE START! From Z=%.0f → To Z=%.0f (dist=%.0f, duration=%.2fs)"),
+				MantleStartLocation.Z, MantleTargetLocation.Z, MantleDist, MovementSettings->MantleDuration));
+	}
+	DrawDebugLine(GetWorld(), MantleStartLocation, MantleTargetLocation, FColor::Green, false, 2.0f, 0, 3.0f);
+#endif
 
 	// Broadcast mantle started event
 	OnMantleStarted.Broadcast();
@@ -1657,26 +1705,91 @@ bool UApexMovementComponent::TraceMantleSurface(FHitResult& OutHit) const
 		return false;
 	}
 
-	const FVector Start = CharacterOwner->GetActorLocation() + FVector(0, 0, 50.0f);
+	const FVector CharLoc = CharacterOwner->GetActorLocation();
+	const FVector Start = CharLoc + FVector(0, 0, 50.0f);
 	const FVector Forward = CharacterOwner->GetActorForwardVector();
 	const FVector End = Start + Forward * MovementSettings->MantleTraceDistance;
 
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(CharacterOwner);
 
+#if ENABLE_DRAW_DEBUG
+	// Debug: wall trace (yellow = searching for wall)
+	DrawDebugLine(GetWorld(), Start, End, FColor::Yellow, false, 0.5f, 0, 2.0f);
+	DrawDebugPoint(GetWorld(), Start, 8.0f, FColor::Yellow, false, 0.5f);
+#endif
+
 	FHitResult WallHit;
 	if (!GetWorld()->LineTraceSingleByChannel(WallHit, Start, End, ECC_Visibility, Params))
 	{
+#if ENABLE_DRAW_DEBUG
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(8800, 0.5f, FColor::Red,
+				FString::Printf(TEXT("MANTLE: No wall found (trace dist=%.0f, from Z=%.0f)"),
+					MovementSettings->MantleTraceDistance, Start.Z));
+		}
+#endif
 		return false;
 	}
+
+#if ENABLE_DRAW_DEBUG
+	// Debug: wall hit point (green)
+	DrawDebugPoint(GetWorld(), WallHit.Location, 12.0f, FColor::Green, false, 0.5f);
+#endif
 
 	const FVector LedgeTraceStart = WallHit.Location + Forward * 10.0f + FVector(0, 0, MovementSettings->MantleReachHeight);
 	const FVector LedgeTraceEnd = WallHit.Location + Forward * 10.0f;
 
+#if ENABLE_DRAW_DEBUG
+	// Debug: ledge trace (cyan = searching for ledge surface)
+	DrawDebugLine(GetWorld(), LedgeTraceStart, LedgeTraceEnd, FColor::Cyan, false, 0.5f, 0, 2.0f);
+	DrawDebugPoint(GetWorld(), LedgeTraceStart, 8.0f, FColor::Cyan, false, 0.5f);
+
+	const float WallHitHeight = WallHit.Location.Z;
+	const float CharFeet = CharLoc.Z - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const float LedgeSearchTop = WallHitHeight + MovementSettings->MantleReachHeight;
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(8801, 0.0f, FColor::Yellow,
+			FString::Printf(TEXT("MANTLE: Wall hit at Z=%.0f | Feet at Z=%.0f | Search top Z=%.0f | Reach=%.0f"),
+				WallHitHeight, CharFeet, LedgeSearchTop, MovementSettings->MantleReachHeight));
+	}
+#endif
+
 	if (!GetWorld()->LineTraceSingleByChannel(OutHit, LedgeTraceStart, LedgeTraceEnd, ECC_Visibility, Params))
 	{
+#if ENABLE_DRAW_DEBUG
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(8802, 0.5f, FColor::Red,
+				TEXT("MANTLE: No ledge surface found (trace went through - wall too tall for MantleReachHeight?)"));
+		}
+#endif
 		return false;
 	}
+
+#if ENABLE_DRAW_DEBUG
+	// Debug: ledge hit point
+	DrawDebugPoint(GetWorld(), OutHit.Location, 12.0f, FColor::Blue, false, 0.5f);
+
+	const float LedgeHeight = OutHit.Location.Z;
+	const float CharFeetZ = CharLoc.Z - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const float HeightAboveFeet = LedgeHeight - CharFeetZ;
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(8803, 0.0f, FColor::Cyan,
+			FString::Printf(TEXT("MANTLE: Ledge at Z=%.0f | %.0f UU above feet | Normal.Z=%.2f %s"),
+				LedgeHeight, HeightAboveFeet, OutHit.Normal.Z,
+				OutHit.Normal.Z > 0.7f ? TEXT("OK") : TEXT("TOO STEEP!")));
+	}
+
+	// Draw the mantle target location
+	const FVector TargetLoc = OutHit.Location + FVector(0, 0, CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+	DrawDebugSphere(GetWorld(), TargetLoc, 20.0f, 8, OutHit.Normal.Z > 0.7f ? FColor::Green : FColor::Red, false, 1.0f);
+#endif
 
 	return OutHit.Normal.Z > 0.7f;
 }

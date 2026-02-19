@@ -8,6 +8,44 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "../DamageTypes/DamageType_EMFWeapon.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/ShooterDummy.h"
+#include "EMFPhysicsProp.h"
+
+namespace
+{
+	/** Check if actor is dead after TakeDamage (synchronous check via HP/bIsDead flags) */
+	bool IsActorDeadAfterDamage(AActor* Actor)
+	{
+		if (!IsValid(Actor))
+		{
+			return true;
+		}
+
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(Actor))
+		{
+			return NPC->IsDead();
+		}
+
+		if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(Actor))
+		{
+			return ShooterChar->IsDead();
+		}
+
+		if (AShooterDummy* Dummy = Cast<AShooterDummy>(Actor))
+		{
+			return Dummy->IsDead();
+		}
+
+		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Actor))
+		{
+			return Prop->IsDead();
+		}
+
+		return Actor->IsPendingKillPending();
+	}
+}
 
 AShooterWeapon_Laser::AShooterWeapon_Laser()
 {
@@ -243,7 +281,7 @@ void AShooterWeapon_Laser::ApplyBeamDamage(const FHitResult& Hit, float DeltaTim
 	// Notify weapon owner about hit (for hit markers, etc.)
 	if (WeaponOwner)
 	{
-		const bool bKilled = HitActor->IsActorBeingDestroyed();
+		const bool bKilled = IsActorDeadAfterDamage(HitActor);
 		WeaponOwner->OnWeaponHit(
 			Hit.ImpactPoint,
 			(Hit.TraceEnd - Hit.TraceStart).GetSafeNormal(),
@@ -579,7 +617,7 @@ void AShooterWeapon_Laser::UpdateSecondHarmonic(float DeltaTime)
 				// Hitmarker
 				if (WeaponOwner)
 				{
-					const bool bKilled = HitA.GetActor()->IsActorBeingDestroyed();
+					const bool bKilled = IsActorDeadAfterDamage(HitA.GetActor());
 					WeaponOwner->OnWeaponHit(HitA.ImpactPoint, DirA, SecondHarmonicDamage, false, bKilled);
 				}
 			}
@@ -616,7 +654,7 @@ void AShooterWeapon_Laser::UpdateSecondHarmonic(float DeltaTime)
 
 				if (WeaponOwner)
 				{
-					const bool bKilled = HitB.GetActor()->IsActorBeingDestroyed();
+					const bool bKilled = IsActorDeadAfterDamage(HitB.GetActor());
 					WeaponOwner->OnWeaponHit(HitB.ImpactPoint, DirB, SecondHarmonicDamage, false, bKilled);
 				}
 			}

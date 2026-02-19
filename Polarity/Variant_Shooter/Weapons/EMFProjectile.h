@@ -189,6 +189,9 @@ protected:
 	/** Apply electromagnetic forces to projectile velocity */
 	void ApplyEMForces(float DeltaTime);
 
+	/** Diagnostic: log sources only once per projectile lifetime */
+	bool bDiagnosticLogged = false;
+
 	/** Apply EMF-specific hit effects */
 	UFUNCTION(BlueprintImplementableEvent, Category = "EMF", meta = (DisplayName = "On EMF Hit"))
 	void BP_OnEMFHit(AActor* HitActor, float ProjectileCharge, const FHitResult& Hit);

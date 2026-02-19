@@ -294,6 +294,17 @@ void UHitMarkerComponent::ApplyCameraEffects(EHitMarkerType HitType)
 		return;
 	}
 
+	// Cooldown check — prevents continuous-fire weapons (laser) from applying punch every frame
+	if (Settings.CameraPunchCooldown > 0.0f && GetWorld())
+	{
+		const float CurrentTime = GetWorld()->GetTimeSeconds();
+		if (CurrentTime - LastCameraPunchTime < Settings.CameraPunchCooldown)
+		{
+			return;
+		}
+		LastCameraPunchTime = CurrentTime;
+	}
+
 	// Get camera manager for camera shake
 	APlayerCameraManager* CameraManager = OwnerController->PlayerCameraManager;
 	if (!CameraManager)
@@ -327,10 +338,6 @@ void UHitMarkerComponent::ApplyCameraEffects(EHitMarkerType HitType)
 	if (PunchIntensity > 0.0f)
 	{
 		// Apply as a small pitch/roll kick
-		// Note: This works as a suggestion to the recoil system
-		// The actual implementation might need integration with WeaponRecoilComponent
-		
-		// Simple approach: use AddControllerPitchInput for feedback
 		// Negative = slight upward kick on hit confirm (satisfying feeling)
 		OwnerController->AddPitchInput(-PunchIntensity * 0.5f);
 		OwnerController->AddYawInput(FMath::RandRange(-PunchIntensity, PunchIntensity) * 0.3f);

@@ -15,6 +15,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/OverlapResult.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 
 AEMFPhysicsProp::AEMFPhysicsProp()
@@ -706,6 +707,77 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			this,               // DamageCauser
 			nullptr             // InstigatedBy
 		);
+	}
+
+	// Explosion impulse: push characters and physics bodies
+	if (bApplyExplosionImpulse && FinalRadius > 0.0f)
+	{
+		TArray<FOverlapResult> Overlaps;
+		FCollisionShape Sphere = FCollisionShape::MakeSphere(FinalRadius);
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(this);
+
+		GetWorld()->OverlapMultiByChannel(
+			Overlaps, ExplosionLocation, FQuat::Identity,
+			ECC_Pawn, Sphere, QueryParams);
+
+		// Also sweep WorldDynamic for physics bodies
+		TArray<FOverlapResult> PhysicsOverlaps;
+		GetWorld()->OverlapMultiByChannel(
+			PhysicsOverlaps, ExplosionLocation, FQuat::Identity,
+			ECC_WorldDynamic, Sphere, QueryParams);
+		Overlaps.Append(PhysicsOverlaps);
+
+		// Track already-processed actors to avoid double impulse
+		TSet<AActor*> ProcessedActors;
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			AActor* HitActor = Overlap.GetActor();
+			if (!HitActor || ProcessedActors.Contains(HitActor))
+			{
+				continue;
+			}
+			ProcessedActors.Add(HitActor);
+
+			const FVector ToTarget = HitActor->GetActorLocation() - ExplosionLocation;
+			const float Distance = ToTarget.Size();
+
+			// Linear falloff: full strength at center, zero at edge
+			const float FalloffAlpha = FMath::Clamp(1.0f - Distance / FinalRadius, 0.0f, 1.0f);
+
+			// Radial direction (away from explosion)
+			FVector ImpulseDir = Distance > KINDA_SMALL_NUMBER
+				? ToTarget.GetSafeNormal()
+				: FVector::UpVector;
+
+			// Apply upward bias: blend radial direction toward Up
+			ImpulseDir = FMath::Lerp(ImpulseDir, FVector::UpVector, ExplosionImpulseUpwardBias).GetSafeNormal();
+
+			// Guarantee minimum vertical component for reliable rocket boost
+			if (ImpulseDir.Z < ExplosionMinVerticalRatio)
+			{
+				ImpulseDir.Z = ExplosionMinVerticalRatio;
+				ImpulseDir.Normalize();
+			}
+
+			// Character impulse via LaunchCharacter (velocity override — feels like a rocket boost)
+			ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
+			if (HitCharacter)
+			{
+				const FVector LaunchVelocity = ImpulseDir * ExplosionImpulseStrength * FalloffAlpha * DamageMultiplier;
+				HitCharacter->LaunchCharacter(LaunchVelocity, false, true);
+				continue;
+			}
+
+			// Physics body impulse
+			UPrimitiveComponent* HitComp = Overlap.GetComponent();
+			if (HitComp && HitComp->IsSimulatingPhysics())
+			{
+				const FVector Impulse = ImpulseDir * ExplosionPhysicsImpulse * FalloffAlpha * DamageMultiplier;
+				HitComp->AddImpulse(Impulse);
+			}
+		}
 	}
 
 	// VFX

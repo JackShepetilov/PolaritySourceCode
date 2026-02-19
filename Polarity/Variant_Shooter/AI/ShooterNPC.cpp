@@ -453,8 +453,8 @@ void AShooterNPC::OnWeaponDeactivated(AShooterWeapon* InWeapon)
 
 void AShooterNPC::OnSemiWeaponRefire()
 {
-	// Don't continue if dead
-	if (bIsDead)
+	// Don't continue if dead or in knockback/captured state
+	if (bIsDead || bIsInKnockback)
 	{
 		StopShooting();
 		return;
@@ -611,8 +611,8 @@ void AShooterNPC::StartShooting(AActor* ActorToShoot, bool bHasExternalPermissio
 
 void AShooterNPC::TryStartShooting()
 {
-	// Don't shoot if dead
-	if (bIsDead)
+	// Don't shoot if dead or in knockback/captured state
+	if (bIsDead || bIsInKnockback)
 	{
 		StopShooting();
 		return;
@@ -811,6 +811,9 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// Mark as in knockback state
 	bIsInKnockback = true;
 	bIsKnockbackInterpolating = true;
+
+	// Stop shooting immediately — burst fire and permission retry don't check knockback
+	StopShooting();
 
 	// Store knockback parameters
 	KnockbackStartPosition = GetActorLocation();
@@ -1680,6 +1683,9 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 	bIsCaptured = true;
 	bIsInKnockback = true; // Blocks AI via StateTree IsInKnockback condition
 
+	// Stop shooting immediately — burst fire cycle and permission retry won't check knockback on their own
+	StopShooting();
+
 	// Stop AI pathfinding
 	if (AController* MyController = GetController())
 	{
@@ -1691,6 +1697,13 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 			}
 			AIController->StopMovement();
 		}
+	}
+
+	// Switch to Falling so gravity counteraction can lift the NPC off the ground
+	// In MOVE_Walking, CharacterMovement suppresses vertical forces
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->SetMovementMode(MOVE_Falling);
 	}
 
 	// Do NOT zero velocity — viscosity manages it

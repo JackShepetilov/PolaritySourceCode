@@ -68,9 +68,7 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Laser|Ionization", meta = (ClampMin = "0.0"))
 	float IonizationChargePerSecond = 5.0f;
 
-	/** Maximum positive charge that ionization can apply */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Laser|Ionization", meta = (ClampMin = "0.0"))
-	float MaxIonizationCharge = 20.0f;
+	// Note: MaxIonizationCharge is inherited from AShooterWeapon (Hitscan|Ionization section)
 
 	// ==================== Laser Beam ====================
 

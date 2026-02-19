@@ -418,6 +418,14 @@ protected:
 	float JumpHoldTimeRemaining = 0.0f;
 	bool bJumpHeld = false;
 
+#if ENABLE_DRAW_DEBUG
+	// Jump metrics debug
+	float JumpStartZ = 0.0f;
+	float JumpMaxZ = 0.0f;
+	bool bTrackingJump = false;
+	FString LastJumpType;
+#endif
+
 	// Air crouch state
 	float AirCrouchHoldTime = 0.0f;
 

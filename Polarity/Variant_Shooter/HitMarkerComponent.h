@@ -160,6 +160,10 @@ struct FHitMarkerSettings
 	/** Camera punch intensity on kill */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.0", ClampMax = "3.0"))
 	float KillCameraPunch = 0.5f;
+
+	/** Minimum interval between camera punches (seconds). Prevents continuous-fire weapons (laser) from applying punch every frame. 0 = no limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float CameraPunchCooldown = 0.1f;
 };
 
 // Delegate for UI to bind to
@@ -285,6 +289,9 @@ protected:
 	/** Cached owner controller */
 	UPROPERTY()
 	TObjectPtr<APlayerController> OwnerController;
+
+	/** World time of last camera punch application (for cooldown) */
+	float LastCameraPunchTime = -100.0f;
 
 	// ==================== Internal ====================
 

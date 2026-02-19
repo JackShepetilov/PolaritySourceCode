@@ -107,6 +107,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
 	TMap<FName, float> TagDamageMultipliers;
 
+	// ==================== Hitscan Ionization ====================
+
+	/** If true, hitscan hits apply a fixed positive charge to the target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (EditCondition = "bUseHitscan"))
+	bool bUseHitscanIonization = false;
+
+	/** Fixed positive charge added to target per hit */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (EditCondition = "bUseHitscan && bUseHitscanIonization", ClampMin = "0.0", ClampMax = "50.0"))
+	float IonizationChargePerHit = 2.0f;
+
+	/** Maximum positive charge that can be applied via ionization (also used by laser) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (ClampMin = "0.0", ClampMax = "100.0"))
+	float MaxIonizationCharge = 20.0f;
+
 	// ==================== Heat System ====================
 
 	/** Enable heat system - weapon heats up when firing, damage decreases with heat */
@@ -490,6 +504,9 @@ protected:
 
 	/** Calculate damage multiplier based on target's tags */
 	float GetTagDamageMultiplier(AActor* Target) const;
+
+	/** Apply ionization (fixed positive charge) to a hit target */
+	void ApplyHitscanIonization(AActor* Target);
 
 	// ==================== Charge-Based Firing ====================
 

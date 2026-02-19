@@ -744,6 +744,10 @@ public:
 	/** Handle incoming damage */
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
+	/** Returns true if player is dead (HP <= 0) */
+	UFUNCTION(BlueprintPure, Category = "Health")
+	bool IsDead() const { return CurrentHP <= 0.0f; }
+
 	/** Returns true if player is currently being knocked back */
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	bool IsInKnockback() const { return bIsInKnockback; }

@@ -15,6 +15,10 @@ class UNiagaraComponent;
  * Flying drone enemy - a hovering robot soldier from an alien civilization.
  * Inherits weapon handling and damage systems from ShooterNPC.
  * Uses UFlyingAIMovementComponent for 3D navigation.
+ *
+ * Knockback uses the same interpolation system as ShooterNPC (SetActorLocation-based),
+ * which provides reliable wall slam damage detection and wall bounce.
+ * Gravity is automatically skipped because GravityScale = 0.
  */
 UCLASS()
 class POLARITY_API AFlyingDrone : public AShooterNPC
@@ -80,16 +84,6 @@ protected:
 	/** Tag to identify enemies (usually "Player") */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
 	FName EnemyTag = FName("Player");
-
-	// ==================== Knockback Settings ====================
-
-	/** Velocity threshold below which knockback ends (cm/s). Set to 0 to disable velocity check. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Knockback", meta = (ClampMin = "0.0"))
-	float KnockbackEndVelocityThreshold = 100.0f;
-
-	/** If true, knockback ends when drone hits a wall */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Knockback")
-	bool bEndKnockbackOnWallHit = true;
 
 	// ==================== Evasive Dash Settings (for StateTree) ====================
 
@@ -170,13 +164,15 @@ protected:
 	/** Override aim calculation - drones aim from their center */
 	virtual FVector GetWeaponTargetLocation() override;
 
-	/** Override knockback for flying movement - uses velocity-based launch */
+	/** Override knockback to add drone-specific setup (stop FlyingMovement, ignore player collision)
+	 *  then delegate to Super::ApplyKnockback for interpolation-based movement */
 	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
 
 	/** Override to restore flying mode after knockback */
 	virtual void EndKnockbackStun() override;
 
-	/** Override to handle knockback wall collision for drones */
+	/** Override to prevent parent's OnCapsuleHit from running during knockback
+	 *  (parent's interpolation system handles wall collisions via CheckKnockbackWallCollision) */
 	virtual void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit) override;
 
 public:

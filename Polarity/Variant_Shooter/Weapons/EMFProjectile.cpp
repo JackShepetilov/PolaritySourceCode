@@ -29,6 +29,9 @@ AEMFProjectile::AEMFProjectile()
 	if (FieldComponent)
 	{
 		FieldComponent->SetOwnerType(EEMSourceOwnerType::Projectile);
+		// IMPORTANT: Disable auto-registration so pooled projectiles don't pollute the EMF registry.
+		// We register manually in BeginPlay (non-pooled) or ResetProjectileState (pooled).
+		FieldComponent->bAutoRegister = false;
 	}
 
 	// Set default damage type to EMFWeapon (EMF category for damage numbers)
@@ -51,6 +54,15 @@ void AEMFProjectile::BeginPlay()
 	// Note: Trail VFX is spawned in SetProjectileCharge() after charge is set by weapon
 	// This ensures we use the correct polarity (player's charge sign)
 
+	// Register with EMF source registry (only for non-pooled projectiles).
+	// Pooled projectiles register in ResetProjectileState() instead.
+	if (!bIsPooled && FieldComponent)
+	{
+		FieldComponent->RegisterWithRegistry();
+	}
+
+	bDiagnosticLogged = false;
+
 	// Log initialization for debugging
 	UE_LOG(LogTemp, Log, TEXT("EMFProjectile spawned: Charge=%.2f, Mass=%.2f, AffectedByFields=%d"),
 		GetProjectileCharge(), GetProjectileMass(), bAffectedByExternalFields);
@@ -69,6 +81,14 @@ void AEMFProjectile::Tick(float DeltaTime)
 
 void AEMFProjectile::NotifyHit(UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp, bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit)
 {
+	// Unregister from EMF source registry immediately on hit.
+	// This prevents the projectile from affecting other sources while waiting
+	// for deferred destruction or sitting in the pool.
+	if (FieldComponent && FieldComponent->IsRegistered())
+	{
+		FieldComponent->UnregisterFromRegistry();
+	}
+
 	// Spawn charge-based explosion VFX before parent processes the hit
 	// (parent may destroy the projectile)
 	if (bExplodeOnHit)
@@ -165,7 +185,15 @@ void AEMFProjectile::ResetProjectileState()
 		Desc.PointChargeParams.Charge = DefaultCharge;
 		Desc.PhysicsParams.Mass = DefaultMass;
 		FieldComponent->SetSourceDescription(Desc);
+
+		// Re-register with EMF source registry (was unregistered when returned to pool)
+		if (!FieldComponent->IsRegistered())
+		{
+			FieldComponent->RegisterWithRegistry();
+		}
 	}
+
+	bDiagnosticLogged = false;
 }
 
 void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection)
@@ -338,6 +366,32 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 	FVector Position = GetActorLocation();
 	FVector Velocity = ProjectileMovement->Velocity;
 	float Mass = GetProjectileMass();
+
+	// === DIAGNOSTIC: log all sources on first tick ===
+	if (!bDiagnosticLogged)
+	{
+		bDiagnosticLogged = true;
+		UE_LOG(LogTemp, Warning, TEXT("=== EMFProjectile DIAGNOSTIC === MyCharge=%.2f, Mass=%.2f, Pos=(%.0f,%.0f,%.0f), Sources=%d"),
+			Charge, Mass, Position.X, Position.Y, Position.Z, OtherSources.Num());
+		for (int32 i = 0; i < OtherSources.Num(); ++i)
+		{
+			const FEMSourceDescription& S = OtherSources[i];
+			float Dist = FVector::Dist(Position, S.Position);
+			const TCHAR* TypeStr = TEXT("Unknown");
+			switch (S.OwnerType)
+			{
+			case EEMSourceOwnerType::Player: TypeStr = TEXT("Player"); break;
+			case EEMSourceOwnerType::NPC: TypeStr = TEXT("NPC"); break;
+			case EEMSourceOwnerType::Projectile: TypeStr = TEXT("Projectile"); break;
+			case EEMSourceOwnerType::Environment: TypeStr = TEXT("Environment"); break;
+			case EEMSourceOwnerType::PhysicsProp: TypeStr = TEXT("PhysicsProp"); break;
+			default: TypeStr = TEXT("None/Unknown"); break;
+			}
+			UE_LOG(LogTemp, Warning, TEXT("  [%d] OwnerType=%s, SourceType=%d, Charge=%.2f, Pos=(%.0f,%.0f,%.0f), Dist=%.1f"),
+				i, TypeStr, static_cast<int32>(S.SourceType), S.PointChargeParams.Charge,
+				S.Position.X, S.Position.Y, S.Position.Z, Dist);
+		}
+	}
 
 	// Calculate Lorentz force from each source with filtering
 	FVector EMForce = FVector::ZeroVector;

@@ -204,6 +204,30 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bCanExplode"))
 	float ExplosionDamageFalloff = 1.0f;
 
+	// ==================== Explosion Impulse (Rocket Boost) ====================
+
+	/** Apply physics impulse to characters and physics bodies within explosion radius */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Impulse", meta = (EditCondition = "bCanExplode"))
+	bool bApplyExplosionImpulse = true;
+
+	/** Base impulse strength (cm/s for characters via LaunchCharacter) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Impulse", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float ExplosionImpulseStrength = 1600.0f;
+
+	/** Upward bias for the impulse direction (0 = pure radial, 1 = entirely upward).
+	 *  Higher values make rocket boosting easier — the character gets launched up even from side blasts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Impulse", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanExplode"))
+	float ExplosionImpulseUpwardBias = 0.45f;
+
+	/** Minimum vertical impulse as fraction of total impulse.
+	 *  Guarantees some upward boost even when explosion is directly below. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Impulse", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanExplode"))
+	float ExplosionMinVerticalRatio = 0.3f;
+
+	/** Impulse strength for physics bodies (Newtons). Separate from character impulse for tuning. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Impulse", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float ExplosionPhysicsImpulse = 50000.0f;
+
 	// ==================== Charge Overlay Materials ====================
 
 	/** If true, overlay material will be applied based on charge state */
