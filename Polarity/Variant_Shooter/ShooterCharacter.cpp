@@ -1833,6 +1833,21 @@ void AShooterCharacter::UpdateChromaticAberration(float DeltaTime)
 	OnDamageChromaticAberration.Broadcast(FinalIntensity);
 }
 
+// ==================== Health Restoration ====================
+
+void AShooterCharacter::RestoreHealth(float Amount)
+{
+	if (IsDead() || Amount <= 0.0f)
+	{
+		return;
+	}
+
+	CurrentHP = FMath::Clamp(CurrentHP + Amount, 0.0f, MaxHP);
+
+	// Update health UI
+	OnDamaged.Broadcast(CurrentHP / MaxHP);
+}
+
 // ==================== Death ====================
 
 void AShooterCharacter::Die()

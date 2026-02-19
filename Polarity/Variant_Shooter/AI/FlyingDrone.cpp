@@ -21,6 +21,7 @@
 #include "../DamageTypes/DamageType_Melee.h"
 #include "AIController.h"
 #include "Engine/OverlapResult.h"
+#include "../Pickups/HealthPickup.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -202,6 +203,9 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 	// Check if we should die
 	if (CurrentHP <= 0.0f)
 	{
+		// Store killing blow info before death for health pickup logic
+		LastKillingDamageType = DamageEvent.DamageTypeClass;
+		LastKillingDamageCauser = DamageCauser;
 		DroneDie();
 	}
 
@@ -240,6 +244,15 @@ void AFlyingDrone::DroneDie()
 	// Broadcast death (BP can spawn VFX here)
 	UE_LOG(LogTemp, Warning, TEXT("FlyingDrone::DroneDie() - Broadcasting OnNPCDeath for %s"), *GetName());
 	OnNPCDeath.Broadcast(this);
+	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
+
+	// Spawn health pickup on non-weapon kill
+	if (HealthPickupClass && AHealthPickup::ShouldDropHealth(LastKillingDamageType))
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		GetWorld()->SpawnActor<AHealthPickup>(HealthPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
+	}
 
 	if (bExplodeOnDeath)
 	{

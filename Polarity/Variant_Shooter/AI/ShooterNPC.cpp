@@ -30,6 +30,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Boss/BossProjectile.h"
+#include "../Pickups/HealthPickup.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -337,6 +338,9 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// Have we depleted HP?
 	if (CurrentHP <= 0.0f)
 	{
+		// Store killing blow info before Die() for health pickup logic
+		LastKillingDamageType = DamageEvent.DamageTypeClass;
+		LastKillingDamageCauser = DamageCauser;
 		Die();
 	}
 
@@ -525,6 +529,15 @@ void AShooterNPC::Die()
 	// broadcast death event (BP can spawn VFX here)
 	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::Die() - Broadcasting OnNPCDeath for %s"), *GetName());
 	OnNPCDeath.Broadcast(this);
+	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
+
+	// Spawn health pickup on non-weapon kill
+	if (HealthPickupClass && AHealthPickup::ShouldDropHealth(LastKillingDamageType))
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		GetWorld()->SpawnActor<AHealthPickup>(HealthPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
+	}
 
 	// play death sound
 	if (DeathSound)

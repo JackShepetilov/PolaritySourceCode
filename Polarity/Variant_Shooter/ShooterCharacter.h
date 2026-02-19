@@ -748,6 +748,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsDead() const { return CurrentHP <= 0.0f; }
 
+	/** Restore HP by the given amount (clamped to MaxHP). Updates UI. */
+	UFUNCTION(BlueprintCallable, Category = "Health")
+	void RestoreHealth(float Amount);
+
 	/** Returns true if player is currently being knocked back */
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	bool IsInKnockback() const { return bIsInKnockback; }

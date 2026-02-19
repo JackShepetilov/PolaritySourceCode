@@ -12,6 +12,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnNPCDamageTaken, AShooterNPC*, DamagedNPC, float, Damage, TSubclassOf<UDamageType>, DamageType, FVector, HitLocation, AActor*, DamageCauser);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnNPCDeathDetailed, AShooterNPC*, DeadNPC, TSubclassOf<UDamageType>, KillingDamageType, AActor*, KillingDamageCauser);
 
 class AShooterWeapon;
 class UAnimMontage;
@@ -23,6 +24,7 @@ class UMaterialInterface;
 class UEMFVelocityModifier;
 class UEMF_FieldComponent;
 class UNiagaraSystem;
+class AHealthPickup;
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -417,7 +419,23 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCDamageTaken OnDamageTaken;
 
+	/** Called when this NPC dies with detailed kill info (damage type, causer) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnNPCDeathDetailed OnNPCDeathDetailed;
+
+	// ==================== Health Pickup Drop ====================
+
+	/** Health pickup class to spawn on non-weapon kill (set in Blueprint defaults) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup")
+	TSubclassOf<AHealthPickup> HealthPickupClass;
+
 protected:
+
+	/** Damage type of the killing blow (set in TakeDamage before Die) */
+	TSubclassOf<UDamageType> LastKillingDamageType;
+
+	/** Actor that dealt the killing blow (set in TakeDamage before Die) */
+	TObjectPtr<AActor> LastKillingDamageCauser;
 
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
