@@ -362,9 +362,10 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	if (bFoundPlate)
 	{
 		const float Distance = FMath::Sqrt(NearestPlateDistSq);
+		const float EffectiveRange = CalculateCaptureRange();
 
-		// Auto-release: if NPC outside capture radius for too long
-		if (Distance > CaptureRadius)
+		// Auto-release: if NPC outside effective capture range for too long
+		if (Distance > EffectiveRange)
 		{
 			WeakCaptureTimer += DeltaTime;
 			if (WeakCaptureTimer >= CaptureReleaseTimeout)
@@ -629,7 +630,7 @@ int32 UEMFVelocityModifier::GetSourceEffectiveChargeSign(const FEMSourceDescript
 
 // ==================== Capture: Hard Hold ====================
 
-float UEMFVelocityModifier::CalculateCapturePullSpeed() const
+float UEMFVelocityModifier::CalculateCaptureRange() const
 {
 	// Get player charge from the plate's charge density (plate mirrors player charge)
 	float PlayerCharge = 0.0f;
@@ -641,17 +642,22 @@ float UEMFVelocityModifier::CalculateCapturePullSpeed() const
 	const float NPCCharge = FMath::Abs(GetCharge());
 	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
 
-	// Product of charges: higher product = stronger pull
+	// Product of charges: higher product = longer range
 	const float ChargeProduct = PlayerChargeAbs * NPCCharge;
 
-	// Speed = BaseSpeed * max(1, 1 + ln(ChargeProduct / NormCoeff))
-	// At ChargeProduct == NormCoeff: Speed = BaseSpeed (ln(1) = 0, so 1+0 = 1)
-	// At ChargeProduct == NormCoeff * e: Speed = BaseSpeed * 2
-	// At ChargeProduct < NormCoeff: ln < 0, but clamped to 1 so speed never below BaseSpeed
+	// Range = BaseRange * max(1, 1 + ln(ChargeProduct / NormCoeff))
+	// At ChargeProduct == NormCoeff: Range = BaseRange (ln(1) = 0, so 1+0 = 1)
+	// At ChargeProduct == NormCoeff * e: Range = BaseRange * 2
+	// At ChargeProduct < NormCoeff: ln < 0, but clamped to 1 so range never below BaseRange
 	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-	const float SpeedMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(FMath::Max(Ratio, KINDA_SMALL_NUMBER)));
+	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(FMath::Max(Ratio, KINDA_SMALL_NUMBER)));
 
-	return CaptureBaseSpeed * SpeedMultiplier;
+	return CaptureBaseRange * RangeMultiplier;
+}
+
+float UEMFVelocityModifier::GetEffectiveCaptureRange() const
+{
+	return CalculateCaptureRange();
 }
 
 FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVector& CurrentVelocity, AEMFChannelingPlateActor* Plate)
@@ -710,7 +716,7 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 	else
 	{
 		// --- PULL-IN PHASE: smoothly move NPC toward plate ---
-		const float PullSpeed = CalculateCapturePullSpeed();
+		const float PullSpeed = CaptureBaseSpeed;
 		const FVector Direction = ToPlate.GetSafeNormal();
 
 		// VInterpTo-style: move toward plate at PullSpeed, don't overshoot

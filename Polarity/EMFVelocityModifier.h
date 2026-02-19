@@ -157,13 +157,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture")
 	bool bEnableViscousCapture = false;
 
-	/** Base pull-in speed (cm/s) when charges are minimal.
-	 *  Actual speed = BaseSpeed * (1 + ln(|q_player| * |q_npc| / NormCoeff)). */
+	/** Constant pull-in speed (cm/s). NPC always approaches at this speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "100.0", ClampMax = "10000.0", Units = "cm/s", EditCondition = "bEnableViscousCapture"))
 	float CaptureBaseSpeed = 1500.0f;
 
-	/** Charge normalization coefficient for pull-in speed formula.
-	 *  Lower = faster at low charges, higher = needs more charge for same speed. */
+	/** Base capture range (cm). Actual range scales with charge:
+	 *  Range = BaseRange * max(1, 1 + ln(|q_player| * |q_npc| / NormCoeff)). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
+	float CaptureBaseRange = 500.0f;
+
+	/** Charge normalization coefficient for capture range formula.
+	 *  Lower = longer range at low charges, higher = needs more charge for same range. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0", EditCondition = "bEnableViscousCapture"))
 	float CaptureChargeNormCoeff = 50.0f;
 
@@ -172,9 +176,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "5.0", ClampMax = "200.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
 	float CaptureSnapDistance = 50.0f;
 
-	/** Maximum capture range (cm). Beyond this, auto-release triggers. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
-	float CaptureRadius = 500.0f;
+	/** Get current effective capture range (accounts for charges).
+	 *  This is the dynamic range — NPCs beyond this distance auto-release. */
+	UFUNCTION(BlueprintPure, Category = "EMF|Capture")
+	float GetEffectiveCaptureRange() const;
 
 	/** Mark this NPC as captured by the given plate. Enters knockback + plays montage. */
 	UFUNCTION(BlueprintCallable, Category = "EMF|Capture")
@@ -376,9 +381,9 @@ private:
 	/** Accumulated time that NPC has been outside CaptureRadius */
 	float WeakCaptureTimer = 0.0f;
 
-	/** Calculate pull-in speed based on player and NPC charges.
-	 *  Formula: BaseSpeed * max(1, 1 + ln(|q_player * q_npc| / NormCoeff)) */
-	float CalculateCapturePullSpeed() const;
+	/** Calculate effective capture range based on player and NPC charges.
+	 *  Formula: BaseRange * max(1, 1 + ln(|q_player * q_npc| / NormCoeff)) */
+	float CalculateCaptureRange() const;
 
 	/** Apply hard-hold capture logic: pull-in or rigid hold. Returns velocity delta to apply. */
 	FVector ComputeHardHoldDelta(float DeltaTime, const FVector& CurrentVelocity, AEMFChannelingPlateActor* Plate);
