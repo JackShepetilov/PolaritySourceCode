@@ -20,6 +20,7 @@
 #include "EMF_FieldComponent.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "AIController.h"
+#include "Engine/OverlapResult.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -332,21 +333,64 @@ void AFlyingDrone::TriggerExplosion()
 		UGameplayStatics::PlaySoundAtLocation(GetWorld(), ExplosionSound, GetActorLocation());
 	}
 
-	// Apply radial damage
+	// Apply explosion damage to all actors in radius
+	// Manual overlap instead of ApplyRadialDamage: NPC friendly-fire check blocks
+	// damage from ShooterNPC-derived sources, so we pass nullptr as instigator/causer
 	if (ExplosionDamage > 0.0f && ExplosionRadius > 0.0f)
 	{
-		UGameplayStatics::ApplyRadialDamage(
-			GetWorld(),
-			ExplosionDamage,
-			GetActorLocation(),
-			ExplosionRadius,
-			UDamageType::StaticClass(),
-			TArray<AActor*>({ this }),
-			this,
-			GetController(),
-			true,
-			ECC_Visibility
-		);
+		const FVector Origin = GetActorLocation();
+
+		TArray<FOverlapResult> Overlaps;
+		FCollisionShape Sphere = FCollisionShape::MakeSphere(ExplosionRadius);
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(this);
+
+		// Sweep Pawn channel (players + NPCs)
+		GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
+
+		// Player pawn as DamageCauser: not a ShooterNPC, so friendly-fire check passes.
+		// DamageNumbersSubsystem recognizes player pawn as "from player" and shows numbers.
+		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+
+		TSet<AActor*> DamagedActors;
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			AActor* HitActor = Overlap.GetActor();
+			if (!HitActor || DamagedActors.Contains(HitActor))
+			{
+				continue;
+			}
+			DamagedActors.Add(HitActor);
+
+			// Line-of-sight check (same as ApplyRadialDamage with bDoFullDamage=false)
+			FHitResult LOSHit;
+			FCollisionQueryParams LOSParams;
+			LOSParams.AddIgnoredActor(this);
+			LOSParams.AddIgnoredActor(HitActor);
+			const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+				LOSHit, Origin, HitActor->GetActorLocation(), ECC_Visibility, LOSParams);
+			if (bBlocked)
+			{
+				continue;
+			}
+
+			// Linear falloff: full damage at center, zero at edge
+			const float Distance = FVector::Dist(Origin, HitActor->GetActorLocation());
+			const float DamageScale = FMath::Clamp(1.0f - Distance / ExplosionRadius, 0.0f, 1.0f);
+			const float FinalDamage = ExplosionDamage * DamageScale;
+
+			if (FinalDamage <= 0.0f)
+			{
+				continue;
+			}
+
+			// nullptr instigator bypasses NPC friendly-fire check.
+			// PlayerPawn as DamageCauser bypasses Cast<AShooterNPC> and triggers damage numbers.
+			FDamageEvent DamageEvent;
+			DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+			HitActor->TakeDamage(FinalDamage, DamageEvent, nullptr, PlayerPawn);
+		}
 	}
 
 	// Disable collision immediately
