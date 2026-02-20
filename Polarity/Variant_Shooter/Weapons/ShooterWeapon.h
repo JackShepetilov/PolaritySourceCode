@@ -650,4 +650,8 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Recoil")
 	const FWeaponRecoilSettings& GetRecoilSettings() const { return RecoilSettings; }
+
+	// ==================== Hitscan Getters ====================
+
+	float GetHitscanDamage() const { return HitscanDamage; }
 };
