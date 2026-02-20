@@ -100,6 +100,14 @@ public:
 	const FCheckpointData& GetCurrentCheckpointData() const { return CurrentCheckpointData; }
 
 	/**
+	 * Directly set checkpoint data (e.g., from ArenaManager with custom respawn point).
+	 * Bypasses CheckpointActor — caller is responsible for filling FCheckpointData.
+	 * @param NewData Fully populated checkpoint data
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint")
+	void SetCheckpointData(const FCheckpointData& NewData);
+
+	/**
 	 * Clear all checkpoint data (e.g., on level restart).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Checkpoint")

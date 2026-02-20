@@ -138,6 +138,27 @@ bool UCheckpointSubsystem::RespawnAtCheckpoint(AShooterCharacter* Character)
 	return true;
 }
 
+void UCheckpointSubsystem::SetCheckpointData(const FCheckpointData& NewData)
+{
+	CurrentCheckpointData = NewData;
+
+	// Snapshot alive NPCs for potential respawn
+	NPCsAliveAtCheckpoint.Empty();
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		if (AShooterNPC* NPC = NPCPtr.Get())
+		{
+			FGuid SpawnID = NPC->GetCheckpointSpawnID();
+			if (SpawnID.IsValid())
+			{
+				NPCsAliveAtCheckpoint.Add(SpawnID);
+			}
+		}
+	}
+
+	OnCheckpointActivated.Broadcast(CurrentCheckpointData);
+}
+
 void UCheckpointSubsystem::ClearCheckpointData()
 {
 	CurrentCheckpointData.Invalidate();

@@ -42,7 +42,8 @@ public class Polarity : ModuleRules
             "Polarity/Variant_Shooter/AI",
             "Polarity/Variant_Shooter/UI",
             "Polarity/Variant_Shooter/Weapons",
-            "Polarity/Subtitle"
+            "Polarity/Subtitle",
+            "Polarity/Arena"
         });
 
         // Uncomment if you are using Slate UI

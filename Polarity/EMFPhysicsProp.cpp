@@ -587,6 +587,18 @@ float AEMFPhysicsProp::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 		bCanExplode, bIsInReverseFlight, bHasExploded, bIsDead,
 		DamageEvent.DamageTypeClass ? *DamageEvent.DamageTypeClass->GetName() : TEXT("NULL"));
 
+	// Chain reaction: explosion from another prop = instant detonation
+	if (bCanExplode && !bHasExploded)
+	{
+		AEMFPhysicsProp* CauserProp = Cast<AEMFPhysicsProp>(DamageCauser);
+		if (CauserProp && CauserProp != this)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: >>> CHAIN REACTION from %s! <<<"), *GetName(), *CauserProp->GetName());
+			Explode(1.0f, 1.0f, 1.0f);
+			return ActualDamage;
+		}
+	}
+
 	// Shot-triggered detonation: hitscan hit (non-melee) during reverse flight = 2x explosion
 	if (bCanExplode && bIsInReverseFlight && !bHasExploded)
 	{
@@ -652,6 +664,13 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 {
 	if (bIsDead)
 	{
+		return;
+	}
+
+	// If prop can explode and hasn't yet — explode instead of just dying
+	if (bCanExplode && !bHasExploded)
+	{
+		Explode(1.0f, 1.0f, 1.0f);
 		return;
 	}
 

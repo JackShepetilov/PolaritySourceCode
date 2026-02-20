@@ -73,7 +73,21 @@
       "WebFetch(domain:notes.hzfishy.fr)",
       "WebFetch(domain:venturousstudios.github.io)",
       "WebFetch(domain:rystorm.com)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "WebFetch(domain:game.dazepuzzle.com)",
+      "WebFetch(domain:kotaku.com)",
+      "WebFetch(domain:smashpad.com)",
+      "WebFetch(domain:gamerescape.com)",
+      "WebFetch(domain:frakattack.substack.com)",
+      "WebFetch(domain:gameinformer.com)",
+      "WebFetch(domain:www.voidbreakergame.com)",
+      "WebFetch(domain:www.gamegrin.com)",
+      "WebFetch(domain:store.steampowered.com)",
+      "WebFetch(domain:www.thedrastikmeasure.com)",
+      "WebFetch(domain:www.oreateai.com)",
+      "WebFetch(domain:monstervine.com)",
+      "WebFetch(domain:www.quodsoler.com)",
+      "WebFetch(domain:www.pcgamer.com)"
     ]
   }
 }
