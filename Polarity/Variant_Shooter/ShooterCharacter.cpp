@@ -1589,8 +1589,15 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 				CurrentWeapon->DeactivateWeapon();
 			}
 
+			AShooterWeapon* OldWeapon = CurrentWeapon;
 			CurrentWeapon = AddedWeapon;
 			CurrentWeapon->ActivateWeapon();
+
+			// Notify upgrade system about new weapon
+			if (UpgradeManager)
+			{
+				UpgradeManager->NotifyWeaponChanged(OldWeapon, CurrentWeapon);
+			}
 
 			// Update mesh visibility when picking up first weapon
 			if (bWasUnarmed)
@@ -1995,10 +2002,17 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 			CurrentWeapon->DeactivateWeapon();
 		}
 
+		AShooterWeapon* OldWeapon = CurrentWeapon;
 		CurrentWeapon = OwnedWeapons[Data.CurrentWeaponIndex];
 		if (CurrentWeapon)
 		{
 			CurrentWeapon->ActivateWeapon();
+		}
+
+		// Notify upgrade system about restored weapon
+		if (UpgradeManager && OldWeapon != CurrentWeapon)
+		{
+			UpgradeManager->NotifyWeaponChanged(OldWeapon, CurrentWeapon);
 		}
 	}
 
