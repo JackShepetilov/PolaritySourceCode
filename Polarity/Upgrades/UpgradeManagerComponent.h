@@ -12,8 +12,8 @@ class UUpgradeComponent;
 class UUpgradeRegistry;
 class AShooterWeapon;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, const UUpgradeDefinition*, Definition);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, const UUpgradeDefinition*, Definition);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinition*, Definition);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, UUpgradeDefinition*, Definition);
 
 /**
  * Manages all active upgrades on the owning ShooterCharacter.
@@ -36,7 +36,7 @@ public:
 	 * @return True if upgrade was newly granted
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Upgrades")
-	bool GrantUpgrade(const UUpgradeDefinition* Definition);
+	bool GrantUpgrade(UUpgradeDefinition* Definition);
 
 	/**
 	 * Remove an upgrade from the player.
@@ -51,7 +51,7 @@ public:
 
 	/** Get all acquired upgrade definitions (for UI) */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
-	TArray<const UUpgradeDefinition*> GetAcquiredUpgrades() const;
+	TArray<UUpgradeDefinition*> GetAcquiredUpgrades() const;
 
 	/** Get the active component for a specific upgrade (nullptr if not owned) */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")

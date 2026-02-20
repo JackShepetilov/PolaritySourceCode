@@ -26,7 +26,7 @@ void UUpgradeManagerComponent::BeginPlay()
 	}
 }
 
-bool UUpgradeManagerComponent::GrantUpgrade(const UUpgradeDefinition* Definition)
+bool UUpgradeManagerComponent::GrantUpgrade(UUpgradeDefinition* Definition)
 {
 	if (!Definition)
 	{
@@ -93,7 +93,7 @@ bool UUpgradeManagerComponent::RemoveUpgrade(FGameplayTag UpgradeTag)
 	}
 
 	UUpgradeComponent* Component = *Found;
-	const UUpgradeDefinition* Definition = Component->UpgradeDefinition;
+	UUpgradeDefinition* Definition = Component->UpgradeDefinition;
 
 	// Deactivate
 	Component->OnUpgradeDeactivated();
@@ -115,9 +115,9 @@ bool UUpgradeManagerComponent::HasUpgrade(FGameplayTag UpgradeTag) const
 	return ActiveUpgrades.Contains(UpgradeTag);
 }
 
-TArray<const UUpgradeDefinition*> UUpgradeManagerComponent::GetAcquiredUpgrades() const
+TArray<UUpgradeDefinition*> UUpgradeManagerComponent::GetAcquiredUpgrades() const
 {
-	TArray<const UUpgradeDefinition*> Result;
+	TArray<UUpgradeDefinition*> Result;
 	Result.Reserve(ActiveUpgrades.Num());
 
 	for (const auto& Pair : ActiveUpgrades)
@@ -175,7 +175,7 @@ void UUpgradeManagerComponent::RestoreUpgradesFromTags(const TArray<FGameplayTag
 	{
 		if (!ActiveUpgrades.Contains(Tag))
 		{
-			const UUpgradeDefinition* Definition = Registry->FindByTag(Tag);
+			UUpgradeDefinition* Definition = Registry->FindByTag(Tag);
 			if (Definition)
 			{
 				GrantUpgrade(Definition);

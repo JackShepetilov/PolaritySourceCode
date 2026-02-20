@@ -3,7 +3,7 @@
 #include "UpgradeRegistry.h"
 #include "UpgradeDefinition.h"
 
-const UUpgradeDefinition* UUpgradeRegistry::FindByTag(FGameplayTag Tag) const
+UUpgradeDefinition* UUpgradeRegistry::FindByTag(FGameplayTag Tag) const
 {
 	for (const TObjectPtr<UUpgradeDefinition>& Def : AllUpgrades)
 	{

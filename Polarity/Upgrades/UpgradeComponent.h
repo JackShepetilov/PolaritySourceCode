@@ -26,7 +26,7 @@ public:
 
 	/** Reference to the definition that spawned this component */
 	UPROPERTY(BlueprintReadOnly, Category = "Upgrade")
-	TObjectPtr<const UUpgradeDefinition> UpgradeDefinition;
+	TObjectPtr<UUpgradeDefinition> UpgradeDefinition;
 
 	/** Get the owning ShooterCharacter */
 	UFUNCTION(BlueprintPure, Category = "Upgrade")

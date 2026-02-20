@@ -27,7 +27,7 @@ public:
 
 	/** Find an upgrade definition by its gameplay tag */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
-	const UUpgradeDefinition* FindByTag(FGameplayTag Tag) const;
+	UUpgradeDefinition* FindByTag(FGameplayTag Tag) const;
 
 	// UPrimaryDataAsset interface
 	virtual FPrimaryAssetId GetPrimaryAssetId() const override
