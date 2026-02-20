@@ -210,33 +210,37 @@ void UUpgrade_360Shot::Execute360Shot()
 		return;
 	}
 
-	// Get aim direction from controller (same as weapon does)
-	FVector AimDirection = Controller->GetControlRotation().Vector();
+	// Trace from camera viewpoint (same as weapon's FireHitscan does)
+	FVector ViewLocation = Character->GetPawnViewLocation();
+	FVector ViewDirection = Character->GetBaseAimRotation().Vector();
 
-	// Get muzzle location from weapon's first person mesh
-	FVector MuzzleLocation = Character->GetActorLocation() + FVector(0, 0, Character->BaseEyeHeight);
+	FVector TraceEnd = ViewLocation + ViewDirection * 20000.0f;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(Character);
+	QueryParams.AddIgnoredActor(Weapon);
+	QueryParams.bReturnPhysicalMaterial = true;
+
+	// Trace by ECC_Pawn to hit NPC pawns (same as weapon's cone sweep).
+	// ECC_Visibility hits static meshes/walls first, missing NPCs behind them.
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	FHitResult HitResult;
+	bool bHit = GetWorld()->LineTraceSingleByObjectType(
+		HitResult, ViewLocation, TraceEnd, ObjectParams, QueryParams);
+
+	FVector BeamEnd = bHit ? HitResult.ImpactPoint : TraceEnd;
+
+	// Get muzzle location for VFX only (not for trace)
+	FVector MuzzleLocation = ViewLocation;
 	USkeletalMeshComponent* WeaponMesh = Weapon->GetFirstPersonMesh();
 	if (WeaponMesh)
 	{
 		MuzzleLocation = WeaponMesh->GetSocketLocation(FName("Muzzle"));
 	}
 
-	// Perform line trace for the 360 shot
-	FVector TraceEnd = MuzzleLocation + AimDirection * 20000.0f;
-
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(Character);
-	QueryParams.AddIgnoredActor(Weapon);
-	QueryParams.bTraceComplex = true;
-	QueryParams.bReturnPhysicalMaterial = true;
-
-	FHitResult HitResult;
-	bool bHit = GetWorld()->LineTraceSingleByChannel(
-		HitResult, MuzzleLocation, TraceEnd, ECC_Visibility, QueryParams);
-
-	FVector BeamEnd = bHit ? HitResult.ImpactPoint : TraceEnd;
-
-	// Spawn charged beam VFX
+	// Spawn charged beam VFX (from muzzle to hit point)
 	SpawnChargedBeamEffect(MuzzleLocation, BeamEnd);
 
 	// Play charged fire sound
