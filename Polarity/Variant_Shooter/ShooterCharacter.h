@@ -16,6 +16,8 @@ class UWeaponRecoilComponent;
 class UHitMarkerComponent;
 class UMeleeAttackComponent;
 class UChargeAnimationComponent;
+class UUpgradeManagerComponent;
+class UUpgradeRegistry;
 class UAudioComponent;
 class UCurveFloat;
 class UCameraShakeBase;
@@ -105,6 +107,10 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	/** Charge animation component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UChargeAnimationComponent* ChargeAnimationComponent;
+
+	/** Upgrade system manager - tracks and manages all active upgrades */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UUpgradeManagerComponent> UpgradeManager;
 
 	// ==================== UE4 Mesh System (Copy Pose from Mesh) ====================
 
@@ -838,6 +844,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Charge")
 	UChargeAnimationComponent* GetChargeAnimationComponent() const { return ChargeAnimationComponent; }
 
+	/** Returns the upgrade manager component */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	UUpgradeManagerComponent* GetUpgradeManager() const { return UpgradeManager; }
+
 	/** Returns the currently equipped weapon */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	AShooterWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
@@ -1041,6 +1051,12 @@ protected:
 
 	/** Returns true if the character already owns a weapon of the given class */
 	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
+
+	// ==================== Upgrade System ====================
+
+	/** Registry of all available upgrades (needed for save/load resolution) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrades")
+	TObjectPtr<UUpgradeRegistry> UpgradeRegistry;
 
 	// ==================== Checkpoint System ====================
 public:

@@ -43,7 +43,9 @@ public class Polarity : ModuleRules
             "Polarity/Variant_Shooter/UI",
             "Polarity/Variant_Shooter/Weapons",
             "Polarity/Subtitle",
-            "Polarity/Arena"
+            "Polarity/Arena",
+            "Polarity/Upgrades",
+            "Polarity/Variant_Shooter/Pickups"
         });
 
         // Uncomment if you are using Slate UI

@@ -32,6 +32,8 @@
 #include "Curves/CurveFloat.h"
 #include "Polarity/Checkpoint/CheckpointData.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
+#include "Polarity/Upgrades/UpgradeManagerComponent.h"
+#include "Polarity/Upgrades/UpgradeRegistry.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -57,6 +59,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the charge animation component
 	ChargeAnimationComponent = CreateDefaultSubobject<UChargeAnimationComponent>(TEXT("Charge Animation Component"));
+
+	// create the upgrade manager component
+	UpgradeManager = CreateDefaultSubobject<UUpgradeManagerComponent>(TEXT("Upgrade Manager"));
 
 	// ==================== UE4 Mesh System ====================
 
@@ -534,6 +539,8 @@ void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
 
 void AShooterCharacter::OnWeaponSwitchLowered()
 {
+	AShooterWeapon* OldWeapon = CurrentWeapon;
+
 	// Deactivate old weapon
 	if (CurrentWeapon)
 	{
@@ -546,6 +553,12 @@ void AShooterCharacter::OnWeaponSwitchLowered()
 		CurrentWeapon = PendingWeapon;
 		CurrentWeapon->ActivateWeapon();
 		PendingWeapon = nullptr;
+	}
+
+	// Notify upgrade system about weapon change
+	if (UpgradeManager && OldWeapon != CurrentWeapon)
+	{
+		UpgradeManager->NotifyWeaponChanged(OldWeapon, CurrentWeapon);
 	}
 
 	// Start raising phase
@@ -1925,6 +1938,12 @@ bool AShooterCharacter::SaveToCheckpoint(FCheckpointData& OutData)
 		}
 	}
 
+	// Save acquired upgrades
+	if (UpgradeManager)
+	{
+		OutData.AcquiredUpgrades = UpgradeManager->GetUpgradeTagsForSave();
+	}
+
 	return true;
 }
 
@@ -2014,6 +2033,12 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 	if (CurrentWeapon)
 	{
 		OnBulletCountUpdated.Broadcast(CurrentWeapon->GetMagazineSize(), CurrentWeapon->GetBulletCount());
+	}
+
+	// Restore upgrades
+	if (UpgradeManager && UpgradeRegistry)
+	{
+		UpgradeManager->RestoreUpgradesFromTags(Data.AcquiredUpgrades, UpgradeRegistry);
 	}
 
 	// Blueprint event (use this to reset any death-related visual effects)

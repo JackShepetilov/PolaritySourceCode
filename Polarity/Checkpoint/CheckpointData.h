@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "CheckpointData.generated.h"
 
 /**
@@ -49,6 +50,10 @@ struct POLARITY_API FCheckpointData
 	UPROPERTY(BlueprintReadWrite, Category = "Checkpoint|Sequences")
 	TMap<FName, bool> CompletedSequences;
 
+	/** Upgrade tags acquired by the player at this checkpoint */
+	UPROPERTY(BlueprintReadWrite, Category = "Checkpoint|Upgrades")
+	TArray<FGameplayTag> AcquiredUpgrades;
+
 	/** Invalidate this checkpoint data */
 	void Invalidate()
 	{
@@ -60,5 +65,6 @@ struct POLARITY_API FCheckpointData
 		WeaponAmmo.Empty();
 		CheckpointID.Invalidate();
 		CompletedSequences.Empty();
+		AcquiredUpgrades.Empty();
 	}
 };
