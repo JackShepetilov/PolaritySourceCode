@@ -38,6 +38,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "0.0"))
 	float MinRotationSpeed = 180.0f;
 
+	/** Recoil multiplier for the 360 shot (1 = normal, 2 = double, 3 = triple, etc.). The normal shot already provides 1x, this adds extra kicks on top. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float RecoilMultiplier = 2.0f;
+
 	// ==================== VFX/SFX ====================
 
 	/** Special beam VFX for the 360 shot (overrides normal beam) */

@@ -11,6 +11,7 @@
 #include "NiagaraComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
+#include "WeaponRecoilComponent.h"
 
 UUpgrade_360Shot::UUpgrade_360Shot()
 {
@@ -242,6 +243,19 @@ void UUpgrade_360Shot::Execute360Shot()
 
 	// Spawn charged beam VFX (from muzzle to hit point)
 	SpawnChargedBeamEffect(MuzzleLocation, BeamEnd);
+
+	// Extra recoil kicks — normal shot already provides 1x, add (Multiplier - 1) extra full recoil cycles
+	int32 ExtraKicks = FMath::RoundToInt(Def360->RecoilMultiplier) - 1;
+	if (ExtraKicks > 0)
+	{
+		if (UWeaponRecoilComponent* RecoilComp = Character->GetRecoilComponent())
+		{
+			for (int32 i = 0; i < ExtraKicks; ++i)
+			{
+				RecoilComp->OnWeaponFired();
+			}
+		}
+	}
 
 	// Play charged fire sound
 	if (Def360->ChargedFireSound)
