@@ -6,8 +6,7 @@
 #include "UpgradeComponent.h"
 #include "Upgrade_360Shot.generated.h"
 
-class UNiagaraSystem;
-class USoundBase;
+class UUpgradeDefinition_360Shot;
 
 /**
  * "360 Shot" Upgrade
@@ -19,6 +18,9 @@ class USoundBase;
  *
  * The bonus damage is applied ON TOP of the normal shot — the regular shot
  * fires normally, and the upgrade adds a separate high-damage hit.
+ *
+ * All tuning parameters and asset references are configured via
+ * UUpgradeDefinition_360Shot (DataAsset) in the editor.
  */
 UCLASS(BlueprintType, meta = (DisplayName = "360 Shot"))
 class POLARITY_API UUpgrade_360Shot : public UUpgradeComponent
@@ -28,42 +30,6 @@ class POLARITY_API UUpgrade_360Shot : public UUpgradeComponent
 public:
 
 	UUpgrade_360Shot();
-
-	// ==================== Tuning ====================
-
-	/** Fixed bonus damage dealt by the 360 shot (on top of normal shot damage) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot", meta = (ClampMin = "1.0"))
-	float BonusDamage = 500.0f;
-
-	/** Time window to complete the 360-degree rotation (seconds) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot", meta = (ClampMin = "0.1", ClampMax = "5.0"))
-	float SpinTimeWindow = 1.5f;
-
-	/** Duration of the charged state after completing the spin (seconds) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot", meta = (ClampMin = "0.1", ClampMax = "5.0"))
-	float ChargedDuration = 1.0f;
-
-	/** Minimum rotation speed to count toward spin (degrees/sec). Prevents slow creeping rotations. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot", meta = (ClampMin = "0.0"))
-	float MinRotationSpeed = 180.0f;
-
-	// ==================== VFX/SFX ====================
-
-	/** Special beam VFX for the 360 shot (overrides normal beam) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot|Effects")
-	TObjectPtr<UNiagaraSystem> ChargedBeamFX;
-
-	/** Color of the charged beam */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot|Effects")
-	FLinearColor ChargedBeamColor = FLinearColor(1.0f, 0.3f, 0.05f, 1.0f);
-
-	/** Sound played when charged state activates */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot|Effects")
-	TObjectPtr<USoundBase> ChargedReadySound;
-
-	/** Sound played when the 360 shot fires */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "360 Shot|Effects")
-	TObjectPtr<USoundBase> ChargedFireSound;
 
 	// ==================== State Queries ====================
 
@@ -83,6 +49,9 @@ protected:
 	virtual void OnWeaponFired() override;
 
 private:
+
+	/** Cached pointer to our typed definition (avoids casting every frame) */
+	TWeakObjectPtr<UUpgradeDefinition_360Shot> Def360;
 
 	/** Accumulated absolute yaw rotation within the time window */
 	float AccumulatedYaw = 0.0f;

@@ -1,6 +1,7 @@
 // Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "Upgrade_360Shot.h"
+#include "UpgradeDefinition_360Shot.h"
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "ShooterWeapon_Laser.h"
@@ -19,11 +20,18 @@ UUpgrade_360Shot::UUpgrade_360Shot()
 
 void UUpgrade_360Shot::OnUpgradeActivated()
 {
+	// Cache the typed definition
+	Def360 = Cast<UUpgradeDefinition_360Shot>(UpgradeDefinition);
+	if (!Def360.IsValid())
+	{
+		UE_LOG(LogTemp, Error, TEXT("360 Shot: UpgradeDefinition is not UUpgradeDefinition_360Shot!"));
+		return;
+	}
+
 	bFirstFrame = true;
 	AccumulatedYaw = 0.0f;
 	bIsCharged = false;
 
-	// Enable tick
 	SetComponentTickEnabled(true);
 }
 
@@ -32,7 +40,6 @@ void UUpgrade_360Shot::OnUpgradeDeactivated()
 	SetComponentTickEnabled(false);
 	DeactivateCharged();
 
-	// Clear timer
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(ChargedExpirationTimer);
@@ -43,13 +50,17 @@ void UUpgrade_360Shot::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	if (!Def360.IsValid())
+	{
+		return;
+	}
+
 	AShooterCharacter* Character = GetShooterCharacter();
 	if (!Character)
 	{
 		return;
 	}
 
-	// Don't track rotation while already charged
 	if (bIsCharged)
 	{
 		return;
@@ -86,22 +97,20 @@ void UUpgrade_360Shot::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 	float RotationSpeed = (DeltaTime > KINDA_SMALL_NUMBER) ? (AbsDelta / DeltaTime) : 0.0f;
 
 	// Only count rotation above minimum speed threshold
-	if (RotationSpeed >= MinRotationSpeed)
+	if (RotationSpeed >= Def360->MinRotationSpeed)
 	{
 		AccumulatedYaw += AbsDelta;
 		TimeSinceLastSignificantRotation = 0.0f;
 	}
 	else
 	{
-		// Decay accumulated rotation if player stops spinning
 		TimeSinceLastSignificantRotation += DeltaTime;
-		if (TimeSinceLastSignificantRotation > SpinTimeWindow)
+		if (TimeSinceLastSignificantRotation > Def360->SpinTimeWindow)
 		{
 			AccumulatedYaw = 0.0f;
 		}
 	}
 
-	// Check for 360 completion
 	if (AccumulatedYaw >= 360.0f)
 	{
 		ActivateCharged();
@@ -133,16 +142,21 @@ void UUpgrade_360Shot::OnWeaponFired()
 
 void UUpgrade_360Shot::ActivateCharged()
 {
+	if (!Def360.IsValid())
+	{
+		return;
+	}
+
 	bIsCharged = true;
 	AccumulatedYaw = 0.0f;
 
 	// Play ready sound
-	if (ChargedReadySound)
+	if (Def360->ChargedReadySound)
 	{
 		AShooterCharacter* Character = GetShooterCharacter();
 		if (Character)
 		{
-			UGameplayStatics::PlaySoundAtLocation(this, ChargedReadySound, Character->GetActorLocation());
+			UGameplayStatics::PlaySoundAtLocation(this, Def360->ChargedReadySound, Character->GetActorLocation());
 		}
 	}
 
@@ -151,10 +165,10 @@ void UUpgrade_360Shot::ActivateCharged()
 	{
 		World->GetTimerManager().SetTimer(
 			ChargedExpirationTimer, this, &UUpgrade_360Shot::DeactivateCharged,
-			ChargedDuration, false);
+			Def360->ChargedDuration, false);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("360 Shot: CHARGED! %.1fs window"), ChargedDuration);
+	UE_LOG(LogTemp, Log, TEXT("360 Shot: CHARGED! %.1fs window"), Def360->ChargedDuration);
 }
 
 void UUpgrade_360Shot::DeactivateCharged()
@@ -168,7 +182,6 @@ void UUpgrade_360Shot::DeactivateCharged()
 	AccumulatedYaw = 0.0f;
 	TimeSinceLastSignificantRotation = 0.0f;
 
-	// Clear timer in case called manually (not from timer)
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(ChargedExpirationTimer);
@@ -179,6 +192,11 @@ void UUpgrade_360Shot::DeactivateCharged()
 
 void UUpgrade_360Shot::Execute360Shot()
 {
+	if (!Def360.IsValid())
+	{
+		return;
+	}
+
 	AShooterCharacter* Character = GetShooterCharacter();
 	AShooterWeapon* Weapon = GetCurrentWeapon();
 	if (!Character || !Weapon)
@@ -222,9 +240,9 @@ void UUpgrade_360Shot::Execute360Shot()
 	SpawnChargedBeamEffect(MuzzleLocation, BeamEnd);
 
 	// Play charged fire sound
-	if (ChargedFireSound)
+	if (Def360->ChargedFireSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, ChargedFireSound, MuzzleLocation);
+		UGameplayStatics::PlaySoundAtLocation(this, Def360->ChargedFireSound, MuzzleLocation);
 	}
 
 	// Apply bonus damage if we hit something
@@ -236,7 +254,7 @@ void UUpgrade_360Shot::Execute360Shot()
 		DamageEvent.DamageTypeClass = UDamageType_Ranged::StaticClass();
 
 		float ActualDamage = HitActor->TakeDamage(
-			BonusDamage, DamageEvent,
+			Def360->BonusDamage, DamageEvent,
 			Controller, Weapon);
 
 		UE_LOG(LogTemp, Log, TEXT("360 Shot: Dealt %.0f bonus damage to %s"), ActualDamage, *HitActor->GetName());
@@ -245,25 +263,15 @@ void UUpgrade_360Shot::Execute360Shot()
 
 void UUpgrade_360Shot::SpawnChargedBeamEffect(const FVector& Start, const FVector& End)
 {
-	UNiagaraSystem* FXToUse = ChargedBeamFX;
-
-	// Fallback to weapon's normal beam if no custom VFX set
-	if (!FXToUse)
+	if (!Def360.IsValid() || !Def360->ChargedBeamFX)
 	{
-		AShooterWeapon* Weapon = GetCurrentWeapon();
-		if (Weapon)
-		{
-			// Access weapon's beam FX through its public getter (BeamFX is protected)
-			// For now, just skip if no custom FX
-			UE_LOG(LogTemp, Warning, TEXT("360 Shot: No ChargedBeamFX set, skipping beam VFX"));
-			return;
-		}
+		UE_LOG(LogTemp, Warning, TEXT("360 Shot: No ChargedBeamFX set, skipping beam VFX"));
 		return;
 	}
 
 	UNiagaraComponent* BeamComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 		GetWorld(),
-		FXToUse,
+		Def360->ChargedBeamFX,
 		Start,
 		(End - Start).Rotation(),
 		FVector::OneVector,
@@ -277,6 +285,6 @@ void UUpgrade_360Shot::SpawnChargedBeamEffect(const FVector& Start, const FVecto
 		BeamComp->SetVectorParameter(FName("BeamStart"), Start);
 		BeamComp->SetVectorParameter(FName("BeamEnd"), End);
 		BeamComp->SetFloatParameter(FName("Energy"), 1.0f);
-		BeamComp->SetColorParameter(FName("BeamColor"), ChargedBeamColor);
+		BeamComp->SetColorParameter(FName("BeamColor"), Def360->ChargedBeamColor);
 	}
 }
