@@ -91,9 +91,25 @@ public:
 	/** Called when owner deals damage to a target */
 	void NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled);
 
+protected:
+
+	virtual void BeginPlay() override;
+
 private:
 
 	/** Map of UpgradeTag -> active upgrade component */
 	UPROPERTY()
 	TMap<FGameplayTag, TObjectPtr<UUpgradeComponent>> ActiveUpgrades;
+
+	/** Currently bound weapon (for delegate cleanup) */
+	UPROPERTY()
+	TWeakObjectPtr<AShooterWeapon> BoundWeapon;
+
+	/** Bind/unbind OnShotFired delegate on weapon */
+	void BindToWeapon(AShooterWeapon* Weapon);
+	void UnbindFromWeapon();
+
+	/** Callback for weapon's OnShotFired delegate */
+	UFUNCTION()
+	void OnWeaponShotFiredCallback();
 };

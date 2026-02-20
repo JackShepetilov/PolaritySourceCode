@@ -4,10 +4,26 @@
 #include "UpgradeDefinition.h"
 #include "UpgradeComponent.h"
 #include "UpgradeRegistry.h"
+#include "ShooterCharacter.h"
+#include "ShooterWeapon.h"
 
 UUpgradeManagerComponent::UUpgradeManagerComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+}
+
+void UUpgradeManagerComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Bind to the character's initial weapon (if already equipped)
+	if (AShooterCharacter* Character = Cast<AShooterCharacter>(GetOwner()))
+	{
+		if (AShooterWeapon* Weapon = Character->GetCurrentWeapon())
+		{
+			BindToWeapon(Weapon);
+		}
+	}
 }
 
 bool UUpgradeManagerComponent::GrantUpgrade(const UUpgradeDefinition* Definition)
@@ -185,6 +201,13 @@ void UUpgradeManagerComponent::NotifyWeaponFired()
 
 void UUpgradeManagerComponent::NotifyWeaponChanged(AShooterWeapon* OldWeapon, AShooterWeapon* NewWeapon)
 {
+	// Rebind OnShotFired to the new weapon
+	UnbindFromWeapon();
+	if (NewWeapon)
+	{
+		BindToWeapon(NewWeapon);
+	}
+
 	for (auto& Pair : ActiveUpgrades)
 	{
 		if (Pair.Value)
@@ -214,4 +237,29 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 			Pair.Value->OnOwnerDealtDamage(Target, Damage, bKilled);
 		}
 	}
+}
+
+void UUpgradeManagerComponent::BindToWeapon(AShooterWeapon* Weapon)
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	BoundWeapon = Weapon;
+	Weapon->OnShotFired.AddDynamic(this, &UUpgradeManagerComponent::OnWeaponShotFiredCallback);
+}
+
+void UUpgradeManagerComponent::UnbindFromWeapon()
+{
+	if (AShooterWeapon* Weapon = BoundWeapon.Get())
+	{
+		Weapon->OnShotFired.RemoveDynamic(this, &UUpgradeManagerComponent::OnWeaponShotFiredCallback);
+	}
+	BoundWeapon.Reset();
+}
+
+void UUpgradeManagerComponent::OnWeaponShotFiredCallback()
+{
+	NotifyWeaponFired();
 }

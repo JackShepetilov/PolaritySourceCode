@@ -45,6 +45,7 @@ public class Polarity : ModuleRules
             "Polarity/Subtitle",
             "Polarity/Arena",
             "Polarity/Upgrades",
+            "Polarity/Upgrades/Upgrades",
             "Polarity/Variant_Shooter/Pickups"
         });
 
