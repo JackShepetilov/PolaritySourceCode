@@ -339,4 +339,18 @@ protected:
 
 	/** Complete current dash */
 	void CompleteDash();
+
+	// ==================== Stuck Detection ====================
+
+	/** Position recorded for stuck detection */
+	FVector StuckCheckPosition = FVector::ZeroVector;
+
+	/** Time when stuck check position was recorded */
+	float StuckCheckTime = 0.0f;
+
+	/** How long the drone must be "not moving" to be considered stuck (seconds) */
+	static constexpr float StuckTimeThreshold = 0.5f;
+
+	/** Minimum distance the drone must move within StuckTimeThreshold to not be "stuck" (cm) */
+	static constexpr float StuckDistanceThreshold = 15.0f;
 };

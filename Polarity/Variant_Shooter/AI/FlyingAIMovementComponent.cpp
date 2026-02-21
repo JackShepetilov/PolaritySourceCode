@@ -112,6 +112,9 @@ void UFlyingAIMovementComponent::FlyToLocation(const FVector& TargetLocation, fl
 	CurrentTargetLocation = ValidateTargetHeight(TargetLocation);
 	CurrentAcceptanceRadius = (CustomAcceptanceRadius > 0.0f) ? CustomAcceptanceRadius : AcceptanceRadius;
 	bIsMovingToTarget = true;
+
+	// Reset stuck detection for new movement
+	StuckCheckTime = 0.0f;
 }
 
 void UFlyingAIMovementComponent::FlyToActor(AActor* InTargetActor, float CustomAcceptanceRadius)
@@ -125,6 +128,9 @@ void UFlyingAIMovementComponent::FlyToActor(AActor* InTargetActor, float CustomA
 	CurrentTargetLocation = ValidateTargetHeight(InTargetActor->GetActorLocation());
 	CurrentAcceptanceRadius = (CustomAcceptanceRadius > 0.0f) ? CustomAcceptanceRadius : AcceptanceRadius;
 	bIsMovingToTarget = true;
+
+	// Reset stuck detection for new movement
+	StuckCheckTime = 0.0f;
 }
 
 void UFlyingAIMovementComponent::StopMovement()
@@ -365,8 +371,33 @@ void UFlyingAIMovementComponent::UpdateMovement(float DeltaTime)
 	// Check if we've reached the target
 	if (DistanceToTarget <= CurrentAcceptanceRadius)
 	{
+		StuckCheckTime = 0.0f;
 		CompleteMovement(true);
 		return;
+	}
+
+	// Stuck detection: if drone hasn't moved significantly in StuckTimeThreshold, abort movement
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (StuckCheckTime <= 0.0f)
+	{
+		// Start tracking
+		StuckCheckPosition = CurrentLocation;
+		StuckCheckTime = CurrentTime;
+	}
+	else if (CurrentTime - StuckCheckTime >= StuckTimeThreshold)
+	{
+		const float DistanceMoved = FVector::Dist(CurrentLocation, StuckCheckPosition);
+		if (DistanceMoved < StuckDistanceThreshold)
+		{
+			// Drone is stuck - abort movement so StateTree picks a new destination
+			StuckCheckTime = 0.0f;
+			CompleteMovement(false);
+			return;
+		}
+
+		// Reset stuck check window
+		StuckCheckPosition = CurrentLocation;
+		StuckCheckTime = CurrentTime;
 	}
 
 	// Calculate desired direction

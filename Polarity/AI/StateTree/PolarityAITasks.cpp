@@ -612,28 +612,16 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 		{
 			StartShooting(Data);
 		}
-#if WITH_EDITOR
-		else
-		{
-			// Debug: why can't we shoot?
-			static float LastDebugTime = 0.0f;
-			float CurrentTime = Data.Drone->GetWorld()->GetTimeSeconds();
-			if (CurrentTime - LastDebugTime > 1.0f) // Log once per second max
-			{
-				LastDebugTime = CurrentTime;
-				UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot CanShoot=false: Dead=%d, InCooldown=%d, IsShooting=%d, HasLOS=%d"),
-					Data.Drone->IsDead(),
-					Data.Drone->IsInBurstCooldown(),
-					Data.Drone->IsCurrentlyShooting(),
-					Data.Drone->HasLineOfSightTo(Data.Target));
-			}
-		}
-#endif
 	}
 	else
 	{
-		// Currently shooting - check if burst completed
-		if (Data.Drone->IsInBurstCooldown())
+		// Currently shooting - check if LOS was lost mid-burst
+		if (!Data.Drone->HasLineOfSightTo(Data.Target))
+		{
+			// LOS lost - stop shooting immediately to avoid firing through walls
+			StopShooting(Data);
+		}
+		else if (Data.Drone->IsInBurstCooldown())
 		{
 			// Burst finished, entering cooldown - just update our state flag
 			// Don't call StopShooting() as that sets bWantsToShoot=false and prevents auto-resume
@@ -692,18 +680,74 @@ bool FSTTask_FlyAndShoot::PickNewDestination(FInstanceDataType& Data) const
 		return false;
 	}
 
-	// Get random point around target
 	const FVector TargetLocation = Data.Target->GetActorLocation();
-	FVector NewPoint;
+	const bool bCurrentlyHasLOS = Data.Drone->HasLineOfSightTo(Data.Target);
 
-	if (FlyingMovement->GetRandomPointInVolume(TargetLocation, Data.OrbitRadius, Data.MinHeight, Data.MaxHeight, NewPoint))
+	// Try multiple points, prefer ones with LOS to target
+	constexpr int32 MaxAttempts = 8;
+	FVector FallbackPoint = FVector::ZeroVector;
+	bool bHasFallback = false;
+
+	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 	{
-		Data.CurrentDestination = NewPoint;
+		FVector NewPoint;
+		if (!FlyingMovement->GetRandomPointInVolume(TargetLocation, Data.OrbitRadius, Data.MinHeight, Data.MaxHeight, NewPoint))
+		{
+			continue;
+		}
+
+		// Save first valid point as fallback
+		if (!bHasFallback)
+		{
+			FallbackPoint = NewPoint;
+			bHasFallback = true;
+		}
+
+		// Check LOS from candidate point to target
+		FHitResult LOSHit;
+		FCollisionQueryParams LOSParams;
+		LOSParams.AddIgnoredActor(Data.Drone);
+		LOSParams.AddIgnoredActor(Data.Target);
+
+		const bool bLOSBlocked = Data.Drone->GetWorld()->LineTraceSingleByChannel(
+			LOSHit,
+			NewPoint,
+			TargetLocation,
+			ECC_Visibility,
+			LOSParams
+		);
+
+		if (!bLOSBlocked)
+		{
+			// Point has LOS - use it
+			Data.CurrentDestination = NewPoint;
+			Data.bHasDestination = true;
+			FlyingMovement->FlyToLocation(NewPoint, Data.AcceptanceRadius);
+			return true;
+		}
+	}
+
+	// No LOS-valid point found
+	if (!bCurrentlyHasLOS)
+	{
+		// No LOS currently - try a point closer to target to approach
+		FVector ApproachPoint;
+		const float ApproachRadius = Data.OrbitRadius * 0.4f;
+		if (FlyingMovement->GetRandomPointInVolume(TargetLocation, ApproachRadius, Data.MinHeight, Data.MaxHeight, ApproachPoint))
+		{
+			Data.CurrentDestination = ApproachPoint;
+			Data.bHasDestination = true;
+			FlyingMovement->FlyToLocation(ApproachPoint, Data.AcceptanceRadius);
+			return true;
+		}
+	}
+
+	// Use fallback point to keep moving
+	if (bHasFallback)
+	{
+		Data.CurrentDestination = FallbackPoint;
 		Data.bHasDestination = true;
-
-		// Start flying to new destination
-		FlyingMovement->FlyToLocation(NewPoint, Data.AcceptanceRadius);
-
+		FlyingMovement->FlyToLocation(FallbackPoint, Data.AcceptanceRadius);
 		return true;
 	}
 
@@ -904,8 +948,13 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 	}
 	else
 	{
-		// Currently shooting - check if burst completed
-		if (Data.NPC->IsInBurstCooldown())
+		// Currently shooting - check if LOS was lost mid-burst
+		if (!Data.NPC->HasLineOfSightTo(Data.Target))
+		{
+			// LOS lost - stop shooting immediately to avoid firing through walls
+			StopShooting(Data);
+		}
+		else if (Data.NPC->IsInBurstCooldown())
 		{
 			// Burst finished, entering cooldown
 			Data.bIsShooting = false;
@@ -967,9 +1016,14 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 	const FVector TargetLocation = Data.Target->GetActorLocation();
 	const FVector NPCLocation = Data.NPC->GetActorLocation();
 
-	// Try multiple times to find a valid point
+	// Check if we currently have LOS - if not, prioritize finding a LOS-valid position
+	const bool bCurrentlyHasLOS = Data.NPC->HasLineOfSightTo(Data.Target);
+
+	// Try multiple times to find a valid point (prefer points with LOS)
 	constexpr int32 MaxAttempts = 15;
 	FNavLocation NavResult;
+	FNavLocation BestNoLOSResult;
+	bool bHasNoLOSFallback = false;
 
 	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 	{
@@ -990,23 +1044,89 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 				continue;
 			}
 
-			// Valid point found!
-			Data.CurrentDestination = NavResult.Location;
-			Data.bHasDestination = true;
+			// Check LOS from candidate point to target (eye height offset)
+			FHitResult LOSHit;
+			FCollisionQueryParams LOSParams;
+			LOSParams.AddIgnoredActor(Data.NPC);
+			LOSParams.AddIgnoredActor(Data.Target);
 
-			// Start moving with strafe enabled
-			FAIMoveRequest MoveRequest;
-			MoveRequest.SetGoalLocation(NavResult.Location);
-			MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
-			MoveRequest.SetUsePathfinding(true);
-			MoveRequest.SetAllowPartialPath(true);
-			MoveRequest.SetProjectGoalLocation(true);
-			MoveRequest.SetCanStrafe(true);
+			const FVector EyeOffset(0.0f, 0.0f, 80.0f);
+			const bool bLOSBlocked = Data.NPC->GetWorld()->LineTraceSingleByChannel(
+				LOSHit,
+				NavResult.Location + EyeOffset,
+				TargetLocation,
+				ECC_Visibility,
+				LOSParams
+			);
 
-			Data.Controller->MoveTo(MoveRequest);
+			if (!bLOSBlocked)
+			{
+				// Point has LOS to target - use it!
+				Data.CurrentDestination = NavResult.Location;
+				Data.bHasDestination = true;
 
-			return true;
+				FAIMoveRequest MoveRequest;
+				MoveRequest.SetGoalLocation(NavResult.Location);
+				MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+				MoveRequest.SetUsePathfinding(true);
+				MoveRequest.SetAllowPartialPath(true);
+				MoveRequest.SetProjectGoalLocation(true);
+				MoveRequest.SetCanStrafe(true);
+
+				Data.Controller->MoveTo(MoveRequest);
+				return true;
+			}
+
+			// No LOS but valid distance - save as fallback
+			if (!bHasNoLOSFallback)
+			{
+				BestNoLOSResult = NavResult;
+				bHasNoLOSFallback = true;
+			}
 		}
+	}
+
+	// No LOS-valid point found - move closer to target to regain LOS
+	if (!bCurrentlyHasLOS)
+	{
+		// Try to find a point closer to target (within min distance) to approach
+		for (int32 Attempt = 0; Attempt < 5; ++Attempt)
+		{
+			if (NavSys->GetRandomReachablePointInRadius(TargetLocation, Data.MinDistanceFromTarget, NavResult))
+			{
+				Data.CurrentDestination = NavResult.Location;
+				Data.bHasDestination = true;
+
+				FAIMoveRequest MoveRequest;
+				MoveRequest.SetGoalLocation(NavResult.Location);
+				MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+				MoveRequest.SetUsePathfinding(true);
+				MoveRequest.SetAllowPartialPath(true);
+				MoveRequest.SetProjectGoalLocation(true);
+				MoveRequest.SetCanStrafe(true);
+
+				Data.Controller->MoveTo(MoveRequest);
+				return true;
+			}
+		}
+	}
+
+	// Fall back to any valid point (even without LOS) to keep moving
+	if (bHasNoLOSFallback)
+	{
+		Data.CurrentDestination = BestNoLOSResult.Location;
+		Data.bHasDestination = true;
+
+		FAIMoveRequest MoveRequest;
+		MoveRequest.SetGoalLocation(BestNoLOSResult.Location);
+		MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+		MoveRequest.SetUsePathfinding(true);
+		MoveRequest.SetAllowPartialPath(true);
+		MoveRequest.SetProjectGoalLocation(true);
+		MoveRequest.SetCanStrafe(true);
+
+		Data.Controller->MoveTo(MoveRequest);
+		return true;
 	}
 
 	return false;
