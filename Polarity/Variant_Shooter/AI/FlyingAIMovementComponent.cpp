@@ -661,30 +661,20 @@ void UFlyingAIMovementComponent::ApplyMovementInput(const FVector& Direction, fl
 	// Update max speed
 	MovementComponent->MaxFlySpeed = Speed;
 
-	// Get collision-safe direction
-	const float DeltaTime = GetWorld()->GetDeltaSeconds();
-	FVector SafeDirection = GetCollisionSafeDirection(Direction, Speed, DeltaTime);
-
-	// If all directions are blocked, stop
-	if (SafeDirection.IsNearlyZero())
-	{
-		MovementComponent->StopMovementImmediately();
-		return;
-	}
-
-	// Check if we have a controller
+	// Let CharacterMovementComponent handle wall sliding natively via PhysFly.
+	// Our GetAvoidanceAdjustedDirection (called before this) provides proactive steering,
+	// while CMC handles reactive collision resolution (depenetration, sliding).
 	if (CharacterOwner->GetController())
 	{
-		// Use standard movement input (works with AI controller)
-		CharacterOwner->AddMovementInput(SafeDirection, 1.0f);
+		CharacterOwner->AddMovementInput(Direction, 1.0f);
 	}
 	else
 	{
 		// No controller - apply velocity directly
-		FVector TargetVelocity = SafeDirection * Speed;
+		const float DeltaTime = GetWorld()->GetDeltaSeconds();
+		FVector TargetVelocity = Direction * Speed;
 		FVector CurrentVelocity = MovementComponent->Velocity;
 
-		// Interpolate towards target velocity
 		FVector NewVelocity = FMath::VInterpTo(CurrentVelocity, TargetVelocity, DeltaTime, FlyAcceleration / Speed);
 		MovementComponent->Velocity = NewVelocity;
 	}
