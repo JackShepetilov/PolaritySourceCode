@@ -307,14 +307,15 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 	case EMeleeAttackState::Recovery:
 		StateTimeRemaining = Settings.RecoveryTime;
 		StopSwingTrailFX();
-		StopMagnetism();
 
-		// Start drop kick cooldown when dropkick attack finishes
+		// Start drop kick cooldown BEFORE StopMagnetism (which resets bIsDropKick)
 		if (bIsDropKick && Settings.DropKickCooldown > 0.0f)
 		{
 			DropKickCooldownRemaining = Settings.DropKickCooldown;
 			OnDropKickCooldownStarted.Broadcast(Settings.DropKickCooldown);
 		}
+
+		StopMagnetism();
 
 		if (!bHasHitThisAttack)
 		{
