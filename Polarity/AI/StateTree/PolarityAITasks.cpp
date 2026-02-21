@@ -619,6 +619,10 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 			// No LOS for too long — interrupt current path to find a position with LOS
 			FlyingMovement->StopMovement();
 			bNeedsNewDestination = true;
+
+			// Reset timer so the drone has time to reach the new destination
+			// before we force another reposition
+			Data.LastLOSTime = CurrentTime;
 		}
 
 		if (bNeedsNewDestination)
@@ -968,6 +972,10 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 		{
 			Data.Controller->StopMovement();
 			bNeedsNewDestination = true;
+
+			// Reset timer so the NPC has time to reach the new destination
+			// before we force another reposition
+			Data.LastLOSTime = CurrentTime;
 		}
 
 		if (bNeedsNewDestination)

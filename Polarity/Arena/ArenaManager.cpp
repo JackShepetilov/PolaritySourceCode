@@ -278,8 +278,9 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 			if (!bIsFlyingUnit)
 			{
 				// Get capsule half-height from CDO to know how high to place the NPC
+				// Add 10cm padding to ensure feet never clip into the floor
 				const ACharacter* CDO = Entry.NPCClass->GetDefaultObject<ACharacter>();
-				const float CapsuleHalfHeight = CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f;
+				const float CapsuleHalfHeight = (CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f) + 10.0f;
 
 				// Try NavMesh projection first — guarantees a walkable surface
 				UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
