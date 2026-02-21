@@ -377,7 +377,13 @@ struct FSTTask_FlyAndShoot_Data
 	FVector CurrentDestination = FVector::ZeroVector;
 	bool bHasDestination = false;
 	bool bIsShooting = false;
+
+	/** Time when LOS was last confirmed (for repositioning when LOS lost too long) */
+	float LastLOSTime = 0.0f;
 };
+
+/** How long without LOS before drone forces a reposition (seconds) */
+static constexpr float FlyAndShoot_LOSLostRepositionTime = 1.5f;
 
 USTRUCT(DisplayName = "Fly And Shoot", Category = "Polarity|AI|Drone")
 struct FSTTask_FlyAndShoot : public FStateTreeTaskCommonBase
@@ -455,7 +461,13 @@ struct FSTTask_RunAndShoot_Data
 	FVector CurrentDestination = FVector::ZeroVector;
 	bool bHasDestination = false;
 	bool bIsShooting = false;
+
+	/** Time when LOS was last confirmed (for repositioning when LOS lost too long) */
+	float LastLOSTime = 0.0f;
 };
+
+/** How long without LOS before NPC forces a reposition (seconds) */
+static constexpr float RunAndShoot_LOSLostRepositionTime = 2.0f;
 
 USTRUCT(DisplayName = "Run And Shoot", Category = "Polarity|AI|Shooter")
 struct FSTTask_RunAndShoot : public FStateTreeTaskCommonBase

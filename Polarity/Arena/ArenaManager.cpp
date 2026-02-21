@@ -10,8 +10,10 @@
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Components/StateTreeAIComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "TimerManager.h"
 #include "GameFramework/PlayerController.h"
+#include "NavigationSystem.h"
 #include "Polarity/Variant_Shooter/ShooterDoor.h"
 
 AArenaManager::AArenaManager()
@@ -269,12 +271,50 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 			UsedSpawnPoints.Add(SpawnPoint);
 
 			const FTransform SpawnTransform = SpawnPoint->GetSpawnTransform(bIsFlyingUnit);
+			FVector SpawnLocation = SpawnTransform.GetLocation();
+
+			// For ground units: project spawn location to floor + capsule half-height
+			// to prevent spawning with feet in the ground
+			if (!bIsFlyingUnit)
+			{
+				// Get capsule half-height from CDO to know how high to place the NPC
+				const ACharacter* CDO = Entry.NPCClass->GetDefaultObject<ACharacter>();
+				const float CapsuleHalfHeight = CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f;
+
+				// Try NavMesh projection first — guarantees a walkable surface
+				UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+				if (NavSys)
+				{
+					FNavLocation NavResult;
+					const FVector ProjectionExtent(50.0f, 50.0f, 500.0f);
+					if (NavSys->ProjectPointToNavigation(SpawnLocation, NavResult, ProjectionExtent))
+					{
+						// NavMesh gives us the floor Z — place capsule center above it
+						SpawnLocation.X = NavResult.Location.X;
+						SpawnLocation.Y = NavResult.Location.Y;
+						SpawnLocation.Z = NavResult.Location.Z + CapsuleHalfHeight;
+					}
+					else
+					{
+						// NavMesh projection failed — fall back to ground trace
+						FHitResult GroundHit;
+						FCollisionQueryParams TraceParams;
+						const FVector TraceStart = SpawnLocation + FVector(0.0f, 0.0f, 200.0f);
+						const FVector TraceEnd = SpawnLocation - FVector(0.0f, 0.0f, 500.0f);
+
+						if (World->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
+						{
+							SpawnLocation.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
+						}
+					}
+				}
+			}
 
 			APawn* SpawnedPawn = UAIBlueprintHelperLibrary::SpawnAIFromClass(
 				World,
 				Entry.NPCClass,
 				nullptr, // No BehaviorTree — StateTree configured on controller
-				SpawnTransform.GetLocation(),
+				SpawnLocation,
 				SpawnTransform.Rotator(),
 				true // bNoCollisionFail
 			);

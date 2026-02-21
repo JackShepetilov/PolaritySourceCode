@@ -560,6 +560,7 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::EnterState(FStateTreeExecutionContext& 
 	Data.bHasDestination = false;
 	Data.bIsShooting = false;
 	Data.CurrentDestination = FVector::ZeroVector;
+	Data.LastLOSTime = Data.Drone->GetWorld()->GetTimeSeconds();
 
 	// Pick first destination
 	if (!PickNewDestination(Data))
@@ -591,15 +592,37 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 		return EStateTreeRunStatus::Failed;
 	}
 
+	// Track LOS status for repositioning
+	const bool bHasLOS = Data.Drone->HasLineOfSightTo(Data.Target);
+	const float CurrentTime = Data.Drone->GetWorld()->GetTimeSeconds();
+
+	if (bHasLOS)
+	{
+		Data.LastLOSTime = CurrentTime;
+	}
+
 	// Check if we reached destination and pick new one
 	if (Data.bHasDestination)
 	{
 		const FVector DroneLocation = Data.Drone->GetActorLocation();
 		const float DistanceToDestination = FVector::Dist(DroneLocation, Data.CurrentDestination);
 
+		bool bNeedsNewDestination = false;
+
 		if (DistanceToDestination <= Data.AcceptanceRadius || !FlyingMovement->IsMoving())
 		{
-			// Reached destination or movement stopped - pick new one
+			// Reached destination or movement stopped
+			bNeedsNewDestination = true;
+		}
+		else if (!bHasLOS && (CurrentTime - Data.LastLOSTime) > FlyAndShoot_LOSLostRepositionTime)
+		{
+			// No LOS for too long — interrupt current path to find a position with LOS
+			FlyingMovement->StopMovement();
+			bNeedsNewDestination = true;
+		}
+
+		if (bNeedsNewDestination)
+		{
 			PickNewDestination(Data);
 		}
 	}
@@ -882,6 +905,7 @@ EStateTreeRunStatus FSTTask_RunAndShoot::EnterState(FStateTreeExecutionContext& 
 	Data.bHasDestination = false;
 	Data.bIsShooting = false;
 	Data.CurrentDestination = FVector::ZeroVector;
+	Data.LastLOSTime = Data.NPC->GetWorld()->GetTimeSeconds();
 
 	// Set focus on target for strafing
 	Data.Controller->SetFocus(Data.Target);
@@ -913,6 +937,15 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 	// Update focus to track moving target
 	Data.Controller->SetFocus(Data.Target);
 
+	// Track LOS status for repositioning
+	const bool bHasLOS = Data.NPC->HasLineOfSightTo(Data.Target);
+	const float CurrentTime = Data.NPC->GetWorld()->GetTimeSeconds();
+
+	if (bHasLOS)
+	{
+		Data.LastLOSTime = CurrentTime;
+	}
+
 	// Check if we reached destination and pick new one
 	if (Data.bHasDestination)
 	{
@@ -920,19 +953,25 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 		const float DistanceToDestination = FVector::Dist(NPCLocation, Data.CurrentDestination);
 
 		// Check PathFollowingComponent status
-		bool bReachedDestination = DistanceToDestination <= Data.AcceptanceRadius;
+		bool bNeedsNewDestination = DistanceToDestination <= Data.AcceptanceRadius;
 
 		if (UPathFollowingComponent* PathComp = Data.Controller->GetPathFollowingComponent())
 		{
 			if (PathComp->DidMoveReachGoal() || PathComp->GetStatus() == EPathFollowingStatus::Idle)
 			{
-				bReachedDestination = true;
+				bNeedsNewDestination = true;
 			}
 		}
 
-		if (bReachedDestination)
+		// No LOS for too long — interrupt current path to find a position with LOS
+		if (!bHasLOS && (CurrentTime - Data.LastLOSTime) > RunAndShoot_LOSLostRepositionTime)
 		{
-			// Reached destination - pick new one
+			Data.Controller->StopMovement();
+			bNeedsNewDestination = true;
+		}
+
+		if (bNeedsNewDestination)
+		{
 			PickNewDestination(Data);
 		}
 	}
