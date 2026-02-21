@@ -332,47 +332,26 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
 				FInstanceDataType* InstanceData = StrongContext.IsValid() ? StrongContext.GetInstanceDataPtr<FInstanceDataType>() : nullptr;
 
-				bool bForget = false;
+				// Perception "forgetting" an actor only means the sensory stimulus expired.
+				// It does NOT mean the target is gone — the NPC should keep pursuing.
+				// Clearing the controller target here would undo targets set by ArenaManager
+				// or other external systems, causing NPCs to stand in place.
+				//
+				// Instead: only reset secondary perception state (investigate location, stimulus strength).
+				// The target persists until the actor is destroyed/invalid (detected in Tick via IsValid)
+				// or until a higher-level system explicitly clears it.
 
 				if (InstanceData)
 				{
-					// are we forgetting the current target?
-					if (SensedActor == InstanceData->TargetActor)
+					if (SensedActor == InstanceData->TargetActor || !IsValid(InstanceData->TargetActor))
 					{
-						bForget = true;
-					} else {
-						// are we forgetting about a partial sense?
-						if (!IsValid(InstanceData->TargetActor))
-						{
-							bForget = true;
-						}
-					}
-				}
-				else
-				{
-					// InstanceData invalid - StateTree already transitioned
-					// Forget this actor if it's the current target on Controller
-					if (SensedActor == Controller->GetCurrentTarget())
-					{
-						bForget = true;
-					}
-				}
-
-				if (bForget)
-				{
-					// Update InstanceData only if still in this state
-					if (InstanceData)
-					{
-						InstanceData->TargetActor = nullptr;
 						InstanceData->bHasInvestigateLocation = false;
-						InstanceData->bHasTarget = false;
 						InstanceData->LastStimulusStrength = 0.0f;
 					}
-
-					// Always clear the controller's target (works even if StateTree transitioned)
-					Controller->ClearCurrentTarget();
-					Controller->ClearFocus(EAIFocusPriority::Gameplay);
 				}
+
+				UE_LOG(LogTemp, Log, TEXT("SenseEnemies: Perception forgot %s — target kept (will clear if actor becomes invalid)"),
+					*SensedActor->GetName());
 			}
 		);
 
@@ -465,6 +444,16 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 		{
 			UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Tick synced target from Controller: %s"), *ControllerTarget->GetName());
 		}
+	}
+
+	// Safety: clear target if the actor was destroyed (GC may not have cleared the pointer yet)
+	if (InstanceData.bHasTarget && !IsValid(InstanceData.TargetActor))
+	{
+		InstanceData.TargetActor = nullptr;
+		InstanceData.bHasTarget = false;
+		InstanceData.bHasInvestigateLocation = false;
+		InstanceData.LastStimulusStrength = 0.0f;
+		InstanceData.Controller->ClearCurrentTarget();
 	}
 
 	// Periodic perception polling - backup mechanism in case delegates don't fire reliably

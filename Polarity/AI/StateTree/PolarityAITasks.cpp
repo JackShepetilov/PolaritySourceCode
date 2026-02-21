@@ -650,18 +650,12 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 		}
 		else if (Data.Drone->IsInBurstCooldown())
 		{
-			// Burst finished, entering cooldown - just update our state flag
-			// Don't call StopShooting() as that sets bWantsToShoot=false and prevents auto-resume
-			Data.bIsShooting = false;
-
-			// Release coordinator permission during cooldown
-			if (Data.bUseCoordinator)
-			{
-				if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone))
-				{
-					Coordinator->NotifyAttackComplete(Data.Drone);
-				}
-			}
+			// Burst finished, entering cooldown — call StopShooting to prevent auto-resume.
+			// OnBurstCooldownEnd() checks bWantsToShoot: if true, it auto-starts a new burst
+			// via TryStartShooting() WITHOUT any LOS check, bypassing the task entirely.
+			// StopShooting() clears bWantsToShoot, so the next burst will only start
+			// when CanShoot() passes on a subsequent Tick (which includes LOS check).
+			StopShooting(Data);
 		}
 		else if (!Data.Drone->IsCurrentlyShooting())
 		{
@@ -1003,17 +997,12 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 		}
 		else if (Data.NPC->IsInBurstCooldown())
 		{
-			// Burst finished, entering cooldown
-			Data.bIsShooting = false;
-
-			// Release coordinator permission during cooldown
-			if (Data.bUseCoordinator)
-			{
-				if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
-				{
-					Coordinator->NotifyAttackComplete(Data.NPC);
-				}
-			}
+			// Burst finished, entering cooldown — call StopShooting to prevent auto-resume.
+			// OnBurstCooldownEnd() checks bWantsToShoot: if true, it auto-starts a new burst
+			// via TryStartShooting() WITHOUT any LOS check, bypassing the task entirely.
+			// StopShooting() clears bWantsToShoot, so the next burst will only start
+			// when CanShoot() passes on a subsequent Tick (which includes LOS check).
+			StopShooting(Data);
 		}
 		else if (!Data.NPC->IsCurrentlyShooting())
 		{
@@ -1066,17 +1055,48 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 	// Check if we currently have LOS - if not, prioritize finding a LOS-valid position
 	const bool bCurrentlyHasLOS = Data.NPC->HasLineOfSightTo(Data.Target);
 
+	// Helper lambda to issue MoveTo and return success
+	auto TryMoveTo = [&Data](const FVector& GoalLocation) -> bool
+	{
+		FAIMoveRequest MoveRequest;
+		MoveRequest.SetGoalLocation(GoalLocation);
+		MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+		MoveRequest.SetUsePathfinding(true);
+		MoveRequest.SetAllowPartialPath(true);
+		MoveRequest.SetProjectGoalLocation(true);
+		MoveRequest.SetCanStrafe(true);
+
+		const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+		if (Result.Code == EPathFollowingRequestResult::Failed)
+		{
+			return false;
+		}
+
+		Data.CurrentDestination = GoalLocation;
+		Data.bHasDestination = true;
+		return true;
+	};
+
 	// Try multiple times to find a valid point (prefer points with LOS)
 	constexpr int32 MaxAttempts = 15;
 	FNavLocation NavResult;
 	FNavLocation BestNoLOSResult;
 	bool bHasNoLOSFallback = false;
+	FNavLocation AnyValidResult;
+	bool bHasAnyValid = false;
 
 	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 	{
 		// Search around target within MaxDistanceFromTarget
 		if (NavSys->GetRandomReachablePointInRadius(TargetLocation, Data.MaxDistanceFromTarget, NavResult))
 		{
+			// Save first valid navmesh point as universal fallback (before distance checks)
+			if (!bHasAnyValid)
+			{
+				AnyValidResult = NavResult;
+				bHasAnyValid = true;
+			}
+
 			const float DistToTarget = FVector::Dist(NavResult.Location, TargetLocation);
 
 			// Check minimum distance from target
@@ -1109,19 +1129,11 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 			if (!bLOSBlocked)
 			{
 				// Point has LOS to target - use it!
-				Data.CurrentDestination = NavResult.Location;
-				Data.bHasDestination = true;
-
-				FAIMoveRequest MoveRequest;
-				MoveRequest.SetGoalLocation(NavResult.Location);
-				MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
-				MoveRequest.SetUsePathfinding(true);
-				MoveRequest.SetAllowPartialPath(true);
-				MoveRequest.SetProjectGoalLocation(true);
-				MoveRequest.SetCanStrafe(true);
-
-				Data.Controller->MoveTo(MoveRequest);
-				return true;
+				if (TryMoveTo(NavResult.Location))
+				{
+					return true;
+				}
+				// MoveTo failed (path unreachable) - keep searching
 			}
 
 			// No LOS but valid distance - save as fallback
@@ -1141,39 +1153,51 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 		{
 			if (NavSys->GetRandomReachablePointInRadius(TargetLocation, Data.MinDistanceFromTarget, NavResult))
 			{
-				Data.CurrentDestination = NavResult.Location;
-				Data.bHasDestination = true;
-
-				FAIMoveRequest MoveRequest;
-				MoveRequest.SetGoalLocation(NavResult.Location);
-				MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
-				MoveRequest.SetUsePathfinding(true);
-				MoveRequest.SetAllowPartialPath(true);
-				MoveRequest.SetProjectGoalLocation(true);
-				MoveRequest.SetCanStrafe(true);
-
-				Data.Controller->MoveTo(MoveRequest);
-				return true;
+				if (TryMoveTo(NavResult.Location))
+				{
+					return true;
+				}
 			}
 		}
 	}
 
-	// Fall back to any valid point (even without LOS) to keep moving
+	// Fall back to any valid point with correct distance (even without LOS) to keep moving
 	if (bHasNoLOSFallback)
 	{
-		Data.CurrentDestination = BestNoLOSResult.Location;
-		Data.bHasDestination = true;
+		if (TryMoveTo(BestNoLOSResult.Location))
+		{
+			return true;
+		}
+	}
 
+	// Fall back to any valid navmesh point found around target
+	if (bHasAnyValid)
+	{
+		if (TryMoveTo(AnyValidResult.Location))
+		{
+			return true;
+		}
+	}
+
+	// Last resort: move directly towards the target actor.
+	// This handles the case where the NPC is very far from the player
+	// and random points around the player are unreachable.
+	{
 		FAIMoveRequest MoveRequest;
-		MoveRequest.SetGoalLocation(BestNoLOSResult.Location);
-		MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+		MoveRequest.SetGoalActor(Data.Target);
+		MoveRequest.SetAcceptanceRadius(Data.MinDistanceFromTarget);
 		MoveRequest.SetUsePathfinding(true);
 		MoveRequest.SetAllowPartialPath(true);
 		MoveRequest.SetProjectGoalLocation(true);
 		MoveRequest.SetCanStrafe(true);
 
-		Data.Controller->MoveTo(MoveRequest);
-		return true;
+		const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+		if (Result.Code != EPathFollowingRequestResult::Failed)
+		{
+			Data.CurrentDestination = TargetLocation;
+			Data.bHasDestination = true;
+			return true;
+		}
 	}
 
 	return false;
