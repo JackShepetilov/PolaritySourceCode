@@ -71,6 +71,17 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateMeleeMeshRotation();
 	UpdateMontagePlayRate(DeltaTime);
 	UpdateCameraFocus(DeltaTime);
+
+	// Update drop kick cooldown
+	if (DropKickCooldownRemaining > 0.0f)
+	{
+		DropKickCooldownRemaining -= DeltaTime;
+		if (DropKickCooldownRemaining <= 0.0f)
+		{
+			DropKickCooldownRemaining = 0.0f;
+			OnDropKickCooldownEnded.Broadcast();
+		}
+	}
 }
 
 bool UMeleeAttackComponent::StartAttack()
@@ -78,7 +89,8 @@ bool UMeleeAttackComponent::StartAttack()
 	// Drop kick can interrupt an ongoing attack:
 	// - Always interrupts a normal (non-dropkick) attack
 	// - Only interrupts another drop kick after it has dealt damage
-	if (!CanAttack() && IsAttacking() && (!bIsDropKick || bHasHitThisAttack) && ShouldPerformDropKick())
+	// - Must have an actual dropkick target in the cone (prevents air melee spam)
+	if (!CanAttack() && IsAttacking() && (!bIsDropKick || bHasHitThisAttack) && ShouldPerformDropKick() && HasDropKickTarget())
 	{
 		// Cleanup current attack
 		StopAttackAnimation();
@@ -278,7 +290,17 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		break;
 
 	case EMeleeAttackState::Active:
-		StateTimeRemaining = Settings.ActiveTime;
+		if (bIsDropKick && MagnetismTarget.IsValid() && OwnerCharacter)
+		{
+			// For dropkick: calculate travel time to reach target, ensure enough active time
+			float DistToTarget = FVector::Dist(OwnerCharacter->GetActorLocation(), LungeTargetPosition);
+			float TravelTime = (Settings.DropKickDiveSpeed > 0.0f) ? (DistToTarget / Settings.DropKickDiveSpeed) : Settings.ActiveTime;
+			StateTimeRemaining = FMath::Max(Settings.ActiveTime, TravelTime + 0.15f); // +0.15s buffer for hit detection
+		}
+		else
+		{
+			StateTimeRemaining = Settings.ActiveTime;
+		}
 		SpawnSwingTrailFX();
 		break;
 
@@ -286,6 +308,14 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		StateTimeRemaining = Settings.RecoveryTime;
 		StopSwingTrailFX();
 		StopMagnetism();
+
+		// Start drop kick cooldown when dropkick attack finishes
+		if (bIsDropKick && Settings.DropKickCooldown > 0.0f)
+		{
+			DropKickCooldownRemaining = Settings.DropKickCooldown;
+			OnDropKickCooldownStarted.Broadcast(Settings.DropKickCooldown);
+		}
+
 		if (!bHasHitThisAttack)
 		{
 			PlaySound(MissSound);
@@ -2400,6 +2430,12 @@ bool UMeleeAttackComponent::ShouldPerformDropKick() const
 		return false;
 	}
 
+	// Check drop kick cooldown
+	if (DropKickCooldownRemaining > 0.0f)
+	{
+		return false;
+	}
+
 	// Must be airborne
 	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
 	if (!Movement)
@@ -2795,4 +2831,133 @@ float UMeleeAttackComponent::CalculateDropKickBonusDamage() const
 
 	// Clamp to max
 	return FMath::Min(BonusDamage, Settings.DropKickMaxBonusDamage);
+}
+
+bool UMeleeAttackComponent::HasDropKickTarget() const
+{
+	if (!OwnerCharacter || !OwnerController)
+	{
+		return false;
+	}
+
+	const FVector Start = OwnerCharacter->GetActorLocation();
+	const FVector CameraForward = OwnerController->GetControlRotation().Vector();
+	const float ConeHalfAngleRad = FMath::DegreesToRadians(Settings.DropKickConeAngle);
+
+	// Calculate cone length to floor (same logic as TryStartDropKick)
+	FHitResult FloorHit;
+	FCollisionQueryParams FloorQueryParams;
+	FloorQueryParams.AddIgnoredActor(OwnerCharacter);
+
+	float FloorZ = Start.Z - 5000.0f;
+	if (GetWorld()->LineTraceSingleByChannel(FloorHit, Start, Start - FVector(0, 0, 5000.0f), ECC_WorldStatic, FloorQueryParams))
+	{
+		FloorZ = FloorHit.Location.Z;
+	}
+
+	float ConeLengthToFloor;
+	if (CameraForward.Z < -0.1f)
+	{
+		float SinPitch = -CameraForward.Z;
+		float CosPitch = FMath::Sqrt(1.0f - SinPitch * SinPitch);
+		float TanCone = FMath::Tan(ConeHalfAngleRad);
+		float Denominator = CameraForward.Z + TanCone * CosPitch;
+
+		if (FMath::Abs(Denominator) > 0.01f)
+		{
+			ConeLengthToFloor = (FloorZ - Start.Z) / Denominator;
+			ConeLengthToFloor = FMath::Clamp(ConeLengthToFloor, 100.0f, Settings.DropKickMaxRange);
+		}
+		else
+		{
+			ConeLengthToFloor = Settings.DropKickMaxRange;
+		}
+	}
+	else
+	{
+		ConeLengthToFloor = Settings.DropKickMaxRange;
+	}
+
+	const float ConeLength = ConeLengthToFloor;
+
+	// Overlap search
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(OwnerCharacter);
+
+	TArray<FOverlapResult> OverlapResults;
+	float SearchRadius = FMath::Max(ConeLength, ConeLength * FMath::Tan(ConeHalfAngleRad)) * 1.2f;
+	FVector SearchCenter = Start + CameraForward * (ConeLength * 0.5f);
+
+	GetWorld()->OverlapMultiByChannel(
+		OverlapResults,
+		SearchCenter,
+		FQuat::Identity,
+		ECC_Pawn,
+		FCollisionShape::MakeSphere(SearchRadius),
+		QueryParams
+	);
+
+	for (const FOverlapResult& Overlap : OverlapResults)
+	{
+		AActor* HitActor = Overlap.GetActor();
+		if (!HitActor || HitActor == OwnerCharacter)
+		{
+			continue;
+		}
+
+		ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
+		bool bIsDummyTarget = HitActor->Implements<UShooterDummyTarget>();
+		if (!HitCharacter && !bIsDummyTarget)
+		{
+			continue;
+		}
+
+		FVector TargetPos = HitActor->GetActorLocation();
+		FVector ToTarget = TargetPos - Start;
+		float Distance = ToTarget.Size();
+
+		if (Distance < KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		// Check cone angle
+		FVector ToTargetNorm = ToTarget.GetSafeNormal();
+		float DotProduct = FVector::DotProduct(CameraForward, ToTargetNorm);
+		float AngleToTarget = FMath::Acos(FMath::Clamp(DotProduct, -1.0f, 1.0f));
+
+		// Check cone length
+		float DistanceAlongRay = FVector::DotProduct(ToTarget, CameraForward);
+		if (DistanceAlongRay < 0 || DistanceAlongRay > ConeLength * 1.1f)
+		{
+			continue;
+		}
+
+		if (AngleToTarget <= ConeHalfAngleRad)
+		{
+			// Check minimum height difference
+			float HeightDiff = Start.Z - TargetPos.Z;
+			if (HeightDiff >= Settings.DropKickMinHeightDifference)
+			{
+				return true; // Found a valid target
+			}
+		}
+	}
+
+	return false;
+}
+
+float UMeleeAttackComponent::GetDropKickCooldownProgress() const
+{
+	if (DropKickCooldownRemaining <= 0.0f)
+	{
+		return 1.0f; // Ready
+	}
+
+	if (Settings.DropKickCooldown <= 0.0f)
+	{
+		return 1.0f;
+	}
+
+	return 1.0f - (DropKickCooldownRemaining / Settings.DropKickCooldown);
 }

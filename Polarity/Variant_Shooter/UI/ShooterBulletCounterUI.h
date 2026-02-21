@@ -95,6 +95,22 @@ public:
 	void BP_UpdateChargeExtended(float TotalCharge, float StableCharge, float UnstableCharge,
 		float MaxStableCharge, float MaxUnstableCharge, EChargePolarity Polarity);
 
+	// ==================== Drop Kick Cooldown ====================
+
+	/**
+	 * Called when drop kick cooldown starts.
+	 * Use this to start a cooldown timer animation.
+	 * @param CooldownDuration - total cooldown duration in seconds
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|DropKick", meta = (DisplayName = "OnDropKickCooldownStarted"))
+	void BP_OnDropKickCooldownStarted(float CooldownDuration);
+
+	/**
+	 * Called when drop kick cooldown ends and ability is ready.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|DropKick", meta = (DisplayName = "OnDropKickCooldownEnded"))
+	void BP_OnDropKickCooldownEnded();
+
 	// ==================== Hit Marker ====================
 
 	/**

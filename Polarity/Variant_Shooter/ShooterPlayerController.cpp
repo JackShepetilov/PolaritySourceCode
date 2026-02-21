@@ -10,6 +10,7 @@
 #include "GameFramework/PlayerStart.h"
 #include "ShooterCharacter.h"
 #include "ShooterBulletCounterUI.h"
+#include "MeleeAttackComponent.h"
 #include "Polarity.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -123,6 +124,13 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		ShooterCharacter->OnPolarityChanged.AddDynamic(this, &AShooterPlayerController::OnPolarityChanged);
 		ShooterCharacter->OnChargeUpdated.AddDynamic(this, &AShooterPlayerController::OnChargeUpdated);
 
+		// Bind melee component events directly for drop kick cooldown UI
+		if (UMeleeAttackComponent* MeleeComp = ShooterCharacter->GetMeleeAttackComponent())
+		{
+			MeleeComp->OnDropKickCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
+			MeleeComp->OnDropKickCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
+		}
+
 		// Rebind UI widget to new character (for HitMarker after respawn)
 		if (BulletCounterUI)
 		{
@@ -216,5 +224,21 @@ void AShooterPlayerController::OnChargeUpdated(float ChargeValue, uint8 Polarity
 	{
 		EChargePolarity PolarityEnum = static_cast<EChargePolarity>(Polarity);
 		BulletCounterUI->BP_UpdateCharge(ChargeValue, PolarityEnum);
+	}
+}
+
+void AShooterPlayerController::OnDropKickCooldownStarted(float CooldownDuration)
+{
+	if (IsValid(BulletCounterUI))
+	{
+		BulletCounterUI->BP_OnDropKickCooldownStarted(CooldownDuration);
+	}
+}
+
+void AShooterPlayerController::OnDropKickCooldownEnded()
+{
+	if (IsValid(BulletCounterUI))
+	{
+		BulletCounterUI->BP_OnDropKickCooldownEnded();
 	}
 }

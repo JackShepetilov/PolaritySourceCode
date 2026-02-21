@@ -1133,13 +1133,22 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 		}
 
 		// Default: add decaying bonus charge for regular enemies
+		float ChargeAmount = EMFMod->ChargePerMeleeHit;
+
+		// Apply drop kick charge multiplier for successful drop kicks
+		if (MeleeAttackComponent && MeleeAttackComponent->IsDropKick())
+		{
+			ChargeAmount *= MeleeAttackComponent->Settings.DropKickChargeMultiplier;
+		}
+
 		float OldCharge = EMFMod->GetCharge();
-		EMFMod->AddBonusCharge(EMFMod->ChargePerMeleeHit);
+		EMFMod->AddBonusCharge(ChargeAmount);
 		float NewCharge = EMFMod->GetCharge();
 
-		UE_LOG(LogTemp, Warning, TEXT("[MeleeCharge] Hit %s - Charge: %.2f -> %.2f (added %.2f bonus)"),
+		UE_LOG(LogTemp, Warning, TEXT("[MeleeCharge] Hit %s - Charge: %.2f -> %.2f (added %.2f bonus%s)"),
 			HitActor ? *HitActor->GetName() : TEXT("NULL"),
-			OldCharge, NewCharge, EMFMod->ChargePerMeleeHit);
+			OldCharge, NewCharge, ChargeAmount,
+			(MeleeAttackComponent && MeleeAttackComponent->IsDropKick()) ? TEXT(", DropKick x2") : TEXT(""));
 	}
 }
 

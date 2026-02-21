@@ -226,6 +226,14 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "500", ClampMax = "5000", EditCondition = "bEnableDropKick"))
 	float DropKickDiveSpeed = 2500.0f;
 
+	/** Cooldown duration for drop kick ability (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "0", ClampMax = "30", EditCondition = "bEnableDropKick"))
+	float DropKickCooldown = 5.0f;
+
+	/** Charge multiplier for successful drop kick hits (multiplied with ChargePerMeleeHit) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "1.0", ClampMax = "10.0", EditCondition = "bEnableDropKick"))
+	float DropKickChargeMultiplier = 2.0f;
+
 	// ==================== Target Magnetism ====================
 
 	/** Enable predictive target magnetism (pulls targets toward punch center) */
@@ -317,6 +325,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnMeleeHit, AActor*, HitActor, co
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDropKickStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDropKickHit, AActor*, HitActor, const FVector&, HitLocation, float, Damage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDropKickCooldownStarted, float, CooldownDuration);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDropKickCooldownEnded);
 
 /**
  * Component that provides quick melee attack capability.
@@ -469,6 +479,14 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnMeleeAttackEnded OnMeleeAttackEnded;
 
+	/** Called when drop kick cooldown starts */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnDropKickCooldownStarted OnDropKickCooldownStarted;
+
+	/** Called when drop kick cooldown ends */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnDropKickCooldownEnded OnDropKickCooldownEnded;
+
 	// ==================== API ====================
 
 	/**
@@ -520,6 +538,30 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsInputLocked() const { return bInputLocked; }
+
+	/**
+	 * Check if current attack is a drop kick
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	bool IsDropKick() const { return bIsDropKick; }
+
+	/**
+	 * Check if drop kick is on cooldown
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	bool IsDropKickOnCooldown() const { return DropKickCooldownRemaining > 0.0f; }
+
+	/**
+	 * Get drop kick cooldown progress (0 = just started, 1 = ready)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	float GetDropKickCooldownProgress() const;
+
+	/**
+	 * Get drop kick cooldown remaining time (seconds)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	float GetDropKickCooldownRemaining() const { return DropKickCooldownRemaining; }
 
 	/**
 	 * Lower the weapon (transition FirstPersonMesh down) without starting an attack.
@@ -628,6 +670,9 @@ protected:
 
 	/** Velocity during drop kick (updated each tick, used for exit momentum) */
 	FVector DropKickVelocity = FVector::ZeroVector;
+
+	/** Remaining drop kick cooldown time (seconds) */
+	float DropKickCooldownRemaining = 0.0f;
 
 	// ==================== Mesh Transition State ====================
 
@@ -776,6 +821,9 @@ protected:
 
 	/** Calculate drop kick bonus damage based on height difference */
 	float CalculateDropKickBonusDamage() const;
+
+	/** Check if there's a valid dropkick target in the cone (read-only, no side effects) */
+	bool HasDropKickTarget() const;
 
 	// ==================== Mesh Transition ====================
 

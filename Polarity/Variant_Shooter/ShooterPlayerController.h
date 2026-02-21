@@ -94,4 +94,12 @@ protected:
 	/** Called every tick with current charge value */
 	UFUNCTION()
 	void OnChargeUpdated(float ChargeValue, uint8 Polarity);
+
+	/** Called when drop kick cooldown starts */
+	UFUNCTION()
+	void OnDropKickCooldownStarted(float CooldownDuration);
+
+	/** Called when drop kick cooldown ends */
+	UFUNCTION()
+	void OnDropKickCooldownEnded();
 };
