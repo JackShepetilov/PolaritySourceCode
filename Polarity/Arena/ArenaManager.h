@@ -13,6 +13,7 @@ class AShooterNPC;
 class AFlyingDrone;
 class AShooterCharacter;
 class UCheckpointSubsystem;
+class AShooterDoor;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
@@ -65,6 +66,12 @@ public:
 	/** Where the player respawns if they die during this arena fight */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Respawn")
 	TSoftObjectPtr<AActor> PlayerRespawnPoint;
+
+	// ==================== Reward Door ====================
+
+	/** Door that opens when all waves are cleared (e.g. upgrade room) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Door")
+	TSoftObjectPtr<AShooterDoor> RewardDoor;
 
 	// ==================== State (Read-Only) ====================
 
@@ -122,8 +129,8 @@ private:
 	/** Spawn all NPCs for the given wave index */
 	void SpawnWave(int32 WaveIndex);
 
-	/** Pick a random spawn point appropriate for the NPC class */
-	AArenaSpawnPoint* PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass) const;
+	/** Pick a random spawn point appropriate for the NPC class, avoiding already used points */
+	AArenaSpawnPoint* PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass, const TArray<AArenaSpawnPoint*>& UsedPoints) const;
 
 	/** Called when a spawned NPC dies */
 	UFUNCTION()

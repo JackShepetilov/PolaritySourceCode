@@ -72,7 +72,7 @@ protected:
 
 	/** Minimum charge module allowed (can still fire weak shots below this) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Firing|Charge", meta = (EditCondition = "bUseChargeFiring", ClampMin = "0.0"))
-	float MinimumBaseCharge = 10.0f;
+	float MinimumBaseCharge = 0.0f;
 
 	/** If true, prevent firing when charge is below minimum (otherwise fires weakened shot) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Firing|Charge", meta = (EditCondition = "bUseChargeFiring"))

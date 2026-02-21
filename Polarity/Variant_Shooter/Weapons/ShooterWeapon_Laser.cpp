@@ -304,10 +304,12 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 
 	const float ChargeToAdd = IonizationChargePerSecond * DeltaTime;
 
-	// Try UEMFVelocityModifier first (for characters - respects BaseCharge/BonusCharge system)
+	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
-		const float CurrentCharge = TargetModifier->GetBaseCharge();
+		// Use GetCharge() to read actual FieldComponent charge (not BaseCharge which may be stale
+		// after melee's SetCharge() calls that bypass BaseCharge tracking)
+		const float CurrentCharge = TargetModifier->GetCharge();
 
 		// Already at max positive charge - nothing to do
 		if (CurrentCharge >= MaxIonizationCharge)
@@ -319,7 +321,7 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 		// If negative: move towards 0, then towards positive
 		// If positive: increase further
 		const float NewCharge = FMath::Min(CurrentCharge + ChargeToAdd, MaxIonizationCharge);
-		TargetModifier->SetBaseCharge(NewCharge);
+		TargetModifier->SetCharge(NewCharge);
 		return;
 	}
 

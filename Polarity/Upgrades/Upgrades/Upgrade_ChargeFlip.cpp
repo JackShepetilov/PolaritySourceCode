@@ -237,13 +237,13 @@ void UUpgrade_ChargeFlip::ApplyIonization(AActor* Target)
 	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
-		const float CurrentCharge = TargetModifier->GetBaseCharge();
+		const float CurrentCharge = TargetModifier->GetCharge();
 		if (CurrentCharge >= DefCF->MaxIonizationCharge)
 		{
 			return;
 		}
 		const float NewCharge = FMath::Min(CurrentCharge + DefCF->IonizationChargePerHit, DefCF->MaxIonizationCharge);
-		TargetModifier->SetBaseCharge(NewCharge);
+		TargetModifier->SetCharge(NewCharge);
 		return;
 	}
 

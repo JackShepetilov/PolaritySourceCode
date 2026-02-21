@@ -985,7 +985,9 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target)
 	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
-		const float CurrentCharge = TargetModifier->GetBaseCharge();
+		// Use GetCharge() to read actual FieldComponent charge (not BaseCharge which may be stale
+		// after melee's SetCharge() calls that bypass BaseCharge tracking)
+		const float CurrentCharge = TargetModifier->GetCharge();
 
 		// Already at max positive charge
 		if (CurrentCharge >= MaxIonizationCharge)
@@ -994,7 +996,7 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target)
 		}
 
 		const float NewCharge = FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge);
-		TargetModifier->SetBaseCharge(NewCharge);
+		TargetModifier->SetCharge(NewCharge);
 		return;
 	}
 

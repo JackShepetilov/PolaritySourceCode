@@ -26,6 +26,12 @@ void UEMFVelocityModifier::BeginPlay()
 		return;
 	}
 
+	// Sync ChargeSign from serialized BaseCharge (for NPCs with negative charge in Blueprint)
+	if (!FMath::IsNearlyZero(BaseCharge))
+	{
+		ChargeSign = (BaseCharge > 0.0f) ? 1 : -1;
+	}
+
 	// Find UEMF_FieldComponent on the same actor
 	FieldComponent = Owner->FindComponentByClass<UEMF_FieldComponent>();
 	if (FieldComponent)
@@ -129,6 +135,13 @@ float UEMFVelocityModifier::GetCharge() const
 
 void UEMFVelocityModifier::SetCharge(float NewCharge)
 {
+	// Sync ChargeSign and BaseCharge from the signed value
+	if (!FMath::IsNearlyZero(NewCharge))
+	{
+		ChargeSign = (NewCharge > 0.0f) ? 1 : -1;
+	}
+	BaseCharge = NewCharge;
+
 	if (FieldComponent)
 	{
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
@@ -179,31 +192,27 @@ void UEMFVelocityModifier::AddEMImpulse(FVector Impulse)
 
 void UEMFVelocityModifier::ToggleChargeSign()
 {
-	if (FMath::IsNearlyZero(BaseCharge))
-	{
-		BaseCharge = 10.0f;
-	}
-	else
-	{
-		BaseCharge = -BaseCharge;
-	}
-
+	ChargeSign = -ChargeSign;
+	BaseCharge = -BaseCharge;
 	UpdateFieldComponentCharge();
 }
 
 int32 UEMFVelocityModifier::GetChargeSign() const
 {
-	float Charge = GetCharge();
-	if (FMath::IsNearlyZero(Charge))
-	{
-		return 0;
-	}
-	return (Charge > 0.0f) ? 1 : -1;
+	return ChargeSign;
 }
 
 void UEMFVelocityModifier::NeutralizeCharge()
 {
-	SetCharge(0.0f);
+	BaseCharge = 0.0f;
+	// ChargeSign preserved — polarity remembered even at zero charge
+	if (FieldComponent)
+	{
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		Desc.PointChargeParams.Charge = 0.0f;
+		FieldComponent->SetSourceDescription(Desc);
+		CheckChargeChanged();
+	}
 	LastNeutralizationTime = GetWorld()->GetTimeSeconds();
 }
 
@@ -942,13 +951,8 @@ void UEMFVelocityModifier::TickComponent(float DeltaTime, ELevelTick TickType, F
 
 void UEMFVelocityModifier::AddBonusCharge(float Amount)
 {
-	if (Amount <= 0.0f)
-	{
-		return;
-	}
-
-	CurrentBonusCharge = FMath::Min(CurrentBonusCharge + Amount, MaxBonusCharge);
-	UpdateFieldComponentCharge();
+	// Unified pool — routes to AddPermanentCharge
+	AddPermanentCharge(Amount);
 }
 
 void UEMFVelocityModifier::AddPermanentCharge(float Amount)
@@ -958,27 +962,20 @@ void UEMFVelocityModifier::AddPermanentCharge(float Amount)
 		return;
 	}
 
-	// Keep the sign of the charge
-	float Sign = (BaseCharge >= 0.0f) ? 1.0f : -1.0f;
 	float CurrentModule = FMath::Abs(BaseCharge);
-
-	// Positive Amount increases module, negative decreases
-	float NewModule = CurrentModule + Amount;
-
-	// Clamp module: min 0, max MaxBaseCharge
-	NewModule = FMath::Clamp(NewModule, 0.0f, MaxBaseCharge);
-
-	// Restore sign
-	BaseCharge = Sign * NewModule;
+	float NewModule = FMath::Clamp(CurrentModule + Amount, 0.0f, MaxBaseCharge);
+	BaseCharge = static_cast<float>(ChargeSign) * NewModule;
 	UpdateFieldComponentCharge();
 }
 
 void UEMFVelocityModifier::SetBaseCharge(float NewBaseCharge)
 {
-	// Clamp by module, keeping sign
-	float Sign = (NewBaseCharge >= 0.0f) ? 1.0f : -1.0f;
+	if (!FMath::IsNearlyZero(NewBaseCharge))
+	{
+		ChargeSign = (NewBaseCharge >= 0.0f) ? 1 : -1;
+	}
 	float Module = FMath::Min(FMath::Abs(NewBaseCharge), MaxBaseCharge);
-	BaseCharge = Sign * Module;
+	BaseCharge = static_cast<float>(ChargeSign) * Module;
 	UpdateFieldComponentCharge();
 }
 
@@ -989,33 +986,15 @@ void UEMFVelocityModifier::DeductCharge(float Amount)
 		return;
 	}
 
-	float RemainingToDeduct = Amount;
-
-	// First deduct from bonus charge
-	if (CurrentBonusCharge > 0.0f)
-	{
-		float DeductFromBonus = FMath::Min(CurrentBonusCharge, RemainingToDeduct);
-		CurrentBonusCharge -= DeductFromBonus;
-		RemainingToDeduct -= DeductFromBonus;
-	}
-
-	// If remaining - deduct from base charge
-	if (RemainingToDeduct > 0.0f)
-	{
-		AddPermanentCharge(-RemainingToDeduct);
-	}
-	else
-	{
-		// Update FieldComponent even if only deducted from bonus
-		UpdateFieldComponentCharge();
-	}
+	float Module = FMath::Abs(BaseCharge);
+	Module = FMath::Max(0.0f, Module - Amount);
+	BaseCharge = static_cast<float>(ChargeSign) * Module;
+	UpdateFieldComponentCharge();
 }
 
 float UEMFVelocityModifier::GetTotalCharge() const
 {
-	// Sign is determined by BaseCharge, bonus is added by module
-	float Sign = (BaseCharge >= 0.0f) ? 1.0f : -1.0f;
-	return BaseCharge + Sign * CurrentBonusCharge;
+	return BaseCharge;
 }
 
 void UEMFVelocityModifier::UpdateFieldComponentCharge()

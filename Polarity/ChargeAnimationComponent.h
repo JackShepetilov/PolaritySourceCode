@@ -162,6 +162,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float ReverseChargeDuration = 0.4f;
 
+	/** Charge cost per second while channeling (continuous drain) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Charge Cost", meta = (ClampMin = "0.0"))
+	float ChannelingChargeCostPerSecond = 5.0f;
+
+	/** Fixed charge cost to activate reverse channeling */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Charge Cost", meta = (ClampMin = "0.0"))
+	float ReverseChannelingChargeCost = 3.0f;
+
 	/** Enable debug visualization of the channeling plate */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Debug")
 	bool bDrawDebugPlate = false;

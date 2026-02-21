@@ -17,6 +17,7 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/OverlapResult.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
+#include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
 
 AEMFPhysicsProp::AEMFPhysicsProp()
 {
@@ -70,6 +71,22 @@ void AEMFPhysicsProp::BeginPlay()
 		PropPhysMat->RestitutionCombineMode = EFrictionCombineMode::Min;
 		PropMesh->SetPhysMaterialOverride(PropPhysMat);
 	}
+
+	// Register with charge widget subsystem
+	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->RegisterProp(this);
+	}
+}
+
+void AEMFPhysicsProp::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->UnregisterProp(this);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void AEMFPhysicsProp::Tick(float DeltaTime)

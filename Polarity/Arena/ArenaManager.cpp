@@ -12,6 +12,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "TimerManager.h"
 #include "GameFramework/PlayerController.h"
+#include "Polarity/Variant_Shooter/ShooterDoor.h"
 
 AArenaManager::AArenaManager()
 {
@@ -242,6 +243,9 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 		return;
 	}
 
+	// Track which spawn points are used this wave to avoid stacking NPCs
+	TArray<AArenaSpawnPoint*> UsedSpawnPoints;
+
 	for (const FArenaSpawnEntry& Entry : Wave.Entries)
 	{
 		if (!Entry.NPCClass)
@@ -255,12 +259,14 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
-			AArenaSpawnPoint* SpawnPoint = PickSpawnPoint(Entry.NPCClass);
+			AArenaSpawnPoint* SpawnPoint = PickSpawnPoint(Entry.NPCClass, UsedSpawnPoints);
 			if (!SpawnPoint)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("ArenaManager: No valid spawn point for %s"), *Entry.NPCClass->GetName());
 				continue;
 			}
+
+			UsedSpawnPoints.Add(SpawnPoint);
 
 			const FTransform SpawnTransform = SpawnPoint->GetSpawnTransform(bIsFlyingUnit);
 
@@ -279,12 +285,6 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 
 				// Subscribe to death
 				NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
-
-				// Force perception update so NPC detects player immediately
-				if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
-				{
-					AIController->ForcePerceptionUpdate();
-				}
 			}
 		}
 	}
@@ -292,18 +292,54 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 	OnWaveStarted.Broadcast(WaveIndex);
 
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Wave %d started — %d NPCs spawned"), WaveIndex, AliveNPCs.Num());
+
+	// Force all NPCs to target the player immediately — don't rely on perception senses
+	// which may fail if player is behind the NPC or out of sight angle.
+	// SetCurrentTarget directly assigns the enemy, then ForcePerceptionUpdate on next tick
+	// ensures the perception system catches up.
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	AActor* PlayerActor = PC ? PC->GetPawn() : nullptr;
+
+	if (PlayerActor)
+	{
+		for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+		{
+			if (AShooterNPC* NPC = NPCPtr.Get())
+			{
+				if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
+				{
+					AIController->SetCurrentTarget(PlayerActor);
+				}
+			}
+		}
+	}
+
+	// Also refresh perception on next tick so the system stays in sync
+	GetWorldTimerManager().SetTimerForNextTick([this]()
+	{
+		for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+		{
+			if (AShooterNPC* NPC = NPCPtr.Get())
+			{
+				if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
+				{
+					AIController->ForcePerceptionUpdate();
+				}
+			}
+		}
+	});
 }
 
-AArenaSpawnPoint* AArenaManager::PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass) const
+AArenaSpawnPoint* AArenaManager::PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass, const TArray<AArenaSpawnPoint*>& UsedPoints) const
 {
 	const bool bNeedsAirSpawn = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
 
-	// Collect valid spawn points
+	// Collect valid spawn points, excluding already used ones
 	TArray<AArenaSpawnPoint*> ValidPoints;
 	for (const TSoftObjectPtr<AArenaSpawnPoint>& PointRef : SpawnPoints)
 	{
 		AArenaSpawnPoint* Point = PointRef.Get();
-		if (!Point)
+		if (!Point || UsedPoints.Contains(Point))
 		{
 			continue;
 		}
@@ -318,7 +354,20 @@ AArenaSpawnPoint* AArenaManager::PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClas
 		}
 	}
 
-	// Fallback: if no matching type found, use any available point
+	// Fallback 1: if no unused matching type, try any unused point
+	if (ValidPoints.Num() == 0)
+	{
+		for (const TSoftObjectPtr<AArenaSpawnPoint>& PointRef : SpawnPoints)
+		{
+			AArenaSpawnPoint* Point = PointRef.Get();
+			if (Point && !UsedPoints.Contains(Point))
+			{
+				ValidPoints.Add(Point);
+			}
+		}
+	}
+
+	// Fallback 2: if all points used, allow reuse (more NPCs than spawn points)
 	if (ValidPoints.Num() == 0)
 	{
 		for (const TSoftObjectPtr<AArenaSpawnPoint>& PointRef : SpawnPoints)

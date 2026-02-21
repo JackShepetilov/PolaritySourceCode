@@ -93,6 +93,12 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 	// Case 2: Reverse-charge tap during post-release window
 	if (CurrentState == EChargeAnimationState::ChannelingRelease)
 	{
+		// Deduct fixed charge cost for reverse channeling
+		if (CachedEMFModifier && ReverseChannelingChargeCost > 0.0f)
+		{
+			CachedEMFModifier->DeductCharge(ReverseChannelingChargeCost);
+		}
+
 		// Spawn plate with OPPOSITE charge sign
 		SpawnPlate(-ChannelingChargeSign);
 
@@ -244,9 +250,13 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 		}
 	}
 
-	// Channeling state: no timer, just update plate position (done in TickComponent)
+	// Channeling state: continuous charge drain
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
+		if (CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
+		{
+			CachedEMFModifier->DeductCharge(ChannelingChargeCostPerSecond * DeltaTime);
+		}
 		return;
 	}
 

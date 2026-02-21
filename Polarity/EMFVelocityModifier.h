@@ -53,25 +53,29 @@ public:
 
 	// ==================== Charge Accumulation ====================
 
-	/** Базовый заряд (постоянный, определяет знак полярности) */
+	/** Текущий заряд (модуль). Расходуется на выстрелы и способности. Начинается с 0. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation")
-	float BaseCharge = 10.0f;
+	float BaseCharge = 0.0f;
 
-	/** Максимальный базовый (стабильный) заряд - от Melee Dummy и т.п. */
+	/** Максимальный заряд */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
-	float MaxBaseCharge = 30.0f;
+	float MaxBaseCharge = 50.0f;
 
 	/** Заряд, добавляемый за каждый успешный удар в ближнем бою */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float ChargePerMeleeHit = 2.0f;
 
-	/** Максимальный бонусный (нестабильный) заряд от ударов по врагам */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
-	float MaxBonusCharge = 20.0f;
+	/** Знак полярности (+1 или -1). Не зависит от величины заряда. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation")
+	int32 ChargeSign = 1;
 
-	/** Скорость убывания бонусного заряда (единиц/сек) */
+	/** Максимальный бонусный заряд (legacy, не используется — единый пул) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
-	float BonusChargeDecayRate = 3.0f;
+	float MaxBonusCharge = 0.0f;
+
+	/** Скорость убывания бонусного заряда (legacy, 0 = без убывания) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
+	float BonusChargeDecayRate = 0.0f;
 
 	// ==================== Charge Neutralization ====================
 
@@ -283,31 +287,31 @@ public:
 
 	// ==================== Charge Accumulation API ====================
 
-	/** Добавить бонусный заряд (от melee удара) - убывает со временем */
+	/** Добавить заряд (единый пул, без убывания) */
 	UFUNCTION(BlueprintCallable, Category = "EMF|Charge")
 	void AddBonusCharge(float Amount);
 
-	/** Добавить постоянный заряд (не убывает) - увеличивает BaseCharge */
+	/** Добавить заряд (единый пул) */
 	UFUNCTION(BlueprintCallable, Category = "EMF|Charge")
 	void AddPermanentCharge(float Amount);
 
-	/** Получить текущий бонусный заряд */
+	/** Получить бонусный заряд (legacy, всегда 0 — единый пул) */
 	UFUNCTION(BlueprintPure, Category = "EMF|Charge")
-	float GetBonusCharge() const { return CurrentBonusCharge; }
+	float GetBonusCharge() const { return 0.0f; }
 
-	/** Получить базовый заряд */
+	/** Получить заряд (со знаком полярности) */
 	UFUNCTION(BlueprintPure, Category = "EMF|Charge")
 	float GetBaseCharge() const { return BaseCharge; }
 
-	/** Установить базовый заряд (меняет знак полярности) */
+	/** Установить заряд (извлекает знак в ChargeSign) */
 	UFUNCTION(BlueprintCallable, Category = "EMF|Charge")
 	void SetBaseCharge(float NewBaseCharge);
 
-	/** Получить итоговый заряд (Base + Bonus) */
+	/** Получить итоговый заряд (ChargeSign * |BaseCharge|) */
 	UFUNCTION(BlueprintPure, Category = "EMF|Charge")
 	float GetTotalCharge() const;
 
-	/** Вычесть заряд (сначала из бонуса, потом из базы) */
+	/** Вычесть заряд (из единого пула) */
 	UFUNCTION(BlueprintCallable, Category = "EMF|Charge")
 	void DeductCharge(float Amount);
 

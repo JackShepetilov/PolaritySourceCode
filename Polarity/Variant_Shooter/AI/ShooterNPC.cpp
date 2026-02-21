@@ -27,6 +27,7 @@
 #include "../DamageTypes/DamageType_Wallslam.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
 #include "../UI/DamageNumbersSubsystem.h"
+#include "../UI/EMFChargeWidgetSubsystem.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Boss/BossProjectile.h"
@@ -99,6 +100,12 @@ void AShooterNPC::BeginPlay()
 	{
 		DamageNumbersSubsystem->RegisterNPC(this);
 	}
+
+	// Register with EMF charge widget subsystem for overhead charge indicator
+	if (UEMFChargeWidgetSubsystem* ChargeWidgetSubsystem = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		ChargeWidgetSubsystem->RegisterNPC(this);
+	}
 }
 
 void AShooterNPC::PossessedBy(AController* NewController)
@@ -131,6 +138,12 @@ void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (UDamageNumbersSubsystem* DamageNumbersSubsystem = GetWorld()->GetSubsystem<UDamageNumbersSubsystem>())
 	{
 		DamageNumbersSubsystem->UnregisterNPC(this);
+	}
+
+	// Unregister from EMF charge widget subsystem
+	if (UEMFChargeWidgetSubsystem* ChargeWidgetSubsystem = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		ChargeWidgetSubsystem->UnregisterNPC(this);
 	}
 }
 
