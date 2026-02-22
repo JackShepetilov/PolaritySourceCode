@@ -904,6 +904,8 @@ EStateTreeRunStatus FSTTask_RunAndShoot::EnterState(FStateTreeExecutionContext& 
 	Data.bIsShooting = false;
 	Data.CurrentDestination = FVector::ZeroVector;
 	Data.LastLOSTime = Data.NPC->GetWorld()->GetTimeSeconds();
+	Data.LastStuckCheckPosition = Data.NPC->GetActorLocation();
+	Data.LastStuckCheckTime = Data.LastLOSTime;
 
 	// Set focus on target for strafing
 	Data.Controller->SetFocus(Data.Target);
@@ -970,6 +972,22 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 			// Reset timer so the NPC has time to reach the new destination
 			// before we force another reposition
 			Data.LastLOSTime = CurrentTime;
+		}
+
+		// Stuck detection: if NPC hasn't moved significantly but should be,
+		// force stop and reposition. Catches cases where PathFollowing thinks
+		// it's "Moving" but the NPC is physically blocked.
+		if (!bNeedsNewDestination && (CurrentTime - Data.LastStuckCheckTime) >= RunAndShoot_StuckCheckInterval)
+		{
+			const float DistanceMoved = FVector::Dist(NPCLocation, Data.LastStuckCheckPosition);
+			Data.LastStuckCheckPosition = NPCLocation;
+			Data.LastStuckCheckTime = CurrentTime;
+
+			if (DistanceMoved < RunAndShoot_StuckDistanceThreshold)
+			{
+				Data.Controller->StopMovement();
+				bNeedsNewDestination = true;
+			}
 		}
 
 		if (bNeedsNewDestination)
@@ -1056,7 +1074,7 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 	const bool bCurrentlyHasLOS = Data.NPC->HasLineOfSightTo(Data.Target);
 
 	// Helper lambda to issue MoveTo and return success
-	auto TryMoveTo = [&Data](const FVector& GoalLocation) -> bool
+	auto TryMoveTo = [&Data, &NPCLocation](const FVector& GoalLocation) -> bool
 	{
 		FAIMoveRequest MoveRequest;
 		MoveRequest.SetGoalLocation(GoalLocation);
@@ -1074,6 +1092,10 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 
 		Data.CurrentDestination = GoalLocation;
 		Data.bHasDestination = true;
+
+		// Reset stuck detection so NPC has full interval to reach new destination
+		Data.LastStuckCheckPosition = NPCLocation;
+		Data.LastStuckCheckTime = Data.NPC->GetWorld()->GetTimeSeconds();
 		return true;
 	};
 

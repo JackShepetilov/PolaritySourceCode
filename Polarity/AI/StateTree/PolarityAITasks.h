@@ -464,10 +464,20 @@ struct FSTTask_RunAndShoot_Data
 
 	/** Time when LOS was last confirmed (for repositioning when LOS lost too long) */
 	float LastLOSTime = 0.0f;
+
+	/** Stuck detection: position at last movement check */
+	FVector LastStuckCheckPosition = FVector::ZeroVector;
+	/** Stuck detection: time of last movement check */
+	float LastStuckCheckTime = 0.0f;
 };
 
 /** How long without LOS before NPC forces a reposition (seconds) */
 static constexpr float RunAndShoot_LOSLostRepositionTime = 2.0f;
+
+/** How long before stuck detection triggers (seconds) */
+static constexpr float RunAndShoot_StuckCheckInterval = 2.5f;
+/** Minimum distance NPC must move within the interval to not be considered stuck (cm) */
+static constexpr float RunAndShoot_StuckDistanceThreshold = 30.0f;
 
 USTRUCT(DisplayName = "Run And Shoot", Category = "Polarity|AI|Shooter")
 struct FSTTask_RunAndShoot : public FStateTreeTaskCommonBase
