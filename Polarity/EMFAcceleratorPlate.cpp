@@ -48,11 +48,23 @@ void AEMFAcceleratorPlate::BeginPlay()
 void AEMFAcceleratorPlate::StartCapture()
 {
 	bIsCaptured = true;
+
+	// Disable EMF field while carried — no interaction with player
+	if (FieldComponent)
+	{
+		FieldComponent->SetActive(false);
+	}
 }
 
 void AEMFAcceleratorPlate::StopCapture()
 {
 	bIsCaptured = false;
+
+	// Re-enable EMF field when released
+	if (FieldComponent)
+	{
+		FieldComponent->SetActive(true);
+	}
 }
 
 void AEMFAcceleratorPlate::UpdateHoldPosition(const FVector& CameraLoc, const FRotator& CameraRot)
@@ -66,5 +78,9 @@ void AEMFAcceleratorPlate::UpdateHoldPosition(const FVector& CameraLoc, const FR
 	const FVector WorldOffset = CameraRot.RotateVector(HoldOffset);
 	const FVector TargetLocation = CameraLoc + WorldOffset;
 
-	SetActorLocation(TargetLocation);
+	// Face the player: plate looks back toward camera
+	const FVector DirToCamera = (CameraLoc - TargetLocation).GetSafeNormal();
+	const FRotator FacingRotation = DirToCamera.Rotation();
+
+	SetActorLocationAndRotation(TargetLocation, FacingRotation);
 }
