@@ -73,10 +73,10 @@ void AShooterWeapon_ChargeLauncher::StartCharging()
 	}
 
 	// Start looping charge sound
-	if (ChargingLoopSound && FirstPersonMesh)
+	if (ChargingLoopSound && GetFirstPersonMesh())
 	{
 		ChargingAudioComponent = UGameplayStatics::SpawnSoundAttached(
-			ChargingLoopSound, FirstPersonMesh, MuzzleSocketName);
+			ChargingLoopSound, GetFirstPersonMesh(), MuzzleSocketName);
 	}
 }
 
@@ -166,7 +166,7 @@ void AShooterWeapon_ChargeLauncher::SpawnStaticCharge()
 
 	// Muzzle location (same logic as CalculateProjectileSpawnTransform)
 	USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled())
-		? FirstPersonMesh : ThirdPersonMesh;
+		? GetFirstPersonMesh() : GetThirdPersonMesh();
 
 	FVector MuzzleLocation = FVector::ZeroVector;
 	if (MuzzleMesh && MuzzleMesh->DoesSocketExist(MuzzleSocketName))
