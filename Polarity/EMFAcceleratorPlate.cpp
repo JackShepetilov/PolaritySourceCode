@@ -78,9 +78,10 @@ void AEMFAcceleratorPlate::UpdateHoldPosition(const FVector& CameraLoc, const FR
 	const FVector WorldOffset = CameraRot.RotateVector(HoldOffset);
 	const FVector TargetLocation = CameraLoc + WorldOffset;
 
-	// Face the player: plate looks back toward camera + designer offset for mesh correction
+	// Face the player: Yaw-only rotation (no pitch tilt) + designer offset for mesh correction
 	const FVector DirToCamera = (CameraLoc - TargetLocation).GetSafeNormal();
-	const FRotator FacingRotation = (FRotationMatrix(DirToCamera.Rotation()) * FRotationMatrix(HoldRotationOffset)).Rotator();
+	const FRotator YawOnly(0.0f, DirToCamera.Rotation().Yaw, 0.0f);
+	const FRotator FacingRotation = (FRotationMatrix(YawOnly) * FRotationMatrix(HoldRotationOffset)).Rotator();
 
 	SetActorLocationAndRotation(TargetLocation, FacingRotation);
 }
