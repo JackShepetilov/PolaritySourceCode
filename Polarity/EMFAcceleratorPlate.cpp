@@ -26,7 +26,7 @@ AEMFAcceleratorPlate::AEMFAcceleratorPlate()
 
 	// Default plate parameters
 	FieldComponent->SourceParams.PlateParams.SurfaceChargeDensity = 1.0f;
-	FieldComponent->SourceParams.PlateParams.Normal = FVector(0.0f, 0.0f, 1.0f); // Up
+	FieldComponent->SourceParams.PlateParams.Normal = FVector(0.0f, 1.0f, 0.0f); // Y-axis
 	FieldComponent->SourceParams.PlateParams.Dimensions = FVector2D(200.0f, 200.0f);
 	FieldComponent->SourceParams.PlateParams.bIsInfinite = false;
 	FieldComponent->SourceParams.PlateParams.MaxDistance = 0.0f;
@@ -78,9 +78,9 @@ void AEMFAcceleratorPlate::UpdateHoldPosition(const FVector& CameraLoc, const FR
 	const FVector WorldOffset = CameraRot.RotateVector(HoldOffset);
 	const FVector TargetLocation = CameraLoc + WorldOffset;
 
-	// Tilt plate so its Z-axis (normal) points at camera — shortest arc, no spin
+	// Tilt plate so its Y-axis (normal) points at camera — shortest arc, no spin
 	const FVector DirToCamera = (CameraLoc - TargetLocation).GetSafeNormal();
-	const FQuat TiltQuat = FQuat::FindBetweenNormals(FVector::UpVector, DirToCamera);
+	const FQuat TiltQuat = FQuat::FindBetweenNormals(FVector::RightVector, DirToCamera);
 	const FRotator FacingRotation = (TiltQuat * FQuat(HoldRotationOffset)).Rotator();
 
 	SetActorLocationAndRotation(TargetLocation, FacingRotation);
