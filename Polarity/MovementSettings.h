@@ -641,7 +641,7 @@ public:
 	float WeaponRunSwayYawAmount = 0.5f;
 
 	/** Distance traveled per full sway cycle (cm) - matches footstep cadence */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon Sway|Run", meta = (ClampMin = "50.0", ClampMax = "500.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon Sway|Run")
 	float WeaponRunSwayStepDistance = 150.0f;
 
 	/** Speed at which sway is at full intensity (cm/s) */

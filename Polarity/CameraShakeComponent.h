@@ -113,19 +113,50 @@ struct FLissajousBobState
 	UPROPERTY(BlueprintReadOnly, Category = "Bob")
 	float PitchOffset = 0.0f;
 
-	void Update(float DeltaPhase, float Intensity, float HorizAmp, float VertAmp, float RollAmp, float PitchAmp)
+	/**
+	 * Update bob generator with wave shaping.
+	 * @param Aggressiveness 0-1: wave shape. 0 = pure sine, 1 = near-square (stompy Doom Eternal feel)
+	 * @param bAsymmetric if true, downward dips (foot plants) are stronger than upward arcs
+	 * @param AsymmetryStrength 0-1: how much stronger the downward dip is vs upward
+	 */
+	void Update(float DeltaPhase, float Intensity, float HorizAmp, float VertAmp, float RollAmp, float PitchAmp,
+		float Aggressiveness = 0.0f, bool bAsymmetric = false, float AsymmetryStrength = 0.5f)
 	{
 		Phase += DeltaPhase;
 		if (Phase > 2.0f * PI) Phase -= 2.0f * PI;
 
-		const float SinPhase = FMath::Sin(Phase);
-		const float Sin2Phase = FMath::Sin(2.0f * Phase);
-		const float Cos2Phase = FMath::Cos(2.0f * Phase);
+		// Raw sine values
+		const float RawSin = FMath::Sin(Phase);
+		const float RawSin2 = FMath::Sin(2.0f * Phase);
+		const float RawCos2 = FMath::Cos(2.0f * Phase);
+
+		// Wave shaping: exponent < 1 flattens peaks, making transitions snappier
+		// exponent = Lerp(1.0, 0.3, Aggressiveness)
+		const float Exponent = FMath::Lerp(1.0f, 0.3f, FMath::Clamp(Aggressiveness, 0.0f, 1.0f));
+		const float SinPhase = FMath::Sign(RawSin) * FMath::Pow(FMath::Abs(RawSin), Exponent);
+		const float Sin2Phase = FMath::Sign(RawSin2) * FMath::Pow(FMath::Abs(RawSin2), Exponent);
+		const float Cos2Phase = FMath::Sign(RawCos2) * FMath::Pow(FMath::Abs(RawCos2), Exponent);
 
 		HorizontalOffset = SinPhase * HorizAmp * Intensity;
 		VerticalOffset = Sin2Phase * VertAmp * Intensity;
 		RollOffset = SinPhase * RollAmp * Intensity;
 		PitchOffset = Cos2Phase * PitchAmp * Intensity;
+
+		// Asymmetry: amplify downward dips (negative vertical), dampen upward arcs
+		if (bAsymmetric)
+		{
+			const float Str = FMath::Clamp(AsymmetryStrength, 0.0f, 1.0f);
+			if (VerticalOffset < 0.0f)
+			{
+				// Foot plant — amplify dip
+				VerticalOffset *= (1.0f + Str);
+			}
+			else
+			{
+				// Mid-stride arc — dampen rise
+				VerticalOffset *= (1.0f - Str * 0.5f);
+			}
+		}
 	}
 
 	void Reset()
@@ -208,6 +239,20 @@ struct FProceduralBobState
 	/** Distance per step during sprinting (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bob|Sprint")
 	float SprintStepDistance = 110.0f;
+
+	// ==================== Wave Shaping ====================
+
+	/** Aggressiveness of the bob wave shape. 0 = smooth sine, 1 = near-square stompy feel (Doom Eternal style) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bob|Wave Shape", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Aggressiveness = 0.0f;
+
+	/** Enable asymmetric bob: foot plants (downward dips) hit harder than upward arcs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bob|Wave Shape")
+	bool bEnableAsymmetry = false;
+
+	/** Asymmetry strength. 0 = symmetric, 1 = max foot plant emphasis */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bob|Wave Shape", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableAsymmetry"))
+	float AsymmetryStrength = 0.5f;
 
 	// ==================== Viewmodel Settings ====================
 

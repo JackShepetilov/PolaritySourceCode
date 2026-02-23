@@ -209,8 +209,9 @@ void UCameraShakeComponent::UpdateProceduralBob(float DeltaTime)
 	// Final intensity with preset and global multipliers
 	float FinalIntensity = ProceduralBob.IntensitySpring.Value * ProceduralBob.GetPresetMultiplier() * ProceduralBob.GlobalIntensity;
 
-	// Update bob generator
-	ProceduralBob.BobGenerator.Update(PhaseIncrement, FinalIntensity, HorizAmp, VertAmp, RollAmp, PitchAmp);
+	// Update bob generator with wave shaping
+	ProceduralBob.BobGenerator.Update(PhaseIncrement, FinalIntensity, HorizAmp, VertAmp, RollAmp, PitchAmp,
+		ProceduralBob.Aggressiveness, ProceduralBob.bEnableAsymmetry, ProceduralBob.AsymmetryStrength);
 
 	// Apply to camera output (scaled by preset)
 	float CameraScale = ProceduralBob.GetCameraScale();
