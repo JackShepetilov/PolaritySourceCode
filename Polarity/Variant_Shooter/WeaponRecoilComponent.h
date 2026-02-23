@@ -337,6 +337,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Recoil")
 	void SetCrouching(bool bCrouching) { bIsCrouching = bCrouching; }
 
+	/** Set external sway override multiplier (e.g. charge launcher shaking). 1.0 = normal. */
+	UFUNCTION(BlueprintCallable, Category = "Recoil")
+	void SetSwayOverrideMultiplier(float Multiplier) { SwayOverrideMultiplier = Multiplier; }
+
 protected:
 	// ==================== Settings ====================
 
@@ -432,6 +436,7 @@ protected:
 
 	bool bIsAiming = false;
 	bool bIsCrouching = false;
+	float SwayOverrideMultiplier = 1.0f;
 
 	// ==================== Internal Methods ====================
 

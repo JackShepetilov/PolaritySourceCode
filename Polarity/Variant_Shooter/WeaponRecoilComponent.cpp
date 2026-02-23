@@ -156,6 +156,8 @@ void UWeaponRecoilComponent::ResetRecoil()
 	FMemory::Memzero(BreathingOU, sizeof(BreathingOU));
 	FMemory::Memzero(TremorOU, sizeof(TremorOU));
 	FMemory::Memzero(JitterOU, sizeof(JitterOU));
+
+	SwayOverrideMultiplier = 1.0f;
 }
 
 // ==================== Input ====================
@@ -550,7 +552,7 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 	float AimMult = bIsAiming ? Settings.ADSSwayMultiplier : 1.0f;
 
 	// Combine all sway sources
-	FRotator TotalSway = (MouseSway + OrganicSway * MovementMult) * AimMult;
+	FRotator TotalSway = (MouseSway + OrganicSway * MovementMult) * AimMult * SwayOverrideMultiplier;
 
 	// Smooth interpolation to target sway
 	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, Settings.MouseSwayLag);

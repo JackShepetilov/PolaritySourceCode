@@ -809,6 +809,14 @@ void AShooterCharacter::DoStartADS()
 
 void AShooterCharacter::DoStopADS()
 {
+	// Notify weapon that secondary action button was released
+	// Must come before bWantsToAim check: when OnSecondaryAction() returned true,
+	// bWantsToAim was never set, but the weapon still needs the release callback
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->OnSecondaryActionReleased();
+	}
+
 	// Only play sound and transition camera if we were actually aiming
 	if (bWantsToAim && CurrentWeapon)
 	{
