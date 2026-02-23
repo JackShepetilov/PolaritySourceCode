@@ -402,11 +402,9 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	else if (bReverse)
 	{
 		// Reverse mode: redirect plate force along plate normal (camera forward)
-		// Suppress non-plate forces, pass plate force for launch
-		TotalForce = FVector::ZeroVector;
-
+		// Other forces apply normally with launched multipliers
 		const FVector PlateNormal = CaptPlate->GetPlateNormal();
-		TotalForce = PlateNormal * PlateForce.Size();
+		TotalForce += PlateNormal * PlateForce.Size();
 	}
 	else
 	{
