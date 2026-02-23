@@ -78,9 +78,10 @@ void AEMFAcceleratorPlate::UpdateHoldPosition(const FVector& CameraLoc, const FR
 	const FVector WorldOffset = CameraRot.RotateVector(HoldOffset);
 	const FVector TargetLocation = CameraLoc + WorldOffset;
 
-	// Face the player: full rotation toward camera (Yaw + Pitch) + designer offset
+	// Face the player: plate Z-axis (normal) points toward camera + designer offset
 	const FVector DirToCamera = (CameraLoc - TargetLocation).GetSafeNormal();
-	const FRotator FacingRotation = (FRotationMatrix(DirToCamera.Rotation()) * FRotationMatrix(HoldRotationOffset)).Rotator();
+	const FRotator BaseRotation = FRotationMatrix::MakeFromZX(DirToCamera, FVector::UpVector).Rotator();
+	const FRotator FacingRotation = (FRotationMatrix(BaseRotation) * FRotationMatrix(HoldRotationOffset)).Rotator();
 
 	SetActorLocationAndRotation(TargetLocation, FacingRotation);
 }
