@@ -970,6 +970,26 @@ void AEMFPhysicsProp::UpdateChargeOverlay(uint8 NewPolarity)
 
 float AEMFPhysicsProp::GetForceMultiplierForOwnerType(EEMSourceOwnerType OwnerType) const
 {
+	if (bIsInReverseFlight)
+	{
+		switch (OwnerType)
+		{
+		case EEMSourceOwnerType::Player:
+			return LaunchedPlayerForceMultiplier;
+		case EEMSourceOwnerType::NPC:
+			return LaunchedNPCForceMultiplier;
+		case EEMSourceOwnerType::Projectile:
+			return LaunchedProjectileForceMultiplier;
+		case EEMSourceOwnerType::Environment:
+			return LaunchedEnvironmentForceMultiplier;
+		case EEMSourceOwnerType::PhysicsProp:
+			return LaunchedPhysicsPropForceMultiplier;
+		case EEMSourceOwnerType::None:
+		default:
+			return LaunchedUnknownForceMultiplier;
+		}
+	}
+
 	switch (OwnerType)
 	{
 	case EEMSourceOwnerType::Player:

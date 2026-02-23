@@ -109,6 +109,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float UnknownForceMultiplier = 1.0f;
 
+	// ==================== Launched Force Filtering ====================
+	// Second set of multipliers, active when prop is in reverse-capture flight (bIsInReverseFlight)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedPlayerForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedNPCForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedProjectileForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedEnvironmentForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedPhysicsPropForceMultiplier = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedUnknownForceMultiplier = 1.0f;
+
 	/** Skip opposite-charge sources closer than OppositeChargeMinDistance to prevent Coulomb 1/r² singularity */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	bool bEnableOppositeChargeDistanceCutoff = true;

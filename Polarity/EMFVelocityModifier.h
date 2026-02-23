@@ -133,6 +133,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float UnknownForceMultiplier = 1.0f;
 
+	// ==================== Launched Force Filtering ====================
+	// Second set of multipliers, active when NPC is in reverse-capture flight (bIsLaunched)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedNPCForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedPlayerForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedProjectileForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedEnvironmentForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedPhysicsPropForceMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
+	float LaunchedUnknownForceMultiplier = 1.0f;
+
+	/** Activate/deactivate launched force filtering (called by owning NPC) */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Launched Force Filtering")
+	void SetLaunchedForceFilteringActive(bool bActive) { bUseLaunchedForceFiltering = bActive; }
+
+	/** Is launched force filtering currently active? */
+	UFUNCTION(BlueprintPure, Category = "EMF|Launched Force Filtering")
+	bool IsLaunchedForceFilteringActive() const { return bUseLaunchedForceFiltering; }
+
 	/** Enable minimum distance cutoff for opposite-charge sources.
 	 *  When enabled, sources closer than OppositeChargeMinDistance with opposite charge sign
 	 *  are ignored, preventing extreme forces from Coulomb 1/r² singularity. */
@@ -359,8 +388,11 @@ private:
 	/** Вычислить velocity delta на основе данных из FieldComponent */
 	FVector ComputeVelocityDelta(float DeltaTime, const FVector& CurrentVelocity);
 
-	/** Get force multiplier for a given source owner type */
+	/** Get force multiplier for a given source owner type (uses launched set if active) */
 	float GetForceMultiplierForOwnerType(EEMSourceOwnerType OwnerType) const;
+
+	/** True when launched force filtering multipliers should be used */
+	bool bUseLaunchedForceFiltering = false;
 
 	/** Debug визуализация */
 	void DrawDebugForces(const FVector& Position, const FVector& Force) const;

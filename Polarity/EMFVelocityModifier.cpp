@@ -444,6 +444,26 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 
 float UEMFVelocityModifier::GetForceMultiplierForOwnerType(EEMSourceOwnerType OwnerType) const
 {
+	if (bUseLaunchedForceFiltering)
+	{
+		switch (OwnerType)
+		{
+		case EEMSourceOwnerType::Player:
+			return LaunchedPlayerForceMultiplier;
+		case EEMSourceOwnerType::NPC:
+			return LaunchedNPCForceMultiplier;
+		case EEMSourceOwnerType::Projectile:
+			return LaunchedProjectileForceMultiplier;
+		case EEMSourceOwnerType::Environment:
+			return LaunchedEnvironmentForceMultiplier;
+		case EEMSourceOwnerType::PhysicsProp:
+			return LaunchedPhysicsPropForceMultiplier;
+		case EEMSourceOwnerType::None:
+		default:
+			return LaunchedUnknownForceMultiplier;
+		}
+	}
+
 	switch (OwnerType)
 	{
 	case EEMSourceOwnerType::Player:

@@ -1821,6 +1821,12 @@ void AShooterNPC::EnterLaunchedState()
 	bIsLaunched = true;
 	bIsInKnockback = true; // Keep AI blocked
 
+	// Switch to launched force filtering weights
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetLaunchedForceFilteringActive(true);
+	}
+
 	// Play launched montage (looping via callback)
 	UAnimMontage* MontageToPlay = LaunchedMontage.Get();
 	if (MontageToPlay)
@@ -1861,6 +1867,12 @@ void AShooterNPC::ExitLaunchedState()
 
 	bIsLaunched = false;
 	bIsInKnockback = false;
+
+	// Revert to normal force filtering weights
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetLaunchedForceFilteringActive(false);
+	}
 
 	// Stop launched montage
 	if (ActiveLaunchedMontage)
