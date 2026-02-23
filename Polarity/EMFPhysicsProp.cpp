@@ -184,9 +184,9 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 		TotalForce += SourceForce * Multiplier;
 	}
 
-	// Suppress all EM forces when captured (mirrors NPC PassThrough ≈ 0 at full capture)
-	// Spring + damping in UpdateCaptureForces handle positioning; external EM forces interfere
-	if (CapturingPlate.IsValid())
+	// Suppress all EM forces when captured in normal mode (spring + damping handle positioning)
+	// In reverse flight: let other forces through with launched multipliers
+	if (CapturingPlate.IsValid() && !bIsInReverseFlight)
 	{
 		TotalForce = FVector::ZeroVector;
 	}
@@ -425,7 +425,7 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 			const FVector PlateForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
 				PropCharge, Position, FVector::ZeroVector, SingleSource, true);
 
-			PropMesh->AddForce(PlateNormal * PlateForce.Size());
+			PropMesh->AddForce(PlateNormal * PlateForce.Size() * LaunchedPlayerForceMultiplier);
 		}
 
 		// Per-frame tangential damping: remove sideways velocity from gravity/other forces
