@@ -97,7 +97,15 @@ void AShooterWeapon_ChargeLauncher::UpdateCharging(float DeltaTime)
 		AccumulatedCharge += ActualConsumption;
 	}
 
-	// Auto-release if charge depleted
+	// Auto-release if max accumulated charge reached
+	if (AccumulatedCharge >= MaxAccumulatedCharge)
+	{
+		AccumulatedCharge = MaxAccumulatedCharge;
+		StopCharging(true);
+		return;
+	}
+
+	// Auto-release if player charge depleted
 	if (FMath::Abs(CachedEMFMod->GetCharge()) < KINDA_SMALL_NUMBER)
 	{
 		StopCharging(true);
@@ -205,7 +213,11 @@ void AShooterWeapon_ChargeLauncher::SpawnStaticCharge()
 		{
 			PlayerSign = static_cast<float>(CachedEMFMod->GetChargeSign());
 		}
-		StaticCharge->SetCharge(PlayerSign * AccumulatedCharge);
+		const float FinalCharge = PlayerSign * AccumulatedCharge;
+		StaticCharge->SetCharge(FinalCharge);
+
+		// Notify Blueprint
+		OnStaticChargePlaced.Broadcast(StaticCharge, FinalCharge);
 	}
 
 	// Release sound

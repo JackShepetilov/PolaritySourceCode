@@ -13,6 +13,10 @@ class AEMFStaticCharge;
 class UEMFVelocityModifier;
 class UAudioComponent;
 class UWeaponRecoilComponent;
+class UMaterialInterface;
+
+/** Fired when a static charge is successfully placed in the world */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStaticChargePlaced, AEMFStaticCharge*, StaticCharge, float, ChargeValue);
 
 UCLASS()
 class POLARITY_API AShooterWeapon_ChargeLauncher : public AShooterWeapon
@@ -49,9 +53,29 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Charge Ability", meta = (ClampMin = "1.0", ClampMax = "10.0"))
 	float ChargingSwayMultiplier = 4.0f;
 
+	/** Maximum accumulated charge before auto-fire */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Charge Ability", meta = (ClampMin = "0.1"))
+	float MaxAccumulatedCharge = 10.0f;
+
 	/** Static charge actor class to spawn */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Charge Ability")
 	TSubclassOf<AEMFStaticCharge> StaticChargeClass;
+
+	// ==================== Overlay Materials (assign in Blueprint) ====================
+
+	/** Overlay material applied to weapon mesh while charging with positive polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Charge Ability|Visuals")
+	TObjectPtr<UMaterialInterface> PositiveChargingOverlay;
+
+	/** Overlay material applied to weapon mesh while charging with negative polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Charge Ability|Visuals")
+	TObjectPtr<UMaterialInterface> NegativeChargingOverlay;
+
+	// ==================== Events ====================
+
+	/** Fired when a static charge is successfully placed in the world */
+	UPROPERTY(BlueprintAssignable, Category = "Charge Ability|Events")
+	FOnStaticChargePlaced OnStaticChargePlaced;
 
 	// ==================== Charge Ability SFX ====================
 
