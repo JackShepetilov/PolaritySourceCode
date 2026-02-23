@@ -49,10 +49,10 @@ void AEMFAcceleratorPlate::StartCapture()
 {
 	bIsCaptured = true;
 
-	// Disable EMF field while carried — no interaction with player
+	// Remove from EMF registry — no field interaction with player while carried
 	if (FieldComponent)
 	{
-		FieldComponent->SetActive(false);
+		FieldComponent->UnregisterFromRegistry();
 	}
 }
 
@@ -60,10 +60,10 @@ void AEMFAcceleratorPlate::StopCapture()
 {
 	bIsCaptured = false;
 
-	// Re-enable EMF field when released
+	// Re-register in EMF registry — field becomes active again
 	if (FieldComponent)
 	{
-		FieldComponent->SetActive(true);
+		FieldComponent->RegisterWithRegistry();
 	}
 }
 
