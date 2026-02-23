@@ -18,6 +18,7 @@ class UEMF_FieldComponent;
 class UEMFVelocityModifier;
 class AEMFChannelingPlateActor;
 class AEMFPhysicsProp;
+class AEMFAcceleratorPlate;
 
 /**
  * Charge animation state
@@ -462,6 +463,9 @@ protected:
 
 	/** Capture a specific physics prop */
 	void CaptureProp(AEMFPhysicsProp* Prop);
+
+	/** Capture an accelerator plate (lowest priority, no charge dependency) */
+	void CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate);
 
 	/** Release the currently captured NPC or prop */
 	void ReleaseCapturedNPC();

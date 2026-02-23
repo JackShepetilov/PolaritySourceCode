@@ -18,6 +18,8 @@
 #include "ShooterWeapon.h"
 #include "EMF_FieldComponent.h"
 #include "EMFPhysicsProp.h"
+#include "EMFAcceleratorPlate.h"
+#include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
 
 UChargeAnimationComponent::UChargeAnimationComponent()
@@ -448,9 +450,20 @@ void UChargeAnimationComponent::ExitChanneling()
 	// Target stays in captured state (knockback) — it will be re-attached
 	// to the reverse plate if player taps, or fully released on timeout.
 	// Just clear the plate reference so weak ptr doesn't dangle.
+	// Exception: AcceleratorPlate is fully released here (no reverse capture).
 	if (CurrentCapturedNPC.IsValid())
 	{
-		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+		if (AEMFAcceleratorPlate* AccelPlate = Cast<AEMFAcceleratorPlate>(CurrentCapturedNPC.Get()))
+		{
+			// AcceleratorPlate: fully release and freeze in place — no reverse capture
+			AccelPlate->StopCapture();
+			if (ChannelingPlateActor)
+			{
+				ChannelingPlateActor->ClearCapturedNPC();
+			}
+			CurrentCapturedNPC.Reset();
+		}
+		else if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 		{
 			if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
 			{
@@ -549,6 +562,12 @@ void UChargeAnimationComponent::UpdatePlatePosition()
 
 	ChannelingPlateActor->UpdateTransformFromCamera(CameraLoc, CameraRot, PlateOffset);
 
+	// Update captured accelerator plate position (follows camera offset, not EMF forces)
+	if (AEMFAcceleratorPlate* AccelPlate = Cast<AEMFAcceleratorPlate>(CurrentCapturedNPC.Get()))
+	{
+		AccelPlate->UpdateHoldPosition(CameraLoc, CameraRot);
+	}
+
 	// Raycast for capture target
 	UpdateCaptureRaycast(CameraLoc, CameraRot);
 }
@@ -601,6 +620,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
 		{
 			if (Prop->IsCapturedByPlate())
+			{
+				return; // Still captured — don't re-search
+			}
+		}
+		// Check AcceleratorPlate
+		else if (AEMFAcceleratorPlate* AccelPlate = Cast<AEMFAcceleratorPlate>(CurrentCapturedNPC.Get()))
+		{
+			if (AccelPlate->IsCaptured())
 			{
 				return; // Still captured — don't re-search
 			}
@@ -729,6 +756,47 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		{
 			CaptureProp(Cast<AEMFPhysicsProp>(BestTarget));
 		}
+		return;
+	}
+
+	// Lowest priority: scan for AcceleratorPlates only if no NPC/Prop was found.
+	// Uses actor iterator since AcceleratorPlates may not have collision primitives.
+	// No charge dependency — purely distance + angle based.
+	AEMFAcceleratorPlate* BestAccelPlate = nullptr;
+	float BestAccelAngleCos = -1.0f;
+
+	for (TActorIterator<AEMFAcceleratorPlate> It(World); It; ++It)
+	{
+		AEMFAcceleratorPlate* AccelPlate = *It;
+		if (!AccelPlate || !AccelPlate->bCanBeCaptured || AccelPlate->IsCaptured())
+		{
+			continue;
+		}
+
+		const FVector ToTarget = AccelPlate->GetActorLocation() - CameraLoc;
+		const float DistSq = ToTarget.SizeSquared();
+		if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+		{
+			continue;
+		}
+
+		const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+		const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+		if (AngleCos < MaxAngleCos)
+		{
+			continue;
+		}
+
+		if (AngleCos > BestAccelAngleCos)
+		{
+			BestAccelAngleCos = AngleCos;
+			BestAccelPlate = AccelPlate;
+		}
+	}
+
+	if (BestAccelPlate)
+	{
+		CaptureAcceleratorPlate(BestAccelPlate);
 	}
 }
 
@@ -774,6 +842,23 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	Prop->SetCapturedByPlate(ChannelingPlateActor);
 }
 
+void UChargeAnimationComponent::CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate)
+{
+	if (!Plate || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// No charge validation — AcceleratorPlate capture is charge-independent
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	CurrentCapturedNPC = Plate;
+	ChannelingPlateActor->SetCapturedNPC(Plate);
+	Plate->StartCapture();
+}
+
 void UChargeAnimationComponent::ReleaseCapturedNPC()
 {
 	if (!CurrentCapturedNPC.IsValid())
@@ -791,6 +876,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
 	{
 		Prop->ReleasedFromCapture();
+	}
+	else if (AEMFAcceleratorPlate* AccelPlate = Cast<AEMFAcceleratorPlate>(CurrentCapturedNPC.Get()))
+	{
+		AccelPlate->StopCapture();
 	}
 
 	if (ChannelingPlateActor)
