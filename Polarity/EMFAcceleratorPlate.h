@@ -48,6 +48,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
 	FVector HoldOffset = FVector(200.0f, 0.0f, 0.0f);
 
+	/** Additional rotation applied on top of face-toward-camera (adjust to match mesh orientation) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
+	FRotator HoldRotationOffset = FRotator::ZeroRotator;
+
 	/** Can this plate be captured by the player? */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
 	bool bCanBeCaptured = true;
