@@ -174,7 +174,7 @@ void AShooterCharacter::BeginPlay()
 	UpdateFirstPersonMeshVisibility();
 
 	// update the HUD
-	OnDamaged.Broadcast(1.0f);
+	OnDamaged.Broadcast(1.0f, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 }
 
 void AShooterCharacter::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -261,7 +261,6 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		const float ArmorAbsorbed = FMath::Min(CurrentArmor, RemainingDamage);
 		CurrentArmor -= ArmorAbsorbed;
 		RemainingDamage -= ArmorAbsorbed;
-		OnArmorUpdated.Broadcast(MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 	}
 
 	// Reduce HP by remaining damage after armor
@@ -328,8 +327,8 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		Die();
 	}
 
-	// update the HUD
-	OnDamaged.Broadcast(FMath::Max(0.0f, CurrentHP / MaxHP));
+	// update the HUD (HP + Armor)
+	OnDamaged.Broadcast(FMath::Max(0.0f, CurrentHP / MaxHP), MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 
 	return Damage;
 }
@@ -950,7 +949,7 @@ void AShooterCharacter::UpdateRegeneration(float DeltaTime)
 	// Update HUD if HP changed
 	if (CurrentHP != OldHP)
 	{
-		OnDamaged.Broadcast(CurrentHP / MaxHP);
+		OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 	}
 }
 
@@ -1891,8 +1890,8 @@ void AShooterCharacter::RestoreHealth(float Amount)
 
 	CurrentHP = FMath::Clamp(CurrentHP + Amount, 0.0f, MaxHP);
 
-	// Update health UI
-	OnDamaged.Broadcast(CurrentHP / MaxHP);
+	// Update HUD
+	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 }
 
 // ==================== Armor Restoration ====================
@@ -1906,8 +1905,8 @@ void AShooterCharacter::RestoreArmor(float Amount)
 
 	CurrentArmor = FMath::Clamp(CurrentArmor + Amount, 0.0f, MaxArmor);
 
-	// Update armor UI
-	OnArmorUpdated.Broadcast(MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	// Update HUD
+	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 }
 
 // ==================== Death ====================
@@ -2025,8 +2024,9 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 
 	// Restore armor
 	CurrentArmor = Data.Armor;
-	OnArmorUpdated.Broadcast(MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
-	OnDamaged.Broadcast(CurrentHP / MaxHP);
+
+	// Update HUD with both HP and armor
+	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 
 	// Restore EMF charge (reset to base/neutral)
 	CurrentCharge = Data.BaseEMFCharge;

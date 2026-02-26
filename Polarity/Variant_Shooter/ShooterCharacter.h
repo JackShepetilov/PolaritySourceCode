@@ -28,7 +28,7 @@ class UNiagaraComponent;
 struct FCheckpointData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamagedDelegate, float, LifePercent);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDamagedDelegate, float, LifePercent, float, ArmorPercent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDamageDirectionDelegate, float, AngleDegrees, float, Damage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FHeatUpdatedDelegate, float, HeatPercent, float, DamageMultiplier);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FSpeedUpdatedDelegate, float, SpeedPercent, float, CurrentSpeed, float, MaxSpeed);
@@ -38,8 +38,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate, float, Char
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, TotalCharge, float, StableCharge, float, UnstableCharge, float, MaxStableCharge, float, MaxUnstableCharge, uint8, Polarity);
 // Chromatic aberration intensity delegate (called every tick while effect is active)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamageChromaticAberrationDelegate, float, Intensity);
-// Armor updated delegate (broadcasts normalized armor percent 0-1)
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FArmorUpdatedDelegate, float, ArmorPercent);
 
 // Boss Finisher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
@@ -710,12 +708,8 @@ public:
 	/** Bullet count updated delegate */
 	FBulletCountUpdatedDelegate OnBulletCountUpdated;
 
-	/** Damaged delegate */
+	/** Damaged delegate (broadcasts both HP and Armor as normalized 0-1 percents) */
 	FDamagedDelegate OnDamaged;
-
-	/** Armor updated delegate (broadcasts ArmorPercent = CurrentArmor / MaxArmor) */
-	UPROPERTY(BlueprintAssignable, Category = "Events")
-	FArmorUpdatedDelegate OnArmorUpdated;
 
 	/** Damage direction delegate (angle in degrees relative to player forward, 0 = front, 90 = right, 180 = back, -90 = left) */
 	FDamageDirectionDelegate OnDamageDirection;
