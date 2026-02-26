@@ -73,7 +73,7 @@ protected:
 
 	/** Called when the possessed pawn is damaged */
 	UFUNCTION()
-	void OnPawnDamaged(float LifePercent);
+	void OnPawnDamaged(float LifePercent, float ArmorPercent);
 
 	/** Called when damage is received from a direction */
 	UFUNCTION()

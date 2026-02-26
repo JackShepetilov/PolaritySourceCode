@@ -137,8 +137,8 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 			BulletCounterUI->BP_BindToCharacter(ShooterCharacter);
 		}
 
-		// force update the life bar
-		ShooterCharacter->OnDamaged.Broadcast(1.0f);
+		// force update the life bar + armor bar
+		ShooterCharacter->OnDamaged.Broadcast(1.0f, ShooterCharacter->GetMaxArmor() > 0.0f ? ShooterCharacter->GetCurrentArmor() / ShooterCharacter->GetMaxArmor() : 0.0f);
 	}
 }
 
@@ -176,7 +176,7 @@ void AShooterPlayerController::OnBulletCountUpdated(int32 MagazineSize, int32 Bu
 	}
 }
 
-void AShooterPlayerController::OnPawnDamaged(float LifePercent)
+void AShooterPlayerController::OnPawnDamaged(float LifePercent, float ArmorPercent)
 {
 	if (IsValid(BulletCounterUI))
 	{
