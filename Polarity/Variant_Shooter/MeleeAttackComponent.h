@@ -300,6 +300,16 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0", ClampMax = "2"))
 	float Cooldown = 0.5f;
 
+	// ==================== Melee Cooldown (Charge System) ====================
+
+	/** Total cooldown time for all melee charges to recover (seconds). Divided evenly among charges. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown", meta = (ClampMin = "0", ClampMax = "30"))
+	float MeleeTotalCooldown = 8.0f;
+
+	/** Maximum number of melee charges */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown", meta = (ClampMin = "1", ClampMax = "5"))
+	int32 MeleeMaxCharges = 2;
+
 	// ==================== Movement ====================
 
 	/** Lunge distance on attack (cm) */
@@ -327,6 +337,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDropKickHit, AActor*, HitActor
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDropKickCooldownStarted, float, CooldownDuration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDropKickCooldownEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMeleeChargeChanged, int32, CurrentCharges, int32, MaxCharges);
 
 /**
  * Component that provides quick melee attack capability.
@@ -487,6 +498,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnDropKickCooldownEnded OnDropKickCooldownEnded;
 
+	/** Called when melee charges change (attack consumed or charge recovered) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnMeleeChargeChanged OnMeleeChargeChanged;
+
 	// ==================== API ====================
 
 	/**
@@ -562,6 +577,36 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	float GetDropKickCooldownRemaining() const { return DropKickCooldownRemaining; }
+
+	/**
+	 * Get current melee charges
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
+	int32 GetMeleeCharges() const { return MeleeCharges; }
+
+	/**
+	 * Get max melee charges from settings
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
+	int32 GetMaxMeleeCharges() const { return Settings.MeleeMaxCharges; }
+
+	/**
+	 * Get recovery time per single charge (TotalCooldown / MaxCharges)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
+	float GetChargeRecoveryTime() const;
+
+	/**
+	 * Get charge recovery progress toward next charge (0 = just started, 1 = ready)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
+	float GetChargeRecoveryProgress() const;
+
+	/**
+	 * Check if there are enough charges for a regular melee attack
+	 */
+	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
+	bool HasMeleeCharges() const { return MeleeCharges >= 1; }
 
 	/**
 	 * Lower the weapon (transition FirstPersonMesh down) without starting an attack.
@@ -656,6 +701,14 @@ protected:
 
 	/** Direction for cool kick boost (movement direction at hit time) */
 	FVector CoolKickDirection = FVector::ZeroVector;
+
+	// ==================== Melee Charge State ====================
+
+	/** Current melee charges available */
+	int32 MeleeCharges = 0;
+
+	/** Time remaining until next charge recovers */
+	float ChargeRecoveryTimer = 0.0f;
 
 	// ==================== Drop Kick State ====================
 
@@ -808,9 +861,14 @@ protected:
 	/** Update cool kick boost */
 	void UpdateCoolKick(float DeltaTime);
 
+	// ==================== Melee Charges ====================
+
+	/** Consume melee charges. If bResetRecoveryTimer is true, resets recovery timer (used for dropkick). */
+	void ConsumeMeleeCharges(int32 Count, bool bResetRecoveryTimer = false);
+
 	// ==================== Drop Kick ====================
 
-	/** Check if drop kick conditions are met (airborne + looking down) */
+	/** Check if drop kick conditions are met (airborne + looking down + has charges) */
 	bool ShouldPerformDropKick() const;
 
 	/** Perform cone trace for drop kick and find target */

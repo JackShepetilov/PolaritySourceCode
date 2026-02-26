@@ -42,6 +42,9 @@ void UMeleeAttackComponent::BeginPlay()
 		OwnerController = Cast<APlayerController>(OwnerCharacter->GetController());
 	}
 
+	// Initialize melee charges
+	MeleeCharges = Settings.MeleeMaxCharges;
+
 	// Auto-detect mesh references
 	AutoDetectMeshReferences();
 
@@ -71,6 +74,28 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateMeleeMeshRotation();
 	UpdateMontagePlayRate(DeltaTime);
 	UpdateCameraFocus(DeltaTime);
+
+	// Update melee charge recovery
+	if (MeleeCharges < Settings.MeleeMaxCharges && ChargeRecoveryTimer > 0.0f)
+	{
+		ChargeRecoveryTimer -= DeltaTime;
+		if (ChargeRecoveryTimer <= 0.0f)
+		{
+			MeleeCharges++;
+			OnMeleeChargeChanged.Broadcast(MeleeCharges, Settings.MeleeMaxCharges);
+
+			if (MeleeCharges < Settings.MeleeMaxCharges)
+			{
+				// Carry over overshoot into next charge recovery
+				float RecoveryTime = GetChargeRecoveryTime();
+				ChargeRecoveryTimer = RecoveryTime + ChargeRecoveryTimer; // Timer is negative, so this subtracts overshoot
+			}
+			else
+			{
+				ChargeRecoveryTimer = 0.0f;
+			}
+		}
+	}
 
 	// Update drop kick cooldown
 	if (DropKickCooldownRemaining > 0.0f)
@@ -154,6 +179,19 @@ bool UMeleeAttackComponent::StartAttack()
 		// Weapon already down - do all the things that normally happen after HidingWeapon
 		SwitchToMeleeMesh();
 		StartMagnetism();
+
+		// Consume melee charges now that attack type is determined
+		if (bIsDropKick)
+		{
+			// Dropkick: consume up to 2 charges, reset recovery timer
+			ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
+		}
+		else
+		{
+			// Regular melee: consume 1 charge
+			ConsumeMeleeCharges(1);
+		}
+
 		PlayAttackAnimation();
 		PlaySwingCameraShake();
 		PlaySound(SwingSound);
@@ -222,6 +260,12 @@ bool UMeleeAttackComponent::CanAttack() const
 		{
 			return false;
 		}
+	}
+
+	// Must have at least 1 melee charge
+	if (MeleeCharges < 1)
+	{
+		return false;
 	}
 
 	// Check airborne restriction
@@ -408,6 +452,19 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 				// Mesh transition complete - switch meshes and start attack
 				SwitchToMeleeMesh();
 				StartMagnetism();
+
+				// Consume melee charges now that attack type is determined
+				if (bIsDropKick)
+				{
+					// Dropkick: consume up to 2 charges, reset recovery timer
+					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
+				}
+				else
+				{
+					// Regular melee: consume 1 charge
+					ConsumeMeleeCharges(1);
+				}
+
 				PlayAttackAnimation();
 				PlaySwingCameraShake();
 				PlaySound(SwingSound);
@@ -487,6 +544,12 @@ bool UMeleeAttackComponent::IsValidMeleeTarget(AActor* HitActor) const
 
 	// Check if it implements IShooterDummyTarget (training dummies, etc.)
 	if (HitActor->Implements<UShooterDummyTarget>())
+	{
+		return true;
+	}
+
+	// Check if it's a destructible environment target (islands, etc.)
+	if (HitActor->ActorHasTag(TEXT("MeleeDestructible")))
 	{
 		return true;
 	}
@@ -2437,6 +2500,12 @@ bool UMeleeAttackComponent::ShouldPerformDropKick() const
 		return false;
 	}
 
+	// Must have at least 1 melee charge for dropkick
+	if (MeleeCharges < 1)
+	{
+		return false;
+	}
+
 	// Must be airborne
 	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
 	if (!Movement)
@@ -2690,6 +2759,7 @@ bool UMeleeAttackComponent::TryStartDropKick()
 	{
 		// Start drop kick!
 		bIsDropKick = true;
+
 		MagnetismTarget = BestTarget;
 		DropKickTargetPosition = BestTargetPos;
 
@@ -2961,4 +3031,61 @@ float UMeleeAttackComponent::GetDropKickCooldownProgress() const
 	}
 
 	return 1.0f - (DropKickCooldownRemaining / Settings.DropKickCooldown);
+}
+
+// ==================== Melee Charge System ====================
+
+void UMeleeAttackComponent::ConsumeMeleeCharges(int32 Count, bool bResetRecoveryTimer)
+{
+	const int32 OldCharges = MeleeCharges;
+	MeleeCharges = FMath::Max(0, MeleeCharges - FMath::Max(0, Count));
+
+	const bool bChargesChanged = (MeleeCharges != OldCharges);
+
+	if (MeleeCharges < Settings.MeleeMaxCharges)
+	{
+		const float RecoveryTime = GetChargeRecoveryTime();
+
+		if (bResetRecoveryTimer)
+		{
+			// Dropkick: reset timer to full recovery time
+			ChargeRecoveryTimer = RecoveryTime;
+		}
+		else if (OldCharges == Settings.MeleeMaxCharges && bChargesChanged)
+		{
+			// Was at max charges, start recovery timer for the first time
+			ChargeRecoveryTimer = RecoveryTime;
+		}
+		// else: timer already running from a previous charge loss, let it continue
+	}
+
+	if (bChargesChanged)
+	{
+		OnMeleeChargeChanged.Broadcast(MeleeCharges, Settings.MeleeMaxCharges);
+	}
+}
+
+float UMeleeAttackComponent::GetChargeRecoveryTime() const
+{
+	if (Settings.MeleeMaxCharges <= 0)
+	{
+		return 0.0f;
+	}
+	return Settings.MeleeTotalCooldown / static_cast<float>(Settings.MeleeMaxCharges);
+}
+
+float UMeleeAttackComponent::GetChargeRecoveryProgress() const
+{
+	if (MeleeCharges >= Settings.MeleeMaxCharges)
+	{
+		return 1.0f; // Fully charged
+	}
+
+	const float RecoveryTime = GetChargeRecoveryTime();
+	if (RecoveryTime <= 0.0f)
+	{
+		return 1.0f;
+	}
+
+	return 1.0f - (ChargeRecoveryTimer / RecoveryTime);
 }

@@ -14,6 +14,7 @@ class AFlyingDrone;
 class AShooterCharacter;
 class UCheckpointSubsystem;
 class AShooterDoor;
+class ADestructibleIslandActor;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
@@ -73,6 +74,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Door")
 	TSoftObjectPtr<AShooterDoor> RewardDoor;
 
+	// ==================== Destructible Island ====================
+
+	/** Optional destructible island linked to this arena. Destroying it force-completes the arena. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Island")
+	TSoftObjectPtr<ADestructibleIslandActor> LinkedIsland;
+
 	// ==================== State (Read-Only) ====================
 
 	/** Current arena state */
@@ -96,6 +103,12 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
 	FOnWaveCleared OnWaveCleared;
+
+	// ==================== API ====================
+
+	/** Force-complete the arena: kill all NPCs, skip remaining waves, open exits. */
+	UFUNCTION(BlueprintCallable, Category = "Arena")
+	void ForceCompleteArena();
 
 protected:
 	virtual void BeginPlay() override;
@@ -155,6 +168,12 @@ private:
 	/** Called when player respawns from checkpoint */
 	UFUNCTION()
 	void OnPlayerRespawned();
+
+	// ==================== Island ====================
+
+	/** Called when the linked destructible island is destroyed */
+	UFUNCTION()
+	void OnLinkedIslandDestroyed(ADestructibleIslandActor* Island, AActor* Destroyer);
 
 	// ==================== Checkpoint ====================
 

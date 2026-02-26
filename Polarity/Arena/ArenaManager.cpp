@@ -15,6 +15,8 @@
 #include "GameFramework/PlayerController.h"
 #include "NavigationSystem.h"
 #include "Polarity/Variant_Shooter/ShooterDoor.h"
+#include "DestructibleIslandActor.h"
+#include "Kismet/GameplayStatics.h"
 
 AArenaManager::AArenaManager()
 {
@@ -43,6 +45,12 @@ void AArenaManager::BeginPlay()
 	{
 		CheckpointSubsystem->OnPlayerRespawned.AddDynamic(this, &AArenaManager::OnPlayerRespawned);
 		bBoundToRespawn = true;
+	}
+
+	// Bind to linked destructible island
+	if (ADestructibleIslandActor* Island = LinkedIsland.Get())
+	{
+		Island->OnIslandDestroyed.AddDynamic(this, &AArenaManager::OnLinkedIslandDestroyed);
 	}
 }
 
@@ -577,6 +585,38 @@ void AArenaManager::OnPlayerRespawned()
 			ActivateArena(Player);
 		}
 	}
+}
+
+// ==================== Island ====================
+
+void AArenaManager::ForceCompleteArena()
+{
+	if (CurrentState == EArenaState::Completed || CurrentState == EArenaState::Idle)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: ForceCompleteArena — killing all NPCs and completing"));
+
+	// Kill all remaining NPCs via lethal damage (triggers normal death flow: ragdoll, OnNPCDeath, etc.)
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		if (AShooterNPC* NPC = NPCPtr.Get())
+		{
+			UGameplayStatics::ApplyDamage(NPC, 99999.f, nullptr, nullptr, UDamageType::StaticClass());
+		}
+	}
+
+	// Clear wave timer (might be between waves)
+	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
+
+	CompleteArena();
+}
+
+void AArenaManager::OnLinkedIslandDestroyed(ADestructibleIslandActor* Island, AActor* Destroyer)
+{
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Linked island destroyed — force completing arena"));
+	ForceCompleteArena();
 }
 
 // ==================== Checkpoint ====================
