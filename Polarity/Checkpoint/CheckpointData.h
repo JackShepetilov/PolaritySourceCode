@@ -23,6 +23,10 @@ struct POLARITY_API FCheckpointData
 	UPROPERTY(BlueprintReadWrite, Category = "Checkpoint")
 	float Health = 0.0f;
 
+	/** Armor at checkpoint (will be restored on respawn) */
+	UPROPERTY(BlueprintReadWrite, Category = "Checkpoint")
+	float Armor = 0.0f;
+
 	/** Base EMF charge at checkpoint (bonus charge is reset) */
 	UPROPERTY(BlueprintReadWrite, Category = "Checkpoint")
 	float BaseEMFCharge = 0.0f;
@@ -60,6 +64,7 @@ struct POLARITY_API FCheckpointData
 		bIsValid = false;
 		SpawnTransform = FTransform::Identity;
 		Health = 0.0f;
+		Armor = 0.0f;
 		BaseEMFCharge = 0.0f;
 		CurrentWeaponIndex = 0;
 		WeaponAmmo.Empty();

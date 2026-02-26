@@ -38,6 +38,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate, float, Char
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, TotalCharge, float, StableCharge, float, UnstableCharge, float, MaxStableCharge, float, MaxUnstableCharge, uint8, Polarity);
 // Chromatic aberration intensity delegate (called every tick while effect is active)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamageChromaticAberrationDelegate, float, Intensity);
+// Armor updated delegate (broadcasts normalized armor percent 0-1)
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FArmorUpdatedDelegate, float, ArmorPercent);
 
 // Boss Finisher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
@@ -197,6 +199,16 @@ protected:
 
 	/** Current HP remaining to this character */
 	float CurrentHP = 0.0f;
+
+	// ==================== Armor (DOOM Eternal-style) ====================
+
+	/** Maximum armor value */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Armor")
+	float MaxArmor = 250.0f;
+
+	/** Current armor remaining (absorbs damage before health) */
+	UPROPERTY(BlueprintReadOnly, Category = "Armor")
+	float CurrentArmor = 0.0f;
 
 	// ==================== HP Regeneration ====================
 
@@ -701,6 +713,10 @@ public:
 	/** Damaged delegate */
 	FDamagedDelegate OnDamaged;
 
+	/** Armor updated delegate (broadcasts ArmorPercent = CurrentArmor / MaxArmor) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FArmorUpdatedDelegate OnArmorUpdated;
+
 	/** Damage direction delegate (angle in degrees relative to player forward, 0 = front, 90 = right, 180 = back, -90 = left) */
 	FDamageDirectionDelegate OnDamageDirection;
 
@@ -757,6 +773,18 @@ public:
 	/** Restore HP by the given amount (clamped to MaxHP). Updates UI. */
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void RestoreHealth(float Amount);
+
+	/** Restore armor by the given amount (clamped to MaxArmor). Updates UI. */
+	UFUNCTION(BlueprintCallable, Category = "Armor")
+	void RestoreArmor(float Amount);
+
+	/** Returns current armor value */
+	UFUNCTION(BlueprintPure, Category = "Armor")
+	float GetCurrentArmor() const { return CurrentArmor; }
+
+	/** Returns maximum armor value */
+	UFUNCTION(BlueprintPure, Category = "Armor")
+	float GetMaxArmor() const { return MaxArmor; }
 
 	/** Returns true if player is currently being knocked back */
 	UFUNCTION(BlueprintPure, Category = "Damage")

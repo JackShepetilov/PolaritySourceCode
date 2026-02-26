@@ -254,8 +254,18 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		return 0.0f;
 	}
 
-	// Reduce HP
-	CurrentHP -= Damage;
+	// Armor absorption (DOOM Eternal-style): armor absorbs damage before health
+	float RemainingDamage = Damage;
+	if (CurrentArmor > 0.0f)
+	{
+		const float ArmorAbsorbed = FMath::Min(CurrentArmor, RemainingDamage);
+		CurrentArmor -= ArmorAbsorbed;
+		RemainingDamage -= ArmorAbsorbed;
+		OnArmorUpdated.Broadcast(MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	}
+
+	// Reduce HP by remaining damage after armor
+	CurrentHP -= RemainingDamage;
 
 	// Reset regeneration delay timer
 	TimeSinceLastDamage = 0.0f;
@@ -1885,6 +1895,21 @@ void AShooterCharacter::RestoreHealth(float Amount)
 	OnDamaged.Broadcast(CurrentHP / MaxHP);
 }
 
+// ==================== Armor Restoration ====================
+
+void AShooterCharacter::RestoreArmor(float Amount)
+{
+	if (IsDead() || Amount <= 0.0f)
+	{
+		return;
+	}
+
+	CurrentArmor = FMath::Clamp(CurrentArmor + Amount, 0.0f, MaxArmor);
+
+	// Update armor UI
+	OnArmorUpdated.Broadcast(MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+}
+
 // ==================== Death ====================
 
 void AShooterCharacter::Die()
@@ -1944,6 +1969,9 @@ bool AShooterCharacter::SaveToCheckpoint(FCheckpointData& OutData)
 	// Health
 	OutData.Health = CurrentHP;
 
+	// Armor
+	OutData.Armor = CurrentArmor;
+
 	// EMF - save base charge (0 for neutral, not bonus charge)
 	// Per requirements: reset bonus charge, keep base
 	OutData.BaseEMFCharge = 0.0f; // Player spawns neutral
@@ -1994,6 +2022,10 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 
 	// Restore health (per requirements: restore HP on respawn)
 	CurrentHP = Data.Health;
+
+	// Restore armor
+	CurrentArmor = Data.Armor;
+	OnArmorUpdated.Broadcast(MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 	OnDamaged.Broadcast(CurrentHP / MaxHP);
 
 	// Restore EMF charge (reset to base/neutral)

@@ -25,6 +25,7 @@ class UEMFVelocityModifier;
 class UEMF_FieldComponent;
 class UNiagaraSystem;
 class AHealthPickup;
+class AArmorPickup;
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -252,6 +253,9 @@ protected:
 	/** True when NPC was launched by reverse channeling and is in flight */
 	bool bIsLaunched = false;
 
+	/** True if NPC was ever captured/launched by channeling. Never cleared. Used for armor drop. */
+	bool bWasChannelingTarget = false;
+
 	/** True when NPC is being interpolated to knockback target position */
 	bool bIsKnockbackInterpolating = false;
 
@@ -428,6 +432,12 @@ public:
 	/** Health pickup class to spawn on non-weapon kill (set in Blueprint defaults) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup")
 	TSubclassOf<AHealthPickup> HealthPickupClass;
+
+	// ==================== Armor Pickup Drop ====================
+
+	/** Armor pickup class to spawn on channeling kill (set in Blueprint defaults) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Armor Pickup")
+	TSubclassOf<AArmorPickup> ArmorPickupClass;
 
 protected:
 
@@ -611,6 +621,10 @@ public:
 	/** Returns true if NPC is in flight after reverse channeling launch */
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool IsLaunched() const { return bIsLaunched; }
+
+	/** Returns true if this NPC was ever captured/launched by channeling (used for armor drop) */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool WasChannelingTarget() const { return bWasChannelingTarget; }
 
 	/** Returns true if this NPC is dead */
 	UFUNCTION(BlueprintPure, Category = "Status")

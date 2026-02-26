@@ -32,6 +32,7 @@
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Boss/BossProjectile.h"
 #include "../Pickups/HealthPickup.h"
+#include "../Pickups/ArmorPickup.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -544,8 +545,14 @@ void AShooterNPC::Die()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
-	// Spawn health pickup on non-weapon kill
-	if (HealthPickupClass && AHealthPickup::ShouldDropHealth(LastKillingDamageType))
+	// Spawn pickup: channeling kills drop armor, other non-weapon kills drop health
+	if (bWasChannelingTarget && ArmorPickupClass)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		GetWorld()->SpawnActor<AArmorPickup>(ArmorPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
+	}
+	else if (HealthPickupClass && AHealthPickup::ShouldDropHealth(LastKillingDamageType))
 	{
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -1313,6 +1320,17 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// ==================== Explosion-Like Elastic Collision ====================
 	// Both NPCs get knocked back in opposite directions with multiplied original velocity
 
+	// Tag other NPC for armor drop if either NPC was a channeling target
+	// (must be done BEFORE delayed damage, as bIsLaunched gets cleared after this function)
+	if (bWasChannelingTarget)
+	{
+		OtherNPC->bWasChannelingTarget = true;
+	}
+	if (OtherNPC->bWasChannelingTarget)
+	{
+		bWasChannelingTarget = true;
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] HandleElasticNPCCollisionWithSpeed: %s -> %s, ImpactSpeed=%.0f"),
 		*GetName(), *OtherNPC->GetName(), ImpactSpeed);
 
@@ -1707,6 +1725,7 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 	}
 
 	bIsCaptured = true;
+	bWasChannelingTarget = true; // Permanent flag for armor drop detection
 	bIsInKnockback = true; // Blocks AI via StateTree IsInKnockback condition
 
 	// Stop shooting immediately — burst fire cycle and permission retry won't check knockback on their own
