@@ -180,7 +180,7 @@ void AShooterPlayerController::OnPawnDamaged(float LifePercent, float ArmorPerce
 {
 	if (IsValid(BulletCounterUI))
 	{
-		BulletCounterUI->BP_Damaged(LifePercent);
+		BulletCounterUI->BP_Damaged(LifePercent, ArmorPercent);
 	}
 }
 
