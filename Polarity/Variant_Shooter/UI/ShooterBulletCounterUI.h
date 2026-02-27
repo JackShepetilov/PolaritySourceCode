@@ -111,6 +111,32 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|DropKick", meta = (DisplayName = "OnDropKickCooldownEnded"))
 	void BP_OnDropKickCooldownEnded();
 
+	// ==================== Melee Charge Cooldown ====================
+
+	/**
+	 * Called when melee cooldown starts (charges dropped below max).
+	 * Use this to show and start cooldown overlay animation.
+	 * @param TotalCooldownDuration - total time to recover all charges (seconds)
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Melee", meta = (DisplayName = "OnMeleeCooldownStarted"))
+	void BP_OnMeleeCooldownStarted(float TotalCooldownDuration);
+
+	/**
+	 * Called when all melee charges are fully recovered.
+	 * Use this to hide cooldown overlay.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Melee", meta = (DisplayName = "OnMeleeCooldownEnded"))
+	void BP_OnMeleeCooldownEnded();
+
+	/**
+	 * Called when melee charges change (consumed or recovered).
+	 * Use this to update charge counter / pips.
+	 * @param CurrentCharges - current available charges
+	 * @param MaxCharges - maximum charges
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Melee", meta = (DisplayName = "OnMeleeChargeChanged"))
+	void BP_OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges);
+
 	// ==================== Hit Marker ====================
 
 	/**

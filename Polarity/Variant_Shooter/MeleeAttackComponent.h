@@ -338,6 +338,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDropKickCooldownStarted, float, CooldownDuration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDropKickCooldownEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMeleeChargeChanged, int32, CurrentCharges, int32, MaxCharges);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMeleeCooldownStarted, float, TotalCooldownDuration);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeCooldownEnded);
 
 /**
  * Component that provides quick melee attack capability.
@@ -501,6 +503,14 @@ public:
 	/** Called when melee charges change (attack consumed or charge recovered) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnMeleeChargeChanged OnMeleeChargeChanged;
+
+	/** Called when melee cooldown starts (charges dropped below max) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnMeleeCooldownStarted OnMeleeCooldownStarted;
+
+	/** Called when melee cooldown ends (all charges fully recovered) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnMeleeCooldownEnded OnMeleeCooldownEnded;
 
 	// ==================== API ====================
 

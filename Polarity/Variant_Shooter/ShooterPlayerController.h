@@ -102,4 +102,16 @@ protected:
 	/** Called when drop kick cooldown ends */
 	UFUNCTION()
 	void OnDropKickCooldownEnded();
+
+	/** Called when melee cooldown starts (charges below max) */
+	UFUNCTION()
+	void OnMeleeCooldownStarted(float TotalCooldownDuration);
+
+	/** Called when melee cooldown ends (all charges recovered) */
+	UFUNCTION()
+	void OnMeleeCooldownEnded();
+
+	/** Called when melee charges change */
+	UFUNCTION()
+	void OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges);
 };

@@ -93,6 +93,7 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 			else
 			{
 				ChargeRecoveryTimer = 0.0f;
+				OnMeleeCooldownEnded.Broadcast();
 			}
 		}
 	}
@@ -179,19 +180,7 @@ bool UMeleeAttackComponent::StartAttack()
 		// Weapon already down - do all the things that normally happen after HidingWeapon
 		SwitchToMeleeMesh();
 		StartMagnetism();
-
-		// Consume melee charges now that attack type is determined
-		if (bIsDropKick)
-		{
-			// Dropkick: consume up to 2 charges, reset recovery timer
-			ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
-		}
-		else
-		{
-			// Regular melee: consume 1 charge
-			ConsumeMeleeCharges(1);
-		}
-
+		// Charges are consumed on HIT, not on swing (see PerformHitDetection)
 		PlayAttackAnimation();
 		PlaySwingCameraShake();
 		PlaySound(SwingSound);
@@ -452,19 +441,7 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 				// Mesh transition complete - switch meshes and start attack
 				SwitchToMeleeMesh();
 				StartMagnetism();
-
-				// Consume melee charges now that attack type is determined
-				if (bIsDropKick)
-				{
-					// Dropkick: consume up to 2 charges, reset recovery timer
-					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
-				}
-				else
-				{
-					// Regular melee: consume 1 charge
-					ConsumeMeleeCharges(1);
-				}
-
+				// Charges are consumed on HIT, not on swing (see PerformHitDetection)
 				PlayAttackAnimation();
 				PlaySwingCameraShake();
 				PlaySound(SwingSound);
@@ -597,6 +574,19 @@ void UMeleeAttackComponent::PerformHitDetection()
 
 			// Valid hit!
 			HitActorsThisAttack.Add(Target);
+
+			// Consume charges on first hit of this attack
+			if (!bHasHitThisAttack)
+			{
+				if (bIsDropKick)
+				{
+					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
+				}
+				else
+				{
+					ConsumeMeleeCharges(1);
+				}
+			}
 			bHasHitThisAttack = true;
 
 			// Check for headshot (approximate - use upper part of target)
@@ -757,6 +747,18 @@ void UMeleeAttackComponent::PerformHitDetection()
 				StartCoolKick();
 			}
 
+			// Consume charges on first hit of this attack
+			if (!bHasHitThisAttack)
+			{
+				if (bIsDropKick)
+				{
+					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
+				}
+				else
+				{
+					ConsumeMeleeCharges(1);
+				}
+			}
 			bHasHitThisAttack = true;
 
 			// Check for headshot
@@ -3062,6 +3064,15 @@ void UMeleeAttackComponent::ConsumeMeleeCharges(int32 Count, bool bResetRecovery
 	if (bChargesChanged)
 	{
 		OnMeleeChargeChanged.Broadcast(MeleeCharges, Settings.MeleeMaxCharges);
+
+		// Calculate actual remaining time until all charges are full:
+		// ChargeRecoveryTimer (time to next charge) + remaining charges after that × RecoveryTime
+		const int32 ChargesMissing = Settings.MeleeMaxCharges - MeleeCharges;
+		const float RecoveryTimePerCharge = GetChargeRecoveryTime();
+		const float RemainingTime = ChargeRecoveryTimer + FMath::Max(0, ChargesMissing - 1) * RecoveryTimePerCharge;
+
+		// Fire every time charges are consumed so BP can restart its timer with correct duration
+		OnMeleeCooldownStarted.Broadcast(RemainingTime);
 	}
 }
 

@@ -129,6 +129,9 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		{
 			MeleeComp->OnDropKickCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
 			MeleeComp->OnDropKickCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
+			MeleeComp->OnMeleeCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnMeleeCooldownStarted);
+			MeleeComp->OnMeleeCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnMeleeCooldownEnded);
+			MeleeComp->OnMeleeChargeChanged.AddDynamic(this, &AShooterPlayerController::OnMeleeChargeChanged);
 		}
 
 		// Rebind UI widget to new character (for HitMarker after respawn)
@@ -240,5 +243,29 @@ void AShooterPlayerController::OnDropKickCooldownEnded()
 	if (IsValid(BulletCounterUI))
 	{
 		BulletCounterUI->BP_OnDropKickCooldownEnded();
+	}
+}
+
+void AShooterPlayerController::OnMeleeCooldownStarted(float TotalCooldownDuration)
+{
+	if (IsValid(BulletCounterUI))
+	{
+		BulletCounterUI->BP_OnMeleeCooldownStarted(TotalCooldownDuration);
+	}
+}
+
+void AShooterPlayerController::OnMeleeCooldownEnded()
+{
+	if (IsValid(BulletCounterUI))
+	{
+		BulletCounterUI->BP_OnMeleeCooldownEnded();
+	}
+}
+
+void AShooterPlayerController::OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges)
+{
+	if (IsValid(BulletCounterUI))
+	{
+		BulletCounterUI->BP_OnMeleeChargeChanged(CurrentCharges, MaxCharges);
 	}
 }
