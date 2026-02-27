@@ -559,6 +559,14 @@ protected:
 	bool bExternalPermissionGranted = false;
 
 public:
+	/** Apply stun from explosion — freezes AI, plays montage, no position interpolation.
+	 *  Uses Knockback state internally so AI stops moving.
+	 *  @param Duration How long the stun lasts
+	 *  @param StunMontage Montage to play (falls back to KnockbackMontage if null)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void ApplyExplosionStun(float Duration, UAnimMontage* StunMontage = nullptr);
+
 	/** Apply distance-based knockback with smooth interpolation to target position
 	 *  @param KnockbackDirection Direction to knock the NPC (normalized)
 	 *  @param Distance Total distance to travel in cm

@@ -16,11 +16,13 @@ class AShooterNPC;
 class UNiagaraSystem;
 class USoundBase;
 class UMaterialInterface;
+class UAnimMontage;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropDeath, AEMFPhysicsProp*, Prop, AActor*, Killer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*, Prop, float, Damage, AActor*, DamageCauser);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropChargeChanged, float, NewCharge, uint8, NewPolarity);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropExploded, AEMFPhysicsProp*, Prop, FVector, Location, float, DamageMultiplier);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnNPCStunnedByExplosion, AShooterNPC*, StunnedNPC, AEMFPhysicsProp*, ExplodedProp, float, StunDuration);
 
 /**
  * Physics-simulated prop with full EMF system integration.
@@ -249,6 +251,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Impulse", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
 	float ExplosionPhysicsImpulse = 50000.0f;
 
+	// ==================== Explosion Stun ====================
+
+	/** If true, explosion stuns nearby NPCs (puts them in Knockback state) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Stun", meta = (EditCondition = "bCanExplode"))
+	bool bApplyExplosionStun = true;
+
+	/** Duration of the stun effect (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Stun", meta = (ClampMin = "0.1", ClampMax = "10.0", EditCondition = "bCanExplode"))
+	float ExplosionStunDuration = 2.0f;
+
+	/** Animation montage to play on stunned NPCs (if null, uses NPC's default KnockbackMontage) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Stun", meta = (EditCondition = "bCanExplode"))
+	TObjectPtr<UAnimMontage> ExplosionStunMontage;
+
 	// ==================== Charge Overlay Materials ====================
 
 	/** If true, overlay material will be applied based on charge state */
@@ -342,6 +358,10 @@ public:
 	/** Called when prop explodes (for BP camera shake, particles, etc.) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnPropExploded OnPropExploded;
+
+	/** Called for each NPC stunned by this prop's explosion */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnNPCStunnedByExplosion OnNPCStunnedByExplosion;
 
 	// ==================== Public API ====================
 

@@ -816,6 +816,34 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 		}
 	}
 
+	// Stun nearby NPCs
+	if (bApplyExplosionStun && FinalRadius > 0.0f)
+	{
+		TArray<FOverlapResult> StunOverlaps;
+		FCollisionShape StunSphere = FCollisionShape::MakeSphere(FinalRadius);
+		FCollisionQueryParams StunQueryParams;
+		StunQueryParams.AddIgnoredActor(this);
+
+		GetWorld()->OverlapMultiByChannel(
+			StunOverlaps, ExplosionLocation, FQuat::Identity,
+			ECC_Pawn, StunSphere, StunQueryParams);
+
+		TSet<AShooterNPC*> StunnedNPCs;
+
+		for (const FOverlapResult& Overlap : StunOverlaps)
+		{
+			AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
+			if (!NPC || StunnedNPCs.Contains(NPC) || NPC->IsDead())
+			{
+				continue;
+			}
+			StunnedNPCs.Add(NPC);
+
+			NPC->ApplyExplosionStun(ExplosionStunDuration, ExplosionStunMontage);
+			OnNPCStunnedByExplosion.Broadcast(NPC, this, ExplosionStunDuration);
+		}
+	}
+
 	// VFX
 	if (ExplosionVFX)
 	{

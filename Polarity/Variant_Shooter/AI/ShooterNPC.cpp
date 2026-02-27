@@ -830,6 +830,64 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 	}
 }
 
+void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
+{
+	// Skip if dead, already stunned, captured, or launched
+	if (bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
+	{
+		return;
+	}
+
+	// Enter knockback state (freezes AI) but without position interpolation
+	bIsInKnockback = true;
+	bIsKnockbackInterpolating = false;
+
+	// Stop shooting immediately
+	StopShooting();
+
+	// Stop AI pathfinding
+	if (AController* MyController = GetController())
+	{
+		if (AAIController* AIController = Cast<AAIController>(MyController))
+		{
+			if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
+			{
+				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
+			}
+			AIController->StopMovement();
+		}
+	}
+
+	// Disable EMF forces during stun
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	// Clear any existing knockback timer and schedule recovery
+	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+	GetWorld()->GetTimerManager().SetTimer(
+		KnockbackStunTimer,
+		this,
+		&AShooterNPC::EndKnockbackStun,
+		Duration,
+		false
+	);
+
+	// Play stun montage (use provided montage, or fallback to KnockbackMontage)
+	UAnimMontage* MontageToPlay = StunMontage ? StunMontage : KnockbackMontage.Get();
+	if (MontageToPlay)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			float PlayRate = MontageToPlay->GetPlayLength() > 0.0f
+				? MontageToPlay->GetPlayLength() / Duration
+				: 1.0f;
+			AnimInstance->Montage_Play(MontageToPlay, PlayRate);
+		}
+	}
+}
+
 void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {
 	// Apply NPC's knockback distance multiplier

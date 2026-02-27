@@ -127,14 +127,15 @@
 
 ### 3.1 Хитскан (Волновая винтовка)
 
-| Параметр           | Значение |
-| ------------------ | -------- |
-| Damage             | 4.0      |
-| RefireRate         | 0.115s   |
-| MaxRange           | 10,000   |
-| MagazineSize       | inf      |
-| AimVariance        | 0°       |
-| FullAuto           | Да       |
+| Параметр          | Значение |
+| ----------------- | -------- |
+| Damage            | 4.0      |
+| RefireRate        | 0.096s   |
+| MaxRange          | 10,000   |
+| MagazineSize      | inf      |
+| AimVariance       | 0°       |
+| FullAuto          | Да       |
+| ChargeCostPerShot | 0.1      |
 
 ### 3.2 Ионизация (хитскан → заряд на цели)
 
@@ -145,13 +146,14 @@
 
 ### 3.3 EMF Снаряды (Зарядомёт)
 
-| Параметр | Значение |
-|----------|----------|
-| HitDamage | 75.0 |
-| DefaultCharge | 2.0 |
-| ChargeTransferRatio | 50% |
-| bAffectedByExternalFields | Да |
-| Rocket Boost | Отталкивание от собственного снаряда при выстреле под ноги |
+| Параметр                  | Значение                                                   |
+| ------------------------- | ---------------------------------------------------------- |
+| HitDamage                 | 75.0                                                       |
+| DefaultCharge             | 2.0                                                        |
+| ChargeCostPerShot         | 1                                                          |
+| ChargeTransferRatio       | 50%                                                        |
+| bAffectedByExternalFields | Да                                                         |
+| Rocket Boost              | Отталкивание от собственного снаряда при выстреле под ноги |
 
 ---
 
@@ -355,6 +357,20 @@
 | ExplosionRadius | 300 |
 | ExplosionImpulse | 1,600 |
 
+### 6.7 Оглушение взрывом пропа (Explosion Stun)
+
+При взрыве EMF-пропа все NPC в радиусе взрыва получают стан — переходят в состояние Knockback без перемещения (AI замораживается на месте, стрельба прекращается, pathfinding останавливается). На оглушённых NPC проигрывается Anim Montage.
+
+| Параметр | Значение |
+|----------|----------|
+| bApplyExplosionStun | Да |
+| ExplosionStunDuration | 2.0s |
+| ExplosionStunMontage | null (fallback на KnockbackMontage NPC) |
+
+**Логика:** `Explode()` → sphere overlap по `ECC_Pawn` в радиусе взрыва → для каждого `AShooterNPC` вызывается `ApplyExplosionStun()` → `bIsInKnockback = true`, montage, таймер на `EndKnockbackStun()`.
+
+**Делегат:** `OnNPCStunnedByExplosion(StunnedNPC, ExplodedProp, StunDuration)` — BlueprintAssignable, вызывается для каждого оглушённого NPC. Позволяет привязать логику в блупринте (VFX на NPC, UI-индикатор стана и т.д.).
+
 ---
 
 ## 7. ОБРАТНАЯ СВЯЗЬ
@@ -394,7 +410,7 @@
 ### Петля 6: Канализация → Захват предмета → Запуск
 > Удерживай → пластина → захват пропа
 > Отпусти + тап → реверс → проп летит как снаряд
-> проп → коллизия = взрыв → отбрасывание + урон
+> проп → коллизия = взрыв → отбрасывание + урон + оглушение ближайших NPC (2s)
 
 ### Петля 7: Разные заряды противников 
 > Сообщи противнику А положительный заряд(например, ионизируй)
