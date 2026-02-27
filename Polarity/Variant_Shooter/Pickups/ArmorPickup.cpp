@@ -58,21 +58,26 @@ void AArmorPickup::Tick(float DeltaTime)
 		return;
 	}
 
-	// Fly toward the player with acceleration
+	// Track elapsed time since magnet activation (reuse CurrentVelocity.X as timer)
+	CurrentVelocity.X += DeltaTime;
+
+	// Direct pursuit: always move straight toward the player, no inertia
 	const FVector TargetLocation = MagnetTarget->GetActorLocation();
-	const FVector Direction = (TargetLocation - GetActorLocation()).GetSafeNormal();
+	const FVector ToTarget = TargetLocation - GetActorLocation();
+	const float Distance = ToTarget.Size();
 
-	// Accelerate toward target
-	CurrentVelocity += Direction * MagnetAcceleration * DeltaTime;
-
-	// Clamp to max speed
-	if (CurrentVelocity.Size() > MagnetSpeed)
+	if (Distance < 1.0f)
 	{
-		CurrentVelocity = CurrentVelocity.GetSafeNormal() * MagnetSpeed;
+		return;
 	}
 
-	// Move
-	const FVector NewLocation = GetActorLocation() + CurrentVelocity * DeltaTime;
+	// Speed ramps up over time: starts slow, reaches MagnetSpeed after ~0.5s
+	const float SpeedAlpha = FMath::Clamp(CurrentVelocity.X * MagnetAcceleration / MagnetSpeed, 0.0f, 1.0f);
+	const float CurrentSpeed = FMath::Lerp(MagnetSpeed * 0.1f, MagnetSpeed, SpeedAlpha * SpeedAlpha);
+
+	// Move directly toward player, clamped to not overshoot
+	const float MoveDistance = FMath::Min(CurrentSpeed * DeltaTime, Distance);
+	const FVector NewLocation = GetActorLocation() + (ToTarget / Distance) * MoveDistance;
 	SetActorLocation(NewLocation);
 }
 
