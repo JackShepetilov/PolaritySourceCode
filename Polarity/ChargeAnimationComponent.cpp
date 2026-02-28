@@ -691,6 +691,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
+			// Charge validation: only capture NPCs with OPPOSITE charge sign
+			// Neutral NPCs can't be captured, same-sign are repelled
+			const float NPCCharge = NPCModifier->GetCharge();
+			if (FMath::IsNearlyZero(NPCCharge) || NPCCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+			{
+				continue;
+			}
+
 			const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
 			const float DistSq = ToTarget.SizeSquared();
 			if (DistSq > SearchRadiusSq || DistSq < 1.0f)

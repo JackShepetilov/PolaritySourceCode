@@ -89,7 +89,14 @@
       "WebFetch(domain:www.quodsoler.com)",
       "WebFetch(domain:www.pcgamer.com)",
       "Bash(ls:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "WebFetch(domain:twhl.info)",
+      "WebFetch(domain:opsive.com)",
+      "WebFetch(domain:sreitich.github.io)",
+      "WebFetch(domain:www.pcgamesn.com)",
+      "WebFetch(domain:snorristurluson.github.io)",
+      "Bash(tasklist)",
+      "Bash(git -C . status --short)"
     ]
   }
 }

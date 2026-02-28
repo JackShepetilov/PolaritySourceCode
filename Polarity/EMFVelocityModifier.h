@@ -233,6 +233,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
 	float CaptureReleaseTimeout = 0.5f;
 
+	/** Reverse launch distance = CaptureRange * this multiplier */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.5", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
+	float ReverseLaunchDistanceMultiplier = 1.5f;
+
+	/** Time (seconds) of constant-speed flight during reverse capture. Speed = Distance / Duration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "bEnableViscousCapture"))
+	float ReverseLaunchFlightDuration = 0.5f;
+
+	/** How fast the target converges onto the camera aim line (1/s).
+	 *  Higher = faster convergence. At 15, ~95% correction in 0.2s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
+	float ReverseLaunchConvergenceRate = 15.0f;
+
 	// ==================== Events ====================
 
 	/** Делегат: вызывается при изменении заряда */
@@ -416,6 +429,12 @@ private:
 
 	/** Accumulated time that NPC has been outside CaptureRadius */
 	float WeakCaptureTimer = 0.0f;
+
+	/** Reverse launch: initialized on first reverse tick */
+	bool bReverseLaunchInitialized = false;
+
+	/** Reverse launch: constant speed for the flight (locked on first frame) */
+	float ReverseLaunchSpeed = 0.0f;
 
 	/** Calculate effective capture range based on player and NPC charges.
 	 *  Formula: BaseRange * max(1, 1 + ln(|q_player * q_npc| / NormCoeff)) */

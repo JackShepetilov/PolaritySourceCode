@@ -311,9 +311,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
 	float ViscosityCoefficient = 10.0f;
 
-	/** Radius within which viscous capture activates */
+	/** Base capture range (cm). Actual range scales with charge:
+	 *  Range = BaseRange * max(1, 1 + ln(|q_player| * |q_prop| / NormCoeff)). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bCanBeCaptured"))
-	float CaptureRadius = 500.0f;
+	float CaptureBaseRange = 500.0f;
+
+	/** Charge normalization coefficient for capture range formula.
+	 *  Lower = longer range at low charges, higher = needs more charge for same range. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0", EditCondition = "bCanBeCaptured"))
+	float CaptureChargeNormCoeff = 50.0f;
 
 	/** Counteract gravity when captured */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (EditCondition = "bCanBeCaptured"))
@@ -334,6 +340,19 @@ public:
 	/** Time below CaptureMinStrength before auto-release */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bCanBeCaptured"))
 	float CaptureReleaseTimeout = 0.5f;
+
+	/** Reverse launch distance = CaptureRange * this multiplier */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.5", ClampMax = "5.0", EditCondition = "bCanBeCaptured"))
+	float ReverseLaunchDistanceMultiplier = 1.5f;
+
+	/** Time (seconds) of constant-speed flight during reverse capture. Speed = Distance / Duration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "bCanBeCaptured"))
+	float ReverseLaunchFlightDuration = 0.5f;
+
+	/** How fast the prop converges onto the camera aim line (1/s).
+	 *  Higher = faster convergence. At 15, ~95% correction in 0.2s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
+	float ReverseLaunchConvergenceRate = 15.0f;
 
 	// ==================== Debug ====================
 
@@ -459,8 +478,13 @@ private:
 	bool bHasPreviousPlatePosition = false;
 	float WeakCaptureTimer = 0.0f;
 	bool bReverseLaunchInitialized = false;
+	float ReverseLaunchSpeed = 0.0f;
 
 	// ==================== Internal Methods ====================
+
+	/** Calculate effective capture range based on player and prop charges.
+	 *  Formula: BaseRange * max(1, 1 + ln(|q_player * q_prop| / NormCoeff)) */
+	float CalculateCaptureRange() const;
 
 	/** Apply electromagnetic forces from all EMF sources */
 	void ApplyEMForces(float DeltaTime);

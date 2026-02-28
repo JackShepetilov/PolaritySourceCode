@@ -7,6 +7,7 @@
 #include "GameFramework/Character.h"
 #include "DrawDebugHelpers.h"
 #include "Kismet/GameplayStatics.h"
+#include "Camera/PlayerCameraManager.h"
 
 // EMF Plugin includes
 #include "EMF_FieldComponent.h"
@@ -287,12 +288,19 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			}
 		}
 
-		const float DebugChargeProduct = FMath::Abs(DebugPlayerCharge) * FMath::Abs(Charge);
-		const float DebugRatio = DebugChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-		const float DebugRangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(FMath::Max(DebugRatio, KINDA_SMALL_NUMBER)));
-		const float DebugCaptureRange = CaptureBaseRange * DebugRangeMultiplier;
+		const float DebugPlayerChargeAbs = FMath::Abs(DebugPlayerCharge);
+		const float DebugNPCChargeAbs = FMath::Abs(Charge);
 
-		DrawDebugSphere(GetWorld(), Position, DebugCaptureRange, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
+		// Only draw sphere when both charges are non-zero (capture requires both)
+		if (DebugPlayerChargeAbs >= KINDA_SMALL_NUMBER && DebugNPCChargeAbs >= KINDA_SMALL_NUMBER)
+		{
+			const float DebugChargeProduct = DebugPlayerChargeAbs * DebugNPCChargeAbs;
+			const float DebugRatio = DebugChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
+			const float DebugRangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(DebugRatio));
+			const float DebugCaptureRange = CaptureBaseRange * DebugRangeMultiplier;
+
+			DrawDebugSphere(GetWorld(), Position, DebugCaptureRange, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
+		}
 	}
 
 	// Pre-calculate squared distances for faster comparison
@@ -427,10 +435,8 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	}
 	else if (bReverse)
 	{
-		// Reverse mode: redirect plate force along plate normal (camera forward)
-		// Other forces apply normally with launched multipliers
-		const FVector PlateNormal = CaptPlate->GetPlateNormal();
-		TotalForce += PlateNormal * PlateForce.Size();
+		// Reverse mode: suppress plate EM force entirely — constant-speed launch handles positioning.
+		// Other forces (NPC, Environment, etc.) still apply through launched multipliers.
 	}
 	else
 	{
@@ -695,6 +701,12 @@ float UEMFVelocityModifier::CalculateCaptureRange() const
 	const float NPCCharge = FMath::Abs(GetCharge());
 	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
 
+	// No capture possible without charge on both sides
+	if (NPCCharge < KINDA_SMALL_NUMBER || PlayerChargeAbs < KINDA_SMALL_NUMBER)
+	{
+		return 0.0f;
+	}
+
 	// Product of charges: higher product = longer range
 	const float ChargeProduct = PlayerChargeAbs * NPCCharge;
 
@@ -703,7 +715,7 @@ float UEMFVelocityModifier::CalculateCaptureRange() const
 	// At ChargeProduct == NormCoeff * e: Range = BaseRange * 2
 	// At ChargeProduct < NormCoeff: ln < 0, but clamped to 1 so range never below BaseRange
 	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(FMath::Max(Ratio, KINDA_SMALL_NUMBER)));
+	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
 
 	return CaptureBaseRange * RangeMultiplier;
 }
@@ -726,24 +738,36 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 
 	if (Plate->IsInReverseMode())
 	{
-		// === REVERSE MODE: launch NPC along camera forward ===
-		// Exit hard hold — NPC is free to be pushed by plate EM force
+		// === REVERSE MODE: aim-line convergence ===
+		// Target flies forward at constant speed + converges laterally onto camera aim line.
+		// Camera rotation → aim line shifts → target smoothly follows crosshair.
 		bHardHoldActive = false;
 
-		// Plate force is already in VelocityDelta from EM calculation above.
-		// We only need to damp tangential velocity so NPC flies straight.
-		const FVector PlateNormal = Plate->GetPlateNormal();
-		const float NormalSpeed = FVector::DotProduct(CurrentVelocity, PlateNormal);
-		const FVector Tangential = CurrentVelocity - NormalSpeed * PlateNormal;
+		if (!bReverseLaunchInitialized)
+		{
+			bReverseLaunchInitialized = true;
 
-		// Strong tangential damping to keep NPC on the line of fire
-		const float TangentialDampFactor = 1.0f - FMath::Exp(-10.0f * DeltaTime);
-		FVector ReverseDelta = -Tangential * TangentialDampFactor;
+			const float LaunchDistance = CalculateCaptureRange() * ReverseLaunchDistanceMultiplier;
+			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
+		}
 
-		// Add the EM-driven acceleration (computed earlier in ComputeVelocityDelta)
-		ReverseDelta += CurrentAcceleration * DeltaTime;
+		// Aim line from camera position along plate normal (= camera forward)
+		const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
+		const FVector AimOrigin = CamMgr ? CamMgr->GetCameraLocation() : Plate->GetActorLocation();
+		const FVector AimDir = Plate->GetPlateNormal();
 
-		return ReverseDelta;
+		// Project NPC position onto aim line
+		const FVector ToTarget = Position - AimOrigin;
+		const float ForwardDist = FVector::DotProduct(ToTarget, AimDir);
+		const FVector NearestOnLine = AimOrigin + ForwardDist * AimDir;
+		const FVector LateralOffset = Position - NearestOnLine;
+
+		// Desired velocity: forward at constant speed + lateral convergence toward aim line
+		const FVector DesiredVelocity = AimDir * ReverseLaunchSpeed
+			- LateralOffset * ReverseLaunchConvergenceRate;
+
+		// Return delta: desired - current + external forces
+		return DesiredVelocity - CurrentVelocity + CurrentAcceleration * DeltaTime;
 	}
 
 	// === NORMAL CAPTURE MODE ===
@@ -794,6 +818,7 @@ void UEMFVelocityModifier::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 	CapturingPlate = Plate;
 	bHardHoldActive = false;
 	WeakCaptureTimer = 0.0f;
+	bReverseLaunchInitialized = false;
 
 	// Enter captured state on the NPC
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(GetOwner()))
@@ -806,6 +831,7 @@ void UEMFVelocityModifier::ReleasedFromCapture()
 {
 	CapturingPlate = nullptr;
 	bHardHoldActive = false;
+	bReverseLaunchInitialized = false;
 
 	// Exit captured state on the NPC
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(GetOwner()))
@@ -818,6 +844,7 @@ void UEMFVelocityModifier::DetachFromPlate()
 {
 	CapturingPlate = nullptr;
 	bHardHoldActive = false;
+	bReverseLaunchInitialized = false;
 	// NOTE: Does NOT call ExitCapturedState — NPC stays in knockback
 	// for plate swap during ExitChanneling → ReverseChanneling transition
 }

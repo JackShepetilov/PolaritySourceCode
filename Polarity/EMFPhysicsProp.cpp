@@ -13,6 +13,7 @@
 #include "EMFVelocityModifier.h"
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Camera/PlayerCameraManager.h"
 #include "NiagaraFunctionLibrary.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/OverlapResult.h"
@@ -113,7 +114,7 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	// Debug: always-visible capture range sphere around this prop
 	if (bDrawDebugForces && bCanBeCaptured)
 	{
-		DrawDebugSphere(GetWorld(), GetActorLocation(), CaptureRadius, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
+		DrawDebugSphere(GetWorld(), GetActorLocation(), CalculateCaptureRange(), 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
 	}
 }
 
@@ -292,6 +293,38 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 
 // ==================== Channeling Capture ====================
 
+float AEMFPhysicsProp::CalculateCaptureRange() const
+{
+	// Get player charge from the plate (if captured) or from player pawn
+	float PlayerCharge = 0.0f;
+	if (CapturingPlate.IsValid())
+	{
+		PlayerCharge = CapturingPlate.Get()->GetPlateChargeDensity();
+	}
+	else if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
+	{
+		if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
+		{
+			PlayerCharge = PlayerMod->GetCharge();
+		}
+	}
+
+	const float PropChargeAbs = FMath::Abs(GetCharge());
+	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
+
+	// No capture possible without charge on both sides
+	if (PropChargeAbs < KINDA_SMALL_NUMBER || PlayerChargeAbs < KINDA_SMALL_NUMBER)
+	{
+		return 0.0f;
+	}
+
+	const float ChargeProduct = PlayerChargeAbs * PropChargeAbs;
+	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
+	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
+
+	return CaptureBaseRange * RangeMultiplier;
+}
+
 void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 {
 	if (!Plate || !bCanBeCaptured)
@@ -335,6 +368,7 @@ void AEMFPhysicsProp::DetachFromPlate()
 {
 	CapturingPlate.Reset();
 	bHasPreviousPlatePosition = false;
+	bReverseLaunchInitialized = false;
 }
 
 void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
@@ -369,11 +403,14 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 		}
 	}
 
+	// Dynamic capture range based on charge product
+	const float EffectiveCaptureRange = CalculateCaptureRange();
+
 	// Smoothstep capture strength
 	float CaptureStrength = 0.0f;
-	if (Distance < CaptureRadius)
+	if (Distance < EffectiveCaptureRange)
 	{
-		const float T = Distance / CaptureRadius;
+		const float T = Distance / EffectiveCaptureRange;
 		CaptureStrength = 1.0f - T * T * (3.0f - 2.0f * T);
 	}
 
@@ -407,40 +444,38 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 	if (Plate->IsInReverseMode())
 	{
-		// Reverse mode: direct velocity correction (mirrors NPC velocity-based damping)
-		const FVector PlateNormal = Plate->GetPlateNormal();
+		// === REVERSE MODE: aim-line convergence ===
+		// Prop flies forward at constant speed + converges laterally onto camera aim line.
+		// SetPhysicsLinearVelocity each frame: full control, gravity doesn't accumulate.
 
-		// On first reverse tick: zero all velocity to prevent sideways teleportation
-		// (projecting onto changing PlateNormal caused lateral drift each frame)
 		if (!bReverseLaunchInitialized)
 		{
-			PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
 			bReverseLaunchInitialized = true;
 			bIsInReverseFlight = true;
 			bHasExploded = false;
+
+			const float LaunchDistance = EffectiveCaptureRange * ReverseLaunchDistanceMultiplier;
+			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
 		}
 
-		// Apply launch force along plate normal (camera forward)
-		const float PropCharge = GetCharge();
-		if (!FMath::IsNearlyZero(PropCharge) && Plate->PlateFieldComponent)
-		{
-			FEMSourceDescription PlateSource = Plate->PlateFieldComponent->GetSourceDescription();
-			TArray<FEMSourceDescription> SingleSource;
-			SingleSource.Add(PlateSource);
+		// Aim line from camera position along plate normal (= camera forward)
+		const FVector PropPos = GetActorLocation();
+		const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
+		const FVector AimOrigin = CamMgr ? CamMgr->GetCameraLocation() : Plate->GetActorLocation();
+		const FVector AimDir = Plate->GetPlateNormal();
 
-			const FVector PlateForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
-				PropCharge, Position, FVector::ZeroVector, SingleSource, true);
+		// Project prop position onto aim line
+		const FVector ToTarget = PropPos - AimOrigin;
+		const float ForwardDist = FVector::DotProduct(ToTarget, AimDir);
+		const FVector NearestOnLine = AimOrigin + ForwardDist * AimDir;
+		const FVector LateralOffset = PropPos - NearestOnLine;
 
-			PropMesh->AddForce(PlateNormal * PlateForce.Size() * LaunchedPlayerForceMultiplier);
-		}
+		// Desired velocity: forward at constant speed + lateral convergence toward aim line
+		const FVector DesiredVelocity = AimDir * ReverseLaunchSpeed
+			- LateralOffset * ReverseLaunchConvergenceRate;
 
-		// Per-frame tangential damping: remove sideways velocity from gravity/other forces
-		const FVector CurrentVel = PropMesh->GetPhysicsLinearVelocity();
-		const float FwdSpeed = FVector::DotProduct(CurrentVel, PlateNormal);
-		const FVector Tangential = CurrentVel - FwdSpeed * PlateNormal;
-		const float DampingFactor = 1.0f - FMath::Exp(-ViscosityCoefficient * CaptureStrength * DeltaTime);
-		const FVector TangentialDamping = -Tangential * DampingFactor * PhysMass / FMath::Max(DeltaTime, SMALL_NUMBER);
-		PropMesh->AddForce(TangentialDamping);
+		// Direct velocity set: bypasses gravity/physics artifacts, collision detection still works
+		PropMesh->SetPhysicsLinearVelocity(DesiredVelocity);
 	}
 	else
 	{
