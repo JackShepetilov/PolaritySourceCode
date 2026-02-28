@@ -407,6 +407,8 @@ protected:
 
 public:
 
+	float GetChargeChangeOnMeleeHit() const { return ChargeChangeOnMeleeHit; }
+
 	/** Delegate called when this NPC dies - can be bound in Blueprints */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCDeath OnNPCDeath;

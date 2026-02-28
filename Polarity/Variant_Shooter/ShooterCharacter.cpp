@@ -3,6 +3,7 @@
 
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "AI/ShooterNPC.h"
 #include "ShooterDummyInterface.h"
 #include "MovementSettings.h"
 #include "CameraShakeComponent.h"
@@ -1149,8 +1150,12 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 			}
 		}
 
-		// Default: add decaying bonus charge for regular enemies
-		float ChargeAmount = EMFMod->ChargePerMeleeHit;
+		// Get charge from the enemy's ChargeChangeOnMeleeHit (negated: enemy loses → player gains)
+		float ChargeAmount = EMFMod->ChargePerMeleeHit; // fallback
+		if (AShooterNPC* HitNPC = Cast<AShooterNPC>(HitActor))
+		{
+			ChargeAmount = -HitNPC->GetChargeChangeOnMeleeHit();
+		}
 
 		// Apply drop kick charge multiplier for successful drop kicks
 		if (MeleeAttackComponent && MeleeAttackComponent->IsDropKick())
