@@ -779,6 +779,7 @@ bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
 {
 	if (!Data.Drone || !Data.Target)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot::CanShoot BLOCKED: Drone or Target is null"));
 		return false;
 	}
 
@@ -803,9 +804,8 @@ bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
 	// Check line of sight
 	if (!Data.Drone->HasLineOfSightTo(Data.Target))
 	{
-#if WITH_EDITOR
-		UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot: No LOS to target"));
-#endif
+		UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot::CanShoot BLOCKED by LOS: %s -> %s"),
+			*Data.Drone->GetName(), *Data.Target->GetName());
 		return false;
 	}
 
@@ -815,13 +815,14 @@ bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
 		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone);
 		if (Coordinator && !Coordinator->RequestAttackPermission(Data.Drone))
 		{
-#if WITH_EDITOR
-			UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot: Coordinator denied permission"));
-#endif
+			UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot::CanShoot BLOCKED by Coordinator: %s"),
+				*Data.Drone->GetName());
 			return false;
 		}
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("FlyAndShoot::CanShoot PASSED: %s can shoot at %s"),
+		*Data.Drone->GetName(), *Data.Target->GetName());
 	return true;
 }
 
@@ -1229,6 +1230,7 @@ bool FSTTask_RunAndShoot::CanShoot(const FInstanceDataType& Data) const
 {
 	if (!Data.NPC || !Data.Target)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("RunAndShoot::CanShoot BLOCKED: NPC or Target is null"));
 		return false;
 	}
 
@@ -1253,6 +1255,8 @@ bool FSTTask_RunAndShoot::CanShoot(const FInstanceDataType& Data) const
 	// Check line of sight
 	if (!Data.NPC->HasLineOfSightTo(Data.Target))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("RunAndShoot::CanShoot BLOCKED by LOS: %s -> %s"),
+			*Data.NPC->GetName(), *Data.Target->GetName());
 		return false;
 	}
 
@@ -1262,10 +1266,14 @@ bool FSTTask_RunAndShoot::CanShoot(const FInstanceDataType& Data) const
 		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
 		if (Coordinator && !Coordinator->RequestAttackPermission(Data.NPC))
 		{
+			UE_LOG(LogTemp, Warning, TEXT("RunAndShoot::CanShoot BLOCKED by Coordinator: %s"),
+				*Data.NPC->GetName());
 			return false;
 		}
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("RunAndShoot::CanShoot PASSED: %s can shoot at %s"),
+		*Data.NPC->GetName(), *Data.Target->GetName());
 	return true;
 }
 
