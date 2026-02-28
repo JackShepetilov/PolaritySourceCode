@@ -246,6 +246,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
 	float ReverseLaunchConvergenceRate = 15.0f;
 
+	/** Duration (seconds) plate force acts on non-capturable NPC with opposite charge.
+	 *  After this time, opposite-charge plate force is suppressed. Same-charge force is unaffected. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.0", ClampMax = "10.0", EditCondition = "!bEnableViscousCapture"))
+	float NonCapturePlateForceDuration = 1.0f;
+
 	// ==================== Events ====================
 
 	/** Делегат: вызывается при изменении заряда */
@@ -429,6 +434,9 @@ private:
 
 	/** Accumulated time that NPC has been outside CaptureRadius */
 	float WeakCaptureTimer = 0.0f;
+
+	/** Timer tracking how long channeling plate has been active (for non-capturable NPCs) */
+	float NonCapturePlateForceTimer = 0.0f;
 
 	/** Reverse launch: initialized on first reverse tick */
 	bool bReverseLaunchInitialized = false;

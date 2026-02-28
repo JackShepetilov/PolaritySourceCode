@@ -311,6 +311,7 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	// Calculate Lorentz force from each source individually with multipliers
 	FVector TotalForce = FVector::ZeroVector;
 	FVector PlateForce = FVector::ZeroVector; // Separated for viscous capture suppression
+	bool bFoundAnyChannelingPlate = false; // Track plate presence for non-capturable timer
 
 	// Viscous capture: resolve plate position from direct reference (not registry search)
 	FVector NearestPlatePosition = FVector::ZeroVector;
@@ -363,6 +364,24 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		if (bIsChannelingPlate && bEnableViscousCapture && !bFoundPlate)
 		{
 			continue;
+		}
+
+		// Non-capturable NPCs: after NonCapturePlateForceDuration, suppress opposite-charge plate force
+		if (bIsChannelingPlate && !bEnableViscousCapture)
+		{
+			bFoundAnyChannelingPlate = true;
+
+			if (NonCapturePlateForceTimer >= NonCapturePlateForceDuration)
+			{
+				const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
+				const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
+
+				// Different charges: suppress force after time limit
+				if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
+				{
+					continue;
+				}
+			}
 		}
 
 		bool bIsPlateSource = bFoundPlate && bIsChannelingPlate;
@@ -441,6 +460,19 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	else
 	{
 		TotalForce += PlateForce;
+	}
+
+	// Update plate force timer for non-capturable NPCs
+	if (!bEnableViscousCapture)
+	{
+		if (bFoundAnyChannelingPlate)
+		{
+			NonCapturePlateForceTimer += DeltaTime;
+		}
+		else
+		{
+			NonCapturePlateForceTimer = 0.0f;
+		}
 	}
 
 	CurrentEMForce = TotalForce;
