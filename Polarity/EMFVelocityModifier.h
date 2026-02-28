@@ -246,6 +246,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
 	float ReverseLaunchConvergenceRate = 15.0f;
 
+	// ==================== Reverse Launch Homing ====================
+
+	/** Enable soft aim-assist homing toward nearest enemy during reverse launch flight */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture|Homing", meta = (EditCondition = "bEnableViscousCapture"))
+	bool bEnableReverseLaunchHoming = true;
+
+	/** Half-angle (degrees) of the forward detection cone */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture|Homing", meta = (ClampMin = "5.0", ClampMax = "45.0", EditCondition = "bEnableViscousCapture && bEnableReverseLaunchHoming"))
+	float HomingConeHalfAngle = 15.0f;
+
+	/** Max range (cm) for homing target detection */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture|Homing", meta = (ClampMin = "500.0", ClampMax = "10000.0", Units = "cm", EditCondition = "bEnableViscousCapture && bEnableReverseLaunchHoming"))
+	float HomingMaxRange = 3000.0f;
+
+	/** Homing strength: 0 = no homing, 1 = full lock-on. At 0.15, barely noticeable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableViscousCapture && bEnableReverseLaunchHoming"))
+	float HomingStrength = 0.15f;
+
+	/** Seconds to ramp from 0 to full homing strength. Prevents instant snap on launch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bEnableViscousCapture && bEnableReverseLaunchHoming"))
+	float HomingRampUpTime = 0.1f;
+
 	/** Duration (seconds) plate force acts on non-capturable NPC with opposite charge.
 	 *  After this time, opposite-charge plate force is suppressed. Same-charge force is unaffected. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.0", ClampMax = "10.0", EditCondition = "!bEnableViscousCapture"))
@@ -444,12 +466,18 @@ private:
 	/** Reverse launch: constant speed for the flight (locked on first frame) */
 	float ReverseLaunchSpeed = 0.0f;
 
+	/** Elapsed time since reverse launch started (for homing ramp-up) */
+	float ReverseLaunchElapsed = 0.0f;
+
 	/** Calculate effective capture range based on player and NPC charges.
 	 *  Formula: BaseRange * max(1, 1 + ln(|q_player * q_npc| / NormCoeff)) */
 	float CalculateCaptureRange() const;
 
 	/** Apply hard-hold capture logic: pull-in or rigid hold. Returns velocity delta to apply. */
 	FVector ComputeHardHoldDelta(float DeltaTime, const FVector& CurrentVelocity, AEMFChannelingPlateActor* Plate);
+
+	/** Find best homing target within cone and range */
+	class AShooterNPC* FindHomingTarget(const FVector& Position, const FVector& AimDirection) const;
 
 	// ==================== Channeling Proxy State ====================
 

@@ -350,6 +350,24 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision", meta = (ClampMin = "0", EditCondition = "bEnableNPCCollision"))
 	float NPCCollisionMinVelocity = 300.0f;
 
+	// ==================== NPC Collision Impact Effects ====================
+
+	/** Post-impact knockback reduction (0 = freeze in place, 1 = full scatter) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Impact", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableNPCCollision"))
+	float NPCCollisionPostImpactKnockbackMultiplier = 0.2f;
+
+	/** Shockwave VFX spawned at NPC-NPC collision point */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Impact", meta = (EditCondition = "bEnableNPCCollision"))
+	TObjectPtr<UNiagaraSystem> NPCCollisionImpactVFX;
+
+	/** Scale for NPC collision impact VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Impact", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableNPCCollision"))
+	float NPCCollisionImpactVFXScale = 1.5f;
+
+	/** Heavy impact sound at NPC-NPC collision point */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Impact", meta = (EditCondition = "bEnableNPCCollision"))
+	TObjectPtr<USoundBase> NPCCollisionImpactSound;
+
 	// ==================== EMF Proximity Knockback ====================
 
 	/** Enable EMF-based attraction knockback when NPCs with opposite charges get close */

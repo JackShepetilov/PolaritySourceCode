@@ -1488,6 +1488,19 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	float KnockbackDuration = KnockbackDistance / FMath::Max(NewSpeed, 1.0f);
 	KnockbackDuration = FMath::Clamp(KnockbackDuration, 0.3f, 2.0f); // Reasonable bounds
 
+	// === IMPACT FREEZE: stop both NPCs and reduce post-impact scatter ===
+	if (UCharacterMovementComponent* MyMoveComp = GetCharacterMovement())
+	{
+		MyMoveComp->StopMovementImmediately();
+	}
+	if (UCharacterMovementComponent* OtherMoveComp = OtherNPC->GetCharacterMovement())
+	{
+		OtherMoveComp->StopMovementImmediately();
+	}
+
+	// Reduce scatter so NPCs die/stagger near collision point
+	KnockbackDistance *= NPCCollisionPostImpactKnockbackMultiplier;
+
 	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to SELF %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
 		*GetName(), -CollisionDirection.X, -CollisionDirection.Y, -CollisionDirection.Z,
 		KnockbackDistance, KnockbackDuration);
@@ -1502,13 +1515,13 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// Apply knockback to other NPC (forwards)
 	OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
 
-	// Apply damage to both NPCs with a short delay
-	// This allows the knockback impulse to be applied first, making deaths look better
+	// Apply damage to both NPCs with a very short delay
+	// NPCs are stopped by impact freeze, so minimal delay needed for knockback state init
 	// Pass nullptr as DamageCauser to bypass friendly fire check (NPC-NPC collision damage is intentional)
 	// Split damage by type: Kinetic (Wallslam) and EMF (EMFProximity)
 	if (CollisionDamage > 0.0f)
 	{
-		const float DamageDelay = 0.1f;
+		const float DamageDelay = 0.02f;
 		float KineticDamage = KineticCollisionDamage;
 		float EMFDamage = EMFCollisionDamage;
 
@@ -1631,6 +1644,25 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 				ENCPoolMethod::None
 			);
 		}
+	}
+
+	// NPC-NPC specific impact shockwave (always spawns, separate from EMF/wallslam effects)
+	if (NPCCollisionImpactVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			NPCCollisionImpactVFX,
+			CollisionPoint,
+			FRotator::ZeroRotator,
+			FVector(NPCCollisionImpactVFXScale),
+			true,
+			true,
+			ENCPoolMethod::None
+		);
+	}
+	if (NPCCollisionImpactSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, NPCCollisionImpactSound, CollisionPoint);
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] COLLISION COMPLETE! ImpactSpeed=%.0f, NewSpeed=%.0f, Damage=%.1f, Duration=%.2fs"),

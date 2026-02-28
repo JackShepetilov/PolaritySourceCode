@@ -354,6 +354,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
 	float ReverseLaunchConvergenceRate = 15.0f;
 
+	// ==================== Reverse Launch Homing ====================
+
+	/** Enable soft aim-assist homing toward nearest enemy during reverse launch flight */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (EditCondition = "bCanBeCaptured"))
+	bool bEnableReverseLaunchHoming = true;
+
+	/** Half-angle (degrees) of the forward detection cone. Only enemies within this cone are considered. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "5.0", ClampMax = "45.0", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
+	float HomingConeHalfAngle = 15.0f;
+
+	/** Max range (cm) for homing target detection */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "500.0", ClampMax = "10000.0", Units = "cm", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
+	float HomingMaxRange = 3000.0f;
+
+	/** Homing strength: 0 = no homing, 1 = full lock-on. At 0.15, barely noticeable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
+	float HomingStrength = 0.15f;
+
+	/** Seconds to ramp from 0 to full homing strength. Prevents instant snap on launch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
+	float HomingRampUpTime = 0.1f;
+
 	// ==================== Debug ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
@@ -479,6 +501,7 @@ private:
 	float WeakCaptureTimer = 0.0f;
 	bool bReverseLaunchInitialized = false;
 	float ReverseLaunchSpeed = 0.0f;
+	float ReverseLaunchElapsed = 0.0f;
 
 	// ==================== Internal Methods ====================
 
@@ -491,6 +514,9 @@ private:
 
 	/** Apply viscous capture forces when held by channeling plate */
 	void UpdateCaptureForces(float DeltaTime);
+
+	/** Find best homing target: overlap sphere within HomingMaxRange, filter by cone + alive */
+	AShooterNPC* FindHomingTarget(const FVector& Position, const FVector& AimDirection) const;
 
 	/** Handle blocking collision with walls/floors/physics bodies */
 	UFUNCTION()

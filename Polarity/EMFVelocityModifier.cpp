@@ -12,6 +12,7 @@
 // EMF Plugin includes
 #include "EMF_FieldComponent.h"
 #include "EMF_PluginBPLibrary.h"
+#include "Engine/OverlapResult.h"
 
 UEMFVelocityModifier::UEMFVelocityModifier()
 {
@@ -757,6 +758,62 @@ float UEMFVelocityModifier::GetEffectiveCaptureRange() const
 	return CalculateCaptureRange();
 }
 
+AShooterNPC* UEMFVelocityModifier::FindHomingTarget(const FVector& Position, const FVector& AimDirection) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	TArray<FOverlapResult> Overlaps;
+	FCollisionShape Sphere = FCollisionShape::MakeSphere(HomingMaxRange);
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(GetOwner());
+
+	World->OverlapMultiByChannel(
+		Overlaps, Position, FQuat::Identity,
+		ECC_Pawn, Sphere, QueryParams);
+
+	const float ConeThreshold = FMath::Cos(FMath::DegreesToRadians(HomingConeHalfAngle));
+
+	AShooterNPC* BestTarget = nullptr;
+	float BestScore = -1.0f;
+
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
+		if (!NPC || NPC->IsDead())
+		{
+			continue;
+		}
+
+		const FVector ToNPC = NPC->GetActorLocation() - Position;
+		const float Distance = ToNPC.Size();
+		if (Distance < KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		const FVector DirToNPC = ToNPC / Distance;
+		const float Dot = FVector::DotProduct(AimDirection, DirToNPC);
+
+		if (Dot < ConeThreshold)
+		{
+			continue;
+		}
+
+		const float Score = Dot / FMath::Max(Distance / HomingMaxRange, 0.01f);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestTarget = NPC;
+		}
+	}
+
+	return BestTarget;
+}
+
 FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVector& CurrentVelocity, AEMFChannelingPlateActor* Plate)
 {
 	AActor* Owner = GetOwner();
@@ -778,15 +835,31 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 		if (!bReverseLaunchInitialized)
 		{
 			bReverseLaunchInitialized = true;
+			ReverseLaunchElapsed = 0.0f;
 
 			const float LaunchDistance = CalculateCaptureRange() * ReverseLaunchDistanceMultiplier;
 			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
 		}
 
+		ReverseLaunchElapsed += DeltaTime;
+
 		// Aim line from camera position along plate normal (= camera forward)
 		const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
 		const FVector AimOrigin = CamMgr ? CamMgr->GetCameraLocation() : Plate->GetActorLocation();
-		const FVector AimDir = Plate->GetPlateNormal();
+		FVector AimDir = Plate->GetPlateNormal();
+
+		// Soft homing: bias aim direction toward nearest valid target in cone
+		if (bEnableReverseLaunchHoming && HomingStrength > 0.0f)
+		{
+			if (AShooterNPC* Target = FindHomingTarget(Position, AimDir))
+			{
+				const FVector DirToTarget = (Target->GetActorLocation() - Position).GetSafeNormal();
+				const float RampAlpha = HomingRampUpTime > 0.0f
+					? FMath::Clamp(ReverseLaunchElapsed / HomingRampUpTime, 0.0f, 1.0f)
+					: 1.0f;
+				AimDir = FMath::Lerp(AimDir, DirToTarget, HomingStrength * RampAlpha).GetSafeNormal();
+			}
+		}
 
 		// Project NPC position onto aim line
 		const FVector ToTarget = Position - AimOrigin;
