@@ -780,6 +780,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Armor")
 	float GetMaxArmor() const { return MaxArmor; }
 
+	/** Returns current HP value */
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentHP() const { return CurrentHP; }
+
+	/** Returns maximum HP value */
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxHP() const { return MaxHP; }
+
 	/** Returns true if player is currently being knocked back */
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	bool IsInKnockback() const { return bIsInKnockback; }

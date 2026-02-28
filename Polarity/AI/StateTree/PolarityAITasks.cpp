@@ -711,6 +711,28 @@ bool FSTTask_FlyAndShoot::PickNewDestination(FInstanceDataType& Data) const
 		return false;
 	}
 
+	// --- Battle Circle Integration ---
+	if (Data.bUseCoordinator)
+	{
+		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone);
+		if (Coordinator)
+		{
+			FVector SlotPosition;
+			if (Coordinator->GetAssignedSlotPosition(Data.Drone, SlotPosition))
+			{
+				// Add vertical offset for flying drone
+				const float HeightOffset = FMath::FRandRange(Data.MinHeight, Data.MaxHeight);
+				SlotPosition.Z = Data.Target->GetActorLocation().Z + HeightOffset;
+
+				Data.CurrentDestination = SlotPosition;
+				Data.bHasDestination = true;
+				FlyingMovement->FlyToLocation(SlotPosition, Data.AcceptanceRadius);
+				return true;
+			}
+		}
+	}
+	// --- End Battle Circle Integration ---
+
 	const FVector TargetLocation = Data.Target->GetActorLocation();
 	const bool bCurrentlyHasLOS = Data.Drone->HasLineOfSightTo(Data.Target);
 
@@ -1089,6 +1111,63 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 	{
 		return false;
 	}
+
+	const FVector NPCLocationForStuck = Data.NPC->GetActorLocation();
+
+	// Helper lambda to issue MoveTo and return success (defined early for battle circle use)
+	auto TryMoveToSlot = [&Data, &NPCLocationForStuck](const FVector& GoalLocation) -> bool
+	{
+		FAIMoveRequest MoveRequest;
+		MoveRequest.SetGoalLocation(GoalLocation);
+		MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+		MoveRequest.SetUsePathfinding(true);
+		MoveRequest.SetAllowPartialPath(true);
+		MoveRequest.SetProjectGoalLocation(true);
+		MoveRequest.SetCanStrafe(true);
+
+		const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+		if (Result.Code == EPathFollowingRequestResult::Failed)
+		{
+			return false;
+		}
+
+		Data.CurrentDestination = GoalLocation;
+		Data.bHasDestination = true;
+		Data.LastStuckCheckPosition = NPCLocationForStuck;
+		Data.LastStuckCheckTime = Data.NPC->GetWorld()->GetTimeSeconds();
+		return true;
+	};
+
+	// --- Battle Circle Integration ---
+	if (Data.bUseCoordinator)
+	{
+		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+		if (Coordinator)
+		{
+			FVector SlotPosition;
+			if (Coordinator->GetAssignedSlotPosition(Data.NPC, SlotPosition))
+			{
+				UNavigationSystemV1* NavSysSlot = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.NPC->GetWorld());
+				if (NavSysSlot)
+				{
+					FNavLocation NavResult;
+					if (NavSysSlot->ProjectPointToNavigation(SlotPosition, NavResult, FVector(200.0f, 200.0f, 200.0f)))
+					{
+						if (TryMoveToSlot(NavResult.Location))
+						{
+							return true;
+						}
+					}
+				}
+				// Fallback: try moving directly to slot position
+				if (TryMoveToSlot(SlotPosition))
+				{
+					return true;
+				}
+			}
+		}
+	}
+	// --- End Battle Circle Integration ---
 
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.NPC->GetWorld());
 	if (!NavSys)
