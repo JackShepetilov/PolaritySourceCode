@@ -11,7 +11,6 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "AITypes.h"
-#include "DrawDebugHelpers.h"
 
 // ============================================================================
 // RequestAttackPermission
@@ -643,15 +642,6 @@ EStateTreeRunStatus FSTTask_FlyAndShoot::Tick(FStateTreeExecutionContext& Contex
 	}
 	else
 	{
-#if WITH_EDITOR
-		// CYAN sphere = task thinks drone is shooting (CanShoot not called)
-		if (Data.Drone && Data.Drone->GetWorld())
-		{
-			const FVector SpherePos = Data.Drone->GetActorLocation() + FVector(0, 0, 120.0f);
-			DrawDebugSphere(Data.Drone->GetWorld(), SpherePos, 20.0f, 8, FColor::Cyan, false, 0.1f, 0, 2.0f);
-		}
-#endif
-
 		// Currently shooting - check if LOS was lost mid-burst
 		if (!Data.Drone->HasLineOfSightTo(Data.Target))
 		{
@@ -809,60 +799,21 @@ bool FSTTask_FlyAndShoot::PickNewDestination(FInstanceDataType& Data) const
 
 bool FSTTask_FlyAndShoot::CanShoot(const FInstanceDataType& Data) const
 {
-	// Debug sphere helper: sphere above NPC head, color = failure reason
-	// RED = null, DARK RED = dead, ORANGE = burst cooldown, YELLOW = already shooting,
-	// PURPLE = LOS blocked, BLUE = coordinator blocked, GREEN = passed
-	auto DrawFailSphere = [](const AShooterNPC* NPC, FColor Color)
-	{
-#if WITH_EDITOR
-		if (NPC && NPC->GetWorld())
-		{
-			const FVector SpherePos = NPC->GetActorLocation() + FVector(0, 0, 120.0f);
-			DrawDebugSphere(NPC->GetWorld(), SpherePos, 20.0f, 8, Color, false, 0.5f, 0, 2.0f);
-		}
-#endif
-	};
-
-	if (!Data.Drone || !Data.Target)
-	{
-		return false;
-	}
-
-	if (Data.Drone->IsDead())
-	{
-		DrawFailSphere(Data.Drone, FColor(128, 0, 0)); // Dark Red = dead
-		return false;
-	}
-
-	if (Data.Drone->IsInBurstCooldown())
-	{
-		DrawFailSphere(Data.Drone, FColor::Orange); // Orange = burst cooldown
-		return false;
-	}
-
-	if (Data.Drone->IsCurrentlyShooting())
-	{
-		DrawFailSphere(Data.Drone, FColor::Yellow); // Yellow = already shooting
-		return false;
-	}
-
-	if (!Data.Drone->HasLineOfSightTo(Data.Target))
-	{
-		DrawFailSphere(Data.Drone, FColor(160, 32, 240)); // Purple = LOS blocked
-		return false;
-	}
+	if (!Data.Drone || !Data.Target) return false;
+	if (Data.Drone->IsDead()) return false;
+	if (Data.Drone->IsInBurstCooldown()) return false;
+	if (Data.Drone->IsCurrentlyShooting()) return false;
+	if (!Data.Drone->HasLineOfSightTo(Data.Target)) return false;
 
 	if (Data.bUseCoordinator)
 	{
 		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone);
 		if (Coordinator && !Coordinator->RequestAttackPermission(Data.Drone))
 		{
-			DrawFailSphere(Data.Drone, FColor::Blue); // Blue = coordinator blocked
 			return false;
 		}
 	}
 
-	DrawFailSphere(Data.Drone, FColor::Green); // Green = PASSED, will shoot
 	return true;
 }
 
@@ -1048,16 +999,6 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 	}
 	else
 	{
-#if WITH_EDITOR
-		// CYAN sphere = task thinks NPC is shooting (CanShoot not called)
-		// If you see CYAN but NPC isn't actually firing, the task is stuck in "shooting" state
-		if (Data.NPC && Data.NPC->GetWorld())
-		{
-			const FVector SpherePos = Data.NPC->GetActorLocation() + FVector(0, 0, 120.0f);
-			DrawDebugSphere(Data.NPC->GetWorld(), SpherePos, 20.0f, 8, FColor::Cyan, false, 0.1f, 0, 2.0f);
-		}
-#endif
-
 		// Currently shooting - check if LOS was lost mid-burst
 		if (!Data.NPC->HasLineOfSightTo(Data.Target))
 		{
@@ -1335,60 +1276,21 @@ bool FSTTask_RunAndShoot::PickNewDestination(FInstanceDataType& Data) const
 
 bool FSTTask_RunAndShoot::CanShoot(const FInstanceDataType& Data) const
 {
-	// Debug sphere helper: sphere above NPC head, color = failure reason
-	// RED = null, DARK RED = dead, ORANGE = burst cooldown, YELLOW = already shooting,
-	// PURPLE = LOS blocked, BLUE = coordinator blocked, GREEN = passed
-	auto DrawFailSphere = [](const AShooterNPC* NPC, FColor Color)
-	{
-#if WITH_EDITOR
-		if (NPC && NPC->GetWorld())
-		{
-			const FVector SpherePos = NPC->GetActorLocation() + FVector(0, 0, 120.0f);
-			DrawDebugSphere(NPC->GetWorld(), SpherePos, 20.0f, 8, Color, false, 0.5f, 0, 2.0f);
-		}
-#endif
-	};
-
-	if (!Data.NPC || !Data.Target)
-	{
-		return false;
-	}
-
-	if (Data.NPC->IsDead())
-	{
-		DrawFailSphere(Data.NPC, FColor(128, 0, 0)); // Dark Red = dead
-		return false;
-	}
-
-	if (Data.NPC->IsInBurstCooldown())
-	{
-		DrawFailSphere(Data.NPC, FColor::Orange); // Orange = burst cooldown
-		return false;
-	}
-
-	if (Data.NPC->IsCurrentlyShooting())
-	{
-		DrawFailSphere(Data.NPC, FColor::Yellow); // Yellow = already shooting
-		return false;
-	}
-
-	if (!Data.NPC->HasLineOfSightTo(Data.Target))
-	{
-		DrawFailSphere(Data.NPC, FColor(160, 32, 240)); // Purple = LOS blocked
-		return false;
-	}
+	if (!Data.NPC || !Data.Target) return false;
+	if (Data.NPC->IsDead()) return false;
+	if (Data.NPC->IsInBurstCooldown()) return false;
+	if (Data.NPC->IsCurrentlyShooting()) return false;
+	if (!Data.NPC->HasLineOfSightTo(Data.Target)) return false;
 
 	if (Data.bUseCoordinator)
 	{
 		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
 		if (Coordinator && !Coordinator->RequestAttackPermission(Data.NPC))
 		{
-			DrawFailSphere(Data.NPC, FColor::Blue); // Blue = coordinator blocked
 			return false;
 		}
 	}
 
-	DrawFailSphere(Data.NPC, FColor::Green); // Green = PASSED, will shoot
 	return true;
 }
 

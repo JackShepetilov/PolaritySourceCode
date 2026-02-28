@@ -32,7 +32,6 @@
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Boss/BossProjectile.h"
 #include "../Pickups/HealthPickup.h"
-#include "DrawDebugHelpers.h"
 #include "../Pickups/ArmorPickup.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
@@ -747,32 +746,6 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 		ECC_Visibility,
 		QueryParams
 	);
-
-#if WITH_EDITOR
-	// DEBUG: Draw the LOS trace - Green = clear, Red = blocked
-	if (bHit)
-	{
-		// Red line to hit point, then dim red to target
-		DrawDebugLine(GetWorld(), Start, HitResult.ImpactPoint, FColor::Red, false, 0.1f, 0, 2.0f);
-		DrawDebugLine(GetWorld(), HitResult.ImpactPoint, End, FColor(128, 0, 0), false, 0.1f, 0, 1.0f);
-		DrawDebugPoint(GetWorld(), HitResult.ImpactPoint, 10.0f, FColor::Yellow, false, 0.1f);
-
-		// Log what we hit (throttled - only every 60 frames)
-		static int32 FrameCounter = 0;
-		if (++FrameCounter % 60 == 0)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("HasLineOfSightTo BLOCKED: %s -> %s | Hit: %s (Component: %s) at %s"),
-				*GetName(), *Target->GetName(),
-				HitResult.GetActor() ? *HitResult.GetActor()->GetName() : TEXT("NULL"),
-				HitResult.GetComponent() ? *HitResult.GetComponent()->GetName() : TEXT("NULL"),
-				*HitResult.ImpactPoint.ToString());
-		}
-	}
-	else
-	{
-		DrawDebugLine(GetWorld(), Start, End, FColor::Green, false, 0.1f, 0, 2.0f);
-	}
-#endif
 
 	// No blocking hit means we have line of sight
 	return !bHit;
