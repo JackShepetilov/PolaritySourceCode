@@ -736,8 +736,11 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 	QueryParams.AddIgnoredActor(Target);
 
 	FHitResult HitResult;
-	const FVector Start = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f); // Offset up from feet
-	const FVector End = Target->GetActorLocation();
+	// Trace from NPC chest height to target center mass (not feet!)
+	// Using GetPawnViewLocation for NPCs (eye level), and half-height offset for target
+	const FVector Start = GetPawnViewLocation();
+	const FVector End = Target->GetActorLocation() + FVector(0.0f, 0.0f,
+		Cast<ACharacter>(Target) ? Cast<ACharacter>(Target)->GetDefaultHalfHeight() : 90.0f);
 
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
 		HitResult,
