@@ -373,6 +373,12 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		const float Distance = FMath::Sqrt(NearestPlateDistSq);
 		const float EffectiveRange = CalculateCaptureRange();
 
+		// Debug: capture range sphere around the NPC
+		if (bDrawDebug)
+		{
+			DrawDebugSphere(GetWorld(), Position, EffectiveRange, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
+		}
+
 		// Auto-release: if NPC outside effective capture range for too long
 		if (Distance > EffectiveRange)
 		{
