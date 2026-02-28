@@ -96,7 +96,20 @@
       "WebFetch(domain:www.pcgamesn.com)",
       "WebFetch(domain:snorristurluson.github.io)",
       "Bash(tasklist)",
-      "Bash(git -C . status --short)"
+      "Bash(git -C . status --short)",
+      "WebFetch(domain:www.gamespot.com)",
+      "WebFetch(domain:www.aiandgames.com)",
+      "WebFetch(domain:aiandgames.com)",
+      "WebFetch(domain:www.toolify.ai)",
+      "WebFetch(domain:askagamedev.tumblr.com)",
+      "WebFetch(domain:wiki.eternalmods.com)",
+      "WebFetch(domain:origin.80.lv)",
+      "WebFetch(domain:www.doomworld.com)",
+      "WebFetch(domain:codegeekology.com)",
+      "WebFetch(domain:80.lv)",
+      "WebFetch(domain:gdconf.com)",
+      "WebFetch(domain:book.leveldesignbook.com)",
+      "WebFetch(domain:sudonull.com)"
     ]
   }
 }
