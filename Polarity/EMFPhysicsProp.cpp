@@ -109,6 +109,12 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	}
 
 	UpdateChargeTracking();
+
+	// Debug: always-visible capture range sphere around this prop
+	if (bDrawDebugForces && bCanBeCaptured)
+	{
+		DrawDebugSphere(GetWorld(), GetActorLocation(), CaptureRadius, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
+	}
 }
 
 // ==================== EMF Force Application ====================
@@ -342,12 +348,6 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 	const FVector Position = GetActorLocation();
 	const FVector PlatePos = Plate->GetActorLocation();
 	const float Distance = FVector::Dist(Position, PlatePos);
-
-	// Debug: capture range sphere around the prop
-	if (bDrawDebugForces)
-	{
-		DrawDebugSphere(GetWorld(), Position, CaptureRadius, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
-	}
 
 	// Wall check: if there's a wall between prop and plate, don't apply capture forces
 	{

@@ -6,6 +6,7 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "GameFramework/Character.h"
 #include "DrawDebugHelpers.h"
+#include "Kismet/GameplayStatics.h"
 
 // EMF Plugin includes
 #include "EMF_FieldComponent.h"
@@ -269,6 +270,31 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	float Charge = GetCharge();
 	float Mass = GetMass();
 
+	// Debug: always-visible capture range sphere around this NPC
+	if (bDrawDebug && bEnableViscousCapture)
+	{
+		// Get player charge: from plate if captured, from player pawn otherwise
+		float DebugPlayerCharge = 0.0f;
+		if (CapturingPlate.IsValid())
+		{
+			DebugPlayerCharge = CapturingPlate.Get()->GetPlateChargeDensity();
+		}
+		else if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
+		{
+			if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
+			{
+				DebugPlayerCharge = PlayerMod->GetCharge();
+			}
+		}
+
+		const float DebugChargeProduct = FMath::Abs(DebugPlayerCharge) * FMath::Abs(Charge);
+		const float DebugRatio = DebugChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
+		const float DebugRangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(FMath::Max(DebugRatio, KINDA_SMALL_NUMBER)));
+		const float DebugCaptureRange = CaptureBaseRange * DebugRangeMultiplier;
+
+		DrawDebugSphere(GetWorld(), Position, DebugCaptureRange, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
+	}
+
 	// Pre-calculate squared distances for faster comparison
 	const float MaxDistSq = MaxSourceDistance * MaxSourceDistance;
 	const float OppositeChargeMinDistSq = bEnableOppositeChargeDistanceCutoff
@@ -372,12 +398,6 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	{
 		const float Distance = FMath::Sqrt(NearestPlateDistSq);
 		const float EffectiveRange = CalculateCaptureRange();
-
-		// Debug: capture range sphere around the NPC
-		if (bDrawDebug)
-		{
-			DrawDebugSphere(GetWorld(), Position, EffectiveRange, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
-		}
 
 		// Auto-release: if NPC outside effective capture range for too long
 		if (Distance > EffectiveRange)
