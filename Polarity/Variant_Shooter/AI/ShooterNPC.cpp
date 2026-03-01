@@ -243,11 +243,20 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		}
 		else
 		{
-			// Check if damage came from another ShooterNPC (through their weapon)
-			AActor* DamageOwner = DamageCauser->GetOwner();
-			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+			// Allow collision/physics damage types from NPCs (Wallslam, EMFProximity)
+			// These come from NPC-NPC collisions and are NOT weapon friendly fire
+			bool bIsCollisionDamage = DamageEvent.DamageTypeClass &&
+				(DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Wallslam::StaticClass()) ||
+				 DamageEvent.DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()));
+
+			if (!bIsCollisionDamage)
 			{
-				return 0.0f;
+				// Check if damage came from another ShooterNPC (through their weapon)
+				AActor* DamageOwner = DamageCauser->GetOwner();
+				if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+				{
+					return 0.0f;
+				}
 			}
 		}
 
@@ -545,18 +554,18 @@ void AShooterNPC::Die()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
-	// Spawn pickup: channeling kills drop armor, other non-weapon kills drop health
+	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health
 	if (bWasChannelingTarget && ArmorPickupClass)
 	{
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		GetWorld()->SpawnActor<AArmorPickup>(ArmorPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
 	}
-	else if (HealthPickupClass && AHealthPickup::ShouldDropHealth(LastKillingDamageType))
+	else if (HealthPickupClass &&
+		(bStunnedByExplosion || AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
 	{
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		GetWorld()->SpawnActor<AHealthPickup>(HealthPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
+		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
+			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
 	}
 
 	// play death sound
@@ -842,6 +851,7 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 	// Enter knockback state (freezes AI) but without position interpolation
 	bIsInKnockback = true;
 	bIsKnockbackInterpolating = false;
+	bStunnedByExplosion = true;
 
 	// Stop shooting immediately
 	StopShooting();
@@ -857,6 +867,13 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 			}
 			AIController->StopMovement();
 		}
+	}
+
+	// Stop character movement and disable CMC entirely to prevent StateTree from re-issuing MoveTo
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
 	}
 
 	// Disable EMF forces during stun
@@ -887,6 +904,8 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 			AnimInstance->Montage_Play(MontageToPlay, PlayRate);
 		}
 	}
+
+	OnStunStart.Broadcast(this, Duration);
 }
 
 void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
@@ -1237,7 +1256,7 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 		{
 			FDamageEvent DamageEvent;
 			DamageEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
-			TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
+			TakeDamage(WallSlamDamage, DamageEvent, nullptr, this);
 
 			if (WallSlamSound)
 			{
@@ -1498,27 +1517,28 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 		float KineticDamage = KineticCollisionDamage;
 		float EMFDamage = EMFCollisionDamage;
 
-		// Delay damage to self
+		// Delay damage to self (DamageCauser = OtherNPC — who hit us)
 		FTimerHandle SelfDamageTimer;
 		GetWorld()->GetTimerManager().SetTimer(
 			SelfDamageTimer,
-			[this, KineticDamage, EMFDamage]()
+			[this, OtherNPC, KineticDamage, EMFDamage]()
 			{
 				if (!bIsDead)
 				{
+					AActor* Causer = (OtherNPC && !OtherNPC->IsDead()) ? static_cast<AActor*>(OtherNPC) : nullptr;
 					// Apply Kinetic damage (Wallslam type)
 					if (KineticDamage > 0.0f)
 					{
 						FDamageEvent KineticEvent;
 						KineticEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
-						TakeDamage(KineticDamage, KineticEvent, nullptr, nullptr);
+						TakeDamage(KineticDamage, KineticEvent, nullptr, Causer);
 					}
 					// Apply EMF damage (EMFProximity type)
 					if (EMFDamage > 0.0f)
 					{
 						FDamageEvent EMFEvent;
 						EMFEvent.DamageTypeClass = UDamageType_EMFProximity::StaticClass();
-						TakeDamage(EMFDamage, EMFEvent, nullptr, nullptr);
+						TakeDamage(EMFDamage, EMFEvent, nullptr, Causer);
 					}
 				}
 			},
@@ -1526,27 +1546,29 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 			false
 		);
 
-		// Delay damage to other NPC
+		// Delay damage to other NPC (DamageCauser = this — we hit them)
 		FTimerHandle OtherDamageTimer;
+		AShooterNPC* Self = this;
 		GetWorld()->GetTimerManager().SetTimer(
 			OtherDamageTimer,
-			[OtherNPC, KineticDamage, EMFDamage]()
+			[Self, OtherNPC, KineticDamage, EMFDamage]()
 			{
-				if (OtherNPC && !OtherNPC->bIsDead)
+				if (OtherNPC && !OtherNPC->IsDead())
 				{
+					AActor* Causer = (Self && !Self->IsDead()) ? static_cast<AActor*>(Self) : nullptr;
 					// Apply Kinetic damage (Wallslam type)
 					if (KineticDamage > 0.0f)
 					{
 						FDamageEvent KineticEvent;
 						KineticEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
-						OtherNPC->TakeDamage(KineticDamage, KineticEvent, nullptr, nullptr);
+						OtherNPC->TakeDamage(KineticDamage, KineticEvent, nullptr, Causer);
 					}
 					// Apply EMF damage (EMFProximity type)
 					if (EMFDamage > 0.0f)
 					{
 						FDamageEvent EMFEvent;
 						EMFEvent.DamageTypeClass = UDamageType_EMFProximity::StaticClass();
-						OtherNPC->TakeDamage(EMFDamage, EMFEvent, nullptr, nullptr);
+						OtherNPC->TakeDamage(EMFDamage, EMFEvent, nullptr, Causer);
 					}
 				}
 			},
@@ -1775,6 +1797,9 @@ void AShooterNPC::EndKnockbackStun()
 	// Clear knockback state
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
+	bStunnedByExplosion = false;
+
+	OnStunEnd.Broadcast(this);
 
 	// Also clear launched state if active
 	if (bIsLaunched)
@@ -1790,9 +1815,10 @@ void AShooterNPC::EndKnockbackStun()
 		}
 	}
 
-	// Restore original ground friction after knockback slide
+	// Restore movement mode and ground friction after knockback
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
+		CharMovement->SetMovementMode(MOVE_Walking);
 		CharMovement->GroundFriction = CachedGroundFriction;
 		CharMovement->Velocity = FVector::ZeroVector;
 	}
@@ -2302,9 +2328,10 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		LastWallSlamTime = CurrentTime;
 
 		// Apply damage to self with Wallslam damage type (Kinetic category)
+		// DamageCauser = this (self-slam), used for health pickup drop logic (e.g. drone wall hit)
 		FDamageEvent DamageEvent;
 		DamageEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
-		TakeDamage(WallSlamDamage, DamageEvent, nullptr, nullptr);
+		TakeDamage(WallSlamDamage, DamageEvent, nullptr, this);
 
 		// Play sound
 		if (WallSlamSound)
