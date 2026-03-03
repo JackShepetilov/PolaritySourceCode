@@ -1,6 +1,7 @@
 // ShooterWeapon_Melee.h
 // Melee weapon that occupies a weapon slot (Doom Eternal Crucible style)
 // Attacks on Fire button, no cooldown, blocks MeleeAttackComponent while equipped
+// Full combat mechanics matching MeleeAttackComponent (magnetism, momentum, dropkick, etc.)
 
 #pragma once
 
@@ -11,6 +12,7 @@
 class UNiagaraSystem;
 class UNiagaraComponent;
 class UCameraShakeBase;
+class ABossCharacter;
 
 /**
  * Animation data for a single melee weapon swing variant
@@ -49,6 +51,16 @@ struct FMeleeWeaponSwingData
  * instead of hitscan/projectile.
  *
  * Blocks MeleeAttackComponent while equipped via IsMeleeWeapon() flag.
+ *
+ * Combat mechanics match MeleeAttackComponent:
+ * - Target magnetism with pre-attack lock-on
+ * - Titanfall 2 momentum preservation and transfer
+ * - Cool kick (airborne speed boost on hit)
+ * - Drop kick (dive attack from height)
+ * - Distance-based knockback with NPC multiplier
+ * - Camera focus on lunge target
+ * - Multiple damage types (base, momentum, dropkick)
+ * - Boss finisher support
  */
 UCLASS()
 class POLARITY_API AShooterWeapon_Melee : public AShooterWeapon
@@ -69,23 +81,12 @@ public:
 
 	// ==================== Damage Window (AnimNotify API) ====================
 
-	/**
-	 * Activate damage window from animation notify.
-	 * While active, sphere traces are performed each tick to detect hits.
-	 * Call from AnimNotify_MeleeDamageWindowStart in the swing montage.
-	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	void ActivateDamageWindow();
 
-	/**
-	 * Deactivate damage window from animation notify.
-	 * If no hit occurred during the window, plays miss sound.
-	 * Call from AnimNotify_MeleeDamageWindowEnd in the swing montage.
-	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	void DeactivateDamageWindow();
 
-	/** Check if damage window is currently active */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsDamageWindowActive() const { return bDamageWindowActive; }
 
@@ -107,6 +108,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Damage", meta = (ClampMin = "0"))
 	float HitImpulse = 500.0f;
 
+	/** Additional impulse multiplier based on player speed (impulse = HitImpulse * (1 + speed * MomentumImpulseMultiplier)) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Damage", meta = (ClampMin = "0"))
+	float MomentumImpulseMultiplier = 0.002f;
+
 	// ==================== Melee Range ====================
 
 	/** Maximum range of the melee swing (cm) */
@@ -121,6 +126,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Range", meta = (ClampMin = "0", ClampMax = "100"))
 	float TraceForwardOffset = 20.0f;
 
+	/** Angle for cone-based hit detection (degrees, 0 = line trace only) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Range", meta = (ClampMin = "0", ClampMax = "45"))
+	float AttackAngle = 15.0f;
+
 	// ==================== Momentum Damage ====================
 
 	/** Additional damage per 100 cm/s of player velocity toward target */
@@ -130,6 +139,38 @@ public:
 	/** Maximum bonus damage from momentum */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Momentum", meta = (ClampMin = "0"))
 	float MaxMomentumDamage = 50.0f;
+
+	// ==================== Titanfall 2 Momentum System ====================
+
+	/** Enable Titanfall 2 style momentum preservation - player keeps velocity during melee */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Titanfall Momentum")
+	bool bPreserveMomentum = true;
+
+	/** How much of the original velocity to preserve during melee (1.0 = 100%) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "1.0", EditCondition = "bPreserveMomentum"))
+	float MomentumPreservationRatio = 1.0f;
+
+	/** Transfer player momentum to target on hit (Titanfall 2 flying kick feel) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Titanfall Momentum")
+	bool bTransferMomentumOnHit = true;
+
+	/** Multiplier for momentum transferred to target (1.0 = full velocity transfer) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "2.0", EditCondition = "bTransferMomentumOnHit"))
+	float MomentumTransferMultiplier = 1.0f;
+
+	// ==================== Target Magnetism ====================
+
+	/** Enable predictive target magnetism (locks onto targets before swing) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Target Magnetism")
+	bool bEnableTargetMagnetism = true;
+
+	/** Range for magnetism sphere trace */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
+	float MagnetismRange = 300.0f;
+
+	/** Radius for magnetism sphere trace */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
+	float MagnetismRadius = 80.0f;
 
 	// ==================== Knockback ====================
 
@@ -141,13 +182,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Knockback", meta = (ClampMin = "0"))
 	float KnockbackDistancePerVelocity = 0.15f;
 
-	/** Duration of knockback interpolation */
+	/** Base duration for knockback interpolation in seconds */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Knockback", meta = (ClampMin = "0.1", ClampMax = "2.0"))
-	float KnockbackDuration = 0.3f;
+	float KnockbackBaseDuration = 0.3f;
+
+	/** Duration multiplier per 100cm of knockback distance */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Knockback", meta = (ClampMin = "0"))
+	float KnockbackDurationPerDistance = 0.001f;
 
 	// ==================== Lunge ====================
 
-	/** Enable lunge toward targets on hit */
+	/** Enable lunge toward targets (pre-attack magnetism lunge, not on-hit) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge")
 	bool bEnableLunge = true;
 
@@ -166,6 +211,68 @@ public:
 	/** Minimum speed to trigger lunge (prevents weak lunges when stationary) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0", EditCondition = "bEnableLunge"))
 	float MinSpeedForLunge = 300.0f;
+
+	/** Lunge duration (seconds) - how long the lunge takes to complete */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0.05", ClampMax = "0.5", EditCondition = "bEnableLunge"))
+	float LungeDuration = 0.15f;
+
+	// ==================== Cool Kick ====================
+
+	/** Duration of the cool kick period (applied when hitting enemy in air without lunge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Cool Kick", meta = (ClampMin = "0", ClampMax = "2.0"))
+	float CoolKickDuration = 0.3f;
+
+	/** Speed boost added gradually over the cool kick period (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Cool Kick", meta = (ClampMin = "0", ClampMax = "2000.0"))
+	float CoolKickSpeedBoost = 400.0f;
+
+	// ==================== Drop Kick ====================
+
+	/** Enable drop kick - airborne attack when looking down, player dives toward enemy */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick")
+	bool bEnableDropKick = true;
+
+	/** Minimum height difference (cm) - drop kick only triggers when player is at least this much higher than target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "0", ClampMax = "500", EditCondition = "bEnableDropKick"))
+	float DropKickMinHeightDifference = 100.0f;
+
+	/** Camera pitch threshold (degrees) - drop kick triggers when looking down more than this */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "10", ClampMax = "80", EditCondition = "bEnableDropKick"))
+	float DropKickPitchThreshold = 45.0f;
+
+	/** Cone angle for drop kick detection (half-angle in degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "5", ClampMax = "45", EditCondition = "bEnableDropKick"))
+	float DropKickConeAngle = 30.0f;
+
+	/** Maximum range for drop kick cone trace (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "100", ClampMax = "2000", EditCondition = "bEnableDropKick"))
+	float DropKickMaxRange = 1000.0f;
+
+	/** Bonus damage per 100cm of height difference */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "0", EditCondition = "bEnableDropKick"))
+	float DropKickDamagePerHeight = 10.0f;
+
+	/** Maximum bonus damage from height */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "0", EditCondition = "bEnableDropKick"))
+	float DropKickMaxBonusDamage = 100.0f;
+
+	/** Speed at which player dives toward drop kick target (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Drop Kick", meta = (ClampMin = "500", ClampMax = "5000", EditCondition = "bEnableDropKick"))
+	float DropKickDiveSpeed = 2500.0f;
+
+	// ==================== Camera Focus ====================
+
+	/** Enable camera focus on lunge target (rotates camera toward enemy when lunge starts) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Camera")
+	bool bEnableCameraFocusOnLunge = true;
+
+	/** Duration of camera focus rotation (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Camera", meta = (ClampMin = "0.05", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnLunge"))
+	float CameraFocusDuration = 0.2f;
+
+	/** Strength of camera focus (1.0 = instant snap, 0.5 = gentle rotation) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Camera", meta = (ClampMin = "0.1", ClampMax = "1.0", EditCondition = "bEnableCameraFocusOnLunge"))
+	float CameraFocusStrength = 0.7f;
 
 	// ==================== Swing Animations ====================
 
@@ -228,24 +335,76 @@ protected:
 	/** Check if the hit is a headshot */
 	bool IsHeadshot(const FHitResult& HitResult) const;
 
-	/** Apply knockback to the hit actor */
-	void ApplyKnockback(AActor* HitActor);
+	/** Check if actor is a valid melee target (Pawn, ShooterDummyTarget, MeleeDestructible) */
+	bool IsValidMeleeTarget(AActor* HitActor) const;
 
 	/** Calculate momentum-based bonus damage */
 	float CalculateMomentumDamage(AActor* HitActor) const;
+
+	/** Calculate momentum-based impulse multiplier */
+	float CalculateMomentumImpulseMultiplier() const;
+
+	/** Calculate drop kick bonus damage based on height difference */
+	float CalculateDropKickBonusDamage() const;
+
+	// ==================== Knockback ====================
+
+	/** Apply full knockback system (distance-based, NPC multiplier, momentum) */
+	void ApplyCharacterImpulse(AActor* HitActor, const FVector& ImpulseDirection, float ImpulseStrength);
+
+	// ==================== Target Magnetism ====================
+
+	/** Find and lock onto nearest target before swing */
+	void StartMagnetism();
+
+	/** Update magnetism lunge and target tracking */
+	void UpdateMagnetism(float DeltaTime);
+
+	/** Stop magnetism, restore gravity, handle exit momentum */
+	void StopMagnetism();
+
+	// ==================== Momentum ====================
+
+	/** Update Titanfall 2 momentum preservation during swing */
+	void UpdateMomentumPreservation(float DeltaTime);
+
+	// ==================== Cool Kick ====================
+
+	/** Start cool kick period (airborne hit speed boost) */
+	void StartCoolKick();
+
+	/** Update cool kick boost */
+	void UpdateCoolKick(float DeltaTime);
+
+	// ==================== Drop Kick ====================
+
+	/** Check if drop kick conditions are met (airborne + looking down) */
+	bool ShouldPerformDropKick() const;
+
+	/** Perform cone trace for drop kick and find target. Returns true if target found. */
+	bool TryStartDropKick();
+
+	/** Update drop kick dive movement */
+	void UpdateDropKick(float DeltaTime);
+
+	/** Check if there's a valid dropkick target in the cone (read-only) */
+	bool HasDropKickTarget() const;
+
+	// ==================== Camera Focus ====================
+
+	/** Start camera focus on target */
+	void StartCameraFocus(AActor* Target);
+
+	/** Update camera focus interpolation */
+	void UpdateCameraFocus(float DeltaTime);
+
+	/** Stop camera focus */
+	void StopCameraFocus();
 
 	// ==================== Animation ====================
 
 	/** Select a random swing animation from the array based on weights */
 	const FMeleeWeaponSwingData* SelectWeightedSwing();
-
-	// ==================== Lunge ====================
-
-	/** Start lunge toward target */
-	void StartLunge(AActor* Target);
-
-	/** Update lunge movement */
-	void UpdateLunge(float DeltaTime);
 
 	// ==================== Montage Control ====================
 
@@ -286,17 +445,12 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UNiagaraComponent> ActiveTrailFX;
 
-	/** Lunge target */
-	TWeakObjectPtr<AActor> LungeTarget;
-
-	/** Target position for lunge */
-	FVector LungeTargetPosition = FVector::ZeroVector;
-
-	/** True while lunge is active */
-	bool bIsLunging = false;
-
 	/** Index to cycle/alternate swing animations (prevents same animation twice in a row) */
 	int32 LastSwingIndex = -1;
+
+	/** Cached player controller */
+	UPROPERTY()
+	TObjectPtr<APlayerController> CachedPlayerController;
 
 	// ==================== Damage Window State ====================
 
@@ -312,4 +466,54 @@ protected:
 
 	/** Currently selected swing data (set in Fire(), used during damage window) */
 	const FMeleeWeaponSwingData* CurrentSwingData = nullptr;
+
+	// ==================== Magnetism State ====================
+
+	/** Target locked on by magnetism (set at swing start) */
+	TWeakObjectPtr<AActor> MagnetismTarget;
+
+	/** Pre-calculated lunge target position (validated via path sweep) */
+	FVector MagnetismLungeTargetPosition = FVector::ZeroVector;
+
+	/** True while magnetism is active (between Fire and DeactivateDamageWindow) */
+	bool bIsMagnetismActive = false;
+
+	/** Lunge progress during magnetism (0-1) */
+	float LungeProgress = 0.0f;
+
+	// ==================== Cool Kick State ====================
+
+	/** Time remaining in cool kick period */
+	float CoolKickTimeRemaining = 0.0f;
+
+	/** Direction for cool kick boost */
+	FVector CoolKickDirection = FVector::ZeroVector;
+
+	// ==================== Drop Kick State ====================
+
+	/** True if current attack is a drop kick */
+	bool bIsDropKick = false;
+
+	/** Height difference at drop kick start (for bonus damage calculation) */
+	float DropKickHeightDifference = 0.0f;
+
+	/** Target position for drop kick dive */
+	FVector DropKickTargetPosition = FVector::ZeroVector;
+
+	/** Velocity during drop kick (for exit momentum) */
+	FVector DropKickVelocity = FVector::ZeroVector;
+
+	// ==================== Camera Focus State ====================
+
+	/** Target actor for camera focus */
+	TWeakObjectPtr<AActor> CameraFocusTarget;
+
+	/** Time remaining for camera focus */
+	float CameraFocusTimeRemaining = 0.0f;
+
+	/** Initial rotation when focus started */
+	FRotator CameraFocusStartRotation = FRotator::ZeroRotator;
+
+	/** Target rotation for camera focus */
+	FRotator CameraFocusTargetRotation = FRotator::ZeroRotator;
 };
