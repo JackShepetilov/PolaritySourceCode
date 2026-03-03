@@ -13,9 +13,10 @@ class AShooterCharacter;
 class UNiagaraSystem;
 class USoundBase;
 class UDamageType;
+class AEMFPhysicsProp;
 
 /**
- * Health pickup dropped by NPCs killed with non-weapon damage.
+ * Health pickup dropped by NPCs killed with prop/drone damage or while prop-stunned.
  * Sits at spawn location, then magnetically flies toward the player
  * when they enter MagnetRadius. Restores HP on contact.
  */
@@ -64,6 +65,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1.0", Units = "s"))
 	float Lifetime = 15.0f;
 
+	// ==================== Burst Flight (Doom Eternal style) ====================
+
+	/** Duration of the burst arc flight from kill center to landing spot (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup|Burst", meta = (ClampMin = "0.1", ClampMax = "2.0", Units = "s"))
+	float BurstDuration = 0.4f;
+
+	/** Height of the arc apex above the straight line between start and end (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup|Burst", meta = (ClampMin = "0", ClampMax = "500", Units = "cm"))
+	float BurstArcHeight = 120.0f;
+
+	/** Start the burst arc flight toward a target landing position.
+	 *  Called by SpawnHealthPickups after spawning at the kill center. */
+	void InitBurst(const FVector& TargetLocation);
+
+	// ==================== Effects ====================
+
 	/** Sound to play when picked up */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup|Effects")
 	TObjectPtr<USoundBase> PickupSound;
@@ -75,11 +92,28 @@ public:
 	// ==================== Static Helpers ====================
 
 	/**
-	 * Check if a killing damage type should trigger health pickup drop.
-	 * Returns true for all damage types EXCEPT DamageType_Ranged and DamageType_EMFWeapon.
+	 * Check if a kill should trigger health pickup drop.
+	 * Returns true only for prop kills (DamageCauser is AEMFPhysicsProp)
+	 * or drone explosion kills (DamageType_DroneExplosion).
 	 */
 	UFUNCTION(BlueprintPure, Category = "Health Pickup")
-	static bool ShouldDropHealth(TSubclassOf<UDamageType> KillingDamageType);
+	static bool ShouldDropHealth(TSubclassOf<UDamageType> KillingDamageType, AActor* KillingDamageCauser);
+
+	/**
+	 * Spawn multiple health pickups scattered around the kill location (Doom Eternal style).
+	 * - Traces down to find the floor so pickups don't float in the air
+	 * - Scatters pickups in a circle, checking for walls
+	 * - Ensures all pickups are accessible to the player
+	 *
+	 * @param WorldContext  World context (the dying NPC)
+	 * @param PickupClass  Class of health pickup to spawn
+	 * @param KillLocation Where the NPC died
+	 * @param Count        Number of pickups to spawn
+	 * @param ScatterRadius How far from the kill point pickups spread (cm)
+	 * @param FloorOffset  Height above the floor to spawn pickups (cm)
+	 */
+	static void SpawnHealthPickups(UWorld* World, TSubclassOf<AHealthPickup> PickupClass,
+		const FVector& KillLocation, int32 Count, float ScatterRadius, float FloorOffset);
 
 protected:
 
@@ -87,6 +121,25 @@ protected:
 	virtual void Tick(float DeltaTime) override;
 
 private:
+
+	// ==================== Burst Flight State ====================
+
+	/** True while the pickup is in the burst arc flight phase */
+	bool bIsBursting = false;
+
+	/** Start position of the burst arc (kill center) */
+	FVector BurstStartLocation = FVector::ZeroVector;
+
+	/** Target landing position of the burst arc */
+	FVector BurstTargetLocation = FVector::ZeroVector;
+
+	/** Elapsed time in the burst arc */
+	float BurstElapsedTime = 0.0f;
+
+	/** Called when burst flight completes — enables overlaps */
+	void OnBurstComplete();
+
+	// ==================== Magnet State ====================
 
 	/** Player we're flying toward (set when player enters magnet radius) */
 	TWeakObjectPtr<AShooterCharacter> MagnetTarget;

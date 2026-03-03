@@ -17,6 +17,7 @@ class UNiagaraSystem;
 class USoundBase;
 class UMaterialInterface;
 class UAnimMontage;
+class UGeometryCollection;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropDeath, AEMFPhysicsProp*, Prop, AActor*, Killer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*, Prop, float, Damage, AActor*, DamageCauser);
@@ -51,6 +52,30 @@ public:
 	/** EMF field component (charge storage + registry) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "EMF")
 	TObjectPtr<UEMF_FieldComponent> FieldComponent;
+
+	// ==================== Geometry Collection Destruction ====================
+
+	/** Optional Geometry Collection for prop destruction.
+	 *  If assigned: GC actor spawns at PropMesh transform on death and shatters.
+	 *  If not assigned: current static mesh behavior (no destruction visual). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction")
+	TObjectPtr<UGeometryCollection> PropGeometryCollection;
+
+	/** How long gib pieces persist before cleanup (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float GibLifetime = 3.0f;
+
+	/** Radial velocity for scattering gibs outward on death (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0"))
+	float DestructionImpulse = 800.0f;
+
+	/** Angular velocity for tumbling gibs on death */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0"))
+	float DestructionAngularImpulse = 100.0f;
+
+	/** Collision profile for GC gibs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction")
+	FName GibCollisionProfile = FName("Ragdoll");
 
 	// ==================== EMF Settings ====================
 
@@ -543,4 +568,10 @@ private:
 
 	/** Get effective charge sign of source (+1, -1, or 0 for magnetic/neutral) */
 	static int32 GetSourceEffectiveChargeSign(const FEMSourceDescription& Source);
+
+	// ==================== Geometry Collection Destruction (Internal) ====================
+
+	/** Spawn GC actor at PropMesh transform, apply destruction fields */
+	void SpawnDestructionGC(const FVector& DestructionOrigin);
+	FTimerHandle GCCleanupTimer;
 };

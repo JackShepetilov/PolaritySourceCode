@@ -382,9 +382,64 @@
 | ExplosionStunDuration | 2.0s |
 | ExplosionStunMontage | null (fallback на KnockbackMontage NPC) |
 
-**Логика:** `Explode()` → sphere overlap по `ECC_Pawn` в радиусе взрыва → для каждого `AShooterNPC` вызывается `ApplyExplosionStun()` → `bIsInKnockback = true`, montage, таймер на `EndKnockbackStun()`.
+**Логика:** `Explode()` → sphere overlap по `ECC_Pawn` в радиусе взрыва → для каждого `AShooterNPC` вызывается `ApplyExplosionStun()` → `bIsInKnockback = true`, `bStunnedByExplosion = true`, `StopMovementImmediately()`, montage, таймер на `EndKnockbackStun()`.
 
-**Делегат:** `OnNPCStunnedByExplosion(StunnedNPC, ExplodedProp, StunDuration)` — BlueprintAssignable, вызывается для каждого оглушённого NPC. Позволяет привязать логику в блупринте (VFX на NPC, UI-индикатор стана и т.д.).
+**Делегаты:**
+- `OnNPCStunnedByExplosion(StunnedNPC, ExplodedProp, StunDuration)` — на пропе, вызывается для каждого оглушённого NPC
+- `OnStunStart(StunnedNPC, Duration)` — на NPC, BlueprintAssignable, при входе в стан
+- `OnStunEnd(StunnedNPC)` — на NPC, BlueprintAssignable, при выходе из стана
+
+**Флаг `bStunnedByExplosion`:** устанавливается при оглушении от пропа или дрона, сбрасывается в `EndKnockbackStun()`. Если NPC погибает с этим флагом — дропается хилка независимо от типа урона.
+
+### 6.8 Реверс-запуск: хоминг, мгновенный подрыв, заморозка столкновений
+
+#### Мягкий хоминг (Soft Homing)
+
+При реверс-запуске пропа/NPC — лёгкое отклонение траектории к ближайшему врагу в конусе. Работает на EMFPhysicsProp и EMFVelocityModifier.
+
+| Параметр | Значение по умолчанию |
+|----------|----------------------|
+| bEnableReverseLaunchHoming | true |
+| HomingConeHalfAngle | 15° |
+| HomingMaxRange | 3,000 cm |
+| HomingStrength | 0.15 (почти незаметный) |
+| HomingRampUpTime | 0.1s |
+
+**Логика:** `FindHomingTarget()` → sphere overlap ECC_Pawn → фильтр по конусу + !IsDead() → score = Dot / (Dist / MaxRange) → лучшая цель → `AimDir = Lerp(AimDir, DirToTarget, Strength * RampAlpha)`.
+
+#### Мгновенный подрыв взрывных пропов
+
+Взрывные пропы (`bCanExplode`) в реверс-полёте при контакте с NPC — пропускают кинетический урон, сразу вызывают `Explode()`. NPC получает ExplosionDamage (50) + стан, а не 100+ кинетического урона.
+
+#### Заморозка NPC-NPC столкновений (Impact Freeze)
+
+При столкновении запущенного NPC с другим NPC — оба останавливаются, knockback уменьшается в 5x.
+
+| Параметр | Значение по умолчанию |
+|----------|----------------------|
+| NPCCollisionPostImpactKnockbackMultiplier | 0.2 |
+| NPCCollisionImpactVFX | null (слот) |
+| NPCCollisionImpactVFXScale | 1.5 |
+| NPCCollisionImpactSound | null (слот) |
+
+### 6.9 Взрыв дрона (Drone Explosion)
+
+Дрон (`bExplodeOnDeath = true`) взрывается при смерти. Ручной overlap вместо ApplyRadialDamage для обхода friendly-fire.
+
+| Параметр | Значение |
+|----------|----------|
+| ExplosionRadius | 200 |
+| ExplosionDamage | 30 |
+| DamageType | DamageType_DroneExplosion |
+| DamageCauser | PlayerPawn (обход friendly-fire) |
+| Falloff | Линейный (100% → 0% от центра к краю) |
+| bApplyExplosionStun | true |
+| ExplosionStunDuration | 2.0s |
+| ExplosionStunMontage | null (fallback на KnockbackMontage NPC) |
+
+**Оглушение:** Логика идентична пропам — `TriggerExplosion()` делает отдельный sphere overlap, для каждого живого NPC в радиусе вызывает `ApplyExplosionStun()`. Оглушённые дроном NPC получают `bStunnedByExplosion = true` и дропают хилки при убийстве.
+
+**Debug:** `[Drone Explosion]` логи: количество overlaps, для каждого попадания — дистанция, scale, урон, блокировки LOS, оглушённые NPC.
 
 ---
 
@@ -402,7 +457,16 @@
 
 ### 7.2 Пикапы здоровья
 
-Дропаются с NPC при убийстве **не-оружейным** уроном (мили, wallslam, dropkick, EMF proximity и т.д.). Не дропаются при убийстве из винтовки или зарядомёта.
+Дропаются с NPC **только** при:
+1. **Убийство от пропа** — кинетический урон (столкновение) или взрыв (DamageCauser = AEMFPhysicsProp)
+2. **Убийство от дрона** — кинетический урон при столкновении с летящим дроном (DamageCauser = AFlyingDrone)
+3. **Само-уничтожение дрона** — дрон врезается в стену при полёте от channeling (DamageCauser = дрон сам, self wallslam)
+4. **Убийство от взрыва дрона** — DamageType = DamageType_DroneExplosion (DamageCauser = PlayerPawn для обхода friendly-fire)
+5. **Убийство оглушённого взрывом NPC** — любой тип урона, если `bStunnedByExplosion = true` (оглушён пропом или дроном)
+
+Не дропаются при: убийстве из винтовки, зарядомёта, мили, wallslam, dropkick, EMF proximity (если NPC не оглушён взрывом).
+
+**Friendly-fire bypass:** Урон типов Wallslam и EMFProximity пропускается через проверку friendly-fire, чтобы NPC-NPC столкновения корректно передавали DamageCauser.
 
 | Параметр | Значение |
 |----------|----------|
@@ -419,7 +483,7 @@
 - Бросок NPC в другого NPC — **оба** погибших дропают броню
 - Любая смерть NPC, который когда-либо побывал в захвате (bWasChannelingTarget)
 
-Channeling kills дропают **только броню**, не здоровье. Это создаёт дуальность ресурсов: мили → хилки, channeling → броня.
+Channeling kills дропают **только броню**, не здоровье. Это создаёт дуальность ресурсов: пропы/дроны → хилки, channeling → броня.
 
 | Параметр | Значение |
 |----------|----------|

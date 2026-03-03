@@ -63,6 +63,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath"))
 	float ExplosionDamage = 30.0f;
 
+	/** If true, explosion stuns nearby NPCs (same as prop explosion) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath"))
+	bool bApplyExplosionStun = true;
+
+	/** Duration of the explosion stun (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath", ClampMin = "0.1"))
+	float ExplosionStunDuration = 2.0f;
+
+	/** Anim montage to play on stunned NPCs (null = fallback to NPC's KnockbackMontage) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath"))
+	TObjectPtr<UAnimMontage> ExplosionStunMontage;
+
 	/** Time before destruction after death (for effects to play) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death")
 	float DeathEffectDuration = 1.0f;
@@ -262,6 +274,9 @@ protected:
 
 	/** Handle drone-specific death behavior */
 	void DroneDie();
+
+	/** Override: use DroneMesh transform instead of SkeletalMesh */
+	virtual void SpawnDeathGeometryCollection(const FDeathModeConfig& Config) override;
 
 	/** Called to trigger explosion effect and damage */
 	void TriggerExplosion();

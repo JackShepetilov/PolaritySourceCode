@@ -109,7 +109,20 @@
       "WebFetch(domain:80.lv)",
       "WebFetch(domain:gdconf.com)",
       "WebFetch(domain:book.leveldesignbook.com)",
-      "WebFetch(domain:sudonull.com)"
+      "WebFetch(domain:sudonull.com)",
+      "WebFetch(domain:www.techort.com)",
+      "WebFetch(domain:www.player.one)",
+      "WebFetch(domain:control.fandom.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:bioshock.fandom.com)",
+      "WebFetch(domain:www.shamusyoung.com)",
+      "Bash(python3 -c \" import json with open\\(r''C:\\\\Users\\\\Professional\\\\.claude\\\\projects\\\\C--Users-Professional-Documents-Unreal-Projects-Polarity-Main5-6-Source\\\\930b8b21-a05e-4391-8506-fec8df9a8138\\\\tool-results\\\\toolu_01JVRfUHxP1uAGe8guF4XeXx.json'', ''r'', encoding=''utf-8''\\) as f: data = json.load\\(f\\) print\\(data[0][''text'']\\) \")",
+      "Bash(python3 -c \":*)",
+      "WebFetch(domain:outscal.com)",
+      "WebFetch(domain:www.summarize.tech)",
+      "WebFetch(domain:scweb4free.com)",
+      "WebFetch(domain:www.platinumgames.com)",
+      "WebFetch(domain:simonschreibt.de)"
     ]
   }
 }

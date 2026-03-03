@@ -33,6 +33,11 @@
 #include "Boss/BossProjectile.h"
 #include "../Pickups/HealthPickup.h"
 #include "../Pickups/ArmorPickup.h"
+#include "FlyingDrone.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Field/FieldSystemObjects.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -361,9 +366,28 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// Have we depleted HP?
 	if (CurrentHP <= 0.0f)
 	{
-		// Store killing blow info before Die() for health pickup logic
+		// Store killing blow info before Die() for health pickup and death effects logic
 		LastKillingDamageType = DamageEvent.DamageTypeClass;
 		LastKillingDamageCauser = DamageCauser;
+
+		// Compute killing hit direction for death effects (dismemberment directional bias, ragdoll impulse)
+		if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
+		{
+			// Explosion: direction from explosion origin to NPC
+			const FRadialDamageEvent& RadialEvent = static_cast<const FRadialDamageEvent&>(DamageEvent);
+			LastKillingHitDirection = (GetActorLocation() - RadialEvent.Origin).GetSafeNormal();
+		}
+		else if (DamageCauser)
+		{
+			// Point/generic damage: direction from causer to NPC
+			LastKillingHitDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
+		}
+		else if (!KnockbackDirection.IsNearlyZero())
+		{
+			// Fallback: use current knockback direction
+			LastKillingHitDirection = KnockbackDirection;
+		}
+
 		Die();
 	}
 
@@ -555,8 +579,23 @@ void AShooterNPC::Die()
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
 	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health
-	if (bWasChannelingTarget && ArmorPickupClass)
+	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s Die(): bWasChannelingTarget=%d, ArmorPickupClass=%s, HealthPickupClass=%s, bStunnedByExplosion=%d"),
+		*GetName(), bWasChannelingTarget,
+		ArmorPickupClass ? *ArmorPickupClass->GetName() : TEXT("NULL"),
+		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"),
+		bStunnedByExplosion);
+	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s Die(): LastKillingDamageType=%s, LastKillingDamageCauser=%s (Class=%s)"),
+		*GetName(),
+		LastKillingDamageType ? *LastKillingDamageType->GetName() : TEXT("NULL"),
+		LastKillingDamageCauser ? *LastKillingDamageCauser->GetName() : TEXT("NULL"),
+		LastKillingDamageCauser ? *LastKillingDamageCauser->GetClass()->GetName() : TEXT("NULL"));
+
+	// Drone kills always produce health, not armor (even if bWasChannelingTarget was propagated)
+	bool bKilledByDrone = Cast<AFlyingDrone>(LastKillingDamageCauser) != nullptr;
+
+	if (bWasChannelingTarget && ArmorPickupClass && !bKilledByDrone)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning ARMOR (channeling target)"), *GetName());
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		GetWorld()->SpawnActor<AArmorPickup>(ArmorPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
@@ -564,8 +603,15 @@ void AShooterNPC::Die()
 	else if (HealthPickupClass &&
 		(bStunnedByExplosion || AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning HEALTH"), *GetName());
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> NO PICKUP (ShouldDropHealth=%d)"),
+			*GetName(),
+			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1);
 	}
 
 	// play death sound
@@ -574,13 +620,176 @@ void AShooterNPC::Die()
 		UGameplayStatics::PlaySoundAtLocation(this, DeathSound, GetActorLocation());
 	}
 
-	// ============== AGGRESSIVE DEACTIVATION FOR PERFORMANCE ==============
+	// ============== DEATH MODE DISPATCH ==============
 
-	// Disable ALL collision immediately
-	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	const FDeathModeConfig& DeathConfig = ResolveDeathConfig();
 
-	// Stop movement completely
+	switch (DeathConfig.Mode)
+	{
+	case EDeathMode::Dismemberment:
+		SpawnDeathGeometryCollection(DeathConfig);
+		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
+		break;
+
+	case EDeathMode::Ragdoll:
+		EnableRagdollDeath(DeathConfig);
+		DeactivateForDeath(DeathConfig.RagdollDuration, /*bHideMesh=*/ false);
+		break;
+
+	case EDeathMode::HideOnly:
+	default:
+		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
+		break;
+	}
+}
+
+void AShooterNPC::DeferredDestruction()
+{
+	Destroy();
+}
+
+// ==================== Death Effects Implementation ====================
+
+const FDeathModeConfig& AShooterNPC::ResolveDeathConfig() const
+{
+	if (LastKillingDamageType && DeathConfigOverrides.Num() > 0)
+	{
+		// Exact match first
+		if (const FDeathModeConfig* Config = DeathConfigOverrides.Find(LastKillingDamageType))
+		{
+			return *Config;
+		}
+
+		// Inheritance-aware: walk parent classes (Dropkick -> Melee, EMFWeapon -> Ranged)
+		for (const auto& Pair : DeathConfigOverrides)
+		{
+			if (Pair.Key && LastKillingDamageType->IsChildOf(Pair.Key))
+			{
+				return Pair.Value;
+			}
+		}
+	}
+
+	return DefaultDeathConfig;
+}
+
+void AShooterNPC::SpawnDeathGeometryCollection(const FDeathModeConfig& Config)
+{
+	if (!DeathGeometryCollection || !GetWorld())
+	{
+		return;
+	}
+
+	const FTransform MeshTransform = GetMesh()->GetComponentTransform();
+	const FVector Origin = MeshTransform.GetLocation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+		Origin, MeshTransform.GetRotation().Rotator(), SpawnParams);
+
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		GCActor->Destroy();
+		return;
+	}
+
+	GCActor->SetActorScale3D(GetMesh()->GetComponentScale());
+
+	// Fix collision: gibs should not push pawns
+	GCComp->SetCollisionProfileName(RagdollCollisionProfile);
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	// Assign GC asset and initialize physics
+	GCComp->SetRestCollection(DeathGeometryCollection);
+
+	// Copy materials from skeletal mesh to GC gibs
+	if (USkeletalMeshComponent* SkelMesh = GetMesh())
+	{
+		const int32 NumMats = SkelMesh->GetNumMaterials();
+		for (int32 i = 0; i < NumMats; i++)
+		{
+			if (UMaterialInterface* Mat = SkelMesh->GetMaterial(i))
+			{
+				GCComp->SetMaterial(i, Mat);
+			}
+		}
+	}
+
+	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
+
+	// Break all clusters with massive external strain
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
+
+	// Scatter pieces with config-driven radial velocity
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = Config.DismembermentImpulse;
+	RadialVelocity->Position = Origin;
+
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+	AngularVelocity->Magnitude = Config.DismembermentAngularImpulse;
+	AngularVelocity->Position = Origin;
+
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVelocity);
+
+	// Directional bias from killing hit direction
+	if (!LastKillingHitDirection.IsNearlyZero() && Config.DirectionalBiasMultiplier > 0.0f)
+	{
+		UUniformVector* DirectionalBias = NewObject<UUniformVector>(GCActor);
+		DirectionalBias->Magnitude = Config.DismembermentImpulse * Config.DirectionalBiasMultiplier;
+		DirectionalBias->Direction = LastKillingHitDirection;
+
+		GCComp->ApplyPhysicsField(true,
+			EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+			nullptr, DirectionalBias);
+	}
+
+	GCActor->SetLifeSpan(GibLifetime);
+
+	UE_LOG(LogTemp, Log, TEXT("SpawnDeathGC: %s impulse=%.0f angular=%.0f dir=[%.2f,%.2f,%.2f]*%.1f"),
+		*GetName(), Config.DismembermentImpulse, Config.DismembermentAngularImpulse,
+		LastKillingHitDirection.X, LastKillingHitDirection.Y, LastKillingHitDirection.Z,
+		Config.DirectionalBiasMultiplier);
+}
+
+void AShooterNPC::EnableRagdollDeath(const FDeathModeConfig& Config)
+{
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	// Warn if no Physics Asset — ragdoll won't work without one
+	if (!MeshComp->GetPhysicsAsset())
+	{
+		UE_LOG(LogTemp, Error, TEXT("EnableRagdollDeath: %s has NO Physics Asset! Ragdoll will not work. Assign one in the editor."), *GetName());
+		return;
+	}
+
+	// 1. Stop movement FIRST so CharacterMovementComponent doesn't fight physics
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
 	{
 		MoveComp->StopMovementImmediately();
@@ -588,11 +797,65 @@ void AShooterNPC::Die()
 		MoveComp->SetComponentTickEnabled(false);
 	}
 
-	// Hide mesh instead of ragdoll (ragdoll is expensive)
-	GetMesh()->SetVisibility(false);
-	GetMesh()->SetComponentTickEnabled(false);
+	// 2. Disable capsule — ragdoll mesh handles collision now
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	// Disable EMF components and unregister from registry immediately
+	// 3. Stop animations so they don't fight physics
+	if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+	{
+		AnimInst->Montage_Stop(0.0f);
+	}
+	MeshComp->bPauseAnims = true;
+
+	// 4. Enable ragdoll physics (requires Physics Asset assigned in editor)
+	MeshComp->SetCollisionProfileName(RagdollCollisionProfile);
+	MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	MeshComp->SetAllBodiesSimulatePhysics(true);
+	MeshComp->SetSimulatePhysics(true);
+	MeshComp->WakeAllRigidBodies();
+	MeshComp->bBlendPhysics = true;
+
+	// 5. Damping — prevents breakdancing, makes ragdoll settle naturally
+	MeshComp->SetAllBodiesPhysicsBlendWeight(1.0f);
+	MeshComp->SetAngularDamping(Config.RagdollAngularDamping);
+	MeshComp->SetLinearDamping(Config.RagdollLinearDamping);
+
+	// 6. Apply impulse to root bone only (not all bodies), respects mass
+	if (!LastKillingHitDirection.IsNearlyZero())
+	{
+		const FName RootBone = MeshComp->GetBoneName(0);
+		const FVector Impulse = LastKillingHitDirection * Config.RagdollImpulse;
+		MeshComp->AddImpulse(Impulse, RootBone, /*bVelChange=*/ false);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("EnableRagdollDeath: %s impulse=%.0f duration=%.1fs dir=[%.2f,%.2f,%.2f]"),
+		*GetName(), Config.RagdollImpulse, Config.RagdollDuration,
+		LastKillingHitDirection.X, LastKillingHitDirection.Y, LastKillingHitDirection.Z);
+}
+
+void AShooterNPC::DeactivateForDeath(float DestructionDelay, bool bHideMesh)
+{
+	// Disable capsule collision (always — even ragdoll disables capsule, mesh handles it)
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Stop movement
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
+		MoveComp->SetComponentTickEnabled(false);
+	}
+
+	if (bHideMesh)
+	{
+		// Dismemberment / HideOnly: mesh no longer needed
+		GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		GetMesh()->SetVisibility(false);
+		GetMesh()->SetComponentTickEnabled(false);
+	}
+	// Ragdoll: mesh stays visible with physics, don't touch it
+
+	// Disable EMF components
 	if (EMFVelocityModifier)
 	{
 		EMFVelocityModifier->SetCharge(0.0f);
@@ -600,7 +863,7 @@ void AShooterNPC::Die()
 	}
 	if (FieldComponent)
 	{
-		FieldComponent->UnregisterFromRegistry();  // Immediately remove from EMF calculations
+		FieldComponent->UnregisterFromRegistry();
 		FieldComponent->SetComponentTickEnabled(false);
 	}
 
@@ -623,20 +886,15 @@ void AShooterNPC::Die()
 	// Disable actor tick
 	SetActorTickEnabled(false);
 
-	// Destroy weapon to free resources
+	// Destroy weapon
 	if (Weapon)
 	{
 		Weapon->Destroy();
 		Weapon = nullptr;
 	}
 
-	// Schedule fast destruction (VFX should be detached by now)
-	GetWorld()->GetTimerManager().SetTimer(DeathTimer, this, &AShooterNPC::DeferredDestruction, 0.5f, false);
-}
-
-void AShooterNPC::DeferredDestruction()
-{
-	Destroy();
+	// Schedule destruction
+	GetWorld()->GetTimerManager().SetTimer(DeathTimer, this, &AShooterNPC::DeferredDestruction, DestructionDelay, false);
 }
 
 void AShooterNPC::StartShooting(AActor* ActorToShoot, bool bHasExternalPermission)
@@ -1518,6 +1776,8 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 		float EMFDamage = EMFCollisionDamage;
 
 		// Delay damage to self (DamageCauser = OtherNPC — who hit us)
+		// Note: don't check IsDead() on Causer — pointer is still valid (deferred destruction 0.5s)
+		// and we need accurate DamageCauser for health pickup drop logic
 		FTimerHandle SelfDamageTimer;
 		GetWorld()->GetTimerManager().SetTimer(
 			SelfDamageTimer,
@@ -1525,7 +1785,7 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 			{
 				if (!bIsDead)
 				{
-					AActor* Causer = (OtherNPC && !OtherNPC->IsDead()) ? static_cast<AActor*>(OtherNPC) : nullptr;
+					AActor* Causer = static_cast<AActor*>(OtherNPC);
 					// Apply Kinetic damage (Wallslam type)
 					if (KineticDamage > 0.0f)
 					{
@@ -1555,7 +1815,7 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 			{
 				if (OtherNPC && !OtherNPC->IsDead())
 				{
-					AActor* Causer = (Self && !Self->IsDead()) ? static_cast<AActor*>(Self) : nullptr;
+					AActor* Causer = static_cast<AActor*>(Self);
 					// Apply Kinetic damage (Wallslam type)
 					if (KineticDamage > 0.0f)
 					{

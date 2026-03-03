@@ -19,6 +19,10 @@
 #include "Engine/OverlapResult.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Field/FieldSystemObjects.h"
 
 AEMFPhysicsProp::AEMFPhysicsProp()
 {
@@ -724,25 +728,32 @@ float AEMFPhysicsProp::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 		bCanExplode, bIsInReverseFlight, bHasExploded, bIsDead,
 		DamageEvent.DamageTypeClass ? *DamageEvent.DamageTypeClass->GetName() : TEXT("NULL"));
 
-	// Chain reaction: explosion from another prop = instant detonation
-	if (bCanExplode && !bHasExploded)
+	// No chain reaction: ignore all damage from other props (charge distribution happens in Explode)
+	if (Cast<AEMFPhysicsProp>(DamageCauser) && DamageCauser != this)
 	{
-		AEMFPhysicsProp* CauserProp = Cast<AEMFPhysicsProp>(DamageCauser);
-		if (CauserProp && CauserProp != this)
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Ignoring damage from prop %s (no chain reaction)"), *GetName(), *DamageCauser->GetName());
+		return 0.0f;
+	}
+
+	// Immunity during reverse flight: only player damage gets through (enemy shots ignored)
+	if (bIsInReverseFlight && !bHasExploded)
+	{
+		const bool bIsPlayerDamage = EventInstigator && EventInstigator->IsPlayerController();
+		if (!bIsPlayerDamage)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: >>> CHAIN REACTION from %s! <<<"), *GetName(), *CauserProp->GetName());
-			Explode(1.0f, 1.0f, 1.0f);
-			return ActualDamage;
+			UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Ignoring non-player damage during reverse flight (DamageCauser=%s)"),
+				*GetName(), DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"));
+			return 0.0f;
 		}
 	}
 
-	// Shot-triggered detonation: hitscan hit (non-melee) during reverse flight = 2x explosion
+	// Shot-triggered detonation: player hit (non-melee) during reverse flight = 2x explosion
 	if (bCanExplode && bIsInReverseFlight && !bHasExploded)
 	{
 		const bool bIsMeleeDamage = DamageEvent.DamageTypeClass &&
 			DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass());
 
-		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Shot-detonation check PASSED (bCanExplode && bIsInReverseFlight && !bHasExploded). bIsMeleeDamage=%d"),
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Shot-detonation check PASSED. bIsMeleeDamage=%d"),
 			*GetName(), bIsMeleeDamage);
 
 		if (!bIsMeleeDamage)
@@ -819,6 +830,106 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 	{
 		ReleasedFromCapture();
 	}
+
+	// Spawn GC destruction if assigned
+	if (PropGeometryCollection)
+	{
+		SpawnDestructionGC(GetActorLocation());
+	}
+}
+
+// ==================== Geometry Collection Destruction ====================
+
+void AEMFPhysicsProp::SpawnDestructionGC(const FVector& DestructionOrigin)
+{
+	if (!PropGeometryCollection || !PropMesh || !GetWorld())
+	{
+		return;
+	}
+
+	// Spawn GC actor at PropMesh's exact world transform
+	const FTransform MeshTransform = PropMesh->GetComponentTransform();
+	const FVector Origin = MeshTransform.GetLocation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+		Origin, MeshTransform.GetRotation().Rotator(), SpawnParams);
+
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		GCActor->Destroy();
+		return;
+	}
+
+	// Match PropMesh scale
+	GCActor->SetActorScale3D(MeshTransform.GetScale3D());
+
+	// Collision: gibs should not push pawns or block camera
+	GCComp->SetCollisionProfileName(GibCollisionProfile);
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	// Assign GC asset and initialize physics
+	GCComp->SetRestCollection(PropGeometryCollection);
+
+	// Copy materials from PropMesh to GC gibs — allows generic GC with prop's material
+	if (PropMesh)
+	{
+		const int32 NumMats = PropMesh->GetNumMaterials();
+		for (int32 i = 0; i < NumMats; i++)
+		{
+			if (UMaterialInterface* Mat = PropMesh->GetMaterial(i))
+			{
+				GCComp->SetMaterial(i, Mat);
+			}
+		}
+	}
+
+	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
+
+	// Break all clusters
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
+
+	// Scatter pieces radially from destruction origin
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = DestructionImpulse;
+	RadialVelocity->Position = DestructionOrigin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+	AngularVelocity->Magnitude = DestructionAngularImpulse;
+	AngularVelocity->Position = DestructionOrigin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVelocity);
+
+	// GC actor self-destructs after lifetime
+	GCActor->SetLifeSpan(GibLifetime);
+
+	// Hide PropMesh (GC gibs replace it visually)
+	PropMesh->SetVisibility(false);
+	PropMesh->SetSimulatePhysics(false);
+	PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: GC destruction spawned, impulse=%.0f, lifetime=%.1fs"),
+		*GetName(), DestructionImpulse, GibLifetime);
 }
 
 // ==================== Explosive Impact ====================
@@ -961,6 +1072,45 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 
 			NPC->ApplyExplosionStun(ExplosionStunDuration, ExplosionStunMontage);
 			OnNPCStunnedByExplosion.Broadcast(NPC, this, ExplosionStunDuration);
+		}
+	}
+
+	// Distribute charge among nearby props (instead of chain reaction destruction)
+	if (FinalRadius > 0.0f)
+	{
+		const float MyCharge = GetCharge();
+		if (!FMath::IsNearlyZero(MyCharge))
+		{
+			TArray<FOverlapResult> PropOverlaps;
+			FCollisionShape PropSphere = FCollisionShape::MakeSphere(FinalRadius);
+			FCollisionQueryParams PropQueryParams;
+			PropQueryParams.AddIgnoredActor(this);
+
+			GetWorld()->OverlapMultiByChannel(
+				PropOverlaps, ExplosionLocation, FQuat::Identity,
+				ECC_WorldDynamic, PropSphere, PropQueryParams);
+
+			TArray<AEMFPhysicsProp*> NearbyProps;
+			for (const FOverlapResult& Overlap : PropOverlaps)
+			{
+				AEMFPhysicsProp* OtherProp = Cast<AEMFPhysicsProp>(Overlap.GetActor());
+				if (OtherProp && OtherProp != this && !OtherProp->IsDead())
+				{
+					NearbyProps.AddUnique(OtherProp);
+				}
+			}
+
+			if (NearbyProps.Num() > 0)
+			{
+				const float ChargePerProp = MyCharge / static_cast<float>(NearbyProps.Num());
+				for (AEMFPhysicsProp* Prop : NearbyProps)
+				{
+					Prop->SetCharge(Prop->GetCharge() + ChargePerProp);
+				}
+
+				UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Distributed charge %.1f among %d nearby props (%.1f each)"),
+					*GetName(), MyCharge, NearbyProps.Num(), ChargePerProp);
+			}
 		}
 	}
 

@@ -2476,6 +2476,12 @@ void UMeleeAttackComponent::UpdateCoolKick(float DeltaTime)
 
 void UMeleeAttackComponent::ActivateDamageWindowFromNotify()
 {
+	// Don't activate if externally disabled (melee weapon is handling this)
+	if (bExternallyDisabled)
+	{
+		return;
+	}
+
 	// Force transition to Active state (damage window)
 	if (CurrentState != EMeleeAttackState::Active)
 	{
@@ -2485,6 +2491,12 @@ void UMeleeAttackComponent::ActivateDamageWindowFromNotify()
 
 void UMeleeAttackComponent::DeactivateDamageWindowFromNotify()
 {
+	// Don't process if externally disabled (melee weapon is handling this)
+	if (bExternallyDisabled)
+	{
+		return;
+	}
+
 	// Force transition to Recovery state (end damage window)
 	if (CurrentState == EMeleeAttackState::Active)
 	{

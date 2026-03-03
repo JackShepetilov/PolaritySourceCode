@@ -13,6 +13,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnNPCDamageTaken, AShooterNPC*, DamagedNPC, float, Damage, TSubclassOf<UDamageType>, DamageType, FVector, HitLocation, AActor*, DamageCauser);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnNPCDeathDetailed, AShooterNPC*, DeadNPC, TSubclassOf<UDamageType>, KillingDamageType, AActor*, KillingDamageCauser);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCStunStart, AShooterNPC*, StunnedNPC, float, Duration);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCStunEnd, AShooterNPC*, StunnedNPC);
 
 class AShooterWeapon;
 class UAnimMontage;
@@ -26,6 +28,71 @@ class UEMF_FieldComponent;
 class UNiagaraSystem;
 class AHealthPickup;
 class AArmorPickup;
+class UGeometryCollection;
+
+// ==================== Death Effects Types ====================
+
+/** How the NPC visually dies */
+UENUM(BlueprintType)
+enum class EDeathMode : uint8
+{
+	/** Spawn Geometry Collection gibs, hide mesh immediately */
+	Dismemberment,
+	/** Enable ragdoll physics on skeletal mesh, keep visible */
+	Ragdoll,
+	/** Just hide the mesh (no special effect) */
+	HideOnly
+};
+
+/** Configuration for a specific death visual mode */
+USTRUCT(BlueprintType)
+struct FDeathModeConfig
+{
+	GENERATED_BODY()
+
+	/** Which visual death mode to use */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	EDeathMode Mode = EDeathMode::Dismemberment;
+
+	// --- Dismemberment parameters ---
+
+	/** Radial velocity for scattering gibs outward (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Dismemberment",
+		meta = (ClampMin = "0", EditCondition = "Mode == EDeathMode::Dismemberment"))
+	float DismembermentImpulse = 800.0f;
+
+	/** Angular velocity for tumbling gibs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Dismemberment",
+		meta = (ClampMin = "0", EditCondition = "Mode == EDeathMode::Dismemberment"))
+	float DismembermentAngularImpulse = 100.0f;
+
+	/** Multiplier for directional bias from damage source (0 = pure radial, 1+ = strong directional) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Dismemberment",
+		meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "Mode == EDeathMode::Dismemberment"))
+	float DirectionalBiasMultiplier = 0.5f;
+
+	// --- Ragdoll parameters ---
+
+	/** Impulse applied to ragdoll root bone in damage direction (force-based, respects mass) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Ragdoll",
+		meta = (ClampMin = "0", EditCondition = "Mode == EDeathMode::Ragdoll"))
+	float RagdollImpulse = 5000.0f;
+
+	/** How long the ragdoll stays visible before destroying (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Ragdoll",
+		meta = (ClampMin = "0.5", ClampMax = "10.0", EditCondition = "Mode == EDeathMode::Ragdoll"))
+	float RagdollDuration = 3.0f;
+
+	/** Angular damping — higher = less spinning/tumbling (0 = none, 5+ = very stiff) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Ragdoll",
+		meta = (ClampMin = "0", ClampMax = "20.0", EditCondition = "Mode == EDeathMode::Ragdoll"))
+	float RagdollAngularDamping = 5.0f;
+
+	/** Linear damping — higher = stops sliding sooner (0 = none, 2+ = heavy drag) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Ragdoll",
+		meta = (ClampMin = "0", ClampMax = "20.0", EditCondition = "Mode == EDeathMode::Ragdoll"))
+	float RagdollLinearDamping = 1.0f;
+};
 
 /**
  *  A simple AI-controlled shooter game NPC
@@ -259,6 +326,9 @@ protected:
 	/** True when NPC is being interpolated to knockback target position */
 	bool bIsKnockbackInterpolating = false;
 
+	/** True when NPC is stunned by prop or drone explosion. Cleared on EndKnockbackStun. */
+	bool bStunnedByExplosion = false;
+
 	/** Start position for knockback interpolation */
 	FVector KnockbackStartPosition = FVector::ZeroVector;
 
@@ -447,17 +517,59 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCDeathDetailed OnNPCDeathDetailed;
 
+	/** Called when NPC enters explosion stun state */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnNPCStunStart OnStunStart;
+
+	/** Called when NPC exits stun state (knockback ends) */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnNPCStunEnd OnStunEnd;
+
 	// ==================== Health Pickup Drop ====================
 
 	/** Health pickup class to spawn on non-weapon kill (set in Blueprint defaults) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup")
 	TSubclassOf<AHealthPickup> HealthPickupClass;
 
+	/** Number of health pickups to drop on kill (Doom Eternal style scatter) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 HealthPickupDropCount = 3;
+
+	/** How far pickups scatter from the kill point (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "0", ClampMax = "500", Units = "cm"))
+	float HealthPickupScatterRadius = 150.0f;
+
+	/** Height above the floor at which pickups spawn (cm). Keeps them visible and accessible. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "5", ClampMax = "200", Units = "cm"))
+	float HealthPickupFloorOffset = 30.0f;
+
 	// ==================== Armor Pickup Drop ====================
 
 	/** Armor pickup class to spawn on channeling kill (set in Blueprint defaults) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Armor Pickup")
 	TSubclassOf<AArmorPickup> ArmorPickupClass;
+
+	// ==================== Death Effects Configuration ====================
+
+	/** Geometry Collection asset to spawn on death for dismemberment effect.
+	 *  Created by converting the NPC's SkeletalMesh -> StaticMesh -> Geometry Collection
+	 *  and fracturing it in Fracture Mode. If null, dismemberment mode falls back to HideOnly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Dismemberment")
+	TObjectPtr<UGeometryCollection> DeathGeometryCollection;
+
+	/** How long gib pieces persist before being destroyed (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Dismemberment", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float GibLifetime = 3.0f;
+
+	/** Default death mode config used when no damage-type-specific override exists */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Effects")
+	FDeathModeConfig DefaultDeathConfig;
+
+	/** Per-damage-type death mode overrides.
+	 *  If the killing damage type (or its parent class) is found here, this config is used
+	 *  instead of DefaultDeathConfig. Inheritance-aware: UDamageType_Dropkick matches UDamageType_Melee. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Effects")
+	TMap<TSubclassOf<UDamageType>, FDeathModeConfig> DeathConfigOverrides;
 
 protected:
 
@@ -466,6 +578,9 @@ protected:
 
 	/** Actor that dealt the killing blow (set in TakeDamage before Die) */
 	TObjectPtr<AActor> LastKillingDamageCauser;
+
+	/** Direction of the killing hit (from damage source toward NPC, set in TakeDamage before Die) */
+	FVector LastKillingHitDirection = FVector::ZeroVector;
 
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
@@ -524,6 +639,26 @@ protected:
 
 	/** Called after death to destroy the actor */
 	void DeferredDestruction();
+
+	// ==================== Death Effects Methods ====================
+
+	/** Determine which death config to use based on LastKillingDamageType.
+	 *  Checks DeathConfigOverrides with inheritance-aware lookup, falls back to DefaultDeathConfig. */
+	const FDeathModeConfig& ResolveDeathConfig() const;
+
+	/** Spawn pre-fractured Geometry Collection and apply configured explosive force.
+	 *  @param Config Death mode config with dismemberment impulse parameters. */
+	virtual void SpawnDeathGeometryCollection(const FDeathModeConfig& Config);
+
+	/** Enable ragdoll physics on skeletal mesh.
+	 *  Mesh stays visible, gets physics impulse in killing direction.
+	 *  Requires Physics Asset on skeletal mesh (editor setup). */
+	void EnableRagdollDeath(const FDeathModeConfig& Config);
+
+	/** Deactivate NPC systems after death (components, AI, tick, weapon).
+	 *  @param DestructionDelay Seconds before actor is destroyed.
+	 *  @param bHideMesh If true, hide and disable mesh (dismemberment/hide-only). False for ragdoll. */
+	void DeactivateForDeath(float DestructionDelay, bool bHideMesh = true);
 
 	/** Play hit reaction animation based on damage direction */
 	void PlayHitReaction(const FVector& DamageDirection);

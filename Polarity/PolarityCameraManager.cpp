@@ -4,8 +4,8 @@
 
 APolarityCameraManager::APolarityCameraManager()
 {
-	ViewPitchMin = -70.0f;
-	ViewPitchMax = 80.0f;
+	ViewPitchMin = -87.0f;
+	ViewPitchMax = 87.0f;
 }
 
 void APolarityCameraManager::UpdateViewTarget(FTViewTarget& OutVT, float DeltaTime)

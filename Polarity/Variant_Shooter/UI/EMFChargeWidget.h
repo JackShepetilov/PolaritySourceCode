@@ -57,6 +57,21 @@ public:
 		meta = (DisplayName = "On Widget Reset"))
 	void BP_OnWidgetReset();
 
+	/** Called when NPC enters stun state (explosion stun, knockback, etc.) */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge",
+		meta = (DisplayName = "On Stun Start"))
+	void BP_OnStunStart(float Duration);
+
+	/** Called when NPC exits stun state */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge",
+		meta = (DisplayName = "On Stun End"))
+	void BP_OnStunEnd();
+
+	/** Called when NPC health changes. Use for HP bar display. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge",
+		meta = (DisplayName = "On Health Changed"))
+	void BP_OnHealthChanged(float CurrentHP, float MaxHP, float NormalizedHP);
+
 	// ==================== Getters ====================
 
 	UFUNCTION(BlueprintPure, Category = "EMF Charge")
@@ -99,6 +114,9 @@ protected:
 	/** Max charge for normalization (cached on bind) */
 	float CachedMaxCharge = 50.0f;
 
+	/** Max HP for normalization (cached on bind from NPC's initial CurrentHP) */
+	float CachedMaxHP = 100.0f;
+
 private:
 	/** Get target world position (above head/top) */
 	bool GetTargetWorldPosition(FVector& OutPosition) const;
@@ -114,4 +132,13 @@ private:
 
 	/** Shared charge update logic */
 	void HandleChargeUpdate(float InChargeValue, uint8 InPolarity);
+
+	UFUNCTION()
+	void OnNPCStunStart(AShooterNPC* StunnedNPC, float Duration);
+
+	UFUNCTION()
+	void OnNPCStunEnd(AShooterNPC* StunnedNPC);
+
+	UFUNCTION()
+	void OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser);
 };

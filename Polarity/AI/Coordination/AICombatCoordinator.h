@@ -45,7 +45,7 @@ struct FTokenPool
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "10"))
+	UPROPERTY(EditAnywhere, meta = (ClampMin = "0", ClampMax = "10"))
 	int32 MaxTokens = 2;
 
 	TArray<TWeakObjectPtr<APawn>> HeldBy;

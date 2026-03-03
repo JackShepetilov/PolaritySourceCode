@@ -19,9 +19,16 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "../DamageTypes/DamageType_Melee.h"
+#include "../DamageTypes/DamageType_Wallslam.h"
+#include "../DamageTypes/DamageType_EMFProximity.h"
 #include "AIController.h"
 #include "Engine/OverlapResult.h"
 #include "../Pickups/HealthPickup.h"
+#include "../DamageTypes/DamageType_DroneExplosion.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Field/FieldSystemObjects.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -148,10 +155,19 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 	// Ignore friendly fire from other NPCs (same logic as ShooterNPC)
 	if (DamageCauser)
 	{
-		AActor* DamageOwner = DamageCauser->GetOwner();
-		if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+		// Allow collision/physics damage types (Wallslam, EMFProximity) —
+		// these come from NPC-NPC collisions and wall slams, NOT weapon fire
+		bool bIsCollisionDamage = DamageEvent.DamageTypeClass &&
+			(DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Wallslam::StaticClass()) ||
+			 DamageEvent.DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()));
+
+		if (!bIsCollisionDamage)
 		{
-			return 0.0f;
+			AActor* DamageOwner = DamageCauser->GetOwner();
+			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+			{
+				return 0.0f;
+			}
 		}
 
 		if (EventInstigator)
@@ -206,6 +222,18 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 		// Store killing blow info before death for health pickup logic
 		LastKillingDamageType = DamageEvent.DamageTypeClass;
 		LastKillingDamageCauser = DamageCauser;
+
+		// Compute killing hit direction for GC directional bias
+		if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
+		{
+			const FRadialDamageEvent& RadialEvent = static_cast<const FRadialDamageEvent&>(DamageEvent);
+			LastKillingHitDirection = (GetActorLocation() - RadialEvent.Origin).GetSafeNormal();
+		}
+		else if (DamageCauser)
+		{
+			LastKillingHitDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
+		}
+
 		DroneDie();
 	}
 
@@ -246,12 +274,37 @@ void AFlyingDrone::DroneDie()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
-	// Spawn health pickup on non-weapon kill
-	if (HealthPickupClass && AHealthPickup::ShouldDropHealth(LastKillingDamageType))
+	// Spawn health pickups: prop/drone kill, wall slam self-destruct, or killed while stunned by explosion
+	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s DroneDie(): bWasChannelingTarget=%d, HealthPickupClass=%s, bStunnedByExplosion=%d"),
+		*GetName(), bWasChannelingTarget,
+		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"),
+		bStunnedByExplosion);
+	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s DroneDie(): LastKillingDamageType=%s, LastKillingDamageCauser=%s (Class=%s)"),
+		*GetName(),
+		LastKillingDamageType ? *LastKillingDamageType->GetName() : TEXT("NULL"),
+		LastKillingDamageCauser ? *LastKillingDamageCauser->GetName() : TEXT("NULL"),
+		LastKillingDamageCauser ? *LastKillingDamageCauser->GetClass()->GetName() : TEXT("NULL"));
+
+	// Channeling drone that died from kinetic collision (Wallslam) should also drop health
+	// (DamageCauser is the OtherNPC, not a drone/prop, so ShouldDropHealth misses it)
+	bool bIsChannelingKineticKill = bWasChannelingTarget && LastKillingDamageType &&
+		LastKillingDamageType->IsChildOf(UDamageType_Wallslam::StaticClass());
+
+	if (HealthPickupClass &&
+		(bStunnedByExplosion || bIsChannelingKineticKill ||
+		 AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
 	{
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		GetWorld()->SpawnActor<AHealthPickup>(HealthPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> Spawning HEALTH (stunned=%d, channelingKinetic=%d, shouldDrop=%d)"),
+			*GetName(), bStunnedByExplosion, bIsChannelingKineticKill,
+			AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser));
+		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
+			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> NO PICKUP (channelingKinetic=%d, ShouldDropHealth=%d)"),
+			*GetName(), bIsChannelingKineticKill,
+			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1);
 	}
 
 	if (bExplodeOnDeath)
@@ -261,6 +314,13 @@ void AFlyingDrone::DroneDie()
 	else
 	{
 		StartDeathFall();
+	}
+
+	// Spawn death gibs (GC actor is independent — survives drone's 0.5s Destroy)
+	if (DeathGeometryCollection)
+	{
+		const FDeathModeConfig& DeathConfig = ResolveDeathConfig();
+		SpawnDeathGeometryCollection(DeathConfig);
 	}
 
 	// ============== AGGRESSIVE DEACTIVATION FOR PERFORMANCE ==============
@@ -361,6 +421,9 @@ void AFlyingDrone::TriggerExplosion()
 		// Sweep Pawn channel (players + NPCs)
 		GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 
+		UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] %s: Radius=%.0f, MaxDamage=%.0f, Overlaps=%d"),
+			*GetName(), ExplosionRadius, ExplosionDamage, Overlaps.Num());
+
 		// Player pawn as DamageCauser: not a ShooterNPC, so friendly-fire check passes.
 		// DamageNumbersSubsystem recognizes player pawn as "from player" and shows numbers.
 		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
@@ -385,6 +448,8 @@ void AFlyingDrone::TriggerExplosion()
 				LOSHit, Origin, HitActor->GetActorLocation(), ECC_Visibility, LOSParams);
 			if (bBlocked)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] LOS blocked to %s by %s"),
+					*HitActor->GetName(), LOSHit.GetActor() ? *LOSHit.GetActor()->GetName() : TEXT("Unknown"));
 				continue;
 			}
 
@@ -398,11 +463,48 @@ void AFlyingDrone::TriggerExplosion()
 				continue;
 			}
 
+			UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] Hit %s: Dist=%.0f, Scale=%.2f, Damage=%.1f"),
+				*HitActor->GetName(), Distance, DamageScale, FinalDamage);
+
 			// nullptr instigator bypasses NPC friendly-fire check.
 			// PlayerPawn as DamageCauser bypasses Cast<AShooterNPC> and triggers damage numbers.
-			FDamageEvent DamageEvent;
-			DamageEvent.DamageTypeClass = UDamageType::StaticClass();
-			HitActor->TakeDamage(FinalDamage, DamageEvent, nullptr, PlayerPawn);
+			// FRadialDamageEvent carries Origin so victims can compute directed dismemberment.
+			FRadialDamageEvent RadialDamageEvent;
+			RadialDamageEvent.DamageTypeClass = UDamageType_DroneExplosion::StaticClass();
+			RadialDamageEvent.Origin = Origin;
+			RadialDamageEvent.Params.BaseDamage = ExplosionDamage;
+			RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
+			HitActor->TakeDamage(FinalDamage, RadialDamageEvent, nullptr, PlayerPawn);
+		}
+	}
+
+	// Stun nearby NPCs (same logic as EMFPhysicsProp::Explode)
+	if (bApplyExplosionStun && ExplosionRadius > 0.0f)
+	{
+		TArray<FOverlapResult> StunOverlaps;
+		FCollisionShape StunSphere = FCollisionShape::MakeSphere(ExplosionRadius);
+		FCollisionQueryParams StunQueryParams;
+		StunQueryParams.AddIgnoredActor(this);
+
+		GetWorld()->OverlapMultiByChannel(
+			StunOverlaps, GetActorLocation(), FQuat::Identity,
+			ECC_Pawn, StunSphere, StunQueryParams);
+
+		TSet<AShooterNPC*> StunnedNPCs;
+
+		for (const FOverlapResult& Overlap : StunOverlaps)
+		{
+			AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
+			if (!NPC || StunnedNPCs.Contains(NPC) || NPC->IsDead() || NPC == this)
+			{
+				continue;
+			}
+			StunnedNPCs.Add(NPC);
+
+			NPC->ApplyExplosionStun(ExplosionStunDuration, ExplosionStunMontage);
+
+			UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] Stunned %s for %.1fs"),
+				*NPC->GetName(), ExplosionStunDuration);
 		}
 	}
 
@@ -436,6 +538,109 @@ void AFlyingDrone::StartDeathFall()
 void AFlyingDrone::DeathDestroy()
 {
 	Destroy();
+}
+
+void AFlyingDrone::SpawnDeathGeometryCollection(const FDeathModeConfig& Config)
+{
+	if (!DeathGeometryCollection || !GetWorld())
+	{
+		return;
+	}
+
+	// Use DroneMesh transform (the actual visible mesh) instead of hidden SkeletalMesh
+	const FTransform MeshTransform = DroneMesh ? DroneMesh->GetComponentTransform()
+	                                           : FTransform(GetActorLocation());
+	const FVector Origin = MeshTransform.GetLocation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+		Origin, MeshTransform.GetRotation().Rotator(), SpawnParams);
+
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		GCActor->Destroy();
+		return;
+	}
+
+	// Scale GC to match drone visual mesh
+	if (DroneMesh)
+	{
+		GCActor->SetActorScale3D(DroneMesh->GetComponentScale());
+	}
+
+	// Collision: gibs collide with world but not pawns/camera
+	// Note: can't use RagdollCollisionProfile here — drone sets it to "NoCollision"
+	GCComp->SetCollisionProfileName(FName("Ragdoll"));
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	// Assign GC asset and initialize physics
+	GCComp->SetRestCollection(DeathGeometryCollection);
+
+	// Copy materials from DroneMesh to GC gibs
+	if (DroneMesh)
+	{
+		const int32 NumMats = DroneMesh->GetNumMaterials();
+		for (int32 i = 0; i < NumMats; i++)
+		{
+			if (UMaterialInterface* Mat = DroneMesh->GetMaterial(i))
+			{
+				GCComp->SetMaterial(i, Mat);
+			}
+		}
+	}
+
+	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
+
+	// Break all clusters
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
+
+	// Scatter pieces radially
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = Config.DismembermentImpulse;
+	RadialVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+	AngularVelocity->Magnitude = Config.DismembermentAngularImpulse;
+	AngularVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVelocity);
+
+	// Directional bias from killing hit direction
+	if (!LastKillingHitDirection.IsNearlyZero() && Config.DirectionalBiasMultiplier > 0.0f)
+	{
+		UUniformVector* DirectionalBias = NewObject<UUniformVector>(GCActor);
+		DirectionalBias->Magnitude = Config.DismembermentImpulse * Config.DirectionalBiasMultiplier;
+		DirectionalBias->Direction = LastKillingHitDirection;
+		GCComp->ApplyPhysicsField(true,
+			EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+			nullptr, DirectionalBias);
+	}
+
+	GCActor->SetLifeSpan(GibLifetime);
+
+	UE_LOG(LogTemp, Log, TEXT("Drone SpawnDeathGC: %s impulse=%.0f dir=[%.2f,%.2f,%.2f]"),
+		*GetName(), Config.DismembermentImpulse,
+		LastKillingHitDirection.X, LastKillingHitDirection.Y, LastKillingHitDirection.Z);
 }
 
 // ==================== Weapon Handling ====================

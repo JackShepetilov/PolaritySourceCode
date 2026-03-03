@@ -25,7 +25,10 @@ public class Polarity : ModuleRules
             "LevelSequence",
             "MovieScene",
             "IKRig",
-            "AudioMixer"
+            "AudioMixer",
+            "GeometryCollectionEngine",
+            "FieldSystemEngine",
+            "ChaosSolverEngine"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags" });

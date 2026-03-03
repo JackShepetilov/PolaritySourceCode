@@ -8,6 +8,7 @@
 #include "EMF_FieldComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/StaticMeshComponent.h"
 
 void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 {
@@ -82,6 +83,14 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 	// Bind to charge update delegate
 	InNPC->OnChargeUpdated.AddDynamic(this, &UEMFChargeWidget::OnNPCChargeUpdated);
 
+	// Bind to stun and health delegates
+	InNPC->OnStunStart.AddDynamic(this, &UEMFChargeWidget::OnNPCStunStart);
+	InNPC->OnStunEnd.AddDynamic(this, &UEMFChargeWidget::OnNPCStunEnd);
+	InNPC->OnDamageTaken.AddDynamic(this, &UEMFChargeWidget::OnNPCDamageTaken);
+
+	// Cache max HP for normalization
+	CachedMaxHP = InNPC->CurrentHP;
+
 	// Cache max charge and get initial state
 	if (UEMFVelocityModifier* EMF = InNPC->FindComponentByClass<UEMFVelocityModifier>())
 	{
@@ -96,6 +105,7 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
+	BP_OnHealthChanged(InNPC->CurrentHP, CachedMaxHP, 1.0f);
 }
 
 void UEMFChargeWidget::BindToProp(AEMFPhysicsProp* InProp, float InVerticalOffset)
@@ -133,6 +143,9 @@ void UEMFChargeWidget::Unbind()
 	if (AShooterNPC* NPC = BoundNPC.Get())
 	{
 		NPC->OnChargeUpdated.RemoveDynamic(this, &UEMFChargeWidget::OnNPCChargeUpdated);
+		NPC->OnStunStart.RemoveDynamic(this, &UEMFChargeWidget::OnNPCStunStart);
+		NPC->OnStunEnd.RemoveDynamic(this, &UEMFChargeWidget::OnNPCStunEnd);
+		NPC->OnDamageTaken.RemoveDynamic(this, &UEMFChargeWidget::OnNPCDamageTaken);
 	}
 	if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
@@ -152,6 +165,7 @@ void UEMFChargeWidget::ResetWidget()
 	CurrentPolarity = 0;
 	NormalizedCharge = 0.0f;
 	CachedMaxCharge = 50.0f;
+	CachedMaxHP = 100.0f;
 	BP_OnWidgetReset();
 }
 
@@ -225,4 +239,24 @@ void UEMFChargeWidget::HandleChargeUpdate(float InChargeValue, uint8 InPolarity)
 	CurrentPolarity = InPolarity;
 
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
+}
+
+void UEMFChargeWidget::OnNPCStunStart(AShooterNPC* StunnedNPC, float Duration)
+{
+	BP_OnStunStart(Duration);
+}
+
+void UEMFChargeWidget::OnNPCStunEnd(AShooterNPC* StunnedNPC)
+{
+	BP_OnStunEnd();
+}
+
+void UEMFChargeWidget::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser)
+{
+	if (AShooterNPC* NPC = BoundNPC.Get())
+	{
+		float HP = FMath::Max(NPC->CurrentHP, 0.0f);
+		float Normalized = (CachedMaxHP > 0.0f) ? FMath::Clamp(HP / CachedMaxHP, 0.0f, 1.0f) : 0.0f;
+		BP_OnHealthChanged(HP, CachedMaxHP, Normalized);
+	}
 }

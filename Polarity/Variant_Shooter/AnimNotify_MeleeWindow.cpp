@@ -3,6 +3,8 @@
 
 #include "AnimNotify_MeleeWindow.h"
 #include "MeleeAttackComponent.h"
+#include "Weapons/ShooterWeapon_Melee.h"
+#include "ShooterCharacter.h"
 #include "AI/MeleeNPC.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Character.h"
@@ -23,6 +25,28 @@ static UMeleeAttackComponent* GetMeleeComponentFromMesh(USkeletalMeshComponent* 
 	}
 
 	return Owner->FindComponentByClass<UMeleeAttackComponent>();
+}
+
+static AShooterWeapon_Melee* GetMeleeWeaponFromMesh(USkeletalMeshComponent* MeshComp)
+{
+	if (!MeshComp)
+	{
+		return nullptr;
+	}
+
+	AShooterCharacter* Character = Cast<AShooterCharacter>(MeshComp->GetOwner());
+	if (!Character)
+	{
+		return nullptr;
+	}
+
+	AShooterWeapon* Weapon = Character->GetCurrentWeapon();
+	if (!Weapon || !Weapon->IsMeleeWeapon())
+	{
+		return nullptr;
+	}
+
+	return Cast<AShooterWeapon_Melee>(Weapon);
 }
 
 static AMeleeNPC* GetMeleeNPCFromMesh(USkeletalMeshComponent* MeshComp)
@@ -48,7 +72,14 @@ void UAnimNotify_MeleeActivate::Notify(USkeletalMeshComponent* MeshComp, UAnimSe
 {
 	Super::Notify(MeshComp, Animation, EventReference);
 
-	// Try player's MeleeAttackComponent first
+	// Try melee weapon first (takes priority when equipped)
+	if (AShooterWeapon_Melee* MeleeWeapon = GetMeleeWeaponFromMesh(MeshComp))
+	{
+		MeleeWeapon->ActivateDamageWindow();
+		return;
+	}
+
+	// Try player's MeleeAttackComponent
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->ActivateDamageWindowFromNotify();
@@ -80,7 +111,14 @@ void UAnimNotify_MeleeDeactivate::Notify(USkeletalMeshComponent* MeshComp, UAnim
 {
 	Super::Notify(MeshComp, Animation, EventReference);
 
-	// Try player's MeleeAttackComponent first
+	// Try melee weapon first (takes priority when equipped)
+	if (AShooterWeapon_Melee* MeleeWeapon = GetMeleeWeaponFromMesh(MeshComp))
+	{
+		MeleeWeapon->DeactivateDamageWindow();
+		return;
+	}
+
+	// Try player's MeleeAttackComponent
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->DeactivateDamageWindowFromNotify();
@@ -112,7 +150,14 @@ void UAnimNotifyState_MeleeDamageWindow::NotifyBegin(USkeletalMeshComponent* Mes
 {
 	Super::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
 
-	// Try player's MeleeAttackComponent first
+	// Try melee weapon first (takes priority when equipped)
+	if (AShooterWeapon_Melee* MeleeWeapon = GetMeleeWeaponFromMesh(MeshComp))
+	{
+		MeleeWeapon->ActivateDamageWindow();
+		return;
+	}
+
+	// Try player's MeleeAttackComponent
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->ActivateDamageWindowFromNotify();
@@ -130,7 +175,14 @@ void UAnimNotifyState_MeleeDamageWindow::NotifyEnd(USkeletalMeshComponent* MeshC
 {
 	Super::NotifyEnd(MeshComp, Animation, EventReference);
 
-	// Try player's MeleeAttackComponent first
+	// Try melee weapon first (takes priority when equipped)
+	if (AShooterWeapon_Melee* MeleeWeapon = GetMeleeWeaponFromMesh(MeshComp))
+	{
+		MeleeWeapon->DeactivateDamageWindow();
+		return;
+	}
+
+	// Try player's MeleeAttackComponent
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->DeactivateDamageWindowFromNotify();

@@ -18,7 +18,7 @@ AShooterWeapon_Melee::AShooterWeapon_Melee()
 	bUseZFactor = false;
 	bUseHitscan = false;
 	bUseChargeFiring = false;
-	bFullAuto = true;
+	bFullAuto = false; // One press = one swing (like MeleeAttackComponent)
 
 	// Melee-appropriate defaults
 	RefireRate = 0.4f; // Swing speed (configured to match animation)
@@ -72,10 +72,18 @@ void AShooterWeapon_Melee::Fire()
 		}
 	}
 
+	// Close previous damage window if still active (new swing overrides)
+	if (bDamageWindowActive)
+	{
+		DeactivateDamageWindow();
+	}
+
 	// Reset damage window state for new swing
-	bDamageWindowActive = false;
 	bHitDuringWindow = false;
 	HitActorsThisSwing.Empty();
+
+	// Stop current montage so the new one can play (avoids Montage_IsPlaying block)
+	StopCurrentMontage();
 
 	// Select and play swing animation
 	CurrentSwingData = SelectWeightedSwing();
@@ -99,13 +107,8 @@ void AShooterWeapon_Melee::Fire()
 	// Fire perception event (AI awareness)
 	OnShotFired.Broadcast();
 
-	// Schedule next swing
-	float ActualRefireRate = RefireRate;
-	if (CurrentSwingData)
-	{
-		ActualRefireRate = RefireRate / CurrentSwingData->BasePlayRate;
-	}
-	GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon_Melee::Fire, ActualRefireRate, false);
+	// Update last shot time — base class uses this for RefireRate enforcement
+	TimeOfLastShot = GetWorld()->GetTimeSeconds();
 }
 
 // ==================== Damage Window (AnimNotify API) ====================
@@ -440,13 +443,38 @@ void AShooterWeapon_Melee::UpdateLunge(float DeltaTime)
 		return;
 	}
 
-	// Move toward target - one-shot impulse
+	// Move toward target - additive impulse (false, false = don't override existing velocity)
 	FVector LungeDirection = ToTarget.GetSafeNormal();
 	if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
 	{
-		OwnerChar->LaunchCharacter(LungeDirection * LungeSpeed, true, true);
+		OwnerChar->LaunchCharacter(LungeDirection * LungeSpeed, false, false);
 	}
 	bIsLunging = false;
+}
+
+// ==================== Montage Control ====================
+
+void AShooterWeapon_Melee::StopCurrentMontage()
+{
+	if (!PawnOwner)
+	{
+		return;
+	}
+
+	// Stop on 3P mesh
+	if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
+	{
+		if (USkeletalMeshComponent* TPMesh = OwnerChar->GetMesh())
+		{
+			if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+			{
+				if (AnimInstance->IsAnyMontagePlaying())
+				{
+					AnimInstance->Montage_Stop(0.15f);
+				}
+			}
+		}
+	}
 }
 
 // ==================== VFX/SFX ====================

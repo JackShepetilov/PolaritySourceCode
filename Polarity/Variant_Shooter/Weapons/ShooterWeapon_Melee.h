@@ -247,6 +247,11 @@ protected:
 	/** Update lunge movement */
 	void UpdateLunge(float DeltaTime);
 
+	// ==================== Montage Control ====================
+
+	/** Stop any currently playing montage on the owner (allows replay for next swing) */
+	void StopCurrentMontage();
+
 	// ==================== VFX/SFX ====================
 
 	/** Spawn swing trail effect */
