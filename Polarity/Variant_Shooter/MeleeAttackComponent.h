@@ -512,6 +512,18 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnMeleeCooldownEnded OnMeleeCooldownEnded;
 
+	// ==================== External Control ====================
+
+	/** When true, CanAttack() returns false. Set by ShooterCharacter when a melee weapon is equipped. */
+	bool bExternallyDisabled = false;
+
+	/** Enable or disable this component externally (e.g., when a melee weapon is equipped) */
+	void SetExternallyDisabled(bool bDisabled) { bExternallyDisabled = bDisabled; }
+
+	/** Check if this component is externally disabled */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	bool IsExternallyDisabled() const { return bExternallyDisabled; }
+
 	// ==================== API ====================
 
 	/**

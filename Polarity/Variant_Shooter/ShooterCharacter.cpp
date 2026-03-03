@@ -1661,6 +1661,12 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 		RecoilComponent->SetRecoilSettings(Weapon->GetRecoilSettings());
 		RecoilComponent->ResetRecoil();
 	}
+
+	// Block MeleeAttackComponent while melee weapon is equipped
+	if (MeleeAttackComponent)
+	{
+		MeleeAttackComponent->SetExternallyDisabled(Weapon->IsMeleeWeapon());
+	}
 }
 
 void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
@@ -1668,6 +1674,12 @@ void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
 	if (RecoilComponent)
 	{
 		RecoilComponent->ResetRecoil();
+	}
+
+	// Re-enable MeleeAttackComponent when melee weapon is unequipped
+	if (MeleeAttackComponent && Weapon->IsMeleeWeapon())
+	{
+		MeleeAttackComponent->SetExternallyDisabled(false);
 	}
 }
 

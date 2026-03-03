@@ -230,6 +230,12 @@ bool UMeleeAttackComponent::CancelAttack()
 
 bool UMeleeAttackComponent::CanAttack() const
 {
+	// Blocked by melee weapon being equipped
+	if (bExternallyDisabled)
+	{
+		return false;
+	}
+
 	// Must be ready and input not locked
 	if (CurrentState != EMeleeAttackState::Ready || bInputLocked)
 	{

@@ -486,6 +486,9 @@ public:
 	void StartFiring();
 	void StopFiring();
 
+	/** Returns true if this weapon is a melee weapon (blocks MeleeAttackComponent while equipped) */
+	virtual bool IsMeleeWeapon() const { return false; }
+
 	/** Called when ADS/secondary action button pressed. Return true to block normal ADS. */
 	virtual bool OnSecondaryAction() { return false; }
 
