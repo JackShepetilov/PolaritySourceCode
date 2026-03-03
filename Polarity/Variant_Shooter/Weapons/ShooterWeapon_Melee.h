@@ -67,6 +67,28 @@ public:
 	virtual bool IsMeleeWeapon() const override { return true; }
 	virtual bool OnSecondaryAction() override { return true; } // Block ADS
 
+	// ==================== Damage Window (AnimNotify API) ====================
+
+	/**
+	 * Activate damage window from animation notify.
+	 * While active, sphere traces are performed each tick to detect hits.
+	 * Call from AnimNotify_MeleeDamageWindowStart in the swing montage.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee")
+	void ActivateDamageWindow();
+
+	/**
+	 * Deactivate damage window from animation notify.
+	 * If no hit occurred during the window, plays miss sound.
+	 * Call from AnimNotify_MeleeDamageWindowEnd in the swing montage.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee")
+	void DeactivateDamageWindow();
+
+	/** Check if damage window is currently active */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	bool IsDamageWindowActive() const { return bDamageWindowActive; }
+
 	// ==================== Melee Damage ====================
 
 	/** Base damage per swing */
@@ -242,6 +264,14 @@ protected:
 	/** Play camera shake */
 	void PlayMeleeCameraShake(TSubclassOf<UCameraShakeBase> ShakeClass, float Scale);
 
+	// ==================== Damage Window ====================
+
+	/** Perform hit detection during active damage window (called from Tick) */
+	void UpdateDamageWindow();
+
+	/** Process a successful hit during damage window */
+	void ProcessHit(const FHitResult& HitResult);
+
 	// ==================== State ====================
 
 	/** Velocity at attack start (for momentum calculations) */
@@ -262,4 +292,19 @@ protected:
 
 	/** Index to cycle/alternate swing animations (prevents same animation twice in a row) */
 	int32 LastSwingIndex = -1;
+
+	// ==================== Damage Window State ====================
+
+	/** True while damage window is open (between ActivateDamageWindow and DeactivateDamageWindow) */
+	bool bDamageWindowActive = false;
+
+	/** True if at least one hit occurred during the current damage window */
+	bool bHitDuringWindow = false;
+
+	/** Actors already hit during this swing (prevents multi-hit on same target) */
+	UPROPERTY()
+	TArray<TObjectPtr<AActor>> HitActorsThisSwing;
+
+	/** Currently selected swing data (set in Fire(), used during damage window) */
+	const FMeleeWeaponSwingData* CurrentSwingData = nullptr;
 };

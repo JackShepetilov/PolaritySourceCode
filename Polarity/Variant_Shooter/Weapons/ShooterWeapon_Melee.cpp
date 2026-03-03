@@ -39,15 +39,22 @@ void AShooterWeapon_Melee::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Perform hit detection during active damage window
+	if (bDamageWindowActive)
+	{
+		UpdateDamageWindow();
+	}
+
 	if (bIsLunging)
 	{
 		UpdateLunge(DeltaTime);
 	}
 }
 
+// ==================== Fire ====================
+
 void AShooterWeapon_Melee::Fire()
 {
-	// Base class handles firing flag check and refire timer scheduling
 	if (!bIsFiring)
 	{
 		return;
@@ -65,12 +72,17 @@ void AShooterWeapon_Melee::Fire()
 		}
 	}
 
+	// Reset damage window state for new swing
+	bDamageWindowActive = false;
+	bHitDuringWindow = false;
+	HitActorsThisSwing.Empty();
+
 	// Select and play swing animation
-	const FMeleeWeaponSwingData* SelectedSwing = SelectWeightedSwing();
-	if (SelectedSwing && SelectedSwing->SwingMontage)
+	CurrentSwingData = SelectWeightedSwing();
+	if (CurrentSwingData && CurrentSwingData->SwingMontage)
 	{
-		WeaponOwner->PlayFiringMontage(SelectedSwing->SwingMontage);
-		PlayMeleeCameraShake(SelectedSwing->SwingCameraShake, SelectedSwing->SwingShakeScale);
+		WeaponOwner->PlayFiringMontage(CurrentSwingData->SwingMontage);
+		PlayMeleeCameraShake(CurrentSwingData->SwingCameraShake, CurrentSwingData->SwingShakeScale);
 	}
 	else if (FiringMontage)
 	{
@@ -84,52 +96,90 @@ void AShooterWeapon_Melee::Fire()
 	// Spawn swing trail VFX
 	SpawnSwingTrail();
 
-	// Perform hit detection
-	FHitResult HitResult;
-	bool bHit = PerformMeleeTrace(HitResult);
-
-	if (bHit)
-	{
-		AActor* HitActor = HitResult.GetActor();
-		float FinalDamage = ApplyMeleeDamage(HitActor, HitResult);
-
-		// Apply knockback
-		ApplyKnockback(HitActor);
-
-		// Play hit effects
-		PlayMeleeSound(HitSound);
-		PlayMeleeCameraShake(HitCameraShake, HitShakeScale);
-		SpawnMeleeImpactFX(HitResult.ImpactPoint, HitResult.ImpactNormal);
-
-		// Report hit to weapon owner (hit markers, charge gain, etc.)
-		bool bHeadshot = IsHeadshot(HitResult);
-		FVector HitDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
-		bool bKilled = HitActor->IsActorBeingDestroyed() || (Cast<AShooterNPC>(HitActor) && Cast<AShooterNPC>(HitActor)->IsDead());
-		WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, FinalDamage, bHeadshot, bKilled);
-
-		// Start lunge toward target if enabled
-		if (bEnableLunge)
-		{
-			StartLunge(HitActor);
-		}
-	}
-	else
-	{
-		// Miss
-		PlayMeleeSound(MissSound);
-	}
-
 	// Fire perception event (AI awareness)
 	OnShotFired.Broadcast();
 
-	// Schedule next swing (base class handles timer via bFullAuto)
+	// Schedule next swing
 	float ActualRefireRate = RefireRate;
-	if (SelectedSwing)
+	if (CurrentSwingData)
 	{
-		// Adjust refire rate based on animation play rate
-		ActualRefireRate = RefireRate / SelectedSwing->BasePlayRate;
+		ActualRefireRate = RefireRate / CurrentSwingData->BasePlayRate;
 	}
 	GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon_Melee::Fire, ActualRefireRate, false);
+}
+
+// ==================== Damage Window (AnimNotify API) ====================
+
+void AShooterWeapon_Melee::ActivateDamageWindow()
+{
+	bDamageWindowActive = true;
+	bHitDuringWindow = false;
+	HitActorsThisSwing.Empty();
+}
+
+void AShooterWeapon_Melee::DeactivateDamageWindow()
+{
+	bDamageWindowActive = false;
+
+	// Play miss sound if nothing was hit during the window
+	if (!bHitDuringWindow)
+	{
+		PlayMeleeSound(MissSound);
+	}
+
+	// Stop trail VFX
+	StopSwingTrail();
+}
+
+void AShooterWeapon_Melee::UpdateDamageWindow()
+{
+	FHitResult HitResult;
+	if (PerformMeleeTrace(HitResult))
+	{
+		AActor* HitActor = HitResult.GetActor();
+
+		// Skip actors already hit during this swing
+		if (HitActor && !HitActorsThisSwing.Contains(HitActor))
+		{
+			ProcessHit(HitResult);
+		}
+	}
+}
+
+void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
+{
+	AActor* HitActor = HitResult.GetActor();
+	if (!HitActor)
+	{
+		return;
+	}
+
+	// Mark actor as hit (prevent multi-hit)
+	HitActorsThisSwing.Add(HitActor);
+	bHitDuringWindow = true;
+
+	// Apply damage
+	float FinalDamage = ApplyMeleeDamage(HitActor, HitResult);
+
+	// Apply knockback
+	ApplyKnockback(HitActor);
+
+	// Play hit effects
+	PlayMeleeSound(HitSound);
+	PlayMeleeCameraShake(HitCameraShake, HitShakeScale);
+	SpawnMeleeImpactFX(HitResult.ImpactPoint, HitResult.ImpactNormal);
+
+	// Report hit to weapon owner (hit markers, charge gain, etc.)
+	bool bHeadshot = IsHeadshot(HitResult);
+	FVector HitDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
+	bool bKilled = HitActor->IsActorBeingDestroyed() || (Cast<AShooterNPC>(HitActor) && Cast<AShooterNPC>(HitActor)->IsDead());
+	WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, FinalDamage, bHeadshot, bKilled);
+
+	// Start lunge toward target if enabled
+	if (bEnableLunge)
+	{
+		StartLunge(HitActor);
+	}
 }
 
 // ==================== Hit Detection ====================
@@ -390,23 +440,13 @@ void AShooterWeapon_Melee::UpdateLunge(float DeltaTime)
 		return;
 	}
 
-	// Move toward target
+	// Move toward target - one-shot impulse
 	FVector LungeDirection = ToTarget.GetSafeNormal();
-	float MoveDistance = LungeSpeed * DeltaTime;
-
-	// Don't overshoot
-	if (MoveDistance > DistanceRemaining - LungeStopBuffer)
-	{
-		MoveDistance = DistanceRemaining - LungeStopBuffer;
-		bIsLunging = false;
-	}
-
 	if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
 	{
 		OwnerChar->LaunchCharacter(LungeDirection * LungeSpeed, true, true);
-		// Lunge is one-shot impulse
-		bIsLunging = false;
 	}
+	bIsLunging = false;
 }
 
 // ==================== VFX/SFX ====================
@@ -453,7 +493,7 @@ void AShooterWeapon_Melee::SpawnMeleeImpactFX(const FVector& Location, const FVe
 		return;
 	}
 
-	UNiagaraComponent* ImpactComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 		GetWorld(),
 		MeleeImpactFX,
 		Location,
