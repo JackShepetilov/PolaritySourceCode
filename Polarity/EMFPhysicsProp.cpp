@@ -590,17 +590,27 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// Explosive impact: detonate only if THIS prop was already moving fast (pre-collision speed)
-	if (bCanExplode && !bHasExploded && !bIsDead)
+	// Explosive impact: detonate only if THIS prop's own speed exceeds threshold
+	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s::OnPropHit collision with %s, CachedSpeed=%.0f, Threshold=%.0f"),
-			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), CachedPreCollisionSpeed, ExplosionSpeedThreshold);
-		if (CachedPreCollisionSpeed >= ExplosionSpeedThreshold)
+		const float Speed = CachedPreCollisionSpeed;
+
+		if (GEngine)
 		{
-			// Critical velocity: broadcast arena-level destruction event
-			if (CachedPreCollisionSpeed >= CriticalVelocity)
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f,
+				Speed >= ExplosionSpeedThreshold ? FColor::Red : FColor::Yellow,
+				FString::Printf(TEXT("[%s] HIT %s | Speed=%.0f | Threshold=%.0f | %s"),
+					*GetName(),
+					OtherActor ? *OtherActor->GetName() : TEXT("NULL"),
+					Speed, ExplosionSpeedThreshold,
+					Speed >= ExplosionSpeedThreshold ? TEXT("BOOM") : TEXT("no")));
+		}
+
+		if (Speed >= ExplosionSpeedThreshold)
+		{
+			if (Speed >= CriticalVelocity)
 			{
-				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), CachedPreCollisionSpeed);
+				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
 			}
 			Explode(1.0f, 1.0f, 1.0f);
 			return;

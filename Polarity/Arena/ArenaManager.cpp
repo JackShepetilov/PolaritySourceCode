@@ -608,9 +608,24 @@ void AArenaManager::OnPlayerRespawned()
 
 void AArenaManager::RegisterTrackedProps()
 {
+	// Register explicitly tracked props
+	TSet<AEMFPhysicsProp*> AlreadyRegistered;
 	for (const TSoftObjectPtr<AEMFPhysicsProp>& PropRef : TrackedProps)
 	{
 		if (AEMFPhysicsProp* Prop = PropRef.Get())
+		{
+			Prop->OnCriticalVelocityImpact.AddDynamic(this, &AArenaManager::OnTrackedPropCriticalImpact);
+			AlreadyRegistered.Add(Prop);
+		}
+	}
+
+	// Also register ALL props in the level (for props thrown into arena dynamically)
+	TArray<AActor*> AllProps;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AEMFPhysicsProp::StaticClass(), AllProps);
+	for (AActor* PropActor : AllProps)
+	{
+		AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(PropActor);
+		if (Prop && !AlreadyRegistered.Contains(Prop))
 		{
 			Prop->OnCriticalVelocityImpact.AddDynamic(this, &AArenaManager::OnTrackedPropCriticalImpact);
 		}
@@ -619,6 +634,12 @@ void AArenaManager::RegisterTrackedProps()
 
 void AArenaManager::OnTrackedPropCriticalImpact(AEMFPhysicsProp* Prop, FVector Location, float Speed)
 {
+	// Only react if the impact is within our arena's destruction radius
+	if (FVector::Dist(Location, GetActorLocation()) > DestructionRadius)
+	{
+		return;
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Critical velocity impact from %s at speed %.0f cm/s"),
 		Prop ? *Prop->GetName() : TEXT("NULL"), Speed);
 
