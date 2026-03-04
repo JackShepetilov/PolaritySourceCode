@@ -15,11 +15,13 @@ class AShooterCharacter;
 class UCheckpointSubsystem;
 class AShooterDoor;
 class ADestructibleIslandActor;
+class AEMFPhysicsProp;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveStarted, int32, WaveIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveCleared, int32, WaveIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnArenaCriticalImpact, AEMFPhysicsProp*, Prop, FVector, Location, float, Speed);
 
 /**
  * Manages a combat arena: activation, wave spawning, exit blockers, and checkpoint integration.
@@ -74,6 +76,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Door")
 	TSoftObjectPtr<AShooterDoor> RewardDoor;
 
+	// ==================== Tracked Props ====================
+
+	/** EMF props to monitor for critical velocity impacts.
+	 *  When any tracked prop hits at its CriticalVelocity, OnPropCriticalVelocityImpact fires. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Props")
+	TArray<TSoftObjectPtr<AEMFPhysicsProp>> TrackedProps;
+
 	// ==================== Destructible Island ====================
 
 	/** Optional destructible island linked to this arena. Destroying it force-completes the arena. */
@@ -103,6 +112,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
 	FOnWaveCleared OnWaveCleared;
+
+	/** Fired when a tracked prop impacts at critical velocity — use to trigger arena-wide destruction */
+	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
+	FOnArenaCriticalImpact OnPropCriticalVelocityImpact;
 
 	// ==================== API ====================
 
@@ -168,6 +181,15 @@ private:
 	/** Called when player respawns from checkpoint */
 	UFUNCTION()
 	void OnPlayerRespawned();
+
+	// ==================== Tracked Props ====================
+
+	/** Called when a tracked prop impacts at critical velocity */
+	UFUNCTION()
+	void OnTrackedPropCriticalImpact(AEMFPhysicsProp* Prop, FVector Location, float Speed);
+
+	/** Bind to tracked props' OnCriticalVelocityImpact delegates */
+	void RegisterTrackedProps();
 
 	// ==================== Island ====================
 

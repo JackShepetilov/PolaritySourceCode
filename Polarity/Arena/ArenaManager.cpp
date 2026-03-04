@@ -16,6 +16,7 @@
 #include "NavigationSystem.h"
 #include "Polarity/Variant_Shooter/ShooterDoor.h"
 #include "DestructibleIslandActor.h"
+#include "Polarity/EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
 
 AArenaManager::AArenaManager()
@@ -46,6 +47,9 @@ void AArenaManager::BeginPlay()
 		CheckpointSubsystem->OnPlayerRespawned.AddDynamic(this, &AArenaManager::OnPlayerRespawned);
 		bBoundToRespawn = true;
 	}
+
+	// Bind to tracked EMF props for critical velocity events
+	RegisterTrackedProps();
 
 	// Bind to linked destructible island
 	if (ADestructibleIslandActor* Island = LinkedIsland.Get())
@@ -585,6 +589,27 @@ void AArenaManager::OnPlayerRespawned()
 			ActivateArena(Player);
 		}
 	}
+}
+
+// ==================== Tracked Props ====================
+
+void AArenaManager::RegisterTrackedProps()
+{
+	for (const TSoftObjectPtr<AEMFPhysicsProp>& PropRef : TrackedProps)
+	{
+		if (AEMFPhysicsProp* Prop = PropRef.Get())
+		{
+			Prop->OnCriticalVelocityImpact.AddDynamic(this, &AArenaManager::OnTrackedPropCriticalImpact);
+		}
+	}
+}
+
+void AArenaManager::OnTrackedPropCriticalImpact(AEMFPhysicsProp* Prop, FVector Location, float Speed)
+{
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Critical velocity impact from %s at speed %.0f cm/s"),
+		Prop ? *Prop->GetName() : TEXT("NULL"), Speed);
+
+	OnPropCriticalVelocityImpact.Broadcast(Prop, Location, Speed);
 }
 
 // ==================== Island ====================

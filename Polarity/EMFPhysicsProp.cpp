@@ -584,14 +584,19 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// Explosive impact: detonate on high-speed collision during reverse channeling flight
-	if (bCanExplode && bIsInReverseFlight && !bHasExploded && !bIsDead && PropMesh)
+	// Explosive impact: detonate on high-speed collision (works regardless of reverse flight)
+	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
 	{
 		const float Speed = PropMesh->GetPhysicsLinearVelocity().Size();
 		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s::OnPropHit collision with %s, Speed=%.0f, Threshold=%.0f"),
 			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), Speed, ExplosionSpeedThreshold);
 		if (Speed >= ExplosionSpeedThreshold)
 		{
+			// Critical velocity: broadcast arena-level destruction event
+			if (Speed >= CriticalVelocity)
+			{
+				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+			}
 			Explode(1.0f, 1.0f, 1.0f);
 			return;
 		}
@@ -633,11 +638,19 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		return;
 	}
 
-	// Explosive props: skip kinetic damage, detonate immediately on NPC contact
-	if (bCanExplode && bIsInReverseFlight && !bHasExploded)
+	// Explosive props: detonate on NPC contact at sufficient speed (or always during reverse flight)
+	if (bCanExplode && !bHasExploded)
 	{
-		Explode(1.0f, 1.0f, 1.0f);
-		return;
+		const float OverlapSpeed = PropMesh ? PropMesh->GetPhysicsLinearVelocity().Size() : 0.0f;
+		if (bIsInReverseFlight || OverlapSpeed >= ExplosionSpeedThreshold)
+		{
+			if (OverlapSpeed >= CriticalVelocity)
+			{
+				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), OverlapSpeed);
+			}
+			Explode(1.0f, 1.0f, 1.0f);
+			return;
+		}
 	}
 
 	// Impact speed from prop's velocity

@@ -24,6 +24,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*,
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropChargeChanged, float, NewCharge, uint8, NewPolarity);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropExploded, AEMFPhysicsProp*, Prop, FVector, Location, float, DamageMultiplier);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnNPCStunnedByExplosion, AShooterNPC*, StunnedNPC, AEMFPhysicsProp*, ExplodedProp, float, StunDuration);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropCriticalVelocityImpact, AEMFPhysicsProp*, Prop, FVector, Location, float, Speed);
 
 /**
  * Physics-simulated prop with full EMF system integration.
@@ -220,9 +221,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact")
 	bool bCanExplode = false;
 
-	/** Minimum speed (cm/s) during reverse flight to trigger explosion on collision */
+	/** Minimum speed (cm/s) to trigger explosion on collision (works regardless of reverse flight) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
 	float ExplosionSpeedThreshold = 500.0f;
+
+	/** Speed (cm/s) at which impact is considered critically destructive.
+	 *  Triggers OnCriticalVelocityImpact for arena-level destruction events. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float CriticalVelocity = 2000.0f;
 
 	/** Base radial damage dealt by explosion */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
@@ -428,6 +434,10 @@ public:
 	/** Called for each NPC stunned by this prop's explosion */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCStunnedByExplosion OnNPCStunnedByExplosion;
+
+	/** Called when prop impacts at critical velocity — signals arena-level destruction */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnPropCriticalVelocityImpact OnCriticalVelocityImpact;
 
 	// ==================== Public API ====================
 
