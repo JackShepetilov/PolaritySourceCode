@@ -18,6 +18,13 @@
 #include "DestructibleIslandActor.h"
 #include "Polarity/EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Field/FieldSystemObjects.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/OverlapResult.h"
 
 AArenaManager::AArenaManager()
 {
@@ -62,6 +69,12 @@ void AArenaManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
 	GetWorldTimerManager().ClearTimer(ActivationDelayHandle);
+
+	for (FTimerHandle& Handle : DestructionTimerHandles)
+	{
+		GetWorldTimerManager().ClearTimer(Handle);
+	}
+	DestructionTimerHandles.Empty();
 
 	if (CheckpointSubsystem && bBoundToRespawn)
 	{
@@ -610,6 +623,332 @@ void AArenaManager::OnTrackedPropCriticalImpact(AEMFPhysicsProp* Prop, FVector L
 		Prop ? *Prop->GetName() : TEXT("NULL"), Speed);
 
 	OnPropCriticalVelocityImpact.Broadcast(Prop, Location, Speed);
+
+	ExecuteArenaDestruction(Location);
+}
+
+// ==================== Arena Destruction ====================
+
+void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
+{
+	if (bDestructionExecuted || !DestructionGC || !GetWorld())
+	{
+		return;
+	}
+	bDestructionExecuted = true;
+
+	// Build exclusion set for fast lookup
+	TSet<AActor*> ExcludedActors;
+	ExcludedActors.Add(this);
+	for (const TSoftObjectPtr<AActor>& Ref : DestructionExcluded)
+	{
+		if (AActor* Actor = Ref.Get())
+		{
+			ExcludedActors.Add(Actor);
+		}
+	}
+	for (const TSoftObjectPtr<AActor>& Ref : ExitBlockers)
+	{
+		if (AActor* Actor = Ref.Get())
+		{
+			ExcludedActors.Add(Actor);
+		}
+	}
+	for (const TSoftObjectPtr<AArenaSpawnPoint>& Ref : SpawnPoints)
+	{
+		if (AActor* Actor = Ref.Get())
+		{
+			ExcludedActors.Add(Actor);
+		}
+	}
+	if (AActor* Respawn = PlayerRespawnPoint.Get())
+	{
+		ExcludedActors.Add(Respawn);
+	}
+	if (AActor* Door = RewardDoor.Get())
+	{
+		ExcludedActors.Add(Door);
+	}
+	if (AActor* Island = LinkedIsland.Get())
+	{
+		ExcludedActors.Add(Island);
+	}
+
+	// Exclude the player
+	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	{
+		if (APawn* Pawn = PC->GetPawn())
+		{
+			ExcludedActors.Add(Pawn);
+		}
+	}
+
+	// Exclude alive NPCs
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		if (AShooterNPC* NPC = NPCPtr.Get())
+		{
+			ExcludedActors.Add(NPC);
+		}
+	}
+
+	// Collect all actors within DestructionRadius via sphere overlap
+	struct FDestructionTarget
+	{
+		TWeakObjectPtr<AActor> Actor;
+		TWeakObjectPtr<UStaticMeshComponent> MeshComp;
+		float BoundsVolume;
+		float DistanceFromEpicenter;
+		bool bIsProp;
+	};
+
+	TArray<FDestructionTarget> Targets;
+	const FVector ArenaCenter = GetActorLocation();
+
+	TArray<FOverlapResult> Overlaps;
+	FCollisionShape Sphere = FCollisionShape::MakeSphere(DestructionRadius);
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	// Sweep WorldStatic + WorldDynamic to catch both static mesh actors and physics props
+	GetWorld()->OverlapMultiByChannel(Overlaps, ArenaCenter, FQuat::Identity, ECC_WorldStatic, Sphere, QueryParams);
+
+	TArray<FOverlapResult> DynamicOverlaps;
+	GetWorld()->OverlapMultiByChannel(DynamicOverlaps, ArenaCenter, FQuat::Identity, ECC_WorldDynamic, Sphere, QueryParams);
+	Overlaps.Append(DynamicOverlaps);
+
+	TSet<AActor*> ProcessedActors;
+
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AActor* Actor = Overlap.GetActor();
+		if (!Actor || ExcludedActors.Contains(Actor) || ProcessedActors.Contains(Actor))
+		{
+			continue;
+		}
+		ProcessedActors.Add(Actor);
+
+		// Check if it's a prop
+		AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Actor);
+		if (Prop && Prop->IsDead())
+		{
+			continue;
+		}
+
+		// Find StaticMeshComponent
+		UStaticMeshComponent* MeshComp = nullptr;
+		if (Prop)
+		{
+			MeshComp = Prop->PropMesh;
+		}
+		else
+		{
+			MeshComp = Actor->FindComponentByClass<UStaticMeshComponent>();
+		}
+
+		if (!MeshComp || !MeshComp->GetStaticMesh())
+		{
+			continue;
+		}
+
+		// Calculate bounding volume
+		const FBoxSphereBounds Bounds = MeshComp->CalcBounds(MeshComp->GetComponentTransform());
+		const FVector Extent = Bounds.BoxExtent;
+		const float Volume = Extent.X * Extent.Y * Extent.Z * 8.0f;
+
+		const float Distance = FVector::Dist(Actor->GetActorLocation(), Epicenter);
+
+		FDestructionTarget Target;
+		Target.Actor = Actor;
+		Target.MeshComp = MeshComp;
+		Target.BoundsVolume = Volume;
+		Target.DistanceFromEpicenter = Distance;
+		Target.bIsProp = (Prop != nullptr);
+		Targets.Add(Target);
+	}
+
+	if (Targets.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: No destruction targets found within radius %.0f"), DestructionRadius);
+		return;
+	}
+
+	// Sort by volume descending
+	Targets.Sort([](const FDestructionTarget& A, const FDestructionTarget& B)
+	{
+		return A.BoundsVolume > B.BoundsVolume;
+	});
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Executing arena destruction — %d targets, top %d get full GC"),
+		Targets.Num(), FMath::Min(MaxFullDestructions, Targets.Num()));
+
+	// Schedule staggered destruction
+	for (int32 i = 0; i < Targets.Num(); i++)
+	{
+		const FDestructionTarget& Target = Targets[i];
+		const bool bFullGC = (i < MaxFullDestructions);
+
+		float Delay = 0.0f;
+		if (DestructionWaveSpeed > 0.0f)
+		{
+			Delay = Target.DistanceFromEpicenter / DestructionWaveSpeed;
+		}
+
+		// Capture by value for lambda safety
+		TWeakObjectPtr<AActor> WeakActor = Target.Actor;
+		TWeakObjectPtr<UStaticMeshComponent> WeakMesh = Target.MeshComp;
+		bool bIsProp = Target.bIsProp;
+		FVector EpicenterCopy = Epicenter;
+
+		auto DestroyLambda = [this, WeakActor, WeakMesh, bFullGC, bIsProp, EpicenterCopy]()
+		{
+			AActor* Actor = WeakActor.Get();
+			UStaticMeshComponent* MeshComp = WeakMesh.Get();
+			if (!Actor || !MeshComp)
+			{
+				return;
+			}
+
+			if (bIsProp)
+			{
+				AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Actor);
+				if (Prop && !Prop->IsDead())
+				{
+					// If prop has no own GC and qualifies for full GC, spawn generic one
+					if (bFullGC && !Prop->PropGeometryCollection)
+					{
+						SpawnDestructionGCForMesh(MeshComp, EpicenterCopy);
+					}
+					// Kill the prop (triggers its own GC if it has one)
+					Prop->Explode(1.0f, 1.0f, 1.0f);
+				}
+			}
+			else
+			{
+				// Static mesh actor
+				if (bFullGC)
+				{
+					SpawnDestructionGCForMesh(MeshComp, EpicenterCopy);
+				}
+				// Hide and disable original
+				Actor->SetActorHiddenInGame(true);
+				MeshComp->SetSimulatePhysics(false);
+				MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			}
+		};
+
+		if (Delay <= KINDA_SMALL_NUMBER)
+		{
+			DestroyLambda();
+		}
+		else
+		{
+			FTimerHandle Handle;
+			GetWorldTimerManager().SetTimer(Handle, FTimerDelegate::CreateLambda(MoveTemp(DestroyLambda)), Delay, false);
+			DestructionTimerHandles.Add(Handle);
+		}
+	}
+}
+
+void AArenaManager::SpawnDestructionGCForMesh(UStaticMeshComponent* MeshComp, const FVector& Epicenter)
+{
+	if (!DestructionGC || !MeshComp || !MeshComp->GetStaticMesh() || !GetWorld())
+	{
+		return;
+	}
+
+	const FTransform MeshTransform = MeshComp->GetComponentTransform();
+	const FVector MeshLocation = MeshTransform.GetLocation();
+	const FRotator MeshRotation = MeshTransform.GetRotation().Rotator();
+
+	// Calculate scale to match original mesh bounds
+	const FBox MeshLocalBox = MeshComp->GetStaticMesh()->GetBoundingBox();
+	const FVector MeshLocalExtent = MeshLocalBox.GetExtent(); // half-extents in local space
+	const FVector MeshWorldScale = MeshTransform.GetScale3D();
+	const FVector MeshWorldExtent = MeshLocalExtent * MeshWorldScale;
+
+	// Scale GC cube to match: each axis independently
+	FVector GCScale = FVector::OneVector;
+	if (DestructionGCHalfExtent.X > KINDA_SMALL_NUMBER)
+	{
+		GCScale.X = MeshWorldExtent.X / DestructionGCHalfExtent.X;
+	}
+	if (DestructionGCHalfExtent.Y > KINDA_SMALL_NUMBER)
+	{
+		GCScale.Y = MeshWorldExtent.Y / DestructionGCHalfExtent.Y;
+	}
+	if (DestructionGCHalfExtent.Z > KINDA_SMALL_NUMBER)
+	{
+		GCScale.Z = MeshWorldExtent.Z / DestructionGCHalfExtent.Z;
+	}
+
+	// Spawn GC actor
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+		MeshLocation, MeshRotation, SpawnParams);
+
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		GCActor->Destroy();
+		return;
+	}
+
+	GCActor->SetActorScale3D(GCScale);
+
+	// Collision: gibs should not push pawns or block camera
+	GCComp->SetCollisionProfileName(DestructionGibCollisionProfile);
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	GCComp->SetRestCollection(DestructionGC);
+
+	// Copy materials from original mesh to GC gibs
+	const int32 NumMats = MeshComp->GetNumMaterials();
+	for (int32 i = 0; i < NumMats; i++)
+	{
+		if (UMaterialInterface* Mat = MeshComp->GetMaterial(i))
+		{
+			GCComp->SetMaterial(i, Mat);
+		}
+	}
+
+	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
+
+	// Break all clusters
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
+
+	// Scatter pieces radially from epicenter
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = DestructionImpulse;
+	RadialVelocity->Position = Epicenter;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+	AngularVelocity->Magnitude = DestructionAngularImpulse;
+	AngularVelocity->Position = Epicenter;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVelocity);
+
+	// Self-destruct after lifetime
+	GCActor->SetLifeSpan(DestructionGibLifetime);
 }
 
 // ==================== Island ====================

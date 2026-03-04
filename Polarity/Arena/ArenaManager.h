@@ -16,6 +16,7 @@ class UCheckpointSubsystem;
 class AShooterDoor;
 class ADestructibleIslandActor;
 class AEMFPhysicsProp;
+class UGeometryCollection;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
@@ -88,6 +89,50 @@ public:
 	/** Optional destructible island linked to this arena. Destroying it force-completes the arena. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Island")
 	TSoftObjectPtr<ADestructibleIslandActor> LinkedIsland;
+
+	// ==================== Arena Destruction ====================
+
+	/** Actors EXCLUDED from arena destruction (floors, walls, pillars you want to keep).
+	 *  Everything else with a StaticMeshComponent or EMFPhysicsProp within DestructionRadius gets shattered. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
+	TArray<TSoftObjectPtr<AActor>> DestructionExcluded;
+
+	/** Radius (cm) from ArenaManager to auto-collect destructible meshes/props */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "100.0", Units = "cm"))
+	float DestructionRadius = 3000.0f;
+
+	/** Generic cube GC asset — spawned at each mesh's size/rotation on destruction */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
+	TObjectPtr<UGeometryCollection> DestructionGC;
+
+	/** Half-extents of the DestructionGC asset in its native (unscaled) form.
+	 *  Used to compute per-mesh scale. Set to match your cube GC asset. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
+	FVector DestructionGCHalfExtent = FVector(50.0f);
+
+	/** Shockwave speed (cm/s). Objects farther from epicenter break later. 0 = all instant. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionWaveSpeed = 5000.0f;
+
+	/** How long GC gib fragments persist (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.5"))
+	float DestructionGibLifetime = 2.0f;
+
+	/** Radial scatter impulse for GC gibs (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionImpulse = 1000.0f;
+
+	/** Angular tumble impulse for GC gibs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionAngularImpulse = 150.0f;
+
+	/** Max objects that get full GC destruction (sorted by volume). Rest just hide. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "1"))
+	int32 MaxFullDestructions = 20;
+
+	/** Collision profile for destruction gibs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
+	FName DestructionGibCollisionProfile = FName("Ragdoll");
 
 	// ==================== State (Read-Only) ====================
 
@@ -190,6 +235,20 @@ private:
 
 	/** Bind to tracked props' OnCriticalVelocityImpact delegates */
 	void RegisterTrackedProps();
+
+	// ==================== Arena Destruction ====================
+
+	/** Orchestrate arena-wide destruction shockwave from epicenter */
+	void ExecuteArenaDestruction(const FVector& Epicenter);
+
+	/** Spawn GC cube at a static mesh's transform, matching size and orientation */
+	void SpawnDestructionGCForMesh(UStaticMeshComponent* MeshComp, const FVector& Epicenter);
+
+	/** Timer handles for staggered destruction wave */
+	TArray<FTimerHandle> DestructionTimerHandles;
+
+	/** Prevent double-triggering destruction */
+	bool bDestructionExecuted = false;
 
 	// ==================== Island ====================
 
