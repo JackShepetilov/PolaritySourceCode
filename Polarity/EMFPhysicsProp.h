@@ -521,6 +521,10 @@ private:
 	/** True if prop has already exploded (prevents double explosion) */
 	bool bHasExploded = false;
 
+	/** Prop's speed cached at end of Tick (before any collision callbacks).
+	 *  Used for explosion checks so only the prop's OWN velocity counts. */
+	float CachedPreCollisionSpeed = 0.0f;
+
 	// ==================== Charge Tracking State ====================
 
 	float PreviousChargeValue = 0.0f;

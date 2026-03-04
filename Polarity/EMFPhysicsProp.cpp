@@ -115,6 +115,12 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 
 	UpdateChargeTracking();
 
+	// Cache speed for explosion checks (before collision callbacks modify velocity)
+	if (PropMesh)
+	{
+		CachedPreCollisionSpeed = PropMesh->GetPhysicsLinearVelocity().Size();
+	}
+
 	// Debug: always-visible capture range sphere around this prop
 	if (bDrawDebugForces && bCanBeCaptured)
 	{
@@ -584,18 +590,17 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// Explosive impact: detonate on high-speed collision (works regardless of reverse flight)
-	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
+	// Explosive impact: detonate only if THIS prop was already moving fast (pre-collision speed)
+	if (bCanExplode && !bHasExploded && !bIsDead)
 	{
-		const float Speed = PropMesh->GetPhysicsLinearVelocity().Size();
-		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s::OnPropHit collision with %s, Speed=%.0f, Threshold=%.0f"),
-			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), Speed, ExplosionSpeedThreshold);
-		if (Speed >= ExplosionSpeedThreshold)
+		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s::OnPropHit collision with %s, CachedSpeed=%.0f, Threshold=%.0f"),
+			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), CachedPreCollisionSpeed, ExplosionSpeedThreshold);
+		if (CachedPreCollisionSpeed >= ExplosionSpeedThreshold)
 		{
 			// Critical velocity: broadcast arena-level destruction event
-			if (Speed >= CriticalVelocity)
+			if (CachedPreCollisionSpeed >= CriticalVelocity)
 			{
-				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), CachedPreCollisionSpeed);
 			}
 			Explode(1.0f, 1.0f, 1.0f);
 			return;
@@ -638,15 +643,14 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		return;
 	}
 
-	// Explosive props: detonate on NPC contact at sufficient speed (or always during reverse flight)
+	// Explosive props: detonate on NPC contact if prop's own speed is sufficient (or during reverse flight)
 	if (bCanExplode && !bHasExploded)
 	{
-		const float OverlapSpeed = PropMesh ? PropMesh->GetPhysicsLinearVelocity().Size() : 0.0f;
-		if (bIsInReverseFlight || OverlapSpeed >= ExplosionSpeedThreshold)
+		if (bIsInReverseFlight || CachedPreCollisionSpeed >= ExplosionSpeedThreshold)
 		{
-			if (OverlapSpeed >= CriticalVelocity)
+			if (CachedPreCollisionSpeed >= CriticalVelocity)
 			{
-				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), OverlapSpeed);
+				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), CachedPreCollisionSpeed);
 			}
 			Explode(1.0f, 1.0f, 1.0f);
 			return;
