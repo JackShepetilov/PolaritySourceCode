@@ -17,6 +17,7 @@
 #include "Polarity/Variant_Shooter/ShooterDoor.h"
 #include "DestructibleIslandActor.h"
 #include "Polarity/EMFPhysicsProp.h"
+#include "Polarity/Variant_Shooter/Weapons/EMFProjectile.h"
 #include "Kismet/GameplayStatics.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
@@ -25,6 +26,12 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/OverlapResult.h"
+#include "Engine/Brush.h"
+#include "GameFramework/Volume.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
+#include "RewardContainer.h"
+#include "Polarity/Variant_Shooter/ShooterDummy.h"
 
 AArenaManager::AArenaManager()
 {
@@ -63,6 +70,12 @@ void AArenaManager::BeginPlay()
 	{
 		Island->OnIslandDestroyed.AddDynamic(this, &AArenaManager::OnLinkedIslandDestroyed);
 	}
+
+	// Bind to reward dummy death
+	if (AShooterDummy* Dummy = RewardDummy.Get())
+	{
+		Dummy->OnDummyDeath.AddDynamic(this, &AArenaManager::OnRewardDummyDeath);
+	}
 }
 
 void AArenaManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -75,6 +88,12 @@ void AArenaManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		GetWorldTimerManager().ClearTimer(Handle);
 	}
 	DestructionTimerHandles.Empty();
+
+	// Restore camera control if locked
+	if (bCameraLocked)
+	{
+		EndCameraLock();
+	}
 
 	if (CheckpointSubsystem && bBoundToRespawn)
 	{
@@ -574,6 +593,12 @@ void AArenaManager::ResetArena()
 	}
 	AliveNPCs.Empty();
 
+	// Restore camera if locked
+	if (bCameraLocked)
+	{
+		EndCameraLock();
+	}
+
 	// Hide blockers (passage open)
 	SetBlockersActive(false);
 
@@ -634,18 +659,49 @@ void AArenaManager::RegisterTrackedProps()
 
 void AArenaManager::OnTrackedPropCriticalImpact(AEMFPhysicsProp* Prop, FVector Location, float Speed)
 {
+	NotifyCriticalImpact(Prop, Location, Speed);
+}
+
+void AArenaManager::OnProjectileCriticalImpact(AEMFProjectile* Projectile, FVector Location, float Speed)
+{
+	NotifyCriticalImpact(Projectile, Location, Speed);
+}
+
+void AArenaManager::NotifyCriticalImpact(AActor* Source, FVector Location, float Speed)
+{
 	// Only react if the impact is within our arena's destruction radius
 	if (FVector::Dist(Location, GetActorLocation()) > DestructionRadius)
 	{
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Critical velocity impact from %s at speed %.0f cm/s"),
-		Prop ? *Prop->GetName() : TEXT("NULL"), Speed);
+	// Check minimum distance — player must be far enough from arena center
+	if (MinDestructionDistance > 0.0f)
+	{
+		if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+		{
+			if (APawn* Pawn = PC->GetPawn())
+			{
+				const float PlayerDist = FVector::Dist(Pawn->GetActorLocation(), GetActorLocation());
+				if (PlayerDist < MinDestructionDistance)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Player too close (%.0f < %.0f), ignoring critical impact"),
+						PlayerDist, MinDestructionDistance);
+					return;
+				}
+			}
+		}
+	}
 
-	OnPropCriticalVelocityImpact.Broadcast(Prop, Location, Speed);
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Critical velocity impact from %s at speed %.0f cm/s"),
+		Source ? *Source->GetName() : TEXT("NULL"), Speed);
+
+	OnCriticalVelocityImpact.Broadcast(Source, Location, Speed);
 
 	ExecuteArenaDestruction(Location);
+
+	// Lock camera on epicenter for cinematic effect
+	StartCameraLock(Location);
 }
 
 // ==================== Arena Destruction ====================
@@ -661,36 +717,54 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 	// Build exclusion set for fast lookup
 	TSet<AActor*> ExcludedActors;
 	ExcludedActors.Add(this);
-	for (const TSoftObjectPtr<AActor>& Ref : DestructionExcluded)
+	for (int32 i = 0; i < DestructionExcluded.Num(); i++)
 	{
-		if (AActor* Actor = Ref.Get())
+		const TSoftObjectPtr<AActor>& Ref = DestructionExcluded[i];
+		if (AActor* Actor = Ref.LoadSynchronous())
 		{
 			ExcludedActors.Add(Actor);
+			UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Excluding[%d]: %s (ptr=%p) [%s]"),
+				i, *Actor->GetName(), Actor, *Actor->GetClass()->GetName());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("ArenaManager: DestructionExcluded[%d] FAILED to load! Path=%s IsNull=%d"),
+				i, *Ref.ToString(), Ref.IsNull());
 		}
 	}
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Total excluded actors: %d (from %d refs)"),
+		ExcludedActors.Num(), DestructionExcluded.Num());
 	for (const TSoftObjectPtr<AActor>& Ref : ExitBlockers)
 	{
-		if (AActor* Actor = Ref.Get())
+		if (AActor* Actor = Ref.LoadSynchronous())
 		{
 			ExcludedActors.Add(Actor);
 		}
 	}
 	for (const TSoftObjectPtr<AArenaSpawnPoint>& Ref : SpawnPoints)
 	{
-		if (AActor* Actor = Ref.Get())
+		if (AActor* Actor = Ref.LoadSynchronous())
 		{
 			ExcludedActors.Add(Actor);
 		}
 	}
-	if (AActor* Respawn = PlayerRespawnPoint.Get())
+	if (AActor* Respawn = PlayerRespawnPoint.LoadSynchronous())
 	{
 		ExcludedActors.Add(Respawn);
 	}
-	if (AActor* Door = RewardDoor.Get())
+	if (AActor* Door = RewardDoor.LoadSynchronous())
 	{
 		ExcludedActors.Add(Door);
 	}
-	if (AActor* Island = LinkedIsland.Get())
+	if (AActor* Container = RewardContainer.LoadSynchronous())
+	{
+		ExcludedActors.Add(Container);
+	}
+	if (AActor* Dummy = RewardDummy.LoadSynchronous())
+	{
+		ExcludedActors.Add(Dummy);
+	}
+	if (AActor* Island = LinkedIsland.LoadSynchronous())
 	{
 		ExcludedActors.Add(Island);
 	}
@@ -743,11 +817,34 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
 		AActor* Actor = Overlap.GetActor();
-		if (!Actor || ExcludedActors.Contains(Actor) || ProcessedActors.Contains(Actor))
+		if (!Actor || ProcessedActors.Contains(Actor))
 		{
 			continue;
 		}
 		ProcessedActors.Add(Actor);
+
+		if (ExcludedActors.Contains(Actor))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ArenaManager: EXCLUDED (in list): %s (ptr=%p) [%s]"),
+				*Actor->GetName(), Actor, *Actor->GetClass()->GetName());
+			continue;
+		}
+
+		// Skip world infrastructure: landscapes, brushes, volumes, level actors
+		const FString ClassName = Actor->GetClass()->GetName();
+		if (Actor->IsA(ABrush::StaticClass()) || Actor->IsA(AVolume::StaticClass())
+			|| ClassName.Contains(TEXT("Landscape")))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ArenaManager: EXCLUDED (infrastructure): %s [%s]"),
+				*Actor->GetName(), *Actor->GetClass()->GetName());
+			continue;
+		}
+
+		// Skip projectiles — they are impact sources, not destruction targets
+		if (Actor->IsA(AEMFProjectile::StaticClass()))
+		{
+			continue;
+		}
 
 		// Check if it's a prop
 		AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Actor);
@@ -779,6 +876,10 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 
 		const float Distance = FVector::Dist(Actor->GetActorLocation(), Epicenter);
 
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: TARGET: %s [%s] Mesh=%s Vol=%.0f Dist=%.0f"),
+			*Actor->GetName(), *Actor->GetClass()->GetName(),
+			*MeshComp->GetStaticMesh()->GetName(), Volume, Distance);
+
 		FDestructionTarget Target;
 		Target.Actor = Actor;
 		Target.MeshComp = MeshComp;
@@ -794,25 +895,104 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 		return;
 	}
 
-	// Sort by volume descending
+	// Sort by distance from epicenter (closest first — for shockwave timing)
 	Targets.Sort([](const FDestructionTarget& A, const FDestructionTarget& B)
 	{
-		return A.BoundsVolume > B.BoundsVolume;
+		return A.DistanceFromEpicenter < B.DistanceFromEpicenter;
 	});
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Executing arena destruction — %d targets, top %d get full GC"),
-		Targets.Num(), FMath::Min(MaxFullDestructions, Targets.Num()));
+	// Three-tier destruction (inspired by The Finals / VOID BREAKER):
+	//   ZONE 1 (< GuaranteedRadius): Full GC tiling = rubble (mesh hidden)
+	//   ZONE 2 (< CollapseRadius):   Physics collapse = mesh itself falls as whole piece
+	//   ZONE 3 (< DestructionRadius): Survival chance based on LOS + distance
+	const float SurvivalRange = DestructionRadius - DestructionCollapseRadius;
+	int32 RubbleCount = 0;
+	int32 CollapseCount = 0;
+	int32 SurvivedCount = 0;
+	int32 GCCount = 0;
 
-	// Schedule staggered destruction
+	// Line-of-sight check params
+	FCollisionQueryParams LOSParams;
+	LOSParams.AddIgnoredActor(this);
+	// Ignore the player
+	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	{
+		if (APawn* Pawn = PC->GetPawn())
+		{
+			LOSParams.AddIgnoredActor(Pawn);
+		}
+	}
+
 	for (int32 i = 0; i < Targets.Num(); i++)
 	{
 		const FDestructionTarget& Target = Targets[i];
-		const bool bFullGC = (i < MaxFullDestructions);
+		const float Dist = Target.DistanceFromEpicenter;
+
+		// Line-of-sight check: can the explosion "see" this mesh?
+		bool bHasLineOfSight = true;
+		if (Target.Actor.IsValid())
+		{
+			FHitResult LOSHit;
+			LOSParams.AddIgnoredActor(Target.Actor.Get());
+			bHasLineOfSight = !GetWorld()->LineTraceSingleByChannel(
+				LOSHit, Epicenter, Target.Actor->GetActorLocation(),
+				ECC_WorldStatic, LOSParams);
+			LOSParams.ClearIgnoredActors();
+			LOSParams.AddIgnoredActor(this);
+		}
+
+		// Determine destruction tier
+		// Zone 1 (Rubble): within GuaranteedRadius — always full GC tiling, no LOS required
+		// Zone 2 (Collapse): within CollapseRadius — physics fall, LOS affects survival chance
+		// Zone 3 (Survive): beyond CollapseRadius — distance + LOS based survival
+		enum class ETier { Rubble, Collapse, Survive };
+		ETier Tier;
+
+		if (Dist <= DestructionGuaranteedRadius)
+		{
+			// Close enough = always rubble, regardless of LOS
+			Tier = ETier::Rubble;
+		}
+		else if (Dist <= DestructionCollapseRadius)
+		{
+			// Objects behind cover in collapse zone have chance to survive
+			if (!bHasLineOfSight && FMath::FRand() < 0.5f)
+			{
+				SurvivedCount++;
+				continue;
+			}
+			Tier = ETier::Collapse;
+		}
+		else
+		{
+			// Beyond collapse radius: survival chance increases toward edge
+			float SurvivalChance = 0.0f;
+			if (SurvivalRange > KINDA_SMALL_NUMBER)
+			{
+				const float T = FMath::Clamp((Dist - DestructionCollapseRadius) / SurvivalRange, 0.0f, 1.0f);
+				SurvivalChance = T * DestructionEdgeSurvivalChance;
+			}
+			// No line of sight = much higher survival
+			if (!bHasLineOfSight)
+			{
+				SurvivalChance = FMath::Max(SurvivalChance, 0.7f);
+			}
+
+			if (SurvivalChance > 0.0f && FMath::FRand() < SurvivalChance)
+			{
+				SurvivedCount++;
+				continue;
+			}
+			Tier = ETier::Collapse;
+		}
+
+		// Full GC only for rubble tier and within budget
+		const bool bFullGC = (Tier == ETier::Rubble) && (GCCount < MaxFullDestructions);
 
 		float Delay = 0.0f;
 		if (DestructionWaveSpeed > 0.0f)
 		{
-			Delay = Target.DistanceFromEpicenter / DestructionWaveSpeed;
+			Delay = Dist / DestructionWaveSpeed;
 		}
 
 		// Capture by value for lambda safety
@@ -820,8 +1000,16 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 		TWeakObjectPtr<UStaticMeshComponent> WeakMesh = Target.MeshComp;
 		bool bIsProp = Target.bIsProp;
 		FVector EpicenterCopy = Epicenter;
+		bool bCollapse = (Tier == ETier::Collapse);
+		float LinDamp = DestructionLinearDamping;
+		float AngDamp = DestructionAngularDamping;
+		float GibLife = DestructionGibLifetime;
+		float FreezeTime = DestructionGibFreezeTime;
+		float CollapseImpulseStrength = CollapseImpulse;
 
-		auto DestroyLambda = [this, WeakActor, WeakMesh, bFullGC, bIsProp, EpicenterCopy]()
+		UNiagaraSystem* VFX = DestructionVFX;
+
+		auto DestroyLambda = [this, WeakActor, WeakMesh, bFullGC, bCollapse, bIsProp, EpicenterCopy, LinDamp, AngDamp, GibLife, FreezeTime, CollapseImpulseStrength, VFX]()
 		{
 			AActor* Actor = WeakActor.Get();
 			UStaticMeshComponent* MeshComp = WeakMesh.Get();
@@ -835,28 +1023,127 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 				AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Actor);
 				if (Prop && !Prop->IsDead())
 				{
-					// If prop has no own GC and qualifies for full GC, spawn generic one
+					// Spawn VFX for props too (they visually break)
+					if (VFX && GetWorld())
+					{
+						const FVector VFXLocation = MeshComp->Bounds.Origin;
+						const float VFXScale = FMath::Max(1.0f, MeshComp->Bounds.BoxExtent.GetMax() / 100.0f);
+						UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+							GetWorld(), VFX, VFXLocation, FRotator::ZeroRotator,
+							FVector(VFXScale), true, true, ENCPoolMethod::AutoRelease);
+					}
 					if (bFullGC && !Prop->PropGeometryCollection)
 					{
 						SpawnDestructionGCForMesh(MeshComp, EpicenterCopy);
 					}
-					// Kill the prop (triggers its own GC if it has one)
 					Prop->Explode(1.0f, 1.0f, 1.0f);
 				}
 			}
 			else
 			{
-				// Static mesh actor
 				if (bFullGC)
 				{
+					// RUBBLE: replace with GC cube tiling + dust VFX
+					UE_LOG(LogTemp, Warning, TEXT("ArenaManager: RUBBLE lambda firing for %s, calling SpawnDestructionGCForMesh"),
+						*Actor->GetName());
+					if (VFX && GetWorld())
+					{
+						const FVector VFXLocation = MeshComp->Bounds.Origin;
+						const float VFXScale = FMath::Max(1.0f, MeshComp->Bounds.BoxExtent.GetMax() / 100.0f);
+						UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+							GetWorld(), VFX, VFXLocation, FRotator::ZeroRotator,
+							FVector(VFXScale), true, true, ENCPoolMethod::AutoRelease);
+					}
+
 					SpawnDestructionGCForMesh(MeshComp, EpicenterCopy);
+					Actor->SetActorHiddenInGame(true);
+					MeshComp->SetSimulatePhysics(false);
+					MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 				}
-				// Hide and disable original
-				Actor->SetActorHiddenInGame(true);
-				MeshComp->SetSimulatePhysics(false);
-				MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				else if (bCollapse)
+				{
+					// COLLAPSE: enable physics on original mesh — it falls/topples as a whole piece
+					UE_LOG(LogTemp, Warning, TEXT("ArenaManager: COLLAPSE lambda firing for %s, IsRoot=%d"),
+						*Actor->GetName(), MeshComp == Actor->GetRootComponent());
+					// Detach from any parent so it can move freely
+					if (Actor->GetAttachParentActor())
+					{
+						Actor->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+					}
+
+					// For StaticMeshActor the root IS the mesh — don't detach root from itself
+					if (MeshComp != Actor->GetRootComponent())
+					{
+						MeshComp->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+					}
+
+					MeshComp->SetMobility(EComponentMobility::Movable);
+
+					// CRITICAL: must recreate physics state after mobility change
+					// otherwise physics body doesn't exist and SetSimulatePhysics silently fails
+					MeshComp->RecreatePhysicsState();
+
+					MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+					MeshComp->SetCollisionObjectType(ECC_PhysicsBody);
+					MeshComp->SetCollisionResponseToAllChannels(ECR_Block);
+					MeshComp->SetSimulatePhysics(true);
+					MeshComp->SetEnableGravity(true);
+					MeshComp->WakeAllRigidBodies();
+					MeshComp->SetLinearDamping(LinDamp * 2.0f);
+					MeshComp->SetAngularDamping(AngDamp * 2.0f);
+
+					// Delay impulse by 1 tick so physics body is fully initialized
+					TWeakObjectPtr<UStaticMeshComponent> WeakImpulseMesh = MeshComp;
+					FVector CollapseEpicenter = EpicenterCopy;
+					float ImpulseStr = CollapseImpulseStrength;
+					GetWorldTimerManager().SetTimerForNextTick(
+						FTimerDelegate::CreateLambda([WeakImpulseMesh, CollapseEpicenter, ImpulseStr]()
+						{
+							if (UStaticMeshComponent* MC = WeakImpulseMesh.Get())
+							{
+								MC->WakeAllRigidBodies();
+								// Push away from epicenter + downward to knock off balance
+								const FVector Dir = (MC->GetComponentLocation() - CollapseEpicenter).GetSafeNormal();
+								const FVector Impulse = (Dir * 0.4f + FVector::DownVector * 0.6f) * ImpulseStr;
+								MC->AddImpulse(Impulse, NAME_None, true);
+							}
+						}));
+
+					// Freeze physics after settling — mesh stays where it fell
+					if (FreezeTime > 0.0f)
+					{
+						TWeakObjectPtr<UStaticMeshComponent> WeakCollapseMesh = MeshComp;
+						FTimerHandle CollapseFreeze;
+						GetWorldTimerManager().SetTimer(CollapseFreeze,
+							FTimerDelegate::CreateLambda([WeakCollapseMesh]()
+							{
+								if (UStaticMeshComponent* MC = WeakCollapseMesh.Get())
+								{
+									MC->SetSimulatePhysics(false);
+								}
+							}),
+							FreezeTime, false);
+						DestructionTimerHandles.Add(CollapseFreeze);
+					}
+
+					// Auto-destroy after lifespan (0 = persist forever)
+					if (GibLife > 0.0f)
+					{
+						Actor->SetLifeSpan(GibLife * 2.0f);
+					}
+				}
+				else
+				{
+					// HIDE: just disappear (over GC budget)
+					Actor->SetActorHiddenInGame(true);
+					MeshComp->SetSimulatePhysics(false);
+					MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				}
 			}
 		};
+
+		if (bFullGC) GCCount++;
+		if (bCollapse) CollapseCount++; else RubbleCount++;
 
 		if (Delay <= KINDA_SMALL_NUMBER)
 		{
@@ -869,107 +1156,363 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 			DestructionTimerHandles.Add(Handle);
 		}
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Destruction — %d rubble (%d GC), %d collapse, %d survived / %d total"),
+		RubbleCount, GCCount, CollapseCount, SurvivedCount, Targets.Num());
 }
 
 void AArenaManager::SpawnDestructionGCForMesh(UStaticMeshComponent* MeshComp, const FVector& Epicenter)
 {
 	if (!DestructionGC || !MeshComp || !MeshComp->GetStaticMesh() || !GetWorld())
 	{
+		UE_LOG(LogTemp, Error, TEXT("ArenaManager::SpawnDestructionGCForMesh EARLY EXIT — GC=%d Mesh=%d StaticMesh=%d World=%d"),
+			DestructionGC != nullptr, MeshComp != nullptr,
+			MeshComp ? (MeshComp->GetStaticMesh() != nullptr) : false,
+			GetWorld() != nullptr);
 		return;
 	}
 
 	const FTransform MeshTransform = MeshComp->GetComponentTransform();
 	const FVector MeshLocation = MeshTransform.GetLocation();
-	const FRotator MeshRotation = MeshTransform.GetRotation().Rotator();
+	const FQuat MeshQuat = MeshTransform.GetRotation();
+	const FRotator MeshRotation = MeshQuat.Rotator();
 
-	// Calculate scale to match original mesh bounds
+	// Get mesh world-space extents
 	const FBox MeshLocalBox = MeshComp->GetStaticMesh()->GetBoundingBox();
-	const FVector MeshLocalExtent = MeshLocalBox.GetExtent(); // half-extents in local space
+	const FVector MeshLocalExtent = MeshLocalBox.GetExtent();
 	const FVector MeshWorldScale = MeshTransform.GetScale3D();
 	const FVector MeshWorldExtent = MeshLocalExtent * MeshWorldScale;
 
-	// Scale GC cube to match: each axis independently
-	FVector GCScale = FVector::OneVector;
-	if (DestructionGCHalfExtent.X > KINDA_SMALL_NUMBER)
+	// Tile size = full size of one GC cube (diameter, not radius)
+	const FVector TileSize = DestructionGCHalfExtent * 2.0f;
+
+	// How many tiles fit along each axis
+	int32 CountX = FMath::Max(1, FMath::CeilToInt(MeshWorldExtent.X * 2.0f / TileSize.X));
+	int32 CountY = FMath::Max(1, FMath::CeilToInt(MeshWorldExtent.Y * 2.0f / TileSize.Y));
+	int32 CountZ = FMath::Max(1, FMath::CeilToInt(MeshWorldExtent.Z * 2.0f / TileSize.Z));
+
+	int32 TotalTiles = CountX * CountY * CountZ;
+
+	// If over budget, uniformly reduce counts
+	if (TotalTiles > MaxGCTilesPerMesh)
 	{
-		GCScale.X = MeshWorldExtent.X / DestructionGCHalfExtent.X;
-	}
-	if (DestructionGCHalfExtent.Y > KINDA_SMALL_NUMBER)
-	{
-		GCScale.Y = MeshWorldExtent.Y / DestructionGCHalfExtent.Y;
-	}
-	if (DestructionGCHalfExtent.Z > KINDA_SMALL_NUMBER)
-	{
-		GCScale.Z = MeshWorldExtent.Z / DestructionGCHalfExtent.Z;
+		const float ReductionFactor = FMath::Pow(static_cast<float>(MaxGCTilesPerMesh) / TotalTiles, 1.0f / 3.0f);
+		CountX = FMath::Max(1, FMath::RoundToInt(CountX * ReductionFactor));
+		CountY = FMath::Max(1, FMath::RoundToInt(CountY * ReductionFactor));
+		CountZ = FMath::Max(1, FMath::RoundToInt(CountZ * ReductionFactor));
+		TotalTiles = CountX * CountY * CountZ;
 	}
 
-	// Spawn GC actor
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: GC tiling for %s — WorldExtent=%s TileSize=%s Grid=%dx%dx%d=%d tiles"),
+		*MeshComp->GetStaticMesh()->GetName(), *MeshWorldExtent.ToString(), *TileSize.ToString(),
+		CountX, CountY, CountZ, TotalTiles);
+
+	// Copy first material from mesh
+	UMaterialInterface* MeshMat = nullptr;
+	if (MeshComp->GetNumMaterials() > 0)
+	{
+		MeshMat = MeshComp->GetMaterial(0);
+	}
+
+	// Compute the grid origin in local mesh space (bottom-left-back corner)
+	// Grid is centered on mesh center, each tile occupies TileSize
+	const FVector GridOriginLocal = FVector(
+		-CountX * TileSize.X * 0.5f + TileSize.X * 0.5f,
+		-CountY * TileSize.Y * 0.5f + TileSize.Y * 0.5f,
+		-CountZ * TileSize.Z * 0.5f + TileSize.Z * 0.5f
+	);
+
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
-		MeshLocation, MeshRotation, SpawnParams);
+	int32 SpawnedCount = 0;
 
-	if (!GCActor)
+	for (int32 ix = 0; ix < CountX; ix++)
 	{
-		return;
-	}
-
-	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
-	if (!GCComp)
-	{
-		GCActor->Destroy();
-		return;
-	}
-
-	GCActor->SetActorScale3D(GCScale);
-
-	// Collision: gibs should not push pawns or block camera
-	GCComp->SetCollisionProfileName(DestructionGibCollisionProfile);
-	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
-
-	GCComp->SetRestCollection(DestructionGC);
-
-	// Copy materials from original mesh to GC gibs
-	const int32 NumMats = MeshComp->GetNumMaterials();
-	for (int32 i = 0; i < NumMats; i++)
-	{
-		if (UMaterialInterface* Mat = MeshComp->GetMaterial(i))
+		for (int32 iy = 0; iy < CountY; iy++)
 		{
-			GCComp->SetMaterial(i, Mat);
+			for (int32 iz = 0; iz < CountZ; iz++)
+			{
+				// Local offset for this tile + random jitter to break grid pattern
+				const float Jitter = DestructionGCHalfExtent.X * 0.4f;
+				const FVector LocalOffset(
+					GridOriginLocal.X + ix * TileSize.X + FMath::RandRange(-Jitter, Jitter),
+					GridOriginLocal.Y + iy * TileSize.Y + FMath::RandRange(-Jitter, Jitter),
+					GridOriginLocal.Z + iz * TileSize.Z + FMath::RandRange(-Jitter, Jitter)
+				);
+
+				// Transform to world space using mesh rotation
+				const FVector WorldPos = MeshLocation + MeshQuat.RotateVector(LocalOffset);
+
+				AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+					WorldPos, MeshRotation, SpawnParams);
+				if (!GCActor) continue;
+
+				UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+				if (!GCComp) { GCActor->Destroy(); continue; }
+
+				// Native scale — NO non-uniform scaling
+				GCActor->SetActorScale3D(FVector::OneVector);
+
+				GCComp->SetCollisionObjectType(ECC_PhysicsBody);
+				GCComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+				GCComp->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+				GCComp->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
+
+				GCComp->SetRestCollection(DestructionGC);
+
+				if (MeshMat)
+				{
+					GCComp->SetMaterial(0, MeshMat);
+				}
+
+				GCComp->SetLinearDamping(DestructionLinearDamping);
+				GCComp->SetAngularDamping(DestructionAngularDamping);
+
+				GCComp->SetSimulatePhysics(true);
+				GCComp->RecreatePhysicsState();
+
+				// Break all clusters
+				UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+				StrainField->Magnitude = 999999.0f;
+				GCComp->ApplyPhysicsField(true,
+					EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+					nullptr, StrainField);
+
+				// Scatter debris outward from epicenter (DestructionImpulse, default 50)
+				if (DestructionImpulse > 0.0f)
+				{
+					URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+					RadialVelocity->Magnitude = DestructionImpulse;
+					RadialVelocity->Position = Epicenter;
+					GCComp->ApplyPhysicsField(true,
+						EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+						nullptr, RadialVelocity);
+				}
+
+				if (DestructionAngularImpulse > 0.0f)
+				{
+					URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+					AngularVelocity->Magnitude = DestructionAngularImpulse;
+					AngularVelocity->Position = Epicenter;
+					GCComp->ApplyPhysicsField(true,
+						EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+						nullptr, AngularVelocity);
+				}
+
+				if (DestructionGibLifetime > 0.0f)
+				{
+					GCActor->SetLifeSpan(DestructionGibLifetime);
+				}
+
+				// Schedule physics freeze — once debris settles, disable simulation
+				// to stop Chaos solver from wasting CPU on sleeping fragments
+				if (DestructionGibFreezeTime > 0.0f)
+				{
+					TWeakObjectPtr<UGeometryCollectionComponent> WeakGC = GCComp;
+					FTimerHandle FreezeHandle;
+					GetWorldTimerManager().SetTimer(FreezeHandle,
+						FTimerDelegate::CreateLambda([WeakGC]()
+						{
+							if (UGeometryCollectionComponent* GC = WeakGC.Get())
+							{
+								GC->SetSimulatePhysics(false);
+							}
+						}),
+						DestructionGibFreezeTime, false);
+					DestructionTimerHandles.Add(FreezeHandle);
+				}
+
+				SpawnedCount++;
+			}
 		}
 	}
 
-	GCComp->SetSimulatePhysics(true);
-	GCComp->RecreatePhysicsState();
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Tiled %d GC cubes for %s (grid %dx%dx%d, mesh extent %s)"),
+		SpawnedCount, *MeshComp->GetStaticMesh()->GetName(),
+		CountX, CountY, CountZ, *MeshWorldExtent.ToString());
+}
 
-	// Break all clusters
-	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
-	StrainField->Magnitude = 999999.0f;
-	GCComp->ApplyPhysicsField(true,
-		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
-		nullptr, StrainField);
+// ==================== Camera Lock ====================
 
-	// Scatter pieces radially from epicenter
-	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
-	RadialVelocity->Magnitude = DestructionImpulse;
-	RadialVelocity->Position = Epicenter;
-	GCComp->ApplyPhysicsField(true,
-		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
-		nullptr, RadialVelocity);
+void AArenaManager::StartCameraLock(const FVector& Epicenter)
+{
+	if (CameraLockDuration <= 0.0f || !GetWorld())
+	{
+		return;
+	}
 
-	// Angular velocity for tumbling
-	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
-	AngularVelocity->Magnitude = DestructionAngularImpulse;
-	AngularVelocity->Position = Epicenter;
-	GCComp->ApplyPhysicsField(true,
-		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
-		nullptr, AngularVelocity);
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	if (!PC)
+	{
+		return;
+	}
 
-	// Self-destruct after lifetime
-	GCActor->SetLifeSpan(DestructionGibLifetime);
+	APawn* Pawn = PC->GetPawn();
+	if (!Pawn)
+	{
+		return;
+	}
+
+	const FVector PlayerLocation = Pawn->GetActorLocation();
+	const FVector EyeLocation = PlayerLocation + FVector(0.0f, 0.0f, 64.0f);
+
+	// Check LOS from player to epicenter
+	FHitResult LOSHit;
+	FCollisionQueryParams LOSParams;
+	LOSParams.AddIgnoredActor(this);
+	LOSParams.AddIgnoredActor(Pawn);
+
+	bool bHasLOS = !GetWorld()->LineTraceSingleByChannel(
+		LOSHit, EyeLocation, Epicenter, ECC_WorldStatic, LOSParams);
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: CameraLock LOS check — HasLOS=%d, PlayerPos=%s, Epicenter=%s"),
+		bHasLOS, *PlayerLocation.ToString(), *Epicenter.ToString());
+	if (!bHasLOS)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: LOS blocked by %s at %s"),
+			LOSHit.GetActor() ? *LOSHit.GetActor()->GetName() : TEXT("NULL"),
+			*LOSHit.ImpactPoint.ToString());
+	}
+
+	if (!bHasLOS)
+	{
+		// No line of sight — find closest NavMesh point NEAR THE PLAYER with visibility to epicenter
+		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+		if (NavSys)
+		{
+			FVector BestPoint = PlayerLocation;
+			float BestDist = MAX_FLT;
+			bool bFoundPoint = false;
+			int32 NavHits = 0;
+			int32 LOSHits = 0;
+
+			// Search around the player, expanding radius if needed
+			const float SearchRadii[] = { 1500.0f, 3000.0f, 5000.0f };
+			for (float SearchRadius : SearchRadii)
+			{
+				for (int32 Attempt = 0; Attempt < 30; Attempt++)
+				{
+					FNavLocation NavResult;
+					if (NavSys->GetRandomReachablePointInRadius(PlayerLocation, SearchRadius, NavResult))
+					{
+						NavHits++;
+
+						// Check LOS from candidate point to epicenter
+						FVector CandidateEye = NavResult.Location + FVector(0.0f, 0.0f, 64.0f);
+
+						FCollisionQueryParams CandidateParams;
+						CandidateParams.AddIgnoredActor(this);
+						CandidateParams.AddIgnoredActor(Pawn);
+
+						FHitResult CandidateHit;
+						if (!GetWorld()->LineTraceSingleByChannel(
+							CandidateHit, CandidateEye, Epicenter, ECC_WorldStatic, CandidateParams))
+						{
+							LOSHits++;
+							// Has LOS — check if it's the closest to player
+							float Dist = FVector::Dist(NavResult.Location, PlayerLocation);
+							if (Dist < BestDist)
+							{
+								BestDist = Dist;
+								BestPoint = NavResult.Location;
+								bFoundPoint = true;
+							}
+						}
+					}
+				}
+
+				// If we found a good point, stop expanding
+				if (bFoundPoint) break;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("ArenaManager: NavMesh search — %d nav hits, %d with LOS, found=%d"),
+				NavHits, LOSHits, bFoundPoint);
+
+			if (bFoundPoint)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Teleporting player to LOS point at %s (dist=%.0f from original pos)"),
+					*BestPoint.ToString(), BestDist);
+				Pawn->SetActorLocation(BestPoint);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("ArenaManager: No NavMesh point with LOS found after searching all radii, locking camera from current position"));
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("ArenaManager: No NavigationSystem available for teleport!"));
+		}
+	}
+
+	// Lock camera
+	CameraLockTarget = Epicenter;
+	bCameraLocked = true;
+
+	// Disable player look + move input
+	PC->SetIgnoreLookInput(true);
+	PC->SetIgnoreMoveInput(true);
+
+	// Start per-frame camera update timer (~60fps)
+	GetWorldTimerManager().SetTimer(CameraLockUpdateHandle,
+		this, &AArenaManager::UpdateCameraLock, 0.016f, true);
+
+	// Schedule unlock after duration
+	GetWorldTimerManager().SetTimer(CameraLockEndHandle,
+		this, &AArenaManager::EndCameraLock, CameraLockDuration, false);
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Camera locked on epicenter for %.1f seconds"), CameraLockDuration);
+}
+
+void AArenaManager::UpdateCameraLock()
+{
+	if (!bCameraLocked || !GetWorld())
+	{
+		return;
+	}
+
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	if (!PC || !PC->GetPawn())
+	{
+		return;
+	}
+
+	const FVector EyeLocation = PC->GetPawn()->GetActorLocation() + FVector(0.0f, 0.0f, 64.0f);
+	const FVector ToTarget = CameraLockTarget - EyeLocation;
+	const FRotator TargetRotation = ToTarget.Rotation();
+
+	// Smooth interpolation — higher InterpSpeed = faster blend
+	const float InterpSpeed = (CameraBlendTime > KINDA_SMALL_NUMBER) ? (1.0f / CameraBlendTime) : 100.0f;
+	const FRotator Current = PC->GetControlRotation();
+	const FRotator NewRotation = FMath::RInterpTo(Current, TargetRotation, 0.016f, InterpSpeed);
+
+	PC->SetControlRotation(NewRotation);
+}
+
+void AArenaManager::EndCameraLock()
+{
+	if (!bCameraLocked)
+	{
+		return;
+	}
+
+	bCameraLocked = false;
+
+	GetWorldTimerManager().ClearTimer(CameraLockUpdateHandle);
+	GetWorldTimerManager().ClearTimer(CameraLockEndHandle);
+
+	if (GetWorld())
+	{
+		if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+		{
+			// Reset (not just decrement) — clears the ignore stack completely
+			PC->ResetIgnoreLookInput();
+			PC->ResetIgnoreMoveInput();
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Camera unlocked"));
 }
 
 // ==================== Island ====================
@@ -1002,6 +1545,17 @@ void AArenaManager::OnLinkedIslandDestroyed(ADestructibleIslandActor* Island, AA
 {
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Linked island destroyed — force completing arena"));
 	ForceCompleteArena();
+}
+
+// ==================== Reward Container ====================
+
+void AArenaManager::OnRewardDummyDeath(AShooterDummy* Dummy, AActor* Killer)
+{
+	if (ARewardContainer* Container = RewardContainer.Get())
+	{
+		Container->Activate();
+		UE_LOG(LogTemp, Log, TEXT("ArenaManager: Reward dummy died — activating RewardContainer"));
+	}
 }
 
 // ==================== Checkpoint ====================

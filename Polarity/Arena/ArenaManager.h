@@ -16,13 +16,17 @@ class UCheckpointSubsystem;
 class AShooterDoor;
 class ADestructibleIslandActor;
 class AEMFPhysicsProp;
+class AEMFProjectile;
 class UGeometryCollection;
+class UNiagaraSystem;
+class AShooterDummy;
+class ARewardContainer;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveStarted, int32, WaveIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveCleared, int32, WaveIndex);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnArenaCriticalImpact, AEMFPhysicsProp*, Prop, FVector, Location, float, Speed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnArenaCriticalImpact, AActor*, Source, FVector, Location, float, Speed);
 
 /**
  * Manages a combat arena: activation, wave spawning, exit blockers, and checkpoint integration.
@@ -77,6 +81,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Door")
 	TSoftObjectPtr<AShooterDoor> RewardDoor;
 
+	// ==================== Reward Container ====================
+
+	/** Optional dummy behind the reward door. When killed, the reward container activates. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Reward")
+	TSoftObjectPtr<AShooterDummy> RewardDummy;
+
+	/** Reward container that drops and shatters when the reward dummy dies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Reward")
+	TSoftObjectPtr<ARewardContainer> RewardContainer;
+
 	// ==================== Tracked Props ====================
 
 	/** EMF props to monitor for critical velocity impacts.
@@ -105,6 +119,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
 	TObjectPtr<UGeometryCollection> DestructionGC;
 
+	/** Dust/debris VFX spawned at each destroyed mesh to mask the mesh→GC transition.
+	 *  Create a Niagara System with a burst of smoke/dust sprites. Leave empty to skip. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
+	TObjectPtr<UNiagaraSystem> DestructionVFX;
+
 	/** Half-extents of the DestructionGC asset in its native (unscaled) form.
 	 *  Used to compute per-mesh scale. Set to match your cube GC asset. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
@@ -114,17 +133,44 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
 	float DestructionWaveSpeed = 5000.0f;
 
-	/** How long GC gib fragments persist (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.5"))
-	float DestructionGibLifetime = 2.0f;
-
-	/** Radial scatter impulse for GC gibs (cm/s) */
+	/** How long GC gib fragments persist before being destroyed (seconds). 0 = never destroy. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
-	float DestructionImpulse = 1000.0f;
+	float DestructionGibLifetime = 0.0f;
 
-	/** Angular tumble impulse for GC gibs */
+	/** Seconds after spawning to freeze gibs (disable physics). Saves CPU once debris settles.
+	 *  Set to 0 to never freeze. Should be < GibLifetime. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
-	float DestructionAngularImpulse = 150.0f;
+	float DestructionGibFreezeTime = 2.0f;
+
+	/** Impulse for GC gibs (cm/s). 0 = pure gravity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionImpulse = 50.0f;
+
+	/** Impulse for collapsing whole meshes (cm/s). Higher = more dramatic scatter. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float CollapseImpulse = 800.0f;
+
+	/** Angular tumble for natural collapse feel */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionAngularImpulse = 20.0f;
+
+	/** Linear damping on debris — higher = pieces settle faster */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionLinearDamping = 0.5f;
+
+	/** Angular damping on debris — higher = pieces stop spinning sooner */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionAngularDamping = 0.8f;
+
+	/** Max depenetration velocity for GC pieces (cm/s).
+	 *  Low value = gentle separation + gravity collapse (like The Finals).
+	 *  0 = pieces freeze in place. Default Chaos -1 = explosive. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionMaxDepenetrationVelocity = 10.0f;
+
+	/** Max GC tiles spawned per mesh. Prevents performance disaster on huge meshes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "1"))
+	int32 MaxGCTilesPerMesh = 64;
 
 	/** Max objects that get full GC destruction (sorted by volume). Rest just hide. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "1"))
@@ -133,6 +179,34 @@ public:
 	/** Collision profile for destruction gibs */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction")
 	FName DestructionGibCollisionProfile = FName("Ragdoll");
+
+	/** Inner radius — everything inside gets FULL GC tiling (rubble) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionGuaranteedRadius = 500.0f;
+
+	/** Middle radius — between Guaranteed and this value, meshes physically collapse as whole pieces.
+	 *  Beyond this radius, survival chance kicks in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float DestructionCollapseRadius = 2000.0f;
+
+	/** Survival chance at the edge of DestructionRadius (0.0 = all destroyed, 1.0 = all survive) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DestructionEdgeSurvivalChance = 0.7f;
+
+	// ==================== Destruction Camera ====================
+
+	/** Min distance (cm) from player to ArenaManager center to allow destruction.
+	 *  If player is closer, critical impact is ignored. 0 = always allow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0", Units = "cm"))
+	float MinDestructionDistance = 2000.0f;
+
+	/** Duration (seconds) camera stays locked on epicenter */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float CameraLockDuration = 3.0f;
+
+	/** Blend time (seconds) for camera rotation toward epicenter */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Destruction", meta = (ClampMin = "0.0"))
+	float CameraBlendTime = 0.3f;
 
 	// ==================== State (Read-Only) ====================
 
@@ -158,11 +232,16 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
 	FOnWaveCleared OnWaveCleared;
 
-	/** Fired when a tracked prop impacts at critical velocity — use to trigger arena-wide destruction */
+	/** Fired when any object impacts at critical velocity within arena radius */
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
-	FOnArenaCriticalImpact OnPropCriticalVelocityImpact;
+	FOnArenaCriticalImpact OnCriticalVelocityImpact;
 
 	// ==================== API ====================
+
+	/** Notify arena of a critical velocity impact from any source (prop, projectile, etc).
+	 *  Checks distance, broadcasts delegate, triggers destruction if within radius. */
+	UFUNCTION(BlueprintCallable, Category = "Arena")
+	void NotifyCriticalImpact(AActor* Source, FVector Location, float Speed);
 
 	/** Force-complete the arena: kill all NPCs, skip remaining waves, open exits. */
 	UFUNCTION(BlueprintCallable, Category = "Arena")
@@ -233,6 +312,10 @@ private:
 	UFUNCTION()
 	void OnTrackedPropCriticalImpact(AEMFPhysicsProp* Prop, FVector Location, float Speed);
 
+	/** Called when a projectile impacts at critical velocity */
+	UFUNCTION()
+	void OnProjectileCriticalImpact(AEMFProjectile* Projectile, FVector Location, float Speed);
+
 	/** Bind to tracked props' OnCriticalVelocityImpact delegates */
 	void RegisterTrackedProps();
 
@@ -249,6 +332,35 @@ private:
 
 	/** Prevent double-triggering destruction */
 	bool bDestructionExecuted = false;
+
+	// ==================== Camera Lock ====================
+
+	/** Lock camera on destruction epicenter, teleport player if no LOS */
+	void StartCameraLock(const FVector& Epicenter);
+
+	/** Restore normal camera control */
+	void EndCameraLock();
+
+	/** Per-frame camera rotation interpolation during lock */
+	void UpdateCameraLock();
+
+	/** Timer for per-frame camera updates */
+	FTimerHandle CameraLockUpdateHandle;
+
+	/** Timer for ending camera lock after duration */
+	FTimerHandle CameraLockEndHandle;
+
+	/** Epicenter being looked at during lock */
+	FVector CameraLockTarget;
+
+	/** Whether camera is currently locked */
+	bool bCameraLocked = false;
+
+	// ==================== Reward Container ====================
+
+	/** Called when the reward dummy dies */
+	UFUNCTION()
+	void OnRewardDummyDeath(AShooterDummy* Dummy, AActor* Killer);
 
 	// ==================== Island ====================
 
