@@ -701,7 +701,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
 		{
 			UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
-			if (!NPCModifier || !NPCModifier->bEnableViscousCapture || NPCModifier->IsCapturedByPlate())
+			if (!NPCModifier || (!NPCModifier->bEnableViscousCapture && !NPC->IsStunnedByExplosion()) || NPCModifier->IsCapturedByPlate())
 			{
 				continue;
 			}
@@ -884,6 +884,12 @@ void UChargeAnimationComponent::CaptureNPC(AShooterNPC* NPC)
 
 	if (UEMFVelocityModifier* Modifier = NPC->FindComponentByClass<UEMFVelocityModifier>())
 	{
+		// Enable viscous capture for stunned NPCs that don't normally have it
+		if (!Modifier->bEnableViscousCapture && NPC->IsStunnedByExplosion())
+		{
+			Modifier->bEnableViscousCapture = true;
+			NPC->SetCaptureEnabledByStun(true);
+		}
 		Modifier->SetCapturedByPlate(ChannelingPlateActor);
 	}
 }

@@ -2080,6 +2080,12 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 
 void AShooterNPC::EndKnockbackStun()
 {
+	// If captured, don't disrupt captured state — stun cleanup happens in ExitCapturedState
+	if (bIsCaptured)
+	{
+		return;
+	}
+
 	// Clear knockback state
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
@@ -2130,6 +2136,16 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 	bIsCaptured = true;
 	bWasChannelingTarget = true; // Permanent flag for armor drop detection
 	bIsInKnockback = true; // Blocks AI via StateTree IsInKnockback condition
+
+	// If stunned, take over from stun state: clear stun timer, re-enable EMF for capture mechanics
+	if (bStunnedByExplosion)
+	{
+		GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+		if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+		{
+			EMFVelocityModifier->SetEnabled(true);
+		}
+	}
 
 	// Stop shooting immediately — burst fire cycle and permission retry won't check knockback on their own
 	StopShooting();
@@ -2199,6 +2215,17 @@ void AShooterNPC::ExitCapturedState()
 
 	bIsCaptured = false;
 	bIsInKnockback = false;
+
+	// Reset capture-enabled-by-stun flag and restore bEnableViscousCapture
+	if (bCaptureEnabledByStun)
+	{
+		bCaptureEnabledByStun = false;
+		if (EMFVelocityModifier)
+		{
+			EMFVelocityModifier->bEnableViscousCapture = false;
+		}
+	}
+	bStunnedByExplosion = false;
 
 	// Restore friction
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())

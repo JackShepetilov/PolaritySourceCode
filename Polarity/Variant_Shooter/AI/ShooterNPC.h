@@ -331,6 +331,9 @@ protected:
 	/** True when NPC is stunned by prop or drone explosion. Cleared on EndKnockbackStun. */
 	bool bStunnedByExplosion = false;
 
+	/** True when bEnableViscousCapture was enabled by stun-capture. Reset on ExitCapturedState. */
+	bool bCaptureEnabledByStun = false;
+
 	/** Start position for knockback interpolation */
 	FVector KnockbackStartPosition = FVector::ZeroVector;
 
@@ -758,6 +761,13 @@ public:
 	/** Returns true if this NPC is currently in knockback state */
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool IsInKnockback() const { return bIsInKnockback; }
+
+	/** Returns true if this NPC is stunned by prop or drone explosion */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsStunnedByExplosion() const { return bStunnedByExplosion; }
+
+	/** Set whether capture was enabled by stun (for cleanup on capture release) */
+	void SetCaptureEnabledByStun(bool bValue) { bCaptureEnabledByStun = bValue; }
 
 	/** Enter captured state (channeling plate grab). Blocks AI, plays montage. */
 	void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr);
