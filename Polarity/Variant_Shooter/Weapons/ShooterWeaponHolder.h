@@ -60,8 +60,9 @@ public:
 	 * @param Damage Amount of damage dealt
 	 * @param bHeadshot True if this was a headshot
 	 * @param bKilled True if target was killed
+	 * @param HitActor The actor that was hit (can be nullptr for backwards compatibility)
 	 */
-	virtual void OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled)
+	virtual void OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled, AActor* HitActor = nullptr)
 	{
 		// Default empty implementation for backwards compatibility
 	}

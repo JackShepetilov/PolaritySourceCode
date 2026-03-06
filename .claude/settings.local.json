@@ -122,7 +122,20 @@
       "WebFetch(domain:www.summarize.tech)",
       "WebFetch(domain:scweb4free.com)",
       "WebFetch(domain:www.platinumgames.com)",
-      "WebFetch(domain:simonschreibt.de)"
+      "WebFetch(domain:simonschreibt.de)",
+      "WebFetch(domain:media.gdcvault.com)",
+      "WebFetch(domain:the-finals.fandom.com)",
+      "WebFetch(domain:www.havok.com)",
+      "WebFetch(domain:gmtk.substack.com)",
+      "WebFetch(domain:itscai.us)",
+      "WebFetch(domain:www.sidefx.com)",
+      "WebFetch(domain:mansisaksson.com)",
+      "WebFetch(domain:www.creativebloq.com)",
+      "WebFetch(domain:finalsguides.com)",
+      "WebFetch(domain:www.digitaltrends.com)",
+      "WebFetch(domain:www.jasondeheras.com)",
+      "WebFetch(domain:www.parallelcube.com)",
+      "WebFetch(domain:www.davetech.co.uk)"
     ]
   }
 }

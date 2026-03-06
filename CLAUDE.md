@@ -118,3 +118,16 @@ Example format:
    With typical boss fight (3-5 projectiles), cost is negligible (<0.01ms/frame).
    Would become problematic only with 100+ projectiles.
 ```
+
+## English Grammar Correction
+
+**When the user writes prompts in English**, correct major grammar inaccuracies (wrong tense, wrong word, broken sentence structure, etc.). Ignore minor issues like capitalization, missing periods, or stylistic choices.
+
+**Place corrections AFTER the file changes report**, at the very end of the response.
+
+Example format:
+```
+✏️ Grammar:
+- "I putted the function there" → "I put the function there" (irregular past tense)
+- "it don't compile" → "it doesn't compile" (subject-verb agreement)
+```

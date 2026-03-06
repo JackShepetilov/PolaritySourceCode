@@ -22,7 +22,7 @@ class UAudioComponent;
 class UCurveFloat;
 class UCameraShakeBase;
 class UMaterialInterface;
-class UIKRetargeter;
+class UStaticMeshComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
 struct FCheckpointData;
@@ -112,15 +112,30 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UUpgradeManagerComponent> UpgradeManager;
 
-	// ==================== UE4 Mesh System (Copy Pose from Mesh) ====================
+	// ==================== Melee Weapon FP Mesh ====================
 
-	/** UE4 First Person Mesh (visible, copies pose from FirstPersonMesh via IK Retargeter) */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components|UE4 Meshes", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<USkeletalMeshComponent> UE4_FPMesh;
+	/** First-person body mesh shown instead of the normal FP mesh when melee weapon is equipped.
+	 *  Attached to camera. Has its own AnimBP with access to character data (velocity, etc.).
+	 *  Separate from FP mesh due to retargeting issues. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components|Melee Weapon", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USkeletalMeshComponent> MeleeWeaponFPMesh;
 
-	/** UE4 Melee Mesh (visible, copies pose from MeleeMesh via IK Retargeter) */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components|UE4 Meshes", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<USkeletalMeshComponent> UE4_MeleeMesh;
+	/** AnimBP class for MeleeWeaponFPMesh */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Weapon FP Mesh", meta = (AllowPrivateAccess = "true"))
+	TSubclassOf<UAnimInstance> MeleeWeaponFPAnimClass;
+
+	/** Location offset for MeleeWeaponFPMesh relative to camera */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Weapon FP Mesh", meta = (AllowPrivateAccess = "true"))
+	FVector MeleeWeaponFPMeshOffset = FVector::ZeroVector;
+
+	/** Rotation offset for MeleeWeaponFPMesh relative to camera */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Weapon FP Mesh", meta = (AllowPrivateAccess = "true"))
+	FRotator MeleeWeaponFPMeshRotation = FRotator::ZeroRotator;
+
+	/** Cached pointer to the first UStaticMeshComponent child of MeleeWeaponFPMesh (added in Blueprint).
+	 *  C++ controls its visibility and first-person rendering settings. */
+	UPROPERTY()
+	TObjectPtr<UStaticMeshComponent> MeleeWeaponStaticMesh;
 
 protected:
 
@@ -296,18 +311,6 @@ protected:
 	FTimerHandle RespawnTimer;
 
 	// ==================== UE4 Mesh System Settings ====================
-
-	/** Enable UE4 mesh system (uses Copy Pose from Mesh with IK Retargeting) */
-	UPROPERTY(EditDefaultsOnly, Category = "UE4 Meshes")
-	bool bUseUE4Meshes = false;
-
-	/** IK Retargeter for First Person Mesh (UE5 Mannequin -> UE4 Skeleton) */
-	UPROPERTY(EditDefaultsOnly, Category = "UE4 Meshes", meta = (EditCondition = "bUseUE4Meshes"))
-	TObjectPtr<UIKRetargeter> FPMeshRetargeter;
-
-	/** IK Retargeter for Melee Mesh (UE5 Mannequin -> UE4 Skeleton) */
-	UPROPERTY(EditDefaultsOnly, Category = "UE4 Meshes", meta = (EditCondition = "bUseUE4Meshes"))
-	TObjectPtr<UIKRetargeter> MeleeMeshRetargeter;
 
 	// ==================== UI Speed & Polarity ====================
 
@@ -738,6 +741,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Character")
 	USkeletalMeshComponent* GetMeleeMesh() const;
 
+	/** Get the melee weapon FP body mesh (can return nullptr if not set up) */
+	UFUNCTION(BlueprintPure, Category = "Character")
+	USkeletalMeshComponent* GetMeleeWeaponFPMesh() const { return MeleeWeaponFPMesh; }
+
+	/** Get the static mesh child of MeleeWeaponFPMesh (the sword model) */
+	UStaticMeshComponent* GetMeleeWeaponStaticMesh() const { return MeleeWeaponStaticMesh; }
+
+	/** Remove a melee weapon from inventory (called when weapon breaks).
+	 *  Deactivates, removes from OwnedWeapons, switches to fallback, destroys. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons")
+	void RemoveMeleeWeapon(AShooterWeapon* WeaponToRemove);
+
 protected:
 
 	/** Gameplay initialization */
@@ -1067,7 +1082,7 @@ public:
 	virtual void OnSemiWeaponRefire() override;
 
 	/** Notifies the owner that a hit was registered */
-	virtual void OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled) override;
+	virtual void OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled, AActor* HitActor = nullptr) override;
 
 	//~End IShooterWeaponHolder interface
 

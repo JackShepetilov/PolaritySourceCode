@@ -590,24 +590,22 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// Explosive impact: detonate only if THIS prop's own speed exceeds threshold
+	// Explosive impact: launched props use lower threshold, collateral uses higher
 	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
 	{
 		const float Speed = CachedPreCollisionSpeed;
+		const float Threshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
 
-		if (GEngine)
+		if (Speed >= Threshold)
 		{
-			GEngine->AddOnScreenDebugMessage(-1, 3.0f,
-				Speed >= ExplosionSpeedThreshold ? FColor::Red : FColor::Yellow,
-				FString::Printf(TEXT("[%s] HIT %s | Speed=%.0f | Threshold=%.0f | %s"),
-					*GetName(),
-					OtherActor ? *OtherActor->GetName() : TEXT("NULL"),
-					Speed, ExplosionSpeedThreshold,
-					Speed >= ExplosionSpeedThreshold ? TEXT("BOOM") : TEXT("no")));
-		}
-
-		if (Speed >= ExplosionSpeedThreshold)
-		{
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Red,
+					FString::Printf(TEXT("[%s] BOOM! Speed=%.0f | Threshold=%.0f (%s) | Hit=%s"),
+						*GetName(), Speed, Threshold,
+						bIsInReverseFlight ? TEXT("Launch") : TEXT("Collateral"),
+						OtherActor ? *OtherActor->GetName() : TEXT("NULL")));
+			}
 			if (Speed >= CriticalVelocity)
 			{
 				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
@@ -653,10 +651,11 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		return;
 	}
 
-	// Explosive props: detonate on NPC contact if prop's own speed is sufficient (or during reverse flight)
+	// Explosive props: detonate on NPC contact — launched props use lower threshold, collateral uses higher
 	if (bCanExplode && !bHasExploded)
 	{
-		if (bIsInReverseFlight || CachedPreCollisionSpeed >= ExplosionSpeedThreshold)
+		const float OverlapThreshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
+		if (CachedPreCollisionSpeed >= OverlapThreshold)
 		{
 			if (CachedPreCollisionSpeed >= CriticalVelocity)
 			{

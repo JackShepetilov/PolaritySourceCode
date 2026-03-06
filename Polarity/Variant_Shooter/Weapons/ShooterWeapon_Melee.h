@@ -13,6 +13,15 @@ class UNiagaraSystem;
 class UNiagaraComponent;
 class UCameraShakeBase;
 class ABossCharacter;
+class UGeometryCollection;
+
+/** Side from which a melee swing comes */
+UENUM(BlueprintType)
+enum class EMeleeSwingSide : uint8
+{
+	Left,
+	Right
+};
 
 /**
  * Animation data for a single melee weapon swing variant
@@ -21,6 +30,10 @@ USTRUCT(BlueprintType)
 struct FMeleeWeaponSwingData
 {
 	GENERATED_BODY()
+
+	/** Which side this swing comes from (Left or Right) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection")
+	EMeleeSwingSide SwingSide = EMeleeSwingSide::Right;
 
 	/** Selection weight for random animation choice */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection", meta = (ClampMin = "0.0"))
@@ -111,6 +124,29 @@ public:
 	/** Additional impulse multiplier based on player speed (impulse = HitImpulse * (1 + speed * MomentumImpulseMultiplier)) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Damage", meta = (ClampMin = "0"))
 	float MomentumImpulseMultiplier = 0.002f;
+
+	// ==================== Durability (Hit Count) ====================
+
+	/** Maximum hits before weapon breaks. 0 = infinite (no breaking). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Durability", meta = (ClampMin = "0"))
+	int32 MaxHitCount = 0;
+
+	/** Remaining hits before weapon breaks (set by SetRemainingHits when equipped from a drop) */
+	UPROPERTY(BlueprintReadOnly, Category = "Melee|Durability")
+	int32 RemainingHits = 0;
+
+	/** Sound played when weapon breaks */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Durability")
+	TObjectPtr<USoundBase> BreakSound;
+
+	/** Set remaining hits (called when equipping from a DroppedMeleeWeapon) */
+	void SetRemainingHits(int32 Hits);
+
+	/** Set break geometry data from a DroppedMeleeWeapon source */
+	void SetBreakData(UGeometryCollection* GC, float Impulse, float AngularImpulse, float GibLifetime);
+
+	/** True if this weapon has limited durability (will break after hits) */
+	bool HasLimitedDurability() const { return MaxHitCount > 0; }
 
 	// ==================== Melee Range ====================
 
@@ -276,9 +312,21 @@ public:
 
 	// ==================== Swing Animations ====================
 
-	/** Array of swing animation variants (randomly selected by weight) */
+	/** Montage played on MeleeWeaponFPMesh when weapon is equipped (e.g. draw/unsheathe) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Animation")
+	TObjectPtr<UAnimMontage> EquipMontage;
+
+	/** Which side the first swing comes from (when starting from idle) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Animation")
+	EMeleeSwingSide FirstSwingSide = EMeleeSwingSide::Right;
+
+	/** Array of ground swing animation variants (randomly selected by weight, filtered by current side) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Animation")
 	TArray<FMeleeWeaponSwingData> SwingAnimations;
+
+	/** Array of airborne swing animation variants (used when player is in the air). Side alternation applies here too. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Animation")
+	TArray<FMeleeWeaponSwingData> AirSwingAnimations;
 
 	// ==================== Melee VFX ====================
 
@@ -376,19 +424,18 @@ protected:
 	/** Update cool kick boost */
 	void UpdateCoolKick(float DeltaTime);
 
-	// ==================== Drop Kick ====================
+	// ==================== Drop Kick (delegated to MeleeAttackComponent) ====================
 
 	/** Check if drop kick conditions are met (airborne + looking down) */
 	bool ShouldPerformDropKick() const;
 
-	/** Perform cone trace for drop kick and find target. Returns true if target found. */
-	bool TryStartDropKick();
+	/** Callback when MeleeAttackComponent detects a dropkick hit */
+	UFUNCTION()
+	void OnDelegatedDropKickHit(AActor* HitActor, const FVector& HitLocation, float Damage);
 
-	/** Update drop kick dive movement */
-	void UpdateDropKick(float DeltaTime);
-
-	/** Check if there's a valid dropkick target in the cone (read-only) */
-	bool HasDropKickTarget() const;
+	/** Callback when MeleeAttackComponent finishes the dropkick attack */
+	UFUNCTION()
+	void OnDelegatedDropKickEnded();
 
 	// ==================== Camera Focus ====================
 
@@ -403,13 +450,23 @@ protected:
 
 	// ==================== Animation ====================
 
-	/** Select a random swing animation from the array based on weights */
-	const FMeleeWeaponSwingData* SelectWeightedSwing();
+	/** Select a random swing animation from the array based on weights and current side. Uses AirSwingAnimations if airborne. */
+	const FMeleeWeaponSwingData* SelectWeightedSwing(bool bAirborne = false);
 
 	// ==================== Montage Control ====================
 
-	/** Stop any currently playing montage on the owner (allows replay for next swing) */
+	/** Stop any currently playing montage on the owner and character's MeleeWeaponFPMesh */
 	void StopCurrentMontage();
+
+public:
+	/** Play montage on character's MeleeWeaponFPMesh (gets mesh from ShooterCharacter) */
+	void PlayMontageOnFPMesh(UAnimMontage* Montage);
+
+protected:
+
+	/** Cached reference to character's MeleeWeaponFPMesh */
+	UPROPERTY()
+	TObjectPtr<USkeletalMeshComponent> CachedMeleeWeaponFPMesh;
 
 	// ==================== VFX/SFX ====================
 
@@ -447,6 +504,12 @@ protected:
 
 	/** Index to cycle/alternate swing animations (prevents same animation twice in a row) */
 	int32 LastSwingIndex = -1;
+
+	/** Current expected swing side (alternates Left↔Right after each swing) */
+	EMeleeSwingSide CurrentSwingSide = EMeleeSwingSide::Right;
+
+	/** True after the first swing has been performed (reset when combo resets) */
+	bool bIsInCombo = false;
 
 	/** Cached player controller */
 	UPROPERTY()
@@ -491,17 +554,11 @@ protected:
 
 	// ==================== Drop Kick State ====================
 
-	/** True if current attack is a drop kick */
+	/** True if current attack is a delegated drop kick (movement handled by MeleeAttackComponent) */
 	bool bIsDropKick = false;
 
 	/** Height difference at drop kick start (for bonus damage calculation) */
 	float DropKickHeightDifference = 0.0f;
-
-	/** Target position for drop kick dive */
-	FVector DropKickTargetPosition = FVector::ZeroVector;
-
-	/** Velocity during drop kick (for exit momentum) */
-	FVector DropKickVelocity = FVector::ZeroVector;
 
 	// ==================== Camera Focus State ====================
 
@@ -516,4 +573,28 @@ protected:
 
 	/** Target rotation for camera focus */
 	FRotator CameraFocusTargetRotation = FRotator::ZeroRotator;
+
+	// ==================== Durability Break State ====================
+
+	/** Geometry Collection for break shatter (set from DroppedMeleeWeapon) */
+	UPROPERTY()
+	TObjectPtr<UGeometryCollection> BreakGeometryCollection;
+
+	/** Break impulse for GC shatter */
+	float BreakImpulse = 600.0f;
+
+	/** Break angular impulse for tumbling gibs */
+	float BreakAngularImpulse = 100.0f;
+
+	/** Break gib lifetime */
+	float BreakGibLifetime = 3.0f;
+
+	/** Decrement hit count and check for break. Returns true if weapon broke. */
+	bool DecrementHitCount();
+
+	/** Execute weapon break: spawn GC, remove from inventory, switch weapon */
+	void BreakWeapon();
+
+	/** Spawn GC destruction at MeleeWeaponStaticMesh location */
+	void SpawnBreakDestructionGC();
 };

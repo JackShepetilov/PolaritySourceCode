@@ -3,6 +3,7 @@
 
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "Weapons/ShooterWeapon_Melee.h"
 #include "AI/ShooterNPC.h"
 #include "ShooterDummyInterface.h"
 #include "MovementSettings.h"
@@ -20,10 +21,10 @@
 #include "Components/AudioComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "Camera/CameraComponent.h"
-#include "Retargeter/IKRetargeter.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
@@ -64,23 +65,17 @@ AShooterCharacter::AShooterCharacter()
 	// create the upgrade manager component
 	UpgradeManager = CreateDefaultSubobject<UUpgradeManagerComponent>(TEXT("Upgrade Manager"));
 
-	// ==================== UE4 Mesh System ====================
+	// ==================== Melee Weapon FP Mesh ====================
 
-	// Create UE4 First Person Mesh (visible, copies pose from FirstPersonMesh)
-	UE4_FPMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("UE4_FPMesh"));
-	UE4_FPMesh->SetupAttachment(GetMesh());
-	UE4_FPMesh->SetOnlyOwnerSee(true);
-	UE4_FPMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
-	UE4_FPMesh->SetCollisionProfileName(FName("NoCollision"));
-	UE4_FPMesh->SetVisibility(false); // Hidden by default, enabled in BeginPlay if bUseUE4Meshes
-
-	// Create UE4 Melee Mesh (visible, copies pose from MeleeMesh)
-	UE4_MeleeMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("UE4_MeleeMesh"));
-	UE4_MeleeMesh->SetupAttachment(GetMesh());
-	UE4_MeleeMesh->SetOnlyOwnerSee(true);
-	UE4_MeleeMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
-	UE4_MeleeMesh->SetCollisionProfileName(FName("NoCollision"));
-	UE4_MeleeMesh->SetVisibility(false); // Hidden by default, controlled by MeleeAttackComponent
+	// Create MeleeWeaponFPMesh - shown instead of FP mesh when melee weapon is equipped
+	MeleeWeaponFPMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MeleeWeaponFPMesh"));
+	MeleeWeaponFPMesh->SetupAttachment(GetMesh());
+	MeleeWeaponFPMesh->SetOnlyOwnerSee(true);
+	MeleeWeaponFPMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+	MeleeWeaponFPMesh->SetCollisionProfileName(FName("NoCollision"));
+	MeleeWeaponFPMesh->SetVisibility(false, true);
+	MeleeWeaponFPMesh->bCastDynamicShadow = false;
+	MeleeWeaponFPMesh->CastShadow = false;
 
 	// configure movement
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 600.0f, 0.0f);
@@ -126,33 +121,30 @@ void AShooterCharacter::BeginPlay()
 		MeleeAttackComponent->OnMeleeHit.AddDynamic(this, &AShooterCharacter::OnMeleeHit);
 	}
 
-	// ==================== Setup UE4 Mesh System ====================
-	if (bUseUE4Meshes)
+	// ==================== Setup Melee Weapon FP Mesh ====================
+	if (MeleeWeaponFPMesh && MeleeWeaponFPAnimClass)
 	{
-		// Hide original meshes (they become leader meshes)
-		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-		{
-			FPMesh->SetVisibility(false);
-		}
-		if (USkeletalMeshComponent* MeleeMesh = GetMeleeMesh())
-		{
-			MeleeMesh->SetVisibility(false);
-		}
+		MeleeWeaponFPMesh->SetAnimInstanceClass(MeleeWeaponFPAnimClass);
+	}
 
-		// Show and configure UE4_FPMesh (follower)
-		if (UE4_FPMesh)
+	// Find the Blueprint-added StaticMesh child of MeleeWeaponFPMesh and apply FP rendering settings
+	if (MeleeWeaponFPMesh)
+	{
+		TArray<USceneComponent*> MeleeChildren;
+		MeleeWeaponFPMesh->GetChildrenComponents(false, MeleeChildren);
+		for (USceneComponent* Child : MeleeChildren)
 		{
-			UE4_FPMesh->SetVisibility(true);
-			// Animation Blueprint will be set in editor with Copy Pose from Mesh node
-			// that references GetFirstPersonMesh() as source and uses FPMeshRetargeter
-		}
-
-		// UE4_MeleeMesh visibility is controlled by MeleeAttackComponent
-		// We need to update MeleeAttackComponent to use UE4_MeleeMesh instead of MeleeMesh
-		if (UE4_MeleeMesh && MeleeAttackComponent)
-		{
-			// Override MeleeAttackComponent's mesh reference to use UE4_MeleeMesh
-			MeleeAttackComponent->MeleeMesh = UE4_MeleeMesh;
+			if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Child))
+			{
+				MeleeWeaponStaticMesh = SMC;
+				SMC->SetOnlyOwnerSee(true);
+				SMC->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+				SMC->SetCollisionProfileName(FName("NoCollision"));
+				SMC->bCastDynamicShadow = false;
+				SMC->CastShadow = false;
+				SMC->SetVisibility(false);
+				break;
+			}
 		}
 	}
 
@@ -993,17 +985,14 @@ void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
 		FPMesh->SetOverlayMaterial(TargetMaterial);
 	}
 
-	// Apply overlay material to UE4 meshes if using them
-	if (bUseUE4Meshes)
+	// Apply overlay material to MeleeWeaponFPMesh and weapon static mesh
+	if (MeleeWeaponFPMesh)
 	{
-		if (UE4_FPMesh)
-		{
-			UE4_FPMesh->SetOverlayMaterial(TargetMaterial);
-		}
-		if (UE4_MeleeMesh)
-		{
-			UE4_MeleeMesh->SetOverlayMaterial(TargetMaterial);
-		}
+		MeleeWeaponFPMesh->SetOverlayMaterial(TargetMaterial);
+	}
+	if (MeleeWeaponStaticMesh)
+	{
+		MeleeWeaponStaticMesh->SetOverlayMaterial(TargetMaterial);
 	}
 }
 
@@ -1646,9 +1635,42 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 	TSubclassOf<UAnimInstance> FPAnimClass = Weapon->GetFirstPersonAnimInstanceClass();
 	TSubclassOf<UAnimInstance> TPAnimClass = Weapon->GetThirdPersonAnimInstanceClass();
 
-	if (FPAnimClass)
+	// Melee weapon: swap FP mesh to MeleeWeaponFPMesh
+	if (Weapon->IsMeleeWeapon() && MeleeWeaponFPMesh && MeleeWeaponFPMesh->GetSkeletalMeshAsset())
 	{
-		GetFirstPersonMesh()->SetAnimInstanceClass(FPAnimClass);
+		// Hide character's FP mesh
+		GetFirstPersonMesh()->SetVisibility(false);
+
+		// Attach MeleeWeaponFPMesh to camera
+		UCameraComponent* Camera = GetFirstPersonCameraComponent();
+		if (Camera)
+		{
+			MeleeWeaponFPMesh->AttachToComponent(
+				Camera,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale
+			);
+			MeleeWeaponFPMesh->SetRelativeLocation(MeleeWeaponFPMeshOffset);
+			MeleeWeaponFPMesh->SetRelativeRotation(MeleeWeaponFPMeshRotation);
+		}
+
+		MeleeWeaponFPMesh->SetVisibility(true, true);
+
+		// Play equip montage if set (draw/unsheathe animation)
+		if (AShooterWeapon_Melee* MeleeWeapon = Cast<AShooterWeapon_Melee>(Weapon))
+		{
+			if (MeleeWeapon->EquipMontage)
+			{
+				MeleeWeapon->PlayMontageOnFPMesh(MeleeWeapon->EquipMontage);
+			}
+		}
+	}
+	else
+	{
+		// Normal weapon: set FP AnimBP as usual
+		if (FPAnimClass)
+		{
+			GetFirstPersonMesh()->SetAnimInstanceClass(FPAnimClass);
+		}
 	}
 
 	if (TPAnimClass)
@@ -1676,11 +1698,53 @@ void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
 		RecoilComponent->ResetRecoil();
 	}
 
+	// Restore FP mesh when melee weapon is unequipped
+	if (Weapon->IsMeleeWeapon() && MeleeWeaponFPMesh)
+	{
+		MeleeWeaponFPMesh->SetVisibility(false, true);
+		MeleeWeaponFPMesh->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
+
+		// Restore character's FP mesh visibility
+		GetFirstPersonMesh()->SetVisibility(true);
+	}
+
 	// Re-enable MeleeAttackComponent when melee weapon is unequipped
 	if (MeleeAttackComponent && Weapon->IsMeleeWeapon())
 	{
 		MeleeAttackComponent->SetExternallyDisabled(false);
 	}
+}
+
+void AShooterCharacter::RemoveMeleeWeapon(AShooterWeapon* WeaponToRemove)
+{
+	if (!WeaponToRemove)
+	{
+		return;
+	}
+
+	// Deactivate if currently equipped (restores FP mesh, re-enables MeleeAttackComponent)
+	if (CurrentWeapon == WeaponToRemove)
+	{
+		OnWeaponDeactivated(WeaponToRemove);
+		CurrentWeapon = nullptr;
+	}
+
+	// Remove from inventory
+	OwnedWeapons.Remove(WeaponToRemove);
+
+	// Switch to first available weapon or clear
+	if (OwnedWeapons.Num() > 0)
+	{
+		CurrentWeapon = OwnedWeapons[0];
+		OnWeaponActivated(CurrentWeapon);
+	}
+	else
+	{
+		UpdateFirstPersonMeshVisibility();
+	}
+
+	// Destroy the weapon actor
+	WeaponToRemove->Destroy();
 }
 
 void AShooterCharacter::UpdateFirstPersonMeshVisibility()
@@ -1692,7 +1756,18 @@ void AShooterCharacter::UpdateFirstPersonMeshVisibility()
 	}
 
 	const bool bHasWeapon = OwnedWeapons.Num() > 0;
-	FPMesh->SetVisibility(bHasWeapon, false);
+
+	// Don't show FP mesh if current weapon is melee and we have MeleeWeaponFPMesh
+	bool bMeleeWeaponOverride = false;
+	if (bHasWeapon && CurrentWeapon && CurrentWeapon->IsMeleeWeapon())
+	{
+		if (MeleeWeaponFPMesh && MeleeWeaponFPMesh->GetSkeletalMeshAsset())
+		{
+			bMeleeWeaponOverride = true;
+		}
+	}
+
+	FPMesh->SetVisibility(bHasWeapon && !bMeleeWeaponOverride, false);
 }
 
 void AShooterCharacter::OnSemiWeaponRefire()
@@ -1700,11 +1775,56 @@ void AShooterCharacter::OnSemiWeaponRefire()
 	// unused
 }
 
-void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled)
+void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled, AActor* HitActor)
 {
 	if (HitMarkerComponent)
 	{
 		HitMarkerComponent->RegisterHit(HitLocation, HitDirection, Damage, bHeadshot, bKilled);
+	}
+
+	// Charge transfer for melee weapon hits (same logic as OnMeleeHit)
+	if (HitActor && CurrentWeapon && CurrentWeapon->IsMeleeWeapon())
+	{
+		if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
+		{
+			bool bIsDummyTarget = HitActor->Implements<UShooterDummyTarget>();
+
+			if (bIsDummyTarget)
+			{
+				bool bGrantsStable = IShooterDummyTarget::Execute_GrantsStableCharge(HitActor);
+				if (bGrantsStable)
+				{
+					float StableAmount = IShooterDummyTarget::Execute_GetStableChargeAmount(HitActor);
+					if (StableAmount > 0.0f)
+					{
+						EMFMod->AddPermanentCharge(StableAmount);
+					}
+					if (bKilled)
+					{
+						float KillBonus = IShooterDummyTarget::Execute_GetKillChargeBonus(HitActor);
+						if (KillBonus > 0.0f)
+						{
+							EMFMod->AddPermanentCharge(KillBonus);
+						}
+					}
+					return;
+				}
+			}
+
+			float ChargeAmount = EMFMod->ChargePerMeleeHit;
+			if (AShooterNPC* HitNPC = Cast<AShooterNPC>(HitActor))
+			{
+				ChargeAmount = -HitNPC->GetChargeChangeOnMeleeHit();
+			}
+
+			float OldCharge = EMFMod->GetCharge();
+			EMFMod->AddBonusCharge(ChargeAmount);
+			float NewCharge = EMFMod->GetCharge();
+
+			UE_LOG(LogTemp, Warning, TEXT("[WeaponMeleeCharge] Hit %s - Charge: %.2f -> %.2f (added %.2f bonus)"),
+				HitActor ? *HitActor->GetName() : TEXT("NULL"),
+				OldCharge, NewCharge, ChargeAmount);
+		}
 	}
 }
 

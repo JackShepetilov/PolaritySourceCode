@@ -23,7 +23,7 @@ ARewardContainer::ARewardContainer()
 	ContainerMesh->SetEnableGravity(false);
 	ContainerMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	// Impact probe — invisible sphere, starts fully disabled
+	// Impact probe — kept for header compatibility, not used in current flow
 	ImpactProbe = CreateDefaultSubobject<USphereComponent>(TEXT("ImpactProbe"));
 	ImpactProbe->SetupAttachment(RootComponent);
 	ImpactProbe->SetSphereRadius(30.0f);
@@ -37,14 +37,12 @@ ARewardContainer::ARewardContainer()
 void ARewardContainer::BeginPlay()
 {
 	Super::BeginPlay();
-
-	ImpactProbe->SetSphereRadius(ImpactProbeRadius);
-	ImpactProbe->OnComponentHit.AddDynamic(this, &ARewardContainer::OnImpactProbeHit);
 }
 
 void ARewardContainer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(GibFreezeHandle);
+	GetWorldTimerManager().ClearTimer(ScatterImpulseHandle);
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -58,26 +56,19 @@ void ARewardContainer::Activate()
 	}
 	bActivated = true;
 
-	UE_LOG(LogTemp, Log, TEXT("RewardContainer %s: Activated"), *GetName());
+	UE_LOG(LogTemp, Log, TEXT("RewardContainer %s: Activated — exploding in place"), *GetName());
 
 	// Hide the static mesh preview
 	ContainerMesh->SetVisibility(false);
 
-	// Spawn falling GC (whole, unbroken)
+	// Spawn GC at mesh location, immediately break it
 	SpawnFallingGC();
 
-	// Activate the impact probe — detach from actor, enable physics, let it fall
-	ImpactProbe->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-	ImpactProbe->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	ImpactProbe->SetCollisionObjectType(ECC_WorldDynamic);
-	ImpactProbe->SetCollisionResponseToAllChannels(ECR_Ignore);
-	ImpactProbe->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
-	ImpactProbe->BodyInstance.bNotifyRigidBodyCollision = true;
-	ImpactProbe->SetSimulatePhysics(true);
-	ImpactProbe->SetEnableGravity(true);
+	// Notify Blueprints — GC visible, physics active, mesh hidden
+	OnContainerActivated.Broadcast();
 }
 
-// ==================== GC Spawning ====================
+// ==================== GC Spawning + Immediate Break ====================
 
 void ARewardContainer::SpawnFallingGC()
 {
@@ -124,39 +115,27 @@ void ARewardContainer::SpawnFallingGC()
 		}
 	}
 
-	// Collision: block WorldStatic (ground), ignore pawns/camera
+	// Collision
 	GCComp->SetCollisionProfileName(GibCollisionProfile);
 	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
 	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
 
-	// Enable physics + gravity — NO strain field, GC falls as whole piece
+	// Enable physics + gravity
 	GCComp->SetSimulatePhysics(true);
 	GCComp->SetEnableGravity(true);
 	GCComp->RecreatePhysicsState();
+
+	// Immediately shatter
+	BreakContainer();
 }
 
-// ==================== Impact Detection ====================
+// ==================== Impact Detection (unused in current flow) ====================
 
 void ARewardContainer::OnImpactProbeHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	if (bImpacted)
-	{
-		return;
-	}
-	bImpacted = true;
-
-	ImpactLocation = Hit.ImpactPoint;
-
-	UE_LOG(LogTemp, Log, TEXT("RewardContainer %s: Impact at %s"), *GetName(), *ImpactLocation.ToString());
-
-	// Disable probe — its job is done
-	ImpactProbe->SetSimulatePhysics(false);
-	ImpactProbe->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	ImpactProbe->DestroyComponent();
-
-	BreakContainer();
+	// Not used — container now explodes immediately on activation
 }
 
 // ==================== GC Destruction ====================
@@ -174,8 +153,6 @@ void ARewardContainer::BreakContainer()
 		return;
 	}
 
-	const FVector BreakOrigin = SpawnedGCActor->GetActorLocation();
-
 	// Shatter all clusters
 	UUniformScalar* StrainField = NewObject<UUniformScalar>(SpawnedGCActor);
 	StrainField->Magnitude = 999999.0f;
@@ -183,41 +160,24 @@ void ARewardContainer::BreakContainer()
 		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
 		nullptr, StrainField);
 
-	// Radial scatter
-	if (BreakImpulse > 0.0f)
-	{
-		URadialVector* RadialVelocity = NewObject<URadialVector>(SpawnedGCActor);
-		RadialVelocity->Magnitude = BreakImpulse;
-		RadialVelocity->Position = BreakOrigin;
-		GCComp->ApplyPhysicsField(true,
-			EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
-			nullptr, RadialVelocity);
-	}
+	// Delay scatter impulse — bodies don't exist yet in the same frame as strain
+	GetWorldTimerManager().SetTimer(ScatterImpulseHandle,
+		this, &ARewardContainer::ApplyScatterImpulse, 0.05f, false);
 
-	// Angular tumble
-	if (BreakAngularImpulse > 0.0f)
-	{
-		URadialVector* AngularVelocity = NewObject<URadialVector>(SpawnedGCActor);
-		AngularVelocity->Magnitude = BreakAngularImpulse;
-		AngularVelocity->Position = BreakOrigin;
-		GCComp->ApplyPhysicsField(true,
-			EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
-			nullptr, AngularVelocity);
-	}
+	// VFX at container location
+	const FVector BreakLocation = SpawnedGCActor->GetActorLocation();
 
-	// Impact VFX
 	if (ImpactVFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			this, ImpactVFX, ImpactLocation,
+			this, ImpactVFX, BreakLocation,
 			FRotator::ZeroRotator, FVector(ImpactVFXScale),
 			true, true, ENCPoolMethod::None, true);
 	}
 
-	// Impact SFX
 	if (ImpactSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, ImpactLocation);
+		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, BreakLocation);
 	}
 
 	// Gib lifetime
@@ -245,21 +205,59 @@ void ARewardContainer::BreakContainer()
 	SpawnReward();
 }
 
-// ==================== Reward Spawning ====================
+// ==================== Scatter Impulse (Deferred) ====================
 
-void ARewardContainer::SpawnReward()
+void ARewardContainer::ApplyScatterImpulse()
 {
-	if (!RewardActorClass || !GetWorld())
+	if (!SpawnedGCActor)
 	{
 		return;
 	}
 
-	const FVector SpawnLocation = ImpactLocation + FVector(0.0f, 0.0f, RewardSpawnZOffset);
+	UGeometryCollectionComponent* GCComp = SpawnedGCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		return;
+	}
+
+	const FVector BreakOrigin = SpawnedGCActor->GetActorLocation();
+
+	GCComp->AddRadialImpulse(BreakOrigin, BreakRadius, BreakImpulse,
+		ERadialImpulseFalloff::RIF_Linear, /*bVelChange=*/ true);
+
+	UE_LOG(LogTemp, Log, TEXT("RewardContainer %s: Applied radial impulse (Strength=%.0f, Radius=%.0f)"),
+		*GetName(), BreakImpulse, BreakRadius);
+}
+
+// ==================== Reward Spawning ====================
+
+void ARewardContainer::SpawnReward()
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+
+	if (!RewardActorClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RewardContainer %s: RewardActorClass not set, skipping reward spawn"), *GetName());
+		return;
+	}
+
+	AActor* SpawnPointActor = RewardSpawnPoint.Get();
+	if (!SpawnPointActor)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RewardContainer %s: RewardSpawnPoint not set, skipping reward spawn"), *GetName());
+		return;
+	}
+
+	const FVector SpawnLocation = SpawnPointActor->GetActorLocation();
+	const FRotator SpawnRotation = SpawnPointActor->GetActorRotation();
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 
-	AActor* Reward = GetWorld()->SpawnActor<AActor>(RewardActorClass, SpawnLocation, FRotator::ZeroRotator, SpawnParams);
+	AActor* Reward = GetWorld()->SpawnActor<AActor>(RewardActorClass, SpawnLocation, SpawnRotation, SpawnParams);
 
 	if (Reward)
 	{

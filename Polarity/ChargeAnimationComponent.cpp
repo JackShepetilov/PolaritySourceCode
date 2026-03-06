@@ -19,6 +19,7 @@
 #include "EMF_FieldComponent.h"
 #include "EMFPhysicsProp.h"
 #include "EMFAcceleratorPlate.h"
+#include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
 
@@ -474,6 +475,11 @@ void UChargeAnimationComponent::ExitChanneling()
 		{
 			Prop->DetachFromPlate();
 		}
+		else if (ADroppedMeleeWeapon* DroppedWeapon = Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
+		{
+			// DroppedMeleeWeapon pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
 		if (ChannelingPlateActor)
 		{
 			ChannelingPlateActor->ClearCapturedNPC();
@@ -632,6 +638,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still captured — don't re-search
 			}
 		}
+		// Check DroppedMeleeWeapon (pull is self-contained — just check if still in progress)
+		else if (ADroppedMeleeWeapon* DroppedWeapon = Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
+		{
+			if (DroppedWeapon->IsBeingPulled())
+			{
+				return; // Still pulling — don't re-search
+			}
+		}
 		// Target was auto-released or is invalid — clear and search for new target
 		CurrentCapturedNPC.Reset();
 		if (ChannelingPlateActor)
@@ -669,10 +683,11 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		QueryParams
 	);
 
-	// Unified scoring: best target (NPC or prop) closest to crosshair
+	// Unified scoring: best target closest to crosshair
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
-	bool bBestIsNPC = false;
+	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
 
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
@@ -717,7 +732,47 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = NPC;
-				bBestIsNPC = true;
+				BestTargetType = ECaptureTargetType::NPC;
+			}
+			continue;
+		}
+
+		// Try DroppedMeleeWeapon (same priority as props)
+		if (ADroppedMeleeWeapon* DroppedWeapon = Cast<ADroppedMeleeWeapon>(HitActor))
+		{
+			if (!DroppedWeapon->bCanBeCaptured || DroppedWeapon->IsBeingPulled() || DroppedWeapon->IsPullComplete())
+			{
+				continue;
+			}
+
+			// Charge validation: only capture weapons with OPPOSITE charge sign
+			const float WeaponCharge = DroppedWeapon->GetCharge();
+			if (FMath::IsNearlyZero(WeaponCharge) || WeaponCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+			{
+				continue;
+			}
+
+			// Range check using weapon's own logarithmic capture range
+			const FVector ToTarget = DroppedWeapon->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float CaptureRange = DroppedWeapon->CalculateCaptureRange();
+			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < MaxAngleCos)
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = DroppedWeapon;
+				BestTargetType = ECaptureTargetType::DroppedWeapon;
 			}
 			continue;
 		}
@@ -748,7 +803,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = Prop;
-				bBestIsNPC = false;
+				BestTargetType = ECaptureTargetType::Prop;
 			}
 			continue;
 		}
@@ -756,13 +811,19 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 	if (BestTarget)
 	{
-		if (bBestIsNPC)
+		switch (BestTargetType)
 		{
+		case ECaptureTargetType::NPC:
 			CaptureNPC(Cast<AShooterNPC>(BestTarget));
-		}
-		else
-		{
+			break;
+		case ECaptureTargetType::Prop:
 			CaptureProp(Cast<AEMFPhysicsProp>(BestTarget));
+			break;
+		case ECaptureTargetType::DroppedWeapon:
+			CaptureDroppedWeapon(Cast<ADroppedMeleeWeapon>(BestTarget));
+			break;
+		default:
+			break;
 		}
 		return;
 	}
@@ -850,6 +911,27 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	Prop->SetCapturedByPlate(ChannelingPlateActor);
 }
 
+void UChargeAnimationComponent::CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon)
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	// Start scripted pull (weapon manages its own interpolation in Tick)
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		Weapon->StartPull(ShooterChar);
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Weapon;
+}
+
 void UChargeAnimationComponent::CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate)
 {
 	if (!Plate || !ChannelingPlateActor)
@@ -888,6 +970,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	else if (AEMFAcceleratorPlate* AccelPlate = Cast<AEMFAcceleratorPlate>(CurrentCapturedNPC.Get()))
 	{
 		AccelPlate->StopCapture();
+	}
+	else if (Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
+	{
+		// DroppedMeleeWeapon pull is self-contained — no release action needed
 	}
 
 	if (ChannelingPlateActor)
@@ -1062,6 +1148,16 @@ void UChargeAnimationComponent::SwitchToFirstPersonMesh()
 			MeleeMesh->UnHideBoneByName(BoneName);
 		}
 		CurrentlyHiddenBones.Empty();
+	}
+
+	// Don't restore FP mesh if melee weapon is equipped — MeleeWeaponFPMesh is used instead
+	if (ShooterCharacter)
+	{
+		AShooterWeapon* CurrentWeapon = ShooterCharacter->GetCurrentWeapon();
+		if (CurrentWeapon && CurrentWeapon->IsMeleeWeapon())
+		{
+			return;
+		}
 	}
 
 	if (FirstPersonMesh)

@@ -7,6 +7,7 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "Engine/World.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 
@@ -43,6 +44,42 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	{
 		SetVisibility(ESlateVisibility::Hidden);
 		return;
+	}
+
+	// Occlusion check — hide if target is behind a wall
+	if (bOcclusionCheck)
+	{
+		AActor* Target = GetBoundActor();
+		if (Target)
+		{
+			UWorld* World = PC->GetWorld();
+			if (World)
+			{
+				FHitResult Hit;
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(ChargeWidgetOcclusion), true);
+				Params.AddIgnoredActor(PC->GetPawn());
+				Params.AddIgnoredActor(Target);
+
+				if (World->LineTraceSingleByChannel(Hit, CameraLocation, Target->GetActorLocation(), ECC_Visibility, Params))
+				{
+					SetVisibility(ESlateVisibility::Hidden);
+					return;
+				}
+			}
+		}
+	}
+
+	// Distance-based scaling
+	if (bEnableDistanceScaling)
+	{
+		float Distance = FVector::Dist(CameraLocation, WorldPos);
+		float Alpha = FMath::Clamp((Distance - MaxScaleDistance) / FMath::Max(MinScaleDistance - MaxScaleDistance, 1.0f), 0.0f, 1.0f);
+		float Scale = FMath::Lerp(MaxWidgetScale, MinWidgetScale, Alpha);
+
+		SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+		FWidgetTransform WidgetTransform;
+		WidgetTransform.Scale = FVector2D(Scale, Scale);
+		SetRenderTransform(WidgetTransform);
 	}
 
 	// Project to screen

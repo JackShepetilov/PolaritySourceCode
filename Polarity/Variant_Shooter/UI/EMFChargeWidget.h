@@ -90,6 +90,34 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "EMF Charge|Layout")
 	FVector2D WidgetHalfSize = FVector2D(40.0f, 10.0f);
 
+	/** Enable distance-based scaling (widget shrinks with distance) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout")
+	bool bEnableDistanceScaling = true;
+
+	/** Distance closer than this = MaxWidgetScale (cm) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout",
+		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "100"))
+	float MaxScaleDistance = 500.0f;
+
+	/** Distance farther than this = MinWidgetScale (cm) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout",
+		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "100"))
+	float MinScaleDistance = 3000.0f;
+
+	/** Scale when very close (<= MaxScaleDistance) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout",
+		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "0.1", ClampMax = "5.0"))
+	float MaxWidgetScale = 1.0f;
+
+	/** Scale when far away (>= MinScaleDistance) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout",
+		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "0.1", ClampMax = "5.0"))
+	float MinWidgetScale = 0.3f;
+
+	/** Hide widget when target is behind a wall */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout")
+	bool bOcclusionCheck = true;
+
 protected:
 	/** The NPC this widget is tracking (mutually exclusive with BoundProp) */
 	TWeakObjectPtr<AShooterNPC> BoundNPC;

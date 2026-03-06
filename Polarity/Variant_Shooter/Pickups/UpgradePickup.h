@@ -8,7 +8,9 @@
 
 class USphereComponent;
 class UStaticMeshComponent;
+class UWidgetComponent;
 class UUpgradeDefinition;
+class UUpgradeTooltipWidget;
 class AShooterCharacter;
 class UNiagaraSystem;
 class UNiagaraComponent;
@@ -39,6 +41,14 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> Mesh;
 
+	/** Overlap sphere that triggers tooltip visibility */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<USphereComponent> TooltipTrigger;
+
+	/** World-space widget showing upgrade info */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UWidgetComponent> TooltipWidgetComponent;
+
 	// ==================== Upgrade ====================
 
 	/** Which upgrade this pickup grants */
@@ -50,6 +60,18 @@ public:
 	/** Pickup radius */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade Pickup", meta = (ClampMin = "50.0", Units = "cm"))
 	float PickupRadius = 100.0f;
+
+	/** Radius at which the tooltip becomes visible (must be larger than PickupRadius) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade Pickup|Tooltip", meta = (ClampMin = "100.0", Units = "cm"))
+	float TooltipRadius = 400.0f;
+
+	/** Widget class for the tooltip (Blueprint inheriting UUpgradeTooltipWidget) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade Pickup|Tooltip")
+	TSubclassOf<UUpgradeTooltipWidget> TooltipWidgetClass;
+
+	/** Vertical offset above the mesh where the tooltip appears (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade Pickup|Tooltip", meta = (Units = "cm"))
+	float TooltipHeight = 80.0f;
 
 	/** Idle VFX (looping particles around the pickup) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade Pickup|Effects")
@@ -106,4 +128,14 @@ private:
 	UFUNCTION()
 	void OnPickupOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	/** Called when player enters tooltip range */
+	UFUNCTION()
+	void OnTooltipBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	/** Called when player leaves tooltip range */
+	UFUNCTION()
+	void OnTooltipEndOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 };

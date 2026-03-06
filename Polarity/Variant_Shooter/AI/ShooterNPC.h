@@ -8,6 +8,8 @@
 #include "GenericTeamAgentInterface.h"
 #include "ShooterNPC.generated.h"
 
+class ADroppedMeleeWeapon;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
@@ -492,6 +494,20 @@ protected:
 	/** Charge change when hit by melee attack (opposite sign to player's gain) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Charge", meta = (ClampMin = "-100.0", ClampMax = "100.0"))
 	float ChargeChangeOnMeleeHit = -25.0f;
+
+	// ==================== Weapon Drop ====================
+
+	/** Optional dropped melee weapon class to spawn on death */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
+	TSubclassOf<ADroppedMeleeWeapon> DroppedMeleeWeaponClass;
+
+	/** Base chance to drop weapon (0-1). Actual chance = BaseChance * abs(NPC_charge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DropWeaponBaseChance = 0.5f;
+
+	/** Offset above NPC location for weapon spawn */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
+	FVector DropSpawnOffset = FVector(0.0f, 0.0f, 50.0f);
 
 public:
 

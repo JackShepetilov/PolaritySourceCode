@@ -534,6 +534,14 @@ public:
 	bool StartAttack();
 
 	/**
+	 * Start a delegated dropkick (called by ShooterWeapon_Melee).
+	 * Handles only movement and hit detection — skips animations, mesh transitions, charges, damage.
+	 * The calling weapon handles its own animation and damage via OnDropKickHit delegate.
+	 * @return true if dropkick started successfully
+	 */
+	bool StartDelegatedDropKick();
+
+	/**
 	 * Cancel current attack (if in windup phase)
 	 * @return true if attack was cancelled
 	 */
@@ -581,6 +589,16 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsDropKick() const { return bIsDropKick; }
+
+	/**
+	 * Check if current dropkick is delegated from ShooterWeapon_Melee
+	 */
+	bool IsDelegatedDropKick() const { return bDelegatedDropKick; }
+
+	/**
+	 * Get height difference at dropkick start (for external bonus damage calculation)
+	 */
+	float GetDropKickHeightDifference() const { return DropKickHeightDifference; }
 
 	/**
 	 * Check if drop kick is on cooldown
@@ -748,6 +766,9 @@ protected:
 
 	/** Remaining drop kick cooldown time (seconds) */
 	float DropKickCooldownRemaining = 0.0f;
+
+	/** When true, dropkick is delegated from ShooterWeapon_Melee — skip mesh/animation/charges/damage */
+	bool bDelegatedDropKick = false;
 
 	// ==================== Mesh Transition State ====================
 

@@ -14,6 +14,9 @@
 #include "EMF_FieldComponent.h"
 #include "EMF_PluginBPLibrary.h"
 
+// Arena
+#include "Polarity/Arena/ArenaManager.h"
+
 // Damage types
 #include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
 
@@ -87,6 +90,33 @@ void AEMFProjectile::NotifyHit(UPrimitiveComponent* MyComp, AActor* Other, UPrim
 	if (FieldComponent && FieldComponent->IsRegistered())
 	{
 		FieldComponent->UnregisterFromRegistry();
+	}
+
+	// Critical velocity check — broadcast arena destruction event
+	if (CriticalVelocity > 0.0f && ProjectileMovement)
+	{
+		const float Speed = ProjectileMovement->Velocity.Size();
+		if (Speed >= CriticalVelocity)
+		{
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+					FString::Printf(TEXT("[Projectile %s] CRITICAL HIT! Speed=%.0f | Threshold=%.0f"),
+						*GetName(), Speed, CriticalVelocity));
+			}
+			OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+
+			// Notify all arena managers in the level
+			TArray<AActor*> Arenas;
+			UGameplayStatics::GetAllActorsOfClass(GetWorld(), AArenaManager::StaticClass(), Arenas);
+			for (AActor* Arena : Arenas)
+			{
+				if (AArenaManager* AM = Cast<AArenaManager>(Arena))
+				{
+					AM->NotifyCriticalImpact(this, GetActorLocation(), Speed);
+				}
+			}
+		}
 	}
 
 	// Spawn charge-based explosion VFX before parent processes the hit

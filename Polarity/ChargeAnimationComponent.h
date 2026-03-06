@@ -19,6 +19,7 @@ class UEMFVelocityModifier;
 class AEMFChannelingPlateActor;
 class AEMFPhysicsProp;
 class AEMFAcceleratorPlate;
+class ADroppedMeleeWeapon;
 
 /**
  * Charge animation state
@@ -463,6 +464,9 @@ protected:
 
 	/** Capture a specific physics prop */
 	void CaptureProp(AEMFPhysicsProp* Prop);
+
+	/** Capture a dropped melee weapon (scripted pull, not physics-based) */
+	void CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon);
 
 	/** Capture an accelerator plate (lowest priority, no charge dependency) */
 	void CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate);

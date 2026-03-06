@@ -2,6 +2,8 @@
 
 #include "ShooterWeapon_Melee.h"
 #include "ShooterWeaponHolder.h"
+#include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/MeleeAttackComponent.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
@@ -16,7 +18,10 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "Engine/DamageEvents.h"
-#include "DrawDebugHelpers.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Field/FieldSystemObjects.h"
 
 AShooterWeapon_Melee::AShooterWeapon_Melee()
 {
@@ -44,6 +49,12 @@ void AShooterWeapon_Melee::BeginPlay()
 	if (PawnOwner)
 	{
 		CachedPlayerController = Cast<APlayerController>(PawnOwner->GetController());
+	}
+
+	// Cache reference to character's MeleeWeaponFPMesh
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner))
+	{
+		CachedMeleeWeaponFPMesh = ShooterChar->GetMeleeWeaponFPMesh();
 	}
 }
 
@@ -85,6 +96,19 @@ void AShooterWeapon_Melee::Fire()
 		return;
 	}
 
+	// Don't interrupt an active drop kick with refire
+	if (bIsDropKick)
+	{
+		return;
+	}
+
+	// Reset combo if too much time passed since last swing
+	const float TimeSinceLastSwing = GetWorld()->GetTimeSeconds() - TimeOfLastShot;
+	if (TimeSinceLastSwing > RefireRate * 3.0f)
+	{
+		bIsInCombo = false;
+	}
+
 	// Keep ammo full
 	CurrentBullets = MagazineSize;
 
@@ -123,18 +147,68 @@ void AShooterWeapon_Melee::Fire()
 	// Stop current montage so the new one can play
 	StopCurrentMontage();
 
+	// ==================== Delegated Drop Kick ====================
+	// Delegate dropkick movement/hit-detection to MeleeAttackComponent (uses its proven code path)
+	// ShooterWeapon_Melee handles its own animation and damage via delegates
+	if (ShouldPerformDropKick())
+	{
+		AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
+		UMeleeAttackComponent* MeleeComp = ShooterChar ? ShooterChar->GetMeleeAttackComponent() : nullptr;
+
+		if (MeleeComp && MeleeComp->StartDelegatedDropKick())
+		{
+			bIsDropKick = true;
+			DropKickHeightDifference = MeleeComp->GetDropKickHeightDifference();
+
+			// Bind to MeleeAttackComponent delegates
+			MeleeComp->OnDropKickHit.AddDynamic(this, &AShooterWeapon_Melee::OnDelegatedDropKickHit);
+			MeleeComp->OnMeleeAttackEnded.AddDynamic(this, &AShooterWeapon_Melee::OnDelegatedDropKickEnded);
+
+			// Play our own air attack animation on the weapon mesh
+			CurrentSwingData = SelectWeightedSwing(/*bAirborne=*/ true);
+			if (CurrentSwingData && CurrentSwingData->SwingMontage)
+			{
+				PlayMontageOnFPMesh(CurrentSwingData->SwingMontage);
+				WeaponOwner->PlayFiringMontage(CurrentSwingData->SwingMontage);
+				PlayMeleeCameraShake(CurrentSwingData->SwingCameraShake, CurrentSwingData->SwingShakeScale);
+			}
+
+			SpawnSwingTrail();
+			PlayMeleeSound(SwingSound);
+			OnShotFired.Broadcast();
+			TimeOfLastShot = GetWorld()->GetTimeSeconds();
+			return;
+		}
+	}
+
+	// ==================== Normal Attack (non-dropkick) ====================
+
 	// Start magnetism (pre-attack target lock-on)
 	StartMagnetism();
 
+	// Determine if airborne for animation selection
+	bool bAirborne = false;
+	if (PawnOwner)
+	{
+		if (UCharacterMovementComponent* Movement = PawnOwner->FindComponentByClass<UCharacterMovementComponent>())
+		{
+			bAirborne = Movement->IsFalling();
+		}
+	}
+
 	// Select and play swing animation
-	CurrentSwingData = SelectWeightedSwing();
+	CurrentSwingData = SelectWeightedSwing(bAirborne);
 	if (CurrentSwingData && CurrentSwingData->SwingMontage)
 	{
+		// Play on MeleeWeaponFPMesh (first-person view)
+		PlayMontageOnFPMesh(CurrentSwingData->SwingMontage);
+		// Also play on TP mesh via WeaponOwner (third-person view)
 		WeaponOwner->PlayFiringMontage(CurrentSwingData->SwingMontage);
 		PlayMeleeCameraShake(CurrentSwingData->SwingCameraShake, CurrentSwingData->SwingShakeScale);
 	}
 	else if (FiringMontage)
 	{
+		PlayMontageOnFPMesh(FiringMontage);
 		WeaponOwner->PlayFiringMontage(FiringMontage);
 	}
 
@@ -155,6 +229,12 @@ void AShooterWeapon_Melee::Fire()
 
 void AShooterWeapon_Melee::ActivateDamageWindow()
 {
+	// Drop kick manages its own damage window — ignore AnimNotify
+	if (bIsDropKick)
+	{
+		return;
+	}
+
 	bDamageWindowActive = true;
 	bHitDuringWindow = false;
 	HitActorsThisSwing.Empty();
@@ -162,6 +242,12 @@ void AShooterWeapon_Melee::ActivateDamageWindow()
 
 void AShooterWeapon_Melee::DeactivateDamageWindow()
 {
+	// Drop kick manages its own damage window — ignore AnimNotify
+	if (bIsDropKick)
+	{
+		return;
+	}
+
 	bDamageWindowActive = false;
 
 	// Play miss sound if nothing was hit during the window
@@ -169,7 +255,8 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 	{
 		PlayMeleeSound(MissSound);
 
-		// Titanfall 2: Restore pre-attack velocity on miss
+		// Titanfall 2: Restore pre-attack velocity on miss — only if it was faster
+		// (don't kill current velocity if player accelerated after swing start)
 		if (bPreserveMomentum && PawnOwner)
 		{
 			if (UCharacterMovementComponent* Movement = PawnOwner->FindComponentByClass<UCharacterMovementComponent>())
@@ -182,7 +269,11 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 					RestoredVelocity.Z = Movement->Velocity.Z;
 				}
 
-				Movement->Velocity = RestoredVelocity;
+				// Only restore if saved velocity was faster than current (don't slow the player down)
+				if (RestoredVelocity.SizeSquared() > Movement->Velocity.SizeSquared())
+				{
+					Movement->Velocity = RestoredVelocity;
+				}
 			}
 		}
 	}
@@ -201,39 +292,7 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 
 void AShooterWeapon_Melee::UpdateDamageWindow()
 {
-	// Drop kick special case: use distance to target instead of camera trace
-	if (bIsDropKick && MagnetismTarget.IsValid() && PawnOwner)
-	{
-		AActor* Target = MagnetismTarget.Get();
-		FVector PlayerPos = PawnOwner->GetActorLocation();
-		FVector TargetPos = Target->GetActorLocation();
-		float DistanceToTarget = FVector::Dist(PlayerPos, TargetPos);
-
-		if (DistanceToTarget <= AttackRange)
-		{
-			// Create a hit result for the target
-			FHitResult FakeHit;
-			FakeHit.ImpactPoint = TargetPos;
-			FakeHit.ImpactNormal = (PlayerPos - TargetPos).GetSafeNormal();
-			FakeHit.Location = TargetPos;
-			FakeHit.bBlockingHit = true;
-
-			if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(Target->GetRootComponent()))
-			{
-				FakeHit.Component = TargetRoot;
-			}
-
-			if (!HitActorsThisSwing.Contains(Target))
-			{
-				ProcessHit(FakeHit);
-			}
-		}
-
-		// Don't fall through to normal trace during dropkick
-		return;
-	}
-
-	// Normal hit detection
+	// Normal hit detection (dropkick hit detection is handled by MeleeAttackComponent)
 	FHitResult HitResult;
 	if (PerformMeleeTrace(HitResult))
 	{
@@ -294,13 +353,19 @@ void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
 			// Report hit to weapon owner
 			bool bHeadshot = IsHeadshot(HitResult);
 			FVector HitDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
-			WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, MeleeDamage, bHeadshot, false);
+			WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, MeleeDamage, bHeadshot, false, HitActor);
 			return;
 		}
 	}
 
 	// Apply damage (multiple damage types)
 	float FinalDamage = ApplyMeleeDamage(HitActor, HitResult);
+
+	// Decrement hit count — if weapon broke, stop processing
+	if (DecrementHitCount())
+	{
+		return;
+	}
 
 	// Apply knockback with full momentum system
 	FVector ImpulseDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
@@ -336,7 +401,7 @@ void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
 	bool bHeadshot = IsHeadshot(HitResult);
 	FVector HitDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
 	bool bKilled = HitActor->IsActorBeingDestroyed() || (Cast<AShooterNPC>(HitActor) && Cast<AShooterNPC>(HitActor)->IsDead());
-	WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, FinalDamage, bHeadshot, bKilled);
+	WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, FinalDamage, bHeadshot, bKilled, HitActor);
 }
 
 // ==================== Hit Detection ====================
@@ -645,20 +710,21 @@ void AShooterWeapon_Melee::ApplyCharacterImpulse(AActor* HitActor, const FVector
 
 void AShooterWeapon_Melee::StartMagnetism()
 {
-	if (!bEnableTargetMagnetism || !PawnOwner || !PawnOwner->GetController())
+	if (!PawnOwner || !PawnOwner->GetController())
 	{
 		return;
 	}
 
 	MagnetismTarget.Reset();
-	bIsDropKick = false;
-	DropKickHeightDifference = 0.0f;
 	bIsMagnetismActive = true;
 	LungeProgress = 0.0f;
 
-	// Check for drop kick first (airborne + looking down)
-	if (ShouldPerformDropKick() && TryStartDropKick())
+	// NOTE: Drop kick is handled in Fire() via delegation to MeleeAttackComponent
+
+	// Magnetism requires bEnableTargetMagnetism
+	if (!bEnableTargetMagnetism)
 	{
+		bIsMagnetismActive = false;
 		return;
 	}
 
@@ -767,12 +833,7 @@ void AShooterWeapon_Melee::UpdateMagnetism(float DeltaTime)
 		return;
 	}
 
-	// Handle drop kick movement separately
-	if (bIsDropKick)
-	{
-		UpdateDropKick(DeltaTime);
-		return;
-	}
+	// NOTE: Dropkick movement is handled by MeleeAttackComponent when delegated
 
 	if (!bEnableTargetMagnetism || !MagnetismTarget.IsValid() || !PawnOwner)
 	{
@@ -818,48 +879,13 @@ void AShooterWeapon_Melee::StopMagnetism()
 		return;
 	}
 
-	// Handle drop kick exit momentum before resetting state
-	if (bIsDropKick && PawnOwner)
-	{
-		if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
-		{
-			if (UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement())
-			{
-				FVector InputVector = Movement->GetPendingInputVector();
-				if (InputVector.IsNearlyZero())
-				{
-					InputVector = Movement->GetLastInputVector();
-				}
-
-				FVector ForwardDir = OwnerChar->GetActorForwardVector();
-				ForwardDir.Z = 0.0f;
-				ForwardDir.Normalize();
-
-				float ForwardInput = FVector::DotProduct(InputVector, ForwardDir);
-
-				if (ForwardInput > 0.1f && !DropKickVelocity.IsNearlyZero())
-				{
-					float ExitSpeed = DropKickVelocity.Size() * 0.5f;
-					Movement->Velocity = ForwardDir * ExitSpeed;
-				}
-				else
-				{
-					Movement->Velocity = FVector::ZeroVector;
-				}
-			}
-		}
-	}
+	// NOTE: Dropkick exit momentum and gravity restoration are handled by
+	// MeleeAttackComponent::StopMagnetism() when dropkick is delegated
 
 	MagnetismTarget.Reset();
 	bIsMagnetismActive = false;
 
-	// Reset drop kick state
-	bIsDropKick = false;
-	DropKickHeightDifference = 0.0f;
-	DropKickTargetPosition = FVector::ZeroVector;
-	DropKickVelocity = FVector::ZeroVector;
-
-	// Restore gravity after lock-on
+	// Restore gravity after normal magnetism lock-on
 	if (PawnOwner)
 	{
 		if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
@@ -893,11 +919,8 @@ void AShooterWeapon_Melee::UpdateMomentumPreservation(float DeltaTime)
 		return;
 	}
 
-	// Start with preserved velocity from attack start
-	FVector PreservedVelocity = VelocityAtSwingStart * MomentumPreservationRatio;
-	PreservedVelocity.Z = Movement->Velocity.Z; // Keep current Z (gravity applied)
-
-	// If we have a magnetism target and lunge is enabled, move toward them
+	// Only override velocity when lunging toward a target.
+	// Without a lunge target, let normal movement continue uninterrupted.
 	if (bEnableLunge && MagnetismTarget.IsValid() && !bIsDropKick)
 	{
 		FVector PlayerPos = OwnerChar->GetActorLocation();
@@ -912,29 +935,26 @@ void AShooterWeapon_Melee::UpdateMomentumPreservation(float DeltaTime)
 			float TimeRemaining = LungeDuration * (1.0f - LungeAlpha);
 			if (TimeRemaining > 0.01f)
 			{
-				PreservedVelocity = ToLungeTarget / TimeRemaining;
+				FVector LungeVelocity = ToLungeTarget / TimeRemaining;
 
 				// Clamp to prevent excessive speeds
 				float MaxSpeed = 3000.0f;
-				if (PreservedVelocity.Size() > MaxSpeed)
+				if (LungeVelocity.Size() > MaxSpeed)
 				{
-					PreservedVelocity = PreservedVelocity.GetSafeNormal() * MaxSpeed;
+					LungeVelocity = LungeVelocity.GetSafeNormal() * MaxSpeed;
 				}
-			}
-			else
-			{
-				PreservedVelocity = FVector::ZeroVector;
+
+				LungeVelocity.Z = Movement->Velocity.Z; // Keep current Z (gravity applied)
+				Movement->Velocity = LungeVelocity;
 			}
 		}
-	}
 
-	Movement->Velocity = PreservedVelocity;
-
-	// Update lunge progress
-	if (LungeDuration > 0.0f)
-	{
-		LungeProgress += DeltaTime / LungeDuration;
-		LungeProgress = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
+		// Update lunge progress
+		if (LungeDuration > 0.0f)
+		{
+			LungeProgress += DeltaTime / LungeDuration;
+			LungeProgress = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
+		}
 	}
 }
 
@@ -1033,196 +1053,53 @@ bool AShooterWeapon_Melee::ShouldPerformDropKick() const
 	return true;
 }
 
-bool AShooterWeapon_Melee::TryStartDropKick()
+void AShooterWeapon_Melee::OnDelegatedDropKickHit(AActor* HitActor, const FVector& HitLocation, float Damage)
 {
-	if (!PawnOwner || !PawnOwner->GetController())
+	if (!HitActor || !PawnOwner)
 	{
-		return false;
+		return;
 	}
 
-	FVector CameraLocation;
-	FRotator CameraRotation;
-	PawnOwner->GetController()->GetPlayerViewPoint(CameraLocation, CameraRotation);
-	FVector CameraForward = CameraRotation.Vector();
+	// Build a fake hit result for ProcessHit
+	FHitResult FakeHit;
+	FakeHit.HitObjectHandle = FActorInstanceHandle(HitActor);
+	FakeHit.ImpactPoint = HitLocation;
+	FakeHit.ImpactNormal = (PawnOwner->GetActorLocation() - HitLocation).GetSafeNormal();
+	FakeHit.Location = HitLocation;
+	FakeHit.bBlockingHit = true;
 
-	FVector TraceStart = CameraLocation;
-	FVector TraceEnd = TraceStart + CameraForward * DropKickMaxRange;
-
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-	QueryParams.AddIgnoredActor(PawnOwner);
-
-	TArray<FHitResult> HitResults;
-	bool bHit = GetWorld()->SweepMultiByChannel(
-		HitResults,
-		TraceStart,
-		TraceEnd,
-		FQuat::Identity,
-		ECC_Pawn,
-		FCollisionShape::MakeSphere(AttackRadius),
-		QueryParams
-	);
-
-	if (!bHit)
+	if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(HitActor->GetRootComponent()))
 	{
-		return false;
+		FakeHit.Component = TargetRoot;
 	}
 
-	AActor* BestTarget = nullptr;
-	float BestDist = FLT_MAX;
-
-	for (const FHitResult& Hit : HitResults)
-	{
-		AActor* HitActor = Hit.GetActor();
-		if (!HitActor || HitActor == PawnOwner || !Cast<ACharacter>(HitActor))
-		{
-			continue;
-		}
-
-		// Check cone angle
-		FVector ToTarget = (HitActor->GetActorLocation() - TraceStart).GetSafeNormal();
-		float Angle = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(CameraForward, ToTarget)));
-		if (Angle > DropKickConeAngle)
-		{
-			continue;
-		}
-
-		// Check height difference
-		float HeightDiff = PawnOwner->GetActorLocation().Z - HitActor->GetActorLocation().Z;
-		if (HeightDiff < DropKickMinHeightDifference)
-		{
-			continue;
-		}
-
-		float Dist = FVector::Dist(TraceStart, HitActor->GetActorLocation());
-		if (Dist < BestDist)
-		{
-			BestDist = Dist;
-			BestTarget = HitActor;
-		}
-	}
-
-	if (!BestTarget)
-	{
-		return false;
-	}
-
-	// Start drop kick
-	bIsDropKick = true;
-	MagnetismTarget = BestTarget;
-	DropKickTargetPosition = BestTarget->GetActorLocation();
-	DropKickHeightDifference = PawnOwner->GetActorLocation().Z - BestTarget->GetActorLocation().Z;
-
-	// Disable gravity during dive
-	if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
-	{
-		if (UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement())
-		{
-			Movement->GravityScale = 0.0f;
-		}
-	}
-
-	StartCameraFocus(BestTarget);
-
-	return true;
+	// Use our own ProcessHit to apply weapon-specific damage, knockback, effects
+	ProcessHit(FakeHit);
 }
 
-void AShooterWeapon_Melee::UpdateDropKick(float DeltaTime)
+void AShooterWeapon_Melee::OnDelegatedDropKickEnded()
 {
-	if (!bIsDropKick || !PawnOwner || !MagnetismTarget.IsValid())
+	// Unbind from MeleeAttackComponent delegates
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
+	UMeleeAttackComponent* MeleeComp = ShooterChar ? ShooterChar->GetMeleeAttackComponent() : nullptr;
+	if (MeleeComp)
 	{
-		return;
+		MeleeComp->OnDropKickHit.RemoveDynamic(this, &AShooterWeapon_Melee::OnDelegatedDropKickHit);
+		MeleeComp->OnMeleeAttackEnded.RemoveDynamic(this, &AShooterWeapon_Melee::OnDelegatedDropKickEnded);
 	}
 
-	ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner);
-	if (!OwnerChar)
+	// Play miss sound if nothing was hit
+	if (!bHitDuringWindow)
 	{
-		return;
+		PlayMeleeSound(MissSound);
 	}
 
-	UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement();
-	if (!Movement)
-	{
-		return;
-	}
+	// Clean up weapon-side state
+	bIsDropKick = false;
+	DropKickHeightDifference = 0.0f;
 
-	// Update target position
-	DropKickTargetPosition = MagnetismTarget->GetActorLocation();
-
-	// Calculate dive direction
-	FVector PlayerPos = OwnerChar->GetActorLocation();
-	FVector ToTarget = DropKickTargetPosition - PlayerPos;
-	float DistToTarget = ToTarget.Size();
-
-	if (DistToTarget > 10.0f)
-	{
-		FVector DiveDirection = ToTarget.GetSafeNormal();
-		FVector DiveVelocity = DiveDirection * DropKickDiveSpeed;
-
-		Movement->Velocity = DiveVelocity;
-		DropKickVelocity = DiveVelocity;
-	}
-}
-
-bool AShooterWeapon_Melee::HasDropKickTarget() const
-{
-	if (!bEnableDropKick || !PawnOwner || !PawnOwner->GetController())
-	{
-		return false;
-	}
-
-	FVector CameraLocation;
-	FRotator CameraRotation;
-	PawnOwner->GetController()->GetPlayerViewPoint(CameraLocation, CameraRotation);
-	FVector CameraForward = CameraRotation.Vector();
-
-	FVector TraceStart = CameraLocation;
-	FVector TraceEnd = TraceStart + CameraForward * DropKickMaxRange;
-
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(PawnOwner);
-
-	TArray<FHitResult> HitResults;
-	bool bHit = GetWorld()->SweepMultiByChannel(
-		HitResults,
-		TraceStart,
-		TraceEnd,
-		FQuat::Identity,
-		ECC_Pawn,
-		FCollisionShape::MakeSphere(AttackRadius),
-		QueryParams
-	);
-
-	if (!bHit)
-	{
-		return false;
-	}
-
-	for (const FHitResult& Hit : HitResults)
-	{
-		AActor* HitActor = Hit.GetActor();
-		if (!HitActor || HitActor == PawnOwner || !Cast<ACharacter>(HitActor))
-		{
-			continue;
-		}
-
-		FVector ToTarget = (HitActor->GetActorLocation() - TraceStart).GetSafeNormal();
-		float Angle = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(CameraForward, ToTarget)));
-		if (Angle > DropKickConeAngle)
-		{
-			continue;
-		}
-
-		float HeightDiff = PawnOwner->GetActorLocation().Z - HitActor->GetActorLocation().Z;
-		if (HeightDiff < DropKickMinHeightDifference)
-		{
-			continue;
-		}
-
-		return true;
-	}
-
-	return false;
+	StopSwingTrail();
+	StopCameraFocus();
 }
 
 // ==================== Camera Focus ====================
@@ -1294,44 +1171,60 @@ void AShooterWeapon_Melee::StopCameraFocus()
 
 // ==================== Animation ====================
 
-const FMeleeWeaponSwingData* AShooterWeapon_Melee::SelectWeightedSwing()
+const FMeleeWeaponSwingData* AShooterWeapon_Melee::SelectWeightedSwing(bool bAirborne)
 {
-	if (SwingAnimations.Num() == 0)
+	// Choose animation pool: air or ground. Fallback to ground if air pool is empty.
+	TArray<FMeleeWeaponSwingData>& AnimPool = (bAirborne && AirSwingAnimations.Num() > 0) ? AirSwingAnimations : SwingAnimations;
+
+	if (AnimPool.Num() == 0)
 	{
 		return nullptr;
 	}
 
-	if (SwingAnimations.Num() == 1)
-	{
-		return &SwingAnimations[0];
-	}
+	// Determine which side we need for this swing
+	EMeleeSwingSide NeededSide = bIsInCombo ? CurrentSwingSide : FirstSwingSide;
 
-	// Calculate total weight
+	// Collect indices matching the needed side
+	TArray<int32> MatchingIndices;
 	float TotalWeight = 0.0f;
-	for (const FMeleeWeaponSwingData& Swing : SwingAnimations)
+	for (int32 i = 0; i < AnimPool.Num(); ++i)
 	{
-		TotalWeight += Swing.Weight;
+		if (AnimPool[i].SwingSide == NeededSide)
+		{
+			MatchingIndices.Add(i);
+			TotalWeight += AnimPool[i].Weight;
+		}
 	}
 
-	if (TotalWeight <= 0.0f)
+	// Fallback: if no animations for this side, use all animations from pool
+	if (MatchingIndices.Num() == 0)
 	{
-		return &SwingAnimations[0];
+		for (int32 i = 0; i < AnimPool.Num(); ++i)
+		{
+			MatchingIndices.Add(i);
+			TotalWeight += AnimPool[i].Weight;
+		}
 	}
 
-	// Select random, avoiding same animation twice in a row
+	if (TotalWeight <= 0.0f || MatchingIndices.Num() == 0)
+	{
+		return &AnimPool[0];
+	}
+
+	// Select random from matching side, avoiding same animation twice in a row
 	int32 SelectedIndex = -1;
 	int32 Attempts = 0;
-	while (SelectedIndex == -1 || (SelectedIndex == LastSwingIndex && Attempts < 3))
+	while (SelectedIndex == -1 || (SelectedIndex == LastSwingIndex && MatchingIndices.Num() > 1 && Attempts < 3))
 	{
 		float RandomValue = FMath::FRandRange(0.0f, TotalWeight);
 		float Accumulator = 0.0f;
 
-		for (int32 i = 0; i < SwingAnimations.Num(); ++i)
+		for (int32 Idx : MatchingIndices)
 		{
-			Accumulator += SwingAnimations[i].Weight;
+			Accumulator += AnimPool[Idx].Weight;
 			if (RandomValue <= Accumulator)
 			{
-				SelectedIndex = i;
+				SelectedIndex = Idx;
 				break;
 			}
 		}
@@ -1341,10 +1234,15 @@ const FMeleeWeaponSwingData* AShooterWeapon_Melee::SelectWeightedSwing()
 	if (SelectedIndex >= 0)
 	{
 		LastSwingIndex = SelectedIndex;
-		return &SwingAnimations[SelectedIndex];
+
+		// Alternate side for next swing
+		CurrentSwingSide = (NeededSide == EMeleeSwingSide::Left) ? EMeleeSwingSide::Right : EMeleeSwingSide::Left;
+		bIsInCombo = true;
+
+		return &AnimPool[SelectedIndex];
 	}
 
-	return &SwingAnimations[0];
+	return &AnimPool[0];
 }
 
 // ==================== Montage Control ====================
@@ -1356,6 +1254,7 @@ void AShooterWeapon_Melee::StopCurrentMontage()
 		return;
 	}
 
+	// Stop on TP mesh
 	if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
 	{
 		if (USkeletalMeshComponent* TPMesh = OwnerChar->GetMesh())
@@ -1367,6 +1266,34 @@ void AShooterWeapon_Melee::StopCurrentMontage()
 					AnimInstance->Montage_Stop(0.15f);
 				}
 			}
+		}
+	}
+
+	// Stop on character's MeleeWeaponFPMesh
+	if (CachedMeleeWeaponFPMesh)
+	{
+		if (UAnimInstance* AnimInstance = CachedMeleeWeaponFPMesh->GetAnimInstance())
+		{
+			if (AnimInstance->IsAnyMontagePlaying())
+			{
+				AnimInstance->Montage_Stop(0.15f);
+			}
+		}
+	}
+}
+
+void AShooterWeapon_Melee::PlayMontageOnFPMesh(UAnimMontage* Montage)
+{
+	if (!Montage || !CachedMeleeWeaponFPMesh)
+	{
+		return;
+	}
+
+	if (UAnimInstance* AnimInstance = CachedMeleeWeaponFPMesh->GetAnimInstance())
+	{
+		if (!AnimInstance->Montage_IsPlaying(Montage))
+		{
+			AnimInstance->Montage_Play(Montage);
 		}
 	}
 }
@@ -1459,4 +1386,143 @@ void AShooterWeapon_Melee::PlayMeleeCameraShake(TSubclassOf<UCameraShakeBase> Sh
 	}
 
 	CachedPlayerController->ClientStartCameraShake(ShakeClass, Scale);
+}
+
+// ==================== Durability ====================
+
+void AShooterWeapon_Melee::SetRemainingHits(int32 Hits)
+{
+	MaxHitCount = Hits;
+	RemainingHits = Hits;
+}
+
+void AShooterWeapon_Melee::SetBreakData(UGeometryCollection* GC, float Impulse, float AngularImpulse, float GibLifetime)
+{
+	BreakGeometryCollection = GC;
+	BreakImpulse = Impulse;
+	BreakAngularImpulse = AngularImpulse;
+	BreakGibLifetime = GibLifetime;
+}
+
+bool AShooterWeapon_Melee::DecrementHitCount()
+{
+	if (!HasLimitedDurability())
+	{
+		return false;
+	}
+
+	--RemainingHits;
+	if (RemainingHits <= 0)
+	{
+		BreakWeapon();
+		return true;
+	}
+	return false;
+}
+
+void AShooterWeapon_Melee::BreakWeapon()
+{
+	// 1. Spawn GC shatter
+	SpawnBreakDestructionGC();
+
+	// 2. Play break sound
+	PlayMeleeSound(BreakSound);
+
+	// 3. Remove weapon from player inventory and switch
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
+	if (ShooterChar)
+	{
+		ShooterChar->RemoveMeleeWeapon(this);
+	}
+}
+
+void AShooterWeapon_Melee::SpawnBreakDestructionGC()
+{
+	if (!BreakGeometryCollection)
+	{
+		return;
+	}
+
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
+	if (!ShooterChar)
+	{
+		return;
+	}
+
+	UStaticMeshComponent* SwordMesh = ShooterChar->GetMeleeWeaponStaticMesh();
+	if (!SwordMesh)
+	{
+		return;
+	}
+
+	const FTransform MeshTransform = SwordMesh->GetComponentTransform();
+	const FVector Origin = MeshTransform.GetLocation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+		Origin, MeshTransform.GetRotation().Rotator(), SpawnParams);
+
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		GCActor->Destroy();
+		return;
+	}
+
+	GCActor->SetActorScale3D(MeshTransform.GetScale3D());
+
+	GCComp->SetCollisionProfileName(FName("Ragdoll"));
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	GCComp->SetRestCollection(BreakGeometryCollection);
+
+	// Copy materials from the sword static mesh
+	const int32 NumMats = SwordMesh->GetNumMaterials();
+	for (int32 i = 0; i < NumMats; i++)
+	{
+		if (UMaterialInterface* Mat = SwordMesh->GetMaterial(i))
+		{
+			GCComp->SetMaterial(i, Mat);
+		}
+	}
+
+	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
+
+	// Break all clusters
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
+
+	// Scatter pieces radially
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = BreakImpulse;
+	RadialVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+	AngularVelocity->Magnitude = BreakAngularImpulse;
+	AngularVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVelocity);
+
+	GCActor->SetLifeSpan(BreakGibLifetime);
+
+	// Hide the sword mesh (GC gibs replace it)
+	SwordMesh->SetVisibility(false);
 }

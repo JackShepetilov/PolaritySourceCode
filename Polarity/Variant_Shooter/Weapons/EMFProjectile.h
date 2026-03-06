@@ -10,6 +10,8 @@
 class UEMF_FieldComponent;
 class UNiagaraSystem;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnProjectileCriticalVelocityImpact, AEMFProjectile*, Projectile, FVector, Location, float, Speed);
+
 /**
  * Projectile with electromagnetic properties.
  *
@@ -113,6 +115,16 @@ public:
 	/** Multiplier for forces from Unknown/unset sources */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float UnknownForceMultiplier = 1.0f;
+
+	// ==================== Critical Velocity ====================
+
+	/** Speed (cm/s) at which projectile impact triggers arena-level critical destruction event */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Critical Velocity", meta = (ClampMin = "0.0"))
+	float CriticalVelocity = 0.0f;
+
+	/** Delegate fired when projectile hits at critical velocity */
+	UPROPERTY(BlueprintAssignable, Category = "EMF|Critical Velocity")
+	FOnProjectileCriticalVelocityImpact OnCriticalVelocityImpact;
 
 	// ==================== Charge-Based Damage (Future) ====================
 

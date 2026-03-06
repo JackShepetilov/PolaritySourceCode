@@ -12,6 +12,8 @@ class UGeometryCollection;
 class AGeometryCollectionActor;
 class UNiagaraSystem;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnContainerActivated);
+
 /**
  * Floating reward container that drops and shatters on impact.
  *
@@ -47,13 +49,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Destruction")
 	FName GibCollisionProfile = FName("Ragdoll");
 
-	/** Radial impulse applied to gibs on break (cm/s) */
+	/** Radial impulse strength applied to gibs on break (velocity change, cm/s) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Destruction", meta = (ClampMin = "0.0"))
-	float BreakImpulse = 400.0f;
+	float BreakImpulse = 600.0f;
 
-	/** Angular impulse for tumbling gibs */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Destruction", meta = (ClampMin = "0.0"))
-	float BreakAngularImpulse = 50.0f;
+	/** Radius of the radial impulse (cm). Should cover the whole container. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Destruction", meta = (ClampMin = "10.0", Units = "cm"))
+	float BreakRadius = 300.0f;
 
 	/** How long gib fragments persist (seconds). 0 = never destroy. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Destruction", meta = (ClampMin = "0.0"))
@@ -65,13 +67,13 @@ public:
 
 	// ==================== Reward Spawning ====================
 
-	/** Actor class to spawn at impact location (e.g. UpgradePickup) */
+	/** Actor class to spawn (e.g. UpgradePickup) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Spawn")
 	TSubclassOf<AActor> RewardActorClass;
 
-	/** Vertical offset from impact point for reward spawn (so it doesn't clip floor) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Spawn", meta = (Units = "cm"))
-	float RewardSpawnZOffset = 50.0f;
+	/** Fixed world point where the reward spawns. Place an empty actor in the level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Spawn")
+	TSoftObjectPtr<AActor> RewardSpawnPoint;
 
 	// ==================== VFX / SFX ====================
 
@@ -92,6 +94,13 @@ public:
 	/** Radius of the invisible impact probe sphere (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reward|Impact Probe", meta = (ClampMin = "5.0", Units = "cm"))
 	float ImpactProbeRadius = 30.0f;
+
+	// ==================== Events ====================
+
+	/** Fired when the container activates: mesh hidden, GC spawned, physics enabled.
+	 *  Use in Blueprint to disable Niagara effects, play sounds, etc. */
+	UPROPERTY(BlueprintAssignable, Category = "Reward|Events")
+	FOnContainerActivated OnContainerActivated;
 
 	// ==================== API ====================
 
@@ -128,8 +137,12 @@ private:
 	/** Shatter the GC, spawn VFX/SFX, schedule gib freeze, spawn reward */
 	void BreakContainer();
 
-	/** Spawn the reward actor at ImpactLocation */
+	/** Apply scatter impulse to broken pieces (called one tick after break) */
+	void ApplyScatterImpulse();
+
+	/** Spawn the reward actor at RewardSpawnPoint */
 	void SpawnReward();
 
 	FTimerHandle GibFreezeHandle;
+	FTimerHandle ScatterImpulseHandle;
 };

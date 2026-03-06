@@ -221,9 +221,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact")
 	bool bCanExplode = false;
 
-	/** Minimum speed (cm/s) to trigger explosion on collision (works regardless of reverse flight) */
+	/** Minimum speed (cm/s) to trigger explosion when prop is launched by the player (reverse flight) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
 	float ExplosionSpeedThreshold = 500.0f;
+
+	/** Minimum speed (cm/s) to trigger explosion from collateral impact (prop NOT launched by player).
+	 *  Should be higher than ExplosionSpeedThreshold to avoid chain explosions from physics pushes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float CollateralExplosionSpeedThreshold = 1500.0f;
 
 	/** Speed (cm/s) at which impact is considered critically destructive.
 	 *  Triggers OnCriticalVelocityImpact for arena-level destruction events. */

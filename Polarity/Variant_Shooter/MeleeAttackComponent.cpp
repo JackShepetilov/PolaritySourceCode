@@ -210,6 +210,60 @@ bool UMeleeAttackComponent::StartAttack()
 	return true;
 }
 
+bool UMeleeAttackComponent::StartDelegatedDropKick()
+{
+	if (!OwnerCharacter || !OwnerController)
+	{
+		return false;
+	}
+
+	// Must be airborne
+	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
+	if (!Movement || !Movement->IsFalling())
+	{
+		return false;
+	}
+
+	// Temporarily allow the component to operate (it's disabled when melee weapon is equipped)
+	bool bWasDisabled = bExternallyDisabled;
+	bExternallyDisabled = false;
+
+	// Reset attack state
+	bHasHitThisAttack = false;
+	HitActorsThisAttack.Empty();
+	bIsDropKick = false;
+	DropKickHeightDifference = 0.0f;
+	MagnetismTarget.Reset();
+
+	// Cache velocity for momentum calculations
+	OwnerVelocityAtAttackStart = Movement->Velocity;
+
+	// Try cone-based dropkick detection (finds target, sets LungeTargetPosition, etc.)
+	bool bSuccess = TryStartDropKick();
+
+	if (bSuccess)
+	{
+		bDelegatedDropKick = true;
+		bInputLocked = true;
+
+		// Jump directly to Active state — skip HidingWeapon, InputDelay, Windup
+		float DistToTarget = FVector::Dist(OwnerCharacter->GetActorLocation(), LungeTargetPosition);
+		float TravelTime = (Settings.DropKickDiveSpeed > 0.0f) ? (DistToTarget / Settings.DropKickDiveSpeed) : Settings.ActiveTime;
+		StateTimeRemaining = FMath::Max(Settings.ActiveTime, TravelTime + 0.15f);
+		CurrentState = EMeleeAttackState::Active;
+
+		// Don't spawn trail FX or play animation — the weapon handles its own
+		OnDropKickStarted.Broadcast();
+	}
+	else
+	{
+		// Failed — restore disabled state
+		bExternallyDisabled = bWasDisabled;
+	}
+
+	return bSuccess;
+}
+
 bool UMeleeAttackComponent::CancelAttack()
 {
 	// Can only cancel during early phases
@@ -313,6 +367,12 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 	case EMeleeAttackState::Ready:
 		StateTimeRemaining = 0.0f;
 		bInputLocked = false;
+		// Clean up delegated dropkick — re-disable component for melee weapon
+		if (bDelegatedDropKick)
+		{
+			bDelegatedDropKick = false;
+			bExternallyDisabled = true;
+		}
 		break;
 
 	case EMeleeAttackState::HidingWeapon:
@@ -344,11 +404,20 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		break;
 
 	case EMeleeAttackState::Recovery:
-		StateTimeRemaining = Settings.RecoveryTime;
+		if (bDelegatedDropKick)
+		{
+			// Delegated: skip to end quickly, weapon handles its own cleanup
+			StateTimeRemaining = 0.0f;
+		}
+		else
+		{
+			StateTimeRemaining = Settings.RecoveryTime;
+		}
 		StopSwingTrailFX();
 
 		// Start drop kick cooldown BEFORE StopMagnetism (which resets bIsDropKick)
-		if (bIsDropKick && Settings.DropKickCooldown > 0.0f)
+		// Skip cooldown for delegated dropkick (weapon doesn't use MeleeAttackComponent's cooldown)
+		if (bIsDropKick && Settings.DropKickCooldown > 0.0f && !bDelegatedDropKick)
 		{
 			DropKickCooldownRemaining = Settings.DropKickCooldown;
 			OnDropKickCooldownStarted.Broadcast(Settings.DropKickCooldown);
@@ -356,7 +425,7 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 
 		StopMagnetism();
 
-		if (!bHasHitThisAttack)
+		if (!bHasHitThisAttack && !bDelegatedDropKick)
 		{
 			PlaySound(MissSound);
 
@@ -392,16 +461,32 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		break;
 
 	case EMeleeAttackState::ShowingWeapon:
-		StateTimeRemaining = Settings.ShowWeaponTime;
-		MeshTransitionProgress = 0.0f;
-		bIsWeaponLowered = false; // Reset lowered state when showing weapon
-		bIsLoweringWeaponOnly = false; // Also reset lowering-only flag
-		StopAttackAnimation();
-		SwitchToFirstPersonMesh();
+		if (bDelegatedDropKick)
+		{
+			// Delegated: skip mesh transitions entirely
+			StateTimeRemaining = 0.0f;
+		}
+		else
+		{
+			StateTimeRemaining = Settings.ShowWeaponTime;
+			MeshTransitionProgress = 0.0f;
+			bIsWeaponLowered = false; // Reset lowered state when showing weapon
+			bIsLoweringWeaponOnly = false; // Also reset lowering-only flag
+			StopAttackAnimation();
+			SwitchToFirstPersonMesh();
+		}
 		break;
 
 	case EMeleeAttackState::Cooldown:
-		StateTimeRemaining = Settings.Cooldown;
+		if (bDelegatedDropKick)
+		{
+			// Delegated: skip cooldown, just broadcast end and clean up
+			StateTimeRemaining = 0.0f;
+		}
+		else
+		{
+			StateTimeRemaining = Settings.Cooldown;
+		}
 		OnMeleeAttackEnded.Broadcast();
 		break;
 	}
@@ -565,6 +650,15 @@ void UMeleeAttackComponent::PerformHitDetection()
 		// Use AttackRange as hit threshold
 		if (DistanceToTarget <= Settings.AttackRange)
 		{
+			bHasHitThisAttack = true;
+
+			// Delegated mode: only signal hit, weapon handles its own damage/effects
+			if (bDelegatedDropKick)
+			{
+				OnDropKickHit.Broadcast(Target, TargetPos, 0.0f);
+				return;
+			}
+
 			// Create a fake hit result for the target
 			FHitResult FakeHit;
 			FakeHit.ImpactPoint = TargetPos;
@@ -582,18 +676,7 @@ void UMeleeAttackComponent::PerformHitDetection()
 			HitActorsThisAttack.Add(Target);
 
 			// Consume charges on first hit of this attack
-			if (!bHasHitThisAttack)
-			{
-				if (bIsDropKick)
-				{
-					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
-				}
-				else
-				{
-					ConsumeMeleeCharges(1);
-				}
-			}
-			bHasHitThisAttack = true;
+			ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
 
 			// Check for headshot (approximate - use upper part of target)
 			bool bHeadshot = IsHeadshot(FakeHit);

@@ -18,6 +18,7 @@
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
+#include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -577,6 +578,31 @@ void AShooterNPC::Die()
 	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::Die() - Broadcasting OnNPCDeath for %s"), *GetName());
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
+
+	// Weapon drop: NPC with charge may drop a melee weapon
+	if (DroppedMeleeWeaponClass)
+	{
+		const float NPCCharge = GetCharge();
+		if (!FMath::IsNearlyZero(NPCCharge))
+		{
+			const float DropChance = DropWeaponBaseChance * FMath::Abs(NPCCharge);
+			if (FMath::FRand() < DropChance)
+			{
+				FActorSpawnParameters WeaponSpawnParams;
+				WeaponSpawnParams.SpawnCollisionHandlingOverride =
+					ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+				const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
+				ADroppedMeleeWeapon* DroppedWeapon = GetWorld()->SpawnActor<ADroppedMeleeWeapon>(
+					DroppedMeleeWeaponClass, SpawnLoc, GetActorRotation(), WeaponSpawnParams);
+
+				if (DroppedWeapon)
+				{
+					DroppedWeapon->SetCharge(NPCCharge);
+				}
+			}
+		}
+	}
 
 	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health
 	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s Die(): bWasChannelingTarget=%d, ArmorPickupClass=%s, HealthPickupClass=%s, bStunnedByExplosion=%d"),
