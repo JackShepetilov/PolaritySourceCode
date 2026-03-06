@@ -675,20 +675,17 @@ void AArenaManager::NotifyCriticalImpact(AActor* Source, FVector Location, float
 		return;
 	}
 
-	// Check minimum distance — player must be far enough from arena center
-	if (MinDestructionDistance > 0.0f)
+	// Block destruction if player is inside the destruction radius sphere
+	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
 	{
-		if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+		if (APawn* Pawn = PC->GetPawn())
 		{
-			if (APawn* Pawn = PC->GetPawn())
+			const float PlayerDist = FVector::Dist(Pawn->GetActorLocation(), GetActorLocation());
+			if (PlayerDist < DestructionRadius)
 			{
-				const float PlayerDist = FVector::Dist(Pawn->GetActorLocation(), GetActorLocation());
-				if (PlayerDist < MinDestructionDistance)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Player too close (%.0f < %.0f), ignoring critical impact"),
-						PlayerDist, MinDestructionDistance);
-					return;
-				}
+				UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Player inside destruction radius (%.0f < %.0f), ignoring critical impact"),
+					PlayerDist, DestructionRadius);
+				return;
 			}
 		}
 	}

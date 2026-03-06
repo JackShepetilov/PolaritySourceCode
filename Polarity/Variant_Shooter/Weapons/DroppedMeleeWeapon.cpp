@@ -38,11 +38,6 @@ void ADroppedMeleeWeapon::BeginPlay()
 		FieldComponent ? *FieldComponent->GetName() : TEXT("NULL"),
 		WeaponMesh ? *WeaponMesh->GetName() : TEXT("NULL"));
 
-	// Register charge widget
-	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
-	{
-		WidgetSub->RegisterDroppedWeapon(this);
-	}
 }
 
 void ADroppedMeleeWeapon::Tick(float DeltaTime)
@@ -84,6 +79,13 @@ void ADroppedMeleeWeapon::SetCharge(float NewCharge)
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("[DroppedWeapon] %s SetCharge(%.2f) — FieldComponent is NULL!"), *GetName(), NewCharge);
+	}
+
+	// Register (or re-register) charge widget with the actual charge value
+	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->UnregisterDroppedWeapon(this);
+		WidgetSub->RegisterDroppedWeapon(this);
 	}
 }
 

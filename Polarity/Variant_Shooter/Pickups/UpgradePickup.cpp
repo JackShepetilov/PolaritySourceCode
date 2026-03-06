@@ -352,8 +352,8 @@ void AUpgradePickup::OnTooltipEndOverlap(UPrimitiveComponent* OverlappedComponen
 		return;
 	}
 
-	TooltipWidgetComponent->SetVisibility(false);
-
+	// Don't hide immediately — let the Blueprint animation play first.
+	// Blueprint calls FinishHide() when the hide animation completes.
 	if (UUpgradeTooltipWidget* Tooltip = Cast<UUpgradeTooltipWidget>(TooltipWidgetComponent->GetWidget()))
 	{
 		Tooltip->BP_OnTooltipHide();
