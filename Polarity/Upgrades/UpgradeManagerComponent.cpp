@@ -239,6 +239,21 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 	}
 }
 
+float UUpgradeManagerComponent::GetCombinedDamageMultiplier(AActor* Target) const
+{
+	float Combined = 1.0f;
+
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Combined *= Pair.Value->GetDamageMultiplier(Target);
+		}
+	}
+
+	return Combined;
+}
+
 void UUpgradeManagerComponent::BindToWeapon(AShooterWeapon* Weapon)
 {
 	if (!Weapon)

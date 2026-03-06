@@ -37,6 +37,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "360 Shot")
 	bool IsCharged() const { return bIsCharged; }
 
+	/** Is the ability on cooldown? */
+	UFUNCTION(BlueprintPure, Category = "360 Shot")
+	bool IsOnCooldown() const { return bOnCooldown; }
+
+	/** Remaining cooldown time in seconds (0 if not on cooldown) */
+	UFUNCTION(BlueprintPure, Category = "360 Shot")
+	float GetCooldownRemaining() const;
+
 	/** Current accumulated rotation (0-360 degrees) */
 	UFUNCTION(BlueprintPure, Category = "360 Shot")
 	float GetAccumulatedRotation() const { return AccumulatedYaw; }
@@ -65,17 +73,29 @@ private:
 	/** Is the charged state active? */
 	bool bIsCharged = false;
 
+	/** Is the ability on cooldown (cannot accumulate rotation)? */
+	bool bOnCooldown = false;
+
 	/** Timer for resetting accumulated rotation if spin is too slow */
 	float TimeSinceLastSignificantRotation = 0.0f;
 
 	/** Timer handle for charged state expiration */
 	FTimerHandle ChargedExpirationTimer;
 
+	/** Timer handle for cooldown expiration */
+	FTimerHandle CooldownTimer;
+
 	/** Activate the charged state */
 	void ActivateCharged();
 
 	/** Deactivate the charged state (timer callback or after shot) */
 	void DeactivateCharged();
+
+	/** Start cooldown period after charged state ends */
+	void StartCooldown();
+
+	/** Called when cooldown expires */
+	void OnCooldownExpired();
 
 	/** Execute the bonus 360 shot (extra damage + VFX) */
 	void Execute360Shot();

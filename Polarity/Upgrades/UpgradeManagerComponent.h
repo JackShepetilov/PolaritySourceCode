@@ -91,6 +91,10 @@ public:
 	/** Called when owner deals damage to a target */
 	void NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled);
 
+	/** Query all active upgrades for their combined damage multiplier against a target */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	float GetCombinedDamageMultiplier(AActor* Target) const;
+
 protected:
 
 	virtual void BeginPlay() override;

@@ -42,6 +42,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "1.0", ClampMax = "10.0"))
 	float RecoilMultiplier = 2.0f;
 
+	/** Cooldown duration after charged state ends before a new spin can charge (seconds). 0 = no cooldown. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+	float CooldownDuration = 5.0f;
+
 	// ==================== VFX/SFX ====================
 
 	/** Special beam VFX for the 360 shot (overrides normal beam) */

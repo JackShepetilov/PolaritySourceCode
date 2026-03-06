@@ -72,6 +72,14 @@ protected:
 	/** Called when the owner deals damage to a target */
 	virtual void OnOwnerDealtDamage(AActor* Target, float Damage, bool bKilled) {}
 
+	/**
+	 * Return a damage multiplier that this upgrade applies to hitscan shots.
+	 * Called by the weapon BEFORE applying damage, so upgrades can scale damage up or down.
+	 * @param Target The actor being shot at
+	 * @return Multiplier (1.0 = no change, >1.0 = bonus, <1.0 = penalty)
+	 */
+	virtual float GetDamageMultiplier(AActor* Target) const { return 1.0f; }
+
 private:
 
 	/** Cached owner reference */

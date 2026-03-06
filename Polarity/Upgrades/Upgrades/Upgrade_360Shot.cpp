@@ -32,6 +32,7 @@ void UUpgrade_360Shot::OnUpgradeActivated()
 	bFirstFrame = true;
 	AccumulatedYaw = 0.0f;
 	bIsCharged = false;
+	bOnCooldown = false;
 
 	SetComponentTickEnabled(true);
 }
@@ -40,10 +41,12 @@ void UUpgrade_360Shot::OnUpgradeDeactivated()
 {
 	SetComponentTickEnabled(false);
 	DeactivateCharged();
+	bOnCooldown = false;
 
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(ChargedExpirationTimer);
+		World->GetTimerManager().ClearTimer(CooldownTimer);
 	}
 }
 
@@ -62,7 +65,7 @@ void UUpgrade_360Shot::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 		return;
 	}
 
-	if (bIsCharged)
+	if (bIsCharged || bOnCooldown)
 	{
 		return;
 	}
@@ -189,6 +192,53 @@ void UUpgrade_360Shot::DeactivateCharged()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("360 Shot: Discharged"));
+
+	StartCooldown();
+}
+
+void UUpgrade_360Shot::StartCooldown()
+{
+	if (!Def360.IsValid() || Def360->CooldownDuration <= 0.0f)
+	{
+		return;
+	}
+
+	bOnCooldown = true;
+	AccumulatedYaw = 0.0f;
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(
+			CooldownTimer, this, &UUpgrade_360Shot::OnCooldownExpired,
+			Def360->CooldownDuration, false);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("360 Shot: Cooldown started (%.1fs)"), Def360->CooldownDuration);
+}
+
+void UUpgrade_360Shot::OnCooldownExpired()
+{
+	bOnCooldown = false;
+	bFirstFrame = true;
+	AccumulatedYaw = 0.0f;
+	TimeSinceLastSignificantRotation = 0.0f;
+
+	UE_LOG(LogTemp, Log, TEXT("360 Shot: Cooldown expired, ready to spin again"));
+}
+
+float UUpgrade_360Shot::GetCooldownRemaining() const
+{
+	if (!bOnCooldown)
+	{
+		return 0.0f;
+	}
+
+	if (const UWorld* World = GetWorld())
+	{
+		return World->GetTimerManager().GetTimerRemaining(CooldownTimer);
+	}
+
+	return 0.0f;
 }
 
 void UUpgrade_360Shot::Execute360Shot()

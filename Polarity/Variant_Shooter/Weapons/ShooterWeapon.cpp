@@ -30,6 +30,7 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterDummy.h"
 #include "EMFPhysicsProp.h"
+#include "Upgrades/UpgradeManagerComponent.h"
 
 namespace
 {
@@ -789,10 +790,20 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		// Tag-based damage multiplier
 		float TagMult = GetTagDamageMultiplier(BestTarget);
 
-		float FinalDamage = HitscanDamage * RemainingEnergy * AreaMultiplier * HeadshotMult * HeatMult * ZFactorMult * TagMult;
+		// Upgrade damage multiplier (e.g. Forward Momentum)
+		float UpgradeMult = 1.0f;
+		if (PawnOwner)
+		{
+			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+			{
+				UpgradeMult = UpgradeMgr->GetCombinedDamageMultiplier(BestTarget);
+			}
+		}
 
-		UE_LOG(LogTemp, Warning, TEXT("    BEST TARGET HIT: %s | Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f x Tag:%.2f = %.1f"),
-			*BestTarget->GetName(), HitscanDamage, RemainingEnergy, AreaMultiplier, HeadshotMult, HeatMult, ZFactorMult, TagMult, FinalDamage);
+		float FinalDamage = HitscanDamage * RemainingEnergy * AreaMultiplier * HeadshotMult * HeatMult * ZFactorMult * TagMult * UpgradeMult;
+
+		UE_LOG(LogTemp, Warning, TEXT("    BEST TARGET HIT: %s | Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f x Tag:%.2f x Upg:%.2f = %.1f"),
+			*BestTarget->GetName(), HitscanDamage, RemainingEnergy, AreaMultiplier, HeadshotMult, HeatMult, ZFactorMult, TagMult, UpgradeMult, FinalDamage);
 
 		// Apply damage
 		FDamageEvent DamageEvent;
