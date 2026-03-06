@@ -313,6 +313,7 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	FVector TotalForce = FVector::ZeroVector;
 	FVector PlateForce = FVector::ZeroVector; // Separated for viscous capture suppression
 	bool bFoundAnyChannelingPlate = false; // Track plate presence for non-capturable timer
+	bool bShouldApplyProximityDamping = false;
 
 	// Viscous capture: resolve plate position from direct reference (not registry search)
 	FVector NearestPlatePosition = FVector::ZeroVector;
@@ -351,6 +352,7 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
 			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
 			{
+				bShouldApplyProximityDamping = true;
 				continue;
 			}
 		}
@@ -489,6 +491,13 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 
 	// Euler: delta_v = a * dt
 	FVector VelocityDelta = CurrentAcceleration * DeltaTime;
+
+	// Proximity damping: viscous braking when inside opposite-charge cutoff distance
+	// Prevents NPC from passing through the source after EM force is suppressed
+	if (bShouldApplyProximityDamping && OppositeChargeProximityDamping > 0.0f)
+	{
+		VelocityDelta += -CurrentVelocity * OppositeChargeProximityDamping * DeltaTime;
+	}
 
 	// ===== Hard Hold: pull-in or rigid position lock =====
 	if (bFoundPlate && CaptPlate)

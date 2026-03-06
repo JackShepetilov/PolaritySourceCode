@@ -188,6 +188,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "1.0", Units = "cm", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
 	float OppositeChargeMinDistance = 35.0f;
 
+	/** Viscous damping coefficient when within cutoff distance of opposite-charge source.
+	 *  Prevents NPC from passing through after EM force cutoff. Units: 1/s. Higher = faster stop. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
+	float OppositeChargeProximityDamping = 10.0f;
+
 	// ==================== Debug ====================
 
 	/** Рисовать debug стрелки для сил и полей */
