@@ -832,9 +832,10 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			// Charge validation: only capture pickups with OPPOSITE charge sign
+			// Upgrade pickups can be captured regardless of charge sign,
+			// but must have non-zero charge for range calculation
 			const float PickupCharge = UPickup->GetCharge();
-			if (FMath::IsNearlyZero(PickupCharge) || PickupCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+			if (FMath::IsNearlyZero(PickupCharge))
 			{
 				continue;
 			}
