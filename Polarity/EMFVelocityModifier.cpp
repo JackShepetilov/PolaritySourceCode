@@ -1123,6 +1123,14 @@ void UEMFVelocityModifier::TickComponent(float DeltaTime, ELevelTick TickType, F
 		CurrentBonusCharge = FMath::Max(0.0f, CurrentBonusCharge - BonusChargeDecayRate * DeltaTime);
 		UpdateFieldComponentCharge();
 	}
+
+	// Scale ProjectileForceMultiplier by movement speed
+	if (bScaleProjectileForceBySpeed && MovementComponent)
+	{
+		const float Speed = MovementComponent->Velocity.Size();
+		const float Alpha = FMath::Clamp(Speed / ProjectileForceSpeedMax, 0.0f, 1.0f);
+		ProjectileForceMultiplier = FMath::Lerp(1.0f, ProjectileForceAtMaxSpeed, Alpha);
+	}
 }
 
 void UEMFVelocityModifier::AddBonusCharge(float Amount)

@@ -111,9 +111,24 @@ public:
 
 	/** Multiplier for forces from Projectile sources.
 	 *  0.0 = ignore Projectile forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
-	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility
+	 *  NOTE: When bScaleProjectileForceBySpeed is true, this value is overridden each frame */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float ProjectileForceMultiplier = 1.0f;
+
+	/** Scale ProjectileForceMultiplier based on owner's movement speed.
+	 *  At 0 speed = 1.0, at ProjectileForceSpeedMax = ProjectileForceAtMaxSpeed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
+	bool bScaleProjectileForceBySpeed = false;
+
+	/** Speed (cm/s) at which ProjectileForceMultiplier reaches its minimum value.
+	 *  Default 7000 = 70 m/s */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (EditCondition = "bScaleProjectileForceBySpeed", ClampMin = "1.0", Units = "cm/s"))
+	float ProjectileForceSpeedMax = 7000.0f;
+
+	/** ProjectileForceMultiplier value at max speed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (EditCondition = "bScaleProjectileForceBySpeed"))
+	float ProjectileForceAtMaxSpeed = 0.1f;
 
 	/** Multiplier for forces from Environment/World sources.
 	 *  0.0 = ignore Environment forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
