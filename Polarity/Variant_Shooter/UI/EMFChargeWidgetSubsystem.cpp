@@ -4,6 +4,7 @@
 #include "EMFChargeWidgetSubsystem.h"
 #include "EMFChargeWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
@@ -179,6 +180,52 @@ void UEMFChargeWidgetSubsystem::UnregisterProp(AEMFPhysicsProp* Prop)
 void UEMFChargeWidgetSubsystem::OnPropDied(AEMFPhysicsProp* Prop, AActor* Killer)
 {
 	UnregisterProp(Prop);
+}
+
+void UEMFChargeWidgetSubsystem::RegisterDroppedWeapon(ADroppedMeleeWeapon* Weapon)
+{
+	if (!Weapon || !bEnabled)
+	{
+		return;
+	}
+
+	if (ActiveWidgets.Contains(Weapon))
+	{
+		return;
+	}
+
+	if (!WidgetClass)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[EMFChargeWidget] RegisterDroppedWeapon: %s deferred (WidgetClass not set yet)"), *Weapon->GetName());
+		return;
+	}
+
+	UEMFChargeWidget* Widget = GetWidgetFromPool();
+	if (!Widget)
+	{
+		return;
+	}
+
+	Widget->BindToDroppedWeapon(Weapon, Settings.PropVerticalOffset);
+	ActiveWidgets.Add(Weapon, Widget);
+
+	UE_LOG(LogTemp, Log, TEXT("[EMFChargeWidget] RegisterDroppedWeapon: %s registered OK"), *Weapon->GetName());
+}
+
+void UEMFChargeWidgetSubsystem::UnregisterDroppedWeapon(ADroppedMeleeWeapon* Weapon)
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	TObjectPtr<UEMFChargeWidget>* FoundWidget = ActiveWidgets.Find(Weapon);
+	if (FoundWidget && *FoundWidget)
+	{
+		ReturnWidgetToPool(*FoundWidget);
+	}
+
+	ActiveWidgets.Remove(Weapon);
 }
 
 void UEMFChargeWidgetSubsystem::ProcessPendingRegistrations()

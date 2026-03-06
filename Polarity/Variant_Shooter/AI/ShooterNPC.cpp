@@ -579,29 +579,50 @@ void AShooterNPC::Die()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
-	// Weapon drop: NPC with charge may drop a melee weapon
+	// Weapon drop: NPC may drop a melee weapon
 	if (DroppedMeleeWeaponClass)
 	{
-		const float NPCCharge = GetCharge();
-		if (!FMath::IsNearlyZero(NPCCharge))
+		// NPC real charge lives in EMFVelocityModifier, NOT PolarityCharacter::CurrentCharge
+		const float NPCCharge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
+		// TODO: restore charge-based formula: DropWeaponBaseChance * FMath::Abs(NPCCharge)
+		const float DropChance = DropWeaponBaseChance;
+		const float Roll = FMath::FRand();
+
+		UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: EMFCharge=%.2f (PolarityChar::Charge=%.2f), BaseChance=%.2f, Roll=%.3f (need < %.3f)"),
+			*GetName(), NPCCharge, GetCharge(), DropWeaponBaseChance, Roll, DropChance);
+
+		if (Roll < DropChance)
 		{
-			const float DropChance = DropWeaponBaseChance * FMath::Abs(NPCCharge);
-			if (FMath::FRand() < DropChance)
+			FActorSpawnParameters WeaponSpawnParams;
+			WeaponSpawnParams.SpawnCollisionHandlingOverride =
+				ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+			const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
+			UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] Spawning %s at %s"),
+				*DroppedMeleeWeaponClass->GetName(), *SpawnLoc.ToString());
+
+			ADroppedMeleeWeapon* DroppedWeapon = GetWorld()->SpawnActor<ADroppedMeleeWeapon>(
+				DroppedMeleeWeaponClass, SpawnLoc, GetActorRotation(), WeaponSpawnParams);
+
+			if (DroppedWeapon)
 			{
-				FActorSpawnParameters WeaponSpawnParams;
-				WeaponSpawnParams.SpawnCollisionHandlingOverride =
-					ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-				const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
-				ADroppedMeleeWeapon* DroppedWeapon = GetWorld()->SpawnActor<ADroppedMeleeWeapon>(
-					DroppedMeleeWeaponClass, SpawnLoc, GetActorRotation(), WeaponSpawnParams);
-
-				if (DroppedWeapon)
-				{
-					DroppedWeapon->SetCharge(NPCCharge);
-				}
+				DroppedWeapon->SetCharge(NPCCharge);
+				UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] SUCCESS — %s spawned, charge set to %.2f, readback=%.2f"),
+					*DroppedWeapon->GetName(), NPCCharge, DroppedWeapon->GetCharge());
+			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("[WeaponDrop] FAILED — SpawnActor returned null!"));
 			}
 		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Roll %.3f >= Chance %.3f — no drop"), *GetName(), Roll, DropChance);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] %s: No DroppedMeleeWeaponClass set — skipping"), *GetName());
 	}
 
 	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health

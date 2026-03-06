@@ -665,10 +665,11 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	const float SearchRadiusSq = CaptureSearchRadius * CaptureSearchRadius;
 	const FVector PlayerLoc = OwnerCharacter->GetActorLocation();
 
-	// Find pawns and physics bodies in radius via overlap
+	// Find pawns, physics bodies, and world dynamic (for DroppedMeleeWeapon) in radius via overlap
 	FCollisionObjectQueryParams ObjectQuery;
 	ObjectQuery.AddObjectTypesToQuery(ECC_Pawn);
 	ObjectQuery.AddObjectTypesToQuery(ECC_PhysicsBody);
+	ObjectQuery.AddObjectTypesToQuery(ECC_WorldDynamic);
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(OwnerCharacter);
 	QueryParams.AddIgnoredActor(ChannelingPlateActor);
@@ -688,6 +689,27 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
+
+	// Debug: log overlap count periodically
+	{
+		static int32 FrameCounter = 0;
+		if (++FrameCounter % 60 == 0) // every ~1 sec at 60fps
+		{
+			int32 DroppedWeaponCount = 0;
+			for (const FOverlapResult& O : Overlaps)
+			{
+				if (O.GetActor() && Cast<ADroppedMeleeWeapon>(O.GetActor()))
+				{
+					DroppedWeaponCount++;
+				}
+			}
+			if (DroppedWeaponCount > 0 || Overlaps.Num() > 0)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Overlaps=%d, DroppedWeaponsInOverlap=%d, SearchRadius=%.0f"),
+					Overlaps.Num(), DroppedWeaponCount, CaptureSearchRadius);
+			}
+		}
+	}
 
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
@@ -742,6 +764,8 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		{
 			if (!DroppedWeapon->bCanBeCaptured || DroppedWeapon->IsBeingPulled() || DroppedWeapon->IsPullComplete())
 			{
+				UE_LOG(LogTemp, Verbose, TEXT("[CaptureScan] DroppedWeapon %s skipped: bCanBeCaptured=%d, pulling=%d, pullComplete=%d"),
+					*DroppedWeapon->GetName(), DroppedWeapon->bCanBeCaptured, DroppedWeapon->IsBeingPulled(), DroppedWeapon->IsPullComplete());
 				continue;
 			}
 
@@ -749,6 +773,8 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			const float WeaponCharge = DroppedWeapon->GetCharge();
 			if (FMath::IsNearlyZero(WeaponCharge) || WeaponCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedWeapon %s REJECTED charge: WeaponCharge=%.2f, ChannelingSign=%d (need opposite)"),
+					*DroppedWeapon->GetName(), WeaponCharge, static_cast<int32>(ChannelingChargeSign));
 				continue;
 			}
 
@@ -758,6 +784,8 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			const float CaptureRange = DroppedWeapon->CalculateCaptureRange();
 			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedWeapon %s OUT OF RANGE: dist=%.0f, captureRange=%.0f"),
+					*DroppedWeapon->GetName(), FMath::Sqrt(DistSq), CaptureRange);
 				continue;
 			}
 
@@ -765,8 +793,13 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
 			if (AngleCos < MaxAngleCos)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedWeapon %s OUT OF ANGLE: cos=%.2f, minCos=%.2f"),
+					*DroppedWeapon->GetName(), AngleCos, MaxAngleCos);
 				continue;
 			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedWeapon %s VALID TARGET: charge=%.2f, dist=%.0f/%.0f, angle=%.2f"),
+				*DroppedWeapon->GetName(), WeaponCharge, FMath::Sqrt(DistSq), CaptureRange, AngleCos);
 
 			if (AngleCos > BestAngleCos)
 			{

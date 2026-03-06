@@ -9,6 +9,7 @@
 
 class AShooterNPC;
 class AEMFPhysicsProp;
+class ADroppedMeleeWeapon;
 
 /**
  * Base class for EMF charge indicator widget displayed above NPCs and Props.
@@ -27,6 +28,9 @@ public:
 
 	/** Bind this widget to a physics prop */
 	void BindToProp(AEMFPhysicsProp* InProp, float InVerticalOffset = 50.0f);
+
+	/** Bind this widget to a dropped melee weapon */
+	void BindToDroppedWeapon(ADroppedMeleeWeapon* InWeapon, float InVerticalOffset = 30.0f);
 
 	/** Unbind from current target and deactivate */
 	void Unbind();
@@ -124,6 +128,9 @@ protected:
 
 	/** The prop this widget is tracking (mutually exclusive with BoundNPC) */
 	TWeakObjectPtr<AEMFPhysicsProp> BoundProp;
+
+	/** The dropped weapon this widget is tracking */
+	TWeakObjectPtr<ADroppedMeleeWeapon> BoundDroppedWeapon;
 
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
 	bool bIsActive = false;

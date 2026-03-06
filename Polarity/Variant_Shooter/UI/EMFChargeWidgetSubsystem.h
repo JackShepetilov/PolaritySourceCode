@@ -11,6 +11,7 @@
 class UEMFChargeWidget;
 class AShooterNPC;
 class AEMFPhysicsProp;
+class ADroppedMeleeWeapon;
 
 /**
  * Settings for EMF charge widget appearance
@@ -77,6 +78,14 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
 	void UnregisterProp(AEMFPhysicsProp* Prop);
+
+	// ==================== Dropped Weapon API ====================
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void RegisterDroppedWeapon(ADroppedMeleeWeapon* Weapon);
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void UnregisterDroppedWeapon(ADroppedMeleeWeapon* Weapon);
 
 	// ==================== Settings ====================
 

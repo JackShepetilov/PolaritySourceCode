@@ -3,6 +3,7 @@
 #include "DroppedMeleeWeapon.h"
 #include "ShooterWeapon_Melee.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
 #include "Components/StaticMeshComponent.h"
@@ -26,12 +27,22 @@ ADroppedMeleeWeapon::ADroppedMeleeWeapon()
 
 	// EMF field component for charge storage
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
-	FieldComponent->SetupAttachment(RootComponent);
 }
 
 void ADroppedMeleeWeapon::BeginPlay()
 {
 	Super::BeginPlay();
+
+	UE_LOG(LogTemp, Warning, TEXT("[DroppedWeapon] %s BeginPlay: Charge=%.2f, bCanBeCaptured=%d, FieldComp=%s, WeaponMesh=%s"),
+		*GetName(), GetCharge(), bCanBeCaptured,
+		FieldComponent ? *FieldComponent->GetName() : TEXT("NULL"),
+		WeaponMesh ? *WeaponMesh->GetName() : TEXT("NULL"));
+
+	// Register charge widget
+	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->RegisterDroppedWeapon(this);
+	}
 }
 
 void ADroppedMeleeWeapon::Tick(float DeltaTime)
@@ -61,8 +72,18 @@ void ADroppedMeleeWeapon::SetCharge(float NewCharge)
 	if (FieldComponent)
 	{
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		const float OldCharge = Desc.PointChargeParams.Charge;
 		Desc.PointChargeParams.Charge = NewCharge;
 		FieldComponent->SetSourceDescription(Desc);
+
+		// Verify readback
+		const float Readback = FieldComponent->GetSourceDescription().PointChargeParams.Charge;
+		UE_LOG(LogTemp, Warning, TEXT("[DroppedWeapon] %s SetCharge: old=%.2f, new=%.2f, readback=%.2f, FieldComp=%s"),
+			*GetName(), OldCharge, NewCharge, Readback, *FieldComponent->GetName());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[DroppedWeapon] %s SetCharge(%.2f) — FieldComponent is NULL!"), *GetName(), NewCharge);
 	}
 }
 
@@ -162,6 +183,12 @@ void ADroppedMeleeWeapon::CompletePull()
 {
 	bPullComplete = true;
 	bIsBeingPulled = false;
+
+	// Unregister charge widget
+	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->UnregisterDroppedWeapon(this);
+	}
 
 	// Hide this actor
 	SetActorHiddenInGame(true);

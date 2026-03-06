@@ -3,6 +3,7 @@
 
 #include "EMFChargeWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "EMFPhysicsProp.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
@@ -175,6 +176,32 @@ void UEMFChargeWidget::BindToProp(AEMFPhysicsProp* InProp, float InVerticalOffse
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
 
+void UEMFChargeWidget::BindToDroppedWeapon(ADroppedMeleeWeapon* InWeapon, float InVerticalOffset)
+{
+	if (!InWeapon)
+	{
+		return;
+	}
+
+	BoundDroppedWeapon = InWeapon;
+	BoundNPC.Reset();
+	BoundProp.Reset();
+	VerticalOffset = InVerticalOffset;
+	bIsActive = true;
+
+	// Static charge — read once
+	float Charge = InWeapon->GetCharge();
+	float AbsCharge = FMath::Abs(Charge);
+
+	CachedMaxCharge = FMath::Max(AbsCharge * 2.0f, 50.0f);
+	CurrentCharge = AbsCharge;
+	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
+	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
+
+	BP_OnBoundToNPC();
+	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
+}
+
 void UEMFChargeWidget::Unbind()
 {
 	if (AShooterNPC* NPC = BoundNPC.Get())
@@ -192,6 +219,7 @@ void UEMFChargeWidget::Unbind()
 	bIsActive = false;
 	BoundNPC.Reset();
 	BoundProp.Reset();
+	BoundDroppedWeapon.Reset();
 	SetVisibility(ESlateVisibility::Collapsed);
 }
 
@@ -215,6 +243,10 @@ AActor* UEMFChargeWidget::GetBoundActor() const
 	if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
 		return Prop;
+	}
+	if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())
+	{
+		return Weapon;
 	}
 	return nullptr;
 }
@@ -242,6 +274,14 @@ bool UEMFChargeWidget::GetTargetWorldPosition(FVector& OutPosition) const
 		return true;
 	}
 
+	if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())
+	{
+		FVector Origin, BoxExtent;
+		Weapon->GetActorBounds(false, Origin, BoxExtent);
+		OutPosition = Origin + FVector(0.0f, 0.0f, BoxExtent.Z + VerticalOffset);
+		return true;
+	}
+
 	return false;
 }
 
@@ -254,6 +294,10 @@ bool UEMFChargeWidget::IsTargetDead() const
 	if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
 		return Prop->IsDead();
+	}
+	if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())
+	{
+		return Weapon->IsPullComplete(); // "dead" once pulled/collected
 	}
 	return true; // No valid target
 }
