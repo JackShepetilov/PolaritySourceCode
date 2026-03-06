@@ -5,6 +5,7 @@
 #include "EMFChargeWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
+#include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
@@ -226,6 +227,49 @@ void UEMFChargeWidgetSubsystem::UnregisterDroppedWeapon(ADroppedMeleeWeapon* Wea
 	}
 
 	ActiveWidgets.Remove(Weapon);
+}
+
+void UEMFChargeWidgetSubsystem::RegisterUpgradePickup(AUpgradePickup* Pickup)
+{
+	if (!Pickup || !bEnabled)
+	{
+		return;
+	}
+
+	if (ActiveWidgets.Contains(Pickup))
+	{
+		return;
+	}
+
+	if (!WidgetClass)
+	{
+		return;
+	}
+
+	UEMFChargeWidget* Widget = GetWidgetFromPool();
+	if (!Widget)
+	{
+		return;
+	}
+
+	Widget->BindToUpgradePickup(Pickup, Settings.PropVerticalOffset);
+	ActiveWidgets.Add(Pickup, Widget);
+}
+
+void UEMFChargeWidgetSubsystem::UnregisterUpgradePickup(AUpgradePickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	TObjectPtr<UEMFChargeWidget>* FoundWidget = ActiveWidgets.Find(Pickup);
+	if (FoundWidget && *FoundWidget)
+	{
+		ReturnWidgetToPool(*FoundWidget);
+	}
+
+	ActiveWidgets.Remove(Pickup);
 }
 
 void UEMFChargeWidgetSubsystem::ProcessPendingRegistrations()

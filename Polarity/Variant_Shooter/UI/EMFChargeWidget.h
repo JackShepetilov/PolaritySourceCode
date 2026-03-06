@@ -10,6 +10,7 @@
 class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
+class AUpgradePickup;
 
 /**
  * Base class for EMF charge indicator widget displayed above NPCs and Props.
@@ -31,6 +32,9 @@ public:
 
 	/** Bind this widget to a dropped melee weapon */
 	void BindToDroppedWeapon(ADroppedMeleeWeapon* InWeapon, float InVerticalOffset = 30.0f);
+
+	/** Bind this widget to an upgrade pickup */
+	void BindToUpgradePickup(AUpgradePickup* InPickup, float InVerticalOffset = 30.0f);
 
 	/** Unbind from current target and deactivate */
 	void Unbind();
@@ -131,6 +135,9 @@ protected:
 
 	/** The dropped weapon this widget is tracking */
 	TWeakObjectPtr<ADroppedMeleeWeapon> BoundDroppedWeapon;
+
+	/** The upgrade pickup this widget is tracking */
+	TWeakObjectPtr<AUpgradePickup> BoundUpgradePickup;
 
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
 	bool bIsActive = false;

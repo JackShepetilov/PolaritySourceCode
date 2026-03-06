@@ -12,6 +12,7 @@ class UEMFChargeWidget;
 class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
+class AUpgradePickup;
 
 /**
  * Settings for EMF charge widget appearance
@@ -86,6 +87,14 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
 	void UnregisterDroppedWeapon(ADroppedMeleeWeapon* Weapon);
+
+	// ==================== Upgrade Pickup API ====================
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void RegisterUpgradePickup(AUpgradePickup* Pickup);
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void UnregisterUpgradePickup(AUpgradePickup* Pickup);
 
 	// ==================== Settings ====================
 

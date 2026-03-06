@@ -20,6 +20,7 @@ class AEMFChannelingPlateActor;
 class AEMFPhysicsProp;
 class AEMFAcceleratorPlate;
 class ADroppedMeleeWeapon;
+class AUpgradePickup;
 
 /**
  * Charge animation state
@@ -467,6 +468,9 @@ protected:
 
 	/** Capture a dropped melee weapon (scripted pull, not physics-based) */
 	void CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon);
+
+	/** Capture an upgrade pickup (scripted pull, not physics-based) */
+	void CaptureUpgradePickup(AUpgradePickup* Pickup);
 
 	/** Capture an accelerator plate (lowest priority, no charge dependency) */
 	void CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate);

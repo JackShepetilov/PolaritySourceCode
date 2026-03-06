@@ -20,6 +20,7 @@
 #include "EMFPhysicsProp.h"
 #include "EMFAcceleratorPlate.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
+#include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
 
@@ -480,6 +481,11 @@ void UChargeAnimationComponent::ExitChanneling()
 			// DroppedMeleeWeapon pull is self-contained — let it finish on its own
 			CurrentCapturedNPC.Reset();
 		}
+		else if (AUpgradePickup* UPickup = Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
+		{
+			// UpgradePickup pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
 		if (ChannelingPlateActor)
 		{
 			ChannelingPlateActor->ClearCapturedNPC();
@@ -646,6 +652,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still pulling — don't re-search
 			}
 		}
+		// Check UpgradePickup (pull is self-contained — just check if still in progress)
+		else if (AUpgradePickup* UPickup = Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
+		{
+			if (UPickup->IsBeingPulled())
+			{
+				return; // Still pulling — don't re-search
+			}
+		}
 		// Target was auto-released or is invalid — clear and search for new target
 		CurrentCapturedNPC.Reset();
 		if (ChannelingPlateActor)
@@ -685,7 +699,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon };
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, UpgradePickup };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -810,6 +824,46 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		// Try UpgradePickup (same priority as DroppedWeapon/props)
+		if (AUpgradePickup* UPickup = Cast<AUpgradePickup>(HitActor))
+		{
+			if (!UPickup->bCanBeCaptured || UPickup->IsBeingPulled() || UPickup->IsPullComplete())
+			{
+				continue;
+			}
+
+			// Charge validation: only capture pickups with OPPOSITE charge sign
+			const float PickupCharge = UPickup->GetCharge();
+			if (FMath::IsNearlyZero(PickupCharge) || PickupCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+			{
+				continue;
+			}
+
+			// Range check using pickup's own logarithmic capture range
+			const FVector ToTarget = UPickup->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float CaptureRange = UPickup->CalculateCaptureRange();
+			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < MaxAngleCos)
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = UPickup;
+				BestTargetType = ECaptureTargetType::UpgradePickup;
+			}
+			continue;
+		}
+
 		// Try Physics Prop
 		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
 		{
@@ -854,6 +908,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			break;
 		case ECaptureTargetType::DroppedWeapon:
 			CaptureDroppedWeapon(Cast<ADroppedMeleeWeapon>(BestTarget));
+			break;
+		case ECaptureTargetType::UpgradePickup:
+			CaptureUpgradePickup(Cast<AUpgradePickup>(BestTarget));
 			break;
 		default:
 			break;
@@ -971,6 +1028,27 @@ void UChargeAnimationComponent::CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon
 	CurrentCapturedNPC = Weapon;
 }
 
+void UChargeAnimationComponent::CaptureUpgradePickup(AUpgradePickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	// Start scripted pull (pickup manages its own interpolation in Tick)
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		Pickup->StartPull(ShooterChar);
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Pickup;
+}
+
 void UChargeAnimationComponent::CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate)
 {
 	if (!Plate || !ChannelingPlateActor)
@@ -1013,6 +1091,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	else if (Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
 	{
 		// DroppedMeleeWeapon pull is self-contained — no release action needed
+	}
+	else if (Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
+	{
+		// UpgradePickup pull is self-contained — no release action needed
 	}
 
 	if (ChannelingPlateActor)
