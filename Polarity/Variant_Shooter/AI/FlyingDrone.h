@@ -138,6 +138,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "0.0", ClampMax = "180.0"))
 	float ImpulseYawRandomness = 30.0f;
 
+	/** Mesh rotation offset when captured by channeling (belly toward player).
+	 *  Tune axes if drone mesh has non-standard orientation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization")
+	FRotator CapturedTiltOffset = FRotator(-70.0f, 0.0f, 0.0f);
+
 	/** Current angular velocity of the mesh tilt (degrees/sec, local space: X=Roll, Y=Pitch, Z=Yaw) */
 	FVector MeshAngularVelocity = FVector::ZeroVector;
 

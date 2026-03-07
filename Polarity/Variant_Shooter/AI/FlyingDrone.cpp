@@ -996,26 +996,39 @@ void AFlyingDrone::UpdateDroneVisuals(float DeltaTime)
 
 void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 {
-	// Rotate drone to face target or movement direction
 	FRotator TargetRotation = GetActorRotation();
 
-	// Check target validity using weak pointer
-	AActor* Target = CurrentAimTarget.Get();
-	if (Target && !Target->IsPendingKillPending())
+	if (bIsCaptured)
 	{
-		// Face the target we're shooting at
-		const FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
-		TargetRotation = ToTarget.Rotation();
-		TargetRotation.Pitch = 0.0f; // Keep drone level (only yaw)
-	}
-	else if (FlyingMovement && FlyingMovement->IsMoving())
-	{
-		// Face movement direction
-		const FVector Velocity = GetVelocity();
-		if (!Velocity.IsNearlyZero())
+		// When captured: face AWAY from player so belly (with tilt) presents toward them
+		if (const ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
 		{
-			TargetRotation = Velocity.Rotation();
+			const FVector AwayFromPlayer = (GetActorLocation() - Player->GetActorLocation());
+			if (!AwayFromPlayer.IsNearlyZero())
+			{
+				TargetRotation = AwayFromPlayer.Rotation();
+				TargetRotation.Pitch = 0.0f;
+			}
+		}
+	}
+	else
+	{
+		// Normal behavior: face target or movement direction
+		AActor* Target = CurrentAimTarget.Get();
+		if (Target && !Target->IsPendingKillPending())
+		{
+			const FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
+			TargetRotation = ToTarget.Rotation();
 			TargetRotation.Pitch = 0.0f;
+		}
+		else if (FlyingMovement && FlyingMovement->IsMoving())
+		{
+			const FVector Velocity = GetVelocity();
+			if (!Velocity.IsNearlyZero())
+			{
+				TargetRotation = Velocity.Rotation();
+				TargetRotation.Pitch = 0.0f;
+			}
 		}
 	}
 
@@ -1059,9 +1072,14 @@ void AFlyingDrone::UpdateStabilization(float DeltaTime)
 	const FRotator CurrentTilt = DroneMesh->GetRelativeRotation();
 	const FVector CurrentAngle(CurrentTilt.Roll, CurrentTilt.Pitch, CurrentTilt.Yaw);
 
-	// PD Controller: restoring torque + damping
-	// Torque = -Spring * Angle - Damping * AngularVelocity
-	const FVector RestoringTorque = -StabilizationSpring * CurrentAngle;
+	// Stabilization target: zero (level) normally, CapturedTiltOffset when captured
+	const FVector TargetAngle = bIsCaptured
+		? FVector(CapturedTiltOffset.Roll, CapturedTiltOffset.Pitch, CapturedTiltOffset.Yaw)
+		: FVector::ZeroVector;
+
+	// PD Controller: restoring torque toward target + damping
+	// Torque = Spring * (Target - Current) - Damping * AngularVelocity
+	const FVector RestoringTorque = StabilizationSpring * (TargetAngle - CurrentAngle);
 	const FVector DampingTorque = -StabilizationDamping * MeshAngularVelocity;
 
 	// Integrate angular velocity
