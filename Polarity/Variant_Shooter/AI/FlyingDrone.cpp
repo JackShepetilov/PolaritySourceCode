@@ -1091,18 +1091,21 @@ void AFlyingDrone::UpdateStabilization(float DeltaTime)
 	// Integrate angle
 	FVector NewAngle = CurrentAngle + MeshAngularVelocity * DeltaTime;
 
-	// Clamp tilt to max angle (pitch and roll only, yaw is free to stabilize naturally)
-	NewAngle.X = FMath::Clamp(NewAngle.X, -MaxTiltAngle, MaxTiltAngle); // Roll
-	NewAngle.Y = FMath::Clamp(NewAngle.Y, -MaxTiltAngle, MaxTiltAngle); // Pitch
+	// Clamp tilt to max angle (only when NOT captured — captured uses CapturedTiltOffset as its own limit)
+	if (!bIsCaptured)
+	{
+		NewAngle.X = FMath::Clamp(NewAngle.X, -MaxTiltAngle, MaxTiltAngle); // Roll
+		NewAngle.Y = FMath::Clamp(NewAngle.Y, -MaxTiltAngle, MaxTiltAngle); // Pitch
 
-	// If angular velocity is clamped at max tilt boundary, zero it out on that axis
-	if (FMath::Abs(NewAngle.X) >= MaxTiltAngle && FMath::Sign(NewAngle.X) == FMath::Sign(MeshAngularVelocity.X))
-	{
-		MeshAngularVelocity.X = 0.0f;
-	}
-	if (FMath::Abs(NewAngle.Y) >= MaxTiltAngle && FMath::Sign(NewAngle.Y) == FMath::Sign(MeshAngularVelocity.Y))
-	{
-		MeshAngularVelocity.Y = 0.0f;
+		// If at boundary, zero out velocity on that axis to prevent bounce
+		if (FMath::Abs(NewAngle.X) >= MaxTiltAngle && FMath::Sign(NewAngle.X) == FMath::Sign(MeshAngularVelocity.X))
+		{
+			MeshAngularVelocity.X = 0.0f;
+		}
+		if (FMath::Abs(NewAngle.Y) >= MaxTiltAngle && FMath::Sign(NewAngle.Y) == FMath::Sign(MeshAngularVelocity.Y))
+		{
+			MeshAngularVelocity.Y = 0.0f;
+		}
 	}
 
 	// Apply to mesh
