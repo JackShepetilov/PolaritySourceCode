@@ -211,6 +211,13 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 		}
 	}
 
+	// Apply angular impulse from the hit (visual stabilization system)
+	if (DamageCauser)
+	{
+		const FVector HitDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
+		ApplyAngularImpulse(HitDirection, Damage);
+	}
+
 	// Broadcast damage taken event for damage numbers system
 	// Use actor center + offset for hit location (same as ShooterNPC)
 	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
@@ -984,6 +991,7 @@ void AFlyingDrone::SpawnMuzzleFlashEffect()
 void AFlyingDrone::UpdateDroneVisuals(float DeltaTime)
 {
 	UpdateDroneRotation(DeltaTime);
+	UpdateStabilization(DeltaTime);
 }
 
 void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
@@ -1014,6 +1022,73 @@ void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 	// Smoothly interpolate rotation
 	const FRotator NewRotation = FMath::RInterpTo(GetActorRotation(), TargetRotation, DeltaTime, 5.0f);
 	SetActorRotation(NewRotation);
+}
+
+void AFlyingDrone::ApplyAngularImpulse(const FVector& HitDirection, float Damage)
+{
+	// Convert hit direction to drone's local space
+	const FVector LocalHitDir = GetActorTransform().InverseTransformVectorNoScale(HitDirection);
+
+	// Cross product with up vector gives torque axis:
+	// Hit from right (+Y) → roll left, hit from front (+X) → pitch back
+	// Cross(LocalHitDir, Up) = (LocalHitDir.Y, -LocalHitDir.X, 0)
+	FVector Impulse;
+	Impulse.X = LocalHitDir.Y;   // Roll from lateral hits
+	Impulse.Y = -LocalHitDir.X;  // Pitch from frontal hits
+	Impulse.Z = FMath::RandRange(-ImpulseYawRandomness, ImpulseYawRandomness); // Random yaw spin
+
+	// Scale with damage
+	Impulse.X *= Damage * AngularImpulsePerDamage;
+	Impulse.Y *= Damage * AngularImpulsePerDamage;
+
+	// Accumulate (multiple hits stack)
+	MeshAngularVelocity += Impulse;
+
+	// Clamp to max
+	MeshAngularVelocity = MeshAngularVelocity.GetClampedToMaxSize(MaxAngularVelocity);
+}
+
+void AFlyingDrone::UpdateStabilization(float DeltaTime)
+{
+	if (!DroneMesh)
+	{
+		return;
+	}
+
+	// Get current tilt as euler angles
+	const FRotator CurrentTilt = DroneMesh->GetRelativeRotation();
+	const FVector CurrentAngle(CurrentTilt.Roll, CurrentTilt.Pitch, CurrentTilt.Yaw);
+
+	// PD Controller: restoring torque + damping
+	// Torque = -Spring * Angle - Damping * AngularVelocity
+	const FVector RestoringTorque = -StabilizationSpring * CurrentAngle;
+	const FVector DampingTorque = -StabilizationDamping * MeshAngularVelocity;
+
+	// Integrate angular velocity
+	MeshAngularVelocity += (RestoringTorque + DampingTorque) * DeltaTime;
+
+	// Clamp angular velocity
+	MeshAngularVelocity = MeshAngularVelocity.GetClampedToMaxSize(MaxAngularVelocity);
+
+	// Integrate angle
+	FVector NewAngle = CurrentAngle + MeshAngularVelocity * DeltaTime;
+
+	// Clamp tilt to max angle (pitch and roll only, yaw is free to stabilize naturally)
+	NewAngle.X = FMath::Clamp(NewAngle.X, -MaxTiltAngle, MaxTiltAngle); // Roll
+	NewAngle.Y = FMath::Clamp(NewAngle.Y, -MaxTiltAngle, MaxTiltAngle); // Pitch
+
+	// If angular velocity is clamped at max tilt boundary, zero it out on that axis
+	if (FMath::Abs(NewAngle.X) >= MaxTiltAngle && FMath::Sign(NewAngle.X) == FMath::Sign(MeshAngularVelocity.X))
+	{
+		MeshAngularVelocity.X = 0.0f;
+	}
+	if (FMath::Abs(NewAngle.Y) >= MaxTiltAngle && FMath::Sign(NewAngle.Y) == FMath::Sign(MeshAngularVelocity.Y))
+	{
+		MeshAngularVelocity.Y = 0.0f;
+	}
+
+	// Apply to mesh
+	DroneMesh->SetRelativeRotation(FRotator(NewAngle.Y, NewAngle.Z, NewAngle.X));
 }
 
 void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)

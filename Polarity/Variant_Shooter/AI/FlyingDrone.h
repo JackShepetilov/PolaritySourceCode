@@ -112,6 +112,35 @@ protected:
 	/** Time when last damage was taken (for StateTree condition with grace period) */
 	float LastDamageTakenTime = -100.0f;
 
+	// ==================== Stabilization Settings ====================
+
+	/** Spring constant - how aggressively drone returns to level (higher = snappier) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "1.0", ClampMax = "50.0"))
+	float StabilizationSpring = 15.0f;
+
+	/** Damping coefficient - how quickly oscillation dies out (higher = less wobble) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+	float StabilizationDamping = 8.0f;
+
+	/** Angular impulse per point of damage (degrees/sec per damage point) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	float AngularImpulsePerDamage = 8.0f;
+
+	/** Maximum angular velocity cap (degrees/sec) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "30.0", ClampMax = "1080.0"))
+	float MaxAngularVelocity = 360.0f;
+
+	/** Maximum tilt angle from level (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "5.0", ClampMax = "90.0"))
+	float MaxTiltAngle = 45.0f;
+
+	/** Random yaw spin added on each hit (degrees/sec) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Stabilization", meta = (ClampMin = "0.0", ClampMax = "180.0"))
+	float ImpulseYawRandomness = 30.0f;
+
+	/** Current angular velocity of the mesh tilt (degrees/sec, local space: X=Roll, Y=Pitch, Z=Yaw) */
+	FVector MeshAngularVelocity = FVector::ZeroVector;
+
 	// ==================== Visual Settings ====================
 
 	/** Color of the drone's emissive elements (for material parameter) */
@@ -300,6 +329,12 @@ protected:
 
 	/** Rotate drone to face movement direction or target */
 	void UpdateDroneRotation(float DeltaTime);
+
+	/** PD controller: apply restoring torque and damping, integrate angular velocity, update mesh rotation */
+	void UpdateStabilization(float DeltaTime);
+
+	/** Apply angular impulse from a hit (called from TakeDamage) */
+	void ApplyAngularImpulse(const FVector& HitDirection, float Damage);
 
 	// ==================== VFX Methods ====================
 
