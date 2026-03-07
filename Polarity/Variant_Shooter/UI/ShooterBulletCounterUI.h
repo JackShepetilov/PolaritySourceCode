@@ -137,6 +137,16 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Melee", meta = (DisplayName = "OnMeleeChargeChanged"))
 	void BP_OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges);
 
+	/**
+	 * Вызывается при экипировке/снятии оружия ближнего боя.
+	 * Используйте для показа/скрытия счётчика оставшихся ударов.
+	 * @param bEquipped - true = меч экипирован, false = убран/сломан
+	 * @param RemainingHits - оставшиеся удары (0 если не экипирован или бесконечный)
+	 * @param MaxHits - максимум ударов (0 если бесконечный)
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Melee", meta = (DisplayName = "OnMeleeWeaponEquipped"))
+	void BP_OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
+
 	// ==================== Hit Marker ====================
 
 	/**

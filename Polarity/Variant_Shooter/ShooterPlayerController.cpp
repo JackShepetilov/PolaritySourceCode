@@ -123,6 +123,7 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		ShooterCharacter->OnSpeedUpdated.AddDynamic(this, &AShooterPlayerController::OnSpeedUpdated);
 		ShooterCharacter->OnPolarityChanged.AddDynamic(this, &AShooterPlayerController::OnPolarityChanged);
 		ShooterCharacter->OnChargeUpdated.AddDynamic(this, &AShooterPlayerController::OnChargeUpdated);
+		ShooterCharacter->OnMeleeWeaponEquipped.AddDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
 
 		// Bind melee component events directly for drop kick cooldown UI
 		if (UMeleeAttackComponent* MeleeComp = ShooterCharacter->GetMeleeAttackComponent())
@@ -267,5 +268,13 @@ void AShooterPlayerController::OnMeleeChargeChanged(int32 CurrentCharges, int32 
 	if (IsValid(BulletCounterUI))
 	{
 		BulletCounterUI->BP_OnMeleeChargeChanged(CurrentCharges, MaxCharges);
+	}
+}
+
+void AShooterPlayerController::OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits)
+{
+	if (IsValid(BulletCounterUI))
+	{
+		BulletCounterUI->BP_OnMeleeWeaponEquipped(bEquipped, RemainingHits, MaxHits);
 	}
 }

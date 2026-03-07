@@ -1689,6 +1689,19 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 	{
 		MeleeAttackComponent->SetExternallyDisabled(Weapon->IsMeleeWeapon());
 	}
+
+	// Notify UI about melee weapon equip state
+	if (Weapon->IsMeleeWeapon())
+	{
+		if (AShooterWeapon_Melee* MeleeWpn = Cast<AShooterWeapon_Melee>(Weapon))
+		{
+			OnMeleeWeaponEquipped.Broadcast(true, MeleeWpn->RemainingHits, MeleeWpn->MaxHitCount);
+		}
+	}
+	else
+	{
+		OnMeleeWeaponEquipped.Broadcast(false, 0, 0);
+	}
 }
 
 void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
@@ -1712,6 +1725,12 @@ void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
 	if (MeleeAttackComponent && Weapon->IsMeleeWeapon())
 	{
 		MeleeAttackComponent->SetExternallyDisabled(false);
+	}
+
+	// Notify UI that melee weapon is no longer equipped
+	if (Weapon->IsMeleeWeapon())
+	{
+		OnMeleeWeaponEquipped.Broadcast(false, 0, 0);
 	}
 }
 

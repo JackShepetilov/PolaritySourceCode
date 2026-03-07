@@ -38,6 +38,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate, float, Char
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, TotalCharge, float, StableCharge, float, UnstableCharge, float, MaxStableCharge, float, MaxUnstableCharge, uint8, Polarity);
 // Chromatic aberration intensity delegate (called every tick while effect is active)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamageChromaticAberrationDelegate, float, Intensity);
+// Melee weapon equip/unequip state delegate
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FMeleeWeaponEquippedDelegate, bool, bEquipped, int32, RemainingHits, int32, MaxHits);
 
 // Boss Finisher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
@@ -731,6 +733,9 @@ public:
 
 	/** Extended charge delegate with stable/unstable breakdown (fires every tick) */
 	FChargeExtendedDelegate OnChargeExtended;
+
+	/** Melee weapon equipped/unequipped state (fires on weapon switch and weapon break) */
+	FMeleeWeaponEquippedDelegate OnMeleeWeaponEquipped;
 
 public:
 

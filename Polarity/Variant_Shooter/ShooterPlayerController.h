@@ -114,4 +114,8 @@ protected:
 	/** Called when melee charges change */
 	UFUNCTION()
 	void OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges);
+
+	/** Called when melee weapon is equipped or unequipped */
+	UFUNCTION()
+	void OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
 };
