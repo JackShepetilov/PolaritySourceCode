@@ -291,6 +291,8 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 	}
 
 	// Consume one durability hit per swing (not per enemy hit)
+	UE_LOG(LogTemp, Warning, TEXT("[MeleeDurability] DeactivateDamageWindow called | bHitDuringWindow=%d, RemainingHits=%d"),
+		bHitDuringWindow, RemainingHits);
 	if (bHitDuringWindow)
 	{
 		DecrementHitCount();
@@ -1432,6 +1434,10 @@ bool AShooterWeapon_Melee::DecrementHitCount()
 	}
 
 	--RemainingHits;
+	UE_LOG(LogTemp, Warning, TEXT("[MeleeDurability] DecrementHitCount: %d -> %d (Max: %d) | CallStack: %s"),
+		RemainingHits + 1, RemainingHits, MaxHitCount,
+		*FString::Printf(TEXT("DamageWindowActive=%d, HitDuringWindow=%d, HitActors=%d"),
+			bDamageWindowActive, bHitDuringWindow, HitActorsThisSwing.Num()));
 	BroadcastDurabilityUpdate();
 
 	if (RemainingHits <= 0)
