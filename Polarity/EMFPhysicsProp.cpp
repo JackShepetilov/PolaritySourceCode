@@ -986,6 +986,10 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 
 		TArray<AActor*> IgnoredActors;
 		IgnoredActors.Add(this);
+		if (APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0))
+		{
+			IgnoredActors.Add(PlayerPawn);
+		}
 
 		UGameplayStatics::ApplyRadialDamageWithFalloff(
 			GetWorld(),

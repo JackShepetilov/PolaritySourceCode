@@ -1736,7 +1736,7 @@ void AShooterCharacter::RemoveMeleeWeapon(AShooterWeapon* WeaponToRemove)
 	if (OwnedWeapons.Num() > 0)
 	{
 		CurrentWeapon = OwnedWeapons[0];
-		OnWeaponActivated(CurrentWeapon);
+		CurrentWeapon->ActivateWeapon();
 	}
 	else
 	{

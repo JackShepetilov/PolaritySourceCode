@@ -135,7 +135,9 @@
       "WebFetch(domain:www.digitaltrends.com)",
       "WebFetch(domain:www.jasondeheras.com)",
       "WebFetch(domain:www.parallelcube.com)",
-      "WebFetch(domain:www.davetech.co.uk)"
+      "WebFetch(domain:www.davetech.co.uk)",
+      "WebFetch(domain:mygamingtutorials.com)",
+      "WebFetch(domain:steamdb.info)"
     ]
   }
 }

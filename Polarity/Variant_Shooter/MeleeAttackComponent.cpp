@@ -2928,11 +2928,11 @@ void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 	FVector CurrentPos = OwnerCharacter->GetActorLocation();
 	FVector TargetPos = Target->GetActorLocation();
 
-	// If target NPC is in knockback, stop all drop kick movement to prevent jitter
-	// The hit already happened, no need to continue tracking
+	// If target NPC is in knockback AND we already hit them, stop tracking to prevent jitter.
+	// But if they were already stunned before our dropkick, keep diving toward them.
 	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(Target))
 	{
-		if (TargetNPC->IsInKnockback())
+		if (TargetNPC->IsInKnockback() && bHasHitThisAttack)
 		{
 			// Stop player movement velocity
 			if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
