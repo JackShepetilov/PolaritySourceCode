@@ -142,6 +142,9 @@ public:
 	/** Set remaining hits (called when equipping from a DroppedMeleeWeapon) */
 	void SetRemainingHits(int32 Hits);
 
+	/** Add hits to remaining count (for stacking when picking up additional melee weapons) */
+	void AddRemainingHits(int32 HitsToAdd);
+
 	/** Set break geometry data from a DroppedMeleeWeapon source */
 	void SetBreakData(UGeometryCollection* GC, float Impulse, float AngularImpulse, float GibLifetime);
 
@@ -597,4 +600,7 @@ protected:
 
 	/** Spawn GC destruction at MeleeWeaponStaticMesh location */
 	void SpawnBreakDestructionGC();
+
+	/** Update CurrentBullets/MagazineSize from durability and broadcast to UI */
+	void BroadcastDurabilityUpdate();
 };

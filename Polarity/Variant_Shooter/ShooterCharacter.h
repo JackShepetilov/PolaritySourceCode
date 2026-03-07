@@ -1086,6 +1086,9 @@ public:
 
 	//~End IShooterWeaponHolder interface
 
+	/** Find an owned weapon of the given class (or subclass). Returns nullptr if not found. */
+	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
+
 protected:
 
 	/** Updates left hand IK transform from weapon socket and passes it to AnimInstance */
@@ -1093,9 +1096,6 @@ protected:
 
 	/** Sets the left hand IK transform and alpha in the AnimInstance via reflection */
 	void SetAnimInstanceLeftHandIK(const FTransform& Transform, float Alpha);
-
-	/** Returns true if the character already owns a weapon of the given class */
-	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
 
 	// ==================== Upgrade System ====================
 

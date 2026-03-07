@@ -43,7 +43,16 @@ void AShooterWeapon_Melee::BeginPlay()
 {
 	Super::BeginPlay();
 
-	CurrentBullets = MagazineSize;
+	// Sync bullet counter with durability if this weapon breaks after N hits
+	if (HasLimitedDurability())
+	{
+		MagazineSize = MaxHitCount;
+		CurrentBullets = RemainingHits;
+	}
+	else
+	{
+		CurrentBullets = MagazineSize;
+	}
 
 	// Cache player controller
 	if (PawnOwner)
@@ -109,8 +118,11 @@ void AShooterWeapon_Melee::Fire()
 		bIsInCombo = false;
 	}
 
-	// Keep ammo full
-	CurrentBullets = MagazineSize;
+	// Keep ammo full (only for infinite-durability weapons; limited ones use RemainingHits)
+	if (!HasLimitedDurability())
+	{
+		CurrentBullets = MagazineSize;
+	}
 
 	// Cache player controller if needed
 	if (!CachedPlayerController && PawnOwner)
@@ -1394,6 +1406,14 @@ void AShooterWeapon_Melee::SetRemainingHits(int32 Hits)
 {
 	MaxHitCount = Hits;
 	RemainingHits = Hits;
+	BroadcastDurabilityUpdate();
+}
+
+void AShooterWeapon_Melee::AddRemainingHits(int32 HitsToAdd)
+{
+	RemainingHits += HitsToAdd;
+	MaxHitCount = RemainingHits;
+	BroadcastDurabilityUpdate();
 }
 
 void AShooterWeapon_Melee::SetBreakData(UGeometryCollection* GC, float Impulse, float AngularImpulse, float GibLifetime)
@@ -1412,12 +1432,30 @@ bool AShooterWeapon_Melee::DecrementHitCount()
 	}
 
 	--RemainingHits;
+	BroadcastDurabilityUpdate();
+
 	if (RemainingHits <= 0)
 	{
 		BreakWeapon();
 		return true;
 	}
 	return false;
+}
+
+void AShooterWeapon_Melee::BroadcastDurabilityUpdate()
+{
+	if (!HasLimitedDurability())
+	{
+		return;
+	}
+
+	MagazineSize = MaxHitCount;
+	CurrentBullets = RemainingHits;
+
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner))
+	{
+		ShooterChar->OnBulletCountUpdated.Broadcast(MaxHitCount, RemainingHits);
+	}
 }
 
 void AShooterWeapon_Melee::BreakWeapon()

@@ -210,18 +210,33 @@ void ADroppedMeleeWeapon::CompletePull()
 		UGameplayStatics::PlaySoundAtLocation(this, PickupSound, GetActorLocation());
 	}
 
-	// Grant the melee weapon
-	Player->AddWeaponClass(MeleeWeaponClass);
-
-	// Find the newly created weapon and configure it
-	AShooterWeapon* NewWeapon = Player->GetCurrentWeapon();
-	if (AShooterWeapon_Melee* MeleeWeapon = Cast<AShooterWeapon_Melee>(NewWeapon))
+	// Check if player already has a melee weapon of this class — if so, add hits to it
+	AShooterWeapon* ExistingWeapon = Player->FindWeaponOfType(MeleeWeaponClass);
+	if (AShooterWeapon_Melee* ExistingMelee = Cast<AShooterWeapon_Melee>(ExistingWeapon))
 	{
+		// Stack hits onto existing weapon
 		if (GrantedHitCount > 0)
 		{
-			MeleeWeapon->SetRemainingHits(GrantedHitCount);
+			ExistingMelee->AddRemainingHits(GrantedHitCount);
 		}
-		MeleeWeapon->SetBreakData(BreakGeometryCollection, BreakImpulse, BreakAngularImpulse, BreakGibLifetime);
+		// Update break data to latest pickup's data
+		ExistingMelee->SetBreakData(BreakGeometryCollection, BreakImpulse, BreakAngularImpulse, BreakGibLifetime);
+	}
+	else
+	{
+		// Grant a new melee weapon
+		Player->AddWeaponClass(MeleeWeaponClass);
+
+		// Configure the newly created weapon
+		AShooterWeapon* NewWeapon = Player->GetCurrentWeapon();
+		if (AShooterWeapon_Melee* MeleeWeapon = Cast<AShooterWeapon_Melee>(NewWeapon))
+		{
+			if (GrantedHitCount > 0)
+			{
+				MeleeWeapon->SetRemainingHits(GrantedHitCount);
+			}
+			MeleeWeapon->SetBreakData(BreakGeometryCollection, BreakImpulse, BreakAngularImpulse, BreakGibLifetime);
+		}
 	}
 
 	// Destroy this world actor (weapon is now in player's inventory)
