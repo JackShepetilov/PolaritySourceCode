@@ -290,6 +290,12 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 		}
 	}
 
+	// Consume one durability hit per swing (not per enemy hit)
+	if (bHitDuringWindow)
+	{
+		DecrementHitCount();
+	}
+
 	// Stop trail VFX
 	StopSwingTrail();
 
@@ -372,12 +378,6 @@ void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
 
 	// Apply damage (multiple damage types)
 	float FinalDamage = ApplyMeleeDamage(HitActor, HitResult);
-
-	// Decrement hit count — if weapon broke, stop processing
-	if (DecrementHitCount())
-	{
-		return;
-	}
 
 	// Apply knockback with full momentum system
 	FVector ImpulseDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
