@@ -1008,77 +1008,74 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	float TraceDistance = MaxHitscanRange * EnergyMultiplier;
 	FVector End = Start + Direction * TraceDistance;
 
-	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(GetOwner());
 	QueryParams.bReturnPhysicalMaterial = true;
 
-	// Single line trace — hits both world geometry and player capsule (both block ECC_Visibility)
-	bool bHit = GetWorld()->LineTraceSingleByChannel(
-		HitResult, Start, End, ECC_Visibility, QueryParams);
+	// --- Trace 1: World geometry (walls, floors, damageable props) ---
+	// Pawn profile ignores ECC_Visibility, so this only finds world geometry
+	FHitResult WallHit;
+	bool bHitWall = GetWorld()->LineTraceSingleByChannel(
+		WallHit, Start, End, ECC_Visibility, QueryParams);
 
-	FVector BeamEnd = bHit ? HitResult.ImpactPoint : End;
+	float WallDistance = bHitWall ? WallHit.Distance : TraceDistance;
 
-	// === DEBUG: NPC Simple Hitscan ===
-	if (bHit)
+	// Damage non-Pawn damageable actors (e.g. EMFPhysicsProp)
+	if (bHitWall && WallHit.GetActor() && !Cast<APawn>(WallHit.GetActor()) && WallHit.GetActor()->CanBeDamaged())
 	{
-		AActor* HitActor = HitResult.GetActor();
-		UPrimitiveComponent* HitComp = HitResult.GetComponent();
+		ApplyHitscanDamage(WallHit, EnergyMultiplier, WallHit.Distance, 0.0f);
+	}
 
-		FString ActorName = HitActor ? HitActor->GetName() : TEXT("NULL");
-		FString ActorClass = HitActor ? HitActor->GetClass()->GetName() : TEXT("NULL");
-		FString CompName = HitComp ? HitComp->GetName() : TEXT("NULL");
-		FString CompClass = HitComp ? HitComp->GetClass()->GetName() : TEXT("NULL");
-		bool bCanDamage = HitActor ? HitActor->CanBeDamaged() : false;
-		bool bIsPawn = HitActor ? Cast<APawn>(HitActor) != nullptr : false;
-		FString BoneName = HitResult.BoneName.ToString();
+	// --- Trace 2: Pawns (player) via ObjectType query ---
+	// Pawn collision profile blocks ObjectType queries for ECC_Pawn
+	FHitResult PawnHit;
+	FCollisionObjectQueryParams PawnObjectParams;
+	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
 
-		// Collision profile of hit component
-		FString CollisionProfile = TEXT("NONE");
-		if (HitComp)
-		{
-			CollisionProfile = HitComp->GetCollisionProfileName().ToString();
-		}
+	FVector PawnTraceEnd = Start + Direction * WallDistance; // only trace up to wall
+	bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
+		PawnHit, Start, PawnTraceEnd, PawnObjectParams, QueryParams);
 
-		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] HIT: Actor=%s (%s) | Comp=%s (%s) | Profile=%s | Bone=%s | IsPawn=%d | CanBeDamaged=%d | Dist=%.0f"),
-			*ActorName, *ActorClass, *CompName, *CompClass, *CollisionProfile, *BoneName, bIsPawn, bCanDamage, HitResult.Distance);
+	// --- Determine beam endpoint and apply pawn damage ---
+	FVector BeamEnd;
+	bool bPawnWasHit = false;
 
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
-			FString::Printf(TEXT("[NPC] Hit: %s (%s) | CanDmg=%d | Pawn=%d | Dist=%.0f"),
-				*ActorName, *ActorClass, bCanDamage, bIsPawn, HitResult.Distance));
+	if (bHitPawn && PawnHit.GetActor() && PawnHit.GetActor()->CanBeDamaged())
+	{
+		// Pawn hit is always closer than wall (we traced up to wall distance)
+		ApplyHitscanDamage(PawnHit, EnergyMultiplier, PawnHit.Distance, 0.0f);
+		bPawnWasHit = true;
+
+		// Beam goes to wall (or max range), not stopping at pawn
+		BeamEnd = bHitWall ? WallHit.ImpactPoint : End;
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] HIT PAWN: %s at dist=%.0f"),
+			*PawnHit.GetActor()->GetName(), PawnHit.Distance);
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green,
+			FString::Printf(TEXT("[NPC] DMG -> %s (%.0f)"), *PawnHit.GetActor()->GetName(), PawnHit.Distance));
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] MISS: No hit within %.0f units"), TraceDistance);
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("[NPC] MISS - nothing hit"));
-	}
-	// === END DEBUG ===
+		BeamEnd = bHitWall ? WallHit.ImpactPoint : End;
 
-	// Apply damage to whatever was hit (player, damageable prop, etc.)
-	if (bHit && HitResult.GetActor() && HitResult.GetActor()->CanBeDamaged())
-	{
-		// WaveRadius = 0 gives AreaMultiplier = 1.0 (full damage, no cone spread penalty)
-		ApplyHitscanDamage(HitResult, EnergyMultiplier, HitResult.Distance, 0.0f);
-
-		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] DAMAGE APPLIED to %s"), *HitResult.GetActor()->GetName());
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
-			FString::Printf(TEXT("[NPC] DAMAGE -> %s"), *HitResult.GetActor()->GetName()));
-	}
-	else if (bHit && HitResult.GetActor())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] HIT but NO DAMAGE: CanBeDamaged=%d"),
-			HitResult.GetActor()->CanBeDamaged());
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Orange,
-			FString::Printf(TEXT("[NPC] HIT %s but CanBeDamaged=FALSE"), *HitResult.GetActor()->GetName()));
+		if (bHitWall)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] Hit wall: %s at dist=%.0f (no pawn hit)"),
+				*WallHit.GetActor()->GetName(), WallHit.Distance);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] MISS: nothing hit"));
+		}
 	}
 
 	// Visual effects
 	SpawnBeamEffect(Start, BeamEnd, EnergyMultiplier);
 
-	if (bHit)
+	if (bHitWall)
 	{
-		SpawnImpactEffect(HitResult.ImpactPoint, HitResult.ImpactNormal);
+		SpawnImpactEffect(WallHit.ImpactPoint, WallHit.ImpactNormal);
 	}
 }
 
