@@ -504,6 +504,12 @@ protected:
 
 	virtual void FireHitscan(const FVector& TargetLocation);
 	void PerformHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount);
+
+	/** NPC simple hitscan: straight line trace without cone sweep.
+	 *  Bypasses the cone-based system which has parallax issues for NPCs
+	 *  (camera and muzzle are at different positions, causing the cone check to reject valid hits). */
+	void PerformSimpleHitscan(const FVector& Start, const FVector& Direction, float EnergyMultiplier);
+
 	bool IsMetal(const FHitResult& Hit) const;
 	FVector CalculateReflection(const FVector& Direction, const FVector& Normal) const;
 	void ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius);

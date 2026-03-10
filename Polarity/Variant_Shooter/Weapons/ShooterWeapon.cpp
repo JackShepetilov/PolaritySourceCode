@@ -461,9 +461,20 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 	}
 
 	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»
-	PerformHitscan(MuzzleLocation, Direction, 1.0f, 0);
+	// NPC: simple line trace instead of cone hitscan.
+	// The cone system was designed for the player (camera and muzzle co-located in FPS).
+	// For NPCs, camera (eyes) and muzzle (weapon) have ~40-50u parallax offset,
+	// exceeding the 5deg cone half-angle, causing valid hits to be rejected.
+	if (PawnOwner && !PawnOwner->IsPlayerControlled())
+	{
+		PerformSimpleHitscan(MuzzleLocation, Direction, 1.0f);
+	}
+	else
+	{
+		PerformHitscan(MuzzleLocation, Direction, 1.0f, 0);
+	}
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+	//ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
 	WeaponOwner->PlayFiringMontage(FiringMontage);
 	WeaponOwner->AddWeaponRecoil(FiringRecoil);
 
@@ -990,6 +1001,39 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 
 	// Apply ionization (add positive charge to target)
 	ApplyHitscanIonization(HitActor);
+}
+
+void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& Direction, float EnergyMultiplier)
+{
+	float TraceDistance = MaxHitscanRange * EnergyMultiplier;
+	FVector End = Start + Direction * TraceDistance;
+
+	FHitResult HitResult;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.AddIgnoredActor(GetOwner());
+	QueryParams.bReturnPhysicalMaterial = true;
+
+	// Single line trace — hits both world geometry and player capsule (both block ECC_Visibility)
+	bool bHit = GetWorld()->LineTraceSingleByChannel(
+		HitResult, Start, End, ECC_Visibility, QueryParams);
+
+	FVector BeamEnd = bHit ? HitResult.ImpactPoint : End;
+
+	// Apply damage to whatever was hit (player, damageable prop, etc.)
+	if (bHit && HitResult.GetActor() && HitResult.GetActor()->CanBeDamaged())
+	{
+		// WaveRadius = 0 gives AreaMultiplier = 1.0 (full damage, no cone spread penalty)
+		ApplyHitscanDamage(HitResult, EnergyMultiplier, HitResult.Distance, 0.0f);
+	}
+
+	// Visual effects
+	SpawnBeamEffect(Start, BeamEnd, EnergyMultiplier);
+
+	if (bHit)
+	{
+		SpawnImpactEffect(HitResult.ImpactPoint, HitResult.ImpactNormal);
+	}
 }
 
 float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
