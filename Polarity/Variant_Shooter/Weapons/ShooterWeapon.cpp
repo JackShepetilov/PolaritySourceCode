@@ -819,15 +819,28 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		{
 			bool bKilled = IsActorDeadAfterDamage(BestTarget);
 			WeaponOwner->OnWeaponHit(BestHitLocation, BestToHitDir, ActualDamage, bBestIsHeadshot, bKilled);
+
+			// Notify upgrade system about dealt damage
+			if (PawnOwner)
+			{
+				if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+				{
+					UpgradeMgr->NotifyOwnerDealtDamage(BestTarget, ActualDamage, bKilled);
+				}
+			}
 		}
 
-		// Apply physics impulse
-		if (UPrimitiveComponent* HitComp = BestHit.GetComponent())
+		// Apply physics impulse / knockback
+		FVector ImpulseDirection = BestToHitDir;
+		float ImpulseForce = HitscanPhysicsForce * RemainingEnergy * AreaMultiplier;
+		if (ACharacter* HitCharacter = Cast<ACharacter>(BestTarget))
+		{
+			HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
+		}
+		else if (UPrimitiveComponent* HitComp = BestHit.GetComponent())
 		{
 			if (HitComp->IsSimulatingPhysics())
 			{
-				FVector ImpulseDirection = BestToHitDir;
-				float ImpulseForce = HitscanPhysicsForce * RemainingEnergy * AreaMultiplier;
 				HitComp->AddImpulseAtLocation(ImpulseDirection * ImpulseForce, BestHitLocation);
 			}
 		}
@@ -949,15 +962,28 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	{
 		FVector HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
 		WeaponOwner->OnWeaponHit(Hit.ImpactPoint, HitDirection, ActualDamage, bIsHeadshot, bKilled);
+
+		// Notify upgrade system about dealt damage
+		if (PawnOwner)
+		{
+			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+			{
+				UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+			}
+		}
 	}
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
-	if (UPrimitiveComponent* HitComp = Hit.GetComponent())
+	//ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
+	FVector ImpulseDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
+	float ImpulseForce = HitscanPhysicsForce * EnergyMultiplier * AreaMultiplier;
+	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	{
+		HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
+	}
+	else if (UPrimitiveComponent* HitComp = Hit.GetComponent())
 	{
 		if (HitComp->IsSimulatingPhysics())
 		{
-			FVector ImpulseDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
-			float ImpulseForce = HitscanPhysicsForce * EnergyMultiplier * AreaMultiplier;
 			HitComp->AddImpulseAtLocation(ImpulseDirection * ImpulseForce, Hit.ImpactPoint);
 		}
 	}

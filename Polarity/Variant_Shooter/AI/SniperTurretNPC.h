@@ -30,9 +30,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTurretAimProgressChanged,
 /** Broadcast when turret fires */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTurretFired);
 
+class UPoseableMeshComponent;
+
 /**
  * Stationary sniper turret NPC.
- * Uses StaticMeshComponent for visuals, hides inherited SkeletalMesh.
+ * Uses PoseableMeshComponent (skeletal) with bone-based rotation for Yaw/Pitch.
  * Progressive aiming: locks onto target over configurable duration before firing hitscan.
  *
  * Aim interrupted by:
@@ -52,9 +54,9 @@ protected:
 
 	// ==================== Components ====================
 
-	/** Static mesh for turret visual (set mesh in Blueprint) */
+	/** Skeletal mesh for turret visual (set mesh in Blueprint) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<UStaticMeshComponent> TurretMesh;
+	TObjectPtr<UPoseableMeshComponent> TurretMesh;
 
 	// ==================== Aiming Parameters ====================
 
@@ -85,19 +87,25 @@ protected:
 		meta = (ClampMin = "10.0", ClampMax = "720.0"))
 	float TurretRotationSpeed = 90.0f;
 
-	/** If true, turret only rotates on yaw axis (horizontal only) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Rotation")
-	bool bYawOnly = false;
-
 	/** Maximum pitch angle the turret can tilt up (degrees) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Rotation",
-		meta = (ClampMin = "0.0", ClampMax = "89.0", EditCondition = "!bYawOnly"))
+		meta = (ClampMin = "0.0", ClampMax = "89.0"))
 	float MaxPitchUp = 45.0f;
 
 	/** Maximum pitch angle the turret can tilt down (degrees) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Rotation",
-		meta = (ClampMin = "0.0", ClampMax = "89.0", EditCondition = "!bYawOnly"))
+		meta = (ClampMin = "0.0", ClampMax = "89.0"))
 	float MaxPitchDown = 30.0f;
+
+	// ==================== Bone Names ====================
+
+	/** Bone name for horizontal rotation (Yaw). Set in Blueprint to match skeleton. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Bones")
+	FName YawBoneName = NAME_None;
+
+	/** Bone name for vertical rotation (Pitch). If None, turret is yaw-only. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Bones")
+	FName PitchBoneName = NAME_None;
 
 	// ==================== Weapon Socket ====================
 
@@ -124,6 +132,12 @@ protected:
 
 	/** True if turret currently has LOS to target */
 	bool bHasLOS = false;
+
+	/** Current interpolated yaw angle (relative to actor forward) */
+	float CurrentYaw = 0.0f;
+
+	/** Current interpolated pitch angle */
+	float CurrentPitch = 0.0f;
 
 public:
 
@@ -189,13 +203,16 @@ protected:
 	virtual void AttachWeaponMeshes(AShooterWeapon* Weapon) override;
 	virtual FVector GetWeaponTargetLocation() override;
 
-	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance,
+	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance,
 		float Duration, const FVector& AttackerLocation = FVector::ZeroVector,
 		bool bKeepEMFEnabled = false) override;
 
 	virtual void ApplyKnockbackVelocity(const FVector& KnockbackVelocity,
 		float StunDuration = 0.3f) override;
 
+public:
+
+	/** LOS check from turret mesh position (public for StateTree tasks) */
 	virtual bool HasLineOfSightTo(AActor* Target) const override;
 
 private:

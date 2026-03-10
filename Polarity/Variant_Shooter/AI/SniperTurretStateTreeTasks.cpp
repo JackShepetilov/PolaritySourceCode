@@ -13,25 +13,31 @@ EStateTreeRunStatus FStateTreeTurretAimTask::EnterState(FStateTreeExecutionConte
 {
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 
+	UE_LOG(LogTemp, Warning, TEXT("[TurretAimTask] EnterState: Turret=%s, Target=%s"),
+		Data.Turret ? *Data.Turret->GetName() : TEXT("NULL"),
+		Data.Target ? *Data.Target->GetName() : TEXT("NULL"));
+
 	if (!Data.Turret)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("TurretAimTask: Invalid Turret"));
+		UE_LOG(LogTemp, Error, TEXT("[TurretAimTask] FAILED: Turret binding is NULL! Check StateTree Context→Actor binding"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	if (Data.Turret->IsDead())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[TurretAimTask] FAILED: Turret is dead"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	if (!Data.Target || !IsValid(Data.Target))
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("TurretAimTask: No valid target"));
+		UE_LOG(LogTemp, Warning, TEXT("[TurretAimTask] FAILED: Target is null/invalid. Check Sense Enemies→TargetActor binding"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Check initial LOS and start aiming
 	const bool bInitialLOS = Data.Turret->HasLineOfSightTo(Data.Target);
+	UE_LOG(LogTemp, Log, TEXT("[TurretAimTask] Starting aim. Initial LOS: %d"), bInitialLOS);
 	Data.Turret->StartAiming(Data.Target);
 	Data.Turret->SetLOSStatus(bInitialLOS);
 
@@ -45,11 +51,15 @@ EStateTreeRunStatus FStateTreeTurretAimTask::Tick(FStateTreeExecutionContext& Co
 
 	if (!Data.Turret || Data.Turret->IsDead())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[TurretAimTask] Tick FAILED: Turret=%s, Dead=%d"),
+			Data.Turret ? *Data.Turret->GetName() : TEXT("NULL"),
+			Data.Turret ? Data.Turret->IsDead() : -1);
 		return EStateTreeRunStatus::Failed;
 	}
 
 	if (!Data.Target || !IsValid(Data.Target))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[TurretAimTask] Tick FAILED: Target lost"));
 		Data.Turret->StopAiming();
 		return EStateTreeRunStatus::Failed;
 	}

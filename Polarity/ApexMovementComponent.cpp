@@ -252,34 +252,41 @@ float UApexMovementComponent::GetMaxSpeed() const
 {
 	if (!MovementSettings)
 	{
-		return Super::GetMaxSpeed();
+		return Super::GetMaxSpeed() * DamageSpeedMultiplier;
 	}
+
+	float BaseSpeed;
 
 	if (bIsSliding || bIsWallRunning)
 	{
-		return MovementSettings->SpeedCap;
+		BaseSpeed = MovementSettings->SpeedCap;
+	}
+	else if (IsCrouching())
+	{
+		BaseSpeed = MovementSettings->CrouchSpeed;
+	}
+	else if (IsSprinting())
+	{
+		BaseSpeed = MovementSettings->SprintSpeed;
+	}
+	else
+	{
+		switch (MovementMode)
+		{
+		case MOVE_Walking:
+		case MOVE_NavWalking:
+			BaseSpeed = MovementSettings->WalkSpeed;
+			break;
+		case MOVE_Falling:
+			BaseSpeed = MovementSettings->SprintSpeed;
+			break;
+		default:
+			BaseSpeed = Super::GetMaxSpeed();
+			break;
+		}
 	}
 
-	if (IsCrouching())
-	{
-		return MovementSettings->CrouchSpeed;
-	}
-
-	if (IsSprinting())
-	{
-		return MovementSettings->SprintSpeed;
-	}
-
-	switch (MovementMode)
-	{
-	case MOVE_Walking:
-	case MOVE_NavWalking:
-		return MovementSettings->WalkSpeed;
-	case MOVE_Falling:
-		return MovementSettings->SprintSpeed;
-	default:
-		return Super::GetMaxSpeed();
-	}
+	return BaseSpeed * DamageSpeedMultiplier;
 }
 
 float UApexMovementComponent::GetMaxAcceleration() const

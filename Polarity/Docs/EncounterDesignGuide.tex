@@ -1,0 +1,1363 @@
+% =============================================================================
+% МЕТОДИЧКА: ДИЗАЙН СХВАТОК И РАЗМЕЩЕНИЕ ПРОТИВНИКОВ
+% Для Climax Arena с двухчастной структурой
+% =============================================================================
+\documentclass[a4paper,11pt]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T2A]{fontenc}
+\usepackage[russian]{babel}
+
+\usepackage[left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm, headheight=14pt]{geometry}
+
+\usepackage{tikz}
+\usetikzlibrary{
+  shapes.geometric, arrows.meta, positioning, calc,
+  patterns, decorations.pathreplacing, backgrounds,
+  fit, shadows, matrix, angles, quotes
+}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{graphicx}
+\graphicspath{{images/}}
+
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{wrapfig}
+\usepackage{amssymb}
+
+% --- Colors ---
+\usepackage{xcolor}
+\definecolor{titanblue}{HTML}{1A5276}
+\definecolor{titanred}{HTML}{C0392B}
+\definecolor{titanorange}{HTML}{E67E22}
+\definecolor{titangreen}{HTML}{27AE60}
+\definecolor{titandark}{HTML}{2C3E50}
+\definecolor{titanlight}{HTML}{ECF0F1}
+\definecolor{titangold}{HTML}{F39C12}
+\definecolor{titancyan}{HTML}{1ABC9C}
+\definecolor{polaritypos}{HTML}{3498DB}
+\definecolor{polarityneg}{HTML}{E74C3C}
+
+% --- Headers ---
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{titandark}{\leftmark}}
+\fancyhead[R]{\small\textcolor{titandark}{Encounter Design Guide}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- Boxes ---
+\usepackage[most]{tcolorbox}
+
+\newtcolorbox{principle}[1]{
+  colback=titanblue!5, colframe=titanblue,
+  fonttitle=\bfseries, title={#1},
+  arc=2mm, boxrule=0.8pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+\newtcolorbox{warning}[1]{
+  colback=titanred!5, colframe=titanred,
+  fonttitle=\bfseries, title={#1},
+  arc=2mm, boxrule=0.8pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+\newtcolorbox{example}[1]{
+  colback=titangreen!5, colframe=titangreen,
+  fonttitle=\bfseries, title={#1},
+  arc=2mm, boxrule=0.8pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+\newtcolorbox{tip}[1]{
+  colback=titanorange!5, colframe=titanorange,
+  fonttitle=\bfseries, title={#1},
+  arc=2mm, boxrule=0.8pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+\newtcolorbox{polarity}[1]{
+  colback=titancyan!5, colframe=titancyan,
+  fonttitle=\bfseries, title={#1},
+  arc=2mm, boxrule=0.8pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+\newtcolorbox{rulebox}[1]{
+  colback=titangold!5, colframe=titangold,
+  fonttitle=\bfseries, title={#1},
+  arc=2mm, boxrule=0.8pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=titanblue,
+  urlcolor=titanblue,
+}
+
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{titandark}}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{titanblue}}
+  {\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{titandark}}
+  {\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\normalfont\normalsize\bfseries\color{titandark}}
+  {\thesubsubsection}{1em}{}
+
+\setcounter{tocdepth}{3}
+\setcounter{secnumdepth}{3}
+
+% =============================================================================
+\begin{document}
+
+% --- Title Page ---
+\begin{titlepage}
+\begin{tikzpicture}[remember picture, overlay]
+  \fill[titandark] (current page.south west) rectangle (current page.north east);
+  \foreach \i in {1,...,15} {
+    \pgfmathsetmacro{\x}{rand*21}
+    \pgfmathsetmacro{\y}{rand*29.7}
+    \fill[titanred!20, opacity=0.12] (\x,\y) circle ({0.4+rand*0.6});
+  }
+  \fill[titanred] (0,16) rectangle (21,16.15);
+  \fill[titanorange] (0,15.85) rectangle (21,16);
+  \node[anchor=south, text=white, font=\fontsize{30}{36}\selectfont\bfseries]
+    at (10.5,18) {ENCOUNTER DESIGN};
+  \node[anchor=south, text=titanred, font=\fontsize{24}{30}\selectfont\bfseries]
+    at (10.5,17) {GUIDE};
+  \node[anchor=north, text=titanlight, font=\Large, text width=14cm, align=center]
+    at (10.5,15.5) {%
+      Размещение противников и дизайн схваток\\[4pt]
+      для двухчастной Climax Arena\\[12pt]
+      \textcolor{titanorange}{Часть I:} Коридорная подготовка (5--10 мин)\\
+      \textcolor{titanred}{Часть II:} Центральная арена 100$\times$100$\times$50м (6--9 мин)
+    };
+  \node[anchor=south, text=titanlight!60, font=\small]
+    at (10.5,2) {Polarity Project --- Internal Document --- 2026};
+\end{tikzpicture}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+
+% =============================================================================
+\chapter{Архитектура двухчастной Climax Arena}
+% =============================================================================
+
+\section{Общая структура}
+
+Climax Arena состоит из двух принципиально разных зон,
+каждая из которых требует своего подхода к размещению врагов:
+
+\begin{tikzpicture}[scale=0.85]
+  % Part 1: Building
+  \draw[very thick, titanblue, rounded corners=4pt, fill=titanblue!5]
+    (0,0) rectangle (6,8);
+  \node[font=\Large\bfseries, titanblue] at (3,7.3) {ЧАСТЬ I};
+  \node[font=\small\bfseries, titandark] at (3,6.6) {Подготовка};
+  \node[font=\small, titandark] at (3,6) {5--10 минут};
+
+  % Building floors
+  \draw[thick, titandark!30] (0.5,1) -- (5.5,1);
+  \draw[thick, titandark!30] (0.5,2.5) -- (5.5,2.5);
+  \draw[thick, titandark!30] (0.5,4) -- (5.5,4);
+  \node[font=\tiny, titandark!50] at (3,0.5) {Этаж 1};
+  \node[font=\tiny, titandark!50] at (3,1.7) {Этаж 2};
+  \node[font=\tiny, titandark!50] at (3,3.2) {Этаж 3};
+  \node[font=\tiny, titandark!50] at (3,4.7) {Этаж 4};
+
+  % Circular path
+  \draw[very thick, titanorange, -{Stealth}, dashed]
+    (1,0.5) -- (5,0.5) -- (5,1.7) -- (1,1.7) -- (1,3.2) -- (5,3.2) -- (5,4.7) -- (3,5.5);
+
+  % Enemy groups
+  \fill[titanred] (4,0.5) circle (0.15);
+  \fill[titanred] (4.3,0.5) circle (0.15);
+  \fill[titanred] (2,1.7) circle (0.15);
+  \fill[titanred] (2.3,1.7) circle (0.15);
+  \fill[titanred] (2.6,1.7) circle (0.15);
+  \fill[titanred] (4,3.2) circle (0.15);
+  \fill[titanred] (4.3,3.2) circle (0.15);
+  \fill[titanred] (4.6,3.2) circle (0.15);
+  \fill[titanred] (4.9,3.2) circle (0.15);
+
+  % Arrow to part 2
+  \draw[ultra thick, titanred, -{Stealth[length=10pt]}] (6.5,4) -- (8,4);
+  \node[font=\small\bfseries, titanred, above] at (7.25,4) {Переход};
+
+  % Part 2: Arena
+  \draw[very thick, titanred, rounded corners=4pt, fill=titanred!5]
+    (8.5,0) rectangle (15.5,8);
+  \node[font=\Large\bfseries, titanred] at (12,7.3) {ЧАСТЬ II};
+  \node[font=\small\bfseries, titandark] at (12,6.6) {Центральная битва};
+  \node[font=\small, titandark] at (12,6) {6--9 минут};
+
+  % Arena interior
+  \draw[thick, titandark!20, fill=titandark!3] (9.5,1) rectangle (14.5,5.5);
+  \node[font=\scriptsize, titandark!40] at (12,5) {100m $\times$ 100m $\times$ 50m};
+
+  % Enemy swarm
+  \foreach \x/\y in {10.2/2, 10.8/3.5, 11.5/1.5, 12/4, 12.5/2.5,
+    13/3.8, 13.5/1.8, 11/4.5, 13.8/4.2, 10.5/4.8} {
+    \fill[titanred] (\x,\y) circle (0.12);
+  }
+
+  % Player path
+  \draw[very thick, titangreen, dashed, -{Stealth}]
+    (9.8,3) to[out=30,in=180] (11,4.5) to[out=0,in=150]
+    (13,3) to[out=-30,in=180] (14,2);
+
+  % Bottom labels
+  \node[font=\small, text=titandark, text width=5cm, align=center] at (3,-1) {
+    \textbf{Малые группы}\\
+    2--4 противника\\
+    Коридоры + комнаты\\
+    Линейный прогресс
+  };
+  \node[font=\small, text=titandark, text width=5cm, align=center] at (12,-1) {
+    \textbf{Большие группы}\\
+    8--20 противников\\
+    Открытое пространство\\
+    3D-движение (полёт)
+  };
+\end{tikzpicture}
+
+\section{Ключевые различия между частями}
+
+\begin{table}[H]
+\centering
+\caption{Сравнение двух частей Climax Arena}
+\begin{tabularx}{\textwidth}{@{}lXX@{}}
+\toprule
+\textbf{Параметр} & \textbf{Часть I: Подготовка} & \textbf{Часть II: Центральная битва} \\
+\midrule
+Пространство & Коридоры, комнаты, лестницы & Открытая арена 100$\times$100$\times$50м \\
+Движение & Wallrun, slide, double jump & Полный 3D-полёт \\
+Группы врагов & 2--4 противника & 8--20+ одновременно \\
+Стычки & 4--6 отдельных энкаунтеров & 3--4 волны + босс \\
+Темп & Staccato (бой-пауза-бой) & Crescendo (непрерывный рост) \\
+Давление & Фронтальное, фланговое & Сферическое (360\textdegree{} + вертикаль) \\
+Навык & Позиционирование, аккуратность & Полный skill expression \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+% =============================================================================
+\chapter{Роли противников}
+% =============================================================================
+
+\section{Система ролей}
+
+Каждый тип врага выполняет конкретную \textbf{функцию} в бою.
+Функция определяет, \textbf{какое давление} враг создаёт на игрока
+и \textbf{какую реакцию} вынуждает.
+
+\begin{principle}{Принцип DOOM Eternal (Hugo Martin)}
+Враги~--- это <<шахматные фигуры>>, которые двигают игрока по арене.
+Каждый тип врага создаёт уникальное давление, заставляя игрока
+менять позицию, оружие или тактику.
+\end{principle}
+
+\subsection{Пять основных ролей}
+
+\begin{tikzpicture}[
+  role/.style={
+    rectangle, rounded corners=4pt,
+    minimum width=3.8cm, minimum height=2.2cm,
+    draw=#1, fill=#1!8, text=titandark,
+    font=\small, align=center
+  }
+]
+  % Roles
+  \node[role=titanred] (rush) at (0,6) {
+    \textbf{\color{titanred}RUSHER}\\[2pt]
+    {\scriptsize Ближний бой}\\
+    {\scriptsize Быстрый, слабый}\\
+    {\scriptsize Давит на \textbf{позицию}}
+  };
+  \node[role=titanblue] (anchor) at (5,6) {
+    \textbf{\color{titanblue}ANCHOR}\\[2pt]
+    {\scriptsize Средняя/дальняя дист.}\\
+    {\scriptsize Стреляет с позиции}\\
+    {\scriptsize Давит на \textbf{укрытие}}
+  };
+  \node[role=titanorange] (disrupt) at (10,6) {
+    \textbf{\color{titanorange}DISRUPTOR}\\[2pt]
+    {\scriptsize Гранаты, AoE, щиты}\\
+    {\scriptsize Выбивает из укрытия}\\
+    {\scriptsize Давит на \textbf{движение}}
+  };
+  \node[role=titangold] (tank) at (2.5,2) {
+    \textbf{\color{titangold}TANK}\\[2pt]
+    {\scriptsize Медленный, живучий}\\
+    {\scriptsize Огромный урон вблизи}\\
+    {\scriptsize Давит на \textbf{дистанцию}}
+  };
+  \node[role=titancyan] (spec) at (7.5,2) {
+    \textbf{\color{titancyan}SPECIALIST}\\[2pt]
+    {\scriptsize Уникальная механика}\\
+    {\scriptsize Снайпер, целитель, баффер}\\
+    {\scriptsize Давит на \textbf{приоритеты}}
+  };
+
+  % Pressure arrows
+  \draw[very thick, titanred!50, -{Stealth}] (rush.south) -- ++(0,-0.5)
+    node[below, font=\tiny] {$\to$ Игрок убегает};
+  \draw[very thick, titanblue!50, -{Stealth}] (anchor.south) -- ++(0,-0.5)
+    node[below, font=\tiny] {$\to$ Игрок прячется};
+  \draw[very thick, titanorange!50, -{Stealth}] (disrupt.south) -- ++(0,-0.5)
+    node[below, font=\tiny] {$\to$ Игрок перемещается};
+  \draw[very thick, titangold!50, -{Stealth}] (tank.south) -- ++(0,-0.5)
+    node[below, font=\tiny] {$\to$ Игрок отступает};
+  \draw[very thick, titancyan!50, -{Stealth}] (spec.south) -- ++(0,-0.5)
+    node[below, font=\tiny] {$\to$ Игрок фокусирует};
+\end{tikzpicture}
+
+\subsection{Таблица ролей с параметрами}
+
+\begin{table}[H]
+\centering
+\caption{Параметры ролей противников}
+\begin{tabularx}{\textwidth}{@{}l c c c c X@{}}
+\toprule
+\textbf{Роль} & \textbf{HP} & \textbf{Скорость} & \textbf{Урон} & \textbf{Дист.} & \textbf{Реакция игрока} \\
+\midrule
+Rusher & Низкий & Высокая & Средний & Ближняя & Отстрел на подходе или уклонение \\
+Anchor & Средний & Низкая & Средний & Средняя & Поиск укрытия, фланг \\
+Disruptor & Средний & Средняя & Низкий & Любая & Смена позиции, приоритизация \\
+Tank & Высокий & Низкая & Высокий & Ближняя & Кайтинг, дистанция \\
+Specialist & Низкий & Разная & Разный & Дальняя & Немедленное уничтожение \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Комбинации ролей: давление как система}
+
+\begin{principle}{Принцип эмерджентности (F.E.A.R.)}
+Когда два типа врагов работают вместе, тактики, эффективные
+против каждого по отдельности, \textbf{перестают работать}.
+Это вынуждает игрока искать новые решения.
+\end{principle}
+
+\begin{table}[H]
+\centering
+\caption{Комбинации ролей и возникающее давление}
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+\textbf{Комбинация} & \textbf{Конфликт} & \textbf{Что происходит} \\
+\midrule
+Rusher + Anchor & Бежать vs прятаться & Нельзя стоять (rusher) и нельзя бежать (anchor стреляет). Нужно \textbf{маневрировать} \\
+Anchor + Disruptor & Прятаться vs двигаться & Нельзя сидеть в укрытии (disruptor выбивает), нельзя выходить (anchor стреляет). Нужна \textbf{агрессия} \\
+Rusher + Tank & Убегать vs отступать & Rusher догоняет, Tank блокирует путь отступления. Нужно \textbf{приоритизировать} \\
+Tank + Specialist & Дистанция vs фокус & Хочется держать дистанцию (tank), но specialist нужно убить первым. \textbf{Риск/награда} \\
+Rusher + Specialist & Позиция vs приоритет & Rusher не даёт спокойно целиться в specialist-а. Нужны \textbf{быстрые решения} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{warning}{Антипаттерн: Однородные группы}
+Группа из 6 одинаковых Rusher-ов~--- скучно. Игрок применяет
+одну тактику (стрелять в подбегающих) и не принимает решений.
+Группа из 3 Rusher + 1 Anchor~--- уже интересно: убивать rusher-ов
+или сначала нейтрализовать anchor?
+\end{warning}
+
+\begin{rulebox}{Правило <<Нет безопасной тактики>>}
+Хорошая комбинация врагов не имеет \textbf{единственного правильного
+ответа}. Если игрок может каждый раз делать одно и то же (например,
+всегда прыгать на высоту и стрелять вниз)~--- комбинация неудачная.
+Добавьте врага, который \textbf{наказывает} эту тактику.
+\end{rulebox}
+
+
+% =============================================================================
+\chapter{Часть I: Коридорные стычки}
+% =============================================================================
+
+\section{Контекст}
+
+Игрок бегает по большому зданию, перемещаясь между этажами по
+кругу, продвигаясь к входу в центральную арену. Стычки с малыми
+группами (2--4 врага) происходят в коридорах, на лестницах,
+в комнатах и на открытых балконах.
+
+\section{Правила размещения врагов в коридорах}
+
+\subsection{Правило 1: Дистанция обнаружения}
+
+\begin{tikzpicture}[scale=0.75]
+  \node[font=\bfseries\color{titandark}] at (7,6.5) {Зоны дистанции в коридоре};
+
+  % Corridor
+  \fill[titanlight] (0,2) rectangle (14,4);
+  \draw[thick] (0,2) -- (14,2);
+  \draw[thick] (0,4) -- (14,4);
+
+  % Player
+  \fill[titangreen] (1,3) circle (0.3);
+  \node[font=\scriptsize\bfseries, titangreen, below] at (1,1.7) {PLAYER};
+
+  % Distance zones
+  \fill[titangreen!15] (1,2) rectangle (4,4);
+  \fill[titanorange!15] (4,2) rectangle (8,4);
+  \fill[titanred!15] (8,2) rectangle (14,4);
+
+  % Zone labels
+  \node[font=\scriptsize\bfseries, titangreen] at (2.5,5) {Мёртвая зона};
+  \node[font=\tiny, titangreen] at (2.5,4.5) {0--5м};
+  \node[font=\tiny, titangreen] at (2.5,1.5) {Слишком близко};
+  \node[font=\tiny, titangreen] at (2.5,1) {для спавна};
+
+  \node[font=\scriptsize\bfseries, titanorange] at (6,5) {Зона реакции};
+  \node[font=\tiny, titanorange] at (6,4.5) {5--15м};
+  \node[font=\tiny, titanorange] at (6,1.5) {Игрок видит и};
+  \node[font=\tiny, titanorange] at (6,1) {может среагировать};
+
+  \node[font=\scriptsize\bfseries, titanred] at (11,5) {Зона инициации};
+  \node[font=\tiny, titanred] at (11,4.5) {15--30м};
+  \node[font=\tiny, titanred] at (11,1.5) {Идеально для};
+  \node[font=\tiny, titanred] at (11,1) {размещения группы};
+
+  % Enemy group in initiation zone
+  \fill[titanred] (10,3) circle (0.2);
+  \fill[titanred] (10.5,2.7) circle (0.2);
+  \fill[titanred] (11,3.3) circle (0.2);
+
+  % Dashed lines
+  \draw[thick, dashed, titandark!40] (4,1.5) -- (4,5.5);
+  \draw[thick, dashed, titandark!40] (8,1.5) -- (8,5.5);
+\end{tikzpicture}
+
+\begin{rulebox}{Дистанция обнаружения}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{0--5м (мёртвая зона):} Никогда не спавните врагов прямо
+    перед носом игрока. Исключение: засады, но только если враг
+    стоит \textbf{спиной} к игроку
+  \item \textbf{5--15м (зона реакции):} Игрок видит врага и может
+    среагировать. Подходит для одиночных Rusher-ов, которые бегут
+    навстречу~--- игрок успевает сориентироваться
+  \item \textbf{15--30м (зона инициации):} Идеальная дистанция для
+    размещения группы. Игрок видит состав, оценивает угрозу, выбирает
+    тактику. Это та дистанция, на которой бой \textbf{начинается осмысленно}
+  \item \textbf{30м+ (зона за поворотом):} Враги не видны~--- размещаются
+    за углом, за дверью, на следующем этаже. Создают ощущение
+    <<населённости>> здания
+\end{itemize}
+\end{rulebox}
+
+\subsection{Правило 2: Привязка к геометрии}
+
+\begin{principle}{Принцип F.E.A.R.}
+Задача дизайнера~--- создать пространство с интересными элементами
+(укрытия, окна, фланговые проходы, столы), которые AI \textbf{эксплуатирует}.
+Враги не запрограммированы на фланг специально~--- они ищут укрытие
+ближе к игроку, и фланговое поведение возникает \textbf{естественно}.
+\end{principle}
+
+Каждая группа врагов должна быть привязана к конкретному
+\textbf{геометрическому элементу}, который делает бой интересным:
+
+\begin{table}[H]
+\centering
+\caption{Привязка врагов к геометрии}
+\begin{tabularx}{\textwidth}{@{}lXX@{}}
+\toprule
+\textbf{Геометрия} & \textbf{Какие враги} & \textbf{Почему интересно} \\
+\midrule
+Т-образный перекрёсток & 2 Anchor по сторонам & Игрок не может стрелять в обоих одновременно \\
+Лестничный пролёт & 2 Rusher сверху & Используют высоту как преимущество \\
+Балкон над коридором & 1 Anchor + 1 Rusher снизу & Вертикальное давление + горизонтальное \\
+Комната с 2 входами & 3 Anchor внутри & Игрок выбирает, с какого входа атаковать \\
+Длинный коридор & 1 Specialist в конце & Дальняя угроза, нужно закрыть дистанцию \\
+Комната с колоннами & 2 Rusher + 1 Disruptor & Колонны дают укрытие, но disruptor выбивает \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Правило 3: Направление давления}
+
+\begin{tikzpicture}[scale=0.75]
+  \node[font=\bfseries\color{titandark}] at (7,8) {Три паттерна давления в коридорах};
+
+  % Pattern 1: Frontal
+  \fill[titanlight] (0,5) rectangle (4.3,7);
+  \draw[thick] (0,5) -- (4.3,5) (0,7) -- (4.3,7);
+  \fill[titangreen] (0.5,6) circle (0.25);
+  \fill[titanred] (3.5,5.7) circle (0.15);
+  \fill[titanred] (3.5,6.3) circle (0.15);
+  \draw[thick, titanred, -{Stealth}] (3.3,5.7) -- (1.3,5.9);
+  \draw[thick, titanred, -{Stealth}] (3.3,6.3) -- (1.3,6.1);
+  \node[font=\scriptsize\bfseries, titandark] at (2.15,7.5) {A: Фронтальное};
+  \node[font=\tiny, titandark] at (2.15,4.5) {Простое, предсказуемое};
+
+  % Pattern 2: Crossfire
+  \fill[titanlight] (5,5) rectangle (9.3,7);
+  \draw[thick] (5,5) -- (9.3,5) (5,7) -- (9.3,7);
+  \fill[titangreen] (5.5,6) circle (0.25);
+  \fill[titanred] (8.5,6.8) circle (0.15);
+  \fill[titanred] (8.5,5.2) circle (0.15);
+  \draw[thick, titanred, -{Stealth}] (8.3,6.7) -- (6.3,6.2);
+  \draw[thick, titanred, -{Stealth}] (8.3,5.3) -- (6.3,5.8);
+  \node[font=\scriptsize\bfseries, titandark] at (7.15,7.5) {B: Перекрёстный};
+  \node[font=\tiny, titandark] at (7.15,4.5) {Требует приоритизации};
+
+  % Pattern 3: Sandwich
+  \fill[titanlight] (10,5) rectangle (14.3,7);
+  \draw[thick] (10,5) -- (14.3,5) (10,7) -- (14.3,7);
+  \fill[titangreen] (12.15,6) circle (0.25);
+  \fill[titanred] (10.5,6) circle (0.15);
+  \fill[titanred] (13.8,6) circle (0.15);
+  \fill[titanred] (13.5,5.5) circle (0.15);
+  \draw[thick, titanred, -{Stealth}] (10.7,6) -- (11.7,6);
+  \draw[thick, titanred, -{Stealth}] (13.6,6) -- (12.6,6);
+  \node[font=\scriptsize\bfseries, titandark] at (12.15,7.5) {C: Тиски};
+  \node[font=\tiny, titandark] at (12.15,4.5) {Максимальное давление};
+
+  % Legend
+  \node[font=\small, text=titandark, text width=14cm, align=left] at (7,3) {
+    \textbf{A) Фронтальное:} все враги впереди. Используйте для первых
+    стычек~--- знакомство.\\
+    \textbf{B) Перекрёстное:} враги на разных высотах или за разными
+    укрытиями. Игрок не может спрятаться от всех сразу.\\
+    \textbf{C) Тиски (Sandwich):} враги с двух сторон. Используйте
+    \textbf{максимум один раз} за подготовку~--- очень стрессовый паттерн.
+  };
+\end{tikzpicture}
+
+
+\section{Эскалация стычек по мере продвижения}
+
+По мере подъёма по зданию стычки должны \textbf{эскалировать}
+по четырём осям:
+
+\begin{tikzpicture}
+  \begin{axis}[
+    width=14cm, height=6cm,
+    xlabel={Этаж / прогресс},
+    ylabel={Значение},
+    xmin=0, xmax=5,
+    ymin=0, ymax=5,
+    xtick={1,2,3,4},
+    xticklabels={Этаж 1, Этаж 2, Этаж 3, Этаж 4},
+    legend style={at={(0.02,0.98)}, anchor=north west, font=\scriptsize},
+    grid=major,
+    grid style={titanlight},
+    axis lines=left,
+    title={\textbf{Эскалация параметров по этажам}},
+    title style={font=\bfseries\color{titandark}}
+  ]
+    \addplot[very thick, titanred, mark=*] coordinates {(1,1) (2,2) (3,3) (4,4)};
+    \addlegendentry{Кол-во врагов}
+    \addplot[very thick, titanblue, mark=square*] coordinates {(1,1) (2,1) (3,2) (4,3)};
+    \addlegendentry{Типов ролей}
+    \addplot[very thick, titanorange, mark=triangle*] coordinates {(1,1) (2,2) (3,2) (4,3)};
+    \addlegendentry{Направлений давления}
+    \addplot[very thick, titangreen, mark=diamond*] coordinates {(1,1) (2,1) (3,2) (4,2)};
+    \addlegendentry{Вертикальность}
+  \end{axis}
+\end{tikzpicture}
+
+\subsection{Детальный план стычек}
+
+\begin{table}[H]
+\centering
+\caption{План стычек для четырёхэтажной подготовки}
+\begin{tabularx}{\textwidth}{@{}c c l X c@{}}
+\toprule
+\textbf{Этаж} & \textbf{Стычка} & \textbf{Состав} & \textbf{Геометрия и тактика} & \textbf{Давление} \\
+\midrule
+\multirow{2}{*}{1} & 1a & 2 Rusher & Коридор, фронтальные, бегут навстречу & Фронт \\
+ & 1b & 2 Anchor & Комната, стреляют из-за укрытий & Фронт \\
+\midrule
+\multirow{2}{*}{2} & 2a & 2R + 1A & Т-перекрёсток: anchor в конце, rusher-ы с боков & Перекрёст \\
+ & 2b & 3 Anchor & Балкон: стреляют снизу, игрок сверху & Вертик. \\
+\midrule
+\multirow{2}{*}{3} & 3a & 2R + 1D & Комната с колоннами: disruptor выбивает из-за колонн & Перекрёст \\
+ & 3b & 2A + 1Sp & Длинный зал: specialist в конце, anchor-ы в середине & Вертик. \\
+\midrule
+4 & 4 & 2R+1A+1D & Финальная комната перед ареной: все роли & Тиски \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{tip}{Между стычками}
+Между каждой стычкой должен быть \textbf{коридор без врагов}
+длиной 5--15 секунд бега. Это зона отдыха: подобрать ресурсы,
+осмотреться, заметить окно с видом на арену (foreshadowing).
+\end{tip}
+
+\section{Spawn-логика в коридорах}
+
+\begin{rulebox}{5 правил спавна в Части I}
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Не спавнить за спиной.} В линейном здании враги за
+    спиной~--- нечестно. Исключение: scripted засада (тиски),
+    максимум 1 раз
+  \item \textbf{Спавнить до прибытия игрока.} Враги уже должны \textbf{быть}
+    в комнате, когда игрок входит. Появление из воздуха~--- последнее средство
+  \item \textbf{Использовать spawn closets.} Двери, лифты, вентиляция~---
+    логичные точки, из которых враги <<приходят>>
+  \item \textbf{Аудио-фидбек.} Игрок должен \textbf{слышать} врагов до того,
+    как увидит (шаги, голоса, звуки оружия). Это даёт время подготовиться
+  \item \textbf{Одна стычка = одно пространство.} Не смешивайте врагов
+    из разных комнат. Каждая стычка~--- изолированный энкаунтер
+    с чётким началом и концом
+\end{enumerate}
+\end{rulebox}
+
+
+% =============================================================================
+\chapter{Часть II: Центральная арена (100$\times$100$\times$50м)}
+% =============================================================================
+
+\section{Принципы боя в большом объёме}
+
+Центральная арена~--- это не комната, а \textbf{трёхмерное боевое
+пространство}. Игрок активно летает, используя все механики.
+Это радикально меняет правила размещения врагов.
+
+\begin{principle}{Принцип сферического давления}
+В 3D-арене враг может быть \textbf{сверху, снизу, сбоку, сзади}.
+Укрытия теряют ценность. Единственная защита~--- \textbf{движение}.
+Враги размещаются так, чтобы не существовало <<безопасной высоты>>
+или <<безопасного угла>>.
+\end{principle}
+
+\subsection{Зоны арены}
+
+\begin{tikzpicture}[scale=0.65]
+  \node[font=\bfseries\color{titandark}] at (7,12) {Вертикальный разрез арены (50м)};
+
+  % Arena outline
+  \draw[very thick, titandark] (0,0) rectangle (14,10);
+
+  % Vertical zones
+  \fill[titanblue!10] (0,0) rectangle (14,3);
+  \fill[titanorange!8] (0,3) rectangle (14,7);
+  \fill[titanred!8] (0,7) rectangle (14,10);
+
+  \draw[thick, dashed, titandark!30] (0,3) -- (14,3);
+  \draw[thick, dashed, titandark!30] (0,7) -- (14,7);
+
+  % Zone labels
+  \node[font=\bfseries, titanblue] at (7,1.5) {GROUND ZONE (0--15м)};
+  \node[font=\scriptsize, titandark] at (7,0.7) {Tank-и, тяжёлые враги, ресурсы};
+
+  \node[font=\bfseries, titanorange] at (7,5) {MID ZONE (15--35м)};
+  \node[font=\scriptsize, titandark] at (7,4.3) {Основной бой, anchor-ы, платформы};
+
+  \node[font=\bfseries, titanred] at (7,8.5) {HIGH ZONE (35--50м)};
+  \node[font=\scriptsize, titandark] at (7,7.7) {Specialist-ы, снайперы, ключевые цели};
+
+  % Platforms
+  \fill[titandark!20] (1,3) rectangle (3.5,3.3);
+  \fill[titandark!20] (5,5) rectangle (7.5,5.3);
+  \fill[titandark!20] (9,4) rectangle (11,4.3);
+  \fill[titandark!20] (2,7) rectangle (4,7.3);
+  \fill[titandark!20] (10,7.5) rectangle (12.5,7.8);
+
+  % Enemies in zones
+  \fill[titangold] (2,0.8) circle (0.3);
+  \node[font=\tiny, white] at (2,0.8) {T};
+  \fill[titanred] (6,5.7) circle (0.2);
+  \fill[titanred] (10,4.8) circle (0.2);
+  \fill[titancyan] (3,7.8) circle (0.2);
+  \fill[titancyan] (11,8.5) circle (0.2);
+
+  % Player
+  \fill[titangreen] (7,6.5) circle (0.3);
+  \node[font=\tiny, white] at (7,6.5) {P};
+  \draw[thick, titangreen, dashed, -{Stealth}] (7,6.5) to[out=30,in=180] (9.5,7);
+  \draw[thick, titangreen, dashed, -{Stealth}] (7,6.5) to[out=-120,in=90] (5,4.5);
+
+  % Side annotation
+  \node[font=\small, text=titandark, text width=4cm, align=left, right] at (14.5,5) {
+    Игрок свободно\\
+    перемещается\\
+    между зонами.\\[4pt]
+    Враги привязаны\\
+    к своим зонам\\
+    и создают\\
+    давление оттуда.
+  };
+\end{tikzpicture}
+
+\subsection{Горизонтальные зоны}
+
+\begin{tikzpicture}[scale=0.65]
+  \node[font=\bfseries\color{titandark}] at (7,11.5) {Вид сверху: горизонтальные зоны (100$\times$100м)};
+
+  % Arena outline
+  \draw[very thick, titandark] (0,0) rectangle (14,10);
+
+  % Concentric zones
+  \draw[thick, dashed, titanred!50] (3,2.5) rectangle (11,7.5);
+  \draw[thick, dashed, titanorange!50] (1.5,1.2) rectangle (12.5,8.8);
+
+  % Zone labels
+  \fill[titanred!8] (3,2.5) rectangle (11,7.5);
+  \node[font=\bfseries, titanred] at (7,5) {KILL ZONE};
+  \node[font=\tiny, titandark] at (7,4.3) {Максимальная концентрация врагов};
+  \node[font=\tiny, titandark] at (7,3.8) {и ресурсов. Центр арены};
+
+  \node[font=\scriptsize\bfseries, titanorange, rotate=90] at (1,5) {FLANK ZONE};
+  \node[font=\scriptsize\bfseries, titanorange, rotate=-90] at (13,5) {FLANK ZONE};
+
+  \node[font=\scriptsize\bfseries, titanblue] at (7,0.5) {EDGE ZONE};
+  \node[font=\scriptsize\bfseries, titanblue] at (7,9.5) {EDGE ZONE};
+  \node[font=\tiny, titanblue] at (7,10.3) {Перезарядка, ресурсы, передышка};
+
+  % Resource pickups at edges
+  \fill[titangreen] (0.5,5) circle (0.2);
+  \fill[titangreen] (13.5,5) circle (0.2);
+  \fill[titangreen] (7,0.3) circle (0.2);
+  \fill[titangreen] (7,9.7) circle (0.2);
+  \node[font=\tiny, titangreen] at (0.5,5.5) {HP};
+  \node[font=\tiny, titangreen] at (13.5,5.5) {HP};
+
+  % Enemy positions (example wave)
+  \foreach \x/\y in {5/4, 6/6, 8/5, 9/3.5, 7/6.5, 5.5/5, 8.5/6} {
+    \fill[titanred] (\x,\y) circle (0.15);
+  }
+\end{tikzpicture}
+
+\begin{rulebox}{Зоны арены}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Kill Zone} (центр, ~60$\times$60м): Основная зона боя.
+    Здесь размещается большинство врагов. Вход сюда = бой
+  \item \textbf{Flank Zone} (периферия, ~20м шириной): Менее
+    плотная зона. Отдельные враги на платформах. Путь для
+    перегруппировки
+  \item \textbf{Edge Zone} (стены, ~10м): Относительная безопасность.
+    Ресурсы (HP, боеприпасы) размещены здесь, чтобы \textbf{вознаградить}
+    игрока за рискованный рывок из центра
+\end{itemize}
+\end{rulebox}
+
+\section{Дизайн волн}
+
+\subsection{Паттерны волновой эскалации}
+
+\begin{tikzpicture}[scale=0.85]
+  \begin{axis}[
+    width=14cm, height=6.5cm,
+    xlabel={Время (минуты)},
+    ylabel={Кол-во врагов на арене},
+    xmin=0, xmax=9,
+    ymin=0, ymax=22,
+    xtick={0,1,...,9},
+    grid=major,
+    grid style={titanlight},
+    axis lines=left,
+    title={\textbf{Волновая эскалация центральной арены}},
+    title style={font=\bfseries\color{titandark}},
+    legend style={at={(0.02,0.98)}, anchor=north west, font=\scriptsize}
+  ]
+    % Wave boundaries
+    \draw[thick, dashed, titandark!30] (axis cs:2.5,0) -- (axis cs:2.5,22);
+    \draw[thick, dashed, titandark!30] (axis cs:5,0) -- (axis cs:5,22);
+    \draw[thick, dashed, titandark!30] (axis cs:7,0) -- (axis cs:7,22);
+
+    \node[font=\scriptsize\bfseries, titanblue] at (axis cs:1.25,21) {Волна 1};
+    \node[font=\scriptsize\bfseries, titanorange] at (axis cs:3.75,21) {Волна 2};
+    \node[font=\scriptsize\bfseries, titanred] at (axis cs:6,21) {Волна 3};
+    \node[font=\scriptsize\bfseries, titangold] at (axis cs:8,21) {BOSS};
+
+    % Enemy count curve
+    \addplot[very thick, titanred, smooth] coordinates {
+      (0,0) (0.3,6) (0.5,8) (1,8) (1.5,6) (2,4) (2.5,2)
+      (2.7,3) (3,8) (3.5,10) (4,12) (4.5,10) (5,6)
+      (5.2,4) (5.5,8) (6,14) (6.5,16) (7,10)
+      (7.2,5) (7.5,3) (7.7,2) (8,1) (8.5,1) (9,0)
+    };
+    \addlegendentry{Враги на арене}
+
+    % Intensity overlay
+    \addplot[very thick, titanblue, dashed, smooth] coordinates {
+      (0,1) (0.5,5) (1,6) (1.5,5) (2,4) (2.5,2)
+      (3,5) (3.5,7) (4,9) (4.5,8) (5,5)
+      (5.5,6) (6,10) (6.5,14) (7,12)
+      (7.5,16) (8,20) (8.5,15) (9,5)
+    };
+    \addlegendentry{Интенсивность}
+
+    % Breath markers
+    \node[font=\tiny, titangreen, fill=white, inner sep=1pt]
+      at (axis cs:2.5,3) {Breath};
+    \node[font=\tiny, titangreen, fill=white, inner sep=1pt]
+      at (axis cs:5,5) {Breath};
+    \node[font=\tiny, titangreen, fill=white, inner sep=1pt]
+      at (axis cs:7,8) {Breath};
+  \end{axis}
+\end{tikzpicture}
+
+\subsection{Детальный план волн}
+
+\subsubsection{Волна 1: Введение (0--2.5 мин)}
+
+Цель: дать игроку освоиться в пространстве арены.
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}l c c X@{}}
+\toprule
+\textbf{Подволна} & \textbf{Состав} & \textbf{Зона} & \textbf{Цель} \\
+\midrule
+1a (0:00) & 4 Rusher + 2 Anchor & Ground & Знакомство с ареной, заставить двигаться \\
+1b (0:30) & 2 Anchor & Mid (платформы) & Показать вертикальность арены \\
+1c (1:00) & 2 Rusher + 1 Disruptor & Ground & Ввести AoE-давление, заставить летать \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Волна 2: Эскалация (2.5--5 мин)}
+
+Цель: увеличить сложность, ввести Tank и Specialist.
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}l c c X@{}}
+\toprule
+\textbf{Подволна} & \textbf{Состав} & \textbf{Зона} & \textbf{Цель} \\
+\midrule
+2a (2:30) & 4R + 2A + 1T & Ground+Mid & Tank давит снизу, anchor-ы с платформ \\
+2b (3:30) & 2D + 1Sp & Mid+High & Specialist на высоте, disruptors давят AoE \\
+2c (4:00) & 3R & Ground & Подкрепление rusher-ов не даёт расслабиться \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Волна 3: Кульминация (5--7 мин)}
+
+Цель: максимальное давление, все роли одновременно.
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}l c c X@{}}
+\toprule
+\textbf{Подволна} & \textbf{Состав} & \textbf{Зона} & \textbf{Цель} \\
+\midrule
+3a (5:00) & 4R + 3A + 2D & Все зоны & Максимальное кол-во, все направления \\
+3b (5:30) & 1T + 1Sp & Ground+High & Tank внизу + specialist наверху = вилка \\
+3c (6:00) & 4R + 2A & Mid & Финальная подволна, сброс перед боссом \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Босс-фаза (7--9 мин)}
+
+Цель: финальное испытание, максимальный skill expression.
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}l c c X@{}}
+\toprule
+\textbf{Подволна} & \textbf{Состав} & \textbf{Зона} & \textbf{Цель} \\
+\midrule
+Boss (7:00) & 1 Boss & Центр & Boss использует всю арену; adds появляются по таймеру \\
+Adds (7:30+) & 2R каждые 30с & Ground & Поддержание давления, ресурсная подпитка \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{polarity}{Интеграция полярности}
+Каждая волна может менять \textbf{полярный заряд} арены:
+\begin{itemize}
+  \item Волна 1: нейтральный заряд~--- базовое состояние
+  \item Волна 2: положительный заряд~--- одни платформы активны
+  \item Волна 3: отрицательный заряд~--- другие платформы активны
+  \item Босс: полярность меняется динамически, привязана к фазам босса
+\end{itemize}
+\end{polarity}
+
+
+\section{Правила spawn-а на большой арене}
+
+\begin{rulebox}{8 правил спавна в центральной арене}
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Никогда в прямом FoV игрока.} Враги не должны появляться
+    из воздуха в центре экрана. Спавн за платформами, из порталов,
+    из дверей, из-за стен
+  \item \textbf{Минимум 20м от игрока.} При спавне враг должен быть
+    достаточно далеко, чтобы игрок мог среагировать, но достаточно
+    близко, чтобы быть заметным
+  \item \textbf{Распределять по зонам.} Не кластерить всех врагов в
+    одном углу. Минимум 2 зоны заняты врагами одновременно
+  \item \textbf{Аудио-прелюдия.} Каждый спавн предваряется звуком:
+    сирена, рёв, звук портала. Это даёт 0.5--1 секунду подготовки
+  \item \textbf{Spawn on kill trigger.} Подволна 2b спавнится, когда
+    убиты 50--70\% подволны 2a. Это создаёт непрерывность без перегрузки
+  \item \textbf{Max concurrent enemies.} Одновременно на арене не
+    больше 12--16 врагов. Больше = visual noise, меньше = скучно
+  \item \textbf{Tank-и и Specialist-ы~--- по одному.} Максимум 1 Tank
+    и 1 Specialist одновременно (до босс-фазы)
+  \item \textbf{Не спавнить в Edge Zone.} Ресурсная зона у стен
+    должна оставаться <<безопасной>> (относительно). Враги спавнятся
+    в Kill Zone или Flank Zone
+\end{enumerate}
+\end{rulebox}
+
+
+% =============================================================================
+\chapter{Пространственные паттерны размещения}
+% =============================================================================
+
+\section{Паттерн <<Триада>> (3 врага)}
+
+Минимальная осмысленная группа. Враги размещаются треугольником.
+
+\begin{tikzpicture}[scale=0.8]
+  \node[font=\bfseries\color{titandark}] at (5,6) {Паттерн <<Триада>>: три варианта};
+
+  % Variant A: Even triangle
+  \draw[thick, titandark!20, fill=titanlight] (0,0) rectangle (4,4);
+  \fill[titangreen] (2,0.5) circle (0.25);
+  \node[font=\tiny, titangreen] at (2,0) {Player};
+  \fill[titanred] (1,3) circle (0.2);
+  \fill[titanblue] (3,3) circle (0.2);
+  \fill[titanorange] (2,2) circle (0.2);
+  \node[font=\tiny, titanred] at (1,3.5) {R};
+  \node[font=\tiny, titanblue] at (3,3.5) {A};
+  \node[font=\tiny, titanorange] at (2,1.5) {D};
+  \draw[dashed, titandark!30] (1,3) -- (3,3) -- (2,2) -- cycle;
+  \node[font=\scriptsize\bfseries] at (2,-0.7) {A: R+A+D};
+  \node[font=\tiny] at (2,-1.2) {Классическая};
+
+  % Variant B: Depth triangle
+  \draw[thick, titandark!20, fill=titanlight] (5.5,0) rectangle (9.5,4);
+  \fill[titangreen] (7.5,0.5) circle (0.25);
+  \fill[titanred] (6.5,1.5) circle (0.2);
+  \fill[titanred] (8.5,1.5) circle (0.2);
+  \fill[titanblue] (7.5,3.5) circle (0.2);
+  \node[font=\tiny, titanred] at (6.5,1) {R};
+  \node[font=\tiny, titanred] at (8.5,1) {R};
+  \node[font=\tiny, titanblue] at (7.5,3) {A};
+  \draw[dashed, titandark!30] (6.5,1.5) -- (8.5,1.5) -- (7.5,3.5) -- cycle;
+  \node[font=\scriptsize\bfseries] at (7.5,-0.7) {B: 2R+A};
+  \node[font=\tiny] at (7.5,-1.2) {Агрессивная};
+
+  % Variant C: Sniper + rushers
+  \draw[thick, titandark!20, fill=titanlight] (11,0) rectangle (15,4);
+  \fill[titangreen] (13,0.5) circle (0.25);
+  \fill[titanred] (12,2) circle (0.2);
+  \fill[titanred] (14,2) circle (0.2);
+  \fill[titancyan] (13,3.8) circle (0.2);
+  \node[font=\tiny, titanred] at (12,1.5) {R};
+  \node[font=\tiny, titanred] at (14,1.5) {R};
+  \node[font=\tiny, titancyan] at (13,3.3) {Sp};
+  \draw[dashed, titandark!30] (12,2) -- (14,2) -- (13,3.8) -- cycle;
+  \node[font=\scriptsize\bfseries] at (13,-0.7) {C: 2R+Sp};
+  \node[font=\tiny] at (13,-1.2) {Приоритетная};
+\end{tikzpicture}
+
+\vspace{5pt}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{A (R+A+D):} Все три давления одновременно.
+    Игрок не может стоять (R), прятаться (D) или игнорировать (A).
+    Идеально для арены
+  \item \textbf{B (2R+A):} Два rusher-а бегут с флангов,
+    anchor стреляет из глубины. Игрок решает: убить близких
+    или прорваться к anchor-у. Подходит для коридорных стычек
+  \item \textbf{C (2R+Sp):} Rusher-ы не дают спокойно целиться
+    в specialist-а. Создаёт дилемму приоритетов.
+    Подходит для обеих частей арены
+\end{itemize}
+
+
+\section{Паттерн <<Тиски>> (2+2)}
+
+Две группы зажимают игрока с разных направлений.
+
+\begin{tikzpicture}[scale=0.8]
+  \node[font=\bfseries\color{titandark}] at (7,6.5) {Паттерн <<Тиски>>};
+
+  % Arena space
+  \draw[thick, titandark!20, fill=titanlight] (0,0) rectangle (14,5);
+  \fill[titangreen] (7,2.5) circle (0.3);
+  \node[font=\scriptsize\bfseries, titangreen] at (7,1.8) {PLAYER};
+
+  % Group A (left)
+  \fill[titanred] (2,2) circle (0.2);
+  \fill[titanred] (2.5,3) circle (0.2);
+  \fill[titanblue] (1.5,3.5) circle (0.2);
+  \draw[thick, titanred, -{Stealth}] (2.8,2.5) -- (5.5,2.5);
+  \node[font=\scriptsize\bfseries, titanred] at (2,4.3) {Группа A};
+  \node[font=\tiny, titandark] at (2,1.3) {2R + 1A};
+
+  % Group B (right)
+  \fill[titanred] (12,2.5) circle (0.2);
+  \fill[titanorange] (11.5,3.5) circle (0.2);
+  \fill[titanblue] (12.5,3) circle (0.2);
+  \draw[thick, titanred, -{Stealth}] (11.2,2.8) -- (8.5,2.5);
+  \node[font=\scriptsize\bfseries, titanred] at (12,4.3) {Группа B};
+  \node[font=\tiny, titandark] at (12,1.3) {1R + 1A + 1D};
+
+  % Escape routes
+  \draw[very thick, titangreen, dashed, -{Stealth}] (7,2.5) -- (7,5.5);
+  \node[font=\tiny, titangreen] at (7,5.8) {Побег вверх (полёт)};
+  \draw[very thick, titangreen, dashed, -{Stealth}] (7,2.5) -- (7,-0.5);
+  \node[font=\tiny, titangreen] at (7,-0.8) {Побег вниз};
+\end{tikzpicture}
+
+\begin{warning}{Правило выхода из тисков}
+В паттерне <<тиски>> \textbf{ВСЕГДА} должен быть третий путь
+побега (вверх, вниз, через портал). Если игрок зажат без
+выхода~--- это не сложно, это \textbf{нечестно}. В 3D-арене
+побег вверх/вниз~--- естественный и читаемый выход.
+\end{warning}
+
+
+\section{Паттерн <<Слои>> (вертикальное распределение)}
+
+Специфичен для арены 100$\times$100$\times$50м с активным
+полётом.
+
+\begin{tikzpicture}[scale=0.75]
+  \node[font=\bfseries\color{titandark}] at (7,10.5) {Паттерн <<Слои>>: вертикальное давление};
+
+  % Arena cross-section
+  \draw[very thick, titandark] (1,0) rectangle (13,9);
+
+  % Layer 1: Ground
+  \fill[titanblue!10] (1,0) rectangle (13,3);
+  \fill[titangold] (4,1) circle (0.4);
+  \node[font=\tiny, white] at (4,1) {Tank};
+  \fill[titanred] (8,0.8) circle (0.2);
+  \fill[titanred] (9,1.5) circle (0.2);
+  \fill[titanred] (10,0.6) circle (0.2);
+  \node[font=\scriptsize\bfseries, titanblue] at (7,2.5) {Layer 1: Ground};
+  \node[font=\tiny, titandark] at (7,2) {Tank + Rushers};
+
+  % Layer 2: Mid
+  \fill[titanorange!8] (1,3) rectangle (13,6);
+  \fill[titanblue!70] (3,4.5) circle (0.2);
+  \fill[titanblue!70] (6,4) circle (0.2);
+  \fill[titanblue!70] (10,5) circle (0.2);
+  \fill[titanorange] (8,4.5) circle (0.2);
+  \node[font=\scriptsize\bfseries, titanorange] at (7,5.5) {Layer 2: Mid};
+  \node[font=\tiny, titandark] at (7,3.5) {Anchors + Disruptor};
+
+  % Layer 3: High
+  \fill[titanred!8] (1,6) rectangle (13,9);
+  \fill[titancyan] (5,7.5) circle (0.2);
+  \fill[titancyan] (9,8) circle (0.2);
+  \node[font=\scriptsize\bfseries, titanred] at (7,8.5) {Layer 3: High};
+  \node[font=\tiny, titandark] at (7,6.5) {Specialists};
+
+  % Player in mid
+  \fill[titangreen] (7,4.5) circle (0.3);
+  \node[font=\tiny, white] at (7,4.5) {P};
+
+  % Pressure arrows
+  \draw[ultra thick, titangold!60, -{Stealth}] (4,1.5) -- (6.5,4);
+  \draw[ultra thick, titancyan!60, -{Stealth}] (5,7.2) -- (6.5,5);
+  \draw[ultra thick, titanblue!60, -{Stealth}] (3,4.5) -- (6.5,4.5);
+  \draw[ultra thick, titanblue!60, -{Stealth}] (10,5) -- (7.5,4.7);
+\end{tikzpicture}
+
+\begin{principle}{Принцип слоёв}
+Каждый вертикальный слой давит своим типом угрозы:
+\begin{itemize}
+  \item \textbf{Ground:} <<опуститься = умереть>> (Tank + Rushers)
+  \item \textbf{Mid:} <<остановиться = умереть>> (Anchors + Disruptors)
+  \item \textbf{High:} <<игнорировать = умереть>> (Specialists)
+\end{itemize}
+Игрок \textbf{вынужден} постоянно менять высоту, чтобы
+избегать давления одного слоя, при этом попадая под
+давление другого. Это создаёт непрерывный <<танец>>.
+\end{principle}
+
+
+\section{Паттерн <<Якорь и Рой>>}
+
+Один сильный враг (Tank или мини-босс) привлекает внимание
+на себя, пока рой мелких врагов (Rusher-ы) атакует с периферии.
+
+\begin{tikzpicture}[scale=0.8]
+  \draw[thick, titandark!20, fill=titanlight] (0,0) rectangle (10,6);
+  \fill[titangreen] (5,1) circle (0.3);
+  \node[font=\scriptsize, titangreen] at (5,0.4) {Player};
+
+  % Tank in center
+  \fill[titangold] (5,4) circle (0.5);
+  \node[font=\small\bfseries, white] at (5,4) {TANK};
+
+  % Rusher swarm
+  \foreach \angle in {0,45,...,315} {
+    \fill[titanred] ($(5,4)+(\angle:2)$) circle (0.15);
+  }
+
+  % Attention split
+  \draw[ultra thick, titangold, -{Stealth}] (5,3.3) -- (5,1.8);
+  \node[font=\tiny, titangold, right] at (5.3,2.5) {Главная угроза};
+  \draw[thick, titanred, -{Stealth}] ($(5,4)+(200:2)$) -- ($(5,1)+(160:1.5)$);
+  \draw[thick, titanred, -{Stealth}] ($(5,4)+(340:2)$) -- ($(5,1)+(20:1.5)$);
+  \node[font=\tiny, titanred] at (8,2) {Периферийные угрозы};
+
+  \node[font=\small, text=titandark, text width=9cm, align=center] at (5,-1) {
+    Tank требует фокуса. Rusher-ы наказывают за тоннельное зрение.
+    Игрок должен \textbf{переключать внимание} между главной и
+    второстепенными угрозами.
+  };
+\end{tikzpicture}
+
+
+% =============================================================================
+\chapter{Правила честности и читаемости}
+% =============================================================================
+
+\section{Честность (Fairness)}
+
+\begin{principle}{Золотое правило}
+Каждая смерть игрока должна ощущаться как \textbf{его ошибка},
+а не как подлость дизайнера. Если игрок не понимает, почему
+он умер~--- энкаунтер спроектирован плохо.
+\end{principle}
+
+\begin{table}[H]
+\centering
+\caption{Честно vs Нечестно}
+\begin{tabularx}{\textwidth}{@{}XX@{}}
+\toprule
+\textbf{Честно} & \textbf{Нечестно} \\
+\midrule
+Враг виден до атаки & Враг стреляет из невидимой позиции \\
+Засада с аудио-подсказкой & Внезапный спавн без предупреждения \\
+Сложная, но проходимая волна & 20 врагов спавнятся одновременно \\
+Тиски с путём побега & Тиски без выхода \\
+Sniper с лазерным прицелом & Instant-hit снайпер без индикации \\
+Враг за укрытием~--- можно зафланкировать & Враг за неразрушимой стеной \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Читаемость (Readability)}
+
+\subsection{Визуальная читаемость врагов}
+
+\begin{rulebox}{Правила читаемости}
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Силуэт.} Каждая роль должна быть различима
+    на расстоянии 10+ метров по силуэту
+  \item \textbf{Цвет.} Роли должны иметь разные цветовые акценты
+    (Rusher~--- красный, Anchor~--- синий, Disruptor~--- оранжевый,
+    Tank~--- жёлтый, Specialist~--- бирюзовый)
+  \item \textbf{Размер.} Tank > Anchor > Rusher по физическим размерам.
+    Большой = опасный и медленный
+  \item \textbf{Звук.} У каждой роли свои звуковые подсказки:
+    топот (Rusher), жужжание (Disruptor), рёв (Tank),
+    щелчок (Specialist/Sniper)
+  \item \textbf{Телеграфирование атак.} Каждая атака имеет
+    визуальный windup длительностью 0.3--0.8 секунды.
+    Чем сильнее атака~--- тем длиннее windup
+\end{enumerate}
+\end{rulebox}
+
+\subsection{Правило <<одного взгляда>>}
+
+\begin{principle}{One Glance Rule}
+Игрок должен понять состав энкаунтера \textbf{за один взгляд}
+(0.5--1 секунда). Это значит:
+\begin{itemize}
+  \item Не более 3 типов врагов в одной группе (до Волны 3)
+  \item Враги одного типа стоят \textbf{рядом друг с другом}
+    (подсознательное группирование)
+  \item Самый опасный враг визуально \textbf{выделяется}
+    (размером, свечением, позицией)
+\end{itemize}
+\end{principle}
+
+
+% =============================================================================
+\chapter{Ресурсы и экономика энкаунтера}
+% =============================================================================
+
+\section{Ресурсная петля DOOM Eternal}
+
+\begin{tikzpicture}[
+  node distance=1.8cm,
+  res/.style={
+    rectangle, rounded corners=4pt,
+    minimum width=2.8cm, minimum height=1.3cm,
+    draw=#1, fill=#1!10,
+    font=\small\bfseries, text=titandark, align=center
+  },
+  arr/.style={-{Stealth[length=5pt]}, very thick, #1}
+]
+  \node[res=titangreen] (hp) at (0,0) {HP\\{\scriptsize Glory Kill}};
+  \node[res=titanblue] (ammo) at (5,0) {Ammo\\{\scriptsize Chainsaw}};
+  \node[res=titanorange] (armor) at (2.5,3) {Armor\\{\scriptsize Flame Belch}};
+
+  \draw[arr=titangreen] (ammo) -- (hp) node[midway, below, font=\tiny] {Стреляешь $\to$ ослабляешь $\to$ добиваешь};
+  \draw[arr=titanblue] (hp) -- (armor) node[midway, left, font=\tiny, text width=2cm, align=center] {Живой $\to$ можешь атаковать};
+  \draw[arr=titanorange] (armor) -- (ammo) node[midway, right, font=\tiny, text width=2cm, align=center] {Защищён $\to$ можешь рисковать};
+
+  \node[font=\small, titandark, below=1cm of ammo, text width=10cm, align=center] {
+    \textbf{Принцип:} враги одновременно \textbf{угроза} и \textbf{ресурс}.
+    Убийство врага восполняет то, что он отнял. Это создаёт
+    push-forward combat~--- агрессия вознаграждается.
+  };
+\end{tikzpicture}
+
+\section{Размещение ресурсов на арене}
+
+\begin{rulebox}{Правила размещения ресурсов}
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Ресурсы на периферии.} HP и аммо~--- в Edge Zone.
+    Чтобы подобрать, нужно выбежать из Kill Zone (risk/reward)
+  \item \textbf{Мелкие ресурсы~--- в центре.} Маленькие дропы~---
+    из убитых врагов. Большие пикапы~--- у стен
+  \item \textbf{Ресурсы указывают путь.} Цепочка маленьких ресурсов
+    ведёт к большому~--- это и навигация, и награда за движение
+  \item \textbf{Не ставить ресурсы рядом со спавном врагов.}
+    Ресурс~--- это момент передышки, спавн~--- момент напряжения.
+    Они не должны быть в одном месте
+  \item \textbf{Критический ресурс~--- у Boss-а.} Если HP дропается
+    при ударе по боссу~--- это мотивирует агрессию, а не кайтинг
+\end{enumerate}
+\end{rulebox}
+
+
+% =============================================================================
+\chapter{Чек-листы}
+% =============================================================================
+
+\section{Чек-лист: Коридорная стычка (Часть I)}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}cX@{}}
+\toprule
+$\square$ & Группа = 2--4 врага, не более \\
+$\square$ & Минимум 2 разные роли в группе (кроме первой стычки) \\
+$\square$ & Враги привязаны к конкретному геометрическому элементу \\
+$\square$ & Дистанция обнаружения: 15--30м (не ближе, не дальше) \\
+$\square$ & Враги не спавнятся за спиной (кроме scripted засады) \\
+$\square$ & Есть аудио-подсказка до визуального контакта \\
+$\square$ & Между стычками есть 5--15 секунд передышки \\
+$\square$ & Каждая следующая стычка сложнее предыдущей (эскалация) \\
+$\square$ & Последняя стычка перед ареной~--- самая интенсивная \\
+$\square$ & Есть vista (вид на арену) хотя бы через 1 окно \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Чек-лист: Волна на арене (Часть II)}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}cX@{}}
+\toprule
+$\square$ & Макс. 12--16 врагов одновременно \\
+$\square$ & Макс. 3 типа ролей одновременно (до Волны 3) \\
+$\square$ & Враги распределены по минимум 2 вертикальным зонам \\
+$\square$ & Есть Rusher-ы для давления на позицию \\
+$\square$ & Есть Anchor-ы для давления на укрытие \\
+$\square$ & Есть хотя бы один Disruptor ИЛИ Specialist \\
+$\square$ & Нет <<безопасной высоты>> (каждый слой под давлением) \\
+$\square$ & Ресурсы доступны на периферии арены \\
+$\square$ & Спавн не в FoV игрока \\
+$\square$ & Аудио-прелюдия перед каждым спавном \\
+$\square$ & Есть breath (1--3 сек тишины) между волнами \\
+$\square$ & Bosс-фаза начинается после финальной <<тишины>> \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Чек-лист: Комбинация врагов}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{@{}cX@{}}
+\toprule
+$\square$ & Нет однородных групп (минимум 2 роли, кроме обучения) \\
+$\square$ & Rusher + Anchor = стандартная база каждой волны \\
+$\square$ & Каждая комбинация создаёт <<конфликт тактик>> \\
+$\square$ & Нет единственной безопасной тактики \\
+$\square$ & Tank и Specialist~--- максимум по 1 одновременно \\
+$\square$ & Каждый враг читаем за 1 секунду (силуэт + цвет + звук) \\
+$\square$ & Каждая атака имеет windup 0.3--0.8 сек \\
+$\square$ & Каждая смерть игрока~--- его ошибка, не подлость дизайнера \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+% =============================================================================
+\chapter{Итерация и плейтестинг}
+% =============================================================================
+
+\section{Что тестировать}
+
+\begin{table}[H]
+\centering
+\caption{Метрики плейтеста для энкаунтеров}
+\begin{tabularx}{\textwidth}{@{}lXX@{}}
+\toprule
+\textbf{Метрика} & \textbf{Хорошо} & \textbf{Плохо} \\
+\midrule
+Смертей на стычку (Ч.I) & 0--1 (Normal) & 3+ = слишком сложно \\
+Смертей на волну (Ч.II) & 0--2 (Normal) & 4+ = проблема с fairness \\
+Время на стычку (Ч.I) & 15--45 сек & 60+ сек = скучно \\
+Время на волну (Ч.II) & 1.5--3 мин & 4+ мин = затянуто \\
+\% использования оружий & Равномерно & Одно оружие = слабая палитра врагов \\
+Тепловая карта смертей & Распределена & Кластер = проблемная точка \\
+Движение игрока & По всей арене & Сидит в углу = плохие стимулы \\
+Вертикальность & Использует все слои & Только ground = плохая вертикаль \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Процесс итерации}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Грейбокс + placeholder враги.} Расставьте врагов
+    базовых типов, запустите, пройдите сами 5 раз
+  \item \textbf{Запишите видео.} Каждый проход~--- запись.
+    Отмечайте, где умерли, где было скучно, где было <<вау>>
+  \item \textbf{Тепловая карта.} Где игрок проводит больше всего
+    времени? Если он стоит в одном месте~--- нужен Disruptor
+    в этой зоне
+  \item \textbf{Внешний плейтест.} Дайте пройти 3--5 людям без
+    подсказок. Спросите: <<где было непонятно?>> и
+    <<где было нечестно?>>
+  \item \textbf{Итерация.} По результатам: сдвиньте спавн на 5м,
+    уберите одного врага, добавьте укрытие. Маленькие изменения~---
+    большой эффект
+\end{enumerate}
+
+\begin{tip}{Правило <<трёх проходов>>}
+Каждый энкаунтер нужно пройти минимум:
+\begin{itemize}
+  \item \textbf{Агрессивно}~--- бежать вперёд, стрелять на бегу
+  \item \textbf{Осторожно}~--- прятаться, стрелять из укрытия
+  \item \textbf{Стильно}~--- использовать все механики, combo, полёт
+\end{itemize}
+Если один из проходов \textbf{невозможен}~--- геометрия или палитра
+врагов ограничивает игрока слишком сильно.
+Если один из проходов \textbf{явно лучший}~--- нужно добавить врагов,
+которые наказывают эту тактику.
+\end{tip}
+
+\vspace{1cm}
+
+\begin{center}
+\begin{tikzpicture}
+  \fill[titandark, rounded corners=4pt] (0,0) rectangle (12,2);
+  \node[text=white, font=\Large\bfseries] at (6,1.3) {POLARITY};
+  \node[text=titanlight, font=\small] at (6,0.6) {Encounter Design Guide --- Internal Document --- 2026};
+\end{tikzpicture}
+\end{center}
+
+\end{document}

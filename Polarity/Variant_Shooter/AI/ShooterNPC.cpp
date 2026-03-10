@@ -614,9 +614,13 @@ void AShooterNPC::Die()
 
 			if (DroppedWeapon)
 			{
-				DroppedWeapon->SetCharge(NPCCharge);
-				UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] SUCCESS — %s spawned, charge set to %.2f, readback=%.2f"),
-					*DroppedWeapon->GetName(), NPCCharge, DroppedWeapon->GetCharge());
+				// If NPC has non-zero charge, transfer it; otherwise keep the default from FieldComponent
+				if (!FMath::IsNearlyZero(NPCCharge))
+				{
+					DroppedWeapon->SetCharge(NPCCharge);
+				}
+				UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] SUCCESS — %s spawned, charge=%.2f (NPC was %.2f)"),
+					*DroppedWeapon->GetName(), DroppedWeapon->GetCharge(), NPCCharge);
 			}
 			else
 			{
@@ -659,9 +663,13 @@ void AShooterNPC::Die()
 
 				if (DroppedRanged)
 				{
-					DroppedRanged->SetCharge(NPCChargeForRanged);
-					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Ranged drop SUCCESS — %s spawned, charge=%.2f"),
-						*GetName(), *Entry.DroppedWeaponClass->GetName(), NPCChargeForRanged);
+					// If NPC has non-zero charge, transfer it; otherwise keep the default from FieldComponent
+					if (!FMath::IsNearlyZero(NPCChargeForRanged))
+					{
+						DroppedRanged->SetCharge(NPCChargeForRanged);
+					}
+					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Ranged drop SUCCESS — %s spawned, charge=%.2f (NPC was %.2f)"),
+						*GetName(), *Entry.DroppedWeaponClass->GetName(), DroppedRanged->GetCharge(), NPCChargeForRanged);
 				}
 
 				break; // Only one ranged drop per death

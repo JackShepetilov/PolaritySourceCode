@@ -10,9 +10,13 @@
 class UCurveFloat;
 class ACharacter;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSuppressionStart, float, Duration);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSuppressionEnd);
+
 /**
  * Component that calculates NPC aim accuracy based on target's movement speed.
  * Faster targets are harder to hit. Wall running provides additional spread bonus.
+ * Supports suppression state: forced donut-pattern misses around the target.
  */
 UCLASS(ClassGroup = (AI), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UAIAccuracyComponent : public UActorComponent
@@ -63,6 +67,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Modifiers", meta = (ClampMin = "1.0", ClampMax = "3.0"))
 	float InAirSpreadMultiplier = 1.2f;
 
+	// ==================== Suppression Settings ====================
+
+	/** Minimum deviation angle during suppression — guarantees a miss (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppression", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+	float MinSuppressionSpread = 8.0f;
+
+	/** Maximum deviation angle during suppression — keeps shots visually near the target (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppression", meta = (ClampMin = "5.0", ClampMax = "45.0"))
+	float MaxSuppressionSpread = 20.0f;
+
 	// ==================== Runtime State ====================
 
 	/** Last calculated spread value (for debugging) */
@@ -73,10 +87,21 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Accuracy|Debug")
 	float LastSpeedRatio = 0.0f;
 
+	// ==================== Suppression Delegates ====================
+
+	/** Broadcast when suppression begins. Duration = total suppression time. */
+	UPROPERTY(BlueprintAssignable, Category = "Accuracy|Suppression")
+	FOnSuppressionStart OnSuppressionStart;
+
+	/** Broadcast when suppression ends (timer expired or manually cleared). */
+	UPROPERTY(BlueprintAssignable, Category = "Accuracy|Suppression")
+	FOnSuppressionEnd OnSuppressionEnd;
+
 	// ==================== API ====================
 
 	/**
 	 * Calculate aim direction with accuracy spread applied.
+	 * During suppression, uses donut pattern instead of normal spread.
 	 * @param TargetLocation - World location to aim at
 	 * @param Target - Target actor (used to get velocity and movement state)
 	 * @return Direction vector with spread applied
@@ -118,10 +143,51 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Accuracy")
 	FVector ApplySpreadToDirection(const FVector& BaseDirection, float SpreadDegrees) const;
 
+	// ==================== Suppression API ====================
+
+	/**
+	 * Apply suppression: forces donut-pattern misses for the given duration.
+	 * Stacks with diminishing returns if already suppressed.
+	 * @param Duration - How long the suppression lasts (seconds)
+	 * @param DiminishingFactor - Stacking falloff rate. Each stack adds Duration / (1 + StackCount * Factor)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Accuracy|Suppression")
+	void ApplySuppression(float Duration, float DiminishingFactor = 0.5f);
+
+	/** Immediately clear suppression state */
+	UFUNCTION(BlueprintCallable, Category = "Accuracy|Suppression")
+	void ClearSuppression();
+
+	/** Returns true if currently suppressed */
+	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppression")
+	bool IsSuppressed() const { return bIsSuppressed; }
+
+	/** Returns remaining suppression time (0 if not suppressed) */
+	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppression")
+	float GetSuppressionTimeRemaining() const { return SuppressionTimeRemaining; }
+
 protected:
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
 	/** Get aim origin (owner's location, typically eye height) */
 	FVector GetAimOrigin() const;
 
 	/** Sample the spread distribution curve */
 	float SampleSpreadDistribution() const;
+
+	/**
+	 * Apply donut-shaped spread: shots land between MinSpread and MaxSpread degrees from center.
+	 * Guarantees a miss (minimum deviation) while keeping shots visually close to the target.
+	 */
+	FVector ApplyDonutSpread(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const;
+
+private:
+	/** True when NPC is in suppression state (forced misses) */
+	bool bIsSuppressed = false;
+
+	/** Seconds remaining in current suppression */
+	float SuppressionTimeRemaining = 0.0f;
+
+	/** Number of suppression applications during current suppression (for diminishing returns) */
+	int32 SuppressionStackCount = 0;
 };

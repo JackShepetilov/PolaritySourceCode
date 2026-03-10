@@ -658,6 +658,42 @@ protected:
 	/** Elapsed time in current knockback */
 	float KnockbackElapsedTime = 0.0f;
 
+	// --- Damage Slowdown (ranged hit stacking) ---
+
+	/** Whether to apply speed slowdown when hit by ranged attacks */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Slowdown")
+	bool bEnableDamageSlowdown = true;
+
+	/** Slowdown values per consecutive hit. Index 0 = first hit, index 1 = second hit, etc.
+	 *  The last element applies to all hits beyond the array size.
+	 *  Values are multiplied by DamageSlowdownMultiplier and subtracted from speed as a percentage.
+	 *  Example: 0.5 with multiplier 0.6 = 30% speed reduction */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Slowdown", meta = (EditCondition = "bEnableDamageSlowdown"))
+	TArray<float> DamageSlowdownArray;
+
+	/** Multiplier applied to values from DamageSlowdownArray.
+	 *  Final speed reduction = ArrayValue * Multiplier (clamped 0-1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Slowdown", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableDamageSlowdown"))
+	float DamageSlowdownMultiplier = 0.3f;
+
+	/** Time window in seconds. If player receives 0 or 1 hits within this window, the hit counter resets */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage Feedback|Slowdown", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableDamageSlowdown"))
+	float DamageSlowdownWindow = 1.0f;
+
+	// --- Damage Slowdown State (internal) ---
+
+	/** Current number of ranged hits received within the time window */
+	int32 DamageSlowdownHitCount = 0;
+
+	/** Timer handle for resetting hit count */
+	FTimerHandle DamageSlowdownResetTimerHandle;
+
+	/** Apply damage slowdown based on current hit count */
+	void ApplyDamageSlowdown();
+
+	/** Called by timer - resets hit count if no recent hits */
+	void OnDamageSlowdownTimerExpired();
+
 	// ==================== VFX|PostProcess ====================
 
 	/** Post process material instance for low health effect (vignette, desaturation, etc.) */

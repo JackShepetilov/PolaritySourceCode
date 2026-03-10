@@ -314,6 +314,26 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		}
 	}
 
+	// Apply damage slowdown for ranged hits
+	if (bEnableDamageSlowdown && Damage > 0.0f && DamageTypeClass && DamageSlowdownArray.Num() > 0)
+	{
+		if (DamageTypeClass->IsChildOf(UDamageType_Ranged::StaticClass()))
+		{
+			DamageSlowdownHitCount++;
+
+			// Restart the reset timer
+			GetWorldTimerManager().SetTimer(
+				DamageSlowdownResetTimerHandle,
+				this,
+				&AShooterCharacter::OnDamageSlowdownTimerExpired,
+				DamageSlowdownWindow,
+				false
+			);
+
+			ApplyDamageSlowdown();
+		}
+	}
+
 	// Have we depleted HP?
 	if (CurrentHP <= 0.0f)
 	{
@@ -1996,6 +2016,32 @@ void AShooterCharacter::CancelKnockback()
 	{
 		bIsInKnockback = false;
 	}
+}
+
+// ==================== Damage Slowdown ====================
+
+void AShooterCharacter::ApplyDamageSlowdown()
+{
+	if (DamageSlowdownArray.Num() == 0)
+	{
+		return;
+	}
+
+	// Hit count is 1-based (first hit = 1), array is 0-based
+	const int32 ArrayIndex = FMath::Min(DamageSlowdownHitCount - 1, DamageSlowdownArray.Num() - 1);
+	const float SlowdownValue = DamageSlowdownArray[ArrayIndex];
+	const float SpeedReduction = FMath::Clamp(SlowdownValue * DamageSlowdownMultiplier, 0.0f, 1.0f);
+
+	// Instantly cut current velocity
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->Velocity *= (1.0f - SpeedReduction);
+	}
+}
+
+void AShooterCharacter::OnDamageSlowdownTimerExpired()
+{
+	DamageSlowdownHitCount = 0;
 }
 
 // ==================== Chromatic Aberration ====================

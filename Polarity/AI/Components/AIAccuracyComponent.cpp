@@ -9,13 +9,21 @@
 
 UAIAccuracyComponent::UAIAccuracyComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 }
 
 FVector UAIAccuracyComponent::CalculateAimDirection(const FVector& TargetLocation, AActor* Target)
 {
 	const FVector AimOrigin = GetAimOrigin();
 	const FVector BaseDirection = (TargetLocation - AimOrigin).GetSafeNormal();
+
+	// Suppression: donut pattern — shots always miss but fly close to target
+	if (bIsSuppressed)
+	{
+		LastCalculatedSpread = MinSuppressionSpread; // debug: show min angle
+		return ApplyDonutSpread(BaseDirection, MinSuppressionSpread, MaxSuppressionSpread);
+	}
 
 	if (!Target)
 	{
@@ -185,4 +193,90 @@ float UAIAccuracyComponent::SampleSpreadDistribution() const
 
 	// Default: uniform distribution
 	return RandomValue;
+}
+
+// ==================== Suppression ====================
+
+void UAIAccuracyComponent::ApplySuppression(float Duration, float DiminishingFactor)
+{
+	if (Duration <= 0.0f)
+	{
+		return;
+	}
+
+	if (bIsSuppressed)
+	{
+		// Already suppressed: add time with diminishing returns
+		// Each stack adds less: Duration / (1 + StackCount * Factor)
+		const float DiminishedDuration = Duration / (1.0f + SuppressionStackCount * DiminishingFactor);
+		SuppressionTimeRemaining += DiminishedDuration;
+		SuppressionStackCount++;
+
+		UE_LOG(LogTemp, Log, TEXT("AIAccuracy: Suppression stacked (x%d). Added %.2fs (base %.2fs). Remaining: %.2fs"),
+			SuppressionStackCount, DiminishedDuration, Duration, SuppressionTimeRemaining);
+	}
+	else
+	{
+		// Fresh suppression
+		bIsSuppressed = true;
+		SuppressionTimeRemaining = Duration;
+		SuppressionStackCount = 1;
+		SetComponentTickEnabled(true);
+
+		UE_LOG(LogTemp, Log, TEXT("AIAccuracy: Suppression started. Duration: %.2fs"), Duration);
+
+		OnSuppressionStart.Broadcast(Duration);
+	}
+}
+
+void UAIAccuracyComponent::ClearSuppression()
+{
+	if (!bIsSuppressed)
+	{
+		return;
+	}
+
+	bIsSuppressed = false;
+	SuppressionTimeRemaining = 0.0f;
+	SuppressionStackCount = 0;
+	SetComponentTickEnabled(false);
+
+	UE_LOG(LogTemp, Log, TEXT("AIAccuracy: Suppression ended."));
+
+	OnSuppressionEnd.Broadcast();
+}
+
+void UAIAccuracyComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (bIsSuppressed)
+	{
+		SuppressionTimeRemaining -= DeltaTime;
+		if (SuppressionTimeRemaining <= 0.0f)
+		{
+			ClearSuppression();
+		}
+	}
+}
+
+FVector UAIAccuracyComponent::ApplyDonutSpread(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const
+{
+	// Random angle between inner and outer — guarantees miss (inner) while keeping shots close (outer)
+	const float SpreadAngle = FMath::FRandRange(InnerSpread, OuterSpread);
+	const float RandomRotation = FMath::FRandRange(0.0f, 360.0f);
+
+	// Find perpendicular axes to BaseDirection
+	FVector Right, Up;
+	BaseDirection.FindBestAxisVectors(Right, Up);
+
+	// Random rotation axis around BaseDirection
+	const float RotRad = FMath::DegreesToRadians(RandomRotation);
+	const FVector RotAxis = Right * FMath::Cos(RotRad) + Up * FMath::Sin(RotRad);
+
+	// Rotate BaseDirection by SpreadAngle degrees around RotAxis perpendicular
+	const float SpreadRad = FMath::DegreesToRadians(SpreadAngle);
+	const FVector Result = (BaseDirection * FMath::Cos(SpreadRad) + RotAxis * FMath::Sin(SpreadRad)).GetSafeNormal();
+
+	return Result;
 }

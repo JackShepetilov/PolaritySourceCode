@@ -346,6 +346,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	float LastFallVelocity = 0.0f;
 
+	// ==================== Damage Speed Modifier ====================
+
+	/** Speed multiplier applied when taking damage (0-1, where 1 = no slowdown).
+	 *  Set by ShooterCharacter's damage slowdown system. */
+	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	float DamageSpeedMultiplier = 1.0f;
+
 	// ==================== EMF ====================
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|EMF")
