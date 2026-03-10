@@ -4,6 +4,7 @@
 #include "EMFChargeWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
+#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EMFPhysicsProp.h"
 #include "EMFVelocityModifier.h"
@@ -203,6 +204,33 @@ void UEMFChargeWidget::BindToDroppedWeapon(ADroppedMeleeWeapon* InWeapon, float 
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
 
+void UEMFChargeWidget::BindToDroppedRangedWeapon(ADroppedRangedWeapon* InWeapon, float InVerticalOffset)
+{
+	if (!InWeapon)
+	{
+		return;
+	}
+
+	BoundDroppedRangedWeapon = InWeapon;
+	BoundNPC.Reset();
+	BoundProp.Reset();
+	BoundDroppedWeapon.Reset();
+	VerticalOffset = InVerticalOffset;
+	bIsActive = true;
+
+	// Static charge — read once
+	float Charge = InWeapon->GetCharge();
+	float AbsCharge = FMath::Abs(Charge);
+
+	CachedMaxCharge = FMath::Max(AbsCharge * 2.0f, 50.0f);
+	CurrentCharge = AbsCharge;
+	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
+	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
+
+	BP_OnBoundToNPC();
+	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
+}
+
 void UEMFChargeWidget::BindToUpgradePickup(AUpgradePickup* InPickup, float InVerticalOffset)
 {
 	if (!InPickup)
@@ -214,6 +242,7 @@ void UEMFChargeWidget::BindToUpgradePickup(AUpgradePickup* InPickup, float InVer
 	BoundNPC.Reset();
 	BoundProp.Reset();
 	BoundDroppedWeapon.Reset();
+	BoundDroppedRangedWeapon.Reset();
 	VerticalOffset = InVerticalOffset;
 	bIsActive = true;
 
@@ -248,6 +277,7 @@ void UEMFChargeWidget::Unbind()
 	BoundNPC.Reset();
 	BoundProp.Reset();
 	BoundDroppedWeapon.Reset();
+	BoundDroppedRangedWeapon.Reset();
 	BoundUpgradePickup.Reset();
 	SetVisibility(ESlateVisibility::Collapsed);
 }
@@ -276,6 +306,10 @@ AActor* UEMFChargeWidget::GetBoundActor() const
 	if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())
 	{
 		return Weapon;
+	}
+	if (ADroppedRangedWeapon* RangedWeapon = BoundDroppedRangedWeapon.Get())
+	{
+		return RangedWeapon;
 	}
 	if (AUpgradePickup* Pickup = BoundUpgradePickup.Get())
 	{
@@ -315,6 +349,14 @@ bool UEMFChargeWidget::GetTargetWorldPosition(FVector& OutPosition) const
 		return true;
 	}
 
+	if (ADroppedRangedWeapon* RangedWeapon = BoundDroppedRangedWeapon.Get())
+	{
+		FVector Origin, BoxExtent;
+		RangedWeapon->GetActorBounds(false, Origin, BoxExtent);
+		OutPosition = Origin + FVector(0.0f, 0.0f, BoxExtent.Z + VerticalOffset);
+		return true;
+	}
+
 	if (AUpgradePickup* Pickup = BoundUpgradePickup.Get())
 	{
 		FVector Origin, BoxExtent;
@@ -339,6 +381,10 @@ bool UEMFChargeWidget::IsTargetDead() const
 	if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())
 	{
 		return Weapon->IsPullComplete(); // "dead" once pulled/collected
+	}
+	if (ADroppedRangedWeapon* RangedWeapon = BoundDroppedRangedWeapon.Get())
+	{
+		return RangedWeapon->IsPullComplete(); // "dead" once pulled/collected
 	}
 	if (AUpgradePickup* Pickup = BoundUpgradePickup.Get())
 	{

@@ -43,6 +43,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|State")
 	bool bIsOpen = false;
 
+	// ==================== Breakable Door ====================
+
+	/** If true, this door can be broken by an explosion (e.g. drone drop) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+	bool bCanBeBrokenByDrop = false;
+
+	/** Tag used to identify breakable mesh components. Add this tag to meshes in Blueprint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+	FName BreakableComponentTag = FName("Breakable");
+
+	/** Impulse strength applied to each mesh when door is broken */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Door|Breakable")
+	float BreakImpulseStrength = 5000.0f;
+
 	// ==================== Key Detection ====================
 
 	/** Box component for detecting keys */
@@ -138,6 +152,11 @@ public:
 	/** Update player detection box size and offset */
 	UFUNCTION(BlueprintCallable, Category = "Door")
 	void UpdatePlayerDetectionBox();
+
+	/** Break the door by applying physics impulse to breakable meshes.
+	 *  Y-direction of impulse depends on explosion position relative to door. */
+	UFUNCTION(BlueprintCallable, Category = "Door|Breakable")
+	void BreakDoor(FVector ExplosionLocation);
 
 protected:
 	virtual void BeginPlay() override;

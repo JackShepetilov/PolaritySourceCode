@@ -848,6 +848,13 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 
 			const float LaunchDistance = CalculateCaptureRange() * ReverseLaunchDistanceMultiplier;
 			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
+
+			// Set stun-on-impact intent NOW — the NPC may collide with another NPC
+			// while still in captured state, BEFORE ReleasedFromCapture is called.
+			if (AShooterNPC* NPC = Cast<AShooterNPC>(Owner))
+			{
+				NPC->NotifyReverseLaunchRelease();
+			}
 		}
 
 		ReverseLaunchElapsed += DeltaTime;
@@ -943,6 +950,9 @@ void UEMFVelocityModifier::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 
 void UEMFVelocityModifier::ReleasedFromCapture()
 {
+	// Save reverse launch flag BEFORE clearing it — needed to set stun intent on NPC
+	const bool bWasReverseLaunch = bReverseLaunchInitialized;
+
 	CapturingPlate = nullptr;
 	bHardHoldActive = false;
 	bReverseLaunchInitialized = false;
@@ -950,6 +960,14 @@ void UEMFVelocityModifier::ReleasedFromCapture()
 	// Exit captured state on the NPC
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(GetOwner()))
 	{
+		// If NPC was in reverse launch, set stun-on-impact flag BEFORE ExitCapturedState.
+		// ExitCapturedState checks velocity, but velocity is 0 at this point because
+		// EMF forces haven't been applied yet this frame. The flag must be set here.
+		if (bWasReverseLaunch)
+		{
+			NPC->NotifyReverseLaunchRelease();
+		}
+
 		NPC->ExitCapturedState();
 	}
 }

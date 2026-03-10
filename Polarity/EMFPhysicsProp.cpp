@@ -19,6 +19,7 @@
 #include "Engine/OverlapResult.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
+#include "Variant_Shooter/ShooterDoor.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
@@ -42,6 +43,10 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 
 	// EMF field component
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
+	if (FieldComponent)
+	{
+		FieldComponent->SetOwnerType(EEMSourceOwnerType::PhysicsProp);
+	}
 }
 
 // ==================== AActor Overrides ====================
@@ -58,7 +63,8 @@ void AEMFPhysicsProp::BeginPlay()
 		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 		Desc.PointChargeParams.Charge = DefaultCharge;
 		Desc.PhysicsParams.Mass = DefaultMass;
-		Desc.OwnerType = EEMSourceOwnerType::PhysicsProp;
+		// OwnerType is NOT overridden here — use whatever is set on the FieldComponent
+		// (defaults to PhysicsProp in C++ constructor, but can be changed per-instance in editor)
 		FieldComponent->SetSourceDescription(Desc);
 	}
 
@@ -81,6 +87,14 @@ void AEMFPhysicsProp::BeginPlay()
 	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
 		WidgetSub->RegisterProp(this);
+	}
+
+	// Uncharged props start with physics disabled (static blockers).
+	// Physics is enabled when prop receives charge via SetCharge().
+	// This prevents NPC depenetration impulses from triggering false explosions.
+	if (PropMesh && FMath::IsNearlyZero(DefaultCharge))
+	{
+		PropMesh->SetSimulatePhysics(false);
 	}
 }
 
@@ -184,8 +198,11 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			continue;
 		}
 
-		// Skip channeling plate forces if captured (handled by UpdateCaptureForces)
-		if (CapturingPlate.IsValid() &&
+		// Skip channeling plate forces entirely for capturable props:
+		// - If captured: UpdateCaptureForces handles positioning (spring + damping)
+		// - If NOT captured: prevent uncaptured props from being attracted by plate's EM field
+		//   (mirrors NPC logic in EMFVelocityModifier where non-captured NPCs skip plate forces)
+		if (bCanBeCaptured &&
 			Source.SourceType == EEMSourceType::FinitePlate &&
 			Source.OwnerType == EEMSourceOwnerType::Player)
 		{
@@ -1165,6 +1182,28 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			*GetName(), FinalDamage, FinalRadius, FinalVFXScale, DamageMultiplier, RadiusMultiplier, VFXScaleMultiplier);
 	}
 
+	// Check for breakable doors within explosion radius
+	{
+		TArray<AActor*> Doors;
+		UGameplayStatics::GetAllActorsOfClass(GetWorld(), AShooterDoor::StaticClass(), Doors);
+		for (AActor* DoorActor : Doors)
+		{
+			AShooterDoor* Door = Cast<AShooterDoor>(DoorActor);
+			if (!Door || !Door->bCanBeBrokenByDrop)
+			{
+				continue;
+			}
+
+			const float Dist = FVector::Dist(ExplosionLocation, Door->GetActorLocation());
+			if (Dist <= FinalRadius)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp::Explode - Breaking door %s (dist=%.1f, radius=%.1f)"),
+					*Door->GetName(), Dist, FinalRadius);
+				Door->BreakDoor(ExplosionLocation);
+			}
+		}
+	}
+
 	OnPropExploded.Broadcast(this, ExplosionLocation, DamageMultiplier);
 
 	// Kill the prop
@@ -1188,9 +1227,18 @@ void AEMFPhysicsProp::SetCharge(float NewCharge)
 	{
 		return;
 	}
+
+	const float OldCharge = GetCharge();
+
 	FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 	Desc.PointChargeParams.Charge = NewCharge;
 	FieldComponent->SetSourceDescription(Desc);
+
+	// Enable physics when prop transitions from uncharged to charged
+	if (PropMesh && FMath::IsNearlyZero(OldCharge) && !FMath::IsNearlyZero(NewCharge))
+	{
+		PropMesh->SetSimulatePhysics(true);
+	}
 }
 
 float AEMFPhysicsProp::GetPropMass() const

@@ -1011,7 +1011,19 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target)
 		return;
 	}
 
-	// Fallback: try raw UEMF_FieldComponent (for physics props without velocity modifier)
+	// Route through SetCharge() for props (enables physics on first charge)
+	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
+	{
+		const float CurrentCharge = Prop->GetCharge();
+		if (CurrentCharge >= MaxIonizationCharge)
+		{
+			return;
+		}
+		Prop->SetCharge(FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge));
+		return;
+	}
+
+	// Generic fallback: raw UEMF_FieldComponent
 	if (UEMF_FieldComponent* TargetField = Target->FindComponentByClass<UEMF_FieldComponent>())
 	{
 		FEMSourceDescription Desc = TargetField->GetSourceDescription();

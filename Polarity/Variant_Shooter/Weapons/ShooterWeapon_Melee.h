@@ -453,6 +453,9 @@ protected:
 
 	// ==================== Animation ====================
 
+	/** Find the start time (seconds) of the first Damage Window notify in a montage. Returns -1 if not found. */
+	static float FindDamageWindowStartTime(const UAnimMontage* Montage);
+
 	/** Select a random swing animation from the array based on weights and current side. Uses AirSwingAnimations if airborne. */
 	const FMeleeWeaponSwingData* SelectWeightedSwing(bool bAirborne = false);
 
@@ -463,7 +466,7 @@ protected:
 
 public:
 	/** Play montage on character's MeleeWeaponFPMesh (gets mesh from ShooterCharacter) */
-	void PlayMontageOnFPMesh(UAnimMontage* Montage);
+	void PlayMontageOnFPMesh(UAnimMontage* Montage, float PlayRate = 1.0f);
 
 protected:
 
@@ -513,6 +516,12 @@ protected:
 
 	/** True after the first swing has been performed (reset when combo resets) */
 	bool bIsInCombo = false;
+
+	/** False while a swing montage is playing before its Blend Out starts. Prevents next swing until Blend Out begins. */
+	bool bCanComboSwing = true;
+
+	/** Callback when swing montage starts blending out — unlocks the next swing */
+	void OnSwingMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
 
 	/** Cached player controller */
 	UPROPERTY()

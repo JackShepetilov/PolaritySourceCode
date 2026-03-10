@@ -324,29 +324,39 @@ FKey UTutorialSubsystem::GetFirstKeyForInputAction(const UInputAction* InputActi
 {
 	if (!InputAction)
 	{
+		UE_LOG(LogPolarity, Warning, TEXT("GetFirstKeyForInputAction: InputAction is null"));
 		return EKeys::Invalid;
 	}
 
 	APlayerController* PC = GetPlayerController(PlayerController);
 	if (!PC)
 	{
+		UE_LOG(LogPolarity, Warning, TEXT("GetFirstKeyForInputAction: No PlayerController for action '%s'"), *InputAction->GetName());
 		return EKeys::Invalid;
 	}
 
 	ULocalPlayer* LocalPlayer = PC->GetLocalPlayer();
 	if (!LocalPlayer)
 	{
+		UE_LOG(LogPolarity, Warning, TEXT("GetFirstKeyForInputAction: No LocalPlayer for action '%s'"), *InputAction->GetName());
 		return EKeys::Invalid;
 	}
 
 	UEnhancedInputLocalPlayerSubsystem* InputSubsystem = LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
 	if (!InputSubsystem)
 	{
+		UE_LOG(LogPolarity, Warning, TEXT("GetFirstKeyForInputAction: No EnhancedInputLocalPlayerSubsystem for action '%s'"), *InputAction->GetName());
 		return EKeys::Invalid;
 	}
 
 	// Query keys mapped to this action
 	TArray<FKey> MappedKeys = InputSubsystem->QueryKeysMappedToAction(InputAction);
+
+	UE_LOG(LogPolarity, Log, TEXT("GetFirstKeyForInputAction: Action '%s' has %d mapped keys"), *InputAction->GetName(), MappedKeys.Num());
+	for (const FKey& Key : MappedKeys)
+	{
+		UE_LOG(LogPolarity, Log, TEXT("  - Key: %s (gamepad: %s)"), *Key.ToString(), Key.IsGamepadKey() ? TEXT("yes") : TEXT("no"));
+	}
 
 	if (MappedKeys.Num() > 0)
 	{
@@ -362,6 +372,7 @@ FKey UTutorialSubsystem::GetFirstKeyForInputAction(const UInputAction* InputActi
 		return MappedKeys[0];
 	}
 
+	UE_LOG(LogPolarity, Warning, TEXT("GetFirstKeyForInputAction: No keys mapped for action '%s' - is the InputMappingContext active?"), *InputAction->GetName());
 	return EKeys::Invalid;
 }
 
@@ -388,6 +399,10 @@ TArray<FTutorialInputIconData> UTutorialSubsystem::GetIconsForInputActions(const
 {
 	TArray<FTutorialInputIconData> Result;
 
+	UE_LOG(LogPolarity, Log, TEXT("GetIconsForInputActions: Resolving %d actions, InputIconsAsset: %s"),
+		   InputActions.Num(),
+		   InputIconsAsset ? *InputIconsAsset->GetName() : TEXT("NULL"));
+
 	for (UInputAction* Action : InputActions)
 	{
 		FTutorialInputIconData IconData;
@@ -400,7 +415,19 @@ TArray<FTutorialInputIconData> UTutorialSubsystem::GetIconsForInputActions(const
 			{
 				IconData.Icon = GetIconForKey(IconData.Key);
 				IconData.bIsValid = (IconData.Icon != nullptr);
+
+				UE_LOG(LogPolarity, Log, TEXT("  Action '%s' -> Key '%s' -> Icon: %s"),
+					   *Action->GetName(), *IconData.Key.ToString(),
+					   IconData.Icon ? *IconData.Icon->GetName() : TEXT("NULL"));
 			}
+			else
+			{
+				UE_LOG(LogPolarity, Warning, TEXT("  Action '%s' -> Key INVALID (no mapping found)"), *Action->GetName());
+			}
+		}
+		else
+		{
+			UE_LOG(LogPolarity, Warning, TEXT("  Action is NULL in InputActions array"));
 		}
 
 		Result.Add(IconData); // Add even if invalid to maintain alignment

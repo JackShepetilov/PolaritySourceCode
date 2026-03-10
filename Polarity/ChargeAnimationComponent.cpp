@@ -20,6 +20,7 @@
 #include "EMFPhysicsProp.h"
 #include "EMFAcceleratorPlate.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
+#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
@@ -77,13 +78,10 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 void UChargeAnimationComponent::OnChargeButtonPressed()
 {
-	// Case 1: Normal activation from Ready state
+	// Case 1: Normal activation from Ready state — tap toggle
 	if (CurrentState == EChargeAnimationState::Ready && CanStartAnimation())
 	{
-		ButtonPressTime = GetWorld()->GetTimeSeconds();
-		bButtonHeld = true;
-		bCommittedAsHold = false;
-		bTapToggleDone = false;
+		bChannelingPath = false;
 		bInputLocked = true;
 
 		MeshTransitionProgress = 0.0f;
@@ -94,9 +92,12 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 		return;
 	}
 
-	// Case 2: Reverse-charge tap during post-release window
-	if (CurrentState == EChargeAnimationState::ChannelingRelease)
+	// Case 2: Pressed during Channeling — trigger reverse channeling
+	if (CurrentState == EChargeAnimationState::Channeling)
 	{
+		// Exit current channeling (destroy plate, disable proxy)
+		ExitChanneling();
+
 		// Deduct fixed charge cost for reverse channeling
 		if (CachedEMFModifier && ReverseChannelingChargeCost > 0.0f)
 		{
@@ -149,18 +150,43 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 
 void UChargeAnimationComponent::OnChargeButtonReleased()
 {
-	bButtonHeld = false;
+	// ToggleCharge release — no action needed (tap toggle is instant on press)
+}
 
-	// If released during channeling, exit to release window
+void UChargeAnimationComponent::OnChannelButtonPressed()
+{
+	// Enter channeling path from Ready state
+	if (CurrentState == EChargeAnimationState::Ready && CanStartAnimation())
+	{
+		bChannelingPath = true;
+		bInputLocked = true;
+
+		MeshTransitionProgress = 0.0f;
+		MontageTimeElapsed = 0.0f;
+
+		BeginHideWeapon();
+		SetState(EChargeAnimationState::HidingWeapon);
+		return;
+	}
+}
+
+void UChargeAnimationComponent::OnChannelButtonReleased()
+{
+	// Exit channeling on button release
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
 		ExitChanneling();
-		SetState(EChargeAnimationState::ChannelingRelease);
+		ReleaseCapturedNPC();
+		EnterFinishingAnimation();
 		return;
 	}
 
-	// If released during HidingWeapon or Playing and not yet committed as hold,
-	// bButtonHeld = false will be picked up by UpdateState to commit as tap
+	// Cancel if released during transition before channeling started
+	if (bChannelingPath && CurrentState == EChargeAnimationState::HidingWeapon)
+	{
+		CancelAnimation();
+		return;
+	}
 }
 
 // ==================== State Machine ====================
@@ -207,11 +233,7 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 		break;
 
 	case EChargeAnimationState::Channeling:
-		StateTimeRemaining = 0.0f; // No timer — held indefinitely
-		break;
-
-	case EChargeAnimationState::ChannelingRelease:
-		StateTimeRemaining = ReverseChargeWindow;
+		StateTimeRemaining = 0.0f; // No timer — held until channel button released
 		break;
 
 	case EChargeAnimationState::ReverseChanneling:
@@ -231,30 +253,7 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 		return;
 	}
 
-	// Special logic for Playing state: tap vs hold decision
-	if (CurrentState == EChargeAnimationState::Playing && !bCommittedAsHold && !bTapToggleDone)
-	{
-		float ElapsedSincePress = GetWorld()->GetTimeSeconds() - ButtonPressTime;
-
-		if (bButtonHeld && ElapsedSincePress >= TapThreshold)
-		{
-			// HOLD committed — enter channeling
-			bCommittedAsHold = true;
-			EnterChanneling();
-			return;
-		}
-
-		if (!bButtonHeld)
-		{
-			// TAP committed — toggle charge
-			bTapToggleDone = true;
-			PerformTapToggle();
-			SpawnChargeVFX();
-			// Continue in Playing state — timer will run out and go to ShowingWeapon
-		}
-	}
-
-	// Channeling state: continuous charge drain
+	// Channeling state: continuous charge drain, no timer
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
 		if (CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
@@ -277,7 +276,19 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 			PlayChargeAnimation();
 			PlaySound(ChargeSound);
 			OnChargeAnimationStarted.Broadcast();
-			SetState(EChargeAnimationState::Playing);
+
+			if (bChannelingPath)
+			{
+				// Channel path: immediately enter channeling
+				EnterChanneling();
+			}
+			else
+			{
+				// Tap path: perform toggle and play animation
+				PerformTapToggle();
+				SpawnChargeVFX();
+				SetState(EChargeAnimationState::Playing);
+			}
 			break;
 
 		case EChargeAnimationState::Playing:
@@ -290,12 +301,6 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 
 		case EChargeAnimationState::Cooldown:
 			SetState(EChargeAnimationState::Ready);
-			break;
-
-		case EChargeAnimationState::ChannelingRelease:
-			// Window expired — no reverse tap. Fully release NPC.
-			ReleaseCapturedNPC();
-			EnterFinishingAnimation();
 			break;
 
 		case EChargeAnimationState::ReverseChanneling:
@@ -358,9 +363,8 @@ bool UChargeAnimationComponent::IsAnimating() const
 
 bool UChargeAnimationComponent::IsBlockingFiring() const
 {
-	// Allow firing during Channeling, ChannelingRelease, and ReverseChanneling
+	// Allow firing during Channeling and ReverseChanneling
 	if (CurrentState == EChargeAnimationState::Channeling ||
-	    CurrentState == EChargeAnimationState::ChannelingRelease ||
 	    CurrentState == EChargeAnimationState::ReverseChanneling)
 	{
 		return false;
@@ -391,7 +395,6 @@ bool UChargeAnimationComponent::CancelAnimation()
 		ShooterCharacter->SetLeftHandIKAlpha(1.0f);
 	}
 	bInputLocked = false;
-	bButtonHeld = false;
 	SetState(EChargeAnimationState::Ready);
 
 	return true;
@@ -479,6 +482,11 @@ void UChargeAnimationComponent::ExitChanneling()
 		else if (ADroppedMeleeWeapon* DroppedWeapon = Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
 		{
 			// DroppedMeleeWeapon pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
+		else if (ADroppedRangedWeapon* DroppedRanged = Cast<ADroppedRangedWeapon>(CurrentCapturedNPC.Get()))
+		{
+			// DroppedRangedWeapon pull is self-contained — let it finish on its own
 			CurrentCapturedNPC.Reset();
 		}
 		else if (AUpgradePickup* UPickup = Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
@@ -652,6 +660,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still pulling — don't re-search
 			}
 		}
+		// Check DroppedRangedWeapon (pull is self-contained — just check if still in progress)
+		else if (ADroppedRangedWeapon* DroppedRanged = Cast<ADroppedRangedWeapon>(CurrentCapturedNPC.Get()))
+		{
+			if (DroppedRanged->IsBeingPulled())
+			{
+				return; // Still pulling — don't re-search
+			}
+		}
 		// Check UpgradePickup (pull is self-contained — just check if still in progress)
 		else if (AUpgradePickup* UPickup = Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
 		{
@@ -699,7 +715,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, UpgradePickup };
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -824,6 +840,57 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		// Try DroppedRangedWeapon (same priority as DroppedMeleeWeapon/props)
+		if (ADroppedRangedWeapon* DroppedRanged = Cast<ADroppedRangedWeapon>(HitActor))
+		{
+			if (!DroppedRanged->bCanBeCaptured || DroppedRanged->IsBeingPulled() || DroppedRanged->IsPullComplete())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s skipped: bCanBeCaptured=%d, pulling=%d, pullComplete=%d"),
+					*DroppedRanged->GetName(), DroppedRanged->bCanBeCaptured, DroppedRanged->IsBeingPulled(), DroppedRanged->IsPullComplete());
+				continue;
+			}
+
+			// Charge validation: only capture weapons with OPPOSITE charge sign
+			const float RangedCharge = DroppedRanged->GetCharge();
+			if (FMath::IsNearlyZero(RangedCharge) || RangedCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s REJECTED charge: Charge=%.2f, ChannelingSign=%d (need opposite)"),
+					*DroppedRanged->GetName(), RangedCharge, static_cast<int32>(ChannelingChargeSign));
+				continue;
+			}
+
+			// Range check using weapon's own logarithmic capture range
+			const FVector ToTarget = DroppedRanged->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float CaptureRange = DroppedRanged->CalculateCaptureRange();
+			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s OUT OF RANGE: dist=%.0f, captureRange=%.0f"),
+					*DroppedRanged->GetName(), FMath::Sqrt(DistSq), CaptureRange);
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < MaxAngleCos)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s OUT OF ANGLE: cos=%.2f, minCos=%.2f"),
+					*DroppedRanged->GetName(), AngleCos, MaxAngleCos);
+				continue;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s VALID TARGET: charge=%.2f, dist=%.0f/%.0f, angle=%.2f"),
+				*DroppedRanged->GetName(), RangedCharge, FMath::Sqrt(DistSq), CaptureRange, AngleCos);
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = DroppedRanged;
+				BestTargetType = ECaptureTargetType::DroppedRangedWeapon;
+			}
+			continue;
+		}
+
 		// Try UpgradePickup (same priority as DroppedWeapon/props)
 		if (AUpgradePickup* UPickup = Cast<AUpgradePickup>(HitActor))
 		{
@@ -909,6 +976,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			break;
 		case ECaptureTargetType::DroppedWeapon:
 			CaptureDroppedWeapon(Cast<ADroppedMeleeWeapon>(BestTarget));
+			break;
+		case ECaptureTargetType::DroppedRangedWeapon:
+			CaptureDroppedRangedWeapon(Cast<ADroppedRangedWeapon>(BestTarget));
 			break;
 		case ECaptureTargetType::UpgradePickup:
 			CaptureUpgradePickup(Cast<AUpgradePickup>(BestTarget));
@@ -1029,6 +1099,27 @@ void UChargeAnimationComponent::CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon
 	CurrentCapturedNPC = Weapon;
 }
 
+void UChargeAnimationComponent::CaptureDroppedRangedWeapon(ADroppedRangedWeapon* Weapon)
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	// Start scripted pull (weapon manages its own interpolation in Tick)
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		Weapon->StartPull(ShooterChar);
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Weapon;
+}
+
 void UChargeAnimationComponent::CaptureUpgradePickup(AUpgradePickup* Pickup)
 {
 	if (!Pickup)
@@ -1092,6 +1183,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	else if (Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
 	{
 		// DroppedMeleeWeapon pull is self-contained — no release action needed
+	}
+	else if (Cast<ADroppedRangedWeapon>(CurrentCapturedNPC.Get()))
+	{
+		// DroppedRangedWeapon pull is self-contained — no release action needed
 	}
 	else if (Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
 	{
@@ -1380,7 +1475,6 @@ void UChargeAnimationComponent::UpdateMontagePlayRate(float DeltaTime)
 
 	// Don't override play rate during channeling freeze
 	if (CurrentState == EChargeAnimationState::Channeling ||
-	    CurrentState == EChargeAnimationState::ChannelingRelease ||
 	    CurrentState == EChargeAnimationState::ReverseChanneling)
 	{
 		return;

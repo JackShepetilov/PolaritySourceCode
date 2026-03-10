@@ -20,6 +20,7 @@ class AEMFChannelingPlateActor;
 class AEMFPhysicsProp;
 class AEMFAcceleratorPlate;
 class ADroppedMeleeWeapon;
+class ADroppedRangedWeapon;
 class AUpgradePickup;
 
 /**
@@ -30,14 +31,13 @@ enum class EChargeAnimationState : uint8
 {
 	Ready,				// Can activate
 	HidingWeapon,		// Transitioning FirstPersonMesh down
-	// -- TAP PATH (press < TapThreshold) --
+	// -- TAP PATH (ToggleCharge button) --
 	Playing,			// Toggle animation playing, VFX active
 	ShowingWeapon,		// Transitioning back to FirstPersonMesh
 	Cooldown,			// Brief cooldown before next activation
-	// -- CHANNELING PATH (hold >= TapThreshold) --
+	// -- CHANNELING PATH (Channel button) --
 	Channeling,			// Plate active, montage frozen, player field disabled
-	ChannelingRelease,	// Released — post-release window for reverse tap
-	ReverseChanneling,	// Post-release tap: plate with opposite charge, timed
+	ReverseChanneling,	// ToggleCharge during channeling: plate with opposite charge, timed
 	FinishingAnimation,	// Montage resumes and plays to completion
 };
 
@@ -83,12 +83,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChannelingEnded);
 /**
  * Component that handles charge toggle animation and channeling ability.
  *
- * TAP: Quick press (< TapThreshold) toggles charge sign with animation + VFX.
- * HOLD: Sustained press spawns an invisible charged plate in front of camera.
+ * TOGGLE CHARGE (ToggleChargeAction): Tap toggles charge sign with animation + VFX.
+ *   If pressed during channeling: triggers reverse channeling (opposite-charge plate burst).
+ * CHANNEL (ChannelAction): Hold to channel — spawns invisible charged plate in front of camera.
  *       - Player's own EMF field is disabled during channeling
  *       - Plate affects enemies and physics objects
  *       - Player is moved by plate's interaction with static environment fields
- *       - On release: short window to tap again for reverse-charge burst
+ *       - Release to exit channeling
  */
 UCLASS(ClassGroup = (Combat), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UChargeAnimationComponent : public UActorComponent
@@ -129,12 +130,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float Cooldown = 0.3f;
 
-	// ==================== Tap vs Hold ====================
-
-	/** Maximum press duration to count as "tap". Hold longer = channeling. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.05", ClampMax = "0.5"))
-	float TapThreshold = 0.15f;
-
 	// ==================== Channeling Settings ====================
 
 	/** Offset of the channeling plate from camera (local space). X = forward */
@@ -156,10 +151,6 @@ public:
 	/** Normalized montage position (0-1) at which to freeze during channeling */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ChannelingFreezeFrame = 0.5f;
-
-	/** Post-release window duration for reverse-charge tap */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.05", ClampMax = "0.5"))
-	float ReverseChargeWindow = 0.2f;
 
 	/** Duration of the reverse-charge channeling burst */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.1", ClampMax = "1.0"))
@@ -245,11 +236,17 @@ public:
 
 	// ==================== Input API ====================
 
-	/** Called when charge button is pressed (from PolarityCharacter) */
+	/** Called when charge button is pressed — tap toggle, or reverse channeling if channeling */
 	void OnChargeButtonPressed();
 
-	/** Called when charge button is released (from PolarityCharacter) */
+	/** Called when charge button is released */
 	void OnChargeButtonReleased();
+
+	/** Called when channel button is pressed — enters channeling */
+	void OnChannelButtonPressed();
+
+	/** Called when channel button is released — exits channeling */
+	void OnChannelButtonReleased();
 
 	// ==================== Query API ====================
 
@@ -310,19 +307,10 @@ protected:
 	/** Input is locked */
 	bool bInputLocked = false;
 
-	// ==================== Tap/Hold Detection ====================
+	// ==================== Path Flag ====================
 
-	/** Time when button was pressed */
-	float ButtonPressTime = 0.0f;
-
-	/** Is the button currently held down? */
-	bool bButtonHeld = false;
-
-	/** Has this press been committed as a hold (passed threshold)? */
-	bool bCommittedAsHold = false;
-
-	/** Has tap toggle been performed for the current press? */
-	bool bTapToggleDone = false;
+	/** True if current activation is channeling path (channel button), false for tap toggle */
+	bool bChannelingPath = false;
 
 	// ==================== Channeling State ====================
 
@@ -468,6 +456,9 @@ protected:
 
 	/** Capture a dropped melee weapon (scripted pull, not physics-based) */
 	void CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon);
+
+	/** Capture a dropped ranged weapon (scripted pull, not physics-based) */
+	void CaptureDroppedRangedWeapon(ADroppedRangedWeapon* Weapon);
 
 	/** Capture an upgrade pickup (scripted pull, not physics-based) */
 	void CaptureUpgradePickup(AUpgradePickup* Pickup);

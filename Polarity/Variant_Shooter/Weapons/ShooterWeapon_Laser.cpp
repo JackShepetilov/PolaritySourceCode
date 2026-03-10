@@ -325,7 +325,19 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 		return;
 	}
 
-	// Fallback: try raw UEMF_FieldComponent (for objects without movement modifier)
+	// Fallback: route through SetCharge() for props (enables physics on first charge)
+	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
+	{
+		const float CurrentCharge = Prop->GetCharge();
+		if (CurrentCharge >= MaxIonizationCharge)
+		{
+			return;
+		}
+		Prop->SetCharge(FMath::Min(CurrentCharge + ChargeToAdd, MaxIonizationCharge));
+		return;
+	}
+
+	// Generic fallback: raw UEMF_FieldComponent (for objects without movement modifier or prop class)
 	if (UEMF_FieldComponent* TargetField = Target->FindComponentByClass<UEMF_FieldComponent>())
 	{
 		FEMSourceDescription Desc = TargetField->GetSourceDescription();

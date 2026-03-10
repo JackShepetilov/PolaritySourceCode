@@ -144,6 +144,53 @@ void AShooterDoor::UpdatePlayerDetectionBox()
 	}
 }
 
+void AShooterDoor::BreakDoor(FVector ExplosionLocation)
+{
+	if (!bCanBeBrokenByDrop)
+	{
+		return;
+	}
+
+	// Collect all StaticMeshComponents with the breakable tag
+	TArray<UStaticMeshComponent*> BreakableMeshes;
+	TArray<UStaticMeshComponent*> AllMeshes;
+	GetComponents(AllMeshes);
+	for (UStaticMeshComponent* Mesh : AllMeshes)
+	{
+		if (Mesh && Mesh->ComponentHasTag(BreakableComponentTag))
+		{
+			BreakableMeshes.Add(Mesh);
+		}
+	}
+
+	if (BreakableMeshes.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShooterDoor::BreakDoor - No meshes with tag '%s' found!"), *BreakableComponentTag.ToString());
+		return;
+	}
+
+	// Transform explosion location to door's local space
+	const FVector LocalExplosion = GetActorTransform().InverseTransformPosition(ExplosionLocation);
+
+	// Determine impulse Y direction: if explosion is on Y-negative side, push Y-positive and vice versa
+	const float ImpulseYSign = (LocalExplosion.Y < 0.0f) ? 1.0f : -1.0f;
+
+	// Build impulse direction in local space (primarily along Y axis)
+	const FVector LocalImpulseDir = FVector(0.0f, ImpulseYSign, 0.3f).GetSafeNormal();
+
+	// Convert impulse direction to world space
+	const FVector WorldImpulse = GetActorTransform().TransformVector(LocalImpulseDir) * BreakImpulseStrength;
+
+	for (UStaticMeshComponent* Mesh : BreakableMeshes)
+	{
+		Mesh->SetSimulatePhysics(true);
+		Mesh->AddImpulse(WorldImpulse, NAME_None, true);
+	}
+
+	// Prevent breaking again
+	bCanBeBrokenByDrop = false;
+}
+
 // ==================== Key Detection Callbacks ====================
 
 void AShooterDoor::OnKeyBoxBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,

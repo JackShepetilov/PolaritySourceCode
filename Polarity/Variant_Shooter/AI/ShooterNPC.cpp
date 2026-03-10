@@ -19,6 +19,7 @@
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
+#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -112,6 +113,13 @@ void AShooterNPC::BeginPlay()
 	if (UEMFChargeWidgetSubsystem* ChargeWidgetSubsystem = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
 		ChargeWidgetSubsystem->RegisterNPC(this);
+	}
+
+	// Apply permanent explosion stun if configured
+	if (bIsPermanentlyStunned)
+	{
+		// Use a large duration; EndKnockbackStun will block recovery anyway
+		ApplyExplosionStun(999999.0f, ReverseChannelingStunMontage);
 	}
 }
 
@@ -625,6 +633,47 @@ void AShooterNPC::Die()
 		UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] %s: No DroppedMeleeWeaponClass set — skipping"), *GetName());
 	}
 
+	// Ranged weapon drop: iterate table, first success wins
+	if (DroppedRangedWeaponTable.Num() > 0)
+	{
+		const float NPCChargeForRanged = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
+
+		for (const FDroppedRangedWeaponEntry& Entry : DroppedRangedWeaponTable)
+		{
+			if (!Entry.DroppedWeaponClass)
+			{
+				continue;
+			}
+
+			const float Roll = FMath::FRand();
+			if (Roll < Entry.DropChance)
+			{
+				FActorSpawnParameters RangedSpawnParams;
+				RangedSpawnParams.SpawnCollisionHandlingOverride =
+					ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+				const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
+
+				ADroppedRangedWeapon* DroppedRanged = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
+					Entry.DroppedWeaponClass, SpawnLoc, GetActorRotation(), RangedSpawnParams);
+
+				if (DroppedRanged)
+				{
+					DroppedRanged->SetCharge(NPCChargeForRanged);
+					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Ranged drop SUCCESS — %s spawned, charge=%.2f"),
+						*GetName(), *Entry.DroppedWeaponClass->GetName(), NPCChargeForRanged);
+				}
+
+				break; // Only one ranged drop per death
+			}
+			else
+			{
+				UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] %s: Ranged entry %s — Roll %.3f >= Chance %.3f"),
+					*GetName(), *Entry.DroppedWeaponClass->GetName(), Roll, Entry.DropChance);
+			}
+		}
+	}
+
 	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health
 	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s Die(): bWasChannelingTarget=%d, ArmorPickupClass=%s, HealthPickupClass=%s, bStunnedByExplosion=%d"),
 		*GetName(), bWasChannelingTarget,
@@ -1067,6 +1116,12 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 
 void AShooterNPC::PlayHitReaction(const FVector& DamageDirection)
 {
+	// Skip hit reaction when stunned — prevents interrupting stun montage
+	if (bStunnedByExplosion)
+	{
+		return;
+	}
+
 	// Check cooldown
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 	if (CurrentTime - LastHitReactionTime < HitReactionCooldown)
@@ -1147,6 +1202,16 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 
 void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 {
+	// === DEBUG: Show guard check ===
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f,
+			(bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched) ? FColor::Red : FColor::Green,
+			FString::Printf(TEXT("[STUN GUARD] %s: bIsDead=%d, bIsInKnockback=%d, bIsCaptured=%d, bIsLaunched=%d => %s"),
+				*GetName(), bIsDead, bIsInKnockback, bIsCaptured, bIsLaunched,
+				(bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched) ? TEXT("BLOCKED!") : TEXT("ALLOWED")));
+	}
+
 	// Skip if dead, already stunned, captured, or launched
 	if (bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
 	{
@@ -1215,6 +1280,12 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 
 void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {
+	// Don't interrupt explosion stun with new knockback
+	if (bStunnedByExplosion)
+	{
+		return;
+	}
+
 	// Apply NPC's knockback distance multiplier
 	float FinalDistance = Distance * KnockbackDistanceMultiplier;
 
@@ -1805,12 +1876,43 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// Apply knockback to myself (backwards)
 	ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
 
-	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to OTHER NPC %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
-		*OtherNPC->GetName(), CollisionDirection.X, CollisionDirection.Y, CollisionDirection.Z,
-		KnockbackDistance, KnockbackDuration);
+	// If this NPC was launched via reverse channeling, stun the target instead of knockback.
+	// Uses bShouldStunOnNPCImpact which persists even after bIsLaunched is cleared (e.g. speed dropped).
 
-	// Apply knockback to other NPC (forwards)
-	OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
+	// === DEBUG: Show stun flag state ===
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Yellow,
+			FString::Printf(TEXT("[RC STUN] %s: bShouldStunOnNPCImpact=%d, bIsLaunched=%d, bIsInKnockback=%d | Target %s: bIsInKnockback=%d, bIsCaptured=%d, bIsLaunched=%d, bIsDead=%d"),
+				*GetName(), bShouldStunOnNPCImpact, bIsLaunched, bIsInKnockback,
+				*OtherNPC->GetName(), OtherNPC->bIsInKnockback, OtherNPC->bIsCaptured, OtherNPC->bIsLaunched, OtherNPC->bIsDead));
+	}
+
+	if (bShouldStunOnNPCImpact)
+	{
+		bShouldStunOnNPCImpact = false; // One-shot: only stun on first NPC-NPC collision
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying REVERSE CHANNELING STUN to %s for %.1fs"),
+			*OtherNPC->GetName(), ReverseChannelingStunDuration);
+
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Green,
+				FString::Printf(TEXT("[RC STUN] >>> Calling ApplyExplosionStun on %s (dur=%.1f)"),
+					*OtherNPC->GetName(), ReverseChannelingStunDuration));
+		}
+
+		OtherNPC->ApplyExplosionStun(ReverseChannelingStunDuration, ReverseChannelingStunMontage);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to OTHER NPC %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
+			*OtherNPC->GetName(), CollisionDirection.X, CollisionDirection.Y, CollisionDirection.Z,
+			KnockbackDistance, KnockbackDuration);
+
+		// Apply knockback to other NPC (forwards)
+		OtherNPC->ApplyKnockback(CollisionDirection, KnockbackDistance, KnockbackDuration, GetActorLocation());
+	}
 
 	// Apply damage to both NPCs with a very short delay
 	// NPCs are stopped by impact freeze, so minimal delay needed for knockback state init
@@ -2101,6 +2203,12 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 
 void AShooterNPC::EndKnockbackStun()
 {
+	// Never exit stun if permanently stunned
+	if (bIsPermanentlyStunned)
+	{
+		return;
+	}
+
 	// If captured, don't disrupt captured state — stun cleanup happens in ExitCapturedState
 	if (bIsCaptured)
 	{
@@ -2111,6 +2219,7 @@ void AShooterNPC::EndKnockbackStun()
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
 	bStunnedByExplosion = false;
+	bShouldStunOnNPCImpact = false;
 
 	OnStunEnd.Broadcast(this);
 
@@ -2227,6 +2336,14 @@ void AShooterNPC::OnCapturedMontageEnded(UAnimMontage* Montage, bool bInterrupte
 	}
 }
 
+void AShooterNPC::NotifyReverseLaunchRelease()
+{
+	if (bApplyReverseChannelingStun)
+	{
+		bShouldStunOnNPCImpact = true;
+	}
+}
+
 void AShooterNPC::ExitCapturedState()
 {
 	if (!bIsCaptured)
@@ -2276,6 +2393,21 @@ void AShooterNPC::ExitCapturedState()
 		return;
 	}
 
+	// Even if speed is below LaunchedMinSpeed, the NPC was still flung by reverse channeling.
+	// Set the stun-on-impact flag so any NPC-NPC collision applies stun.
+	if (bApplyReverseChannelingStun && CurrentSpeed > KINDA_SMALL_NUMBER)
+	{
+		bShouldStunOnNPCImpact = true;
+	}
+
+	// === DEBUG ===
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Cyan,
+			FString::Printf(TEXT("[RC STUN] ExitCapturedState %s (no launched): Speed=%.0f, bShouldStunOnNPCImpact=%d"),
+				*GetName(), CurrentSpeed, bShouldStunOnNPCImpact));
+	}
+
 	// AI will resume on next StateTree tick
 }
 
@@ -2290,6 +2422,15 @@ void AShooterNPC::EnterLaunchedState()
 
 	bIsLaunched = true;
 	bIsInKnockback = true; // Keep AI blocked
+	bShouldStunOnNPCImpact = bApplyReverseChannelingStun; // Persist stun intent beyond launched state
+
+	// === DEBUG ===
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Cyan,
+			FString::Printf(TEXT("[RC STUN] EnterLaunchedState %s: bShouldStunOnNPCImpact=%d (bApplyRCStun=%d)"),
+				*GetName(), bShouldStunOnNPCImpact, bApplyReverseChannelingStun));
+	}
 
 	// Switch to launched force filtering weights
 	if (EMFVelocityModifier)
@@ -2337,6 +2478,14 @@ void AShooterNPC::ExitLaunchedState()
 
 	bIsLaunched = false;
 	bIsInKnockback = false;
+
+	// === DEBUG ===
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Orange,
+			FString::Printf(TEXT("[RC STUN] ExitLaunchedState %s: bIsInKnockback now FALSE, bShouldStunOnNPCImpact=%d (should persist!)"),
+				*GetName(), bShouldStunOnNPCImpact));
+	}
 
 	// Revert to normal force filtering weights
 	if (EMFVelocityModifier)

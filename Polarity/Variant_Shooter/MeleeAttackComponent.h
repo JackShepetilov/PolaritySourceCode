@@ -601,6 +601,11 @@ public:
 	float GetDropKickHeightDifference() const { return DropKickHeightDifference; }
 
 	/**
+	 * Get the current dropkick/magnetism target actor (for external calculations like play rate sync)
+	 */
+	AActor* GetDropKickTarget() const { return MagnetismTarget.Get(); }
+
+	/**
 	 * Check if drop kick is on cooldown
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")

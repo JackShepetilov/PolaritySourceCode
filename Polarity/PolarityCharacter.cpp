@@ -147,6 +147,12 @@ void APolarityCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 			EnhancedInputComponent->BindAction(ToggleChargeAction, ETriggerEvent::Started, this, &APolarityCharacter::DoToggleChargePressed);
 			EnhancedInputComponent->BindAction(ToggleChargeAction, ETriggerEvent::Completed, this, &APolarityCharacter::DoToggleChargeReleased);
 		}
+
+		if (ChannelAction)
+		{
+			EnhancedInputComponent->BindAction(ChannelAction, ETriggerEvent::Started, this, &APolarityCharacter::DoChannelPressed);
+			EnhancedInputComponent->BindAction(ChannelAction, ETriggerEvent::Completed, this, &APolarityCharacter::DoChannelReleased);
+		}
 	}
 }
 
@@ -329,6 +335,24 @@ void APolarityCharacter::DoToggleChargeReleased()
 	if (ChargeAnim)
 	{
 		ChargeAnim->OnChargeButtonReleased();
+	}
+}
+
+void APolarityCharacter::DoChannelPressed()
+{
+	UChargeAnimationComponent* ChargeAnim = FindComponentByClass<UChargeAnimationComponent>();
+	if (ChargeAnim)
+	{
+		ChargeAnim->OnChannelButtonPressed();
+	}
+}
+
+void APolarityCharacter::DoChannelReleased()
+{
+	UChargeAnimationComponent* ChargeAnim = FindComponentByClass<UChargeAnimationComponent>();
+	if (ChargeAnim)
+	{
+		ChargeAnim->OnChannelButtonReleased();
 	}
 }
 

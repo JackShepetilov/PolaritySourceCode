@@ -19,6 +19,7 @@
 
 // Damage types
 #include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
+#include "EMFPhysicsProp.h"
 
 AEMFProjectile::AEMFProjectile()
 {
@@ -238,38 +239,35 @@ void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, 
 	}
 
 	// Apply EMF damage (with charge scaling if enabled)
-	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	if (HitActor && (HitActor != GetOwner() || bDamageOwner))
 	{
-		// Ignore the owner unless bDamageOwner is true
-		if (HitCharacter != GetOwner() || bDamageOwner)
+		// Calculate damage with charge scaling
+		float ChargeDamage = CalculateChargeDamage();
+
+		// Apply tag-based damage multiplier (inherited from ShooterProjectile)
+		float TagMultiplier = GetTagDamageMultiplier(HitActor);
+		float FinalDamage = ChargeDamage * TagMultiplier;
+
+		UE_LOG(LogTemp, Warning, TEXT("EMFProjectile::ProcessHit - Target: %s, BaseDamage: %.1f, ChargeDamage: %.1f, TagMultiplier: %.2f, FinalDamage: %.1f, Charge: %.2f"),
+			*HitActor->GetName(),
+			HitDamage,
+			ChargeDamage,
+			TagMultiplier,
+			FinalDamage,
+			ProjectileCharge);
+
+		// Log all tags on target and all configured multipliers
+		for (const auto& Pair : TagDamageMultipliers)
 		{
-			// Calculate damage with charge scaling
-			float ChargeDamage = CalculateChargeDamage();
-
-			// Apply tag-based damage multiplier (inherited from ShooterProjectile)
-			float TagMultiplier = GetTagDamageMultiplier(HitActor);
-			float FinalDamage = ChargeDamage * TagMultiplier;
-
-			UE_LOG(LogTemp, Warning, TEXT("EMFProjectile::ProcessHit - Target: %s, BaseDamage: %.1f, ChargeDamage: %.1f, TagMultiplier: %.2f, FinalDamage: %.1f, Charge: %.2f"),
-				*HitActor->GetName(),
-				HitDamage,
-				ChargeDamage,
-				TagMultiplier,
-				FinalDamage,
-				ProjectileCharge);
-
-			// Log all tags on target and all configured multipliers
-			for (const auto& Pair : TagDamageMultipliers)
-			{
-				bool bHasTag = HitActor->ActorHasTag(Pair.Key);
-				UE_LOG(LogTemp, Warning, TEXT("  EMFProjectile TagMultiplier: '%s' = %.2f, Target has tag: %s"),
-					*Pair.Key.ToString(),
-					Pair.Value,
-					bHasTag ? TEXT("YES") : TEXT("NO"));
-			}
-
-			UGameplayStatics::ApplyDamage(HitCharacter, FinalDamage, GetInstigator()->GetController(), this, HitDamageType);
+			bool bHasTag = HitActor->ActorHasTag(Pair.Key);
+			UE_LOG(LogTemp, Warning, TEXT("  EMFProjectile TagMultiplier: '%s' = %.2f, Target has tag: %s"),
+				*Pair.Key.ToString(),
+				Pair.Value,
+				bHasTag ? TEXT("YES") : TEXT("NO"));
 		}
+
+		AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
+		UGameplayStatics::ApplyDamage(HitActor, FinalDamage, InstigatorController, this, HitDamageType);
 	}
 
 	// Apply physics forces (same as parent)
@@ -334,6 +332,8 @@ void AEMFProjectile::TransferChargeToActor(AActor* HitActor)
 	// Check if charges are opposite signs
 	bool bOppositeCharges = (ProjectileCharge * TargetCharge) < 0.0f;
 
+	float NewTargetCharge = 0.0f;
+
 	if (bOppositeCharges && bNeutralizeOppositeCharges)
 	{
 		// Neutralization: reduce both charges
@@ -342,19 +342,12 @@ void AEMFProjectile::TransferChargeToActor(AActor* HitActor)
 
 		if (AbsProjectileCharge >= AbsTargetCharge)
 		{
-			// Projectile charge neutralizes target completely
-			FEMSourceDescription TargetDesc = TargetFieldComp->GetSourceDescription();
-			TargetDesc.PointChargeParams.Charge = 0.0f;
-			TargetFieldComp->SetSourceDescription(TargetDesc);
+			NewTargetCharge = 0.0f;
 			UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Target charge neutralized completely"));
 		}
 		else
 		{
-			// Partial neutralization
-			float NewTargetCharge = TargetCharge + ChargeToTransfer; // Signs cancel out
-			FEMSourceDescription TargetDesc = TargetFieldComp->GetSourceDescription();
-			TargetDesc.PointChargeParams.Charge = NewTargetCharge;
-			TargetFieldComp->SetSourceDescription(TargetDesc);
+			NewTargetCharge = TargetCharge + ChargeToTransfer; // Signs cancel out
 			UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Partial neutralization, target charge %.2f -> %.2f"),
 				TargetCharge, NewTargetCharge);
 		}
@@ -362,13 +355,21 @@ void AEMFProjectile::TransferChargeToActor(AActor* HitActor)
 	else
 	{
 		// Same sign or neutralization disabled: add charges
-		float NewTargetCharge = TargetCharge + ChargeToTransfer;
+		NewTargetCharge = TargetCharge + ChargeToTransfer;
+		UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Charge transferred to target: %.2f (target: %.2f -> %.2f)"),
+			ChargeToTransfer, TargetCharge, NewTargetCharge);
+	}
+
+	// Route through SetCharge() for props (enables physics on first charge)
+	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
+	{
+		Prop->SetCharge(NewTargetCharge);
+	}
+	else
+	{
 		FEMSourceDescription TargetDesc = TargetFieldComp->GetSourceDescription();
 		TargetDesc.PointChargeParams.Charge = NewTargetCharge;
 		TargetFieldComp->SetSourceDescription(TargetDesc);
-
-		UE_LOG(LogTemp, Log, TEXT("EMFProjectile: Charge transferred to target: %.2f (target: %.2f -> %.2f)"),
-			ChargeToTransfer, TargetCharge, NewTargetCharge);
 	}
 }
 

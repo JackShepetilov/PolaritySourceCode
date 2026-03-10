@@ -2202,7 +2202,16 @@ void UMeleeAttackComponent::SwitchToFirstPersonMesh()
 
 	if (FirstPersonMesh)
 	{
-		FirstPersonMesh->SetVisibility(true);
+		// Only restore FP mesh visibility if the player actually has a weapon
+		bool bShouldShow = true;
+		if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
+		{
+			bShouldShow = ShooterChar->GetCurrentWeapon() != nullptr;
+		}
+		if (bShouldShow)
+		{
+			FirstPersonMesh->SetVisibility(true);
+		}
 		// Location will be interpolated back in UpdateMeshTransition
 	}
 

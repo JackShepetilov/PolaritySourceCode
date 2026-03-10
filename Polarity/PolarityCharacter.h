@@ -73,6 +73,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* ToggleChargeAction;
 
+	/** Channel (Capture) Input Action */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* ChannelAction;
+
 	// ==================== Apex Movement ====================
 
 	/** Custom movement component reference */
@@ -143,6 +147,14 @@ protected:
 	/** Toggle charge button released */
 	UFUNCTION(BlueprintCallable, Category = "EMF")
 	void DoToggleChargeReleased();
+
+	/** Channel button pressed */
+	UFUNCTION(BlueprintCallable, Category = "EMF")
+	void DoChannelPressed();
+
+	/** Channel button released */
+	UFUNCTION(BlueprintCallable, Category = "EMF")
+	void DoChannelReleased();
 
 	/** Update camera effects (tilt, pitch offset from shakes) */
 	void UpdateCameraEffects(float DeltaTime);

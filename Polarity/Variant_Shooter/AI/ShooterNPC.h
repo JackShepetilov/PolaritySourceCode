@@ -9,6 +9,22 @@
 #include "ShooterNPC.generated.h"
 
 class ADroppedMeleeWeapon;
+class ADroppedRangedWeapon;
+
+/** Entry in the NPC's ranged weapon drop table */
+USTRUCT(BlueprintType)
+struct FDroppedRangedWeaponEntry
+{
+	GENERATED_BODY()
+
+	/** Dropped weapon actor class to spawn (configure mesh, weapon class, etc. in its Blueprint defaults) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
+	TSubclassOf<ADroppedRangedWeapon> DroppedWeaponClass;
+
+	/** Probability of this weapon dropping (0-1). Entries are evaluated in order; first success wins. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DropChance = 0.1f;
+};
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
@@ -331,6 +347,15 @@ protected:
 	/** True when NPC is stunned by prop or drone explosion. Cleared on EndKnockbackStun. */
 	bool bStunnedByExplosion = false;
 
+	/** If true, NPC applies permanent explosion stun on BeginPlay and never recovers from it */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback")
+	bool bIsPermanentlyStunned = false;
+
+	/** True when NPC should stun the next NPC it collides with.
+	 *  Set on EnterLaunchedState, cleared on first NPC-NPC collision or EndKnockbackStun.
+	 *  Persists even if bIsLaunched is cleared (e.g. speed dropped below LaunchedMinSpeed). */
+	bool bShouldStunOnNPCImpact = false;
+
 	/** True when bEnableViscousCapture was enabled by stun-capture. Reset on ExitCapturedState. */
 	bool bCaptureEnabledByStun = false;
 
@@ -443,6 +468,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Impact", meta = (EditCondition = "bEnableNPCCollision"))
 	TObjectPtr<USoundBase> NPCCollisionImpactSound;
 
+	// ==================== Reverse Channeling Stun ====================
+
+	/** Whether to stun the target NPC when hit by a reverse-channeled launched NPC */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Reverse Channeling Stun", meta = (EditCondition = "bEnableNPCCollision"))
+	bool bApplyReverseChannelingStun = true;
+
+	/** Duration of stun applied to target when hit by reverse-channeled NPC (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Reverse Channeling Stun", meta = (ClampMin = "0.5", ClampMax = "5.0", EditCondition = "bEnableNPCCollision && bApplyReverseChannelingStun"))
+	float ReverseChannelingStunDuration = 2.0f;
+
+	/** Optional stun montage for reverse channeling impact (falls back to KnockbackMontage if null) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|NPC Collision|Reverse Channeling Stun", meta = (EditCondition = "bEnableNPCCollision && bApplyReverseChannelingStun"))
+	TObjectPtr<UAnimMontage> ReverseChannelingStunMontage;
+
 	// ==================== EMF Proximity Knockback ====================
 
 	/** Enable EMF-based attraction knockback when NPCs with opposite charges get close */
@@ -511,6 +550,13 @@ protected:
 	/** Offset above NPC location for weapon spawn */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
 	FVector DropSpawnOffset = FVector(0.0f, 0.0f, 50.0f);
+
+	// ==================== Ranged Weapon Drop ====================
+
+	/** List of ranged weapons this NPC can drop on death.
+	 *  Evaluated in order; first entry that passes its roll is spawned (at most one drop). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop|Ranged")
+	TArray<FDroppedRangedWeaponEntry> DroppedRangedWeaponTable;
 
 public:
 
@@ -774,6 +820,10 @@ public:
 
 	/** Exit captured state. Restores AI, stops montage. */
 	void ExitCapturedState();
+
+	/** Called by EMFVelocityModifier when NPC is released from reverse channeling launch.
+	 *  Sets bShouldStunOnNPCImpact so the NPC stuns the first NPC it collides with. */
+	void NotifyReverseLaunchRelease();
 
 private:
 	/** Currently playing captured montage (for looping and stop) */

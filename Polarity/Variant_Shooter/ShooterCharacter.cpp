@@ -1654,6 +1654,7 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 		}
 
 		MeleeWeaponFPMesh->SetVisibility(true, true);
+		MeleeWeaponFPMesh->HideBoneByName(FName("neck_01"), EPhysBodyOp::PBO_None);
 
 		// Play equip montage if set (draw/unsheathe animation)
 		if (AShooterWeapon_Melee* MeleeWeapon = Cast<AShooterWeapon_Melee>(Weapon))

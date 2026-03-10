@@ -12,6 +12,7 @@ class UEMFChargeWidget;
 class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
+class ADroppedRangedWeapon;
 class AUpgradePickup;
 
 /**
@@ -87,6 +88,14 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
 	void UnregisterDroppedWeapon(ADroppedMeleeWeapon* Weapon);
+
+	// ==================== Dropped Ranged Weapon API ====================
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void RegisterDroppedRangedWeapon(ADroppedRangedWeapon* Weapon);
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void UnregisterDroppedRangedWeapon(ADroppedRangedWeapon* Weapon);
 
 	// ==================== Upgrade Pickup API ====================
 

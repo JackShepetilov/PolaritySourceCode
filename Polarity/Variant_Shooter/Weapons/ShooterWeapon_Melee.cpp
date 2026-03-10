@@ -22,6 +22,8 @@
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
+#include "Variant_Shooter/AnimNotify_MeleeWindow.h"
+#include "Animation/AnimMontage.h"
 
 AShooterWeapon_Melee::AShooterWeapon_Melee()
 {
@@ -105,10 +107,19 @@ void AShooterWeapon_Melee::Fire()
 		return;
 	}
 
-	// Don't interrupt an active drop kick with refire
+	// Don't interrupt an active drop kick with refire.
+	// bIsDropKick stays true after OnDelegatedDropKickEnded to suppress the montage's
+	// damage window notify. Clear it here once MeleeAttackComponent is no longer attacking.
 	if (bIsDropKick)
 	{
-		return;
+		AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
+		UMeleeAttackComponent* MeleeComp = ShooterChar ? ShooterChar->GetMeleeAttackComponent() : nullptr;
+		if (MeleeComp && MeleeComp->IsAttacking())
+		{
+			return; // Dropkick still in progress
+		}
+		// Dropkick ended, safe to clear and proceed with new attack
+		bIsDropKick = false;
 	}
 
 	// Reset combo if too much time passed since last swing
@@ -291,10 +302,11 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 	}
 
 	// Consume one durability hit per swing (not per enemy hit)
-	UE_LOG(LogTemp, Warning, TEXT("[MeleeDurability] DeactivateDamageWindow called | bHitDuringWindow=%d, RemainingHits=%d"),
-		bHitDuringWindow, RemainingHits);
+	// Reset bHitDuringWindow BEFORE decrementing so repeated calls
+	// (from multiple AnimNotify sources) don't consume extra durability
 	if (bHitDuringWindow)
 	{
+		bHitDuringWindow = false;
 		DecrementHitCount();
 	}
 
@@ -1108,8 +1120,12 @@ void AShooterWeapon_Melee::OnDelegatedDropKickEnded()
 		PlayMeleeSound(MissSound);
 	}
 
-	// Clean up weapon-side state
-	bIsDropKick = false;
+	// Keep bIsDropKick TRUE here — the swing montage is still playing and its
+	// damage window notify would fire after this callback. Since ActivateDamageWindow()
+	// checks bIsDropKick, keeping it true prevents the notify from opening a damage
+	// window that would score a second hit.
+	// bIsDropKick is cleared at the start of the next Fire() call, which also calls
+	// StopCurrentMontage() to kill the old animation before starting a new one.
 	DropKickHeightDifference = 0.0f;
 
 	StopSwingTrail();
@@ -1184,6 +1200,31 @@ void AShooterWeapon_Melee::StopCameraFocus()
 }
 
 // ==================== Animation ====================
+
+float AShooterWeapon_Melee::FindDamageWindowStartTime(const UAnimMontage* Montage)
+{
+	if (!Montage)
+	{
+		return -1.0f;
+	}
+
+	for (const FAnimNotifyEvent& NotifyEvent : Montage->Notifies)
+	{
+		if (NotifyEvent.NotifyStateClass &&
+			NotifyEvent.NotifyStateClass->IsA<UAnimNotifyState_MeleeDamageWindow>())
+		{
+			return NotifyEvent.GetTriggerTime();
+		}
+
+		if (NotifyEvent.Notify &&
+			NotifyEvent.Notify->IsA<UAnimNotify_MeleeActivate>())
+		{
+			return NotifyEvent.GetTriggerTime();
+		}
+	}
+
+	return -1.0f;
+}
 
 const FMeleeWeaponSwingData* AShooterWeapon_Melee::SelectWeightedSwing(bool bAirborne)
 {
@@ -1296,7 +1337,7 @@ void AShooterWeapon_Melee::StopCurrentMontage()
 	}
 }
 
-void AShooterWeapon_Melee::PlayMontageOnFPMesh(UAnimMontage* Montage)
+void AShooterWeapon_Melee::PlayMontageOnFPMesh(UAnimMontage* Montage, float PlayRate)
 {
 	if (!Montage || !CachedMeleeWeaponFPMesh)
 	{
@@ -1307,7 +1348,7 @@ void AShooterWeapon_Melee::PlayMontageOnFPMesh(UAnimMontage* Montage)
 	{
 		if (!AnimInstance->Montage_IsPlaying(Montage))
 		{
-			AnimInstance->Montage_Play(Montage);
+			AnimInstance->Montage_Play(Montage, PlayRate);
 		}
 	}
 }
@@ -1434,10 +1475,6 @@ bool AShooterWeapon_Melee::DecrementHitCount()
 	}
 
 	--RemainingHits;
-	UE_LOG(LogTemp, Warning, TEXT("[MeleeDurability] DecrementHitCount: %d -> %d (Max: %d) | CallStack: %s"),
-		RemainingHits + 1, RemainingHits, MaxHitCount,
-		*FString::Printf(TEXT("DamageWindowActive=%d, HitDuringWindow=%d, HitActors=%d"),
-			bDamageWindowActive, bHitDuringWindow, HitActorsThisSwing.Num()));
 	BroadcastDurabilityUpdate();
 
 	if (RemainingHits <= 0)

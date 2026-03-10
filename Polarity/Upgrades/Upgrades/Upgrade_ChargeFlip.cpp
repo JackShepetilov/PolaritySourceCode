@@ -14,6 +14,7 @@
 #include "Engine/DamageEvents.h"
 #include "EngineUtils.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
+#include "EMFPhysicsProp.h"
 
 void UUpgrade_ChargeFlip::OnUpgradeActivated()
 {
@@ -247,7 +248,19 @@ void UUpgrade_ChargeFlip::ApplyIonization(AActor* Target)
 		return;
 	}
 
-	// Fallback: UEMF_FieldComponent (for physics props)
+	// Route through SetCharge() for props (enables physics on first charge)
+	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
+	{
+		const float CurrentCharge = Prop->GetCharge();
+		if (CurrentCharge >= DefCF->MaxIonizationCharge)
+		{
+			return;
+		}
+		Prop->SetCharge(FMath::Min(CurrentCharge + DefCF->IonizationChargePerHit, DefCF->MaxIonizationCharge));
+		return;
+	}
+
+	// Generic fallback: UEMF_FieldComponent
 	if (UEMF_FieldComponent* TargetField = Target->FindComponentByClass<UEMF_FieldComponent>())
 	{
 		FEMSourceDescription Desc = TargetField->GetSourceDescription();

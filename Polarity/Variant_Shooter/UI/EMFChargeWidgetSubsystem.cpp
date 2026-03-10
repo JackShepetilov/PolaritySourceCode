@@ -5,6 +5,7 @@
 #include "EMFChargeWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
+#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
@@ -214,6 +215,49 @@ void UEMFChargeWidgetSubsystem::RegisterDroppedWeapon(ADroppedMeleeWeapon* Weapo
 }
 
 void UEMFChargeWidgetSubsystem::UnregisterDroppedWeapon(ADroppedMeleeWeapon* Weapon)
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	TObjectPtr<UEMFChargeWidget>* FoundWidget = ActiveWidgets.Find(Weapon);
+	if (FoundWidget && *FoundWidget)
+	{
+		ReturnWidgetToPool(*FoundWidget);
+	}
+
+	ActiveWidgets.Remove(Weapon);
+}
+
+void UEMFChargeWidgetSubsystem::RegisterDroppedRangedWeapon(ADroppedRangedWeapon* Weapon)
+{
+	if (!Weapon || !bEnabled)
+	{
+		return;
+	}
+
+	if (ActiveWidgets.Contains(Weapon))
+	{
+		return;
+	}
+
+	if (!WidgetClass)
+	{
+		return;
+	}
+
+	UEMFChargeWidget* Widget = GetWidgetFromPool();
+	if (!Widget)
+	{
+		return;
+	}
+
+	Widget->BindToDroppedRangedWeapon(Weapon, Settings.PropVerticalOffset);
+	ActiveWidgets.Add(Weapon, Widget);
+}
+
+void UEMFChargeWidgetSubsystem::UnregisterDroppedRangedWeapon(ADroppedRangedWeapon* Weapon)
 {
 	if (!Weapon)
 	{
