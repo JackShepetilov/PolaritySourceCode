@@ -363,6 +363,7 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 
 			if (AttackerPawn)
 			{
+				NotifyTargetAcquired(AttackerPawn);
 				CurrentAimTarget = AttackerPawn;
 				bWantsToShoot = true;
 				bIsShooting = true;
@@ -1003,6 +1004,9 @@ void AShooterNPC::DeactivateForDeath(float DestructionDelay, bool bHideMesh)
 
 void AShooterNPC::StartShooting(AActor* ActorToShoot, bool bHasExternalPermission)
 {
+	// Track target acquisition for perception delay
+	NotifyTargetAcquired(ActorToShoot);
+
 	// Save the aim target and mark that we want to shoot
 	CurrentAimTarget = ActorToShoot;
 	bWantsToShoot = true;
@@ -1027,6 +1031,14 @@ void AShooterNPC::TryStartShooting()
 	{
 		StopPermissionRetryTimer();
 		CurrentAimTarget = nullptr;
+		return;
+	}
+
+	// Wait for perception delay to expire before attacking
+	if (IsInPerceptionDelay())
+	{
+		GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
+			&AShooterNPC::TryStartShooting, 0.1f, false);
 		return;
 	}
 
@@ -1082,6 +1094,10 @@ void AShooterNPC::StopShooting()
 	bWantsToShoot = false;
 	bExternalPermissionGranted = false;
 
+	// Reset perception delay tracking (target lost)
+	TargetAcquiredTime = -1.0f;
+	PerceptionDelayTrackedTarget = nullptr;
+
 	// Stop retry timer
 	StopPermissionRetryTimer();
 
@@ -1093,6 +1109,24 @@ void AShooterNPC::StopShooting()
 
 	// Release attack permission
 	ReleaseAttackPermission();
+}
+
+void AShooterNPC::NotifyTargetAcquired(AActor* NewTarget)
+{
+	if (!NewTarget) return;
+
+	// Only reset timer if this is a different target
+	if (PerceptionDelayTrackedTarget != NewTarget)
+	{
+		PerceptionDelayTrackedTarget = NewTarget;
+		TargetAcquiredTime = GetWorld()->GetTimeSeconds();
+	}
+}
+
+bool AShooterNPC::IsInPerceptionDelay() const
+{
+	if (PerceptionDelay <= 0.0f || TargetAcquiredTime < 0.0f) return false;
+	return (GetWorld()->GetTimeSeconds() - TargetAcquiredTime) < PerceptionDelay;
 }
 
 bool AShooterNPC::HasLineOfSightTo(AActor* Target) const

@@ -254,6 +254,21 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float PermissionRetryInterval = 0.25f;
 
+	// ==================== Perception Delay ====================
+
+	/** Delay (seconds) before NPC can attack after acquiring a new target.
+	 *  During this time NPC moves and faces the target normally, but cannot shoot or melee. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Perception", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float PerceptionDelay = 0.75f;
+
+	/** World time when the current target was first acquired. -1 = no target tracked */
+	float TargetAcquiredTime = -1.0f;
+
+	/** The target we're tracking for perception delay (to detect target switch) */
+	TWeakObjectPtr<AActor> PerceptionDelayTrackedTarget;
+
+	// ==================== Burst Fire State ====================
+
 	/** Current shot count in this burst */
 	int32 CurrentBurstShots = 0;
 
@@ -876,6 +891,13 @@ public:
 	/** Returns true if this NPC is in burst cooldown (burst completed, waiting to fire again) */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsInBurstCooldown() const { return bInBurstCooldown; }
+
+	/** Records the time a new target was acquired. Resets timer if target changes. */
+	void NotifyTargetAcquired(AActor* NewTarget);
+
+	/** Returns true if still within perception delay window after acquiring a target */
+	UFUNCTION(BlueprintPure, Category = "AI|Perception")
+	bool IsInPerceptionDelay() const;
 
 	/** Check if NPC has line of sight to target */
 	UFUNCTION(BlueprintPure, Category = "Combat")

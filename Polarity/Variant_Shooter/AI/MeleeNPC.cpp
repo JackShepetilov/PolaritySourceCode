@@ -89,6 +89,9 @@ void AMeleeNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AMeleeNPC::StartMeleeAttack(AActor* Target)
 {
+	// Track target acquisition for perception delay
+	NotifyTargetAcquired(Target);
+
 	// Validate
 	if (!CanAttack() || !Target || bIsDead)
 	{
@@ -191,6 +194,12 @@ bool AMeleeNPC::CanAttack() const
 {
 	// Нельзя атаковать если мёртв, уже атакует, в knockback или в dash
 	if (bIsDead || bIsAttacking || bIsInKnockback || bIsDashing)
+	{
+		return false;
+	}
+
+	// Wait for perception delay to expire before attacking
+	if (IsInPerceptionDelay())
 	{
 		return false;
 	}
