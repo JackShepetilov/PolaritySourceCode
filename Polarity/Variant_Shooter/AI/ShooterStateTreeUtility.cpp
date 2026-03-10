@@ -219,8 +219,6 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 		// get the instance data
 		FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
 
-		UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: EnterState - binding delegates"));
-
 		// Capture Controller, Character, and SenseTag by value (safe - they're pointers/simple types)
 		// Capture WeakContext to access InstanceData only when context is valid
 		AShooterAIController* Controller = InstanceData.Controller;
@@ -231,23 +229,15 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 		InstanceData.Controller->OnShooterPerceptionUpdated.BindLambda(
 			[WeakContext = Context.MakeWeakExecutionContext(), Controller, Character, SenseTag](AActor* SensedActor, const FAIStimulus& Stimulus)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: PerceptionUpdated called for %s"), *SensedActor->GetName());
-
-				// Verify captured objects are still valid
+					// Verify captured objects are still valid
 				if (!IsValid(Controller) || !IsValid(Character))
 				{
-					UE_LOG(LogTemp, Error, TEXT("SenseEnemies: Controller or Character invalid in lambda"));
 					return;
 				}
 
 				// Try to get InstanceData through WeakContext (may fail if StateTree already transitioned)
 				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
 				FInstanceDataType* InstanceData = StrongContext.IsValid() ? StrongContext.GetInstanceDataPtr<FInstanceDataType>() : nullptr;
-
-				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking tag '%s' on %s - HasTag: %s"),
-					*SenseTag.ToString(),
-					*SensedActor->GetName(),
-					SensedActor->ActorHasTag(SenseTag) ? TEXT("YES") : TEXT("NO"));
 
 				if (SensedActor->ActorHasTag(SenseTag))
 				{
@@ -267,28 +257,21 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 					);
 					bool bDirectLOS = !bHit;
 
-					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: LineTrace to %s - DirectLOS=%s"),
-						*SensedActor->GetName(),
-						bDirectLOS ? TEXT("YES") : TEXT("NO"));
-
 					if (bDirectLOS)
 					{
-						UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Setting target to %s"), *SensedActor->GetName());
-
 						// Always update the controller's target (works even if StateTree transitioned)
 						Controller->SetCurrentTarget(SensedActor);
 
 						// Update InstanceData only if still in this state
 						if (InstanceData)
 						{
-							UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: InstanceData is valid, updating TargetActor and bHasTarget"));
 							InstanceData->TargetActor = SensedActor;
 							InstanceData->bHasTarget = true;
 							InstanceData->bHasInvestigateLocation = false;
 						}
 						else
 						{
-							UE_LOG(LogTemp, Error, TEXT("SenseEnemies: InstanceData is NULL! Cannot update StateTree output"));
+							// InstanceData is NULL - StateTree already transitioned, controller target was still set above
 						}
 
 					// no direct line of sight to target
@@ -350,16 +333,12 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 					}
 				}
 
-				UE_LOG(LogTemp, Log, TEXT("SenseEnemies: Perception forgot %s — target kept (will clear if actor becomes invalid)"),
-					*SensedActor->GetName());
 			}
 		);
 
 		// ВАЖНО: Проверить уже известных актёров из AIPerception
 		// Это нужно потому что PerceptionUpdated может вызваться ДО того как мы забиндили делегаты
 		// В таком случае NPC не получит событие и не установит цель
-		UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Checking already known actors"));
-
 		// Force perception system to update immediately
 		InstanceData.Controller->ForcePerceptionUpdate();
 
@@ -368,8 +347,6 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 			TArray<AActor*> KnownActors;
 			PerceptionComp->GetKnownPerceivedActors(nullptr, KnownActors);
 
-			UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Found %d known actors"), KnownActors.Num());
-
 			for (AActor* KnownActor : KnownActors)
 			{
 				if (!KnownActor)
@@ -377,13 +354,9 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 					continue;
 				}
 
-				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Processing known actor %s"), *KnownActor->GetName());
-
 				// Проверяем тег
 				if (!KnownActor->ActorHasTag(InstanceData.SenseTag))
 				{
-					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Known actor %s doesn't have tag '%s'"),
-						*KnownActor->GetName(), *InstanceData.SenseTag.ToString());
 					continue;
 				}
 
@@ -403,13 +376,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 
 				bool bDirectLOS = !bHit;
 
-				UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Known actor %s - DirectLOS=%s"),
-					*KnownActor->GetName(), bDirectLOS ? TEXT("YES") : TEXT("NO"));
-
 				if (bDirectLOS)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Setting target to known actor %s"), *KnownActor->GetName());
-
 					// Устанавливаем цель
 					InstanceData.Controller->SetCurrentTarget(KnownActor);
 					InstanceData.TargetActor = KnownActor;
@@ -440,10 +408,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 		InstanceData.TargetActor = ControllerTarget;
 		InstanceData.bHasTarget = IsValid(ControllerTarget);
 
-		if (IsValid(ControllerTarget))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Tick synced target from Controller: %s"), *ControllerTarget->GetName());
-		}
+		// Target synced from Controller
 	}
 
 	// Safety: clear target if the actor was destroyed (GC may not have cleared the pointer yet)
@@ -493,7 +458,6 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 
 					if (!bHit) // Direct LOS
 					{
-						UE_LOG(LogTemp, Warning, TEXT("SenseEnemies: Poll found target %s"), *KnownActor->GetName());
 						InstanceData.Controller->SetCurrentTarget(KnownActor);
 						InstanceData.TargetActor = KnownActor;
 						InstanceData.bHasTarget = true;

@@ -60,12 +60,6 @@ EStateTreeRunStatus FStateTreeMeleeAttackTask::Tick(FStateTreeExecutionContext& 
 	bool bInRange = Data.Character->IsTargetInAttackRange(Data.Target);
 	bool bInKnockback = Data.Character->IsInKnockback();
 
-	UE_LOG(LogTemp, Warning, TEXT("MeleeAttackTask::Tick - Attacking=%s, CanAttack=%s, InRange=%s, InKnockback=%s"),
-		bIsAttacking ? TEXT("Y") : TEXT("N"),
-		bCanAttack ? TEXT("Y") : TEXT("N"),
-		bInRange ? TEXT("Y") : TEXT("N"),
-		bInKnockback ? TEXT("Y") : TEXT("N"));
-
 	if (bIsAttacking)
 	{
 		return EStateTreeRunStatus::Running;

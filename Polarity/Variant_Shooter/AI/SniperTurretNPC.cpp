@@ -82,16 +82,6 @@ void ASniperTurretNPC::Tick(float DeltaTime)
 		bIsInKnockback = false;
 	}
 
-	// Periodic state dump (every 2 seconds)
-	static double LastStateDump = 0;
-	if (AimTarget.IsValid() && GetWorld()->GetTimeSeconds() - LastStateDump > 2.0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] STATE: AimState=%d, AimProgress=%.2f, LOS=%d, BurstCD=%d, bIsShooting=%d, Target=%s"),
-			(int32)CurrentAimState, AimProgress, bHasLOS, bInBurstCooldown, bIsShooting,
-			AimTarget.IsValid() ? *AimTarget->GetName() : TEXT("null"));
-		LastStateDump = GetWorld()->GetTimeSeconds();
-	}
-
 	// Rotate turret toward target when engaged
 	if (AimTarget.IsValid() && CurrentAimState != ETurretAimState::Idle)
 	{
@@ -116,7 +106,8 @@ void ASniperTurretNPC::StartAiming(AActor* Target)
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[SniperTurret] StartAiming at %s"), *Target->GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] StartAiming at %s (prevState=%d, prevProgress=%.3f, bHasLOS=%d)"),
+		*Target->GetName(), (int32)CurrentAimState, AimProgress, bHasLOS);
 	AimTarget = Target;
 	ResetAimProgress();
 	SetAimState(ETurretAimState::Aiming);
@@ -139,8 +130,8 @@ void ASniperTurretNPC::SetLOSStatus(bool bNewHasLOS)
 
 	if (bWasLOS != bNewHasLOS)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[SniperTurret] LOS changed: %d → %d (State: %d)"),
-			bWasLOS, bNewHasLOS, (int32)CurrentAimState);
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS changed: %d → %d (State: %d, AimProgress=%.3f)"),
+			bWasLOS, bNewHasLOS, (int32)CurrentAimState, AimProgress);
 	}
 
 	if (bWasLOS && !bNewHasLOS)
@@ -150,8 +141,20 @@ void ASniperTurretNPC::SetLOSStatus(bool bNewHasLOS)
 		{
 			ResetAimProgress();
 		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS lost but state=%d (not Aiming) — AimProgress NOT reset (%.3f)"),
+				(int32)CurrentAimState, AimProgress);
+		}
 	}
-	// When LOS regained, UpdateAimProgress resumes naturally since bHasLOS is true
+
+	if (!bWasLOS && bNewHasLOS)
+	{
+		// LOS regained — AimProgress should be 0 if properly reset
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS REGAINED: AimProgress=%.3f, State=%d %s"),
+			AimProgress, (int32)CurrentAimState,
+			AimProgress > 0.01f ? TEXT("*** NON-ZERO PROGRESS! ***") : TEXT("(OK)"));
+	}
 }
 
 // ==================== Internal Aiming Logic ====================
@@ -160,24 +163,33 @@ void ASniperTurretNPC::UpdateAimProgress(float DeltaTime)
 {
 	if (!AimTarget.IsValid() || bIsDead || !bHasLOS)
 	{
-		// Log why we're not progressing (throttled to once per second)
-		static double LastSkipLog = 0;
-		if (GetWorld()->GetTimeSeconds() - LastSkipLog > 1.0)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress SKIPPED: Target=%d, Dead=%d, LOS=%d, State=%d"),
-				AimTarget.IsValid(), bIsDead, bHasLOS, (int32)CurrentAimState);
-			LastSkipLog = GetWorld()->GetTimeSeconds();
-		}
 		return;
 	}
 
+	const float OldProgress = AimProgress;
 	AimProgress += DeltaTime / AimDuration;
 	AimProgress = FMath::Clamp(AimProgress, 0.0f, 1.0f);
+
+	// Log first frame of accumulation — catches cases where progress starts non-zero
+	if (OldProgress < 0.01f && AimProgress >= 0.01f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress STARTED: %.3f → %.3f (DT=%.4f, AimDuration=%.2f)"),
+			OldProgress, AimProgress, DeltaTime, AimDuration);
+	}
+
+	// Log when halfway — for timing reference
+	if (OldProgress < 0.5f && AimProgress >= 0.5f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress HALFWAY: %.3f (Time=%.2f)"),
+			AimProgress, GetWorld()->GetTimeSeconds());
+	}
 
 	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
 
 	if (AimProgress >= 1.0f)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress FULL — about to fire (Time=%.2f)"),
+			GetWorld()->GetTimeSeconds());
 		FireAtTarget();
 	}
 }
@@ -258,9 +270,9 @@ void ASniperTurretNPC::FireAtTarget()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] === FIRING at %s ==="), *AimTarget->GetName());
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Pre-fire: bIsShooting=%d, bWantsToShoot=%d, bInBurstCooldown=%d, bIsInKnockback=%d, CurrentBurstShots=%d"),
-		bIsShooting, bWantsToShoot, bInBurstCooldown, bIsInKnockback, CurrentBurstShots);
+	UE_LOG(LogTemp, Warning, TEXT("[Turret:%s] === FIRING at %s === (T=%.2f)"), *GetName(), *AimTarget->GetName(), GetWorld()->GetTimeSeconds());
+	UE_LOG(LogTemp, Warning, TEXT("[Turret:%s]   Pre-fire: bIsShooting=%d, bWantsToShoot=%d, bInBurstCooldown=%d, bIsInKnockback=%d, CurrentBurstShots=%d"),
+		*GetName(), bIsShooting, bWantsToShoot, bInBurstCooldown, bIsInKnockback, CurrentBurstShots);
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Weapon: %s"),
 		Weapon ? *Weapon->GetName() : TEXT("NULL"));
 
@@ -294,8 +306,18 @@ void ASniperTurretNPC::FireAtTarget()
 
 void ASniperTurretNPC::OnDamageRecoveryEnd()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] DamageRecoveryEnd: AimProgress=%.3f, Target=%d, LOS=%d"),
+		AimProgress, AimTarget.IsValid(), bHasLOS);
+
 	if (AimTarget.IsValid() && bHasLOS && !bIsDead)
 	{
+		// Safety: ensure progress is 0 when re-entering Aiming
+		if (AimProgress > 0.01f)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[SniperTurret] *** BUG: AimProgress=%.3f when entering Aiming from DamageRecovery! Resetting. ***"),
+				AimProgress);
+			ResetAimProgress();
+		}
 		SetAimState(ETurretAimState::Aiming);
 	}
 	else
@@ -306,8 +328,18 @@ void ASniperTurretNPC::OnDamageRecoveryEnd()
 
 void ASniperTurretNPC::OnPostFireCooldownEnd()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] PostFireCooldownEnd: AimProgress=%.3f, Target=%d, LOS=%d"),
+		AimProgress, AimTarget.IsValid(), bHasLOS);
+
 	if (AimTarget.IsValid() && bHasLOS && !bIsDead)
 	{
+		// Safety: ensure progress is 0 when re-entering Aiming
+		if (AimProgress > 0.01f)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[SniperTurret] *** BUG: AimProgress=%.3f when entering Aiming from PostFireCooldown! Resetting. ***"),
+				AimProgress);
+			ResetAimProgress();
+		}
 		SetAimState(ETurretAimState::Aiming);
 	}
 	else
@@ -318,6 +350,11 @@ void ASniperTurretNPC::OnPostFireCooldownEnd()
 
 void ASniperTurretNPC::ResetAimProgress()
 {
+	if (AimProgress > 0.01f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] ResetAimProgress: %.3f → 0.0 (State=%d)"),
+			AimProgress, (int32)CurrentAimState);
+	}
 	AimProgress = 0.0f;
 	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
 }
@@ -326,7 +363,7 @@ void ASniperTurretNPC::SetAimState(ETurretAimState NewState)
 {
 	if (CurrentAimState != NewState)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[SniperTurret] State: %d → %d"), (int32)CurrentAimState, (int32)NewState);
+		UE_LOG(LogTemp, Warning, TEXT("[Turret:%s] State: %d → %d (T=%.2f)"), *GetName(), (int32)CurrentAimState, (int32)NewState, GetWorld()->GetTimeSeconds());
 	}
 	CurrentAimState = NewState;
 	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
@@ -340,6 +377,13 @@ float ASniperTurretNPC::TakeDamage(float Damage, FDamageEvent const& DamageEvent
 	// Melee damage and charge transfer pass through normally
 	// Knockback is already blocked via ApplyKnockback/ApplyKnockbackVelocity overrides
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	// CRITICAL: Parent's TakeDamage starts retaliation shooting when attacked
+	// (sets bWantsToShoot=true, bIsShooting=true, defers TryStartShooting to next tick).
+	// Turret must ONLY fire through its own aim progress system.
+	// Reset parent's shooting state so the deferred TryStartShooting exits early.
+	bIsShooting = false;
+	bWantsToShoot = false;
 
 	if (bIsDead)
 	{

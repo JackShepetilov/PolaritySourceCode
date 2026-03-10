@@ -215,9 +215,6 @@ bool AMeleeNPC::IsTargetInAttackRange(AActor* Target) const
 	float Distance = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
 	bool bInRange = Distance <= AttackRange;
 
-	UE_LOG(LogTemp, Warning, TEXT("IsTargetInAttackRange: Distance=%.2f, AttackRange=%.2f, InRange=%s"),
-		Distance, AttackRange, bInRange ? TEXT("YES") : TEXT("NO"));
-
 	return bInRange;
 }
 

@@ -123,26 +123,12 @@ void AShooterAIController::ClearCurrentTarget()
 
 void AShooterAIController::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
-	// Debug: Log all perception updates with sense type
 	const bool bIsSight = Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>();
 	const bool bIsTeam = Stimulus.Type == UAISense::GetSenseID<UAISense_Team>();
-
-	UE_LOG(LogTemp, Log, TEXT("[%s] OnPerceptionUpdated: Actor=%s, Sensed=%d, SenseType=%s (Sight=%d, Team=%d)"),
-		*GetName(),
-		Actor ? *Actor->GetName() : TEXT("NULL"),
-		Stimulus.WasSuccessfullySensed(),
-		*Stimulus.Type.Name.ToString(),
-		bIsSight,
-		bIsTeam);
 
 	// If this is a Team sense event, broadcast to Blueprint
 	if (bIsTeam && Stimulus.WasSuccessfullySensed())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[%s] >>> RECEIVED TEAM PERCEPTION about %s at location %s"),
-			*GetName(),
-			Actor ? *Actor->GetName() : TEXT("NULL"),
-			*Stimulus.StimulusLocation.ToString());
-
 		// Broadcast Blueprint event for team perception
 		OnTeamPerceptionReceived.Broadcast(Actor, Stimulus.StimulusLocation);
 	}
@@ -220,41 +206,4 @@ void AShooterAIController::BroadcastEnemyToTeam(AActor* DetectedEnemy, const FVe
 	// Send the event to the perception system (this internally calls UAISense_Team::RegisterEvent)
 	PerceptionSystem->OnEvent(TeamEvent);
 
-	// Debug: Count nearby teammates and check their perception configs
-	int32 NearbyTeammates = 0;
-	for (TActorIterator<AShooterAIController> It(GetWorld()); It; ++It)
-	{
-		AShooterAIController* OtherController = *It;
-		if (OtherController && OtherController != this && OtherController->GetPawn())
-		{
-			if (OtherController->GetGenericTeamId() == GetGenericTeamId())
-			{
-				float Distance = FVector::Dist(GetPawn()->GetActorLocation(), OtherController->GetPawn()->GetActorLocation());
-				if (Distance <= TeamPerceptionRadius)
-				{
-					NearbyTeammates++;
-
-					// Check if teammate has Team sense configured
-					bool bHasTeamSense = false;
-					if (OtherController->AIPerception)
-					{
-						FAISenseID TeamSenseID = UAISense::GetSenseID<UAISense_Team>();
-						bHasTeamSense = OtherController->AIPerception->GetSenseConfig(TeamSenseID) != nullptr;
-					}
-
-					UE_LOG(LogTemp, Warning, TEXT("  -> Teammate %s (dist=%.0f, TeamSenseConfigured=%d)"),
-						*OtherController->GetName(),
-						Distance,
-						bHasTeamSense);
-				}
-			}
-		}
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[%s] <<< BROADCASTING: enemy=%s, radius=%.0f, NearbyTeammates=%d, BroadcasterLoc=%s"),
-		*GetName(),
-		*DetectedEnemy->GetName(),
-		TeamPerceptionRadius,
-		NearbyTeammates,
-		*GetPawn()->GetActorLocation().ToString());
 }
