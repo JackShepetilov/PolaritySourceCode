@@ -1020,11 +1020,57 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 
 	FVector BeamEnd = bHit ? HitResult.ImpactPoint : End;
 
+	// === DEBUG: NPC Simple Hitscan ===
+	if (bHit)
+	{
+		AActor* HitActor = HitResult.GetActor();
+		UPrimitiveComponent* HitComp = HitResult.GetComponent();
+
+		FString ActorName = HitActor ? HitActor->GetName() : TEXT("NULL");
+		FString ActorClass = HitActor ? HitActor->GetClass()->GetName() : TEXT("NULL");
+		FString CompName = HitComp ? HitComp->GetName() : TEXT("NULL");
+		FString CompClass = HitComp ? HitComp->GetClass()->GetName() : TEXT("NULL");
+		bool bCanDamage = HitActor ? HitActor->CanBeDamaged() : false;
+		bool bIsPawn = HitActor ? Cast<APawn>(HitActor) != nullptr : false;
+		FString BoneName = HitResult.BoneName.ToString();
+
+		// Collision profile of hit component
+		FString CollisionProfile = TEXT("NONE");
+		if (HitComp)
+		{
+			CollisionProfile = HitComp->GetCollisionProfileName().ToString();
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] HIT: Actor=%s (%s) | Comp=%s (%s) | Profile=%s | Bone=%s | IsPawn=%d | CanBeDamaged=%d | Dist=%.0f"),
+			*ActorName, *ActorClass, *CompName, *CompClass, *CollisionProfile, *BoneName, bIsPawn, bCanDamage, HitResult.Distance);
+
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
+			FString::Printf(TEXT("[NPC] Hit: %s (%s) | CanDmg=%d | Pawn=%d | Dist=%.0f"),
+				*ActorName, *ActorClass, bCanDamage, bIsPawn, HitResult.Distance));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] MISS: No hit within %.0f units"), TraceDistance);
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("[NPC] MISS - nothing hit"));
+	}
+	// === END DEBUG ===
+
 	// Apply damage to whatever was hit (player, damageable prop, etc.)
 	if (bHit && HitResult.GetActor() && HitResult.GetActor()->CanBeDamaged())
 	{
 		// WaveRadius = 0 gives AreaMultiplier = 1.0 (full damage, no cone spread penalty)
 		ApplyHitscanDamage(HitResult, EnergyMultiplier, HitResult.Distance, 0.0f);
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] DAMAGE APPLIED to %s"), *HitResult.GetActor()->GetName());
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
+			FString::Printf(TEXT("[NPC] DAMAGE -> %s"), *HitResult.GetActor()->GetName()));
+	}
+	else if (bHit && HitResult.GetActor())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] HIT but NO DAMAGE: CanBeDamaged=%d"),
+			HitResult.GetActor()->CanBeDamaged());
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Orange,
+			FString::Printf(TEXT("[NPC] HIT %s but CanBeDamaged=FALSE"), *HitResult.GetActor()->GetName()));
 	}
 
 	// Visual effects
