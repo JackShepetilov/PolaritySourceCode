@@ -295,6 +295,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Recoil")
 	void OnWeaponFired();
 
+	/** Fire a single shot using override recoil settings (ignores current weapon settings and consecutive state) */
+	UFUNCTION(BlueprintCallable, Category = "Recoil")
+	void FireWithOverrideSettings(const FWeaponRecoilSettings& OverrideSettings);
+
 	/** Called when firing stops - reset consecutive shot counter */
 	UFUNCTION(BlueprintCallable, Category = "Recoil")
 	void OnFiringEnded();

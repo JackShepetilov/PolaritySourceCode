@@ -294,17 +294,10 @@ void UUpgrade_360Shot::Execute360Shot()
 	// Spawn charged beam VFX (from muzzle to hit point)
 	SpawnChargedBeamEffect(MuzzleLocation, BeamEnd);
 
-	// Extra recoil kicks — normal shot already provides 1x, add (Multiplier - 1) extra full recoil cycles
-	int32 ExtraKicks = FMath::RoundToInt(Def360->RecoilMultiplier) - 1;
-	if (ExtraKicks > 0)
+	// Apply 360 shot's own recoil settings (independent from weapon's recoil)
+	if (UWeaponRecoilComponent* RecoilComp = Character->GetRecoilComponent())
 	{
-		if (UWeaponRecoilComponent* RecoilComp = Character->GetRecoilComponent())
-		{
-			for (int32 i = 0; i < ExtraKicks; ++i)
-			{
-				RecoilComp->OnWeaponFired();
-			}
-		}
+		RecoilComp->FireWithOverrideSettings(Def360->ShotRecoilSettings);
 	}
 
 	// Play charged fire sound

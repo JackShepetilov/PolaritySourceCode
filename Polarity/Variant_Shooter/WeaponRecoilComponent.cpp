@@ -126,6 +126,27 @@ void UWeaponRecoilComponent::OnWeaponFired()
 		ViewmodelRecoil.Pitch, ViewmodelRecoil.Yaw);
 }
 
+void UWeaponRecoilComponent::FireWithOverrideSettings(const FWeaponRecoilSettings& OverrideSettings)
+{
+	// Save current state
+	FWeaponRecoilSettings SavedSettings = Settings;
+	int32 SavedShotIndex = CurrentShotIndex;
+	float SavedConsecutiveMultiplier = CurrentConsecutiveMultiplier;
+
+	// Apply override — start from shot 0 with no consecutive buildup
+	Settings = OverrideSettings;
+	CurrentShotIndex = 0;
+	CurrentConsecutiveMultiplier = 1.0f;
+
+	// Fire with override settings
+	OnWeaponFired();
+
+	// Restore original state
+	Settings = SavedSettings;
+	CurrentShotIndex = SavedShotIndex;
+	CurrentConsecutiveMultiplier = SavedConsecutiveMultiplier;
+}
+
 void UWeaponRecoilComponent::OnFiringEnded()
 {
 	bIsFiring = false;

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UpgradeDefinition.h"
+#include "WeaponRecoilComponent.h"
 #include "UpgradeDefinition_360Shot.generated.h"
 
 class UNiagaraSystem;
@@ -38,9 +39,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "0.0"))
 	float MinRotationSpeed = 180.0f;
 
-	/** Recoil multiplier for the 360 shot (1 = normal, 2 = double, 3 = triple, etc.). The normal shot already provides 1x, this adds extra kicks on top. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "1.0", ClampMax = "10.0"))
-	float RecoilMultiplier = 2.0f;
+	/** Independent recoil settings for the 360 shot (applied instead of weapon's normal recoil) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot|Recoil")
+	FWeaponRecoilSettings ShotRecoilSettings;
 
 	/** Cooldown duration after charged state ends before a new spin can charge (seconds). 0 = no cooldown. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot", meta = (ClampMin = "0.0", ClampMax = "30.0"))
