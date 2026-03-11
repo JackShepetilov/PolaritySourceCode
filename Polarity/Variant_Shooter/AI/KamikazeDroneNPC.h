@@ -392,6 +392,28 @@ protected:
 	/** If true, attack was triggered by retaliation (bypasses token) */
 	bool bIsRetaliating = false;
 
+	// ==================== Telegraph Phantom Lerp ====================
+	// Two "ghost" drones are simulated: one continues orbiting, one snaps to attack.
+	// The real drone's position is lerped between them over TelegraphDuration.
+
+	/** Drone position at telegraph start — both phantoms originate here */
+	FVector TelegraphStartPos = FVector::ZeroVector;
+
+	/** Attack phantom direction (toward predicted target at telegraph start) */
+	FVector TelegraphAttackDir = FVector::ForwardVector;
+
+	/** Saved orbit angle for phantom orbit simulation */
+	float TelegraphPhantomOrbitAngle = 0.0f;
+
+	/** Saved effective speed for phantom orbit */
+	float TelegraphPhantomOrbitSpeed = 0.0f;
+
+	/** Saved orbit center for phantom orbit */
+	FVector TelegraphPhantomOrbitCenter = FVector::ZeroVector;
+
+	/** Previous frame's interpolated position (for computing virtual velocity) */
+	FVector TelegraphPrevPos = FVector::ZeroVector;
+
 	// ==================== Damage State (for StateTree) ====================
 
 	/** True if damage taken this frame */

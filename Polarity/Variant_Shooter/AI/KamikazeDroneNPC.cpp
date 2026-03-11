@@ -271,7 +271,38 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), OrbitStr, nullptr, FColor::Green, 0.0f, true, 0.8f);
 		}
 
-		if (CurrentState == EKamikazeState::Attacking || CurrentState == EKamikazeState::Telegraphing)
+		if (CurrentState == EKamikazeState::Telegraphing)
+		{
+			// --- Telegraph: show phantom positions and lerp progress ---
+			const float DbgAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
+
+			// Orbit phantom position (blue sphere)
+			const float DbgSM = CurrentOrbitRadius;
+			const float DbgSm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
+			const FVector DbgOrbitPhantom(
+				TelegraphPhantomOrbitCenter.X + DbgSM * FMath::Cos(TelegraphPhantomOrbitAngle),
+				TelegraphPhantomOrbitCenter.Y + DbgSm * FMath::Sin(TelegraphPhantomOrbitAngle),
+				TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
+					+ OrbitHeightAmplitude * FMath::Sin(TelegraphPhantomOrbitAngle + OrbitHeightPhaseOffset));
+			DrawDebugSphere(GetWorld(), DbgOrbitPhantom, 20.0f, 6, FColor::Blue, false, 0.0f, 0, 2.0f);
+
+			// Attack phantom position (red sphere)
+			const FVector DbgAttackPhantom = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer;
+			DrawDebugSphere(GetWorld(), DbgAttackPhantom, 20.0f, 6, FColor::Red, false, 0.0f, 0, 2.0f);
+
+			// Lines from drone to each phantom
+			DrawDebugLine(GetWorld(), MyLoc, DbgOrbitPhantom, FColor::Blue, false, 0.0f, 0, 1.5f);
+			DrawDebugLine(GetWorld(), MyLoc, DbgAttackPhantom, FColor::Red, false, 0.0f, 0, 1.5f);
+
+			// Attack target (magenta sphere)
+			DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Magenta, false, 0.0f, 0, 2.0f);
+
+			// Alpha + speed text
+			const FString LerpStr = FString::Printf(TEXT("Lerp: %.2f | Speed: %.0f"), DbgAlpha, MySpeed);
+			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), LerpStr, nullptr, FColor::Orange, 0.0f, true, 1.0f);
+		}
+
+		if (CurrentState == EKamikazeState::Attacking)
 		{
 			// --- Attack target (red sphere) ---
 			DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Red, false, 0.0f, 0, 3.0f);
@@ -459,41 +490,49 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 {
 	StateTimer += DeltaTime;
 
-	APawn* Player = GetPlayerPawn();
-	if (!Player)
-	{
-		if (StateTimer >= TelegraphDuration)
-		{
-			CommitAttack();
-		}
-		return;
-	}
+	// --- Alpha: smooth 0→1 over TelegraphDuration ---
+	const float RawAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
+	const float Alpha = FMath::SmoothStep(0.0f, 1.0f, RawAlpha);
 
-	const FVector ToPlayer = (Player->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+	// --- Orbit phantom: continue orbiting as if no attack was triggered ---
+	const float PhantomAngularSpeed = TelegraphPhantomOrbitSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
+	TelegraphPhantomOrbitAngle += PhantomAngularSpeed * DeltaTime;
 
-	// Face actor toward player
-	const FRotator TargetRot = ToPlayer.Rotation();
-	SetActorRotation(FMath::RInterpTo(GetActorRotation(), FRotator(0.0f, TargetRot.Yaw, 0.0f), DeltaTime, 15.0f));
+	const float SM = CurrentOrbitRadius;
+	const float Sm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
+	const FVector OrbitPhantomPos(
+		TelegraphPhantomOrbitCenter.X + SM * FMath::Cos(TelegraphPhantomOrbitAngle),
+		TelegraphPhantomOrbitCenter.Y + Sm * FMath::Sin(TelegraphPhantomOrbitAngle),
+		TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
+			+ OrbitHeightAmplitude * FMath::Sin(TelegraphPhantomOrbitAngle + OrbitHeightPhaseOffset));
 
-	// Physically redirect velocity toward player — this IS the banking maneuver before the dive
+	// --- Attack phantom: fly straight toward player from start position at cruise speed ---
+	const FVector AttackPhantomPos = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer;
+
+	// --- Lerp real drone between phantoms ---
+	const FVector LerpedPos = FMath::Lerp(OrbitPhantomPos, AttackPhantomPos, Alpha);
+	SetActorLocation(LerpedPos, false, nullptr, ETeleportType::TeleportPhysics);
+
+	// --- Compute virtual velocity for FPVTilt and actor rotation ---
+	const FVector VirtualVelocity = (DeltaTime > SMALL_NUMBER)
+		? (LerpedPos - TelegraphPrevPos) / DeltaTime
+		: TelegraphAttackDir * CruiseSpeed;
+	TelegraphPrevPos = LerpedPos;
+
+	// Set CMC->Velocity so GetVelocity() returns correct value for FPVTilt and rotation
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		const FVector CurrentVelDir = CMC->Velocity.GetSafeNormal();
-		if (!CurrentVelDir.IsNearlyZero())
-		{
-			// Aggressive turn rate: needs to redirect ~90° in TelegraphDuration (0.35s default)
-			const float TelegraphTurnRate = 180.0f;
-			const FVector NewDir = FMath::VInterpNormalRotationTo(CurrentVelDir, ToPlayer, DeltaTime, TelegraphTurnRate);
-
-			// Decelerate while banking — builds tension, lets the turn happen tighter
-			const float CurrentSpeed = CMC->Velocity.Size();
-			const float NewSpeed = FMath::FInterpTo(CurrentSpeed, CruiseSpeed * 0.4f, DeltaTime, 5.0f);
-			CMC->Velocity = NewDir * NewSpeed;
-		}
+		CMC->Velocity = VirtualVelocity;
 	}
 
-	if (StateTimer >= TelegraphDuration)
+	// --- Commit when lerp is complete ---
+	if (RawAlpha >= 1.0f)
 	{
+		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Telegraph COMPLETE | Time=%.2fs Speed=%.0f -> CommitAttack"),
+				*GetName(), StateTimer, VirtualVelocity.Size());
+		}
 		CommitAttack();
 	}
 }
@@ -562,43 +601,47 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 		CMC->AddInputVector(AttackDirection);
 	}
 
-	// Raycast forward for imminent geometry impact
-	// 200cm — detects walls/floor the drone is about to hit (~6 frames at 2000cm/s 60fps)
-	// NOT 500cm — that caused premature "crash" when floor was far below a diving drone
-	FHitResult Hit;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-
-	const FVector RayStart = GetActorLocation();
-	const FVector RayEnd = RayStart + AttackDirection * 200.0f;
-
-	if (GetWorld()->LineTraceSingleByChannel(Hit, RayStart, RayEnd, ECC_WorldStatic, QueryParams))
+	// Grace period: skip raycast for first 0.15s of PostAttack.
+	// Without this, the drone arrives at the target point (where the player was), the floor is
+	// just beneath the diving trajectory, and the raycast immediately fires -> premature explosion.
+	if (StateTimer >= 0.15f)
 	{
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		// Raycast forward for imminent geometry impact (200cm ahead)
+		FHitResult Hit;
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(this);
+
+		const FVector RayStart = GetActorLocation();
+		const FVector RayEnd = RayStart + AttackDirection * 200.0f;
+
+		if (GetWorld()->LineTraceSingleByChannel(Hit, RayStart, RayEnd, ECC_WorldStatic, QueryParams))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack GEOMETRY IMPACT | Actor=%s Comp=%s Dist=%.0f HitLoc=(%.0f,%.0f,%.0f) Dir=(%.2f,%.2f,%.2f)"),
-				*GetName(),
-				Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
-				Hit.GetComponent() ? *Hit.GetComponent()->GetName() : TEXT("null"),
-				Hit.Distance,
-				Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
-				AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
+			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack GEOMETRY IMPACT | Actor=%s Comp=%s Dist=%.0f HitLoc=(%.0f,%.0f,%.0f) Dir=(%.2f,%.2f,%.2f)"),
+					*GetName(),
+					Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
+					Hit.GetComponent() ? *Hit.GetComponent()->GetName() : TEXT("null"),
+					Hit.Distance,
+					Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
+					AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
+			}
+			// Physical impact into wall/floor — FULL explosion, same as hitting the player
+			// "Crash" (reduced) is only for being shot down in the air
+			CurrentState = EKamikazeState::Dead;
+			TriggerCollisionExplosion();
+			KamikazeDie();
+			return;
 		}
-		// Physical impact into wall/floor — FULL explosion, same as hitting the player
-		// "Crash" (reduced) is only for being shot down in the air
-		CurrentState = EKamikazeState::Dead;
-		TriggerCollisionExplosion();
-		KamikazeDie();
-		return;
-	}
 
 #if ENABLE_DRAW_DEBUG
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
-	{
-		// Draw the forward raycast (orange = no hit)
-		DrawDebugLine(GetWorld(), RayStart, RayEnd, FColor::Orange, false, 0.0f, 0, 1.5f);
-	}
+		if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
+		{
+			// Draw the forward raycast (orange = no hit)
+			DrawDebugLine(GetWorld(), RayStart, RayEnd, FColor::Orange, false, 0.0f, 0, 1.5f);
+		}
 #endif
+	}
 
 	// After inertia time: roll crash chance or recover
 	if (StateTimer >= PostAttackInertiaTime)
@@ -694,6 +737,27 @@ void AKamikazeDroneNPC::BeginTelegraph(bool bRetaliation)
 	}
 
 	bIsRetaliating = bRetaliation;
+
+	// --- Snapshot phantom states for lerp ---
+	TelegraphStartPos = GetActorLocation();
+	TelegraphPrevPos = TelegraphStartPos;
+
+	// Orbit phantom: continues from current orbit state
+	TelegraphPhantomOrbitAngle = OrbitAngle;
+	TelegraphPhantomOrbitSpeed = CruiseSpeed;
+	TelegraphPhantomOrbitCenter = OrbitCenter;
+
+	// Attack phantom: direction toward predicted player position
+	AttackTargetPosition = CalculatePredictedPosition();
+	TelegraphAttackDir = (AttackTargetPosition - TelegraphStartPos).GetSafeNormal();
+
+	// Disable CMC movement — we position the drone manually via SetActorLocation during lerp
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->StopMovementImmediately();
+		CMC->SetMovementMode(MOVE_None);
+	}
+
 	SetState(EKamikazeState::Telegraphing);
 
 	// Play telegraph sound
@@ -705,12 +769,17 @@ void AKamikazeDroneNPC::BeginTelegraph(bool bRetaliation)
 
 void AKamikazeDroneNPC::CommitAttack()
 {
-	// Calculate predicted target position
+	// Recalculate predicted target position fresh (player may have moved during telegraph)
 	AttackTargetPosition = CalculatePredictedPosition();
 	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
 
-	// No velocity snap — telegraph already redirected the drone toward the target
-	// Attack phase will accelerate to AttackSpeed and do fine steering corrections
+	// Restore CMC flying mode (was MOVE_None during phantom lerp) and snap velocity
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->SetMovementMode(MOVE_Flying);
+		CMC->Velocity = AttackDirection * AttackSpeed;
+		CMC->MaxFlySpeed = AttackSpeed;
+	}
 
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
 	{
