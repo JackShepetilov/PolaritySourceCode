@@ -362,6 +362,11 @@ protected:
 	/** True when NPC is stunned by prop or drone explosion. Cleared on EndKnockbackStun. */
 	bool bStunnedByExplosion = false;
 
+	/** True when NPC is stunned by another NPC's collision (reverse channeling impact).
+	 *  Used to distinguish NPC-sourced stun from prop/drone stun for HP pickup drop count.
+	 *  Cleared on EndKnockbackStun. */
+	bool bStunnedByNPCImpact = false;
+
 	/** If true, NPC applies permanent explosion stun on BeginPlay and never recovers from it */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback")
 	bool bIsPermanentlyStunned = false;
@@ -614,6 +619,11 @@ public:
 	/** Number of health pickups to drop on kill (Doom Eternal style scatter) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
 	int32 HealthPickupDropCount = 3;
+
+	/** Number of health pickups to drop when killed by another NPC collision
+	 *  or killed while stunned by NPC impact */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 HealthPickupDropCount_NPCKill = 2;
 
 	/** How far pickups scatter from the kill point (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "0", ClampMax = "500", Units = "cm"))

@@ -697,6 +697,8 @@ void AShooterNPC::Die()
 
 	// Drone kills always produce health, not armor (even if bWasChannelingTarget was propagated)
 	bool bKilledByDrone = Cast<AFlyingDrone>(LastKillingDamageCauser) != nullptr;
+	// NPC-on-NPC collision kill (DamageCauser is another ShooterNPC)
+	bool bKilledByNPC = Cast<AShooterNPC>(LastKillingDamageCauser) != nullptr;
 
 	if (bWasChannelingTarget && ArmorPickupClass && !bKilledByDrone)
 	{
@@ -708,15 +710,24 @@ void AShooterNPC::Die()
 	else if (HealthPickupClass &&
 		(bStunnedByExplosion || AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning HEALTH"), *GetName());
+		// Prop/drone kill or prop/drone-stunned — full HP drop count
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning HEALTH (prop/drone, count=%d)"), *GetName(), HealthPickupDropCount);
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
 	}
+	else if (HealthPickupClass && (bKilledByNPC || bStunnedByNPCImpact))
+	{
+		// Killed by NPC collision or killed while stunned by NPC impact — reduced HP drop
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning HEALTH (NPC kill/stun, count=%d)"), *GetName(), HealthPickupDropCount_NPCKill);
+		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
+			HealthPickupDropCount_NPCKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
+	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> NO PICKUP (ShouldDropHealth=%d)"),
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> NO PICKUP (ShouldDropHealth=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d)"),
 			*GetName(),
-			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1);
+			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
+			bKilledByNPC, bStunnedByNPCImpact);
 	}
 
 	// play death sound
@@ -1945,6 +1956,7 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 		}
 
 		OtherNPC->ApplyExplosionStun(ReverseChannelingStunDuration, ReverseChannelingStunMontage);
+		OtherNPC->bStunnedByNPCImpact = true; // Track NPC-sourced stun for reduced HP pickup drop
 	}
 	else
 	{
@@ -2261,6 +2273,7 @@ void AShooterNPC::EndKnockbackStun()
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
 	bStunnedByExplosion = false;
+	bStunnedByNPCImpact = false;
 	bShouldStunOnNPCImpact = false;
 
 	OnStunEnd.Broadcast(this);
