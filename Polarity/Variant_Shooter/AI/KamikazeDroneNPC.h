@@ -194,6 +194,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Prediction", meta = (ClampMin = "0.5", ClampMax = "2.0"))
 	float AttackTurnRateMultiplier = 1.0f;
 
+	// ==================== Orbit-to-Attack Timing ====================
+
+	/** Minimum time the drone must orbit before being eligible for token-based attack (seconds).
+	 *  Set to 0 for immediate attack eligibility (e.g. for solo drones).
+	 *  Does NOT affect retaliation or forced attacks — those always trigger immediately. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Triggers", meta = (ClampMin = "0.0"))
+	float MinOrbitTimeBeforeAttack = 2.0f;
+
 	// ==================== Proximity / Retaliation ====================
 
 	/** Radius at which proximity attack triggers if no token for too long */
@@ -366,6 +374,9 @@ protected:
 
 	/** Time at proximity radius without token */
 	float ProximityTimer = 0.0f;
+
+	/** How long the drone has been in orbit (for MinOrbitTimeBeforeAttack) */
+	float OrbitElapsedTime = 0.0f;
 
 	// ==================== Attack State ====================
 

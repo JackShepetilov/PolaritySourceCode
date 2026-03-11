@@ -21,6 +21,7 @@
 #include "../DamageTypes/DamageType_KamikazeExplosion.h"
 #include "../Pickups/HealthPickup.h"
 #include "ShooterGameMode.h"
+#include "AICombatCoordinator.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
@@ -202,6 +203,12 @@ void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 {
 	CurrentState = NewState;
 	StateTimer = 0.0f;
+
+	// Reset orbit timer when entering orbit
+	if (NewState == EKamikazeState::Orbiting)
+	{
+		OrbitElapsedTime = 0.0f;
+	}
 }
 
 void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
@@ -283,6 +290,18 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 	{
 		CMC->AddInputVector(MoveDir);
 		CMC->MaxFlySpeed = EffectiveSpeed;
+	}
+
+	// --- Token-based attack check ---
+	OrbitElapsedTime += DeltaTime;
+	if (OrbitElapsedTime >= MinOrbitTimeBeforeAttack)
+	{
+		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this);
+		if (Coordinator && Coordinator->RequestAttackToken(this, EAttackTokenType::Kamikaze))
+		{
+			BeginTelegraph(false);
+			return;
+		}
 	}
 
 	// --- Proximity attack check ---
