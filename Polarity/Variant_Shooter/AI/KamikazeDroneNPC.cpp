@@ -487,11 +487,8 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 	const FVector CurrentDir = GetVelocity().GetSafeNormal();
 	const FVector DesiredDir = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
 
-	// Limited turn rate during attack
-	const float MaxTurnThisFrame = FMath::DegreesToRadians(AttackTurnRate * AttackTurnRateMultiplier) * DeltaTime;
+	// Limited turn rate during attack — steer toward target but DON'T overwrite AttackDirection
 	const FVector SteeringDir = FMath::VInterpNormalRotationTo(CurrentDir, DesiredDir, DeltaTime, AttackTurnRate * AttackTurnRateMultiplier);
-
-	AttackDirection = SteeringDir;
 
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
@@ -510,6 +507,7 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PLAYER COLLISION | Dist=%.0f Threshold=%.0f"),
 					*GetName(), DistToPlayer, CollisionRadius + 60.0f);
 			}
+			CurrentState = EKamikazeState::Dead; // Prevent double dispatch in KamikazeDie
 			TriggerCollisionExplosion();
 			KamikazeDie();
 			return;
@@ -517,6 +515,7 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 	}
 
 	// --- Check if we've passed the target ---
+	// Use AttackDirection from CommitAttack (original dive direction), NOT current steering
 	const FVector ToTarget = AttackTargetPosition - GetActorLocation();
 	const float DotToTarget = FVector::DotProduct(ToTarget, AttackDirection);
 	if (DotToTarget < 0.0f)
@@ -526,7 +525,8 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PASSED TARGET | Dot=%.0f DistToTarget=%.0f -> PostAttack"),
 				*GetName(), DotToTarget, ToTarget.Size());
 		}
-		// Passed the target — enter post-attack inertia
+		// Set AttackDirection to current velocity for PostAttack inertia
+		AttackDirection = GetVelocity().GetSafeNormal();
 		SetState(EKamikazeState::PostAttack);
 	}
 }
@@ -562,7 +562,8 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 				Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
 				AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
 		}
-		// Will crash into geometry
+		// Will crash into geometry — set Dead before KamikazeDie to prevent double dispatch
+		CurrentState = EKamikazeState::Dead;
 		TriggerCrashExplosion();
 		KamikazeDie();
 		return;
@@ -605,7 +606,8 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack RANDOM CRASH (rolled under %.2f)"), *GetName(), CrashChance);
 			}
-			// Random crash — lost control
+			// Random crash — lost control — set Dead before KamikazeDie to prevent double dispatch
+			CurrentState = EKamikazeState::Dead;
 			TriggerCrashExplosion();
 			KamikazeDie();
 			return;
@@ -885,8 +887,12 @@ void AKamikazeDroneNPC::KamikazeDie()
 	}
 
 	case EKamikazeState::PostAttack:
-		// After miss — treat as debris (already past target)
+		// Killed by player during post-attack — debris fall
 		TriggerDebrisFall();
+		break;
+
+	case EKamikazeState::Dead:
+		// Already handled externally (crash/collision explosion set state to Dead before calling KamikazeDie)
 		break;
 
 	default:
