@@ -276,14 +276,22 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 			// --- Telegraph: show phantom positions and lerp progress ---
 			const float DbgAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
 
-			// Orbit phantom position (blue sphere)
+			// Orbit phantom position (blue sphere) — delta-based, matches UpdateTelegraphing
 			const float DbgSM = CurrentOrbitRadius;
 			const float DbgSm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
-			const FVector DbgOrbitPhantom(
+			const float DbgPhantomAngularSpeed = TelegraphPhantomOrbitSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
+			const float DbgCurrentAngle = TelegraphPhantomOrbitAngle + DbgPhantomAngularSpeed * StateTimer;
+			const FVector DbgInitialFormulaPos(
 				TelegraphPhantomOrbitCenter.X + DbgSM * FMath::Cos(TelegraphPhantomOrbitAngle),
 				TelegraphPhantomOrbitCenter.Y + DbgSm * FMath::Sin(TelegraphPhantomOrbitAngle),
 				TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
 					+ OrbitHeightAmplitude * FMath::Sin(TelegraphPhantomOrbitAngle + OrbitHeightPhaseOffset));
+			const FVector DbgCurrentFormulaPos(
+				TelegraphPhantomOrbitCenter.X + DbgSM * FMath::Cos(DbgCurrentAngle),
+				TelegraphPhantomOrbitCenter.Y + DbgSm * FMath::Sin(DbgCurrentAngle),
+				TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
+					+ OrbitHeightAmplitude * FMath::Sin(DbgCurrentAngle + OrbitHeightPhaseOffset));
+			const FVector DbgOrbitPhantom = TelegraphStartPos + (DbgCurrentFormulaPos - DbgInitialFormulaPos);
 			DrawDebugSphere(GetWorld(), DbgOrbitPhantom, 20.0f, 6, FColor::Blue, false, 0.0f, 0, 2.0f);
 
 			// Attack phantom position (red sphere)
@@ -495,16 +503,30 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 	const float Alpha = FMath::SmoothStep(0.0f, 1.0f, RawAlpha);
 
 	// --- Orbit phantom: continue orbiting as if no attack was triggered ---
+	// Compute current angle from initial angle + elapsed time (TelegraphPhantomOrbitAngle is NOT modified)
 	const float PhantomAngularSpeed = TelegraphPhantomOrbitSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
-	TelegraphPhantomOrbitAngle += PhantomAngularSpeed * DeltaTime;
+	const float CurrentPhantomAngle = TelegraphPhantomOrbitAngle + PhantomAngularSpeed * StateTimer;
 
 	const float SM = CurrentOrbitRadius;
 	const float Sm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
-	const FVector OrbitPhantomPos(
+
+	// Orbit formula position at telegraph START (initial saved angle)
+	const FVector InitialOrbitFormulaPos(
 		TelegraphPhantomOrbitCenter.X + SM * FMath::Cos(TelegraphPhantomOrbitAngle),
 		TelegraphPhantomOrbitCenter.Y + Sm * FMath::Sin(TelegraphPhantomOrbitAngle),
 		TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
 			+ OrbitHeightAmplitude * FMath::Sin(TelegraphPhantomOrbitAngle + OrbitHeightPhaseOffset));
+
+	// Orbit formula position at CURRENT time (advanced angle)
+	const FVector CurrentOrbitFormulaPos(
+		TelegraphPhantomOrbitCenter.X + SM * FMath::Cos(CurrentPhantomAngle),
+		TelegraphPhantomOrbitCenter.Y + Sm * FMath::Sin(CurrentPhantomAngle),
+		TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
+			+ OrbitHeightAmplitude * FMath::Sin(CurrentPhantomAngle + OrbitHeightPhaseOffset));
+
+	// Orbit phantom = actual start pos + orbit movement delta
+	// At t=0: delta=0, OrbitPhantomPos=TelegraphStartPos — NO teleport
+	const FVector OrbitPhantomPos = TelegraphStartPos + (CurrentOrbitFormulaPos - InitialOrbitFormulaPos);
 
 	// --- Attack phantom: fly straight toward player from start position at cruise speed ---
 	const FVector AttackPhantomPos = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer;
@@ -523,6 +545,17 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->Velocity = VirtualVelocity;
+	}
+
+	// --- Per-frame position log ---
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Telegraph | A=%.2f Pos=(%.0f,%.0f,%.0f) OrbPh=(%.0f,%.0f,%.0f) AtkPh=(%.0f,%.0f,%.0f) Spd=%.0f"),
+			*GetName(), Alpha,
+			LerpedPos.X, LerpedPos.Y, LerpedPos.Z,
+			OrbitPhantomPos.X, OrbitPhantomPos.Y, OrbitPhantomPos.Z,
+			AttackPhantomPos.X, AttackPhantomPos.Y, AttackPhantomPos.Z,
+			VirtualVelocity.Size());
 	}
 
 	// --- Commit when lerp is complete ---
