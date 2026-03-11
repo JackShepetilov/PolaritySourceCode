@@ -300,8 +300,8 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 			const FVector DbgOrbitPhantom = TelegraphStartPos + (DbgCurrentFormulaPos - DbgInitialFormulaPos);
 			DrawDebugSphere(GetWorld(), DbgOrbitPhantom, 20.0f, 6, FColor::Blue, false, 0.0f, 0, 2.0f);
 
-			// Attack phantom position (red sphere)
-			const FVector DbgAttackPhantom = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer;
+			// Attack phantom position (red sphere) — accelerating from 0
+			const FVector DbgAttackPhantom = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer * DbgAlpha * 0.5f;
 			DrawDebugSphere(GetWorld(), DbgAttackPhantom, 20.0f, 6, FColor::Red, false, 0.0f, 0, 2.0f);
 
 			// Lines from drone to each phantom
@@ -559,8 +559,9 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 	// At t=0: delta=0, OrbitPhantomPos=TelegraphStartPos — NO teleport
 	const FVector OrbitPhantomPos = TelegraphStartPos + (CurrentOrbitFormulaPos - InitialOrbitFormulaPos);
 
-	// --- Attack phantom: fly straight toward player from start position at cruise speed ---
-	const FVector AttackPhantomPos = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer;
+	// --- Attack phantom: accelerates from 0 to CruiseSpeed over TelegraphDuration ---
+	// Speed(t) = CruiseSpeed * RawAlpha, Distance = CruiseSpeed * t * RawAlpha * 0.5
+	const FVector AttackPhantomPos = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer * RawAlpha * 0.5f;
 
 	// --- Lerp real drone between phantoms ---
 	const FVector LerpedPos = FMath::Lerp(OrbitPhantomPos, AttackPhantomPos, Alpha);
