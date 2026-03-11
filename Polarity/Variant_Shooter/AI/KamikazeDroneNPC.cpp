@@ -35,6 +35,20 @@ static TAutoConsoleVariable<int32> CVarKamikazeDebug(
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
 
+static const TCHAR* KamikazeStateToString(EKamikazeState S)
+{
+	switch (S)
+	{
+	case EKamikazeState::Orbiting:     return TEXT("Orbiting");
+	case EKamikazeState::Telegraphing: return TEXT("Telegraphing");
+	case EKamikazeState::Attacking:    return TEXT("Attacking");
+	case EKamikazeState::PostAttack:   return TEXT("PostAttack");
+	case EKamikazeState::Recovery:     return TEXT("Recovery");
+	case EKamikazeState::Dead:         return TEXT("Dead");
+	default:                           return TEXT("Unknown");
+	}
+}
+
 AKamikazeDroneNPC::AKamikazeDroneNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -295,20 +309,6 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 }
 
 // ==================== State Machine ====================
-
-static const TCHAR* KamikazeStateToString(EKamikazeState S)
-{
-	switch (S)
-	{
-	case EKamikazeState::Orbiting:     return TEXT("Orbiting");
-	case EKamikazeState::Telegraphing: return TEXT("Telegraphing");
-	case EKamikazeState::Attacking:    return TEXT("Attacking");
-	case EKamikazeState::PostAttack:   return TEXT("PostAttack");
-	case EKamikazeState::Recovery:     return TEXT("Recovery");
-	case EKamikazeState::Dead:         return TEXT("Dead");
-	default:                           return TEXT("Unknown");
-	}
-}
 
 void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 {
