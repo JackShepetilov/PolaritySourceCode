@@ -515,9 +515,10 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 	}
 
 	// --- Check if we've passed the target ---
-	// Use AttackDirection from CommitAttack (original dive direction), NOT current steering
+	// Velocity is set toward target in CommitAttack, so dot product with velocity is correct from frame 1
 	const FVector ToTarget = AttackTargetPosition - GetActorLocation();
-	const float DotToTarget = FVector::DotProduct(ToTarget, AttackDirection);
+	const FVector TravelDir = GetVelocity().GetSafeNormal();
+	const float DotToTarget = FVector::DotProduct(ToTarget, TravelDir);
 	if (DotToTarget < 0.0f)
 	{
 		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
@@ -525,8 +526,8 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PASSED TARGET | Dot=%.0f DistToTarget=%.0f -> PostAttack"),
 				*GetName(), DotToTarget, ToTarget.Size());
 		}
-		// Set AttackDirection to current velocity for PostAttack inertia
-		AttackDirection = GetVelocity().GetSafeNormal();
+		// Use current velocity direction for PostAttack inertia
+		AttackDirection = TravelDir;
 		SetState(EKamikazeState::PostAttack);
 	}
 }
@@ -685,6 +686,12 @@ void AKamikazeDroneNPC::CommitAttack()
 	// Calculate predicted target position
 	AttackTargetPosition = CalculatePredictedPosition();
 	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
+
+	// Redirect velocity immediately toward target — the drone commits to the dive
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->Velocity = AttackDirection * AttackSpeed;
+	}
 
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
 	{
