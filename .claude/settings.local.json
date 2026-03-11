@@ -167,7 +167,14 @@
       "WebFetch(domain:blog.adamatomic.com)",
       "WebFetch(domain:gamedesignskills.com)",
       "WebFetch(domain:www.fullbrightdesign.com)",
-      "Bash(pdflatex -interaction=nonstopmode EncounterDesignGuide.tex)"
+      "Bash(pdflatex -interaction=nonstopmode EncounterDesignGuide.tex)",
+      "Bash(node -e \"require\\(''pptxgenjs''\\)\")",
+      "Bash(python \"C:\\\\Users\\\\Professional\\\\AppData\\\\Roaming\\\\Claude\\\\local-agent-mode-sessions\\\\skills-plugin\\\\8dd759b4-da55-4eb0-98f3-89e776d85fbb\\\\765ec62f-cc3a-42b4-9089-50f39e01a598\\\\skills\\\\pptx\\\\scripts\\\\office\\\\soffice.py\" --headless --convert-to pdf PitchTemplate.pptx)",
+      "Bash(pdftoppm -jpeg -r 150 PitchTemplate.pdf slide)",
+      "Bash(where soffice)",
+      "Bash(pip install \"markitdown[pptx]\")",
+      "Bash(python -m markitdown \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\\\\Docs\\\\PitchTemplate.pptx\")",
+      "Bash(NODE_PATH=\"C:\\\\Users\\\\Professional\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\" node create_pitch.js)"
     ]
   }
 }
