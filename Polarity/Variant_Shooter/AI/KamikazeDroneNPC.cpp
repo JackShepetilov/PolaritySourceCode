@@ -562,19 +562,21 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 		CMC->AddInputVector(AttackDirection);
 	}
 
-	// Raycast forward for geometry collision
+	// Raycast forward for imminent geometry impact
+	// 200cm — detects walls/floor the drone is about to hit (~6 frames at 2000cm/s 60fps)
+	// NOT 500cm — that caused premature "crash" when floor was far below a diving drone
 	FHitResult Hit;
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
 	const FVector RayStart = GetActorLocation();
-	const FVector RayEnd = RayStart + AttackDirection * 500.0f;
+	const FVector RayEnd = RayStart + AttackDirection * 200.0f;
 
 	if (GetWorld()->LineTraceSingleByChannel(Hit, RayStart, RayEnd, ECC_WorldStatic, QueryParams))
 	{
 		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack CRASH RAYCAST HIT | Actor=%s Comp=%s Dist=%.0f HitLoc=(%.0f,%.0f,%.0f) Dir=(%.2f,%.2f,%.2f)"),
+			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack GEOMETRY IMPACT | Actor=%s Comp=%s Dist=%.0f HitLoc=(%.0f,%.0f,%.0f) Dir=(%.2f,%.2f,%.2f)"),
 				*GetName(),
 				Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
 				Hit.GetComponent() ? *Hit.GetComponent()->GetName() : TEXT("null"),
@@ -582,9 +584,10 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 				Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
 				AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
 		}
-		// Will crash into geometry — set Dead before KamikazeDie to prevent double dispatch
+		// Physical impact into wall/floor — FULL explosion, same as hitting the player
+		// "Crash" (reduced) is only for being shot down in the air
 		CurrentState = EKamikazeState::Dead;
-		TriggerCrashExplosion();
+		TriggerCollisionExplosion();
 		KamikazeDie();
 		return;
 	}
