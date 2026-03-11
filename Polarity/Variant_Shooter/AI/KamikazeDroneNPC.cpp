@@ -459,18 +459,37 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 {
 	StateTimer += DeltaTime;
 
-	// During telegraph: face toward player aggressively
-	if (APawn* Player = GetPlayerPawn())
+	APawn* Player = GetPlayerPawn();
+	if (!Player)
 	{
-		const FVector ToPlayer = (Player->GetActorLocation() - GetActorLocation()).GetSafeNormal();
-		const FRotator TargetRot = ToPlayer.Rotation();
-		SetActorRotation(FMath::RInterpTo(GetActorRotation(), FRotator(0.0f, TargetRot.Yaw, 0.0f), DeltaTime, 15.0f));
+		if (StateTimer >= TelegraphDuration)
+		{
+			CommitAttack();
+		}
+		return;
 	}
 
-	// Still moving on orbit during telegraph (but slowing to a more predictable path)
+	const FVector ToPlayer = (Player->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+
+	// Face actor toward player
+	const FRotator TargetRot = ToPlayer.Rotation();
+	SetActorRotation(FMath::RInterpTo(GetActorRotation(), FRotator(0.0f, TargetRot.Yaw, 0.0f), DeltaTime, 15.0f));
+
+	// Physically redirect velocity toward player — this IS the banking maneuver before the dive
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		CMC->MaxFlySpeed = CruiseSpeed * 0.5f;
+		const FVector CurrentVelDir = CMC->Velocity.GetSafeNormal();
+		if (!CurrentVelDir.IsNearlyZero())
+		{
+			// Aggressive turn rate: needs to redirect ~90° in TelegraphDuration (0.35s default)
+			const float TelegraphTurnRate = 180.0f;
+			const FVector NewDir = FMath::VInterpNormalRotationTo(CurrentVelDir, ToPlayer, DeltaTime, TelegraphTurnRate);
+
+			// Decelerate while banking — builds tension, lets the turn happen tighter
+			const float CurrentSpeed = CMC->Velocity.Size();
+			const float NewSpeed = FMath::FInterpTo(CurrentSpeed, CruiseSpeed * 0.4f, DeltaTime, 5.0f);
+			CMC->Velocity = NewDir * NewSpeed;
+		}
 	}
 
 	if (StateTimer >= TelegraphDuration)
@@ -687,11 +706,8 @@ void AKamikazeDroneNPC::CommitAttack()
 	AttackTargetPosition = CalculatePredictedPosition();
 	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
 
-	// Redirect velocity immediately toward target — the drone commits to the dive
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->Velocity = AttackDirection * AttackSpeed;
-	}
+	// No velocity snap — telegraph already redirected the drone toward the target
+	// Attack phase will accelerate to AttackSpeed and do fine steering corrections
 
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
 	{
