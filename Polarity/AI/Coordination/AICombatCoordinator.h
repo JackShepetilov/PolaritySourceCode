@@ -15,7 +15,8 @@ enum class EAttackTokenType : uint8
 {
 	Ranged,     // ShooterNPC burst fire, FlyingDrone shooting
 	Melee,      // MeleeNPC dash + melee attack
-	Special     // Reserved for boss abilities, grenades, etc.
+	Special,    // Reserved for boss abilities, grenades, etc.
+	Kamikaze    // KamikazeDroneNPC dive attacks (separate pool, dynamic sizing)
 };
 
 /** Role assigned to NPC for combat coordination */
@@ -160,6 +161,24 @@ public:
 	/** Maximum simultaneous special attack tokens */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Tokens", meta = (ClampMin = "0", ClampMax = "10"))
 	int32 MaxSpecialTokens = 1;
+
+	// --- Kamikaze Token Pool (dynamic sizing based on alive count) ---
+
+	/** Number of alive kamikaze drones per token (e.g. 5 drones → 1 token, 10 → 2) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Tokens|Kamikaze", meta = (ClampMin = "1", ClampMax = "20"))
+	int32 DronesPerKamikazeToken = 5;
+
+	/** Maximum kamikaze tokens cap */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Tokens|Kamikaze", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 MaxKamikazeTokensCap = 5;
+
+	/** Stagger delay between kamikaze attack commits (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Tokens|Kamikaze", meta = (ClampMin = "0"))
+	float KamikazeStaggerDelay = 0.3f;
+
+	/** Random range added to stagger delay (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Tokens|Kamikaze", meta = (ClampMin = "0"))
+	float KamikazeStaggerRandom = 0.3f;
 
 	/** Distance threshold for proximity override (cm). NPC within this range attacks without token. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Tokens", meta = (ClampMin = "0"))
@@ -386,6 +405,10 @@ private:
 	FTokenPool RangedTokenPool;
 	FTokenPool MeleeTokenPool;
 	FTokenPool SpecialTokenPool;
+	FTokenPool KamikazeTokenPool;
+
+	/** Time of last kamikaze token grant (for stagger enforcement) */
+	float LastKamikazeTokenGrantTime = -100.0f;
 
 	FTokenPool& GetPoolForType(EAttackTokenType Type);
 	const FTokenPool& GetPoolForType(EAttackTokenType Type) const;
@@ -393,6 +416,11 @@ private:
 	bool TryStealToken(APawn* Requester, FTokenPool& Pool);
 	void UpdateProximityOverrides();
 	void UpdateTokenPools();
+
+	/** Count alive (non-dead) kamikaze drones among registered NPCs */
+	int32 CountAliveKamikazeDrones() const;
+	/** Update kamikaze token pool size based on alive count */
+	void UpdateKamikazeTokenPoolSize();
 
 	// --- Battle Circle ---
 	TArray<FBattleSlot> BattleSlots;

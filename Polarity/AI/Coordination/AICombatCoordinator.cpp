@@ -8,6 +8,7 @@
 #include "ShooterNPC.h"
 #include "MeleeNPC.h"
 #include "FlyingDrone.h"
+#include "KamikazeDroneNPC.h"
 #include "ShooterCharacter.h"
 
 // ==================== FTokenPool ====================
@@ -97,10 +98,12 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 
 	// Token pools
 	UpdateTokenPools();
+	UpdateKamikazeTokenPoolSize();
 	UpdateProximityOverrides();
 	RangedTokenPool.CleanupInvalid();
 	MeleeTokenPool.CleanupInvalid();
 	SpecialTokenPool.CleanupInvalid();
+	KamikazeTokenPool.CleanupInvalid();
 
 	// Scores
 	UpdateAttackScores();
@@ -214,6 +217,7 @@ void AAICombatCoordinator::UnregisterNPC(APawn* NPC)
 	RangedTokenPool.Release(NPC);
 	MeleeTokenPool.Release(NPC);
 	SpecialTokenPool.Release(NPC);
+	KamikazeTokenPool.Release(NPC);
 
 	RegisteredNPCs.RemoveAll([NPC](const FRegisteredNPCData& Data)
 	{
@@ -323,6 +327,7 @@ void AAICombatCoordinator::GrantRetaliationPermission(APawn* NPC)
 
 EAttackTokenType AAICombatCoordinator::DetermineTokenType(APawn* NPC) const
 {
+	if (Cast<AKamikazeDroneNPC>(NPC)) return EAttackTokenType::Kamikaze;
 	if (Cast<AMeleeNPC>(NPC)) return EAttackTokenType::Melee;
 	// FlyingDrone and ShooterNPC both use ranged
 	return EAttackTokenType::Ranged;
@@ -334,6 +339,7 @@ FTokenPool& AAICombatCoordinator::GetPoolForType(EAttackTokenType Type)
 	{
 	case EAttackTokenType::Melee: return MeleeTokenPool;
 	case EAttackTokenType::Special: return SpecialTokenPool;
+	case EAttackTokenType::Kamikaze: return KamikazeTokenPool;
 	default: return RangedTokenPool;
 	}
 }
@@ -344,6 +350,7 @@ const FTokenPool& AAICombatCoordinator::GetPoolForType(EAttackTokenType Type) co
 	{
 	case EAttackTokenType::Melee: return MeleeTokenPool;
 	case EAttackTokenType::Special: return SpecialTokenPool;
+	case EAttackTokenType::Kamikaze: return KamikazeTokenPool;
 	default: return RangedTokenPool;
 	}
 }
@@ -380,9 +387,24 @@ bool AAICombatCoordinator::RequestAttackToken(APawn* Requester, EAttackTokenType
 		return false;
 	}
 
+	// Kamikaze stagger: enforce delay between kamikaze token grants
+	if (TokenType == EAttackTokenType::Kamikaze)
+	{
+		const float TimeSinceLastKamikaze = GetWorld()->GetTimeSeconds() - LastKamikazeTokenGrantTime;
+		const float RequiredDelay = KamikazeStaggerDelay + FMath::FRandRange(0.0f, KamikazeStaggerRandom);
+		if (TimeSinceLastKamikaze < RequiredDelay)
+		{
+			return false;
+		}
+	}
+
 	// Try to acquire from pool
 	if (Pool.TryAcquire(Requester))
 	{
+		if (TokenType == EAttackTokenType::Kamikaze)
+		{
+			LastKamikazeTokenGrantTime = GetWorld()->GetTimeSeconds();
+		}
 		return true;
 	}
 
@@ -580,6 +602,7 @@ EBattleRing AAICombatCoordinator::GetPreferredRing(const FRegisteredNPCData& Dat
 
 	// Type-based defaults
 	if (Cast<AMeleeNPC>(Data.NPC.Get())) return EBattleRing::Inner;
+	if (Cast<AKamikazeDroneNPC>(Data.NPC.Get())) return EBattleRing::Middle;
 	if (Cast<AFlyingDrone>(Data.NPC.Get())) return EBattleRing::Outer;
 	return EBattleRing::Middle;
 }
@@ -1211,4 +1234,33 @@ void AAICombatCoordinator::DrawRoleDebug()
 			FString::Printf(TEXT("%s (%.0f deg)"), *RoleName, Data.AngleToPlayerFacing),
 			nullptr, RoleColor, DebugDuration, true, 0.8f);
 	}
+}
+
+// ==================== Kamikaze Token Pool ====================
+
+int32 AAICombatCoordinator::CountAliveKamikazeDrones() const
+{
+	int32 Count = 0;
+	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		if (!Data.NPC.IsValid()) continue;
+		AKamikazeDroneNPC* Kamikaze = Cast<AKamikazeDroneNPC>(Data.NPC.Get());
+		if (Kamikaze && !Kamikaze->IsDead())
+		{
+			Count++;
+		}
+	}
+	return Count;
+}
+
+void AAICombatCoordinator::UpdateKamikazeTokenPoolSize()
+{
+	const int32 AliveCount = CountAliveKamikazeDrones();
+	if (AliveCount <= 0)
+	{
+		KamikazeTokenPool.MaxTokens = 0;
+		return;
+	}
+
+	KamikazeTokenPool.MaxTokens = FMath::Clamp(AliveCount / DronesPerKamikazeToken, 1, MaxKamikazeTokensCap);
 }
