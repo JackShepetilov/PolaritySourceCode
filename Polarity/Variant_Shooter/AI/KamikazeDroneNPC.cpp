@@ -143,7 +143,6 @@ void AKamikazeDroneNPC::BeginPlay()
 
 	// Initialize orbit
 	CurrentOrbitRadius = OrbitStartRadius;
-	OrbitAngle = InstanceRandom.FRandRange(0.0f, UE_TWO_PI);
 	OrbitHeightPhaseOffset = InstanceRandom.FRandRange(0.0f, UE_TWO_PI);
 	SpeedNoiseTimeOffset = InstanceRandom.FRandRange(0.0f, 100.0f);
 
@@ -156,6 +155,12 @@ void AKamikazeDroneNPC::BeginPlay()
 	{
 		OrbitCenter = GetActorLocation();
 	}
+
+	// Init OrbitAngle from actual spawn position relative to orbit center
+	// (each drone spawns at a different position, so angles are naturally varied in swarms)
+	const FVector RelToCenter = GetActorLocation() - OrbitCenter;
+	OrbitAngle = FMath::Atan2(RelToCenter.Y, RelToCenter.X);
+	OrbitCumulativeAngle = 0.0f;
 
 	CurrentState = EKamikazeState::Orbiting;
 	PreviousFrameLocation = GetActorLocation();
@@ -391,27 +396,49 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 		OrbitCenter = FMath::VInterpTo(OrbitCenter, PlayerPos, OrbitCenterUpdateInterval, 500.0f / OrbitCenterUpdateInterval);
 	}
 
-	// --- Advance orbit angle ---
+	// --- Compute effective speed with noise ---
 	const float SpeedNoise = SpeedNoiseAmplitude * FMath::Sin((GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset) * 2.7f);
 	const float EffectiveSpeed = CruiseSpeed * (1.0f + SpeedNoise);
 	const float AngularSpeed = EffectiveSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
-	OrbitAngle += AngularSpeed * DeltaTime;
+
+	// --- Sync OrbitAngle to drone's actual angular position ---
+	// This prevents the orbit target from racing ahead when the drone can't keep up
+	const FVector RelativePos = GetActorLocation() - OrbitCenter;
+	const float ActualAngle = FMath::Atan2(RelativePos.Y, RelativePos.X);
+
+	// Compute how much the drone actually advanced (signed, handles wrap-around)
+	float AngleDelta = ActualAngle - OrbitAngle;
+	if (AngleDelta > UE_PI) AngleDelta -= UE_TWO_PI;
+	if (AngleDelta < -UE_PI) AngleDelta += UE_TWO_PI;
+
+	// Accumulate positive (forward) movement for lap counting
+	if (AngleDelta > 0.0f)
+	{
+		OrbitCumulativeAngle += AngleDelta;
+	}
+
+	// Snap OrbitAngle to actual drone angle
+	OrbitAngle = ActualAngle;
 
 	// --- Lap completion: shrink radius ---
-	if (OrbitAngle >= UE_TWO_PI)
+	if (OrbitCumulativeAngle >= UE_TWO_PI)
 	{
-		OrbitAngle -= UE_TWO_PI;
+		OrbitCumulativeAngle -= UE_TWO_PI;
 		CurrentOrbitRadius = FMath::Max(CurrentOrbitRadius - OrbitShrinkPerLap, OrbitMinRadius);
 	}
 
-	// --- Calculate target position on elliptical orbit ---
+	// --- Lead target: point slightly ahead on the orbit ---
+	// 0.5s of angular lead — drone chases a point ahead on the curve, not behind it
+	const float LeadAngle = AngularSpeed * 0.5f;
+	const float TargetAngle = OrbitAngle + LeadAngle;
+
 	const float SemiMajor = CurrentOrbitRadius;
 	const float SemiMinor = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
-	const float TargetX = OrbitCenter.X + SemiMajor * FMath::Cos(OrbitAngle);
-	const float TargetY = OrbitCenter.Y + SemiMinor * FMath::Sin(OrbitAngle);
+	const float TargetX = OrbitCenter.X + SemiMajor * FMath::Cos(TargetAngle);
+	const float TargetY = OrbitCenter.Y + SemiMinor * FMath::Sin(TargetAngle);
 
-	// Vertical sinusoid
-	const float HeightOscillation = OrbitHeightAmplitude * FMath::Sin(OrbitAngle + OrbitHeightPhaseOffset);
+	// Vertical sinusoid (use TargetAngle for consistent height at lead point)
+	const float HeightOscillation = OrbitHeightAmplitude * FMath::Sin(TargetAngle + OrbitHeightPhaseOffset);
 	const float TargetZ = OrbitCenter.Z + OrbitBaseHeight + HeightOscillation;
 
 	const FVector TargetOrbitPos(TargetX, TargetY, TargetZ);
@@ -747,6 +774,7 @@ void AKamikazeDroneNPC::UpdateRecovery(float DeltaTime)
 		// Recalculate orbit angle based on current position relative to orbit center
 		const FVector Offset = GetActorLocation() - OrbitCenter;
 		OrbitAngle = FMath::Atan2(Offset.Y, Offset.X);
+		OrbitCumulativeAngle = 0.0f;
 
 		SetState(EKamikazeState::Orbiting);
 	}

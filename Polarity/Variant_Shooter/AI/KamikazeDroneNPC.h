@@ -345,8 +345,11 @@ protected:
 
 	// ==================== Orbit State ====================
 
-	/** Current orbit angle (radians) */
+	/** Current orbit angle (radians) — synced to drone's actual angular position */
 	float OrbitAngle = 0.0f;
+
+	/** Cumulative angle traveled for lap counting (resets every 2PI) */
+	float OrbitCumulativeAngle = 0.0f;
 
 	/** Current orbit radius */
 	float CurrentOrbitRadius = 1100.0f;
