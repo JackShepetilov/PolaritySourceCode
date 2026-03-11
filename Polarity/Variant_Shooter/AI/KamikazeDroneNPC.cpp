@@ -22,6 +22,14 @@
 #include "../Pickups/HealthPickup.h"
 #include "ShooterGameMode.h"
 #include "AICombatCoordinator.h"
+#include "DrawDebugHelpers.h"
+
+// Console variable: toggle with "Kamikaze.Debug 1" in console
+static TAutoConsoleVariable<int32> CVarKamikazeDebug(
+	TEXT("Kamikaze.Debug"),
+	0,
+	TEXT("0=off, 1=log only, 2=log+visuals"),
+	ECVF_Cheat);
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
@@ -195,12 +203,116 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 		const FRotator NewRot = FMath::RInterpTo(CurrentRot, FRotator(0.0f, TargetRot.Yaw, 0.0f), DeltaTime, YawSpeed / 45.0f);
 		SetActorRotation(NewRot);
 	}
+
+	// ==================== DEBUG VISUALIZATION ====================
+#if ENABLE_DRAW_DEBUG
+	const int32 DebugLevel = CVarKamikazeDebug.GetValueOnGameThread();
+	if (DebugLevel >= 2)
+	{
+		const FVector MyLoc = GetActorLocation();
+		const float MySpeed = GetVelocity().Size();
+		const FVector MyVel = GetVelocity();
+
+		// --- State + speed text above drone ---
+		const FString StateStr = FString::Printf(TEXT("%s | Spd:%.0f | Rad:%.0f | H:%.0f | OrbitT:%.1f"),
+			KamikazeStateToString(CurrentState), MySpeed, CurrentOrbitRadius, MyLoc.Z - OrbitCenter.Z, OrbitElapsedTime);
+
+		DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 80), StateStr, nullptr, FColor::White, 0.0f, true, 1.0f);
+
+		// --- Velocity arrow (cyan) ---
+		if (!MyVel.IsNearlyZero())
+		{
+			DrawDebugDirectionalArrow(GetWorld(), MyLoc, MyLoc + MyVel.GetSafeNormal() * 150.0f,
+				15.0f, FColor::Cyan, false, 0.0f, 0, 2.0f);
+		}
+
+		// --- Orbit center (yellow sphere) ---
+		DrawDebugSphere(GetWorld(), OrbitCenter, 30.0f, 8, FColor::Yellow, false, 0.0f, 0, 1.5f);
+
+		// --- Orbit path (yellow circle at orbit height) ---
+		const FVector CircleCenter(OrbitCenter.X, OrbitCenter.Y, OrbitCenter.Z + OrbitBaseHeight);
+		DrawDebugCircle(GetWorld(), CircleCenter, CurrentOrbitRadius, 32,
+			FColor::Yellow, false, 0.0f, 0, 1.0f, FVector::YAxisVector, FVector::XAxisVector, false);
+
+		// --- Line from drone to orbit center (yellow dotted) ---
+		DrawDebugLine(GetWorld(), MyLoc, OrbitCenter, FColor::Yellow, false, 0.0f, 0, 0.5f);
+
+		if (CurrentState == EKamikazeState::Orbiting)
+		{
+			// --- Orbit target position (green sphere) ---
+			const float SM = CurrentOrbitRadius;
+			const float Sm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
+			const float OTx = OrbitCenter.X + SM * FMath::Cos(OrbitAngle);
+			const float OTy = OrbitCenter.Y + Sm * FMath::Sin(OrbitAngle);
+			const float OTz = OrbitCenter.Z + OrbitBaseHeight + OrbitHeightAmplitude * FMath::Sin(OrbitAngle + OrbitHeightPhaseOffset);
+			const FVector OrbitTarget(OTx, OTy, OTz);
+			DrawDebugSphere(GetWorld(), OrbitTarget, 20.0f, 6, FColor::Green, false, 0.0f, 0, 2.0f);
+
+			// --- Line from drone to orbit target (green) ---
+			DrawDebugLine(GetWorld(), MyLoc, OrbitTarget, FColor::Green, false, 0.0f, 0, 1.5f);
+
+			// --- Distance to orbit target ---
+			const float DistToTarget = FVector::Dist(MyLoc, OrbitTarget);
+			const FString OrbitStr = FString::Printf(TEXT("DistToTarget: %.0f"), DistToTarget);
+			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), OrbitStr, nullptr, FColor::Green, 0.0f, true, 0.8f);
+		}
+
+		if (CurrentState == EKamikazeState::Attacking || CurrentState == EKamikazeState::Telegraphing)
+		{
+			// --- Attack target (red sphere) ---
+			DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Red, false, 0.0f, 0, 3.0f);
+
+			// --- Line from drone to attack target (red) ---
+			DrawDebugLine(GetWorld(), MyLoc, AttackTargetPosition, FColor::Red, false, 0.0f, 0, 2.0f);
+		}
+
+		if (CurrentState == EKamikazeState::PostAttack)
+		{
+			// --- Direction arrow (orange) ---
+			DrawDebugDirectionalArrow(GetWorld(), MyLoc, MyLoc + AttackDirection * 300.0f,
+				20.0f, FColor::Orange, false, 0.0f, 0, 3.0f);
+		}
+
+		// --- Ground check: raycast down to show height above floor ---
+		FHitResult GroundHit;
+		if (GetWorld()->LineTraceSingleByChannel(GroundHit, MyLoc, MyLoc - FVector(0, 0, 2000), ECC_WorldStatic))
+		{
+			const float HeightAboveGround = MyLoc.Z - GroundHit.Location.Z;
+			DrawDebugLine(GetWorld(), MyLoc, GroundHit.Location, FColor::Magenta, false, 0.0f, 0, 0.5f);
+			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 40), FString::Printf(TEXT("Floor:%.0f cm"), HeightAboveGround),
+				nullptr, FColor::Magenta, 0.0f, true, 0.8f);
+		}
+
+		// --- CMC movement mode ---
+		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+		{
+			const FString MoveStr = FString::Printf(TEXT("CMC: Mode=%d MaxFly=%.0f Accel=%.0f Grav=%.1f"),
+				(int32)CMC->MovementMode.GetValue(), CMC->MaxFlySpeed, CMC->MaxAcceleration, CMC->GravityScale);
+			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 100), MoveStr, nullptr, FColor::Silver, 0.0f, true, 0.7f);
+		}
+	}
+#endif
 }
 
 // ==================== State Machine ====================
 
+static const TCHAR* KamikazeStateToString(EKamikazeState S)
+{
+	switch (S)
+	{
+	case EKamikazeState::Orbiting:     return TEXT("Orbiting");
+	case EKamikazeState::Telegraphing: return TEXT("Telegraphing");
+	case EKamikazeState::Attacking:    return TEXT("Attacking");
+	case EKamikazeState::PostAttack:   return TEXT("PostAttack");
+	case EKamikazeState::Recovery:     return TEXT("Recovery");
+	case EKamikazeState::Dead:         return TEXT("Dead");
+	default:                           return TEXT("Unknown");
+	}
+}
+
 void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 {
+	const EKamikazeState OldState = CurrentState;
 	CurrentState = NewState;
 	StateTimer = 0.0f;
 
@@ -208,6 +320,14 @@ void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 	if (NewState == EKamikazeState::Orbiting)
 	{
 		OrbitElapsedTime = 0.0f;
+	}
+
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] State: %s -> %s | Pos=(%.0f,%.0f,%.0f) Vel=%.0f"),
+			*GetName(), KamikazeStateToString(OldState), KamikazeStateToString(NewState),
+			GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z,
+			GetVelocity().Size());
 	}
 }
 
@@ -264,11 +384,19 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(this);
 
-		if (GetWorld()->LineTraceSingleByChannel(Hit, GetActorLocation(),
-			GetActorLocation() + ForwardDir * 200.0f, ECC_WorldStatic, QueryParams))
+		const FVector GeoRayEnd = GetActorLocation() + ForwardDir * 200.0f;
+		if (GetWorld()->LineTraceSingleByChannel(Hit, GetActorLocation(), GeoRayEnd, ECC_WorldStatic, QueryParams))
 		{
 			// Obstacle ahead — track time unable to orbit
 			OrbitForcedTimer += GeometryCheckInterval;
+
+			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[Kamikaze %s] Orbit geometry HIT: %s (%.0fcm ahead) ForcedTimer=%.1f"),
+					*GetName(),
+					Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
+					Hit.Distance, OrbitForcedTimer);
+			}
 		}
 		else
 		{
@@ -278,6 +406,11 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 		// Forced attack if can't maintain orbit for 1.5s
 		if (OrbitForcedTimer >= 1.5f && CurrentOrbitRadius <= MinOrbitSpaceThreshold)
 		{
+			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] FORCED ATTACK (orbit blocked %.1fs, radius=%.0f < threshold=%.0f)"),
+					*GetName(), OrbitForcedTimer, CurrentOrbitRadius, MinOrbitSpaceThreshold);
+			}
 			bOrbitForced = true;
 			BeginTelegraph(false);
 			return;
@@ -372,6 +505,11 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 		const float DistToPlayer = FVector::Dist(GetActorLocation(), Player->GetActorLocation());
 		if (DistToPlayer < CollisionRadius + 60.0f) // Player capsule radius ~34
 		{
+			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PLAYER COLLISION | Dist=%.0f Threshold=%.0f"),
+					*GetName(), DistToPlayer, CollisionRadius + 60.0f);
+			}
 			TriggerCollisionExplosion();
 			KamikazeDie();
 			return;
@@ -380,8 +518,14 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 
 	// --- Check if we've passed the target ---
 	const FVector ToTarget = AttackTargetPosition - GetActorLocation();
-	if (FVector::DotProduct(ToTarget, AttackDirection) < 0.0f)
+	const float DotToTarget = FVector::DotProduct(ToTarget, AttackDirection);
+	if (DotToTarget < 0.0f)
 	{
+		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PASSED TARGET | Dot=%.0f DistToTarget=%.0f -> PostAttack"),
+				*GetName(), DotToTarget, ToTarget.Size());
+		}
 		// Passed the target — enter post-attack inertia
 		SetState(EKamikazeState::PostAttack);
 	}
@@ -403,14 +547,34 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
-	if (GetWorld()->LineTraceSingleByChannel(Hit, GetActorLocation(),
-		GetActorLocation() + AttackDirection * 500.0f, ECC_WorldStatic, QueryParams))
+	const FVector RayStart = GetActorLocation();
+	const FVector RayEnd = RayStart + AttackDirection * 500.0f;
+
+	if (GetWorld()->LineTraceSingleByChannel(Hit, RayStart, RayEnd, ECC_WorldStatic, QueryParams))
 	{
+		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack CRASH RAYCAST HIT | Actor=%s Comp=%s Dist=%.0f HitLoc=(%.0f,%.0f,%.0f) Dir=(%.2f,%.2f,%.2f)"),
+				*GetName(),
+				Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
+				Hit.GetComponent() ? *Hit.GetComponent()->GetName() : TEXT("null"),
+				Hit.Distance,
+				Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
+				AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
+		}
 		// Will crash into geometry
 		TriggerCrashExplosion();
 		KamikazeDie();
 		return;
 	}
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
+	{
+		// Draw the forward raycast (orange = no hit)
+		DrawDebugLine(GetWorld(), RayStart, RayEnd, FColor::Orange, false, 0.0f, 0, 1.5f);
+	}
+#endif
 
 	// After inertia time: roll crash chance or recover
 	if (StateTimer >= PostAttackInertiaTime)
@@ -429,8 +593,18 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 
 		const float CrashChance = BaseCrashChance + SpeedFactor + AngleFactor;
 
+		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack CRASH ROLL | Chance=%.2f (base=%.2f + speed=%.2f + angle=%.2f) Speed=%.0f Pitch=%.0f"),
+				*GetName(), CrashChance, BaseCrashChance, SpeedFactor, AngleFactor, Speed, PitchAngle);
+		}
+
 		if (InstanceRandom.FRand() < CrashChance)
 		{
+			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack RANDOM CRASH (rolled under %.2f)"), *GetName(), CrashChance);
+			}
 			// Random crash — lost control
 			TriggerCrashExplosion();
 			KamikazeDie();
@@ -488,6 +662,12 @@ void AKamikazeDroneNPC::BeginTelegraph(bool bRetaliation)
 		return;
 	}
 
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] BeginTelegraph | Retaliation=%d OrbitForced=%d OrbitTime=%.1f"),
+			*GetName(), bRetaliation, bOrbitForced, OrbitElapsedTime);
+	}
+
 	bIsRetaliating = bRetaliation;
 	SetState(EKamikazeState::Telegraphing);
 
@@ -503,6 +683,15 @@ void AKamikazeDroneNPC::CommitAttack()
 	// Calculate predicted target position
 	AttackTargetPosition = CalculatePredictedPosition();
 	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
+
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		const float DistToTarget = FVector::Dist(GetActorLocation(), AttackTargetPosition);
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] CommitAttack | Target=(%.0f,%.0f,%.0f) Dist=%.0f Dir=(%.2f,%.2f,%.2f)"),
+			*GetName(),
+			AttackTargetPosition.X, AttackTargetPosition.Y, AttackTargetPosition.Z,
+			DistToTarget, AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
+	}
 
 	SetState(EKamikazeState::Attacking);
 }
@@ -659,6 +848,14 @@ void AKamikazeDroneNPC::KamikazeDie()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] KamikazeDie | DeathState=%s Pos=(%.0f,%.0f,%.0f) Vel=%.0f"),
+			*GetName(), KamikazeStateToString(CurrentState),
+			GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z,
+			GetVelocity().Size());
+	}
+
 	// Death behavior depends on state at death
 	switch (CurrentState)
 	{
@@ -714,6 +911,10 @@ void AKamikazeDroneNPC::KamikazeDie()
 
 void AKamikazeDroneNPC::TriggerDebrisFall()
 {
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] >>> TriggerDebrisFall (NO explosion, YES HP)"), *GetName());
+	}
 	// No explosion — just enable gravity so debris/mesh falls
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
@@ -731,12 +932,21 @@ void AKamikazeDroneNPC::TriggerDebrisFall()
 
 void AKamikazeDroneNPC::TriggerAirExplosion()
 {
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] >>> TriggerAirExplosion (crash radius, YES HP)"), *GetName());
+	}
 	// Smaller explosion when killed during attack approach
 	DoExplosion(CrashExplosionRadius, CrashDamage, UDamageType_KamikazeExplosion::StaticClass(), true);
 }
 
 void AKamikazeDroneNPC::TriggerCrashExplosion()
 {
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] >>> TriggerCrashExplosion (crash radius, NO HP) | Pos=(%.0f,%.0f,%.0f)"),
+			*GetName(), GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
+	}
 	// Crash into geometry — explosion but NO HP pickup
 	DoExplosion(CrashExplosionRadius, CrashDamage, UDamageType_KamikazeExplosion::StaticClass(), false);
 
@@ -749,6 +959,11 @@ void AKamikazeDroneNPC::TriggerCrashExplosion()
 
 void AKamikazeDroneNPC::TriggerCollisionExplosion()
 {
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] >>> TriggerCollisionExplosion (FULL radius, YES HP) | Pos=(%.0f,%.0f,%.0f)"),
+			*GetName(), GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
+	}
 	// Direct hit on player — full explosion
 	DoExplosion(ExplosionRadius, CollisionDamage, UDamageType_KamikazeExplosion::StaticClass(), true);
 }
