@@ -115,16 +115,16 @@ void UFPVTiltComponent::UpdateSpring(float DeltaTime)
 	// Uses per-axis interp speeds as spring frequency
 	// SpringDamping < 1.0 gives overshoot
 
-	auto SpringAxis = [this, DeltaTime](float& Current, float& Vel, float Target, float InterpSpeed)
+	auto SpringAxis = [this, DeltaTime](double& Current, double& Vel, double Target, float InterpSpeed)
 	{
 		// Spring-damper: F = -k*(x-target) - d*v
 		// k = InterpSpeed^2, d = 2*damping*InterpSpeed
-		const float Omega = InterpSpeed; // natural frequency
-		const float Damping = SpringDamping;
+		const double Omega = InterpSpeed; // natural frequency
+		const double Damping = SpringDamping;
 
-		const float Error = Current - Target;
-		const float SpringForce = -Omega * Omega * Error;
-		const float DampingForce = -2.0f * Damping * Omega * Vel;
+		const double Error = Current - Target;
+		const double SpringForce = -Omega * Omega * Error;
+		const double DampingForce = -2.0 * Damping * Omega * Vel;
 
 		Vel += (SpringForce + DampingForce) * DeltaTime;
 		Current += Vel * DeltaTime;

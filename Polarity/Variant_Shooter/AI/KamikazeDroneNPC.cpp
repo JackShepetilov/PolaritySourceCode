@@ -886,11 +886,8 @@ void AKamikazeDroneNPC::DeactivateAllSystems()
 		FieldComponent->SetComponentTickEnabled(false);
 	}
 
-	// Disable accuracy component
-	if (AccuracyComponent)
-	{
-		AccuracyComponent->SetComponentTickEnabled(false);
-	}
+	// Disable accuracy component (kamikaze doesn't use it, but inherited from ShooterNPC)
+	// AccuracyComponent is not used by kamikaze drone — skip
 
 	// Disable FPV tilt
 	if (FPVTilt)
@@ -1004,22 +1001,69 @@ void AKamikazeDroneNPC::SpawnDeathGeometryCollection(const FDeathModeConfig& Con
 		return;
 	}
 
+	// Scale GC to match drone visual mesh
+	if (DroneMesh)
+	{
+		GCActor->SetActorScale3D(DroneMesh->GetComponentScale());
+	}
+
+	// Collision: gibs collide with world but not pawns/camera
+	GCComp->SetCollisionProfileName(FName("Ragdoll"));
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
 	GCComp->SetRestCollection(DeathGeometryCollection);
-	GCComp->SetWorldTransform(MeshTransform);
+
+	// Copy materials from DroneMesh to GC gibs
+	if (DroneMesh)
+	{
+		const int32 NumMats = DroneMesh->GetNumMaterials();
+		for (int32 i = 0; i < NumMats; i++)
+		{
+			if (UMaterialInterface* Mat = DroneMesh->GetMaterial(i))
+			{
+				GCComp->SetMaterial(i, Mat);
+			}
+		}
+	}
+
 	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
 
-	// Apply radial force for scattering gibs
-	const FVector ForceDir = LastKillingHitDirection.IsNearlyZero() ? FVector::UpVector : LastKillingHitDirection;
-	const float Impulse = Config.DismembermentImpulse;
+	// Break all clusters
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
 
-	FRadialFalloff* RadialFalloff = NewObject<FRadialFalloff>(GCActor);
-	RadialFalloff->Magnitude = Impulse;
-	RadialFalloff->MinRange = 0.0f;
-	RadialFalloff->MaxRange = 200.0f;
-	RadialFalloff->Default = 0.0f;
-	RadialFalloff->Radius = 200.0f;
-	RadialFalloff->Position = Origin - ForceDir * 50.0f;
-	RadialFalloff->SetExternalStrain(Impulse);
+	// Scatter pieces radially
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = Config.DismembermentImpulse;
+	RadialVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVel = NewObject<URadialVector>(GCActor);
+	AngularVel->Magnitude = Config.DismembermentAngularImpulse;
+	AngularVel->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVel);
+
+	// Directional bias from killing hit direction
+	if (!LastKillingHitDirection.IsNearlyZero() && Config.DirectionalBiasMultiplier > 0.0f)
+	{
+		UUniformVector* DirectionalBias = NewObject<UUniformVector>(GCActor);
+		DirectionalBias->Magnitude = Config.DismembermentImpulse * Config.DirectionalBiasMultiplier;
+		DirectionalBias->Direction = LastKillingHitDirection;
+		GCComp->ApplyPhysicsField(true,
+			EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+			nullptr, DirectionalBias);
+	}
 
 	// Auto-destroy gibs
 	GCActor->SetLifeSpan(GibLifetime);
