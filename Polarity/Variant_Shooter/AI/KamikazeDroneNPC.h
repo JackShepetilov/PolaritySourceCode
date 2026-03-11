@@ -109,7 +109,7 @@ protected:
 	float AttackTurnRate = 17.5f;
 
 	/** Duration of telegraph phase before attack (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0.1"))
 	float TelegraphDuration = 0.35f;
 
 	/** Duration of post-attack inertia before crash chance or recovery */
@@ -413,6 +413,14 @@ protected:
 
 	/** Previous frame's interpolated position (for computing virtual velocity) */
 	FVector TelegraphPrevPos = FVector::ZeroVector;
+
+	// ==================== Sweep Collision ====================
+
+	/** Previous frame position — used for sphere sweep hit detection to prevent tunneling */
+	FVector PreviousFrameLocation = FVector::ZeroVector;
+
+	/** Sphere sweep from previous to current location. Returns true if hit player → triggers explosion + death. */
+	bool CheckPlayerCollisionSweep();
 
 	// ==================== Damage State (for StateTree) ====================
 

@@ -158,6 +158,7 @@ void AKamikazeDroneNPC::BeginPlay()
 	}
 
 	CurrentState = EKamikazeState::Orbiting;
+	PreviousFrameLocation = GetActorLocation();
 }
 
 void AKamikazeDroneNPC::Tick(float DeltaTime)
@@ -345,6 +346,9 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 		}
 	}
 #endif
+
+	// Update previous location for sweep collision detection (must be last in Tick)
+	PreviousFrameLocation = GetActorLocation();
 }
 
 // ==================== State Machine ====================
@@ -587,22 +591,10 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 		CMC->AddInputVector(SteeringDir);
 	}
 
-	// --- Check player collision (sphere overlap) ---
-	if (APawn* Player = GetPlayerPawn())
+	// --- Check player collision (sphere sweep from previous to current frame) ---
+	if (CheckPlayerCollisionSweep())
 	{
-		const float DistToPlayer = FVector::Dist(GetActorLocation(), Player->GetActorLocation());
-		if (DistToPlayer < CollisionRadius + 60.0f) // Player capsule radius ~34
-		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PLAYER COLLISION | Dist=%.0f Threshold=%.0f"),
-					*GetName(), DistToPlayer, CollisionRadius + 60.0f);
-			}
-			CurrentState = EKamikazeState::Dead; // Prevent double dispatch in KamikazeDie
-			TriggerCollisionExplosion();
-			KamikazeDie();
-			return;
-		}
+		return;
 	}
 
 	// --- Check if we've passed the target ---
@@ -632,6 +624,12 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 	{
 		CMC->MaxFlySpeed = AttackSpeed;
 		CMC->AddInputVector(AttackDirection);
+	}
+
+	// --- Check player collision during post-attack inertia too ---
+	if (CheckPlayerCollisionSweep())
+	{
+		return;
 	}
 
 	// Grace period: skip raycast for first 0.15s of PostAttack.
@@ -824,6 +822,49 @@ void AKamikazeDroneNPC::CommitAttack()
 	}
 
 	SetState(EKamikazeState::Attacking);
+}
+
+bool AKamikazeDroneNPC::CheckPlayerCollisionSweep()
+{
+	APawn* Player = GetPlayerPawn();
+	if (!Player) return false;
+
+	const FVector CurrentLoc = GetActorLocation();
+	const FVector SweepStart = PreviousFrameLocation;
+	const FVector SweepEnd = CurrentLoc;
+
+	// Skip if barely moved (orbiting, idle)
+	if (FVector::DistSquared(SweepStart, SweepEnd) < 1.0f) return false;
+
+	// Sphere sweep from previous position to current
+	// Drone collision radius + player capsule radius (~34cm) for reliable detection
+	const float SweepRadius = CollisionRadius + 34.0f;
+
+	FHitResult Hit;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	const FCollisionShape SweepSphere = FCollisionShape::MakeSphere(SweepRadius);
+
+	const bool bHit = GetWorld()->SweepSingleByChannel(
+		Hit, SweepStart, SweepEnd, FQuat::Identity,
+		ECC_Pawn, SweepSphere, QueryParams);
+
+	if (bHit && Hit.GetActor() == Player)
+	{
+		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] SWEEP HIT PLAYER | SweepDist=%.0f HitDist=%.0f Radius=%.0f State=%s"),
+				*GetName(), FVector::Dist(SweepStart, SweepEnd), Hit.Distance, SweepRadius,
+				KamikazeStateToString(CurrentState));
+		}
+		CurrentState = EKamikazeState::Dead;
+		TriggerCollisionExplosion();
+		KamikazeDie();
+		return true;
+	}
+
+	return false;
 }
 
 FVector AKamikazeDroneNPC::CalculatePredictedPosition() const
