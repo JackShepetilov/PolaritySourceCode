@@ -174,7 +174,11 @@
       "Bash(where soffice)",
       "Bash(pip install \"markitdown[pptx]\")",
       "Bash(python -m markitdown \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\\\\Docs\\\\PitchTemplate.pptx\")",
-      "Bash(NODE_PATH=\"C:\\\\Users\\\\Professional\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\" node create_pitch.js)"
+      "Bash(NODE_PATH=\"C:\\\\Users\\\\Professional\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\" node create_pitch.js)",
+      "WebFetch(domain:gdkeys.com)",
+      "WebFetch(domain:www.halopedia.org)",
+      "WebFetch(domain:serioussam.fandom.com)",
+      "mcp__af340771-2280-4d0a-90ff-19f2e654d124__create_view"
     ]
   }
 }
