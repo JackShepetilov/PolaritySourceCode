@@ -165,11 +165,8 @@ void AKamikazeDroneNPC::BeginPlay()
 	CurrentState = EKamikazeState::Orbiting;
 	PreviousFrameLocation = GetActorLocation();
 
-	// Drones are always capturable by EMF channeling
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->bEnableViscousCapture = true;
-	}
+	// Drones are NOT viscous-capturable — they are repelled by same-charge plate forces instead
+	// bEnableViscousCapture stays false so plate forces are not skipped
 }
 
 void AKamikazeDroneNPC::Tick(float DeltaTime)
