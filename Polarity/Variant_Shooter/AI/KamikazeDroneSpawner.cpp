@@ -7,6 +7,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "TimerManager.h"
 
 AKamikazeDroneSpawner::AKamikazeDroneSpawner()
@@ -151,6 +152,28 @@ void AKamikazeDroneSpawner::SpawnDrone()
 
 	ActiveDrones.Add(Drone);
 	Drone->OnDestroyed.AddDynamic(this, &AKamikazeDroneSpawner::OnDroneDestroyed);
+
+	// ── Launch velocity ───────────────────────────────────────
+	// Convert LaunchDirection from local to world space, apply random spread cone
+	if (LaunchSpeed > 0.f)
+	{
+		FVector WorldLaunchDir = GetActorTransform().TransformVectorNoScale(LaunchDirection.GetSafeNormal());
+
+		// Apply random spread within cone
+		if (LaunchSpreadAngle > 0.f)
+		{
+			WorldLaunchDir = FMath::VRandCone(WorldLaunchDir, FMath::DegreesToRadians(LaunchSpreadAngle));
+		}
+
+		// Set initial velocity directly on CMC — orbit system will naturally stabilize
+		if (UCharacterMovementComponent* DroneCMC = Drone->GetCharacterMovement())
+		{
+			DroneCMC->Velocity = WorldLaunchDir * LaunchSpeed;
+		}
+
+		// Orient drone to face launch direction
+		Drone->SetActorRotation(WorldLaunchDir.Rotation());
+	}
 
 	// VFX
 	if (SpawnVFX)

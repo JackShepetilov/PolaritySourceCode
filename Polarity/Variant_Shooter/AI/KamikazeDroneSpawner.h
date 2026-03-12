@@ -92,6 +92,21 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Spawn")
 	float SpawnHeight = 200.f;
 
+	// ── Launch Settings ────────────────────────────────────────
+	/** Initial launch speed when drone is ejected from spawner (cm/s).
+	 *  Drone's orbit system will naturally decelerate it to CruiseSpeed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Launch", meta = (ClampMin = "0"))
+	float LaunchSpeed = 1500.f;
+
+	/** Launch direction in spawner's local space (normalized automatically).
+	 *  X = forward, Y = right, Z = up. Default = forward + slightly up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Launch")
+	FVector LaunchDirection = FVector(1.f, 0.f, 0.3f);
+
+	/** Random spread cone half-angle (degrees). 0 = perfectly straight. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Launch", meta = (ClampMin = "0", ClampMax = "90"))
+	float LaunchSpreadAngle = 15.f;
+
 	// ── Player Detection ───────────────────────────────────────
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Detection")
 	float ReactionRadius = 3000.f;
