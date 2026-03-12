@@ -90,6 +90,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "FPV Tilt|Wobble", meta = (ClampMin = "0.1"))
 	float SecondaryFrequency = 3.7f;
 
+	/** Wobble amplification at max speed (1.0 = no change, 2.0 = double wobble at full speed) */
+	UPROPERTY(EditAnywhere, Category = "FPV Tilt|Wobble", meta = (ClampMin = "1.0", ClampMax = "5.0"))
+	float SpeedWobbleMultiplier = 2.0f;
+
 	// ==================== Overshoot ====================
 
 	/** Spring damping factor (< 1.0 = overshoot, 1.0 = critical damping). ~0.95 gives 2-4% overshoot. */

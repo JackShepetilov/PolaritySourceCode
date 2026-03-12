@@ -116,6 +116,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float PostAttackInertiaTime = 0.5f;
 
+	/** Steering jitter amplitude during attack dive — simulates FPV imperfections (0.06 ≈ 3.4°) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0", ClampMax = "0.3"))
+	float AttackJitterAmplitude = 0.06f;
+
+	/** Speed oscillation during attack (fraction of AttackSpeed, ±4% default) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0", ClampMax = "0.2"))
+	float AttackSpeedJitter = 0.04f;
+
 	/** Distance from target within which killing the attacking drone triggers air explosion */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
 	float AttackDeathDistanceThreshold = 400.0f;

@@ -52,10 +52,13 @@ void UFPVTiltComponent::SetMovementState(float CurrentSpeed, const FVector& Velo
 	// We keep tilt yaw at 0 and let the natural lag from lower interp speed create the effect
 	const float TargetYaw = 0.0f;
 
-	// --- Apply wobble noise ---
-	const float WobblePitch = CalculateWobble(AccumulatedTime, 0.0f);
-	const float WobbleRoll = CalculateWobble(AccumulatedTime, 1.7f); // offset per axis
-	const float WobbleYaw = CalculateWobble(AccumulatedTime, 3.3f);
+	// --- Apply wobble noise (amplified at high speed) ---
+	const float SpeedRatio = FMath::Clamp(CurrentSpeed / MaxSpeed, 0.0f, 1.0f);
+	const float WobbleMult = FMath::Lerp(1.0f, SpeedWobbleMultiplier, SpeedRatio);
+
+	const float WobblePitch = CalculateWobble(AccumulatedTime, 0.0f) * WobbleMult;
+	const float WobbleRoll = CalculateWobble(AccumulatedTime, 1.7f) * WobbleMult;
+	const float WobbleYaw = CalculateWobble(AccumulatedTime, 3.3f) * WobbleMult;
 
 	// Set spring targets (tilt + wobble)
 	TargetAngles.Pitch = TargetPitch + WobblePitch;

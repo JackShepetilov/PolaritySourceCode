@@ -593,8 +593,17 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		CMC->MaxFlySpeed = AttackSpeed;
-		CMC->AddInputVector(SteeringDir);
+		// --- FPV jitter: simulate construction imperfections, wind, PID noise ---
+		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
+		const FVector Right = FVector::CrossProduct(SteeringDir, FVector::UpVector).GetSafeNormal();
+		const FVector Up = FVector::CrossProduct(Right, SteeringDir);
+		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
+		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
+		const FVector NoisyDir = (SteeringDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
+
+		const float SpeedNoise = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
+		CMC->MaxFlySpeed = AttackSpeed * (1.0f + SpeedNoise);
+		CMC->AddInputVector(NoisyDir);
 	}
 
 	// --- Check player collision (sphere sweep from previous to current frame) ---
@@ -625,11 +634,19 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 {
 	StateTimer += DeltaTime;
 
-	// Continue at attack speed along current direction
+	// Continue at attack speed along current direction (with jitter)
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		CMC->MaxFlySpeed = AttackSpeed;
-		CMC->AddInputVector(AttackDirection);
+		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
+		const FVector Right = FVector::CrossProduct(AttackDirection, FVector::UpVector).GetSafeNormal();
+		const FVector Up = FVector::CrossProduct(Right, AttackDirection);
+		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
+		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
+		const FVector NoisyDir = (AttackDirection + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
+
+		const float SpeedNoise = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
+		CMC->MaxFlySpeed = AttackSpeed * (1.0f + SpeedNoise);
+		CMC->AddInputVector(NoisyDir);
 	}
 
 	// --- Check player collision during post-attack inertia too ---
