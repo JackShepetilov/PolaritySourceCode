@@ -841,10 +841,10 @@ public:
 	void SetCaptureEnabledByStun(bool bValue) { bCaptureEnabledByStun = bValue; }
 
 	/** Enter captured state (channeling plate grab). Blocks AI, plays montage. */
-	void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr);
+	virtual void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr);
 
 	/** Exit captured state. Restores AI, stops montage. */
-	void ExitCapturedState();
+	virtual void ExitCapturedState();
 
 	/** Called by EMFVelocityModifier when NPC is released from reverse channeling launch.
 	 *  Sets bShouldStunOnNPCImpact so the NPC stuns the first NPC it collides with. */

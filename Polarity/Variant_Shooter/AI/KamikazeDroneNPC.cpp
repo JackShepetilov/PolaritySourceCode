@@ -164,6 +164,12 @@ void AKamikazeDroneNPC::BeginPlay()
 
 	CurrentState = EKamikazeState::Orbiting;
 	PreviousFrameLocation = GetActorLocation();
+
+	// Drones are always capturable by EMF channeling
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->bEnableViscousCapture = true;
+	}
 }
 
 void AKamikazeDroneNPC::Tick(float DeltaTime)
@@ -177,6 +183,13 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 
 	// Reset per-frame flags
 	bTookDamageThisFrame = false;
+
+	// Skip state machine while captured by EMF channeling
+	if (bIsCaptured)
+	{
+		PreviousFrameLocation = GetActorLocation();
+		return;
+	}
 
 	// State machine
 	switch (CurrentState)
@@ -488,12 +501,20 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 		}
 	}
 
-	// --- Move drone toward orbit position ---
+	// --- Move drone toward orbit position (with FPV jitter) ---
 	const FVector MoveDir = (TargetOrbitPos - GetActorLocation()).GetSafeNormal();
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		CMC->AddInputVector(MoveDir);
-		CMC->MaxFlySpeed = EffectiveSpeed;
+		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
+		const FVector Right = FVector::CrossProduct(MoveDir, FVector::UpVector).GetSafeNormal();
+		const FVector Up = FVector::CrossProduct(Right, MoveDir);
+		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
+		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
+		const FVector NoisyDir = (MoveDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
+
+		const float OrbitJitterSpeed = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
+		CMC->AddInputVector(NoisyDir);
+		CMC->MaxFlySpeed = EffectiveSpeed * (1.0f + OrbitJitterSpeed);
 	}
 
 	// --- Token-based attack check ---
@@ -544,7 +565,20 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 
 	const float t = RawAlpha;
 	const float u = 1.0f - t;
-	const FVector BezierPos = u*u*u * P0 + 3.0f*u*u*t * P1 + 3.0f*u*t*t * P2 + t*t*t * P3;
+	FVector BezierPos = u*u*u * P0 + 3.0f*u*u*t * P1 + 3.0f*u*t*t * P2 + t*t*t * P3;
+
+	// --- FPV jitter during telegraph, ramping up with t² (quiet start, noisy end) ---
+	{
+		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
+		const FVector BezierTangent = (3.0f*u*u*(P1-P0) + 6.0f*u*t*(P2-P1) + 3.0f*t*t*(P3-P2)).GetSafeNormal();
+		const FVector Right = FVector::CrossProduct(BezierTangent, FVector::UpVector).GetSafeNormal();
+		const FVector Up = FVector::CrossProduct(Right, BezierTangent);
+		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
+		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
+		// t*t ramp: silent at start, full jitter near end; scale by CruiseSpeed for world-space amplitude
+		const float JitterScale = t * t * AttackJitterAmplitude * CruiseSpeed;
+		BezierPos += (Right * JitterRight + Up * JitterUp) * JitterScale;
+	}
 
 	SetActorLocation(BezierPos, false, nullptr, ETeleportType::TeleportPhysics);
 
@@ -599,7 +633,8 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 		const FVector Up = FVector::CrossProduct(Right, SteeringDir);
 		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
 		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector NoisyDir = (SteeringDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
+		const FVector JitterOffset = (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude;
+		const FVector NoisyDir = (SteeringDir + JitterOffset).GetSafeNormal();
 
 		const float SpeedNoise = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
 		CMC->MaxFlySpeed = AttackSpeed * (1.0f + SpeedNoise);
@@ -610,6 +645,27 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 	if (CheckPlayerCollisionSweep())
 	{
 		return;
+	}
+
+	// --- Raycast forward for geometry (floor/wall) collision ---
+	{
+		FHitResult Hit;
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(this);
+		const FVector RayStart = GetActorLocation();
+		const FVector RayEnd = RayStart + GetVelocity().GetSafeNormal() * 200.0f;
+		if (GetWorld()->LineTraceSingleByChannel(Hit, RayStart, RayEnd, ECC_WorldStatic, QueryParams))
+		{
+			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Attacking GEOMETRY IMPACT | Dist=%.0f HitActor=%s"),
+					*GetName(), Hit.Distance, Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"));
+			}
+			CurrentState = EKamikazeState::Dead;
+			TriggerCollisionExplosion();
+			KamikazeDie();
+			return;
+		}
 	}
 
 	// --- Check if we've passed the target ---
@@ -642,7 +698,8 @@ void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
 		const FVector Up = FVector::CrossProduct(Right, AttackDirection);
 		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
 		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector NoisyDir = (AttackDirection + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
+		const FVector JitterOffset = (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude;
+		const FVector NoisyDir = (AttackDirection + JitterOffset).GetSafeNormal();
 
 		const float SpeedNoise = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
 		CMC->MaxFlySpeed = AttackSpeed * (1.0f + SpeedNoise);
@@ -745,15 +802,24 @@ void AKamikazeDroneNPC::UpdateRecovery(float DeltaTime)
 	// Decelerate and turn back toward orbit
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
+		// Restore normal acceleration after attack's boosted value
+		CMC->MaxAcceleration = 2048.0f;
+
 		// Gradually reduce speed back to cruise
 		const float TargetSpeed = FMath::FInterpTo(CMC->MaxFlySpeed, CruiseSpeed, DeltaTime, 3.0f);
 		CMC->MaxFlySpeed = TargetSpeed;
 
-		// Turn toward orbit center
+		// Turn toward orbit center (with FPV jitter)
 		if (APawn* Player = GetPlayerPawn())
 		{
 			const FVector ToPlayer = (Player->GetActorLocation() - GetActorLocation()).GetSafeNormal();
-			CMC->AddInputVector(ToPlayer);
+			const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
+			const FVector Right = FVector::CrossProduct(ToPlayer, FVector::UpVector).GetSafeNormal();
+			const FVector Up = FVector::CrossProduct(Right, ToPlayer);
+			const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
+			const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
+			const FVector NoisyDir = (ToPlayer + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
+			CMC->AddInputVector(NoisyDir);
 		}
 	}
 
@@ -840,6 +906,8 @@ void AKamikazeDroneNPC::CommitAttack()
 		CMC->SetMovementMode(MOVE_Flying);
 		CMC->Velocity = AttackDirection * AttackSpeed;
 		CMC->MaxFlySpeed = AttackSpeed;
+		// Very high acceleration so CMC can follow rapid jitter direction changes instantly
+		CMC->MaxAcceleration = 100000.0f;
 	}
 
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
@@ -905,20 +973,21 @@ FVector AKamikazeDroneNPC::CalculatePredictedPosition() const
 		return GetActorLocation() + GetActorForwardVector() * 500.0f;
 	}
 
-	const FVector PlayerPos = Player->GetActorLocation();
+	// Aim at feet level (90cm below actor origin)
+	const FVector PlayerFeet = Player->GetActorLocation() - FVector(0.0f, 0.0f, 90.0f);
 
 	if (PredictionOrder == 0)
 	{
 		// Zero order: aim at current position
-		return PlayerPos;
+		return PlayerFeet;
 	}
 
 	// First order: pos + vel * timeToImpact
-	const float Distance = FVector::Dist(GetActorLocation(), PlayerPos);
+	const float Distance = FVector::Dist(GetActorLocation(), PlayerFeet);
 	const float TimeToImpact = Distance / FMath::Max(AttackSpeed, 1.0f);
 	const FVector PlayerVel = Player->GetVelocity();
 
-	return PlayerPos + PlayerVel * TimeToImpact;
+	return PlayerFeet + PlayerVel * TimeToImpact;
 }
 
 // ==================== Damage ====================
@@ -1019,6 +1088,34 @@ float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	}
 
 	return Damage;
+}
+
+// ==================== EMF Capture ====================
+
+void AKamikazeDroneNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
+{
+	// Save state so we know what was interrupted
+	StateBeforeCapture = CurrentState;
+
+	// Stop CMC — drone hangs in the air held by EMF forces
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->StopMovementImmediately();
+		CMC->SetMovementMode(MOVE_None);
+	}
+
+	// Let base class handle bIsCaptured, bIsInKnockback, montage, etc.
+	Super::EnterCapturedState(OverrideMontage);
+}
+
+void AKamikazeDroneNPC::ExitCapturedState()
+{
+	// Let base class handle cleanup first
+	Super::ExitCapturedState();
+
+	// Drone explodes on release — it's a kamikaze, no point returning to orbit
+	TriggerCollisionExplosion();
+	KamikazeDie();
 }
 
 // ==================== Death ====================

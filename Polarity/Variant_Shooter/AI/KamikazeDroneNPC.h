@@ -260,6 +260,8 @@ protected:
 	virtual void EndKnockbackStun() override;
 	virtual void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit) override;
 	virtual void SpawnDeathGeometryCollection(const FDeathModeConfig& Config) override;
+	virtual void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr) override;
+	virtual void ExitCapturedState() override;
 
 public:
 
@@ -304,6 +306,7 @@ protected:
 	// ==================== State Machine ====================
 
 	EKamikazeState CurrentState = EKamikazeState::Orbiting;
+	EKamikazeState StateBeforeCapture = EKamikazeState::Orbiting;
 
 	void SetState(EKamikazeState NewState);
 	void UpdateOrbiting(float DeltaTime);
