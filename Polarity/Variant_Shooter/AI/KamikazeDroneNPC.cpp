@@ -279,41 +279,42 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 
 		if (CurrentState == EKamikazeState::Telegraphing)
 		{
-			// --- Telegraph: show phantom positions and lerp progress ---
+			// --- Telegraph: draw Bezier curve and control points ---
 			const float DbgAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
 
-			// Orbit phantom position (blue sphere) — delta-based, matches UpdateTelegraphing
-			const float DbgSM = CurrentOrbitRadius;
-			const float DbgSm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
-			const float DbgPhantomAngularSpeed = TelegraphPhantomOrbitSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
-			const float DbgCurrentAngle = TelegraphPhantomOrbitAngle + DbgPhantomAngularSpeed * StateTimer;
-			const FVector DbgInitialFormulaPos(
-				TelegraphPhantomOrbitCenter.X + DbgSM * FMath::Cos(TelegraphPhantomOrbitAngle),
-				TelegraphPhantomOrbitCenter.Y + DbgSm * FMath::Sin(TelegraphPhantomOrbitAngle),
-				TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
-					+ OrbitHeightAmplitude * FMath::Sin(TelegraphPhantomOrbitAngle + OrbitHeightPhaseOffset));
-			const FVector DbgCurrentFormulaPos(
-				TelegraphPhantomOrbitCenter.X + DbgSM * FMath::Cos(DbgCurrentAngle),
-				TelegraphPhantomOrbitCenter.Y + DbgSm * FMath::Sin(DbgCurrentAngle),
-				TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
-					+ OrbitHeightAmplitude * FMath::Sin(DbgCurrentAngle + OrbitHeightPhaseOffset));
-			const FVector DbgOrbitPhantom = TelegraphStartPos + (DbgCurrentFormulaPos - DbgInitialFormulaPos);
-			DrawDebugSphere(GetWorld(), DbgOrbitPhantom, 20.0f, 6, FColor::Blue, false, 0.0f, 0, 2.0f);
+			const FVector P0 = TelegraphStartPos;
+			const FVector P1 = TelegraphPhantomOrbitCenter;
+			const FVector P3 = TelegraphStartPos + TelegraphAttackDir * TelegraphPhantomOrbitAngle;
+			const FVector P2 = P3 - TelegraphAttackDir * TelegraphPhantomOrbitSpeed;
 
-			// Attack phantom position (red sphere) — accelerating from 0
-			const FVector DbgAttackPhantom = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer * DbgAlpha * 0.5f;
-			DrawDebugSphere(GetWorld(), DbgAttackPhantom, 20.0f, 6, FColor::Red, false, 0.0f, 0, 2.0f);
+			// Draw Bezier curve as segments (orange = traveled, yellow = remaining)
+			constexpr int32 NumSegments = 20;
+			FVector PrevPt = P0;
+			for (int32 i = 1; i <= NumSegments; ++i)
+			{
+				const float st = (float)i / (float)NumSegments;
+				const float su = 1.0f - st;
+				const FVector Pt = su*su*su * P0 + 3.0f*su*su*st * P1 + 3.0f*su*st*st * P2 + st*st*st * P3;
+				DrawDebugLine(GetWorld(), PrevPt, Pt, (st <= DbgAlpha) ? FColor::Orange : FColor::Yellow, false, 0.0f, 0, 2.0f);
+				PrevPt = Pt;
+			}
 
-			// Lines from drone to each phantom
-			DrawDebugLine(GetWorld(), MyLoc, DbgOrbitPhantom, FColor::Blue, false, 0.0f, 0, 1.5f);
-			DrawDebugLine(GetWorld(), MyLoc, DbgAttackPhantom, FColor::Red, false, 0.0f, 0, 1.5f);
+			// Control points: P0 green, P1 blue (orbit tangent), P2 red (attack approach), P3 magenta (end)
+			DrawDebugSphere(GetWorld(), P0, 15.0f, 4, FColor::Green, false, 0.0f, 0, 1.5f);
+			DrawDebugSphere(GetWorld(), P1, 15.0f, 4, FColor::Blue, false, 0.0f, 0, 1.5f);
+			DrawDebugSphere(GetWorld(), P2, 15.0f, 4, FColor::Red, false, 0.0f, 0, 1.5f);
+			DrawDebugSphere(GetWorld(), P3, 15.0f, 4, FColor::Magenta, false, 0.0f, 0, 1.5f);
 
-			// Attack target (magenta sphere)
+			// Control polygon (tangent handles)
+			DrawDebugLine(GetWorld(), P0, P1, FColor::Blue, false, 0.0f, 0, 0.5f);
+			DrawDebugLine(GetWorld(), P2, P3, FColor::Red, false, 0.0f, 0, 0.5f);
+
+			// Attack target
 			DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Magenta, false, 0.0f, 0, 2.0f);
 
-			// Alpha + speed text
-			const FString LerpStr = FString::Printf(TEXT("Lerp: %.2f | Speed: %.0f"), DbgAlpha, MySpeed);
-			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), LerpStr, nullptr, FColor::Orange, 0.0f, true, 1.0f);
+			// Progress text
+			const FString BezierStr = FString::Printf(TEXT("Bezier t: %.2f | Speed: %.0f"), DbgAlpha, MySpeed);
+			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), BezierStr, nullptr, FColor::Orange, 0.0f, true, 1.0f);
 		}
 
 		if (CurrentState == EKamikazeState::Attacking)
@@ -528,52 +529,31 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 {
 	StateTimer += DeltaTime;
-
-	// --- Alpha: smooth 0→1 over TelegraphDuration ---
 	const float RawAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
-	const float Alpha = FMath::SmoothStep(0.0f, 1.0f, RawAlpha);
 
-	// --- Orbit phantom: continue orbiting as if no attack was triggered ---
-	// Compute current angle from initial angle + elapsed time (TelegraphPhantomOrbitAngle is NOT modified)
-	const float PhantomAngularSpeed = TelegraphPhantomOrbitSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
-	const float CurrentPhantomAngle = TelegraphPhantomOrbitAngle + PhantomAngularSpeed * StateTimer;
+	// --- Cubic Bezier: smooth curve from orbit tangent to attack direction ---
+	// Control points stored in BeginTelegraph (repurposed phantom variables):
+	//   P0 = TelegraphStartPos
+	//   P1 = TelegraphPhantomOrbitCenter  (orbit tangent pull)
+	//   P3 = TelegraphStartPos + TelegraphAttackDir * TelegraphPhantomOrbitAngle
+	//   P2 = P3 - TelegraphAttackDir * TelegraphPhantomOrbitSpeed
+	const FVector P0 = TelegraphStartPos;
+	const FVector P1 = TelegraphPhantomOrbitCenter;
+	const FVector P3 = TelegraphStartPos + TelegraphAttackDir * TelegraphPhantomOrbitAngle;
+	const FVector P2 = P3 - TelegraphAttackDir * TelegraphPhantomOrbitSpeed;
 
-	const float SM = CurrentOrbitRadius;
-	const float Sm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
+	const float t = RawAlpha;
+	const float u = 1.0f - t;
+	const FVector BezierPos = u*u*u * P0 + 3.0f*u*u*t * P1 + 3.0f*u*t*t * P2 + t*t*t * P3;
 
-	// Orbit formula position at telegraph START (initial saved angle)
-	const FVector InitialOrbitFormulaPos(
-		TelegraphPhantomOrbitCenter.X + SM * FMath::Cos(TelegraphPhantomOrbitAngle),
-		TelegraphPhantomOrbitCenter.Y + Sm * FMath::Sin(TelegraphPhantomOrbitAngle),
-		TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
-			+ OrbitHeightAmplitude * FMath::Sin(TelegraphPhantomOrbitAngle + OrbitHeightPhaseOffset));
-
-	// Orbit formula position at CURRENT time (advanced angle)
-	const FVector CurrentOrbitFormulaPos(
-		TelegraphPhantomOrbitCenter.X + SM * FMath::Cos(CurrentPhantomAngle),
-		TelegraphPhantomOrbitCenter.Y + Sm * FMath::Sin(CurrentPhantomAngle),
-		TelegraphPhantomOrbitCenter.Z + OrbitBaseHeight
-			+ OrbitHeightAmplitude * FMath::Sin(CurrentPhantomAngle + OrbitHeightPhaseOffset));
-
-	// Orbit phantom = actual start pos + orbit movement delta
-	// At t=0: delta=0, OrbitPhantomPos=TelegraphStartPos — NO teleport
-	const FVector OrbitPhantomPos = TelegraphStartPos + (CurrentOrbitFormulaPos - InitialOrbitFormulaPos);
-
-	// --- Attack phantom: accelerates from 0 to CruiseSpeed over TelegraphDuration ---
-	// Speed(t) = CruiseSpeed * RawAlpha, Distance = CruiseSpeed * t * RawAlpha * 0.5
-	const FVector AttackPhantomPos = TelegraphStartPos + TelegraphAttackDir * CruiseSpeed * StateTimer * RawAlpha * 0.5f;
-
-	// --- Lerp real drone between phantoms ---
-	const FVector LerpedPos = FMath::Lerp(OrbitPhantomPos, AttackPhantomPos, Alpha);
-	SetActorLocation(LerpedPos, false, nullptr, ETeleportType::TeleportPhysics);
+	SetActorLocation(BezierPos, false, nullptr, ETeleportType::TeleportPhysics);
 
 	// --- Compute virtual velocity for FPVTilt and actor rotation ---
 	const FVector VirtualVelocity = (DeltaTime > SMALL_NUMBER)
-		? (LerpedPos - TelegraphPrevPos) / DeltaTime
+		? (BezierPos - TelegraphPrevPos) / DeltaTime
 		: TelegraphAttackDir * CruiseSpeed;
-	TelegraphPrevPos = LerpedPos;
+	TelegraphPrevPos = BezierPos;
 
-	// Set CMC->Velocity so GetVelocity() returns correct value for FPVTilt and rotation
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->Velocity = VirtualVelocity;
@@ -582,15 +562,13 @@ void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
 	// --- Per-frame position log ---
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Telegraph | A=%.2f Pos=(%.0f,%.0f,%.0f) OrbPh=(%.0f,%.0f,%.0f) AtkPh=(%.0f,%.0f,%.0f) Spd=%.0f"),
-			*GetName(), Alpha,
-			LerpedPos.X, LerpedPos.Y, LerpedPos.Z,
-			OrbitPhantomPos.X, OrbitPhantomPos.Y, OrbitPhantomPos.Z,
-			AttackPhantomPos.X, AttackPhantomPos.Y, AttackPhantomPos.Z,
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Telegraph Bezier | t=%.2f Pos=(%.0f,%.0f,%.0f) Spd=%.0f"),
+			*GetName(), t,
+			BezierPos.X, BezierPos.Y, BezierPos.Z,
 			VirtualVelocity.Size());
 	}
 
-	// --- Commit when lerp is complete ---
+	// --- Commit when complete ---
 	if (RawAlpha >= 1.0f)
 	{
 		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
@@ -798,20 +776,26 @@ void AKamikazeDroneNPC::BeginTelegraph(bool bRetaliation)
 
 	bIsRetaliating = bRetaliation;
 
-	// --- Snapshot phantom states for lerp ---
+	// --- Snapshot state BEFORE disabling CMC ---
 	TelegraphStartPos = GetActorLocation();
 	TelegraphPrevPos = TelegraphStartPos;
+	const FVector OrbitTangent = GetVelocity().GetSafeNormal(); // actual flight direction = orbit tangent
 
-	// Orbit phantom: continues from current orbit state
-	TelegraphPhantomOrbitAngle = OrbitAngle;
-	TelegraphPhantomOrbitSpeed = CruiseSpeed;
-	TelegraphPhantomOrbitCenter = OrbitCenter;
-
-	// Attack phantom: direction toward predicted player position
+	// Attack direction toward predicted player position
 	AttackTargetPosition = CalculatePredictedPosition();
 	TelegraphAttackDir = (AttackTargetPosition - TelegraphStartPos).GetSafeNormal();
 
-	// Disable CMC movement — we position the drone manually via SetActorLocation during lerp
+	// --- Cubic Bezier control points (repurpose phantom variables) ---
+	// P0 = TelegraphStartPos
+	// P1 = TelegraphPhantomOrbitCenter  (orbit tangent pull — big initial curve)
+	// P2 = computed from P3 - AttackDir * TelegraphPhantomOrbitSpeed (small end curve)
+	// P3 = TelegraphStartPos + AttackDir * TelegraphPhantomOrbitAngle
+	const float ArcLength = CruiseSpeed * TelegraphDuration;
+	TelegraphPhantomOrbitCenter = TelegraphStartPos + OrbitTangent * ArcLength * 0.5f;   // P1
+	TelegraphPhantomOrbitAngle = ArcLength * 0.5f;                                       // P3 distance
+	TelegraphPhantomOrbitSpeed = ArcLength * 0.15f;                                      // P2 pull-back
+
+	// Disable CMC movement — we position the drone manually via SetActorLocation
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->StopMovementImmediately();
