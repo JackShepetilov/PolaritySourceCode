@@ -19,7 +19,11 @@ AKamikazeDroneSpawner::AKamikazeDroneSpawner()
 
 	DetectionSphere = CreateDefaultSubobject<USphereComponent>(TEXT("DetectionSphere"));
 	DetectionSphere->SetupAttachment(SceneRoot);
-	DetectionSphere->SetCollisionProfileName(FName("OverlapOnlyPawn"));
+	// Explicit collision setup — do NOT rely on profile names that may not exist in the project
+	DetectionSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	DetectionSphere->SetCollisionObjectType(ECC_WorldDynamic);
+	DetectionSphere->SetCollisionResponseToAllChannels(ECR_Ignore);
+	DetectionSphere->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
 	DetectionSphere->SetGenerateOverlapEvents(true);
 	DetectionSphere->SetSphereRadius(ReactionRadius);
 
