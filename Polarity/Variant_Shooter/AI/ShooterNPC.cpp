@@ -170,6 +170,12 @@ void AShooterNPC::Tick(float DeltaTime)
 
 	Super::Tick(DeltaTime);
 
+	// Dead NPCs: skip all NPC-specific logic (character movement still ticks via Super)
+	if (bIsDead)
+	{
+		return;
+	}
+
 	// Update knockback interpolation if active
 	if (bIsKnockbackInterpolating)
 	{
@@ -189,8 +195,8 @@ void AShooterNPC::Tick(float DeltaTime)
 		ChargeValue = EMFVelocityModifier->GetCharge();
 	}
 
-	// Sync FieldComponent with EMFVelocityModifier charge
-	if (FieldComponent)
+	// Sync FieldComponent with EMFVelocityModifier charge (only when changed)
+	if (FieldComponent && !FMath::IsNearlyEqual(ChargeValue, PreviousChargeValue, 0.001f))
 	{
 		FieldComponent->SetCharge(ChargeValue);
 	}
