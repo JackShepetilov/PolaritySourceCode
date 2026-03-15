@@ -89,12 +89,13 @@ void AEMFPhysicsProp::BeginPlay()
 		WidgetSub->RegisterProp(this);
 	}
 
-	// Uncharged props start with physics disabled (static blockers).
-	// Physics is enabled when prop receives charge via SetCharge().
+	// Uncharged props start with physics and tick disabled (static blockers).
+	// Both are enabled when prop receives charge via SetCharge().
 	// This prevents NPC depenetration impulses from triggering false explosions.
 	if (PropMesh && FMath::IsNearlyZero(DefaultCharge))
 	{
 		PropMesh->SetSimulatePhysics(false);
+		SetActorTickEnabled(false);
 	}
 }
 
@@ -126,8 +127,6 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	{
 		UpdateCaptureForces(DeltaTime);
 	}
-
-	UpdateChargeTracking();
 
 	// Cache speed for explosion checks (before collision callbacks modify velocity)
 	if (PropMesh)
@@ -166,6 +165,10 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 
 	FVector TotalForce = FVector::ZeroVector;
 	bool bShouldApplyProximityDamping = false;
+
+	// Pre-allocate once, reuse in loop (avoids heap allocation per source per tick)
+	TArray<FEMSourceDescription> SingleSource;
+	SingleSource.Reserve(1);
 
 	for (const FEMSourceDescription& Source : OtherSources)
 	{
@@ -209,7 +212,7 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			continue;
 		}
 
-		TArray<FEMSourceDescription> SingleSource;
+		SingleSource.Reset();
 		SingleSource.Add(Source);
 
 		const FVector SourceForce = UEMF_PluginBPLibrary::CalculateLorentzForceComplete(
@@ -607,6 +610,12 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
+	// Early exit: nothing to do for slow/resting props that aren't in flight
+	if (!bIsInReverseFlight && CachedPreCollisionSpeed < ExplosionSpeedThreshold)
+	{
+		return;
+	}
+
 	// Explosive impact: launched props use lower threshold, collateral uses higher
 	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
 	{
@@ -866,6 +875,7 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 	}
 
 	bIsDead = true;
+	SetActorTickEnabled(false);
 	OnPropDeath.Broadcast(this, Killer);
 
 	// Release from capture if held
@@ -1228,6 +1238,7 @@ void AEMFPhysicsProp::ResetProp()
 	bIsInReverseFlight = false;
 	CachedPreCollisionSpeed = 0.0f;
 	CurrentHP = MaxHP;
+	SetActorTickEnabled(true);
 
 	// Release from capture if held
 	if (CapturingPlate.IsValid())
@@ -1259,6 +1270,12 @@ void AEMFPhysicsProp::ResetProp()
 	// Reset charge to default
 	SetCharge(DefaultCharge);
 
+	// Match BeginPlay: uncharged props don't need tick
+	if (FMath::IsNearlyZero(DefaultCharge))
+	{
+		SetActorTickEnabled(false);
+	}
+
 	// Re-register with charge widget subsystem (OnPropDied unregistered us)
 	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
@@ -1281,11 +1298,14 @@ void AEMFPhysicsProp::SetCharge(float NewCharge)
 	Desc.PointChargeParams.Charge = NewCharge;
 	FieldComponent->SetSourceDescription(Desc);
 
-	// Enable physics when prop transitions from uncharged to charged
+	// Enable physics and tick when prop transitions from uncharged to charged
 	if (PropMesh && FMath::IsNearlyZero(OldCharge) && !FMath::IsNearlyZero(NewCharge))
 	{
 		PropMesh->SetSimulatePhysics(true);
+		SetActorTickEnabled(true);
 	}
+
+	UpdateChargeTracking();
 }
 
 float AEMFPhysicsProp::GetPropMass() const
