@@ -379,6 +379,12 @@ protected:
 	/** True when bEnableViscousCapture was enabled by stun-capture. Reset on ExitCapturedState. */
 	bool bCaptureEnabledByStun = false;
 
+	/** Cached value of CMC->bUseControllerDesiredRotation before stun disabled it */
+	bool bCachedUseControllerDesiredRotation = false;
+
+	/** Cached value of bUseControllerRotationYaw before stun disabled it */
+	bool bCachedUseControllerRotationYaw = false;
+
 	/** Start position for knockback interpolation */
 	FVector KnockbackStartPosition = FVector::ZeroVector;
 

@@ -1279,7 +1279,7 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 	// Stop shooting immediately
 	StopShooting();
 
-	// Stop AI pathfinding
+	// Stop AI pathfinding and clear focus to prevent rotation toward player during stun
 	if (AController* MyController = GetController())
 	{
 		if (AAIController* AIController = Cast<AAIController>(MyController))
@@ -1289,6 +1289,7 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
 			}
 			AIController->StopMovement();
+			AIController->ClearFocus(EAIFocusPriority::Gameplay);
 		}
 	}
 
@@ -1297,7 +1298,15 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 	{
 		MoveComp->StopMovementImmediately();
 		MoveComp->DisableMovement();
+
+		// Disable controller-driven rotation so NPC doesn't turn toward player during stun
+		bCachedUseControllerDesiredRotation = MoveComp->bUseControllerDesiredRotation;
+		MoveComp->bUseControllerDesiredRotation = false;
 	}
+
+	// Disable character-level controller rotation
+	bCachedUseControllerRotationYaw = bUseControllerRotationYaw;
+	bUseControllerRotationYaw = false;
 
 	// Disable EMF forces during stun
 	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
@@ -1363,7 +1372,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	KnockbackElapsedTime = 0.0f;
 	KnockbackAttackerPosition = AttackerLocation;
 
-	// Stop AI pathfinding completely
+	// Stop AI pathfinding completely and clear focus to prevent rotation during knockback
 	if (AController* MyController = GetController())
 	{
 		if (AAIController* AIController = Cast<AAIController>(MyController))
@@ -1375,6 +1384,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 			}
 			// Stop any active movement request
 			AIController->StopMovement();
+			AIController->ClearFocus(EAIFocusPriority::Gameplay);
 		}
 	}
 
@@ -1399,7 +1409,15 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 		// Stop any current movement
 		CharMovement->StopActiveMovement();
 		CharMovement->Velocity = FVector::ZeroVector;
+
+		// Disable controller-driven rotation so NPC doesn't turn toward player during knockback
+		bCachedUseControllerDesiredRotation = CharMovement->bUseControllerDesiredRotation;
+		CharMovement->bUseControllerDesiredRotation = false;
 	}
+
+	// Disable character-level controller rotation
+	bCachedUseControllerRotationYaw = bUseControllerRotationYaw;
+	bUseControllerRotationYaw = false;
 
 	// Clear any existing timers
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
@@ -2292,18 +2310,34 @@ void AShooterNPC::EndKnockbackStun()
 		}
 	}
 
-	// Restore movement mode and ground friction after knockback
+	// Restore movement mode, ground friction, and rotation after knockback
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
 		CharMovement->SetMovementMode(MOVE_Walking);
 		CharMovement->GroundFriction = CachedGroundFriction;
 		CharMovement->Velocity = FVector::ZeroVector;
+		CharMovement->bUseControllerDesiredRotation = bCachedUseControllerDesiredRotation;
 	}
+
+	// Restore character-level controller rotation
+	bUseControllerRotationYaw = bCachedUseControllerRotationYaw;
 
 	// Re-enable EMF forces
 	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
 	{
 		EMFVelocityModifier->SetEnabled(true);
+	}
+
+	// Restore focus on current target so NPC resumes facing the player
+	if (AController* MyController = GetController())
+	{
+		if (AShooterAIController* AIController = Cast<AShooterAIController>(MyController))
+		{
+			if (AActor* Target = AIController->GetCurrentTarget())
+			{
+				AIController->SetFocus(Target);
+			}
+		}
 	}
 
 	// AI will resume pathfinding on next StateTree tick
