@@ -623,7 +623,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 						bIsInReverseFlight ? TEXT("Launch") : TEXT("Collateral"),
 						OtherActor ? *OtherActor->GetName() : TEXT("NULL")));
 			}
-			if (Speed >= CriticalVelocity)
+			if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
 			{
 				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
 			}
@@ -674,7 +674,7 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		const float OverlapThreshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
 		if (CachedPreCollisionSpeed >= OverlapThreshold)
 		{
-			if (CachedPreCollisionSpeed >= CriticalVelocity)
+			if (CriticalVelocity > 0.0f && CachedPreCollisionSpeed >= CriticalVelocity)
 			{
 				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), CachedPreCollisionSpeed);
 			}
@@ -1219,6 +1219,53 @@ float AEMFPhysicsProp::GetCharge() const
 		return 0.0f;
 	}
 	return FieldComponent->GetSourceDescription().PointChargeParams.Charge;
+}
+
+void AEMFPhysicsProp::ResetProp()
+{
+	bIsDead = false;
+	bHasExploded = false;
+	bIsInReverseFlight = false;
+	CachedPreCollisionSpeed = 0.0f;
+	CurrentHP = MaxHP;
+
+	// Release from capture if held
+	if (CapturingPlate.IsValid())
+	{
+		ReleasedFromCapture();
+	}
+
+	// Restore visibility
+	SetActorHiddenInGame(false);
+	if (PropMesh)
+	{
+		PropMesh->SetVisibility(true);
+		PropMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+		// Match BeginPlay logic: uncharged props start with physics off
+		if (FMath::IsNearlyZero(DefaultCharge))
+		{
+			PropMesh->SetSimulatePhysics(false);
+		}
+		else
+		{
+			PropMesh->SetSimulatePhysics(true);
+		}
+
+		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+		PropMesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+	}
+
+	// Reset charge to default
+	SetCharge(DefaultCharge);
+
+	// Re-register with charge widget subsystem (OnPropDied unregistered us)
+	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->RegisterProp(this);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp: %s reset to alive state"), *GetName());
 }
 
 void AEMFPhysicsProp::SetCharge(float NewCharge)

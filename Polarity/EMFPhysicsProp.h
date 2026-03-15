@@ -483,6 +483,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Explosive Impact")
 	void Explode(float DamageMultiplier = 1.0f, float RadiusMultiplier = 1.0f, float VFXScaleMultiplier = 1.0f);
 
+	/** Reset prop to alive state: restore HP, visibility, physics, charge.
+	 *  Call SetActorTransform() before this if you need to restore position. */
+	UFUNCTION(BlueprintCallable, Category = "Health")
+	void ResetProp();
+
 	// ==================== Channeling Capture API ====================
 
 	/** Mark this prop as captured by the given plate */
