@@ -42,12 +42,22 @@ AShooterProjectile* UProjectilePoolSubsystem::GetProjectile(
 	AShooterProjectile* Projectile = nullptr;
 
 	// Try to get from pool
-	TArray<AShooterProjectile*>* Pool = PoolsByClass.Find(ProjectileClass);
-	if (Pool && Pool->Num() > 0)
+	FProjectilePool* Pool = PoolsByClass.Find(ProjectileClass);
+	if (Pool && Pool->Projectiles.Num() > 0)
 	{
-		Projectile = Pool->Pop();
+		// Pop from pool, skipping any that were unexpectedly destroyed
+		while (Pool->Projectiles.Num() > 0)
+		{
+			Projectile = Pool->Projectiles.Pop();
+			if (IsValid(Projectile))
+			{
+				break;
+			}
+			Projectile = nullptr;
+		}
 	}
-	else
+
+	if (!Projectile)
 	{
 		// Pool empty or doesn't exist - spawn new projectile
 		Projectile = SpawnPooledProjectile(ProjectileClass);
@@ -93,8 +103,8 @@ void UProjectilePoolSubsystem::ReturnProjectile(AShooterProjectile* Projectile)
 	Projectile->DeactivateToPool();
 
 	// Return to pool
-	TArray<AShooterProjectile*>& Pool = PoolsByClass.FindOrAdd(ProjectileClass);
-	Pool.Add(Projectile);
+	FProjectilePool& Pool = PoolsByClass.FindOrAdd(ProjectileClass);
+	Pool.Projectiles.Add(Projectile);
 
 	// Update active count
 	if (int32* ActiveCount = ActiveCountByClass.Find(ProjectileClass))
@@ -110,23 +120,23 @@ void UProjectilePoolSubsystem::PrewarmPool(TSubclassOf<AShooterProjectile> Proje
 		return;
 	}
 
-	TArray<AShooterProjectile*>& Pool = PoolsByClass.FindOrAdd(ProjectileClass);
-	Pool.Reserve(Pool.Num() + Count);
+	FProjectilePool& Pool = PoolsByClass.FindOrAdd(ProjectileClass);
+	Pool.Projectiles.Reserve(Pool.Projectiles.Num() + Count);
 
 	for (int32 i = 0; i < Count; ++i)
 	{
 		if (AShooterProjectile* Projectile = SpawnPooledProjectile(ProjectileClass))
 		{
-			Pool.Add(Projectile);
+			Pool.Projectiles.Add(Projectile);
 		}
 	}
 }
 
 int32 UProjectilePoolSubsystem::GetPoolSize(TSubclassOf<AShooterProjectile> ProjectileClass) const
 {
-	if (const TArray<AShooterProjectile*>* Pool = PoolsByClass.Find(ProjectileClass))
+	if (const FProjectilePool* Pool = PoolsByClass.Find(ProjectileClass))
 	{
-		return Pool->Num();
+		return Pool->Projectiles.Num();
 	}
 	return 0;
 }

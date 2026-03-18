@@ -691,9 +691,19 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	}
 
 	const FVector CameraForward = CameraRot.Vector();
-	const float MaxAngleCos = FMath::Cos(FMath::DegreesToRadians(CaptureMaxAngle));
 	const float SearchRadiusSq = CaptureSearchRadius * CaptureSearchRadius;
 	const FVector PlayerLoc = OwnerCharacter->GetActorLocation();
+
+	// Adaptive cone: close objects get a wider acceptance angle because
+	// small height differences create large angles when viewed from nearby.
+	// At 0 cm → 90°, at NearFieldRadius → CaptureMaxAngle. Beyond that → CaptureMaxAngle.
+	constexpr float NearFieldRadius = 500.0f;
+	auto GetMaxAngleCosForDistance = [&](float Dist) -> float
+	{
+		const float T = FMath::Clamp(Dist / NearFieldRadius, 0.0f, 1.0f);
+		const float EffectiveAngle = FMath::Lerp(90.0f, CaptureMaxAngle, T);
+		return FMath::Cos(FMath::DegreesToRadians(EffectiveAngle));
+	};
 
 	// Find pawns, physics bodies, and world dynamic (for DroppedMeleeWeapon) in radius via overlap
 	FCollisionObjectQueryParams ObjectQuery;
@@ -775,7 +785,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			if (AngleCos < MaxAngleCos)
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
 			{
 				continue;
 			}
@@ -821,10 +831,11 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			if (AngleCos < MaxAngleCos)
+			const float AdaptedMaxAngleCosWeapon = GetMaxAngleCosForDistance(FMath::Sqrt(DistSq));
+			if (AngleCos < AdaptedMaxAngleCosWeapon)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedWeapon %s OUT OF ANGLE: cos=%.2f, minCos=%.2f"),
-					*DroppedWeapon->GetName(), AngleCos, MaxAngleCos);
+					*DroppedWeapon->GetName(), AngleCos, AdaptedMaxAngleCosWeapon);
 				continue;
 			}
 
@@ -872,10 +883,11 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			if (AngleCos < MaxAngleCos)
+			const float AdaptedMaxAngleCosRanged = GetMaxAngleCosForDistance(FMath::Sqrt(DistSq));
+			if (AngleCos < AdaptedMaxAngleCosRanged)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s OUT OF ANGLE: cos=%.2f, minCos=%.2f"),
-					*DroppedRanged->GetName(), AngleCos, MaxAngleCos);
+					*DroppedRanged->GetName(), AngleCos, AdaptedMaxAngleCosRanged);
 				continue;
 			}
 
@@ -918,7 +930,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			if (AngleCos < MaxAngleCos)
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
 			{
 				continue;
 			}
@@ -949,7 +961,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			if (AngleCos < MaxAngleCos)
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
 			{
 				continue;
 			}
@@ -1012,7 +1024,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 		const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 		const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-		if (AngleCos < MaxAngleCos)
+		if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
 		{
 			continue;
 		}

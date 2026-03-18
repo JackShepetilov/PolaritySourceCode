@@ -103,6 +103,10 @@ void ATutorialTriggerVolume::OnTriggerBeginOverlap(UPrimitiveComponent* Overlapp
 	case ETutorialType::Slide:
 		bShown = Subsystem->ShowSlide(TutorialID, SlideData, PC);
 		break;
+
+	case ETutorialType::HUDArrow:
+		bShown = Subsystem->ShowHUDArrow(TutorialID, HUDArrowData, PC);
+		break;
 	}
 
 	if (bShown)

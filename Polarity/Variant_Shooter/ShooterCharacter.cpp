@@ -43,6 +43,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
+#include "TutorialSubsystem.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 
 AShooterCharacter::AShooterCharacter()
@@ -168,6 +169,27 @@ void AShooterCharacter::BeginPlay()
 
 	// update the HUD
 	OnDamaged.Broadcast(1.0f, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+
+	// Tutorial debug mode: reveal all HUD elements and skip all tutorials
+	if (bTutorialDebugMode)
+	{
+		// Delay slightly so HUD widget has time to initialize
+		FTimerHandle DebugTimerHandle;
+		GetWorldTimerManager().SetTimer(DebugTimerHandle, [this]()
+		{
+			if (UGameInstance* GI = GetGameInstance())
+			{
+				if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+				{
+					TArray<FName> AllTutorialIDs;
+					AllTutorialIDs.Add(FirstDamageTutorialID);
+					AllTutorialIDs.Add(FirstChargeTutorialID);
+					AllTutorialIDs.Add(MeleeChargesTutorialID);
+					TutorialSub->RunTutorialDebugReveal(AllTutorialIDs);
+				}
+			}
+		}, 0.5f, false);
+	}
 }
 
 void AShooterCharacter::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -342,6 +364,19 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 
 	// update the HUD (HP + Armor)
 	OnDamaged.Broadcast(FMath::Max(0.0f, CurrentHP / MaxHP), MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+
+	// Trigger first-damage tutorial arrow (Health Bar)
+	if (!FirstDamageTutorialID.IsNone() && Damage > 0.0f)
+	{
+		if (UGameInstance* GI = GetGameInstance())
+		{
+			if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+			{
+				APlayerController* PC = Cast<APlayerController>(GetController());
+				TutorialSub->ShowHUDArrow(FirstDamageTutorialID, FirstDamageArrowData, PC);
+			}
+		}
+	}
 
 	return Damage;
 }
@@ -1142,6 +1177,19 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 					UE_LOG(LogTemp, Warning, TEXT("[MeleeCharge] Dummy stable charge: +%.2f to %s"),
 						StableAmount, *GetName());
 					EMFMod->AddPermanentCharge(StableAmount);
+
+					// Trigger first-charge tutorial arrow (Charge Bar)
+					if (!FirstChargeTutorialID.IsNone())
+					{
+						if (UGameInstance* GI = GetGameInstance())
+						{
+							if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+							{
+								APlayerController* PC = Cast<APlayerController>(GetController());
+								TutorialSub->ShowHUDArrow(FirstChargeTutorialID, FirstChargeArrowData, PC);
+							}
+						}
+					}
 				}
 
 				// Add kill bonus if we killed the dummy

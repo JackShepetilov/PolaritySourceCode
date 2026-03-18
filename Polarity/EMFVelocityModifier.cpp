@@ -369,23 +369,7 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			continue;
 		}
 
-		// Non-capturable NPCs: after NonCapturePlateForceDuration, suppress opposite-charge plate force
-		if (bIsChannelingPlate && !bEnableViscousCapture)
-		{
-			bFoundAnyChannelingPlate = true;
 
-			if (NonCapturePlateForceTimer >= NonCapturePlateForceDuration)
-			{
-				const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
-				const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
-
-				// Different charges: suppress force after time limit
-				if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
-				{
-					continue;
-				}
-			}
-		}
 
 		bool bIsPlateSource = bFoundPlate && bIsChannelingPlate;
 
@@ -411,6 +395,13 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		);
 
 		SourceForce *= Multiplier;
+
+		// DEBUG: Log plate force on kamikaze drones
+		if (bIsChannelingPlate)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[EMF DEBUG] %s | PlateForce: %s | Mult: %.1f | Charge: %.1f | bViscous: %d | bFoundPlate: %d | Timer: %.2f/%.2f"),
+				*GetOwner()->GetName(), *SourceForce.ToCompactString(), Multiplier, Charge, bEnableViscousCapture, bFoundPlate, NonCapturePlateForceTimer, NonCapturePlateForceDuration);
+		}
 
 		// Separate plate forces for later suppression
 		if (bIsPlateSource)
@@ -503,6 +494,13 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	if (bFoundPlate && CaptPlate)
 	{
 		VelocityDelta = ComputeHardHoldDelta(DeltaTime, CurrentVelocity, CaptPlate);
+	}
+
+	// DEBUG: Final velocity delta for drones
+	if (!VelocityDelta.IsNearlyZero(0.1f))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EMF RESULT] %s | VelDelta: %s | Force: %s | Mass: %.1f"),
+			*GetOwner()->GetName(), *VelocityDelta.ToCompactString(), *CurrentEMForce.ToCompactString(), Mass);
 	}
 
 	// Debug

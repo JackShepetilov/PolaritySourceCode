@@ -5,7 +5,8 @@
 #include "BossCharacter.h"
 #include "Variant_Shooter/AI/FlyingAIMovementComponent.h"
 
-ABossAIController::ABossAIController()
+ABossAIController::ABossAIController(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
 {
 }
 

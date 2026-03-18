@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Tickable.h"
+#include "EMFChargeWidget.h"
 #include "EMFChargeWidgetSubsystem.generated.h"
 
 class UEMFChargeWidget;
@@ -13,7 +14,41 @@ class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
-class AUpgradePickup;
+
+/**
+ * Per-category settings for widget clutter reduction.
+ * Controls how the widget's own MinScaleDistance is multiplied down as more actors
+ * of this category are registered. Base distance comes from the widget blueprint.
+ * Formula: Multiplier = MinMultiplier + (1 - MinMultiplier) / (1 + DecayRate * (Count - 1))
+ */
+USTRUCT(BlueprintType)
+struct FWidgetClutterSettings
+{
+	GENERATED_BODY()
+
+	/** Base cutoff distance for this category (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Clutter", meta = (ClampMin = "500", ClampMax = "20000"))
+	float BaseMinScaleDistance = 3000.0f;
+
+	/** How fast distance shrinks with count (higher = more aggressive reduction) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Clutter", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float DecayRate = 0.15f;
+
+	/** Floor multiplier — never reduce below this fraction of BaseMinScaleDistance */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Clutter", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float MinMultiplier = 0.3f;
+
+	/** Compute effective MinScaleDistance for a given count */
+	float ComputeEffectiveDistance(int32 Count) const
+	{
+		if (Count <= 1)
+		{
+			return BaseMinScaleDistance;
+		}
+		float Mult = MinMultiplier + (1.0f - MinMultiplier) / (1.0f + DecayRate * (Count - 1));
+		return BaseMinScaleDistance * Mult;
+	}
+};
 
 /**
  * Settings for EMF charge widget appearance
@@ -35,9 +70,17 @@ struct FEMFChargeWidgetSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layout", meta = (ClampMin = "0", ClampMax = "200"))
 	float PropVerticalOffset = 30.0f;
 
-	/** Maximum widgets in pool */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pool", meta = (ClampMin = "5", ClampMax = "50"))
-	int32 PoolSize = 20;
+	/** Clutter reduction settings for NPC widgets */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Clutter")
+	FWidgetClutterSettings NPCClutter;
+
+	/** Clutter reduction settings for EMF Prop widgets */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Clutter")
+	FWidgetClutterSettings PropClutter;
+
+	/** Clutter reduction settings for Dropped Weapon widgets */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Clutter")
+	FWidgetClutterSettings WeaponClutter;
 };
 
 /**
@@ -97,14 +140,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
 	void UnregisterDroppedRangedWeapon(ADroppedRangedWeapon* Weapon);
 
-	// ==================== Upgrade Pickup API ====================
-
-	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
-	void RegisterUpgradePickup(AUpgradePickup* Pickup);
-
-	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
-	void UnregisterUpgradePickup(AUpgradePickup* Pickup);
-
 	// ==================== Settings ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
@@ -136,13 +171,16 @@ protected:
 
 	UEMFChargeWidget* GetWidgetFromPool();
 	void ReturnWidgetToPool(UEMFChargeWidget* Widget);
-	void CreateWidgetPool();
 	void CleanupWidgets();
 	void ProcessPendingRegistrations();
 
 	APlayerController* GetLocalPlayerController() const;
 
+	/** Get clutter settings for a given category */
+	const FWidgetClutterSettings& GetClutterSettings(EChargeWidgetCategory Category) const;
+
 	/** Actors that tried to register before WidgetClass was set */
 	TArray<TWeakObjectPtr<AShooterNPC>> PendingNPCs;
 	TArray<TWeakObjectPtr<AEMFPhysicsProp>> PendingProps;
+
 };

@@ -11,7 +11,15 @@ class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
-class AUpgradePickup;
+
+/** Category for widget clutter reduction — widgets in the same category share a visibility pool */
+UENUM(BlueprintType)
+enum class EChargeWidgetCategory : uint8
+{
+	NPC,
+	Prop,
+	Weapon
+};
 
 /**
  * Base class for EMF charge indicator widget displayed above NPCs and Props.
@@ -37,9 +45,6 @@ public:
 	/** Bind this widget to a dropped ranged weapon */
 	void BindToDroppedRangedWeapon(ADroppedRangedWeapon* InWeapon, float InVerticalOffset = 30.0f);
 
-	/** Bind this widget to an upgrade pickup */
-	void BindToUpgradePickup(AUpgradePickup* InPickup, float InVerticalOffset = 30.0f);
-
 	/** Unbind from current target and deactivate */
 	void Unbind();
 
@@ -51,6 +56,9 @@ public:
 	 * Called every frame by EMFChargeWidgetSubsystem::Tick.
 	 */
 	void UpdateScreenPosition(APlayerController* PC);
+
+	/** Get this widget's category for clutter reduction */
+	EChargeWidgetCategory GetCategory() const;
 
 	// ==================== Blueprint Events ====================
 
@@ -98,6 +106,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "EMF Charge")
 	uint8 GetCurrentPolarity() const { return CurrentPolarity; }
 
+	/** Was this widget visible on screen last frame? Used for clutter counting. */
+	bool bWasVisibleLastFrame = false;
+
 	/** Widget half-size for centering (pixels) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "EMF Charge|Layout")
 	FVector2D WidgetHalfSize = FVector2D(40.0f, 10.0f);
@@ -111,7 +122,7 @@ public:
 		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "100"))
 	float MaxScaleDistance = 500.0f;
 
-	/** Distance farther than this = MinWidgetScale (cm) */
+	/** Distance farther than this = MinWidgetScale (cm). Dynamically adjusted by clutter reduction. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout",
 		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "100"))
 	float MinScaleDistance = 3000.0f;
@@ -121,14 +132,17 @@ public:
 		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "0.1", ClampMax = "5.0"))
 	float MaxWidgetScale = 1.0f;
 
-	/** Scale when far away (>= MinScaleDistance) */
+	/** Scale when far away (>= MinScaleDistance). Set to 0 for full fade-out at distance. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout",
-		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "0.1", ClampMax = "5.0"))
-	float MinWidgetScale = 0.3f;
+		meta = (EditCondition = "bEnableDistanceScaling", ClampMin = "0.0", ClampMax = "5.0"))
+	float MinWidgetScale = 0.0f;
 
 	/** Hide widget when target is behind a wall */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Layout")
 	bool bOcclusionCheck = true;
+
+	/** Effective MinScaleDistance after clutter reduction (set by subsystem each frame) */
+	float EffectiveMinScaleDistance = 3000.0f;
 
 protected:
 	/** The NPC this widget is tracking (mutually exclusive with BoundProp) */
@@ -142,9 +156,6 @@ protected:
 
 	/** The dropped ranged weapon this widget is tracking */
 	TWeakObjectPtr<ADroppedRangedWeapon> BoundDroppedRangedWeapon;
-
-	/** The upgrade pickup this widget is tracking */
-	TWeakObjectPtr<AUpgradePickup> BoundUpgradePickup;
 
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
 	bool bIsActive = false;

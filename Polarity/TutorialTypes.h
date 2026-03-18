@@ -15,7 +15,9 @@ enum class ETutorialType : uint8
 	/** Compact hint with input icon and text */
 	Hint,
 	/** Fullscreen slide with image (pauses game) */
-	Slide
+	Slide,
+	/** HUD arrow pointing to a specific HUD element (pauses game) */
+	HUDArrow
 };
 
 /**
@@ -30,6 +32,17 @@ enum class ETutorialCompletionType : uint8
 	OnExitVolume,
 	/** Completes manually via Blueprint or C++ */
 	Manual
+};
+
+/**
+ * HUD elements that tutorial arrows can point to
+ */
+UENUM(BlueprintType)
+enum class EHUDElement : uint8
+{
+	ChargeBar,
+	HealthBar,
+	MeleeCharges
 };
 
 /**
@@ -52,6 +65,27 @@ struct FTutorialInputIconData
 	/** Is this icon valid (has texture)? */
 	UPROPERTY(BlueprintReadOnly, Category = "Tutorial")
 	bool bIsValid = false;
+};
+
+/**
+ * Single entry in a multi-hint (vertical list of action+description pairs)
+ */
+USTRUCT(BlueprintType)
+struct FTutorialHintEntry
+{
+	GENERATED_BODY()
+
+	/** Description text for this action */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
+	FText EntryText;
+
+	/** Input actions for this entry's icon row */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
+	TArray<TObjectPtr<class UInputAction>> InputActions;
+
+	/** If true, show "+" between icons in this row (combination) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
+	bool bIsCombination = false;
 };
 
 /**
@@ -84,6 +118,23 @@ struct FTutorialHintData
 	/** How this hint is completed/hidden */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
 	ETutorialCompletionType CompletionType = ETutorialCompletionType::OnInputAction;
+
+	// ==================== Multi-Hint Mode ====================
+
+	/**
+	 * If true, this hint uses vertical multi-entry layout instead of single hint.
+	 * When enabled, MultiHintEntries is used instead of HintText/InputActions.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint|Multi")
+	bool bIsMultiHint = false;
+
+	/**
+	 * Entries for multi-hint mode (vertical list of action+description pairs).
+	 * Only used when bIsMultiHint is true.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint|Multi",
+		meta = (EditCondition = "bIsMultiHint", EditConditionHides))
+	TArray<FTutorialHintEntry> MultiHintEntries;
 
 	// ==================== Backward Compatibility ====================
 
@@ -123,7 +174,40 @@ struct FTutorialSlideData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide")
 	TObjectPtr<class UInputAction> CloseAction;
 
-	/** Optional: text hint for closing (e.g., "Press SPACE to continue") */
+	/** Optional: text hint for closing (e.g., "Hold SPACE to continue") */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide")
 	FText CloseHintText;
+
+	/** Duration in seconds the close button must be held to dismiss (0 = instant press) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float HoldDuration = 1.0f;
+};
+
+/**
+ * Data for a HUD arrow tutorial (pauses game, shows arrows on HUD elements)
+ */
+USTRUCT(BlueprintType)
+struct FTutorialHUDArrowData
+{
+	GENERATED_BODY()
+
+	/** Which HUD element to point the arrow at */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD Arrow")
+	EHUDElement TargetElement = EHUDElement::ChargeBar;
+
+	/** Description text shown alongside the arrow */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD Arrow")
+	FText DescriptionText;
+
+	/** Input action to close (defaults to space/enter) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD Arrow")
+	TObjectPtr<class UInputAction> CloseAction;
+
+	/** Optional: text hint for closing */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD Arrow")
+	FText CloseHintText;
+
+	/** Duration in seconds the close button must be held to dismiss */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD Arrow", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float HoldDuration = 1.0f;
 };

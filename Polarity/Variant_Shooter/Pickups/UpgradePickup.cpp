@@ -10,7 +10,6 @@
 #include "UpgradeTooltipWidget.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
-#include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "NiagaraFunctionLibrary.h"
@@ -94,11 +93,6 @@ void AUpgradePickup::BeginPlay()
 		}
 	}
 
-	// Register charge widget
-	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
-	{
-		WidgetSub->RegisterUpgradePickup(this);
-	}
 }
 
 void AUpgradePickup::Tick(float DeltaTime)
@@ -261,11 +255,6 @@ void AUpgradePickup::CompletePull()
 	bPullComplete = true;
 	bIsBeingPulled = false;
 
-	// Unregister charge widget
-	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
-	{
-		WidgetSub->UnregisterUpgradePickup(this);
-	}
 
 	// Hide this actor
 	SetActorHiddenInGame(true);

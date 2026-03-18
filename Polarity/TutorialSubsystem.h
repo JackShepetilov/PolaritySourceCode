@@ -11,21 +11,24 @@
 class UInputIconsDataAsset;
 class UTutorialHintWidget;
 class UTutorialSlideWidget;
+class UShooterBulletCounterUI;
 class UInputAction;
 class APlayerController;
 struct FHintDisplayData;
+struct FMultiHintDisplayData;
 
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTutorialCompleted, FName, TutorialID);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHintShown, FName, TutorialID);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSlideShown, FName, TutorialID);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHUDArrowShown, FName, TutorialID);
 
 /**
  * Subsystem managing the tutorial/hint system.
- * Handles showing hints, fullscreen slides, tracking completion, and input icon lookup.
+ * Handles showing hints, fullscreen slides, HUD arrows, tracking completion, and input icon lookup.
  */
 UCLASS()
-class POLARITY_API UTutorialSubsystem : public UGameInstanceSubsystem
+class POLARITY_API UTutorialSubsystem : public UGameInstanceSubsystem, public FTickableGameObject
 {
 	GENERATED_BODY()
 
@@ -35,6 +38,13 @@ public:
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
+
+	// ==================== FTickableGameObject ====================
+
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(UTutorialSubsystem, STATGROUP_Tickables); }
+	virtual bool IsTickable() const override { return bHUDArrowActive; }
+	virtual bool IsTickableWhenPaused() const override { return true; }
 
 	// ==================== Configuration ====================
 
@@ -51,6 +61,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Tutorial")
 	void SetWidgetClasses(TSubclassOf<UTutorialHintWidget> HintClass, TSubclassOf<UTutorialSlideWidget> SlideClass);
+
+	/**
+	 * Set the HUD widget for tutorial arrow display
+	 * Must be called before showing HUD arrows (usually from HUD initialization)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial")
+	void SetHUDWidget(UShooterBulletCounterUI* InHUDWidget);
 
 	// ==================== Hint API ====================
 
@@ -101,6 +118,39 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Slide")
 	bool IsSlideActive() const { return bSlideActive; }
+
+	// ==================== HUD Arrow API ====================
+
+	/**
+	 * Show a tutorial arrow pointing at a HUD element (pauses game, hold to close)
+	 * @param TutorialID - Unique identifier for this tutorial
+	 * @param ArrowData - Arrow configuration data
+	 * @param PlayerController - Controller (uses first local player if null)
+	 * @return True if arrow was shown
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|HUDArrow")
+	bool ShowHUDArrow(FName TutorialID, const FTutorialHUDArrowData& ArrowData, APlayerController* PlayerController = nullptr);
+
+	/**
+	 * Close the currently displayed HUD arrow (unpauses game)
+	 * @param bMarkCompleted - If true, marks this tutorial as completed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|HUDArrow")
+	void CloseHUDArrow(bool bMarkCompleted = true);
+
+	/**
+	 * Check if a HUD arrow is currently being displayed
+	 */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|HUDArrow")
+	bool IsHUDArrowActive() const { return bHUDArrowActive; }
+
+	/**
+	 * Debug mode: instantly show+hide arrows for all HUD elements and mark all given tutorials as completed.
+	 * Does NOT pause the game. Used to reveal HUD elements that are hidden until their tutorial fires.
+	 * @param TutorialIDsToComplete - Tutorial IDs to mark completed (arrows + weapon slides)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Debug")
+	void RunTutorialDebugReveal(const TArray<FName>& TutorialIDsToComplete);
 
 	// ==================== Completion Tracking ====================
 
@@ -176,6 +226,14 @@ public:
 	 */
 	FHintDisplayData BuildHintDisplayData(const FTutorialHintData& HintData, APlayerController* PlayerController) const;
 
+	/**
+	 * Build complete display data for multi-hint
+	 * @param HintData - Source hint data with multi-hint entries
+	 * @param PlayerController - Controller for key bindings
+	 * @return Ready-to-use multi-hint display data
+	 */
+	FMultiHintDisplayData BuildMultiHintDisplayData(const FTutorialHintData& HintData, APlayerController* PlayerController) const;
+
 	// ==================== Events ====================
 
 	/** Fired when any tutorial is marked as completed */
@@ -189,6 +247,10 @@ public:
 	/** Fired when a slide is shown */
 	UPROPERTY(BlueprintAssignable, Category = "Tutorial|Events")
 	FOnSlideShown OnSlideShown;
+
+	/** Fired when a HUD arrow is shown */
+	UPROPERTY(BlueprintAssignable, Category = "Tutorial|Events")
+	FOnHUDArrowShown OnHUDArrowShown;
 
 protected:
 
@@ -205,6 +267,10 @@ protected:
 	/** Widget class for slides */
 	UPROPERTY()
 	TSubclassOf<UTutorialSlideWidget> SlideWidgetClass;
+
+	/** HUD widget for tutorial arrows */
+	UPROPERTY()
+	TObjectPtr<UShooterBulletCounterUI> HUDWidget;
 
 	// ==================== State ====================
 
@@ -225,11 +291,52 @@ protected:
 	/** ID of currently active slide */
 	FName ActiveSlideID;
 
+	/** ID of currently active HUD arrow */
+	FName ActiveHUDArrowID;
+
 	/** Is a hint currently active */
 	bool bHintActive = false;
 
 	/** Is a slide currently active */
 	bool bSlideActive = false;
+
+	/** Is a HUD arrow currently active */
+	bool bHUDArrowActive = false;
+
+	// ==================== HUD Arrow State ====================
+
+	/** Currently active HUD arrow element */
+	EHUDElement ActiveArrowElement = EHUDElement::ChargeBar;
+
+	/** Expected close key for HUD arrow */
+	FKey ArrowExpectedCloseKey;
+
+	/** Hold duration required to close arrow */
+	float ArrowHoldDuration = 1.0f;
+
+	/** Current hold time for arrow close */
+	float ArrowCurrentHoldTime = 0.0f;
+
+	/** True while close key is held for arrow */
+	bool bArrowHoldingCloseKey = false;
+
+	/** Slate-level input processor for arrow key down/up */
+	void BindArrowInput();
+	void UnbindArrowInput();
+	TSharedPtr<class FArrowInputProcessor> ArrowInputProcessor;
+
+public:
+	// Called by FArrowInputProcessor — not for external use
+	/** Check if key is valid for closing HUD arrow */
+	bool IsArrowCloseKey(const FKey& Key) const;
+	/** True while close key is held */
+	bool IsArrowHolding() const { return bArrowHoldingCloseKey; }
+	/** Handle key down for arrow close */
+	void HandleArrowKeyDown(const FKeyEvent& InKeyEvent);
+	/** Handle key up for arrow close */
+	void HandleArrowKeyUp(const FKeyEvent& InKeyEvent);
+
+protected:
 
 	// ==================== Internal ====================
 

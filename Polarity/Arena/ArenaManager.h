@@ -27,13 +27,15 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveStarted, int32, WaveIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveCleared, int32, WaveIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnArenaCriticalImpact, AActor*, Source, FVector, Location, float, Speed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAllPropsDestroyed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropPercentChanged, float, RemainingPercent, int32, AliveCount);
 
 /**
  * Manages a combat arena: activation, wave spawning, exit blockers, and checkpoint integration.
  *
  * Place one per arena level. Configure waves in the Details panel.
- * Blockers are separate mesh actors referenced by this manager.
- * Activation happens when the player overlaps a blocker and stays inside.
+ * Blockers are separate mesh actors referenced by this manager (enabled only during combat).
+ * Activation happens when the player overlaps a separate entry trigger.
  */
 UCLASS(Blueprintable)
 class POLARITY_API AArenaManager : public AActor
@@ -43,25 +45,57 @@ class POLARITY_API AArenaManager : public AActor
 public:
 	AArenaManager();
 
+	// ==================== Arena Mode ====================
+
+	/** How the arena spawns enemies */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Mode")
+	EArenaMode ArenaMode = EArenaMode::Waves;
+
 	// ==================== Wave Configuration ====================
 
-	/** Waves of enemies to spawn, in order */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Waves")
+	/** Waves of enemies to spawn, in order (used when ArenaMode == Waves) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Waves", meta = (EditCondition = "ArenaMode == EArenaMode::Waves"))
 	TArray<FArenaWave> Waves;
 
 	/** Pause between waves (seconds). Next wave auto-starts after this delay */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Waves", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Waves", meta = (ClampMin = "0.0", EditCondition = "ArenaMode == EArenaMode::Waves"))
 	float TimeBetweenWaves = 3.0f;
+
+	// ==================== Sustain Configuration ====================
+
+	/** Weighted pool of enemy classes for sustain mode */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Sustain", meta = (EditCondition = "ArenaMode == EArenaMode::Sustain"))
+	TArray<FSustainSpawnEntry> SustainEnemyPool;
+
+	/** Max enemies alive simultaneously in sustain mode.
+	 *  0 = maintain the count of enemies that were manually placed on the level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Sustain", meta = (ClampMin = "0", EditCondition = "ArenaMode == EArenaMode::Sustain"))
+	int32 MaxSustainEnemies = 1;
+
+	/** Total number of enemies to spawn before the arena completes.
+	 *  -1 = infinite (never completes, current behavior).
+	 *  Counts only respawned enemies, not the initial batch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Sustain", meta = (ClampMin = "-1", EditCondition = "ArenaMode == EArenaMode::Sustain"))
+	int32 SustainTotalEnemies = -1;
 
 	// ==================== Blockers ====================
 
 	/**
 	 * Actors that block arena exits during combat (mesh walls/doors).
-	 * Collision + visibility are toggled by the manager.
-	 * One of these also serves as the entry trigger (first overlapped).
+	 * Fully disabled (invisible, no collision) until arena activates.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Blockers")
 	TArray<TSoftObjectPtr<AActor>> ExitBlockers;
+
+	// ==================== Entry Triggers ====================
+
+	/**
+	 * Trigger volumes that activate the arena when the player enters.
+	 * Can be any actor with a primitive component (StaticMesh, Box/Sphere/CapsuleCollision, etc.).
+	 * These are separate from blockers — blockers only appear after activation.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Activation")
+	TArray<TSoftObjectPtr<AActor>> EntryTriggers;
 
 	// ==================== Spawn Points ====================
 
@@ -97,6 +131,11 @@ public:
 	 *  When any tracked prop hits at its CriticalVelocity, OnPropCriticalVelocityImpact fires. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Props")
 	TArray<TSoftObjectPtr<AEMFPhysicsProp>> TrackedProps;
+
+	/** If set, auto-finds ALL actors of this class on the level and tracks them as arena props.
+	 *  Props found this way get death tracking + respawn on player death. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Props")
+	TSubclassOf<AEMFPhysicsProp> AutoPropClass;
 
 	// ==================== Destructible Island ====================
 
@@ -236,6 +275,14 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
 	FOnArenaCriticalImpact OnCriticalVelocityImpact;
 
+	/** Fired when all auto-indexed props on the arena are destroyed */
+	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
+	FOnAllPropsDestroyed OnAllPropsDestroyed;
+
+	/** Fired after each prop destruction. RemainingPercent: 0.0 (all dead) to 1.0 (all alive). */
+	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
+	FOnPropPercentChanged OnPropPercentChanged;
+
 	// ==================== API ====================
 
 	/** Notify arena of a critical velocity impact from any source (prop, projectile, etc).
@@ -255,9 +302,9 @@ private:
 
 	// ==================== Activation ====================
 
-	/** Called when player touches the invisible blocker shell */
+	/** Called when player overlaps an entry trigger */
 	UFUNCTION()
-	void OnBlockerBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+	void OnEntryTriggerOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 
 	/** Called after delay — player has passed through, now activate */
@@ -268,11 +315,11 @@ private:
 
 	// ==================== Blockers ====================
 
-	/** Set blocker visibility and collision */
-	void SetBlockersActive(bool bActive);
+	/** Enable/disable blockers: visibility + collision (NoCollision when off) */
+	void SetBlockersEnabled(bool bEnabled);
 
-	/** Register overlap callbacks on blocker meshes */
-	void RegisterBlockerOverlaps();
+	/** Register overlap callbacks on entry trigger actors */
+	void RegisterEntryTriggers();
 
 	// ==================== Wave Spawning ====================
 
@@ -305,6 +352,67 @@ private:
 	/** Called when player respawns from checkpoint */
 	UFUNCTION()
 	void OnPlayerRespawned();
+
+	// ==================== Sustain Mode ====================
+
+	/** Spawn a single enemy from the weighted pool at a LOS-aware spawn point */
+	void SpawnSustainEnemy();
+
+	/** Pick spawn point out of player's line of sight, or farthest if all visible.
+	 *  Filters out points that exclude the given NPCClass. */
+	AArenaSpawnPoint* PickSustainSpawnPoint(TSubclassOf<AShooterNPC> NPCClass);
+
+	/** Pick a random NPC class from SustainEnemyPool using weighted probability */
+	TSubclassOf<AShooterNPC> PickWeightedSustainClass() const;
+
+	/** Find and register all ShooterNPCs already placed on the level */
+	void RegisterLevelEnemies();
+
+	/** Effective max enemies for sustain mode (resolves MaxSustainEnemies == 0) */
+	int32 GetEffectiveMaxSustainEnemies() const;
+
+	/** Number of enemies manually placed on level at BeginPlay */
+	int32 InitialLevelEnemyCount = 0;
+
+	/** Remaining respawns allowed. Decremented each time a replacement spawns.
+	 *  Negative = infinite (no limit). Initialized from SustainTotalEnemies. */
+	int32 SustainRemainingSpawns = -1;
+
+	/** Recently used spawn points (sustain mode). Avoided when picking next point
+	 *  to spread enemies across different locations. */
+	TArray<AArenaSpawnPoint*> RecentlyUsedSpawnPoints;
+
+	// ==================== NPC Pool (Sustain Mode) ====================
+
+	/** Dead NPCs waiting to be recycled (sustain mode only) */
+	UPROPERTY()
+	TArray<TWeakObjectPtr<AShooterNPC>> NPCPool;
+
+	/** Try to recycle an NPC of the given class from the pool.
+	 *  Returns the recycled NPC (already reset + teleported), or nullptr if no match. */
+	AShooterNPC* TryRecycleFromPool(TSubclassOf<AShooterNPC> NPCClass, const FVector& Location, const FRotator& Rotation);
+
+	// ==================== Auto-Indexed Props ====================
+
+	/** Register auto-found props: bind death, cache transforms */
+	void RegisterAutoProps();
+
+	/** Called when an auto-indexed prop dies */
+	UFUNCTION()
+	void OnAutoPropDied(AEMFPhysicsProp* Prop, AActor* Killer);
+
+	/** Respawn all auto-indexed props to their initial state */
+	void RespawnAllProps();
+
+	/** Auto-found props */
+	UPROPERTY()
+	TArray<TWeakObjectPtr<AEMFPhysicsProp>> AutoProps;
+
+	/** Initial transforms of auto-found props (parallel to AutoProps) */
+	TArray<FTransform> AutoPropInitialTransforms;
+
+	/** How many auto-props are still alive */
+	int32 AliveAutoPropsCount = 0;
 
 	// ==================== Tracked Props ====================
 
@@ -382,10 +490,10 @@ private:
 	/** Timer for between-wave delay */
 	FTimerHandle WaveTimerHandle;
 
-	/** Timer for activation delay (player passing through blocker) */
+	/** Timer for activation delay (player entering trigger) */
 	FTimerHandle ActivationDelayHandle;
 
-	/** Player who touched the blocker, waiting for delay */
+	/** Player who entered trigger, waiting for delay */
 	TWeakObjectPtr<AShooterCharacter> PendingPlayer;
 
 	/** Cached reference to checkpoint subsystem */

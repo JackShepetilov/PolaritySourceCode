@@ -1,0 +1,786 @@
+LogTemp: Error: ArenaManager::BeginPlay — BOUND to OnPlayerRespawned (CheckpointSubsystem=0000012C909BB900)
+LogTemp: Warning: ArenaManager: Auto-indexed 68 props of class BP_EMFProp_1_C
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — ArenaMode: 1 (0=Waves, 1=Sustain)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — GetAllActorsOfClass found 14 ShooterNPC actors
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_14 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_TurretNPC_C_1 (class: BP_TurretNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_TurretNPC_C_2 (class: BP_TurretNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_1 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_3 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_5 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_7 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_9 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_11 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_MeleeNPC_C_13 (class: BP_MeleeNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_ShooterNPC_C_3 (class: BP_ShooterNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_ShooterNPC_C_5 (class: BP_ShooterNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_ShooterNPC_C_7 (class: BP_ShooterNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — Registered: BP_ShooterNPC_C_9 (class: BP_ShooterNPC_C)
+LogTemp: Warning: ArenaManager::RegisterLevelEnemies — DONE. Total registered: 14, InitialLevelEnemyCount: 14
+LogTemp: Error: ArenaManager::OnBlockerBeginOverlap — CurrentState: 0, OtherActor: BP_ShooterCharacter_C_0, AliveNPCs: 14
+LogTemp: Warning: ArenaManager: Dist2D=559.2, BlockerRadius=720.0, Scale=9.00
+LogTemp: Warning: ArenaManager: No PlayerRespawnPoint set, using player's current position
+LogTemp: Warning: ArenaManager: Checkpoint saved at arena respawn point
+LogTemp: Warning: ArenaManager::OnNPCDied [SUSTAIN] — AliveNPCs: 13, Cap: 14, PoolSize: 2
+LogTemp: Warning: ArenaManager::OnNPCDied [SUSTAIN] — Under cap, calling SpawnSustainEnemy()
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.16/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=1, dist=6125
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=5860
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=741
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=0, dist=1023
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=4592
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=4774
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=5328
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=4907
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=5449
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=4430
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=5037
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=7389
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=7654
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=2459
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_11 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_11 at X=-3900.000 Y=8800.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-3900.000 Y=8800.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-3900.000 Y=8800.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=-3900.000 Y=8800.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_0 at X=-3900.000 Y=8800.000 Z=208.000. AliveNPCs now: 14
+LogTemp: Warning: ArenaManager: Prop BP_EMFProp_1_C_64 died — 67/68 alive (99% remaining)
+LogTemp: Warning: ArenaManager: Prop BP_EMFProp_1_C_65 died — 66/68 alive (97% remaining)
+LogTemp: Warning: ArenaManager: Prop BP_EMFProp_1_C_68 died — 65/68 alive (96% remaining)
+LogTemp: Warning: ArenaManager::OnNPCDied [SUSTAIN] — AliveNPCs: 13, Cap: 14, PoolSize: 2
+LogTemp: Warning: ArenaManager::OnNPCDied [SUSTAIN] — Under cap, calling SpawnSustainEnemy()
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.77/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=1, dist=9070
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=6495
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=4419
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=3293
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=3488
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=2184
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=0, dist=1606
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=0, dist=2865
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=0, dist=4897
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=0, dist=4640
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=0, dist=5638
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=0, dist=8635
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=8363
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=0, dist=5396
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_0 (7 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_0 at X=-3650.000 Y=5650.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-3650.000 Y=5650.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-3650.000 Y=5650.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=-3650.000 Y=5650.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_0 at X=-3650.000 Y=5650.000 Z=2308.000. AliveNPCs now: 14
+LogTemp: Warning: ArenaManager: Prop BP_EMFProp_1_C_70 died — 64/68 alive (94% remaining)
+LogTemp: Warning: ArenaManager: Prop BP_EMFProp_1_C_69 died — 63/68 alive (93% remaining)
+LogTemp: Warning: ArenaManager::OnNPCDied [SUSTAIN] — AliveNPCs: 13, Cap: 14, PoolSize: 2
+LogTemp: Warning: ArenaManager::OnNPCDied [SUSTAIN] — Under cap, calling SpawnSustainEnemy()
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.49/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=1, dist=8908
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=6474
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=4220
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=3068
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=3535
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=2316
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=0, dist=1839
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=0, dist=2927
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=4887
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=0, dist=4561
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=0, dist=5555
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=0, dist=8546
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=0, dist=8325
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=0, dist=5183
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_3 (7 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_3 at X=3350.000 Y=5850.000 Z=1650.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=5850.000 Z=1650.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=5850.000 Z=1615.263
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=3350.000 Y=5850.000 Z=1615.263
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_2 at X=3350.000 Y=5850.000 Z=1615.263. AliveNPCs now: 14
+LogTemp: Error: ========== ArenaManager::OnPlayerRespawned START ==========
+LogTemp: Warning: ArenaManager: No PlayerRespawnPoint set, using player's current position
+LogTemp: Warning: ArenaManager: Checkpoint saved at arena respawn point
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.88/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_5 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_5 at X=3350.000 Y=10100.000 Z=850.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=10100.000 Z=850.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_8 at X=3350.000 Y=10100.000 Z=908.000. AliveNPCs now: 1
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.72/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_11 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_11 at X=-3900.000 Y=8800.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-3900.000 Y=8800.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-3900.000 Y=8800.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=-3900.000 Y=8800.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_10 at X=-3900.000 Y=8800.000 Z=208.000. AliveNPCs now: 2
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.18/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_12 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_12 at X=-3400.000 Y=10350.000 Z=950.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-3400.000 Y=10350.000 Z=950.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-3400.000 Y=10350.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=-3400.000 Y=10350.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_18 at X=-3400.000 Y=10350.000 Z=908.000. AliveNPCs now: 3
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.18/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_4 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_4 at X=1900.000 Y=10100.000 Z=1550.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1900.000 Y=10100.000 Z=1550.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_19 at X=1900.000 Y=10100.000 Z=1608.000. AliveNPCs now: 4
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.00/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_4 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_4 at X=1900.000 Y=10100.000 Z=1550.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1900.000 Y=10100.000 Z=1550.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_20 at X=1900.000 Y=10100.000 Z=1608.000. AliveNPCs now: 5
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.96/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_4 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_4 at X=1900.000 Y=10100.000 Z=1550.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1900.000 Y=10100.000 Z=1550.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_11 at X=1900.000 Y=10100.000 Z=1608.000. AliveNPCs now: 6
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.83/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_6 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_6 at X=4550.000 Y=10100.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=4550.000 Y=10100.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=4550.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=4550.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_12 at X=4550.000 Y=10100.000 Z=208.000. AliveNPCs now: 7
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.88/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_4 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_4 at X=1900.000 Y=10100.000 Z=1550.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1900.000 Y=10100.000 Z=1550.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=1900.000 Y=10100.000 Z=1608.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_13 at X=1900.000 Y=10100.000 Z=1608.000. AliveNPCs now: 8
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.96/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_5 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_5 at X=3350.000 Y=10100.000 Z=850.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=10100.000 Z=850.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_14 at X=3350.000 Y=10100.000 Z=908.000. AliveNPCs now: 9
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.50/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_12 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_12 at X=-3400.000 Y=10350.000 Z=950.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-3400.000 Y=10350.000 Z=950.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-3400.000 Y=10350.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=-3400.000 Y=10350.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_15 at X=-3400.000 Y=10350.000 Z=908.000. AliveNPCs now: 10
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.06/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_2 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_2 at X=1800.000 Y=5850.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1800.000 Y=5850.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_21 at X=1800.000 Y=5850.000 Z=2308.000. AliveNPCs now: 11
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.53/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_8 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_8 at X=100.000 Y=10100.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=100.000 Y=10100.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=100.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=100.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_16 at X=100.000 Y=10100.000 Z=208.000. AliveNPCs now: 12
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.23/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_13 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_13 at X=300.000 Y=5500.000 Z=950.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=300.000 Y=5500.000 Z=950.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=300.000 Y=5500.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=300.000 Y=5500.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_22 at X=300.000 Y=5500.000 Z=908.000. AliveNPCs now: 13
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.52/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_5 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_5 at X=3350.000 Y=10100.000 Z=850.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=10100.000 Z=850.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_17 at X=3350.000 Y=10100.000 Z=908.000. AliveNPCs now: 14
+LogTemp: Error: ========== ArenaManager::OnPlayerRespawned END ==========
+LogTemp: Error: ========== ArenaManager::OnPlayerRespawned START ==========
+LogTemp: Warning: ArenaManager: No PlayerRespawnPoint set, using player's current position
+LogTemp: Warning: ArenaManager: Checkpoint saved at arena respawn point
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.87/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_3 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_3 at X=3350.000 Y=5850.000 Z=1650.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=5850.000 Z=1650.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=5850.000 Z=1615.263
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=3350.000 Y=5850.000 Z=1615.263
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_26 at X=3350.000 Y=5850.000 Z=1615.263. AliveNPCs now: 1
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.27/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_2 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_2 at X=1800.000 Y=5850.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1800.000 Y=5850.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_39 at X=1800.000 Y=5850.000 Z=2308.000. AliveNPCs now: 2
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.57/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_9 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_9 at X=100.000 Y=8800.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=100.000 Y=8800.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=100.000 Y=8800.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=100.000 Y=8800.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_27 at X=100.000 Y=8800.000 Z=208.000. AliveNPCs now: 3
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.80/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_2 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_2 at X=1800.000 Y=5850.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1800.000 Y=5850.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_28 at X=1800.000 Y=5850.000 Z=2308.000. AliveNPCs now: 4
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.35/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_13 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_13 at X=300.000 Y=5500.000 Z=950.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=300.000 Y=5500.000 Z=950.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=300.000 Y=5500.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=300.000 Y=5500.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_40 at X=300.000 Y=5500.000 Z=908.000. AliveNPCs now: 5
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.93/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_8 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_8 at X=100.000 Y=10100.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=100.000 Y=10100.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=100.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=100.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_29 at X=100.000 Y=10100.000 Z=208.000. AliveNPCs now: 6
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.43/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_2 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_2 at X=1800.000 Y=5850.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1800.000 Y=5850.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_41 at X=1800.000 Y=5850.000 Z=2308.000. AliveNPCs now: 7
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.19/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_1 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_1 at X=-1250.000 Y=10100.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-1250.000 Y=10100.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-1250.000 Y=10100.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=-1250.000 Y=10100.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_42 at X=-1250.000 Y=10100.000 Z=2308.000. AliveNPCs now: 8
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.30/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_5 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_5 at X=3350.000 Y=10100.000 Z=850.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=10100.000 Z=850.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_43 at X=3350.000 Y=10100.000 Z=908.000. AliveNPCs now: 9
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.55/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_2 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_2 at X=1800.000 Y=5850.000 Z=2250.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=1800.000 Y=5850.000 Z=2250.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=1800.000 Y=5850.000 Z=2308.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_30 at X=1800.000 Y=5850.000 Z=2308.000. AliveNPCs now: 10
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=1.00/1.00, Picked: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_ShooterNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_8 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_8 at X=100.000 Y=10100.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=100.000 Y=10100.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=100.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_ShooterNPC_C) at X=100.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_ShooterNPC_C_31 at X=100.000 Y=10100.000 Z=208.000. AliveNPCs now: 11
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.03/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_12 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_12 at X=-3400.000 Y=10350.000 Z=950.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=-3400.000 Y=10350.000 Z=950.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=-3400.000 Y=10350.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=-3400.000 Y=10350.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_44 at X=-3400.000 Y=10350.000 Z=908.000. AliveNPCs now: 12
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.16/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_7 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_7 at X=2350.000 Y=10100.000 Z=200.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=2350.000 Y=10100.000 Z=200.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=2350.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=2350.000 Y=10100.000 Z=208.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_45 at X=2350.000 Y=10100.000 Z=208.000. AliveNPCs now: 13
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — START
+LogTemp: Warning: ArenaManager::PickWeightedSustainClass — Roll=0.10/1.00, Picked: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked class: BP_MeleeNPC_C
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_0: LOS blocked=0, dist=5349
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_1: LOS blocked=1, dist=7744
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_2: LOS blocked=1, dist=3936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_3: LOS blocked=1, dist=5013
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_4: LOS blocked=1, dist=7936
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_5: LOS blocked=1, dist=8594
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_6: LOS blocked=1, dist=9346
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_7: LOS blocked=1, dist=8595
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_8: LOS blocked=1, dist=8373
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_9: LOS blocked=1, dist=7271
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_10: LOS blocked=1, dist=7379
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_11: LOS blocked=1, dist=8436
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_12: LOS blocked=1, dist=9079
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — TargetPoint_13: LOS blocked=1, dist=4313
+LogTemp: Warning: ArenaManager::PickSustainSpawnPoint — Picked OUT-OF-SIGHT: TargetPoint_5 (13 candidates)
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Picked spawn point: TargetPoint_5 at X=3350.000 Y=10100.000 Z=850.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Raw spawn location: X=3350.000 Y=10100.000 Z=850.000, IsFlying: 0
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — NavMesh projected to: X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Calling SpawnAIFromClass(BP_MeleeNPC_C) at X=3350.000 Y=10100.000 Z=908.000
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — Force-targeted player
+LogTemp: Warning: ArenaManager::SpawnSustainEnemy — SUCCESS: Spawned BP_MeleeNPC_C_46 at X=3350.000 Y=10100.000 Z=908.000. AliveNPCs now: 14
+LogTemp: Error: ========== ArenaManager::OnPlayerRespawned END ==========

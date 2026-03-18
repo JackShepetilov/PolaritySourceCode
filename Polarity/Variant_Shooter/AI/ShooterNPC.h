@@ -657,6 +657,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Dismemberment", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float GibLifetime = 3.0f;
 
+	// ==================== ULTRAGORE ====================
+
+	/** Enable ULTRAGORE mode: spawn multiple GC copies on death for extra debris */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|ULTRAGORE")
+	bool bUltragore = false;
+
+	/** How many GC copies to spawn on death (only used when bUltragore is true) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|ULTRAGORE", meta = (ClampMin = "2", ClampMax = "20", EditCondition = "bUltragore"))
+	int32 UltragoreGCCount = 3;
+
+	/** Random position offset (cm) for each extra GC copy to prevent physics overlap issues */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|ULTRAGORE", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bUltragore"))
+	float UltragoreSpawnOffset = 8.0f;
+
 	/** Default death mode config used when no damage-type-specific override exists */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Effects")
 	FDeathModeConfig DefaultDeathConfig;
@@ -899,6 +913,14 @@ public:
 	/** Returns true if this NPC is dead */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsDead() const { return bIsDead; }
+
+	/** If true, NPC is managed by a pool and won't self-destruct after death.
+	 *  Set by ArenaManager in sustain mode. */
+	bool bIsPooled = false;
+
+	/** Reset NPC state for pool recycling. Teleports, resets HP/charge, re-enables all systems.
+	 *  Call only on pooled NPCs that have completed their death sequence (hidden). */
+	void ResetForPool(const FVector& NewLocation, const FRotator& NewRotation);
 
 	/** Returns true if this NPC is currently shooting */
 	UFUNCTION(BlueprintPure, Category = "Status")

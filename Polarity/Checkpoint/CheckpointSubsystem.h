@@ -184,4 +184,7 @@ protected:
 
 	/** Respawn all NPCs to checkpoint state (destroy all current, respawn all from checkpoint) */
 	void RespawnAllNPCsToCheckpointState();
+
+	/** True while RespawnAllNPCsToCheckpointState is running — prevents RegisterNPC from double-adding */
+	bool bIsRespawningNPCs = false;
 };

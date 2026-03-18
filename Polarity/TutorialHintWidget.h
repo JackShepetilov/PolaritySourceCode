@@ -38,6 +38,44 @@ struct FHintDisplayData
 };
 
 /**
+ * Single resolved entry for multi-hint display
+ */
+USTRUCT(BlueprintType)
+struct FMultiHintEntryDisplayData
+{
+	GENERATED_BODY()
+
+	/** Description text for this entry */
+	UPROPERTY(BlueprintReadOnly, Category = "Hint")
+	FText EntryText;
+
+	/** Resolved icons for this entry */
+	UPROPERTY(BlueprintReadOnly, Category = "Hint")
+	TArray<FTutorialInputIconData> Icons;
+
+	/** If true, show "+" between icons in this entry */
+	UPROPERTY(BlueprintReadOnly, Category = "Hint")
+	bool bIsCombination = false;
+
+	/** True if there are valid icons in this entry */
+	UPROPERTY(BlueprintReadOnly, Category = "Hint")
+	bool bHasIcons = false;
+};
+
+/**
+ * Display data for multi-hint widget (vertical list of entries)
+ */
+USTRUCT(BlueprintType)
+struct FMultiHintDisplayData
+{
+	GENERATED_BODY()
+
+	/** Array of resolved hint entries */
+	UPROPERTY(BlueprintReadOnly, Category = "Hint")
+	TArray<FMultiHintEntryDisplayData> Entries;
+};
+
+/**
  * Base widget class for displaying compact tutorial hints.
  * Shows an input icon and localized text.
  * Derive from this class in Blueprint to implement the visual design.
@@ -58,6 +96,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Tutorial|Hint")
 	void SetupHintEx(const FHintDisplayData& InDisplayData, const TArray<UInputAction*>& InInputActions);
+
+	/**
+	 * Configure the hint with multi-entry content (vertical layout)
+	 * @param InMultiDisplayData - All entries for vertical display
+	 * @param InPrimaryInputAction - Primary input action for completion detection (can be null)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Hint")
+	void SetupMultiHint(const FMultiHintDisplayData& InMultiDisplayData, UInputAction* InPrimaryInputAction);
 
 	/**
 	 * DEPRECATED: Configure the hint with single icon
@@ -83,6 +129,14 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Tutorial|Hint",
 			  meta = (DisplayName = "On Hint Setup Extended"))
 	void BP_OnHintSetupEx(const FHintDisplayData& InDisplayData);
+
+	/**
+	 * Called when multi-hint content is set (vertical layout)
+	 * @param InMultiDisplayData - All entries for vertical display
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Tutorial|Hint",
+			  meta = (DisplayName = "On Multi Hint Setup"))
+	void BP_OnMultiHintSetup(const FMultiHintDisplayData& InMultiDisplayData);
 
 	/**
 	 * DEPRECATED: Called when hint content is set (single icon version)
@@ -132,6 +186,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
 	bool IsCombination() const { return DisplayData.bIsCombination; }
 
+	/** Check if this is a multi-hint */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
+	bool IsMultiHint() const { return bIsMultiHint; }
+
+	/** Get the multi-hint display data */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
+	FMultiHintDisplayData GetMultiHintDisplayData() const { return MultiDisplayData; }
+
 	/** DEPRECATED: Get the key icon (returns first icon) */
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint",
 			  meta = (DeprecatedFunction))
@@ -139,9 +201,16 @@ public:
 
 protected:
 
-	/** Full display data */
+	/** Full display data (single hint mode) */
 	UPROPERTY(BlueprintReadOnly, Category = "Tutorial|Hint")
 	FHintDisplayData DisplayData;
+
+	/** Multi-hint display data (multi hint mode) */
+	UPROPERTY(BlueprintReadOnly, Category = "Tutorial|Hint")
+	FMultiHintDisplayData MultiDisplayData;
+
+	/** True if this is a multi-hint */
+	bool bIsMultiHint = false;
 
 	/** All associated input actions */
 	UPROPERTY(BlueprintReadOnly, Category = "Tutorial|Hint")

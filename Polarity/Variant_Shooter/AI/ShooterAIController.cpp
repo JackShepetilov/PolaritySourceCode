@@ -12,8 +12,10 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "EngineUtils.h"  // For TActorIterator
 #include "AI/Navigation/PathFollowingAgentInterface.h"
+#include "AI/Navigation/PolarityPathFollowingComponent.h"
 
-AShooterAIController::AShooterAIController()
+AShooterAIController::AShooterAIController(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPolarityPathFollowingComponent>(TEXT("PathFollowingComponent")))
 {
 	// create the StateTree component
 	StateTreeAI = CreateDefaultSubobject<UStateTreeAIComponent>(TEXT("StateTreeAI"));

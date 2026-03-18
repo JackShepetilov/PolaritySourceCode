@@ -6,6 +6,7 @@
 
 void UTutorialHintWidget::SetupHintEx(const FHintDisplayData& InDisplayData, const TArray<UInputAction*>& InInputActions)
 {
+	bIsMultiHint = false;
 	DisplayData = InDisplayData;
 
 	// Copy input actions
@@ -34,6 +35,23 @@ void UTutorialHintWidget::SetupHintEx(const FHintDisplayData& InDisplayData, con
 
 	// Also call legacy event for backward compatibility
 	BP_OnHintSetup(HintText, KeyIcon.Get());
+}
+
+void UTutorialHintWidget::SetupMultiHint(const FMultiHintDisplayData& InMultiDisplayData, UInputAction* InPrimaryInputAction)
+{
+	bIsMultiHint = true;
+	MultiDisplayData = InMultiDisplayData;
+
+	// Store primary action for completion detection
+	InputActions.Empty();
+	if (InPrimaryInputAction)
+	{
+		InputActions.Add(InPrimaryInputAction);
+		InputAction = InPrimaryInputAction;
+	}
+
+	// Notify Blueprint
+	BP_OnMultiHintSetup(MultiDisplayData);
 }
 
 void UTutorialHintWidget::SetupHint(const FText& InText, UTexture2D* InIcon, UInputAction* InInputAction)

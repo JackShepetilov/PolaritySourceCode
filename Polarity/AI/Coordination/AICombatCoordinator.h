@@ -58,6 +58,19 @@ struct FTokenPool
 	void CleanupInvalid();
 };
 
+/** Strafe slot assignment for a drone in confined spaces */
+USTRUCT()
+struct FStrafeSlot
+{
+	GENERATED_BODY()
+
+	TWeakObjectPtr<APawn> AssignedDrone;
+	FVector Center = FVector::ZeroVector;
+	FVector Axis = FVector::ZeroVector;
+	float HeightOffset = 0.0f;
+	float AngleDeg = 0.0f;
+};
+
 /** Battle circle slot — a position around the player that an NPC is assigned to */
 USTRUCT()
 struct FBattleSlot
@@ -238,6 +251,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|BattleCircle", meta = (ClampMin = "0.1"))
 	float SlotRecalculationInterval = 0.5f;
 
+	// ==================== Strafe Coordination ====================
+
+	/** Number of sample directions for strafe slot calculation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Strafe", meta = (ClampMin = "4", ClampMax = "36"))
+	int32 StrafeSampleDirections = 12;
+
+	/** Height offset step between drones sharing similar strafe angles (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Strafe", meta = (ClampMin = "50"))
+	float StrafeHeightStep = 100.0f;
+
 	// ==================== Role & Pressure ====================
 
 	/** HP percentage threshold below which pressure tactics activate */
@@ -371,6 +394,24 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coordination|BattleCircle")
 	EBattleRing GetNPCRing(APawn* NPC) const;
 
+	// --- Strafe Coordination API ---
+
+	/** Request a strafe slot for a drone. Fills OutCenter and OutAxis for lateral oscillation.
+	 *  OrbitDistance determines how far from player to sample. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Strafe")
+	void RequestStrafeSlot(APawn* Drone, float OrbitDistance, FVector& OutCenter, FVector& OutAxis);
+
+	/** Release a strafe slot when switching back to orbit or dying. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Strafe")
+	void ReleaseStrafeSlot(APawn* Drone);
+
+	// --- Enemy Cluster API ---
+
+	/** Get direction from player toward highest non-kamikaze NPC density (XY only, normalized).
+	 *  Returns ZeroVector if no NPCs or no clear cluster. Cached, updated every ~0.5s. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Cluster")
+	FVector GetEnemyClusterDirection() const { return CachedClusterDirection; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
@@ -422,6 +463,9 @@ private:
 	/** Update kamikaze token pool size based on alive count */
 	void UpdateKamikazeTokenPoolSize();
 
+	// --- Strafe Coordination ---
+	TArray<FStrafeSlot> StrafeSlots;
+
 	// --- Battle Circle ---
 	TArray<FBattleSlot> BattleSlots;
 	float TimeSinceLastSlotRecalc = 0.0f;
@@ -440,6 +484,11 @@ private:
 	void UpdatePlayerStateCache();
 	void AssignRoles();
 	float CalculateAngleFromPlayerFacing(APawn* NPC) const;
+
+	// --- Enemy Cluster ---
+	FVector CachedClusterDirection = FVector::ZeroVector;
+	float TimeSinceLastClusterCalc = 0.0f;
+	void UpdateEnemyClusterDirection();
 
 	// --- Debug ---
 	void DrawDebugInfo();

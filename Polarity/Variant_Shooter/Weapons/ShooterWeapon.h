@@ -7,6 +7,7 @@
 #include "ShooterWeaponHolder.h"
 #include "Animation/AnimInstance.h"
 #include "WeaponRecoilComponent.h"
+#include "TutorialTypes.h"
 #include "ShooterWeapon.generated.h"
 
 class IShooterWeaponHolder;
@@ -440,6 +441,20 @@ protected:
 
 	UPROPERTY()
 	TObjectPtr<UCharacterMovementComponent> CachedMovementComponent;
+
+	// ==================== Tutorial ====================
+
+	/**
+	 * Tutorial ID for first-equip slide.
+	 * If not None, a tutorial slide will be shown the first time this weapon is equipped.
+	 * Uses TutorialSubsystem completion tracking - shows only once ever.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FName FirstEquipTutorialID;
+
+	/** Slide data shown on first equip */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FTutorialSlideData FirstEquipSlideData;
 
 	// ==================== Perception ====================
 

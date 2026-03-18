@@ -2,6 +2,7 @@
 
 #include "KamikazeDroneSpawner.h"
 #include "KamikazeDroneNPC.h"
+#include "Variant_Shooter/ShooterDummy.h"
 #include "Components/SphereComponent.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
@@ -9,6 +10,10 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "TimerManager.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Field/FieldSystemObjects.h"
 
 AKamikazeDroneSpawner::AKamikazeDroneSpawner()
 {
@@ -47,11 +52,24 @@ void AKamikazeDroneSpawner::BeginPlay()
 		if (Guardian)
 		{
 			ResolvedGuardians.Add(Guardian);
-			Guardian->OnDestroyed.AddDynamic(this, &AKamikazeDroneSpawner::OnGuardianDestroyed);
+
+			// ShooterDummy uses OnDummyDeath (does NOT call Destroy on death)
+			// Other actors use OnDestroyed
+			if (AShooterDummy* Dummy = Cast<AShooterDummy>(Guardian))
+			{
+				Dummy->OnDummyDeath.AddDynamic(this, &AKamikazeDroneSpawner::OnGuardianDummyDied);
+			}
+			else
+			{
+				Guardian->OnDestroyed.AddDynamic(this, &AKamikazeDroneSpawner::OnGuardianDestroyed);
+			}
 		}
 	}
 
 	GuardiansAlive = ResolvedGuardians.Num();
+	GuardiansTotal = GuardiansAlive;
+
+	UE_LOG(LogTemp, Warning, TEXT("[Spawner] BeginPlay: %d guardians resolved"), GuardiansAlive);
 
 	// No guardians assigned → skip straight to Panic mode
 	if (GuardiansAlive <= 0)
@@ -76,7 +94,7 @@ void AKamikazeDroneSpawner::BeginPlay()
 float AKamikazeDroneSpawner::TakeDamage(float Damage, const FDamageEvent& DamageEvent,
 	AController* EventInstigator, AActor* DamageCauser)
 {
-	if (bIsShieldActive)
+	if (bIsShieldActive || bIsDead)
 	{
 		return 0.f;
 	}
@@ -84,6 +102,9 @@ float AKamikazeDroneSpawner::TakeDamage(float Damage, const FDamageEvent& Damage
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 
 	CurrentHP -= ActualDamage;
+
+	UE_LOG(LogTemp, Warning, TEXT("[Spawner] Took %.1f damage, HP now: %.1f/%.1f"),
+		ActualDamage, CurrentHP, MaxHP);
 
 	if (CurrentHP <= 0.f)
 	{
@@ -158,25 +179,18 @@ void AKamikazeDroneSpawner::SpawnDrone()
 	Drone->OnDestroyed.AddDynamic(this, &AKamikazeDroneSpawner::OnDroneDestroyed);
 
 	// ── Launch velocity ───────────────────────────────────────
-	// Convert LaunchDirection from local to world space, apply random spread cone
+	// Drone enters Launching state: FPV PID stabilization from launch impulse,
+	// then transitions to orbit when speed settles near CruiseSpeed.
 	if (LaunchSpeed > 0.f)
 	{
 		FVector WorldLaunchDir = GetActorTransform().TransformVectorNoScale(LaunchDirection.GetSafeNormal());
 
-		// Apply random spread within cone
 		if (LaunchSpreadAngle > 0.f)
 		{
 			WorldLaunchDir = FMath::VRandCone(WorldLaunchDir, FMath::DegreesToRadians(LaunchSpreadAngle));
 		}
 
-		// Set initial velocity directly on CMC — orbit system will naturally stabilize
-		if (UCharacterMovementComponent* DroneCMC = Drone->GetCharacterMovement())
-		{
-			DroneCMC->Velocity = WorldLaunchDir * LaunchSpeed;
-		}
-
-		// Orient drone to face launch direction
-		Drone->SetActorRotation(WorldLaunchDir.Rotation());
+		Drone->InitiateLaunch(WorldLaunchDir * LaunchSpeed);
 	}
 
 	// VFX
@@ -206,7 +220,24 @@ void AKamikazeDroneSpawner::OnDroneDestroyed(AActor* DestroyedActor)
 
 void AKamikazeDroneSpawner::OnGuardianDestroyed(AActor* DestroyedActor)
 {
+	HandleGuardianKilled(DestroyedActor);
+}
+
+void AKamikazeDroneSpawner::OnGuardianDummyDied(AShooterDummy* Dummy, AActor* Killer)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[Spawner] Guardian Dummy died: %s"),
+		Dummy ? *Dummy->GetName() : TEXT("null"));
+	HandleGuardianKilled(Dummy);
+}
+
+void AKamikazeDroneSpawner::HandleGuardianKilled(AActor* Guardian)
+{
 	GuardiansAlive = FMath::Max(0, GuardiansAlive - 1);
+
+	UE_LOG(LogTemp, Warning, TEXT("[Spawner] Guardian killed! Remaining: %d/%d"),
+		GuardiansAlive, GuardiansTotal);
+
+	OnGuardianKilled.Broadcast(Guardian, GuardiansAlive, GuardiansTotal);
 
 	if (GuardiansAlive <= 0)
 	{
@@ -218,6 +249,8 @@ void AKamikazeDroneSpawner::EnterPanicMode()
 {
 	CurrentMode = ESpawnerMode::Panic;
 	bIsShieldActive = false;
+
+	UE_LOG(LogTemp, Warning, TEXT("[Spawner] PANIC MODE — shield down, spawner damageable"));
 
 	// Kill shield VFX
 	if (ShieldVFXComponent)
@@ -245,6 +278,7 @@ void AKamikazeDroneSpawner::EnterPanicMode()
 
 void AKamikazeDroneSpawner::Die()
 {
+	bIsDead = true;
 	GetWorldTimerManager().ClearTimer(SpawnTimerHandle);
 
 	if (DeathVFX)
@@ -258,10 +292,113 @@ void AKamikazeDroneSpawner::Die()
 		UGameplayStatics::PlaySoundAtLocation(this, DeathSFX, GetActorLocation());
 	}
 
+	// Spawn GC destruction if assigned
+	if (DestructionGeometryCollection)
+	{
+		SpawnDestructionGC();
+	}
+
 	OnSpawnerDestroyed.Broadcast(this);
 
 	// Drones are NOT killed — they become orphans
 	SetLifeSpan(5.f);
+}
+
+// ── Geometry Collection Destruction ───────────────────────────
+
+void AKamikazeDroneSpawner::SpawnDestructionGC()
+{
+	if (!DestructionGeometryCollection || !GetWorld())
+	{
+		return;
+	}
+
+	const FVector Origin = GetActorLocation();
+	const FRotator Rotation = GetActorRotation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+		Origin, Rotation, SpawnParams);
+
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		GCActor->Destroy();
+		return;
+	}
+
+	// Match spawner scale
+	GCActor->SetActorScale3D(GetActorScale3D());
+
+	// Collision: gibs should not push pawns or block camera
+	GCComp->SetCollisionProfileName(GibCollisionProfile);
+	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	// Assign GC asset and initialize physics
+	GCComp->SetRestCollection(DestructionGeometryCollection);
+
+	// Copy materials from first found StaticMeshComponent (added in BP)
+	TArray<UStaticMeshComponent*> MeshComponents;
+	GetComponents<UStaticMeshComponent>(MeshComponents);
+	if (MeshComponents.Num() > 0)
+	{
+		UStaticMeshComponent* SourceMesh = MeshComponents[0];
+		const int32 NumMats = SourceMesh->GetNumMaterials();
+		for (int32 i = 0; i < NumMats; i++)
+		{
+			if (UMaterialInterface* Mat = SourceMesh->GetMaterial(i))
+			{
+				GCComp->SetMaterial(i, Mat);
+			}
+		}
+	}
+
+	GCComp->SetSimulatePhysics(true);
+	GCComp->RecreatePhysicsState();
+
+	// Break all clusters
+	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+	StrainField->Magnitude = 999999.0f;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, StrainField);
+
+	// Scatter pieces radially from destruction origin
+	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+	RadialVelocity->Magnitude = DestructionImpulse;
+	RadialVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+		nullptr, RadialVelocity);
+
+	// Angular velocity for tumbling
+	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+	AngularVelocity->Magnitude = DestructionAngularImpulse;
+	AngularVelocity->Position = Origin;
+	GCComp->ApplyPhysicsField(true,
+		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+		nullptr, AngularVelocity);
+
+	// GC actor self-destructs after lifetime
+	GCActor->SetLifeSpan(GibLifetime);
+
+	// Hide all mesh components (GC gibs replace them visually)
+	TArray<UStaticMeshComponent*> AllMeshes;
+	GetComponents<UStaticMeshComponent>(AllMeshes);
+	for (UStaticMeshComponent* Mesh : AllMeshes)
+	{
+		Mesh->SetVisibility(false);
+		Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
 }
 
 // ── Helpers ────────────────────────────────────────────────────

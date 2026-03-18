@@ -5,7 +5,6 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
-#include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EMFPhysicsProp.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
@@ -24,6 +23,7 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	if (IsTargetDead())
 	{
 		SetVisibility(ESlateVisibility::Hidden);
+		bWasVisibleLastFrame = false;
 		return;
 	}
 
@@ -31,6 +31,7 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	if (!GetTargetWorldPosition(WorldPos))
 	{
 		SetVisibility(ESlateVisibility::Hidden);
+		bWasVisibleLastFrame = false;
 		return;
 	}
 
@@ -46,6 +47,7 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	if (DotProduct <= 0.0f)
 	{
 		SetVisibility(ESlateVisibility::Hidden);
+		bWasVisibleLastFrame = false;
 		return;
 	}
 
@@ -66,18 +68,28 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 				if (World->LineTraceSingleByChannel(Hit, CameraLocation, Target->GetActorLocation(), ECC_Visibility, Params))
 				{
 					SetVisibility(ESlateVisibility::Hidden);
+					bWasVisibleLastFrame = false;
 					return;
 				}
 			}
 		}
 	}
 
-	// Distance-based scaling
+	// Distance-based scaling using EffectiveMinScaleDistance (adjusted by clutter reduction)
 	if (bEnableDistanceScaling)
 	{
 		float Distance = FVector::Dist(CameraLocation, WorldPos);
-		float Alpha = FMath::Clamp((Distance - MaxScaleDistance) / FMath::Max(MinScaleDistance - MaxScaleDistance, 1.0f), 0.0f, 1.0f);
+		float ScaleRange = FMath::Max(EffectiveMinScaleDistance - MaxScaleDistance, 1.0f);
+		float Alpha = FMath::Clamp((Distance - MaxScaleDistance) / ScaleRange, 0.0f, 1.0f);
 		float Scale = FMath::Lerp(MaxWidgetScale, MinWidgetScale, Alpha);
+
+		// Hide widget when scale is effectively zero
+		if (Scale < KINDA_SMALL_NUMBER)
+		{
+			SetVisibility(ESlateVisibility::Hidden);
+			bWasVisibleLastFrame = false;
+			return;
+		}
 
 		SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
 		FWidgetTransform WidgetTransform;
@@ -98,14 +110,30 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 
 	if (bValidPosition)
 	{
-		FVector2D CenteredPosition = ScreenPosition - WidgetHalfSize;
-		SetPositionInViewport(CenteredPosition, true);
+		SetAlignmentInViewport(FVector2D(0.5f, 0.5f));
+		SetPositionInViewport(ScreenPosition, true);
 		SetVisibility(ESlateVisibility::HitTestInvisible);
+		bWasVisibleLastFrame = true;
 	}
 	else
 	{
 		SetVisibility(ESlateVisibility::Hidden);
+		bWasVisibleLastFrame = false;
 	}
+}
+
+EChargeWidgetCategory UEMFChargeWidget::GetCategory() const
+{
+	if (BoundNPC.IsValid())
+	{
+		return EChargeWidgetCategory::NPC;
+	}
+	if (BoundProp.IsValid())
+	{
+		return EChargeWidgetCategory::Prop;
+	}
+	// DroppedMeleeWeapon and DroppedRangedWeapon
+	return EChargeWidgetCategory::Weapon;
 }
 
 void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
@@ -231,34 +259,6 @@ void UEMFChargeWidget::BindToDroppedRangedWeapon(ADroppedRangedWeapon* InWeapon,
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
 
-void UEMFChargeWidget::BindToUpgradePickup(AUpgradePickup* InPickup, float InVerticalOffset)
-{
-	if (!InPickup)
-	{
-		return;
-	}
-
-	BoundUpgradePickup = InPickup;
-	BoundNPC.Reset();
-	BoundProp.Reset();
-	BoundDroppedWeapon.Reset();
-	BoundDroppedRangedWeapon.Reset();
-	VerticalOffset = InVerticalOffset;
-	bIsActive = true;
-
-	// Static charge — read once
-	float Charge = InPickup->GetCharge();
-	float AbsCharge = FMath::Abs(Charge);
-
-	CachedMaxCharge = FMath::Max(AbsCharge * 2.0f, 50.0f);
-	CurrentCharge = AbsCharge;
-	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
-	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
-
-	BP_OnBoundToNPC();
-	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
-}
-
 void UEMFChargeWidget::Unbind()
 {
 	if (AShooterNPC* NPC = BoundNPC.Get())
@@ -274,11 +274,11 @@ void UEMFChargeWidget::Unbind()
 	}
 
 	bIsActive = false;
+	bWasVisibleLastFrame = false;
 	BoundNPC.Reset();
 	BoundProp.Reset();
 	BoundDroppedWeapon.Reset();
 	BoundDroppedRangedWeapon.Reset();
-	BoundUpgradePickup.Reset();
 	SetVisibility(ESlateVisibility::Collapsed);
 }
 
@@ -290,6 +290,7 @@ void UEMFChargeWidget::ResetWidget()
 	NormalizedCharge = 0.0f;
 	CachedMaxCharge = 50.0f;
 	CachedMaxHP = 100.0f;
+	EffectiveMinScaleDistance = MinScaleDistance;
 	BP_OnWidgetReset();
 }
 
@@ -310,10 +311,6 @@ AActor* UEMFChargeWidget::GetBoundActor() const
 	if (ADroppedRangedWeapon* RangedWeapon = BoundDroppedRangedWeapon.Get())
 	{
 		return RangedWeapon;
-	}
-	if (AUpgradePickup* Pickup = BoundUpgradePickup.Get())
-	{
-		return Pickup;
 	}
 	return nullptr;
 }
@@ -357,14 +354,6 @@ bool UEMFChargeWidget::GetTargetWorldPosition(FVector& OutPosition) const
 		return true;
 	}
 
-	if (AUpgradePickup* Pickup = BoundUpgradePickup.Get())
-	{
-		FVector Origin, BoxExtent;
-		Pickup->GetActorBounds(false, Origin, BoxExtent);
-		OutPosition = Origin + FVector(0.0f, 0.0f, BoxExtent.Z + VerticalOffset);
-		return true;
-	}
-
 	return false;
 }
 
@@ -385,10 +374,6 @@ bool UEMFChargeWidget::IsTargetDead() const
 	if (ADroppedRangedWeapon* RangedWeapon = BoundDroppedRangedWeapon.Get())
 	{
 		return RangedWeapon->IsPullComplete(); // "dead" once pulled/collected
-	}
-	if (AUpgradePickup* Pickup = BoundUpgradePickup.Get())
-	{
-		return Pickup->IsPullComplete(); // "dead" once pulled/collected
 	}
 	return true; // No valid target
 }

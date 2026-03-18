@@ -12,6 +12,7 @@
 #include "ShooterBulletCounterUI.h"
 #include "MeleeAttackComponent.h"
 #include "Polarity.h"
+#include "TutorialSubsystem.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
 void AShooterPlayerController::BeginPlay()
@@ -46,6 +47,14 @@ void AShooterPlayerController::BeginPlay()
 		{
 			BulletCounterUI->AddToPlayerScreen(0);
 
+			// Register HUD widget with tutorial subsystem for arrow display
+			if (UGameInstance* GI = GetGameInstance())
+			{
+				if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+				{
+					TutorialSub->SetHUDWidget(BulletCounterUI);
+				}
+			}
 		}
 		else {
 

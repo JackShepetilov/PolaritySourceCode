@@ -21,7 +21,7 @@ class POLARITY_API ABossAIController : public AShooterAIController
 
 public:
 
-	ABossAIController();
+	ABossAIController(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 protected:
 

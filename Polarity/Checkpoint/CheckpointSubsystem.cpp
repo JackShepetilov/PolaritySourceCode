@@ -191,6 +191,13 @@ void UCheckpointSubsystem::RegisterNPC(AShooterNPC* NPC)
 		return;
 	}
 
+	// Skip registration if we're currently respawning NPCs from checkpoint —
+	// the respawn loop handles AliveNPCs.Add and SpawnID assignment itself.
+	if (bIsRespawningNPCs)
+	{
+		return;
+	}
+
 	// Check if this NPC already has a SpawnID (respawned NPC)
 	FGuid ExistingID = NPC->GetCheckpointSpawnID();
 	if (ExistingID.IsValid())
@@ -236,6 +243,10 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 		return;
 	}
 
+	UE_LOG(LogTemp, Error, TEXT("===== CheckpointSubsystem::RespawnAllNPCsToCheckpointState START ====="));
+	UE_LOG(LogTemp, Error, TEXT("  AliveNPCs to destroy: %d, NPCsAliveAtCheckpoint to respawn: %d"),
+		AliveNPCs.Num(), NPCsAliveAtCheckpoint.Num());
+
 	// Step 1: Destroy all currently alive NPCs (with proper controller/StateTree cleanup)
 	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
 	{
@@ -256,9 +267,12 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 		}
 	}
 	AliveNPCs.Empty();
+	UE_LOG(LogTemp, Error, TEXT("  Step 1 done: all old NPCs destroyed"));
 
 	// Step 2: Respawn ALL NPCs that were alive at checkpoint activation
 	// Use SpawnAIFromClass to properly initialize AI controller and StateTree
+	// Flag prevents BeginPlay -> RegisterNPC from double-adding to AliveNPCs
+	bIsRespawningNPCs = true;
 	for (const FGuid& SpawnID : NPCsAliveAtCheckpoint)
 	{
 		if (const FNPCSpawnData* SpawnData = RegisteredNPCs.Find(SpawnID))
@@ -288,4 +302,7 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 			}
 		}
 	}
+	bIsRespawningNPCs = false;
+	UE_LOG(LogTemp, Error, TEXT("  Step 2 done: respawned %d NPCs from checkpoint data"), AliveNPCs.Num());
+	UE_LOG(LogTemp, Error, TEXT("===== CheckpointSubsystem::RespawnAllNPCsToCheckpointState END ====="));
 }

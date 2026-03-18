@@ -28,6 +28,7 @@
 #include "Sound/SoundAttenuation.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "TutorialSubsystem.h"
 #include "Variant_Shooter/ShooterDummy.h"
 #include "EMFPhysicsProp.h"
 #include "Upgrades/UpgradeManagerComponent.h"
@@ -172,6 +173,29 @@ void AShooterWeapon::ActivateWeapon()
 
 	// notify the owner
 	WeaponOwner->OnWeaponActivated(this);
+
+	// Show first-equip tutorial slide (if configured and not yet completed)
+	// Skip if owner has tutorial debug mode enabled
+	if (!FirstEquipTutorialID.IsNone())
+	{
+		bool bSkip = false;
+		if (AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner))
+		{
+			bSkip = ShooterOwner->bTutorialDebugMode;
+		}
+
+		if (!bSkip)
+		{
+			if (UGameInstance* GI = GetGameInstance())
+			{
+				if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+				{
+					APlayerController* PC = PawnOwner ? Cast<APlayerController>(PawnOwner->GetController()) : nullptr;
+					TutorialSub->ShowSlide(FirstEquipTutorialID, FirstEquipSlideData, PC);
+				}
+			}
+		}
+	}
 }
 
 void AShooterWeapon::DeactivateWeapon()
@@ -196,9 +220,14 @@ void AShooterWeapon::StartFiring()
 	const float TimeSinceLastShot = GetWorld()->GetTimeSeconds() - TimeOfLastShot;
 	const float CurrentRefireRate = GetCurrentRefireRate();
 
+	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] StartFiring: TimeSinceLastShot=%.3f, RefireRate=%.3f, bFullAuto=%d, Owner=%s"),
+		*GetName(), TimeSinceLastShot, CurrentRefireRate, bFullAuto,
+		PawnOwner ? *PawnOwner->GetName() : TEXT("NULL"));
+
 	if (TimeSinceLastShot > CurrentRefireRate)
 	{
 		// fire the weapon right away
+		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   -> Firing immediately"), *GetName());
 		Fire();
 
 	}
@@ -207,7 +236,12 @@ void AShooterWeapon::StartFiring()
 		// if we're full auto, schedule the next shot
 		if (bFullAuto)
 		{
+			UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   -> Deferred (full auto): scheduling in %.3f sec"), *GetName(), TimeSinceLastShot);
 			GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, TimeSinceLastShot, false);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   -> SKIPPED: not full auto and refire rate not met!"), *GetName());
 		}
 
 	}
@@ -215,6 +249,10 @@ void AShooterWeapon::StartFiring()
 
 void AShooterWeapon::StopFiring()
 {
+	const bool bHadPendingRefire = GetWorld()->GetTimerManager().IsTimerActive(RefireTimer);
+	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] StopFiring: bIsFiring was %d, hadPendingRefire=%d"),
+		*GetName(), bIsFiring, bHadPendingRefire);
+
 	// lower the firing flag
 	bIsFiring = false;
 
@@ -224,9 +262,13 @@ void AShooterWeapon::StopFiring()
 
 void AShooterWeapon::Fire()
 {
+	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] Fire() called: bIsFiring=%d, bUseChargeFiring=%d, WeaponOwner=%d"),
+		*GetName(), bIsFiring, bUseChargeFiring, WeaponOwner != nullptr);
+
 	// ensure the player still wants to fire. They may have let go of the trigger
 	if (!bIsFiring)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: bIsFiring is false!"), *GetName());
 		return;
 	}
 
@@ -237,10 +279,19 @@ void AShooterWeapon::Fire()
 		if (!TryConsumeCharge(ChargeMultiplier))
 		{
 			// Not enough charge - stop firing
+			UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: charge requirements not met!"), *GetName());
 			StopFiring();
 			return;
 		}
 	}
+
+	if (!WeaponOwner)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: WeaponOwner is NULL!"), *GetName());
+		return;
+	}
+
+	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() PROCEEDING: spawning effects, getting target..."), *GetName());
 
 	// Spawn muzzle flash effect for all weapon types
 	SpawnMuzzleFlashEffect();
@@ -257,18 +308,24 @@ void AShooterWeapon::Fire()
 	// Get target location
 	const FVector TargetLocation = WeaponOwner->GetWeaponTargetLocation();
 
+	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   TargetLocation: (%.1f, %.1f, %.1f), bUseHitscan=%d"),
+		*GetName(), TargetLocation.X, TargetLocation.Y, TargetLocation.Z, bUseHitscan);
+
 	// Fire based on mode
 	if (bUseHitscan)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   >>> FireHitscan <<<"), *GetName());
 		FireHitscan(TargetLocation);
 	}
 	else
 	{
+		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   >>> FireProjectile <<<"), *GetName());
 		FireProjectile(TargetLocation, ChargeMultiplier);
 	}
 
 	// update the time of our last shot
 	TimeOfLastShot = GetWorld()->GetTimeSeconds();
+	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Shot complete. TimeOfLastShot=%.2f"), *GetName(), TimeOfLastShot);
 
 	// Notify listeners that a shot was fired (for NPC burst counting)
 	OnShotFired.Broadcast();

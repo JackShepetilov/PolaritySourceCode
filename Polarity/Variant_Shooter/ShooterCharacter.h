@@ -6,6 +6,7 @@
 #include "PolarityCharacter.h"
 #include "ShooterWeaponHolder.h"
 #include "ApexMovementComponent.h"
+#include "TutorialTypes.h"
 #include "ShooterCharacter.generated.h"
 
 class AShooterWeapon;
@@ -1184,6 +1185,33 @@ protected:
 
 	/** Called from the respawn timer to destroy this character and force the PC to respawn */
 	void OnRespawn();
+
+	// ==================== Tutorial Triggers ====================
+public:
+
+	/** Debug mode: on BeginPlay, flash all 3 HUD arrows and skip weapon slides */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	bool bTutorialDebugMode = false;
+
+	/** HUD arrow data for first-damage tutorial (points to Health Bar) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FTutorialHUDArrowData FirstDamageArrowData;
+
+	/** Tutorial ID for first-damage arrow */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FName FirstDamageTutorialID = FName("Tutorial_FirstDamage");
+
+	/** HUD arrow data for first-charge tutorial (points to Charge Bar) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FTutorialHUDArrowData FirstChargeArrowData;
+
+	/** Tutorial ID for first-charge arrow */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FName FirstChargeTutorialID = FName("Tutorial_FirstCharge");
+
+	/** Tutorial ID for melee charges arrow (must match TriggerVolume config) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FName MeleeChargesTutorialID = FName("Tutorial_MeleeCharges");
 
 	// ==================== Boss Finisher System ====================
 public:

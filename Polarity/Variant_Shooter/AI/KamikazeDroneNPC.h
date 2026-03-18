@@ -12,16 +12,20 @@ class UFlyingAIMovementComponent;
 class USphereComponent;
 class UFPVTiltComponent;
 class UNiagaraSystem;
+class UAudioComponent;
 
 /** State machine for kamikaze drone behavior */
 UENUM(BlueprintType)
 enum class EKamikazeState : uint8
 {
+	Launching,      // Post-spawn: FPV PID stabilization from launch impulse
 	Orbiting,       // Circling in Middle Ring
 	Telegraphing,   // 0.3-0.4s warning before attack
+	Positioning,    // Flying to frontal attack point before committing
 	Attacking,      // Diving toward predicted position
 	PostAttack,     // Inertia after missing target
 	Recovery,       // Braking, turning, returning to orbit
+	Parried,        // Melee-parried: spiraling toward target/ground, will explode with stun
 	Dead
 };
 
@@ -65,6 +69,10 @@ protected:
 	/** FPV visual tilt component (pitch/roll/yaw/wobble) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UFPVTiltComponent> FPVTilt;
+
+	/** Looping flight sound component */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UAudioComponent> FlightAudioComponent;
 
 	// ==================== Collision Settings ====================
 
@@ -178,6 +186,36 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
 	float MinOrbitSpaceThreshold = 400.0f;
 
+	/** Speed during positioning phase — flying to frontal attack point (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning")
+	float PositioningSpeed = 1000.0f;
+
+	/** Turn rate during positioning (degrees/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning")
+	float PositioningTurnRate = 120.0f;
+
+	/** Distance threshold to frontal point to begin telegraph (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning", meta = (ClampMin = "50"))
+	float PositioningArrivalThreshold = 200.0f;
+
+	/** Max time in positioning before forced telegraph even if not at target (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning", meta = (ClampMin = "0.5"))
+	float PositioningMaxTime = 3.0f;
+
+	// ==================== Strafe Settings ====================
+
+	/** Lateral oscillation amplitude (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strafe", meta = (ClampMin = "50", ClampMax = "800"))
+	float StrafeAmplitude = 300.0f;
+
+	/** Oscillation frequency (radians/s). 2.5 ≈ one full cycle every 2.5 seconds */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strafe", meta = (ClampMin = "0.5", ClampMax = "8.0"))
+	float StrafeFrequency = 2.5f;
+
+	/** Number of blocked rays (out of 8) to consider orbit "bad" and switch to strafe */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strafe", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 BadOrbitThreshold = 5;
+
 	// ==================== Crash Settings ====================
 
 	/** Base crash chance even in open space after a miss */
@@ -191,6 +229,23 @@ protected:
 	/** Additional crash chance from pitch angle factor */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Crash", meta = (ClampMin = "0", ClampMax = "1"))
 	float AngleCrashFactor = 0.2f;
+
+	// ==================== Launch Stabilization ====================
+
+	/** Max time for launch stabilization before forcing orbit transition (seconds).
+	 *  Actual transition often happens sooner when speed settles near CruiseSpeed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch")
+	float MaxLaunchStabilizationTime = 1.5f;
+
+	/** Speed decay rate during launch (higher = faster deceleration).
+	 *  Simulates FPV PID-controller settling: exponential decay toward CruiseSpeed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float LaunchDecayRate = 3.0f;
+
+	/** How aggressively the drone steers toward orbit path during launch (degrees/s).
+	 *  Low = gentle arc from launch tube, high = sharp snap to orbit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch", meta = (ClampMin = "5.0", ClampMax = "120.0"))
+	float LaunchSteerRate = 35.0f;
 
 	// ==================== Prediction Settings ====================
 
@@ -224,6 +279,52 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Triggers")
 	bool bRetaliateOnDamage = true;
 
+	// ==================== Parry Settings ====================
+
+	/** Speed along the parry direction (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParrySpiralForwardSpeed = 900.0f;
+
+	/** Spiral rotation speed (radians/s) — how fast it circles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParrySpiralAngularSpeed = 12.0f;
+
+	/** Starting radius of the spiral (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParrySpiralStartRadius = 120.0f;
+
+	/** How fast the spiral radius shrinks (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParrySpiralRadiusShrinkRate = 40.0f;
+
+	/** Downward bias when no enemy target — makes spiral go toward ground (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParryGravityBias = 200.0f;
+
+	/** Mesh spin speed when parried (degrees/s) — visual tumble */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParryMeshSpinSpeed = 1080.0f;
+
+	/** Max time before forced explosion if nothing is hit (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry", meta = (ClampMin = "0.5"))
+	float ParryMaxFlightTime = 3.0f;
+
+	/** Half-angle of the cone in front of player to search for redirect targets (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry", meta = (ClampMin = "5", ClampMax = "90"))
+	float ParryConeLookHalfAngle = 45.0f;
+
+	/** Max distance to search for redirect targets (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParryConeLookDistance = 2000.0f;
+
+	/** Explosion radius for parried drone (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParryExplosionRadius = 400.0f;
+
+	/** Damage dealt by parried explosion */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Parry")
+	float ParryExplosionDamage = 50.0f;
+
 	// ==================== VFX / SFX ====================
 
 	/** Niagara system for full explosion (player collision) */
@@ -245,6 +346,26 @@ protected:
 	/** Sound for telegraph (high-pitched whine) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX")
 	TObjectPtr<USoundBase> TelegraphSound;
+
+	/** Looping flight sound (assigned in Blueprint) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX")
+	TObjectPtr<USoundBase> FlightSound;
+
+	/** Minimum pitch multiplier (at FlightPitchMinSpeed or below) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX", meta = (ClampMin = "0.3", ClampMax = "2.0"))
+	float FlightPitchMin = 0.8f;
+
+	/** Maximum pitch multiplier (at FlightPitchMaxSpeed or above) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX", meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float FlightPitchMax = 1.4f;
+
+	/** Speed at which pitch is at minimum */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX", meta = (ClampMin = "0"))
+	float FlightPitchMinSpeed = 200.0f;
+
+	/** Speed at which pitch is at maximum */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX", meta = (ClampMin = "0"))
+	float FlightPitchMaxSpeed = 1200.0f;
 
 protected:
 
@@ -301,6 +422,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
 	void BeginTelegraph(bool bRetaliation = false);
 
+	/** Initialize launch from spawner: sets velocity and enters Launching state.
+	 *  Drone will stabilize from launch impulse (FPV PID settling) before entering orbit. */
+	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
+	void InitiateLaunch(const FVector& LaunchVelocity);
+
 protected:
 
 	// ==================== State Machine ====================
@@ -309,11 +435,18 @@ protected:
 	EKamikazeState StateBeforeCapture = EKamikazeState::Orbiting;
 
 	void SetState(EKamikazeState NewState);
+	void UpdateLaunching(float DeltaTime);
 	void UpdateOrbiting(float DeltaTime);
+	void UpdateStrafing(float DeltaTime);
+	void UpdatePositioning(float DeltaTime);
 	void UpdateTelegraphing(float DeltaTime);
 	void UpdateAttacking(float DeltaTime);
 	void UpdatePostAttack(float DeltaTime);
+
+	/** Evaluate orbit quality: 8 rays, switch to strafe if too many blocked */
+	void EvaluateOrbitQuality();
 	void UpdateRecovery(float DeltaTime);
+	void UpdateParried(float DeltaTime);
 
 	// ==================== Attack Methods ====================
 
@@ -322,6 +455,14 @@ protected:
 
 	/** Calculate predicted target position using prediction order */
 	FVector CalculatePredictedPosition() const;
+
+	// ==================== Parry Methods ====================
+
+	/** Initiate parry: find target in cone or use player look direction, enter Parried state */
+	void InitiateParry(AController* AttackerController);
+
+	/** Find best enemy target in cone in front of player. Returns nullptr if none found. */
+	AShooterNPC* FindParryTarget(const FVector& PlayerLocation, const FVector& PlayerForward) const;
 
 	// ==================== Death Methods ====================
 
@@ -389,6 +530,29 @@ protected:
 	/** Time at proximity radius without token */
 	float ProximityTimer = 0.0f;
 
+	// ==================== Strafe State ====================
+
+	/** If true, drone is in lateral strafe mode instead of orbiting */
+	bool bIsStrafing = false;
+
+	/** Center position for strafe oscillation (assigned by coordinator) */
+	FVector StrafeCenter = FVector::ZeroVector;
+
+	/** Lateral axis for strafe oscillation (perpendicular to player-drone direction) */
+	FVector StrafeAxis = FVector::ZeroVector;
+
+	/** Current phase of strafe sinusoid */
+	float StrafePhase = 0.0f;
+
+	/** Cumulative phase for lap counting (one full sin period = one "lap") */
+	float StrafeCumulativePhase = 0.0f;
+
+	/** Timer for orbit quality evaluation (every 1.0s) */
+	float OrbitEvaluationTimer = 0.0f;
+
+	/** Number of blocked rays in last orbit evaluation (out of 8) */
+	int32 LastBlockedRayCount = 0;
+
 	/** How long the drone has been in orbit (for MinOrbitTimeBeforeAttack) */
 	float OrbitElapsedTime = 0.0f;
 
@@ -443,6 +607,37 @@ protected:
 
 	/** Time when last damage was taken */
 	float LastDamageTakenTime = -100.0f;
+
+	// ==================== Launch State ====================
+
+	/** Initial launch speed (set by spawner via InitiateLaunch) */
+	float LaunchInitialSpeed = 0.0f;
+
+	/** Accumulated time with near-zero position delta (for stuck detection) */
+	float StuckAccumulator = 0.0f;
+
+	// ==================== Parry State ====================
+
+	/** Direction the parried drone flies (toward enemy or player look dir) */
+	FVector ParryDirection = FVector::ForwardVector;
+
+	/** Right axis perpendicular to ParryDirection (for spiral) */
+	FVector ParrySpiralRight = FVector::RightVector;
+
+	/** Up axis perpendicular to ParryDirection (for spiral) */
+	FVector ParrySpiralUp = FVector::UpVector;
+
+	/** Current spiral angle (radians) */
+	float ParrySpiralAngle = 0.0f;
+
+	/** Current spiral radius */
+	float ParryCurrentRadius = 0.0f;
+
+	/** Whether this drone was parried (used to enable stun on explosion) */
+	bool bIsParried = false;
+
+	/** Target NPC for redirected parry (can be null — spiral toward ground) */
+	TWeakObjectPtr<AActor> ParryTarget;
 
 	// ==================== Internal ====================
 

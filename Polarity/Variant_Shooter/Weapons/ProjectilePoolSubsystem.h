@@ -8,6 +8,16 @@
 
 class AShooterProjectile;
 
+/** Wrapper struct so UPROPERTY can track pooled projectile references */
+USTRUCT()
+struct FProjectilePool
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<TObjectPtr<AShooterProjectile>> Projectiles;
+};
+
 /**
  * World Subsystem that manages object pooling for projectiles.
  * Eliminates SpawnActor/Destroy overhead during gameplay.
@@ -72,7 +82,8 @@ public:
 protected:
 
 	/** Pool storage: Class -> Array of inactive projectiles */
-	TMap<TSubclassOf<AShooterProjectile>, TArray<AShooterProjectile*>> PoolsByClass;
+	UPROPERTY()
+	TMap<TSubclassOf<AShooterProjectile>, FProjectilePool> PoolsByClass;
 
 	/** Track active projectiles for statistics */
 	TMap<TSubclassOf<AShooterProjectile>, int32> ActiveCountByClass;

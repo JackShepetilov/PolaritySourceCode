@@ -1,6 +1,7 @@
 // Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "ArenaSpawnPoint.h"
+#include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
 #include "Components/BillboardComponent.h"
 #include "Components/ArrowComponent.h"
 
@@ -29,6 +30,23 @@ AArenaSpawnPoint::AArenaSpawnPoint()
 		EditorArrow->ArrowSize = 1.0f;
 	}
 #endif
+}
+
+bool AArenaSpawnPoint::IsClassAllowed(TSubclassOf<AShooterNPC> NPCClass) const
+{
+	if (ExcludedNPCClasses.Num() == 0 || !NPCClass)
+	{
+		return true;
+	}
+
+	for (const TSubclassOf<AShooterNPC>& Excluded : ExcludedNPCClasses)
+	{
+		if (Excluded && NPCClass->IsChildOf(Excluded))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 FTransform AArenaSpawnPoint::GetSpawnTransform(bool bForAirUnit) const

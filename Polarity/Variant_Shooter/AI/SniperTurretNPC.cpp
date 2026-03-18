@@ -43,6 +43,11 @@ ASniperTurretNPC::ASniperTurretNPC(const FObjectInitializer& ObjectInitializer)
 
 	// Independent firing - no coordinator
 	bUseCoordinator = false;
+
+	// Turret has its own progressive aim system (AimDuration) — perception delay
+	// would cause StartShooting→TryStartShooting to defer the shot, but StopShooting
+	// is called immediately after, killing the deferred retry → shot never fires
+	PerceptionDelay = 0.0f;
 }
 
 // ==================== Lifecycle ====================
@@ -67,10 +72,36 @@ void ASniperTurretNPC::BeginPlay()
 
 void ASniperTurretNPC::Tick(float DeltaTime)
 {
+	// === Capture pre-tick position to detect and revert unwanted movement ===
+	const FVector PreTickPos = GetActorLocation();
+
 	Super::Tick(DeltaTime);
 
-	// Turret immunity: instantly revert externally-applied stun/capture states
-	// ApplyExplosionStun is non-virtual and sets these directly — we undo it each frame
+	// === Detect & revert movement (turrets must be stationary) ===
+	const FVector PostParentTickPos = GetActorLocation();
+	const float Drift = FVector::Dist(PreTickPos, PostParentTickPos);
+	if (Drift > 0.1f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET MOVE] %s drifted %.1f! Launched=%d Captured=%d Knockback=%d KBInterp=%d Stun=%d Vel=%s Mode=%d"),
+			*GetName(), Drift,
+			bIsLaunched, bIsCaptured, bIsInKnockback, bIsKnockbackInterpolating, bStunnedByExplosion,
+			*GetVelocity().ToCompactString(),
+			GetCharacterMovement() ? (int32)GetCharacterMovement()->MovementMode.GetValue() : -1);
+
+		// Force position back
+		SetActorLocation(PreTickPos);
+		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+		{
+			CMC->Velocity = FVector::ZeroVector;
+			if (CMC->MovementMode != MOVE_Walking)
+			{
+				CMC->SetMovementMode(MOVE_Walking);
+			}
+		}
+	}
+
+	// Turret immunity: instantly revert externally-applied stun/capture/launch states
+	// These non-virtual functions set flags directly — we undo them each frame
 	if (bStunnedByExplosion)
 	{
 		bStunnedByExplosion = false;
@@ -79,6 +110,16 @@ void ASniperTurretNPC::Tick(float DeltaTime)
 	if (bIsCaptured)
 	{
 		bIsCaptured = false;
+		bIsInKnockback = false;
+	}
+	if (bIsLaunched)
+	{
+		bIsLaunched = false;
+		bIsInKnockback = false;
+	}
+	if (bIsKnockbackInterpolating)
+	{
+		bIsKnockbackInterpolating = false;
 		bIsInKnockback = false;
 	}
 
@@ -154,6 +195,15 @@ void ASniperTurretNPC::SetLOSStatus(bool bNewHasLOS)
 		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS REGAINED: AimProgress=%.3f, State=%d %s"),
 			AimProgress, (int32)CurrentAimState,
 			AimProgress > 0.01f ? TEXT("*** NON-ZERO PROGRESS! ***") : TEXT("(OK)"));
+
+		// If turret went Idle because LOS was lost during PostFireCooldown/DamageRecovery,
+		// restart aiming now that LOS is back
+		if (CurrentAimState == ETurretAimState::Idle && AimTarget.IsValid() && !bIsDead)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] Restarting aim from Idle (LOS regained)"));
+			ResetAimProgress();
+			SetAimState(ETurretAimState::Aiming);
+		}
 	}
 }
 
@@ -265,32 +315,43 @@ void ASniperTurretNPC::FireAtTarget()
 {
 	if (!AimTarget.IsValid() || !Weapon || bIsDead)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] FireAtTarget REJECTED: Target=%d, Weapon=%d, Dead=%d"),
+		UE_LOG(LogTemp, Error, TEXT("[SniperTurret] FireAtTarget REJECTED: Target=%d, Weapon=%d, Dead=%d"),
 			AimTarget.IsValid(), Weapon != nullptr, bIsDead);
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[Turret:%s] === FIRING at %s === (T=%.2f)"), *GetName(), *AimTarget->GetName(), GetWorld()->GetTimeSeconds());
-	UE_LOG(LogTemp, Warning, TEXT("[Turret:%s]   Pre-fire: bIsShooting=%d, bWantsToShoot=%d, bInBurstCooldown=%d, bIsInKnockback=%d, CurrentBurstShots=%d"),
-		*GetName(), bIsShooting, bWantsToShoot, bInBurstCooldown, bIsInKnockback, CurrentBurstShots);
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Weapon: %s"),
-		Weapon ? *Weapon->GetName() : TEXT("NULL"));
+	const float Now = GetWorld()->GetTimeSeconds();
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s] ========== FIRE ATTEMPT at %s ========== (T=%.2f)"),
+		*GetName(), *AimTarget->GetName(), Now);
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   NPC state: bIsShooting=%d, bWantsToShoot=%d, bInBurstCooldown=%d, bIsInKnockback=%d, bIsCaptured=%d, bStunnedByExplosion=%d, CurrentBurstShots=%d"),
+		*GetName(), bIsShooting, bWantsToShoot, bInBurstCooldown, bIsInKnockback, bIsCaptured, bStunnedByExplosion, CurrentBurstShots);
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   PerceptionDelay=%.3f, TargetAcquiredTime=%.2f, PerceptionTarget=%s"),
+		*GetName(), PerceptionDelay, TargetAcquiredTime,
+		PerceptionDelayTrackedTarget.IsValid() ? *PerceptionDelayTrackedTarget->GetName() : TEXT("null"));
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   Weapon: %s, RefireRate=%.3f, IsHitscan=%d"),
+		*GetName(), *Weapon->GetName(), Weapon->GetActualRefireRate(), Weapon->IsHitscan());
 
 	SetAimState(ETurretAimState::Firing);
 
 	// Set aim target on parent for GetWeaponTargetLocation
 	CurrentAimTarget = AimTarget;
 
-	// Fire using parent's weapon system — shot happens synchronously inside StartShooting
-	StartShooting(AimTarget.Get(), true);
-	// Immediately clean up: shot already fired, stop weapon and reset burst state
-	// (BurstCooldown=0 causes timer to never fire, leaving bInBurstCooldown stuck true)
-	StopShooting();
+	// === BYPASS parent's StartShooting entirely — fire weapon directly ===
+	// StartShooting → TryStartShooting has too many potential blockers
+	// (PerceptionDelay, bInBurstCooldown, permission retry, etc.)
+	// Turret's own aim system already handles all timing.
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   Calling Weapon->StartFiring()..."), *GetName());
+	Weapon->StartFiring();
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   StartFiring returned. Calling StopFiring..."), *GetName());
+	Weapon->StopFiring();
+
+	// Reset NPC shooting state (don't leave stale flags from OnWeaponShotFired callback)
+	bIsShooting = false;
+	bWantsToShoot = false;
 	bInBurstCooldown = false;
 	CurrentBurstShots = 0;
 
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Post-fire cleanup: bIsShooting=%d, bInBurstCooldown=%d"),
-		bIsShooting, bInBurstCooldown);
+	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   Post-fire cleanup done."), *GetName());
 
 	OnTurretFired.Broadcast();
 
@@ -433,11 +494,19 @@ void ASniperTurretNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 
 FVector ASniperTurretNPC::GetWeaponTargetLocation()
 {
-	// Sniper turret aims directly at target - no spread.
+	// Sniper turret aims directly at target center mass - no spread.
 	// Progressive aim time IS the accuracy mechanic.
 	if (AimTarget.IsValid())
 	{
-		return AimTarget->GetActorLocation();
+		FVector TargetLoc = AimTarget->GetActorLocation();
+		if (const ACharacter* CharTarget = Cast<ACharacter>(AimTarget.Get()))
+		{
+			if (const UCapsuleComponent* Capsule = CharTarget->GetCapsuleComponent())
+			{
+				TargetLoc.Z += Capsule->GetScaledCapsuleHalfHeight();
+			}
+		}
+		return TargetLoc;
 	}
 
 	// Fallback: aim forward
@@ -465,12 +534,32 @@ bool ASniperTurretNPC::HasLineOfSightTo(AActor* Target) const
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
-	FHitResult Hit;
-	const FVector Start = TurretMesh
-		? TurretMesh->GetComponentLocation()
-		: GetActorLocation();
-	const FVector End = Target->GetActorLocation();
+	// Start trace from muzzle socket (where the weapon actually fires from)
+	FVector Start;
+	if (TurretMesh && TurretMesh->DoesSocketExist(TurretWeaponSocket))
+	{
+		Start = TurretMesh->GetSocketLocation(TurretWeaponSocket);
+	}
+	else if (TurretMesh)
+	{
+		Start = TurretMesh->GetComponentLocation();
+	}
+	else
+	{
+		Start = GetActorLocation();
+	}
 
+	// Aim at target center mass, not feet
+	FVector End = Target->GetActorLocation();
+	if (const ACharacter* CharTarget = Cast<ACharacter>(Target))
+	{
+		if (const UCapsuleComponent* Capsule = CharTarget->GetCapsuleComponent())
+		{
+			End.Z += Capsule->GetScaledCapsuleHalfHeight();
+		}
+	}
+
+	FHitResult Hit;
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
 		Hit, Start, End, ECC_Visibility, QueryParams);
 

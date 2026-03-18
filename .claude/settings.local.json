@@ -178,7 +178,22 @@
       "WebFetch(domain:gdkeys.com)",
       "WebFetch(domain:www.halopedia.org)",
       "WebFetch(domain:serioussam.fandom.com)",
-      "mcp__af340771-2280-4d0a-90ff-19f2e654d124__create_view"
+      "mcp__af340771-2280-4d0a-90ff-19f2e654d124__create_view",
+      "Bash(python -m markitdown \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\\\\Docs\\\\PitchTemplate_deslopified.pptx\")",
+      "WebFetch(domain:voiceactingclub.com)",
+      "WebFetch(domain:rocketbrush.com)",
+      "WebFetch(domain:www.gamesoundcon.com)",
+      "WebFetch(domain:playstack.com)",
+      "WebFetch(domain:www.playstack.com)",
+      "WebFetch(domain:www.pcgamingwiki.com)",
+      "WebFetch(domain:whimsygames.co)",
+      "WebFetch(domain:vsquad.art)",
+      "WebFetch(domain:www.argentics.io)",
+      "WebFetch(domain:retrostylegames.com)",
+      "WebFetch(domain:steamspy.com)",
+      "WebFetch(domain:mixkit.co)",
+      "WebFetch(domain:www.zapsplat.com)",
+      "WebFetch(domain:freesound.org)"
     ]
   }
 }

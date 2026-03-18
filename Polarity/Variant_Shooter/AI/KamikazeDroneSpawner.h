@@ -10,9 +10,11 @@
 #include "KamikazeDroneSpawner.generated.h"
 
 class AKamikazeDroneNPC;
+class AShooterDummy;
 class USphereComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
+class UGeometryCollection;
 
 UENUM(BlueprintType)
 enum class ESpawnerMode : uint8
@@ -22,6 +24,7 @@ enum class ESpawnerMode : uint8
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSpawnerDestroyed, AKamikazeDroneSpawner*, Spawner);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnGuardianKilled, AActor*, KilledGuardian, int32, GuardiansRemaining, int32, GuardiansTotal);
 
 UCLASS()
 class POLARITY_API AKamikazeDroneSpawner : public AActor
@@ -34,6 +37,9 @@ public:
 	// ── Delegates ──────────────────────────────────────────────
 	UPROPERTY(BlueprintAssignable, Category = "Spawner|Events")
 	FOnSpawnerDestroyed OnSpawnerDestroyed;
+
+	UPROPERTY(BlueprintAssignable, Category = "Spawner|Events")
+	FOnGuardianKilled OnGuardianKilled;
 
 protected:
 	virtual void BeginPlay() override;
@@ -56,6 +62,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Spawner|State")
 	bool bIsShieldActive = true;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Spawner|State")
+	bool bIsDead = false;
 
 	// ── Health ─────────────────────────────────────────────────
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Health")
@@ -118,6 +127,29 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Spawner|Drone")
 	TArray<TObjectPtr<AKamikazeDroneNPC>> ActiveDrones;
 
+	// ── Geometry Collection Destruction ────────────────────────
+	/** Optional Geometry Collection for spawner destruction.
+	 *  If assigned: GC actor spawns at actor transform on death and shatters.
+	 *  If not assigned: actor just hides and self-destructs after 5s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Destruction")
+	TObjectPtr<UGeometryCollection> DestructionGeometryCollection;
+
+	/** How long gib pieces persist before cleanup (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Destruction", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float GibLifetime = 3.0f;
+
+	/** Radial velocity for scattering gibs outward on death (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Destruction", meta = (ClampMin = "0"))
+	float DestructionImpulse = 800.0f;
+
+	/** Angular velocity for tumbling gibs on death */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Destruction", meta = (ClampMin = "0"))
+	float DestructionAngularImpulse = 100.0f;
+
+	/** Collision profile for GC gibs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|Destruction")
+	FName GibCollisionProfile = FName("Ragdoll");
+
 	// ── VFX ────────────────────────────────────────────────────
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawner|VFX")
 	TObjectPtr<UNiagaraSystem> SpawnVFX;
@@ -150,6 +182,7 @@ private:
 	TArray<TWeakObjectPtr<AActor>> ResolvedGuardians;
 
 	int32 GuardiansAlive = 0;
+	int32 GuardiansTotal = 0;
 
 	UFUNCTION()
 	void OnDetectionBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
@@ -160,14 +193,22 @@ private:
 	void SpawnDrone();
 	void StartSpawnTimer();
 
+	/** Bound to AActor::OnDestroyed for non-Dummy guardians. */
 	UFUNCTION()
 	void OnGuardianDestroyed(AActor* DestroyedActor);
+
+	/** Bound to AShooterDummy::OnDummyDeath for Dummy guardians. */
+	UFUNCTION()
+	void OnGuardianDummyDied(AShooterDummy* Dummy, AActor* Killer);
+
+	void HandleGuardianKilled(AActor* Guardian);
 
 	UFUNCTION()
 	void OnDroneDestroyed(AActor* DestroyedActor);
 
 	void EnterPanicMode();
 	void Die();
+	void SpawnDestructionGC();
 
 	int32 GetMaxDronesForCurrentMode() const;
 	float GetSpawnIntervalForCurrentMode() const;

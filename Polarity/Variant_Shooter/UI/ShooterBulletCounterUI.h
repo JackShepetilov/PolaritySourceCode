@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "TutorialTypes.h"
 #include "ShooterBulletCounterUI.generated.h"
 
 class AShooterCharacter;
@@ -176,4 +177,39 @@ public:
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Respawn", meta = (DisplayName = "BindToCharacter"))
 	void BP_BindToCharacter(AShooterCharacter* NewCharacter);
+
+	// ==================== Tutorial Arrows ====================
+
+	/**
+	 * Show a tutorial arrow pointing at a specific HUD element.
+	 * Implement in Blueprint to show arrow + description text near the target element.
+	 * The arrow lives inside the HUD widget (same coordinate space = resolution-safe).
+	 * @param Element - Which HUD element to point at
+	 * @param DescriptionText - Description text shown alongside the arrow
+	 * @param CloseKeyIcon - Icon for the close key (for "Hold X to continue" prompt)
+	 * @param CloseHintText - Text for close prompt
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "ShowTutorialArrow"))
+	void BP_ShowTutorialArrow(EHUDElement Element, const FText& DescriptionText, UTexture2D* CloseKeyIcon, const FText& CloseHintText);
+
+	/**
+	 * Hide the tutorial arrow for a specific HUD element.
+	 * @param Element - Which arrow to hide
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "HideTutorialArrow"))
+	void BP_HideTutorialArrow(EHUDElement Element);
+
+	/**
+	 * Update hold progress for the close button on tutorial arrows.
+	 * @param Progress - 0.0 = just started, 1.0 = about to close
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "UpdateTutorialHoldProgress"))
+	void BP_UpdateTutorialHoldProgress(float Progress);
+
+	/**
+	 * Called when hold is cancelled (key released early).
+	 * Use to reset progress indicator.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "OnTutorialHoldCancelled"))
+	void BP_OnTutorialHoldCancelled();
 };

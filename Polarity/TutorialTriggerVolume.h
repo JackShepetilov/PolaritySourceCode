@@ -54,7 +54,7 @@ protected:
 	ETutorialType TutorialType = ETutorialType::Hint;
 
 	/** Data for hint-type tutorials */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tutorial|Hint", 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tutorial|Hint",
 		meta = (EditCondition = "TutorialType == ETutorialType::Hint", EditConditionHides))
 	FTutorialHintData HintData;
 
@@ -62,6 +62,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tutorial|Slide",
 		meta = (EditCondition = "TutorialType == ETutorialType::Slide", EditConditionHides))
 	FTutorialSlideData SlideData;
+
+	/** Data for HUD arrow tutorials */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tutorial|HUDArrow",
+		meta = (EditCondition = "TutorialType == ETutorialType::HUDArrow", EditConditionHides))
+	FTutorialHUDArrowData HUDArrowData;
 
 	/** Only trigger for actors with this tag (leave empty to trigger for any pawn) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tutorial|Filtering")
@@ -87,7 +92,7 @@ protected:
 	// ==================== Overlap Handlers ====================
 
 	UFUNCTION()
-	void OnTriggerBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, 
+	void OnTriggerBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 
 	UFUNCTION()

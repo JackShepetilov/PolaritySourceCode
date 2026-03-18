@@ -15,6 +15,7 @@
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "ShooterAIController.h"
+#include "Components/StateTreeAIComponent.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
@@ -565,6 +566,22 @@ void AShooterNPC::Die()
 	// raise the dead flag
 	bIsDead = true;
 
+	// Cache charge before disabling EMF (needed for weapon drops below)
+	const float CachedNPCCharge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
+
+	// Immediately disable EMF field so it stops affecting other objects
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetCharge(0.0f);
+		EMFVelocityModifier->SetComponentTickEnabled(false);
+	}
+	if (FieldComponent)
+	{
+		FieldComponent->SetCharge(0.0f);
+		FieldComponent->UnregisterFromRegistry();
+		FieldComponent->SetComponentTickEnabled(false);
+	}
+
 	// Stop shooting immediately
 	StopShooting();
 
@@ -597,8 +614,8 @@ void AShooterNPC::Die()
 	// Weapon drop: NPC may drop a melee weapon
 	if (DroppedMeleeWeaponClass)
 	{
-		// NPC real charge lives in EMFVelocityModifier, NOT PolarityCharacter::CurrentCharge
-		const float NPCCharge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
+		// Use cached charge (EMF already disabled above)
+		const float NPCCharge = CachedNPCCharge;
 		// TODO: restore charge-based formula: DropWeaponBaseChance * FMath::Abs(NPCCharge)
 		const float DropChance = DropWeaponBaseChance;
 		const float Roll = FMath::FRand();
@@ -647,7 +664,7 @@ void AShooterNPC::Die()
 	// Ranged weapon drop: iterate table, first success wins
 	if (DroppedRangedWeaponTable.Num() > 0)
 	{
-		const float NPCChargeForRanged = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
+		const float NPCChargeForRanged = CachedNPCCharge;
 
 		for (const FDroppedRangedWeaponEntry& Entry : DroppedRangedWeaponTable)
 		{
@@ -767,7 +784,202 @@ void AShooterNPC::Die()
 
 void AShooterNPC::DeferredDestruction()
 {
+	if (bIsPooled)
+	{
+		// Pool mode: hide completely but don't destroy — ArenaManager will recycle
+		SetActorHiddenInGame(true);
+		SetActorEnableCollision(false);
+		return;
+	}
 	Destroy();
+}
+
+// ==================== Pool Recycling ====================
+
+void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRotation)
+{
+	// --- Core state ---
+	bIsDead = false;
+
+	// Reset HP from class defaults
+	const AShooterNPC* CDO = GetClass()->GetDefaultObject<AShooterNPC>();
+	CurrentHP = CDO->CurrentHP;
+
+	// --- Combat state ---
+	bIsShooting = false;
+	bWantsToShoot = false;
+	bHasAttackPermission = false;
+	bInBurstCooldown = false;
+	bExternalPermissionGranted = false;
+	CurrentBurstShots = 0;
+	CurrentAimTarget = nullptr;
+
+	// --- Knockback/stun state ---
+	bIsInKnockback = false;
+	bIsCaptured = false;
+	bIsLaunched = false;
+	bWasChannelingTarget = false;
+	bIsKnockbackInterpolating = false;
+	bStunnedByExplosion = false;
+	bStunnedByNPCImpact = false;
+	bShouldStunOnNPCImpact = false;
+	bCaptureEnabledByStun = false;
+	KnockbackDirection = FVector::ZeroVector;
+	KnockbackStartPosition = FVector::ZeroVector;
+	KnockbackTargetPosition = FVector::ZeroVector;
+	KnockbackAttackerPosition = FVector::ZeroVector;
+	KnockbackTotalDuration = 0.0f;
+	KnockbackElapsedTime = 0.0f;
+
+	// --- Perception ---
+	TargetAcquiredTime = -1.0f;
+	PerceptionDelayTrackedTarget = nullptr;
+
+	// --- Kill tracking ---
+	LastKillingDamageType = nullptr;
+	LastKillingDamageCauser = nullptr;
+	LastKillingHitDirection = FVector::ZeroVector;
+	LastHitReactionTime = -1.0f;
+	PreviousPolarity = 0;
+	PreviousChargeValue = 0.0f;
+	LastWallSlamTime = -1.0f;
+	LastEMFProximityTriggerTime = -10.0f;
+	PreviousTickVelocity = FVector::ZeroVector;
+
+	// --- Montage state ---
+	ActiveCapturedMontage = nullptr;
+	ActiveLaunchedMontage = nullptr;
+
+	// --- Clear timers ---
+	UWorld* World = GetWorld();
+	FTimerManager& TM = World->GetTimerManager();
+	TM.ClearTimer(BurstCooldownTimer);
+	TM.ClearTimer(PermissionRetryTimer);
+	TM.ClearTimer(KnockbackStunTimer);
+	TM.ClearTimer(KnockbackInterpTimer);
+	TM.ClearTimer(EMFProximityDamageTimer);
+	TM.ClearTimer(DeathTimer);
+
+	// --- Mesh: stop physics BEFORE teleport (ragdoll displaces mesh from capsule) ---
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		// 1. Stop ragdoll physics
+		MeshComp->SetSimulatePhysics(false);
+		MeshComp->SetAllBodiesSimulatePhysics(false);
+		MeshComp->bPauseAnims = false;
+		MeshComp->bBlendPhysics = false;
+
+		// 2. Snap mesh back to capsule (ragdoll may have displaced it)
+		const ACharacter* CharCDO = GetClass()->GetDefaultObject<ACharacter>();
+		MeshComp->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+		MeshComp->SetRelativeLocation(CharCDO->GetMesh()->GetRelativeLocation());
+		MeshComp->SetRelativeRotation(CharCDO->GetMesh()->GetRelativeRotation());
+
+		// 3. Reset animation to clear ragdoll bone poses
+		MeshComp->InitAnim(true);
+
+		// 4. Restore visibility and collision
+		MeshComp->SetVisibility(true);
+		MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		MeshComp->SetComponentTickEnabled(true);
+	}
+
+	// --- Teleport ---
+	SetActorLocation(NewLocation);
+	SetActorRotation(NewRotation);
+
+	// --- Re-enable actor ---
+	SetActorHiddenInGame(false);
+	SetActorEnableCollision(true);
+	SetActorTickEnabled(true);
+
+	// --- Capsule ---
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Capsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	}
+
+	// --- Movement ---
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->SetMovementMode(MOVE_Walking);
+		MoveComp->SetComponentTickEnabled(true);
+	}
+
+	// --- EMF components ---
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetCharge(0.0f);
+		EMFVelocityModifier->SetComponentTickEnabled(true);
+	}
+	if (FieldComponent)
+	{
+		FieldComponent->SetCharge(0.0f);
+		FieldComponent->RegisterWithRegistry();
+		FieldComponent->SetComponentTickEnabled(true);
+	}
+
+	// --- AI components ---
+	if (AccuracyComponent)
+	{
+		AccuracyComponent->SetComponentTickEnabled(true);
+	}
+	if (MeleeRetreatComponent)
+	{
+		MeleeRetreatComponent->SetComponentTickEnabled(true);
+	}
+
+	// --- Weapon (destroyed during death — spawn fresh) ---
+	if (!Weapon && WeaponClass)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		SpawnParams.Instigator = this;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		Weapon = World->SpawnActor<AShooterWeapon>(WeaponClass, GetActorTransform(), SpawnParams);
+		if (Weapon)
+		{
+			Weapon->OnShotFired.AddDynamic(this, &AShooterNPC::OnWeaponShotFired);
+		}
+	}
+
+	// --- AI Controller (destroyed during death — spawn fresh) ---
+	SpawnDefaultController();
+
+	// --- Re-register with subsystems ---
+	RegisterWithCoordinator();
+
+	if (UCheckpointSubsystem* CS = World->GetSubsystem<UCheckpointSubsystem>())
+	{
+		CS->RegisterNPC(this);
+	}
+	if (UDamageNumbersSubsystem* DNS = World->GetSubsystem<UDamageNumbersSubsystem>())
+	{
+		DNS->RegisterNPC(this);
+	}
+	if (UEMFChargeWidgetSubsystem* CWS = World->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		CWS->RegisterNPC(this);
+	}
+
+	// --- Clear death delegates (ArenaManager will re-bind) ---
+	OnNPCDeath.Clear();
+	OnNPCDeathDetailed.Clear();
+
+	// --- Charge overlay ---
+	if (bUseChargeOverlay)
+	{
+		UpdateChargeOverlay(0);
+	}
+
+	// --- Permanent stun (if configured) ---
+	if (bIsPermanentlyStunned)
+	{
+		ApplyExplosionStun(999999.0f, ReverseChannelingStunMontage);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::ResetForPool — %s recycled at %s"), *GetName(), *NewLocation.ToString());
 }
 
 // ==================== Death Effects Implementation ====================
@@ -804,94 +1016,116 @@ void AShooterNPC::SpawnDeathGeometryCollection(const FDeathModeConfig& Config)
 
 	const FTransform MeshTransform = GetMesh()->GetComponentTransform();
 	const FVector Origin = MeshTransform.GetLocation();
+	const FRotator Rotation = MeshTransform.GetRotation().Rotator();
+	const FVector Scale = GetMesh()->GetComponentScale();
 
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
-		Origin, MeshTransform.GetRotation().Rotator(), SpawnParams);
-
-	if (!GCActor)
-	{
-		return;
-	}
-
-	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
-	if (!GCComp)
-	{
-		GCActor->Destroy();
-		return;
-	}
-
-	GCActor->SetActorScale3D(GetMesh()->GetComponentScale());
-
-	// Fix collision: gibs should not push pawns
-	GCComp->SetCollisionProfileName(RagdollCollisionProfile);
-	GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-	GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-	GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
-
-	// Assign GC asset and initialize physics
-	GCComp->SetRestCollection(DeathGeometryCollection);
-
-	// Copy materials from skeletal mesh to GC gibs
+	// Cache materials once
+	TArray<UMaterialInterface*> CachedMaterials;
 	if (USkeletalMeshComponent* SkelMesh = GetMesh())
 	{
 		const int32 NumMats = SkelMesh->GetNumMaterials();
+		CachedMaterials.Reserve(NumMats);
 		for (int32 i = 0; i < NumMats; i++)
 		{
-			if (UMaterialInterface* Mat = SkelMesh->GetMaterial(i))
-			{
-				GCComp->SetMaterial(i, Mat);
-			}
+			CachedMaterials.Add(SkelMesh->GetMaterial(i));
 		}
 	}
 
-	GCComp->SetSimulatePhysics(true);
-	GCComp->RecreatePhysicsState();
+	const int32 CopyCount = bUltragore ? FMath::Max(2, UltragoreGCCount) : 1;
 
-	// Break all clusters with massive external strain
-	UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
-	StrainField->Magnitude = 999999.0f;
-
-	GCComp->ApplyPhysicsField(true,
-		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
-		nullptr, StrainField);
-
-	// Scatter pieces with config-driven radial velocity
-	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
-	RadialVelocity->Magnitude = Config.DismembermentImpulse;
-	RadialVelocity->Position = Origin;
-
-	GCComp->ApplyPhysicsField(true,
-		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
-		nullptr, RadialVelocity);
-
-	// Angular velocity for tumbling
-	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
-	AngularVelocity->Magnitude = Config.DismembermentAngularImpulse;
-	AngularVelocity->Position = Origin;
-
-	GCComp->ApplyPhysicsField(true,
-		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
-		nullptr, AngularVelocity);
-
-	// Directional bias from killing hit direction
-	if (!LastKillingHitDirection.IsNearlyZero() && Config.DirectionalBiasMultiplier > 0.0f)
+	for (int32 CopyIdx = 0; CopyIdx < CopyCount; CopyIdx++)
 	{
-		UUniformVector* DirectionalBias = NewObject<UUniformVector>(GCActor);
-		DirectionalBias->Magnitude = Config.DismembermentImpulse * Config.DirectionalBiasMultiplier;
-		DirectionalBias->Direction = LastKillingHitDirection;
+		// Small random offset for extra copies to prevent physics overlap
+		FVector SpawnLocation = Origin;
+		if (CopyIdx > 0 && UltragoreSpawnOffset > 0.0f)
+		{
+			SpawnLocation += FMath::VRand() * UltragoreSpawnOffset;
+		}
+
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AGeometryCollectionActor* GCActor = GetWorld()->SpawnActor<AGeometryCollectionActor>(
+			SpawnLocation, Rotation, SpawnParams);
+
+		if (!GCActor)
+		{
+			continue;
+		}
+
+		UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+		if (!GCComp)
+		{
+			GCActor->Destroy();
+			continue;
+		}
+
+		GCActor->SetActorScale3D(Scale);
+
+		// Fix collision: gibs should not push pawns
+		GCComp->SetCollisionProfileName(RagdollCollisionProfile);
+		GCComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		GCComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+		GCComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+		// Assign GC asset and initialize physics
+		GCComp->SetRestCollection(DeathGeometryCollection);
+
+		// Copy materials from skeletal mesh to GC gibs
+		for (int32 i = 0; i < CachedMaterials.Num(); i++)
+		{
+			if (CachedMaterials[i])
+			{
+				GCComp->SetMaterial(i, CachedMaterials[i]);
+			}
+		}
+
+		GCComp->SetSimulatePhysics(true);
+		GCComp->RecreatePhysicsState();
+
+		// Break all clusters with massive external strain
+		UUniformScalar* StrainField = NewObject<UUniformScalar>(GCActor);
+		StrainField->Magnitude = 999999.0f;
+
+		GCComp->ApplyPhysicsField(true,
+			EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+			nullptr, StrainField);
+
+		// Scatter pieces with config-driven radial velocity
+		URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
+		RadialVelocity->Magnitude = Config.DismembermentImpulse;
+		RadialVelocity->Position = SpawnLocation;
 
 		GCComp->ApplyPhysicsField(true,
 			EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
-			nullptr, DirectionalBias);
+			nullptr, RadialVelocity);
+
+		// Angular velocity for tumbling
+		URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
+		AngularVelocity->Magnitude = Config.DismembermentAngularImpulse;
+		AngularVelocity->Position = SpawnLocation;
+
+		GCComp->ApplyPhysicsField(true,
+			EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
+			nullptr, AngularVelocity);
+
+		// Directional bias from killing hit direction
+		if (!LastKillingHitDirection.IsNearlyZero() && Config.DirectionalBiasMultiplier > 0.0f)
+		{
+			UUniformVector* DirectionalBias = NewObject<UUniformVector>(GCActor);
+			DirectionalBias->Magnitude = Config.DismembermentImpulse * Config.DirectionalBiasMultiplier;
+			DirectionalBias->Direction = LastKillingHitDirection;
+
+			GCComp->ApplyPhysicsField(true,
+				EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
+				nullptr, DirectionalBias);
+		}
+
+		GCActor->SetLifeSpan(GibLifetime);
 	}
 
-	GCActor->SetLifeSpan(GibLifetime);
-
-	UE_LOG(LogTemp, Log, TEXT("SpawnDeathGC: %s impulse=%.0f angular=%.0f dir=[%.2f,%.2f,%.2f]*%.1f"),
-		*GetName(), Config.DismembermentImpulse, Config.DismembermentAngularImpulse,
+	UE_LOG(LogTemp, Log, TEXT("SpawnDeathGC: %s copies=%d impulse=%.0f angular=%.0f dir=[%.2f,%.2f,%.2f]*%.1f"),
+		*GetName(), CopyCount, Config.DismembermentImpulse, Config.DismembermentAngularImpulse,
 		LastKillingHitDirection.X, LastKillingHitDirection.Y, LastKillingHitDirection.Z,
 		Config.DirectionalBiasMultiplier);
 }
@@ -999,10 +1233,41 @@ void AShooterNPC::DeactivateForDeath(float DestructionDelay, bool bHideMesh)
 		MeleeRetreatComponent->SetComponentTickEnabled(false);
 	}
 
-	// Unpossess to stop AI controller
+	// Pooled NPCs: unregister from subsystems (EndPlay won't run)
+	if (bIsPooled)
+	{
+		UnregisterFromCoordinator();
+
+		if (UDamageNumbersSubsystem* DNS = GetWorld()->GetSubsystem<UDamageNumbersSubsystem>())
+		{
+			DNS->UnregisterNPC(this);
+		}
+		if (UEMFChargeWidgetSubsystem* CWS = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+		{
+			CWS->UnregisterNPC(this);
+		}
+	}
+
+	// Stop AI controller
 	if (AController* MyController = GetController())
 	{
-		MyController->UnPossess();
+		if (bIsPooled)
+		{
+			// Pooled: stop StateTree and destroy controller (will be recreated on recycle)
+			if (AShooterAIController* AICtrl = Cast<AShooterAIController>(MyController))
+			{
+				if (UStateTreeAIComponent* StateTreeComp = AICtrl->FindComponentByClass<UStateTreeAIComponent>())
+				{
+					StateTreeComp->StopLogic(TEXT("NPCPool"));
+				}
+			}
+			MyController->UnPossess();
+			MyController->Destroy();
+		}
+		else
+		{
+			MyController->UnPossess();
+		}
 	}
 
 	// Disable actor tick
@@ -2388,18 +2653,19 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 		}
 	}
 
-	// Switch to Falling so gravity counteraction can lift the NPC off the ground
-	// In MOVE_Walking, CharacterMovement suppresses vertical forces
+	// Zero velocity and switch to Falling mode.
+	// Viscous capture forces (ComputeHardHoldDelta) only run through ApexMovementComponent
+	// which NPCs don't use — so velocity must be zeroed here to prevent drift.
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
+		CharMovement->StopMovementImmediately();
 		CharMovement->SetMovementMode(MOVE_Falling);
 	}
 
-	// Do NOT zero velocity — viscosity manages it
 	// Do NOT disable EMF — viscous capture needs it
 	// Do NOT set knockback timer — capture duration managed externally
 
-	// Play captured montage (will loop via OnCapturedMontageEnded callback)
+	// Play captured montage with seamless looping via NextSection
 	UAnimMontage* MontageToPlay = OverrideMontage ? OverrideMontage : CapturedMontage.Get();
 	if (MontageToPlay)
 	{
@@ -2408,21 +2674,35 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 			ActiveCapturedMontage = MontageToPlay;
 			AnimInstance->Montage_Play(MontageToPlay, 1.0f);
 
-			FOnMontageEnded EndDelegate;
-			EndDelegate.BindUObject(this, &AShooterNPC::OnCapturedMontageEnded);
-			AnimInstance->Montage_SetEndDelegate(EndDelegate, MontageToPlay);
+			// Loop by pointing the last section back to the first — no callback, no gap, no blend
+			const int32 NumSections = MontageToPlay->CompositeSections.Num();
+			if (NumSections > 0)
+			{
+				const FName FirstSection = MontageToPlay->CompositeSections[0].SectionName;
+				const FName LastSection = MontageToPlay->CompositeSections[NumSections - 1].SectionName;
+				AnimInstance->Montage_SetNextSection(LastSection, FirstSection, MontageToPlay);
+			}
 		}
 	}
 }
 
 void AShooterNPC::OnCapturedMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
-	// If still captured and not interrupted — loop the montage
+	// Safety fallback — montage loops via SetNextSection, but if it somehow ends
+	// (e.g. montage has no sections), restart it
 	if (bIsCaptured && !bInterrupted && ActiveCapturedMontage)
 	{
 		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
 		{
-			AnimInstance->Montage_Play(ActiveCapturedMontage, 1.0f);
+			AnimInstance->Montage_Play(ActiveCapturedMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f);
+
+			const int32 NumSections = ActiveCapturedMontage->CompositeSections.Num();
+			if (NumSections > 0)
+			{
+				const FName FirstSection = ActiveCapturedMontage->CompositeSections[0].SectionName;
+				const FName LastSection = ActiveCapturedMontage->CompositeSections[NumSections - 1].SectionName;
+				AnimInstance->Montage_SetNextSection(LastSection, FirstSection, ActiveCapturedMontage);
+			}
 
 			FOnMontageEnded EndDelegate;
 			EndDelegate.BindUObject(this, &AShooterNPC::OnCapturedMontageEnded);
@@ -2533,7 +2813,7 @@ void AShooterNPC::EnterLaunchedState()
 		EMFVelocityModifier->SetLaunchedForceFilteringActive(true);
 	}
 
-	// Play launched montage (looping via callback)
+	// Play launched montage with seamless looping via NextSection
 	UAnimMontage* MontageToPlay = LaunchedMontage.Get();
 	if (MontageToPlay)
 	{
@@ -2542,20 +2822,33 @@ void AShooterNPC::EnterLaunchedState()
 			ActiveLaunchedMontage = MontageToPlay;
 			AnimInstance->Montage_Play(MontageToPlay, 1.0f);
 
-			FOnMontageEnded EndDelegate;
-			EndDelegate.BindUObject(this, &AShooterNPC::OnLaunchedMontageEnded);
-			AnimInstance->Montage_SetEndDelegate(EndDelegate, MontageToPlay);
+			const int32 NumSections = MontageToPlay->CompositeSections.Num();
+			if (NumSections > 0)
+			{
+				const FName FirstSection = MontageToPlay->CompositeSections[0].SectionName;
+				const FName LastSection = MontageToPlay->CompositeSections[NumSections - 1].SectionName;
+				AnimInstance->Montage_SetNextSection(LastSection, FirstSection, MontageToPlay);
+			}
 		}
 	}
 }
 
 void AShooterNPC::OnLaunchedMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
+	// Safety fallback — montage loops via SetNextSection, but restart if it somehow ends
 	if (bIsLaunched && !bInterrupted && ActiveLaunchedMontage)
 	{
 		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
 		{
-			AnimInstance->Montage_Play(ActiveLaunchedMontage, 1.0f);
+			AnimInstance->Montage_Play(ActiveLaunchedMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f);
+
+			const int32 NumSections = ActiveLaunchedMontage->CompositeSections.Num();
+			if (NumSections > 0)
+			{
+				const FName FirstSection = ActiveLaunchedMontage->CompositeSections[0].SectionName;
+				const FName LastSection = ActiveLaunchedMontage->CompositeSections[NumSections - 1].SectionName;
+				AnimInstance->Montage_SetNextSection(LastSection, FirstSection, ActiveLaunchedMontage);
+			}
 
 			FOnMontageEnded EndDelegate;
 			EndDelegate.BindUObject(this, &AShooterNPC::OnLaunchedMontageEnded);

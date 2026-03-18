@@ -147,6 +147,14 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 		}
 	}
 
+	// Enemy cluster direction (for kamikaze orbit bias)
+	TimeSinceLastClusterCalc += DeltaTime;
+	if (TimeSinceLastClusterCalc >= 0.5f)
+	{
+		UpdateEnemyClusterDirection();
+		TimeSinceLastClusterCalc = 0.0f;
+	}
+
 	// Debug drawing
 	if (bDrawDebug)
 	{
@@ -218,6 +226,9 @@ void AAICombatCoordinator::UnregisterNPC(APawn* NPC)
 	MeleeTokenPool.Release(NPC);
 	SpecialTokenPool.Release(NPC);
 	KamikazeTokenPool.Release(NPC);
+
+	// Release strafe slot
+	ReleaseStrafeSlot(NPC);
 
 	RegisteredNPCs.RemoveAll([NPC](const FRegisteredNPCData& Data)
 	{
@@ -1263,4 +1274,210 @@ void AAICombatCoordinator::UpdateKamikazeTokenPoolSize()
 	}
 
 	KamikazeTokenPool.MaxTokens = FMath::Clamp(AliveCount / DronesPerKamikazeToken, 1, MaxKamikazeTokensCap);
+}
+
+// ==================== Strafe Coordination ====================
+
+void AAICombatCoordinator::RequestStrafeSlot(APawn* Drone, float OrbitDistance, FVector& OutCenter, FVector& OutAxis)
+{
+	if (!Drone) return;
+
+	AActor* Target = PrimaryTarget.Get();
+	if (!Target)
+	{
+		// Fallback: use drone's current position
+		OutCenter = Drone->GetActorLocation();
+		const FVector ToPlayer = -Drone->GetActorForwardVector();
+		OutAxis = FVector::CrossProduct(FVector::UpVector, ToPlayer).GetSafeNormal();
+		return;
+	}
+
+	const FVector PlayerPos = Target->GetActorLocation();
+
+	// Clean up invalid slots
+	StrafeSlots.RemoveAll([](const FStrafeSlot& Slot) { return !Slot.AssignedDrone.IsValid(); });
+
+	// Check if drone already has a slot — update it
+	FStrafeSlot* ExistingSlot = StrafeSlots.FindByPredicate([Drone](const FStrafeSlot& Slot)
+	{
+		return Slot.AssignedDrone.Get() == Drone;
+	});
+
+	// Sample directions around player
+	TArray<float> ClearAngles;
+	TArray<float> AllAngles;
+	const float AngleStep = 360.0f / StrafeSampleDirections;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(Drone);
+	QueryParams.AddIgnoredActor(Target);
+
+	for (int32 i = 0; i < StrafeSampleDirections; ++i)
+	{
+		const float AngleDeg = AngleStep * i;
+		const float AngleRad = FMath::DegreesToRadians(AngleDeg);
+		const FVector Dir(FMath::Cos(AngleRad), FMath::Sin(AngleRad), 0.0f);
+		const FVector SamplePos = PlayerPos + Dir * OrbitDistance;
+
+		AllAngles.Add(AngleDeg);
+
+		FHitResult Hit;
+		if (!GetWorld()->LineTraceSingleByChannel(Hit, PlayerPos, SamplePos, ECC_WorldStatic, QueryParams))
+		{
+			ClearAngles.Add(AngleDeg);
+		}
+	}
+
+	// If nothing is clear, use least-blocked: pick direction closest to drone's current angle
+	if (ClearAngles.Num() == 0)
+	{
+		const FVector DroneDir = (Drone->GetActorLocation() - PlayerPos);
+		const float DroneAngle = FMath::RadiansToDegrees(FMath::Atan2(DroneDir.Y, DroneDir.X));
+		float BestAngle = 0.0f;
+		float BestDist = 999.0f;
+		for (float Ang : AllAngles)
+		{
+			float Diff = FMath::Abs(FMath::FindDeltaAngleDegrees(Ang, DroneAngle));
+			if (Diff < BestDist)
+			{
+				BestDist = Diff;
+				BestAngle = Ang;
+			}
+		}
+		ClearAngles.Add(BestAngle);
+	}
+
+	// Find the clear angle with maximum angular separation from other assigned drones
+	float BestAngle = ClearAngles[0];
+	float BestMinSeparation = -1.0f;
+
+	for (float CandidateAngle : ClearAngles)
+	{
+		float MinSeparation = 360.0f;
+
+		for (const FStrafeSlot& Slot : StrafeSlots)
+		{
+			if (Slot.AssignedDrone.Get() == Drone) continue; // skip self
+			const float Sep = FMath::Abs(FMath::FindDeltaAngleDegrees(CandidateAngle, Slot.AngleDeg));
+			MinSeparation = FMath::Min(MinSeparation, Sep);
+		}
+
+		if (MinSeparation > BestMinSeparation)
+		{
+			BestMinSeparation = MinSeparation;
+			BestAngle = CandidateAngle;
+		}
+	}
+
+	// Compute center and axis
+	const float BestRad = FMath::DegreesToRadians(BestAngle);
+	const FVector Dir(FMath::Cos(BestRad), FMath::Sin(BestRad), 0.0f);
+	OutCenter = PlayerPos + Dir * OrbitDistance;
+	OutAxis = FVector::CrossProduct(FVector::UpVector, Dir).GetSafeNormal();
+
+	// Height offset: count drones within 30° of this angle
+	float HeightOffset = 0.0f;
+	int32 NearbyCount = 0;
+	for (const FStrafeSlot& Slot : StrafeSlots)
+	{
+		if (Slot.AssignedDrone.Get() == Drone) continue;
+		if (FMath::Abs(FMath::FindDeltaAngleDegrees(BestAngle, Slot.AngleDeg)) < 30.0f)
+		{
+			++NearbyCount;
+		}
+	}
+	HeightOffset = NearbyCount * StrafeHeightStep;
+
+	// Apply height offset to center
+	OutCenter.Z += HeightOffset;
+
+	// Store or update slot
+	if (ExistingSlot)
+	{
+		ExistingSlot->Center = OutCenter;
+		ExistingSlot->Axis = OutAxis;
+		ExistingSlot->AngleDeg = BestAngle;
+		ExistingSlot->HeightOffset = HeightOffset;
+	}
+	else
+	{
+		FStrafeSlot NewSlot;
+		NewSlot.AssignedDrone = Drone;
+		NewSlot.Center = OutCenter;
+		NewSlot.Axis = OutAxis;
+		NewSlot.AngleDeg = BestAngle;
+		NewSlot.HeightOffset = HeightOffset;
+		StrafeSlots.Add(NewSlot);
+	}
+}
+
+void AAICombatCoordinator::ReleaseStrafeSlot(APawn* Drone)
+{
+	if (!Drone) return;
+	StrafeSlots.RemoveAll([Drone](const FStrafeSlot& Slot)
+	{
+		return Slot.AssignedDrone.Get() == Drone;
+	});
+}
+
+// ==================== Enemy Cluster Direction ====================
+
+void AAICombatCoordinator::UpdateEnemyClusterDirection()
+{
+	if (!PrimaryTarget.IsValid())
+	{
+		CachedClusterDirection = FVector::ZeroVector;
+		return;
+	}
+
+	const FVector PlayerPos = PrimaryTarget->GetActorLocation();
+	FVector WeightedSum = FVector::ZeroVector;
+	float TotalWeight = 0.0f;
+
+	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		if (!Data.NPC.IsValid())
+		{
+			continue;
+		}
+
+		// Skip kamikaze drones — we want ground NPC clusters
+		if (Cast<AKamikazeDroneNPC>(Data.NPC.Get()))
+		{
+			continue;
+		}
+
+		// Skip dead NPCs
+		if (const AShooterNPC* NPC = Cast<AShooterNPC>(Data.NPC.Get()))
+		{
+			if (NPC->IsDead())
+			{
+				continue;
+			}
+		}
+
+		const FVector NPCPos = Data.NPC->GetActorLocation();
+		FVector ToNPC = NPCPos - PlayerPos;
+		ToNPC.Z = 0.0f; // XY only
+		const float Dist = ToNPC.Size();
+
+		if (Dist < 50.0f)
+		{
+			continue; // Too close, skip
+		}
+
+		// Weight: closer NPCs count more (inverse distance, clamped)
+		const float Weight = 1.0f / FMath::Max(Dist / 500.0f, 0.2f);
+		WeightedSum += ToNPC.GetSafeNormal() * Weight;
+		TotalWeight += Weight;
+	}
+
+	if (TotalWeight > 0.0f && !WeightedSum.IsNearlyZero(0.1f))
+	{
+		CachedClusterDirection = WeightedSum.GetSafeNormal();
+	}
+	else
+	{
+		CachedClusterDirection = FVector::ZeroVector;
+	}
 }

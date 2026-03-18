@@ -6,7 +6,6 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
-#include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
@@ -48,11 +47,30 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 		ProcessPendingRegistrations();
 	}
 
-	// Update screen positions for all active widgets
+	// === Clutter reduction: count active widgets per category ===
+	int32 CategoryCounts[3] = { 0, 0, 0 }; // NPC, Prop, Weapon
+	for (const auto& Pair : ActiveWidgets)
+	{
+		if (Pair.Value)
+		{
+			uint8 CatIndex = static_cast<uint8>(Pair.Value->GetCategory());
+			CategoryCounts[CatIndex]++;
+		}
+	}
+
+	// Compute effective distances per category (base + clutter reduction)
+	float EffectiveDistances[3];
+	EffectiveDistances[0] = Settings.NPCClutter.ComputeEffectiveDistance(CategoryCounts[0]);
+	EffectiveDistances[1] = Settings.PropClutter.ComputeEffectiveDistance(CategoryCounts[1]);
+	EffectiveDistances[2] = Settings.WeaponClutter.ComputeEffectiveDistance(CategoryCounts[2]);
+
+	// Update screen positions for all active widgets with clutter-adjusted distance
 	for (auto& Pair : ActiveWidgets)
 	{
 		if (Pair.Value)
 		{
+			uint8 CatIndex = static_cast<uint8>(Pair.Value->GetCategory());
+			Pair.Value->EffectiveMinScaleDistance = EffectiveDistances[CatIndex];
 			Pair.Value->UpdateScreenPosition(PC);
 		}
 	}
@@ -273,49 +291,6 @@ void UEMFChargeWidgetSubsystem::UnregisterDroppedRangedWeapon(ADroppedRangedWeap
 	ActiveWidgets.Remove(Weapon);
 }
 
-void UEMFChargeWidgetSubsystem::RegisterUpgradePickup(AUpgradePickup* Pickup)
-{
-	if (!Pickup || !bEnabled)
-	{
-		return;
-	}
-
-	if (ActiveWidgets.Contains(Pickup))
-	{
-		return;
-	}
-
-	if (!WidgetClass)
-	{
-		return;
-	}
-
-	UEMFChargeWidget* Widget = GetWidgetFromPool();
-	if (!Widget)
-	{
-		return;
-	}
-
-	Widget->BindToUpgradePickup(Pickup, Settings.PropVerticalOffset);
-	ActiveWidgets.Add(Pickup, Widget);
-}
-
-void UEMFChargeWidgetSubsystem::UnregisterUpgradePickup(AUpgradePickup* Pickup)
-{
-	if (!Pickup)
-	{
-		return;
-	}
-
-	TObjectPtr<UEMFChargeWidget>* FoundWidget = ActiveWidgets.Find(Pickup);
-	if (FoundWidget && *FoundWidget)
-	{
-		ReturnWidgetToPool(*FoundWidget);
-	}
-
-	ActiveWidgets.Remove(Pickup);
-}
-
 void UEMFChargeWidgetSubsystem::ProcessPendingRegistrations()
 {
 	// Process pending NPCs
@@ -343,20 +318,14 @@ void UEMFChargeWidgetSubsystem::ProcessPendingRegistrations()
 
 UEMFChargeWidget* UEMFChargeWidgetSubsystem::GetWidgetFromPool()
 {
-	// Ensure pool exists
-	if (WidgetPool.Num() == 0 && WidgetClass)
-	{
-		CreateWidgetPool();
-	}
-
 	if (WidgetPool.Num() > 0)
 	{
 		return WidgetPool.Pop();
 	}
 
-	// Pool exhausted - create one more if reasonable
+	// Pool empty — create a new widget on demand
 	APlayerController* PC = GetLocalPlayerController();
-	if (PC && WidgetClass && ActiveWidgets.Num() < Settings.PoolSize * 2)
+	if (PC && WidgetClass)
 	{
 		UEMFChargeWidget* NewWidget = CreateWidget<UEMFChargeWidget>(PC, WidgetClass);
 		if (NewWidget)
@@ -380,26 +349,6 @@ void UEMFChargeWidgetSubsystem::ReturnWidgetToPool(UEMFChargeWidget* Widget)
 	Widget->ResetWidget();
 	Widget->SetVisibility(ESlateVisibility::Collapsed);
 	WidgetPool.Add(Widget);
-}
-
-void UEMFChargeWidgetSubsystem::CreateWidgetPool()
-{
-	APlayerController* PC = GetLocalPlayerController();
-	if (!PC || !WidgetClass)
-	{
-		return;
-	}
-
-	for (int32 i = 0; i < Settings.PoolSize; ++i)
-	{
-		UEMFChargeWidget* Widget = CreateWidget<UEMFChargeWidget>(PC, WidgetClass);
-		if (Widget)
-		{
-			Widget->AddToViewport(90);
-			Widget->SetVisibility(ESlateVisibility::Collapsed);
-			WidgetPool.Add(Widget);
-		}
-	}
 }
 
 void UEMFChargeWidgetSubsystem::CleanupWidgets()
@@ -434,4 +383,19 @@ APlayerController* UEMFChargeWidgetSubsystem::GetLocalPlayerController() const
 		return nullptr;
 	}
 	return UGameplayStatics::GetPlayerController(World, 0);
+}
+
+const FWidgetClutterSettings& UEMFChargeWidgetSubsystem::GetClutterSettings(EChargeWidgetCategory Category) const
+{
+	switch (Category)
+	{
+	case EChargeWidgetCategory::NPC:
+		return Settings.NPCClutter;
+	case EChargeWidgetCategory::Prop:
+		return Settings.PropClutter;
+	case EChargeWidgetCategory::Weapon:
+		return Settings.WeaponClutter;
+	default:
+		return Settings.NPCClutter;
+	}
 }

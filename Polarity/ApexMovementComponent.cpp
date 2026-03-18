@@ -376,8 +376,8 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		Velocity = JumpVelocity;
 		SetMovementMode(MOVE_Falling);
 
-		// After wall jump, player cannot double jump (set to max jumps)
-		CurrentJumpCount = MaxJumps;
+		// After wall jump, allow one air jump (double jump)
+		CurrentJumpCount = MaxJumps - 1;
 
 #if ENABLE_DRAW_DEBUG
 		JumpStartZ = CharacterOwner->GetActorLocation().Z;
@@ -393,28 +393,6 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		}
 
 		// Broadcast jump event (wall jump is not considered double jump)
-		OnJumpPerformed.Broadcast(false);
-
-		return true;
-	}
-
-	// Check if we're falling after wallrun ended by time expiration
-	// In this case, player gets ONE jump
-	if (IsFalling() && LastWallRunEndReason == EWallRunEndReason::TimeExpired && CurrentJumpCount < MaxJumps)
-	{
-		// Allow the jump but consume all remaining jumps
-		Velocity.Z = MovementSettings->JumpZVelocity;
-		CurrentJumpCount = MaxJumps; // Consume all jumps
-		LastWallRunEndReason = EWallRunEndReason::None; // Reset so this only works once
-		SetMovementMode(MOVE_Falling);
-
-		// Trigger Blueprint event
-		if (CharacterOwner)
-		{
-			CharacterOwner->OnJumped();
-		}
-
-		// Broadcast jump event (post-wallrun jump is not double jump)
 		OnJumpPerformed.Broadcast(false);
 
 		return true;
@@ -1242,19 +1220,9 @@ void UApexMovementComponent::EndWallRun(EWallRunEndReason Reason)
 		WallRunSameWallCooldown = MovementSettings->WallRunSameWallCooldown;
 	}
 
-	// Set jump availability based on end reason
-	if (Reason == EWallRunEndReason::JumpedOff)
-	{
-		// Player jumped off - no more jumps allowed
-		CurrentJumpCount = MovementSettings ? MovementSettings->MaxJumpCount : 2;
-	}
-	else if (Reason == EWallRunEndReason::TimeExpired)
-	{
-		// Time expired - allow one more jump (will be handled in DoJump)
-		// CurrentJumpCount stays at 0, but LastWallRunEndReason tracks this
-		CurrentJumpCount = 0;
-	}
-	// For LostWall, keep current jump count
+	// After any wallrun, allow exactly one air jump (treated as double jump)
+	const int32 MaxJumps = MovementSettings ? MovementSettings->MaxJumpCount : 2;
+	CurrentJumpCount = FMath::Max(CurrentJumpCount, MaxJumps - 1);
 
 	OnWallRunChanged.Broadcast(false, EWallSide::None);
 	OnWallrunEnded.Broadcast();

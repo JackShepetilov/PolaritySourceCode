@@ -174,6 +174,12 @@ bool UMeleeAttackComponent::StartAttack()
 	LungeDirection = GetLungeDirection();
 	LungeProgress = 0.0f;
 
+	// Broadcast dropkick delegate immediately on input, before HidingWeapon phase
+	if (ShouldPerformDropKick() && HasDropKickTarget())
+	{
+		OnDropKickStarted.Broadcast();
+	}
+
 	// Skip hiding weapon if already lowered (boss finisher case)
 	if (bIsWeaponLowered)
 	{
@@ -2917,8 +2923,6 @@ bool UMeleeAttackComponent::TryStartDropKick()
 			DrawDebugLine(GetWorld(), Start, BestTargetPos, FColor::Yellow, false, DebugShapeDuration, 0, 5.0f);
 			DrawDebugSphere(GetWorld(), LungeTargetPosition, 30.0f, 8, FColor::Cyan, false, DebugShapeDuration);
 		}
-
-		OnDropKickStarted.Broadcast();
 
 		return true;
 	}

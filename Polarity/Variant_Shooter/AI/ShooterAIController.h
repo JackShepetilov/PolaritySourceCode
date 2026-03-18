@@ -9,6 +9,7 @@
 
 class UStateTreeAIComponent;
 class UAIPerceptionComponent;
+class UPolarityPathFollowingComponent;
 struct FAIStimulus;
 class AShooterNPC;
 
@@ -81,8 +82,8 @@ public:
 
 public:
 
-	/** Constructor */
-	AShooterAIController();
+	/** Constructor — sets PolarityPathFollowingComponent as default */
+	AShooterAIController(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 protected:
 

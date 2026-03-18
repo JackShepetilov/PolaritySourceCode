@@ -8,6 +8,18 @@
 class AShooterNPC;
 
 /**
+ * Arena operating mode.
+ */
+UENUM(BlueprintType)
+enum class EArenaMode : uint8
+{
+	/** Classic wave-based spawning */
+	Waves,
+	/** Continuous spawning: kill one enemy, another spawns */
+	Sustain
+};
+
+/**
  * Current state of a combat arena.
  */
 UENUM(BlueprintType)
@@ -38,6 +50,23 @@ struct FArenaSpawnEntry
 	/** How many of this NPC to spawn */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena", meta = (ClampMin = "1"))
 	int32 Count = 1;
+};
+
+/**
+ * Weighted enemy entry for sustain mode.
+ */
+USTRUCT(BlueprintType)
+struct FSustainSpawnEntry
+{
+	GENERATED_BODY()
+
+	/** Class of NPC to spawn */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena")
+	TSubclassOf<AShooterNPC> NPCClass;
+
+	/** Relative spawn weight (higher = more likely). Not a percentage — just relative to other entries. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena", meta = (ClampMin = "0.01"))
+	float Weight = 1.0f;
 };
 
 /**
