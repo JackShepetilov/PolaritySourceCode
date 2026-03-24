@@ -33,6 +33,12 @@ public class Polarity : ModuleRules
 
         PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags" });
 
+        // Editor-only: GC batch creator needs UnrealEd (asset saving) and ContentBrowser (selection)
+        if (Target.Type == TargetType.Editor)
+        {
+            PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "ContentBrowser", "MeshDescription", "StaticMeshDescription", "GeometryCollectionEditor", "FractureEngine", "Chaos", "DataflowCore" });
+        }
+
         PublicIncludePaths.AddRange(new string[] {
             "Polarity",
             "Polarity/AI",

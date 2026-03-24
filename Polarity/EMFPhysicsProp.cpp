@@ -25,6 +25,10 @@
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
 
+#if WITH_EDITOR
+#include "GCBatchCreatorLibrary.h"
+#endif
+
 AEMFPhysicsProp::AEMFPhysicsProp()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -49,11 +53,85 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	}
 }
 
+// ==================== Editor: Auto-assign GC when PropMesh changes ====================
+
+#if WITH_EDITOR
+void AEMFPhysicsProp::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName PropertyName = PropertyChangedEvent.GetMemberPropertyName();
+	if (PropertyName != GET_MEMBER_NAME_CHECKED(AEMFPhysicsProp, PropMesh))
+	{
+		return;
+	}
+
+	// PropMesh component changed — try to find a matching GC asset
+	if (!PropMesh || !PropMesh->GetStaticMesh())
+	{
+		PropGeometryCollection = nullptr;
+		return;
+	}
+
+	const UStaticMesh* Mesh = PropMesh->GetStaticMesh();
+	const FString MeshName = Mesh->GetName();
+	const FString MeshPackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
+	const FString GCName = FString::Printf(TEXT("GC_%s"), *MeshName);
+
+	// Search in the same folder as the mesh asset
+	const FString CandidatePath = FString::Printf(TEXT("%s/%s.%s"), *MeshPackagePath, *GCName, *GCName);
+
+	UGeometryCollection* FoundGC = LoadObject<UGeometryCollection>(nullptr, *CandidatePath);
+	if (FoundGC)
+	{
+		PropGeometryCollection = FoundGC;
+		UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Auto-assigned existing GC '%s'"), *GetName(), *GCName);
+		return;
+	}
+
+	// Not found — auto-create via batch creator
+	FGCCreationResult CreateResult = UGCBatchCreatorLibrary::CreateGCFromStaticMesh(
+		const_cast<UStaticMesh*>(Mesh), /*PieceCount=*/0, /*bOverwrite=*/false);
+
+	if (CreateResult.bSuccess && CreateResult.CreatedGC)
+	{
+		PropGeometryCollection = CreateResult.CreatedGC;
+		UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Auto-CREATED GC '%s' (%s)"),
+			*GetName(), *GCName, *CreateResult.Message);
+		return;
+	}
+
+	// Creation failed — use fallback
+	UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s: Could not create GC for '%s': %s"),
+		*GetName(), *MeshName, *CreateResult.Message);
+
+	PropGeometryCollection = FallbackGeometryCollection;
+}
+#endif
+
 // ==================== AActor Overrides ====================
 
 void AEMFPhysicsProp::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Runtime GC auto-lookup: if no GC assigned, try to find GC_{MeshName} in same folder
+	if (!PropGeometryCollection && PropMesh && PropMesh->GetStaticMesh())
+	{
+		const UStaticMesh* Mesh = PropMesh->GetStaticMesh();
+		const FString MeshPackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
+		const FString GCName = FString::Printf(TEXT("GC_%s"), *Mesh->GetName());
+		const FString CandidatePath = FString::Printf(TEXT("%s/%s.%s"), *MeshPackagePath, *GCName, *GCName);
+
+		if (UGeometryCollection* FoundGC = LoadObject<UGeometryCollection>(nullptr, *CandidatePath))
+		{
+			PropGeometryCollection = FoundGC;
+		}
+		else if (FallbackGeometryCollection)
+		{
+			PropGeometryCollection = FallbackGeometryCollection;
+		}
+	}
 
 	CurrentHP = MaxHP;
 
@@ -895,6 +973,11 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 
 void AEMFPhysicsProp::SpawnDestructionGC(const FVector& DestructionOrigin)
 {
+	UE_LOG(LogTemp, Warning, TEXT("SpawnDestructionGC [%s]: GC=%s, Mesh=%s"),
+		*GetName(),
+		PropGeometryCollection ? *PropGeometryCollection->GetName() : TEXT("NULL"),
+		(PropMesh && PropMesh->GetStaticMesh()) ? *PropMesh->GetStaticMesh()->GetName() : TEXT("NULL"));
+
 	if (!PropGeometryCollection || !PropMesh || !GetWorld())
 	{
 		return;
@@ -922,8 +1005,8 @@ void AEMFPhysicsProp::SpawnDestructionGC(const FVector& DestructionOrigin)
 		return;
 	}
 
-	// Match PropMesh scale
-	GCActor->SetActorScale3D(MeshTransform.GetScale3D());
+	// Note: GC geometry is at native mesh scale from AppendStaticMesh.
+	// Actor scale is (1,1,1) — no additional scaling needed.
 
 	// Collision: gibs should not push pawns or block camera
 	GCComp->SetCollisionProfileName(GibCollisionProfile);

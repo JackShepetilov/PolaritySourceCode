@@ -58,9 +58,15 @@ public:
 
 	/** Optional Geometry Collection for prop destruction.
 	 *  If assigned: GC actor spawns at PropMesh transform on death and shatters.
-	 *  If not assigned: current static mesh behavior (no destruction visual). */
+	 *  If not assigned: current static mesh behavior (no destruction visual).
+	 *  Auto-assigned when PropMesh changes in editor (searches for GC_{MeshName} in same folder). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction")
 	TObjectPtr<UGeometryCollection> PropGeometryCollection;
+
+	/** Fallback GC used when no matching GC_{MeshName} asset is found.
+	 *  Set this in BP_EMFProp defaults to your generic cube GC. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Destruction")
+	TObjectPtr<UGeometryCollection> FallbackGeometryCollection;
 
 	/** How long gib pieces persist before cleanup (seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0.5", ClampMax = "10.0"))
@@ -515,6 +521,10 @@ public:
 	// ==================== AActor Overrides ====================
 
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 
 protected:
 	virtual void BeginPlay() override;
