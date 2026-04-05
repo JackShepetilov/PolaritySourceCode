@@ -10,6 +10,7 @@
 #include "TimerManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
+#include "Engine/DataTable.h"
 
 void USubtitleSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -138,6 +139,153 @@ void USubtitleSubsystem::ShowSubtitleDirect(FText Text, float Duration, FText Sp
 	}
 }
 
+void USubtitleSubsystem::ShowSubtitleDirectWithSound(FText Text, float Duration, FText Speaker, USoundBase* Sound)
+{
+	if (Text.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: ShowSubtitleDirectWithSound called with empty text"));
+		return;
+	}
+
+	// Duration priority: DurationOverride > Sound duration > text estimate
+	if (Duration <= 0.0f && Sound)
+	{
+		Duration = Sound->GetDuration();
+	}
+	if (Duration <= 0.0f)
+	{
+		const int32 TextLength = Text.ToString().Len();
+		Duration = FMath::Max(2.0f, TextLength / 15.0f);
+	}
+
+	FSubtitleRequest Request(Text, Duration, Speaker, Sound);
+	SubtitleQueue.Add(Request);
+
+	if (!bSubtitleActive)
+	{
+		ProcessQueue();
+	}
+}
+
+bool USubtitleSubsystem::ShowSubtitleFromTable(UDataTable* DataTable, FName RowName)
+{
+	if (!DataTable)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: ShowSubtitleFromTable called with null DataTable"));
+		return false;
+	}
+
+	// Search by ID field, not row name
+	const FSubtitleEntry* Entry = nullptr;
+	TArray<FName> AllRowNames = DataTable->GetRowNames();
+	for (const FName& RN : AllRowNames)
+	{
+		const FSubtitleEntry* Row = DataTable->FindRow<FSubtitleEntry>(RN, TEXT("ShowSubtitleFromTable"));
+		if (Row && Row->ID == RowName)
+		{
+			Entry = Row;
+			break;
+		}
+	}
+
+	if (!Entry)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: Entry with ID '%s' not found in DataTable"), *RowName.ToString());
+		return false;
+	}
+
+	USoundBase* Sound = Entry->Sound.LoadSynchronous();
+
+	float Duration = Entry->DurationOverride;
+	if (Duration <= 0.0f && Sound)
+	{
+		Duration = Sound->GetDuration();
+	}
+	if (Duration <= 0.0f)
+	{
+		const int32 TextLength = Entry->Text.ToString().Len();
+		Duration = FMath::Max(2.0f, TextLength / 15.0f);
+	}
+
+	FSubtitleRequest Request(Entry->Text, Duration, Entry->Speaker, Sound);
+	SubtitleQueue.Add(Request);
+
+	if (!bSubtitleActive)
+	{
+		ProcessQueue();
+	}
+
+	return true;
+}
+
+void USubtitleSubsystem::ShowSubtitleSequence(UDataTable* DataTable, const FString& Prefix)
+{
+	if (!DataTable)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: ShowSubtitleSequence called with null DataTable"));
+		return;
+	}
+
+	TArray<FName> RowNames = DataTable->GetRowNames();
+	RowNames.Sort(FNameLexicalLess());
+
+	UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: ShowSubtitleSequence called with prefix '%s', %d total rows"), *Prefix, RowNames.Num());
+
+	// Collect matching entries sorted by ID
+	TArray<TPair<FName, const FSubtitleEntry*>> MatchedEntries;
+
+	int32 MatchCount = 0;
+	for (const FName& RowName : RowNames)
+	{
+		const FSubtitleEntry* Entry = DataTable->FindRow<FSubtitleEntry>(RowName, TEXT("ShowSubtitleSequence"));
+		if (!Entry)
+		{
+			continue;
+		}
+
+		if (!Entry->ID.ToString().StartsWith(Prefix))
+		{
+			continue;
+		}
+		MatchCount++;
+		MatchedEntries.Add(TPair<FName, const FSubtitleEntry*>(Entry->ID, Entry));
+	}
+
+	// Sort by ID string so beach_01 comes before beach_02
+	MatchedEntries.Sort([](const TPair<FName, const FSubtitleEntry*>& A, const TPair<FName, const FSubtitleEntry*>& B)
+	{
+		return A.Key.ToString() < B.Key.ToString();
+	});
+
+	for (const auto& Pair : MatchedEntries)
+	{
+		const FSubtitleEntry* Entry = Pair.Value;
+
+		USoundBase* Sound = Entry->Sound.LoadSynchronous();
+
+		float Duration = Entry->DurationOverride;
+		if (Duration <= 0.0f && Sound)
+		{
+			Duration = Sound->GetDuration();
+		}
+		if (Duration <= 0.0f)
+		{
+			const int32 TextLength = Entry->Text.ToString().Len();
+			Duration = FMath::Max(2.0f, TextLength / 15.0f);
+		}
+
+		FSubtitleRequest Request(Entry->Text, Duration, Entry->Speaker, Sound);
+		SubtitleQueue.Add(Request);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: Matched %d rows with prefix '%s', queue size now %d, bSubtitleActive=%d"), MatchCount, *Prefix, SubtitleQueue.Num(), bSubtitleActive);
+
+	if (!bSubtitleActive)
+	{
+		ProcessQueue();
+	}
+}
+
 void USubtitleSubsystem::HideAllSubtitles()
 {
 	// Clear the queue
@@ -216,6 +364,10 @@ void USubtitleSubsystem::ProcessQueue()
 
 void USubtitleSubsystem::DisplaySubtitle(const FSubtitleRequest& Request)
 {
+	UE_LOG(LogTemp, Warning, TEXT("SubtitleSubsystem: DisplaySubtitle - Text='%s', Speaker='%s', Duration=%.1f, WidgetClass=%s"),
+		*Request.Text.ToString(), *Request.Speaker.ToString(), Request.Duration,
+		SubtitleWidgetClass ? *SubtitleWidgetClass->GetName() : TEXT("NULL"));
+
 	USubtitleWidget* Widget = EnsureWidgetCreated();
 	if (!Widget)
 	{

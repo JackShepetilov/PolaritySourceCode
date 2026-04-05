@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ArenaWaveData.h"
+#include "Polarity/Checkpoint/CheckpointData.h"
 #include "ArenaManager.generated.h"
 
 class UBoxComponent;
@@ -21,6 +22,8 @@ class UGeometryCollection;
 class UNiagaraSystem;
 class AShooterDummy;
 class ARewardContainer;
+class UMusicTrackDataAsset;
+class UMusicPlayerSubsystem;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
@@ -108,6 +111,12 @@ public:
 	/** Where the player respawns if they die during this arena fight */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Respawn")
 	TSoftObjectPtr<AActor> PlayerRespawnPoint;
+
+	// ==================== Music ====================
+
+	/** Music track to play while the arena is active. Stops on completion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Music")
+	TObjectPtr<UMusicTrackDataAsset> ArenaMusicTrack;
 
 	// ==================== Reward Door ====================
 
@@ -294,6 +303,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Arena")
 	void ForceCompleteArena();
 
+	/** Manually activate the arena (use when entry triggers don't work in sublevel setups).
+	 *  Finds the player automatically. Does nothing if already active or completed. */
+	UFUNCTION(BlueprintCallable, Category = "Arena")
+	void ForceActivateArena();
+
+	/** Returns a copy of alive NPCs tracked by this arena (resolved from weak pointers). */
+	UFUNCTION(BlueprintPure, Category = "Arena")
+	TArray<AShooterNPC*> GetAliveNPCs() const;
+
+	/** Stop sustain mode from spawning replacement enemies. Used by finale sequence. */
+	UFUNCTION(BlueprintCallable, Category = "Arena")
+	void PauseSustainSpawning();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -478,8 +500,11 @@ private:
 
 	// ==================== Checkpoint ====================
 
-	/** Override checkpoint spawn transform to our respawn point */
+	/** Override checkpoint spawn transform to our respawn point (during arena) */
 	void SaveArenaCheckpoint(AShooterCharacter* Player);
+
+	/** Save a completion checkpoint at the arena respawn point (after arena cleared) */
+	void SaveCompletionCheckpoint();
 
 	// ==================== Runtime Data ====================
 

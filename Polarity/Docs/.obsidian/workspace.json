@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "CombatMechanics.md",
+                "file": "Lore.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "CombatMechanics"
+              "title": "Lore"
             }
           }
         ]
@@ -185,6 +185,7 @@
   },
   "active": "da563def76e2087c",
   "lastOpenFiles": [
+    "CombatMechanics.md",
     "CombatMechanics.md.tmp.83728.1773181718326",
     "CombatMechanics.md.tmp.83728.1773181377060",
     "CombatMechanics.md.tmp.83728.1773181327574",

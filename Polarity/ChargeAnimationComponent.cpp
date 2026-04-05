@@ -22,6 +22,7 @@
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
+#include "Variant_Shooter/Pickups/ScriptedPickup.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
 
@@ -72,6 +73,9 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	{
 		UpdatePlatePosition();
 	}
+
+	// Update beam VFX positions (capture/launch beams track plate and target)
+	UpdateBeamVFX();
 }
 
 // ==================== Input API ====================
@@ -117,6 +121,17 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 		if (ChannelingPlateActor)
 		{
 			ChannelingPlateActor->SetReverseMode(true);
+		}
+
+		// Launch VFX and delegate (after polarity flip)
+		if (CurrentCapturedNPC.IsValid())
+		{
+			SpawnLaunchVFX(CurrentCapturedNPC.Get());
+			StopHoldVFX();
+			if (ShooterCharacter)
+			{
+				ShooterCharacter->OnPropLaunched.Broadcast(CurrentCapturedNPC.Get());
+			}
 		}
 
 		// Re-attach captured target to the new plate (target stayed in knockback)
@@ -494,6 +509,11 @@ void UChargeAnimationComponent::ExitChanneling()
 			// UpgradePickup pull is self-contained — let it finish on its own
 			CurrentCapturedNPC.Reset();
 		}
+		else if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
+		{
+			// ScriptedPickup pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
 		if (ChannelingPlateActor)
 		{
 			ChannelingPlateActor->ClearCapturedNPC();
@@ -676,6 +696,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still pulling — don't re-search
 			}
 		}
+		// Check ScriptedPickup (pull is self-contained — just check if still in progress)
+		else if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
+		{
+			if (SPickup->IsBeingPulled())
+			{
+				return; // Still pulling — don't re-search
+			}
+		}
 		// Target was auto-released or is invalid — clear and search for new target
 		CurrentCapturedNPC.Reset();
 		if (ChannelingPlateActor)
@@ -725,7 +753,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup };
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, ScriptedPickup };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -944,6 +972,44 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		// Try ScriptedPickup (same logic as UpgradePickup)
+		if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(HitActor))
+		{
+			if (!SPickup->bCanBeCaptured || SPickup->IsBeingPulled() || SPickup->IsPullComplete())
+			{
+				continue;
+			}
+
+			const float PickupCharge = SPickup->GetCharge();
+			if (FMath::IsNearlyZero(PickupCharge))
+			{
+				continue;
+			}
+
+			const FVector ToTarget = SPickup->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float CaptureRange = SPickup->CalculateCaptureRange();
+			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = SPickup;
+				BestTargetType = ECaptureTargetType::ScriptedPickup;
+			}
+			continue;
+		}
+
 		// Try Physics Prop
 		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
 		{
@@ -994,6 +1060,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			break;
 		case ECaptureTargetType::UpgradePickup:
 			CaptureUpgradePickup(Cast<AUpgradePickup>(BestTarget));
+			break;
+		case ECaptureTargetType::ScriptedPickup:
+			CaptureScriptedPickup(Cast<AScriptedPickup>(BestTarget));
 			break;
 		default:
 			break;
@@ -1065,6 +1134,14 @@ void UChargeAnimationComponent::CaptureNPC(AShooterNPC* NPC)
 		}
 		Modifier->SetCapturedByPlate(ChannelingPlateActor);
 	}
+
+	// VFX and delegate
+	SpawnCaptureVFX(NPC);
+	SpawnHoldVFX();
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->OnPropCaptured.Broadcast(NPC);
+	}
 }
 
 void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
@@ -1088,6 +1165,14 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	CurrentCapturedNPC = Prop;
 	ChannelingPlateActor->SetCapturedNPC(Prop);
 	Prop->SetCapturedByPlate(ChannelingPlateActor);
+
+	// VFX and delegate
+	SpawnCaptureVFX(Prop);
+	SpawnHoldVFX();
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->OnPropCaptured.Broadcast(Prop);
+	}
 }
 
 void UChargeAnimationComponent::CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon)
@@ -1153,6 +1238,27 @@ void UChargeAnimationComponent::CaptureUpgradePickup(AUpgradePickup* Pickup)
 	CurrentCapturedNPC = Pickup;
 }
 
+void UChargeAnimationComponent::CaptureScriptedPickup(AScriptedPickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	// Start scripted pull (pickup manages its own interpolation in Tick)
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		Pickup->StartPull(ShooterChar);
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Pickup;
+}
+
 void UChargeAnimationComponent::CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate)
 {
 	if (!Plate || !ChannelingPlateActor)
@@ -1172,6 +1278,15 @@ void UChargeAnimationComponent::CaptureAcceleratorPlate(AEMFAcceleratorPlate* Pl
 
 void UChargeAnimationComponent::ReleaseCapturedNPC()
 {
+	StopHoldVFX();
+
+	// Stop beam VFX — target is being released
+	if (ActiveCaptureVFX)
+	{
+		ActiveCaptureVFX->DeactivateImmediate();
+		ActiveCaptureVFX = nullptr;
+	}
+
 	if (!CurrentCapturedNPC.IsValid())
 	{
 		return;
@@ -1203,6 +1318,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	else if (Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
 	{
 		// UpgradePickup pull is self-contained — no release action needed
+	}
+	else if (Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
+	{
+		// ScriptedPickup pull is self-contained — no release action needed
 	}
 
 	if (ChannelingPlateActor)
@@ -1272,6 +1391,13 @@ void UChargeAnimationComponent::CleanupChanneling()
 {
 	// Release any captured NPC first
 	ReleaseCapturedNPC();
+
+	// Safety: stop any lingering beam VFX
+	if (ActiveLaunchVFX)
+	{
+		ActiveLaunchVFX->DeactivateImmediate();
+		ActiveLaunchVFX = nullptr;
+	}
 
 	// Destroy any lingering plate
 	DestroyPlate();
@@ -1576,6 +1702,158 @@ void UChargeAnimationComponent::StopChargeVFX()
 	{
 		ActiveChargeFX->DeactivateImmediate();
 		ActiveChargeFX = nullptr;
+	}
+}
+
+// ==================== Channeling VFX ====================
+
+void UChargeAnimationComponent::SpawnCaptureVFX(AActor* CapturedTarget)
+{
+	if (!CapturedTarget || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// Stop previous capture VFX if still active
+	if (ActiveCaptureVFX)
+	{
+		ActiveCaptureVFX->DeactivateImmediate();
+		ActiveCaptureVFX = nullptr;
+	}
+
+	// Select VFX based on current polarity (before flip)
+	UNiagaraSystem* VFXToSpawn = (ChannelingChargeSign > 0) ? PositiveCaptureVFX : NegativeCaptureVFX;
+	if (!VFXToSpawn)
+	{
+		return;
+	}
+
+	const FVector SpawnLocation = ChannelingPlateActor->GetActorLocation() + CaptureVFXOffset;
+
+	ActiveCaptureVFX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(),
+		VFXToSpawn,
+		SpawnLocation,
+		FRotator::ZeroRotator,
+		CaptureVFXScale,
+		false  // bAutoDestroy — we track and clean up manually
+	);
+
+	if (ActiveCaptureVFX)
+	{
+		ActiveCaptureVFX->SetVariableVec3(FName("BeamEndPoint"), CapturedTarget->GetActorLocation());
+	}
+}
+
+void UChargeAnimationComponent::SpawnLaunchVFX(AActor* LaunchedTarget)
+{
+	if (!LaunchedTarget || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// Stop previous launch VFX if still active
+	if (ActiveLaunchVFX)
+	{
+		ActiveLaunchVFX->DeactivateImmediate();
+		ActiveLaunchVFX = nullptr;
+	}
+
+	// Select VFX based on NEW polarity (after flip: -ChannelingChargeSign)
+	const int32 NewSign = -ChannelingChargeSign;
+	UNiagaraSystem* VFXToSpawn = (NewSign > 0) ? PositiveLaunchVFX : NegativeLaunchVFX;
+	if (!VFXToSpawn)
+	{
+		return;
+	}
+
+	const FVector SpawnLocation = ChannelingPlateActor->GetActorLocation() + LaunchVFXOffset;
+
+	ActiveLaunchVFX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(),
+		VFXToSpawn,
+		SpawnLocation,
+		FRotator::ZeroRotator,
+		LaunchVFXScale,
+		false  // bAutoDestroy — we track and clean up manually
+	);
+
+	if (ActiveLaunchVFX)
+	{
+		ActiveLaunchVFX->SetVariableVec3(FName("BeamEndPoint"), LaunchedTarget->GetActorLocation());
+	}
+}
+
+void UChargeAnimationComponent::UpdateBeamVFX()
+{
+	// Update capture beam: plate → captured target
+	if (ActiveCaptureVFX)
+	{
+		if (!ActiveCaptureVFX->IsActive())
+		{
+			// Niagara system finished playing — clean up ref
+			ActiveCaptureVFX = nullptr;
+		}
+		else if (ChannelingPlateActor && CurrentCapturedNPC.IsValid())
+		{
+			ActiveCaptureVFX->SetWorldLocation(ChannelingPlateActor->GetActorLocation() + CaptureVFXOffset);
+			ActiveCaptureVFX->SetVariableVec3(FName("BeamEndPoint"), CurrentCapturedNPC->GetActorLocation());
+		}
+	}
+
+	// Update launch beam: plate → launched target
+	if (ActiveLaunchVFX)
+	{
+		if (!ActiveLaunchVFX->IsActive())
+		{
+			ActiveLaunchVFX = nullptr;
+		}
+		else if (ChannelingPlateActor && CurrentCapturedNPC.IsValid())
+		{
+			ActiveLaunchVFX->SetWorldLocation(ChannelingPlateActor->GetActorLocation() + LaunchVFXOffset);
+			ActiveLaunchVFX->SetVariableVec3(FName("BeamEndPoint"), CurrentCapturedNPC->GetActorLocation());
+		}
+	}
+}
+
+void UChargeAnimationComponent::SpawnHoldVFX()
+{
+	// Stop existing hold VFX first
+	StopHoldVFX();
+
+	if (!MeleeMesh)
+	{
+		return;
+	}
+
+	UNiagaraSystem* VFXToSpawn = (ChannelingChargeSign > 0) ? PositiveHoldVFX : NegativeHoldVFX;
+	if (!VFXToSpawn)
+	{
+		return;
+	}
+
+	ActiveHoldVFX = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		VFXToSpawn,
+		MeleeMesh,
+		HoldVFXSocket,
+		HoldVFXOffset,
+		FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false  // bAutoDestroy — we manage lifetime manually
+	);
+
+	if (ActiveHoldVFX)
+	{
+		ActiveHoldVFX->SetWorldScale3D(HoldVFXScale);
+	}
+}
+
+void UChargeAnimationComponent::StopHoldVFX()
+{
+	if (ActiveHoldVFX)
+	{
+		ActiveHoldVFX->DeactivateImmediate();
+		ActiveHoldVFX = nullptr;
 	}
 }
 

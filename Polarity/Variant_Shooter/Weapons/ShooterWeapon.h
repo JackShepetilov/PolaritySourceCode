@@ -331,6 +331,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float FireSoundVolume = 1.0f;
 
+	/** Sound played when trying to fire with insufficient charge (dry fire click) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX", meta = (EditCondition = "bUseChargeFiring"))
+	TObjectPtr<USoundBase> DryFireSound;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<USoundBase> ReflectionSound;
 

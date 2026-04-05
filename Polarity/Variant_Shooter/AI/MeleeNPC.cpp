@@ -603,8 +603,8 @@ void AMeleeNPC::UpdateAttackMagnetism(float DeltaTime)
 
 bool AMeleeNPC::CanDash() const
 {
-	// Нельзя рывок если мёртв, уже в рывке, в knockback или атакует
-	if (bIsDead || bIsDashing || bIsInKnockback || bIsAttacking)
+	// Нельзя рывок если мёртв, уже в рывке, в knockback, атакует или в воздухе
+	if (bIsDead || bIsDashing || bIsInKnockback || bIsAttacking || GetCharacterMovement()->IsFalling())
 	{
 		return false;
 	}

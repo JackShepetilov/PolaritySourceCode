@@ -2,6 +2,7 @@
 
 #include "ShooterSettingsSubsystem.h"
 #include "ShooterGameSettings.h"
+#include "Engine/World.h"
 
 void UShooterSettingsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -13,17 +14,43 @@ void UShooterSettingsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// Load settings on startup
 	LoadSettings();
 
+	// Bind to world initialization to apply audio/control settings when the world is ready
+	// (Subsystem initializes before the world exists, so we can't apply immediately)
+	WorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddUObject(
+		this, &UShooterSettingsSubsystem::OnWorldInitialized);
+
 	UE_LOG(LogTemp, Log, TEXT("ShooterSettingsSubsystem initialized"));
 }
 
 void UShooterSettingsSubsystem::Deinitialize()
 {
+	// Unbind world delegate
+	FWorldDelegates::OnPostWorldInitialization.Remove(WorldInitHandle);
+
 	// Save settings on shutdown
 	SaveSettings();
 
 	CachedSettings = nullptr;
 
 	Super::Deinitialize();
+}
+
+void UShooterSettingsSubsystem::OnWorldInitialized(UWorld* World, const UWorld::InitializationValues IVS)
+{
+	if (!World || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] World ready - applying all settings on startup"));
+
+	// Now that a game world exists, apply audio, controls, and gameplay settings
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		Settings->ApplyAudioSettings();
+		Settings->ApplyGameplaySettings();
+		Settings->ApplyControlSettings();
+	}
 }
 
 UShooterGameSettings* UShooterSettingsSubsystem::GetSettings() const

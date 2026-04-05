@@ -20,10 +20,12 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
 #include "Variant_Shooter/ShooterDoor.h"
+#include "ShooterCharacter.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 #if WITH_EDITOR
 #include "GCBatchCreatorLibrary.h"
@@ -78,34 +80,41 @@ void AEMFPhysicsProp::PostEditChangeProperty(FPropertyChangedEvent& PropertyChan
 	const FString MeshPackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
 	const FString GCName = FString::Printf(TEXT("GC_%s"), *MeshName);
 
-	// Search in the same folder as the mesh asset
-	const FString CandidatePath = FString::Printf(TEXT("%s/%s.%s"), *MeshPackagePath, *GCName, *GCName);
+	// Search for GC_{MeshName} in the same folder and all subfolders
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-	UGeometryCollection* FoundGC = LoadObject<UGeometryCollection>(nullptr, *CandidatePath);
+	TArray<FAssetData> FoundAssets;
+	AssetRegistry.GetAssetsByPath(FName(*MeshPackagePath), FoundAssets, /*bRecursive=*/true);
+
+	UGeometryCollection* FoundGC = nullptr;
+	for (const FAssetData& Asset : FoundAssets)
+	{
+		if (Asset.AssetName == FName(*GCName) && Asset.AssetClassPath == UGeometryCollection::StaticClass()->GetClassPathName())
+		{
+			FoundGC = Cast<UGeometryCollection>(Asset.GetAsset());
+			break;
+		}
+	}
+
 	if (FoundGC)
 	{
 		PropGeometryCollection = FoundGC;
-		UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Auto-assigned existing GC '%s'"), *GetName(), *GCName);
+		UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Auto-assigned GC '%s'"), *GetName(), *GCName);
 		return;
 	}
 
-	// Not found — auto-create via batch creator
-	FGCCreationResult CreateResult = UGCBatchCreatorLibrary::CreateGCFromStaticMesh(
-		const_cast<UStaticMesh*>(Mesh), /*PieceCount=*/0, /*bOverwrite=*/false);
-
-	if (CreateResult.bSuccess && CreateResult.CreatedGC)
+	// Not found — use fallback
+	if (FallbackGeometryCollection)
 	{
-		PropGeometryCollection = CreateResult.CreatedGC;
-		UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Auto-CREATED GC '%s' (%s)"),
-			*GetName(), *GCName, *CreateResult.Message);
-		return;
+		PropGeometryCollection = FallbackGeometryCollection;
+		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s: No GC '%s' found, using fallback"), *GetName(), *GCName);
 	}
-
-	// Creation failed — use fallback
-	UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s: Could not create GC for '%s': %s"),
-		*GetName(), *MeshName, *CreateResult.Message);
-
-	PropGeometryCollection = FallbackGeometryCollection;
+	else
+	{
+		PropGeometryCollection = nullptr;
+		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s: No GC '%s' found and no fallback set"), *GetName(), *GCName);
+	}
 }
 #endif
 
@@ -115,19 +124,27 @@ void AEMFPhysicsProp::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Runtime GC auto-lookup: if no GC assigned, try to find GC_{MeshName} in same folder
+	// Runtime GC auto-lookup: if no GC assigned, search for GC_{MeshName} in mesh folder + subfolders
 	if (!PropGeometryCollection && PropMesh && PropMesh->GetStaticMesh())
 	{
 		const UStaticMesh* Mesh = PropMesh->GetStaticMesh();
 		const FString MeshPackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
 		const FString GCName = FString::Printf(TEXT("GC_%s"), *Mesh->GetName());
-		const FString CandidatePath = FString::Printf(TEXT("%s/%s.%s"), *MeshPackagePath, *GCName, *GCName);
 
-		if (UGeometryCollection* FoundGC = LoadObject<UGeometryCollection>(nullptr, *CandidatePath))
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		TArray<FAssetData> FoundAssets;
+		AssetRegistryModule.Get().GetAssetsByPath(FName(*MeshPackagePath), FoundAssets, /*bRecursive=*/true);
+
+		for (const FAssetData& Asset : FoundAssets)
 		{
-			PropGeometryCollection = FoundGC;
+			if (Asset.AssetName == FName(*GCName) && Asset.AssetClassPath == UGeometryCollection::StaticClass()->GetClassPathName())
+			{
+				PropGeometryCollection = Cast<UGeometryCollection>(Asset.GetAsset());
+				break;
+			}
 		}
-		else if (FallbackGeometryCollection)
+
+		if (!PropGeometryCollection && FallbackGeometryCollection)
 		{
 			PropGeometryCollection = FallbackGeometryCollection;
 		}
@@ -179,6 +196,9 @@ void AEMFPhysicsProp::BeginPlay()
 
 void AEMFPhysicsProp::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	GetWorld()->GetTimerManager().ClearTimer(GCFreezeTimer);
+	GetWorld()->GetTimerManager().ClearTimer(GCCleanupTimer);
+
 	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
 		WidgetSub->UnregisterProp(this);
@@ -269,6 +289,26 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
 			{
 				bShouldApplyProximityDamping = true;
+				continue;
+			}
+		}
+
+		// LOS Shielding: skip sources blocked by geometry
+		if (bEnableLOSShielding)
+		{
+			FHitResult LOSHit;
+			FCollisionQueryParams LOSParams(SCENE_QUERY_STAT(EMF_LOS), true, this);
+			bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+				LOSHit, Position, Source.Position, LOSTraceChannel, LOSParams);
+
+			if (bDrawLOSDebug)
+			{
+				DrawDebugLine(GetWorld(), Position, Source.Position,
+					bBlocked ? FColor::Red : FColor::Green, false, -1.0f, 0, 0.5f);
+			}
+
+			if (bBlocked)
+			{
 				continue;
 			}
 		}
@@ -445,13 +485,11 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 	bHasPreviousPlatePosition = false;
 	bReverseLaunchInitialized = false;
 
-	// Teleport prop to plate center and zero velocity — prop must START at plate position
-	// so spring/damping work from zero offset, and reverse launch fires in correct direction
+	// Let spring/damping pull the prop smoothly to plate center (no teleport).
+	// Only zero out velocity so the prop doesn't overshoot on first capture.
 	if (PropMesh && PropMesh->IsSimulatingPhysics())
 	{
-		const FVector PlatePos = Plate->GetActorLocation();
 		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
-		SetActorLocation(PlatePos);
 
 		// Switch to Overlap with Pawns: no physics impulse while captured near player
 		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
@@ -621,6 +659,13 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 
 			const float LaunchDistance = EffectiveCaptureRange * ReverseLaunchDistanceMultiplier;
 			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
+
+			// Apply spin on launch
+			if (ReverseLaunchSpinSpeed > 0.0f && PropMesh)
+			{
+				const FVector RandomAxis = FMath::VRand();
+				PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * ReverseLaunchSpinSpeed);
+			}
 		}
 
 		ReverseLaunchElapsed += DeltaTime;
@@ -659,6 +704,27 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 	}
 	else
 	{
+		// Pull-in phase: smooth interp to plate center before switching to spring/damping
+		if (!bReverseLaunchInitialized)
+		{
+			const float DistToPlate = FVector::Dist(Position, PlatePos);
+			if (DistToPlate < CapturePullInSnapDistance)
+			{
+				// Close enough — snap and switch to spring/damping
+				bReverseLaunchInitialized = true;
+				PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+				SetActorLocation(PlatePos);
+			}
+			else
+			{
+				// Exponential ease toward plate center
+				const FVector NewPos = FMath::VInterpTo(Position, PlatePos, DeltaTime, CapturePullInInterpSpeed);
+				SetActorLocation(NewPos);
+				PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+				return;
+			}
+		}
+
 		// Normal capture: damp all relative velocity
 		const float DampingFactor = 1.0f - FMath::Exp(-ViscosityCoefficient * CaptureStrength * DeltaTime);
 		const FVector DampingForce = -RelativeVelocity * DampingFactor * PhysMass / FMath::Max(DeltaTime, SMALL_NUMBER);
@@ -859,7 +925,8 @@ float AEMFPhysicsProp::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 		DamageEvent.DamageTypeClass ? *DamageEvent.DamageTypeClass->GetName() : TEXT("NULL"));
 
 	// No chain reaction: ignore all damage from other props (charge distribution happens in Explode)
-	if (Cast<AEMFPhysicsProp>(DamageCauser) && DamageCauser != this)
+	// Exception: bAllowChainReaction lets specific props be destroyed by nearby explosions
+	if (Cast<AEMFPhysicsProp>(DamageCauser) && DamageCauser != this && !bAllowChainReaction)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: Ignoring damage from prop %s (no chain reaction)"), *GetName(), *DamageCauser->GetName());
 		return 0.0f;
@@ -953,6 +1020,7 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 	}
 
 	bIsDead = true;
+	SetCharge(0.0f);
 	SetActorTickEnabled(false);
 	OnPropDeath.Broadcast(this, Killer);
 
@@ -1040,32 +1108,69 @@ void AEMFPhysicsProp::SpawnDestructionGC(const FVector& DestructionOrigin)
 		EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
 		nullptr, StrainField);
 
-	// Scatter pieces radially from destruction origin
+	// Scatter pieces radially from destruction origin (scaled by charge for explosions)
 	URadialVector* RadialVelocity = NewObject<URadialVector>(GCActor);
-	RadialVelocity->Magnitude = DestructionImpulse;
+	RadialVelocity->Magnitude = DestructionImpulse * CachedChargeScale;
 	RadialVelocity->Position = DestructionOrigin;
 	GCComp->ApplyPhysicsField(true,
 		EGeometryCollectionPhysicsTypeEnum::Chaos_LinearVelocity,
 		nullptr, RadialVelocity);
 
-	// Angular velocity for tumbling
+	// Angular velocity for tumbling (scaled by charge for explosions)
 	URadialVector* AngularVelocity = NewObject<URadialVector>(GCActor);
-	AngularVelocity->Magnitude = DestructionAngularImpulse;
+	AngularVelocity->Magnitude = DestructionAngularImpulse * CachedChargeScale;
 	AngularVelocity->Position = DestructionOrigin;
 	GCComp->ApplyPhysicsField(true,
 		EGeometryCollectionPhysicsTypeEnum::Chaos_AngularVelocity,
 		nullptr, AngularVelocity);
 
-	// GC actor self-destructs after lifetime
-	GCActor->SetLifeSpan(GibLifetime);
+	// Cache reference for freeze/cleanup
+	SpawnedGCActor = GCActor;
+
+	// Phase 1: after GibPhysicsLifetime, freeze gibs (disable physics + collision)
+	GetWorld()->GetTimerManager().SetTimer(GCFreezeTimer, this, &AEMFPhysicsProp::FreezeGibs, GibPhysicsLifetime, false);
+
+	// Phase 2: if GibVisualLifetime > 0, destroy the frozen gibs after additional time
+	if (GibVisualLifetime > 0.0f)
+	{
+		GCActor->SetLifeSpan(GibPhysicsLifetime + GibVisualLifetime);
+	}
+	// else: gibs persist forever as cheap static visuals
 
 	// Hide PropMesh (GC gibs replace it visually)
 	PropMesh->SetVisibility(false);
 	PropMesh->SetSimulatePhysics(false);
 	PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: GC destruction spawned, impulse=%.0f, lifetime=%.1fs"),
-		*GetName(), DestructionImpulse, GibLifetime);
+	UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: GC destruction spawned, impulse=%.0f (chargeScale=%.2f), physicsTime=%.1fs, visualTime=%.1fs"),
+		*GetName(), DestructionImpulse * CachedChargeScale, CachedChargeScale, GibPhysicsLifetime,
+		GibVisualLifetime > 0.0f ? GibVisualLifetime : -1.0f);
+}
+
+void AEMFPhysicsProp::FreezeGibs()
+{
+	AGeometryCollectionActor* GCActor = SpawnedGCActor.Get();
+	if (!GCActor)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* GCComp = GCActor->GetGeometryCollectionComponent();
+	if (!GCComp)
+	{
+		return;
+	}
+
+	// Don't hard-freeze (SetSimulatePhysics(false)) — that leaves airborne pieces floating.
+	// Instead: strip all collision except WorldStatic so pieces can only rest on floors/walls.
+	// High linear damping makes them settle quickly. Chaos auto-sleeps stationary bodies,
+	// and sleeping rigid bodies cost near-zero (no solver iterations, no broadphase).
+	GCComp->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+	GCComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+	GCComp->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+	GCComp->SetAngularDamping(5.0f);
+
+	UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Gibs settling (collision stripped to WorldStatic, high damping)"), *GetName());
 }
 
 // ==================== Explosive Impact ====================
@@ -1080,12 +1185,42 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 	bHasExploded = true;
 	bIsInReverseFlight = false;
 
-	const FVector ExplosionLocation = GetActorLocation();
-	const float FinalDamage = ExplosionDamage * DamageMultiplier;
-	const float FinalRadius = ExplosionRadius * RadiusMultiplier;
-	const float FinalVFXScale = ExplosionVFXScale * VFXScaleMultiplier;
+	// Charge-proportionate scaling: scale = |charge| / referenceCharge, clamped
+	float ChargeScale = 1.0f;
+	if (bScaleExplosionWithCharge)
+	{
+		const float AbsCharge = FMath::Abs(GetCharge());
+		ChargeScale = FMath::Clamp(AbsCharge / ExplosionReferenceCharge, MinChargeScale, MaxChargeScale);
+	}
+	CachedChargeScale = ChargeScale;
 
-	// Radial damage
+	const FVector ExplosionLocation = GetActorLocation();
+	const float FinalDamage = ExplosionDamage * DamageMultiplier * ChargeScale;
+	const float FinalRadius = ExplosionRadius * RadiusMultiplier;
+	const float FinalVFXScale = ExplosionVFXScale * VFXScaleMultiplier * ChargeScale;
+
+	// LOS check: trace from explosion origin to target, blocking on static world geometry only
+	FCollisionQueryParams LOSParams;
+	LOSParams.AddIgnoredActor(this);
+	LOSParams.bTraceComplex = false;
+	auto HasLineOfSight = [&](const AActor* Target) -> bool
+	{
+		if (!Target)
+		{
+			return false;
+		}
+		FHitResult LOSHit;
+		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+			LOSHit, ExplosionLocation, Target->GetActorLocation(),
+			ECC_Visibility, LOSParams);
+		// Not blocked, or the trace hit the target itself = has LOS
+		return !bBlocked || LOSHit.GetActor() == Target;
+	};
+
+	// Radial damage (manual per-actor with LOS) + impact tracking for delegate
+	float ImpactTotalDamage = 0.0f;
+	int32 ImpactKillCount = 0;
+
 	if (FinalDamage > 0.0f && FinalRadius > 0.0f)
 	{
 		TSubclassOf<UDamageType> DamageClass = ExplosionDamageType;
@@ -1094,29 +1229,76 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			DamageClass = UDamageType::StaticClass();
 		}
 
-		TArray<AActor*> IgnoredActors;
-		IgnoredActors.Add(this);
-		if (APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0))
-		{
-			IgnoredActors.Add(PlayerPawn);
-		}
+		TArray<FOverlapResult> DamageOverlaps;
+		FCollisionShape DamageSphere = FCollisionShape::MakeSphere(FinalRadius);
+		FCollisionQueryParams DamageQueryParams;
+		DamageQueryParams.AddIgnoredActor(this);
 
-		UGameplayStatics::ApplyRadialDamageWithFalloff(
-			GetWorld(),
-			FinalDamage,
-			FinalDamage * 0.1f,  // MinimumDamage = 10% at edge
-			ExplosionLocation,
-			FinalRadius * 0.3f,  // DamageInnerRadius (full damage zone)
-			FinalRadius,         // DamageOuterRadius
-			ExplosionDamageFalloff,
-			DamageClass,
-			IgnoredActors,
-			this,               // DamageCauser
-			nullptr             // InstigatedBy
-		);
+		GetWorld()->OverlapMultiByChannel(
+			DamageOverlaps, ExplosionLocation, FQuat::Identity,
+			ECC_Pawn, DamageSphere, DamageQueryParams);
+
+		TSet<AActor*> DamagedActors;
+		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+
+		for (const FOverlapResult& Overlap : DamageOverlaps)
+		{
+			AActor* HitActor = Overlap.GetActor();
+			if (!HitActor || HitActor == PlayerPawn || DamagedActors.Contains(HitActor))
+			{
+				continue;
+			}
+			DamagedActors.Add(HitActor);
+
+			if (!HasLineOfSight(HitActor))
+			{
+				continue;
+			}
+
+			const float Distance = FVector::Dist(ExplosionLocation, HitActor->GetActorLocation());
+			const float InnerRadius = FinalRadius * 0.3f;
+
+			// Falloff: full damage within inner radius, then power-curve falloff to edge
+			float DamageAlpha;
+			if (Distance <= InnerRadius)
+			{
+				DamageAlpha = 1.0f;
+			}
+			else
+			{
+				const float T = FMath::Clamp((Distance - InnerRadius) / (FinalRadius - InnerRadius), 0.0f, 1.0f);
+				DamageAlpha = FMath::Lerp(1.0f, 0.1f, FMath::Pow(T, ExplosionDamageFalloff));
+			}
+
+			const float ActorDamage = FinalDamage * DamageAlpha;
+
+			// Track NPC state before damage for kill detection
+			AShooterNPC* HitNPC = Cast<AShooterNPC>(HitActor);
+			const bool bWasAlive = HitNPC && !HitNPC->IsDead();
+
+			UGameplayStatics::ApplyDamage(HitActor, ActorDamage, nullptr, this, DamageClass);
+
+			if (bWasAlive)
+			{
+				ImpactTotalDamage += ActorDamage;
+				if (HitNPC->IsDead())
+				{
+					ImpactKillCount++;
+				}
+			}
+		}
 	}
 
-	// Explosion impulse: push characters and physics bodies
+	// Broadcast prop impact delegate to player character
+	if (ImpactTotalDamage > 0.0f)
+	{
+		if (AShooterCharacter* Player = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)))
+		{
+			Player->OnPropImpact.Broadcast(this, ImpactTotalDamage, ImpactKillCount);
+		}
+	}
+
+	// Explosion impulse: push characters and physics bodies (with LOS)
 	if (bApplyExplosionImpulse && FinalRadius > 0.0f)
 	{
 		TArray<FOverlapResult> Overlaps;
@@ -1147,6 +1329,11 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			}
 			ProcessedActors.Add(HitActor);
 
+			if (!HasLineOfSight(HitActor))
+			{
+				continue;
+			}
+
 			const FVector ToTarget = HitActor->GetActorLocation() - ExplosionLocation;
 			const float Distance = ToTarget.Size();
 
@@ -1172,7 +1359,7 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
 			if (HitCharacter)
 			{
-				const FVector LaunchVelocity = ImpulseDir * ExplosionImpulseStrength * FalloffAlpha * DamageMultiplier;
+				const FVector LaunchVelocity = ImpulseDir * ExplosionImpulseStrength * FalloffAlpha * DamageMultiplier * ChargeScale;
 				HitCharacter->LaunchCharacter(LaunchVelocity, false, true);
 				continue;
 			}
@@ -1181,13 +1368,13 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			UPrimitiveComponent* HitComp = Overlap.GetComponent();
 			if (HitComp && HitComp->IsSimulatingPhysics())
 			{
-				const FVector Impulse = ImpulseDir * ExplosionPhysicsImpulse * FalloffAlpha * DamageMultiplier;
+				const FVector Impulse = ImpulseDir * ExplosionPhysicsImpulse * FalloffAlpha * DamageMultiplier * ChargeScale;
 				HitComp->AddImpulse(Impulse);
 			}
 		}
 	}
 
-	// Stun nearby NPCs
+	// Stun nearby NPCs (with LOS)
 	if (bApplyExplosionStun && FinalRadius > 0.0f)
 	{
 		TArray<FOverlapResult> StunOverlaps;
@@ -1210,8 +1397,14 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			}
 			StunnedNPCs.Add(NPC);
 
-			NPC->ApplyExplosionStun(ExplosionStunDuration, ExplosionStunMontage);
-			OnNPCStunnedByExplosion.Broadcast(NPC, this, ExplosionStunDuration);
+			if (!HasLineOfSight(NPC))
+			{
+				continue;
+			}
+
+			const float FinalStunDuration = ExplosionStunDuration * ChargeScale;
+			NPC->ApplyExplosionStun(FinalStunDuration, ExplosionStunMontage);
+			OnNPCStunnedByExplosion.Broadcast(NPC, this, FinalStunDuration);
 		}
 	}
 
@@ -1271,8 +1464,8 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 
 	if (bLogEMForces)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s EXPLODED: Damage=%.0f Radius=%.0f VFXScale=%.1f (multipliers: %.1fx/%.1fx/%.1fx)"),
-			*GetName(), FinalDamage, FinalRadius, FinalVFXScale, DamageMultiplier, RadiusMultiplier, VFXScaleMultiplier);
+		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s EXPLODED: Damage=%.0f Radius=%.0f VFXScale=%.1f ChargeScale=%.2f (multipliers: %.1fx/%.1fx/%.1fx)"),
+			*GetName(), FinalDamage, FinalRadius, FinalVFXScale, ChargeScale, DamageMultiplier, RadiusMultiplier, VFXScaleMultiplier);
 	}
 
 	// Check for breakable doors within explosion radius
@@ -1320,8 +1513,18 @@ void AEMFPhysicsProp::ResetProp()
 	bHasExploded = false;
 	bIsInReverseFlight = false;
 	CachedPreCollisionSpeed = 0.0f;
+	CachedChargeScale = 1.0f;
 	CurrentHP = MaxHP;
 	SetActorTickEnabled(true);
+
+	// Clean up any existing GC gibs from previous death
+	GetWorld()->GetTimerManager().ClearTimer(GCFreezeTimer);
+	GetWorld()->GetTimerManager().ClearTimer(GCCleanupTimer);
+	if (AGeometryCollectionActor* OldGC = SpawnedGCActor.Get())
+	{
+		OldGC->Destroy();
+		SpawnedGCActor.Reset();
+	}
 
 	// Release from capture if held
 	if (CapturingPlate.IsValid())

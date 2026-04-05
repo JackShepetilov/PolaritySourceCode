@@ -193,6 +193,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
 	float OppositeChargeProximityDamping = 10.0f;
 
+	// ==================== Line-of-Sight Shielding ====================
+
+	/** Enable line-of-sight check: sources behind walls/geometry are ignored.
+	 *  Uses a single-line trace per source. Only sources that pass distance culling are checked. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding")
+	bool bEnableLOSShielding = false;
+
+	/** Trace channel for LOS checks. Use Visibility for simple wall blocking,
+	 *  or a custom channel for fine-grained control over what blocks EMF. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
+	TEnumAsByte<ECollisionChannel> LOSTraceChannel = ECC_Visibility;
+
+	/** Draw debug lines for LOS traces (green = visible, red = blocked) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
+	bool bDrawLOSDebug = false;
+
 	// ==================== Debug ====================
 
 	/** Рисовать debug стрелки для сил и полей */

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UpgradeDefinition.h"
+#include "Sound/SoundBase.h"
 #include "UpgradeDefinition_SuppressionFire.generated.h"
 
 /**
@@ -44,4 +45,36 @@ public:
 	 *  Each stack adds: Duration / (1 + StackCount * Factor) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float DiminishingReturnsFactor = 0.5f;
+
+	// ==================== Sound ====================
+
+	/** Sound played on the enemy when Plot Armor activates.
+	 *  Volume, pitch and reverb are scaled by player speed at the moment of the hit. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound")
+	TObjectPtr<USoundBase> SuppressionSound = nullptr;
+
+	/** Volume multiplier at minimum speed */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float SoundVolumeMin = 0.4f;
+
+	/** Volume multiplier at maximum speed */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float SoundVolumeMax = 1.0f;
+
+	/** Pitch multiplier at minimum speed */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound", meta = (ClampMin = "0.1", ClampMax = "4.0"))
+	float SoundPitchMin = 0.8f;
+
+	/** Pitch multiplier at maximum speed */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound", meta = (ClampMin = "0.1", ClampMax = "4.0"))
+	float SoundPitchMax = 1.2f;
+
+	/** Reverb send level at minimum speed (0.0 = dry, 1.0 = fully wet).
+	 *  Requires the Sound Cue to have a float parameter named "ReverbSend". */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SoundReverbMin = 0.0f;
+
+	/** Reverb send level at maximum speed. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Suppression Fire|Sound", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SoundReverbMax = 0.6f;
 };

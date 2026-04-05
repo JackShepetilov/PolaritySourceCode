@@ -6,10 +6,10 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "SubtitleTypes.h"
+#include "SubtitleWidget.h"
 #include "SubtitleSubsystem.generated.h"
 
 class USubtitleDataAsset;
-class USubtitleWidget;
 
 // ==================== Delegates ====================
 
@@ -90,6 +90,34 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Subtitle")
 	void ShowSubtitleDirect(FText Text, float Duration, FText Speaker = FText());
+
+	/**
+	 * Queue a subtitle directly with optional 2D sound playback.
+	 * @param Text - Text to display
+	 * @param Duration - How long to show (seconds)
+	 * @param Speaker - Optional speaker name
+	 * @param Sound - Optional sound to play when subtitle starts
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Subtitle", meta = (DisplayName = "Show Subtitle Direct With Sound"))
+	void ShowSubtitleDirectWithSound(FText Text, float Duration, FText Speaker, USoundBase* Sound);
+
+	/**
+	 * Queue a single subtitle from a DataTable by row name.
+	 * @param DataTable - The DataTable with SubtitleEntry rows
+	 * @param RowName - The exact row name (e.g., "tut_01")
+	 * @return True if row was found and queued
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Subtitle")
+	bool ShowSubtitleFromTable(UDataTable* DataTable, FName RowName);
+
+	/**
+	 * Queue all subtitles from a DataTable whose row names start with a given prefix.
+	 * Rows are played in alphabetical order (use zero-padded names like beach_01, beach_02).
+	 * @param DataTable - The DataTable with SubtitleEntry rows
+	 * @param Prefix - Row name prefix to filter (e.g., "beach" matches "beach_01", "beach_02", etc.)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Subtitle")
+	void ShowSubtitleSequence(UDataTable* DataTable, const FString& Prefix);
 
 	/**
 	 * Immediately hide the current subtitle and clear the queue.

@@ -55,6 +55,7 @@ void UApexMovementComponent::InitializeComponent()
 		// Also set CrouchedHalfHeight from settings
 		SetCrouchedHalfHeight(MovementSettings->CrouchingCapsuleHalfHeight);
 
+		GravityScale = MovementSettings->DefaultGravityScale;
 		JumpZVelocity = MovementSettings->JumpZVelocity;
 		MaxWalkSpeed = MovementSettings->WalkSpeed;
 		MaxWalkSpeedCrouched = MovementSettings->CrouchSpeed;
@@ -1062,6 +1063,11 @@ bool UApexMovementComponent::IsValidWallRunSurface(const FHitResult& Hit) const
 		return false;
 	}
 
+	if (Hit.GetActor() && Hit.GetActor()->ActorHasTag(FName("NoWallRun")))
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -1175,6 +1181,9 @@ void UApexMovementComponent::StartWallRun(const FHitResult& WallHit, EWallSide S
 	WallRunNormal = WallHit.Normal;
 	WallRunDirection = WallDirection;
 
+	// Apply wallrun gravity scale
+	GravityScale = MovementSettings->WallRunGravityScale;
+
 	// Titanfall 2 style: track elapsed time, entry speed, calculate peak
 	WallRunElapsedTime = 0.0f;
 	WallRunEntrySpeed = ParallelSpeed;
@@ -1217,6 +1226,8 @@ void UApexMovementComponent::EndWallRun(EWallRunEndReason Reason)
 
 	if (MovementSettings)
 	{
+		// Restore default gravity
+		GravityScale = MovementSettings->DefaultGravityScale;
 		WallRunSameWallCooldown = MovementSettings->WallRunSameWallCooldown;
 	}
 

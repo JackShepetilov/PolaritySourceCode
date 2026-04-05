@@ -186,21 +186,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
 	float MinOrbitSpaceThreshold = 400.0f;
 
-	/** Speed during positioning phase — flying to frontal attack point (cm/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning")
-	float PositioningSpeed = 1000.0f;
-
-	/** Turn rate during positioning (degrees/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning")
-	float PositioningTurnRate = 120.0f;
-
-	/** Distance threshold to frontal point to begin telegraph (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning", meta = (ClampMin = "50"))
-	float PositioningArrivalThreshold = 200.0f;
-
-	/** Max time in positioning before forced telegraph even if not at target (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning", meta = (ClampMin = "0.5"))
-	float PositioningMaxTime = 3.0f;
+	/** Duration of positioning Bezier transition (seconds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning", meta = (ClampMin = "0.3", ClampMax = "3.0"))
+	float PositioningDuration = 0.8f;
 
 	// ==================== Strafe Settings ====================
 
@@ -377,6 +365,7 @@ protected:
 	// ==================== Overrides from ShooterNPC ====================
 
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+	virtual UMeshComponent* GetHitFlashMeshComponent() const override;
 	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
 	virtual void EndKnockbackStun() override;
 	virtual void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit) override;
@@ -569,6 +558,22 @@ protected:
 
 	/** If true, attack was triggered by retaliation (bypasses token) */
 	bool bIsRetaliating = false;
+
+	// ==================== Positioning Bezier State ====================
+	// Cubic Bezier from orbit to frontal attack point.
+	// P0, P1 are fixed at start. P3 (target) updates dynamically each frame.
+
+	/** Position at start of positioning */
+	FVector PositioningStartPos = FVector::ZeroVector;
+
+	/** P1 control point (orbit tangent pull, fixed at start) */
+	FVector PositioningP1 = FVector::ZeroVector;
+
+	/** Previous frame position for virtual velocity calculation */
+	FVector PositioningPrevPos = FVector::ZeroVector;
+
+	/** Orbit tangent direction at positioning start (for P1 calculation) */
+	FVector PositioningOrbitTangent = FVector::ForwardVector;
 
 	// ==================== Telegraph Phantom Lerp ====================
 	// Two "ghost" drones are simulated: one continues orbiting, one snaps to attack.

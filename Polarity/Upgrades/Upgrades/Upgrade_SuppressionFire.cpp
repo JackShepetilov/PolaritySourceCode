@@ -5,8 +5,13 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "ShooterNPC.h"
+#include "MeleeNPC.h"
+#include "KamikazeDroneNPC.h"
+#include "SniperTurretNPC.h"
 #include "AIAccuracyComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Components/AudioComponent.h"
 
 UUpgrade_SuppressionFire::UUpgrade_SuppressionFire()
 {
@@ -39,6 +44,12 @@ void UUpgrade_SuppressionFire::OnOwnerDealtDamage(AActor* Target, float Damage, 
 	// Only affects ShooterNPC and subclasses (FlyingDrone, SniperTurret, etc.)
 	AShooterNPC* NPC = Cast<AShooterNPC>(Target);
 	if (!NPC)
+	{
+		return;
+	}
+
+	// Exclude enemies that don't use ranged accuracy: melee fighters, kamikaze drones, turrets
+	if (NPC->IsA<AMeleeNPC>() || NPC->IsA<AKamikazeDroneNPC>() || NPC->IsA<ASniperTurretNPC>())
 	{
 		return;
 	}
@@ -81,8 +92,34 @@ void UUpgrade_SuppressionFire::OnOwnerDealtDamage(AActor* Target, float Damage, 
 		return;
 	}
 
+	// Remember whether suppression was already active before we apply it
+	const bool bWasAlreadySuppressed = AccuracyComp->IsSuppressed();
+
 	// Apply suppression with configured diminishing returns
 	AccuracyComp->ApplySuppression(Duration, DefSuppression->DiminishingReturnsFactor);
+
+	// Play Plot Armor sound only on fresh application, not on extension
+	if (DefSuppression->SuppressionSound && !bWasAlreadySuppressed)
+	{
+		const float Volume = FMath::Lerp(DefSuppression->SoundVolumeMin, DefSuppression->SoundVolumeMax, SpeedFactor);
+		const float Pitch  = FMath::Lerp(DefSuppression->SoundPitchMin,  DefSuppression->SoundPitchMax,  SpeedFactor);
+		const float Reverb = FMath::Lerp(DefSuppression->SoundReverbMin, DefSuppression->SoundReverbMax, SpeedFactor);
+
+		if (UAudioComponent* AudioComp = UGameplayStatics::SpawnSoundAttached(
+			DefSuppression->SuppressionSound,
+			NPC->GetRootComponent(),
+			NAME_None,
+			FVector::ZeroVector,
+			EAttachLocation::KeepRelativeOffset,
+			/*bStopWhenAttachedToDestroyed=*/ true,
+			Volume,
+			Pitch))
+		{
+			// ReverbSend is a named float parameter in the Sound Cue.
+			// Add a "Float Parameter" node named "ReverbSend" and route it to the reverb submix send level.
+			AudioComp->SetFloatParameter(FName("ReverbSend"), Reverb);
+		}
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("Suppression Fire: Applied %.2fs suppression to %s (player speed: %.0f cm/s, factor: %.2f)"),
 		Duration, *NPC->GetName(), PlayerSpeed, SpeedFactor);

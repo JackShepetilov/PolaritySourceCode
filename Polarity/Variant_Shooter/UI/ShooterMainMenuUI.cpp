@@ -54,9 +54,6 @@ void UShooterMainMenuUI::OpenSettings()
 		OptionsMenuWidget->SetVisibility(ESlateVisibility::Visible);
 	}
 
-	// Hide main menu while options are open
-	SetVisibility(ESlateVisibility::Hidden);
-
 	// Broadcast event for Blueprint to handle any additional setup
 	BP_OnOpenSettings();
 }
@@ -109,10 +106,6 @@ void UShooterMainMenuUI::CloseOptionsMenu()
 		OptionsMenuWidget->OnOptionsMenuClosed.RemoveDynamic(this, &UShooterMainMenuUI::OnOptionsMenuClosedHandler);
 		OptionsMenuWidget->RemoveFromParent();
 		OptionsMenuWidget = nullptr;
-
-		// Show main menu again
-		SetVisibility(ESlateVisibility::Visible);
-
 		BP_OnSettingsClosed();
 	}
 }
@@ -121,9 +114,5 @@ void UShooterMainMenuUI::OnOptionsMenuClosedHandler()
 {
 	// Options menu closed itself via Back button
 	OptionsMenuWidget = nullptr;
-
-	// Show main menu again
-	SetVisibility(ESlateVisibility::Visible);
-
 	BP_OnSettingsClosed();
 }

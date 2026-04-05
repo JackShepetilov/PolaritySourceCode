@@ -2262,16 +2262,15 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 	// Teleport to spawn point and set view rotation
 	SetActorTransform(Data.SpawnTransform);
 
-	// Set controller rotation to match checkpoint direction (add 180 to face forward from checkpoint)
+	// Set controller rotation to match checkpoint direction
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		FRotator SpawnRotation = Data.SpawnTransform.GetRotation().Rotator();
-		SpawnRotation.Yaw += 180.0f;
 		PC->SetControlRotation(SpawnRotation);
 	}
 
-	// Restore health (per requirements: restore HP on respawn)
-	CurrentHP = Data.Health;
+	// Restore health to maximum on respawn
+	CurrentHP = MaxHP;
 
 	// Restore armor
 	CurrentArmor = Data.Armor;
@@ -2968,7 +2967,7 @@ void AShooterCharacter::UpdateBossFinisher(float DeltaTime)
 				// Re-enable gravity
 				if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 				{
-					Movement->GravityScale = 1.0f;
+					Movement->GravityScale = MovementSettings ? MovementSettings->DefaultGravityScale : 1.5f;
 					Movement->SetMovementMode(MOVE_Falling);
 				}
 
@@ -3031,7 +3030,7 @@ void AShooterCharacter::EndBossFinisher()
 	// Restore normal movement
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
-		Movement->GravityScale = 1.0f;
+		Movement->GravityScale = MovementSettings ? MovementSettings->DefaultGravityScale : 1.5f;
 		if (!Movement->IsMovingOnGround())
 		{
 			Movement->SetMovementMode(MOVE_Falling);

@@ -18,6 +18,7 @@ class USoundBase;
 class UMaterialInterface;
 class UAnimMontage;
 class UGeometryCollection;
+class AGeometryCollectionActor;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropDeath, AEMFPhysicsProp*, Prop, AActor*, Killer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropDamaged, AEMFPhysicsProp*, Prop, float, Damage, AActor*, DamageCauser);
@@ -68,9 +69,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Destruction")
 	TObjectPtr<UGeometryCollection> FallbackGeometryCollection;
 
-	/** How long gib pieces persist before cleanup (seconds) */
+	/** How long gibs simulate physics before freezing in place (seconds).
+	 *  After this time, physics and collision are disabled — gibs become static visuals with near-zero cost. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0.5", ClampMax = "10.0"))
-	float GibLifetime = 3.0f;
+	float GibPhysicsLifetime = 3.0f;
+
+	/** How long frozen gibs remain visible before being destroyed (seconds).
+	 *  0 = persist forever (no cleanup). Total gib lifespan = GibPhysicsLifetime + GibVisualLifetime. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0.0"))
+	float GibVisualLifetime = 0.0f;
 
 	/** Radial velocity for scattering gibs outward on death (cm/s) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction", meta = (ClampMin = "0"))
@@ -177,6 +184,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bEnableOppositeChargeDistanceCutoff"))
 	float OppositeChargeProximityDamping = 10.0f;
 
+	// ==================== Line-of-Sight Shielding ====================
+
+	/** Enable line-of-sight check: sources behind walls/geometry are ignored.
+	 *  Uses a single-line trace per source. Only sources that pass distance culling are checked. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding")
+	bool bEnableLOSShielding = false;
+
+	/** Trace channel for LOS checks */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
+	TEnumAsByte<ECollisionChannel> LOSTraceChannel = ECC_Visibility;
+
+	/** Draw debug lines for LOS traces (green = visible, red = blocked) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
+	bool bDrawLOSDebug = false;
+
 	// ==================== Health ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health", meta = (ClampMin = "1.0"))
@@ -268,6 +290,27 @@ public:
 	/** Damage falloff exponent (1 = linear, 2 = quadratic). Controls how damage decreases with distance from center. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bCanExplode"))
 	float ExplosionDamageFalloff = 1.0f;
+
+	// ==================== Charge-Proportionate Scaling ====================
+
+	/** If true, explosion damage/impulse/stun scale proportionally to prop charge at detonation.
+	 *  Scale = clamp(|CurrentCharge| / ReferenceCharge, MinChargeScale, MaxChargeScale).
+	 *  Base UPROPERTY values (ExplosionDamage, ExplosionImpulseStrength, etc.) represent values at ReferenceCharge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Charge Scaling", meta = (EditCondition = "bCanExplode"))
+	bool bScaleExplosionWithCharge = true;
+
+	/** Charge level at which base explosion values apply without scaling (scale = 1.0).
+	 *  A prop with |charge| = ReferenceCharge explodes at exactly the base values. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Charge Scaling", meta = (ClampMin = "1.0", EditCondition = "bCanExplode && bScaleExplosionWithCharge"))
+	float ExplosionReferenceCharge = 10.0f;
+
+	/** Minimum scale multiplier (prevents explosions from being too weak at low charge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Charge Scaling", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanExplode && bScaleExplosionWithCharge"))
+	float MinChargeScale = 0.2f;
+
+	/** Maximum scale multiplier (caps explosions at high charge) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Charge Scaling", meta = (ClampMin = "1.0", ClampMax = "10.0", EditCondition = "bCanExplode && bScaleExplosionWithCharge"))
+	float MaxChargeScale = 3.0f;
 
 	// ==================== Explosion Impulse (Rocket Boost) ====================
 
@@ -383,6 +426,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bCanBeCaptured"))
 	float CaptureReleaseTimeout = 0.5f;
 
+	/** Interpolation speed for the initial pull-in to plate center. Higher = faster snap. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "100.0", EditCondition = "bCanBeCaptured"))
+	float CapturePullInInterpSpeed = 20.0f;
+
+	/** Distance (cm) at which pull-in lerp snaps to plate and switches to spring/damping */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
+	float CapturePullInSnapDistance = 5.0f;
+
+	/** Angular velocity (deg/s) applied to prop when launched. Random axis, this magnitude. 0 = no spin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "3600.0", EditCondition = "bCanBeCaptured"))
+	float ReverseLaunchSpinSpeed = 720.0f;
+
 	/** Reverse launch distance = CaptureRange * this multiplier */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.5", ClampMax = "5.0", EditCondition = "bCanBeCaptured"))
 	float ReverseLaunchDistanceMultiplier = 1.5f;
@@ -480,6 +535,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Explosive Impact")
 	bool IsInReverseFlight() const { return bIsInReverseFlight; }
 
+	/** If true, this prop can be destroyed by another prop's explosion (chain reaction).
+	 *  By default props ignore damage from each other to prevent unintended chain reactions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact")
+	bool bAllowChainReaction = false;
+
 	/**
 	 * Trigger explosion at current location. Deals radial damage, spawns VFX/SFX, kills the prop.
 	 * @param DamageMultiplier  Multiplier for damage (e.g. 2.0 for shot-triggered detonation)
@@ -540,6 +600,10 @@ private:
 
 	/** True if prop has already exploded (prevents double explosion) */
 	bool bHasExploded = false;
+
+	/** Cached charge scale from Explode() — used by SpawnDestructionGC to scale gib impulse.
+	 *  1.0 for non-explosion deaths. */
+	float CachedChargeScale = 1.0f;
 
 	/** Prop's speed cached at end of Tick (before any collision callbacks).
 	 *  Used for explosion checks so only the prop's OWN velocity counts. */
@@ -607,5 +671,15 @@ private:
 
 	/** Spawn GC actor at PropMesh transform, apply destruction fields */
 	void SpawnDestructionGC(const FVector& DestructionOrigin);
+
+	/** Settle GC gibs: strip collision to WorldStatic only, apply high damping.
+	 *  Pieces fall to rest naturally, Chaos auto-sleeps them (near-zero cost). */
+	void FreezeGibs();
+
+	FTimerHandle GCFreezeTimer;
 	FTimerHandle GCCleanupTimer;
+
+	/** Cached reference to spawned GC actor (for freeze/cleanup) */
+	UPROPERTY()
+	TWeakObjectPtr<AGeometryCollectionActor> SpawnedGCActor;
 };

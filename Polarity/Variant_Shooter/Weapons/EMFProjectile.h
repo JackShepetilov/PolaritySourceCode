@@ -11,6 +11,7 @@ class UEMF_FieldComponent;
 class UNiagaraSystem;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnProjectileCriticalVelocityImpact, AEMFProjectile*, Projectile, FVector, Location, float, Speed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnProjectileFired, float, Charge);
 
 /**
  * Projectile with electromagnetic properties.
@@ -71,6 +72,22 @@ public:
 	/** Log EM force calculations */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Debug")
 	bool bLogEMForces = false;
+
+	// ==================== LOS Shielding ====================
+
+	/** Skip EMF sources blocked by geometry (walls, floors, etc.).
+	 *  Uses a single line trace per source. Only sources that pass multiplier filtering are checked. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding")
+	bool bEnableLOSShielding = false;
+
+	/** Trace channel for LOS checks. Use Visibility for simple wall blocking,
+	 *  or a custom channel for fine-grained control over what blocks EMF. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
+	TEnumAsByte<ECollisionChannel> LOSTraceChannel = ECC_Visibility;
+
+	/** Draw debug lines for LOS traces (green = visible, red = blocked) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
+	bool bDrawLOSDebug = false;
 
 	// ==================== Charge-Based VFX ====================
 
@@ -153,6 +170,12 @@ public:
 	/** If true, neutralize opposite charges instead of adding them */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Transfer", meta = (EditCondition = "bTransferChargeOnHit"))
 	bool bNeutralizeOppositeCharges = true;
+
+	// ==================== Events ====================
+
+	/** Fired when the projectile's charge is set (i.e. when actually fired, not on pool creation) */
+	UPROPERTY(BlueprintAssignable, Category = "EMF|Events")
+	FOnProjectileFired OnProjectileFired;
 
 	// ==================== Public API ====================
 

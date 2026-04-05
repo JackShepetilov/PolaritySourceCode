@@ -22,6 +22,7 @@ class AEMFAcceleratorPlate;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class AUpgradePickup;
+class AScriptedPickup;
 
 /**
  * Charge animation state
@@ -196,6 +197,66 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
 	FName ChargeVFXSocket = FName("ChargeSocket");
 
+	// ==================== Channeling VFX ====================
+
+	// --- Capture VFX (lightning beam from plate to captured object, one-shot) ---
+
+	/** VFX for capturing with positive polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Capture")
+	TObjectPtr<UNiagaraSystem> PositiveCaptureVFX;
+
+	/** VFX for capturing with negative polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Capture")
+	TObjectPtr<UNiagaraSystem> NegativeCaptureVFX;
+
+	/** Offset from plate position for capture VFX spawn */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Capture")
+	FVector CaptureVFXOffset = FVector::ZeroVector;
+
+	/** Scale of capture VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Capture")
+	FVector CaptureVFXScale = FVector(1.0f);
+
+	// --- Launch VFX (lightning beam from plate to launched object, one-shot) ---
+
+	/** VFX for launching with positive polarity (checked AFTER polarity flip) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Launch")
+	TObjectPtr<UNiagaraSystem> PositiveLaunchVFX;
+
+	/** VFX for launching with negative polarity (checked AFTER polarity flip) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Launch")
+	TObjectPtr<UNiagaraSystem> NegativeLaunchVFX;
+
+	/** Offset from plate position for launch VFX spawn */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Launch")
+	FVector LaunchVFXOffset = FVector::ZeroVector;
+
+	/** Scale of launch VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Launch")
+	FVector LaunchVFXScale = FVector(1.0f);
+
+	// --- Hold VFX (continuous effect on hand while holding captured object) ---
+
+	/** Continuous VFX while holding with positive polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Hold")
+	TObjectPtr<UNiagaraSystem> PositiveHoldVFX;
+
+	/** Continuous VFX while holding with negative polarity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Hold")
+	TObjectPtr<UNiagaraSystem> NegativeHoldVFX;
+
+	/** Offset from socket for hold VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Hold")
+	FVector HoldVFXOffset = FVector::ZeroVector;
+
+	/** Scale of hold VFX */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Hold")
+	FVector HoldVFXScale = FVector(1.0f);
+
+	/** Socket on MeleeMesh for hold VFX attachment */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Channeling|Hold")
+	FName HoldVFXSocket = FName("ChargeSocket");
+
 	// ==================== Audio ====================
 
 	/** Sound to play when charge animation starts */
@@ -288,6 +349,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Charge")
 	bool IsInputLocked() const { return bInputLocked; }
 
+	/** Externally lock/unlock input (used by finale sequence to block normal grab) */
+	UFUNCTION(BlueprintCallable, Category = "Charge")
+	void SetInputLocked(bool bLocked) { bInputLocked = bLocked; }
+
 	/**
 	 * Cancel current animation (if in early phases)
 	 * @return true if animation was cancelled
@@ -354,6 +419,20 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UNiagaraComponent> ActiveChargeFX;
 
+	/** Active hold VFX component (continuous, while holding captured object) */
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> ActiveHoldVFX;
+
+	/** Active capture/launch beam VFX (tracked each tick while alive) */
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> ActiveCaptureVFX;
+
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> ActiveLaunchVFX;
+
+	/** Update beam VFX positions to follow plate and target */
+	void UpdateBeamVFX();
+
 	// ==================== Montage State ====================
 
 	/** Mesh transition progress (0-1) */
@@ -416,6 +495,18 @@ protected:
 	/** Stop and destroy charge VFX */
 	void StopChargeVFX();
 
+	/** Spawn one-shot capture VFX (lightning from plate to captured target) */
+	void SpawnCaptureVFX(AActor* CapturedTarget);
+
+	/** Spawn one-shot launch VFX (lightning from plate to launched target, uses post-flip polarity) */
+	void SpawnLaunchVFX(AActor* LaunchedTarget);
+
+	/** Spawn continuous hold VFX on hand (MeleeMesh) */
+	void SpawnHoldVFX();
+
+	/** Stop and destroy hold VFX */
+	void StopHoldVFX();
+
 	/** Play sound effect */
 	void PlaySound(USoundBase* Sound);
 
@@ -462,6 +553,9 @@ protected:
 
 	/** Capture an upgrade pickup (scripted pull, not physics-based) */
 	void CaptureUpgradePickup(AUpgradePickup* Pickup);
+
+	/** Capture a scripted pickup (scripted pull, same as UpgradePickup but no upgrade) */
+	void CaptureScriptedPickup(AScriptedPickup* Pickup);
 
 	/** Capture an accelerator plate (lowest priority, no charge dependency) */
 	void CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate);

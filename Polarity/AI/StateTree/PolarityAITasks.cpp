@@ -349,13 +349,44 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::EnterState(FStateTreeExecutionContex
 
 	const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
 
-	UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: MoveTo result=%d, Destination=%s"),
-		static_cast<int32>(Result.Code), *Data.Destination.ToString());
+	// [NAV_DEBUG] Detailed navigation diagnostics
+	{
+		APawn* Pawn = Data.Controller->GetPawn();
+		const FString PawnName = Pawn ? Pawn->GetName() : TEXT("NULL");
+		const FVector PawnLoc = Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector;
+
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s MoveWithStrafe: Result=%d, From=%s, To=%s, UsePathfinding=%d"),
+			*PawnName, static_cast<int32>(Result.Code), *PawnLoc.ToString(), *Data.Destination.ToString(), Data.bUsePathfinding);
+
+		// Check NavMesh at both locations
+		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.Controller->GetWorld());
+		if (NavSys)
+		{
+			FNavLocation NavLoc;
+			const bool bStartOnNav = NavSys->ProjectPointToNavigation(PawnLoc, NavLoc, FVector(50, 50, 200));
+			const bool bDestOnNav = NavSys->ProjectPointToNavigation(Data.Destination, NavLoc, FVector(50, 50, 200));
+			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s NavMesh check: StartOnNav=%d, DestOnNav=%d"),
+				*PawnName, bStartOnNav, bDestOnNav);
+
+			if (!bStartOnNav)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] %s NPC LOCATION IS NOT ON NAVMESH! Loc=%s"), *PawnName, *PawnLoc.ToString());
+			}
+			if (!bDestOnNav)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] %s DESTINATION IS NOT ON NAVMESH! Dest=%s"), *PawnName, *Data.Destination.ToString());
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] %s NO NAVIGATION SYSTEM FOUND!"), *PawnName);
+		}
+	}
 
 	// Check immediate move result
 	if (Result.Code == EPathFollowingRequestResult::Failed)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MoveWithStrafe: MoveTo failed immediately!"));
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] MoveWithStrafe: MoveTo FAILED immediately!"));
 		return EStateTreeRunStatus::Failed;
 	}
 
@@ -399,17 +430,16 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::Tick(FStateTreeExecutionContext& Con
 		if (Status == EPathFollowingStatus::Idle)
 		{
 			// Check distance to destination - if we're close enough, consider it success
-			if (APawn* Pawn = Data.Controller->GetPawn())
+			APawn* IdlePawn = Data.Controller->GetPawn();
+			const float DistToGoal = IdlePawn ? FVector::Dist(IdlePawn->GetActorLocation(), Data.Destination) : -1.0f;
+			if (IdlePawn && DistToGoal <= Data.AcceptanceRadius * 1.5f)
 			{
-				const float DistToGoal = FVector::Dist(Pawn->GetActorLocation(), Data.Destination);
-				if (DistToGoal <= Data.AcceptanceRadius * 1.5f)
-				{
-					UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: Close enough to goal (dist=%.0f)"), DistToGoal);
-					return EStateTreeRunStatus::Succeeded;
-				}
+				UE_LOG(LogTemp, Log, TEXT("MoveWithStrafe: Close enough to goal (dist=%.0f)"), DistToGoal);
+				return EStateTreeRunStatus::Succeeded;
 			}
 
-			UE_LOG(LogTemp, Warning, TEXT("MoveWithStrafe: PathFollowing is Idle - movement may have failed"));
+			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s MoveWithStrafe: PathFollowing is Idle - movement FAILED, dist=%.0f"),
+				IdlePawn ? *IdlePawn->GetName() : TEXT("NULL"), DistToGoal);
 			return EStateTreeRunStatus::Failed;
 		}
 	}

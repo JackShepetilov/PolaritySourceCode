@@ -51,7 +51,7 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 
 	GetCharacterMovement()->BrakingDecelerationFalling = 0.0f;
 	GetCharacterMovement()->AirControl = 0.0f; // Disabled - custom ApplyAirStrafe() handles all air movement
-	GetCharacterMovement()->GravityScale = 1.17f;
+	// GravityScale is set from MovementSettings in ApexMovementComponent::InitializeComponent()
 }
 
 void APolarityCharacter::BeginPlay()

@@ -357,6 +357,26 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			}
 		}
 
+		// LOS Shielding: skip sources blocked by geometry
+		if (bEnableLOSShielding)
+		{
+			FHitResult LOSHit;
+			FCollisionQueryParams LOSParams(SCENE_QUERY_STAT(EMF_LOS), true, Owner);
+			bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+				LOSHit, Position, Source.Position, LOSTraceChannel, LOSParams);
+
+			if (bDrawLOSDebug)
+			{
+				DrawDebugLine(GetWorld(), Position, Source.Position,
+					bBlocked ? FColor::Red : FColor::Green, false, -1.0f, 0, 0.5f);
+			}
+
+			if (bBlocked)
+			{
+				continue;
+			}
+		}
+
 		// Identify plate sources (player-owned finite plates from channeling)
 		const bool bIsChannelingPlate =
 			Source.SourceType == EEMSourceType::FinitePlate &&

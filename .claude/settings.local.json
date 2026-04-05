@@ -193,7 +193,26 @@
       "WebFetch(domain:steamspy.com)",
       "WebFetch(domain:mixkit.co)",
       "WebFetch(domain:www.zapsplat.com)",
-      "WebFetch(domain:freesound.org)"
+      "WebFetch(domain:freesound.org)",
+      "Bash(find 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.6.1\\\\UE_5.6\\\\Engine\\\\Source' -type f \\\\\\(-name *.h -o -name *.cpp \\\\\\) -path *FractureEditor*)",
+      "Bash(2)",
+      "Bash(find 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.6.1\\\\UE_5.6\\\\Engine\\\\Plugins\\\\Experimental\\\\ChaosEditor' -type f \\\\\\(-name *.h -o -name *.py \\\\\\))",
+      "WebFetch(domain:cghow.com)",
+      "WebFetch(domain:www.imogendaviesvfx.com)",
+      "WebFetch(domain:craftofcoding.wordpress.com)",
+      "Bash(find '/c/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source' -type f \\\\\\(-name *.h -o -name *.cpp \\\\\\))",
+      "WebFetch(domain:ultidigi.com)",
+      "WebFetch(domain:ikrima.dev)",
+      "WebFetch(domain:avidachievers.com)",
+      "WebFetch(domain:www.brushify.io)",
+      "WebFetch(domain:toxigon.com)",
+      "WebFetch(domain:worldofleveldesign.com)",
+      "Bash(pip install:*)",
+      "Bash(python gen_dialogue_pdf.py)",
+      "Bash(curl -sL \"https://github.com/google/fonts/raw/main/ofl/rajdhani/Rajdhani-Regular.ttf\" -o Rajdhani-Regular.ttf)",
+      "Bash(curl -sL \"https://github.com/google/fonts/raw/main/ofl/rajdhani/Rajdhani-Bold.ttf\" -o Rajdhani-Bold.ttf)",
+      "Bash(curl -sL \"https://github.com/google/fonts/raw/main/ofl/rajdhani/Rajdhani-SemiBold.ttf\" -o Rajdhani-SemiBold.ttf)",
+      "Bash(find 'C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity' -type f \\\\\\(-iname *subtitle* -o -iname *dialogue* -o -iname *chat* -o -iname *message* -o -iname *voice* -o -iname *comms* -o -iname *hint* \\\\\\))"
     ]
   }
 }

@@ -6,6 +6,7 @@
 #include "GCBatchCreatorLibrary.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "GeometryCollection/GeometryCollectionEngineConversion.h"
+#include "GeometryCollection/GeometryCollectionClusteringUtility.h"
 #include "GeometryCollection/GeometryCollectionFactory.h"
 #include "FractureEngineFracturing.h"
 #include "Serialization/BufferArchive.h"
@@ -345,6 +346,12 @@ static bool BuildFracturedGC(
 	UE_LOG(LogTemp, Log, TEXT("GCBatch: Voronoi fracture → %d pieces from %d sites"),
 		GC->NumElements(FTransformCollection::TransformGroup), PieceCount);
 
+	// Cluster all pieces under a single root so strain field can break them
+	FGeometryCollectionClusteringUtility::ClusterAllBonesUnderNewRoot(GC);
+
+	UE_LOG(LogTemp, Log, TEXT("GCBatch: After clustering → %d transforms"),
+		GC->NumElements(FTransformCollection::TransformGroup));
+
 	return true;
 }
 
@@ -434,6 +441,9 @@ FGCCreationResult UGCBatchCreatorLibrary::CreateGCFromStaticMesh(
 		Result.Message = FString::Printf(TEXT("Failed to build GC for %s"), *SourceMesh->GetName());
 		return Result;
 	}
+
+	// Set all damage thresholds to 0 — instant break at all hierarchy levels
+	GCAsset->DamageThreshold = {0.0f, 0.0f, 0.0f, 0.0f};
 
 	// Save to disk
 	FAssetRegistryModule::AssetCreated(GCAsset);

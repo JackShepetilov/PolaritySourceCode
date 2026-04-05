@@ -11,6 +11,7 @@
 #include "ShooterDummyInterface.h"
 #include "PolarityCharacter.h"
 #include "ApexMovementComponent.h"
+#include "MovementSettings.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Camera/CameraComponent.h"
@@ -916,9 +917,9 @@ void AShooterWeapon_Melee::StopMagnetism()
 	{
 		if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
 		{
-			if (UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement())
+			if (UApexMovementComponent* Movement = Cast<UApexMovementComponent>(OwnerChar->GetCharacterMovement()))
 			{
-				Movement->GravityScale = 1.0f;
+				Movement->GravityScale = Movement->MovementSettings ? Movement->MovementSettings->DefaultGravityScale : 1.5f;
 			}
 		}
 	}

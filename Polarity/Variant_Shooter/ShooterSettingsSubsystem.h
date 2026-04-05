@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "Engine/World.h"
 #include "ShooterSettingsSubsystem.generated.h"
 
 class UShooterGameSettings;
@@ -121,6 +122,12 @@ public:
 	void NotifySettingsChanged();
 
 private:
+
+	/** Called when a world is initialized - applies settings that need a world context */
+	void OnWorldInitialized(UWorld* World, const UWorld::InitializationValues IVS);
+
+	/** Handle for the world initialization delegate */
+	FDelegateHandle WorldInitHandle;
 
 	/** Cached pointer to game settings */
 	UPROPERTY()

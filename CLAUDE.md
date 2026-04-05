@@ -68,6 +68,18 @@ or
 - Example: Need both `BossTargetIsFarCondition` AND `BossTargetIsCloseCondition`
 - NEVER suggest using condition inversion in StateTree - it doesn't exist!
 
+## Debug Logging Convention
+
+**При добавлении отладочных логов ВСЕГДА используй явный тег большими буквами для фильтрации:**
+- Формат: `[ARENA_DEBUG]`, `[NAV_DEBUG]`, `[AI_DEBUG]` и т.д.
+- Тег должен быть в начале сообщения, легко фильтруемый в Output Log
+- Сообщай пользователю какой тег использовать для фильтрации
+
+**Пример:**
+```cpp
+UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] NPC %s MoveTo result: %d"), *GetName(), (int32)Result);
+```
+
 ## DO NOT Compile From Terminal
 
 **NEVER try to compile the project via Bash/terminal commands.**
@@ -117,6 +129,25 @@ Example format:
 ⚡ Performance: This algorithm is O(n) where n = number of tracked projectiles.
    With typical boss fight (3-5 projectiles), cost is negligible (<0.01ms/frame).
    Would become problematic only with 100+ projectiles.
+```
+
+## Naming Mechanics - IMPORTANT
+
+**При реализации новой механики — ВСЕГДА придумывай оригинальное игровое название, а не техническое:**
+- Техническое название (для кода): `SuppressionFire`, `VelocityModifier` — остаётся в коде
+- Игровое название (для игрока/дизайна): должно быть метафоричным, memorable, неочевидным
+- Примеры: `SuppressionFire` → **"Plot Armor"**, `VelocityDamageModifier` → **"Testosterone Boost"**
+
+**Правила хорошего игрового названия:**
+1. Передаёт ощущение, а не механику
+2. Может быть ироничным, мемным или кинематографичным
+3. Игрок должен понять суть по названию, не читая описание
+4. Предложи 2-3 варианта и дай пользователю выбрать
+
+**Формат:**
+```
+🎮 Игровое название: "Plot Armor" / "Ghost Mode" / "Bullet Magnet"
+   (техническое: SuppressionFireUpgrade)
 ```
 
 ## English Grammar Correction

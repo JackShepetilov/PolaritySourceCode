@@ -312,6 +312,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	UApexMovementComponent* GetApexMovement() const { return ApexMovement; }
 
+	/** Returns the grab/toggle-charge input action (for external bindings) */
+	UInputAction* GetToggleChargeAction() const { return ToggleChargeAction; }
+
+	/** Returns the channel/capture input action (for external bindings) */
+	UInputAction* GetChannelAction() const { return ChannelAction; }
+
 	/** Returns camera shake component */
 	UFUNCTION(BlueprintPure, Category = "Camera")
 	UCameraShakeComponent* GetCameraShake() const { return CameraShakeComponent; }

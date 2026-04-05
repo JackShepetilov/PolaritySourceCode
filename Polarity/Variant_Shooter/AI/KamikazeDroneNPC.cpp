@@ -835,6 +835,16 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 		if (Coordinator && Coordinator->RequestAttackToken(this, EAttackTokenType::Kamikaze))
 		{
 			bIsRetaliating = false;
+			// Snapshot Bezier start state
+			PositioningStartPos = GetActorLocation();
+			PositioningPrevPos = PositioningStartPos;
+			PositioningOrbitTangent = GetVelocity().GetSafeNormal();
+			PositioningP1 = PositioningStartPos + PositioningOrbitTangent * CruiseSpeed * PositioningDuration * 0.5f;
+			if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+			{
+				CMC->StopMovementImmediately();
+				CMC->SetMovementMode(MOVE_None);
+			}
 			SetState(EKamikazeState::Positioning);
 			return;
 		}
@@ -861,6 +871,7 @@ void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 void AKamikazeDroneNPC::UpdatePositioning(float DeltaTime)
 {
 	StateTimer += DeltaTime;
+	const float Alpha = FMath::Clamp(StateTimer / FMath::Max(PositioningDuration, 0.01f), 0.0f, 1.0f);
 
 	APawn* Player = GetPlayerPawn();
 	if (!Player)
@@ -869,55 +880,64 @@ void AKamikazeDroneNPC::UpdatePositioning(float DeltaTime)
 		return;
 	}
 
-	// Compute frontal attack point: player position + camera forward (XY) * current orbit radius, at orbit height
-	FVector FrontalTarget = Player->GetActorLocation();
+	// P3 (target) is dynamic — recalculate every frame from current camera direction
+	FVector P3 = Player->GetActorLocation();
 	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
 	{
 		const FVector CamFwd = PC->GetControlRotation().Vector();
 		const FVector CamFwdXY = FVector(CamFwd.X, CamFwd.Y, 0.0f).GetSafeNormal();
 		if (!CamFwdXY.IsNearlyZero())
 		{
-			FrontalTarget += CamFwdXY * CurrentOrbitRadius;
+			P3 += CamFwdXY * CurrentOrbitRadius;
 		}
 	}
-	FrontalTarget.Z = Player->GetActorLocation().Z + OrbitBaseHeight;
+	P3.Z = Player->GetActorLocation().Z + OrbitBaseHeight;
 
-	const FVector MyLoc = GetActorLocation();
-	const float DistToTarget = FVector::Dist(MyLoc, FrontalTarget);
+	// Bezier control points:
+	// P0 = PositioningStartPos (fixed)
+	// P1 = PositioningP1 (fixed — orbit tangent pull)
+	// P2 = P3 - dir_to_P3 * pullback (smooth arrival into target)
+	// P3 = dynamic frontal point
+	const FVector P0 = PositioningStartPos;
+	const FVector P1 = PositioningP1;
+	const FVector DirToP3 = (P3 - P0).GetSafeNormal();
+	const float ArcLength = FVector::Dist(P0, P3);
+	const FVector P2 = P3 - DirToP3 * ArcLength * 0.15f;
 
-#if ENABLE_DRAW_DEBUG
-	// Frontal target point (magenta sphere) + line from drone to it
-	DrawDebugSphere(GetWorld(), FrontalTarget, 40.0f, 8, FColor::Magenta, false, 0.0f, 0, 2.0f);
-	DrawDebugLine(GetWorld(), MyLoc, FrontalTarget, FColor::Magenta, false, 0.0f, 0, 1.5f);
-	// Arrival threshold sphere (yellow wireframe)
-	DrawDebugSphere(GetWorld(), FrontalTarget, PositioningArrivalThreshold, 12, FColor::Yellow, false, 0.0f, 0, 1.0f);
-#endif
+	// Cubic Bezier
+	const float t = Alpha;
+	const float u = 1.0f - t;
+	FVector BezierPos = u*u*u * P0 + 3.0f*u*u*t * P1 + 3.0f*u*t*t * P2 + t*t*t * P3;
 
-	// Arrived or timed out — begin telegraph from here
-	if (DistToTarget <= PositioningArrivalThreshold || StateTimer >= PositioningMaxTime)
+	// FPV jitter (ramps up with t)
 	{
-		BeginTelegraph(bIsRetaliating);
-		return;
-	}
-
-	// Fly toward frontal point with limited turn rate (same pattern as orbit movement)
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->MaxFlySpeed = PositioningSpeed;
-
-		const FVector DesiredDir = (FrontalTarget - MyLoc).GetSafeNormal();
-		const FVector CurrentDir = GetVelocity().IsNearlyZero(10.0f) ? GetActorForwardVector() : GetVelocity().GetSafeNormal();
-		const FVector SteeringDir = FMath::VInterpNormalRotationTo(CurrentDir, DesiredDir, DeltaTime, PositioningTurnRate);
-
-		// FPV jitter for visual consistency
 		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-		const FVector Right = FVector::CrossProduct(SteeringDir, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, SteeringDir);
+		const FVector BezierTangent = (3.0f*u*u*(P1-P0) + 6.0f*u*t*(P2-P1) + 3.0f*t*t*(P3-P2)).GetSafeNormal();
+		const FVector Right = FVector::CrossProduct(BezierTangent, FVector::UpVector).GetSafeNormal();
+		const FVector Up = FVector::CrossProduct(Right, BezierTangent);
 		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
 		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector NoisyDir = (SteeringDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude * 0.5f).GetSafeNormal();
+		const float JitterScale = t * AttackJitterAmplitude * CruiseSpeed * 0.3f;
+		BezierPos += (Right * JitterRight + Up * JitterUp) * JitterScale;
+	}
 
-		CMC->AddInputVector(NoisyDir);
+	SetActorLocation(BezierPos, false, nullptr, ETeleportType::TeleportPhysics);
+
+	// Virtual velocity for orientation + FPVTilt
+	const FVector VirtualVelocity = (DeltaTime > SMALL_NUMBER)
+		? (BezierPos - PositioningPrevPos) / DeltaTime
+		: PositioningOrbitTangent * CruiseSpeed;
+	PositioningPrevPos = BezierPos;
+
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->Velocity = VirtualVelocity;
+	}
+
+	// Complete — begin telegraph from the frontal point
+	if (Alpha >= 1.0f)
+	{
+		BeginTelegraph(bIsRetaliating);
 	}
 }
 
@@ -1791,6 +1811,15 @@ void AKamikazeDroneNPC::UpdateStrafing(float DeltaTime)
 		if (Coordinator && Coordinator->RequestAttackToken(this, EAttackTokenType::Kamikaze))
 		{
 			bIsRetaliating = false;
+			PositioningStartPos = GetActorLocation();
+			PositioningPrevPos = PositioningStartPos;
+			PositioningOrbitTangent = GetVelocity().GetSafeNormal();
+			PositioningP1 = PositioningStartPos + PositioningOrbitTangent * CruiseSpeed * PositioningDuration * 0.5f;
+			if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+			{
+				CMC->StopMovementImmediately();
+				CMC->SetMovementMode(MOVE_None);
+			}
 			SetState(EKamikazeState::Positioning);
 			return;
 		}
@@ -1834,11 +1863,16 @@ void AKamikazeDroneNPC::BeginTelegraph(bool bRetaliation)
 	// --- Snapshot state BEFORE disabling CMC ---
 	TelegraphStartPos = GetActorLocation();
 	TelegraphPrevPos = TelegraphStartPos;
-	const FVector OrbitTangent = GetVelocity().GetSafeNormal(); // actual flight direction = orbit tangent
 
 	// Attack direction toward predicted player position
 	AttackTargetPosition = CalculatePredictedPosition();
 	TelegraphAttackDir = (AttackTargetPosition - TelegraphStartPos).GetSafeNormal();
+
+	// When coming from Positioning, drone is already at the frontal point facing the player.
+	// Use attack direction as tangent so telegraph goes straight — no sideways jerk.
+	const FVector OrbitTangent = (CurrentState == EKamikazeState::Positioning)
+		? TelegraphAttackDir
+		: GetVelocity().GetSafeNormal();
 
 	// --- Cubic Bezier control points (repurpose phantom variables) ---
 	// P0 = TelegraphStartPos
@@ -1990,9 +2024,14 @@ FVector AKamikazeDroneNPC::CalculatePredictedPosition() const
 
 // ==================== Damage ====================
 
+UMeshComponent* AKamikazeDroneNPC::GetHitFlashMeshComponent() const
+{
+	return DroneMesh;
+}
+
 float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
-	if (bIsDead)
+	if (bIsDead || bIsParried)
 	{
 		return 0.0f;
 	}
@@ -2074,6 +2113,15 @@ float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	if (bRetaliateOnDamage && CurrentState == EKamikazeState::Orbiting)
 	{
 		bIsRetaliating = true;
+		PositioningStartPos = GetActorLocation();
+		PositioningPrevPos = PositioningStartPos;
+		PositioningOrbitTangent = GetVelocity().GetSafeNormal();
+		PositioningP1 = PositioningStartPos + PositioningOrbitTangent * CruiseSpeed * PositioningDuration * 0.5f;
+		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+		{
+			CMC->StopMovementImmediately();
+			CMC->SetMovementMode(MOVE_None);
+		}
 		SetState(EKamikazeState::Positioning);
 	}
 
@@ -2231,9 +2279,22 @@ void AKamikazeDroneNPC::TriggerDebrisFall()
 {
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] >>> TriggerDebrisFall (NO explosion, YES HP)"), *GetName());
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] >>> TriggerDebrisFall (crash VFX/SFX, YES HP)"), *GetName());
 	}
-	// No explosion — just enable gravity so debris/mesh falls
+
+	// Crash VFX
+	if (CrashExplosionFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), CrashExplosionFX, GetActorLocation());
+	}
+
+	// Crash SFX
+	if (CrashSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), CrashSound, GetActorLocation());
+	}
+
+	// Enable gravity so debris/mesh falls
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->GravityScale = 1.0f;
@@ -2241,7 +2302,7 @@ void AKamikazeDroneNPC::TriggerDebrisFall()
 	}
 
 	// Drop HP pickups (reward for killing)
-	if (HealthPickupClass)
+	if (!bSuppressDeathDrops && HealthPickupClass)
 	{
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
@@ -2385,7 +2446,7 @@ void AKamikazeDroneNPC::DoExplosion(float Radius, float Damage, TSubclassOf<UDam
 	}
 
 	// Drop HP pickups
-	if (bDropHealthPickup && HealthPickupClass)
+	if (!bSuppressDeathDrops && bDropHealthPickup && HealthPickupClass)
 	{
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);

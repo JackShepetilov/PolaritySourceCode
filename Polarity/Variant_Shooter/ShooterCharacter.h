@@ -26,6 +26,7 @@ class UMaterialInterface;
 class UStaticMeshComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
+class AEMFPhysicsProp;
 struct FCheckpointData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
@@ -41,6 +42,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FChargeExtendedDelegate, float, Tot
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FDamageChromaticAberrationDelegate, float, Intensity);
 // Melee weapon equip/unequip state delegate
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FMeleeWeaponEquippedDelegate, bool, bEquipped, int32, RemainingHits, int32, MaxHits);
+
+// Prop capture/launch delegates (fired by ChargeAnimationComponent)
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPropCaptured, AActor*, CapturedActor);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPropLaunched, AActor*, LaunchedActor);
+
+// Prop impact delegate (fired by EMFPhysicsProp when a launched prop damages NPCs)
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropImpact, AEMFPhysicsProp*, Prop, float, TotalDamage, int32, KillCount);
 
 // Boss Finisher delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
@@ -1222,6 +1230,18 @@ public:
 	/** Settings for the boss finisher - configure from Level BP */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss Finisher")
 	FBossFinisherSettings BossFinisherSettings;
+
+	/** Called when a prop/NPC is captured by channeling */
+	UPROPERTY(BlueprintAssignable, Category = "Events|Channeling")
+	FOnPropCaptured OnPropCaptured;
+
+	/** Called when a captured prop/NPC is launched (reverse channeling) */
+	UPROPERTY(BlueprintAssignable, Category = "Events|Channeling")
+	FOnPropLaunched OnPropLaunched;
+
+	/** Called when a launched prop explodes and damages NPCs (TotalDamage = sum of all NPC damage, KillCount = NPCs killed) */
+	UPROPERTY(BlueprintAssignable, Category = "Events|Channeling")
+	FOnPropImpact OnPropImpact;
 
 	/** Called when boss finisher starts */
 	UPROPERTY(BlueprintAssignable, Category = "Boss Finisher")

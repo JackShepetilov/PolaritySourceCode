@@ -13,6 +13,8 @@
 #include "Components/CapsuleComponent.h"
 #include "TimerManager.h"
 #include "GameFramework/PlayerController.h"
+#include "Polarity/Music/MusicPlayerSubsystem.h"
+#include "Polarity/Music/MusicTrackDataAsset.h"
 #include "NavigationSystem.h"
 #include "Polarity/Variant_Shooter/ShooterDoor.h"
 #include "DestructibleIslandActor.h"
@@ -47,6 +49,120 @@ void AArenaManager::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// --- Sublevel diagnostics ---
+	ULevel* MyLevel = GetLevel();
+	UE_LOG(LogTemp, Error, TEXT("===== ArenaManager::BeginPlay [%s] ====="), *GetName());
+	UE_LOG(LogTemp, Error, TEXT("  ArenaMode: %s"), ArenaMode == EArenaMode::Sustain ? TEXT("SUSTAIN") : TEXT("WAVES"));
+	UE_LOG(LogTemp, Error, TEXT("  MyLevel: %s (Outer: %s)"),
+		MyLevel ? *MyLevel->GetName() : TEXT("NULL"),
+		(MyLevel && MyLevel->GetOuter()) ? *MyLevel->GetOuter()->GetName() : TEXT("NULL"));
+	UE_LOG(LogTemp, Error, TEXT("  IsPersistentLevel: %d"), MyLevel == GetWorld()->PersistentLevel);
+	UE_LOG(LogTemp, Error, TEXT("  World: %s, StreamingLevels: %d"),
+		*GetWorld()->GetName(), GetWorld()->GetStreamingLevels().Num());
+
+	// Dump soft pointer resolution status
+	{
+		int32 ResolvedTriggers = 0, NullTriggers = 0;
+		for (const TSoftObjectPtr<AActor>& Ref : EntryTriggers)
+		{
+			if (Ref.Get()) ResolvedTriggers++;
+			else NullTriggers++;
+		}
+		UE_LOG(LogTemp, Error, TEXT("  EntryTriggers: %d total, %d resolved, %d NULL (soft path failed)"),
+			EntryTriggers.Num(), ResolvedTriggers, NullTriggers);
+		for (int32 i = 0; i < EntryTriggers.Num(); i++)
+		{
+			UE_LOG(LogTemp, Error, TEXT("    [%d] SoftPath='%s' Resolved=%d"),
+				i, *EntryTriggers[i].ToSoftObjectPath().ToString(), EntryTriggers[i].Get() != nullptr);
+		}
+	}
+	{
+		int32 ResolvedPoints = 0, NullPoints = 0;
+		for (const TSoftObjectPtr<AArenaSpawnPoint>& Ref : SpawnPoints)
+		{
+			if (Ref.Get()) ResolvedPoints++;
+			else NullPoints++;
+		}
+		UE_LOG(LogTemp, Error, TEXT("  SpawnPoints: %d total, %d resolved, %d NULL"),
+			SpawnPoints.Num(), ResolvedPoints, NullPoints);
+	}
+	{
+		int32 ResolvedBlockers = 0, NullBlockers = 0;
+		for (const TSoftObjectPtr<AActor>& Ref : ExitBlockers)
+		{
+			if (Ref.Get()) ResolvedBlockers++;
+			else NullBlockers++;
+		}
+		UE_LOG(LogTemp, Error, TEXT("  ExitBlockers: %d total, %d resolved, %d NULL"),
+			ExitBlockers.Num(), ResolvedBlockers, NullBlockers);
+	}
+	UE_LOG(LogTemp, Error, TEXT("  SustainEnemyPool: %d entries, MaxSustainEnemies: %d, SustainTotalEnemies: %d"),
+		SustainEnemyPool.Num(), MaxSustainEnemies, SustainTotalEnemies);
+
+	// --- Sublevel soft pointer fallback ---
+	// When this level is loaded as a sublevel of a master level, TSoftObjectPtr paths
+	// break because they reference the original package name. Auto-discover actors
+	// in the same ULevel as a fallback.
+	{
+		// Check if SpawnPoints soft ptrs failed to resolve
+		bool bAnySpawnPointResolved = false;
+		for (const TSoftObjectPtr<AArenaSpawnPoint>& Ref : SpawnPoints)
+		{
+			if (Ref.Get()) { bAnySpawnPointResolved = true; break; }
+		}
+
+		if (SpawnPoints.Num() > 0 && !bAnySpawnPointResolved)
+		{
+			UE_LOG(LogTemp, Error, TEXT("  SUBLEVEL FALLBACK: All %d SpawnPoint soft ptrs failed! Auto-discovering ArenaSpawnPoints in same level..."),
+				SpawnPoints.Num());
+
+			SpawnPoints.Empty();
+			TArray<AActor*> FoundSpawnPoints;
+			UGameplayStatics::GetAllActorsOfClass(GetWorld(), AArenaSpawnPoint::StaticClass(), FoundSpawnPoints);
+
+			for (AActor* Actor : FoundSpawnPoints)
+			{
+				if (Actor->GetLevel() == MyLevel)
+				{
+					AArenaSpawnPoint* SP = Cast<AArenaSpawnPoint>(Actor);
+					if (SP)
+					{
+						SpawnPoints.Add(TSoftObjectPtr<AArenaSpawnPoint>(FSoftObjectPath(SP)));
+						UE_LOG(LogTemp, Error, TEXT("    Found SpawnPoint: %s (path: %s)"), *SP->GetName(), *FSoftObjectPath(SP).ToString());
+					}
+				}
+			}
+			UE_LOG(LogTemp, Error, TEXT("  SUBLEVEL FALLBACK: Discovered %d SpawnPoints in same level"), SpawnPoints.Num());
+		}
+
+		// Check if EntryTriggers soft ptrs failed to resolve
+		bool bAnyTriggerResolved = false;
+		for (const TSoftObjectPtr<AActor>& Ref : EntryTriggers)
+		{
+			if (Ref.Get()) { bAnyTriggerResolved = true; break; }
+		}
+
+		if (EntryTriggers.Num() > 0 && !bAnyTriggerResolved)
+		{
+			UE_LOG(LogTemp, Error, TEXT("  SUBLEVEL FALLBACK: All %d EntryTrigger soft ptrs failed! Cannot auto-discover triggers (no known class)."),
+				EntryTriggers.Num());
+			UE_LOG(LogTemp, Error, TEXT("  >>> Arena will NOT activate via overlap! Consider using hard references or ForceActivate from Blueprint."));
+		}
+
+		// Check if ExitBlockers soft ptrs failed to resolve
+		bool bAnyBlockerResolved = false;
+		for (const TSoftObjectPtr<AActor>& Ref : ExitBlockers)
+		{
+			if (Ref.Get()) { bAnyBlockerResolved = true; break; }
+		}
+
+		if (ExitBlockers.Num() > 0 && !bAnyBlockerResolved)
+		{
+			UE_LOG(LogTemp, Error, TEXT("  SUBLEVEL FALLBACK: All %d ExitBlocker soft ptrs failed! Blockers will not work."),
+				ExitBlockers.Num());
+		}
+	}
+
 	CheckpointSubsystem = GetWorld()->GetSubsystem<UCheckpointSubsystem>();
 
 	// Register overlap callbacks on entry triggers (separate from blockers)
@@ -60,11 +176,11 @@ void AArenaManager::BeginPlay()
 	{
 		CheckpointSubsystem->OnPlayerRespawned.AddDynamic(this, &AArenaManager::OnPlayerRespawned);
 		bBoundToRespawn = true;
-		UE_LOG(LogTemp, Error, TEXT("ArenaManager::BeginPlay — BOUND to OnPlayerRespawned (CheckpointSubsystem=%p)"), CheckpointSubsystem.Get());
+		UE_LOG(LogTemp, Error, TEXT("  BOUND to OnPlayerRespawned OK"));
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("ArenaManager::BeginPlay — FAILED to bind OnPlayerRespawned! CheckpointSubsystem=%p, bBoundToRespawn=%d"),
+		UE_LOG(LogTemp, Error, TEXT("  FAILED to bind OnPlayerRespawned! CheckpointSubsystem=%p, bBoundToRespawn=%d"),
 			CheckpointSubsystem.Get(), bBoundToRespawn);
 	}
 
@@ -88,6 +204,9 @@ void AArenaManager::BeginPlay()
 	{
 		Dummy->OnDummyDeath.AddDynamic(this, &AArenaManager::OnRewardDummyDeath);
 	}
+
+	UE_LOG(LogTemp, Error, TEXT("===== ArenaManager::BeginPlay DONE — AliveNPCs: %d, InitialLevelEnemyCount: %d ====="),
+		AliveNPCs.Num(), InitialLevelEnemyCount);
 }
 
 void AArenaManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -120,31 +239,50 @@ void AArenaManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AArenaManager::RegisterEntryTriggers()
 {
-	for (const TSoftObjectPtr<AActor>& TriggerRef : EntryTriggers)
+	int32 BoundCount = 0;
+	for (int32 i = 0; i < EntryTriggers.Num(); i++)
 	{
-		AActor* Trigger = TriggerRef.Get();
+		AActor* Trigger = EntryTriggers[i].Get();
 		if (!Trigger)
 		{
+			UE_LOG(LogTemp, Error, TEXT("  RegisterEntryTriggers[%d]: FAILED — soft ptr did not resolve (path: %s)"),
+				i, *EntryTriggers[i].ToSoftObjectPath().ToString());
 			continue;
 		}
 
 		TArray<UPrimitiveComponent*> Primitives;
 		Trigger->GetComponents<UPrimitiveComponent>(Primitives);
 
+		if (Primitives.Num() == 0)
+		{
+			UE_LOG(LogTemp, Error, TEXT("  RegisterEntryTriggers[%d]: FAILED — %s has no PrimitiveComponents!"),
+				i, *Trigger->GetName());
+			continue;
+		}
+
 		for (UPrimitiveComponent* Prim : Primitives)
 		{
 			Prim->SetGenerateOverlapEvents(true);
 			Prim->OnComponentBeginOverlap.AddDynamic(this, &AArenaManager::OnEntryTriggerOverlap);
+			UE_LOG(LogTemp, Error, TEXT("  RegisterEntryTriggers[%d]: BOUND overlap on %s::%s (overlap events ON)"),
+				i, *Trigger->GetName(), *Prim->GetName());
+			BoundCount++;
 			break; // Only bind first primitive per trigger actor
 		}
 	}
+	UE_LOG(LogTemp, Error, TEXT("  RegisterEntryTriggers: %d/%d triggers bound"), BoundCount, EntryTriggers.Num());
 }
 
 void AArenaManager::OnEntryTriggerOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
+	UE_LOG(LogTemp, Error, TEXT("ArenaManager::OnEntryTriggerOverlap — OtherActor: %s, CurrentState: %d, Component: %s"),
+		OtherActor ? *OtherActor->GetName() : TEXT("NULL"), (int32)CurrentState,
+		OverlappedComponent ? *OverlappedComponent->GetName() : TEXT("NULL"));
+
 	if (CurrentState != EArenaState::Idle)
 	{
+		UE_LOG(LogTemp, Error, TEXT("  SKIPPED — state is not Idle (%d)"), (int32)CurrentState);
 		return;
 	}
 
@@ -153,6 +291,8 @@ void AArenaManager::OnEntryTriggerOverlap(UPrimitiveComponent* OverlappedCompone
 	{
 		return;
 	}
+
+	UE_LOG(LogTemp, Error, TEXT("  Player entered trigger — scheduling activation in 0.4s"));
 
 	// Player entered a trigger zone — small delay before activation
 	PendingPlayer = Player;
@@ -201,6 +341,15 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 	// Save checkpoint so player respawns here on death
 	SaveArenaCheckpoint(Player);
 
+	// Start arena music
+	if (ArenaMusicTrack)
+	{
+		if (UMusicPlayerSubsystem* MusicSubsystem = GetGameInstance()->GetSubsystem<UMusicPlayerSubsystem>())
+		{
+			MusicSubsystem->StartTrack(ArenaMusicTrack, true);
+		}
+	}
+
 	OnArenaStarted.Broadcast();
 
 	if (ArenaMode == EArenaMode::Sustain)
@@ -214,13 +363,60 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 		UE_LOG(LogTemp, Error, TEXT("  ActivateArena [SUSTAIN] — AliveNPCs: %d, Cap: %d, MaxSustainEnemies: %d, InitialLevelEnemyCount: %d, PoolSize: %d, SpawnPoints: %d"),
 			AliveNPCs.Num(), Cap, MaxSustainEnemies, InitialLevelEnemyCount, SustainEnemyPool.Num(), SpawnPoints.Num());
 
-		// Dump existing AliveNPCs to see if there are ghosts
+		// Force pre-placed enemies to target the player immediately
+		AActor* PlayerActor = Player;
+		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] ActivateArena SUSTAIN: NavSystem=%s"), NavSys ? TEXT("EXISTS") : TEXT("NULL!!!"));
+		if (NavSys && PlayerActor)
+		{
+			FNavLocation NavLoc;
+			const FVector PlayerLoc = PlayerActor->GetActorLocation();
+			const bool bPlayerOnNav = NavSys->ProjectPointToNavigation(PlayerLoc, NavLoc, FVector(50, 50, 200));
+			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] Player at %s — OnNavMesh=%d"), *PlayerLoc.ToString(), bPlayerOnNav);
+		}
+
 		for (int32 i = 0; i < AliveNPCs.Num(); i++)
 		{
 			AShooterNPC* NPC = AliveNPCs[i].Get();
 			UE_LOG(LogTemp, Error, TEXT("  ActivateArena: EXISTING AliveNPCs[%d]: %s (Valid: %d)"),
 				i, NPC ? *NPC->GetName() : TEXT("NULL"), AliveNPCs[i].IsValid());
+			if (NPC && PlayerActor)
+			{
+				// [NAV_DEBUG] Check if NPC location is on NavMesh
+				if (NavSys)
+				{
+					FNavLocation NavLoc;
+					const FVector NPCLoc = NPC->GetActorLocation();
+					const bool bOnNav = NavSys->ProjectPointToNavigation(NPCLoc, NavLoc, FVector(50, 50, 200));
+					UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] NPC %s at %s — OnNavMesh=%d"),
+						*NPC->GetName(), *NPCLoc.ToString(), bOnNav);
+					if (!bOnNav)
+					{
+						UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] NPC %s IS NOT ON NAVMESH!"), *NPC->GetName());
+					}
+				}
+
+				if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
+				{
+					AIController->SetCurrentTarget(PlayerActor);
+				}
+			}
 		}
+
+		// Refresh perception on next tick so SenseEnemies task picks up the target
+		GetWorldTimerManager().SetTimerForNextTick([this]()
+		{
+			for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+			{
+				if (AShooterNPC* NPC = NPCPtr.Get())
+				{
+					if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
+					{
+						AIController->ForcePerceptionUpdate();
+					}
+				}
+			}
+		});
 
 		int32 SpawnedCount = 0;
 		while (AliveNPCs.Num() < Cap && SustainEnemyPool.Num() > 0)
@@ -511,37 +707,64 @@ void AArenaManager::OnNPCDied(AShooterNPC* DeadNPC)
 		if (DeadNPC->bIsPooled)
 		{
 			NPCPool.Add(DeadNPC);
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::OnNPCDied [SUSTAIN] — Added %s to recycle pool (pool size: %d)"),
+			UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — Added %s to recycle pool (pool size: %d)"),
 				*DeadNPC->GetName(), NPCPool.Num());
 		}
 
 		// Check if we ran out of spawns and all enemies are dead
 		if (SustainRemainingSpawns == 0 && AliveNPCs.Num() == 0)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::OnNPCDied [SUSTAIN] — No remaining spawns and no alive NPCs, completing arena"));
+			UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — No remaining spawns and no alive NPCs → COMPLETING ARENA"));
 			CompleteArena();
 			return;
 		}
 
-		// Sustain mode: spawn replacement if under cap and spawns remain
+		// Sustain mode: spawn replacements to fill up to cap (handles multi-kill)
 		const int32 Cap = GetEffectiveMaxSustainEnemies();
 		const bool bCanSpawn = SustainRemainingSpawns != 0; // -1 = infinite, >0 = has budget
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::OnNPCDied [SUSTAIN] — AliveNPCs: %d, Cap: %d, SustainPool: %d, RemainingSpawns: %d"),
-			AliveNPCs.Num(), Cap, SustainEnemyPool.Num(), SustainRemainingSpawns);
+		const int32 Deficit = Cap - AliveNPCs.Num();
 
-		if (AliveNPCs.Num() < Cap && SustainEnemyPool.Num() > 0 && bCanSpawn)
+		UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — AliveNPCs: %d, Cap: %d, Deficit: %d, PoolEntries: %d, RemainingSpawns: %d, CanSpawn: %d"),
+			AliveNPCs.Num(), Cap, Deficit, SustainEnemyPool.Num(), SustainRemainingSpawns, bCanSpawn);
+
+		if (Deficit > 0 && SustainEnemyPool.Num() > 0 && bCanSpawn)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::OnNPCDied [SUSTAIN] — Under cap, calling SpawnSustainEnemy()"));
+			// Spawn enough enemies to fill back up to cap (handles simultaneous deaths)
+			int32 ToSpawn = Deficit;
 			if (SustainRemainingSpawns > 0)
 			{
-				SustainRemainingSpawns--;
+				ToSpawn = FMath::Min(ToSpawn, SustainRemainingSpawns);
 			}
-			SpawnSustainEnemy();
+
+			UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — Spawning %d replacements (deficit: %d, budget: %d)"),
+				ToSpawn, Deficit, SustainRemainingSpawns);
+
+			for (int32 i = 0; i < ToSpawn; i++)
+			{
+				const int32 BeforeCount = AliveNPCs.Num();
+				SpawnSustainEnemy();
+
+				if (AliveNPCs.Num() > BeforeCount)
+				{
+					// Successfully spawned — decrement budget
+					if (SustainRemainingSpawns > 0)
+					{
+						SustainRemainingSpawns--;
+					}
+					UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — Spawned replacement %d/%d. AliveNPCs: %d, RemainingSpawns: %d"),
+						i + 1, ToSpawn, AliveNPCs.Num(), SustainRemainingSpawns);
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — SpawnSustainEnemy FAILED on replacement %d/%d, stopping"), i + 1, ToSpawn);
+					break;
+				}
+			}
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::OnNPCDied [SUSTAIN] — NOT spawning. AliveNPCs(%d) >= Cap(%d) OR SustainPool(%d) == 0 OR RemainingSpawns(%d) == 0"),
-				AliveNPCs.Num(), Cap, SustainEnemyPool.Num(), SustainRemainingSpawns);
+			UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied [SUSTAIN] — NOT spawning. Deficit=%d, PoolEntries=%d, CanSpawn=%d"),
+				Deficit, SustainEnemyPool.Num(), bCanSpawn);
 		}
 	}
 	else
@@ -616,6 +839,18 @@ void AArenaManager::CompleteArena()
 
 	// Open exits
 	SetBlockersEnabled(false);
+
+	// Stop arena music
+	if (ArenaMusicTrack)
+	{
+		if (UMusicPlayerSubsystem* MusicSubsystem = GetGameInstance()->GetSubsystem<UMusicPlayerSubsystem>())
+		{
+			MusicSubsystem->StopTrack();
+		}
+	}
+
+	// Save a completion checkpoint so dying after the arena doesn't send player back before it
+	SaveCompletionCheckpoint();
 
 	OnArenaCleared.Broadcast();
 
@@ -747,25 +982,55 @@ void AArenaManager::OnPlayerRespawned()
 
 void AArenaManager::RegisterLevelEnemies()
 {
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — ArenaMode: %d (0=Waves, 1=Sustain)"), (int32)ArenaMode);
+	UE_LOG(LogTemp, Error, TEXT("ArenaManager::RegisterLevelEnemies — ArenaMode: %s"),
+		ArenaMode == EArenaMode::Sustain ? TEXT("SUSTAIN") : TEXT("WAVES"));
 
 	if (ArenaMode != EArenaMode::Sustain)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — SKIPPED (not Sustain mode)"));
+		UE_LOG(LogTemp, Error, TEXT("  RegisterLevelEnemies — SKIPPED (not Sustain mode)"));
 		return;
 	}
+
+	ULevel* MyLevel = GetLevel();
+	UE_LOG(LogTemp, Error, TEXT("  RegisterLevelEnemies — MyLevel: %s (Outer: %s), IsPersistent: %d"),
+		MyLevel ? *MyLevel->GetName() : TEXT("NULL"),
+		(MyLevel && MyLevel->GetOuter()) ? *MyLevel->GetOuter()->GetName() : TEXT("NULL"),
+		MyLevel == GetWorld()->PersistentLevel);
 
 	TArray<AActor*> AllNPCs;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AShooterNPC::StaticClass(), AllNPCs);
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — GetAllActorsOfClass found %d ShooterNPC actors"), AllNPCs.Num());
+	UE_LOG(LogTemp, Error, TEXT("  RegisterLevelEnemies — GetAllActorsOfClass found %d ShooterNPC actors in world"), AllNPCs.Num());
+
+	int32 SkippedOtherLevel = 0;
+	int32 SkippedAlreadyTracked = 0;
+	int32 SkippedDead = 0;
 
 	for (AActor* Actor : AllNPCs)
 	{
 		AShooterNPC* NPC = Cast<AShooterNPC>(Actor);
 		if (!NPC)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — Cast failed for %s"), *Actor->GetName());
+			continue;
+		}
+
+		// Filter by sublevel — only track NPCs in the same level as this ArenaManager
+		// (same logic as RegisterAutoProps to prevent cross-arena interference)
+		if (NPC->GetLevel() != MyLevel)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  RegisterLevelEnemies — SKIPPED %s (different level: %s vs %s)"),
+				*NPC->GetName(),
+				NPC->GetLevel() ? *NPC->GetLevel()->GetOuter()->GetName() : TEXT("NULL"),
+				MyLevel ? *MyLevel->GetOuter()->GetName() : TEXT("NULL"));
+			SkippedOtherLevel++;
+			continue;
+		}
+
+		// Skip dead NPCs (e.g. from previous arena run before reset)
+		if (NPC->IsDead())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  RegisterLevelEnemies — SKIPPED %s (already dead)"), *NPC->GetName());
+			SkippedDead++;
 			continue;
 		}
 
@@ -781,24 +1046,32 @@ void AArenaManager::RegisterLevelEnemies()
 		}
 		if (bAlreadyTracked)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — %s already tracked, skipping"), *NPC->GetName());
+			UE_LOG(LogTemp, Warning, TEXT("  RegisterLevelEnemies — SKIPPED %s (already tracked)"), *NPC->GetName());
+			SkippedAlreadyTracked++;
 			continue;
 		}
 
 		AliveNPCs.Add(NPC);
 		NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
 		NPC->bIsPooled = true;
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — Registered: %s (class: %s, pooled)"), *NPC->GetName(), *NPC->GetClass()->GetName());
+		UE_LOG(LogTemp, Error, TEXT("  RegisterLevelEnemies — REGISTERED: %s (class: %s)"), *NPC->GetName(), *NPC->GetClass()->GetName());
 	}
 
 	InitialLevelEnemyCount = AliveNPCs.Num();
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::RegisterLevelEnemies — DONE. Total registered: %d, InitialLevelEnemyCount: %d"), AliveNPCs.Num(), InitialLevelEnemyCount);
+	UE_LOG(LogTemp, Error, TEXT("  RegisterLevelEnemies DONE — Registered: %d, Skipped: %d other-level, %d already-tracked, %d dead. InitialLevelEnemyCount: %d"),
+		AliveNPCs.Num(), SkippedOtherLevel, SkippedAlreadyTracked, SkippedDead, InitialLevelEnemyCount);
 }
 
 int32 AArenaManager::GetEffectiveMaxSustainEnemies() const
 {
-	return (MaxSustainEnemies == 0) ? InitialLevelEnemyCount : MaxSustainEnemies;
+	const int32 Effective = (MaxSustainEnemies == 0) ? InitialLevelEnemyCount : MaxSustainEnemies;
+	if (Effective == 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("ArenaManager::GetEffectiveMaxSustainEnemies — WARNING: Cap is 0! MaxSustainEnemies=%d, InitialLevelEnemyCount=%d. No enemies will spawn!"),
+			MaxSustainEnemies, InitialLevelEnemyCount);
+	}
+	return Effective;
 }
 
 TSubclassOf<AShooterNPC> AArenaManager::PickWeightedSustainClass() const
@@ -842,21 +1115,37 @@ TSubclassOf<AShooterNPC> AArenaManager::PickWeightedSustainClass() const
 
 AArenaSpawnPoint* AArenaManager::PickSustainSpawnPoint(TSubclassOf<AShooterNPC> NPCClass)
 {
+	UE_LOG(LogTemp, Error, TEXT("PickSustainSpawnPoint — NPCClass: %s, SpawnPoints: %d"),
+		NPCClass ? *NPCClass->GetName() : TEXT("NULL"), SpawnPoints.Num());
+
 	// Collect all valid points for this class
 	TArray<AArenaSpawnPoint*> AllValid;
-	for (const TSoftObjectPtr<AArenaSpawnPoint>& Ref : SpawnPoints)
+	for (int32 i = 0; i < SpawnPoints.Num(); i++)
 	{
-		if (AArenaSpawnPoint* Point = Ref.Get())
+		const TSoftObjectPtr<AArenaSpawnPoint>& Ref = SpawnPoints[i];
+		AArenaSpawnPoint* Point = Ref.Get();
+		if (!Point)
 		{
-			if (Point->IsClassAllowed(NPCClass))
-			{
-				AllValid.Add(Point);
-			}
+			UE_LOG(LogTemp, Error, TEXT("  SpawnPoints[%d]: Get() returned NULL (path: %s)"), i, *Ref.ToSoftObjectPath().ToString());
+			continue;
+		}
+
+		const bool bAllowed = Point->IsClassAllowed(NPCClass);
+		UE_LOG(LogTemp, Error, TEXT("  SpawnPoints[%d]: %s — IsClassAllowed=%d, bAirSpawn=%d, ExcludedClasses=%d"),
+			i, *Point->GetName(), bAllowed, Point->bAirSpawn, Point->ExcludedNPCClasses.Num());
+
+		if (bAllowed)
+		{
+			AllValid.Add(Point);
 		}
 	}
 
+	UE_LOG(LogTemp, Error, TEXT("PickSustainSpawnPoint — AllValid: %d / %d"), AllValid.Num(), SpawnPoints.Num());
+
 	if (AllValid.Num() == 0)
 	{
+		UE_LOG(LogTemp, Error, TEXT("PickSustainSpawnPoint — RETURNING NULL: no valid points for %s!"),
+			NPCClass ? *NPCClass->GetName() : TEXT("NULL"));
 		return nullptr;
 	}
 
@@ -2088,6 +2377,48 @@ void AArenaManager::EndCameraLock()
 
 // ==================== Island ====================
 
+void AArenaManager::ForceActivateArena()
+{
+	if (CurrentState != EArenaState::Idle)
+	{
+		UE_LOG(LogTemp, Error, TEXT("ArenaManager::ForceActivateArena — SKIPPED, state is %d (not Idle)"), (int32)CurrentState);
+		return;
+	}
+
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	AShooterCharacter* Player = PC ? Cast<AShooterCharacter>(PC->GetPawn()) : nullptr;
+	if (!Player)
+	{
+		UE_LOG(LogTemp, Error, TEXT("ArenaManager::ForceActivateArena — FAILED: no player found"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Error, TEXT("ArenaManager::ForceActivateArena — Activating arena manually"));
+	ActivateArena(Player);
+}
+
+TArray<AShooterNPC*> AArenaManager::GetAliveNPCs() const
+{
+	TArray<AShooterNPC*> Result;
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		if (AShooterNPC* NPC = NPCPtr.Get())
+		{
+			if (!NPC->IsDead())
+			{
+				Result.Add(NPC);
+			}
+		}
+	}
+	return Result;
+}
+
+void AArenaManager::PauseSustainSpawning()
+{
+	SustainRemainingSpawns = 0;
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Sustain spawning paused (SustainRemainingSpawns = 0)"));
+}
+
 void AArenaManager::ForceCompleteArena()
 {
 	if (CurrentState == EArenaState::Completed || CurrentState == EArenaState::Idle)
@@ -2160,4 +2491,39 @@ void AArenaManager::SaveArenaCheckpoint(AShooterCharacter* Player)
 	CheckpointSubsystem->SetCheckpointData(NewData);
 
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Checkpoint saved at arena respawn point"));
+}
+
+void AArenaManager::SaveCompletionCheckpoint()
+{
+	if (!CheckpointSubsystem)
+	{
+		return;
+	}
+
+	AShooterCharacter* Player = Cast<AShooterCharacter>(GetWorld()->GetFirstPlayerController()->GetPawn());
+	if (!Player)
+	{
+		return;
+	}
+
+	FCheckpointData NewData;
+	NewData.bIsValid = true;
+	NewData.CheckpointID = FGuid::NewGuid();
+
+	// Use the same respawn point as the arena checkpoint
+	if (AActor* RespawnActor = PlayerRespawnPoint.Get())
+	{
+		NewData.SpawnTransform = RespawnActor->GetActorTransform();
+	}
+	else
+	{
+		NewData.SpawnTransform = Player->GetActorTransform();
+	}
+
+	// Save current player state (post-arena: full health, current weapons/upgrades)
+	Player->SaveToCheckpoint(NewData);
+
+	CheckpointSubsystem->SetCheckpointData(NewData);
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Completion checkpoint saved after arena cleared"));
 }

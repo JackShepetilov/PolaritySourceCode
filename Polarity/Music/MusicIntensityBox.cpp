@@ -190,24 +190,21 @@ void AMusicIntensityBox::OnPlayerEntered()
 		return;
 	}
 
-	// Check if music is already playing (from another MIB)
-	if (MusicSubsystem->IsPlaying())
+	if (MusicSubsystem->IsPlaying() && MusicSubsystem->GetCurrentTrack() == MusicTrack)
 	{
-		// Just set intense zone, music continues
-		LogDebug(TEXT("Music already playing - just setting intense zone"));
-		MusicSubsystem->SetIntenseZone(true);
+		// Same track already playing - nothing to do
+		LogDebug(TEXT("Same track already playing - ignoring"));
+		return;
 	}
-	else
-	{
-		// Start new track
-		bool bShouldFadeIn = bIsFirstMusicEntry;
-		LogDebug(FString::Printf(TEXT("Starting track '%s' (FadeIn: %s)"),
-			*MusicTrack->TrackName,
-			bShouldFadeIn ? TEXT("YES") : TEXT("NO")));
 
-		MusicSubsystem->StartTrack(MusicTrack, bShouldFadeIn);
-		bIsFirstMusicEntry = false;
-	}
+	// Start new track (StartTrack internally stops the old one if any)
+	bool bShouldFadeIn = bIsFirstMusicEntry;
+	LogDebug(FString::Printf(TEXT("Starting track '%s' (FadeIn: %s)"),
+		*MusicTrack->TrackName,
+		bShouldFadeIn ? TEXT("YES") : TEXT("NO")));
+
+	MusicSubsystem->StartTrack(MusicTrack, bShouldFadeIn);
+	bIsFirstMusicEntry = false;
 }
 
 void AMusicIntensityBox::OnPlayerExited()
@@ -219,13 +216,7 @@ void AMusicIntensityBox::OnPlayerExited()
 
 	bPlayerInside = false;
 
-	LogDebug(FString::Printf(TEXT("=== Player EXITED MIB '%s' ==="), *GetName()));
-
-	if (MusicSubsystem && bIsActive)
-	{
-		// Switch to calm mode (music continues at lower volume)
-		MusicSubsystem->SetIntenseZone(false);
-	}
+	LogDebug(FString::Printf(TEXT("=== Player EXITED MIB '%s' === (music continues at full volume)"), *GetName()));
 }
 
 // ==================== Enemy Tracking ====================
@@ -325,16 +316,11 @@ void AMusicIntensityBox::UpdateActiveState()
 
 	const int32 EnemyCount = TrackedEnemies.Num();
 
-	// Deactivate if no enemies left AND player was inside
-	if (EnemyCount == 0 && bIsActive && bPlayerInside)
+	// Deactivate if no enemies left
+	if (EnemyCount == 0 && bIsActive)
 	{
-		LogDebug(FString::Printf(TEXT("All enemies cleared in MIB '%s' - deactivating"), *GetName()));
+		LogDebug(FString::Printf(TEXT("All enemies cleared in MIB '%s' - deactivating (music continues)"), *GetName()));
 		bIsActive = false;
-
-		if (MusicSubsystem)
-		{
-			MusicSubsystem->OnEnemiesCleared();
-		}
 	}
 }
 

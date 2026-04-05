@@ -4,15 +4,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/DataTable.h"
 #include "SubtitleTypes.generated.h"
 
 class USoundBase;
 
 /**
- * Single subtitle entry in a data asset
+ * Single subtitle entry in a data asset.
+ * Also usable as a DataTable row for CSV import.
  */
 USTRUCT(BlueprintType)
-struct FSubtitleEntry
+struct FSubtitleEntry : public FTableRowBase
 {
 	GENERATED_BODY()
 

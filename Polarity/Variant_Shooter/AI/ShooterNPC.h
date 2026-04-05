@@ -10,6 +10,7 @@
 
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
+class UCurveFloat;
 
 /** Entry in the NPC's ranged weapon drop table */
 USTRUCT(BlueprintType)
@@ -322,6 +323,20 @@ protected:
 
 	/** Previous charge value for change detection */
 	float PreviousChargeValue = 0.0f;
+
+	// ==================== Hit Flash Overlay ====================
+
+	/** Material for damage hit flash (additive/translucent white with scalar param "Opacity") */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Hit Flash")
+	TObjectPtr<UMaterialInterface> HitFlashOverlayMaterial;
+
+	/** Curve controlling flash intensity over normalized time (X: 0-1, Y: 0-1 opacity) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Hit Flash")
+	TObjectPtr<UCurveFloat> HitFlashCurve;
+
+	/** Duration of the hit flash effect in seconds */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Hit Flash", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float HitFlashDuration = 0.1f;
 
 	// ==================== Knockback ====================
 
@@ -871,6 +886,23 @@ public:
 	void NotifyReverseLaunchRelease();
 
 private:
+	// ==================== Hit Flash State ====================
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> HitFlashDMI;
+
+	TObjectPtr<UMaterialInterface> SavedOverlayBeforeFlash;
+	float HitFlashElapsed = -1.0f;
+	bool bHitFlashActive = false;
+
+	void StartHitFlash();
+	void UpdateHitFlash(float DeltaTime);
+	void EndHitFlash();
+
+	/** Returns the mesh component to apply hit flash overlay on. Override for non-standard meshes (e.g. DroneMesh). */
+	virtual UMeshComponent* GetHitFlashMeshComponent() const;
+
+
 	/** Currently playing captured montage (for looping and stop) */
 	UPROPERTY()
 	TObjectPtr<UAnimMontage> ActiveCapturedMontage;
@@ -900,7 +932,7 @@ public:
 	bool IsCaptured() const { return bIsCaptured; }
 
 	/** Enter launched state after reverse channeling release. Plays montage, enables NPC-NPC collision. */
-	void EnterLaunchedState();
+	virtual void EnterLaunchedState();
 
 	/** Returns true if NPC is in flight after reverse channeling launch */
 	UFUNCTION(BlueprintPure, Category = "Combat")
@@ -913,6 +945,14 @@ public:
 	/** Returns true if this NPC is dead */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsDead() const { return bIsDead; }
+
+	/** If true, Die() skips all loot drops (weapons, health, armor). Used by finale sequence. */
+	bool bSuppressDeathDrops = false;
+
+	/** Force-reset all combat states (captured, launched, knockback) so ApplyExplosionStun can be applied.
+	 *  Used by finale sequence to guarantee stun on every NPC regardless of current state. */
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void ForceResetCombatState();
 
 	/** If true, NPC is managed by a pool and won't self-destruct after death.
 	 *  Set by ArenaManager in sustain mode. */

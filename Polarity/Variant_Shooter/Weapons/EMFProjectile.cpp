@@ -147,6 +147,9 @@ void AEMFProjectile::SetProjectileCharge(float NewCharge)
 
 	// Update trail VFX to match new charge polarity
 	SpawnChargeBasedTrailVFX();
+
+	// Notify listeners that projectile has been fired with this charge
+	OnProjectileFired.Broadcast(NewCharge);
 }
 
 float AEMFProjectile::GetProjectileCharge() const
@@ -464,6 +467,26 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 		if (FMath::IsNearlyZero(Multiplier))
 		{
 			continue;
+		}
+
+		// LOS Shielding: skip sources blocked by geometry
+		if (bEnableLOSShielding)
+		{
+			FHitResult LOSHit;
+			FCollisionQueryParams LOSParams(SCENE_QUERY_STAT(EMFProjectile_LOS), true, this);
+			bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+				LOSHit, Position, Source.Position, LOSTraceChannel, LOSParams);
+
+			if (bDrawLOSDebug)
+			{
+				DrawDebugLine(GetWorld(), Position, Source.Position,
+					bBlocked ? FColor::Red : FColor::Green, false, -1.0f, 0, 0.5f);
+			}
+
+			if (bBlocked)
+			{
+				continue;
+			}
 		}
 
 		// Calculate force from this single source

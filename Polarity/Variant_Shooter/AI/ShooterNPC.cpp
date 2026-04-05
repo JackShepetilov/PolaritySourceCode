@@ -31,6 +31,7 @@
 #include "../DamageTypes/DamageType_EMFProximity.h"
 #include "../UI/DamageNumbersSubsystem.h"
 #include "../UI/EMFChargeWidgetSubsystem.h"
+#include "Curves/CurveFloat.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Boss/BossProjectile.h"
@@ -41,6 +42,7 @@
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
+#include "CameraShakeComponent.h"
 
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -63,11 +65,32 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 		// NPCs don't react to other NPCs' EM forces
 		EMFVelocityModifier->NPCForceMultiplier = 0.0f;
 	}
+
+	// === Performance: optimize animation ticking for NPCs ===
+	// Third person mesh (GetMesh()) - only tick animations when rendered
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		TPMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+	}
 }
 
 void AShooterNPC::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// === Performance: disable CameraShake on NPCs — they don't need it ===
+	if (UCameraShakeComponent* Shake = GetCameraShake())
+	{
+		Shake->SetComponentTickEnabled(false);
+	}
+
+	// === Performance: disable FirstPersonMesh on NPCs — not visible ===
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetComponentTickEnabled(false);
+		FPMesh->SetVisibility(false);
+		FPMesh->SetHiddenInGame(true);
+	}
 
 	// spawn the weapon
 	FActorSpawnParameters SpawnParams;
@@ -187,6 +210,12 @@ void AShooterNPC::Tick(float DeltaTime)
 	if (bIsLaunched)
 	{
 		UpdateLaunchedCollision();
+	}
+
+	// Update hit flash overlay
+	if (bHitFlashActive)
+	{
+		UpdateHitFlash(DeltaTime);
 	}
 
 	// Update Charge/Polarity - get charge from EMFVelocityModifier
@@ -339,6 +368,7 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	{
 		FVector DamageDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
 		PlayHitReaction(DamageDirection);
+		StartHitFlash();
 
 		// Retaliation: get immediate permission to shoot back
 		if (bUseCoordinator)
@@ -611,6 +641,10 @@ void AShooterNPC::Die()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
+	// === LOOT DROPS (skipped by finale sequence) ===
+	if (!bSuppressDeathDrops)
+	{
+
 	// Weapon drop: NPC may drop a melee weapon
 	if (DroppedMeleeWeaponClass)
 	{
@@ -752,6 +786,8 @@ void AShooterNPC::Die()
 			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
 			bKilledByNPC, bStunnedByNPCImpact);
 	}
+
+	} // end if (!bSuppressDeathDrops)
 
 	// play death sound
 	if (DeathSound)
@@ -1522,6 +1558,97 @@ void AShooterNPC::UpdateChargeOverlay(uint8 NewPolarity)
 	{
 		FPMesh->SetOverlayMaterial(TargetMaterial);
 	}
+}
+
+// ==================== Hit Flash Overlay ====================
+
+UMeshComponent* AShooterNPC::GetHitFlashMeshComponent() const
+{
+	return GetMesh();
+}
+
+void AShooterNPC::StartHitFlash()
+{
+	if (!HitFlashOverlayMaterial || bIsDead)
+	{
+		return;
+	}
+
+	// If already flashing, just restart the timer (don't overwrite the saved overlay)
+	if (bHitFlashActive)
+	{
+		HitFlashElapsed = 0.0f;
+		if (HitFlashDMI)
+		{
+			const float InitialAlpha = HitFlashCurve ? HitFlashCurve->GetFloatValue(0.0f) : 1.0f;
+			HitFlashDMI->SetScalarParameterValue(FName("Opacity"), InitialAlpha);
+		}
+		return;
+	}
+
+	UMeshComponent* FlashMesh = GetHitFlashMeshComponent();
+	if (!FlashMesh)
+	{
+		return;
+	}
+
+	// Save current overlay before we replace it
+	SavedOverlayBeforeFlash = FlashMesh->GetOverlayMaterial();
+
+	// Create DMI lazily (reuse across flashes)
+	if (!HitFlashDMI)
+	{
+		HitFlashDMI = UMaterialInstanceDynamic::Create(HitFlashOverlayMaterial, this);
+	}
+
+	const float InitialAlpha = HitFlashCurve ? HitFlashCurve->GetFloatValue(0.0f) : 1.0f;
+	HitFlashDMI->SetScalarParameterValue(FName("Opacity"), InitialAlpha);
+
+	FlashMesh->SetOverlayMaterial(HitFlashDMI);
+
+	HitFlashElapsed = 0.0f;
+	bHitFlashActive = true;
+}
+
+void AShooterNPC::UpdateHitFlash(float DeltaTime)
+{
+	if (!bHitFlashActive || !HitFlashDMI)
+	{
+		return;
+	}
+
+	HitFlashElapsed += DeltaTime;
+
+	if (HitFlashElapsed >= HitFlashDuration)
+	{
+		EndHitFlash();
+		return;
+	}
+
+	const float NormalizedTime = HitFlashElapsed / HitFlashDuration;
+	const float Alpha = HitFlashCurve
+		? HitFlashCurve->GetFloatValue(NormalizedTime)
+		: 1.0f - NormalizedTime;  // Linear fallback
+
+	HitFlashDMI->SetScalarParameterValue(FName("Opacity"), Alpha);
+}
+
+void AShooterNPC::EndHitFlash()
+{
+	bHitFlashActive = false;
+	HitFlashElapsed = -1.0f;
+
+	// Restore saved overlay only if our DMI is still the active overlay
+	// (another system like charge overlay may have already overwritten it)
+	if (UMeshComponent* FlashMesh = GetHitFlashMeshComponent())
+	{
+		if (FlashMesh->GetOverlayMaterial() == HitFlashDMI)
+		{
+			FlashMesh->SetOverlayMaterial(SavedOverlayBeforeFlash);
+		}
+	}
+
+	SavedOverlayBeforeFlash = nullptr;
 }
 
 void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
@@ -2542,6 +2669,33 @@ void AShooterNPC::TriggerEMFProximityKnockback(AShooterNPC* OtherNPC)
 
 	// Damage is NOT applied here - it will be applied when capsules actually collide
 	// via HandleNPCCollision() in UpdateKnockbackInterpolation()
+}
+
+void AShooterNPC::ForceResetCombatState()
+{
+	if (bIsDead)
+	{
+		return;
+	}
+
+	if (bIsCaptured)
+	{
+		ExitCapturedState();
+	}
+
+	if (bIsLaunched)
+	{
+		ExitLaunchedState();
+	}
+
+	if (bIsInKnockback)
+	{
+		// Temporarily clear bIsPermanentlyStunned so EndKnockbackStun actually runs
+		const bool bWasPermanent = bIsPermanentlyStunned;
+		bIsPermanentlyStunned = false;
+		EndKnockbackStun();
+		bIsPermanentlyStunned = bWasPermanent;
+	}
 }
 
 void AShooterNPC::EndKnockbackStun()

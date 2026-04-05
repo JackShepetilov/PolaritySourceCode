@@ -183,6 +183,12 @@ void UMusicPlayerSubsystem::StartTrack(UMusicTrackDataAsset* Track, bool bFadeIn
 		return;
 	}
 
+	// Cancel any pending stop timer from a previous StopTrack fade-out
+	if (UWorld* World = GetWorldForTimers())
+	{
+		World->GetTimerManager().ClearTimer(StopTimerHandle);
+	}
+
 	// Stop current track if any (without fade, we'll fade the new one)
 	if (AudioComponentA && AudioComponentA->IsPlaying())
 	{
@@ -668,10 +674,7 @@ float UMusicPlayerSubsystem::CalculateTargetVolume() const
 		return 1.0f;
 	}
 
-	// Get base volume multiplier based on intensity
-	float ZoneMultiplier = bIsInIntenseZone ? CurrentTrack->IntenseVolumeMultiplier : CurrentTrack->CalmVolumeMultiplier;
-
-	// Get part-specific volume
+	// Part-specific volume only (calm/intense logic disabled)
 	float PartVolume = 1.0f;
 	const FMusicPart* Part = CurrentTrack->FindPart(CurrentPartID);
 	if (Part)
@@ -679,7 +682,7 @@ float UMusicPlayerSubsystem::CalculateTargetVolume() const
 		PartVolume = Part->Volume;
 	}
 
-	return ZoneMultiplier * PartVolume;
+	return PartVolume;
 }
 
 // ==================== State ====================

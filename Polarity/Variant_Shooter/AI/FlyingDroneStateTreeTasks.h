@@ -233,3 +233,37 @@ struct POLARITY_API FStateTreeDroneIsDashingCondition : public FStateTreeConditi
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
 #endif
 };
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Drone Is In No-Fly Zone
+// Checks if drone's current position is inside a NoFlyZone volume
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeDroneIsInNoFlyZoneInstanceData
+{
+	GENERATED_BODY()
+
+	/** FlyingDrone to check */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AFlyingDrone> Drone;
+};
+
+USTRUCT(DisplayName = "Drone Is In No-Fly Zone", Category = "Flying Drone")
+struct POLARITY_API FStateTreeDroneIsInNoFlyZoneCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeDroneIsInNoFlyZoneInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};

@@ -75,11 +75,33 @@ void UShooterGameSettings::ApplyAudioSettings()
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SFXClass path: %s"), *SFXSoundClass.ToString());
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] VoiceClass path: %s"), *VoiceSoundClass.ToString());
 
-	// Load audio assets if they're set
+	// Load audio assets - try TSoftObjectPtr first, then fallback to LoadObject for packaged builds
 	USoundMix* SoundMix = AudioSoundMix.LoadSynchronous();
 	USoundClass* MusicClass = MusicSoundClass.LoadSynchronous();
 	USoundClass* SFXClass = SFXSoundClass.LoadSynchronous();
 	USoundClass* VoiceClass = VoiceSoundClass.LoadSynchronous();
+
+	// Fallback: if soft pointers failed (asset not cooked via soft ref), try LoadObject directly
+	if (!SoundMix)
+	{
+		SoundMix = LoadObject<USoundMix>(nullptr, TEXT("/Game/Audio/Classes/NewSoundMix.NewSoundMix"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SoundMix soft ref failed, LoadObject fallback: %s"), SoundMix ? TEXT("OK") : TEXT("STILL NULL"));
+	}
+	if (!MusicClass)
+	{
+		MusicClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Music.Music"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] MusicClass soft ref failed, LoadObject fallback: %s"), MusicClass ? TEXT("OK") : TEXT("STILL NULL"));
+	}
+	if (!SFXClass)
+	{
+		SFXClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/SFX.SFX"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SFXClass soft ref failed, LoadObject fallback: %s"), SFXClass ? TEXT("OK") : TEXT("STILL NULL"));
+	}
+	if (!VoiceClass)
+	{
+		VoiceClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Voice.Voice"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] VoiceClass soft ref failed, LoadObject fallback: %s"), VoiceClass ? TEXT("OK") : TEXT("STILL NULL"));
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Loaded: SoundMix=%s, Music=%s, SFX=%s, Voice=%s"),
 		SoundMix ? TEXT("OK") : TEXT("NULL"),
@@ -89,7 +111,7 @@ void UShooterGameSettings::ApplyAudioSettings()
 
 	if (!SoundMix)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] AudioSoundMix FAILED to load! Path: %s"), *AudioSoundMix.ToString());
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] AudioSoundMix FAILED to load! Path: %s. Make sure the asset is in 'Additional Asset Directories to Cook'!"), *AudioSoundMix.ToString());
 		return;
 	}
 
@@ -197,7 +219,9 @@ void UShooterGameSettings::ApplyControlSettings()
 					const float BaseSensitivity = 2.5f;
 
 					const float YawScale = BaseSensitivity * MouseSensitivity * MouseSensitivityX * (bInvertMouseX ? -1.0f : 1.0f);
-					const float PitchScale = BaseSensitivity * MouseSensitivity * MouseSensitivityY * (bInvertMouseY ? -1.0f : 1.0f);
+					// UE default PitchScale is -2.5 (negative = standard non-inverted look)
+					// So normal (non-inverted) must be negative, inverted must be positive
+					const float PitchScale = BaseSensitivity * MouseSensitivity * MouseSensitivityY * (bInvertMouseY ? 1.0f : -1.0f);
 
 					// Use deprecated setters (still work with bEnableLegacyInputScales=true)
 					PRAGMA_DISABLE_DEPRECATION_WARNINGS

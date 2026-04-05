@@ -79,6 +79,26 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death")
 	float DeathEffectDuration = 1.0f;
 
+	/** Scale explosion damage/radius/VFX by charge magnitude (like EMFPhysicsProp) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath"))
+	bool bScaleExplosionWithCharge = true;
+
+	/** Reference charge for scaling: |charge| / this = scale factor */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath && bScaleExplosionWithCharge", ClampMin = "1.0"))
+	float ExplosionReferenceCharge = 50.0f;
+
+	/** Minimum charge scale (clamp low end) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath && bScaleExplosionWithCharge", ClampMin = "0.1", ClampMax = "1.0"))
+	float MinChargeScale = 0.5f;
+
+	/** Maximum charge scale (clamp high end) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Death", meta = (EditCondition = "bExplodeOnDeath && bScaleExplosionWithCharge", ClampMin = "1.0", ClampMax = "5.0"))
+	float MaxChargeScale = 2.0f;
+
+	/** Angular spin speed (deg/s) applied to drone mesh when launched. 0 = no spin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat", meta = (ClampMin = "0.0", ClampMax = "3600.0"))
+	float LaunchSpinSpeed = 720.0f;
+
 	// ==================== Combat Settings ====================
 
 	/** If true, drone will automatically shoot at visible enemies (legacy - disable for StateTree control) */
@@ -204,6 +224,12 @@ protected:
 	/** Override damage handling to trigger drone-specific death */
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
+	/** Override hit flash mesh — drone uses DroneMesh (StaticMesh) instead of GetMesh() (SkeletalMesh) */
+	virtual UMeshComponent* GetHitFlashMeshComponent() const override;
+
+	/** Override to apply spin on launch */
+	virtual void EnterLaunchedState() override;
+
 	/** Override weapon attachment for drone body */
 	virtual void AttachWeaponMeshes(AShooterWeapon* WeaponToAttach) override;
 
@@ -220,6 +246,12 @@ protected:
 	/** Override to prevent parent's OnCapsuleHit from running during knockback
 	 *  (parent's interpolation system handles wall collisions via CheckKnockbackWallCollision) */
 	virtual void OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit) override;
+
+	/** Override to stop FlyingMovement and reset angular velocity on capture */
+	virtual void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr) override;
+
+	/** Override to restore flying mode after capture release */
+	virtual void ExitCapturedState() override;
 
 public:
 

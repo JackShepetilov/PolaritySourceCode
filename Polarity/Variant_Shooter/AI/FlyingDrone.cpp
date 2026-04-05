@@ -29,6 +29,7 @@
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
+#include "ShooterCharacter.h"
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -139,6 +140,23 @@ void AFlyingDrone::Tick(float DeltaTime)
 }
 
 // ==================== Damage & Death Handling ====================
+
+UMeshComponent* AFlyingDrone::GetHitFlashMeshComponent() const
+{
+	return DroneMesh;
+}
+
+void AFlyingDrone::EnterLaunchedState()
+{
+	Super::EnterLaunchedState();
+
+	// Apply random spin to drone mesh on launch (like prop's ReverseLaunchSpinSpeed)
+	if (LaunchSpinSpeed > 0.0f)
+	{
+		const FVector RandomSpin = FMath::VRand() * LaunchSpinSpeed;
+		MeshAngularVelocity = RandomSpin;
+	}
+}
 
 float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
@@ -282,6 +300,8 @@ void AFlyingDrone::DroneDie()
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
 	// Spawn health pickups: prop/drone kill, wall slam self-destruct, or killed while stunned by explosion
+	if (!bSuppressDeathDrops)
+	{
 	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s DroneDie(): bWasChannelingTarget=%d, HealthPickupClass=%s, bStunnedByExplosion=%d"),
 		*GetName(), bWasChannelingTarget,
 		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"),
@@ -313,6 +333,7 @@ void AFlyingDrone::DroneDie()
 			*GetName(), bIsChannelingKineticKill,
 			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1);
 	}
+	} // end if (!bSuppressDeathDrops)
 
 	if (bExplodeOnDeath)
 	{
@@ -404,6 +425,17 @@ void AFlyingDrone::DroneDie()
 
 void AFlyingDrone::TriggerExplosion()
 {
+	// Charge-proportionate scaling (like EMFPhysicsProp::Explode)
+	float ChargeScale = 1.0f;
+	if (bScaleExplosionWithCharge && EMFVelocityModifier)
+	{
+		const float AbsCharge = FMath::Abs(EMFVelocityModifier->GetCharge());
+		ChargeScale = FMath::Clamp(AbsCharge / ExplosionReferenceCharge, MinChargeScale, MaxChargeScale);
+	}
+
+	const float FinalExplosionDamage = ExplosionDamage * ChargeScale;
+	const float FinalExplosionRadius = ExplosionRadius * ChargeScale;
+
 	// Spawn explosion VFX
 	SpawnExplosionEffect();
 
@@ -413,26 +445,21 @@ void AFlyingDrone::TriggerExplosion()
 		UGameplayStatics::PlaySoundAtLocation(GetWorld(), ExplosionSound, GetActorLocation());
 	}
 
-	// Apply explosion damage to all actors in radius
-	// Manual overlap instead of ApplyRadialDamage: NPC friendly-fire check blocks
-	// damage from ShooterNPC-derived sources, so we pass nullptr as instigator/causer
-	if (ExplosionDamage > 0.0f && ExplosionRadius > 0.0f)
+	// Apply explosion damage to all actors in radius + track for delegate
+	float ImpactTotalDamage = 0.0f;
+	int32 ImpactKillCount = 0;
+
+	if (FinalExplosionDamage > 0.0f && FinalExplosionRadius > 0.0f)
 	{
 		const FVector Origin = GetActorLocation();
 
 		TArray<FOverlapResult> Overlaps;
-		FCollisionShape Sphere = FCollisionShape::MakeSphere(ExplosionRadius);
+		FCollisionShape Sphere = FCollisionShape::MakeSphere(FinalExplosionRadius);
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(this);
 
-		// Sweep Pawn channel (players + NPCs)
 		GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 
-		UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] %s: Radius=%.0f, MaxDamage=%.0f, Overlaps=%d"),
-			*GetName(), ExplosionRadius, ExplosionDamage, Overlaps.Num());
-
-		// Player pawn as DamageCauser: not a ShooterNPC, so friendly-fire check passes.
-		// DamageNumbersSubsystem recognizes player pawn as "from player" and shows numbers.
 		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
 
 		TSet<AActor*> DamagedActors;
@@ -446,7 +473,6 @@ void AFlyingDrone::TriggerExplosion()
 			}
 			DamagedActors.Add(HitActor);
 
-			// Line-of-sight check (same as ApplyRadialDamage with bDoFullDamage=false)
 			FHitResult LOSHit;
 			FCollisionQueryParams LOSParams;
 			LOSParams.AddIgnoredActor(this);
@@ -455,41 +481,54 @@ void AFlyingDrone::TriggerExplosion()
 				LOSHit, Origin, HitActor->GetActorLocation(), ECC_Visibility, LOSParams);
 			if (bBlocked)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] LOS blocked to %s by %s"),
-					*HitActor->GetName(), LOSHit.GetActor() ? *LOSHit.GetActor()->GetName() : TEXT("Unknown"));
 				continue;
 			}
 
-			// Linear falloff: full damage at center, zero at edge
 			const float Distance = FVector::Dist(Origin, HitActor->GetActorLocation());
-			const float DamageScale = FMath::Clamp(1.0f - Distance / ExplosionRadius, 0.0f, 1.0f);
-			const float FinalDamage = ExplosionDamage * DamageScale;
+			const float DamageScale = FMath::Clamp(1.0f - Distance / FinalExplosionRadius, 0.0f, 1.0f);
+			const float ActorDamage = FinalExplosionDamage * DamageScale;
 
-			if (FinalDamage <= 0.0f)
+			if (ActorDamage <= 0.0f)
 			{
 				continue;
 			}
 
-			UE_LOG(LogTemp, Warning, TEXT("[Drone Explosion] Hit %s: Dist=%.0f, Scale=%.2f, Damage=%.1f"),
-				*HitActor->GetName(), Distance, DamageScale, FinalDamage);
+			// Track NPC state for kill detection
+			AShooterNPC* HitNPC = Cast<AShooterNPC>(HitActor);
+			const bool bWasAlive = HitNPC && !HitNPC->IsDead();
 
-			// nullptr instigator bypasses NPC friendly-fire check.
-			// PlayerPawn as DamageCauser bypasses Cast<AShooterNPC> and triggers damage numbers.
-			// FRadialDamageEvent carries Origin so victims can compute directed dismemberment.
 			FRadialDamageEvent RadialDamageEvent;
 			RadialDamageEvent.DamageTypeClass = UDamageType_DroneExplosion::StaticClass();
 			RadialDamageEvent.Origin = Origin;
-			RadialDamageEvent.Params.BaseDamage = ExplosionDamage;
-			RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
-			HitActor->TakeDamage(FinalDamage, RadialDamageEvent, nullptr, PlayerPawn);
+			RadialDamageEvent.Params.BaseDamage = FinalExplosionDamage;
+			RadialDamageEvent.Params.OuterRadius = FinalExplosionRadius;
+			HitActor->TakeDamage(ActorDamage, RadialDamageEvent, nullptr, PlayerPawn);
+
+			if (bWasAlive)
+			{
+				ImpactTotalDamage += ActorDamage;
+				if (HitNPC->IsDead())
+				{
+					ImpactKillCount++;
+				}
+			}
+		}
+	}
+
+	// Broadcast impact delegate to player character
+	if (ImpactTotalDamage > 0.0f)
+	{
+		if (AShooterCharacter* Player = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)))
+		{
+			Player->OnPropImpact.Broadcast(nullptr, ImpactTotalDamage, ImpactKillCount);
 		}
 	}
 
 	// Stun nearby NPCs (same logic as EMFPhysicsProp::Explode)
-	if (bApplyExplosionStun && ExplosionRadius > 0.0f)
+	if (bApplyExplosionStun && FinalExplosionRadius > 0.0f)
 	{
 		TArray<FOverlapResult> StunOverlaps;
-		FCollisionShape StunSphere = FCollisionShape::MakeSphere(ExplosionRadius);
+		FCollisionShape StunSphere = FCollisionShape::MakeSphere(FinalExplosionRadius);
 		FCollisionQueryParams StunQueryParams;
 		StunQueryParams.AddIgnoredActor(this);
 
@@ -996,39 +1035,32 @@ void AFlyingDrone::UpdateDroneVisuals(float DeltaTime)
 
 void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 {
-	FRotator TargetRotation = GetActorRotation();
-
+	// When captured: don't update actor rotation every frame.
+	// The initial rotation is set in EnterCapturedState, and UpdateStabilization
+	// handles the mesh tilt via CapturedTiltOffset. Continuously rotating the actor
+	// here fights with the PD stabilization controller, causing angular jiggle.
 	if (bIsCaptured)
 	{
-		// When captured: face AWAY from player so belly (with tilt) presents toward them
-		if (const ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
-		{
-			const FVector AwayFromPlayer = (GetActorLocation() - Player->GetActorLocation());
-			if (!AwayFromPlayer.IsNearlyZero())
-			{
-				TargetRotation = AwayFromPlayer.Rotation();
-				TargetRotation.Pitch = 0.0f;
-			}
-		}
+		return;
 	}
-	else
+
+	FRotator TargetRotation = GetActorRotation();
+
+	// Normal behavior: face target or movement direction
+	AActor* Target = CurrentAimTarget.Get();
+	if (Target && !Target->IsPendingKillPending())
 	{
-		// Normal behavior: face target or movement direction
-		AActor* Target = CurrentAimTarget.Get();
-		if (Target && !Target->IsPendingKillPending())
+		const FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
+		TargetRotation = ToTarget.Rotation();
+		TargetRotation.Pitch = 0.0f;
+	}
+	else if (FlyingMovement && FlyingMovement->IsMoving())
+	{
+		const FVector Velocity = GetVelocity();
+		if (!Velocity.IsNearlyZero())
 		{
-			const FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
-			TargetRotation = ToTarget.Rotation();
+			TargetRotation = Velocity.Rotation();
 			TargetRotation.Pitch = 0.0f;
-		}
-		else if (FlyingMovement && FlyingMovement->IsMoving())
-		{
-			const FVector Velocity = GetVelocity();
-			if (!Velocity.IsNearlyZero())
-			{
-				TargetRotation = Velocity.Rotation();
-				TargetRotation.Pitch = 0.0f;
-			}
 		}
 	}
 
@@ -1111,6 +1143,50 @@ void AFlyingDrone::UpdateStabilization(float DeltaTime)
 	// Apply to mesh
 	DroneMesh->SetRelativeRotation(FRotator(NewAngle.Y, NewAngle.Z, NewAngle.X));
 }
+
+// ==================== Captured State (EMF Channeling) ====================
+
+void AFlyingDrone::EnterCapturedState(UAnimMontage* OverrideMontage)
+{
+	// Stop FlyingAIMovementComponent before capture takes over
+	if (FlyingMovement)
+	{
+		FlyingMovement->StopMovement();
+	}
+
+	// Reset angular velocity to prevent pre-capture spin from causing jiggle
+	MeshAngularVelocity = FVector::ZeroVector;
+
+	// Set initial "away from player" rotation immediately (no interp)
+	// so UpdateDroneRotation doesn't need to chase a moving target
+	if (const ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
+	{
+		const FVector AwayFromPlayer = (GetActorLocation() - Player->GetActorLocation());
+		if (!AwayFromPlayer.IsNearlyZero())
+		{
+			FRotator CaptureRotation = AwayFromPlayer.Rotation();
+			CaptureRotation.Pitch = 0.0f;
+			SetActorRotation(CaptureRotation);
+		}
+	}
+
+	// Let base class handle bIsCaptured, bIsInKnockback, stop AI, stop CMC, etc.
+	Super::EnterCapturedState(OverrideMontage);
+}
+
+void AFlyingDrone::ExitCapturedState()
+{
+	// Let base class handle cleanup first (clears bIsCaptured, bIsInKnockback, etc.)
+	Super::ExitCapturedState();
+
+	// Restore flying movement mode (parent leaves it in Falling)
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->SetMovementMode(MOVE_Flying);
+	}
+}
+
+// ==================== Knockback ====================
 
 void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
 {

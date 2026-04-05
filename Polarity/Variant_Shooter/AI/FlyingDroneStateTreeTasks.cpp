@@ -5,6 +5,7 @@
 #include "FlyingDrone.h"
 #include "FlyingAIMovementComponent.h"
 #include "StateTreeExecutionContext.h"
+#include "NoFlyZone.h"
 
 //////////////////////////////////////////////////////////////////
 // TASK: Drone Evasive Dash
@@ -104,35 +105,50 @@ EStateTreeRunStatus FStateTreeDroneFlyToRandomPointTask::EnterState(FStateTreeEx
 
 	FVector TargetPoint;
 	bool bFoundPoint = false;
+	constexpr int32 MaxAttempts = 10;
 
 	// If we have a target to orbit around, generate point relative to them
 	if (Data.TargetToOrbit)
 	{
 		const FVector TargetLocation = Data.TargetToOrbit->GetActorLocation();
 
-		// Generate random point at a distance from target
-		const float RandomAngle = FMath::RandRange(0.0f, 2.0f * PI);
-		const float RandomDistance = FMath::RandRange(Data.MinDistanceFromTarget, Data.MaxDistanceFromTarget);
-
-		FVector CandidatePoint = TargetLocation;
-		CandidatePoint.X += FMath::Cos(RandomAngle) * RandomDistance;
-		CandidatePoint.Y += FMath::Sin(RandomAngle) * RandomDistance;
-		CandidatePoint.Z = Data.Drone->GetActorLocation().Z; // Keep current height initially
-
-		// Validate through FlyingMovement (handles NavMesh projection)
-		FVector ProjectedPoint;
-		if (FlyingMovement->ProjectToNavMesh(CandidatePoint, ProjectedPoint))
+		for (int32 Attempt = 0; Attempt < MaxAttempts && !bFoundPoint; ++Attempt)
 		{
-			// FlyToLocation will call ValidateTargetHeight internally
-			TargetPoint = ProjectedPoint;
-			bFoundPoint = true;
+			const float RandomAngle = FMath::RandRange(0.0f, 2.0f * PI);
+			const float RandomDistance = FMath::RandRange(Data.MinDistanceFromTarget, Data.MaxDistanceFromTarget);
+
+			FVector CandidatePoint = TargetLocation;
+			CandidatePoint.X += FMath::Cos(RandomAngle) * RandomDistance;
+			CandidatePoint.Y += FMath::Sin(RandomAngle) * RandomDistance;
+			CandidatePoint.Z = Data.Drone->GetActorLocation().Z;
+
+			FVector ProjectedPoint;
+			if (FlyingMovement->ProjectToNavMesh(CandidatePoint, ProjectedPoint))
+			{
+				if (!ANoFlyZone::IsPointInNoFlyZone(Data.Drone, ProjectedPoint))
+				{
+					TargetPoint = ProjectedPoint;
+					bFoundPoint = true;
+				}
+			}
 		}
 	}
 
-	// Fallback to patrol point generation
+	// Fallback to patrol point generation (with no-fly zone rejection)
 	if (!bFoundPoint)
 	{
-		bFoundPoint = FlyingMovement->GetRandomPatrolPoint(TargetPoint);
+		for (int32 Attempt = 0; Attempt < MaxAttempts && !bFoundPoint; ++Attempt)
+		{
+			FVector CandidatePoint;
+			if (FlyingMovement->GetRandomPatrolPoint(CandidatePoint))
+			{
+				if (!ANoFlyZone::IsPointInNoFlyZone(Data.Drone, CandidatePoint))
+				{
+					TargetPoint = CandidatePoint;
+					bFoundPoint = true;
+				}
+			}
+		}
 	}
 
 	if (!bFoundPoint)
@@ -275,5 +291,28 @@ bool FStateTreeDroneIsDashingCondition::TestCondition(FStateTreeExecutionContext
 FText FStateTreeDroneIsDashingCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("Drone is currently dashing"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Drone Is In No-Fly Zone
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeDroneIsInNoFlyZoneCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Drone)
+	{
+		return false;
+	}
+
+	return ANoFlyZone::IsPointInNoFlyZone(Data.Drone, Data.Drone->GetActorLocation());
+}
+
+#if WITH_EDITOR
+FText FStateTreeDroneIsInNoFlyZoneCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Drone is inside a No-Fly Zone"));
 }
 #endif

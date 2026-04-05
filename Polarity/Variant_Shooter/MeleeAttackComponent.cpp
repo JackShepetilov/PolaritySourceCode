@@ -19,6 +19,7 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "ApexMovementComponent.h"
+#include "MovementSettings.h"
 #include "PolarityCharacter.h"
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
@@ -1816,9 +1817,9 @@ void UMeleeAttackComponent::StopMagnetism()
 	// Restore gravity and EMF after lock-on ends (after Recovery phase)
 	if (OwnerCharacter)
 	{
-		if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+		if (UApexMovementComponent* Movement = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
 		{
-			Movement->GravityScale = 1.0f;
+			Movement->GravityScale = Movement->MovementSettings ? Movement->MovementSettings->DefaultGravityScale : 1.5f;
 		}
 
 		// Re-enable EMF if available
