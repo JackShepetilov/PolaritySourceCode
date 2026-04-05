@@ -69,39 +69,17 @@ void UShooterGameSettings::ApplyAudioSettings()
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Values: Master=%.2f, Music=%.2f, SFX=%.2f, Voice=%.2f"),
 		MasterVolume, MusicVolume, SFXVolume, VoiceVolume);
 
-	// Log the asset paths being loaded
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SoundMix path: %s"), *AudioSoundMix.ToString());
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] MusicClass path: %s"), *MusicSoundClass.ToString());
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SFXClass path: %s"), *SFXSoundClass.ToString());
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] VoiceClass path: %s"), *VoiceSoundClass.ToString());
-
-	// Load audio assets - try TSoftObjectPtr first, then fallback to LoadObject for packaged builds
+	// Load audio assets
 	USoundMix* SoundMix = AudioSoundMix.LoadSynchronous();
 	USoundClass* MusicClass = MusicSoundClass.LoadSynchronous();
 	USoundClass* SFXClass = SFXSoundClass.LoadSynchronous();
 	USoundClass* VoiceClass = VoiceSoundClass.LoadSynchronous();
 
-	// Fallback: if soft pointers failed (asset not cooked via soft ref), try LoadObject directly
-	if (!SoundMix)
-	{
-		SoundMix = LoadObject<USoundMix>(nullptr, TEXT("/Game/Audio/Classes/NewSoundMix.NewSoundMix"));
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SoundMix soft ref failed, LoadObject fallback: %s"), SoundMix ? TEXT("OK") : TEXT("STILL NULL"));
-	}
-	if (!MusicClass)
-	{
-		MusicClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Music.Music"));
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] MusicClass soft ref failed, LoadObject fallback: %s"), MusicClass ? TEXT("OK") : TEXT("STILL NULL"));
-	}
-	if (!SFXClass)
-	{
-		SFXClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/SFX.SFX"));
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SFXClass soft ref failed, LoadObject fallback: %s"), SFXClass ? TEXT("OK") : TEXT("STILL NULL"));
-	}
-	if (!VoiceClass)
-	{
-		VoiceClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Voice.Voice"));
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] VoiceClass soft ref failed, LoadObject fallback: %s"), VoiceClass ? TEXT("OK") : TEXT("STILL NULL"));
-	}
+	// Fallback: try LoadObject directly if soft refs failed
+	if (!SoundMix)  SoundMix = LoadObject<USoundMix>(nullptr, TEXT("/Game/Audio/Classes/NewSoundMix.NewSoundMix"));
+	if (!MusicClass) MusicClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Music.Music"));
+	if (!SFXClass)   SFXClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/SFX.SFX"));
+	if (!VoiceClass) VoiceClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Voice.Voice"));
 
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Loaded: SoundMix=%s, Music=%s, SFX=%s, Voice=%s"),
 		SoundMix ? TEXT("OK") : TEXT("NULL"),
@@ -111,11 +89,11 @@ void UShooterGameSettings::ApplyAudioSettings()
 
 	if (!SoundMix)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] AudioSoundMix FAILED to load! Path: %s. Make sure the asset is in 'Additional Asset Directories to Cook'!"), *AudioSoundMix.ToString());
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SoundMix FAILED to load!"));
 		return;
 	}
 
-	// Get a world context for audio (Game for packaged, PIE for editor play)
+	// Find a game world
 	UWorld* World = nullptr;
 	if (GEngine)
 	{
@@ -135,42 +113,35 @@ void UShooterGameSettings::ApplyAudioSettings()
 		return;
 	}
 
-	// Push the sound mix if not already active
-	UGameplayStatics::PushSoundMixModifier(World, SoundMix);
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] PushSoundMixModifier done"));
+	// Use SetBaseSoundMix instead of PushSoundMixModifier
+	// SetBaseSoundMix is the correct API for persistent user volume settings
+	// PushSoundMixModifier is for temporary effects (underwater, rooms) and stacks on repeated calls
+	UGameplayStatics::SetBaseSoundMix(World, SoundMix);
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetBaseSoundMix done"));
 
-	// Apply volume for each Sound Class (multiplied by MasterVolume)
+	// IMPORTANT: Never set volume to exactly 0.0 - UE virtualizes (kills) sounds at zero volume
+	// and they won't resume when volume increases. Use 0.001 as minimum.
+	const float MinVolume = 0.001f;
+
 	if (MusicClass)
 	{
-		const float FinalMusicVolume = MusicVolume * MasterVolume;
+		const float FinalMusicVolume = FMath::Max(MusicVolume * MasterVolume, MinVolume);
 		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, MusicClass, FinalMusicVolume, 1.0f, 0.0f, true);
-		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Music applied: %.2f (%.2f * %.2f)"), FinalMusicVolume, MusicVolume, MasterVolume);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] MusicSoundClass is NULL - skipping"));
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Music: %.4f"), FinalMusicVolume);
 	}
 
 	if (SFXClass)
 	{
-		const float FinalSFXVolume = SFXVolume * MasterVolume;
+		const float FinalSFXVolume = FMath::Max(SFXVolume * MasterVolume, MinVolume);
 		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, SFXClass, FinalSFXVolume, 1.0f, 0.0f, true);
-		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SFX applied: %.2f (%.2f * %.2f)"), FinalSFXVolume, SFXVolume, MasterVolume);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SFXSoundClass is NULL - skipping"));
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SFX: %.4f"), FinalSFXVolume);
 	}
 
 	if (VoiceClass)
 	{
-		const float FinalVoiceVolume = VoiceVolume * MasterVolume;
+		const float FinalVoiceVolume = FMath::Max(VoiceVolume * MasterVolume, MinVolume);
 		UGameplayStatics::SetSoundMixClassOverride(World, SoundMix, VoiceClass, FinalVoiceVolume, 1.0f, 0.0f, true);
-		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Voice applied: %.2f (%.2f * %.2f)"), FinalVoiceVolume, VoiceVolume, MasterVolume);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] VoiceSoundClass is NULL - skipping"));
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Voice: %.4f"), FinalVoiceVolume);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] === ApplyAudioSettings done ==="));
