@@ -760,7 +760,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 		return;
 	}
 
-	// Explosive impact: launched props use lower threshold, collateral uses higher
+	// Explosive impact check
 	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
 	{
 		const float Speed = CachedPreCollisionSpeed;
@@ -768,19 +768,78 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 
 		if (Speed >= Threshold)
 		{
-			if (GEngine)
+			// Direct NPC hit — always detonate
+			AShooterNPC* HitNPC = Cast<AShooterNPC>(OtherActor);
+			if (HitNPC && !HitNPC->IsDead())
 			{
-				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Red,
-					FString::Printf(TEXT("[%s] BOOM! Speed=%.0f | Threshold=%.0f (%s) | Hit=%s"),
-						*GetName(), Speed, Threshold,
-						bIsInReverseFlight ? TEXT("Launch") : TEXT("Collateral"),
-						OtherActor ? *OtherActor->GetName() : TEXT("NULL")));
+				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Direct NPC hit → %s, Speed=%.0f"),
+					*GetName(), *OtherActor->GetName(), Speed);
+				if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
+				{
+					OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+				}
+				Explode(1.0f, 1.0f, 1.0f);
+				return;
 			}
-			if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
+
+			// Environment hit — check if center of prop actually impacted
+			const FVector PropCenter = GetActorLocation();
+			const FVector Velocity = PropMesh->GetPhysicsLinearVelocity();
+			const FVector VelDir = Velocity.GetSafeNormal();
+			bool bShouldDetonate = false;
+
+			// Line trace from prop center along velocity — did the center reach the surface?
+			if (!VelDir.IsNearlyZero())
 			{
-				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+				FHitResult CenterTrace;
+				FCollisionQueryParams TraceParams;
+				TraceParams.AddIgnoredActor(this);
+				const FVector TraceEnd = PropCenter + VelDir * CenterDetonationRadius;
+
+				if (GetWorld()->LineTraceSingleByChannel(CenterTrace, PropCenter, TraceEnd, ECC_WorldStatic, TraceParams))
+				{
+					bShouldDetonate = true;
+					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit surface at %.0f cm → detonate"),
+						*GetName(), CenterTrace.Distance);
+				}
 			}
-			Explode(1.0f, 1.0f, 1.0f);
+
+			// Fallback: check if any NPC is within explosion radius
+			if (!bShouldDetonate)
+			{
+				FCollisionQueryParams OverlapParams;
+				OverlapParams.AddIgnoredActor(this);
+				TArray<FOverlapResult> NearbyOverlaps;
+				GetWorld()->OverlapMultiByChannel(
+					NearbyOverlaps, PropCenter, FQuat::Identity,
+					ECC_Pawn, FCollisionShape::MakeSphere(ExplosionRadius), OverlapParams);
+
+				for (const FOverlapResult& Overlap : NearbyOverlaps)
+				{
+					AShooterNPC* NearbyNPC = Cast<AShooterNPC>(Overlap.GetActor());
+					if (NearbyNPC && !NearbyNPC->IsDead())
+					{
+						bShouldDetonate = true;
+						UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: NPC %s in explosion radius → detonate"),
+							*GetName(), *NearbyNPC->GetName());
+						break;
+					}
+				}
+			}
+
+			if (bShouldDetonate)
+			{
+				if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
+				{
+					OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+				}
+				Explode(1.0f, 1.0f, 1.0f);
+				return;
+			}
+
+			// Edge graze with no NPC nearby — prop continues flying
+			UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Edge graze on %s, no NPC nearby → skip"),
+				*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"));
 			return;
 		}
 	}
@@ -788,7 +847,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	// End reverse flight state on any blocking collision (wall, floor, etc.)
 	if (bIsInReverseFlight)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[EMFProp DEBUG] %s: bIsInReverseFlight set to FALSE due to collision with %s"),
+		UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: bIsInReverseFlight set to FALSE due to collision with %s"),
 			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"));
 		bIsInReverseFlight = false;
 	}
