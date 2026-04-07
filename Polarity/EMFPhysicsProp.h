@@ -263,12 +263,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
 	float CriticalVelocity = 2000.0f;
 
-	/** Tolerance for center-of-mass detonation check (cm).
-	 *  On environment hit, a line trace from prop center along velocity determines if
-	 *  the center (not just an edge) hit the surface. Hits within this distance detonate.
-	 *  Larger = easier to detonate on walls, smaller = more forgiving for edge grazes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "1.0", Units = "cm", EditCondition = "bCanExplode"))
-	float CenterDetonationRadius = 50.0f;
+	/** Minimum dot product between velocity direction and center-to-impact vector
+	 *  for an environment hit to count as a "center hit" and detonate.
+	 *  1.0 = only perfectly head-on impacts, 0.0 = any forward-facing hit, 0.5 = default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanExplode"))
+	float CenterHitDotThreshold = 0.5f;
 
 	/** Base radial damage dealt by explosion */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))

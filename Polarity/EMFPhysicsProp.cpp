@@ -782,26 +782,19 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 				return;
 			}
 
-			// Environment hit — check if center of prop actually impacted
+			// Environment hit — check if prop center is facing the impact point
 			const FVector PropCenter = GetActorLocation();
-			const FVector Velocity = PropMesh->GetPhysicsLinearVelocity();
-			const FVector VelDir = Velocity.GetSafeNormal();
+			const FVector VelDir = PropMesh->GetPhysicsLinearVelocity().GetSafeNormal();
+			const FVector ToImpact = (Hit.ImpactPoint - PropCenter).GetSafeNormal();
+			const float CenterDot = FVector::DotProduct(VelDir, ToImpact);
 			bool bShouldDetonate = false;
 
-			// Line trace from prop center along velocity — did the center reach the surface?
-			if (!VelDir.IsNearlyZero())
+			// High dot = impact point is ahead of center along velocity = head-on hit
+			if (CenterDot >= CenterHitDotThreshold)
 			{
-				FHitResult CenterTrace;
-				FCollisionQueryParams TraceParams;
-				TraceParams.AddIgnoredActor(this);
-				const FVector TraceEnd = PropCenter + VelDir * CenterDetonationRadius;
-
-				if (GetWorld()->LineTraceSingleByChannel(CenterTrace, PropCenter, TraceEnd, ECC_WorldStatic, TraceParams))
-				{
-					bShouldDetonate = true;
-					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit surface at %.0f cm → detonate"),
-						*GetName(), CenterTrace.Distance);
-				}
+				bShouldDetonate = true;
+				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit (dot=%.2f >= %.2f) → detonate"),
+					*GetName(), CenterDot, CenterHitDotThreshold);
 			}
 
 			// Fallback: check if any NPC is within explosion radius
@@ -838,8 +831,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 			}
 
 			// Edge graze with no NPC nearby — prop continues flying
-			UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Edge graze on %s, no NPC nearby → skip"),
-				*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"));
+			UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Edge graze on %s (dot=%.2f), no NPC nearby → skip"),
+				*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), CenterDot);
 			return;
 		}
 	}
