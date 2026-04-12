@@ -212,4 +212,27 @@ public:
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "OnTutorialHoldCancelled"))
 	void BP_OnTutorialHoldCancelled();
+
+	// ==================== Health Pickup Objective ====================
+
+	/**
+	 * Show persistent objective text telling the player to collect health pickups.
+	 * @param Required - Total pickups needed (e.g. 2)
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "ShowHealthPickupObjective"))
+	void BP_ShowHealthPickupObjective(int32 Required);
+
+	/**
+	 * Update the pickup objective progress (e.g. "1/2").
+	 * @param Current - Pickups collected so far
+	 * @param Required - Total pickups needed
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "UpdateHealthPickupObjective"))
+	void BP_UpdateHealthPickupObjective(int32 Current, int32 Required);
+
+	/**
+	 * Hide the health pickup objective text (player collected enough).
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Tutorial", meta = (DisplayName = "HideHealthPickupObjective"))
+	void BP_HideHealthPickupObjective();
 };

@@ -49,10 +49,17 @@ void AMeleeNPC::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Обновление интерполяции рывка если активен
-	if (bIsDashing)
+	// Обновление интерполяции рывка если активен (но не во время knockback/capture — иначе рывок тянет NPC вместо стана)
+	if (bIsDashing && !bIsInKnockback)
 	{
 		UpdateDashInterpolation(DeltaTime);
+	}
+	else if (bIsDashing && bIsInKnockback)
+	{
+		// Прервать рывок — NPC оглушён или захвачен
+		UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s dash INTERRUPTED by knockback/capture (bIsCaptured=%d, bStunnedByExplosion=%d)"),
+			*GetName(), bIsCaptured, bStunnedByExplosion);
+		bIsDashing = false;
 	}
 	// Attack magnetism (only if not dashing or in knockback)
 	else if (bIsAttacking && !bIsInKnockback)

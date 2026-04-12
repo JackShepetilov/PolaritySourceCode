@@ -72,6 +72,9 @@ protected:
 	/** Called when the owner deals damage to a target */
 	virtual void OnOwnerDealtDamage(AActor* Target, float Damage, bool bKilled) {}
 
+	/** Called when owner collects a health pickup while at full HP */
+	virtual void OnHealthPickupCollectedAtFullHP() {}
+
 	/**
 	 * Return a damage multiplier that this upgrade applies to hitscan shots.
 	 * Called by the weapon BEFORE applying damage, so upgrades can scale damage up or down.

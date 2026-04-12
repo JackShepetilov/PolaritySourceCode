@@ -102,6 +102,11 @@ UInputAction* UTutorialHintWidget::GetInputAction() const
 	return InputActions.Num() > 0 ? InputActions[0].Get() : nullptr;
 }
 
+void UTutorialHintWidget::SetDismissIconData(const FTutorialInputIconData& InDismissIcon)
+{
+	DismissIconData = InDismissIcon;
+}
+
 UTexture2D* UTutorialHintWidget::GetKeyIcon() const
 {
 	if (DisplayData.Icons.Num() > 0 && DisplayData.Icons[0].bIsValid)

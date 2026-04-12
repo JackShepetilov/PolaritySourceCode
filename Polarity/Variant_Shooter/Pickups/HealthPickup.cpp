@@ -8,6 +8,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_DroneExplosion.h"
 #include "Variant_Shooter/AI/FlyingDrone.h"
 #include "EMFPhysicsProp.h"
+#include "Upgrades/UpgradeManagerComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 
@@ -165,10 +166,25 @@ void AHealthPickup::OnPickupOverlap(UPrimitiveComponent* OverlappedComponent, AA
 		return;
 	}
 
-	// Restore health
-	Player->RestoreHealth(HealAmount);
+	// If at full HP, notify upgrade system instead of healing
+	if (Player->GetCurrentHP() >= Player->GetMaxHP())
+	{
+		if (UUpgradeManagerComponent* UpgradeManager = Player->GetUpgradeManager())
+		{
+			UpgradeManager->NotifyHealthPickupCollectedAtFullHP();
+		}
+		// Don't call RestoreHealth (would do nothing anyway)
+	}
+	else
+	{
+		// Restore health
+		Player->RestoreHealth(HealAmount);
+	}
 
-	// Effects
+	// Notify tutorial system about health pickup collection
+	Player->NotifyHealthPickupCollected();
+
+	// Effects — always play regardless of full HP or not
 	if (PickupSound)
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, PickupSound, GetActorLocation());

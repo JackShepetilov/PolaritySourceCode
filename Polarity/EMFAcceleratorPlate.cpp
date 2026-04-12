@@ -45,6 +45,30 @@ void AEMFAcceleratorPlate::BeginPlay()
 	}
 }
 
+void AEMFAcceleratorPlate::ToggleField()
+{
+	SetFieldActive(!bFieldActive);
+}
+
+void AEMFAcceleratorPlate::SetFieldActive(bool bActive)
+{
+	bFieldActive = bActive;
+
+	if (FieldComponent)
+	{
+		if (bFieldActive)
+		{
+			FieldComponent->RegisterWithRegistry();
+			UE_LOG(LogTemp, Warning, TEXT("[BUTTON_DEBUG] AcceleratorPlate field ON: %s"), *GetName());
+		}
+		else
+		{
+			FieldComponent->UnregisterFromRegistry();
+			UE_LOG(LogTemp, Warning, TEXT("[BUTTON_DEBUG] AcceleratorPlate field OFF: %s"), *GetName());
+		}
+	}
+}
+
 void AEMFAcceleratorPlate::StartCapture()
 {
 	bIsCaptured = true;

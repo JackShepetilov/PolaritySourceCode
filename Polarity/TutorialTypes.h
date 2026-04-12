@@ -31,7 +31,9 @@ enum class ETutorialCompletionType : uint8
 	/** Completes when player exits the trigger volume */
 	OnExitVolume,
 	/** Completes manually via Blueprint or C++ */
-	Manual
+	Manual,
+	/** Completes when player holds a separate dismiss input for a duration */
+	OnHoldInput
 };
 
 /**
@@ -118,6 +120,25 @@ struct FTutorialHintData
 	/** How this hint is completed/hidden */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint")
 	ETutorialCompletionType CompletionType = ETutorialCompletionType::OnInputAction;
+
+	// ==================== Hold-to-Dismiss (OnHoldInput) ====================
+
+	/**
+	 * Input action used to dismiss this hint (separate from the hint's displayed actions).
+	 * Only used when CompletionType == OnHoldInput.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint|HoldDismiss",
+		meta = (EditCondition = "CompletionType == ETutorialCompletionType::OnHoldInput", EditConditionHides))
+	TObjectPtr<class UInputAction> DismissAction;
+
+	/**
+	 * Duration in seconds the dismiss button must be held to close this hint.
+	 * Only used when CompletionType == OnHoldInput.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hint|HoldDismiss",
+		meta = (EditCondition = "CompletionType == ETutorialCompletionType::OnHoldInput", EditConditionHides,
+				ClampMin = "0.0", ClampMax = "5.0"))
+	float HoldDuration = 1.0f;
 
 	// ==================== Multi-Hint Mode ====================
 
@@ -210,4 +231,20 @@ struct FTutorialHUDArrowData
 	/** Duration in seconds the close button must be held to dismiss */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD Arrow", meta = (ClampMin = "0.0", ClampMax = "5.0"))
 	float HoldDuration = 1.0f;
+};
+
+/**
+ * Data for the reminder panel (Witcher-style hint overlay).
+ * Each entry is a full FTutorialHintData — icons are resolved via InputAction pipeline,
+ * so they update correctly when keys are rebound.
+ * CompletionType/DismissAction/HoldDuration fields are ignored in reminder context.
+ */
+USTRUCT(BlueprintType)
+struct FReminderPanelData
+{
+	GENERATED_BODY()
+
+	/** Array of hint entries to display in the reminder panel */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reminder")
+	TArray<FTutorialHintData> Entries;
 };

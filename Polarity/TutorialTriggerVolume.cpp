@@ -98,6 +98,7 @@ void ATutorialTriggerVolume::OnTriggerBeginOverlap(UPrimitiveComponent* Overlapp
 		{
 			BindInputCompletion();
 		}
+		// OnHoldInput is handled entirely by TutorialSubsystem (dismiss action binding + tick)
 		break;
 
 	case ETutorialType::Slide:
@@ -131,10 +132,10 @@ void ATutorialTriggerVolume::OnTriggerEndOverlap(UPrimitiveComponent* Overlapped
 	{
 		if (UTutorialSubsystem* Subsystem = GetTutorialSubsystem())
 		{
-			if (Subsystem->IsHintActive())
+			if (Subsystem->IsHintActiveByID(TutorialID))
 			{
 				bool bMarkCompleted = (HintData.CompletionType == ETutorialCompletionType::OnExitVolume);
-				Subsystem->HideHint(bMarkCompleted);
+				Subsystem->HideHintByID(TutorialID, bMarkCompleted);
 				UnbindInputCompletion();
 			}
 		}
@@ -232,10 +233,10 @@ void ATutorialTriggerVolume::OnInputActionTriggered()
 		return;
 	}
 
-	// Complete if hint is still active (removed bPlayerInside check - unreliable)
-	if (Subsystem->IsHintActive())
+	// Complete if this specific hint is still active
+	if (Subsystem->IsHintActiveByID(TutorialID))
 	{
-		Subsystem->HideHint(true);
+		Subsystem->HideHintByID(TutorialID, true);
 		UE_LOG(LogPolarity, Log, TEXT("Tutorial completed via input: %s"), *TutorialID.ToString());
 	}
 }

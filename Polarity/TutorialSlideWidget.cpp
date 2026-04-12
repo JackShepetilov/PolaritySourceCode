@@ -35,6 +35,10 @@ void UTutorialSlideWidget::HideSlide()
 
 	bIsHiding = true;
 
+	// Make widget invisible to hit-testing immediately so it doesn't block input
+	// while the hide animation plays (widget stays in viewport until OnHideAnimationFinished)
+	SetVisibility(ESlateVisibility::HitTestInvisible);
+
 	// Notify Blueprint to play animation
 	BP_OnHideSlide();
 }

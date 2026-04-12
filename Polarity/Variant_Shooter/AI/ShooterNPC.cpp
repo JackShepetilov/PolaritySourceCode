@@ -741,25 +741,26 @@ void AShooterNPC::Die()
 	}
 
 	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health
-	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s Die(): bWasChannelingTarget=%d, ArmorPickupClass=%s, HealthPickupClass=%s, bStunnedByExplosion=%d"),
-		*GetName(), bWasChannelingTarget,
+	UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s Die(): bWasChannelingTarget=%d, bStunnedByExplosion=%d, bStunnedByNPCImpact=%d, ArmorPickupClass=%s, HealthPickupClass=%s"),
+		*GetName(), bWasChannelingTarget, bStunnedByExplosion, bStunnedByNPCImpact,
 		ArmorPickupClass ? *ArmorPickupClass->GetName() : TEXT("NULL"),
-		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"),
-		bStunnedByExplosion);
-	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s Die(): LastKillingDamageType=%s, LastKillingDamageCauser=%s (Class=%s)"),
+		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"));
+	UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s Die(): LastKillingDamageType=%s, LastKillingDamageCauser=%s (Class=%s), bShouldStunOnNPCImpact=%d"),
 		*GetName(),
 		LastKillingDamageType ? *LastKillingDamageType->GetName() : TEXT("NULL"),
 		LastKillingDamageCauser ? *LastKillingDamageCauser->GetName() : TEXT("NULL"),
-		LastKillingDamageCauser ? *LastKillingDamageCauser->GetClass()->GetName() : TEXT("NULL"));
+		LastKillingDamageCauser ? *LastKillingDamageCauser->GetClass()->GetName() : TEXT("NULL"),
+		bShouldStunOnNPCImpact);
 
 	// Drone kills always produce health, not armor (even if bWasChannelingTarget was propagated)
 	bool bKilledByDrone = Cast<AFlyingDrone>(LastKillingDamageCauser) != nullptr;
 	// NPC-on-NPC collision kill (DamageCauser is another ShooterNPC)
 	bool bKilledByNPC = Cast<AShooterNPC>(LastKillingDamageCauser) != nullptr;
 
-	if (bWasChannelingTarget && ArmorPickupClass && !bKilledByDrone)
+	if (bWasChannelingTarget && ArmorPickupClass && !bKilledByDrone && !bStunnedByNPCImpact)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning ARMOR (channeling target)"), *GetName());
+		// Armor only for the NPC that was directly channeled, NOT for NPCs hit by the thrown NPC
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning ARMOR (direct channeling target)"), *GetName());
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		GetWorld()->SpawnActor<AArmorPickup>(ArmorPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
@@ -768,23 +769,24 @@ void AShooterNPC::Die()
 		(bStunnedByExplosion || AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
 	{
 		// Prop/drone kill or prop/drone-stunned — full HP drop count
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning HEALTH (prop/drone, count=%d)"), *GetName(), HealthPickupDropCount);
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning HEALTH (prop/drone/explosion-stun, count=%d)"), *GetName(), HealthPickupDropCount);
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
 	}
 	else if (HealthPickupClass && (bKilledByNPC || bStunnedByNPCImpact))
 	{
 		// Killed by NPC collision or killed while stunned by NPC impact — reduced HP drop
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> Spawning HEALTH (NPC kill/stun, count=%d)"), *GetName(), HealthPickupDropCount_NPCKill);
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning HEALTH (NPC kill/stun, count=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d)"), *GetName(), HealthPickupDropCount_NPCKill, bKilledByNPC, bStunnedByNPCImpact);
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount_NPCKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] %s -> NO PICKUP (ShouldDropHealth=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d)"),
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> NO PICKUP! ShouldDropHealth=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d, bWasChannelingTarget=%d, HealthPickupClass=%s"),
 			*GetName(),
 			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
-			bKilledByNPC, bStunnedByNPCImpact);
+			bKilledByNPC, bStunnedByNPCImpact, bWasChannelingTarget,
+			HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"));
 	}
 
 	} // end if (!bSuppressDeathDrops)
@@ -1666,8 +1668,11 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 	// Skip if dead, already stunned, captured, or launched
 	if (bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[STUN_DEBUG] %s ApplyExplosionStun BLOCKED! bIsDead=%d, bIsInKnockback=%d, bIsCaptured=%d, bIsLaunched=%d"),
+			*GetName(), bIsDead, bIsInKnockback, bIsCaptured, bIsLaunched);
 		return;
 	}
+	UE_LOG(LogTemp, Warning, TEXT("[STUN_DEBUG] %s ApplyExplosionStun APPLIED (dur=%.2f)"), *GetName(), Duration);
 
 	// Enter knockback state (freezes AI) but without position interpolation
 	bIsInKnockback = true;
@@ -2247,10 +2252,12 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// (must be done BEFORE delayed damage, as bIsLaunched gets cleared after this function)
 	if (bWasChannelingTarget)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] NPC Collision: PROPAGATING bWasChannelingTarget from %s -> %s"), *GetName(), *OtherNPC->GetName());
 		OtherNPC->bWasChannelingTarget = true;
 	}
 	if (OtherNPC->bWasChannelingTarget)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] NPC Collision: PROPAGATING bWasChannelingTarget from %s -> %s"), *OtherNPC->GetName(), *GetName());
 		bWasChannelingTarget = true;
 	}
 
@@ -2713,6 +2720,8 @@ void AShooterNPC::EndKnockbackStun()
 	}
 
 	// Clear knockback state
+	UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s EndKnockbackStun: CLEARING flags (bStunnedByExplosion=%d, bStunnedByNPCImpact=%d, bWasChannelingTarget=%d)"),
+		*GetName(), bStunnedByExplosion, bStunnedByNPCImpact, bWasChannelingTarget);
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
 	bStunnedByExplosion = false;
@@ -2774,8 +2783,13 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 {
 	if (bIsCaptured || bIsDead)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s EnterCapturedState BLOCKED! bIsCaptured=%d, bIsDead=%d"), *GetName(), bIsCaptured, bIsDead);
 		return;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s EnterCapturedState: bIsInKnockback=%d, bStunnedByExplosion=%d, MovementMode=%d"),
+		*GetName(), bIsInKnockback, bStunnedByExplosion,
+		GetCharacterMovement() ? (int32)GetCharacterMovement()->MovementMode.GetValue() : -1);
 
 	bIsCaptured = true;
 	bWasChannelingTarget = true; // Permanent flag for armor drop detection
@@ -2808,13 +2822,22 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 	}
 
 	// Zero velocity and switch to Falling mode.
-	// Viscous capture forces (ComputeHardHoldDelta) only run through ApexMovementComponent
-	// which NPCs don't use — so velocity must be zeroed here to prevent drift.
+	// Must keep MOVE_Falling (not DisableMovement!) — viscous EMF capture forces need active CMC to pull NPC toward player.
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
 		CharMovement->StopMovementImmediately();
 		CharMovement->SetMovementMode(MOVE_Falling);
+
+		// Disable controller-driven rotation so NPC doesn't turn toward AI target during capture
+		bCachedUseControllerDesiredRotation = CharMovement->bUseControllerDesiredRotation;
+		CharMovement->bUseControllerDesiredRotation = false;
+
+		UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s movement set to MOVE_Falling, velocity zeroed, rotation disabled"), *GetName());
 	}
+
+	// Disable character-level controller rotation
+	bCachedUseControllerRotationYaw = bUseControllerRotationYaw;
+	bUseControllerRotationYaw = false;
 
 	// Do NOT disable EMF — viscous capture needs it
 	// Do NOT set knockback timer — capture duration managed externally
@@ -2894,11 +2917,36 @@ void AShooterNPC::ExitCapturedState()
 	}
 	bStunnedByExplosion = false;
 
-	// Restore friction
+	// Fully restore movement, friction, rotation, and AI focus
+	// (EnterCapturedState clears stun timer, so EndKnockbackStun never runs — we must do its job here)
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
+		CharMovement->SetMovementMode(MOVE_Walking);
 		CharMovement->GroundFriction = CachedGroundFriction;
+		CharMovement->Velocity = FVector::ZeroVector;
+		CharMovement->bUseControllerDesiredRotation = bCachedUseControllerDesiredRotation;
 	}
+	bUseControllerRotationYaw = bCachedUseControllerRotationYaw;
+
+	// Re-enable EMF forces (disabled by ApplyExplosionStun if stun was active before capture)
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(true);
+	}
+
+	// Restore AI focus so NPC resumes facing the player
+	if (AController* MyController = GetController())
+	{
+		if (AShooterAIController* AIController = Cast<AShooterAIController>(MyController))
+		{
+			if (AActor* Target = AIController->GetCurrentTarget())
+			{
+				AIController->SetFocus(Target);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s ExitCapturedState: FULL restore (Walking, friction, rotation, EMF, AI focus)"), *GetName());
 
 	// Stop captured montage
 	if (ActiveCapturedMontage)

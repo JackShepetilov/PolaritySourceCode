@@ -153,6 +153,21 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Tutorial|Hint", meta = (DisplayName = "On Hide Hint"))
 	void BP_OnHideHint();
 
+	// ==================== Hold-to-Dismiss Events ====================
+
+	/**
+	 * Called each tick while the dismiss key is held (for hold-to-dismiss hints)
+	 * @param Progress - Hold progress from 0.0 (just started) to 1.0 (complete)
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Tutorial|Hint", meta = (DisplayName = "On Hold Progress Updated"))
+	void BP_OnHoldProgressUpdated(float Progress);
+
+	/**
+	 * Called when the dismiss key is released before hold completes
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Tutorial|Hint", meta = (DisplayName = "On Hold Cancelled"))
+	void BP_OnHoldCancelled();
+
 	/**
 	 * Call this from Blueprint when hide animation finishes
 	 * Will remove the widget from parent
@@ -190,6 +205,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
 	bool IsMultiHint() const { return bIsMultiHint; }
 
+	/** Set dismiss icon data (for hold-to-dismiss hints) */
+	void SetDismissIconData(const FTutorialInputIconData& InDismissIcon);
+
+	/** Get the dismiss key icon (for hold-to-dismiss hints) */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
+	FTutorialInputIconData GetDismissIconData() const { return DismissIconData; }
+
+	/** Check if this hint has a dismiss icon */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
+	bool HasDismissIcon() const { return DismissIconData.bIsValid; }
+
 	/** Get the multi-hint display data */
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
 	FMultiHintDisplayData GetMultiHintDisplayData() const { return MultiDisplayData; }
@@ -211,6 +237,10 @@ protected:
 
 	/** True if this is a multi-hint */
 	bool bIsMultiHint = false;
+
+	/** Resolved dismiss key icon (for hold-to-dismiss hints) */
+	UPROPERTY(BlueprintReadOnly, Category = "Tutorial|Hint")
+	FTutorialInputIconData DismissIconData;
 
 	/** All associated input actions */
 	UPROPERTY(BlueprintReadOnly, Category = "Tutorial|Hint")

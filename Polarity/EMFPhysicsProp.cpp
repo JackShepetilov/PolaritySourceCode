@@ -26,6 +26,7 @@
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Checkpoint/CheckpointSubsystem.h"
 
 #if WITH_EDITOR
 #include "GCBatchCreatorLibrary.h"
@@ -182,6 +183,12 @@ void AEMFPhysicsProp::BeginPlay()
 	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
 		WidgetSub->RegisterProp(this);
+	}
+
+	// Register with checkpoint subsystem for state tracking
+	if (UCheckpointSubsystem* CheckpointSub = GetWorld()->GetSubsystem<UCheckpointSubsystem>())
+	{
+		CheckpointSub->RegisterProp(this);
 	}
 
 	// Uncharged props start with physics and tick disabled (static blockers).
@@ -1460,23 +1467,27 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 		}
 	}
 
-	// Distribute charge among nearby props (instead of chain reaction destruction)
+	// Distribute charge among nearby props and NPCs (instead of chain reaction destruction)
 	if (FinalRadius > 0.0f)
 	{
 		const float MyCharge = GetCharge();
 		if (!FMath::IsNearlyZero(MyCharge))
 		{
-			TArray<FOverlapResult> PropOverlaps;
-			FCollisionShape PropSphere = FCollisionShape::MakeSphere(FinalRadius);
-			FCollisionQueryParams PropQueryParams;
-			PropQueryParams.AddIgnoredActor(this);
+			// Overlap on both WorldDynamic (props) and Pawn (NPCs) channels
+			TArray<FOverlapResult> ChargeOverlaps;
+			FCollisionShape ChargeSphere = FCollisionShape::MakeSphere(FinalRadius);
+			FCollisionQueryParams ChargeQueryParams;
+			ChargeQueryParams.AddIgnoredActor(this);
+
+			// Gather props
+			TArray<AEMFPhysicsProp*> NearbyProps;
+			TArray<AShooterNPC*> NearbyNPCs;
 
 			GetWorld()->OverlapMultiByChannel(
-				PropOverlaps, ExplosionLocation, FQuat::Identity,
-				ECC_WorldDynamic, PropSphere, PropQueryParams);
+				ChargeOverlaps, ExplosionLocation, FQuat::Identity,
+				ECC_WorldDynamic, ChargeSphere, ChargeQueryParams);
 
-			TArray<AEMFPhysicsProp*> NearbyProps;
-			for (const FOverlapResult& Overlap : PropOverlaps)
+			for (const FOverlapResult& Overlap : ChargeOverlaps)
 			{
 				AEMFPhysicsProp* OtherProp = Cast<AEMFPhysicsProp>(Overlap.GetActor());
 				if (OtherProp && OtherProp != this && !OtherProp->IsDead())
@@ -1485,16 +1496,39 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 				}
 			}
 
-			if (NearbyProps.Num() > 0)
+			// Gather NPCs
+			ChargeOverlaps.Reset();
+			GetWorld()->OverlapMultiByChannel(
+				ChargeOverlaps, ExplosionLocation, FQuat::Identity,
+				ECC_Pawn, ChargeSphere, ChargeQueryParams);
+
+			for (const FOverlapResult& Overlap : ChargeOverlaps)
 			{
-				const float ChargePerProp = MyCharge / static_cast<float>(NearbyProps.Num());
+				AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
+				if (NPC && !NPC->IsDead() && NPC->FindComponentByClass<UEMFVelocityModifier>())
+				{
+					NearbyNPCs.AddUnique(NPC);
+				}
+			}
+
+			const int32 TotalReceivers = NearbyProps.Num() + NearbyNPCs.Num();
+			if (TotalReceivers > 0)
+			{
+				const float ChargePerReceiver = MyCharge / static_cast<float>(TotalReceivers);
+
 				for (AEMFPhysicsProp* Prop : NearbyProps)
 				{
-					Prop->SetCharge(Prop->GetCharge() + ChargePerProp);
+					Prop->SetCharge(Prop->GetCharge() + ChargePerReceiver);
 				}
 
-				UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Distributed charge %.1f among %d nearby props (%.1f each)"),
-					*GetName(), MyCharge, NearbyProps.Num(), ChargePerProp);
+				for (AShooterNPC* NPC : NearbyNPCs)
+				{
+					UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
+					NPCModifier->SetCharge(NPCModifier->GetCharge() + ChargePerReceiver);
+				}
+
+				UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: Distributed charge %.1f among %d receivers (%d props, %d NPCs, %.1f each)"),
+					*GetName(), MyCharge, TotalReceivers, NearbyProps.Num(), NearbyNPCs.Num(), ChargePerReceiver);
 			}
 		}
 	}
@@ -1621,6 +1655,57 @@ void AEMFPhysicsProp::ResetProp()
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp: %s reset to alive state"), *GetName());
+}
+
+void AEMFPhysicsProp::RestoreFromCheckpointState(const FPropCheckpointData& State)
+{
+	if (State.bWasDead)
+	{
+		// Prop should be dead at checkpoint — silently set dead state (no GC spawn / explosion)
+		if (!bIsDead)
+		{
+			bIsDead = true;
+			bHasExploded = true;
+			bIsInReverseFlight = false;
+			CachedPreCollisionSpeed = 0.0f;
+			SetCharge(0.0f);
+			SetActorTickEnabled(false);
+			SetActorHiddenInGame(true);
+
+			if (CapturingPlate.IsValid())
+			{
+				ReleasedFromCapture();
+			}
+
+			if (PropMesh)
+			{
+				PropMesh->SetVisibility(false);
+				PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				PropMesh->SetSimulatePhysics(false);
+			}
+		}
+		// Already dead — leave as is
+	}
+	else
+	{
+		// Prop should be alive at checkpoint
+		if (bIsDead)
+		{
+			// Bring back from dead — ResetProp handles GC cleanup, visibility, capture release
+			ResetProp();
+		}
+
+		// Apply checkpoint state
+		SetActorTransform(State.Transform);
+		CurrentHP = FMath::Clamp(State.CurrentHP, 0.0f, MaxHP);
+		SetCharge(State.Charge);
+
+		if (PropMesh)
+		{
+			PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+			PropMesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+		}
+	}
 }
 
 void AEMFPhysicsProp::SetCharge(float NewCharge)

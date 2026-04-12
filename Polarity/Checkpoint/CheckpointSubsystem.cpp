@@ -5,6 +5,7 @@
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
 #include "Polarity/Variant_Shooter/AI/ShooterAIController.h"
+#include "Polarity/EMFPhysicsProp.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Components/StateTreeAIComponent.h"
 
@@ -23,6 +24,8 @@ void UCheckpointSubsystem::Deinitialize()
 	RegisteredNPCs.Empty();
 	NPCsAliveAtCheckpoint.Empty();
 	AliveNPCs.Empty();
+	RegisteredProps.Empty();
+	PropStatesAtCheckpoint.Empty();
 	Super::Deinitialize();
 }
 
@@ -104,6 +107,9 @@ bool UCheckpointSubsystem::ActivateCheckpoint(ACheckpointActor* Checkpoint, ASho
 		}
 	}
 
+	// Snapshot all registered prop states
+	SnapshotPropStates();
+
 	OnCheckpointActivated.Broadcast(CurrentCheckpointData);
 
 	return true;
@@ -126,6 +132,9 @@ bool UCheckpointSubsystem::RespawnAtCheckpoint(AShooterCharacter* Character)
 	// Respawn all NPCs to checkpoint state FIRST (before player restore)
 	// This ensures NPCs are reset before they can target the respawning player
 	RespawnAllNPCsToCheckpointState();
+
+	// Restore all props to checkpoint state
+	RestoreAllPropsToCheckpointState();
 
 	// Restore character state from checkpoint
 	if (!Character->RestoreFromCheckpoint(CurrentCheckpointData))
@@ -155,6 +164,9 @@ void UCheckpointSubsystem::SetCheckpointData(const FCheckpointData& NewData)
 			}
 		}
 	}
+
+	// Snapshot all registered prop states
+	SnapshotPropStates();
 
 	OnCheckpointActivated.Broadcast(CurrentCheckpointData);
 }
@@ -305,4 +317,82 @@ void UCheckpointSubsystem::RespawnAllNPCsToCheckpointState()
 	bIsRespawningNPCs = false;
 	UE_LOG(LogTemp, Error, TEXT("  Step 2 done: respawned %d NPCs from checkpoint data"), AliveNPCs.Num());
 	UE_LOG(LogTemp, Error, TEXT("===== CheckpointSubsystem::RespawnAllNPCsToCheckpointState END ====="));
+}
+
+// ==================== Prop Tracking ====================
+
+void UCheckpointSubsystem::RegisterProp(AEMFPhysicsProp* Prop)
+{
+	if (!IsValid(Prop))
+	{
+		return;
+	}
+
+	// Avoid duplicates
+	for (const TWeakObjectPtr<AEMFPhysicsProp>& Existing : RegisteredProps)
+	{
+		if (Existing.Get() == Prop)
+		{
+			return;
+		}
+	}
+
+	RegisteredProps.Add(Prop);
+}
+
+void UCheckpointSubsystem::SnapshotPropStates()
+{
+	PropStatesAtCheckpoint.Empty();
+	PropStatesAtCheckpoint.Reserve(RegisteredProps.Num());
+
+	for (const TWeakObjectPtr<AEMFPhysicsProp>& PropPtr : RegisteredProps)
+	{
+		FPropCheckpointData State;
+
+		if (AEMFPhysicsProp* Prop = PropPtr.Get())
+		{
+			State.Transform = Prop->GetActorTransform();
+			State.bWasDead = Prop->IsDead();
+			State.CurrentHP = Prop->CurrentHP;
+			State.Charge = Prop->GetCharge();
+		}
+		else
+		{
+			// Prop was destroyed — mark as dead in snapshot
+			State.bWasDead = true;
+		}
+
+		PropStatesAtCheckpoint.Add(State);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("CheckpointSubsystem: Snapshot %d prop states"), PropStatesAtCheckpoint.Num());
+}
+
+void UCheckpointSubsystem::RestoreAllPropsToCheckpointState()
+{
+	if (PropStatesAtCheckpoint.Num() == 0)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("===== CheckpointSubsystem::RestoreAllPropsToCheckpointState START ====="));
+
+	int32 RestoredCount = 0;
+	int32 NullCount = 0;
+
+	for (int32 i = 0; i < RegisteredProps.Num() && i < PropStatesAtCheckpoint.Num(); i++)
+	{
+		AEMFPhysicsProp* Prop = RegisteredProps[i].Get();
+		if (!Prop)
+		{
+			NullCount++;
+			continue;
+		}
+
+		Prop->RestoreFromCheckpointState(PropStatesAtCheckpoint[i]);
+		RestoredCount++;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("  Restored: %d, Null: %d"), RestoredCount, NullCount);
+	UE_LOG(LogTemp, Log, TEXT("===== CheckpointSubsystem::RestoreAllPropsToCheckpointState END ====="));
 }

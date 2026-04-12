@@ -10,6 +10,7 @@
 class ACheckpointActor;
 class AShooterCharacter;
 class AShooterNPC;
+class AEMFPhysicsProp;
 
 /**
  * Stores data needed to respawn an NPC.
@@ -30,6 +31,27 @@ struct FNPCSpawnData
 	/** Unique ID to track this NPC instance */
 	UPROPERTY()
 	FGuid SpawnID;
+};
+
+/**
+ * Stores per-prop state for checkpoint restore.
+ */
+USTRUCT()
+struct FPropCheckpointData
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FTransform Transform = FTransform::Identity;
+
+	UPROPERTY()
+	bool bWasDead = false;
+
+	UPROPERTY()
+	float CurrentHP = 100.0f;
+
+	UPROPERTY()
+	float Charge = 0.0f;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCheckpointActivated, const FCheckpointData&, CheckpointData);
@@ -187,4 +209,29 @@ protected:
 
 	/** True while RespawnAllNPCsToCheckpointState is running — prevents RegisterNPC from double-adding */
 	bool bIsRespawningNPCs = false;
+
+	// ==================== Prop Tracking ====================
+public:
+	/**
+	 * Register a prop for checkpoint tracking.
+	 * Called by EMFPhysicsProp on BeginPlay.
+	 * @param Prop The prop to register
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint|Props")
+	void RegisterProp(AEMFPhysicsProp* Prop);
+
+protected:
+	/** All registered props (parallel array with PropStatesAtCheckpoint) */
+	UPROPERTY()
+	TArray<TWeakObjectPtr<AEMFPhysicsProp>> RegisteredProps;
+
+	/** Prop states saved at last checkpoint activation (parallel to RegisteredProps) */
+	UPROPERTY()
+	TArray<FPropCheckpointData> PropStatesAtCheckpoint;
+
+	/** Snapshot current state of all registered props */
+	void SnapshotPropStates();
+
+	/** Restore all props to their checkpoint state */
+	void RestoreAllPropsToCheckpointState();
 };

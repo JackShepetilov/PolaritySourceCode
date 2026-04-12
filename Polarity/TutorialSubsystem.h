@@ -11,11 +11,13 @@
 class UInputIconsDataAsset;
 class UTutorialHintWidget;
 class UTutorialSlideWidget;
+class UReminderPanelWidget;
 class UShooterBulletCounterUI;
 class UInputAction;
 class APlayerController;
 struct FHintDisplayData;
 struct FMultiHintDisplayData;
+struct FReminderDisplayData;
 
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTutorialCompleted, FName, TutorialID);
@@ -43,7 +45,7 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(UTutorialSubsystem, STATGROUP_Tickables); }
-	virtual bool IsTickable() const override { return bHUDArrowActive; }
+	virtual bool IsTickable() const override { return bHUDArrowActive || bHasActiveHoldHints; }
 	virtual bool IsTickableWhenPaused() const override { return true; }
 
 	// ==================== Configuration ====================
@@ -69,10 +71,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Tutorial")
 	void SetHUDWidget(UShooterBulletCounterUI* InHUDWidget);
 
+	/** Get the current HUD widget (may be null if not yet set) */
+	UFUNCTION(BlueprintPure, Category = "Tutorial")
+	UShooterBulletCounterUI* GetHUDWidget() const { return HUDWidget; }
+
 	// ==================== Hint API ====================
 
 	/**
-	 * Show a hint with input icon and text
+	 * Show a hint with input icon and text.
+	 * Supports multiple simultaneous hints (stacking). Duplicate TutorialIDs are rejected.
 	 * @param TutorialID - Unique identifier for this tutorial
 	 * @param HintData - Hint content data
 	 * @param PlayerController - Controller to show hint for (uses first local player if null)
@@ -82,17 +89,31 @@ public:
 	bool ShowHint(FName TutorialID, const FTutorialHintData& HintData, APlayerController* PlayerController = nullptr);
 
 	/**
-	 * Hide the currently displayed hint
+	 * Hide a specific hint by TutorialID
+	 * @param TutorialID - ID of the hint to hide
 	 * @param bMarkCompleted - If true, marks this tutorial as completed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Hint")
+	void HideHintByID(FName TutorialID, bool bMarkCompleted = true);
+
+	/**
+	 * Hide all currently displayed hints (backward compatible)
+	 * @param bMarkCompleted - If true, marks all active hints as completed
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Tutorial|Hint")
 	void HideHint(bool bMarkCompleted = true);
 
 	/**
-	 * Check if a hint is currently being displayed
+	 * Check if any hint is currently being displayed
 	 */
 	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
-	bool IsHintActive() const { return bHintActive; }
+	bool IsHintActive() const { return ActiveHints.Num() > 0; }
+
+	/**
+	 * Check if a specific hint is currently being displayed
+	 */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|Hint")
+	bool IsHintActiveByID(FName TutorialID) const;
 
 	// ==================== Slide API ====================
 
@@ -151,6 +172,43 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Tutorial|Debug")
 	void RunTutorialDebugReveal(const TArray<FName>& TutorialIDsToComplete);
+
+	// ==================== Reminder Panel API ====================
+
+	/**
+	 * Set the widget class for the reminder panel
+	 * Must be called before SetReminderData
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Reminder")
+	void SetReminderWidgetClass(TSubclassOf<UReminderPanelWidget> InClass);
+
+	/**
+	 * Set the dismiss input action (shared with hold-hint dismiss).
+	 * When held: dismisses active hold-hints (priority) or shows reminder panel.
+	 * When released: hides reminder panel.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Reminder")
+	void SetReminderDismissAction(UInputAction* InAction);
+
+	/**
+	 * Set reminder panel data. Each entry is a full FTutorialHintData.
+	 * Creates the widget and resolves icons via InputAction pipeline.
+	 * @param InData - Reminder entries (CompletionType/DismissAction/HoldDuration fields are ignored)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Reminder")
+	void SetReminderData(const FReminderPanelData& InData);
+
+	/** Show the reminder panel */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Reminder")
+	void ShowReminder();
+
+	/** Hide the reminder panel */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Reminder")
+	void HideReminder();
+
+	/** Check if the reminder panel is currently visible */
+	UFUNCTION(BlueprintPure, Category = "Tutorial|Reminder")
+	bool IsReminderVisible() const { return bReminderVisible; }
 
 	// ==================== Completion Tracking ====================
 
@@ -277,16 +335,37 @@ protected:
 	/** Set of completed tutorial IDs */
 	TSet<FName> CompletedTutorials;
 
-	/** Currently active hint widget */
+	// ---- Multi-hint stacking ----
+
+	/** Tracked state for a single active hint */
+	struct FActiveHintEntry
+	{
+		FName TutorialID;
+		/** Original hint data (kept for rebuilding the combined widget) */
+		FTutorialHintData HintData;
+		// Hold-dismiss state (only for OnHoldInput hints)
+		bool bIsHoldHint = false;
+		float HoldDuration = 0.f;
+		float CurrentHoldTime = 0.f;
+		bool bIsHolding = false;
+		FKey ExpectedDismissKey;
+	};
+
+	/** All currently active hints */
+	TArray<FActiveHintEntry> ActiveHints;
+
+	/** Single shared widget displaying all active hints */
 	UPROPERTY()
 	TObjectPtr<UTutorialHintWidget> ActiveHintWidget;
+
+	/** True if any active hint is a hold-hint (for IsTickable) */
+	bool bHasActiveHoldHints = false;
+
+	// ---- Slide / HUD Arrow (unchanged, single-instance) ----
 
 	/** Currently active slide widget */
 	UPROPERTY()
 	TObjectPtr<UTutorialSlideWidget> ActiveSlideWidget;
-
-	/** ID of currently active hint */
-	FName ActiveHintID;
 
 	/** ID of currently active slide */
 	FName ActiveSlideID;
@@ -294,14 +373,34 @@ protected:
 	/** ID of currently active HUD arrow */
 	FName ActiveHUDArrowID;
 
-	/** Is a hint currently active */
-	bool bHintActive = false;
-
 	/** Is a slide currently active */
 	bool bSlideActive = false;
 
 	/** Is a HUD arrow currently active */
 	bool bHUDArrowActive = false;
+
+	// ---- Reminder Panel ----
+
+	/** Widget class for reminder panel */
+	UPROPERTY()
+	TSubclassOf<UReminderPanelWidget> ReminderWidgetClass;
+
+	/** Active reminder panel widget (created once, shown/hidden) */
+	UPROPERTY()
+	TObjectPtr<UReminderPanelWidget> ReminderWidget;
+
+	/** Stored reminder data for re-resolving icons */
+	FReminderPanelData StoredReminderData;
+
+	/** Dismiss input action (shared: hold-hints + reminder toggle) */
+	UPROPERTY()
+	TObjectPtr<UInputAction> DismissAction;
+
+	/** Is the reminder panel currently visible */
+	bool bReminderVisible = false;
+
+	/** Is the dismiss key currently held (for reminder show/hide) */
+	bool bDismissKeyHeld = false;
 
 	// ==================== HUD Arrow State ====================
 
@@ -361,4 +460,27 @@ protected:
 	 * Resets widget state so widgets are recreated on the new level.
 	 */
 	void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
+
+	// ---- Dismiss Action Input Handling ----
+
+	/** Bind dismiss action to Enhanced Input (called once from SetReminderDismissAction) */
+	void BindDismissInput();
+
+	/** Unbind dismiss action */
+	void UnbindDismissInput();
+
+	/** Called when dismiss action starts (key pressed) */
+	void OnDismissActionStarted();
+
+	/** Called when dismiss action completes (key released) */
+	void OnDismissActionCompleted();
+
+	/** Recalculate bHasActiveHoldHints flag */
+	void UpdateHoldHintsFlag();
+
+	/** Rebuild the single hint widget from all active hints */
+	void RebuildHintWidget();
+
+	/** Find active hint entry by ID (returns nullptr if not found) */
+	FActiveHintEntry* FindActiveHint(FName TutorialID);
 };

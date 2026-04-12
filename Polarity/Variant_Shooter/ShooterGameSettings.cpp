@@ -76,10 +76,26 @@ void UShooterGameSettings::ApplyAudioSettings()
 	USoundClass* VoiceClass = VoiceSoundClass.LoadSynchronous();
 
 	// Fallback: try LoadObject directly if soft refs failed
-	if (!SoundMix)  SoundMix = LoadObject<USoundMix>(nullptr, TEXT("/Game/Audio/Classes/NewSoundMix.NewSoundMix"));
-	if (!MusicClass) MusicClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Music.Music"));
-	if (!SFXClass)   SFXClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/SFX.SFX"));
-	if (!VoiceClass) VoiceClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Voice.Voice"));
+	if (!SoundMix)
+	{
+		SoundMix = LoadObject<USoundMix>(nullptr, TEXT("/Game/Audio/Classes/NewSoundMix.NewSoundMix"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SoundMix soft ref failed, fallback: %s"), SoundMix ? TEXT("OK") : TEXT("STILL NULL"));
+	}
+	if (!MusicClass)
+	{
+		MusicClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Music.Music"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] MusicClass soft ref failed, fallback: %s"), MusicClass ? TEXT("OK") : TEXT("STILL NULL"));
+	}
+	if (!SFXClass)
+	{
+		SFXClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/SFX.SFX"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] SFXClass soft ref failed, fallback: %s"), SFXClass ? TEXT("OK") : TEXT("STILL NULL"));
+	}
+	if (!VoiceClass)
+	{
+		VoiceClass = LoadObject<USoundClass>(nullptr, TEXT("/Game/Audio/Classes/Voice.Voice"));
+		UE_LOG(LogTemp, Warning, TEXT("[AudioDebug] VoiceClass soft ref failed, fallback: %s"), VoiceClass ? TEXT("OK") : TEXT("STILL NULL"));
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Loaded: SoundMix=%s, Music=%s, SFX=%s, Voice=%s"),
 		SoundMix ? TEXT("OK") : TEXT("NULL"),
@@ -89,7 +105,7 @@ void UShooterGameSettings::ApplyAudioSettings()
 
 	if (!SoundMix)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SoundMix FAILED to load!"));
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] SoundMix FAILED to load from both soft ref and LoadObject!"));
 		return;
 	}
 
@@ -97,27 +113,34 @@ void UShooterGameSettings::ApplyAudioSettings()
 	UWorld* World = nullptr;
 	if (GEngine)
 	{
+		UE_LOG(LogTemp, Log, TEXT("[AudioDebug] WorldContexts count: %d"), GEngine->GetWorldContexts().Num());
 		for (const FWorldContext& Context : GEngine->GetWorldContexts())
 		{
-			if (Context.World() && (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE))
+			if (Context.World())
 			{
-				World = Context.World();
-				break;
+				UE_LOG(LogTemp, Log, TEXT("[AudioDebug] Found world: %s, Type=%d"), *Context.World()->GetName(), (int32)Context.WorldType);
+				if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+				{
+					World = Context.World();
+					break;
+				}
 			}
 		}
 	}
 
 	if (!World)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] No game world found!"));
+		UE_LOG(LogTemp, Error, TEXT("[AudioDebug] No Game/PIE world found!"));
 		return;
 	}
 
+	// Check audio device
+	FAudioDeviceHandle AudioDevice = World->GetAudioDevice();
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] AudioDevice: %s"), AudioDevice.IsValid() ? TEXT("OK") : TEXT("NULL/INVALID"));
+
 	// Use SetBaseSoundMix instead of PushSoundMixModifier
-	// SetBaseSoundMix is the correct API for persistent user volume settings
-	// PushSoundMixModifier is for temporary effects (underwater, rooms) and stacks on repeated calls
 	UGameplayStatics::SetBaseSoundMix(World, SoundMix);
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetBaseSoundMix done"));
+	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] SetBaseSoundMix done for world: %s"), *World->GetName());
 
 	// IMPORTANT: Never set volume to exactly 0.0 - UE virtualizes (kills) sounds at zero volume
 	// and they won't resume when volume increases. Use 0.001 as minimum.

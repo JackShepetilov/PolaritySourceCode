@@ -704,6 +704,9 @@ protected:
 	/** Has hit something during current attack */
 	bool bHasHitThisAttack = false;
 
+	/** Has hit an enemy (AShooterNPC) during current attack — used to decide if cooldown applies */
+	bool bHitEnemyThisAttack = false;
+
 	/** Input is locked - prevents starting new attack until current one fully completes */
 	bool bInputLocked = false;
 

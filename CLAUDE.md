@@ -8,6 +8,20 @@
 
 Папка Polarity_Main не является репо и работа в ней и в её подпапках помимо Source запрещена. Если найдешь себя в этой папке, то немедленно выйди из неё и вернись в Polarity_Main/Source
 
+## CRITICAL: Worktree Safety — No Duplicate .cs Files
+
+**UBT (Unreal Build Tool) сканирует ВСЮ папку Source рекурсивно, включая `.claude/worktrees/`.**
+Если worktree содержит копии `.Build.cs` или `.Target.cs` файлов, UBT найдёт дубликаты и билд сломается с CS0101 ошибками.
+
+**ПЕРЕД созданием worktree или файлов в worktree:**
+1. Проверь, что worktree НЕ создаёт дубликаты `.Build.cs` и `.Target.cs`
+2. Если worktree уже существует с такими файлами — удали их или весь worktree
+3. После завершения работы — убедись что worktree почищен
+
+**При ошибках CS0101 (duplicate definition):**
+1. Проверь `.claude/worktrees/` на наличие дублирующих `.cs` файлов
+2. Удали старые/неиспользуемые worktree директории
+
 ## CRITICAL: Always Work With Live Code
 
 **ALWAYS work with code from the main working directory:**
@@ -88,12 +102,25 @@ UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] NPC %s MoveTo result: %d"), *GetNam
 - If there are compilation errors, the user will provide them
 - This wastes time and produces unreadable output
 
+## CRITICAL: Thoroughness — Think Before You Code
+
+**НИКОГДА не пиши код на основе предположений. Каждое решение должно быть подкреплено проверкой.**
+
+1. **Перед использованием ЛЮБОГО UE API** — найди 2-3 примера в кодобазе как аналогичная задача уже решена. Если примеров нет — ищи в документации.
+2. **Перед написанием физики/коллизий/ProjectileMovement** — ОБЯЗАТЕЛЬНО прочитай как существующие классы в проекте это делают (ShooterProjectile, EMFPhysicsProp и т.д.)
+3. **При работе с lifecycle** (BeginPlay, InitializeComponent, SpawnActor) — проверяй порядок вызовов. Свойства компонента, выставленные ПОСЛЕ BeginPlay, не применяются автоматически.
+4. **При спавне акторов** — проверяй что параметры (скорость, позиция, коллизия) применяются ДО того как актор начинает жить, или используй правильный метод обновления ПОСЛЕ спавна.
+5. **НЕ УГАДЫВАЙ** поведение API — если не уверен на 100%, ищи в интернете или в проекте.
+6. **Всегда предлагай ПРОСТОЕ решение первым** — не изобретай сложные переключения режимов, если есть встроенный параметр (например bShouldBounce вместо ручного переключения на физику).
+7. **Перед каждым решением задай себе вопрос:** "Есть ли в UE встроенный способ это сделать?" — если да, используй его.
+
 ## Research First - IMPORTANT
 
 **Если есть хоть какое-то сомнение в том, как работает тот или иной инструмент/API/класс Unreal Engine:**
 1. Сразу иди в интернет и читай официальную документацию
 2. Не полагайся на память - проверяй актуальную информацию
 3. Особенно важно для: Enhanced Input, GameUserSettings, SaveGame, Subsystems, Slate/UMG
+4. **Особенно важно для физики:** ProjectileMovementComponent, коллизии, SimulatePhysics — ВСЕГДА проверяй порядок инициализации
 
 ## NO Unsolicited "Smart" Architecture
 

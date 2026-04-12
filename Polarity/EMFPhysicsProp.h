@@ -537,6 +537,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetHealthPercent() const { return MaxHP > 0.0f ? CurrentHP / MaxHP : 0.0f; }
 
+	/** Restore prop to a saved checkpoint state (called by CheckpointSubsystem on player respawn) */
+	void RestoreFromCheckpointState(const struct FPropCheckpointData& State);
+
 	/** Is this prop currently in reverse channeling flight? */
 	UFUNCTION(BlueprintPure, Category = "Explosive Impact")
 	bool IsInReverseFlight() const { return bIsInReverseFlight; }

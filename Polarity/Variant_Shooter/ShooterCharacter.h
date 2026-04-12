@@ -1221,6 +1221,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
 	FName MeleeChargesTutorialID = FName("Tutorial_MeleeCharges");
 
+	// --- Health Pickup Objective (shown after first low-health arrow is dismissed) ---
+
+	/** Tutorial ID for the health pickup objective (tracked for completion) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FName HealthPickupObjectiveTutorialID = FName("Tutorial_HealthPickupObjective");
+
+	/** How many health pickups the player must collect to complete the objective */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial", meta = (ClampMin = "1"))
+	int32 RequiredHealthPickups = 2;
+
+	/** Called by HealthPickup when the player collects one */
+	void NotifyHealthPickupCollected();
+
+private:
+
+	/** How many pickups collected since objective started */
+	int32 HealthPickupsCollected = 0;
+
+	/** True while the persistent HUD objective is active */
+	bool bHealthPickupObjectiveActive = false;
+
+public:
+
 	// ==================== Boss Finisher System ====================
 public:
 	/** Flag indicating boss finisher mode is active - set from Level BP */

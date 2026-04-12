@@ -1,4 +1,5 @@
 {
+  "effortLevel": "high",
   "permissions": {
     "allow": [
       "Bash(git push:*)",
@@ -212,7 +213,15 @@
       "Bash(curl -sL \"https://github.com/google/fonts/raw/main/ofl/rajdhani/Rajdhani-Regular.ttf\" -o Rajdhani-Regular.ttf)",
       "Bash(curl -sL \"https://github.com/google/fonts/raw/main/ofl/rajdhani/Rajdhani-Bold.ttf\" -o Rajdhani-Bold.ttf)",
       "Bash(curl -sL \"https://github.com/google/fonts/raw/main/ofl/rajdhani/Rajdhani-SemiBold.ttf\" -o Rajdhani-SemiBold.ttf)",
-      "Bash(find 'C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity' -type f \\\\\\(-iname *subtitle* -o -iname *dialogue* -o -iname *chat* -o -iname *message* -o -iname *voice* -o -iname *comms* -o -iname *hint* \\\\\\))"
+      "Bash(find 'C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity' -type f \\\\\\(-iname *subtitle* -o -iname *dialogue* -o -iname *chat* -o -iname *message* -o -iname *voice* -o -iname *comms* -o -iname *hint* \\\\\\))",
+      "WebFetch(domain:docs.infimagames.com)",
+      "Bash(python gen_dialogue_ru_pdf.py)",
+      "Bash(curl -sL \"https://github.com/googlefonts/rubik/raw/main/fonts/ttf/Rubik-Regular.ttf\" -o Rubik-Regular.ttf)",
+      "Bash(curl -sL \"https://github.com/googlefonts/rubik/raw/main/fonts/ttf/Rubik-Bold.ttf\" -o Rubik-Bold.ttf)",
+      "Bash(curl -sL \"https://github.com/googlefonts/rubik/raw/main/fonts/ttf/Rubik-SemiBold.ttf\" -o Rubik-SemiBold.ttf)",
+      "Bash(curl -sL \"https://github.com/googlefonts/rubik/raw/refs/heads/main/fonts/ttf/Rubik-Regular.ttf\" -o Rubik-Regular.ttf)",
+      "Bash(curl -sL \"https://fonts.google.com/download?family=Rubik\" -o rubik.zip)",
+      "Bash(curl -L -o rubik.zip \"https://fonts.google.com/download?family=Rubik\" -H \"User-Agent: Mozilla/5.0\")"
     ]
   }
 }

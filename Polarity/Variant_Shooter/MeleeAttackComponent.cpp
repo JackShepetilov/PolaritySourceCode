@@ -113,12 +113,24 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 bool UMeleeAttackComponent::StartAttack()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === StartAttack ENTER === State=%d, bInputLocked=%d, bExternallyDisabled=%d, MeleeCharges=%d, bIsDropKick=%d, bHasHitThisAttack=%d"),
+		(int32)CurrentState, bInputLocked, bExternallyDisabled, MeleeCharges, bIsDropKick, bHasHitThisAttack);
+
+	bool bCanAttackNow = CanAttack();
+	bool bIsCurrentlyAttacking = IsAttacking();
+	bool bShouldDropKick = ShouldPerformDropKick();
+	bool bHasTarget = bShouldDropKick ? HasDropKickTarget() : false;
+
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack=%d, IsAttacking=%d, ShouldDropKick=%d, HasTarget=%d"),
+		bCanAttackNow, bIsCurrentlyAttacking, bShouldDropKick, bHasTarget);
+
 	// Drop kick can interrupt an ongoing attack:
 	// - Always interrupts a normal (non-dropkick) attack
 	// - Only interrupts another drop kick after it has dealt damage
 	// - Must have an actual dropkick target in the cone (prevents air melee spam)
-	if (!CanAttack() && IsAttacking() && (!bIsDropKick || bHasHitThisAttack) && ShouldPerformDropKick() && HasDropKickTarget())
+	if (!bCanAttackNow && bIsCurrentlyAttacking && (!bIsDropKick || bHasHitThisAttack) && bShouldDropKick && bHasTarget)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] INTERRUPTING current attack for dropkick"));
 		// Cleanup current attack
 		StopAttackAnimation();
 		StopSwingTrailFX();
@@ -129,8 +141,9 @@ bool UMeleeAttackComponent::StartAttack()
 		SetState(EMeleeAttackState::Ready);
 		// Fall through to start a new attack (which will become a drop kick via StartMagnetism)
 	}
-	else if (!CanAttack())
+	else if (!bCanAttackNow)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED by CanAttack=false (no dropkick interrupt path)"));
 		return false;
 	}
 
@@ -139,6 +152,7 @@ bool UMeleeAttackComponent::StartAttack()
 
 	// Reset attack state
 	bHasHitThisAttack = false;
+	bHitEnemyThisAttack = false;
 	HitActorsThisAttack.Empty();
 	MeshTransitionProgress = 0.0f;
 	MontageTimeElapsed = 0.0f;
@@ -219,8 +233,11 @@ bool UMeleeAttackComponent::StartAttack()
 
 bool UMeleeAttackComponent::StartDelegatedDropKick()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === StartDelegatedDropKick ENTER ==="));
+
 	if (!OwnerCharacter || !OwnerController)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] DelegatedDropKick: FALSE - no owner/controller"));
 		return false;
 	}
 
@@ -228,6 +245,8 @@ bool UMeleeAttackComponent::StartDelegatedDropKick()
 	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
 	if (!Movement || !Movement->IsFalling())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] DelegatedDropKick: FALSE - not falling (Mode=%d)"),
+			Movement ? (int32)Movement->MovementMode : -1);
 		return false;
 	}
 
@@ -237,6 +256,7 @@ bool UMeleeAttackComponent::StartDelegatedDropKick()
 
 	// Reset attack state
 	bHasHitThisAttack = false;
+	bHitEnemyThisAttack = false;
 	HitActorsThisAttack.Empty();
 	bIsDropKick = false;
 	DropKickHeightDifference = 0.0f;
@@ -245,6 +265,7 @@ bool UMeleeAttackComponent::StartDelegatedDropKick()
 	// Cache velocity for momentum calculations
 	OwnerVelocityAtAttackStart = Movement->Velocity;
 
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] DelegatedDropKick: calling TryStartDropKick..."));
 	// Try cone-based dropkick detection (finds target, sets LungeTargetPosition, etc.)
 	bool bSuccess = TryStartDropKick();
 
@@ -259,11 +280,15 @@ bool UMeleeAttackComponent::StartDelegatedDropKick()
 		StateTimeRemaining = FMath::Max(Settings.ActiveTime, TravelTime + 0.15f);
 		CurrentState = EMeleeAttackState::Active;
 
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] DelegatedDropKick: SUCCESS! DistToTarget=%.0f, TravelTime=%.2f, StateTime=%.2f"),
+			DistToTarget, TravelTime, StateTimeRemaining);
+
 		// Don't spawn trail FX or play animation — the weapon handles its own
 		OnDropKickStarted.Broadcast();
 	}
 	else
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] DelegatedDropKick: FAILED - TryStartDropKick returned false"));
 		// Failed — restore disabled state
 		bExternallyDisabled = bWasDisabled;
 	}
@@ -294,18 +319,21 @@ bool UMeleeAttackComponent::CanAttack() const
 	// Blocked by melee weapon being equipped
 	if (bExternallyDisabled)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - bExternallyDisabled"));
 		return false;
 	}
 
 	// Must be ready and input not locked
 	if (CurrentState != EMeleeAttackState::Ready || bInputLocked)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - State=%d (need Ready=0), bInputLocked=%d"), (int32)CurrentState, bInputLocked);
 		return false;
 	}
 
 	// Must have valid owner
 	if (!OwnerCharacter)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - No OwnerCharacter"));
 		return false;
 	}
 
@@ -314,6 +342,7 @@ bool UMeleeAttackComponent::CanAttack() const
 	{
 		if (ChargeAnim->IsAnimating())
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - ChargeAnimation playing"));
 			return false;
 		}
 	}
@@ -321,6 +350,7 @@ bool UMeleeAttackComponent::CanAttack() const
 	// Must have at least 1 melee charge
 	if (MeleeCharges < 1)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - MeleeCharges=%d (need >=1)"), MeleeCharges);
 		return false;
 	}
 
@@ -330,6 +360,7 @@ bool UMeleeAttackComponent::CanAttack() const
 	{
 		if (!Settings.bCanAttackInAir && Movement->IsFalling())
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - Airborne but bCanAttackInAir=false"));
 			return false;
 		}
 
@@ -337,6 +368,7 @@ bool UMeleeAttackComponent::CanAttack() const
 		// For now, we allow it and let the character class handle restrictions
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: TRUE"));
 	return true;
 }
 
@@ -584,7 +616,15 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 			break;
 
 		case EMeleeAttackState::ShowingWeapon:
-			SetState(EMeleeAttackState::Cooldown);
+			// Skip cooldown if we didn't hit an enemy (allows spam-hitting props)
+			if (bHitEnemyThisAttack)
+			{
+				SetState(EMeleeAttackState::Cooldown);
+			}
+			else
+			{
+				SetState(EMeleeAttackState::Ready);
+			}
 			break;
 
 		case EMeleeAttackState::Cooldown:
@@ -683,6 +723,7 @@ void UMeleeAttackComponent::PerformHitDetection()
 			HitActorsThisAttack.Add(Target);
 
 			// Consume charges on first hit of this attack
+			bHitEnemyThisAttack = true;
 			ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
 
 			// Check for headshot (approximate - use upper part of target)
@@ -843,9 +884,10 @@ void UMeleeAttackComponent::PerformHitDetection()
 				StartCoolKick();
 			}
 
-			// Consume charges on first hit of this attack
-			if (!bHasHitThisAttack)
+			// Consume charges on first hit of this attack, but only against enemies (not props/destructibles)
+			if (!bHasHitThisAttack && Cast<AShooterNPC>(HitActor))
 			{
+				bHitEnemyThisAttack = true;
 				if (bIsDropKick)
 				{
 					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
@@ -1435,11 +1477,14 @@ void UMeleeAttackComponent::StartMagnetism()
 	DropKickHeightDifference = 0.0f;
 
 	// Check for drop kick first (airborne + looking down)
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: checking dropkick..."));
 	if (ShouldPerformDropKick() && TryStartDropKick())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: DROPKICK started successfully!"));
 		// Drop kick started successfully - skip normal magnetism
 		return;
 	}
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: dropkick NOT started, proceeding with normal magnetism"));
 
 	const FVector Start = GetTraceStart();
 	const FVector End = Start + GetTraceDirection() * Settings.MagnetismRange;
@@ -2616,12 +2661,14 @@ bool UMeleeAttackComponent::ShouldPerformDropKick() const
 	// Check drop kick cooldown
 	if (DropKickCooldownRemaining > 0.0f)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] ShouldDropKick: FALSE - cooldown remaining: %.1f"), DropKickCooldownRemaining);
 		return false;
 	}
 
 	// Must have at least 1 melee charge for dropkick
 	if (MeleeCharges < 1)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] ShouldDropKick: FALSE - MeleeCharges=%d"), MeleeCharges);
 		return false;
 	}
 
@@ -3023,8 +3070,10 @@ float UMeleeAttackComponent::CalculateDropKickBonusDamage() const
 
 bool UMeleeAttackComponent::HasDropKickTarget() const
 {
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] HasDropKickTarget: checking..."));
 	if (!OwnerCharacter || !OwnerController)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] HasDropKickTarget: FALSE - no owner/controller"));
 		return false;
 	}
 
@@ -3125,13 +3174,23 @@ bool UMeleeAttackComponent::HasDropKickTarget() const
 		{
 			// Check minimum height difference
 			float HeightDiff = Start.Z - TargetPos.Z;
+			UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] HasDropKickTarget: %s in cone (angle=%.1f), HeightDiff=%.1f (need>=%.1f)"),
+				*HitActor->GetName(), FMath::RadiansToDegrees(AngleToTarget), HeightDiff, Settings.DropKickMinHeightDifference);
 			if (HeightDiff >= Settings.DropKickMinHeightDifference)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] HasDropKickTarget: TRUE - found %s"), *HitActor->GetName());
 				return true; // Found a valid target
 			}
 		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] HasDropKickTarget: %s OUTSIDE cone (angle=%.1f > max=%.1f)"),
+				*HitActor->GetName(), FMath::RadiansToDegrees(AngleToTarget), Settings.DropKickConeAngle);
+		}
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] HasDropKickTarget: FALSE - no valid targets found (checked %d overlaps, ConeLen=%.0f, SearchRadius=%.0f)"),
+		OverlapResults.Num(), ConeLength, SearchRadius);
 	return false;
 }
 

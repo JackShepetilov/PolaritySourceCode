@@ -44,6 +44,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
 #include "TutorialSubsystem.h"
+#include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 
 AShooterCharacter::AShooterCharacter()
@@ -183,6 +184,7 @@ void AShooterCharacter::BeginPlay()
 				{
 					TArray<FName> AllTutorialIDs;
 					AllTutorialIDs.Add(FirstDamageTutorialID);
+					AllTutorialIDs.Add(HealthPickupObjectiveTutorialID);
 					AllTutorialIDs.Add(FirstChargeTutorialID);
 					AllTutorialIDs.Add(MeleeChargesTutorialID);
 					TutorialSub->RunTutorialDebugReveal(AllTutorialIDs);
@@ -190,6 +192,7 @@ void AShooterCharacter::BeginPlay()
 			}
 		}, 0.5f, false);
 	}
+
 }
 
 void AShooterCharacter::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -638,15 +641,19 @@ void AShooterCharacter::OnWeaponSwitchRaised()
 
 void AShooterCharacter::DoMeleeAttack()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === DoMeleeAttack CALLED ==="));
+
 	// Don't melee if charge animating
 	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: ChargeAnimation playing"));
 		return;
 	}
 
 	// Don't melee if weapon switch in progress
 	if (bIsWeaponSwitchInProgress)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: WeaponSwitch"));
 		return;
 	}
 
@@ -671,7 +678,12 @@ void AShooterCharacter::DoMeleeAttack()
 			CurrentWeapon->StopFiring();
 		}
 
-		MeleeAttackComponent->StartAttack();
+		bool bResult = MeleeAttackComponent->StartAttack();
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartAttack returned: %d"), bResult);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: No MeleeAttackComponent!"));
 	}
 }
 
@@ -2145,6 +2157,52 @@ void AShooterCharacter::RestoreHealth(float Amount)
 	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
 }
 
+// ==================== Health Pickup Objective ====================
+
+void AShooterCharacter::NotifyHealthPickupCollected()
+{
+	if (!bHealthPickupObjectiveActive)
+	{
+		return;
+	}
+
+	HealthPickupsCollected++;
+
+	UGameInstance* GI = GetGameInstance();
+	if (!GI)
+	{
+		return;
+	}
+
+	UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>();
+	if (!TutorialSub)
+	{
+		return;
+	}
+
+	UShooterBulletCounterUI* HUD = TutorialSub->GetHUDWidget();
+
+	if (HealthPickupsCollected >= RequiredHealthPickups)
+	{
+		// Objective complete
+		bHealthPickupObjectiveActive = false;
+		TutorialSub->MarkCompleted(HealthPickupObjectiveTutorialID);
+
+		if (HUD)
+		{
+			HUD->BP_HideHealthPickupObjective();
+		}
+	}
+	else
+	{
+		// Update progress
+		if (HUD)
+		{
+			HUD->BP_UpdateHealthPickupObjective(HealthPickupsCollected, RequiredHealthPickups);
+		}
+	}
+}
+
 // ==================== Armor Restoration ====================
 
 void AShooterCharacter::RestoreArmor(float Amount)
@@ -2605,6 +2663,27 @@ void AShooterCharacter::UpdateLowHealthWarning(float DeltaTime)
 			// Just entered low health state - play warning immediately
 			bIsLowHealth = true;
 			LowHealthWarningTimer = 0.0f;
+
+			// Start health pickup objective on first low-health event
+			if (!bHealthPickupObjectiveActive && !HealthPickupObjectiveTutorialID.IsNone())
+			{
+				if (UGameInstance* GI = GetGameInstance())
+				{
+					if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+					{
+						if (!TutorialSub->IsCompleted(HealthPickupObjectiveTutorialID))
+						{
+							bHealthPickupObjectiveActive = true;
+							HealthPickupsCollected = 0;
+
+							if (UShooterBulletCounterUI* HUD = TutorialSub->GetHUDWidget())
+							{
+								HUD->BP_ShowHealthPickupObjective(RequiredHealthPickups);
+							}
+						}
+					}
+				}
+			}
 
 			if (LowHealthWarningSound)
 			{

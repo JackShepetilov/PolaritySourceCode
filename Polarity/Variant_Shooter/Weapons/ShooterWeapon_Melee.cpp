@@ -103,8 +103,11 @@ void AShooterWeapon_Melee::Tick(float DeltaTime)
 
 void AShooterWeapon_Melee::Fire()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === WeaponMelee::Fire CALLED === bIsFiring=%d, bIsDropKick=%d"), bIsFiring, bIsDropKick);
+
 	if (!bIsFiring)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Fire: BLOCKED - bIsFiring=false"));
 		return;
 	}
 
@@ -117,6 +120,7 @@ void AShooterWeapon_Melee::Fire()
 		UMeleeAttackComponent* MeleeComp = ShooterChar ? ShooterChar->GetMeleeAttackComponent() : nullptr;
 		if (MeleeComp && MeleeComp->IsAttacking())
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Fire: BLOCKED - previous dropkick still in progress"));
 			return; // Dropkick still in progress
 		}
 		// Dropkick ended, safe to clear and proceed with new attack
@@ -1051,6 +1055,7 @@ bool AShooterWeapon_Melee::ShouldPerformDropKick() const
 {
 	if (!bEnableDropKick || !PawnOwner || !PawnOwner->GetController())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Weapon::ShouldDropKick: FALSE - bEnableDropKick=%d, PawnOwner=%d"), bEnableDropKick, PawnOwner != nullptr);
 		return false;
 	}
 
@@ -1058,12 +1063,15 @@ bool AShooterWeapon_Melee::ShouldPerformDropKick() const
 	ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner);
 	if (!OwnerChar)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Weapon::ShouldDropKick: FALSE - no OwnerChar"));
 		return false;
 	}
 
 	UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement();
 	if (!Movement || !Movement->IsFalling())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Weapon::ShouldDropKick: FALSE - not falling (Mode=%d)"),
+			Movement ? (int32)Movement->MovementMode : -1);
 		return false;
 	}
 
@@ -1074,9 +1082,13 @@ bool AShooterWeapon_Melee::ShouldPerformDropKick() const
 
 	if (CameraRotation.Pitch > -DropKickPitchThreshold)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Weapon::ShouldDropKick: FALSE - Pitch=%.1f, need < -%.1f (not looking down enough)"),
+			CameraRotation.Pitch, DropKickPitchThreshold);
 		return false;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] Weapon::ShouldDropKick: TRUE (Pitch=%.1f, Threshold=-%.1f)"),
+		CameraRotation.Pitch, DropKickPitchThreshold);
 	return true;
 }
 

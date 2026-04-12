@@ -331,11 +331,15 @@ bool UEMFChargeWidget::GetTargetWorldPosition(FVector& OutPosition) const
 
 	if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
-		// Use bounds top for props
-		FVector Origin, BoxExtent;
-		Prop->GetActorBounds(false, Origin, BoxExtent);
-		OutPosition = Origin + FVector(0.0f, 0.0f, BoxExtent.Z + VerticalOffset);
-		return true;
+		// Use PropMesh bounds directly — GetActorBounds includes ALL primitive components
+		// (Niagara, etc.) which may stay at spawn position when PropMesh moves via physics
+		if (Prop->PropMesh)
+		{
+			const FBoxSphereBounds& MeshBounds = Prop->PropMesh->Bounds;
+			OutPosition = MeshBounds.Origin + FVector(0.0f, 0.0f, MeshBounds.BoxExtent.Z + VerticalOffset);
+			return true;
+		}
+		return false;
 	}
 
 	if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())

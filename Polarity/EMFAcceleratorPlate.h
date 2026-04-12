@@ -5,6 +5,8 @@
 // - No charge dependency, no EMF-based carry mechanics
 // - Freezes in place on release (no reverse capture)
 // - Lowest capture priority (only captured when no other targets in range)
+//
+// Optional: add ShootableButtonComponent in Blueprint to toggle field on/off.
 
 #pragma once
 
@@ -76,9 +78,22 @@ public:
 	 */
 	void UpdateHoldPosition(const FVector& CameraLoc, const FRotator& CameraRot);
 
+	// ==================== Field Toggle API ====================
+
+	/** Toggle EMF field on/off. Call from Blueprint (e.g. OnButtonPressed). */
+	UFUNCTION(BlueprintCallable, Category = "EMF")
+	void ToggleField();
+
+	/** Is the EMF field currently active? */
+	UFUNCTION(BlueprintPure, Category = "EMF")
+	bool IsFieldActive() const { return bFieldActive; }
+
 protected:
 	virtual void BeginPlay() override;
 
 private:
 	bool bIsCaptured = false;
+	bool bFieldActive = true;
+
+	void SetFieldActive(bool bActive);
 };

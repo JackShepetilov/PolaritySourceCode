@@ -22,6 +22,7 @@ class UGeometryCollection;
 class UNiagaraSystem;
 class AShooterDummy;
 class ARewardContainer;
+class AArenaFinaleSequence;
 class UMusicTrackDataAsset;
 class UMusicPlayerSubsystem;
 
@@ -117,6 +118,12 @@ public:
 	/** Music track to play while the arena is active. Stops on completion. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Music")
 	TObjectPtr<UMusicTrackDataAsset> ArenaMusicTrack;
+
+	// ==================== Finale Sequence ====================
+
+	/** Optional finale sequence. If set, music stop is deferred until the sequence completes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Finale")
+	TSoftObjectPtr<AArenaFinaleSequence> FinaleSequence;
 
 	// ==================== Reward Door ====================
 
@@ -403,6 +410,20 @@ private:
 	/** Recently used spawn points (sustain mode). Avoided when picking next point
 	 *  to spread enemies across different locations. */
 	TArray<AArenaSpawnPoint*> RecentlyUsedSpawnPoints;
+
+	// ==================== Stuck Detection ====================
+
+	/** Periodically check alive NPCs for stuck state and kill+respawn if out of player's view */
+	void CheckStuckNPCs();
+
+	/** Timer for periodic stuck checks */
+	FTimerHandle StuckCheckTimerHandle;
+
+	/** Last known positions of alive NPCs for movement detection */
+	TMap<TWeakObjectPtr<AShooterNPC>, FVector> NPCLastPositions;
+
+	/** How many consecutive stuck checks each NPC has failed (not moving) */
+	TMap<TWeakObjectPtr<AShooterNPC>, int32> NPCStuckCounter;
 
 	// ==================== NPC Pool (Sustain Mode) ====================
 

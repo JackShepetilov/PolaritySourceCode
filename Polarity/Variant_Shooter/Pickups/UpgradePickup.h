@@ -16,6 +16,9 @@ class UNiagaraSystem;
 class UNiagaraComponent;
 class USoundBase;
 class UEMF_FieldComponent;
+class UInputAction;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradePickupCollected, AShooterCharacter*, Player);
 
 /**
  * World pickup actor for upgrades.
@@ -117,6 +120,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0"))
 	float CaptureChargeNormCoeff = 50.0f;
 
+	// ==================== Hint on Pickup ====================
+
+	/** Show a hold-to-dismiss HUD hint with upgrade description when picked up */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Upgrade Pickup|Hint")
+	bool bShowHintOnPickup = true;
+
+	/** Input action the player must hold to dismiss the hint (must match the tutorial system dismiss action) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Upgrade Pickup|Hint")
+	TObjectPtr<UInputAction> HintDismissAction;
+
+	/** How long the player must hold the dismiss key (seconds) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Upgrade Pickup|Hint", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float HintHoldDuration = 1.0f;
+
 	// ==================== Pull Settings ====================
 
 	/** Camera-relative offset where the pickup flies to during pull (X=forward, Y=right, Z=up) */
@@ -153,9 +170,13 @@ public:
 	/** Has pull completed (upgrade granted)? */
 	bool IsPullComplete() const { return bPullComplete; }
 
-	// ==================== Blueprint Events ====================
+	// ==================== Events ====================
 
-	/** Called when upgrade is successfully picked up */
+	/** Broadcast when upgrade is successfully picked up (bind from Level Blueprint or other actors) */
+	UPROPERTY(BlueprintAssignable, Category = "Upgrade Pickup")
+	FOnUpgradePickupCollected OnPickedUp;
+
+	/** Called when upgrade is successfully picked up (override in child Blueprints) */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Upgrade Pickup", meta = (DisplayName = "On Upgrade Picked Up"))
 	void BP_OnUpgradePickedUp(AShooterCharacter* Player);
 

@@ -239,6 +239,17 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 	}
 }
 
+void UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP()
+{
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->OnHealthPickupCollectedAtFullHP();
+		}
+	}
+}
+
 float UUpgradeManagerComponent::GetCombinedDamageMultiplier(AActor* Target) const
 {
 	float Combined = 1.0f;

@@ -13,6 +13,7 @@
 #include "InputAction.h"
 #include "GameFramework/PlayerController.h"
 #include "Curves/CurveFloat.h"
+#include "Polarity/Music/MusicPlayerSubsystem.h"
 
 AArenaFinaleSequence::AArenaFinaleSequence()
 {
@@ -362,6 +363,15 @@ void AArenaFinaleSequence::EndFinaleSequence()
 
 	// Cleanup any remaining input bindings
 	UnbindPlayerInput();
+
+	// Stop arena music now that the finale is complete
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UMusicPlayerSubsystem* MusicSubsystem = GI->GetSubsystem<UMusicPlayerSubsystem>())
+		{
+			MusicSubsystem->StopTrack();
+		}
+	}
 
 	OnFinaleCompleted.Broadcast();
 }

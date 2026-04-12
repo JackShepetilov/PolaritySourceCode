@@ -5,11 +5,14 @@
 #include "InputIconsDataAsset.h"
 #include "TutorialHintWidget.h"
 #include "TutorialSlideWidget.h"
+#include "ReminderPanelWidget.h"
 #include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "EnhancedInputSubsystems.h"
+#include "EnhancedInputComponent.h"
 #include "InputAction.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/IInputProcessor.h"
@@ -68,8 +71,10 @@ void UTutorialSubsystem::Deinitialize()
 	FWorldDelegates::OnWorldCleanup.RemoveAll(this);
 
 	UnbindArrowInput();
+	UnbindDismissInput();
 
-	// Clean up any active widgets
+	// Clean up hints
+	ActiveHints.Empty();
 	if (ActiveHintWidget)
 	{
 		ActiveHintWidget->RemoveFromParent();
@@ -82,6 +87,12 @@ void UTutorialSubsystem::Deinitialize()
 		ActiveSlideWidget = nullptr;
 	}
 
+	if (ReminderWidget)
+	{
+		ReminderWidget->RemoveFromParent();
+		ReminderWidget = nullptr;
+	}
+
 	Super::Deinitialize();
 }
 
@@ -90,26 +101,60 @@ void UTutorialSubsystem::Deinitialize()
 void UTutorialSubsystem::Tick(float DeltaTime)
 {
 	// Handle HUD arrow hold-to-close progress (ticks while paused)
-	if (!bHUDArrowActive || !bArrowHoldingCloseKey)
+	if (bHUDArrowActive && bArrowHoldingCloseKey)
 	{
-		return;
+		ArrowCurrentHoldTime += FApp::GetDeltaTime();
+
+		float Progress = ArrowHoldDuration > 0.0f ? FMath::Clamp(ArrowCurrentHoldTime / ArrowHoldDuration, 0.0f, 1.0f) : 1.0f;
+
+		// Notify HUD of progress
+		if (HUDWidget)
+		{
+			HUDWidget->BP_UpdateTutorialHoldProgress(Progress);
+		}
+
+		// Check if hold is complete
+		if (Progress >= 1.0f)
+		{
+			bArrowHoldingCloseKey = false;
+			CloseHUDArrow(true);
+		}
 	}
 
-	ArrowCurrentHoldTime += FApp::GetDeltaTime();
-
-	float Progress = ArrowHoldDuration > 0.0f ? FMath::Clamp(ArrowCurrentHoldTime / ArrowHoldDuration, 0.0f, 1.0f) : 1.0f;
-
-	// Notify HUD of progress
-	if (HUDWidget)
+	// Handle hold-hint progress (does NOT tick while paused — hints don't pause)
+	if (bHasActiveHoldHints)
 	{
-		HUDWidget->BP_UpdateTutorialHoldProgress(Progress);
-	}
+		const float GameDelta = DeltaTime;
 
-	// Check if hold is complete
-	if (Progress >= 1.0f)
-	{
-		bArrowHoldingCloseKey = false;
-		CloseHUDArrow(true);
+		for (int32 i = ActiveHints.Num() - 1; i >= 0; --i)
+		{
+			FActiveHintEntry& Entry = ActiveHints[i];
+			if (!Entry.bIsHoldHint || !Entry.bIsHolding)
+			{
+				continue;
+			}
+
+			Entry.CurrentHoldTime += GameDelta;
+
+			float Progress = Entry.HoldDuration > 0.0f
+				? FMath::Clamp(Entry.CurrentHoldTime / Entry.HoldDuration, 0.0f, 1.0f)
+				: 1.0f;
+
+			// Notify widget of progress
+			if (ActiveHintWidget)
+			{
+				ActiveHintWidget->BP_OnHoldProgressUpdated(Progress);
+			}
+
+			// Check if hold is complete
+			if (Progress >= 1.0f)
+			{
+				FName CompletedID = Entry.TutorialID;
+				Entry.bIsHolding = false;
+				HideHintByID(CompletedID, true);
+				// Array modified — index may be invalid now, but we're iterating backwards so it's safe
+			}
+		}
 	}
 }
 
@@ -149,14 +194,14 @@ bool UTutorialSubsystem::ShowHint(FName TutorialID, const FTutorialHintData& Hin
 		return false;
 	}
 
-	// Don't show if hint already active
-	if (bHintActive)
+	// Don't show duplicate hints (same ID already active)
+	if (FindActiveHint(TutorialID) != nullptr)
 	{
-		UE_LOG(LogPolarity, Warning, TEXT("Cannot show hint '%s' - another hint is active"), *TutorialID.ToString());
+		UE_LOG(LogPolarity, Warning, TEXT("Cannot show hint '%s' - already active"), *TutorialID.ToString());
 		return false;
 	}
 
-	// Don't show if slide or arrow is active
+	// Don't show if slide or arrow is active (they take over the screen)
 	if (bSlideActive || bHUDArrowActive)
 	{
 		UE_LOG(LogPolarity, Warning, TEXT("Cannot show hint '%s' - a slide or arrow is active"), *TutorialID.ToString());
@@ -174,89 +219,97 @@ bool UTutorialSubsystem::ShowHint(FName TutorialID, const FTutorialHintData& Hin
 	FTutorialHintData MutableHintData = HintData;
 	MigrateHintDataIfNeeded(MutableHintData);
 
-	// Create widget
-	ActiveHintWidget = CreateWidget<UTutorialHintWidget>(PC, HintWidgetClass);
-	if (!ActiveHintWidget)
-	{
-		UE_LOG(LogPolarity, Error, TEXT("Failed to create hint widget for '%s'"), *TutorialID.ToString());
-		return false;
-	}
+	// Add to tracked entries
+	FActiveHintEntry NewEntry;
+	NewEntry.TutorialID = TutorialID;
+	NewEntry.HintData = MutableHintData;
 
-	// Check if multi-hint mode
-	if (MutableHintData.bIsMultiHint && MutableHintData.MultiHintEntries.Num() > 0)
+	// Set up hold-dismiss state if needed
+	if (MutableHintData.CompletionType == ETutorialCompletionType::OnHoldInput)
 	{
-		// Build multi-hint display data
-		FMultiHintDisplayData MultiDisplayData = BuildMultiHintDisplayData(MutableHintData, PC);
+		NewEntry.bIsHoldHint = true;
+		NewEntry.HoldDuration = FMath::Max(0.0f, MutableHintData.HoldDuration);
+		NewEntry.ExpectedDismissKey = MutableHintData.DismissAction
+			? GetFirstKeyForInputAction(MutableHintData.DismissAction, PC)
+			: EKeys::Invalid;
 
-		// Get primary action for completion (from first entry that has actions)
-		UInputAction* PrimaryAction = nullptr;
-		for (const FTutorialHintEntry& Entry : MutableHintData.MultiHintEntries)
+		// Auto-bind dismiss action if not already bound
+		if (MutableHintData.DismissAction && DismissAction != MutableHintData.DismissAction)
 		{
-			if (Entry.InputActions.Num() > 0 && Entry.InputActions[0])
-			{
-				PrimaryAction = Entry.InputActions[0].Get();
-				break;
-			}
+			SetReminderDismissAction(MutableHintData.DismissAction);
 		}
-
-		ActiveHintWidget->SetupMultiHint(MultiDisplayData, PrimaryAction);
-	}
-	else
-	{
-		// Standard single-hint mode
-		FHintDisplayData DisplayData = BuildHintDisplayData(MutableHintData, PC);
-
-		TArray<UInputAction*> RawActions;
-		for (const TObjectPtr<UInputAction>& Action : MutableHintData.InputActions)
-		{
-			RawActions.Add(Action.Get());
-		}
-
-		ActiveHintWidget->SetupHintEx(DisplayData, RawActions);
 	}
 
-	ActiveHintWidget->AddToViewport(100); // High Z-order
+	ActiveHints.Add(MoveTemp(NewEntry));
+	UpdateHoldHintsFlag();
 
-	// Set state AFTER successful widget creation
-	ActiveHintID = TutorialID;
-	bHintActive = true;
+	// Rebuild the single shared widget with all active hints
+	RebuildHintWidget();
 
 	OnHintShown.Broadcast(TutorialID);
 
-	UE_LOG(LogPolarity, Log, TEXT("Showing hint: %s (multi: %s)"),
+	UE_LOG(LogPolarity, Log, TEXT("Showing hint: %s (hold: %s, total active: %d)"),
 		   *TutorialID.ToString(),
-		   MutableHintData.bIsMultiHint ? TEXT("true") : TEXT("false"));
+		   MutableHintData.CompletionType == ETutorialCompletionType::OnHoldInput ? TEXT("true") : TEXT("false"),
+		   ActiveHints.Num());
 
 	return true;
 }
 
-void UTutorialSubsystem::HideHint(bool bMarkCompleted)
+void UTutorialSubsystem::HideHintByID(FName TutorialID, bool bMarkCompleted)
 {
-	if (!bHintActive)
+	bool bFound = false;
+	for (int32 i = ActiveHints.Num() - 1; i >= 0; --i)
 	{
-		return;
+		if (ActiveHints[i].TutorialID == TutorialID)
+		{
+			ActiveHints.RemoveAt(i);
+			bFound = true;
+
+			if (bMarkCompleted && !TutorialID.IsNone())
+			{
+				MarkCompleted(TutorialID);
+			}
+
+			UE_LOG(LogPolarity, Log, TEXT("Hidden hint: %s (remaining: %d)"), *TutorialID.ToString(), ActiveHints.Num());
+			break;
+		}
 	}
 
-	FName CompletedID = ActiveHintID;
+	if (bFound)
+	{
+		UpdateHoldHintsFlag();
+		RebuildHintWidget();
+	}
+}
 
-	// Reset state FIRST to prevent re-entry issues
-	bHintActive = false;
-	ActiveHintID = NAME_None;
+void UTutorialSubsystem::HideHint(bool bMarkCompleted)
+{
+	// Hide ALL active hints (backward compatible)
+	for (const FActiveHintEntry& Entry : ActiveHints)
+	{
+		if (bMarkCompleted && !Entry.TutorialID.IsNone())
+		{
+			MarkCompleted(Entry.TutorialID);
+		}
+	}
 
-	// Hide widget if valid
+	ActiveHints.Empty();
+	UpdateHoldHintsFlag();
+
+	// Destroy widget
 	if (ActiveHintWidget)
 	{
 		ActiveHintWidget->HideHint();
 		ActiveHintWidget = nullptr;
 	}
 
-	// Mark completed if requested
-	if (bMarkCompleted && !CompletedID.IsNone())
-	{
-		MarkCompleted(CompletedID);
-	}
+	UE_LOG(LogPolarity, Log, TEXT("Hidden all hints"));
+}
 
-	UE_LOG(LogPolarity, Log, TEXT("Hidden hint: %s"), *CompletedID.ToString());
+bool UTutorialSubsystem::IsHintActiveByID(FName TutorialID) const
+{
+	return const_cast<UTutorialSubsystem*>(this)->FindActiveHint(TutorialID) != nullptr;
 }
 
 // ==================== Slide API ====================
@@ -294,12 +347,6 @@ bool UTutorialSubsystem::ShowSlide(FName TutorialID, const FTutorialSlideData& S
 	{
 		UE_LOG(LogPolarity, Error, TEXT("Cannot show slide - SlideWidgetClass not set"));
 		return false;
-	}
-
-	// Hide any active hint first
-	if (bHintActive)
-	{
-		HideHint(false);
 	}
 
 	// Create widget
@@ -418,12 +465,6 @@ bool UTutorialSubsystem::ShowHUDArrow(FName TutorialID, const FTutorialHUDArrowD
 	{
 		UE_LOG(LogPolarity, Error, TEXT("Cannot show HUD arrow - no valid PlayerController"));
 		return false;
-	}
-
-	// Hide any active hint first
-	if (bHintActive)
-	{
-		HideHint(false);
 	}
 
 	// Resolve close key icon
@@ -594,6 +635,222 @@ void UTutorialSubsystem::HandleArrowKeyUp(const FKeyEvent& InKeyEvent)
 	if (HUDWidget)
 	{
 		HUDWidget->BP_OnTutorialHoldCancelled();
+	}
+}
+
+// ==================== Reminder Panel API ====================
+
+void UTutorialSubsystem::SetReminderWidgetClass(TSubclassOf<UReminderPanelWidget> InClass)
+{
+	ReminderWidgetClass = InClass;
+}
+
+void UTutorialSubsystem::SetReminderDismissAction(UInputAction* InAction)
+{
+	// Unbind old if changing
+	if (DismissAction != InAction)
+	{
+		UnbindDismissInput();
+	}
+
+	DismissAction = InAction;
+
+	if (DismissAction)
+	{
+		BindDismissInput();
+	}
+}
+
+void UTutorialSubsystem::SetReminderData(const FReminderPanelData& InData)
+{
+	StoredReminderData = InData;
+
+	APlayerController* PC = GetPlayerController(nullptr);
+	if (!PC)
+	{
+		UE_LOG(LogPolarity, Warning, TEXT("SetReminderData: No PlayerController available yet"));
+		return;
+	}
+
+	if (!ReminderWidgetClass)
+	{
+		UE_LOG(LogPolarity, Error, TEXT("SetReminderData: ReminderWidgetClass not set. Call SetReminderWidgetClass() first."));
+		return;
+	}
+
+	// Create widget if not yet created
+	if (!ReminderWidget)
+	{
+		ReminderWidget = CreateWidget<UReminderPanelWidget>(PC, ReminderWidgetClass);
+		if (!ReminderWidget)
+		{
+			UE_LOG(LogPolarity, Error, TEXT("SetReminderData: Failed to create reminder widget"));
+			return;
+		}
+		ReminderWidget->AddToViewport(50); // Below hints
+		ReminderWidget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+
+	// Build resolved display data using existing hint pipeline
+	FReminderDisplayData DisplayData;
+
+	for (const FTutorialHintData& HintEntry : InData.Entries)
+	{
+		// Make a mutable copy for migration
+		FTutorialHintData MutableEntry = HintEntry;
+		MigrateHintDataIfNeeded(MutableEntry);
+
+		bool bIsMulti = MutableEntry.bIsMultiHint && MutableEntry.MultiHintEntries.Num() > 0;
+		DisplayData.IsMultiHint.Add(bIsMulti ? 1 : 0);
+
+		if (bIsMulti)
+		{
+			DisplayData.Entries.Add(FHintDisplayData()); // placeholder
+			DisplayData.MultiEntries.Add(BuildMultiHintDisplayData(MutableEntry, PC));
+		}
+		else
+		{
+			DisplayData.Entries.Add(BuildHintDisplayData(MutableEntry, PC));
+			DisplayData.MultiEntries.Add(FMultiHintDisplayData()); // placeholder
+		}
+	}
+
+	// Resolve dismiss icon
+	if (DismissAction)
+	{
+		DisplayData.DismissIcon.Key = GetFirstKeyForInputAction(DismissAction, PC);
+		if (DisplayData.DismissIcon.Key.IsValid())
+		{
+			DisplayData.DismissIcon.Icon = GetIconForKey(DisplayData.DismissIcon.Key);
+			DisplayData.DismissIcon.bIsValid = (DisplayData.DismissIcon.Icon != nullptr);
+		}
+	}
+
+	ReminderWidget->BP_OnReminderSetup(DisplayData);
+
+	UE_LOG(LogPolarity, Log, TEXT("Reminder panel configured with %d entries"), InData.Entries.Num());
+}
+
+void UTutorialSubsystem::ShowReminder()
+{
+	if (!ReminderWidget || bReminderVisible)
+	{
+		return;
+	}
+
+	bReminderVisible = true;
+	ReminderWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	ReminderWidget->BP_OnShowReminder();
+
+	UE_LOG(LogPolarity, Log, TEXT("Reminder panel shown"));
+}
+
+void UTutorialSubsystem::HideReminder()
+{
+	if (!ReminderWidget || !bReminderVisible)
+	{
+		return;
+	}
+
+	bReminderVisible = false;
+	ReminderWidget->BP_OnHideReminder();
+	// Widget hides itself via animation → SetVisibility(Collapsed) in Blueprint
+
+	UE_LOG(LogPolarity, Log, TEXT("Reminder panel hidden"));
+}
+
+// ==================== Dismiss Action Input ====================
+
+void UTutorialSubsystem::BindDismissInput()
+{
+	APlayerController* PC = GetPlayerController(nullptr);
+	if (!PC || !DismissAction)
+	{
+		return;
+	}
+
+	APawn* Pawn = PC->GetPawn();
+	if (!Pawn)
+	{
+		return;
+	}
+
+	UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(Pawn->InputComponent);
+	if (!EnhancedInput)
+	{
+		UE_LOG(LogPolarity, Warning, TEXT("BindDismissInput: No EnhancedInputComponent found"));
+		return;
+	}
+
+	// Bind Started (key pressed) and Completed (key released)
+	EnhancedInput->BindAction(DismissAction, ETriggerEvent::Started, this, &UTutorialSubsystem::OnDismissActionStarted);
+	EnhancedInput->BindAction(DismissAction, ETriggerEvent::Completed, this, &UTutorialSubsystem::OnDismissActionCompleted);
+
+	UE_LOG(LogPolarity, Log, TEXT("Dismiss action bound: %s"), *DismissAction->GetName());
+}
+
+void UTutorialSubsystem::UnbindDismissInput()
+{
+	// Enhanced Input bindings are auto-cleaned when the component is destroyed
+	// For explicit unbinding we'd need to store handles, but this is called on Deinitialize
+}
+
+void UTutorialSubsystem::OnDismissActionStarted()
+{
+	bDismissKeyHeld = true;
+
+	// Priority 1: Start hold on active hold-hints
+	bool bFoundHoldHint = false;
+	for (FActiveHintEntry& Entry : ActiveHints)
+	{
+		if (Entry.bIsHoldHint)
+		{
+			Entry.bIsHolding = true;
+			Entry.CurrentHoldTime = 0.0f;
+			bFoundHoldHint = true;
+		}
+	}
+
+	if (bFoundHoldHint)
+	{
+		if (ActiveHintWidget)
+		{
+			ActiveHintWidget->BP_OnHoldProgressUpdated(0.0f);
+		}
+		return;
+	}
+
+	// Priority 2: Show reminder panel
+	if (ReminderWidget && !bReminderVisible)
+	{
+		ShowReminder();
+	}
+}
+
+void UTutorialSubsystem::OnDismissActionCompleted()
+{
+	bDismissKeyHeld = false;
+
+	// Cancel any active holds
+	bool bCancelledHold = false;
+	for (FActiveHintEntry& Entry : ActiveHints)
+	{
+		if (Entry.bIsHoldHint && Entry.bIsHolding)
+		{
+			Entry.bIsHolding = false;
+			Entry.CurrentHoldTime = 0.0f;
+			bCancelledHold = true;
+		}
+	}
+	if (bCancelledHold && ActiveHintWidget)
+	{
+		ActiveHintWidget->BP_OnHoldCancelled();
+	}
+
+	// Hide reminder panel on release
+	if (bReminderVisible)
+	{
+		HideReminder();
 	}
 }
 
@@ -868,14 +1125,160 @@ void UTutorialSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool 
 
 	// Widgets are destroyed by the engine during world cleanup.
 	// Null our pointers so they get recreated on the new level.
+	ActiveHints.Empty();
 	ActiveHintWidget = nullptr;
+	bHasActiveHoldHints = false;
+
 	ActiveSlideWidget = nullptr;
 	HUDWidget = nullptr;
-	bHintActive = false;
+	ReminderWidget = nullptr;
+	bReminderVisible = false;
+	bDismissKeyHeld = false;
 	bSlideActive = false;
 	bHUDArrowActive = false;
 	bArrowHoldingCloseKey = false;
-	ActiveHintID = NAME_None;
 	ActiveSlideID = NAME_None;
 	ActiveHUDArrowID = NAME_None;
+}
+
+void UTutorialSubsystem::UpdateHoldHintsFlag()
+{
+	bHasActiveHoldHints = false;
+	for (const FActiveHintEntry& Entry : ActiveHints)
+	{
+		if (Entry.bIsHoldHint)
+		{
+			bHasActiveHoldHints = true;
+			break;
+		}
+	}
+}
+
+void UTutorialSubsystem::RebuildHintWidget()
+{
+	APlayerController* PC = GetPlayerController(nullptr);
+	if (!PC)
+	{
+		return;
+	}
+
+	// Destroy old widget
+	if (ActiveHintWidget)
+	{
+		ActiveHintWidget->HideHint();
+		ActiveHintWidget = nullptr;
+	}
+
+	// Nothing to show
+	if (ActiveHints.Num() == 0)
+	{
+		return;
+	}
+
+	// Create fresh widget
+	ActiveHintWidget = CreateWidget<UTutorialHintWidget>(PC, HintWidgetClass);
+	if (!ActiveHintWidget)
+	{
+		UE_LOG(LogPolarity, Error, TEXT("RebuildHintWidget: Failed to create widget"));
+		return;
+	}
+
+	// Resolve dismiss icon if any hold-hint exists
+	for (const FActiveHintEntry& Entry : ActiveHints)
+	{
+		if (Entry.bIsHoldHint && Entry.HintData.DismissAction)
+		{
+			FTutorialInputIconData DismissIconData;
+			DismissIconData.Key = GetFirstKeyForInputAction(Entry.HintData.DismissAction, PC);
+			if (DismissIconData.Key.IsValid())
+			{
+				DismissIconData.Icon = GetIconForKey(DismissIconData.Key);
+				DismissIconData.bIsValid = (DismissIconData.Icon != nullptr);
+			}
+			ActiveHintWidget->SetDismissIconData(DismissIconData);
+			break; // one dismiss icon is enough
+		}
+	}
+
+	if (ActiveHints.Num() == 1 && !ActiveHints[0].HintData.bIsMultiHint)
+	{
+		// Single hint — use standard setup
+		const FTutorialHintData& Data = ActiveHints[0].HintData;
+		FHintDisplayData DisplayData = BuildHintDisplayData(Data, PC);
+
+		TArray<UInputAction*> RawActions;
+		for (const TObjectPtr<UInputAction>& Action : Data.InputActions)
+		{
+			RawActions.Add(Action.Get());
+		}
+
+		ActiveHintWidget->SetupHintEx(DisplayData, RawActions);
+	}
+	else
+	{
+		// Multiple hints or single multi-hint — combine all into multi-hint layout
+		FMultiHintDisplayData CombinedData;
+
+		for (const FActiveHintEntry& Entry : ActiveHints)
+		{
+			const FTutorialHintData& Data = Entry.HintData;
+
+			if (Data.bIsMultiHint && Data.MultiHintEntries.Num() > 0)
+			{
+				// Expand multi-hint entries
+				FMultiHintDisplayData SubData = BuildMultiHintDisplayData(Data, PC);
+				CombinedData.Entries.Append(SubData.Entries);
+			}
+			else
+			{
+				// Convert single hint to a multi-hint entry
+				FMultiHintEntryDisplayData EntryData;
+				EntryData.EntryText = Data.HintText;
+				EntryData.bIsCombination = Data.bIsCombination;
+				EntryData.bHasIcons = false;
+
+				TArray<UInputAction*> RawActions;
+				for (const TObjectPtr<UInputAction>& Action : Data.InputActions)
+				{
+					RawActions.Add(Action.Get());
+				}
+
+				EntryData.Icons = GetIconsForInputActions(RawActions, PC);
+				for (const FTutorialInputIconData& IconData : EntryData.Icons)
+				{
+					if (IconData.bIsValid)
+					{
+						EntryData.bHasIcons = true;
+						break;
+					}
+				}
+
+				CombinedData.Entries.Add(EntryData);
+			}
+		}
+
+		// Primary action for completion detection (first non-null)
+		UInputAction* PrimaryAction = nullptr;
+		for (const FActiveHintEntry& Entry : ActiveHints)
+		{
+			PrimaryAction = Entry.HintData.GetPrimaryInputAction();
+			if (PrimaryAction) break;
+		}
+
+		ActiveHintWidget->SetupMultiHint(CombinedData, PrimaryAction);
+	}
+
+	ActiveHintWidget->AddToViewport(100);
+}
+
+UTutorialSubsystem::FActiveHintEntry* UTutorialSubsystem::FindActiveHint(FName TutorialID)
+{
+	for (FActiveHintEntry& Entry : ActiveHints)
+	{
+		if (Entry.TutorialID == TutorialID)
+		{
+			return &Entry;
+		}
+	}
+	return nullptr;
 }

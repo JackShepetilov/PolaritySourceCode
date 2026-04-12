@@ -1,6 +1,7 @@
 // Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "ArenaManager.h"
+#include "ArenaFinaleSequence.h"
 #include "ArenaSpawnPoint.h"
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
@@ -431,6 +432,11 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 			SpawnedCount++;
 		}
 		UE_LOG(LogTemp, Error, TEXT("  ActivateArena [SUSTAIN] — Spawned %d enemies. Total alive: %d"), SpawnedCount, AliveNPCs.Num());
+
+		// Start stuck detection timer (check every 5 seconds)
+		NPCLastPositions.Empty();
+		NPCStuckCounter.Empty();
+		GetWorldTimerManager().SetTimer(StuckCheckTimerHandle, this, &AArenaManager::CheckStuckNPCs, 5.0f, true, 10.0f);
 	}
 	else
 	{
@@ -837,11 +843,16 @@ void AArenaManager::CompleteArena()
 {
 	CurrentState = EArenaState::Completed;
 
+	// Stop stuck detection
+	GetWorldTimerManager().ClearTimer(StuckCheckTimerHandle);
+	NPCLastPositions.Empty();
+	NPCStuckCounter.Empty();
+
 	// Open exits
 	SetBlockersEnabled(false);
 
-	// Stop arena music
-	if (ArenaMusicTrack)
+	// Stop arena music (skip if finale sequence will handle it)
+	if (ArenaMusicTrack && !FinaleSequence.IsValid())
 	{
 		if (UMusicPlayerSubsystem* MusicSubsystem = GetGameInstance()->GetSubsystem<UMusicPlayerSubsystem>())
 		{
@@ -868,6 +879,11 @@ void AArenaManager::ResetArena()
 	// which in Sustain mode would spawn replacement enemies while we're cleaning up.
 	CurrentState = EArenaState::Idle;
 	CurrentWaveIndex = -1;
+
+	// Stop stuck detection
+	GetWorldTimerManager().ClearTimer(StuckCheckTimerHandle);
+	NPCLastPositions.Empty();
+	NPCStuckCounter.Empty();
 
 	// Reset sustain state for next activation
 	SustainRemainingSpawns = SustainTotalEnemies;
@@ -948,8 +964,28 @@ void AArenaManager::OnPlayerRespawned()
 			NPC ? !IsValid(NPC) : true);
 	}
 
-	// Respawn all auto-indexed props regardless of arena state
-	RespawnAllProps();
+	// Props are restored by CheckpointSubsystem (if checkpoint data exists).
+	// Recalculate alive count from current prop state.
+	if (CheckpointSubsystem && CheckpointSubsystem->HasActiveCheckpoint())
+	{
+		AliveAutoPropsCount = 0;
+		for (const TWeakObjectPtr<AEMFPhysicsProp>& PropPtr : AutoProps)
+		{
+			if (AEMFPhysicsProp* Prop = PropPtr.Get())
+			{
+				if (!Prop->IsDead())
+				{
+					AliveAutoPropsCount++;
+				}
+			}
+		}
+		UE_LOG(LogTemp, Error, TEXT("  Props restored by CheckpointSubsystem — AliveAutoPropsCount: %d"), AliveAutoPropsCount);
+	}
+	else
+	{
+		// No checkpoint data — fallback to initial state reset
+		RespawnAllProps();
+	}
 
 	// Only reset if we were in an active fight
 	if (CurrentState == EArenaState::Active || CurrentState == EArenaState::BetweenWaves)
@@ -1386,6 +1422,107 @@ void AArenaManager::SpawnSustainEnemy()
 
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — SUCCESS: %s at %s. AliveNPCs now: %d"),
 		*NPC->GetName(), *SpawnLocation.ToString(), AliveNPCs.Num());
+}
+
+// ==================== Stuck Detection ====================
+
+void AArenaManager::CheckStuckNPCs()
+{
+	if (CurrentState != EArenaState::Active)
+	{
+		return;
+	}
+
+	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	APawn* PlayerPawn = PC ? PC->GetPawn() : nullptr;
+	if (!PlayerPawn)
+	{
+		return;
+	}
+
+	const float StuckThreshold = 50.0f; // NPC moved less than 50cm since last check = stuck
+	const int32 StuckKillCount = 3;     // Kill after 3 consecutive stuck checks (15 seconds)
+
+	// Collect NPCs to kill (can't modify AliveNPCs while iterating)
+	TArray<AShooterNPC*> NPCsToKill;
+
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	{
+		AShooterNPC* NPC = NPCPtr.Get();
+		if (!NPC || NPC->IsDead())
+		{
+			continue;
+		}
+
+		const FVector CurrentPos = NPC->GetActorLocation();
+		TWeakObjectPtr<AShooterNPC> WeakNPC(NPC);
+
+		// Check if NPC has moved since last check
+		if (FVector* LastPos = NPCLastPositions.Find(WeakNPC))
+		{
+			const float DistMoved = FVector::Dist(*LastPos, CurrentPos);
+			if (DistMoved < StuckThreshold)
+			{
+				// NPC hasn't moved — increment stuck counter
+				int32& Counter = NPCStuckCounter.FindOrAdd(WeakNPC, 0);
+				Counter++;
+
+				if (Counter >= StuckKillCount)
+				{
+					// Check if NPC is visible to the player
+					bool bInPlayerView = false;
+					if (PC->GetLocalPlayer() && PC->GetLocalPlayer()->ViewportClient)
+					{
+						FVector2D ScreenPos;
+						bInPlayerView = PC->ProjectWorldLocationToScreen(CurrentPos, ScreenPos, true);
+					}
+
+					if (!bInPlayerView)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[ARENA_STUCK] NPC %s stuck for %d checks at %s — NOT in player view → killing for respawn"),
+							*NPC->GetName(), Counter, *CurrentPos.ToString());
+						NPCsToKill.Add(NPC);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[ARENA_STUCK] NPC %s stuck for %d checks at %s — but IN player view, skipping"),
+							*NPC->GetName(), Counter, *CurrentPos.ToString());
+					}
+				}
+			}
+			else
+			{
+				// NPC is moving — reset counter
+				NPCStuckCounter.Remove(WeakNPC);
+			}
+		}
+
+		// Update last known position
+		NPCLastPositions.FindOrAdd(WeakNPC) = CurrentPos;
+	}
+
+	// Kill stuck NPCs (triggers OnNPCDied → respawn in sustain mode)
+	for (AShooterNPC* NPC : NPCsToKill)
+	{
+		NPCLastPositions.Remove(TWeakObjectPtr<AShooterNPC>(NPC));
+		NPCStuckCounter.Remove(TWeakObjectPtr<AShooterNPC>(NPC));
+		UGameplayStatics::ApplyDamage(NPC, 99999.f, nullptr, this, nullptr);
+	}
+
+	// Clean up stale entries for NPCs no longer alive
+	TArray<TWeakObjectPtr<AShooterNPC>> StaleKeys;
+	for (auto& Pair : NPCLastPositions)
+	{
+		if (!Pair.Key.IsValid() || !AliveNPCs.Contains(Pair.Key))
+		{
+			StaleKeys.Add(Pair.Key);
+		}
+	}
+	for (const auto& Key : StaleKeys)
+	{
+		NPCLastPositions.Remove(Key);
+		NPCStuckCounter.Remove(Key);
+	}
 }
 
 // ==================== Auto-Indexed Props ====================
@@ -2415,8 +2552,10 @@ TArray<AShooterNPC*> AArenaManager::GetAliveNPCs() const
 
 void AArenaManager::PauseSustainSpawning()
 {
+	// Set both so that ResetArena() on respawn also restores to 0, not back to the original value
 	SustainRemainingSpawns = 0;
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Sustain spawning paused (SustainRemainingSpawns = 0)"));
+	SustainTotalEnemies = 0;
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Sustain spawning paused permanently (survives respawn reset)"));
 }
 
 void AArenaManager::ForceCompleteArena()

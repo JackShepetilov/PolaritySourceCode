@@ -92,19 +92,23 @@ void UPolarityPathFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
 		bIsNavLink = true;
 	}
 
+	// [NAV_DEBUG] Log every segment to see if NavLinks appear in paths at all
+	UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s SetMoveSegment %d/%d Flags=%u CustomLinkId=%s IsNavLink=%s Pos=(%.0f,%.0f,%.0f)"),
+		GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
+		SegmentStartIndex, PathPoints.Num() - 1,
+		CurrentPoint.Flags,
+		CurrentPoint.CustomNavLinkId.IsValid() ? TEXT("VALID") : TEXT("none"),
+		bIsNavLink ? TEXT("YES") : TEXT("NO"),
+		CurrentPoint.Location.X, CurrentPoint.Location.Y, CurrentPoint.Location.Z);
+
 	if (bIsNavLink)
 	{
 		const FVector& JumpEnd = PathPoints[NextIndex].Location;
 
-#if WITH_EDITOR
-		if (bDebugJumps)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[%s] NavLink detected at segment %d -> jumping to (%.0f, %.0f, %.0f)"),
-				GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
-				SegmentStartIndex,
-				JumpEnd.X, JumpEnd.Y, JumpEnd.Z);
-		}
-#endif
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP TRIGGERED seg %d -> (%.0f, %.0f, %.0f)"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
+			SegmentStartIndex,
+			JumpEnd.X, JumpEnd.Y, JumpEnd.Z);
 
 		ExecuteJump(JumpEnd);
 	}
@@ -247,6 +251,8 @@ void UPolarityPathFollowingComponent::ExecuteJump(const FVector& EndPos)
 	// Hard override — NavLink jumps manually blocked
 	if (!bAllowNavLinkJumps)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP BLOCKED: bAllowNavLinkJumps=false"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("???"));
 		AIOwner->GetPathFollowingComponent()->AbortMove(*AIOwner, FPathFollowingResultFlags::MovementStop);
 		return;
 	}
@@ -254,20 +260,9 @@ void UPolarityPathFollowingComponent::ExecuteJump(const FVector& EndPos)
 	ACharacter* Character = Cast<ACharacter>(AIOwner->GetPawn());
 	if (!Character) return;
 
-	// Smart check: can the NPC shoot the target from its current level?
-	// If yes — don't jump, abort so AI finds a same-level path instead
-	if (HasShootingPositionOnSameLevel(GetWorld(), AIOwner, Character))
-	{
-#if WITH_EDITOR
-		if (bDebugJumps)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[%s] Jump blocked — shooting position exists on same level"),
-				GetOwner() ? *GetOwner()->GetName() : TEXT("???"));
-		}
-#endif
-		AIOwner->GetPathFollowingComponent()->AbortMove(*AIOwner, FPathFollowingResultFlags::MovementStop);
-		return;
-	}
+	UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP EXECUTING to (%.0f,%.0f,%.0f)"),
+		GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
+		EndPos.X, EndPos.Y, EndPos.Z);
 
 	const FVector StartPos = Character->GetActorLocation();
 

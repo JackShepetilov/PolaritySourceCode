@@ -91,6 +91,9 @@ public:
 	/** Called when owner deals damage to a target */
 	void NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled);
 
+	/** Called when owner collects a health pickup while at full HP */
+	void NotifyHealthPickupCollectedAtFullHP();
+
 	/** Query all active upgrades for their combined damage multiplier against a target */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedDamageMultiplier(AActor* Target) const;

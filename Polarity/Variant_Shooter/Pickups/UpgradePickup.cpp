@@ -10,6 +10,8 @@
 #include "UpgradeTooltipWidget.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
+#include "TutorialSubsystem.h"
+#include "TutorialTypes.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "NiagaraFunctionLibrary.h"
@@ -307,7 +309,30 @@ void AUpgradePickup::CompletePull()
 				true, true, ENCPoolMethod::None);
 		}
 
+		// Show HUD hint with upgrade description
+		if (bShowHintOnPickup && HintDismissAction)
+		{
+			if (UTutorialSubsystem* TutSub = GetGameInstance()->GetSubsystem<UTutorialSubsystem>())
+			{
+				FTutorialHintData HintData;
+				HintData.HintText = FText::Format(
+					NSLOCTEXT("Upgrades", "UpgradeHintFormat", "{0}: {1}"),
+					UpgradeDefinition->DisplayName,
+					UpgradeDefinition->Description
+				);
+				HintData.CompletionType = ETutorialCompletionType::OnHoldInput;
+				HintData.DismissAction = HintDismissAction;
+				HintData.HoldDuration = HintHoldDuration;
+
+				const FName HintID = FName(*FString::Printf(TEXT("Upgrade_%s"),
+					*UpgradeDefinition->UpgradeTag.ToString()));
+
+				TutSub->ShowHint(HintID, HintData, GetWorld()->GetFirstPlayerController());
+			}
+		}
+
 		BP_OnUpgradePickedUp(Player);
+		OnPickedUp.Broadcast(Player);
 	}
 
 	Destroy();
