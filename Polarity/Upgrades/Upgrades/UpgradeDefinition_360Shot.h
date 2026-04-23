@@ -64,4 +64,11 @@ public:
 	/** Sound played when the 360 shot fires */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot|Effects")
 	TObjectPtr<USoundBase> ChargedFireSound;
+
+	// ==================== Marking ====================
+
+	/** VFX spawned at the impact point on any actor that implements IBuildingMarkable.
+	 *  Reusable across future markable target types. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "360 Shot|Marking")
+	TObjectPtr<UNiagaraSystem> MarkerVFX;
 };

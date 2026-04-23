@@ -645,6 +645,42 @@ void AKamikazeDroneNPC::InitiateLaunch(const FVector& LaunchVelocity)
 		GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
 }
 
+void AKamikazeDroneNPC::InitiateDirectAttack(AActor* Target, FVector TargetWorldLocation)
+{
+	if (!Target)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] InitiateDirectAttack called with null target"), *GetName());
+		return;
+	}
+
+	AttackPattern = EAttackPattern::Direct;
+	BuildingTarget = Target;
+	DirectAttackTargetLocation = TargetWorldLocation;
+
+	AttackTargetPosition = CalculatePredictedPosition();
+	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
+
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->SetComponentTickEnabled(true);
+		CMC->SetMovementMode(MOVE_Flying);
+		CMC->Velocity = AttackDirection * AttackSpeed;
+	}
+
+	if (!AttackDirection.IsNearlyZero())
+	{
+		SetActorRotation(AttackDirection.Rotation());
+	}
+
+	PreviousFrameLocation = GetActorLocation();
+	StateTimer = 0.0f;
+	SetState(EKamikazeState::Attacking);
+
+	UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] InitiateDirectAttack | Target=%s TargetPos=%s (from %s)"),
+		*GetName(), *Target->GetName(), *AttackTargetPosition.ToCompactString(),
+		DirectAttackTargetLocation.IsZero() ? TEXT("bounds center fallback") : TEXT("explicit hit point"));
+}
+
 void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 {
 	APawn* Player = GetPlayerPawn();
@@ -1117,6 +1153,20 @@ void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
 				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Attacking GEOMETRY IMPACT | Dist=%.0f HitActor=%s"),
 					*GetName(), Hit.Distance, Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"));
 			}
+
+			// Direct attack: parent's DoExplosion only damages pawns (ECC_Pawn overlap, PlayerPawn as causer),
+			// so a building target would never receive the explosion. Notify it directly with the drone as causer
+			// so the building's TakeDamage override recognizes the impact and triggers Collapse.
+			if (AttackPattern == EAttackPattern::Direct && BuildingTarget && Hit.GetActor() == BuildingTarget)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[DRONE_DIRECT] %s impact on building target %s — calling TakeDamage with self as Causer"),
+					*GetName(), *BuildingTarget->GetName());
+
+				FDamageEvent DmgEvent;
+				DmgEvent.DamageTypeClass = UDamageType::StaticClass();
+				BuildingTarget->TakeDamage(99999.0f, DmgEvent, GetController(), this);
+			}
+
 			CurrentState = EKamikazeState::Dead;
 			TriggerCollisionExplosion();
 			KamikazeDie();
@@ -1979,6 +2029,20 @@ bool AKamikazeDroneNPC::CheckPlayerCollisionSweep()
 
 FVector AKamikazeDroneNPC::CalculatePredictedPosition() const
 {
+	// Direct attack pattern: stationary actor target — no prediction, aim at the explicit world
+	// location set by InitiateDirectAttack (typically the player's hit point on the wall).
+	// Fall back to bounds center only if the explicit location wasn't provided.
+	if (AttackPattern == EAttackPattern::Direct && BuildingTarget)
+	{
+		if (!DirectAttackTargetLocation.IsZero())
+		{
+			return DirectAttackTargetLocation;
+		}
+		FVector BoundsOrigin, BoundsExtent;
+		BuildingTarget->GetActorBounds(true, BoundsOrigin, BoundsExtent);
+		return BoundsOrigin;
+	}
+
 	APawn* Player = GetPlayerPawn();
 	if (!Player)
 	{

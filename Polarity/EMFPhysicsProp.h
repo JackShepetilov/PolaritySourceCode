@@ -207,6 +207,15 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Health")
 	float CurrentHP = 100.0f;
 
+	// ==================== Static Mode ====================
+
+	/** When true, the static PropMesh is NEVER auto-enabled for physics simulation
+	 *  (SetCharge, ResetProp, and any other path that would flip bSimulatePhysics are gated).
+	 *  Use for static-style subclasses (e.g. destructible buildings) where the visible mesh
+	 *  should stay kinematic until explicitly hidden by a custom destruction path. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Static Mode")
+	bool bKeepPropMeshStatic = false;
+
 	// ==================== Collision Damage ====================
 
 	/** Enable kinetic/EMF damage to NPCs on impact */
@@ -600,6 +609,10 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
+	/** Spawn the destruction Geometry Collection. Override to implement custom destruction patterns
+	 *  (e.g. progressive top-down collapse for a skyscraper instead of an instant universal break). */
+	virtual void SpawnDestructionGC(const FVector& DestructionOrigin);
+
 private:
 	bool bIsDead = false;
 	float LastCollisionDamageTime = -1.0f;
@@ -677,9 +690,6 @@ private:
 	static int32 GetSourceEffectiveChargeSign(const FEMSourceDescription& Source);
 
 	// ==================== Geometry Collection Destruction (Internal) ====================
-
-	/** Spawn GC actor at PropMesh transform, apply destruction fields */
-	void SpawnDestructionGC(const FVector& DestructionOrigin);
 
 	/** Settle GC gibs: strip collision to WorldStatic only, apply high damping.
 	 *  Pieces fall to rest naturally, Chaos auto-sleeps them (near-zero cost). */

@@ -56,7 +56,8 @@ public class Polarity : ModuleRules
             "Polarity/Arena",
             "Polarity/Upgrades",
             "Polarity/Upgrades/Upgrades",
-            "Polarity/Variant_Shooter/Pickups"
+            "Polarity/Variant_Shooter/Pickups",
+            "Polarity/Buildings"
         });
 
         // Uncomment if you are using Slate UI

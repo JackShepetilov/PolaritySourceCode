@@ -191,10 +191,11 @@ void AEMFPhysicsProp::BeginPlay()
 		CheckpointSub->RegisterProp(this);
 	}
 
-	// Uncharged props start with physics and tick disabled (static blockers).
-	// Both are enabled when prop receives charge via SetCharge().
+	// Uncharged props (or static-mode subclasses) start with physics and tick disabled (static blockers).
+	// Normally both are enabled when prop receives charge via SetCharge() — but static-mode subclasses
+	// keep PropMesh kinematic regardless.
 	// This prevents NPC depenetration impulses from triggering false explosions.
-	if (PropMesh && FMath::IsNearlyZero(DefaultCharge))
+	if (PropMesh && (FMath::IsNearlyZero(DefaultCharge) || bKeepPropMeshStatic))
 	{
 		PropMesh->SetSimulatePhysics(false);
 		SetActorTickEnabled(false);
@@ -1625,8 +1626,9 @@ void AEMFPhysicsProp::ResetProp()
 		PropMesh->SetVisibility(true);
 		PropMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
-		// Match BeginPlay logic: uncharged props start with physics off
-		if (FMath::IsNearlyZero(DefaultCharge))
+		// Match BeginPlay logic: uncharged props start with physics off.
+		// Static-mode subclasses never enable physics on PropMesh — they manage the mesh state themselves.
+		if (FMath::IsNearlyZero(DefaultCharge) || bKeepPropMeshStatic)
 		{
 			PropMesh->SetSimulatePhysics(false);
 		}
@@ -1721,8 +1723,10 @@ void AEMFPhysicsProp::SetCharge(float NewCharge)
 	Desc.PointChargeParams.Charge = NewCharge;
 	FieldComponent->SetSourceDescription(Desc);
 
-	// Enable physics and tick when prop transitions from uncharged to charged
-	if (PropMesh && FMath::IsNearlyZero(OldCharge) && !FMath::IsNearlyZero(NewCharge))
+	// Enable physics and tick when prop transitions from uncharged to charged.
+	// Static-mode subclasses (e.g. ATurretBuilding) opt out — they keep PropMesh kinematic
+	// and handle destruction via their own path (e.g. hiding PropMesh + spawning GC).
+	if (PropMesh && FMath::IsNearlyZero(OldCharge) && !FMath::IsNearlyZero(NewCharge) && !bKeepPropMeshStatic)
 	{
 		PropMesh->SetSimulatePhysics(true);
 		SetActorTickEnabled(true);

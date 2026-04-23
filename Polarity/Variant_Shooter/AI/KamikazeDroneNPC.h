@@ -29,6 +29,16 @@ enum class EKamikazeState : uint8
 	Dead
 };
 
+/** How the drone reaches its target. */
+UENUM(BlueprintType)
+enum class EAttackPattern : uint8
+{
+	/** Default — orbit the player, then dive (with prediction). */
+	Orbit,
+	/** Skip orbit/positioning/telegraph entirely — fly straight at BuildingTarget's location. */
+	Direct
+};
+
 /**
  * FPV Kamikaze Drone NPC.
  *
@@ -135,6 +145,20 @@ protected:
 	/** Distance from target within which killing the attacking drone triggers air explosion */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
 	float AttackDeathDistanceThreshold = 400.0f;
+
+	/** Attack pattern. Direct skips orbit/positioning/telegraph and dives straight at BuildingTarget. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
+	EAttackPattern AttackPattern = EAttackPattern::Orbit;
+
+	/** Fixed actor target used when AttackPattern == Direct (e.g. ATurretBuilding). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
+	TObjectPtr<AActor> BuildingTarget;
+
+	/** Exact world-space point the drone aims for in Direct mode. Set by InitiateDirectAttack.
+	 *  Typically the player's impact point on the target's wall — NOT the actor origin or
+	 *  bounds center, which can be empty air for tall/thin meshes. */
+	UPROPERTY(BlueprintReadOnly, Category = "Kamikaze|Attack")
+	FVector DirectAttackTargetLocation = FVector::ZeroVector;
 
 	// ==================== Orbit Settings ====================
 
@@ -415,6 +439,15 @@ public:
 	 *  Drone will stabilize from launch impulse (FPV PID settling) before entering orbit. */
 	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
 	void InitiateLaunch(const FVector& LaunchVelocity);
+
+	/** Configure this drone as a direct attacker against a fixed actor target
+	 *  (skips orbit/telegraph and dives straight toward TargetWorldLocation).
+	 *  Used by ATurretBuilding to deploy a kamikaze drone at a specific point on a building —
+	 *  the hit location on the wall, NOT the bounds center (which for tall skyscrapers is empty air).
+	 *  @param Target             Actor the drone is attacking (stored as BuildingTarget for ownership / impact dispatch)
+	 *  @param TargetWorldLocation Exact world-space point the drone will dive toward */
+	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
+	void InitiateDirectAttack(AActor* Target, FVector TargetWorldLocation);
 
 protected:
 

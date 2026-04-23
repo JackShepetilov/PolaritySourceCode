@@ -12,6 +12,7 @@
 #include "Engine/DamageEvents.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
 #include "WeaponRecoilComponent.h"
+#include "Buildings/BuildingMarkable.h"
 
 UUpgrade_360Shot::UUpgrade_360Shot()
 {
@@ -261,11 +262,12 @@ void UUpgrade_360Shot::Execute360Shot()
 		return;
 	}
 
-	// Trace from camera viewpoint (same as weapon's FireHitscan does)
+	// Trace from camera viewpoint (same as weapon's FireHitscan does).
+	// Range must reach skyscrapers across the bridge (several km in level design).
 	FVector ViewLocation = Character->GetPawnViewLocation();
 	FVector ViewDirection = Character->GetBaseAimRotation().Vector();
 
-	FVector TraceEnd = ViewLocation + ViewDirection * 20000.0f;
+	FVector TraceEnd = ViewLocation + ViewDirection * 500000.0f; // 5 km
 
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(Character);
@@ -273,9 +275,13 @@ void UUpgrade_360Shot::Execute360Shot()
 	QueryParams.bReturnPhysicalMaterial = true;
 
 	// Trace by ECC_Pawn to hit NPC pawns (same as weapon's cone sweep).
-	// ECC_Visibility hits static meshes/walls first, missing NPCs behind them.
+	// Also trace WorldStatic/WorldDynamic so the shot can land on buildings — needed for
+	// IBuildingMarkable. ObjectType trace returns the closest of all listed types, so a wall
+	// in front of an NPC still blocks the shot (no wall-hack regression).
 	FCollisionObjectQueryParams ObjectParams;
 	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
 
 	FHitResult HitResult;
 	bool bHit = GetWorld()->LineTraceSingleByObjectType(
@@ -319,6 +325,40 @@ void UUpgrade_360Shot::Execute360Shot()
 			Controller, Weapon);
 
 		UE_LOG(LogTemp, Log, TEXT("360 Shot: Dealt %.0f bonus damage to %s"), ActualDamage, *HitActor->GetName());
+
+		// Mark the target if it implements IBuildingMarkable. The marker VFX is spawned by the
+		// upgrade itself (so the same upgrade can later mark other markable target types).
+		const bool bIsMarkable = HitActor->Implements<UBuildingMarkable>();
+		UE_LOG(LogTemp, Warning, TEXT("[BUILDING_MARK] Hit %s | Markable=%d | ImpactPt=%s Normal=%s"),
+			*HitActor->GetName(), bIsMarkable ? 1 : 0,
+			*HitResult.ImpactPoint.ToCompactString(), *HitResult.ImpactNormal.ToCompactString());
+
+		if (bIsMarkable)
+		{
+			if (Def360->MarkerVFX)
+			{
+				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+					GetWorld(),
+					Def360->MarkerVFX,
+					HitResult.ImpactPoint,
+					HitResult.ImpactNormal.Rotation(),
+					FVector::OneVector,
+					true,   // bAutoDestroy
+					true,   // bAutoActivate
+					ENCPoolMethod::None);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[BUILDING_MARK] MarkerVFX is null on UpgradeDefinition_360Shot — no visual marker"));
+			}
+
+			IBuildingMarkable::Execute_OnMarked(HitActor, HitResult.ImpactPoint, HitResult.ImpactNormal);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BUILDING_MARK] 360 Shot trace missed everything | Start=%s End=%s Length=%.0f cm. If building is farther than this, increase trace length. Otherwise check PropMesh collision profile / static mesh has collision geometry."),
+			*ViewLocation.ToCompactString(), *TraceEnd.ToCompactString(), (TraceEnd - ViewLocation).Size());
 	}
 }
 
