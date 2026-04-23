@@ -10,6 +10,10 @@
 #include "Engine/SkeletalMesh.h"
 #include "DamageTypes/DamageType_Melee.h"
 #include "EMFVelocityModifier.h"
+#include "NiagaraSystem.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
+#include "ShooterCharacter.h"
 
 ASniperTurretNPC::ASniperTurretNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -68,6 +72,32 @@ void ASniperTurretNPC::BeginPlay()
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   YawBone: '%s', PitchBone: '%s'"),
 		*YawBoneName.ToString(), *PitchBoneName.ToString());
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   WeaponSocket: '%s'"), *TurretWeaponSocket.ToString());
+
+	// Drive aim telegraph (laser VFX + player post-process) off our own progress broadcasts
+	OnAimProgressChanged.AddDynamic(this, &ASniperTurretNPC::HandleAimProgressChanged);
+}
+
+void ASniperTurretNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	OnAimProgressChanged.RemoveDynamic(this, &ASniperTurretNPC::HandleAimProgressChanged);
+
+	if (ActiveAimLaser)
+	{
+		ActiveAimLaser->DestroyComponent();
+		ActiveAimLaser = nullptr;
+	}
+
+	// Disengage the last telegraphed player so its PP state clears when the turret is destroyed mid-aim
+	if (LastTelegraphedPlayer.IsValid())
+	{
+		if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(LastTelegraphedPlayer.Get()))
+		{
+			Shooter->NotifyTurretTargeting(this, 0.0f, false);
+		}
+		LastTelegraphedPlayer = nullptr;
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void ASniperTurretNPC::Tick(float DeltaTime)
@@ -428,6 +458,97 @@ void ASniperTurretNPC::SetAimState(ETurretAimState NewState)
 	}
 	CurrentAimState = NewState;
 	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
+}
+
+// ==================== Aim Telegraph ====================
+
+void ASniperTurretNPC::HandleAimProgressChanged(float Progress, ETurretAimState AimState)
+{
+	const bool bIsActivelyAiming = (AimState == ETurretAimState::Aiming);
+
+	// ----- Laser VFX lifecycle -----
+	if (bIsActivelyAiming)
+	{
+		// Spawn on first entry; reactivate if it was previously deactivated
+		if (!ActiveAimLaser)
+		{
+			if (AimLaserVFX && TurretMesh)
+			{
+				ActiveAimLaser = UNiagaraFunctionLibrary::SpawnSystemAttached(
+					AimLaserVFX,
+					TurretMesh,
+					TurretWeaponSocket,
+					AimLaserSpawnOffset,
+					FRotator::ZeroRotator,
+					EAttachLocation::KeepRelativeOffset,
+					false  // bAutoDestroy=false — we control the lifecycle
+				);
+			}
+		}
+		else if (!ActiveAimLaser->IsActive())
+		{
+			ActiveAimLaser->Activate(true);
+		}
+
+		// Feed aim progress + beam endpoint into the Niagara system
+		if (ActiveAimLaser)
+		{
+			UNiagaraFunctionLibrary::SetNiagaraVariableFloat(
+				ActiveAimLaser, AimLaserIntensityParam.ToString(), Progress);
+
+			if (AimTarget.IsValid())
+			{
+				FVector EndLoc = AimTarget->GetActorLocation();
+				if (const ACharacter* CharTarget = Cast<ACharacter>(AimTarget.Get()))
+				{
+					if (const UCapsuleComponent* Capsule = CharTarget->GetCapsuleComponent())
+					{
+						EndLoc.Z += Capsule->GetScaledCapsuleHalfHeight();
+					}
+				}
+				UNiagaraFunctionLibrary::SetNiagaraVariableVec3(
+					ActiveAimLaser, AimLaserBeamEndParam.ToString(), EndLoc);
+			}
+		}
+	}
+	else
+	{
+		// Deactivate (not Destroy) so Niagara can fade out via its own Lifetime Energy
+		if (ActiveAimLaser && ActiveAimLaser->IsActive())
+		{
+			ActiveAimLaser->Deactivate();
+		}
+	}
+
+	// ----- Player-side post-process notification -----
+	AActor* CurrentPlayer = (bIsActivelyAiming && AimTarget.IsValid()) ? AimTarget.Get() : nullptr;
+
+	// Disengage previous player if target changed or aim stopped
+	if (LastTelegraphedPlayer.IsValid() && LastTelegraphedPlayer.Get() != CurrentPlayer)
+	{
+		if (AShooterCharacter* PrevShooter = Cast<AShooterCharacter>(LastTelegraphedPlayer.Get()))
+		{
+			PrevShooter->NotifyTurretTargeting(this, 0.0f, false);
+		}
+	}
+
+	// Engage current player (if any)
+	if (CurrentPlayer)
+	{
+		if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(CurrentPlayer))
+		{
+			Shooter->NotifyTurretTargeting(this, Progress, true);
+			LastTelegraphedPlayer = CurrentPlayer;
+		}
+		else
+		{
+			LastTelegraphedPlayer = nullptr;
+		}
+	}
+	else
+	{
+		LastTelegraphedPlayer = nullptr;
+	}
 }
 
 // ==================== Overrides from AShooterNPC ====================

@@ -54,6 +54,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropImpact, AEMFPhysicsProp*, 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherEnded);
 
+// Turret aim telegraph: Progress (0..1), bIsActive (true while any turret is aiming at player)
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTargetedByTurretDelegate, float, Progress, bool, bIsActive);
+
 /**
  * Settings for Boss Finisher cinematic attack
  * All times are in seconds, distances in cm
@@ -713,6 +716,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
 	TObjectPtr<UMaterialInstanceDynamic> HighSpeedPPMaterial;
 
+	/** Post process material instance for sniper turret aim telegraph (screen flash as a turret locks on) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
+	TObjectPtr<UMaterialInstanceDynamic> TurretBlindPPMaterial;
+
 	/** Parameter name for intensity in post process materials */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
 	FName PPIntensityParameterName = FName("Intensity");
@@ -734,6 +741,15 @@ protected:
 
 	/** Current high speed PP intensity (internal) */
 	float CurrentHighSpeedPPIntensity = 0.0f;
+
+	/** Current turret-blind PP intensity (interpolated toward TargetTurretBlindPPIntensity) */
+	float CurrentTurretBlindPPIntensity = 0.0f;
+
+	/** Target turret-blind PP intensity — max aim progress across all turrets currently targeting the player */
+	float TargetTurretBlindPPIntensity = 0.0f;
+
+	/** Turrets currently aiming at this player, keyed by turret pointer → that turret's aim progress (invalid entries pruned lazily) */
+	TMap<TWeakObjectPtr<AActor>, float> ActiveTurretAimings;
 
 	// ==================== VFX|Movement ====================
 
@@ -782,6 +798,10 @@ public:
 	/** Melee weapon equipped/unequipped state (fires on weapon switch and weapon break) */
 	FMeleeWeaponEquippedDelegate OnMeleeWeaponEquipped;
 
+	/** Turret aim telegraph: broadcasts max progress across all turrets targeting player (0..1) and bIsActive flag */
+	UPROPERTY(BlueprintAssignable, Category = "Player|Events")
+	FOnTargetedByTurretDelegate OnTargetedByTurret;
+
 public:
 
 	/** Constructor */
@@ -802,6 +822,11 @@ public:
 	 *  Deactivates, removes from OwnedWeapons, switches to fallback, destroys. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons")
 	void RemoveMeleeWeapon(AShooterWeapon* WeaponToRemove);
+
+	/** Called by sniper turrets to report aim progress targeting this player.
+	 *  bIsActive=false removes the turret from tracking (e.g. state change, turret destroyed). */
+	UFUNCTION(BlueprintCallable, Category = "Player|Telegraph")
+	void NotifyTurretTargeting(AActor* Turret, float Progress, bool bIsActive);
 
 protected:
 

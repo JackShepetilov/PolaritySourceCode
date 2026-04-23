@@ -31,6 +31,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTurretAimProgressChanged,
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTurretFired);
 
 class UPoseableMeshComponent;
+class UNiagaraSystem;
+class UNiagaraComponent;
 
 /**
  * Stationary sniper turret NPC.
@@ -113,6 +115,31 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Weapon")
 	FName TurretWeaponSocket = FName("Muzzle");
 
+	// ==================== Aim Laser Telegraph ====================
+
+	/** Niagara system spawned at TurretWeaponSocket while turret is aiming. Deactivates on aim interrupt, reactivates on resume. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
+	TObjectPtr<UNiagaraSystem> AimLaserVFX;
+
+	/** Additional offset applied to laser spawn point relative to the weapon socket (local space) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
+	FVector AimLaserSpawnOffset = FVector::ZeroVector;
+
+	/** User-parameter name (float) in the Niagara system that receives aim progress (0..1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
+	FName AimLaserIntensityParam = FName("Intensity");
+
+	/** User-parameter name (vector) in the Niagara system that receives the beam end location (world space) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
+	FName AimLaserBeamEndParam = FName("BeamEnd");
+
+	/** Currently active laser VFX component (null when not aiming). Spawn-once, Activate/Deactivate during aim cycles. */
+	UPROPERTY()
+	TObjectPtr<UNiagaraComponent> ActiveAimLaser;
+
+	/** Last player notified as being targeted. Needed to send a disengage notification after AimTarget is cleared. */
+	TWeakObjectPtr<AActor> LastTelegraphedPlayer;
+
 	// ==================== Aiming State (Runtime) ====================
 
 	/** Current aim state */
@@ -193,6 +220,7 @@ protected:
 	// ==================== Lifecycle Overrides ====================
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
 	// ==================== Overrides from AShooterNPC ====================
@@ -239,4 +267,8 @@ private:
 
 	/** Transition to a new aim state and broadcast */
 	void SetAimState(ETurretAimState NewState);
+
+	/** Handler bound to OnAimProgressChanged — drives laser VFX lifecycle and notifies player character */
+	UFUNCTION()
+	void HandleAimProgressChanged(float Progress, ETurretAimState AimState);
 };
