@@ -493,8 +493,7 @@ void ASniperTurretNPC::HandleAimProgressChanged(float Progress, ETurretAimState 
 		// Feed aim progress + beam endpoint into the Niagara system
 		if (ActiveAimLaser)
 		{
-			UNiagaraFunctionLibrary::SetNiagaraVariableFloat(
-				ActiveAimLaser, AimLaserIntensityParam.ToString(), Progress);
+			ActiveAimLaser->SetVariableFloat(AimLaserIntensityParam, Progress);
 
 			if (AimTarget.IsValid())
 			{
@@ -506,8 +505,7 @@ void ASniperTurretNPC::HandleAimProgressChanged(float Progress, ETurretAimState 
 						EndLoc.Z += Capsule->GetScaledCapsuleHalfHeight();
 					}
 				}
-				UNiagaraFunctionLibrary::SetNiagaraVariableVec3(
-					ActiveAimLaser, AimLaserBeamEndParam.ToString(), EndLoc);
+				ActiveAimLaser->SetVariableVec3(AimLaserBeamEndParam, EndLoc);
 			}
 		}
 	}
