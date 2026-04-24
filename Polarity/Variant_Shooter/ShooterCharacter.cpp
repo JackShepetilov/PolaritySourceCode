@@ -2730,7 +2730,6 @@ void AShooterCharacter::UpdatePostProcessEffects(float DeltaTime)
 	// Interpolate current values
 	CurrentLowHealthPPIntensity = FMath::FInterpTo(CurrentLowHealthPPIntensity, TargetLowHealthIntensity, DeltaTime, PPInterpSpeed);
 	CurrentHighSpeedPPIntensity = FMath::FInterpTo(CurrentHighSpeedPPIntensity, TargetHighSpeedIntensity, DeltaTime, PPInterpSpeed);
-	CurrentTurretBlindPPIntensity = FMath::FInterpTo(CurrentTurretBlindPPIntensity, TargetTurretBlindPPIntensity, DeltaTime, PPInterpSpeed);
 
 	// Apply to materials
 	if (LowHealthPPMaterial)
@@ -2742,11 +2741,6 @@ void AShooterCharacter::UpdatePostProcessEffects(float DeltaTime)
 	{
 		HighSpeedPPMaterial->SetScalarParameterValue(PPIntensityParameterName, CurrentHighSpeedPPIntensity);
 	}
-
-	if (TurretBlindPPMaterial)
-	{
-		TurretBlindPPMaterial->SetScalarParameterValue(PPIntensityParameterName, CurrentTurretBlindPPIntensity);
-	}
 }
 
 void AShooterCharacter::NotifyTurretTargeting(AActor* Turret, float Progress, bool bIsActive)
@@ -2756,30 +2750,37 @@ void AShooterCharacter::NotifyTurretTargeting(AActor* Turret, float Progress, bo
 		return;
 	}
 
+	// Drop any entries for turrets that disappeared without calling disengage
+	ActiveAimingTurrets.RemoveAll([](const FTurretAimInfo& Info)
+	{
+		return !IsValid(Info.Turret);
+	});
+
+	const int32 Index = ActiveAimingTurrets.IndexOfByPredicate([Turret](const FTurretAimInfo& Info)
+	{
+		return Info.Turret == Turret;
+	});
+
 	if (bIsActive)
 	{
-		ActiveTurretAimings.FindOrAdd(Turret) = Progress;
-	}
-	else
-	{
-		ActiveTurretAimings.Remove(Turret);
-	}
-
-	// Prune stale weak pointers and pick max progress across remaining turrets
-	float MaxProgress = 0.0f;
-	for (auto It = ActiveTurretAimings.CreateIterator(); It; ++It)
-	{
-		if (!It->Key.IsValid())
+		if (Index != INDEX_NONE)
 		{
-			It.RemoveCurrent();
-			continue;
+			ActiveAimingTurrets[Index].Progress = Progress;
 		}
-		MaxProgress = FMath::Max(MaxProgress, It->Value);
+		else
+		{
+			FTurretAimInfo Info;
+			Info.Turret = Turret;
+			Info.Progress = Progress;
+			ActiveAimingTurrets.Add(Info);
+		}
+	}
+	else if (Index != INDEX_NONE)
+	{
+		ActiveAimingTurrets.RemoveAt(Index);
 	}
 
-	TargetTurretBlindPPIntensity = MaxProgress;
-	const bool bAnyActive = ActiveTurretAimings.Num() > 0;
-	OnTargetedByTurret.Broadcast(MaxProgress, bAnyActive);
+	OnTargetedByTurret.Broadcast(ActiveAimingTurrets);
 }
 
 void AShooterCharacter::SpawnDoubleJumpVFX()

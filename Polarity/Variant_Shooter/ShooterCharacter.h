@@ -54,8 +54,26 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropImpact, AEMFPhysicsProp*, 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherEnded);
 
-// Turret aim telegraph: Progress (0..1), bIsActive (true while any turret is aiming at player)
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTargetedByTurretDelegate, float, Progress, bool, bIsActive);
+/**
+ * Per-turret aim telegraph entry. BP iterates ActiveAimingTurrets to compute its own
+ * intensity (e.g. dot product of camera forward vs direction-to-turret, mapped through a curve).
+ */
+USTRUCT(BlueprintType)
+struct FTurretAimInfo
+{
+	GENERATED_BODY()
+
+	/** The turret currently aiming at the player */
+	UPROPERTY(BlueprintReadOnly, Category = "Turret Aim")
+	TObjectPtr<AActor> Turret = nullptr;
+
+	/** Current aim progress of this turret (0..1) */
+	UPROPERTY(BlueprintReadOnly, Category = "Turret Aim")
+	float Progress = 0.0f;
+};
+
+// Broadcasts the full snapshot of turrets currently aiming at the player whenever it changes
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTargetedByTurretDelegate, const TArray<FTurretAimInfo>&, ActiveTurrets);
 
 /**
  * Settings for Boss Finisher cinematic attack
@@ -716,10 +734,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
 	TObjectPtr<UMaterialInstanceDynamic> HighSpeedPPMaterial;
 
-	/** Post process material instance for sniper turret aim telegraph (screen flash as a turret locks on) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
-	TObjectPtr<UMaterialInstanceDynamic> TurretBlindPPMaterial;
-
 	/** Parameter name for intensity in post process materials */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|PostProcess")
 	FName PPIntensityParameterName = FName("Intensity");
@@ -742,14 +756,9 @@ protected:
 	/** Current high speed PP intensity (internal) */
 	float CurrentHighSpeedPPIntensity = 0.0f;
 
-	/** Current turret-blind PP intensity (interpolated toward TargetTurretBlindPPIntensity) */
-	float CurrentTurretBlindPPIntensity = 0.0f;
-
-	/** Target turret-blind PP intensity — max aim progress across all turrets currently targeting the player */
-	float TargetTurretBlindPPIntensity = 0.0f;
-
-	/** Turrets currently aiming at this player, keyed by turret pointer → that turret's aim progress (invalid entries pruned lazily) */
-	TMap<TWeakObjectPtr<AActor>, float> ActiveTurretAimings;
+	/** Snapshot of turrets currently aiming at the player. BP consumes this (directly or via OnTargetedByTurret) to drive PP effects. */
+	UPROPERTY(BlueprintReadOnly, Category = "Player|Telegraph")
+	TArray<FTurretAimInfo> ActiveAimingTurrets;
 
 	// ==================== VFX|Movement ====================
 
@@ -798,7 +807,8 @@ public:
 	/** Melee weapon equipped/unequipped state (fires on weapon switch and weapon break) */
 	FMeleeWeaponEquippedDelegate OnMeleeWeaponEquipped;
 
-	/** Turret aim telegraph: broadcasts max progress across all turrets targeting player (0..1) and bIsActive flag */
+	/** Turret aim telegraph: broadcasts full list of turrets currently aiming at the player on every change.
+	 *  BP computes per-turret intensity (e.g. dot product + curve) and drives PP settings accordingly. */
 	UPROPERTY(BlueprintAssignable, Category = "Player|Events")
 	FOnTargetedByTurretDelegate OnTargetedByTurret;
 
