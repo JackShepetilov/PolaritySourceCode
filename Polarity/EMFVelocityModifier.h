@@ -69,6 +69,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation")
 	int32 ChargeSign = 1;
 
+	/** When false, ToggleChargeSign() and any external sign-flip path is gated and becomes a no-op.
+	 *  Set to false on BP_Player to lock polarity at +1 (simplified onboarding mode).
+	 *  Leave true on Boss / NPCs that legitimately flip polarity.
+	 *  Reserved for the future "Cause and Effect" environment-polarity level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation")
+	bool bAllowPolarityToggle = true;
+
 	/** Максимальный бонусный заряд (legacy, не используется — единый пул) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float MaxBonusCharge = 0.0f;

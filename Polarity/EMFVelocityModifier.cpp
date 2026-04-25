@@ -195,6 +195,15 @@ void UEMFVelocityModifier::AddEMImpulse(FVector Impulse)
 
 void UEMFVelocityModifier::ToggleChargeSign()
 {
+	// Polarity-toggle gate: when bAllowPolarityToggle is false (e.g. on BP_Player in
+	// the simplified-onboarding build), this entry point becomes a no-op. The body is
+	// preserved verbatim below for trivial revert when the toggle is reintroduced via
+	// the future "Cause and Effect" environment-polarity level.
+	if (!bAllowPolarityToggle)
+	{
+		return;
+	}
+
 	ChargeSign = -ChargeSign;
 	BaseCharge = -BaseCharge;
 	UpdateFieldComponentCharge();
