@@ -13,13 +13,13 @@ struct FChatMessage : public FTableRowBase
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString AuthorName;
+	FText AuthorName;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString MessageText;
+	FText MessageText;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString DateTime;
+	FText DateTime;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	bool IsNewAuthor = true;
