@@ -37,9 +37,13 @@ enum class EChargeAnimationState : uint8
 	ShowingWeapon,		// Transitioning back to FirstPersonMesh
 	Cooldown,			// Brief cooldown before next activation
 	// -- CHANNELING PATH (Channel button) --
-	Channeling,			// Plate active, montage frozen, player field disabled
-	ReverseChanneling,	// ToggleCharge during channeling: plate with opposite charge, timed
+	Channeling,			// Plate active, montage frozen, player field disabled.
+						// In press-press mode this means "target captured, awaiting throw press".
+	ReverseChanneling,	// Channel/ToggleCharge during channeling: plate with opposite charge, timed
 	FinishingAnimation,	// Montage resumes and plays to completion
+	CaptureLockout,		// Press-press mode: brief window after a successful capture during which
+						// channel button input is ignored, preventing instant-launch from spam.
+						// Auto-transitions to Channeling after CaptureToLaunchLockout seconds.
 };
 
 /**
@@ -156,6 +160,17 @@ public:
 	/** Duration of the reverse-charge channeling burst */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float ReverseChargeDuration = 0.4f;
+
+	/** When true (default), channel button uses press-press cycle (Void Breaker-style):
+	 *  press 1 = attempt capture, press 2 (after lockout) = launch.
+	 *  When false, falls back to the legacy hold-to-channel / release-to-exit mode. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling")
+	bool bUsePressPressCaptureMode = true;
+
+	/** Lockout (seconds) after a successful capture during which channel button input is
+	 *  ignored. Prevents accidental instant-launch from button spam. Press-press mode only. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CaptureToLaunchLockout = 0.25f;
 
 	/** Charge cost per second while channeling (continuous drain) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Charge Cost", meta = (ClampMin = "0.0"))
@@ -568,6 +583,10 @@ protected:
 
 	/** Perform the tap toggle: switch charge sign */
 	void PerformTapToggle();
+
+	/** Press-press mode: trigger reverse channeling launch from a held capture.
+	 *  Extracted from OnChargeButtonPressed Case 2 so the channel button can drive launches. */
+	void BeginLaunch();
 
 	/** Enter the finishing animation state: re-enable field, resume montage */
 	void EnterFinishingAnimation();

@@ -68,8 +68,10 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	UpdateMeshTransition(DeltaTime);
 	UpdateMontagePlayRate(DeltaTime);
 
-	// Update plate position during channeling states
-	if (CurrentState == EChargeAnimationState::Channeling || CurrentState == EChargeAnimationState::ReverseChanneling)
+	// Update plate position during channeling-family states (incl. lockout window)
+	if (CurrentState == EChargeAnimationState::Channeling ||
+	    CurrentState == EChargeAnimationState::ReverseChanneling ||
+	    CurrentState == EChargeAnimationState::CaptureLockout)
 	{
 		UpdatePlatePosition();
 	}
@@ -82,6 +84,16 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 void UChargeAnimationComponent::OnChargeButtonPressed()
 {
+	// In simplified-onboarding mode (bUsePressPressCaptureMode = true) the dedicated
+	// charge-toggle button is intentionally retired — the launch is driven by a second
+	// channel press. Body kept verbatim for the legacy/alt mode path below.
+	if (bUsePressPressCaptureMode)
+	{
+		return;
+	}
+
+	// === Legacy tap-toggle / reverse-channel-via-toggle path (preserved for revert) ===
+
 	// Case 1: Normal activation from Ready state — tap toggle
 	if (CurrentState == EChargeAnimationState::Ready && CanStartAnimation())
 	{
@@ -96,98 +108,82 @@ void UChargeAnimationComponent::OnChargeButtonPressed()
 		return;
 	}
 
-	// Case 2: Pressed during Channeling — trigger reverse channeling
+	// Case 2: Pressed during Channeling — trigger reverse channeling launch
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
-		// Exit current channeling (destroy plate, disable proxy)
-		ExitChanneling();
-
-		// Deduct fixed charge cost for reverse channeling
-		if (CachedEMFModifier && ReverseChannelingChargeCost > 0.0f)
-		{
-			CachedEMFModifier->DeductCharge(ReverseChannelingChargeCost);
-		}
-
-		// Spawn plate with OPPOSITE charge sign
-		SpawnPlate(-ChannelingChargeSign);
-
-		// Flip player's charge sign (matches the new plate polarity)
-		if (CachedEMFModifier)
-		{
-			CachedEMFModifier->ToggleChargeSign();
-		}
-
-		// Set reverse mode on the new plate (tangential-only damping)
-		if (ChannelingPlateActor)
-		{
-			ChannelingPlateActor->SetReverseMode(true);
-		}
-
-		// Launch VFX and delegate (after polarity flip)
-		if (CurrentCapturedNPC.IsValid())
-		{
-			SpawnLaunchVFX(CurrentCapturedNPC.Get());
-			StopHoldVFX();
-			if (ShooterCharacter)
-			{
-				ShooterCharacter->OnPropLaunched.Broadcast(CurrentCapturedNPC.Get());
-			}
-		}
-
-		// Re-attach captured target to the new plate (target stayed in knockback)
-		if (CurrentCapturedNPC.IsValid() && ChannelingPlateActor)
-		{
-			if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
-			{
-				if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
-				{
-					Mod->SetCapturedByPlate(ChannelingPlateActor);
-				}
-				ChannelingPlateActor->SetCapturedNPC(NPC);
-			}
-			else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
-			{
-				Prop->SetCapturedByPlate(ChannelingPlateActor);
-				ChannelingPlateActor->SetCapturedNPC(Prop);
-			}
-		}
-
-		// Enable proxy mode with the new plate
-		if (CachedEMFModifier)
-		{
-			CachedEMFModifier->SetChannelingProxyMode(true, ChannelingPlateActor);
-		}
-
-		SetState(EChargeAnimationState::ReverseChanneling);
+		BeginLaunch();
 		return;
 	}
 }
 
 void UChargeAnimationComponent::OnChargeButtonReleased()
 {
-	// ToggleCharge release — no action needed (tap toggle is instant on press)
+	// ToggleCharge release — no action needed (tap toggle is instant on press,
+	// and in simplified mode the button is retired entirely).
 }
 
 void UChargeAnimationComponent::OnChannelButtonPressed()
 {
-	// Enter channeling path from Ready state
-	if (CurrentState == EChargeAnimationState::Ready && CanStartAnimation())
+	// === Legacy hold-to-channel mode (kept for revert) ===
+	if (!bUsePressPressCaptureMode)
 	{
+		if (CurrentState == EChargeAnimationState::Ready && CanStartAnimation())
+		{
+			bChannelingPath = true;
+			bInputLocked = true;
+
+			MeshTransitionProgress = 0.0f;
+			MontageTimeElapsed = 0.0f;
+
+			BeginHideWeapon();
+			SetState(EChargeAnimationState::HidingWeapon);
+		}
+		return;
+	}
+
+	// === Press-press mode (Void Breaker-style) ===
+	// Press 1 from Ready → wind-up, single capture attempt
+	// Press 2 from Channeling → launch held target
+	// Press during CaptureLockout → ignored (anti-spam window)
+	switch (CurrentState)
+	{
+	case EChargeAnimationState::Ready:
+		if (!CanStartAnimation())
+		{
+			return;
+		}
 		bChannelingPath = true;
 		bInputLocked = true;
-
 		MeshTransitionProgress = 0.0f;
 		MontageTimeElapsed = 0.0f;
-
 		BeginHideWeapon();
 		SetState(EChargeAnimationState::HidingWeapon);
-		return;
+		break;
+
+	case EChargeAnimationState::Channeling:
+		// A target is held — second press launches it
+		BeginLaunch();
+		break;
+
+	case EChargeAnimationState::CaptureLockout:
+		// Within the post-capture lockout window — ignore to prevent instant-launch from spam
+		break;
+
+	default:
+		// HidingWeapon, ReverseChanneling, FinishingAnimation, etc. — input ignored
+		break;
 	}
 }
 
 void UChargeAnimationComponent::OnChannelButtonReleased()
 {
-	// Exit channeling on button release
+	// Press-press mode: release is meaningless — capture and launch are press-only.
+	if (bUsePressPressCaptureMode)
+	{
+		return;
+	}
+
+	// === Legacy hold-mode behavior (kept for revert) ===
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
 		ExitChanneling();
@@ -248,7 +244,8 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 		break;
 
 	case EChargeAnimationState::Channeling:
-		StateTimeRemaining = 0.0f; // No timer — held until channel button released
+		StateTimeRemaining = 0.0f; // No timer — held until channel button released (legacy)
+		                           // or second channel press launches (press-press)
 		break;
 
 	case EChargeAnimationState::ReverseChanneling:
@@ -257,6 +254,10 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 
 	case EChargeAnimationState::FinishingAnimation:
 		// Timer set in EnterFinishingAnimation() based on remaining montage length
+		break;
+
+	case EChargeAnimationState::CaptureLockout:
+		StateTimeRemaining = CaptureToLaunchLockout;
 		break;
 	}
 }
@@ -268,17 +269,25 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 		return;
 	}
 
-	// Channeling state: continuous charge drain, no timer
+	// Continuous charge drain runs during both Channeling and CaptureLockout —
+	// the player is holding a captured target in either case.
+	const bool bIsHoldingCapture =
+		CurrentState == EChargeAnimationState::Channeling ||
+		CurrentState == EChargeAnimationState::CaptureLockout;
+	if (bIsHoldingCapture && CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
+	{
+		CachedEMFModifier->DeductCharge(ChannelingChargeCostPerSecond * DeltaTime);
+	}
+
+	// Channeling has no timer — it ends only via second-press launch (press-press)
+	// or button release (legacy hold-mode).
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
-		if (CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
-		{
-			CachedEMFModifier->DeductCharge(ChannelingChargeCostPerSecond * DeltaTime);
-		}
 		return;
 	}
 
-	// Update timer
+	// Update timer (CaptureLockout, HidingWeapon, Playing, ShowingWeapon, Cooldown,
+	// ReverseChanneling, FinishingAnimation all participate)
 	StateTimeRemaining -= DeltaTime;
 
 	if (StateTimeRemaining <= 0.0f)
@@ -334,6 +343,11 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 			SetState(EChargeAnimationState::ShowingWeapon);
 			break;
 
+		case EChargeAnimationState::CaptureLockout:
+			// Lockout window over — promote to Channeling so a second press launches.
+			SetState(EChargeAnimationState::Channeling);
+			break;
+
 		default:
 			break;
 		}
@@ -378,9 +392,10 @@ bool UChargeAnimationComponent::IsAnimating() const
 
 bool UChargeAnimationComponent::IsBlockingFiring() const
 {
-	// Allow firing during Channeling and ReverseChanneling
+	// Allow firing during channeling-family states (Channeling, ReverseChanneling, CaptureLockout)
 	if (CurrentState == EChargeAnimationState::Channeling ||
-	    CurrentState == EChargeAnimationState::ReverseChanneling)
+	    CurrentState == EChargeAnimationState::ReverseChanneling ||
+	    CurrentState == EChargeAnimationState::CaptureLockout)
 	{
 		return false;
 	}
@@ -392,7 +407,8 @@ bool UChargeAnimationComponent::IsBlockingFiring() const
 bool UChargeAnimationComponent::IsChanneling() const
 {
 	return CurrentState == EChargeAnimationState::Channeling ||
-	       CurrentState == EChargeAnimationState::ReverseChanneling;
+	       CurrentState == EChargeAnimationState::ReverseChanneling ||
+	       CurrentState == EChargeAnimationState::CaptureLockout;
 }
 
 bool UChargeAnimationComponent::CancelAnimation()
@@ -461,6 +477,34 @@ void UChargeAnimationComponent::EnterChanneling()
 		CachedEMFModifier->SetChannelingProxyMode(true, ChannelingPlateActor);
 	}
 
+	if (bUsePressPressCaptureMode)
+	{
+		// Press-press mode: one synchronous capture scan. CurrentState is still HidingWeapon
+		// at this point, so UpdateCaptureRaycast's press-press scan-skip does NOT apply yet
+		// (it gates only when state is Channeling/CaptureLockout — see that function).
+		FVector CamLoc;
+		FRotator CamRot;
+		if (GetCameraViewPoint(CamLoc, CamRot))
+		{
+			UpdateCaptureRaycast(CamLoc, CamRot);
+		}
+
+		if (CurrentCapturedNPC.IsValid())
+		{
+			// Capture succeeded — enter lockout window first, then Channeling (auto-promoted).
+			SetState(EChargeAnimationState::CaptureLockout);
+			OnChannelingStarted.Broadcast();
+		}
+		else
+		{
+			// No target — bail out via the standard finishing-animation cleanup path.
+			ExitChanneling();
+			EnterFinishingAnimation();
+		}
+		return;
+	}
+
+	// Legacy hold-mode: continuous scan happens via tick.
 	SetState(EChargeAnimationState::Channeling);
 	OnChannelingStarted.Broadcast();
 }
@@ -710,6 +754,17 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		{
 			ChannelingPlateActor->ClearCapturedNPC();
 		}
+	}
+
+	// Press-press mode: skip the new-target scan once we're past the single-shot entry.
+	// The initial capture scan happens from EnterChanneling while state is still HidingWeapon,
+	// so this gate does NOT apply on entry — it only suppresses replacement scans during
+	// the held / lockout window.
+	if (bUsePressPressCaptureMode &&
+	    (CurrentState == EChargeAnimationState::Channeling ||
+	     CurrentState == EChargeAnimationState::CaptureLockout))
+	{
+		return;
 	}
 
 	UWorld* World = GetWorld();
@@ -1338,6 +1393,75 @@ void UChargeAnimationComponent::PerformTapToggle()
 	{
 		CachedEMFModifier->ToggleChargeSign();
 	}
+}
+
+void UChargeAnimationComponent::BeginLaunch()
+{
+	// Tear down the current "hold" plate (proxy mode disabled, plate destroyed).
+	ExitChanneling();
+
+	// Deduct fixed charge cost for the reverse channeling burst
+	if (CachedEMFModifier && ReverseChannelingChargeCost > 0.0f)
+	{
+		CachedEMFModifier->DeductCharge(ReverseChannelingChargeCost);
+	}
+
+	// Spawn a fresh plate with the OPPOSITE charge sign — this inversion is what produces
+	// the same-sign repulsion against the held target and propels it forward.
+	SpawnPlate(-ChannelingChargeSign);
+
+	// Flip player's charge sign — gated upstream by EMFVelocityModifier::bAllowPolarityToggle.
+	// In simplified mode (player BP sets bAllowPolarityToggle = false) this call no-ops, so
+	// the plate inversion alone drives the launch and the player visibly stays positive.
+	// In legacy mode the flip still happens, preserving the original behavior.
+	if (CachedEMFModifier)
+	{
+		CachedEMFModifier->ToggleChargeSign();
+	}
+
+	// Mark plate as reverse (tangential-only damping) so the held target slides off cleanly.
+	if (ChannelingPlateActor)
+	{
+		ChannelingPlateActor->SetReverseMode(true);
+	}
+
+	// Launch VFX + delegate (after plate inversion is in place)
+	if (CurrentCapturedNPC.IsValid())
+	{
+		SpawnLaunchVFX(CurrentCapturedNPC.Get());
+		StopHoldVFX();
+		if (ShooterCharacter)
+		{
+			ShooterCharacter->OnPropLaunched.Broadcast(CurrentCapturedNPC.Get());
+		}
+	}
+
+	// Re-attach the captured target to the new (reverse) plate so the same-sign field
+	// pushes it forward instead of letting it fall.
+	if (CurrentCapturedNPC.IsValid() && ChannelingPlateActor)
+	{
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+		{
+			if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
+			{
+				Mod->SetCapturedByPlate(ChannelingPlateActor);
+			}
+			ChannelingPlateActor->SetCapturedNPC(NPC);
+		}
+		else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
+		{
+			Prop->SetCapturedByPlate(ChannelingPlateActor);
+			ChannelingPlateActor->SetCapturedNPC(Prop);
+		}
+	}
+
+	// Re-enable proxy mode against the new plate
+	if (CachedEMFModifier)
+	{
+		CachedEMFModifier->SetChannelingProxyMode(true, ChannelingPlateActor);
+	}
+
+	SetState(EChargeAnimationState::ReverseChanneling);
 }
 
 void UChargeAnimationComponent::EnterFinishingAnimation()
