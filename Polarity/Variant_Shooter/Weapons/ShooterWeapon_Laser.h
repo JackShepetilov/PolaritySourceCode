@@ -64,9 +64,15 @@ protected:
 
 	// ==================== Laser Ionization ====================
 
-	/** Charge added per second to hit targets (always positive - ionization) */
+	/** Charge added per second to hit targets (magnitude — sign is determined by bElectrifyNegative) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Laser|Ionization", meta = (ClampMin = "0.0"))
 	float IonizationChargePerSecond = 5.0f;
+
+	/** When true, the laser ELECTRIFIES targets with negative charge (capped at -MaxIonizationCharge).
+	 *  When false, falls back to the legacy positive-ionization behavior (cap at +MaxIonizationCharge).
+	 *  Default true for the simplified-onboarding build (player always +, targets always — for grab). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Laser|Ionization")
+	bool bElectrifyNegative = true;
 
 	// Note: MaxIonizationCharge is inherited from AShooterWeapon (Hitscan|Ionization section)
 

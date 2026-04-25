@@ -293,7 +293,9 @@ void AShooterWeapon_Laser::ApplyBeamDamage(const FHitResult& Hit, float DeltaTim
 }
 
 // =============================================================================
-// ApplyIonization - add positive charge to target
+// ApplyIonization - shift target charge toward bElectrifyNegative-determined polarity
+// New default: electrify negative (target gets pulled to -MaxIonizationCharge).
+// Legacy: ionize positive (target gets pushed to +MaxIonizationCharge).
 // =============================================================================
 void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 {
@@ -302,7 +304,31 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 		return;
 	}
 
-	const float ChargeToAdd = IonizationChargePerSecond * DeltaTime;
+	const float ChargeStep = IonizationChargePerSecond * DeltaTime;
+	// Sign of accumulation: -1 for electrify-negative (default), +1 for legacy ionize-positive.
+	const float DirSign = bElectrifyNegative ? -1.0f : 1.0f;
+	// Target charge cap aligned with direction.
+	const float ChargeCap = DirSign * MaxIonizationCharge;
+
+	// Helper lambda: shift CurrentCharge one step toward ChargeCap (DirSign-clamped).
+	auto StepToward = [&](float CurrentCharge) -> float
+	{
+		if (bElectrifyNegative)
+		{
+			// Already at or past negative cap — saturated.
+			if (CurrentCharge <= ChargeCap)
+			{
+				return CurrentCharge;
+			}
+			return FMath::Max(CurrentCharge - ChargeStep, ChargeCap);
+		}
+		// Legacy positive path.
+		if (CurrentCharge >= ChargeCap)
+		{
+			return CurrentCharge;
+		}
+		return FMath::Min(CurrentCharge + ChargeStep, ChargeCap);
+	};
 
 	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
@@ -310,18 +336,11 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 		// Use GetCharge() to read actual FieldComponent charge (not BaseCharge which may be stale
 		// after melee's SetCharge() calls that bypass BaseCharge tracking)
 		const float CurrentCharge = TargetModifier->GetCharge();
-
-		// Already at max positive charge - nothing to do
-		if (CurrentCharge >= MaxIonizationCharge)
+		const float NewCharge = StepToward(CurrentCharge);
+		if (NewCharge != CurrentCharge)
 		{
-			return;
+			TargetModifier->SetCharge(NewCharge);
 		}
-
-		// Add charge towards positive (ionization)
-		// If negative: move towards 0, then towards positive
-		// If positive: increase further
-		const float NewCharge = FMath::Min(CurrentCharge + ChargeToAdd, MaxIonizationCharge);
-		TargetModifier->SetCharge(NewCharge);
 		return;
 	}
 
@@ -329,11 +348,11 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
 	{
 		const float CurrentCharge = Prop->GetCharge();
-		if (CurrentCharge >= MaxIonizationCharge)
+		const float NewCharge = StepToward(CurrentCharge);
+		if (NewCharge != CurrentCharge)
 		{
-			return;
+			Prop->SetCharge(NewCharge);
 		}
-		Prop->SetCharge(FMath::Min(CurrentCharge + ChargeToAdd, MaxIonizationCharge));
 		return;
 	}
 
@@ -342,14 +361,12 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
 	{
 		FEMSourceDescription Desc = TargetField->GetSourceDescription();
 		const float CurrentCharge = Desc.PointChargeParams.Charge;
-
-		if (CurrentCharge >= MaxIonizationCharge)
+		const float NewCharge = StepToward(CurrentCharge);
+		if (NewCharge != CurrentCharge)
 		{
-			return;
+			Desc.PointChargeParams.Charge = NewCharge;
+			TargetField->SetSourceDescription(Desc);
 		}
-
-		Desc.PointChargeParams.Charge = FMath::Min(CurrentCharge + ChargeToAdd, MaxIonizationCharge);
-		TargetField->SetSourceDescription(Desc);
 	}
 }
 
