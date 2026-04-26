@@ -68,10 +68,9 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	UpdateMeshTransition(DeltaTime);
 	UpdateMontagePlayRate(DeltaTime);
 
-	// Update plate position during channeling-family states (incl. lockout window)
-	if (CurrentState == EChargeAnimationState::Channeling ||
-	    CurrentState == EChargeAnimationState::ReverseChanneling ||
-	    CurrentState == EChargeAnimationState::CaptureLockout)
+	// Update plate position during channeling states (animation flow matches legacy —
+	// the post-capture lockout lives inside Channeling as a timer, not a separate state).
+	if (CurrentState == EChargeAnimationState::Channeling || CurrentState == EChargeAnimationState::ReverseChanneling)
 	{
 		UpdatePlatePosition();
 	}
@@ -143,8 +142,7 @@ void UChargeAnimationComponent::OnChannelButtonPressed()
 
 	// === Press-press mode (Void Breaker-style) ===
 	// Press 1 from Ready → wind-up, single capture attempt
-	// Press 2 from Channeling → launch held target
-	// Press during CaptureLockout → ignored (anti-spam window)
+	// Press 2 from Channeling → launch held target (gated by post-capture lockout timer)
 	switch (CurrentState)
 	{
 	case EChargeAnimationState::Ready:
@@ -161,12 +159,12 @@ void UChargeAnimationComponent::OnChannelButtonPressed()
 		break;
 
 	case EChargeAnimationState::Channeling:
-		// A target is held — second press launches it
+		// Anti-spam: ignore the second press while the post-capture lockout is still running.
+		if (CaptureLockoutTimeRemaining > 0.0f)
+		{
+			break;
+		}
 		BeginLaunch();
-		break;
-
-	case EChargeAnimationState::CaptureLockout:
-		// Within the post-capture lockout window — ignore to prevent instant-launch from spam
 		break;
 
 	default:
@@ -256,9 +254,9 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 		// Timer set in EnterFinishingAnimation() based on remaining montage length
 		break;
 
-	case EChargeAnimationState::CaptureLockout:
-		StateTimeRemaining = CaptureToLaunchLockout;
-		break;
+	// CaptureLockout enum value retained for revert; no longer entered as a state —
+	// the post-capture input lockout is now a timer (CaptureLockoutTimeRemaining)
+	// running inside Channeling so the animation flow matches the legacy hold-mode timeline.
 	}
 }
 
@@ -269,25 +267,22 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 		return;
 	}
 
-	// Continuous charge drain runs during both Channeling and CaptureLockout —
-	// the player is holding a captured target in either case.
-	const bool bIsHoldingCapture =
-		CurrentState == EChargeAnimationState::Channeling ||
-		CurrentState == EChargeAnimationState::CaptureLockout;
-	if (bIsHoldingCapture && CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
-	{
-		CachedEMFModifier->DeductCharge(ChannelingChargeCostPerSecond * DeltaTime);
-	}
-
-	// Channeling has no timer — it ends only via second-press launch (press-press)
-	// or button release (legacy hold-mode).
+	// Channeling state: continuous charge drain, no state timer.
+	// Press-press lockout countdown happens here too (timer-only, no separate state).
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
+		if (CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
+		{
+			CachedEMFModifier->DeductCharge(ChannelingChargeCostPerSecond * DeltaTime);
+		}
+		if (CaptureLockoutTimeRemaining > 0.0f)
+		{
+			CaptureLockoutTimeRemaining = FMath::Max(0.0f, CaptureLockoutTimeRemaining - DeltaTime);
+		}
 		return;
 	}
 
-	// Update timer (CaptureLockout, HidingWeapon, Playing, ShowingWeapon, Cooldown,
-	// ReverseChanneling, FinishingAnimation all participate)
+	// Update timer
 	StateTimeRemaining -= DeltaTime;
 
 	if (StateTimeRemaining <= 0.0f)
@@ -343,11 +338,6 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 			SetState(EChargeAnimationState::ShowingWeapon);
 			break;
 
-		case EChargeAnimationState::CaptureLockout:
-			// Lockout window over — promote to Channeling so a second press launches.
-			SetState(EChargeAnimationState::Channeling);
-			break;
-
 		default:
 			break;
 		}
@@ -392,10 +382,9 @@ bool UChargeAnimationComponent::IsAnimating() const
 
 bool UChargeAnimationComponent::IsBlockingFiring() const
 {
-	// Allow firing during channeling-family states (Channeling, ReverseChanneling, CaptureLockout)
+	// Allow firing during Channeling and ReverseChanneling
 	if (CurrentState == EChargeAnimationState::Channeling ||
-	    CurrentState == EChargeAnimationState::ReverseChanneling ||
-	    CurrentState == EChargeAnimationState::CaptureLockout)
+	    CurrentState == EChargeAnimationState::ReverseChanneling)
 	{
 		return false;
 	}
@@ -407,8 +396,7 @@ bool UChargeAnimationComponent::IsBlockingFiring() const
 bool UChargeAnimationComponent::IsChanneling() const
 {
 	return CurrentState == EChargeAnimationState::Channeling ||
-	       CurrentState == EChargeAnimationState::ReverseChanneling ||
-	       CurrentState == EChargeAnimationState::CaptureLockout;
+	       CurrentState == EChargeAnimationState::ReverseChanneling;
 }
 
 bool UChargeAnimationComponent::CancelAnimation()
@@ -481,7 +469,7 @@ void UChargeAnimationComponent::EnterChanneling()
 	{
 		// Press-press mode: one synchronous capture scan. CurrentState is still HidingWeapon
 		// at this point, so UpdateCaptureRaycast's press-press scan-skip does NOT apply yet
-		// (it gates only when state is Channeling/CaptureLockout — see that function).
+		// (it gates only when state is Channeling — see that function).
 		FVector CamLoc;
 		FRotator CamRot;
 		if (GetCameraViewPoint(CamLoc, CamRot))
@@ -491,8 +479,11 @@ void UChargeAnimationComponent::EnterChanneling()
 
 		if (CurrentCapturedNPC.IsValid())
 		{
-			// Capture succeeded — enter lockout window first, then Channeling (auto-promoted).
-			SetState(EChargeAnimationState::CaptureLockout);
+			// Capture succeeded — enter the same Channeling state the legacy hold-mode uses,
+			// so the animation timeline is identical. The post-capture input lockout runs as
+			// a timer inside Channeling (CaptureLockoutTimeRemaining), not a separate state.
+			SetState(EChargeAnimationState::Channeling);
+			CaptureLockoutTimeRemaining = CaptureToLaunchLockout;
 			OnChannelingStarted.Broadcast();
 		}
 		else
@@ -759,10 +750,8 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	// Press-press mode: skip the new-target scan once we're past the single-shot entry.
 	// The initial capture scan happens from EnterChanneling while state is still HidingWeapon,
 	// so this gate does NOT apply on entry — it only suppresses replacement scans during
-	// the held / lockout window.
-	if (bUsePressPressCaptureMode &&
-	    (CurrentState == EChargeAnimationState::Channeling ||
-	     CurrentState == EChargeAnimationState::CaptureLockout))
+	// the held window (Channeling). Lockout is now a timer inside Channeling, not a separate state.
+	if (bUsePressPressCaptureMode && CurrentState == EChargeAnimationState::Channeling)
 	{
 		return;
 	}

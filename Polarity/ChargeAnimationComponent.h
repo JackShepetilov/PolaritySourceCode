@@ -401,6 +401,13 @@ protected:
 	/** Cached player charge sign at channeling start (1 or -1) */
 	int32 ChannelingChargeSign = 1;
 
+	/** Press-press mode: time remaining in the post-capture input-lockout window.
+	 *  While >0 (and state == Channeling), a second channel-button press is ignored to
+	 *  prevent instant-launch from spam. Counted down in UpdateState's Channeling tick.
+	 *  Held inside the Channeling state (no separate state) so the animation flow stays
+	 *  identical to the legacy hold-mode timeline. */
+	float CaptureLockoutTimeRemaining = 0.0f;
+
 	/** Cached reference to EMFVelocityModifier */
 	UPROPERTY()
 	TObjectPtr<UEMFVelocityModifier> CachedEMFModifier;

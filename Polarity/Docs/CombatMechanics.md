@@ -112,14 +112,13 @@
 | Эффект (захват)         | Спавн пластины +, поле игрока отключено, удержание ОДНОЙ цели           |
 | Эффект (запуск)         | Пластина инвертируется в −, захваченный объект отталкивается вперёд     |
 
-**Состояния (state machine):**
+**Состояния (state machine идентична легаси-hold-mode — lockout живёт как таймер внутри Channeling, не как отдельное состояние, чтобы анимации не имели лишних переходов):**
 1. `Ready` — простой
 2. `HidingWeapon` — wind-up анимация (0.15s)
 3. *(сразу после wind-up — синхронный одноразовый скан конуса)*
-4. `CaptureLockout` — 0.25s lockout, инпут игнорируется
-5. `Channeling` — цель захвачена, ждёт второго нажатия
-6. `ReverseChanneling` — запуск (0.4s)
-7. `FinishingAnimation` → `ShowingWeapon` → `Cooldown` → `Ready`
+4. `Channeling` — цель захвачена, ждёт второго нажатия. Внутри: `CaptureLockoutTimeRemaining` (0.25s) блокирует второе нажатие.
+5. `ReverseChanneling` — запуск (0.4s)
+6. `FinishingAnimation` → `ShowingWeapon` → `Cooldown` → `Ready`
 
 Если на скане цель не найдена — переход 3 → `FinishingAnimation` напрямую.
 
