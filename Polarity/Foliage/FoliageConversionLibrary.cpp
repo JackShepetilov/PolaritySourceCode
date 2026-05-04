@@ -16,16 +16,25 @@
 
 namespace
 {
-	/** Walk the foliage actor's FoliageInfos map to find the UFoliageType that owns the given component.
-	 *  No public Blueprint API exposes this in UE 5.6, so we iterate the map directly.
+	/** Find the UFoliageType that owns the given component using only public API.
+	 *  AInstancedFoliageActor::FoliageInfos is private in UE 5.6, so we iterate the
+	 *  publicly-exposed list of used foliage types and look up each FFoliageInfo.
 	 *  Cost is O(N) over foliage types on the level (typically <50), negligible per shot. */
 	UFoliageType* FindFoliageTypeForComponent(AInstancedFoliageActor& IFA, UFoliageInstancedStaticMeshComponent& Component)
 	{
-		for (auto& Pair : IFA.FoliageInfos)
+		const TArray<UFoliageType*> UsedTypes = IFA.GetUsedFoliageTypes();
+		for (UFoliageType* FT : UsedTypes)
 		{
-			if (Pair.Value.IsValid() && Pair.Value->GetComponent() == &Component)
+			if (!FT)
 			{
-				return Pair.Key;
+				continue;
+			}
+			if (FFoliageInfo* Info = IFA.FindMesh(FT))
+			{
+				if (Info->GetComponent() == &Component)
+				{
+					return FT;
+				}
 			}
 		}
 		return nullptr;
