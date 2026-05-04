@@ -12,6 +12,7 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterDummy.h"
 #include "EMFPhysicsProp.h"
+#include "Foliage/FoliageConversionLibrary.h"
 
 namespace
 {
@@ -146,9 +147,21 @@ void AShooterWeapon_Laser::Tick(float DeltaTime)
 	}
 	else if (bHit)
 	{
-		// Hit a surface (wall, floor) - impact VFX only, no damage/hitmarker
+		// Hit a surface (wall, floor) - impact VFX only, no damage/hitmarker.
+		// EXCEPT: if the surface is a UEMFConvertibleFoliageType instance, swap it
+		// for an EMFPhysicsProp this tick and apply ionization to the new prop.
+		// On subsequent ticks the beam will hit the prop directly via the pawn/physics
+		// trace and run through the normal damage+ionization path.
+		if (AEMFPhysicsProp* ConvertedProp = UFoliageConversionLibrary::TryConvertFoliageInstance(HitResult, 0.0f))
+		{
+			ApplyIonization(ConvertedProp, DeltaTime);
+			CurrentHitActor = ConvertedProp;
+		}
+		else
+		{
+			CurrentHitActor = nullptr;
+		}
 		UpdateImpactVFX(true, HitResult.ImpactPoint, HitResult.ImpactNormal);
-		CurrentHitActor = nullptr;
 	}
 	else
 	{

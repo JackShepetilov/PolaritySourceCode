@@ -28,7 +28,8 @@ public class Polarity : ModuleRules
             "AudioMixer",
             "GeometryCollectionEngine",
             "FieldSystemEngine",
-            "ChaosSolverEngine"
+            "ChaosSolverEngine",
+            "Foliage"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags" });
@@ -57,7 +58,8 @@ public class Polarity : ModuleRules
             "Polarity/Upgrades",
             "Polarity/Upgrades/Upgrades",
             "Polarity/Variant_Shooter/Pickups",
-            "Polarity/Buildings"
+            "Polarity/Buildings",
+            "Polarity/Foliage"
         });
 
         // Uncomment if you are using Slate UI

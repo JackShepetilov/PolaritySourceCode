@@ -23,6 +23,8 @@
 #include "PolarityCharacter.h"
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "EMFPhysicsProp.h"
+#include "Foliage/FoliageConversionLibrary.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
 
@@ -943,6 +945,14 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 	if (!HitActor || !OwnerCharacter)
 	{
 		return 0.0f;
+	}
+
+	// EMF Foliage->Prop conversion: a melee strike on a UEMFConvertibleFoliageType
+	// instance promotes the foliage to a real EMFPhysicsProp before any damage runs.
+	// All subsequent TakeDamage calls in this function are routed to the spawned prop.
+	if (AEMFPhysicsProp* ConvertedProp = UFoliageConversionLibrary::TryConvertFoliageInstance(HitResult, Settings.BaseDamage))
+	{
+		HitActor = ConvertedProp;
 	}
 
 	// ==================== Boss Finisher Check ====================

@@ -31,6 +31,7 @@
 #include "TutorialSubsystem.h"
 #include "Variant_Shooter/ShooterDummy.h"
 #include "EMFPhysicsProp.h"
+#include "Foliage/FoliageConversionLibrary.h"
 #include "Upgrades/UpgradeManagerComponent.h"
 
 namespace
@@ -1070,6 +1071,14 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 		return;
 	}
 
+	// EMF Foliage->Prop conversion: if the trace struck a UEMFConvertibleFoliageType
+	// instance, swap the foliage instance for a freshly spawned EMFPhysicsProp
+	// before any damage/ionization runs. From here on HitActor refers to the new prop.
+	if (AEMFPhysicsProp* ConvertedProp = UFoliageConversionLibrary::TryConvertFoliageInstance(Hit, HitscanDamage))
+	{
+		HitActor = ConvertedProp;
+	}
+
 	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢
 	if (!bHitscanDamageOwner && HitActor == GetOwner())
 	{
@@ -1126,11 +1135,22 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	{
 		HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
 	}
-	else if (UPrimitiveComponent* HitComp = Hit.GetComponent())
+	else
 	{
-		if (HitComp->IsSimulatingPhysics())
+		// After foliage->prop conversion HitActor != Hit.GetActor(), and the original
+		// component is the foliage HISM (no physics). Route the impulse to the freshly
+		// spawned prop's PropMesh instead. For non-converted hits this stays Hit.GetComponent().
+		UPrimitiveComponent* ImpulseTarget = Hit.GetComponent();
+		if (HitActor != Hit.GetActor())
 		{
-			HitComp->AddImpulseAtLocation(ImpulseDirection * ImpulseForce, Hit.ImpactPoint);
+			if (AEMFPhysicsProp* AsProp = Cast<AEMFPhysicsProp>(HitActor))
+			{
+				ImpulseTarget = AsProp->PropMesh;
+			}
+		}
+		if (ImpulseTarget && ImpulseTarget->IsSimulatingPhysics())
+		{
+			ImpulseTarget->AddImpulseAtLocation(ImpulseDirection * ImpulseForce, Hit.ImpactPoint);
 		}
 	}
 
