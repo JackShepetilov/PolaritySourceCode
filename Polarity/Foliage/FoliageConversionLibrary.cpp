@@ -2,12 +2,13 @@
 
 #include "FoliageConversionLibrary.h"
 
-#include "EMFConvertibleFoliageType.h"
+#include "EMFFoliageSettings.h"
 #include "EMFPhysicsProp.h"
 
 #include "InstancedFoliageActor.h"
 #include "FoliageInstancedStaticMeshComponent.h"
 #include "FoliageType.h"
+#include "InstancedFoliage.h" // FFoliageInfo
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -57,17 +58,36 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		return nullptr;
 	}
 
-	// --- 2. Resolve FoliageType and check it's convertible ---
+	// --- 2. Resolve FoliageType and check it's registered for conversion ---
 	UFoliageType* FoliageType = FindFoliageTypeForComponent(*IFA, *FISMC);
-	UEMFConvertibleFoliageType* ConvType = Cast<UEMFConvertibleFoliageType>(FoliageType);
-	if (!ConvType || !ConvType->PropClass)
+	if (!FoliageType)
+	{
+		return nullptr;
+	}
+
+	const UEMFFoliageSettings* Settings = GetDefault<UEMFFoliageSettings>();
+	if (!Settings)
+	{
+		return nullptr;
+	}
+
+	const FEMFFoliageEntry* Entry = Settings->FindEntryForFoliageType(FoliageType);
+	if (!Entry)
 	{
 		return nullptr;
 	}
 
 	// Damage gate (0 disables gating)
-	if (ConvType->MinDamageToConvert > 0.0f && DamageDealt < ConvType->MinDamageToConvert)
+	if (Entry->MinDamageToConvert > 0.0f && DamageDealt < Entry->MinDamageToConvert)
 	{
+		return nullptr;
+	}
+
+	UClass* ResolvedPropClass = Entry->PropClass.LoadSynchronous();
+	if (!ResolvedPropClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[FOLIAGE_CONVERT] Entry for %s has no PropClass set"),
+			*GetNameSafe(FoliageType));
 		return nullptr;
 	}
 
@@ -90,13 +110,8 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 	// --- 4. Deferred spawn so we can set the mesh BEFORE BeginPlay runs.
 	//        SpawnActor + SetStaticMesh after BeginPlay would let the physics body
 	//        initialize against the BP's default mesh, then need a recreate. ---
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	SpawnParams.Owner = nullptr;
-	SpawnParams.Instigator = nullptr;
-
 	AEMFPhysicsProp* SpawnedProp = World->SpawnActorDeferred<AEMFPhysicsProp>(
-		ConvType->PropClass,
+		ResolvedPropClass,
 		InstanceTransform,
 		/*Owner=*/nullptr,
 		/*Instigator=*/nullptr,
@@ -105,7 +120,7 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 	if (!SpawnedProp)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[FOLIAGE_CONVERT] SpawnActorDeferred failed for class %s"),
-			*GetNameSafe(ConvType->PropClass));
+			*GetNameSafe(ResolvedPropClass));
 		return nullptr;
 	}
 

@@ -29,7 +29,8 @@ public class Polarity : ModuleRules
             "GeometryCollectionEngine",
             "FieldSystemEngine",
             "ChaosSolverEngine",
-            "Foliage"
+            "Foliage",
+            "DeveloperSettings"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags" });
