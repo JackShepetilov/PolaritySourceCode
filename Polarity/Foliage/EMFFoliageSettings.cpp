@@ -2,6 +2,10 @@
 
 #include "EMFFoliageSettings.h"
 
+// Full definition needed: TSoftObjectPtr<UFoliageType>::Get() instantiates
+// dynamic_cast<UFoliageType*>(...) which requires the complete type.
+#include "FoliageType.h"
+
 UEMFFoliageSettings::UEMFFoliageSettings()
 {
 	CategoryName = TEXT("Polarity");
