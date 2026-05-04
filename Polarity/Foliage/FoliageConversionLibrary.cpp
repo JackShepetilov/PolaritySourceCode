@@ -17,24 +17,19 @@
 namespace
 {
 	/** Find the UFoliageType that owns the given component using only public API.
-	 *  AInstancedFoliageActor::FoliageInfos is private in UE 5.6, so we iterate the
-	 *  publicly-exposed list of used foliage types and look up each FFoliageInfo.
-	 *  Cost is O(N) over foliage types on the level (typically <50), negligible per shot. */
+	 *  AInstancedFoliageActor::FoliageInfos is private in UE 5.6, but the actor
+	 *  exposes a const accessor `GetFoliageInfos()` we can iterate.
+	 *  FFoliageInfo::GetComponent() returns the HISM that backs the foliage type;
+	 *  comparing it against the hit FISMC (which is-a HISM) recovers the type.
+	 *  Cost is O(N) over foliage types on the level (typically <50). */
 	UFoliageType* FindFoliageTypeForComponent(AInstancedFoliageActor& IFA, UFoliageInstancedStaticMeshComponent& Component)
 	{
-		const TArray<UFoliageType*> UsedTypes = IFA.GetUsedFoliageTypes();
-		for (UFoliageType* FT : UsedTypes)
+		const TMap<UFoliageType*, TUniqueObj<FFoliageInfo>>& Infos = IFA.GetFoliageInfos();
+		for (const auto& Pair : Infos)
 		{
-			if (!FT)
+			if (Pair.Value->GetComponent() == &Component)
 			{
-				continue;
-			}
-			if (FFoliageInfo* Info = IFA.FindMesh(FT))
-			{
-				if (Info->GetComponent() == &Component)
-				{
-					return FT;
-				}
+				return Pair.Key;
 			}
 		}
 		return nullptr;
