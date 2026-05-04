@@ -23,6 +23,7 @@
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "Variant_Shooter/Pickups/ScriptedPickup.h"
+#include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
 
@@ -218,7 +219,10 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 
 	case EChargeAnimationState::Playing:
 		StateTimeRemaining = AnimationDuration;
-		if (ShooterCharacter)
+		// Legacy: alpha=0 freed left hand for the melee mesh charge montage.
+		// In FP-montage mode, the slot drives the left arm directly via Layered Blend Per Bone,
+		// so don't fight it with IK alpha changes.
+		if (!bUseFPMontages && ShooterCharacter)
 		{
 			ShooterCharacter->SetLeftHandIKAlpha(0.0f);
 		}
@@ -229,7 +233,11 @@ void UChargeAnimationComponent::SetState(EChargeAnimationState NewState)
 		MeshTransitionProgress = 0.0f;
 		StopChargeAnimation();
 		StopChargeVFX();
-		SwitchToFirstPersonMesh();
+		// When bUseFPMontages: FP mesh never left, so skip the swap-back.
+		if (!bUseFPMontages)
+		{
+			SwitchToFirstPersonMesh();
+		}
 		if (ShooterCharacter)
 		{
 			ShooterCharacter->SetLeftHandIKAlpha(1.0f);
@@ -290,9 +298,14 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 		switch (CurrentState)
 		{
 		case EChargeAnimationState::HidingWeapon:
-			// Mesh transition complete — switch meshes and start animation
-			SwitchToMeleeMesh();
-			PlayChargeAnimation();
+			// Mesh transition complete — switch meshes and start animation.
+			// When bUseFPMontages: skip the legacy mesh swap + charge montage entirely.
+			// FP weapon stays visible; catch/hold/throw montages handle the left arm.
+			if (!bUseFPMontages)
+			{
+				SwitchToMeleeMesh();
+				PlayChargeAnimation();
+			}
 			PlaySound(ChargeSound);
 			OnChargeAnimationStarted.Broadcast();
 
@@ -485,6 +498,17 @@ void UChargeAnimationComponent::EnterChanneling()
 			SetState(EChargeAnimationState::Channeling);
 			CaptureLockoutTimeRemaining = CaptureToLaunchLockout;
 			OnChannelingStarted.Broadcast();
+
+			// FP-montage mode: free left hand IK so the slot/montage drives the left arm
+			// (Control Rig sits AFTER the slot in AnimGraph, so it would otherwise yank the
+			// hand back to the weapon grip socket and override the catch/hold/throw poses).
+			if (bUseFPMontages && ShooterCharacter)
+			{
+				ShooterCharacter->SetLeftHandIKAlpha(0.0f);
+			}
+
+			// Trigger Catch montage on FP mesh — chains into Hold loop on natural end.
+			PlayCatchMontage();
 		}
 		else
 		{
@@ -498,6 +522,15 @@ void UChargeAnimationComponent::EnterChanneling()
 	// Legacy hold-mode: continuous scan happens via tick.
 	SetState(EChargeAnimationState::Channeling);
 	OnChannelingStarted.Broadcast();
+
+	// Same IK-disable as press-press path — see comment there.
+	if (bUseFPMontages && ShooterCharacter)
+	{
+		ShooterCharacter->SetLeftHandIKAlpha(0.0f);
+	}
+
+	// Legacy mode: kick off Catch on channeling entry; capture confirmation happens in tick.
+	PlayCatchMontage();
 }
 
 void UChargeAnimationComponent::ExitChanneling()
@@ -797,7 +830,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, ScriptedPickup };
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, ScriptedPickup, HumanoidWeapon };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -831,42 +864,83 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
-		// Try NPC
+		// Try NPC — HumanoidNPC is handled separately below (yank weapon, not body capture)
 		if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
 		{
-			UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
-			if (!NPCModifier || (!NPCModifier->bEnableViscousCapture && !NPC->IsStunnedByExplosion()) || NPCModifier->IsCapturedByPlate())
+			if (Cast<AHumanoidNPC>(NPC))
+			{
+				// Skip — handled in HumanoidNPC branch below
+			}
+			else
+			{
+				UEMFVelocityModifier* NPCModifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
+				if (!NPCModifier || (!NPCModifier->bEnableViscousCapture && !NPC->IsStunnedByExplosion()) || NPCModifier->IsCapturedByPlate())
+				{
+					continue;
+				}
+
+				// Charge validation: only capture NPCs with OPPOSITE charge sign
+				// Neutral NPCs can't be captured, same-sign are repelled
+				const float NPCCharge = NPCModifier->GetCharge();
+				if (FMath::IsNearlyZero(NPCCharge) || NPCCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+				{
+					continue;
+				}
+
+				const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
+				const float DistSq = ToTarget.SizeSquared();
+				if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+				{
+					continue;
+				}
+
+				const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+				const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+				if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
+				{
+					continue;
+				}
+
+				if (AngleCos > BestAngleCos)
+				{
+					BestAngleCos = AngleCos;
+					BestTarget = NPC;
+					BestTargetType = ECaptureTargetType::NPC;
+				}
+				continue;
+			}
+		}
+
+		// HumanoidNPC — yank weapon from hands instead of body capture
+		if (AHumanoidNPC* Humanoid = Cast<AHumanoidNPC>(HitActor))
+		{
+			if (!Humanoid->CanBeYanked()) continue;
+
+			// Require opposite charge sign (same rule as regular NPC capture)
+			UEMFVelocityModifier* HumanoidMod = Humanoid->FindComponentByClass<UEMFVelocityModifier>();
+			if (!HumanoidMod) continue;
+
+			const float HumanoidCharge = HumanoidMod->GetCharge();
+			if (FMath::IsNearlyZero(HumanoidCharge) || HumanoidCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
 			{
 				continue;
 			}
 
-			// Charge validation: only capture NPCs with OPPOSITE charge sign
-			// Neutral NPCs can't be captured, same-sign are repelled
-			const float NPCCharge = NPCModifier->GetCharge();
-			if (FMath::IsNearlyZero(NPCCharge) || NPCCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
-			{
-				continue;
-			}
-
-			const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
+			// Range: logarithmic, same formula as DroppedRangedWeapon
+			const FVector ToTarget = Humanoid->GetActorLocation() - CameraLoc;
 			const float DistSq = ToTarget.SizeSquared();
-			if (DistSq > SearchRadiusSq || DistSq < 1.0f)
-			{
-				continue;
-			}
+			const float YankRange = Humanoid->CalculateWeaponYankRange();
+			if (YankRange < 1.0f || DistSq > YankRange * YankRange || DistSq < 1.0f) continue;
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
-			{
-				continue;
-			}
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq))) continue;
 
 			if (AngleCos > BestAngleCos)
 			{
 				BestAngleCos = AngleCos;
-				BestTarget = NPC;
-				BestTargetType = ECaptureTargetType::NPC;
+				BestTarget = Humanoid;
+				BestTargetType = ECaptureTargetType::HumanoidWeapon;
 			}
 			continue;
 		}
@@ -1108,6 +1182,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		case ECaptureTargetType::ScriptedPickup:
 			CaptureScriptedPickup(Cast<AScriptedPickup>(BestTarget));
 			break;
+		case ECaptureTargetType::HumanoidWeapon:
+			CaptureHumanoidWeapon(Cast<AHumanoidNPC>(BestTarget));
+			break;
 		default:
 			break;
 		}
@@ -1186,6 +1263,46 @@ void UChargeAnimationComponent::CaptureNPC(AShooterNPC* NPC)
 	{
 		ShooterCharacter->OnPropCaptured.Broadcast(NPC);
 	}
+}
+
+void UChargeAnimationComponent::CaptureHumanoidWeapon(AHumanoidNPC* Humanoid)
+{
+	if (!Humanoid) return;
+
+	// Yank is a one-shot action — no hold state, so release any previous capture first
+	ReleaseCapturedNPC();
+
+	// Match prop-capture VFX feedback: beam from plate to humanoid + hold aura on socket.
+	// Beam will freeze at humanoid's spawn location since CurrentCapturedNPC is not set
+	// (UpdateBeamVFX only re-targets when CurrentCapturedNPC is valid). Acceptable for yank —
+	// reads as a short discharge, and the dropped weapon flies on its own.
+	SpawnCaptureVFX(Humanoid);
+	SpawnHoldVFX();
+
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		// Strict rule: at most one yanked weapon in inventory. If the player already has one,
+		// throw it away as a non-capturable physics decoration BEFORE starting the new yank.
+		// If the discarded weapon was equipped, switch to a non-yanked replacement instantly
+		// so the subsequent BeginWeaponLower has something concrete to lower.
+		ShooterChar->DropYankedWeaponIfAny();
+
+		// Start lowering player's current weapon NOW (in parallel with the pull flight).
+		// Lower (~0.15s) completes well before pull arrival (~0.4s), so mesh waits at the
+		// bottom. When the dropped weapon arrives via CompletePull → AddWeaponClassAnimated
+		// detects the paused-at-bottom switch and calls FinishWeaponSwitch — instant
+		// off-camera swap + raise of new weapon. No-op if player is unarmed.
+		ShooterChar->BeginWeaponLower();
+
+		// Broadcast capture event — cancels Upgrade_HealthBlast's empty-capture timer
+		// (yank IS a successful capture, so the timer should not fire).
+		ShooterChar->OnPropCaptured.Broadcast(Humanoid);
+
+		Humanoid->YankCurrentWeapon(ShooterChar);
+	}
+
+	// CurrentCapturedNPC intentionally NOT set — yank has no hold phase
 }
 
 void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
@@ -1386,6 +1503,10 @@ void UChargeAnimationComponent::PerformTapToggle()
 
 void UChargeAnimationComponent::BeginLaunch()
 {
+	// Trigger Throw montage on FP mesh BEFORE plate teardown so the gesture starts immediately
+	// when the player presses the launch button (most responsive feel).
+	PlayThrowMontage();
+
 	// Tear down the current "hold" plate (proxy mode disabled, plate destroyed).
 	ExitChanneling();
 
@@ -1502,6 +1623,9 @@ void UChargeAnimationComponent::EnterFinishingAnimation()
 
 void UChargeAnimationComponent::CleanupChanneling()
 {
+	// Stop any FP montages (catch/hold/throw) — safety net for cancel/EndPlay paths.
+	StopFPMontages();
+
 	// Release any captured NPC first
 	ReleaseCapturedNPC();
 
@@ -1715,6 +1839,205 @@ void UChargeAnimationComponent::StopChargeAnimation()
 	}
 
 	CurrentMontage = nullptr;
+}
+
+// ==================== FP Montages (catch/hold/throw) ====================
+
+void UChargeAnimationComponent::PlayCatchMontage()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] PlayCatchMontage CALLED. FirstPersonMesh=%s CatchMontage=%s"),
+		FirstPersonMesh ? *FirstPersonMesh->GetName() : TEXT("nullptr"),
+		CatchMontage ? *CatchMontage->GetName() : TEXT("nullptr"));
+
+	if (!FirstPersonMesh)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayCatchMontage EARLY RETURN: FirstPersonMesh is null"));
+		return;
+	}
+
+	// No catch montage assigned — fall through directly to hold so the loop still starts.
+	if (!CatchMontage)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] PlayCatchMontage: no CatchMontage, fallback to PlayHoldMontage"));
+		PlayHoldMontage();
+		return;
+	}
+
+	UAnimInstance* AnimInstance = FirstPersonMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayCatchMontage EARLY RETURN: AnimInstance is null on FirstPersonMesh (anim class=%s)"),
+			FirstPersonMesh->GetAnimClass() ? *FirstPersonMesh->GetAnimClass()->GetName() : TEXT("none"));
+		return;
+	}
+
+	float Duration = AnimInstance->Montage_Play(CatchMontage);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(CatchMontage) returned duration=%.3f (0=failed). AnimInstance class=%s"),
+		Duration, *AnimInstance->GetClass()->GetName());
+
+	FOnMontageEnded EndDelegate;
+	EndDelegate.BindUObject(this, &UChargeAnimationComponent::OnCatchMontageEnded);
+	AnimInstance->Montage_SetEndDelegate(EndDelegate, CatchMontage);
+
+	// Overlap catch → hold the same way hold loops itself: schedule hold start
+	// HoldLoopOverlap seconds BEFORE catch ends. Reuses the existing HoldLoopTimerHandle
+	// (we don't need both timers active at once — catch fires first, then hold takes over).
+	// UE crossfades the two via Slot's Blend In/Out → no rest-pose snap between them.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HoldLoopTimerHandle);
+		const float Length = CatchMontage->GetPlayLength();
+		const float Overlap = FMath::Min(HoldLoopOverlap, Length * 0.5f);
+		const float Delay = FMath::Max(0.05f, Length - Overlap);
+		World->GetTimerManager().SetTimer(HoldLoopTimerHandle, this, &UChargeAnimationComponent::OnHoldLoopTimer, Delay, false);
+	}
+}
+
+void UChargeAnimationComponent::PlayHoldMontage()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] PlayHoldMontage CALLED. FirstPersonMesh=%s HoldMontage=%s"),
+		FirstPersonMesh ? *FirstPersonMesh->GetName() : TEXT("nullptr"),
+		HoldMontage ? *HoldMontage->GetName() : TEXT("nullptr"));
+
+	if (!FirstPersonMesh || !HoldMontage)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayHoldMontage EARLY RETURN: missing FP mesh or HoldMontage"));
+		return;
+	}
+
+	UAnimInstance* AnimInstance = FirstPersonMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayHoldMontage EARLY RETURN: AnimInstance is null"));
+		return;
+	}
+
+	float Duration = AnimInstance->Montage_Play(HoldMontage);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(HoldMontage) returned duration=%.3f"), Duration);
+
+	FOnMontageEnded EndDelegate;
+	EndDelegate.BindUObject(this, &UChargeAnimationComponent::OnHoldMontageEnded);
+	AnimInstance->Montage_SetEndDelegate(EndDelegate, HoldMontage);
+
+	// Schedule overlap-restart: timer fires HoldLoopOverlap seconds BEFORE the montage ends,
+	// triggering another Montage_Play. UE's natural Blend In on the new instance + Blend Out
+	// on the old one produces a smooth crossfade — no rest-pose snap between iterations.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HoldLoopTimerHandle);
+		const float Length = HoldMontage->GetPlayLength();
+		const float Overlap = FMath::Min(HoldLoopOverlap, Length * 0.5f);
+		const float Delay = FMath::Max(0.05f, Length - Overlap);
+		World->GetTimerManager().SetTimer(HoldLoopTimerHandle, this, &UChargeAnimationComponent::OnHoldLoopTimer, Delay, false);
+	}
+}
+
+void UChargeAnimationComponent::OnHoldLoopTimer()
+{
+	// Only continue the loop if we're still in Channeling. Throw / cancel sets a different
+	// state and clears this timer, but guard anyway in case of timer race.
+	if (CurrentState == EChargeAnimationState::Channeling)
+	{
+		PlayHoldMontage();
+	}
+}
+
+void UChargeAnimationComponent::PlayThrowMontage()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] PlayThrowMontage CALLED. FirstPersonMesh=%s ThrowMontage=%s"),
+		FirstPersonMesh ? *FirstPersonMesh->GetName() : TEXT("nullptr"),
+		ThrowMontage ? *ThrowMontage->GetName() : TEXT("nullptr"));
+
+	// Throw interrupts the hold loop — kill the overlap timer so it doesn't re-kick hold.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HoldLoopTimerHandle);
+	}
+
+	if (!FirstPersonMesh || !ThrowMontage)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayThrowMontage EARLY RETURN: missing FP mesh or ThrowMontage"));
+		return;
+	}
+
+	UAnimInstance* AnimInstance = FirstPersonMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayThrowMontage EARLY RETURN: AnimInstance is null"));
+		return;
+	}
+
+	// Interrupt catch/hold if either is currently playing — throw replaces them.
+	if (CatchMontage && AnimInstance->Montage_IsPlaying(CatchMontage))
+	{
+		AnimInstance->Montage_Stop(0.0f, CatchMontage);
+	}
+	if (HoldMontage && AnimInstance->Montage_IsPlaying(HoldMontage))
+	{
+		AnimInstance->Montage_Stop(0.0f, HoldMontage);
+	}
+
+	float Duration = AnimInstance->Montage_Play(ThrowMontage);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(ThrowMontage) returned duration=%.3f"), Duration);
+}
+
+void UChargeAnimationComponent::StopFPMontages()
+{
+	// Always cancel the hold-loop overlap timer — even if mesh/anim is gone, we don't want
+	// a stale timer firing later.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HoldLoopTimerHandle);
+	}
+
+	if (!FirstPersonMesh)
+	{
+		return;
+	}
+
+	UAnimInstance* AnimInstance = FirstPersonMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		return;
+	}
+
+	if (CatchMontage && AnimInstance->Montage_IsPlaying(CatchMontage))
+	{
+		AnimInstance->Montage_Stop(0.1f, CatchMontage);
+	}
+	if (HoldMontage && AnimInstance->Montage_IsPlaying(HoldMontage))
+	{
+		AnimInstance->Montage_Stop(0.1f, HoldMontage);
+	}
+	if (ThrowMontage && AnimInstance->Montage_IsPlaying(ThrowMontage))
+	{
+		AnimInstance->Montage_Stop(0.1f, ThrowMontage);
+	}
+}
+
+void UChargeAnimationComponent::OnCatchMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] OnCatchMontageEnded: bInterrupted=%d state=%d"),
+		bInterrupted ? 1 : 0, (int32)CurrentState);
+
+	// Chain into hold loop only if catch ended naturally (not interrupted by throw / cleanup)
+	// AND we're still in Channeling state (otherwise the player has already moved on).
+	if (!bInterrupted && CurrentState == EChargeAnimationState::Channeling)
+	{
+		PlayHoldMontage();
+	}
+}
+
+void UChargeAnimationComponent::OnHoldMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] OnHoldMontageEnded: bInterrupted=%d state=%d"),
+		bInterrupted ? 1 : 0, (int32)CurrentState);
+
+	// Re-play hold for loop continuation. Same gating as catch: state must still be Channeling.
+	if (!bInterrupted && CurrentState == EChargeAnimationState::Channeling)
+	{
+		PlayHoldMontage();
+	}
 }
 
 void UChargeAnimationComponent::UpdateMontagePlayRate(float DeltaTime)

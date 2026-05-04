@@ -324,6 +324,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.05", ClampMax = "0.5"))
 	float WeaponSwitchRaiseTime = 0.15f;
 
+	/** True when a weapon switch was started without a target weapon (e.g. yank — pull is in flight).
+	 *  Mesh holds at the lowered position until FinishWeaponSwitch(NewWeapon) is called. */
+	bool bWeaponSwitchPausedAtBottom = false;
+
 	/** Time before respawn after death */
 	UPROPERTY(EditAnywhere, Category = "Death", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
 	float RespawnTime = 2.0f;
@@ -930,6 +934,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoSwitchWeapon();
 
+	/** Press handler for SwitchWeaponAction — starts hold timer for throw-yanked detection. */
+	void OnSwitchWeaponPressed();
+
+	/** Release handler for SwitchWeaponAction — if hold threshold not yet fired, performs
+	 *  normal tap-swap. If hold already fired, no-op (throw already happened). */
+	void OnSwitchWeaponReleased();
+
+	/** Timer callback fired after YankSwapHoldThreshold seconds of holding the swap key.
+	 *  Throws the currently-owned yanked weapon forward as an impact-stunning physics actor. */
+	UFUNCTION()
+	void OnSwapHoldThresholdFired();
+
 	/** Handles weapon hotkey input - switches to specific weapon class if owned */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass);
@@ -1174,7 +1190,89 @@ public:
 	/** Find an owned weapon of the given class (or subclass). Returns nullptr if not found. */
 	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
 
+	/** Add a weapon of this class with the same animated lower→swap→raise transition that
+	 *  Q-switch uses. If the player is unarmed (no CurrentWeapon), falls back to instant equip.
+	 *  If a paused-at-bottom switch is already in progress (BeginWeaponLower was called), this
+	 *  routes through FinishWeaponSwitch so the swap+raise happens immediately without
+	 *  re-lowering. Used by yank pickup (DroppedRangedWeapon::CompletePull). */
+	UFUNCTION(BlueprintCallable, Category = "Weapons")
+	AShooterWeapon* AddWeaponClassAnimated(const TSubclassOf<AShooterWeapon>& WeaponClass);
+
+	/** Begin only the lower phase of a weapon switch. Mesh smoothly drops and pauses at the
+	 *  bottom waiting for FinishWeaponSwitch(NewWeapon). Used when the new weapon is in flight
+	 *  (yank pull) — lets the lower animation run in parallel with the pull so the new weapon
+	 *  arrives at an already-empty hand. No-op if a switch is already in progress or if unarmed. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons")
+	void BeginWeaponLower();
+
+	/** Complete a paused weapon switch: instantly swap to NewWeapon (off-camera at the bottom)
+	 *  and play the raise animation. NewWeapon must be in OwnedWeapons. No-op if not paused. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons")
+	void FinishWeaponSwitch(AShooterWeapon* NewWeapon);
+
+	/** If any weapon in OwnedWeapons has bWasYanked == true, spawn a non-capturable
+	 *  ADroppedRangedWeapon (decoration) at the player's hip with light physics impulse,
+	 *  remove the weapon from inventory and destroy it. If it was CurrentWeapon, switch to
+	 *  the first non-yanked weapon instantly (no animation — caller is about to BeginWeaponLower).
+	 *  Strict rule: at most one yanked weapon in inventory at a time. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
+	void DropYankedWeaponIfAny();
+
+	/** Same as DropYankedWeaponIfAny but spawns the discarded weapon IN FRONT of the player
+	 *  with strong forward+up impulse, AND enables stun-on-impact on the spawned actor.
+	 *  Used by hold-swap-key input to launch the held yanked weapon as an improvised projectile. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
+	void ThrowYankedWeaponIfAny();
+
+	// ==================== Yank Drop Settings (passive auto-replace) ====================
+
+	/** Spawn offset (relative to player actor space) for the discarded yanked weapon.
+	 *  Default: behind+right, hip height — reads as "dropped from the back". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Drop")
+	FVector YankDropSpawnOffset = FVector(-40.0f, 20.0f, 30.0f);
+
+	/** Linear impulse (cm/s) applied in player actor space to the discarded weapon mesh.
+	 *  Small/negative-X for "drops behind" feel — gravity does the rest. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Drop")
+	FVector YankDropLinearImpulse = FVector(-80.0f, 30.0f, 0.0f);
+
+	/** Angular impulse (degrees/s) for the discarded weapon — light tumble. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Drop")
+	FVector YankDropAngularImpulse = FVector(120.0f, 200.0f, 100.0f);
+
+	// ==================== Yank Throw Settings (active hold-swap launch) ====================
+
+	/** Hold time (seconds) on the swap-weapon button required to trigger a yank throw.
+	 *  Tap shorter than this performs a normal weapon switch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Throw", meta = (ClampMin = "0.1", ClampMax = "1.5"))
+	float YankSwapHoldThreshold = 0.4f;
+
+	/** Spawn offset (relative to player actor space) for a thrown yanked weapon.
+	 *  Default: in front of camera. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Throw")
+	FVector YankThrowSpawnOffset = FVector(60.0f, 0.0f, 30.0f);
+
+	/** Linear impulse (cm/s) for thrown weapon — strong forward+up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Throw")
+	FVector YankThrowLinearImpulse = FVector(1500.0f, 0.0f, 200.0f);
+
+	/** Angular impulse (degrees/s) for thrown weapon — heavy tumble. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Throw")
+	FVector YankThrowAngularImpulse = FVector(0.0f, 800.0f, 300.0f);
+
 protected:
+
+	/** Timer for hold-detection on the swap weapon key */
+	FTimerHandle SwapHoldTimer;
+
+	/** True while swap key is held and we're waiting for the hold-threshold timer.
+	 *  Cleared on release (timer cancelled — tap path) or on threshold fire (hold path). */
+	bool bSwapKeyHeldPending = false;
+
+	/** World seconds when the swap key was pressed (for debug "held for Xs" log). */
+	float SwapKeyPressTime = -1.0f;
+
+
 
 	/** Updates left hand IK transform from weapon socket and passes it to AnimInstance */
 	void UpdateLeftHandIK(float DeltaTime);

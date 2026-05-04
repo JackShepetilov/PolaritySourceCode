@@ -8,6 +8,7 @@
 #include "Animation/AnimInstance.h"
 #include "WeaponRecoilComponent.h"
 #include "TutorialTypes.h"
+#include "Chaos/ChaosEngineInterface.h"
 #include "ShooterWeapon.generated.h"
 
 class IShooterWeaponHolder;
@@ -115,7 +116,7 @@ protected:
 	bool bUseHitscanIonization = false;
 
 	/** Fixed positive charge added to target per hit */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (EditCondition = "bUseHitscan && bUseHitscanIonization", ClampMin = "0.0", ClampMax = "50.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (EditCondition = "bUseHitscan && bUseHitscanIonization"))
 	float IonizationChargePerHit = 2.0f;
 
 	/** Maximum positive charge that can be applied via ionization (also used by laser) */
@@ -278,8 +279,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan && bUseWaveVisualization"))
 	TObjectPtr<UNiagaraSystem> WaveFrontFX;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan"))
+	/** Default impact VFX (used when surface has no PhysicalMaterial or is missing from ImpactFXBySurface) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Impact", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<UNiagaraSystem> ImpactFX;
+
+	/** Per-surface impact VFX. Key is the SurfaceType configured in Project Settings -> Physics -> Physical Surfaces. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	TMap<TEnumAsByte<EPhysicalSurface>, TObjectPtr<UNiagaraSystem>> ImpactFXBySurface;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<UNiagaraSystem> ReflectionFX;
@@ -337,6 +343,29 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<USoundBase> ReflectionSound;
+
+	// ==================== SFX|Impact ====================
+
+	/** Default impact sound (used when surface has no PhysicalMaterial or is missing from ImpactSoundBySurface) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	TObjectPtr<USoundBase> DefaultImpactSound;
+
+	/** Per-surface impact sound. Key is the SurfaceType configured in Project Settings -> Physics -> Physical Surfaces. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	TMap<TEnumAsByte<EPhysicalSurface>, TObjectPtr<USoundBase>> ImpactSoundBySurface;
+
+	/** Optional attenuation for impact sounds (3D spatialization, falloff) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	TObjectPtr<USoundAttenuation> ImpactSoundAttenuation;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan", ClampMin = "0.5", ClampMax = "2.0"))
+	float ImpactSoundPitchMin = 0.95f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan", ClampMin = "0.5", ClampMax = "2.0"))
+	float ImpactSoundPitchMax = 1.05f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan", ClampMin = "0.0", ClampMax = "2.0"))
+	float ImpactSoundVolume = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|ADS")
 	TObjectPtr<USoundBase> ADSInSound;
@@ -481,6 +510,16 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Firing")
 	FOnWeaponShotFired OnShotFired;
 
+	// ==================== First Person View Pose ====================
+
+	/** Static rotation offset applied to the FP mesh while this weapon is equipped (neutral state only — replaced by crouch/wallrun tilts). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View Pose")
+	FRotator FirstPersonMeshTilt = FRotator::ZeroRotator;
+
+	/** Static location offset applied to the FP mesh while this weapon is equipped (neutral state only — replaced by crouch/wallrun offsets). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View Pose")
+	FVector FirstPersonMeshOffset = FVector::ZeroVector;
+
 public:
 
 	AShooterWeapon();
@@ -575,7 +614,7 @@ protected:
 	void SpawnWaveFronts(const FVector& Start, const FVector& End);
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
-	void SpawnImpactEffect(const FVector& Location, const FVector& Normal);
+	void SpawnImpactEffect(const FHitResult& Hit);
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnReflectionEffect(const FVector& Location, const FVector& IncomingDirection, const FVector& ReflectedDirection);
@@ -598,6 +637,26 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	USkeletalMeshComponent* GetThirdPersonMesh() const { return ThirdPersonMesh; }
+
+	// ==================== Yank Origin Tag ====================
+
+	/** True when this weapon was acquired by yanking it from a HumanoidNPC.
+	 *  Player can hold at most one yanked weapon at a time — taking a new one drops the old.
+	 *  Set in ADroppedRangedWeapon::CompletePull after the weapon is added to the inventory. */
+	UPROPERTY(BlueprintReadOnly, Category = "Yank")
+	bool bWasYanked = false;
+
+	/** ADroppedRangedWeapon class to spawn when this weapon is discarded by being replaced
+	 *  via another yank. Set together with bWasYanked at pickup time. */
+	UPROPERTY(BlueprintReadOnly, Category = "Yank")
+	TSubclassOf<class ADroppedRangedWeapon> SourceYankDropClass;
+
+	/** True when this weapon has finite ammo and must be discarded when CurrentBullets reaches 0
+	 *  (no manual reload). Set in ADroppedRangedWeapon::CompletePull only when the source drop
+	 *  was yank-spawned (SpawnedBulletCount > 0). Leaves the auto-refill behavior intact for
+	 *  starter weapons and NPC death drops, which both keep this flag at false. */
+	UPROPERTY(BlueprintReadOnly, Category = "Yank")
+	bool bHasLimitedAmmo = false;
 
 	const TSubclassOf<UAnimInstance>& GetFirstPersonAnimInstanceClass() const;
 	const TSubclassOf<UAnimInstance>& GetThirdPersonAnimInstanceClass() const;

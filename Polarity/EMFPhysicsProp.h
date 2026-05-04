@@ -327,6 +327,37 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Charge Scaling", meta = (ClampMin = "1.0", ClampMax = "10.0", EditCondition = "bCanExplode && bScaleExplosionWithCharge"))
 	float MaxChargeScale = 3.0f;
 
+	// ==================== Weak Impact (Below Charge Threshold) ====================
+	// When |charge| < ExplosionMinCharge at impact, the prop does NOT explode. Instead:
+	//  - Environment hits: just no explosion (physics handles the prop normally)
+	//  - NPC hits: deals reduced damage + stun, splits charge with NPC, reflects velocity to bounce off
+
+	/** Minimum |charge| required for the prop to explode on impact.
+	 *  Below this threshold, the prop bounces off NPCs (with weak damage/stun) instead of detonating. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float ExplosionMinCharge = 5.0f;
+
+	/** Damage dealt to NPC on weak impact (no explosion). Should be lower than ExplosionDamage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
+	float WeakImpactDamage = 15.0f;
+
+	/** Stun duration on weak impact (seconds). Should be shorter than ExplosionStunDuration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bCanExplode"))
+	float WeakImpactStunDuration = 0.5f;
+
+	/** Optional montage played on stunned NPC. If null, NPC's default knockback montage is used. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (EditCondition = "bCanExplode"))
+	TObjectPtr<UAnimMontage> WeakImpactStunMontage;
+
+	/** Velocity restitution after bounce (0 = stops dead, 1 = elastic, no energy loss). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanExplode"))
+	float WeakImpactBounceRestitution = 0.6f;
+
+	/** Fraction of prop's charge transferred to the NPC on weak impact (0..1).
+	 *  Default 0.5 = exactly half goes to NPC, half stays on prop. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanExplode"))
+	float WeakImpactChargeShareRatio = 0.5f;
+
 	// ==================== Explosion Impulse (Rocket Boost) ====================
 
 	/** Apply physics impulse to characters and physics bodies within explosion radius */
@@ -670,6 +701,10 @@ private:
 	/** Handle overlap with Pawns (NPC damage — Pawns use ECR_Overlap to avoid physics impulse with player) */
 	UFUNCTION()
 	void OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	/** Apply the weak-impact path: reduced damage/stun, half-charge transfer, velocity reflection.
+	 *  Used when prop hits NPC at speed >= ExplosionSpeedThreshold but |charge| < ExplosionMinCharge. */
+	void ApplyWeakImpactToNPC(AShooterNPC* HitNPC, const FVector& ImpactNormal, const FVector& ImpactPoint);
 
 	/** Called when HP reaches zero */
 	void Die(AActor* Killer);

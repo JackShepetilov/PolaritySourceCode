@@ -3,10 +3,12 @@
 #include "DroppedRangedWeapon.h"
 #include "ShooterWeapon.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
 #include "Components/StaticMeshComponent.h"
+#include "Curves/CurveFloat.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 
@@ -34,6 +36,40 @@ void ADroppedRangedWeapon::BeginPlay()
 
 	UE_LOG(LogTemp, Warning, TEXT("[DroppedRangedWeapon] %s BeginPlay: Charge=%.2f, bCanBeCaptured=%d"),
 		*GetName(), GetCharge(), bCanBeCaptured);
+
+	// Bind hit callback for stun-on-impact. The callback gates on bCanStunOnImpact at runtime,
+	// so we always bind (cheap) regardless of whether stun is currently enabled.
+	if (WeaponMesh)
+	{
+		WeaponMesh->SetNotifyRigidBodyCollision(true);
+		WeaponMesh->OnComponentHit.AddDynamic(this, &ADroppedRangedWeapon::OnWeaponMeshHit);
+	}
+}
+
+void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
+{
+	if (!bCanStunOnImpact || !OtherActor) return;
+
+	// Cooldown check — prevents one bounce from triggering multiple stun events.
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastStunTime < StunCooldown) return;
+
+	// Velocity gate — settling/rolling weapons shouldn't stun NPCs that brush against them.
+	if (!WeaponMesh) return;
+	const float ImpactSpeed = WeaponMesh->GetPhysicsLinearVelocity().Size();
+	if (ImpactSpeed < StunImpactVelocityThreshold) return;
+
+	// Only NPCs (not props, not the player). HumanoidNPC's ApplyExplosionStun is currently
+	// no-op (immune to forces) — that's intentional per spec; passes through as no stun.
+	AShooterNPC* NPC = Cast<AShooterNPC>(OtherActor);
+	if (!NPC || NPC->IsDead()) return;
+
+	NPC->ApplyExplosionStun(StunDuration, StunMontage);
+	LastStunTime = Now;
+
+	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] %s stunned %s for %.1fs (impact speed=%.0f)"),
+		*GetName(), *NPC->GetName(), StunDuration, ImpactSpeed);
 }
 
 void ADroppedRangedWeapon::Tick(float DeltaTime)
@@ -73,6 +109,47 @@ void ADroppedRangedWeapon::SetCharge(float NewCharge)
 		WidgetSub->UnregisterDroppedRangedWeapon(this);
 		WidgetSub->RegisterDroppedRangedWeapon(this);
 	}
+}
+
+// ==================== Ammo Distribution ====================
+
+void ADroppedRangedWeapon::RollSpawnedBulletCount()
+{
+	if (!WeaponClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: RollSpawnedBulletCount skipped — WeaponClass is null"), *GetName());
+		return;
+	}
+
+	const AShooterWeapon* CDO = WeaponClass->GetDefaultObject<AShooterWeapon>();
+	const int32 MagSize = CDO ? CDO->GetMagazineSize() : 0;
+	if (MagSize <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: RollSpawnedBulletCount skipped — invalid MagSize=%d"),
+			*GetName(), MagSize);
+		return;
+	}
+
+	int32 RolledCount;
+	if (AmmoDistributionCurve)
+	{
+		// Inverse-transform sampling: roll random in [0..1], read fraction from curve
+		const float Roll = FMath::FRand();
+		const float Fraction = FMath::Clamp(AmmoDistributionCurve->GetFloatValue(Roll), 0.0f, 1.0f);
+		RolledCount = FMath::RoundToInt(Fraction * MagSize);
+		UE_LOG(LogTemp, Log, TEXT("[YANK_AMMO] %s: curve roll=%.3f, fraction=%.3f, count=%d"),
+			*GetName(), Roll, Fraction, RolledCount);
+	}
+	else
+	{
+		// Fallback: uniform random [1, MagSize] inclusive
+		RolledCount = FMath::RandRange(1, MagSize);
+		UE_LOG(LogTemp, Log, TEXT("[YANK_AMMO] %s: no curve, random fallback count=%d (range 1..%d)"),
+			*GetName(), RolledCount, MagSize);
+	}
+
+	// Clamp to [1, MagSize] — minimum 1 bullet so the pickup is always usable
+	SpawnedBulletCount = FMath::Clamp(RolledCount, 1, MagSize);
 }
 
 // ==================== Capture Range ====================
@@ -200,8 +277,36 @@ void ADroppedRangedWeapon::CompletePull()
 	AShooterWeapon* ExistingWeapon = Player->FindWeaponOfType(WeaponClass);
 	if (!ExistingWeapon)
 	{
-		// Grant a new weapon (permanent)
-		Player->AddWeaponClass(WeaponClass);
+		// Grant a new weapon (permanent) with animated lower→swap→raise transition.
+		// AddWeaponClassAnimated falls back to instant equip if player is unarmed.
+		Player->AddWeaponClassAnimated(WeaponClass);
+
+		// Tag the freshly-added weapon as yank-acquired so the strict "one yanked weapon at a time"
+		// rule (DropYankedWeaponIfAny) can identify and discard it on subsequent yanks.
+		if (AShooterWeapon* AddedWeapon = Player->FindWeaponOfType(WeaponClass))
+		{
+			AddedWeapon->bWasYanked = true;
+			AddedWeapon->SourceYankDropClass = GetClass();
+
+			// Limited-ammo behavior: only set when this drop was yank-spawned (HumanoidNPC called
+			// RollSpawnedBulletCount → SpawnedBulletCount > 0). Death drops leave SpawnedBulletCount
+			// at the -1 default, so the granted weapon stays at full mag with infinite refills.
+			if (SpawnedBulletCount > 0)
+			{
+				AddedWeapon->SetBulletCount(SpawnedBulletCount);
+				AddedWeapon->bHasLimitedAmmo = true;
+				UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] CompletePull — %s granted with %d bullets (limited ammo)"),
+					*AddedWeapon->GetName(), SpawnedBulletCount);
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] CompletePull — tagged %s: bWasYanked=true, SourceYankDropClass=%s, bHasLimitedAmmo=%d"),
+				*AddedWeapon->GetName(), *GetClass()->GetName(), AddedWeapon->bHasLimitedAmmo ? 1 : 0);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] CompletePull — FindWeaponOfType returned NULL after AddWeaponClassAnimated! Weapon class: %s"),
+				*WeaponClass->GetName());
+		}
 	}
 	else
 	{

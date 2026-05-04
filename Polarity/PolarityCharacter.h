@@ -102,6 +102,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "EMF")
 	float EMFMass = 70.0f;
 
+	// ==================== Movement Abilities (unlockable via upgrades) ====================
+
+	/** Can the player sprint */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
+	bool bCanSprint = true;
+
+	/** Can the player perform air jumps (any jump after the first one — uses MovementSettings->MaxJumpCount as the cap) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
+	bool bCanDoubleJump = true;
+
+	/** Can the player air dash */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
+	bool bCanAirDash = true;
+
 public:
 	APolarityCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 

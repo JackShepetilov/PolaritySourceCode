@@ -272,6 +272,15 @@ void AShooterWeapon::Fire()
 		return;
 	}
 
+	// Limited-ammo guard: yanked weapons that ran dry should not fire phantom shots in the
+	// brief window between magazine depletion and the deferred DropYankedWeaponIfAny tick.
+	if (bHasLimitedAmmo && CurrentBullets <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: Fire() ABORTED — empty yanked weapon, awaiting discard"), *GetName());
+		StopFiring();
+		return;
+	}
+
 	// Check charge requirements if enabled
 	float ChargeMultiplier = 1.0f;
 	if (bUseChargeFiring)
@@ -417,10 +426,22 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 	// consume bullets
 	--CurrentBullets;
 
-	// if the clip is depleted, reload it
+	// Magazine depleted: yanked weapons get discarded (player can't reload), others auto-refill
 	if (CurrentBullets <= 0)
 	{
-		CurrentBullets = MagazineSize;
+		AShooterCharacter* PlayerOwner = Cast<AShooterCharacter>(PawnOwner);
+		if (bHasLimitedAmmo && PlayerOwner)
+		{
+			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
+			// can't be done synchronously inside Fire().
+			GetWorld()->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::DropYankedWeaponIfAny));
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: magazine empty, scheduled discard for next tick"), *GetName());
+		}
+		else
+		{
+			CurrentBullets = MagazineSize;  // Auto-refill: starter weapons, NPC drops, NPC owners
+		}
 	}
 
 	// update the weapon HUD
@@ -540,9 +561,23 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 	WeaponOwner->AddWeaponRecoil(FiringRecoil);
 
 	--CurrentBullets;
+
+	// Magazine depleted: yanked weapons get discarded (player can't reload), others auto-refill
 	if (CurrentBullets <= 0)
 	{
-		CurrentBullets = MagazineSize;
+		AShooterCharacter* PlayerOwner = Cast<AShooterCharacter>(PawnOwner);
+		if (bHasLimitedAmmo && PlayerOwner)
+		{
+			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
+			// can't be done synchronously inside Fire().
+			GetWorld()->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::DropYankedWeaponIfAny));
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: hitscan magazine empty, scheduled discard for next tick"), *GetName());
+		}
+		else
+		{
+			CurrentBullets = MagazineSize;  // Auto-refill: starter weapons, NPC drops, NPC owners
+		}
 	}
 
 	WeaponOwner->UpdateWeaponHUD(CurrentBullets, MagazineSize);
@@ -951,10 +986,30 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	}
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â­ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
-	if (bHitWall)
+	// Decide impact target: pawn (if hit closer than wall) or wall.
+	// The wall trace uses ECC_Visibility which passes through pawns, so without this check
+	// the impact would always appear on the surface BEHIND a hit pawn.
+	bool bImpactOnPawn = false;
+	if (BestTarget)
 	{
-		SpawnImpactEffect(WallHitResult.ImpactPoint, WallHitResult.ImpactNormal);
+		const FVector PawnEndPoint = BestHitLocation.IsNearlyZero() ? BestTarget->GetActorLocation() : BestHitLocation;
+		const float DistToPawn = FVector::Dist(Start, PawnEndPoint);
+		const float DistToWall = bHitWall ? FVector::Dist(Start, WallHitResult.ImpactPoint) : TNumericLimits<float>::Max();
+		bImpactOnPawn = (DistToPawn < DistToWall);
+	}
 
+	if (bImpactOnPawn)
+	{
+		SpawnImpactEffect(BestHit);
+	}
+	else if (bHitWall)
+	{
+		SpawnImpactEffect(WallHitResult);
+	}
+
+	// Reflection happens only off a wall, and only if the shot wasn't intercepted by a pawn.
+	if (bHitWall && !bImpactOnPawn)
+	{
 		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
 		if (MaxReflections > 0 && IsMetal(WallHitResult) && ReflectionCount < MaxReflections)
 		{
@@ -1153,9 +1208,15 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	// Visual effects
 	SpawnBeamEffect(Start, BeamEnd, EnergyMultiplier);
 
-	if (bHitWall)
+	// Spawn impact: prefer pawn hit (closer), otherwise the wall behind it.
+	// Without this, impact would always appear on the wall — even when a pawn intercepted the shot.
+	if (bPawnWasHit)
 	{
-		SpawnImpactEffect(WallHit.ImpactPoint, WallHit.ImpactNormal);
+		SpawnImpactEffect(PawnHit);
+	}
+	else if (bHitWall)
+	{
+		SpawnImpactEffect(WallHit);
 	}
 }
 
@@ -1485,32 +1546,75 @@ void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 	}
 }
 
-void AShooterWeapon::SpawnImpactEffect(const FVector& Location, const FVector& Normal)
+void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
 {
-	if (!ImpactFX)
+	const FVector Location = Hit.ImpactPoint;
+	const FVector Normal = Hit.ImpactNormal;
+
+	// Resolve surface type from hit's physical material (null-safe).
+	// Requires the trace to be done with bReturnPhysicalMaterial = true.
+	EPhysicalSurface Surface = SurfaceType_Default;
+	if (UPhysicalMaterial* PhysMat = Hit.PhysMaterial.Get())
 	{
-		return;
+		Surface = PhysMat->SurfaceType;
 	}
 
-	UNiagaraComponent* ImpactComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-		GetWorld(),
-		ImpactFX,
-		Location,
-		Normal.Rotation(),
-		FVector::OneVector,
-		true,
-		true,
-		ENCPoolMethod::None
-	);
-
-	if (ImpactComp)
+	// Pick VFX: per-surface override, otherwise default ImpactFX.
+	UNiagaraSystem* ResolvedFX = ImpactFX;
+	if (TObjectPtr<UNiagaraSystem>* FoundFX = ImpactFXBySurface.Find(Surface))
 	{
-		ImpactComp->SetColorParameter(FName("ImpactColor"), BeamColor);
-
-		if (bUseWaveVisualization)
+		if (*FoundFX)
 		{
-			ImpactComp->SetFloatParameter(FName("Wavelength"), Wavelength);
+			ResolvedFX = *FoundFX;
 		}
+	}
+
+	if (ResolvedFX)
+	{
+		UNiagaraComponent* ImpactComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			ResolvedFX,
+			Location,
+			Normal.Rotation(),
+			FVector::OneVector,
+			true,
+			true,
+			ENCPoolMethod::None
+		);
+
+		if (ImpactComp)
+		{
+			ImpactComp->SetColorParameter(FName("ImpactColor"), BeamColor);
+
+			if (bUseWaveVisualization)
+			{
+				ImpactComp->SetFloatParameter(FName("Wavelength"), Wavelength);
+			}
+		}
+	}
+
+	// Pick sound: per-surface override, otherwise DefaultImpactSound.
+	USoundBase* ResolvedSound = DefaultImpactSound;
+	if (TObjectPtr<USoundBase>* FoundSound = ImpactSoundBySurface.Find(Surface))
+	{
+		if (*FoundSound)
+		{
+			ResolvedSound = *FoundSound;
+		}
+	}
+
+	if (ResolvedSound)
+	{
+		const float Pitch = FMath::FRandRange(ImpactSoundPitchMin, ImpactSoundPitchMax);
+		UGameplayStatics::PlaySoundAtLocation(
+			this,
+			ResolvedSound,
+			Location,
+			ImpactSoundVolume,
+			Pitch,
+			0.0f,
+			ImpactSoundAttenuation
+		);
 	}
 }
 

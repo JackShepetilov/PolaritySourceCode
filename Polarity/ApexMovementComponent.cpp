@@ -3,6 +3,7 @@
 
 #include "ApexMovementComponent.h"
 #include "MovementSettings.h"
+#include "PolarityCharacter.h"
 #include "VelocityModifier.h"
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
@@ -358,7 +359,9 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		return Super::DoJump(bReplayingMoves, DeltaTime);
 	}
 
-	const int32 MaxJumps = MovementSettings->MaxJumpCount;
+	const APolarityCharacter* PolChar = Cast<APolarityCharacter>(GetOwner());
+	const bool bAllowAirJump = !PolChar || PolChar->bCanDoubleJump;
+	const int32 MaxJumps = bAllowAirJump ? MovementSettings->MaxJumpCount : 1;
 
 	// Wall jump - player pushed off wall, NO double jump allowed after
 	if (bIsWallRunning)
@@ -377,8 +380,8 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		Velocity = JumpVelocity;
 		SetMovementMode(MOVE_Falling);
 
-		// After wall jump, allow one air jump (double jump)
-		CurrentJumpCount = MaxJumps - 1;
+		// After wall jump, allow one air jump (double jump) — unless air jumps are disabled
+		CurrentJumpCount = bAllowAirJump ? (MaxJumps - 1) : MaxJumps;
 
 #if ENABLE_DRAW_DEBUG
 		JumpStartZ = CharacterOwner->GetActorLocation().Z;
@@ -478,6 +481,13 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 
 void UApexMovementComponent::StartSprint()
 {
+	if (const APolarityCharacter* PolChar = Cast<APolarityCharacter>(GetOwner()))
+	{
+		if (!PolChar->bCanSprint)
+		{
+			return;
+		}
+	}
 	bWantsToSprint = true;
 }
 
@@ -1931,6 +1941,14 @@ bool UApexMovementComponent::CanAirDash() const
 	if (!MovementSettings || !IsFalling() || bIsAirDashing || bIsMantling || bIsWallRunning)
 	{
 		return false;
+	}
+
+	if (const APolarityCharacter* PolChar = Cast<APolarityCharacter>(GetOwner()))
+	{
+		if (!PolChar->bCanAirDash)
+		{
+			return false;
+		}
 	}
 
 	if (AirDashCooldownRemaining > 0.0f)

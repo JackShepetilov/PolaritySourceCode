@@ -96,12 +96,17 @@ void AMeleeNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AMeleeNPC::StartMeleeAttack(AActor* Target)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] StartMeleeAttack ENTER (%s): target=%s, AttackMontages.Num=%d"),
+		*GetName(), Target ? *Target->GetName() : TEXT("NULL"), AttackMontages.Num());
+
 	// Track target acquisition for perception delay
 	NotifyTargetAcquired(Target);
 
 	// Validate
 	if (!CanAttack() || !Target || bIsDead)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] StartMeleeAttack EARLY-OUT (%s): CanAttack=%d Target=%d bIsDead=%d"),
+			*GetName(), CanAttack() ? 1 : 0, Target ? 1 : 0, bIsDead ? 1 : 0);
 		return;
 	}
 
@@ -128,6 +133,9 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 		MontageToPlay = AttackMontages[RandomIndex];
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] StartMeleeAttack picked montage: %s"),
+		MontageToPlay ? *MontageToPlay->GetName() : TEXT("NONE — AttackMontages empty, using instant damage path"));
+
 	// Play attack animation
 	if (MontageToPlay)
 	{
@@ -138,6 +146,9 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 			if (AnimInstance)
 			{
 				float MontageLength = AnimInstance->Montage_Play(MontageToPlay);
+
+				UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] Montage_Play returned length=%.2f (0 = failed; check AnimBP slot binding)"),
+					MontageLength);
 
 				// Bind to montage end
 				FOnMontageEnded EndDelegate;
@@ -202,19 +213,24 @@ bool AMeleeNPC::CanAttack() const
 	// Нельзя атаковать если мёртв, уже атакует, в knockback или в dash
 	if (bIsDead || bIsAttacking || bIsInKnockback || bIsDashing)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): bIsDead=%d bIsAttacking=%d bIsInKnockback=%d bIsDashing=%d"),
+			*GetName(), bIsDead ? 1 : 0, bIsAttacking ? 1 : 0, bIsInKnockback ? 1 : 0, bIsDashing ? 1 : 0);
 		return false;
 	}
 
 	// Wait for perception delay to expire before attacking
 	if (IsInPerceptionDelay())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): in perception delay"), *GetName());
 		return false;
 	}
 
 	// Check cooldown
-	float CurrentTime = GetWorld()->GetTimeSeconds();
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
 	if (LastAttackTime > 0.0f && (CurrentTime - LastAttackTime) < AttackCooldown)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): cooldown (since last %.2fs / %.2fs)"),
+			*GetName(), CurrentTime - LastAttackTime, AttackCooldown);
 		return false;
 	}
 

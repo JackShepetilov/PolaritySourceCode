@@ -801,20 +801,26 @@ void AShooterNPC::Die()
 
 	const FDeathModeConfig& DeathConfig = ResolveDeathConfig();
 
+	UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG] %s Die() — DeathMode=%d, RagdollImpulse=%.0f"),
+		*GetName(), (int32)DeathConfig.Mode, DeathConfig.RagdollImpulse);
+
 	switch (DeathConfig.Mode)
 	{
 	case EDeathMode::Dismemberment:
+		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   → going DISMEMBERMENT path (not ragdoll!)"));
 		SpawnDeathGeometryCollection(DeathConfig);
 		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
 		break;
 
 	case EDeathMode::Ragdoll:
+		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   → going RAGDOLL path"));
 		EnableRagdollDeath(DeathConfig);
 		DeactivateForDeath(DeathConfig.RagdollDuration, /*bHideMesh=*/ false);
 		break;
 
 	case EDeathMode::HideOnly:
 	default:
+		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   → going HIDE_ONLY path"));
 		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
 		break;
 	}
@@ -1215,11 +1221,51 @@ void AShooterNPC::EnableRagdollDeath(const FDeathModeConfig& Config)
 	MeshComp->SetLinearDamping(Config.RagdollLinearDamping);
 
 	// 6. Apply impulse to root bone only (not all bodies), respects mass
+	UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG] EnableRagdollDeath: %s LastKillingHitDirection=[%.2f, %.2f, %.2f] (size=%.3f, isNearlyZero=%d)"),
+		*GetName(),
+		LastKillingHitDirection.X, LastKillingHitDirection.Y, LastKillingHitDirection.Z,
+		LastKillingHitDirection.Size(),
+		LastKillingHitDirection.IsNearlyZero() ? 1 : 0);
+
 	if (!LastKillingHitDirection.IsNearlyZero())
 	{
-		const FName RootBone = MeshComp->GetBoneName(0);
+		// Find the first bone that actually has a physics body. GetBoneName(0) returns the
+		// topmost skeleton bone (typically "root") which is just a transform anchor with no
+		// physics body in the Physics Asset — applying impulse there does nothing.
+		FName ImpulseBone = NAME_None;
+		const int32 NumBones = MeshComp->GetNumBones();
+		for (int32 i = 0; i < NumBones; ++i)
+		{
+			const FName BoneName = MeshComp->GetBoneName(i);
+			if (MeshComp->IsSimulatingPhysics(BoneName))
+			{
+				ImpulseBone = BoneName;
+				break;
+			}
+		}
+
+		if (ImpulseBone == NAME_None)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   ⚠ No simulating physics bone found! Physics Asset is broken."));
+			return;
+		}
+
 		const FVector Impulse = LastKillingHitDirection * Config.RagdollImpulse;
-		MeshComp->AddImpulse(Impulse, RootBone, /*bVelChange=*/ false);
+		const float ImpulseBoneMass = MeshComp->GetBoneMass(ImpulseBone);
+		const float TotalMass = MeshComp->GetMass();
+		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   ImpulseBone=%s (auto-detected first physics body), Mass=%.2fkg, TotalMeshMass=%.2fkg, Impulse=%.0f → expected ΔV ≈ %.1f cm/s"),
+			*ImpulseBone.ToString(), ImpulseBoneMass, TotalMass, Config.RagdollImpulse,
+			ImpulseBoneMass > 0.0f ? (Config.RagdollImpulse / ImpulseBoneMass) : 0.0f);
+
+		MeshComp->AddImpulse(Impulse, ImpulseBone, /*bVelChange=*/ false);
+
+		const FVector PostImpulseVelocity = MeshComp->GetPhysicsLinearVelocity(ImpulseBone);
+		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   Post-impulse %s velocity=[%.1f, %.1f, %.1f] (size=%.1f cm/s)"),
+			*ImpulseBone.ToString(), PostImpulseVelocity.X, PostImpulseVelocity.Y, PostImpulseVelocity.Z, PostImpulseVelocity.Size());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   ⚠ Impulse SKIPPED — LastKillingHitDirection is zero (no damage source direction recorded)"));
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("EnableRagdollDeath: %s impulse=%.0f duration=%.1fs dir=[%.2f,%.2f,%.2f]"),

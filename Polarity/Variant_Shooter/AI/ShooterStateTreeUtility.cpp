@@ -403,17 +403,27 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 	// This handles the case where delegates update Controller but can't update InstanceData (due to WeakContext invalidation)
 	AActor* ControllerTarget = InstanceData.Controller->GetCurrentTarget();
 
+	const bool bWasHasTarget = InstanceData.bHasTarget;
+	AActor* PrevInstanceTarget = InstanceData.TargetActor;
+
 	if (ControllerTarget != InstanceData.TargetActor)
 	{
 		InstanceData.TargetActor = ControllerTarget;
 		InstanceData.bHasTarget = IsValid(ControllerTarget);
 
-		// Target synced from Controller
+		UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s SYNC: prev=%s -> new=%s (bHasTarget=%d)"),
+			*GetNameSafe(InstanceData.Character),
+			*GetNameSafe(PrevInstanceTarget),
+			*GetNameSafe(ControllerTarget),
+			InstanceData.bHasTarget ? 1 : 0);
 	}
 
 	// Safety: clear target if the actor was destroyed (GC may not have cleared the pointer yet)
 	if (InstanceData.bHasTarget && !IsValid(InstanceData.TargetActor))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s SAFETY-CLEAR: TargetActor invalid, calling ClearCurrentTarget"),
+			*GetNameSafe(InstanceData.Character));
+
 		InstanceData.TargetActor = nullptr;
 		InstanceData.bHasTarget = false;
 		InstanceData.bHasInvestigateLocation = false;
@@ -427,6 +437,12 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 	{
 		InstanceData.TimeSinceLastPoll = 0.0f;
 
+		UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s HEARTBEAT: bHasTarget=%d ControllerTarget=%s InstanceTarget=%s"),
+			*GetNameSafe(InstanceData.Character),
+			InstanceData.bHasTarget ? 1 : 0,
+			*GetNameSafe(InstanceData.Controller->GetCurrentTarget()),
+			*GetNameSafe(InstanceData.TargetActor));
+
 		// Only poll if we don't have a target yet
 		if (!InstanceData.bHasTarget)
 		{
@@ -434,6 +450,11 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 			{
 				TArray<AActor*> KnownActors;
 				PerceptionComp->GetKnownPerceivedActors(nullptr, KnownActors);
+
+				UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL: KnownActors.Num=%d (looking for tag '%s')"),
+					*GetNameSafe(InstanceData.Character),
+					KnownActors.Num(),
+					*InstanceData.SenseTag.ToString());
 
 				for (AActor* KnownActor : KnownActors)
 				{
@@ -456,15 +477,28 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 						QueryParams
 					);
 
+					UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL-LOS: candidate=%s LOSBlocked=%d (blocker=%s)"),
+						*GetNameSafe(InstanceData.Character),
+						*GetNameSafe(KnownActor),
+						bHit ? 1 : 0,
+						bHit ? *GetNameSafe(OutHit.GetActor()) : TEXT("none"));
+
 					if (!bHit) // Direct LOS
 					{
 						InstanceData.Controller->SetCurrentTarget(KnownActor);
 						InstanceData.TargetActor = KnownActor;
 						InstanceData.bHasTarget = true;
 						InstanceData.bHasInvestigateLocation = false;
+						UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL-ACQUIRED: %s"),
+							*GetNameSafe(InstanceData.Character), *GetNameSafe(KnownActor));
 						break;
 					}
 				}
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL: PerceptionComponent NULL!"),
+					*GetNameSafe(InstanceData.Character));
 			}
 		}
 	}

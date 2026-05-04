@@ -776,10 +776,20 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 
 		if (Speed >= Threshold)
 		{
-			// Direct NPC hit — always detonate
+			const bool bChargeBelowThreshold = FMath::Abs(GetCharge()) < ExplosionMinCharge;
+
+			// Direct NPC hit
 			AShooterNPC* HitNPC = Cast<AShooterNPC>(OtherActor);
 			if (HitNPC && !HitNPC->IsDead())
 			{
+				if (bChargeBelowThreshold)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Direct NPC hit → %s (Speed=%.0f), |charge|=%.1f < %.1f → weak impact"),
+						*GetName(), *OtherActor->GetName(), Speed, FMath::Abs(GetCharge()), ExplosionMinCharge);
+					ApplyWeakImpactToNPC(HitNPC, Hit.ImpactNormal, Hit.ImpactPoint);
+					return;
+				}
+
 				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Direct NPC hit → %s, Speed=%.0f"),
 					*GetName(), *OtherActor->GetName(), Speed);
 				if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
@@ -790,58 +800,68 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 				return;
 			}
 
-			// Environment hit — check if prop center is facing the impact point
-			const FVector PropCenter = GetActorLocation();
-			const FVector VelDir = PropMesh->GetPhysicsLinearVelocity().GetSafeNormal();
-			const FVector ToImpact = (Hit.ImpactPoint - PropCenter).GetSafeNormal();
-			const float CenterDot = FVector::DotProduct(VelDir, ToImpact);
-			bool bShouldDetonate = false;
-
-			// High dot = impact point is ahead of center along velocity = head-on hit
-			if (CenterDot >= CenterHitDotThreshold)
+			// Environment hit — low charge means no detonation regardless of geometry
+			if (bChargeBelowThreshold)
 			{
-				bShouldDetonate = true;
-				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit (dot=%.2f >= %.2f) → detonate"),
-					*GetName(), CenterDot, CenterHitDotThreshold);
+				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Env hit on %s (Speed=%.0f), |charge|=%.1f < %.1f → no explosion"),
+					*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), Speed, FMath::Abs(GetCharge()), ExplosionMinCharge);
+				// Fall through to "End reverse flight" code below — physics handles the bounce naturally
 			}
-
-			// Fallback: check if any NPC is within explosion radius
-			if (!bShouldDetonate)
+			else
 			{
-				FCollisionQueryParams OverlapParams;
-				OverlapParams.AddIgnoredActor(this);
-				TArray<FOverlapResult> NearbyOverlaps;
-				GetWorld()->OverlapMultiByChannel(
-					NearbyOverlaps, PropCenter, FQuat::Identity,
-					ECC_Pawn, FCollisionShape::MakeSphere(ExplosionRadius), OverlapParams);
+				// Environment hit — check if prop center is facing the impact point
+				const FVector PropCenter = GetActorLocation();
+				const FVector VelDir = PropMesh->GetPhysicsLinearVelocity().GetSafeNormal();
+				const FVector ToImpact = (Hit.ImpactPoint - PropCenter).GetSafeNormal();
+				const float CenterDot = FVector::DotProduct(VelDir, ToImpact);
+				bool bShouldDetonate = false;
 
-				for (const FOverlapResult& Overlap : NearbyOverlaps)
+				// High dot = impact point is ahead of center along velocity = head-on hit
+				if (CenterDot >= CenterHitDotThreshold)
 				{
-					AShooterNPC* NearbyNPC = Cast<AShooterNPC>(Overlap.GetActor());
-					if (NearbyNPC && !NearbyNPC->IsDead())
+					bShouldDetonate = true;
+					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit (dot=%.2f >= %.2f) → detonate"),
+						*GetName(), CenterDot, CenterHitDotThreshold);
+				}
+
+				// Fallback: check if any NPC is within explosion radius
+				if (!bShouldDetonate)
+				{
+					FCollisionQueryParams OverlapParams;
+					OverlapParams.AddIgnoredActor(this);
+					TArray<FOverlapResult> NearbyOverlaps;
+					GetWorld()->OverlapMultiByChannel(
+						NearbyOverlaps, PropCenter, FQuat::Identity,
+						ECC_Pawn, FCollisionShape::MakeSphere(ExplosionRadius), OverlapParams);
+
+					for (const FOverlapResult& Overlap : NearbyOverlaps)
 					{
-						bShouldDetonate = true;
-						UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: NPC %s in explosion radius → detonate"),
-							*GetName(), *NearbyNPC->GetName());
-						break;
+						AShooterNPC* NearbyNPC = Cast<AShooterNPC>(Overlap.GetActor());
+						if (NearbyNPC && !NearbyNPC->IsDead())
+						{
+							bShouldDetonate = true;
+							UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: NPC %s in explosion radius → detonate"),
+								*GetName(), *NearbyNPC->GetName());
+							break;
+						}
 					}
 				}
-			}
 
-			if (bShouldDetonate)
-			{
-				if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
+				if (bShouldDetonate)
 				{
-					OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+					if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
+					{
+						OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
+					}
+					Explode(1.0f, 1.0f, 1.0f);
+					return;
 				}
-				Explode(1.0f, 1.0f, 1.0f);
+
+				// Edge graze with no NPC nearby — prop continues flying
+				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Edge graze on %s (dot=%.2f), no NPC nearby → skip"),
+					*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), CenterDot);
 				return;
 			}
-
-			// Edge graze with no NPC nearby — prop continues flying
-			UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Edge graze on %s (dot=%.2f), no NPC nearby → skip"),
-				*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"), CenterDot);
-			return;
 		}
 	}
 
@@ -887,6 +907,21 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		const float OverlapThreshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
 		if (CachedPreCollisionSpeed >= OverlapThreshold)
 		{
+			// Charge gate: below threshold → weak impact (bounce + reduced damage/stun + half charge transfer) instead of explosion
+			if (FMath::Abs(GetCharge()) < ExplosionMinCharge)
+			{
+				const FVector OverlapNormal = bFromSweep
+					? FVector(SweepResult.ImpactNormal)
+					: (GetActorLocation() - HitNPC->GetActorLocation()).GetSafeNormal();
+				const FVector OverlapPoint = bFromSweep ? FVector(SweepResult.ImpactPoint) : HitNPC->GetActorLocation();
+
+				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Overlap with %s (Speed=%.0f), |charge|=%.1f < %.1f → weak impact"),
+					*GetName(), *HitNPC->GetName(), CachedPreCollisionSpeed, FMath::Abs(GetCharge()), ExplosionMinCharge);
+
+				ApplyWeakImpactToNPC(HitNPC, OverlapNormal, OverlapPoint);
+				return;
+			}
+
 			if (CriticalVelocity > 0.0f && CachedPreCollisionSpeed >= CriticalVelocity)
 			{
 				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), CachedPreCollisionSpeed);
@@ -963,6 +998,77 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		UE_LOG(LogTemp, Warning, TEXT("EMFPhysicsProp %s overlap NPC %s: Speed=%.0f, KineticDmg=%.1f, EMFDmg=%.1f"),
 			*GetName(), *HitNPC->GetName(), ImpactSpeed, KineticDamage, EMFDamage);
 	}
+}
+
+void AEMFPhysicsProp::ApplyWeakImpactToNPC(AShooterNPC* HitNPC, const FVector& ImpactNormal, const FVector& ImpactPoint)
+{
+	if (!HitNPC || HitNPC->IsDead() || !PropMesh)
+	{
+		return;
+	}
+
+	// 1. Damage
+	if (WeakImpactDamage > 0.0f)
+	{
+		FDamageEvent WeakEvent;
+		WeakEvent.DamageTypeClass = UDamageType_EMFProximity::StaticClass();
+		HitNPC->TakeDamage(WeakImpactDamage, WeakEvent, nullptr, this);
+	}
+
+	// 2. Stun (short, separate from explosion stun)
+	if (WeakImpactStunDuration > 0.0f && !HitNPC->IsDead())
+	{
+		HitNPC->ApplyExplosionStun(WeakImpactStunDuration, WeakImpactStunMontage);
+	}
+
+	// 3. Charge transfer: WeakImpactChargeShareRatio of prop's charge goes to NPC, the rest stays
+	const float MyCharge = GetCharge();
+	if (!FMath::IsNearlyZero(MyCharge))
+	{
+		if (UEMFVelocityModifier* NPCModifier = HitNPC->FindComponentByClass<UEMFVelocityModifier>())
+		{
+			const float TransferAmount = MyCharge * WeakImpactChargeShareRatio;
+			NPCModifier->SetCharge(NPCModifier->GetCharge() + TransferAmount);
+			SetCharge(MyCharge - TransferAmount);
+		}
+	}
+
+	// 4. Velocity reflection — manual, because:
+	//    - During reverse flight prop is ECR_Overlap on Pawn (no natural physics block)
+	//    - Prop's PhysMaterial.Restitution = 0, so Block path doesn't bounce naturally either
+	//    - Skip if velocity already points away from surface (dot >= 0) so we don't fight physics
+	const FVector InVel = PropMesh->GetPhysicsLinearVelocity();
+	const float VelDotN = FVector::DotProduct(InVel, ImpactNormal);
+	if (VelDotN < 0.0f)
+	{
+		const FVector Reflected = FMath::GetReflectionVector(InVel, ImpactNormal);
+		PropMesh->SetPhysicsLinearVelocity(Reflected * WeakImpactBounceRestitution);
+	}
+
+	// 5. Exit reverse-flight + restore Block on Pawn so subsequent collisions behave normally
+	if (bIsInReverseFlight)
+	{
+		bIsInReverseFlight = false;
+	}
+	if (CapturingPlate.IsValid())
+	{
+		ReleasedFromCapture();
+	}
+
+	// 6. Effects (reuse the existing impact assets)
+	if (EMFDischargeVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(), EMFDischargeVFX, ImpactPoint,
+			FRotator::ZeroRotator, FVector(EMFDischargeVFXScale),
+			true, true, ENCPoolMethod::None);
+	}
+	if (ImpactSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, ImpactPoint);
+	}
+
+	LastCollisionDamageTime = GetWorld()->GetTimeSeconds();
 }
 
 // ==================== Damage & Health ====================

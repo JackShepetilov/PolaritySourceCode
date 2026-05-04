@@ -23,6 +23,7 @@ class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class AUpgradePickup;
 class AScriptedPickup;
+class AHumanoidNPC;
 
 /**
  * Charge animation state
@@ -116,6 +117,40 @@ public:
 	/** Animation data for charge toggle */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation")
 	FChargeAnimationData AnimationData;
+
+	// ==================== FirstPerson Mesh Montages (catch/hold/throw) ====================
+	// Plays on FirstPersonMesh (not MeleeMesh). Optional — leave any unassigned to disable.
+	// Replaces the single-frozen-montage flow with three distinct phases:
+	//   Catch  → fires on successful capture (in EnterChanneling after target locked)
+	//   Hold   → auto-loops while in Channeling state, starts when Catch ends (or immediately
+	//            if no CatchMontage assigned)
+	//   Throw  → fires on BeginLaunch (interrupts Hold)
+	// All three are independent of AnimationData.ChargeMontage which still runs on MeleeMesh.
+
+	/** Played on FirstPersonMesh when capture confirms. If null, Hold starts immediately. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
+	TObjectPtr<UAnimMontage> CatchMontage;
+
+	/** Looping montage on FirstPersonMesh while holding captured target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
+	TObjectPtr<UAnimMontage> HoldMontage;
+
+	/** Played on FirstPersonMesh when launching (throw). Interrupts Hold. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
+	TObjectPtr<UAnimMontage> ThrowMontage;
+
+	/** When true (default), the legacy MeleeMesh swap + ChargeMontage flow is BYPASSED entirely.
+	 *  Weapon stays visible on FirstPersonMesh, and only the catch/hold/throw montages above
+	 *  drive the visual. Set to false to re-enable the legacy melee-mesh dance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
+	bool bUseFPMontages = true;
+
+	/** How many seconds BEFORE the hold montage ends should we kick off the next iteration.
+	 *  Lets UE's natural Blend In/Out crossfade two overlapping plays into a seamless loop.
+	 *  Set this to roughly match HoldMontage's Blend In Time (default ~0.25s in the asset).
+	 *  Tune lower for snappier loops, higher for smoother. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HoldLoopOverlap = 0.15f;
 
 	// ==================== Timing ====================
 
@@ -536,6 +571,36 @@ protected:
 	UFUNCTION()
 	void OnMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
+	// ---- FP Montages (catch/hold/throw) ----
+
+	/** Play catch montage on FirstPersonMesh. Auto-chains to Hold on natural end.
+	 *  If CatchMontage is null, starts Hold immediately. */
+	void PlayCatchMontage();
+
+	/** Play hold montage on FirstPersonMesh. Re-loops itself while state == Channeling. */
+	void PlayHoldMontage();
+
+	/** Play throw montage on FirstPersonMesh. Interrupts Catch/Hold if playing. */
+	void PlayThrowMontage();
+
+	/** Stop any of the three FP montages currently playing. */
+	void StopFPMontages();
+
+	/** Called when CatchMontage ends — chains into Hold loop if still Channeling. */
+	UFUNCTION()
+	void OnCatchMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Called when HoldMontage ends — re-plays it for loop continuation if still Channeling. */
+	UFUNCTION()
+	void OnHoldMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Timer handle for overlap-restart of the hold loop. */
+	FTimerHandle HoldLoopTimerHandle;
+
+	/** Timer callback: kicks off the next hold play (overlapping the current one). */
+	UFUNCTION()
+	void OnHoldLoopTimer();
+
 	/** Auto-detect mesh references if not set */
 	void AutoDetectMeshReferences();
 
@@ -578,6 +643,9 @@ protected:
 
 	/** Capture a scripted pickup (scripted pull, same as UpgradePickup but no upgrade) */
 	void CaptureScriptedPickup(AScriptedPickup* Pickup);
+
+	/** Yank the current weapon from a humanoid NPC (single action, no hold state) */
+	void CaptureHumanoidWeapon(AHumanoidNPC* Humanoid);
 
 	/** Capture an accelerator plate (lowest priority, no charge dependency) */
 	void CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate);

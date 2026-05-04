@@ -17,31 +17,35 @@ EStateTreeRunStatus FStateTreeMeleeAttackTask::EnterState(FStateTreeExecutionCon
 {
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask::EnterState — Character=%s, Target=%s"),
+		Data.Character ? *Data.Character->GetName() : TEXT("NULL"),
+		Data.Target ? *Data.Target->GetName() : TEXT("NULL"));
+
 	// Проверяем что всё валидно
 	if (!Data.Character || !Data.Target)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MeleeAttackTask: Invalid Character or Target"));
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: Invalid Character or Target"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Проверяем можем ли атаковать
 	if (!Data.Character->CanAttack())
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Cannot attack (cooldown or dead)"));
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: CanAttack=false (see CanAttack log above for reason)"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Проверяем дистанцию
 	if (!Data.Character->IsTargetInAttackRange(Data.Target))
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Target not in range"));
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: Target not in range"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Начинаем атаку
 	Data.Character->StartMeleeAttack(Data.Target);
 
-	UE_LOG(LogTemp, Verbose, TEXT("MeleeAttackTask: Started attack on %s"), *Data.Target->GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask STARTED on %s"), *Data.Target->GetName());
 
 	return EStateTreeRunStatus::Running;
 }
@@ -102,10 +106,17 @@ bool FStateTreeIsInMeleeRangeCondition::TestCondition(FStateTreeExecutionContext
 
 	if (!Data.Character || !Data.Target)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] IsInMeleeRange = FALSE (Character or Target null)"));
 		return false;
 	}
 
-	return Data.Character->IsTargetInAttackRange(Data.Target);
+	const float Distance = FVector::Dist(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
+	const float Range = Data.Character->GetAttackRange();
+	const bool bInRange = Distance <= Range;
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] IsInMeleeRange: dist=%.0f, range=%.0f, result=%d"),
+		Distance, Range, bInRange ? 1 : 0);
+
+	return bInRange;
 }
 
 #if WITH_EDITOR
@@ -125,10 +136,13 @@ bool FStateTreeCanMeleeAttackCondition::TestCondition(FStateTreeExecutionContext
 
 	if (!Data.Character)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanMeleeAttack = FALSE (Character null)"));
 		return false;
 	}
 
-	return Data.Character->CanAttack();
+	const bool bCan = Data.Character->CanAttack();
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanMeleeAttack: %d  (NPC=%s)"), bCan ? 1 : 0, *Data.Character->GetName());
+	return bCan;
 }
 
 #if WITH_EDITOR
@@ -192,11 +206,12 @@ bool FStateTreeHasValidTargetCondition::TestCondition(FStateTreeExecutionContext
 {
 	const FInstanceDataType& Data = Context.GetInstanceData(*this);
 
-	bool bIsValid = Data.Target != nullptr && IsValid(Data.Target);
+	const bool bIsValid = Data.Target != nullptr && IsValid(Data.Target);
 
-	UE_LOG(LogTemp, Verbose, TEXT("HasValidTarget: Target=%s, IsValid=%s"),
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] HasValidTarget [owner=%s]: target=%s, valid=%d"),
+		*GetNameSafe(Context.GetOwner()),
 		Data.Target ? *Data.Target->GetName() : TEXT("NULL"),
-		bIsValid ? TEXT("TRUE") : TEXT("FALSE"));
+		bIsValid ? 1 : 0);
 
 	return bIsValid;
 }

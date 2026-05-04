@@ -1,5 +1,4 @@
 {
-  "effortLevel": "high",
   "permissions": {
     "allow": [
       "Bash(git push:*)",
@@ -221,7 +220,23 @@
       "Bash(curl -sL \"https://github.com/googlefonts/rubik/raw/main/fonts/ttf/Rubik-SemiBold.ttf\" -o Rubik-SemiBold.ttf)",
       "Bash(curl -sL \"https://github.com/googlefonts/rubik/raw/refs/heads/main/fonts/ttf/Rubik-Regular.ttf\" -o Rubik-Regular.ttf)",
       "Bash(curl -sL \"https://fonts.google.com/download?family=Rubik\" -o rubik.zip)",
-      "Bash(curl -L -o rubik.zip \"https://fonts.google.com/download?family=Rubik\" -H \"User-Agent: Mozilla/5.0\")"
+      "Bash(curl -L -o rubik.zip \"https://fonts.google.com/download?family=Rubik\" -H \"User-Agent: Mozilla/5.0\")",
+      "WebFetch(domain:www.cnblogs.com)",
+      "Read(//c/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Content/Localization/Game/**)",
+      "Bash(xxd)",
+      "WebFetch(domain:fonts.google.com)",
+      "WebFetch(domain:qna.habr.com)",
+      "Bash(git rm *)",
+      "Bash(git reset *)",
+      "Bash(git restore *)",
+      "Write(C:\\Users\\Professional\\Documents\\assets\\Animations\\**)",
+      "Edit(C:\\Users\\Professional\\Documents\\assets\\Animations\\**)",
+      "Read(C:\\Users\\Professional\\Documents\\assets\\Animations\\**)",
+      "Bash(\"/c/Program Files/Blender Foundation/Blender 4.3/blender.exe\":*)",
+      "Bash(\"/c/Program Files/Blender Foundation/Blender 5.0/blender.exe\":*)",
+      "Bash(ls \"/c/Users/Professional/Documents/assets/Animations\":*)",
+      "Bash(ls /c/Users/Professional/Documents/assets/Animations:*)"
     ]
-  }
+  },
+  "effortLevel": "high"
 }

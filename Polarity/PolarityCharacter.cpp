@@ -7,6 +7,8 @@
 #include "ChargeAnimationComponent.h"
 #include "PolarityCameraManager.h"
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -506,16 +508,37 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 
 	UpdateWeaponRunSway(DeltaTime);
 
+	// ==================== Weapon Base Pose (per-weapon static tilt/offset) ====================
+	// Replaced (faded out) by crouch/slide and wallrun states.
+	// Crouch fade is smooth via CrouchSlideProgress; wallrun is a hard switch (acceptable
+	// since WallrunMeshTilt itself ramps in via ApexMovement's interpolation).
+
+	FRotator WeaponBaseTilt = FRotator::ZeroRotator;
+	FVector WeaponBaseOffset = FVector::ZeroVector;
+	if (const AShooterCharacter* AsShooter = Cast<const AShooterCharacter>(this))
+	{
+		if (const AShooterWeapon* Weapon = AsShooter->GetCurrentWeapon())
+		{
+			const float WeaponBaseFactor = (1.0f - CrouchSlideProgress) * (bIsWallrunning ? 0.0f : 1.0f);
+			WeaponBaseTilt = Weapon->FirstPersonMeshTilt * WeaponBaseFactor;
+			WeaponBaseOffset = Weapon->FirstPersonMeshOffset * WeaponBaseFactor;
+		}
+	}
+
 	// ==================== Apply to FirstPersonMesh ====================
 
 	// Calculate final location
 	FVector NewLocation = FirstPersonMeshBaseLocation;
+	NewLocation += WeaponBaseOffset;
 	NewLocation += CurrentCrouchOffset;
 	NewLocation += (CurrentADSOffset + CurrentWallrunOffset);
 	NewLocation += CurrentRunSwayPosition; // Run sway position offset
 
 	// Calculate final rotation (base + all tilts combined)
 	FRotator NewRotation = FirstPersonMeshBaseRotation;
+	NewRotation.Pitch += WeaponBaseTilt.Pitch;
+	NewRotation.Yaw += WeaponBaseTilt.Yaw;
+	NewRotation.Roll += WeaponBaseTilt.Roll;
 	NewRotation.Pitch += CurrentWeaponTilt.Pitch;
 	NewRotation.Yaw += CurrentWeaponTilt.Yaw;
 	NewRotation.Roll += CurrentWeaponTilt.Roll;

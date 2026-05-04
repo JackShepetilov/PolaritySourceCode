@@ -15,6 +15,10 @@ class UEMF_FieldComponent;
 class AShooterWeapon;
 class AShooterCharacter;
 class USoundBase;
+class UAnimMontage;
+class UPrimitiveComponent;
+class UCurveFloat;
+struct FHitResult;
 
 UCLASS(Blueprintable)
 class POLARITY_API ADroppedRangedWeapon : public AActor
@@ -39,6 +43,22 @@ public:
 	/** Weapon class to grant when player captures this */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon")
 	TSubclassOf<AShooterWeapon> WeaponClass;
+
+	// ==================== Ammo (yanked-source weapons only) ====================
+
+	/** Distribution curve sampled at yank-spawn time (RollSpawnedBulletCount) to determine
+	 *  starting bullet count via inverse-transform sampling: X = random [0..1], Y = bullet
+	 *  fraction [0..1] of MagazineSize. If null, falls back to uniform random [1, MagazineSize].
+	 *  Only consulted when HumanoidNPC explicitly calls RollSpawnedBulletCount() — death-drop
+	 *  path leaves SpawnedBulletCount = -1 and the weapon is granted at full mag. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo")
+	TObjectPtr<UCurveFloat> AmmoDistributionCurve;
+
+	/** Bullet count this drop will grant on pickup. -1 = unrolled (default — full magazine on
+	 *  pickup, equivalent to current death-drop behavior). Set to a positive value by
+	 *  RollSpawnedBulletCount() — guaranteed >= 1 when set. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ammo")
+	int32 SpawnedBulletCount = -1;
 
 	// ==================== Capture Settings ====================
 
@@ -74,6 +94,32 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Effects")
 	TObjectPtr<USoundBase> PickupSound;
 
+	// ==================== Stun on Impact (thrown weapon) ====================
+
+	/** When true, this dropped weapon stuns AShooterNPCs it collides with above the velocity
+	 *  threshold. Set externally (e.g. by ShooterCharacter::ThrowYankedWeaponIfAny). Default false
+	 *  so passively-discarded weapons don't stun NPCs that walk into them. */
+	UPROPERTY(BlueprintReadWrite, Category = "Stun")
+	bool bCanStunOnImpact = false;
+
+	/** Duration (seconds) of the stun applied to NPCs hit by this weapon. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stun", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+	float StunDuration = 2.0f;
+
+	/** Minimum impact velocity (cm/s) required to trigger a stun. Lower velocities are ignored
+	 *  (prevents stun-spam from a settling/rolling weapon). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stun", meta = (ClampMin = "0.0"))
+	float StunImpactVelocityThreshold = 400.0f;
+
+	/** Cooldown (seconds) between stun events. Prevents multi-stun from a single bounce. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stun", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float StunCooldown = 0.5f;
+
+	/** Optional montage to play on the stunned NPC. If null, ApplyExplosionStun falls back to
+	 *  the NPC's KnockbackMontage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stun")
+	TObjectPtr<UAnimMontage> StunMontage;
+
 	// ==================== Public API ====================
 
 	/** Get current charge */
@@ -96,11 +142,27 @@ public:
 	/** Has pull completed (weapon granted)? */
 	bool IsPullComplete() const { return bPullComplete; }
 
+	/** Roll SpawnedBulletCount from AmmoDistributionCurve via inverse-transform sampling, or
+	 *  uniform random [1, MagazineSize] when curve is null. Result is clamped to [1, MagazineSize].
+	 *  Called by HumanoidNPC::YankCurrentWeapon — death-drop path does NOT call this, so the
+	 *  granted weapon stays at full mag with infinite refills (current behavior preserved). */
+	UFUNCTION(BlueprintCallable, Category = "Ammo")
+	void RollSpawnedBulletCount();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 
+	/** OnComponentHit callback for WeaponMesh — applies stun to AShooterNPC targets when
+	 *  bCanStunOnImpact is true and impact velocity exceeds StunImpactVelocityThreshold. */
+	UFUNCTION()
+	void OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+
 private:
+	/** Time of last stun event for cooldown checking (world seconds). */
+	float LastStunTime = -10.0f;
+
 	// ==================== Pull State ====================
 
 	bool bIsBeingPulled = false;

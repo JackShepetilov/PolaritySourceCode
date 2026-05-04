@@ -959,8 +959,10 @@ public:
 	bool bIsPooled = false;
 
 	/** Reset NPC state for pool recycling. Teleports, resets HP/charge, re-enables all systems.
-	 *  Call only on pooled NPCs that have completed their death sequence (hidden). */
-	void ResetForPool(const FVector& NewLocation, const FRotator& NewRotation);
+	 *  Call only on pooled NPCs that have completed their death sequence (hidden).
+	 *  Virtual so that subclasses (HumanoidNPC, etc.) can extend the reset; ArenaManager
+	 *  invokes through AShooterNPC* — without virtual, derived overrides are static-dispatch hidden. */
+	virtual void ResetForPool(const FVector& NewLocation, const FRotator& NewRotation);
 
 	/** Returns true if this NPC is currently shooting */
 	UFUNCTION(BlueprintPure, Category = "Status")

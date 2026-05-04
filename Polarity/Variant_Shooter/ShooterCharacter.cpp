@@ -4,6 +4,8 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "Weapons/ShooterWeapon_Melee.h"
+#include "Weapons/DroppedRangedWeapon.h"
+#include "UI/EMFChargeWidgetSubsystem.h"
 #include "AI/ShooterNPC.h"
 #include "ShooterDummyInterface.h"
 #include "MovementSettings.h"
@@ -222,8 +224,11 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AShooterCharacter::DoStartFiring);
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoStopFiring);
 
-		// Switch weapon
-		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Triggered, this, &AShooterCharacter::DoSwitchWeapon);
+		// Switch weapon — split into press/release for tap (swap) vs hold (throw yanked) detection.
+		// Tap: <YankSwapHoldThreshold sec → DoSwitchWeapon (preserves existing behavior, on release).
+		// Hold: ≥YankSwapHoldThreshold sec → ThrowYankedWeaponIfAny (fired by SwapHoldTimer).
+		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::OnSwitchWeaponPressed);
+		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Completed, this, &AShooterCharacter::OnSwitchWeaponReleased);
 
 		// ADS (hold to aim)
 		if (ADSAction)
@@ -557,13 +562,32 @@ void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
 			// Lowering complete?
 			if (WeaponSwitchProgress >= 1.0f)
 			{
-				OnWeaponSwitchLowered();
+				if (bWeaponSwitchPausedAtBottom)
+				{
+					// Yank flow: hold at bottom until FinishWeaponSwitch is called.
+					// Mark lower phase done so FinishWeaponSwitch knows mesh is already at bottom.
+					bIsWeaponLowering = false;
+				}
+				else
+				{
+					OnWeaponSwitchLowered();
+				}
 			}
 		}
-		else
+		else if (!bWeaponSwitchPausedAtBottom)
 		{
-			// No lowering time, switch immediately
+			// No lowering time, switch immediately (only when not paused-at-bottom)
 			OnWeaponSwitchLowered();
+		}
+	}
+	else if (bWeaponSwitchPausedAtBottom)
+	{
+		// Paused at bottom — clamp mesh to lowered position each tick (defensive against
+		// other systems that might touch FP mesh location). Wait for FinishWeaponSwitch.
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			FVector TargetLocation = WeaponSwitchMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
+			FPMesh->SetRelativeLocation(TargetLocation);
 		}
 	}
 	else
@@ -636,6 +660,7 @@ void AShooterCharacter::OnWeaponSwitchRaised()
 
 	// Switch complete
 	bIsWeaponSwitchInProgress = false;
+	bWeaponSwitchPausedAtBottom = false;  // safety reset
 	PendingWeapon = nullptr;
 }
 
@@ -1598,10 +1623,7 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 	{
 		if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
 		{
-			if (!AnimInstance->Montage_IsPlaying(Montage))
-			{
-				AnimInstance->Montage_Play(Montage);
-			}
+			AnimInstance->Montage_Play(Montage);
 		}
 	}
 
@@ -1610,10 +1632,7 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 	{
 		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
 		{
-			if (!AnimInstance->Montage_IsPlaying(Montage))
-			{
-				AnimInstance->Montage_Play(Montage);
-			}
+			AnimInstance->Montage_Play(Montage);
 		}
 	}
 }
@@ -1706,6 +1725,322 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 			}
 		}
 	}
+}
+
+AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<AShooterWeapon>& WeaponClass)
+{
+	// Already own this class — return existing instance, no swap.
+	if (AShooterWeapon* OwnedWeapon = FindWeaponOfType(WeaponClass))
+	{
+		return OwnedWeapon;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::MultiplyWithRoot;
+
+	AShooterWeapon* AddedWeapon = GetWorld()->SpawnActor<AShooterWeapon>(WeaponClass, GetActorTransform(), SpawnParams);
+	if (!AddedWeapon)
+	{
+		return nullptr;
+	}
+
+	const bool bWasUnarmed = (OwnedWeapons.Num() == 0);
+	OwnedWeapons.Add(AddedWeapon);
+
+	if (bIsWeaponSwitchInProgress && bWeaponSwitchPausedAtBottom)
+	{
+		// Yank path: lower already started/finished via BeginWeaponLower(). The mesh is
+		// either dropping or already at the bottom — finish the swap with this weapon.
+		FinishWeaponSwitch(AddedWeapon);
+	}
+	else if (bWasUnarmed || !CurrentWeapon)
+	{
+		// Nothing to swap from — instant equip path mirrors the tail of AddWeaponClass.
+		AShooterWeapon* OldWeapon = CurrentWeapon;
+		CurrentWeapon = AddedWeapon;
+		CurrentWeapon->ActivateWeapon();
+
+		if (UpgradeManager)
+		{
+			UpgradeManager->NotifyWeaponChanged(OldWeapon, CurrentWeapon);
+		}
+
+		if (bWasUnarmed)
+		{
+			UpdateFirstPersonMeshVisibility();
+		}
+	}
+	else
+	{
+		// Player is currently holding a weapon — use the standard Q-switch pipeline.
+		// StartWeaponSwitch handles lower → OnWeaponSwitchLowered (deactivate old, activate new,
+		// notify upgrades) → raise. New weapon must already be in OwnedWeapons (it is, line above).
+		StartWeaponSwitch(AddedWeapon);
+	}
+
+	return AddedWeapon;
+}
+
+void AShooterCharacter::BeginWeaponLower()
+{
+	// Don't interrupt an already-running switch
+	if (bIsWeaponSwitchInProgress)
+	{
+		return;
+	}
+
+	// Nothing to lower — caller (e.g. yank pickup on unarmed player) will fall through to
+	// AddWeaponClassAnimated which handles instant equip.
+	if (!CurrentWeapon)
+	{
+		return;
+	}
+
+	// Stop firing current weapon
+	CurrentWeapon->StopFiring();
+
+	// No PendingWeapon yet — FinishWeaponSwitch will set it
+	PendingWeapon = nullptr;
+
+	bIsWeaponSwitchInProgress = true;
+	bIsWeaponLowering = true;
+	bWeaponSwitchPausedAtBottom = true;
+	WeaponSwitchProgress = 0.0f;
+
+	// Cache base location for interpolation
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
+	}
+
+	PlayWeaponSwitchSound();
+}
+
+void AShooterCharacter::FinishWeaponSwitch(AShooterWeapon* NewWeapon)
+{
+	if (!bIsWeaponSwitchInProgress || !bWeaponSwitchPausedAtBottom)
+	{
+		return;
+	}
+
+	PendingWeapon = NewWeapon;
+	bWeaponSwitchPausedAtBottom = false;
+
+	if (bIsWeaponLowering)
+	{
+		// Lower phase still in progress — UpdateWeaponSwitch will hit OnWeaponSwitchLowered
+		// naturally when WeaponSwitchProgress reaches 1.0 (now that pause flag is cleared).
+		return;
+	}
+
+	// Lower already completed (mesh held at bottom) — trigger swap+raise immediately.
+	OnWeaponSwitchLowered();
+}
+
+// Shared helper: finds the first yanked weapon in OwnedWeapons, spawns a non-capturable
+// ADroppedRangedWeapon at LocalSpawnOffset (in player actor space) with given impulses, and
+// removes the weapon from inventory. If bEnableStunOnImpact, the spawned actor will stun
+// AShooterNPCs it collides with above its velocity threshold.
+static void DiscardYankedWeaponShared(
+	AShooterCharacter* Self,
+	TArray<AShooterWeapon*>& OwnedWeapons,
+	TObjectPtr<AShooterWeapon>& CurrentWeapon,
+	UUpgradeManagerComponent* UpgradeManager,
+	const FVector& LocalSpawnOffset,
+	const FVector& LocalLinearImpulse,
+	const FVector& AngularImpulse,
+	bool bEnableStunOnImpact)
+{
+	AShooterWeapon* YankedWeapon = nullptr;
+	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] DiscardYankedWeaponShared — scanning %d owned weapons (stunOnImpact=%d)"),
+		OwnedWeapons.Num(), bEnableStunOnImpact ? 1 : 0);
+	for (AShooterWeapon* W : OwnedWeapons)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW]   weapon %s: bWasYanked=%d, SourceYankDropClass=%s"),
+			W ? *W->GetName() : TEXT("null"),
+			W ? (W->bWasYanked ? 1 : 0) : -1,
+			(W && W->SourceYankDropClass) ? *W->SourceYankDropClass->GetName() : TEXT("null"));
+		if (W && W->bWasYanked)
+		{
+			YankedWeapon = W;
+			break;
+		}
+	}
+
+	if (!YankedWeapon)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] DiscardYankedWeaponShared — no yanked weapon found, returning"));
+		return;
+	}
+
+	if (YankedWeapon->SourceYankDropClass)
+	{
+		// Throw uses camera transform (so vertical aim is respected); passive drop uses actor
+		// transform (drops behind back, vertical aim irrelevant). bEnableStunOnImpact == true
+		// is our proxy for "this is an active throw".
+		FTransform RefTransform;
+		if (bEnableStunOnImpact)
+		{
+			if (UCameraComponent* Cam = Self->GetFirstPersonCameraComponent())
+			{
+				RefTransform = Cam->GetComponentTransform();
+			}
+			else
+			{
+				RefTransform = Self->GetActorTransform();
+			}
+		}
+		else
+		{
+			RefTransform = Self->GetActorTransform();
+		}
+
+		const FVector SpawnLoc = RefTransform.TransformPosition(LocalSpawnOffset);
+		const FRotator SpawnRot = RefTransform.Rotator();
+
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		ADroppedRangedWeapon* Discarded = Self->GetWorld()->SpawnActor<ADroppedRangedWeapon>(
+			YankedWeapon->SourceYankDropClass, SpawnLoc, SpawnRot, Params);
+
+		if (Discarded)
+		{
+			// Pure decoration — block re-capture and EMF interaction.
+			Discarded->bCanBeCaptured = false;
+			Discarded->SetCharge(0.0f);
+
+			// SetCharge re-registers with the widget subsystem; explicitly unregister so no
+			// charge UI floats over the discarded weapon.
+			if (UEMFChargeWidgetSubsystem* WidgetSub = Self->GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+			{
+				WidgetSub->UnregisterDroppedRangedWeapon(Discarded);
+			}
+
+			// Enable stun-on-impact for thrown variant — drop variant leaves it false (default).
+			Discarded->bCanStunOnImpact = bEnableStunOnImpact;
+
+			if (UStaticMeshComponent* DiscardedMesh = Discarded->WeaponMesh)
+			{
+				// For thrown variant: enable Pawn collision so weapon hits NPCs. Constructor
+				// sets Pawn=Ignore so passively-dropped weapons don't push characters around;
+				// for an active throw we WANT contact (and OnComponentHit fires only on Block).
+				if (bEnableStunOnImpact)
+				{
+					DiscardedMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+				}
+
+				// Apply impulses (RefTransform-space → world). Same transform used for spawn so
+				// linear impulse direction matches "forward" of the source frame (camera or actor).
+				const FVector WorldLinearImpulse = RefTransform.TransformVector(LocalLinearImpulse);
+				DiscardedMesh->AddImpulse(WorldLinearImpulse, NAME_None, /*bVelChange=*/ true);
+				DiscardedMesh->AddAngularImpulseInDegrees(AngularImpulse, NAME_None, /*bVelChange=*/ true);
+			}
+		}
+	}
+
+	// Remove from inventory; if it was the equipped weapon, switch to a non-yanked replacement
+	// instantly (no animation — for Drop, caller is about to BeginWeaponLower; for Throw, we
+	// just leave the player on the next non-yanked weapon).
+	const bool bWasCurrent = (CurrentWeapon == YankedWeapon);
+	OwnedWeapons.Remove(YankedWeapon);
+
+	if (bWasCurrent)
+	{
+		AShooterWeapon* OldCurrent = CurrentWeapon;
+		CurrentWeapon->DeactivateWeapon();
+
+		AShooterWeapon* Replacement = nullptr;
+		for (AShooterWeapon* W : OwnedWeapons)
+		{
+			if (W && !W->bWasYanked)
+			{
+				Replacement = W;
+				break;
+			}
+		}
+
+		CurrentWeapon = Replacement;
+		if (CurrentWeapon)
+		{
+			CurrentWeapon->ActivateWeapon();
+		}
+
+		if (UpgradeManager)
+		{
+			UpgradeManager->NotifyWeaponChanged(OldCurrent, CurrentWeapon);
+		}
+	}
+
+	YankedWeapon->Destroy();
+}
+
+void AShooterCharacter::DropYankedWeaponIfAny()
+{
+	DiscardYankedWeaponShared(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
+		YankDropSpawnOffset, YankDropLinearImpulse, YankDropAngularImpulse,
+		/*bEnableStunOnImpact=*/ false);
+}
+
+void AShooterCharacter::ThrowYankedWeaponIfAny()
+{
+	DiscardYankedWeaponShared(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
+		YankThrowSpawnOffset, YankThrowLinearImpulse, YankThrowAngularImpulse,
+		/*bEnableStunOnImpact=*/ true);
+}
+
+// ==================== Swap Weapon Hold Detection ====================
+
+void AShooterCharacter::OnSwitchWeaponPressed()
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] OnSwitchWeaponPressed @ T=%.3f — starting hold timer (threshold=%.2fs)"),
+		Now, YankSwapHoldThreshold);
+	SwapKeyPressTime = Now;
+	bSwapKeyHeldPending = true;
+	GetWorld()->GetTimerManager().SetTimer(
+		SwapHoldTimer, this, &AShooterCharacter::OnSwapHoldThresholdFired,
+		YankSwapHoldThreshold, false);
+}
+
+void AShooterCharacter::OnSwitchWeaponReleased()
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	const float HeldFor = Now - SwapKeyPressTime;
+	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] OnSwitchWeaponReleased @ T=%.3f — held for %.3fs (threshold=%.2fs)"),
+		Now, HeldFor, YankSwapHoldThreshold);
+
+	// If the timer is still active, this was a tap — preserve the original instant-swap behavior.
+	// If the timer already fired, hold path already executed (throw); nothing to do.
+	if (bSwapKeyHeldPending)
+	{
+		FTimerManager& TimerMgr = GetWorld()->GetTimerManager();
+		if (TimerMgr.IsTimerActive(SwapHoldTimer))
+		{
+			TimerMgr.ClearTimer(SwapHoldTimer);
+			bSwapKeyHeldPending = false;
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW]   → TAP path (DoSwitchWeapon)"));
+			DoSwitchWeapon();
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW]   → pending=true but timer inactive"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW]   → pending=false (hold already fired, no-op)"));
+	}
+}
+
+void AShooterCharacter::OnSwapHoldThresholdFired()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] OnSwapHoldThresholdFired — calling ThrowYankedWeaponIfAny"));
+	bSwapKeyHeldPending = false;
+	ThrowYankedWeaponIfAny();
 }
 
 void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
@@ -2477,7 +2812,24 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 		bIsWallRunning = Apex->IsWallRunning();
 	}
 
-	TargetLeftHandIKAlpha = bIsWallRunning ? 0.0f : 1.0f;
+	// Wallrun forces alpha=0 (hand free of weapon while running on wall).
+	// Otherwise default to 1.0, UNLESS ChargeAnimationComponent has authority over alpha
+	// (during channeling its SetLeftHandIKAlpha(0) sets alpha=0 to free left arm for
+	// catch/hold/throw montages — don't clobber it every Tick).
+	if (bIsWallRunning)
+	{
+		TargetLeftHandIKAlpha = 0.0f;
+	}
+	else
+	{
+		const UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>();
+		const bool bChargingOwnsAlpha = ChargeComp && ChargeComp->IsChanneling();
+		if (!bChargingOwnsAlpha)
+		{
+			TargetLeftHandIKAlpha = 1.0f;
+		}
+		// else: leave whatever ChargeAnimationComponent has set
+	}
 
 	// Interpolate alpha
 	CurrentLeftHandIKAlpha = FMath::FInterpTo(
