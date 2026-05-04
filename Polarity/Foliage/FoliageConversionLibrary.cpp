@@ -72,7 +72,11 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		return nullptr;
 	}
 
-	const UEMFFoliageSettings* Settings = GetDefault<UEMFFoliageSettings>();
+	// Use StaticClass()->GetDefaultObject() instead of GetDefault<T>() —
+	// the template has caused Cast<> instantiation issues alongside the
+	// MinimalAPI-marked Foliage types in this TU.
+	const UEMFFoliageSettings* Settings =
+		static_cast<const UEMFFoliageSettings*>(UEMFFoliageSettings::StaticClass()->GetDefaultObject());
 	if (!Settings)
 	{
 		return nullptr;
@@ -116,20 +120,27 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 
 	// --- 4. Deferred spawn so we can set the mesh BEFORE BeginPlay runs.
 	//        SpawnActor + SetStaticMesh after BeginPlay would let the physics body
-	//        initialize against the BP's default mesh, then need a recreate. ---
-	AEMFPhysicsProp* SpawnedProp = World->SpawnActorDeferred<AEMFPhysicsProp>(
+	//        initialize against the BP's default mesh, then need a recreate.
+	//        We spawn through the AActor template path to avoid instantiating
+	//        Cast<AEMFPhysicsProp> in this TU (interaction with MinimalAPI types
+	//        in the same compile unit was triggering C2680 in Casts.h). ---
+	AActor* SpawnedActor = World->SpawnActorDeferred<AActor>(
 		ResolvedPropClass,
 		InstanceTransform,
 		/*Owner=*/nullptr,
 		/*Instigator=*/nullptr,
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 
-	if (!SpawnedProp)
+	if (!SpawnedActor)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[FOLIAGE_CONVERT] SpawnActorDeferred failed for class %s"),
 			*GetNameSafe(ResolvedPropClass));
 		return nullptr;
 	}
+
+	// Class hierarchy was already validated via TSubclassOf<AEMFPhysicsProp>
+	// in the settings entry, so static_cast is safe here.
+	AEMFPhysicsProp* SpawnedProp = static_cast<AEMFPhysicsProp*>(SpawnedActor);
 
 	// Override the prop's mesh to match the foliage instance.
 	// One BP_EMFProp can back many visually-different convertible foliage assets.
