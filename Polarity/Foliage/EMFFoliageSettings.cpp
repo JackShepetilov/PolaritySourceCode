@@ -15,15 +15,13 @@ const FEMFFoliageEntry* UEMFFoliageSettings::FindEntryForFoliageType(const UFoli
 		return nullptr;
 	}
 
+	// Direct pointer comparison is sufficient: any FoliageType painted on the
+	// current level is loaded (Foliage Tool keeps used types resident), so
+	// Entry.FoliageType.Get() will resolve. Soft pointer to an asset on a
+	// different level can't match an in-flight hit on this level anyway.
 	for (const FEMFFoliageEntry& Entry : Entries)
 	{
-		// Compare by hard pointer when loaded; fall back to soft path comparison.
-		const UFoliageType* EntryType = Entry.FoliageType.Get();
-		if (EntryType == InType)
-		{
-			return &Entry;
-		}
-		if (!EntryType && Entry.FoliageType.GetUniqueID().GetAssetPath() == FSoftObjectPath(InType).GetAssetPath())
+		if (Entry.FoliageType.Get() == InType)
 		{
 			return &Entry;
 		}
