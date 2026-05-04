@@ -149,13 +149,29 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		SpawnedProp->PropMesh->SetStaticMesh(InstanceMesh);
 	}
 
-	UGameplayStatics::FinishSpawningActor(SpawnedProp, InstanceTransform);
-
-	// --- 5. Remove the foliage instance LAST.
+	// --- 5. Remove the foliage instance BEFORE FinishSpawningActor.
+	//        If we leave the instance in place during BeginPlay, the prop's
+	//        physics body initializes overlapping the instance's collision —
+	//        Chaos can register the resulting depenetration as immediate sleep
+	//        and the body never wakes until something pushes it again.
 	//        Note: HISM RemoveInstance uses RemoveAtSwap and shuffles the last
 	//        instance into this slot, so any cached Hit.Item for this component
 	//        from earlier in the same frame is now invalid. ---
 	FISMC->RemoveInstance(InstanceIndex);
+
+	UGameplayStatics::FinishSpawningActor(SpawnedProp, InstanceTransform);
+
+	// --- 6. Wake the rigid body explicitly.
+	//        Even with DefaultCharge==0, the caller will run ionization right
+	//        after this returns and SetCharge() flips SetSimulatePhysics(true).
+	//        Chaos sometimes leaves a freshly-simulating body in sleep state
+	//        (zero velocity, no contacts), which makes OverlapMultiByObjectType
+	//        in the channeling capture scan miss the prop until the body is
+	//        woken by an external impulse (e.g. running into it). ---
+	if (SpawnedProp->PropMesh)
+	{
+		SpawnedProp->PropMesh->WakeAllRigidBodies();
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[FOLIAGE_CONVERT] Converted instance %d of %s -> %s at %s"),
 		InstanceIndex,
