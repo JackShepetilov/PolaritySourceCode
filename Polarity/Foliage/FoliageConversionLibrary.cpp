@@ -10,7 +10,9 @@
 #include "FoliageType.h"
 #include "InstancedFoliage.h" // FFoliageInfo
 
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/HitResult.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
@@ -40,17 +42,22 @@ namespace
 AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHitResult& Hit, float DamageDealt)
 {
 	// --- 1. Validate the hit was on a foliage instance ---
-	AInstancedFoliageActor* IFA = Cast<AInstancedFoliageActor>(Hit.GetActor());
-	if (!IFA)
+	// Use IsA + static_cast instead of Cast<>: AInstancedFoliageActor and
+	// UFoliageInstancedStaticMeshComponent are MinimalAPI, which can break
+	// the template Cast<> path across modules with C2680 dynamic_cast errors.
+	AActor* HitActor = Hit.GetActor();
+	if (!HitActor || !HitActor->IsA(AInstancedFoliageActor::StaticClass()))
 	{
 		return nullptr;
 	}
+	AInstancedFoliageActor* IFA = static_cast<AInstancedFoliageActor*>(HitActor);
 
-	UFoliageInstancedStaticMeshComponent* FISMC = Cast<UFoliageInstancedStaticMeshComponent>(Hit.GetComponent());
-	if (!FISMC)
+	UPrimitiveComponent* HitComp = Hit.GetComponent();
+	if (!HitComp || !HitComp->IsA(UFoliageInstancedStaticMeshComponent::StaticClass()))
 	{
 		return nullptr;
 	}
+	UFoliageInstancedStaticMeshComponent* FISMC = static_cast<UFoliageInstancedStaticMeshComponent*>(HitComp);
 
 	const int32 InstanceIndex = Hit.Item;
 	if (InstanceIndex < 0 || InstanceIndex >= FISMC->GetInstanceCount())
