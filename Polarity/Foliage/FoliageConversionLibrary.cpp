@@ -179,5 +179,22 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		*GetNameSafe(SpawnedProp),
 		*InstanceTransform.GetLocation().ToString());
 
+	// Diagnostic dump: post-spawn component state. Helps identify whether the
+	// channeling capture scan misses the prop because of collision profile,
+	// object channel, sleeping body, or capture flags. Remove once stable.
+	if (UStaticMeshComponent* M = SpawnedProp->PropMesh)
+	{
+		const FBodyInstance* BI = M->GetBodyInstance();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FOLIAGE_CONVERT] Post-spawn state: profile=%s, ObjectType=%d, SimulatePhysics=%d, IsAwake=%d, bCanBeCaptured=%d, Charge=%.2f, IsDead=%d"),
+			*M->GetCollisionProfileName().ToString(),
+			(int32)M->GetCollisionObjectType(),
+			M->IsSimulatingPhysics() ? 1 : 0,
+			(BI && BI->IsInstanceAwake()) ? 1 : 0,
+			SpawnedProp->bCanBeCaptured ? 1 : 0,
+			SpawnedProp->GetCharge(),
+			SpawnedProp->IsDead() ? 1 : 0);
+	}
+
 	return SpawnedProp;
 }
