@@ -16,6 +16,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
+#include "TimerManager.h"
 
 namespace
 {
@@ -179,14 +180,16 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		*GetNameSafe(SpawnedProp),
 		*InstanceTransform.GetLocation().ToString());
 
-	// Diagnostic dump: post-spawn component state. Helps identify whether the
-	// channeling capture scan misses the prop because of collision profile,
-	// object channel, sleeping body, or capture flags. Remove once stable.
+	// Diagnostic dump: post-spawn component state. The caller (weapon) will
+	// run ionization right after this returns and SetCharge() flips
+	// SimulatePhysics. Schedule a follow-up log on the next tick so we see
+	// the actual state once charge has been applied — that's the state the
+	// channeling capture scan will inspect on subsequent frames.
 	if (UStaticMeshComponent* M = SpawnedProp->PropMesh)
 	{
 		const FBodyInstance* BI = M->GetBodyInstance();
 		UE_LOG(LogTemp, Warning,
-			TEXT("[FOLIAGE_CONVERT] Post-spawn state: profile=%s, ObjectType=%d, SimulatePhysics=%d, IsAwake=%d, bCanBeCaptured=%d, Charge=%.2f, IsDead=%d"),
+			TEXT("[FOLIAGE_CONVERT] Pre-ionize state: profile=%s, ObjectType=%d, SimulatePhysics=%d, IsAwake=%d, bCanBeCaptured=%d, Charge=%.2f, IsDead=%d"),
 			*M->GetCollisionProfileName().ToString(),
 			(int32)M->GetCollisionObjectType(),
 			M->IsSimulatingPhysics() ? 1 : 0,
@@ -195,6 +198,27 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 			SpawnedProp->GetCharge(),
 			SpawnedProp->IsDead() ? 1 : 0);
 	}
+
+	// Re-log + force-wake one tick later (after caller's ionization has run).
+	TWeakObjectPtr<AEMFPhysicsProp> WeakProp = SpawnedProp;
+	World->GetTimerManager().SetTimerForNextTick([WeakProp]()
+	{
+		AEMFPhysicsProp* Prop = WeakProp.Get();
+		if (!Prop || !Prop->PropMesh)
+		{
+			return;
+		}
+		// Belt-and-braces wake AFTER ionization may have re-enabled physics.
+		Prop->PropMesh->WakeAllRigidBodies();
+
+		const FBodyInstance* BI = Prop->PropMesh->GetBodyInstance();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[FOLIAGE_CONVERT] Post-ionize state (1 tick later, post-wake): SimulatePhysics=%d, IsAwake=%d, Charge=%.2f, Loc=%s"),
+			Prop->PropMesh->IsSimulatingPhysics() ? 1 : 0,
+			(BI && BI->IsInstanceAwake()) ? 1 : 0,
+			Prop->GetCharge(),
+			*Prop->GetActorLocation().ToString());
+	});
 
 	return SpawnedProp;
 }
