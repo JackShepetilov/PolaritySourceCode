@@ -455,9 +455,43 @@ void AShooterNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 	// attach the weapon actor
 	WeaponToAttach->AttachToActor(this, AttachmentRule);
 
+	// --- Debug: verify sockets exist on target meshes BEFORE attaching ---
+	// If the socket name is missing, AttachToComponent silently falls back to the
+	// component root (which is at the feet of the character) — that's why a wrong
+	// socket name makes the weapon "spin under the NPC's feet".
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		if (!TPMesh->DoesSocketExist(ThirdPersonWeaponSocket))
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[WEAPON_ATTACH] %s: ThirdPersonWeaponSocket '%s' NOT FOUND on TP mesh '%s'. Weapon will attach to mesh root (feet)!"),
+				*GetName(),
+				*ThirdPersonWeaponSocket.ToString(),
+				*GetNameSafe(TPMesh->GetSkeletalMeshAsset()));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Verbose,
+				TEXT("[WEAPON_ATTACH] %s: TP socket '%s' OK"),
+				*GetName(),
+				*ThirdPersonWeaponSocket.ToString());
+		}
+	}
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		if (!FPMesh->DoesSocketExist(FirstPersonWeaponSocket))
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[WEAPON_ATTACH] %s: FirstPersonWeaponSocket '%s' NOT FOUND on FP mesh '%s'. Weapon will attach to mesh root!"),
+				*GetName(),
+				*FirstPersonWeaponSocket.ToString(),
+				*GetNameSafe(FPMesh->GetSkeletalMeshAsset()));
+		}
+	}
+
 	// attach the weapon meshes
 	WeaponToAttach->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonWeaponSocket);
-	WeaponToAttach->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, FirstPersonWeaponSocket);
+	WeaponToAttach->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, ThirdPersonWeaponSocket);
 }
 
 void AShooterNPC::PlayFiringMontage(UAnimMontage* Montage)
