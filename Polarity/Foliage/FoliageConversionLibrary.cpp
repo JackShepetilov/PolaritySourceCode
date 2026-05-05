@@ -150,6 +150,16 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		SpawnedProp->PropMesh->SetStaticMesh(InstanceMesh);
 	}
 
+	// Prime DefaultCharge with a tiny non-zero value BEFORE BeginPlay runs.
+	// AEMFPhysicsProp::BeginPlay disables SimulatePhysics for "uncharged"
+	// props (DefaultCharge near zero), then SetCharge() during ionization
+	// re-enables it — that off→on flip recreates the physics body and
+	// leaves it absent from the broadphase the channeling capture scan
+	// uses. Priming here keeps physics on for the whole lifecycle, so
+	// the body is a stable participant in overlap queries from frame 0.
+	// Visually indistinguishable from 0 charge (well below any threshold).
+	SpawnedProp->DefaultCharge = 0.001f;
+
 	// --- 5. Remove the foliage instance BEFORE FinishSpawningActor.
 	//        If we leave the instance in place during BeginPlay, the prop's
 	//        physics body initializes overlapping the instance's collision —
