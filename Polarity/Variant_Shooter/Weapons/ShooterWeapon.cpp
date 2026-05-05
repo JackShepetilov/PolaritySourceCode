@@ -88,6 +88,13 @@ AShooterWeapon::AShooterWeapon()
 	FirstPersonMesh->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::FirstPerson);
 	FirstPersonMesh->bOnlyOwnerSee = true;
 
+	// Always tick pose & refresh bones every frame, and disable Update Rate Optimizations.
+	// Default settings can skip bone updates when the mesh isn't on screen / not playing montage,
+	// which makes child components (sights, suppressors, lasers attached to sockets) lag a frame
+	// behind the weapon's animated pose.
+	FirstPersonMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	FirstPersonMesh->bEnableUpdateRateOptimizations = false;
+
 	// create the third person mesh
 	ThirdPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Third Person Mesh"));
 	ThirdPersonMesh->SetupAttachment(RootComponent);
@@ -139,6 +146,70 @@ void AShooterWeapon::BeginPlay()
 	if (ADSCameraComponent && FirstPersonMesh && FirstPersonMesh->DoesSocketExist(ADSSocketName))
 	{
 		ADSCameraComponent->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ADSSocketName);
+	}
+
+	// Force every component attached to the weapon's meshes (sights, suppressors, lasers,
+	// rails, etc.) to tick AFTER the mesh's animation has been evaluated AND in a later tick
+	// group, so they cannot read stale bone/socket transforms and lag a frame behind the weapon.
+	auto ForceLateTickOnChildren = [](USkeletalMeshComponent* Parent)
+	{
+		if (!Parent) return;
+
+		TArray<USceneComponent*> AttachedChildren;
+		Parent->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AttachedChildren);
+		for (USceneComponent* Child : AttachedChildren)
+		{
+			if (!Child || Child == Parent) continue;
+
+			// 1. Hard prerequisite — child can never tick before the parent.
+			Child->AddTickPrerequisiteComponent(Parent);
+
+			// 2. Push tick into TG_PostPhysics so it runs after PrePhysics anim work AND
+			//    any DuringPhysics simulation. If the component doesn't tick at all this is
+			//    harmless; if it does (animated, particle, dynamic), it picks up the latest pose.
+			if (Child->PrimaryComponentTick.bCanEverTick)
+			{
+				Child->PrimaryComponentTick.TickGroup = TG_PostPhysics;
+			}
+		}
+	};
+	ForceLateTickOnChildren(FirstPersonMesh);
+	ForceLateTickOnChildren(ThirdPersonMesh);
+
+	// === Diagnostic dump of attachment transforms after equip ===
+	// Filter Output Log by [ATTACH_DEBUG] to read it.
+	if (FirstPersonMesh)
+	{
+		const FTransform MeshWorld = FirstPersonMesh->GetComponentTransform();
+		const FTransform MeshRelative = FirstPersonMesh->GetRelativeTransform();
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH_DEBUG] === %s FirstPersonMesh ==="), *GetName());
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH_DEBUG]   AttachSocket=%s"), *FirstPersonMesh->GetAttachSocketName().ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH_DEBUG]   Rel  T=%s R=%s S=%s"),
+			*MeshRelative.GetLocation().ToString(),
+			*MeshRelative.GetRotation().Rotator().ToString(),
+			*MeshRelative.GetScale3D().ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH_DEBUG]   World T=%s R=%s S=%s"),
+			*MeshWorld.GetLocation().ToString(),
+			*MeshWorld.GetRotation().Rotator().ToString(),
+			*MeshWorld.GetScale3D().ToString());
+
+		TArray<USceneComponent*> AllChildren;
+		FirstPersonMesh->GetChildrenComponents(true, AllChildren);
+		for (USceneComponent* Child : AllChildren)
+		{
+			if (!Child) continue;
+			const FTransform Rel = Child->GetRelativeTransform();
+			const FTransform World = Child->GetComponentTransform();
+			UE_LOG(LogTemp, Warning,
+				TEXT("[ATTACH_DEBUG] Child=%s class=%s ParentSocket=%s | Rel T=%s R=%s S=%s | World T=%s"),
+				*Child->GetName(),
+				*Child->GetClass()->GetName(),
+				*Child->GetAttachSocketName().ToString(),
+				*Rel.GetLocation().ToString(),
+				*Rel.GetRotation().Rotator().ToString(),
+				*Rel.GetScale3D().ToString(),
+				*World.GetLocation().ToString());
+		}
 	}
 }
 

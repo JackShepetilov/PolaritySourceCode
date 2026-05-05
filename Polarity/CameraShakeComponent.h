@@ -389,6 +389,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera Shake")
 	float GetFOVOffset() const { return CurrentFOVOffset; }
 
+	/** Set the base FOV the shake adds its offsets on top of (e.g. driven by ADS blend). */
+	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
+	void SetBaseFOV(float NewBaseFOV) { BaseFOV = NewBaseFOV; }
+
 	/** Get viewmodel bob position offset */
 	UFUNCTION(BlueprintPure, Category = "Camera Shake|Bob")
 	FVector GetViewmodelBobOffset() const { return CurrentViewmodelBobOffset; }

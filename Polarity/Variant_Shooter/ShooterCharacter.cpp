@@ -5,6 +5,7 @@
 #include "ShooterWeapon.h"
 #include "Weapons/ShooterWeapon_Melee.h"
 #include "Weapons/DroppedRangedWeapon.h"
+#include "Weapons/RiotShield.h"
 #include "UI/EMFChargeWidgetSubsystem.h"
 #include "AI/ShooterNPC.h"
 #include "ShooterDummyInterface.h"
@@ -241,6 +242,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		if (MeleeAction)
 		{
 			EnhancedInputComponent->BindAction(MeleeAction, ETriggerEvent::Triggered, this, &AShooterCharacter::DoMeleeAttack);
+		}
+
+		// Shield toggle (tap = raise/lower). Throw is bound to the channel/grab key (DoChannelPressed override).
+		if (ShieldToggleAction)
+		{
+			EnhancedInputComponent->BindAction(ShieldToggleAction, ETriggerEvent::Started, this, &AShooterCharacter::OnShieldTogglePressed);
 		}
 
 		// Weapon hotkeys
@@ -598,12 +605,17 @@ void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
 			WeaponSwitchProgress += DeltaTime / WeaponSwitchRaiseTime;
 			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
 
-			// Interpolate mesh up
+			// Interpolate mesh up.
+			// Anchor includes the new weapon's per-weapon mesh offset so the rise ends
+			// exactly where APolarityCharacter::Tick will keep applying it next frame —
+			// no snap when bIsWeaponSwitchInProgress flips off.
 			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
 			{
 				float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
-				FVector LoweredLocation = WeaponSwitchMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(LoweredLocation, WeaponSwitchMeshBaseLocation, Alpha);
+				const FVector RaiseAnchor = FirstPersonMeshBaseLocation
+					+ (CurrentWeapon ? CurrentWeapon->FirstPersonMeshOffset : FVector::ZeroVector);
+				FVector LoweredLocation = RaiseAnchor - FVector(0.0f, 0.0f, 100.0f);
+				FVector NewLocation = FMath::Lerp(LoweredLocation, RaiseAnchor, Alpha);
 				FPMesh->SetRelativeLocation(NewLocation);
 			}
 
@@ -652,10 +664,13 @@ void AShooterCharacter::OnWeaponSwitchLowered()
 
 void AShooterCharacter::OnWeaponSwitchRaised()
 {
-	// Restore mesh to exact base position
+	// Restore mesh to the equipped weapon's natural rest position so the value matches
+	// what APolarityCharacter::Tick will keep applying once bIsWeaponSwitchInProgress flips off.
 	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
 	{
-		FPMesh->SetRelativeLocation(WeaponSwitchMeshBaseLocation);
+		const FVector EquippedTarget = FirstPersonMeshBaseLocation
+			+ (CurrentWeapon ? CurrentWeapon->FirstPersonMeshOffset : FVector::ZeroVector);
+		FPMesh->SetRelativeLocation(EquippedTarget);
 	}
 
 	// Switch complete
@@ -692,6 +707,13 @@ void AShooterCharacter::DoMeleeAttack()
 	// Don't allow normal melee during boss finisher
 	if (bBossFinisherActive)
 	{
+		return;
+	}
+
+	// Shield bash takes priority when raised — replaces both quick-melee and equipped melee weapon swings.
+	if (EquippedShield && EquippedShield->IsRaised())
+	{
+		EquippedShield->StartBash();
 		return;
 	}
 
@@ -849,6 +871,12 @@ void AShooterCharacter::DoStartADS()
 		return;
 	}
 
+	// Don't ADS while shield is raised (shield blocks the sight line)
+	if (EquippedShield && EquippedShield->IsRaised())
+	{
+		return;
+	}
+
 	// Don't ADS if charge animating
 	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
 	{
@@ -865,35 +893,12 @@ void AShooterCharacter::DoStartADS()
 	{
 		bWantsToAim = true;
 
-		// Play ADS in sound
 		if (CurrentWeapon)
 		{
 			CurrentWeapon->PlayADSInSound();
-
-			// Set the weapon as the view target — PlayerCameraManager will blend
-			// to it and call Weapon->CalcCamera() which returns sight-socket position
-			// with ControlRotation (no recoil visual kick)
-			if (APlayerController* PC = Cast<APlayerController>(GetController()))
-			{
-				FViewTargetTransitionParams BlendParams;
-				BlendParams.BlendTime = CurrentWeapon->GetADSBlendInTime();
-				BlendParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
-				BlendParams.BlendExp = 2.0f;
-				PC->SetViewTarget(CurrentWeapon, BlendParams);
-			}
 		}
 
-		// Attach FP Mesh (hands + weapon) to CameraComponent so it follows pitch.
-		// FP Mesh was on 3P Mesh (Yaw only). Camera has Pitch + Yaw.
-		// KeepWorldTransform preserves current visual position during transition.
-		USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
-		UCameraComponent* Camera = GetFirstPersonCameraComponent();
-		if (FPMesh && Camera)
-		{
-			FPMesh->AttachToComponent(Camera, FAttachmentTransformRules::KeepWorldTransform);
-		}
-
-		// Tell recoil component we're aiming
+		// Tell recoil component we're aiming (split between camera/viewmodel kick)
 		if (RecoilComponent)
 		{
 			RecoilComponent->SetAiming(true);
@@ -911,27 +916,9 @@ void AShooterCharacter::DoStopADS()
 		CurrentWeapon->OnSecondaryActionReleased();
 	}
 
-	// Only play sound and transition camera if we were actually aiming
 	if (bWantsToAim && CurrentWeapon)
 	{
 		CurrentWeapon->PlayADSOutSound();
-
-		// Blend camera back to the character (CameraComponent)
-		if (APlayerController* PC = Cast<APlayerController>(GetController()))
-		{
-			FViewTargetTransitionParams BlendParams;
-			BlendParams.BlendTime = CurrentWeapon->GetADSBlendOutTime();
-			BlendParams.BlendFunction = EViewTargetBlendFunction::VTBlend_EaseInOut;
-			BlendParams.BlendExp = 2.0f;
-			PC->SetViewTarget(this, BlendParams);
-		}
-
-		// Reattach FP Mesh back to 3P Mesh (GetMesh) so it stops following pitch
-		USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
-		if (FPMesh)
-		{
-			FPMesh->AttachToComponent(GetMesh(), FAttachmentTransformRules::KeepWorldTransform);
-		}
 	}
 
 	bWantsToAim = false;
@@ -945,8 +932,24 @@ void AShooterCharacter::DoStopADS()
 
 void AShooterCharacter::UpdateADS(float DeltaTime)
 {
+	// Shield camera offset — interpolated independently of ADS being enabled, applied at the very
+	// end so it composes with whatever path (ADS-on or ADS-off) sets the camera transform.
+	{
+		const FVector ShieldOffsetTarget = (EquippedShield && EquippedShield->IsRaised())
+			? EquippedShield->GetCameraOffsetWhenRaised()
+			: FVector::ZeroVector;
+		CurrentShieldCameraOffset = FMath::VInterpTo(
+			CurrentShieldCameraOffset, ShieldOffsetTarget, DeltaTime, ShieldCameraInterpSpeed);
+	}
+
 	if (!MovementSettings || !MovementSettings->bEnableADS)
 	{
+		// ADS disabled but we still need the shield offset to land on the camera. The camera's
+		// relative location is otherwise untouched here, so set it = base + shield offset each tick.
+		if (UCameraComponent* Cam = GetFirstPersonCameraComponent())
+		{
+			Cam->SetRelativeLocation(BaseCameraLocation + CurrentShieldCameraOffset);
+		}
 		return;
 	}
 
@@ -961,21 +964,63 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		MovementSettings->ADSInterpSpeed
 	);
 
-	// Camera position/rotation is handled by SetViewTarget + CalcCamera blend
-	// (PlayerCameraManager blends between character camera and weapon CalcCamera).
-	// We still need to apply shake offset to the character's own camera component
-	// so it's correct when not in ADS.
+	// ==================== Camera Position Blend ====================
+	// ADS = camera moves to the weapon's ADSCamera anchor (stays at hipfire base when alpha=0).
+	// Weapon mesh / hands stay in their normal animated pose — no Modify Bone, no skeleton hacks.
+	// Designer places ADSCamera component on the weapon at the desired sight-eye position.
 	UCameraComponent* Camera = GetFirstPersonCameraComponent();
-	if (Camera)
+	if (!Camera)
 	{
-		// Apply shake offset to camera (always, regardless of ADS state)
-		FVector ShakeOffset = FVector::ZeroVector;
-		if (UCameraShakeComponent* ShakeComp = GetCameraShake())
-		{
-			ShakeOffset = ShakeComp->GetCameraOffset();
-		}
-		Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset);
+		return;
 	}
+
+	FVector ShakeOffset = FVector::ZeroVector;
+	if (UCameraShakeComponent* ShakeComp = GetCameraShake())
+	{
+		ShakeOffset = ShakeComp->GetCameraOffset();
+	}
+
+	// Hipfire camera target in WORLD space (character actor transform * relative base + shake).
+	const FTransform CharXform = GetActorTransform();
+	const FVector BaseCameraWorld = CharXform.TransformPosition(BaseCameraLocation + ShakeOffset);
+
+	// ADS targets — fall back to hipfire base if no ADSCamera on the weapon.
+	FVector ADSCameraWorld = BaseCameraWorld;
+	float   ADSFOV    = BaseCameraFOV;
+	float   ADSFPFOV  = BaseFirstPersonFOV;
+	if (CurrentWeapon)
+	{
+		if (UCameraComponent* WeaponADSCam = CurrentWeapon->GetADSCamera())
+		{
+			ADSCameraWorld = WeaponADSCam->GetComponentLocation();
+			ADSFOV         = WeaponADSCam->FieldOfView;
+			ADSFPFOV       = WeaponADSCam->FirstPersonFieldOfView;
+		}
+	}
+
+	// Lerp position by alpha and apply. Camera rotation is unchanged — bUsePawnControlRotation
+	// keeps it glued to ControlRotation, so player aim still works as usual; only the eye slides.
+	const FVector InterpCameraWorld = FMath::Lerp(BaseCameraWorld, ADSCameraWorld, CurrentADSAlpha);
+
+	// Add shield camera offset (in actor-local space → world).
+	const FVector ShieldOffsetWorld = CharXform.TransformVector(CurrentShieldCameraOffset);
+	Camera->SetWorldLocation(InterpCameraWorld + ShieldOffsetWorld);
+
+	// Lerp FOV — designer sets desired zoom directly on the weapon's ADSCamera component.
+	// CameraShakeComponent overwrites Camera->FieldOfView each frame using its own BaseFOV +
+	// effect offsets, so we route our blended value through SetBaseFOV(). FirstPersonFieldOfView
+	// is not touched by the shake component, so we write it directly on the camera.
+	const float InterpFOV   = FMath::Lerp(BaseCameraFOV,      ADSFOV,   CurrentADSAlpha);
+	const float InterpFPFOV = FMath::Lerp(BaseFirstPersonFOV, ADSFPFOV, CurrentADSAlpha);
+	if (UCameraShakeComponent* ShakeComp = GetCameraShake())
+	{
+		ShakeComp->SetBaseFOV(InterpFOV);
+	}
+	else
+	{
+		Camera->SetFieldOfView(InterpFOV);
+	}
+	Camera->FirstPersonFieldOfView = InterpFPFOV;
 }
 
 void AShooterCharacter::UpdateRegeneration(float DeltaTime)
@@ -1126,32 +1171,9 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 	FPMesh->SetRelativeLocation(CurrentLocation);
 	FPMesh->SetRelativeRotation(CurrentRotation);
 
-	// === ADS Pitch Follow ===
-	// FP Mesh parent (3P Mesh) has ~-90° Yaw. In that parent-local space,
-	// world pitch maps to a different axis. Use the same UnrotateVector
-	// conversion as recoil to correctly add pitch in parent-local space.
-	if (CurrentADSAlpha > KINDA_SMALL_NUMBER)
-	{
-		float CameraPitch = GetControlRotation().Pitch;
-		if (CameraPitch > 180.0f) CameraPitch -= 360.0f;
-
-		float PitchToAdd = CameraPitch * CurrentADSAlpha;
-
-		// Convert world-logical pitch to parent-local rotation
-		// Same method as recoil: (Roll, Pitch, Yaw) vector through UnrotateVector
-		if (USceneComponent* Parent = FPMesh->GetAttachParent())
-		{
-			const FRotator ParentRot = Parent->GetRelativeRotation();
-			const FVector WorldRotVec(0.0f, PitchToAdd, 0.0f); // (Roll, Pitch, Yaw) in world
-			const FVector LocalRotVec = ParentRot.UnrotateVector(WorldRotVec);
-			FRotator PitchInLocal = FRotator(LocalRotVec.Y, LocalRotVec.Z, LocalRotVec.X);
-
-			CurrentLocation = FPMesh->GetRelativeLocation();
-			CurrentRotation = FPMesh->GetRelativeRotation();
-			CurrentRotation += PitchInLocal;
-			FPMesh->SetRelativeRotation(CurrentRotation);
-		}
-	}
+	// ADS pose follow is handled by the AnimBP Modify Bone driven by ADSAnchorOffset
+	// (computed in UpdateADS). No additional pitch-follow on the mesh component here —
+	// it would double up with the bone modification.
 }
 
 void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
@@ -1578,7 +1600,14 @@ void AShooterCharacter::UnbindMovementSFXDelegates()
 
 void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 {
-	const FAttachmentTransformRules AttachmentRule(EAttachmentRule::SnapToTarget, false);
+	// SnapToTarget for location+rotation (so socket aligns the mesh), but KeepRelative for SCALE
+	// so the weapon's blueprint-set Scale is preserved instead of being reset to (1,1,1) by the
+	// socket's scale (the single-arg ctor would have applied SnapToTarget to scale too).
+	const FAttachmentTransformRules AttachmentRule(
+		EAttachmentRule::SnapToTarget,    // Location
+		EAttachmentRule::SnapToTarget,    // Rotation
+		EAttachmentRule::KeepRelative,    // Scale
+		false);
 
 	// attach the weapon actor
 	Weapon->AttachToActor(this, AttachmentRule);
@@ -1587,28 +1616,48 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	Weapon->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonWeaponSocket);
 	Weapon->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, ThirdPersonWeaponSocket);
 
-	// If weapon has OptionalGrip socket, offset the mesh so that socket aligns with hand
+	// If weapon has OptionalGrip socket, offset the mesh so that socket aligns with hand.
+	// IMPORTANT: shifting the mesh's relative transform also moves every attached child
+	// (sights, suppressors, lasers, etc.) — that's why BP-placed attachments end up in the
+	// "wrong" spot at runtime vs. how they look in the editor preview. We compensate by
+	// snapshotting each child's WORLD transform before the shift and restoring it afterwards,
+	// so children stay where the BP author placed them visually relative to the authored mesh.
 	static const FName OptionalGripSocket = FName("OptionalGrip");
 
-	if (USkeletalMeshComponent* FPMesh = Weapon->GetFirstPersonMesh())
+	auto AlignToOptionalGripPreservingChildren = [](USkeletalMeshComponent* WeaponMesh)
 	{
-		if (FPMesh->DoesSocketExist(OptionalGripSocket))
+		if (!WeaponMesh || !WeaponMesh->DoesSocketExist(OptionalGripSocket))
 		{
-			FTransform SocketTransform = FPMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
-			FPMesh->SetRelativeLocation(-SocketTransform.GetLocation());
-			FPMesh->SetRelativeRotation(SocketTransform.GetRotation().Inverse());
+			return;
 		}
-	}
 
-	if (USkeletalMeshComponent* TPMesh = Weapon->GetThirdPersonMesh())
-	{
-		if (TPMesh->DoesSocketExist(OptionalGripSocket))
+		// Capture children world transforms BEFORE the parent shift.
+		TArray<USceneComponent*> Children;
+		WeaponMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
+		TArray<FTransform> ChildWorldBefore;
+		ChildWorldBefore.Reserve(Children.Num());
+		for (USceneComponent* Child : Children)
 		{
-			FTransform SocketTransform = TPMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
-			TPMesh->SetRelativeLocation(-SocketTransform.GetLocation());
-			TPMesh->SetRelativeRotation(SocketTransform.GetRotation().Inverse());
+			ChildWorldBefore.Add(Child ? Child->GetComponentTransform() : FTransform::Identity);
 		}
-	}
+
+		// Apply the OptionalGrip alignment shift to the mesh itself.
+		const FTransform SocketTransform = WeaponMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
+		WeaponMesh->SetRelativeLocation(-SocketTransform.GetLocation());
+		WeaponMesh->SetRelativeRotation(SocketTransform.GetRotation().Inverse());
+
+		// Restore each child's WORLD transform — undoes the unintended drift the parent shift caused.
+		for (int32 i = 0; i < Children.Num(); ++i)
+		{
+			if (USceneComponent* Child = Children[i])
+			{
+				Child->SetWorldTransform(ChildWorldBefore[i]);
+			}
+		}
+	};
+
+	AlignToOptionalGripPreservingChildren(Weapon->GetFirstPersonMesh());
+	AlignToOptionalGripPreservingChildren(Weapon->GetThirdPersonMesh());
 }
 
 void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
@@ -2041,6 +2090,76 @@ void AShooterCharacter::OnSwapHoldThresholdFired()
 	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] OnSwapHoldThresholdFired — calling ThrowYankedWeaponIfAny"));
 	bSwapKeyHeldPending = false;
 	ThrowYankedWeaponIfAny();
+}
+
+// ==================== Riot Shield ====================
+
+void AShooterCharacter::EquipShield(ARiotShield* Shield)
+{
+	if (!Shield)
+	{
+		return;
+	}
+	if (EquippedShield)
+	{
+		// Already carry one — refuse (swap behavior is a future feature).
+		return;
+	}
+
+	EquippedShield = Shield;
+	Shield->OnDestroyed.AddUniqueDynamic(this, &AShooterCharacter::OnEquippedShieldDestroyed);
+	Shield->EquipToCharacter(this);
+
+	// Disable wallrun while a shield is held (kills any active wallrun, blocks new ones).
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SetWallRunExternallyDisabled(true);
+	}
+}
+
+void AShooterCharacter::OnEquippedShieldDestroyed(AActor* DestroyedActor)
+{
+	if (DestroyedActor == EquippedShield)
+	{
+		EquippedShield = nullptr;
+
+		// Re-enable wallrun now that the shield is gone.
+		if (UApexMovementComponent* Apex = GetApexMovement())
+		{
+			Apex->SetWallRunExternallyDisabled(false);
+		}
+	}
+}
+
+void AShooterCharacter::OnShieldTogglePressed()
+{
+	if (EquippedShield)
+	{
+		EquippedShield->Toggle();
+	}
+}
+
+// ==================== Channel button override (grab) ====================
+
+void AShooterCharacter::DoChannelPressed()
+{
+	// Shield held → repurpose the grab key as "throw shield" and suppress the channel/capture path.
+	if (EquippedShield)
+	{
+		EquippedShield->ThrowAway();
+		return;
+	}
+	Super::DoChannelPressed();
+}
+
+void AShooterCharacter::DoChannelReleased()
+{
+	// Shield held → no channel was started, ignore the release.
+	if (EquippedShield)
+	{
+		return;
+	}
+	Super::DoChannelReleased();
 }
 
 void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
@@ -2812,11 +2931,18 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 		bIsWallRunning = Apex->IsWallRunning();
 	}
 
+	// Riot shield equipped: force alpha=0 — left hand is busy holding the shield, so the AnimBP
+	// should drive it via animation rather than IK-pinning it to the weapon's left-hand socket.
+	// (Same convention as wallrun and charging-channel: alpha=0 = "hand free of weapon".)
+	if (HasShield())
+	{
+		TargetLeftHandIKAlpha = 0.0f;
+	}
 	// Wallrun forces alpha=0 (hand free of weapon while running on wall).
 	// Otherwise default to 1.0, UNLESS ChargeAnimationComponent has authority over alpha
 	// (during channeling its SetLeftHandIKAlpha(0) sets alpha=0 to free left arm for
 	// catch/hold/throw montages — don't clobber it every Tick).
-	if (bIsWallRunning)
+	else if (bIsWallRunning)
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}

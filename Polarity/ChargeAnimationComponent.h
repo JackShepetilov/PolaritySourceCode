@@ -647,6 +647,9 @@ protected:
 	/** Yank the current weapon from a humanoid NPC (single action, no hold state) */
 	void CaptureHumanoidWeapon(AHumanoidNPC* Humanoid);
 
+	/** Yank the riot shield off a humanoid NPC (single action, spawns ARiotShieldPickup that flies to player) */
+	void CaptureHumanoidShield(AHumanoidNPC* Humanoid);
+
 	/** Capture an accelerator plate (lowest priority, no charge dependency) */
 	void CaptureAcceleratorPlate(AEMFAcceleratorPlate* Plate);
 

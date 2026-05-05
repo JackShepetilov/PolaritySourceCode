@@ -27,6 +27,7 @@ class UStaticMeshComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
 class AEMFPhysicsProp;
+class ARiotShield;
 struct FCheckpointData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
@@ -190,6 +191,10 @@ protected:
 	/** Melee attack input action */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* MeleeAction;
+
+	/** Shield toggle input action (tap = raise/lower, hold = throw). */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* ShieldToggleAction;
 
 	/** Name of the first person mesh weapon socket */
 	UPROPERTY(EditAnywhere, Category = "Weapons")
@@ -1224,6 +1229,38 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
 	void ThrowYankedWeaponIfAny();
 
+	// ==================== Riot Shield API ====================
+
+	/** True when the player currently owns a shield (regardless of raised/lowered state). */
+	UFUNCTION(BlueprintPure, Category = "Shield")
+	bool HasShield() const { return EquippedShield != nullptr; }
+
+	/** Returns the currently equipped shield actor (or nullptr). */
+	UFUNCTION(BlueprintPure, Category = "Shield")
+	ARiotShield* GetEquippedShield() const { return EquippedShield; }
+
+	/** Place a shield in the shield slot, attach it to the camera, and start raised.
+	 *  Called by ARiotShieldPickup::OnOverlap. */
+	UFUNCTION(BlueprintCallable, Category = "Shield")
+	void EquipShield(ARiotShield* Shield);
+
+	/** Shield-toggle key (tap-only): raise ↔ lower. Throw is now bound to the channel/grab key. */
+	void OnShieldTogglePressed();
+
+	/** Notification from the shield actor when it's destroyed (break or throw). Clears the slot. */
+	UFUNCTION()
+	void OnEquippedShieldDestroyed(AActor* DestroyedActor);
+
+	// ==================== Channel button override ====================
+
+	/** While a shield is equipped: throw the shield instead of starting a charge channel.
+	 *  Otherwise defers to the base implementation (normal grab/channel). */
+	virtual void DoChannelPressed() override;
+
+	/** While a shield is equipped: swallow the release (no channel was started).
+	 *  Otherwise defers to the base implementation. */
+	virtual void DoChannelReleased() override;
+
 	// ==================== Yank Drop Settings (passive auto-replace) ====================
 
 	/** Spawn offset (relative to player actor space) for the discarded yanked weapon.
@@ -1260,6 +1297,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapons|Yank Throw")
 	FVector YankThrowAngularImpulse = FVector(0.0f, 800.0f, 300.0f);
 
+	// ==================== Riot Shield ====================
+
+	/** Currently equipped riot shield (separate slot — not part of OwnedWeapons). */
+	UPROPERTY(BlueprintReadOnly, Category = "Shield")
+	TObjectPtr<ARiotShield> EquippedShield;
+
+	/** Interpolation speed for the shield-equipped camera offset (higher = snappier). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+	float ShieldCameraInterpSpeed = 8.0f;
+
+	/** Current shield-equipped camera offset (interpolated each tick toward Shield->CameraOffsetWhenRaised when raised, ZeroVector otherwise). */
+	FVector CurrentShieldCameraOffset = FVector::ZeroVector;
+
 protected:
 
 	/** Timer for hold-detection on the swap weapon key */
@@ -1271,6 +1321,7 @@ protected:
 
 	/** World seconds when the swap key was pressed (for debug "held for Xs" log). */
 	float SwapKeyPressTime = -1.0f;
+
 
 
 

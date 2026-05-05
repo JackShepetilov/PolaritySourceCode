@@ -12,6 +12,7 @@
 class ADroppedRangedWeapon;
 class AShooterCharacter;
 class UAnimInstance;
+class UNPCRiotShieldComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHumanoidEnteredMeleeMode, AHumanoidNPC*, Humanoid);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHumanoidExitedMeleeMode,  AHumanoidNPC*, Humanoid);
@@ -103,9 +104,30 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Humanoid")
 	float CalculateWeaponYankRange() const;
 
-	/** True if a yank can start: ranged mode, weapon valid, no yank in progress, not dead. */
+	/** True if a yank can start: ranged mode, weapon valid, no yank in progress, not dead.
+	 *  Returns false while a shield is still active — shield must be yanked first. */
 	UFUNCTION(BlueprintPure, Category = "Humanoid")
 	bool CanBeYanked() const;
+
+	// ==================== Shield API ====================
+
+	/** Optional shield component. Always present, but inactive unless its ShieldMeshAsset+PickupClass are set
+	 *  (so vanilla BP_HumanoidNPC keeps working unchanged). */
+	UFUNCTION(BlueprintPure, Category = "Humanoid|Shield")
+	UNPCRiotShieldComponent* GetShieldComponent() const { return ShieldComponent; }
+
+	/** True if a shield yank can start: shield active, not dead, not in melee mode. */
+	UFUNCTION(BlueprintPure, Category = "Humanoid|Shield")
+	bool CanShieldBeYanked() const;
+
+	/** Player yanks the shield from this NPC. Spawns ARiotShieldPickup with impulse toward Puller.
+	 *  @return false if CanShieldBeYanked() == false or Puller is null. */
+	UFUNCTION(BlueprintCallable, Category = "Humanoid|Shield")
+	bool YankShield(AShooterCharacter* Puller);
+
+	/** Effective shield-yank range; same charge formula as weapon yank. 0 when shield can't be yanked. */
+	UFUNCTION(BlueprintPure, Category = "Humanoid|Shield")
+	float CalculateShieldYankRange() const;
 
 	/** Reset state for pool recycling. Clears weapon index, mode flags, re-spawns first weapon.
 	 *  override is critical: ArenaManager calls ResetForPool through AShooterNPC*, so without
@@ -173,4 +195,8 @@ private:
 
 	/** MaxWalkSpeed value at BeginPlay. Restored on pool reset. */
 	float CachedRangedMaxWalkSpeed = 0.0f;
+
+	/** Optional shield slot. Subobject is always created so designers can opt-in via UPROPERTY in BP children. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Humanoid|Shield", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UNPCRiotShieldComponent> ShieldComponent;
 };

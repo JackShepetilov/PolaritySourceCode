@@ -2,6 +2,7 @@
 
 #include "HumanoidNPC.h"
 #include "EMFVelocityModifier.h"
+#include "NPCRiotShieldComponent.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "ShooterWeapon.h"
@@ -16,6 +17,7 @@
 AHumanoidNPC::AHumanoidNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	ShieldComponent = CreateDefaultSubobject<UNPCRiotShieldComponent>(TEXT("ShieldComponent"));
 }
 
 void AHumanoidNPC::BeginPlay()
@@ -153,7 +155,55 @@ bool AHumanoidNPC::CanBeYanked() const
 	if (bIsInMeleeMode || bIsDead) return false;
 	if (!Weapon) return false;
 	if (GetWorld()->GetTimerManager().IsTimerActive(WeaponSwitchTimer)) return false;
+	// Shield-first ordering: weapon stays unyankable until the shield (if any) is gone
+	if (ShieldComponent && ShieldComponent->HasActiveShield()) return false;
 	return true;
+}
+
+// ==================== Shield API ====================
+
+bool AHumanoidNPC::CanShieldBeYanked() const
+{
+	if (bIsInMeleeMode || bIsDead) return false;
+	if (!ShieldComponent || !ShieldComponent->HasActiveShield()) return false;
+	return true;
+}
+
+bool AHumanoidNPC::YankShield(AShooterCharacter* Puller)
+{
+	if (!CanShieldBeYanked() || !Puller) return false;
+
+	const bool bYanked = ShieldComponent->TryYank(Puller);
+
+	if (bYanked)
+	{
+		// Mirror the weapon-yank charge reset so the body can re-charge for the next yank target
+		if (EMFVelocityModifier)
+		{
+			EMFVelocityModifier->SetCharge(0.0f);
+		}
+
+		// Reuse the same directional yank reaction the weapon-yank uses — keeps shield/weapon yanks visually consistent
+		if (UAnimMontage* Montage = SelectYankMontageForDirection(Puller->GetActorLocation()))
+		{
+			if (USkeletalMeshComponent* YankMesh = GetMesh())
+			{
+				if (UAnimInstance* AnimInst = YankMesh->GetAnimInstance())
+				{
+					AnimInst->Montage_Play(Montage);
+					ActiveYankMontage = Montage;
+				}
+			}
+		}
+	}
+
+	return bYanked;
+}
+
+float AHumanoidNPC::CalculateShieldYankRange() const
+{
+	if (!CanShieldBeYanked()) return 0.0f;
+	return ShieldComponent->CalculateYankRange();
 }
 
 bool AHumanoidNPC::YankCurrentWeapon(AShooterCharacter* Puller)
@@ -439,6 +489,12 @@ void AHumanoidNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewR
 
 	// Parent resets HP, charge, AI, etc.
 	Super::ResetForPool(NewLocation, NewRotation);
+
+	// Re-activate shield if it was yanked during the previous life. No-op for vanilla BPs without shield asset.
+	if (ShieldComponent)
+	{
+		ShieldComponent->ResetForPool();
+	}
 
 	// Spawn first weapon fresh from inventory
 	if (WeaponInventory.IsValidIndex(0) && WeaponInventory[0])

@@ -830,7 +830,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, ScriptedPickup, HumanoidWeapon };
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, ScriptedPickup, HumanoidWeapon, HumanoidShield };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -911,10 +911,12 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			}
 		}
 
-		// HumanoidNPC — yank weapon from hands instead of body capture
+		// HumanoidNPC — yank shield first (if present), then weapon, instead of body capture
 		if (AHumanoidNPC* Humanoid = Cast<AHumanoidNPC>(HitActor))
 		{
-			if (!Humanoid->CanBeYanked()) continue;
+			const bool bShieldYankable = Humanoid->CanShieldBeYanked();
+			const bool bWeaponYankable = !bShieldYankable && Humanoid->CanBeYanked();
+			if (!bShieldYankable && !bWeaponYankable) continue;
 
 			// Require opposite charge sign (same rule as regular NPC capture)
 			UEMFVelocityModifier* HumanoidMod = Humanoid->FindComponentByClass<UEMFVelocityModifier>();
@@ -926,10 +928,10 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			// Range: logarithmic, same formula as DroppedRangedWeapon
+			// Range: logarithmic, same formula as DroppedRangedWeapon (shield uses its own base/norm)
 			const FVector ToTarget = Humanoid->GetActorLocation() - CameraLoc;
 			const float DistSq = ToTarget.SizeSquared();
-			const float YankRange = Humanoid->CalculateWeaponYankRange();
+			const float YankRange = bShieldYankable ? Humanoid->CalculateShieldYankRange() : Humanoid->CalculateWeaponYankRange();
 			if (YankRange < 1.0f || DistSq > YankRange * YankRange || DistSq < 1.0f) continue;
 
 			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
@@ -940,7 +942,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = Humanoid;
-				BestTargetType = ECaptureTargetType::HumanoidWeapon;
+				BestTargetType = bShieldYankable ? ECaptureTargetType::HumanoidShield : ECaptureTargetType::HumanoidWeapon;
 			}
 			continue;
 		}
@@ -1185,6 +1187,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		case ECaptureTargetType::HumanoidWeapon:
 			CaptureHumanoidWeapon(Cast<AHumanoidNPC>(BestTarget));
 			break;
+		case ECaptureTargetType::HumanoidShield:
+			CaptureHumanoidShield(Cast<AHumanoidNPC>(BestTarget));
+			break;
 		default:
 			break;
 		}
@@ -1300,6 +1305,29 @@ void UChargeAnimationComponent::CaptureHumanoidWeapon(AHumanoidNPC* Humanoid)
 		ShooterChar->OnPropCaptured.Broadcast(Humanoid);
 
 		Humanoid->YankCurrentWeapon(ShooterChar);
+	}
+
+	// CurrentCapturedNPC intentionally NOT set — yank has no hold phase
+}
+
+void UChargeAnimationComponent::CaptureHumanoidShield(AHumanoidNPC* Humanoid)
+{
+	if (!Humanoid) return;
+
+	// Yank is a one-shot action — no hold state, so release any previous capture first
+	ReleaseCapturedNPC();
+
+	// Same VFX feedback as weapon-yank: beam to humanoid + plate aura
+	SpawnCaptureVFX(Humanoid);
+	SpawnHoldVFX();
+
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		// Broadcast capture event so HealthBlast-style empty-capture timers cancel
+		ShooterChar->OnPropCaptured.Broadcast(Humanoid);
+
+		Humanoid->YankShield(ShooterChar);
 	}
 
 	// CurrentCapturedNPC intentionally NOT set — yank has no hold phase

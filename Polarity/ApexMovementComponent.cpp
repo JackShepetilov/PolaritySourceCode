@@ -935,6 +935,11 @@ bool UApexMovementComponent::CanWallRun() const
 		return false;
 	}
 
+	if (bWallRunExternallyDisabled)
+	{
+		return false;
+	}
+
 	if (bIsSliding || bIsMantling || bIsWallRunning || bIsCrouchedInAir)
 	{
 		return false;
@@ -1216,6 +1221,17 @@ void UApexMovementComponent::StartWallRun(const FHitResult& WallHit, EWallSide S
 
 	OnWallRunChanged.Broadcast(true, Side);
 	OnWallrunStarted.Broadcast(Side);
+}
+
+void UApexMovementComponent::SetWallRunExternallyDisabled(bool bDisabled)
+{
+	bWallRunExternallyDisabled = bDisabled;
+
+	// If we just got disabled while a wallrun is in progress, kill it immediately.
+	if (bDisabled && bIsWallRunning)
+	{
+		EndWallRun(EWallRunEndReason::LostWall);
+	}
 }
 
 void UApexMovementComponent::EndWallRun(EWallRunEndReason Reason)

@@ -116,6 +116,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bIsWallRunning = false;
 
+	/** Set by external systems (e.g. ShooterCharacter when a riot shield is equipped) to fully gate wallrun. */
+	UPROPERTY()
+	bool bWallRunExternallyDisabled = false;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	EWallSide WallRunSide = EWallSide::None;
 
@@ -225,6 +229,13 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void EndWallRun(EWallRunEndReason Reason = EWallRunEndReason::LostWall);
+
+	/** External gate: when true, CanWallRun() always returns false and an active wallrun is interrupted. */
+	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
+	void SetWallRunExternallyDisabled(bool bDisabled);
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsWallRunExternallyDisabled() const { return bWallRunExternallyDisabled; }
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsWallRunning() const { return bIsWallRunning; }

@@ -34,6 +34,10 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonMesh->SetOnlyOwnerSee(true);
 	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
 	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
+	// Force full per-frame pose & bone refresh so weapon/attachment world transforms can never
+	// lag behind the hand animation (default tick option only refreshes bones during montages).
+	FirstPersonMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	FirstPersonMesh->bEnableUpdateRateOptimizations = false;
 
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
 	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());

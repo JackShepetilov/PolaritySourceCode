@@ -164,11 +164,11 @@ protected:
 
 	/** Channel button pressed */
 	UFUNCTION(BlueprintCallable, Category = "EMF")
-	void DoChannelPressed();
+	virtual void DoChannelPressed();
 
 	/** Channel button released */
 	UFUNCTION(BlueprintCallable, Category = "EMF")
-	void DoChannelReleased();
+	virtual void DoChannelReleased();
 
 	/** Update camera effects (tilt, pitch offset from shakes) */
 	void UpdateCameraEffects(float DeltaTime);
@@ -335,6 +335,12 @@ public:
 	/** Returns camera shake component */
 	UFUNCTION(BlueprintPure, Category = "Camera")
 	UCameraShakeComponent* GetCameraShake() const { return CameraShakeComponent; }
+
+	/** Current procedural run-sway position offset (in FP-mesh local space). Updated each tick. */
+	const FVector& GetCurrentRunSwayPosition() const { return CurrentRunSwayPosition; }
+
+	/** Current procedural run-sway rotation offset. Updated each tick. */
+	const FRotator& GetCurrentRunSwayRotation() const { return CurrentRunSwayRotation; }
 
 	// ==================== EMF Methods ====================
 
