@@ -209,7 +209,22 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 			SpawnedProp->IsDead() ? 1 : 0);
 	}
 
-	// Re-log + force-wake one tick later (after caller's ionization has run).
+	// Force-rebuild physics state so the body is re-registered in the
+	// physics scene's broadphase. Theory: SetStaticMesh + BeginPlay's
+	// SimulatePhysics toggling can leave the body simulating but missing
+	// from the spatial structure that OverlapMultiByObjectType walks.
+	// Also re-assert collision settings in case SetStaticMesh stomped them
+	// from the static mesh asset's BodySetup defaults.
+	if (UStaticMeshComponent* M = SpawnedProp->PropMesh)
+	{
+		M->SetCollisionProfileName(TEXT("PhysicsActor"));
+		M->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		M->SetCollisionObjectType(ECC_PhysicsBody);
+		M->RecreatePhysicsState();
+		M->WakeAllRigidBodies();
+	}
+
+	// Re-log one tick later (after caller's ionization has run).
 	TWeakObjectPtr<AEMFPhysicsProp> WeakProp = SpawnedProp;
 	World->GetTimerManager().SetTimerForNextTick([WeakProp]()
 	{
@@ -218,12 +233,14 @@ AEMFPhysicsProp* UFoliageConversionLibrary::TryConvertFoliageInstance(const FHit
 		{
 			return;
 		}
-		// Belt-and-braces wake AFTER ionization may have re-enabled physics.
 		Prop->PropMesh->WakeAllRigidBodies();
 
 		const FBodyInstance* BI = Prop->PropMesh->GetBodyInstance();
 		UE_LOG(LogTemp, Warning,
-			TEXT("[FOLIAGE_CONVERT] Post-ionize state (1 tick later, post-wake): SimulatePhysics=%d, IsAwake=%d, Charge=%.2f, Loc=%s"),
+			TEXT("[FOLIAGE_CONVERT] Post-ionize: profile=%s, ObjType=%d, CollEnabled=%d, SimPhys=%d, IsAwake=%d, Charge=%.2f, Loc=%s"),
+			*Prop->PropMesh->GetCollisionProfileName().ToString(),
+			(int32)Prop->PropMesh->GetCollisionObjectType(),
+			(int32)Prop->PropMesh->GetCollisionEnabled(),
 			Prop->PropMesh->IsSimulatingPhysics() ? 1 : 0,
 			(BI && BI->IsInstanceAwake()) ? 1 : 0,
 			Prop->GetCharge(),
