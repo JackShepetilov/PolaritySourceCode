@@ -59,6 +59,8 @@ public class Polarity : ModuleRules
             "Polarity/Upgrades",
             "Polarity/Upgrades/Upgrades",
             "Polarity/Variant_Shooter/Pickups",
+            "Polarity/Variant_Shooter/Run",
+            "Polarity/Variant_Shooter/XP",
             "Polarity/Buildings",
             "Polarity/Foliage"
         });

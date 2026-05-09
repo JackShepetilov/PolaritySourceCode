@@ -4,11 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
+#include "RunSubsystem.h"
 #include "ShooterPlayerController.generated.h"
 
 class UInputMappingContext;
 class AShooterCharacter;
 class UShooterBulletCounterUI;
+class UUpgradeChoiceWidget;
 
 /**
  *  Simple PlayerController for a first person shooter game
@@ -52,10 +54,32 @@ protected:
 	/** Pointer to the bullet counter UI widget */
 	TObjectPtr<UShooterBulletCounterUI> BulletCounterUI;
 
+	// ==================== Roguelite Run Widgets ====================
+
+	/**
+	 * Run-HUD container widget — instantiated when a run starts.
+	 * Typically WBP_RunHUD that statically embeds 4 instances of WBP_XPBar
+	 * (one per ESkillCategory).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI|Run")
+	TSubclassOf<UUserWidget> XPBarWidgetClass;
+
+	/** Modal upgrade choice widget class — instantiated when a run starts, opens on level-up. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI|Run")
+	TSubclassOf<UUpgradeChoiceWidget> UpgradeChoiceWidgetClass;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UUserWidget> XPBarWidget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UUpgradeChoiceWidget> UpgradeChoiceWidget;
+
 protected:
 
 	/** Gameplay Initialization */
 	virtual void BeginPlay() override;
+
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
 	/** Initialize input bindings */
 	virtual void SetupInputComponent() override;
@@ -118,4 +142,15 @@ protected:
 	/** Called when melee weapon is equipped or unequipped */
 	UFUNCTION()
 	void OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
+
+	// ==================== Run lifecycle handlers ====================
+
+	UFUNCTION()
+	void HandleRunStarted();
+
+	UFUNCTION()
+	void HandleRunEnded(ERunEndReason Reason);
+
+	void CreateRunWidgets();
+	void DestroyRunWidgets();
 };

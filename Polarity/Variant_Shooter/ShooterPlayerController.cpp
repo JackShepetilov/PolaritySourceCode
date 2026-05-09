@@ -5,6 +5,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "UserSettings/EnhancedInputUserSettings.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/GameInstance.h"
 #include "InputMappingContext.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerStart.h"
@@ -14,6 +15,8 @@
 #include "Polarity.h"
 #include "TutorialSubsystem.h"
 #include "Widgets/Input/SVirtualJoystick.h"
+#include "RunSubsystem.h"
+#include "UpgradeChoiceWidget.h"
 
 void AShooterPlayerController::BeginPlay()
 {
@@ -100,6 +103,86 @@ void AShooterPlayerController::BeginPlay()
 			}
 			UE_LOG(LogPolarity, Log, TEXT("ShooterPlayerController: Added %d IMCs"), AllContexts.Num());
 		}
+
+		// Subscribe to RunSubsystem to (de)spawn roguelite HUD widgets on run start/end
+		if (UGameInstance* GI = GetGameInstance())
+		{
+			if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>())
+			{
+				Run->OnRunStarted.AddDynamic(this, &AShooterPlayerController::HandleRunStarted);
+				Run->OnRunEnded.AddDynamic(this, &AShooterPlayerController::HandleRunEnded);
+
+				// If run is already active when PC spawns (e.g., level reload mid-run), create widgets now
+				if (Run->IsRunActive())
+				{
+					CreateRunWidgets();
+				}
+			}
+		}
+	}
+}
+
+void AShooterPlayerController::EndPlay(const EEndPlayReason::Type Reason)
+{
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>())
+		{
+			Run->OnRunStarted.RemoveDynamic(this, &AShooterPlayerController::HandleRunStarted);
+			Run->OnRunEnded.RemoveDynamic(this, &AShooterPlayerController::HandleRunEnded);
+		}
+	}
+	DestroyRunWidgets();
+	Super::EndPlay(Reason);
+}
+
+void AShooterPlayerController::HandleRunStarted()
+{
+	UE_LOG(LogPolarity, Log, TEXT("[RUN_DEBUG] PC: HandleRunStarted -> creating widgets"));
+	CreateRunWidgets();
+}
+
+void AShooterPlayerController::HandleRunEnded(ERunEndReason Reason)
+{
+	UE_LOG(LogPolarity, Log, TEXT("[RUN_DEBUG] PC: HandleRunEnded reason=%d -> destroying widgets"), (int32)Reason);
+	DestroyRunWidgets();
+}
+
+void AShooterPlayerController::CreateRunWidgets()
+{
+	if (!IsLocalPlayerController()) return;
+
+	if (XPBarWidgetClass && !XPBarWidget)
+	{
+		XPBarWidget = CreateWidget<UUserWidget>(this, XPBarWidgetClass);
+		if (XPBarWidget)
+		{
+			XPBarWidget->AddToPlayerScreen(0);
+		}
+	}
+
+	if (UpgradeChoiceWidgetClass && !UpgradeChoiceWidget)
+	{
+		UpgradeChoiceWidget = CreateWidget<UUpgradeChoiceWidget>(this, UpgradeChoiceWidgetClass);
+		if (UpgradeChoiceWidget)
+		{
+			// Higher Z so it renders above HUD when shown
+			UpgradeChoiceWidget->AddToPlayerScreen(10);
+		}
+	}
+}
+
+void AShooterPlayerController::DestroyRunWidgets()
+{
+	if (XPBarWidget)
+	{
+		XPBarWidget->RemoveFromParent();
+		XPBarWidget = nullptr;
+	}
+	if (UpgradeChoiceWidget)
+	{
+		UpgradeChoiceWidget->RemoveFromParent();
+		UpgradeChoiceWidget = nullptr;
 	}
 }
 

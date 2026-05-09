@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
+#include "SkillTypes.h"
 #include "UpgradeDefinition.generated.h"
 
 class UUpgradeComponent;
@@ -23,6 +24,10 @@ public:
 	/** Unique gameplay tag identifier for this upgrade (used for save/load and dedup) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
 	FGameplayTag UpgradeTag;
+
+	/** Skill that this upgrade belongs to. Choice panel pulls from the pool of the levelled-up skill. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
+	ESkillCategory Category = ESkillCategory::Movement;
 
 	/** Display name shown in UI and on world pickup */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|UI")
