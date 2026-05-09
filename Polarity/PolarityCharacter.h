@@ -112,9 +112,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
 	bool bCanDoubleJump = true;
 
-	/** Can the player air dash */
+	/** Can the player air dash. Default false — granted by the "Air Dash" upgrade pickup. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
-	bool bCanAirDash = true;
+	bool bCanAirDash = false;
 
 public:
 	APolarityCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());

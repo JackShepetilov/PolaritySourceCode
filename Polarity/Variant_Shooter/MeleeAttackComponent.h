@@ -612,6 +612,13 @@ public:
 	bool IsDropKickOnCooldown() const { return DropKickCooldownRemaining > 0.0f; }
 
 	/**
+	 * Runtime gate for the drop kick mechanic. Default false — granted by the "Drop Kick" upgrade pickup.
+	 * ShouldPerformDropKick() returns false while this is false, regardless of Settings.bEnableDropKick.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Melee|Drop Kick")
+	bool bDropKickUnlocked = false;
+
+	/**
 	 * Get drop kick cooldown progress (0 = just started, 1 = ready)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")

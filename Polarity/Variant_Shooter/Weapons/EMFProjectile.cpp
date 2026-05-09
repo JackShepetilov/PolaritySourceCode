@@ -469,17 +469,32 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 			continue;
 		}
 
-		// LOS Shielding: skip sources blocked by geometry
+		// LOS Shielding: skip sources blocked by geometry.
+		// Endpoint is shrunk back from Source.Position so the trace doesn't hit the
+		// source actor's own collision (e.g. NPC capsule whose center == Source.Position).
 		if (bEnableLOSShielding)
 		{
-			FHitResult LOSHit;
-			FCollisionQueryParams LOSParams(SCENE_QUERY_STAT(EMFProjectile_LOS), true, this);
-			bool bBlocked = GetWorld()->LineTraceSingleByChannel(
-				LOSHit, Position, Source.Position, LOSTraceChannel, LOSParams);
+			constexpr float LOSEndShrink = 50.0f;
+			const FVector ToSource = Source.Position - Position;
+			const float DistToSource = ToSource.Size();
+
+			bool bBlocked = false;
+			FVector LOSEnd = Source.Position;
+
+			if (DistToSource > LOSEndShrink)
+			{
+				LOSEnd = Source.Position - ToSource.GetSafeNormal() * LOSEndShrink;
+
+				FHitResult LOSHit;
+				FCollisionQueryParams LOSParams(SCENE_QUERY_STAT(EMFProjectile_LOS), true, this);
+				bBlocked = GetWorld()->LineTraceSingleByChannel(
+					LOSHit, Position, LOSEnd, LOSTraceChannel, LOSParams);
+			}
+			// else: source closer than shrink margin → too close to meaningfully test LOS, treat as visible
 
 			if (bDrawLOSDebug)
 			{
-				DrawDebugLine(GetWorld(), Position, Source.Position,
+				DrawDebugLine(GetWorld(), Position, LOSEnd,
 					bBlocked ? FColor::Red : FColor::Green, false, -1.0f, 0, 0.5f);
 			}
 

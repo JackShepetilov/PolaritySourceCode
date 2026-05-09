@@ -100,26 +100,27 @@ void UTutorialSubsystem::Deinitialize()
 
 void UTutorialSubsystem::Tick(float DeltaTime)
 {
-	// Handle HUD arrow hold-to-close progress (ticks while paused)
-	if (bHUDArrowActive && bArrowHoldingCloseKey)
-	{
-		ArrowCurrentHoldTime += FApp::GetDeltaTime();
-
-		float Progress = ArrowHoldDuration > 0.0f ? FMath::Clamp(ArrowCurrentHoldTime / ArrowHoldDuration, 0.0f, 1.0f) : 1.0f;
-
-		// Notify HUD of progress
-		if (HUDWidget)
-		{
-			HUDWidget->BP_UpdateTutorialHoldProgress(Progress);
-		}
-
-		// Check if hold is complete
-		if (Progress >= 1.0f)
-		{
-			bArrowHoldingCloseKey = false;
-			CloseHUDArrow(true);
-		}
-	}
+	// LIGHT MODE: hold-to-close отключён вместе с паузой — блок неактивен
+	// // Handle HUD arrow hold-to-close progress (ticks while paused)
+	// if (bHUDArrowActive && bArrowHoldingCloseKey)
+	// {
+	// 	ArrowCurrentHoldTime += FApp::GetDeltaTime();
+	//
+	// 	float Progress = ArrowHoldDuration > 0.0f ? FMath::Clamp(ArrowCurrentHoldTime / ArrowHoldDuration, 0.0f, 1.0f) : 1.0f;
+	//
+	// 	// Notify HUD of progress
+	// 	if (HUDWidget)
+	// 	{
+	// 		HUDWidget->BP_UpdateTutorialHoldProgress(Progress);
+	// 	}
+	//
+	// 	// Check if hold is complete
+	// 	if (Progress >= 1.0f)
+	// 	{
+	// 		bArrowHoldingCloseKey = false;
+	// 		CloseHUDArrow(true);
+	// 	}
+	// }
 
 	// Handle hold-hint progress (does NOT tick while paused — hints don't pause)
 	if (bHasActiveHoldHints)
@@ -482,18 +483,20 @@ bool UTutorialSubsystem::ShowHUDArrow(FName TutorialID, const FTutorialHUDArrowD
 	// Notify HUD widget
 	HUDWidget->BP_ShowTutorialArrow(ArrowData.TargetElement, ArrowData.DescriptionText, CloseIcon, ArrowData.CloseHintText);
 
-	// Pause game
-	UGameplayStatics::SetGamePaused(GetWorld(), true);
-
-	// Set input mode to Game and UI so the HUD (which is the game viewport widget) can still receive input
-	// We use GameAndUI because the HUD is not a separate focusable widget like slides
-	FInputModeGameAndUI InputMode;
-	InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-	PC->SetInputMode(InputMode);
-	PC->SetShowMouseCursor(true);
-
-	// Bind Slate-level input for hold detection
-	BindArrowInput();
+	// LIGHT MODE: пауза/смена input mode/hold-input отключены — стрелка показывается поверх живого геймплея.
+	// Закрывать стрелку нужно явным вызовом CloseHUDArrow(...) из gameplay-кода.
+	// // Pause game
+	// UGameplayStatics::SetGamePaused(GetWorld(), true);
+	//
+	// // Set input mode to Game and UI so the HUD (which is the game viewport widget) can still receive input
+	// // We use GameAndUI because the HUD is not a separate focusable widget like slides
+	// FInputModeGameAndUI InputMode;
+	// InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+	// PC->SetInputMode(InputMode);
+	// PC->SetShowMouseCursor(true);
+	//
+	// // Bind Slate-level input for hold detection
+	// BindArrowInput();
 
 	OnHUDArrowShown.Broadcast(TutorialID);
 
@@ -512,8 +515,9 @@ void UTutorialSubsystem::CloseHUDArrow(bool bMarkCompleted)
 
 	FName CompletedID = ActiveHUDArrowID;
 
-	// Unbind input
-	UnbindArrowInput();
+	// LIGHT MODE: hold-input не привязывался — отвязка не нужна
+	// // Unbind input
+	// UnbindArrowInput();
 
 	// Notify HUD widget to hide arrow
 	if (HUDWidget)
@@ -521,24 +525,26 @@ void UTutorialSubsystem::CloseHUDArrow(bool bMarkCompleted)
 		HUDWidget->BP_HideTutorialArrow(ActiveArrowElement);
 	}
 
-	APlayerController* PC = GetPlayerController(nullptr);
+	// LIGHT MODE: PC не нужен (input mode/пауза не менялись)
+	// APlayerController* PC = GetPlayerController(nullptr);
 
 	// Reset state
 	bHUDArrowActive = false;
 	bArrowHoldingCloseKey = false;
 	ActiveHUDArrowID = NAME_None;
 
-	// Restore input mode and flush keys BEFORE unpausing
-	if (PC)
-	{
-		FInputModeGameOnly InputMode;
-		PC->SetInputMode(InputMode);
-		PC->SetShowMouseCursor(false);
-		PC->FlushPressedKeys();
-	}
-
-	// Unpause game
-	UGameplayStatics::SetGamePaused(GetWorld(), false);
+	// LIGHT MODE: режим ввода и пауза не трогались — восстанавливать нечего
+	// // Restore input mode and flush keys BEFORE unpausing
+	// if (PC)
+	// {
+	// 	FInputModeGameOnly InputMode;
+	// 	PC->SetInputMode(InputMode);
+	// 	PC->SetShowMouseCursor(false);
+	// 	PC->FlushPressedKeys();
+	// }
+	//
+	// // Unpause game
+	// UGameplayStatics::SetGamePaused(GetWorld(), false);
 
 	// Mark completed if requested
 	if (bMarkCompleted)
@@ -564,6 +570,9 @@ void UTutorialSubsystem::RunTutorialDebugReveal(const TArray<FName>& TutorialIDs
 
 		HUDWidget->BP_ShowTutorialArrow(EHUDElement::MeleeCharges, FText::GetEmpty(), nullptr, FText::GetEmpty());
 		HUDWidget->BP_HideTutorialArrow(EHUDElement::MeleeCharges);
+
+		HUDWidget->BP_ShowTutorialArrow(EHUDElement::FirstDepleted, FText::GetEmpty(), nullptr, FText::GetEmpty());
+		HUDWidget->BP_HideTutorialArrow(EHUDElement::FirstDepleted);
 	}
 	else
 	{

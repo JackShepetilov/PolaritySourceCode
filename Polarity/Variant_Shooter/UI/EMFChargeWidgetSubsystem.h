@@ -14,6 +14,7 @@ class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
+class ARiotShieldPickup;
 
 /**
  * Per-category settings for widget clutter reduction.
@@ -139,6 +140,14 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
 	void UnregisterDroppedRangedWeapon(ADroppedRangedWeapon* Weapon);
+
+	// ==================== Riot Shield Pickup API ====================
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void RegisterRiotShieldPickup(ARiotShieldPickup* Pickup);
+
+	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
+	void UnregisterRiotShieldPickup(ARiotShieldPickup* Pickup);
 
 	// ==================== Settings ====================
 

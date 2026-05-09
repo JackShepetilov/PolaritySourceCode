@@ -4,6 +4,8 @@
 #include "RiotShieldPickup.h"
 #include "ShooterCharacter.h"
 #include "WeaponRecoilComponent.h"
+#include "ChargeAnimationComponent.h"
+#include "EMF_FieldComponent.h"
 #include "DamageTypes/DamageType_Melee.h"
 
 #include "Camera/CameraComponent.h"
@@ -47,8 +49,31 @@ ARiotShield::ARiotShield()
 	ShieldMesh->CastShadow = false;
 	ShieldMesh->bSelfShadowOnly = false;
 
+	// EMF field: holds the shield's charge while equipped (no widget on player-held shield).
+	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
+
 	// Default damage types blocked: ranged is the obvious one; designer can extend in BP.
 	HealthDrainingDamageTypes.Reset();
+}
+
+float ARiotShield::GetCharge() const
+{
+	if (FieldComponent)
+	{
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		return Desc.PointChargeParams.Charge;
+	}
+	return 0.0f;
+}
+
+void ARiotShield::SetCharge(float NewCharge)
+{
+	if (FieldComponent)
+	{
+		FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
+		Desc.PointChargeParams.Charge = NewCharge;
+		FieldComponent->SetSourceDescription(Desc);
+	}
 }
 
 void ARiotShield::BeginPlay()
@@ -89,6 +114,13 @@ void ARiotShield::EquipToCharacter(AShooterCharacter* Character)
 
 	UpdateMeshCollision();
 	ApplyWalkSpeedPenalty();
+
+	// Play catch → hold-loop on the FP mesh, reusing the prop-capture montages.
+	if (UChargeAnimationComponent* ChargeAnim = Character->FindComponentByClass<UChargeAnimationComponent>())
+	{
+		ChargeAnim->PlayShieldCatchAndHold();
+	}
+
 	OnStateChanged.Broadcast(State);
 }
 
@@ -203,8 +235,24 @@ void ARiotShield::ThrowAway()
 	ARiotShieldPickup* Pickup = World->SpawnActor<ARiotShieldPickup>(PickupClass, SpawnLoc, SpawnRot, Params);
 	if (Pickup)
 	{
+		// Transfer the shield's stored charge onto the pickup so it survives the throw and can drive
+		// the floating charge widget over the world pickup. This is the value originally yanked from
+		// the NPC (or set by designer for hand-placed pickups).
+		Pickup->SetCharge(GetCharge());
+
 		const FVector WorldLinearImpulse = RefTransform.TransformVector(ThrowLinearImpulse);
 		Pickup->SpawnAsThrown(WorldLinearImpulse, ThrowAngularImpulse);
+		// Active player throw → arm impact-stun. Passively-placed pickups (no SpawnAsThrown call) keep this false.
+		Pickup->SetCanStunOnImpact(true);
+	}
+
+	// Throw FP montage interrupts catch/hold and clears the loop timer.
+	if (OwnerCharacter)
+	{
+		if (UChargeAnimationComponent* ChargeAnim = OwnerCharacter->FindComponentByClass<UChargeAnimationComponent>())
+		{
+			ChargeAnim->PlayShieldThrow();
+		}
 	}
 
 	TearDownAndScheduleDestroy();
@@ -222,6 +270,15 @@ void ARiotShield::BreakShield()
 		UGameplayStatics::PlaySoundAtLocation(this, BreakSound, GetActorLocation());
 	}
 	OnBroken.Broadcast();
+
+	// Stop catch/hold without playing the throw montage — shield was destroyed, not thrown.
+	if (OwnerCharacter)
+	{
+		if (UChargeAnimationComponent* ChargeAnim = OwnerCharacter->FindComponentByClass<UChargeAnimationComponent>())
+		{
+			ChargeAnim->StopShieldFPMontages();
+		}
+	}
 
 	SpawnBreakDestructionGC();
 	TearDownAndScheduleDestroy();

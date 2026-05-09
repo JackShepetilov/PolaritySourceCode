@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterWeapon.h"
+#include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
@@ -507,7 +508,7 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
 			// can't be done synchronously inside Fire().
 			GetWorld()->GetTimerManager().SetTimerForNextTick(
-				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::DropYankedWeaponIfAny));
+				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfAny));
 			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: magazine empty, scheduled discard for next tick"), *GetName());
 		}
 		else
@@ -643,7 +644,7 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
 			// can't be done synchronously inside Fire().
 			GetWorld()->GetTimerManager().SetTimerForNextTick(
-				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::DropYankedWeaponIfAny));
+				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfAny));
 			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: hitscan magazine empty, scheduled discard for next tick"), *GetName());
 		}
 		else
@@ -1024,8 +1025,8 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			}
 		}
 
-		// Apply ionization (add positive charge to target)
-		ApplyHitscanIonization(BestTarget);
+		// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
+		ApplyHitscanIonization(BestTarget, BestHit.GetComponent());
 	}
 
 	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 4: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ =====
@@ -1225,8 +1226,8 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 		}
 	}
 
-	// Apply ionization (add positive charge to target)
-	ApplyHitscanIonization(HitActor);
+	// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
+	ApplyHitscanIonization(HitActor, Hit.GetComponent());
 }
 
 void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& Direction, float EnergyMultiplier)
@@ -1331,12 +1332,27 @@ float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
 	return Multiplier;
 }
 
-void AShooterWeapon::ApplyHitscanIonization(AActor* Target)
+void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s bUseHitscanIonization=%d"),
+		*GetNameSafe(Target),
+		HitComponent ? *HitComponent->GetName() : TEXT("null"),
+		bUseHitscanIonization);
+
 	if (!bUseHitscanIonization || !Target)
 	{
 		return;
 	}
+
+	// NPC riot-shield rule: hit on body while shield is up → no charge transfer.
+	// Player must hit the shield mesh to electrify the NPC behind it.
+	if (UNPCRiotShieldComponent::ShouldBlockBodyIonization(Target, HitComponent))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: BLOCKED by shield rule"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: PASSED, applying charge to %s"), *Target->GetName());
 
 	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())

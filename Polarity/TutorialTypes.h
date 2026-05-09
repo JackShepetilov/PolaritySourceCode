@@ -44,7 +44,8 @@ enum class EHUDElement : uint8
 {
 	ChargeBar,
 	HealthBar,
-	MeleeCharges
+	MeleeCharges,
+	FirstDepleted
 };
 
 /**

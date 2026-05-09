@@ -2,15 +2,19 @@
 
 #include "NPCRiotShieldComponent.h"
 #include "EMFVelocityModifier.h"
+#include "HumanoidNPC.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 
+#include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
+
+const FName UNPCRiotShieldComponent::ShieldComponentTag = TEXT("NPCShield");
 
 UNPCRiotShieldComponent::UNPCRiotShieldComponent()
 {
@@ -98,20 +102,17 @@ bool UNPCRiotShieldComponent::TryYank(AShooterCharacter* Puller)
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	Params.Owner = GetOwner(); // pickup's GetOwner() = NPC, not the puller — puller is free to overlap-pick immediately
+	Params.Owner = GetOwner();
 
 	ARiotShieldPickup* Pickup = World->SpawnActor<ARiotShieldPickup>(PickupClass, SpawnLoc, SpawnRot, Params);
 	if (Pickup)
 	{
-		const FVector ToPuller = (Puller->GetActorLocation() - SpawnLoc).GetSafeNormal();
-		const FVector LinearImpulse = ToPuller * YankLinearImpulseMagnitude;
-		Pickup->SpawnAsThrown(LinearImpulse, YankAngularImpulseDeg);
+		// Scripted pull (canonical yank flow) — pickup ignores physics/collision and lerps to the player,
+		// guaranteed to arrive and equip. NEVER use SpawnAsThrown here: that's for FP-throw flow.
+		Pickup->StartPull(Puller);
 	}
 
 	Deactivate();
-
-	UE_LOG(LogTemp, Warning, TEXT("[NPC_SHIELD] %s: Yanked, pickup=%s"),
-		*GetNameSafe(GetOwner()), *GetNameSafe(Pickup));
 
 	return Pickup != nullptr;
 }
@@ -124,11 +125,29 @@ void UNPCRiotShieldComponent::ResetForPool()
 
 void UNPCRiotShieldComponent::TryActivate()
 {
-	if (bShieldActive) return;
-	if (!ShieldMeshAsset || !PickupClass) return; // designed no-op path — leaves vanilla BP_HumanoidNPC unaffected
+	if (bShieldActive)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC_SHIELD] %s: TryActivate skipped — already active"), *GetNameSafe(GetOwner()));
+		return;
+	}
+	if (!ShieldMeshAsset)
+	{
+		// Verbose: every vanilla BP_HumanoidNPC without shield asset hits this — silent by design
+		UE_LOG(LogTemp, Verbose, TEXT("[NPC_SHIELD] %s: no-op (ShieldMeshAsset not set)"), *GetNameSafe(GetOwner()));
+		return;
+	}
+	if (!PickupClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC_SHIELD] %s: TryActivate skipped — PickupClass NOT SET (mesh present but no pickup class — config error)"), *GetNameSafe(GetOwner()));
+		return;
+	}
 
 	USkeletalMeshComponent* OwnerMesh = GetOwnerSkeletalMesh();
-	if (!OwnerMesh) return;
+	if (!OwnerMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC_SHIELD] %s: TryActivate skipped — owner has no skeletal mesh"), *GetNameSafe(GetOwner()));
+		return;
+	}
 
 	if (!OwnerMesh->DoesSocketExist(AttachSocketName))
 	{
@@ -143,7 +162,24 @@ void UNPCRiotShieldComponent::TryActivate()
 
 	ShieldMesh->SetStaticMesh(ShieldMeshAsset);
 	ShieldMesh->SetMobility(EComponentMobility::Movable);
-	ShieldMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision); // visual only — blocking is a future concern, not part of this task
+
+	// Query-only profile.
+	//  - ObjectType MUST be ECC_Pawn so weapon `LineTraceByObjectType(ECC_Pawn)` actually finds
+	//    the shield (object-type query filters by CollisionObjectType, not response). With WorldDynamic
+	//    the pawn-trace passed straight through and HitComponent was always the body capsule.
+	//  - Block ALL channels so Visibility traces still stop at the shield (walls / projectile traces).
+	//  - QueryOnly so the shield doesn't physically push the carrying NPC capsule or the player.
+	ShieldMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	ShieldMesh->SetCollisionObjectType(ECC_Pawn);
+	ShieldMesh->SetCollisionResponseToAllChannels(ECR_Block);
+	ShieldMesh->SetGenerateOverlapEvents(false);
+
+	// Tag the mesh so ionization paths (ShouldBlockBodyIonization) can identify "hit shield" vs "hit body"
+	ShieldMesh->ComponentTags.AddUnique(ShieldComponentTag);
+
+	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] %s: ShieldMesh tagged '%s' (tags now: %d entries)"),
+		*GetNameSafe(GetOwner()), *ShieldComponentTag.ToString(), ShieldMesh->ComponentTags.Num());
+
 	ShieldMesh->AttachToComponent(OwnerMesh, FAttachmentTransformRules::KeepRelativeTransform, AttachSocketName);
 	ShieldMesh->SetRelativeLocationAndRotation(RelativeLocation, RelativeRotation);
 	ShieldMesh->SetRelativeScale3D(RelativeScale);
@@ -174,4 +210,43 @@ USkeletalMeshComponent* UNPCRiotShieldComponent::GetOwnerSkeletalMesh() const
 	const AActor* Owner = GetOwner();
 	if (!Owner) return nullptr;
 	return Owner->FindComponentByClass<USkeletalMeshComponent>();
+}
+
+bool UNPCRiotShieldComponent::ShouldBlockBodyIonization(AActor* HitTarget, UPrimitiveComponent* HitComp)
+{
+	if (!HitTarget)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ShouldBlock: HitTarget=null → false"));
+		return false;
+	}
+
+	const AHumanoidNPC* Humanoid = Cast<AHumanoidNPC>(HitTarget);
+	if (!Humanoid)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ShouldBlock: target=%s is not HumanoidNPC → false (allow ionize)"),
+			*HitTarget->GetName());
+		return false;
+	}
+
+	const UNPCRiotShieldComponent* Shield = Humanoid->GetShieldComponent();
+	if (!Shield || !Shield->HasActiveShield())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ShouldBlock: %s has no active shield (comp=%d active=%d) → false (allow ionize)"),
+			*Humanoid->GetName(), Shield != nullptr, Shield ? Shield->HasActiveShield() : false);
+		return false;
+	}
+
+	// Hit lands on the shield iff the hit component carries our tag — anything else (capsule,
+	// skeletal mesh, hitboxes) is "body" and ionization must NOT pass through.
+	const bool bHitShield = HitComp && HitComp->ComponentTags.Contains(ShieldComponentTag);
+
+	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ShouldBlock: target=%s hitComp=%s (class=%s, tags=%d) → bHitShield=%d → block=%d"),
+		*Humanoid->GetName(),
+		HitComp ? *HitComp->GetName() : TEXT("null"),
+		HitComp ? *HitComp->GetClass()->GetName() : TEXT("null"),
+		HitComp ? HitComp->ComponentTags.Num() : -1,
+		bHitShield,
+		!bHitShield);
+
+	return !bHitShield;
 }

@@ -15,6 +15,7 @@ class USoundBase;
 class UDamageType;
 class UNiagaraSystem;
 class UGeometryCollection;
+class UEMF_FieldComponent;
 class AShooterCharacter;
 class ARiotShieldPickup;
 
@@ -81,6 +82,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Shield")
 	AShooterCharacter* GetOwningCharacter() const { return OwnerCharacter; }
 
+	/** Current EMF charge stored in the shield (mirrors ADroppedRangedWeapon::GetCharge). */
+	UFUNCTION(BlueprintPure, Category = "Shield|EMF")
+	float GetCharge() const;
+
+	/** Set the shield's stored charge (no widget — shield is on the player, not on the ground). */
+	UFUNCTION(BlueprintCallable, Category = "Shield|EMF")
+	void SetCharge(float NewCharge);
+
 	/** Override TakeDamage so projectiles/hitscan that hit ShieldMesh consume HP instead of hurting the player. */
 	virtual float TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
@@ -105,6 +114,11 @@ protected:
 	/** Visible shield model. Block channels are configured at runtime based on Raised/Lowered. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UStaticMeshComponent> ShieldMesh;
+
+	/** EMF field component — stores the shield's charge while it's held by the player.
+	 *  Same role as DroppedRangedWeapon's FieldComponent: source of truth for GetCharge/SetCharge. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UEMF_FieldComponent> FieldComponent;
 
 	// ==================== Health / Durability ====================
 

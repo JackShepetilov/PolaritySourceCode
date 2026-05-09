@@ -11,6 +11,7 @@ class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
+class ARiotShieldPickup;
 
 /** Category for widget clutter reduction — widgets in the same category share a visibility pool */
 UENUM(BlueprintType)
@@ -44,6 +45,9 @@ public:
 
 	/** Bind this widget to a dropped ranged weapon */
 	void BindToDroppedRangedWeapon(ADroppedRangedWeapon* InWeapon, float InVerticalOffset = 30.0f);
+
+	/** Bind this widget to a riot shield pickup. */
+	void BindToRiotShieldPickup(ARiotShieldPickup* InPickup, float InVerticalOffset = 30.0f);
 
 	/** Unbind from current target and deactivate */
 	void Unbind();
@@ -156,6 +160,9 @@ protected:
 
 	/** The dropped ranged weapon this widget is tracking */
 	TWeakObjectPtr<ADroppedRangedWeapon> BoundDroppedRangedWeapon;
+
+	/** The riot shield pickup this widget is tracking */
+	TWeakObjectPtr<ARiotShieldPickup> BoundRiotShieldPickup;
 
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
 	bool bIsActive = false;

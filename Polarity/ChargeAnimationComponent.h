@@ -22,6 +22,7 @@ class AEMFAcceleratorPlate;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class AUpgradePickup;
+class AAbilityPickup;
 class AScriptedPickup;
 class AHumanoidNPC;
 
@@ -131,13 +132,61 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
 	TObjectPtr<UAnimMontage> CatchMontage;
 
+	/** Blend-in time (seconds) for FPMontageAlpha when CatchMontage starts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0"))
+	float CatchAlphaBlendIn = 0.1f;
+
+	/** Blend-out time (seconds) for FPMontageAlpha when transitioning OUT of catch (unused for now —
+	 *  catch chains directly into hold without blending out). Kept for symmetry. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0"))
+	float CatchAlphaBlendOut = 0.15f;
+
 	/** Looping montage on FirstPersonMesh while holding captured target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
 	TObjectPtr<UAnimMontage> HoldMontage;
 
+	/** Blend-in time for FPMontageAlpha when HoldMontage starts (typically same as catch). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0"))
+	float HoldAlphaBlendIn = 0.1f;
+
+	/** Blend-out time when hold ends (without throw — e.g. cancel). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0"))
+	float HoldAlphaBlendOut = 0.15f;
+
 	/** Played on FirstPersonMesh when launching (throw). Interrupts Hold. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages")
 	TObjectPtr<UAnimMontage> ThrowMontage;
+
+	/** Blend-in time for FPMontageAlpha when ThrowMontage starts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0"))
+	float ThrowAlphaBlendIn = 0.1f;
+
+	/** Blend-out time for FPMontageAlpha when ThrowMontage ends. Should match the visual
+	 *  return-to-weapon-hold timing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages", meta = (ClampMin = "0.0"))
+	float ThrowAlphaBlendOut = 0.2f;
+
+	// ---- Yank-Throw montage (separate from channeling throw) ----
+	// Played on FirstPersonMesh by ShooterCharacter::ThrowYankedWeaponIfAny when discarding
+	// a yanked weapon. Distinct asset from ThrowMontage so the yank-throw animation can have
+	// its own timing, AnimNotifies (UAnimNotify_YankThrowDiscard, UAnimNotify_YankThrowLower),
+	// and blend curves without affecting the channeling-throw montage.
+
+	/** Played on FirstPersonMesh when discarding a yanked weapon (player throw or ammo-out). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages|Yank Throw")
+	TObjectPtr<UAnimMontage> YankThrowMontage;
+
+	/** Blend-in time for FPMontageAlpha when YankThrowMontage starts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages|Yank Throw", meta = (ClampMin = "0.0"))
+	float YankThrowAlphaBlendIn = 0.1f;
+
+	/** Blend-out time for FPMontageAlpha when YankThrowMontage ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|FP Montages|Yank Throw", meta = (ClampMin = "0.0"))
+	float YankThrowAlphaBlendOut = 0.2f;
+
+	// Discard / lower timing inside the yank-throw is driven by AnimNotifies inside the
+	// YankThrowMontage asset (UAnimNotify_YankThrowDiscard, UAnimNotify_YankThrowLower) —
+	// animator controls timing in Persona.
 
 	/** When true (default), the legacy MeleeMesh swap + ChargeMontage flow is BYPASSED entirely.
 	 *  Weapon stays visible on FirstPersonMesh, and only the catch/hold/throw montages above
@@ -410,6 +459,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Charge")
 	bool CancelAnimation();
 
+	// ==================== External hold (e.g. RiotShield) ====================
+
+	/** Play Catch on FP mesh, then loop Hold for as long as the shield is held.
+	 *  Reuses the same montages and hold-loop timer as the prop-capture flow. */
+	UFUNCTION(BlueprintCallable, Category = "Charge|External Hold")
+	void PlayShieldCatchAndHold();
+
+	/** Play Throw on FP mesh and stop the shield hold loop. */
+	UFUNCTION(BlueprintCallable, Category = "Charge|External Hold")
+	void PlayShieldThrow();
+
+	/** Stop any active shield hold/throw FP montages without playing throw (used on shield break). */
+	UFUNCTION(BlueprintCallable, Category = "Charge|External Hold")
+	void StopShieldFPMontages();
+
 protected:
 	// ==================== State ====================
 
@@ -580,8 +644,19 @@ protected:
 	/** Play hold montage on FirstPersonMesh. Re-loops itself while state == Channeling. */
 	void PlayHoldMontage();
 
-	/** Play throw montage on FirstPersonMesh. Interrupts Catch/Hold if playing. */
+public:
+	/** Play throw montage on FirstPersonMesh. Interrupts Catch/Hold if playing.
+	 *  Used by the channeling flow (BeginLaunch). */
+	UFUNCTION(BlueprintCallable, Category = "Charge|FP Montages")
 	void PlayThrowMontage();
+
+	/** Play YANK throw montage on FirstPersonMesh. Used by ShooterCharacter::ThrowYankedWeaponIfAny.
+	 *  Plays a different asset than PlayThrowMontage, so yank discards have their own animation
+	 *  with their own AnimNotify timing for mesh-hide/spawn-dropped/lower-hands. */
+	UFUNCTION(BlueprintCallable, Category = "Charge|FP Montages")
+	void PlayYankThrowMontage();
+
+protected:
 
 	/** Stop any of the three FP montages currently playing. */
 	void StopFPMontages();
@@ -594,8 +669,21 @@ protected:
 	UFUNCTION()
 	void OnHoldMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
+	/** Called when ThrowMontage ends (or is interrupted) — fades FPMontageAlpha back to 0. */
+	UFUNCTION()
+	void OnThrowMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Called when YankThrowMontage ends — same alpha-reset behavior as OnThrowMontageEnded
+	 *  but uses YankThrowAlphaBlendOut for the fade-out timing. */
+	UFUNCTION()
+	void OnYankThrowMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
 	/** Timer handle for overlap-restart of the hold loop. */
 	FTimerHandle HoldLoopTimerHandle;
+
+	/** True while an external system (currently RiotShield) is borrowing the catch/hold/throw FP montages.
+	 *  When true, OnHoldLoopTimer will keep re-kicking PlayHoldMontage even though CurrentState != Channeling. */
+	bool bExternalHoldActive = false;
 
 	/** Timer callback: kicks off the next hold play (overlapping the current one). */
 	UFUNCTION()
@@ -641,8 +729,14 @@ protected:
 	/** Capture an upgrade pickup (scripted pull, not physics-based) */
 	void CaptureUpgradePickup(AUpgradePickup* Pickup);
 
+	/** Capture an ability pickup (scripted pull, grants ability on completion) */
+	void CaptureAbilityPickup(AAbilityPickup* Pickup);
+
 	/** Capture a scripted pickup (scripted pull, same as UpgradePickup but no upgrade) */
 	void CaptureScriptedPickup(AScriptedPickup* Pickup);
+
+	/** Capture a riot shield pickup (scripted pull, equips shield on arrival). */
+	void CaptureRiotShieldPickup(class ARiotShieldPickup* Pickup);
 
 	/** Yank the current weapon from a humanoid NPC (single action, no hold state) */
 	void CaptureHumanoidWeapon(AHumanoidNPC* Humanoid);

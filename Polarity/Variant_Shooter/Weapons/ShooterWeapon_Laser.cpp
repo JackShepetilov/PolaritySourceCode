@@ -1,6 +1,8 @@
 // ShooterWeapon_Laser.cpp
 
 #include "ShooterWeapon_Laser.h"
+#include "Variant_Shooter/AI/HumanoidNPC.h"
+#include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Components/AudioComponent.h"
@@ -141,7 +143,7 @@ void AShooterWeapon_Laser::Tick(float DeltaTime)
 	{
 		// Hit a pawn/character - apply damage, ionization, show impact
 		ApplyBeamDamage(HitResult, DeltaTime);
-		ApplyIonization(HitResult.GetActor(), DeltaTime);
+		ApplyIonization(HitResult.GetActor(), HitResult.GetComponent(), DeltaTime);
 		UpdateImpactVFX(true, HitResult.ImpactPoint, HitResult.ImpactNormal);
 		CurrentHitActor = HitResult.GetActor();
 	}
@@ -154,7 +156,8 @@ void AShooterWeapon_Laser::Tick(float DeltaTime)
 		// trace and run through the normal damage+ionization path.
 		if (AEMFPhysicsProp* ConvertedProp = UFoliageConversionLibrary::TryConvertFoliageInstance(HitResult, 0.0f))
 		{
-			ApplyIonization(ConvertedProp, DeltaTime);
+			// Foliage→prop conversion has no original component context; nullptr → shield-rule no-op for non-humanoid props.
+			ApplyIonization(ConvertedProp, nullptr, DeltaTime);
 			CurrentHitActor = ConvertedProp;
 		}
 		else
@@ -310,9 +313,28 @@ void AShooterWeapon_Laser::ApplyBeamDamage(const FHitResult& Hit, float DeltaTim
 // New default: electrify negative (target gets pulled to -MaxIonizationCharge).
 // Legacy: ionize positive (target gets pushed to +MaxIonizationCharge).
 // =============================================================================
-void AShooterWeapon_Laser::ApplyIonization(AActor* Target, float DeltaTime)
+void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* HitComponent, float DeltaTime)
 {
 	if (!Target)
+	{
+		return;
+	}
+
+	// Verbose: laser ApplyIonization fires every tick. Throttle by logging only when target has a shield.
+	if (const AHumanoidNPC* H = Cast<AHumanoidNPC>(Target))
+	{
+		if (H->GetShieldComponent() && H->GetShieldComponent()->HasActiveShield())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] Laser tick: target=%s hitComp=%s (class=%s)"),
+				*H->GetName(),
+				HitComponent ? *HitComponent->GetName() : TEXT("null"),
+				HitComponent ? *HitComponent->GetClass()->GetName() : TEXT("null"));
+		}
+	}
+
+	// NPC riot-shield rule: beam on body while shield is up → no charge transfer.
+	// Player must aim at the shield mesh for ionization to pass through to the NPC.
+	if (UNPCRiotShieldComponent::ShouldBlockBodyIonization(Target, HitComponent))
 	{
 		return;
 	}

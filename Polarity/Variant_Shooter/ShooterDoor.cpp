@@ -189,6 +189,8 @@ void AShooterDoor::BreakDoor(FVector ExplosionLocation)
 
 	// Prevent breaking again
 	bCanBeBrokenByDrop = false;
+
+	OpenDoor();
 }
 
 // ==================== Key Detection Callbacks ====================

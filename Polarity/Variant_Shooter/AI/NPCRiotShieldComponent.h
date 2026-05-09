@@ -13,6 +13,7 @@
 class UStaticMesh;
 class UStaticMeshComponent;
 class USkeletalMeshComponent;
+class UPrimitiveComponent;
 class ARiotShieldPickup;
 class AShooterCharacter;
 
@@ -51,6 +52,16 @@ public:
 	/** Pickup class to spawn on yank. Public read for the capture scanner gating. */
 	UFUNCTION(BlueprintPure, Category = "Shield")
 	TSubclassOf<ARiotShieldPickup> GetPickupClass() const { return PickupClass; }
+
+	/** Tag attached to the runtime shield mesh — ionization paths use it to tell "hit shield" vs "hit body". */
+	static const FName ShieldComponentTag;
+
+	/** True if the hit should NOT propagate ionization to the NPC's body.
+	 *  True when: HitTarget is a HumanoidNPC with an ACTIVE shield AND HitComp is NOT the shield mesh.
+	 *  Ionization design: shooting the shield electrifies the NPC (charge passes through),
+	 *  shooting around the shield into the body does nothing — the player MUST hit the shield. */
+	UFUNCTION(BlueprintPure, Category = "Shield")
+	static bool ShouldBlockBodyIonization(AActor* HitTarget, UPrimitiveComponent* HitComp);
 
 protected:
 	// ==================== Shield Asset ====================
@@ -98,14 +109,6 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Yank", meta = (ClampMin = "0.01"))
 	float YankNormCoeff = 50.0f;
-
-	/** Linear impulse magnitude (cm/s * mass) applied to the spawned pickup, directed from shield toward Puller. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Yank", meta = (ClampMin = "0.0"))
-	float YankLinearImpulseMagnitude = 1500.0f;
-
-	/** Angular impulse (deg) applied to the spawned pickup. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Yank")
-	FVector YankAngularImpulseDeg = FVector(0.0f, 600.0f, 0.0f);
 
 private:
 	/** Runtime visual mesh. Created and registered when activation succeeds. */

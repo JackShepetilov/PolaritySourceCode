@@ -2662,6 +2662,11 @@ void UMeleeAttackComponent::DeactivateDamageWindowFromNotify()
 
 bool UMeleeAttackComponent::ShouldPerformDropKick() const
 {
+	if (!bDropKickUnlocked)
+	{
+		return false;
+	}
+
 	if (!Settings.bEnableDropKick || !OwnerCharacter || !OwnerController)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("DropKick: Settings disabled or no owner (bEnable=%d)"), Settings.bEnableDropKick);
@@ -2717,7 +2722,7 @@ bool UMeleeAttackComponent::ShouldPerformDropKick() const
 
 bool UMeleeAttackComponent::TryStartDropKick()
 {
-	if (!OwnerCharacter || !OwnerController)
+	if (!bDropKickUnlocked || !OwnerCharacter || !OwnerController)
 	{
 		return false;
 	}

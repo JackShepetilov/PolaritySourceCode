@@ -216,8 +216,11 @@ private:
 	/** Apply continuous damage to the hit actor */
 	void ApplyBeamDamage(const FHitResult& Hit, float DeltaTime);
 
-	/** Apply ionization (positive charge) to the hit actor */
-	void ApplyIonization(AActor* Target, float DeltaTime);
+	/** Apply ionization (charge shift toward bElectrifyNegative-determined polarity) to the hit actor.
+	 *  HitComponent is used by the NPC riot-shield rule: when an active shield is up,
+	 *  only beams hitting the shield mesh transfer charge to the NPC body — body hits bypass ionization.
+	 *  Pass nullptr when there's no relevant component (e.g. after foliage→prop conversion). */
+	void ApplyIonization(AActor* Target, UPrimitiveComponent* HitComponent, float DeltaTime);
 
 	/** Activate beam visuals and audio */
 	void ActivateBeam();

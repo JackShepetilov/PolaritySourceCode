@@ -282,7 +282,7 @@ void ADroppedRangedWeapon::CompletePull()
 		Player->AddWeaponClassAnimated(WeaponClass);
 
 		// Tag the freshly-added weapon as yank-acquired so the strict "one yanked weapon at a time"
-		// rule (DropYankedWeaponIfAny) can identify and discard it on subsequent yanks.
+		// rule (ThrowYankedWeaponIfAny) can identify and discard it on subsequent yanks.
 		if (AShooterWeapon* AddedWeapon = Player->FindWeaponOfType(WeaponClass))
 		{
 			AddedWeapon->bWasYanked = true;

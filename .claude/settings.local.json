@@ -235,7 +235,19 @@
       "Bash(\"/c/Program Files/Blender Foundation/Blender 4.3/blender.exe\":*)",
       "Bash(\"/c/Program Files/Blender Foundation/Blender 5.0/blender.exe\":*)",
       "Bash(ls \"/c/Users/Professional/Documents/assets/Animations\":*)",
-      "Bash(ls /c/Users/Professional/Documents/assets/Animations:*)"
+      "Bash(ls /c/Users/Professional/Documents/assets/Animations:*)",
+      "Bash(git log *)",
+      "WebFetch(domain:www.youtube.com)",
+      "WebFetch(domain:youtubetotranscript.com)",
+      "WebFetch(domain:www.youtube-transcript.io)",
+      "WebFetch(domain:tactiq.io)",
+      "mcp__84965934-40b2-4f6c-8b5a-d90673a77d14__validate_and_render_mermaid_diagram",
+      "Bash(python)",
+      "Bash('/c/Program Files \\(x86\\)/Microsoft/Edge/Application/msedge.exe' --headless --disable-gpu --hide-scrollbars '--screenshot=C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\\\\Docs\\\\CombatFlowDiagram.png' --window-size=2500,1050 --default-background-color=ffffffff file:///C:/Users/Professional/Documents/Unreal%20Projects/Polarity_Main5_6/Source/Polarity/Docs/_diagram_render.html)",
+      "Bash(ls \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Plugins/EMF_Plugin/Source/EMF_Plugin/Public/\" \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Plugins/EMF_Plugin/Source/EMF_Plugin/Private/\" 2>/dev/null)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(Find \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\" -name \"*DataTable*\" -o -name \"*Registry*\")"
     ]
   },
   "effortLevel": "high"

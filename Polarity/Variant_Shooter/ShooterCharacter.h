@@ -19,6 +19,7 @@ class UMeleeAttackComponent;
 class UChargeAnimationComponent;
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
+class UAbilityComponent;
 class UAudioComponent;
 class UCurveFloat;
 class UCameraShakeBase;
@@ -145,6 +146,10 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UUpgradeManagerComponent> UpgradeManager;
 
+	/** Ability inventory + activation orchestrator (Titanfall-style abilities). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UAbilityComponent> AbilityComponent;
+
 	// ==================== Melee Weapon FP Mesh ====================
 
 	/** First-person body mesh shown instead of the normal FP mesh when melee weapon is equipped.
@@ -224,6 +229,19 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand IK")
 	float LeftHandIKAlphaInterpSpeed = 10.0f;
 
+	// ==================== FP Montage Alpha ====================
+
+	/** Current interpolated alpha [0..1]. 0 = AnimBP runs Control Rig as normal,
+	 *  1 = Control Rig disabled + Spine Transform Modify Bone active (camera follow via spine). */
+	float CurrentFPMontageAlpha = 0.0f;
+
+	/** Target value FPMontageAlpha is interpolating toward. Set via SetFPMontageAlpha(). */
+	float TargetFPMontageAlpha = 0.0f;
+
+	/** Rate (units per second) for interpolation. Computed as 1.0 / BlendTime when SetFPMontageAlpha
+	 *  is called. Reaches target in approximately BlendTime seconds regardless of distance. */
+	float FPMontageAlphaInterpRate = 10.0f;
+
 	/** Max distance to use for aim traces */
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 100000, Units = "cm"))
 	float MaxAimDistance = 10000.0f;
@@ -246,6 +264,10 @@ protected:
 	/** Max HP this character can have */
 	UPROPERTY(EditAnywhere, Category = "Health")
 	float MaxHP = 500.0f;
+
+	/** Fraction of MaxHP the character starts with (1.0 = full, 0.5 = half). */
+	UPROPERTY(EditAnywhere, Category = "Health", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
+	float StartingHPPercent = 1.0f;
 
 	/** Current HP remaining to this character */
 	float CurrentHP = 0.0f;
@@ -999,6 +1021,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	UUpgradeManagerComponent* GetUpgradeManager() const { return UpgradeManager; }
 
+	/** Returns the ability component (multi-slot ability inventory + activation). */
+	UFUNCTION(BlueprintPure, Category = "Abilities")
+	UAbilityComponent* GetAbilityComponent() const { return AbilityComponent; }
+
 	/** Returns the currently equipped weapon */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	AShooterWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
@@ -1006,6 +1032,16 @@ public:
 	/** Sets the target left hand IK alpha (0 = detached, 1 = fully attached). Use for wallrun, melee, etc. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Left Hand IK")
 	void SetLeftHandIKAlpha(float Alpha) { TargetLeftHandIKAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f); }
+
+	/** Drives the FP-montage alpha (Control Rig disable / Spine Transform enable in AnimBP).
+	 *  Smoothly interpolates Current → Target over BlendTime seconds.
+	 *  Pushed into AnimBP every Tick via reflection (property name: "FPMontageAlpha"). */
+	UFUNCTION(BlueprintCallable, Category = "Animation|FP Montage Alpha")
+	void SetFPMontageAlpha(float Target, float BlendTime);
+
+	/** Current interpolated FP-montage alpha (read-only). */
+	UFUNCTION(BlueprintPure, Category = "Animation|FP Montage Alpha")
+	float GetFPMontageAlpha() const { return CurrentFPMontageAlpha; }
 
 	/** Gets the current left hand IK alpha */
 	UFUNCTION(BlueprintPure, Category = "Weapons|Left Hand IK")
@@ -1215,19 +1251,41 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapons")
 	void FinishWeaponSwitch(AShooterWeapon* NewWeapon);
 
-	/** If any weapon in OwnedWeapons has bWasYanked == true, spawn a non-capturable
-	 *  ADroppedRangedWeapon (decoration) at the player's hip with light physics impulse,
-	 *  remove the weapon from inventory and destroy it. If it was CurrentWeapon, switch to
-	 *  the first non-yanked weapon instantly (no animation — caller is about to BeginWeaponLower).
+	/** Discards any yanked weapon in OwnedWeapons via the throw animation flow:
+	 *  plays ThrowMontage on FP arms; AnimNotifies in the montage drive the actual gameplay
+	 *  steps (mesh hide + dropped spawn = mid-throw notify; lower hands + switch to replacement
+	 *  = end notify). If no ThrowMontage is configured, falls back to instant discard.
 	 *  Strict rule: at most one yanked weapon in inventory at a time. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
-	void DropYankedWeaponIfAny();
-
-	/** Same as DropYankedWeaponIfAny but spawns the discarded weapon IN FRONT of the player
-	 *  with strong forward+up impulse, AND enables stun-on-impact on the spawned actor.
-	 *  Used by hold-swap-key input to launch the held yanked weapon as an improvised projectile. */
-	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
 	void ThrowYankedWeaponIfAny();
+
+private:
+	/** Yanked weapon currently being thrown via animation. Set by ThrowYankedWeaponIfAny,
+	 *  consumed by OnYankThrowDiscardNotify (hide+spawn) and OnYankThrowLowerNotify (switch). */
+	TWeakObjectPtr<AShooterWeapon> PendingYankThrowWeapon;
+
+	/** Timer that destroys the orphaned yanked weapon actor after BeginWeaponLower +
+	 *  FinishWeaponSwitch has had time to complete its animation. */
+	FTimerHandle YankActorDestroyTimer;
+
+public:
+	/** Called by AnimNotify_YankThrowDiscard at the moment in the ThrowMontage where the
+	 *  weapon should leave the hand. Spawns dropped version at the FP weapon mesh's exact
+	 *  world position and hides the held weapon's meshes. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
+	void OnYankThrowDiscardNotify();
+
+	/** Called by AnimNotify_YankThrowLower at the moment in the ThrowMontage where the empty
+	 *  hands should start lowering for weapon switch. Triggers BeginWeaponLower +
+	 *  FinishWeaponSwitch(replacement) and schedules the orphaned yanked actor for destruction. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
+	void OnYankThrowLowerNotify();
+
+private:
+	UFUNCTION()
+	void DestroyOrphanedYankActor();
+
+public:
 
 	// ==================== Riot Shield API ====================
 
@@ -1400,6 +1458,14 @@ public:
 	/** Tutorial ID for first-charge arrow */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
 	FName FirstChargeTutorialID = FName("Tutorial_FirstCharge");
+
+	/** HUD arrow data for first-depletion tutorial (points to Charge Bar) — fires when player's charge first returns to Neutral after being charged */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FTutorialHUDArrowData FirstDepletionArrowData;
+
+	/** Tutorial ID for first-depletion arrow */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")
+	FName FirstDepletionTutorialID = FName("Tutorial_FirstDepletion");
 
 	/** Tutorial ID for melee charges arrow (must match TriggerVolume config) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tutorial")

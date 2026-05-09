@@ -575,8 +575,11 @@ protected:
 	/** Calculate damage multiplier based on target's tags */
 	float GetTagDamageMultiplier(AActor* Target) const;
 
-	/** Apply ionization (fixed positive charge) to a hit target */
-	void ApplyHitscanIonization(AActor* Target);
+	/** Apply ionization (fixed positive charge) to a hit target.
+	 *  HitComponent is used by the NPC riot-shield rule: when an active shield is up,
+	 *  only hits on the shield mesh transfer charge to the NPC body — direct body hits
+	 *  bypass ionization entirely. Pass `FHitResult::GetComponent()` from the hitscan trace. */
+	void ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent = nullptr);
 
 	// ==================== Charge-Based Firing ====================
 

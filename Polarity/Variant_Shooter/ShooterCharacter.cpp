@@ -39,6 +39,7 @@
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "Polarity/Upgrades/UpgradeRegistry.h"
+#include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -70,6 +71,9 @@ AShooterCharacter::AShooterCharacter()
 	// create the upgrade manager component
 	UpgradeManager = CreateDefaultSubobject<UUpgradeManagerComponent>(TEXT("Upgrade Manager"));
 
+	// create the ability component (multi-slot ability inventory)
+	AbilityComponent = CreateDefaultSubobject<UAbilityComponent>(TEXT("Ability Component"));
+
 	// ==================== Melee Weapon FP Mesh ====================
 
 	// Create MeleeWeaponFPMesh - shown instead of FP mesh when melee weapon is equipped
@@ -99,8 +103,8 @@ void AShooterCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// reset HP to max
-	CurrentHP = MaxHP;
+	// Initialize HP based on StartingHPPercent (1.0 = full HP)
+	CurrentHP = MaxHP * FMath::Clamp(StartingHPPercent, 0.0f, 1.0f);
 
 	// Store base FOV and location values for ADS interpolation
 	if (UCameraComponent* Camera = GetFirstPersonCameraComponent())
@@ -189,6 +193,7 @@ void AShooterCharacter::BeginPlay()
 					AllTutorialIDs.Add(FirstDamageTutorialID);
 					AllTutorialIDs.Add(HealthPickupObjectiveTutorialID);
 					AllTutorialIDs.Add(FirstChargeTutorialID);
+					AllTutorialIDs.Add(FirstDepletionTutorialID);
 					AllTutorialIDs.Add(MeleeChargesTutorialID);
 					TutorialSub->RunTutorialDebugReveal(AllTutorialIDs);
 				}
@@ -710,10 +715,9 @@ void AShooterCharacter::DoMeleeAttack()
 		return;
 	}
 
-	// Shield bash takes priority when raised — replaces both quick-melee and equipped melee weapon swings.
-	if (EquippedShield && EquippedShield->IsRaised())
+	// Shield equipped → suppress melee entirely (mirrors prop-capture behavior: hands are busy holding it).
+	if (EquippedShield)
 	{
-		EquippedShield->StartBash();
 		return;
 	}
 
@@ -841,6 +845,24 @@ void AShooterCharacter::Tick(float DeltaTime)
 	{
 		OnPolarityChanged.Broadcast(CurrentPolarity, ChargeValue);
 		UpdateChargeOverlay(CurrentPolarity);
+
+		// Trigger first-depletion tutorial arrow — when polarity returns to Neutral after being charged
+		if (CurrentPolarity == 0 && PreviousPolarity != 0 && !FirstDepletionTutorialID.IsNone())
+		{
+			if (UGameInstance* GI = GetGameInstance())
+			{
+				if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
+				{
+					APlayerController* PC = Cast<APlayerController>(GetController());
+
+					// Force-route to the dedicated FirstDepleted BP branch regardless of editor defaults
+					FTutorialHUDArrowData ArrowDataCopy = FirstDepletionArrowData;
+					ArrowDataCopy.TargetElement = EHUDElement::FirstDepleted;
+					TutorialSub->ShowHUDArrow(FirstDepletionTutorialID, ArrowDataCopy, PC);
+				}
+			}
+		}
+
 		PreviousPolarity = CurrentPolarity;
 	}
 
@@ -1927,6 +1949,7 @@ static void DiscardYankedWeaponShared(
 
 	if (YankedWeapon->SourceYankDropClass)
 	{
+		// RefTransform = source frame for IMPULSE direction.
 		// Throw uses camera transform (so vertical aim is respected); passive drop uses actor
 		// transform (drops behind back, vertical aim irrelevant). bEnableStunOnImpact == true
 		// is our proxy for "this is an active throw".
@@ -1947,8 +1970,33 @@ static void DiscardYankedWeaponShared(
 			RefTransform = Self->GetActorTransform();
 		}
 
-		const FVector SpawnLoc = RefTransform.TransformPosition(LocalSpawnOffset);
-		const FRotator SpawnRot = RefTransform.Rotator();
+		// Location: OptionalGrip socket world position if present (= visible grip).
+		// Rotation: component world rotation (= rendered orientation of skeletal mesh vertices).
+		static const FName OptionalGripSocket(TEXT("OptionalGrip"));
+		FVector RefLocation;
+		FRotator RefRotation;
+		if (USkeletalMeshComponent* WeaponFPMesh = YankedWeapon->GetFirstPersonMesh())
+		{
+			RefRotation = WeaponFPMesh->GetComponentRotation();
+			RefLocation = WeaponFPMesh->DoesSocketExist(OptionalGripSocket)
+				? WeaponFPMesh->GetSocketLocation(OptionalGripSocket)
+				: WeaponFPMesh->GetComponentLocation();
+		}
+		else if (USkeletalMeshComponent* WeaponTPMesh = YankedWeapon->GetThirdPersonMesh())
+		{
+			RefRotation = WeaponTPMesh->GetComponentRotation();
+			RefLocation = WeaponTPMesh->DoesSocketExist(OptionalGripSocket)
+				? WeaponTPMesh->GetSocketLocation(OptionalGripSocket)
+				: WeaponTPMesh->GetComponentLocation();
+		}
+		else
+		{
+			RefLocation = RefTransform.GetLocation();
+			RefRotation = RefTransform.Rotator();
+		}
+
+		const FVector SpawnLoc = RefLocation + RefRotation.RotateVector(LocalSpawnOffset);
+		const FRotator SpawnRot = RefRotation;
 
 		FActorSpawnParameters Params;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -2027,18 +2075,193 @@ static void DiscardYankedWeaponShared(
 	YankedWeapon->Destroy();
 }
 
-void AShooterCharacter::DropYankedWeaponIfAny()
-{
-	DiscardYankedWeaponShared(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
-		YankDropSpawnOffset, YankDropLinearImpulse, YankDropAngularImpulse,
-		/*bEnableStunOnImpact=*/ false);
-}
-
 void AShooterCharacter::ThrowYankedWeaponIfAny()
 {
+	// Find the yanked weapon (or bail out if none).
+	AShooterWeapon* YankedWeapon = nullptr;
+	for (AShooterWeapon* W : OwnedWeapons)
+	{
+		if (W && W->bWasYanked) { YankedWeapon = W; break; }
+	}
+
+	if (!YankedWeapon)
+	{
+		return;
+	}
+
+	UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>();
+
+	// Animation flow: store the yanked ref, play the dedicated yank-throw montage, and let
+	// the AnimNotifies drive the rest (Discard notify hides mesh + spawns dropped; Lower
+	// notify swaps weapons).
+	if (ChargeComp && ChargeComp->YankThrowMontage)
+	{
+		PendingYankThrowWeapon = YankedWeapon;
+		ChargeComp->PlayYankThrowMontage();
+		return;
+	}
+
+	// Fallback: no yank-throw montage configured — do an instant discard the old way so
+	// other game logic (ammo-empty, channeling-yank) still works without an animation asset
+	// set up.
 	DiscardYankedWeaponShared(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
 		YankThrowSpawnOffset, YankThrowLinearImpulse, YankThrowAngularImpulse,
 		/*bEnableStunOnImpact=*/ true);
+}
+
+void AShooterCharacter::OnYankThrowDiscardNotify()
+{
+	// Phase 1 of the animated throw: weapon visually leaves the hand. Spawn the dropped
+	// version at the held FP weapon mesh's exact world transform (so the dropped pickup
+	// appears continuous with what the player saw a frame ago) and hide the held weapon's
+	// FP/TP meshes so the rest of the throw animation plays with empty hands.
+	AShooterWeapon* Yanked = PendingYankThrowWeapon.Get();
+	if (!Yanked)
+	{
+		return;
+	}
+
+	if (!Yanked->SourceYankDropClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] OnYankThrowDiscardNotify: yanked weapon has no SourceYankDropClass — can't spawn dropped version"));
+		return;
+	}
+
+	// Spawn position: FP weapon mesh's VISUAL grip — uses OptionalGrip socket world LOCATION
+	// when present (matches HandGrip_R thanks to the alignment in AttachWeaponMeshes), so the
+	// dropped mesh's pivot lands exactly where the held mesh's grip is.
+	//
+	// Spawn rotation: COMPONENT world rotation — that's the rotation the skeletal mesh's
+	// vertices are rendered with. The static-mesh asset for the dropped version is authored
+	// in the same orientation as the skeletal-mesh asset, so component rotation is the
+	// correct match (socket rotation differs because of the inverse-rotation alignment math).
+	static const FName OptionalGripSocket(TEXT("OptionalGrip"));
+	FVector RefLocation;
+	FRotator RefRotation;
+	if (USkeletalMeshComponent* WeaponFPMesh = Yanked->GetFirstPersonMesh())
+	{
+		RefRotation = WeaponFPMesh->GetComponentRotation();
+		RefLocation = WeaponFPMesh->DoesSocketExist(OptionalGripSocket)
+			? WeaponFPMesh->GetSocketLocation(OptionalGripSocket)
+			: WeaponFPMesh->GetComponentLocation();
+	}
+	else if (USkeletalMeshComponent* WeaponTPMesh = Yanked->GetThirdPersonMesh())
+	{
+		RefRotation = WeaponTPMesh->GetComponentRotation();
+		RefLocation = WeaponTPMesh->DoesSocketExist(OptionalGripSocket)
+			? WeaponTPMesh->GetSocketLocation(OptionalGripSocket)
+			: WeaponTPMesh->GetComponentLocation();
+	}
+	else
+	{
+		RefLocation = GetActorLocation();
+		RefRotation = GetActorRotation();
+	}
+
+	// Apply YankThrowSpawnOffset as fine-tune in world rotation frame.
+	const FVector SpawnLoc = RefLocation + RefRotation.RotateVector(YankThrowSpawnOffset);
+	const FRotator SpawnRot = RefRotation;
+
+	// Impulse direction: still based on camera (for vertical aim feel).
+	FTransform ImpulseRef;
+	if (UCameraComponent* Cam = GetFirstPersonCameraComponent())
+	{
+		ImpulseRef = Cam->GetComponentTransform();
+	}
+	else
+	{
+		ImpulseRef = GetActorTransform();
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ADroppedRangedWeapon* Discarded = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
+		Yanked->SourceYankDropClass, SpawnLoc, SpawnRot, Params);
+
+	if (Discarded)
+	{
+		Discarded->bCanBeCaptured = false;
+		Discarded->SetCharge(0.0f);
+		if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+		{
+			WidgetSub->UnregisterDroppedRangedWeapon(Discarded);
+		}
+		Discarded->bCanStunOnImpact = true;
+
+		if (UStaticMeshComponent* DiscardedMesh = Discarded->WeaponMesh)
+		{
+			DiscardedMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+			const FVector WorldLinearImpulse = ImpulseRef.TransformVector(YankThrowLinearImpulse);
+			DiscardedMesh->AddImpulse(WorldLinearImpulse, NAME_None, /*bVelChange=*/ true);
+			DiscardedMesh->AddAngularImpulseInDegrees(YankThrowAngularImpulse, NAME_None, /*bVelChange=*/ true);
+		}
+	}
+
+	// Hide the held weapon's meshes so the rest of the throw animation plays with empty hands.
+	if (USkeletalMeshComponent* FPMesh = Yanked->GetFirstPersonMesh())
+	{
+		FPMesh->SetVisibility(false, /*bPropagateToChildren=*/ true);
+	}
+	if (USkeletalMeshComponent* TPMesh = Yanked->GetThirdPersonMesh())
+	{
+		TPMesh->SetVisibility(false, /*bPropagateToChildren=*/ true);
+	}
+}
+
+void AShooterCharacter::OnYankThrowLowerNotify()
+{
+	// Phase 2 of the animated throw: empty hands lower, then a non-yanked replacement weapon
+	// is raised. Hooks into the existing BeginWeaponLower + FinishWeaponSwitch state machine.
+	AShooterWeapon* Yanked = PendingYankThrowWeapon.Get();
+	if (!Yanked)
+	{
+		return;
+	}
+
+	// Find a non-yanked replacement to raise after the lower phase.
+	AShooterWeapon* Replacement = nullptr;
+	for (AShooterWeapon* W : OwnedWeapons)
+	{
+		if (W && W != Yanked && !W->bWasYanked)
+		{
+			Replacement = W;
+			break;
+		}
+	}
+
+	// Remove the yanked weapon from inventory now (so other systems don't find it).
+	// CurrentWeapon may still point to Yanked — that's intentional, BeginWeaponLower needs
+	// a non-null current to lower. We schedule actor destruction below.
+	OwnedWeapons.Remove(Yanked);
+
+	if (Replacement)
+	{
+		BeginWeaponLower();              // animate FP arms lowering (Yanked mesh hidden, so visually empty hands lower)
+		FinishWeaponSwitch(Replacement); // schedule swap-to-replacement at bottom + raise
+	}
+	else
+	{
+		// No replacement — just deactivate yanked, leave hands empty.
+		if (CurrentWeapon == Yanked)
+		{
+			Yanked->DeactivateWeapon();
+			CurrentWeapon = nullptr;
+		}
+	}
+
+	// Schedule destruction of the orphaned yanked actor after the switch animation has had
+	// time to complete. 1s is a heuristic safe upper bound for typical lower+raise durations.
+	GetWorldTimerManager().SetTimer(YankActorDestroyTimer, this,
+		&AShooterCharacter::DestroyOrphanedYankActor, 1.0f, /*bLoop=*/ false);
+}
+
+void AShooterCharacter::DestroyOrphanedYankActor()
+{
+	if (AShooterWeapon* Yanked = PendingYankThrowWeapon.Get())
+	{
+		Yanked->Destroy();
+	}
+	PendingYankThrowWeapon.Reset();
 }
 
 // ==================== Swap Weapon Hold Detection ====================
@@ -2922,6 +3145,12 @@ void AShooterCharacter::ResetCharacterState()
 	}
 }
 
+void AShooterCharacter::SetFPMontageAlpha(float Target, float BlendTime)
+{
+	TargetFPMontageAlpha = FMath::Clamp(Target, 0.0f, 1.0f);
+	FPMontageAlphaInterpRate = (BlendTime > KINDA_SMALL_NUMBER) ? (1.0f / BlendTime) : 999.0f;
+}
+
 void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 {
 	// Determine target alpha based on state
@@ -2949,12 +3178,14 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	else
 	{
 		const UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>();
+		const UAbilityComponent* AbilComp = FindComponentByClass<UAbilityComponent>();
 		const bool bChargingOwnsAlpha = ChargeComp && ChargeComp->IsChanneling();
-		if (!bChargingOwnsAlpha)
+		const bool bAbilityOwnsAlpha = AbilComp && AbilComp->IsCasting();
+		if (!bChargingOwnsAlpha && !bAbilityOwnsAlpha)
 		{
 			TargetLeftHandIKAlpha = 1.0f;
 		}
-		// else: leave whatever ChargeAnimationComponent has set
+		// else: leave whatever ChargeAnimationComponent or AbilityComponent has set
 	}
 
 	// Interpolate alpha
@@ -2982,6 +3213,42 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 
 	// Always pass the interpolated alpha value
 	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
+
+	// FP Montage alpha — interpolate at user-specified rate (FPMontageAlphaInterpRate),
+	// push to AnimBP via reflection. Drives Control Rig.Alpha (= 1 - this) and
+	// Spine Transform Modify Bone.Alpha (= this) in the AnimGraph.
+	CurrentFPMontageAlpha = FMath::FInterpConstantTo(
+		CurrentFPMontageAlpha,
+		TargetFPMontageAlpha,
+		DeltaTime,
+		FPMontageAlphaInterpRate
+	);
+
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		if (UAnimInstance* AnimInst = FPMesh->GetAnimInstance())
+		{
+			static const FName FPMontageAlphaPropertyName(TEXT("FPMontageAlpha"));
+			FProperty* AlphaProp = AnimInst->GetClass()->FindPropertyByName(FPMontageAlphaPropertyName);
+			if (AlphaProp)
+			{
+				if (FFloatProperty* FloatProp = CastField<FFloatProperty>(AlphaProp))
+				{
+					if (void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInst))
+					{
+						*static_cast<float*>(ValuePtr) = CurrentFPMontageAlpha;
+					}
+				}
+				else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(AlphaProp))
+				{
+					if (void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInst))
+					{
+						*static_cast<double*>(ValuePtr) = static_cast<double>(CurrentFPMontageAlpha);
+					}
+				}
+			}
+		}
+	}
 }
 
 void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, float Alpha)

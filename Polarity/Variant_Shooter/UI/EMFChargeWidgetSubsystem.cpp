@@ -6,6 +6,7 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
+#include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "EMFPhysicsProp.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
@@ -289,6 +290,51 @@ void UEMFChargeWidgetSubsystem::UnregisterDroppedRangedWeapon(ADroppedRangedWeap
 	}
 
 	ActiveWidgets.Remove(Weapon);
+}
+
+// ==================== Riot Shield Pickup ====================
+
+void UEMFChargeWidgetSubsystem::RegisterRiotShieldPickup(ARiotShieldPickup* Pickup)
+{
+	if (!Pickup || !bEnabled)
+	{
+		return;
+	}
+
+	if (ActiveWidgets.Contains(Pickup))
+	{
+		return;
+	}
+
+	if (!WidgetClass)
+	{
+		return;
+	}
+
+	UEMFChargeWidget* Widget = GetWidgetFromPool();
+	if (!Widget)
+	{
+		return;
+	}
+
+	Widget->BindToRiotShieldPickup(Pickup, Settings.PropVerticalOffset);
+	ActiveWidgets.Add(Pickup, Widget);
+}
+
+void UEMFChargeWidgetSubsystem::UnregisterRiotShieldPickup(ARiotShieldPickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	TObjectPtr<UEMFChargeWidget>* FoundWidget = ActiveWidgets.Find(Pickup);
+	if (FoundWidget && *FoundWidget)
+	{
+		ReturnWidgetToPool(*FoundWidget);
+	}
+
+	ActiveWidgets.Remove(Pickup);
 }
 
 void UEMFChargeWidgetSubsystem::ProcessPendingRegistrations()

@@ -22,7 +22,9 @@
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
+#include "Variant_Shooter/Pickups/AbilityPickup.h"
 #include "Variant_Shooter/Pickups/ScriptedPickup.h"
+#include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
@@ -492,6 +494,27 @@ void UChargeAnimationComponent::EnterChanneling()
 
 		if (CurrentCapturedNPC.IsValid())
 		{
+			// Self-contained pull targets (dropped weapons, upgrade/scripted pickups) have no
+			// hold/throw phase — the pull manages itself in Tick and grants the item on its own.
+			// Skip the Channeling hold state and wind down via the same path as "no target", so
+			// the player returns to Ready without a second button press. ExitChanneling already
+			// resets CurrentCapturedNPC for these types and lets the in-flight pull continue.
+			AActor* Captured = CurrentCapturedNPC.Get();
+			const bool bSelfContainedPull = Captured && (
+				Cast<ADroppedMeleeWeapon>(Captured) ||
+				Cast<ADroppedRangedWeapon>(Captured) ||
+				Cast<AUpgradePickup>(Captured) ||
+				Cast<AAbilityPickup>(Captured) ||
+				Cast<AScriptedPickup>(Captured) ||
+				Cast<ARiotShieldPickup>(Captured));
+
+			if (bSelfContainedPull)
+			{
+				ExitChanneling();
+				EnterFinishingAnimation();
+				return;
+			}
+
 			// Capture succeeded — enter the same Channeling state the legacy hold-mode uses,
 			// so the animation timeline is identical. The post-capture input lockout runs as
 			// a timer inside Channeling (CaptureLockoutTimeRemaining), not a separate state.
@@ -577,9 +600,19 @@ void UChargeAnimationComponent::ExitChanneling()
 			// UpgradePickup pull is self-contained — let it finish on its own
 			CurrentCapturedNPC.Reset();
 		}
+		else if (AAbilityPickup* APickup = Cast<AAbilityPickup>(CurrentCapturedNPC.Get()))
+		{
+			// AbilityPickup pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
 		else if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
 		{
 			// ScriptedPickup pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
+		else if (ARiotShieldPickup* ShieldPickup = Cast<ARiotShieldPickup>(CurrentCapturedNPC.Get()))
+		{
+			// RiotShieldPickup pull is self-contained — let it finish on its own
 			CurrentCapturedNPC.Reset();
 		}
 		if (ChannelingPlateActor)
@@ -764,10 +797,26 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still pulling — don't re-search
 			}
 		}
+		// Check AbilityPickup (pull is self-contained — just check if still in progress)
+		else if (AAbilityPickup* APickup = Cast<AAbilityPickup>(CurrentCapturedNPC.Get()))
+		{
+			if (APickup->IsBeingPulled())
+			{
+				return; // Still pulling — don't re-search
+			}
+		}
 		// Check ScriptedPickup (pull is self-contained — just check if still in progress)
 		else if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
 		{
 			if (SPickup->IsBeingPulled())
+			{
+				return; // Still pulling — don't re-search
+			}
+		}
+		// Check RiotShieldPickup (pull is self-contained — just check if still in progress)
+		else if (ARiotShieldPickup* ShieldPickup = Cast<ARiotShieldPickup>(CurrentCapturedNPC.Get()))
+		{
+			if (ShieldPickup->IsBeingPulled())
 			{
 				return; // Still pulling — don't re-search
 			}
@@ -830,7 +879,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, ScriptedPickup, HumanoidWeapon, HumanoidShield };
+	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -1092,6 +1141,44 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		// Try AbilityPickup (same logic as UpgradePickup, grants ability instead of upgrade)
+		if (AAbilityPickup* APickup = Cast<AAbilityPickup>(HitActor))
+		{
+			if (!APickup->bCanBeCaptured || APickup->IsBeingPulled() || APickup->IsPullComplete())
+			{
+				continue;
+			}
+
+			const float PickupCharge = APickup->GetCharge();
+			if (FMath::IsNearlyZero(PickupCharge))
+			{
+				continue;
+			}
+
+			const FVector ToTarget = APickup->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float CaptureRange = APickup->CalculateCaptureRange();
+			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = APickup;
+				BestTargetType = ECaptureTargetType::AbilityPickup;
+			}
+			continue;
+		}
+
 		// Try ScriptedPickup (same logic as UpgradePickup)
 		if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(HitActor))
 		{
@@ -1126,6 +1213,38 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				BestAngleCos = AngleCos;
 				BestTarget = SPickup;
 				BestTargetType = ECaptureTargetType::ScriptedPickup;
+			}
+			continue;
+		}
+
+		// Try RiotShieldPickup — fixed-range capture, no charge-sign requirement (shield can be charge-less).
+		if (ARiotShieldPickup* ShieldPickup = Cast<ARiotShieldPickup>(HitActor))
+		{
+			if (!ShieldPickup->bCanBeCaptured || ShieldPickup->IsBeingPulled())
+			{
+				continue;
+			}
+
+			const FVector ToTarget = ShieldPickup->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float ShieldCaptureRange = ShieldPickup->CaptureRange;
+			if (DistSq > ShieldCaptureRange * ShieldCaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos)
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = ShieldPickup;
+				BestTargetType = ECaptureTargetType::RiotShieldPickup;
 			}
 			continue;
 		}
@@ -1181,8 +1300,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		case ECaptureTargetType::UpgradePickup:
 			CaptureUpgradePickup(Cast<AUpgradePickup>(BestTarget));
 			break;
+		case ECaptureTargetType::AbilityPickup:
+			CaptureAbilityPickup(Cast<AAbilityPickup>(BestTarget));
+			break;
 		case ECaptureTargetType::ScriptedPickup:
 			CaptureScriptedPickup(Cast<AScriptedPickup>(BestTarget));
+			break;
+		case ECaptureTargetType::RiotShieldPickup:
+			CaptureRiotShieldPickup(Cast<ARiotShieldPickup>(BestTarget));
 			break;
 		case ECaptureTargetType::HumanoidWeapon:
 			CaptureHumanoidWeapon(Cast<AHumanoidNPC>(BestTarget));
@@ -1291,7 +1416,7 @@ void UChargeAnimationComponent::CaptureHumanoidWeapon(AHumanoidNPC* Humanoid)
 		// throw it away as a non-capturable physics decoration BEFORE starting the new yank.
 		// If the discarded weapon was equipped, switch to a non-yanked replacement instantly
 		// so the subsequent BeginWeaponLower has something concrete to lower.
-		ShooterChar->DropYankedWeaponIfAny();
+		ShooterChar->ThrowYankedWeaponIfAny();
 
 		// Start lowering player's current weapon NOW (in parallel with the pull flight).
 		// Lower (~0.15s) completes well before pull arrival (~0.4s), so mesh waits at the
@@ -1427,6 +1552,27 @@ void UChargeAnimationComponent::CaptureUpgradePickup(AUpgradePickup* Pickup)
 	CurrentCapturedNPC = Pickup;
 }
 
+void UChargeAnimationComponent::CaptureAbilityPickup(AAbilityPickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	// Start scripted pull (pickup manages its own interpolation in Tick)
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		Pickup->StartPull(ShooterChar);
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Pickup;
+}
+
 void UChargeAnimationComponent::CaptureScriptedPickup(AScriptedPickup* Pickup)
 {
 	if (!Pickup)
@@ -1438,6 +1584,27 @@ void UChargeAnimationComponent::CaptureScriptedPickup(AScriptedPickup* Pickup)
 	ReleaseCapturedNPC();
 
 	// Start scripted pull (pickup manages its own interpolation in Tick)
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		Pickup->StartPull(ShooterChar);
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Pickup;
+}
+
+void UChargeAnimationComponent::CaptureRiotShieldPickup(ARiotShieldPickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	// Start scripted pull (pickup manages its own interpolation + equip in Tick)
 	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
 	if (ShooterChar)
 	{
@@ -1507,6 +1674,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	else if (Cast<AUpgradePickup>(CurrentCapturedNPC.Get()))
 	{
 		// UpgradePickup pull is self-contained — no release action needed
+	}
+	else if (Cast<AAbilityPickup>(CurrentCapturedNPC.Get()))
+	{
+		// AbilityPickup pull is self-contained — no release action needed
 	}
 	else if (Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
 	{
@@ -1653,6 +1824,13 @@ void UChargeAnimationComponent::CleanupChanneling()
 {
 	// Stop any FP montages (catch/hold/throw) — safety net for cancel/EndPlay paths.
 	StopFPMontages();
+
+	// Force FP alpha back to 0 with throw blend-out time — handles cancel paths where
+	// OnThrowMontageEnded didn't get to fire.
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->SetFPMontageAlpha(0.0f, ThrowAlphaBlendOut);
+	}
 
 	// Release any captured NPC first
 	ReleaseCapturedNPC();
@@ -1903,6 +2081,9 @@ void UChargeAnimationComponent::PlayCatchMontage()
 	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(CatchMontage) returned duration=%.3f (0=failed). AnimInstance class=%s"),
 		Duration, *AnimInstance->GetClass()->GetName());
 
+	// Catch is a left-arm-only animation (Slot 'LeftArm' + LBPB mask on upperarm_l).
+	// Does NOT trigger FPMontageAlpha — only two-hand class animations (Throw) do that.
+
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &UChargeAnimationComponent::OnCatchMontageEnded);
 	AnimInstance->Montage_SetEndDelegate(EndDelegate, CatchMontage);
@@ -1943,6 +2124,8 @@ void UChargeAnimationComponent::PlayHoldMontage()
 	float Duration = AnimInstance->Montage_Play(HoldMontage);
 	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(HoldMontage) returned duration=%.3f"), Duration);
 
+	// Hold is a left-arm-only animation, same class as Catch — does NOT trigger FPMontageAlpha.
+
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &UChargeAnimationComponent::OnHoldMontageEnded);
 	AnimInstance->Montage_SetEndDelegate(EndDelegate, HoldMontage);
@@ -1962,12 +2145,39 @@ void UChargeAnimationComponent::PlayHoldMontage()
 
 void UChargeAnimationComponent::OnHoldLoopTimer()
 {
-	// Only continue the loop if we're still in Channeling. Throw / cancel sets a different
-	// state and clears this timer, but guard anyway in case of timer race.
-	if (CurrentState == EChargeAnimationState::Channeling)
+	// Continue looping if we're still channeling a captured prop, OR if an external system
+	// (RiotShield) has the FP montages reserved. Throw / cancel clears one of these flags.
+	if (CurrentState == EChargeAnimationState::Channeling || bExternalHoldActive)
 	{
 		PlayHoldMontage();
 	}
+}
+
+// ==================== External hold (RiotShield) ====================
+
+void UChargeAnimationComponent::PlayShieldCatchAndHold()
+{
+	bExternalHoldActive = true;
+	// PlayCatchMontage already handles the catch→hold-loop crossfade and timer scheduling.
+	// If CatchMontage is null it falls back to PlayHoldMontage directly, which also schedules the loop.
+	PlayCatchMontage();
+}
+
+void UChargeAnimationComponent::PlayShieldThrow()
+{
+	bExternalHoldActive = false;
+	// PlayThrowMontage already kills HoldLoopTimerHandle and stops Catch/Hold if playing.
+	PlayThrowMontage();
+}
+
+void UChargeAnimationComponent::StopShieldFPMontages()
+{
+	bExternalHoldActive = false;
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HoldLoopTimerHandle);
+	}
+	StopFPMontages();
 }
 
 void UChargeAnimationComponent::PlayThrowMontage()
@@ -2007,6 +2217,88 @@ void UChargeAnimationComponent::PlayThrowMontage()
 
 	float Duration = AnimInstance->Montage_Play(ThrowMontage);
 	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(ThrowMontage) returned duration=%.3f"), Duration);
+
+	// Drive alpha → 1 with throw blend-in. Bind end callback so we can blend out → 0
+	// when throw ends (yank-throw flow doesn't go through ShowingWeapon/CleanupChanneling).
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->SetFPMontageAlpha(1.0f, ThrowAlphaBlendIn);
+	}
+
+	FOnMontageEnded EndDelegate;
+	EndDelegate.BindUObject(this, &UChargeAnimationComponent::OnThrowMontageEnded);
+	AnimInstance->Montage_SetEndDelegate(EndDelegate, ThrowMontage);
+}
+
+void UChargeAnimationComponent::OnThrowMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] OnThrowMontageEnded: bInterrupted=%d"), bInterrupted ? 1 : 0);
+
+	// Blend alpha back to 0 with throw's blend-out time.
+	// This is the channeling-throw montage end (BeginLaunch flow).
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->SetFPMontageAlpha(0.0f, ThrowAlphaBlendOut);
+	}
+}
+
+void UChargeAnimationComponent::PlayYankThrowMontage()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] PlayYankThrowMontage CALLED. FirstPersonMesh=%s YankThrowMontage=%s"),
+		FirstPersonMesh ? *FirstPersonMesh->GetName() : TEXT("nullptr"),
+		YankThrowMontage ? *YankThrowMontage->GetName() : TEXT("nullptr"));
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HoldLoopTimerHandle);
+	}
+
+	if (!FirstPersonMesh || !YankThrowMontage)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayYankThrowMontage EARLY RETURN: missing FP mesh or YankThrowMontage"));
+		return;
+	}
+
+	UAnimInstance* AnimInstance = FirstPersonMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGE_ANIM] PlayYankThrowMontage EARLY RETURN: AnimInstance is null"));
+		return;
+	}
+
+	// Interrupt catch/hold if playing — yank-throw takes priority on the FP arms slot.
+	if (CatchMontage && AnimInstance->Montage_IsPlaying(CatchMontage))
+	{
+		AnimInstance->Montage_Stop(0.0f, CatchMontage);
+	}
+	if (HoldMontage && AnimInstance->Montage_IsPlaying(HoldMontage))
+	{
+		AnimInstance->Montage_Stop(0.0f, HoldMontage);
+	}
+
+	float Duration = AnimInstance->Montage_Play(YankThrowMontage);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] Montage_Play(YankThrowMontage) returned duration=%.3f"), Duration);
+
+	// Drive FPMontageAlpha → 1 with yank-throw's own blend-in time.
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->SetFPMontageAlpha(1.0f, YankThrowAlphaBlendIn);
+	}
+
+	FOnMontageEnded EndDelegate;
+	EndDelegate.BindUObject(this, &UChargeAnimationComponent::OnYankThrowMontageEnded);
+	AnimInstance->Montage_SetEndDelegate(EndDelegate, YankThrowMontage);
+}
+
+void UChargeAnimationComponent::OnYankThrowMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGE_ANIM] OnYankThrowMontageEnded: bInterrupted=%d"), bInterrupted ? 1 : 0);
+
+	// Reset FPMontageAlpha → 0 using yank-throw's own blend-out time.
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->SetFPMontageAlpha(0.0f, YankThrowAlphaBlendOut);
+	}
 }
 
 void UChargeAnimationComponent::StopFPMontages()

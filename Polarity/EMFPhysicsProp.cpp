@@ -776,7 +776,7 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 
 		if (Speed >= Threshold)
 		{
-			const bool bChargeBelowThreshold = FMath::Abs(GetCharge()) < ExplosionMinCharge;
+			const bool bChargeBelowThreshold = FMath::Abs(GetCharge()) <= ExplosionMinCharge;
 
 			// Direct NPC hit
 			AShooterNPC* HitNPC = Cast<AShooterNPC>(OtherActor);
@@ -790,8 +790,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 					return;
 				}
 
-				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Direct NPC hit → %s, Speed=%.0f"),
-					*GetName(), *OtherActor->GetName(), Speed);
+				UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Direct NPC hit → %s, Speed=%.0f, |charge|=%.1f >= %.1f → EXPLODE"),
+					*GetName(), *OtherActor->GetName(), Speed, FMath::Abs(GetCharge()), ExplosionMinCharge);
 				if (CriticalVelocity > 0.0f && Speed >= CriticalVelocity)
 				{
 					OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), Speed);
@@ -820,8 +820,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 				if (CenterDot >= CenterHitDotThreshold)
 				{
 					bShouldDetonate = true;
-					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit (dot=%.2f >= %.2f) → detonate"),
-						*GetName(), CenterDot, CenterHitDotThreshold);
+					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Center hit (dot=%.2f >= %.2f, |charge|=%.1f > %.1f) → detonate"),
+						*GetName(), CenterDot, CenterHitDotThreshold, FMath::Abs(GetCharge()), ExplosionMinCharge);
 				}
 
 				// Fallback: check if any NPC is within explosion radius
@@ -840,8 +840,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 						if (NearbyNPC && !NearbyNPC->IsDead())
 						{
 							bShouldDetonate = true;
-							UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: NPC %s in explosion radius → detonate"),
-								*GetName(), *NearbyNPC->GetName());
+							UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: NPC %s in explosion radius (|charge|=%.1f > %.1f) → detonate"),
+								*GetName(), *NearbyNPC->GetName(), FMath::Abs(GetCharge()), ExplosionMinCharge);
 							break;
 						}
 					}
@@ -907,8 +907,8 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		const float OverlapThreshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
 		if (CachedPreCollisionSpeed >= OverlapThreshold)
 		{
-			// Charge gate: below threshold → weak impact (bounce + reduced damage/stun + half charge transfer) instead of explosion
-			if (FMath::Abs(GetCharge()) < ExplosionMinCharge)
+			// Charge gate: at or below threshold → weak impact (bounce + reduced damage/stun + half charge transfer) instead of explosion
+			if (FMath::Abs(GetCharge()) <= ExplosionMinCharge)
 			{
 				const FVector OverlapNormal = bFromSweep
 					? FVector(SweepResult.ImpactNormal)
@@ -922,6 +922,8 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 				return;
 			}
 
+			UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Overlap with %s (Speed=%.0f), |charge|=%.1f >= %.1f → EXPLODE"),
+				*GetName(), *HitNPC->GetName(), CachedPreCollisionSpeed, FMath::Abs(GetCharge()), ExplosionMinCharge);
 			if (CriticalVelocity > 0.0f && CachedPreCollisionSpeed >= CriticalVelocity)
 			{
 				OnCriticalVelocityImpact.Broadcast(this, GetActorLocation(), CachedPreCollisionSpeed);
