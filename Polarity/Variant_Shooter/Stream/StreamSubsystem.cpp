@@ -1,7 +1,6 @@
 // StreamSubsystem.cpp
-// Phase 1: subsystem boots, subscribes to RunSubsystem lifecycle, and is tickable.
-// All math (viewer target / smoothing / donation roll) is empty — Phase 3+ fills it
-// in via Live Coding without touching this header. Logging tag: [STREAM_DEBUG].
+// Phases 1-4: subsystem lifecycle, viewer simulation, and donation generation.
+// Logging tag: [STREAM_DEBUG].
 
 #include "StreamSubsystem.h"
 
@@ -9,6 +8,7 @@
 #include "StreamArenaConfig.h"
 #include "StyleComponent.h"
 
+#include "Curves/CurveFloat.h"
 #include "Engine/GameInstance.h"
 #include "Stats/Stats.h"
 
@@ -55,7 +55,17 @@ URunSubsystem* UStreamSubsystem::GetRunSubsystem() const
 
 void UStreamSubsystem::Tick(float DeltaTime)
 {
-	// Phase 3: sample LPS, recompute ViewerTarget, smooth Viewers, roll donations.
+	if (!bRunActive)
+	{
+		return;
+	}
+
+	const float LPS = SampleLikesPerSecond();
+	const float TimeIntoRun = GetRunElapsedSeconds();
+
+	RecomputeViewerTarget(TimeIntoRun, LPS);
+	UpdateViewers(DeltaTime);
+	TickDonations(DeltaTime, LPS);
 }
 
 TStatId UStreamSubsystem::GetStatId() const
@@ -180,17 +190,103 @@ float UStreamSubsystem::SampleLikesPerSecond() const
 
 void UStreamSubsystem::RecomputeViewerTarget(float TimeIntoRunSeconds, float LikesPerSecond)
 {
-	// Phase 3.
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		ViewerTarget = 0;
+		return;
+	}
+
+	float TimeShape = 1.0f;
+	if (UCurveFloat* Curve = Cfg->BaselineCurve)
+	{
+		TimeShape = Curve->GetFloatValue(TimeIntoRunSeconds);
+	}
+
+	float RankMul = 1.0f;
+	if (UCurveFloat* Curve = Cfg->RankMultiplierCurve)
+	{
+		RankMul = Curve->GetFloatValue(LikesPerSecond);
+	}
+
+	float ArenaMul = 1.0f;
+	if (UStreamArenaConfig* AC = ArenaConfig.Get())
+	{
+		ArenaMul = AC->ArenaMultiplier;
+	}
+
+	const float TargetFloat = static_cast<float>(Cfg->BasePopulation) * TimeShape * RankMul * ArenaMul;
+	ViewerTarget = FMath::Max(0, FMath::RoundToInt(TargetFloat));
 }
 
 void UStreamSubsystem::UpdateViewers(float DeltaTime)
 {
-	// Phase 3.
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		return;
+	}
+
+	const float ApproachSpeed = FMath::Max(0.0f, Cfg->ViewerApproachSpeed);
+
+	const float CurrentF = static_cast<float>(CurrentViewers);
+	const float TargetF = static_cast<float>(ViewerTarget);
+	const float NewF = FMath::FInterpTo(CurrentF, TargetF, DeltaTime, ApproachSpeed);
+	const int32 NewViewers = FMath::RoundToInt(NewF);
+
+	if (NewViewers != CurrentViewers)
+	{
+		CurrentViewers = NewViewers;
+		OnViewersChanged.Broadcast(CurrentViewers);
+	}
 }
 
 void UStreamSubsystem::TickDonations(float DeltaTime, float LikesPerSecond)
 {
-	// Phase 4.
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg || CurrentViewers <= 0)
+	{
+		return;
+	}
+
+	const float Divisor = FMath::Max(1.0f, Cfg->DonationDivisor);
+
+	float ChanceMul = 1.0f;
+	if (UCurveFloat* Curve = Cfg->DonationChanceCurve)
+	{
+		ChanceMul = Curve->GetFloatValue(LikesPerSecond);
+	}
+
+	const float DonationsPerSecond = (static_cast<float>(CurrentViewers) / Divisor) * ChanceMul;
+	DonationRollAccumulator += DonationsPerSecond * DeltaTime;
+
+	while (DonationRollAccumulator >= 1.0f)
+	{
+		DonationRollAccumulator -= 1.0f;
+
+		FDonation Donation;
+		Donation.DonorName = PickDonorName();
+
+		if (UCurveFloat* AmtCurve = Cfg->DonationAmountCurve)
+		{
+			const float Roll = FMath::FRand();
+			const float RawAmount = AmtCurve->GetFloatValue(Roll);
+			const float ViewerScale = FMath::Pow(static_cast<float>(CurrentViewers), 0.3f);
+			Donation.Amount = FMath::Max(1, FMath::RoundToInt(RawAmount * ViewerScale));
+		}
+		else
+		{
+			Donation.Amount = 1;
+		}
+
+		Donation.Message = FText::GetEmpty();
+
+		OnDonationGenerated.Broadcast(Donation);
+		AddMetaCurrency(static_cast<int64>(Donation.Amount));
+
+		UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Donation: %s -> %d (Viewers=%d, LPS=%.1f)"),
+			*Donation.DonorName, Donation.Amount, CurrentViewers, LikesPerSecond);
+	}
 }
 
 FString UStreamSubsystem::PickDonorName() const
