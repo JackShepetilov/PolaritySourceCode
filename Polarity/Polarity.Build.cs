@@ -61,6 +61,7 @@ public class Polarity : ModuleRules
             "Polarity/Variant_Shooter/Pickups",
             "Polarity/Variant_Shooter/Run",
             "Polarity/Variant_Shooter/XP",
+            "Polarity/Variant_Shooter/Stream",
             "Polarity/Buildings",
             "Polarity/Foliage"
         });
