@@ -62,6 +62,50 @@ void UStyleComponent::RegisterAction(const FStyleAction& Action)
 		TEXT("[STREAM_DEBUG] Action=%d Spectacle=%.0f Fresh=%.2f StyleAdded=%.0f Style=%.0f LPS=%.1f Hearts=%d"),
 		static_cast<int32>(Action.Category), Spectacle, Freshness, StylePoints,
 		CurrentStyle, CurrentLikesPerSecond, HeartCount);
+
+	// Multikill detection: if this was a kill-like action, count recent kill timestamps
+	// across all kill categories. >=2 in window -> recursively register a Multikill.
+	if (Action.Category != EStyleCategory::Multikill)
+	{
+		static const TSet<EStyleCategory> KillCategories = {
+			EStyleCategory::Kill,
+			EStyleCategory::Headshot,
+			EStyleCategory::AirDashKill,
+			EStyleCategory::YankKill,
+			EStyleCategory::SlideKill,
+			EStyleCategory::MeleeKill,
+			EStyleCategory::EnvironmentalKill,
+			EStyleCategory::ParryReflect,
+		};
+
+		if (KillCategories.Contains(Action.Category))
+		{
+			constexpr float MultikillWindow = 1.0f;
+			int32 RecentKills = 0;
+			for (const auto& Pair : CategoryHistories)
+			{
+				if (KillCategories.Contains(Pair.Key))
+				{
+					for (float Timestamp : Pair.Value.Timestamps)
+					{
+						if (Now - Timestamp <= MultikillWindow)
+						{
+							++RecentKills;
+						}
+					}
+				}
+			}
+
+			if (RecentKills >= 2)
+			{
+				FStyleAction MultikillAction;
+				MultikillAction.Category = EStyleCategory::Multikill;
+				MultikillAction.WorldLocation = Action.WorldLocation;
+				MultikillAction.InstanceMultiplier = static_cast<float>(RecentKills);
+				RegisterAction(MultikillAction);
+			}
+		}
+	}
 }
 
 void UStyleComponent::ResetStyleState()

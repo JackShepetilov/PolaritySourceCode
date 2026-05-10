@@ -38,6 +38,8 @@
 #include "Polarity/Checkpoint/CheckpointData.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
+#include "StyleComponent.h"
+#include "StyleAction.h"
 #include "Polarity/Upgrades/UpgradeRegistry.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "NiagaraFunctionLibrary.h"
@@ -2557,6 +2559,33 @@ void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& H
 	if (HitMarkerComponent)
 	{
 		HitMarkerComponent->RegisterHit(HitLocation, HitDirection, Damage, bHeadshot, bKilled);
+	}
+
+	// === Stream style hook ===
+	if (bKilled)
+	{
+		if (UStyleComponent* Style = FindComponentByClass<UStyleComponent>())
+		{
+			EStyleCategory Category = EStyleCategory::Kill;
+			if (CurrentWeapon && CurrentWeapon->bWasYanked)
+			{
+				Category = EStyleCategory::YankKill;
+			}
+			else if (ActiveAirDashTrailComponent != nullptr)
+			{
+				Category = EStyleCategory::AirDashKill;
+			}
+			else if (bHeadshot)
+			{
+				Category = EStyleCategory::Headshot;
+			}
+
+			FStyleAction Action;
+			Action.Category = Category;
+			Action.WorldLocation = HitActor ? HitActor->GetActorLocation() : HitLocation;
+			Action.InstanceMultiplier = 1.0f;
+			Style->RegisterAction(Action);
+		}
 	}
 
 	// Charge transfer for melee weapon hits (same logic as OnMeleeHit)
