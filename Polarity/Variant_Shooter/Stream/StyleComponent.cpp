@@ -1,10 +1,13 @@
 // StyleComponent.cpp
-// Phase 1: skeleton — tick is enabled, public API is in place, but scoring/freshness
-// logic is empty (Phase 2). Logging tag: [STREAM_DEBUG].
+// Phase 2: style accumulation, freshness tracking, LPS computation.
+// Logging tag: [STREAM_DEBUG].
 
 #include "StyleComponent.h"
 
 #include "StreamConfig.h"
+
+#include "Curves/CurveFloat.h"
+#include "Engine/World.h"
 
 UStyleComponent::UStyleComponent()
 {
@@ -21,7 +24,44 @@ void UStyleComponent::SetConfig(UStreamConfig* InConfig)
 
 void UStyleComponent::RegisterAction(const FStyleAction& Action)
 {
-	// Phase 2 will compute Spectacle * Freshness * InstanceMultiplier and accumulate into CurrentStyle.
+	if (Action.Category == EStyleCategory::None)
+	{
+		return;
+	}
+
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		return;
+	}
+
+	const float* SpectaclePtr = Cfg->SpectacleScores.Find(Action.Category);
+	if (!SpectaclePtr)
+	{
+		// Category has no configured score yet — silent no-op (designer hasn't filled the table).
+		return;
+	}
+	const float Spectacle = *SpectaclePtr;
+	const float Freshness = ComputeFreshness(Action.Category);
+	const float StylePoints = Spectacle * Freshness * Action.InstanceMultiplier;
+
+	const float MaxStyle = (Cfg->MaxStyle > 0.0f) ? Cfg->MaxStyle : 10000.0f;
+	CurrentStyle = FMath::Clamp(CurrentStyle + StylePoints, 0.0f, MaxStyle);
+	TimeSinceLastAction = 0.0f;
+
+	const float Now = (GetWorld() != nullptr) ? GetWorld()->GetTimeSeconds() : 0.0f;
+	FCategoryHistory& History = CategoryHistories.FindOrAdd(Action.Category);
+	History.Timestamps.Add(Now);
+
+	RecomputeLikesPerSecond();
+
+	const int32 HeartCount = FMath::Max(1, FMath::RoundToInt(StylePoints / 10.0f));
+	OnLikesGenerated.Broadcast(HeartCount, Action.WorldLocation);
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[STREAM_DEBUG] Action=%d Spectacle=%.0f Fresh=%.2f StyleAdded=%.0f Style=%.0f LPS=%.1f Hearts=%d"),
+		static_cast<int32>(Action.Category), Spectacle, Freshness, StylePoints,
+		CurrentStyle, CurrentLikesPerSecond, HeartCount);
 }
 
 void UStyleComponent::ResetStyleState()
@@ -41,23 +81,91 @@ void UStyleComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActor
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Phase 2: decay CurrentStyle after grace period, prune category histories,
-	// recompute LikesPerSecond every frame.
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		return;
+	}
+
+	TimeSinceLastAction += DeltaTime;
+
+	if (TimeSinceLastAction > Cfg->StyleDecayGracePeriod && CurrentStyle > 0.0f)
+	{
+		CurrentStyle = FMath::Max(0.0f, CurrentStyle - Cfg->StyleDecayPerSecond * DeltaTime);
+	}
+
+	PruneCategoryHistories();
+	RecomputeLikesPerSecond();
 }
 
 float UStyleComponent::ComputeFreshness(EStyleCategory Category) const
 {
-	// Phase 2: count entries within window in CategoryHistories[Category],
-	// then sample Config->Freshness.RepetitionMultiplier curve.
-	return 1.0f;
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		return 1.0f;
+	}
+
+	UCurveFloat* Curve = Cfg->Freshness.RepetitionMultiplier;
+	if (!Curve)
+	{
+		return 1.0f;
+	}
+
+	const float WindowSeconds = FMath::Max(0.1f, Cfg->Freshness.WindowSeconds);
+	const float Now = (GetWorld() != nullptr) ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+	int32 Repetitions = 0;
+	if (const FCategoryHistory* History = CategoryHistories.Find(Category))
+	{
+		for (float Timestamp : History->Timestamps)
+		{
+			if (Now - Timestamp <= WindowSeconds)
+			{
+				++Repetitions;
+			}
+		}
+	}
+
+	return Curve->GetFloatValue(static_cast<float>(Repetitions));
 }
 
 void UStyleComponent::RecomputeLikesPerSecond()
 {
-	// Phase 2: sample Config->LikesPerSecondCurve at CurrentStyle.
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		CurrentLikesPerSecond = 0.0f;
+		return;
+	}
+
+	if (UCurveFloat* Curve = Cfg->LikesPerSecondCurve)
+	{
+		CurrentLikesPerSecond = Curve->GetFloatValue(CurrentStyle);
+	}
+	else
+	{
+		CurrentLikesPerSecond = 0.0f;
+	}
 }
 
 void UStyleComponent::PruneCategoryHistories()
 {
-	// Phase 2.
+	UStreamConfig* Cfg = Config.Get();
+	if (!Cfg)
+	{
+		return;
+	}
+
+	const float WindowSeconds = FMath::Max(0.1f, Cfg->Freshness.WindowSeconds);
+	const float Now = (GetWorld() != nullptr) ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+	for (auto& Pair : CategoryHistories)
+	{
+		FCategoryHistory& History = Pair.Value;
+		History.Timestamps.RemoveAll([Now, WindowSeconds](float Timestamp)
+		{
+			return (Now - Timestamp) > WindowSeconds;
+		});
+	}
 }

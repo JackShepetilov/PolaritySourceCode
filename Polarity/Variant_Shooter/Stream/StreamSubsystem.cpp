@@ -75,6 +75,11 @@ void UStreamSubsystem::SetConfig(UStreamConfig* InConfig)
 	Config = InConfig;
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Config set: %s"),
 		InConfig ? *InConfig->GetName() : TEXT("NULL"));
+
+	if (UStyleComponent* Style = StyleComponent.Get())
+	{
+		Style->SetConfig(InConfig);
+	}
 }
 
 void UStreamSubsystem::SetArenaConfig(UStreamArenaConfig* InArenaConfig)
@@ -89,6 +94,11 @@ void UStreamSubsystem::RegisterStyleComponent(UStyleComponent* InStyle)
 	StyleComponent = InStyle;
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] StyleComponent registered: %s"),
 		InStyle ? *InStyle->GetName() : TEXT("NULL"));
+
+	if (InStyle && Config.IsValid())
+	{
+		InStyle->SetConfig(Config.Get());
+	}
 }
 
 // ==================== Read API ====================
