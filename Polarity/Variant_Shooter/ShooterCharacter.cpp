@@ -1244,6 +1244,29 @@ void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation,
 		);
 	}
 
+	// === Stream style hook (melee path) ===
+	if (bKilled)
+	{
+		if (UStyleComponent* Style = FindComponentByClass<UStyleComponent>())
+		{
+			EStyleCategory Category = EStyleCategory::MeleeKill;
+			if (ActiveAirDashTrailComponent != nullptr)
+			{
+				Category = EStyleCategory::AirDashKill;
+			}
+			else if (bHeadshot)
+			{
+				Category = EStyleCategory::Headshot;
+			}
+
+			FStyleAction Action;
+			Action.Category = Category;
+			Action.WorldLocation = HitActor ? HitActor->GetActorLocation() : HitLocation;
+			Action.InstanceMultiplier = 1.0f;
+			Style->RegisterAction(Action);
+		}
+	}
+
 	// Handle charge based on target type
 	if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
 	{
