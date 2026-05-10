@@ -120,7 +120,7 @@ void UUpgradeChoiceWidget::RollChoicesForCategory(ESkillCategory Category)
 				*Def->GetName(), (int32)Def->Category, (int32)Category);
 			continue;
 		}
-		if (Manager && Manager->HasUpgrade(Def->UpgradeTag))
+		if (Manager && Manager->IsUpgradeMaxedOut(Def))
 		{
 			++SkippedOwned;
 			continue;
@@ -129,7 +129,7 @@ void UUpgradeChoiceWidget::RollChoicesForCategory(ESkillCategory Category)
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("[XP_DEBUG] RollChoices skill=%d: registry=%d -> pool=%d (skipped: null=%d, wrong-category=%d, owned=%d)"),
+		TEXT("[XP_DEBUG] RollChoices skill=%d: registry=%d -> pool=%d (skipped: null=%d, wrong-category=%d, maxed=%d)"),
 		(int32)Category, TotalInRegistry, Pool.Num(), SkippedNull, SkippedCategory, SkippedOwned);
 
 	const int32 N = FMath::Min(ChoiceCount, Pool.Num());

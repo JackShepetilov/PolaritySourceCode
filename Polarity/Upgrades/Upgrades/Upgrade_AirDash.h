@@ -28,4 +28,22 @@ protected:
 
 	virtual void OnUpgradeActivated() override;
 	virtual void OnUpgradeDeactivated() override;
+	virtual void OnLevelChanged(int32 OldLevel, int32 NewLevel) override;
+
+private:
+
+	/** Reads UpgradeDefinition_AirDash.LevelData[Level-1] and applies it to MovementSettings. */
+	void ApplyForLevel(int32 Level);
+
+	/** Snapshot the current MovementSettings values so OnUpgradeDeactivated can restore them. */
+	void CaptureBaseline();
+
+	/** Restore original MovementSettings values captured in OnUpgradeActivated. */
+	void RevertToBaseline();
+
+	// Cached baseline of MovementSettings fields we modify (set in OnUpgradeActivated).
+	int32 BaselineMaxAirDashCount = 1;
+	float BaselineAirDashCooldown = 1.5f;
+	float BaselineAirDashSpeed = 800.0f;
+	bool bBaselineCaptured = false;
 };

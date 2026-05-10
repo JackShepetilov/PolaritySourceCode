@@ -40,11 +40,35 @@ bool UUpgradeManagerComponent::GrantUpgrade(UUpgradeDefinition* Definition)
 		return false;
 	}
 
-	// Already owned?
-	if (ActiveUpgrades.Contains(Definition->UpgradeTag))
+	// Already owned? Try to level up.
+	if (TObjectPtr<UUpgradeComponent>* ExistingPtr = ActiveUpgrades.Find(Definition->UpgradeTag))
 	{
-		UE_LOG(LogTemp, Log, TEXT("UpgradeManager: Already has upgrade '%s'"), *Definition->DisplayName.ToString());
-		return false;
+		UUpgradeComponent* Existing = ExistingPtr->Get();
+		if (!Existing)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UpgradeManager: '%s' tracked but component is null — clearing"), *Definition->DisplayName.ToString());
+			ActiveUpgrades.Remove(Definition->UpgradeTag);
+			// fall through to normal grant below
+		}
+		else
+		{
+			if (Existing->CurrentLevel >= Definition->MaxLevel)
+			{
+				UE_LOG(LogTemp, Log, TEXT("UpgradeManager: '%s' already at max level %d/%d"),
+					*Definition->DisplayName.ToString(), Existing->CurrentLevel, Definition->MaxLevel);
+				return false;
+			}
+
+			const int32 OldLevel = Existing->CurrentLevel;
+			Existing->CurrentLevel = OldLevel + 1;
+			Existing->OnLevelChanged(OldLevel, Existing->CurrentLevel);
+
+			UE_LOG(LogTemp, Log, TEXT("UpgradeManager: '%s' levelled up %d -> %d"),
+				*Definition->DisplayName.ToString(), OldLevel, Existing->CurrentLevel);
+
+			OnUpgradeLeveledUp.Broadcast(Definition, Existing->CurrentLevel);
+			return true;
+		}
 	}
 
 	if (!Definition->ComponentClass)
@@ -68,15 +92,17 @@ bool UUpgradeManagerComponent::GrantUpgrade(UUpgradeDefinition* Definition)
 	}
 
 	NewComponent->UpgradeDefinition = Definition;
+	NewComponent->CurrentLevel = 1;
 	NewComponent->RegisterComponent();
 
 	// Track it
 	ActiveUpgrades.Add(Definition->UpgradeTag, NewComponent);
 
-	// Activate the upgrade logic
+	// Activate the upgrade logic (handles level-1 setup)
 	NewComponent->OnUpgradeActivated();
 
-	UE_LOG(LogTemp, Log, TEXT("UpgradeManager: Granted upgrade '%s'"), *Definition->DisplayName.ToString());
+	UE_LOG(LogTemp, Log, TEXT("UpgradeManager: Granted upgrade '%s' (Lv 1/%d)"),
+		*Definition->DisplayName.ToString(), Definition->MaxLevel);
 
 	// Broadcast
 	OnUpgradeGranted.Broadcast(Definition);
@@ -113,6 +139,31 @@ bool UUpgradeManagerComponent::RemoveUpgrade(FGameplayTag UpgradeTag)
 bool UUpgradeManagerComponent::HasUpgrade(FGameplayTag UpgradeTag) const
 {
 	return ActiveUpgrades.Contains(UpgradeTag);
+}
+
+int32 UUpgradeManagerComponent::GetUpgradeLevel(FGameplayTag UpgradeTag) const
+{
+	if (const TObjectPtr<UUpgradeComponent>* Found = ActiveUpgrades.Find(UpgradeTag))
+	{
+		if (UUpgradeComponent* Component = Found->Get())
+		{
+			return Component->CurrentLevel;
+		}
+	}
+	return 0;
+}
+
+bool UUpgradeManagerComponent::IsUpgradeMaxedOut(UUpgradeDefinition* Definition) const
+{
+	if (!Definition) return false;
+	if (const TObjectPtr<UUpgradeComponent>* Found = ActiveUpgrades.Find(Definition->UpgradeTag))
+	{
+		if (UUpgradeComponent* Component = Found->Get())
+		{
+			return Component->CurrentLevel >= Definition->MaxLevel;
+		}
+	}
+	return false; // Not owned at all — still grantable
 }
 
 TArray<UUpgradeDefinition*> UUpgradeManagerComponent::GetAcquiredUpgrades() const

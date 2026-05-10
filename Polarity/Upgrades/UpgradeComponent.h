@@ -28,6 +28,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Upgrade")
 	TObjectPtr<UUpgradeDefinition> UpgradeDefinition;
 
+	/** Current level of this upgrade. Starts at 1 on grant, increments via UpgradeManagerComponent::GrantUpgrade. */
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade")
+	int32 CurrentLevel = 1;
+
+	UFUNCTION(BlueprintPure, Category = "Upgrade")
+	int32 GetCurrentLevel() const { return CurrentLevel; }
+
 	/** Get the owning ShooterCharacter */
 	UFUNCTION(BlueprintPure, Category = "Upgrade")
 	AShooterCharacter* GetShooterCharacter() const;
@@ -55,6 +62,15 @@ protected:
 	 * Use this to unbind from delegates, clean up state, etc.
 	 */
 	virtual void OnUpgradeDeactivated();
+
+	/**
+	 * Called when this upgrade's level is incremented by a repeat grant.
+	 * Override in subclasses to apply per-level scaling (e.g. extra dash charges).
+	 * NOT called on the very first grant — use OnUpgradeActivated for level-1 setup.
+	 * @param OldLevel Level before increment.
+	 * @param NewLevel Level after increment (= OldLevel + 1).
+	 */
+	virtual void OnLevelChanged(int32 OldLevel, int32 NewLevel) {}
 
 	// ==================== Event Hooks ====================
 	// Override these in subclasses to react to game events.

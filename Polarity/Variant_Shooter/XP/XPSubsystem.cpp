@@ -251,6 +251,8 @@ void UXPSubsystem::OnAnyActorSpawned(AActor* Actor)
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(Actor))
 	{
 		BindToNPC(NPC);
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Bound late-spawn NPC: %s (class %s)"),
+			*NPC->GetName(), *NPC->GetClass()->GetName());
 	}
 }
 
@@ -265,10 +267,40 @@ void UXPSubsystem::HandleNPCDeath(AShooterNPC* DeadNPC, TSubclassOf<UDamageType>
 {
 	if (!DeadNPC) return;
 
-	URunSubsystem* Run = GetRunSubsystem();
-	if (!Run || !Run->IsRunActive()) return;
+	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] HandleNPCDeath: NPC=%s DT=%s Causer=%s"),
+		*DeadNPC->GetName(),
+		KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL"),
+		KillingDamageCauser ? *KillingDamageCauser->GetName() : TEXT("NULL"));
 
-	if (!WasKillCausedByPlayer(KillingDamageCauser)) return;
+	URunSubsystem* Run = GetRunSubsystem();
+	if (!Run || !Run->IsRunActive())
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[XP_DEBUG] Kill %s ignored: run not active"), *DeadNPC->GetName());
+		return;
+	}
+
+	// Some DamageTypes are gameplay-implied player kills even when the engine's Causer/Instigator
+	// chain doesn't lead back to the PlayerPawn (e.g. thrown props, wallslam from yank-throws).
+	// Designer opts these in via XPConfig.AlwaysAttributeToPlayer.
+	const bool bAlwaysAttribute = Config.IsValid() && Config->ShouldAlwaysAttributeToPlayer(KillingDamageType);
+
+	if (!bAlwaysAttribute && !WasKillCausedByPlayer(KillingDamageCauser))
+	{
+		// Most common reason for "missing" XP from props / thrown NPCs: their Instigator chain
+		// doesn't lead back to the player pawn. If you expect the kill to count, the gameplay
+		// code that spawns/kicks the prop must set its Instigator to the player.
+		const FString CauserStr   = KillingDamageCauser ? KillingDamageCauser->GetName() : FString(TEXT("NULL"));
+		const FString OwnerStr    = (KillingDamageCauser && KillingDamageCauser->GetOwner())
+			? KillingDamageCauser->GetOwner()->GetName() : FString(TEXT("NULL"));
+		const FString InstigStr   = (KillingDamageCauser && KillingDamageCauser->GetInstigator())
+			? KillingDamageCauser->GetInstigator()->GetName() : FString(TEXT("NULL"));
+		const FString DTStr       = KillingDamageType ? KillingDamageType->GetName() : FString(TEXT("NULL"));
+
+		UE_LOG(LogTemp, Warning,
+			TEXT("[XP_DEBUG] Kill %s ignored: not attributed to player. DamageType=%s Causer=%s Owner=%s Instigator=%s"),
+			*DeadNPC->GetName(), *DTStr, *CauserStr, *OwnerStr, *InstigStr);
+		return;
+	}
 
 	const TSubclassOf<AShooterNPC> EnemyClass = DeadNPC->GetClass();
 	Run->RegisterKillInStats(EnemyClass);
@@ -282,12 +314,15 @@ void UXPSubsystem::HandleNPCDeath(AShooterNPC* DeadNPC, TSubclassOf<UDamageType>
 	ESkillCategory Cat;
 	if (!Config->GetSkillForDamageType(KillingDamageType, Cat))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] DamageType %s not in KillXPRouting — kill awards no XP"),
+		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] DamageType %s not in KillXPRouting — kill awards no XP (add the entry to DA_XPConfig.KillXPRouting)"),
 			KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL"));
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Kill %s -> skill %d"), *DeadNPC->GetName(), (int32)Cat);
+	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Kill %s by %s -> skill %d"),
+		*DeadNPC->GetName(),
+		KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL-DamageType"),
+		(int32)Cat);
 	AwardKillXP(Cat, EnemyClass);
 }
 

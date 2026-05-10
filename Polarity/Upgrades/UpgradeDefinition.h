@@ -29,6 +29,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
 	ESkillCategory Category = ESkillCategory::Movement;
 
+	/** Maximum level this upgrade can reach. 1 = single-level (legacy behaviour, drops out of pool after first grant). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade", meta = (ClampMin = "1"))
+	int32 MaxLevel = 1;
+
 	/** Display name shown in UI and on world pickup */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|UI")
 	FText DisplayName;

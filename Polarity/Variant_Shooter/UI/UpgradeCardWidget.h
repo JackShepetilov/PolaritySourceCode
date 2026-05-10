@@ -53,12 +53,24 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Card")
 	int32 UpgradeTier = 1;
 
+	/** Current level the player has (0 = not yet owned). */
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Card")
+	int32 UpgradeCurrentLevel = 0;
+
+	/** Maximum level for this upgrade. */
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Card")
+	int32 UpgradeMaxLevel = 1;
+
 protected:
 	/**
 	 * Implement in BP to populate widgets and play intro animation.
 	 * Data is passed via parameters (not relying on inherited variables).
+	 *
+	 * InCurrentLevel = 0 means "not yet owned" (this will be a fresh grant — show as "NEW" or "Lv 1").
+	 * InCurrentLevel >= 1 means "already owned at level N — choosing levels up to N+1".
+	 * Use (InCurrentLevel, InMaxLevel) to render "Lv N -> N+1" or "MAX" labels.
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Upgrade Card",
 		meta = (DisplayName = "On Initialized"))
-	void BP_OnInitialized(const FText& InName, const FText& InDescription, UTexture2D* InIcon, int32 InTier);
+	void BP_OnInitialized(const FText& InName, const FText& InDescription, UTexture2D* InIcon, int32 InTier, int32 InCurrentLevel, int32 InMaxLevel);
 };

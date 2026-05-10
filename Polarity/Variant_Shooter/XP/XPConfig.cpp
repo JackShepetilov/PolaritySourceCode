@@ -43,6 +43,12 @@ bool UXPConfig::GetSkillForDamageType(TSubclassOf<UDamageType> DamageType, ESkil
 	return false;
 }
 
+bool UXPConfig::ShouldAlwaysAttributeToPlayer(TSubclassOf<UDamageType> DamageType) const
+{
+	if (!DamageType) return false;
+	return AlwaysAttributeToPlayer.Contains(DamageType);
+}
+
 const FMovementActionConfig* UXPConfig::GetMovementConfig(EMovementAction Action) const
 {
 	return MovementActions.Find(Action);

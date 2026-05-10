@@ -3,6 +3,10 @@
 #include "UpgradeCardWidget.h"
 
 #include "UpgradeDefinition.h"
+#include "UpgradeManagerComponent.h"
+
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 
 void UUpgradeCardWidget::InitFromDefinition(UUpgradeDefinition* InDefinition, int32 InIndex)
 {
@@ -20,6 +24,7 @@ void UUpgradeCardWidget::InitFromDefinition(UUpgradeDefinition* InDefinition, in
 		UpgradeDescription = Definition->Description;
 		UpgradeIcon = Definition->Icon;
 		UpgradeTier = Definition->Tier;
+		UpgradeMaxLevel = Definition->MaxLevel;
 	}
 	else
 	{
@@ -27,13 +32,30 @@ void UUpgradeCardWidget::InitFromDefinition(UUpgradeDefinition* InDefinition, in
 		UpgradeDescription = FText::GetEmpty();
 		UpgradeIcon = nullptr;
 		UpgradeTier = 0;
+		UpgradeMaxLevel = 1;
+	}
+
+	// Look up current level on the player's UpgradeManager (0 if not yet owned)
+	UpgradeCurrentLevel = 0;
+	if (Definition)
+	{
+		if (APlayerController* PC = GetOwningPlayer())
+		{
+			if (APawn* Pawn = PC->GetPawn())
+			{
+				if (UUpgradeManagerComponent* Mgr = Pawn->FindComponentByClass<UUpgradeManagerComponent>())
+				{
+					UpgradeCurrentLevel = Mgr->GetUpgradeLevel(Definition->UpgradeTag);
+				}
+			}
+		}
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("[XP_DEBUG] Card pre-BP: this=%p UpgradeName='%s' UpgradeDescription='%s' Tier=%d"),
-		this, *UpgradeName.ToString(), *UpgradeDescription.ToString(), UpgradeTier);
+		TEXT("[XP_DEBUG] Card pre-BP: this=%p UpgradeName='%s' Tier=%d Level=%d/%d"),
+		this, *UpgradeName.ToString(), UpgradeTier, UpgradeCurrentLevel, UpgradeMaxLevel);
 
-	BP_OnInitialized(UpgradeName, UpgradeDescription, UpgradeIcon, UpgradeTier);
+	BP_OnInitialized(UpgradeName, UpgradeDescription, UpgradeIcon, UpgradeTier, UpgradeCurrentLevel, UpgradeMaxLevel);
 }
 
 void UUpgradeCardWidget::RequestSelect()

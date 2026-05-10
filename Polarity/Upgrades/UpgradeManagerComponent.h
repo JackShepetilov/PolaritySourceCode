@@ -14,6 +14,7 @@ class AShooterWeapon;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, UUpgradeDefinition*, Definition);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnUpgradeLeveledUp, UUpgradeDefinition*, Definition, int32, NewLevel);
 
 /**
  * Manages all active upgrades on the owning ShooterCharacter.
@@ -31,9 +32,11 @@ public:
 	// ==================== Core API ====================
 
 	/**
-	 * Grant an upgrade to the player. Does nothing if already owned.
-	 * Creates the upgrade component and activates it.
-	 * @return True if upgrade was newly granted
+	 * Grant an upgrade to the player.
+	 *  - If not yet owned: creates the upgrade component at CurrentLevel=1 and calls OnUpgradeActivated.
+	 *  - If already owned and below MaxLevel: increments CurrentLevel and calls OnLevelChanged.
+	 *  - If already at MaxLevel: returns false (no-op).
+	 * @return True if upgrade was newly granted OR levelled up.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Upgrades")
 	bool GrantUpgrade(UUpgradeDefinition* Definition);
@@ -48,6 +51,14 @@ public:
 	/** Check if player has a specific upgrade */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	bool HasUpgrade(FGameplayTag UpgradeTag) const;
+
+	/** Current level for an owned upgrade (1+). Returns 0 if not owned. */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	int32 GetUpgradeLevel(FGameplayTag UpgradeTag) const;
+
+	/** True if upgrade is owned AND CurrentLevel >= Definition->MaxLevel. False if not owned (still grantable). */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	bool IsUpgradeMaxedOut(UUpgradeDefinition* Definition) const;
 
 	/** Get all acquired upgrade definitions (for UI) */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
@@ -74,6 +85,10 @@ public:
 	/** Broadcast when an upgrade is removed */
 	UPROPERTY(BlueprintAssignable, Category = "Upgrades")
 	FOnUpgradeRemoved OnUpgradeRemoved;
+
+	/** Broadcast when an already-owned upgrade is levelled up by a repeat grant. */
+	UPROPERTY(BlueprintAssignable, Category = "Upgrades")
+	FOnUpgradeLeveledUp OnUpgradeLeveledUp;
 
 	// ==================== Event Broadcasting ====================
 	// Called by core systems (ShooterCharacter, ShooterWeapon).

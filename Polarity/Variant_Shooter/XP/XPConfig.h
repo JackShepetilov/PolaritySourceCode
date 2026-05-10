@@ -32,6 +32,24 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Routing")
 	TMap<TSubclassOf<UDamageType>, ESkillCategory> KillXPRouting;
 
+	/**
+	 * DamageTypes whose kills are always attributed to the player, even if the engine's
+	 * Causer/Owner/Instigator chain does not lead back to the PlayerPawn.
+	 *
+	 * Use this for indirect kills where attribution is gameplay-implied but not engine-tracked,
+	 * e.g.:
+	 *   - DamageType_EMFWeapon kills via thrown/exploded props (Causer = prop, no Instigator)
+	 *   - DamageType_Wallslam where the killed NPC slammed into a wall after a player throw
+	 *
+	 * NOTE: this bypasses player-attribution. Don't add DamageTypes that NPCs use against each
+	 * other organically (without player initiation), or you'll award XP for ambient NPC fights.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Routing")
+	TSet<TSubclassOf<UDamageType>> AlwaysAttributeToPlayer;
+
+	/** True if the given DamageType is in AlwaysAttributeToPlayer (skip Causer/Instigator check). */
+	bool ShouldAlwaysAttributeToPlayer(TSubclassOf<UDamageType> DamageType) const;
+
 	/** Per-action parameters for Movement XP (consumed by MovementXPTracker — Stage Б). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Movement")
 	TMap<EMovementAction, FMovementActionConfig> MovementActions;
