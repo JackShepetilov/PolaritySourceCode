@@ -2566,22 +2566,19 @@ void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& H
 	{
 		if (UStyleComponent* Style = FindComponentByClass<UStyleComponent>())
 		{
+			// Priority: rarer / higher-skill actions first.
 			EStyleCategory Category = EStyleCategory::Kill;
-			if (CurrentWeapon && CurrentWeapon->bHasLimitedAmmo)
-			{
-				// bHasLimitedAmmo is set in DroppedRangedWeapon::CompletePull only when
-				// the source drop was yank-spawned (SpawnedBulletCount > 0). Death-drop
-				// pickups leave it false, so this cleanly identifies kills via a weapon
-				// torn from a live enemy.
-				Category = EStyleCategory::YankKill;
-			}
-			else if (ActiveAirDashTrailComponent != nullptr)
+			if (ActiveAirDashTrailComponent != nullptr)
 			{
 				Category = EStyleCategory::AirDashKill;
 			}
 			else if (bHeadshot)
 			{
 				Category = EStyleCategory::Headshot;
+			}
+			else if (CurrentWeapon && CurrentWeapon->bWasYanked)
+			{
+				Category = EStyleCategory::YankKill;
 			}
 
 			FStyleAction Action;
