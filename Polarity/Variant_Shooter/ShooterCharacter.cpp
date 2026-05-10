@@ -2567,8 +2567,12 @@ void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& H
 		if (UStyleComponent* Style = FindComponentByClass<UStyleComponent>())
 		{
 			EStyleCategory Category = EStyleCategory::Kill;
-			if (CurrentWeapon && CurrentWeapon->bWasYanked)
+			if (CurrentWeapon && CurrentWeapon->bHasLimitedAmmo)
 			{
+				// bHasLimitedAmmo is set in DroppedRangedWeapon::CompletePull only when
+				// the source drop was yank-spawned (SpawnedBulletCount > 0). Death-drop
+				// pickups leave it false, so this cleanly identifies kills via a weapon
+				// torn from a live enemy.
 				Category = EStyleCategory::YankKill;
 			}
 			else if (ActiveAirDashTrailComponent != nullptr)
