@@ -40,6 +40,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Spawn Point")
 	FTransform GetSpawnTransform(bool bForAirUnit) const;
 
+	/** Delay (seconds) between ArenaManager requesting a spawn and the NPC actually appearing.
+	 *  0 = spawn immediately (default). Subclasses (e.g. telegraphed) override this. */
+	virtual float GetTelegraphDelay() const { return 0.0f; }
+
+	/** Called by ArenaManager when a spawn is scheduled but not yet executed at this point.
+	 *  Override in subclasses to drive VFX, audio, or floor-flash feedback in BP. */
+	virtual void OnSpawnTelegraphed(TSubclassOf<AShooterNPC> NPCClass, float Duration) {}
+
 protected:
 #if WITH_EDITORONLY_DATA
 	/** Billboard for visibility in editor */

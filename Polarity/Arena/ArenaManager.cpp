@@ -512,9 +512,6 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 			continue;
 		}
 
-		// Check if this is a flying drone for air spawn point selection
-		const bool bIsFlyingUnit = Entry.NPCClass->IsChildOf(AFlyingDrone::StaticClass());
-
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
 			AArenaSpawnPoint* SpawnPoint = PickSpawnPoint(Entry.NPCClass, UsedSpawnPoints);
@@ -526,92 +523,25 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 
 			UsedSpawnPoints.Add(SpawnPoint);
 
-			const FTransform SpawnTransform = SpawnPoint->GetSpawnTransform(bIsFlyingUnit);
-			FVector SpawnLocation = SpawnTransform.GetLocation();
-
-			// For ground units: project spawn location to floor + capsule half-height
-			// to prevent spawning with feet in the ground
-			if (!bIsFlyingUnit)
-			{
-				// Get capsule half-height from CDO to know how high to place the NPC
-				// Add 10cm padding to ensure feet never clip into the floor
-				const ACharacter* CDO = Entry.NPCClass->GetDefaultObject<ACharacter>();
-				const float CapsuleHalfHeight = (CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f) + 10.0f;
-
-				// Try NavMesh projection first — guarantees a walkable surface
-				UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-				if (NavSys)
+			TSubclassOf<AShooterNPC> ClassCopy = Entry.NPCClass;
+			const bool bDeferred = TryBeginTelegraph(SpawnPoint, ClassCopy,
+				[this](AArenaSpawnPoint* DeferredPoint, TSubclassOf<AShooterNPC> DeferredClass)
 				{
-					FNavLocation NavResult;
-					const FVector ProjectionExtent(50.0f, 50.0f, 500.0f);
-					if (NavSys->ProjectPointToNavigation(SpawnLocation, NavResult, ProjectionExtent))
-					{
-						// NavMesh gives us the floor Z — place capsule center above it
-						SpawnLocation.X = NavResult.Location.X;
-						SpawnLocation.Y = NavResult.Location.Y;
-						SpawnLocation.Z = NavResult.Location.Z + CapsuleHalfHeight;
-					}
-					else
-					{
-						// NavMesh projection failed — fall back to ground trace
-						FHitResult GroundHit;
-						FCollisionQueryParams TraceParams;
-						const FVector TraceStart = SpawnLocation + FVector(0.0f, 0.0f, 200.0f);
-						const FVector TraceEnd = SpawnLocation - FVector(0.0f, 0.0f, 500.0f);
-
-						if (World->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
-						{
-							SpawnLocation.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
-						}
-					}
-				}
-			}
-
-			APawn* SpawnedPawn = UAIBlueprintHelperLibrary::SpawnAIFromClass(
-				World,
-				Entry.NPCClass,
-				nullptr, // No BehaviorTree — StateTree configured on controller
-				SpawnLocation,
-				SpawnTransform.Rotator(),
-				true // bNoCollisionFail
-			);
-
-			if (AShooterNPC* NPC = Cast<AShooterNPC>(SpawnedPawn))
+					ExecuteWaveSpawnAt(DeferredClass, DeferredPoint);
+				});
+			if (!bDeferred)
 			{
-				AliveNPCs.Add(NPC);
-
-				// Subscribe to death
-				NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
+				ExecuteWaveSpawnAt(ClassCopy, SpawnPoint);
 			}
 		}
 	}
 
 	OnWaveStarted.Broadcast(WaveIndex);
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Wave %d started — %d NPCs spawned"), WaveIndex, AliveNPCs.Num());
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Wave %d started — %d NPCs spawned immediately (%d telegraphed)"),
+		WaveIndex, AliveNPCs.Num(), ReservedSpawnPoints.Num());
 
-	// Force all NPCs to target the player immediately — don't rely on perception senses
-	// which may fail if player is behind the NPC or out of sight angle.
-	// SetCurrentTarget directly assigns the enemy, then ForcePerceptionUpdate on next tick
-	// ensures the perception system catches up.
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	AActor* PlayerActor = PC ? PC->GetPawn() : nullptr;
-
-	if (PlayerActor)
-	{
-		for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
-		{
-			if (AShooterNPC* NPC = NPCPtr.Get())
-			{
-				if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
-				{
-					AIController->SetCurrentTarget(PlayerActor);
-				}
-			}
-		}
-	}
-
-	// Also refresh perception on next tick so the system stays in sync
+	// Refresh perception on next tick so the system stays in sync for the immediately-spawned NPCs
 	GetWorldTimerManager().SetTimerForNextTick([this]()
 	{
 		for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
@@ -627,6 +557,163 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 	});
 }
 
+// ==================== Spawn Execution Helpers ====================
+
+FTransform AArenaManager::ResolveSpawnTransform(AArenaSpawnPoint* SpawnPoint, TSubclassOf<AShooterNPC> NPCClass) const
+{
+	if (!SpawnPoint || !NPCClass)
+	{
+		return FTransform::Identity;
+	}
+
+	const bool bIsFlyingUnit = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
+	FTransform Result = SpawnPoint->GetSpawnTransform(bIsFlyingUnit);
+	FVector SpawnLocation = Result.GetLocation();
+
+	if (!bIsFlyingUnit)
+	{
+		const ACharacter* CDO = NPCClass->GetDefaultObject<ACharacter>();
+		const float CapsuleHalfHeight = (CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f) + 10.0f;
+
+		UWorld* World = GetWorld();
+		UNavigationSystemV1* NavSys = World ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
+		if (NavSys)
+		{
+			FNavLocation NavResult;
+			const FVector ProjectionExtent(50.0f, 50.0f, 500.0f);
+			if (NavSys->ProjectPointToNavigation(SpawnLocation, NavResult, ProjectionExtent))
+			{
+				SpawnLocation.X = NavResult.Location.X;
+				SpawnLocation.Y = NavResult.Location.Y;
+				SpawnLocation.Z = NavResult.Location.Z + CapsuleHalfHeight;
+			}
+			else if (World)
+			{
+				FHitResult GroundHit;
+				FCollisionQueryParams TraceParams;
+				const FVector TraceStart = SpawnLocation + FVector(0.0f, 0.0f, 200.0f);
+				const FVector TraceEnd = SpawnLocation - FVector(0.0f, 0.0f, 500.0f);
+				if (World->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
+				{
+					SpawnLocation.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
+				}
+			}
+		}
+	}
+
+	Result.SetLocation(SpawnLocation);
+	return Result;
+}
+
+void AArenaManager::ExecuteWaveSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AArenaSpawnPoint* SpawnPoint)
+{
+	UWorld* World = GetWorld();
+	if (!World || !SpawnPoint || !NPCClass)
+	{
+		return;
+	}
+
+	const FTransform SpawnTransform = ResolveSpawnTransform(SpawnPoint, NPCClass);
+
+	APawn* SpawnedPawn = UAIBlueprintHelperLibrary::SpawnAIFromClass(
+		World,
+		NPCClass,
+		nullptr,
+		SpawnTransform.GetLocation(),
+		SpawnTransform.Rotator(),
+		true
+	);
+
+	AShooterNPC* NPC = Cast<AShooterNPC>(SpawnedPawn);
+	if (!NPC)
+	{
+		return;
+	}
+
+	AliveNPCs.Add(NPC);
+	NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
+
+	// Force-target the player so this NPC engages immediately even if spawned behind the player
+	APlayerController* PC = World->GetFirstPlayerController();
+	AActor* PlayerActor = PC ? PC->GetPawn() : nullptr;
+	if (PlayerActor)
+	{
+		if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
+		{
+			AIController->SetCurrentTarget(PlayerActor);
+
+			TWeakObjectPtr<AShooterAIController> WeakAIC = AIController;
+			GetWorldTimerManager().SetTimerForNextTick([WeakAIC]()
+			{
+				if (AShooterAIController* AIC = WeakAIC.Get())
+				{
+					AIC->ForcePerceptionUpdate();
+				}
+			});
+		}
+	}
+}
+
+bool AArenaManager::TryBeginTelegraph(AArenaSpawnPoint* SpawnPoint, TSubclassOf<AShooterNPC> NPCClass,
+	TFunction<void(AArenaSpawnPoint*, TSubclassOf<AShooterNPC>)> ExecuteCallback)
+{
+	if (!SpawnPoint)
+	{
+		return false;
+	}
+
+	const float Delay = SpawnPoint->GetTelegraphDelay();
+	if (Delay <= 0.0f)
+	{
+		return false;
+	}
+
+	ReservedSpawnPoints.Add(SpawnPoint);
+	SpawnPoint->OnSpawnTelegraphed(NPCClass, Delay);
+
+	TWeakObjectPtr<AArenaSpawnPoint> WeakSP = SpawnPoint;
+	TSubclassOf<AShooterNPC> ClassCopy = NPCClass;
+
+	FTimerHandle Handle;
+	GetWorldTimerManager().SetTimer(Handle, FTimerDelegate::CreateLambda(
+		[this, WeakSP, ClassCopy, ExecuteCallback]()
+		{
+			AArenaSpawnPoint* SP = WeakSP.Get();
+			if (!SP)
+			{
+				return;
+			}
+			ReservedSpawnPoints.Remove(SP);
+
+			// Arena may have ended (player died / sequence triggered) while we were waiting
+			if (CurrentState != EArenaState::Active)
+			{
+				return;
+			}
+
+			ExecuteCallback(SP, ClassCopy);
+		}), Delay, false);
+
+	return true;
+}
+
+bool AArenaManager::IsSpawnPointAvailable(AArenaSpawnPoint* Point) const
+{
+	if (!Point)
+	{
+		return false;
+	}
+	// Skip points mid-telegraph (compare via weak-ptr equality)
+	for (const TWeakObjectPtr<AArenaSpawnPoint>& Reserved : ReservedSpawnPoints)
+	{
+		if (Reserved.Get() == Point)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 AArenaSpawnPoint* AArenaManager::PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass, const TArray<AArenaSpawnPoint*>& UsedPoints) const
 {
 	const bool bNeedsAirSpawn = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
@@ -636,7 +723,7 @@ AArenaSpawnPoint* AArenaManager::PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClas
 	for (const TSoftObjectPtr<AArenaSpawnPoint>& PointRef : SpawnPoints)
 	{
 		AArenaSpawnPoint* Point = PointRef.Get();
-		if (!Point || UsedPoints.Contains(Point) || !Point->IsClassAllowed(NPCClass))
+		if (!Point || UsedPoints.Contains(Point) || !Point->IsClassAllowed(NPCClass) || !IsSpawnPointAvailable(Point))
 		{
 			continue;
 		}
@@ -657,21 +744,22 @@ AArenaSpawnPoint* AArenaManager::PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClas
 		for (const TSoftObjectPtr<AArenaSpawnPoint>& PointRef : SpawnPoints)
 		{
 			AArenaSpawnPoint* Point = PointRef.Get();
-			if (Point && !UsedPoints.Contains(Point) && Point->IsClassAllowed(NPCClass))
+			if (Point && !UsedPoints.Contains(Point) && Point->IsClassAllowed(NPCClass) && IsSpawnPointAvailable(Point))
 			{
 				ValidPoints.Add(Point);
 			}
 		}
 	}
 
-	// Fallback 2: if all points used, allow reuse (more NPCs than spawn points)
+	// Fallback 2: if all points used, allow reuse (more NPCs than spawn points).
+	// Still honor IsSpawnPointAvailable so we never spawn on a telegraphing point.
 	if (ValidPoints.Num() == 0)
 	{
 		for (const TSoftObjectPtr<AArenaSpawnPoint>& PointRef : SpawnPoints)
 		{
 			if (AArenaSpawnPoint* Point = PointRef.Get())
 			{
-				if (Point->IsClassAllowed(NPCClass))
+				if (Point->IsClassAllowed(NPCClass) && IsSpawnPointAvailable(Point))
 				{
 					ValidPoints.Add(Point);
 				}
@@ -1167,10 +1255,11 @@ AArenaSpawnPoint* AArenaManager::PickSustainSpawnPoint(TSubclassOf<AShooterNPC> 
 		}
 
 		const bool bAllowed = Point->IsClassAllowed(NPCClass);
-		UE_LOG(LogTemp, Error, TEXT("  SpawnPoints[%d]: %s — IsClassAllowed=%d, bAirSpawn=%d, ExcludedClasses=%d"),
-			i, *Point->GetName(), bAllowed, Point->bAirSpawn, Point->ExcludedNPCClasses.Num());
+		const bool bAvailable = IsSpawnPointAvailable(Point);
+		UE_LOG(LogTemp, Error, TEXT("  SpawnPoints[%d]: %s — IsClassAllowed=%d, bAvailable=%d, bAirSpawn=%d, ExcludedClasses=%d"),
+			i, *Point->GetName(), bAllowed, bAvailable, Point->bAirSpawn, Point->ExcludedNPCClasses.Num());
 
-		if (bAllowed)
+		if (bAllowed && bAvailable)
 		{
 			AllValid.Add(Point);
 		}
@@ -1303,8 +1392,6 @@ void AArenaManager::SpawnSustainEnemy()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — Picked class: %s"), *NPCClass->GetName());
-
 	AArenaSpawnPoint* SpawnPoint = PickSustainSpawnPoint(NPCClass);
 	if (!SpawnPoint)
 	{
@@ -1312,65 +1399,41 @@ void AArenaManager::SpawnSustainEnemy()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — Picked spawn point: %s at %s"),
-		*SpawnPoint->GetName(), *SpawnPoint->GetActorLocation().ToString());
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — Picked class %s at point %s"),
+		*NPCClass->GetName(), *SpawnPoint->GetName());
 
-	UWorld* World = GetWorld();
-	if (!World)
+	const bool bDeferred = TryBeginTelegraph(SpawnPoint, NPCClass,
+		[this](AArenaSpawnPoint* DeferredPoint, TSubclassOf<AShooterNPC> DeferredClass)
+		{
+			ExecuteSustainSpawnAt(DeferredClass, DeferredPoint);
+		});
+
+	if (!bDeferred)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ArenaManager::SpawnSustainEnemy — FAILED: World is null"));
+		ExecuteSustainSpawnAt(NPCClass, SpawnPoint);
+	}
+}
+
+void AArenaManager::ExecuteSustainSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AArenaSpawnPoint* SpawnPoint)
+{
+	UWorld* World = GetWorld();
+	if (!World || !SpawnPoint || !NPCClass)
+	{
 		return;
 	}
 
-	const bool bIsFlyingUnit = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
-	const FTransform SpawnTransform = SpawnPoint->GetSpawnTransform(bIsFlyingUnit);
-	FVector SpawnLocation = SpawnTransform.GetLocation();
+	const FTransform SpawnTransform = ResolveSpawnTransform(SpawnPoint, NPCClass);
+	const FVector SpawnLocation = SpawnTransform.GetLocation();
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — Raw spawn location: %s, IsFlying: %d"),
-		*SpawnLocation.ToString(), bIsFlyingUnit);
-
-	// For ground units: project to floor + capsule half-height
-	if (!bIsFlyingUnit)
-	{
-		const ACharacter* CDO = NPCClass->GetDefaultObject<ACharacter>();
-		const float CapsuleHalfHeight = (CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f) + 10.0f;
-
-		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-		if (NavSys)
-		{
-			FNavLocation NavResult;
-			const FVector ProjectionExtent(50.0f, 50.0f, 500.0f);
-			if (NavSys->ProjectPointToNavigation(SpawnLocation, NavResult, ProjectionExtent))
-			{
-				SpawnLocation.X = NavResult.Location.X;
-				SpawnLocation.Y = NavResult.Location.Y;
-				SpawnLocation.Z = NavResult.Location.Z + CapsuleHalfHeight;
-				UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — NavMesh projected to: %s"), *SpawnLocation.ToString());
-			}
-			else
-			{
-				UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — NavMesh projection FAILED, using raw location"));
-			}
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — No NavSystem found"));
-		}
-	}
-
-	// --- Try recycling from pool first ---
+	// Try recycling from pool first
 	AShooterNPC* NPC = TryRecycleFromPool(NPCClass, SpawnLocation, SpawnTransform.Rotator());
 	if (NPC)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — RECYCLED %s from pool at %s"),
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::ExecuteSustainSpawnAt — RECYCLED %s at %s"),
 			*NPC->GetName(), *SpawnLocation.ToString());
 	}
 	else
 	{
-		// No pool match — spawn fresh
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — No pool match, calling SpawnAIFromClass(%s) at %s"),
-			*NPCClass->GetName(), *SpawnLocation.ToString());
-
 		APawn* SpawnedPawn = UAIBlueprintHelperLibrary::SpawnAIFromClass(
 			World,
 			NPCClass,
@@ -1379,27 +1442,22 @@ void AArenaManager::SpawnSustainEnemy()
 			SpawnTransform.Rotator(),
 			true
 		);
-
 		if (!SpawnedPawn)
 		{
-			UE_LOG(LogTemp, Error, TEXT("ArenaManager::SpawnSustainEnemy — FAILED: SpawnAIFromClass returned null! Class: %s, Location: %s"),
+			UE_LOG(LogTemp, Error, TEXT("ArenaManager::ExecuteSustainSpawnAt — FAILED: SpawnAIFromClass returned null! Class %s at %s"),
 				*NPCClass->GetName(), *SpawnLocation.ToString());
 			return;
 		}
-
 		NPC = Cast<AShooterNPC>(SpawnedPawn);
 		if (!NPC)
 		{
-			UE_LOG(LogTemp, Error, TEXT("ArenaManager::SpawnSustainEnemy — FAILED: SpawnedPawn is not AShooterNPC! Actual class: %s"),
+			UE_LOG(LogTemp, Error, TEXT("ArenaManager::ExecuteSustainSpawnAt — SpawnedPawn is not AShooterNPC: %s"),
 				*SpawnedPawn->GetClass()->GetName());
 			return;
 		}
-
-		// Mark for pooling
 		NPC->bIsPooled = true;
 	}
 
-	// Register with arena tracking
 	AliveNPCs.Add(NPC);
 	NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
 
@@ -1411,16 +1469,10 @@ void AArenaManager::SpawnSustainEnemy()
 		if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
 		{
 			AIController->SetCurrentTarget(PlayerActor);
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — Force-targeted player"));
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — WARNING: No ShooterAIController on NPC! Controller: %s"),
-				NPC->GetController() ? *NPC->GetController()->GetClass()->GetName() : TEXT("NULL"));
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::SpawnSustainEnemy — SUCCESS: %s at %s. AliveNPCs now: %d"),
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager::ExecuteSustainSpawnAt — SUCCESS: %s at %s. AliveNPCs: %d"),
 		*NPC->GetName(), *SpawnLocation.ToString(), AliveNPCs.Num());
 }
 
@@ -2556,6 +2608,89 @@ void AArenaManager::PauseSustainSpawning()
 	SustainRemainingSpawns = 0;
 	SustainTotalEnemies = 0;
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Sustain spawning paused permanently (survives respawn reset)"));
+}
+
+// ==================== KillAllAliveNPCs ====================
+
+void AArenaManager::KillAllAliveNPCs(bool bSequential, float DelayBetweenKills, UNiagaraSystem* DeathVFX, bool bSuppressDrops)
+{
+	// Stop sustain from filling the cap while we're killing
+	PauseSustainSpawning();
+
+	TArray<AShooterNPC*> ToKill = GetAliveNPCs();
+	if (ToKill.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::KillAllAliveNPCs — no alive NPCs, nothing to do"));
+		return;
+	}
+
+	if (!bSequential)
+	{
+		for (AShooterNPC* NPC : ToKill)
+		{
+			DoKillSingleNPC(NPC, DeathVFX, bSuppressDrops);
+		}
+		return;
+	}
+
+	// Fisher-Yates shuffle for visual variety
+	for (int32 i = ToKill.Num() - 1; i > 0; --i)
+	{
+		const int32 j = FMath::RandRange(0, i);
+		ToKill.Swap(i, j);
+	}
+
+	PendingKillAllNPCs.Reset(ToKill.Num());
+	for (AShooterNPC* NPC : ToKill)
+	{
+		PendingKillAllNPCs.Add(NPC);
+	}
+	PendingKillAllVFX = DeathVFX;
+	PendingKillAllDelay = FMath::Max(DelayBetweenKills, 0.01f);
+	bPendingKillAllSuppressDrops = bSuppressDrops;
+
+	GetWorldTimerManager().ClearTimer(KillAllTimerHandle);
+	ProcessNextKillAll();
+}
+
+void AArenaManager::ProcessNextKillAll()
+{
+	while (PendingKillAllNPCs.Num() > 0)
+	{
+		TWeakObjectPtr<AShooterNPC> NPCPtr = PendingKillAllNPCs[0];
+		PendingKillAllNPCs.RemoveAt(0);
+
+		AShooterNPC* NPC = NPCPtr.Get();
+		if (NPC && !NPC->IsDead())
+		{
+			DoKillSingleNPC(NPC, PendingKillAllVFX, bPendingKillAllSuppressDrops);
+
+			if (PendingKillAllNPCs.Num() > 0)
+			{
+				GetWorldTimerManager().SetTimer(KillAllTimerHandle, this,
+					&AArenaManager::ProcessNextKillAll, PendingKillAllDelay, false);
+			}
+			return;
+		}
+	}
+}
+
+void AArenaManager::DoKillSingleNPC(AShooterNPC* NPC, UNiagaraSystem* DeathVFX, bool bSuppressDrops)
+{
+	if (!NPC)
+	{
+		return;
+	}
+
+	const FVector NPCLocation = NPC->GetActorLocation();
+	if (DeathVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(), DeathVFX, NPCLocation, FRotator::ZeroRotator, FVector(1.0f));
+	}
+
+	NPC->bSuppressDeathDrops = bSuppressDrops;
+	UGameplayStatics::ApplyDamage(NPC, NPC->CurrentHP + 100.0f, nullptr, this, nullptr);
 }
 
 void AArenaManager::ForceCompleteArena()

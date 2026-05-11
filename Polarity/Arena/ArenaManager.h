@@ -323,6 +323,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Arena")
 	void PauseSustainSpawning();
 
+	/** Kill every currently-alive NPC tracked by this arena.
+	 *  bSequential = stagger kills with DelayBetweenKills (Finale-style); false = all die instantly.
+	 *  Also calls PauseSustainSpawning() so Sustain mode doesn't backfill replacements. */
+	UFUNCTION(BlueprintCallable, Category = "Arena", meta = (AdvancedDisplay = "bSuppressDrops"))
+	void KillAllAliveNPCs(bool bSequential = true, float DelayBetweenKills = 0.3f, UNiagaraSystem* DeathVFX = nullptr, bool bSuppressDrops = true);
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -355,9 +361,34 @@ private:
 	/** Spawn all NPCs for the given wave index */
 	void SpawnWave(int32 WaveIndex);
 
-	/** Pick a random spawn point appropriate for the NPC class, avoiding already used points */
-	AArenaSpawnPoint* PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass, const TArray<AArenaSpawnPoint*>& UsedPoints) const;
+protected:
+	/** Pick a random spawn point appropriate for the NPC class, avoiding already used points.
+	 *  Virtual so subclasses (e.g. BridgeArenaManager) can add ahead-of-player / distance filters. */
+	virtual AArenaSpawnPoint* PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass, const TArray<AArenaSpawnPoint*>& UsedPoints) const;
 
+	/** Base gate every spawn-point pick honors. Default: not reserved (telegraph in progress).
+	 *  Subclasses extend with extra filters (ahead-of-player, distance band, etc.). */
+	virtual bool IsSpawnPointAvailable(AArenaSpawnPoint* Point) const;
+
+	/** Resolves the final spawn transform: applies NavMesh / line-trace ground projection
+	 *  for ground units, leaves air units alone. */
+	FTransform ResolveSpawnTransform(AArenaSpawnPoint* SpawnPoint, TSubclassOf<AShooterNPC> NPCClass) const;
+
+	/** Executes the actual SpawnAIFromClass call + AliveNPCs registration for a wave entry. */
+	void ExecuteWaveSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AArenaSpawnPoint* SpawnPoint);
+
+	/** Executes recycle-or-spawn + registration + force-target for sustain mode. */
+	void ExecuteSustainSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AArenaSpawnPoint* SpawnPoint);
+
+	/** If the spawn point has a telegraph delay, reserves the point and schedules a deferred
+	 *  call to ExecuteCallback after the delay (also broadcasts OnSpawnTelegraphed).
+	 *  Returns true if telegraph was started (deferred), false to spawn immediately. */
+	bool TryBeginTelegraph(AArenaSpawnPoint* SpawnPoint, TSubclassOf<AShooterNPC> NPCClass, TFunction<void(AArenaSpawnPoint*, TSubclassOf<AShooterNPC>)> ExecuteCallback);
+
+	/** Spawn points currently mid-telegraph. Pickers skip them so we don't double-up. */
+	TSet<TWeakObjectPtr<AArenaSpawnPoint>> ReservedSpawnPoints;
+
+private:
 	/** Called when a spawned NPC dies */
 	UFUNCTION()
 	void OnNPCDied(AShooterNPC* DeadNPC);
@@ -384,21 +415,25 @@ private:
 
 	// ==================== Sustain Mode ====================
 
-	/** Spawn a single enemy from the weighted pool at a LOS-aware spawn point */
+protected:
+	/** Spawn a single enemy from the weighted pool at a LOS-aware spawn point.
+	 *  Protected so subclasses (e.g. BridgeArenaManager) can drive periodic spawn pressure. */
 	void SpawnSustainEnemy();
 
 	/** Pick spawn point out of player's line of sight, or farthest if all visible.
-	 *  Filters out points that exclude the given NPCClass. */
-	AArenaSpawnPoint* PickSustainSpawnPoint(TSubclassOf<AShooterNPC> NPCClass);
+	 *  Filters out points that exclude the given NPCClass. Virtual for bridge filtering. */
+	virtual AArenaSpawnPoint* PickSustainSpawnPoint(TSubclassOf<AShooterNPC> NPCClass);
 
 	/** Pick a random NPC class from SustainEnemyPool using weighted probability */
 	TSubclassOf<AShooterNPC> PickWeightedSustainClass() const;
 
+	/** Effective max enemies for sustain mode (resolves MaxSustainEnemies == 0).
+	 *  Virtual so subclasses can lerp the cap (e.g. by player progress on a spline). */
+	virtual int32 GetEffectiveMaxSustainEnemies() const;
+
+private:
 	/** Find and register all ShooterNPCs already placed on the level */
 	void RegisterLevelEnemies();
-
-	/** Effective max enemies for sustain mode (resolves MaxSustainEnemies == 0) */
-	int32 GetEffectiveMaxSustainEnemies() const;
 
 	/** Number of enemies manually placed on level at BeginPlay */
 	int32 InitialLevelEnemyCount = 0;
@@ -548,4 +583,28 @@ private:
 
 	/** Whether we already bound to OnPlayerRespawned delegate */
 	bool bBoundToRespawn = false;
+
+	// ==================== KillAllAliveNPCs Pipeline ====================
+
+	/** Apply lethal damage to a single NPC with optional VFX and drop suppression. */
+	void DoKillSingleNPC(AShooterNPC* NPC, UNiagaraSystem* DeathVFX, bool bSuppressDrops);
+
+	/** Process the next NPC in PendingKillAllNPCs queue (sequential mode of KillAllAliveNPCs). */
+	void ProcessNextKillAll();
+
+	/** Shuffled queue for sequential KillAllAliveNPCs */
+	TArray<TWeakObjectPtr<AShooterNPC>> PendingKillAllNPCs;
+
+	/** VFX captured for the active KillAllAliveNPCs sequence */
+	UPROPERTY()
+	TObjectPtr<UNiagaraSystem> PendingKillAllVFX = nullptr;
+
+	/** Delay between each kill in the active sequence */
+	float PendingKillAllDelay = 0.3f;
+
+	/** Whether to suppress death drops in the active sequence */
+	bool bPendingKillAllSuppressDrops = true;
+
+	/** Timer driving the sequential kill loop */
+	FTimerHandle KillAllTimerHandle;
 };
