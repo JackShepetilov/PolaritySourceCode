@@ -76,6 +76,11 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "XP|Events")
 	FOnSkillLevelUp OnSkillLevelUp;
 
+	/** Subscribe to an NPC's OnNPCDeathDetailed so its kill routes through HandleNPCDeath.
+	 *  Normally called automatically by OnAnyActorSpawned, but recycled NPCs (pool re-use)
+	 *  don't fire SpawnActor — call this manually in ResetForPool to restore XP tracking. */
+	void BindToNPC(AShooterNPC* NPC);
+
 protected:
 	// ==================== Run lifecycle handlers ====================
 
@@ -87,7 +92,6 @@ protected:
 
 	void BindNPCEventsForCurrentWorld();
 	void UnbindNPCEventsForCurrentWorld();
-	void BindToNPC(AShooterNPC* NPC);
 	void OnAnyActorSpawned(AActor* Actor);
 
 	UFUNCTION()

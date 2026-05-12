@@ -34,6 +34,8 @@
 #include "Curves/CurveFloat.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
+#include "XPSubsystem.h"
+#include "Engine/GameInstance.h"
 #include "Boss/BossProjectile.h"
 #include "../Pickups/HealthPickup.h"
 #include "../Pickups/ArmorPickup.h"
@@ -1046,9 +1048,21 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 		CWS->RegisterNPC(this);
 	}
 
-	// --- Clear death delegates (ArenaManager will re-bind) ---
+	// --- Clear death delegates ---
+	// ArenaManager re-binds OnNPCDeath in ExecuteSustainSpawnAt right after recycling.
+	// XPSubsystem normally hooks OnNPCDeathDetailed in OnAnyActorSpawned — but recycled
+	// NPCs don't fire SpawnActor, so we have to re-bind it manually here, otherwise the
+	// player gets no XP for killing a recycled enemy.
 	OnNPCDeath.Clear();
 	OnNPCDeathDetailed.Clear();
+
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UXPSubsystem* XP = GI->GetSubsystem<UXPSubsystem>())
+		{
+			XP->BindToNPC(this);
+		}
+	}
 
 	// --- Charge overlay ---
 	if (bUseChargeOverlay)
