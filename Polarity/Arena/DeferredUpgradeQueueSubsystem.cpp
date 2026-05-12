@@ -12,6 +12,10 @@
 
 void UDeferredUpgradeQueueSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
+	// Force XPSubsystem to initialize FIRST so its delegate exists when we bind to it.
+	// Without this, GameInstance subsystem init order is undefined and the bind silently fails.
+	Collection.InitializeDependency(UXPSubsystem::StaticClass());
+
 	Super::Initialize(Collection);
 
 	if (UGameInstance* GI = GetGameInstance())
@@ -24,7 +28,7 @@ void UDeferredUpgradeQueueSubsystem::Initialize(FSubsystemCollectionBase& Collec
 		}
 		else
 		{
-			UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] DeferredQueue::Initialize — XPSubsystem not found"));
+			UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] DeferredQueue::Initialize — XPSubsystem STILL not found after InitializeDependency"));
 		}
 	}
 }

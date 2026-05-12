@@ -151,20 +151,32 @@ void AArenaAntenna::ApplyStateVisuals(EAntennaState NewState)
 {
 	if (!BeaconVFX)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: BeaconVFX component is NULL"), *GetName());
 		return;
 	}
 
 	const bool bShouldBeacon = (NewState == EAntennaState::AvailablePostFight);
+
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: state=%d, bShouldBeacon=%d, BeaconVFXAsset=%s"),
+		*GetName(), (int32)NewState, bShouldBeacon ? 1 : 0,
+		BeaconVFXAsset ? *BeaconVFXAsset->GetName() : TEXT("NULL"));
 
 	if (bShouldBeacon && BeaconVFXAsset)
 	{
 		// (Re)assign the asset in case it changed and start the system fresh
 		BeaconVFX->SetAsset(BeaconVFXAsset);
 		BeaconVFX->Activate(true);
+		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: Beacon ACTIVATED with asset %s"),
+			*GetName(), *BeaconVFXAsset->GetName());
 	}
 	else
 	{
 		BeaconVFX->Deactivate();
+		if (bShouldBeacon && !BeaconVFXAsset)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: WANT beacon but BeaconVFXAsset is NULL — set it in BP_Antenna Details"),
+				*GetName());
+		}
 	}
 }
 
