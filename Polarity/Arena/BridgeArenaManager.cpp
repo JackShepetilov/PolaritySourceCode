@@ -30,11 +30,11 @@ void ABridgeArenaManager::BeginPlay()
 
 	if (BridgeSpline)
 	{
-		BridgeSplineLength = BridgeSpline->GetSplineLength();
+		CachedSplineLength = BridgeSpline->GetSplineLength();
 		UE_LOG(LogTemp, Warning, TEXT("BridgeArenaManager: Spline length %.0f cm (%d points)"),
-			BridgeSplineLength, BridgeSpline->GetNumberOfSplinePoints());
+			CachedSplineLength, BridgeSpline->GetNumberOfSplinePoints());
 
-		if (BridgeSplineLength <= 0.0f)
+		if (CachedSplineLength <= 0.0f)
 		{
 			UE_LOG(LogTemp, Error, TEXT("BridgeArenaManager: Spline has zero length — add at least two points in the editor"));
 		}
@@ -55,7 +55,7 @@ void ABridgeArenaManager::Tick(float DeltaTime)
 		return;
 	}
 
-	if (!BridgeSpline || BridgeSplineLength <= 0.0f)
+	if (!BridgeSpline || CachedSplineLength <= 0.0f)
 	{
 		return;
 	}
@@ -91,7 +91,7 @@ void ABridgeArenaManager::Tick(float DeltaTime)
 
 float ABridgeArenaManager::GetPlayerProgress01() const
 {
-	if (!BridgeSpline || BridgeSplineLength <= 0.0f)
+	if (!BridgeSpline || CachedSplineLength <= 0.0f)
 	{
 		return 0.0f;
 	}
@@ -129,7 +129,7 @@ bool ABridgeArenaManager::IsSpawnPointAvailable(AArenaSpawnPoint* Point) const
 		return false;
 	}
 
-	if (!BridgeSpline || BridgeSplineLength <= 0.0f)
+	if (!BridgeSpline || CachedSplineLength <= 0.0f)
 	{
 		// Fall through — without a spline we can't filter by position
 		return true;
@@ -167,7 +167,7 @@ float ABridgeArenaManager::ComputeCurrentSpawnInterval() const
 
 float ABridgeArenaManager::ProjectToBridge01(const FVector& WorldLocation) const
 {
-	if (!BridgeSpline || BridgeSplineLength <= 0.0f)
+	if (!BridgeSpline || CachedSplineLength <= 0.0f)
 	{
 		return 0.0f;
 	}
@@ -175,12 +175,12 @@ float ABridgeArenaManager::ProjectToBridge01(const FVector& WorldLocation) const
 	const float Distance = BridgeSpline->GetDistanceAlongSplineAtLocation(
 		WorldLocation, ESplineCoordinateSpace::World);
 
-	return FMath::Clamp(Distance / BridgeSplineLength, 0.0f, 1.0f);
+	return FMath::Clamp(Distance / CachedSplineLength, 0.0f, 1.0f);
 }
 
 void ABridgeArenaManager::RefreshPlayerProjectionCache() const
 {
-	if (!BridgeSpline || BridgeSplineLength <= 0.0f)
+	if (!BridgeSpline || CachedSplineLength <= 0.0f)
 	{
 		CachedPlayerProgress01 = 0.0f;
 		CachedPlayerDistanceAlongSpline = 0.0f;
@@ -199,5 +199,5 @@ void ABridgeArenaManager::RefreshPlayerProjectionCache() const
 	const FVector PlayerLoc = PlayerPawn->GetActorLocation();
 	CachedPlayerDistanceAlongSpline = BridgeSpline->GetDistanceAlongSplineAtLocation(
 		PlayerLoc, ESplineCoordinateSpace::World);
-	CachedPlayerProgress01 = FMath::Clamp(CachedPlayerDistanceAlongSpline / BridgeSplineLength, 0.0f, 1.0f);
+	CachedPlayerProgress01 = FMath::Clamp(CachedPlayerDistanceAlongSpline / CachedSplineLength, 0.0f, 1.0f);
 }
