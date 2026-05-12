@@ -72,11 +72,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bridge|Spawn", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float MaxProgressToSpawn = 0.95f;
 
+	// ==================== Auto-Collect Spawn Points ====================
+
+	/** On BeginPlay, auto-collect every AArenaSpawnPoint placed in this manager's own level
+	 *  (typically the bridge sublevel). Manually-added points in the SpawnPoints array are preserved. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bridge|Spawn")
+	bool bAutoCollectSpawnPointsFromOwnLevel = true;
+
 	// ==================== API ====================
 
 	/** 0.0 at the start of the bridge, 1.0 at the far end. Computed from player projection onto the spline. */
 	UFUNCTION(BlueprintPure, Category = "Bridge")
 	float GetPlayerProgress01() const;
+
+	/** Scan the world and add every AArenaSpawnPoint that lives in this manager's own level
+	 *  to the SpawnPoints array (skipping duplicates). Returns the number of points added.
+	 *  Called automatically in BeginPlay if bAutoCollectSpawnPointsFromOwnLevel is true. */
+	UFUNCTION(BlueprintCallable, Category = "Bridge|Spawn")
+	int32 CollectSpawnPointsFromOwnLevel();
 
 protected:
 	virtual void BeginPlay() override;

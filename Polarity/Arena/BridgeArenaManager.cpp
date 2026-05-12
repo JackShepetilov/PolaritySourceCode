@@ -7,6 +7,8 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Engine/World.h"
+#include "Engine/Level.h"
+#include "EngineUtils.h"
 
 // File-local throttle for Tick-summary debug logs (single bridge per level expected).
 // Kept here instead of as a member to avoid touching the header for pure debug state.
@@ -46,6 +48,16 @@ void ABridgeArenaManager::BeginPlay()
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("[BRIDGE_DEBUG] BeginPlay: BridgeSpline component is null"));
+	}
+
+	// Auto-collect spawn points from our own level before logging the dump, so the dump reflects
+	// the final state. Designers can disable the flag if they want full manual control.
+	if (bAutoCollectSpawnPointsFromOwnLevel)
+	{
+		const int32 BeforeCount = SpawnPoints.Num();
+		const int32 Added = CollectSpawnPointsFromOwnLevel();
+		UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] BeginPlay: Auto-collected %d spawn points (had %d manually, total %d)"),
+			Added, BeforeCount, SpawnPoints.Num());
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] BeginPlay: SpawnPoints=%d, SustainPool=%d, ArenaMode=%d (1=Sustain), CanEverTick=%d, TickEnabled=%d"),
@@ -273,4 +285,65 @@ void ABridgeArenaManager::RefreshPlayerProjectionCache() const
 	CachedPlayerDistanceAlongSpline = BridgeSpline->GetDistanceAlongSplineAtLocation(
 		PlayerLoc, ESplineCoordinateSpace::World);
 	CachedPlayerProgress01 = FMath::Clamp(CachedPlayerDistanceAlongSpline / CachedSplineLength, 0.0f, 1.0f);
+}
+
+int32 ABridgeArenaManager::CollectSpawnPointsFromOwnLevel()
+{
+	ULevel* MyLevel = GetLevel();
+	if (!MyLevel)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] CollectSpawnPointsFromOwnLevel: GetLevel() returned null"));
+		return 0;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return 0;
+	}
+
+	const FString MyLevelName = MyLevel->GetOuter() ? MyLevel->GetOuter()->GetName() : TEXT("UNKNOWN");
+	int32 Added = 0;
+	int32 SkippedOtherLevel = 0;
+	int32 SkippedDuplicate = 0;
+
+	for (TActorIterator<AArenaSpawnPoint> It(World); It; ++It)
+	{
+		AArenaSpawnPoint* SP = *It;
+		if (!SP)
+		{
+			continue;
+		}
+
+		if (SP->GetLevel() != MyLevel)
+		{
+			++SkippedOtherLevel;
+			continue;
+		}
+
+		// Manual de-dup against existing SoftObjectPtrs (designer may have hand-added some)
+		bool bAlreadyPresent = false;
+		for (const TSoftObjectPtr<AArenaSpawnPoint>& Existing : SpawnPoints)
+		{
+			if (Existing.Get() == SP)
+			{
+				bAlreadyPresent = true;
+				break;
+			}
+		}
+		if (bAlreadyPresent)
+		{
+			++SkippedDuplicate;
+			continue;
+		}
+
+		SpawnPoints.Add(TSoftObjectPtr<AArenaSpawnPoint>(SP));
+		++Added;
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[BRIDGE_DEBUG] CollectSpawnPointsFromOwnLevel(level=%s): added=%d, skipped_other_level=%d, skipped_duplicate=%d"),
+		*MyLevelName, Added, SkippedOtherLevel, SkippedDuplicate);
+
+	return Added;
 }
