@@ -32,20 +32,32 @@ void AArenaAntenna::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Bind to paired button — pressing it activates the antenna
-	if (AShootableButton* Button = InteractionButton.LoadSynchronous())
+	// Two interaction modes supported:
+	//   (a) UShootableButtonComponent added INSIDE this antenna's Blueprint via "Add Component"
+	//       — single self-contained actor, designer puts the button mesh directly on the antenna.
+	//   (b) InteractionButton soft pointer to a separate AShootableButton actor placed nearby.
+	// Embedded component wins if both are configured.
+	UShootableButtonComponent* EmbeddedButton = FindComponentByClass<UShootableButtonComponent>();
+	if (EmbeddedButton)
 	{
-		if (Button->ButtonComponent && !bBoundToButton)
+		EmbeddedButton->OnButtonPressed.AddDynamic(this, &AArenaAntenna::HandleButtonPressed);
+		bBoundToButton = true;
+		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Bound to EMBEDDED ShootableButtonComponent"),
+			*GetName());
+	}
+	else if (AShootableButton* Button = InteractionButton.LoadSynchronous())
+	{
+		if (Button->ButtonComponent)
 		{
 			Button->ButtonComponent->OnButtonPressed.AddDynamic(this, &AArenaAntenna::HandleButtonPressed);
 			bBoundToButton = true;
-			UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Bound to button %s"),
+			UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Bound to EXTERNAL button actor %s"),
 				*GetName(), *Button->GetName());
 		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: No InteractionButton set — antenna will only respond to BP-driven TryActivate()"),
+		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: No interaction source — antenna will only respond to BP-driven TryActivate()"),
 			*GetName());
 	}
 
@@ -55,13 +67,21 @@ void AArenaAntenna::BeginPlay()
 
 void AArenaAntenna::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (AShootableButton* Button = InteractionButton.Get())
+	if (bBoundToButton)
 	{
-		if (Button->ButtonComponent && bBoundToButton)
+		// Try both possible sources — RemoveDynamic is a no-op if we weren't bound there
+		if (UShootableButtonComponent* EmbeddedButton = FindComponentByClass<UShootableButtonComponent>())
 		{
-			Button->ButtonComponent->OnButtonPressed.RemoveDynamic(this, &AArenaAntenna::HandleButtonPressed);
-			bBoundToButton = false;
+			EmbeddedButton->OnButtonPressed.RemoveDynamic(this, &AArenaAntenna::HandleButtonPressed);
 		}
+		if (AShootableButton* Button = InteractionButton.Get())
+		{
+			if (Button->ButtonComponent)
+			{
+				Button->ButtonComponent->OnButtonPressed.RemoveDynamic(this, &AArenaAntenna::HandleButtonPressed);
+			}
+		}
+		bBoundToButton = false;
 	}
 
 	Super::EndPlay(EndPlayReason);
