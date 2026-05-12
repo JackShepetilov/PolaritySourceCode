@@ -8,6 +8,10 @@
 #include "GameFramework/Pawn.h"
 #include "Engine/World.h"
 
+// File-local throttle for Tick-summary debug logs (single bridge per level expected).
+// Kept here instead of as a member to avoid touching the header for pure debug state.
+namespace { float GBridgeDebugLogAccumulator = 0.0f; }
+
 ABridgeArenaManager::ABridgeArenaManager()
 {
 	// Bridge variant needs a tick to drive periodic spawn pressure.
@@ -31,17 +35,41 @@ void ABridgeArenaManager::BeginPlay()
 	if (BridgeSpline)
 	{
 		CachedSplineLength = BridgeSpline->GetSplineLength();
-		UE_LOG(LogTemp, Warning, TEXT("BridgeArenaManager: Spline length %.0f cm (%d points)"),
+		UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] BeginPlay: Spline length %.0f cm (%d points)"),
 			CachedSplineLength, BridgeSpline->GetNumberOfSplinePoints());
 
 		if (CachedSplineLength <= 0.0f)
 		{
-			UE_LOG(LogTemp, Error, TEXT("BridgeArenaManager: Spline has zero length — add at least two points in the editor"));
+			UE_LOG(LogTemp, Error, TEXT("[BRIDGE_DEBUG] BeginPlay: Spline has zero length — add at least two points in the editor"));
 		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("BridgeArenaManager: BridgeSpline component is null — bridge filtering disabled"));
+		UE_LOG(LogTemp, Error, TEXT("[BRIDGE_DEBUG] BeginPlay: BridgeSpline component is null"));
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] BeginPlay: SpawnPoints=%d, SustainPool=%d, ArenaMode=%d (1=Sustain), CanEverTick=%d, TickEnabled=%d"),
+		SpawnPoints.Num(),
+		SustainEnemyPool.Num(),
+		(int32)ArenaMode,
+		PrimaryActorTick.bCanEverTick ? 1 : 0,
+		IsActorTickEnabled() ? 1 : 0);
+
+	UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] BeginPlay: MaxEnemiesAtStart=%d, MaxEnemiesAtEnd=%d, SpawnInterval %.1f→%.1f, Distance %.0f→%.0f, MaxProgress %.2f"),
+		MaxEnemiesAtStart, MaxEnemiesAtEnd,
+		SpawnIntervalAtStart, SpawnIntervalAtEnd,
+		MinDistanceAhead, MaxDistanceAhead,
+		MaxProgressToSpawn);
+
+	// Dump spawn point status so we can see what BP collected
+	for (int32 i = 0; i < SpawnPoints.Num(); ++i)
+	{
+		const TSoftObjectPtr<AArenaSpawnPoint>& Ref = SpawnPoints[i];
+		AArenaSpawnPoint* SP = Ref.Get();
+		UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG]   SpawnPoint[%d]: %s (path=%s)"),
+			i,
+			SP ? *SP->GetName() : TEXT("UNRESOLVED"),
+			*Ref.ToSoftObjectPath().ToString());
 	}
 }
 
@@ -49,14 +77,32 @@ void ABridgeArenaManager::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Throttle Tick logging to once per second
+	GBridgeDebugLogAccumulator += DeltaTime;
+	const bool bShouldLog = GBridgeDebugLogAccumulator >= 1.0f;
+	if (bShouldLog)
+	{
+		GBridgeDebugLogAccumulator = 0.0f;
+	}
+
 	// Only drive periodic spawns while the arena is in active combat
 	if (CurrentState != EArenaState::Active || ArenaMode != EArenaMode::Sustain)
 	{
+		if (bShouldLog)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] Tick SKIP: State=%d (need 1=Active), Mode=%d (need 1=Sustain)"),
+				(int32)CurrentState, (int32)ArenaMode);
+		}
 		return;
 	}
 
 	if (!BridgeSpline || CachedSplineLength <= 0.0f)
 	{
+		if (bShouldLog)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] Tick SKIP: Spline invalid (Spline=%p, Length=%.1f)"),
+				BridgeSpline.Get(), CachedSplineLength);
+		}
 		return;
 	}
 
@@ -65,27 +111,49 @@ void ABridgeArenaManager::Tick(float DeltaTime)
 	// Past the end-zone cutoff — leave the button area clear
 	if (CachedPlayerProgress01 >= MaxProgressToSpawn)
 	{
+		if (bShouldLog)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] Tick SKIP: Player past MaxProgress (%.2f >= %.2f)"),
+				CachedPlayerProgress01, MaxProgressToSpawn);
+		}
 		return;
 	}
 
 	TimeSinceLastBridgeSpawn += DeltaTime;
 	const float CurrentInterval = ComputeCurrentSpawnInterval();
+
+	// Only add pressure if we're below the (also-growing) cap
+	const int32 AliveCount = GetAliveNPCs().Num();
+	const int32 Cap = GetEffectiveMaxSustainEnemies();
+
+	if (bShouldLog)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BRIDGE_DEBUG] Tick: Progress=%.2f, PlayerDist=%.0f, Interval=%.2fs (accum=%.2fs), Alive=%d, Cap=%d, SpawnPoints=%d, SustainPool=%d"),
+			CachedPlayerProgress01, CachedPlayerDistanceAlongSpline,
+			CurrentInterval, TimeSinceLastBridgeSpawn,
+			AliveCount, Cap, SpawnPoints.Num(), SustainEnemyPool.Num());
+	}
+
 	if (TimeSinceLastBridgeSpawn < CurrentInterval)
 	{
 		return;
 	}
 
-	// Only add pressure if we're below the (also-growing) cap
-	const int32 AliveCount = GetAliveNPCs().Num();
-	const int32 Cap = GetEffectiveMaxSustainEnemies();
 	if (AliveCount >= Cap)
 	{
 		// Hold the accumulator so the next slot below cap fires immediately
 		TimeSinceLastBridgeSpawn = CurrentInterval;
+		if (bShouldLog)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] Tick: at cap (%d/%d), waiting for kill"), AliveCount, Cap);
+		}
 		return;
 	}
 
 	TimeSinceLastBridgeSpawn = 0.0f;
+	UE_LOG(LogTemp, Warning, TEXT("[BRIDGE_DEBUG] Tick: ATTEMPTING SPAWN (progress=%.2f, alive=%d/%d, interval=%.2fs)"),
+		CachedPlayerProgress01, AliveCount, Cap, CurrentInterval);
 	SpawnSustainEnemy();
 }
 
@@ -147,15 +215,20 @@ bool ABridgeArenaManager::IsSpawnPointAvailable(AArenaSpawnPoint* Point) const
 
 	const float DistanceAhead = PointDistanceAlongSpline - CachedPlayerDistanceAlongSpline;
 
-	if (DistanceAhead < MinDistanceAhead)
-	{
-		return false;
-	}
-	if (DistanceAhead > MaxDistanceAhead)
-	{
-		return false;
-	}
+	const bool bTooClose = DistanceAhead < MinDistanceAhead;
+	const bool bTooFar = DistanceAhead > MaxDistanceAhead;
 
+	UE_LOG(LogTemp, Warning,
+		TEXT("[BRIDGE_DEBUG]   IsSpawnPointAvailable %s: SP_dist=%.0f, Player_dist=%.0f, Ahead=%.0f, Range=[%.0f..%.0f] → %s"),
+		*Point->GetName(),
+		PointDistanceAlongSpline, CachedPlayerDistanceAlongSpline, DistanceAhead,
+		MinDistanceAhead, MaxDistanceAhead,
+		bTooClose ? TEXT("REJECT_TOO_CLOSE") : (bTooFar ? TEXT("REJECT_TOO_FAR") : TEXT("OK")));
+
+	if (bTooClose || bTooFar)
+	{
+		return false;
+	}
 	return true;
 }
 
