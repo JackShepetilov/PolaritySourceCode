@@ -37,6 +37,8 @@
 #include "Polarity/Variant_Shooter/ShooterDummy.h"
 #include "Engine/Level.h"
 #include "EngineUtils.h"
+#include "ArenaAntenna.h"
+#include "DeferredUpgradeQueueSubsystem.h"
 
 AArenaManager::AArenaManager()
 {
@@ -110,6 +112,15 @@ void AArenaManager::BeginPlay()
 		const int32 Added = CollectSpawnPointsFromOwnLevel();
 		UE_LOG(LogTemp, Warning, TEXT("  Auto-collected %d spawn points (had %d manually, total %d)"),
 			Added, BeforeCount, SpawnPoints.Num());
+	}
+
+	// --- Auto-collect antennas from this manager's level ---
+	if (bAutoCollectAntennasFromOwnLevel)
+	{
+		const int32 BeforeCount = Antennas.Num();
+		const int32 Added = CollectAntennasFromOwnLevel();
+		UE_LOG(LogTemp, Warning, TEXT("  Auto-collected %d antennas (had %d manually, total %d)"),
+			Added, BeforeCount, Antennas.Num());
 	}
 
 	// --- Sublevel soft pointer fallback ---
@@ -217,6 +228,9 @@ void AArenaManager::BeginPlay()
 	{
 		Dummy->OnDummyDeath.AddDynamic(this, &AArenaManager::OnRewardDummyDeath);
 	}
+
+	// Bind to antenna activation events
+	RegisterAntennas();
 
 	UE_LOG(LogTemp, Error, TEXT("===== ArenaManager::BeginPlay DONE — AliveNPCs: %d, InitialLevelEnemyCount: %d ====="),
 		AliveNPCs.Num(), InitialLevelEnemyCount);
@@ -350,6 +364,15 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 
 	// Close exits
 	SetBlockersEnabled(true);
+
+	// Antennas become "press to end the fight" instantly
+	SetAllAntennasState(static_cast<uint8>(EAntennaState::AvailableMidFight));
+
+	// Capture all level-ups during combat — they're released when the antenna is activated
+	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
+	{
+		Deferred->BeginCapture();
+	}
 
 	// Save checkpoint so player respawns here on death
 	SaveArenaCheckpoint(Player);
@@ -951,6 +974,10 @@ void AArenaManager::CompleteArena()
 	// Open exits
 	SetBlockersEnabled(false);
 
+	// Flip antennas to "beacon mode" — sky-beam VFX guides the player to the upload location.
+	// (Antennas already Activated by mid-fight upload are not regressed by SetAllAntennasState.)
+	SetAllAntennasState(static_cast<uint8>(EAntennaState::AvailablePostFight));
+
 	// Stop arena music (skip if finale sequence will handle it)
 	if (ArenaMusicTrack && !FinaleSequence.IsValid())
 	{
@@ -973,6 +1000,15 @@ void AArenaManager::CompleteArena()
 void AArenaManager::ResetArena()
 {
 	UE_LOG(LogTemp, Error, TEXT("  --- ResetArena START --- CurrentState was: %d, AliveNPCs: %d"), (int32)CurrentState, AliveNPCs.Num());
+
+	// Drop any pending deferred level-ups — player is respawning, the fight is restarting from scratch
+	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
+	{
+		Deferred->ClearWithoutReleasing();
+	}
+
+	// Antennas go back to inactive — they re-enable when the player re-enters the arena
+	SetAllAntennasState(static_cast<uint8>(EAntennaState::Inactive));
 
 	// IMPORTANT: Set state to Idle FIRST, before destroying NPCs.
 	// Otherwise NPC->Destroy() may trigger OnNPCDeath → OnNPCDied,
@@ -2766,6 +2802,113 @@ int32 AArenaManager::CollectSpawnPointsFromOwnLevel()
 		*MyLevelName, Added, SkippedOtherLevel, SkippedDuplicate);
 
 	return Added;
+}
+
+// ==================== Antennas ====================
+
+int32 AArenaManager::CollectAntennasFromOwnLevel()
+{
+	ULevel* MyLevel = GetLevel();
+	UWorld* World = GetWorld();
+	if (!MyLevel || !World)
+	{
+		return 0;
+	}
+
+	const FString MyLevelName = MyLevel->GetOuter() ? MyLevel->GetOuter()->GetName() : TEXT("UNKNOWN");
+	int32 Added = 0, SkippedOtherLevel = 0, SkippedDuplicate = 0;
+
+	for (TActorIterator<AArenaAntenna> It(World); It; ++It)
+	{
+		AArenaAntenna* Ant = *It;
+		if (!Ant)
+		{
+			continue;
+		}
+		if (Ant->GetLevel() != MyLevel)
+		{
+			++SkippedOtherLevel;
+			continue;
+		}
+
+		bool bAlreadyPresent = false;
+		for (const TSoftObjectPtr<AArenaAntenna>& Existing : Antennas)
+		{
+			if (Existing.Get() == Ant)
+			{
+				bAlreadyPresent = true;
+				break;
+			}
+		}
+		if (bAlreadyPresent)
+		{
+			++SkippedDuplicate;
+			continue;
+		}
+
+		Antennas.Add(TSoftObjectPtr<AArenaAntenna>(Ant));
+		++Added;
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("ArenaManager::CollectAntennasFromOwnLevel(level=%s): added=%d, skipped_other_level=%d, skipped_duplicate=%d"),
+		*MyLevelName, Added, SkippedOtherLevel, SkippedDuplicate);
+
+	return Added;
+}
+
+void AArenaManager::RegisterAntennas()
+{
+	for (const TSoftObjectPtr<AArenaAntenna>& Ref : Antennas)
+	{
+		AArenaAntenna* Ant = Ref.Get();
+		if (!Ant)
+		{
+			continue;
+		}
+		// AddUniqueDynamic is idempotent — safe even if BeginPlay is somehow called twice
+		Ant->OnActivated.AddUniqueDynamic(this, &AArenaManager::HandleAntennaActivated);
+	}
+}
+
+void AArenaManager::SetAllAntennasState(uint8 NewState)
+{
+	const EAntennaState Target = static_cast<EAntennaState>(NewState);
+	for (const TSoftObjectPtr<AArenaAntenna>& Ref : Antennas)
+	{
+		AArenaAntenna* Ant = Ref.Get();
+		if (!Ant)
+		{
+			continue;
+		}
+		// Never regress an already-uploaded antenna back to a usable state
+		if (Ant->State == EAntennaState::Activated)
+		{
+			continue;
+		}
+		Ant->SetState(Target);
+	}
+}
+
+void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
+{
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Antenna %s activated — wrapping up combat and flushing upgrades"),
+		Antenna ? *Antenna->GetName() : TEXT("NULL"));
+
+	// If the player triggered the antenna mid-fight, end the fight right now (kills NPCs,
+	// stops sustain spawns, opens exits). If the fight is already complete, this is a no-op.
+	if (CurrentState == EArenaState::Active || CurrentState == EArenaState::BetweenWaves)
+	{
+		ForceCompleteArena();
+	}
+
+	// Release every level-up the player earned during the fight as a sequence of popups
+	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
+	{
+		Deferred->FlushAll();
+	}
+
+	OnAntennaActivated.Broadcast(Antenna);
 }
 
 void AArenaManager::ForceCompleteArena()

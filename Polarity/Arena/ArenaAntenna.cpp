@@ -1,0 +1,225 @@
+// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
+
+#include "ArenaAntenna.h"
+#include "Polarity/Variant_Shooter/ShootableButton.h"
+#include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
+#include "Polarity/Subtitle/SubtitleSubsystem.h"
+#include "Components/StaticMeshComponent.h"
+#include "NiagaraComponent.h"
+#include "NiagaraSystem.h"
+#include "NiagaraFunctionLibrary.h"
+#include "Engine/DataTable.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+
+AArenaAntenna::AArenaAntenna()
+{
+	PrimaryActorTick.bCanEverTick = false;
+
+	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
+	SetRootComponent(SceneRoot);
+
+	AntennaMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("AntennaMesh"));
+	AntennaMesh->SetupAttachment(SceneRoot);
+	AntennaMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+	BeaconVFX = CreateDefaultSubobject<UNiagaraComponent>(TEXT("BeaconVFX"));
+	BeaconVFX->SetupAttachment(SceneRoot);
+	BeaconVFX->bAutoActivate = false; // Off until ArenaManager flips us to AvailablePostFight
+}
+
+void AArenaAntenna::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Bind to paired button — pressing it activates the antenna
+	if (AShootableButton* Button = InteractionButton.LoadSynchronous())
+	{
+		if (Button->ButtonComponent && !bBoundToButton)
+		{
+			Button->ButtonComponent->OnButtonPressed.AddDynamic(this, &AArenaAntenna::HandleButtonPressed);
+			bBoundToButton = true;
+			UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Bound to button %s"),
+				*GetName(), *Button->GetName());
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: No InteractionButton set — antenna will only respond to BP-driven TryActivate()"),
+			*GetName());
+	}
+
+	// Sync visuals to whatever the initial state is (default Inactive — beacon off)
+	ApplyStateVisuals(State);
+}
+
+void AArenaAntenna::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (AShootableButton* Button = InteractionButton.Get())
+	{
+		if (Button->ButtonComponent && bBoundToButton)
+		{
+			Button->ButtonComponent->OnButtonPressed.RemoveDynamic(this, &AArenaAntenna::HandleButtonPressed);
+			bBoundToButton = false;
+		}
+	}
+
+	Super::EndPlay(EndPlayReason);
+}
+
+void AArenaAntenna::SetState(EAntennaState NewState)
+{
+	if (State == NewState)
+	{
+		return;
+	}
+
+	const EAntennaState OldState = State;
+	State = NewState;
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: State %d -> %d"),
+		*GetName(), (int32)OldState, (int32)NewState);
+
+	ApplyStateVisuals(NewState);
+	OnStateChanged.Broadcast(this, NewState);
+}
+
+void AArenaAntenna::TryActivate()
+{
+	const bool bCanActivate =
+		State == EAntennaState::AvailableMidFight ||
+		State == EAntennaState::AvailablePostFight;
+
+	if (!bCanActivate)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: TryActivate ignored — state=%d (need Available*)"),
+			*GetName(), (int32)State);
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: ACTIVATED (was state=%d)"), *GetName(), (int32)State);
+
+	// Run dialogue resolution BEFORE flipping to Activated so this antenna still counts
+	// out the "other" antenna search the same way for designers reasoning about distances.
+	PlayContextualDialogue();
+
+	SetState(EAntennaState::Activated);
+	OnActivated.Broadcast(this);
+}
+
+void AArenaAntenna::HandleButtonPressed(UShootableButtonComponent* /*Button*/, AActor* /*Activator*/)
+{
+	TryActivate();
+}
+
+void AArenaAntenna::ApplyStateVisuals(EAntennaState NewState)
+{
+	if (!BeaconVFX)
+	{
+		return;
+	}
+
+	const bool bShouldBeacon = (NewState == EAntennaState::AvailablePostFight);
+
+	if (bShouldBeacon && BeaconVFXAsset)
+	{
+		// (Re)assign the asset in case it changed and start the system fresh
+		BeaconVFX->SetAsset(BeaconVFXAsset);
+		BeaconVFX->Activate(true);
+	}
+	else
+	{
+		BeaconVFX->Deactivate();
+	}
+}
+
+// ==================== Dialogue ====================
+
+void AArenaAntenna::PlayContextualDialogue()
+{
+	if (DialogueChoices.Num() == 0)
+	{
+		return;
+	}
+
+	const float Distance = GetDistanceToNearestOtherAntenna();
+	const FAntennaDialogueChoice* Choice = PickDialogueChoiceForDistance(Distance);
+	if (!Choice || !Choice->SubtitleTable || Choice->SubtitlePrefix.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: No usable dialogue choice (distance=%.0f)"),
+			*GetName(), Distance);
+		return;
+	}
+
+	UGameInstance* GI = GetGameInstance();
+	USubtitleSubsystem* Subs = GI ? GI->GetSubsystem<USubtitleSubsystem>() : nullptr;
+	if (!Subs)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: SubtitleSubsystem unavailable, skipping dialogue"),
+			*GetName());
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Playing dialogue prefix=%s (distance=%.0f, range=[%.0f..%.0f])"),
+		*GetName(), *Choice->SubtitlePrefix, Distance, Choice->MinDistance, Choice->MaxDistance);
+
+	Subs->ShowSubtitleSequence(Choice->SubtitleTable, Choice->SubtitlePrefix);
+}
+
+float AArenaAntenna::GetDistanceToNearestOtherAntenna() const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return -1.0f;
+	}
+
+	const FVector MyLocation = GetActorLocation();
+	float NearestSquared = -1.0f;
+
+	for (TActorIterator<AArenaAntenna> It(World); It; ++It)
+	{
+		AArenaAntenna* Other = *It;
+		if (!Other || Other == this)
+		{
+			continue;
+		}
+		if (Other->State == EAntennaState::Activated)
+		{
+			continue;
+		}
+
+		const float DistSq = FVector::DistSquared(MyLocation, Other->GetActorLocation());
+		if (NearestSquared < 0.0f || DistSq < NearestSquared)
+		{
+			NearestSquared = DistSq;
+		}
+	}
+
+	return (NearestSquared < 0.0f) ? -1.0f : FMath::Sqrt(NearestSquared);
+}
+
+const FAntennaDialogueChoice* AArenaAntenna::PickDialogueChoiceForDistance(float Distance) const
+{
+	if (DialogueChoices.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	// Negative distance means "no other antenna found" — fall back to the first entry
+	if (Distance < 0.0f)
+	{
+		return &DialogueChoices[0];
+	}
+
+	for (const FAntennaDialogueChoice& Choice : DialogueChoices)
+	{
+		if (Distance >= Choice.MinDistance && Distance < Choice.MaxDistance)
+		{
+			return &Choice;
+		}
+	}
+
+	// No band matched — fall back to first entry so dialogue still plays (designer can fix table)
+	return &DialogueChoices[0];
+}

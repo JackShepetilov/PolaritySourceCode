@@ -25,6 +25,7 @@ class ARewardContainer;
 class AArenaFinaleSequence;
 class UMusicTrackDataAsset;
 class UMusicPlayerSubsystem;
+class AArenaAntenna;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnArenaCleared);
@@ -33,6 +34,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveCleared, int32, WaveIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnArenaCriticalImpact, AActor*, Source, FVector, Location, float, Speed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAllPropsDestroyed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropPercentChanged, float, RemainingPercent, int32, AliveCount);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnArenaAntennaActivated, AArenaAntenna*, Antenna);
 
 /**
  * Manages a combat arena: activation, wave spawning, exit blockers, and checkpoint integration.
@@ -146,6 +148,19 @@ public:
 	/** Reward container that drops and shatters when the reward dummy dies. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Reward")
 	TSoftObjectPtr<ARewardContainer> RewardContainer;
+
+	// ==================== Antennas ====================
+
+	/** Data-uplink antennas placed on rooftops inside this arena.
+	 *  Pressing any of them ends the arena and triggers the post-fight reward / dialogue.
+	 *  Optional — leave empty to keep the classic RewardDummy/RewardContainer flow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Antennas")
+	TArray<TSoftObjectPtr<AArenaAntenna>> Antennas;
+
+	/** Auto-collect every AArenaAntenna placed in this manager's level (same logic as
+	 *  bAutoCollectSpawnPointsFromOwnLevel). Manual entries are preserved. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Antennas")
+	bool bAutoCollectAntennasFromOwnLevel = true;
 
 	// ==================== Tracked Props ====================
 
@@ -305,6 +320,12 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
 	FOnPropPercentChanged OnPropPercentChanged;
 
+	/** Fired when an antenna belonging to this arena is activated (data uploaded).
+	 *  Subscribers can play one-off VFX, swap UI overlays, etc. The arena itself reacts
+	 *  internally by force-completing combat and flushing deferred upgrades. */
+	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
+	FOnArenaAntennaActivated OnAntennaActivated;
+
 	// ==================== API ====================
 
 	/** Notify arena of a critical velocity impact from any source (prop, projectile, etc).
@@ -340,6 +361,10 @@ public:
 	 *  Called automatically in BeginPlay if bAutoCollectSpawnPointsFromOwnLevel is true. */
 	UFUNCTION(BlueprintCallable, Category = "Arena|Spawn")
 	int32 CollectSpawnPointsFromOwnLevel();
+
+	/** Mirror of CollectSpawnPointsFromOwnLevel but for AArenaAntenna actors. */
+	UFUNCTION(BlueprintCallable, Category = "Arena|Antennas")
+	int32 CollectAntennasFromOwnLevel();
 
 protected:
 	virtual void BeginPlay() override;
@@ -595,6 +620,19 @@ private:
 
 	/** Whether we already bound to OnPlayerRespawned delegate */
 	bool bBoundToRespawn = false;
+
+	// ==================== Antennas ====================
+
+	/** Bind to every antenna's OnActivated delegate and put each into the correct initial state. */
+	void RegisterAntennas();
+
+	/** Bound to AArenaAntenna::OnActivated. The arena force-completes itself and flushes the
+	 *  DeferredUpgradeQueueSubsystem so any popups stashed during the fight finally fire. */
+	UFUNCTION()
+	void HandleAntennaActivated(AArenaAntenna* Antenna);
+
+	/** Push every antenna into NewState, skipping null and already-activated ones. */
+	void SetAllAntennasState(uint8 NewState);
 
 	// ==================== KillAllAliveNPCs Pipeline ====================
 
