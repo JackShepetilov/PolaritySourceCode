@@ -107,6 +107,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Spawn")
 	TArray<TSoftObjectPtr<AArenaSpawnPoint>> SpawnPoints;
 
+	/** On BeginPlay, auto-collect every AArenaSpawnPoint placed in this manager's own level
+	 *  (typically the arena sublevel). Manually-added points in SpawnPoints are preserved
+	 *  — duplicates are skipped. Set to false if you want pure manual control. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Spawn")
+	bool bAutoCollectSpawnPointsFromOwnLevel = true;
+
 	// ==================== Respawn ====================
 
 	/** Where the player respawns if they die during this arena fight */
@@ -328,6 +334,12 @@ public:
 	 *  Also calls PauseSustainSpawning() so Sustain mode doesn't backfill replacements. */
 	UFUNCTION(BlueprintCallable, Category = "Arena", meta = (AdvancedDisplay = "bSuppressDrops"))
 	void KillAllAliveNPCs(bool bSequential = true, float DelayBetweenKills = 0.3f, UNiagaraSystem* DeathVFX = nullptr, bool bSuppressDrops = true);
+
+	/** Scan the world and add every AArenaSpawnPoint that lives in this manager's own level
+	 *  to the SpawnPoints array (skipping duplicates). Returns the number of points added.
+	 *  Called automatically in BeginPlay if bAutoCollectSpawnPointsFromOwnLevel is true. */
+	UFUNCTION(BlueprintCallable, Category = "Arena|Spawn")
+	int32 CollectSpawnPointsFromOwnLevel();
 
 protected:
 	virtual void BeginPlay() override;

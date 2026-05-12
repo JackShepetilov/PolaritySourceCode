@@ -35,6 +35,8 @@
 #include "NiagaraSystem.h"
 #include "RewardContainer.h"
 #include "Polarity/Variant_Shooter/ShooterDummy.h"
+#include "Engine/Level.h"
+#include "EngineUtils.h"
 
 AArenaManager::AArenaManager()
 {
@@ -99,6 +101,16 @@ void AArenaManager::BeginPlay()
 	}
 	UE_LOG(LogTemp, Error, TEXT("  SustainEnemyPool: %d entries, MaxSustainEnemies: %d, SustainTotalEnemies: %d"),
 		SustainEnemyPool.Num(), MaxSustainEnemies, SustainTotalEnemies);
+
+	// --- Auto-collect spawn points from this manager's level ---
+	// Runs before the sublevel fallback so the fallback only fires when truly nothing was found.
+	if (bAutoCollectSpawnPointsFromOwnLevel)
+	{
+		const int32 BeforeCount = SpawnPoints.Num();
+		const int32 Added = CollectSpawnPointsFromOwnLevel();
+		UE_LOG(LogTemp, Warning, TEXT("  Auto-collected %d spawn points (had %d manually, total %d)"),
+			Added, BeforeCount, SpawnPoints.Num());
+	}
 
 	// --- Sublevel soft pointer fallback ---
 	// When this level is loaded as a sublevel of a master level, TSoftObjectPtr paths
@@ -2691,6 +2703,69 @@ void AArenaManager::DoKillSingleNPC(AShooterNPC* NPC, UNiagaraSystem* DeathVFX, 
 
 	NPC->bSuppressDeathDrops = bSuppressDrops;
 	UGameplayStatics::ApplyDamage(NPC, NPC->CurrentHP + 100.0f, nullptr, this, nullptr);
+}
+
+// ==================== Auto-Collect Spawn Points ====================
+
+int32 AArenaManager::CollectSpawnPointsFromOwnLevel()
+{
+	ULevel* MyLevel = GetLevel();
+	if (!MyLevel)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::CollectSpawnPointsFromOwnLevel: GetLevel() returned null"));
+		return 0;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return 0;
+	}
+
+	const FString MyLevelName = MyLevel->GetOuter() ? MyLevel->GetOuter()->GetName() : TEXT("UNKNOWN");
+	int32 Added = 0;
+	int32 SkippedOtherLevel = 0;
+	int32 SkippedDuplicate = 0;
+
+	for (TActorIterator<AArenaSpawnPoint> It(World); It; ++It)
+	{
+		AArenaSpawnPoint* SP = *It;
+		if (!SP)
+		{
+			continue;
+		}
+
+		if (SP->GetLevel() != MyLevel)
+		{
+			++SkippedOtherLevel;
+			continue;
+		}
+
+		// De-dup against existing SoftObjectPtrs (designer may have hand-added some)
+		bool bAlreadyPresent = false;
+		for (const TSoftObjectPtr<AArenaSpawnPoint>& Existing : SpawnPoints)
+		{
+			if (Existing.Get() == SP)
+			{
+				bAlreadyPresent = true;
+				break;
+			}
+		}
+		if (bAlreadyPresent)
+		{
+			++SkippedDuplicate;
+			continue;
+		}
+
+		SpawnPoints.Add(TSoftObjectPtr<AArenaSpawnPoint>(SP));
+		++Added;
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("ArenaManager::CollectSpawnPointsFromOwnLevel(level=%s): added=%d, skipped_other_level=%d, skipped_duplicate=%d"),
+		*MyLevelName, Added, SkippedOtherLevel, SkippedDuplicate);
+
+	return Added;
 }
 
 void AArenaManager::ForceCompleteArena()
