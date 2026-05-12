@@ -904,6 +904,13 @@ void AArenaManager::OnNPCDied(AShooterNPC* DeadNPC)
 
 void AArenaManager::CheckWaveComplete()
 {
+	// Arena is already wrapping up (ForceCompleteArena / antenna activation) — don't
+	// reschedule the next wave on our way out of the death broadcasts.
+	if (CurrentState == EArenaState::Completed)
+	{
+		return;
+	}
+
 	// Clean up any stale weak pointers
 	AliveNPCs.RemoveAll([](const TWeakObjectPtr<AShooterNPC>& Ptr)
 	{
@@ -964,6 +971,13 @@ void AArenaManager::StartNextWave()
 
 void AArenaManager::CompleteArena()
 {
+	// Re-entrancy guard — ForceCompleteArena calls us at the end, but inner OnNPCDied
+	// chains may have flagged the arena Completed already.
+	if (CurrentState == EArenaState::Completed)
+	{
+		return;
+	}
+
 	CurrentState = EArenaState::Completed;
 
 	// Stop stuck detection
@@ -2918,18 +2932,32 @@ void AArenaManager::ForceCompleteArena()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: ForceCompleteArena — killing all NPCs and completing"));
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: ForceCompleteArena — killing %d NPCs and completing"), AliveNPCs.Num());
 
-	// Kill all remaining NPCs via lethal damage (triggers normal death flow: ragdoll, OnNPCDeath, etc.)
-	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : AliveNPCs)
+	// 1. Stop sustain backfill BEFORE the kills so OnNPCDied can't respawn replacements
+	PauseSustainSpawning();
+
+	// 2. Cancel the between-wave timer NOW so the OnNPCDied -> CheckWaveComplete chain
+	//    that fires inside the loop can't reschedule the next wave on us.
+	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
+
+	// 3. Snapshot the alive list — OnNPCDied mutates AliveNPCs synchronously, which would
+	//    skip entries in a direct range-based loop.
+	TArray<TWeakObjectPtr<AShooterNPC>> Snapshot = AliveNPCs;
+
+	for (const TWeakObjectPtr<AShooterNPC>& NPCPtr : Snapshot)
 	{
 		if (AShooterNPC* NPC = NPCPtr.Get())
 		{
-			UGameplayStatics::ApplyDamage(NPC, 99999.f, nullptr, nullptr, UDamageType::StaticClass());
+			if (!NPC->IsDead())
+			{
+				UGameplayStatics::ApplyDamage(NPC, 99999.f, nullptr, nullptr, UDamageType::StaticClass());
+			}
 		}
 	}
 
-	// Clear wave timer (might be between waves)
+	// 4. Clear the wave timer AGAIN — defensive, in case CheckWaveComplete re-armed it
+	//    before our state guard catches it (the guards below are the long-term fix).
 	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
 
 	CompleteArena();
