@@ -42,8 +42,8 @@ void AArenaAntenna::BeginPlay()
 	{
 		EmbeddedButton->OnButtonPressed.AddDynamic(this, &AArenaAntenna::HandleButtonPressed);
 		bBoundToButton = true;
-		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Bound to EMBEDDED ShootableButtonComponent"),
-			*GetName());
+		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] BeginPlay: Bound to EMBEDDED ShootableButtonComponent (%s)"),
+			*GetName(), *EmbeddedButton->GetName());
 	}
 	else if (AShootableButton* Button = InteractionButton.LoadSynchronous())
 	{
@@ -51,15 +51,23 @@ void AArenaAntenna::BeginPlay()
 		{
 			Button->ButtonComponent->OnButtonPressed.AddDynamic(this, &AArenaAntenna::HandleButtonPressed);
 			bBoundToButton = true;
-			UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: Bound to EXTERNAL button actor %s"),
+			UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] BeginPlay: Bound to EXTERNAL button actor %s"),
+				*GetName(), *Button->GetName());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ANTENNA_DEBUG] [%s] BeginPlay: InteractionButton actor %s has NULL ButtonComponent"),
 				*GetName(), *Button->GetName());
 		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: No interaction source — antenna will only respond to BP-driven TryActivate()"),
+		UE_LOG(LogTemp, Error, TEXT("[ANTENNA_DEBUG] [%s] BeginPlay: NO interaction source found — neither embedded ShootableButtonComponent nor external InteractionButton actor. Antenna only responds to BP-driven TryActivate()"),
 			*GetName());
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] BeginPlay: Initial state=%d, DialogueChoices=%d"),
+		*GetName(), (int32)State, DialogueChoices.Num());
 
 	// Sync visuals to whatever the initial state is (default Inactive — beacon off)
 	ApplyStateVisuals(State);
@@ -97,7 +105,7 @@ void AArenaAntenna::SetState(EAntennaState NewState)
 	const EAntennaState OldState = State;
 	State = NewState;
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: State %d -> %d"),
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] SetState: %d -> %d"),
 		*GetName(), (int32)OldState, (int32)NewState);
 
 	ApplyStateVisuals(NewState);
@@ -106,18 +114,21 @@ void AArenaAntenna::SetState(EAntennaState NewState)
 
 void AArenaAntenna::TryActivate()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] TryActivate called — current state=%d (0=Inactive, 1=MidFight, 2=PostFight, 3=Activated)"),
+		*GetName(), (int32)State);
+
 	const bool bCanActivate =
 		State == EAntennaState::AvailableMidFight ||
 		State == EAntennaState::AvailablePostFight;
 
 	if (!bCanActivate)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: TryActivate ignored — state=%d (need Available*)"),
+		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] TryActivate REJECTED — state=%d (need Available*). Did the player enter the EntryTrigger so ArenaManager could flip antennas to MidFight?"),
 			*GetName(), (int32)State);
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("ArenaAntenna [%s]: ACTIVATED (was state=%d)"), *GetName(), (int32)State);
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ACTIVATED (was state=%d)"), *GetName(), (int32)State);
 
 	// Run dialogue resolution BEFORE flipping to Activated so this antenna still counts
 	// out the "other" antenna search the same way for designers reasoning about distances.
@@ -127,8 +138,12 @@ void AArenaAntenna::TryActivate()
 	OnActivated.Broadcast(this);
 }
 
-void AArenaAntenna::HandleButtonPressed(UShootableButtonComponent* /*Button*/, AActor* /*Activator*/)
+void AArenaAntenna::HandleButtonPressed(UShootableButtonComponent* Button, AActor* Activator)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] HandleButtonPressed fired (button=%s, activator=%s) — routing to TryActivate"),
+		*GetName(),
+		Button ? *Button->GetName() : TEXT("NULL"),
+		Activator ? *Activator->GetName() : TEXT("NULL"));
 	TryActivate();
 }
 
