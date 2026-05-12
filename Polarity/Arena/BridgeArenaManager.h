@@ -30,10 +30,11 @@ public:
 
 	// ==================== Spline ====================
 
-	/** Actor containing the USplineComponent that defines the bridge axis.
-	 *  The first spline point is "start" (progress 0), the last is "end" (progress 1). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bridge|Spline")
-	TSoftObjectPtr<AActor> BridgeSplineActor;
+	/** Bridge path. Edit the spline points directly on this actor in the editor —
+	 *  first point = start (progress 0), last point = end (progress 1).
+	 *  No external actor needed; the manager and the spline are one thing. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Bridge|Spline")
+	TObjectPtr<USplineComponent> BridgeSpline;
 
 	// ==================== Spawn Rate ====================
 
@@ -85,10 +86,6 @@ protected:
 	virtual bool IsSpawnPointAvailable(AArenaSpawnPoint* Point) const override;
 
 private:
-	/** Resolved spline component from BridgeSplineActor */
-	UPROPERTY()
-	TObjectPtr<USplineComponent> CachedSpline;
-
 	/** Time accumulator for the next periodic spawn attempt */
 	float TimeSinceLastBridgeSpawn = 0.0f;
 
