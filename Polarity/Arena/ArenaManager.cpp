@@ -371,7 +371,12 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 	// Capture all level-ups during combat — they're released when the antenna is activated
 	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] ArenaManager::ActivateArena — calling Deferred->BeginCapture()"));
 		Deferred->BeginCapture();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] ArenaManager::ActivateArena — DeferredUpgradeQueueSubsystem NOT FOUND, level-ups will NOT be deferred"));
 	}
 
 	// Save checkpoint so player respawns here on death
@@ -2919,7 +2924,12 @@ void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
 	// Release every level-up the player earned during the fight as a sequence of popups
 	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] ArenaManager::HandleAntennaActivated — calling Deferred->FlushAll()"));
 		Deferred->FlushAll();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] ArenaManager::HandleAntennaActivated — DeferredUpgradeQueueSubsystem NOT FOUND"));
 	}
 
 	OnAntennaActivated.Broadcast(Antenna);

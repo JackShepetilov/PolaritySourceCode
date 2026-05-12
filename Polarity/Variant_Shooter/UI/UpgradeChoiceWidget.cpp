@@ -25,12 +25,17 @@ void UUpgradeChoiceWidget::NativeConstruct()
 		if (UDeferredUpgradeQueueSubsystem* Deferred = GI->GetSubsystem<UDeferredUpgradeQueueSubsystem>())
 		{
 			Deferred->OnDeferredLevelUpReleased.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] UpgradeChoiceWidget::NativeConstruct — subscribed to DeferredQueue::OnDeferredLevelUpReleased"));
 		}
 		else if (UXPSubsystem* XP = GetXPSubsystem())
 		{
 			// Fallback: subsystem absent (shouldn't happen at runtime, but keeps editor / tests sane)
-			UE_LOG(LogTemp, Warning, TEXT("UpgradeChoiceWidget: DeferredUpgradeQueueSubsystem unavailable, falling back to direct XP binding"));
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] UpgradeChoiceWidget::NativeConstruct — DeferredQueue unavailable, FALLBACK to direct XP binding"));
 			XP->OnSkillLevelUp.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] UpgradeChoiceWidget::NativeConstruct — NEITHER DeferredQueue NOR XPSubsystem available!"));
 		}
 	}
 

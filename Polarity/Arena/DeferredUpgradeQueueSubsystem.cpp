@@ -20,11 +20,11 @@ void UDeferredUpgradeQueueSubsystem::Initialize(FSubsystemCollectionBase& Collec
 		{
 			XP->OnSkillLevelUp.AddDynamic(this, &UDeferredUpgradeQueueSubsystem::HandleSkillLevelUp);
 			CachedXPSubsystem = XP;
-			UE_LOG(LogTemp, Warning, TEXT("DeferredUpgradeQueueSubsystem: Bound to XPSubsystem::OnSkillLevelUp"));
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::Initialize — bound to XPSubsystem::OnSkillLevelUp"));
 		}
 		else
 		{
-			UE_LOG(LogTemp, Error, TEXT("DeferredUpgradeQueueSubsystem: XPSubsystem not found at Initialize"));
+			UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] DeferredQueue::Initialize — XPSubsystem not found"));
 		}
 	}
 }
@@ -46,10 +46,11 @@ void UDeferredUpgradeQueueSubsystem::BeginCapture()
 {
 	if (bCapturing)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::BeginCapture — already capturing, no-op (pending=%d)"), PendingLevelUps.Num());
 		return;
 	}
 	bCapturing = true;
-	UE_LOG(LogTemp, Warning, TEXT("DeferredUpgradeQueueSubsystem: BeginCapture (pending=%d)"), PendingLevelUps.Num());
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::BeginCapture — capture STARTED (pending=%d)"), PendingLevelUps.Num());
 }
 
 void UDeferredUpgradeQueueSubsystem::EndCapture()
@@ -59,12 +60,13 @@ void UDeferredUpgradeQueueSubsystem::EndCapture()
 		return;
 	}
 	bCapturing = false;
-	UE_LOG(LogTemp, Warning, TEXT("DeferredUpgradeQueueSubsystem: EndCapture (pending=%d, NOT flushed)"), PendingLevelUps.Num());
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::EndCapture — capture STOPPED (pending=%d, NOT flushed)"), PendingLevelUps.Num());
 }
 
 void UDeferredUpgradeQueueSubsystem::FlushAll()
 {
-	UE_LOG(LogTemp, Warning, TEXT("DeferredUpgradeQueueSubsystem: FlushAll — releasing %d queued level-ups"), PendingLevelUps.Num());
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::FlushAll — releasing %d queued level-ups (bound listeners=%d)"),
+		PendingLevelUps.Num(), OnDeferredLevelUpReleased.IsBound() ? 1 : 0);
 
 	bCapturing = false;
 
@@ -74,6 +76,8 @@ void UDeferredUpgradeQueueSubsystem::FlushAll()
 
 	for (const FDeferredLevelUp& Entry : ToRelease)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::FlushAll — broadcasting cat=%d, lvl=%d"),
+			(int32)Entry.Category, Entry.NewLevel);
 		OnDeferredLevelUpReleased.Broadcast(Entry.Category, Entry.NewLevel);
 	}
 }
@@ -84,7 +88,7 @@ void UDeferredUpgradeQueueSubsystem::ClearWithoutReleasing()
 	{
 		return;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("DeferredUpgradeQueueSubsystem: ClearWithoutReleasing — dropping %d pending"), PendingLevelUps.Num());
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::ClearWithoutReleasing — dropping %d pending"), PendingLevelUps.Num());
 	PendingLevelUps.Reset();
 	bCapturing = false;
 }
@@ -97,11 +101,13 @@ void UDeferredUpgradeQueueSubsystem::HandleSkillLevelUp(ESkillCategory Category,
 		Entry.Category = Category;
 		Entry.NewLevel = NewLevel;
 		PendingLevelUps.Add(Entry);
-		UE_LOG(LogTemp, Warning, TEXT("DeferredUpgradeQueueSubsystem: Captured level-up (cat=%d, lvl=%d, queue=%d)"),
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::HandleSkillLevelUp — CAPTURED (cat=%d, lvl=%d, queue=%d)"),
 			(int32)Category, NewLevel, PendingLevelUps.Num());
 		return;
 	}
 
 	// Pass-through — behave like a normal observer
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::HandleSkillLevelUp — PASS-THROUGH (cat=%d, lvl=%d, listeners=%d)"),
+		(int32)Category, NewLevel, OnDeferredLevelUpReleased.IsBound() ? 1 : 0);
 	OnDeferredLevelUpReleased.Broadcast(Category, NewLevel);
 }
