@@ -157,26 +157,36 @@ void AArenaAntenna::ApplyStateVisuals(EAntennaState NewState)
 
 	const bool bShouldBeacon = (NewState == EAntennaState::AvailablePostFight);
 
-	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: state=%d, bShouldBeacon=%d, BeaconVFXAsset=%s"),
+	// The Niagara asset can come from two places:
+	//   1. BeaconVFXAsset UPROPERTY on the actor — explicit override (e.g. set per-instance).
+	//   2. The BeaconVFX component's own "Niagara System Asset" set in the Blueprint defaults
+	//      (the standard UE pattern, what the user is most likely doing).
+	// Only call SetAsset when the actor-level override is provided; otherwise leave the
+	// component's own asset alone so the BP-configured one keeps working.
+	UNiagaraSystem* ComponentAsset = BeaconVFX->GetAsset();
+	UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: state=%d, bShouldBeacon=%d, OverrideAsset=%s, ComponentAsset=%s"),
 		*GetName(), (int32)NewState, bShouldBeacon ? 1 : 0,
-		BeaconVFXAsset ? *BeaconVFXAsset->GetName() : TEXT("NULL"));
+		BeaconVFXAsset ? *BeaconVFXAsset->GetName() : TEXT("NULL"),
+		ComponentAsset ? *ComponentAsset->GetName() : TEXT("NULL"));
 
-	if (bShouldBeacon && BeaconVFXAsset)
+	if (bShouldBeacon)
 	{
-		// (Re)assign the asset in case it changed and start the system fresh
-		BeaconVFX->SetAsset(BeaconVFXAsset);
+		if (BeaconVFXAsset)
+		{
+			BeaconVFX->SetAsset(BeaconVFXAsset);
+		}
+		else if (!ComponentAsset)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: no Niagara asset on the BeaconVFX component AND no override — beacon will not show"),
+				*GetName());
+			return;
+		}
 		BeaconVFX->Activate(true);
-		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: Beacon ACTIVATED with asset %s"),
-			*GetName(), *BeaconVFXAsset->GetName());
+		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: Beacon ACTIVATED"), *GetName());
 	}
 	else
 	{
 		BeaconVFX->Deactivate();
-		if (bShouldBeacon && !BeaconVFXAsset)
-		{
-			UE_LOG(LogTemp, Error, TEXT("[ANTENNA_DEBUG] [%s] ApplyStateVisuals: WANT beacon but BeaconVFXAsset is NULL — set it in BP_Antenna Details"),
-				*GetName());
-		}
 	}
 }
 
