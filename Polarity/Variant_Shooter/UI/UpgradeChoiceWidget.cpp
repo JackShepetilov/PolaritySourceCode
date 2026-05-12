@@ -6,6 +6,7 @@
 #include "UpgradeRegistry.h"
 #include "UpgradeDefinition.h"
 #include "UpgradeManagerComponent.h"
+#include "DeferredUpgradeQueueSubsystem.h"
 
 #include "Engine/GameInstance.h"
 #include "GameFramework/Pawn.h"
@@ -16,9 +17,21 @@ void UUpgradeChoiceWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (UXPSubsystem* XP = GetXPSubsystem())
+	// Prefer the deferred queue: it acts as a pass-through when no arena is capturing,
+	// and stashes level-ups during combat so popups don't interrupt the fight. The widget's
+	// own PendingCategories queue still handles ordering once popups are released.
+	if (UGameInstance* GI = GetGameInstance())
 	{
-		XP->OnSkillLevelUp.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+		if (UDeferredUpgradeQueueSubsystem* Deferred = GI->GetSubsystem<UDeferredUpgradeQueueSubsystem>())
+		{
+			Deferred->OnDeferredLevelUpReleased.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+		}
+		else if (UXPSubsystem* XP = GetXPSubsystem())
+		{
+			// Fallback: subsystem absent (shouldn't happen at runtime, but keeps editor / tests sane)
+			UE_LOG(LogTemp, Warning, TEXT("UpgradeChoiceWidget: DeferredUpgradeQueueSubsystem unavailable, falling back to direct XP binding"));
+			XP->OnSkillLevelUp.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+		}
 	}
 
 	SetVisibility(ESlateVisibility::Collapsed);
@@ -26,8 +39,16 @@ void UUpgradeChoiceWidget::NativeConstruct()
 
 void UUpgradeChoiceWidget::NativeDestruct()
 {
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UDeferredUpgradeQueueSubsystem* Deferred = GI->GetSubsystem<UDeferredUpgradeQueueSubsystem>())
+		{
+			Deferred->OnDeferredLevelUpReleased.RemoveDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+		}
+	}
 	if (UXPSubsystem* XP = GetXPSubsystem())
 	{
+		// Safe even if we never subscribed via XP — RemoveDynamic is a no-op for missing bindings
 		XP->OnSkillLevelUp.RemoveDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
 	}
 
