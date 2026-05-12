@@ -97,23 +97,28 @@ UUpgradeManagerComponent* UUpgradeChoiceWidget::GetUpgradeManager() const
 
 void UUpgradeChoiceWidget::HandleSkillLevelUp(ESkillCategory Category, int32 NewLevel)
 {
-	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] LevelUp skill=%d level=%d"), (int32)Category, NewLevel);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — RECEIVED cat=%d, lvl=%d, bIsOpen=%d, IsInViewport=%d"),
+		(int32)Category, NewLevel, bIsOpen ? 1 : 0, IsInViewport() ? 1 : 0);
 
 	if (bIsOpen)
 	{
 		PendingCategories.Add(Category);
-		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Choice already open — queued (%d pending)"), PendingCategories.Num());
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — Choice already open, queued (%d pending)"), PendingCategories.Num());
 		return;
 	}
 
 	RollChoicesForCategory(Category);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — RollChoices returned %d choices (Registry=%s)"),
+		CurrentChoices.Num(), Registry ? *Registry->GetName() : TEXT("NULL"));
+
 	if (CurrentChoices.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] No upgrades available for skill %d — skipping"), (int32)Category);
+		UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — NO upgrades available for skill %d, skipping (Registry pool empty / wrong category / all maxed?)"), (int32)Category);
 		TryProcessNextPending();
 		return;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — Opening choice popup"));
 	OpenChoice(Category);
 }
 
@@ -169,6 +174,9 @@ void UUpgradeChoiceWidget::RollChoicesForCategory(ESkillCategory Category)
 
 void UUpgradeChoiceWidget::OpenChoice(ESkillCategory Category)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::OpenChoice — opening for cat=%d, IsInViewport=%d, OwningPlayer=%s"),
+		(int32)Category, IsInViewport() ? 1 : 0, GetOwningPlayer() ? *GetOwningPlayer()->GetName() : TEXT("NULL"));
+
 	bIsOpen = true;
 	CurrentCategory = Category;
 	SetVisibility(ESlateVisibility::Visible);
@@ -184,6 +192,8 @@ void UUpgradeChoiceWidget::OpenChoice(ESkillCategory Category)
 
 	UGameplayStatics::SetGamePaused(this, true);
 	BP_OnChoiceOpened(Category);
+
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::OpenChoice — done (BP_OnChoiceOpened called)"));
 }
 
 void UUpgradeChoiceWidget::CloseChoice(UUpgradeDefinition* SelectedDefinition)
