@@ -292,6 +292,11 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 
 void UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP()
 {
+	// Step 1: try to top up the shared pool. If at cap, nothing is stored — but
+	// upgrades still get the hook for legacy/VFX-only behaviours.
+	AddStoredHealthPickup();
+
+	// Step 2: notify each active upgrade so it can react (e.g. play "stored" VFX).
 	for (auto& Pair : ActiveUpgrades)
 	{
 		if (Pair.Value)
@@ -299,6 +304,50 @@ void UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP()
 			Pair.Value->OnHealthPickupCollectedAtFullHP();
 		}
 	}
+}
+
+bool UUpgradeManagerComponent::AddStoredHealthPickup()
+{
+	if (StoredHealthPickups >= MaxStoredHealthPickups)
+	{
+		return false;
+	}
+
+	StoredHealthPickups++;
+	OnStoredHealthPickupsChanged.Broadcast(StoredHealthPickups, MaxStoredHealthPickups);
+
+	UE_LOG(LogTemp, Log, TEXT("[UPGRADE_POOL] Stored health pickup: %d/%d"),
+		StoredHealthPickups, MaxStoredHealthPickups);
+
+	return true;
+}
+
+int32 UUpgradeManagerComponent::ConsumeStoredHealthPickups(int32 RequestedCount)
+{
+	if (RequestedCount <= 0 || StoredHealthPickups <= 0)
+	{
+		return 0;
+	}
+
+	const int32 Consumed = FMath::Min(RequestedCount, StoredHealthPickups);
+	StoredHealthPickups -= Consumed;
+	OnStoredHealthPickupsChanged.Broadcast(StoredHealthPickups, MaxStoredHealthPickups);
+
+	UE_LOG(LogTemp, Log, TEXT("[UPGRADE_POOL] Consumed %d pickups (%d remaining)"),
+		Consumed, StoredHealthPickups);
+
+	return Consumed;
+}
+
+void UUpgradeManagerComponent::ResetStoredHealthPickups()
+{
+	if (StoredHealthPickups == 0)
+	{
+		return;
+	}
+
+	StoredHealthPickups = 0;
+	OnStoredHealthPickupsChanged.Broadcast(StoredHealthPickups, MaxStoredHealthPickups);
 }
 
 float UUpgradeManagerComponent::GetCombinedDamageMultiplier(AActor* Target) const

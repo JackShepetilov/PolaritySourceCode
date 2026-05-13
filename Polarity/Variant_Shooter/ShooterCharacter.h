@@ -112,6 +112,10 @@ struct FBossFinisherSettings
 	FVector ApproachOffset = FVector(500.0f, 0.0f, 200.0f);
 };
 
+// Multicast delegates for melee button hold-detection (used by ChargedPunch and similar upgrades).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeChargeHoldStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeChargeHoldReleased);
+
 /**
  *  A player controllable first person shooter character
  *  Manages a weapon inventory through the IShooterWeaponHolder interface
@@ -992,6 +996,36 @@ public:
 	/** Handles melee attack input */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoMeleeAttack();
+
+	/**
+	 * Called on melee button press (ETriggerEvent::Started). Broadcasts OnMeleeChargeHoldStarted.
+	 * Does NOT trigger the regular melee swing — that still runs from DoMeleeAttack on Triggered.
+	 * This hook exists for hold-based upgrades like ChargedPunch.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoMeleePressed();
+
+	/**
+	 * Called on melee button release (ETriggerEvent::Completed). Broadcasts OnMeleeChargeHoldReleased.
+	 * Used by hold-based upgrades like ChargedPunch to finalize a charged action.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoMeleeReleased();
+
+	// ==================== Melee Hold Input Delegates ====================
+	// Used by upgrades that need to know when the melee button is pressed/released,
+	// independent of the regular tap-to-swing flow. Subscribers do their own
+	// hold-time accounting (e.g. ChargedPunch waits for MinHoldTime before charging).
+	// Delegate types declared on file scope below — see FOnMeleeChargeHoldStarted /
+	// FOnMeleeChargeHoldReleased near the top of this header.
+
+	/** Broadcast when the melee button is pressed (Started). */
+	UPROPERTY(BlueprintAssignable, Category = "Melee|Input")
+	FOnMeleeChargeHoldStarted OnMeleeChargeHoldStarted;
+
+	/** Broadcast when the melee button is released (Completed). */
+	UPROPERTY(BlueprintAssignable, Category = "Melee|Input")
+	FOnMeleeChargeHoldReleased OnMeleeChargeHoldReleased;
 
 	/** Returns true if currently aiming down sights */
 	UFUNCTION(BlueprintPure, Category = "ADS")

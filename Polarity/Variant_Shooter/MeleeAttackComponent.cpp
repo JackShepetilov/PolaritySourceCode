@@ -349,8 +349,9 @@ bool UMeleeAttackComponent::CanAttack() const
 		}
 	}
 
-	// Must have at least 1 melee charge
-	if (MeleeCharges < 1)
+	// Must have at least 1 melee charge — unless the charge system is disabled
+	// (then the Settings.Cooldown timer alone gates refire).
+	if (!Settings.bDisableCharges && MeleeCharges < 1)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - MeleeCharges=%d (need >=1)"), MeleeCharges);
 		return false;
@@ -417,29 +418,32 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		break;
 
 	case EMeleeAttackState::HidingWeapon:
+		// Mesh-transition timings are NOT scaled by combo speed — these are visual
+		// transitions (swap to MeleeMesh / back) and should stay constant.
 		StateTimeRemaining = Settings.HideWeaponTime;
 		MeshTransitionProgress = 0.0f;
 		break;
 
 	case EMeleeAttackState::InputDelay:
-		StateTimeRemaining = Settings.InputDelayTime;
+		StateTimeRemaining = Settings.InputDelayTime / ComboSpeedMultiplier;
 		break;
 
 	case EMeleeAttackState::Windup:
-		StateTimeRemaining = Settings.WindupTime;
+		StateTimeRemaining = Settings.WindupTime / ComboSpeedMultiplier;
 		break;
 
 	case EMeleeAttackState::Active:
 		if (bIsDropKick && MagnetismTarget.IsValid() && OwnerCharacter)
 		{
-			// For dropkick: calculate travel time to reach target, ensure enough active time
+			// For dropkick: calculate travel time to reach target, ensure enough active time.
+			// Travel time is physics-bound (DropKickDiveSpeed) — don't shrink it via combo.
 			float DistToTarget = FVector::Dist(OwnerCharacter->GetActorLocation(), LungeTargetPosition);
 			float TravelTime = (Settings.DropKickDiveSpeed > 0.0f) ? (DistToTarget / Settings.DropKickDiveSpeed) : Settings.ActiveTime;
-			StateTimeRemaining = FMath::Max(Settings.ActiveTime, TravelTime + 0.15f); // +0.15s buffer for hit detection
+			StateTimeRemaining = FMath::Max(Settings.ActiveTime / ComboSpeedMultiplier, TravelTime + 0.15f);
 		}
 		else
 		{
-			StateTimeRemaining = Settings.ActiveTime;
+			StateTimeRemaining = Settings.ActiveTime / ComboSpeedMultiplier;
 		}
 		SpawnSwingTrailFX();
 		break;
@@ -452,7 +456,7 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		}
 		else
 		{
-			StateTimeRemaining = Settings.RecoveryTime;
+			StateTimeRemaining = Settings.RecoveryTime / ComboSpeedMultiplier;
 		}
 		StopSwingTrailFX();
 
@@ -509,6 +513,7 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		}
 		else
 		{
+			// Mesh-transition timing — keep constant (see HidingWeapon comment).
 			StateTimeRemaining = Settings.ShowWeaponTime;
 			MeshTransitionProgress = 0.0f;
 			bIsWeaponLowered = false; // Reset lowered state when showing weapon
@@ -526,7 +531,7 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		}
 		else
 		{
-			StateTimeRemaining = Settings.Cooldown;
+			StateTimeRemaining = Settings.Cooldown / ComboSpeedMultiplier;
 		}
 		OnMeleeAttackEnded.Broadcast();
 		break;
@@ -1220,7 +1225,7 @@ void UMeleeAttackComponent::PlayAttackAnimation()
 			MontageTimeElapsed = 0.0f;
 			MontageTotalDuration = AnimData.AttackMontage->GetPlayLength();
 
-			float PlayRate = AnimData.BasePlayRate;
+			float PlayRate = AnimData.BasePlayRate * ComboSpeedMultiplier;
 
 			// Sample play rate curve at start if available
 			if (AnimData.PlayRateCurve)
@@ -2658,6 +2663,43 @@ void UMeleeAttackComponent::DeactivateDamageWindowFromNotify()
 	}
 }
 
+void UMeleeAttackComponent::EndRecoveryFromNotify()
+{
+	if (bExternallyDisabled)
+	{
+		return;
+	}
+
+	if (CurrentState == EMeleeAttackState::Recovery)
+	{
+		SetState(EMeleeAttackState::ShowingWeapon);
+	}
+}
+
+void UMeleeAttackComponent::ApplyComboSpeedMultiplier(float NewMultiplier)
+{
+	// Clamp to a safe range (>=0.1 so we never divide by zero / freeze the state machine).
+	const float Clamped = FMath::Max(0.1f, NewMultiplier);
+	if (FMath::IsNearlyEqual(Clamped, ComboSpeedMultiplier))
+	{
+		return;
+	}
+
+	ComboSpeedMultiplier = Clamped;
+
+	// If a montage is currently playing, scale its play rate live so the visual
+	// stays in sync with the new timing for the rest of the current swing.
+	if (CurrentMeleeMontage && MeleeMesh)
+	{
+		if (UAnimInstance* AnimInstance = MeleeMesh->GetAnimInstance())
+		{
+			const FMeleeAnimationData& AnimData = GetCurrentAnimationData();
+			float PlayRate = AnimData.BasePlayRate * ComboSpeedMultiplier;
+			AnimInstance->Montage_SetPlayRate(CurrentMeleeMontage, PlayRate);
+		}
+	}
+}
+
 // ==================== Drop Kick Implementation ====================
 
 bool UMeleeAttackComponent::ShouldPerformDropKick() const
@@ -2680,8 +2722,8 @@ bool UMeleeAttackComponent::ShouldPerformDropKick() const
 		return false;
 	}
 
-	// Must have at least 1 melee charge for dropkick
-	if (MeleeCharges < 1)
+	// Must have at least 1 melee charge for dropkick — bypassed if charges disabled.
+	if (!Settings.bDisableCharges && MeleeCharges < 1)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] ShouldDropKick: FALSE - MeleeCharges=%d"), MeleeCharges);
 		return false;
@@ -3228,6 +3270,12 @@ float UMeleeAttackComponent::GetDropKickCooldownProgress() const
 
 void UMeleeAttackComponent::ConsumeMeleeCharges(int32 Count, bool bResetRecoveryTimer)
 {
+	// Charge system bypassed — only Settings.Cooldown gates refire.
+	if (Settings.bDisableCharges)
+	{
+		return;
+	}
+
 	const int32 OldCharges = MeleeCharges;
 	MeleeCharges = FMath::Max(0, MeleeCharges - FMath::Max(0, Count));
 

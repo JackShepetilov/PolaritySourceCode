@@ -248,7 +248,11 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		// Melee attack
 		if (MeleeAction)
 		{
+			// Tap = swing on Triggered (matches existing behaviour).
 			EnhancedInputComponent->BindAction(MeleeAction, ETriggerEvent::Triggered, this, &AShooterCharacter::DoMeleeAttack);
+			// Hold = broadcast Started/Completed so upgrades like ChargedPunch can do their own hold timing.
+			EnhancedInputComponent->BindAction(MeleeAction, ETriggerEvent::Started, this, &AShooterCharacter::DoMeleePressed);
+			EnhancedInputComponent->BindAction(MeleeAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoMeleeReleased);
 		}
 
 		// Shield toggle (tap = raise/lower). Throw is bound to the channel/grab key (DoChannelPressed override).
@@ -738,6 +742,20 @@ void AShooterCharacter::DoMeleeAttack()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: No MeleeAttackComponent!"));
 	}
+}
+
+void AShooterCharacter::DoMeleePressed()
+{
+	// Broadcast for hold-based upgrades. The regular swing still fires from
+	// DoMeleeAttack on Triggered — this hook only signals "button went down".
+	OnMeleeChargeHoldStarted.Broadcast();
+}
+
+void AShooterCharacter::DoMeleeReleased()
+{
+	// Broadcast for hold-based upgrades to finalize. Subscribers decide whether
+	// the elapsed hold time crossed their threshold and act accordingly.
+	OnMeleeChargeHoldReleased.Broadcast();
 }
 
 void AShooterCharacter::Tick(float DeltaTime)

@@ -148,6 +148,17 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Melee", meta = (DisplayName = "OnMeleeWeaponEquipped"))
 	void BP_OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
 
+	// ==================== Combo (Upgrade_Combo) ====================
+
+	/**
+	 * Called whenever the Combo upgrade's count changes (hit, miss, or timeout reset).
+	 * Implement in Blueprint to drive a HUD chain counter / speed indicator.
+	 * @param ComboCount - current chain count (0 when reset)
+	 * @param SpeedMultiplier - current attack-speed multiplier driven by the count (1.0 = normal)
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Combo", meta = (DisplayName = "OnComboChanged"))
+	void BP_OnComboChanged(int32 ComboCount, float SpeedMultiplier);
+
 	// ==================== Hit Marker ====================
 
 	/**

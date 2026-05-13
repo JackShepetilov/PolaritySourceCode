@@ -310,6 +310,16 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown", meta = (ClampMin = "1", ClampMax = "5"))
 	int32 MeleeMaxCharges = 2;
 
+	/**
+	 * When true, the charge system is bypassed entirely:
+	 *  - CanAttack ignores MeleeCharges
+	 *  - Hits never consume charges
+	 *  - Settings.Cooldown still applies between attacks (refire rate)
+	 * Use for "spammable melee" builds where only the Settings.Cooldown gate matters.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown")
+	bool bDisableCharges = true;
+
 	// ==================== Movement ====================
 
 	/** Lunge distance on attack (cm) */
@@ -686,18 +696,45 @@ public:
 	bool IsDebugVisualizationEnabled() const { return bEnableDebugVisualization; }
 
 	// ==================== Animation Notify API ====================
+	// All three notify entry points are idempotent within a single attack — calling
+	// them twice in the same phase is a no-op. Fallback state-machine timers honour
+	// the per-phase "consumed" flags so the notify always wins if it fires.
 
 	/**
-	 * Activate damage window from animation notify (called by AnimNotify)
+	 * Activate damage window from animation notify (called by AnimNotify_MeleeActiveStart).
+	 * Transitions Windup -> Active (consumes Windup timer).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	void ActivateDamageWindowFromNotify();
 
 	/**
-	 * Deactivate damage window from animation notify (called by AnimNotify)
+	 * Deactivate damage window from animation notify (called by AnimNotify_MeleeActiveEnd).
+	 * Transitions Active -> Recovery (consumes Active timer).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	void DeactivateDamageWindowFromNotify();
+
+	/**
+	 * End recovery from animation notify (called by AnimNotify_MeleeRecoveryEnd).
+	 * Transitions Recovery -> ShowingWeapon (consumes Recovery timer).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee")
+	void EndRecoveryFromNotify();
+
+	// ==================== Combo Speed Multiplier ====================
+
+	/**
+	 * Apply a multiplier to all phase timings and montage play rates.
+	 * 1.0 = normal speed. 2.0 = twice as fast.
+	 * Called by the Combo upgrade as the combo counter rises.
+	 * Takes effect from the NEXT phase entry (current phase keeps its current timer).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Combo")
+	void ApplyComboSpeedMultiplier(float NewMultiplier);
+
+	/** Current combo speed multiplier (1.0 if no combo modifier active). */
+	UFUNCTION(BlueprintPure, Category = "Melee|Combo")
+	float GetComboSpeedMultiplier() const { return ComboSpeedMultiplier; }
 
 protected:
 	// ==================== State ====================
@@ -764,6 +801,11 @@ protected:
 
 	/** Time remaining until next charge recovers */
 	float ChargeRecoveryTimer = 0.0f;
+
+	// ==================== Combo Speed State ====================
+
+	/** Current combo speed multiplier (set by ApplyComboSpeedMultiplier). */
+	float ComboSpeedMultiplier = 1.0f;
 
 	// ==================== Drop Kick State ====================
 

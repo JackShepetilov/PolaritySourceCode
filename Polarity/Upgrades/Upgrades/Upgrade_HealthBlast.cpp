@@ -4,6 +4,7 @@
 #include "UpgradeDefinition_HealthBlast.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "ChargeAnimationComponent.h"
+#include "Upgrades/UpgradeManagerComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
@@ -212,7 +213,25 @@ void UUpgrade_HealthBlast::OnUpgradeActivated()
 	// Bind to prop captured to cancel empty capture timer
 	Character->OnPropCaptured.AddDynamic(this, &UUpgrade_HealthBlast::OnPropCaptured);
 
-	StoredPickups = 0;
+	// Subscribe to the shared health-pickup pool so we can re-broadcast its
+	// change events (UI keeps using our OnStoredPickupsChanged signature) and
+	// honour MaxStoredPickups from this upgrade's definition by raising the
+	// manager's cap if needed.
+	UUpgradeManagerComponent* UpgradeManager = Character->GetUpgradeManager();
+	CachedUpgradeManager = UpgradeManager;
+	if (UpgradeManager)
+	{
+		// Raise the manager's cap if this upgrade allows more storage than the default.
+		if (UpgradeManager->GetMaxStoredHealthPickups() < CachedDef->MaxStoredPickups)
+		{
+			UpgradeManager->MaxStoredHealthPickups = CachedDef->MaxStoredPickups;
+		}
+
+		UpgradeManager->OnStoredHealthPickupsChanged.AddDynamic(this, &UUpgrade_HealthBlast::HandleSharedPoolChanged);
+
+		// Broadcast initial state so UI/HUD picks up current count immediately.
+		OnStoredPickupsChanged.Broadcast(UpgradeManager->GetStoredHealthPickups(), UpgradeManager->GetMaxStoredHealthPickups());
+	}
 }
 
 void UUpgrade_HealthBlast::OnUpgradeDeactivated()
@@ -230,6 +249,11 @@ void UUpgrade_HealthBlast::OnUpgradeDeactivated()
 		Character->OnPropCaptured.RemoveDynamic(this, &UUpgrade_HealthBlast::OnPropCaptured);
 	}
 
+	if (UUpgradeManagerComponent* UpgradeManager = CachedUpgradeManager.Get())
+	{
+		UpgradeManager->OnStoredHealthPickupsChanged.RemoveDynamic(this, &UUpgrade_HealthBlast::HandleSharedPoolChanged);
+	}
+
 	// Clear timers
 	if (UWorld* World = GetWorld())
 	{
@@ -238,24 +262,47 @@ void UUpgrade_HealthBlast::OnUpgradeDeactivated()
 	}
 }
 
+int32 UUpgrade_HealthBlast::GetStoredPickups() const
+{
+	if (const UUpgradeManagerComponent* UpgradeManager = CachedUpgradeManager.Get())
+	{
+		return UpgradeManager->GetStoredHealthPickups();
+	}
+	return 0;
+}
+
+void UUpgrade_HealthBlast::HandleSharedPoolChanged(int32 CurrentCount, int32 MaxCount)
+{
+	// Re-broadcast so existing UI / BP subscribers keep working.
+	OnStoredPickupsChanged.Broadcast(CurrentCount, MaxCount);
+}
+
 void UUpgrade_HealthBlast::OnHealthPickupCollectedAtFullHP()
 {
+	// Pool incrementing is handled centrally by UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP
+	// (which calls AddStoredHealthPickup BEFORE dispatching this hook). All we do here is play our own
+	// feedback if the pool actually accepted the pickup — detect via current count vs cap.
 	if (!CachedDef.IsValid())
 	{
 		return;
 	}
 
-	if (StoredPickups >= CachedDef->MaxStoredPickups)
+	UUpgradeManagerComponent* UpgradeManager = CachedUpgradeManager.Get();
+	if (!UpgradeManager)
 	{
-		return; // Already at max capacity
+		return;
 	}
 
-	StoredPickups++;
+	// If the pool was already at max BEFORE this notification, AddStoredHealthPickup returned false
+	// and we shouldn't play stored-feedback. We can't observe that from here directly, but we can
+	// rely on HandleSharedPoolChanged having fired on success — that already re-broadcasts to UI.
+	// Stored VFX/SFX is a HealthBlast-specific cosmetic, so play it any time we get a pickup at
+	// full HP while owned, regardless of whether the pool actually grew (player still sees feedback
+	// even at cap, like Doom Eternal's "ammo full" sound).
 
 	AShooterCharacter* Character = GetShooterCharacter();
 	if (Character)
 	{
-		// Play stored feedback VFX
 		if (CachedDef->StoredVFX)
 		{
 			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
@@ -264,25 +311,19 @@ void UUpgrade_HealthBlast::OnHealthPickupCollectedAtFullHP()
 				true, true, ENCPoolMethod::None);
 		}
 
-		// Play stored sound
 		if (CachedDef->StoredSound)
 		{
 			UGameplayStatics::PlaySoundAtLocation(this, CachedDef->StoredSound, Character->GetActorLocation());
 		}
 	}
-
-	OnStoredPickupsChanged.Broadcast(StoredPickups, CachedDef->MaxStoredPickups);
-
-	UE_LOG(LogTemp, Log, TEXT("[HEALTHBLAST] Stored health pickup: %d/%d"),
-		StoredPickups, CachedDef->MaxStoredPickups);
 }
 
 // ==================== Channeling Callbacks ====================
 
 void UUpgrade_HealthBlast::OnChannelingStarted()
 {
-	// Only start empty capture timer if we have stored pickups and not on cooldown
-	if (StoredPickups <= 0 || bOnCooldown || !CachedDef.IsValid())
+	// Only start empty capture timer if pool has pickups and we're not on cooldown
+	if (GetStoredPickups() <= 0 || bOnCooldown || !CachedDef.IsValid())
 	{
 		return;
 	}
@@ -319,7 +360,13 @@ void UUpgrade_HealthBlast::OnEmptyCaptureTimerFired()
 
 void UUpgrade_HealthBlast::FireHealthBlast()
 {
-	if (StoredPickups <= 0 || bOnCooldown || !CachedDef.IsValid())
+	if (bOnCooldown || !CachedDef.IsValid())
+	{
+		return;
+	}
+
+	UUpgradeManagerComponent* UpgradeManager = CachedUpgradeManager.Get();
+	if (!UpgradeManager || UpgradeManager->GetStoredHealthPickups() <= 0)
 	{
 		return;
 	}
@@ -336,7 +383,13 @@ void UUpgrade_HealthBlast::FireHealthBlast()
 		return;
 	}
 
-	const int32 PickupsToFire = StoredPickups;
+	// Drain the entire pool (HealthBlast is "all-or-nothing"). ConsumeStoredHealthPickups
+	// returns the count actually drained and broadcasts the change.
+	const int32 PickupsToFire = UpgradeManager->ConsumeStoredHealthPickups(UpgradeManager->GetStoredHealthPickups());
+	if (PickupsToFire <= 0)
+	{
+		return;
+	}
 
 	// Spawn at plate position: camera + 200cm forward (matches channeling plate offset)
 	FVector CameraLoc;
@@ -406,9 +459,7 @@ void UUpgrade_HealthBlast::FireHealthBlast()
 
 	UE_LOG(LogTemp, Warning, TEXT("[HEALTHBLAST] Fired %d health pickups!"), PickupsToFire);
 
-	// Reset stored count
-	StoredPickups = 0;
-	OnStoredPickupsChanged.Broadcast(StoredPickups, CachedDef->MaxStoredPickups);
+	// Pool was already drained by ConsumeStoredHealthPickups above — broadcast happened there.
 
 	// Start cooldown
 	bOnCooldown = true;

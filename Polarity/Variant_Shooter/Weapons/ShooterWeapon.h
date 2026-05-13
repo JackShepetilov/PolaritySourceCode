@@ -596,7 +596,7 @@ protected:
 	float GetOwnerSpeed() const;
 	float CalculateHeatDamageMultiplier() const;
 	float CalculateHeatFireRateMultiplier() const;
-	float GetCurrentRefireRate() const;
+	virtual float GetCurrentRefireRate() const;
 
 	// ==================== Z-Factor ====================
 

@@ -76,12 +76,19 @@ struct FMeleeWeaponSwingData
  * - Boss finisher support
  */
 UCLASS()
+/** Broadcast whenever a sword swing deals damage to a target. Used by Combo upgrade. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnMeleeWeaponHit, AActor*, HitActor, const FVector&, HitLocation, bool, bHeadshot, float, Damage);
+
 class POLARITY_API AShooterWeapon_Melee : public AShooterWeapon
 {
 	GENERATED_BODY()
 
 public:
 	AShooterWeapon_Melee();
+
+	/** Fires every time a sword swing successfully damages a target. */
+	UPROPERTY(BlueprintAssignable, Category = "Melee|Events")
+	FOnMeleeWeaponHit OnMeleeWeaponHit;
 
 protected:
 	virtual void BeginPlay() override;
@@ -91,6 +98,22 @@ protected:
 public:
 	virtual bool IsMeleeWeapon() const override { return true; }
 	virtual bool OnSecondaryAction() override { return true; } // Block ADS
+
+	// ==================== Combo Speed Multiplier ====================
+
+	/**
+	 * Scale refire rate and swing-montage play rate. 1.0 = normal. 2.0 = twice as fast.
+	 * Mirrors UMeleeAttackComponent::ApplyComboSpeedMultiplier so the Combo upgrade can
+	 * apply the same multiplier to both the fist swing and the sword.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Combo")
+	void ApplyComboSpeedMultiplier(float NewMultiplier);
+
+	UFUNCTION(BlueprintPure, Category = "Melee|Combo")
+	float GetComboSpeedMultiplier() const { return ComboSpeedMultiplier; }
+
+	/** Override: divide base refire rate by combo multiplier so faster combo = shorter refire. */
+	virtual float GetCurrentRefireRate() const override;
 
 	// ==================== Damage Window (AnimNotify API) ====================
 
@@ -600,6 +623,9 @@ protected:
 
 	/** Break gib lifetime */
 	float BreakGibLifetime = 3.0f;
+
+	/** Current combo speed multiplier (1.0 = normal). Mutated by ApplyComboSpeedMultiplier. */
+	float ComboSpeedMultiplier = 1.0f;
 
 	/** Decrement hit count and check for break. Returns true if weapon broke. */
 	bool DecrementHitCount();

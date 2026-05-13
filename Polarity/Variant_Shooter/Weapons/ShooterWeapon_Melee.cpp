@@ -433,6 +433,9 @@ void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
 	FVector HitDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
 	bool bKilled = HitActor->IsActorBeingDestroyed() || (Cast<AShooterNPC>(HitActor) && Cast<AShooterNPC>(HitActor)->IsDead());
 	WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, FinalDamage, bHeadshot, bKilled, HitActor);
+
+	// Broadcast for subscribers (Combo upgrade etc.)
+	OnMeleeWeaponHit.Broadcast(HitActor, HitResult.ImpactPoint, bHeadshot, FinalDamage);
 }
 
 // ==================== Hit Detection ====================
@@ -1361,9 +1364,46 @@ void AShooterWeapon_Melee::PlayMontageOnFPMesh(UAnimMontage* Montage, float Play
 	{
 		if (!AnimInstance->Montage_IsPlaying(Montage))
 		{
-			AnimInstance->Montage_Play(Montage, PlayRate);
+			// Apply combo speed multiplier on top of the caller-provided rate.
+			AnimInstance->Montage_Play(Montage, PlayRate * ComboSpeedMultiplier);
 		}
 	}
+}
+
+// ==================== Combo Speed ====================
+
+void AShooterWeapon_Melee::ApplyComboSpeedMultiplier(float NewMultiplier)
+{
+	const float Clamped = FMath::Max(0.1f, NewMultiplier);
+	if (FMath::IsNearlyEqual(Clamped, ComboSpeedMultiplier))
+	{
+		return;
+	}
+
+	ComboSpeedMultiplier = Clamped;
+
+	// Adjust the play rate of any currently-playing swing montage so the visual
+	// reflects the new combo speed immediately rather than waiting for the next swing.
+	if (CachedMeleeWeaponFPMesh)
+	{
+		if (UAnimInstance* AnimInstance = CachedMeleeWeaponFPMesh->GetAnimInstance())
+		{
+			if (CurrentSwingData && CurrentSwingData->SwingMontage &&
+				AnimInstance->Montage_IsPlaying(CurrentSwingData->SwingMontage))
+			{
+				AnimInstance->Montage_SetPlayRate(CurrentSwingData->SwingMontage,
+					CurrentSwingData->BasePlayRate * ComboSpeedMultiplier);
+			}
+		}
+	}
+}
+
+float AShooterWeapon_Melee::GetCurrentRefireRate() const
+{
+	// Base implementation already factors in heat. Combo divides on top — clamp to a tiny
+	// positive number so we never return 0 / negative.
+	const float Base = Super::GetCurrentRefireRate();
+	return Base / FMath::Max(0.1f, ComboSpeedMultiplier);
 }
 
 // ==================== VFX/SFX ====================

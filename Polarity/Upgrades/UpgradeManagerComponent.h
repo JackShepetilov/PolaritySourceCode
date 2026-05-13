@@ -16,6 +16,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinitio
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, UUpgradeDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnUpgradeLeveledUp, UUpgradeDefinition*, Definition, int32, NewLevel);
 
+/** Broadcast when the shared health-pickup pool count changes (used by HealthBlast, ChargedPunch, future upgrades) */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStoredHealthPickupsChanged, int32, CurrentCount, int32, MaxCount);
+
 /**
  * Manages all active upgrades on the owning ShooterCharacter.
  * Handles granting, removing, querying, and persistence of upgrades.
@@ -113,6 +116,38 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedDamageMultiplier(AActor* Target) const;
 
+	// ==================== Shared Health-Pickup Pool ====================
+	// A counter, incremented when the player collects a health pickup at full HP,
+	// shared between every upgrade that consumes "stored pickups" (HealthBlast,
+	// ChargedPunch, etc). Each consumer reads/decrements via the API below.
+
+	/** Maximum size of the shared pool (cap for all consumers combined). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrades|Shared Pool", meta = (ClampMin = "1", ClampMax = "99"))
+	int32 MaxStoredHealthPickups = 10;
+
+	/** Broadcast whenever StoredHealthPickups changes (after Add/Consume/Set). */
+	UPROPERTY(BlueprintAssignable, Category = "Upgrades|Shared Pool")
+	FOnStoredHealthPickupsChanged OnStoredHealthPickupsChanged;
+
+	/** Current pool count. */
+	UFUNCTION(BlueprintPure, Category = "Upgrades|Shared Pool")
+	int32 GetStoredHealthPickups() const { return StoredHealthPickups; }
+
+	UFUNCTION(BlueprintPure, Category = "Upgrades|Shared Pool")
+	int32 GetMaxStoredHealthPickups() const { return MaxStoredHealthPickups; }
+
+	/** Increment by 1 (clamped to Max). Returns true if the value actually changed. */
+	UFUNCTION(BlueprintCallable, Category = "Upgrades|Shared Pool")
+	bool AddStoredHealthPickup();
+
+	/** Consume up to RequestedCount from the pool. Returns the count actually consumed. */
+	UFUNCTION(BlueprintCallable, Category = "Upgrades|Shared Pool")
+	int32 ConsumeStoredHealthPickups(int32 RequestedCount);
+
+	/** Reset to 0 (e.g. on death/respawn). */
+	UFUNCTION(BlueprintCallable, Category = "Upgrades|Shared Pool")
+	void ResetStoredHealthPickups();
+
 protected:
 
 	virtual void BeginPlay() override;
@@ -122,6 +157,10 @@ private:
 	/** Map of UpgradeTag -> active upgrade component */
 	UPROPERTY()
 	TMap<FGameplayTag, TObjectPtr<UUpgradeComponent>> ActiveUpgrades;
+
+	/** Shared pool counter — see GetStoredHealthPickups. */
+	UPROPERTY()
+	int32 StoredHealthPickups = 0;
 
 	/** Currently bound weapon (for delegate cleanup) */
 	UPROPERTY()

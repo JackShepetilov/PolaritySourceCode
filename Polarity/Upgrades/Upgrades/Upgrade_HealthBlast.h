@@ -8,6 +8,7 @@
 
 class UUpgradeDefinition_HealthBlast;
 class UChargeAnimationComponent;
+class UUpgradeManagerComponent;
 class UProjectileMovementComponent;
 class UStaticMeshComponent;
 class USphereComponent;
@@ -15,6 +16,9 @@ class UNiagaraSystem;
 class USoundBase;
 
 // ==================== Delegate for UI ====================
+// Kept for legacy widget subscribers. Identical signature to
+// UUpgradeManagerComponent::FOnStoredHealthPickupsChanged — this component
+// re-broadcasts the manager event so existing Blueprints don't need rewiring.
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStoredPickupsChanged, int32, CurrentCount, int32, MaxCount);
 
@@ -94,11 +98,11 @@ public:
 
 	UUpgrade_HealthBlast();
 
-	/** Current number of stored health pickups */
+	/** Current number of stored health pickups (reads from the shared UpgradeManager pool) */
 	UFUNCTION(BlueprintPure, Category = "Health Blast")
-	int32 GetStoredPickups() const { return StoredPickups; }
+	int32 GetStoredPickups() const;
 
-	/** Broadcast when stored pickup count changes (for UI) */
+	/** Broadcast when stored pickup count changes (for UI). Re-broadcasts the shared pool's event. */
 	UPROPERTY(BlueprintAssignable, Category = "Health Blast")
 	FOnStoredPickupsChanged OnStoredPickupsChanged;
 
@@ -121,8 +125,8 @@ private:
 	/** Cached reference to ChargeAnimationComponent */
 	TWeakObjectPtr<UChargeAnimationComponent> CachedChargeComp;
 
-	/** Number of stored health pickups */
-	int32 StoredPickups = 0;
+	/** Cached reference to the owning character's UpgradeManager (host of the shared pool) */
+	TWeakObjectPtr<UUpgradeManagerComponent> CachedUpgradeManager;
 
 	/** Whether blast is on cooldown */
 	bool bOnCooldown = false;
@@ -146,6 +150,10 @@ private:
 	/** Called when channeling ends (cancel empty capture timer) */
 	UFUNCTION()
 	void OnChannelingEnded();
+
+	/** Re-broadcast the shared pool change to OnStoredPickupsChanged (UI compatibility) */
+	UFUNCTION()
+	void HandleSharedPoolChanged(int32 CurrentCount, int32 MaxCount);
 
 	/** Called when empty capture timer fires — execute the blast */
 	void OnEmptyCaptureTimerFired();
