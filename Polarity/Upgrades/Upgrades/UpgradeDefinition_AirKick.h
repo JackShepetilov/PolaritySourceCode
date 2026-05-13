@@ -9,6 +9,29 @@
 #include "UpgradeDefinition_AirKick.generated.h"
 
 /**
+ * Per-level explosion tuning for Air Kick.
+ * Level 1 (index 0) typically has bExplodeOnImpact = false — kick just launches the prop.
+ * Level 2 (index 1) flips it on with a fixed damage and radius.
+ */
+USTRUCT(BlueprintType)
+struct FAirKickLevelData
+{
+	GENERATED_BODY()
+
+	/** If true, the launched prop is primed to detonate when it hits an NPC. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Level")
+	bool bExplodeOnImpact = false;
+
+	/** Flat damage dealt by the on-impact explosion (only used when bExplodeOnImpact is true). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Level", meta = (ClampMin = "0.0", EditCondition = "bExplodeOnImpact"))
+	float FixedExplosionDamage = 100.0f;
+
+	/** Explosion radius in cm (only used when bExplodeOnImpact is true). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Level", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bExplodeOnImpact"))
+	float FixedExplosionRadius = 300.0f;
+};
+
+/**
  * Data asset for the "Air Kick" upgrade.
  * When the player hits an airborne EMFPhysicsProp with melee while also airborne,
  * the prop is launched forward in the camera direction (same as the previous
@@ -39,15 +62,27 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick", meta = (ClampMin = "0.0"))
 	float KickSpinSpeed = 720.0f;
 
-	// ==================== On-Impact Explosion ====================
+	// ==================== Per-Level Explosion ====================
 
 	/**
-	 * Flat damage dealt by the explosion when the launched prop hits an NPC.
-	 * Overrides the prop's own ExplosionDamage and bypasses charge-based scaling —
-	 * every air-kick payload is the same regardless of which prop was kicked.
+	 * Per-level explosion tuning. Index 0 = level 1, index 1 = level 2, etc.
+	 * MaxLevel on the parent definition should match the number of entries.
+	 * If CurrentLevel exceeds the array, the last entry is reused.
 	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Explosion", meta = (ClampMin = "0.0"))
-	float FixedExplosionDamage = 100.0f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Levels")
+	TArray<FAirKickLevelData> LevelData;
+
+	/** Returns the tuning block for the given level (1-based), safely clamped. */
+	const FAirKickLevelData& GetLevelData(int32 Level) const
+	{
+		if (LevelData.Num() == 0)
+		{
+			static const FAirKickLevelData Default;
+			return Default;
+		}
+		const int32 Index = FMath::Clamp(Level - 1, 0, LevelData.Num() - 1);
+		return LevelData[Index];
+	}
 
 	// ==================== VFX ====================
 

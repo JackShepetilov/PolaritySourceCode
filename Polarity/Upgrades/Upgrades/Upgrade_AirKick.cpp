@@ -84,33 +84,39 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		return;
 	}
 
-	// === All conditions met: launch the prop, primed to detonate on NPC impact ===
+	// === All conditions met: launch the prop, primed (or not) per current level ===
 
-	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — launch %.0fcm/s, primed explosion dmg=%.1f (flat falloff, no charge scaling, no weak-impact fallback)"),
+	const FAirKickLevelData& LD = DefAirKick->GetLevelData(CurrentLevel);
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — Lv%d/%d, launch %.0fcm/s, ExplodeOnImpact=%d, dmg=%.1f, radius=%.0f"),
 		*Character->GetName(), *Prop->GetName(),
+		CurrentLevel, DefAirKick->MaxLevel,
 		DefAirKick->LaunchSpeed,
-		DefAirKick->FixedExplosionDamage);
+		LD.bExplodeOnImpact ? 1 : 0,
+		LD.FixedExplosionDamage,
+		LD.FixedExplosionRadius);
 
-	// Prime the prop's explosion params BEFORE launching, so when it hits an NPC
-	// mid-flight it detonates with our fixed damage instead of the prop's own
-	// configured damage / charge-scaled damage. Overrides:
-	//   - bCanExplode = true: even non-explosive props blow up on impact.
-	//   - ExplosionDamage = FixedExplosionDamage: predictable payload.
-	//   - bScaleExplosionWithCharge = false: damage doesn't ride on prop charge.
-	//   - ExplosionMinCharge = 0: prop won't fall back to "weak impact" (which
-	//     bypasses Explode entirely and deals WeakImpactDamage instead).
-	//   - ExplosionDamageFalloff = 5 (max allowed by UPROPERTY clamp): keeps
-	//     damage near-flat across the whole blast radius. Without this, only
-	//     targets inside the inner 30% of radius take full damage; the rest
-	//     drops to ~10% on the edge, so the "fixed" damage looked variable.
-	// We don't restore these — after Explode() the prop is normally
-	// destroyed/hidden, and if it survives, the override staying in place is
-	// acceptable for subsequent chain reactions.
-	Prop->bCanExplode = true;
-	Prop->ExplosionDamage = DefAirKick->FixedExplosionDamage;
-	Prop->bScaleExplosionWithCharge = false;
-	Prop->ExplosionMinCharge = 0.0f;
-	Prop->ExplosionDamageFalloff = 5.0f;
+	// Only prime the explosion params if this level actually wants an explosion on impact.
+	// Level 1 (no explosion) keeps the prop's own settings intact — kick becomes a plain
+	// physics launch, just like the old behaviour. Level 2 (or higher) overrides the prop
+	// to detonate with our fixed damage / radius regardless of its own configuration.
+	if (LD.bExplodeOnImpact)
+	{
+		// Overrides (see commit history for rationale):
+		//   - bCanExplode = true: even non-explosive props blow up on impact.
+		//   - ExplosionDamage / ExplosionRadius: predictable, level-defined payload.
+		//   - bScaleExplosionWithCharge = false: damage doesn't ride on prop charge.
+		//   - ExplosionMinCharge = 0: prevents fallback to "weak impact" (which deals
+		//     WeakImpactDamage instead of running Explode at all).
+		//   - ExplosionDamageFalloff = 5 (max by UPROPERTY clamp): keeps damage near-flat
+		//     across the whole blast radius (only the inner 30% gets full damage by default).
+		Prop->bCanExplode = true;
+		Prop->ExplosionDamage = LD.FixedExplosionDamage;
+		Prop->ExplosionRadius = LD.FixedExplosionRadius;
+		Prop->bScaleExplosionWithCharge = false;
+		Prop->ExplosionMinCharge = 0.0f;
+		Prop->ExplosionDamageFalloff = 5.0f;
+	}
 
 	// Launch the prop in the camera forward direction (same as the previous version).
 	APlayerController* PC = Cast<APlayerController>(Character->GetController());
