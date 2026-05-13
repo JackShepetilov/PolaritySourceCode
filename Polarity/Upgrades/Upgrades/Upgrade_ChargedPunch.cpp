@@ -145,6 +145,17 @@ void UUpgrade_ChargedPunch::EnterChargingState()
 		return;
 	}
 
+	// Kill any in-flight regular swing immediately — without this, the ground melee
+	// montage (started by the Triggered binding when the player first pressed) keeps
+	// playing on MeleeMesh for the rest of its duration, and any repeated Triggered
+	// pulses during the hold would restart it. EnterMeleeMeshView force-stops the
+	// state machine, hides the weapon mesh, attaches MeleeMesh to camera, and clears
+	// all montages on MeleeMesh.
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		MeleeComp->EnterMeleeMeshView();
+	}
+
 	// Spawn endpoint-preview VFX (positioned at endpoint each tick via SetWorldLocation).
 	if (CachedDef->EndpointPreviewVFX)
 	{

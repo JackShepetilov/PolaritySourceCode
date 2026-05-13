@@ -693,6 +693,8 @@ void AShooterCharacter::OnWeaponSwitchRaised()
 void AShooterCharacter::DoMeleeAttack()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === DoMeleeAttack CALLED ==="));
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack (Triggered) fired @ %.3fs"),
+		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
 
 	// Don't melee if charge animating
 	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
@@ -746,6 +748,8 @@ void AShooterCharacter::DoMeleeAttack()
 
 void AShooterCharacter::DoMeleePressed()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleePressed (Started) fired @ %.3fs"),
+		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
 	// Broadcast for hold-based upgrades. The regular swing still fires from
 	// DoMeleeAttack on Triggered — this hook only signals "button went down".
 	OnMeleeChargeHoldStarted.Broadcast();
@@ -753,6 +757,8 @@ void AShooterCharacter::DoMeleePressed()
 
 void AShooterCharacter::DoMeleeReleased()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeReleased (Completed) fired @ %.3fs"),
+		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
 	// Broadcast for hold-based upgrades to finalize. Subscribers decide whether
 	// the elapsed hold time crossed their threshold and act accordingly.
 	OnMeleeChargeHoldReleased.Broadcast();

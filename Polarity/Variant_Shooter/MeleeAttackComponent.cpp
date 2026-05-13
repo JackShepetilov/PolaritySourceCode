@@ -2700,6 +2700,18 @@ void UMeleeAttackComponent::EnterMeleeMeshView()
 	}
 
 	SwitchToMeleeMesh();
+
+	// Kill anything still playing on MeleeMesh (e.g. a ground swing montage that's
+	// already past CancelAttack's allowed phases). Without this, the ground anim
+	// keeps playing on top of the upgrade's air-attack montage.
+	if (MeleeMesh)
+	{
+		if (UAnimInstance* AnimInst = MeleeMesh->GetAnimInstance())
+		{
+			AnimInst->StopAllMontages(0.0f);
+		}
+	}
+	CurrentMeleeMontage = nullptr;
 }
 
 void UMeleeAttackComponent::ExitMeleeMeshView()
