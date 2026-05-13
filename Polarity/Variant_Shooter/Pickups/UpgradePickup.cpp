@@ -188,8 +188,16 @@ void AUpgradePickup::StartPull(AShooterCharacter* InPullingPlayer)
 {
 	if (!InPullingPlayer || bIsBeingPulled || bPullComplete)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] StartPull SKIPPED on '%s' (player=%s, bIsBeingPulled=%d, bPullComplete=%d)"),
+			*GetName(),
+			InPullingPlayer ? *InPullingPlayer->GetName() : TEXT("NULL"),
+			bIsBeingPulled ? 1 : 0, bPullComplete ? 1 : 0);
 		return;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] StartPull on '%s' for player=%s, definition=%s"),
+		*GetName(), *InPullingPlayer->GetName(),
+		UpgradeDefinition ? *UpgradeDefinition->DisplayName.ToString() : TEXT("<NONE>"));
 
 	bIsBeingPulled = true;
 	PullElapsed = 0.0f;
@@ -254,6 +262,10 @@ void AUpgradePickup::UpdatePull(float DeltaTime)
 
 void AUpgradePickup::CompletePull()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull on '%s' (definition=%s)"),
+		*GetName(),
+		UpgradeDefinition ? *UpgradeDefinition->DisplayName.ToString() : TEXT("<NONE>"));
+
 	bPullComplete = true;
 	bIsBeingPulled = false;
 
@@ -264,6 +276,7 @@ void AUpgradePickup::CompletePull()
 
 	if (!PullingCharacter.IsValid())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull ABORTED — PullingCharacter invalid"));
 		Destroy();
 		return;
 	}
@@ -272,7 +285,7 @@ void AUpgradePickup::CompletePull()
 
 	if (!UpgradeDefinition)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("UpgradePickup: No UpgradeDefinition set on '%s'"), *GetName());
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull ABORTED — no UpgradeDefinition set on '%s'"), *GetName());
 		Destroy();
 		return;
 	}
@@ -280,6 +293,7 @@ void AUpgradePickup::CompletePull()
 	UUpgradeManagerComponent* UpgradeMgr = Player->GetUpgradeManager();
 	if (!UpgradeMgr)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull ABORTED — player has no UpgradeManager"));
 		Destroy();
 		return;
 	}
@@ -287,12 +301,17 @@ void AUpgradePickup::CompletePull()
 	// Check if player already has this upgrade
 	if (UpgradeMgr->HasUpgrade(UpgradeDefinition->UpgradeTag))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull: '%s' already owned — no grant"),
+			*UpgradeDefinition->DisplayName.ToString());
 		BP_OnUpgradeAlreadyOwned(Player);
 		Destroy();
 		return;
 	}
 
 	// Grant the upgrade
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull: calling GrantUpgrade('%s', tag=%s)"),
+		*UpgradeDefinition->DisplayName.ToString(),
+		*UpgradeDefinition->UpgradeTag.ToString());
 	if (UpgradeMgr->GrantUpgrade(UpgradeDefinition))
 	{
 		// Effects
@@ -333,6 +352,11 @@ void AUpgradePickup::CompletePull()
 
 		BP_OnUpgradePickedUp(Player);
 		OnPickedUp.Broadcast(Player);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull: GrantUpgrade returned FALSE for '%s' — see UpgradeManager log above for reason"),
+			*UpgradeDefinition->DisplayName.ToString());
 	}
 
 	Destroy();
