@@ -71,11 +71,22 @@ void UUpgrade_ChargedPunch::OnUpgradeDeactivated()
 
 	ExitChargingState();
 
-	// If we're deactivated mid-lunge (e.g. on death), restore movement / mesh so
-	// the character isn't stuck in Flying mode with hidden weapon mesh.
+	// If we're deactivated mid-lunge (e.g. on death), restore movement so the
+	// character isn't stuck in Flying mode.
 	if (bIsLunging)
 	{
 		FinishLunge();
+	}
+
+	// Force-restore FPMesh view in case the air-attack montage was still playing
+	// after the lunge finished (post-lunge anim wait phase) when the upgrade got
+	// removed — otherwise the player would be stuck looking at MeleeMesh.
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		if (MeleeComp->MeleeMesh && MeleeComp->MeleeMesh->IsVisible())
+		{
+			MeleeComp->ExitMeleeMeshView();
+		}
 	}
 
 	SetComponentTickEnabled(false);
@@ -208,11 +219,32 @@ void UUpgrade_ChargedPunch::TickComponent(float DeltaTime, ELevelTick TickType, 
 	if (bIsLunging)
 	{
 		TickLunge(DeltaTime);
-		// If lunge just finished and button is no longer held, disable tick.
-		if (!bIsLunging && !bButtonHeld)
+		return;
+	}
+
+	// Post-lunge animation wait: lunge physics is done, but the air-attack montage
+	// may still be playing. Keep MeleeMesh attached/visible until the AnimInstance
+	// reports no montage playing, then swap back to FirstPersonMesh.
+	// Triggered only when: not currently charging, button not held — i.e. we just
+	// came out of a successful charged punch and aren't starting another one.
+	if (!bIsCharging && !bButtonHeld)
+	{
+		if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
 		{
-			SetComponentTickEnabled(false);
+			if (MeleeComp->MeleeMesh && MeleeComp->MeleeMesh->IsVisible())
+			{
+				const UAnimInstance* AnimInst = MeleeComp->MeleeMesh->GetAnimInstance();
+				const bool bMontageStillPlaying = AnimInst ? AnimInst->IsAnyMontagePlaying() : false;
+				if (!bMontageStillPlaying)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] Air montage finished — exiting MeleeMesh view"));
+					MeleeComp->ExitMeleeMeshView();
+					SetComponentTickEnabled(false);
+				}
+				return; // either still waiting or just exited — nothing else to do this tick
+			}
 		}
+		SetComponentTickEnabled(false);
 		return;
 	}
 
@@ -644,7 +676,7 @@ void UUpgrade_ChargedPunch::FinishLunge()
 	AShooterCharacter* Character = GetShooterCharacter();
 	if (Character)
 	{
-		// Restore movement state.
+		// Restore movement state — flight is over, gravity/walking should resume.
 		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 		{
 			Movement->GravityScale = SavedGravityScale;
@@ -653,15 +685,15 @@ void UUpgrade_ChargedPunch::FinishLunge()
 		}
 	}
 
-	// Restore mesh view back to FirstPersonMesh + weapon.
-	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
-	{
-		MeleeComp->ExitMeleeMeshView();
-	}
+	// IMPORTANT: do NOT call ExitMeleeMeshView here. The air-attack montage is
+	// often longer than LungeDuration (e.g. 1.07s montage vs 0.15s flight); ending
+	// the mesh view immediately would chop the animation off visually.
+	// Instead, TickComponent keeps polling the MeleeMesh's AnimInstance after
+	// FinishLunge and calls ExitMeleeMeshView once the montage stops playing.
 
 	const FVector FinalPos = Character ? Character->GetActorLocation() : FVector::ZeroVector;
 	const float OffsetFromEnd = FVector::Dist(FinalPos, LungeEnd);
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] FinishLunge — finalPos=(%.0f,%.0f,%.0f), expectedEnd=(%.0f,%.0f,%.0f), offset=%.1f, restored MovementMode=%d, Gravity=%.2f"),
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] FinishLunge — finalPos=(%.0f,%.0f,%.0f), expectedEnd=(%.0f,%.0f,%.0f), offset=%.1f, restored MovementMode=%d, Gravity=%.2f (mesh stays attached until anim ends)"),
 		FinalPos.X, FinalPos.Y, FinalPos.Z,
 		LungeEnd.X, LungeEnd.Y, LungeEnd.Z, OffsetFromEnd,
 		(int32)SavedMovementMode, SavedGravityScale);
