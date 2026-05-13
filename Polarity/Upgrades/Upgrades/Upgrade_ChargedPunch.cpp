@@ -557,6 +557,25 @@ UUpgrade_Combo* UUpgrade_ChargedPunch::FindComboUpgrade() const
 	return Character->FindComponentByClass<UUpgrade_Combo>();
 }
 
+bool UUpgrade_ChargedPunch::IsActive() const
+{
+	if (bIsCharging || bIsLunging)
+	{
+		return true;
+	}
+
+	// Post-lunge anim wait: MeleeMesh is still visible because the air montage
+	// is still playing. The ground swing must not fire underneath it.
+	if (const UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		if (MeleeComp->MeleeMesh && MeleeComp->MeleeMesh->IsVisible())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // ==================== Lunge Lifecycle ====================
 
 void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& EndPos)

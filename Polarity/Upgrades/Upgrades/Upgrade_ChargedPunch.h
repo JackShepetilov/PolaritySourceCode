@@ -41,6 +41,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
 	bool IsCharging() const { return bIsCharging; }
 
+	/** True while flight phase is interpolating the player toward the endpoint. */
+	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
+	bool IsLunging() const { return bIsLunging; }
+
+	/**
+	 * Aggregate "is the upgrade in any active phase that should suppress regular
+	 * melee?" — covers charging, lunging, AND post-lunge anim wait (the air
+	 * montage is still playing). Used by AShooterCharacter::DoMeleeAttack to
+	 * filter out repeated Triggered pulses while the charged punch owns the view.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
+	bool IsActive() const;
+
 	/** Hold elapsed seconds (0 if not pressed). Capped at definition's MaxHoldTime. */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
 	float GetHoldElapsed() const { return HoldElapsed; }

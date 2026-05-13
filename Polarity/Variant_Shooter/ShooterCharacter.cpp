@@ -697,15 +697,19 @@ void AShooterCharacter::DoMeleeAttack()
 	UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack (Triggered) fired @ %.3fs"),
 		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
 
-	// Block regular swings while a ChargedPunch is mid-hold past its threshold or
-	// mid-lunge. IA_Melee's Triggered binding pulses more than once per press in
-	// the project's input setup — without this gate, a second ground swing kicks
-	// in during the charged punch and clobbers the air-attack montage.
+	// Block regular swings while a ChargedPunch is in ANY active phase — charging,
+	// flying toward endpoint, or waiting for the post-lunge air montage to finish.
+	// IA_Melee's Triggered binding pulses repeatedly during the hold AND after, so
+	// the simple bIsCharging check missed the lunge / post-anim windows: a Triggered
+	// pulse during the flight made the player perform a ground swing on the NPC
+	// they were piercing through, applying ordinary melee damage instead of the
+	// charged-punch effect.
 	if (UUpgrade_ChargedPunch* ChargedPunch = FindComponentByClass<UUpgrade_ChargedPunch>())
 	{
-		if (ChargedPunch->IsCharging())
+		if (ChargedPunch->IsActive())
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack SUPPRESSED — ChargedPunch is charging"));
+			UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack SUPPRESSED — ChargedPunch active (charging=%d, lunging=%d)"),
+				ChargedPunch->IsCharging() ? 1 : 0, ChargedPunch->IsLunging() ? 1 : 0);
 			return;
 		}
 	}
