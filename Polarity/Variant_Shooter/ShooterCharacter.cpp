@@ -3,6 +3,7 @@
 
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "Upgrades/Upgrades/Upgrade_ChargedPunch.h"
 #include "Weapons/ShooterWeapon_Melee.h"
 #include "Weapons/DroppedRangedWeapon.h"
 #include "Weapons/RiotShield.h"
@@ -695,6 +696,19 @@ void AShooterCharacter::DoMeleeAttack()
 	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === DoMeleeAttack CALLED ==="));
 	UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack (Triggered) fired @ %.3fs"),
 		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
+
+	// Block regular swings while a ChargedPunch is mid-hold past its threshold or
+	// mid-lunge. IA_Melee's Triggered binding pulses more than once per press in
+	// the project's input setup — without this gate, a second ground swing kicks
+	// in during the charged punch and clobbers the air-attack montage.
+	if (UUpgrade_ChargedPunch* ChargedPunch = FindComponentByClass<UUpgrade_ChargedPunch>())
+	{
+		if (ChargedPunch->IsCharging())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack SUPPRESSED — ChargedPunch is charging"));
+			return;
+		}
+	}
 
 	// Don't melee if charge animating
 	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())

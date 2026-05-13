@@ -537,20 +537,17 @@ void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& E
 
 	LungeStart = StartPos;
 	LungeEnd = EndPos;
+	// Keep the flight perfectly horizontal at the player's current Z — no vertical jump.
+	// The "странный рывок" the user reported was the +VerticalLiftAmount teleport in one
+	// frame; with MOVE_Flying + GravityScale=0 we don't need to lift to escape friction.
+	LungeStart.Z = Character->GetActorLocation().Z;
+	LungeEnd.Z = LungeStart.Z;
 	LungeElapsed = 0.0f;
 	LungeTotalDuration = FMath::Max(0.05f, CachedDef->LungeDuration);
 	bIsLunging = true;
 
-	// 1. Lift the player slightly so SetActorLocation doesn't collide with the floor.
-	if (CachedDef->VerticalLiftAmount > 0.0f)
-	{
-		FVector Lifted = Character->GetActorLocation() + FVector(0.0f, 0.0f, CachedDef->VerticalLiftAmount);
-		Character->SetActorLocation(Lifted, /*bSweep=*/ false);
-		LungeStart.Z = Lifted.Z;
-		LungeEnd.Z = Lifted.Z; // keep flight perfectly horizontal at the lifted height
-	}
-
-	// 2. Disable gravity + put movement into Flying so the player doesn't fall mid-lunge.
+	// Disable gravity + put movement into Flying so SetActorLocation drives motion
+	// without ground friction or gravity kicking the player around.
 	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 	{
 		SavedMovementMode = Movement->MovementMode;
