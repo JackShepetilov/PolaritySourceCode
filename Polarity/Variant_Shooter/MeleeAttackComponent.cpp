@@ -443,21 +443,24 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		}
 		else
 		{
-			StateTimeRemaining = Settings.ActiveTime / ComboSpeedMultiplier;
+			// Active phase fallback timer kept large — the real Active End is driven by
+			// the UAnimNotifyState_MeleeDamageWindow's NotifyEnd (calls DeactivateDamageWindowFromNotify
+			// which transitions Active -> Recovery) OR by OnMeleeMontageEnded if the notify is missing.
+			StateTimeRemaining = (MontageTotalDuration > 0.0f)
+				? (MontageTotalDuration / ComboSpeedMultiplier) + 0.5f  // safety buffer past natural end
+				: (Settings.ActiveTime / ComboSpeedMultiplier);
 		}
 		SpawnSwingTrailFX();
 		break;
 
 	case EMeleeAttackState::Recovery:
-		if (bDelegatedDropKick)
-		{
-			// Delegated: skip to end quickly, weapon handles its own cleanup
-			StateTimeRemaining = 0.0f;
-		}
-		else
-		{
-			StateTimeRemaining = Settings.RecoveryTime / ComboSpeedMultiplier;
-		}
+	{
+		// Recovery is now a zero-duration pass-through state. Cleanup (StopMagnetism,
+		// miss-momentum restore, dropkick cooldown) still happens here, but the next
+		// tick immediately transitions to ShowingWeapon. The "natural" wait between
+		// the swing finishing and the next swing being allowed is driven by Settings.Cooldown
+		// downstream, plus the residual montage tail.
+		StateTimeRemaining = 0.0f;
 		StopSwingTrailFX();
 
 		// Start drop kick cooldown BEFORE StopMagnetism (which resets bIsDropKick)
@@ -504,6 +507,7 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 			}
 		}
 		break;
+	}
 
 	case EMeleeAttackState::ShowingWeapon:
 		if (bDelegatedDropKick)
@@ -2398,15 +2402,21 @@ void UMeleeAttackComponent::UpdateMontagePlayRate(float DeltaTime)
 
 void UMeleeAttackComponent::OnMeleeMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
-	if (Montage == CurrentMeleeMontage)
+	if (Montage != CurrentMeleeMontage)
 	{
-		CurrentMeleeMontage = nullptr;
+		return;
+	}
 
-		// If montage ended naturally during Active or Recovery, transition to next state
-		if (!bInterrupted && (CurrentState == EMeleeAttackState::Active || CurrentState == EMeleeAttackState::Recovery))
-		{
-			// Let the state machine handle the transition
-		}
+	CurrentMeleeMontage = nullptr;
+
+	// Drive the swing's end through the montage instead of fixed Settings timers.
+	// If we're still in Active or Recovery when the montage ends naturally, jump
+	// straight to ShowingWeapon — Recovery is now zero-duration (cleanup-only) and
+	// Active has a long safety timer that we want to short-circuit.
+	if (!bInterrupted &&
+		(CurrentState == EMeleeAttackState::Active || CurrentState == EMeleeAttackState::Recovery))
+	{
+		SetState(EMeleeAttackState::ShowingWeapon);
 	}
 }
 
@@ -2668,15 +2678,8 @@ void UMeleeAttackComponent::DeactivateDamageWindowFromNotify()
 
 void UMeleeAttackComponent::EndRecoveryFromNotify()
 {
-	if (bExternallyDisabled)
-	{
-		return;
-	}
-
-	if (CurrentState == EMeleeAttackState::Recovery)
-	{
-		SetState(EMeleeAttackState::ShowingWeapon);
-	}
+	// No-op — Recovery now passes through in a single tick (StateTimeRemaining = 0).
+	// Kept declared in the header for source compatibility with any external caller.
 }
 
 void UMeleeAttackComponent::ApplyComboSpeedMultiplier(float NewMultiplier)
