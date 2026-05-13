@@ -2385,9 +2385,12 @@ void UMeleeAttackComponent::UpdateMontagePlayRate(float DeltaTime)
 	// Calculate normalized progress (0-1)
 	float NormalizedProgress = FMath::Clamp(MontageTimeElapsed / MontageTotalDuration, 0.0f, 1.0f);
 
-	// Sample the curve
+	// Final play rate = BasePlayRate * PlayRateCurve(progress) * ComboSpeedMultiplier
+	//   BasePlayRate         — static per-animation tuning
+	//   PlayRateCurve        — per-frame modulation in 0..1 normalized time (Y=1.0 = no change)
+	//   ComboSpeedMultiplier — global combo-driven multiplier (1.0 outside Combo upgrade)
 	float CurveValue = AnimData.PlayRateCurve->GetFloatValue(NormalizedProgress);
-	float NewPlayRate = AnimData.BasePlayRate * CurveValue;
+	float NewPlayRate = AnimData.BasePlayRate * CurveValue * ComboSpeedMultiplier;
 
 	// Apply new play rate
 	AnimInstance->Montage_SetPlayRate(CurrentMeleeMontage, NewPlayRate);
@@ -2687,14 +2690,21 @@ void UMeleeAttackComponent::ApplyComboSpeedMultiplier(float NewMultiplier)
 
 	ComboSpeedMultiplier = Clamped;
 
-	// If a montage is currently playing, scale its play rate live so the visual
-	// stays in sync with the new timing for the rest of the current swing.
+	// If a montage is currently playing, recompute its play rate with the same
+	// three-factor formula UpdateMontagePlayRate uses every tick:
+	//   PlayRate = BasePlayRate * PlayRateCurve(progress) * ComboSpeedMultiplier
+	// We don't want to skip the curve when reacting to a mid-swing combo change.
 	if (CurrentMeleeMontage && MeleeMesh)
 	{
 		if (UAnimInstance* AnimInstance = MeleeMesh->GetAnimInstance())
 		{
 			const FMeleeAnimationData& AnimData = GetCurrentAnimationData();
 			float PlayRate = AnimData.BasePlayRate * ComboSpeedMultiplier;
+			if (AnimData.PlayRateCurve && MontageTotalDuration > 0.0f)
+			{
+				const float NormalizedProgress = FMath::Clamp(MontageTimeElapsed / MontageTotalDuration, 0.0f, 1.0f);
+				PlayRate *= AnimData.PlayRateCurve->GetFloatValue(NormalizedProgress);
+			}
 			AnimInstance->Montage_SetPlayRate(CurrentMeleeMontage, PlayRate);
 		}
 	}
