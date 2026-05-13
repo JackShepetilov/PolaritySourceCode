@@ -4,30 +4,46 @@
 
 ## 0. СТРУКТУРА ИГРЫ
 
-Игра делится на две главы с принципиально разной структурой, арсеналом и набором допустимых EMF-взаимодействий.
+Roguelite. **4 тира × 3 арены = 12 арен в проекте**, ран = 4 арены (по одной из 3 в каждом тире). Permadeath, мета-апгрейды между ранами, внутрирановые апгрейды через level-up choice.
 
-### 0.1 Глава 1 — Линейная кампания (Titanfall 2-style)
+### 0.1 Сеттинг и мета-нарратив
 
-**Сеттинг.** Секретное измерение мирового заговора. Главный герой проникает внутрь и пробивается через охрану.
+Главный герой — секретный агент, проникающий на точки интереса мирового заговора. По сеттингу — смесь ИИ-роботов (охрана секретного измерения, см. §5.1–5.4) и органических людей (картели, ЧВК, спецслужбы — см. §5.5). Распределение типов врагов по аренам определяется тематикой тира.
 
-**Враги.** ИИ-роботы (металлические) — охрана измерения. Электризуются и захватываются **всеми** EMF-методами:
-- `ShooterNPC`, `MeleeNPC`, `FlyingDrone`, `SniperTurretNPC` (см. §5.1–5.4)
+Тело органического NPC электризовать нельзя — yank-аются только его оружие и щит, в порядке: щит → оружие. Когда инвентарь пуст → NPC уходит в melee-режим.
 
-**Арсенал игрока.** Волновой пистолет, зарядомёт, меч (список расширяется по ходу глав).
+Мета-нарратив: игрок-геймер играет на стриме, друг-стример комментирует. Донаты от зрителей конвертируются в мета-валюту, которая между ранами разблокирует стартовые апгрейды и ассеты.
 
-### 0.2 Глава 2 — Roguelite (12 арен)
+### 0.2 Полярность игрока
 
-**Структура.** 4 тира × 3 арены. Ран = 4 арены (по одной на тир, выбор 1 из 3 каждый раз). Permadeath, мета-апгрейды, внутрирановые апгрейды.
+Игрок зафиксирован на (+) на всех аренах, кроме одной "Cause and Effect"-арены, где управление полярностью передаётся **окружению** (статические заряды на арене, не игрок) — см. §2.2. Гейт: `EMFVelocityModifier::bAllowPolarityToggle`.
 
-**Сюжет.** Игрок находит фабрику ИИ-роботов из Главы 1, получает безлимитное тело-оружие, проникает на точки интереса мирового заговора — базы преступных организаций и спецслужб (мексиканские картели, ЧВК Вагнер/Blackwater, Моссад, МИ6).
+### 0.3 Стартовый арсенал
 
-**Враги.** Органические люди (`HumanoidNPC`, см. §5.5). **Тело электризовать нельзя** — только их оружие или riot-щиты. Yank через канализацию: сначала щит, потом оружие по порядку. Когда инвентарь пуст → переход в melee-режим.
+Только волновой пистолет. меч, riot shield и прочее оружие — через дроп / yank из NPC-инвентаря / мета-апгрейды.
 
-**Стартовый арсенал.** Только волновой пистолет. **Зарядомёт в Главе 2 отсутствует.** Прочее оружие даётся через дроп / yank / мета-апгрейды.
+### 0.4 Прогрессия в ране (XP по скиллам + level-up choice)
 
-### 0.3 Полярность игрока
+Четыре независимых пула опыта (`ESkillCategory`), у каждого свой `CurrentLevel`, своя кривая `LevelThresholds` и свой пул апгрейдов:
 
-Игрок зафиксирован на (+) на всех уровнях, кроме одного в Главе 1, где будет реализована механика «Cause and Effect» — управление полярностью **окружения**, не игрока (см. §2.2). Гейт: `EMFVelocityModifier::bAllowPolarityToggle`.
+| Скилл    | Источник опыта                                                                                                          |
+| -------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Movement | Действия движения (slide, wallrun, dash, double jump): активная фаза N сек → cooldown N сек. *TBD — Этап Б, сейчас 0.* |
+| Melee    | Убийства в ближнем бою (`DamageType_Melee`, `DamageType_Dropkick`)                                                      |
+| EMF      | Убийства через EMF-броски (`DamageType_Wallslam`, `DamageType_EMFProximity`, `DamageType_MomentumBonus`)                |
+| Weapon   | Убийства из оружия (`DamageType_EMFWeapon`, `DamageType_Ranged`)                                                        |
+
+**Маршрутизация kill-XP.** `XPConfig.KillXPRouting: TMap<TSubclassOf<UDamageType>, ESkillCategory>` — таблица DamageType → скилл. Не в таблице → 0 XP + warning в лог.
+
+**Множитель за врага.** `XPConfig.EnemyXPMultiplier: TMap<TSubclassOf<AShooterNPC>, float>` — индивидуальный множитель к `BaseXPPerKill` категории. Кого нет в таблице → 1.0x.
+
+**Доверие attribution.** `XPConfig.AlwaysAttributeToPlayer: TSet<TSubclassOf<UDamageType>>` — DamageType, которые засчитываются игроку всегда, даже если движок не видит цепочки `DamageCauser → Player`. Нужно для пропов и брошенных NPC, у которых `Instigator/Owner == NULL` (gameplay-implied attribution).
+
+**Кривые уровней.** Per-skill `LevelThresholds: TArray<int32>` (cumulative XP до уровня). Длина массива = `MaxLevel`. Default — арифметика 100/250/450/.../4500 (12 уровней, дельта +50 каждый раз).
+
+**Level-up.** На пересечении порога — `UXPSubsystem` шлёт `OnSkillLevelUp(Category, NewLevel)`. Открывается модальный `UUpgradeChoiceWidget` (3 случайных апгрейда из пула категории, исключая `IsUpgradeMaxedOut`). Игрок выбирает → `UUpgradeManagerComponent::GrantUpgrade()`. FIFO-очередь, если несколько уровней пришли одновременно.
+
+**Лайфцикл рана.** `URunSubsystem` (`GameInstanceSubsystem`) координирует: `StartRun` / `EndRun(ERunEndReason)` / `EnterArena(int32)` / `ClearArena(int32)`. Per-run sub-systems (XP, run stats) подписываются на `OnRunStarted` и сбрасывают своё состояние.
 
 ---
 
@@ -185,7 +201,7 @@
 
 ### 3.1 Хитскан (Волновой пистолет)
 
-Электризатор без прямого урона. **Единственное** назначение — наложение (−) заряда на цель. Стартовое и единственное оружие в Главе 2; в Главе 1 идёт в паре с зарядомётом и мечом.
+Электризатор без прямого урона. **Единственное** назначение — наложение (−) заряда на цель. Стартовое и единственное оружие в начале рана. Зарядомёт, меч и прочее — через дроп / yank / мета-апгрейды.
 
 | Параметр          | Значение |
 | ----------------- | -------- |
@@ -199,7 +215,7 @@
 
 <!--
 Легаси: волновая винтовка (предыдущая версия оружия). Закомментирована до решения
-о её судьбе — может быть восстановлена как отдельный ствол / unlock в Главе 1.
+о её судьбе — может быть восстановлена как отдельный ствол / мета-апгрейд.
 
 | Параметр          | Значение |
 | ----------------- | -------- |
@@ -215,7 +231,7 @@
 
 ### 3.2 Электризация (основная функция волнового пистолета)
 
-Каждый выстрел волнового пистолета накладывает (−) заряд на цель — это его *единственное* боевое назначение. Игрок (+) → цель (−) → притяжение зарядомёта (Гл.1) и возможность захвата через канализацию (см. §2.3, §2.5). Заряд накапливается с каждым попаданием до `MaxIonizationCharge`.
+Каждый выстрел волнового пистолета накладывает (−) заряд на цель — это его *единственное* боевое назначение. Игрок (+) → цель (−) → притяжение зарядомёта и возможность захвата через канализацию (см. §2.3, §2.5). Заряд накапливается с каждым попаданием до `MaxIonizationCharge`.
 
 Эффект работает независимо от полярности игрока — даже если `bAllowPolarityToggle` включён и игрок временно (−), пистолет всё равно даёт цели (−).
 
@@ -359,7 +375,7 @@
 
 ## 5. ВРАГИ
 
-### 5.1 Стрелок (ShooterNPC) — *Глава 1: ИИ-робот*
+### 5.1 Стрелок (ShooterNPC) — *ИИ-робот*
 
 | Параметр | Значение |
 |----------|----------|
@@ -377,7 +393,7 @@
 | RetreatProximityTrigger | 250 / 1.5s |
 | KnockbackDistanceMultiplier | 1.0 |
 
-### 5.2 Мили (MeleeNPC) — *Глава 1: ИИ-робот*
+### 5.2 Мили (MeleeNPC) — *ИИ-робот*
 
 | Параметр | Значение |
 |----------|----------|
@@ -396,7 +412,7 @@
 | bDashTracksTarget | Да |
 | KnockbackDistanceMultiplier | 1.0 |
 
-### 5.3 Дрон (FlyingDrone) — *Глава 1: ИИ-робот*
+### 5.3 Дрон (FlyingDrone) — *ИИ-робот*
 
 | Параметр | Значение |
 |----------|----------|
@@ -416,7 +432,7 @@
 | EngageRange | 2,000 |
 | KnockbackDistanceMultiplier | 1.0 |
 
-### 5.4 Снайперская турель (SniperTurretNPC) — *Глава 1: ИИ-робот*
+### 5.4 Снайперская турель (SniperTurretNPC) — *ИИ-робот*
 
 Стационарная турель с прогрессивным прицеливанием. Наследует `AShooterNPC`. Не двигается, не нокбэчится, не оглушается, не захватывается. Стреляет независимо от координатора.
 
@@ -460,7 +476,7 @@
 
 **Делегаты:** `OnAimProgressChanged(Progress, State)`, `OnTurretFired`.
 
-### 5.5 Гуманоид (HumanoidNPC) — *Глава 2: органика*
+### 5.5 Гуманоид (HumanoidNPC) — *Органика*
 
 Стрелок-наследник `MeleeNPC` с инвентарём ранжированного оружия. **Тело гуманоида нельзя взять в захват ни одним из EMF-методов** — игрок вместо этого выдёргивает (yank) оружие из рук поочерёдно. После того как весь инвентарь изъят, гуманоид переходит в melee-режим: бежит на игрока и больше не принимает заряд.
 
@@ -806,16 +822,19 @@
 
 ### 11.1 Архитектура
 
-Система апгрейдов состоит из четырёх компонентов:
+- **UUpgradeDefinition** — Data Asset, поля: `UpgradeTag` (GameplayTag), **`Category`** (`ESkillCategory` — определяет в какой пул choice-а попадает), **`MaxLevel`** (default 1), `DisplayName`, `Description`, `Icon`, `Tier`, `ComponentClass`. Подкласс `UUpgradeDefinition_X` добавляет `TArray<FXLevelData> LevelData` — designer редактирует per-level параметры в редакторе, длина массива через `PostEditChangeProperty` авто-синкается с `MaxLevel`.
+- **UUpgradeComponent** — рантайм-логика, дин. компонент на `ShooterCharacter`. Хранит **`CurrentLevel` (1+)**. Хуки: `OnUpgradeActivated()` (на первом гранте, Lv 1), **`OnLevelChanged(Old, New)`** (на повышении уровня, Lv N → N+1), `OnUpgradeDeactivated()`, и игровые: `OnWeaponFired/Changed`, `OnOwnerTookDamage/DealtDamage`, `GetDamageMultiplier()`. Подкласс читает `LevelData[CurrentLevel-1]` и применяет к персонажу.
+- **UUpgradeManagerComponent** — на персонаже. `GrantUpgrade(Def)` создаёт компонент при первом гранте + `OnUpgradeActivated`; на повторе — повышает `CurrentLevel` + `OnLevelChanged`; на максимуме — no-op (`false`). Геттеры: **`GetUpgradeLevel(Tag)`** (0 если не владеет), **`IsUpgradeMaxedOut(Def)`**. Делегаты: `OnUpgradeGranted`, `OnUpgradeRemoved`, **`OnUpgradeLeveledUp(Def, NewLevel)`**. `GetCombinedDamageMultiplier()` перемножает множители всех апгрейдов.
+- **UUpgradeRegistry** — каталог всех `UUpgradeDefinition` (Data Asset с `AllUpgrades: TArray<UUpgradeDefinition*>`). `UUpgradeChoiceWidget` ролит pool фильтром `Category == LevelledUpCategory && !IsUpgradeMaxedOut`.
 
-- **UUpgradeDefinition** — Data Asset с метаданными: `UpgradeTag` (GameplayTag), `DisplayName`, `Description`, `Icon`, `ComponentClass`, `Tier`
-- **UUpgradeComponent** — абстрактный рантайм-компонент, прикрепляется к персонажу при получении. Хуки: `OnUpgradeActivated()`, `OnUpgradeDeactivated()`, `OnWeaponFired()`, `OnWeaponChanged()`, `OnOwnerTookDamage()`, `OnOwnerDealtDamage()`, `GetDamageMultiplier()`
-- **UUpgradeManagerComponent** — менеджер на персонаже. API: `GrantUpgrade()`, `RemoveUpgrade()`, `HasUpgrade()`. Маршрутизирует события всем активным апгрейдам. `GetCombinedDamageMultiplier()` — перемножает множители всех апгрейдов
-- **UUpgradeRegistry** — каталог всех апгрейдов (Data Asset с `TArray<UUpgradeDefinition*>`). Используется для save/load через GameplayTags
+Подробный шаблон создания нового апгрейда (struct LevelData → подкласс Definition → подкласс Component → DataAsset → Registry) — в `Polarity/Upgrades/Upgrades/AUTHORING_GUIDE.md`.
 
 ### 11.2 Получение апгрейдов
 
-**AUpgradePickup** — актор в мире. Два оверлапа: `PickupCollision` (захват EMF) и `TooltipTrigger` (тултип). Игрок подбирает через EMF channeling — `StartPull()` → плавная интерполяция к камере → `CompletePull()` → `GrantUpgrade()`.
+Два пути: **(1) world-pickup** через EMF channeling и **(2) level-up choice** при пересечении XP-порога.
+
+- **AUpgradePickup** — актор в мире. Два оверлапа: `PickupCollision` (захват EMF) и `TooltipTrigger` (тултип). Игрок подбирает через channeling — `StartPull()` → плавная интерполяция к камере → `CompletePull()` → `GrantUpgrade()`.
+- **Level-up choice** — `UUpgradeChoiceWidget` (модал) подписан на `UXPSubsystem::OnSkillLevelUp`. Ролит N=3 случайных апгрейда из `Registry.AllUpgrades` фильтром по категории и `IsUpgradeMaxedOut`, ставит `SetGamePaused(true)`, ждёт выбор → `GrantUpgrade()` → unpause. FIFO-очередь, если уровни пришли одновременно.
 
 
 ### 11.3 Философия апгрейдов

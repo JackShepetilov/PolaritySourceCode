@@ -247,7 +247,13 @@
       "Bash(ls \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Plugins/EMF_Plugin/Source/EMF_Plugin/Public/\" \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Plugins/EMF_Plugin/Source/EMF_Plugin/Private/\" 2>/dev/null)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\" -Directory)",
       "Bash(Select-Object Name)",
-      "Bash(Find \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\" -name \"*DataTable*\" -o -name \"*Registry*\")"
+      "Bash(Find \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Source\\\\Polarity\" -name \"*DataTable*\" -o -name \"*Registry*\")",
+      "WebFetch(domain:www.pinterest.com)",
+      "WebFetch(domain:dribbble.com)",
+      "WebFetch(domain:visualsbyimpulse.com)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" status --short)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Docs/CombatMechanics.md Polarity/Docs/GameDesign.md Polarity/Docs/.obsidian/workspace.json .claude/settings.local.json)",
+      "Bash(git -C 'C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source' commit -m ' *)"
     ]
   },
   "effortLevel": "high"
