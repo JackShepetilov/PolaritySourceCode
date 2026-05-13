@@ -557,7 +557,7 @@ UUpgrade_Combo* UUpgrade_ChargedPunch::FindComboUpgrade() const
 	return Character->FindComponentByClass<UUpgrade_Combo>();
 }
 
-bool UUpgrade_ChargedPunch::IsActive() const
+bool UUpgrade_ChargedPunch::IsBusy() const
 {
 	if (bIsCharging || bIsLunging)
 	{

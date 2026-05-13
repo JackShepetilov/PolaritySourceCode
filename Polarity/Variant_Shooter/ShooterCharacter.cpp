@@ -706,9 +706,9 @@ void AShooterCharacter::DoMeleeAttack()
 	// charged-punch effect.
 	if (UUpgrade_ChargedPunch* ChargedPunch = FindComponentByClass<UUpgrade_ChargedPunch>())
 	{
-		if (ChargedPunch->IsActive())
+		if (ChargedPunch->IsBusy())
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack SUPPRESSED — ChargedPunch active (charging=%d, lunging=%d)"),
+			UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack SUPPRESSED — ChargedPunch busy (charging=%d, lunging=%d)"),
 				ChargedPunch->IsCharging() ? 1 : 0, ChargedPunch->IsLunging() ? 1 : 0);
 			return;
 		}

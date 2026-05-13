@@ -50,9 +50,11 @@ public:
 	 * melee?" — covers charging, lunging, AND post-lunge anim wait (the air
 	 * montage is still playing). Used by AShooterCharacter::DoMeleeAttack to
 	 * filter out repeated Triggered pulses while the charged punch owns the view.
+	 * Named IsBusy() instead of IsActive() to avoid colliding with the
+	 * UActorComponent::IsActive() UFUNCTION in the parent class hierarchy.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
-	bool IsActive() const;
+	bool IsBusy() const;
 
 	/** Hold elapsed seconds (0 if not pressed). Capped at definition's MaxHoldTime. */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
