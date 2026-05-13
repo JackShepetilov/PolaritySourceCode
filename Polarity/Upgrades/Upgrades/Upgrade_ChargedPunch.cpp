@@ -30,18 +30,25 @@ void UUpgrade_ChargedPunch::OnUpgradeActivated()
 	CachedDef = Cast<UUpgradeDefinition_ChargedPunch>(UpgradeDefinition);
 	if (!CachedDef.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[CHARGEDPUNCH] Failed to cast UpgradeDefinition to ChargedPunch type"));
+		UE_LOG(LogTemp, Error, TEXT("[CHARGED_PUNCH_DEBUG] Failed to cast UpgradeDefinition to ChargedPunch type"));
 		return;
 	}
 
 	AShooterCharacter* Character = GetShooterCharacter();
 	if (!Character)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[CHARGED_PUNCH_DEBUG] No owning ShooterCharacter — upgrade can't bind"));
 		return;
 	}
 
 	CachedUpgradeManager = Character->GetUpgradeManager();
 	CachedMeleeComp = Character->GetMeleeAttackComponent();
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ACTIVATED — MinHold=%.2fs, MaxHold=%.2fs, Drain=%.1f/s, MaxDist=%.0f, MaxBonus=%.1f, Mgr=%s, MeleeComp=%s"),
+		CachedDef->MinHoldTime, CachedDef->MaxHoldTime, CachedDef->PickupsPerSecond,
+		CachedDef->MaxDistance, CachedDef->MaxBonusDamage,
+		CachedUpgradeManager.IsValid() ? TEXT("OK") : TEXT("NULL"),
+		CachedMeleeComp.IsValid() ? TEXT("OK") : TEXT("NULL"));
 
 	Character->OnMeleeChargeHoldStarted.AddDynamic(this, &UUpgrade_ChargedPunch::HandleHoldStarted);
 	Character->OnMeleeChargeHoldReleased.AddDynamic(this, &UUpgrade_ChargedPunch::HandleHoldReleased);
@@ -49,6 +56,9 @@ void UUpgrade_ChargedPunch::OnUpgradeActivated()
 
 void UUpgrade_ChargedPunch::OnUpgradeDeactivated()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] DEACTIVATED (bIsCharging=%d, HoldElapsed=%.2f)"),
+		bIsCharging ? 1 : 0, HoldElapsed);
+
 	if (AShooterCharacter* Character = GetShooterCharacter())
 	{
 		Character->OnMeleeChargeHoldStarted.RemoveDynamic(this, &UUpgrade_ChargedPunch::HandleHoldStarted);
@@ -66,6 +76,11 @@ void UUpgrade_ChargedPunch::HandleHoldStarted()
 		return;
 	}
 
+	const int32 PoolNow = CachedUpgradeManager.IsValid() ? CachedUpgradeManager->GetStoredHealthPickups() : -1;
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] HOLD_START — pool=%d/%d"),
+		PoolNow,
+		CachedUpgradeManager.IsValid() ? CachedUpgradeManager->GetMaxStoredHealthPickups() : -1);
+
 	bButtonHeld = true;
 	HoldElapsed = 0.0f;
 	DrainAccumulator = 0.0f;
@@ -74,12 +89,19 @@ void UUpgrade_ChargedPunch::HandleHoldStarted()
 
 void UUpgrade_ChargedPunch::HandleHoldReleased()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] HOLD_RELEASE — HoldElapsed=%.2fs, bIsCharging=%d"),
+		HoldElapsed, bIsCharging ? 1 : 0);
+
 	bButtonHeld = false;
 
 	if (bIsCharging)
 	{
 		// Fire the punch — pool has already drained whatever it could during hold.
 		ExecutePunch();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] Release under MinHoldTime — no charge fired (jab path only)"));
 	}
 
 	ExitChargingState();
@@ -93,6 +115,9 @@ void UUpgrade_ChargedPunch::EnterChargingState()
 		return;
 	}
 	bIsCharging = true;
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ENTER_CHARGE — HoldElapsed=%.2fs crossed MinHold=%.2fs"),
+		HoldElapsed, CachedDef->MinHoldTime);
 
 	AShooterCharacter* Character = GetShooterCharacter();
 	if (!Character)
@@ -123,6 +148,11 @@ void UUpgrade_ChargedPunch::EnterChargingState()
 
 void UUpgrade_ChargedPunch::ExitChargingState()
 {
+	if (bIsCharging)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] EXIT_CHARGE — cleared VFX/SFX"));
+	}
+
 	bIsCharging = false;
 	HoldElapsed = 0.0f;
 	DrainAccumulator = 0.0f;
@@ -157,6 +187,8 @@ void UUpgrade_ChargedPunch::TickComponent(float DeltaTime, ELevelTick TickType, 
 		if (!Mgr || Mgr->GetStoredHealthPickups() <= 0)
 		{
 			// No pickups available — do nothing. The regular jab from Triggered already played.
+			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Threshold crossed but pool empty (pool=%d) — jab-only this press"),
+				Mgr ? Mgr->GetStoredHealthPickups() : -1);
 			return;
 		}
 		EnterChargingState();
@@ -178,9 +210,13 @@ void UUpgrade_ChargedPunch::TickComponent(float DeltaTime, ELevelTick TickType, 
 			const int32 Drained = Mgr->ConsumeStoredHealthPickups(ToDrain);
 			DrainAccumulator -= static_cast<float>(Drained);
 
+			UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] Drained %d/%d pickups (pool now=%d, acc=%.2f)"),
+				Drained, ToDrain, Mgr->GetStoredHealthPickups(), DrainAccumulator);
+
 			// If we drained less than requested, the pool is empty — release the charge early.
 			if (Drained < ToDrain)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Pool depleted mid-hold — auto-firing at HoldElapsed=%.2fs"), HoldElapsed);
 				ExecutePunch();
 				ExitChargingState();
 				return;
@@ -340,12 +376,18 @@ void UUpgrade_ChargedPunch::ExecutePunch()
 	{
 		if (UUpgrade_Combo* ComboUpg = FindComboUpgrade())
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Feeding %d kills to Combo"), KilledCount);
 			ComboUpg->AddComboHits(KilledCount);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] %d kills, but no Combo upgrade present"), KilledCount);
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGEDPUNCH] Fired: hold=%.2fs, distance=%.0f, hits=%d, kills=%d, dmg=%.1f"),
-		HoldElapsed, Distance, HitCount, KilledCount, TotalDamage);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] FIRED: hold=%.2fs, distance=%.0f, capsule_r=%.0f, hits=%d, kills=%d, dmg=%.1f (base=%.1f + bonus=%.1f), poolRemaining=%d"),
+		HoldElapsed, Distance, CachedDef->CapsuleRadius, HitCount, KilledCount, TotalDamage, BaseDamage, BonusDamage,
+		CachedUpgradeManager.IsValid() ? CachedUpgradeManager->GetStoredHealthPickups() : -1);
 }
 
 void UUpgrade_ChargedPunch::ComputeEndpoint(FVector& OutEndpoint, float& OutDistance) const
@@ -389,6 +431,8 @@ void UUpgrade_ChargedPunch::ComputeEndpoint(FVector& OutEndpoint, float& OutDist
 		const float Clamped = FMath::Max(0.0f, WallDistance - CachedDef->CapsuleRadius);
 		OutEndpoint = StartLoc + ForwardDir * Clamped;
 		OutDistance = Clamped;
+		UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] Endpoint clamped by wall (%s) — desired=%.0f, clamped=%.0f"),
+			WallHit.GetActor() ? *WallHit.GetActor()->GetName() : TEXT("WorldStatic"), DesiredDistance, Clamped);
 	}
 	else
 	{

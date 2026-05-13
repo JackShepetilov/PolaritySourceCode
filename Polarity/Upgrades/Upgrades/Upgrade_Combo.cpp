@@ -18,15 +18,23 @@ void UUpgrade_Combo::OnUpgradeActivated()
 	CachedDef = Cast<UUpgradeDefinition_Combo>(UpgradeDefinition);
 	if (!CachedDef.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[COMBO] Failed to cast UpgradeDefinition to Combo type"));
+		UE_LOG(LogTemp, Error, TEXT("[COMBO_DEBUG] Failed to cast UpgradeDefinition to Combo type"));
 		return;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] ACTIVATED — ResetWindow=%.2fs, MaxMult=%.2f, bResetOnMiss=%d, Curve=%s"),
+		CachedDef->ResetWindow,
+		CachedDef->MaxMultiplier,
+		CachedDef->bResetOnMiss ? 1 : 0,
+		CachedDef->ComboCountToMultiplier ? *CachedDef->ComboCountToMultiplier->GetName() : TEXT("<fallback linear>"));
 
 	BindToMeleeSubsystem();
 }
 
 void UUpgrade_Combo::OnUpgradeDeactivated()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] DEACTIVATED — final Count=%d, Mult=%.2f"), ComboCount, CurrentMultiplier);
+
 	UnbindFromMeleeSubsystem();
 
 	// Make sure we don't leave the melee component / weapon stuck on an elevated speed.
@@ -86,6 +94,11 @@ void UUpgrade_Combo::UnbindFromMeleeSubsystem()
 
 void UUpgrade_Combo::OnWeaponChanged(AShooterWeapon* OldWeapon, AShooterWeapon* NewWeapon)
 {
+	const bool bHadMeleeWeapon = (Cast<AShooterWeapon_Melee>(OldWeapon) != nullptr);
+	const bool bHasMeleeWeapon = (Cast<AShooterWeapon_Melee>(NewWeapon) != nullptr);
+	UE_LOG(LogTemp, Verbose, TEXT("[COMBO_DEBUG] WeaponChanged: had-melee=%d -> has-melee=%d, preserving combo Count=%d Mult=%.2f"),
+		bHadMeleeWeapon ? 1 : 0, bHasMeleeWeapon ? 1 : 0, ComboCount, CurrentMultiplier);
+
 	// Swap our weapon binding without resetting the combo — combo persists across weapon swaps
 	// (player can jab with fists, swap to sword, keep the chain going).
 	if (AShooterWeapon_Melee* OldMelee = Cast<AShooterWeapon_Melee>(OldWeapon))
@@ -126,6 +139,7 @@ void UUpgrade_Combo::UnbindFromMeleeWeapon(AShooterWeapon_Melee* Weapon)
 void UUpgrade_Combo::HandleMeleeAttackStarted()
 {
 	bHitThisSwing = false;
+	UE_LOG(LogTemp, Verbose, TEXT("[COMBO_DEBUG] FistSwing STARTED (Count=%d)"), ComboCount);
 }
 
 void UUpgrade_Combo::HandleMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
@@ -135,6 +149,8 @@ void UUpgrade_Combo::HandleMeleeHit(AActor* HitActor, const FVector& HitLocation
 		return;
 	}
 	bHitThisSwing = true;
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] Fist HIT %s (dmg=%.1f) +1"),
+		HitActor ? *HitActor->GetName() : TEXT("NULL"), Damage);
 	AddComboHits(1);
 }
 
@@ -144,6 +160,8 @@ void UUpgrade_Combo::HandleSwordHit(AActor* HitActor, const FVector& HitLocation
 	{
 		return;
 	}
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] Sword HIT %s (dmg=%.1f) +1"),
+		HitActor ? *HitActor->GetName() : TEXT("NULL"), Damage);
 	// Sword doesn't share MeleeAttackComponent's start/end events — treat each hit as both
 	// a hit AND an implicit no-miss for the swing. Misses on sword are reset via timeout only.
 	AddComboHits(1);
@@ -159,7 +177,12 @@ void UUpgrade_Combo::HandleMeleeAttackEnded()
 	// Fist swing finished without registering a hit → miss → reset.
 	if (!bHitThisSwing && ComboCount > 0)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] FistSwing ENDED with MISS — combo RESET (was Count=%d)"), ComboCount);
 		ResetCombo();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[COMBO_DEBUG] FistSwing ENDED (hit=%d, Count=%d kept)"), bHitThisSwing ? 1 : 0, ComboCount);
 	}
 }
 
@@ -170,8 +193,12 @@ void UUpgrade_Combo::AddComboHits(int32 Amount)
 		return;
 	}
 
+	const int32 OldCount = ComboCount;
 	ComboCount += Amount;
 	ResetTimer = CachedDef->ResetWindow;
+
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] AddComboHits(+%d): Count %d -> %d, ResetTimer=%.2fs"),
+		Amount, OldCount, ComboCount, ResetTimer);
 
 	ApplyCurrentMultiplier();
 
@@ -181,6 +208,7 @@ void UUpgrade_Combo::AddComboHits(int32 Amount)
 
 void UUpgrade_Combo::ApplyCurrentMultiplier()
 {
+	const float OldMultiplier = CurrentMultiplier;
 	const float NewMultiplier = EvaluateMultiplier(ComboCount);
 	CurrentMultiplier = NewMultiplier;
 
@@ -193,11 +221,17 @@ void UUpgrade_Combo::ApplyCurrentMultiplier()
 		MeleeWeapon->ApplyComboSpeedMultiplier(NewMultiplier);
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] Mult %.2fx -> %.2fx (Count=%d, fist=%s, sword=%s)"),
+		OldMultiplier, NewMultiplier, ComboCount,
+		CachedMeleeComp.IsValid() ? TEXT("OK") : TEXT("NULL"),
+		CachedMeleeWeapon.IsValid() ? TEXT("OK") : TEXT("NULL"));
+
 	OnComboChanged.Broadcast(ComboCount, NewMultiplier);
 }
 
 void UUpgrade_Combo::ResetCombo()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] RESET — Count %d -> 0"), ComboCount);
 	ComboCount = 0;
 	ResetTimer = -1.0f;
 	ApplyCurrentMultiplier(); // pushes 1.0x downstream via curve evaluation at 0

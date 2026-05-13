@@ -63,8 +63,8 @@ bool UUpgradeManagerComponent::GrantUpgrade(UUpgradeDefinition* Definition)
 			Existing->CurrentLevel = OldLevel + 1;
 			Existing->OnLevelChanged(OldLevel, Existing->CurrentLevel);
 
-			UE_LOG(LogTemp, Log, TEXT("UpgradeManager: '%s' levelled up %d -> %d"),
-				*Definition->DisplayName.ToString(), OldLevel, Existing->CurrentLevel);
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] '%s' LEVEL_UP %d -> %d (tag=%s)"),
+				*Definition->DisplayName.ToString(), OldLevel, Existing->CurrentLevel, *Definition->UpgradeTag.ToString());
 
 			OnUpgradeLeveledUp.Broadcast(Definition, Existing->CurrentLevel);
 			return true;
@@ -101,8 +101,10 @@ bool UUpgradeManagerComponent::GrantUpgrade(UUpgradeDefinition* Definition)
 	// Activate the upgrade logic (handles level-1 setup)
 	NewComponent->OnUpgradeActivated();
 
-	UE_LOG(LogTemp, Log, TEXT("UpgradeManager: Granted upgrade '%s' (Lv 1/%d)"),
-		*Definition->DisplayName.ToString(), Definition->MaxLevel);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] '%s' GRANTED Lv 1/%d (tag=%s, class=%s)"),
+		*Definition->DisplayName.ToString(), Definition->MaxLevel,
+		*Definition->UpgradeTag.ToString(),
+		*Definition->ComponentClass->GetName());
 
 	// Broadcast
 	OnUpgradeGranted.Broadcast(Definition);
@@ -292,6 +294,9 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 
 void UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_POOL] Pickup collected at full HP — pool before: %d/%d"),
+		StoredHealthPickups, MaxStoredHealthPickups);
+
 	// Step 1: try to top up the shared pool. If at cap, nothing is stored — but
 	// upgrades still get the hook for legacy/VFX-only behaviours.
 	AddStoredHealthPickup();
@@ -310,13 +315,15 @@ bool UUpgradeManagerComponent::AddStoredHealthPickup()
 {
 	if (StoredHealthPickups >= MaxStoredHealthPickups)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_POOL] Add rejected — pool at cap %d/%d"),
+			StoredHealthPickups, MaxStoredHealthPickups);
 		return false;
 	}
 
 	StoredHealthPickups++;
 	OnStoredHealthPickupsChanged.Broadcast(StoredHealthPickups, MaxStoredHealthPickups);
 
-	UE_LOG(LogTemp, Log, TEXT("[UPGRADE_POOL] Stored health pickup: %d/%d"),
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_POOL] Stored health pickup: %d/%d"),
 		StoredHealthPickups, MaxStoredHealthPickups);
 
 	return true;
@@ -333,8 +340,8 @@ int32 UUpgradeManagerComponent::ConsumeStoredHealthPickups(int32 RequestedCount)
 	StoredHealthPickups -= Consumed;
 	OnStoredHealthPickupsChanged.Broadcast(StoredHealthPickups, MaxStoredHealthPickups);
 
-	UE_LOG(LogTemp, Log, TEXT("[UPGRADE_POOL] Consumed %d pickups (%d remaining)"),
-		Consumed, StoredHealthPickups);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_POOL] Consumed %d pickups (%d remaining of %d)"),
+		Consumed, StoredHealthPickups, MaxStoredHealthPickups);
 
 	return Consumed;
 }
@@ -345,6 +352,8 @@ void UUpgradeManagerComponent::ResetStoredHealthPickups()
 	{
 		return;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_POOL] Pool RESET — was %d"), StoredHealthPickups);
 
 	StoredHealthPickups = 0;
 	OnStoredHealthPickupsChanged.Broadcast(StoredHealthPickups, MaxStoredHealthPickups);
