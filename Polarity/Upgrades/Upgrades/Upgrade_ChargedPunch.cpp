@@ -642,22 +642,25 @@ void UUpgrade_ChargedPunch::TickLunge(float DeltaTime)
 	const float Alpha = FMath::Clamp(LungeElapsed / LungeTotalDuration, 0.0f, 1.0f);
 	const FVector DesiredPos = FMath::Lerp(LungeStart, LungeEnd, Alpha);
 
-	// SetActorLocation with sweep so we collide with walls / actors on the way.
-	FHitResult SweepHit;
-	const bool bMoved = Character->SetActorLocation(DesiredPos, /*bSweep=*/ true, &SweepHit);
+	// No sweep — the lunge is pierce-through by design. ComputeEndpoint already
+	// clamped LungeEnd against world geometry via a line trace before this phase
+	// started, so the path from LungeStart to LungeEnd is guaranteed clear of
+	// blocking walls. Any other actors in the way (NPC capsules, ragdolls,
+	// debris, prop collision) are passed through — damage was already applied
+	// in the one-shot capsule sweep at the moment of release.
+	const bool bMoved = Character->SetActorLocation(DesiredPos, /*bSweep=*/ false);
 
 	const FVector PosAfter = Character->GetActorLocation();
 	const float DeltaMoved = FVector::Dist(PosBefore, PosAfter);
 	const float DistToTarget = FVector::Dist(PosAfter, LungeEnd);
 	const float DistFromDesired = FVector::Dist(PosAfter, DesiredPos);
 
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] Tick alpha=%.2f, desired=(%.0f,%.0f,%.0f), actual=(%.0f,%.0f,%.0f), movedThisTick=%.1f, distToEnd=%.0f, distFromDesired=%.1f, bMoved=%d, blockedBy=%s"),
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] Tick alpha=%.2f, desired=(%.0f,%.0f,%.0f), actual=(%.0f,%.0f,%.0f), movedThisTick=%.1f, distToEnd=%.0f, distFromDesired=%.1f, bMoved=%d (pierce-through, no sweep)"),
 		Alpha,
 		DesiredPos.X, DesiredPos.Y, DesiredPos.Z,
 		PosAfter.X, PosAfter.Y, PosAfter.Z,
 		DeltaMoved, DistToTarget, DistFromDesired,
-		bMoved ? 1 : 0,
-		SweepHit.bBlockingHit ? (SweepHit.GetActor() ? *SweepHit.GetActor()->GetName() : TEXT("WorldStatic")) : TEXT("none"));
+		bMoved ? 1 : 0);
 
 	if (Alpha >= 1.0f)
 	{
