@@ -573,8 +573,13 @@ void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& E
 	// Ensure tick is running for interpolation.
 	SetComponentTickEnabled(true);
 
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] StartLunge — start=(%.0f,%.0f,%.0f), end=(%.0f,%.0f,%.0f), duration=%.2fs"),
-		LungeStart.X, LungeStart.Y, LungeStart.Z, LungeEnd.X, LungeEnd.Y, LungeEnd.Z, LungeTotalDuration);
+	const FVector ActorPosNow = Character->GetActorLocation();
+	const float StraightDist = FVector::Dist(LungeStart, LungeEnd);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] StartLunge — actorNow=(%.0f,%.0f,%.0f), lungeStart=(%.0f,%.0f,%.0f), lungeEnd=(%.0f,%.0f,%.0f), straight_dist=%.0f, duration=%.2fs"),
+		ActorPosNow.X, ActorPosNow.Y, ActorPosNow.Z,
+		LungeStart.X, LungeStart.Y, LungeStart.Z,
+		LungeEnd.X, LungeEnd.Y, LungeEnd.Z,
+		StraightDist, LungeTotalDuration);
 }
 
 void UUpgrade_ChargedPunch::TickLunge(float DeltaTime)
@@ -591,12 +596,27 @@ void UUpgrade_ChargedPunch::TickLunge(float DeltaTime)
 		return;
 	}
 
+	const FVector PosBefore = Character->GetActorLocation();
 	LungeElapsed += DeltaTime;
 	const float Alpha = FMath::Clamp(LungeElapsed / LungeTotalDuration, 0.0f, 1.0f);
-	const FVector NewPos = FMath::Lerp(LungeStart, LungeEnd, Alpha);
+	const FVector DesiredPos = FMath::Lerp(LungeStart, LungeEnd, Alpha);
 
 	// SetActorLocation with sweep so we collide with walls / actors on the way.
-	Character->SetActorLocation(NewPos, /*bSweep=*/ true);
+	FHitResult SweepHit;
+	const bool bMoved = Character->SetActorLocation(DesiredPos, /*bSweep=*/ true, &SweepHit);
+
+	const FVector PosAfter = Character->GetActorLocation();
+	const float DeltaMoved = FVector::Dist(PosBefore, PosAfter);
+	const float DistToTarget = FVector::Dist(PosAfter, LungeEnd);
+	const float DistFromDesired = FVector::Dist(PosAfter, DesiredPos);
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] Tick alpha=%.2f, desired=(%.0f,%.0f,%.0f), actual=(%.0f,%.0f,%.0f), movedThisTick=%.1f, distToEnd=%.0f, distFromDesired=%.1f, bMoved=%d, blockedBy=%s"),
+		Alpha,
+		DesiredPos.X, DesiredPos.Y, DesiredPos.Z,
+		PosAfter.X, PosAfter.Y, PosAfter.Z,
+		DeltaMoved, DistToTarget, DistFromDesired,
+		bMoved ? 1 : 0,
+		SweepHit.bBlockingHit ? (SweepHit.GetActor() ? *SweepHit.GetActor()->GetName() : TEXT("WorldStatic")) : TEXT("none"));
 
 	if (Alpha >= 1.0f)
 	{
@@ -630,6 +650,10 @@ void UUpgrade_ChargedPunch::FinishLunge()
 		MeleeComp->ExitMeleeMeshView();
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] FinishLunge — restored MovementMode=%d, Gravity=%.2f"),
+	const FVector FinalPos = Character ? Character->GetActorLocation() : FVector::ZeroVector;
+	const float OffsetFromEnd = FVector::Dist(FinalPos, LungeEnd);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] FinishLunge — finalPos=(%.0f,%.0f,%.0f), expectedEnd=(%.0f,%.0f,%.0f), offset=%.1f, restored MovementMode=%d, Gravity=%.2f"),
+		FinalPos.X, FinalPos.Y, FinalPos.Z,
+		LungeEnd.X, LungeEnd.Y, LungeEnd.Z, OffsetFromEnd,
 		(int32)SavedMovementMode, SavedGravityScale);
 }
