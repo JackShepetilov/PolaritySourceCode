@@ -75,10 +75,10 @@ struct FMeleeWeaponSwingData
  * - Multiple damage types (base, momentum, dropkick)
  * - Boss finisher support
  */
-UCLASS()
 /** Broadcast whenever a sword swing deals damage to a target. Used by Combo upgrade. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnMeleeWeaponHit, AActor*, HitActor, const FVector&, HitLocation, bool, bHeadshot, float, Damage);
 
+UCLASS()
 class POLARITY_API AShooterWeapon_Melee : public AShooterWeapon
 {
 	GENERATED_BODY()
