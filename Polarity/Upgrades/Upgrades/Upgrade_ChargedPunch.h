@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UpgradeComponent.h"
+#include "Engine/EngineTypes.h"
 #include "Upgrade_ChargedPunch.generated.h"
 
 class UUpgradeDefinition_ChargedPunch;
@@ -76,6 +77,22 @@ private:
 	/** Fractional pickups drained this tick — once it exceeds 1.0 we consume an integer count. */
 	float DrainAccumulator = 0.0f;
 
+	// ==================== Lunge Flight State ====================
+	// Active between StartLunge() and FinishLunge(). Tick interpolates LungeStart -> LungeEnd
+	// over LungeTotalDuration seconds via SetActorLocation (gravity disabled, mesh swapped).
+
+	/** True while the player is mid-flight after a charged-punch release. */
+	bool bIsLunging = false;
+
+	FVector LungeStart = FVector::ZeroVector;
+	FVector LungeEnd = FVector::ZeroVector;
+	float LungeElapsed = 0.0f;
+	float LungeTotalDuration = 0.15f;
+
+	/** Saved CharacterMovement state restored when lunge finishes. */
+	TEnumAsByte<EMovementMode> SavedMovementMode = MOVE_Walking;
+	float SavedGravityScale = 1.0f;
+
 	// ==================== Input Callbacks ====================
 
 	UFUNCTION()
@@ -110,4 +127,15 @@ private:
 
 	/** Find Combo upgrade on the same character, if active, for multi-kill feed-back. */
 	UUpgrade_Combo* FindComboUpgrade() const;
+
+	// ==================== Lunge Lifecycle ====================
+
+	/** Start the visual lunge phase: lift player, disable gravity, switch mesh, play montage. */
+	void StartLunge(const FVector& StartPos, const FVector& EndPos);
+
+	/** Tick interpolation while bIsLunging — moves player from LungeStart toward LungeEnd. */
+	void TickLunge(float DeltaTime);
+
+	/** Restore everything that StartLunge changed (mesh view, gravity, movement mode). */
+	void FinishLunge();
 };

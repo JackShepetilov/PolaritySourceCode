@@ -2682,6 +2682,50 @@ void UMeleeAttackComponent::EndRecoveryFromNotify()
 	// Kept declared in the header for source compatibility with any external caller.
 }
 
+// ==================== External / Charged Punch API ====================
+
+void UMeleeAttackComponent::EnterMeleeMeshView()
+{
+	// Force-cancel any in-flight regular swing so the external upgrade owns the view.
+	// CancelAttack only works in early phases (HidingWeapon / InputDelay / Windup) —
+	// if we're past that, we just stop the anim and switch state to Ready.
+	if (CurrentState != EMeleeAttackState::Ready)
+	{
+		StopAttackAnimation();
+		StopSwingTrailFX();
+		StopMagnetism();
+		StopCameraFocus();
+		bInputLocked = false;
+		SetState(EMeleeAttackState::Ready);
+	}
+
+	SwitchToMeleeMesh();
+}
+
+void UMeleeAttackComponent::ExitMeleeMeshView()
+{
+	SwitchToFirstPersonMesh();
+}
+
+void UMeleeAttackComponent::PlayMontageOnMeleeMesh(UAnimMontage* Montage, float PlayRate)
+{
+	if (!Montage || !MeleeMesh)
+	{
+		return;
+	}
+
+	if (UAnimInstance* AnimInst = MeleeMesh->GetAnimInstance())
+	{
+		// Stop anything else currently playing on this mesh first so we don't blend
+		// from the regular swing into the charged-punch swing on the same channel.
+		AnimInst->StopAllMontages(0.0f);
+		AnimInst->Montage_Play(Montage, PlayRate);
+		CurrentMeleeMontage = Montage;
+		MontageTimeElapsed = 0.0f;
+		MontageTotalDuration = Montage->GetPlayLength();
+	}
+}
+
 void UMeleeAttackComponent::ApplyComboSpeedMultiplier(float NewMultiplier)
 {
 	// Clamp to a safe range (>=0.1 so we never divide by zero / freeze the state machine).

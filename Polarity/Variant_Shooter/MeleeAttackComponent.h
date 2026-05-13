@@ -695,6 +695,28 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Melee|Debug")
 	bool IsDebugVisualizationEnabled() const { return bEnableDebugVisualization; }
 
+	// ==================== Charged Punch / Air-Lunge API ====================
+	// External hook for upgrades like ChargedPunch that want to take over the swing
+	// pipeline temporarily: hide the weapon, swap to MeleeMesh, play a custom montage,
+	// then restore. Wrap the protected mesh-switch helpers so external callers can
+	// drive their own flow without touching the rest of the state machine.
+
+	/** Hide FirstPersonMesh + current weapon, show MeleeMesh attached to camera. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|External")
+	void EnterMeleeMeshView();
+
+	/** Hide MeleeMesh, restore FirstPersonMesh + weapon visibility. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|External")
+	void ExitMeleeMeshView();
+
+	/**
+	 * Play a single montage on the MeleeMesh's AnimInstance. Intended for upgrades
+	 * (ChargedPunch) to play their custom swing animation in the first-person view.
+	 * Caller is responsible for EnterMeleeMeshView before and ExitMeleeMeshView after.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Melee|External")
+	void PlayMontageOnMeleeMesh(UAnimMontage* Montage, float PlayRate = 1.0f);
+
 	// ==================== Animation Notify API ====================
 	// All three notify entry points are idempotent within a single attack — calling
 	// them twice in the same phase is a no-op. Fallback state-machine timers honour

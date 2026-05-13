@@ -60,8 +60,8 @@ void UUpgrade_ChargedPunch::OnUpgradeActivated()
 
 void UUpgrade_ChargedPunch::OnUpgradeDeactivated()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] DEACTIVATED (bIsCharging=%d, HoldElapsed=%.2f)"),
-		bIsCharging ? 1 : 0, HoldElapsed);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] DEACTIVATED (bIsCharging=%d, bIsLunging=%d, HoldElapsed=%.2f)"),
+		bIsCharging ? 1 : 0, bIsLunging ? 1 : 0, HoldElapsed);
 
 	if (AShooterCharacter* Character = GetShooterCharacter())
 	{
@@ -70,6 +70,14 @@ void UUpgrade_ChargedPunch::OnUpgradeDeactivated()
 	}
 
 	ExitChargingState();
+
+	// If we're deactivated mid-lunge (e.g. on death), restore movement / mesh so
+	// the character isn't stuck in Flying mode with hidden weapon mesh.
+	if (bIsLunging)
+	{
+		FinishLunge();
+	}
+
 	SetComponentTickEnabled(false);
 }
 
@@ -101,6 +109,8 @@ void UUpgrade_ChargedPunch::HandleHoldReleased()
 	if (bIsCharging)
 	{
 		// Fire the punch — pool has already drained whatever it could during hold.
+		// ExecutePunch -> StartLunge sets bIsLunging=true and keeps tick running so
+		// TickLunge can interpolate the player to Endpoint over LungeDuration.
 		ExecutePunch();
 	}
 	else
@@ -109,7 +119,13 @@ void UUpgrade_ChargedPunch::HandleHoldReleased()
 	}
 
 	ExitChargingState();
-	SetComponentTickEnabled(false);
+
+	// Keep ticking while a lunge is in progress; FinishLunge or the lunge-finish path
+	// in TickComponent will disable tick once everything's restored.
+	if (!bIsLunging)
+	{
+		SetComponentTickEnabled(false);
+	}
 }
 
 void UUpgrade_ChargedPunch::EnterChargingState()
@@ -176,6 +192,18 @@ void UUpgrade_ChargedPunch::ExitChargingState()
 void UUpgrade_ChargedPunch::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Lunge phase (after release with charge) takes priority over hold logic.
+	if (bIsLunging)
+	{
+		TickLunge(DeltaTime);
+		// If lunge just finished and button is no longer held, disable tick.
+		if (!bIsLunging && !bButtonHeld)
+		{
+			SetComponentTickEnabled(false);
+		}
+		return;
+	}
 
 	if (!bButtonHeld || !CachedDef.IsValid())
 	{
@@ -351,69 +379,12 @@ void UUpgrade_ChargedPunch::ExecutePunch()
 		}
 	}
 
-	// ==================== Lunge the player forward to endpoint ====================
-	// LaunchCharacter alone gets eaten by ground friction in ~1 frame on flat terrain.
-	// To make the lunge actually carry the player to Endpoint:
-	//   1. Kill ground friction / braking deceleration on the CharacterMovement temporarily.
-	//   2. LaunchCharacter with the velocity that would cover Distance in LungeDuration seconds.
-	//   3. After LungeDuration, restore the saved friction values via timer.
-	// We don't set MovementMode=Falling because that triggers gravity — the lunge is a flat dash.
-	const float LungeDuration = 0.15f;
-	const FVector LungeVelocity = (Endpoint - StartLoc) / LungeDuration;
-
-	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-	{
-		// Save current friction settings so we can restore them.
-		const float SavedGroundFriction = Movement->GroundFriction;
-		const float SavedBrakingFrictionFactor = Movement->BrakingFrictionFactor;
-		const float SavedBrakingDecelerationWalking = Movement->BrakingDecelerationWalking;
-
-		// Kill friction so LaunchCharacter actually carries us to the endpoint.
-		Movement->GroundFriction = 0.0f;
-		Movement->BrakingFrictionFactor = 0.0f;
-		Movement->BrakingDecelerationWalking = 0.0f;
-
-		Character->LaunchCharacter(LungeVelocity, /*bXYOverride=*/ true, /*bZOverride=*/ true);
-
-		// Restore friction after lunge duration.
-		TWeakObjectPtr<AShooterCharacter> WeakChar(Character);
-		FTimerHandle RestoreHandle;
-		GetWorld()->GetTimerManager().SetTimer(RestoreHandle,
-			[WeakChar, SavedGroundFriction, SavedBrakingFrictionFactor, SavedBrakingDecelerationWalking]()
-			{
-				if (AShooterCharacter* RestoredChar = WeakChar.Get())
-				{
-					if (UCharacterMovementComponent* RestoredMove = RestoredChar->GetCharacterMovement())
-					{
-						RestoredMove->GroundFriction = SavedGroundFriction;
-						RestoredMove->BrakingFrictionFactor = SavedBrakingFrictionFactor;
-						RestoredMove->BrakingDecelerationWalking = SavedBrakingDecelerationWalking;
-					}
-				}
-			},
-			LungeDuration, false);
-	}
-
-	// ==================== Air-attack montage on MeleeMesh ====================
-	// Best-effort: play the first airborne attack montage if MeleeMesh + AirborneAttacks
-	// exist. We don't do the full mesh-switch (attach to camera / hide weapon) here because
-	// those helpers are private on MeleeAttackComponent — that would need a header change.
-	// The animation will look out-of-place visually until the proper hook is exposed; the
-	// gameplay effect (capsule sweep + lunge) is correct.
-	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
-	{
-		if (MeleeComp->MeleeMesh && MeleeComp->AirborneAttacks.Num() > 0)
-		{
-			const FMeleeAnimationData& AirData = MeleeComp->AirborneAttacks[0];
-			if (AirData.AttackMontage)
-			{
-				if (UAnimInstance* AnimInst = MeleeComp->MeleeMesh->GetAnimInstance())
-				{
-					AnimInst->Montage_Play(AirData.AttackMontage, AirData.BasePlayRate);
-				}
-			}
-		}
-	}
+	// ==================== Start the lunge phase ====================
+	// Tick-driven motion via SetActorLocation between LungeStart and LungeEnd over
+	// LungeTotalDuration. StartLunge handles: mesh swap, montage play, vertical lift,
+	// gravity disable. FinishLunge (called from TickLunge when elapsed >= duration)
+	// restores everything.
+	StartLunge(StartLoc, Endpoint);
 
 	// ==================== Player-side feedback ====================
 	if (CachedDef->FireVFX)
@@ -541,4 +512,116 @@ UUpgrade_Combo* UUpgrade_ChargedPunch::FindComboUpgrade() const
 	// FindComponentByClass walks all components — Upgrade_Combo is added dynamically by
 	// UUpgradeManagerComponent when the combo upgrade is granted.
 	return Character->FindComponentByClass<UUpgrade_Combo>();
+}
+
+// ==================== Lunge Lifecycle ====================
+
+void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& EndPos)
+{
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character || !CachedDef.IsValid())
+	{
+		return;
+	}
+
+	LungeStart = StartPos;
+	LungeEnd = EndPos;
+	LungeElapsed = 0.0f;
+	LungeTotalDuration = FMath::Max(0.05f, CachedDef->LungeDuration);
+	bIsLunging = true;
+
+	// 1. Lift the player slightly so SetActorLocation doesn't collide with the floor.
+	if (CachedDef->VerticalLiftAmount > 0.0f)
+	{
+		FVector Lifted = Character->GetActorLocation() + FVector(0.0f, 0.0f, CachedDef->VerticalLiftAmount);
+		Character->SetActorLocation(Lifted, /*bSweep=*/ false);
+		LungeStart.Z = Lifted.Z;
+		LungeEnd.Z = Lifted.Z; // keep flight perfectly horizontal at the lifted height
+	}
+
+	// 2. Disable gravity + put movement into Flying so the player doesn't fall mid-lunge.
+	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+	{
+		SavedMovementMode = Movement->MovementMode;
+		SavedGravityScale = Movement->GravityScale;
+
+		Movement->GravityScale = 0.0f;
+		Movement->Velocity = FVector::ZeroVector;
+		Movement->SetMovementMode(MOVE_Flying);
+	}
+
+	// 3. Switch to MeleeMesh view (hides weapon + FPMesh, attaches MeleeMesh to camera).
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		MeleeComp->EnterMeleeMeshView();
+
+		// 4. Play the single configured air-attack montage on MeleeMesh.
+		if (CachedDef->AirAttackMontage)
+		{
+			MeleeComp->PlayMontageOnMeleeMesh(CachedDef->AirAttackMontage, 1.0f);
+		}
+	}
+
+	// Ensure tick is running for interpolation.
+	SetComponentTickEnabled(true);
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] StartLunge — start=(%.0f,%.0f,%.0f), end=(%.0f,%.0f,%.0f), duration=%.2fs"),
+		LungeStart.X, LungeStart.Y, LungeStart.Z, LungeEnd.X, LungeEnd.Y, LungeEnd.Z, LungeTotalDuration);
+}
+
+void UUpgrade_ChargedPunch::TickLunge(float DeltaTime)
+{
+	if (!bIsLunging)
+	{
+		return;
+	}
+
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character)
+	{
+		FinishLunge();
+		return;
+	}
+
+	LungeElapsed += DeltaTime;
+	const float Alpha = FMath::Clamp(LungeElapsed / LungeTotalDuration, 0.0f, 1.0f);
+	const FVector NewPos = FMath::Lerp(LungeStart, LungeEnd, Alpha);
+
+	// SetActorLocation with sweep so we collide with walls / actors on the way.
+	Character->SetActorLocation(NewPos, /*bSweep=*/ true);
+
+	if (Alpha >= 1.0f)
+	{
+		FinishLunge();
+	}
+}
+
+void UUpgrade_ChargedPunch::FinishLunge()
+{
+	if (!bIsLunging)
+	{
+		return;
+	}
+	bIsLunging = false;
+
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (Character)
+	{
+		// Restore movement state.
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			Movement->GravityScale = SavedGravityScale;
+			Movement->SetMovementMode(SavedMovementMode);
+			Movement->Velocity = FVector::ZeroVector;
+		}
+	}
+
+	// Restore mesh view back to FirstPersonMesh + weapon.
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		MeleeComp->ExitMeleeMeshView();
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] FinishLunge — restored MovementMode=%d, Gravity=%.2f"),
+		(int32)SavedMovementMode, SavedGravityScale);
 }

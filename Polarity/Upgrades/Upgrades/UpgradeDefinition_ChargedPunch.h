@@ -6,6 +6,7 @@
 #include "UpgradeDefinition.h"
 #include "UpgradeDefinition_ChargedPunch.generated.h"
 
+class UAnimMontage;
 class UCurveFloat;
 class UNiagaraSystem;
 class USoundBase;
@@ -85,6 +86,33 @@ public:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Damage")
 	TSubclassOf<UDamageType> DamageType;
+
+	// ==================== Lunge Flight ====================
+
+	/**
+	 * Total seconds the player spends physically traveling from start to endpoint.
+	 * The damage capsule sweep is one-shot at the moment of release, so this controls
+	 * only the visual / camera travel time.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Lunge", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float LungeDuration = 0.15f;
+
+	/**
+	 * Lift the player this many cm upward at lunge start, then disable gravity for
+	 * the duration. Prevents the lunge dragging the player along uneven floor and
+	 * triggering ground friction. Restored on lunge finish.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Lunge", meta = (ClampMin = "0.0", ClampMax = "200.0"))
+	float VerticalLiftAmount = 30.0f;
+
+	/**
+	 * Single airborne-style melee montage played on the MeleeMesh during the lunge.
+	 * The upgrade does its own EnterMeleeMeshView / ExitMeleeMeshView around it so
+	 * the weapon mesh hides and MeleeMesh attaches to camera (same view as a regular
+	 * MeleeAttackComponent swing).
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Animation")
+	TObjectPtr<UAnimMontage> AirAttackMontage;
 
 	// ==================== Visual / Audio ====================
 
