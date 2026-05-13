@@ -86,7 +86,7 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 
 	// === All conditions met: launch the prop, primed to detonate on NPC impact ===
 
-	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — launch %.0fcm/s, primed explosion dmg=%.1f"),
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — launch %.0fcm/s, primed explosion dmg=%.1f (flat falloff, no charge scaling, no weak-impact fallback)"),
 		*Character->GetName(), *Prop->GetName(),
 		DefAirKick->LaunchSpeed,
 		DefAirKick->FixedExplosionDamage);
@@ -97,12 +97,20 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 	//   - bCanExplode = true: even non-explosive props blow up on impact.
 	//   - ExplosionDamage = FixedExplosionDamage: predictable payload.
 	//   - bScaleExplosionWithCharge = false: damage doesn't ride on prop charge.
+	//   - ExplosionMinCharge = 0: prop won't fall back to "weak impact" (which
+	//     bypasses Explode entirely and deals WeakImpactDamage instead).
+	//   - ExplosionDamageFalloff = 5 (max allowed by UPROPERTY clamp): keeps
+	//     damage near-flat across the whole blast radius. Without this, only
+	//     targets inside the inner 30% of radius take full damage; the rest
+	//     drops to ~10% on the edge, so the "fixed" damage looked variable.
 	// We don't restore these — after Explode() the prop is normally
 	// destroyed/hidden, and if it survives, the override staying in place is
 	// acceptable for subsequent chain reactions.
 	Prop->bCanExplode = true;
 	Prop->ExplosionDamage = DefAirKick->FixedExplosionDamage;
 	Prop->bScaleExplosionWithCharge = false;
+	Prop->ExplosionMinCharge = 0.0f;
+	Prop->ExplosionDamageFalloff = 5.0f;
 
 	// Launch the prop in the camera forward direction (same as the previous version).
 	APlayerController* PC = Cast<APlayerController>(Character->GetController());
