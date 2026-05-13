@@ -18,9 +18,21 @@ struct FAirKickLevelData
 {
 	GENERATED_BODY()
 
-	/** If true, the launched prop is primed to detonate when it hits an NPC. */
+	/**
+	 * If true, the launched prop is primed to detonate in a radius when it hits an NPC.
+	 * If false, the prop instead applies single-target ImpactDamage and bounces.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Level")
 	bool bExplodeOnImpact = false;
+
+	/**
+	 * Damage dealt to a single NPC when the launched prop strikes them WITHOUT exploding.
+	 * Used when bExplodeOnImpact is false. Routed through the EMFPhysicsProp "weak impact"
+	 * path so no explosion VFX/radius — the prop just dings the target and bounces off,
+	 * potentially hitting more NPCs after the bounce.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Level", meta = (ClampMin = "0.0", EditCondition = "!bExplodeOnImpact"))
+	float ImpactDamage = 25.0f;
 
 	/** Flat damage dealt by the on-impact explosion (only used when bExplodeOnImpact is true). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Level", meta = (ClampMin = "0.0", EditCondition = "bExplodeOnImpact"))
