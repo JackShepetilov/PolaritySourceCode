@@ -84,49 +84,57 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		return;
 	}
 
-	// === All conditions met: force-detonate the prop with fixed damage ===
+	// === All conditions met: launch the prop, primed to detonate on NPC impact ===
 
-	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — forcing explosion (fixed dmg=%.1f, radiusMul=%.2f, vfxMul=%.2f)"),
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — launch %.0fcm/s, primed explosion dmg=%.1f"),
 		*Character->GetName(), *Prop->GetName(),
-		DefAirKick->FixedExplosionDamage,
-		DefAirKick->ExplosionRadiusMultiplier,
-		DefAirKick->ExplosionVFXScaleMultiplier);
+		DefAirKick->LaunchSpeed,
+		DefAirKick->FixedExplosionDamage);
 
-	// Override the prop's explosion parameters so the kick always detonates with
-	// the upgrade's fixed damage, regardless of:
-	//  - the prop's bCanExplode flag (non-explosive props still detonate)
-	//  - the prop's own ExplosionDamage value
-	//  - charge-based scaling (bScaleExplosionWithCharge)
-	// We cache the originals and restore them after Explode() in case the prop
-	// survives detonation (some props stay alive after explode for chain reactions).
-	const bool   bSavedCanExplode  = Prop->bCanExplode;
-	const float  SavedExplosionDmg = Prop->ExplosionDamage;
-	const bool   bSavedScaleWithCharge = Prop->bScaleExplosionWithCharge;
-
+	// Prime the prop's explosion params BEFORE launching, so when it hits an NPC
+	// mid-flight it detonates with our fixed damage instead of the prop's own
+	// configured damage / charge-scaled damage. Overrides:
+	//   - bCanExplode = true: even non-explosive props blow up on impact.
+	//   - ExplosionDamage = FixedExplosionDamage: predictable payload.
+	//   - bScaleExplosionWithCharge = false: damage doesn't ride on prop charge.
+	// We don't restore these — after Explode() the prop is normally
+	// destroyed/hidden, and if it survives, the override staying in place is
+	// acceptable for subsequent chain reactions.
 	Prop->bCanExplode = true;
 	Prop->ExplosionDamage = DefAirKick->FixedExplosionDamage;
 	Prop->bScaleExplosionWithCharge = false;
 
-	// Damage multiplier kept at 1.0 — fixed damage was set on the prop directly above.
-	Prop->Explode(/*DamageMultiplier=*/ 1.0f,
-		/*RadiusMultiplier=*/ DefAirKick->ExplosionRadiusMultiplier,
-		/*VFXScaleMultiplier=*/ DefAirKick->ExplosionVFXScaleMultiplier);
-
-	if (IsValid(Prop) && !Prop->IsActorBeingDestroyed())
+	// Launch the prop in the camera forward direction (same as the previous version).
+	APlayerController* PC = Cast<APlayerController>(Character->GetController());
+	FVector LaunchDir = Character->GetActorForwardVector(); // fallback
+	if (PC)
 	{
-		Prop->bCanExplode = bSavedCanExplode;
-		Prop->ExplosionDamage = SavedExplosionDmg;
-		Prop->bScaleExplosionWithCharge = bSavedScaleWithCharge;
+		FVector ViewLocation;
+		FRotator ViewRotation;
+		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		LaunchDir = ViewRotation.Vector();
 	}
 
-	// Optional kick-specific cosmetic feedback on top of the prop's explosion VFX/sound.
+	UStaticMeshComponent* PropMesh = Prop->PropMesh;
+	if (PropMesh && PropMesh->IsSimulatingPhysics())
+	{
+		PropMesh->SetPhysicsLinearVelocity(LaunchDir * DefAirKick->LaunchSpeed);
+
+		if (DefAirKick->KickSpinSpeed > 0.0f)
+		{
+			const FVector RandomAxis = FMath::VRand();
+			PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * DefAirKick->KickSpinSpeed);
+		}
+	}
+
+	// Optional kick-specific cosmetic feedback at the contact point.
 	if (DefAirKick->KickImpactFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 			GetWorld(),
 			DefAirKick->KickImpactFX,
 			HitLocation,
-			FRotator::ZeroRotator,
+			LaunchDir.Rotation(),
 			FVector(DefAirKick->KickImpactFXScale),
 			true,  // auto-destroy
 			true,  // auto-activate

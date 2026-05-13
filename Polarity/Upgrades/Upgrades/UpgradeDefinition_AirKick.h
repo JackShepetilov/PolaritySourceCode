@@ -11,10 +11,11 @@
 /**
  * Data asset for the "Air Kick" upgrade.
  * When the player hits an airborne EMFPhysicsProp with melee while also airborne,
- * the prop is forced to detonate in place. Damage from the explosion is a fixed
- * value set on this definition, independent of the prop's own ExplosionDamage and
- * any charge-based scaling — so the kick output is predictable regardless of which
- * prop the player chooses to detonate.
+ * the prop is launched forward in the camera direction (same as the previous
+ * reverse-channeling kick). The kick also marks the prop so that any subsequent
+ * collision with an NPC during flight detonates it with a fixed damage value
+ * defined here — so the kick's payload is predictable regardless of the prop's
+ * own ExplosionDamage / bCanExplode / charge-scaling configuration.
  */
 UCLASS(BlueprintType)
 class POLARITY_API UUpgradeDefinition_AirKick : public UUpgradeDefinition
@@ -23,36 +24,30 @@ class POLARITY_API UUpgradeDefinition_AirKick : public UUpgradeDefinition
 
 public:
 
-	// ==================== Trigger Conditions ====================
+	// ==================== Launch Tuning ====================
+
+	/** Speed at which the kicked prop is launched (cm/s). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick", meta = (ClampMin = "500.0"))
+	float LaunchSpeed = 3000.0f;
 
 	/** Maximum distance below the prop to trace for ground (cm).
 	 *  If ground is found within this distance, the prop is considered grounded and the kick won't trigger. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick", meta = (ClampMin = "10.0"))
 	float PropAirborneTraceDistance = 80.0f;
 
-	// ==================== Forced Explosion ====================
+	/** Spin speed applied to the prop on kick (degrees/second). Zero = no spin. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick", meta = (ClampMin = "0.0"))
+	float KickSpinSpeed = 720.0f;
+
+	// ==================== On-Impact Explosion ====================
 
 	/**
-	 * Flat damage dealt by the forced explosion. Overrides the prop's own
-	 * ExplosionDamage and bypasses charge-based scaling — every air-kick deals
-	 * exactly this much regardless of which prop is hit.
+	 * Flat damage dealt by the explosion when the launched prop hits an NPC.
+	 * Overrides the prop's own ExplosionDamage and bypasses charge-based scaling —
+	 * every air-kick payload is the same regardless of which prop was kicked.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Explosion", meta = (ClampMin = "0.0"))
 	float FixedExplosionDamage = 100.0f;
-
-	/**
-	 * Multiplier applied to the prop's ExplosionRadius for this detonation only.
-	 * 1.0 keeps the prop's configured radius; >1 makes the air-kick blast bigger,
-	 * <1 makes it smaller. Doesn't change the prop's base ExplosionRadius.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Explosion", meta = (ClampMin = "0.1"))
-	float ExplosionRadiusMultiplier = 1.0f;
-
-	/**
-	 * Multiplier applied to the explosion's VFX scale. Cosmetic only.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|Explosion", meta = (ClampMin = "0.1"))
-	float ExplosionVFXScaleMultiplier = 1.0f;
 
 	// ==================== VFX ====================
 
