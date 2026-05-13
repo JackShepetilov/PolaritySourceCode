@@ -12,12 +12,16 @@
 #include "Engine/World.h"
 #include "Engine/DamageEvents.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "Components/AudioComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "TimerManager.h"
 
 UUpgrade_ChargedPunch::UUpgrade_ChargedPunch()
 {
@@ -348,11 +352,68 @@ void UUpgrade_ChargedPunch::ExecutePunch()
 	}
 
 	// ==================== Lunge the player forward to endpoint ====================
-	// Use LaunchCharacter with a velocity that covers the distance over a short period.
-	// We use 0.15s as a fixed lunge duration — feels snappy and matches air-melee feel.
+	// LaunchCharacter alone gets eaten by ground friction in ~1 frame on flat terrain.
+	// To make the lunge actually carry the player to Endpoint:
+	//   1. Kill ground friction / braking deceleration on the CharacterMovement temporarily.
+	//   2. LaunchCharacter with the velocity that would cover Distance in LungeDuration seconds.
+	//   3. After LungeDuration, restore the saved friction values via timer.
+	// We don't set MovementMode=Falling because that triggers gravity — the lunge is a flat dash.
 	const float LungeDuration = 0.15f;
 	const FVector LungeVelocity = (Endpoint - StartLoc) / LungeDuration;
-	Character->LaunchCharacter(LungeVelocity, /*bXYOverride=*/ true, /*bZOverride=*/ true);
+
+	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+	{
+		// Save current friction settings so we can restore them.
+		const float SavedGroundFriction = Movement->GroundFriction;
+		const float SavedBrakingFrictionFactor = Movement->BrakingFrictionFactor;
+		const float SavedBrakingDecelerationWalking = Movement->BrakingDecelerationWalking;
+
+		// Kill friction so LaunchCharacter actually carries us to the endpoint.
+		Movement->GroundFriction = 0.0f;
+		Movement->BrakingFrictionFactor = 0.0f;
+		Movement->BrakingDecelerationWalking = 0.0f;
+
+		Character->LaunchCharacter(LungeVelocity, /*bXYOverride=*/ true, /*bZOverride=*/ true);
+
+		// Restore friction after lunge duration.
+		TWeakObjectPtr<AShooterCharacter> WeakChar(Character);
+		FTimerHandle RestoreHandle;
+		GetWorld()->GetTimerManager().SetTimer(RestoreHandle,
+			[WeakChar, SavedGroundFriction, SavedBrakingFrictionFactor, SavedBrakingDecelerationWalking]()
+			{
+				if (AShooterCharacter* RestoredChar = WeakChar.Get())
+				{
+					if (UCharacterMovementComponent* RestoredMove = RestoredChar->GetCharacterMovement())
+					{
+						RestoredMove->GroundFriction = SavedGroundFriction;
+						RestoredMove->BrakingFrictionFactor = SavedBrakingFrictionFactor;
+						RestoredMove->BrakingDecelerationWalking = SavedBrakingDecelerationWalking;
+					}
+				}
+			},
+			LungeDuration, false);
+	}
+
+	// ==================== Air-attack montage on MeleeMesh ====================
+	// Best-effort: play the first airborne attack montage if MeleeMesh + AirborneAttacks
+	// exist. We don't do the full mesh-switch (attach to camera / hide weapon) here because
+	// those helpers are private on MeleeAttackComponent — that would need a header change.
+	// The animation will look out-of-place visually until the proper hook is exposed; the
+	// gameplay effect (capsule sweep + lunge) is correct.
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		if (MeleeComp->MeleeMesh && MeleeComp->AirborneAttacks.Num() > 0)
+		{
+			const FMeleeAnimationData& AirData = MeleeComp->AirborneAttacks[0];
+			if (AirData.AttackMontage)
+			{
+				if (UAnimInstance* AnimInst = MeleeComp->MeleeMesh->GetAnimInstance())
+				{
+					AnimInst->Montage_Play(AirData.AttackMontage, AirData.BasePlayRate);
+				}
+			}
+		}
+	}
 
 	// ==================== Player-side feedback ====================
 	if (CachedDef->FireVFX)
