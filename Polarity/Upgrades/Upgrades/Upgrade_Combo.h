@@ -49,6 +49,7 @@ protected:
 
 	virtual void OnUpgradeActivated() override;
 	virtual void OnUpgradeDeactivated() override;
+	virtual void OnLevelChanged(int32 OldLevel, int32 NewLevel) override;
 	virtual void OnWeaponChanged(AShooterWeapon* OldWeapon, AShooterWeapon* NewWeapon) override;
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

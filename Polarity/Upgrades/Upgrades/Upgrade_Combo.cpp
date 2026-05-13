@@ -22,13 +22,35 @@ void UUpgrade_Combo::OnUpgradeActivated()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] ACTIVATED — ResetWindow=%.2fs, MaxMult=%.2f, bResetOnMiss=%d, Curve=%s"),
-		CachedDef->ResetWindow,
-		CachedDef->MaxMultiplier,
-		CachedDef->bResetOnMiss ? 1 : 0,
-		CachedDef->ComboCountToMultiplier ? *CachedDef->ComboCountToMultiplier->GetName() : TEXT("<fallback linear>"));
+	const FComboLevelData& LD = CachedDef->GetLevelData(CurrentLevel);
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] ACTIVATED Lv%d/%d — ResetWindow=%.2fs, MaxMult=%.2f, bResetOnMiss=%d, Curve=%s"),
+		CurrentLevel, CachedDef->MaxLevel,
+		LD.ResetWindow,
+		LD.MaxMultiplier,
+		LD.bResetOnMiss ? 1 : 0,
+		LD.ComboCountToMultiplier ? *LD.ComboCountToMultiplier->GetName() : TEXT("<fallback linear>"));
 
 	BindToMeleeSubsystem();
+}
+
+void UUpgrade_Combo::OnLevelChanged(int32 OldLevel, int32 NewLevel)
+{
+	if (!CachedDef.IsValid())
+	{
+		return;
+	}
+
+	const FComboLevelData& LD = CachedDef->GetLevelData(NewLevel);
+	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] LEVEL_UP %d -> %d — new ResetWindow=%.2fs, MaxMult=%.2f, bResetOnMiss=%d, Curve=%s"),
+		OldLevel, NewLevel,
+		LD.ResetWindow,
+		LD.MaxMultiplier,
+		LD.bResetOnMiss ? 1 : 0,
+		LD.ComboCountToMultiplier ? *LD.ComboCountToMultiplier->GetName() : TEXT("<fallback linear>"));
+
+	// Re-evaluate the multiplier with the new level's curve so the player feels the
+	// upgrade immediately (no need to break the combo first).
+	ApplyCurrentMultiplier();
 }
 
 void UUpgrade_Combo::OnUpgradeDeactivated()
@@ -169,7 +191,12 @@ void UUpgrade_Combo::HandleSwordHit(AActor* HitActor, const FVector& HitLocation
 
 void UUpgrade_Combo::HandleMeleeAttackEnded()
 {
-	if (!CachedDef.IsValid() || !CachedDef->bResetOnMiss)
+	if (!CachedDef.IsValid())
+	{
+		return;
+	}
+	const FComboLevelData& LD = CachedDef->GetLevelData(CurrentLevel);
+	if (!LD.bResetOnMiss)
 	{
 		return;
 	}
@@ -195,7 +222,7 @@ void UUpgrade_Combo::AddComboHits(int32 Amount)
 
 	const int32 OldCount = ComboCount;
 	ComboCount += Amount;
-	ResetTimer = CachedDef->ResetWindow;
+	ResetTimer = CachedDef->GetLevelData(CurrentLevel).ResetWindow;
 
 	UE_LOG(LogTemp, Warning, TEXT("[COMBO_DEBUG] AddComboHits(+%d): Count %d -> %d, ResetTimer=%.2fs"),
 		Amount, OldCount, ComboCount, ResetTimer);
@@ -246,10 +273,12 @@ float UUpgrade_Combo::EvaluateMultiplier(int32 Count) const
 		return 1.0f;
 	}
 
+	const FComboLevelData& LD = CachedDef->GetLevelData(CurrentLevel);
+
 	float Value = 1.0f;
-	if (CachedDef->ComboCountToMultiplier)
+	if (LD.ComboCountToMultiplier)
 	{
-		Value = CachedDef->ComboCountToMultiplier->GetFloatValue(static_cast<float>(Count));
+		Value = LD.ComboCountToMultiplier->GetFloatValue(static_cast<float>(Count));
 	}
 	else
 	{
@@ -257,7 +286,7 @@ float UUpgrade_Combo::EvaluateMultiplier(int32 Count) const
 		Value = 1.0f + 0.1f * Count;
 	}
 
-	return FMath::Clamp(Value, 1.0f, CachedDef->MaxMultiplier);
+	return FMath::Clamp(Value, 1.0f, LD.MaxMultiplier);
 }
 
 void UUpgrade_Combo::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
