@@ -4,12 +4,10 @@
 #include "UpgradeDefinition_AirKick.h"
 #include "ShooterCharacter.h"
 #include "EMFPhysicsProp.h"
-#include "EMFVelocityModifier.h"
 #include "MeleeAttackComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
-#include "NiagaraComponent.h"
 
 UUpgrade_AirKick::UUpgrade_AirKick()
 {
@@ -86,58 +84,56 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		return;
 	}
 
-	// === All conditions met: execute instant capture + launch ===
+	// === All conditions met: force-detonate the prop with fixed damage ===
 
-	UE_LOG(LogTemp, Log, TEXT("Air Kick: %s kicked %s while both airborne"),
-		*Character->GetName(), *Prop->GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_KICK_DEBUG] %s air-kicked %s — forcing explosion (fixed dmg=%.1f, radiusMul=%.2f, vfxMul=%.2f)"),
+		*Character->GetName(), *Prop->GetName(),
+		DefAirKick->FixedExplosionDamage,
+		DefAirKick->ExplosionRadiusMultiplier,
+		DefAirKick->ExplosionVFXScaleMultiplier);
 
-	// 1. Toggle player polarity (same as reverse channeling)
-	UEMFVelocityModifier* EMFMod = Character->FindComponentByClass<UEMFVelocityModifier>();
-	if (EMFMod)
+	// Override the prop's explosion parameters so the kick always detonates with
+	// the upgrade's fixed damage, regardless of:
+	//  - the prop's bCanExplode flag (non-explosive props still detonate)
+	//  - the prop's own ExplosionDamage value
+	//  - charge-based scaling (bScaleExplosionWithCharge)
+	// We cache the originals and restore them after Explode() in case the prop
+	// survives detonation (some props stay alive after explode for chain reactions).
+	const bool   bSavedCanExplode  = Prop->bCanExplode;
+	const float  SavedExplosionDmg = Prop->ExplosionDamage;
+	const bool   bSavedScaleWithCharge = Prop->bScaleExplosionWithCharge;
+
+	Prop->bCanExplode = true;
+	Prop->ExplosionDamage = DefAirKick->FixedExplosionDamage;
+	Prop->bScaleExplosionWithCharge = false;
+
+	// Damage multiplier kept at 1.0 — fixed damage was set on the prop directly above.
+	Prop->Explode(/*DamageMultiplier=*/ 1.0f,
+		/*RadiusMultiplier=*/ DefAirKick->ExplosionRadiusMultiplier,
+		/*VFXScaleMultiplier=*/ DefAirKick->ExplosionVFXScaleMultiplier);
+
+	if (IsValid(Prop) && !Prop->IsActorBeingDestroyed())
 	{
-		EMFMod->ToggleChargeSign();
+		Prop->bCanExplode = bSavedCanExplode;
+		Prop->ExplosionDamage = SavedExplosionDmg;
+		Prop->bScaleExplosionWithCharge = bSavedScaleWithCharge;
 	}
 
-	// 2. Launch the prop in camera forward direction
-	APlayerController* PC = Cast<APlayerController>(Character->GetController());
-	FVector LaunchDir = Character->GetActorForwardVector(); // fallback
-	if (PC)
-	{
-		FVector ViewLocation;
-		FRotator ViewRotation;
-		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
-		LaunchDir = ViewRotation.Vector();
-	}
-
-	UStaticMeshComponent* PropMesh = Prop->PropMesh;
-	if (PropMesh && PropMesh->IsSimulatingPhysics())
-	{
-		PropMesh->SetPhysicsLinearVelocity(LaunchDir * DefAirKick->LaunchSpeed);
-
-		// Apply spin for visual flair
-		if (DefAirKick->KickSpinSpeed > 0.0f)
-		{
-			const FVector RandomAxis = FMath::VRand();
-			PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * DefAirKick->KickSpinSpeed);
-		}
-	}
-
-	// 3. Spawn kick VFX at impact point
+	// Optional kick-specific cosmetic feedback on top of the prop's explosion VFX/sound.
 	if (DefAirKick->KickImpactFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 			GetWorld(),
 			DefAirKick->KickImpactFX,
 			HitLocation,
-			LaunchDir.Rotation(),
+			FRotator::ZeroRotator,
 			FVector(DefAirKick->KickImpactFXScale),
-			true, // auto-destroy
-			true, // auto-activate
+			true,  // auto-destroy
+			true,  // auto-activate
 			ENCPoolMethod::None
 		);
 	}
 
-	// 4. Play kick sound
 	if (DefAirKick->KickSound)
 	{
 		UGameplayStatics::PlaySoundAtLocation(
