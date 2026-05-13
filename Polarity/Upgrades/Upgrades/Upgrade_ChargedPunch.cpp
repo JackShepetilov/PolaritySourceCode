@@ -537,11 +537,9 @@ void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& E
 
 	LungeStart = StartPos;
 	LungeEnd = EndPos;
-	// Keep the flight perfectly horizontal at the player's current Z — no vertical jump.
-	// The "странный рывок" the user reported was the +VerticalLiftAmount teleport in one
-	// frame; with MOVE_Flying + GravityScale=0 we don't need to lift to escape friction.
-	LungeStart.Z = Character->GetActorLocation().Z;
-	LungeEnd.Z = LungeStart.Z;
+	// Z is preserved from ComputeEndpoint — that already accounts for camera pitch,
+	// so aiming up makes the lunge go up. Previously this was force-flattened, which
+	// caused the player to land on the floor regardless of VFX preview height.
 	LungeElapsed = 0.0f;
 	LungeTotalDuration = FMath::Max(0.05f, CachedDef->LungeDuration);
 	bIsLunging = true;
@@ -566,8 +564,19 @@ void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& E
 		// 4. Play the single configured air-attack montage on MeleeMesh.
 		if (CachedDef->AirAttackMontage)
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] Playing AirAttackMontage='%s' on MeleeMesh"),
+				*CachedDef->AirAttackMontage->GetName());
 			MeleeComp->PlayMontageOnMeleeMesh(CachedDef->AirAttackMontage, 1.0f);
 		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] AirAttackMontage IS NULL on definition '%s' — set it in the DataAsset"),
+				*CachedDef->GetName());
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] CachedMeleeComp is invalid — cannot play montage"));
 	}
 
 	// Ensure tick is running for interpolation.

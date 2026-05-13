@@ -2721,8 +2721,14 @@ void UMeleeAttackComponent::ExitMeleeMeshView()
 
 void UMeleeAttackComponent::PlayMontageOnMeleeMesh(UAnimMontage* Montage, float PlayRate)
 {
-	if (!Montage || !MeleeMesh)
+	if (!Montage)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] PlayMontageOnMeleeMesh: Montage is NULL"));
+		return;
+	}
+	if (!MeleeMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] PlayMontageOnMeleeMesh: MeleeMesh is NULL on this component — was AutoDetectMeshReferences successful?"));
 		return;
 	}
 
@@ -2731,10 +2737,17 @@ void UMeleeAttackComponent::PlayMontageOnMeleeMesh(UAnimMontage* Montage, float 
 		// Stop anything else currently playing on this mesh first so we don't blend
 		// from the regular swing into the charged-punch swing on the same channel.
 		AnimInst->StopAllMontages(0.0f);
-		AnimInst->Montage_Play(Montage, PlayRate);
+		const float PlayedDuration = AnimInst->Montage_Play(Montage, PlayRate);
 		CurrentMeleeMontage = Montage;
 		MontageTimeElapsed = 0.0f;
 		MontageTotalDuration = Montage->GetPlayLength();
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] Montage_Play('%s', rate=%.2f) returned duration=%.2f, totalLen=%.2f, meshVisible=%d"),
+			*Montage->GetName(), PlayRate, PlayedDuration, MontageTotalDuration,
+			MeleeMesh->IsVisible() ? 1 : 0);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] PlayMontageOnMeleeMesh: MeleeMesh has no AnimInstance (no AnimBP set?)"));
 	}
 }
 
