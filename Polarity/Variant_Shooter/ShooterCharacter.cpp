@@ -1708,21 +1708,33 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	// If the weapon mesh has an OptionalGrip socket, shift the mesh's relative transform so
 	// that this socket lands exactly at the origin of the parent attach socket (the hand).
 	//
-	// Math: we want   T_relative * T_optionalgrip_in_component  ==  Identity
-	//       =>        T_relative = T_optionalgrip_in_component.Inverse()
+	// Derivation. Let P be the hand-socket world transform, M the mesh's relative transform
+	// (what we're setting), and S the OptionalGrip transform in component space. The world
+	// position of OptionalGrip is:
+	//     O = P * M * S
+	// We want O.Location == P.Location and O.Rotation == P.Rotation, i.e. (M * S) acts as
+	// identity on rotation and position. Expanding the FTransform composition rule
+	//     (M * S).Location = M.Rotation.Rotate(S.Location * M.Scale) + M.Location
+	//     (M * S).Rotation = M.Rotation * S.Rotation
+	// gives:
+	//     M.Rotation = S.Rotation.Inverse()
+	//     M.Location = -M.Rotation.Rotate(S.Location * M.Scale)
 	//
-	// The previous implementation split this as
-	//     SetRelativeLocation(-Socket.Location)
-	//     SetRelativeRotation(Socket.Rotation.Inverse())
-	// which only equals the true inverse when Socket.Rotation is identity. With any non-zero
-	// socket rotation the location component must be `-Rotation.Inverse() * Location` (which
-	// is what FTransform::Inverse() produces), otherwise the grip lands off-axis.
+	// The previous implementation set
+	//     M.Location = -S.Location
+	//     M.Rotation = S.Rotation.Inverse()
+	// which is only correct when (a) S.Rotation is identity AND (b) M.Scale is (1,1,1).
+	// With any non-identity socket rotation OR a BP-set mesh scale ≠ 1 (very common for
+	// FP weapon meshes — they're usually scaled down to look right on camera), the grip
+	// lands off by `S.Location * (1 - M.Scale)` plus a rotation-induced error, so the whole
+	// mesh hangs with a visible offset from the hand and any BP-aligned child (sight,
+	// suppressor) appears shifted relative to where it sits in the BP preview.
 	//
 	// Children attached to sockets on the weapon mesh are intentionally NOT compensated:
 	// they ride the parent's relative shift as Unreal's attachment system expects, so their
-	// socket-relative offsets stay intact and bone animation drives them correctly.
-	// (The earlier `SetWorldTransform` restore overwrote those offsets, which is what made
-	// sights/suppressors/lasers drift away from their sockets as soon as the weapon animated.)
+	// socket-relative offsets stay intact and bone animation drives them correctly. (The
+	// earlier `SetWorldTransform` restore overwrote those offsets, which is what made
+	// sights/suppressors/lasers drift off their sockets the moment the weapon animated.)
 	static const FName OptionalGripSocket = FName("OptionalGrip");
 
 	auto AlignToOptionalGrip = [](USkeletalMeshComponent* WeaponMesh)
@@ -1733,11 +1745,16 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 		}
 
 		const FTransform SocketComponent = WeaponMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
-		const FTransform Inverse = SocketComponent.Inverse();
+		const FQuat    InverseRotation = SocketComponent.GetRotation().Inverse();
+		const FVector  MeshScale       = WeaponMesh->GetRelativeScale3D();
+
+		// Scaled socket offset in mesh-local axes, then unrotated into mesh-relative axes.
+		const FVector ScaledSocketLocation = SocketComponent.GetLocation() * MeshScale;
+		const FVector NewRelativeLocation  = -InverseRotation.RotateVector(ScaledSocketLocation);
 
 		// Apply location + rotation atomically; leave scale untouched (KeepRelative scale
 		// from AttachmentRule preserved the BP-set scale and we don't want to clobber it).
-		WeaponMesh->SetRelativeLocationAndRotation(Inverse.GetLocation(), Inverse.GetRotation());
+		WeaponMesh->SetRelativeLocationAndRotation(NewRelativeLocation, InverseRotation);
 	};
 
 	AlignToOptionalGrip(Weapon->GetFirstPersonMesh());
