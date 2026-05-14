@@ -536,6 +536,9 @@ void UChargeAnimationComponent::EnterChanneling()
 		else
 		{
 			// No target — bail out via the standard finishing-animation cleanup path.
+			// Broadcast the empty-press signal BEFORE exiting so subscribers (HealthBlast)
+			// can react to the missed capture attempt.
+			OnEmptyCaptureAttempt.Broadcast();
 			ExitChanneling();
 			EnterFinishingAnimation();
 		}
@@ -1650,6 +1653,9 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] ReleaseCapturedNPC (ChargeAnimComp) -> %s, CurrentState=%d, CaptureLockoutTimeRemaining=%.2f"),
+			*NPC->GetName(), (int32)CurrentState, CaptureLockoutTimeRemaining);
+		FDebug::DumpStackTraceToLog(TEXT("[CAPTURE_DEBUG_STACK]"), ELogVerbosity::Warning);
 		if (UEMFVelocityModifier* Modifier = NPC->FindComponentByClass<UEMFVelocityModifier>())
 		{
 			Modifier->ReleasedFromCapture();

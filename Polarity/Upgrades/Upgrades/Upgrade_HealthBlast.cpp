@@ -208,6 +208,7 @@ void UUpgrade_HealthBlast::OnUpgradeActivated()
 	{
 		ChargeComp->OnChannelingStarted.AddDynamic(this, &UUpgrade_HealthBlast::OnChannelingStarted);
 		ChargeComp->OnChannelingEnded.AddDynamic(this, &UUpgrade_HealthBlast::OnChannelingEnded);
+		ChargeComp->OnEmptyCaptureAttempt.AddDynamic(this, &UUpgrade_HealthBlast::OnEmptyCaptureAttempt);
 	}
 
 	// Bind to prop captured to cancel empty capture timer
@@ -242,6 +243,7 @@ void UUpgrade_HealthBlast::OnUpgradeDeactivated()
 	{
 		ChargeComp->OnChannelingStarted.RemoveDynamic(this, &UUpgrade_HealthBlast::OnChannelingStarted);
 		ChargeComp->OnChannelingEnded.RemoveDynamic(this, &UUpgrade_HealthBlast::OnChannelingEnded);
+		ChargeComp->OnEmptyCaptureAttempt.RemoveDynamic(this, &UUpgrade_HealthBlast::OnEmptyCaptureAttempt);
 	}
 
 	if (Character)
@@ -322,6 +324,18 @@ void UUpgrade_HealthBlast::OnHealthPickupCollectedAtFullHP()
 
 void UUpgrade_HealthBlast::OnChannelingStarted()
 {
+	// Press-press mode broadcasts OnChannelingStarted ONLY after a successful capture (not on
+	// button press). The "empty press" path uses OnEmptyCaptureAttempt instead, dispatched
+	// synchronously by ChargeAnimationComponent — so the timer pattern below would misfire
+	// after every successful grab. Skip it in press-press; legacy hold-mode keeps the timer.
+	if (UChargeAnimationComponent* ChargeComp = CachedChargeComp.Get())
+	{
+		if (ChargeComp->bUsePressPressCaptureMode)
+		{
+			return;
+		}
+	}
+
 	// Only start empty capture timer if pool has pickups and we're not on cooldown
 	if (GetStoredPickups() <= 0 || bOnCooldown || !CachedDef.IsValid())
 	{
@@ -354,6 +368,14 @@ void UUpgrade_HealthBlast::OnEmptyCaptureTimerFired()
 	{
 		ChargeComp->OnChannelButtonReleased();
 	}
+}
+
+void UUpgrade_HealthBlast::OnEmptyCaptureAttempt()
+{
+	// Press-press path: ChargeAnimationComponent already ran the synchronous capture scan and
+	// found nothing. No timer needed — fire immediately. Channeling cleanup is handled by the
+	// caller (ExitChanneling + EnterFinishingAnimation right after this broadcast).
+	FireHealthBlast();
 }
 
 // ==================== Blast Logic ====================

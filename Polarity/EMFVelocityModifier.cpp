@@ -455,6 +455,8 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			WeakCaptureTimer += DeltaTime;
 			if (WeakCaptureTimer >= CaptureReleaseTimeout)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s WeakCaptureTimer EXPIRED — Distance=%.0f, EffectiveRange=%.0f, Timer=%.2f/%.2f"),
+					GetOwner() ? *GetOwner()->GetName() : TEXT("?"), Distance, EffectiveRange, WeakCaptureTimer, CaptureReleaseTimeout);
 				ReleasedFromCapture();
 				bFoundPlate = false;
 				CaptPlate = nullptr;
@@ -977,6 +979,11 @@ void UEMFVelocityModifier::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 
 void UEMFVelocityModifier::ReleasedFromCapture()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s ReleasedFromCapture called (CapturingPlate=%s, bReverseLaunch=%d)"),
+		GetOwner() ? *GetOwner()->GetName() : TEXT("?"),
+		CapturingPlate.IsValid() ? *CapturingPlate->GetName() : TEXT("nullptr"),
+		bReverseLaunchInitialized);
+
 	// Save reverse launch flag BEFORE clearing it — needed to set stun intent on NPC
 	const bool bWasReverseLaunch = bReverseLaunchInitialized;
 
@@ -1184,6 +1191,27 @@ void UEMFVelocityModifier::TickComponent(float DeltaTime, ELevelTick TickType, F
 		const float Speed = MovementComponent->Velocity.Size();
 		const float Alpha = FMath::Clamp(Speed / ProjectileForceSpeedMax, 0.0f, 1.0f);
 		ProjectileForceMultiplier = FMath::Lerp(1.0f, ProjectileForceAtMaxSpeed, Alpha);
+	}
+
+	// Fallback path for owners not using ApexMovementComponent (NPCs use plain UCharacterMovementComponent).
+	// Apex calls ModifyVelocity each frame via ApplyVelocityModifiers; plain CMC has no such hook, so capture
+	// pull-to-plate and reverse-launch never run. Mirror that work here when no Apex component is registered.
+	if (!MovementComponent && bEnabled && CapturingPlate.IsValid() && bEnableViscousCapture)
+	{
+		if (ACharacter* Char = Cast<ACharacter>(GetOwner()))
+		{
+			if (UCharacterMovementComponent* CMC = Char->GetCharacterMovement())
+			{
+				FVector VelocityDelta = FVector::ZeroVector;
+				if (Execute_ModifyVelocity(this, DeltaTime, CMC->Velocity, VelocityDelta))
+				{
+					if (!VelocityDelta.IsNearlyZero())
+					{
+						CMC->Velocity += VelocityDelta;
+					}
+				}
+			}
+		}
 	}
 }
 

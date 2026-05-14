@@ -86,6 +86,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChargeAnimationStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChargeAnimationEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChannelingStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnChannelingEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEmptyCaptureAttempt);
 
 /**
  * Component that handles charge toggle animation and channeling ability.
@@ -393,6 +394,12 @@ public:
 	/** Called when channeling ends (including reverse charge) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnChannelingEnded OnChannelingEnded;
+
+	/** Press-press mode: fires when channel button is pressed but the synchronous capture scan
+	 *  finds no valid target. Distinct from OnChannelingStarted (which only fires on successful
+	 *  capture in press-press). Consumers like HealthBlast use this as the "empty press" signal. */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnEmptyCaptureAttempt OnEmptyCaptureAttempt;
 
 	// ==================== Input API ====================
 

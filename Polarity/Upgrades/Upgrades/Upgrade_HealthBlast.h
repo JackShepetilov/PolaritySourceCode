@@ -151,6 +151,11 @@ private:
 	UFUNCTION()
 	void OnChannelingEnded();
 
+	/** Press-press mode: channel button pressed with no valid capture target — fire immediately.
+	 *  Replaces the legacy hold-mode empty-capture timer in press-press flow. */
+	UFUNCTION()
+	void OnEmptyCaptureAttempt();
+
 	/** Re-broadcast the shared pool change to OnStoredPickupsChanged (UI compatibility) */
 	UFUNCTION()
 	void HandleSharedPoolChanged(int32 CurrentCount, int32 MaxCount);
