@@ -1705,48 +1705,43 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	Weapon->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonWeaponSocket);
 	Weapon->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, ThirdPersonWeaponSocket);
 
-	// If weapon has OptionalGrip socket, offset the mesh so that socket aligns with hand.
-	// IMPORTANT: shifting the mesh's relative transform also moves every attached child
-	// (sights, suppressors, lasers, etc.) — that's why BP-placed attachments end up in the
-	// "wrong" spot at runtime vs. how they look in the editor preview. We compensate by
-	// snapshotting each child's WORLD transform before the shift and restoring it afterwards,
-	// so children stay where the BP author placed them visually relative to the authored mesh.
+	// If the weapon mesh has an OptionalGrip socket, shift the mesh's relative transform so
+	// that this socket lands exactly at the origin of the parent attach socket (the hand).
+	//
+	// Math: we want   T_relative * T_optionalgrip_in_component  ==  Identity
+	//       =>        T_relative = T_optionalgrip_in_component.Inverse()
+	//
+	// The previous implementation split this as
+	//     SetRelativeLocation(-Socket.Location)
+	//     SetRelativeRotation(Socket.Rotation.Inverse())
+	// which only equals the true inverse when Socket.Rotation is identity. With any non-zero
+	// socket rotation the location component must be `-Rotation.Inverse() * Location` (which
+	// is what FTransform::Inverse() produces), otherwise the grip lands off-axis.
+	//
+	// Children attached to sockets on the weapon mesh are intentionally NOT compensated:
+	// they ride the parent's relative shift as Unreal's attachment system expects, so their
+	// socket-relative offsets stay intact and bone animation drives them correctly.
+	// (The earlier `SetWorldTransform` restore overwrote those offsets, which is what made
+	// sights/suppressors/lasers drift away from their sockets as soon as the weapon animated.)
 	static const FName OptionalGripSocket = FName("OptionalGrip");
 
-	auto AlignToOptionalGripPreservingChildren = [](USkeletalMeshComponent* WeaponMesh)
+	auto AlignToOptionalGrip = [](USkeletalMeshComponent* WeaponMesh)
 	{
 		if (!WeaponMesh || !WeaponMesh->DoesSocketExist(OptionalGripSocket))
 		{
 			return;
 		}
 
-		// Capture children world transforms BEFORE the parent shift.
-		TArray<USceneComponent*> Children;
-		WeaponMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
-		TArray<FTransform> ChildWorldBefore;
-		ChildWorldBefore.Reserve(Children.Num());
-		for (USceneComponent* Child : Children)
-		{
-			ChildWorldBefore.Add(Child ? Child->GetComponentTransform() : FTransform::Identity);
-		}
+		const FTransform SocketComponent = WeaponMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
+		const FTransform Inverse = SocketComponent.Inverse();
 
-		// Apply the OptionalGrip alignment shift to the mesh itself.
-		const FTransform SocketTransform = WeaponMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
-		WeaponMesh->SetRelativeLocation(-SocketTransform.GetLocation());
-		WeaponMesh->SetRelativeRotation(SocketTransform.GetRotation().Inverse());
-
-		// Restore each child's WORLD transform — undoes the unintended drift the parent shift caused.
-		for (int32 i = 0; i < Children.Num(); ++i)
-		{
-			if (USceneComponent* Child = Children[i])
-			{
-				Child->SetWorldTransform(ChildWorldBefore[i]);
-			}
-		}
+		// Apply location + rotation atomically; leave scale untouched (KeepRelative scale
+		// from AttachmentRule preserved the BP-set scale and we don't want to clobber it).
+		WeaponMesh->SetRelativeLocationAndRotation(Inverse.GetLocation(), Inverse.GetRotation());
 	};
 
-	AlignToOptionalGripPreservingChildren(Weapon->GetFirstPersonMesh());
-	AlignToOptionalGripPreservingChildren(Weapon->GetThirdPersonMesh());
+	AlignToOptionalGrip(Weapon->GetFirstPersonMesh());
+	AlignToOptionalGrip(Weapon->GetThirdPersonMesh());
 }
 
 void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
