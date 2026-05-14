@@ -1578,11 +1578,23 @@ void AShooterWeapon_Melee::BreakWeapon()
 	// 2. Play break sound
 	PlayMeleeSound(BreakSound);
 
-	// 3. Remove weapon from player inventory and switch
+	// 3. Remove weapon from player inventory and switch.
+	// Deferred to next tick: BreakWeapon can be called from a TP-mesh AnimNotify
+	// (DeactivateDamageWindowFromNotify → DecrementHitCount → BreakWeapon). The swap
+	// chain ends in OnWeaponActivated → SetAnimInstanceClass on the same mesh, which
+	// UE asserts against while PostAnimEvaluation is in progress (recursion check).
 	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
 	if (ShooterChar)
 	{
-		ShooterChar->RemoveMeleeWeapon(this);
+		TWeakObjectPtr<AShooterCharacter> WeakChar(ShooterChar);
+		TWeakObjectPtr<AShooterWeapon_Melee> WeakThis(this);
+		GetWorld()->GetTimerManager().SetTimerForNextTick([WeakChar, WeakThis]()
+		{
+			if (WeakChar.IsValid() && WeakThis.IsValid())
+			{
+				WeakChar->RemoveMeleeWeapon(WeakThis.Get());
+			}
+		});
 	}
 }
 
