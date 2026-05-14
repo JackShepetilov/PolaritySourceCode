@@ -1737,10 +1737,22 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	// sights/suppressors/lasers drift off their sockets the moment the weapon animated.)
 	static const FName OptionalGripSocket = FName("OptionalGrip");
 
-	auto AlignToOptionalGrip = [](USkeletalMeshComponent* WeaponMesh)
+	const FString WeaponNameForLog = Weapon->GetName();
+
+	auto AlignToOptionalGrip = [&WeaponNameForLog](USkeletalMeshComponent* WeaponMesh)
 	{
-		if (!WeaponMesh || !WeaponMesh->DoesSocketExist(OptionalGripSocket))
+		if (!WeaponMesh)
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s: WeaponMesh is null — skipping"), *WeaponNameForLog);
+			return;
+		}
+
+		const FString MeshNameForLog = WeaponMesh->GetName();
+
+		if (!WeaponMesh->DoesSocketExist(OptionalGripSocket))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s %s: OptionalGrip socket NOT FOUND — alignment skipped"),
+				*WeaponNameForLog, *MeshNameForLog);
 			return;
 		}
 
@@ -1752,9 +1764,63 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 		const FVector ScaledSocketLocation = SocketComponent.GetLocation() * MeshScale;
 		const FVector NewRelativeLocation  = -InverseRotation.RotateVector(ScaledSocketLocation);
 
+		// === BEFORE state ===
+		const FTransform MeshRelBefore = WeaponMesh->GetRelativeTransform();
+		const FVector    OptionalGripWorldBefore = WeaponMesh->GetSocketLocation(OptionalGripSocket);
+
+		// Where the hand socket lives in world (the attach parent + attach socket on it).
+		FVector HandSocketWorld = FVector::ZeroVector;
+		FString HandSocketLog = TEXT("<no parent>");
+		if (USceneComponent* AttachParent = WeaponMesh->GetAttachParent())
+		{
+			const FName AttachSock = WeaponMesh->GetAttachSocketName();
+			HandSocketWorld = AttachSock.IsNone() ? AttachParent->GetComponentLocation()
+			                                     : AttachParent->GetSocketLocation(AttachSock);
+			HandSocketLog = FString::Printf(TEXT("%s.%s"), *AttachParent->GetName(), *AttachSock.ToString());
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] === %s %s ==="), *WeaponNameForLog, *MeshNameForLog);
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Attached to: %s"), *HandSocketLog);
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Socket S (component space):  Loc=%s  Rot=%s  Scale=%s"),
+			*SocketComponent.GetLocation().ToString(),
+			*SocketComponent.GetRotation().Rotator().ToString(),
+			*SocketComponent.GetScale3D().ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Mesh BEFORE: RelLoc=%s  RelRot=%s  RelScale=%s"),
+			*MeshRelBefore.GetLocation().ToString(),
+			*MeshRelBefore.GetRotation().Rotator().ToString(),
+			*MeshScale.ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Computed:    NewRelLoc=%s  NewRelRot=%s"),
+			*NewRelativeLocation.ToString(),
+			*InverseRotation.Rotator().ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Hand world = %s"), *HandSocketWorld.ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world BEFORE = %s  (delta=%s)"),
+			*OptionalGripWorldBefore.ToString(),
+			*(OptionalGripWorldBefore - HandSocketWorld).ToString());
+
 		// Apply location + rotation atomically; leave scale untouched (KeepRelative scale
 		// from AttachmentRule preserved the BP-set scale and we don't want to clobber it).
 		WeaponMesh->SetRelativeLocationAndRotation(NewRelativeLocation, InverseRotation);
+
+		// === AFTER state — verify OptionalGrip actually lands at hand socket ===
+		const FVector OptionalGripWorldAfter = WeaponMesh->GetSocketLocation(OptionalGripSocket);
+		const FVector DeltaAfter = OptionalGripWorldAfter - HandSocketWorld;
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world AFTER  = %s  (delta=%s  len=%.4f)"),
+			*OptionalGripWorldAfter.ToString(),
+			*DeltaAfter.ToString(),
+			DeltaAfter.Size());
+
+		// Log every child's world position so we can see if scope/sight ended up where BP intended.
+		TArray<USceneComponent*> Children;
+		WeaponMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
+		for (USceneComponent* Child : Children)
+		{
+			if (!Child || Child == WeaponMesh) continue;
+			UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Child=%s ParentSocket=%s  RelLoc=%s  WorldLoc=%s"),
+				*Child->GetName(),
+				*Child->GetAttachSocketName().ToString(),
+				*Child->GetRelativeLocation().ToString(),
+				*Child->GetComponentLocation().ToString());
+		}
 	};
 
 	AlignToOptionalGrip(Weapon->GetFirstPersonMesh());
