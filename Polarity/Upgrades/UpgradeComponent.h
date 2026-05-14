@@ -99,6 +99,16 @@ protected:
 	 */
 	virtual float GetDamageMultiplier(AActor* Target) const { return 1.0f; }
 
+	/**
+	 * Return a damage multiplier that this upgrade applies to MELEE base damage
+	 * (fist swing or melee weapon). Called by MeleeAttackComponent / ShooterWeapon_Melee
+	 * before applying TakeDamage. Separate from hitscan so upgrades can target one
+	 * or the other (e.g. Backstab only buffs melee).
+	 * @param Target The actor being struck
+	 * @return Multiplier (1.0 = no change, >1.0 = bonus, <1.0 = penalty)
+	 */
+	virtual float GetMeleeDamageMultiplier(AActor* Target) const { return 1.0f; }
+
 private:
 
 	/** Cached owner reference */

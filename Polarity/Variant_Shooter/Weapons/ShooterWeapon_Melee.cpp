@@ -3,6 +3,7 @@
 #include "ShooterWeapon_Melee.h"
 #include "ShooterWeaponHolder.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Upgrades/UpgradeManagerComponent.h"
 #include "Variant_Shooter/MeleeAttackComponent.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
@@ -543,6 +544,21 @@ float AShooterWeapon_Melee::ApplyMeleeDamage(AActor* HitActor, const FHitResult&
 	if (IsHeadshot(HitResult))
 	{
 		BaseDamage *= MeleeHeadshotMultiplier;
+	}
+
+	// Apply upgrade-driven melee multiplier (e.g. Backstab: 3x on stunned NPC from behind).
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = ShooterChar->GetUpgradeManager())
+		{
+			const float UpgradeMult = UpgradeMgr->GetCombinedMeleeDamageMultiplier(HitActor);
+			if (!FMath::IsNearlyEqual(UpgradeMult, 1.0f))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[MELEE_DMG_DEBUG] Sword: upgrade multiplier %.2fx vs %s — base %.1f -> %.1f"),
+					UpgradeMult, *HitActor->GetName(), BaseDamage, BaseDamage * UpgradeMult);
+				BaseDamage *= UpgradeMult;
+			}
+		}
 	}
 
 	if (BaseDamage > 0.0f)

@@ -24,6 +24,7 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "EMFPhysicsProp.h"
+#include "Upgrades/UpgradeManagerComponent.h"
 #include "Foliage/FoliageConversionLibrary.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
@@ -402,6 +403,14 @@ float UMeleeAttackComponent::GetCooldownProgress() const
 
 void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] SetState: %d -> %d (type=%d elapsed=%.3fs / total=%.3fs %.0f%%)"),
+		(int32)CurrentState,
+		(int32)NewState,
+		(int32)CurrentAttackType,
+		MontageTimeElapsed,
+		MontageTotalDuration,
+		MontageTotalDuration > 0.0f ? (MontageTimeElapsed / MontageTotalDuration) * 100.0f : -1.0f);
+
 	CurrentState = NewState;
 
 	switch (NewState)
@@ -989,6 +998,21 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 		BaseDamage *= Settings.HeadshotMultiplier;
 	}
 
+	// Apply upgrade-driven melee multiplier (e.g. Backstab: 3x on stunned NPC from behind).
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = ShooterChar->GetUpgradeManager())
+		{
+			const float UpgradeMult = UpgradeMgr->GetCombinedMeleeDamageMultiplier(HitActor);
+			if (!FMath::IsNearlyEqual(UpgradeMult, 1.0f))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[MELEE_DMG_DEBUG] Upgrade multiplier %.2fx vs %s — base %.1f -> %.1f"),
+					UpgradeMult, *HitActor->GetName(), BaseDamage, BaseDamage * UpgradeMult);
+				BaseDamage *= UpgradeMult;
+			}
+		}
+	}
+
 	if (BaseDamage > 0.0f)
 	{
 		FPointDamageEvent BaseDamageEvent(
@@ -1243,6 +1267,15 @@ void UMeleeAttackComponent::PlayAttackAnimation()
 			FOnMontageEnded EndDelegate;
 			EndDelegate.BindUObject(this, &UMeleeAttackComponent::OnMeleeMontageEnded);
 			AnimInstance->Montage_SetEndDelegate(EndDelegate, AnimData.AttackMontage);
+
+			UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] PlayAttackAnimation: type=%d (0=Ground,1=Airborne,2=Sliding) montage='%s' totalLen=%.3fs playRate=%.2f -> realDuration=%.3fs basePlayRate=%.2f comboMult=%.2f"),
+				(int32)CurrentAttackType,
+				*AnimData.AttackMontage->GetName(),
+				MontageTotalDuration,
+				PlayRate,
+				PlayRate > 0.0f ? MontageTotalDuration / PlayRate : -1.0f,
+				AnimData.BasePlayRate,
+				ComboSpeedMultiplier);
 		}
 	}
 
@@ -1265,6 +1298,14 @@ void UMeleeAttackComponent::StopAttackAnimation()
 	{
 		return;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] StopAttackAnimation called: state=%d type=%d elapsed=%.3fs / total=%.3fs (%.0f%%) montage='%s'"),
+		(int32)CurrentState,
+		(int32)CurrentAttackType,
+		MontageTimeElapsed,
+		MontageTotalDuration,
+		MontageTotalDuration > 0.0f ? (MontageTimeElapsed / MontageTotalDuration) * 100.0f : -1.0f,
+		CurrentMeleeMontage ? *CurrentMeleeMontage->GetName() : TEXT("NULL"));
 
 	// Stop melee mesh montage
 	if (CurrentMeleeMontage && MeleeMesh)
@@ -2402,6 +2443,16 @@ void UMeleeAttackComponent::UpdateMontagePlayRate(float DeltaTime)
 
 void UMeleeAttackComponent::OnMeleeMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] OnMeleeMontageEnded: montage='%s' bInterrupted=%d state=%d type=%d elapsed=%.3fs / total=%.3fs (%.0f%%) isCurrent=%d"),
+		Montage ? *Montage->GetName() : TEXT("NULL"),
+		bInterrupted ? 1 : 0,
+		(int32)CurrentState,
+		(int32)CurrentAttackType,
+		MontageTimeElapsed,
+		MontageTotalDuration,
+		MontageTotalDuration > 0.0f ? (MontageTimeElapsed / MontageTotalDuration) * 100.0f : -1.0f,
+		Montage == CurrentMeleeMontage ? 1 : 0);
+
 	if (Montage != CurrentMeleeMontage)
 	{
 		return;
@@ -2648,6 +2699,14 @@ void UMeleeAttackComponent::UpdateCoolKick(float DeltaTime)
 
 void UMeleeAttackComponent::ActivateDamageWindowFromNotify()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] ActivateDamageWindowFromNotify: state=%d type=%d elapsed=%.3fs / total=%.3fs (%.0f%%) externallyDisabled=%d"),
+		(int32)CurrentState,
+		(int32)CurrentAttackType,
+		MontageTimeElapsed,
+		MontageTotalDuration,
+		MontageTotalDuration > 0.0f ? (MontageTimeElapsed / MontageTotalDuration) * 100.0f : -1.0f,
+		bExternallyDisabled ? 1 : 0);
+
 	// Don't activate if externally disabled (melee weapon is handling this)
 	if (bExternallyDisabled)
 	{
@@ -2663,6 +2722,14 @@ void UMeleeAttackComponent::ActivateDamageWindowFromNotify()
 
 void UMeleeAttackComponent::DeactivateDamageWindowFromNotify()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] DeactivateDamageWindowFromNotify: state=%d type=%d elapsed=%.3fs / total=%.3fs (%.0f%%) externallyDisabled=%d"),
+		(int32)CurrentState,
+		(int32)CurrentAttackType,
+		MontageTimeElapsed,
+		MontageTotalDuration,
+		MontageTotalDuration > 0.0f ? (MontageTimeElapsed / MontageTotalDuration) * 100.0f : -1.0f,
+		bExternallyDisabled ? 1 : 0);
+
 	// Don't process if externally disabled (melee weapon is handling this)
 	if (bExternallyDisabled)
 	{

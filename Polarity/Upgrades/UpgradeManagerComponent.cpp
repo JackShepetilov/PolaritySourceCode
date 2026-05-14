@@ -374,6 +374,21 @@ float UUpgradeManagerComponent::GetCombinedDamageMultiplier(AActor* Target) cons
 	return Combined;
 }
 
+float UUpgradeManagerComponent::GetCombinedMeleeDamageMultiplier(AActor* Target) const
+{
+	float Combined = 1.0f;
+
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Combined *= Pair.Value->GetMeleeDamageMultiplier(Target);
+		}
+	}
+
+	return Combined;
+}
+
 void UUpgradeManagerComponent::BindToWeapon(AShooterWeapon* Weapon)
 {
 	if (!Weapon)

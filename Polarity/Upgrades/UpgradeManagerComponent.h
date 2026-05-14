@@ -116,6 +116,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedDamageMultiplier(AActor* Target) const;
 
+	/** Same as above but for the MELEE damage track (fist + melee weapon). */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	float GetCombinedMeleeDamageMultiplier(AActor* Target) const;
+
 	// ==================== Shared Health-Pickup Pool ====================
 	// A counter, incremented when the player collects a health pickup at full HP,
 	// shared between every upgrade that consumes "stored pickups" (HealthBlast,
