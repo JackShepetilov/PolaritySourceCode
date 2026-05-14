@@ -292,6 +292,17 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 	}
 }
 
+void UUpgradeManagerComponent::NotifyOwnerHitscanIonized(AActor* Target)
+{
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->OnHitscanIonized(Target);
+		}
+	}
+}
+
 void UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_POOL] Pickup collected at full HP — pool before: %d/%d"),

@@ -109,6 +109,10 @@ public:
 	/** Called when owner deals damage to a target */
 	void NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled);
 
+	/** Called whenever owner's hitscan ionization successfully applies charge to a target.
+	 *  Decoupled from damage so 0-damage ionizers (wave pistol) still notify upgrades. */
+	void NotifyOwnerHitscanIonized(AActor* Target);
+
 	/** Called when owner collects a health pickup while at full HP */
 	void NotifyHealthPickupCollectedAtFullHP();
 

@@ -48,8 +48,3 @@ bool UXPConfig::ShouldAlwaysAttributeToPlayer(TSubclassOf<UDamageType> DamageTyp
 	if (!DamageType) return false;
 	return AlwaysAttributeToPlayer.Contains(DamageType);
 }
-
-const FMovementActionConfig* UXPConfig::GetMovementConfig(EMovementAction Action) const
-{
-	return MovementActions.Find(Action);
-}

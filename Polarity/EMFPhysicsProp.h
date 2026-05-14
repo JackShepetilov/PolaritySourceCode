@@ -17,6 +17,7 @@ class UNiagaraSystem;
 class USoundBase;
 class UMaterialInterface;
 class UAnimMontage;
+class UCurveFloat;
 class UGeometryCollection;
 class AGeometryCollectionActor;
 
@@ -337,13 +338,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
 	float ExplosionMinCharge = 5.0f;
 
-	/** Damage dealt to NPC on weak impact (no explosion). Should be lower than ExplosionDamage. */
+	/** Damage dealt to NPC on weak impact (no explosion). Used as fallback when WeakImpactDamageByCharge is null. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", EditCondition = "bCanExplode"))
 	float WeakImpactDamage = 15.0f;
 
-	/** Stun duration on weak impact (seconds). Should be shorter than ExplosionStunDuration. */
+	/** Curve mapping |charge| at impact (X) to weak-impact damage (Y). If null, falls back to WeakImpactDamage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (EditCondition = "bCanExplode"))
+	TObjectPtr<UCurveFloat> WeakImpactDamageByCharge;
+
+	/** Stun duration on weak impact (seconds). Used as fallback when WeakImpactStunDurationByCharge is null. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "bCanExplode"))
 	float WeakImpactStunDuration = 0.5f;
+
+	/** Curve mapping |charge| at impact (X) to stun duration in seconds (Y). If null, falls back to WeakImpactStunDuration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (EditCondition = "bCanExplode"))
+	TObjectPtr<UCurveFloat> WeakImpactStunDurationByCharge;
 
 	/** Optional montage played on stunned NPC. If null, NPC's default knockback montage is used. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Explosive Impact|Weak Impact", meta = (EditCondition = "bCanExplode"))

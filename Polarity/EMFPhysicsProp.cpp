@@ -2,6 +2,7 @@
 // Physics-simulated prop with full EMF system integration
 
 #include "EMFPhysicsProp.h"
+#include "Curves/CurveFloat.h"
 #include "Engine/DamageEvents.h"
 #include "EMFChannelingPlateActor.h"
 #include "EMF_FieldComponent.h"
@@ -1009,18 +1010,28 @@ void AEMFPhysicsProp::ApplyWeakImpactToNPC(AShooterNPC* HitNPC, const FVector& I
 		return;
 	}
 
+	// Evaluate damage/stun from charge-driven curves (fall back to flat values if curve is null).
+	// Sampled before the charge transfer below so the impact reflects the prop's charge at the moment of contact.
+	const float AbsChargeAtImpact = FMath::Abs(GetCharge());
+	const float ResolvedDamage = WeakImpactDamageByCharge
+		? WeakImpactDamageByCharge->GetFloatValue(AbsChargeAtImpact)
+		: WeakImpactDamage;
+	const float ResolvedStunDuration = WeakImpactStunDurationByCharge
+		? WeakImpactStunDurationByCharge->GetFloatValue(AbsChargeAtImpact)
+		: WeakImpactStunDuration;
+
 	// 1. Damage
-	if (WeakImpactDamage > 0.0f)
+	if (ResolvedDamage > 0.0f)
 	{
 		FDamageEvent WeakEvent;
 		WeakEvent.DamageTypeClass = UDamageType_EMFProximity::StaticClass();
-		HitNPC->TakeDamage(WeakImpactDamage, WeakEvent, nullptr, this);
+		HitNPC->TakeDamage(ResolvedDamage, WeakEvent, nullptr, this);
 	}
 
 	// 2. Stun (short, separate from explosion stun)
-	if (WeakImpactStunDuration > 0.0f && !HitNPC->IsDead())
+	if (ResolvedStunDuration > 0.0f && !HitNPC->IsDead())
 	{
-		HitNPC->ApplyExplosionStun(WeakImpactStunDuration, WeakImpactStunMontage);
+		HitNPC->ApplyExplosionStun(ResolvedStunDuration, WeakImpactStunMontage);
 	}
 
 	// 3. Charge transfer: WeakImpactChargeShareRatio of prop's charge goes to NPC, the rest stays

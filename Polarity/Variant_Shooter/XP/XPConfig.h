@@ -50,9 +50,6 @@ public:
 	/** True if the given DamageType is in AlwaysAttributeToPlayer (skip Causer/Instigator check). */
 	bool ShouldAlwaysAttributeToPlayer(TSubclassOf<UDamageType> DamageType) const;
 
-	/** Per-action parameters for Movement XP (consumed by MovementXPTracker — Stage Б). */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Movement")
-	TMap<EMovementAction, FMovementActionConfig> MovementActions;
 
 	// === Helpers ===
 
@@ -68,7 +65,4 @@ public:
 
 	/** Resolves DamageType to skill category. Returns false if unmapped. */
 	bool GetSkillForDamageType(TSubclassOf<UDamageType> DamageType, ESkillCategory& OutCategory) const;
-
-	/** Returns nullptr if no entry for this action. */
-	const FMovementActionConfig* GetMovementConfig(EMovementAction Action) const;
 };

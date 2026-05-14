@@ -338,3 +338,196 @@ bool UXPSubsystem::WasKillCausedByPlayer(AActor* DamageCauser) const
 	if (DamageCauser->GetOwner() == PlayerPawn) return true;
 	return false;
 }
+
+// ==================== Debug Console Commands ====================
+//
+// All commands are registered via FAutoConsoleCommandWithWorldAndArgs (static, global).
+// Open the in-game console (` key) and type the command name. Tab-completion works.
+//
+// Examples:
+//   polarity.xp.add Melee 500
+//   polarity.xp.add 1 500          (1 == Melee, indices 0..3)
+//   polarity.xp.levelup Weapon
+//   polarity.xp.show
+//   polarity.run.start
+//   polarity.run.enterarena 0
+
+namespace XPDebugCommands
+{
+	static UXPSubsystem* GetXP(UWorld* World)
+	{
+		if (!World) return nullptr;
+		UGameInstance* GI = World->GetGameInstance();
+		return GI ? GI->GetSubsystem<UXPSubsystem>() : nullptr;
+	}
+
+	static URunSubsystem* GetRun(UWorld* World)
+	{
+		if (!World) return nullptr;
+		UGameInstance* GI = World->GetGameInstance();
+		return GI ? GI->GetSubsystem<URunSubsystem>() : nullptr;
+	}
+
+	static const TCHAR* SkillName(ESkillCategory Cat)
+	{
+		switch (Cat)
+		{
+			case ESkillCategory::Movement: return TEXT("Movement");
+			case ESkillCategory::Melee:    return TEXT("Melee");
+			case ESkillCategory::EMF:      return TEXT("EMF");
+			case ESkillCategory::Weapon:   return TEXT("Weapon");
+		}
+		return TEXT("?");
+	}
+
+	static bool ParseSkill(const FString& Str, ESkillCategory& OutCat)
+	{
+		if (Str.Equals(TEXT("Movement"), ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::Movement; return true; }
+		if (Str.Equals(TEXT("Melee"),    ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::Melee;    return true; }
+		if (Str.Equals(TEXT("EMF"),      ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::EMF;      return true; }
+		if (Str.Equals(TEXT("Weapon"),   ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::Weapon;   return true; }
+		if (Str.IsNumeric())
+		{
+			const int32 V = FCString::Atoi(*Str);
+			if (V >= 0 && V <= 3) { OutCat = static_cast<ESkillCategory>(V); return true; }
+		}
+		return false;
+	}
+
+	static void CmdAddXP(const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.xp.add <Movement|Melee|EMF|Weapon|0..3> <amount>"));
+			return;
+		}
+		ESkillCategory Cat;
+		if (!ParseSkill(Args[0], Cat))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Unknown skill: '%s'. Use Movement / Melee / EMF / Weapon or 0..3"), *Args[0]);
+			return;
+		}
+		const int32 Amount = FCString::Atoi(*Args[1]);
+		if (Amount <= 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Amount must be positive, got %d"), Amount);
+			return;
+		}
+		UXPSubsystem* XP = GetXP(World);
+		if (!XP) { UE_LOG(LogTemp, Warning, TEXT("XPSubsystem not found")); return; }
+
+		URunSubsystem* Run = GetRun(World);
+		if (Run && !Run->IsRunActive())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Run not active — call polarity.run.start first (or AddSkillXP will be a no-op)"));
+		}
+
+		XP->AddSkillXP(Cat, Amount);
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] cmd: +%d XP to %s (total %d, level %d)"),
+			Amount, SkillName(Cat), XP->GetCurrentXP(Cat), XP->GetCurrentLevel(Cat));
+	}
+
+	static void CmdLevelUp(const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.xp.levelup <Movement|Melee|EMF|Weapon|0..3>"));
+			return;
+		}
+		ESkillCategory Cat;
+		if (!ParseSkill(Args[0], Cat))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Unknown skill: '%s'"), *Args[0]);
+			return;
+		}
+		UXPSubsystem* XP = GetXP(World);
+		if (!XP) return;
+		const int32 ToNext = XP->GetXPToNextLevel(Cat);
+		if (ToNext == INT32_MAX)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] %s already at max level"), SkillName(Cat));
+			return;
+		}
+		XP->AddSkillXP(Cat, FMath::Max(1, ToNext));
+	}
+
+	static void CmdShow(const TArray<FString>& /*Args*/, UWorld* World)
+	{
+		UXPSubsystem* XP = GetXP(World);
+		if (!XP) { UE_LOG(LogTemp, Warning, TEXT("XPSubsystem not found")); return; }
+
+		URunSubsystem* Run = GetRun(World);
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] === Skill Status (run %s) ==="),
+			(Run && Run->IsRunActive()) ? TEXT("ACTIVE") : TEXT("INACTIVE"));
+
+		for (int32 i = 0; i <= 3; ++i)
+		{
+			const ESkillCategory Cat = static_cast<ESkillCategory>(i);
+			const int32 ToNext = XP->GetXPToNextLevel(Cat);
+			UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG]   %-10s  XP=%-6d  Lv=%-3d  ToNext=%s"),
+				SkillName(Cat),
+				XP->GetCurrentXP(Cat),
+				XP->GetCurrentLevel(Cat),
+				(ToNext == INT32_MAX) ? TEXT("MAX") : *FString::FromInt(ToNext));
+		}
+	}
+
+	static void CmdRunStart(const TArray<FString>& /*Args*/, UWorld* World)
+	{
+		URunSubsystem* Run = GetRun(World);
+		if (!Run) { UE_LOG(LogTemp, Warning, TEXT("RunSubsystem not found")); return; }
+		Run->StartRun();
+	}
+
+	static void CmdRunEnd(const TArray<FString>& Args, UWorld* World)
+	{
+		URunSubsystem* Run = GetRun(World);
+		if (!Run) return;
+		ERunEndReason Reason = ERunEndReason::Aborted;
+		if (Args.Num() > 0)
+		{
+			if      (Args[0].Equals(TEXT("Death"),   ESearchCase::IgnoreCase)) Reason = ERunEndReason::PlayerDeath;
+			else if (Args[0].Equals(TEXT("Victory"), ESearchCase::IgnoreCase)) Reason = ERunEndReason::Victory;
+			else if (Args[0].Equals(TEXT("Quit"),    ESearchCase::IgnoreCase)) Reason = ERunEndReason::QuitToMenu;
+		}
+		Run->EndRun(Reason);
+	}
+
+	static void CmdRunEnterArena(const TArray<FString>& Args, UWorld* World)
+	{
+		URunSubsystem* Run = GetRun(World);
+		if (!Run) return;
+		const int32 Idx = (Args.Num() > 0) ? FCString::Atoi(*Args[0]) : 0;
+		Run->EnterArena(Idx);
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPAdd(
+	TEXT("polarity.xp.add"),
+	TEXT("Add XP to a skill. Usage: polarity.xp.add <Movement|Melee|EMF|Weapon|0..3> <amount>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdAddXP));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPLevelUp(
+	TEXT("polarity.xp.levelup"),
+	TEXT("Adds just enough XP to trigger one level-up in the given skill. Usage: polarity.xp.levelup <skill>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdLevelUp));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPShow(
+	TEXT("polarity.xp.show"),
+	TEXT("Logs current XP / level / XP-to-next for all four skills."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdShow));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunStart(
+	TEXT("polarity.run.start"),
+	TEXT("Start a roguelite run (resets all skills, fires OnRunStarted)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunStart));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunEnd(
+	TEXT("polarity.run.end"),
+	TEXT("End the current run. Usage: polarity.run.end [Death|Victory|Quit|Aborted]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunEnd));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunEnterArena(
+	TEXT("polarity.run.enterarena"),
+	TEXT("Enter arena by index (re-binds NPC death handlers). Usage: polarity.run.enterarena [idx=0]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunEnterArena));

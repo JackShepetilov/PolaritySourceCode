@@ -993,20 +993,22 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		}
 
 		float ActualDamage = BestTarget->TakeDamage(FinalDamage, DamageEvent, PawnOwner ? PawnOwner->GetController() : nullptr, this);
+		const bool bKilled = IsActorDeadAfterDamage(BestTarget);
 
-		// Notify weapon owner about hit (for hitmarkers)
+		// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
 		if (WeaponOwner && ActualDamage > 0.0f)
 		{
-			bool bKilled = IsActorDeadAfterDamage(BestTarget);
 			WeaponOwner->OnWeaponHit(BestHitLocation, BestToHitDir, ActualDamage, bBestIsHeadshot, bKilled);
+		}
 
-			// Notify upgrade system about dealt damage
-			if (PawnOwner)
+		// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits.
+		// Suppression Fire / future hitscan-on-hit upgrades depend on this firing for the pistol.
+		// Per-upgrade filters (e.g. SF's IsHitscan + ShooterNPC check) live in OnOwnerDealtDamage.
+		if (PawnOwner)
+		{
+			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
 			{
-				if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
-				{
-					UpgradeMgr->NotifyOwnerDealtDamage(BestTarget, ActualDamage, bKilled);
-				}
+				UpgradeMgr->NotifyOwnerDealtDamage(BestTarget, ActualDamage, bKilled);
 			}
 		}
 
@@ -1185,18 +1187,20 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â£ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°)
+	// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
 	if (WeaponOwner && ActualDamage > 0.0f)
 	{
 		FVector HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
 		WeaponOwner->OnWeaponHit(Hit.ImpactPoint, HitDirection, ActualDamage, bIsHeadshot, bKilled);
+	}
 
-		// Notify upgrade system about dealt damage
-		if (PawnOwner)
+	// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits.
+	// Suppression Fire / future hitscan-on-hit upgrades depend on this firing for the pistol.
+	if (PawnOwner)
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
 		{
-			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
-			{
-				UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
-			}
+			UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
 		}
 	}
 
@@ -1353,6 +1357,17 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: PASSED, applying charge to %s"), *Target->GetName());
+
+	// Notify upgrade system of ionization-eligible hit. Fires once per valid hit regardless
+	// of whether the target was already at max charge — upgrades (e.g. PistolStun) gate
+	// per-target spam themselves via their own cooldowns.
+	if (PawnOwner)
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+		{
+			UpgradeMgr->NotifyOwnerHitscanIonized(Target);
+		}
+	}
 
 	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())

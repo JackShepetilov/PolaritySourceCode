@@ -88,6 +88,13 @@ protected:
 	/** Called when the owner deals damage to a target */
 	virtual void OnOwnerDealtDamage(AActor* Target, float Damage, bool bKilled) {}
 
+	/**
+	 * Called whenever the owner's hitscan ionization successfully applies charge to a target.
+	 * Independent of damage — fires for 0-damage ionizer hits (wave pistol).
+	 * Sourced from AShooterWeapon::ApplyHitscanIonization after shield-block check and charge transfer.
+	 */
+	virtual void OnHitscanIonized(AActor* Target) {}
+
 	/** Called when owner collects a health pickup while at full HP */
 	virtual void OnHealthPickupCollectedAtFullHP() {}
 
