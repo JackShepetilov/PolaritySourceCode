@@ -156,13 +156,94 @@ void UUpgrade_X::ApplyForLevel(int32 Level)
 
 ---
 
-## Reference-имплементация: AirDash
+## Reference-имплементации
 
-См. файлы `UpgradeDefinition_AirDash.h/.cpp` и `Upgrade_AirDash.h/.cpp`.
+### AirDash (multi-level, modifies shared settings)
+
+См. `UpgradeDefinition_AirDash.h/.cpp` и `Upgrade_AirDash.h/.cpp`.
 
 - `FAirDashLevelData`: `MaxCharges`, `CooldownSeconds`, `ImpulseMultiplier`.
 - `Upgrade_AirDash` модифицирует `ApexMovementComponent->MovementSettings` (shared DataAsset!), поэтому используется паттерн **CaptureBaseline + RevertToBaseline**.
 - Дополнительно: при level-up синхронизируется `RemainingAirDashCount`, чтобы новые charges работали сразу, без приземления.
+
+### Combo (multi-level, gameplay event subscriber)
+
+См. `UpgradeDefinition_Combo.h/.cpp` и `Upgrade_Combo.h/.cpp`.
+
+- `FComboLevelData`: `ResetWindow`, `ComboCountToMultiplier` (curve), `MaxMultiplier`, `bResetOnMiss`.
+- Подписан на `OnMeleeHit` (fist) и `OnMeleeWeaponHit` (sword) + `OnMeleeAttackStarted/Ended` для детекции промахов.
+- На `OnLevelChanged` пересчитывает multiplier с новой curve без сброса текущего combo.
+- Передаёт multiplier downstream через `MeleeAttackComponent::ApplyComboSpeedMultiplier` и `AShooterWeapon_Melee::ApplyComboSpeedMultiplier`.
+
+### Backstab (single-level в multi-level shape)
+
+См. `UpgradeDefinition_Backstab.h` и `Upgrade_Backstab.h/.cpp`.
+
+- Single-level упгрейд, но всё равно использует `TArray<FBackstabLevelData>` с одним элементом. Это позволяет дизайнеру добавить Lv 2 одной строкой массива позже, без рефактора кода.
+- Демонстрирует override `GetMeleeDamageMultiplier(Target)` — возвращает `LD.DamageMultiplier` при выполнении условий (stunned + back cone), иначе 1.0f.
+- Stateless: нет state'а в компоненте, все условия пересчитываются на каждый вызов multiplier'а.
+
+### ChargedPunch (shared resource consumer)
+
+См. `UpgradeDefinition_ChargedPunch.h` и `Upgrade_ChargedPunch.h/.cpp`.
+
+- Потребитель **shared health-pickup pool** на `UUpgradeManagerComponent` (см. ниже).
+- Подписан на `AShooterCharacter::OnMeleeChargeHoldStarted/Released` для hold-detection.
+- Демонстрирует mesh-swap через `UMeleeAttackComponent::EnterMeleeMeshView/ExitMeleeMeshView` для проигрывания собственного монтажа в FP-виде.
+
+---
+
+## Доступные hooks (virtual на UUpgradeComponent)
+
+Переопределяй только нужные тебе — все имеют пустые default-реализации.
+
+### Lifecycle
+
+| Hook | Когда вызывается | Назначение |
+|---|---|---|
+| `OnUpgradeActivated()` | Первый грант, `CurrentLevel = 1` | One-time setup (биндинги, флаги). Часто вызывай `ApplyForLevel(CurrentLevel)` в конце. |
+| `OnUpgradeDeactivated()` | Removal / cleanup (death-reset, smerть) | Anti-setup: отвязать делегаты, восстановить shared values. |
+| `OnLevelChanged(Old, New)` | Repeat grant (Lv N → N+1), **не** на первом | Применить новые per-level параметры. Не повторяй here то что уже делает OnUpgradeActivated. |
+
+### Event hooks (вызываются UUpgradeManagerComponent::Notify*)
+
+| Hook | Кто броадкастит | Использовать для |
+|---|---|---|
+| `OnWeaponFired()` | `AShooterWeapon::OnShotFired` через manager | Hitscan/projectile-based триггеры (Charge Flip, 360 Shot). |
+| `OnWeaponChanged(Old, New)` | `ShooterCharacter` при swap | Re-bind на новое оружие (например, Combo для меча). |
+| `OnOwnerTookDamage(Dmg, Causer)` | `ShooterCharacter::TakeDamage` | Defensive triggers (cooldown sense, panic effects). |
+| `OnOwnerDealtDamage(Tgt, Dmg, Killed)` | `ShooterCharacter` при applied damage | On-kill бонусы, chain triggers. |
+| `OnHealthPickupCollectedAtFullHP()` | `HealthPickup` через manager | Сейчас используется только для cosmetics — пул HP-пикапов теперь инкрементится централизованно в `Notify` сам, не в hook'е. |
+
+### Damage multipliers (query'ятся при applied damage)
+
+| Hook | Кто опрашивает | Когда |
+|---|---|---|
+| `GetDamageMultiplier(Target)` | `AShooterWeapon::ApplyHitscanDamage` через `UpgradeMgr->GetCombinedDamageMultiplier` | Перед `TakeDamage` хитсканом. |
+| `GetMeleeDamageMultiplier(Target)` | `MeleeAttackComponent::ApplyDamage` + `ShooterWeapon_Melee::ApplyMeleeDamage` через `UpgradeMgr->GetCombinedMeleeDamageMultiplier` | Перед `TakeDamage` мили (кулак ИЛИ меч). Используется в **Backstab**. |
+
+`1.0` = без изменения, `>1.0` = бонус, `<1.0` = штраф. Множители всех активных апгрейдов перемножаются.
+
+### Делегаты на ShooterCharacter (для hold-based апгрейдов)
+
+Не часть UpgradeComponent, но часто используются:
+
+| Delegate | Когда фирится | Использует |
+|---|---|---|
+| `OnMeleeChargeHoldStarted` | Press melee button (Started) | ChargedPunch — старт hold-timer |
+| `OnMeleeChargeHoldReleased` | Release melee button (Completed) | ChargedPunch — finalize/cancel |
+
+---
+
+## Shared resources
+
+Если апгрейд использует **разделяемый между апгрейдами ресурс** (типа HP-пула):
+
+- Храни ресурс на `UUpgradeManagerComponent` (или другом компоненте character'а), **не** в самом upgrade'е.
+- Используй multicast delegate для UI/SFX subscribers.
+- Каждый потребитель в `OnUpgradeActivated` может поднять cap ресурса если его definition требует больше дефолтного.
+
+Reference: `UUpgradeManagerComponent::StoredHealthPickups` + `Add/Consume/ResetStoredHealthPickups` API. Используется `Upgrade_HealthBlast` (расходует весь пул на шотган) и `Upgrade_ChargedPunch` (тратит N в секунду).
 
 ---
 
