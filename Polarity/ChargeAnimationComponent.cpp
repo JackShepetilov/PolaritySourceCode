@@ -942,7 +942,8 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 				const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
 				const float DistSq = ToTarget.SizeSquared();
-				if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+				const float NPCCaptureRange = EvaluateCaptureRange(FMath::Abs(NPCCharge));
+				if (NPCCaptureRange < 1.0f || DistSq > NPCCaptureRange * NPCCaptureRange || DistSq < 1.0f)
 				{
 					continue;
 				}
@@ -1263,7 +1264,8 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 			const FVector ToTarget = Prop->GetActorLocation() - CameraLoc;
 			const float DistSq = ToTarget.SizeSquared();
-			if (DistSq > SearchRadiusSq || DistSq < 1.0f)
+			const float PropCaptureRange = EvaluateCaptureRange(FMath::Abs(Prop->GetCharge()));
+			if (PropCaptureRange < 1.0f || DistSq > PropCaptureRange * PropCaptureRange || DistSq < 1.0f)
 			{
 				continue;
 			}
