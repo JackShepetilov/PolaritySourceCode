@@ -116,6 +116,15 @@ protected:
 	 */
 	virtual float GetMeleeDamageMultiplier(AActor* Target) const { return 1.0f; }
 
+	/**
+	 * Return a multiplier this upgrade applies to MELEE knockback distance on the target.
+	 * Called by MeleeAttackComponent just before forwarding the knockback to AShooterNPC::ApplyKnockback.
+	 * Multipliers from all active upgrades are combined (multiplicatively).
+	 * @param Target The actor being struck
+	 * @return Multiplier (1.0 = no change, >1.0 = stronger knockback, <1.0 = weaker)
+	 */
+	virtual float GetMeleeKnockbackDistanceMultiplier(AActor* Target) const { return 1.0f; }
+
 private:
 
 	/** Cached owner reference */

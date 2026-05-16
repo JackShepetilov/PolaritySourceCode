@@ -60,6 +60,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ammo")
 	int32 SpawnedBulletCount = -1;
 
+	/** When true, this drop auto-rolls SpawnedBulletCount in BeginPlay so the granted weapon
+	 *  behaves like a yanked one: limited bullet pool on pickup, auto-discarded when empty.
+	 *  Lets death-drop blueprints opt into the yank-style single-use behavior without code
+	 *  changes on the spawn site. Ignored if RollSpawnedBulletCount() already ran (yank path). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo")
+	bool bForceLimitedAmmo = false;
+
 	// ==================== Capture Settings ====================
 
 	/** Can be captured by channeling? */
@@ -135,6 +142,13 @@ public:
 
 	/** Begin scripted pull toward camera-relative target */
 	void StartPull(AShooterCharacter* PullingPlayer);
+
+	/** Class of the weapon the player was holding when StartPull fired. Captured so the
+	 *  Bandolier-pickup check at CompletePull uses the class at pull-START — the player may
+	 *  have switched weapons during the pull and we want pull-time intent, not current state.
+	 *  Null if pull never started or player was unarmed. */
+	UPROPERTY()
+	TSubclassOf<AShooterWeapon> PullingClientCurrentWeaponClass;
 
 	/** Is currently being pulled toward player? */
 	bool IsBeingPulled() const { return bIsBeingPulled; }

@@ -2195,13 +2195,17 @@ static void DiscardYankedWeaponShared(
 		AShooterWeapon* OldCurrent = CurrentWeapon;
 		CurrentWeapon->DeactivateWeapon();
 
-		AShooterWeapon* Replacement = nullptr;
-		for (AShooterWeapon* W : OwnedWeapons)
+		// Bandolier: prefer a reserve copy of the same class over the generic non-yanked fallback.
+		AShooterWeapon* Replacement = Self->PromoteReserveCopyOfClass(YankedWeapon->GetClass());
+		if (!Replacement)
 		{
-			if (W && !W->bWasYanked)
+			for (AShooterWeapon* W : OwnedWeapons)
 			{
-				Replacement = W;
-				break;
+				if (W && !W->bWasYanked)
+				{
+					Replacement = W;
+					break;
+				}
 			}
 		}
 
@@ -2363,21 +2367,29 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 		return;
 	}
 
-	// Find a non-yanked replacement to raise after the lower phase.
-	AShooterWeapon* Replacement = nullptr;
-	for (AShooterWeapon* W : OwnedWeapons)
+	// Remove the yanked weapon from inventory now (so PromoteReserveCopyOfClass / the non-yanked
+	// fallback below don't accidentally pick it up). CurrentWeapon may still point to Yanked —
+	// that's intentional, BeginWeaponLower needs a non-null current to lower. Actor destruction
+	// is scheduled below.
+	OwnedWeapons.Remove(Yanked);
+
+	// Bandolier: prefer a reserve copy of the same class over the generic non-yanked fallback.
+	// If present, promote it into OwnedWeapons so FinishWeaponSwitch's ActivateWeapon attaches +
+	// un-hides it correctly.
+	AShooterWeapon* Replacement = PromoteReserveCopyOfClass(Yanked->GetClass());
+
+	// Fallback: non-yanked weapon (starter pistol, melee) as before.
+	if (!Replacement)
 	{
-		if (W && W != Yanked && !W->bWasYanked)
+		for (AShooterWeapon* W : OwnedWeapons)
 		{
-			Replacement = W;
-			break;
+			if (W && W != Yanked && !W->bWasYanked)
+			{
+				Replacement = W;
+				break;
+			}
 		}
 	}
-
-	// Remove the yanked weapon from inventory now (so other systems don't find it).
-	// CurrentWeapon may still point to Yanked — that's intentional, BeginWeaponLower needs
-	// a non-null current to lower. We schedule actor destruction below.
-	OwnedWeapons.Remove(Yanked);
 
 	if (Replacement)
 	{
@@ -2789,6 +2801,128 @@ AShooterWeapon* AShooterCharacter::FindWeaponOfType(TSubclassOf<AShooterWeapon> 
 	}
 
 	return nullptr;
+}
+
+int32 AShooterCharacter::CountYankedCopiesOfClass(TSubclassOf<AShooterWeapon> WeaponClass) const
+{
+	if (!WeaponClass) return 0;
+
+	int32 Count = 0;
+	for (const AShooterWeapon* W : OwnedWeapons)
+	{
+		if (W && W->bHasLimitedAmmo && W->IsA(WeaponClass)) { ++Count; }
+	}
+	for (const AShooterWeapon* W : ReserveWeapons)
+	{
+		if (W && W->bHasLimitedAmmo && W->IsA(WeaponClass)) { ++Count; }
+	}
+	return Count;
+}
+
+AShooterWeapon* AShooterCharacter::AddYankedReserveCopy(TSubclassOf<AShooterWeapon> WeaponClass,
+	TSubclassOf<ADroppedRangedWeapon> SourceDropClass,
+	int32 BulletCount)
+{
+	if (!WeaponClass) return nullptr;
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::MultiplyWithRoot;
+
+	AShooterWeapon* Reserve = GetWorld()->SpawnActor<AShooterWeapon>(WeaponClass, GetActorTransform(), SpawnParams);
+	if (!Reserve)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] AddYankedReserveCopy — SpawnActor failed for %s"),
+			*WeaponClass->GetName());
+		return nullptr;
+	}
+
+	// Hide before any visibility paint hits the screen. ActivateWeapon later un-hides.
+	Reserve->SetActorHiddenInGame(true);
+
+	Reserve->bWasYanked = true;
+	Reserve->bHasLimitedAmmo = true;
+	Reserve->SourceYankDropClass = SourceDropClass;
+	Reserve->SetBulletCount(BulletCount);
+
+	ReserveWeapons.Add(Reserve);
+
+	UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] Stashed reserve %s with %d bullets (reserve count for class now %d)"),
+		*Reserve->GetName(), BulletCount, CountYankedCopiesOfClass(WeaponClass));
+
+	return Reserve;
+}
+
+void AShooterCharacter::SpillBulletsIntoYankedCopiesOfClass(TSubclassOf<AShooterWeapon> WeaponClass, int32 BulletsToSpill)
+{
+	if (!WeaponClass || BulletsToSpill <= 0) return;
+
+	// Build the fill order: CurrentWeapon (if it matches), then other yanked OwnedWeapons of class,
+	// then ReserveWeapons. Each copy gets topped up to its MagazineSize.
+	TArray<AShooterWeapon*> FillOrder;
+	if (CurrentWeapon && CurrentWeapon->bHasLimitedAmmo && CurrentWeapon->IsA(WeaponClass))
+	{
+		FillOrder.Add(CurrentWeapon);
+	}
+	for (AShooterWeapon* W : OwnedWeapons)
+	{
+		if (W && W != CurrentWeapon && W->bHasLimitedAmmo && W->IsA(WeaponClass))
+		{
+			FillOrder.Add(W);
+		}
+	}
+	for (AShooterWeapon* W : ReserveWeapons)
+	{
+		if (W && W->bHasLimitedAmmo && W->IsA(WeaponClass))
+		{
+			FillOrder.Add(W);
+		}
+	}
+
+	int32 Remaining = BulletsToSpill;
+	for (AShooterWeapon* W : FillOrder)
+	{
+		if (Remaining <= 0) break;
+
+		const int32 Headroom = W->GetMagazineSize() - W->GetBulletCount();
+		if (Headroom <= 0) continue;
+
+		const int32 Add = FMath::Min(Headroom, Remaining);
+		W->SetBulletCount(W->GetBulletCount() + Add);
+		Remaining -= Add;
+
+		UE_LOG(LogTemp, Log, TEXT("[BANDOLIER] Spilled %d into %s (now %d/%d), %d left"),
+			Add, *W->GetName(), W->GetBulletCount(), W->GetMagazineSize(), Remaining);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] Spill for %s: %d total bullets, %d wasted (all mags full)"),
+		*WeaponClass->GetName(), BulletsToSpill, Remaining);
+}
+
+AShooterWeapon* AShooterCharacter::PromoteReserveCopyOfClass(TSubclassOf<AShooterWeapon> WeaponClass)
+{
+	if (!WeaponClass) return nullptr;
+
+	AShooterWeapon* Promoted = nullptr;
+	for (AShooterWeapon* W : ReserveWeapons)
+	{
+		if (W && W->IsA(WeaponClass)) { Promoted = W; break; }
+	}
+
+	if (!Promoted) return nullptr;
+
+	ReserveWeapons.Remove(Promoted);
+	OwnedWeapons.Add(Promoted);
+
+	// ActivateWeapon (called by the equip path right after this) will SetActorHiddenInGame(false)
+	// and attach the meshes — no need to do either here.
+
+	UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] Promoted reserve %s into OwnedWeapons (%d reserves left)"),
+		*Promoted->GetName(), ReserveWeapons.Num());
+
+	return Promoted;
 }
 
 // ==================== Damage Feedback ====================

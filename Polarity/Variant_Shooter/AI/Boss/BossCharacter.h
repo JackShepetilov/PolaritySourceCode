@@ -548,7 +548,7 @@ public:
 	// ==================== Knockback Override ====================
 
 	/** Override to ignore knockback during finisher phase */
-	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
+	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false, EKnockbackStyle Style = EKnockbackStyle::Standard) override;
 
 protected:
 	/** Teleport boss to finisher position with VFX */

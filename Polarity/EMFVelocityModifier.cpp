@@ -49,6 +49,12 @@ void UEMFVelocityModifier::BeginPlay()
 	{
 		MovementComponent = Cast<UApexMovementComponent>(Character->GetCharacterMovement());
 
+		UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s BeginPlay: CMC class=%s, IsApex=%d, bEnableViscousCapture(default)=%d"),
+			*Owner->GetName(),
+			Character->GetCharacterMovement() ? *Character->GetCharacterMovement()->GetClass()->GetName() : TEXT("null"),
+			MovementComponent != nullptr,
+			bEnableViscousCapture);
+
 		if (MovementComponent)
 		{
 			MovementComponent->RegisterVelocityModifier(this);
@@ -73,6 +79,18 @@ void UEMFVelocityModifier::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 bool UEMFVelocityModifier::ModifyVelocity_Implementation(float DeltaTime, const FVector& CurrentVelocity, FVector& OutVelocityDelta)
 {
+	// Periodic diagnostic — fires ~4x/sec when NPC is captured, to verify path is alive
+	if (CapturingPlate.IsValid())
+	{
+		static int32 LogCounter = 0;
+		if (++LogCounter % 15 == 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] %s ModifyVelocity: bEnabled=%d, bViscous=%d, Plate=%s, ReverseMode=%d, CurrentVel=%s"),
+				GetOwner() ? *GetOwner()->GetName() : TEXT("?"), bEnabled, bEnableViscousCapture,
+				*CapturingPlate->GetName(), CapturingPlate->IsInReverseMode(), *CurrentVelocity.ToCompactString());
+		}
+	}
+
 	if (!bEnabled)
 	{
 		OutVelocityDelta = FVector::ZeroVector;
@@ -1193,26 +1211,6 @@ void UEMFVelocityModifier::TickComponent(float DeltaTime, ELevelTick TickType, F
 		ProjectileForceMultiplier = FMath::Lerp(1.0f, ProjectileForceAtMaxSpeed, Alpha);
 	}
 
-	// Fallback path for owners not using ApexMovementComponent (NPCs use plain UCharacterMovementComponent).
-	// Apex calls ModifyVelocity each frame via ApplyVelocityModifiers; plain CMC has no such hook, so capture
-	// pull-to-plate and reverse-launch never run. Mirror that work here when no Apex component is registered.
-	if (!MovementComponent && bEnabled && CapturingPlate.IsValid() && bEnableViscousCapture)
-	{
-		if (ACharacter* Char = Cast<ACharacter>(GetOwner()))
-		{
-			if (UCharacterMovementComponent* CMC = Char->GetCharacterMovement())
-			{
-				FVector VelocityDelta = FVector::ZeroVector;
-				if (Execute_ModifyVelocity(this, DeltaTime, CMC->Velocity, VelocityDelta))
-				{
-					if (!VelocityDelta.IsNearlyZero())
-					{
-						CMC->Velocity += VelocityDelta;
-					}
-				}
-			}
-		}
-	}
 }
 
 void UEMFVelocityModifier::AddBonusCharge(float Amount)

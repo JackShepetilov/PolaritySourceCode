@@ -2595,7 +2595,7 @@ void AKamikazeDroneNPC::DeathDestroy()
 
 // ==================== Knockback Overrides (FlyingDrone pattern) ====================
 
-void AKamikazeDroneNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
+void AKamikazeDroneNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
 	// Don't apply knockback if parried — we control movement ourselves
 	if (bIsInKnockback || bIsParried)
@@ -2623,7 +2623,7 @@ void AKamikazeDroneNPC::ApplyKnockback(const FVector& InKnockbackDirection, floa
 		}
 	}
 
-	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled);
+	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 }
 
 void AKamikazeDroneNPC::EndKnockbackStun()

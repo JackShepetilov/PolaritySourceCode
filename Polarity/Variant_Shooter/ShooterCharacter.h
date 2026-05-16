@@ -329,6 +329,13 @@ protected:
 	/** Weapon currently equipped and ready to shoot with */
 	TObjectPtr<AShooterWeapon> CurrentWeapon;
 
+	/** Reserve copies of yanked weapons held by the Bandolier upgrade. Hidden actors with
+	 *  bullet state preserved; not in OwnedWeapons, not seen by FindWeaponOfType or the
+	 *  switch keys. Promoted into OwnedWeapons when the active copy of the same class is
+	 *  discarded (empty-mag throw, hold-throw). */
+	UPROPERTY()
+	TArray<AShooterWeapon*> ReserveWeapons;
+
 	// ==================== Weapon Switch Animation ====================
 
 	/** True while weapon switch animation is in progress */
@@ -1264,6 +1271,31 @@ public:
 
 	/** Find an owned weapon of the given class (or subclass). Returns nullptr if not found. */
 	AShooterWeapon* FindWeaponOfType(TSubclassOf<AShooterWeapon> WeaponClass) const;
+
+	/** Count weapons of WeaponClass in OwnedWeapons + ReserveWeapons that are yank-acquired
+	 *  (bHasLimitedAmmo). Starter weapons (infinite ammo) are excluded — they don't compete
+	 *  for Bandolier capacity. Used by the Bandolier-pickup branch to decide reserve-add vs
+	 *  ammo-spill. */
+	int32 CountYankedCopiesOfClass(TSubclassOf<AShooterWeapon> WeaponClass) const;
+
+	/** Spawn a hidden, non-activated AShooterWeapon of WeaponClass and put it in ReserveWeapons.
+	 *  Tags it as bWasYanked + bHasLimitedAmmo with the provided BulletCount and SourceDropClass.
+	 *  Used by DroppedRangedWeapon::CompletePull when Bandolier capacity allows another copy. */
+	AShooterWeapon* AddYankedReserveCopy(TSubclassOf<AShooterWeapon> WeaponClass,
+		TSubclassOf<class ADroppedRangedWeapon> SourceDropClass,
+		int32 BulletCount);
+
+	/** Spread BulletsToSpill across all yanked copies of WeaponClass (CurrentWeapon first if it
+	 *  matches, then other yanked in OwnedWeapons, then ReserveWeapons). Stops once Bullets
+	 *  reaches 0 or all are full. Excess is dropped on the floor. Used by the Bandolier-overflow
+	 *  branch of CompletePull. */
+	void SpillBulletsIntoYankedCopiesOfClass(TSubclassOf<AShooterWeapon> WeaponClass, int32 BulletsToSpill);
+
+	/** If a reserve copy of WeaponClass exists, move it from ReserveWeapons → OwnedWeapons,
+	 *  un-hide it, and return it as a candidate equip target. Returns nullptr otherwise.
+	 *  Called from the throw flow (OnYankThrowLowerNotify / DiscardYankedWeaponShared) so the
+	 *  reserve of the same class is preferred over a fallback non-yanked weapon. */
+	AShooterWeapon* PromoteReserveCopyOfClass(TSubclassOf<AShooterWeapon> WeaponClass);
 
 	/** Add a weapon of this class with the same animated lower→swap→raise transition that
 	 *  Q-switch uses. If the player is unarmed (no CurrentWeapon), falls back to instant equip.

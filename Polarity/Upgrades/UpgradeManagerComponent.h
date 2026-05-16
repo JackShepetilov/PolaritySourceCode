@@ -120,9 +120,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedDamageMultiplier(AActor* Target) const;
 
+	/** Max copies of the same yanked class the player may carry, per Bandolier's current level.
+	 *  Returns 1 if the Bandolier upgrade is not owned (no expansion). */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	int32 GetBandolierMaxCopies() const;
+
 	/** Same as above but for the MELEE damage track (fist + melee weapon). */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedMeleeDamageMultiplier(AActor* Target) const;
+
+	/** Query all active upgrades for their combined knockback-distance multiplier on a melee target. */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	float GetCombinedMeleeKnockbackDistanceMultiplier(AActor* Target) const;
 
 	// ==================== Shared Health-Pickup Pool ====================
 	// A counter, incremented when the player collects a health pickup at full HP,

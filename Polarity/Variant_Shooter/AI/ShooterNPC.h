@@ -12,6 +12,19 @@ class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class UCurveFloat;
 
+/**
+ * Style of an active ApplyKnockback. Selects the animation montage AND whether collision damage
+ * (wall slam, NPC-NPC) lands while the knockback is in flight.
+ */
+UENUM(BlueprintType)
+enum class EKnockbackStyle : uint8
+{
+	/** Standard knockback — plays KnockbackMontage. Wall and NPC-NPC collisions deal damage. */
+	Standard,
+	/** Tractor beam pull — plays CapturedMontage instead. Collisions are absorbed without damage. */
+	Tractor,
+};
+
 /** Entry in the NPC's ranged weapon drop table */
 USTRUCT(BlueprintType)
 struct FDroppedRangedWeaponEntry
@@ -382,6 +395,48 @@ protected:
 	 *  Cleared on EndKnockbackStun. */
 	bool bStunnedByNPCImpact = false;
 
+	/** Currently active knockback style. Set by ApplyKnockback, consumed by collision-damage
+	 *  handlers (wall slam, NPC-NPC) and animation selection. Reset to Standard in EndKnockbackStun. */
+	EKnockbackStyle CurrentKnockbackStyle = EKnockbackStyle::Standard;
+
+	// ==================== Cinematic Pull (Tractor Beam Lv2) ====================
+	// One-shot magnet drag with dynamic end position and curve-driven interpolation. Used by
+	// Tractor Beam Lv2 when the target is already inside capture range — pulls them precisely
+	// onto AbsoluteMinDistance from the player, by the time the duration elapses, regardless
+	// of how the player moves during the pull.
+
+	/** True while a cinematic pull is in flight. Blocks new pulls (including Tractor) on this NPC. */
+	bool bIsInCinematicPull = false;
+
+	/** Player actor we're being pulled toward. End position is recalculated each tick relative to it. */
+	TWeakObjectPtr<AActor> CinematicPullPlayer;
+
+	/** Final distance from player at the END of the pull (cm). */
+	float CinematicPullMinDistance = 0.0f;
+
+	/** Total duration of the cinematic pull (s). */
+	float CinematicPullDuration = 0.0f;
+
+	/** Elapsed time since pull started (s). */
+	float CinematicPullElapsed = 0.0f;
+
+	/** NPC position at the moment ApplyCinematicPull was called. Fixed for the duration. */
+	FVector CinematicPullStartPos = FVector::ZeroVector;
+
+	/** Optional curve mapping linear-alpha (0..1) → eased-alpha (0..1) for the Lerp. Null = linear. */
+	UPROPERTY()
+	TObjectPtr<UCurveFloat> CinematicPullCurveAsset;
+
+	/** True while this NPC is inside the Tractor Beam combo-window (recently pulled).
+	 *  Set by Upgrade_TractorBeam on each pull hit, decays passively when the window
+	 *  expires (queried via Upgrade_TractorBeam::IsNPCBeingPulled, not auto-cleared). */
+	bool bIsBeingPulledByTractorBeam = false;
+
+	/** True when this NPC died while inside the Tractor Beam combo-window.
+	 *  Set in Upgrade_TractorBeam::OnOwnerDealtDamage. Permanent kill-attribution flag,
+	 *  parallel to bWasChannelingTarget — never cleared. */
+	bool bKilledByTractorBeamCombo = false;
+
 	/** If true, NPC applies permanent explosion stun on BeginPlay and never recovers from it */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback")
 	bool bIsPermanentlyStunned = false;
@@ -646,6 +701,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
 	int32 HealthPickupDropCount_NPCKill = 2;
 
+	/** Chance (0-1) to drop health pickups on a regular weapon kill (no channeling, no prop/drone/stun).
+	 *  0 = never, 1 = always. Rolled per-kill. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HealthPickupDropChance_WeaponKill = 0.5f;
+
+	/** Number of health pickups to drop on a regular weapon kill (if the chance roll succeeds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 HealthPickupDropCount_WeaponKill = 1;
+
 	/** How far pickups scatter from the kill point (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "0", ClampMax = "500", Units = "cm"))
 	float HealthPickupScatterRadius = 150.0f;
@@ -855,7 +919,7 @@ public:
 	 *  @param bKeepEMFEnabled If true, don't disable EMF forces during knockback (for EMF attraction mechanic)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false);
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false, EKnockbackStyle Style = EKnockbackStyle::Standard);
 
 	/** Legacy knockback using velocity (converts to distance-based internally)
 	 *  @param KnockbackVelocity Velocity vector for knockback
@@ -875,6 +939,30 @@ public:
 	/** Set whether capture was enabled by stun (for cleanup on capture release) */
 	void SetCaptureEnabledByStun(bool bValue) { bCaptureEnabledByStun = bValue; }
 
+	/** Tractor Beam combo-window state — read by Upgrade_TractorBeam to gate bonus damage/knockback. */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsBeingPulledByTractorBeam() const { return bIsBeingPulledByTractorBeam; }
+	void SetBeingPulledByTractorBeam(bool bValue) { bIsBeingPulledByTractorBeam = bValue; }
+
+	/** Permanent kill-attribution flag — set when this NPC dies inside the Tractor Beam combo window.
+	 *  Parallel to bWasChannelingTarget. Read by death-drop/scoring code. */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool WasKilledByTractorBeamCombo() const { return bKilledByTractorBeamCombo; }
+	void SetKilledByTractorBeamCombo(bool bValue) { bKilledByTractorBeamCombo = bValue; }
+
+	/** Returns true while a cinematic pull is in progress on this NPC. New pulls should be skipped. */
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsInCinematicPull() const { return bIsInCinematicPull; }
+
+	/**
+	 * Start a cinematic pull toward the player. The NPC interpolates from its current location
+	 * to a point at MinDistanceFromPlayer from the player, using Curve to ease alpha.
+	 * End position is recomputed each frame from the player's CURRENT location (handles movement).
+	 * Suppresses collision damage and plays CapturedMontage. Cannot be interrupted mid-pull.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void ApplyCinematicPull(AActor* PlayerActor, float MinDistanceFromPlayer, float Duration, UCurveFloat* Curve);
+
 	/** Enter captured state (channeling plate grab). Blocks AI, plays montage. */
 	virtual void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr);
 
@@ -886,6 +974,14 @@ public:
 	void NotifyReverseLaunchRelease();
 
 private:
+	// ==================== Cinematic Pull internals ====================
+
+	/** Tick-driven interpolation step. Recomputes end-position relative to live player loc each frame. */
+	void UpdateCinematicPullInterpolation(float DeltaTime);
+
+	/** Cleanup: restore CMC + AI, clear flags, stop captured montage. */
+	void EndCinematicPull();
+
 	// ==================== Hit Flash State ====================
 
 	UPROPERTY()

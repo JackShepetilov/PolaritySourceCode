@@ -7,6 +7,7 @@
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
+#include "Upgrades/UpgradeManagerComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Curves/CurveFloat.h"
 #include "Kismet/GameplayStatics.h"
@@ -43,6 +44,16 @@ void ADroppedRangedWeapon::BeginPlay()
 	{
 		WeaponMesh->SetNotifyRigidBodyCollision(true);
 		WeaponMesh->OnComponentHit.AddDynamic(this, &ADroppedRangedWeapon::OnWeaponMeshHit);
+	}
+
+	// Opt-in yank-style limited ammo for death drops. Skip if the yank path already rolled
+	// (SpawnedBulletCount >= 0 means RollSpawnedBulletCount ran before BeginPlay, e.g. via
+	// SpawnActorDeferred — though current callers don't use that pattern).
+	if (bForceLimitedAmmo && SpawnedBulletCount < 0)
+	{
+		RollSpawnedBulletCount();
+		UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: bForceLimitedAmmo=true → auto-rolled SpawnedBulletCount=%d"),
+			*GetName(), SpawnedBulletCount);
 	}
 }
 
@@ -197,6 +208,14 @@ void ADroppedRangedWeapon::StartPull(AShooterCharacter* InPullingPlayer)
 	PullStartLocation = GetActorLocation();
 	PullStartRotation = GetActorRotation();
 
+	// Snapshot the player's current weapon class for the Bandolier check at CompletePull —
+	// the player may switch weapons mid-pull, but capacity is gated by what they had in hand
+	// at the moment they committed to pulling this specific drop.
+	if (const AShooterWeapon* CurrentHeld = InPullingPlayer->GetCurrentWeapon())
+	{
+		PullingClientCurrentWeaponClass = CurrentHeld->GetClass();
+	}
+
 	// Disable physics — we drive position directly
 	WeaponMesh->SetSimulatePhysics(false);
 	WeaponMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -310,8 +329,41 @@ void ADroppedRangedWeapon::CompletePull()
 	}
 	else
 	{
-		UE_LOG(LogTemp, Log, TEXT("[DroppedRangedWeapon] Player already has %s — skipping grant"),
-			*WeaponClass->GetName());
+		// Player already has a weapon of this class. Bandolier opt-in: if the upgrade is
+		// owned AND the player was holding this same class when StartPull fired, the drop
+		// goes into reserve (or spills bullets on overflow). Otherwise: original skip.
+		UUpgradeManagerComponent* UpgradeMgr = Player->GetUpgradeManager();
+		const int32 MaxCopies = UpgradeMgr ? UpgradeMgr->GetBandolierMaxCopies() : 1;
+		const bool bClassMatchAtPullStart =
+			PullingClientCurrentWeaponClass && PullingClientCurrentWeaponClass == WeaponClass;
+
+		if (MaxCopies > 1 && bClassMatchAtPullStart)
+		{
+			// Compute the bullet count we'd hand out — fall back to a full mag if the death-drop
+			// path left SpawnedBulletCount at -1 (the player still gets ammo, not a dry weapon).
+			const int32 MagSize = WeaponClass->GetDefaultObject<AShooterWeapon>()->GetMagazineSize();
+			const int32 BulletsForCopy = (SpawnedBulletCount > 0) ? SpawnedBulletCount : MagSize;
+
+			const int32 OwnedYankedCount = Player->CountYankedCopiesOfClass(WeaponClass);
+
+			if (OwnedYankedCount < MaxCopies)
+			{
+				Player->AddYankedReserveCopy(WeaponClass, GetClass(), BulletsForCopy);
+				UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] %s pickup → reserve (%d/%d copies of %s)"),
+					*GetName(), OwnedYankedCount + 1, MaxCopies, *WeaponClass->GetName());
+			}
+			else
+			{
+				Player->SpillBulletsIntoYankedCopiesOfClass(WeaponClass, BulletsForCopy);
+				UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] %s pickup → overflow spill of %d bullets (%d/%d copies, at cap)"),
+					*GetName(), BulletsForCopy, OwnedYankedCount, MaxCopies);
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[DroppedRangedWeapon] Player already has %s — skipping grant (MaxCopies=%d, classMatch=%d)"),
+				*WeaponClass->GetName(), MaxCopies, bClassMatchAtPullStart ? 1 : 0);
+		}
 	}
 
 	// Destroy this world actor (weapon is now in player's inventory)

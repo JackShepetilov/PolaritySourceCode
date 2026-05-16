@@ -327,11 +327,21 @@ void AFlyingDrone::DroneDie()
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
 	}
+	else if (HealthPickupClass && HealthPickupDropChance_WeaponKill > 0.0f &&
+		FMath::FRand() < HealthPickupDropChance_WeaponKill)
+	{
+		// Regular weapon kill — chance-based small HP drop
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> Spawning HEALTH (weapon kill, chance=%.2f, count=%d)"),
+			*GetName(), HealthPickupDropChance_WeaponKill, HealthPickupDropCount_WeaponKill);
+		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
+			HealthPickupDropCount_WeaponKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
+	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> NO PICKUP (channelingKinetic=%d, ShouldDropHealth=%d)"),
+		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> NO PICKUP (channelingKinetic=%d, ShouldDropHealth=%d, WeaponKillChance=%.2f)"),
 			*GetName(), bIsChannelingKineticKill,
-			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1);
+			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
+			HealthPickupDropChance_WeaponKill);
 	}
 	} // end if (!bSuppressDeathDrops)
 
@@ -1188,7 +1198,7 @@ void AFlyingDrone::ExitCapturedState()
 
 // ==================== Knockback ====================
 
-void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
+void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
 	// Don't apply new knockback if already in knockback (prevents jitter from multiple hits)
 	if (bIsInKnockback)
@@ -1226,7 +1236,7 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 	// - Wall bounce with energy loss
 	// - NPC-NPC collision detection
 	// Gravity is automatically zero because our CMC has GravityScale = 0.
-	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled);
+	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 
 #if WITH_EDITOR
 	if (GEngine)

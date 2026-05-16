@@ -538,7 +538,7 @@ void AMeleeNPC::SpawnMeleeWeapon()
 	}
 }
 
-void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
+void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
 	// Парирование: если NPC в dash, умножаем knockback
 	float DistanceMultiplier = 1.0f;
@@ -570,7 +570,7 @@ void AMeleeNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distan
 	bIsAttacking = false;
 
 	// Применить knockback с множителем
-	Super::ApplyKnockback(InKnockbackDirection, Distance * DistanceMultiplier, Duration, AttackerLocation, bKeepEMFEnabled);
+	Super::ApplyKnockback(InKnockbackDirection, Distance * DistanceMultiplier, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 }
 
 // ==================== Attack Magnetism ====================

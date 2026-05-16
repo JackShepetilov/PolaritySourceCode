@@ -1996,6 +1996,20 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	// Apply NPC multiplier to distance (not duration - heavier enemies move same speed, just less distance)
 	KnockbackDistance *= NPCMultiplier;
 
+	// Upgrade-driven multiplier (e.g. Tractor Beam Lv2: bonus knockback on NPCs being pulled).
+	// Applied AFTER NPCMultiplier so the divide-out below only undoes NPCMultiplier, not this one.
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = ShooterChar->GetUpgradeManager())
+		{
+			const float UpgradeKnockMult = UpgradeMgr->GetCombinedMeleeKnockbackDistanceMultiplier(HitActor);
+			if (!FMath::IsNearlyEqual(UpgradeKnockMult, 1.0f))
+			{
+				KnockbackDistance *= UpgradeKnockMult;
+			}
+		}
+	}
+
 #if WITH_EDITOR
 	if (GEngine)
 	{

@@ -633,7 +633,7 @@ FVector ASniperTurretNPC::GetWeaponTargetLocation()
 }
 
 void ASniperTurretNPC::ApplyKnockback(const FVector& /*KnockbackDirection*/, float /*Distance*/,
-	float /*Duration*/, const FVector& /*AttackerLocation*/, bool /*bKeepEMFEnabled*/)
+	float /*Duration*/, const FVector& /*AttackerLocation*/, bool /*bKeepEMFEnabled*/, EKnockbackStyle /*Style*/)
 {
 	// Turrets are stationary - ignore knockback entirely
 }

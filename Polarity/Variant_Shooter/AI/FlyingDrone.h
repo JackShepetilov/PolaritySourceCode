@@ -238,7 +238,7 @@ protected:
 
 	/** Override knockback to add drone-specific setup (stop FlyingMovement, ignore player collision)
 	 *  then delegate to Super::ApplyKnockback for interpolation-based movement */
-	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
+	virtual void ApplyKnockback(const FVector& KnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false, EKnockbackStyle Style = EKnockbackStyle::Standard) override;
 
 	/** Override to restore flying mode after knockback */
 	virtual void EndKnockbackStun() override;

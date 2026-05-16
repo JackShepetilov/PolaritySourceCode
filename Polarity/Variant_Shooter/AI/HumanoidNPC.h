@@ -146,7 +146,8 @@ protected:
 	// ==================== EMF / Capture Immunity ====================
 
 	virtual void ApplyKnockback(const FVector& KnockbackDir, float Distance, float Duration,
-		const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false) override;
+		const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false,
+		EKnockbackStyle Style = EKnockbackStyle::Standard) override;
 
 	virtual void ApplyKnockbackVelocity(const FVector& KnockbackVelocity,
 		float StunDuration = 0.3f) override;

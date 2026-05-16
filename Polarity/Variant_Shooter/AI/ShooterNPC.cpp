@@ -26,6 +26,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
+#include "Curves/CurveFloat.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
@@ -206,6 +207,12 @@ void AShooterNPC::Tick(float DeltaTime)
 	if (bIsKnockbackInterpolating)
 	{
 		UpdateKnockbackInterpolation(DeltaTime);
+	}
+
+	// Update Tractor Beam cinematic pull if active (dynamic end-pos, curve-driven)
+	if (bIsInCinematicPull)
+	{
+		UpdateCinematicPullInterpolation(DeltaTime);
 	}
 
 	// Update launched state collision detection
@@ -821,12 +828,22 @@ void AShooterNPC::Die()
 		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
 			HealthPickupDropCount_NPCKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
 	}
+	else if (HealthPickupClass && HealthPickupDropChance_WeaponKill > 0.0f &&
+		FMath::FRand() < HealthPickupDropChance_WeaponKill)
+	{
+		// Regular weapon kill — chance-based small HP drop
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning HEALTH (weapon kill, chance=%.2f, count=%d)"),
+			*GetName(), HealthPickupDropChance_WeaponKill, HealthPickupDropCount_WeaponKill);
+		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
+			HealthPickupDropCount_WeaponKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
+	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> NO PICKUP! ShouldDropHealth=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d, bWasChannelingTarget=%d, HealthPickupClass=%s"),
+		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> NO PICKUP! ShouldDropHealth=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d, bWasChannelingTarget=%d, WeaponKillChance=%.2f, HealthPickupClass=%s"),
 			*GetName(),
 			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
 			bKilledByNPC, bStunnedByNPCImpact, bWasChannelingTarget,
+			HealthPickupDropChance_WeaponKill,
 			HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"));
 	}
 
@@ -1842,10 +1859,18 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 	OnStunStart.Broadcast(this, Duration);
 }
 
-void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
+void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
 	// Don't interrupt explosion stun with new knockback
 	if (bStunnedByExplosion)
+	{
+		return;
+	}
+
+	// Don't interrupt captured state — capture pull/launch runs through EMFVelocityModifier
+	// and ApplyKnockback would SetEnabled(false), freezing the NPC on the plate.
+	// NPC-NPC collisions while captured (HandleNPCCollision) reach this path.
+	if (bIsCaptured)
 	{
 		return;
 	}
@@ -1858,6 +1883,10 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	{
 		return;
 	}
+
+	// Remember the style so collision-damage handlers (OnCapsuleHit, HandleNPCCollision,
+	// HandleKnockbackWallSlam) can gate damage and animation choice can branch below.
+	CurrentKnockbackStyle = Style;
 
 	// Mark as in knockback state
 	bIsInKnockback = true;
@@ -1933,16 +1962,22 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 		false
 	);
 
-	// Play knockback animation montage if available
-	if (KnockbackMontage)
+	// Play animation montage. Tractor-style pulls use the captured montage so the visual
+	// matches "being yanked / held by a beam" rather than "took a hit".
+	UAnimMontage* MontageToPlay = (Style == EKnockbackStyle::Tractor) ? CapturedMontage.Get() : KnockbackMontage.Get();
+	if (MontageToPlay)
 	{
 		UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
-		if (AnimInstance && !AnimInstance->Montage_IsPlaying(KnockbackMontage))
+		if (AnimInstance && !AnimInstance->Montage_IsPlaying(MontageToPlay))
 		{
 			// Calculate play rate to match knockback duration
 			// Montage is 1 second long, so PlayRate = 1.0 / Duration
 			float PlayRate = 1.0f / Duration;
-			AnimInstance->Montage_Play(KnockbackMontage, PlayRate);
+			if (Style == EKnockbackStyle::Tractor)
+			{
+				ActiveCapturedMontage = MontageToPlay; // tracked so EndKnockbackStun can stop it
+			}
+			AnimInstance->Montage_Play(MontageToPlay, PlayRate);
 		}
 	}
 
@@ -2195,8 +2230,9 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 	FVector WallPosition = WallHit.Location + Normal * (CapsuleRadius + 5.0f);
 	SetActorLocation(WallPosition, false);
 
-	// Apply wall slam damage first (if strong enough)
-	if (PerpendicularVelocity >= WallSlamVelocityThreshold)
+	// Apply wall slam damage first (if strong enough).
+	// Tractor-style knockback absorbs the impact without damage (NPC is "magnetically held").
+	if (PerpendicularVelocity >= WallSlamVelocityThreshold && CurrentKnockbackStyle != EKnockbackStyle::Tractor)
 	{
 		float ExcessVelocity = PerpendicularVelocity - WallSlamVelocityThreshold;
 		float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
@@ -2494,7 +2530,11 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// NPCs are stopped by impact freeze, so minimal delay needed for knockback state init
 	// Pass nullptr as DamageCauser to bypass friendly fire check (NPC-NPC collision damage is intentional)
 	// Split damage by type: Kinetic (Wallslam) and EMF (EMFProximity)
-	if (CollisionDamage > 0.0f)
+	// Tractor-style knockback on EITHER side absorbs the impact — no damage to anyone.
+	const bool bSuppressCollisionDamage =
+		CurrentKnockbackStyle == EKnockbackStyle::Tractor ||
+		(OtherNPC && OtherNPC->CurrentKnockbackStyle == EKnockbackStyle::Tractor);
+	if (CollisionDamage > 0.0f && !bSuppressCollisionDamage)
 	{
 		const float DamageDelay = 0.02f;
 		float KineticDamage = KineticCollisionDamage;
@@ -2827,6 +2867,20 @@ void AShooterNPC::EndKnockbackStun()
 	bStunnedByNPCImpact = false;
 	bShouldStunOnNPCImpact = false;
 
+	// Stop the captured-style montage if a Tractor pull was active, and reset the style.
+	if (CurrentKnockbackStyle == EKnockbackStyle::Tractor && ActiveCapturedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+		{
+			if (AnimInstance->Montage_IsPlaying(ActiveCapturedMontage))
+			{
+				AnimInstance->Montage_Stop(0.2f, ActiveCapturedMontage);
+			}
+		}
+		ActiveCapturedMontage = nullptr;
+	}
+	CurrentKnockbackStyle = EKnockbackStyle::Standard;
+
 	OnStunEnd.Broadcast(this);
 
 	// Also clear launched state if active
@@ -2894,14 +2948,15 @@ void AShooterNPC::EnterCapturedState(UAnimMontage* OverrideMontage)
 	bWasChannelingTarget = true; // Permanent flag for armor drop detection
 	bIsInKnockback = true; // Blocks AI via StateTree IsInKnockback condition
 
-	// If stunned, take over from stun state: clear stun timer, re-enable EMF for capture mechanics
-	if (bStunnedByExplosion)
+	// Take over from ANY prior knockback/stun state: clear pending timer so EndKnockbackStun
+	// doesn't fire and revert AI mid-capture, then re-enable EMF — viscous capture pull/reverse
+	// launch run through EMFVelocityModifier::ModifyVelocity, which early-returns when bEnabled=0.
+	// Without this, NPCs captured while already in knockback (melee/dropkick) stay frozen on the
+	// plate with no pull and Press 2 produces no launch.
+	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
 	{
-		GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
-		if (bDisableEMFDuringKnockback && EMFVelocityModifier)
-		{
-			EMFVelocityModifier->SetEnabled(true);
-		}
+		EMFVelocityModifier->SetEnabled(true);
 	}
 
 	// Stop shooting immediately — burst fire cycle and permission retry won't check knockback on their own
@@ -3572,4 +3627,182 @@ void AShooterNPC::OnTeamPerceptionReceived_Implementation(AActor* ReportedEnemy,
 		*GetName(),
 		ReportedEnemy ? *ReportedEnemy->GetName() : TEXT("NULL"),
 		*LastKnownLocation.ToString());
+}
+
+// ==================== Cinematic Pull (Tractor Beam Lv2) ====================
+
+void AShooterNPC::ApplyCinematicPull(AActor* PlayerActor, float MinDistanceFromPlayer, float Duration, UCurveFloat* Curve)
+{
+	if (bIsDead || bIsCaptured || !PlayerActor || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	// One-shot only — don't restart a pull that's already in flight.
+	if (bIsInCinematicPull)
+	{
+		return;
+	}
+
+	// Initialize cinematic state.
+	bIsInCinematicPull = true;
+	CinematicPullPlayer = PlayerActor;
+	CinematicPullMinDistance = FMath::Max(0.0f, MinDistanceFromPlayer);
+	CinematicPullDuration = Duration;
+	CinematicPullElapsed = 0.0f;
+	CinematicPullStartPos = GetActorLocation();
+	CinematicPullCurveAsset = Curve;
+
+	// Block AI / firing / pathfinding (same flags ApplyKnockback uses, minus the interpolation one
+	// since cinematic owns its own interpolation path).
+	bIsInKnockback = true;
+	CurrentKnockbackStyle = EKnockbackStyle::Tractor;
+
+	StopShooting();
+
+	if (AController* MyController = GetController())
+	{
+		if (AAIController* AIController = Cast<AAIController>(MyController))
+		{
+			if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
+			{
+				PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Reset);
+			}
+			AIController->StopMovement();
+			AIController->ClearFocus(EAIFocusPriority::Gameplay);
+		}
+	}
+
+	// Disable EMF forces during the pull so they don't fight our SetActorLocation.
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
+	// Disable CMC velocity — we drive position directly. Save state for restoration.
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		if (CachedGroundFriction == 8.0f)
+		{
+			CachedGroundFriction = CharMovement->GroundFriction;
+		}
+		CharMovement->GroundFriction = KnockbackGroundFriction;
+		CharMovement->StopActiveMovement();
+		CharMovement->Velocity = FVector::ZeroVector;
+		bCachedUseControllerDesiredRotation = CharMovement->bUseControllerDesiredRotation;
+		CharMovement->bUseControllerDesiredRotation = false;
+	}
+	bCachedUseControllerRotationYaw = bUseControllerRotationYaw;
+	bUseControllerRotationYaw = false;
+
+	// Play CapturedMontage so the visual matches "magnetically held being yanked in".
+	if (CapturedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+		{
+			if (!AnimInstance->Montage_IsPlaying(CapturedMontage))
+			{
+				ActiveCapturedMontage = CapturedMontage;
+				AnimInstance->Montage_Play(CapturedMontage, 1.0f);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[TRACTOR_BEAM_CINEMATIC] %s START: target=%s, MinDist=%.0f, Dur=%.2f, Curve=%s"),
+		*GetName(), *PlayerActor->GetName(), CinematicPullMinDistance, CinematicPullDuration,
+		Curve ? *Curve->GetName() : TEXT("null/linear"));
+}
+
+void AShooterNPC::UpdateCinematicPullInterpolation(float DeltaTime)
+{
+	// Bail out cleanly if the player went away mid-pull.
+	AActor* PlayerActor = CinematicPullPlayer.Get();
+	if (!PlayerActor)
+	{
+		EndCinematicPull();
+		return;
+	}
+
+	CinematicPullElapsed += DeltaTime;
+	const float Alpha = FMath::Clamp(CinematicPullElapsed / FMath::Max(CinematicPullDuration, 0.01f), 0.0f, 1.0f);
+
+	// Map linear alpha → eased alpha via curve. Y-axis convention: 0 = stay at start, 1 = arrive at end.
+	const float EasedAlpha = CinematicPullCurveAsset
+		? CinematicPullCurveAsset->GetFloatValue(Alpha)
+		: Alpha;
+
+	// Recompute end position from the player's CURRENT location each frame, so a moving player
+	// still ends up with the NPC at the correct relative distance.
+	const FVector PlayerLoc = PlayerActor->GetActorLocation();
+	const FVector NPCLoc = GetActorLocation();
+	FVector AwayFromPlayer = (NPCLoc - PlayerLoc);
+	if (AwayFromPlayer.IsNearlyZero())
+	{
+		// Degenerate: NPC is exactly on the player. Pick a fallback direction (player forward).
+		AwayFromPlayer = PlayerActor->GetActorForwardVector();
+	}
+	const FVector EndPosition = PlayerLoc + AwayFromPlayer.GetSafeNormal() * CinematicPullMinDistance;
+
+	const FVector NewPos = FMath::Lerp(CinematicPullStartPos, EndPosition, EasedAlpha);
+	SetActorLocation(NewPos, /*bSweep=*/ false);
+
+	if (Alpha >= 1.0f)
+	{
+		EndCinematicPull();
+	}
+}
+
+void AShooterNPC::EndCinematicPull()
+{
+	if (!bIsInCinematicPull)
+	{
+		return;
+	}
+
+	bIsInCinematicPull = false;
+	bIsInKnockback = false;
+	CurrentKnockbackStyle = EKnockbackStyle::Standard;
+	CinematicPullPlayer.Reset();
+	CinematicPullCurveAsset = nullptr;
+
+	// Restore CMC + rotation
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->GroundFriction = CachedGroundFriction;
+		CharMovement->bUseControllerDesiredRotation = bCachedUseControllerDesiredRotation;
+	}
+	bUseControllerRotationYaw = bCachedUseControllerRotationYaw;
+
+	// Re-enable EMF
+	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(true);
+	}
+
+	// Stop captured montage
+	if (ActiveCapturedMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+		{
+			if (AnimInstance->Montage_IsPlaying(ActiveCapturedMontage))
+			{
+				AnimInstance->Montage_Stop(0.2f, ActiveCapturedMontage);
+			}
+		}
+		ActiveCapturedMontage = nullptr;
+	}
+
+	// Restore AI focus on player
+	if (AController* MyController = GetController())
+	{
+		if (AShooterAIController* AIController = Cast<AShooterAIController>(MyController))
+		{
+			if (AActor* Target = AIController->GetCurrentTarget())
+			{
+				AIController->SetFocus(Target);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[TRACTOR_BEAM_CINEMATIC] %s END"), *GetName());
 }

@@ -6,6 +6,7 @@
 #include "UpgradeRegistry.h"
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
+#include "Upgrades/Upgrade_Bandolier.h"
 
 UUpgradeManagerComponent::UUpgradeManagerComponent()
 {
@@ -398,6 +399,33 @@ float UUpgradeManagerComponent::GetCombinedMeleeDamageMultiplier(AActor* Target)
 	}
 
 	return Combined;
+}
+
+float UUpgradeManagerComponent::GetCombinedMeleeKnockbackDistanceMultiplier(AActor* Target) const
+{
+	float Combined = 1.0f;
+
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Combined *= Pair.Value->GetMeleeKnockbackDistanceMultiplier(Target);
+		}
+	}
+
+	return Combined;
+}
+
+int32 UUpgradeManagerComponent::GetBandolierMaxCopies() const
+{
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (const UUpgrade_Bandolier* Bandolier = Cast<UUpgrade_Bandolier>(Pair.Value))
+		{
+			return Bandolier->GetMaxCopiesForCurrentLevel();
+		}
+	}
+	return 1;
 }
 
 void UUpgradeManagerComponent::BindToWeapon(AShooterWeapon* Weapon)

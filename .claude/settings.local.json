@@ -253,7 +253,20 @@
       "WebFetch(domain:visualsbyimpulse.com)",
       "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" status --short)",
       "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Docs/CombatMechanics.md Polarity/Docs/GameDesign.md Polarity/Docs/.obsidian/workspace.json .claude/settings.local.json)",
-      "Bash(git -C 'C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source' commit -m ' *)"
+      "Bash(git -C 'C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source' commit -m ' *)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Variant_Shooter/Weapons/ShooterWeapon_Melee.h)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" push)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Upgrades/UpgradeManagerComponent.cpp Polarity/Upgrades/Upgrades/Upgrade_ChargedPunch.cpp Polarity/Upgrades/Upgrades/Upgrade_Combo.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Variant_Shooter/ShooterCharacter.cpp Polarity/Upgrades/Upgrades/Upgrade_ChargedPunch.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Upgrades/Upgrades/UpgradeDefinition_AirKick.h Polarity/Upgrades/Upgrades/Upgrade_AirKick.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Upgrades/Upgrades/UpgradeDefinition_Combo.h Polarity/Upgrades/Upgrades/Upgrade_Combo.h Polarity/Upgrades/Upgrades/Upgrade_Combo.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Upgrades/Upgrades/Upgrade_ChargedPunch.h Polarity/Upgrades/Upgrades/Upgrade_ChargedPunch.cpp Polarity/Variant_Shooter/ShooterCharacter.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Upgrades/UpgradeComponent.h Polarity/Upgrades/UpgradeManagerComponent.h Polarity/Upgrades/UpgradeManagerComponent.cpp Polarity/Variant_Shooter/MeleeAttackComponent.cpp Polarity/Variant_Shooter/Weapons/ShooterWeapon_Melee.cpp Polarity/Upgrades/Upgrades/UpgradeDefinition_Backstab.h Polarity/Upgrades/Upgrades/Upgrade_Backstab.h Polarity/Upgrades/Upgrades/Upgrade_Backstab.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" status)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Variant_Shooter/ShooterCharacter.cpp)",
+      "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" push origin main)",
+      "Bash(find \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Content\" -name \"*Upgrade*\" -type f 2>/dev/null | head -10)",
+      "Bash(git check-ignore *)"
     ]
   },
   "effortLevel": "high"

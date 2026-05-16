@@ -128,8 +128,15 @@ void AHumanoidNPC::OnWeaponShotFiredForward()
 }
 
 void AHumanoidNPC::ApplyKnockback(const FVector& KnockbackDir, float Distance, float Duration,
-	const FVector& AttackerLocation, bool bKeepEMFEnabled)
+	const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
+	// Tractor Beam pull bypasses humanoid's body-knockback immunity — the upgrade explicitly
+	// targets humanoids too. Other knockback sources (melee, explosion knockback) remain immune.
+	if (Style == EKnockbackStyle::Tractor)
+	{
+		Super::ApplyKnockback(KnockbackDir, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
+		return;
+	}
 	UE_LOG(LogTemp, Verbose, TEXT("[HUMANOID_DEBUG] %s: ApplyKnockback ignored (immune)"), *GetName());
 }
 

@@ -5,11 +5,17 @@
 #include "XPConfig.h"
 #include "ShooterNPC.h"
 
+#include "UpgradeManagerComponent.h"
+#include "UpgradeRegistry.h"
+#include "UpgradeDefinition.h"
+#include "GameplayTagContainer.h"
+
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
+#include "UObject/UObjectIterator.h"
 
 void UXPSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -500,6 +506,130 @@ namespace XPDebugCommands
 		const int32 Idx = (Args.Num() > 0) ? FCString::Atoi(*Args[0]) : 0;
 		Run->EnterArena(Idx);
 	}
+
+	// ==================== Upgrade commands ====================
+
+	static UUpgradeManagerComponent* GetUpgradeManagerComp(UWorld* World)
+	{
+		if (!World) return nullptr;
+		APawn* Pawn = UGameplayStatics::GetPlayerPawn(World, 0);
+		return Pawn ? Pawn->FindComponentByClass<UUpgradeManagerComponent>() : nullptr;
+	}
+
+	/** Returns the first loaded UUpgradeRegistry instance in memory (skipping CDOs). */
+	static UUpgradeRegistry* FindFirstLoadedRegistry()
+	{
+		for (TObjectIterator<UUpgradeRegistry> It; It; ++It)
+		{
+			UUpgradeRegistry* R = *It;
+			if (!R || R->IsTemplate() || R->HasAnyFlags(RF_ClassDefaultObject)) continue;
+			return R;
+		}
+		return nullptr;
+	}
+
+	static void CmdUpgradeGrant(const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.upgrade.grant <Upgrade.Tag>"));
+			return;
+		}
+
+		const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*Args[0]), /*bErrorIfNotFound*/ false);
+		if (!Tag.IsValid())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Gameplay tag '%s' is not registered (check Project Settings > GameplayTags)"), *Args[0]);
+			return;
+		}
+
+		UUpgradeRegistry* Registry = FindFirstLoadedRegistry();
+		if (!Registry)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] No UpgradeRegistry loaded — open WBP_UpgradeChoice or start a run so the registry is referenced"));
+			return;
+		}
+
+		UUpgradeDefinition* Def = Registry->FindByTag(Tag);
+		if (!Def)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Tag '%s' not present in UpgradeRegistry.AllUpgrades"), *Tag.ToString());
+			return;
+		}
+
+		UUpgradeManagerComponent* Manager = GetUpgradeManagerComp(World);
+		if (!Manager)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Player pawn has no UUpgradeManagerComponent"));
+			return;
+		}
+
+		const bool bOk = Manager->GrantUpgrade(Def);
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] cmd grant '%s' -> %s (now Lv %d/%d)"),
+			*Tag.ToString(),
+			bOk ? TEXT("OK") : TEXT("no-op (likely at MaxLevel)"),
+			Manager->GetUpgradeLevel(Tag),
+			Def->MaxLevel);
+	}
+
+	static void CmdUpgradeList(const TArray<FString>& /*Args*/, UWorld* /*World*/)
+	{
+		UUpgradeRegistry* Registry = FindFirstLoadedRegistry();
+		if (!Registry)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] No UpgradeRegistry loaded"));
+			return;
+		}
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] === Registry (%d upgrades) ==="), Registry->AllUpgrades.Num());
+		for (UUpgradeDefinition* Def : Registry->AllUpgrades)
+		{
+			if (!Def) continue;
+			UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG]   '%s'  cat=%d  maxLv=%d  tag='%s'"),
+				*Def->DisplayName.ToString(),
+				(int32)Def->Category,
+				Def->MaxLevel,
+				*Def->UpgradeTag.ToString());
+		}
+	}
+
+	static void CmdUpgradeShow(const TArray<FString>& /*Args*/, UWorld* World)
+	{
+		UUpgradeManagerComponent* Manager = GetUpgradeManagerComp(World);
+		if (!Manager)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] No UpgradeManagerComponent on player pawn"));
+			return;
+		}
+		const TArray<UUpgradeDefinition*> Acquired = Manager->GetAcquiredUpgrades();
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] === Owned (%d) ==="), Acquired.Num());
+		for (UUpgradeDefinition* Def : Acquired)
+		{
+			if (!Def) continue;
+			const int32 Lv = Manager->GetUpgradeLevel(Def->UpgradeTag);
+			UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG]   '%s'  Lv %d/%d  tag='%s'"),
+				*Def->DisplayName.ToString(), Lv, Def->MaxLevel, *Def->UpgradeTag.ToString());
+		}
+	}
+
+	static void CmdUpgradeRemove(const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.upgrade.remove <Upgrade.Tag>"));
+			return;
+		}
+		const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*Args[0]), false);
+		if (!Tag.IsValid())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Unknown gameplay tag '%s'"), *Args[0]);
+			return;
+		}
+		UUpgradeManagerComponent* Manager = GetUpgradeManagerComp(World);
+		if (!Manager) return;
+		const bool bOk = Manager->RemoveUpgrade(Tag);
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] cmd remove '%s' -> %s"),
+			*Tag.ToString(), bOk ? TEXT("OK") : TEXT("not owned"));
+	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPAdd(
@@ -531,3 +661,23 @@ static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunEnterArena(
 	TEXT("polarity.run.enterarena"),
 	TEXT("Enter arena by index (re-binds NPC death handlers). Usage: polarity.run.enterarena [idx=0]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunEnterArena));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityUpgradeGrant(
+	TEXT("polarity.upgrade.grant"),
+	TEXT("Grant an upgrade to the player by gameplay tag (or level it up if already owned). Usage: polarity.upgrade.grant <Upgrade.Tag>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdUpgradeGrant));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityUpgradeRemove(
+	TEXT("polarity.upgrade.remove"),
+	TEXT("Remove an upgrade from the player by gameplay tag. Usage: polarity.upgrade.remove <Upgrade.Tag>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdUpgradeRemove));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityUpgradeList(
+	TEXT("polarity.upgrade.list"),
+	TEXT("List all upgrades present in the loaded UpgradeRegistry."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdUpgradeList));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityUpgradeShow(
+	TEXT("polarity.upgrade.show"),
+	TEXT("List upgrades the player currently owns and their levels."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdUpgradeShow));

@@ -42,15 +42,6 @@ void UUpgrade_PistolStun::OnHitscanIonized(AActor* Target)
 		return;
 	}
 
-	// Humanoid in melee mode — body is not chargeable, no stun
-	if (const AHumanoidNPC* Humanoid = Cast<AHumanoidNPC>(NPC))
-	{
-		if (Humanoid->bIsInMeleeMode)
-		{
-			return;
-		}
-	}
-
 	const FPistolStunLevelData& Data = DefPistolStun->GetLevelData(CurrentLevel);
 
 	if (Data.StunDuration <= 0.0f)

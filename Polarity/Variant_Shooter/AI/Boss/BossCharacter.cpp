@@ -1282,7 +1282,7 @@ void ABossCharacter::EnterFinisherPhase()
 	OnFinisherReady.Broadcast();
 }
 
-void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled)
+void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
 	// Ignore knockback in finisher phase - boss must stay at teleport position
 	if (bIsInFinisherPhase)
@@ -1291,7 +1291,7 @@ void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float D
 	}
 
 	// Call parent implementation
-	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled);
+	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 }
 
 void ABossCharacter::TeleportToFinisherPosition()
