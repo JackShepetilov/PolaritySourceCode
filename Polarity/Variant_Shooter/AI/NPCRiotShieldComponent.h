@@ -102,14 +102,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Aim")
 	float AimYawOffsetDeg = 0.0f;
 
-	// ==================== Yank ====================
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Yank", meta = (ClampMin = "50.0"))
-	float YankBaseRange = 600.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Yank", meta = (ClampMin = "0.01"))
-	float YankNormCoeff = 50.0f;
-
 private:
 	/** Runtime visual mesh. Created and registered when activation succeeds. */
 	UPROPERTY()

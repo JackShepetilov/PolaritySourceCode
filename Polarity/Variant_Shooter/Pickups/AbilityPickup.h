@@ -85,13 +85,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
 	bool bCanBeCaptured = true;
 
-	/** Base capture range (cm). Same logarithmic charge formula as UpgradePickup. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (ClampMin = "50.0", Units = "cm"))
-	float CaptureBaseRange = 500.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0"))
-	float CaptureChargeNormCoeff = 50.0f;
-
 	// ==================== Pull Settings ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pull")

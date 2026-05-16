@@ -237,16 +237,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "100.0", ClampMax = "10000.0", Units = "cm/s", EditCondition = "bEnableViscousCapture"))
 	float CaptureBaseSpeed = 1500.0f;
 
-	/** Base capture range (cm). Actual range scales with charge:
-	 *  Range = BaseRange * max(1, 1 + ln(|q_player| * |q_npc| / NormCoeff)). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bEnableViscousCapture"))
-	float CaptureBaseRange = 500.0f;
-
-	/** Charge normalization coefficient for capture range formula.
-	 *  Lower = longer range at low charges, higher = needs more charge for same range. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0", EditCondition = "bEnableViscousCapture"))
-	float CaptureChargeNormCoeff = 50.0f;
-
 	/** Distance (cm) at which NPC snaps to plate and enters hard hold.
 	 *  Below this, NPC position is locked to plate each frame. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "5.0", ClampMax = "200.0", Units = "cm", EditCondition = "bEnableViscousCapture"))

@@ -113,11 +113,12 @@ void UUpgrade_TractorBeam::OnHitscanIonized(AActor* Target)
 		return;
 	}
 
-	// Resolve the NPC's "you're in capture range now" handoff distance from CaptureBaseRange.
+	// Resolve the NPC's "you're in capture range now" handoff distance from the
+	// charge-based capture range (curve evaluated at current player/NPC charges).
 	float CaptureHandoffDist = 0.0f;
 	if (UEMFVelocityModifier* NPCMod = NPC->FindComponentByClass<UEMFVelocityModifier>())
 	{
-		CaptureHandoffDist = FMath::Max(0.0f, NPCMod->CaptureBaseRange - Data.CaptureRangeBuffer);
+		CaptureHandoffDist = FMath::Max(0.0f, NPCMod->CalculateCaptureRange() - Data.CaptureRangeBuffer);
 	}
 
 	const float CurrentDist = FMath::Sqrt(DistSq);

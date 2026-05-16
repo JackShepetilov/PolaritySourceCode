@@ -110,16 +110,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture")
 	bool bCanBeCaptured = true;
 
-	// ==================== Capture Settings ====================
-
-	/** Base capture range (cm). Actual range = BaseRange * max(1, 1 + ln(|q_player * q_pickup| / NormCoeff)) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (ClampMin = "50.0", Units = "cm"))
-	float CaptureBaseRange = 500.0f;
-
-	/** Charge normalization coefficient for capture range formula */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0"))
-	float CaptureChargeNormCoeff = 50.0f;
-
 	// ==================== Pull Settings ====================
 
 	/** Camera-relative offset where the pickup flies to during pull (X=forward, Y=right, Z=up) */

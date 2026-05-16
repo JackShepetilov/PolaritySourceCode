@@ -451,16 +451,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
 	float ViscosityCoefficient = 10.0f;
 
-	/** Base capture range (cm). Actual range scales with charge:
-	 *  Range = BaseRange * max(1, 1 + ln(|q_player| * |q_prop| / NormCoeff)). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "50.0", Units = "cm", EditCondition = "bCanBeCaptured"))
-	float CaptureBaseRange = 500.0f;
-
-	/** Charge normalization coefficient for capture range formula.
-	 *  Lower = longer range at low charges, higher = needs more charge for same range. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "1000.0", EditCondition = "bCanBeCaptured"))
-	float CaptureChargeNormCoeff = 50.0f;
-
 	/** Counteract gravity when captured */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (EditCondition = "bCanBeCaptured"))
 	bool bCounterGravityWhenCaptured = true;

@@ -271,7 +271,10 @@ public:
 
 	// ==================== Capture Targeting ====================
 
-	/** Maximum distance from player to consider NPC for capture */
+	/** Upper bound for the initial sphere-overlap query in UpdateCaptureRaycast.
+	 *  Acts as the outer envelope — actual per-target gating is done by CaptureRangeCurve.
+	 *  Must be >= max Y value of CaptureRangeCurve, otherwise distant targets the curve
+	 *  would allow will be missed by the overlap. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "100.0", Units = "cm"))
 	float CaptureSearchRadius = 2000.0f;
 

@@ -57,7 +57,7 @@ struct FTractorBeamLevelData
 	float MeleeKnockbackMultiplier = 1.0f;
 
 	// ==================== Cinematic pull (Lv2 only) ====================
-	// When a hit lands on a target ALREADY inside (NPC.CaptureBaseRange - CaptureRangeBuffer),
+	// When a hit lands on a target ALREADY inside (NPC.CalculateCaptureRange() - CaptureRangeBuffer),
 	// the pull switches to a one-shot cinematic mode: the NPC interpolates precisely onto
 	// AbsoluteMinDistance from the player using its own duration + curve. The pull cannot
 	// be interrupted — additional hits during it are ignored.
