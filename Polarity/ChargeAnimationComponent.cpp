@@ -28,6 +28,7 @@
 #include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
+#include "Curves/CurveFloat.h"
 
 UChargeAnimationComponent::UChargeAnimationComponent()
 {
@@ -2699,4 +2700,46 @@ void UChargeAnimationComponent::AutoDetectMeshReferences()
 			}
 		}
 	}
+}
+
+// ==================== Capture Range Curve ====================
+
+float UChargeAnimationComponent::EvaluateCaptureRange(float TargetChargeAbs) const
+{
+	if (TargetChargeAbs < KINDA_SMALL_NUMBER)
+	{
+		return 0.0f;
+	}
+
+	const float PlayerChargeAbs = CachedEMFModifier
+		? FMath::Abs(CachedEMFModifier->GetCharge())
+		: 0.0f;
+	if (PlayerChargeAbs < KINDA_SMALL_NUMBER)
+	{
+		return 0.0f;
+	}
+
+	const float ChargeProduct = PlayerChargeAbs * TargetChargeAbs;
+
+	if (CaptureRangeCurve)
+	{
+		return FMath::Max(0.0f, CaptureRangeCurve->GetFloatValue(ChargeProduct));
+	}
+
+	return FallbackCaptureRange;
+}
+
+float UChargeAnimationComponent::GetCaptureRangeFor(const UObject* WorldContextObject, float TargetChargeAbs)
+{
+	if (!WorldContextObject) return 0.0f;
+	UWorld* World = WorldContextObject->GetWorld();
+	if (!World) return 0.0f;
+
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
+	if (!PlayerPawn) return 0.0f;
+
+	const UChargeAnimationComponent* Comp = PlayerPawn->FindComponentByClass<UChargeAnimationComponent>();
+	if (!Comp) return 0.0f;
+
+	return Comp->EvaluateCaptureRange(TargetChargeAbs);
 }

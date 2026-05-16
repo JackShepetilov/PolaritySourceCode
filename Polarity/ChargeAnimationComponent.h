@@ -279,6 +279,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "1.0", ClampMax = "90.0", Units = "deg"))
 	float CaptureMaxAngle = 30.0f;
 
+	/** Curve mapping (|q_player| * |q_target|) → max capture distance in cm.
+	 *  Single authoritative source of capture range for ALL captures
+	 *  (NPC body, Prop, dropped weapons, pickups, humanoid weapon/shield yank).
+	 *  Sampled via EvaluateCaptureRange / GetCaptureRangeFor.
+	 *  CaptureSearchRadius must be >= max Y of this curve, since it bounds the
+	 *  initial sphere overlap query in UpdateCaptureRaycast. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture")
+	TObjectPtr<UCurveFloat> CaptureRangeCurve;
+
+	/** Range (cm) returned by EvaluateCaptureRange when CaptureRangeCurve is unset.
+	 *  Prevents broken capture if the curve asset isn't assigned. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "0.0", Units = "cm"))
+	float FallbackCaptureRange = 500.0f;
+
 	// ==================== VFX ====================
 
 	/** Niagara effect to spawn during charge toggle (legacy - used when polarity-based VFX not set) */
@@ -454,6 +468,23 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Charge")
 	bool IsInputLocked() const { return bInputLocked; }
+
+	/**
+	 * Sample CaptureRangeCurve for a given target |charge| against the player's |charge|.
+	 * Player charge is read from this component's owner's UEMFVelocityModifier.
+	 * Returns 0 if either |charge| is ~0 (capture impossible without charge on both sides).
+	 * Falls back to FallbackCaptureRange when CaptureRangeCurve is unset.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Charge|Capture")
+	float EvaluateCaptureRange(float TargetChargeAbs) const;
+
+	/**
+	 * Convenience helper for NPCs/Props/Weapons/Pickups: locates the local player's
+	 * UChargeAnimationComponent and forwards to EvaluateCaptureRange.
+	 * Returns 0 if no local player / component / charge.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Charge|Capture", meta = (WorldContext = "WorldContextObject"))
+	static float GetCaptureRangeFor(const UObject* WorldContextObject, float TargetChargeAbs);
 
 	/** Externally lock/unlock input (used by finale sequence to block normal grab) */
 	UFUNCTION(BlueprintCallable, Category = "Charge")
