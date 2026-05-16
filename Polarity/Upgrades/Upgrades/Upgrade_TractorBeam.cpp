@@ -118,7 +118,7 @@ void UUpgrade_TractorBeam::OnHitscanIonized(AActor* Target)
 	float CaptureHandoffDist = 0.0f;
 	if (UEMFVelocityModifier* NPCMod = NPC->FindComponentByClass<UEMFVelocityModifier>())
 	{
-		CaptureHandoffDist = FMath::Max(0.0f, NPCMod->CalculateCaptureRange() - Data.CaptureRangeBuffer);
+		CaptureHandoffDist = FMath::Max(0.0f, NPCMod->GetEffectiveCaptureRange() - Data.CaptureRangeBuffer);
 	}
 
 	const float CurrentDist = FMath::Sqrt(DistSq);
