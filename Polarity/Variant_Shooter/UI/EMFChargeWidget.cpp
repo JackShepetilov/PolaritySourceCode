@@ -474,8 +474,13 @@ void UEMFChargeWidget::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, T
 
 // ==================== Capture Zone ====================
 
-bool UEMFChargeWidget::ComputeInCaptureZone(const APawn* Player) const
+bool UEMFChargeWidget::EvaluateCaptureCandidate(
+	const APawn* Player,
+	const FVector& CameraLoc,
+	const FVector& CameraForward,
+	float& OutAngleCos) const
 {
+	OutAngleCos = -1.0f;
 	if (!bIsActive || !Player) return false;
 
 	AActor* Target = GetBoundActor();
@@ -530,11 +535,29 @@ bool UEMFChargeWidget::ComputeInCaptureZone(const APawn* Player) const
 		return false;
 	}
 
+	// Range gate (per-target via curve)
 	const float CaptureRange = ChargeComp->EvaluateCaptureRange(FMath::Abs(TargetCharge));
 	if (CaptureRange < 1.0f) return false;
 
-	const float DistSq = FVector::DistSquared(Target->GetActorLocation(), Player->GetActorLocation());
-	return DistSq <= CaptureRange * CaptureRange;
+	const FVector ToTarget = Target->GetActorLocation() - CameraLoc;
+	const float DistSq = ToTarget.SizeSquared();
+	if (DistSq < 1.0f || DistSq > CaptureRange * CaptureRange) return false;
+
+	// Adaptive angle cone — matches UpdateCaptureRaycast:
+	// near (≤NearFieldRadius) → 90°, far → CaptureMaxAngle.
+	const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+	const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+
+	constexpr float NearFieldRadius = 500.0f;
+	const float Dist = FMath::Sqrt(DistSq);
+	const float T = FMath::Clamp(Dist / NearFieldRadius, 0.0f, 1.0f);
+	const float EffectiveAngle = FMath::Lerp(90.0f, ChargeComp->CaptureMaxAngle, T);
+	const float MaxAngleCos = FMath::Cos(FMath::DegreesToRadians(EffectiveAngle));
+
+	if (AngleCos < MaxAngleCos) return false;
+
+	OutAngleCos = AngleCos;
+	return true;
 }
 
 void UEMFChargeWidget::SetCaptureZoneState(bool bInZone)

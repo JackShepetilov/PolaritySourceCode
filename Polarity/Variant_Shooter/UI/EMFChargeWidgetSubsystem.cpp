@@ -65,10 +65,17 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 	EffectiveDistances[1] = Settings.PropClutter.ComputeEffectiveDistance(CategoryCounts[1]);
 	EffectiveDistances[2] = Settings.WeaponClutter.ComputeEffectiveDistance(CategoryCounts[2]);
 
-	// Resolve local pawn once for capture-zone checks (predictive highlight).
+	// Resolve player pawn + camera for predictive capture-target selection.
 	APawn* PlayerPawn = PC->GetPawn();
+	FVector CameraLoc;
+	FRotator CameraRot;
+	PC->GetPlayerViewPoint(CameraLoc, CameraRot);
+	const FVector CameraForward = CameraRot.Vector();
 
-	// Update screen positions + capture-zone state for all active widgets.
+	// Pass 1: position update + evaluate each widget's capture candidacy.
+	// Best candidate = highest dot(CameraForward, dirToTarget) — same rule as UpdateCaptureRaycast.
+	UEMFChargeWidget* BestWidget = nullptr;
+	float BestAngleCos = -1.0f;
 	for (auto& Pair : ActiveWidgets)
 	{
 		if (Pair.Value)
@@ -77,8 +84,24 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 			Pair.Value->EffectiveMinScaleDistance = EffectiveDistances[CatIndex];
 			Pair.Value->UpdateScreenPosition(PC);
 
-			const bool bInZone = Pair.Value->ComputeInCaptureZone(PlayerPawn);
-			Pair.Value->SetCaptureZoneState(bInZone);
+			float AngleCos = -1.0f;
+			if (Pair.Value->EvaluateCaptureCandidate(PlayerPawn, CameraLoc, CameraForward, AngleCos))
+			{
+				if (AngleCos > BestAngleCos)
+				{
+					BestAngleCos = AngleCos;
+					BestWidget = Pair.Value;
+				}
+			}
+		}
+	}
+
+	// Pass 2: apply capture-zone state — only the single best candidate is "in zone".
+	for (auto& Pair : ActiveWidgets)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->SetCaptureZoneState(Pair.Value == BestWidget);
 		}
 	}
 }

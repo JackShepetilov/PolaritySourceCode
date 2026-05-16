@@ -104,9 +104,15 @@ public:
 
 	// ==================== Capture Zone ====================
 
-	/** Computes whether this widget's target could be captured by the given player right now,
-	 *  applying the capture range curve and per-type sign rules. */
-	bool ComputeInCaptureZone(const APawn* Player) const;
+	/** Evaluate capture candidacy for this widget's target. Returns true if the target
+	 *  passes ALL capture gates (range via curve, per-type sign rule, angle cone from camera —
+	 *  matching UpdateCaptureRaycast). When true, OutAngleCos = dot(CameraForward, dirToTarget);
+	 *  the subsystem uses it to pick the single best (closest-to-crosshair) candidate. */
+	bool EvaluateCaptureCandidate(
+		const APawn* Player,
+		const FVector& CameraLoc,
+		const FVector& CameraForward,
+		float& OutAngleCos) const;
 
 	/** Updates capture-zone state. Fires BP_OnCaptureZoneChanged only on transition. */
 	void SetCaptureZoneState(bool bInZone);
