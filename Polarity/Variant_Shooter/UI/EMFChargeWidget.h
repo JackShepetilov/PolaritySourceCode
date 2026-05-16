@@ -96,6 +96,25 @@ public:
 		meta = (DisplayName = "On Health Changed"))
 	void BP_OnHealthChanged(float CurrentHP, float MaxHP, float NormalizedHP);
 
+	/** Called when target enters/exits the player's capture zone (range curve + sign check).
+	 *  Use this in WBP_EMFChargeIndicator to highlight/unhighlight capturable targets. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge",
+		meta = (DisplayName = "On Capture Zone Changed"))
+	void BP_OnCaptureZoneChanged(bool bInZone);
+
+	// ==================== Capture Zone ====================
+
+	/** Computes whether this widget's target could be captured by the given player right now,
+	 *  applying the capture range curve and per-type sign rules. */
+	bool ComputeInCaptureZone(const APawn* Player) const;
+
+	/** Updates capture-zone state. Fires BP_OnCaptureZoneChanged only on transition. */
+	void SetCaptureZoneState(bool bInZone);
+
+	/** Current capture-zone state. */
+	UFUNCTION(BlueprintPure, Category = "EMF Charge")
+	bool IsInCaptureZone() const { return bIsInCaptureZone; }
+
 	// ==================== Getters ====================
 
 	UFUNCTION(BlueprintPure, Category = "EMF Charge")
@@ -175,6 +194,9 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
 	float NormalizedCharge = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
+	bool bIsInCaptureZone = false;
 
 	float VerticalOffset = 120.0f;
 

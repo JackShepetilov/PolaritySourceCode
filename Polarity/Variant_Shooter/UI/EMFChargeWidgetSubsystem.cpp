@@ -65,7 +65,10 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 	EffectiveDistances[1] = Settings.PropClutter.ComputeEffectiveDistance(CategoryCounts[1]);
 	EffectiveDistances[2] = Settings.WeaponClutter.ComputeEffectiveDistance(CategoryCounts[2]);
 
-	// Update screen positions for all active widgets with clutter-adjusted distance
+	// Resolve local pawn once for capture-zone checks (predictive highlight).
+	APawn* PlayerPawn = PC->GetPawn();
+
+	// Update screen positions + capture-zone state for all active widgets.
 	for (auto& Pair : ActiveWidgets)
 	{
 		if (Pair.Value)
@@ -73,6 +76,9 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 			uint8 CatIndex = static_cast<uint8>(Pair.Value->GetCategory());
 			Pair.Value->EffectiveMinScaleDistance = EffectiveDistances[CatIndex];
 			Pair.Value->UpdateScreenPosition(PC);
+
+			const bool bInZone = Pair.Value->ComputeInCaptureZone(PlayerPawn);
+			Pair.Value->SetCaptureZoneState(bInZone);
 		}
 	}
 }

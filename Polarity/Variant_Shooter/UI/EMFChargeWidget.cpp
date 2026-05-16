@@ -6,10 +6,12 @@
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
+#include "ChargeAnimationComponent.h"
 #include "EMFPhysicsProp.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "Engine/World.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -305,6 +307,7 @@ void UEMFChargeWidget::Unbind()
 
 	bIsActive = false;
 	bWasVisibleLastFrame = false;
+	bIsInCaptureZone = false;
 	BoundNPC.Reset();
 	BoundProp.Reset();
 	BoundDroppedWeapon.Reset();
@@ -467,4 +470,76 @@ void UEMFChargeWidget::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, T
 		float Normalized = (CachedMaxHP > 0.0f) ? FMath::Clamp(HP / CachedMaxHP, 0.0f, 1.0f) : 0.0f;
 		BP_OnHealthChanged(HP, CachedMaxHP, Normalized);
 	}
+}
+
+// ==================== Capture Zone ====================
+
+bool UEMFChargeWidget::ComputeInCaptureZone(const APawn* Player) const
+{
+	if (!bIsActive || !Player) return false;
+
+	AActor* Target = GetBoundActor();
+	if (!Target) return false;
+
+	const UChargeAnimationComponent* ChargeComp = Player->FindComponentByClass<UChargeAnimationComponent>();
+	if (!ChargeComp) return false;
+
+	UEMFVelocityModifier* PlayerMod = Player->FindComponentByClass<UEMFVelocityModifier>();
+	if (!PlayerMod) return false;
+	const float PlayerCharge = PlayerMod->GetCharge();
+	if (FMath::IsNearlyZero(PlayerCharge)) return false;
+
+	// Resolve target |charge| and whether the bound type requires opposite-sign for capture.
+	float TargetCharge = 0.0f;
+	bool bRequiresOppositeSign = false;
+	if (AShooterNPC* NPC = BoundNPC.Get())
+	{
+		if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
+		{
+			TargetCharge = Mod->GetCharge();
+		}
+		bRequiresOppositeSign = true;
+	}
+	else if (AEMFPhysicsProp* Prop = BoundProp.Get())
+	{
+		TargetCharge = Prop->GetCharge();
+	}
+	else if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())
+	{
+		TargetCharge = Weapon->GetCharge();
+		bRequiresOppositeSign = true;
+	}
+	else if (ADroppedRangedWeapon* RangedWeapon = BoundDroppedRangedWeapon.Get())
+	{
+		TargetCharge = RangedWeapon->GetCharge();
+		bRequiresOppositeSign = true;
+	}
+	else if (ARiotShieldPickup* ShieldPickup = BoundRiotShieldPickup.Get())
+	{
+		TargetCharge = ShieldPickup->GetCharge();
+	}
+	else
+	{
+		return false;
+	}
+
+	if (FMath::IsNearlyZero(TargetCharge)) return false;
+
+	if (bRequiresOppositeSign && PlayerCharge * TargetCharge > 0.0f)
+	{
+		return false;
+	}
+
+	const float CaptureRange = ChargeComp->EvaluateCaptureRange(FMath::Abs(TargetCharge));
+	if (CaptureRange < 1.0f) return false;
+
+	const float DistSq = FVector::DistSquared(Target->GetActorLocation(), Player->GetActorLocation());
+	return DistSq <= CaptureRange * CaptureRange;
+}
+
+void UEMFChargeWidget::SetCaptureZoneState(bool bInZone)
+{
+	if (bIsInCaptureZone == bInZone) return;
+	bIsInCaptureZone = bInZone;
+	BP_OnCaptureZoneChanged(bInZone);
 }
