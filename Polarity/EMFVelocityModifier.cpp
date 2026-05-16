@@ -2,6 +2,7 @@
 
 #include "EMFVelocityModifier.h"
 #include "ApexMovementComponent.h"
+#include "ChargeAnimationComponent.h"
 #include "EMFChannelingPlateActor.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "GameFramework/Character.h"
@@ -302,31 +303,9 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	// Debug: always-visible capture range sphere around this NPC
 	if (bDrawDebug && bEnableViscousCapture)
 	{
-		// Get player charge: from plate if captured, from player pawn otherwise
-		float DebugPlayerCharge = 0.0f;
-		if (CapturingPlate.IsValid())
+		const float DebugCaptureRange = CalculateCaptureRange();
+		if (DebugCaptureRange > 0.0f)
 		{
-			DebugPlayerCharge = CapturingPlate.Get()->GetPlateChargeDensity();
-		}
-		else if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
-		{
-			if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
-			{
-				DebugPlayerCharge = PlayerMod->GetCharge();
-			}
-		}
-
-		const float DebugPlayerChargeAbs = FMath::Abs(DebugPlayerCharge);
-		const float DebugNPCChargeAbs = FMath::Abs(Charge);
-
-		// Only draw sphere when both charges are non-zero (capture requires both)
-		if (DebugPlayerChargeAbs >= KINDA_SMALL_NUMBER && DebugNPCChargeAbs >= KINDA_SMALL_NUMBER)
-		{
-			const float DebugChargeProduct = DebugPlayerChargeAbs * DebugNPCChargeAbs;
-			const float DebugRatio = DebugChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-			const float DebugRangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(DebugRatio));
-			const float DebugCaptureRange = CaptureBaseRange * DebugRangeMultiplier;
-
 			DrawDebugSphere(GetWorld(), Position, DebugCaptureRange, 32, FColor::Cyan, false, -1.0f, 0, 1.5f);
 		}
 	}
@@ -780,33 +759,7 @@ int32 UEMFVelocityModifier::GetSourceEffectiveChargeSign(const FEMSourceDescript
 
 float UEMFVelocityModifier::CalculateCaptureRange() const
 {
-	// Get player charge from the plate's charge density (plate mirrors player charge)
-	float PlayerCharge = 0.0f;
-	if (CapturingPlate.IsValid())
-	{
-		PlayerCharge = CapturingPlate.Get()->GetPlateChargeDensity();
-	}
-
-	const float NPCCharge = FMath::Abs(GetCharge());
-	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
-
-	// No capture possible without charge on both sides
-	if (NPCCharge < KINDA_SMALL_NUMBER || PlayerChargeAbs < KINDA_SMALL_NUMBER)
-	{
-		return 0.0f;
-	}
-
-	// Product of charges: higher product = longer range
-	const float ChargeProduct = PlayerChargeAbs * NPCCharge;
-
-	// Range = BaseRange * max(1, 1 + ln(ChargeProduct / NormCoeff))
-	// At ChargeProduct == NormCoeff: Range = BaseRange (ln(1) = 0, so 1+0 = 1)
-	// At ChargeProduct == NormCoeff * e: Range = BaseRange * 2
-	// At ChargeProduct < NormCoeff: ln < 0, but clamped to 1 so range never below BaseRange
-	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
-
-	return CaptureBaseRange * RangeMultiplier;
+	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(GetCharge()));
 }
 
 float UEMFVelocityModifier::GetEffectiveCaptureRange() const

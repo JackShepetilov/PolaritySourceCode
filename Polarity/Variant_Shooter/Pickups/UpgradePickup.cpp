@@ -1,6 +1,7 @@
 // Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "UpgradePickup.h"
+#include "ChargeAnimationComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
@@ -156,30 +157,7 @@ void AUpgradePickup::SetCharge(float NewCharge)
 
 float AUpgradePickup::CalculateCaptureRange() const
 {
-	// Get player charge
-	float PlayerCharge = 0.0f;
-	if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
-	{
-		if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
-		{
-			PlayerCharge = PlayerMod->GetCharge();
-		}
-	}
-
-	const float PickupChargeAbs = FMath::Abs(GetCharge());
-	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
-
-	// No capture possible without charge on both sides
-	if (PickupChargeAbs < KINDA_SMALL_NUMBER || PlayerChargeAbs < KINDA_SMALL_NUMBER)
-	{
-		return 0.0f;
-	}
-
-	const float ChargeProduct = PlayerChargeAbs * PickupChargeAbs;
-	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
-
-	return CaptureBaseRange * RangeMultiplier;
+	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(GetCharge()));
 }
 
 // ==================== Pull ====================

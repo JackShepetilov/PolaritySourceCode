@@ -1,6 +1,7 @@
 // DroppedRangedWeapon.cpp
 
 #include "DroppedRangedWeapon.h"
+#include "ChargeAnimationComponent.h"
 #include "ShooterWeapon.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
@@ -167,30 +168,7 @@ void ADroppedRangedWeapon::RollSpawnedBulletCount()
 
 float ADroppedRangedWeapon::CalculateCaptureRange() const
 {
-	// Get player charge
-	float PlayerCharge = 0.0f;
-	if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
-	{
-		if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
-		{
-			PlayerCharge = PlayerMod->GetCharge();
-		}
-	}
-
-	const float WeaponChargeAbs = FMath::Abs(GetCharge());
-	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
-
-	// No capture possible without charge on both sides
-	if (WeaponChargeAbs < KINDA_SMALL_NUMBER || PlayerChargeAbs < KINDA_SMALL_NUMBER)
-	{
-		return 0.0f;
-	}
-
-	const float ChargeProduct = PlayerChargeAbs * WeaponChargeAbs;
-	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
-
-	return CaptureBaseRange * RangeMultiplier;
+	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(GetCharge()));
 }
 
 // ==================== Pull ====================

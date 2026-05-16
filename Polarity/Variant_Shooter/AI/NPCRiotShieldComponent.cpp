@@ -1,6 +1,7 @@
 // NPCRiotShieldComponent.cpp
 
 #include "NPCRiotShieldComponent.h"
+#include "ChargeAnimationComponent.h"
 #include "EMFVelocityModifier.h"
 #include "HumanoidNPC.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
@@ -72,22 +73,7 @@ float UNPCRiotShieldComponent::CalculateYankRange() const
 	UEMFVelocityModifier* OwnerMod = Owner ? Owner->FindComponentByClass<UEMFVelocityModifier>() : nullptr;
 	if (!OwnerMod) return 0.0f;
 
-	const float NpcAbs = FMath::Abs(OwnerMod->GetCharge());
-	if (NpcAbs < KINDA_SMALL_NUMBER) return 0.0f;
-
-	float PlayerAbs = 0.0f;
-	if (ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
-	{
-		if (UEMFVelocityModifier* PMod = Player->FindComponentByClass<UEMFVelocityModifier>())
-		{
-			PlayerAbs = FMath::Abs(PMod->GetCharge());
-		}
-	}
-	if (PlayerAbs < KINDA_SMALL_NUMBER) return 0.0f;
-
-	const float Ratio = (PlayerAbs * NpcAbs) / FMath::Max(YankNormCoeff, 0.01f);
-	const float Mult = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
-	return YankBaseRange * Mult;
+	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(OwnerMod->GetCharge()));
 }
 
 bool UNPCRiotShieldComponent::TryYank(AShooterCharacter* Puller)

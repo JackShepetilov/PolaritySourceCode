@@ -3,6 +3,7 @@
 
 #include "EMFPhysicsProp.h"
 #include "Curves/CurveFloat.h"
+#include "ChargeAnimationComponent.h"
 #include "Engine/DamageEvents.h"
 #include "EMFChannelingPlateActor.h"
 #include "EMF_FieldComponent.h"
@@ -452,34 +453,7 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 
 float AEMFPhysicsProp::CalculateCaptureRange() const
 {
-	// Get player charge from the plate (if captured) or from player pawn
-	float PlayerCharge = 0.0f;
-	if (CapturingPlate.IsValid())
-	{
-		PlayerCharge = CapturingPlate.Get()->GetPlateChargeDensity();
-	}
-	else if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
-	{
-		if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
-		{
-			PlayerCharge = PlayerMod->GetCharge();
-		}
-	}
-
-	const float PropChargeAbs = FMath::Abs(GetCharge());
-	const float PlayerChargeAbs = FMath::Abs(PlayerCharge);
-
-	// No capture possible without charge on both sides
-	if (PropChargeAbs < KINDA_SMALL_NUMBER || PlayerChargeAbs < KINDA_SMALL_NUMBER)
-	{
-		return 0.0f;
-	}
-
-	const float ChargeProduct = PlayerChargeAbs * PropChargeAbs;
-	const float Ratio = ChargeProduct / FMath::Max(CaptureChargeNormCoeff, 0.01f);
-	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
-
-	return CaptureBaseRange * RangeMultiplier;
+	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(GetCharge()));
 }
 
 void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)

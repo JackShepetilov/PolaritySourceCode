@@ -1,6 +1,7 @@
 // HumanoidNPC.cpp
 
 #include "HumanoidNPC.h"
+#include "ChargeAnimationComponent.h"
 #include "EMFVelocityModifier.h"
 #include "NPCRiotShieldComponent.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
@@ -288,37 +289,8 @@ bool AHumanoidNPC::YankCurrentWeapon(AShooterCharacter* Puller)
 float AHumanoidNPC::CalculateWeaponYankRange() const
 {
 	if (!CanBeYanked()) return 0.0f;
-
-	float BaseRange = 500.0f;
-	float NormCoeff = 50.0f;
-
-	// Read capture parameters from the CDO of the drop class at current index
-	if (WeaponDropMapping.IsValidIndex(CurrentWeaponIndex) && WeaponDropMapping[CurrentWeaponIndex])
-	{
-		if (const ADroppedRangedWeapon* CDO = WeaponDropMapping[CurrentWeaponIndex]->GetDefaultObject<ADroppedRangedWeapon>())
-		{
-			BaseRange = CDO->CaptureBaseRange;
-			NormCoeff = CDO->CaptureChargeNormCoeff;
-		}
-	}
-
 	const float NpcChargeAbs = EMFVelocityModifier ? FMath::Abs(EMFVelocityModifier->GetCharge()) : 0.0f;
-	if (NpcChargeAbs < KINDA_SMALL_NUMBER) return 0.0f;
-
-	// Get player charge (same pattern as DroppedRangedWeapon::CalculateCaptureRange)
-	float PlayerChargeAbs = 0.0f;
-	if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(GetWorld(), 0))
-	{
-		if (UEMFVelocityModifier* PlayerMod = PlayerChar->FindComponentByClass<UEMFVelocityModifier>())
-		{
-			PlayerChargeAbs = FMath::Abs(PlayerMod->GetCharge());
-		}
-	}
-	if (PlayerChargeAbs < KINDA_SMALL_NUMBER) return 0.0f;
-
-	const float Ratio = (PlayerChargeAbs * NpcChargeAbs) / FMath::Max(NormCoeff, 0.01f);
-	const float RangeMultiplier = FMath::Max(1.0f, 1.0f + FMath::Loge(Ratio));
-	return BaseRange * RangeMultiplier;
+	return UChargeAnimationComponent::GetCaptureRangeFor(this, NpcChargeAbs);
 }
 
 // ==================== Internal Weapon Management ====================
