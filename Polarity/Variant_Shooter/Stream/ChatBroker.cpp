@@ -80,6 +80,7 @@ void UChatBroker::Init(UStreamSubsystem* InOwner)
 	LastEmitTimeSeconds = 0.0;
 	bBoredomActive = false;
 	LastNonBoredomActivitySeconds = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
+	CurrentPhase = EChatPhase::Idle;
 
 	if (UGameInstance* GI = (InOwner ? InOwner->GetGameInstance() : nullptr))
 	{
@@ -90,6 +91,73 @@ void UChatBroker::Init(UStreamSubsystem* InOwner)
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] ChatBroker initialized"));
+}
+
+void UChatBroker::BeginRun(bool bIsFirstRun)
+{
+	// Cancel anything left from a previous run.
+	EndRun();
+
+	bCurrentRunIsFirst = bIsFirstRun;
+	CurrentPhase = EChatPhase::Opening;
+
+	UStreamConfig* Cfg = Config.Get();
+	UWorld* W = GetWorld();
+
+	// Fire opening scripted sequence
+	const FName OpeningID = bIsFirstRun
+		? FName(TEXT("stream_opening_first"))
+		: FName(TEXT("stream_opening_normal"));
+	RunScripted(OpeningID);
+
+	// Schedule Opening → Warmup transition
+	if (Cfg && W)
+	{
+		const float OpeningDur = bIsFirstRun ? Cfg->ChatFirstRunOpeningDurationSec : Cfg->ChatOpeningDurationSec;
+		W->GetTimerManager().SetTimer(
+			OpeningTransitionHandle,
+			FTimerDelegate::CreateUObject(this, &UChatBroker::TransitionToWarmup),
+			FMath::Max(0.5f, OpeningDur), false);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] ChatBroker BeginRun (first=%d)"), bIsFirstRun ? 1 : 0);
+}
+
+void UChatBroker::EndRun()
+{
+	if (UWorld* W = GetWorld())
+	{
+		FTimerManager& TM = W->GetTimerManager();
+		TM.ClearTimer(OpeningTransitionHandle);
+		TM.ClearTimer(WarmupTransitionHandle);
+	}
+	StopAllScripted();
+	CurrentPhase = EChatPhase::Idle;
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] ChatBroker EndRun"));
+}
+
+void UChatBroker::TransitionToWarmup()
+{
+	CurrentPhase = EChatPhase::Warmup;
+
+	UStreamConfig* Cfg = Config.Get();
+	UWorld* W = GetWorld();
+	if (Cfg && W)
+	{
+		const float WarmupDur = bCurrentRunIsFirst ? Cfg->ChatFirstRunWarmupDurationSec : Cfg->ChatWarmupDurationSec;
+		W->GetTimerManager().SetTimer(
+			WarmupTransitionHandle,
+			FTimerDelegate::CreateUObject(this, &UChatBroker::TransitionToNormal),
+			FMath::Max(0.5f, WarmupDur), false);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Phase → Warmup"));
+}
+
+void UChatBroker::TransitionToNormal()
+{
+	CurrentPhase = EChatPhase::Normal;
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Phase → Normal"));
 }
 
 void UChatBroker::Shutdown()
@@ -212,6 +280,13 @@ void UChatBroker::HandleLikesGenerated(int32 LikeCount, FVector WorldLocation)
 	UStreamConfig* Cfg = Config.Get();
 	const float Threshold = Cfg ? Cfg->ChatHighLPSThreshold : 50.0f;
 
+	// Hype only in Normal phase — feels wrong during opening/warmup.
+	if (CurrentPhase != EChatPhase::Normal)
+	{
+		LastObservedLPS = CurrentLPS;
+		return;
+	}
+
 	if (LastObservedLPS < Threshold && CurrentLPS >= Threshold)
 	{
 		const FGameplayTag HypeTag = FGameplayTag::RequestGameplayTag(FName(TEXT("Chat.Event.HypeBurst")), false);
@@ -229,7 +304,14 @@ void UChatBroker::HandleLikesGenerated(int32 LikeCount, FVector WorldLocation)
 
 void UChatBroker::HandleAntennaActivated(AArenaAntenna* Antenna)
 {
+	// First antenna activation per run = "real run started" milestone.
+	if (Owner.IsValid())
+	{
+		Owner->MarkRunMilestoneReached();
+	}
+
 	// Generic "antenna done" reaction (random pool from DT_ChatReactions)
+	// (EmitReaction self-gates on phase — won't fire in Opening.)
 	const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(TEXT("Chat.Event.AntennaDone")), false);
 	if (Tag.IsValid())
 	{
@@ -272,6 +354,11 @@ void UChatBroker::HandleSubtitleStarted(const FText& Text, float Duration)
 
 void UChatBroker::TickAmbient()
 {
+	if (CurrentPhase == EChatPhase::Idle || CurrentPhase == EChatPhase::Opening)
+	{
+		RescheduleAmbient();
+		return;
+	}
 	if (!AmbientTable)
 	{
 		RescheduleAmbient();
@@ -323,6 +410,11 @@ void UChatBroker::TickChannelEvent()
 
 void UChatBroker::TickHint()
 {
+	if (CurrentPhase == EChatPhase::Idle || CurrentPhase == EChatPhase::Opening)
+	{
+		RescheduleHint();
+		return;
+	}
 	// MVP: random hint from table, no XP analysis (later phase).
 	if (!HintsTable)
 	{
@@ -363,6 +455,11 @@ void UChatBroker::TickHint()
 
 void UChatBroker::TickBoredom()
 {
+	if (CurrentPhase == EChatPhase::Idle || CurrentPhase == EChatPhase::Opening)
+	{
+		RescheduleBoredom();
+		return;
+	}
 	UStreamConfig* Cfg = Config.Get();
 	const float Activation = Cfg ? Cfg->ChatBoredomActivationDelaySec : 30.0f;
 
@@ -461,6 +558,10 @@ void UChatBroker::TickScriptedStep(FName SequenceID)
 
 void UChatBroker::EmitReaction(FGameplayTag EventTag)
 {
+	if (CurrentPhase == EChatPhase::Idle || CurrentPhase == EChatPhase::Opening)
+	{
+		return;
+	}
 	if (!ReactionsTable || !EventTag.IsValid())
 	{
 		return;
@@ -642,7 +743,7 @@ void UChatBroker::Enqueue(const FStreamChatMessage& Msg, int32 Priority)
 FStreamChatMessage UChatBroker::MakeMessage(const FName& PersonaRow, const FString& UsernameOverride, const FText& Message, EChatMessageKind Kind) const
 {
 	FStreamChatMessage Msg;
-	Msg.Message = Message;
+	Msg.Message = SubstitutePlayerName(Message);
 	Msg.Kind = Kind;
 	ResolveSpeaker(PersonaRow, UsernameOverride, Msg.Username, Msg.UsernameColor);
 	return Msg;
@@ -693,8 +794,14 @@ void UChatBroker::RescheduleAmbient()
 	UWorld* W = GetWorld();
 	if (!W) { return; }
 	UStreamConfig* Cfg = Config.Get();
-	const float Min = Cfg ? Cfg->ChatAmbientIntervalMin : 2.0f;
-	const float Max = Cfg ? Cfg->ChatAmbientIntervalMax : 5.0f;
+	float Min = Cfg ? Cfg->ChatAmbientIntervalMin : 2.0f;
+	float Max = Cfg ? Cfg->ChatAmbientIntervalMax : 5.0f;
+	if (CurrentPhase == EChatPhase::Warmup && Cfg)
+	{
+		const float Slow = FMath::Max(1.0f, Cfg->ChatWarmupAmbientSlowdown);
+		Min *= Slow;
+		Max *= Slow;
+	}
 	const float Delay = FMath::FRandRange(Min, FMath::Max(Min, Max));
 	W->GetTimerManager().SetTimer(AmbientHandle, FTimerDelegate::CreateUObject(this, &UChatBroker::TickAmbient), Delay, /*bLoop*/false);
 }

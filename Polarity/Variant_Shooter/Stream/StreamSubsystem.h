@@ -94,6 +94,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Stream|Player")
 	void SetPlayerStreamerName(const FString& InName);
 
+	// ==================== Run Tracking ====================
+
+	/** Total runs the player has reached the milestone trigger on (first antenna activation).
+	 *  Pre-milestone failures don't count — see MarkRunMilestoneReached. SaveGame persisted. */
+	UFUNCTION(BlueprintPure, Category = "Stream|Run")
+	int32 GetCompletedRuns() const { return CompletedRuns; }
+
+	/** True if the player hasn't yet reached the milestone trigger in any previous run
+	 *  AND hasn't reached it in the current run. Used by ChatBroker to pick opening sequence. */
+	UFUNCTION(BlueprintPure, Category = "Stream|Run")
+	bool IsFirstRun() const { return CompletedRuns == 0 && !bCurrentRunMilestoneReached; }
+
+	/** Call when the player crosses the "real run" threshold (first antenna activation per run).
+	 *  Idempotent within a single run — increments CompletedRuns only once per run. */
+	UFUNCTION(BlueprintCallable, Category = "Stream|Run")
+	void MarkRunMilestoneReached();
+
 	// ==================== Read API ====================
 
 	UFUNCTION(BlueprintPure, Category = "Stream")
@@ -192,4 +209,13 @@ protected:
 	/** Owned chat broker — coordinates ambient / reactions / scripted / hints / hype / boredom / etc. */
 	UPROPERTY(Transient)
 	TObjectPtr<UChatBroker> ChatBroker;
+
+	/** Total "real" runs completed (those that crossed the milestone trigger). SaveGame. */
+	UPROPERTY(SaveGame)
+	int32 CompletedRuns = 0;
+
+	/** Whether the current run has already crossed the milestone trigger.
+	 *  Reset on HandleRunStarted; set true via MarkRunMilestoneReached. */
+	UPROPERTY(Transient)
+	bool bCurrentRunMilestoneReached = false;
 };

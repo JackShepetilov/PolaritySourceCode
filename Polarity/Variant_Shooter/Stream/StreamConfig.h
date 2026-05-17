@@ -164,6 +164,29 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1.0"))
 	float ChatHighLPSThreshold = 50.0f;
 
+	// ==================== Chat (Run-Opening Phase) ====================
+
+	/** Duration of the Opening phase for a normal (non-first) run, in seconds.
+	 *  During Opening, only the scripted opening sequence fires — ambient/reactions/etc are suppressed. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Phases", meta = (ClampMin = "1.0"))
+	float ChatOpeningDurationSec = 15.0f;
+
+	/** Duration of the Warmup phase for a normal run (ambient slower, hype still off). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Phases", meta = (ClampMin = "1.0"))
+	float ChatWarmupDurationSec = 30.0f;
+
+	/** Duration of the Opening phase for the player's first ever run (longer — onboarding). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Phases", meta = (ClampMin = "1.0"))
+	float ChatFirstRunOpeningDurationSec = 45.0f;
+
+	/** Duration of the Warmup phase for the player's first ever run. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Phases", meta = (ClampMin = "1.0"))
+	float ChatFirstRunWarmupDurationSec = 45.0f;
+
+	/** Multiplier applied to ambient interval during Warmup phase (≥1.0 = slower). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Phases", meta = (ClampMin = "1.0"))
+	float ChatWarmupAmbientSlowdown = 2.0f;
+
 	/** How many short emote-spam messages a hype burst fires. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1"))
 	int32 ChatHypeBurstSize = 6;

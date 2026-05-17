@@ -25,6 +25,15 @@ class USubtitleSubsystem;
 class UStreamConfig;
 struct FDonation;
 
+UENUM(BlueprintType)
+enum class EChatPhase : uint8
+{
+	Idle,       // No run active — nothing fires
+	Opening,    // Scripted opening sequence only; all other producers suppressed
+	Warmup,     // Ambient slower, reactions/hint/boredom OK, hype still off
+	Normal      // Everything full speed
+};
+
 UCLASS(BlueprintType)
 class POLARITY_API UChatBroker : public UObject
 {
@@ -49,6 +58,20 @@ public:
 
 	void BindArenaManager(AArenaManager* Arena);
 	void UnbindArenaManager();
+
+	// ==================== Run lifecycle ====================
+
+	/** Called by UStreamSubsystem on RunStarted. Sets phase to Opening and triggers the
+	 *  appropriate opening scripted sequence (`stream_opening_first` vs `_normal`). */
+	UFUNCTION(BlueprintCallable, Category = "Chat|Run")
+	void BeginRun(bool bIsFirstRun);
+
+	/** Called by UStreamSubsystem on RunEnded. Cancels transition timers + active sequences. */
+	UFUNCTION(BlueprintCallable, Category = "Chat|Run")
+	void EndRun();
+
+	UFUNCTION(BlueprintPure, Category = "Chat|Run")
+	EChatPhase GetCurrentPhase() const { return CurrentPhase; }
 
 	// ==================== Public triggers ====================
 
@@ -97,6 +120,9 @@ protected:
 	void RescheduleBoredom();
 	void RescheduleDispatcher();
 
+	void TransitionToWarmup();
+	void TransitionToNormal();
+
 	/** Resolve final speaker (username + color) from PersonaRow / Override / random. */
 	void ResolveSpeaker(const FName& PersonaRow, const FString& UsernameOverride, FString& OutUsername, FColor& OutColor) const;
 
@@ -132,6 +158,17 @@ protected:
 	FTimerHandle HintHandle;
 	FTimerHandle BoredomHandle;
 	FTimerHandle DispatcherHandle;
+
+	// Phase transition timers
+	FTimerHandle OpeningTransitionHandle;
+	FTimerHandle WarmupTransitionHandle;
+
+	UPROPERTY(Transient)
+	EChatPhase CurrentPhase = EChatPhase::Idle;
+
+	/** Captured at BeginRun and used by transition callbacks to pick first-vs-normal durations. */
+	UPROPERTY(Transient)
+	bool bCurrentRunIsFirst = false;
 
 	struct FQueuedMessage
 	{

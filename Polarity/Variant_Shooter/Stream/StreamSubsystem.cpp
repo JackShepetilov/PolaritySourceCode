@@ -206,13 +206,21 @@ void UStreamSubsystem::HandleRunStarted()
 	CurrentViewers = 0;
 	ViewerTarget = 0;
 	DonationRollAccumulator = 0.0f;
+	bCurrentRunMilestoneReached = false;
 
 	if (UStyleComponent* Style = StyleComponent.Get())
 	{
 		Style->ResetStyleState();
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Run started"));
+	const bool bWasFirst = IsFirstRun();
+	if (ChatBroker)
+	{
+		ChatBroker->BeginRun(bWasFirst);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Run started (first=%d, completedSoFar=%d)"),
+		bWasFirst ? 1 : 0, CompletedRuns);
 }
 
 void UStreamSubsystem::HandleRunEnded(ERunEndReason Reason)
@@ -220,11 +228,27 @@ void UStreamSubsystem::HandleRunEnded(ERunEndReason Reason)
 	bRunActive = false;
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Run ended, reason=%d, final viewers=%d"), (int32)Reason, CurrentViewers);
 
-	if (ChatBroker && Reason == ERunEndReason::PlayerDeath)
+	if (ChatBroker)
 	{
-		const FGameplayTag DeathTag = FGameplayTag::RequestGameplayTag(FName(TEXT("Chat.Event.PlayerDeath")), false);
-		ChatBroker->EmitReaction(DeathTag);
+		ChatBroker->EndRun();
+
+		if (Reason == ERunEndReason::PlayerDeath)
+		{
+			const FGameplayTag DeathTag = FGameplayTag::RequestGameplayTag(FName(TEXT("Chat.Event.PlayerDeath")), false);
+			ChatBroker->EmitReaction(DeathTag);
+		}
 	}
+}
+
+void UStreamSubsystem::MarkRunMilestoneReached()
+{
+	if (bCurrentRunMilestoneReached)
+	{
+		return;
+	}
+	bCurrentRunMilestoneReached = true;
+	++CompletedRuns;
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Run milestone reached. CompletedRuns now %d"), CompletedRuns);
 }
 
 void UStreamSubsystem::HandleArenaEntered(int32 ArenaIndex)
