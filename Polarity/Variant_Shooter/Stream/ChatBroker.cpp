@@ -304,6 +304,10 @@ void UChatBroker::HandleLikesGenerated(int32 LikeCount, FVector WorldLocation)
 
 void UChatBroker::HandleAntennaActivated(AArenaAntenna* Antenna)
 {
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] HandleAntennaActivated fired (antenna=%s tag=%s)"),
+		Antenna ? *Antenna->GetName() : TEXT("NULL"),
+		Antenna ? *Antenna->ArenaTagForLore.ToString() : TEXT(""));
+
 	// First antenna activation per run = "real run started" milestone.
 	if (Owner.IsValid())
 	{

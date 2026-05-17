@@ -271,6 +271,14 @@ void UStreamSubsystem::HandleArenaEntered(int32 ArenaIndex)
 				FoundArena = *It;
 				break;
 			}
+			if (FoundArena)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Bound ArenaManager: %s"), *FoundArena->GetName());
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] HandleArenaEntered: no AArenaManager found in world — antenna events won't reach the chat broker"));
+			}
 			ChatBroker->BindArenaManager(FoundArena);
 		}
 	}
