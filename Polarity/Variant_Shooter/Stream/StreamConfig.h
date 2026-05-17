@@ -126,6 +126,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Tables")
 	TObjectPtr<UDataTable> ChatPersonasTable;
 
+	/** Lore DataTables (sharded by biome). Row type: FLoreEntryRow.
+	 *  UStreamSubsystem forwards these to ULoreSubsystem on SetConfig. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Lore")
+	TArray<TObjectPtr<UDataTable>> LoreTables;
+
 	// ==================== Chat (Timing) ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "0.5"))

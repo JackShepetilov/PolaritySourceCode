@@ -1,0 +1,8 @@
+Name,LoreID,Biome,ArenaTag,Scope,RequiredLoreIDs,ChatScriptedSequenceID,VoiceLineID,Priority,DesignerNotes
+lore_cart_001,villain_laws_homophobic,Cartels,cartel_office_main,Arena,,lore_cart_villain_laws,,10,"Discovers villain pushed homophobic legislation through proxies"
+lore_cart_002,villain_closet_gay,Cartels,yacht_master_suite,Arena,villain_laws_homophobic,lore_cart_villain_closet,,10,"Reveals villain is closeted — requires laws lore consumed first (sequential puzzle)"
+lore_cart_003,cartel_human_trials_meta,Cartels,cartel_lab_alpha,Arena,,lore_cart_lab_trials,,5,"Experiments on civilians for metabolic enhancements"
+lore_cart_004,cartel_money_laundering_chain,Cartels,cartel_office_main,Arena,,lore_cart_laundering,,3,"Bank chain across 3 jurisdictions"
+lore_cart_005,villain_charity_facade,Cartels,,Biome,,lore_cart_villain_charity,,5,"Generic biome lore — villain runs fake charity. Falls back when no arena-specific available"
+lore_cart_006,villain_pet_capybara,Cartels,,Biome,,lore_cart_villain_capybara,,1,"Low-priority filler — villain has emotional support capybara named Чавес"
+lore_cart_007,global_polarity_origin,,,Global,,lore_global_polarity_origin,,1,"Last-resort filler — origin of the polarity tech. Plays anywhere when biome pool is dry"

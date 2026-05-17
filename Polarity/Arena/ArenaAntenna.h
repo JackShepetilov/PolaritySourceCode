@@ -115,6 +115,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Antenna|Dialogue")
 	TArray<FAntennaDialogueChoice> DialogueChoices;
 
+	/** Logical arena tag for lore purposes — the same tag can repeat across levels.
+	 *  When the antenna activates, ULoreSubsystem uses this to pick an arena-specific
+	 *  lore entry (or fall back to biome-general / global). Empty = biome-general only. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Antenna|Lore")
+	FName ArenaTagForLore;
+
 	// ==================== State (read-only) ====================
 
 	/** Current state — driven by ArenaManager and the button press. */

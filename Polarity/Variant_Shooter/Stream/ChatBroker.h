@@ -87,7 +87,7 @@ protected:
 	void TickHint();
 	void TickBoredom();
 	void TickDispatcher();
-	void TickScriptedStep(int32 SequenceSlot);
+	void TickScriptedStep(FName SequenceID);
 
 	// ==================== Internals ====================
 
@@ -143,6 +143,7 @@ protected:
 	struct FActiveScripted
 	{
 		FName SequenceID;
+		TArray<FChatScriptedRow> Steps;   // cached copies of rows ordered by StepIndex
 		int32 NextStepIndex = 0;
 		FTimerHandle StepHandle;
 	};

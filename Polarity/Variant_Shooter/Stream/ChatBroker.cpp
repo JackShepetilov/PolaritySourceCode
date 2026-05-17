@@ -7,11 +7,14 @@
 
 #include "StreamSubsystem.h"
 #include "StreamConfig.h"
+#include "StreamArenaConfig.h"
 #include "StyleComponent.h"
 #include "StyleAction.h"
 #include "Polarity/Arena/ArenaManager.h"
 #include "Polarity/Arena/ArenaAntenna.h"
 #include "Polarity/Subtitle/SubtitleSubsystem.h"
+#include "Polarity/Variant_Shooter/Lore/LoreSubsystem.h"
+#include "Polarity/Variant_Shooter/Lore/LoreTypes.h"
 
 #include "Engine/DataTable.h"
 #include "Engine/GameInstance.h"
@@ -226,10 +229,36 @@ void UChatBroker::HandleLikesGenerated(int32 LikeCount, FVector WorldLocation)
 
 void UChatBroker::HandleAntennaActivated(AArenaAntenna* Antenna)
 {
+	// Generic "antenna done" reaction (random pool from DT_ChatReactions)
 	const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(TEXT("Chat.Event.AntennaDone")), false);
 	if (Tag.IsValid())
 	{
 		EmitReaction(Tag);
+	}
+
+	// Lore-specific commentary (scripted sequence from DT_Lore_*)
+	if (!Antenna || !Owner.IsValid()) { return; }
+
+	UGameInstance* GI = Owner->GetGameInstance();
+	if (!GI) { return; }
+
+	ULoreSubsystem* Lore = GI->GetSubsystem<ULoreSubsystem>();
+	if (!Lore) { return; }
+
+	FName Biome = NAME_None;
+	if (UStreamArenaConfig* AC = Owner->GetArenaConfig())
+	{
+		Biome = AC->Biome;
+	}
+
+	FLoreEntryRow Entry;
+	if (Lore->PickAndConsumeLoreForArena(Antenna->ArenaTagForLore, Biome, Entry))
+	{
+		if (!Entry.ChatScriptedSequenceID.IsNone())
+		{
+			RunScripted(Entry.ChatScriptedSequenceID);
+		}
+		// TODO when voice integration lands: trigger USubtitleSubsystem with Entry.VoiceLineID
 	}
 }
 
@@ -390,9 +419,42 @@ void UChatBroker::TickDispatcher()
 	RescheduleDispatcher();
 }
 
-void UChatBroker::TickScriptedStep(int32 SequenceSlot)
+void UChatBroker::TickScriptedStep(FName SequenceID)
 {
-	// MVP stub for scripted sequences. Next phase implements step-by-step playback.
+	const int32 Idx = ActiveScripted.IndexOfByPredicate([SequenceID](const FActiveScripted& A)
+	{
+		return A.SequenceID == SequenceID;
+	});
+	if (Idx == INDEX_NONE) { return; }
+
+	FActiveScripted& Active = ActiveScripted[Idx];
+	if (!Active.Steps.IsValidIndex(Active.NextStepIndex))
+	{
+		ActiveScripted.RemoveAt(Idx);
+		return;
+	}
+
+	const FChatScriptedRow& Step = Active.Steps[Active.NextStepIndex];
+	Enqueue(MakeMessage(Step.PersonaRow, Step.UsernameOverride, Step.Message, EChatMessageKind::Scripted),
+		/*Priority*/ 2);
+
+	Active.NextStepIndex++;
+
+	if (Active.NextStepIndex >= Active.Steps.Num())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Scripted '%s' finished"), *SequenceID.ToString());
+		ActiveScripted.RemoveAt(Idx);
+		return;
+	}
+
+	UWorld* W = GetWorld();
+	if (!W) { return; }
+
+	const float NextDelay = FMath::Max(0.001f, Active.Steps[Active.NextStepIndex].DelaySec);
+	W->GetTimerManager().SetTimer(
+		Active.StepHandle,
+		FTimerDelegate::CreateUObject(this, &UChatBroker::TickScriptedStep, SequenceID),
+		NextDelay, false);
 }
 
 // ==================== Triggers ====================
@@ -448,8 +510,63 @@ void UChatBroker::EmitReaction(FGameplayTag EventTag)
 
 void UChatBroker::RunScripted(FName SequenceID)
 {
-	// MVP stub. Next phase: parse FChatScriptedRow, sort by StepIndex, schedule step timers.
-	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] RunScripted(%s) — not implemented in MVP"), *SequenceID.ToString());
+	if (!ScriptedTable || SequenceID.IsNone()) { return; }
+
+	// Already running this sequence? Guard against double-trigger.
+	const int32 ExistingIdx = ActiveScripted.IndexOfByPredicate([SequenceID](const FActiveScripted& A)
+	{
+		return A.SequenceID == SequenceID;
+	});
+	if (ExistingIdx != INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Scripted '%s' already running — ignoring duplicate trigger"), *SequenceID.ToString());
+		return;
+	}
+
+	// Gather rows matching SequenceID
+	TArray<const FChatScriptedRow*> Steps;
+	for (const FName& RowName : ScriptedTable->GetRowNames())
+	{
+		const FChatScriptedRow* Row = ScriptedTable->FindRow<FChatScriptedRow>(RowName, TEXT("RunScripted"));
+		if (Row && Row->SequenceID == SequenceID)
+		{
+			Steps.Add(Row);
+		}
+	}
+
+	if (Steps.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] No scripted rows for SequenceID '%s'"), *SequenceID.ToString());
+		return;
+	}
+
+	// Sort by StepIndex ascending
+	Steps.Sort([](const FChatScriptedRow& A, const FChatScriptedRow& B)
+	{
+		return A.StepIndex < B.StepIndex;
+	});
+
+	FActiveScripted Active;
+	Active.SequenceID = SequenceID;
+	Active.NextStepIndex = 0;
+	Active.Steps.Reserve(Steps.Num());
+	for (const FChatScriptedRow* Row : Steps)
+	{
+		Active.Steps.Add(*Row);
+	}
+	ActiveScripted.Add(MoveTemp(Active));
+
+	UWorld* W = GetWorld();
+	if (!W) { return; }
+
+	const float FirstDelay = FMath::Max(0.001f, ActiveScripted.Last().Steps[0].DelaySec);
+	W->GetTimerManager().SetTimer(
+		ActiveScripted.Last().StepHandle,
+		FTimerDelegate::CreateUObject(this, &UChatBroker::TickScriptedStep, SequenceID),
+		FirstDelay, false);
+
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Started scripted '%s' (%d steps, first delay %.2fs)"),
+		*SequenceID.ToString(), Steps.Num(), FirstDelay);
 }
 
 void UChatBroker::StopAllScripted()

@@ -82,6 +82,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Stream|Chat")
 	UStyleComponent* GetStyleComponent() const { return StyleComponent.Get(); }
 
+	UFUNCTION(BlueprintPure, Category = "Stream")
+	UStreamConfig* GetConfig() const { return Config.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Stream")
+	UStreamArenaConfig* GetArenaConfig() const { return ArenaConfig.Get(); }
+
 	UFUNCTION(BlueprintPure, Category = "Stream|Player")
 	FString GetPlayerStreamerName() const { return PlayerStreamerName; }
 

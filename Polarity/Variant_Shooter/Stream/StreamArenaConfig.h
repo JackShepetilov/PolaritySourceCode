@@ -23,4 +23,9 @@ public:
 	/** Optional per-arena chat script. If null, falls back to UStreamConfig::DefaultChatScript. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Arena")
 	TObjectPtr<UChatScript> ChatScript;
+
+	/** Biome tag this arena belongs to (Cartels / Islands / Yachts / OtherDim).
+	 *  Consumed by ULoreSubsystem to pick biome-general lore when arena-specific is exhausted. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Arena")
+	FName Biome;
 };

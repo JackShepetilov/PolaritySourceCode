@@ -10,8 +10,10 @@
 #include "ChatBroker.h"
 
 #include "Polarity/Arena/ArenaManager.h"
+#include "Polarity/Variant_Shooter/Lore/LoreSubsystem.h"
 
 #include "Curves/CurveFloat.h"
+#include "Engine/DataTable.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -115,6 +117,23 @@ void UStreamSubsystem::SetConfig(UStreamConfig* InConfig)
 	if (ChatBroker)
 	{
 		ChatBroker->ApplyConfig(InConfig);
+	}
+
+	// Forward lore tables to LoreSubsystem.
+	if (InConfig)
+	{
+		if (UGameInstance* GI = GetGameInstance())
+		{
+			if (ULoreSubsystem* Lore = GI->GetSubsystem<ULoreSubsystem>())
+			{
+				TArray<UDataTable*> Tables;
+				for (const TObjectPtr<UDataTable>& T : InConfig->LoreTables)
+				{
+					if (T) { Tables.Add(T.Get()); }
+				}
+				Lore->SetLoreTables(Tables);
+			}
+		}
 	}
 }
 
