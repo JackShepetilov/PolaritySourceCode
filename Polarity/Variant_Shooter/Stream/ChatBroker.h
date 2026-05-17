@@ -1,7 +1,7 @@
 // ChatBroker.h
 // Coordinates all chat producers (ambient, reactions, scripted, hints, channel events,
 // hype bursts, boredom, schadenfreude, friend voice echo, direct mentions) and dispatches
-// FChatMessage events at a rate-limited cadence.
+// FStreamChatMessage events at a rate-limited cadence.
 //
 // Owned by UStreamSubsystem (one broker per game instance). Event-driven and timer-driven
 // — no Tick. Producers subscribe to delegates / spawn timers when relevant; the dispatcher
@@ -70,7 +70,7 @@ public:
 	// ==================== Events ====================
 
 	UPROPERTY(BlueprintAssignable, Category = "Chat|Events")
-	FOnChatMessageReady OnChatMessageReady;
+	FOnStreamChatMessageReady OnChatMessageReady;
 
 protected:
 	// ==================== Event handlers ====================
@@ -103,9 +103,9 @@ protected:
 	FString PickRandomNick() const;
 	FColor PickRandomColor() const;
 
-	void Enqueue(const FChatMessage& Msg, int32 Priority);
+	void Enqueue(const FStreamChatMessage& Msg, int32 Priority);
 
-	FChatMessage MakeMessage(const FName& PersonaRow, const FString& UsernameOverride, const FText& Message, EChatMessageKind Kind) const;
+	FStreamChatMessage MakeMessage(const FName& PersonaRow, const FString& UsernameOverride, const FText& Message, EChatMessageKind Kind) const;
 
 	float CurrentMaxMessagesPerSecond() const;
 	float SampleLikesPerSecond() const;
@@ -135,7 +135,7 @@ protected:
 
 	struct FQueuedMessage
 	{
-		FChatMessage Msg;
+		FStreamChatMessage Msg;
 		int32 Priority = 0;
 	};
 	TArray<FQueuedMessage> Queue;

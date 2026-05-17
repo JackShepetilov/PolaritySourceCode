@@ -466,7 +466,7 @@ void UChatBroker::StopAllScripted()
 
 void UChatBroker::DebugEmit(const FString& Username, const FText& Message, EChatMessageKind Kind)
 {
-	FChatMessage Msg;
+	FStreamChatMessage Msg;
 	Msg.Username = Username;
 	Msg.Message = Message;
 	Msg.UsernameColor = FColor::Yellow;
@@ -514,7 +514,7 @@ FColor UChatBroker::PickRandomColor() const
 	return Pool[FMath::RandRange(0, Pool.Num() - 1)];
 }
 
-void UChatBroker::Enqueue(const FChatMessage& Msg, int32 Priority)
+void UChatBroker::Enqueue(const FStreamChatMessage& Msg, int32 Priority)
 {
 	FQueuedMessage Q;
 	Q.Msg = Msg;
@@ -522,9 +522,9 @@ void UChatBroker::Enqueue(const FChatMessage& Msg, int32 Priority)
 	Queue.Add(Q);
 }
 
-FChatMessage UChatBroker::MakeMessage(const FName& PersonaRow, const FString& UsernameOverride, const FText& Message, EChatMessageKind Kind) const
+FStreamChatMessage UChatBroker::MakeMessage(const FName& PersonaRow, const FString& UsernameOverride, const FText& Message, EChatMessageKind Kind) const
 {
-	FChatMessage Msg;
+	FStreamChatMessage Msg;
 	Msg.Message = Message;
 	Msg.Kind = Kind;
 	ResolveSpeaker(PersonaRow, UsernameOverride, Msg.Username, Msg.UsernameColor);

@@ -136,7 +136,7 @@ struct FChatHintRow : public FTableRowBase
 // ==================== Output Message ====================
 
 USTRUCT(BlueprintType)
-struct FChatMessage
+struct FStreamChatMessage
 {
 	GENERATED_BODY()
 
@@ -155,4 +155,4 @@ struct FChatMessage
 
 // ==================== Delegates ====================
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChatMessageReady, const FChatMessage&, Message);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStreamChatMessageReady, const FStreamChatMessage&, Message);
