@@ -7,9 +7,15 @@
 #include "StreamConfig.h"
 #include "StreamArenaConfig.h"
 #include "StyleComponent.h"
+#include "ChatBroker.h"
+
+#include "Polarity/Arena/ArenaManager.h"
 
 #include "Curves/CurveFloat.h"
 #include "Engine/GameInstance.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameplayTagContainer.h"
 #include "Stats/Stats.h"
 
 void UStreamSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -28,10 +34,19 @@ void UStreamSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] RunSubsystem unavailable in Initialize — Stream will not function"));
 	}
+
+	ChatBroker = NewObject<UChatBroker>(this);
+	ChatBroker->Init(this);
 }
 
 void UStreamSubsystem::Deinitialize()
 {
+	if (ChatBroker)
+	{
+		ChatBroker->Shutdown();
+		ChatBroker = nullptr;
+	}
+
 	if (URunSubsystem* Run = GetRunSubsystem())
 	{
 		Run->OnRunStarted.RemoveDynamic(this, &UStreamSubsystem::HandleRunStarted);
@@ -40,6 +55,12 @@ void UStreamSubsystem::Deinitialize()
 	}
 
 	Super::Deinitialize();
+}
+
+void UStreamSubsystem::SetPlayerStreamerName(const FString& InName)
+{
+	PlayerStreamerName = InName.IsEmpty() ? TEXT("@ramless_") : InName;
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] PlayerStreamerName set: %s"), *PlayerStreamerName);
 }
 
 URunSubsystem* UStreamSubsystem::GetRunSubsystem() const
@@ -90,6 +111,11 @@ void UStreamSubsystem::SetConfig(UStreamConfig* InConfig)
 	{
 		Style->SetConfig(InConfig);
 	}
+
+	if (ChatBroker)
+	{
+		ChatBroker->ApplyConfig(InConfig);
+	}
 }
 
 void UStreamSubsystem::SetArenaConfig(UStreamArenaConfig* InArenaConfig)
@@ -108,6 +134,11 @@ void UStreamSubsystem::RegisterStyleComponent(UStyleComponent* InStyle)
 	if (InStyle && Config.IsValid())
 	{
 		InStyle->SetConfig(Config.Get());
+	}
+
+	if (ChatBroker)
+	{
+		ChatBroker->BindStyleComponent(InStyle);
 	}
 }
 
@@ -169,12 +200,37 @@ void UStreamSubsystem::HandleRunEnded(ERunEndReason Reason)
 {
 	bRunActive = false;
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Run ended, reason=%d, final viewers=%d"), (int32)Reason, CurrentViewers);
+
+	if (ChatBroker && Reason == ERunEndReason::PlayerDeath)
+	{
+		const FGameplayTag DeathTag = FGameplayTag::RequestGameplayTag(FName(TEXT("Chat.Event.PlayerDeath")), false);
+		ChatBroker->EmitReaction(DeathTag);
+	}
 }
 
 void UStreamSubsystem::HandleArenaEntered(int32 ArenaIndex)
 {
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Arena entered: %d"), ArenaIndex);
-	// Phase 3+: arena-specific reset / config swap if needed.
+
+	// Auto-bind chat broker to the arena manager so antenna events flow into chat reactions.
+	if (ChatBroker)
+	{
+		UWorld* World = nullptr;
+		if (UGameInstance* GI = GetGameInstance())
+		{
+			World = GI->GetWorld();
+		}
+		if (World)
+		{
+			AArenaManager* FoundArena = nullptr;
+			for (TActorIterator<AArenaManager> It(World); It; ++It)
+			{
+				FoundArena = *It;
+				break;
+			}
+			ChatBroker->BindArenaManager(FoundArena);
+		}
+	}
 }
 
 // ==================== Tick helpers (skeletons) ====================

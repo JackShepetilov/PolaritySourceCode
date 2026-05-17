@@ -57,6 +57,7 @@ void UStyleComponent::RegisterAction(const FStyleAction& Action)
 
 	const int32 HeartCount = FMath::Max(1, FMath::RoundToInt(StylePoints / 10.0f));
 	OnLikesGenerated.Broadcast(HeartCount, Action.WorldLocation);
+	OnStyleActionRegistered.Broadcast(Action);
 
 	UE_LOG(LogTemp, Log,
 		TEXT("[STREAM_DEBUG] Action=%d Spectacle=%.0f Fresh=%.2f StyleAdded=%.0f Style=%.0f LPS=%.1f Hearts=%d"),

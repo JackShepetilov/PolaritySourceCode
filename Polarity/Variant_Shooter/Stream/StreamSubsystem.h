@@ -21,6 +21,7 @@
 class UStreamConfig;
 class UStreamArenaConfig;
 class UStyleComponent;
+class UChatBroker;
 
 USTRUCT(BlueprintType)
 struct FDonation
@@ -72,6 +73,20 @@ public:
 	/** Register the player's StyleComponent so the subsystem can poll LikesPerSecond. */
 	UFUNCTION(BlueprintCallable, Category = "Stream")
 	void RegisterStyleComponent(UStyleComponent* InStyle);
+
+	// ==================== Chat + Player Name ====================
+
+	UFUNCTION(BlueprintPure, Category = "Stream|Chat")
+	UChatBroker* GetChatBroker() const { return ChatBroker; }
+
+	UFUNCTION(BlueprintPure, Category = "Stream|Chat")
+	UStyleComponent* GetStyleComponent() const { return StyleComponent.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Stream|Player")
+	FString GetPlayerStreamerName() const { return PlayerStreamerName; }
+
+	UFUNCTION(BlueprintCallable, Category = "Stream|Player")
+	void SetPlayerStreamerName(const FString& InName);
 
 	// ==================== Read API ====================
 
@@ -163,4 +178,12 @@ protected:
 	/** Persists across runs (SaveGame integration in a later phase). */
 	UPROPERTY(SaveGame)
 	int64 MetaCurrency = 0;
+
+	/** Player's stream name — used for direct mentions in chat and (later) friend voicelines. */
+	UPROPERTY(SaveGame)
+	FString PlayerStreamerName = TEXT("@ramless_");
+
+	/** Owned chat broker — coordinates ambient / reactions / scripted / hints / hype / boredom / etc. */
+	UPROPERTY(Transient)
+	TObjectPtr<UChatBroker> ChatBroker;
 };

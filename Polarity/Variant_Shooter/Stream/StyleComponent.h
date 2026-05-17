@@ -18,6 +18,7 @@
 class UStreamConfig;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLikesGenerated, int32, LikeCount, FVector, WorldLocation);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStyleActionRegistered, const FStyleAction&, Action);
 
 UCLASS(BlueprintType, meta = (BlueprintSpawnableComponent))
 class POLARITY_API UStyleComponent : public UActorComponent
@@ -50,6 +51,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Style|Events")
 	FOnLikesGenerated OnLikesGenerated;
+
+	/** Fires once per RegisterAction call with full FStyleAction (category-aware). */
+	UPROPERTY(BlueprintAssignable, Category = "Style|Events")
+	FOnStyleActionRegistered OnStyleActionRegistered;
 
 protected:
 	virtual void BeginPlay() override;

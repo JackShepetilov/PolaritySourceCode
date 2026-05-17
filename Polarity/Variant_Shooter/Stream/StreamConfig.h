@@ -14,6 +14,7 @@
 
 class UCurveFloat;
 class UChatScript;
+class UDataTable;
 
 USTRUCT(BlueprintType)
 struct FFreshnessFalloff
@@ -102,4 +103,67 @@ public:
 	/** Fallback chat script when an arena doesn't define its own. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Defaults")
 	TObjectPtr<UChatScript> DefaultChatScript;
+
+	// ==================== Chat (DataTables) ====================
+
+	/** Row type: FChatAmbientRow. Pool of random ambient lines. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Tables")
+	TObjectPtr<UDataTable> ChatAmbientTable;
+
+	/** Row type: FChatReactionRow. Event-driven lines, keyed by FGameplayTag. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Tables")
+	TObjectPtr<UDataTable> ChatReactionsTable;
+
+	/** Row type: FChatScriptedRow. Multi-step sequences sharing SequenceID. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Tables")
+	TObjectPtr<UDataTable> ChatScriptedTable;
+
+	/** Row type: FChatHintRow. XP-under-used hints. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Tables")
+	TObjectPtr<UDataTable> ChatHintsTable;
+
+	/** Row type: FChatPersonaRow. Persona definitions referenced by other tables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Tables")
+	TObjectPtr<UDataTable> ChatPersonasTable;
+
+	// ==================== Chat (Timing) ====================
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "0.5"))
+	float ChatAmbientIntervalMin = 2.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "0.5"))
+	float ChatAmbientIntervalMax = 5.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "5.0"))
+	float ChatChannelEventIntervalMin = 60.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "5.0"))
+	float ChatChannelEventIntervalMax = 180.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "5.0"))
+	float ChatHintCheckIntervalSec = 20.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "5.0"))
+	float ChatBoredomCheckIntervalSec = 8.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Timing", meta = (ClampMin = "5.0"))
+	float ChatBoredomActivationDelaySec = 30.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1"))
+	int32 ChatMaxMessagesPerSecondLow = 2;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1"))
+	int32 ChatMaxMessagesPerSecondHigh = 6;
+
+	/** LPS above this threshold uses the High rate cap; below uses Low. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1.0"))
+	float ChatHighLPSThreshold = 50.0f;
+
+	/** How many short emote-spam messages a hype burst fires. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1"))
+	int32 ChatHypeBurstSize = 6;
+
+	/** Cooldown between hype bursts to prevent infinite spam. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1.0"))
+	float ChatHypeBurstCooldownSec = 8.0f;
 };

@@ -1,0 +1,51 @@
+Name,EventTag,PersonaRow,UsernameOverride,Message,Weight
+react_h1,Chat.Event.Headshot,,POG that headshot,,1.0
+react_h2,Chat.Event.Headshot,per_leet,,W aim actually,1.0
+react_h3,Chat.Event.Headshot,per_stan,,headshot king lets gooo,1.0
+react_h4,Chat.Event.Headshot,,tasty,,1.0
+react_h5,Chat.Event.Headshot,per_chad,,clean shot dude,1.0
+react_mk1,Chat.Event.Multikill,,POG POG POG,,1.0
+react_mk2,Chat.Event.Multikill,per_leet,,AYO?,1.0
+react_mk3,Chat.Event.Multikill,per_stan,,MULTIKILL LETS GO,1.0
+react_mk4,Chat.Event.Multikill,per_chad,,absolute rampage,1.0
+react_mk5,Chat.Event.Multikill,,they didnt stand a chance,,1.0
+react_ad1,Chat.Event.AirDashKill,,SPIDER-MAN REAL,,1.0
+react_ad2,Chat.Event.AirDashKill,per_stan,,FLYING ARROW,1.0
+react_ad3,Chat.Event.AirDashKill,,PARKOUR,,1.0
+react_ad4,Chat.Event.AirDashKill,per_chad,,style for days,1.0
+react_yk1,Chat.Event.YankKill,,RUDE,,1.0
+react_yk2,Chat.Event.YankKill,per_leet,,stole their toy lol,1.0
+react_yk3,Chat.Event.YankKill,,OWN IT,,1.0
+react_yk4,Chat.Event.YankKill,per_stan,,KARMA,1.0
+react_ce1,Chat.Event.ChainElectrify,,ZAPPED,,1.0
+react_ce2,Chat.Event.ChainElectrify,per_witch,,the current flows,1.0
+react_ce3,Chat.Event.ChainElectrify,,CHAIN LIGHTNING,,1.0
+react_mk_m1,Chat.Event.MeleeKill,,one shot one kill,,1.0
+react_mk_m2,Chat.Event.MeleeKill,per_leet,,got too close lmao,1.0
+react_mk_m3,Chat.Event.MeleeKill,,HANDS,,1.0
+react_a1,Chat.Event.AntennaDone,,DATA SECURED,,1.0
+react_a2,Chat.Event.AntennaDone,per_chad,,uplink complete gg,1.0
+react_a3,Chat.Event.AntennaDone,per_witch,,the signal has been received,1.0
+react_a4,Chat.Event.AntennaDone,,package delivered,,1.0
+react_d1,Chat.Event.PlayerDeath,,F,,1.0
+react_d2,Chat.Event.PlayerDeath,per_leet,,trash gamer,1.0
+react_d3,Chat.Event.PlayerDeath,,rip,,1.0
+react_d4,Chat.Event.PlayerDeath,per_granny,,oh no honey,1.0
+react_d5,Chat.Event.PlayerDeath,,kekw,,1.0
+react_d6,Chat.Event.PlayerDeath,per_ratio,,actually his positioning was off,1.0
+react_d7,Chat.Event.PlayerDeath,per_chad,,we move,1.0
+react_hb1,Chat.Event.HypeBurst,,POG,,1.0
+react_hb2,Chat.Event.HypeBurst,,POGGERS,,1.0
+react_hb3,Chat.Event.HypeBurst,,🔥🔥🔥,,1.0
+react_hb4,Chat.Event.HypeBurst,,WOOOOO,,1.0
+react_hb5,Chat.Event.HypeBurst,,GIGACHAD,,1.0
+react_hb6,Chat.Event.HypeBurst,,LFG,,1.0
+react_hb7,Chat.Event.HypeBurst,,ULTRA,,1.0
+react_b1,Chat.Event.Boredom,,is this guy alive,,1.0
+react_b2,Chat.Event.Boredom,per_leet,,bro do something,1.0
+react_b3,Chat.Event.Boredom,,did the stream freeze,,1.0
+react_b4,Chat.Event.Boredom,per_ratio,,actually nothing is happening,1.0
+react_b5,Chat.Event.Boredom,per_granny,,is he okay,1.0
+react_cs1,Chat.Event.ChannelSub,viewer_new42,just subscribed!,,1.0
+react_cs2,Chat.Event.ChannelSub,sub_train_88,just subscribed!,,1.0
+react_cs3,Chat.Event.ChannelSub,polarity_addict,just subscribed!,,1.0

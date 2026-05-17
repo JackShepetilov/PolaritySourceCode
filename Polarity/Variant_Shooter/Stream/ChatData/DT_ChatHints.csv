@@ -1,0 +1,13 @@
+Name,XPUnderUsedCategory,PersonaRow,UsernameOverride,Message,Weight
+hint_m1,Melee,per_leet,,daun меч хоть раз достанешь?,1.0
+hint_m2,Melee,,,sword exists for a reason,1.0
+hint_m3,Melee,per_ratio,,actually melee resets the multikill timer,1.0
+hint_w1,Weapon,per_leet,,возьми оружие которое они выкидывают noob,1.0
+hint_w2,Weapon,,,ты на голом пистолете полрана уже,1.0
+hint_w3,Weapon,per_chad,,try the launcher dude,1.0
+hint_e1,EMF,per_witch,,electrify them or what are you doing,1.0
+hint_e2,EMF,,,волновой пистолет не для красоты,1.0
+hint_e3,EMF,per_leet,,electrocute the dudes у тебя же есть для этого пушка,1.0
+hint_mv1,Movement,,,use the dash for once,1.0
+hint_mv2,Movement,per_stan,,you can wallrun btw,1.0
+hint_mv3,Movement,per_chad,,a slide kill is so easy here,1.0
