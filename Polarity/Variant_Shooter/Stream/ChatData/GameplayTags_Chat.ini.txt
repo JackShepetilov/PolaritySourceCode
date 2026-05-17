@@ -1,40 +1,36 @@
 ; ============================================================================
-; Two formats below — pick ONE depending on where you paste these.
+; UE5 GameplayTag source file — paste content into Config/Tags/GameplayTags_Chat.ini
+;
+; Requirements:
+;   1. Project Settings → Project → GameplayTags → Import Tags From Config = ON
+;   2. File must live under {ProjectRoot}/Config/Tags/
+;   3. Section header MUST be [/Script/GameplayTags.GameplayTagsList]
+;      (NOT GameplayTagsSettings — that's for the main DefaultGameplayTags.ini)
+;   4. Lines are plain GameplayTagList=(...)  — no `+` prefix
+;
+; After editing, restart the editor (or toggle Import Tags From Config off/on)
+; to reload tags.
+;
+; Ref: https://dev.epicgames.com/documentation/en-us/unreal-engine/using-gameplay-tags-in-unreal-engine
 ; ============================================================================
 
-; --------------------------------------------------------
-; FORMAT A: Standalone tag source file (Config/Tags/GameplayTags_Chat.ini)
-; Project Settings → GameplayTags → Manage Tag Sources → New → name it.
-; The file must contain ONLY the +GameplayTagList lines (no section header).
-; --------------------------------------------------------
-
-+GameplayTagList=(Tag="Chat.Event.Headshot",DevComment="Player landed a headshot kill")
-+GameplayTagList=(Tag="Chat.Event.Multikill",DevComment="≥2 kills within 1s window")
-+GameplayTagList=(Tag="Chat.Event.AirDashKill",DevComment="Kill while ActiveAirDashTrail")
-+GameplayTagList=(Tag="Chat.Event.YankKill",DevComment="Kill with bWasYanked weapon")
-+GameplayTagList=(Tag="Chat.Event.SlideKill",DevComment="Kill while sliding")
-+GameplayTagList=(Tag="Chat.Event.MeleeKill",DevComment="Kill via MeleeAttackComponent")
-+GameplayTagList=(Tag="Chat.Event.ChainElectrify",DevComment="Chain-electrified 3+ enemies")
-+GameplayTagList=(Tag="Chat.Event.EnvironmentalKill",DevComment="Kill via environmental hazard")
-+GameplayTagList=(Tag="Chat.Event.ParryReflect",DevComment="Kill via reflected projectile/melee")
-+GameplayTagList=(Tag="Chat.Event.NoHitClear",DevComment="Cleared a wave without taking damage")
-+GameplayTagList=(Tag="Chat.Event.AntennaStart",DevComment="Antenna upload started (future)")
-+GameplayTagList=(Tag="Chat.Event.AntennaDone",DevComment="Antenna data uploaded")
-+GameplayTagList=(Tag="Chat.Event.PlayerDeath",DevComment="Player died — Schadenfreude")
-+GameplayTagList=(Tag="Chat.Event.FriendSpoke",DevComment="Streamer-friend subtitle started — FriendEcho")
-+GameplayTagList=(Tag="Chat.Event.ChannelSub",DevComment="Channel event: sub")
-+GameplayTagList=(Tag="Chat.Event.ChannelFollow",DevComment="Channel event: follow")
-+GameplayTagList=(Tag="Chat.Event.Boredom",DevComment="LPS=0 for boredom activation delay")
-+GameplayTagList=(Tag="Chat.Event.HypeBurst",DevComment="LPS crossed high threshold")
-+GameplayTagList=(Tag="Chat.Event.DirectMention",DevComment="High-rank moment, chat tags {PlayerName}")
-
-; --------------------------------------------------------
-; FORMAT B: Append to Config/DefaultGameplayTags.ini
-; If you choose this option, your file already has the section header from
-; other tags — put these lines under the existing [/Script/GameplayTags...]
-; block, OR copy the block below if your DefaultGameplayTags.ini is empty.
-; --------------------------------------------------------
-
-; [/Script/GameplayTags.GameplayTagsSettings]
-; +GameplayTagList=(Tag="Chat.Event.Headshot",...)
-; (same lines as above)
+[/Script/GameplayTags.GameplayTagsList]
+GameplayTagList=(Tag="Chat.Event.Headshot",DevComment="Player landed a headshot kill")
+GameplayTagList=(Tag="Chat.Event.Multikill",DevComment="≥2 kills within 1s window")
+GameplayTagList=(Tag="Chat.Event.AirDashKill",DevComment="Kill while ActiveAirDashTrail")
+GameplayTagList=(Tag="Chat.Event.YankKill",DevComment="Kill with bWasYanked weapon")
+GameplayTagList=(Tag="Chat.Event.SlideKill",DevComment="Kill while sliding")
+GameplayTagList=(Tag="Chat.Event.MeleeKill",DevComment="Kill via MeleeAttackComponent")
+GameplayTagList=(Tag="Chat.Event.ChainElectrify",DevComment="Chain-electrified 3+ enemies")
+GameplayTagList=(Tag="Chat.Event.EnvironmentalKill",DevComment="Kill via environmental hazard")
+GameplayTagList=(Tag="Chat.Event.ParryReflect",DevComment="Kill via reflected projectile/melee")
+GameplayTagList=(Tag="Chat.Event.NoHitClear",DevComment="Cleared a wave without taking damage")
+GameplayTagList=(Tag="Chat.Event.AntennaStart",DevComment="Antenna upload started (future)")
+GameplayTagList=(Tag="Chat.Event.AntennaDone",DevComment="Antenna data uploaded")
+GameplayTagList=(Tag="Chat.Event.PlayerDeath",DevComment="Player died — Schadenfreude")
+GameplayTagList=(Tag="Chat.Event.FriendSpoke",DevComment="Streamer-friend subtitle started — FriendEcho")
+GameplayTagList=(Tag="Chat.Event.ChannelSub",DevComment="Channel event: sub")
+GameplayTagList=(Tag="Chat.Event.ChannelFollow",DevComment="Channel event: follow")
+GameplayTagList=(Tag="Chat.Event.Boredom",DevComment="LPS=0 for boredom activation delay")
+GameplayTagList=(Tag="Chat.Event.HypeBurst",DevComment="LPS crossed high threshold")
+GameplayTagList=(Tag="Chat.Event.DirectMention",DevComment="High-rank moment, chat tags {PlayerName}")
