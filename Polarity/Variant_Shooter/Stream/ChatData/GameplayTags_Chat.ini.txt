@@ -1,12 +1,13 @@
 ; ============================================================================
-; Paste these lines into Config/DefaultGameplayTags.ini (or register them via
-; Project Settings → Project → GameplayTags → Manage Tag Sources → New).
-;
-; If tags are not registered, EmitReaction(Chat.Event.X) silently no-ops
-; because the FGameplayTag in CSV won't match the runtime-requested one.
+; Two formats below — pick ONE depending on where you paste these.
 ; ============================================================================
 
-[/Script/GameplayTags.GameplayTagsSettings]
+; --------------------------------------------------------
+; FORMAT A: Standalone tag source file (Config/Tags/GameplayTags_Chat.ini)
+; Project Settings → GameplayTags → Manage Tag Sources → New → name it.
+; The file must contain ONLY the +GameplayTagList lines (no section header).
+; --------------------------------------------------------
+
 +GameplayTagList=(Tag="Chat.Event.Headshot",DevComment="Player landed a headshot kill")
 +GameplayTagList=(Tag="Chat.Event.Multikill",DevComment="≥2 kills within 1s window")
 +GameplayTagList=(Tag="Chat.Event.AirDashKill",DevComment="Kill while ActiveAirDashTrail")
@@ -26,3 +27,14 @@
 +GameplayTagList=(Tag="Chat.Event.Boredom",DevComment="LPS=0 for boredom activation delay")
 +GameplayTagList=(Tag="Chat.Event.HypeBurst",DevComment="LPS crossed high threshold")
 +GameplayTagList=(Tag="Chat.Event.DirectMention",DevComment="High-rank moment, chat tags {PlayerName}")
+
+; --------------------------------------------------------
+; FORMAT B: Append to Config/DefaultGameplayTags.ini
+; If you choose this option, your file already has the section header from
+; other tags — put these lines under the existing [/Script/GameplayTags...]
+; block, OR copy the block below if your DefaultGameplayTags.ini is empty.
+; --------------------------------------------------------
+
+; [/Script/GameplayTags.GameplayTagsSettings]
+; +GameplayTagList=(Tag="Chat.Event.Headshot",...)
+; (same lines as above)
