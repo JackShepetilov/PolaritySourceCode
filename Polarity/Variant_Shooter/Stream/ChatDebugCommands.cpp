@@ -10,6 +10,7 @@
 #include "ChatBroker.h"
 #include "ChatTypes.h"
 #include "StreamSubsystem.h"
+#include "RunSubsystem.h"
 
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -149,21 +150,105 @@ namespace ChatDebug
 	static void CmdHelp(const TArray<FString>& Args, UWorld* World)
 	{
 		UE_LOG(LogTemp, Log, TEXT("==================== Stream Debug Commands ===================="));
-		UE_LOG(LogTemp, Log, TEXT("  stream.reaction <Tag>       Fire reaction (Headshot, Multikill, AirDashKill, YankKill,"));
-		UE_LOG(LogTemp, Log, TEXT("                              MeleeKill, ChainElectrify, AntennaDone, PlayerDeath,"));
-		UE_LOG(LogTemp, Log, TEXT("                              HypeBurst, Boredom, ChannelSub, FriendSpoke)"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.scripted <SeqID>     Start scripted sequence (regulars_argue, antenna_drama,"));
-		UE_LOG(LogTemp, Log, TEXT("                              first_kill_chat)"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.stopscripted         Stop all active scripted sequences"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.burst [N]            Fire HypeBurst N times (default 6)"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.say <user> <msg>     Inject a custom debug chat message"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.headshot             Quick shorthand for stream.reaction Headshot"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.multikill            Quick shorthand for Multikill"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.antenna              Quick shorthand for AntennaDone"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.death                Quick shorthand for PlayerDeath"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.boredom              Quick shorthand for Boredom"));
-		UE_LOG(LogTemp, Log, TEXT("  stream.help                 This help"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.reaction <Tag>           Fire reaction (Headshot, Multikill, AirDashKill,"));
+		UE_LOG(LogTemp, Log, TEXT("                                  YankKill, MeleeKill, ChainElectrify, AntennaDone,"));
+		UE_LOG(LogTemp, Log, TEXT("                                  PlayerDeath, HypeBurst, Boredom, ChannelSub, FriendSpoke)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.scripted <SeqID>         Start scripted sequence"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.stopscripted             Stop all active scripted sequences"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.burst [N]                Fire HypeBurst N times (default 6)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.say <user> <msg>         Inject a custom debug chat message"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.headshot|multikill|...   Quick reaction shorthands"));
+		UE_LOG(LogTemp, Log, TEXT("  --- Run / Onboarding ---"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.run.status               Show CompletedRuns / IsFirstRun / current phase"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.run.markmilestone        Force first-antenna milestone (++CompletedRuns)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.run.simulatenew          End current run + start a new one (in-PIE retest)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.help                     This help"));
 		UE_LOG(LogTemp, Log, TEXT("================================================================"));
+	}
+
+	// ==================== Run / Onboarding ====================
+
+	static UStreamSubsystem* FindStream(UWorld* World)
+	{
+		if (!World) { return nullptr; }
+		UGameInstance* GI = World->GetGameInstance();
+		if (!GI)     { return nullptr; }
+		return GI->GetSubsystem<UStreamSubsystem>();
+	}
+
+	static URunSubsystem* FindRun(UWorld* World)
+	{
+		if (!World) { return nullptr; }
+		UGameInstance* GI = World->GetGameInstance();
+		if (!GI)     { return nullptr; }
+		return GI->GetSubsystem<URunSubsystem>();
+	}
+
+	static FString PhaseToString(EChatPhase Phase)
+	{
+		switch (Phase)
+		{
+		case EChatPhase::Idle:    return TEXT("Idle");
+		case EChatPhase::Opening: return TEXT("Opening");
+		case EChatPhase::Warmup:  return TEXT("Warmup");
+		case EChatPhase::Normal:  return TEXT("Normal");
+		default:                  return TEXT("?");
+		}
+	}
+
+	static void CmdRunStatus(const TArray<FString>& Args, UWorld* World)
+	{
+		UStreamSubsystem* Stream = FindStream(World);
+		UChatBroker* Broker = FindBroker(World);
+		URunSubsystem* Run = FindRun(World);
+		if (!Stream)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] StreamSubsystem not available"));
+			return;
+		}
+
+		const int32 Completed = Stream->GetCompletedRuns();
+		const bool bFirst = Stream->IsFirstRun();
+		const FString Phase = Broker ? PhaseToString(Broker->GetCurrentPhase()) : TEXT("<no broker>");
+		const bool bRunActive = Run ? Run->IsRunActive() : false;
+		const int32 ArenaIdx = Run ? Run->GetCurrentArenaIndex() : -1;
+
+		UE_LOG(LogTemp, Log, TEXT("==================== Run / Onboarding Status ===================="));
+		UE_LOG(LogTemp, Log, TEXT("  CompletedRuns       : %d"), Completed);
+		UE_LOG(LogTemp, Log, TEXT("  IsFirstRun()        : %s"), bFirst ? TEXT("true (opening_first will play)") : TEXT("false (opening_normal will play)"));
+		UE_LOG(LogTemp, Log, TEXT("  Current chat phase  : %s"), *Phase);
+		UE_LOG(LogTemp, Log, TEXT("  Run active          : %s"), bRunActive ? TEXT("yes") : TEXT("no"));
+		UE_LOG(LogTemp, Log, TEXT("  Current arena index : %d"), ArenaIdx);
+		UE_LOG(LogTemp, Log, TEXT("================================================================="));
+	}
+
+	static void CmdRunMarkMilestone(const TArray<FString>& Args, UWorld* World)
+	{
+		UStreamSubsystem* Stream = FindStream(World);
+		if (!Stream) { return; }
+		Stream->MarkRunMilestoneReached();
+	}
+
+	static void CmdRunSimulateNew(const TArray<FString>& Args, UWorld* World)
+	{
+		URunSubsystem* Run = FindRun(World);
+		if (!Run)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] RunSubsystem not available"));
+			return;
+		}
+
+		if (Run->IsRunActive())
+		{
+			UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] simulatenew: ending current run (Aborted)"));
+			Run->EndRun(ERunEndReason::Aborted);
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] simulatenew: starting new run"));
+		Run->StartRun();
+
+		// Useful when designer wants to also test arena-entered hooks
+		Run->EnterArena(0);
 	}
 }
 
@@ -249,4 +334,24 @@ static FAutoConsoleCommandWithWorldAndArgs CmdStreamBoredom(
 	{
 		ChatDebug::CmdQuickTag(TEXT("Boredom"), World);
 	})
+);
+
+// ==================== Run / Onboarding ====================
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamRunStatus(
+	TEXT("stream.run.status"),
+	TEXT("Show CompletedRuns / IsFirstRun / current chat phase / run active state."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ChatDebug::CmdRunStatus)
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamRunMarkMilestone(
+	TEXT("stream.run.markmilestone"),
+	TEXT("Force the first-antenna milestone (++CompletedRuns, IsFirstRun becomes false next run)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ChatDebug::CmdRunMarkMilestone)
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamRunSimulateNew(
+	TEXT("stream.run.simulatenew"),
+	TEXT("End current run (Aborted) + start a new one + enter arena 0. For in-PIE retest of opening flow."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ChatDebug::CmdRunSimulateNew)
 );
