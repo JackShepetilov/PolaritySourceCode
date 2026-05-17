@@ -19,6 +19,7 @@
 #include "Engine/DataTable.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameplayTagContainer.h"
 #include "TimerManager.h"
 
@@ -240,15 +241,47 @@ void UChatBroker::BindArenaManager(AArenaManager* Arena)
 {
 	UnbindArenaManager();
 	BoundArena = Arena;
-	if (Arena)
+
+	// Levels can contain MULTIPLE AArenaManager actors (one per arena slot in a level).
+	// Subscribe to every one we can find in the world so antenna events from any of them
+	// reach the broker, not just the first iterator returned.
+	UWorld* World = GetWorld();
+	int32 BoundCount = 0;
+	if (World)
 	{
-		Arena->OnAntennaActivated.AddDynamic(this, &UChatBroker::HandleAntennaActivated);
+		for (TActorIterator<AArenaManager> It(World); It; ++It)
+		{
+			AArenaManager* M = *It;
+			if (!M) { continue; }
+			M->OnAntennaActivated.AddUniqueDynamic(this, &UChatBroker::HandleAntennaActivated);
+			++BoundCount;
+		}
 	}
+	else if (Arena)
+	{
+		Arena->OnAntennaActivated.AddUniqueDynamic(this, &UChatBroker::HandleAntennaActivated);
+		BoundCount = 1;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] BindArenaManager: subscribed to %d ArenaManager(s)"), BoundCount);
 }
 
 void UChatBroker::UnbindArenaManager()
 {
-	if (AArenaManager* Arena = BoundArena.Get())
+	// Unsubscribe from every ArenaManager in the world (mirrors BindArenaManager which
+	// subscribed to all of them).
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		for (TActorIterator<AArenaManager> It(World); It; ++It)
+		{
+			if (AArenaManager* M = *It)
+			{
+				M->OnAntennaActivated.RemoveDynamic(this, &UChatBroker::HandleAntennaActivated);
+			}
+		}
+	}
+	else if (AArenaManager* Arena = BoundArena.Get())
 	{
 		Arena->OnAntennaActivated.RemoveDynamic(this, &UChatBroker::HandleAntennaActivated);
 	}
