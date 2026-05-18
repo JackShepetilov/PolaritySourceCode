@@ -459,6 +459,25 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 				? (MontageTotalDuration / ComboSpeedMultiplier) + 0.5f  // safety buffer past natural end
 				: (Settings.ActiveTime / ComboSpeedMultiplier);
 		}
+
+		// One-shot forward boost when no lunge target was acquired.
+		// Natural friction/drag handles the falloff — no per-frame tug needed.
+		if (!bIsDropKick && !MagnetismTarget.IsValid() && Settings.NoTargetBoostSpeed > 0.0f && OwnerCharacter)
+		{
+			if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+			{
+				FVector BoostDir = LungeDirection;
+				BoostDir.Z = 0.0f;
+				if (BoostDir.SizeSquared() < KINDA_SMALL_NUMBER)
+				{
+					BoostDir = OwnerCharacter->GetActorForwardVector();
+					BoostDir.Z = 0.0f;
+				}
+				BoostDir.Normalize();
+				Movement->Velocity += BoostDir * Settings.NoTargetBoostSpeed;
+			}
+		}
+
 		SpawnSwingTrailFX();
 		break;
 
@@ -1147,80 +1166,57 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 		FVector PreservedVelocity = OwnerVelocityAtAttackStart * Settings.MomentumPreservationRatio;
 		PreservedVelocity.Z = Movement->Velocity.Z; // Keep current Z velocity (gravity applied)
 
-		// If we have a magnetism target and lunge-to-target is enabled, move toward them
-		if (Settings.bLungeToTarget && MagnetismTarget.IsValid())
+		// If we have a lunge target, move toward it
+		if (Settings.bEnableLunge && MagnetismTarget.IsValid())
 		{
-			// ==================== Lunge to Pre-Calculated Target Position ====================
-			// LungeTargetPosition was validated in StartMagnetism() via SweepSphere
+			// ==================== Distance-Based Homing ====================
+			// LungeTargetPosition is refreshed each frame in UpdateMagnetism (XY+Z tracks the
+			// moving target). Here we drive velocity straight at the current position at
+			// LungeMaxSpeed, clamped to "don't overshoot in one frame". The lunge ends when
+			// the player arrives OR when the Active phase timer expires — not on a fixed clock.
 			FVector PlayerPos = OwnerCharacter->GetActorLocation();
 			FVector ToLungeTarget = LungeTargetPosition - PlayerPos;
 			float DistToLungeTarget = ToLungeTarget.Size();
 
-			// Only lunge if we're moving fast enough (prevents weak lunges when stationary)
+			// Optional gate: require minimum starting speed (TF2 default is 0 = works stationary)
 			float CurrentSpeed = OwnerVelocityAtAttackStart.Size();
-			if (CurrentSpeed >= Settings.MinSpeedForLungeToTarget && DistToLungeTarget > 10.0f)
+			const float ArrivalRadius = FMath::Max(20.0f, Settings.LungeStopDistance * 0.3f);
+
+			if (CurrentSpeed >= Settings.MinSpeedForLunge && DistToLungeTarget > ArrivalRadius)
 			{
-				// Interpolate position using LungeDuration
-				// Calculate what percentage of the lunge we've completed
-				float LungeAlpha = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
-
-				// Calculate velocity needed to reach target position
-				// Use simple linear interpolation based on time remaining
-				float TimeRemaining = Settings.LungeDuration * (1.0f - LungeAlpha);
-				if (TimeRemaining > 0.01f)
-				{
-					// Velocity = Distance / Time
-					PreservedVelocity = ToLungeTarget / TimeRemaining;
-
-					// Clamp total velocity to prevent excessive speeds
-					float MaxSpeed = 3000.0f;
-					if (PreservedVelocity.Size() > MaxSpeed)
-					{
-						PreservedVelocity = PreservedVelocity.GetSafeNormal() * MaxSpeed;
-					}
-				}
-				else
-				{
-					// Almost there - stop moving
-					PreservedVelocity = FVector::ZeroVector;
-				}
+				// Drive at full lunge speed, but don't overshoot the target inside one frame.
+				const float SafeDt = FMath::Max(DeltaTime, 0.001f);
+				const float MaxStepSpeed = DistToLungeTarget / SafeDt;
+				const float StepSpeed = FMath::Min(Settings.LungeMaxSpeed, MaxStepSpeed);
+				PreservedVelocity = (ToLungeTarget / DistToLungeTarget) * StepSpeed;
 
 #if WITH_EDITOR
 				if (GEngine && bEnableDebugVisualization)
 				{
 					GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Cyan,
-						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f, Progress=%.2f"),
-							DistToLungeTarget, PreservedVelocity.Size(), LungeAlpha));
+						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f"),
+							DistToLungeTarget, PreservedVelocity.Size()));
 				}
 #endif
 			}
 		}
-		else if (Settings.LungeDistance > 0.0f && Settings.LungeDuration > 0.0f)
-		{
-			// No magnetism target - apply standard lunge in movement direction
-			// But still PRESERVE momentum, just ADD lunge on top
-			float LungeSpeed = Settings.LungeDistance / Settings.LungeDuration;
-			FVector LungeBoost = LungeDirection * LungeSpeed;
-			LungeBoost.Z = 0.0f;
-
-			// Add lunge boost to preserved velocity
-			PreservedVelocity.X += LungeBoost.X;
-			PreservedVelocity.Y += LungeBoost.Y;
-		}
+		// No-target case: handled by a one-shot impulse on Active phase entry (see SetState).
+		// Per-frame velocity tug while target is absent has been removed.
 
 		// Apply the final velocity
 		Movement->Velocity = PreservedVelocity;
 	}
 	else
 	{
-		// Legacy behavior: Override velocity with lunge (kills momentum)
-		if (Settings.LungeDistance <= 0.0f || Settings.LungeDuration <= 0.0f)
+		// Legacy behavior (bPreserveMomentum=false): one-frame override with NoTargetBoostSpeed.
+		// Note: this branch doesn't track a lunge target — the no-target boost is applied here
+		// directly. For real target lunging, keep bPreserveMomentum=true.
+		if (Settings.NoTargetBoostSpeed <= 0.0f)
 		{
 			return;
 		}
 
-		float LungeSpeed = Settings.LungeDistance / Settings.LungeDuration;
-		FVector LungeVelocity = LungeDirection * LungeSpeed;
+		FVector LungeVelocity = LungeDirection * Settings.NoTargetBoostSpeed;
 		LungeVelocity.Z = 0.0f;
 
 		FVector CurrentVelocity = Movement->Velocity;
@@ -1527,7 +1523,7 @@ void UMeleeAttackComponent::SpawnImpactFX(const FVector& Location, const FVector
 
 void UMeleeAttackComponent::StartMagnetism()
 {
-	if (!Settings.bEnableTargetMagnetism || !OwnerCharacter)
+	if (!Settings.bEnableLunge || !OwnerCharacter)
 	{
 		return;
 	}
@@ -1541,159 +1537,142 @@ void UMeleeAttackComponent::StartMagnetism()
 	if (ShouldPerformDropKick() && TryStartDropKick())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: DROPKICK started successfully!"));
-		// Drop kick started successfully - skip normal magnetism
+		// Drop kick started successfully - skip normal lunge
 		return;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: dropkick NOT started, proceeding with normal magnetism"));
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: dropkick NOT started, proceeding with normal lunge"));
 
+	// ==================== Cone-based Target Acquisition (TF2-style) ====================
+	// Sphere overlap within LungeRange, filtered by dot-product against camera forward.
+	// Picks the candidate with the highest dot (most centered in the cone).
 	const FVector Start = GetTraceStart();
-	const FVector End = Start + GetTraceDirection() * Settings.MagnetismRange;
+	const FVector Forward = GetTraceDirection();
+	const float CosThreshold = FMath::Cos(FMath::DegreesToRadians(Settings.LungeConeHalfAngle));
 
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(OwnerCharacter);
 
-	TArray<FHitResult> HitResults;
-	bool bHit = GetWorld()->SweepMultiByChannel(
-		HitResults,
+	TArray<FOverlapResult> Overlaps;
+	GetWorld()->OverlapMultiByChannel(
+		Overlaps,
 		Start,
-		End,
 		FQuat::Identity,
 		ECC_Pawn,
-		FCollisionShape::MakeSphere(Settings.MagnetismRadius),
+		FCollisionShape::MakeSphere(Settings.LungeRange),
 		QueryParams
 	);
 
-	// Debug visualization for magnetism trace
+	AActor* BestTarget = nullptr;
+	float BestDot = CosThreshold;
+
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AActor* HitActor = Overlap.GetActor();
+		if (!HitActor || HitActor == OwnerCharacter || !Cast<ACharacter>(HitActor))
+		{
+			continue;
+		}
+
+		FVector ToTarget = HitActor->GetActorLocation() - Start;
+		const float Dist = ToTarget.Size();
+		if (Dist <= KINDA_SMALL_NUMBER || Dist > Settings.LungeRange)
+		{
+			continue;
+		}
+		ToTarget /= Dist;
+
+		const float Dot = FVector::DotProduct(Forward, ToTarget);
+		if (Dot >= BestDot)
+		{
+			BestDot = Dot;
+			BestTarget = HitActor;
+		}
+	}
+
 	if (bEnableDebugVisualization)
 	{
-		FColor MagnetismColor = bHit ? FColor::Magenta : FColor::Orange;
-		DrawDebugCapsule(
+		DrawDebugCone(
 			GetWorld(),
-			(Start + End) * 0.5f,
-			FVector::Dist(Start, End) * 0.5f,
-			Settings.MagnetismRadius,
-			FQuat::FindBetweenNormals(FVector::UpVector, (End - Start).GetSafeNormal()),
-			MagnetismColor,
+			Start,
+			Forward,
+			Settings.LungeRange,
+			FMath::DegreesToRadians(Settings.LungeConeHalfAngle),
+			FMath::DegreesToRadians(Settings.LungeConeHalfAngle),
+			16,
+			BestTarget ? FColor::Magenta : FColor::Orange,
 			false,
 			DebugShapeDuration
 		);
-		DrawDebugSphere(GetWorld(), Start, Settings.MagnetismRadius, 8, FColor::Cyan, false, DebugShapeDuration);
-		DrawDebugSphere(GetWorld(), End, Settings.MagnetismRadius, 8, FColor::Purple, false, DebugShapeDuration);
-		DrawDebugLine(GetWorld(), Start, End, MagnetismColor, false, DebugShapeDuration, 0, 3.0f);
 	}
 
-	if (bHit)
+	if (!BestTarget)
 	{
-		// Find the closest valid target
-		float ClosestDist = FLT_MAX;
-		AActor* ClosestTarget = nullptr;
+		return;
+	}
 
-		for (const FHitResult& Hit : HitResults)
-		{
-			AActor* HitActor = Hit.GetActor();
-			if (HitActor && HitActor != OwnerCharacter)
-			{
-				// Check if it's a character (enemy)
-				if (Cast<ACharacter>(HitActor))
-				{
-					float Dist = FVector::DistSquared(Start, Hit.ImpactPoint);
-					if (Dist < ClosestDist)
-					{
-						ClosestDist = Dist;
-						ClosestTarget = HitActor;
-					}
-				}
-			}
-		}
+	// ==================== Calculate Stop Position ====================
+	// Direct stop distance from target (no AttackRange math anymore).
+	FVector PlayerPos = OwnerCharacter->GetActorLocation();
+	FVector TargetPos = BestTarget->GetActorLocation();
+	FVector DirectionFromTarget = (PlayerPos - TargetPos).GetSafeNormal();
+	FVector IdealLungePos = TargetPos + DirectionFromTarget * Settings.LungeStopDistance;
 
-		if (ClosestTarget && Settings.bLungeToTarget)
-		{
-			// ==================== Calculate Lunge Target Position ====================
-			// Target position is on the line player->enemy at distance (AttackRange - Buffer) from enemy
-			FVector PlayerPos = OwnerCharacter->GetActorLocation();
-			FVector TargetPos = ClosestTarget->GetActorLocation();
-			FVector ToTarget = TargetPos - PlayerPos;
-			float DistanceToTarget = ToTarget.Size();
+	// ==================== Path Validation ====================
+	FHitResult SweepHit;
+	FCollisionQueryParams SweepParams;
+	SweepParams.AddIgnoredActor(OwnerCharacter);
+	SweepParams.AddIgnoredActor(BestTarget);
 
-			// Calculate ideal stop position
-			float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
-			FVector DirectionFromTarget = (PlayerPos - TargetPos).GetSafeNormal();
-			FVector IdealLungePos = TargetPos + DirectionFromTarget * StopDistance;
+	const float ProbeRadius = FMath::Max(Settings.LungeStopDistance, 20.0f);
+	const bool bPathBlocked = GetWorld()->SweepSingleByChannel(
+		SweepHit,
+		PlayerPos,
+		IdealLungePos,
+		FQuat::Identity,
+		ECC_Visibility,
+		FCollisionShape::MakeSphere(ProbeRadius),
+		SweepParams
+	);
 
-			// ==================== Path Validation via SweepSphere ====================
-			// Sweep a sphere from player to ideal position to check for obstacles
-			FHitResult SweepHit;
-			FCollisionQueryParams SweepParams;
-			SweepParams.AddIgnoredActor(OwnerCharacter);
-			SweepParams.AddIgnoredActor(ClosestTarget); // Ignore target itself
+	if (bEnableDebugVisualization)
+	{
+		FColor PathColor = bPathBlocked ? FColor::Red : FColor::Green;
+		DrawDebugSphere(GetWorld(), IdealLungePos, ProbeRadius, 12, PathColor, false, DebugShapeDuration);
+		DrawDebugLine(GetWorld(), PlayerPos, IdealLungePos, PathColor, false, DebugShapeDuration, 0, 2.0f);
+	}
 
-			bool bPathBlocked = GetWorld()->SweepSingleByChannel(
-				SweepHit,
-				PlayerPos,
-				IdealLungePos,
-				FQuat::Identity,
-				ECC_Visibility, // Check for walls/geometry
-				FCollisionShape::MakeSphere(Settings.LungeStopDistanceBuffer),
-				SweepParams
-			);
-
-			// Debug visualization for path validation
-			if (bEnableDebugVisualization)
-			{
-				FColor PathColor = bPathBlocked ? FColor::Red : FColor::Green;
-				DrawDebugSphere(GetWorld(), IdealLungePos, Settings.LungeStopDistanceBuffer, 12, PathColor, false, DebugShapeDuration);
-				DrawDebugLine(GetWorld(), PlayerPos, IdealLungePos, PathColor, false, DebugShapeDuration, 0, 2.0f);
-			}
-
-			// If path is clear, establish lock-on
-			if (!bPathBlocked)
-			{
-				MagnetismTarget = ClosestTarget;
-				LungeTargetPosition = IdealLungePos;
-
-				// Start camera focus when lunge target is found
-				StartCameraFocus(ClosestTarget);
-
-				// Disable gravity and EMF during lock-on for smooth Z-alignment
-				if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
-				{
-					Movement->GravityScale = 0.0f;
-				}
-
-				if (APolarityCharacter* PolarityChar = Cast<APolarityCharacter>(OwnerCharacter))
-				{
-					// TODO: Add EMF disable call here when EMF component is accessible
-					// PolarityChar->DisableEMF();
-				}
-
+	if (bPathBlocked)
+	{
 #if WITH_EDITOR
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Green,
-						FString::Printf(TEXT("Lock-On: Distance=%.0f, StopAt=%.0f from target"),
-							DistanceToTarget, StopDistance));
-				}
-#endif
-			}
-			else
-			{
-				// Path blocked - cancel lock-on
-#if WITH_EDITOR
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Red,
-						TEXT("Lock-On FAILED: Path blocked"));
-				}
-#endif
-			}
-		}
-		else if (ClosestTarget)
+		if (GEngine)
 		{
-			// No lunge-to-target - simple magnetism without path validation
-			MagnetismTarget = ClosestTarget;
-			StartCameraFocus(ClosestTarget);
+			GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Red, TEXT("Lunge FAILED: Path blocked"));
+		}
+#endif
+		return;
+	}
+
+	MagnetismTarget = BestTarget;
+	LungeTargetPosition = IdealLungePos;
+
+	StartCameraFocus(BestTarget);
+
+	if (Settings.bDisableGravityDuringLunge)
+	{
+		if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+		{
+			Movement->GravityScale = 0.0f;
 		}
 	}
+
+#if WITH_EDITOR
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Green,
+			FString::Printf(TEXT("Lunge: Target=%s, StopAt=%.0fcm, Dot=%.2f"),
+				*BestTarget->GetName(), Settings.LungeStopDistance, BestDot));
+	}
+#endif
 }
 
 void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
@@ -1711,7 +1690,7 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		return;
 	}
 
-	if (!Settings.bEnableTargetMagnetism || !MagnetismTarget.IsValid())
+	if (!Settings.bEnableLunge || !MagnetismTarget.IsValid() || !OwnerCharacter)
 	{
 		return;
 	}
@@ -1723,7 +1702,7 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		return;
 	}
 
-	// Skip magnetism if target NPC is in knockback state
+	// Skip tracking if target NPC is in knockback state
 	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(Target))
 	{
 		if (TargetNPC->IsInKnockback())
@@ -1732,109 +1711,48 @@ void UMeleeAttackComponent::UpdateMagnetism(float DeltaTime)
 		}
 	}
 
-	// ==================== Titanfall 2 Magnetism ====================
-	// In Titanfall 2, the PLAYER moves toward the target, not vice versa
-	// This creates the satisfying "magnetic kick" where you fly toward enemies
+	// ==================== Full XY+Z Homing (TF2-style) ====================
+	// Recalculate the lunge end position each frame so the player tracks the target
+	// horizontally AND vertically. The actual velocity push happens in UpdateLunge().
+	FVector TargetPos = Target->GetActorLocation();
+	FVector PlayerPos = OwnerCharacter->GetActorLocation();
 
-	if (Settings.bLungeToTarget)
+	FVector DirectionFromTarget = (PlayerPos - TargetPos);
+	DirectionFromTarget.Z = 0.0f;
+	if (!DirectionFromTarget.Normalize())
 	{
-		// Titanfall 2 style: Player lunges toward target
-		// The actual velocity is applied in UpdateLunge() - this function just maintains
-		// the magnetism target and can do additional target tracking/rotation
-
-		// ==================== Dynamic Z-Alignment ====================
-		// Update Z-component of LungeTargetPosition each frame to match target's current height
-		// This prevents player from floating in air if target moves vertically
-		if (OwnerCharacter)
-		{
-			FVector TargetPos = Target->GetActorLocation();
-			FVector PlayerPos = OwnerCharacter->GetActorLocation();
-
-			// Recalculate lunge position with updated target Z
-			FVector DirectionFromTarget = (PlayerPos - TargetPos);
-			DirectionFromTarget.Z = 0.0f; // Keep horizontal direction
-			DirectionFromTarget.Normalize();
-
-			float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
-			FVector NewLungePos = TargetPos + DirectionFromTarget * StopDistance;
-
-			// Update only Z to match target's current height (keep XY from original path calculation)
-			LungeTargetPosition.Z = NewLungePos.Z;
-		}
-
-		// Debug visualization for lunge direction
-		if (bEnableDebugVisualization && OwnerCharacter)
-		{
-			FVector PlayerPos = OwnerCharacter->GetActorLocation();
-			FVector TargetPos = Target->GetActorLocation();
-			DrawDebugDirectionalArrow(
-				GetWorld(),
-				PlayerPos,
-				TargetPos,
-				50.0f,
-				FColor::Green,
-				false,
-				0.0f,  // Single frame
-				0,
-				4.0f
-			);
-			DrawDebugSphere(GetWorld(), TargetPos, 30.0f, 8, FColor::Green, false, 0.0f);
-			// Visualize lunge target position (where player will stop)
-			DrawDebugSphere(GetWorld(), LungeTargetPosition, 20.0f, 8, FColor::Yellow, false, 0.0f);
-		}
-
-		// Optional: Rotate player to face target for better kick feel
-		if (OwnerCharacter && OwnerController)
-		{
-			FVector ToTarget = Target->GetActorLocation() - OwnerCharacter->GetActorLocation();
-			ToTarget.Z = 0.0f;
-
-			if (ToTarget.SizeSquared() > 100.0f)
-			{
-				// Smoothly rotate view toward target (subtle aim assist)
-				FRotator TargetRotation = ToTarget.Rotation();
-				FRotator CurrentRotation = OwnerController->GetControlRotation();
-
-				// Very subtle rotation assist - don't override player's aim too much
-				float RotationAssistStrength = 0.1f; // 10% blend per frame
-				FRotator NewRotation = FMath::RInterpTo(CurrentRotation, TargetRotation, DeltaTime, RotationAssistStrength * 60.0f);
-
-				// Only adjust yaw, keep pitch and roll as player set them
-				NewRotation.Pitch = CurrentRotation.Pitch;
-				NewRotation.Roll = CurrentRotation.Roll;
-
-				// Uncomment below line if you want auto-aim assist during melee:
-				// OwnerController->SetControlRotation(NewRotation);
-			}
-		}
+		// Player is directly above/below target — fall back to forward axis
+		DirectionFromTarget = -GetTraceDirection();
+		DirectionFromTarget.Z = 0.0f;
+		DirectionFromTarget.Normalize();
 	}
-	else
+
+	LungeTargetPosition = TargetPos + DirectionFromTarget * Settings.LungeStopDistance;
+
+	if (bEnableDebugVisualization)
 	{
-		// Legacy behavior: Pull enemy toward player's attack center
+		DrawDebugDirectionalArrow(GetWorld(), PlayerPos, TargetPos, 50.0f, FColor::Green, false, 0.0f, 0, 4.0f);
+		DrawDebugSphere(GetWorld(), TargetPos, 30.0f, 8, FColor::Green, false, 0.0f);
+		DrawDebugSphere(GetWorld(), LungeTargetPosition, 20.0f, 8, FColor::Yellow, false, 0.0f);
+	}
 
-		// Get impact center and target position
-		FVector ImpactCenter = GetImpactCenter();
-		FVector TargetPos = Target->GetActorLocation();
-
-		// Calculate direction to pull
-		FVector PullDirection = (ImpactCenter - TargetPos);
-		PullDirection.Z = 0.0f; // Keep horizontal only
-		float DistToCenter = PullDirection.Size();
-
-		// Stop if close enough
-		if (DistToCenter < 10.0f)
+	// ==================== Soft Aim Assist ====================
+	// Gently steer camera yaw toward the target. Pitch untouched so vertical aim is the player's.
+	if (Settings.bSoftAimAssistDuringLunge && OwnerController && Settings.SoftAimAssistStrength > 0.0f)
+	{
+		FVector ToTarget = TargetPos - PlayerPos;
+		ToTarget.Z = 0.0f;
+		if (ToTarget.SizeSquared() > 100.0f)
 		{
-			return;
+			FRotator CurrentRotation = OwnerController->GetControlRotation();
+			FRotator TargetRotation = ToTarget.Rotation();
+
+			const float InterpSpeed = Settings.SoftAimAssistStrength * 30.0f; // 0..30
+			FRotator NewRotation = FMath::RInterpTo(CurrentRotation, TargetRotation, DeltaTime, InterpSpeed);
+			NewRotation.Pitch = CurrentRotation.Pitch;
+			NewRotation.Roll = CurrentRotation.Roll;
+			OwnerController->SetControlRotation(NewRotation);
 		}
-
-		PullDirection.Normalize();
-
-		// Calculate pull amount this frame
-		float PullAmount = FMath::Min(Settings.MagnetismPullSpeed * DeltaTime, DistToCenter);
-
-		// Apply movement
-		FVector NewLocation = TargetPos + PullDirection * PullAmount;
-		Target->SetActorLocation(NewLocation, true);
 	}
 }
 
@@ -1919,19 +1837,12 @@ void UMeleeAttackComponent::StopMagnetism()
 	DropKickTargetPosition = FVector::ZeroVector;
 	DropKickVelocity = FVector::ZeroVector;
 
-	// Restore gravity and EMF after lock-on ends (after Recovery phase)
-	if (OwnerCharacter)
+	// Restore gravity after lunge ends — only if we disabled it on lunge start
+	if (Settings.bDisableGravityDuringLunge && OwnerCharacter)
 	{
 		if (UApexMovementComponent* Movement = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
 		{
 			Movement->GravityScale = Movement->MovementSettings ? Movement->MovementSettings->DefaultGravityScale : 1.5f;
-		}
-
-		// Re-enable EMF if available
-		if (APolarityCharacter* PolarityChar = Cast<APolarityCharacter>(OwnerCharacter))
-		{
-			// TODO: Add EMF enable call here when EMF component is accessible
-			// PolarityChar->EnableEMF();
 		}
 	}
 }
@@ -3161,7 +3072,7 @@ bool UMeleeAttackComponent::TryStartDropKick()
 		DirectionFromTarget.Z = 0.0f;
 		DirectionFromTarget.Normalize();
 
-		float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
+		float StopDistance = Settings.LungeStopDistance;
 		LungeTargetPosition = BestTargetPos + DirectionFromTarget * StopDistance;
 		LungeTargetPosition.Z = BestTargetPos.Z;
 
@@ -3238,7 +3149,7 @@ void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 		DirectionFromTarget.Normalize();
 	}
 
-	float StopDistance = Settings.AttackRange - Settings.LungeStopDistanceBuffer;
+	float StopDistance = Settings.LungeStopDistance;
 	LungeTargetPosition = TargetPos + DirectionFromTarget * StopDistance;
 	LungeTargetPosition.Z = TargetPos.Z;
 

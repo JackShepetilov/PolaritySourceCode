@@ -148,6 +148,50 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distance Knockback", meta = (ClampMin = "0"))
 	float KnockbackDurationPerDistance = 0.001f;
 
+	// ==================== Lunge (TF2-style) ====================
+	// Player flies TO the enemy on attack. Target acquired via cone trace from camera.
+	// Position is recalculated each frame (full XY+Z homing during the lunge).
+
+	/** Enable lunge toward target enemy in cone */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge")
+	bool bEnableLunge = true;
+
+	/** Max range for target acquisition (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "0", EditCondition = "bEnableLunge"))
+	float LungeRange = 250.0f;
+
+	/** Half-angle of detection cone in degrees (TF2 pilot: 30°) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "5", ClampMax = "60", EditCondition = "bEnableLunge"))
+	float LungeConeHalfAngle = 30.0f;
+
+	/** How close (cm) to stop in front of the target. ~50 = nearly touching. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "0", ClampMax = "200", EditCondition = "bEnableLunge"))
+	float LungeStopDistance = 50.0f;
+
+	/** Hard cap on lunge velocity (cm/s) — prevents teleport-feel when very close */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "500", ClampMax = "10000", EditCondition = "bEnableLunge"))
+	float LungeMaxSpeed = 3000.0f;
+
+	/** Minimum player speed required to trigger lunge (0 = works from standstill, TF2 default) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "0", EditCondition = "bEnableLunge"))
+	float MinSpeedForLunge = 0.0f;
+
+	/** Disable gravity during the lunge for clean horizontal flight */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (EditCondition = "bEnableLunge"))
+	bool bDisableGravityDuringLunge = true;
+
+	/** Soft aim-assist: gently steer camera toward the lunge target each frame. Off by default — opt in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (EditCondition = "bEnableLunge"))
+	bool bSoftAimAssistDuringLunge = false;
+
+	/** Strength of the aim assist (0 = none, 1 = snap). 0.3 ≈ subtle. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "bSoftAimAssistDuringLunge"))
+	float SoftAimAssistStrength = 0.3f;
+
+	/** One-shot forward boost (cm/s) added to velocity on Active phase entry when there is no lunge target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lunge", meta = (ClampMin = "0", ClampMax = "2000"))
+	float NoTargetBoostSpeed = 600.0f;
+
 	// ==================== Titanfall 2 Momentum System ====================
 
 	/** Enable Titanfall 2 style momentum preservation - player keeps velocity during melee */
@@ -158,14 +202,6 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "1.0", EditCondition = "bPreserveMomentum"))
 	float MomentumPreservationRatio = 1.0f;
 
-	/** Enable "lunge to target" - player moves toward magnetism target instead of target being pulled */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum")
-	bool bLungeToTarget = true;
-
-	/** Speed at which player lunges toward target (cm/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", EditCondition = "bLungeToTarget"))
-	float LungeToTargetSpeed = 2000.0f;
-
 	/** Transfer player momentum to target on hit (Titanfall 2 flying kick feel) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum")
 	bool bTransferMomentumOnHit = true;
@@ -173,14 +209,6 @@ struct FMeleeAttackSettings
 	/** Multiplier for momentum transferred to target (1.0 = full velocity transfer) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "2.0", EditCondition = "bTransferMomentumOnHit"))
 	float MomentumTransferMultiplier = 1.0f;
-
-	/** Minimum speed to trigger lunge-to-target (prevents weak lunges when stationary) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", EditCondition = "bLungeToTarget"))
-	float MinSpeedForLungeToTarget = 300.0f;
-
-	/** Distance buffer from AttackRange where lunge stops (AttackRange - Buffer) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Titanfall Momentum", meta = (ClampMin = "0", ClampMax = "100", EditCondition = "bLungeToTarget"))
-	float LungeStopDistanceBuffer = 40.0f;
 
 	// ==================== Cool Kick ====================
 
@@ -233,24 +261,6 @@ struct FMeleeAttackSettings
 	/** Charge multiplier for successful drop kick hits (multiplied with ChargePerMeleeHit) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drop Kick", meta = (ClampMin = "1.0", ClampMax = "10.0", EditCondition = "bEnableDropKick"))
 	float DropKickChargeMultiplier = 2.0f;
-
-	// ==================== Target Magnetism ====================
-
-	/** Enable predictive target magnetism (pulls targets toward punch center) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target Magnetism")
-	bool bEnableTargetMagnetism = true;
-
-	/** Range for predictive magnetism trace */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
-	float MagnetismRange = 300.0f;
-
-	/** Radius for magnetism sphere trace */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
-	float MagnetismRadius = 80.0f;
-
-	/** How fast to pull target toward attack center (units per second) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
-	float MagnetismPullSpeed = 800.0f;
 
 	// ==================== Range & Detection ====================
 
@@ -322,11 +332,7 @@ struct FMeleeAttackSettings
 
 	// ==================== Movement ====================
 
-	/** Lunge distance on attack (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement", meta = (ClampMin = "0", ClampMax = "500"))
-	float LungeDistance = 100.0f;
-
-	/** Lunge duration (seconds) */
+	/** Lunge duration (seconds) — how long the player flies toward the lunge target */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement", meta = (ClampMin = "0.05", ClampMax = "0.5"))
 	float LungeDuration = 0.15f;
 

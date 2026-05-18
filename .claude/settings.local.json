@@ -266,7 +266,16 @@
       "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" add Polarity/Variant_Shooter/ShooterCharacter.cpp)",
       "Bash(git -C \"C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_6/Source\" push origin main)",
       "Bash(find \"C:\\\\Users\\\\Professional\\\\Documents\\\\Unreal Projects\\\\Polarity_Main5_6\\\\Content\" -name \"*Upgrade*\" -type f 2>/dev/null | head -10)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "WebFetch(domain:titanfall-2-handbook.gitbook.io)",
+      "Bash(awk 'END{print NR}' \"Polarity/Variant_Shooter/MeleeAttackComponent.h\" \"Polarity/Variant_Shooter/MeleeAttackComponent.cpp\")",
+      "Bash(awk 'END{print FILENAME\": \"NR}' \"Polarity/Variant_Shooter/MeleeAttackComponent.h\")",
+      "Bash(awk 'END{print FILENAME\": \"NR}' \"Polarity/Variant_Shooter/MeleeAttackComponent.cpp\")",
+      "Bash(awk 'NR>=444 && NR<=464' \"Polarity/Variant_Shooter/MeleeAttackComponent.cpp\")",
+      "WebFetch(domain:www.palantir.com)",
+      "WebFetch(domain:stratechery.com)",
+      "WebFetch(domain:aletteraday.substack.com)",
+      "WebFetch(domain:www.cato-unbound.org)"
     ]
   },
   "effortLevel": "high"

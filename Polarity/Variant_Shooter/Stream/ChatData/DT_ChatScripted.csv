@@ -57,3 +57,252 @@ open_first_8,stream_opening_first,8,3.0,,viewer_curious99,is the streamer human 
 open_first_9,stream_opening_first,9,3.0,per_leet,,@viewer_curious99 robot. obviously
 open_first_10,stream_opening_first,10,2.5,per_stan,,first run for the new viewers LFG
 open_first_11,stream_opening_first,11,2.5,per_chad,,alright {PlayerName} show them what you got
+manif_c0,lore_isl_manifesto_west,0,1.5,per_ratio,,oh boy here we go
+manif_c1,lore_isl_manifesto_west,1,3.0,per_leet,,he's WRITING manifestos
+manif_c2,lore_isl_manifesto_west,2,2.5,per_witch,,men who fund wars always write the book first
+manif_c3,lore_isl_manifesto_west,3,3.0,per_chad,,every villain thinks he's the hero
+manif_c4,lore_isl_manifesto_west,4,2.5,per_stan,,80 PAGES???
+manif_c5,lore_isl_manifesto_west,5,2.5,per_granny,,oh dear
+manif_c6,lore_isl_manifesto_west,6,2.0,per_ratio,,actually some of his sources check out
+manif_c7,lore_isl_manifesto_west,7,2.5,per_leet,,@ratio_engineer not the point
+speech_c0,lore_isl_speech_drafts,0,2.0,per_witch,,i told you
+speech_c1,lore_isl_speech_drafts,1,2.5,per_chad,,condescension is its own evil
+speech_c2,lore_isl_speech_drafts,2,3.0,per_leet,,bro is GAS LIGHTING in WORD
+speech_c3,lore_isl_speech_drafts,3,2.5,per_ratio,,actually this is just media training
+speech_c4,lore_isl_speech_drafts,4,2.0,per_leet,,@ratio_engineer kys
+speech_c5,lore_isl_speech_drafts,5,3.0,per_granny,,that's not how my husband used to talk to me
+speech_c6,lore_isl_speech_drafts,6,2.5,per_vibe,,the vibes are getting bad chat
+israel_c0,lore_isl_israel_admiration,0,2.0,per_witch,,ah. the network.
+israel_c1,lore_isl_israel_admiration,1,3.0,per_ratio,,actually security cooperation is well documented public knowledge
+israel_c2,lore_isl_israel_admiration,2,2.5,per_leet,,'redacted lunch' lol
+israel_c3,lore_isl_israel_admiration,3,3.0,per_bigstein,,ah a neighbor
+israel_c4,lore_isl_israel_admiration,4,2.0,per_chad,,@big_stein STAY OUT OF THIS
+israel_c5,lore_isl_israel_admiration,5,2.5,per_bigstein,,i'm just saying. range. respect.
+israel_c6,lore_isl_israel_admiration,6,2.5,per_granny,,who is the neighbor
+israel_c7,lore_isl_israel_admiration,7,2.0,per_leet,,granny dont ask
+oath_c0,lore_isl_oath_burden,0,2.0,per_ratio,,oh god he LARPs as a stoic
+oath_c1,lore_isl_oath_burden,1,3.0,per_leet,,aurelius would push him in the pool
+oath_c2,lore_isl_oath_burden,2,2.5,per_chad,,real burden carriers don't write OATHS
+oath_c3,lore_isl_oath_burden,3,3.0,per_witch,,rituals reveal the gap between self image and self
+oath_c4,lore_isl_oath_burden,4,2.5,per_stan,,my therapist would have notes
+oath_c5,lore_isl_oath_burden,5,2.5,per_granny,,why is everyone so dramatic
+oath_c6,lore_isl_oath_burden,6,2.5,per_vibe,,the cringe is loud today
+video_c0,lore_isl_video_uploaded,0,2.0,per_witch,,he's already gone in some way
+video_c1,lore_isl_video_uploaded,1,3.0,per_leet,,bro made a podcast for HIMSELF
+video_c2,lore_isl_video_uploaded,2,2.5,per_ratio,,actually this might be a coping mechanism for mortality
+video_c3,lore_isl_video_uploaded,3,2.5,per_chad,,yeah no shit
+video_c4,lore_isl_video_uploaded,4,2.5,per_stan,,WAIT NEXT VESSEL???
+video_c5,lore_isl_video_uploaded,5,3.0,per_bot,,Did you know: mind-uploading remains theoretical with zero successful trials
+video_c6,lore_isl_video_uploaded,6,2.5,per_witch,,zero CONFIRMED bot. confirmed.
+read_c0,lore_isl_reading_list,0,2.5,per_ratio,,actually burnham predicted the managerial class so
+read_c1,lore_isl_reading_list,1,3.0,per_leet,,god this guy is exactly the freshman you avoid in college
+read_c2,lore_isl_reading_list,2,2.5,per_chad,,reading list says everything
+read_c3,lore_isl_reading_list,3,2.5,per_witch,,he reads to win arguments not to change
+read_c4,lore_isl_reading_list,4,3.0,per_bot,,Did you know: 73% of self-published civilization manifestos predict imminent collapse
+read_c5,lore_isl_reading_list,5,2.5,per_leet,,thats real?
+read_c6,lore_isl_reading_list,6,2.0,per_bot,,I make up numbers regularly
+wellness_c0,lore_isl_wellness_staff,0,2.5,per_witch,,i KNEW
+wellness_c1,lore_isl_wellness_staff,1,2.0,per_leet,,OH WE'RE COOKED
+wellness_c2,lore_isl_wellness_staff,2,2.0,per_stan,,NO
+wellness_c3,lore_isl_wellness_staff,3,2.5,per_granny,,oh god oh god oh god
+wellness_c4,lore_isl_wellness_staff,4,2.5,per_chad,,take a breath man
+wellness_c5,lore_isl_wellness_staff,5,3.0,per_bigstein,,i don't recognize that name
+wellness_c6,lore_isl_wellness_staff,6,2.5,per_leet,,nobody named anyone @big_stein
+wellness_c7,lore_isl_wellness_staff,7,2.5,per_bigstein,,just saying. for the record.
+guest_c0,lore_isl_guest_logs,0,2.0,per_witch,,oh
+guest_c1,lore_isl_guest_logs,1,2.5,per_leet,,encrypted names is CRAZY
+guest_c2,lore_isl_guest_logs,2,2.5,per_ratio,,actually that's standard for high-clearance guest registries
+guest_c3,lore_isl_guest_logs,3,3.0,per_chad,,standard for WHAT @ratio_engineer
+guest_c4,lore_isl_guest_logs,4,2.0,per_bigstein,,i wasn't there
+guest_c5,lore_isl_guest_logs,5,2.0,per_leet,,nobody asked
+guest_c6,lore_isl_guest_logs,6,2.5,per_bigstein,,just making it CLEAR
+guest_c7,lore_isl_guest_logs,7,3.0,per_granny,,this is too much for this old lady
+photo_c0,lore_isl_photo_archive,0,2.0,per_witch,,don't open them
+photo_c1,lore_isl_photo_archive,1,2.5,per_chad,,pang DO NOT
+photo_c2,lore_isl_photo_archive,2,2.0,per_leet,,dont
+photo_c3,lore_isl_photo_archive,3,3.0,per_granny,,please don't
+photo_c4,lore_isl_photo_archive,4,2.5,per_bigstein,,i don't keep photos
+photo_c5,lore_isl_photo_archive,5,2.5,per_leet,,lmao @big_stein WE KNOW
+photo_c6,lore_isl_photo_archive,6,2.5,per_ratio,,actually proper hand-off procedure is the right call here
+photo_c7,lore_isl_photo_archive,7,2.5,per_stan,,pang you're a good one
+nda_c0,lore_isl_nda_payouts,0,2.5,per_ratio,,2.4 is below most disclosure thresholds yes
+nda_c1,lore_isl_nda_payouts,1,3.0,per_leet,,HE LITERALLY PICKED THE THRESHOLD
+nda_c2,lore_isl_nda_payouts,2,2.5,per_chad,,this is a system
+nda_c3,lore_isl_nda_payouts,3,2.5,per_witch,,a SYSTEM
+nda_c4,lore_isl_nda_payouts,4,3.0,per_granny,,my late husband would have called this evil
+nda_c5,lore_isl_nda_payouts,5,2.5,per_stan,,granny❤️
+nda_c6,lore_isl_nda_payouts,6,2.5,per_vibe,,vibes are death
+chambers_c0,lore_isl_chambers,0,2.5,per_witch,,i told you the temple was wrong
+chambers_c1,lore_isl_chambers,1,2.5,per_leet,,3 LEVELS DOWN
+chambers_c2,lore_isl_chambers,2,2.5,per_ratio,,actually private corridors are common for high net worth properties
+chambers_c3,lore_isl_chambers,3,3.0,per_chad,,rooms you 'don't have words for' aren't common @ratio_engineer
+chambers_c4,lore_isl_chambers,4,2.5,per_bigstein,,temples are normal
+chambers_c5,lore_isl_chambers,5,2.5,per_leet,,@big_stein temples don't have BASEMENTS LIKE THAT
+chambers_c6,lore_isl_chambers,6,2.0,per_bigstein,,mine did
+chambers_c7,lore_isl_chambers,7,2.5,per_leet,,WAIT WHAT
+dvds_c0,lore_isl_dvds,0,2.5,per_witch,,don't open
+dvds_c1,lore_isl_dvds,1,2.0,per_chad,,don't
+dvds_c2,lore_isl_dvds,2,2.5,per_granny,,please don't
+dvds_c3,lore_isl_dvds,3,2.5,per_stan,,log and run
+dvds_c4,lore_isl_dvds,4,3.0,per_leet,,man the 2010s were a TIME huh
+dvds_c5,lore_isl_dvds,5,2.5,per_ratio,,actually physical media is harder to subpoena
+dvds_c6,lore_isl_dvds,6,3.0,per_chad,,thanks @ratio_engineer DARK INSIGHT
+recruiter_c0,lore_isl_recruiter,0,2.0,per_witch,,agencies. always agencies.
+recruiter_c1,lore_isl_recruiter,1,2.5,per_leet,,parental nda IS A SENTENCE
+recruiter_c2,lore_isl_recruiter,2,2.5,per_chad,,this is processing humans
+recruiter_c3,lore_isl_recruiter,3,3.0,per_ratio,,technically that's how all entertainment industries onboard minors
+recruiter_c4,lore_isl_recruiter,4,2.5,per_leet,,NOT LIKE THIS @ratio_engineer
+recruiter_c5,lore_isl_recruiter,5,2.5,per_granny,,i'm calling someone
+jet_c0,lore_isl_jet_logs,0,2.0,per_witch,,no
+jet_c1,lore_isl_jet_logs,1,2.0,per_chad,,no no no
+jet_c2,lore_isl_jet_logs,2,2.0,per_leet,,NO
+jet_c3,lore_isl_jet_logs,3,2.5,per_granny,,i can't
+jet_c4,lore_isl_jet_logs,4,3.0,per_bigstein,,i flew commercial
+jet_c5,lore_isl_jet_logs,5,2.5,per_leet,,@big_stein NOT THE TIME
+jet_c6,lore_isl_jet_logs,6,2.5,per_bigstein,,for the record
+jet_c7,lore_isl_jet_logs,7,3.0,per_ratio,,m to r-m ratio is the question yes
+cost_c0,lore_isl_cost_benefit,0,2.5,per_witch,,he doesn't see them
+cost_c1,lore_isl_cost_benefit,1,3.0,per_ratio,,actually that's standard utilitarian calc—
+cost_c2,lore_isl_cost_benefit,2,2.5,per_chad,,SHUT UP @ratio_engineer
+cost_c3,lore_isl_cost_benefit,3,2.5,per_leet,,ratio youre DONE
+cost_c4,lore_isl_cost_benefit,4,3.0,per_granny,,847 souls
+cost_c5,lore_isl_cost_benefit,5,2.5,per_stan,,a TOWN
+cost_c6,lore_isl_cost_benefit,6,2.5,per_vibe,,vibes are dead
+surv_c0,lore_isl_surveillance,0,2.5,per_witch,,how many 'closed'
+surv_c1,lore_isl_surveillance,1,2.5,per_leet,,dont ask witch
+surv_c2,lore_isl_surveillance,2,3.0,per_ratio,,actually source-discrediting is a normal corporate practice
+surv_c3,lore_isl_surveillance,3,2.5,per_chad,,'closed' is not normal anything @ratio_engineer
+surv_c4,lore_isl_surveillance,4,2.5,per_granny,,are these people gone
+surv_c5,lore_isl_surveillance,5,3.0,per_bot,,Did you know: 23 journalists died in 'accidents' globally last year
+surv_c6,lore_isl_surveillance,6,2.5,per_leet,,BOT WHAT
+surv_c7,lore_isl_surveillance,7,2.5,per_bot,,I do not specify which
+kill_c0,lore_isl_kill_list,0,2.0,per_witch,,everyone is a person
+kill_c1,lore_isl_kill_list,1,2.5,per_chad,,thank you witch
+kill_c2,lore_isl_kill_list,2,2.5,per_leet,,pang dont name names dont name names
+kill_c3,lore_isl_kill_list,3,3.0,per_ratio,,actually we should crowdsource the politician —
+kill_c4,lore_isl_kill_list,4,2.5,per_chad,,NO @ratio_engineer
+kill_c5,lore_isl_kill_list,5,2.5,per_granny,,a politician
+kill_c6,lore_isl_kill_list,6,2.5,per_stan,,oh my god
+lab_c0,lore_isl_lab_subjects,0,2.5,per_witch,,the tech is built on bodies
+lab_c1,lore_isl_lab_subjects,1,2.5,per_chad,,it always is
+lab_c2,lore_isl_lab_subjects,2,2.5,per_leet,,lost integrity is a SENTENCE
+lab_c3,lore_isl_lab_subjects,3,3.0,per_ratio,,actually pre-CPT research did require somatic—
+lab_c4,lore_isl_lab_subjects,4,2.5,per_leet,,RATIO IM GONNA BAN U
+lab_c5,lore_isl_lab_subjects,5,3.0,per_granny,,those poor people
+lab_c6,lore_isl_lab_subjects,6,2.5,per_stan,,the technology we use is BUILT ON THIS
+silenced_c0,lore_isl_silenced,0,2.5,per_witch,,of course
+silenced_c1,lore_isl_silenced,1,2.5,per_chad,,of course
+silenced_c2,lore_isl_silenced,2,2.0,per_leet,,every
+silenced_c3,lore_isl_silenced,3,2.5,per_granny,,those families
+silenced_c4,lore_isl_silenced,4,3.0,per_ratio,,actually statistical clustering of accidents around—
+silenced_c5,lore_isl_silenced,5,2.5,per_chad,,not the moment @ratio_engineer
+silenced_c6,lore_isl_silenced,6,2.5,per_stan,,12 PEOPLE
+arms_c0,lore_isl_israel_arms,0,3.0,per_bot,,Did you know: NSO Group Cellebrite Candiru are publicly reported Israeli spyware exporters
+arms_c1,lore_isl_israel_arms,1,2.5,per_witch,,this is real-world bot
+arms_c2,lore_isl_israel_arms,2,2.5,per_leet,,BOT JUST DROPPED ALPHA
+arms_c3,lore_isl_israel_arms,3,3.0,per_ratio,,actually surveillance-tech export is a documented economic sector
+arms_c4,lore_isl_israel_arms,4,2.5,per_chad,,doesn't make it less evil @ratio_engineer
+arms_c5,lore_isl_israel_arms,5,2.5,per_bigstein,,just a market
+arms_c6,lore_isl_israel_arms,6,3.0,per_leet,,@big_stein every time bro
+arms_c7,lore_isl_israel_arms,7,2.5,per_bigstein,,i'm a customer not a supplier
+protocol_c0,lore_isl_morning_protocol,0,2.0,per_witch,,of course
+protocol_c1,lore_isl_morning_protocol,1,2.5,per_leet,,HE WHAT
+protocol_c2,lore_isl_morning_protocol,2,2.0,per_stan,,WHAT THE FUCK
+protocol_c3,lore_isl_morning_protocol,3,2.5,per_granny,,that's it i'm OUT
+protocol_c4,lore_isl_morning_protocol,4,3.0,per_ratio,,actually young plasma protocols have peer-reviewed—
+protocol_c5,lore_isl_morning_protocol,5,2.5,per_chad,,shut up ratio
+protocol_c6,lore_isl_morning_protocol,6,2.5,per_leet,,SHUT UP @ratio_engineer
+phobia_c0,lore_isl_phobia,0,2.5,per_witch,,pathological need to be RIGHT in death
+phobia_c1,lore_isl_phobia,1,3.0,per_chad,,fear of being misremembered. that's the WHOLE thing
+phobia_c2,lore_isl_phobia,2,2.5,per_leet,,bro is a tragic backstory
+phobia_c3,lore_isl_phobia,3,2.5,per_stan,,he's so lonely
+phobia_c4,lore_isl_phobia,4,3.0,per_ratio,,actually this would correlate with narcissistic personality—
+phobia_c5,lore_isl_phobia,5,2.5,per_granny,,not a sane man
+phobia_c6,lore_isl_phobia,6,2.5,per_vibe,,vibes hurt
+dna_c0,lore_isl_dna_backup,0,2.5,per_witch,,the ego of it
+dna_c1,lore_isl_dna_backup,1,3.0,per_bot,,Did you know: the Svalbard Seed Vault is the real iceland-adjacent global seed reserve
+dna_c2,lore_isl_dna_backup,2,2.5,per_chad,,he put HIMSELF next to the world's seeds
+dna_c3,lore_isl_dna_backup,3,2.5,per_leet,,like a CONDIMENT
+dna_c4,lore_isl_dna_backup,4,3.0,per_ratio,,actually self-cryopreservation logistics are well documented
+dna_c5,lore_isl_dna_backup,5,2.5,per_stan,,this man is unwell
+ritual_c0,lore_isl_pre_upload,0,3.0,per_witch,,the ritual reveals the prayer
+ritual_c1,lore_isl_pre_upload,1,2.5,per_chad,,he's basically performing a death rite
+ritual_c2,lore_isl_pre_upload,2,2.5,per_leet,,not a man but a CONTINUITY
+ritual_c3,lore_isl_pre_upload,3,3.0,per_stan,,bro WROTE a religion
+ritual_c4,lore_isl_pre_upload,4,2.5,per_ratio,,actually pre-uplink ritual is undocumented in—
+ritual_c5,lore_isl_pre_upload,5,2.5,per_bot,,Did you know: there are 0 successful human consciousness uploads
+ritual_c6,lore_isl_pre_upload,6,2.5,per_witch,,bot we get it
+yacht_c0,lore_isl_yacht_fleet,0,3.0,per_ratio,,actually those are aristotelian concepts of human flourishing
+yacht_c1,lore_isl_yacht_fleet,1,2.5,per_chad,,thanks ratio
+yacht_c2,lore_isl_yacht_fleet,2,2.5,per_leet,,HE NAMED A BOAT AFTER HAPPINESS
+yacht_c3,lore_isl_yacht_fleet,3,2.5,per_stan,,30 mil a year just for boats
+yacht_c4,lore_isl_yacht_fleet,4,3.0,per_witch,,vessels of his imagined self
+yacht_c5,lore_isl_yacht_fleet,5,2.5,per_granny,,my husband called his fishing rod brenda
+yacht_c6,lore_isl_yacht_fleet,6,2.5,per_chad,,granny that's adorable
+capy_c0,lore_isl_capybara,0,2.0,per_witch,,Чавес❤️
+capy_c1,lore_isl_capybara,1,2.5,per_chad,,leave the capy out of this
+capy_c2,lore_isl_capybara,2,2.5,per_leet,,chavez has better healthcare than my family
+capy_c3,lore_isl_capybara,3,3.0,per_granny,,oh i love him
+capy_c4,lore_isl_capybara,4,2.5,per_stan,,free chavez
+capy_c5,lore_isl_capybara,5,2.5,per_ratio,,actually capybaras require socialization more than security
+capy_c6,lore_isl_capybara,6,2.5,per_vibe,,chavez deserves the world
+capy_c7,lore_isl_capybara,7,2.5,per_chad,,CHAVEZ NATION
+telaviv_c0,lore_isl_tel_aviv,0,2.5,per_bigstein,,oh that's near me
+telaviv_c1,lore_isl_tel_aviv,1,2.0,per_leet,,WAIT BIGSTEIN U LIVE IN TEL AVIV???
+telaviv_c2,lore_isl_tel_aviv,2,2.5,per_bigstein,,i'm just somewhere safe
+telaviv_c3,lore_isl_tel_aviv,3,3.0,per_chad,,somewhere with NO EXTRADITION you mean
+telaviv_c4,lore_isl_tel_aviv,4,2.5,per_witch,,the network meets where it can
+telaviv_c5,lore_isl_tel_aviv,5,2.5,per_bigstein,,i don't know him
+telaviv_c6,lore_isl_tel_aviv,6,3.0,per_leet,,@big_stein you literally live BLOCKS AWAY
+telaviv_c7,lore_isl_tel_aviv,7,2.5,per_bigstein,,city is big
+mom_c0,lore_isl_mom_calls,0,3.0,per_witch,,the most damning thing is the unread voicemails
+mom_c1,lore_isl_mom_calls,1,2.5,per_chad,,oof
+mom_c2,lore_isl_mom_calls,2,2.5,per_granny,,oh his mother
+mom_c3,lore_isl_mom_calls,3,3.0,per_stan,,that's so sad
+mom_c4,lore_isl_mom_calls,4,2.5,per_ratio,,actually maternal estrangement correlates with—
+mom_c5,lore_isl_mom_calls,5,2.5,per_leet,,shut up ratio for once let us feel
+mom_c6,lore_isl_mom_calls,6,3.0,per_chad,,feeling pity for a man who runs a wellness staff rotation
+mom_c7,lore_isl_mom_calls,7,2.5,per_witch,,chad is right. don't.
+therapy_c0,lore_isl_therapist,0,2.5,per_witch,,she'll never speak
+therapy_c1,lore_isl_therapist,1,3.0,per_chad,,paid to lie about his soul
+therapy_c2,lore_isl_therapist,2,2.5,per_leet,,80k QUARTERLY???
+therapy_c3,lore_isl_therapist,3,3.0,per_ratio,,actually mental health practitioners have HIPAA obligations independent of—
+therapy_c4,lore_isl_therapist,4,2.5,per_chad,,she signed it ratio. she's broken too.
+therapy_c5,lore_isl_therapist,5,2.5,per_granny,,oh that poor woman
+therapy_c6,lore_isl_therapist,6,2.5,per_stan,,NDA ndaNDA
+diary_c0,lore_isl_diary,0,3.0,per_witch,,that's the closest he comes to god
+diary_c1,lore_isl_diary,1,2.5,per_chad,,relief at being right. that's the disease.
+diary_c2,lore_isl_diary,2,3.0,per_leet,,bro DREAMS the way out and is MAD about it
+diary_c3,lore_isl_diary,3,2.5,per_granny,,a man with no light
+diary_c4,lore_isl_diary,4,3.0,per_ratio,,actually doubt-suppression is the marker of—
+diary_c5,lore_isl_diary,5,2.5,per_vibe,,heavy vibes
+diary_c6,lore_isl_diary,6,2.5,per_stan,,pang are you okay
+diary_c7,lore_isl_diary,7,2.5,per_stan,,pangolier you've read SO MUCH today
+finale_c0,lore_isl_finale,0,3.0,per_stan,,pang you back!!!
+finale_c1,lore_isl_finale,1,2.5,per_chad,,gg the boss
+finale_c2,lore_isl_finale,2,3.0,per_witch,,the master file. finally.
+finale_c3,lore_isl_finale,3,3.5,per_leet,,OPEN IT
+finale_c4,lore_isl_finale,4,3.0,per_stan,,WAIT WHAT
+finale_c5,lore_isl_finale,5,2.5,per_witch,,i told you
+finale_c6,lore_isl_finale,6,2.5,per_chad,,pang you good
+finale_c7,lore_isl_finale,7,3.0,per_leet,,HE FUNDED WHAT?
+finale_c8,lore_isl_finale,8,2.5,per_stan,,ALL OF THEM??????
+finale_c9,lore_isl_finale,9,3.0,per_granny,,oh dear lord
+finale_c10,lore_isl_finale,10,2.5,per_witch,,of course he did
+finale_c11,lore_isl_finale,11,2.5,per_chad,,pang. breathe.
+finale_c12,lore_isl_finale,12,3.0,per_leet,,THE PRESIDENT???
+finale_c13,lore_isl_finale,13,2.5,per_stan,,🚨🚨🚨
+finale_c14,lore_isl_finale,14,3.0,per_bigstein,,i wasn't there
+finale_c15,lore_isl_finale,15,2.5,per_leet,,NOT THE TIME BIGSTEIN
+finale_c16,lore_isl_finale,16,3.0,per_bigstein,,just for the record
+finale_c17,lore_isl_finale,17,3.0,per_witch,,what's the third document
+finale_c18,lore_isl_finale,18,2.5,per_chad,,pang
+finale_c19,lore_isl_finale,19,3.0,per_ratio,,actually we should consider—
+finale_c20,lore_isl_finale,20,2.5,per_leet,,NOT NOW RATIO
+finale_c21,lore_isl_finale,21,3.0,per_stan,,what was IT
+finale_c22,lore_isl_finale,22,3.0,per_chad,,he won't say
+finale_c23,lore_isl_finale,23,2.5,per_witch,,he can't say
+finale_c24,lore_isl_finale,24,3.0,per_granny,,cooked
+finale_c25,lore_isl_finale,25,3.0,per_stan,,WISHLIST NOW LFG
+finale_c26,lore_isl_finale,26,3.0,per_chad,,see you next time chat
+finale_c27,lore_isl_finale,27,3.0,per_witch,,we'll be back. for the third document.
