@@ -21,10 +21,10 @@ void UUpgradeCardWidget::InitFromDefinition(UUpgradeDefinition* InDefinition, in
 	if (Definition)
 	{
 		UpgradeName = Definition->DisplayName;
-		UpgradeDescription = Definition->Description;
 		UpgradeIcon = Definition->Icon;
 		UpgradeTier = Definition->Tier;
 		UpgradeMaxLevel = Definition->MaxLevel;
+		// UpgradeDescription is set further down using GetDescriptionForLevel(DisplayLevel)
 	}
 	else
 	{
@@ -51,11 +51,23 @@ void UUpgradeCardWidget::InitFromDefinition(UUpgradeDefinition* InDefinition, in
 		}
 	}
 
+	// Choice screen always shows the level the player would have AFTER accepting:
+	//  - not yet owned (CurrentLevel == 0) -> display Lv 1
+	//  - already at Lv N (< MaxLevel)       -> display Lv N+1
+	//  - clamped to MaxLevel (defensive — maxed-out upgrades shouldn't reach here)
+	const int32 DisplayLevel = (UpgradeCurrentLevel == 0)
+		? 1
+		: FMath::Min(UpgradeCurrentLevel + 1, FMath::Max(UpgradeMaxLevel, 1));
+
+	UpgradeDescription = Definition ? Definition->GetDescriptionForLevel(DisplayLevel) : FText::GetEmpty();
+	UpgradeStats = Definition ? Definition->GetDisplayedStats(DisplayLevel) : TArray<FUpgradeStat>();
+
 	UE_LOG(LogTemp, Log,
-		TEXT("[XP_DEBUG] Card pre-BP: this=%p UpgradeName='%s' Tier=%d Level=%d/%d"),
-		this, *UpgradeName.ToString(), UpgradeTier, UpgradeCurrentLevel, UpgradeMaxLevel);
+		TEXT("[XP_DEBUG] Card pre-BP: this=%p UpgradeName='%s' Tier=%d Level=%d/%d (display Lv %d, %d stat rows)"),
+		this, *UpgradeName.ToString(), UpgradeTier, UpgradeCurrentLevel, UpgradeMaxLevel, DisplayLevel, UpgradeStats.Num());
 
 	BP_OnInitialized(UpgradeName, UpgradeDescription, UpgradeIcon, UpgradeTier, UpgradeCurrentLevel, UpgradeMaxLevel);
+	BP_OnStatsAvailable(UpgradeStats);
 }
 
 void UUpgradeCardWidget::RequestSelect()

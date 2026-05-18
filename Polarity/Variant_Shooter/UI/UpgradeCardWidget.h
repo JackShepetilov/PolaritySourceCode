@@ -8,6 +8,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "UpgradeDefinition.h"
 #include "UpgradeCardWidget.generated.h"
 
 class UUpgradeDefinition;
@@ -61,6 +62,16 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Card")
 	int32 UpgradeMaxLevel = 1;
 
+	/**
+	 * Hades-style "stat rows" for this upgrade at the level the player would have AFTER
+	 * accepting this choice. Filled by InitFromDefinition from
+	 * UUpgradeDefinition::GetDisplayedStats(DisplayLevel).
+	 *
+	 * Use this in BP to render label/value rows under the description.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Card")
+	TArray<FUpgradeStat> UpgradeStats;
+
 protected:
 	/**
 	 * Implement in BP to populate widgets and play intro animation.
@@ -73,4 +84,12 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Upgrade Card",
 		meta = (DisplayName = "On Initialized"))
 	void BP_OnInitialized(const FText& InName, const FText& InDescription, UTexture2D* InIcon, int32 InTier, int32 InCurrentLevel, int32 InMaxLevel);
+
+	/**
+	 * Fired right after BP_OnInitialized. Use this to render the per-stat rows
+	 * (Hades-style "Doom Damage: 100"). Stats are also available via Self.UpgradeStats.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Upgrade Card",
+		meta = (DisplayName = "On Stats Available"))
+	void BP_OnStatsAvailable(const TArray<FUpgradeStat>& Stats);
 };
