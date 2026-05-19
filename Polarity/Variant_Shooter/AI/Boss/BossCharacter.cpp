@@ -141,13 +141,7 @@ void ABossCharacter::Tick(float DeltaTime)
 			// so zeroing velocity here doesn't fight the pull — it only kills drift.
 			MovementComp->Velocity = FVector::ZeroVector;
 		}
-		if (USkeletalMeshComponent* MeshComp = GetMesh())
-		{
-			if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
-			{
-				bRootMotionActive = AnimInst->HasRootMotion();
-			}
-		}
+		bRootMotionActive = IsPlayingRootMotion();
 
 		static double LastAttackMotionLog = -10.0;
 		const double NowSec = GetWorld()->GetTimeSeconds();
