@@ -386,23 +386,12 @@ bool ABossCharacter::StartApproachDash(AActor* Target)
 	// Positive offset = counter-clockwise, negative = clockwise
 	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
 
-	// Calculate approximate arc length for fallback duration
-	float AngleDelta = FMath::Abs(AngleOffsetRad);
-	float AverageRadius = (DashStartRadius + DashTargetRadius) * 0.5f;
-	float ArcLength = AngleDelta * AverageRadius + FMath::Abs(DashStartRadius - DashTargetRadius);
-	float FallbackDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
-
-	// Duration is determined by montage length if available, otherwise by arc calculation
-	if (ApproachDashMontage)
-	{
-		DashTotalDuration = ApproachDashMontage->GetPlayLength();
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] Using montage length for duration: %.2fs"), DashTotalDuration);
-	}
-	else
-	{
-		DashTotalDuration = FallbackDuration;
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] No montage, using calculated duration: %.2fs"), DashTotalDuration);
-	}
+	// Duration is ALWAYS computed from DashSpeed × arc length. The montage is play-rate-scaled
+	// to fit, so tuning DashSpeed in the editor actually changes the dash duration.
+	const float AngleDelta = FMath::Abs(AngleOffsetRad);
+	const float AverageRadius = (DashStartRadius + DashTargetRadius) * 0.5f;
+	const float ArcLength = AngleDelta * AverageRadius + FMath::Abs(DashStartRadius - DashTargetRadius);
+	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
 	DashElapsedTime = 0.0f;
 
 	bIsDashing = true;
@@ -414,11 +403,17 @@ bool ABossCharacter::StartApproachDash(AActor* Target)
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Crossfade into approach dash montage (architectural crossfade — no per-asset blend reliance)
-	CrossfadeToMontage(ApproachDashMontage, DashStartBlendTime);
+	// Crossfade into approach dash montage with play rate scaled so the animation fits the dash
+	float ApproachPlayRate = 1.0f;
+	if (ApproachDashMontage && DashTotalDuration > 0.0f)
+	{
+		const float MontageLength = ApproachDashMontage->GetPlayLength();
+		ApproachPlayRate = (MontageLength > 0.0f) ? (MontageLength / DashTotalDuration) : 1.0f;
+	}
+	CrossfadeToMontage(ApproachDashMontage, DashStartBlendTime, ApproachPlayRate);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH DYNAMIC: AngleOffset=%.1f, StartRadius=%.0f -> TargetRadius=%.0f, Duration=%.2fs (Arc would be %.2fs)"),
-		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration, FallbackDuration);
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH: AngleOffset=%.1f, Radius=%.0f->%.0f, Duration=%.2fs (DashSpeed=%.0f, ArcLen=%.0f), PlayRate=%.2fx"),
+		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration, DashSpeed, ArcLength, ApproachPlayRate);
 
 	return true;
 }
@@ -461,8 +456,8 @@ bool ABossCharacter::StartCircleDash(AActor* Target)
 	DashTargetAngle = DashStartAngle + AngleOffsetRad;
 	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
 
-	// Calculate duration based on arc length
-	float ArcLength = FMath::Abs(AngleOffsetRad) * DashStartRadius;
+	// Duration is ALWAYS computed from DashSpeed × arc length; montage is play-rate-scaled.
+	const float ArcLength = FMath::Abs(AngleOffsetRad) * DashStartRadius;
 	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
 	DashElapsedTime = 0.0f;
 
@@ -475,11 +470,17 @@ bool ABossCharacter::StartCircleDash(AActor* Target)
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Crossfade into circle dash montage
-	CrossfadeToMontage(CircleDashMontage, DashStartBlendTime);
+	// Crossfade into circle dash montage with play rate scaled to fit
+	float CirclePlayRate = 1.0f;
+	if (CircleDashMontage && DashTotalDuration > 0.0f)
+	{
+		const float MontageLength = CircleDashMontage->GetPlayLength();
+		CirclePlayRate = (MontageLength > 0.0f) ? (MontageLength / DashTotalDuration) : 1.0f;
+	}
+	CrossfadeToMontage(CircleDashMontage, DashStartBlendTime, CirclePlayRate);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE DYNAMIC: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs"),
-		AngleOffsetDeg, DashStartRadius, DashTotalDuration);
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs (DashSpeed=%.0f, ArcLen=%.0f), PlayRate=%.2fx"),
+		AngleOffsetDeg, DashStartRadius, DashTotalDuration, DashSpeed, ArcLength, CirclePlayRate);
 
 	return true;
 }
@@ -693,6 +694,13 @@ void ABossCharacter::StartMeleeAttack(AActor* Target)
 	bIsInMeleeWindup = true; // counter window opens until OnDamageWindowStart
 	HitActorsThisAttack.Empty();
 
+	// Disable EMF forces during attack so the boss doesn't drift backwards from player's
+	// EMF field (re-enabled when the attack montage ends).
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(false);
+	}
+
 	// Face target
 	FVector DirectionToTarget = (Target->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
 	if (!DirectionToTarget.IsNearlyZero())
@@ -775,6 +783,13 @@ void ABossCharacter::OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupt
 {
 	bIsAttacking = false;
 	bDamageWindowActive = false;
+	bIsInMeleeWindup = false; // safety reset if montage was interrupted before damage window opened
+
+	// Re-enable EMF forces now that the swing is done
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->SetEnabled(true);
+	}
 
 	// Start cooldown
 	bMeleeOnCooldown = true;
@@ -858,8 +873,10 @@ void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
 
 	float DistanceToPlayer = ToPlayer.Size();
 
-	// Don't pull if already very close
-	if (DistanceToPlayer < 50.0f)
+	// Don't pull inside the player — keep at attack range so the boss hits from a distance
+	// instead of climbing into the capsule.
+	const float DesiredDistance = FMath::Max(DashTargetDistanceFromPlayer, 50.0f);
+	if (DistanceToPlayer <= DesiredDistance)
 	{
 		return;
 	}
@@ -868,8 +885,8 @@ void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
 	FVector PullDirection = ToPlayer.GetSafeNormal();
 	float PullDistance = MeleeAttackPullSpeed * DeltaTime;
 
-	// Don't overshoot the player
-	PullDistance = FMath::Min(PullDistance, DistanceToPlayer - 50.0f);
+	// Don't overshoot — stop at the desired attack distance
+	PullDistance = FMath::Min(PullDistance, DistanceToPlayer - DesiredDistance);
 
 	FVector NewLocation = BossLocation + PullDirection * PullDistance;
 	NewLocation.Z = BossLocation.Z; // Keep same height
@@ -995,13 +1012,20 @@ void ABossCharacter::EnterFinisherPhase()
 
 void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
-	// Ignore knockback in finisher phase - boss must stay at teleport position
+	// Ignore knockback in finisher phase - boss must stay frozen in his stun pose
 	if (bIsInFinisherPhase)
 	{
 		return;
 	}
 
-	// Call parent implementation
+	// Posture-based design: hits drain CurrentHP (== Posture) but don't physically displace the
+	// boss in Ground phase, otherwise melee combat turns into ping-pong. Prop impacts still
+	// route through ApplyExplosionStun, which applies a movement-speed slowdown instead.
+	if (CurrentPhase == EBossPhase::Ground)
+	{
+		return;
+	}
+
 	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 }
 
