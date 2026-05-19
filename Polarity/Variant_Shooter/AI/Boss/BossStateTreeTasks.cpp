@@ -14,6 +14,12 @@ EStateTreeRunStatus FStateTreeBossApproachDashTask::EnterState(FStateTreeExecuti
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
+	const bool bBossOK = InstanceData.Boss != nullptr;
+	const bool bTargetOK = InstanceData.Target != nullptr;
+	const bool bCanDash = bBossOK && InstanceData.Boss->CanDash();
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] ApproachDash::EnterState - Boss=%d Target=%d CanDash=%d"),
+		bBossOK, bTargetOK, bCanDash);
+
 	if (!InstanceData.Boss || !InstanceData.Target)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[BossApproachDash] FAILED - Missing Boss or Target"));
@@ -22,10 +28,12 @@ EStateTreeRunStatus FStateTreeBossApproachDashTask::EnterState(FStateTreeExecuti
 
 	if (!InstanceData.Boss->CanDash())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossApproachDash] FAILED - CanDash returned false"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	bool bStarted = InstanceData.Boss->StartApproachDash(InstanceData.Target);
+	UE_LOG(LogTemp, Warning, TEXT("[BossApproachDash] StartApproachDash returned %d"), bStarted);
 	return bStarted ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Failed;
 }
 
@@ -65,6 +73,9 @@ EStateTreeRunStatus FStateTreeBossCircleDashTask::EnterState(FStateTreeExecution
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] CircleDash::EnterState - Boss=%d Target=%d"),
+		InstanceData.Boss != nullptr, InstanceData.Target != nullptr);
+
 	if (!InstanceData.Boss || !InstanceData.Target)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[BossCircleDash] FAILED - Missing Boss or Target"));
@@ -76,6 +87,7 @@ EStateTreeRunStatus FStateTreeBossCircleDashTask::EnterState(FStateTreeExecution
 	// The cooldown is checked before the next Approach Dash instead
 
 	bool bStarted = InstanceData.Boss->StartCircleDash(InstanceData.Target);
+	UE_LOG(LogTemp, Warning, TEXT("[BossCircleDash] StartCircleDash returned %d"), bStarted);
 	return bStarted ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Failed;
 }
 
@@ -115,13 +127,21 @@ EStateTreeRunStatus FStateTreeBossMeleeAttackTask::EnterState(FStateTreeExecutio
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
+	const bool bBossOK = InstanceData.Boss != nullptr;
+	const bool bTargetOK = InstanceData.Target != nullptr;
+	const bool bCanMelee = bBossOK && InstanceData.Boss->CanMeleeAttack();
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] MeleeAttack::EnterState - Boss=%d Target=%d CanMelee=%d"),
+		bBossOK, bTargetOK, bCanMelee);
+
 	if (!InstanceData.Boss || !InstanceData.Target)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[BossMeleeAttack] FAILED - Missing Boss or Target"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	if (!InstanceData.Boss->CanMeleeAttack())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BossMeleeAttack] FAILED - CanMeleeAttack returned false"));
 		return EStateTreeRunStatus::Failed;
 	}
 
@@ -165,6 +185,9 @@ EStateTreeRunStatus FStateTreeBossEnterFinisherTask::EnterState(FStateTreeExecut
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] EnterFinisher::EnterState - Boss=%d"),
+		InstanceData.Boss != nullptr);
+
 	if (!InstanceData.Boss)
 	{
 		return EStateTreeRunStatus::Failed;
@@ -188,6 +211,9 @@ FText FStateTreeBossEnterFinisherTask::GetDescription(const FGuid& ID, FStateTre
 EStateTreeRunStatus FStateTreeBossSetPhaseTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] SetPhase::EnterState - Boss=%d NewPhase(raw)=%d"),
+		InstanceData.Boss != nullptr, (int)InstanceData.NewPhase);
 
 	if (!InstanceData.Boss)
 	{

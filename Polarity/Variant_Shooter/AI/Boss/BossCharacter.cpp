@@ -75,6 +75,25 @@ void ABossCharacter::BeginPlay()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BOSS] LinkedArena not set; Posture regen will use fallback formula at full prop percent."));
 	}
+
+	// ===== Boot-time debug dump =====
+	UE_LOG(LogTemp, Warning,
+		TEXT("[BOSS_DEBUG] BeginPlay: Phase=%s, HP=%.0f/%.0f, DefaultMaxWalkSpeed=%.0f, "
+			 "ApproachDashMontage=%s, CircleDashMontage=%s, MeleeAttackMontages=%d, "
+			 "FinisherEnterStunMontage=%s, FinisherKnockbackMontage=%s, "
+			 "Controller=%s, LinkedArena=%s"),
+		*BossPhaseName(CurrentPhase), CurrentHP, MaxHP, DefaultMaxWalkSpeed,
+		*GetNameSafe(ApproachDashMontage), *GetNameSafe(CircleDashMontage), MeleeAttackMontages.Num(),
+		*GetNameSafe(FinisherEnterStunMontage), *GetNameSafe(FinisherKnockbackMontage),
+		*GetNameSafe(GetController()), *GetNameSafe(LinkedArena.Get()));
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::Green,
+			FString::Printf(TEXT("[BOSS_DEBUG] BeginPlay HP=%.0f Montages=%d Ctrl=%s Arena=%s"),
+				CurrentHP, MeleeAttackMontages.Num(),
+				*GetNameSafe(GetController()), *GetNameSafe(LinkedArena.Get())));
+	}
 }
 
 void ABossCharacter::Tick(float DeltaTime)
@@ -106,6 +125,29 @@ void ABossCharacter::Tick(float DeltaTime)
 
 	// Posture regen scales with datacenter prop percent
 	UpdatePostureRegen(DeltaTime);
+
+	// ===== Throttled state debug =====
+	static double LastBossDebugLogTime = -1.0;
+	const double NowSec = GetWorld()->GetTimeSeconds();
+	if (NowSec - LastBossDebugLogTime >= 1.0)
+	{
+		LastBossDebugLogTime = NowSec;
+		const FString TargetName = CurrentTarget.IsValid() ? CurrentTarget->GetName() : TEXT("NONE");
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BOSS_DEBUG] State: Phase=%s Trans=%d Dash=%d(Cool=%d) Att=%d(Cool=%d) Windup=%d DmgWin=%d Slowed=%d HP=%.0f/%.0f ArenaPct=%.2f Tgt=%s"),
+			*BossPhaseName(CurrentPhase), bIsTransitioning,
+			bIsDashing, bDashOnCooldown, bIsAttacking, bMeleeOnCooldown,
+			bIsInMeleeWindup, bDamageWindowActive, bIsSlowed,
+			CurrentHP, MaxHP, CachedArenaPropPercent, *TargetName);
+
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(1001, 1.2f, FColor::Cyan,
+				FString::Printf(TEXT("BOSS %s | Dsh=%d Att=%d Wnd=%d Trans=%d | HP=%.0f Pct=%.2f | Tgt=%s"),
+					*BossPhaseName(CurrentPhase), bIsDashing, bIsAttacking, bIsInMeleeWindup, bIsTransitioning,
+					CurrentHP, CachedArenaPropPercent, *TargetName));
+		}
+	}
 }
 
 void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -1069,6 +1111,12 @@ void ABossCharacter::OnFinisherKnockbackComplete()
 
 void ABossCharacter::SetTarget(AActor* NewTarget)
 {
+	AActor* OldTarget = CurrentTarget.Get();
+	if (OldTarget != NewTarget)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS_DEBUG] SetTarget: %s -> %s"),
+			*GetNameSafe(OldTarget), *GetNameSafe(NewTarget));
+	}
 	CurrentTarget = NewTarget;
 }
 

@@ -14,10 +14,20 @@ void ABossAIController::OnPossess(APawn* InPawn)
 	Super::OnPossess(InPawn);
 
 	ControlledBoss = Cast<ABossCharacter>(InPawn);
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_AI] OnPossess: InPawn=%s -> ControlledBoss=%s"),
+		*GetNameSafe(InPawn), *GetNameSafe(ControlledBoss));
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::Green,
+			FString::Printf(TEXT("[BOSS_AI] OnPossess -> %s"), *GetNameSafe(ControlledBoss)));
+	}
 }
 
 void ABossAIController::OnUnPossess()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS_AI] OnUnPossess: ControlledBoss=%s"), *GetNameSafe(ControlledBoss));
 	ControlledBoss = nullptr;
 
 	Super::OnUnPossess();
