@@ -864,6 +864,14 @@ void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
 		return;
 	}
 
+	// Knockback wins over magnet. While the boss is being knocked back by the player's melee,
+	// the pull is silent — otherwise the magnet would yank him right back into your face and
+	// melee feedback would be invisible.
+	if (bIsInKnockback)
+	{
+		return;
+	}
+
 	const FVector BossLocation = GetActorLocation();
 	const FVector PlayerLocation = CurrentTarget->GetActorLocation();
 
@@ -873,22 +881,26 @@ void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
 	const float DistanceToPlayer = ToPlayer.Size();
 	if (DistanceToPlayer < KINDA_SMALL_NUMBER)
 	{
-		return; // overlapping centers, nothing to magnetize toward
+		return;
 	}
 
-	// MeleeNPC-style magnetism: while attacking, the boss is pulled toward the player every tick.
-	// SetActorLocation with sweep=true uses capsule collision to stop the boss from climbing into
-	// the player — the sweep itself produces the "distance attack" effect, no manual threshold
-	// needed. Tune feel via MeleeAttackPullSpeed (0 = pull disabled).
+	// Magnet stops at attack range, not at the player's capsule. The boss hits from a stand-off
+	// distance and stays outside the player's capsule. Tune the stand-off via
+	// DashTargetDistanceFromPlayer; tune the magnet pull strength via MeleeAttackPullSpeed.
+	const float DesiredDistance = FMath::Max(DashTargetDistanceFromPlayer, 50.0f);
+	if (DistanceToPlayer <= DesiredDistance)
+	{
+		return;
+	}
+
 	const FVector PullDirection = ToPlayer.GetSafeNormal();
 	float PullDistance = MeleeAttackPullSpeed * DeltaTime;
-	PullDistance = FMath::Min(PullDistance, DistanceToPlayer);
+	PullDistance = FMath::Min(PullDistance, DistanceToPlayer - DesiredDistance);
 
 	FVector NewLocation = BossLocation + PullDirection * PullDistance;
 	NewLocation.Z = BossLocation.Z;
-	SetActorLocation(NewLocation, true); // bSweep=true — collision stops the move
+	SetActorLocation(NewLocation, true);
 
-	// Track the player while pulling
 	FRotator NewRotation = PullDirection.Rotation();
 	NewRotation.Pitch = 0.0f;
 	NewRotation.Roll = 0.0f;
