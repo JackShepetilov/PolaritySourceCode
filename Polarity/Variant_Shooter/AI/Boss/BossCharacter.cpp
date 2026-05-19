@@ -17,6 +17,27 @@
 #include "NiagaraComponent.h"
 #include "DrawDebugHelpers.h"
 
+namespace
+{
+	// Safe phase-name lookup that won't read past the array if a stale StateTree asset
+	// hands us a value outside the current EBossPhase enum (e.g. the old "Finisher = 2"
+	// from when EBossPhase still had an Aerial member).
+	FString BossPhaseName(EBossPhase Phase)
+	{
+		switch (Phase)
+		{
+		case EBossPhase::Ground:   return TEXT("Ground");
+		case EBossPhase::Finisher: return TEXT("Finisher");
+		default:                   return FString::Printf(TEXT("Unknown(%d)"), (int)Phase);
+		}
+	}
+
+	bool IsValidBossPhase(EBossPhase Phase)
+	{
+		return Phase == EBossPhase::Ground || Phase == EBossPhase::Finisher;
+	}
+}
+
 ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -170,9 +191,16 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 
 void ABossCharacter::SetPhase(EBossPhase NewPhase)
 {
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
+	if (!IsValidBossPhase(NewPhase))
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[BOSS] SetPhase called with invalid value %d. This usually means the StateTree asset still stores the old Aerial=1/Finisher=2 mapping — open ST_Boss and re-pick the phase enum on any BossSetPhase task. Ignoring this transition."),
+			(int)NewPhase);
+		return;
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase called: Current=%s, New=%s"),
-		*PhaseNames[(int)CurrentPhase], *PhaseNames[(int)NewPhase]);
+		*BossPhaseName(CurrentPhase), *BossPhaseName(NewPhase));
 
 	if (CurrentPhase != NewPhase)
 	{
@@ -180,34 +208,35 @@ void ABossCharacter::SetPhase(EBossPhase NewPhase)
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase: Already in %s phase, no transition needed"), *PhaseNames[(int)NewPhase]);
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase: Already in %s phase, no transition needed"), *BossPhaseName(NewPhase));
 	}
 }
 
 void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 {
-	EBossPhase OldPhase = CurrentPhase;
+	if (!IsValidBossPhase(NewPhase))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BOSS] ExecutePhaseTransition: invalid phase %d, ignoring."), (int)NewPhase);
+		return;
+	}
 
-	// Debug: Print stack trace to see who called this
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
+	const EBossPhase OldPhase = CurrentPhase;
+
 	UE_LOG(LogTemp, Error, TEXT("[BOSS PHASE] >>> TRANSITION: %s -> %s (HP=%.0f/%.0f)"),
-		*PhaseNames[(int)OldPhase], *PhaseNames[(int)NewPhase],
+		*BossPhaseName(OldPhase), *BossPhaseName(NewPhase),
 		CurrentHP, MaxHP);
 
-	// On-screen debug message (red, 5 seconds)
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red,
-			FString::Printf(TEXT("BOSS PHASE: %s -> %s"), *PhaseNames[(int)OldPhase], *PhaseNames[(int)NewPhase]));
+			FString::Printf(TEXT("BOSS PHASE: %s -> %s"), *BossPhaseName(OldPhase), *BossPhaseName(NewPhase)));
 	}
 
 	CurrentPhase = NewPhase;
 
-	// Start transition - boss cannot attack until complete
 	bIsTransitioning = true;
 	float TransitionDuration = 0.0f;
 
-	// Reset phase-specific counters and start movement
 	switch (NewPhase)
 	{
 	case EBossPhase::Ground:
@@ -221,11 +250,14 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 
 	case EBossPhase::Finisher:
 		// Finisher phase handled by EnterFinisherPhase()
-		bIsTransitioning = false; // No transition delay for finisher
+		bIsTransitioning = false;
+		break;
+
+	default:
+		// Unreachable — IsValidBossPhase above filters this.
 		break;
 	}
 
-	// Set timer to complete transition
 	if (TransitionDuration > 0.0f)
 	{
 		GetWorld()->GetTimerManager().SetTimer(
@@ -238,19 +270,15 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition started, duration: %.2f seconds"), TransitionDuration);
 	}
 
-	// Broadcast phase change
 	OnPhaseChanged.Broadcast(OldPhase, NewPhase);
 }
 
 void ABossCharacter::OnPhaseTransitionComplete()
 {
-	// For Ground phase, only complete if we're actually on the ground
-	// (Landed() will call this when we touch down)
 	if (CurrentPhase == EBossPhase::Ground)
 	{
 		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 		{
-			// If still falling, don't complete yet - wait for Landed()
 			if (MovementComp->IsFalling())
 			{
 				UE_LOG(LogTemp, Warning, TEXT("[BOSS] OnPhaseTransitionComplete called but still falling (Z=%.1f) - waiting for Landed()"),
@@ -258,22 +286,19 @@ void ABossCharacter::OnPhaseTransitionComplete()
 				return;
 			}
 
-			// We're on the ground - set walking mode
 			MovementComp->SetMovementMode(MOVE_Walking);
 			MovementComp->Velocity = FVector::ZeroVector;
 		}
 	}
 
 	bIsTransitioning = false;
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack. Phase=%d, Z=%.1f"),
-		(int)CurrentPhase, GetActorLocation().Z);
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack. Phase=%s, Z=%.1f"),
+		*BossPhaseName(CurrentPhase), GetActorLocation().Z);
 
-	// On-screen debug message (green for success)
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
-			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *PhaseNames[(int)CurrentPhase], GetActorLocation().Z));
+			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *BossPhaseName(CurrentPhase), GetActorLocation().Z));
 	}
 }
 
