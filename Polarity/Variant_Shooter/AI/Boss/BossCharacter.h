@@ -363,9 +363,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Target")
 	AActor* GetTarget() const { return CurrentTarget.Get(); }
 
-	/** Arena this boss is bound to (datacenter prop %). Returns nullptr if not loaded. */
+	/** Arena this boss is bound to (datacenter prop %). Returns nullptr if not loaded.
+	 *  Defined in .cpp because TSoftObjectPtr::Get() resolves via dynamic_cast and needs
+	 *  the full AArenaManager type — keeping it inline here forces every TU that includes
+	 *  BossCharacter.h to also include ArenaManager.h, which is bad include hygiene. */
 	UFUNCTION(BlueprintPure, Category = "Boss")
-	AArenaManager* GetLinkedArena() const { return LinkedArena.Get(); }
+	AArenaManager* GetLinkedArena() const;
 
 protected:
 	// ==================== Internal Methods ====================

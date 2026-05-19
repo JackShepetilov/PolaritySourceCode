@@ -1072,6 +1072,11 @@ void ABossCharacter::SetTarget(AActor* NewTarget)
 	CurrentTarget = NewTarget;
 }
 
+AArenaManager* ABossCharacter::GetLinkedArena() const
+{
+	return LinkedArena.Get();
+}
+
 // ==================== Animation Blending ====================
 
 void ABossCharacter::CrossfadeToMontage(UAnimMontage* NewMontage, float CrossfadeTime, float PlayRate)
