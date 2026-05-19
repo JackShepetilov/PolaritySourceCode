@@ -111,18 +111,24 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 		return 0.0f;
 	}
 
-	// Counter: player attacked head-on during the boss's melee windup → no damage, boss slows
-	if (bIsInMeleeWindup && IsBeingCountered(DamageCauser))
+	// Counter: any hit during boss windup or dash absorbs damage and slows the boss instead.
+	if (IsBeingCountered(DamageCauser))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Countered by %s during melee windup — damage absorbed, applying slowdown"),
-			DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"));
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Countered by %s (windup=%d, dashing=%d) — damage absorbed, applying slowdown"),
+			DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"), bIsInMeleeWindup, bIsDashing);
 
-		// Cancel the windup attack so the boss doesn't follow through
+		// Cancel any in-progress windup attack so the boss doesn't follow through with the swing
 		bIsInMeleeWindup = false;
 		bIsAttacking = false;
 		bDamageWindowActive = false;
 		GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
 		GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
+
+		// Also cancel a dash if we were countered mid-dash
+		if (bIsDashing)
+		{
+			EndDash();
+		}
 
 		ApplyExplosionStun(CounterSlowdownDuration, nullptr);
 		return 0.0f;
@@ -1127,43 +1133,13 @@ void ABossCharacter::EndSlowdown()
 
 // ==================== Counter ====================
 
-bool ABossCharacter::IsBeingCountered(AActor* Attacker) const
+bool ABossCharacter::IsBeingCountered(AActor* /*Attacker*/) const
 {
-	if (!Attacker)
-	{
-		return false;
-	}
-
-	// Range check (head-on counter requires the attacker to be right in the swing zone)
-	const float Distance = FVector::Dist(GetActorLocation(), Attacker->GetActorLocation());
-	if (Distance > CounterDistance)
-	{
-		return false;
-	}
-
-	const APawn* AttackerPawn = Cast<APawn>(Attacker);
-	if (!AttackerPawn)
-	{
-		return false;
-	}
-
-	// "Шагнув навстречу" — the player must be MOVING toward the boss, not just aiming at him.
-	// Standing still while clicking attack doesn't count as a counter.
-	const FVector AttackerVelocity = AttackerPawn->GetVelocity();
-	if (AttackerVelocity.SizeSquared2D() < KINDA_SMALL_NUMBER)
-	{
-		return false;
-	}
-
-	const FVector ToBoss = (GetActorLocation() - AttackerPawn->GetActorLocation()).GetSafeNormal2D();
-	const FVector VelocityDir = AttackerVelocity.GetSafeNormal2D();
-	if (ToBoss.IsNearlyZero() || VelocityDir.IsNearlyZero())
-	{
-		return false;
-	}
-
-	const float Dot = FVector::DotProduct(VelocityDir, ToBoss);
-	return Dot >= CounterDotThreshold;
+	// Counter window: any hit landing while the boss is mid-dash or in melee windup
+	// (i.e. before the swing has become live and dealt damage to the player).
+	// CounterDistance / CounterDotThreshold are intentionally unused now — kept on the
+	// header for future tuning if we want to gate the counter geometrically again.
+	return bIsInMeleeWindup || bIsDashing;
 }
 
 // ==================== Posture Regen ====================
