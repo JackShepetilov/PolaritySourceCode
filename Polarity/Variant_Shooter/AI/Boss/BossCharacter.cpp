@@ -123,6 +123,46 @@ void ABossCharacter::Tick(float DeltaTime)
 		PerformMeleeTrace();
 	}
 
+	// ===== Attack-motion diagnostics + drift guard =====
+	// While the boss is mid-attack and NOT being knocked back, two things happen:
+	//   1) Any residual CharacterMovement velocity is cancelled so the boss can't drift
+	//      from movement-component state left over from the prior dash / pathing.
+	//   2) Per-frame motion is logged so we can spot the actual displacement source
+	//      (knockback, root motion, slowdown, or pull) if it still happens.
+	if (bIsAttacking && !bIsInKnockback)
+	{
+		const FVector AttackStartPos = GetActorLocation();
+		FVector PreVelocity = FVector::ZeroVector;
+		bool bRootMotionActive = false;
+		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+		{
+			PreVelocity = MovementComp->Velocity;
+			// The pull (UpdateMeleeAttackPull) drives the boss via SetActorLocation directly,
+			// so zeroing velocity here doesn't fight the pull — it only kills drift.
+			MovementComp->Velocity = FVector::ZeroVector;
+		}
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+			{
+				bRootMotionActive = AnimInst->HasRootMotion();
+			}
+		}
+
+		static double LastAttackMotionLog = -10.0;
+		const double NowSec = GetWorld()->GetTimeSeconds();
+		if (NowSec - LastAttackMotionLog >= 0.1)
+		{
+			LastAttackMotionLog = NowSec;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[BOSS_MOTION] Attack: Pos=(%.0f,%.0f,%.0f) PreVel=(%.0f,%.0f,%.0f) speed=%.0f rootMotion=%d windup=%d dmgWin=%d slowed=%d"),
+				AttackStartPos.X, AttackStartPos.Y, AttackStartPos.Z,
+				PreVelocity.X, PreVelocity.Y, PreVelocity.Z, PreVelocity.Size2D(),
+				bRootMotionActive ? 1 : 0,
+				bIsInMeleeWindup, bDamageWindowActive, bIsSlowed);
+		}
+	}
+
 	// Posture regen scales with datacenter prop percent
 	UpdatePostureRegen(DeltaTime);
 
