@@ -1032,6 +1032,15 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 		}
 	}
 
+	// Apply tag-based melee multiplier (mirrors AShooterWeapon::TagDamageMultipliers).
+	const float TagMult = GetTagDamageMultiplier(HitActor);
+	if (!FMath::IsNearlyEqual(TagMult, 1.0f))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DMG_DEBUG] Tag multiplier %.2fx vs %s — base %.1f -> %.1f"),
+			TagMult, *HitActor->GetName(), BaseDamage, BaseDamage * TagMult);
+		BaseDamage *= TagMult;
+	}
+
 	if (BaseDamage > 0.0f)
 	{
 		FPointDamageEvent BaseDamageEvent(
@@ -3410,4 +3419,24 @@ float UMeleeAttackComponent::GetChargeRecoveryProgress() const
 	}
 
 	return 1.0f - (ChargeRecoveryTimer / RecoveryTime);
+}
+
+// ==================== Tag-Based Damage ====================
+
+float UMeleeAttackComponent::GetTagDamageMultiplier(AActor* Target) const
+{
+	if (!Target || TagDamageMultipliers.Num() == 0)
+	{
+		return 1.0f;
+	}
+
+	float Multiplier = 1.0f;
+	for (const auto& Pair : TagDamageMultipliers)
+	{
+		if (Target->ActorHasTag(Pair.Key))
+		{
+			Multiplier *= Pair.Value;
+		}
+	}
+	return Multiplier;
 }

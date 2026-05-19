@@ -528,6 +528,17 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnMeleeCooldownEnded OnMeleeCooldownEnded;
 
+	// ==================== Tag-Based Damage Multipliers ====================
+
+	/** Damage multipliers based on target actor tags (AActor::Tags). Multiple matching tags multiply together.
+	 *  Mirrors AShooterWeapon::TagDamageMultipliers so melee and gunplay can be tuned per-target uniformly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage")
+	TMap<FName, float> TagDamageMultipliers;
+
+	/** Calculate combined damage multiplier from this component's TagDamageMultipliers against Target. */
+	UFUNCTION(BlueprintPure, Category = "Damage")
+	float GetTagDamageMultiplier(AActor* Target) const;
+
 	// ==================== External Control ====================
 
 	/** When true, CanAttack() returns false. Set by ShooterCharacter when a melee weapon is equipped. */

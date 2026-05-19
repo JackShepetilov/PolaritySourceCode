@@ -909,7 +909,7 @@ public:
 	 *  @param StunMontage Montage to play (falls back to KnockbackMontage if null)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	void ApplyExplosionStun(float Duration, UAnimMontage* StunMontage = nullptr);
+	virtual void ApplyExplosionStun(float Duration, UAnimMontage* StunMontage = nullptr);
 
 	/** Apply distance-based knockback with smooth interpolation to target position
 	 *  @param KnockbackDirection Direction to knock the NPC (normalized)
