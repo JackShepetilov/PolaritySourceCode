@@ -1701,6 +1701,16 @@ void AArenaManager::OnAutoPropDied(AEMFPhysicsProp* Prop, AActor* Killer)
 
 	OnPropPercentChanged.Broadcast(RemainingPercent, AliveAutoPropsCount);
 
+	// Datacenter critical-damage threshold (fires once per fight when crossed).
+	const float DestroyedPercent = 1.0f - RemainingPercent;
+	if (!bDatacenterCriticalDamageFired && DestroyedPercent >= DatacenterVictoryDestroyedPercent)
+	{
+		bDatacenterCriticalDamageFired = true;
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Datacenter critically damaged — %.0f%% destroyed (threshold %.0f%%)"),
+			DestroyedPercent * 100.0f, DatacenterVictoryDestroyedPercent * 100.0f);
+		OnDatacenterCriticalDamage.Broadcast(DestroyedPercent);
+	}
+
 	if (AliveAutoPropsCount <= 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: All props destroyed!"));
