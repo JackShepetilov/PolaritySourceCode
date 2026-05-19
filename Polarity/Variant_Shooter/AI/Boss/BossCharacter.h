@@ -363,6 +363,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Target")
 	AActor* GetTarget() const { return CurrentTarget.Get(); }
 
+	/** Arena this boss is bound to (datacenter prop %). Returns nullptr if not loaded. */
+	UFUNCTION(BlueprintPure, Category = "Boss")
+	AArenaManager* GetLinkedArena() const { return LinkedArena.Get(); }
+
 protected:
 	// ==================== Internal Methods ====================
 

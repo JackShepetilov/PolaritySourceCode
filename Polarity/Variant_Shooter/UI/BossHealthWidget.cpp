@@ -3,6 +3,7 @@
 
 #include "BossHealthWidget.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
+#include "Polarity/Arena/ArenaManager.h"
 
 void UBossHealthWidget::ShowForBoss(ABossCharacter* Boss)
 {
@@ -26,6 +27,24 @@ void UBossHealthWidget::ShowForBoss(ABossCharacter* Boss)
 	Boss->OnDamageTaken.AddDynamic(this, &UBossHealthWidget::OnBossDamageTaken);
 	Boss->OnPhaseChanged.AddDynamic(this, &UBossHealthWidget::OnBossPhaseChanged);
 	Boss->OnBossDefeated.AddDynamic(this, &UBossHealthWidget::OnBossDefeated);
+
+	// Bind to the boss's arena so the widget can drive the datacenter HP bar alongside Posture.
+	// The datacenter is the *true* health pool — boss Posture (already-bound CurrentHP) only
+	// gates the finisher window.
+	if (AArenaManager* Arena = Boss->GetLinkedArena())
+	{
+		TrackedArena = Arena;
+		CurrentDatacenterPercent = Arena->GetCurrentPropPercent();
+		Arena->OnPropPercentChanged.AddDynamic(this, &UBossHealthWidget::OnDatacenterPropPercentChanged);
+		UE_LOG(LogTemp, Log, TEXT("[BossHealthWidget] Subscribed to arena %s — initial datacenter percent %.2f"),
+			*Arena->GetName(), CurrentDatacenterPercent);
+	}
+	else
+	{
+		CurrentDatacenterPercent = 1.0f;
+		UE_LOG(LogTemp, Warning, TEXT("[BossHealthWidget] Boss %s has no LinkedArena — datacenter bar will stay at 1.0"),
+			*Boss->GetName());
+	}
 
 	// Show the widget
 	SetVisibility(ESlateVisibility::HitTestInvisible);
@@ -123,6 +142,23 @@ void UBossHealthWidget::UnbindFromBoss()
 	}
 
 	TrackedBoss.Reset();
+	UnbindFromArena();
+}
+
+void UBossHealthWidget::UnbindFromArena()
+{
+	if (AArenaManager* Arena = TrackedArena.Get())
+	{
+		Arena->OnPropPercentChanged.RemoveDynamic(this, &UBossHealthWidget::OnDatacenterPropPercentChanged);
+	}
+	TrackedArena.Reset();
+}
+
+void UBossHealthWidget::OnDatacenterPropPercentChanged(float RemainingPercent, int32 AliveCount)
+{
+	const float OldPercent = CurrentDatacenterPercent;
+	CurrentDatacenterPercent = FMath::Clamp(RemainingPercent, 0.0f, 1.0f);
+	BP_OnDatacenterHealthChanged(CurrentDatacenterPercent, OldPercent, AliveCount);
 }
 
 void UBossHealthWidget::NativeDestruct()

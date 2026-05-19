@@ -366,6 +366,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Arena|Antennas")
 	int32 CollectAntennasFromOwnLevel();
 
+	// ==================== Datacenter Props (read-only state) ====================
+
+	/** Current datacenter prop percent: 1.0 = all alive, 0.0 = all destroyed.
+	 *  Returns 1.0 when no auto-indexed props are tracked (nothing to destroy). */
+	UFUNCTION(BlueprintPure, Category = "Arena|Props")
+	float GetCurrentPropPercent() const
+	{
+		return AutoProps.Num() > 0 ? float(AliveAutoPropsCount) / float(AutoProps.Num()) : 1.0f;
+	}
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
