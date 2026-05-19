@@ -386,12 +386,23 @@ bool ABossCharacter::StartApproachDash(AActor* Target)
 	// Positive offset = counter-clockwise, negative = clockwise
 	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
 
-	// Duration is ALWAYS computed from DashSpeed × arc length. The montage is play-rate-scaled
-	// to fit, so tuning DashSpeed in the editor actually changes the dash duration.
+	// Dash duration honors the montage's own RateScale (set on the montage asset),
+	// so editing the montage's play rate in the editor changes how long the dash lasts.
+	// Falls back to DashSpeed × arc length when no montage is set.
 	const float AngleDelta = FMath::Abs(AngleOffsetRad);
 	const float AverageRadius = (DashStartRadius + DashTargetRadius) * 0.5f;
 	const float ArcLength = AngleDelta * AverageRadius + FMath::Abs(DashStartRadius - DashTargetRadius);
-	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+	const float FallbackDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+
+	if (ApproachDashMontage)
+	{
+		const float RateScale = FMath::Max(ApproachDashMontage->RateScale, 0.01f);
+		DashTotalDuration = ApproachDashMontage->GetPlayLength() / RateScale;
+	}
+	else
+	{
+		DashTotalDuration = FallbackDuration;
+	}
 	DashElapsedTime = 0.0f;
 
 	bIsDashing = true;
@@ -403,17 +414,14 @@ bool ABossCharacter::StartApproachDash(AActor* Target)
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Crossfade into approach dash montage with play rate scaled so the animation fits the dash
-	float ApproachPlayRate = 1.0f;
-	if (ApproachDashMontage && DashTotalDuration > 0.0f)
-	{
-		const float MontageLength = ApproachDashMontage->GetPlayLength();
-		ApproachPlayRate = (MontageLength > 0.0f) ? (MontageLength / DashTotalDuration) : 1.0f;
-	}
-	CrossfadeToMontage(ApproachDashMontage, DashStartBlendTime, ApproachPlayRate);
+	// Play the montage with PlayRate=1.0 — the montage asset's RateScale is applied on top of this
+	// by the animation system, so changing RateScale in the editor speeds/slows the dash anim AND
+	// the movement (because DashTotalDuration was computed from that same RateScale above).
+	CrossfadeToMontage(ApproachDashMontage, DashStartBlendTime, 1.0f);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH: AngleOffset=%.1f, Radius=%.0f->%.0f, Duration=%.2fs (DashSpeed=%.0f, ArcLen=%.0f), PlayRate=%.2fx"),
-		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration, DashSpeed, ArcLength, ApproachPlayRate);
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH: AngleOffset=%.1f, Radius=%.0f->%.0f, Duration=%.2fs (montage RateScale=%.2f, fallback would be %.2f)"),
+		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration,
+		ApproachDashMontage ? ApproachDashMontage->RateScale : 0.0f, FallbackDuration);
 
 	return true;
 }
@@ -456,9 +464,19 @@ bool ABossCharacter::StartCircleDash(AActor* Target)
 	DashTargetAngle = DashStartAngle + AngleOffsetRad;
 	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
 
-	// Duration is ALWAYS computed from DashSpeed × arc length; montage is play-rate-scaled.
+	// Same rule as approach dash: montage RateScale dictates duration if a montage is set.
 	const float ArcLength = FMath::Abs(AngleOffsetRad) * DashStartRadius;
-	DashTotalDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+	const float FallbackDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
+
+	if (CircleDashMontage)
+	{
+		const float RateScale = FMath::Max(CircleDashMontage->RateScale, 0.01f);
+		DashTotalDuration = CircleDashMontage->GetPlayLength() / RateScale;
+	}
+	else
+	{
+		DashTotalDuration = FallbackDuration;
+	}
 	DashElapsedTime = 0.0f;
 
 	bIsDashing = true;
@@ -470,17 +488,12 @@ bool ABossCharacter::StartCircleDash(AActor* Target)
 		EMFVelocityModifier->SetEnabled(false);
 	}
 
-	// Crossfade into circle dash montage with play rate scaled to fit
-	float CirclePlayRate = 1.0f;
-	if (CircleDashMontage && DashTotalDuration > 0.0f)
-	{
-		const float MontageLength = CircleDashMontage->GetPlayLength();
-		CirclePlayRate = (MontageLength > 0.0f) ? (MontageLength / DashTotalDuration) : 1.0f;
-	}
-	CrossfadeToMontage(CircleDashMontage, DashStartBlendTime, CirclePlayRate);
+	// Pass PlayRate=1.0; montage asset's RateScale applies automatically.
+	CrossfadeToMontage(CircleDashMontage, DashStartBlendTime, 1.0f);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs (DashSpeed=%.0f, ArcLen=%.0f), PlayRate=%.2fx"),
-		AngleOffsetDeg, DashStartRadius, DashTotalDuration, DashSpeed, ArcLength, CirclePlayRate);
+	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs (montage RateScale=%.2f, fallback would be %.2f)"),
+		AngleOffsetDeg, DashStartRadius, DashTotalDuration,
+		CircleDashMontage ? CircleDashMontage->RateScale : 0.0f, FallbackDuration);
 
 	return true;
 }
@@ -694,13 +707,6 @@ void ABossCharacter::StartMeleeAttack(AActor* Target)
 	bIsInMeleeWindup = true; // counter window opens until OnDamageWindowStart
 	HitActorsThisAttack.Empty();
 
-	// Disable EMF forces during attack so the boss doesn't drift backwards from player's
-	// EMF field (re-enabled when the attack montage ends).
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetEnabled(false);
-	}
-
 	// Face target
 	FVector DirectionToTarget = (Target->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
 	if (!DirectionToTarget.IsNearlyZero())
@@ -784,12 +790,6 @@ void ABossCharacter::OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupt
 	bIsAttacking = false;
 	bDamageWindowActive = false;
 	bIsInMeleeWindup = false; // safety reset if montage was interrupted before damage window opened
-
-	// Re-enable EMF forces now that the swing is done
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetEnabled(true);
-	}
 
 	// Start cooldown
 	bMeleeOnCooldown = true;
@@ -1014,14 +1014,6 @@ void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float D
 {
 	// Ignore knockback in finisher phase - boss must stay frozen in his stun pose
 	if (bIsInFinisherPhase)
-	{
-		return;
-	}
-
-	// Posture-based design: hits drain CurrentHP (== Posture) but don't physically displace the
-	// boss in Ground phase, otherwise melee combat turns into ping-pong. Prop impacts still
-	// route through ApplyExplosionStun, which applies a movement-speed slowdown instead.
-	if (CurrentPhase == EBossPhase::Ground)
 	{
 		return;
 	}
