@@ -158,25 +158,6 @@ Example format:
    Would become problematic only with 100+ projectiles.
 ```
 
-## Naming Mechanics - IMPORTANT
-
-**При реализации новой механики — ВСЕГДА придумывай оригинальное игровое название, а не техническое:**
-- Техническое название (для кода): `SuppressionFire`, `VelocityModifier` — остаётся в коде
-- Игровое название (для игрока/дизайна): должно быть метафоричным, memorable, неочевидным
-- Примеры: `SuppressionFire` → **"Plot Armor"**, `VelocityDamageModifier` → **"Testosterone Boost"**
-
-**Правила хорошего игрового названия:**
-1. Передаёт ощущение, а не механику
-2. Может быть ироничным, мемным или кинематографичным
-3. Игрок должен понять суть по названию, не читая описание
-4. Предложи 2-3 варианта и дай пользователю выбрать
-
-**Формат:**
-```
-🎮 Игровое название: "Plot Armor" / "Ghost Mode" / "Bullet Magnet"
-   (техническое: SuppressionFireUpgrade)
-```
-
 ## English Grammar Correction
 
 **When the user writes prompts in English**, correct major grammar inaccuracies (wrong tense, wrong word, broken sentence structure, etc.). Ignore minor issues like capitalization, missing periods, or stylistic choices.
