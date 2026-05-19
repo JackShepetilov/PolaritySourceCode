@@ -898,44 +898,35 @@ void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
 		return;
 	}
 
-	FVector BossLocation = GetActorLocation();
-	FVector PlayerLocation = CurrentTarget->GetActorLocation();
+	const FVector BossLocation = GetActorLocation();
+	const FVector PlayerLocation = CurrentTarget->GetActorLocation();
 
-	// Calculate direction to player (2D only, keep Z)
 	FVector ToPlayer = PlayerLocation - BossLocation;
 	ToPlayer.Z = 0.0f;
 
-	float DistanceToPlayer = ToPlayer.Size();
-
-	// Don't pull inside the player — keep at attack range so the boss hits from a distance
-	// instead of climbing into the capsule.
-	const float DesiredDistance = FMath::Max(DashTargetDistanceFromPlayer, 50.0f);
-	if (DistanceToPlayer <= DesiredDistance)
+	const float DistanceToPlayer = ToPlayer.Size();
+	if (DistanceToPlayer < KINDA_SMALL_NUMBER)
 	{
-		return;
+		return; // overlapping centers, nothing to magnetize toward
 	}
 
-	// Calculate pull movement
-	FVector PullDirection = ToPlayer.GetSafeNormal();
+	// MeleeNPC-style magnetism: while attacking, the boss is pulled toward the player every tick.
+	// SetActorLocation with sweep=true uses capsule collision to stop the boss from climbing into
+	// the player — the sweep itself produces the "distance attack" effect, no manual threshold
+	// needed. Tune feel via MeleeAttackPullSpeed (0 = pull disabled).
+	const FVector PullDirection = ToPlayer.GetSafeNormal();
 	float PullDistance = MeleeAttackPullSpeed * DeltaTime;
-
-	// Don't overshoot — stop at the desired attack distance
-	PullDistance = FMath::Min(PullDistance, DistanceToPlayer - DesiredDistance);
+	PullDistance = FMath::Min(PullDistance, DistanceToPlayer);
 
 	FVector NewLocation = BossLocation + PullDirection * PullDistance;
-	NewLocation.Z = BossLocation.Z; // Keep same height
+	NewLocation.Z = BossLocation.Z;
+	SetActorLocation(NewLocation, true); // bSweep=true — collision stops the move
 
-	// Move with sweep to avoid going through walls
-	SetActorLocation(NewLocation, true);
-
-	// Face the player during pull
-	if (!PullDirection.IsNearlyZero())
-	{
-		FRotator NewRotation = PullDirection.Rotation();
-		NewRotation.Pitch = 0.0f;
-		NewRotation.Roll = 0.0f;
-		SetActorRotation(NewRotation);
-	}
+	// Track the player while pulling
+	FRotator NewRotation = PullDirection.Rotation();
+	NewRotation.Pitch = 0.0f;
+	NewRotation.Roll = 0.0f;
+	SetActorRotation(NewRotation);
 }
 
 // ==================== Finisher Phase ====================
