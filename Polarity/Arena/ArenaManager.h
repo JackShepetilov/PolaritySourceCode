@@ -34,6 +34,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWaveCleared, int32, WaveIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnArenaCriticalImpact, AActor*, Source, FVector, Location, float, Speed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAllPropsDestroyed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropPercentChanged, float, RemainingPercent, int32, AliveCount);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDatacenterCriticalDamage, float, DestroyedPercent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnArenaAntennaActivated, AArenaAntenna*, Antenna);
 
 /**
@@ -173,6 +174,12 @@ public:
 	 *  Props found this way get death tracking + respawn on player death. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Props")
 	TSubclassOf<AEMFPhysicsProp> AutoPropClass;
+
+	/** Fraction of auto-indexed props that must be destroyed to consider the datacenter
+	 *  critically damaged (0..1). Fires OnDatacenterCriticalDamage exactly once when crossed.
+	 *  Use this for "kill the datacenter" win conditions without having to destroy ALL props. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena|Props", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DatacenterVictoryDestroyedPercent = 0.75f;
 
 	// ==================== Destructible Island ====================
 
@@ -319,6 +326,11 @@ public:
 	/** Fired after each prop destruction. RemainingPercent: 0.0 (all dead) to 1.0 (all alive). */
 	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
 	FOnPropPercentChanged OnPropPercentChanged;
+
+	/** Fired ONCE the moment the destroyed-prop fraction crosses DatacenterVictoryDestroyedPercent.
+	 *  Bind on the boss / GameMode to end the fight ("datacenter destroyed" win condition). */
+	UPROPERTY(BlueprintAssignable, Category = "Arena|Events")
+	FOnDatacenterCriticalDamage OnDatacenterCriticalDamage;
 
 	/** Fired when an antenna belonging to this arena is activated (data uploaded).
 	 *  Subscribers can play one-off VFX, swap UI overlays, etc. The arena itself reacts
@@ -538,6 +550,9 @@ private:
 
 	/** How many auto-props are still alive */
 	int32 AliveAutoPropsCount = 0;
+
+	/** Latched: was OnDatacenterCriticalDamage already fired this fight? */
+	bool bDatacenterCriticalDamageFired = false;
 
 	// ==================== Tracked Props ====================
 
