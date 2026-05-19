@@ -212,19 +212,24 @@ EStateTreeRunStatus FStateTreeBossSetPhaseTask::EnterState(FStateTreeExecutionCo
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] SetPhase::EnterState - Boss=%d NewPhase(raw)=%d"),
-		InstanceData.Boss != nullptr, (int)InstanceData.NewPhase);
-
 	if (!InstanceData.Boss)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[BossSetPhase] FAILED - Boss is NULL"));
 		return EStateTreeRunStatus::Failed;
 	}
 
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
-	const int32 PhaseIdx = (int)InstanceData.NewPhase;
-	UE_LOG(LogTemp, Warning, TEXT("[BossSetPhase] Setting phase to %s"),
-		PhaseIdx >= 0 && PhaseIdx < 2 ? *PhaseNames[PhaseIdx] : TEXT("Unknown"));
+	// Rate-limited diagnostic so StateTree spinning on this task doesn't flood the log.
+	static double LastSetPhaseTaskLogTime = -10.0;
+	const double NowSec = InstanceData.Boss->GetWorld() ? InstanceData.Boss->GetWorld()->GetTimeSeconds() : 0.0;
+	if (NowSec - LastSetPhaseTaskLogTime >= 5.0)
+	{
+		LastSetPhaseTaskLogTime = NowSec;
+
+		FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
+		const int32 PhaseIdx = (int)InstanceData.NewPhase;
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS_TASK] SetPhase::EnterState - NewPhase(raw)=%d, named=%s"),
+			PhaseIdx, PhaseIdx >= 0 && PhaseIdx < 2 ? *PhaseNames[PhaseIdx] : TEXT("Unknown"));
+	}
 
 	InstanceData.Boss->SetPhase(InstanceData.NewPhase);
 	return EStateTreeRunStatus::Succeeded;

@@ -235,9 +235,16 @@ void ABossCharacter::SetPhase(EBossPhase NewPhase)
 {
 	if (!IsValidBossPhase(NewPhase))
 	{
-		UE_LOG(LogTemp, Error,
-			TEXT("[BOSS] SetPhase called with invalid value %d. This usually means the StateTree asset still stores the old Aerial=1/Finisher=2 mapping — open ST_Boss and re-pick the phase enum on any BossSetPhase task. Ignoring this transition."),
-			(int)NewPhase);
+		// Rate-limited so a StateTree task that gets re-entered every frame doesn't flood the log.
+		static double LastInvalidPhaseWarnTime = -10.0;
+		const double NowSec = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+		if (NowSec - LastInvalidPhaseWarnTime >= 5.0)
+		{
+			LastInvalidPhaseWarnTime = NowSec;
+			UE_LOG(LogTemp, Error,
+				TEXT("[BOSS] SetPhase called with invalid value %d. The StateTree asset still stores the old Aerial=1/Finisher=2 mapping — open ST_Boss and either DELETE the BossSetPhase task or re-pick the phase enum dropdown. Suppressing this warning for 5s."),
+				(int)NewPhase);
+		}
 		return;
 	}
 
