@@ -3,14 +3,9 @@
 
 #include "BossCharacter.h"
 #include "BossAIController.h"
-#include "BossProjectile.h"
-#include "Variant_Shooter/AI/FlyingAIMovementComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
-#include "Variant_Shooter/Weapons/ShooterProjectile.h"
-#include "Variant_Shooter/Weapons/EMFProjectile.h"
 #include "EMFVelocityModifier.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/ProjectileMovementComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Components/CapsuleComponent.h"
 #include "Animation/AnimInstance.h"
@@ -23,9 +18,6 @@
 ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// Create flying movement component
-	FlyingMovement = CreateDefaultSubobject<UFlyingAIMovementComponent>(TEXT("FlyingMovement"));
-
 	// Set AI Controller class
 	AIControllerClass = ABossAIController::StaticClass();
 
@@ -38,20 +30,10 @@ void ABossCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Cache max HP for threshold calculations
+	// Cache max HP for Posture threshold calculations
 	MaxHP = CurrentHP;
 
-	// Initialize in ground phase
 	CurrentPhase = EBossPhase::Ground;
-
-	// Configure flying movement for aerial phase
-	if (FlyingMovement)
-	{
-		FlyingMovement->DefaultHoverHeight = AerialHoverHeight;
-		FlyingMovement->MinHoverHeight = AerialHoverHeight - 200.0f;
-		FlyingMovement->MaxHoverHeight = AerialHoverHeight + 200.0f;
-		FlyingMovement->FlySpeed = AerialStrafeSpeed;
-	}
 }
 
 void ABossCharacter::Tick(float DeltaTime)
@@ -80,12 +62,6 @@ void ABossCharacter::Tick(float DeltaTime)
 	{
 		PerformMeleeTrace();
 	}
-
-	// Check aerial phase timeout
-	if (CurrentPhase == EBossPhase::Aerial)
-	{
-		CheckAerialPhaseTimeout();
-	}
 }
 
 void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -95,92 +71,8 @@ void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	GetWorld()->GetTimerManager().ClearTimer(MeleeCooldownTimer);
 	GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
 	GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
-	GetWorld()->GetTimerManager().ClearTimer(AerialPhaseTimer);
-	GetWorld()->GetTimerManager().ClearTimer(ParryCheckTimer);
-
-	// Clear tracked projectiles
-	TrackedProjectiles.Empty();
-	ProjectileOriginalTargetPolarity.Empty();
 
 	Super::EndPlay(EndPlayReason);
-}
-
-void ABossCharacter::Landed(const FHitResult& Hit)
-{
-	Super::Landed(Hit);
-
-	// Debug: log every Landed call
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landed() called! Z=%.1f, HitActor=%s, HitLocation=%.1f, Phase=%d, bIsTransitioning=%d"),
-		GetActorLocation().Z,
-		Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("NULL"),
-		Hit.Location.Z,
-		(int)CurrentPhase,
-		bIsTransitioning);
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
-			FString::Printf(TEXT("[BOSS] Landed Z=%.1f, HitZ=%.1f, Phase=%d"),
-				GetActorLocation().Z, Hit.Location.Z, (int)CurrentPhase));
-	}
-
-	// Complete ground phase transition when boss actually lands
-	if (bIsTransitioning && CurrentPhase == EBossPhase::Ground)
-	{
-		// Cancel the timer if any
-		GetWorld()->GetTimerManager().ClearTimer(PhaseTransitionTimer);
-
-		// Force walking mode
-		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-		{
-			MovementComp->SetMovementMode(MOVE_Walking);
-			MovementComp->Velocity = FVector::ZeroVector;
-		}
-
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landed - starting landing sequence"));
-
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
-				FString::Printf(TEXT("BOSS LANDED: Playing landing montage (Z=%.0f)"), GetActorLocation().Z));
-		}
-
-		// Play landing montage with highest priority, stop all other montages
-		if (LandingMontage)
-		{
-			if (USkeletalMeshComponent* MeshComp = GetMesh())
-			{
-				if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-				{
-					// Stop ALL currently playing montages first
-					AnimInstance->StopAllMontages(0.1f);
-					UE_LOG(LogTemp, Warning, TEXT("[BOSS] Stopped all montages for landing"));
-
-					// Play landing montage - transition completes when montage ends
-					AnimInstance->Montage_Play(LandingMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, true);
-
-					// Bind end delegate
-					FOnMontageEnded EndDelegate;
-					EndDelegate.BindUObject(this, &ABossCharacter::OnLandingMontageEnded);
-					AnimInstance->Montage_SetEndDelegate(EndDelegate, LandingMontage);
-
-					UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landing montage started, waiting for completion to finish transition"));
-				}
-			}
-		}
-		else
-		{
-			// No landing montage - complete transition immediately
-			bIsTransitioning = false;
-			UE_LOG(LogTemp, Warning, TEXT("[BOSS] No landing montage - transition complete immediately"));
-
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
-					FString::Printf(TEXT("BOSS LANDED: Ground phase ready (no montage)")));
-			}
-		}
-	}
 }
 
 // ==================== Damage Handling ====================
@@ -225,22 +117,6 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 		StopShooting();
 	}
 
-	// Play aerial hit react montage when damaged in aerial phase
-	if (CurrentPhase == EBossPhase::Aerial && !bIsTransitioning && Result > 0.0f)
-	{
-		if (AerialHitReactMontage)
-		{
-			if (USkeletalMeshComponent* MeshComp = GetMesh())
-			{
-				if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-				{
-					AnimInstance->Montage_Play(AerialHitReactMontage);
-					UE_LOG(LogTemp, Warning, TEXT("[BOSS] Playing aerial hit react montage (damage=%.1f)"), Result);
-				}
-			}
-		}
-	}
-
 	return Result;
 }
 
@@ -248,7 +124,7 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 
 void ABossCharacter::SetPhase(EBossPhase NewPhase)
 {
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase called: Current=%s, New=%s"),
 		*PhaseNames[(int)CurrentPhase], *PhaseNames[(int)NewPhase]);
 
@@ -262,79 +138,15 @@ void ABossCharacter::SetPhase(EBossPhase NewPhase)
 	}
 }
 
-bool ABossCharacter::ShouldTransitionToAerial() const
-{
-	if (CurrentPhase != EBossPhase::Ground)
-	{
-		return false;
-	}
-
-	// Check if still in cooldown after returning from aerial phase
-	if (GroundPhaseStartTime > 0.0f)
-	{
-		float TimeInGround = GetWorld()->GetTimeSeconds() - GroundPhaseStartTime;
-		if (TimeInGround < GroundPhaseCooldown)
-		{
-			return false;
-		}
-	}
-
-	// Check if currently transitioning
-	if (bIsTransitioning)
-	{
-		return false;
-	}
-
-	// Check HP threshold (only triggers once per fight)
-	float HPPercent = CurrentHP / MaxHP;
-	if (HPPercent <= AerialPhaseHPThreshold && !bHPThresholdTriggered)
-	{
-		return true;
-	}
-
-	// Check dash attack count
-	if (CurrentDashAttackCount >= DashAttacksBeforeAerialPhase)
-	{
-		return true;
-	}
-
-	return false;
-}
-
-bool ABossCharacter::ShouldTransitionToGround() const
-{
-	// Check parry count
-	if (CurrentParryCount >= ParriesBeforeGroundPhase)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] ShouldTransitionToGround: TRUE (parry count %d >= %d)"),
-			CurrentParryCount, ParriesBeforeGroundPhase);
-		return true;
-	}
-
-	// Check timeout (uses AerialPhaseStartTime set when entering aerial phase)
-	if (AerialPhaseStartTime > 0.0f)
-	{
-		float TimeInAerial = GetWorld()->GetTimeSeconds() - AerialPhaseStartTime;
-		if (TimeInAerial >= MaxAerialPhaseDuration)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[BOSS] ShouldTransitionToGround: TRUE (timeout %.1f >= %.1f)"),
-				TimeInAerial, MaxAerialPhaseDuration);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 {
 	EBossPhase OldPhase = CurrentPhase;
 
 	// Debug: Print stack trace to see who called this
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
-	UE_LOG(LogTemp, Error, TEXT("[BOSS PHASE] >>> TRANSITION: %s -> %s (HP=%.0f/%.0f, DashCount=%d)"),
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
+	UE_LOG(LogTemp, Error, TEXT("[BOSS PHASE] >>> TRANSITION: %s -> %s (HP=%.0f/%.0f)"),
 		*PhaseNames[(int)OldPhase], *PhaseNames[(int)NewPhase],
-		CurrentHP, MaxHP, CurrentDashAttackCount);
+		CurrentHP, MaxHP);
 
 	// On-screen debug message (red, 5 seconds)
 	if (GEngine)
@@ -353,41 +165,12 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 	switch (NewPhase)
 	{
 	case EBossPhase::Ground:
-		CurrentDashAttackCount = 0;
-		GroundPhaseStartTime = GetWorld()->GetTimeSeconds();
-		StopHovering();
-		StopParryDetection();
-		// Check if already on ground (e.g., starting in Ground phase or transition from non-aerial state)
+		// Ground transition completes immediately (no aerial phase to land from)
 		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 		{
-			if (MovementComp->IsMovingOnGround() || !MovementComp->IsFalling())
-			{
-				// Already on ground - complete transition immediately
-				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Ground phase: already on ground, completing immediately"));
-				bIsTransitioning = false;
-				MovementComp->SetMovementMode(MOVE_Walking);
-			}
-			else
-			{
-				// In air - wait for Landed() callback
-				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Ground phase: falling, waiting for Landed() callback"));
-			}
+			MovementComp->SetMovementMode(MOVE_Walking);
 		}
-		break;
-
-	case EBossPhase::Aerial:
-		CurrentParryCount = 0;
-		AerialPhaseStartTime = GetWorld()->GetTimeSeconds();
-		// Mark HP threshold as triggered so it doesn't keep firing
-		if (!bHPThresholdTriggered && (CurrentHP / MaxHP) <= AerialPhaseHPThreshold)
-		{
-			bHPThresholdTriggered = true;
-			UE_LOG(LogTemp, Warning, TEXT("[BOSS] HP threshold triggered (HP=%.0f/%.0f = %.1f%%), won't trigger again"),
-				CurrentHP, MaxHP, (CurrentHP / MaxHP) * 100.0f);
-		}
-		StartHovering();
-		StartParryDetection();
-		TransitionDuration = TakeOffDuration;
+		bIsTransitioning = false;
 		break;
 
 	case EBossPhase::Finisher:
@@ -440,19 +223,11 @@ void ABossCharacter::OnPhaseTransitionComplete()
 		(int)CurrentPhase, GetActorLocation().Z);
 
 	// On-screen debug message (green for success)
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
 			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *PhaseNames[(int)CurrentPhase], GetActorLocation().Z));
-	}
-}
-
-void ABossCharacter::CheckAerialPhaseTimeout()
-{
-	if (ShouldTransitionToGround())
-	{
-		SetPhase(EBossPhase::Ground);
 	}
 }
 
@@ -781,9 +556,6 @@ void ABossCharacter::EndDash()
 		EMFVelocityModifier->SetEnabled(true);
 	}
 
-	// Increment dash attack counter
-	CurrentDashAttackCount++;
-
 	// Start cooldown
 	bDashOnCooldown = true;
 	GetWorld()->GetTimerManager().SetTimer(DashCooldownTimer, this, &ABossCharacter::OnDashCooldownEnd, DashCooldown, false);
@@ -900,22 +672,6 @@ void ABossCharacter::OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupt
 	GetWorld()->GetTimerManager().SetTimer(MeleeCooldownTimer, this, &ABossCharacter::OnMeleeCooldownEnd, MeleeAttackCooldown, false);
 }
 
-void ABossCharacter::OnLandingMontageEnded(UAnimMontage* Montage, bool bInterrupted)
-{
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Landing montage ended (Interrupted=%d), completing ground transition"), bInterrupted);
-
-	// Now complete the transition
-	bIsTransitioning = false;
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
-			FString::Printf(TEXT("BOSS: Ground phase ready (landing complete)")));
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Ground phase transition COMPLETE - boss can now attack"));
-}
-
 void ABossCharacter::OnMeleeCooldownEnd()
 {
 	bMeleeOnCooldown = false;
@@ -1020,191 +776,6 @@ void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
 		NewRotation.Roll = 0.0f;
 		SetActorRotation(NewRotation);
 	}
-}
-
-// ==================== Aerial Phase ====================
-
-void ABossCharacter::StartHovering()
-{
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StartHovering() called! CurrentPhase=%d"), (int)CurrentPhase);
-
-	// Play take off montage with highest priority - stop all other montages first
-	if (TakeOffMontage)
-	{
-		if (USkeletalMeshComponent* MeshComp = GetMesh())
-		{
-			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-			{
-				// Stop ALL currently playing montages first
-				AnimInstance->StopAllMontages(0.1f);
-				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Stopped all montages for take off"));
-
-				// Play take off montage with highest priority
-				AnimInstance->Montage_Play(TakeOffMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, true);
-				UE_LOG(LogTemp, Warning, TEXT("[BOSS] Take off montage started"));
-			}
-		}
-	}
-
-	// Enable forced flying mode for aerial phase
-	if (FlyingMovement)
-	{
-		FlyingMovement->SetComponentTickEnabled(true); // Re-enable tick (disabled in StopHovering)
-		FlyingMovement->bEnforceFlyingMode = true;
-	}
-
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		MovementComp->SetMovementMode(MOVE_Flying);
-		MovementComp->GravityScale = 0.0f; // Disable gravity for flying
-	}
-
-	// Fly to hover height
-	if (FlyingMovement)
-	{
-		FVector CurrentLocation = GetActorLocation();
-		FVector HoverLocation = CurrentLocation;
-		HoverLocation.Z += AerialHoverHeight;
-
-		// Calculate speed based on height and take off duration
-		float TakeOffSpeed = AerialHoverHeight / FMath::Max(TakeOffDuration, 0.1f);
-		FlyingMovement->FlySpeed = TakeOffSpeed;
-		FlyingMovement->FlyToLocation(HoverLocation);
-
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Taking off: Z %.1f -> %.1f (speed=%.1f)"),
-			CurrentLocation.Z, HoverLocation.Z, TakeOffSpeed);
-	}
-}
-
-void ABossCharacter::StopHovering()
-{
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] StopHovering() called! Current Z=%.1f"), GetActorLocation().Z);
-
-	// Disable forced flying mode so boss can fall
-	if (FlyingMovement)
-	{
-		FlyingMovement->bEnforceFlyingMode = false;
-		FlyingMovement->StopMovement();
-		FlyingMovement->SetComponentTickEnabled(false); // Полностью отключить tick
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] FlyingMovement disabled"));
-	}
-
-	// Switch to falling mode and enable gravity - boss will fall naturally
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		MovementComp->SetMovementMode(MOVE_Falling);
-		MovementComp->GravityScale = 1.0f;
-		MovementComp->Velocity = FVector(0, 0, -100.0f); // Небольшой начальный импульс вниз
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Gravity enabled, MovementMode=%d, Velocity.Z=%.1f"),
-			(int)MovementComp->MovementMode, MovementComp->Velocity.Z);
-	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Cyan,
-			FString::Printf(TEXT("[BOSS] StopHovering Z=%.1f"), GetActorLocation().Z));
-	}
-}
-
-void ABossCharacter::AerialStrafe(const FVector& Direction)
-{
-	if (CurrentPhase != EBossPhase::Aerial || !FlyingMovement)
-	{
-		return;
-	}
-
-	// Calculate strafe target
-	FVector StrafeTarget = GetActorLocation() + Direction.GetSafeNormal() * 200.0f;
-	FlyingMovement->FlyToLocation(StrafeTarget);
-}
-
-bool ABossCharacter::PerformAerialDash()
-{
-	if (!FlyingMovement || CurrentPhase != EBossPhase::Aerial || bIsTransitioning)
-	{
-		return false;
-	}
-
-	// Random direction for evasion
-	FVector RandomDirection = FMath::VRand();
-	RandomDirection.Z = 0.0f;
-	RandomDirection.Normalize();
-
-	return FlyingMovement->StartDash(RandomDirection);
-}
-
-void ABossCharacter::MatchOppositePolarity(AActor* Target)
-{
-	if (!Target || !EMFVelocityModifier)
-	{
-		return;
-	}
-
-	// Get target's EMF component
-	UEMFVelocityModifier* TargetEMF = Target->FindComponentByClass<UEMFVelocityModifier>();
-	if (!TargetEMF)
-	{
-		return;
-	}
-
-	// Get target's charge sign and set our charge to opposite
-	int32 TargetSign = TargetEMF->GetChargeSign();
-	float BossCurrentCharge = EMFVelocityModifier->GetCharge();
-	int32 CurrentSign = (BossCurrentCharge >= 0) ? 1 : -1;
-
-	// If same sign, toggle to opposite
-	if (CurrentSign == TargetSign)
-	{
-		EMFVelocityModifier->ToggleChargeSign();
-	}
-}
-
-void ABossCharacter::RegisterParry()
-{
-	CurrentParryCount++;
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] RegisterParry: ParryCount=%d/%d"),
-		CurrentParryCount, ParriesBeforeGroundPhase);
-
-	// Perform evasive dash after parry
-	if (bDashAfterParry)
-	{
-		PerformAerialDash();
-	}
-
-	// Check if should transition to ground
-	if (ShouldTransitionToGround())
-	{
-		SetPhase(EBossPhase::Ground);
-	}
-}
-
-void ABossCharacter::OnProjectileParried(ABossProjectile* Projectile)
-{
-	if (!Projectile)
-	{
-		return;
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] OnProjectileParried called!"));
-
-	// Change boss polarity to OPPOSITE of projectile
-	// This ensures the projectile is ATTRACTED to boss (opposite charges attract)
-	if (EMFVelocityModifier)
-	{
-		float ProjectileCharge = Projectile->GetProjectileCharge();
-		float BossCharge = EMFVelocityModifier->GetCharge();
-
-		// If same sign (would repel), toggle to opposite
-		if ((ProjectileCharge * BossCharge) > 0.0f)
-		{
-			EMFVelocityModifier->ToggleChargeSign();
-			UE_LOG(LogTemp, Log, TEXT("[BossCharacter] Toggled polarity to attract parried projectile"));
-		}
-	}
-
-	// Register the parry (increments counter, does dash, checks phase transition)
-	RegisterParry();
 }
 
 // ==================== Finisher Phase ====================
@@ -1336,14 +907,6 @@ void ABossCharacter::TeleportToFinisherPosition()
 		// AnimBP uses IsFalling() to determine air state
 		// Set MOVE_Flying AFTER DisableMovement so IsFalling() returns false
 		MovementComp->SetMovementMode(MOVE_Flying);
-	}
-
-	// Stop FlyingAIMovementComponent completely
-	if (FlyingMovement)
-	{
-		FlyingMovement->StopMovement();
-		FlyingMovement->bEnforceFlyingMode = false;
-		FlyingMovement->SetComponentTickEnabled(false);
 	}
 
 	// FIX #2: Face the player after teleport
@@ -1494,246 +1057,3 @@ void ABossCharacter::SetTarget(AActor* NewTarget)
 	CurrentTarget = NewTarget;
 }
 
-// ==================== Projectile Firing ====================
-
-void ABossCharacter::FireEMFProjectile(AActor* Target)
-{
-	// Cannot shoot while transitioning between phases
-	if (bIsTransitioning)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] FireEMFProjectile: Cannot shoot while transitioning"));
-		return;
-	}
-
-	if (!Target)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossCharacter] FireEMFProjectile: No target"));
-		return;
-	}
-
-	if (!BossProjectileClass)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[BossCharacter] FireEMFProjectile: BossProjectileClass not set!"));
-		return;
-	}
-
-	// Play random aerial attack montage
-	if (AerialAttackMontages.Num() > 0)
-	{
-		if (USkeletalMeshComponent* MeshComp = GetMesh())
-		{
-			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-			{
-				int32 MontageIndex = FMath::RandRange(0, AerialAttackMontages.Num() - 1);
-				UAnimMontage* SelectedMontage = AerialAttackMontages[MontageIndex];
-				if (SelectedMontage)
-				{
-					AnimInstance->Montage_Play(SelectedMontage);
-				}
-			}
-		}
-	}
-
-	// Calculate spawn transform - from boss towards target
-	FVector MuzzleLocation = GetActorLocation() + GetActorForwardVector() * 100.0f + FVector(0, 0, 50.0f);
-	FVector DirectionToTarget = (Target->GetActorLocation() - MuzzleLocation).GetSafeNormal();
-	FRotator SpawnRotation = DirectionToTarget.Rotation();
-
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	SpawnParams.Owner = this;
-	SpawnParams.Instigator = this;
-
-	// Spawn BossProjectile
-	ABossProjectile* Projectile = GetWorld()->SpawnActor<ABossProjectile>(
-		BossProjectileClass,
-		MuzzleLocation,
-		SpawnRotation,
-		SpawnParams
-	);
-
-	if (Projectile)
-	{
-		// Initialize for boss - sets opposite charge to player, stores references
-		Projectile->InitializeForBoss(this, Target);
-
-		// Set projectile velocity
-		UProjectileMovementComponent* ProjMovement = Projectile->FindComponentByClass<UProjectileMovementComponent>();
-		if (ProjMovement)
-		{
-			ProjMovement->Velocity = DirectionToTarget * ProjectileSpeed;
-			ProjMovement->InitialSpeed = ProjectileSpeed;
-			ProjMovement->MaxSpeed = ProjectileSpeed * 2.0f;
-		}
-
-		// Track for legacy parry detection (can be removed later)
-		TrackProjectile(Projectile);
-
-		UE_LOG(LogTemp, Log, TEXT("[BossCharacter] Fired BossProjectile at %s"), *Target->GetName());
-	}
-}
-
-void ABossCharacter::TrackProjectile(AShooterProjectile* Projectile)
-{
-	if (!Projectile)
-	{
-		return;
-	}
-
-	// Add to tracking list
-	TrackedProjectiles.Add(Projectile);
-
-	// Store target's polarity at spawn time
-	if (CurrentTarget.IsValid())
-	{
-		UEMFVelocityModifier* TargetEMF = CurrentTarget->FindComponentByClass<UEMFVelocityModifier>();
-		if (TargetEMF)
-		{
-			ProjectileOriginalTargetPolarity.Add(Projectile, TargetEMF->GetChargeSign());
-		}
-	}
-}
-
-// ==================== Parry Detection ====================
-
-void ABossCharacter::StartParryDetection()
-{
-	// Start periodic parry check
-	GetWorld()->GetTimerManager().SetTimer(
-		ParryCheckTimer,
-		this,
-		&ABossCharacter::OnParryCheckTimer,
-		ParryCheckInterval,
-		true // Looping
-	);
-}
-
-void ABossCharacter::StopParryDetection()
-{
-	GetWorld()->GetTimerManager().ClearTimer(ParryCheckTimer);
-
-	// Clean up tracking data
-	TrackedProjectiles.Empty();
-	ProjectileOriginalTargetPolarity.Empty();
-}
-
-void ABossCharacter::OnParryCheckTimer()
-{
-	CleanupTrackedProjectiles();
-	CheckProjectilesForParry();
-}
-
-void ABossCharacter::CleanupTrackedProjectiles()
-{
-	// Remove invalid/destroyed projectiles
-	for (int32 i = TrackedProjectiles.Num() - 1; i >= 0; --i)
-	{
-		if (!TrackedProjectiles[i].IsValid())
-		{
-			// Also remove from polarity map
-			ProjectileOriginalTargetPolarity.Remove(TrackedProjectiles[i]);
-			TrackedProjectiles.RemoveAt(i);
-		}
-	}
-}
-
-void ABossCharacter::CheckProjectilesForParry()
-{
-	for (TWeakObjectPtr<AShooterProjectile>& ProjectilePtr : TrackedProjectiles)
-	{
-		AShooterProjectile* Projectile = ProjectilePtr.Get();
-		if (!Projectile)
-		{
-			continue;
-		}
-
-		if (IsProjectileReturning(Projectile))
-		{
-			// Projectile is being parried (returning to boss)
-			RegisterParry();
-
-			// Remove this projectile from tracking (parry registered)
-			ProjectileOriginalTargetPolarity.Remove(ProjectilePtr);
-			ProjectilePtr.Reset();
-
-			// Only count one parry per check cycle
-			break;
-		}
-	}
-}
-
-bool ABossCharacter::IsProjectileReturning(AShooterProjectile* Projectile) const
-{
-	if (!Projectile)
-	{
-		return false;
-	}
-
-	// Get projectile's current velocity
-	FVector ProjectileVelocity = FVector::ZeroVector;
-
-	// Try to get velocity from ProjectileMovementComponent
-	UProjectileMovementComponent* ProjectileMovement = Projectile->FindComponentByClass<UProjectileMovementComponent>();
-	if (ProjectileMovement)
-	{
-		ProjectileVelocity = ProjectileMovement->Velocity;
-	}
-	else
-	{
-		// Fallback: estimate from actor velocity
-		ProjectileVelocity = Projectile->GetVelocity();
-	}
-
-	if (ProjectileVelocity.IsNearlyZero())
-	{
-		return false;
-	}
-
-	// Check distance to boss
-	FVector ToBoss = GetActorLocation() - Projectile->GetActorLocation();
-	float DistanceToBoss = ToBoss.Size();
-
-	if (DistanceToBoss > ParryDetectionRadius)
-	{
-		// Too far, not considered returning yet
-		return false;
-	}
-
-	// Check if projectile is moving towards boss
-	FVector VelocityDir = ProjectileVelocity.GetSafeNormal();
-	FVector ToBossDir = ToBoss.GetSafeNormal();
-
-	float DotProduct = FVector::DotProduct(VelocityDir, ToBossDir);
-	float AngleDegrees = FMath::RadiansToDegrees(FMath::Acos(DotProduct));
-
-	// If angle is small enough, projectile is heading towards boss
-	if (AngleDegrees <= ParryReturnAngleThreshold)
-	{
-		// Additional check: did the player change polarity?
-		// The projectile should be repelled by player and attracted to boss
-		// This happens naturally via EMF, but we can verify by checking
-		// if the projectile's charge now attracts it to boss
-
-		AEMFProjectile* EMFProj = Cast<AEMFProjectile>(Projectile);
-		if (EMFProj && EMFVelocityModifier)
-		{
-			float ProjectileCharge = EMFProj->GetProjectileCharge();
-			float BossCharge = EMFVelocityModifier->GetCharge();
-
-			// Opposite charges attract - if charges have opposite signs, projectile is attracted to boss
-			bool bAttractedToBoss = (ProjectileCharge * BossCharge) < 0;
-
-			if (bAttractedToBoss)
-			{
-				return true;
-			}
-		}
-		else
-		{
-			// No EMF data, just use direction check
-			return true;
-		}
-	}
-
-	return false;
-}

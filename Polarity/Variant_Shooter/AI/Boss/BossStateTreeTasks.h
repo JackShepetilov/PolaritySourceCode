@@ -22,11 +22,9 @@ struct FStateTreeBossApproachDashInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss performing the dash */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to dash towards */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
@@ -62,11 +60,9 @@ struct FStateTreeBossCircleDashInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss performing the dash */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to circle around */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
@@ -102,11 +98,9 @@ struct FStateTreeBossMeleeAttackInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss performing the attack */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to attack */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
@@ -133,234 +127,7 @@ struct POLARITY_API FStateTreeBossMeleeAttackTask : public FStateTreeTaskCommonB
 };
 
 //////////////////////////////////////////////////////////////////
-// TASK: Boss Start Hovering
-// Transitions boss to aerial phase hovering state
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossStartHoveringInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss to start hovering */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-};
-
-USTRUCT(meta = (DisplayName = "Boss Start Hovering", Category = "Boss"))
-struct POLARITY_API FStateTreeBossStartHoveringTask : public FStateTreeTaskCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossStartHoveringInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Stop Hovering
-// Returns boss to ground movement
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossStopHoveringInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss to stop hovering */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-};
-
-USTRUCT(meta = (DisplayName = "Boss Stop Hovering", Category = "Boss"))
-struct POLARITY_API FStateTreeBossStopHoveringTask : public FStateTreeTaskCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossStopHoveringInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Aerial Strafe
-// Performs slow strafe movement in aerial phase
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossAerialStrafeInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss performing strafe */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-
-	/** Duration to strafe (seconds) */
-	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.1"))
-	float StrafeDuration = 1.0f;
-
-	/** Internal timer */
-	float ElapsedTime = 0.0f;
-
-	/** Current strafe direction */
-	FVector StrafeDirection = FVector::ZeroVector;
-};
-
-USTRUCT(meta = (DisplayName = "Boss Aerial Strafe", Category = "Boss"))
-struct POLARITY_API FStateTreeBossAerialStrafeTask : public FStateTreeTaskCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossAerialStrafeInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Aerial Dash
-// Performs evasive dash in aerial phase
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossAerialDashInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss performing dash */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-};
-
-USTRUCT(meta = (DisplayName = "Boss Aerial Dash", Category = "Boss"))
-struct POLARITY_API FStateTreeBossAerialDashTask : public FStateTreeTaskCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossAerialDashInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Match Opposite Polarity
-// Changes boss polarity to opposite of target
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossMatchPolarityInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss to change polarity */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-
-	/** Target whose polarity to oppose */
-	UPROPERTY(EditAnywhere, Category = "Input")
-	TObjectPtr<AActor> Target;
-};
-
-USTRUCT(meta = (DisplayName = "Boss Match Opposite Polarity", Category = "Boss"))
-struct POLARITY_API FStateTreeBossMatchPolarityTask : public FStateTreeTaskCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossMatchPolarityInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Shoot EMF Projectile
-// Fires EMF projectile at target (requires weapon setup)
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossShootInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss shooting */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-
-	/** Target to shoot at */
-	UPROPERTY(EditAnywhere, Category = "Input")
-	TObjectPtr<AActor> Target;
-};
-
-USTRUCT(meta = (DisplayName = "Boss Shoot", Category = "Boss"))
-struct POLARITY_API FStateTreeBossShootTask : public FStateTreeTaskCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossShootInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
 // TASK: Boss Enter Finisher Phase
-// Transitions boss to finisher phase
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -368,7 +135,6 @@ struct FStateTreeBossEnterFinisherInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss entering finisher phase */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 };
@@ -394,7 +160,6 @@ struct POLARITY_API FStateTreeBossEnterFinisherTask : public FStateTreeTaskCommo
 
 //////////////////////////////////////////////////////////////////
 // TASK: Boss Set Phase
-// Manually sets boss phase
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -402,11 +167,9 @@ struct FStateTreeBossSetPhaseInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to change phase */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Phase to set */
 	UPROPERTY(EditAnywhere, Category = "Parameter")
 	EBossPhase NewPhase = EBossPhase::Ground;
 };
@@ -436,7 +199,6 @@ struct POLARITY_API FStateTreeBossSetPhaseTask : public FStateTreeTaskCommonBase
 
 //////////////////////////////////////////////////////////////////
 // CONDITION: Boss Phase Is
-// Checks if boss is in specified phase
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -444,11 +206,9 @@ struct FStateTreeBossPhaseIsInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Phase to check for */
 	UPROPERTY(EditAnywhere, Category = "Parameter")
 	EBossPhase ExpectedPhase = EBossPhase::Ground;
 };
@@ -473,76 +233,7 @@ struct POLARITY_API FStateTreeBossPhaseIsCondition : public FStateTreeConditionC
 };
 
 //////////////////////////////////////////////////////////////////
-// CONDITION: Boss Should Transition To Aerial
-// Checks if boss should enter aerial phase
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossShouldGoAerialInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss to check */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-};
-
-USTRUCT(DisplayName = "Boss Should Transition To Aerial", Category = "Boss")
-struct POLARITY_API FStateTreeBossShouldGoAerialCondition : public FStateTreeConditionCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossShouldGoAerialInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Should Transition To Ground
-// Checks if boss should return to ground phase
-//////////////////////////////////////////////////////////////////
-
-USTRUCT()
-struct FStateTreeBossShouldGoGroundInstanceData
-{
-	GENERATED_BODY()
-
-	/** Boss to check */
-	UPROPERTY(EditAnywhere, Category = "Context")
-	TObjectPtr<ABossCharacter> Boss;
-};
-
-USTRUCT(DisplayName = "Boss Should Transition To Ground", Category = "Boss")
-struct POLARITY_API FStateTreeBossShouldGoGroundCondition : public FStateTreeConditionCommonBase
-{
-	GENERATED_BODY()
-
-	using FInstanceDataType = FStateTreeBossShouldGoGroundInstanceData;
-
-	virtual const UStruct* GetInstanceDataType() const override
-	{
-		return FInstanceDataType::StaticStruct();
-	}
-
-	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
-
-#if WITH_EDITOR
-	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
-#endif
-};
-
-//////////////////////////////////////////////////////////////////
 // CONDITION: Boss Can Dash
-// Checks if boss can perform dash
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -550,7 +241,6 @@ struct FStateTreeBossCanDashInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 };
@@ -576,7 +266,6 @@ struct POLARITY_API FStateTreeBossCanDashCondition : public FStateTreeConditionC
 
 //////////////////////////////////////////////////////////////////
 // CONDITION: Boss Can Melee Attack
-// Checks if boss can perform melee attack
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -584,7 +273,6 @@ struct FStateTreeBossCanMeleeInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 };
@@ -610,7 +298,6 @@ struct POLARITY_API FStateTreeBossCanMeleeCondition : public FStateTreeCondition
 
 //////////////////////////////////////////////////////////////////
 // CONDITION: Boss Is Dashing
-// Checks if boss is currently dashing
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -618,7 +305,6 @@ struct FStateTreeBossIsDashingInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 };
@@ -644,7 +330,6 @@ struct POLARITY_API FStateTreeBossIsDashingCondition : public FStateTreeConditio
 
 //////////////////////////////////////////////////////////////////
 // CONDITION: Boss Is In Melee Range
-// Checks if target is within boss melee range
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -652,11 +337,9 @@ struct FStateTreeBossInMeleeRangeInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to check range to */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
@@ -681,8 +364,7 @@ struct POLARITY_API FStateTreeBossInMeleeRangeCondition : public FStateTreeCondi
 };
 
 //////////////////////////////////////////////////////////////////
-// CONDITION: Boss Target Is Far
-// Checks if target is far (needs approach dash)
+// CONDITION: Boss Target Is Far (needs approach dash)
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -690,11 +372,9 @@ struct FStateTreeBossTargetIsFarInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to check distance to */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
@@ -719,9 +399,8 @@ struct POLARITY_API FStateTreeBossTargetIsFarCondition : public FStateTreeCondit
 };
 
 //////////////////////////////////////////////////////////////////
-// CONDITION: Boss Target Is Close
-// Checks if target is close (no approach needed, can circle/attack)
-// NOTE: StateTree does NOT support condition inversion, so we need both Far and Close
+// CONDITION: Boss Target Is Close (no approach needed)
+// NOTE: StateTree does NOT support condition inversion, so we keep both Far and Close.
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -729,11 +408,9 @@ struct FStateTreeBossTargetIsCloseInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 
-	/** Target to check distance to */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target;
 };
@@ -759,7 +436,6 @@ struct POLARITY_API FStateTreeBossTargetIsCloseCondition : public FStateTreeCond
 
 //////////////////////////////////////////////////////////////////
 // CONDITION: Boss Is In Finisher Phase
-// Checks if boss is in finisher phase
 //////////////////////////////////////////////////////////////////
 
 USTRUCT()
@@ -767,7 +443,6 @@ struct FStateTreeBossInFinisherInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 };
@@ -800,7 +475,6 @@ struct FStateTreeBossIsOnGroundInstanceData
 {
 	GENERATED_BODY()
 
-	/** Boss to check */
 	UPROPERTY(EditAnywhere, Category = "Context")
 	TObjectPtr<ABossCharacter> Boss;
 };

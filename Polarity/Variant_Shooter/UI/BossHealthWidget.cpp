@@ -91,9 +91,6 @@ void UBossHealthWidget::OnBossPhaseChanged(EBossPhase OldPhase, EBossPhase NewPh
 	case EBossPhase::Ground:
 		PhaseName = TEXT("Ground Phase");
 		break;
-	case EBossPhase::Aerial:
-		PhaseName = TEXT("Aerial Phase");
-		break;
 	case EBossPhase::Finisher:
 		PhaseName = TEXT("Finisher");
 		break;

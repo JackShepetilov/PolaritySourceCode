@@ -138,7 +138,6 @@ EStateTreeRunStatus FStateTreeBossMeleeAttackTask::Tick(FStateTreeExecutionConte
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Wait for attack to complete
 	if (InstanceData.Boss->IsAttacking())
 	{
 		return EStateTreeRunStatus::Running;
@@ -149,268 +148,12 @@ EStateTreeRunStatus FStateTreeBossMeleeAttackTask::Tick(FStateTreeExecutionConte
 
 void FStateTreeBossMeleeAttackTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
-	// Attack cleanup handled by boss
 }
 
 #if WITH_EDITOR
 FText FStateTreeBossMeleeAttackTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("Boss: Melee Attack"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Start Hovering
-//////////////////////////////////////////////////////////////////
-
-EStateTreeRunStatus FStateTreeBossStartHoveringTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[BossStartHovering] FAILED - Boss is NULL"));
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// StartHovering is called by SetPhase/ExecutePhaseTransition when phase changes to Aerial
-	// If we're already in Aerial phase and not transitioning - succeed immediately
-	bool bIsAerialPhase = (InstanceData.Boss->GetCurrentPhase() == EBossPhase::Aerial);
-	bool bIsTransitioning = InstanceData.Boss->IsTransitioning();
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossStartHovering] EnterState: Phase=%s, IsTransitioning=%d"),
-		bIsAerialPhase ? TEXT("Aerial") : TEXT("Other"), bIsTransitioning);
-
-	if (!bIsTransitioning)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossStartHovering] Not transitioning - returning Succeeded immediately"));
-		return EStateTreeRunStatus::Succeeded;
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossStartHovering] Waiting for takeoff to complete..."));
-	return EStateTreeRunStatus::Running;
-}
-
-EStateTreeRunStatus FStateTreeBossStartHoveringTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// Wait for transition to complete
-	if (InstanceData.Boss->IsTransitioning())
-	{
-		return EStateTreeRunStatus::Running;
-	}
-
-	return EStateTreeRunStatus::Succeeded;
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossStartHoveringTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss: Start Hovering (Wait for takeoff)"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Stop Hovering
-//////////////////////////////////////////////////////////////////
-
-EStateTreeRunStatus FStateTreeBossStopHoveringTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[BossStopHovering] FAILED - Boss is NULL"));
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// If already on ground and not transitioning - succeed immediately (initial game start)
-	if (InstanceData.Boss->GetCurrentPhase() == EBossPhase::Ground && !InstanceData.Boss->IsTransitioning())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Already on ground - returning Succeeded"));
-		return EStateTreeRunStatus::Succeeded;
-	}
-
-	// Start landing - call SetPhase to Ground which triggers StopHovering and gravity
-	UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Starting landing sequence..."));
-	InstanceData.Boss->SetPhase(EBossPhase::Ground);
-
-	return EStateTreeRunStatus::Running;
-}
-
-EStateTreeRunStatus FStateTreeBossStopHoveringTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// Wait for transition to complete (boss landed)
-	if (InstanceData.Boss->IsTransitioning())
-	{
-		return EStateTreeRunStatus::Running;
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossStopHovering] Landing complete!"));
-	return EStateTreeRunStatus::Succeeded;
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossStopHoveringTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss: Stop Hovering (Wait for landing)"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Aerial Strafe
-//////////////////////////////////////////////////////////////////
-
-EStateTreeRunStatus FStateTreeBossAerialStrafeTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// Reset timer and pick random strafe direction
-	InstanceData.ElapsedTime = 0.0f;
-	InstanceData.StrafeDirection = FMath::VRand();
-	InstanceData.StrafeDirection.Z = 0.0f;
-	InstanceData.StrafeDirection.Normalize();
-
-	// 50% chance to strafe left or right
-	if (FMath::RandBool())
-	{
-		InstanceData.StrafeDirection = -InstanceData.StrafeDirection;
-	}
-
-	return EStateTreeRunStatus::Running;
-}
-
-EStateTreeRunStatus FStateTreeBossAerialStrafeTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	InstanceData.ElapsedTime += DeltaTime;
-
-	if (InstanceData.ElapsedTime >= InstanceData.StrafeDuration)
-	{
-		return EStateTreeRunStatus::Succeeded;
-	}
-
-	// Perform strafe
-	InstanceData.Boss->AerialStrafe(InstanceData.StrafeDirection);
-
-	return EStateTreeRunStatus::Running;
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossAerialStrafeTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss: Aerial Strafe"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Aerial Dash
-//////////////////////////////////////////////////////////////////
-
-EStateTreeRunStatus FStateTreeBossAerialDashTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	bool bStarted = InstanceData.Boss->PerformAerialDash();
-	return bStarted ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Failed;
-}
-
-EStateTreeRunStatus FStateTreeBossAerialDashTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// Check if flying movement dash is done
-	// For now, immediately succeed - aerial dash is quick
-	return EStateTreeRunStatus::Succeeded;
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossAerialDashTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss: Aerial Dash"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Match Opposite Polarity
-//////////////////////////////////////////////////////////////////
-
-EStateTreeRunStatus FStateTreeBossMatchPolarityTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss || !InstanceData.Target)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	InstanceData.Boss->MatchOppositePolarity(InstanceData.Target);
-	return EStateTreeRunStatus::Succeeded;
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossMatchPolarityTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss: Match Opposite Polarity"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// TASK: Boss Shoot
-//////////////////////////////////////////////////////////////////
-
-EStateTreeRunStatus FStateTreeBossShootTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
-{
-	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss || !InstanceData.Target)
-	{
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// Use BossCharacter's custom projectile firing (spawns BossProjectile with parry detection)
-	InstanceData.Boss->FireEMFProjectile(InstanceData.Target);
-	return EStateTreeRunStatus::Succeeded;
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossShootTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss: Shoot at Target"));
 }
 #endif
 
@@ -452,8 +195,10 @@ EStateTreeRunStatus FStateTreeBossSetPhaseTask::EnterState(FStateTreeExecutionCo
 		return EStateTreeRunStatus::Failed;
 	}
 
-	FString PhaseNames[] = { TEXT("Ground"), TEXT("Aerial"), TEXT("Finisher") };
-	UE_LOG(LogTemp, Warning, TEXT("[BossSetPhase] Setting phase to %s"), *PhaseNames[(int)InstanceData.NewPhase]);
+	FString PhaseNames[] = { TEXT("Ground"), TEXT("Finisher") };
+	const int32 PhaseIdx = (int)InstanceData.NewPhase;
+	UE_LOG(LogTemp, Warning, TEXT("[BossSetPhase] Setting phase to %s"),
+		PhaseIdx >= 0 && PhaseIdx < 2 ? *PhaseNames[PhaseIdx] : TEXT("Unknown"));
 
 	InstanceData.Boss->SetPhase(InstanceData.NewPhase);
 	return EStateTreeRunStatus::Succeeded;
@@ -469,7 +214,6 @@ FText FStateTreeBossSetPhaseTask::GetDescription(const FGuid& ID, FStateTreeData
 		switch (Data->NewPhase)
 		{
 		case EBossPhase::Ground: PhaseName = TEXT("Ground"); break;
-		case EBossPhase::Aerial: PhaseName = TEXT("Aerial"); break;
 		case EBossPhase::Finisher: PhaseName = TEXT("Finisher"); break;
 		default: PhaseName = TEXT("Unknown"); break;
 		}
@@ -481,10 +225,6 @@ FText FStateTreeBossSetPhaseTask::GetDescription(const FGuid& ID, FStateTreeData
 
 //////////////////////////////////////////////////////////////////
 // CONDITIONS
-//////////////////////////////////////////////////////////////////
-
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Phase Is
 //////////////////////////////////////////////////////////////////
 
 bool FStateTreeBossPhaseIsCondition::TestCondition(FStateTreeExecutionContext& Context) const
@@ -509,7 +249,6 @@ FText FStateTreeBossPhaseIsCondition::GetDescription(const FGuid& ID, FStateTree
 		switch (Data->ExpectedPhase)
 		{
 		case EBossPhase::Ground: PhaseName = TEXT("Ground"); break;
-		case EBossPhase::Aerial: PhaseName = TEXT("Aerial"); break;
 		case EBossPhase::Finisher: PhaseName = TEXT("Finisher"); break;
 		default: PhaseName = TEXT("Unknown"); break;
 		}
@@ -519,66 +258,10 @@ FText FStateTreeBossPhaseIsCondition::GetDescription(const FGuid& ID, FStateTree
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Should Transition To Aerial
-//////////////////////////////////////////////////////////////////
-
-bool FStateTreeBossShouldGoAerialCondition::TestCondition(FStateTreeExecutionContext& Context) const
-{
-	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->ShouldTransitionToAerial();
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossShouldGoAerialCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss Should Transition To Aerial"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Should Transition To Ground
-//////////////////////////////////////////////////////////////////
-
-bool FStateTreeBossShouldGoGroundCondition::TestCondition(FStateTreeExecutionContext& Context) const
-{
-	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->ShouldTransitionToGround();
-}
-
-#if WITH_EDITOR
-FText FStateTreeBossShouldGoGroundCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
-{
-	return FText::FromString(TEXT("Boss Should Transition To Ground"));
-}
-#endif
-
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Can Dash
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossCanDashCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->CanDash();
+	return InstanceData.Boss && InstanceData.Boss->CanDash();
 }
 
 #if WITH_EDITOR
@@ -588,20 +271,10 @@ FText FStateTreeBossCanDashCondition::GetDescription(const FGuid& ID, FStateTree
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Can Melee Attack
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossCanMeleeCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->CanMeleeAttack();
+	return InstanceData.Boss && InstanceData.Boss->CanMeleeAttack();
 }
 
 #if WITH_EDITOR
@@ -611,20 +284,10 @@ FText FStateTreeBossCanMeleeCondition::GetDescription(const FGuid& ID, FStateTre
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Is Dashing
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossIsDashingCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->IsDashing();
+	return InstanceData.Boss && InstanceData.Boss->IsDashing();
 }
 
 #if WITH_EDITOR
@@ -634,20 +297,10 @@ FText FStateTreeBossIsDashingCondition::GetDescription(const FGuid& ID, FStateTr
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Is In Melee Range
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossInMeleeRangeCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss || !InstanceData.Target)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->IsTargetInMeleeRange(InstanceData.Target);
+	return InstanceData.Boss && InstanceData.Target && InstanceData.Boss->IsTargetInMeleeRange(InstanceData.Target);
 }
 
 #if WITH_EDITOR
@@ -657,20 +310,10 @@ FText FStateTreeBossInMeleeRangeCondition::GetDescription(const FGuid& ID, FStat
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Is In Finisher Phase
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossInFinisherCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->IsInFinisherPhase();
+	return InstanceData.Boss && InstanceData.Boss->IsInFinisherPhase();
 }
 
 #if WITH_EDITOR
@@ -680,20 +323,10 @@ FText FStateTreeBossInFinisherCondition::GetDescription(const FGuid& ID, FStateT
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Target Is Far
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossTargetIsFarCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss || !InstanceData.Target)
-	{
-		return false;
-	}
-
-	return InstanceData.Boss->IsTargetFar(InstanceData.Target);
+	return InstanceData.Boss && InstanceData.Target && InstanceData.Boss->IsTargetFar(InstanceData.Target);
 }
 
 #if WITH_EDITOR
@@ -703,21 +336,10 @@ FText FStateTreeBossTargetIsFarCondition::GetDescription(const FGuid& ID, FState
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Target Is Close
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossTargetIsCloseCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
-	if (!InstanceData.Boss || !InstanceData.Target)
-	{
-		return false;
-	}
-
-	// Opposite of IsTargetFar
-	return !InstanceData.Boss->IsTargetFar(InstanceData.Target);
+	return InstanceData.Boss && InstanceData.Target && !InstanceData.Boss->IsTargetFar(InstanceData.Target);
 }
 
 #if WITH_EDITOR
@@ -727,25 +349,17 @@ FText FStateTreeBossTargetIsCloseCondition::GetDescription(const FGuid& ID, FSta
 }
 #endif
 
-//////////////////////////////////////////////////////////////////
-// CONDITION: Boss Is On Ground (Walking)
-//////////////////////////////////////////////////////////////////
-
 bool FStateTreeBossIsOnGroundCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
 	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
-
 	if (!InstanceData.Boss)
 	{
 		return false;
 	}
-
-	// Check if boss is on ground (walking mode, not flying/falling)
 	if (UCharacterMovementComponent* MovementComp = InstanceData.Boss->GetCharacterMovement())
 	{
 		return MovementComp->IsMovingOnGround();
 	}
-
 	return false;
 }
 

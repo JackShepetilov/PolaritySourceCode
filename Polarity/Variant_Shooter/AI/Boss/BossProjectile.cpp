@@ -152,11 +152,8 @@ void ABossProjectile::CheckForParry()
 		UE_LOG(LogTemp, Warning, TEXT("[BossProjectile] PARRIED! PlayerCharge=%.2f, ProjectileCharge=%.2f, NPCForceMultiplier=%.2f, bDamageOwner=true"),
 			PlayerCharge, ProjectileCharge, NPCForceMultiplier);
 
-		// Notify boss
-		if (OwnerBoss.IsValid())
-		{
-			OwnerBoss->OnProjectileParried(this);
-		}
+		// Boss-side parry hook removed when aerial phase was deprecated;
+		// projectile still flips NPCForceMultiplier and damages the boss on contact.
 	}
 }
 
