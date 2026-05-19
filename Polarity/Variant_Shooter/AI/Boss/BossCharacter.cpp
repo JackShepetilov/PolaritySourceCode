@@ -1276,7 +1276,19 @@ void ABossCharacter::UpdatePostureRegen(float DeltaTime)
 		return;
 	}
 
+	const float OldHP = CurrentHP;
 	CurrentHP = FMath::Min(MaxHP, CurrentHP + RegenPerSec * DeltaTime);
+
+	// Notify health-tracking widgets so the Posture bar can repaint on regen, not just on
+	// damage. We reuse OnDamageTaken with DamageAmount=0 to mean "HP changed, no damage event",
+	// and throttle the broadcast to once per integer-HP crossing so we don't flood the
+	// multicast delegate every tick.
+	const int32 OldHPInt = FMath::FloorToInt(OldHP);
+	const int32 NewHPInt = FMath::FloorToInt(CurrentHP);
+	if (NewHPInt != OldHPInt)
+	{
+		OnDamageTaken.Broadcast(this, 0.0f, TSubclassOf<UDamageType>(), GetActorLocation(), nullptr);
+	}
 }
 
 void ABossCharacter::OnArenaPropPercentChanged(float RemainingPercent, int32 AliveCount)
