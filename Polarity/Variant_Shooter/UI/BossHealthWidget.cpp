@@ -34,10 +34,16 @@ void UBossHealthWidget::ShowForBoss(ABossCharacter* Boss)
 	if (AArenaManager* Arena = Boss->GetLinkedArena())
 	{
 		TrackedArena = Arena;
-		CurrentDatacenterPercent = Arena->GetCurrentPropPercent();
+		// Map raw prop percent through the victory-threshold formula so the bar reads
+		// "datacenter HP" instead of raw prop count: full at start, empty exactly when
+		// DatacenterVictoryDestroyedPercent of the props are gone.
+		const float RawPercent = Arena->GetCurrentPropPercent();
+		const float Threshold = FMath::Clamp(Arena->DatacenterVictoryDestroyedPercent, KINDA_SMALL_NUMBER, 1.0f);
+		const float Floor = 1.0f - Threshold;
+		CurrentDatacenterPercent = FMath::Clamp((RawPercent - Floor) / Threshold, 0.0f, 1.0f);
 		Arena->OnPropPercentChanged.AddDynamic(this, &UBossHealthWidget::OnDatacenterPropPercentChanged);
-		UE_LOG(LogTemp, Log, TEXT("[BossHealthWidget] Subscribed to arena %s — initial datacenter percent %.2f"),
-			*Arena->GetName(), CurrentDatacenterPercent);
+		UE_LOG(LogTemp, Log, TEXT("[BossHealthWidget] Subscribed to arena %s — raw=%.2f, effective datacenter HP=%.2f (threshold %.0f%%)"),
+			*Arena->GetName(), RawPercent, CurrentDatacenterPercent, Threshold * 100.0f);
 	}
 	else
 	{
@@ -157,7 +163,18 @@ void UBossHealthWidget::UnbindFromArena()
 void UBossHealthWidget::OnDatacenterPropPercentChanged(float RemainingPercent, int32 AliveCount)
 {
 	const float OldPercent = CurrentDatacenterPercent;
-	CurrentDatacenterPercent = FMath::Clamp(RemainingPercent, 0.0f, 1.0f);
+
+	// Same threshold remap as ShowForBoss: bar reads "datacenter HP", reaching 0 when
+	// DatacenterVictoryDestroyedPercent of the props have been destroyed.
+	float EffectivePercent = FMath::Clamp(RemainingPercent, 0.0f, 1.0f);
+	if (AArenaManager* Arena = TrackedArena.Get())
+	{
+		const float Threshold = FMath::Clamp(Arena->DatacenterVictoryDestroyedPercent, KINDA_SMALL_NUMBER, 1.0f);
+		const float Floor = 1.0f - Threshold;
+		EffectivePercent = FMath::Clamp((EffectivePercent - Floor) / Threshold, 0.0f, 1.0f);
+	}
+
+	CurrentDatacenterPercent = EffectivePercent;
 	BP_OnDatacenterHealthChanged(CurrentDatacenterPercent, OldPercent, AliveCount);
 }
 

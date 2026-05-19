@@ -1288,6 +1288,17 @@ void ABossCharacter::UpdatePostureRegen(float DeltaTime)
 
 void ABossCharacter::OnArenaPropPercentChanged(float RemainingPercent, int32 AliveCount)
 {
-	CachedArenaPropPercent = FMath::Clamp(RemainingPercent, 0.0f, 1.0f);
+	// Convert raw RemainingPercent (1.0 = nothing destroyed, 0.0 = ALL props destroyed) into the
+	// "datacenter HP" that the design actually cares about: 1.0 = full HP, 0.0 = destroyed-at-threshold.
+	// This is what feeds the Posture-regen curve, so the curve's X axis maps cleanly to the bar the
+	// player sees. Crossing the threshold reads as Effective=0, regen=0, boss is left to be finished.
+	float EffectivePercent = FMath::Clamp(RemainingPercent, 0.0f, 1.0f);
+	if (AArenaManager* Arena = LinkedArena.Get())
+	{
+		const float Threshold = FMath::Clamp(Arena->DatacenterVictoryDestroyedPercent, KINDA_SMALL_NUMBER, 1.0f);
+		const float Floor = 1.0f - Threshold;
+		EffectivePercent = FMath::Clamp((EffectivePercent - Floor) / Threshold, 0.0f, 1.0f);
+	}
+	CachedArenaPropPercent = EffectivePercent;
 }
 
