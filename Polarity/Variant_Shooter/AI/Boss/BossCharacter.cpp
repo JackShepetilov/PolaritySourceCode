@@ -1141,22 +1141,28 @@ bool ABossCharacter::IsBeingCountered(AActor* Attacker) const
 		return false;
 	}
 
-	// Attacker must be a pawn so we can read their forward vector
 	const APawn* AttackerPawn = Cast<APawn>(Attacker);
 	if (!AttackerPawn)
 	{
 		return false;
 	}
 
-	// Head-on: attacker's forward must align with direction-to-boss
-	const FVector ToBoss = (GetActorLocation() - AttackerPawn->GetActorLocation()).GetSafeNormal2D();
-	const FVector AttackerForward = AttackerPawn->GetActorForwardVector().GetSafeNormal2D();
-	if (ToBoss.IsNearlyZero() || AttackerForward.IsNearlyZero())
+	// "Шагнув навстречу" — the player must be MOVING toward the boss, not just aiming at him.
+	// Standing still while clicking attack doesn't count as a counter.
+	const FVector AttackerVelocity = AttackerPawn->GetVelocity();
+	if (AttackerVelocity.SizeSquared2D() < KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
 
-	const float Dot = FVector::DotProduct(AttackerForward, ToBoss);
+	const FVector ToBoss = (GetActorLocation() - AttackerPawn->GetActorLocation()).GetSafeNormal2D();
+	const FVector VelocityDir = AttackerVelocity.GetSafeNormal2D();
+	if (ToBoss.IsNearlyZero() || VelocityDir.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const float Dot = FVector::DotProduct(VelocityDir, ToBoss);
 	return Dot >= CounterDotThreshold;
 }
 
