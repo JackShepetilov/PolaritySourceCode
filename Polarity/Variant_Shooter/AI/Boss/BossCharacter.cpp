@@ -123,6 +123,28 @@ void ABossCharacter::Tick(float DeltaTime)
 		PerformMeleeTrace();
 	}
 
+	// While slowed from a prop impact, cap velocity to the slowed walk speed. Explosions in
+	// EMFPhysicsProp apply a radial impulse straight to the capsule on top of calling
+	// ApplyExplosionStun — that impulse bypasses MaxWalkSpeed and the boss flies away. Capping
+	// velocity each tick to the slowed speed kills the launch but leaves normal slow walking
+	// (which sits at or below the cap) untouched.
+	if (bIsSlowed)
+	{
+		if (UCharacterMovementComponent* MC = GetCharacterMovement())
+		{
+			const float MaxSlowSpeed = DefaultMaxWalkSpeed * FMath::Max(SlowdownStrength, 0.0f);
+			const float MaxSlowSqr = FMath::Square(MaxSlowSpeed);
+			const FVector V = MC->Velocity;
+			const float Speed2DSqr = V.X * V.X + V.Y * V.Y;
+			if (Speed2DSqr > MaxSlowSqr)
+			{
+				const FVector V2D(V.X, V.Y, 0.0f);
+				const FVector Capped = V2D.GetSafeNormal() * MaxSlowSpeed;
+				MC->Velocity = FVector(Capped.X, Capped.Y, V.Z);
+			}
+		}
+	}
+
 	// Posture regen scales with datacenter prop percent
 	UpdatePostureRegen(DeltaTime);
 
@@ -174,10 +196,11 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 		return 0.0f;
 	}
 
-	// Counter: any hit during boss windup or dash absorbs damage and slows the boss instead.
+	// Counter: any hit during boss windup or dash interrupts him and slows him down.
+	// Damage still applies — counter is "interrupt + slow", not a damage shield.
 	if (IsBeingCountered(DamageCauser))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Countered by %s (windup=%d, dashing=%d) — damage absorbed, applying slowdown"),
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Countered by %s (windup=%d, dashing=%d) — interrupt + slowdown"),
 			DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"), bIsInMeleeWindup, bIsDashing);
 
 		// Cancel any in-progress windup attack so the boss doesn't follow through with the swing
@@ -194,7 +217,7 @@ float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, 
 		}
 
 		ApplyExplosionStun(CounterSlowdownDuration, nullptr);
-		return 0.0f;
+		// fall through — Super::TakeDamage still applies the player's damage below
 	}
 
 	// Calculate damage that would be applied
