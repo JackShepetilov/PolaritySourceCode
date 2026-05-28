@@ -1,10 +1,24 @@
 // BossCharacter.h
-// Ground-phase melee boss with finisher
+// Ground-phase boss: shoot-and-strafe (ranged) + melee (lunge / in-place), Sekiro-style.
+//
+// Built on AHumanoidNPC, which already provides: ranged weapon + burst fire (AShooterNPC),
+// player weapon-yank, cyclic weapon management, melee montages + attack magnetism +
+// AnimNotify-driven damage window (AMeleeNPC), and EMF capture immunity.
+//
+// This class adds the boss-specific layer on top:
+//   - Posture model: CurrentHP is Posture (Sekiro-style). When it would hit 1, the boss enters
+//     the invulnerable Finisher phase and waits for a melee finisher. Posture regenerates at a
+//     rate that scales with the datacenter (arena prop %), the true health pool (ArenaManager).
+//   - Prop impacts apply a temporary slowdown instead of a stun.
+//   - Counter: a player hit landing during the boss's melee windup (before the damage notify
+//     opens) interrupts + slows the boss; only in that window is the boss knocked back.
+//   - Cyclic disarm: when the player yanks the weapon, the boss fights melee-only for a short
+//     window, then re-arms and resumes the ranged/melee choice.
 
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "BossCharacter.generated.h"
 
 class UAnimMontage;
@@ -24,24 +38,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBossPhaseChanged, EBossPhase, Ol
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossDefeated);
 
-/**
- * Ground-phase melee boss with finisher.
- *
- * The CurrentHP field is conceptually Posture (Sekiro-style): every player damage source drains it,
- * and when it hits 1 the boss enters Finisher phase (invulnerable, waiting for a melee finisher).
- * The actual health pool is the datacenter (arena prop %), tracked by ArenaManager separately.
- *
- * Prop impacts that would normally stun a regular NPC instead apply a temporary slowdown — only a
- * fully drained Posture (Finisher phase) actually stuns the boss.
- *
- * Posture regenerates passively, but at a rate that scales with datacenter health: the more the
- * datacenter is destroyed, the slower the boss recovers.
- *
- * Melee swings have a windup phase; a player who attacks the boss head-on during windup performs
- * a counter that bypasses damage and instead slows the boss.
- */
 UCLASS()
-class POLARITY_API ABossCharacter : public AShooterNPC
+class POLARITY_API ABossCharacter : public AHumanoidNPC
 {
 	GENERATED_BODY()
 
@@ -57,80 +55,60 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Boss|Phase")
 	bool bIsTransitioning = false;
 
-	// ==================== Ground Phase: Dash ====================
+	// ==================== Melee: Lunge vs In-Place ====================
+	// Drives the inherited AMeleeNPC machinery (magnetism / damage window / trace). The melee
+	// start range, pull-to distance, pull speed, damage, and trace size are the inherited
+	// AMeleeNPC properties: AttackRange (start), MagnetismStopDistance (pull-to),
+	// MagnetismSpeed (pull speed), AttackDamage, TraceRadius/TraceDistance.
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "100.0"))
-	float MaxDashDistance = 2000.0f;
+	/** Attack montages used when the target is farther than InPlaceMeleeRange — boss lunges in
+	 *  (attack magnetism pulls it toward the player, stopping at MagnetismStopDistance). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Melee")
+	TArray<TObjectPtr<UAnimMontage>> LungeMeleeMontages;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "500.0"))
-	float DashSpeed = 2500.0f;
+	/** Attack montages used when the target is already within InPlaceMeleeRange — boss strikes
+	 *  on the spot with NO magnet pull. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Melee")
+	TArray<TObjectPtr<UAnimMontage>> InPlaceMeleeMontages;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "0.5"))
-	float DashCooldown = 1.5f;
+	/** Distance threshold: target closer than this → in-place attack (no pull); farther → lunge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Melee", meta = (ClampMin = "0.0"))
+	float InPlaceMeleeRange = 180.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "30.0", ClampMax = "150.0"))
-	float MinDashAngleOffset = 45.0f;
+	// ==================== Ranged: Fire-Montage Fork (crossfaded) ====================
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "30.0", ClampMax = "180.0"))
-	float MaxDashAngleOffset = 135.0f;
+	/** Crossfaded in from locomotion on the FIRST shot of a burst. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage")
+	TObjectPtr<UAnimMontage> FirstFireMontage;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash", meta = (ClampMin = "50.0"))
-	float DashTargetDistanceFromPlayer = 150.0f;
+	/** Crossfaded on the 2nd+ shots of a burst; on the last shot it crossfades back to locomotion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage")
+	TObjectPtr<UAnimMontage> ContinuousFireMontage;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash|Animation")
-	TObjectPtr<UAnimMontage> ApproachDashMontage;
+	/** Crossfade time for all fire-montage transitions (in, between, out). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FireMontageBlendTime = 0.12f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Dash|Animation")
-	TObjectPtr<UAnimMontage> CircleDashMontage;
+	// ==================== Yank Gate ====================
 
-	// ==================== Ground Phase: Melee ====================
+	/** The boss's weapon can only be yanked once |body charge| reaches this threshold.
+	 *  Layered on top of AHumanoidNPC::CanBeYanked() via the override below. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Yank", meta = (ClampMin = "0.0"))
+	float YankChargeThreshold = 50.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee")
-	TArray<TObjectPtr<UAnimMontage>> MeleeAttackMontages;
+	// ==================== Animation Blending (melee) ====================
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "0"))
-	float MeleeAttackDamage = 50.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "50.0"))
-	float MeleeAttackRange = 200.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "0.1"))
-	float MeleeAttackCooldown = 0.5f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "0.0"))
-	float MeleeAttackPullSpeed = 500.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "10.0"))
-	float MeleeTraceRadius = 50.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ground Phase|Melee", meta = (ClampMin = "50.0"))
-	float MeleeTraceDistance = 150.0f;
-
-	// ==================== Crossfade (Dash <-> Attack) ====================
-
-	/** Blend time when crossfading from a dash montage into an attack montage. */
+	/** Blend time when crossfading from locomotion into an attack montage. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Animation Blending", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DashToAttackBlendTime = 0.15f;
-
-	/** Blend time when first starting a dash montage. 0 = snap in. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Animation Blending", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DashStartBlendTime = 0.05f;
+	float MeleeStartBlendTime = 0.1f;
 
 	/** Blend time when crossfading out of an attack montage. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Animation Blending", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float AttackEndBlendTime = 0.2f;
 
-	// ==================== Counter Detection ====================
+	// ==================== Counter ====================
 
-	/** Max distance (cm) from boss within which an attacker is considered a counter. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Counter", meta = (ClampMin = "50.0"))
-	float CounterDistance = 200.0f;
-
-	/** Minimum dot product of attacker forward × direction-to-boss to count as a head-on counter. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Counter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CounterDotThreshold = 0.7f;
-
-	/** Slowdown duration applied to the boss after a successful counter. */
+	/** Slowdown duration applied to the boss after a successful counter (player hit during windup). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Counter", meta = (ClampMin = "0.1"))
 	float CounterSlowdownDuration = 1.5f;
 
@@ -146,10 +124,8 @@ protected:
 
 	// ==================== Posture Regen ====================
 
-	/**
-	 * Curve mapping datacenter RemainingPercent (X, 0..1, 1 = full) → Posture/HP per second (Y).
-	 * Falls back to FallbackPostureRegenBase * Percent² if null.
-	 */
+	/** Curve mapping datacenter RemainingPercent (X, 0..1, 1 = full) → Posture/HP per second (Y).
+	 *  Falls back to FallbackPostureRegenBase * Percent² if null. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Posture Regen")
 	TObjectPtr<UCurveFloat> PostureRegenByArenaPropCurve;
 
@@ -197,53 +173,27 @@ protected:
 	FVector FinisherKnockbackEndPos = FVector::ZeroVector;
 	float FinisherKnockbackElapsed = 0.0f;
 
-	bool bIsDashing = false;
-	bool bIsAttacking = false;
-	bool bMeleeOnCooldown = false;
-	bool bDashOnCooldown = false;
-	float LastDashTime = -10.0f;
-	float LastMeleeAttackTime = -10.0f;
+	/** Cached max Posture (== starting CurrentHP). Posture threshold math uses this. */
 	float MaxHP = 1000.0f;
-
-	/** True from StartMeleeAttack until the damage window opens — the read-and-react counter window. */
-	bool bIsInMeleeWindup = false;
 
 	/** Slowdown state and cached default MaxWalkSpeed for restoration. */
 	bool bIsSlowed = false;
 	float DefaultMaxWalkSpeed = 0.0f;
 	FTimerHandle SlowdownRecoveryTimer;
 
-	/** Last broadcasted datacenter prop percent (1.0 = all alive, 0.0 = all destroyed). */
+	/** World time of the last registered windup counter. Lets ApplyKnockback allow the counter
+	 *  knockback regardless of whether the player's TakeDamage or ApplyKnockback fires first. */
+	float LastCounterRegisteredTime = -10.0f;
+
+	/** Last broadcast datacenter prop percent, remapped to 1.0 = full, 0.0 = destroyed-at-threshold. */
 	float CachedArenaPropPercent = 1.0f;
 
 	/** Currently-playing montage tracked by CrossfadeToMontage; used to blend out on the next call. */
 	TWeakObjectPtr<UAnimMontage> ActiveCrossfadeMontage;
 
-	// ==================== Dash State ====================
-
-	bool bIsApproachDash = false;
-	FVector DashStartPosition = FVector::ZeroVector;
-	float DashStartAngle = 0.0f;
-	float DashTargetAngle = 0.0f;
-	float DashStartRadius = 0.0f;
-	float DashTargetRadius = 0.0f;
-	float DashArcDirection = 1.0f;
-	float DashElapsedTime = 0.0f;
-	float DashTotalDuration = 0.0f;
-
+	/** Current combat target (set by the boss StateTree). */
 	TWeakObjectPtr<AActor> CurrentTarget;
 
-	// ==================== Melee State ====================
-
-	TSet<AActor*> HitActorsThisAttack;
-	bool bDamageWindowActive = false;
-
-	// ==================== Timers ====================
-
-	FTimerHandle DashCooldownTimer;
-	FTimerHandle MeleeCooldownTimer;
-	FTimerHandle DamageWindowStartTimer;
-	FTimerHandle DamageWindowEndTimer;
 	FTimerHandle PhaseTransitionTimer;
 
 public:
@@ -265,14 +215,16 @@ protected:
 	virtual void Tick(float DeltaTime) override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	// ==================== Damage Handling ====================
+	// ==================== Damage / Stun / Knockback ====================
 
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
-	// ==================== Stun / Slowdown ====================
-
 	/** Boss does not stun on prop impact while Posture is alive; instead, it slows. */
 	virtual void ApplyExplosionStun(float Duration, UAnimMontage* StunMontage = nullptr) override;
+
+	/** Boss knockback rule: suppressed in general (HumanoidNPC body immunity), allowed ONLY during
+	 *  the boss's own melee windup (the counter window) and never in the finisher phase. */
+	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false, EKnockbackStyle Style = EKnockbackStyle::Standard) override;
 
 public:
 	// ==================== Phase Control ====================
@@ -286,47 +238,39 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Phase")
 	bool IsTransitioning() const { return bIsTransitioning; }
 
-	// ==================== Ground Phase Interface ====================
+	// ==================== Melee Interface ====================
 
-	UFUNCTION(BlueprintCallable, Category = "Boss|Ground Phase")
-	bool StartApproachDash(AActor* Target);
+	/** Boss melee entry point (called by the boss StateTree melee task). Picks a lunge or in-place
+	 *  montage based on distance to Target, toggles attack magnetism accordingly, and drives the
+	 *  inherited AMeleeNPC damage-window / trace / magnet machinery. The damage window is
+	 *  AnimNotify-driven (bUseTimerDamageWindow = false) — place the "Melee: Damage Window State"
+	 *  notify in the attack montages. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Melee")
+	void StartBossMeleeAttack(AActor* Target);
 
-	UFUNCTION(BlueprintCallable, Category = "Boss|Ground Phase")
-	bool StartCircleDash(AActor* Target);
+	/** True during the read-and-react counter window: the boss's own attack has started but the
+	 *  damage window has not opened yet (derived from inherited AMeleeNPC flags). */
+	UFUNCTION(BlueprintPure, Category = "Boss|Melee")
+	bool IsInMeleeWindup() const;
 
-	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
-	bool CanDash() const;
+	// ==================== Ranged / Disarm ====================
 
-	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
-	bool IsDashing() const { return bIsDashing; }
-
-	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
-	bool IsTargetFar(AActor* Target) const;
-
-	UFUNCTION(BlueprintCallable, Category = "Boss|Ground Phase")
-	void StartMeleeAttack(AActor* Target);
-
-	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
-	bool CanMeleeAttack() const;
-
-	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
-	bool IsAttacking() const { return bIsAttacking; }
-
-	UFUNCTION(BlueprintPure, Category = "Boss|Ground Phase")
-	bool IsTargetInMeleeRange(AActor* Target) const;
+	/** True when the boss currently holds no ranged weapon (just yanked, waiting to re-arm). */
+	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
+	bool IsDisarmed() const;
 
 	// ==================== Counter ====================
 
-	/** Returns true if Attacker satisfies all conditions for countering a windup attack. */
+	/** Returns true if a hit from Attacker right now should count as a windup counter. */
 	UFUNCTION(BlueprintPure, Category = "Boss|Counter")
 	bool IsBeingCountered(AActor* Attacker) const;
 
 	// ==================== Animation Blending ====================
 
 	/**
-	 * Stop the currently-tracked montage with BlendOut = CrossfadeTime, then play NewMontage
-	 * with BlendIn = CrossfadeTime. Use this when chaining boss montages (dash → attack, etc.)
-	 * to get a clean architectural crossfade in code instead of relying on per-asset blends.
+	 * Stop the currently-tracked montage with BlendOut = CrossfadeTime, then play NewMontage with
+	 * BlendIn = CrossfadeTime. Use this when chaining boss montages (melee, fire fork) to get a
+	 * clean crossfade in code. Passing nullptr just blends the tracked montage out to locomotion.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Animation")
 	void CrossfadeToMontage(UAnimMontage* NewMontage, float CrossfadeTime = 0.15f, float PlayRate = 1.0f);
@@ -345,16 +289,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Finisher Phase")
 	bool IsInFinisherKnockback() const { return bIsFinisherKnockback; }
 
-	// ==================== Knockback Override ====================
+	// ==================== Yank Override ====================
 
-	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation = FVector::ZeroVector, bool bKeepEMFEnabled = false, EKnockbackStyle Style = EKnockbackStyle::Standard) override;
+	/** Adds the YankChargeThreshold gate on top of AHumanoidNPC::CanBeYanked(). */
+	virtual bool CanBeYanked() const override;
 
-protected:
-	void StartFinisherKnockback();
-	void UpdateFinisherKnockback(float DeltaTime);
-	void OnFinisherKnockbackComplete();
-
-public:
 	// ==================== Target Management ====================
 
 	UFUNCTION(BlueprintCallable, Category = "Boss|Target")
@@ -364,35 +303,51 @@ public:
 	AActor* GetTarget() const { return CurrentTarget.Get(); }
 
 	/** Arena this boss is bound to (datacenter prop %). Returns nullptr if not loaded.
-	 *  Defined in .cpp because TSoftObjectPtr::Get() resolves via dynamic_cast and needs
-	 *  the full AArenaManager type — keeping it inline here forces every TU that includes
-	 *  BossCharacter.h to also include ArenaManager.h, which is bad include hygiene. */
+	 *  Defined in .cpp because TSoftObjectPtr::Get() resolves via the full AArenaManager type. */
 	UFUNCTION(BlueprintPure, Category = "Boss")
 	AArenaManager* GetLinkedArena() const;
 
 protected:
-	// ==================== Internal Methods ====================
+	// ==================== Cyclic Re-arm ====================
 
-	FVector CalculateArcDashTarget(AActor* Target) const;
-	FVector CalculateArcControlPoint(const FVector& Start, const FVector& End, AActor* Target) const;
-	void UpdateArcDash(float DeltaTime);
-	void EndDash();
-	void OnDashCooldownEnd();
-	void OnMeleeCooldownEnd();
-	void PerformMeleeTrace();
-	void OnDamageWindowStart();
-	void OnDamageWindowEnd();
+	/** Override AHumanoidNPC: instead of exhausting the inventory into permanent melee mode, the
+	 *  boss re-spawns its (single) weapon and resumes the ranged/melee choice. The disarmed window
+	 *  is the WeaponSwitchDelay between the yank and this call. */
+	virtual void SpawnNextWeapon() override;
+
+	// ==================== Internal: Melee ====================
 
 	UFUNCTION()
-	void OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+	void OnBossAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
-	void ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitResult);
-	void UpdateMeleeAttackPull(float DeltaTime);
+	// ==================== Internal: Fire-Montage Fork ====================
+
+	/** Bound to the INITIAL weapon's OnShotFired (burst counting handled by the inherited
+	 *  AHumanoidNPC binding). Drives the crossfaded fire montage only. */
+	UFUNCTION()
+	void OnBossWeaponShotFired();
+
+	/** Bound to a RE-ARMED weapon's OnShotFired. Drives burst counting (the inherited binding is
+	 *  gone on a fresh weapon) AND the fire montage. */
+	UFUNCTION()
+	void OnBossWeaponShotFiredReArmed();
+
+	/** Shared fire-montage logic: first shot → FirstFireMontage, 2nd+ → ContinuousFireMontage,
+	 *  last shot of the burst → blend back to locomotion. All via CrossfadeToMontage. */
+	void DriveFireMontageForShot();
+
+	// ==================== Internal: Phase ====================
+
 	void ExecutePhaseTransition(EBossPhase NewPhase);
 	void OnPhaseTransitionComplete();
-	FVector EvaluateBezier(const FVector& P0, const FVector& P1, const FVector& P2, float T) const;
 
-	// ==================== Posture Regen ====================
+	// ==================== Internal: Finisher ====================
+
+	void StartFinisherKnockback();
+	void UpdateFinisherKnockback(float DeltaTime);
+	void OnFinisherKnockbackComplete();
+
+	// ==================== Internal: Posture Regen ====================
 
 	/** Posture-recovery tick. Samples PostureRegenByArenaPropCurve at CachedArenaPropPercent. */
 	void UpdatePostureRegen(float DeltaTime);
@@ -401,7 +356,7 @@ protected:
 	UFUNCTION()
 	void OnArenaPropPercentChanged(float RemainingPercent, int32 AliveCount);
 
-	// ==================== Slowdown ====================
+	// ==================== Internal: Slowdown ====================
 
 	/** Restore MaxWalkSpeed at the end of a slowdown window. */
 	void EndSlowdown();

@@ -1,5 +1,5 @@
 // BossAIController.cpp
-// AI Controller for the ground-melee boss character
+// AI Controller for the boss character.
 
 #include "BossAIController.h"
 #include "BossCharacter.h"
@@ -15,62 +15,14 @@ void ABossAIController::OnPossess(APawn* InPawn)
 
 	ControlledBoss = Cast<ABossCharacter>(InPawn);
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS_AI] OnPossess: InPawn=%s -> ControlledBoss=%s"),
+	UE_LOG(LogTemp, Log, TEXT("[BOSS_AI] OnPossess: InPawn=%s -> ControlledBoss=%s"),
 		*GetNameSafe(InPawn), *GetNameSafe(ControlledBoss));
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::Green,
-			FString::Printf(TEXT("[BOSS_AI] OnPossess -> %s"), *GetNameSafe(ControlledBoss)));
-	}
 }
 
 void ABossAIController::OnUnPossess()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS_AI] OnUnPossess: ControlledBoss=%s"), *GetNameSafe(ControlledBoss));
 	ControlledBoss = nullptr;
-
 	Super::OnUnPossess();
-}
-
-// ==================== Ground Phase Commands ====================
-
-bool ABossAIController::StartApproachDash(AActor* Target)
-{
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->StartApproachDash(Target);
-}
-
-bool ABossAIController::StartCircleDash(AActor* Target)
-{
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->StartCircleDash(Target);
-}
-
-void ABossAIController::StartMeleeAttack(AActor* Target)
-{
-	if (ControlledBoss)
-	{
-		ControlledBoss->StartMeleeAttack(Target);
-	}
-}
-
-bool ABossAIController::IsTargetInMeleeRange(AActor* Target) const
-{
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->IsTargetInMeleeRange(Target);
 }
 
 // ==================== Phase Management ====================
@@ -85,12 +37,7 @@ void ABossAIController::SetPhase(EBossPhase NewPhase)
 
 EBossPhase ABossAIController::GetCurrentPhase() const
 {
-	if (!ControlledBoss)
-	{
-		return EBossPhase::Ground;
-	}
-
-	return ControlledBoss->GetCurrentPhase();
+	return ControlledBoss ? ControlledBoss->GetCurrentPhase() : EBossPhase::Ground;
 }
 
 // ==================== Finisher Phase ====================
@@ -105,42 +52,5 @@ void ABossAIController::EnterFinisherPhase()
 
 bool ABossAIController::IsInFinisherPhase() const
 {
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->IsInFinisherPhase();
-}
-
-// ==================== State Queries ====================
-
-bool ABossAIController::IsDashing() const
-{
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->IsDashing();
-}
-
-bool ABossAIController::CanDash() const
-{
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->CanDash();
-}
-
-bool ABossAIController::CanMeleeAttack() const
-{
-	if (!ControlledBoss)
-	{
-		return false;
-	}
-
-	return ControlledBoss->CanMeleeAttack();
+	return ControlledBoss ? ControlledBoss->IsInFinisherPhase() : false;
 }

@@ -1,17 +1,17 @@
 // BossAIController.h
-// AI Controller for the ground-melee boss character
+// AI Controller for the boss character.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Variant_Shooter/AI/ShooterAIController.h"
+#include "BossCharacter.h"
 #include "BossAIController.generated.h"
-
-class ABossCharacter;
 
 /**
  * AI Controller for the Boss character.
- * Extends ShooterAIController with boss-specific commands for ground melee phase.
+ * Extends ShooterAIController with boss phase/finisher convenience wrappers. Combat actions
+ * (melee, shoot, strafe) are driven directly on ABossCharacter by the boss StateTree tasks.
  */
 UCLASS()
 class POLARITY_API ABossAIController : public AShooterAIController
@@ -27,27 +27,12 @@ protected:
 	UPROPERTY()
 	TObjectPtr<ABossCharacter> ControlledBoss;
 
-protected:
 	// ==================== Controller Lifecycle ====================
 
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
 
 public:
-	// ==================== Ground Phase Commands ====================
-
-	UFUNCTION(BlueprintCallable, Category = "Boss AI|Ground")
-	bool StartApproachDash(AActor* Target);
-
-	UFUNCTION(BlueprintCallable, Category = "Boss AI|Ground")
-	bool StartCircleDash(AActor* Target);
-
-	UFUNCTION(BlueprintCallable, Category = "Boss AI|Ground")
-	void StartMeleeAttack(AActor* Target);
-
-	UFUNCTION(BlueprintPure, Category = "Boss AI|Ground")
-	bool IsTargetInMeleeRange(AActor* Target) const;
-
 	// ==================== Phase Management ====================
 
 	UFUNCTION(BlueprintCallable, Category = "Boss AI|Phase")
@@ -63,17 +48,6 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Boss AI|Finisher")
 	bool IsInFinisherPhase() const;
-
-	// ==================== State Queries ====================
-
-	UFUNCTION(BlueprintPure, Category = "Boss AI|State")
-	bool IsDashing() const;
-
-	UFUNCTION(BlueprintPure, Category = "Boss AI|State")
-	bool CanDash() const;
-
-	UFUNCTION(BlueprintPure, Category = "Boss AI|State")
-	bool CanMeleeAttack() const;
 
 	UFUNCTION(BlueprintPure, Category = "Boss AI")
 	ABossCharacter* GetControlledBoss() const { return ControlledBoss; }

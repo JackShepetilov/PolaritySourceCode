@@ -1,27 +1,24 @@
 // BossCharacter.cpp
-// Hybrid boss character implementation
+// Ground-phase boss built on AHumanoidNPC. See BossCharacter.h for the design overview.
 
 #include "BossCharacter.h"
 #include "BossAIController.h"
-#include "Variant_Shooter/Weapons/ShooterWeapon.h"
+#include "ShooterWeapon.h"
 #include "Polarity/Arena/ArenaManager.h"
 #include "EMFVelocityModifier.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "Engine/DamageEvents.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
 #include "Curves/CurveFloat.h"
-#include "Kismet/GameplayStatics.h"
-#include "Kismet/KismetMathLibrary.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
-#include "DrawDebugHelpers.h"
 
 namespace
 {
-	// Safe phase-name lookup that won't read past the array if a stale StateTree asset
-	// hands us a value outside the current EBossPhase enum (e.g. the old "Finisher = 2"
-	// from when EBossPhase still had an Aerial member).
 	FString BossPhaseName(EBossPhase Phase)
 	{
 		switch (Phase)
@@ -41,31 +38,44 @@ namespace
 ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// Set AI Controller class
 	AIControllerClass = ABossAIController::StaticClass();
 
-	// Boss-specific defaults
+	// Posture pool (CurrentHP is Posture).
 	CurrentHP = 1000.0f;
 	MaxHP = 1000.0f;
+
+	// Melee tuning (inherited AMeleeNPC properties). The damage window is AnimNotify-driven:
+	// place the "Melee: Damage Window State" notify in the boss attack montages.
+	AttackDamage = 50.0f;
+	bUseTimerDamageWindow = false;
+	bEnableAttackMagnetism = true;
+	MagnetismSpeed = 900.0f;         // lunge pull speed (cm/s)
+	MagnetismStopDistance = 120.0f;  // stand-off where the lunge stops in front of the player
+	AttackRange = 600.0f;            // boss commits to a (lunge) melee from this far
+	AttackCooldown = 0.6f;
 }
 
 void ABossCharacter::BeginPlay()
 {
+	// AHumanoidNPC::BeginPlay spawns WeaponInventory[0], wires burst counting, disables body capture.
 	Super::BeginPlay();
 
-	// Cache max HP for Posture threshold calculations
 	MaxHP = CurrentHP;
-
 	CurrentPhase = EBossPhase::Ground;
 
-	// Cache default walk speed for slowdown restoration
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		DefaultMaxWalkSpeed = MovementComp->MaxWalkSpeed;
 	}
 
-	// Subscribe to the arena's prop-percent broadcast so Posture regen can scale with it.
-	// Sync-load the arena once (it's expected to be in the persistent or already-loaded sublevel).
+	// Drive the crossfaded fire-montage fork off the INITIAL weapon's shots. Burst counting is
+	// already bound by AHumanoidNPC (OnWeaponShotFiredForward), so this handler is montage-only.
+	if (Weapon)
+	{
+		Weapon->OnShotFired.AddDynamic(this, &ABossCharacter::OnBossWeaponShotFired);
+	}
+
+	// Subscribe to the arena's prop-percent broadcast so posture regen can scale with it.
 	if (AArenaManager* Arena = LinkedArena.LoadSynchronous())
 	{
 		Arena->OnPropPercentChanged.AddDynamic(this, &ABossCharacter::OnArenaPropPercentChanged);
@@ -73,61 +83,33 @@ void ABossCharacter::BeginPlay()
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] LinkedArena not set; Posture regen will use fallback formula at full prop percent."));
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] LinkedArena not set; posture regen uses fallback formula at full prop percent."));
 	}
 
-	// ===== Boot-time debug dump =====
-	UE_LOG(LogTemp, Warning,
-		TEXT("[BOSS_DEBUG] BeginPlay: Phase=%s, HP=%.0f/%.0f, DefaultMaxWalkSpeed=%.0f, "
-			 "ApproachDashMontage=%s, CircleDashMontage=%s, MeleeAttackMontages=%d, "
-			 "FinisherEnterStunMontage=%s, FinisherKnockbackMontage=%s, "
-			 "Controller=%s, LinkedArena=%s"),
-		*BossPhaseName(CurrentPhase), CurrentHP, MaxHP, DefaultMaxWalkSpeed,
-		*GetNameSafe(ApproachDashMontage), *GetNameSafe(CircleDashMontage), MeleeAttackMontages.Num(),
-		*GetNameSafe(FinisherEnterStunMontage), *GetNameSafe(FinisherKnockbackMontage),
-		*GetNameSafe(GetController()), *GetNameSafe(LinkedArena.Get()));
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::Green,
-			FString::Printf(TEXT("[BOSS_DEBUG] BeginPlay HP=%.0f Montages=%d Ctrl=%s Arena=%s"),
-				CurrentHP, MeleeAttackMontages.Num(),
-				*GetNameSafe(GetController()), *GetNameSafe(LinkedArena.Get())));
-	}
+	UE_LOG(LogTemp, Log, TEXT("[BOSS] BeginPlay: Phase=%s, Posture=%.0f/%.0f, Weapon=%s"),
+		*BossPhaseName(CurrentPhase), CurrentHP, MaxHP, *GetNameSafe(Weapon));
 }
 
 void ABossCharacter::Tick(float DeltaTime)
 {
-	Super::Tick(DeltaTime);
-
-	// Update finisher knockback if in progress
+	// Finisher knockback is fully scripted (SetActorLocation) — skip the normal NPC/melee tick.
 	if (bIsFinisherKnockback)
 	{
 		UpdateFinisherKnockback(DeltaTime);
-		return; // Skip all other updates during knockback
+		return;
 	}
 
-	// Update arc dash if in progress
-	if (bIsDashing)
+	// AMeleeNPC::Tick = attack magnetism (lunge pull) + melee trace; AShooterNPC::Tick = charge etc.
+	Super::Tick(DeltaTime);
+
+	if (bIsDead)
 	{
-		UpdateArcDash(DeltaTime);
+		return;
 	}
 
-	// Pull towards player and perform melee trace during attack
-	if (bIsAttacking && CurrentTarget.IsValid())
-	{
-		UpdateMeleeAttackPull(DeltaTime);
-	}
-	if (bDamageWindowActive)
-	{
-		PerformMeleeTrace();
-	}
-
-	// While slowed from a prop impact, cap velocity to the slowed walk speed. Explosions in
-	// EMFPhysicsProp apply a radial impulse straight to the capsule on top of calling
-	// ApplyExplosionStun — that impulse bypasses MaxWalkSpeed and the boss flies away. Capping
-	// velocity each tick to the slowed speed kills the launch but leaves normal slow walking
-	// (which sits at or below the cap) untouched.
+	// While slowed from a prop impact, cap horizontal velocity to the slowed walk speed. Prop
+	// explosions add a radial impulse straight to the capsule (bypassing MaxWalkSpeed); capping
+	// each tick kills the launch but leaves normal slow walking untouched.
 	if (bIsSlowed)
 	{
 		if (UCharacterMovementComponent* MC = GetCharacterMovement())
@@ -145,40 +127,17 @@ void ABossCharacter::Tick(float DeltaTime)
 		}
 	}
 
-	// Posture regen scales with datacenter prop percent
+	// Posture regen scales with datacenter prop percent.
 	UpdatePostureRegen(DeltaTime);
-
-	// ===== Throttled state debug =====
-	static double LastBossDebugLogTime = -1.0;
-	const double NowSec = GetWorld()->GetTimeSeconds();
-	if (NowSec - LastBossDebugLogTime >= 1.0)
-	{
-		LastBossDebugLogTime = NowSec;
-		const FString TargetName = CurrentTarget.IsValid() ? CurrentTarget->GetName() : TEXT("NONE");
-		UE_LOG(LogTemp, Warning,
-			TEXT("[BOSS_DEBUG] State: Phase=%s Trans=%d Dash=%d(Cool=%d) Att=%d(Cool=%d) Windup=%d DmgWin=%d Slowed=%d HP=%.0f/%.0f ArenaPct=%.2f Tgt=%s"),
-			*BossPhaseName(CurrentPhase), bIsTransitioning,
-			bIsDashing, bDashOnCooldown, bIsAttacking, bMeleeOnCooldown,
-			bIsInMeleeWindup, bDamageWindowActive, bIsSlowed,
-			CurrentHP, MaxHP, CachedArenaPropPercent, *TargetName);
-
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(1001, 1.2f, FColor::Cyan,
-				FString::Printf(TEXT("BOSS %s | Dsh=%d Att=%d Wnd=%d Trans=%d | HP=%.0f Pct=%.2f | Tgt=%s"),
-					*BossPhaseName(CurrentPhase), bIsDashing, bIsAttacking, bIsInMeleeWindup, bIsTransitioning,
-					CurrentHP, CachedArenaPropPercent, *TargetName));
-		}
-	}
 }
 
 void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// Clear all timers
-	GetWorld()->GetTimerManager().ClearTimer(DashCooldownTimer);
-	GetWorld()->GetTimerManager().ClearTimer(MeleeCooldownTimer);
-	GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
-	GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(PhaseTransitionTimer);
+		World->GetTimerManager().ClearTimer(SlowdownRecoveryTimer);
+	}
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -187,63 +146,61 @@ void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 float ABossCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
-	// In finisher phase, only accept melee damage from player to trigger finisher
+	// In finisher phase the boss is invulnerable; the finisher is triggered via ExecuteFinisher()
+	// (player melee), not through damage.
 	if (bIsInFinisherPhase)
 	{
-		// Check if this is a melee hit from player
-		// The player's melee system should call ExecuteFinisher() directly
-		// Here we just ignore all damage
 		return 0.0f;
 	}
 
-	// Counter: any hit during boss windup or dash interrupts him and slows him down.
-	// Damage still applies — counter is "interrupt + slow", not a damage shield.
+	// Counter: a hit landing during the boss's melee windup (before the damage notify opens)
+	// interrupts the swing and slows the boss. Damage still applies (counter is interrupt+slow,
+	// not a damage shield). The knockback that pushes the boss back is allowed by ApplyKnockback
+	// while LastCounterRegisteredTime is fresh (see below).
 	if (IsBeingCountered(DamageCauser))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Countered by %s (windup=%d, dashing=%d) — interrupt + slowdown"),
-			DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"), bIsInMeleeWindup, bIsDashing);
+		LastCounterRegisteredTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 
-		// Cancel any in-progress windup attack so the boss doesn't follow through with the swing
-		bIsInMeleeWindup = false;
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Countered by %s during windup — interrupt + slowdown"),
+			DamageCauser ? *DamageCauser->GetName() : TEXT("NULL"));
+
+		// Interrupt the swing so the AnimNotify damage window never opens.
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+			{
+				AnimInst->StopAllMontages(AttackEndBlendTime);
+			}
+		}
+		ActiveCrossfadeMontage.Reset();
 		bIsAttacking = false;
 		bDamageWindowActive = false;
-		GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
-		GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
-
-		// Also cancel a dash if we were countered mid-dash
-		if (bIsDashing)
+		if (UWorld* W = GetWorld())
 		{
-			EndDash();
+			W->GetTimerManager().ClearTimer(DamageWindowStartTimer);
+			W->GetTimerManager().ClearTimer(DamageWindowEndTimer);
 		}
 
 		ApplyExplosionStun(CounterSlowdownDuration, nullptr);
 		// fall through — Super::TakeDamage still applies the player's damage below
 	}
 
-	// Calculate damage that would be applied
-	float ActualDamage = Damage;
-
-	// Check if this damage would bring HP to 1 or below
-	if (CurrentHP - ActualDamage <= 1.0f)
+	// Posture break: if this hit would drop Posture to 1 or below, clamp to 1 and enter Finisher.
+	if (CurrentHP - Damage <= 1.0f)
 	{
-		// Set HP to exactly 1 and enter finisher phase
-		float DamageToApply = CurrentHP - 1.0f;
+		const float DamageToApply = CurrentHP - 1.0f;
 		CurrentHP = 1.0f;
 
-		// Broadcast damage taken event
 		OnDamageTaken.Broadcast(this, DamageToApply, TSubclassOf<UDamageType>(), GetActorLocation(), DamageCauser);
 
-		// Enter finisher phase
 		EnterFinisherPhase();
-
 		return DamageToApply;
 	}
 
-	// Normal damage handling - but prevent auto-retaliation shooting in ground phase
-	bool bWasShootingBefore = bIsShooting;
-	float Result = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+	// Normal damage. Prevent auto-retaliation fire in ground phase — boss fire is StateTree-driven.
+	const bool bWasShootingBefore = bIsShooting;
+	const float Result = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 
-	// In ground phase, boss should NOT shoot - only melee
 	if (CurrentPhase == EBossPhase::Ground && !bWasShootingBefore)
 	{
 		StopShooting();
@@ -258,29 +215,19 @@ void ABossCharacter::SetPhase(EBossPhase NewPhase)
 {
 	if (!IsValidBossPhase(NewPhase))
 	{
-		// Rate-limited so a StateTree task that gets re-entered every frame doesn't flood the log.
 		static double LastInvalidPhaseWarnTime = -10.0;
 		const double NowSec = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
 		if (NowSec - LastInvalidPhaseWarnTime >= 5.0)
 		{
 			LastInvalidPhaseWarnTime = NowSec;
-			UE_LOG(LogTemp, Error,
-				TEXT("[BOSS] SetPhase called with invalid value %d. The StateTree asset still stores the old Aerial=1/Finisher=2 mapping — open ST_Boss and either DELETE the BossSetPhase task or re-pick the phase enum dropdown. Suppressing this warning for 5s."),
-				(int)NewPhase);
+			UE_LOG(LogTemp, Error, TEXT("[BOSS] SetPhase called with invalid value %d (stale StateTree enum?). Suppressing for 5s."), (int)NewPhase);
 		}
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase called: Current=%s, New=%s"),
-		*BossPhaseName(CurrentPhase), *BossPhaseName(NewPhase));
-
 	if (CurrentPhase != NewPhase)
 	{
 		ExecutePhaseTransition(NewPhase);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] SetPhase: Already in %s phase, no transition needed"), *BossPhaseName(NewPhase));
 	}
 }
 
@@ -288,31 +235,20 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 {
 	if (!IsValidBossPhase(NewPhase))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[BOSS] ExecutePhaseTransition: invalid phase %d, ignoring."), (int)NewPhase);
 		return;
 	}
 
 	const EBossPhase OldPhase = CurrentPhase;
 
-	UE_LOG(LogTemp, Error, TEXT("[BOSS PHASE] >>> TRANSITION: %s -> %s (HP=%.0f/%.0f)"),
-		*BossPhaseName(OldPhase), *BossPhaseName(NewPhase),
-		CurrentHP, MaxHP);
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red,
-			FString::Printf(TEXT("BOSS PHASE: %s -> %s"), *BossPhaseName(OldPhase), *BossPhaseName(NewPhase)));
-	}
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS PHASE] %s -> %s (Posture=%.0f/%.0f)"),
+		*BossPhaseName(OldPhase), *BossPhaseName(NewPhase), CurrentHP, MaxHP);
 
 	CurrentPhase = NewPhase;
-
 	bIsTransitioning = true;
-	float TransitionDuration = 0.0f;
 
 	switch (NewPhase)
 	{
 	case EBossPhase::Ground:
-		// Ground transition completes immediately (no aerial phase to land from)
 		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 		{
 			MovementComp->SetMovementMode(MOVE_Walking);
@@ -321,25 +257,12 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 		break;
 
 	case EBossPhase::Finisher:
-		// Finisher phase handled by EnterFinisherPhase()
+		// Finisher state set up by EnterFinisherPhase().
 		bIsTransitioning = false;
 		break;
 
 	default:
-		// Unreachable — IsValidBossPhase above filters this.
 		break;
-	}
-
-	if (TransitionDuration > 0.0f)
-	{
-		GetWorld()->GetTimerManager().SetTimer(
-			PhaseTransitionTimer,
-			this,
-			&ABossCharacter::OnPhaseTransitionComplete,
-			TransitionDuration,
-			false
-		);
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition started, duration: %.2f seconds"), TransitionDuration);
 	}
 
 	OnPhaseChanged.Broadcast(OldPhase, NewPhase);
@@ -347,587 +270,208 @@ void ABossCharacter::ExecutePhaseTransition(EBossPhase NewPhase)
 
 void ABossCharacter::OnPhaseTransitionComplete()
 {
-	if (CurrentPhase == EBossPhase::Ground)
-	{
-		if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-		{
-			if (MovementComp->IsFalling())
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[BOSS] OnPhaseTransitionComplete called but still falling (Z=%.1f) - waiting for Landed()"),
-					GetActorLocation().Z);
-				return;
-			}
-
-			MovementComp->SetMovementMode(MOVE_Walking);
-			MovementComp->Velocity = FVector::ZeroVector;
-		}
-	}
-
 	bIsTransitioning = false;
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Phase transition complete, boss can now attack. Phase=%s, Z=%.1f"),
-		*BossPhaseName(CurrentPhase), GetActorLocation().Z);
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
-			FString::Printf(TEXT("BOSS TRANSITION COMPLETE: Now in %s (Z=%.0f)"), *BossPhaseName(CurrentPhase), GetActorLocation().Z));
-	}
 }
 
-// ==================== Ground Phase: Approach Dash ====================
+// ==================== Melee ====================
 
-bool ABossCharacter::StartApproachDash(AActor* Target)
+void ABossCharacter::StartBossMeleeAttack(AActor* Target)
 {
-	if (!CanDash() || !Target)
+	if (!Target || bIsDead || bIsInFinisherPhase || !CanAttack())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartApproachDash FAILED - CanDash=%d, Target=%s"),
-			CanDash(), Target ? *Target->GetName() : TEXT("NULL"));
-		return false;
-	}
-
-	CurrentTarget = Target;
-	bIsApproachDash = true;
-
-	FVector PlayerPos = Target->GetActorLocation();
-	FVector BossPos = GetActorLocation();
-	DashStartPosition = BossPos; // Keep for Z reference
-
-	// Calculate start position in polar coordinates (relative to player)
-	FVector PlayerToBoss = BossPos - PlayerPos;
-	DashStartRadius = PlayerToBoss.Size2D();
-	DashStartAngle = FMath::Atan2(PlayerToBoss.Y, PlayerToBoss.X);
-
-	// Target: random point on circle around player at melee range
-	DashTargetRadius = DashTargetDistanceFromPlayer;
-
-	// Pick random target angle within ±120 degrees
-	float AngleOffsetDeg = FMath::RandRange(-120.0f, 120.0f);
-	float AngleOffsetRad = FMath::DegreesToRadians(AngleOffsetDeg);
-	DashTargetAngle = DashStartAngle + AngleOffsetRad;
-
-	// Determine arc direction (shorter path around, but always outward from player)
-	// Positive offset = counter-clockwise, negative = clockwise
-	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
-
-	// Dash duration honors the montage's own RateScale (set on the montage asset),
-	// so editing the montage's play rate in the editor changes how long the dash lasts.
-	// Falls back to DashSpeed × arc length when no montage is set.
-	const float AngleDelta = FMath::Abs(AngleOffsetRad);
-	const float AverageRadius = (DashStartRadius + DashTargetRadius) * 0.5f;
-	const float ArcLength = AngleDelta * AverageRadius + FMath::Abs(DashStartRadius - DashTargetRadius);
-	const float FallbackDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
-
-	if (ApproachDashMontage)
-	{
-		const float RateScale = FMath::Max(ApproachDashMontage->RateScale, 0.01f);
-		DashTotalDuration = ApproachDashMontage->GetPlayLength() / RateScale;
-	}
-	else
-	{
-		DashTotalDuration = FallbackDuration;
-	}
-	DashElapsedTime = 0.0f;
-
-	bIsDashing = true;
-	LastDashTime = GetWorld()->GetTimeSeconds();
-
-	// Disable EMF forces during dash
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetEnabled(false);
-	}
-
-	// Play the montage with PlayRate=1.0 — the montage asset's RateScale is applied on top of this
-	// by the animation system, so changing RateScale in the editor speeds/slows the dash anim AND
-	// the movement (because DashTotalDuration was computed from that same RateScale above).
-	CrossfadeToMontage(ApproachDashMontage, DashStartBlendTime, 1.0f);
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] APPROACH: AngleOffset=%.1f, Radius=%.0f->%.0f, Duration=%.2fs (montage RateScale=%.2f, fallback would be %.2f)"),
-		AngleOffsetDeg, DashStartRadius, DashTargetRadius, DashTotalDuration,
-		ApproachDashMontage ? ApproachDashMontage->RateScale : 0.0f, FallbackDuration);
-
-	return true;
-}
-
-// ==================== Ground Phase: Circle Dash ====================
-
-bool ABossCharacter::StartCircleDash(AActor* Target)
-{
-	// Circle Dash does NOT check cooldown - it chains immediately after Approach Dash
-	// Only check basic state (not dead, not already dashing, etc.)
-	if (!Target || bIsDead || bIsDashing || bIsInKnockback || bIsInFinisherPhase)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] StartCircleDash FAILED - Target=%s, bIsDead=%d, bIsDashing=%d"),
-			Target ? *Target->GetName() : TEXT("NULL"), bIsDead, bIsDashing);
-		return false;
-	}
-
-	CurrentTarget = Target;
-	bIsApproachDash = false;
-
-	FVector PlayerPos = Target->GetActorLocation();
-	FVector BossPos = GetActorLocation();
-	DashStartPosition = BossPos; // Keep for Z reference
-
-	// Calculate start position in polar coordinates
-	FVector PlayerToBoss = BossPos - PlayerPos;
-	DashStartRadius = FMath::Max(PlayerToBoss.Size2D(), DashTargetDistanceFromPlayer);
-	DashStartAngle = FMath::Atan2(PlayerToBoss.Y, PlayerToBoss.X);
-
-	// Circle dash keeps the same radius
-	DashTargetRadius = DashStartRadius;
-
-	// Random angle offset (45-135 degrees either direction)
-	float AngleOffsetDeg = FMath::RandRange(MinDashAngleOffset, MaxDashAngleOffset);
-	if (FMath::RandBool())
-	{
-		AngleOffsetDeg = -AngleOffsetDeg;
-	}
-	float AngleOffsetRad = FMath::DegreesToRadians(AngleOffsetDeg);
-	DashTargetAngle = DashStartAngle + AngleOffsetRad;
-	DashArcDirection = (AngleOffsetDeg >= 0) ? 1.0f : -1.0f;
-
-	// Same rule as approach dash: montage RateScale dictates duration if a montage is set.
-	const float ArcLength = FMath::Abs(AngleOffsetRad) * DashStartRadius;
-	const float FallbackDuration = FMath::Max(ArcLength / DashSpeed, 0.2f);
-
-	if (CircleDashMontage)
-	{
-		const float RateScale = FMath::Max(CircleDashMontage->RateScale, 0.01f);
-		DashTotalDuration = CircleDashMontage->GetPlayLength() / RateScale;
-	}
-	else
-	{
-		DashTotalDuration = FallbackDuration;
-	}
-	DashElapsedTime = 0.0f;
-
-	bIsDashing = true;
-	LastDashTime = GetWorld()->GetTimeSeconds();
-
-	// Disable EMF forces during dash
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetEnabled(false);
-	}
-
-	// Pass PlayRate=1.0; montage asset's RateScale applies automatically.
-	CrossfadeToMontage(CircleDashMontage, DashStartBlendTime, 1.0f);
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] CIRCLE: AngleOffset=%.1f, Radius=%.0f, Duration=%.2fs (montage RateScale=%.2f, fallback would be %.2f)"),
-		AngleOffsetDeg, DashStartRadius, DashTotalDuration,
-		CircleDashMontage ? CircleDashMontage->RateScale : 0.0f, FallbackDuration);
-
-	return true;
-}
-
-bool ABossCharacter::IsTargetFar(AActor* Target) const
-{
-	if (!Target)
-	{
-		return true;
-	}
-	float Distance = FVector::Dist2D(GetActorLocation(), Target->GetActorLocation());
-	// Consider "far" if beyond melee range + some buffer
-	return Distance > (MeleeAttackRange + 100.0f);
-}
-
-bool ABossCharacter::CanDash() const
-{
-	if (bIsDead || bIsDashing || bIsInKnockback || bIsInFinisherPhase || bIsTransitioning)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossDash] CanDash=FALSE: Dead=%d, Dashing=%d, Knockback=%d, Finisher=%d, Transitioning=%d"),
-			bIsDead, bIsDashing, bIsInKnockback, bIsInFinisherPhase, bIsTransitioning);
-		return false;
-	}
-
-	// Check cooldown
-	float TimeSinceLastDash = GetWorld()->GetTimeSeconds() - LastDashTime;
-	return TimeSinceLastDash >= DashCooldown;
-}
-
-FVector ABossCharacter::CalculateArcDashTarget(AActor* Target) const
-{
-	if (!Target)
-	{
-		return GetActorLocation();
-	}
-
-	FVector TargetLocation = Target->GetActorLocation();
-	FVector BossLocation = GetActorLocation();
-
-	// Direction from player to boss (we want to end up on the other side)
-	FVector FromPlayerToBoss = (BossLocation - TargetLocation).GetSafeNormal2D();
-
-	// Random angle offset - pick a point around the player, offset from our current angle
-	// Positive angle = clockwise, Negative = counter-clockwise (looking down)
-	float AngleOffset = FMath::RandRange(MinDashAngleOffset, MaxDashAngleOffset);
-	if (FMath::RandBool())
-	{
-		AngleOffset = -AngleOffset;
-	}
-
-	// Rotate to get direction from player to dash target position
-	FVector DirectionToTarget = FromPlayerToBoss.RotateAngleAxis(AngleOffset, FVector::UpVector);
-
-	// Dash target is on a circle around the player at melee range
-	FVector DashTarget = TargetLocation + DirectionToTarget * DashTargetDistanceFromPlayer;
-
-	// Clamp distance from current boss position to max dash distance
-	float DistanceToTarget = FVector::Dist2D(BossLocation, DashTarget);
-	if (DistanceToTarget > MaxDashDistance)
-	{
-		// If too far, move target closer along the line from boss to target
-		FVector DirectionFromBoss = (DashTarget - BossLocation).GetSafeNormal2D();
-		DashTarget = BossLocation + DirectionFromBoss * MaxDashDistance;
-	}
-
-	// Keep same Z height (ground phase)
-	DashTarget.Z = BossLocation.Z;
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossDash] Target calc: Boss(%s) -> DashTarget(%s), Angle=%.1f, DistFromPlayer=%.1f"),
-		*BossLocation.ToString(), *DashTarget.ToString(), AngleOffset, FVector::Dist2D(TargetLocation, DashTarget));
-
-	return DashTarget;
-}
-
-FVector ABossCharacter::CalculateArcControlPoint(const FVector& Start, const FVector& End, AActor* Target) const
-{
-	// Midpoint between start and end
-	FVector Midpoint = (Start + End) * 0.5f;
-
-	// Direction perpendicular to the line (towards the player for a curved path around them)
-	FVector LineDirection = (End - Start).GetSafeNormal2D();
-	FVector PerpDirection = FVector::CrossProduct(LineDirection, FVector::UpVector);
-
-	// Determine which side to curve towards (towards player makes more interesting arc)
-	if (Target)
-	{
-		FVector ToPlayer = (Target->GetActorLocation() - Midpoint).GetSafeNormal2D();
-		if (FVector::DotProduct(PerpDirection, ToPlayer) < 0)
-		{
-			PerpDirection = -PerpDirection;
-		}
-	}
-
-	// Control point offset (creates the arc)
-	float ArcIntensity = FVector::Dist2D(Start, End) * 0.3f;
-	FVector ControlPoint = Midpoint + PerpDirection * ArcIntensity;
-	ControlPoint.Z = Start.Z;
-
-	return ControlPoint;
-}
-
-void ABossCharacter::UpdateArcDash(float DeltaTime)
-{
-	if (!bIsDashing || !CurrentTarget.IsValid())
-	{
-		if (bIsDashing)
-		{
-			EndDash();
-		}
 		return;
 	}
 
-	DashElapsedTime += DeltaTime;
-	float Alpha = FMath::Clamp(DashElapsedTime / DashTotalDuration, 0.0f, 1.0f);
+	NotifyTargetAcquired(Target);
 
-	FVector PlayerPos = CurrentTarget->GetActorLocation();
-	FVector NewPosition;
-
-	// Both dash types use polar coordinates relative to CURRENT player position
-	// This makes the dash dynamically track the player
-
-	// Interpolate angle and radius
-	float CurrentAngle = FMath::Lerp(DashStartAngle, DashTargetAngle, Alpha);
-	float CurrentRadius = FMath::Lerp(DashStartRadius, DashTargetRadius, Alpha);
-
-	// Convert polar to cartesian, centered on current player position
-	NewPosition.X = PlayerPos.X + FMath::Cos(CurrentAngle) * CurrentRadius;
-	NewPosition.Y = PlayerPos.Y + FMath::Sin(CurrentAngle) * CurrentRadius;
-	NewPosition.Z = DashStartPosition.Z;
-
-	// Face the player during dash
-	FVector ToPlayerDir = (PlayerPos - NewPosition).GetSafeNormal2D();
-	if (!ToPlayerDir.IsNearlyZero())
-	{
-		FRotator NewRotation = ToPlayerDir.Rotation();
-		NewRotation.Pitch = 0.0f;
-		NewRotation.Roll = 0.0f;
-		SetActorRotation(NewRotation);
-	}
-
-	// Move to new position with sweep (like MeleeNPC does)
-	FVector CurrentPos = GetActorLocation();
-	SetActorLocation(NewPosition, true);
-
-	// Update velocity for visuals and animations (like MeleeNPC does)
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		if (DeltaTime > 0.0f)
-		{
-			FVector FrameVelocity = (NewPosition - CurrentPos) / DeltaTime;
-			MovementComp->Velocity = FrameVelocity;
-		}
-	}
-
-	// Check if dash complete
-	if (Alpha >= 1.0f)
-	{
-		EndDash();
-	}
-}
-
-void ABossCharacter::EndDash()
-{
-	bIsDashing = false;
-
-	// Stop velocity and restore walking movement (like MeleeNPC does)
-	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
-	{
-		MovementComp->Velocity = FVector::ZeroVector;
-		MovementComp->SetMovementMode(MOVE_Walking);
-	}
-
-	// Re-enable EMF forces
-	if (EMFVelocityModifier)
-	{
-		EMFVelocityModifier->SetEnabled(true);
-	}
-
-	// Start cooldown
-	bDashOnCooldown = true;
-	GetWorld()->GetTimerManager().SetTimer(DashCooldownTimer, this, &ABossCharacter::OnDashCooldownEnd, DashCooldown, false);
-}
-
-void ABossCharacter::OnDashCooldownEnd()
-{
-	bDashOnCooldown = false;
-}
-
-FVector ABossCharacter::EvaluateBezier(const FVector& P0, const FVector& P1, const FVector& P2, float T) const
-{
-	// Quadratic Bezier: B(t) = (1-t)^2 * P0 + 2*(1-t)*t * P1 + t^2 * P2
-	float OneMinusT = 1.0f - T;
-	return (OneMinusT * OneMinusT * P0) + (2.0f * OneMinusT * T * P1) + (T * T * P2);
-}
-
-// ==================== Ground Phase: Melee Attack ====================
-
-void ABossCharacter::StartMeleeAttack(AActor* Target)
-{
-	if (!CanMeleeAttack() || !Target)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BossMelee] StartMeleeAttack FAILED - CanMeleeAttack=%d, Target=%s, bIsAttacking=%d, bIsDashing=%d"),
-			CanMeleeAttack(), Target ? *Target->GetName() : TEXT("NULL"), bIsAttacking, bIsDashing);
-		return;
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BossMelee] StartMeleeAttack SUCCESS - Target=%s"), *Target->GetName());
-
-	CurrentTarget = Target;
+	// Reuse the inherited AMeleeNPC attack state so its Tick magnetism / trace / damage-window
+	// machinery drives this attack.
 	bIsAttacking = true;
-	bIsInMeleeWindup = true; // counter window opens until OnDamageWindowStart
+	CurrentMeleeTarget = Target;
+	CurrentTarget = Target;
 	HitActorsThisAttack.Empty();
+	bHasDealtDamage = false;
+	LastAttackTime = GetWorld()->GetTimeSeconds();
 
-	// Face target
-	FVector DirectionToTarget = (Target->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
-	if (!DirectionToTarget.IsNearlyZero())
+	// Face target (yaw only).
+	FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
+	ToTarget.Z = 0.0f;
+	if (!ToTarget.IsNearlyZero())
 	{
-		FRotator NewRotation = DirectionToTarget.Rotation();
+		FRotator NewRotation = ToTarget.Rotation();
 		NewRotation.Pitch = 0.0f;
 		NewRotation.Roll = 0.0f;
 		SetActorRotation(NewRotation);
 	}
 
-	// Crossfade from (currently-playing) dash montage into the attack montage
-	if (MeleeAttackMontages.Num() > 0)
+	// Lunge (far) vs in-place (close). Magnet pulls only on a lunge.
+	const float Dist = FVector::Dist2D(GetActorLocation(), Target->GetActorLocation());
+	const bool bLunge = Dist > InPlaceMeleeRange;
+	bEnableAttackMagnetism = bLunge;
+
+	const TArray<TObjectPtr<UAnimMontage>>& Pool = bLunge ? LungeMeleeMontages : InPlaceMeleeMontages;
+	UAnimMontage* MontageToPlay = (Pool.Num() > 0) ? Pool[FMath::RandRange(0, Pool.Num() - 1)].Get() : nullptr;
+
+	if (MontageToPlay)
 	{
-		int32 MontageIndex = FMath::RandRange(0, MeleeAttackMontages.Num() - 1);
-		UAnimMontage* SelectedMontage = MeleeAttackMontages[MontageIndex];
+		CrossfadeToMontage(MontageToPlay, MeleeStartBlendTime);
 
-		if (SelectedMontage)
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
 		{
-			CrossfadeToMontage(SelectedMontage, DashToAttackBlendTime);
-
-			// Bind montage end delegate so OnAttackMontageEnded fires for cooldown handling
-			if (USkeletalMeshComponent* MeshComp = GetMesh())
+			if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
 			{
-				if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-				{
-					FOnMontageEnded EndDelegate;
-					EndDelegate.BindUObject(this, &ABossCharacter::OnAttackMontageEnded);
-					AnimInstance->Montage_SetEndDelegate(EndDelegate, SelectedMontage);
-				}
+				FOnMontageEnded EndDelegate;
+				EndDelegate.BindUObject(this, &ABossCharacter::OnBossAttackMontageEnded);
+				AnimInstance->Montage_SetEndDelegate(EndDelegate, MontageToPlay);
 			}
 		}
+		// The damage window is opened/closed by the "Melee: Damage Window State" AnimNotify in
+		// the montage, which calls the inherited NotifyDamageWindowStart/End on this boss.
 	}
-
-	// Start damage window timer (use fixed timing for now, can be AnimNotify later)
-	float DamageWindowStartDelay = 0.2f;
-	float DamageWindowDuration = 0.3f;
-
-	GetWorld()->GetTimerManager().SetTimer(DamageWindowStartTimer, this, &ABossCharacter::OnDamageWindowStart, DamageWindowStartDelay, false);
-	GetWorld()->GetTimerManager().SetTimer(DamageWindowEndTimer, this, &ABossCharacter::OnDamageWindowEnd, DamageWindowStartDelay + DamageWindowDuration, false);
-
-	// Record attack time
-	LastMeleeAttackTime = GetWorld()->GetTimeSeconds();
-}
-
-bool ABossCharacter::CanMeleeAttack() const
-{
-	if (bIsDead || bIsAttacking || bIsInKnockback || bIsDashing || bIsInFinisherPhase)
+	else
 	{
-		return false;
+		// No montage configured — fail safe so the attack still deals damage and ends.
+		UE_LOG(LogTemp, Warning, TEXT("[BOSS] StartBossMeleeAttack: no %s montage set — using instant window."),
+			bLunge ? TEXT("Lunge") : TEXT("InPlace"));
+		bDamageWindowActive = true;
+		FTimerHandle TmpEnd;
+		GetWorld()->GetTimerManager().SetTimer(TmpEnd, [this]()
+		{
+			bDamageWindowActive = false;
+			bHasDealtDamage = true;
+			bIsAttacking = false;
+		}, 0.3f, false);
 	}
-
-	// Check cooldown
-	float TimeSinceLastAttack = GetWorld()->GetTimeSeconds() - LastMeleeAttackTime;
-	return TimeSinceLastAttack >= MeleeAttackCooldown;
 }
 
-bool ABossCharacter::IsTargetInMeleeRange(AActor* Target) const
+bool ABossCharacter::IsInMeleeWindup() const
 {
-	if (!Target)
+	// Own attack started, but the damage window has not opened and no damage has been dealt yet.
+	return bIsAttacking && !bDamageWindowActive && !bHasDealtDamage;
+}
+
+void ABossCharacter::OnBossAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	if (bDamageWindowActive)
 	{
-		return false;
+		// Mirror AMeleeNPC::OnDamageWindowEnd side effects (stops magnetism).
+		bDamageWindowActive = false;
+		bHasDealtDamage = true;
 	}
 
-	float Distance = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
-	return Distance <= MeleeAttackRange;
-}
+	if (UWorld* W = GetWorld())
+	{
+		W->GetTimerManager().ClearTimer(DamageWindowStartTimer);
+		W->GetTimerManager().ClearTimer(DamageWindowEndTimer);
+	}
 
-void ABossCharacter::OnDamageWindowStart()
-{
-	bDamageWindowActive = true;
-	bIsInMeleeWindup = false; // counter window closes once the swing becomes live
-}
-
-void ABossCharacter::OnDamageWindowEnd()
-{
-	bDamageWindowActive = false;
-}
-
-void ABossCharacter::OnAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted)
-{
 	bIsAttacking = false;
-	bDamageWindowActive = false;
-	bIsInMeleeWindup = false; // safety reset if montage was interrupted before damage window opened
 
-	// Start cooldown
-	bMeleeOnCooldown = true;
-	GetWorld()->GetTimerManager().SetTimer(MeleeCooldownTimer, this, &ABossCharacter::OnMeleeCooldownEnd, MeleeAttackCooldown, false);
+	if (ActiveCrossfadeMontage.Get() == Montage)
+	{
+		ActiveCrossfadeMontage.Reset();
+	}
 }
 
-void ABossCharacter::OnMeleeCooldownEnd()
+// ==================== Counter ====================
+
+bool ABossCharacter::IsBeingCountered(AActor* /*Attacker*/) const
 {
-	bMeleeOnCooldown = false;
+	return IsInMeleeWindup();
 }
 
-void ABossCharacter::PerformMeleeTrace()
+// ==================== Ranged / Disarm ====================
+
+bool ABossCharacter::IsDisarmed() const
 {
-	if (!bDamageWindowActive)
+	return !bIsDead && !bIsInFinisherPhase && (Weapon == nullptr);
+}
+
+bool ABossCharacter::CanBeYanked() const
+{
+	if (!Super::CanBeYanked())
+	{
+		return false;
+	}
+	const float ChargeAbs = EMFVelocityModifier ? FMath::Abs(EMFVelocityModifier->GetCharge()) : 0.0f;
+	return ChargeAbs >= YankChargeThreshold;
+}
+
+void ABossCharacter::SpawnNextWeapon()
+{
+	if (bIsDead || bIsInFinisherPhase)
 	{
 		return;
 	}
 
-	// Trace start/end
-	FVector TraceStart = GetActorLocation() + FVector(0, 0, 50.0f);
-	FVector TraceEnd = TraceStart + GetActorForwardVector() * MeleeTraceDistance;
-
-	// Perform sphere trace
-	TArray<FHitResult> HitResults;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-
-	bool bHit = GetWorld()->SweepMultiByChannel(
-		HitResults,
-		TraceStart,
-		TraceEnd,
-		FQuat::Identity,
-		ECC_Pawn,
-		FCollisionShape::MakeSphere(MeleeTraceRadius),
-		QueryParams
-	);
-
-	if (bHit)
+	// Cyclic re-arm: always respawn the single boss weapon (CurrentWeaponIndex stays 0), instead of
+	// AHumanoidNPC's exhaust-into-permanent-melee behavior. The disarmed window is the
+	// WeaponSwitchDelay between the yank and this call.
+	if (!WeaponInventory.IsValidIndex(0) || !WeaponInventory[0])
 	{
-		for (const FHitResult& Hit : HitResults)
+		return;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	Weapon = GetWorld()->SpawnActor<AShooterWeapon>(WeaponInventory[0], GetActorTransform(), SpawnParams);
+	if (Weapon)
+	{
+		// Fresh weapon: wire burst counting AND the fire montage (the inherited binding lived on the
+		// yanked actor, which is gone).
+		Weapon->OnShotFired.AddDynamic(this, &ABossCharacter::OnBossWeaponShotFiredReArmed);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Re-armed: %s"), *GetNameSafe(Weapon));
+}
+
+// ==================== Fire-Montage Fork ====================
+
+void ABossCharacter::OnBossWeaponShotFired()
+{
+	// Initial weapon: burst counting is handled by the inherited binding; montage only here.
+	DriveFireMontageForShot();
+}
+
+void ABossCharacter::OnBossWeaponShotFiredReArmed()
+{
+	// Re-armed weapon: drive burst counting (inherited binding is gone) then the montage.
+	OnWeaponShotFired();
+	DriveFireMontageForShot();
+}
+
+void ABossCharacter::DriveFireMontageForShot()
+{
+	if (bIsDead || bIsInFinisherPhase)
+	{
+		return;
+	}
+
+	// CurrentBurstShots / bInBurstCooldown have already been updated by the burst handler this shot.
+	if (bInBurstCooldown)
+	{
+		// Last shot of the burst → blend the fire montage back to locomotion.
+		CrossfadeToMontage(nullptr, FireMontageBlendTime);
+		return;
+	}
+
+	if (CurrentBurstShots <= 1)
+	{
+		if (FirstFireMontage)
 		{
-			AActor* HitActor = Hit.GetActor();
-			if (HitActor && !HitActorsThisAttack.Contains(HitActor))
-			{
-				// Check if this is the player (has Player tag)
-				if (HitActor->ActorHasTag(FName("Player")))
-				{
-					ApplyMeleeDamage(HitActor, Hit);
-					HitActorsThisAttack.Add(HitActor);
-				}
-			}
+			CrossfadeToMontage(FirstFireMontage, FireMontageBlendTime);
 		}
 	}
-}
-
-void ABossCharacter::ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitResult)
-{
-	if (!HitActor)
+	else
 	{
-		return;
+		if (ContinuousFireMontage)
+		{
+			CrossfadeToMontage(ContinuousFireMontage, FireMontageBlendTime);
+		}
 	}
-
-	// Apply damage
-	FPointDamageEvent DamageEvent(MeleeAttackDamage, HitResult, GetActorForwardVector(), nullptr);
-	HitActor->TakeDamage(MeleeAttackDamage, DamageEvent, GetController(), this);
-}
-
-void ABossCharacter::UpdateMeleeAttackPull(float DeltaTime)
-{
-	if (!bIsAttacking || !CurrentTarget.IsValid() || MeleeAttackPullSpeed <= 0.0f)
-	{
-		return;
-	}
-
-	// Knockback wins over magnet. While the boss is being knocked back by the player's melee,
-	// the pull is silent — otherwise the magnet would yank him right back into your face and
-	// melee feedback would be invisible.
-	if (bIsInKnockback)
-	{
-		return;
-	}
-
-	const FVector BossLocation = GetActorLocation();
-	const FVector PlayerLocation = CurrentTarget->GetActorLocation();
-
-	FVector ToPlayer = PlayerLocation - BossLocation;
-	ToPlayer.Z = 0.0f;
-
-	const float DistanceToPlayer = ToPlayer.Size();
-	if (DistanceToPlayer < KINDA_SMALL_NUMBER)
-	{
-		return;
-	}
-
-	// Magnet stops at attack range, not at the player's capsule. The boss hits from a stand-off
-	// distance and stays outside the player's capsule. Tune the stand-off via
-	// DashTargetDistanceFromPlayer; tune the magnet pull strength via MeleeAttackPullSpeed.
-	const float DesiredDistance = FMath::Max(DashTargetDistanceFromPlayer, 50.0f);
-	if (DistanceToPlayer <= DesiredDistance)
-	{
-		return;
-	}
-
-	const FVector PullDirection = ToPlayer.GetSafeNormal();
-	float PullDistance = MeleeAttackPullSpeed * DeltaTime;
-	PullDistance = FMath::Min(PullDistance, DistanceToPlayer - DesiredDistance);
-
-	FVector NewLocation = BossLocation + PullDirection * PullDistance;
-	NewLocation.Z = BossLocation.Z;
-	SetActorLocation(NewLocation, true);
-
-	FRotator NewRotation = PullDirection.Rotation();
-	NewRotation.Pitch = 0.0f;
-	NewRotation.Roll = 0.0f;
-	SetActorRotation(NewRotation);
 }
 
 // ==================== Finisher Phase ====================
@@ -939,40 +483,42 @@ void ABossCharacter::EnterFinisherPhase()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] EnterFinisherPhase: Posture broken, freezing on the spot. CurrentPhase=%d"),
-		(int)CurrentPhase);
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] EnterFinisherPhase: Posture broken, freezing on the spot."));
 
 	bIsInFinisherPhase = true;
 
-	// Cancel any ongoing phase transition
+	// Cancel any ongoing transition.
 	bIsTransitioning = false;
 	GetWorld()->GetTimerManager().ClearTimer(PhaseTransitionTimer);
 
-	// Stop any current actions
-	bIsDashing = false;
+	// Stop ranged fire and all combat actions.
+	StopShooting();
 	bIsAttacking = false;
 	bDamageWindowActive = false;
-	bIsInMeleeWindup = false;
+	bIsDashing = false;
 
-	// Cancel knockback completely
+	// Cancel knockback completely.
 	bIsInKnockback = false;
 	bIsKnockbackInterpolating = false;
 	KnockbackElapsedTime = 0.0f;
 
-	// Cancel slowdown — finisher freeze overrides it
+	// Cancel slowdown — finisher freeze overrides it.
 	if (bIsSlowed)
 	{
 		EndSlowdown();
 	}
 
-	// Stop all combat timers
-	GetWorld()->GetTimerManager().ClearTimer(DashCooldownTimer);
-	GetWorld()->GetTimerManager().ClearTimer(MeleeCooldownTimer);
-	GetWorld()->GetTimerManager().ClearTimer(DamageWindowStartTimer);
-	GetWorld()->GetTimerManager().ClearTimer(DamageWindowEndTimer);
-	GetWorld()->GetTimerManager().ClearTimer(SlowdownRecoveryTimer);
+	// Stop all combat timers (inherited + boss).
+	if (UWorld* W = GetWorld())
+	{
+		FTimerManager& TM = W->GetTimerManager();
+		TM.ClearTimer(DamageWindowStartTimer);
+		TM.ClearTimer(DamageWindowEndTimer);
+		TM.ClearTimer(AttackCooldownTimer);
+		TM.ClearTimer(SlowdownRecoveryTimer);
+	}
 
-	// Stop any montages and clear crossfade state
+	// Stop montages and clear crossfade tracking.
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
 		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
@@ -982,7 +528,7 @@ void ABossCharacter::EnterFinisherPhase()
 	}
 	ActiveCrossfadeMontage.Reset();
 
-	// Freeze movement IN PLACE — no teleport, boss falls into stun pose right where he is
+	// Freeze movement IN PLACE — boss falls into the stun pose where it stands.
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->StopMovementImmediately();
@@ -990,10 +536,10 @@ void ABossCharacter::EnterFinisherPhase()
 		MovementComp->DisableMovement();
 	}
 
-	// Transition to finisher phase (notifies StateTree, broadcasts OnPhaseChanged)
+	// Notify StateTree / widgets.
 	ExecutePhaseTransition(EBossPhase::Finisher);
 
-	// Face the player so the finisher window looks natural
+	// Face the player so the finisher window reads naturally.
 	if (CurrentTarget.IsValid())
 	{
 		FVector DirectionToPlayer = (CurrentTarget->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
@@ -1006,7 +552,7 @@ void ABossCharacter::EnterFinisherPhase()
 		}
 	}
 
-	// Play the in-place stun montage
+	// Play the in-place stun montage.
 	if (FinisherEnterStunMontage)
 	{
 		if (USkeletalMeshComponent* MeshComp = GetMesh())
@@ -1018,33 +564,16 @@ void ABossCharacter::EnterFinisherPhase()
 		}
 	}
 
-	// Spawn vulnerability VFX attached to boss
+	// Spawn vulnerability VFX attached to boss.
 	if (FinisherVulnerabilityVFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAttached(
-			FinisherVulnerabilityVFX,
-			GetRootComponent(),
-			NAME_None,
-			FVector::ZeroVector,
-			FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget,
-			true,
-			true
-		);
+			FinisherVulnerabilityVFX, GetRootComponent(), NAME_None,
+			FVector::ZeroVector, FRotator::ZeroRotator,
+			EAttachLocation::SnapToTarget, true, true);
 	}
 
 	OnFinisherReady.Broadcast();
-}
-
-void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
-{
-	// Ignore knockback in finisher phase - boss must stay frozen in his stun pose
-	if (bIsInFinisherPhase)
-	{
-		return;
-	}
-
-	Super::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 }
 
 void ABossCharacter::ExecuteFinisher(AActor* Attacker)
@@ -1054,24 +583,20 @@ void ABossCharacter::ExecuteFinisher(AActor* Attacker)
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisher called, starting knockback"));
-
-	// Start knockback sequence instead of instant death
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisher — starting knockback"));
 	StartFinisherKnockback();
 }
 
 void ABossCharacter::StartFinisherKnockback()
 {
 	bIsFinisherKnockback = true;
-	bIsInFinisherPhase = false; // No longer in finisher phase
+	bIsInFinisherPhase = false;
 
-	// Calculate knockback positions
 	FinisherKnockbackStartPos = GetActorLocation();
-	FVector NormalizedDirection = FinisherKnockbackDirection.GetSafeNormal();
+	const FVector NormalizedDirection = FinisherKnockbackDirection.GetSafeNormal();
 	FinisherKnockbackEndPos = FinisherKnockbackStartPos + NormalizedDirection * FinisherKnockbackDistance;
 	FinisherKnockbackElapsed = 0.0f;
 
-	// Play knockback animation
 	if (FinisherKnockbackMontage)
 	{
 		if (USkeletalMeshComponent* MeshComp = GetMesh())
@@ -1083,26 +608,20 @@ void ABossCharacter::StartFinisherKnockback()
 		}
 	}
 
-	// Disable movement
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		MovementComp->DisableMovement();
 	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Knockback started: %s -> %s over %.2f seconds"),
-		*FinisherKnockbackStartPos.ToString(), *FinisherKnockbackEndPos.ToString(), FinisherKnockbackDuration);
 }
 
 void ABossCharacter::UpdateFinisherKnockback(float DeltaTime)
 {
 	FinisherKnockbackElapsed += DeltaTime;
 
-	float Alpha = FMath::Clamp(FinisherKnockbackElapsed / FinisherKnockbackDuration, 0.0f, 1.0f);
+	const float Alpha = FMath::Clamp(FinisherKnockbackElapsed / FinisherKnockbackDuration, 0.0f, 1.0f);
+	const float EasedAlpha = 1.0f - FMath::Pow(1.0f - Alpha, 2.0f);
 
-	// Use EaseOut for knockback (fast start, slow at end)
-	float EasedAlpha = 1.0f - FMath::Pow(1.0f - Alpha, 2.0f);
-
-	FVector NewPosition = FMath::Lerp(FinisherKnockbackStartPos, FinisherKnockbackEndPos, EasedAlpha);
+	const FVector NewPosition = FMath::Lerp(FinisherKnockbackStartPos, FinisherKnockbackEndPos, EasedAlpha);
 	SetActorLocation(NewPosition);
 
 	if (Alpha >= 1.0f)
@@ -1113,112 +632,77 @@ void ABossCharacter::UpdateFinisherKnockback(float DeltaTime)
 
 void ABossCharacter::OnFinisherKnockbackComplete()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Knockback complete, triggering death"));
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Knockback complete — death"));
 
 	bIsFinisherKnockback = false;
 
-	// Spawn death VFX
 	if (FinisherDeathVFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(),
-			FinisherDeathVFX,
-			GetActorLocation(),
-			GetActorRotation(),
-			FVector(1.0f),
-			true,
-			true
-		);
+			GetWorld(), FinisherDeathVFX, GetActorLocation(), GetActorRotation(),
+			FVector(1.0f), true, true);
 	}
 
-	// Enable ragdoll on mesh
+	// Ragdoll the mesh.
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
 		MeshComp->SetSimulatePhysics(true);
 		MeshComp->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
 
-		// Apply small impulse in knockback direction for dramatic effect
-		FVector Impulse = FinisherKnockbackDirection.GetSafeNormal() * 500.0f;
+		const FVector Impulse = FinisherKnockbackDirection.GetSafeNormal() * 500.0f;
 		MeshComp->AddImpulse(Impulse, NAME_None, true);
 	}
 
-	// Disable capsule collision
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
 
-	// Broadcast defeat event (for cutscene trigger)
 	OnBossDefeated.Broadcast();
 
-	// Mark as dead
 	CurrentHP = 0.0f;
 	bIsDead = true;
 }
 
-// ==================== Target Management ====================
+// ==================== Knockback Override ====================
 
-void ABossCharacter::SetTarget(AActor* NewTarget)
+void ABossCharacter::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
-	AActor* OldTarget = CurrentTarget.Get();
-	if (OldTarget != NewTarget)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BOSS_DEBUG] SetTarget: %s -> %s"),
-			*GetNameSafe(OldTarget), *GetNameSafe(NewTarget));
-	}
-	CurrentTarget = NewTarget;
-}
-
-AArenaManager* ABossCharacter::GetLinkedArena() const
-{
-	return LinkedArena.Get();
-}
-
-// ==================== Animation Blending ====================
-
-void ABossCharacter::CrossfadeToMontage(UAnimMontage* NewMontage, float CrossfadeTime, float PlayRate)
-{
-	if (!NewMontage)
+	// Frozen during finisher / scripted finisher knockback.
+	if (bIsInFinisherPhase || bIsFinisherKnockback)
 	{
 		return;
 	}
 
-	USkeletalMeshComponent* MeshComp = GetMesh();
-	if (!MeshComp)
+	// Boss is generally immune to being shoved around (inherited HumanoidNPC body immunity).
+	// The ONLY exception: a player hit during the boss's own melee windup (the counter window).
+	const bool bCounterWindow = IsInMeleeWindup()
+		|| (GetWorld() && (GetWorld()->GetTimeSeconds() - LastCounterRegisteredTime) < 0.15f);
+
+	if (!bCounterWindow)
 	{
 		return;
 	}
 
-	UAnimInstance* AnimInst = MeshComp->GetAnimInstance();
-	if (!AnimInst)
+	// Counter knockback: interrupt the swing, then apply a REAL knockback. Call AShooterNPC's
+	// implementation directly to bypass HumanoidNPC's blanket immunity and MeleeNPC's parry path.
+	bIsAttacking = false;
+	bDamageWindowActive = false;
+	if (UWorld* W = GetWorld())
 	{
-		return;
+		W->GetTimerManager().ClearTimer(DamageWindowStartTimer);
+		W->GetTimerManager().ClearTimer(DamageWindowEndTimer);
 	}
 
-	// Blend out the previously-tracked montage so it fades while the new one ramps up.
-	UAnimMontage* OldMontage = ActiveCrossfadeMontage.Get();
-	if (OldMontage && OldMontage != NewMontage && AnimInst->Montage_IsPlaying(OldMontage))
-	{
-		AnimInst->Montage_Stop(CrossfadeTime, OldMontage);
-	}
-
-	// Play new montage with an explicit blend-in (UE 5.5+ API).
-	// bStopAllMontages=false because we already blended out the previous tracked montage above;
-	// blending in here is what produces the actual crossfade overlap.
-	FAlphaBlendArgs BlendInArgs;
-	BlendInArgs.BlendTime = CrossfadeTime;
-	AnimInst->Montage_PlayWithBlendIn(NewMontage, BlendInArgs, PlayRate,
-		EMontagePlayReturnType::MontageLength, 0.0f, false);
-
-	ActiveCrossfadeMontage = NewMontage;
+	AShooterNPC::ApplyKnockback(InKnockbackDirection, Distance, Duration, AttackerLocation, bKeepEMFEnabled, Style);
 }
 
 // ==================== Stun / Slowdown ====================
 
 void ABossCharacter::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 {
-	// While Posture is alive, prop impacts only SLOW the boss; they don't stun.
-	// Actual stun (full freeze + finisher window) only comes from Posture break = HP→1.
+	// While Posture is alive, prop impacts only SLOW the boss; they don't stun. A real stun (full
+	// freeze + finisher window) only comes from Posture break (HP -> 1).
 	if (bIsInFinisherPhase || bIsDead || CurrentHP <= 1.0f)
 	{
 		return;
@@ -1230,23 +714,18 @@ void ABossCharacter::ApplyExplosionStun(float Duration, UAnimMontage* StunMontag
 		return;
 	}
 
-	// (Re)apply slowdown. Starting a fresh slowdown resets the timer to the new duration.
 	bIsSlowed = true;
 	MovementComp->MaxWalkSpeed = DefaultMaxWalkSpeed * SlowdownStrength;
 
 	const float SlowdownDuration = Duration * StunToSlowdownTimeScale;
 	if (SlowdownDuration > 0.0f)
 	{
-		GetWorld()->GetTimerManager().SetTimer(SlowdownRecoveryTimer, this,
-			&ABossCharacter::EndSlowdown, SlowdownDuration, false);
+		GetWorld()->GetTimerManager().SetTimer(SlowdownRecoveryTimer, this, &ABossCharacter::EndSlowdown, SlowdownDuration, false);
 	}
 	else
 	{
 		EndSlowdown();
 	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Prop-impact slowdown: MaxWalkSpeed=%.0f for %.2fs"),
-		MovementComp->MaxWalkSpeed, SlowdownDuration);
 }
 
 void ABossCharacter::EndSlowdown()
@@ -1258,17 +737,6 @@ void ABossCharacter::EndSlowdown()
 	bIsSlowed = false;
 }
 
-// ==================== Counter ====================
-
-bool ABossCharacter::IsBeingCountered(AActor* /*Attacker*/) const
-{
-	// Counter window: any hit landing while the boss is mid-dash or in melee windup
-	// (i.e. before the swing has become live and dealt damage to the player).
-	// CounterDistance / CounterDotThreshold are intentionally unused now — kept on the
-	// header for future tuning if we want to gate the counter geometrically again.
-	return bIsInMeleeWindup || bIsDashing;
-}
-
 // ==================== Posture Regen ====================
 
 void ABossCharacter::UpdatePostureRegen(float DeltaTime)
@@ -1278,7 +746,6 @@ void ABossCharacter::UpdatePostureRegen(float DeltaTime)
 		return;
 	}
 
-	// Sample regen-per-second from the curve; fall back to base × percent² if no curve.
 	float RegenPerSec = 0.0f;
 	if (PostureRegenByArenaPropCurve)
 	{
@@ -1297,10 +764,7 @@ void ABossCharacter::UpdatePostureRegen(float DeltaTime)
 	const float OldHP = CurrentHP;
 	CurrentHP = FMath::Min(MaxHP, CurrentHP + RegenPerSec * DeltaTime);
 
-	// Notify health-tracking widgets so the Posture bar can repaint on regen, not just on
-	// damage. We reuse OnDamageTaken with DamageAmount=0 to mean "HP changed, no damage event",
-	// and throttle the broadcast to once per integer-HP crossing so we don't flood the
-	// multicast delegate every tick.
+	// Repaint the posture bar on regen, throttled to once per integer-HP crossing.
 	const int32 OldHPInt = FMath::FloorToInt(OldHP);
 	const int32 NewHPInt = FMath::FloorToInt(CurrentHP);
 	if (NewHPInt != OldHPInt)
@@ -1311,10 +775,8 @@ void ABossCharacter::UpdatePostureRegen(float DeltaTime)
 
 void ABossCharacter::OnArenaPropPercentChanged(float RemainingPercent, int32 AliveCount)
 {
-	// Convert raw RemainingPercent (1.0 = nothing destroyed, 0.0 = ALL props destroyed) into the
-	// "datacenter HP" that the design actually cares about: 1.0 = full HP, 0.0 = destroyed-at-threshold.
-	// This is what feeds the Posture-regen curve, so the curve's X axis maps cleanly to the bar the
-	// player sees. Crossing the threshold reads as Effective=0, regen=0, boss is left to be finished.
+	// Remap raw RemainingPercent (1 = nothing destroyed) into "datacenter HP" (1 = full,
+	// 0 = destroyed-at-threshold) so the posture-regen curve's X axis matches the player-facing bar.
 	float EffectivePercent = FMath::Clamp(RemainingPercent, 0.0f, 1.0f);
 	if (AArenaManager* Arena = LinkedArena.Get())
 	{
@@ -1325,3 +787,62 @@ void ABossCharacter::OnArenaPropPercentChanged(float RemainingPercent, int32 Ali
 	CachedArenaPropPercent = EffectivePercent;
 }
 
+// ==================== Animation Blending ====================
+
+void ABossCharacter::CrossfadeToMontage(UAnimMontage* NewMontage, float CrossfadeTime, float PlayRate)
+{
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	UAnimInstance* AnimInst = MeshComp->GetAnimInstance();
+	if (!AnimInst)
+	{
+		return;
+	}
+
+	UAnimMontage* OldMontage = ActiveCrossfadeMontage.Get();
+
+	// nullptr → blend the tracked montage out to locomotion.
+	if (!NewMontage)
+	{
+		if (OldMontage && AnimInst->Montage_IsPlaying(OldMontage))
+		{
+			AnimInst->Montage_Stop(CrossfadeTime, OldMontage);
+		}
+		ActiveCrossfadeMontage.Reset();
+		return;
+	}
+
+	// Already playing this montage → don't restart it (keeps a looping fire montage stable).
+	if (OldMontage == NewMontage && AnimInst->Montage_IsPlaying(NewMontage))
+	{
+		return;
+	}
+
+	// Blend out the previously-tracked montage so it fades while the new one ramps up.
+	if (OldMontage && OldMontage != NewMontage && AnimInst->Montage_IsPlaying(OldMontage))
+	{
+		AnimInst->Montage_Stop(CrossfadeTime, OldMontage);
+	}
+
+	FAlphaBlendArgs BlendInArgs;
+	BlendInArgs.BlendTime = CrossfadeTime;
+	AnimInst->Montage_PlayWithBlendIn(NewMontage, BlendInArgs, PlayRate, EMontagePlayReturnType::MontageLength, 0.0f, false);
+
+	ActiveCrossfadeMontage = NewMontage;
+}
+
+// ==================== Target Management ====================
+
+void ABossCharacter::SetTarget(AActor* NewTarget)
+{
+	CurrentTarget = NewTarget;
+}
+
+AArenaManager* ABossCharacter::GetLinkedArena() const
+{
+	return LinkedArena.Get();
+}

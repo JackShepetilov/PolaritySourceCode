@@ -105,9 +105,10 @@ public:
 	float CalculateWeaponYankRange() const;
 
 	/** True if a yank can start: ranged mode, weapon valid, no yank in progress, not dead.
-	 *  Returns false while a shield is still active — shield must be yanked first. */
+	 *  Returns false while a shield is still active — shield must be yanked first.
+	 *  Virtual so subclasses (e.g. ABossCharacter) can add extra gates such as a charge threshold. */
 	UFUNCTION(BlueprintPure, Category = "Humanoid")
-	bool CanBeYanked() const;
+	virtual bool CanBeYanked() const;
 
 	// ==================== Shield API ====================
 
@@ -157,8 +158,10 @@ protected:
 
 	// ==================== Internal Weapon Management ====================
 
-	/** Increments CurrentWeaponIndex and spawns the next weapon, or calls EnterMeleeMode(). */
-	void SpawnNextWeapon();
+	/** Increments CurrentWeaponIndex and spawns the next weapon, or calls EnterMeleeMode().
+	 *  Virtual so subclasses (e.g. ABossCharacter) can implement a cyclic re-arm instead of
+	 *  exhausting the inventory into permanent melee mode. */
+	virtual void SpawnNextWeapon();
 
 	/** Destroys Weapon actor and nulls the pointer. */
 	void DespawnCurrentWeapon();

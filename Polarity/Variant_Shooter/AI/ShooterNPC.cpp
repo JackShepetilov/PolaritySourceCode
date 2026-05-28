@@ -37,7 +37,6 @@
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "XPSubsystem.h"
 #include "Engine/GameInstance.h"
-#include "Boss/BossProjectile.h"
 #include "../Pickups/HealthPickup.h"
 #include "../Pickups/ArmorPickup.h"
 #include "FlyingDrone.h"
@@ -280,47 +279,27 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		return 0.0f;
 	}
 
-	// Ignore friendly fire from other NPCs (except parried projectiles)
-	bool bIsParriedProjectile = false;
+	// Ignore friendly fire from other NPCs
 	if (DamageCauser)
 	{
-		// Check if this is a parried BossProjectile - those SHOULD damage the boss
-		if (ABossProjectile* BossProj = Cast<ABossProjectile>(DamageCauser))
+		// Allow collision/physics damage types from NPCs (Wallslam, EMFProximity)
+		// These come from NPC-NPC collisions and are NOT weapon friendly fire
+		bool bIsCollisionDamage = DamageEvent.DamageTypeClass &&
+			(DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Wallslam::StaticClass()) ||
+			 DamageEvent.DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()));
+
+		if (!bIsCollisionDamage)
 		{
-			if (BossProj->WasParried())
+			// Check if damage came from another ShooterNPC (through their weapon)
+			AActor* DamageOwner = DamageCauser->GetOwner();
+			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
 			{
-				// Allow parried projectile damage to go through
-				UE_LOG(LogTemp, Warning, TEXT("[ShooterNPC] Allowing parried BossProjectile damage: %.1f"), Damage);
-				bIsParriedProjectile = true;
-				// Don't return - let damage be applied
-			}
-			else
-			{
-				// Non-parried boss projectile - still ignore friendly fire
 				return 0.0f;
 			}
 		}
-		else
-		{
-			// Allow collision/physics damage types from NPCs (Wallslam, EMFProximity)
-			// These come from NPC-NPC collisions and are NOT weapon friendly fire
-			bool bIsCollisionDamage = DamageEvent.DamageTypeClass &&
-				(DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Wallslam::StaticClass()) ||
-				 DamageEvent.DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()));
 
-			if (!bIsCollisionDamage)
-			{
-				// Check if damage came from another ShooterNPC (through their weapon)
-				AActor* DamageOwner = DamageCauser->GetOwner();
-				if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
-				{
-					return 0.0f;
-				}
-			}
-		}
-
-		// Also check the instigator's pawn (but allow parried projectiles)
-		if (EventInstigator && !bIsParriedProjectile)
+		// Also check the instigator's pawn
+		if (EventInstigator)
 		{
 			if (Cast<AShooterNPC>(EventInstigator->GetPawn()))
 			{
