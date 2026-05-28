@@ -231,3 +231,176 @@ struct POLARITY_API FStateTreeBossInFinisherCondition : public FStateTreeConditi
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
 #endif
 };
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Choose Action (weighted Shoot / Melee; forced Melee while disarmed)
+// Run this between strafes; branch afterwards on the "Boss Pending Action Is" condition.
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossChooseActionInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+};
+
+USTRUCT(meta = (DisplayName = "Boss Choose Action", Category = "Boss"))
+struct POLARITY_API FStateTreeBossChooseActionTask : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossChooseActionInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Shoot (single ranged burst)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossShootInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	/** Safety cap — end the task even if the burst never reports complete (e.g. out of ammo). */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.5"))
+	float MaxShootDuration = 5.0f;
+
+	UPROPERTY()
+	float ElapsedTime = 0.0f;
+};
+
+USTRUCT(meta = (DisplayName = "Boss Shoot", Category = "Boss"))
+struct POLARITY_API FStateTreeBossShootTask : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossShootInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Strafe (Sekiro/DS orbit around the player for a duration)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossStrafeInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	UPROPERTY()
+	float ElapsedTime = 0.0f;
+
+	UPROPERTY()
+	float RepathTimer = 0.0f;
+
+	UPROPERTY()
+	float Direction = 1.0f;
+
+	UPROPERTY()
+	float Duration = 2.5f;
+};
+
+USTRUCT(meta = (DisplayName = "Boss Strafe", Category = "Boss"))
+struct POLARITY_API FStateTreeBossStrafeTask : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossStrafeInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Is Disarmed (no ranged weapon)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossIsDisarmedInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+};
+
+USTRUCT(DisplayName = "Boss Is Disarmed", Category = "Boss")
+struct POLARITY_API FStateTreeBossIsDisarmedCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossIsDisarmedInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Boss Pending Action Is (branch after Choose Action)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossPendingActionIsInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	EBossAction ExpectedAction = EBossAction::Shoot;
+};
+
+USTRUCT(DisplayName = "Boss Pending Action Is", Category = "Boss")
+struct POLARITY_API FStateTreeBossPendingActionIsCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossPendingActionIsInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};

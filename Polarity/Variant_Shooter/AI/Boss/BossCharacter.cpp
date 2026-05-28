@@ -6,6 +6,7 @@
 #include "ShooterWeapon.h"
 #include "Polarity/Arena/ArenaManager.h"
 #include "EMFVelocityModifier.h"
+#include "AIController.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -53,6 +54,9 @@ ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 	MagnetismStopDistance = 120.0f;  // stand-off where the lunge stops in front of the player
 	AttackRange = 600.0f;            // boss commits to a (lunge) melee from this far
 	AttackCooldown = 0.6f;
+
+	// Solo boss — don't gate fire on the squad combat coordinator.
+	bUseCoordinator = false;
 }
 
 void ABossCharacter::BeginPlay()
@@ -66,6 +70,12 @@ void ABossCharacter::BeginPlay()
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
 		DefaultMaxWalkSpeed = MovementComp->MaxWalkSpeed;
+
+		// Face the target via controller desired rotation (AIController focus) instead of orienting
+		// to movement — this is what lets the boss strafe sideways while facing the player and feed
+		// a strafe blendspace (Sekiro/DS feel).
+		MovementComp->bOrientRotationToMovement = false;
+		MovementComp->bUseControllerDesiredRotation = true;
 	}
 
 	// Drive the crossfaded fire-montage fork off the INITIAL weapon's shots. Burst counting is
@@ -288,7 +298,7 @@ void ABossCharacter::StartBossMeleeAttack(AActor* Target)
 	// machinery drives this attack.
 	bIsAttacking = true;
 	CurrentMeleeTarget = Target;
-	CurrentTarget = Target;
+	SetTarget(Target);
 	HitActorsThisAttack.Empty();
 	bHasDealtDamage = false;
 	LastAttackTime = GetWorld()->GetTimeSeconds();
@@ -426,6 +436,85 @@ void ABossCharacter::SpawnNextWeapon()
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Re-armed: %s"), *GetNameSafe(Weapon));
+}
+
+void ABossCharacter::StartShootBurst(AActor* Target)
+{
+	if (!Target || bIsDead || bIsInFinisherPhase || IsDisarmed())
+	{
+		return;
+	}
+
+	SetTarget(Target);
+	// bHasExternalPermission = true → skip the squad coordinator (RequestAttackPermission returns true).
+	StartShooting(Target, true);
+}
+
+// ==================== Behavior (StateTree-driven) ====================
+
+void ABossCharacter::ChooseNextAction()
+{
+	// No weapon → can only melee.
+	if (IsDisarmed())
+	{
+		PendingAction = EBossAction::Melee;
+		return;
+	}
+
+	const float Total = FMath::Max(ShootActionWeight + MeleeActionWeight, KINDA_SMALL_NUMBER);
+	const float Roll = FMath::FRand() * Total;
+	PendingAction = (Roll < ShootActionWeight) ? EBossAction::Shoot : EBossAction::Melee;
+}
+
+float ABossCharacter::GetStrafeDurationForState() const
+{
+	return IsDisarmed() ? StrafeDurationDisarmed : StrafeDuration;
+}
+
+void ABossCharacter::BeginStrafe(AActor* Target)
+{
+	// Face the player while orbiting (drives the strafe blendspace via controller-desired rotation).
+	SetTarget(Target);
+}
+
+void ABossCharacter::StrafeStep(AActor* Target, float Direction)
+{
+	if (!Target)
+	{
+		return;
+	}
+
+	AAIController* AI = Cast<AAIController>(GetController());
+	if (!AI)
+	{
+		return;
+	}
+
+	const FVector TargetLoc = Target->GetActorLocation();
+	FVector ToBoss = GetActorLocation() - TargetLoc;
+	ToBoss.Z = 0.0f;
+	if (ToBoss.IsNearlyZero())
+	{
+		ToBoss = -GetActorForwardVector();
+	}
+	ToBoss = ToBoss.GetSafeNormal2D();
+
+	// Step around the player's circle in the chosen direction, keeping StrafeRadius distance.
+	const float SignedStep = (Direction >= 0.0f ? 1.0f : -1.0f) * StrafeStepAngleDeg;
+	const FVector StepDir = ToBoss.RotateAngleAxis(SignedStep, FVector::UpVector);
+	const FVector RingPoint = TargetLoc + StepDir * StrafeRadius;
+
+	AI->MoveToLocation(RingPoint, StrafeAcceptanceRadius,
+		/*bStopOnOverlap*/ false, /*bUsePathfinding*/ true,
+		/*bProjectDestinationToNavigation*/ true, /*bCanStrafe*/ true);
+}
+
+void ABossCharacter::StopStrafe()
+{
+	if (AAIController* AI = Cast<AAIController>(GetController()))
+	{
+		AI->StopMovement();
+	}
 }
 
 // ==================== Fire-Montage Fork ====================
@@ -840,6 +929,20 @@ void ABossCharacter::CrossfadeToMontage(UAnimMontage* NewMontage, float Crossfad
 void ABossCharacter::SetTarget(AActor* NewTarget)
 {
 	CurrentTarget = NewTarget;
+
+	// Keep the controller focused on the target so bUseControllerDesiredRotation faces the player
+	// in every state (strafe sideways, lunge, in-place, shoot).
+	if (AAIController* AI = Cast<AAIController>(GetController()))
+	{
+		if (NewTarget)
+		{
+			AI->SetFocus(NewTarget);
+		}
+		else
+		{
+			AI->ClearFocus(EAIFocusPriority::Gameplay);
+		}
+	}
 }
 
 AArenaManager* ABossCharacter::GetLinkedArena() const

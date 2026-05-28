@@ -34,6 +34,14 @@ enum class EBossPhase : uint8
 	Finisher	UMETA(DisplayName = "Finisher Phase")
 };
 
+/** Action the boss commits to after a strafe (chosen by ChooseNextAction). */
+UENUM(BlueprintType)
+enum class EBossAction : uint8
+{
+	Shoot	UMETA(DisplayName = "Shoot (ranged burst)"),
+	Melee	UMETA(DisplayName = "Melee (approach + strike)")
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBossPhaseChanged, EBossPhase, OldPhase, EBossPhase, NewPhase);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossFinisherReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnBossDefeated);
@@ -95,6 +103,44 @@ protected:
 	 *  Layered on top of AHumanoidNPC::CanBeYanked() via the override below. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Yank", meta = (ClampMin = "0.0"))
 	float YankChargeThreshold = 50.0f;
+
+	// ==================== Behavior: Action Choice ====================
+	// The boss cycle is: strafe → ChooseNextAction (weighted) → Shoot or Melee → back to strafe.
+	// When disarmed (weapon just yanked) the choice is forced to Melee.
+
+	/** Relative weight of choosing a ranged burst (vs melee) when armed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior", meta = (ClampMin = "0.0"))
+	float ShootActionWeight = 1.0f;
+
+	/** Relative weight of choosing a melee approach (vs shoot) when armed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior", meta = (ClampMin = "0.0"))
+	float MeleeActionWeight = 1.0f;
+
+	// ==================== Behavior: Strafe (Sekiro/DS orbit) ====================
+
+	/** Preferred distance the boss keeps from the player while strafing (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "0.0"))
+	float StrafeRadius = 700.0f;
+
+	/** How long a normal strafe lasts before the boss picks an action (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "0.0"))
+	float StrafeDuration = 2.5f;
+
+	/** Shorter strafe time used while disarmed (boss is more aggressive without its gun). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "0.0"))
+	float StrafeDurationDisarmed = 1.0f;
+
+	/** How often the strafe issues a new orbit MoveTo (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "0.05"))
+	float StrafeRepathInterval = 0.5f;
+
+	/** Angle stepped around the player per repath (deg) — sets the orbit speed/curve. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "1.0", ClampMax = "120.0"))
+	float StrafeStepAngleDeg = 35.0f;
+
+	/** MoveTo acceptance radius for orbit points (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "1.0"))
+	float StrafeAcceptanceRadius = 80.0f;
 
 	// ==================== Animation Blending (melee) ====================
 
@@ -185,6 +231,9 @@ protected:
 	 *  knockback regardless of whether the player's TakeDamage or ApplyKnockback fires first. */
 	float LastCounterRegisteredTime = -10.0f;
 
+	/** Action chosen by the last ChooseNextAction(); the StateTree branches on it. */
+	EBossAction PendingAction = EBossAction::Shoot;
+
 	/** Last broadcast datacenter prop percent, remapped to 1.0 = full, 0.0 = destroyed-at-threshold. */
 	float CachedArenaPropPercent = 1.0f;
 
@@ -258,6 +307,40 @@ public:
 	/** True when the boss currently holds no ranged weapon (just yanked, waiting to re-arm). */
 	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
 	bool IsDisarmed() const;
+
+	/** Start a single ranged burst at Target (StateTree shoot task). Bypasses the squad
+	 *  coordinator (solo boss). The burst ends via the inherited burst-cooldown logic. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
+	void StartShootBurst(AActor* Target);
+
+	// ==================== Behavior (StateTree-driven) ====================
+
+	/** Pick the next action with weights; forced to Melee while disarmed. Stores PendingAction. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Behavior")
+	void ChooseNextAction();
+
+	UFUNCTION(BlueprintPure, Category = "Boss|Behavior")
+	EBossAction GetPendingAction() const { return PendingAction; }
+
+	/** Strafe duration for the current state (shorter while disarmed). */
+	UFUNCTION(BlueprintPure, Category = "Boss|Behavior")
+	float GetStrafeDurationForState() const;
+
+	/** How often the strafe task should issue a new orbit MoveTo (s). */
+	UFUNCTION(BlueprintPure, Category = "Boss|Behavior")
+	float GetStrafeRepathInterval() const { return StrafeRepathInterval; }
+
+	/** Begin a strafe: focus the controller on Target so the boss faces it while orbiting. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Behavior")
+	void BeginStrafe(AActor* Target);
+
+	/** Issue one orbit MoveTo around Target. Direction +1 = CCW, -1 = CW. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Behavior")
+	void StrafeStep(AActor* Target, float Direction);
+
+	/** Stop the strafe movement. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Behavior")
+	void StopStrafe();
 
 	// ==================== Counter ====================
 
