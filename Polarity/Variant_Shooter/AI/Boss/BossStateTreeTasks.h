@@ -404,3 +404,45 @@ struct POLARITY_API FStateTreeBossPendingActionIsCondition : public FStateTreeCo
 	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
 #endif
 };
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Approach Target
+// Runs up to the player (nav MoveTo) until within AttackRange, then Succeeds — so the melee
+// attack always lunges from a controlled distance instead of across the arena.
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossApproachInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	/** Re-issue MoveTo this often (s) as a safety net against aborted/stuck paths. */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "0.1"))
+	float RepathInterval = 0.5f;
+
+	UPROPERTY()
+	float RepathTimer = 0.0f;
+};
+
+USTRUCT(meta = (DisplayName = "Boss Approach Target", Category = "Boss"))
+struct POLARITY_API FStateTreeBossApproachTask : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossApproachInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};

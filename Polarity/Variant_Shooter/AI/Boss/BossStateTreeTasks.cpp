@@ -4,6 +4,7 @@
 #include "BossStateTreeTasks.h"
 #include "BossCharacter.h"
 #include "StateTreeExecutionContext.h"
+#include "AIController.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
 //////////////////////////////////////////////////////////////////
@@ -358,5 +359,99 @@ FText FStateTreeBossPendingActionIsCondition::GetDescription(const FGuid& ID, FS
 		return FText::FromString(FString::Printf(TEXT("Boss Pending Action is %s"), *ActionName));
 	}
 	return FText::FromString(TEXT("Boss Pending Action Is"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// TASK: Boss Approach Target
+//////////////////////////////////////////////////////////////////
+
+namespace
+{
+	// Run up to the player, stopping at the boss's AttackRange (the lunge launch distance).
+	void IssueBossApproachMove(ABossCharacter* Boss, AActor* Target)
+	{
+		if (AAIController* AI = Cast<AAIController>(Boss->GetController()))
+		{
+			AI->MoveToActor(Target, Boss->GetAttackRange(),
+				/*bStopOnOverlap*/ false, /*bUsePathfinding*/ true, /*bCanStrafe*/ true);
+		}
+	}
+
+	void StopBossMovement(ABossCharacter* Boss)
+	{
+		if (AAIController* AI = Cast<AAIController>(Boss->GetController()))
+		{
+			AI->StopMovement();
+		}
+	}
+}
+
+EStateTreeRunStatus FStateTreeBossApproachTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss || !InstanceData.Target)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Already within lunge range → no approach needed, let the attack fire immediately.
+	if (InstanceData.Boss->IsTargetInAttackRange(InstanceData.Target))
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	InstanceData.Boss->SetTarget(InstanceData.Target); // focus → faces player while running up
+	InstanceData.RepathTimer = 0.0f;
+	IssueBossApproachMove(InstanceData.Boss, InstanceData.Target);
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FStateTreeBossApproachTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+
+	if (!InstanceData.Boss || !InstanceData.Target)
+	{
+		if (InstanceData.Boss)
+		{
+			StopBossMovement(InstanceData.Boss);
+		}
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Reached lunge range → done; the melee attack launches the lunge from here.
+	if (InstanceData.Boss->IsTargetInAttackRange(InstanceData.Target))
+	{
+		StopBossMovement(InstanceData.Boss);
+		return EStateTreeRunStatus::Succeeded;
+	}
+
+	// Re-issue the move periodically so a moving/dodging player is still chased.
+	InstanceData.RepathTimer += DeltaTime;
+	if (InstanceData.RepathTimer >= InstanceData.RepathInterval)
+	{
+		InstanceData.RepathTimer = 0.0f;
+		IssueBossApproachMove(InstanceData.Boss, InstanceData.Target);
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FStateTreeBossApproachTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+	if (InstanceData.Boss)
+	{
+		StopBossMovement(InstanceData.Boss);
+	}
+}
+
+#if WITH_EDITOR
+FText FStateTreeBossApproachTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Boss: Approach Target (run up to lunge range)"));
 }
 #endif

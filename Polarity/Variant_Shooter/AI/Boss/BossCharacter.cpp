@@ -52,7 +52,7 @@ ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 	bEnableAttackMagnetism = true;
 	MagnetismSpeed = 900.0f;         // lunge pull speed (cm/s)
 	MagnetismStopDistance = 120.0f;  // stand-off where the lunge stops in front of the player
-	AttackRange = 600.0f;            // boss commits to a (lunge) melee from this far
+	AttackRange = 400.0f;            // approach stops here = lunge launch distance (keep < StrafeRadius)
 	AttackCooldown = 0.6f;
 
 	// Solo boss — don't gate fire on the squad combat coordinator.
