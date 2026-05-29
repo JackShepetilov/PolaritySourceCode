@@ -83,17 +83,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Melee", meta = (ClampMin = "0.0"))
 	float InPlaceMeleeRange = 180.0f;
 
-	// ==================== Ranged: Fire-Montage Fork (crossfaded) ====================
+	// ==================== Ranged: Fire Montage (notify-driven) ====================
 
-	/** Crossfaded in from locomotion on the FIRST shot of a burst. */
+	/** Burst-fire animation. Place a "Boss — Fire One Shot" notify at each shot frame: every notify
+	 *  fires one round, so the animation drives the firing cadence and number of shots. Plays once
+	 *  per Shoot action; the Shoot task ends when this montage ends. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage")
-	TObjectPtr<UAnimMontage> FirstFireMontage;
+	TObjectPtr<UAnimMontage> FireMontage;
 
-	/** Crossfaded on the 2nd+ shots of a burst; on the last shot it crossfades back to locomotion. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage")
-	TObjectPtr<UAnimMontage> ContinuousFireMontage;
-
-	/** Crossfade time for all fire-montage transitions (in, between, out). */
+	/** Crossfade time when blending into the fire montage from locomotion. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FireMontageBlendTime = 0.12f;
 
@@ -234,6 +232,9 @@ protected:
 	/** Action chosen by the last ChooseNextAction(); the StateTree branches on it. */
 	EBossAction PendingAction = EBossAction::Shoot;
 
+	/** True while the fire montage is playing (notify-driven burst in progress). */
+	bool bShootMontageActive = false;
+
 	/** Last broadcast datacenter prop percent, remapped to 1.0 = full, 0.0 = destroyed-at-threshold. */
 	float CachedArenaPropPercent = 1.0f;
 
@@ -308,10 +309,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
 	bool IsDisarmed() const;
 
-	/** Start a single ranged burst at Target (StateTree shoot task). Bypasses the squad
-	 *  coordinator (solo boss). The burst ends via the inherited burst-cooldown logic. */
+	/** Begin a ranged burst at Target (StateTree shoot task): plays FireMontage; its
+	 *  "Boss — Fire One Shot" notifies fire the rounds. The burst ends when the montage ends. */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
 	void StartShootBurst(AActor* Target);
+
+	/** True while the fire montage (and thus the burst) is still playing. */
+	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
+	bool IsShootMontagePlaying() const { return bShootMontageActive; }
+
+	/** Fire exactly one round at the current target. Called by the "Boss — Fire One Shot" notify. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
+	void FireOneShotFromNotify();
 
 	// ==================== Behavior (StateTree-driven) ====================
 
@@ -403,21 +412,11 @@ protected:
 	UFUNCTION()
 	void OnBossAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
-	// ==================== Internal: Fire-Montage Fork ====================
+	// ==================== Internal: Fire Montage ====================
 
-	/** Bound to the INITIAL weapon's OnShotFired (burst counting handled by the inherited
-	 *  AHumanoidNPC binding). Drives the crossfaded fire montage only. */
+	/** Montage-end handler for FireMontage — clears bShootMontageActive so the Shoot task ends. */
 	UFUNCTION()
-	void OnBossWeaponShotFired();
-
-	/** Bound to a RE-ARMED weapon's OnShotFired. Drives burst counting (the inherited binding is
-	 *  gone on a fresh weapon) AND the fire montage. */
-	UFUNCTION()
-	void OnBossWeaponShotFiredReArmed();
-
-	/** Shared fire-montage logic: first shot → FirstFireMontage, 2nd+ → ContinuousFireMontage,
-	 *  last shot of the burst → blend back to locomotion. All via CrossfadeToMontage. */
-	void DriveFireMontageForShot();
+	void OnBossShootMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	// ==================== Internal: Phase ====================
 

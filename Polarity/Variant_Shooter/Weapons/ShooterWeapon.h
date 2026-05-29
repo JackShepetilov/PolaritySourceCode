@@ -544,6 +544,11 @@ public:
 	void StartFiring();
 	void StopFiring();
 
+	/** Fire exactly one shot now, ignoring the auto/refire cadence — for animation-notify-driven
+	 *  firing. Routes through Fire() (aim, ammo, charge, OnShotFired), then clears any scheduled
+	 *  refire so the cadence is owned by the animation. */
+	void FireOnce();
+
 	/** Returns true if this weapon is a melee weapon (blocks MeleeAttackComponent while equipped) */
 	virtual bool IsMeleeWeapon() const { return false; }
 

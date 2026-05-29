@@ -78,13 +78,6 @@ void ABossCharacter::BeginPlay()
 		MovementComp->bUseControllerDesiredRotation = true;
 	}
 
-	// Drive the crossfaded fire-montage fork off the INITIAL weapon's shots. Burst counting is
-	// already bound by AHumanoidNPC (OnWeaponShotFiredForward), so this handler is montage-only.
-	if (Weapon)
-	{
-		Weapon->OnShotFired.AddDynamic(this, &ABossCharacter::OnBossWeaponShotFired);
-	}
-
 	// Subscribe to the arena's prop-percent broadcast so posture regen can scale with it.
 	if (AArenaManager* Arena = LinkedArena.LoadSynchronous())
 	{
@@ -428,26 +421,54 @@ void ABossCharacter::SpawnNextWeapon()
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	Weapon = GetWorld()->SpawnActor<AShooterWeapon>(WeaponInventory[0], GetActorTransform(), SpawnParams);
-	if (Weapon)
-	{
-		// Fresh weapon: wire burst counting AND the fire montage (the inherited binding lived on the
-		// yanked actor, which is gone).
-		Weapon->OnShotFired.AddDynamic(this, &ABossCharacter::OnBossWeaponShotFiredReArmed);
-	}
+	// Notify-driven firing: no OnShotFired binding needed (the fire montage's notifies fire shots).
 
 	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Re-armed: %s"), *GetNameSafe(Weapon));
 }
 
 void ABossCharacter::StartShootBurst(AActor* Target)
 {
-	if (!Target || bIsDead || bIsInFinisherPhase || IsDisarmed())
+	if (!Target || bIsDead || bIsInFinisherPhase || IsDisarmed() || !FireMontage)
 	{
 		return;
 	}
 
-	SetTarget(Target);
-	// bHasExternalPermission = true → skip the squad coordinator (RequestAttackPermission returns true).
-	StartShooting(Target, true);
+	SetTarget(Target);              // focus → faces the player while firing
+	CurrentAimTarget = Target;      // aim source for the per-notify shots
+
+	bShootMontageActive = true;
+	CrossfadeToMontage(FireMontage, FireMontageBlendTime);
+
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+		{
+			FOnMontageEnded EndDelegate;
+			EndDelegate.BindUObject(this, &ABossCharacter::OnBossShootMontageEnded);
+			AnimInstance->Montage_SetEndDelegate(EndDelegate, FireMontage);
+		}
+	}
+}
+
+void ABossCharacter::FireOneShotFromNotify()
+{
+	if (bIsDead || bIsInFinisherPhase || !Weapon)
+	{
+		return;
+	}
+
+	// Aim at the current target; Fire() reads CurrentAimTarget via GetWeaponTargetLocation().
+	CurrentAimTarget = CurrentTarget.Get();
+	Weapon->FireOnce();
+}
+
+void ABossCharacter::OnBossShootMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	bShootMontageActive = false;
+	if (ActiveCrossfadeMontage.Get() == Montage)
+	{
+		ActiveCrossfadeMontage.Reset();
+	}
 }
 
 // ==================== Behavior (StateTree-driven) ====================
@@ -514,52 +535,6 @@ void ABossCharacter::StopStrafe()
 	if (AAIController* AI = Cast<AAIController>(GetController()))
 	{
 		AI->StopMovement();
-	}
-}
-
-// ==================== Fire-Montage Fork ====================
-
-void ABossCharacter::OnBossWeaponShotFired()
-{
-	// Initial weapon: burst counting is handled by the inherited binding; montage only here.
-	DriveFireMontageForShot();
-}
-
-void ABossCharacter::OnBossWeaponShotFiredReArmed()
-{
-	// Re-armed weapon: drive burst counting (inherited binding is gone) then the montage.
-	OnWeaponShotFired();
-	DriveFireMontageForShot();
-}
-
-void ABossCharacter::DriveFireMontageForShot()
-{
-	if (bIsDead || bIsInFinisherPhase)
-	{
-		return;
-	}
-
-	// CurrentBurstShots / bInBurstCooldown have already been updated by the burst handler this shot.
-	if (bInBurstCooldown)
-	{
-		// Last shot of the burst → blend the fire montage back to locomotion.
-		CrossfadeToMontage(nullptr, FireMontageBlendTime);
-		return;
-	}
-
-	if (CurrentBurstShots <= 1)
-	{
-		if (FirstFireMontage)
-		{
-			CrossfadeToMontage(FirstFireMontage, FireMontageBlendTime);
-		}
-	}
-	else
-	{
-		if (ContinuousFireMontage)
-		{
-			CrossfadeToMontage(ContinuousFireMontage, FireMontageBlendTime);
-		}
 	}
 }
 

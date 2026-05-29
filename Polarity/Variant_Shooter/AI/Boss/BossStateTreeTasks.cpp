@@ -212,6 +212,13 @@ EStateTreeRunStatus FStateTreeBossShootTask::EnterState(FStateTreeExecutionConte
 
 	InstanceData.ElapsedTime = 0.0f;
 	InstanceData.Boss->StartShootBurst(InstanceData.Target);
+
+	// If the fire montage didn't start (none assigned), don't hang — finish immediately.
+	if (!InstanceData.Boss->IsShootMontagePlaying())
+	{
+		return EStateTreeRunStatus::Succeeded;
+	}
+
 	return EStateTreeRunStatus::Running;
 }
 
@@ -226,10 +233,9 @@ EStateTreeRunStatus FStateTreeBossShootTask::Tick(FStateTreeExecutionContext& Co
 
 	InstanceData.ElapsedTime += DeltaTime;
 
-	// Burst finished (inherited burst-cooldown latch) or safety cap reached.
-	if (InstanceData.Boss->IsInBurstCooldown() || InstanceData.ElapsedTime >= InstanceData.MaxShootDuration)
+	// Fire montage ended (notify-driven burst complete) or safety cap reached.
+	if (!InstanceData.Boss->IsShootMontagePlaying() || InstanceData.ElapsedTime >= InstanceData.MaxShootDuration)
 	{
-		InstanceData.Boss->StopShooting();
 		return EStateTreeRunStatus::Succeeded;
 	}
 
@@ -241,7 +247,8 @@ void FStateTreeBossShootTask::ExitState(FStateTreeExecutionContext& Context, con
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 	if (InstanceData.Boss)
 	{
-		InstanceData.Boss->StopShooting();
+		// Stop the fire montage if the state was left before the burst finished.
+		InstanceData.Boss->CrossfadeToMontage(nullptr, 0.1f);
 	}
 }
 

@@ -333,6 +333,15 @@ void AShooterWeapon::StopFiring()
 	GetWorld()->GetTimerManager().ClearTimer(RefireTimer);
 }
 
+void AShooterWeapon::FireOnce()
+{
+	// Single shot through the normal Fire() path (handles aim/ammo/charge/OnShotFired), then clear
+	// the scheduled refire so the firing cadence is driven entirely by the animation notify.
+	bIsFiring = true;
+	Fire();
+	StopFiring();
+}
+
 void AShooterWeapon::Fire()
 {
 	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] Fire() called: bIsFiring=%d, bUseChargeFiring=%d, WeaponOwner=%d"),
