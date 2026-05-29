@@ -828,6 +828,19 @@ void ABossCharacter::ApplyExplosionStun(float Duration, UAnimMontage* StunMontag
 		return;
 	}
 
+	// Prop impact: interrupt whatever the boss is doing so it drops back to strafe (ranged burst or
+	// melee swing), all at once with the slowdown. No knockback impulse — that's blocked at the source.
+	bShootMontageActive = false;   // ends a ranged burst; the pending next-tick shot montage no-ops
+	bIsAttacking = false;          // ends a melee attack → the StateTree melee task returns to strafe
+	bDamageWindowActive = false;
+	bHasDealtDamage = true;
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(DamageWindowStartTimer);
+		World->GetTimerManager().ClearTimer(DamageWindowEndTimer);
+	}
+	CrossfadeToMontage(nullptr, AttackEndBlendTime);   // blend the current action montage out
+
 	bIsSlowed = true;
 	MovementComp->MaxWalkSpeed = DefaultMaxWalkSpeed * SlowdownStrength;
 

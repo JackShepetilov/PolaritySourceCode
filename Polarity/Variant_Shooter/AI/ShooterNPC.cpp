@@ -355,7 +355,12 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	if (DamageCauser)
 	{
 		FVector DamageDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
-		PlayHitReaction(DamageDirection);
+		// 0-damage hits (e.g. the ionizer pistol) must not stagger/interrupt the current action —
+		// only real damage plays the flinch reaction.
+		if (Damage > 0.0f)
+		{
+			PlayHitReaction(DamageDirection);
+		}
 		StartHitFlash();
 
 		// Retaliation: get immediate permission to shoot back

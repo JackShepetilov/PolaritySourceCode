@@ -9,6 +9,7 @@
 #include "EMF_FieldComponent.h"
 #include "EMF_PluginBPLibrary.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Wallslam.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
@@ -1512,8 +1513,13 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
 			if (HitCharacter)
 			{
-				const FVector LaunchVelocity = ImpulseDir * ExplosionImpulseStrength * FalloffAlpha * DamageMultiplier * ChargeScale;
-				HitCharacter->LaunchCharacter(LaunchVelocity, false, true);
+				// The boss takes NO physics impulse from prop explosions — it reacts via slowdown +
+				// action-interrupt in ApplyExplosionStun (below) instead of being launched.
+				if (!Cast<ABossCharacter>(HitCharacter))
+				{
+					const FVector LaunchVelocity = ImpulseDir * ExplosionImpulseStrength * FalloffAlpha * DamageMultiplier * ChargeScale;
+					HitCharacter->LaunchCharacter(LaunchVelocity, false, true);
+				}
 				continue;
 			}
 
