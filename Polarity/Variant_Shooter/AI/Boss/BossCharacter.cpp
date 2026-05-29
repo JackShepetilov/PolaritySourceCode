@@ -920,13 +920,10 @@ void ABossCharacter::CrossfadeToMontage(UAnimMontage* NewMontage, float Crossfad
 		return;
 	}
 
-	// Already playing this montage → don't restart it (keeps a looping fire montage stable).
-	if (OldMontage == NewMontage && AnimInst->Montage_IsPlaying(NewMontage))
-	{
-		return;
-	}
-
-	// Blend out the previously-tracked montage so it fades while the new one ramps up.
+	// Blend out a DIFFERENT tracked montage so it fades while the new one ramps up. If the next
+	// montage reuses the SAME asset (e.g. the same shoot montage for several shots), we fall through
+	// to Montage_PlayWithBlendIn below, which restarts it from the top so its per-shot notify fires
+	// again — that's why there is no "already playing → skip" guard here.
 	if (OldMontage && OldMontage != NewMontage && AnimInst->Montage_IsPlaying(OldMontage))
 	{
 		AnimInst->Montage_Stop(CrossfadeTime, OldMontage);
