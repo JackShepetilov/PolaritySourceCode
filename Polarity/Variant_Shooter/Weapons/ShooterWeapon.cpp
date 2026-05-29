@@ -28,6 +28,7 @@
 #include "Components/AudioComponent.h"
 #include "Sound/SoundAttenuation.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "TutorialSubsystem.h"
 #include "Variant_Shooter/ShooterDummy.h"
@@ -1026,7 +1027,11 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		float ImpulseForce = HitscanPhysicsForce * RemainingEnergy * AreaMultiplier;
 		if (ACharacter* HitCharacter = Cast<ACharacter>(BestTarget))
 		{
-			HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
+			// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
+			if (!(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
+			{
+				HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
+			}
 		}
 		else if (UPrimitiveComponent* HitComp = BestHit.GetComponent())
 		{
@@ -1218,7 +1223,11 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	float ImpulseForce = HitscanPhysicsForce * EnergyMultiplier * AreaMultiplier;
 	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 	{
-		HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
+		// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
+		if (!(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
+		{
+			HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
+		}
 	}
 	else
 	{
