@@ -83,17 +83,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Melee", meta = (ClampMin = "0.0"))
 	float InPlaceMeleeRange = 180.0f;
 
-	// ==================== Ranged: Per-Shot Fire Montages (crossfaded sequence) ====================
+	// ==================== Ranged: Per-Shot Fire Montages (crossfaded chain) ====================
 
-	/** One montage per shot in the burst. The boss plays them in order, crossfading between each,
-	 *  and fires one round as each begins. Number of shots in the burst = number of montages. */
+	/** One montage per shot in the burst, played consecutively. EACH montage must contain a single
+	 *  "Boss — Fire One Shot" notify: that notify fires the round AND crossfades to the next montage.
+	 *  Number of shots = number of montages; cadence/crossfade are set by where you place the notify. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire")
 	TArray<TObjectPtr<UAnimMontage>> FireShotMontages;
-
-	/** Time between shots — the cadence at which the boss crossfades to the next per-shot montage
-	 *  and fires the next round. Set below the montage length so consecutive montages overlap. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire", meta = (ClampMin = "0.02"))
-	float ShotInterval = 0.18f;
 
 	/** Crossfade time between consecutive per-shot montages (and out to locomotion at the end). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -236,14 +232,11 @@ protected:
 	/** Action chosen by the last ChooseNextAction(); the StateTree branches on it. */
 	EBossAction PendingAction = EBossAction::Shoot;
 
-	/** True while a ranged burst (per-shot montage sequence) is in progress. */
+	/** True while a ranged burst (per-shot montage chain) is in progress. */
 	bool bShootMontageActive = false;
 
-	/** Index of the next shot/montage in the current burst. */
+	/** Index of the montage currently playing in the burst chain. */
 	int32 CurrentShotIndex = 0;
-
-	/** Timer pacing the per-shot montage sequence. */
-	FTimerHandle ShotTimer;
 
 	/** Last broadcast datacenter prop percent, remapped to 1.0 = full, 0.0 = destroyed-at-threshold. */
 	float CachedArenaPropPercent = 1.0f;
@@ -319,18 +312,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
 	bool IsDisarmed() const;
 
-	/** Begin a ranged burst at Target (StateTree shoot task): fires one round per montage in
-	 *  FireShotMontages, crossfading between them every ShotInterval. */
+	/** Begin a ranged burst at Target (StateTree shoot task): plays FireShotMontages[0]; each
+	 *  montage's "Boss — Fire One Shot" notify fires its round and crossfades to the next. */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
 	void StartShootBurst(AActor* Target);
 
-	/** Stop the burst early (clears the timer, blends back to locomotion). */
+	/** Stop the burst early (blends back to locomotion). */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
 	void StopShootBurst();
 
 	/** True while a ranged burst is still in progress. */
 	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
 	bool IsShootMontagePlaying() const { return bShootMontageActive; }
+
+	/** Fire this montage's shot and advance to the next shot montage. Called by the
+	 *  "Boss — Fire One Shot" notify placed once in each FireShotMontages entry. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
+	void FireOneShotFromNotify();
 
 	// ==================== Behavior (StateTree-driven) ====================
 
@@ -424,8 +422,13 @@ protected:
 
 	// ==================== Internal: Fire Burst ====================
 
-	/** Timer step: crossfade to the current shot's montage, fire one round, advance / end. */
-	void FireBurstShot();
+	/** Crossfade to FireShotMontages[Index] and bind its end delegate. */
+	void PlayShootMontage(int32 Index);
+
+	/** End delegate for each shot montage. A natural end of the last montage ends the burst; an
+	 *  interrupted end (we crossfaded to the next shot) is ignored. */
+	UFUNCTION()
+	void OnShootMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	// ==================== Internal: Phase ====================
 

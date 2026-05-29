@@ -140,7 +140,6 @@ void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(PhaseTransitionTimer);
 		World->GetTimerManager().ClearTimer(SlowdownRecoveryTimer);
-		World->GetTimerManager().ClearTimer(ShotTimer);
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -438,47 +437,76 @@ void ABossCharacter::StartShootBurst(AActor* Target)
 	CurrentShotIndex = 0;
 	bShootMontageActive = true;
 
-	FireBurstShot();            // fire the first shot immediately
+	// Play the first shot montage; its "Boss — Fire One Shot" notify fires the round and advances.
+	PlayShootMontage(0);
 }
 
-void ABossCharacter::FireBurstShot()
+void ABossCharacter::PlayShootMontage(int32 Index)
+{
+	if (!FireShotMontages.IsValidIndex(Index))
+	{
+		return;
+	}
+
+	UAnimMontage* Montage = FireShotMontages[Index].Get();
+	if (!Montage)
+	{
+		return;
+	}
+
+	CurrentShotIndex = Index;
+	CrossfadeToMontage(Montage, FireMontageBlendTime);
+
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+		{
+			FOnMontageEnded EndDelegate;
+			EndDelegate.BindUObject(this, &ABossCharacter::OnShootMontageEnded);
+			AnimInstance->Montage_SetEndDelegate(EndDelegate, Montage);
+		}
+	}
+}
+
+void ABossCharacter::FireOneShotFromNotify()
 {
 	if (bIsDead || bIsInFinisherPhase || !bShootMontageActive)
 	{
-		StopShootBurst();
 		return;
 	}
 
-	// Past the last shot → end the burst.
-	if (!FireShotMontages.IsValidIndex(CurrentShotIndex))
-	{
-		StopShootBurst();
-		return;
-	}
-
-	// Crossfade to this shot's montage and fire one round.
-	if (UAnimMontage* Montage = FireShotMontages[CurrentShotIndex].Get())
-	{
-		CrossfadeToMontage(Montage, FireMontageBlendTime);
-	}
+	// Fire this montage's shot.
 	if (Weapon)
 	{
 		CurrentAimTarget = CurrentTarget.Get();   // aim at the player; Fire() reads CurrentAimTarget
 		Weapon->FireOnce();
 	}
 
-	++CurrentShotIndex;
+	// Advance to the next shot's montage (crossfade). If there is no next one, the current (last)
+	// montage plays out and OnShootMontageEnded ends the burst.
+	if (FireShotMontages.IsValidIndex(CurrentShotIndex + 1))
+	{
+		PlayShootMontage(CurrentShotIndex + 1);
+	}
+}
 
-	// Schedule the next shot (or the end, when the index runs past the array).
-	GetWorld()->GetTimerManager().SetTimer(ShotTimer, this, &ABossCharacter::FireBurstShot, ShotInterval, false);
+void ABossCharacter::OnShootMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	// Crossfading to the next shot interrupts the previous montage — that's not the end of the burst.
+	if (bInterrupted)
+	{
+		return;
+	}
+
+	// The last montage finished on its own → burst complete.
+	if (bShootMontageActive)
+	{
+		StopShootBurst();
+	}
 }
 
 void ABossCharacter::StopShootBurst()
 {
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(ShotTimer);
-	}
 	bShootMontageActive = false;
 	CrossfadeToMontage(nullptr, FireMontageBlendTime);   // blend back to locomotion
 }
