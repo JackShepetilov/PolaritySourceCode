@@ -470,36 +470,40 @@ void ABossCharacter::PlayShootMontage(int32 Index)
 
 void ABossCharacter::FireOneShotFromNotify()
 {
-	if (bIsDead || bIsInFinisherPhase || !bShootMontageActive)
+	// Fire this montage's shot only. Advancing to the next montage happens on montage END
+	// (OnShootMontageEnded), NOT here — restarting a montage from inside its own notify is
+	// unreliable in UE (it would drop shots when the same animation is reused for several shots).
+	if (bIsDead || bIsInFinisherPhase || !bShootMontageActive || !Weapon)
 	{
 		return;
 	}
 
-	// Fire this montage's shot.
-	if (Weapon)
-	{
-		CurrentAimTarget = CurrentTarget.Get();   // aim at the player; Fire() reads CurrentAimTarget
-		Weapon->FireOnce();
-	}
-
-	// Advance to the next shot's montage (crossfade). If there is no next one, the current (last)
-	// montage plays out and OnShootMontageEnded ends the burst.
-	if (FireShotMontages.IsValidIndex(CurrentShotIndex + 1))
-	{
-		PlayShootMontage(CurrentShotIndex + 1);
-	}
+	CurrentAimTarget = CurrentTarget.Get();   // aim at the player; Fire() reads CurrentAimTarget
+	Weapon->FireOnce();
 }
 
 void ABossCharacter::OnShootMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
-	// Crossfading to the next shot interrupts the previous montage — that's not the end of the burst.
-	if (bInterrupted)
+	if (!bShootMontageActive)
 	{
 		return;
 	}
 
-	// The last montage finished on its own → burst complete.
-	if (bShootMontageActive)
+	// Cut short by something external (finisher, task exit) → end the burst.
+	if (bInterrupted)
+	{
+		StopShootBurst();
+		return;
+	}
+
+	// This shot's montage finished on its own → play the next one (a fresh play, so a reused
+	// animation still re-fires its notify), or finish the burst after the last montage.
+	const int32 NextIndex = CurrentShotIndex + 1;
+	if (FireShotMontages.IsValidIndex(NextIndex))
+	{
+		PlayShootMontage(NextIndex);
+	}
+	else
 	{
 		StopShootBurst();
 	}
