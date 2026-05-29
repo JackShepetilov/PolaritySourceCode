@@ -443,6 +443,11 @@ void ABossCharacter::StartShootBurst(AActor* Target)
 
 void ABossCharacter::PlayShootMontage(int32 Index)
 {
+	// This runs deferred (next tick) — bail if the burst was stopped in the meantime.
+	if (!bShootMontageActive || bIsDead || bIsInFinisherPhase)
+	{
+		return;
+	}
 	if (!FireShotMontages.IsValidIndex(Index))
 	{
 		return;
@@ -456,54 +461,55 @@ void ABossCharacter::PlayShootMontage(int32 Index)
 
 	CurrentShotIndex = Index;
 	CrossfadeToMontage(Montage, FireMontageBlendTime);
-
-	if (USkeletalMeshComponent* MeshComp = GetMesh())
-	{
-		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-		{
-			FOnMontageEnded EndDelegate;
-			EndDelegate.BindUObject(this, &ABossCharacter::OnShootMontageEnded);
-			AnimInstance->Montage_SetEndDelegate(EndDelegate, Montage);
-		}
-	}
+	// End delegate is bound only on the LAST montage (in FireOneShotFromNotify) to end the burst.
 }
 
 void ABossCharacter::FireOneShotFromNotify()
 {
-	// Fire this montage's shot only. Advancing to the next montage happens on montage END
-	// (OnShootMontageEnded), NOT here — restarting a montage from inside its own notify is
-	// unreliable in UE (it would drop shots when the same animation is reused for several shots).
-	if (bIsDead || bIsInFinisherPhase || !bShootMontageActive || !Weapon)
+	if (bIsDead || bIsInFinisherPhase || !bShootMontageActive)
 	{
 		return;
 	}
 
-	CurrentAimTarget = CurrentTarget.Get();   // aim at the player; Fire() reads CurrentAimTarget
-	Weapon->FireOnce();
+	// Fire this montage's shot.
+	if (Weapon)
+	{
+		CurrentAimTarget = CurrentTarget.Get();   // aim at the player; Fire() reads CurrentAimTarget
+		Weapon->FireOnce();
+	}
+
+	const int32 NextIndex = CurrentShotIndex + 1;
+	if (FireShotMontages.IsValidIndex(NextIndex))
+	{
+		// Crossfade to the next shot's montage on the NEXT TICK. Playing/restarting a montage from
+		// inside the current montage's own notify is unreliable in UE (it dropped shots when the same
+		// animation was reused). Deferring one tick makes the crossfade — and the same-asset restart —
+		// reliable, and the next montage blends in right after the shot (no return-to-idle stutter).
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateUObject(this, &ABossCharacter::PlayShootMontage, NextIndex));
+		}
+	}
+	else if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		// Last shot: let this montage play out, then end the burst (back to locomotion).
+		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
+		{
+			if (UAnimMontage* LastMontage = FireShotMontages[CurrentShotIndex].Get())
+			{
+				FOnMontageEnded EndDelegate;
+				EndDelegate.BindUObject(this, &ABossCharacter::OnShootMontageEnded);
+				AnimInstance->Montage_SetEndDelegate(EndDelegate, LastMontage);
+			}
+		}
+	}
 }
 
 void ABossCharacter::OnShootMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
-	if (!bShootMontageActive)
-	{
-		return;
-	}
-
-	// Cut short by something external (finisher, task exit) → end the burst.
-	if (bInterrupted)
-	{
-		StopShootBurst();
-		return;
-	}
-
-	// This shot's montage finished on its own → play the next one (a fresh play, so a reused
-	// animation still re-fires its notify), or finish the burst after the last montage.
-	const int32 NextIndex = CurrentShotIndex + 1;
-	if (FireShotMontages.IsValidIndex(NextIndex))
-	{
-		PlayShootMontage(NextIndex);
-	}
-	else
+	// Bound only on the final shot montage — when it finishes (or is cut), the burst is over.
+	if (bShootMontageActive)
 	{
 		StopShootBurst();
 	}
