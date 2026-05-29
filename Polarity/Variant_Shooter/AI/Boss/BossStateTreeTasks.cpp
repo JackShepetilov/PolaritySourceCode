@@ -247,8 +247,8 @@ void FStateTreeBossShootTask::ExitState(FStateTreeExecutionContext& Context, con
 	FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
 	if (InstanceData.Boss)
 	{
-		// Stop the fire montage if the state was left before the burst finished.
-		InstanceData.Boss->CrossfadeToMontage(nullptr, 0.1f);
+		// Stop the burst if the state was left before it finished.
+		InstanceData.Boss->StopShootBurst();
 	}
 }
 

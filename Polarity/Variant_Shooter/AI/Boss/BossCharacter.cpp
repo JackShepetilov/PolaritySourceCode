@@ -140,6 +140,7 @@ void ABossCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(PhaseTransitionTimer);
 		World->GetTimerManager().ClearTimer(SlowdownRecoveryTimer);
+		World->GetTimerManager().ClearTimer(ShotTimer);
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -428,47 +429,58 @@ void ABossCharacter::SpawnNextWeapon()
 
 void ABossCharacter::StartShootBurst(AActor* Target)
 {
-	if (!Target || bIsDead || bIsInFinisherPhase || IsDisarmed() || !FireMontage)
+	if (!Target || bIsDead || bIsInFinisherPhase || IsDisarmed() || FireShotMontages.Num() == 0)
 	{
 		return;
 	}
 
-	SetTarget(Target);              // focus → faces the player while firing
-	CurrentAimTarget = Target;      // aim source for the per-notify shots
-
+	SetTarget(Target);          // focus → faces the player while firing
+	CurrentShotIndex = 0;
 	bShootMontageActive = true;
-	CrossfadeToMontage(FireMontage, FireMontageBlendTime);
 
-	if (USkeletalMeshComponent* MeshComp = GetMesh())
-	{
-		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
-		{
-			FOnMontageEnded EndDelegate;
-			EndDelegate.BindUObject(this, &ABossCharacter::OnBossShootMontageEnded);
-			AnimInstance->Montage_SetEndDelegate(EndDelegate, FireMontage);
-		}
-	}
+	FireBurstShot();            // fire the first shot immediately
 }
 
-void ABossCharacter::FireOneShotFromNotify()
+void ABossCharacter::FireBurstShot()
 {
-	if (bIsDead || bIsInFinisherPhase || !Weapon)
+	if (bIsDead || bIsInFinisherPhase || !bShootMontageActive)
 	{
+		StopShootBurst();
 		return;
 	}
 
-	// Aim at the current target; Fire() reads CurrentAimTarget via GetWeaponTargetLocation().
-	CurrentAimTarget = CurrentTarget.Get();
-	Weapon->FireOnce();
+	// Past the last shot → end the burst.
+	if (!FireShotMontages.IsValidIndex(CurrentShotIndex))
+	{
+		StopShootBurst();
+		return;
+	}
+
+	// Crossfade to this shot's montage and fire one round.
+	if (UAnimMontage* Montage = FireShotMontages[CurrentShotIndex].Get())
+	{
+		CrossfadeToMontage(Montage, FireMontageBlendTime);
+	}
+	if (Weapon)
+	{
+		CurrentAimTarget = CurrentTarget.Get();   // aim at the player; Fire() reads CurrentAimTarget
+		Weapon->FireOnce();
+	}
+
+	++CurrentShotIndex;
+
+	// Schedule the next shot (or the end, when the index runs past the array).
+	GetWorld()->GetTimerManager().SetTimer(ShotTimer, this, &ABossCharacter::FireBurstShot, ShotInterval, false);
 }
 
-void ABossCharacter::OnBossShootMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+void ABossCharacter::StopShootBurst()
 {
-	bShootMontageActive = false;
-	if (ActiveCrossfadeMontage.Get() == Montage)
+	if (UWorld* World = GetWorld())
 	{
-		ActiveCrossfadeMontage.Reset();
+		World->GetTimerManager().ClearTimer(ShotTimer);
 	}
+	bShootMontageActive = false;
+	CrossfadeToMontage(nullptr, FireMontageBlendTime);   // blend back to locomotion
 }
 
 // ==================== Behavior (StateTree-driven) ====================

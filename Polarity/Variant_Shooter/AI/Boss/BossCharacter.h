@@ -83,16 +83,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Melee", meta = (ClampMin = "0.0"))
 	float InPlaceMeleeRange = 180.0f;
 
-	// ==================== Ranged: Fire Montage (notify-driven) ====================
+	// ==================== Ranged: Per-Shot Fire Montages (crossfaded sequence) ====================
 
-	/** Burst-fire animation. Place a "Boss — Fire One Shot" notify at each shot frame: every notify
-	 *  fires one round, so the animation drives the firing cadence and number of shots. Plays once
-	 *  per Shoot action; the Shoot task ends when this montage ends. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage")
-	TObjectPtr<UAnimMontage> FireMontage;
+	/** One montage per shot in the burst. The boss plays them in order, crossfading between each,
+	 *  and fires one round as each begins. Number of shots in the burst = number of montages. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire")
+	TArray<TObjectPtr<UAnimMontage>> FireShotMontages;
 
-	/** Crossfade time when blending into the fire montage from locomotion. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire Montage", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	/** Time between shots — the cadence at which the boss crossfades to the next per-shot montage
+	 *  and fires the next round. Set below the montage length so consecutive montages overlap. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire", meta = (ClampMin = "0.02"))
+	float ShotInterval = 0.18f;
+
+	/** Crossfade time between consecutive per-shot montages (and out to locomotion at the end). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Ranged|Fire", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FireMontageBlendTime = 0.12f;
 
 	// ==================== Yank Gate ====================
@@ -232,8 +236,14 @@ protected:
 	/** Action chosen by the last ChooseNextAction(); the StateTree branches on it. */
 	EBossAction PendingAction = EBossAction::Shoot;
 
-	/** True while the fire montage is playing (notify-driven burst in progress). */
+	/** True while a ranged burst (per-shot montage sequence) is in progress. */
 	bool bShootMontageActive = false;
+
+	/** Index of the next shot/montage in the current burst. */
+	int32 CurrentShotIndex = 0;
+
+	/** Timer pacing the per-shot montage sequence. */
+	FTimerHandle ShotTimer;
 
 	/** Last broadcast datacenter prop percent, remapped to 1.0 = full, 0.0 = destroyed-at-threshold. */
 	float CachedArenaPropPercent = 1.0f;
@@ -309,18 +319,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
 	bool IsDisarmed() const;
 
-	/** Begin a ranged burst at Target (StateTree shoot task): plays FireMontage; its
-	 *  "Boss — Fire One Shot" notifies fire the rounds. The burst ends when the montage ends. */
+	/** Begin a ranged burst at Target (StateTree shoot task): fires one round per montage in
+	 *  FireShotMontages, crossfading between them every ShotInterval. */
 	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
 	void StartShootBurst(AActor* Target);
 
-	/** True while the fire montage (and thus the burst) is still playing. */
+	/** Stop the burst early (clears the timer, blends back to locomotion). */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
+	void StopShootBurst();
+
+	/** True while a ranged burst is still in progress. */
 	UFUNCTION(BlueprintPure, Category = "Boss|Ranged")
 	bool IsShootMontagePlaying() const { return bShootMontageActive; }
-
-	/** Fire exactly one round at the current target. Called by the "Boss — Fire One Shot" notify. */
-	UFUNCTION(BlueprintCallable, Category = "Boss|Ranged")
-	void FireOneShotFromNotify();
 
 	// ==================== Behavior (StateTree-driven) ====================
 
@@ -412,11 +422,10 @@ protected:
 	UFUNCTION()
 	void OnBossAttackMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
-	// ==================== Internal: Fire Montage ====================
+	// ==================== Internal: Fire Burst ====================
 
-	/** Montage-end handler for FireMontage — clears bShootMontageActive so the Shoot task ends. */
-	UFUNCTION()
-	void OnBossShootMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+	/** Timer step: crossfade to the current shot's montage, fire one round, advance / end. */
+	void FireBurstShot();
 
 	// ==================== Internal: Phase ====================
 
