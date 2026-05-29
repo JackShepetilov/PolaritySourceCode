@@ -197,6 +197,18 @@ void ADroppedRangedWeapon::StartPull(AShooterCharacter* InPullingPlayer)
 	// Disable physics — we drive position directly
 	WeaponMesh->SetSimulatePhysics(false);
 	WeaponMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Stop exerting EMF force while under scripted pull. The drop spawns at its charged origin —
+	// a yank spawns it AT the boss carrying the boss's charge — and is flown to the player by
+	// SetActorLocation. While its field stays registered, that live charge attracts the player
+	// toward the drop's origin (the boss), because the player filters NPC-typed sources
+	// (NPCForceMultiplier=0) but NOT this drop's source. The charge value remains in SourceParams
+	// for GetCharge()/widget/capture-range queries (those read it locally, not via the registry),
+	// and the capture scan already skips weapons that are being pulled.
+	if (FieldComponent)
+	{
+		FieldComponent->UnregisterFromRegistry();
+	}
 }
 
 void ADroppedRangedWeapon::UpdatePull(float DeltaTime)
@@ -207,6 +219,11 @@ void ADroppedRangedWeapon::UpdatePull(float DeltaTime)
 		bIsBeingPulled = false;
 		WeaponMesh->SetSimulatePhysics(true);
 		WeaponMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		// Restore EMF source registration (unregistered in StartPull) now that it's a world drop again.
+		if (FieldComponent)
+		{
+			FieldComponent->RegisterWithRegistry();
+		}
 		return;
 	}
 

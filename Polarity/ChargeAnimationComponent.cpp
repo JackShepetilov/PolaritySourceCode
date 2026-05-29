@@ -749,6 +749,18 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		return;
 	}
 
+	// Launch burst (ReverseChanneling): the held target is being thrown — do NOT run target
+	// acquisition here. TickComponent calls this for BOTH Channeling AND ReverseChanneling, and
+	// the press-press skip below only covers Channeling. Without this guard, pressing throw while
+	// holding a prop would launch the prop AND, on the same burst, re-scan and yank a humanoid's
+	// weapon if one sat under the crosshair (the prop slides off the reverse plate, freeing the
+	// scan to re-acquire). The plate transform is still updated by UpdatePlatePosition before this
+	// call, so the launch plate keeps following the camera.
+	if (CurrentState == EChargeAnimationState::ReverseChanneling)
+	{
+		return;
+	}
+
 	// Check if current captured target is still valid and still captured
 	if (CurrentCapturedNPC.IsValid())
 	{
