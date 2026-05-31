@@ -1608,6 +1608,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss Finisher")
 	bool IsBossFinisherActive() const { return bBossFinisherActive; }
 
+	/** Cinematic finisher start: hide the first-person body/weapon and lock input while the boss's
+	 *  Level Sequence plays (the cine camera owns the view via a Camera Cuts track). */
+	UFUNCTION(BlueprintCallable, Category = "Boss Finisher")
+	void BeginFinisherCinematic();
+
+	/** Cinematic finisher end: teleport to ExitLocation, reveal the player, restore input, fade in.
+	 *  Called (under the sequence's black fade) from the boss when the sequence finishes. */
+	UFUNCTION(BlueprintCallable, Category = "Boss Finisher")
+	void EndFinisherCinematic(FVector ExitLocation);
+
 protected:
 	// ==================== Boss Finisher State ====================
 

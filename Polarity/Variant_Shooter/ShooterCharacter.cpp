@@ -4215,3 +4215,63 @@ void AShooterCharacter::EndBossFinisher()
 	// Broadcast end event
 	OnBossFinisherEnded.Broadcast();
 }
+
+// ==================== Cinematic Finisher (Level Sequence) ====================
+
+void AShooterCharacter::BeginFinisherCinematic()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[FINISHER] BeginFinisherCinematic — hiding player, locking input"));
+
+	// Stop firing and hide the first-person body + weapon; the sequence shows a double.
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StopFiring();
+		CurrentWeapon->SetActorHiddenInGame(true);
+	}
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetVisibility(false, /*bPropagateToChildren=*/ true);
+	}
+	if (MeleeWeaponFPMesh)
+	{
+		MeleeWeaponFPMesh->SetVisibility(false, /*bPropagateToChildren=*/ true);
+	}
+
+	// Lock input — the cine camera (Camera Cuts) owns the view during the finisher.
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+	{
+		Move->StopMovementImmediately();
+	}
+	DisableInput(nullptr);
+}
+
+void AShooterCharacter::EndFinisherCinematic(FVector ExitLocation)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[FINISHER] EndFinisherCinematic — teleport + reveal + fade in"));
+
+	// Under the sequence's black fade: move to the exit point and reveal the player body/weapon.
+	SetActorLocation(ExitLocation, /*bSweep=*/ false, nullptr, ETeleportType::TeleportPhysics);
+
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		FPMesh->SetVisibility(true, /*bPropagateToChildren=*/ true);
+	}
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->SetActorHiddenInGame(false);
+	}
+
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		EnableInput(PC);
+
+		// Camera Cuts releases the cine camera on finish; make sure the view is back on the player.
+		PC->SetViewTarget(this);
+
+		// Fade in from the black left by the sequence's fade track.
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, RespawnFadeInDuration, DeathFadeColor, false, false);
+		}
+	}
+}

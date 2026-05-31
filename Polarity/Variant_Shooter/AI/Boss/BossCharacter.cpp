@@ -17,6 +17,9 @@
 #include "TimerManager.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
+#include "LevelSequenceActor.h"
+#include "LevelSequencePlayer.h"
+#include "ShooterCharacter.h"
 
 namespace
 {
@@ -692,13 +695,129 @@ void ABossCharacter::EnterFinisherPhase()
 
 void ABossCharacter::ExecuteFinisher(AActor* Attacker)
 {
-	if (!bIsInFinisherPhase || bIsFinisherKnockback)
+	if (!bIsInFinisherPhase || bInFinisherCinematic)
 	{
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisher — starting knockback"));
-	StartFinisherKnockback();
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisher — starting cinematic finisher"));
+
+	// Keep bIsInFinisherPhase = true so the StateTree stays in its idle finisher-wait state and the
+	// boss's melee/shoot entry points keep bailing; bInFinisherCinematic guards against re-trigger.
+	bInFinisherCinematic = true;
+	FinisherPlayer = Attacker;
+
+	// 1. Position the Transform Origin actor at the boss, yawed toward the player. The sequence is
+	//    authored around the world origin (boss at 0,0,0 facing +X); moving the origin here makes the
+	//    whole scene play relative to the boss, oriented to whatever side the player attacked from.
+	if (AActor* OriginActor = FinisherOriginActor.LoadSynchronous())
+	{
+		FRotator OriginRot(0.0f, GetActorRotation().Yaw, 0.0f);
+		if (Attacker)
+		{
+			const FVector ToPlayer = Attacker->GetActorLocation() - GetActorLocation();
+			if (!ToPlayer.IsNearlyZero())
+			{
+				OriginRot.Yaw = ToPlayer.Rotation().Yaw;
+			}
+		}
+		OriginActor->SetActorLocationAndRotation(GetActorLocation(), OriginRot);
+	}
+
+	// 2. Put the player into the cinematic (hide body/weapon + lock input).
+	if (AShooterCharacter* Player = Cast<AShooterCharacter>(Attacker))
+	{
+		Player->BeginFinisherCinematic();
+	}
+
+	// 3. Play the sequence; OnFinished handles death + player restore.
+	if (ALevelSequenceActor* SeqActor = FinisherSequenceActor.LoadSynchronous())
+	{
+		if (ULevelSequencePlayer* SeqPlayer = SeqActor->GetSequencePlayer())
+		{
+			SeqPlayer->OnFinished.AddDynamic(this, &ABossCharacter::OnFinisherSequenceFinished);
+			SeqPlayer->Play();
+			return;
+		}
+	}
+
+	// Fail safe: no sequence configured — gib + finish immediately so the boss still dies.
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisher: no FinisherSequenceActor set — finishing without cinematic."));
+	ExecuteFinisherDismemberment();
+	OnFinisherSequenceFinished();
+}
+
+void ABossCharacter::ExecuteFinisherDismemberment()
+{
+	if (bIsDead)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] ExecuteFinisherDismemberment — gib"));
+
+	// Scatter bias toward the player (the inherited GC path reads LastKillingHitDirection).
+	if (FinisherPlayer.IsValid())
+	{
+		const FVector Dir = (FinisherPlayer->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+		if (!Dir.IsNearlyZero())
+		{
+			LastKillingHitDirection = Dir;
+		}
+	}
+
+	// Inherited from AShooterNPC: spawns the fractured Geometry Collection and applies Chaos fields.
+	// Uses DefaultDeathConfig (set Mode = Dismemberment and assign DeathGeometryCollection on the boss).
+	SpawnDeathGeometryCollection(ResolveDeathConfig());
+
+	// Hide the animated skeletal mesh — the gibs take over.
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->SetVisibility(false, true);
+	}
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	bIsDead = true;
+	CurrentHP = 0.0f;
+}
+
+void ABossCharacter::OnFinisherSequenceFinished()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[BOSS] Finisher sequence finished — cleanup"));
+
+	// Unbind so a future Play doesn't double-fire.
+	if (ALevelSequenceActor* SeqActor = FinisherSequenceActor.LoadSynchronous())
+	{
+		if (ULevelSequencePlayer* SeqPlayer = SeqActor->GetSequencePlayer())
+		{
+			SeqPlayer->OnFinished.RemoveDynamic(this, &ABossCharacter::OnFinisherSequenceFinished);
+		}
+	}
+
+	// Safety: if the dismemberment Event track wasn't placed, gib now.
+	if (!bIsDead)
+	{
+		ExecuteFinisherDismemberment();
+	}
+
+	// Player is repositioned + revealed under the (still black) screen, then faded back in.
+	if (AShooterCharacter* Player = Cast<AShooterCharacter>(FinisherPlayer.Get()))
+	{
+		FVector ExitLoc = Player->GetActorLocation();
+		if (AActor* Exit = PlayerExitPoint.LoadSynchronous())
+		{
+			ExitLoc = Exit->GetActorLocation();
+		}
+		Player->EndFinisherCinematic(ExitLoc);
+	}
+
+	OnBossDefeated.Broadcast();
+
+	// Tear down the boss now the sequence has released its binding.
+	DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
 }
 
 void ABossCharacter::StartFinisherKnockback()
@@ -859,9 +978,32 @@ void ABossCharacter::EndSlowdown()
 {
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
-		MovementComp->MaxWalkSpeed = DefaultMaxWalkSpeed;
+		// Restore to the approach speed if a slowdown ended while the boss is still charging in,
+		// otherwise back to the normal/strafe speed.
+		MovementComp->MaxWalkSpeed = bIsApproaching
+			? DefaultMaxWalkSpeed * ApproachSpeedMultiplier
+			: DefaultMaxWalkSpeed;
 	}
 	bIsSlowed = false;
+}
+
+void ABossCharacter::SetApproachSpeedActive(bool bActive)
+{
+	bIsApproaching = bActive;
+
+	// While slowed, the slowdown owns MaxWalkSpeed (and Tick caps actual velocity to the slowed
+	// speed). Don't fight it here — EndSlowdown restores the right speed based on bIsApproaching.
+	if (bIsSlowed)
+	{
+		return;
+	}
+
+	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
+	{
+		MovementComp->MaxWalkSpeed = bActive
+			? DefaultMaxWalkSpeed * ApproachSpeedMultiplier
+			: DefaultMaxWalkSpeed;
+	}
 }
 
 // ==================== Posture Regen ====================

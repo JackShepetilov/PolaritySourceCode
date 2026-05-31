@@ -25,6 +25,7 @@ class UAnimMontage;
 class UNiagaraSystem;
 class UCurveFloat;
 class AArenaManager;
+class ALevelSequenceActor;
 
 /** Boss phase enumeration */
 UENUM(BlueprintType)
@@ -140,6 +141,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior|Strafe", meta = (ClampMin = "1.0"))
 	float StrafeAcceptanceRadius = 80.0f;
 
+	/** Multiplier on the normal walk speed while charging in to melee (the Boss Approach task).
+	 *  >1 makes the boss run AT the player faster than it strafes. Applied as
+	 *  MaxWalkSpeed = DefaultMaxWalkSpeed * ApproachSpeedMultiplier only for the duration of the
+	 *  approach (strafe keeps the normal speed). A multiplier (not an absolute) so it always reads
+	 *  as "faster than strafe" regardless of the base walk speed set on the movement component. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Behavior", meta = (ClampMin = "0.1"))
+	float ApproachSpeedMultiplier = 1.6f;
+
 	// ==================== Animation Blending (melee) ====================
 
 	/** Blend time when crossfading from locomotion into an attack montage. */
@@ -208,10 +217,32 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Death")
 	TObjectPtr<UNiagaraSystem> FinisherDeathVFX;
 
+	// ==================== Finisher Cinematic (Level Sequence) ====================
+
+	/** Placed Level Sequence actor that plays the paired finisher. Authored around the world
+	 *  origin (boss at 0,0,0 facing +X); played relative to this boss via the Transform Origin actor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Cinematic")
+	TSoftObjectPtr<ALevelSequenceActor> FinisherSequenceActor;
+
+	/** Actor assigned as the sequence's Transform Origin. Moved onto the boss (location + yaw toward
+	 *  the player) at finisher start so the scene plays relative to the boss, from any direction. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Cinematic")
+	TSoftObjectPtr<AActor> FinisherOriginActor;
+
+	/** Where the player is teleported (under the black fade) when the finisher ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss|Finisher Phase|Cinematic")
+	TSoftObjectPtr<AActor> PlayerExitPoint;
+
 	// ==================== Runtime State ====================
 
 	bool bIsInFinisherPhase = false;
 	bool bIsFinisherKnockback = false;
+
+	/** Player that triggered the finisher — cached for the cinematic (dismember bias, exit teleport). */
+	TWeakObjectPtr<AActor> FinisherPlayer;
+
+	/** True while the finisher cinematic (Level Sequence) is playing — re-entry guard. */
+	bool bInFinisherCinematic = false;
 
 	FVector FinisherKnockbackStartPos = FVector::ZeroVector;
 	FVector FinisherKnockbackEndPos = FVector::ZeroVector;
@@ -224,6 +255,10 @@ protected:
 	bool bIsSlowed = false;
 	float DefaultMaxWalkSpeed = 0.0f;
 	FTimerHandle SlowdownRecoveryTimer;
+
+	/** True while the Boss Approach task is running (boss is charging in). Lets EndSlowdown restore
+	 *  the correct MaxWalkSpeed (approach speed vs normal) when a slowdown ends mid-approach. */
+	bool bIsApproaching = false;
 
 	/** World time of the last registered windup counter. Lets ApplyKnockback allow the counter
 	 *  knockback regardless of whether the player's TakeDamage or ApplyKnockback fires first. */
@@ -359,6 +394,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Boss|Behavior")
 	void StopStrafe();
 
+	/** Switch movement speed between the normal/strafe speed and the faster approach speed
+	 *  (DefaultMaxWalkSpeed * ApproachSpeedMultiplier). Called by the Boss Approach task on
+	 *  enter/exit. No-op while slowed — the slowdown owns MaxWalkSpeed and EndSlowdown restores it. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Behavior")
+	void SetApproachSpeedActive(bool bActive);
+
 	// ==================== Counter ====================
 
 	/** Returns true if a hit from Attacker right now should count as a windup counter. */
@@ -382,6 +423,11 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Boss|Finisher Phase")
 	void ExecuteFinisher(AActor* Attacker);
+
+	/** Blow the boss into Chaos gibs (inherited GC death path). Call from a Level Sequence Event
+	 *  track at the dismemberment frame via the sequence's Director Blueprint. */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Finisher Phase")
+	void ExecuteFinisherDismemberment();
 
 	UFUNCTION(BlueprintPure, Category = "Boss|Finisher Phase")
 	bool IsInFinisherPhase() const { return bIsInFinisherPhase; }
@@ -440,6 +486,10 @@ protected:
 	void StartFinisherKnockback();
 	void UpdateFinisherKnockback(float DeltaTime);
 	void OnFinisherKnockbackComplete();
+
+	/** Bound to the finisher sequence player's OnFinished: cleanup, player restore, boss teardown. */
+	UFUNCTION()
+	void OnFinisherSequenceFinished();
 
 	// ==================== Internal: Posture Regen ====================
 
