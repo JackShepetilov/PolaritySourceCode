@@ -1608,6 +1608,11 @@ void AShooterNPC::PlayHitReaction(const FVector& DamageDirection)
 		MontageToPlay = HitReactionBackMontage;
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s PlayHitReaction (FLINCH): montage=%s (%s), bIsInKnockback=%d, bIsKnockbackInterpolating=%d"),
+		*GetName(), MontageToPlay ? *MontageToPlay->GetName() : TEXT("NULL"),
+		DotProduct > 0.0f ? TEXT("front") : TEXT("back"),
+		bIsInKnockback, bIsKnockbackInterpolating);
+
 	// Play the montage on third person mesh
 	if (MontageToPlay)
 	{
@@ -1845,9 +1850,14 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 
 void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback ENTER: Distance=%.1f, Duration=%.2f, DistMult=%.2f, Style=%d | guards: bStunnedByExplosion=%d, bIsCaptured=%d, bIsDead=%d, bIsInKnockback=%d"),
+		*GetName(), Distance, Duration, KnockbackDistanceMultiplier, (int32)Style,
+		bStunnedByExplosion, bIsCaptured, bIsDead, bIsInKnockback);
+
 	// Don't interrupt explosion stun with new knockback
 	if (bStunnedByExplosion)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: bStunnedByExplosion"), *GetName());
 		return;
 	}
 
@@ -1856,6 +1866,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// NPC-NPC collisions while captured (HandleNPCCollision) reach this path.
 	if (bIsCaptured)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: bIsCaptured"), *GetName());
 		return;
 	}
 
@@ -1865,6 +1876,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// Don't apply knockback if distance is negligible
 	if (FinalDistance < 1.0f)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: FinalDistance=%.2f < 1.0 (twitch with no slide!)"), *GetName(), FinalDistance);
 		return;
 	}
 
@@ -1886,6 +1898,11 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	KnockbackTotalDuration = Duration;
 	KnockbackElapsedTime = 0.0f;
 	KnockbackAttackerPosition = AttackerLocation;
+
+	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s SLIDE planned: %.1f cm over %.2fs | Start=(%.0f,%.0f,%.0f) -> Target=(%.0f,%.0f,%.0f)"),
+		*GetName(), FinalDistance, Duration,
+		KnockbackStartPosition.X, KnockbackStartPosition.Y, KnockbackStartPosition.Z,
+		KnockbackTargetPosition.X, KnockbackTargetPosition.Y, KnockbackTargetPosition.Z);
 
 	// Stop AI pathfinding completely and clear focus to prevent rotation during knockback
 	if (AController* MyController = GetController())
@@ -1949,6 +1966,9 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// Play animation montage. Tractor-style pulls use the captured montage so the visual
 	// matches "being yanked / held by a beam" rather than "took a hit".
 	UAnimMontage* MontageToPlay = (Style == EKnockbackStyle::Tractor) ? CapturedMontage.Get() : KnockbackMontage.Get();
+	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s knockback montage = %s (PlayRate=%.2f)"),
+		*GetName(), MontageToPlay ? *MontageToPlay->GetName() : TEXT("NULL — no knockback anim assigned!"),
+		Duration > 0.0f ? 1.0f / Duration : -1.0f);
 	if (MontageToPlay)
 	{
 		UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
@@ -2138,6 +2158,13 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 	if (Alpha >= 1.0f)
 	{
 		bIsKnockbackInterpolating = false;
+
+		const float TraveledDist = FVector::Dist(KnockbackStartPosition, GetActorLocation());
+		const float PlannedDist = FVector::Dist(KnockbackStartPosition, KnockbackTargetPosition);
+		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s SLIDE complete: traveled %.1f cm of planned %.1f cm (%.0f%%), elapsed=%.2fs"),
+			*GetName(), TraveledDist, PlannedDist,
+			PlannedDist > 0.0f ? (TraveledDist / PlannedDist) * 100.0f : -1.0f,
+			KnockbackElapsedTime);
 
 		// Stop velocity
 		if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())

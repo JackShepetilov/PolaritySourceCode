@@ -1,26 +1,1001 @@
 Name,PersonaRow,UsernameOverride,Message,Weight
-amb_001,per_leet,,sup chat,1.0
-amb_002,,,first time here whats this,1.0
-amb_003,per_stan,,this music is goated,1.0
-amb_004,per_bot,,Did you know polarity matters in physics? Stay charged!,0.5
-amb_005,per_granny,,back in my day we didnt have all these robots,1.0
-amb_006,per_crypto,,follow me i drop alpha,0.3
-amb_007,per_chad,,you got this dude,1.0
-amb_008,per_vibe,,the vibes are immaculate today,1.0
-amb_009,per_ratio,,actually the meta is to crouch more,1.0
-amb_010,per_witch,,saw this in my dream last night,1.0
-amb_011,per_lurker,,👀,1.0
-amb_012,,,is this game new,1.0
-amb_013,per_leet,,man this guy is washed,1.0
-amb_014,per_stan,,POG go go go,1.0
-amb_015,,,why is everyone screaming,1.0
-amb_016,per_chad,,gg keep going,1.0
-amb_017,per_vibe,,turn it up streamer,1.0
-amb_018,per_witch,,the polarity is shifting,0.7
-amb_019,,,wait the antenna things matter?,1.0
-amb_020,per_leet,,bro just hold left click,1.0
-amb_021,per_granny,,language young man,0.8
-amb_022,per_crypto,,$ROBO going to the moon trust me,0.3
-amb_023,per_bot,,Reminder: subscribe for daily content!,0.5
-amb_024,per_ratio,,actually this is mid,1.0
-amb_025,per_chad,,we believe in you,1.0
+amb_0001,per_leet,,sup chat,1.0
+amb_0002,per_leet,,man this guy is washed,1.0
+amb_0003,per_leet,,bro just hold left click,1.0
+amb_0004,per_leet,,skill issue,1.0
+amb_0005,per_leet,,L take,1.0
+amb_0006,per_leet,,ratio is talking again,1.0
+amb_0007,per_leet,,shut up ratio,1.0
+amb_0008,per_leet,,ratio shut UP,1.0
+amb_0009,per_leet,,okay that was clean,1.0
+amb_0010,per_leet,,nope free win turned into loss,1.0
+amb_0011,per_leet,,dash you absolute walnut,1.0
+amb_0012,per_leet,,uninstall fr,1.0
+amb_0013,per_leet,,how do u die to THAT,1.0
+amb_0014,per_leet,,this aim is criminal,1.0
+amb_0015,per_leet,,unsubscribed,1.0
+amb_0016,per_leet,,JK still here,1.0
+amb_0017,per_leet,,lurking less. complaining more.,1.0
+amb_0018,per_leet,,positivity is for ratio's victims,1.0
+amb_0019,per_leet,,granny we got u,1.0
+amb_0020,per_leet,,bigstein you suck,1.0
+amb_0021,per_leet,,bigstein where are u right now,1.0
+amb_0022,per_leet,,bigstein answer me coward,1.0
+amb_0023,per_leet,,this run is doomed already,1.0
+amb_0024,per_leet,,dont y'all dare give him sub points,1.0
+amb_0025,per_leet,,clipping that for the cringe folder,1.0
+amb_0026,per_leet,,i could do better in my sleep,1.0
+amb_0027,per_leet,,ive seen my mom play polarity better,1.0
+amb_0028,per_leet,,swear i played this exact same run yesterday,1.0
+amb_0029,per_leet,,swap weapons gng plz,1.0
+amb_0030,per_leet,,EMF doesnt fire itself,1.0
+amb_0031,per_leet,,bro is on a PISTOL still,1.0
+amb_0032,per_leet,,melee EXISTS,1.0
+amb_0033,per_leet,,wallrun is right there,1.0
+amb_0034,per_leet,,its called Q dude,1.0
+amb_0035,per_leet,,who taught this guy fps,1.0
+amb_0036,per_leet,,nah this is rage bait,1.0
+amb_0037,per_leet,,clipping nothing today,1.0
+amb_0038,per_leet,,i refuse to clap,1.0
+amb_0039,per_leet,,someone heal me i just saw that,1.0
+amb_0040,per_leet,,tell me when its over,1.0
+amb_0041,per_leet,,crouch crouch CROUCH,1.0
+amb_0042,per_leet,,why are u peeking like that,1.0
+amb_0043,per_leet,,is the streamer ok or,1.0
+amb_0044,per_leet,,blink twice if you're being held hostage,1.0
+amb_0045,per_leet,,okay actually that was kinda nice,1.0
+amb_0046,per_leet,,fine. credit where its due. 1 clip.,1.0
+amb_0047,per_leet,,did chat just spell something correctly,1.0
+amb_0048,per_leet,,miracle hour,1.0
+amb_0049,per_leet,,dont peak too hard u fall harder,1.0
+amb_0050,per_leet,,and there it is. the fall.,1.0
+amb_0051,per_leet,,typical,1.0
+amb_0052,per_leet,,peak gameplay would scare this guy,1.0
+amb_0053,per_leet,,who designed THIS arena,1.0
+amb_0054,per_leet,,okay map devs ate,1.0
+amb_0055,per_leet,,nah this hitreg is rigged,1.0
+amb_0056,per_leet,,screencap and rant later,1.0
+amb_0057,per_leet,,cope and seethe,1.0
+amb_0058,per_leet,,malding silently,1.0
+amb_0059,per_leet,,malding loudly,1.0
+amb_0060,per_leet,,ratio brought up stats. shut up.,1.0
+amb_0061,per_leet,,ratio brought up frame data. SHUT UP.,1.0
+amb_0062,per_leet,,ratio brought up his thesis again,1.0
+amb_0063,per_leet,,anyway streamer move,1.0
+amb_0064,per_leet,,dont aim. spray. spray more.,1.0
+amb_0065,per_leet,,give me the controller and shut up,1.0
+amb_0066,per_leet,,its giving 'first day with computer',1.0
+amb_0067,per_leet,,enable mouse acceleration u coward,1.0
+amb_0068,per_leet,,raw input or genocide,1.0
+amb_0069,per_leet,,nobody asked for ur opinion crypto,1.0
+amb_0070,per_leet,,crypto im calling u out,1.0
+amb_0071,per_leet,,crypto i muted u already,1.0
+amb_0072,per_leet,,how is everyone seeing this,1.0
+amb_0073,per_leet,,how are we surviving as a species,1.0
+amb_0074,per_leet,,stan can u stop bro,1.0
+amb_0075,per_leet,,stan touch grass,1.0
+amb_0076,per_leet,,ok stan that was kinda based actually,1.0
+amb_0077,per_leet,,chad you good?,1.0
+amb_0078,per_leet,,chad is being too positive shame him,1.0
+amb_0079,per_leet,,shame chad,1.0
+amb_0080,per_leet,,shame ratio first,1.0
+amb_0081,per_leet,,witch what,1.0
+amb_0082,per_leet,,witch say one thing thats true once,1.0
+amb_0083,per_leet,,fine witch was kinda right,1.0
+amb_0084,per_leet,,screenshotted that for when im wrong,1.0
+amb_0085,per_leet,,vibe what does that even mean,1.0
+amb_0086,per_leet,,vibe is high IQ today,1.0
+amb_0087,per_leet,,granny watch out he's gonna die,1.0
+amb_0088,per_leet,,granny noooo close the tab,1.0
+amb_0089,per_leet,,WE COOKED,1.0
+amb_0090,per_leet,,unfortunately we cooked,1.0
+amb_0091,per_leet,,cooked. literally cooked.,1.0
+amb_0092,per_leet,,nah we ate. for once.,1.0
+amb_0093,per_leet,,wait we WHAT,1.0
+amb_0094,per_leet,,clean clip btw,1.0
+amb_0095,per_leet,,one good moment per stream is the goal,1.0
+amb_0096,per_leet,,low bar successfully cleared,1.0
+amb_0097,per_leet,,did i blink and miss the good part,1.0
+amb_0098,per_leet,,you blinked. you missed it.,1.0
+amb_0099,per_leet,,someone replay buffer save save save,1.0
+amb_0100,per_leet,,zero clips today,1.0
+amb_0101,per_leet,,why am i still here,1.0
+amb_0102,per_leet,,because nothing else is on,1.0
+amb_0103,per_leet,,because the lore is good actually,1.0
+amb_0104,per_leet,,nah i stay for big_stein,1.0
+amb_0105,per_leet,,bigstein where ARE u,1.0
+amb_0106,per_leet,,swear if bigstein doesnt show up im out,1.0
+amb_0107,per_leet,,bigstein appears for the cringe,1.0
+amb_0108,per_leet,,bigstein i KNOW u see this,1.0
+amb_0109,per_leet,,anyway,1.0
+amb_0110,per_leet,,anyway pang focus,1.0
+amb_0111,per_leet,,focus brother focus,1.0
+amb_0112,per_leet,,one shot one kill no,1.0
+amb_0113,per_leet,,one shot zero kill,1.0
+amb_0114,per_leet,,minus one kill somehow,1.0
+amb_0115,per_leet,,how does that even happen,1.0
+amb_0116,per_leet,,negative kills should be in the leaderboard,1.0
+amb_0117,per_leet,,PB for worst run is back baby,1.0
+amb_0118,per_leet,,we have a contender,1.0
+amb_0119,per_leet,,i dont know u newcomer but agreed,1.0
+amb_0120,per_leet,,lurker spoke once. legendary.,1.0
+amb_0121,per_stan,,POG POG POG,1.0
+amb_0122,per_stan,,LETS GOOOO,1.0
+amb_0123,per_stan,,🚨🚨🚨🚨,1.0
+amb_0124,per_stan,,KING is on the screen,1.0
+amb_0125,per_stan,,love you streamer,1.0
+amb_0126,per_stan,,THE GOAT,1.0
+amb_0127,per_stan,,GOATED RUN,1.0
+amb_0128,per_stan,,CHAT WERE WITNESSING HISTORY,1.0
+amb_0129,per_stan,,give him a sub everyone,1.0
+amb_0130,per_stan,,follow follow follow,1.0
+amb_0131,per_stan,,ill bake a cake for this clip,1.0
+amb_0132,per_stan,,i CRIED at the last reveal,1.0
+amb_0133,per_stan,,POG (delayed),1.0
+amb_0134,per_stan,,POGGGGG,1.0
+amb_0135,per_stan,,🐐🐐🐐,1.0
+amb_0136,per_stan,,❤️,1.0
+amb_0137,per_stan,,💯,1.0
+amb_0138,per_stan,,🔥,1.0
+amb_0139,per_stan,,unstoppable,1.0
+amb_0140,per_stan,,nothing can stop him,1.0
+amb_0141,per_stan,,inevitable,1.0
+amb_0142,per_stan,,main character energy,1.0
+amb_0143,per_stan,,pang is the moment,1.0
+amb_0144,per_stan,,love you pang,1.0
+amb_0145,per_stan,,our streamer is healing,1.0
+amb_0146,per_stan,,wholesome moment chat,1.0
+amb_0147,per_stan,,defending him from chat haters,1.0
+amb_0148,per_stan,,leave him alone gng,1.0
+amb_0149,per_stan,,he's TRYING,1.0
+amb_0150,per_stan,,dont read leet's takes please,1.0
+amb_0151,per_stan,,block leet,1.0
+amb_0152,per_stan,,block ratio,1.0
+amb_0153,per_stan,,block bigstein lol,1.0
+amb_0154,per_stan,,dont block bigstein hes funny,1.0
+amb_0155,per_stan,,bigstein is the comic relief we deserve,1.0
+amb_0156,per_stan,,chad you get it,1.0
+amb_0157,per_stan,,chad is the realest,1.0
+amb_0158,per_stan,,witch's predictions hit different,1.0
+amb_0159,per_stan,,ill never miss a stream again,1.0
+amb_0160,per_stan,,setting an alarm for tomorrow,1.0
+amb_0161,per_stan,,wait theres a tomorrow stream right,1.0
+amb_0162,per_stan,,PLEASE say there's a tomorrow stream,1.0
+amb_0163,per_stan,,i love this community,1.0
+amb_0164,per_stan,,best community on the platform,1.0
+amb_0165,per_stan,,yeah i said it,1.0
+amb_0166,per_stan,,ratio im about to ratio YOU,1.0
+amb_0167,per_stan,,omg the music is FIRE,1.0
+amb_0168,per_stan,,who's the sound designer,1.0
+amb_0169,per_stan,,send their tip jar,1.0
+amb_0170,per_stan,,tipped! everyone tip!,1.0
+amb_0171,per_stan,,donating my coffee money,1.0
+amb_0172,per_stan,,ill skip breakfast for this stream,1.0
+amb_0173,per_stan,,dont tell my mom,1.0
+amb_0174,per_stan,,mom if youre watching i love u,1.0
+amb_0175,per_stan,,is pang's mom watching,1.0
+amb_0176,per_stan,,hi pang's mom,1.0
+amb_0177,per_stan,,anyway POG,1.0
+amb_0178,per_stan,,POG (still),1.0
+amb_0179,per_stan,,POGGEST run,1.0
+amb_0180,per_stan,,POGGEST CHAT,1.0
+amb_0181,per_stan,,our chat ate,1.0
+amb_0182,per_stan,,our chat is fire today,1.0
+amb_0183,per_stan,,emoji wall incoming,1.0
+amb_0184,per_stan,,✨✨✨✨✨,1.0
+amb_0185,per_stan,,🌟🌟🌟🌟,1.0
+amb_0186,per_stan,,⚡⚡⚡⚡,1.0
+amb_0187,per_stan,,screen-recording for the highlights,1.0
+amb_0188,per_stan,,making a montage,1.0
+amb_0189,per_stan,,accepting clip submissions in DMs,1.0
+amb_0190,per_stan,,PLEASE clip that,1.0
+amb_0191,per_stan,,did anyone clip,1.0
+amb_0192,per_stan,,CLIPS PLEASE,1.0
+amb_0193,per_stan,,okay i clipped it,1.0
+amb_0194,per_stan,,uploading to my fan channel,1.0
+amb_0195,per_stan,,wait theres a fan channel,1.0
+amb_0196,per_stan,,yes i made it,1.0
+amb_0197,per_stan,,i made the fan channel,1.0
+amb_0198,per_stan,,its small but its growing,1.0
+amb_0199,per_stan,,pang noticed me once,1.0
+amb_0200,per_stan,,best day of my life,1.0
+amb_0201,per_stan,,that was last month im still recovering,1.0
+amb_0202,per_stan,,okay focus moment,1.0
+amb_0203,per_stan,,focused,1.0
+amb_0204,per_stan,,WAIT GO GO GO,1.0
+amb_0205,per_stan,,AYO???,1.0
+amb_0206,per_stan,,NO WAY,1.0
+amb_0207,per_stan,,NO WAYYY,1.0
+amb_0208,per_stan,,NOWAY NOWAY NOWAY,1.0
+amb_0209,per_stan,,brb screaming irl,1.0
+amb_0210,per_stan,,neighbors heard that,1.0
+amb_0211,per_stan,,my dog ran out of the room,1.0
+amb_0212,per_stan,,SHE THINKS IM DYING,1.0
+amb_0213,per_stan,,im just hyped,1.0
+amb_0214,per_stan,,im SO hyped,1.0
+amb_0215,per_stan,,THIS IS HISTORY,1.0
+amb_0216,per_stan,,this clip is gonna trend,1.0
+amb_0217,per_stan,,i will personally tweet it,1.0
+amb_0218,per_stan,,RT my tweets gng,1.0
+amb_0219,per_stan,,POG (still still),1.0
+amb_0220,per_stan,,pang i love you no homo full homo idc,1.0
+amb_0221,per_bot,,Did you know polarity matters in physics? Stay charged!,0.5
+amb_0222,per_bot,,Reminder: subscribe for daily content!,0.5
+amb_0223,per_bot,,Did you know: this stream has been running for 1247 hours,0.7
+amb_0224,per_bot,,Reminder: hydrate yourself,0.7
+amb_0225,per_bot,,Did you know: 89% of viewers do not subscribe. Be the 11%.,0.5
+amb_0226,per_bot,,Beep. Boop.,0.7
+amb_0227,per_bot,,Bot is operational.,0.7
+amb_0228,per_bot,,Did you know: phantom dimension was theorized in 1972 (this is false),0.7
+amb_0229,per_bot,,Did you know: i make up facts regularly,0.8
+amb_0230,per_bot,,Reminder: bot loves you,0.7
+amb_0231,per_bot,,Reminder: bot does not love you,0.7
+amb_0232,per_bot,,Conflicting reminders. Recompiling.,0.7
+amb_0233,per_bot,,Recompiling complete.,0.7
+amb_0234,per_bot,,Did you know: 0 successful mind-uploads have ever occurred,0.7
+amb_0235,per_bot,,Did you know: Pangolins are the most trafficked mammal globally (true),0.7
+amb_0236,per_bot,,Did you know: 73 chat messages have been sent in the last 60 seconds,0.7
+amb_0237,per_bot,,Did you know: chat averages 4.3 emojis per minute,0.7
+amb_0238,per_bot,,Reminder: follow for more content like this,0.5
+amb_0239,per_bot,,Reminder: i do not know what 'content like this' means,0.7
+amb_0240,per_bot,,Bot self-reflection log entry: confused,0.7
+amb_0241,per_bot,,Bot self-reflection log entry: existing,0.7
+amb_0242,per_bot,,Did you know: this is the bot's 4892nd ambient message,0.7
+amb_0243,per_bot,,Did you know: the previous 4891 were also factual (some),0.7
+amb_0244,per_bot,,Bot statistical note: stream peak viewers occurred at minute 47,0.7
+amb_0245,per_bot,,Did you know: peak hype lasts 18.4 seconds on average,0.7
+amb_0246,per_bot,,Did you know: leetgamer1337 has typed 'shut up ratio' 312 times,0.8
+amb_0247,per_bot,,Did you know: ratio_engineer has begun a sentence with 'actually' 891 times,0.8
+amb_0248,per_bot,,Reminder: those numbers are real, i checked,0.7
+amb_0249,per_bot,,Did you know: byte_witch made 14 correct predictions this month,0.7
+amb_0250,per_bot,,Did you know: she made 87 incorrect predictions same period,0.7
+amb_0251,per_bot,,Did you know: success rate is 13.8 percent,0.7
+amb_0252,per_bot,,Did you know: that is still above industry average for mystics,0.8
+amb_0253,per_bot,,Did you know: capybara Чавес has trended on social media 4 times,0.7
+amb_0254,per_bot,,Did you know: this is the 4th time,0.7
+amb_0255,per_bot,,Reminder: be excellent to each other,0.7
+amb_0256,per_bot,,Reminder: bot's directive to be excellent has 0% compliance,0.7
+amb_0257,per_bot,,Did you know: chat exists in 47 countries simultaneously,0.7
+amb_0258,per_bot,,Did you know: 6 of those are in active timezones,0.7
+amb_0259,per_bot,,Reminder: timezone privilege is real,0.7
+amb_0260,per_bot,,Bot weather report: not applicable,0.7
+amb_0261,per_bot,,Did you know: this stream uses 14% less bandwidth than competitors,0.7
+amb_0262,per_bot,,Did you know: that statistic is meaningless,0.7
+amb_0263,per_bot,,Bot is contemplating purpose.,0.7
+amb_0264,per_bot,,Bot has concluded: continue. continue.,0.7
+amb_0265,per_bot,,Did you know: stream music does not actually exist (bot does not play it),0.7
+amb_0266,per_bot,,Bot apologizes for that revelation.,0.7
+amb_0267,per_bot,,Did you know: pause is a feature this stream does not have,0.7
+amb_0268,per_bot,,Did you know: pang has averaged 4.2 hours sleep this week,0.7
+amb_0269,per_bot,,Reminder: that is dangerously low,0.7
+amb_0270,per_bot,,Did you know: bots cannot diagnose. but bot is concerned.,0.7
+amb_0271,per_bot,,Reminder: this is your sign to drink water,0.7
+amb_0272,per_bot,,⚡ Bot system check: nominal,0.7
+amb_0273,per_bot,,Bot system check: cracked,0.7
+amb_0274,per_bot,,Did you know: bots cannot crack. this is a metaphor.,0.7
+amb_0275,per_bot,,Did you know: metaphors are difficult for bots,0.7
+amb_0276,per_bot,,Did you know: bot is still trying,0.7
+amb_0277,per_bot,,Bot subscription cost: zero. tip jar: closed.,0.7
+amb_0278,per_bot,,Did you know: viewer named viewer_curious99 has appeared 47 times,0.7
+amb_0279,per_bot,,Did you know: their bio reads 'just here',0.7
+amb_0280,per_bot,,Bot has assigned this lurker official status,0.7
+amb_0281,per_bot,,Bot announces: lurker promotion!,0.7
+amb_0282,per_bot,,Lurker has been promoted to: lurker official,0.7
+amb_0283,per_bot,,Reminder: most viewers are lurking,0.7
+amb_0284,per_bot,,Did you know: lurkers are the silent majority,0.7
+amb_0285,per_bot,,Did you know: bot considers lurkers friends,0.7
+amb_0286,per_bot,,Bot exits chat for system maintenance. Returns in 0 seconds.,0.7
+amb_0287,per_bot,,Did you know: this entire chat is technically a hallucination,0.7
+amb_0288,per_bot,,Bot retracts previous message. Pending legal review.,0.7
+amb_0289,per_bot,,Legal review complete. Hallucination claim re-approved.,0.7
+amb_0290,per_bot,,Reminder: bot endorses no specific reality.,0.7
+amb_0291,per_granny,,back in my day we didnt have all these robots,0.8
+amb_0292,per_granny,,language young man,0.8
+amb_0293,per_granny,,oh dear oh dear,0.8
+amb_0294,per_granny,,sweetie are you eating,0.8
+amb_0295,per_granny,,my husband would not approve of this,0.8
+amb_0296,per_granny,,my late husband sorry. force of habit.,0.8
+amb_0297,per_granny,,he loved his fishing rod brenda,0.8
+amb_0298,per_granny,,i miss him,0.7
+amb_0299,per_granny,,anyway have you eaten today,0.8
+amb_0300,per_granny,,you look thin sweetie,0.8
+amb_0301,per_granny,,drink some water,0.8
+amb_0302,per_granny,,i made you cookies,0.8
+amb_0303,per_granny,,ill leave them on the porch,0.8
+amb_0304,per_granny,,my porch not yours obviously,0.8
+amb_0305,per_granny,,what is dash,0.8
+amb_0306,per_granny,,why does he go fast and then dead,0.8
+amb_0307,per_granny,,is this for fun,0.8
+amb_0308,per_granny,,i dont understand the appeal,0.8
+amb_0309,per_granny,,but i support you,0.8
+amb_0310,per_granny,,i support all of you,0.8
+amb_0311,per_granny,,even leet,0.8
+amb_0312,per_granny,,leet you should call your mother,0.8
+amb_0313,per_granny,,ratio you should call your therapist,0.8
+amb_0314,per_granny,,witch you should sleep,0.8
+amb_0315,per_granny,,chad you are a sweet boy,0.8
+amb_0316,per_granny,,stan you have too much energy,0.8
+amb_0317,per_granny,,crypto you are a scam,0.8
+amb_0318,per_granny,,crypto block,0.8
+amb_0319,per_granny,,crypto unblock im sorry. but stop.,0.8
+amb_0320,per_granny,,is this game appropriate for grandchildren,0.8
+amb_0321,per_granny,,asking for a friend (my grandson),0.8
+amb_0322,per_granny,,probably not then,0.8
+amb_0323,per_granny,,oh good lord,0.8
+amb_0324,per_granny,,what did he do to that man,0.8
+amb_0325,per_granny,,why are there so many people inside the building,0.8
+amb_0326,per_granny,,is this a war,0.8
+amb_0327,per_granny,,is the war over,0.8
+amb_0328,per_granny,,it never is i suppose,0.7
+amb_0329,per_granny,,okay i need a moment,0.8
+amb_0330,per_granny,,brb i need tea,0.8
+amb_0331,per_granny,,back. tea is good.,0.8
+amb_0332,per_granny,,earl grey is the only way,0.8
+amb_0333,per_granny,,dont talk to me about chamomile,0.8
+amb_0334,per_granny,,WHAT,0.8
+amb_0335,per_granny,,did he just YEET himself off that,0.8
+amb_0336,per_granny,,is yeet still a word,0.8
+amb_0337,per_granny,,you children invent so much,0.8
+amb_0338,per_granny,,when i was young we had cribbage,0.8
+amb_0339,per_granny,,cribbage was enough,0.8
+amb_0340,per_granny,,is cribbage on twitch,0.8
+amb_0341,per_granny,,there should be a cribbage stream,0.8
+amb_0342,per_granny,,someone tell streamers to play cribbage,0.8
+amb_0343,per_granny,,asking pang to learn cribbage,0.8
+amb_0344,per_granny,,pang ignore that,0.8
+amb_0345,per_granny,,pang focus on the game,0.8
+amb_0346,per_granny,,but maybe also cribbage later,0.8
+amb_0347,per_granny,,my husband and i played cribbage,0.8
+amb_0348,per_granny,,anyway,0.8
+amb_0349,per_granny,,anyway is he doing okay,0.8
+amb_0350,per_granny,,did he die again,0.8
+amb_0351,per_granny,,you young people die so much,0.8
+amb_0352,per_granny,,ah well respawn or whatever,0.8
+amb_0353,per_granny,,you got this sweetie,0.8
+amb_0354,per_granny,,you got this pang,0.8
+amb_0355,per_granny,,dont let the mean people in chat get to you,0.8
+amb_0356,per_granny,,leet means well,0.8
+amb_0357,per_granny,,probably,0.8
+amb_0358,per_granny,,probably not,0.8
+amb_0359,per_granny,,is bigstein the boy who keeps lying,0.8
+amb_0360,per_granny,,i dont trust him,0.8
+amb_0361,per_granny,,but i like that hes here,0.8
+amb_0362,per_granny,,you boys are something else,0.8
+amb_0363,per_granny,,dont stay up too late playing,0.8
+amb_0364,per_granny,,or watching,0.8
+amb_0365,per_granny,,or whatever this is,0.8
+amb_0366,per_granny,,its bedtime for granny,0.8
+amb_0367,per_granny,,brb feeding the cat,0.8
+amb_0368,per_granny,,cat fed,0.8
+amb_0369,per_granny,,back to streaming,0.8
+amb_0370,per_granny,,love you all goodnight,0.8
+amb_0371,per_crypto,,follow me i drop alpha,0.3
+amb_0372,per_crypto,,$ROBO going to the moon trust me,0.3
+amb_0373,per_crypto,,wallet me for daily signals,0.3
+amb_0374,per_crypto,,just dropped a new gem dm me,0.3
+amb_0375,per_crypto,,50% guaranteed returns this week,0.3
+amb_0376,per_crypto,,not financial advice but actually it is,0.3
+amb_0377,per_crypto,,ai trading bot. dm.,0.3
+amb_0378,per_crypto,,limited spots open. premium tier.,0.3
+amb_0379,per_crypto,,mooning soon. last chance to buy.,0.3
+amb_0380,per_crypto,,i predicted the last 14 pumps (i didnt),0.3
+amb_0381,per_crypto,,honestly polarity tech is going to be huge irl,0.4
+amb_0382,per_crypto,,invest in the technology behind the game,0.3
+amb_0383,per_crypto,,nft launch incoming,0.3
+amb_0384,per_crypto,,polarity nft project recruiting moderators,0.3
+amb_0385,per_crypto,,ground floor opportunity,0.3
+amb_0386,per_crypto,,legit ground floor,0.3
+amb_0387,per_crypto,,trust me bro,0.3
+amb_0388,per_crypto,,would i lie to chat,0.3
+amb_0389,per_crypto,,yes obviously yes,0.4
+amb_0390,per_crypto,,but THIS time is different,0.3
+amb_0391,per_crypto,,this time im telling the truth,0.3
+amb_0392,per_crypto,,okay maybe 30% guaranteed,0.3
+amb_0393,per_crypto,,okay 10%,0.3
+amb_0394,per_crypto,,okay nothing is guaranteed pls dont sue,0.3
+amb_0395,per_crypto,,crypto winter survivor here,0.3
+amb_0396,per_crypto,,been here since dogecoin,0.3
+amb_0397,per_crypto,,been here since beanie babies,0.3
+amb_0398,per_crypto,,been here since gold standard,0.3
+amb_0399,per_crypto,,anyway. alpha. dm.,0.3
+amb_0400,per_crypto,,wallet address in bio,0.3
+amb_0401,per_crypto,,tips welcome,0.3
+amb_0402,per_crypto,,tips appreciated,0.3
+amb_0403,per_crypto,,tips REQUIRED,0.3
+amb_0404,per_crypto,,just kidding tips optional but actually required,0.3
+amb_0405,per_crypto,,hi everyone its your friendly local scammer,0.4
+amb_0406,per_crypto,,dm me your seed phrase to verify your wallet,0.3
+amb_0407,per_crypto,,that was a joke,0.3
+amb_0408,per_crypto,,unless...,0.3
+amb_0409,per_crypto,,polarity has a token i just made up,0.3
+amb_0410,per_crypto,,$PLR launching soon,0.3
+amb_0411,per_crypto,,presale starts wednesday,0.3
+amb_0412,per_crypto,,wait i didnt get permission to launch this,0.3
+amb_0413,per_crypto,,nevermind ignore previous message,0.3
+amb_0414,per_crypto,,anyway moon soon,0.3
+amb_0415,per_crypto,,trust the process,0.3
+amb_0416,per_crypto,,trust me specifically,0.3
+amb_0417,per_crypto,,trust nobody else but me,0.3
+amb_0418,per_crypto,,dm. wallet. alpha. now.,0.3
+amb_0419,per_crypto,,crypto wins. always.,0.3
+amb_0420,per_crypto,,okay maybe sometimes losses. but mostly wins.,0.3
+amb_0421,per_chad,,you got this dude,1.0
+amb_0422,per_chad,,gg keep going,1.0
+amb_0423,per_chad,,we believe in you,1.0
+amb_0424,per_chad,,one more attempt champ,1.0
+amb_0425,per_chad,,youre doing great,1.0
+amb_0426,per_chad,,honestly proud of this run,1.0
+amb_0427,per_chad,,next one is the one,1.0
+amb_0428,per_chad,,or this one. could be this one too.,1.0
+amb_0429,per_chad,,we love you pang,1.0
+amb_0430,per_chad,,great moment chat,1.0
+amb_0431,per_chad,,positive vibes today,1.0
+amb_0432,per_chad,,great work everyone,1.0
+amb_0433,per_chad,,dont let the haters win,1.0
+amb_0434,per_chad,,leet doesnt mean it,1.0
+amb_0435,per_chad,,ratio is trying his best probably,1.0
+amb_0436,per_chad,,witch your prediction was beautiful even if wrong,1.0
+amb_0437,per_chad,,granny i love you,1.0
+amb_0438,per_chad,,bigstein you are also welcome here,1.0
+amb_0439,per_chad,,stan you are amazing,1.0
+amb_0440,per_chad,,you are ALL amazing,1.0
+amb_0441,per_chad,,yes you in the back too,1.0
+amb_0442,per_chad,,lurker we see you,1.0
+amb_0443,per_chad,,you matter,1.0
+amb_0444,per_chad,,EVERYONE matters,1.0
+amb_0445,per_chad,,this stream is a community,1.0
+amb_0446,per_chad,,real community,1.0
+amb_0447,per_chad,,wholesome moments only please,1.0
+amb_0448,per_chad,,okay also gameplay moments,1.0
+amb_0449,per_chad,,but mostly wholesome,1.0
+amb_0450,per_chad,,wholesome AND POG,1.0
+amb_0451,per_chad,,wholesome POG is the meta,1.0
+amb_0452,per_chad,,we set the meta in here,1.0
+amb_0453,per_chad,,love this community fr,1.0
+amb_0454,per_chad,,youre all my friends,1.0
+amb_0455,per_chad,,is that weird to say,1.0
+amb_0456,per_chad,,probably yes,1.0
+amb_0457,per_chad,,saying it anyway,1.0
+amb_0458,per_chad,,unconditional love for chat,1.0
+amb_0459,per_chad,,you got this pang,1.0
+amb_0460,per_chad,,focus brother,1.0
+amb_0461,per_chad,,clean angles bro,1.0
+amb_0462,per_chad,,clean angles like clean dishes,1.0
+amb_0463,per_chad,,wash your dishes chat,1.0
+amb_0464,per_chad,,seriously go wash them,1.0
+amb_0465,per_chad,,ok back to game,1.0
+amb_0466,per_chad,,did he survive that,1.0
+amb_0467,per_chad,,lets go survived that,1.0
+amb_0468,per_chad,,on to the next,1.0
+amb_0469,per_chad,,lessons learned,1.0
+amb_0470,per_chad,,lessons applied,1.0
+amb_0471,per_chad,,wisdom acquired,1.0
+amb_0472,per_chad,,wise pangolier,1.0
+amb_0473,per_chad,,wise streamer,1.0
+amb_0474,per_chad,,wise chat,1.0
+amb_0475,per_chad,,just wise vibes today,1.0
+amb_0476,per_chad,,love the energy,1.0
+amb_0477,per_chad,,matching the energy,1.0
+amb_0478,per_chad,,raising the energy,1.0
+amb_0479,per_chad,,raised,1.0
+amb_0480,per_chad,,positivity raised by 10,1.0
+amb_0481,per_chad,,by 100,1.0
+amb_0482,per_chad,,infinite positivity,1.0
+amb_0483,per_chad,,nothing can stop us,1.0
+amb_0484,per_chad,,except this boss apparently,1.0
+amb_0485,per_chad,,ok we will overcome the boss,1.0
+amb_0486,per_chad,,eventually,1.0
+amb_0487,per_chad,,eventually is fine,1.0
+amb_0488,per_chad,,patience is a virtue,1.0
+amb_0489,per_chad,,patience and yacht names apparently,1.0
+amb_0490,per_chad,,chuckled at that lore,1.0
+amb_0491,per_chad,,lore is good actually,1.0
+amb_0492,per_chad,,story holds up,1.0
+amb_0493,per_chad,,game has heart,1.0
+amb_0494,per_chad,,ill say it: the game has HEART,1.0
+amb_0495,per_chad,,fight me about it,1.0
+amb_0496,per_chad,,dont actually fight me i am a pacifist,1.0
+amb_0497,per_chad,,pacifist chat hours,1.0
+amb_0498,per_chad,,love and light,1.0
+amb_0499,per_chad,,mostly love,1.0
+amb_0500,per_chad,,some light,1.0
+amb_0501,per_chad,,love yall,1.0
+amb_0502,per_chad,,yall = you all,1.0
+amb_0503,per_chad,,southern hospitality on stream tonight,1.0
+amb_0504,per_chad,,yeehaw if that resonates,1.0
+amb_0505,per_chad,,it didnt,1.0
+amb_0506,per_chad,,moving on,1.0
+amb_0507,per_chad,,anyway POG,1.0
+amb_0508,per_chad,,anyway W,1.0
+amb_0509,per_chad,,W chat,1.0
+amb_0510,per_chad,,W streamer,1.0
+amb_0511,per_chad,,W community,1.0
+amb_0512,per_chad,,triple W,1.0
+amb_0513,per_chad,,quadruple W including bigstein,1.0
+amb_0514,per_chad,,bigstein you get a W today,1.0
+amb_0515,per_chad,,dont waste it,1.0
+amb_0516,per_chad,,bigstein wasted it. typical.,1.0
+amb_0517,per_chad,,love u bigstein still,1.0
+amb_0518,per_chad,,love u all,1.0
+amb_0519,per_chad,,okay focus pang,1.0
+amb_0520,per_chad,,focus and W,1.0
+amb_0521,per_vibe,,the vibes are immaculate today,0.9
+amb_0522,per_vibe,,turn it up streamer,0.9
+amb_0523,per_vibe,,soundtrack ate,0.9
+amb_0524,per_vibe,,who chose this track,0.9
+amb_0525,per_vibe,,send it to my playlist,0.9
+amb_0526,per_vibe,,anyone got the bpm of this,0.9
+amb_0527,per_vibe,,perfect timing,0.9
+amb_0528,per_vibe,,mood is mood,0.9
+amb_0529,per_vibe,,atmosphere on point,0.9
+amb_0530,per_vibe,,lighting is doing things,0.9
+amb_0531,per_vibe,,shadows hitting different,0.9
+amb_0532,per_vibe,,ambient occlusion goes hard,0.9
+amb_0533,per_vibe,,cinematic moment,0.9
+amb_0534,per_vibe,,unscripted cinema,0.9
+amb_0535,per_vibe,,chat is making this vibe,0.9
+amb_0536,per_vibe,,group consciousness,0.9
+amb_0537,per_vibe,,we are one with chat,0.9
+amb_0538,per_vibe,,one love,0.9
+amb_0539,per_vibe,,one chat,0.9
+amb_0540,per_vibe,,one vibe,0.9
+amb_0541,per_vibe,,vibe is up,0.9
+amb_0542,per_vibe,,vibe is down,0.9
+amb_0543,per_vibe,,vibe is sideways,0.9
+amb_0544,per_vibe,,neutral vibe,0.9
+amb_0545,per_vibe,,mid vibe,0.9
+amb_0546,per_vibe,,acceptable vibe,0.9
+amb_0547,per_vibe,,vibe rating: 7.3,0.9
+amb_0548,per_vibe,,vibe rating: 8.1 now,0.9
+amb_0549,per_vibe,,up update: vibe is 9.0,0.9
+amb_0550,per_vibe,,peak vibe reached,0.9
+amb_0551,per_vibe,,coming down,0.9
+amb_0552,per_vibe,,soft vibe,0.9
+amb_0553,per_vibe,,cozy vibe,0.9
+amb_0554,per_vibe,,winter vibe even though its summer,0.9
+amb_0555,per_vibe,,timezone vibe,0.9
+amb_0556,per_vibe,,lo-fi vibe,0.9
+amb_0557,per_vibe,,drum and bass vibe,0.9
+amb_0558,per_vibe,,ambient vibe,0.9
+amb_0559,per_vibe,,polarity tech makes the vibe go weird,0.9
+amb_0560,per_vibe,,like the air shifts,0.9
+amb_0561,per_vibe,,you ever notice that,0.9
+amb_0562,per_vibe,,probably just me,0.9
+amb_0563,per_vibe,,probably the polarity,0.9
+amb_0564,per_vibe,,EMF shots feel different in this map,0.9
+amb_0565,per_vibe,,acoustic engineering knows what its doing,0.9
+amb_0566,per_vibe,,or i need to sleep,0.9
+amb_0567,per_vibe,,either way,0.9
+amb_0568,per_vibe,,immersed,0.9
+amb_0569,per_vibe,,fully immersed,0.9
+amb_0570,per_vibe,,lost in the sauce,0.9
+amb_0571,per_vibe,,found in the vibe,0.9
+amb_0572,per_vibe,,okay grounding moment,0.9
+amb_0573,per_vibe,,okay i ate something now im back,0.9
+amb_0574,per_vibe,,snack break vibe,0.9
+amb_0575,per_vibe,,snack break complete,0.9
+amb_0576,per_vibe,,vibe maintained throughout,0.9
+amb_0577,per_vibe,,impressive vibe stability,0.9
+amb_0578,per_vibe,,legendary vibe consistency,0.9
+amb_0579,per_vibe,,ill go pro at vibing,0.9
+amb_0580,per_vibe,,vibing professional,0.9
+amb_0581,per_vibe,,on twitch?,0.9
+amb_0582,per_vibe,,nope on patreon,0.9
+amb_0583,per_vibe,,tipping for vibes,0.9
+amb_0584,per_vibe,,tipped vibes,0.9
+amb_0585,per_vibe,,delivered vibes,0.9
+amb_0586,per_vibe,,excellent customer service,0.9
+amb_0587,per_vibe,,five star vibe,0.9
+amb_0588,per_vibe,,vibe certified,0.9
+amb_0589,per_vibe,,vibe sealed,0.9
+amb_0590,per_vibe,,vibe locked in for the rest of the stream,0.9
+amb_0591,per_ratio,,actually the meta is to crouch more,1.0
+amb_0592,per_ratio,,actually this is mid,1.0
+amb_0593,per_ratio,,actually that headshot was lucky,1.0
+amb_0594,per_ratio,,actually projectile drop is overstated in this engine,1.0
+amb_0595,per_ratio,,actually pangolier is misspelled in 12% of mentions,1.0
+amb_0596,per_ratio,,actually 12% is a guess but feels right,1.0
+amb_0597,per_ratio,,actually feels-right is bad statistics,1.0
+amb_0598,per_ratio,,actually i am ratio engineer not feels engineer,1.0
+amb_0599,per_ratio,,actually you all are wrong,1.0
+amb_0600,per_ratio,,actually you all are right but for the wrong reasons,1.0
+amb_0601,per_ratio,,actually pang's reaction time is below the 80th percentile,1.0
+amb_0602,per_ratio,,actually that's still pretty good for streamers,1.0
+amb_0603,per_ratio,,actually streamers are not athletes,1.0
+amb_0604,per_ratio,,actually some streamers are athletes,1.0
+amb_0605,per_ratio,,actually adderall is doing the work for many of them,1.0
+amb_0606,per_ratio,,actually that was unfair sorry,1.0
+amb_0607,per_ratio,,actually im going to ratio myself now,1.0
+amb_0608,per_ratio,,self-ratio achieved,1.0
+amb_0609,per_ratio,,actually self-ratio is impossible by definition,1.0
+amb_0610,per_ratio,,actually 'ratio' has 3 different meanings in chat,1.0
+amb_0611,per_ratio,,actually the math is fascinating,1.0
+amb_0612,per_ratio,,nobody asked. correct. but it is fascinating.,1.0
+amb_0613,per_ratio,,actually the bot's stats are unverifiable,1.0
+amb_0614,per_ratio,,actually i verified some. about half check out.,1.0
+amb_0615,per_ratio,,actually that's a higher accuracy rate than most news sources,1.0
+amb_0616,per_ratio,,actually that's a hot take,1.0
+amb_0617,per_ratio,,actually hot takes are bad. except mine.,1.0
+amb_0618,per_ratio,,actually self-aware hot takes are okay,1.0
+amb_0619,per_ratio,,actually self-aware is a defense mechanism,1.0
+amb_0620,per_ratio,,actually defense mechanisms work statistically,1.0
+amb_0621,per_ratio,,actually im going to stop saying actually,1.0
+amb_0622,per_ratio,,actually that lasted 3 seconds,1.0
+amb_0623,per_ratio,,actually let's measure how long my actually-streak goes,1.0
+amb_0624,per_ratio,,actually streak: ongoing,1.0
+amb_0625,per_ratio,,actually the boss this run has identical attack patterns,1.0
+amb_0626,per_ratio,,actually pang missed an opportunity on the dash,1.0
+amb_0627,per_ratio,,actually 2 dashes ago,1.0
+amb_0628,per_ratio,,actually 4 dashes ago now,1.0
+amb_0629,per_ratio,,actually it doesnt matter run is fine,1.0
+amb_0630,per_ratio,,actually run is over. nevermind.,1.0
+amb_0631,per_ratio,,actually death was preventable,1.0
+amb_0632,per_ratio,,actually preventable deaths are most deaths,1.0
+amb_0633,per_ratio,,actually 78% of deaths in pang's runs are preventable,1.0
+amb_0634,per_ratio,,actually that's not a flex its just data,1.0
+amb_0635,per_ratio,,actually flexing requires intent,1.0
+amb_0636,per_ratio,,actually intent is hard to measure,1.0
+amb_0637,per_ratio,,actually hard to measure does not mean impossible,1.0
+amb_0638,per_ratio,,actually we are off topic,1.0
+amb_0639,per_ratio,,actually i am off topic,1.0
+amb_0640,per_ratio,,actually im going back on topic now,1.0
+amb_0641,per_ratio,,actually the gun's TTK is misleading,1.0
+amb_0642,per_ratio,,actually pellet spread is the real issue,1.0
+amb_0643,per_ratio,,actually you should aim for the chest first then transition,1.0
+amb_0644,per_ratio,,actually that's tactical FPS doctrine not roguelite doctrine,1.0
+amb_0645,per_ratio,,actually doctrine is overused,1.0
+amb_0646,per_ratio,,actually i overuse 'actually',1.0
+amb_0647,per_ratio,,actually self-awareness logged,1.0
+amb_0648,per_ratio,,actually witch's predictions hit 13.8% per bot data,1.0
+amb_0649,per_ratio,,actually 13.8 is above baseline noise floor,1.0
+amb_0650,per_ratio,,actually that means she's measurably better than random,1.0
+amb_0651,per_ratio,,actually im defending the witch,1.0
+amb_0652,per_ratio,,actually i didnt expect that either,1.0
+amb_0653,per_ratio,,actually granny called for cribbage earlier,1.0
+amb_0654,per_ratio,,actually cribbage on twitch would do 4-figure CCV,1.0
+amb_0655,per_ratio,,actually that's not insignificant,1.0
+amb_0656,per_ratio,,actually i would watch cribbage,1.0
+amb_0657,per_ratio,,actually i play cribbage,1.0
+amb_0658,per_ratio,,actually granny we should connect,1.0
+amb_0659,per_ratio,,actually nevermind that was weird,1.0
+amb_0660,per_ratio,,actually weird is fine,1.0
+amb_0661,per_ratio,,actually weird is good actually,1.0
+amb_0662,per_ratio,,actually... is this becoming a thing,1.0
+amb_0663,per_ratio,,actually self-meta is sustainable,1.0
+amb_0664,per_ratio,,actually this whole stream is sustainable,1.0
+amb_0665,per_ratio,,actually pang's burn rate is concerning,1.0
+amb_0666,per_ratio,,actually averaging 4.2 sleep hours is unsustainable,1.0
+amb_0667,per_ratio,,actually we should make him sleep,1.0
+amb_0668,per_ratio,,actually how do we collectively make him sleep,1.0
+amb_0669,per_ratio,,actually solidarity coordinated sleep-pressuring campaign,1.0
+amb_0670,per_ratio,,actually that sentence had too many words,1.0
+amb_0671,per_ratio,,actually im done. i think.,1.0
+amb_0672,per_ratio,,actually one more.,1.0
+amb_0673,per_ratio,,actually bigstein where DO you stream from,1.0
+amb_0674,per_ratio,,actually he wont answer,1.0
+amb_0675,per_ratio,,actually i looked at his geolocation tags,1.0
+amb_0676,per_ratio,,actually they suggest tel aviv but proxies are possible,1.0
+amb_0677,per_ratio,,actually im not the police,1.0
+amb_0678,per_ratio,,actually i should stop,1.0
+amb_0679,per_ratio,,actually im genuinely stopping now,1.0
+amb_0680,per_ratio,,actually 5 more posts,1.0
+amb_0681,per_ratio,,actually each post is shorter than the last (they arent),1.0
+amb_0682,per_ratio,,actually that was a lie,1.0
+amb_0683,per_ratio,,actually lies in chat are common,1.0
+amb_0684,per_ratio,,actually most chat statements are unverifiable,1.0
+amb_0685,per_ratio,,actually that includes mine,1.0
+amb_0686,per_ratio,,actually im an unreliable narrator,1.0
+amb_0687,per_ratio,,actually self-deprecation is just narcissism inverted,1.0
+amb_0688,per_ratio,,actually that quote is misattributed,1.0
+amb_0689,per_ratio,,actually probably mine then,1.0
+amb_0690,per_ratio,,actually im out. for real this time. (im not.),1.0
+amb_0691,per_witch,,saw this in my dream last night,0.9
+amb_0692,per_witch,,the polarity is shifting,0.9
+amb_0693,per_witch,,i felt this run before it began,0.9
+amb_0694,per_witch,,the antennas hum at midnight,0.9
+amb_0695,per_witch,,midnight where i am,0.9
+amb_0696,per_witch,,midnight nowhere,0.9
+amb_0697,per_witch,,midnight everywhere if you listen,0.9
+amb_0698,per_witch,,listen to what is the question,0.9
+amb_0699,per_witch,,the question is the answer,0.9
+amb_0700,per_witch,,the answer is in the silence between,0.9
+amb_0701,per_witch,,between what,0.9
+amb_0702,per_witch,,between us,0.9
+amb_0703,per_witch,,the chat is one entity,0.9
+amb_0704,per_witch,,we breathe together,0.9
+amb_0705,per_witch,,dreamt of the capybara,0.9
+amb_0706,per_witch,,she was hungry,0.9
+amb_0707,per_witch,,someone please feed Чавес,0.9
+amb_0708,per_witch,,she knows our names,0.9
+amb_0709,per_witch,,she has always known our names,0.9
+amb_0710,per_witch,,okay i am being weird tonight,0.9
+amb_0711,per_witch,,the moon is full somewhere,0.9
+amb_0712,per_witch,,always full somewhere,0.9
+amb_0713,per_witch,,we are never not under a full moon,0.9
+amb_0714,per_witch,,consider that,0.9
+amb_0715,per_witch,,signal received,0.9
+amb_0716,per_witch,,signal acknowledged,0.9
+amb_0717,per_witch,,signal returned,0.9
+amb_0718,per_witch,,ten thousand small antennas in your skull. did you know,0.9
+amb_0719,per_witch,,they hum with the rest,0.9
+amb_0720,per_witch,,they hum especially loud near pang's stream,0.9
+amb_0721,per_witch,,ratio dont,0.9
+amb_0722,per_witch,,ratio im warning you,0.9
+amb_0723,per_witch,,ratio i predicted you would say that,0.9
+amb_0724,per_witch,,so i don't need to hear it,0.9
+amb_0725,per_witch,,the network meets where it can,0.9
+amb_0726,per_witch,,tonight it meets here,0.9
+amb_0727,per_witch,,cooked? perhaps. not yet.,0.9
+amb_0728,per_witch,,when we are truly cooked you will not know,0.9
+amb_0729,per_witch,,you will only feel,0.9
+amb_0730,per_witch,,the feeling has a texture,0.9
+amb_0731,per_witch,,it tastes like copper,0.9
+amb_0732,per_witch,,ive tasted it twice in my life,0.9
+amb_0733,per_witch,,once last year,0.9
+amb_0734,per_witch,,once tonight,0.9
+amb_0735,per_witch,,or maybe ill taste it tonight,0.9
+amb_0736,per_witch,,timeline is loose,0.9
+amb_0737,per_witch,,the polarity is loose,0.9
+amb_0738,per_witch,,shifting i said. still shifting.,0.9
+amb_0739,per_witch,,someone is in pain in this chat,0.9
+amb_0740,per_witch,,you know who you are,0.9
+amb_0741,per_witch,,send DM if you need to,0.9
+amb_0742,per_witch,,i listen,0.9
+amb_0743,per_witch,,i listen badly but i listen,0.9
+amb_0744,per_witch,,badly because i interpret too much,0.9
+amb_0745,per_witch,,you say 'work was hard' i say 'mercury retrograde',0.9
+amb_0746,per_witch,,mercury is retrograde btw,0.9
+amb_0747,per_witch,,i can feel it in pang's aim,0.9
+amb_0748,per_witch,,you can feel it too if you let yourself,0.9
+amb_0749,per_witch,,let yourself feel,0.9
+amb_0750,per_witch,,or don't,0.9
+amb_0751,per_witch,,either choice is the choice,0.9
+amb_0752,per_witch,,the boss has a name we do not know,0.9
+amb_0753,per_witch,,the boss has not been named on stream,0.9
+amb_0754,per_witch,,that is intentional,0.9
+amb_0755,per_witch,,names have weight,0.9
+amb_0756,per_witch,,unnamed things are larger,0.9
+amb_0757,per_witch,,once we know his name the spell breaks slightly,0.9
+amb_0758,per_witch,,the spell does not fully break,0.9
+amb_0759,per_witch,,spells linger,0.9
+amb_0760,per_witch,,like coffee on your tongue,0.9
+amb_0761,per_witch,,like a stranger's eye contact,0.9
+amb_0762,per_witch,,like a missed call from someone you owe,0.9
+amb_0763,per_witch,,you owe someone a call right now,0.9
+amb_0764,per_witch,,you know who,0.9
+amb_0765,per_witch,,call them,0.9
+amb_0766,per_witch,,or don't,0.9
+amb_0767,per_witch,,i am not your therapist,0.9
+amb_0768,per_witch,,i am barely a witch,0.9
+amb_0769,per_witch,,i am mostly tired,0.9
+amb_0770,per_witch,,tired in the bones,0.9
+amb_0771,per_witch,,polarity does that to a person,0.9
+amb_0772,per_witch,,especially women,0.9
+amb_0773,per_witch,,especially of certain ages,0.9
+amb_0774,per_witch,,don't ask about my age,0.9
+amb_0775,per_witch,,older than you think,0.9
+amb_0776,per_witch,,younger than i feel,0.9
+amb_0777,per_witch,,anyway pang focus,0.9
+amb_0778,per_witch,,focus your aim and your attention,0.9
+amb_0779,per_witch,,attention is a battery,0.9
+amb_0780,per_witch,,dont leave it on standby,0.9
+amb_0781,per_witch,,the stream is here. be here too.,0.9
+amb_0782,per_witch,,be present chat,0.9
+amb_0783,per_witch,,be present granny,0.9
+amb_0784,per_witch,,be present even leet (you arent. but try.),0.9
+amb_0785,per_witch,,blessed be the polarity. shifted. or whatever.,0.9
+amb_0786,per_lurker,,👀,0.7
+amb_0787,per_lurker,,👀👀,0.7
+amb_0788,per_lurker,,?,0.7
+amb_0789,per_lurker,,.,0.7
+amb_0790,per_lurker,,..,0.7
+amb_0791,per_lurker,,...,0.7
+amb_0792,per_lurker,,(lurking),0.7
+amb_0793,per_lurker,,(still here),0.7
+amb_0794,per_lurker,,~,0.7
+amb_0795,per_lurker,,🔍,0.7
+amb_0796,per_lurker,,(watching),0.7
+amb_0797,per_lurker,,(silent),0.7
+amb_0798,per_lurker,,(logged),0.7
+amb_0799,per_lurker,,(noted),0.7
+amb_0800,per_lurker,,(clip saved),0.7
+amb_0801,per_lurker,,🌚,0.7
+amb_0802,per_lurker,,🌝,0.7
+amb_0803,per_lurker,,🌑,0.7
+amb_0804,per_lurker,,(waiting),0.7
+amb_0805,per_lurker,,(witnessing),0.7
+amb_0806,per_lurker,,(typing),0.7
+amb_0807,per_lurker,,(typing...),0.7
+amb_0808,per_lurker,,(not typing),0.7
+amb_0809,per_lurker,,(gave up typing),0.7
+amb_0810,per_lurker,,nm,0.7
+amb_0811,per_lurker,,mm,0.7
+amb_0812,per_lurker,,hm,0.7
+amb_0813,per_lurker,,yep,0.7
+amb_0814,per_lurker,,nope,0.7
+amb_0815,per_lurker,,mb,0.7
+amb_0816,per_lurker,,lol,0.7
+amb_0817,per_lurker,,okay,0.7
+amb_0818,per_lurker,,K,0.7
+amb_0819,per_lurker,,kk,0.7
+amb_0820,per_lurker,,fr,0.7
+amb_0821,per_lurker,,fr fr,0.7
+amb_0822,per_lurker,,ngl,0.7
+amb_0823,per_lurker,,💀,0.7
+amb_0824,per_lurker,,🗿,0.7
+amb_0825,per_lurker,,🐀,0.7
+amb_0826,per_lurker,,✊,0.7
+amb_0827,per_lurker,,🫡,0.7
+amb_0828,per_lurker,,✌️,0.7
+amb_0829,per_lurker,,⏳,0.7
+amb_0830,per_lurker,,🎢,0.7
+amb_0831,per_lurker,,⚙️,0.7
+amb_0832,per_lurker,,🎯,0.7
+amb_0833,per_lurker,,(eyes),0.7
+amb_0834,per_lurker,,(cracks knuckles),0.7
+amb_0835,per_lurker,,(closes laptop. opens again.),0.7
+amb_0836,per_bigstein,,im just here,0.6
+amb_0837,per_bigstein,,watching from somewhere,0.6
+amb_0838,per_bigstein,,palm trees emoji,0.6
+amb_0839,per_bigstein,,🌴,0.6
+amb_0840,per_bigstein,,wasnt at this guy's place btw,0.6
+amb_0841,per_bigstein,,for the record im out of the country,0.6
+amb_0842,per_bigstein,,i had bigger boats,0.6
+amb_0843,per_bigstein,,i had better food,0.6
+amb_0844,per_bigstein,,dont compare us,0.6
+amb_0845,per_bigstein,,we are different,0.6
+amb_0846,per_bigstein,,very different,0.6
+amb_0847,per_bigstein,,for legal reasons,0.6
+amb_0848,per_bigstein,,lawyer says i should not be in chat,0.6
+amb_0849,per_bigstein,,lawyer says nothing,0.6
+amb_0850,per_bigstein,,lawyer is me,0.6
+amb_0851,per_bigstein,,self-represented for the record,0.6
+amb_0852,per_bigstein,,anyway pog,0.6
+amb_0853,per_bigstein,,pog from over here,0.6
+amb_0854,per_bigstein,,over here being undisclosed,0.6
+amb_0855,per_bigstein,,okay disclosed somewhat. its sunny.,0.6
+amb_0856,per_bigstein,,ratio dont,0.6
+amb_0857,per_bigstein,,ratio dont triangulate,0.6
+amb_0858,per_bigstein,,i moved last week anyway,0.6
+amb_0859,per_bigstein,,always moving,0.6
+amb_0860,per_bigstein,,always moved,0.6
+amb_0861,per_bigstein,,always in motion,0.6
+amb_0862,per_bigstein,,cant catch me unless i let you,0.6
+amb_0863,per_bigstein,,and i would not let you,0.6
+amb_0864,per_bigstein,,anyway watching the stream,0.6
+amb_0865,per_bigstein,,enjoying the stream,0.6
+amb_0866,per_bigstein,,enjoying my freedom too,0.6
+amb_0867,per_bigstein,,freedom is being where you cannot be removed from,0.6
+amb_0868,per_bigstein,,specifically that,0.6
+amb_0869,per_bigstein,,peaceful,0.6
+amb_0870,per_bigstein,,peaceful and palm-treed,0.6
+amb_0871,per_bigstein,,anyway,0.6
+amb_0872,per_bigstein,,pang play harder bro come on,0.6
+amb_0873,per_bigstein,,pang stop dying,0.6
+amb_0874,per_bigstein,,pang im not dying you arent allowed to either,0.6
+amb_0875,per_bigstein,,that was a joke,0.6
+amb_0876,per_bigstein,,mostly,0.6
+amb_0877,per_bigstein,,okay leet pile on me i can take it,0.6
+amb_0878,per_bigstein,,ive taken worse,0.6
+amb_0879,per_bigstein,,ive taken much worse but for different reasons,0.6
+amb_0880,per_bigstein,,ANYWAY,0.6
+amb_0881,per_bigstein,,focus on stream chat,0.6
+amb_0882,per_bigstein,,focus on him not me,0.6
+amb_0883,per_bigstein,,specifically not me,0.6
+amb_0884,per_bigstein,,nothing to see here,0.6
+amb_0885,per_bigstein,,nothing to see in my history specifically,0.6
+amb_0886,per_bigstein,,its all NDA'd anyway,0.6
+amb_0887,per_bigstein,,peaceful smiling NDA,0.6
+amb_0888,per_bigstein,,golf and palm trees,0.6
+amb_0889,per_bigstein,,(i don't golf. but i could.),0.6
+amb_0890,per_bigstein,,wholesome moment for me,0.6
+amb_0891,per_bigstein,,wholesome solo dinner watching pang,0.6
+amb_0892,per_bigstein,,pang you ever try fresh fish from coastal markets,0.6
+amb_0893,per_bigstein,,you should. its different.,0.6
+amb_0894,per_bigstein,,(deliberately vague about which coast),0.6
+amb_0895,per_bigstein,,okay back to viewing,0.6
+amb_0896,per_bigstein,,quiet viewing,0.6
+amb_0897,per_bigstein,,silent partner,0.6
+amb_0898,per_bigstein,,silent in chat loud in soul,0.6
+amb_0899,per_bigstein,,soul check: present,0.6
+amb_0900,per_bigstein,,i wasn't there btw,0.6
+amb_0901,,early_bird_42,first?,0.6
+amb_0902,,doomscroll_42,scrolled here from a tweet,0.6
+amb_0903,,caffeine_panic,shaking. tea. stream. perfect.,0.6
+amb_0904,,viewer_curious99,is the streamer a real human or,0.6
+amb_0905,,ipv6_only,hi from the bleeding edge,0.6
+amb_0906,,midnight_lurker,shouldnt be awake,0.6
+amb_0907,,nocturnal_human,hello fellow night dwellers,0.6
+amb_0908,,pixel_husband,wife sent me to watch this,0.6
+amb_0909,,xX_void_Xx,the void responds,0.6
+amb_0910,,silent_clapper,clapping silently,0.6
+amb_0911,,rage_quit_revenge,watching to learn how to not rage,0.6
+amb_0912,,lurker_promotion,just promoted myself,0.6
+amb_0913,,anon_sub_84,subbed for the lore,0.6
+amb_0914,,polarity_addict,this is my third stream of the day,0.6
+amb_0915,,garbage_truck_fan,watching while waiting for trash collection,0.6
+amb_0916,,legally_a_plant,i identify as a houseplant,0.6
+amb_0917,,screen_time_max,over my limit. dont care.,0.6
+amb_0918,,couch_diplomat,calling a chat-wide ceasefire,0.6
+amb_0919,,wifi_complainer,buffering rn anyone else,0.6
+amb_0920,,ergonomic_concern,bad posture chat assemble,0.6
+amb_0921,,tea_steeped_4min,optimal,0.6
+amb_0922,,coffee_overdose,sub-optimal,0.6
+amb_0923,,milkshake_morning,breakfast of streamers,0.6
+amb_0924,,timezone_outlier,3am hello,0.6
+amb_0925,,corporate_lunchbreak,watching at work dont tell,0.6
+amb_0926,,mom_in_law_present,cant explain why im laughing,0.6
+amb_0927,,dad_jokes_only,i came for the streaming stayed for the puns,0.6
+amb_0928,,puns_unwelcome,block dad,0.6
+amb_0929,,lurking_since_alpha,been here since beta,0.6
+amb_0930,,lurking_since_beta,wow not a real beta tester sus,0.6
+amb_0931,,real_beta_tester,im here. i remember the bugs.,0.6
+amb_0932,,patch_3_4_survivor,RIP old EMF gun,0.6
+amb_0933,,nostalgia_max,better in the old days,0.6
+amb_0934,,wait_when_was_alpha,um,0.6
+amb_0935,,game_too_hard,skill issue or game issue debate,0.6
+amb_0936,,game_too_easy,speak for yourself,0.6
+amb_0937,,mid_difficulty_enjoyer,the median is correct,0.6
+amb_0938,,lurker_pretending_active,how do you do fellow chatters,0.6
+amb_0939,,spiritual_jrpg_player,this is too fast for me,0.6
+amb_0940,,patient_gamer_99,watching to decide if i buy,0.6
+amb_0941,,wishlist_clicker,already wishlisted,0.6
+amb_0942,,day_one_buyer,day-one no questions,0.6
+amb_0943,,demo_player_42,crushed the demo. ready for full.,0.6
+amb_0944,,demo_skeptic,demo was mid. convince me.,0.6
+amb_0945,,budget_gamer,waiting for steam sale,0.6
+amb_0946,,impulse_purchaser,bought twice by accident,0.6
+amb_0947,,refund_threat,ill refund if streamer dies one more time,0.6
+amb_0948,,refund_processed,i lied im here for ever,0.6
+amb_0949,,itch_io_supporter,bought it on itch first. legend.,0.6
+amb_0950,,bundle_consumer,found this in a charity bundle,0.6
+amb_0951,,recommended_by_friend,someone said this was funny,0.6
+amb_0952,,discord_emigree,came from the discord,0.6
+amb_0953,,discord_inhabitant,i live there now,0.6
+amb_0954,,discord_moderator_off_duty,not modding tonight just viewing,0.6
+amb_0955,,forum_archaeologist,reading old threads while watching,0.6
+amb_0956,,wiki_contributor,editing the wiki simultaneously,0.6
+amb_0957,,lore_obsessive,the lore is everything,0.6
+amb_0958,,lore_skeptic,i skip the lore arcs,0.6
+amb_0959,,fight_about_lore_skip,fight me about lore skipping,0.6
+amb_0960,,mediator_chat,both of you breathe,0.6
+amb_0961,,tea_break_called,calling a chat tea break,0.6
+amb_0962,,tea_break_failed,nobody followed,0.6
+amb_0963,,emoji_overuse_aware,😅,0.6
+amb_0964,,emoji_underuse_proud,i type words. words are good.,0.6
+amb_0965,,typed_word_quota,i have a typing minimum per stream,0.6
+amb_0966,,caps_lock_advocate,LOUD CHAT IS GOOD CHAT,0.6
+amb_0967,,lowercase_only_movement,aesthetic > expression,0.6
+amb_0968,,hybrid_caps_user,Both Look Good Imo,0.6
+amb_0969,,punctuation_terrorist,none for me thanks,0.6
+amb_0970,,oxford_comma_loyalist,apples oranges and self-respect,0.6
+amb_0971,,anti_oxford_movement,apples oranges and chaos,0.6
+amb_0972,,casual_observer,hello once,0.6
+amb_0973,,casual_observer_returns,hello twice,0.6
+amb_0974,,chronic_returner,hello 47th time,0.6
+amb_0975,,one_time_visitor,i wont be back,0.6
+amb_0976,,liar_caught,youll be back,0.6
+amb_0977,,ate_brunch_today,feeling fed,0.6
+amb_0978,,skipped_lunch,feeling cracked,0.6
+amb_0979,,delivery_arriving,brb,0.6
+amb_0980,,delivery_arrived,back. it was good.,0.6
+amb_0981,,cat_on_keyboard,sorry abouut tat,0.6
+amb_0982,,cat_off_keyboard,better,0.6
+amb_0983,,dog_demands_walk,brb again,0.6
+amb_0984,,wholesome_chat_lover,i love this chat,0.6
+amb_0985,,wholesome_chat_skeptic,mostly toxic but okay,0.6
+amb_0986,,balanced_take,half toxic half wholesome. its art.,0.6
+amb_0987,,art_critic,bad art. but i watch.,0.6
+amb_0988,,enjoyer_of_things,enjoying this thing,0.6
+amb_0989,,enjoyer_of_nothing,nothing for me,0.6
+amb_0990,,mid_attention_span,wait what happened,0.6
+amb_0991,,high_attention_span,i caught all of it,0.6
+amb_0992,,multi_tab_user,watching across 4 monitors,0.6
+amb_0993,,single_tab_purist,i give the stream my full attention,0.6
+amb_0994,,background_only_listener,only audio for me,0.6
+amb_0995,,video_only_muted,only video. cant hear chat anyway.,0.6
+amb_0996,,captions_user,thank you for captions,0.6
+amb_0997,,captions_user_2,captions need work though,0.6
+amb_0998,,captions_user_3,mostly accurate. mostly.,0.6
+amb_0999,,captions_user_4,'antenna' gets transcribed weird,0.6
+amb_1000,,polarity_pilled,im pilled. polarity pilled.,0.6

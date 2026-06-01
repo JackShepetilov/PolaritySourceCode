@@ -275,7 +275,11 @@
       "WebFetch(domain:www.palantir.com)",
       "WebFetch(domain:stratechery.com)",
       "WebFetch(domain:aletteraday.substack.com)",
-      "WebFetch(domain:www.cato-unbound.org)"
+      "WebFetch(domain:www.cato-unbound.org)",
+      "WebFetch(domain:vorixo.github.io)",
+      "WebFetch(domain:www.froyok.fr)",
+      "WebFetch(domain:doc-08-4g-docstext.googleusercontent.com)",
+      "WebFetch(domain:docs.google.com)"
     ]
   },
   "effortLevel": "high"

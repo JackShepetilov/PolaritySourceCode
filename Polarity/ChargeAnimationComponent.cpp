@@ -875,6 +875,48 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		return FMath::Cos(FMath::DegreesToRadians(EffectiveAngle));
 	};
 
+	// Line-of-sight gate: the player may only capture a target they can actually SEE.
+	// Two traces from the camera to the target's center, both ignoring the player, the
+	// channeling plate, and the target itself:
+	//   1) ECC_Visibility       → world geometry (walls/floors/damageable props). Pawns
+	//      IGNORE this channel, so it only catches "grab through a wall".
+	//   2) ECC_Pawn object query → another NPC standing between the player and the target.
+	//      ECC_Visibility passes straight through pawns, so this second trace is what stops
+	//      the far enemy from being grabbed when a nearer one is directly in front of it.
+	// Either blocking hit ⇒ target is occluded ⇒ rejected as a capture candidate.
+	auto HasLineOfSight = [&](const AActor* Target) -> bool
+	{
+		if (!Target)
+		{
+			return false;
+		}
+		const FVector TargetLoc = Target->GetActorLocation();
+
+		FCollisionQueryParams LosParams;
+		LosParams.AddIgnoredActor(OwnerCharacter);
+		if (ChannelingPlateActor)
+		{
+			LosParams.AddIgnoredActor(ChannelingPlateActor);
+		}
+		LosParams.AddIgnoredActor(Target);
+
+		FHitResult WorldHit;
+		if (World->LineTraceSingleByChannel(WorldHit, CameraLoc, TargetLoc, ECC_Visibility, LosParams))
+		{
+			return false; // wall / world geometry between camera and target
+		}
+
+		FCollisionObjectQueryParams PawnQuery;
+		PawnQuery.AddObjectTypesToQuery(ECC_Pawn);
+		FHitResult PawnHit;
+		if (World->LineTraceSingleByObjectType(PawnHit, CameraLoc, TargetLoc, PawnQuery, LosParams))
+		{
+			return false; // another pawn is standing in front of the target
+		}
+
+		return true;
+	};
+
 	// Find pawns, physics bodies, and world dynamic (for DroppedMeleeWeapon) in radius via overlap
 	FCollisionObjectQueryParams ObjectQuery;
 	ObjectQuery.AddObjectTypesToQuery(ECC_Pawn);
@@ -967,7 +1009,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 					continue;
 				}
 
-				if (AngleCos > BestAngleCos)
+				if (AngleCos > BestAngleCos && HasLineOfSight(NPC))
 				{
 					BestAngleCos = AngleCos;
 					BestTarget = NPC;
@@ -1004,7 +1046,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
 			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq))) continue;
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(Humanoid))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = Humanoid;
@@ -1056,7 +1098,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedWeapon %s VALID TARGET: charge=%.2f, dist=%.0f/%.0f, angle=%.2f"),
 				*DroppedWeapon->GetName(), WeaponCharge, FMath::Sqrt(DistSq), CaptureRange, AngleCos);
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(DroppedWeapon))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = DroppedWeapon;
@@ -1108,7 +1150,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s VALID TARGET: charge=%.2f, dist=%.0f/%.0f, angle=%.2f"),
 				*DroppedRanged->GetName(), RangedCharge, FMath::Sqrt(DistSq), CaptureRange, AngleCos);
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(DroppedRanged))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = DroppedRanged;
@@ -1149,7 +1191,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(UPickup))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = UPickup;
@@ -1187,7 +1229,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(APickup))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = APickup;
@@ -1225,7 +1267,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(SPickup))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = SPickup;
@@ -1257,7 +1299,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(ShieldPickup))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = ShieldPickup;
@@ -1289,7 +1331,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
-			if (AngleCos > BestAngleCos)
+			if (AngleCos > BestAngleCos && HasLineOfSight(Prop))
 			{
 				BestAngleCos = AngleCos;
 				BestTarget = Prop;

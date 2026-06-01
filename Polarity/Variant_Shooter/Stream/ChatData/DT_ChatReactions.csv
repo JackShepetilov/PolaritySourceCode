@@ -61,3 +61,41 @@ react_hb_e9,Chat.Event.HypeBurst,,⭐⭐⭐,,1.0
 react_hb_e10,Chat.Event.HypeBurst,,POG 😱,,1.0
 react_hb_e11,Chat.Event.HypeBurst,,W 🏆,,1.0
 react_hb_e12,Chat.Event.HypeBurst,,🤡🤡🤡,,1.0
+react_sk1,Chat.Event.SlideKill,,SLIDE-FU,,1.0
+react_sk2,Chat.Event.SlideKill,per_chad,,clean slide kill,1.0
+react_sk3,Chat.Event.SlideKill,per_leet,,kneecaps optional apparently,1.0
+react_sk4,Chat.Event.SlideKill,per_stan,,SLIIIIDING POG,1.0
+react_sk5,Chat.Event.SlideKill,,low to the ground untouchable,,1.0
+react_env1,Chat.Event.EnvironmentalKill,,USED THE MAP,,1.0
+react_env2,Chat.Event.EnvironmentalKill,per_witch,,the room ate him,1.0
+react_env3,Chat.Event.EnvironmentalKill,per_chad,,nature is the real boss,1.0
+react_env4,Chat.Event.EnvironmentalKill,per_leet,,W environment 0 W skill,1.0
+react_env5,Chat.Event.EnvironmentalKill,per_stan,,YES THE TRAPS,1.0
+react_pr1,Chat.Event.ParryReflect,,SENT IT BACK,,1.0
+react_pr2,Chat.Event.ParryReflect,per_chad,,return to sender,1.0
+react_pr3,Chat.Event.ParryReflect,per_witch,,karma made flesh,1.0
+react_pr4,Chat.Event.ParryReflect,per_leet,,deflect god,1.0
+react_nh1,Chat.Event.NoHitClear,,UNTOUCHABLE,,1.0
+react_nh2,Chat.Event.NoHitClear,per_stan,,FLAWLESS LETS GO,1.0
+react_nh3,Chat.Event.NoHitClear,per_chad,,no damage taken absolute legend,1.0
+react_nh4,Chat.Event.NoHitClear,per_ratio,,actually statistically improbable,1.0
+react_as1,Chat.Event.AntennaStart,,UPLINK STARTED,,1.0
+react_as2,Chat.Event.AntennaStart,per_witch,,the signal opens,1.0
+react_as3,Chat.Event.AntennaStart,per_chad,,grab the data champ,1.0
+react_cf1,Chat.Event.ChannelFollow,,new_follower_72,just followed!,1.0
+react_cf2,Chat.Event.ChannelFollow,,follow_train_99,just followed!,1.0
+react_cf3,Chat.Event.ChannelFollow,,here_to_lurk_44,just followed!,1.0
+react_cf4,Chat.Event.ChannelFollow,,wishlist_too_55,just followed!,1.0
+react_dm1,Chat.Event.DirectMention,,{PlayerName} ACKNOWLEDGED,,1.0
+react_dm2,Chat.Event.DirectMention,per_stan,,{PlayerName} OUR HERO,1.0
+react_dm3,Chat.Event.DirectMention,per_chad,,{PlayerName} the moment,1.0
+react_k1,Chat.Event.Kill,,one down,,1.0
+react_k2,Chat.Event.Kill,per_leet,,about time,1.0
+react_k3,Chat.Event.Kill,per_stan,,W,1.0
+react_k4,Chat.Event.Kill,per_chad,,clean kill,1.0
+react_k5,Chat.Event.Kill,,bodied,,1.0
+react_b6,Chat.Event.Boredom,per_witch,,the polarity dims,1.0
+react_b7,Chat.Event.Boredom,per_chad,,take a breath maybe,1.0
+react_b8,Chat.Event.Boredom,per_stan,,brb refilling drink,1.0
+react_d8,Chat.Event.PlayerDeath,per_stan,,no my brother,1.0
+react_d9,Chat.Event.PlayerDeath,per_witch,,return to the polarity,1.0

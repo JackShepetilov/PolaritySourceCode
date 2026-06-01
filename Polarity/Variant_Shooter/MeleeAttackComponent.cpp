@@ -160,6 +160,8 @@ bool UMeleeAttackComponent::StartAttack()
 	MeshTransitionProgress = 0.0f;
 	MontageTimeElapsed = 0.0f;
 	bIsLoweringWeaponOnly = false; // This is a real attack, not just lowering
+	// Cleared so the Windup gate can reliably detect "no montage this swing" (timer fallback).
+	CurrentMeleeMontage = nullptr;
 
 	// Determine attack type based on movement state
 	CurrentAttackType = DetermineAttackType();
@@ -210,18 +212,16 @@ bool UMeleeAttackComponent::StartAttack()
 		PlaySound(SwingSound);
 		OnMeleeAttackStarted.Broadcast();
 
-		// Go to appropriate next state
+		// Go to appropriate next state. The damage window (Active) is opened by the
+		// animation notify, so funnel into the "armed" Windup state and wait for it
+		// (instead of letting the timer fall straight through to Active).
 		if (Settings.InputDelayTime > 0.0f)
 		{
 			SetState(EMeleeAttackState::InputDelay);
 		}
-		else if (Settings.WindupTime > 0.0f)
-		{
-			SetState(EMeleeAttackState::Windup);
-		}
 		else
 		{
-			SetState(EMeleeAttackState::Active);
+			SetState(EMeleeAttackState::Windup);
 		}
 	}
 	else
@@ -620,30 +620,29 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 				{
 					SetState(EMeleeAttackState::InputDelay);
 				}
-				else if (Settings.WindupTime > 0.0f)
-				{
-					SetState(EMeleeAttackState::Windup);
-				}
 				else
 				{
-					SetState(EMeleeAttackState::Active);
+					// Funnel into the "armed" Windup state even when WindupTime == 0 —
+					// the damage window (Active) is opened by the animation notify, not here.
+					SetState(EMeleeAttackState::Windup);
 				}
 			}
 			break;
 
 		case EMeleeAttackState::InputDelay:
-			if (Settings.WindupTime > 0.0f)
-			{
-				SetState(EMeleeAttackState::Windup);
-			}
-			else
-			{
-				SetState(EMeleeAttackState::Active);
-			}
+			// Always advance to the armed Windup state; the notify opens the damage window.
+			SetState(EMeleeAttackState::Windup);
 			break;
 
 		case EMeleeAttackState::Windup:
-			SetState(EMeleeAttackState::Active);
+			// Damage window (Active) is opened by the animation notify
+			// (ActivateDamageWindowFromNotify), NOT by this timer. Park here and wait for it.
+			// Fall back to timer-driven Active only when there is no montage to carry the
+			// notify, or for dropkicks (which use their own distance-based damage in Active).
+			if (bIsDropKick || CurrentMeleeMontage == nullptr)
+			{
+				SetState(EMeleeAttackState::Active);
+			}
 			break;
 
 		case EMeleeAttackState::Active:
@@ -2399,8 +2398,13 @@ void UMeleeAttackComponent::OnMeleeMontageEnded(UAnimMontage* Montage, bool bInt
 	// straight to ShowingWeapon — Recovery is now zero-duration (cleanup-only) and
 	// Active has a long safety timer that we want to short-circuit.
 	if (!bInterrupted &&
-		(CurrentState == EMeleeAttackState::Active || CurrentState == EMeleeAttackState::Recovery))
+		(CurrentState == EMeleeAttackState::Active ||
+		 CurrentState == EMeleeAttackState::Recovery ||
+		 CurrentState == EMeleeAttackState::Windup ||
+		 CurrentState == EMeleeAttackState::InputDelay))
 	{
+		// Includes the armed Windup/InputDelay states: if the montage ends without ever
+		// firing the damage-window notify, finish the swing cleanly (no stuck input lock).
 		SetState(EMeleeAttackState::ShowingWeapon);
 	}
 }

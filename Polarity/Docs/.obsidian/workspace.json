@@ -13,15 +13,29 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "GameDesign.md",
+                "file": "CombatMechanics.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "GameDesign"
+              "title": "CombatMechanics"
+            }
+          },
+          {
+            "id": "36072e2f538b2518",
+            "type": "leaf",
+            "state": {
+              "type": "bases",
+              "state": {
+                "file": "Без названия.base",
+                "viewName": "Таблица"
+              },
+              "icon": "lucide-table",
+              "title": "Без названия"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -183,9 +197,15 @@
       "bases:Создать новую базу": false
     }
   },
-  "active": "da563def76e2087c",
+  "active": "36072e2f538b2518",
   "lastOpenFiles": [
+    "Без названия 1.md",
+    "Без названия.md",
+    "Без названия.base",
     "CombatMechanics.md",
+    "Без названия",
+    "UpgradeDescriptions_EN.md",
+    "GameDesign.md",
     "roguelike_analysis.pdf",
     "Lore.md",
     "CombatMechanics.md.tmp.83728.1773181718326",

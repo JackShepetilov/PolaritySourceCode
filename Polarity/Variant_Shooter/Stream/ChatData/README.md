@@ -147,8 +147,9 @@ react_death_2,Chat.Event.PlayerDeath,per_granny,,oh honey,1.0
 | `Message` | FText | Текст шага |
 
 **Где scripted-сценки запускаются автоматически:**
-- `stream_opening_normal` — на старте обычного рана
-- `stream_opening_first` — на старте первого рана игрока
+- `stream_opening_normal` — на старте обычного рана (returning viewers)
+- `stream_opening_first` — на старте первого рана игрока (полный onboarding для новых зрителей)
+- `stream_opening_returning` — для возвращающихся зрителей которые не активные регуляры (короткий recap)
 - Любой `ChatScriptedSequenceID` из `DT_Lore_*` — при выпадении лора с антенны
 
 **Можно запускать вручную** из BP или консоли:

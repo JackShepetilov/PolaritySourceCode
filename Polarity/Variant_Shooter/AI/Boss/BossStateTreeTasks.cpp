@@ -380,7 +380,15 @@ namespace
 	{
 		if (AAIController* AI = Cast<AAIController>(Boss->GetController()))
 		{
-			AI->MoveToActor(Target, Boss->GetAttackRange(),
+			// Acceptance radius must be comfortably INSIDE AttackRange. The approach task's
+			// per-frame IsTargetInAttackRange (Dist <= AttackRange) is the real "start the attack"
+			// trigger, and it has to fire while the boss is still MOVING. If the acceptance radius
+			// equals AttackRange the boss stops exactly on the boundary, where the 3D distance check
+			// flickers (capsule Z offset + path overshoot) and the attack won't start until the
+			// player steps closer. Stopping short lets the boss cross the AttackRange line under
+			// power, so the Tick reliably catches it and launches the lunge at ~AttackRange.
+			const float ApproachAcceptance = Boss->GetAttackRange() * 0.5f;
+			AI->MoveToActor(Target, ApproachAcceptance,
 				/*bStopOnOverlap*/ false, /*bUsePathfinding*/ true, /*bCanStrafe*/ true);
 		}
 	}
@@ -410,6 +418,7 @@ EStateTreeRunStatus FStateTreeBossApproachTask::EnterState(FStateTreeExecutionCo
 	}
 
 	InstanceData.Boss->SetTarget(InstanceData.Target); // focus → faces player while running up
+	InstanceData.Boss->SetApproachSpeedActive(true);   // charge in faster than the strafe speed
 	InstanceData.RepathTimer = 0.0f;
 	IssueBossApproachMove(InstanceData.Boss, InstanceData.Target);
 
@@ -453,6 +462,7 @@ void FStateTreeBossApproachTask::ExitState(FStateTreeExecutionContext& Context, 
 	if (InstanceData.Boss)
 	{
 		StopBossMovement(InstanceData.Boss);
+		InstanceData.Boss->SetApproachSpeedActive(false); // restore the normal/strafe walk speed
 	}
 }
 

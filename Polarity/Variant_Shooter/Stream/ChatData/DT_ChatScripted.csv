@@ -7,7 +7,7 @@ scr_argue_4,regulars_argue,4,2.0,per_stan,,you guys are mean leave him alone
 scr_lore_0,antenna_drama,0,0.0,per_witch,,whatever is on that antenna is going to wake something up
 scr_lore_1,antenna_drama,1,3.0,per_leet,,bro stfu its just a hack
 scr_lore_2,antenna_drama,2,2.5,per_chad,,nah the witch is onto something
-scr_lore_3,antenna_drama,3,2.0,per_bot,,Did you know Polarity-class robots predate the conspiracy by 30 years?
+scr_lore_3,antenna_drama,3,2.0,per_bot,,Did you know remote-pilot bodies predate the conspiracy by 30 years?
 scr_first_0,first_kill_chat,0,0.0,per_stan,,FIRST BLOOD LETS GO
 scr_first_1,first_kill_chat,1,1.5,per_leet,,about time
 scr_first_2,first_kill_chat,2,1.8,per_chad,,here we go
@@ -36,7 +36,7 @@ lore_cart_charity_2,lore_cart_villain_charity,2,2.0,per_ratio,,11% goes to the c
 lore_cart_capybara_0,lore_cart_villain_capybara,0,0.5,per_witch,,why is there a capybara on his desk
 lore_cart_capybara_1,lore_cart_villain_capybara,1,1.8,per_stan,,his name is Чавес,
 lore_cart_capybara_2,lore_cart_villain_capybara,2,1.5,per_chad,,this is the only redeeming thing
-lore_global_origin_0,lore_global_polarity_origin,0,0.5,per_witch,,polarity tech was never theirs
+lore_global_origin_0,lore_global_polarity_origin,0,0.5,per_witch,,the tech was never theirs
 lore_global_origin_1,lore_global_polarity_origin,1,2.5,per_chad,,reverse engineered from what
 lore_global_origin_2,lore_global_polarity_origin,2,2.5,per_ratio,,the patents predate them by 30 years
 open_norm_0,stream_opening_normal,0,0.5,per_chad,,back to it
@@ -45,18 +45,54 @@ open_norm_2,stream_opening_normal,2,2.5,per_leet,,let's see if he learned anythi
 open_norm_3,stream_opening_normal,3,2.5,per_witch,,the antennae are humming again
 open_norm_4,stream_opening_normal,4,2.0,per_ratio,,actually his last run had below-average kills per minute
 open_norm_5,stream_opening_normal,5,2.5,per_chad,,let him cook chat
+open_norm_6,stream_opening_normal,6,2.0,per_bigstein,,watching from somewhere
+open_norm_7,stream_opening_normal,7,2.0,per_leet,,bigstein nobody asked
+open_norm_8,stream_opening_normal,8,2.0,per_stan,,WE BACK
+open_norm_9,stream_opening_normal,9,2.5,per_chad,,alright {PlayerName} same energy as last time please
 open_first_0,stream_opening_first,0,0.5,,viewer_new42,wait this stream is new?
 open_first_1,stream_opening_first,1,3.0,per_leet,,@viewer_new42 yeah lurk and learn
-open_first_2,stream_opening_first,2,2.5,per_witch,,polarity sim. he hacks into the conspiracy
+open_first_2,stream_opening_first,2,2.5,per_witch,,robot-pilot shooter. he hacks into the conspiracy.
 open_first_3,stream_opening_first,3,2.5,per_stan,,this game looks WILD
 open_first_4,stream_opening_first,4,3.0,,anon_sub_84,subbed for the vibe
 open_first_5,stream_opening_first,5,3.0,per_chad,,welcome to the rabbit hole newcomers
 open_first_6,stream_opening_first,6,2.5,per_ratio,,actually the lore is fine the gameplay is debatable
-open_first_7,stream_opening_first,7,2.5,per_witch,,the antennas hold the lore. watch them
+open_first_7,stream_opening_first,7,2.5,per_witch,,the antennas hold the lore. watch them.
 open_first_8,stream_opening_first,8,3.0,,viewer_curious99,is the streamer human or
-open_first_9,stream_opening_first,9,3.0,per_leet,,@viewer_curious99 robot. obviously
+open_first_9,stream_opening_first,9,3.0,per_leet,,@viewer_curious99 robot. obviously.
 open_first_10,stream_opening_first,10,2.5,per_stan,,first run for the new viewers LFG
-open_first_11,stream_opening_first,11,2.5,per_chad,,alright {PlayerName} show them what you got
+open_first_11,stream_opening_first,11,2.5,per_chad,,quick rundown for chat
+open_first_12,stream_opening_first,12,2.5,per_chad,,he pilots a body. data extraction job.
+open_first_13,stream_opening_first,13,2.5,per_witch,,if he dies he wakes up in a new one
+open_first_14,stream_opening_first,14,2.5,per_leet,,he dies a LOT
+open_first_15,stream_opening_first,15,2.5,per_ratio,,actually that's the point. each death buys progress.
+open_first_16,stream_opening_first,16,3.0,,welcome_party_03,oh so its like one of those roguelite things
+open_first_17,stream_opening_first,17,2.5,per_chad,,exactly. you get it.
+open_first_18,stream_opening_first,18,2.5,per_witch,,antennas pull files. listen for the friend on voice.
+open_first_19,stream_opening_first,19,2.5,per_ratio,,friend is the hacker. pulled pang in. decrypts the data.
+open_first_20,stream_opening_first,20,2.5,per_stan,,the chat reacts to all of it. you are part of the show.
+open_first_21,stream_opening_first,21,2.5,per_chad,,donations go to a meta-progression fund
+open_first_22,stream_opening_first,22,2.5,per_leet,,or directly to pang's instant noodle fund
+open_first_23,stream_opening_first,23,2.5,per_bigstein,,im here too. for the record.
+open_first_24,stream_opening_first,24,2.5,per_leet,,nobody asked bigstein
+open_first_25,stream_opening_first,25,2.5,per_bigstein,,just establishing presence
+open_first_26,stream_opening_first,26,2.5,per_witch,,the witch will speak. just nod.
+open_first_27,stream_opening_first,27,2.5,per_chad,,welcome welcome. the antennas are warming up.
+open_first_28,stream_opening_first,28,2.5,per_stan,,POG everyone strap in
+open_first_29,stream_opening_first,29,2.5,per_chad,,alright {PlayerName} show them what you got
+open_return_0,stream_opening_returning,0,0.5,per_chad,,oh hey welcome back
+open_return_1,stream_opening_returning,1,2.5,,viewer_returning_88,wait i was here like last week
+open_return_2,stream_opening_returning,2,2.5,per_leet,,@viewer_returning_88 nothing changed pang still trash
+open_return_3,stream_opening_returning,3,2.5,per_stan,,he's NOT trash
+open_return_4,stream_opening_returning,4,2.5,per_chad,,he's average. and we love him.
+open_return_5,stream_opening_returning,5,2.5,per_witch,,you missed two reveals last week. discord has notes.
+open_return_6,stream_opening_returning,6,2.5,per_ratio,,actually three reveals
+open_return_7,stream_opening_returning,7,2.5,per_witch,,ratio shut up
+open_return_8,stream_opening_returning,8,2.5,per_chad,,short recap: he's deeper in the conspiracy now
+open_return_9,stream_opening_returning,9,2.5,per_leet,,the antennas the deaths the chat the friend you know the deal
+open_return_10,stream_opening_returning,10,2.5,per_bigstein,,im still not involved
+open_return_11,stream_opening_returning,11,2.5,per_leet,,@big_stein nobody believes you
+open_return_12,stream_opening_returning,12,2.5,per_stan,,WE BACK BABYYY
+open_return_13,stream_opening_returning,13,2.5,per_chad,,alright {PlayerName} pick up where you left off
 manif_c0,lore_isl_manifesto_west,0,1.5,per_ratio,,oh boy here we go
 manif_c1,lore_isl_manifesto_west,1,3.0,per_leet,,he's WRITING manifestos
 manif_c2,lore_isl_manifesto_west,2,2.5,per_witch,,men who fund wars always write the book first

@@ -3,6 +3,7 @@
 
 #include "EMFChargeWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
@@ -494,9 +495,11 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 	const float PlayerCharge = PlayerMod->GetCharge();
 	if (FMath::IsNearlyZero(PlayerCharge)) return false;
 
-	// Resolve target |charge| and whether the bound type requires opposite-sign for capture.
+	// Resolve target |charge|, opposite-sign requirement, and (for humanoid yank targets) an
+	// explicit capture range that replaces the generic curve.
 	float TargetCharge = 0.0f;
 	bool bRequiresOppositeSign = false;
+	float CaptureRangeOverride = -1.0f; // <0 = resolve from the shared capture-range curve below
 	if (AShooterNPC* NPC = BoundNPC.Get())
 	{
 		if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
@@ -504,6 +507,22 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 			TargetCharge = Mod->GetCharge();
 		}
 		bRequiresOppositeSign = true;
+
+		// HumanoidNPCs are never body-captured — they are weapon/shield YANK targets, so the
+		// highlight must follow the YANK gate, not the generic NPC capture-range curve. Mirror
+		// UpdateCaptureRaycast's humanoid branch: require the weapon (or shield) to be yankable
+		// right now, and use the yank range. CanBeYanked() folds in the boss's YankChargeThreshold
+		// (sub-threshold → not yankable), and CalculateWeaponYankRange() returns 0 when it isn't,
+		// so the boss only lights up once it's charged enough AND within yank distance.
+		if (AHumanoidNPC* Humanoid = Cast<AHumanoidNPC>(NPC))
+		{
+			const bool bShieldYankable = Humanoid->CanShieldBeYanked();
+			const bool bWeaponYankable = !bShieldYankable && Humanoid->CanBeYanked();
+			if (!bShieldYankable && !bWeaponYankable) return false;
+			CaptureRangeOverride = bShieldYankable
+				? Humanoid->CalculateShieldYankRange()
+				: Humanoid->CalculateWeaponYankRange();
+		}
 	}
 	else if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
@@ -535,8 +554,11 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 		return false;
 	}
 
-	// Range gate (per-target via curve)
-	const float CaptureRange = ChargeComp->EvaluateCaptureRange(FMath::Abs(TargetCharge));
+	// Range gate: humanoid yank targets use their yank range (set above); everything else uses
+	// the shared per-target capture-range curve.
+	const float CaptureRange = (CaptureRangeOverride >= 0.0f)
+		? CaptureRangeOverride
+		: ChargeComp->EvaluateCaptureRange(FMath::Abs(TargetCharge));
 	if (CaptureRange < 1.0f) return false;
 
 	const FVector ToTarget = Target->GetActorLocation() - CameraLoc;
