@@ -40,6 +40,8 @@
 #include "../Pickups/HealthPickup.h"
 #include "../Pickups/ArmorPickup.h"
 #include "FlyingDrone.h"
+#include "KamikazeDroneNPC.h"
+#include "SniperTurretNPC.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
@@ -79,6 +81,23 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 void AShooterNPC::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// === Combat facing: strafe while facing the target ===
+	// The AI move tasks (RunAndShoot / MoveWithStrafe) set the controller focus on the target and
+	// issue a strafing MoveTo. For the body to actually turn toward the player while strafing, the
+	// movement component must rotate toward the controller's desired rotation (the focus) instead of
+	// toward the velocity. Without this the NPC orients to its movement direction and ends up running
+	// at the player sideways/backwards. Same setup the boss uses (see ABossCharacter::BeginPlay).
+	// Set at runtime so it overrides whatever the Blueprint's CharacterMovement defaults are.
+	// Flying drones, the kamikaze drone and the turret drive their own rotation, so skip them.
+	if (!IsA<AFlyingDrone>() && !IsA<AKamikazeDroneNPC>() && !IsA<ASniperTurretNPC>())
+	{
+		if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+		{
+			MoveComp->bOrientRotationToMovement = false;
+			MoveComp->bUseControllerDesiredRotation = true;
+		}
+	}
 
 	// === Performance: disable CameraShake on NPCs — they don't need it ===
 	if (UCameraShakeComponent* Shake = GetCameraShake())
