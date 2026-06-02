@@ -363,42 +363,47 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		}
 		StartHitFlash();
 
-		// Retaliation: get immediate permission to shoot back
-		if (bUseCoordinator)
+		// Retaliation only on real damage — a 0-damage hit (e.g. the ionizer pistol)
+		// must not provoke the NPC into shooting back.
+		if (Damage > 0.0f)
 		{
-			if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
+			// Retaliation: get immediate permission to shoot back
+			if (bUseCoordinator)
 			{
-				Coordinator->GrantRetaliationPermission(this);
-			}
-		}
-
-		// If we have a target and want to shoot, try immediately
-		if (bWantsToShoot && CurrentAimTarget.IsValid())
-		{
-			TryStartShooting();
-		}
-		// If we don't have a target yet, set the damage causer as target
-		else if (!CurrentAimTarget.IsValid())
-		{
-			// Get the pawn that caused damage (could be through weapon)
-			APawn* AttackerPawn = nullptr;
-			if (EventInstigator)
-			{
-				AttackerPawn = EventInstigator->GetPawn();
-			}
-			if (!AttackerPawn)
-			{
-				AttackerPawn = Cast<APawn>(DamageCauser);
+				if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
+				{
+					Coordinator->GrantRetaliationPermission(this);
+				}
 			}
 
-			if (AttackerPawn)
+			// If we have a target and want to shoot, try immediately
+			if (bWantsToShoot && CurrentAimTarget.IsValid())
 			{
-				NotifyTargetAcquired(AttackerPawn);
-				CurrentAimTarget = AttackerPawn;
-				bWantsToShoot = true;
-				bIsShooting = true;
-				// Defer to next tick to prevent infinite recursion when NPCs shoot each other
-				GetWorld()->GetTimerManager().SetTimerForNextTick(this, &AShooterNPC::TryStartShooting);
+				TryStartShooting();
+			}
+			// If we don't have a target yet, set the damage causer as target
+			else if (!CurrentAimTarget.IsValid())
+			{
+				// Get the pawn that caused damage (could be through weapon)
+				APawn* AttackerPawn = nullptr;
+				if (EventInstigator)
+				{
+					AttackerPawn = EventInstigator->GetPawn();
+				}
+				if (!AttackerPawn)
+				{
+					AttackerPawn = Cast<APawn>(DamageCauser);
+				}
+
+				if (AttackerPawn)
+				{
+					NotifyTargetAcquired(AttackerPawn);
+					CurrentAimTarget = AttackerPawn;
+					bWantsToShoot = true;
+					bIsShooting = true;
+					// Defer to next tick to prevent infinite recursion when NPCs shoot each other
+					GetWorld()->GetTimerManager().SetTimerForNextTick(this, &AShooterNPC::TryStartShooting);
+				}
 			}
 		}
 	}
