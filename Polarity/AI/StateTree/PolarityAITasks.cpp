@@ -11,6 +11,33 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "AITypes.h"
+#include "GameFramework/CharacterMovementComponent.h"
+
+namespace
+{
+	/** Max horizontal speed (cm/s) at which a stop-and-shoot NPC is considered "planted" and may
+	 *  open fire. Above this it keeps braking — the visible halt telegraphs the incoming shot. */
+	constexpr float RunAndShoot_ShootMoveSpeedThreshold = 50.0f;
+
+	/** Stop-and-shoot rotation toggle for ground shooters driven by RunAndShoot.
+	 *  bFaceTarget == false → orient the body to its movement direction (the forward-run
+	 *                          animation matches while repositioning).
+	 *  bFaceTarget == true  → rotate the body toward the controller's focus/target (used while
+	 *                          stopped to fire, so the NPC faces the player without needing a
+	 *                          directional-strafe blendspace). */
+	void SetShooterRotationMode(AShooterNPC* NPC, bool bFaceTarget)
+	{
+		if (!NPC)
+		{
+			return;
+		}
+		if (UCharacterMovementComponent* CMC = NPC->GetCharacterMovement())
+		{
+			CMC->bUseControllerDesiredRotation = bFaceTarget;
+			CMC->bOrientRotationToMovement = !bFaceTarget;
+		}
+	}
+}
 
 // ============================================================================
 // RequestAttackPermission
@@ -929,7 +956,10 @@ EStateTreeRunStatus FSTTask_RunAndShoot::EnterState(FStateTreeExecutionContext& 
 	Data.LastStuckCheckPosition = Data.NPC->GetActorLocation();
 	Data.LastStuckCheckTime = Data.LastLOSTime;
 
-	// Set focus on target for strafing
+	// Stop-and-shoot: begin in "moving" mode. While repositioning we orient the body to its
+	// movement direction so the forward-run animation matches; we only turn to face the target
+	// while stopped to fire (see StartShooting). Focus stays on the target for aiming.
+	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ false);
 	Data.Controller->SetFocus(Data.Target);
 
 	// Pick first destination
@@ -956,7 +986,8 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Update focus to track moving target
+	// Keep focus on the target for aiming (body rotation is governed by the move/aim mode toggled
+	// in StartShooting / StopShooting).
 	Data.Controller->SetFocus(Data.Target);
 
 	// Track LOS status for repositioning
@@ -968,8 +999,25 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 		Data.LastLOSTime = CurrentTime;
 	}
 
+	// Stop-and-shoot decision, computed once. While firing OR planting a shot the NPC stands still
+	// and faces the target; only otherwise does it reposition. (CanShoot has coordinator/LOS side
+	// effects, so evaluate it a single time per Tick.)
+	const bool bWantsToShoot = !Data.bIsShooting && CanShoot(Data);
+
+	// While firing or planting a shot: stand still — no repositioning. Movement is halted in the
+	// shooting block below / StartShooting, and the body faces the target.
+	if (Data.bIsShooting || bWantsToShoot)
+	{
+		// Intentionally idle here: standing still, facing the target. The shooting block below
+		// handles planting/firing and when to resume movement.
+	}
+	// While repositioning, make sure we always have a destination to move toward.
+	else if (!Data.bHasDestination)
+	{
+		PickNewDestination(Data);
+	}
 	// Check if we reached destination and pick new one
-	if (Data.bHasDestination)
+	else if (Data.bHasDestination)
 	{
 		const FVector NPCLocation = Data.NPC->GetActorLocation();
 		const float DistanceToDestination = FVector::Dist(NPCLocation, Data.CurrentDestination);
@@ -1018,16 +1066,23 @@ EStateTreeRunStatus FSTTask_RunAndShoot::Tick(FStateTreeExecutionContext& Contex
 		}
 	}
 
-	// Handle shooting - check if we can shoot
-	if (!Data.bIsShooting)
+	// Handle shooting.
+	if (bWantsToShoot)
 	{
-		// Not currently shooting - check if we can start
-		if (CanShoot(Data))
+		// Plant first, fire second. Halt + face the target now, but only open fire once we're
+		// nearly stopped, so the visible halt telegraphs the shot instead of the NPC firing while
+		// still sliding.
+		Data.Controller->StopMovement();
+		Data.Controller->SetFocus(Data.Target);
+		Data.bHasDestination = false;
+		SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ true);
+
+		if (Data.NPC->GetVelocity().Size2D() <= RunAndShoot_ShootMoveSpeedThreshold)
 		{
 			StartShooting(Data);
 		}
 	}
-	else
+	else if (Data.bIsShooting)
 	{
 		// Currently shooting - check if LOS was lost mid-burst
 		if (!Data.NPC->HasLineOfSightTo(Data.Target))
@@ -1066,6 +1121,10 @@ void FSTTask_RunAndShoot::ExitState(FStateTreeExecutionContext& Context,
 		{
 			StopShooting(Data);
 		}
+
+		// Restore the default "face target" rotation mode (matches AShooterNPC::BeginPlay) so a
+		// following state doesn't inherit the reposition (orient-to-movement) mode.
+		SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ true);
 	}
 
 	if (Data.Controller)
@@ -1331,6 +1390,17 @@ void FSTTask_RunAndShoot::StartShooting(FInstanceDataType& Data) const
 		return;
 	}
 
+	// Stop-and-shoot: halt and turn to face the target before firing. The stop telegraphs the
+	// incoming shot, and standing still lets the body face the player without the strafe-animation
+	// mismatch (these NPCs have no directional-strafe locomotion).
+	if (Data.Controller)
+	{
+		Data.Controller->StopMovement();
+		Data.Controller->SetFocus(Data.Target);
+	}
+	Data.bHasDestination = false;
+	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ true);
+
 	// Start shooting (with external permission since we already checked coordinator)
 	Data.NPC->StartShooting(Data.Target, true);
 	Data.bIsShooting = true;
@@ -1354,6 +1424,11 @@ void FSTTask_RunAndShoot::StopShooting(FInstanceDataType& Data) const
 
 	Data.NPC->StopShooting();
 	Data.bIsShooting = false;
+
+	// Back to repositioning: orient the body to movement so the run animation matches again,
+	// and force a fresh destination to be picked on the next Tick.
+	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ false);
+	Data.bHasDestination = false;
 
 	// Notify coordinator that attack completed
 	if (Data.bUseCoordinator)
