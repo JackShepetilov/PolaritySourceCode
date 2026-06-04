@@ -48,6 +48,31 @@
 #include "Field/FieldSystemObjects.h"
 #include "CameraShakeComponent.h"
 
+namespace
+{
+	/** Re-assert the BeginPlay combat rotation mode for a GROUND NPC after a stun / capture /
+	 *  launch / pull ends. These states cache the rotation flags into shared members and disable
+	 *  them; when states overlap (e.g. captured while already knocked back, or a throw that recovers
+	 *  through ExitLaunchedState which restores nothing) the cache can be clobbered or never
+	 *  restored, leaving bUseControllerDesiredRotation = false. The NPC then keeps a stale facing
+	 *  and runs at the player sideways/with its mesh turned. Re-asserting the known-correct mode is
+	 *  robust regardless of which path was taken. Flying drones / kamikaze / turret drive their own
+	 *  rotation, so they are skipped and keep their own (cached) restore. */
+	void RestoreGroundCombatRotation(AShooterNPC* NPC)
+	{
+		if (!NPC || NPC->IsA<AFlyingDrone>() || NPC->IsA<AKamikazeDroneNPC>() || NPC->IsA<ASniperTurretNPC>())
+		{
+			return;
+		}
+		if (UCharacterMovementComponent* CMC = NPC->GetCharacterMovement())
+		{
+			CMC->bOrientRotationToMovement = false;
+			CMC->bUseControllerDesiredRotation = true;
+		}
+		NPC->bUseControllerRotationYaw = false;
+	}
+}
+
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -2981,6 +3006,11 @@ void AShooterNPC::EndKnockbackStun()
 	// Restore character-level controller rotation
 	bUseControllerRotationYaw = bCachedUseControllerRotationYaw;
 
+	// Robustly re-assert the combat rotation mode for ground NPCs — the cached value above can be
+	// stale/clobbered when stun+capture+launch overlap, which otherwise leaves the NPC unable to
+	// turn (runs at the player with its mesh facing a stale direction).
+	RestoreGroundCombatRotation(this);
+
 	// Re-enable EMF forces
 	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
 	{
@@ -3154,6 +3184,10 @@ void AShooterNPC::ExitCapturedState()
 	}
 	bUseControllerRotationYaw = bCachedUseControllerRotationYaw;
 
+	// Robustly re-assert the combat rotation mode for ground NPCs (cached value can be clobbered
+	// when capture overlaps a prior knockback/stun).
+	RestoreGroundCombatRotation(this);
+
 	// Re-enable EMF forces (disabled by ApplyExplosionStun if stun was active before capture)
 	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
 	{
@@ -3294,6 +3328,22 @@ void AShooterNPC::ExitLaunchedState()
 
 	bIsLaunched = false;
 	bIsInKnockback = false;
+
+	// Throw recovery: this is the tail of the capture -> launch (throw) sequence, and it used to
+	// restore NEITHER rotation NOR focus — so the NPC kept a stale facing and ran at the player with
+	// its mesh turned. Re-assert the ground combat rotation mode and re-focus the target here, the
+	// same way EndKnockbackStun / ExitCapturedState do.
+	RestoreGroundCombatRotation(this);
+	if (AController* MyController = GetController())
+	{
+		if (AShooterAIController* AIController = Cast<AShooterAIController>(MyController))
+		{
+			if (AActor* Target = AIController->GetCurrentTarget())
+			{
+				AIController->SetFocus(Target);
+			}
+		}
+	}
 
 	// === DEBUG ===
 	if (GEngine)
@@ -3844,6 +3894,9 @@ void AShooterNPC::EndCinematicPull()
 		CharMovement->bUseControllerDesiredRotation = bCachedUseControllerDesiredRotation;
 	}
 	bUseControllerRotationYaw = bCachedUseControllerRotationYaw;
+
+	// Robustly re-assert the combat rotation mode for ground NPCs (cached value can be stale).
+	RestoreGroundCombatRotation(this);
 
 	// Re-enable EMF
 	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
