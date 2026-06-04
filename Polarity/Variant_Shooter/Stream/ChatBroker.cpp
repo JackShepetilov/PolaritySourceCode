@@ -396,6 +396,12 @@ void UChatBroker::TickAmbient()
 		RescheduleAmbient();
 		return;
 	}
+	// Suppress ambient while any scripted sequence is playing (finale, lore, opening).
+	if (ActiveScripted.Num() > 0)
+	{
+		RescheduleAmbient();
+		return;
+	}
 	if (!AmbientTable)
 	{
 		RescheduleAmbient();
@@ -452,6 +458,12 @@ void UChatBroker::TickHint()
 		RescheduleHint();
 		return;
 	}
+	// Suppress hints while any scripted sequence is playing.
+	if (ActiveScripted.Num() > 0)
+	{
+		RescheduleHint();
+		return;
+	}
 	// MVP: random hint from table, no XP analysis (later phase).
 	if (!HintsTable)
 	{
@@ -493,6 +505,12 @@ void UChatBroker::TickHint()
 void UChatBroker::TickBoredom()
 {
 	if (CurrentPhase == EChatPhase::Idle || CurrentPhase == EChatPhase::Opening)
+	{
+		RescheduleBoredom();
+		return;
+	}
+	// Suppress boredom while any scripted sequence is playing.
+	if (ActiveScripted.Num() > 0)
 	{
 		RescheduleBoredom();
 		return;
@@ -569,8 +587,9 @@ void UChatBroker::TickScriptedStep(FName SequenceID)
 	}
 
 	const FChatScriptedRow& Step = Active.Steps[Active.NextStepIndex];
-	Enqueue(MakeMessage(Step.PersonaRow, Step.UsernameOverride, Step.Message, EChatMessageKind::Scripted),
-		/*Priority*/ 2);
+	// Scripted lines bypass the rate-limited dispatcher and broadcast directly, so the
+	// authored DelaySec timing is exact (not throttled by ChatMaxMessagesPerSecond).
+	OnChatMessageReady.Broadcast(MakeMessage(Step.PersonaRow, Step.UsernameOverride, Step.Message, EChatMessageKind::Scripted));
 
 	Active.NextStepIndex++;
 
@@ -596,6 +615,11 @@ void UChatBroker::TickScriptedStep(FName SequenceID)
 void UChatBroker::EmitReaction(FGameplayTag EventTag)
 {
 	if (CurrentPhase == EChatPhase::Idle || CurrentPhase == EChatPhase::Opening)
+	{
+		return;
+	}
+	// Suppress reactions/hype/channel/schadenfreude while a scripted sequence plays.
+	if (ActiveScripted.Num() > 0)
 	{
 		return;
 	}
@@ -693,6 +717,10 @@ void UChatBroker::RunScripted(FName SequenceID)
 		Active.Steps.Add(*Row);
 	}
 	ActiveScripted.Add(MoveTemp(Active));
+
+	// A scripted sequence takes over the chat — drop any pending non-scripted messages
+	// (ambient/hints/reactions) already queued so they don't leak in while it plays.
+	Queue.Reset();
 
 	UWorld* W = GetWorld();
 	if (!W) { return; }

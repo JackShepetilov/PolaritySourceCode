@@ -25,13 +25,14 @@
             "id": "36072e2f538b2518",
             "type": "leaf",
             "state": {
-              "type": "bases",
+              "type": "markdown",
               "state": {
-                "file": "Без названия.base",
-                "viewName": "Таблица"
+                "file": "PitchGuide.md",
+                "mode": "source",
+                "source": false
               },
-              "icon": "lucide-table",
-              "title": "Без названия"
+              "icon": "lucide-file",
+              "title": "PitchGuide"
             }
           }
         ],
@@ -199,18 +200,22 @@
   },
   "active": "36072e2f538b2518",
   "lastOpenFiles": [
+    "ppt37F4.tmp",
+    "ppt943.tmp",
+    "~$Polarity_Pitch_v2.pptx",
+    "build_pitch_deck.js.tmp.21912.8c7b583cf579",
+    "build_pitch_deck.js.tmp.21912.c6c9b8413c81",
+    "build_pitch_deck.js.tmp.21912.3109c2e116ce",
+    "build_pitch_deck.js.tmp.21912.a801968cfa9c",
+    "build_pitch_deck.js.tmp.21912.0debe4a7af29",
+    "build_pitch_deck.js.tmp.21912.b5f0e2d6b27c",
+    "build_pitch_deck.js.tmp.21912.50d795188d45",
+    "pptBF14.tmp",
     "Без названия 1.md",
     "Без названия.md",
-    "Без названия.base",
     "CombatMechanics.md",
-    "Без названия",
     "UpgradeDescriptions_EN.md",
     "GameDesign.md",
-    "roguelike_analysis.pdf",
-    "Lore.md",
-    "CombatMechanics.md.tmp.83728.1773181718326",
-    "CombatMechanics.md.tmp.83728.1773181377060",
-    "CombatMechanics.md.tmp.83728.1773181327574",
-    "CombatMechanics.md.tmp.10640.1771521700483"
+    "Lore.md"
   ]
 }

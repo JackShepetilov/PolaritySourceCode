@@ -9,6 +9,7 @@
 
 class UEMF_FieldComponent;
 class UNiagaraSystem;
+class AShooterNPC;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnProjectileCriticalVelocityImpact, AEMFProjectile*, Projectile, FVector, Location, float, Speed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnProjectileFired, float, Charge);
@@ -88,6 +89,54 @@ public:
 	/** Draw debug lines for LOS traces (green = visible, red = blocked) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|LOS Shielding", meta = (EditCondition = "bEnableLOSShielding"))
 	bool bDrawLOSDebug = false;
+
+	// ==================== Charge-Based Homing ====================
+
+	/** Enable single-target charge-scaled homing. When true, the projectile locks onto ONE
+	 *  charged target and steers toward it (guaranteed hit), instead of summing field forces
+	 *  from all sources (which can thread between enemies and miss everyone). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing")
+	bool bUseChargeHoming = true;
+
+	/** Only home onto targets whose charge is opposite to the projectile (classic attract-to-electrified).
+	 *  When false, any charged target is eligible. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming"))
+	bool bRequireOppositeCharge = true;
+
+	/** Half-angle of the cone (relative to current velocity) used to acquire a homing target (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "1.0", ClampMax = "180.0"))
+	float HomingConeHalfAngle = 35.0f;
+
+	/** Max range to acquire a homing target (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
+	float HomingMaxRange = 6000.0f;
+
+	/** How often (s) the projectile re-evaluates the best target. 0 = every tick.
+	 *  Re-acquisition is forced immediately if the locked target dies or becomes invalid. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
+	float HomingRetargetInterval = 0.1f;
+
+	/** Score multiplier favoring the currently-locked target, to prevent thrashing between targets (>= 1.0) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "1.0"))
+	float HomingStickiness = 1.5f;
+
+	/** Homing acceleration per unit of |q_proj * q_target| (cm/s^2 per charge^2).
+	 *  This is the "homing strength linked to charge" — bigger charge product = tighter, faster curve. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
+	float HomingAccelPerChargeProduct = 4000.0f;
+
+	/** Minimum homing acceleration once a target is locked. Set high enough that the turn radius
+	 *  stays below engagement distance — this is what guarantees the hit even at low charge (cm/s^2). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
+	float MinHomingAccel = 8000.0f;
+
+	/** Maximum homing acceleration (cm/s^2) — caps the curve so high-charge shots don't orbit */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
+	float MaxHomingAccel = 60000.0f;
+
+	/** Draw debug for homing target acquisition (line to locked target + accel/charge readout) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing")
+	bool bDrawHomingDebug = false;
 
 	// ==================== Charge-Based VFX ====================
 
@@ -223,6 +272,18 @@ protected:
 
 	/** Apply electromagnetic forces to projectile velocity */
 	void ApplyEMForces(float DeltaTime);
+
+	/** Update single-target charge-scaled homing (called from Tick when bUseChargeHoming). */
+	void UpdateChargeHoming(float DeltaTime);
+
+	/** Select the best homing target by charge-weighted cone score, with stickiness toward the current target. */
+	AShooterNPC* SelectHomingTarget() const;
+
+	/** Currently locked homing target (weak — target may die or be pooled out from under us). */
+	TWeakObjectPtr<AShooterNPC> CurrentHomingTarget;
+
+	/** Time accumulator since the last retarget evaluation. */
+	float TimeSinceRetarget = 0.0f;
 
 	/** Diagnostic: log sources only once per projectile lifetime */
 	bool bDiagnosticLogged = false;

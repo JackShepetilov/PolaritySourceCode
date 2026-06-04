@@ -3,6 +3,7 @@
 
 #include "EMFChargeWidgetSubsystem.h"
 #include "EMFChargeWidget.h"
+#include "CaptureReticleWidget.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
@@ -104,6 +105,69 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 			Pair.Value->SetCaptureZoneState(Pair.Value == BestWidget);
 		}
 	}
+
+	// On-target capture reticle: brackets that hug the best candidate's body center.
+	UpdateCaptureReticle(PC, CameraRot, BestWidget);
+}
+
+UCaptureReticleWidget* UEMFChargeWidgetSubsystem::GetOrCreateReticle(APlayerController* PC)
+{
+	if (ReticleWidget)
+	{
+		return ReticleWidget;
+	}
+	if (PC && ReticleWidgetClass)
+	{
+		ReticleWidget = CreateWidget<UCaptureReticleWidget>(PC, ReticleWidgetClass);
+		if (ReticleWidget)
+		{
+			// Z-order 80 — just under the overhead charge bars (90) so the bar stays readable.
+			ReticleWidget->AddToViewport(80);
+			ReticleWidget->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+	return ReticleWidget;
+}
+
+void UEMFChargeWidgetSubsystem::UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget)
+{
+	if (!ReticleWidgetClass)
+	{
+		return; // reticle disabled
+	}
+
+	UCaptureReticleWidget* Reticle = GetOrCreateReticle(PC);
+	if (!Reticle)
+	{
+		return;
+	}
+
+	FVector Center;
+	float Radius = 0.0f;
+	if (!BestWidget || !BestWidget->GetTargetCenterAndRadius(Center, Radius))
+	{
+		Reticle->ClearTarget();
+		return;
+	}
+
+	FVector2D CenterScreen;
+	if (!PC->ProjectWorldLocationToScreen(Center, CenterScreen, false))
+	{
+		Reticle->ClearTarget();
+		return;
+	}
+
+	// On-screen radius: project a point offset from the center by Radius along camera-right and
+	// measure the pixel distance. Falls back to a sane default if that point won't project.
+	float PixelRadius = 64.0f;
+	const FVector CameraRight = FRotationMatrix(CameraRot).GetUnitAxis(EAxis::Y);
+	FVector2D EdgeScreen;
+	if (PC->ProjectWorldLocationToScreen(Center + CameraRight * Radius, EdgeScreen, false))
+	{
+		PixelRadius = FVector2D::Distance(CenterScreen, EdgeScreen);
+	}
+
+	Reticle->UpdateForTarget(CenterScreen, PixelRadius, BestWidget->GetCurrentPolarity());
 }
 
 void UEMFChargeWidgetSubsystem::RegisterNPC(AShooterNPC* NPC)
@@ -448,6 +512,13 @@ void UEMFChargeWidgetSubsystem::CleanupWidgets()
 		}
 	}
 	WidgetPool.Empty();
+
+	// Cleanup the single capture reticle
+	if (ReticleWidget)
+	{
+		ReticleWidget->RemoveFromParent();
+		ReticleWidget = nullptr;
+	}
 }
 
 APlayerController* UEMFChargeWidgetSubsystem::GetLocalPlayerController() const

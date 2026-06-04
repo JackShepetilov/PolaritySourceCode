@@ -10,6 +10,7 @@
 #include "EMFChargeWidgetSubsystem.generated.h"
 
 class UEMFChargeWidget;
+class UCaptureReticleWidget;
 class AShooterNPC;
 class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
@@ -158,6 +159,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
 	TSubclassOf<UEMFChargeWidget> WidgetClass;
 
+	/** On-target capture reticle class (brackets around the object the player can capture).
+	 *  A single instance is created lazily and follows the current best capture candidate.
+	 *  Leave empty to disable the reticle entirely. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
+	TSubclassOf<UCaptureReticleWidget> ReticleWidgetClass;
+
 	/** Enable/disable the entire system */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
 	bool bEnabled = true;
@@ -182,6 +189,18 @@ protected:
 	void ReturnWidgetToPool(UEMFChargeWidget* Widget);
 	void CleanupWidgets();
 	void ProcessPendingRegistrations();
+
+	// ==================== Capture Reticle ====================
+
+	/** The single on-target reticle instance (created lazily once a PlayerController exists). */
+	UPROPERTY()
+	TObjectPtr<UCaptureReticleWidget> ReticleWidget;
+
+	/** Create the reticle on first use; returns null if disabled or no PlayerController yet. */
+	UCaptureReticleWidget* GetOrCreateReticle(APlayerController* PC);
+
+	/** Drive the reticle from the current best capture candidate (or hide it if there is none). */
+	void UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget);
 
 	APlayerController* GetLocalPlayerController() const;
 

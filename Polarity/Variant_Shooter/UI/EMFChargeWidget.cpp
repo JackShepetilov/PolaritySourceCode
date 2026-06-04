@@ -490,6 +490,20 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 	const UChargeAnimationComponent* ChargeComp = Player->FindComponentByClass<UChargeAnimationComponent>();
 	if (!ChargeComp) return false;
 
+	// Already holding a captured target? In press-press capture mode the channel button now only
+	// LAUNCHES — it can't start a new capture — so the player cannot capture anything right now.
+	// Suppress the capture highlight/reticle for every target until the held object is thrown.
+	if (ChargeComp->bUsePressPressCaptureMode)
+	{
+		const EChargeAnimationState AnimState = ChargeComp->GetAnimationState();
+		if (AnimState == EChargeAnimationState::Channeling ||
+			AnimState == EChargeAnimationState::ReverseChanneling ||
+			AnimState == EChargeAnimationState::CaptureLockout)
+		{
+			return false;
+		}
+	}
+
 	UEMFVelocityModifier* PlayerMod = Player->FindComponentByClass<UEMFVelocityModifier>();
 	if (!PlayerMod) return false;
 	const float PlayerCharge = PlayerMod->GetCharge();
@@ -587,4 +601,46 @@ void UEMFChargeWidget::SetCaptureZoneState(bool bInZone)
 	if (bIsInCaptureZone == bInZone) return;
 	bIsInCaptureZone = bInZone;
 	BP_OnCaptureZoneChanged(bInZone);
+}
+
+bool UEMFChargeWidget::GetTargetCenterAndRadius(FVector& OutCenter, float& OutRadius) const
+{
+	if (AShooterNPC* NPC = BoundNPC.Get())
+	{
+		// Capsule origin == actor location == body center. Use half-height as the radius so the
+		// brackets wrap the whole body vertically.
+		OutCenter = NPC->GetActorLocation();
+		float HalfHeight = 88.0f;
+		if (const UCapsuleComponent* Capsule = NPC->GetCapsuleComponent())
+		{
+			HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+		}
+		OutRadius = HalfHeight;
+		return true;
+	}
+
+	if (AEMFPhysicsProp* Prop = BoundProp.Get())
+	{
+		// Use PropMesh bounds directly (mirrors GetTargetWorldPosition) — GetActorBounds would
+		// include Niagara components that can lag behind physics movement.
+		if (Prop->PropMesh)
+		{
+			OutCenter = Prop->PropMesh->Bounds.Origin;
+			OutRadius = FMath::Max(static_cast<float>(Prop->PropMesh->Bounds.SphereRadius), 1.0f);
+			return true;
+		}
+		return false;
+	}
+
+	// Dropped melee/ranged weapons and the riot shield pickup — use collider bounds.
+	if (AActor* Target = GetBoundActor())
+	{
+		FVector Origin, BoxExtent;
+		Target->GetActorBounds(false, Origin, BoxExtent);
+		OutCenter = Origin;
+		OutRadius = FMath::Max3(BoxExtent.X, BoxExtent.Y, BoxExtent.Z);
+		return true;
+	}
+
+	return false;
 }

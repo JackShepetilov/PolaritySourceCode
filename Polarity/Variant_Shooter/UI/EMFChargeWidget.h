@@ -121,6 +121,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "EMF Charge")
 	bool IsInCaptureZone() const { return bIsInCaptureZone; }
 
+	/** Get the target's CENTER (no vertical offset) and an approximate bounding radius (cm).
+	 *  Used by the on-target capture reticle to position/size the brackets around the object's
+	 *  body, not above its head. Returns false if there is no valid target. */
+	bool GetTargetCenterAndRadius(FVector& OutCenter, float& OutRadius) const;
+
 	// ==================== Getters ====================
 
 	UFUNCTION(BlueprintPure, Category = "EMF Charge")

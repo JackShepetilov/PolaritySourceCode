@@ -9,6 +9,7 @@
 #include "GameFramework/Pawn.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "Engine/OverlapResult.h"
@@ -1174,8 +1175,16 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 		FVector PreservedVelocity = OwnerVelocityAtAttackStart * Settings.MomentumPreservationRatio;
 		PreservedVelocity.Z = Movement->Velocity.Z; // Keep current Z velocity (gravity applied)
 
+		// Stop homing the instant the target is knocked back, otherwise the player keeps
+		// driving into the spot the enemy just vacated (mirrors the UpdateMagnetism guard).
+		bool bTargetInKnockback = false;
+		if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(MagnetismTarget.Get()))
+		{
+			bTargetInKnockback = TargetNPC->IsInKnockback();
+		}
+
 		// If we have a lunge target, move toward it
-		if (Settings.bEnableLunge && MagnetismTarget.IsValid())
+		if (Settings.bEnableLunge && MagnetismTarget.IsValid() && !bTargetInKnockback)
 		{
 			// ==================== Distance-Based Homing ====================
 			// LungeTargetPosition is refreshed each frame in UpdateMagnetism (XY+Z tracks the
@@ -1663,6 +1672,19 @@ void UMeleeAttackComponent::StartMagnetism()
 	MagnetismTarget = BestTarget;
 	LungeTargetPosition = IdealLungePos;
 
+	// LungeStopDistance is measured from the target's capsule CENTER and is smaller than the
+	// sum of the two capsule radii, so the lunge parks the player inside the target. With both
+	// capsules blocking ECC_Pawn that triggers per-frame depenetration (the ~30cm target jitter).
+	// Mutually ignore move-collision for the lunge; restored in StopMagnetism.
+	if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(OwnerCharacter->GetRootComponent()))
+	{
+		OwnerRoot->IgnoreActorWhenMoving(BestTarget, true);
+	}
+	if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(BestTarget->GetRootComponent()))
+	{
+		TargetRoot->IgnoreActorWhenMoving(OwnerCharacter, true);
+	}
+
 	StartCameraFocus(BestTarget);
 
 	if (Settings.bDisableGravityDuringLunge)
@@ -1774,6 +1796,20 @@ void UMeleeAttackComponent::StopMagnetism()
 				bIsDropKick ? 1 : 0, DropKickVelocity.Size()));
 	}
 #endif
+
+	// Restore move-collision with the lunge target (added in StartMagnetism).
+	if (OwnerCharacter && MagnetismTarget.IsValid())
+	{
+		AActor* IgnoredTarget = MagnetismTarget.Get();
+		if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(OwnerCharacter->GetRootComponent()))
+		{
+			OwnerRoot->IgnoreActorWhenMoving(IgnoredTarget, false);
+		}
+		if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(IgnoredTarget->GetRootComponent()))
+		{
+			TargetRoot->IgnoreActorWhenMoving(OwnerCharacter, false);
+		}
+	}
 
 	MagnetismTarget.Reset();
 

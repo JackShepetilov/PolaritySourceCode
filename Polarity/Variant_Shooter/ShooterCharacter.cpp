@@ -422,6 +422,13 @@ void AShooterCharacter::DoStartFiring()
 		return;
 	}
 
+	// Don't fire while an ability is casting — the fire montage shares the FP mesh slot and
+	// would interrupt the ability's montage (e.g. Charge Burst).
+	if (AbilityComponent && AbilityComponent->IsCasting())
+	{
+		return;
+	}
+
 	// Don't fire if weapon switch in progress
 	if (bIsWeaponSwitchInProgress)
 	{
@@ -1938,6 +1945,22 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 			if (bWasUnarmed)
 			{
 				UpdateFirstPersonMeshVisibility();
+			}
+		}
+	}
+	else
+	{
+		// Already own this weapon class — picking up a duplicate tops up its magazine to full
+		// instead of being wasted. SetBulletCount clamps to [0, MagazineSize].
+		const int32 MaxAmmo = OwnedWeapon->GetMagazineSize();
+		if (OwnedWeapon->GetBulletCount() < MaxAmmo)
+		{
+			OwnedWeapon->SetBulletCount(MaxAmmo);
+
+			// Refresh the ammo HUD only if this is the weapon currently in hand
+			if (OwnedWeapon == CurrentWeapon)
+			{
+				UpdateWeaponHUD(OwnedWeapon->GetBulletCount(), MaxAmmo);
 			}
 		}
 	}

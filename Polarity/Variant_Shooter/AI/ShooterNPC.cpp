@@ -221,6 +221,43 @@ void AShooterNPC::Tick(float DeltaTime)
 		return;
 	}
 
+	// [FACING_DEBUG] Throttled (~1/sec) snapshot of the rotation chain, to find out why NPCs
+	// don't face the player. Filter the Output Log by: FACING_DEBUG  (remove after diagnosis)
+	if (UWorld* DbgWorld = GetWorld())
+	{
+		const float DbgTime = DbgWorld->GetTimeSeconds();
+		if (FMath::Fmod(DbgTime, 1.0f) < DeltaTime)
+		{
+			const UCharacterMovementComponent* DbgCMC = GetCharacterMovement();
+			AAIController* DbgAI = Cast<AAIController>(GetController());
+			AActor* DbgFocus = DbgAI ? DbgAI->GetFocusActor() : nullptr;
+			AActor* DbgTarget = nullptr;
+			if (AShooterAIController* DbgSAI = Cast<AShooterAIController>(GetController()))
+			{
+				DbgTarget = DbgSAI->GetCurrentTarget();
+			}
+			AActor* DbgRef = DbgFocus ? DbgFocus : DbgTarget;
+			const float DbgYawToRef = DbgRef
+				? (DbgRef->GetActorLocation() - GetActorLocation()).Rotation().Yaw
+				: 0.0f;
+
+			UE_LOG(LogTemp, Warning,
+				TEXT("[FACING_DEBUG] %s | Orient2Move=%d UseCtrlDesired=%d UseCtrlYaw=%d RotRateYaw=%.0f MoveMode=%d | Focus=%s Target=%s | ActorYaw=%.0f CtrlYaw=%.0f YawToTgt=%.0f | Speed=%.0f"),
+				*GetName(),
+				DbgCMC ? (DbgCMC->bOrientRotationToMovement ? 1 : 0) : -1,
+				DbgCMC ? (DbgCMC->bUseControllerDesiredRotation ? 1 : 0) : -1,
+				bUseControllerRotationYaw ? 1 : 0,
+				DbgCMC ? DbgCMC->RotationRate.Yaw : -1.0f,
+				DbgCMC ? (int32)DbgCMC->MovementMode.GetValue() : -1,
+				*GetNameSafe(DbgFocus),
+				*GetNameSafe(DbgTarget),
+				GetActorRotation().Yaw,
+				DbgAI ? DbgAI->GetControlRotation().Yaw : 0.0f,
+				DbgYawToRef,
+				GetVelocity().Size2D());
+		}
+	}
+
 	// Update knockback interpolation if active
 	if (bIsKnockbackInterpolating)
 	{

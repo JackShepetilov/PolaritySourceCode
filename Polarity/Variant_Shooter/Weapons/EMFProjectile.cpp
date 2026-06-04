@@ -17,6 +17,9 @@
 // Arena
 #include "Polarity/Arena/ArenaManager.h"
 
+// AI (homing targets)
+#include "Variant_Shooter/AI/ShooterNPC.h"
+
 // Damage types
 #include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
 #include "EMFPhysicsProp.h"
@@ -76,11 +79,159 @@ void AEMFProjectile::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Apply EMF forces to projectile velocity
-	if (bAffectedByExternalFields && FieldComponent && ProjectileMovement)
+	// Charge homing takes over steering: lock onto ONE charged target and curve into it
+	// (guaranteed hit). This replaces the summed field-force steering, which can point the
+	// projectile into the empty space between several charged enemies and miss everyone.
+	if (bUseChargeHoming)
 	{
+		UpdateChargeHoming(DeltaTime);
+	}
+	else if (bAffectedByExternalFields && FieldComponent && ProjectileMovement)
+	{
+		// Legacy / non-homing path: physically-accurate Lorentz force from all sources.
 		ApplyEMForces(DeltaTime);
 	}
+}
+
+void AEMFProjectile::UpdateChargeHoming(float DeltaTime)
+{
+	if (!ProjectileMovement)
+	{
+		return;
+	}
+
+	// Re-evaluate the locked target on an interval (0 = every tick). Force immediate
+	// re-acquisition if the current target died or was pooled out from under us.
+	TimeSinceRetarget += DeltaTime;
+	const bool bCurrentInvalid = !CurrentHomingTarget.IsValid() || CurrentHomingTarget->IsDead();
+	if (bCurrentInvalid || TimeSinceRetarget >= HomingRetargetInterval)
+	{
+		TimeSinceRetarget = 0.0f;
+		CurrentHomingTarget = SelectHomingTarget();
+	}
+
+	AShooterNPC* Target = CurrentHomingTarget.Get();
+	if (!Target)
+	{
+		// No valid target: fly straight. The projectile stays registered as a field source,
+		// so rocket boost (player pushed off the projectile) still works — we just don't steer.
+		ProjectileMovement->bIsHomingProjectile = false;
+		ProjectileMovement->HomingTargetComponent = nullptr;
+		return;
+	}
+
+	// Homing strength scales with the charge product |q_proj * q_target|.
+	const float ProjCharge = GetProjectileCharge();
+	float TargetCharge = 0.0f;
+	if (UEMF_FieldComponent* TargetField = Target->FindComponentByClass<UEMF_FieldComponent>())
+	{
+		TargetCharge = TargetField->GetSourceDescription().PointChargeParams.Charge;
+	}
+
+	const float ChargeProduct = FMath::Abs(ProjCharge * TargetCharge);
+	const float Accel = FMath::Clamp(HomingAccelPerChargeProduct * ChargeProduct, MinHomingAccel, MaxHomingAccel);
+
+	ProjectileMovement->bIsHomingProjectile = true;
+	ProjectileMovement->HomingTargetComponent = Target->GetRootComponent();
+	ProjectileMovement->HomingAccelerationMagnitude = Accel;
+
+	if (bDrawHomingDebug)
+	{
+		DrawDebugLine(GetWorld(), GetActorLocation(), Target->GetActorLocation(),
+			FColor::Yellow, false, -1.0f, 0, 1.5f);
+		DrawDebugString(GetWorld(), GetActorLocation() + FVector(0, 0, 30.0f),
+			FString::Printf(TEXT("Homing %s | qProd=%.1f | Accel=%.0f"), *Target->GetName(), ChargeProduct, Accel),
+			nullptr, FColor::Yellow, 0.0f, true);
+	}
+}
+
+AShooterNPC* AEMFProjectile::SelectHomingTarget() const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	const FVector Position = GetActorLocation();
+	const FVector AimDir = (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
+		? ProjectileMovement->Velocity.GetSafeNormal()
+		: GetActorForwardVector();
+	const float ProjCharge = GetProjectileCharge();
+
+	TArray<FOverlapResult> Overlaps;
+	const FCollisionShape Sphere = FCollisionShape::MakeSphere(HomingMaxRange);
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EMFProjectile_Homing), false, this);
+	if (AActor* MyOwner = GetOwner())
+	{
+		QueryParams.AddIgnoredActor(MyOwner);
+	}
+
+	World->OverlapMultiByChannel(Overlaps, Position, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
+
+	const float ConeThreshold = FMath::Cos(FMath::DegreesToRadians(HomingConeHalfAngle));
+	AShooterNPC* const CurrentTarget = CurrentHomingTarget.Get();
+
+	AShooterNPC* BestTarget = nullptr;
+	float BestScore = -1.0f;
+
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
+		if (!NPC || NPC->IsDead())
+		{
+			continue;
+		}
+
+		// Read the target's charge.
+		float TargetCharge = 0.0f;
+		if (UEMF_FieldComponent* TargetField = NPC->FindComponentByClass<UEMF_FieldComponent>())
+		{
+			TargetCharge = TargetField->GetSourceDescription().PointChargeParams.Charge;
+		}
+
+		// Only home onto charged targets; optionally require opposite sign (attract-to-electrified).
+		if (FMath::IsNearlyZero(TargetCharge))
+		{
+			continue;
+		}
+		if (bRequireOppositeCharge && (ProjCharge * TargetCharge) >= 0.0f)
+		{
+			continue;
+		}
+
+		const FVector ToNPC = NPC->GetActorLocation() - Position;
+		const float Distance = ToNPC.Size();
+		if (Distance < KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		const FVector DirToNPC = ToNPC / Distance;
+		const float Dot = FVector::DotProduct(AimDir, DirToNPC);
+		if (Dot < ConeThreshold)
+		{
+			continue;
+		}
+
+		// Score: prefer the most-charged, most-centered, and closest target.
+		float Score = FMath::Abs(TargetCharge) * Dot / FMath::Max(Distance / HomingMaxRange, 0.01f);
+
+		// Stickiness: bias toward the currently-locked target so continuous retargeting
+		// doesn't thrash the projectile between two similarly-scored enemies.
+		if (NPC == CurrentTarget)
+		{
+			Score *= HomingStickiness;
+		}
+
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestTarget = NPC;
+		}
+	}
+
+	return BestTarget;
 }
 
 void AEMFProjectile::NotifyHit(UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp, bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit)
@@ -228,6 +379,15 @@ void AEMFProjectile::ResetProjectileState()
 	}
 
 	bDiagnosticLogged = false;
+
+	// Clear homing lock so a reused projectile doesn't keep chasing an old target.
+	CurrentHomingTarget = nullptr;
+	TimeSinceRetarget = 0.0f;
+	if (ProjectileMovement)
+	{
+		ProjectileMovement->bIsHomingProjectile = false;
+		ProjectileMovement->HomingTargetComponent = nullptr;
+	}
 }
 
 void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection)

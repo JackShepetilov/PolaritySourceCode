@@ -1278,6 +1278,11 @@ void UTutorialSubsystem::RebuildHintWidget()
 	}
 
 	ActiveHintWidget->AddToViewport(100);
+
+	// Hint is purely informational (closed via input keys, not mouse) — make it
+	// transparent to hit-testing so clicks pass through to any UI beneath it
+	// (e.g. the pause menu buttons). HitTestInvisible covers the widget and all children.
+	ActiveHintWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
 UTutorialSubsystem::FActiveHintEntry* UTutorialSubsystem::FindActiveHint(FName TutorialID)

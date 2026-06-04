@@ -16,6 +16,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Camera/CameraComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
@@ -854,6 +855,21 @@ void AShooterWeapon_Melee::StartMagnetism()
 				MagnetismTarget = ClosestTarget;
 				MagnetismLungeTargetPosition = IdealLungePos;
 
+				// Lunge parks the player capsule inside the target (stop distance < capsule radii),
+				// so mutually ignore move-collision for the lunge to stop per-frame depenetration
+				// jitter on the target. Restored in StopMagnetism.
+				if (PawnOwner)
+				{
+					if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(PawnOwner->GetRootComponent()))
+					{
+						OwnerRoot->IgnoreActorWhenMoving(ClosestTarget, true);
+					}
+					if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(ClosestTarget->GetRootComponent()))
+					{
+						TargetRoot->IgnoreActorWhenMoving(PawnOwner, true);
+					}
+				}
+
 				// Start camera focus when lunge target is found
 				StartCameraFocus(ClosestTarget);
 
@@ -932,6 +948,20 @@ void AShooterWeapon_Melee::StopMagnetism()
 	// NOTE: Dropkick exit momentum and gravity restoration are handled by
 	// MeleeAttackComponent::StopMagnetism() when dropkick is delegated
 
+	// Restore move-collision with the lunge target (added in StartMagnetism).
+	if (PawnOwner && MagnetismTarget.IsValid())
+	{
+		AActor* IgnoredTarget = MagnetismTarget.Get();
+		if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(PawnOwner->GetRootComponent()))
+		{
+			OwnerRoot->IgnoreActorWhenMoving(IgnoredTarget, false);
+		}
+		if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(IgnoredTarget->GetRootComponent()))
+		{
+			TargetRoot->IgnoreActorWhenMoving(PawnOwner, false);
+		}
+	}
+
 	MagnetismTarget.Reset();
 	bIsMagnetismActive = false;
 
@@ -971,7 +1001,14 @@ void AShooterWeapon_Melee::UpdateMomentumPreservation(float DeltaTime)
 
 	// Only override velocity when lunging toward a target.
 	// Without a lunge target, let normal movement continue uninterrupted.
-	if (bEnableLunge && MagnetismTarget.IsValid() && !bIsDropKick)
+	// Don't keep driving the player once the target is knocked back (mirrors UpdateMagnetism).
+	bool bTargetInKnockback = false;
+	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(MagnetismTarget.Get()))
+	{
+		bTargetInKnockback = TargetNPC->IsInKnockback();
+	}
+
+	if (bEnableLunge && MagnetismTarget.IsValid() && !bIsDropKick && !bTargetInKnockback)
 	{
 		FVector PlayerPos = OwnerChar->GetActorLocation();
 		FVector ToLungeTarget = MagnetismLungeTargetPosition - PlayerPos;
