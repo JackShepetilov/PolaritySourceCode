@@ -1,14 +1,11 @@
 // XPBarWidget.h
-// HUD widget showing one skill's XP progress and level.
-// Set CategoryToShow in WBP class defaults — widget filters subsystem events to that category.
-// To show all 4 skills, build a container WBP that statically embeds 4 instances of WBP_XPBar,
-// each with a different CategoryToShow.
+// HUD widget showing the run's single XP progress and level.
+// One instance per run HUD — there is no longer a per-skill split.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
-#include "SkillTypes.h"
 #include "XPBarWidget.generated.h"
 
 class UXPSubsystem;
@@ -31,9 +28,6 @@ public:
 	UFUNCTION(BlueprintPure, Category = "XP")
 	float GetProgress01() const { return CachedProgress01; }
 
-	UFUNCTION(BlueprintPure, Category = "XP")
-	ESkillCategory GetCategoryToShow() const { return CategoryToShow; }
-
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
@@ -51,17 +45,13 @@ protected:
 	// ==================== Internal ====================
 
 	UFUNCTION()
-	void HandleSkillXPGained(ESkillCategory Category, int32 Amount, int32 NewTotalXP);
+	void HandleXPGained(int32 Amount, int32 NewTotalXP);
 
 	UFUNCTION()
-	void HandleSkillLevelUp(ESkillCategory Category, int32 NewLevel);
+	void HandleLevelUp(int32 NewLevel);
 
 	void RefreshFromSubsystem();
 	UXPSubsystem* GetXPSubsystem() const;
-
-	/** Which skill this bar shows. Set per-instance in the parent WBP_RunHUD (or in Class Defaults). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "XP")
-	ESkillCategory CategoryToShow = ESkillCategory::Movement;
 
 	UPROPERTY(BlueprintReadOnly, Category = "XP")
 	int32 CachedCurrentXP = 0;

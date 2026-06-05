@@ -12,8 +12,8 @@ void UXPBarWidget::NativeConstruct()
 
 	if (UXPSubsystem* XP = GetXPSubsystem())
 	{
-		XP->OnSkillXPGained.AddDynamic(this, &UXPBarWidget::HandleSkillXPGained);
-		XP->OnSkillLevelUp.AddDynamic(this, &UXPBarWidget::HandleSkillLevelUp);
+		XP->OnXPGained.AddDynamic(this, &UXPBarWidget::HandleXPGained);
+		XP->OnLevelUp.AddDynamic(this, &UXPBarWidget::HandleLevelUp);
 	}
 
 	RefreshFromSubsystem();
@@ -25,8 +25,8 @@ void UXPBarWidget::NativeDestruct()
 {
 	if (UXPSubsystem* XP = GetXPSubsystem())
 	{
-		XP->OnSkillXPGained.RemoveDynamic(this, &UXPBarWidget::HandleSkillXPGained);
-		XP->OnSkillLevelUp.RemoveDynamic(this, &UXPBarWidget::HandleSkillLevelUp);
+		XP->OnXPGained.RemoveDynamic(this, &UXPBarWidget::HandleXPGained);
+		XP->OnLevelUp.RemoveDynamic(this, &UXPBarWidget::HandleLevelUp);
 	}
 
 	Super::NativeDestruct();
@@ -46,22 +46,20 @@ void UXPBarWidget::RefreshFromSubsystem()
 	UXPSubsystem* XP = GetXPSubsystem();
 	if (!XP) return;
 
-	CachedCurrentXP = XP->GetCurrentXP(CategoryToShow);
-	CachedCurrentLevel = XP->GetCurrentLevel(CategoryToShow);
-	CachedXPToNext = XP->GetXPToNextLevel(CategoryToShow);
-	CachedProgress01 = XP->GetProgressToNextLevel01(CategoryToShow);
+	CachedCurrentXP = XP->GetCurrentXP();
+	CachedCurrentLevel = XP->GetCurrentLevel();
+	CachedXPToNext = XP->GetXPToNextLevel();
+	CachedProgress01 = XP->GetProgressToNextLevel01();
 }
 
-void UXPBarWidget::HandleSkillXPGained(ESkillCategory Category, int32 Amount, int32 NewTotalXP)
+void UXPBarWidget::HandleXPGained(int32 Amount, int32 NewTotalXP)
 {
-	if (Category != CategoryToShow) return;
 	RefreshFromSubsystem();
 	BP_OnXPChanged(CachedCurrentXP, CachedXPToNext, CachedProgress01);
 }
 
-void UXPBarWidget::HandleSkillLevelUp(ESkillCategory Category, int32 NewLevel)
+void UXPBarWidget::HandleLevelUp(int32 NewLevel)
 {
-	if (Category != CategoryToShow) return;
 	RefreshFromSubsystem();
 	BP_OnLevelChanged(NewLevel);
 }

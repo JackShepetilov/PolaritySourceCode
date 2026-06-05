@@ -1,11 +1,5 @@
 // Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
-// TODO (UI wiring, scaffolding-pass deferred):
-//   UUpgradeChoiceWidget currently listens to UXPSubsystem::OnSkillLevelUp directly. For this
-//   subsystem to actually suppress popups during capture, the widget should switch to listening
-//   on OnDeferredLevelUpReleased instead (or guard its existing handler when capturing is on).
-//   That's a 5-line change in UpgradeChoiceWidget.cpp; left out of this pass per "scaffolding first".
-
 #include "DeferredUpgradeQueueSubsystem.h"
 #include "Polarity/Variant_Shooter/XP/XPSubsystem.h"
 #include "Engine/GameInstance.h"
@@ -22,9 +16,9 @@ void UDeferredUpgradeQueueSubsystem::Initialize(FSubsystemCollectionBase& Collec
 	{
 		if (UXPSubsystem* XP = GI->GetSubsystem<UXPSubsystem>())
 		{
-			XP->OnSkillLevelUp.AddDynamic(this, &UDeferredUpgradeQueueSubsystem::HandleSkillLevelUp);
+			XP->OnLevelUp.AddDynamic(this, &UDeferredUpgradeQueueSubsystem::HandleLevelUp);
 			CachedXPSubsystem = XP;
-			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::Initialize — bound to XPSubsystem::OnSkillLevelUp"));
+			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::Initialize — bound to XPSubsystem::OnLevelUp"));
 		}
 		else
 		{
@@ -37,7 +31,7 @@ void UDeferredUpgradeQueueSubsystem::Deinitialize()
 {
 	if (UXPSubsystem* XP = CachedXPSubsystem.Get())
 	{
-		XP->OnSkillLevelUp.RemoveDynamic(this, &UDeferredUpgradeQueueSubsystem::HandleSkillLevelUp);
+		XP->OnLevelUp.RemoveDynamic(this, &UDeferredUpgradeQueueSubsystem::HandleLevelUp);
 	}
 	CachedXPSubsystem.Reset();
 	PendingLevelUps.Reset();
@@ -80,9 +74,8 @@ void UDeferredUpgradeQueueSubsystem::FlushAll()
 
 	for (const FDeferredLevelUp& Entry : ToRelease)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::FlushAll — broadcasting cat=%d, lvl=%d"),
-			(int32)Entry.Category, Entry.NewLevel);
-		OnDeferredLevelUpReleased.Broadcast(Entry.Category, Entry.NewLevel);
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::FlushAll — broadcasting lvl=%d"), Entry.NewLevel);
+		OnDeferredLevelUpReleased.Broadcast(Entry.NewLevel);
 	}
 }
 
@@ -97,21 +90,20 @@ void UDeferredUpgradeQueueSubsystem::ClearWithoutReleasing()
 	bCapturing = false;
 }
 
-void UDeferredUpgradeQueueSubsystem::HandleSkillLevelUp(ESkillCategory Category, int32 NewLevel)
+void UDeferredUpgradeQueueSubsystem::HandleLevelUp(int32 NewLevel)
 {
 	if (bCapturing)
 	{
 		FDeferredLevelUp Entry;
-		Entry.Category = Category;
 		Entry.NewLevel = NewLevel;
 		PendingLevelUps.Add(Entry);
-		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::HandleSkillLevelUp — CAPTURED (cat=%d, lvl=%d, queue=%d)"),
-			(int32)Category, NewLevel, PendingLevelUps.Num());
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::HandleLevelUp — CAPTURED (lvl=%d, queue=%d)"),
+			NewLevel, PendingLevelUps.Num());
 		return;
 	}
 
 	// Pass-through — behave like a normal observer
-	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::HandleSkillLevelUp — PASS-THROUGH (cat=%d, lvl=%d, listeners=%d)"),
-		(int32)Category, NewLevel, OnDeferredLevelUpReleased.IsBound() ? 1 : 0);
-	OnDeferredLevelUpReleased.Broadcast(Category, NewLevel);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] DeferredQueue::HandleLevelUp — PASS-THROUGH (lvl=%d, listeners=%d)"),
+		NewLevel, OnDeferredLevelUpReleased.IsBound() ? 1 : 0);
+	OnDeferredLevelUpReleased.Broadcast(NewLevel);
 }

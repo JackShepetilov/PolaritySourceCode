@@ -1,14 +1,16 @@
 // SkillTypes.h
-// Shared enums and structs for the per-skill XP system.
-// Add or remove entries in ESkillCategory to expand or shrink the system —
-// no other code change is required outside config asset re-tuning.
+// Shared enums and structs for the XP / upgrade system.
+//
+// NOTE: the XP track is now single-pool (one level curve, one counter). ESkillCategory no longer
+// drives XP tracking or upgrade-pool filtering — it survives ONLY as a cosmetic tag on
+// UUpgradeDefinition (card colour / icon). FSkillState/FSkillCurve are single-instance now.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "SkillTypes.generated.h"
 
-/** Skill categories tracked independently. Stored as TMap key in XPSubsystem and XPConfig. */
+/** Cosmetic upgrade categories — used only to colour/icon upgrade cards. No longer drives XP. */
 UENUM(BlueprintType)
 enum class ESkillCategory : uint8
 {
@@ -18,7 +20,7 @@ enum class ESkillCategory : uint8
 	Weapon      UMETA(DisplayName = "Weapon Handling"),
 };
 
-/** Per-skill leveling state. Lives in XPSubsystem, keyed by ESkillCategory. */
+/** The run's single leveling state. Lives in XPSubsystem as one instance. */
 USTRUCT(BlueprintType)
 struct FSkillState
 {
@@ -31,7 +33,7 @@ struct FSkillState
 	int32 CurrentLevel = 0;
 };
 
-/** Per-skill leveling curve and base kill XP. Lives in XPConfig, keyed by ESkillCategory. */
+/** The run's single leveling curve and base kill XP. Lives in XPConfig.LevelCurve. */
 USTRUCT(BlueprintType)
 struct FSkillCurve
 {

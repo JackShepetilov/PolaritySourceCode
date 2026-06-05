@@ -4,7 +4,6 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
-#include "Polarity/Variant_Shooter/XP/SkillTypes.h"
 #include "DeferredUpgradeQueueSubsystem.generated.h"
 
 class UXPSubsystem;
@@ -15,9 +14,6 @@ struct FDeferredLevelUp
 	GENERATED_BODY()
 
 	UPROPERTY(BlueprintReadOnly, Category = "Deferred Upgrade")
-	ESkillCategory Category = ESkillCategory::Movement;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Deferred Upgrade")
 	int32 NewLevel = 0;
 };
 
@@ -26,7 +22,7 @@ struct FDeferredLevelUp
  * upgrade-choice popup like a normal level-up. Bind UUpgradeChoiceWidget (or a thin BP wrapper)
  * to this delegate so the existing popup queue inside the widget handles ordering for free.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDeferredLevelUpReleased, ESkillCategory, Category, int32, NewLevel);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDeferredLevelUpReleased, int32, NewLevel);
 
 /**
  * Captures level-ups that happen during gated periods (e.g. while an arena is active) and
@@ -34,18 +30,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDeferredLevelUpReleased, ESkillC
  * and uploads data.
  *
  * Wiring:
- *   - Subsystem listens to UXPSubsystem::OnSkillLevelUp at all times (passive).
- *   - When NOT capturing, OnSkillLevelUp passes straight through to OnDeferredLevelUpReleased
+ *   - Subsystem listens to UXPSubsystem::OnLevelUp at all times (passive).
+ *   - When NOT capturing, OnLevelUp passes straight through to OnDeferredLevelUpReleased
  *     so UI behavior is unchanged from the player's perspective.
  *   - When capturing (BeginCapture → EndCapture / FlushAll), level-ups are stashed in the
  *     PendingLevelUps queue instead of releasing immediately.
  *   - FlushAll() drains the queue and broadcasts OnDeferredLevelUpReleased once per entry.
  *
- * IMPORTANT — UI integration:
- *   For this to actually defer popups, UUpgradeChoiceWidget must listen to
- *   OnDeferredLevelUpReleased INSTEAD OF (or in addition to, with a guard) the raw
- *   XPSubsystem::OnSkillLevelUp. The current widget listens directly to XP; rewiring it
- *   is a tiny change but it's NOT done in this scaffolding pass — see TODO at top of .cpp.
+ * UI integration:
+ *   UUpgradeChoiceWidget subscribes to OnDeferredLevelUpReleased (with a fallback to the raw
+ *   XPSubsystem::OnLevelUp when this subsystem is unavailable). See UpgradeChoiceWidget.cpp.
  */
 UCLASS()
 class POLARITY_API UDeferredUpgradeQueueSubsystem : public UGameInstanceSubsystem
@@ -92,7 +86,7 @@ public:
 
 private:
 	UFUNCTION()
-	void HandleSkillLevelUp(ESkillCategory Category, int32 NewLevel);
+	void HandleLevelUp(int32 NewLevel);
 
 	UPROPERTY()
 	TArray<FDeferredLevelUp> PendingLevelUps;

@@ -1,8 +1,9 @@
 // XPConfig.h
-// PrimaryDataAsset configuring the per-skill XP economy.
+// PrimaryDataAsset configuring the single-track XP economy for a roguelite run.
 //
-// Replaces the old single-curve config: the system is now multi-skill, where each ESkillCategory
-// has its own leveling curve, base kill XP, and (via DamageType routing) source events.
+// XP is one global pool: every player kill awards BaseXPPerKill * EnemyXPMultiplier[class]
+// into a single level track (LevelCurve). Upgrades are no longer routed by skill category —
+// ESkillCategory survives only as a cosmetic tag on UUpgradeDefinition (card colour/icon).
 
 #pragma once
 
@@ -20,17 +21,13 @@ class POLARITY_API UXPConfig : public UPrimaryDataAsset
 	GENERATED_BODY()
 
 public:
-	/** Per-skill leveling curves and base kill XP. Author entries for each ESkillCategory you ship. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Skills")
-	TMap<ESkillCategory, FSkillCurve> SkillCurves;
+	/** The run's single leveling curve and base kill XP. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP")
+	FSkillCurve LevelCurve;
 
 	/** Multiplier applied to base kill XP, per enemy class. NPCs not in this map get 1.0x. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Enemies")
 	TMap<TSubclassOf<AShooterNPC>, float> EnemyXPMultiplier;
-
-	/** Routes a kill's DamageType to a skill category. Unmapped types award no kill XP (with warning). */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "XP|Routing")
-	TMap<TSubclassOf<UDamageType>, ESkillCategory> KillXPRouting;
 
 	/**
 	 * DamageTypes whose kills are always attributed to the player, even if the engine's
@@ -53,16 +50,13 @@ public:
 
 	// === Helpers ===
 
-	/** Cumulative XP threshold required to reach the given level (>= 1) within Category. INT32_MAX out of range. */
-	int32 GetThresholdForLevel(ESkillCategory Category, int32 Level) const;
+	/** Cumulative XP threshold required to reach the given level (>= 1). INT32_MAX out of range. */
+	int32 GetThresholdForLevel(int32 Level) const;
 
-	int32 GetMaxLevel(ESkillCategory Category) const;
+	int32 GetMaxLevel() const;
 
-	int32 GetBaseXPPerKill(ESkillCategory Category) const;
+	int32 GetBaseXPPerKill() const;
 
 	/** Returns multiplier for enemy class. 1.0 if class not in table. */
 	float GetEnemyMultiplier(TSubclassOf<AShooterNPC> EnemyClass) const;
-
-	/** Resolves DamageType to skill category. Returns false if unmapped. */
-	bool GetSkillForDamageType(TSubclassOf<UDamageType> DamageType, ESkillCategory& OutCategory) const;
 };

@@ -2,24 +2,20 @@
 
 #include "XPConfig.h"
 
-int32 UXPConfig::GetThresholdForLevel(ESkillCategory Category, int32 Level) const
+int32 UXPConfig::GetThresholdForLevel(int32 Level) const
 {
-	const FSkillCurve* Curve = SkillCurves.Find(Category);
-	if (!Curve) return INT32_MAX;
-	if (Level < 1 || Level > Curve->LevelThresholds.Num()) return INT32_MAX;
-	return Curve->LevelThresholds[Level - 1];
+	if (Level < 1 || Level > LevelCurve.LevelThresholds.Num()) return INT32_MAX;
+	return LevelCurve.LevelThresholds[Level - 1];
 }
 
-int32 UXPConfig::GetMaxLevel(ESkillCategory Category) const
+int32 UXPConfig::GetMaxLevel() const
 {
-	const FSkillCurve* Curve = SkillCurves.Find(Category);
-	return Curve ? Curve->LevelThresholds.Num() : 0;
+	return LevelCurve.LevelThresholds.Num();
 }
 
-int32 UXPConfig::GetBaseXPPerKill(ESkillCategory Category) const
+int32 UXPConfig::GetBaseXPPerKill() const
 {
-	const FSkillCurve* Curve = SkillCurves.Find(Category);
-	return Curve ? Curve->BaseXPPerKill : 0;
+	return LevelCurve.BaseXPPerKill;
 }
 
 float UXPConfig::GetEnemyMultiplier(TSubclassOf<AShooterNPC> EnemyClass) const
@@ -30,17 +26,6 @@ float UXPConfig::GetEnemyMultiplier(TSubclassOf<AShooterNPC> EnemyClass) const
 		return *Found;
 	}
 	return 1.f;
-}
-
-bool UXPConfig::GetSkillForDamageType(TSubclassOf<UDamageType> DamageType, ESkillCategory& OutCategory) const
-{
-	if (!DamageType) return false;
-	if (const ESkillCategory* Found = KillXPRouting.Find(DamageType))
-	{
-		OutCategory = *Found;
-		return true;
-	}
-	return false;
 }
 
 bool UXPConfig::ShouldAlwaysAttributeToPlayer(TSubclassOf<UDamageType> DamageType) const

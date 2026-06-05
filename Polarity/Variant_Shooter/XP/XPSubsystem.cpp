@@ -65,62 +65,54 @@ void UXPSubsystem::SetConfig(UXPConfig* InConfig)
 		InConfig ? *InConfig->GetName() : TEXT("NULL"));
 }
 
-FSkillState& UXPSubsystem::GetOrCreateState(ESkillCategory Category)
-{
-	return Skills.FindOrAdd(Category);
-}
-
 // ==================== Read API ====================
 
-int32 UXPSubsystem::GetCurrentXP(ESkillCategory Category) const
+int32 UXPSubsystem::GetCurrentXP() const
 {
-	const FSkillState* S = Skills.Find(Category);
-	return S ? S->CurrentXP : 0;
+	return Progress.CurrentXP;
 }
 
-int32 UXPSubsystem::GetCurrentLevel(ESkillCategory Category) const
+int32 UXPSubsystem::GetCurrentLevel() const
 {
-	const FSkillState* S = Skills.Find(Category);
-	return S ? S->CurrentLevel : 0;
+	return Progress.CurrentLevel;
 }
 
-int32 UXPSubsystem::GetXPToNextLevel(ESkillCategory Category) const
+int32 UXPSubsystem::GetXPToNextLevel() const
 {
 	if (!Config.IsValid()) return INT32_MAX;
-	const int32 Level = GetCurrentLevel(Category);
-	const int32 Next = Level + 1;
-	if (Next > Config->GetMaxLevel(Category)) return INT32_MAX;
-	return Config->GetThresholdForLevel(Category, Next) - GetCurrentXP(Category);
+	const int32 Next = Progress.CurrentLevel + 1;
+	if (Next > Config->GetMaxLevel()) return INT32_MAX;
+	return Config->GetThresholdForLevel(Next) - Progress.CurrentXP;
 }
 
-int32 UXPSubsystem::GetXPIntoCurrentLevel(ESkillCategory Category) const
+int32 UXPSubsystem::GetXPIntoCurrentLevel() const
 {
-	if (!Config.IsValid()) return GetCurrentXP(Category);
-	const int32 Level = GetCurrentLevel(Category);
-	const int32 Prev = (Level >= 1) ? Config->GetThresholdForLevel(Category, Level) : 0;
-	return GetCurrentXP(Category) - Prev;
+	if (!Config.IsValid()) return Progress.CurrentXP;
+	const int32 Level = Progress.CurrentLevel;
+	const int32 Prev = (Level >= 1) ? Config->GetThresholdForLevel(Level) : 0;
+	return Progress.CurrentXP - Prev;
 }
 
-int32 UXPSubsystem::GetCurrentLevelSpan(ESkillCategory Category) const
+int32 UXPSubsystem::GetCurrentLevelSpan() const
 {
 	if (!Config.IsValid()) return 0;
-	const int32 Level = GetCurrentLevel(Category);
+	const int32 Level = Progress.CurrentLevel;
 	const int32 Next = Level + 1;
-	if (Next > Config->GetMaxLevel(Category)) return 0;
-	const int32 Prev = (Level >= 1) ? Config->GetThresholdForLevel(Category, Level) : 0;
-	return Config->GetThresholdForLevel(Category, Next) - Prev;
+	if (Next > Config->GetMaxLevel()) return 0;
+	const int32 Prev = (Level >= 1) ? Config->GetThresholdForLevel(Level) : 0;
+	return Config->GetThresholdForLevel(Next) - Prev;
 }
 
-float UXPSubsystem::GetProgressToNextLevel01(ESkillCategory Category) const
+float UXPSubsystem::GetProgressToNextLevel01() const
 {
-	const int32 Span = GetCurrentLevelSpan(Category);
+	const int32 Span = GetCurrentLevelSpan();
 	if (Span <= 0) return 1.f;
-	return FMath::Clamp(static_cast<float>(GetXPIntoCurrentLevel(Category)) / static_cast<float>(Span), 0.f, 1.f);
+	return FMath::Clamp(static_cast<float>(GetXPIntoCurrentLevel()) / static_cast<float>(Span), 0.f, 1.f);
 }
 
 // ==================== Award API ====================
 
-void UXPSubsystem::AddSkillXP(ESkillCategory Category, int32 Amount)
+void UXPSubsystem::AddXP(int32 Amount)
 {
 	if (Amount <= 0) return;
 
@@ -131,16 +123,15 @@ void UXPSubsystem::AddSkillXP(ESkillCategory Category, int32 Amount)
 		return;
 	}
 
-	FSkillState& State = GetOrCreateState(Category);
-	State.CurrentXP += Amount;
+	Progress.CurrentXP += Amount;
 
 	Run->AddXPEarnedToStats(Amount);
 
-	OnSkillXPGained.Broadcast(Category, Amount, State.CurrentXP);
-	CheckLevelUpForCategory(Category);
+	OnXPGained.Broadcast(Amount, Progress.CurrentXP);
+	CheckLevelUp();
 }
 
-void UXPSubsystem::AwardKillXP(ESkillCategory Category, TSubclassOf<AShooterNPC> EnemyClass)
+void UXPSubsystem::AwardKillXP(TSubclassOf<AShooterNPC> EnemyClass)
 {
 	if (!Config.IsValid())
 	{
@@ -148,43 +139,41 @@ void UXPSubsystem::AwardKillXP(ESkillCategory Category, TSubclassOf<AShooterNPC>
 		return;
 	}
 
-	const int32 Base = Config->GetBaseXPPerKill(Category);
+	const int32 Base = Config->GetBaseXPPerKill();
 	if (Base <= 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] BaseXPPerKill=0 for skill %d (curve missing?)"), (int32)Category);
+		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] BaseXPPerKill=0 (LevelCurve missing?)"));
 		return;
 	}
 
 	const float Multiplier = Config->GetEnemyMultiplier(EnemyClass);
 	const int32 Award = FMath::RoundToInt(static_cast<float>(Base) * Multiplier);
 
-	AddSkillXP(Category, Award);
+	AddXP(Award);
 }
 
 // ==================== Internals ====================
 
-void UXPSubsystem::CheckLevelUpForCategory(ESkillCategory Category)
+void UXPSubsystem::CheckLevelUp()
 {
 	if (!Config.IsValid()) return;
-	const int32 MaxLevel = Config->GetMaxLevel(Category);
+	const int32 MaxLevel = Config->GetMaxLevel();
 
-	FSkillState& State = GetOrCreateState(Category);
-
-	while (State.CurrentLevel < MaxLevel)
+	while (Progress.CurrentLevel < MaxLevel)
 	{
-		const int32 Next = State.CurrentLevel + 1;
-		const int32 Threshold = Config->GetThresholdForLevel(Category, Next);
-		if (State.CurrentXP < Threshold) break;
+		const int32 Next = Progress.CurrentLevel + 1;
+		const int32 Threshold = Config->GetThresholdForLevel(Next);
+		if (Progress.CurrentXP < Threshold) break;
 
-		State.CurrentLevel = Next;
+		Progress.CurrentLevel = Next;
 
 		if (URunSubsystem* Run = GetRunSubsystem())
 		{
 			Run->AddLevelGainedToStats();
 		}
 
-		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] LevelUp skill=%d -> %d"), (int32)Category, State.CurrentLevel);
-		OnSkillLevelUp.Broadcast(Category, State.CurrentLevel);
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] LevelUp -> %d"), Progress.CurrentLevel);
+		OnLevelUp.Broadcast(Progress.CurrentLevel);
 	}
 }
 
@@ -192,8 +181,8 @@ void UXPSubsystem::CheckLevelUpForCategory(ESkillCategory Category)
 
 void UXPSubsystem::HandleRunStarted()
 {
-	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] HandleRunStarted — resetting all skills"));
-	Skills.Reset();
+	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] HandleRunStarted — resetting XP track"));
+	Progress = FSkillState();
 }
 
 void UXPSubsystem::HandleRunEnded(ERunEndReason Reason)
@@ -317,19 +306,10 @@ void UXPSubsystem::HandleNPCDeath(AShooterNPC* DeadNPC, TSubclassOf<UDamageType>
 		return;
 	}
 
-	ESkillCategory Cat;
-	if (!Config->GetSkillForDamageType(KillingDamageType, Cat))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] DamageType %s not in KillXPRouting — kill awards no XP (add the entry to DA_XPConfig.KillXPRouting)"),
-			KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL"));
-		return;
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Kill %s by %s -> skill %d"),
+	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Kill %s by %s -> +XP"),
 		*DeadNPC->GetName(),
-		KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL-DamageType"),
-		(int32)Cat);
-	AwardKillXP(Cat, EnemyClass);
+		KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL-DamageType"));
+	AwardKillXP(EnemyClass);
 }
 
 bool UXPSubsystem::WasKillCausedByPlayer(AActor* DamageCauser) const
@@ -351,9 +331,8 @@ bool UXPSubsystem::WasKillCausedByPlayer(AActor* DamageCauser) const
 // Open the in-game console (` key) and type the command name. Tab-completion works.
 //
 // Examples:
-//   polarity.xp.add Melee 500
-//   polarity.xp.add 1 500          (1 == Melee, indices 0..3)
-//   polarity.xp.levelup Weapon
+//   polarity.xp.add 500
+//   polarity.xp.levelup
 //   polarity.xp.show
 //   polarity.run.start
 //   polarity.run.enterarena 0
@@ -374,46 +353,14 @@ namespace XPDebugCommands
 		return GI ? GI->GetSubsystem<URunSubsystem>() : nullptr;
 	}
 
-	static const TCHAR* SkillName(ESkillCategory Cat)
-	{
-		switch (Cat)
-		{
-			case ESkillCategory::Movement: return TEXT("Movement");
-			case ESkillCategory::Melee:    return TEXT("Melee");
-			case ESkillCategory::EMF:      return TEXT("EMF");
-			case ESkillCategory::Weapon:   return TEXT("Weapon");
-		}
-		return TEXT("?");
-	}
-
-	static bool ParseSkill(const FString& Str, ESkillCategory& OutCat)
-	{
-		if (Str.Equals(TEXT("Movement"), ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::Movement; return true; }
-		if (Str.Equals(TEXT("Melee"),    ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::Melee;    return true; }
-		if (Str.Equals(TEXT("EMF"),      ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::EMF;      return true; }
-		if (Str.Equals(TEXT("Weapon"),   ESearchCase::IgnoreCase)) { OutCat = ESkillCategory::Weapon;   return true; }
-		if (Str.IsNumeric())
-		{
-			const int32 V = FCString::Atoi(*Str);
-			if (V >= 0 && V <= 3) { OutCat = static_cast<ESkillCategory>(V); return true; }
-		}
-		return false;
-	}
-
 	static void CmdAddXP(const TArray<FString>& Args, UWorld* World)
 	{
-		if (Args.Num() < 2)
+		if (Args.Num() < 1)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.xp.add <Movement|Melee|EMF|Weapon|0..3> <amount>"));
+			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.xp.add <amount>"));
 			return;
 		}
-		ESkillCategory Cat;
-		if (!ParseSkill(Args[0], Cat))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Unknown skill: '%s'. Use Movement / Melee / EMF / Weapon or 0..3"), *Args[0]);
-			return;
-		}
-		const int32 Amount = FCString::Atoi(*Args[1]);
+		const int32 Amount = FCString::Atoi(*Args[0]);
 		if (Amount <= 0)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Amount must be positive, got %d"), Amount);
@@ -425,36 +372,25 @@ namespace XPDebugCommands
 		URunSubsystem* Run = GetRun(World);
 		if (Run && !Run->IsRunActive())
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Run not active — call polarity.run.start first (or AddSkillXP will be a no-op)"));
+			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Run not active — call polarity.run.start first (or AddXP will be a no-op)"));
 		}
 
-		XP->AddSkillXP(Cat, Amount);
-		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] cmd: +%d XP to %s (total %d, level %d)"),
-			Amount, SkillName(Cat), XP->GetCurrentXP(Cat), XP->GetCurrentLevel(Cat));
+		XP->AddXP(Amount);
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] cmd: +%d XP (total %d, level %d)"),
+			Amount, XP->GetCurrentXP(), XP->GetCurrentLevel());
 	}
 
-	static void CmdLevelUp(const TArray<FString>& Args, UWorld* World)
+	static void CmdLevelUp(const TArray<FString>& /*Args*/, UWorld* World)
 	{
-		if (Args.Num() < 1)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.xp.levelup <Movement|Melee|EMF|Weapon|0..3>"));
-			return;
-		}
-		ESkillCategory Cat;
-		if (!ParseSkill(Args[0], Cat))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Unknown skill: '%s'"), *Args[0]);
-			return;
-		}
 		UXPSubsystem* XP = GetXP(World);
 		if (!XP) return;
-		const int32 ToNext = XP->GetXPToNextLevel(Cat);
+		const int32 ToNext = XP->GetXPToNextLevel();
 		if (ToNext == INT32_MAX)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] %s already at max level"), SkillName(Cat));
+			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Already at max level"));
 			return;
 		}
-		XP->AddSkillXP(Cat, FMath::Max(1, ToNext));
+		XP->AddXP(FMath::Max(1, ToNext));
 	}
 
 	static void CmdShow(const TArray<FString>& /*Args*/, UWorld* World)
@@ -463,19 +399,12 @@ namespace XPDebugCommands
 		if (!XP) { UE_LOG(LogTemp, Warning, TEXT("XPSubsystem not found")); return; }
 
 		URunSubsystem* Run = GetRun(World);
-		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] === Skill Status (run %s) ==="),
-			(Run && Run->IsRunActive()) ? TEXT("ACTIVE") : TEXT("INACTIVE"));
-
-		for (int32 i = 0; i <= 3; ++i)
-		{
-			const ESkillCategory Cat = static_cast<ESkillCategory>(i);
-			const int32 ToNext = XP->GetXPToNextLevel(Cat);
-			UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG]   %-10s  XP=%-6d  Lv=%-3d  ToNext=%s"),
-				SkillName(Cat),
-				XP->GetCurrentXP(Cat),
-				XP->GetCurrentLevel(Cat),
-				(ToNext == INT32_MAX) ? TEXT("MAX") : *FString::FromInt(ToNext));
-		}
+		const int32 ToNext = XP->GetXPToNextLevel();
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] === XP Status (run %s) ===  XP=%d  Lv=%d  ToNext=%s"),
+			(Run && Run->IsRunActive()) ? TEXT("ACTIVE") : TEXT("INACTIVE"),
+			XP->GetCurrentXP(),
+			XP->GetCurrentLevel(),
+			(ToNext == INT32_MAX) ? TEXT("MAX") : *FString::FromInt(ToNext));
 	}
 
 	static void CmdRunStart(const TArray<FString>& /*Args*/, UWorld* World)
@@ -634,17 +563,17 @@ namespace XPDebugCommands
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPAdd(
 	TEXT("polarity.xp.add"),
-	TEXT("Add XP to a skill. Usage: polarity.xp.add <Movement|Melee|EMF|Weapon|0..3> <amount>"),
+	TEXT("Add XP to the run's single track. Usage: polarity.xp.add <amount>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdAddXP));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPLevelUp(
 	TEXT("polarity.xp.levelup"),
-	TEXT("Adds just enough XP to trigger one level-up in the given skill. Usage: polarity.xp.levelup <skill>"),
+	TEXT("Adds just enough XP to trigger one level-up. Usage: polarity.xp.levelup"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdLevelUp));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPShow(
 	TEXT("polarity.xp.show"),
-	TEXT("Logs current XP / level / XP-to-next for all four skills."),
+	TEXT("Logs current XP / level / XP-to-next."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdShow));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunStart(

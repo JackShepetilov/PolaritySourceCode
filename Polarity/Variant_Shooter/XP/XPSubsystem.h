@@ -1,12 +1,10 @@
 // XPSubsystem.h
-// GameInstance subsystem owning per-skill XP and level state for a roguelite run.
+// GameInstance subsystem owning the single XP + level track for a roguelite run.
 //
-// State is now keyed by ESkillCategory. Public API takes a Category parameter throughout.
-// Kill XP is routed via XPConfig.KillXPRouting (DamageType -> Category) and scaled by
-// XPConfig.EnemyXPMultiplier (class -> float, default 1.0).
-//
-// Trackers (Movement / Melee / EMF / Weapon) for non-kill events are added in Stage Б;
-// they will call AddSkillXP(Category, Amount) directly.
+// XP is one global pool. Every player kill awards BaseXPPerKill * EnemyXPMultiplier[class]
+// (XPConfig). Non-kill XP sources, if added later, call AddXP(Amount) directly.
+// On crossing a threshold the subsystem broadcasts OnLevelUp(NewLevel); the upgrade-choice UI
+// then rolls random upgrades from the whole registry (no per-skill routing).
 
 #pragma once
 
@@ -22,8 +20,8 @@ class AActor;
 class UDamageType;
 class UWorld;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnSkillXPGained, ESkillCategory, Category, int32, Amount, int32, NewTotalXP);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSkillLevelUp, ESkillCategory, Category, int32, NewLevel);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnXPGained, int32, Amount, int32, NewTotalXP);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLevelUp, int32, NewLevel);
 
 UCLASS()
 class POLARITY_API UXPSubsystem : public UGameInstanceSubsystem
@@ -41,40 +39,40 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "XP")
 	void SetConfig(UXPConfig* InConfig);
 
-	/** Award flat XP to a specific skill (no enemy multiplier). Called by trackers in Stage Б. */
+	/** Award flat XP into the single pool (no enemy multiplier). For non-kill XP sources. */
 	UFUNCTION(BlueprintCallable, Category = "XP")
-	void AddSkillXP(ESkillCategory Category, int32 Amount);
+	void AddXP(int32 Amount);
 
-	/** Award kill XP for a skill: BaseXPPerKill[Cat] * EnemyMultiplier[EnemyClass]. C++-only (no BP exec wrapper to avoid pulling ShooterNPC.h into this header). */
-	void AwardKillXP(ESkillCategory Category, TSubclassOf<AShooterNPC> EnemyClass);
+	/** Award kill XP: BaseXPPerKill * EnemyMultiplier[EnemyClass]. C++-only (no BP exec wrapper to avoid pulling ShooterNPC.h into this header). */
+	void AwardKillXP(TSubclassOf<AShooterNPC> EnemyClass);
 
 	// ==================== Read API ====================
 
 	UFUNCTION(BlueprintPure, Category = "XP")
-	int32 GetCurrentXP(ESkillCategory Category) const;
+	int32 GetCurrentXP() const;
 
 	UFUNCTION(BlueprintPure, Category = "XP")
-	int32 GetCurrentLevel(ESkillCategory Category) const;
+	int32 GetCurrentLevel() const;
 
 	UFUNCTION(BlueprintPure, Category = "XP")
-	int32 GetXPToNextLevel(ESkillCategory Category) const;
+	int32 GetXPToNextLevel() const;
 
 	UFUNCTION(BlueprintPure, Category = "XP")
-	int32 GetXPIntoCurrentLevel(ESkillCategory Category) const;
+	int32 GetXPIntoCurrentLevel() const;
 
 	UFUNCTION(BlueprintPure, Category = "XP")
-	int32 GetCurrentLevelSpan(ESkillCategory Category) const;
+	int32 GetCurrentLevelSpan() const;
 
 	UFUNCTION(BlueprintPure, Category = "XP")
-	float GetProgressToNextLevel01(ESkillCategory Category) const;
+	float GetProgressToNextLevel01() const;
 
 	// ==================== Events ====================
 
 	UPROPERTY(BlueprintAssignable, Category = "XP|Events")
-	FOnSkillXPGained OnSkillXPGained;
+	FOnXPGained OnXPGained;
 
 	UPROPERTY(BlueprintAssignable, Category = "XP|Events")
-	FOnSkillLevelUp OnSkillLevelUp;
+	FOnLevelUp OnLevelUp;
 
 	/** Subscribe to an NPC's OnNPCDeathDetailed so its kill routes through HandleNPCDeath.
 	 *  Normally called automatically by OnAnyActorSpawned, but recycled NPCs (pool re-use)
@@ -99,15 +97,15 @@ protected:
 
 	// ==================== Internals ====================
 
-	void CheckLevelUpForCategory(ESkillCategory Category);
+	void CheckLevelUp();
 	bool WasKillCausedByPlayer(AActor* DamageCauser) const;
 	URunSubsystem* GetRunSubsystem() const;
-	FSkillState& GetOrCreateState(ESkillCategory Category);
 
 	// ==================== State ====================
 
+	/** Single XP + level track for the current run. Reset on OnRunStarted. */
 	UPROPERTY(SaveGame)
-	TMap<ESkillCategory, FSkillState> Skills;
+	FSkillState Progress;
 
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UXPConfig> Config;

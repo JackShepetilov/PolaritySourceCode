@@ -19,19 +19,19 @@ void UUpgradeChoiceWidget::NativeConstruct()
 
 	// Prefer the deferred queue: it acts as a pass-through when no arena is capturing,
 	// and stashes level-ups during combat so popups don't interrupt the fight. The widget's
-	// own PendingCategories queue still handles ordering once popups are released.
+	// own PendingLevelUps counter still handles ordering once popups are released.
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		if (UDeferredUpgradeQueueSubsystem* Deferred = GI->GetSubsystem<UDeferredUpgradeQueueSubsystem>())
 		{
-			Deferred->OnDeferredLevelUpReleased.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+			Deferred->OnDeferredLevelUpReleased.AddDynamic(this, &UUpgradeChoiceWidget::HandleLevelUp);
 			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] UpgradeChoiceWidget::NativeConstruct — subscribed to DeferredQueue::OnDeferredLevelUpReleased"));
 		}
 		else if (UXPSubsystem* XP = GetXPSubsystem())
 		{
 			// Fallback: subsystem absent (shouldn't happen at runtime, but keeps editor / tests sane)
 			UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] UpgradeChoiceWidget::NativeConstruct — DeferredQueue unavailable, FALLBACK to direct XP binding"));
-			XP->OnSkillLevelUp.AddDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+			XP->OnLevelUp.AddDynamic(this, &UUpgradeChoiceWidget::HandleLevelUp);
 		}
 		else
 		{
@@ -48,13 +48,13 @@ void UUpgradeChoiceWidget::NativeDestruct()
 	{
 		if (UDeferredUpgradeQueueSubsystem* Deferred = GI->GetSubsystem<UDeferredUpgradeQueueSubsystem>())
 		{
-			Deferred->OnDeferredLevelUpReleased.RemoveDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+			Deferred->OnDeferredLevelUpReleased.RemoveDynamic(this, &UUpgradeChoiceWidget::HandleLevelUp);
 		}
 	}
 	if (UXPSubsystem* XP = GetXPSubsystem())
 	{
 		// Safe even if we never subscribed via XP — RemoveDynamic is a no-op for missing bindings
-		XP->OnSkillLevelUp.RemoveDynamic(this, &UUpgradeChoiceWidget::HandleSkillLevelUp);
+		XP->OnLevelUp.RemoveDynamic(this, &UUpgradeChoiceWidget::HandleLevelUp);
 	}
 
 	// Defensive: if widget gets destroyed mid-choice, restore game state.
@@ -69,7 +69,7 @@ void UUpgradeChoiceWidget::NativeDestruct()
 		}
 		bIsOpen = false;
 	}
-	PendingCategories.Reset();
+	PendingLevelUps = 0;
 
 	Super::NativeDestruct();
 }
@@ -95,34 +95,34 @@ UUpgradeManagerComponent* UUpgradeChoiceWidget::GetUpgradeManager() const
 	return nullptr;
 }
 
-void UUpgradeChoiceWidget::HandleSkillLevelUp(ESkillCategory Category, int32 NewLevel)
+void UUpgradeChoiceWidget::HandleLevelUp(int32 NewLevel)
 {
-	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — RECEIVED cat=%d, lvl=%d, bIsOpen=%d, IsInViewport=%d"),
-		(int32)Category, NewLevel, bIsOpen ? 1 : 0, IsInViewport() ? 1 : 0);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — RECEIVED lvl=%d, bIsOpen=%d, IsInViewport=%d"),
+		NewLevel, bIsOpen ? 1 : 0, IsInViewport() ? 1 : 0);
 
 	if (bIsOpen)
 	{
-		PendingCategories.Add(Category);
-		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — Choice already open, queued (%d pending)"), PendingCategories.Num());
+		++PendingLevelUps;
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — Choice already open, queued (%d pending)"), PendingLevelUps);
 		return;
 	}
 
-	RollChoicesForCategory(Category);
-	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — RollChoices returned %d choices (Registry=%s)"),
+	RollChoices();
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — RollChoices returned %d choices (Registry=%s)"),
 		CurrentChoices.Num(), Registry ? *Registry->GetName() : TEXT("NULL"));
 
 	if (CurrentChoices.Num() == 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — NO upgrades available for skill %d, skipping (Registry pool empty / wrong category / all maxed?)"), (int32)Category);
+		UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — NO upgrades available, skipping (Registry empty / all maxed?)"));
 		TryProcessNextPending();
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleSkillLevelUp — Opening choice popup"));
-	OpenChoice(Category);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — Opening choice popup"));
+	OpenChoice();
 }
 
-void UUpgradeChoiceWidget::RollChoicesForCategory(ESkillCategory Category)
+void UUpgradeChoiceWidget::RollChoices()
 {
 	CurrentChoices.Reset();
 
@@ -136,32 +136,26 @@ void UUpgradeChoiceWidget::RollChoicesForCategory(ESkillCategory Category)
 
 	const int32 TotalInRegistry = Registry->AllUpgrades.Num();
 	int32 SkippedNull = 0;
-	int32 SkippedCategory = 0;
-	int32 SkippedOwned = 0;
+	int32 SkippedMaxed = 0;
 
+	// Pool = every upgrade in the registry that isn't null and isn't already at max level.
+	// No category filter — a single roll can mix Movement / Melee / EMF / Weapon cards.
 	TArray<UUpgradeDefinition*> Pool;
 	Pool.Reserve(TotalInRegistry);
 	for (UUpgradeDefinition* Def : Registry->AllUpgrades)
 	{
 		if (!Def) { ++SkippedNull; continue; }
-		if (Def->Category != Category)
-		{
-			++SkippedCategory;
-			UE_LOG(LogTemp, Verbose, TEXT("[XP_DEBUG]   skip %s — category %d != %d"),
-				*Def->GetName(), (int32)Def->Category, (int32)Category);
-			continue;
-		}
 		if (Manager && Manager->IsUpgradeMaxedOut(Def))
 		{
-			++SkippedOwned;
+			++SkippedMaxed;
 			continue;
 		}
 		Pool.Add(Def);
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("[XP_DEBUG] RollChoices skill=%d: registry=%d -> pool=%d (skipped: null=%d, wrong-category=%d, maxed=%d)"),
-		(int32)Category, TotalInRegistry, Pool.Num(), SkippedNull, SkippedCategory, SkippedOwned);
+		TEXT("[XP_DEBUG] RollChoices: registry=%d -> pool=%d (skipped: null=%d, maxed=%d)"),
+		TotalInRegistry, Pool.Num(), SkippedNull, SkippedMaxed);
 
 	const int32 N = FMath::Min(ChoiceCount, Pool.Num());
 	for (int32 i = 0; i < N; ++i)
@@ -172,13 +166,12 @@ void UUpgradeChoiceWidget::RollChoicesForCategory(ESkillCategory Category)
 	}
 }
 
-void UUpgradeChoiceWidget::OpenChoice(ESkillCategory Category)
+void UUpgradeChoiceWidget::OpenChoice()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::OpenChoice — opening for cat=%d, IsInViewport=%d, OwningPlayer=%s"),
-		(int32)Category, IsInViewport() ? 1 : 0, GetOwningPlayer() ? *GetOwningPlayer()->GetName() : TEXT("NULL"));
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::OpenChoice — IsInViewport=%d, OwningPlayer=%s"),
+		IsInViewport() ? 1 : 0, GetOwningPlayer() ? *GetOwningPlayer()->GetName() : TEXT("NULL"));
 
 	bIsOpen = true;
-	CurrentCategory = Category;
 	SetVisibility(ESlateVisibility::Visible);
 
 	if (APlayerController* PC = GetOwningPlayer())
@@ -191,7 +184,7 @@ void UUpgradeChoiceWidget::OpenChoice(ESkillCategory Category)
 	}
 
 	UGameplayStatics::SetGamePaused(this, true);
-	BP_OnChoiceOpened(Category);
+	BP_OnChoiceOpened();
 
 	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::OpenChoice — done (BP_OnChoiceOpened called)"));
 }
@@ -217,18 +210,17 @@ void UUpgradeChoiceWidget::CloseChoice(UUpgradeDefinition* SelectedDefinition)
 
 void UUpgradeChoiceWidget::TryProcessNextPending()
 {
-	while (PendingCategories.Num() > 0 && !bIsOpen)
+	while (PendingLevelUps > 0 && !bIsOpen)
 	{
-		const ESkillCategory NextCat = PendingCategories[0];
-		PendingCategories.RemoveAt(0);
+		--PendingLevelUps;
 
-		RollChoicesForCategory(NextCat);
+		RollChoices();
 		if (CurrentChoices.Num() == 0)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Queued skill %d has no upgrades — skipping"), (int32)NextCat);
+			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Queued level-up has no upgrades — skipping (%d still pending)"), PendingLevelUps);
 			continue;
 		}
-		OpenChoice(NextCat);
+		OpenChoice();
 		break;
 	}
 }

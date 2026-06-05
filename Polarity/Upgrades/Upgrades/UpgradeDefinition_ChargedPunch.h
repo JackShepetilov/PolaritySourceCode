@@ -81,8 +81,8 @@ public:
 	float CapsuleRadius = 60.0f;
 
 	/**
-	 * Damage type for the punch. Defaults to DamageType_Melee in BP so XP routes
-	 * to the Melee skill via XPConfig.KillXPRouting.
+	 * Damage type for the punch. Defaults to DamageType_Melee in BP. Used for damage
+	 * application and player kill-attribution (XP is a single pool now — no per-skill routing).
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Damage")
 	TSubclassOf<UDamageType> DamageType;
