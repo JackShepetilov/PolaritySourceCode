@@ -9,6 +9,7 @@
 class UShooterUI;
 class AShooterCharacter;
 class UUserWidget;
+class ARunLaunchPoint;
 
 /**
  *  Simple GameMode for a first person shooter game
@@ -49,6 +50,11 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> LoadingCoverWidget;
 
+	/** If true, the sea-toss launch fires automatically when the world is ready. Set false to
+	 *  trigger it from BP (e.g. timed with the intro Level Sequence) via PerformRunLaunch(). */
+	UPROPERTY(EditAnywhere, Category = "Run Start")
+	bool bAutoLaunchOnReady = true;
+
 	/** Ensures the run is started exactly once. */
 	bool bRunStartTriggered = false;
 
@@ -60,6 +66,10 @@ protected:
 
 	/** Called once the world is confirmed loaded and drawn; starts the run. */
 	void HandleWorldReady();
+
+	/** Teleports the player to the level's ARunLaunchPoint and tosses them into the air. */
+	UFUNCTION(BlueprintCallable, Category = "Run Start")
+	void PerformRunLaunch();
 
 public:
 

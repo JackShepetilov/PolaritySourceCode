@@ -5,6 +5,7 @@
 #include "ShooterUI.h"
 #include "ShooterCharacter.h"
 #include "RunSubsystem.h"
+#include "RunLaunchPoint.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "Blueprint/UserWidget.h"
@@ -104,8 +105,36 @@ void AShooterGameMode::HandleWorldReady()
 		}
 	}
 
-	// Let Blueprint play the intro Level Sequence (fade) + launch from the sea.
+	// Toss the player out of the sea (unless BP wants to time it with the intro sequence).
+	if (bAutoLaunchOnReady)
+	{
+		PerformRunLaunch();
+	}
+
+	// Let Blueprint play the intro Level Sequence (fade) + reveal.
 	BP_OnRunStartReady();
+}
+
+void AShooterGameMode::PerformRunLaunch()
+{
+	ARunLaunchPoint* Point = Cast<ARunLaunchPoint>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), ARunLaunchPoint::StaticClass()));
+	if (!Point)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: no ARunLaunchPoint in level"));
+		return;
+	}
+
+	AShooterCharacter* Character = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+	if (!Character)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: player pawn is not a ShooterCharacter"));
+		return;
+	}
+
+	Character->SetActorLocationAndRotation(Point->GetActorLocation(), Point->GetActorRotation(),
+		false, nullptr, ETeleportType::TeleportPhysics);
+	Character->BeginRunLaunch(Point->GetLaunchVelocity());
 }
 
 void AShooterGameMode::DismissLoadingCover()

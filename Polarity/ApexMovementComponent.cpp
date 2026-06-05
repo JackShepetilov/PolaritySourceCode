@@ -1234,6 +1234,17 @@ void UApexMovementComponent::SetWallRunExternallyDisabled(bool bDisabled)
 	}
 }
 
+void UApexMovementComponent::SetRunLaunchActive(bool bActive)
+{
+	bRunLaunchActive = bActive;
+
+	// Entering the launch: cancel any contextual air state so the toss arc is clean.
+	if (bActive && bIsWallRunning)
+	{
+		EndWallRun(EWallRunEndReason::LostWall);
+	}
+}
+
 void UApexMovementComponent::EndWallRun(EWallRunEndReason Reason)
 {
 	if (!bIsWallRunning)

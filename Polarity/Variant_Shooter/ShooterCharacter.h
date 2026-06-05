@@ -1233,6 +1233,12 @@ protected:
 	/** Stop air dash trail VFX */
 	void StopAirDashTrailVFX();
 
+	/** Grants the starting weapon + restores air abilities on the opening launch's first landing. */
+	virtual void Landed(const FHitResult& Hit) override;
+
+	/** Air control saved at launch, restored on landing (run-start toss keeps a pure-physics arc). */
+	float SavedAirControl = 0.f;
+
 public:
 
 	//~Begin IShooterWeaponHolder interface
@@ -1304,6 +1310,22 @@ public:
 	 *  re-lowering. Used by yank pickup (DroppedRangedWeapon::CompletePull). */
 	UFUNCTION(BlueprintCallable, Category = "Weapons")
 	AShooterWeapon* AddWeaponClassAnimated(const TSubclassOf<AShooterWeapon>& WeaponClass);
+
+	// ==================== Run Start Launch ====================
+
+	/** Weapon granted (with the animated draw) when the player first lands at the start of a run.
+	 *  Single weapon for now; hub loadout selection will set this later. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run Start")
+	TSubclassOf<AShooterWeapon> StartingWeaponClass;
+
+	/** True from the opening sea-toss launch until the first landing. */
+	UPROPERTY(BlueprintReadOnly, Category = "Run Start")
+	bool bRunLaunchInProgress = false;
+
+	/** Tosses the character with the given world velocity and suppresses air abilities + air control
+	 *  until landing, so the opening arc is deterministic. */
+	UFUNCTION(BlueprintCallable, Category = "Run Start")
+	void BeginRunLaunch(const FVector& LaunchVelocity);
 
 	/** Begin only the lower phase of a weapon switch. Mesh smoothly drops and pauses at the
 	 *  bottom waiting for FinishWeaponSwitch(NewWeapon). Used when the new weapon is in flight

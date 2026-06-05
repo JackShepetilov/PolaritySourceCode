@@ -1672,6 +1672,48 @@ void AShooterCharacter::OnLanded_SFX(const FHitResult& Hit)
 	}
 }
 
+void AShooterCharacter::BeginRunLaunch(const FVector& LaunchVelocity)
+{
+	bRunLaunchInProgress = true;
+
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SetRunLaunchActive(true);
+		SavedAirControl = Apex->AirControl;
+		Apex->AirControl = 0.f;   // pure-physics arc: no mid-air steering
+	}
+
+	// Override both XY and Z so the toss is exactly the authored velocity (deterministic landing).
+	LaunchCharacter(LaunchVelocity, true, true);
+
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] BeginRunLaunch vel=%s"), *LaunchVelocity.ToString());
+}
+
+void AShooterCharacter::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+
+	if (!bRunLaunchInProgress)
+	{
+		return;
+	}
+	bRunLaunchInProgress = false;
+
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SetRunLaunchActive(false);
+		Apex->AirControl = SavedAirControl;
+	}
+
+	// Hand the player their starting weapon with the normal animated draw.
+	if (StartingWeaponClass)
+	{
+		AddWeaponClassAnimated(StartingWeaponClass);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] Run-launch landed -> grant starting weapon"));
+}
+
 void AShooterCharacter::BindMovementSFXDelegates()
 {
 	if (UApexMovementComponent* Apex = GetApexMovement())

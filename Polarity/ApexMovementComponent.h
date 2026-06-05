@@ -120,6 +120,11 @@ public:
 	UPROPERTY()
 	bool bWallRunExternallyDisabled = false;
 
+	/** True during the start-of-run sea-toss flight. Suppresses jump / air dash / wallrun / mantle so
+	 *  the arc stays deterministic. Crouch->slide-on-land is intentionally still allowed. */
+	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	bool bRunLaunchActive = false;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	EWallSide WallRunSide = EWallSide::None;
 
@@ -236,6 +241,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsWallRunExternallyDisabled() const { return bWallRunExternallyDisabled; }
+
+	/** Enable/disable the start-of-run launch state (suppresses air abilities while the toss arc plays). */
+	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
+	void SetRunLaunchActive(bool bActive);
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsWallRunning() const { return bIsWallRunning; }
