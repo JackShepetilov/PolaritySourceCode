@@ -7,6 +7,7 @@
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/OverlapResult.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 
@@ -103,14 +104,24 @@ void AEMFProjectile::UpdateChargeHoming(float DeltaTime)
 	// Re-evaluate the locked target on an interval (0 = every tick). Force immediate
 	// re-acquisition if the current target died or was pooled out from under us.
 	TimeSinceRetarget += DeltaTime;
-	const bool bCurrentInvalid = !CurrentHomingTarget.IsValid() || CurrentHomingTarget->IsDead();
+
+	bool bCurrentInvalid = !CurrentHomingTarget.IsValid();
+	if (!bCurrentInvalid)
+	{
+		// For NPC targets, check IsDead(). For tagged non-NPC targets, the weak ptr handles destruction.
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentHomingTarget.Get()))
+		{
+			bCurrentInvalid = NPC->IsDead();
+		}
+	}
+
 	if (bCurrentInvalid || TimeSinceRetarget >= HomingRetargetInterval)
 	{
 		TimeSinceRetarget = 0.0f;
 		CurrentHomingTarget = SelectHomingTarget();
 	}
 
-	AShooterNPC* Target = CurrentHomingTarget.Get();
+	AActor* Target = CurrentHomingTarget.Get();
 	if (!Target)
 	{
 		// No valid target: fly straight. The projectile stays registered as a field source,
@@ -128,6 +139,14 @@ void AEMFProjectile::UpdateChargeHoming(float DeltaTime)
 		TargetCharge = TargetField->GetSourceDescription().PointChargeParams.Charge;
 	}
 
+	// For tagged actors without EMF component — use virtual charge so homing still works.
+	const bool bIsTaggedTarget = !HomingTargetTag.IsNone() && Target->ActorHasTag(HomingTargetTag);
+	if (FMath::IsNearlyZero(TargetCharge) && bIsTaggedTarget)
+	{
+		// Virtual charge with opposite sign to projectile, so the product is always positive.
+		TargetCharge = -FMath::Sign(ProjCharge) * HomingTagVirtualCharge;
+	}
+
 	const float ChargeProduct = FMath::Abs(ProjCharge * TargetCharge);
 	const float Accel = FMath::Clamp(HomingAccelPerChargeProduct * ChargeProduct, MinHomingAccel, MaxHomingAccel);
 
@@ -140,12 +159,14 @@ void AEMFProjectile::UpdateChargeHoming(float DeltaTime)
 		DrawDebugLine(GetWorld(), GetActorLocation(), Target->GetActorLocation(),
 			FColor::Yellow, false, -1.0f, 0, 1.5f);
 		DrawDebugString(GetWorld(), GetActorLocation() + FVector(0, 0, 30.0f),
-			FString::Printf(TEXT("Homing %s | qProd=%.1f | Accel=%.0f"), *Target->GetName(), ChargeProduct, Accel),
+			FString::Printf(TEXT("[HOMING_DEBUG] %s | qProd=%.1f | Accel=%.0f%s"),
+				*Target->GetName(), ChargeProduct, Accel,
+				bIsTaggedTarget ? TEXT(" [TAG]") : TEXT("")),
 			nullptr, FColor::Yellow, 0.0f, true);
 	}
 }
 
-AShooterNPC* AEMFProjectile::SelectHomingTarget() const
+AActor* AEMFProjectile::SelectHomingTarget() const
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -159,6 +180,10 @@ AShooterNPC* AEMFProjectile::SelectHomingTarget() const
 		: GetActorForwardVector();
 	const float ProjCharge = GetProjectileCharge();
 
+	// Use OverlapMultiByObjectType instead of OverlapMultiByChannel so we find BOTH
+	// Pawn-type actors (NPC, dummies) AND WorldDynamic actors (EMF props).
+	// OverlapMultiByChannel(ECC_Pawn) only returns actors whose collision responds to the
+	// Pawn trace channel — props on "PhysicsActor" profile (WorldDynamic) are invisible to it.
 	TArray<FOverlapResult> Overlaps;
 	const FCollisionShape Sphere = FCollisionShape::MakeSphere(HomingMaxRange);
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EMFProjectile_Homing), false, this);
@@ -167,48 +192,85 @@ AShooterNPC* AEMFProjectile::SelectHomingTarget() const
 		QueryParams.AddIgnoredActor(MyOwner);
 	}
 
-	World->OverlapMultiByChannel(Overlaps, Position, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
+	FCollisionObjectQueryParams ObjectQuery;
+	ObjectQuery.AddObjectTypesToQuery(ECC_Pawn);
+	ObjectQuery.AddObjectTypesToQuery(ECC_WorldDynamic);
+
+	World->OverlapMultiByObjectType(Overlaps, Position, FQuat::Identity, ObjectQuery, Sphere, QueryParams);
 
 	const float ConeThreshold = FMath::Cos(FMath::DegreesToRadians(HomingConeHalfAngle));
-	AShooterNPC* const CurrentTarget = CurrentHomingTarget.Get();
+	AActor* const CurrentTarget = CurrentHomingTarget.Get();
+	const bool bHasTag = !HomingTargetTag.IsNone();
 
-	AShooterNPC* BestTarget = nullptr;
+	AActor* BestTarget = nullptr;
 	float BestScore = -1.0f;
 
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
-		AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
-		if (!NPC || NPC->IsDead())
+		AActor* Candidate = Overlap.GetActor();
+		if (!Candidate || Candidate == this)
 		{
 			continue;
 		}
 
-		// Read the target's charge.
+		// --- Eligibility: NPC path (by charge) OR tag path (explicit opt-in) ---
+		bool bIsNPC = false;
+		bool bIsTagged = false;
+
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(Candidate))
+		{
+			if (NPC->IsDead())
+			{
+				continue;
+			}
+			bIsNPC = true;
+		}
+		else if (bHasTag && Candidate->ActorHasTag(HomingTargetTag))
+		{
+			bIsTagged = true;
+		}
+		else
+		{
+			// Neither a valid NPC nor a tagged target — skip.
+			continue;
+		}
+
+		// --- Charge ---
 		float TargetCharge = 0.0f;
-		if (UEMF_FieldComponent* TargetField = NPC->FindComponentByClass<UEMF_FieldComponent>())
+		if (UEMF_FieldComponent* TargetField = Candidate->FindComponentByClass<UEMF_FieldComponent>())
 		{
 			TargetCharge = TargetField->GetSourceDescription().PointChargeParams.Charge;
 		}
 
-		// Only home onto charged targets; optionally require opposite sign (attract-to-electrified).
-		if (FMath::IsNearlyZero(TargetCharge))
+		// For tagged actors without real charge, substitute virtual charge (opposite sign to projectile).
+		if (FMath::IsNearlyZero(TargetCharge) && bIsTagged)
+		{
+			TargetCharge = -FMath::Sign(ProjCharge) * HomingTagVirtualCharge;
+		}
+
+		// NPC path: require charge (skip uncharged NPCs — they haven't been electrified yet).
+		if (bIsNPC && FMath::IsNearlyZero(TargetCharge))
 		{
 			continue;
 		}
+
+		// Optionally require opposite charge sign (attract-to-electrified).
+		// Tagged targets with virtual charge already have the correct sign, so they pass.
 		if (bRequireOppositeCharge && (ProjCharge * TargetCharge) >= 0.0f)
 		{
 			continue;
 		}
 
-		const FVector ToNPC = NPC->GetActorLocation() - Position;
-		const float Distance = ToNPC.Size();
+		// --- Cone + distance ---
+		const FVector ToTarget = Candidate->GetActorLocation() - Position;
+		const float Distance = ToTarget.Size();
 		if (Distance < KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
 
-		const FVector DirToNPC = ToNPC / Distance;
-		const float Dot = FVector::DotProduct(AimDir, DirToNPC);
+		const FVector DirToTarget = ToTarget / Distance;
+		const float Dot = FVector::DotProduct(AimDir, DirToTarget);
 		if (Dot < ConeThreshold)
 		{
 			continue;
@@ -218,8 +280,8 @@ AShooterNPC* AEMFProjectile::SelectHomingTarget() const
 		float Score = FMath::Abs(TargetCharge) * Dot / FMath::Max(Distance / HomingMaxRange, 0.01f);
 
 		// Stickiness: bias toward the currently-locked target so continuous retargeting
-		// doesn't thrash the projectile between two similarly-scored enemies.
-		if (NPC == CurrentTarget)
+		// doesn't thrash the projectile between two similarly-scored targets.
+		if (Candidate == CurrentTarget)
 		{
 			Score *= HomingStickiness;
 		}
@@ -227,7 +289,7 @@ AShooterNPC* AEMFProjectile::SelectHomingTarget() const
 		if (Score > BestScore)
 		{
 			BestScore = Score;
-			BestTarget = NPC;
+			BestTarget = Candidate;
 		}
 	}
 

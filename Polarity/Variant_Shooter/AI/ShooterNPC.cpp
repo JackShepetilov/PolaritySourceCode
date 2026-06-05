@@ -350,6 +350,34 @@ void AShooterNPC::Tick(float DeltaTime)
 	{
 		CheckEMFProximityCollision();
 	}
+
+#if !UE_BUILD_SHIPPING
+	// [SHAKE_DEBUG] Per-frame position trace near the player to find which system moves the NPC
+	// during the melee jitter. Filter Output Log by "SHAKE_DEBUG". Remove once diagnosed.
+	// move: 0=None 1=Walking 2=NavWalking 3=Falling | aiPath: 0=Idle 1=Waiting 2=Paused 3=Moving
+	if (APawn* DebugPlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0))
+	{
+		if (FVector::Dist(GetActorLocation(), DebugPlayerPawn->GetActorLocation()) < 600.0f)
+		{
+			const FVector L = GetActorLocation();
+			int32 PathStatus = -1;
+			if (AAIController* AICon = Cast<AAIController>(GetController()))
+			{
+				if (UPathFollowingComponent* PFC = AICon->GetPathFollowingComponent())
+				{
+					PathStatus = (int32)PFC->GetStatus();
+				}
+			}
+			UE_LOG(LogTemp, Warning, TEXT("[SHAKE_DEBUG] %s(%s) pos=(%.1f,%.1f,%.1f) move=%d vel=%.0f | kb=%d kbInterp=%d cap=%d launch=%d cinePull=%d aiPath=%d"),
+				*GetName(), *GetClass()->GetName(), L.X, L.Y, L.Z,
+				GetCharacterMovement() ? (int32)GetCharacterMovement()->MovementMode.GetValue() : -1,
+				GetVelocity().Size(),
+				bIsInKnockback ? 1 : 0, bIsKnockbackInterpolating ? 1 : 0,
+				bIsCaptured ? 1 : 0, bIsLaunched ? 1 : 0, bIsInCinematicPull ? 1 : 0,
+				PathStatus);
+		}
+	}
+#endif
 }
 
 float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)

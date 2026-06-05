@@ -471,6 +471,14 @@ void AShooterCharacter::DoSwitchWeapon()
 		return;
 	}
 
+	// Don't switch while an ability is casting — swapping weapons re-inits the FP AnimInstance
+	// (SetAnimInstanceClass), which orphans the ability montage's end delegate and can leave the
+	// cast stuck (bIsCasting never cleared).
+	if (AbilityComponent && AbilityComponent->IsCasting())
+	{
+		return;
+	}
+
 	// Don't switch if already switching
 	if (bIsWeaponSwitchInProgress)
 	{
@@ -510,6 +518,12 @@ void AShooterCharacter::DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass)
 
 	// Don't switch if charge animating
 	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
+	{
+		return;
+	}
+
+	// Don't switch while an ability is casting — see DoSwitchWeapon for rationale.
+	if (AbilityComponent && AbilityComponent->IsCasting())
 	{
 		return;
 	}
@@ -1909,6 +1923,11 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 {
 	AShooterWeapon* OwnedWeapon = FindWeaponOfType(WeaponClass);
 
+	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] AddWeaponClass: Class=%s, OwnedWeapon=%s (%s branch)"),
+		*GetNameSafe(WeaponClass),
+		*GetNameSafe(OwnedWeapon),
+		OwnedWeapon ? TEXT("TOP-UP") : TEXT("SPAWN NEW"));
+
 	if (!OwnedWeapon)
 	{
 		FActorSpawnParameters SpawnParams;
@@ -1923,6 +1942,9 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 		{
 			// Check if this is the first weapon (for visibility update)
 			const bool bWasUnarmed = OwnedWeapons.Num() == 0;
+
+			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Spawned new %s: MagazineSize=%d, bHasLimitedAmmo=%d"),
+				*GetNameSafe(AddedWeapon), AddedWeapon->GetMagazineSize(), AddedWeapon->bHasLimitedAmmo ? 1 : 0);
 
 			OwnedWeapons.Add(AddedWeapon);
 
@@ -1953,15 +1975,30 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 		// Already own this weapon class — picking up a duplicate tops up its magazine to full
 		// instead of being wasted. SetBulletCount clamps to [0, MagazineSize].
 		const int32 MaxAmmo = OwnedWeapon->GetMagazineSize();
-		if (OwnedWeapon->GetBulletCount() < MaxAmmo)
+		const int32 BeforeAmmo = OwnedWeapon->GetBulletCount();
+
+		UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] TOP-UP candidate %s: Bullets=%d/%d, bHasLimitedAmmo=%d, IsCurrent=%d"),
+			*GetNameSafe(OwnedWeapon), BeforeAmmo, MaxAmmo,
+			OwnedWeapon->bHasLimitedAmmo ? 1 : 0,
+			(OwnedWeapon == CurrentWeapon) ? 1 : 0);
+
+		if (BeforeAmmo < MaxAmmo)
 		{
 			OwnedWeapon->SetBulletCount(MaxAmmo);
+
+			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] TOP-UP applied: %d -> %d"),
+				BeforeAmmo, OwnedWeapon->GetBulletCount());
 
 			// Refresh the ammo HUD only if this is the weapon currently in hand
 			if (OwnedWeapon == CurrentWeapon)
 			{
 				UpdateWeaponHUD(OwnedWeapon->GetBulletCount(), MaxAmmo);
 			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] TOP-UP SKIPPED — magazine already full (%d/%d). "
+				"Standard pickups auto-refill, so they are rarely below max."), BeforeAmmo, MaxAmmo);
 		}
 	}
 }
@@ -3229,6 +3266,14 @@ void AShooterCharacter::RestoreArmor(float Amount)
 
 void AShooterCharacter::Die()
 {
+	// Cancel any in-progress ability cast. The character is REUSED on respawn (not destroyed),
+	// so AbilityComponent::EndPlay never runs and bIsCasting would carry a stuck cast into the
+	// next life — locking firing / ability activation / weapon swap permanently.
+	if (AbilityComponent && AbilityComponent->IsCasting())
+	{
+		AbilityComponent->CancelCast();
+	}
+
 	if (IsValid(CurrentWeapon))
 	{
 		CurrentWeapon->DeactivateWeapon();
@@ -4266,11 +4311,31 @@ void AShooterCharacter::BeginFinisherCinematic()
 		Move->StopMovementImmediately();
 	}
 	DisableInput(nullptr);
+
+	// Kill ALL camera animation — the cine camera (Camera Cuts) owns the view during the finisher,
+	// so any procedural bob / shake / focus would only fight it and cause the jitter on entry.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StopAllCameraShakes(true);
+		}
+	}
+	if (UCameraShakeComponent* Shake = GetCameraShake())
+	{
+		Shake->SetComponentTickEnabled(false);
+	}
 }
 
 void AShooterCharacter::EndFinisherCinematic(FVector ExitLocation)
 {
 	UE_LOG(LogTemp, Warning, TEXT("[FINISHER] EndFinisherCinematic — teleport + reveal + fade in"));
+
+	// Restore the camera animation disabled in BeginFinisherCinematic.
+	if (UCameraShakeComponent* Shake = GetCameraShake())
+	{
+		Shake->SetComponentTickEnabled(true);
+	}
 
 	// Under the sequence's black fade: move to the exit point and reveal the player body/weapon.
 	SetActorLocation(ExitLocation, /*bSweep=*/ false, nullptr, ETeleportType::TeleportPhysics);

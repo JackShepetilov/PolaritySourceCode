@@ -11,6 +11,7 @@
 #include "GameFramework/PlayerStart.h"
 #include "ShooterCharacter.h"
 #include "ShooterBulletCounterUI.h"
+#include "AbilityResourceBar.h"
 #include "MeleeAttackComponent.h"
 #include "Polarity.h"
 #include "TutorialSubsystem.h"
@@ -63,6 +64,33 @@ void AShooterPlayerController::BeginPlay()
 
 			UE_LOG(LogPolarity, Error, TEXT("Could not spawn bullet counter widget."));
 
+		}
+
+		// create the ability/resource bar widget and add it to the screen
+		if (AbilityResourceBarClass)
+		{
+			AbilityResourceBar = CreateWidget<UAbilityResourceBar>(this, AbilityResourceBarClass);
+			if (AbilityResourceBar)
+			{
+				AbilityResourceBar->AddToPlayerScreen(0);
+
+				// OnPossess for the starting pawn usually fires BEFORE this BeginPlay, so the bar
+				// didn't exist yet to bind there. If we're already possessing a character, bind now.
+				// InitializeFor is idempotent (unbinds first), so the OnPossess path stays safe for respawns.
+				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[ABILITY_BAR] BeginPlay: binding bar to already-possessed pawn %s"), *GetNameSafe(PossessedCharacter));
+					AbilityResourceBar->InitializeFor(PossessedCharacter);
+				}
+			}
+			else
+			{
+				UE_LOG(LogPolarity, Error, TEXT("Could not spawn ability/resource bar widget."));
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ABILITY_BAR] AbilityResourceBarClass is NOT set on ShooterPlayerController -> bar will never be created. Set it on the BP_ShooterPlayerController."));
 		}
 
 		// Setup IMCs and key remapping
@@ -231,6 +259,13 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		if (BulletCounterUI)
 		{
 			BulletCounterUI->BP_BindToCharacter(ShooterCharacter);
+		}
+
+		// Bind the ability/resource bar to the (re)possessed character. InitializeFor unbinds the
+		// previous character first, so this is respawn-safe.
+		if (AbilityResourceBar)
+		{
+			AbilityResourceBar->InitializeFor(ShooterCharacter);
 		}
 
 		// force update the life bar + armor bar

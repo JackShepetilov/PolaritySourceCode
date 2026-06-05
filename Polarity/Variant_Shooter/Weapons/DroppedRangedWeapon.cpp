@@ -289,6 +289,10 @@ void ADroppedRangedWeapon::CompletePull()
 
 	// Check if player already has a weapon of this class — if so, skip (no stacking for ranged)
 	AShooterWeapon* ExistingWeapon = Player->FindWeaponOfType(WeaponClass);
+
+	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] CompletePull (DROPPED): WeaponClass=%s, ExistingWeapon=%s, SpawnedBulletCount=%d"),
+		*GetNameSafe(WeaponClass), *GetNameSafe(ExistingWeapon), SpawnedBulletCount);
+
 	if (!ExistingWeapon)
 	{
 		// Grant a new weapon (permanent) with animated lower→swap→raise transition.
@@ -356,8 +360,23 @@ void ADroppedRangedWeapon::CompletePull()
 		}
 		else
 		{
-			UE_LOG(LogTemp, Log, TEXT("[DroppedRangedWeapon] Player already has %s — skipping grant (MaxCopies=%d, classMatch=%d)"),
-				*WeaponClass->GetName(), MaxCopies, bClassMatchAtPullStart ? 1 : 0);
+			// Duplicate pickup of an already-owned class: instead of discarding the drop,
+			// top up the existing weapon's magazine to full. SetBulletCount clamps to [0, MagazineSize].
+			const int32 MaxAmmo = ExistingWeapon->GetMagazineSize();
+			const int32 BeforeAmmo = ExistingWeapon->GetBulletCount();
+
+			ExistingWeapon->SetBulletCount(MaxAmmo);
+
+			// Refresh the ammo HUD only if this is the weapon currently in hand
+			if (ExistingWeapon == Player->GetCurrentWeapon())
+			{
+				Player->UpdateWeaponHUD(ExistingWeapon->GetBulletCount(), MaxAmmo);
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] DROPPED duplicate of %s — magazine topped up %d -> %d (MaxCopies=%d, classMatch=%d, IsCurrent=%d)"),
+				*WeaponClass->GetName(), BeforeAmmo, ExistingWeapon->GetBulletCount(),
+				MaxCopies, bClassMatchAtPullStart ? 1 : 0,
+				(ExistingWeapon == Player->GetCurrentWeapon()) ? 1 : 0);
 		}
 	}
 

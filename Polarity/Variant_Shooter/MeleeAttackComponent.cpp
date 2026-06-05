@@ -115,6 +115,49 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	}
 }
 
+// Side-effect-free boss-finisher detection that reuses the lunge cone (range + half-angle from the
+// camera forward). Returns a boss currently in its finisher phase inside the cone, or null.
+static ABossCharacter* FindFinisherBossInCone(UWorld* World, AActor* Owner, const FVector& Start, const FVector& Forward, float Range, float ConeHalfAngleDeg)
+{
+	if (!World || !Owner)
+	{
+		return nullptr;
+	}
+	const float CosThreshold = FMath::Cos(FMath::DegreesToRadians(ConeHalfAngleDeg));
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(Owner);
+
+	TArray<FOverlapResult> Overlaps;
+	World->OverlapMultiByChannel(Overlaps, Start, FQuat::Identity, ECC_Pawn,
+		FCollisionShape::MakeSphere(Range), QueryParams);
+
+	ABossCharacter* Best = nullptr;
+	float BestDot = CosThreshold;
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		ABossCharacter* Boss = Cast<ABossCharacter>(Overlap.GetActor());
+		if (!Boss || !Boss->IsInFinisherPhase())
+		{
+			continue;
+		}
+		FVector ToTarget = Boss->GetActorLocation() - Start;
+		const float Dist = ToTarget.Size();
+		if (Dist <= KINDA_SMALL_NUMBER || Dist > Range)
+		{
+			continue;
+		}
+		ToTarget /= Dist;
+		const float Dot = FVector::DotProduct(Forward, ToTarget);
+		if (Dot >= BestDot)
+		{
+			BestDot = Dot;
+			Best = Boss;
+		}
+	}
+	return Best;
+}
+
 bool UMeleeAttackComponent::StartAttack()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === StartAttack ENTER === State=%d, bInputLocked=%d, bExternallyDisabled=%d, MeleeCharges=%d, bIsDropKick=%d, bHasHitThisAttack=%d"),
@@ -149,6 +192,19 @@ bool UMeleeAttackComponent::StartAttack()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED by CanAttack=false (no dropkick interrupt path)"));
 		return false;
+	}
+
+	// ==================== Boss Finisher Trigger (start of swing) ====================
+	// If a finisher-phase boss is within the lunge cone/range as the swing starts, run the cinematic
+	// finisher INSTEAD of a melee attack. Returning here fully cancels the swing — none of the attack
+	// machinery below runs, so there is no animation, damage, hitmarker, lunge, or swing camera shake.
+	if (OwnerCharacter)
+	{
+		if (ABossCharacter* FinisherBoss = FindFinisherBossInCone(GetWorld(), OwnerCharacter, GetTraceStart(), GetTraceDirection(), Settings.LungeRange, Settings.LungeConeHalfAngle))
+		{
+			FinisherBoss->ExecuteFinisher(OwnerCharacter);
+			return true;
+		}
 	}
 
 	// Lock input immediately to prevent spam
@@ -992,17 +1048,9 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 		HitActor = ConvertedProp;
 	}
 
-	// ==================== Boss Finisher Check ====================
-	// If hitting a boss in finisher phase, execute the finisher instead of normal damage
-	if (ABossCharacter* Boss = Cast<ABossCharacter>(HitActor))
-	{
-		if (Boss->IsInFinisherPhase())
-		{
-			Boss->ExecuteFinisher(OwnerCharacter);
-			// Return a symbolic damage value for UI/feedback purposes
-			return Settings.BaseDamage;
-		}
-	}
+	// Boss finisher now triggers at the START of the swing (lunge-cone detection in StartMagnetism),
+	// not on a successful hit. A finisher-phase boss is invulnerable in TakeDamage, so a stray hit
+	// landing here is simply a no-op.
 
 	float TotalDamage = 0.0f;
 	FVector TraceDir = GetTraceDirection();

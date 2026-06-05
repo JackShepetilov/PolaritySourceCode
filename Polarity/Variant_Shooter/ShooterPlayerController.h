@@ -11,6 +11,7 @@ class UInputMappingContext;
 class AShooterCharacter;
 class UShooterBulletCounterUI;
 class UUpgradeChoiceWidget;
+class UAbilityResourceBar;
 
 /**
  *  Simple PlayerController for a first person shooter game
@@ -53,6 +54,14 @@ protected:
 
 	/** Pointer to the bullet counter UI widget */
 	TObjectPtr<UShooterBulletCounterUI> BulletCounterUI;
+
+	/** Type of ability/resource bar widget to spawn (WBP_AbilityResourceBar). */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
+	TSubclassOf<UAbilityResourceBar> AbilityResourceBarClass;
+
+	/** Pointer to the ability/resource bar widget. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAbilityResourceBar> AbilityResourceBar;
 
 	// ==================== Roguelite Run Widgets ====================
 

@@ -15,9 +15,12 @@
 
 # Claude temp files
 tmpclaude-*
+.claude/scheduled_tasks.lock
+.claude/worktrees/
 
 # Windows reserved filename
 nul
 
 # Large binary docs
 *.pptx
+*.mp4

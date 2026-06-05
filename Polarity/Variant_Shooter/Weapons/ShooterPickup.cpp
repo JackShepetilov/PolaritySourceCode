@@ -70,6 +70,12 @@ void AShooterPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AShooterPickup::OnOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] ShooterPickup OnOverlap: Pickup=%s, WeaponClass=%s, OtherActor=%s, IsHolder=%d"),
+		*GetName(),
+		*GetNameSafe(WeaponClass),
+		*GetNameSafe(OtherActor),
+		Cast<IShooterWeaponHolder>(OtherActor) ? 1 : 0);
+
 	// have we collided against a weapon holder?
 	if (IShooterWeaponHolder* WeaponHolder = Cast<IShooterWeaponHolder>(OtherActor))
 	{

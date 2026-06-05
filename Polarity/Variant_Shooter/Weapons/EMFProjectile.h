@@ -134,6 +134,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
 	float MaxHomingAccel = 60000.0f;
 
+	/** Actor tag that marks non-NPC actors as eligible homing targets (e.g. training dummies, props).
+	 *  NPC with charge are always eligible — this tag is an additional opt-in for anything else. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming"))
+	FName HomingTargetTag = FName("HomingTarget");
+
+	/** Virtual charge used for scoring tagged targets that have no UEMF_FieldComponent.
+	 *  Acts as if the target has this much opposite charge for homing purposes.
+	 *  Real charged NPCs with higher charge will still be preferred. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing", meta = (EditCondition = "bUseChargeHoming", ClampMin = "0.0"))
+	float HomingTagVirtualCharge = 5.0f;
+
 	/** Draw debug for homing target acquisition (line to locked target + accel/charge readout) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Homing")
 	bool bDrawHomingDebug = false;
@@ -276,11 +287,13 @@ protected:
 	/** Update single-target charge-scaled homing (called from Tick when bUseChargeHoming). */
 	void UpdateChargeHoming(float DeltaTime);
 
-	/** Select the best homing target by charge-weighted cone score, with stickiness toward the current target. */
-	AShooterNPC* SelectHomingTarget() const;
+	/** Select the best homing target by charge-weighted cone score, with stickiness toward the current target.
+	 *  Accepts AShooterNPC (by charge) and any actor with HomingTargetTag (by virtual charge). */
+	AActor* SelectHomingTarget() const;
 
-	/** Currently locked homing target (weak — target may die or be pooled out from under us). */
-	TWeakObjectPtr<AShooterNPC> CurrentHomingTarget;
+	/** Currently locked homing target (weak — target may die or be pooled out from under us).
+	 *  Can be AShooterNPC or any tagged actor (e.g. training dummy). */
+	TWeakObjectPtr<AActor> CurrentHomingTarget;
 
 	/** Time accumulator since the last retarget evaluation. */
 	float TimeSinceRetarget = 0.0f;

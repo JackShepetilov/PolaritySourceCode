@@ -197,9 +197,43 @@ void UAbilityHandler_Burst::EnterCastFinish()
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Burst::EnterCastFinish: montage='%s' len=%.3f"),
 		*CachedBurstDef->CastFinishMontage->GetName(), Length);
 
+	// If the finish montage failed to play (no AnimInstance, length 0, etc.) the end delegate
+	// below would never fire and the cast would deadlock with bIsCasting stuck true. Complete now.
+	if (Length <= 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Burst::EnterCastFinish: montage failed to play (len<=0) -> complete immediately"));
+		ResetToIdle();
+		NotifyAbilityComplete();
+		return;
+	}
+
 	// Use natural end for the final montage (nothing to crossfade into).
 	BindFPMontageEnd(CachedBurstDef->CastFinishMontage,
 		GET_FUNCTION_NAME_CHECKED(UAbilityHandler_Burst, OnCastFinishMontageEnded));
+
+	// Deadlock safety net. The whole cast's completion hinges on this single montage end
+	// delegate. If it never fires -- e.g. a weapon swap / mesh re-init replaces the FP
+	// AnimInstance while CastFinish is playing, or the montage is force-stopped without an end
+	// callback -- bIsCasting would stay true forever (firing / ability / weapon-swap all locked).
+	// Schedule a fallback that force-completes shortly after the montage's expected end. Reuses
+	// TransitionTimerHandle (idle during CastFinish); the normal OnCastFinishMontageEnded path
+	// runs ResetToIdle() which clears this timer, so the fallback only fires if the delegate didn't.
+	if (UWorld* World = GetWorld())
+	{
+		const float FallbackDelay = Length + 0.5f;
+		TWeakObjectPtr<UAbilityHandler_Burst> WeakThis(this);
+		FTimerDelegate FallbackDelegate = FTimerDelegate::CreateLambda([WeakThis]()
+		{
+			UAbilityHandler_Burst* Self = WeakThis.Get();
+			if (Self && Self->Phase == EBurstPhase::CastFinish)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Burst::CastFinish watchdog fired -- end delegate never came, force-completing"));
+				Self->ResetToIdle();
+				Self->NotifyAbilityComplete();
+			}
+		});
+		World->GetTimerManager().SetTimer(TransitionTimerHandle, FallbackDelegate, FallbackDelay, false);
+	}
 }
 
 void UAbilityHandler_Burst::OnCastFinishMontageEnded(UAnimMontage* Montage, bool bInterrupted)
