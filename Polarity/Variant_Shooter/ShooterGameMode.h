@@ -8,6 +8,7 @@
 
 class UShooterUI;
 class AShooterCharacter;
+class UUserWidget;
 
 /**
  *  Simple GameMode for a first person shooter game
@@ -34,6 +35,31 @@ protected:
 
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
+
+	/** Cleans up the run-start gate's viewport delegate */
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	// ===== Run-start loading gate =====
+
+	/** Full-screen black widget shown from the first frame until the intro reveals the world. Assign in BP. */
+	UPROPERTY(EditAnywhere, Category = "Run Start")
+	TSubclassOf<UUserWidget> LoadingCoverClass;
+
+	/** Live instance of the loading cover. */
+	UPROPERTY(Transient)
+	TObjectPtr<UUserWidget> LoadingCoverWidget;
+
+	/** Ensures the run is started exactly once. */
+	bool bRunStartTriggered = false;
+
+	/** Handle for the first-rendered-frame hook. */
+	FDelegateHandle ViewportRenderedHandle;
+
+	/** Latched on the first actually-rendered frame after the level loads. */
+	void OnFirstViewportRendered();
+
+	/** Called once the world is confirmed loaded and drawn; starts the run. */
+	void HandleWorldReady();
 
 public:
 
@@ -62,4 +88,12 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Checkpoint")
 	void RestartLevel();
+
+	/** Removes the black loading cover. Call from BP once the intro fade has revealed the world. */
+	UFUNCTION(BlueprintCallable, Category = "Run Start")
+	void DismissLoadingCover();
+
+	/** Fired right after the run starts; implement in BP to play the intro Level Sequence + launch. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Run Start")
+	void BP_OnRunStartReady();
 };
