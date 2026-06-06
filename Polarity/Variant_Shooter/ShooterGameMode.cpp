@@ -126,7 +126,11 @@ void AShooterGameMode::PerformRunLaunch()
 		return;
 	}
 
-	Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), RunMarker->GetActorRotation(),
+	// Keep the capsule upright: take ONLY the marker's yaw for facing. The marker's pitch/roll is
+	// meant to aim the toss arc and lives in the launch VELOCITY (GetLaunchVelocity uses the marker's
+	// forward vector) — it must never tilt the character's body, or the mesh/camera break.
+	const FRotator UprightRot(0.f, RunMarker->GetActorRotation().Yaw, 0.f);
+	Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), UprightRot,
 		false, nullptr, ETeleportType::TeleportPhysics);
 	Character->BeginRunLaunch(RunMarker->GetLaunchVelocity());
 }
