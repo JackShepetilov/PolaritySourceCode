@@ -10,6 +10,7 @@ class UShooterUI;
 class AShooterCharacter;
 class UUserWidget;
 class ARunLaunchPoint;
+class FViewport;
 
 /**
  *  Simple GameMode for a first person shooter game
@@ -61,8 +62,8 @@ protected:
 	/** Handle for the first-rendered-frame hook. */
 	FDelegateHandle ViewportRenderedHandle;
 
-	/** Latched on the first actually-rendered frame after the level loads. */
-	void OnFirstViewportRendered();
+	/** Latched on the first actually-rendered frame after the level loads. (UE5.6 passes the FViewport*.) */
+	void OnFirstViewportRendered(FViewport* Viewport);
 
 	/** Called once the world is confirmed loaded and drawn; starts the run. */
 	void HandleWorldReady();

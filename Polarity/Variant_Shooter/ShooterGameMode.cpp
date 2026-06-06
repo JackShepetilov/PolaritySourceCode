@@ -69,7 +69,7 @@ void AShooterGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void AShooterGameMode::OnFirstViewportRendered()
+void AShooterGameMode::OnFirstViewportRendered(FViewport* /*Viewport*/)
 {
 	// Unbind so we only react to the FIRST drawn frame.
 	if (GEngine && GEngine->GameViewport && ViewportRenderedHandle.IsValid())
