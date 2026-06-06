@@ -1705,10 +1705,29 @@ void AShooterCharacter::Landed(const FHitResult& Hit)
 		Apex->AirControl = SavedAirControl;
 	}
 
-	// Hand the player their starting weapon with the normal animated draw.
+	// Hand the player their starting weapon. AddWeaponClassAnimated equips instantly when the player
+	// is unarmed (no draw), so play the procedural weapon-raise on top — the same FP-mesh rise the
+	// melee "show weapon" recovery uses (lerp up from the lowered position with ease-out).
 	if (StartingWeaponClass)
 	{
-		AddWeaponClassAnimated(StartingWeaponClass);
+		AShooterWeapon* Equipped = AddWeaponClassAnimated(StartingWeaponClass);
+		if (Equipped && CurrentWeapon == Equipped && !bIsWeaponSwitchInProgress)
+		{
+			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+			{
+				WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
+				// Snap to the lowered position so the raise lerp visibly brings it up from below.
+				const FVector RaiseAnchor = FirstPersonMeshBaseLocation + CurrentWeapon->FirstPersonMeshOffset;
+				FPMesh->SetRelativeLocation(RaiseAnchor - FVector(0.0f, 0.0f, 100.0f));
+			}
+
+			// Raise-only phase (skip the lower): identical motion to the weapon-switch / melee raise.
+			bIsWeaponSwitchInProgress = true;
+			bIsWeaponLowering = false;
+			bWeaponSwitchPausedAtBottom = false;
+			WeaponSwitchProgress = 0.0f;
+			PlayWeaponSwitchSound();
+		}
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] Run-launch landed -> grant starting weapon"));
