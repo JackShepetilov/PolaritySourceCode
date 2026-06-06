@@ -10,9 +10,12 @@
 class UArrowComponent;
 
 /**
- * Editor-placed marker for the opening sea-toss. The player is teleported to this actor and
- * launched along its forward direction at LaunchSpeed. Place it above the water and pitch the
- * whole actor up / toward the island to author the arc (the cyan arrow shows the launch vector).
+ * Editor-placed marker that tags a level as a "run map" and carries its per-map run data.
+ * The GameMode finds it on BeginPlay; its presence = run map (vs. menu/hub). On the world-ready
+ * event the run-start sequence fires with this actor's ArenaIndex / bLaunchFromSea. When
+ * bLaunchFromSea is set (first map of a run), the player is teleported here and tossed along the
+ * actor's forward direction at LaunchSpeed (pitch the actor up / toward the island to author the
+ * arc; the cyan arrow shows the launch vector).
  */
 UCLASS()
 class POLARITY_API ARunLaunchPoint : public AActor
@@ -22,7 +25,15 @@ class POLARITY_API ARunLaunchPoint : public AActor
 public:
 	ARunLaunchPoint();
 
-	/** Launch speed (uu/s) applied along the actor's forward direction. */
+	/** Which arena this map represents; passed to RunSubsystem::EnterArena on the world-ready event. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run")
+	int32 ArenaIndex = 0;
+
+	/** First map of a run (player is tossed out of the sea). False on later maps = normal spawn, no toss. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run")
+	bool bLaunchFromSea = true;
+
+	/** Launch speed (uu/s) applied along the actor's forward direction (used when bLaunchFromSea). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Launch")
 	float LaunchSpeed = 3000.f;
 

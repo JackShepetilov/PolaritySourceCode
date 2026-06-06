@@ -24,9 +24,17 @@ void AShooterGameMode::BeginPlay()
 	ShooterUI->AddToViewport(0);
 
 	// ===== Run-start loading gate =====
-	// At BeginPlay the level is loaded but the first frame is not yet rendered, and
-	// textures/shaders may still be streaming in. We cover the viewport with a black
-	// widget from frame 0, then start the run only after the world has actually drawn.
+	// Run maps are identified by a RunLaunchPoint marker. On non-run maps (menu/hub) there is none,
+	// so the gate stays completely idle: no cover, no run-start sequence.
+	RunMarker = Cast<ARunLaunchPoint>(UGameplayStatics::GetActorOfClass(GetWorld(), ARunLaunchPoint::StaticClass()));
+	if (!RunMarker)
+	{
+		return;
+	}
+
+	// At BeginPlay the level is loaded but the first frame is not yet rendered, and textures/shaders
+	// may still be streaming in. We cover the viewport from frame 0, then fire the run-start sequence
+	// only after the world has actually drawn.
 
 	// 1. Cover the screen immediately so the player never sees the black/unstreamed frames.
 	if (LoadingCoverClass)
@@ -85,7 +93,7 @@ void AShooterGameMode::OnFirstViewportRendered(FViewport* /*Viewport*/)
 
 void AShooterGameMode::HandleWorldReady()
 {
-	if (bRunStartTriggered)
+	if (bRunStartTriggered || !RunMarker)
 	{
 		return;
 	}
@@ -95,33 +103,19 @@ void AShooterGameMode::HandleWorldReady()
 	// required ULevelStreaming sublevel reports OnLevelShown. All sublevels are currently
 	// Always Loaded, so they are guaranteed present here.
 
-	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready -> StartRun"));
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready -> BP_OnRunStartReady (arena=%d, toss=%d)"),
+		RunMarker->ArenaIndex, RunMarker->bLaunchFromSea ? 1 : 0);
 
-	if (UGameInstance* GI = GetGameInstance())
-	{
-		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>())
-		{
-			Run->StartRun();
-		}
-	}
-
-	// Toss the player out of the sea (unless BP wants to time it with the intro sequence).
-	if (bAutoLaunchOnReady)
-	{
-		PerformRunLaunch();
-	}
-
-	// Let Blueprint play the intro Level Sequence (fade) + reveal.
-	BP_OnRunStartReady();
+	// Blueprint owns the run-subsystem sequence (stream overlay, configs, StartRun, EnterArena) and the
+	// intro fade. It calls PerformRunLaunch() itself when bLaunchFromSea is set.
+	BP_OnRunStartReady(RunMarker->ArenaIndex, RunMarker->bLaunchFromSea);
 }
 
 void AShooterGameMode::PerformRunLaunch()
 {
-	ARunLaunchPoint* Point = Cast<ARunLaunchPoint>(
-		UGameplayStatics::GetActorOfClass(GetWorld(), ARunLaunchPoint::StaticClass()));
-	if (!Point)
+	if (!RunMarker)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: no ARunLaunchPoint in level"));
+		UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: no RunLaunchPoint marker"));
 		return;
 	}
 
@@ -132,9 +126,9 @@ void AShooterGameMode::PerformRunLaunch()
 		return;
 	}
 
-	Character->SetActorLocationAndRotation(Point->GetActorLocation(), Point->GetActorRotation(),
+	Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), RunMarker->GetActorRotation(),
 		false, nullptr, ETeleportType::TeleportPhysics);
-	Character->BeginRunLaunch(Point->GetLaunchVelocity());
+	Character->BeginRunLaunch(RunMarker->GetLaunchVelocity());
 }
 
 void AShooterGameMode::DismissLoadingCover()

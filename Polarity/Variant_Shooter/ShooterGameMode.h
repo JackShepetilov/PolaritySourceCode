@@ -51,10 +51,9 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> LoadingCoverWidget;
 
-	/** If true, the sea-toss launch fires automatically when the world is ready. Set false to
-	 *  trigger it from BP (e.g. timed with the intro Level Sequence) via PerformRunLaunch(). */
-	UPROPERTY(EditAnywhere, Category = "Run Start")
-	bool bAutoLaunchOnReady = true;
+	/** The run-map marker found at BeginPlay; null on non-run maps (then the gate stays idle). */
+	UPROPERTY(Transient)
+	TObjectPtr<ARunLaunchPoint> RunMarker;
 
 	/** Ensures the run is started exactly once. */
 	bool bRunStartTriggered = false;
@@ -104,7 +103,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void DismissLoadingCover();
 
-	/** Fired right after the run starts; implement in BP to play the intro Level Sequence + launch. */
+	/** Fired once the world is loaded & the first frame is drawn (run maps only). Implement in BP to run
+	 *  the run-start sequence: stream overlay; if !RunSubsystem.IsRunActive -> set configs + StartRun;
+	 *  EnterArena(ArenaIndex); if bLaunchFromSea -> PerformRunLaunch(); then fade in + DismissLoadingCover(). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Run Start")
-	void BP_OnRunStartReady();
+	void BP_OnRunStartReady(int32 ArenaIndex, bool bLaunchFromSea);
 };
