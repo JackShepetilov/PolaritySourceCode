@@ -13,6 +13,7 @@
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/GameViewportClient.h"
+#include "ContentStreaming.h"
 #include "TimerManager.h"
 
 void AShooterGameMode::BeginPlay()
@@ -99,11 +100,17 @@ void AShooterGameMode::HandleWorldReady()
 	}
 	bRunStartTriggered = true;
 
-	// TODO (when streaming sublevels are added): before this point, wait until every
-	// required ULevelStreaming sublevel reports OnLevelShown. All sublevels are currently
-	// Always Loaded, so they are guaranteed present here.
+	// The first rendered frame is NOT "the black screen is gone": in standalone/packaged the engine
+	// keeps showing black while textures/meshes stream in, yet the viewport already draws (black) and
+	// fires OnViewportRendered. So force all wanting resources to stream in NOW and block until done
+	// (bounded, so we never hard-hang). We're behind the black cover, so this hitch is invisible — and
+	// it guarantees the toss plays on an actually-visible scene instead of behind the loading black.
+	IStreamingManager::Get().StreamAllResources(/*TimeLimit*/ 5.0f);
 
-	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready -> BP_OnRunStartReady (arena=%d, toss=%d)"),
+	// TODO (when streaming sublevels are added): also wait until every required ULevelStreaming
+	// sublevel reports OnLevelShown. All sublevels are currently Always Loaded, so they're present here.
+
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready (resources streamed) -> BP_OnRunStartReady (arena=%d, toss=%d)"),
 		RunMarker->ArenaIndex, RunMarker->bLaunchFromSea ? 1 : 0);
 
 	// Blueprint owns the run-subsystem sequence (stream overlay, configs, StartRun, EnterArena) and the
