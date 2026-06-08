@@ -146,9 +146,10 @@ public:
 	void SetState(EAntennaState NewState);
 
 	/** Try to activate the antenna right now. No-op if it's not in an Available state.
-	 *  Called by the button-press handler and exposed for BP scripted activations. */
+	 *  Called by the button-press handler and exposed for BP scripted activations.
+	 *  Virtual so subclasses (e.g. AGateAntenna) can intercept presses while locked. */
 	UFUNCTION(BlueprintCallable, Category = "Antenna")
-	void TryActivate();
+	virtual void TryActivate();
 
 	/** Resolves the dialogue choice for the current distance-to-next-antenna and plays it
 	 *  through the SubtitleSubsystem. Called automatically inside TryActivate's success path. */

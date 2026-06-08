@@ -336,6 +336,7 @@ bool UXPSubsystem::WasKillCausedByPlayer(AActor* DamageCauser) const
 //   polarity.xp.show
 //   polarity.run.start
 //   polarity.run.enterarena 0
+//   polarity.run.antennas 5
 
 namespace XPDebugCommands
 {
@@ -434,6 +435,45 @@ namespace XPDebugCommands
 		if (!Run) return;
 		const int32 Idx = (Args.Num() > 0) ? FCString::Atoi(*Args[0]) : 0;
 		Run->EnterArena(Idx);
+	}
+
+	static void CmdRunAntennas(const TArray<FString>& Args, UWorld* World)
+	{
+		URunSubsystem* Run = GetRun(World);
+		if (!Run) { UE_LOG(LogTemp, Warning, TEXT("RunSubsystem not found")); return; }
+
+		// No arg → just print the current count.
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] Activated antennas this run: %d (run %s)"),
+				Run->GetActivatedAntennaCount(),
+				Run->IsRunActive() ? TEXT("ACTIVE") : TEXT("INACTIVE"));
+			return;
+		}
+
+		if (!Run->IsRunActive())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] Run not active — call polarity.run.start first"));
+			return;
+		}
+
+		const int32 Target  = FCString::Atoi(*Args[0]);
+		const int32 Current = Run->GetActivatedAntennaCount();
+		if (Target <= Current)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] Count is already %d; this cmd only raises it. Use polarity.run.start to reset to 0 first."), Current);
+			return;
+		}
+
+		// Drive it up through the real path so OnAntennaCountChanged fires each step
+		// and any AGateAntenna in the world unlocks exactly as it would in real play.
+		const int32 Delta = Target - Current;
+		for (int32 i = 0; i < Delta; ++i)
+		{
+			Run->RegisterAntennaActivated();
+		}
+		UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] cmd: antennas %d -> %d (+%d)"),
+			Current, Run->GetActivatedAntennaCount(), Delta);
 	}
 
 	// ==================== Upgrade commands ====================
@@ -590,6 +630,11 @@ static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunEnterArena(
 	TEXT("polarity.run.enterarena"),
 	TEXT("Enter arena by index (re-binds NPC death handlers). Usage: polarity.run.enterarena [idx=0]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunEnterArena));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunAntennas(
+	TEXT("polarity.run.antennas"),
+	TEXT("Print or raise the run's activated-antenna count (gates the boss path). Usage: polarity.run.antennas [N]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunAntennas));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityUpgradeGrant(
 	TEXT("polarity.upgrade.grant"),

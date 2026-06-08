@@ -239,6 +239,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Tutorial|Progress")
 	void ResetAllProgress();
 
+	/**
+	 * Record that a HUD ability-bar entry category (e.g. "barfirst.ability") is being shown.
+	 * @return true only the FIRST time this key is seen this session — used by the ability bar to
+	 *         trigger a one-time "first acquisition" celebration animation. Per-session
+	 *         (GameInstance lifetime), matching CompletedTutorials semantics (no save system yet).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tutorial|Progress")
+	bool MarkBarEntryFirstShownIfNew(FName EntryKey);
+
 	// ==================== Input Icon Lookup ====================
 
 	/**
@@ -334,6 +343,10 @@ protected:
 
 	/** Set of completed tutorial IDs */
 	TSet<FName> CompletedTutorials;
+
+	/** HUD ability-bar entry categories already shown once this session (drives the one-time
+	 *  first-acquisition celebration). Per-session, like CompletedTutorials. */
+	TSet<FName> EverShownBarEntries;
 
 	// ---- Multi-hint stacking ----
 

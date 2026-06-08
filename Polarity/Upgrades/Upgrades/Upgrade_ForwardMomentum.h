@@ -42,8 +42,13 @@ protected:
 
 	virtual void OnUpgradeActivated() override;
 	virtual float GetDamageMultiplier(AActor* Target) const override;
+	virtual float GetMeleeDamageMultiplier(AActor* Target) const override;
 
 private:
+
+	/** Shared momentum formula used by BOTH the hitscan and melee multiplier hooks.
+	 *  Returns 1.0 when no bonus/penalty applies; caches LastMomentumMultiplier. */
+	float ComputeMomentumMultiplier(AActor* Target) const;
 
 	/** Cached pointer to our typed definition */
 	TWeakObjectPtr<UUpgradeDefinition_ForwardMomentum> DefMomentum;

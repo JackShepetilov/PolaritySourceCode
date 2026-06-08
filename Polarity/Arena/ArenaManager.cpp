@@ -39,6 +39,7 @@
 #include "EngineUtils.h"
 #include "ArenaAntenna.h"
 #include "DeferredUpgradeQueueSubsystem.h"
+#include "Polarity/Variant_Shooter/Run/RunSubsystem.h"
 
 AArenaManager::AArenaManager()
 {
@@ -2940,6 +2941,17 @@ void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("[UPGRADE_DEBUG] ArenaManager::HandleAntennaActivated — DeferredUpgradeQueueSubsystem NOT FOUND"));
+	}
+
+	// Count this activation toward the run-wide total (gates the boss path in the hub).
+	// One antenna activates at most once per run, so no de-dup needed here.
+	if (URunSubsystem* Run = GetGameInstance() ? GetGameInstance()->GetSubsystem<URunSubsystem>() : nullptr)
+	{
+		Run->RegisterAntennaActivated();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RUN_DEBUG] ArenaManager::HandleAntennaActivated — RunSubsystem NOT FOUND, antenna not counted"));
 	}
 
 	OnAntennaActivated.Broadcast(Antenna);

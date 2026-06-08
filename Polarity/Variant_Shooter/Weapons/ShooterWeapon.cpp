@@ -35,6 +35,7 @@
 #include "EMFPhysicsProp.h"
 #include "Foliage/FoliageConversionLibrary.h"
 #include "Upgrades/UpgradeManagerComponent.h"
+#include "EnemyBeamBoltSubsystem.h"
 
 namespace
 {
@@ -1286,6 +1287,43 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
 		PawnHit, Start, PawnTraceEnd, PawnObjectParams, QueryParams);
 
+	// --- Always fire a dodgeable traveling BOLT (down the aim line) instead of an instant hitscan ---
+	// EVERY enemy hitscan shot becomes a projectile-like bolt travelling down the aim line at
+	// HitscanBoltSpeed (fast by default). Damage lands only if the player's CURRENT position is
+	// inside the moving window when it passes — so the player can dodge by stepping off the line.
+	// The Low-Health Defense upgrade slows the bolt via the player's EnemyBoltSlowMultiplier
+	// (curve-scaled), making it progressively dodgeable as HP drops.
+	if (AShooterCharacter* TargetPlayer = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)))
+	{
+		const float SpeedMult = FMath::Max(TargetPlayer->GetEnemyBoltSlowMultiplier(), 0.01f);
+		const float EffSpeed = HitscanBoltSpeed * SpeedMult;
+		const float EffVariance = HitscanBoltSpeedVariance * SpeedMult;
+
+		const FVector BoltBeamEnd = bHitWall ? WallHit.ImpactPoint : End;
+		const float RandomSeed = FMath::FRand() * 1000.0f;
+		const float RandSpeed = FMath::Max(EffSpeed + EffVariance * FMath::Sin(RandomSeed), 1.0f);
+
+		if (UEnemyBeamBoltSubsystem* BoltSys = GetWorld() ? GetWorld()->GetSubsystem<UEnemyBeamBoltSubsystem>() : nullptr)
+		{
+			BoltSys->RegisterBolt(this, TargetPlayer, Start, Direction, WallDistance,
+				RandSpeed, HitscanBoltLength, HitscanBoltRadius, EnergyMultiplier);
+		}
+
+		// Tracer matches the bolt exactly (same effective Speed/Variance + RandomSeed pushed to Niagara).
+		SpawnBeamEffect(Start, BoltBeamEnd, EnergyMultiplier,
+			EffSpeed, EffVariance, HitscanBoltLength, RandomSeed);
+
+		if (bHitWall)
+		{
+			SpawnImpactEffect(WallHit);
+		}
+
+		UE_LOG(LogTemp, Verbose, TEXT("[BOLT_DEBUG] Enemy bolt down aim line — speedMult=%.2f randSpeed=%.0f maxDist=%.0f"),
+			SpeedMult, RandSpeed, WallDistance);
+		return; // damage is deferred to the bolt subsystem (dodgeable)
+	}
+	// (No local player resolved → fall through to the instant hitscan path below as a safety fallback.)
+
 	// --- Determine beam endpoint and apply pawn damage ---
 	FVector BeamEnd;
 	bool bPawnWasHit = false;
@@ -1541,7 +1579,8 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 	}
 }
 
-void AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier)
+void AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier,
+	float OverrideBoltSpeed, float OverrideBoltSpeedVariance, float OverrideBoltLength, float OverrideRandomSeed)
 {
 	if (!BeamFX)
 	{
@@ -1567,7 +1606,19 @@ void AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, f
 		BeamComp->SetFloatParameter(FName("Energy"), EnergyMultiplier);
 		BeamComp->SetColorParameter(FName("BeamColor"), BeamColor);
 		BeamComp->SetFloatParameter(FName("Distance"), FVector::Dist(Start, End));
-		BeamComp->SetFloatParameter(FName("RandomSeed"), FMath::FRand() * 1000.0f);
+
+		const float UsedRandomSeed = (OverrideRandomSeed >= 0.0f) ? OverrideRandomSeed : (FMath::FRand() * 1000.0f);
+		BeamComp->SetFloatParameter(FName("RandomSeed"), UsedRandomSeed);
+
+		// Low-HP dodgeable bolt: override the tracer's Speed / SpeedVariance / beamLength so the
+		// visible bolt matches the C++ damage region (UEnemyBeamBoltSubsystem). Requires the enemy
+		// beam Niagara asset to read these as User parameters and feed them into its HLSL node.
+		if (OverrideBoltSpeed >= 0.0f)
+		{
+			BeamComp->SetFloatParameter(FName("Speed"), OverrideBoltSpeed);
+			BeamComp->SetFloatParameter(FName("SpeedVariance"), OverrideBoltSpeedVariance);
+			BeamComp->SetFloatParameter(FName("beamLength"), OverrideBoltLength);
+		}
 		UE_LOG(LogTemp, Warning, TEXT("BeamFX Distance: %.1f, Start: %s, End: %s"), FVector::Dist(Start, End), *Start.ToString(), *End.ToString());
 
 		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½

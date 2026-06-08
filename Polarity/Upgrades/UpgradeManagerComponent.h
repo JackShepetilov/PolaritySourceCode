@@ -11,6 +11,7 @@ class UUpgradeDefinition;
 class UUpgradeComponent;
 class UUpgradeRegistry;
 class AShooterWeapon;
+class UInputAction;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, UUpgradeDefinition*, Definition);
@@ -63,6 +64,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	bool IsUpgradeMaxedOut(UUpgradeDefinition* Definition) const;
 
+	/**
+	 * True if the player already owns an upgrade that is mutually exclusive with Candidate.
+	 * Checked bidirectionally via UUpgradeDefinition::MutuallyExclusiveWith. Used to filter the
+	 * choice pool and to refuse conflicting grants (e.g. the full-HP vs low-HP archetypes).
+	 */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	bool OwnsConflicting(const UUpgradeDefinition* Candidate) const;
+
 	/** Get all acquired upgrade definitions (for UI) */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	TArray<UUpgradeDefinition*> GetAcquiredUpgrades() const;
@@ -78,6 +87,12 @@ public:
 
 	/** Restore upgrades from saved tags (used by checkpoint/save system) */
 	void RestoreUpgradesFromTags(const TArray<FGameplayTag>& Tags, const UUpgradeRegistry* Registry);
+
+	/** Restore upgrades AT their saved levels (run-scoped cross-level carry via URunSubsystem).
+	 *  Removes any owned upgrade not present in the map, then grants/levels each entry up to its
+	 *  stored level. Unlike RestoreUpgradesFromTags, this preserves levels. Does NOT trigger the
+	 *  level-up choice UI (that flow is XP-driven) — it only re-applies the upgrade logic. */
+	void RestoreUpgrades(const TMap<FGameplayTag, int32>& TagToLevel, const UUpgradeRegistry* Registry);
 
 	// ==================== Delegates ====================
 
@@ -152,6 +167,16 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Upgrades|Shared Pool")
 	int32 GetMaxStoredHealthPickups() const { return MaxStoredHealthPickups; }
+
+	/** True if the player currently owns at least one upgrade that consumes the shared pool
+	 *  (UUpgradeDefinition::bUsesStoredHealthPickups). The HUD uses this to gate the heal-charge entry. */
+	UFUNCTION(BlueprintPure, Category = "Upgrades|Shared Pool")
+	bool HasStoredHealthPickupConsumer() const;
+
+	/** Input action that spends the pool for the currently-owned consumer (null if none / not set).
+	 *  Consumers are mutually exclusive, so at most one is owned. Used for the HUD keybind hint. */
+	UFUNCTION(BlueprintPure, Category = "Upgrades|Shared Pool")
+	UInputAction* GetHealSpendInputAction() const;
 
 	/** Increment by 1 (clamped to Max). Returns true if the value actually changed. */
 	UFUNCTION(BlueprintCallable, Category = "Upgrades|Shared Pool")

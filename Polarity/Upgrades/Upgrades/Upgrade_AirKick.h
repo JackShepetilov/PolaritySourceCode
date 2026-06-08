@@ -44,4 +44,10 @@ private:
 
 	/** Check if the prop has no ground within trace distance below it */
 	bool IsPropAirborne(AActor* Prop) const;
+
+	/** True if the NPC's EMF charge magnitude has reached its max (so Air Mail should launch it). */
+	bool IsNPCAtMaxCharge(class AShooterNPC* NPC) const;
+
+	/** Launch a max-charge NPC into the air (reuses AShooterNPC::LaunchIntoAir) + kick feedback. */
+	void LaunchNPC(class AShooterNPC* NPC, class AShooterCharacter* Character, const FVector& HitLocation) const;
 };

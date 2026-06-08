@@ -2969,6 +2969,41 @@ void AShooterNPC::ForceResetCombatState()
 	}
 }
 
+void AShooterNPC::LaunchIntoAir(const FVector& LaunchVelocity)
+{
+	if (bIsDead)
+	{
+		return;
+	}
+
+	// Clear any capture/launch/knockback/stun state first so this works even on already-stunned
+	// enemies. ForceResetCombatState routes through EndKnockbackStun / ExitCapturedState, which
+	// restore GroundFriction to its cached (high) value — so the NPC won't slide on landing
+	// (we deliberately never lower friction here, unlike ApplyKnockback).
+	ForceResetCombatState();
+
+	// Reuse the reverse-channeling throw's launched-state machinery (looping launched montage,
+	// NPC-collision stun, UpdateLaunchedCollision flight policing) — but supply the velocity
+	// directly instead of via the channeling plate. LaunchCharacter gives a proper gravity arc
+	// and Landed handling (same primitive the player uses for the run-start sea-toss).
+	EnterLaunchedState();
+
+	// Respect launched-state immunity: AHumanoidNPC overrides EnterLaunchedState() as a no-op, so
+	// bIsLaunched stays false for them. Only NPCs that actually entered the launched state get the
+	// physical LaunchCharacter arc — otherwise we'd toss a humanoid with raw physics and no
+	// launched anim / NPC-impact stun, contradicting the immunity contract.
+	if (!bIsLaunched)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL_DEBUG] %s LaunchIntoAir skipped — immune to launched state"), *GetName());
+		return;
+	}
+
+	LaunchCharacter(LaunchVelocity, /*bXYOverride=*/true, /*bZOverride=*/true);
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL_DEBUG] %s LaunchIntoAir vel=(%.0f,%.0f,%.0f) speed=%.0f"),
+		*GetName(), LaunchVelocity.X, LaunchVelocity.Y, LaunchVelocity.Z, LaunchVelocity.Size());
+}
+
 void AShooterNPC::EndKnockbackStun()
 {
 	// Never exit stun if permanently stunned

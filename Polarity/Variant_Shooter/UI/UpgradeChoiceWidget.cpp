@@ -137,8 +137,10 @@ void UUpgradeChoiceWidget::RollChoices()
 	const int32 TotalInRegistry = Registry->AllUpgrades.Num();
 	int32 SkippedNull = 0;
 	int32 SkippedMaxed = 0;
+	int32 SkippedConflicts = 0;
 
-	// Pool = every upgrade in the registry that isn't null and isn't already at max level.
+	// Pool = every upgrade in the registry that isn't null, isn't already at max level,
+	// and doesn't conflict with an upgrade the player already owns (mutual exclusion).
 	// No category filter — a single roll can mix Movement / Melee / EMF / Weapon cards.
 	TArray<UUpgradeDefinition*> Pool;
 	Pool.Reserve(TotalInRegistry);
@@ -150,19 +152,36 @@ void UUpgradeChoiceWidget::RollChoices()
 			++SkippedMaxed;
 			continue;
 		}
+		if (Manager && Manager->OwnsConflicting(Def))
+		{
+			++SkippedConflicts;
+			continue;
+		}
 		Pool.Add(Def);
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("[XP_DEBUG] RollChoices: registry=%d -> pool=%d (skipped: null=%d, maxed=%d)"),
-		TotalInRegistry, Pool.Num(), SkippedNull, SkippedMaxed);
+		TEXT("[XP_DEBUG] RollChoices: registry=%d -> pool=%d (skipped: null=%d, maxed=%d, conflicts=%d)"),
+		TotalInRegistry, Pool.Num(), SkippedNull, SkippedMaxed, SkippedConflicts);
 
 	const int32 N = FMath::Min(ChoiceCount, Pool.Num());
-	for (int32 i = 0; i < N; ++i)
+	for (int32 i = 0; i < N && Pool.Num() > 0; ++i)
 	{
 		const int32 Idx = FMath::RandRange(0, Pool.Num() - 1);
-		CurrentChoices.Add(Pool[Idx]);
+		UUpgradeDefinition* Picked = Pool[Idx];
+		CurrentChoices.Add(Picked);
 		Pool.RemoveAtSwap(Idx);
+
+		// Don't also offer an upgrade mutually exclusive with the one just picked — the archetypes
+		// (e.g. full-HP vs low-HP) are an either/or choice, never both on the same screen.
+		if (Picked)
+		{
+			Pool.RemoveAll([Picked](UUpgradeDefinition* Other)
+			{
+				return Other && (Picked->MutuallyExclusiveWith.Contains(Other->UpgradeTag)
+					|| Other->MutuallyExclusiveWith.Contains(Picked->UpgradeTag));
+			});
+		}
 	}
 }
 

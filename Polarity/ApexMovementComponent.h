@@ -373,6 +373,12 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	float DamageSpeedMultiplier = 1.0f;
 
+	/** External speed multiplier driven by upgrades (e.g. the full-HP bonus). 1.0 = no change.
+	 *  Multiplied into GetMaxSpeed() alongside DamageSpeedMultiplier. This is a per-component
+	 *  value (not a shared DataAsset), so an upgrade may write it directly and reset to 1.0 on removal. */
+	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	float ExternalSpeedMultiplier = 1.0f;
+
 	// ==================== EMF ====================
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|EMF")

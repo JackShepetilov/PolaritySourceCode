@@ -26,6 +26,16 @@ void UBarEntryWidget::PlayIntro()
 	BP_PlayIntro();
 }
 
+void UBarEntryWidget::PlayFirstTimeIntro()
+{
+	BP_PlayFirstTimeIntro();
+}
+
+void UBarEntryWidget::SetKeybindHint(const FText& KeyText, UTexture2D* KeyIcon)
+{
+	BP_SetKeybindHint(KeyText, KeyIcon);
+}
+
 float UBarEntryWidget::PlayOutro()
 {
 	return BP_PlayOutro();

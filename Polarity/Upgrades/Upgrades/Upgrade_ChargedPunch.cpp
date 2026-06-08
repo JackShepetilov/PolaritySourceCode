@@ -10,18 +10,17 @@
 #include "Upgrades/UpgradeManagerComponent.h"
 #include "Curves/CurveFloat.h"
 #include "Engine/World.h"
+#include "Engine/OverlapResult.h"
 #include "Engine/DamageEvents.h"
+#include "CollisionShape.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
-#include "NiagaraComponent.h"
 #include "Components/AudioComponent.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "Animation/AnimInstance.h"
+#include "Components/CapsuleComponent.h"
 #include "Animation/AnimMontage.h"
-#include "TimerManager.h"
 
 UUpgrade_ChargedPunch::UUpgrade_ChargedPunch()
 {
@@ -48,11 +47,10 @@ void UUpgrade_ChargedPunch::OnUpgradeActivated()
 	CachedUpgradeManager = Character->GetUpgradeManager();
 	CachedMeleeComp = Character->GetMeleeAttackComponent();
 
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ACTIVATED — MinHold=%.2fs, MaxHold=%.2fs, Drain=%.1f/s, MaxDist=%.0f, MaxBonus=%.1f, Mgr=%s, MeleeComp=%s"),
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ACTIVATED (rise/slam) — MinHold=%.2fs, MaxHold=%.2fs, Drain=%.1f/s, Rise=%.0f/MaxH=%.0f, Buffer=%.2fs, SlamSpeed=%.0f, SlamR=%.0f"),
 		CachedDef->MinHoldTime, CachedDef->MaxHoldTime, CachedDef->PickupsPerSecond,
-		CachedDef->MaxDistance, CachedDef->MaxBonusDamage,
-		CachedUpgradeManager.IsValid() ? TEXT("OK") : TEXT("NULL"),
-		CachedMeleeComp.IsValid() ? TEXT("OK") : TEXT("NULL"));
+		CachedDef->RiseSpeed, CachedDef->MaxRiseHeight, CachedDef->ReleaseBufferTime,
+		CachedDef->SlamDescentSpeed, CachedDef->SlamRadius);
 
 	Character->OnMeleeChargeHoldStarted.AddDynamic(this, &UUpgrade_ChargedPunch::HandleHoldStarted);
 	Character->OnMeleeChargeHoldReleased.AddDynamic(this, &UUpgrade_ChargedPunch::HandleHoldReleased);
@@ -60,8 +58,8 @@ void UUpgrade_ChargedPunch::OnUpgradeActivated()
 
 void UUpgrade_ChargedPunch::OnUpgradeDeactivated()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] DEACTIVATED (bIsCharging=%d, bIsLunging=%d, HoldElapsed=%.2f)"),
-		bIsCharging ? 1 : 0, bIsLunging ? 1 : 0, HoldElapsed);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] DEACTIVATED (phase=%d, HoldElapsed=%.2f)"),
+		(int32)Phase, HoldElapsed);
 
 	if (AShooterCharacter* Character = GetShooterCharacter())
 	{
@@ -69,28 +67,10 @@ void UUpgrade_ChargedPunch::OnUpgradeDeactivated()
 		Character->OnMeleeChargeHoldReleased.RemoveDynamic(this, &UUpgrade_ChargedPunch::HandleHoldReleased);
 	}
 
-	ExitChargingState();
-
-	// If we're deactivated mid-lunge (e.g. on death), restore movement so the
-	// character isn't stuck in Flying mode.
-	if (bIsLunging)
-	{
-		FinishLunge();
-	}
-
-	// Force-restore FPMesh view in case the air-attack montage was still playing
-	// after the lunge finished (post-lunge anim wait phase) when the upgrade got
-	// removed — otherwise the player would be stuck looking at MeleeMesh.
-	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
-	{
-		if (MeleeComp->MeleeMesh && MeleeComp->MeleeMesh->IsVisible())
-		{
-			MeleeComp->ExitMeleeMeshView();
-		}
-	}
-
-	SetComponentTickEnabled(false);
+	EndSequence();
 }
+
+// ==================== Input callbacks ====================
 
 void UUpgrade_ChargedPunch::HandleHoldStarted()
 {
@@ -99,10 +79,15 @@ void UUpgrade_ChargedPunch::HandleHoldStarted()
 		return;
 	}
 
+	// Ignore a fresh press while a sequence is already running (e.g. a dropkick re-press during the
+	// hover Buffer) — that press is for the dropkick, not a new charge.
+	if (Phase != EChargedPunchPhase::None)
+	{
+		return;
+	}
+
 	const int32 PoolNow = CachedUpgradeManager.IsValid() ? CachedUpgradeManager->GetStoredHealthPickups() : -1;
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] HOLD_START — pool=%d/%d"),
-		PoolNow,
-		CachedUpgradeManager.IsValid() ? CachedUpgradeManager->GetMaxStoredHealthPickups() : -1);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] HOLD_START — pool=%d"), PoolNow);
 
 	bButtonHeld = true;
 	HoldElapsed = 0.0f;
@@ -112,204 +97,380 @@ void UUpgrade_ChargedPunch::HandleHoldStarted()
 
 void UUpgrade_ChargedPunch::HandleHoldReleased()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] HOLD_RELEASE — HoldElapsed=%.2fs, bIsCharging=%d"),
-		HoldElapsed, bIsCharging ? 1 : 0);
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] HOLD_RELEASE — HoldElapsed=%.2fs, phase=%d"), HoldElapsed, (int32)Phase);
 
 	bButtonHeld = false;
 
-	if (bIsCharging)
+	if (Phase == EChargedPunchPhase::Rising)
 	{
-		// Fire the punch — pool has already drained whatever it could during hold.
-		// ExecutePunch -> StartLunge sets bIsLunging=true and keeps tick running so
-		// TickLunge can interpolate the player to Endpoint over LungeDuration.
-		ExecutePunch();
+		// Capture the charge level for the slam, then hover (the buffer window).
+		ChargedBonusDamage = EvaluateBonusDamage(HoldElapsed);
+		EnterBufferPhase();
 	}
-	else
+	else if (Phase == EChargedPunchPhase::None)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] Release under MinHoldTime — no charge fired (jab path only)"));
-	}
-
-	ExitChargingState();
-
-	// Keep ticking while a lunge is in progress; FinishLunge or the lunge-finish path
-	// in TickComponent will disable tick once everything's restored.
-	if (!bIsLunging)
-	{
+		// Never charged — the regular jab from the Triggered binding already played.
+		StopChargeLoop();
 		SetComponentTickEnabled(false);
 	}
+	// else: already past the hold (Buffer / Slamming / DropkickFollow) — the phase tick owns the
+	// sequence now; a physical release here must not interrupt it.
 }
 
-void UUpgrade_ChargedPunch::EnterChargingState()
+void UUpgrade_ChargedPunch::HandleDropKickStarted()
 {
-	if (bIsCharging)
-	{
-		return;
-	}
-	bIsCharging = true;
-
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ENTER_CHARGE — HoldElapsed=%.2fs crossed MinHold=%.2fs"),
-		HoldElapsed, CachedDef->MinHoldTime);
-
-	AShooterCharacter* Character = GetShooterCharacter();
-	if (!Character)
+	// A dropkick fired during the hover buffer → it replaces the fall. Hand movement control back
+	// to the dropkick and switch to the follow phase; the slam AoE will fire on the dropkick's hit.
+	if (Phase != EChargedPunchPhase::Buffer)
 	{
 		return;
 	}
 
-	// Kill any in-flight regular swing immediately — without this, the ground melee
-	// montage (started by the Triggered binding when the player first pressed) keeps
-	// playing on MeleeMesh for the rest of its duration, and any repeated Triggered
-	// pulses during the hold would restart it. EnterMeleeMeshView force-stops the
-	// state machine, hides the weapon mesh, attaches MeleeMesh to camera, and clears
-	// all montages on MeleeMesh.
-	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Dropkick replaced the slam — entering DropkickFollow"));
+
+	Phase = EChargedPunchPhase::DropkickFollow;
+	DropkickWaitElapsed = 0.0f;
+
+	// Restore gravity and drop into Falling so the dropkick dive behaves like a normal airborne kick.
+	if (AShooterCharacter* Character = GetShooterCharacter())
 	{
-		MeleeComp->EnterMeleeMeshView();
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			Movement->GravityScale = SavedGravityScale;
+			Movement->SetMovementMode(MOVE_Falling);
+		}
+	}
+	bMovementSaved = false; // consumed
+
+	// Release our mesh view so the dropkick's own animation drives the FP view cleanly.
+	if (bOwnsMeleeMeshView)
+	{
+		if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+		{
+			MeleeComp->ExitMeleeMeshView();
+		}
+		bOwnsMeleeMeshView = false;
 	}
 
-	// Spawn endpoint-preview VFX (positioned at endpoint each tick via SetWorldLocation).
-	if (CachedDef->EndpointPreviewVFX)
-	{
-		FVector Endpoint;
-		float Distance;
-		ComputeEndpoint(Endpoint, Distance);
-		ActiveEndpointVFX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(), CachedDef->EndpointPreviewVFX, Endpoint,
-			FRotator::ZeroRotator, FVector::OneVector,
-			/*bAutoDestroy=*/ false, /*bAutoActivate=*/ true,
-			ENCPoolMethod::None);
-	}
-
-	// Start charge-loop audio.
-	if (CachedDef->ChargeLoopSound)
-	{
-		ActiveChargeLoop = UGameplayStatics::SpawnSoundAttached(
-			CachedDef->ChargeLoopSound, Character->GetRootComponent());
-	}
+	StopChargeLoop();
+	SetComponentTickEnabled(true); // keep ticking for the hit-timeout
+	// OnDropKickHit stays bound to place the slam on the target.
 }
 
-void UUpgrade_ChargedPunch::ExitChargingState()
+void UUpgrade_ChargedPunch::HandleDropKickHit(AActor* HitActor, const FVector& HitLocation, float Damage)
 {
-	if (bIsCharging)
+	if (Phase != EChargedPunchPhase::DropkickFollow)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] EXIT_CHARGE — cleared VFX/SFX"));
+		return;
 	}
 
-	bIsCharging = false;
-	HoldElapsed = 0.0f;
-	DrainAccumulator = 0.0f;
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Dropkick connected on %s — firing slam AoE at target"),
+		*GetNameSafe(HitActor));
 
-	if (ActiveEndpointVFX)
-	{
-		ActiveEndpointVFX->DestroyComponent();
-		ActiveEndpointVFX = nullptr;
-	}
-	if (ActiveChargeLoop)
-	{
-		ActiveChargeLoop->Stop();
-		ActiveChargeLoop = nullptr;
-	}
+	// Slam's AoE sphere centered on the dropkick target (dropkick damage already applied by the
+	// melee component; this adds the area damage around the victim).
+	DoSlamAoE(HitLocation);
+	EndSequence();
 }
+
+// ==================== Tick ====================
 
 void UUpgrade_ChargedPunch::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Lunge phase (after release with charge) takes priority over hold logic.
-	if (bIsLunging)
+	// Safety: if the player dies mid-sequence (gravity is disabled during rise/buffer/slam),
+	// tear everything down so the corpse doesn't float in MOVE_Flying.
+	if (Phase != EChargedPunchPhase::None)
 	{
-		TickLunge(DeltaTime);
-		return;
+		AShooterCharacter* Character = GetShooterCharacter();
+		if (!Character || Character->IsDead())
+		{
+			EndSequence();
+			return;
+		}
 	}
 
-	// Post-lunge animation wait: lunge physics is done, but the air-attack montage
-	// may still be playing. Keep MeleeMesh attached/visible until the AnimInstance
-	// reports no montage playing, then swap back to FirstPersonMesh.
-	// Triggered only when: not currently charging, button not held — i.e. we just
-	// came out of a successful charged punch and aren't starting another one.
-	if (!bIsCharging && !bButtonHeld)
+	switch (Phase)
 	{
-		if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
-		{
-			if (MeleeComp->MeleeMesh && MeleeComp->MeleeMesh->IsVisible())
-			{
-				const UAnimInstance* AnimInst = MeleeComp->MeleeMesh->GetAnimInstance();
-				const bool bMontageStillPlaying = AnimInst ? AnimInst->IsAnyMontagePlaying() : false;
-				if (!bMontageStillPlaying)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] Air montage finished — exiting MeleeMesh view"));
-					MeleeComp->ExitMeleeMeshView();
-					SetComponentTickEnabled(false);
-				}
-				return; // either still waiting or just exited — nothing else to do this tick
-			}
-		}
-		SetComponentTickEnabled(false);
-		return;
+	case EChargedPunchPhase::Buffer:         TickBuffer(DeltaTime); return;
+	case EChargedPunchPhase::Slamming:       TickSlam(DeltaTime); return;
+	case EChargedPunchPhase::DropkickFollow: TickDropkickFollow(DeltaTime); return;
+	default: break; // None or Rising fall through to the hold logic below
 	}
 
 	if (!bButtonHeld || !CachedDef.IsValid())
 	{
+		// Not holding and not in a phase — nothing to do (e.g. a stray tick after EndSequence).
+		if (Phase == EChargedPunchPhase::None)
+		{
+			SetComponentTickEnabled(false);
+		}
 		return;
 	}
 
 	HoldElapsed = FMath::Min(HoldElapsed + DeltaTime, CachedDef->MaxHoldTime);
 
-	// Cross MinHoldTime threshold for the first time — try to enter charging state.
-	if (!bIsCharging && HoldElapsed >= CachedDef->MinHoldTime)
+	// Cross MinHoldTime → enter the rise (if the pool has at least one pickup).
+	if (Phase == EChargedPunchPhase::None && HoldElapsed >= CachedDef->MinHoldTime)
 	{
 		UUpgradeManagerComponent* Mgr = CachedUpgradeManager.Get();
 		if (!Mgr || Mgr->GetStoredHealthPickups() <= 0)
 		{
-			// No pickups available — do nothing. The regular jab from Triggered already played.
-			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Threshold crossed but pool empty (pool=%d) — jab-only this press"),
-				Mgr ? Mgr->GetStoredHealthPickups() : -1);
+			// No pickups — jab-only this press (already fired off Triggered).
 			return;
 		}
-		EnterChargingState();
+		EnterRisingPhase();
 	}
 
-	if (!bIsCharging)
+	if (Phase != EChargedPunchPhase::Rising)
 	{
 		return;
 	}
 
-	// Drain pickups at PickupsPerSecond. Accumulate fractional and consume whole pickups.
+	// Drain pickups at PickupsPerSecond. When the pool runs dry, auto-release into the buffer.
 	DrainAccumulator += CachedDef->PickupsPerSecond * DeltaTime;
 	if (DrainAccumulator >= 1.0f)
 	{
-		UUpgradeManagerComponent* Mgr = CachedUpgradeManager.Get();
-		if (Mgr)
+		if (UUpgradeManagerComponent* Mgr = CachedUpgradeManager.Get())
 		{
 			const int32 ToDrain = FMath::FloorToInt(DrainAccumulator);
 			const int32 Drained = Mgr->ConsumeStoredHealthPickups(ToDrain);
 			DrainAccumulator -= static_cast<float>(Drained);
 
-			UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] Drained %d/%d pickups (pool now=%d, acc=%.2f)"),
-				Drained, ToDrain, Mgr->GetStoredHealthPickups(), DrainAccumulator);
-
-			// If we drained less than requested, the pool is empty — release the charge early.
 			if (Drained < ToDrain)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Pool depleted mid-hold — auto-firing at HoldElapsed=%.2fs"), HoldElapsed);
-				ExecutePunch();
-				ExitChargingState();
+				UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Pool depleted mid-rise — auto-releasing into buffer at HoldElapsed=%.2fs"), HoldElapsed);
+				bButtonHeld = false;
+				ChargedBonusDamage = EvaluateBonusDamage(HoldElapsed);
+				EnterBufferPhase();
 				return;
 			}
 		}
 	}
 
-	// Update endpoint VFX position each tick (camera-driven).
-	if (ActiveEndpointVFX)
+	TickRise(DeltaTime);
+}
+
+// ==================== Phase logic ====================
+
+void UUpgrade_ChargedPunch::EnterRisingPhase()
+{
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character || !CachedDef.IsValid())
 	{
-		FVector Endpoint;
-		float Distance;
-		ComputeEndpoint(Endpoint, Distance);
-		ActiveEndpointVFX->SetWorldLocation(Endpoint);
+		return;
+	}
+
+	Phase = EChargedPunchPhase::Rising;
+	RiseStartZ = Character->GetActorLocation().Z;
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ENTER_RISE — HoldElapsed=%.2fs, startZ=%.0f"), HoldElapsed, RiseStartZ);
+
+	// MOVE_Falling (not Flying) + zero gravity: we drive the rise via Velocity.Z, but the player
+	// keeps normal AIR CONTROL over horizontal movement (X/Y left to the CMC). Don't zero velocity
+	// here — preserve the player's momentum into the takeoff.
+	CaptureMovement();
+	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+	{
+		Movement->GravityScale = 0.0f;
+		Movement->SetMovementMode(MOVE_Falling);
+	}
+
+	// Stop the in-flight jab and show the charge pose on the MeleeMesh.
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
+	{
+		MeleeComp->EnterMeleeMeshView();
+		bOwnsMeleeMeshView = true;
+		if (CachedDef->AirAttackMontage)
+		{
+			MeleeComp->PlayMontageOnMeleeMesh(CachedDef->AirAttackMontage, 1.0f);
+		}
+	}
+
+	// Charge-loop audio.
+	if (CachedDef->ChargeLoopSound)
+	{
+		ActiveChargeLoop = UGameplayStatics::SpawnSoundAttached(CachedDef->ChargeLoopSound, Character->GetRootComponent());
 	}
 }
 
-void UUpgrade_ChargedPunch::ExecutePunch()
+void UUpgrade_ChargedPunch::TickRise(float DeltaTime)
+{
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character || !CachedDef.IsValid())
+	{
+		return;
+	}
+
+	const float MaxZ = RiseStartZ + CachedDef->MaxRiseHeight;
+	const float CurZ = Character->GetActorLocation().Z;
+
+	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+	{
+		// Drive ONLY the vertical velocity for the rise; leave X/Y to the CMC's air control so the
+		// player can steer while taking off. Stop climbing at the height cap (then it hovers).
+		Movement->Velocity.Z = (CurZ < MaxZ) ? CachedDef->RiseSpeed : 0.0f;
+	}
+}
+
+void UUpgrade_ChargedPunch::EnterBufferPhase()
+{
+	Phase = EChargedPunchPhase::Buffer;
+	BufferElapsed = 0.0f;
+	StopChargeLoop();
+
+	// Hover (gravity already disabled in EnterRisingPhase): kill only vertical velocity but keep
+	// horizontal — the player retains air control during the buffer too.
+	if (AShooterCharacter* Character = GetShooterCharacter())
+	{
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			Movement->Velocity.Z = 0.0f;
+		}
+	}
+
+	// Listen for a dropkick that replaces the slam.
+	BindDropkickDelegates();
+	SetComponentTickEnabled(true);
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ENTER_BUFFER — hover %.2fs (input a dropkick to replace the slam)"), CachedDef.IsValid() ? CachedDef->ReleaseBufferTime : 0.0f);
+}
+
+void UUpgrade_ChargedPunch::TickBuffer(float DeltaTime)
+{
+	if (!CachedDef.IsValid())
+	{
+		EnterSlamPhase();
+		return;
+	}
+
+	// Keep hovering (kill only vertical velocity; horizontal stays for air control).
+	if (AShooterCharacter* Character = GetShooterCharacter())
+	{
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			Movement->Velocity.Z = 0.0f;
+		}
+	}
+
+	BufferElapsed += DeltaTime;
+	if (BufferElapsed >= CachedDef->ReleaseBufferTime)
+	{
+		EnterSlamPhase();
+	}
+}
+
+void UUpgrade_ChargedPunch::EnterSlamPhase()
+{
+	Phase = EChargedPunchPhase::Slamming;
+
+	// The buffer ended without a dropkick — stop listening for one.
+	UnbindDropkickDelegates();
+
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character)
+	{
+		EndSequence();
+		return;
+	}
+
+	// Commit to the drop: Flying + zero velocity so the descent is a clean straight slam — no air
+	// control nudging it off-line, and the CMC won't fight the SetActorLocation in TickSlam.
+	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+	{
+		Movement->GravityScale = 0.0f;
+		Movement->Velocity = FVector::ZeroVector;
+		Movement->SetMovementMode(MOVE_Flying);
+	}
+
+	// Capsule half-height — so the descent lands the capsule ON the floor, not centered on it
+	// (centering would bury the lower half and the player falls through / physics breaks).
+	float HalfHeight = 0.0f;
+	if (const UCapsuleComponent* Cap = Character->GetCapsuleComponent())
+	{
+		HalfHeight = Cap->GetScaledCapsuleHalfHeight();
+	}
+
+	// Trace straight down for the ground (the descent target).
+	const FVector Origin = Character->GetActorLocation();
+	const FVector DownEnd = Origin - FVector(0.0f, 0.0f, 100000.0f);
+	FHitResult GroundHit;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(Character);
+	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundHit, Origin, DownEnd, ECC_Visibility, Params))
+	{
+		// Rest the capsule on the surface (actor location = floor + half-height).
+		SlamGroundTarget = GroundHit.ImpactPoint + FVector(0.0f, 0.0f, HalfHeight);
+	}
+	else
+	{
+		// No ground below (pit / off the nav) — don't descend into the void. Slam in place at the
+		// current location and let normal gravity take over afterward.
+		SlamGroundTarget = Origin;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] ENTER_SLAM — land Z=%.0f (halfH=%.0f)"), SlamGroundTarget.Z, HalfHeight);
+}
+
+void UUpgrade_ChargedPunch::TickSlam(float DeltaTime)
+{
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character || !CachedDef.IsValid())
+	{
+		EndSequence();
+		return;
+	}
+
+	FVector Pos = Character->GetActorLocation();
+	Pos.Z -= CachedDef->SlamDescentSpeed * DeltaTime;
+
+	if (Pos.Z <= SlamGroundTarget.Z)
+	{
+		// Landed — settle the capsule on the ground, restore movement, and slam.
+		Pos.Z = SlamGroundTarget.Z;
+		Character->SetActorLocation(Pos, /*bSweep=*/false);
+		RestoreMovement();
+
+		// Slam origin at the player's FEET (floor), not the capsule center — so the AoE + VFX sit
+		// on the ground where the slam landed.
+		FVector SlamOrigin = Character->GetActorLocation();
+		if (const UCapsuleComponent* Cap = Character->GetCapsuleComponent())
+		{
+			SlamOrigin.Z -= Cap->GetScaledCapsuleHalfHeight();
+		}
+		DoSlamAoE(SlamOrigin);
+		EndSequence();
+		return;
+	}
+
+	Character->SetActorLocation(Pos, /*bSweep=*/false);
+	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+	{
+		Movement->Velocity = FVector::ZeroVector;
+	}
+}
+
+void UUpgrade_ChargedPunch::TickDropkickFollow(float DeltaTime)
+{
+	if (!CachedDef.IsValid())
+	{
+		EndSequence();
+		return;
+	}
+
+	DropkickWaitElapsed += DeltaTime;
+	if (DropkickWaitElapsed >= CachedDef->DropkickHitTimeout)
+	{
+		// The dropkick never connected — give up (no slam, since there's no target to center on).
+		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] DropkickFollow timed out — no slam"));
+		EndSequence();
+	}
+}
+
+// ==================== Slam AoE ====================
+
+void UUpgrade_ChargedPunch::DoSlamAoE(const FVector& Origin)
 {
 	if (!CachedDef.IsValid())
 	{
@@ -321,53 +482,33 @@ void UUpgrade_ChargedPunch::ExecutePunch()
 	{
 		return;
 	}
-
 	APlayerController* PC = Cast<APlayerController>(Character->GetController());
-	if (!PC)
+
+	const float BaseDamage = CachedMeleeComp.IsValid() ? CachedMeleeComp->Settings.BaseDamage : 50.0f;
+	const float TotalDamage = BaseDamage + ChargedBonusDamage;
+
+	TArray<FOverlapResult> Overlaps;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(Character);
+	if (GetWorld())
 	{
-		return;
+		GetWorld()->OverlapMultiByChannel(
+			Overlaps,
+			Origin,
+			FQuat::Identity,
+			ECC_Pawn,
+			FCollisionShape::MakeSphere(CachedDef->SlamRadius),
+			Params);
 	}
 
-	// ==================== Compute trajectory ====================
-	FVector Endpoint;
-	float Distance;
-	ComputeEndpoint(Endpoint, Distance);
-
-	const FVector StartLoc = Character->GetActorLocation();
-	const FVector LungeDir = (Endpoint - StartLoc).GetSafeNormal();
-
-	// ==================== Capsule sweep along trajectory ====================
-	// We treat the punch as a swept capsule from StartLoc to Endpoint with CapsuleRadius.
-	// SweepMultiByChannel returns ALL overlapping actors on the path — pierce-through is
-	// "process every hit, never stop at first".
-
-	TArray<FHitResult> Hits;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(Character);
-	QueryParams.bReturnPhysicalMaterial = true;
-
-	GetWorld()->SweepMultiByChannel(
-		Hits,
-		StartLoc,
-		Endpoint,
-		FQuat::Identity,
-		ECC_Pawn,
-		FCollisionShape::MakeSphere(CachedDef->CapsuleRadius),
-		QueryParams);
-
-	// ==================== Apply damage to each unique pawn hit ====================
-	const float BaseDamage = (CachedMeleeComp.IsValid()) ? CachedMeleeComp->Settings.BaseDamage : 50.0f;
-	const float BonusDamage = EvaluateBonusDamage(HoldElapsed);
-	const float TotalDamage = BaseDamage + BonusDamage;
-
 	TSet<AActor*> Processed;
-	int32 KilledCount = 0;
 	int32 HitCount = 0;
+	int32 KilledCount = 0;
 
-	for (const FHitResult& Hit : Hits)
+	for (const FOverlapResult& Ov : Overlaps)
 	{
-		AActor* HitActor = Hit.GetActor();
-		if (!HitActor || Processed.Contains(HitActor) || HitActor == Character)
+		AActor* HitActor = Ov.GetActor();
+		if (!HitActor || HitActor == Character || Processed.Contains(HitActor))
 		{
 			continue;
 		}
@@ -377,44 +518,35 @@ void UUpgrade_ChargedPunch::ExecutePunch()
 		}
 		Processed.Add(HitActor);
 
-		// Apply damage with DamageType from def (defaults to DamageType_Melee in BP, which
-		// routes XP to Melee and triggers electrification on AShooterNPC::TakeDamage).
-		FPointDamageEvent DamageEvent(
-			TotalDamage,
-			Hit,
-			LungeDir,
-			CachedDef->DamageType);
+		FVector Dir = (HitActor->GetActorLocation() - Origin).GetSafeNormal2D();
+		if (Dir.IsNearlyZero())
+		{
+			Dir = Character->GetActorForwardVector();
+		}
 
+		FHitResult SynthHit;
+		SynthHit.ImpactPoint = HitActor->GetActorLocation();
+		SynthHit.Location = SynthHit.ImpactPoint;
+
+		FPointDamageEvent DamageEvent(TotalDamage, SynthHit, Dir, CachedDef->DamageType);
 		HitActor->TakeDamage(TotalDamage, DamageEvent, PC, Character);
 		HitCount++;
 
-		// Knockback: use distance based on player's regular melee BaseKnockbackDistance.
+		// Knockback: punch targets up and outward from the slam origin.
 		if (ACharacter* HitChar = Cast<ACharacter>(HitActor))
 		{
-			const float KnockbackDistance = (CachedMeleeComp.IsValid())
-				? CachedMeleeComp->Settings.BaseKnockbackDistance : 200.0f;
-			HitChar->LaunchCharacter(LungeDir * KnockbackDistance * 5.0f, false, false);
+			const float KnockbackDistance = CachedMeleeComp.IsValid() ? CachedMeleeComp->Settings.BaseKnockbackDistance : 200.0f;
+			const FVector Launch = Dir * (KnockbackDistance * 3.0f) + FVector(0.0f, 0.0f, KnockbackDistance * 2.0f);
+			HitChar->LaunchCharacter(Launch, false, false);
 		}
 
-		// Per-hit VFX/sound.
-		if (CachedDef->HitVFX)
-		{
-			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-				GetWorld(), CachedDef->HitVFX, Hit.ImpactPoint,
-				FRotator::ZeroRotator, FVector::OneVector,
-				true, true, ENCPoolMethod::None);
-		}
-		if (CachedDef->HitSound)
-		{
-			UGameplayStatics::PlaySoundAtLocation(this, CachedDef->HitSound, Hit.ImpactPoint);
-		}
+		// No per-target VFX/sound — the slam plays a SINGLE VFX + HitSound at the landing point below.
 
-		// Hit marker on the player.
 		if (UHitMarkerComponent* HitMarker = Character->GetHitMarkerComponent())
 		{
 			const bool bKilled = HitActor->IsActorBeingDestroyed() ||
 				(Cast<AShooterNPC>(HitActor) && Cast<AShooterNPC>(HitActor)->IsDead());
-			HitMarker->RegisterHit(Hit.ImpactPoint, LungeDir, TotalDamage, false, bKilled);
+			HitMarker->RegisterHit(SynthHit.ImpactPoint, Dir, TotalDamage, false, bKilled);
 			if (bKilled)
 			{
 				KilledCount++;
@@ -422,113 +554,136 @@ void UUpgrade_ChargedPunch::ExecutePunch()
 		}
 	}
 
-	// ==================== Start the lunge phase ====================
-	// Tick-driven motion via SetActorLocation between LungeStart and LungeEnd over
-	// LungeTotalDuration. StartLunge handles: mesh swap, montage play, vertical lift,
-	// gravity disable. FinishLunge (called from TickLunge when elapsed >= duration)
-	// restores everything.
-	StartLunge(StartLoc, Endpoint);
-
-	// ==================== Player-side feedback ====================
+	// Slam impact feedback at the origin (reuses the upgrade's "fire" feedback slots).
 	if (CachedDef->FireVFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(), CachedDef->FireVFX, StartLoc,
-			LungeDir.Rotation(), FVector::OneVector,
-			true, true, ENCPoolMethod::None);
+			GetWorld(), CachedDef->FireVFX, Origin,
+			FRotator::ZeroRotator, FVector::OneVector, true, true, ENCPoolMethod::None);
 	}
 	if (CachedDef->FireSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, CachedDef->FireSound, StartLoc);
+		UGameplayStatics::PlaySoundAtLocation(this, CachedDef->FireSound, Origin);
+	}
+	if (CachedDef->HitSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, CachedDef->HitSound, Origin);
 	}
 	if (CachedDef->FireCameraShake && PC)
 	{
 		PC->ClientStartCameraShake(CachedDef->FireCameraShake, CachedDef->FireCameraShakeScale);
 	}
 
-	// ==================== Feed combo with kills ====================
 	if (KilledCount > 0)
 	{
 		if (UUpgrade_Combo* ComboUpg = FindComboUpgrade())
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] Feeding %d kills to Combo"), KilledCount);
 			ComboUpg->AddComboHits(KilledCount);
 		}
-		else
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] SLAM at (%.0f,%.0f,%.0f) R=%.0f — hits=%d, kills=%d, dmg=%.1f (base=%.1f + bonus=%.1f)"),
+		Origin.X, Origin.Y, Origin.Z, CachedDef->SlamRadius, HitCount, KilledCount, TotalDamage, BaseDamage, ChargedBonusDamage);
+}
+
+// ==================== Helpers / lifecycle ====================
+
+void UUpgrade_ChargedPunch::EndSequence()
+{
+	StopChargeLoop();
+	UnbindDropkickDelegates();
+	RestoreMovement();
+
+	if (bOwnsMeleeMeshView)
+	{
+		if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
 		{
-			UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] %d kills, but no Combo upgrade present"), KilledCount);
+			MeleeComp->ExitMeleeMeshView();
+		}
+		bOwnsMeleeMeshView = false;
+	}
+
+	Phase = EChargedPunchPhase::None;
+	bButtonHeld = false;
+	HoldElapsed = 0.0f;
+	DrainAccumulator = 0.0f;
+	BufferElapsed = 0.0f;
+	DropkickWaitElapsed = 0.0f;
+	ChargedBonusDamage = 0.0f;
+
+	SetComponentTickEnabled(false);
+}
+
+void UUpgrade_ChargedPunch::StopChargeLoop()
+{
+	if (ActiveChargeLoop)
+	{
+		ActiveChargeLoop->Stop();
+		ActiveChargeLoop = nullptr;
+	}
+}
+
+void UUpgrade_ChargedPunch::CaptureMovement()
+{
+	if (bMovementSaved)
+	{
+		return;
+	}
+	if (AShooterCharacter* Character = GetShooterCharacter())
+	{
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			SavedMovementMode = Movement->MovementMode;
+			SavedGravityScale = Movement->GravityScale;
+			bMovementSaved = true;
 		}
 	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_DEBUG] FIRED: hold=%.2fs, distance=%.0f, capsule_r=%.0f, hits=%d, kills=%d, dmg=%.1f (base=%.1f + bonus=%.1f), poolRemaining=%d"),
-		HoldElapsed, Distance, CachedDef->CapsuleRadius, HitCount, KilledCount, TotalDamage, BaseDamage, BonusDamage,
-		CachedUpgradeManager.IsValid() ? CachedUpgradeManager->GetStoredHealthPickups() : -1);
 }
 
-void UUpgrade_ChargedPunch::ComputeEndpoint(FVector& OutEndpoint, float& OutDistance) const
+void UUpgrade_ChargedPunch::RestoreMovement()
 {
-	AShooterCharacter* Character = GetShooterCharacter();
-	if (!Character)
+	if (!bMovementSaved)
 	{
-		OutEndpoint = FVector::ZeroVector;
-		OutDistance = 0.0f;
 		return;
 	}
-
-	APlayerController* PC = Cast<APlayerController>(Character->GetController());
-	if (!PC)
+	if (AShooterCharacter* Character = GetShooterCharacter())
 	{
-		OutEndpoint = Character->GetActorLocation();
-		OutDistance = 0.0f;
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			Movement->GravityScale = SavedGravityScale;
+			Movement->SetMovementMode(SavedMovementMode);
+			Movement->Velocity = FVector::ZeroVector;
+		}
+	}
+	bMovementSaved = false;
+}
+
+void UUpgrade_ChargedPunch::BindDropkickDelegates()
+{
+	if (bDropkickDelegatesBound)
+	{
 		return;
 	}
-
-	FVector CameraLoc;
-	FRotator CameraRot;
-	PC->GetPlayerViewPoint(CameraLoc, CameraRot);
-	const FVector ForwardDir = CameraRot.Vector();
-
-	const float DesiredDistance = EvaluateDistance(HoldElapsed);
-
-	// Trace forward from the player's actor location (NOT camera — we don't want to
-	// punch into walls behind the player). Clamp at first geometry hit.
-	const FVector StartLoc = Character->GetActorLocation();
-	const FVector DesiredEnd = StartLoc + ForwardDir * DesiredDistance;
-
-	FHitResult WallHit;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(Character);
-
-	if (GetWorld()->LineTraceSingleByChannel(WallHit, StartLoc, DesiredEnd, ECC_Visibility, QueryParams))
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
 	{
-		// Hit geometry — clamp endpoint a bit short of the wall.
-		const float WallDistance = (WallHit.ImpactPoint - StartLoc).Size();
-		const float Clamped = FMath::Max(0.0f, WallDistance - CachedDef->CapsuleRadius);
-		OutEndpoint = StartLoc + ForwardDir * Clamped;
-		OutDistance = Clamped;
-		UE_LOG(LogTemp, Verbose, TEXT("[CHARGED_PUNCH_DEBUG] Endpoint clamped by wall (%s) — desired=%.0f, clamped=%.0f"),
-			WallHit.GetActor() ? *WallHit.GetActor()->GetName() : TEXT("WorldStatic"), DesiredDistance, Clamped);
-	}
-	else
-	{
-		OutEndpoint = DesiredEnd;
-		OutDistance = DesiredDistance;
+		MeleeComp->OnDropKickStarted.AddDynamic(this, &UUpgrade_ChargedPunch::HandleDropKickStarted);
+		MeleeComp->OnDropKickHit.AddDynamic(this, &UUpgrade_ChargedPunch::HandleDropKickHit);
+		bDropkickDelegatesBound = true;
 	}
 }
 
-float UUpgrade_ChargedPunch::EvaluateDistance(float HoldTime) const
+void UUpgrade_ChargedPunch::UnbindDropkickDelegates()
 {
-	if (!CachedDef.IsValid())
+	if (!bDropkickDelegatesBound)
 	{
-		return 0.0f;
+		return;
 	}
-	if (CachedDef->HoldTimeToDistance)
+	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
 	{
-		return FMath::Max(0.0f, CachedDef->HoldTimeToDistance->GetFloatValue(HoldTime));
+		MeleeComp->OnDropKickStarted.RemoveDynamic(this, &UUpgrade_ChargedPunch::HandleDropKickStarted);
+		MeleeComp->OnDropKickHit.RemoveDynamic(this, &UUpgrade_ChargedPunch::HandleDropKickHit);
 	}
-	// Fallback linear: 0 at HoldTime=0, MaxDistance at HoldTime=MaxHoldTime.
-	const float Alpha = (CachedDef->MaxHoldTime > 0.0f) ? FMath::Clamp(HoldTime / CachedDef->MaxHoldTime, 0.0f, 1.0f) : 0.0f;
-	return Alpha * CachedDef->MaxDistance;
+	bDropkickDelegatesBound = false;
 }
 
 float UUpgrade_ChargedPunch::EvaluateBonusDamage(float HoldTime) const
@@ -552,171 +707,14 @@ UUpgrade_Combo* UUpgrade_ChargedPunch::FindComboUpgrade() const
 	{
 		return nullptr;
 	}
-	// FindComponentByClass walks all components — Upgrade_Combo is added dynamically by
-	// UUpgradeManagerComponent when the combo upgrade is granted.
 	return Character->FindComponentByClass<UUpgrade_Combo>();
 }
 
 bool UUpgrade_ChargedPunch::IsBusy() const
 {
-	if (bIsCharging || bIsLunging)
-	{
-		return true;
-	}
-
-	// Post-lunge anim wait: MeleeMesh is still visible because the air montage
-	// is still playing. The ground swing must not fire underneath it.
-	if (const UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
-	{
-		if (MeleeComp->MeleeMesh && MeleeComp->MeleeMesh->IsVisible())
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-// ==================== Lunge Lifecycle ====================
-
-void UUpgrade_ChargedPunch::StartLunge(const FVector& StartPos, const FVector& EndPos)
-{
-	AShooterCharacter* Character = GetShooterCharacter();
-	if (!Character || !CachedDef.IsValid())
-	{
-		return;
-	}
-
-	LungeStart = StartPos;
-	LungeEnd = EndPos;
-	// Z is preserved from ComputeEndpoint — that already accounts for camera pitch,
-	// so aiming up makes the lunge go up. Previously this was force-flattened, which
-	// caused the player to land on the floor regardless of VFX preview height.
-	LungeElapsed = 0.0f;
-	LungeTotalDuration = FMath::Max(0.05f, CachedDef->LungeDuration);
-	bIsLunging = true;
-
-	// Disable gravity + put movement into Flying so SetActorLocation drives motion
-	// without ground friction or gravity kicking the player around.
-	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-	{
-		SavedMovementMode = Movement->MovementMode;
-		SavedGravityScale = Movement->GravityScale;
-
-		Movement->GravityScale = 0.0f;
-		Movement->Velocity = FVector::ZeroVector;
-		Movement->SetMovementMode(MOVE_Flying);
-	}
-
-	// 3. Switch to MeleeMesh view (hides weapon + FPMesh, attaches MeleeMesh to camera).
-	if (UMeleeAttackComponent* MeleeComp = CachedMeleeComp.Get())
-	{
-		MeleeComp->EnterMeleeMeshView();
-
-		// 4. Play the single configured air-attack montage on MeleeMesh.
-		if (CachedDef->AirAttackMontage)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] Playing AirAttackMontage='%s' on MeleeMesh"),
-				*CachedDef->AirAttackMontage->GetName());
-			MeleeComp->PlayMontageOnMeleeMesh(CachedDef->AirAttackMontage, 1.0f);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] AirAttackMontage IS NULL on definition '%s' — set it in the DataAsset"),
-				*CachedDef->GetName());
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_ANIM] CachedMeleeComp is invalid — cannot play montage"));
-	}
-
-	// Ensure tick is running for interpolation.
-	SetComponentTickEnabled(true);
-
-	const FVector ActorPosNow = Character->GetActorLocation();
-	const float StraightDist = FVector::Dist(LungeStart, LungeEnd);
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] StartLunge — actorNow=(%.0f,%.0f,%.0f), lungeStart=(%.0f,%.0f,%.0f), lungeEnd=(%.0f,%.0f,%.0f), straight_dist=%.0f, duration=%.2fs"),
-		ActorPosNow.X, ActorPosNow.Y, ActorPosNow.Z,
-		LungeStart.X, LungeStart.Y, LungeStart.Z,
-		LungeEnd.X, LungeEnd.Y, LungeEnd.Z,
-		StraightDist, LungeTotalDuration);
-}
-
-void UUpgrade_ChargedPunch::TickLunge(float DeltaTime)
-{
-	if (!bIsLunging)
-	{
-		return;
-	}
-
-	AShooterCharacter* Character = GetShooterCharacter();
-	if (!Character)
-	{
-		FinishLunge();
-		return;
-	}
-
-	const FVector PosBefore = Character->GetActorLocation();
-	LungeElapsed += DeltaTime;
-	const float Alpha = FMath::Clamp(LungeElapsed / LungeTotalDuration, 0.0f, 1.0f);
-	const FVector DesiredPos = FMath::Lerp(LungeStart, LungeEnd, Alpha);
-
-	// No sweep — the lunge is pierce-through by design. ComputeEndpoint already
-	// clamped LungeEnd against world geometry via a line trace before this phase
-	// started, so the path from LungeStart to LungeEnd is guaranteed clear of
-	// blocking walls. Any other actors in the way (NPC capsules, ragdolls,
-	// debris, prop collision) are passed through — damage was already applied
-	// in the one-shot capsule sweep at the moment of release.
-	const bool bMoved = Character->SetActorLocation(DesiredPos, /*bSweep=*/ false);
-
-	const FVector PosAfter = Character->GetActorLocation();
-	const float DeltaMoved = FVector::Dist(PosBefore, PosAfter);
-	const float DistToTarget = FVector::Dist(PosAfter, LungeEnd);
-	const float DistFromDesired = FVector::Dist(PosAfter, DesiredPos);
-
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] Tick alpha=%.2f, desired=(%.0f,%.0f,%.0f), actual=(%.0f,%.0f,%.0f), movedThisTick=%.1f, distToEnd=%.0f, distFromDesired=%.1f, bMoved=%d (pierce-through, no sweep)"),
-		Alpha,
-		DesiredPos.X, DesiredPos.Y, DesiredPos.Z,
-		PosAfter.X, PosAfter.Y, PosAfter.Z,
-		DeltaMoved, DistToTarget, DistFromDesired,
-		bMoved ? 1 : 0);
-
-	if (Alpha >= 1.0f)
-	{
-		FinishLunge();
-	}
-}
-
-void UUpgrade_ChargedPunch::FinishLunge()
-{
-	if (!bIsLunging)
-	{
-		return;
-	}
-	bIsLunging = false;
-
-	AShooterCharacter* Character = GetShooterCharacter();
-	if (Character)
-	{
-		// Restore movement state — flight is over, gravity/walking should resume.
-		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-		{
-			Movement->GravityScale = SavedGravityScale;
-			Movement->SetMovementMode(SavedMovementMode);
-			Movement->Velocity = FVector::ZeroVector;
-		}
-	}
-
-	// IMPORTANT: do NOT call ExitMeleeMeshView here. The air-attack montage is
-	// often longer than LungeDuration (e.g. 1.07s montage vs 0.15s flight); ending
-	// the mesh view immediately would chop the animation off visually.
-	// Instead, TickComponent keeps polling the MeleeMesh's AnimInstance after
-	// FinishLunge and calls ExitMeleeMeshView once the montage stops playing.
-
-	const FVector FinalPos = Character ? Character->GetActorLocation() : FVector::ZeroVector;
-	const float OffsetFromEnd = FVector::Dist(FinalPos, LungeEnd);
-	UE_LOG(LogTemp, Warning, TEXT("[CHARGED_PUNCH_FLIGHT] FinishLunge — finalPos=(%.0f,%.0f,%.0f), expectedEnd=(%.0f,%.0f,%.0f), offset=%.1f, restored MovementMode=%d, Gravity=%.2f (mesh stays attached until anim ends)"),
-		FinalPos.X, FinalPos.Y, FinalPos.Z,
-		LungeEnd.X, LungeEnd.Y, LungeEnd.Z, OffsetFromEnd,
-		(int32)SavedMovementMode, SavedGravityScale);
+	// Suppress the regular swing while rising / slamming / dropkick-following. Deliberately FALSE
+	// during the hover Buffer so the player's dropkick re-press reaches MeleeAttackComponent.
+	return Phase == EChargedPunchPhase::Rising
+		|| Phase == EChargedPunchPhase::Slamming
+		|| Phase == EChargedPunchPhase::DropkickFollow;
 }

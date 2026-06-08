@@ -11,22 +11,34 @@ class UUpgradeDefinition_ChargedPunch;
 class UUpgradeManagerComponent;
 class UMeleeAttackComponent;
 class UUpgrade_Combo;
-class UNiagaraComponent;
 class UAudioComponent;
 
+/** Internal phase of the reworked charged punch. */
+enum class EChargedPunchPhase : uint8
+{
+	None,
+	Rising,          // button held past MinHoldTime: the player rises higher and higher
+	Buffer,          // released: hovering for ReleaseBufferTime, a dropkick may replace the slam
+	Slamming,        // descending fast → AoE slam on landing
+	DropkickFollow   // a dropkick replaced the slam: waiting for it to hit, then AoE on the target
+};
+
 /**
- * Runtime logic for the Charged Punch upgrade. See UpgradeDefinition_ChargedPunch.h
- * for design.
+ * Runtime logic for the reworked Charged Punch upgrade. See UpgradeDefinition_ChargedPunch.h.
  *
  * Flow:
- *   AShooterCharacter::OnMeleeChargeHoldStarted -> HandleHoldStarted
- *     starts a hold timer
- *   TickComponent
- *     once HoldElapsed > MinHoldTime: enter ChargingPhase, drain pool, spawn VFX
- *     stops draining if pool reaches 0
- *   AShooterCharacter::OnMeleeChargeHoldReleased -> HandleHoldReleased
- *     if charging: do capsule sweep, deal damage, lunge player, feed Combo
- *     else: no-op (regular jab from Triggered already played)
+ *   Hold melee past MinHoldTime  -> Rising: drain the shared health-pickup pool and lift the
+ *                                   player upward (up to MaxRiseHeight), gravity disabled.
+ *   Release                      -> Buffer: hover for ReleaseBufferTime so the player can input a
+ *                                   dropkick.
+ *     - dropkick during buffer   -> DropkickFollow: the dropkick dives at its target (driven by
+ *                                   MeleeAttackComponent); when it connects (OnDropKickHit) the
+ *                                   slam's AoE sphere fires centered on that target.
+ *     - no dropkick              -> Slamming: fast descent, then an AoE slam at the landing point.
+ *
+ * The dropkick is detected via MeleeAttackComponent::OnDropKickStarted / OnDropKickHit (bound only
+ * during Buffer + DropkickFollow), so no change to AShooterCharacter::DoMeleeAttack is needed — the
+ * buffer phase deliberately reports IsBusy() == false so the re-press reaches the melee component.
  */
 UCLASS(BlueprintType, meta = (DisplayName = "Charged Punch"))
 class POLARITY_API UUpgrade_ChargedPunch : public UUpgradeComponent
@@ -37,26 +49,24 @@ public:
 
 	UUpgrade_ChargedPunch();
 
-	/** Is the player currently charging? */
+	/** Is the player currently charging (rising)? */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
-	bool IsCharging() const { return bIsCharging; }
+	bool IsCharging() const { return Phase == EChargedPunchPhase::Rising; }
 
-	/** True while flight phase is interpolating the player toward the endpoint. */
+	/** True during a post-release motion phase (slam descent or dropkick follow). */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
-	bool IsLunging() const { return bIsLunging; }
+	bool IsLunging() const { return Phase == EChargedPunchPhase::Slamming || Phase == EChargedPunchPhase::DropkickFollow; }
 
 	/**
-	 * Aggregate "is the upgrade in any active phase that should suppress regular
-	 * melee?" — covers charging, lunging, AND post-lunge anim wait (the air
-	 * montage is still playing). Used by AShooterCharacter::DoMeleeAttack to
-	 * filter out repeated Triggered pulses while the charged punch owns the view.
-	 * Named IsBusy() instead of IsActive() to avoid colliding with the
-	 * UActorComponent::IsActive() UFUNCTION in the parent class hierarchy.
+	 * Should the regular swing be suppressed? True while rising / slamming / dropkick-following.
+	 * Deliberately FALSE during the hover Buffer so the player's dropkick re-press reaches
+	 * AShooterCharacter::DoMeleeAttack → MeleeAttackComponent. Named IsBusy() (not IsActive()) to
+	 * avoid colliding with UActorComponent::IsActive().
 	 */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
 	bool IsBusy() const;
 
-	/** Hold elapsed seconds (0 if not pressed). Capped at definition's MaxHoldTime. */
+	/** Hold elapsed seconds (0 if not pressed). Capped at the definition's MaxHoldTime. */
 	UFUNCTION(BlueprintPure, Category = "ChargedPunch")
 	float GetHoldElapsed() const { return HoldElapsed; }
 
@@ -72,85 +82,76 @@ private:
 	TWeakObjectPtr<UUpgradeManagerComponent> CachedUpgradeManager;
 	TWeakObjectPtr<UMeleeAttackComponent> CachedMeleeComp;
 
-	/** Active endpoint-preview VFX instance (spawned at hold-start, destroyed on release/cancel). */
-	UPROPERTY()
-	TObjectPtr<UNiagaraComponent> ActiveEndpointVFX;
-
-	/** Active charge-loop audio (spawned at threshold, stopped on release/cancel). */
+	/** Active charge-loop audio (spawned at rise start, stopped on release/cancel). */
 	UPROPERTY()
 	TObjectPtr<UAudioComponent> ActiveChargeLoop;
 
-	/** True while button is held. */
+	EChargedPunchPhase Phase = EChargedPunchPhase::None;
+
+	/** True while the melee button is held. */
 	bool bButtonHeld = false;
 
-	/** True once HoldElapsed crossed MinHoldTime AND pool was non-empty at that moment. */
-	bool bIsCharging = false;
-
-	/** Seconds the button has been held this press. */
+	/** Seconds the button has been held this press (capped at MaxHoldTime). */
 	float HoldElapsed = 0.0f;
 
 	/** Fractional pickups drained this tick — once it exceeds 1.0 we consume an integer count. */
 	float DrainAccumulator = 0.0f;
 
-	// ==================== Lunge Flight State ====================
-	// Active between StartLunge() and FinishLunge(). Tick interpolates LungeStart -> LungeEnd
-	// over LungeTotalDuration seconds via SetActorLocation (gravity disabled, mesh swapped).
+	/** Bonus damage captured at release so the slam keeps the charge level after HoldElapsed resets. */
+	float ChargedBonusDamage = 0.0f;
 
-	/** True while the player is mid-flight after a charged-punch release. */
-	bool bIsLunging = false;
+	/** Hover timer for the Buffer phase. */
+	float BufferElapsed = 0.0f;
 
-	FVector LungeStart = FVector::ZeroVector;
-	FVector LungeEnd = FVector::ZeroVector;
-	float LungeElapsed = 0.0f;
-	float LungeTotalDuration = 0.15f;
+	/** Timeout timer for the DropkickFollow phase. */
+	float DropkickWaitElapsed = 0.0f;
 
-	/** Saved CharacterMovement state restored when lunge finishes. */
+	/** Z the player was at when the rise started (cap reference for MaxRiseHeight). */
+	float RiseStartZ = 0.0f;
+
+	/** Ground point found at slam start (the descent target). */
+	FVector SlamGroundTarget = FVector::ZeroVector;
+
+	/** Saved CharacterMovement state captured at rise start, restored when the sequence ends. */
 	TEnumAsByte<EMovementMode> SavedMovementMode = MOVE_Walking;
 	float SavedGravityScale = 1.0f;
+	bool bMovementSaved = false;
 
-	// ==================== Input Callbacks ====================
+	/** True while we own the MeleeMesh view (entered at rise start). */
+	bool bOwnsMeleeMeshView = false;
 
-	UFUNCTION()
-	void HandleHoldStarted();
+	/** True while OnDropKickStarted / OnDropKickHit are bound (Buffer + DropkickFollow). */
+	bool bDropkickDelegatesBound = false;
 
-	UFUNCTION()
-	void HandleHoldReleased();
+	// ==================== Input / event callbacks ====================
 
-	// ==================== Charge Lifecycle ====================
+	UFUNCTION() void HandleHoldStarted();
+	UFUNCTION() void HandleHoldReleased();
+	UFUNCTION() void HandleDropKickStarted();
+	UFUNCTION() void HandleDropKickHit(AActor* HitActor, const FVector& HitLocation, float Damage);
 
-	/** First time HoldElapsed crosses MinHoldTime — spawn VFX/audio, mark bIsCharging. */
-	void EnterChargingState();
+	// ==================== Phase logic ====================
 
-	/** Stop charging (cancel or release) — destroy VFX/audio, clear state. */
-	void ExitChargingState();
+	void EnterRisingPhase();
+	void TickRise(float DeltaTime);
+	void EnterBufferPhase();
+	void TickBuffer(float DeltaTime);
+	void EnterSlamPhase();
+	void TickSlam(float DeltaTime);
+	void TickDropkickFollow(float DeltaTime);
 
-	/** Execute the punch (capsule sweep + lunge + damage). Called on release if bIsCharging. */
-	void ExecutePunch();
+	/** Radial AoE: overlap sphere at Origin, damage + knockback + VFX/sound per target, feed Combo. */
+	void DoSlamAoE(const FVector& Origin);
 
-	/**
-	 * Compute the endpoint of the punch given current hold elapsed.
-	 * Forward-trace from camera; clamp at first geometry hit; otherwise use desired distance.
-	 * Returns (endpoint, distance).
-	 */
-	void ComputeEndpoint(FVector& OutEndpoint, float& OutDistance) const;
+	/** End the whole sequence: stop charge SFX, unbind dropkick delegates, restore movement/mesh, reset to None. */
+	void EndSequence();
 
-	/** Sample distance from curve (or fallback) for a given hold time. */
-	float EvaluateDistance(float HoldTime) const;
+	void StopChargeLoop();
+	void CaptureMovement();
+	void RestoreMovement();
+	void BindDropkickDelegates();
+	void UnbindDropkickDelegates();
 
-	/** Sample bonus damage from curve (or fallback) for a given hold time. */
 	float EvaluateBonusDamage(float HoldTime) const;
-
-	/** Find Combo upgrade on the same character, if active, for multi-kill feed-back. */
 	UUpgrade_Combo* FindComboUpgrade() const;
-
-	// ==================== Lunge Lifecycle ====================
-
-	/** Start the visual lunge phase: lift player, disable gravity, switch mesh, play montage. */
-	void StartLunge(const FVector& StartPos, const FVector& EndPos);
-
-	/** Tick interpolation while bIsLunging — moves player from LungeStart toward LungeEnd. */
-	void TickLunge(float DeltaTime);
-
-	/** Restore everything that StartLunge changed (mesh view, gravity, movement mode). */
-	void FinishLunge();
 };

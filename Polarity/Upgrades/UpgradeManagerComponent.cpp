@@ -72,6 +72,15 @@ bool UUpgradeManagerComponent::GrantUpgrade(UUpgradeDefinition* Definition)
 		}
 	}
 
+	// Brand-new grant: refuse it if it is mutually exclusive with an already-owned upgrade.
+	// (Covers level-up choice, world pickups, and save-restore — all route through here.)
+	if (OwnsConflicting(Definition))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] '%s' GRANT REFUSED — mutually exclusive with an owned upgrade"),
+			*Definition->DisplayName.ToString());
+		return false;
+	}
+
 	if (!Definition->ComponentClass)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("UpgradeManager: No ComponentClass set on upgrade '%s'"), *Definition->DisplayName.ToString());
@@ -185,10 +194,78 @@ TArray<UUpgradeDefinition*> UUpgradeManagerComponent::GetAcquiredUpgrades() cons
 	return Result;
 }
 
+bool UUpgradeManagerComponent::OwnsConflicting(const UUpgradeDefinition* Candidate) const
+{
+	if (!Candidate)
+	{
+		return false;
+	}
+
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		const UUpgradeComponent* Comp = Pair.Value;
+		if (!Comp)
+		{
+			continue;
+		}
+		const UUpgradeDefinition* Owned = Comp->UpgradeDefinition;
+		if (!Owned || Owned == Candidate)
+		{
+			continue;
+		}
+
+		// Bidirectional — a conflict declared on either definition counts.
+		if (Candidate->MutuallyExclusiveWith.Contains(Owned->UpgradeTag) ||
+			Owned->MutuallyExclusiveWith.Contains(Candidate->UpgradeTag))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 UUpgradeComponent* UUpgradeManagerComponent::GetUpgradeComponent(FGameplayTag UpgradeTag) const
 {
 	const TObjectPtr<UUpgradeComponent>* Found = ActiveUpgrades.Find(UpgradeTag);
 	return Found ? Found->Get() : nullptr;
+}
+
+bool UUpgradeManagerComponent::HasStoredHealthPickupConsumer() const
+{
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		const UUpgradeComponent* Comp = Pair.Value;
+		if (!Comp)
+		{
+			continue;
+		}
+		const UUpgradeDefinition* Owned = Comp->UpgradeDefinition;
+		if (Owned && Owned->bUsesStoredHealthPickups)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+UInputAction* UUpgradeManagerComponent::GetHealSpendInputAction() const
+{
+	// Consumers are mutually exclusive, so at most one is owned — return the first found.
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		const UUpgradeComponent* Comp = Pair.Value;
+		if (!Comp)
+		{
+			continue;
+		}
+		const UUpgradeDefinition* Owned = Comp->UpgradeDefinition;
+		if (Owned && Owned->bUsesStoredHealthPickups && Owned->HealSpendInputAction)
+		{
+			return Owned->HealSpendInputAction;
+		}
+	}
+	return nullptr;
 }
 
 TArray<FGameplayTag> UUpgradeManagerComponent::GetUpgradeTagsForSave() const
@@ -239,6 +316,53 @@ void UUpgradeManagerComponent::RestoreUpgradesFromTags(const TArray<FGameplayTag
 				UE_LOG(LogTemp, Warning, TEXT("UpgradeManager: Could not find definition for saved tag '%s'"), *Tag.ToString());
 			}
 		}
+	}
+}
+
+void UUpgradeManagerComponent::RestoreUpgrades(const TMap<FGameplayTag, int32>& TagToLevel, const UUpgradeRegistry* Registry)
+{
+	if (!Registry)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UpgradeManager: RestoreUpgrades called with null registry"));
+		return;
+	}
+
+	// Drop any owned upgrades that aren't in the saved set.
+	TArray<FGameplayTag> CurrentTags;
+	ActiveUpgrades.GetKeys(CurrentTags);
+	for (const FGameplayTag& Tag : CurrentTags)
+	{
+		if (!TagToLevel.Contains(Tag))
+		{
+			RemoveUpgrade(Tag);
+		}
+	}
+
+	// Grant / level each saved upgrade up to its stored level.
+	// GrantUpgrade lifts the level by 1 each call (first call creates at Lv 1), so we loop.
+	for (const TPair<FGameplayTag, int32>& Pair : TagToLevel)
+	{
+		UUpgradeDefinition* Definition = Registry->FindByTag(Pair.Key);
+		if (!Definition)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UpgradeManager: RestoreUpgrades — no definition for tag '%s'"), *Pair.Key.ToString());
+			continue;
+		}
+
+		const int32 TargetLevel = FMath::Clamp(Pair.Value, 1, FMath::Max(1, Definition->MaxLevel));
+
+		// Guard caps iterations at TargetLevel so a misbehaving GrantUpgrade can't spin forever.
+		int32 Guard = 0;
+		while (GetUpgradeLevel(Pair.Key) < TargetLevel && Guard++ < TargetLevel)
+		{
+			if (!GrantUpgrade(Definition))
+			{
+				break; // maxed out or refused (e.g. mutually exclusive)
+			}
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] RestoreUpgrades: '%s' -> Lv %d (wanted %d)"),
+			*Definition->DisplayName.ToString(), GetUpgradeLevel(Pair.Key), TargetLevel);
 	}
 }
 

@@ -254,7 +254,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 {
 	if (!MovementSettings)
 	{
-		return Super::GetMaxSpeed() * DamageSpeedMultiplier;
+		return Super::GetMaxSpeed() * DamageSpeedMultiplier * ExternalSpeedMultiplier;
 	}
 
 	float BaseSpeed;
@@ -288,7 +288,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 		}
 	}
 
-	return BaseSpeed * DamageSpeedMultiplier;
+	return BaseSpeed * DamageSpeedMultiplier * ExternalSpeedMultiplier;
 }
 
 float UApexMovementComponent::GetMaxAcceleration() const

@@ -8,6 +8,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
+#include "EMFVelocityModifier.h"
 
 UUpgrade_AirKick::UUpgrade_AirKick()
 {
@@ -58,22 +60,36 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		return;
 	}
 
-	// Must be hitting an EMF physics prop
-	AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor);
-	if (!Prop)
-	{
-		return;
-	}
-
 	AShooterCharacter* Character = GetShooterCharacter();
 	if (!Character)
 	{
 		return;
 	}
 
-	// Player must be airborne
+	// Air Mail only triggers from a mid-air melee hit.
 	UCharacterMovementComponent* MovementComp = Character->GetCharacterMovement();
-	if (!MovementComp || !MovementComp->IsFalling())
+	const bool bPlayerAirborne = MovementComp && MovementComp->IsFalling();
+
+	// --- NPC branch: air-melee a max-charge enemy → launch it into the air ---
+	// Reuses the reverse-channeling throw (AShooterNPC::LaunchIntoAir). Works on already-stunned
+	// enemies; humanoids are immune (their bodies can't be electrified to max charge anyway).
+	if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
+	{
+		if (bPlayerAirborne && IsNPCAtMaxCharge(NPC))
+		{
+			LaunchNPC(NPC, Character, HitLocation);
+		}
+		return; // NPCs never take the prop path below
+	}
+
+	// --- Prop branch (existing behavior): air-kick an airborne EMF physics prop ---
+	AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor);
+	if (!Prop)
+	{
+		return;
+	}
+
+	if (!bPlayerAirborne)
 	{
 		return;
 	}
@@ -204,4 +220,79 @@ bool UUpgrade_AirKick::IsPropAirborne(AActor* Prop) const
 	);
 
 	return !bHitGround;
+}
+
+bool UUpgrade_AirKick::IsNPCAtMaxCharge(AShooterNPC* NPC) const
+{
+	if (!NPC)
+	{
+		return false;
+	}
+
+	UEMFVelocityModifier* EMF = NPC->FindComponentByClass<UEMFVelocityModifier>();
+	if (!EMF)
+	{
+		return false;
+	}
+
+	// Charge accumulation is clamped to MaxBaseCharge, so |GetCharge()| reaching it == "max charge".
+	return FMath::Abs(EMF->GetCharge()) >= (EMF->MaxBaseCharge - KINDA_SMALL_NUMBER);
+}
+
+void UUpgrade_AirKick::LaunchNPC(AShooterNPC* NPC, AShooterCharacter* Character, const FVector& HitLocation) const
+{
+	if (!NPC || !Character || !DefAirKick.IsValid())
+	{
+		return;
+	}
+
+	// Launch direction: camera-forward blended toward straight up by NPCLaunchUpBias.
+	FVector ForwardDir = Character->GetActorForwardVector();
+	if (APlayerController* PC = Cast<APlayerController>(Character->GetController()))
+	{
+		FVector ViewLocation;
+		FRotator ViewRotation;
+		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		ForwardDir = ViewRotation.Vector();
+	}
+
+	const float UpBias = FMath::Clamp(DefAirKick->NPCLaunchUpBias, 0.0f, 1.0f);
+	FVector LaunchDir = (ForwardDir * (1.0f - UpBias) + FVector::UpVector * UpBias).GetSafeNormal();
+	if (LaunchDir.IsNearlyZero())
+	{
+		LaunchDir = FVector::UpVector;
+	}
+
+	const FVector LaunchVelocity = LaunchDir * DefAirKick->NPCLaunchSpeed;
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL_DEBUG] %s air-launched max-charge NPC %s — speed=%.0f, upBias=%.2f"),
+		*Character->GetName(), *NPC->GetName(), DefAirKick->NPCLaunchSpeed, UpBias);
+
+	NPC->LaunchIntoAir(LaunchVelocity);
+
+	// Reuse the kick's cosmetic feedback at the contact point.
+	if (DefAirKick->KickImpactFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(),
+			DefAirKick->KickImpactFX,
+			HitLocation,
+			LaunchDir.Rotation(),
+			FVector(DefAirKick->KickImpactFXScale),
+			true,  // auto-destroy
+			true,  // auto-activate
+			ENCPoolMethod::None
+		);
+	}
+
+	if (DefAirKick->KickSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(
+			GetWorld(),
+			DefAirKick->KickSound,
+			HitLocation,
+			DefAirKick->KickSoundVolume,
+			DefAirKick->KickSoundPitch
+		);
+	}
 }

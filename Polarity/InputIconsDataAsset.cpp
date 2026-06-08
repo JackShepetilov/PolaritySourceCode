@@ -149,6 +149,18 @@ FString UInputIconsDataAsset::KeyToTextureName(const FKey& Key) const
 	{
 		KeyName = TEXT("Backspace");
 	}
+	// Top-row number keys: FKey::ToString() returns the WORD ("Two"), but the icon textures are named
+	// with the DIGIT (T_Key_2). Map the words back to digits so auto-discovery finds them.
+	else if (KeyName == TEXT("Zero"))  { KeyName = TEXT("0"); }
+	else if (KeyName == TEXT("One"))   { KeyName = TEXT("1"); }
+	else if (KeyName == TEXT("Two"))   { KeyName = TEXT("2"); }
+	else if (KeyName == TEXT("Three")) { KeyName = TEXT("3"); }
+	else if (KeyName == TEXT("Four"))  { KeyName = TEXT("4"); }
+	else if (KeyName == TEXT("Five"))  { KeyName = TEXT("5"); }
+	else if (KeyName == TEXT("Six"))   { KeyName = TEXT("6"); }
+	else if (KeyName == TEXT("Seven")) { KeyName = TEXT("7"); }
+	else if (KeyName == TEXT("Eight")) { KeyName = TEXT("8"); }
+	else if (KeyName == TEXT("Nine"))  { KeyName = TEXT("9"); }
 
 	return TexturePrefix + KeyName;
 }

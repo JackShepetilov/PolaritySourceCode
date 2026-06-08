@@ -889,8 +889,19 @@ void UTutorialSubsystem::ResetCompletion(FName TutorialID)
 void UTutorialSubsystem::ResetAllProgress()
 {
 	CompletedTutorials.Empty();
+	EverShownBarEntries.Empty();
 
 	UE_LOG(LogPolarity, Log, TEXT("All tutorial progress reset"));
+}
+
+bool UTutorialSubsystem::MarkBarEntryFirstShownIfNew(FName EntryKey)
+{
+	if (EntryKey.IsNone() || EverShownBarEntries.Contains(EntryKey))
+	{
+		return false;
+	}
+	EverShownBarEntries.Add(EntryKey);
+	return true;
 }
 
 // ==================== Input Icon Lookup ====================

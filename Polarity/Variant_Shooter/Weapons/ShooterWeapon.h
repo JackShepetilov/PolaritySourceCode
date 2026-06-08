@@ -24,6 +24,7 @@ class UDamageType;
 class UCharacterMovementComponent;
 class USoundAttenuation;
 class UEMF_FieldComponent;
+class UInputAction;
 
 // Delegate for heat updates (for UI binding)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHeatChanged, float, NewHeat);
@@ -43,6 +44,9 @@ class POLARITY_API AShooterWeapon : public AActor
 {
 	GENERATED_BODY()
 
+	// The bolt subsystem drives deferred (dodgeable) hitscan damage and calls ApplyHitscanDamage.
+	friend class UEnemyBeamBoltSubsystem;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	USkeletalMeshComponent* FirstPersonMesh;
 
@@ -57,10 +61,44 @@ protected:
 
 	IShooterWeaponHolder* WeaponOwner;
 
+	// ==================== Input ====================
+
+	/** Input action that switches/equips this weapon (the per-weapon "hotkey"). Multiple weapon
+	 *  classes may share one action (e.g. all ranged weapons → the same key) — only one is ever
+	 *  owned at a time, so the selection is unambiguous. The character binds the union of these via
+	 *  its WeaponSwitchActions list. Leave null for weapons reachable only via the cycle key. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> SwitchAction;
+
 	// ==================== Firing Mode ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing")
 	bool bUseHitscan = false;
+
+	// ==================== Dodgeable Bolt ====================
+	// Enemy hitscan ALWAYS fires as a "bolt": a damage region that travels along the aim line at
+	// HitscanBoltSpeed and only hurts the player if they're still on the line when it passes. The
+	// Low-Health Defense upgrade slows it via the player's EnemyBoltSlowMultiplier (so it becomes
+	// dodgeable at low HP). These values MUST mirror the enemy beam Niagara asset's Custom HLSL so
+	// the visible tracer matches the damage region — expose Speed / SpeedVariance / beamLength as
+	// User parameters on that asset (C++ pushes the effective values per shot).
+
+	/** Default bolt travel speed (cm/s). Fast by default (≈ instant feel); the Low-Health Defense
+	 *  upgrade multiplies it down (EnemyBoltSlowMultiplier) so bolts become dodgeable at low HP. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing|Bolt", meta = (ClampMin = "100.0"))
+	float HitscanBoltSpeed = 30000.0f;
+
+	/** Per-shot speed variance (cm/s): RandSpeed = HitscanBoltSpeed + variance * sin(RandomSeed). Must match the HLSL. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing|Bolt", meta = (ClampMin = "0.0"))
+	float HitscanBoltSpeedVariance = 15000.0f;
+
+	/** Length of the moving damage window along the beam (cm). Must match the HLSL beamLength. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing|Bolt", meta = (ClampMin = "1.0"))
+	float HitscanBoltLength = 500.0f;
+
+	/** Perpendicular tolerance (cm) from the beam line within which the player counts as hit. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing|Bolt", meta = (ClampMin = "1.0"))
+	float HitscanBoltRadius = 80.0f;
 
 	// ==================== Charge-Based Firing ====================
 
@@ -615,8 +653,13 @@ protected:
 	/** Get owner's EMF charge value. Returns 0 if owner has no EMF component. */
 	float GetOwnerCharge() const;
 
+	/** Spawn the beam tracer. The optional Override* params feed the low-HP dodgeable-bolt
+	 *  values (Speed / SpeedVariance / beamLength) and a fixed RandomSeed into the Niagara asset
+	 *  so the visible tracer matches the C++ damage region. Pass < 0 to leave the asset defaults. */
 	UFUNCTION(BlueprintCallable, Category = "VFX")
-	void SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier = 1.0f);
+	void SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier = 1.0f,
+		float OverrideBoltSpeed = -1.0f, float OverrideBoltSpeedVariance = -1.0f,
+		float OverrideBoltLength = -1.0f, float OverrideRandomSeed = -1.0f);
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnWaveFronts(const FVector& Start, const FVector& End);
@@ -671,6 +714,9 @@ public:
 
 	int32 GetMagazineSize() const { return MagazineSize; }
 	int32 GetBulletCount() const { return CurrentBullets; }
+
+	/** Input action that switches/equips this weapon (per-weapon hotkey). May be null. */
+	UInputAction* GetSwitchAction() const { return SwitchAction; }
 
 	/** Set bullet count (used for checkpoint restore) */
 	void SetBulletCount(int32 NewCount) { CurrentBullets = FMath::Clamp(NewCount, 0, MagazineSize); }

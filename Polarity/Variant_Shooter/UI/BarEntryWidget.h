@@ -43,6 +43,13 @@ public:
 	/** Play the spawn animation (called by the bar right after the entry is added). */
 	void PlayIntro();
 
+	/** Play the special FIRST-TIME celebration (only the first time this entry category appears
+	 *  this session). If the BP event is left empty, nothing extra happens. */
+	void PlayFirstTimeIntro();
+
+	/** Set (or clear) the keybind hint shown over this entry. Empty text + null icon hides it. */
+	void SetKeybindHint(const FText& KeyText, UTexture2D* KeyIcon);
+
 	/** Play the removal animation. Returns its length in seconds (0 = remove immediately). */
 	float PlayOutro();
 
@@ -64,6 +71,15 @@ protected:
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Play Intro"))
 	void BP_PlayIntro();
+
+	/** First-time-acquisition celebration. Play a louder/flashier intro than BP_PlayIntro. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Play First Time Intro"))
+	void BP_PlayFirstTimeIntro();
+
+	/** Show the "press X" hint over this entry. KeyText is the display name (fallback if no icon);
+	 *  KeyIcon is the resolved key glyph (may be null). Empty text + null icon should hide the hint. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Set Keybind Hint"))
+	void BP_SetKeybindHint(const FText& KeyText, UTexture2D* KeyIcon);
 
 	/** Return the outro animation length in seconds (0 = no animation, remove immediately). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Play Outro"))

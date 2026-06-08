@@ -9,6 +9,7 @@
 #include "UpgradeDefinition.generated.h"
 
 class UUpgradeComponent;
+class UInputAction;
 
 /**
  * One "stat row" displayed on the upgrade card in the level-up Choice UI — Hades-style.
@@ -71,6 +72,29 @@ public:
 	/** Maximum level this upgrade can reach. 1 = single-level (legacy behaviour, drops out of pool after first grant). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade", meta = (ClampMin = "1"))
 	int32 MaxLevel = 1;
+
+	/**
+	 * Upgrade tags this one is mutually exclusive with. If the player already owns any
+	 * upgrade listed here — or one whose own list names this upgrade — this upgrade is
+	 * filtered out of the level-up choice pool and UUpgradeManagerComponent::GrantUpgrade
+	 * refuses it. The check is bidirectional, so declaring the conflict on either side is enough.
+	 * Used e.g. for the full-HP vs low-HP archetypes (a player can't run both).
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
+	TArray<FGameplayTag> MutuallyExclusiveWith;
+
+	// ==================== Shared Health-Pickup Pool ====================
+
+	/** True if this upgrade CONSUMES the shared stored-health-pickup pool (HealthBlast, ChargedPunch, …).
+	 *  Drives the HUD: the heal-charge entry is only shown while the player owns at least one consumer. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Shared Pool")
+	bool bUsesStoredHealthPickups = false;
+
+	/** Input action that SPENDS the stored health pickups for this upgrade (e.g. Channel for HealthBlast,
+	 *  Melee for ChargedPunch). Optional — the HUD shows a "press X" hint over the heal entry when set.
+	 *  Leave null for no hint. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Shared Pool")
+	TObjectPtr<UInputAction> HealSpendInputAction = nullptr;
 
 	/** Display name shown in UI and on world pickup */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|UI")

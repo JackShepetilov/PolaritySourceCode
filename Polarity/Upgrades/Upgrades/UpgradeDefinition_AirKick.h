@@ -74,6 +74,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick", meta = (ClampMin = "0.0"))
 	float KickSpinSpeed = 720.0f;
 
+	// ==================== NPC Launch (air-melee a max-charge enemy) ====================
+
+	/** Speed at which a max-charge NPC is launched when air-melee'd (cm/s). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|NPC Launch", meta = (ClampMin = "0.0"))
+	float NPCLaunchSpeed = 2500.0f;
+
+	/** How much the NPC launch direction is biased toward straight up
+	 *  (0 = camera-forward, 1 = straight up). Blended, then normalized. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Kick|NPC Launch", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float NPCLaunchUpBias = 0.6f;
+
 	// ==================== Per-Level Explosion ====================
 
 	/**

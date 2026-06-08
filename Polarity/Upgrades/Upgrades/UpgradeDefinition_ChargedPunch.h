@@ -114,6 +114,36 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Animation")
 	TObjectPtr<UAnimMontage> AirAttackMontage;
 
+	// ==================== Rise / Slam (reworked behaviour) ====================
+	// Hold the melee button → the player rises (RiseSpeed, capped at MaxRiseHeight). On release
+	// there is a ReleaseBufferTime hover during which a dropkick can replace the slam; otherwise
+	// the player slams down at SlamDescentSpeed and deals radial AoE damage within SlamRadius.
+
+	/** Upward speed (cm/s) while the button is held. The player rises until MaxRiseHeight. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Rise", meta = (ClampMin = "0.0", ClampMax = "5000.0"))
+	float RiseSpeed = 800.0f;
+
+	/** Maximum height (cm) the player can rise above where the charge started. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Rise", meta = (ClampMin = "0.0", ClampMax = "3000.0"))
+	float MaxRiseHeight = 700.0f;
+
+	/** Grace window (seconds) after release, during which the player hovers before the slam begins —
+	 *  time to input a dropkick that replaces the fall. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Slam", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ReleaseBufferTime = 0.2f;
+
+	/** Downward speed (cm/s) of the slam descent. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Slam", meta = (ClampMin = "100.0", ClampMax = "10000.0"))
+	float SlamDescentSpeed = 3500.0f;
+
+	/** Radius (cm) of the slam's AoE damage sphere — at the landing point, or at the dropkick target. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Slam", meta = (ClampMin = "50.0", ClampMax = "2000.0"))
+	float SlamRadius = 400.0f;
+
+	/** Max seconds to wait for the dropkick to connect after it replaces the slam, before giving up. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ChargedPunch|Slam", meta = (ClampMin = "0.1", ClampMax = "5.0"))
+	float DropkickHitTimeout = 2.0f;
+
 	// ==================== Visual / Audio ====================
 
 	/**
