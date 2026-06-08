@@ -1410,6 +1410,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void EquipStartingWeaponAnimated();
 
+	/** Hide the player and lock input for an intro cutscene (the cinematic camera frames the boss).
+	 *  Hides the first-person AND third-person meshes (+ any current weapon), stops movement, kills
+	 *  camera shakes. The player should already be PLACED at its fight-start spot — no teleport here. */
+	UFUNCTION(BlueprintCallable, Category = "Run Start")
+	void BeginIntroCutscene();
+
+	/** Reveal the player, restore input, and draw the starting weapon (animated raise) at the end of the
+	 *  intro cutscene. The camera blend back to the player is done in BP (SetViewTargetWithBlend) so the
+	 *  blend feel is author-controlled; no teleport. */
+	UFUNCTION(BlueprintCallable, Category = "Run Start")
+	void EndIntroCutscene();
+
 	/** Begin only the lower phase of a weapon switch. Mesh smoothly drops and pauses at the
 	 *  bottom waiting for FinishWeaponSwitch(NewWeapon). Used when the new weapon is in flight
 	 *  (yank pull) — lets the lower animation run in parallel with the pull so the new weapon
