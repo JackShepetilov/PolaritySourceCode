@@ -116,6 +116,11 @@ struct FBossFinisherSettings
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeChargeHoldStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeChargeHoldReleased);
 
+// Broadcast whenever the owned-weapon inventory changes (a weapon is added or removed). Param-less —
+// subscribers re-enumerate via GetOwnedWeapons(). Used by the HUD ability bar to keep one persistent
+// entry per owned ammo/melee weapon (not just the active one).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponInventoryChanged);
+
 /**
  *  A player controllable first person shooter character
  *  Manages a weapon inventory through the IShooterWeaponHolder interface
@@ -189,9 +194,15 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* SwitchWeaponAction;
 
-	/** Map of input actions to specific weapon classes (direct weapon hotkeys) */
+	/** Switch weapon backward input action (cycles through weapons in reverse order). */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* SwitchWeaponBackAction;
+
+	/** Set of weapon-switch input actions to listen for (e.g. IA_Slot1, IA_Slot2). WHICH weapon a key
+	 *  selects is declared per-weapon via AShooterWeapon::SwitchAction — so several weapon classes can
+	 *  share one key (only one is ever owned at a time). List here every action used by any weapon. */
 	UPROPERTY(EditAnywhere, Category = "Input|Weapon Hotkeys")
-	TMap<UInputAction*, TSubclassOf<AShooterWeapon>> WeaponHotkeys;
+	TArray<TObjectPtr<UInputAction>> WeaponSwitchActions;
 
 	/** Aim down sights input action */
 	UPROPERTY(EditAnywhere, Category = "Input")
@@ -204,6 +215,11 @@ protected:
 	/** Shield toggle input action (tap = raise/lower, hold = throw). */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* ShieldToggleAction;
+
+	/** Activate the currently selected ability (press = TryActivate, release = OnButtonReleased).
+	 *  Press/release split feeds the ability's own Tap-vs-Hold ActivationMode. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* AbilityAction;
 
 	/** Name of the first person mesh weapon socket */
 	UPROPERTY(EditAnywhere, Category = "Weapons")
@@ -630,6 +646,13 @@ protected:
 	/** Timer for low health warning sounds */
 	float LowHealthWarningTimer = 0.0f;
 
+	/** Backing flag for IsLowHealthDefenseActive — maintained by UUpgrade_LowHealthDefense.
+	 *  Gates the nearby-enemy slow-mo effect. */
+	bool bLowHealthDefenseActive = false;
+
+	/** Enemy-bolt speed multiplier (1.0 default; lowered by the Low-Health Defense upgrade). */
+	float EnemyBoltSlowMultiplier = 1.0f;
+
 	// ==================== Damage Feedback ====================
 
 	/** Camera shake to play when taking damage. Intensity is scaled by DamageToCameraShakeCurve */
@@ -849,6 +872,11 @@ public:
 	/** Melee weapon equipped/unequipped state (fires on weapon switch and weapon break) */
 	FMeleeWeaponEquippedDelegate OnMeleeWeaponEquipped;
 
+	/** Fired when the owned-weapon inventory changes (weapon added/removed). Subscribers re-enumerate
+	 *  via GetOwnedWeapons(). Used by the HUD ability bar to maintain one entry per owned weapon. */
+	UPROPERTY(BlueprintAssignable, Category = "Player|Events")
+	FOnWeaponInventoryChanged OnWeaponInventoryChanged;
+
 	/** Turret aim telegraph: broadcasts full list of turrets currently aiming at the player on every change.
 	 *  BP computes per-turret intensity (e.g. dot product + curve) and drives PP settings accordingly. */
 	UPROPERTY(BlueprintAssignable, Category = "Player|Events")
@@ -930,6 +958,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetMaxHP() const { return MaxHP; }
 
+	/** True while the Low-Health Defense upgrade is owned AND the player is below its threshold.
+	 *  Maintained by UUpgrade_LowHealthDefense; read by enemy weapons (AShooterWeapon) to switch
+	 *  their hitscan into dodgeable traveling bolts. */
+	UFUNCTION(BlueprintPure, Category = "Health")
+	bool IsLowHealthDefenseActive() const { return bLowHealthDefenseActive; }
+
+	/** Called by the Low-Health Defense upgrade when its active state changes. */
+	UFUNCTION(BlueprintCallable, Category = "Health")
+	void SetLowHealthDefenseActive(bool bActive) { bLowHealthDefenseActive = bActive; }
+
+	/** Speed multiplier enemy bolts use against this player (1.0 = full/default speed). The
+	 *  Low-Health Defense upgrade drives this below 1.0 (curve-scaled) so enemy bolts slow down
+	 *  and become dodgeable as HP drops. Read by AShooterWeapon when spawning a bolt. */
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetEnemyBoltSlowMultiplier() const { return EnemyBoltSlowMultiplier; }
+
+	/** Set by the Low-Health Defense upgrade (1.0 when inactive / above threshold). */
+	UFUNCTION(BlueprintCallable, Category = "Health")
+	void SetEnemyBoltSlowMultiplier(float Multiplier) { EnemyBoltSlowMultiplier = Multiplier; }
+
 	/** Returns true if player is currently being knocked back */
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	bool IsInKnockback() const { return bIsInKnockback; }
@@ -972,6 +1020,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoSwitchWeapon();
 
+	/** Handles reverse switch weapon input (cycles through weapons in reverse order). */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoSwitchWeaponBackward();
+
+	/** Shared weapon-cycle helper. Direction == +1 selects the next weapon, -1 the previous;
+	 *  wraps around both ends of OwnedWeapons. Honors the same melee/charge/cast/in-progress guards. */
+	void CycleWeapon(int32 Direction);
+
 	/** Press handler for SwitchWeaponAction — starts hold timer for throw-yanked detection. */
 	void OnSwitchWeaponPressed();
 
@@ -984,9 +1040,10 @@ public:
 	UFUNCTION()
 	void OnSwapHoldThresholdFired();
 
-	/** Handles weapon hotkey input - switches to specific weapon class if owned */
+	/** Handles a weapon-switch key: equips the OWNED weapon whose SwitchAction matches the pressed
+	 *  action (if not already equipped). Several weapon classes may map to one action; only one is owned. */
 	UFUNCTION(BlueprintCallable, Category = "Input")
-	void DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass);
+	void DoWeaponSwitchByAction(UInputAction* Action);
 
 	/** Returns true if weapon switch is currently in progress */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
@@ -1018,6 +1075,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoMeleeReleased();
+
+	/** Called on ability button press (ETriggerEvent::Started). Calls AbilityComponent->TryActivate(). */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoAbilityPressed();
+
+	/** Called on ability button release (ETriggerEvent::Completed). Calls AbilityComponent->OnButtonReleased(). */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoAbilityReleased();
 
 	// ==================== Melee Hold Input Delegates ====================
 	// Used by upgrades that need to know when the melee button is pressed/released,
@@ -1069,6 +1134,18 @@ public:
 	/** Returns the currently equipped weapon */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	AShooterWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
+
+	/** Returns the input action that activates the ability (for HUD keybind hints; may be null). */
+	UFUNCTION(BlueprintPure, Category = "Abilities")
+	UInputAction* GetAbilityAction() const { return AbilityAction; }
+
+	/** Read-only access to the owned-weapon inventory (excludes hidden Bandolier reserve copies). */
+	const TArray<AShooterWeapon*>& GetOwnedWeapons() const { return OwnedWeapons; }
+
+	/** Returns the input action that switches/equips the given owned weapon: its own SwitchAction if set,
+	 *  else the cycle SwitchWeaponAction. Null if neither is set. Used for the HUD "press X to equip" hint. */
+	UFUNCTION(BlueprintPure, Category = "Weapons")
+	UInputAction* GetSwitchInputActionForWeapon(const AShooterWeapon* Weapon) const;
 
 	/** Sets the target left hand IK alpha (0 = detached, 1 = fully attached). Use for wallrun, melee, etc. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Left Hand IK")
@@ -1326,6 +1403,12 @@ public:
 	 *  until landing, so the opening arc is deterministic. */
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void BeginRunLaunch(const FVector& LaunchVelocity);
+
+	/** Grants StartingWeaponClass and plays the procedural weapon-raise (smooth draw, same motion as the
+	 *  melee "show weapon" recovery). Called from Landed() on toss maps and from BP after the boss intro
+	 *  cutscene. No-op if StartingWeaponClass is unset. */
+	UFUNCTION(BlueprintCallable, Category = "Run Start")
+	void EquipStartingWeaponAnimated();
 
 	/** Begin only the lower phase of a weapon switch. Mesh smoothly drops and pauses at the
 	 *  bottom waiting for FinishWeaponSwitch(NewWeapon). Used when the new weapon is in flight

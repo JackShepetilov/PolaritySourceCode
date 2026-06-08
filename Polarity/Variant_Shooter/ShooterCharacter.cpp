@@ -20,6 +20,9 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputCoreTypes.h"
+#include "Engine/LocalPlayer.h"
 #include "Components/InputComponent.h"
 #include "Components/PawnNoiseEmitterComponent.h"
 #include "Components/AudioComponent.h"
@@ -42,6 +45,7 @@
 #include "StyleComponent.h"
 #include "StyleAction.h"
 #include "Polarity/Upgrades/UpgradeRegistry.h"
+#include "Variant_Shooter/Run/RunSubsystem.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
@@ -105,6 +109,19 @@ USkeletalMeshComponent* AShooterCharacter::GetMeleeMesh() const
 void AShooterCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// ==================== Restore run-scoped upgrades (cross-level carry) ====================
+	// The character is rebuilt on every OpenLevel; the run's upgrade ledger lives on the
+	// GameInstance (URunSubsystem) and is re-applied here, then kept in sync as the player
+	// gains more upgrades. HP and weapons are intentionally NOT carried (full heal each biome,
+	// fixed loadout) — only upgrades persist.
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>())
+		{
+			Run->BindUpgradeManager(UpgradeManager, UpgradeRegistry);
+		}
+	}
 
 	// Initialize HP based on StartingHPPercent (1.0 = full HP)
 	CurrentHP = MaxHP * FMath::Clamp(StartingHPPercent, 0.0f, 1.0f);
@@ -239,6 +256,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::OnSwitchWeaponPressed);
 		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Completed, this, &AShooterCharacter::OnSwitchWeaponReleased);
 
+		// Reverse cycle (e.g. mouse wheel down) — simple single-shot per press, no tap/hold throw logic.
+		if (SwitchWeaponBackAction)
+		{
+			EnhancedInputComponent->BindAction(SwitchWeaponBackAction, ETriggerEvent::Started, this, &AShooterCharacter::DoSwitchWeaponBackward);
+		}
+
 		// ADS (hold to aim)
 		if (ADSAction)
 		{
@@ -262,12 +285,22 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EnhancedInputComponent->BindAction(ShieldToggleAction, ETriggerEvent::Started, this, &AShooterCharacter::OnShieldTogglePressed);
 		}
 
-		// Weapon hotkeys
-		for (const auto& Hotkey : WeaponHotkeys)
+		// Ability activation. Started = press (TryActivate), Completed = release (OnButtonReleased) —
+		// the press/release pair feeds the ability's own Tap-vs-Hold ActivationMode (do NOT use Triggered).
+		if (AbilityAction)
 		{
-			if (Hotkey.Key && Hotkey.Value)
+			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Started, this, &AShooterCharacter::DoAbilityPressed);
+			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoAbilityReleased);
+		}
+
+		// Weapon-switch keys. Each weapon declares its own SwitchAction; we bind the listed actions and
+		// the handler resolves which OWNED weapon the pressed action selects (so several weapon classes
+		// can share one key — only one is owned at a time).
+		for (UInputAction* SwitchActionEntry : WeaponSwitchActions)
+		{
+			if (SwitchActionEntry)
 			{
-				EnhancedInputComponent->BindAction(Hotkey.Key, ETriggerEvent::Triggered, this, &AShooterCharacter::DoWeaponHotkey, Hotkey.Value);
+				EnhancedInputComponent->BindAction(SwitchActionEntry, ETriggerEvent::Triggered, this, &AShooterCharacter::DoWeaponSwitchByAction, SwitchActionEntry);
 			}
 		}
 	}
@@ -459,6 +492,18 @@ void AShooterCharacter::DoStopFiring()
 
 void AShooterCharacter::DoSwitchWeapon()
 {
+	// Forward cycle (next weapon).
+	CycleWeapon(1);
+}
+
+void AShooterCharacter::DoSwitchWeaponBackward()
+{
+	// Reverse cycle (previous weapon) — bound to SwitchWeaponBackAction (e.g. mouse wheel down).
+	CycleWeapon(-1);
+}
+
+void AShooterCharacter::CycleWeapon(int32 Direction)
+{
 	// Don't switch if melee attacking
 	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
 	{
@@ -490,26 +535,28 @@ void AShooterCharacter::DoSwitchWeapon()
 	{
 		// Find the index of the current weapon in the owned list
 		int32 WeaponIndex = OwnedWeapons.Find(CurrentWeapon);
-
-		// Is this the last weapon?
-		if (WeaponIndex == OwnedWeapons.Num() - 1)
+		if (WeaponIndex == INDEX_NONE)
 		{
-			// Loop back to the beginning of the array
 			WeaponIndex = 0;
 		}
-		else
-		{
-			// Select the next weapon index
-			++WeaponIndex;
-		}
+
+		// Step by Direction (+1 = next, -1 = previous), wrapping around both ends.
+		// Adding Count before the modulo keeps the result non-negative when Direction == -1.
+		const int32 Count = OwnedWeapons.Num();
+		WeaponIndex = (WeaponIndex + Direction + Count) % Count;
 
 		// Start animated switch to the new weapon
 		StartWeaponSwitch(OwnedWeapons[WeaponIndex]);
 	}
 }
 
-void AShooterCharacter::DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass)
+void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 {
+	if (!Action)
+	{
+		return;
+	}
+
 	// Don't switch if melee attacking
 	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
 	{
@@ -534,13 +581,15 @@ void AShooterCharacter::DoWeaponHotkey(TSubclassOf<AShooterWeapon> WeaponClass)
 		return;
 	}
 
-	// Find weapon of this class in our inventory
-	AShooterWeapon* TargetWeapon = FindWeaponOfType(WeaponClass);
-
-	// Only switch if we own this weapon and it's not already equipped
-	if (TargetWeapon && TargetWeapon != CurrentWeapon)
+	// Equip the owned weapon whose per-weapon SwitchAction matches the pressed key (if not already held).
+	// Several weapon classes can share one action, but only one is ever owned, so the match is unambiguous.
+	for (AShooterWeapon* TargetWeapon : OwnedWeapons)
 	{
-		StartWeaponSwitch(TargetWeapon);
+		if (TargetWeapon && TargetWeapon->GetSwitchAction() == Action && TargetWeapon != CurrentWeapon)
+		{
+			StartWeaponSwitch(TargetWeapon);
+			return;
+		}
 	}
 }
 
@@ -801,6 +850,51 @@ void AShooterCharacter::DoMeleeReleased()
 	// Broadcast for hold-based upgrades to finalize. Subscribers decide whether
 	// the elapsed hold time crossed their threshold and act accordingly.
 	OnMeleeChargeHoldReleased.Broadcast();
+}
+
+void AShooterCharacter::DoAbilityPressed()
+{
+	// Diagnostic: confirms the C++ IA_Ability binding is the trigger. If the ability fires WITHOUT this
+	// line appearing in the log, something else (a Blueprint node or another IMC mapping) called it.
+	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_INPUT_DEBUG] DoAbilityPressed (C++ AbilityAction binding) @ %.3fs"),
+		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
+
+	// Dump EVERY key currently mapped to AbilityAction across ALL active mapping contexts — this is what
+	// the engine actually sees (not just one IMC asset). If a mouse-wheel / swap key shows up here, then
+	// IA_Ability is mapped to it in one of the active IMCs, and the bug is in the input data, not this code.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (ULocalPlayer* LP = PC->GetLocalPlayer())
+		{
+			if (UEnhancedInputLocalPlayerSubsystem* Sub = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+			{
+				FString KeyList;
+				for (const FKey& MappedKey : Sub->QueryKeysMappedToAction(AbilityAction))
+				{
+					KeyList += MappedKey.ToString() + TEXT(" ");
+				}
+				UE_LOG(LogTemp, Warning, TEXT("[ABILITY_INPUT_DEBUG]   AbilityAction='%s' is mapped to keys: [ %s]"),
+					*GetNameSafe(AbilityAction), *KeyList);
+			}
+		}
+	}
+
+	// The ability component / active handler decide Tap-vs-Hold internally.
+	if (AbilityComponent)
+	{
+		AbilityComponent->TryActivate();
+	}
+}
+
+void AShooterCharacter::DoAbilityReleased()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_INPUT_DEBUG] DoAbilityReleased (C++ AbilityAction binding) @ %.3fs"),
+		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
+
+	if (AbilityComponent)
+	{
+		AbilityComponent->OnButtonReleased();
+	}
 }
 
 void AShooterCharacter::Tick(float DeltaTime)
@@ -1705,32 +1799,40 @@ void AShooterCharacter::Landed(const FHitResult& Hit)
 		Apex->AirControl = SavedAirControl;
 	}
 
-	// Hand the player their starting weapon. AddWeaponClassAnimated equips instantly when the player
-	// is unarmed (no draw), so play the procedural weapon-raise on top — the same FP-mesh rise the
-	// melee "show weapon" recovery uses (lerp up from the lowered position with ease-out).
-	if (StartingWeaponClass)
-	{
-		AShooterWeapon* Equipped = AddWeaponClassAnimated(StartingWeaponClass);
-		if (Equipped && CurrentWeapon == Equipped && !bIsWeaponSwitchInProgress)
-		{
-			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-			{
-				WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
-				// Snap to the lowered position so the raise lerp visibly brings it up from below.
-				const FVector RaiseAnchor = FirstPersonMeshBaseLocation + CurrentWeapon->FirstPersonMeshOffset;
-				FPMesh->SetRelativeLocation(RaiseAnchor - FVector(0.0f, 0.0f, 100.0f));
-			}
-
-			// Raise-only phase (skip the lower): identical motion to the weapon-switch / melee raise.
-			bIsWeaponSwitchInProgress = true;
-			bIsWeaponLowering = false;
-			bWeaponSwitchPausedAtBottom = false;
-			WeaponSwitchProgress = 0.0f;
-			PlayWeaponSwitchSound();
-		}
-	}
+	// Hand the player their starting weapon, drawn with the smooth raise.
+	EquipStartingWeaponAnimated();
 
 	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] Run-launch landed -> grant starting weapon"));
+}
+
+void AShooterCharacter::EquipStartingWeaponAnimated()
+{
+	if (!StartingWeaponClass)
+	{
+		return;
+	}
+
+	// AddWeaponClassAnimated equips instantly when the player is unarmed (no draw), so play the
+	// procedural weapon-raise on top — the same FP-mesh rise the melee "show weapon" recovery uses
+	// (lerp up from the lowered position with ease-out).
+	AShooterWeapon* Equipped = AddWeaponClassAnimated(StartingWeaponClass);
+	if (Equipped && CurrentWeapon == Equipped && !bIsWeaponSwitchInProgress)
+	{
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
+			// Snap to the lowered position so the raise lerp visibly brings it up from below.
+			const FVector RaiseAnchor = FirstPersonMeshBaseLocation + CurrentWeapon->FirstPersonMeshOffset;
+			FPMesh->SetRelativeLocation(RaiseAnchor - FVector(0.0f, 0.0f, 100.0f));
+		}
+
+		// Raise-only phase (skip the lower): identical motion to the weapon-switch / melee raise.
+		bIsWeaponSwitchInProgress = true;
+		bIsWeaponLowering = false;
+		bWeaponSwitchPausedAtBottom = false;
+		WeaponSwitchProgress = 0.0f;
+		PlayWeaponSwitchSound();
+	}
 }
 
 void AShooterCharacter::BindMovementSFXDelegates()
@@ -2008,6 +2110,7 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 				*GetNameSafe(AddedWeapon), AddedWeapon->GetMagazineSize(), AddedWeapon->bHasLimitedAmmo ? 1 : 0);
 
 			OwnedWeapons.Add(AddedWeapon);
+			OnWeaponInventoryChanged.Broadcast();
 
 			if (CurrentWeapon)
 			{
@@ -2086,6 +2189,7 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 
 	const bool bWasUnarmed = (OwnedWeapons.Num() == 0);
 	OwnedWeapons.Add(AddedWeapon);
+	OnWeaponInventoryChanged.Broadcast();
 
 	if (bIsWeaponSwitchInProgress && bWeaponSwitchPausedAtBottom)
 	{
@@ -2310,6 +2414,8 @@ static void DiscardYankedWeaponShared(
 	// just leave the player on the next non-yanked weapon).
 	const bool bWasCurrent = (CurrentWeapon == YankedWeapon);
 	OwnedWeapons.Remove(YankedWeapon);
+	// DiscardYankedWeaponShared is a static helper (no 'this'); broadcast on the passed-in character.
+	Self->OnWeaponInventoryChanged.Broadcast();
 
 	if (bWasCurrent)
 	{
@@ -2493,6 +2599,7 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 	// that's intentional, BeginWeaponLower needs a non-null current to lower. Actor destruction
 	// is scheduled below.
 	OwnedWeapons.Remove(Yanked);
+	OnWeaponInventoryChanged.Broadcast();
 
 	// Bandolier: prefer a reserve copy of the same class over the generic non-yanked fallback.
 	// If present, promote it into OwnedWeapons so FinishWeaponSwitch's ActivateWeapon attaches +
@@ -2786,6 +2893,7 @@ void AShooterCharacter::RemoveMeleeWeapon(AShooterWeapon* WeaponToRemove)
 
 	// Remove from inventory
 	OwnedWeapons.Remove(WeaponToRemove);
+	OnWeaponInventoryChanged.Broadcast();
 
 	// Switch to first available weapon or clear
 	if (OwnedWeapons.Num() > 0)
@@ -2924,6 +3032,23 @@ AShooterWeapon* AShooterCharacter::FindWeaponOfType(TSubclassOf<AShooterWeapon> 
 	return nullptr;
 }
 
+UInputAction* AShooterCharacter::GetSwitchInputActionForWeapon(const AShooterWeapon* Weapon) const
+{
+	if (!Weapon)
+	{
+		return nullptr;
+	}
+
+	// The hotkey now lives on the weapon itself.
+	if (UInputAction* WeaponAction = Weapon->GetSwitchAction())
+	{
+		return WeaponAction;
+	}
+
+	// No per-weapon hotkey — the only route to this weapon is the forward-cycle key.
+	return SwitchWeaponAction;
+}
+
 int32 AShooterCharacter::CountYankedCopiesOfClass(TSubclassOf<AShooterWeapon> WeaponClass) const
 {
 	if (!WeaponClass) return 0;
@@ -3036,6 +3161,7 @@ AShooterWeapon* AShooterCharacter::PromoteReserveCopyOfClass(TSubclassOf<AShoote
 
 	ReserveWeapons.Remove(Promoted);
 	OwnedWeapons.Add(Promoted);
+	OnWeaponInventoryChanged.Broadcast();
 
 	// ActivateWeapon (called by the equip path right after this) will SetActorHiddenInGame(false)
 	// and attach the meshes — no need to do either here.
@@ -3866,30 +3992,20 @@ void AShooterCharacter::UpdateLowHealthWarning(float DeltaTime)
 				}
 			}
 
+			// Play the warning ONCE on entering low health. Deliberately NOT looped — the
+			// bIsLowHealth latch (cleared only in the else-branch below, when HP recovers
+			// above the threshold) re-arms this one-shot, so it won't nag while the player
+			// stays low. LowHealthWarningInterval / LowHealthWarningTimer are now unused but
+			// kept to avoid a header change / Live-Coding break.
 			if (LowHealthWarningSound)
 			{
 				UGameplayStatics::PlaySound2D(this, LowHealthWarningSound, LowHealthWarningVolume);
 			}
 		}
-		else
-		{
-			// Already in low health - update timer
-			LowHealthWarningTimer += DeltaTime;
-
-			if (LowHealthWarningTimer >= LowHealthWarningInterval)
-			{
-				LowHealthWarningTimer = 0.0f;
-
-				if (LowHealthWarningSound)
-				{
-					UGameplayStatics::PlaySound2D(this, LowHealthWarningSound, LowHealthWarningVolume);
-				}
-			}
-		}
 	}
 	else
 	{
-		// Reset low health state
+		// Recovered above the threshold — re-arm the one-shot warning for the next episode.
 		bIsLowHealth = false;
 		LowHealthWarningTimer = 0.0f;
 	}

@@ -110,12 +110,13 @@ void AShooterGameMode::HandleWorldReady()
 	// TODO (when streaming sublevels are added): also wait until every required ULevelStreaming
 	// sublevel reports OnLevelShown. All sublevels are currently Always Loaded, so they're present here.
 
-	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready (resources streamed) -> BP_OnRunStartReady (arena=%d, toss=%d)"),
-		RunMarker->ArenaIndex, RunMarker->bLaunchFromSea ? 1 : 0);
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready (resources streamed) -> BP_OnRunStartReady (arena=%d, toss=%d, boss=%d)"),
+		RunMarker->ArenaIndex, RunMarker->bLaunchFromSea ? 1 : 0, RunMarker->bBossIntro ? 1 : 0);
 
 	// Blueprint owns the run-subsystem sequence (stream overlay, configs, StartRun, EnterArena) and the
-	// intro fade. It calls PerformRunLaunch() itself when bLaunchFromSea is set.
-	BP_OnRunStartReady(RunMarker->ArenaIndex, RunMarker->bLaunchFromSea);
+	// intro flow. It calls PerformRunLaunch() for the toss, or plays the boss cutscene + ForceActivateArena
+	// for the boss branch, picking by bLaunchFromSea / bBossIntro.
+	BP_OnRunStartReady(RunMarker->ArenaIndex, RunMarker->bLaunchFromSea, RunMarker->bBossIntro);
 }
 
 void AShooterGameMode::PerformRunLaunch()

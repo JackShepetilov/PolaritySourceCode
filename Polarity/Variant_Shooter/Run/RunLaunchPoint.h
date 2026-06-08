@@ -33,6 +33,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run")
 	bool bLaunchFromSea = true;
 
+	/** This map opens with a boss intro cutscene (camera cuts to the boss, blends back to the player,
+	 *  then the player draws their weapon and the boss aggros). Drives the boss branch of
+	 *  BP_OnRunStartReady. Typically paired with bLaunchFromSea = false. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run")
+	bool bBossIntro = false;
+
 	/** Launch speed (uu/s) applied along the actor's forward direction (used when bLaunchFromSea). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Launch")
 	float LaunchSpeed = 3000.f;

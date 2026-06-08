@@ -105,7 +105,11 @@ public:
 
 	/** Fired once the world is loaded & the first frame is drawn (run maps only). Implement in BP to run
 	 *  the run-start sequence: stream overlay; if !RunSubsystem.IsRunActive -> set configs + StartRun;
-	 *  EnterArena(ArenaIndex); if bLaunchFromSea -> PerformRunLaunch(); then fade in + DismissLoadingCover(). */
+	 *  EnterArena(ArenaIndex). Then branch on the intro type:
+	 *   - bLaunchFromSea -> PerformRunLaunch() (weapon is granted on landing);
+	 *   - bBossIntro -> lock input, play the boss intro Level Sequence, on finish blend the camera back
+	 *     to the player, EnableInput, EquipStartingWeaponAnimated(), then ForceActivateArena() to aggro;
+	 *   - otherwise -> normal spawn. Finally fade in + DismissLoadingCover(). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Run Start")
-	void BP_OnRunStartReady(int32 ArenaIndex, bool bLaunchFromSea);
+	void BP_OnRunStartReady(int32 ArenaIndex, bool bLaunchFromSea, bool bBossIntro);
 };
