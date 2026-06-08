@@ -173,6 +173,19 @@ FText FStateTreeBossInFinisherCondition::GetDescription(const FGuid& ID, FStateT
 }
 #endif
 
+bool FStateTreeBossCombatEnabledCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& InstanceData = Context.GetInstanceData<FInstanceDataType>(*this);
+	return InstanceData.Boss && InstanceData.Boss->IsCombatEnabled();
+}
+
+#if WITH_EDITOR
+FText FStateTreeBossCombatEnabledCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Boss Combat Enabled"));
+}
+#endif
+
 //////////////////////////////////////////////////////////////////
 // TASK: Boss Choose Action
 //////////////////////////////////////////////////////////////////

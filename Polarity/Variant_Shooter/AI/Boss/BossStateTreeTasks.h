@@ -233,6 +233,34 @@ struct POLARITY_API FStateTreeBossInFinisherCondition : public FStateTreeConditi
 };
 
 //////////////////////////////////////////////////////////////////
+// CONDITION: Boss Combat Enabled (gates aggro until the intro cutscene ends)
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeBossCombatEnabledInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<ABossCharacter> Boss;
+};
+
+USTRUCT(DisplayName = "Boss Combat Enabled", Category = "Boss")
+struct POLARITY_API FStateTreeBossCombatEnabledCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeBossCombatEnabledInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
 // TASK: Boss Choose Action (weighted Shoot / Melee; forced Melee while disarmed)
 // Run this between strafes; branch afterwards on the "Boss Pending Action Is" condition.
 //////////////////////////////////////////////////////////////////

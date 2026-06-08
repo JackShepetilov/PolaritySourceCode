@@ -326,6 +326,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boss|Phase")
 	bool IsTransitioning() const { return bIsTransitioning; }
 
+	// ==================== Combat Gate (boss intro) ====================
+
+	/** Gates the StateTree combat transition. The boss still senses the player, but its tree must not
+	 *  enter combat until this is set true — call from BP after the intro cutscene blends back to the
+	 *  player. Wire FStateTreeBossCombatEnabledCondition on a re-evaluated transition (Idle -> Combat),
+	 *  NOT a parent-state enter condition (parent conditions are not re-evaluated). */
+	UFUNCTION(BlueprintCallable, Category = "Boss|Combat")
+	void SetCombatEnabled(bool bEnabled) { bCombatEnabled = bEnabled; }
+
+	/** Read by FStateTreeBossCombatEnabledCondition to allow the combat transition. */
+	UFUNCTION(BlueprintPure, Category = "Boss|Combat")
+	bool IsCombatEnabled() const { return bCombatEnabled; }
+
+protected:
+	/** Backing flag for the combat gate; default false so the boss waits for the intro cutscene. */
+	bool bCombatEnabled = false;
+
+public:
+
 	// ==================== Melee Interface ====================
 
 	/** Boss melee entry point (called by the boss StateTree melee task). Picks a lunge or in-place
