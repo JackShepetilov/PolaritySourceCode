@@ -214,6 +214,14 @@ void AShooterPlayerController::DestroyRunWidgets()
 	}
 }
 
+void AShooterPlayerController::SetRunHUDVisible(bool bVisible, bool bAnimated)
+{
+	// Widgets (HP/charge counter, ability bar, …) bound to OnRunHUDVisibilityChanged decide how to
+	// show/hide; bAnimated lets the cutscene pick a fade animation vs an instant snap per call.
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] SetRunHUDVisible visible=%d animated=%d"), bVisible ? 1 : 0, bAnimated ? 1 : 0);
+	OnRunHUDVisibilityChanged.Broadcast(bVisible, bAnimated);
+}
+
 void AShooterPlayerController::SetupInputComponent()
 {
 	Super::SetupInputComponent();

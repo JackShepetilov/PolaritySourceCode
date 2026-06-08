@@ -13,6 +13,11 @@ class UShooterBulletCounterUI;
 class UUpgradeChoiceWidget;
 class UAbilityResourceBar;
 
+/** Tells run-HUD widgets to show/hide (e.g. for cutscenes).
+ *  bVisible  = appear (true) vs disappear (false).
+ *  bAnimated = play the widget's fade animation (true) vs snap instantly (false). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRunHUDVisibilityChanged, bool, bVisible, bool, bAnimated);
+
 /**
  *  Simple PlayerController for a first person shooter game
  *  Manages input mappings
@@ -162,4 +167,17 @@ protected:
 
 	void CreateRunWidgets();
 	void DestroyRunWidgets();
+
+public:
+
+	// ==================== HUD cutscene visibility ====================
+
+	/** Run-HUD widgets (HP/charge counter, ability bar, …) bind to this to show/hide for cutscenes. */
+	UPROPERTY(BlueprintAssignable, Category = "Shooter|UI")
+	FOnRunHUDVisibilityChanged OnRunHUDVisibilityChanged;
+
+	/** Broadcast OnRunHUDVisibilityChanged. Call from a cutscene: SetRunHUDVisible(false, bAnimated) on
+	 *  enter, SetRunHUDVisible(true, bAnimated) on exit. bAnimated = fade animation vs instant snap. */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
+	void SetRunHUDVisible(bool bVisible, bool bAnimated);
 };
