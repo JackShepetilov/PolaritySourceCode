@@ -3,11 +3,26 @@
 #include "LoreSubsystem.h"
 
 #include "Engine/DataTable.h"
+#include "Engine/GameInstance.h"
+#include "Save/SaveGameSubsystem.h"
+#include "Save/PolarityMetaSave.h"
 
 void ULoreSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-	UE_LOG(LogTemp, Log, TEXT("[LORE_DEBUG] LoreSubsystem initialized"));
+
+	// Restore persisted lore progress from the save profile. SaveGameSubsystem depends on nobody,
+	// so this dependency is acyclic and guarantees the meta file has loaded before we read it.
+	if (USaveGameSubsystem* Save = Cast<USaveGameSubsystem>(
+			Collection.InitializeDependency(USaveGameSubsystem::StaticClass())))
+	{
+		if (const UPolarityMetaSave* M = Save->GetMeta())
+		{
+			ConsumedLoreIDs = M->ConsumedLoreIDs;
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[LORE_DEBUG] LoreSubsystem initialized (%d consumed restored)"), ConsumedLoreIDs.Num());
 }
 
 void ULoreSubsystem::Deinitialize()
@@ -95,6 +110,15 @@ void ULoreSubsystem::MarkLoreConsumed(FName LoreID)
 	if (const FLoreEntryRow* Row = FindRowByLoreID(LoreID))
 	{
 		OnLoreConsumed.Broadcast(*Row);
+	}
+
+	// Lore progress is meta-persistent — flag the save (debounced).
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (USaveGameSubsystem* Save = GI->GetSubsystem<USaveGameSubsystem>())
+		{
+			Save->RequestMetaSave();
+		}
 	}
 }
 

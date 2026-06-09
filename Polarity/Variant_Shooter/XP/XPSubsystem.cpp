@@ -77,6 +77,15 @@ int32 UXPSubsystem::GetCurrentLevel() const
 	return Progress.CurrentLevel;
 }
 
+void UXPSubsystem::RestoreProgress(int32 InXP, int32 InLevel)
+{
+	Progress.CurrentXP    = FMath::Max(0, InXP);
+	Progress.CurrentLevel = FMath::Max(0, InLevel);
+	// Silent restore: no level-up evaluation. Nudge HUD listeners to re-read via a 0-delta event.
+	OnXPGained.Broadcast(0, Progress.CurrentXP);
+	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] RestoreProgress xp=%d level=%d"), Progress.CurrentXP, Progress.CurrentLevel);
+}
+
 int32 UXPSubsystem::GetXPToNextLevel() const
 {
 	if (!Config.IsValid()) return INT32_MAX;

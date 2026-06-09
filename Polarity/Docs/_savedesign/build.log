@@ -1,0 +1,37 @@
+Using bundled DotNet SDK version: 8.0.300 win-x64
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" PolarityEditor Win64 Development "C:\Users\Professional\Documents\Unreal Projects\Polarity_Main5_6\Polarity.uproject" -waitmutex
+Log file: C:\Users\Professional\AppData\Local\UnrealBuildTool\Log.txt
+Using 'git status' to determine working set for adaptive non-unity build (C:\Users\Professional\Documents\Unreal Projects\Polarity_Main5_6).
+Parsing headers for PolarityEditor
+  Running Internal UnrealHeaderTool "C:\Users\Professional\Documents\Unreal Projects\Polarity_Main5_6\Polarity.uproject" "C:\Users\Professional\Documents\Unreal Projects\Polarity_Main5_6\Intermediate\Build\Win64\PolarityEditor\Development\PolarityEditor.uhtmanifest" -WarningsAsErrors -installed
+Total of 7 written
+Reflection code generated for PolarityEditor in 1.4891704 seconds
+Building PolarityEditor...
+Using Visual Studio 2022 14.38.33143 toolchain (C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.38.33130) and Windows 10.0.22621.0 SDK (C:\Program Files (x86)\Windows Kits\10).
+[Adaptive Build] Excluded from Polarity unity file: ApexMovementComponent.cpp, CameraShakeComponent.cpp, ChargeAnimationComponent.cpp, DamageVolume.cpp, EMFAcceleratorPlate.cpp, EMFChannelingPlateActor.cpp, EMFPhysicsProp.cpp, EMFSetupHelper.cpp, EMFStaticCharge.cpp, EMFVelocityModifier.cpp, GCBatchCreatorLibrary.cpp, InputIconsDataAsset.cpp, NoFlyZone.cpp, OutlineComponent.cpp, Polarity.cpp, PolarityCameraManager.cpp, PolarityCharacter.cpp, PolarityGameMode.cpp, PolarityPlayerController.cpp, ReminderPanelWidget.cpp, TutorialHintWidget.cpp, TutorialSlideWidget.cpp, TutorialSubsystem.cpp, TutorialTriggerVolume.cpp, AIAccuracyComponent.cpp, MeleeRetreatComponent.cpp, AICombatCoordinator.cpp, PolarityPathFollowingComponent.cpp, PolarityAIConditions.cpp, PolarityAITasks.cpp, ArenaAntenna.cpp, ArenaFinaleSequence.cpp, ArenaManager.cpp, ArenaSpawnPoint.cpp, BridgeArenaManager.cpp, DeferredUpgradeQueueSubsystem.cpp, DestroyedIslandsSubsystem.cpp, DestructibleIslandActor.cpp, GateAntenna.cpp, RewardContainer.cpp, TelegraphedArenaSpawnPoint.cpp, TurretBuilding.cpp, CheckpointActor.cpp, CheckpointSubsystem.cpp, EMFFoliageSettings.cpp, FoliageConversionLibrary.cpp, MusicExitBox.cpp, MusicIntensityBox.cpp, MusicPlayerSubsystem.cpp, MusicTrackDataAsset.cpp, PolarityMetaSave.cpp, PolarityRunSave.cpp, SaveGameSubsystem.cpp, SubtitleDataAsset.cpp, SubtitleSubsystem.cpp, SubtitleWidget.cpp, UpgradeComponent.cpp, UpgradeDefinition.cpp, UpgradeManagerComponent.cpp, UpgradeRegistry.cpp, UpgradeDefinition_AdsTimeDilation.cpp, UpgradeDefinition_AirDash.cpp, UpgradeDefinition_Bandolier.cpp, UpgradeDefinition_FullHealthBonus.cpp, UpgradeDefinition_LowHealthDefense.cpp, UpgradeDefinition_PistolStun.cpp, UpgradeDefinition_TractorBeam.cpp, Upgrade_360Shot.cpp, Upgrade_AdsTimeDilation.cpp, Upgrade_AirDash.cpp, Upgrade_AirKick.cpp, Upgrade_Backstab.cpp, Upgrade_Bandolier.cpp, Upgrade_ChargedPunch.cpp, Upgrade_ChargeFlip.cpp, Upgrade_Combo.cpp, Upgrade_DropKick.cpp, Upgrade_ForwardMomentum.cpp, Upgrade_FullHealthBonus.cpp, Upgrade_HealthBlast.cpp, Upgrade_LowHealthDefense.cpp, Upgrade_PistolStun.cpp, Upgrade_SuppressionFire.cpp, Upgrade_TractorBeam.cpp, AnimNotify_MeleeWindow.cpp, AnimNotify_YankThrow.cpp, HitMarkerComponent.cpp, MeleeAttackComponent.cpp, ShootableButton.cpp, ShootableButtonComponent.cpp, ShooterCharacter.cpp, ShooterDoor.cpp, ShooterDummy.cpp, ShooterGameMode.cpp, ShooterGameSettings.cpp, ShooterKey.cpp, ShooterPlayerController.cpp, ShooterSettingsSubsystem.cpp, WeaponRecoilComponent.cpp, AbilityComponent.cpp, AbilityDefinition.cpp, AbilityDefinition_Burst.cpp, AbilityHandler.cpp, AbilityHandler_Burst.cpp, AbilityHandler_EMFBurst.cpp, AnimNotify_AbilityFire.cpp, EnvQueryContext_Target.cpp, FlyingAIMovementComponent.cpp, FlyingDrone.cpp, FlyingDroneController.cpp, FlyingDroneSpawner.cpp, FlyingDroneStateTreeTasks.cpp, FPVTiltComponent.cpp, HumanoidNPC.cpp, HumanoidStateTreeTasks.cpp, KamikazeDroneController.cpp, KamikazeDroneNPC.cpp, KamikazeDroneSpawner.cpp, KamikazeStateTreeTasks.cpp, MeleeNPC.cpp, MeleeStateTreeTasks.cpp, NPCRiotShieldComponent.cpp, ShooterAIController.cpp, ShooterNPC.cpp, ShooterStateTreeUtility.cpp, SniperTurretNPC.cpp, SniperTurretStateTreeTasks.cpp, AnimNotify_BossFire.cpp, BossAIController.cpp, BossCharacter.cpp, BossStateTreeTasks.cpp, PlayerDamageCategory.cpp, LoreDebugCommands.cpp, LoreSubsystem.cpp, AbilityPickup.cpp, ArmorPickup.cpp, HealthPickup.cpp, ScriptedPickup.cpp, UpgradePickup.cpp, RunLaunchPoint.cpp, RunSubsystem.cpp, ChatBroker.cpp, ChatDebugCommands.cpp, ChatScript.cpp, StreamArenaConfig.cpp, StreamConfig.cpp, StreamSubsystem.cpp, StyleComponent.cpp, AbilityResourceBar.cpp, BarEntryWidget.cpp, BossHealthWidget.cpp, CaptureReticleWidget.cpp, DamageNumbersSubsystem.cpp, DamageNumberWidget.cpp, EMFChargeWidget.cpp, EMFChargeWidgetSubsystem.cpp, ShooterBulletCounterUI.cpp, ShooterDeathScreenUI.cpp, ShooterKeyBindingsUI.cpp, ShooterMainMenuUI.cpp, ShooterOptionsMenuUI.cpp, ShooterPauseMenuUI.cpp, ShooterUI.cpp, ShooterVictoryScreenUI.cpp, UpgradeCardWidget.cpp, UpgradeChoiceWidget.cpp, UpgradeTooltipWidget.cpp, XPBarWidget.cpp, DroppedMeleeWeapon.cpp, DroppedRangedWeapon.cpp, EMFProjectile.cpp, EnemyBeamBoltSubsystem.cpp, ProjectilePoolSubsystem.cpp, RiotShield.cpp, RiotShieldPickup.cpp, ShooterPickup.cpp, ShooterProjectile.cpp, ShooterWeapon.cpp, ShooterWeaponHolder.cpp, ShooterWeapon_ChargeLauncher.cpp, ShooterWeapon_Laser.cpp, ShooterWeapon_Melee.cpp, XPConfig.cpp, XPSubsystem.cpp, VFXPrewarmSubsystem.cpp
+Determining max actions to execute in parallel (14 physical cores, 20 logical cores)
+  Executing up to 14 processes, one per physical core
+  Requested 1.5 GB memory per action, 1.73 GB available: limiting max parallel actions to 1
+Using Unreal Build Accelerator local executor to run 13 action(s)
+  Storage capacity 40Gb
+---- Starting trace: 260608_174605 ----
+UbaServer - Listening on 0.0.0.0:1345
+------ Building 13 action(s) started ------
+[1/13] Compile [x64] LoreSubsystem.cpp
+[2/13] Compile [x64] Module.Polarity.14.cpp
+[3/13] Compile [x64] Module.Polarity.15.cpp
+[4/13] Compile [x64] Module.Polarity.16.cpp
+[5/13] Compile [x64] Module.Polarity.6.cpp
+[6/13] Compile [x64] PolarityMetaSave.cpp
+[7/13] Compile [x64] PolarityRunSave.cpp
+[8/13] Compile [x64] RunSubsystem.cpp
+[9/13] Compile [x64] SaveGameSubsystem.cpp
+[10/13] Compile [x64] StreamSubsystem.cpp
+[11/13] Link [x64] UnrealEditor-Polarity.dll
+[12/13] Link [x64] UnrealEditor-Polarity.lib
+[13/13] WriteMetadata PolarityEditor.target (UBA disabled)
+Trace written to file C:/Users/Professional/AppData/Local/UnrealBuildTool/Log.uba with size 8.9kb
+Total time in Unreal Build Accelerator local executor: 51.26 seconds
+
+Result: Succeeded
+Total execution time: 53.66 seconds

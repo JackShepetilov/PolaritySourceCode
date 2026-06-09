@@ -287,6 +287,9 @@ float UWeaponRecoilComponent::GetSituationalMultiplier() const
 		Multiplier *= Settings.MovingRecoilMultiplier;
 	}
 
+	// External scalar (e.g. ADS time-dilation upgrade reduces recoil while active)
+	Multiplier *= ExternalRecoilMultiplier;
+
 	return Multiplier;
 }
 

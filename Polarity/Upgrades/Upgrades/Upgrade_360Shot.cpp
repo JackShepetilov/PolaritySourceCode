@@ -320,11 +320,21 @@ void UUpgrade_360Shot::Execute360Shot()
 		FDamageEvent DamageEvent;
 		DamageEvent.DamageTypeClass = UDamageType_Ranged::StaticClass();
 
-		float ActualDamage = HitActor->TakeDamage(
+		const float ActualDamage = HitActor->TakeDamage(
 			Def360->BonusDamage, DamageEvent,
 			Controller, Weapon);
 
-		UE_LOG(LogTemp, Log, TEXT("360 Shot: Dealt %.0f bonus damage to %s"), ActualDamage, *HitActor->GetName());
+		// [SHOT360_DMG] pinpoint: BonusDamage requested vs ActualDamage actually applied by the
+		// target's TakeDamage (0 = rejected, e.g. friendly-fire; full value = applied). Also logs
+		// what the upgrade's INDEPENDENT trace hit (may differ from the weapon's actual shot target).
+		UE_LOG(LogTemp, Warning, TEXT("[SHOT360_DMG] requested=%.0f -> hit '%s' (class=%s) | ActualDamage=%.0f | causer=%s instigator=%s | impact=%s"),
+			Def360->BonusDamage,
+			*HitActor->GetName(),
+			*HitActor->GetClass()->GetName(),
+			ActualDamage,
+			*GetNameSafe(Weapon),
+			*GetNameSafe(Controller),
+			*HitResult.ImpactPoint.ToCompactString());
 
 		// Mark the target if it implements IBuildingMarkable. The marker VFX is spawned by the
 		// upgrade itself (so the same upgrade can later mark other markable target types).

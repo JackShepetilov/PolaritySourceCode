@@ -368,13 +368,38 @@ void AShooterNPC::Tick(float DeltaTime)
 					PathStatus = (int32)PFC->GetStatus();
 				}
 			}
-			UE_LOG(LogTemp, Warning, TEXT("[SHAKE_DEBUG] %s(%s) pos=(%.1f,%.1f,%.1f) move=%d vel=%.0f | kb=%d kbInterp=%d cap=%d launch=%d cinePull=%d aiPath=%d"),
+
+			// Per-frame position delta + direction-reversal detection (cpp-only debug state,
+			// static map instead of member vars to stay Live Coding compatible).
+			static TMap<TWeakObjectPtr<const AActor>, TPair<FVector, FVector>> ShakeDebugHistory; // Key=PrevPos, Value=PrevDelta
+			TPair<FVector, FVector>& Hist = ShakeDebugHistory.FindOrAdd(this, TPair<FVector, FVector>(L, FVector::ZeroVector));
+			const FVector PosDelta = L - Hist.Key;
+			const FVector PrevDelta = Hist.Value;
+			const bool bReversal = PosDelta.Size2D() > 1.0f && PrevDelta.Size2D() > 1.0f &&
+				(PosDelta.X * PrevDelta.X + PosDelta.Y * PrevDelta.Y) < 0.0f;
+			Hist.Key = L;
+			Hist.Value = PosDelta;
+
+			// Who could be moving us this frame?
+			const FVector EMForce = EMFVelocityModifier ? EMFVelocityModifier->CurrentEMForce : FVector::ZeroVector;
+			const bool bRootMotion = GetMesh() && GetMesh()->IsPlayingRootMotion();
+			UAnimInstance* DbgAnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+			UAnimMontage* DbgMontage = DbgAnimInst ? DbgAnimInst->GetCurrentActiveMontage() : nullptr;
+			const bool bRetreating = MeleeRetreatComponent && MeleeRetreatComponent->IsRetreating();
+			const float DistToPlayer = FVector::Dist(L, DebugPlayerPawn->GetActorLocation());
+
+			UE_LOG(LogTemp, Warning, TEXT("[SHAKE_DEBUG]%s %s(%s) pos=(%.1f,%.1f,%.1f) dPos=%.1f(2D=%.1f) distPl=%.0f move=%d vel=%.0f | kb=%d kbInterp=%d cap=%d launch=%d cinePull=%d aiPath=%d | emf=%.0f rootMotion=%d montage=%s retreat=%d"),
+				bReversal ? TEXT(" <<REVERSAL>>") : TEXT(""),
 				*GetName(), *GetClass()->GetName(), L.X, L.Y, L.Z,
+				PosDelta.Size(), PosDelta.Size2D(), DistToPlayer,
 				GetCharacterMovement() ? (int32)GetCharacterMovement()->MovementMode.GetValue() : -1,
 				GetVelocity().Size(),
 				bIsInKnockback ? 1 : 0, bIsKnockbackInterpolating ? 1 : 0,
 				bIsCaptured ? 1 : 0, bIsLaunched ? 1 : 0, bIsInCinematicPull ? 1 : 0,
-				PathStatus);
+				PathStatus,
+				EMForce.Size(), bRootMotion ? 1 : 0,
+				DbgMontage ? *DbgMontage->GetName() : TEXT("none"),
+				bRetreating ? 1 : 0);
 		}
 	}
 #endif
@@ -2982,25 +3007,29 @@ void AShooterNPC::LaunchIntoAir(const FVector& LaunchVelocity)
 	// (we deliberately never lower friction here, unlike ApplyKnockback).
 	ForceResetCombatState();
 
-	// Reuse the reverse-channeling throw's launched-state machinery (looping launched montage,
-	// NPC-collision stun, UpdateLaunchedCollision flight policing) — but supply the velocity
-	// directly instead of via the channeling plate. LaunchCharacter gives a proper gravity arc
-	// and Landed handling (same primitive the player uses for the run-start sea-toss).
+	// Reuse the reverse-channeling throw's LAUNCHED-state machinery (looping launched montage,
+	// launched force-filtering, NPC-impact stun, UpdateLaunchedCollision flight policing).
+	// AHumanoidNPC overrides EnterLaunchedState() as a no-op (immune), so bIsLaunched stays false
+	// for them and we bail without applying any physics.
 	EnterLaunchedState();
-
-	// Respect launched-state immunity: AHumanoidNPC overrides EnterLaunchedState() as a no-op, so
-	// bIsLaunched stays false for them. Only NPCs that actually entered the launched state get the
-	// physical LaunchCharacter arc — otherwise we'd toss a humanoid with raw physics and no
-	// launched anim / NPC-impact stun, contradicting the immunity contract.
 	if (!bIsLaunched)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL_DEBUG] %s LaunchIntoAir skipped — immune to launched state"), *GetName());
 		return;
 	}
 
-	LaunchCharacter(LaunchVelocity, /*bXYOverride=*/true, /*bZOverride=*/true);
+	// Fly EXACTLY like the reverse throw: MOVE_Falling + a scripted velocity. The real throw stays
+	// in MOVE_Falling (set by EnterCapturedState) while the EMF modifier writes a constant velocity
+	// each tick; here we seed the velocity once and let the CMC's MOVE_Falling gravity arc it via the
+	// next Super::TickComponent. MOVE_Walking would run PhysWalking and clamp the upward Z, killing
+	// the toss. Direct Velocity assignment — NOT LaunchCharacter, NOT AddImpulse, NOT AddForce.
+	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
+	{
+		CharMovement->SetMovementMode(MOVE_Falling);
+		CharMovement->Velocity = LaunchVelocity;
+	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL_DEBUG] %s LaunchIntoAir vel=(%.0f,%.0f,%.0f) speed=%.0f"),
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL_DEBUG] %s LaunchIntoAir vel=(%.0f,%.0f,%.0f) speed=%.0f (MOVE_Falling, scripted velocity, no LaunchCharacter)"),
 		*GetName(), LaunchVelocity.X, LaunchVelocity.Y, LaunchVelocity.Z, LaunchVelocity.Size());
 }
 

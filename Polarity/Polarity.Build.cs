@@ -63,6 +63,7 @@ public class Polarity : ModuleRules
             "Polarity/Variant_Shooter/XP",
             "Polarity/Variant_Shooter/Stream",
             "Polarity/Variant_Shooter/Lore",
+            "Polarity/Save",
             "Polarity/Buildings",
             "Polarity/Foliage"
         });

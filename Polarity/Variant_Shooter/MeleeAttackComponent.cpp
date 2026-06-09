@@ -1255,6 +1255,12 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 				const float StepSpeed = FMath::Min(Settings.LungeMaxSpeed, MaxStepSpeed);
 				PreservedVelocity = (ToLungeTarget / DistToLungeTarget) * StepSpeed;
 
+				// [LUNGE_DEBUG] Oscillation probe: if HOMING and ARRIVED alternate every 1-2 frames,
+				// the arrival-restore branch is shoving the player out of the arrival radius each frame.
+				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] HOMING state=%d dist=%.1f arrivalR=%.1f stepSpeed=%.0f hit=%d vel=(%.0f,%.0f,%.0f)"),
+					(int32)CurrentState, DistToLungeTarget, ArrivalRadius, StepSpeed, bHasHitThisAttack ? 1 : 0,
+					PreservedVelocity.X, PreservedVelocity.Y, PreservedVelocity.Z);
+
 #if WITH_EDITOR
 				if (GEngine && bEnableDebugVisualization)
 				{
@@ -1264,6 +1270,20 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 				}
 #endif
 			}
+			else
+			{
+				// [LUNGE_DEBUG] Inside arrival radius (or below min speed): velocity falls back to
+				// the attack-start velocity — this is the suspected jitter source.
+				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] ARRIVED-RESTORE state=%d dist=%.1f arrivalR=%.1f hit=%d restoredVel=%.0f (attack-start vel re-applied)"),
+					(int32)CurrentState, DistToLungeTarget, ArrivalRadius, bHasHitThisAttack ? 1 : 0, PreservedVelocity.Size());
+			}
+		}
+		else if (Settings.bEnableLunge && MagnetismTarget.IsValid() && bTargetInKnockback)
+		{
+			// [LUNGE_DEBUG] Homing paused while target is in knockback. If HOMING resumes after this,
+			// the knockback stun ended while the Active phase was still running (post-damage re-lunge).
+			UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] PAUSED-TARGET-KNOCKBACK state=%d hit=%d vel=%.0f"),
+				(int32)CurrentState, bHasHitThisAttack ? 1 : 0, PreservedVelocity.Size());
 		}
 		// No-target case: handled by a one-shot impulse on Active phase entry (see SetState).
 		// Per-frame velocity tug while target is absent has been removed.

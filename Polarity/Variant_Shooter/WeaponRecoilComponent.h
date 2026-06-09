@@ -345,6 +345,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Recoil")
 	void SetSwayOverrideMultiplier(float Multiplier) { SwayOverrideMultiplier = Multiplier; }
 
+	/** Set an external recoil scalar applied on top of the situational multipliers (e.g. the ADS
+	 *  time-dilation upgrade reducing recoil while active). 1.0 = normal, <1.0 = reduced recoil.
+	 *  Clamped to >= 0. Affects the aim-kick (pitch/yaw); cosmetic camera punch is left unchanged. */
+	UFUNCTION(BlueprintCallable, Category = "Recoil")
+	void SetExternalRecoilMultiplier(float Multiplier) { ExternalRecoilMultiplier = FMath::Max(0.0f, Multiplier); }
+
 protected:
 	// ==================== Settings ====================
 
@@ -441,6 +447,9 @@ protected:
 	bool bIsAiming = false;
 	bool bIsCrouching = false;
 	float SwayOverrideMultiplier = 1.0f;
+
+	/** External recoil scalar applied on top of situational multipliers (1.0 = no change). Set via SetExternalRecoilMultiplier. */
+	float ExternalRecoilMultiplier = 1.0f;
 
 	// ==================== Internal Methods ====================
 

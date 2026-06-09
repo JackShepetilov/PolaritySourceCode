@@ -46,6 +46,10 @@ public:
 	/** Award kill XP: BaseXPPerKill * EnemyMultiplier[EnemyClass]. C++-only (no BP exec wrapper to avoid pulling ShooterNPC.h into this header). */
 	void AwardKillXP(TSubclassOf<AShooterNPC> EnemyClass);
 
+	/** Silently restore the XP track from a save (mid-run resume). Does NOT run level-up logic;
+	 *  broadcasts OnXPGained(0, XP) once so HUD bars refresh. */
+	void RestoreProgress(int32 InXP, int32 InLevel);
+
 	// ==================== Read API ====================
 
 	UFUNCTION(BlueprintPure, Category = "XP")

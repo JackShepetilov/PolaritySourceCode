@@ -3,8 +3,22 @@
 #include "RunSubsystem.h"
 
 #include "Engine/World.h"
+#include "Engine/GameInstance.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "Polarity/Upgrades/UpgradeDefinition.h"
+#include "Save/SaveGameSubsystem.h"
+
+namespace
+{
+	USaveGameSubsystem* GetSaveSubsystem(const URunSubsystem* Self)
+	{
+		if (UGameInstance* GI = Self ? Self->GetGameInstance() : nullptr)
+		{
+			return GI->GetSubsystem<USaveGameSubsystem>();
+		}
+		return nullptr;
+	}
+}
 
 void URunSubsystem::StartRun()
 {
@@ -25,6 +39,12 @@ void URunSubsystem::StartRun()
 	OnAntennaCountChanged.Broadcast(ActivatedAntennaCount);
 
 	OnRunStarted.Broadcast();
+
+	// New run supersedes any stale mid-run resume; it re-checkpoints on the first EnterArena.
+	if (USaveGameSubsystem* Save = GetSaveSubsystem(this))
+	{
+		Save->ClearRun();
+	}
 }
 
 void URunSubsystem::EndRun(ERunEndReason Reason)
@@ -45,6 +65,21 @@ void URunSubsystem::EndRun(ERunEndReason Reason)
 		(int32)Reason, Stats.RunDuration, Stats.TotalXPEarned, Stats.LevelsGained);
 
 	OnRunEnded.Broadcast(Reason);
+
+	// Persist banked meta (Stream's HandleRunEnded ran synchronously during the broadcast above),
+	// then either keep the run save for resume (quit) or delete it (death / victory / abort).
+	if (USaveGameSubsystem* Save = GetSaveSubsystem(this))
+	{
+		Save->SaveMetaNow();
+		if (Reason == ERunEndReason::QuitToMenu)
+		{
+			Save->SaveRun();
+		}
+		else
+		{
+			Save->ClearRun();
+		}
+	}
 }
 
 void URunSubsystem::EnterArena(int32 ArenaIndex)
@@ -58,6 +93,12 @@ void URunSubsystem::EnterArena(int32 ArenaIndex)
 	CurrentArenaIndex = ArenaIndex;
 	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] EnterArena %d"), ArenaIndex);
 	OnArenaEntered.Broadcast(ArenaIndex);
+
+	// Checkpoint the run so a quit-to-menu from this arena can resume here.
+	if (USaveGameSubsystem* Save = GetSaveSubsystem(this))
+	{
+		Save->SaveRun();
+	}
 }
 
 void URunSubsystem::ClearArena(int32 ArenaIndex)
@@ -137,4 +178,26 @@ void URunSubsystem::HandleUpgradeRemoved(UUpgradeDefinition* Definition)
 	{
 		AcquiredUpgrades.Remove(Definition->UpgradeTag);
 	}
+}
+
+void URunSubsystem::RestoreFromSave(ERunState InState, int32 InArenaIndex, int32 InActivatedAntennas,
+	const TMap<FGameplayTag, int32>& InUpgrades, const FRunStats& InStats)
+{
+	RunState              = InState;
+	CurrentArenaIndex     = InArenaIndex;
+	ActivatedAntennaCount = InActivatedAntennas;
+	AcquiredUpgrades      = InUpgrades;
+	Stats                 = InStats;
+
+	// Preserve elapsed run time across the resume (RunDuration was captured at save time).
+	if (UWorld* World = GetWorld())
+	{
+		RunStartTimeSeconds = World->GetTimeSeconds() - Stats.RunDuration;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] RestoreFromSave state=%d arena=%d antennas=%d upgrades=%d"),
+		(int32)RunState, CurrentArenaIndex, ActivatedAntennaCount, AcquiredUpgrades.Num());
+
+	// Resync UI once (don't replay N antenna increments).
+	OnAntennaCountChanged.Broadcast(ActivatedAntennaCount);
 }

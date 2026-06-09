@@ -1,0 +1,8 @@
+{
+  "whiteBalance": { "tempShift": 0.03, "tintShift": -0.03 },
+  "toneCurve": { "blackPoint": 0.01, "whitePoint": 1.0, "pivot": 0.45, "contrast": 0.12 },
+  "liftGammaGain": { "lift": [-0.005, 0.0, 0.012], "gamma": [1.0, 1.0, 1.0], "gain": [1.0, 1.0, 0.99] },
+  "globalSaturation": 0.92,
+  "perHueSaturation": { "red": 0.95, "orange": 0.8, "yellow": 0.7, "green": 0.6, "aqua": 1.06, "blue": 1.02, "purple": 1.0, "magenta": 1.0 },
+  "perHueRotation": { "red": 0, "orange": 0, "yellow": 15, "green": 6, "aqua": 0, "blue": 0, "purple": 0, "magenta": 0 }
+}

@@ -11,6 +11,8 @@
 
 #include "Polarity/Arena/ArenaManager.h"
 #include "Polarity/Variant_Shooter/Lore/LoreSubsystem.h"
+#include "Save/SaveGameSubsystem.h"
+#include "Save/PolarityMetaSave.h"
 
 #include "Curves/CurveFloat.h"
 #include "Engine/DataTable.h"
@@ -39,6 +41,21 @@ void UStreamSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 	ChatBroker = NewObject<UChatBroker>(this);
 	ChatBroker->Init(this);
+
+	// Restore persisted meta from the save profile. SaveGameSubsystem depends on nobody, so this
+	// dependency is acyclic and guarantees the meta file is loaded before we read it.
+	if (USaveGameSubsystem* Save = Cast<USaveGameSubsystem>(
+			Collection.InitializeDependency(USaveGameSubsystem::StaticClass())))
+	{
+		if (const UPolarityMetaSave* M = Save->GetMeta())
+		{
+			MetaCurrency       = M->MetaCurrency;
+			CompletedRuns      = M->CompletedRuns;
+			PlayerStreamerName = M->PlayerStreamerName; // may be empty == "not chosen yet"
+			UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Restored meta: currency=%lld runs=%d name='%s'"),
+				MetaCurrency, CompletedRuns, *PlayerStreamerName);
+		}
+	}
 }
 
 void UStreamSubsystem::Deinitialize()
@@ -61,7 +78,8 @@ void UStreamSubsystem::Deinitialize()
 
 void UStreamSubsystem::SetPlayerStreamerName(const FString& InName)
 {
-	PlayerStreamerName = InName.IsEmpty() ? TEXT("@ramless_") : InName;
+	// Empty stays empty == "not chosen yet" (the desktop prompts for a handle on first launch).
+	PlayerStreamerName = InName;
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] PlayerStreamerName set: %s"), *PlayerStreamerName);
 }
 

@@ -49,6 +49,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lore")
 	bool IsLoreConsumed(FName LoreID) const;
 
+	/** Raw set of consumed lore IDs — used by the save system to persist/restore lore progress. */
+	const TSet<FName>& GetConsumedLoreIDs() const { return ConsumedLoreIDs; }
+
 	/** Force-mark a lore entry as consumed, even without picking it. For scripted gates / debugging. */
 	UFUNCTION(BlueprintCallable, Category = "Lore")
 	void MarkLoreConsumed(FName LoreID);

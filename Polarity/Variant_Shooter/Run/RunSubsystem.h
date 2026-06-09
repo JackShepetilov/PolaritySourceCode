@@ -125,6 +125,13 @@ public:
 	void AddLevelGainedToStats();
 	void RegisterKillInStats(TSubclassOf<AShooterNPC> EnemyClass);
 
+	// ==================== Save / restore (mid-run resume) ====================
+
+	/** Restore the whole run-tier state from a save (mid-run resume). Sets the protected fields
+	 *  directly, then fires OnAntennaCountChanged once so UI resyncs without N spurious increments. */
+	void RestoreFromSave(ERunState InState, int32 InArenaIndex, int32 InActivatedAntennas,
+		const TMap<FGameplayTag, int32>& InUpgrades, const FRunStats& InStats);
+
 	// ==================== Events ====================
 
 	UPROPERTY(BlueprintAssignable, Category = "Run|Events")
