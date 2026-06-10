@@ -1,0 +1,116 @@
+{
+  "name": "A5_Amphitheater",
+  "comment": "Финальная generic-арена L (LevelDesign.md §5/A5): амфитеатр 6000x8000 на склоне, три террасы вниз к воде (0/-350/-700), вход сверху с севера + западный боковой на T1. Кромки террас = wallrun-фронты; EMF-пластины = лифты между ярусами; турель на восточной вышке держит диагональ; сцена с пилоном на T2 = арт-якорь. Борт у воды по M5. Самый плотный состав.",
+  "level_path": "/Game/Variant_Shooter/Arenas/Biome1/A5_Amphitheater/Lvl_A5_Amphitheater",
+  "time_between_waves": 3.0,
+
+  "classes": {
+    "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
+    "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
+    "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
+    "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
+    "plate": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMF_AcceleratorPlate",
+    "spawn_point": "/Script/Polarity.ArenaSpawnPoint",
+    "shooter": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC",
+    "melee": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_MeleeNPC",
+    "drone": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone",
+    "humanoid": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_HumanoidNPC",
+    "kamikaze": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_KamikazeDrone",
+    "turret": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_TurretNPC"
+  },
+
+  "pieces": [
+    { "id": "T0", "shape": "box", "mat": "floor", "pos": [0, -2700, -450], "size": [6600, 2600, 900], "group": "Terraces" },
+    { "id": "T1", "shape": "box", "mat": "floor", "pos": [0, -100, -625],  "size": [6600, 2600, 550], "group": "Terraces" },
+    { "id": "T2", "shape": "box", "mat": "floor", "pos": [0, 2600, -800],  "size": [6600, 2800, 200], "group": "Terraces" },
+    { "id": "approach", "shape": "box", "mat": "floor", "pos": [0, -4250, -50],  "size": [1200, 500, 100], "group": "Terraces" },
+    { "id": "app_w",    "shape": "box", "mat": "floor", "pos": [-3650, 200, -400], "size": [500, 600, 100], "group": "Terraces" },
+
+    { "id": "wr_t01_a", "shape": "box", "mat": "wallrun", "pos": [-1700, -1390, -175], "size": [1500, 20, 330], "group": "Wallrun" },
+    { "id": "wr_t01_b", "shape": "box", "mat": "wallrun", "pos": [1500, -1390, -175],  "size": [1500, 20, 330], "group": "Wallrun" },
+    { "id": "wr_t12_a", "shape": "box", "mat": "wallrun", "pos": [-1300, 1210, -525],  "size": [1500, 20, 330], "group": "Wallrun" },
+    { "id": "wr_t12_b", "shape": "box", "mat": "wallrun", "pos": [1800, 1210, -525],   "size": [1500, 20, 330], "group": "Wallrun" },
+
+    { "id": "rock_w_n", "shape": "box", "mat": "wall", "pos": [-3400, -2050, -200], "size": [200, 3900, 1000], "group": "Perimeter" },
+    { "id": "rock_w_s", "shape": "box", "mat": "wall", "pos": [-3400, 2250, -200],  "size": [200, 3500, 1000], "group": "Perimeter" },
+    { "id": "rock_e",   "shape": "box", "mat": "wall", "pos": [3400, -100, -200],   "size": [200, 7800, 1000], "group": "Perimeter" },
+    { "id": "rock_n_w", "shape": "box", "mat": "wall", "pos": [-1950, -4100, 150],  "size": [2700, 200, 300],  "group": "Perimeter" },
+    { "id": "rock_n_e", "shape": "box", "mat": "wall", "pos": [1950, -4100, 150],   "size": [2700, 200, 300],  "group": "Perimeter" },
+    { "id": "bort_s",   "shape": "box", "mat": "wall", "pos": [0, 4050, -575],      "size": [6600, 100, 250],  "group": "Perimeter" },
+
+    { "id": "tower_t", "shape": "box", "mat": "deco", "pos": [2700, -2000, 250], "size": [700, 700, 500], "group": "Tower" },
+
+    { "id": "stage",       "shape": "cylinder", "mat": "deco", "pos": [0, 2600, -625], "size": [1400, 1400, 150], "group": "Stage" },
+    { "id": "stage_pylon", "shape": "cylinder", "mat": "deco", "pos": [0, 2600, -200], "size": [300, 300, 700],   "group": "Stage" },
+
+    { "id": "seat_t1_a", "shape": "box", "mat": "wall", "pos": [-1200, -700, -300], "size": [1200, 150, 100], "group": "Cover" },
+    { "id": "seat_t1_b", "shape": "box", "mat": "wall", "pos": [0, -400, -300],     "size": [1200, 150, 100], "group": "Cover" },
+    { "id": "seat_t1_c", "shape": "box", "mat": "wall", "pos": [1300, -750, -300],  "size": [1200, 150, 100], "group": "Cover" },
+    { "id": "seat_t2_a", "shape": "box", "mat": "wall", "pos": [-1500, 1900, -650], "size": [1200, 150, 100], "group": "Cover" },
+    { "id": "seat_t2_b", "shape": "box", "mat": "wall", "pos": [800, 2100, -650],   "size": [1200, 150, 100], "group": "Cover" },
+    { "id": "seat_t2_c", "shape": "box", "mat": "wall", "pos": [-300, 3200, -650],  "size": [1200, 150, 100], "group": "Cover" },
+    { "id": "cf_t0_a",   "shape": "box", "mat": "wall", "pos": [-1400, -2200, 100], "size": [150, 900, 200],  "group": "Cover" },
+    { "id": "cf_t0_b",   "shape": "box", "mat": "wall", "pos": [1200, -2400, 100],  "size": [150, 900, 200],  "group": "Cover" },
+
+    { "id": "blk_n", "shape": "box", "mat": "blocker", "pos": [0, -4100, 250],   "size": [1200, 40, 500], "group": "Blockers" },
+    { "id": "blk_w", "shape": "box", "mat": "blocker", "pos": [-3400, 200, -100], "size": [40, 600, 500],  "group": "Blockers" }
+  ],
+
+  "exit_blocker_ids": ["blk_n", "blk_w"],
+
+  "markers": [
+    { "type": "player_start",  "pos": [0, -4250, 100], "yaw": 90 },
+    { "type": "respawn_point", "pos": [0, -4150, 100], "yaw": 90 },
+
+    { "type": "entry_trigger", "pos": [0, -4150, 150],    "extent": [600, 150, 250] },
+    { "type": "entry_trigger", "pos": [-3500, 200, -200], "extent": [150, 300, 250] },
+
+    { "type": "npc", "id": "TowerTurret", "class_key": "turret", "pos": [2700, -2000, 530], "yaw": 135 },
+
+    { "type": "spawn", "id": "G1a", "pos": [-2600, -3300, 10],   "yaw": 45 },
+    { "type": "spawn", "id": "G1b", "pos": [-2000, -3500, 10],   "yaw": 45 },
+    { "type": "spawn", "id": "G2a", "pos": [2600, -200, -340],   "yaw": 180 },
+    { "type": "spawn", "id": "G2b", "pos": [2700, 400, -340],    "yaw": 180 },
+    { "type": "spawn", "id": "G3a", "pos": [-2200, 3300, -690],  "yaw": 0 },
+    { "type": "spawn", "id": "G3b", "pos": [-1500, 3500, -690],  "yaw": 30 },
+    { "type": "spawn", "id": "G4",  "pos": [2500, 2800, -690],   "yaw": 135 },
+    { "type": "spawn", "id": "Air1", "pos": [0, -500, -290],     "air": true, "air_height": 300 },
+    { "type": "spawn", "id": "Air2", "pos": [1300, 2500, -640],  "air": true, "air_height": 300 },
+
+    { "type": "prop_cluster", "id": "C1", "pos": [-2500, -2500, 60],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C2", "pos": [1800, -600, -290],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C3", "pos": [-800, 2300, -640],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C4", "pos": [2300, 3300, -640],  "count": 3, "radius": 150 },
+
+    { "type": "plate", "id": "Plate1", "pos": [-2400, -1200, -330] },
+    { "type": "plate", "id": "Plate2", "pos": [2200, 1100, -680] },
+    { "type": "plate", "id": "Plate3", "pos": [0, 3500, -680] },
+
+    { "type": "antenna", "id": "Antenna", "pos": [2800, 3600, -590], "yaw": -135 },
+    { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 600] },
+    { "type": "manager", "pos": [0, 0, 800] },
+
+    { "type": "nav_link", "id": "NL01_c", "pos": [0, -1400, 5],       "left": [0, -250, 0], "right": [0, 400, -350] },
+    { "type": "nav_link", "id": "NL01_w", "pos": [-2900, -1400, 5],   "left": [0, -250, 0], "right": [0, 400, -350] },
+    { "type": "nav_link", "id": "NL01_e", "pos": [2800, -1400, 5],    "left": [0, -250, 0], "right": [0, 400, -350] },
+    { "type": "nav_link", "id": "NL12_c", "pos": [200, 1200, -345],   "left": [0, -250, 0], "right": [0, 400, -350] },
+    { "type": "nav_link", "id": "NL12_w", "pos": [-2800, 1200, -345], "left": [0, -250, 0], "right": [0, 400, -350] },
+    { "type": "nav_link", "id": "NL12_e", "pos": [2900, 1200, -345],  "left": [0, -250, 0], "right": [0, 400, -350] }
+  ],
+
+  "navmesh_bounds": { "pos": [0, -100, -100], "size": [7600, 9400, 2600] },
+
+  "screenshots": [
+    { "id": "top",    "pos": [0, 0, 5600],         "pitch": -90, "yaw": -90 },
+    { "id": "entry",  "pos": [0, -4150, 180],      "pitch": -6,  "yaw": 90 },
+    { "id": "iso_se", "pos": [5200, 5200, 2400],   "pitch": -24, "yaw": -135 },
+    { "id": "iso_nw", "pos": [-5200, -5200, 2600], "pitch": -24, "yaw": 45 },
+    { "id": "stage",  "pos": [0, 500, -100],       "pitch": -10, "yaw": 90 }
+  ],
+
+  "waves": [
+    { "delay": 0.0, "entries": [["melee", 3], ["shooter", 2]] },
+    { "delay": 0.0, "entries": [["shooter", 3], ["drone", 2], ["kamikaze", 2]] },
+    { "delay": 0.0, "entries": [["humanoid", 2], ["melee", 2], ["drone", 1]] }
+  ]
+}

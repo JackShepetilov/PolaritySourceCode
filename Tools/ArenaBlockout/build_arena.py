@@ -68,34 +68,53 @@ def get_subsystems():
     return les, eas
 
 
-def ensure_materials():
-    """Create the flat-color blockout materials once; return name -> loaded asset."""
+FLATCOL_PARENT = "/Game/LevelPrototyping/Materials/M_FlatCol"
+
+
+def ensure_materials(force=False):
+    """Create colored MaterialInstanceConstants of the template's M_FlatCol.
+
+    Hand-building UMaterial graphs from python proved fragile (assets authored in a
+    NullRHI commandlet session render as the checkerboard fallback forever). Material
+    INSTANCES of an existing, known-good parent are deterministic instead."""
     eal = unreal.EditorAssetLibrary
-    if not eal.does_directory_exist(MAT_DIR):
-        eal.make_directory(MAT_DIR)
     tools = unreal.AssetToolsHelpers.get_asset_tools()
     mel = unreal.MaterialEditingLibrary
+    if force and eal.does_directory_exist(MAT_DIR):
+        eal.delete_directory(MAT_DIR)
+        log("Deleted old material dir {}".format(MAT_DIR))
+    if not eal.does_directory_exist(MAT_DIR):
+        eal.make_directory(MAT_DIR)
+    parent = eal.load_asset(FLATCOL_PARENT)
+    if parent is None:
+        raise RuntimeError("Parent material not found: " + FLATCOL_PARENT)
     out = {}
+    param_name = None
     for name, rgb in MATERIALS.items():
-        path = "{}/M_BLK_{}".format(MAT_DIR, name)
+        path = "{}/MI_BLK_{}".format(MAT_DIR, name)
         if eal.does_asset_exist(path):
             out[name] = eal.load_asset(path)
             continue
-        mat = tools.create_asset("M_BLK_{}".format(name), MAT_DIR, unreal.Material,
-                                 unreal.MaterialFactoryNew())
-        color = mel.create_material_expression(
-            mat, unreal.MaterialExpressionConstant3Vector, -300, 0)
-        color.set_editor_property(
-            "constant", unreal.LinearColor(rgb[0], rgb[1], rgb[2], 1.0))
-        mel.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
-        rough = mel.create_material_expression(
-            mat, unreal.MaterialExpressionConstant, -300, 220)
-        rough.set_editor_property("r", 0.9)
-        mel.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
-        mel.recompile_material(mat)
+        mic = tools.create_asset("MI_BLK_{}".format(name), MAT_DIR,
+                                 unreal.MaterialInstanceConstant,
+                                 unreal.MaterialInstanceConstantFactoryNew())
+        if mic is None:
+            raise RuntimeError("Failed to create material instance " + path)
+        mel.set_material_instance_parent(mic, parent)
+        if param_name is None:
+            names = [str(n) for n in mel.get_vector_parameter_names(mic)]
+            log("M_FlatCol vector params: {}".format(names))
+            if not names:
+                raise RuntimeError("M_FlatCol has no vector parameters to tint")
+            preferred = [n for n in names if "color" in n.lower() or "tint" in n.lower()]
+            param_name = preferred[0] if preferred else names[0]
+            log("Using vector param '{}'".format(param_name))
+        mel.set_material_instance_vector_parameter_value(
+            mic, param_name, unreal.LinearColor(rgb[0], rgb[1], rgb[2], 1.0))
+        mel.update_material_instance(mic)
         eal.save_asset(path)
-        out[name] = mat
-        log("Created material {}".format(path))
+        out[name] = mic
+        log("Created material instance {}".format(path))
     return out
 
 
@@ -121,16 +140,34 @@ def open_or_create_level(les, level_path):
         log("Created new level {}".format(level_path))
 
 
-def clear_tagged(eas, tag):
+def in_package(actor, package_name):
+    """True if the actor lives in the given level package.
+
+    The author adds his own sublevels (debug character, lighting) to built arenas —
+    we must NEVER touch actors outside the arena's persistent level package."""
+    try:
+        return actor.get_package().get_name() == package_name
+    except Exception:
+        return False
+
+
+def clear_tagged(eas, tag, package_name):
     removed = 0
+    skipped_foreign = 0
     for actor in list(eas.get_all_level_actors()):
         try:
             if tag in [str(t) for t in actor.tags]:
-                eas.destroy_actor(actor)
-                removed += 1
+                if in_package(actor, package_name):
+                    eas.destroy_actor(actor)
+                    removed += 1
+                else:
+                    skipped_foreign += 1
         except Exception:
             pass
     log("Removed {} previously generated actors".format(removed))
+    if skipped_foreign:
+        warn("Skipped {} tagged actors living in OTHER levels (author sublevels untouched)"
+             .format(skipped_foreign))
 
 
 def finish_actor(actor, tag, label, folder):
@@ -178,18 +215,32 @@ def take_screenshots(eas, spec, arena):
     cap = eas.spawn_actor_from_class(unreal.SceneCapture2D, unreal.Vector(0, 0, 0))
     comp = cap.capture_component2d
     comp.set_editor_property("texture_target", rt)
-    comp.set_editor_property("capture_source", unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
-    comp.set_editor_property("show_flag_settings",
-                             [unreal.EngineShowFlagsSetting(show_flag_name="Lighting", enabled=False)])
     comp.set_editor_property("capture_every_frame", False)
+    # Transient lights for the lit pass — destroyed right after, never saved (the level
+    # stays light-free per author rule; we simply don't save after screenshots).
+    sun = eas.spawn_actor_from_class(unreal.DirectionalLight, unreal.Vector(0, 0, 3000),
+                                     unreal.Rotator(roll=0.0, pitch=-55.0, yaw=35.0))
+    fill = eas.spawn_actor_from_class(unreal.DirectionalLight, unreal.Vector(0, 0, 3000),
+                                      unreal.Rotator(roll=0.0, pitch=-30.0, yaw=215.0))
+    try:
+        fill.get_component_by_class(unreal.DirectionalLightComponent).set_editor_property(
+            "intensity", 3.0)
+    except Exception as e:
+        warn("fill light intensity: {}".format(e))
     for shot in shots:
         cap.set_actor_location_and_rotation(vec(shot["pos"]), rot(shot), False, False)
         comp.set_editor_property("fov_angle", float(shot.get("fov", 90.0)))
+        sid = shot.get("id", "shot")
+        # Lit FinalColor with transient lights (captured twice so eye adaptation settles).
+        comp.set_editor_property("capture_source", unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
         comp.capture_scene()
-        name = "{}_{}.png".format(arena, shot.get("id", "shot"))
+        comp.capture_scene()
+        name = "{}_{}.png".format(arena, sid)
         unreal.RenderingLibrary.export_render_target(world, rt, out_dir, name)
         log("Screenshot saved: {}".format(os.path.join(out_dir, name)))
     eas.destroy_actor(cap)
+    eas.destroy_actor(sun)
+    eas.destroy_actor(fill)
     log("Screenshots done ({})".format(len(shots)))
 
 
@@ -239,20 +290,30 @@ def build_waves(spec, classes):
     return waves
 
 
-def dump_actors(eas, tag, arena):
+def dump_actors(eas, tag, arena, package_name):
     rows = []
     for actor in eas.get_all_level_actors():
         if tag not in [str(t) for t in actor.tags]:
             continue
+        if not in_package(actor, package_name):
+            continue
         origin, extent = actor.get_actor_bounds(False)
         loc = actor.get_actor_location()
-        rows.append({
+        row = {
             "label": actor.get_actor_label(),
             "class": actor.get_class().get_name(),
             "loc": [round(loc.x, 1), round(loc.y, 1), round(loc.z, 1)],
             "bounds_origin": [round(origin.x, 1), round(origin.y, 1), round(origin.z, 1)],
             "bounds_extent": [round(extent.x, 1), round(extent.y, 1), round(extent.z, 1)],
-        })
+        }
+        try:
+            smc = getattr(actor, "static_mesh_component", None)
+            if smc:
+                mat = smc.get_material(0)
+                row["mat"] = mat.get_path_name() if mat else "NULL"
+        except Exception:
+            pass
+        rows.append(row)
     out_dir = os.path.join(TOOLS_DIR, "Build")
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
@@ -274,9 +335,9 @@ def build(arena_name):
     level_path = spec["level_path"]
 
     les, eas = get_subsystems()
-    mats = ensure_materials()
+    mats = ensure_materials(force=False)
     open_or_create_level(les, level_path)
-    clear_tagged(eas, tag)
+    clear_tagged(eas, tag, level_path)
 
     classes = {key: resolve_class(path) for key, path in spec.get("classes", {}).items()}
 
@@ -327,6 +388,16 @@ def build(arena_name):
             label = marker.get("id", "Spawn{}".format(idx))
             finish_actor(actor, tag, "BLK_{}_{}".format(arena, label), "{}/Spawns".format(arena))
             spawn_point_count += 1
+            continue
+        if mtype == "npc":
+            cls = classes.get(marker.get("class_key", ""))
+            if cls is None:
+                warn("npc marker: unknown class_key '{}'".format(marker.get("class_key")))
+                continue
+            actor = eas.spawn_actor_from_class(cls, vec(marker["pos"]), rot(marker))
+            if actor:
+                label = marker.get("id", "NPC{}".format(idx))
+                finish_actor(actor, tag, "BLK_{}_{}".format(arena, label), "{}/NPCs".format(arena))
             continue
         if mtype == "nav_link":
             actor = eas.spawn_actor_from_class(unreal.NavLinkProxy, vec(marker["pos"]), rot(marker))
@@ -414,7 +485,7 @@ def build(arena_name):
     if not les.save_current_level():
         warn("save_current_level returned false")
     unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-    dump_actors(eas, tag, arena)
+    dump_actors(eas, tag, arena, level_path)
 
     # --- unlit verification screenshots (after save: capture actor is never persisted) ---
     take_screenshots(eas, spec, arena)

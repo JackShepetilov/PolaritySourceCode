@@ -1,0 +1,111 @@
+{
+  "name": "A4_Hangar",
+  "comment": "Интерьерная арена M (LevelDesign.md §5/A4): серверный ангар 4000x7000, потолок 900 (выше апекса двойного прыжка). Ряды стоек = wallrun-грани (1500-1600) + slam-поверхности + LOS-ритм; крыши стоек L1 +350 (мантл). Турель на южной платформе держит центральный неф; мёртвая зона и фланги через боковые коридоры. Вход север (-Y) + западная боковая дверь. Состав: гуманоиды+пехота, без камикадзе.",
+  "level_path": "/Game/Variant_Shooter/Arenas/Biome1/A4_Hangar/Lvl_A4_Hangar",
+  "time_between_waves": 3.0,
+
+  "classes": {
+    "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
+    "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
+    "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
+    "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
+    "plate": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMF_AcceleratorPlate",
+    "spawn_point": "/Script/Polarity.ArenaSpawnPoint",
+    "shooter": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC",
+    "melee": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_MeleeNPC",
+    "drone": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone",
+    "humanoid": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_HumanoidNPC",
+    "kamikaze": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_KamikazeDrone",
+    "turret": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_TurretNPC"
+  },
+
+  "pieces": [
+    { "id": "floor",    "shape": "box", "mat": "floor", "pos": [0, 0, -50],     "size": [4400, 7400, 100], "group": "Shell" },
+    { "id": "approach", "shape": "box", "mat": "floor", "pos": [0, -4050, -50], "size": [1200, 500, 100],  "group": "Shell" },
+    { "id": "ceiling",  "shape": "box", "mat": "wall",  "pos": [0, 0, 950],     "size": [4400, 7400, 100], "group": "Shell" },
+
+    { "id": "wall_n_w", "shape": "box", "mat": "wall", "pos": [-1250, -3600, 450], "size": [1900, 200, 900], "group": "Shell" },
+    { "id": "wall_n_e", "shape": "box", "mat": "wall", "pos": [1250, -3600, 450],  "size": [1900, 200, 900], "group": "Shell" },
+    { "id": "wall_s",   "shape": "box", "mat": "wall", "pos": [0, 3600, 450],      "size": [4400, 200, 900], "group": "Shell" },
+    { "id": "wall_w_n", "shape": "box", "mat": "wall", "pos": [-2300, -750, 450],  "size": [200, 5900, 900], "group": "Shell" },
+    { "id": "wall_w_s", "shape": "box", "mat": "wall", "pos": [-2300, 3250, 450],  "size": [200, 900, 900],  "group": "Shell" },
+    { "id": "wall_e",   "shape": "box", "mat": "wall", "pos": [2300, 0, 450],      "size": [200, 7400, 900], "group": "Shell" },
+
+    { "id": "rack1", "shape": "box", "mat": "deco", "pos": [-1100, -1800, 175], "size": [400, 1600, 350], "group": "Racks" },
+    { "id": "rack2", "shape": "box", "mat": "deco", "pos": [-1100, 400, 175],   "size": [400, 1600, 350], "group": "Racks" },
+    { "id": "rack3", "shape": "box", "mat": "deco", "pos": [-1100, 2600, 175],  "size": [400, 1600, 350], "group": "Racks" },
+    { "id": "rack4", "shape": "box", "mat": "deco", "pos": [1100, -700, 175],   "size": [400, 1600, 350], "group": "Racks" },
+    { "id": "rack5", "shape": "box", "mat": "deco", "pos": [1100, 1500, 175],   "size": [400, 1600, 350], "group": "Racks" },
+
+    { "id": "wr1",  "shape": "box", "mat": "wallrun", "pos": [-890, -1800, 185], "size": [20, 1500, 320], "group": "Wallrun" },
+    { "id": "wr2",  "shape": "box", "mat": "wallrun", "pos": [-890, 400, 185],   "size": [20, 1500, 320], "group": "Wallrun" },
+    { "id": "wr3",  "shape": "box", "mat": "wallrun", "pos": [-890, 2600, 185],  "size": [20, 1500, 320], "group": "Wallrun" },
+    { "id": "wr4",  "shape": "box", "mat": "wallrun", "pos": [890, -700, 185],   "size": [20, 1500, 320], "group": "Wallrun" },
+    { "id": "wr5",  "shape": "box", "mat": "wallrun", "pos": [890, 1500, 185],   "size": [20, 1500, 320], "group": "Wallrun" },
+    { "id": "wr_w", "shape": "box", "mat": "wallrun", "pos": [-2190, -1500, 500], "size": [20, 1600, 500], "group": "Wallrun" },
+    { "id": "wr_e", "shape": "box", "mat": "wallrun", "pos": [2190, 800, 500],    "size": [20, 1600, 500], "group": "Wallrun" },
+
+    { "id": "plat_t", "shape": "box", "mat": "deco", "pos": [0, 3100, 200],   "size": [1400, 800, 400], "group": "South" },
+    { "id": "step_t", "shape": "box", "mat": "deco", "pos": [900, 3100, 100], "size": [600, 800, 200],  "group": "South" },
+
+    { "id": "cov1", "shape": "box", "mat": "wall", "pos": [0, -1200, 50],  "size": [700, 150, 100], "group": "Cover" },
+    { "id": "cov2", "shape": "box", "mat": "wall", "pos": [0, 800, 50],    "size": [700, 150, 100], "yaw": 30, "group": "Cover" },
+    { "id": "cov3", "shape": "box", "mat": "wall", "pos": [300, 2300, 50], "size": [500, 150, 100], "group": "Cover" },
+
+    { "id": "blk_n", "shape": "box", "mat": "blocker", "pos": [0, -3600, 250],    "size": [600, 40, 500], "group": "Blockers" },
+    { "id": "blk_w", "shape": "box", "mat": "blocker", "pos": [-2300, 2500, 250], "size": [40, 600, 500], "group": "Blockers" }
+  ],
+
+  "exit_blocker_ids": ["blk_n", "blk_w"],
+
+  "markers": [
+    { "type": "player_start",  "pos": [0, -4050, 100], "yaw": 90 },
+    { "type": "respawn_point", "pos": [0, -3950, 100], "yaw": 90 },
+
+    { "type": "entry_trigger", "pos": [0, -3700, 150],    "extent": [300, 150, 200] },
+    { "type": "entry_trigger", "pos": [-2400, 2500, 150], "extent": [150, 300, 200] },
+
+    { "type": "npc", "id": "NaveTurret", "class_key": "turret", "pos": [0, 3200, 430], "yaw": -90 },
+
+    { "type": "spawn", "id": "G1a", "pos": [-1750, -2200, 10], "yaw": 0 },
+    { "type": "spawn", "id": "G1b", "pos": [-1750, -1500, 10], "yaw": 0 },
+    { "type": "spawn", "id": "G2a", "pos": [1750, 400, 10],    "yaw": 180 },
+    { "type": "spawn", "id": "G2b", "pos": [1750, 1100, 10],   "yaw": 180 },
+    { "type": "spawn", "id": "G3a", "pos": [-1750, 2900, 10],  "yaw": 0 },
+    { "type": "spawn", "id": "G3b", "pos": [-1300, 3100, 10],  "yaw": 45 },
+    { "type": "spawn", "id": "Rack", "pos": [-1100, 400, 360], "yaw": 0 },
+    { "type": "spawn", "id": "Air1", "pos": [0, -300, 60],     "air": true, "air_height": 300 },
+    { "type": "spawn", "id": "Air2", "pos": [0, 1900, 60],     "air": true, "air_height": 300 },
+
+    { "type": "prop_cluster", "id": "C1", "pos": [-1700, -2800, 60], "count": 3, "radius": 150 },
+    { "type": "prop_cluster", "id": "C2", "pos": [1700, -100, 60],   "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C3", "pos": [-1700, 1600, 60],  "count": 3, "radius": 150 },
+
+    { "type": "antenna", "id": "Antenna", "pos": [0, 3350, 410], "yaw": -90 },
+    { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 700] },
+    { "type": "manager", "pos": [0, 0, 1200] },
+
+    { "type": "nav_link", "id": "NL_r1", "pos": [-950, -1800, 355], "left": [-150, 0, 0], "right": [400, 0, -350] },
+    { "type": "nav_link", "id": "NL_r2", "pos": [-950, 400, 355],   "left": [-150, 0, 0], "right": [400, 0, -350] },
+    { "type": "nav_link", "id": "NL_r3", "pos": [-950, 2600, 355],  "left": [-150, 0, 0], "right": [400, 0, -350] },
+    { "type": "nav_link", "id": "NL_r4", "pos": [950, -700, 355],   "left": [150, 0, 0],  "right": [-400, 0, -350] },
+    { "type": "nav_link", "id": "NL_r5", "pos": [950, 1500, 355],   "left": [150, 0, 0],  "right": [-400, 0, -350] },
+    { "type": "nav_link", "id": "NL_plat", "pos": [0, 2700, 405],   "left": [0, 200, 0],  "right": [0, -350, -400] }
+  ],
+
+  "navmesh_bounds": { "pos": [0, -150, 450], "size": [5200, 8600, 1500] },
+
+  "screenshots": [
+    { "id": "top_n", "pos": [0, -1800, 840],   "pitch": -90, "yaw": -90, "fov": 110 },
+    { "id": "top_s", "pos": [0, 1700, 840],    "pitch": -90, "yaw": -90, "fov": 110 },
+    { "id": "entry", "pos": [0, -3650, 180],   "pitch": -3,  "yaw": 90 },
+    { "id": "nave",  "pos": [0, -2800, 500],   "pitch": -12, "yaw": 90 },
+    { "id": "diag",  "pos": [-1850, -3000, 750], "pitch": -20, "yaw": 55 }
+  ],
+
+  "waves": [
+    { "delay": 0.0, "entries": [["melee", 2], ["shooter", 2]] },
+    { "delay": 0.0, "entries": [["humanoid", 1], ["shooter", 2]] },
+    { "delay": 0.0, "entries": [["humanoid", 1], ["melee", 2], ["drone", 1]] }
+  ]
+}
