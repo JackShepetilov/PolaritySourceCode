@@ -160,20 +160,77 @@ def spawn_shape(eas, mats, piece, tag, arena):
                         "{}/{}".format(arena, group))
 
 
-def spawn_lights(eas, tag, arena, bounds_z=2000.0):
-    sun = eas.spawn_actor_from_class(unreal.DirectionalLight, unreal.Vector(0, 0, bounds_z),
-                                     unreal.Rotator(roll=0.0, pitch=-55.0, yaw=35.0))
-    finish_actor(sun, tag, "BLK_{}_Sun".format(arena), "{}/Lighting".format(arena))
-    sky = eas.spawn_actor_from_class(unreal.SkyLight, unreal.Vector(0, 0, bounds_z))
-    try:
-        comp = sky.get_component_by_class(unreal.SkyLightComponent)
-        comp.set_editor_property("real_time_capture", True)
-    except Exception:
-        warn("SkyLight real_time_capture not set (API mismatch) — set manually")
-    finish_actor(sky, tag, "BLK_{}_SkyLight".format(arena), "{}/Lighting".format(arena))
-    atm = eas.spawn_actor_from_class(unreal.SkyAtmosphere, unreal.Vector(0, 0, 0))
-    finish_actor(atm, tag, "BLK_{}_SkyAtmosphere".format(arena), "{}/Lighting".format(arena))
-    log("Spawned blockout lighting")
+# NO lighting is ever spawned: the author adds lighting as a separate sublevel.
+# Verification screenshots are taken in UNLIT viewmode instead (flat blockout colors
+# read perfectly without lights).
+
+class _ShotRunner(object):
+    """Tick-driven sequential screenshot capture; optionally quits the editor when done.
+
+    Screenshots are async (processed at end of frame), so after the build we keep the
+    editor alive via a slate post-tick callback: set camera -> wait -> request shot ->
+    wait -> next. Only then --quit fires."""
+
+    def __init__(self, shots, out_dir, arena, quit_when_done):
+        self.shots = shots
+        self.out_dir = out_dir
+        self.arena = arena
+        self.quit_when_done = quit_when_done
+        self.idx = -1
+        self.wait = 10
+        self.pending_capture = False
+        self.ues = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
+        self.handle = unreal.register_slate_post_tick_callback(self._tick)
+
+    def _tick(self, _dt):
+        try:
+            if self.wait > 0:
+                self.wait -= 1
+                return
+            if self.pending_capture:
+                shot = self.shots[self.idx]
+                path = os.path.join(self.out_dir,
+                                    "{}_{}.png".format(self.arena, shot.get("id", self.idx)))
+                unreal.AutomationLibrary.take_high_res_screenshot(1600, 900, path)
+                log("Screenshot requested: {}".format(path))
+                self.pending_capture = False
+                self.wait = 30
+                return
+            self.idx += 1
+            if self.idx >= len(self.shots):
+                self._finish()
+                return
+            shot = self.shots[self.idx]
+            self.ues.set_level_viewport_camera_info(vec(shot["pos"]), rot(shot))
+            self.pending_capture = True
+            self.wait = 8
+        except Exception:
+            import traceback
+            for line in traceback.format_exc().splitlines():
+                warn(line)
+            self._finish()
+
+    def _finish(self):
+        unreal.unregister_slate_post_tick_callback(self.handle)
+        log("Screenshots done ({} requested)".format(max(self.idx, 0)))
+        log("RESULT: SUCCESS")
+        if self.quit_when_done:
+            log("Quitting editor (--quit)")
+            unreal.SystemLibrary.quit_editor()
+
+
+def start_screenshots(spec, arena, quit_when_done):
+    shots = spec.get("screenshots") or []
+    if not shots:
+        return False
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    unreal.SystemLibrary.execute_console_command(world, "viewmode unlit")
+    out_dir = os.path.join(TOOLS_DIR, "Build", "Screenshots")
+    if not os.path.isdir(out_dir):
+        os.makedirs(out_dir)
+    _ShotRunner(shots, out_dir, arena, quit_when_done)
+    log("Screenshot pass started: {} cameras, unlit".format(len(shots)))
+    return True
 
 
 def spawn_navmesh_bounds(eas, tag, arena, spec):
@@ -245,7 +302,7 @@ def dump_actors(eas, tag, arena):
     log("Dumped {} actors to {}".format(len(rows), out_path))
 
 
-def build(arena_name):
+def build(arena_name, quit_when_done=False):
     spec_path = os.path.join(TOOLS_DIR, "Arenas", arena_name + ".json")
     if not os.path.isfile(spec_path):
         raise RuntimeError("Spec not found: " + spec_path)
@@ -274,7 +331,6 @@ def build(arena_name):
             count_geo += 1
     log("Spawned {} geometry pieces".format(count_geo))
 
-    spawn_lights(eas, tag, arena)
     spawn_navmesh_bounds(eas, tag, arena, spec)
 
     # --- markers / gameplay actors ---
@@ -311,6 +367,23 @@ def build(arena_name):
             label = marker.get("id", "Spawn{}".format(idx))
             finish_actor(actor, tag, "BLK_{}_{}".format(arena, label), "{}/Spawns".format(arena))
             spawn_point_count += 1
+            continue
+        if mtype == "nav_link":
+            actor = eas.spawn_actor_from_class(unreal.NavLinkProxy, vec(marker["pos"]), rot(marker))
+            if actor is None:
+                warn("NavLinkProxy failed to spawn")
+                continue
+            link = unreal.NavigationLink()
+            link.set_editor_property("left", vec(marker["left"]))
+            link.set_editor_property("right", vec(marker["right"]))
+            try:
+                link.set_editor_property("direction", unreal.NavLinkDirection.BOTH_WAYS)
+                link.set_editor_property("snap_radius", float(marker.get("snap_radius", 150.0)))
+            except Exception as e:
+                warn("NavigationLink optional props: {}".format(e))
+            actor.set_editor_property("point_links", [link])
+            label = marker.get("id", "NavLink{}".format(idx))
+            finish_actor(actor, tag, "BLK_{}_{}".format(arena, label), "{}/Nav".format(arena))
             continue
         if mtype == "prop_cluster":
             cls = classes.get("prop")
@@ -384,25 +457,32 @@ def build(arena_name):
     dump_actors(eas, tag, arena)
     log("DONE: {} built into {}".format(arena, level_path))
 
+    # --- unlit verification screenshots (async; defers --quit if any) ---
+    return start_screenshots(spec, arena, quit_when_done)
+
 
 def main():
     args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
     quit_when_done = "--quit" in sys.argv[1:]
     ok = False
+    deferred = False
     try:
         if not args:
             raise RuntimeError("Usage: build_arena.py <ArenaSpecName> [--quit]")
-        build(args[0])
+        deferred = build(args[0], quit_when_done)
         ok = True
     except Exception:
         import traceback
         for line in traceback.format_exc().splitlines():
             warn(line)
     finally:
-        log("RESULT: {}".format("SUCCESS" if ok else "FAILED"))
-        if quit_when_done:
-            log("Quitting editor (--quit)")
-            unreal.SystemLibrary.quit_editor()
+        if deferred:
+            log("Build OK; awaiting screenshot pass (quit deferred)")
+        else:
+            log("RESULT: {}".format("SUCCESS" if ok else "FAILED"))
+            if quit_when_done:
+                log("Quitting editor (--quit)")
+                unreal.SystemLibrary.quit_editor()
 
 
 main()

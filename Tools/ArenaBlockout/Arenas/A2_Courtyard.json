@@ -97,7 +97,23 @@
 
     { "type": "antenna", "id": "Antenna", "pos": [1600, 2720, 355], "yaw": -90 },
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1100] },
-    { "type": "manager", "pos": [0, 0, 1300] }
+    { "type": "manager", "pos": [0, 0, 1300] },
+
+    { "type": "nav_link", "id": "NL_n_w", "pos": [-1200, -2500, 355], "left": [0, -150, 0], "right": [0, 450, -350] },
+    { "type": "nav_link", "id": "NL_n_e", "pos": [1200, -2500, 355],  "left": [0, -150, 0], "right": [0, 450, -350] },
+    { "type": "nav_link", "id": "NL_w_s", "pos": [-2500, 2200, 355],  "left": [-150, 0, 0], "right": [450, 0, -350] },
+    { "type": "nav_link", "id": "NL_w_n", "pos": [-2500, -2300, 355], "left": [-150, 0, 0], "right": [450, 0, -350] },
+    { "type": "nav_link", "id": "NL_e_s", "pos": [2500, 800, 355],    "left": [150, 0, 0],  "right": [-450, 0, -350] },
+    { "type": "nav_link", "id": "NL_e_n", "pos": [2500, -2200, 355],  "left": [150, 0, 0],  "right": [-450, 0, -350] },
+    { "type": "nav_link", "id": "NL_s_e", "pos": [2200, 2500, 355],   "left": [0, 150, 0],  "right": [0, -450, -350] },
+    { "type": "nav_link", "id": "NL_s_w", "pos": [-2400, 2500, 355],  "left": [0, 150, 0],  "right": [0, -450, -350] }
+  ],
+
+  "screenshots": [
+    { "id": "top",    "pos": [0, 0, 5800],       "pitch": -90, "yaw": -90 },
+    { "id": "entry",  "pos": [0, -3500, 180],    "pitch": -5,  "yaw": 90 },
+    { "id": "iso_ne", "pos": [4800, -4800, 2600],  "pitch": -22, "yaw": 135 },
+    { "id": "iso_sw", "pos": [-4800, 4800, 2600],  "pitch": -22, "yaw": -45 }
   ],
 
   "navmesh_bounds": { "pos": [0, -200, 500], "size": [7600, 8200, 2400] },
