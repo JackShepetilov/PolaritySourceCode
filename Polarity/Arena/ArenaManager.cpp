@@ -41,6 +41,8 @@
 #include "DeferredUpgradeQueueSubsystem.h"
 #include "Polarity/Variant_Shooter/Run/RunSubsystem.h"
 #include "Polarity/Variant_Shooter/XP/XPSubsystem.h"
+#include "Polarity/Variant_Shooter/ShootableButton.h"
+#include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
 
 AArenaManager::AArenaManager()
 {
@@ -2890,6 +2892,28 @@ int32 AArenaManager::CollectAntennasFromOwnLevel()
 	return Added;
 }
 
+/** Resolve the ShootableButtonComponent paired with an antenna: embedded component first,
+ *  then the external InteractionButton actor (same priority as AArenaAntenna::BeginPlay).
+ *  ArenaManager drives the button's enabled state so it's only green/pressable while the
+ *  antenna is Available*. NOT used for AGateAntenna — the gate isn't in any arena's
+ *  Antennas list and must keep its button live for the "locked attempt" feedback. */
+static UShootableButtonComponent* ResolveAntennaButton(AArenaAntenna* Antenna)
+{
+	if (!Antenna)
+	{
+		return nullptr;
+	}
+	if (UShootableButtonComponent* Embedded = Antenna->FindComponentByClass<UShootableButtonComponent>())
+	{
+		return Embedded;
+	}
+	if (AShootableButton* ButtonActor = Antenna->InteractionButton.LoadSynchronous())
+	{
+		return ButtonActor->ButtonComponent;
+	}
+	return nullptr;
+}
+
 void AArenaManager::RegisterAntennas()
 {
 	for (const TSoftObjectPtr<AArenaAntenna>& Ref : Antennas)
@@ -2901,12 +2925,24 @@ void AArenaManager::RegisterAntennas()
 		}
 		// AddUniqueDynamic is idempotent — safe even if BeginPlay is somehow called twice
 		Ant->OnActivated.AddUniqueDynamic(this, &AArenaManager::HandleAntennaActivated);
+
+		// Buttons start dark/locked — they only light up when CompleteArena flips the
+		// antennas to AvailablePostFight. (Safe vs. component BeginPlay order: the button's
+		// BeginPlay re-reads bIsEnabled in UpdateMaterial and doesn't reset the flag.)
+		if (UShootableButtonComponent* Button = ResolveAntennaButton(Ant))
+		{
+			Button->SetEnabled(false);
+		}
 	}
 }
 
 void AArenaManager::SetAllAntennasState(uint8 NewState)
 {
 	const EAntennaState Target = static_cast<EAntennaState>(NewState);
+	const bool bButtonEnabled =
+		Target == EAntennaState::AvailableMidFight ||
+		Target == EAntennaState::AvailablePostFight;
+
 	for (const TSoftObjectPtr<AArenaAntenna>& Ref : Antennas)
 	{
 		AArenaAntenna* Ant = Ref.Get();
@@ -2920,6 +2956,12 @@ void AArenaManager::SetAllAntennasState(uint8 NewState)
 			continue;
 		}
 		Ant->SetState(Target);
+
+		// Keep the paired button in sync: green/pressable only while the antenna is Available*.
+		if (UShootableButtonComponent* Button = ResolveAntennaButton(Ant))
+		{
+			Button->SetEnabled(bButtonEnabled);
+		}
 	}
 }
 
@@ -2927,6 +2969,13 @@ void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
 {
 	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Antenna %s activated — flushing upgrades and granting the antenna level"),
 		Antenna ? *Antenna->GetName() : TEXT("NULL"));
+
+	// Spent antenna = dead button. One-shot buttons disable themselves on press; this also
+	// covers toggle-mode buttons, which would otherwise stay pressable after the upload.
+	if (UShootableButtonComponent* Button = ResolveAntennaButton(Antenna))
+	{
+		Button->SetEnabled(false);
+	}
 
 	// Antennas only unlock in CompleteArena now, so combat is normally already over.
 	// Defensive guard for scripted/BP activations that bypass the lock.
