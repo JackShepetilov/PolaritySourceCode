@@ -161,76 +161,36 @@ def spawn_shape(eas, mats, piece, tag, arena):
 
 
 # NO lighting is ever spawned: the author adds lighting as a separate sublevel.
-# Verification screenshots are taken in UNLIT viewmode instead (flat blockout colors
-# read perfectly without lights).
+# Verification screenshots are rendered via a transient SceneCapture2D with the
+# Lighting show-flag disabled (= unlit, flat blockout colors). Synchronous, no
+# viewport involved — works headless where editor viewports don't redraw.
 
-class _ShotRunner(object):
-    """Tick-driven sequential screenshot capture; optionally quits the editor when done.
-
-    Screenshots are async (processed at end of frame), so after the build we keep the
-    editor alive via a slate post-tick callback: set camera -> wait -> request shot ->
-    wait -> next. Only then --quit fires."""
-
-    def __init__(self, shots, out_dir, arena, quit_when_done):
-        self.shots = shots
-        self.out_dir = out_dir
-        self.arena = arena
-        self.quit_when_done = quit_when_done
-        self.idx = -1
-        self.wait = 10
-        self.pending_capture = False
-        self.ues = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
-        self.handle = unreal.register_slate_post_tick_callback(self._tick)
-
-    def _tick(self, _dt):
-        try:
-            if self.wait > 0:
-                self.wait -= 1
-                return
-            if self.pending_capture:
-                shot = self.shots[self.idx]
-                path = os.path.join(self.out_dir,
-                                    "{}_{}.png".format(self.arena, shot.get("id", self.idx)))
-                unreal.AutomationLibrary.take_high_res_screenshot(1600, 900, path)
-                log("Screenshot requested: {}".format(path))
-                self.pending_capture = False
-                self.wait = 30
-                return
-            self.idx += 1
-            if self.idx >= len(self.shots):
-                self._finish()
-                return
-            shot = self.shots[self.idx]
-            self.ues.set_level_viewport_camera_info(vec(shot["pos"]), rot(shot))
-            self.pending_capture = True
-            self.wait = 8
-        except Exception:
-            import traceback
-            for line in traceback.format_exc().splitlines():
-                warn(line)
-            self._finish()
-
-    def _finish(self):
-        unreal.unregister_slate_post_tick_callback(self.handle)
-        log("Screenshots done ({} requested)".format(max(self.idx, 0)))
-        log("RESULT: SUCCESS")
-        if self.quit_when_done:
-            log("Quitting editor (--quit)")
-            unreal.SystemLibrary.quit_editor()
-
-
-def start_screenshots(spec, arena, quit_when_done):
+def take_screenshots(eas, spec, arena):
     shots = spec.get("screenshots") or []
     if not shots:
-        return False
-    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-    unreal.SystemLibrary.execute_console_command(world, "viewmode unlit")
+        return
     out_dir = os.path.join(TOOLS_DIR, "Build", "Screenshots")
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
-    _ShotRunner(shots, out_dir, arena, quit_when_done)
-    log("Screenshot pass started: {} cameras, unlit".format(len(shots)))
-    return True
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    rt = unreal.RenderingLibrary.create_render_target2d(
+        world, 1600, 900, unreal.TextureRenderTargetFormat.RTF_RGBA8)
+    cap = eas.spawn_actor_from_class(unreal.SceneCapture2D, unreal.Vector(0, 0, 0))
+    comp = cap.capture_component2d
+    comp.set_editor_property("texture_target", rt)
+    comp.set_editor_property("capture_source", unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
+    comp.set_editor_property("show_flag_settings",
+                             [unreal.EngineShowFlagsSetting(show_flag_name="Lighting", enabled=False)])
+    comp.set_editor_property("capture_every_frame", False)
+    for shot in shots:
+        cap.set_actor_location_and_rotation(vec(shot["pos"]), rot(shot), False, False)
+        comp.set_editor_property("fov_angle", float(shot.get("fov", 90.0)))
+        comp.capture_scene()
+        name = "{}_{}.png".format(arena, shot.get("id", "shot"))
+        unreal.RenderingLibrary.export_render_target(world, rt, out_dir, name)
+        log("Screenshot saved: {}".format(os.path.join(out_dir, name)))
+    eas.destroy_actor(cap)
+    log("Screenshots done ({})".format(len(shots)))
 
 
 def spawn_navmesh_bounds(eas, tag, arena, spec):
@@ -302,7 +262,7 @@ def dump_actors(eas, tag, arena):
     log("Dumped {} actors to {}".format(len(rows), out_path))
 
 
-def build(arena_name, quit_when_done=False):
+def build(arena_name):
     spec_path = os.path.join(TOOLS_DIR, "Arenas", arena_name + ".json")
     if not os.path.isfile(spec_path):
         raise RuntimeError("Spec not found: " + spec_path)
@@ -455,34 +415,51 @@ def build(arena_name, quit_when_done=False):
         warn("save_current_level returned false")
     unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
     dump_actors(eas, tag, arena)
+
+    # --- unlit verification screenshots (after save: capture actor is never persisted) ---
+    take_screenshots(eas, spec, arena)
     log("DONE: {} built into {}".format(arena, level_path))
 
-    # --- unlit verification screenshots (async; defers --quit if any) ---
-    return start_screenshots(spec, arena, quit_when_done)
+
+def shots_only(arena_name):
+    """Re-take screenshots of an already-built arena WITHOUT touching the level file.
+
+    Safe to run while the author has the level open in another editor instance:
+    nothing is cleared, spawned-persistent, or saved."""
+    spec_path = os.path.join(TOOLS_DIR, "Arenas", arena_name + ".json")
+    if not os.path.isfile(spec_path):
+        raise RuntimeError("Spec not found: " + spec_path)
+    with open(spec_path, "r", encoding="utf-8") as f:
+        spec = json.load(f)
+    les, eas = get_subsystems()
+    if not unreal.EditorAssetLibrary.does_asset_exist(spec["level_path"]):
+        raise RuntimeError("Level does not exist yet, run a full build first: " + spec["level_path"])
+    if not les.load_level(spec["level_path"]):
+        raise RuntimeError("Failed to load level " + spec["level_path"])
+    take_screenshots(eas, spec, spec["name"])
 
 
 def main():
     args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
     quit_when_done = "--quit" in sys.argv[1:]
     ok = False
-    deferred = False
     try:
         if not args:
-            raise RuntimeError("Usage: build_arena.py <ArenaSpecName> [--quit]")
-        deferred = build(args[0], quit_when_done)
+            raise RuntimeError("Usage: build_arena.py <ArenaSpecName> [--shots-only] [--quit]")
+        if "--shots-only" in sys.argv[1:]:
+            shots_only(args[0])
+        else:
+            build(args[0])
         ok = True
     except Exception:
         import traceback
         for line in traceback.format_exc().splitlines():
             warn(line)
     finally:
-        if deferred:
-            log("Build OK; awaiting screenshot pass (quit deferred)")
-        else:
-            log("RESULT: {}".format("SUCCESS" if ok else "FAILED"))
-            if quit_when_done:
-                log("Quitting editor (--quit)")
-                unreal.SystemLibrary.quit_editor()
+        log("RESULT: {}".format("SUCCESS" if ok else "FAILED"))
+        if quit_when_done:
+            log("Quitting editor (--quit)")
+            unreal.SystemLibrary.quit_editor()
 
 
 main()
