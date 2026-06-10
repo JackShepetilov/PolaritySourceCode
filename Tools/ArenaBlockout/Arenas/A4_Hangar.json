@@ -57,10 +57,12 @@
     { "id": "cov3", "shape": "box", "mat": "wall", "pos": [300, 2300, 50], "size": [500, 150, 100], "group": "Cover" },
 
     { "id": "blk_n", "shape": "box", "mat": "blocker", "pos": [0, -3600, 250],    "size": [600, 40, 500], "group": "Blockers" },
-    { "id": "blk_w", "shape": "box", "mat": "blocker", "pos": [-2300, 2500, 250], "size": [40, 600, 500], "group": "Blockers" }
+    { "id": "blk_w", "shape": "box", "mat": "blocker", "pos": [-2300, 2500, 250], "size": [40, 600, 500], "group": "Blockers" },
+
+    { "id": "fld_roof", "shape": "box", "mat": "field", "pos": [0, 3050, 1010], "size": [1620, 920, 20], "group": "Field" }
   ],
 
-  "exit_blocker_ids": ["blk_n", "blk_w"],
+  "exit_blocker_ids": ["blk_n", "blk_w", "fld_roof"],
 
   "markers": [
     { "type": "player_start",  "pos": [0, -4050, 100], "yaw": 90 },

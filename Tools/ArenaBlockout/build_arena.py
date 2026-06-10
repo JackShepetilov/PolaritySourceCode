@@ -116,6 +116,10 @@ def ensure_materials(force=False):
         mel.update_material_instance(mic)
         eal.save_asset(path)
         out[name] = mic
+    # Containment field: translucent glass for the "стакан" walls that keep drones
+    # (and the player) inside during combat. Wired into ExitBlockers via the spec.
+    glass = eal.load_asset("/Game/LevelPrototyping/PolygonPrototype/Materials/M_PolygonPrototype_Glass")
+    out["field"] = glass if glass else out["wall"]
     return out
 
 

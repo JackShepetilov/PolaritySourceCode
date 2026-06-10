@@ -56,10 +56,18 @@
     { "id": "tower_step1",  "shape": "box", "mat": "deco", "pos": [2450, -2200, 125],  "size": [500, 500, 250], "group": "Tower" },
 
     { "id": "blk_s",  "shape": "box", "mat": "blocker", "pos": [0, -3000, 250],    "size": [600, 40, 500], "group": "Blockers" },
-    { "id": "blk_ne", "shape": "box", "mat": "blocker", "pos": [1800, 3000, 250],  "size": [600, 40, 500], "group": "Blockers" }
+    { "id": "blk_ne", "shape": "box", "mat": "blocker", "pos": [1800, 3000, 250],  "size": [600, 40, 500], "group": "Blockers" },
+
+    { "id": "ant_step2", "shape": "box", "mat": "deco", "pos": [-1400, 2400, 250], "size": [500, 500, 500], "group": "Antenna" },
+    { "id": "ant_step1", "shape": "box", "mat": "deco", "pos": [-900, 2400, 125],  "size": [500, 500, 250], "group": "Antenna" },
+
+    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 3010, 1250],  "size": [6040, 20, 2500], "group": "Field" },
+    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -3010, 1250], "size": [6040, 20, 2500], "group": "Field" },
+    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-3010, 0, 1250], "size": [20, 6040, 2500], "group": "Field" },
+    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [3010, 0, 1250],  "size": [20, 6040, 2500], "group": "Field" }
   ],
 
-  "exit_blocker_ids": ["blk_s", "blk_ne"],
+  "exit_blocker_ids": ["blk_s", "blk_ne", "fld_n", "fld_s", "fld_w", "fld_e"],
 
   "markers": [
     { "type": "player_start",  "pos": [0, -3550, 100], "yaw": 90 },
@@ -74,15 +82,15 @@
     { "type": "spawn", "id": "G1b", "pos": [-2200, -2600, 10], "yaw": 45 },
     { "type": "spawn", "id": "G2a", "pos": [2650, 1250, 10],   "yaw": 180 },
     { "type": "spawn", "id": "G2b", "pos": [2650, 1700, 10],   "yaw": 180 },
-    { "type": "spawn", "id": "G3a", "pos": [-800, 2600, 10],   "yaw": -90 },
-    { "type": "spawn", "id": "G3b", "pos": [-200, 2700, 10],   "yaw": -90 },
+    { "type": "spawn", "id": "G3a", "pos": [-450, 2700, 10],   "yaw": -90 },
+    { "type": "spawn", "id": "G3b", "pos": [150, 2650, 10],    "yaw": -90 },
     { "type": "spawn", "id": "Roof", "pos": [0, -300, 810],    "yaw": -90 },
     { "type": "spawn", "id": "T2",  "pos": [1300, -1500, 410], "yaw": 140 },
     { "type": "spawn", "id": "Air1", "pos": [-1800, -400, 60], "air": true, "air_height": 300 },
     { "type": "spawn", "id": "Air2", "pos": [1400, 2100, 60],  "air": true, "air_height": 300 },
 
     { "type": "prop_cluster", "id": "C1", "pos": [-1900, -700, 60], "count": 4, "radius": 180 },
-    { "type": "prop_cluster", "id": "C2", "pos": [-500, 2500, 60],  "count": 3, "radius": 150 },
+    { "type": "prop_cluster", "id": "C2", "pos": [-150, 2450, 60],  "count": 3, "radius": 150 },
     { "type": "prop_cluster", "id": "C3", "pos": [1100, -2500, 60], "count": 3, "radius": 150 },
 
     { "type": "antenna", "id": "Antenna", "pos": [-2000, 2400, 610], "yaw": -45 },
