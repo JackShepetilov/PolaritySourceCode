@@ -155,9 +155,14 @@ def report_sublevels(prefix):
     """Log the persistent level's streaming sublevels (author's debug/light levels)."""
     try:
         world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-        subs = world.get_editor_property("streaming_levels")
-        names = [str(s.get_editor_property("world_asset_package_name")) for s in subs if s]
-        log("{}: {} streaming sublevels {}".format(prefix, len(names), names))
+        subs = unreal.EditorLevelUtils.get_levels(world)
+        names = []
+        for lvl in subs:
+            if lvl is None:
+                continue
+            pkg = lvl.get_package().get_name()
+            names.append(pkg)
+        log("{}: {} levels in world {}".format(prefix, len(names), names))
         return names
     except Exception as e:
         warn("Sublevel report failed: {}".format(e))
