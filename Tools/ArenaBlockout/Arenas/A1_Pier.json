@@ -73,7 +73,7 @@
 
     { "type": "prop_cluster", "id": "C1", "pos": [-1700, -2500, 60], "count": 3, "radius": 150 },
     { "type": "prop_cluster", "id": "C2", "pos": [1700, 2600, 60],   "count": 4, "radius": 180 },
-    { "type": "prop_cluster", "id": "C3", "pos": [250, 650, 60],     "count": 3, "radius": 150 },
+    { "type": "prop_cluster", "id": "C3", "pos": [0, 500, 60],       "count": 3, "radius": 150 },
 
     { "type": "antenna", "id": "Antenna", "pos": [0, 3050, 155], "yaw": 180 },
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1100] },

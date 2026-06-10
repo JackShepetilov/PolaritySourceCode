@@ -38,7 +38,9 @@
     { "id": "rock_n_e", "shape": "box", "mat": "wall", "pos": [1950, -4100, 150],   "size": [2700, 200, 300],  "group": "Perimeter" },
     { "id": "bort_s",   "shape": "box", "mat": "wall", "pos": [0, 4050, -575],      "size": [6600, 100, 250],  "group": "Perimeter" },
 
-    { "id": "tower_t", "shape": "box", "mat": "deco", "pos": [2700, -2000, 250], "size": [700, 700, 500], "group": "Tower" },
+    { "id": "tower_t",     "shape": "box", "mat": "deco", "pos": [2700, -2000, 250], "size": [700, 700, 500], "group": "Tower" },
+    { "id": "tower_step2", "shape": "box", "mat": "deco", "pos": [2100, -2000, 250], "size": [500, 500, 500], "group": "Tower" },
+    { "id": "tower_step1", "shape": "box", "mat": "deco", "pos": [2100, -2500, 125], "size": [500, 500, 250], "group": "Tower" },
 
     { "id": "stage",       "shape": "cylinder", "mat": "deco", "pos": [0, 2600, -625], "size": [1400, 1400, 150], "group": "Stage" },
     { "id": "stage_pylon", "shape": "cylinder", "mat": "deco", "pos": [0, 2600, -200], "size": [300, 300, 700],   "group": "Stage" },
@@ -65,7 +67,7 @@
     { "type": "entry_trigger", "pos": [0, -4150, 150],    "extent": [600, 150, 250] },
     { "type": "entry_trigger", "pos": [-3500, 200, -200], "extent": [150, 300, 250] },
 
-    { "type": "npc", "id": "TowerTurret", "class_key": "turret", "pos": [2700, -2000, 530], "yaw": 135 },
+    { "type": "npc", "id": "TowerTurret", "class_key": "turret", "pos": [2700, -2320, 530], "yaw": 135 },
 
     { "type": "spawn", "id": "G1a", "pos": [-2600, -3300, 10],   "yaw": 45 },
     { "type": "spawn", "id": "G1b", "pos": [-2000, -3500, 10],   "yaw": 45 },
@@ -78,13 +80,9 @@
     { "type": "spawn", "id": "Air2", "pos": [1300, 2500, -640],  "air": true, "air_height": 300 },
 
     { "type": "prop_cluster", "id": "C1", "pos": [-2500, -2500, 60],  "count": 4, "radius": 180 },
-    { "type": "prop_cluster", "id": "C2", "pos": [1800, -600, -290],  "count": 4, "radius": 180 },
-    { "type": "prop_cluster", "id": "C3", "pos": [-800, 2300, -640],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C2", "pos": [2000, -150, -290],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C3", "pos": [-1150, 2750, -640], "count": 4, "radius": 180 },
     { "type": "prop_cluster", "id": "C4", "pos": [2300, 3300, -640],  "count": 3, "radius": 150 },
-
-    { "type": "plate", "id": "Plate1", "pos": [-2400, -1200, -330] },
-    { "type": "plate", "id": "Plate2", "pos": [2200, 1100, -680] },
-    { "type": "plate", "id": "Plate3", "pos": [0, 3500, -680] },
 
     { "type": "antenna", "id": "Antenna", "pos": [2800, 3600, -590], "yaw": -135 },
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 600] },

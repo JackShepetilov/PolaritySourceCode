@@ -22,7 +22,11 @@
   "pieces": [
     { "id": "floor",    "shape": "box", "mat": "floor", "pos": [0, 0, -50],     "size": [4400, 7400, 100], "group": "Shell" },
     { "id": "approach", "shape": "box", "mat": "floor", "pos": [0, -4050, -50], "size": [1200, 500, 100],  "group": "Shell" },
-    { "id": "ceiling",  "shape": "box", "mat": "wall",  "pos": [0, 0, 950],     "size": [4400, 7400, 100], "group": "Shell" },
+    { "id": "ceil_n",       "shape": "box", "mat": "wall", "pos": [0, -1850, 950],    "size": [4400, 3700, 100], "group": "Shell" },
+    { "id": "ceil_mid",     "shape": "box", "mat": "wall", "pos": [0, 1300, 950],     "size": [4400, 2600, 100], "group": "Shell" },
+    { "id": "ceil_s_w",     "shape": "box", "mat": "wall", "pos": [-1500, 3050, 950], "size": [1400, 900, 100],  "group": "Shell" },
+    { "id": "ceil_s_e",     "shape": "box", "mat": "wall", "pos": [1500, 3050, 950],  "size": [1400, 900, 100],  "group": "Shell" },
+    { "id": "ceil_s_strip", "shape": "box", "mat": "wall", "pos": [0, 3600, 950],     "size": [4400, 200, 100],  "group": "Shell" },
 
     { "id": "wall_n_w", "shape": "box", "mat": "wall", "pos": [-1250, -3600, 450], "size": [1900, 200, 900], "group": "Shell" },
     { "id": "wall_n_e", "shape": "box", "mat": "wall", "pos": [1250, -3600, 450],  "size": [1900, 200, 900], "group": "Shell" },
