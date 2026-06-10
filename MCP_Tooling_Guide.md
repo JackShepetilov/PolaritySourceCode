@@ -25,6 +25,17 @@
   (вызываемые, но не листятся): `task_*`, `execute_script`, `run_console_command`.
 - Оба сервера живут в `Source/.mcp.json`. Им нужен **запущенный редактор с загруженными
   плагинами**: без него handshake пройдёт, но любой tool-вызов упадёт по соединению.
+- ⚠️ **UnrealClaude лжёт про успешный старт**: при занятом порте 3000 в логе будет
+  `LogHttpListener: Error: HttpListener unable to bind to 127.0.0.1:3000`, но строкой ниже модуль
+  всё равно напишет «MCP Server started on http://localhost:3000» (проверено 2026-06-10). Порт
+  захардкожен (`UnrealClaudeConstants.h: DefaultPort = 3000`, constexpr), перезапуск сервера без
+  рестарта редактора невозможен (нет ни консольной команды, ни UCLASS-сабсистемы). Диагностика:
+  `netstat -ano | findstr :3000` + грэп лога по `LogHttpListener`. Лечение: освободить порт и
+  перезапустить редактор; при хронических коллизиях — сменить константу и пересобрать плагин
+  (+ `UNREAL_MCP_URL` в `.mcp.json`).
+- API-ключ vibeue.com на TCP-мост 55557 НЕ влияет: предупреждение `LogMCPServer: API key not
+  configured` касается другого компонента (HTTP MCP/чат); `get_system_info` по TCP отвечает без
+  ключа (проверено живьём).
 - Панель UnrealClaude в редакторе: **Tools → Claude Assistant**. AI Chat VibeUE требует ключ
   vibeue.com — для MCP он НЕ нужен.
 
