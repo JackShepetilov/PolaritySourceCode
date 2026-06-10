@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "vibeue": {
+      "command": "C:\\Users\\Professional\\Documents\\Unreal Projects\\Polarity_Main5_6\\Plugins\\VibeUE\\Python\\vibe-ue-main\\Python\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\Professional\\Documents\\Unreal Projects\\Polarity_Main5_6\\Plugins\\VibeUE\\Python\\vibe-ue-main\\Python\\vibe_ue_server.py"
+      ]
+    },
+    "unrealclaude": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\Professional\\Documents\\Unreal Projects\\Polarity_Main5_6\\Plugins\\UnrealClaude\\UnrealClaude\\Resources\\mcp-bridge\\index.js"
+      ],
+      "env": {
+        "UNREAL_MCP_URL": "http://localhost:3000"
+      }
+    }
+  }
+}
