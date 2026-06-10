@@ -36,6 +36,13 @@
 - API-ключ vibeue.com на TCP-мост 55557 НЕ влияет: предупреждение `LogMCPServer: API key not
   configured` касается другого компонента (HTTP MCP/чат); `get_system_info` по TCP отвечает без
   ключа (проверено живьём).
+- ⚠️ **`execute_script` = модальный диалог «Execute PYTHON Script?» в редакторе.** Вызов уходит
+  в task queue (`task_submit` → `task_status`/`task_result`), а диалог разрешения **блокирует
+  весь редактор, включая сам HTTP-сервер** — все запросы (даже `task_status`) висят по таймауту,
+  пока человек не кликнет Approve. Это штатно, не дедлок. Скрипты сохраняются в
+  `Content/UnrealClaude/Scripts/*.py` (чистка — тул `cleanup_scripts`). В конце результата
+  бывает `[WARNING: ... no new actors were created ...]` — ложнопозитивный шум для
+  ассет-скриптов, игнорировать.
 - Панель UnrealClaude в редакторе: **Tools → Claude Assistant**. AI Chat VibeUE требует ключ
   vibeue.com — для MCP он НЕ нужен.
 
