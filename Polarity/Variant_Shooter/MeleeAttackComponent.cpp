@@ -1231,8 +1231,11 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 			bTargetInKnockback = TargetNPC->IsInKnockback();
 		}
 
-		// If we have a lunge target, move toward it
-		if (Settings.bEnableLunge && MagnetismTarget.IsValid() && !bTargetInKnockback)
+		// If we have a lunge target, move toward it.
+		// bHasHitThisAttack gate: once the hit has landed, never resume homing — otherwise,
+		// if the target's knockback stun ends while the Active phase is still running, the
+		// player gets dragged toward the enemy a second time.
+		if (Settings.bEnableLunge && MagnetismTarget.IsValid() && !bTargetInKnockback && !bHasHitThisAttack)
 		{
 			// ==================== Distance-Based Homing ====================
 			// LungeTargetPosition is refreshed each frame in UpdateMagnetism (XY+Z tracks the
@@ -1246,8 +1249,9 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 			// Optional gate: require minimum starting speed (TF2 default is 0 = works stationary)
 			float CurrentSpeed = OwnerVelocityAtAttackStart.Size();
 			const float ArrivalRadius = FMath::Max(20.0f, Settings.LungeStopDistance * 0.3f);
+			const bool bSpeedGatePassed = CurrentSpeed >= Settings.MinSpeedForLunge;
 
-			if (CurrentSpeed >= Settings.MinSpeedForLunge && DistToLungeTarget > ArrivalRadius)
+			if (bSpeedGatePassed && DistToLungeTarget > ArrivalRadius)
 			{
 				// Drive at full lunge speed, but don't overshoot the target inside one frame.
 				const float SafeDt = FMath::Max(DeltaTime, 0.001f);
@@ -1270,12 +1274,20 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 				}
 #endif
 			}
-			else
+			else if (bSpeedGatePassed)
 			{
-				// [LUNGE_DEBUG] Inside arrival radius (or below min speed): velocity falls back to
-				// the attack-start velocity — this is the suspected jitter source.
-				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] ARRIVED-RESTORE state=%d dist=%.1f arrivalR=%.1f hit=%d restoredVel=%.0f (attack-start vel re-applied)"),
-					(int32)CurrentState, DistToLungeTarget, ArrivalRadius, bHasHitThisAttack ? 1 : 0, PreservedVelocity.Size());
+				// ==================== Arrival Hold (jitter fix) ====================
+				// Inside the arrival radius: hold position instead of re-applying the attack-start
+				// velocity. The old restore shoved the player out of the radius every frame and the
+				// homing branch yanked him back — a frame-frequency oscillation (~15-25cm) that read
+				// as "the enemy jitters" at point-blank range (verified via LUNGE_DEBUG: HOMING and
+				// ARRIVED-RESTORE alternated every 1-2 frames with velocity sign flips).
+				// Z is left untouched (gravity is disabled during the lunge anyway).
+				PreservedVelocity.X = 0.0f;
+				PreservedVelocity.Y = 0.0f;
+
+				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] ARRIVED-HOLD state=%d dist=%.1f arrivalR=%.1f hit=%d (XY velocity zeroed)"),
+					(int32)CurrentState, DistToLungeTarget, ArrivalRadius, bHasHitThisAttack ? 1 : 0);
 			}
 		}
 		else if (Settings.bEnableLunge && MagnetismTarget.IsValid() && bTargetInKnockback)
