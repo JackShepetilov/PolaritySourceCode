@@ -228,7 +228,18 @@ def take_screenshots(eas, spec, arena):
             "intensity", 3.0)
     except Exception as e:
         warn("fill light intensity: {}".format(e))
+    # Camera-mounted "flash" so interiors (closed shells like the hangar) are visible —
+    # the directional lights can't reach inside.
+    flash = eas.spawn_actor_from_class(unreal.PointLight, unreal.Vector(0, 0, 0))
+    try:
+        flash_comp = flash.get_component_by_class(unreal.PointLightComponent)
+        flash_comp.set_editor_property("intensity", 30000.0)
+        flash_comp.set_editor_property("attenuation_radius", 12000.0)
+        flash_comp.set_editor_property("cast_shadows", False)
+    except Exception as e:
+        warn("flash light setup: {}".format(e))
     for shot in shots:
+        flash.set_actor_location(vec(shot["pos"]), False, False)
         cap.set_actor_location_and_rotation(vec(shot["pos"]), rot(shot), False, False)
         comp.set_editor_property("fov_angle", float(shot.get("fov", 90.0)))
         sid = shot.get("id", "shot")
@@ -242,6 +253,7 @@ def take_screenshots(eas, spec, arena):
     eas.destroy_actor(cap)
     eas.destroy_actor(sun)
     eas.destroy_actor(fill)
+    eas.destroy_actor(flash)
     log("Screenshots done ({})".format(len(shots)))
 
 
