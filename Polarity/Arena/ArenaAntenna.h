@@ -23,9 +23,10 @@ class UDataTable;
 UENUM(BlueprintType)
 enum class EAntennaState : uint8
 {
-	/** Arena hasn't been activated yet — antenna is purely decorative */
+	/** Arena not cleared yet (idle OR in combat) — antenna is locked, button presses are rejected */
 	Inactive,
-	/** Arena is in active combat; pressing the button now will cut the fight short */
+	/** Legacy: pressing mid-fight used to cut the fight short. ArenaManager no longer sets
+	 *  this state (antennas stay Inactive until the arena is cleared); kept for BP compat. */
 	AvailableMidFight,
 	/** Arena cleared the normal way; beacon VFX guides the player to the antenna */
 	AvailablePostFight,

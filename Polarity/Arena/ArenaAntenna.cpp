@@ -123,7 +123,7 @@ void AArenaAntenna::TryActivate()
 
 	if (!bCanActivate)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] TryActivate REJECTED — state=%d (need Available*). Did the player enter the EntryTrigger so ArenaManager could flip antennas to MidFight?"),
+		UE_LOG(LogTemp, Warning, TEXT("[ANTENNA_DEBUG] [%s] TryActivate REJECTED — state=%d (need Available*). Antennas unlock only when the arena is cleared (CompleteArena -> AvailablePostFight)."),
 			*GetName(), (int32)State);
 		return;
 	}

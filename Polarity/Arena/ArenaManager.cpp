@@ -40,6 +40,7 @@
 #include "ArenaAntenna.h"
 #include "DeferredUpgradeQueueSubsystem.h"
 #include "Polarity/Variant_Shooter/Run/RunSubsystem.h"
+#include "Polarity/Variant_Shooter/XP/XPSubsystem.h"
 
 AArenaManager::AArenaManager()
 {
@@ -366,8 +367,10 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 	// Close exits
 	SetBlockersEnabled(true);
 
-	// Antennas become "press to end the fight" instantly
-	SetAllAntennasState(static_cast<uint8>(EAntennaState::AvailableMidFight));
+	// Antennas stay locked for the whole fight — premature upload is not allowed.
+	// CompleteArena flips them to AvailablePostFight once the arena is actually cleared.
+	// (Explicit set is defensive; ResetArena also returns them to Inactive.)
+	SetAllAntennasState(static_cast<uint8>(EAntennaState::Inactive));
 
 	// Capture all level-ups during combat — they're released when the antenna is activated
 	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
@@ -2922,17 +2925,17 @@ void AArenaManager::SetAllAntennasState(uint8 NewState)
 
 void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
 {
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Antenna %s activated — wrapping up combat and flushing upgrades"),
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Antenna %s activated — flushing upgrades and granting the antenna level"),
 		Antenna ? *Antenna->GetName() : TEXT("NULL"));
 
-	// If the player triggered the antenna mid-fight, end the fight right now (kills NPCs,
-	// stops sustain spawns, opens exits). If the fight is already complete, this is a no-op.
+	// Antennas only unlock in CompleteArena now, so combat is normally already over.
+	// Defensive guard for scripted/BP activations that bypass the lock.
 	if (CurrentState == EArenaState::Active || CurrentState == EArenaState::BetweenWaves)
 	{
 		ForceCompleteArena();
 	}
 
-	// Release every level-up the player earned during the fight as a sequence of popups
+	// Release every level-up stashed during the fight as a sequence of popups
 	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] ArenaManager::HandleAntennaActivated — calling Deferred->FlushAll()"));
@@ -2952,6 +2955,18 @@ void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("[RUN_DEBUG] ArenaManager::HandleAntennaActivated — RunSubsystem NOT FOUND, antenna not counted"));
+	}
+
+	// The antenna IS the level-up: exactly one level per uploaded antenna. Fires after
+	// FlushAll, so the deferred queue is no longer capturing and the upgrade-choice popup
+	// appears immediately.
+	if (UXPSubsystem* XP = GetGameInstance() ? GetGameInstance()->GetSubsystem<UXPSubsystem>() : nullptr)
+	{
+		XP->GrantLevel();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[XP_DEBUG] ArenaManager::HandleAntennaActivated — XPSubsystem NOT FOUND, no level granted"));
 	}
 
 	OnAntennaActivated.Broadcast(Antenna);

@@ -1,10 +1,11 @@
 // XPSubsystem.h
-// GameInstance subsystem owning the single XP + level track for a roguelite run.
+// GameInstance subsystem owning the single level track for a roguelite run.
 //
-// XP is one global pool. Every player kill awards BaseXPPerKill * EnemyXPMultiplier[class]
-// (XPConfig). Non-kill XP sources, if added later, call AddXP(Amount) directly.
-// On crossing a threshold the subsystem broadcasts OnLevelUp(NewLevel); the upgrade-choice UI
-// then rolls random upgrades from the whole registry (no per-skill routing).
+// Levels come from arena antennas: ArenaManager::HandleAntennaActivated calls GrantLevel()
+// once per uploaded antenna. Kills do NOT award XP — they only feed run kill stats.
+// The legacy XP pool (AddXP + XPConfig thresholds) remains for debug commands and possible
+// future non-antenna sources. On level-up the subsystem broadcasts OnLevelUp(NewLevel);
+// the upgrade-choice UI then rolls random upgrades from the whole registry.
 
 #pragma once
 
@@ -39,12 +40,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "XP")
 	void SetConfig(UXPConfig* InConfig);
 
-	/** Award flat XP into the single pool (no enemy multiplier). For non-kill XP sources. */
+	/** Award flat XP into the single pool. Legacy/debug path — normal play levels up via GrantLevel. */
 	UFUNCTION(BlueprintCallable, Category = "XP")
 	void AddXP(int32 Amount);
 
-	/** Award kill XP: BaseXPPerKill * EnemyMultiplier[EnemyClass]. C++-only (no BP exec wrapper to avoid pulling ShooterNPC.h into this header). */
-	void AwardKillXP(TSubclassOf<AShooterNPC> EnemyClass);
+	/** Grant exactly one level — the antenna-activation reward. Ignores XP thresholds:
+	 *  bumps the level, snaps CurrentXP up to the new level's threshold so HUD readouts
+	 *  stay consistent, and broadcasts OnLevelUp. No-op if the run is inactive or the
+	 *  level cap (XPConfig::GetMaxLevel) is already reached. */
+	UFUNCTION(BlueprintCallable, Category = "XP")
+	void GrantLevel();
 
 	/** Silently restore the XP track from a save (mid-run resume). Does NOT run level-up logic;
 	 *  broadcasts OnXPGained(0, XP) once so HUD bars refresh. */

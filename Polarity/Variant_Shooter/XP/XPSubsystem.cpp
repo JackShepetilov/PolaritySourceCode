@@ -140,25 +140,34 @@ void UXPSubsystem::AddXP(int32 Amount)
 	CheckLevelUp();
 }
 
-void UXPSubsystem::AwardKillXP(TSubclassOf<AShooterNPC> EnemyClass)
+void UXPSubsystem::GrantLevel()
 {
-	if (!Config.IsValid())
+	URunSubsystem* Run = GetRunSubsystem();
+	if (!Run || !Run->IsRunActive())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] AwardKillXP called with no config"));
+		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] GrantLevel ignored: run not active"));
 		return;
 	}
 
-	const int32 Base = Config->GetBaseXPPerKill();
-	if (Base <= 0)
+	if (Config.IsValid() && Progress.CurrentLevel >= Config->GetMaxLevel())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] BaseXPPerKill=0 (LevelCurve missing?)"));
+		UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] GrantLevel ignored: already at max level %d"), Progress.CurrentLevel);
 		return;
 	}
 
-	const float Multiplier = Config->GetEnemyMultiplier(EnemyClass);
-	const int32 Award = FMath::RoundToInt(static_cast<float>(Base) * Multiplier);
+	Progress.CurrentLevel += 1;
 
-	AddXP(Award);
+	// Snap the XP pool up to the new level's threshold so the HUD bar reads "0 into current
+	// level" instead of drifting out of sync with the level number.
+	if (Config.IsValid())
+	{
+		Progress.CurrentXP = FMath::Max(Progress.CurrentXP, Config->GetThresholdForLevel(Progress.CurrentLevel));
+	}
+
+	Run->AddLevelGainedToStats();
+
+	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] GrantLevel (antenna) -> level %d"), Progress.CurrentLevel);
+	OnLevelUp.Broadcast(Progress.CurrentLevel);
 }
 
 // ==================== Internals ====================
@@ -306,19 +315,9 @@ void UXPSubsystem::HandleNPCDeath(AShooterNPC* DeadNPC, TSubclassOf<UDamageType>
 		return;
 	}
 
+	// Kills only feed run stats now — levels come exclusively from antenna activations (GrantLevel).
 	const TSubclassOf<AShooterNPC> EnemyClass = DeadNPC->GetClass();
 	Run->RegisterKillInStats(EnemyClass);
-
-	if (!Config.IsValid())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] No XPConfig — kill stats registered but no XP awarded"));
-		return;
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[XP_DEBUG] Kill %s by %s -> +XP"),
-		*DeadNPC->GetName(),
-		KillingDamageType ? *KillingDamageType->GetName() : TEXT("NULL-DamageType"));
-	AwardKillXP(EnemyClass);
 }
 
 bool UXPSubsystem::WasKillCausedByPlayer(AActor* DamageCauser) const
@@ -394,13 +393,8 @@ namespace XPDebugCommands
 	{
 		UXPSubsystem* XP = GetXP(World);
 		if (!XP) return;
-		const int32 ToNext = XP->GetXPToNextLevel();
-		if (ToNext == INT32_MAX)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Already at max level"));
-			return;
-		}
-		XP->AddXP(FMath::Max(1, ToNext));
+		// Same path as a real antenna activation (GrantLevel logs the no-op reasons itself).
+		XP->GrantLevel();
 	}
 
 	static void CmdShow(const TArray<FString>& /*Args*/, UWorld* World)
@@ -617,7 +611,7 @@ static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPAdd(
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPLevelUp(
 	TEXT("polarity.xp.levelup"),
-	TEXT("Adds just enough XP to trigger one level-up. Usage: polarity.xp.levelup"),
+	TEXT("Grants one level via the antenna path (XPSubsystem::GrantLevel). Usage: polarity.xp.levelup"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdLevelUp));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityXPShow(
