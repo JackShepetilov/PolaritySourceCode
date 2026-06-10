@@ -5,8 +5,12 @@
 #
 # Usage:
 #   In-editor console:  py "<...>/Source/Tools/ArenaBlockout/build_arena.py" A2_Courtyard
-#   Headless:           UnrealEditor-Cmd.exe "<...>/Polarity.uproject" -run=pythonscript
-#                         -script="<...>/build_arena.py A2_Courtyard" -stdout -unattended
+#   Headless (full editor; -run=pythonscript commandlet CRASHES on new_level — do not use):
+#     UnrealEditor-Cmd.exe "<...>/Polarity.uproject" /Engine/Maps/Entry
+#       -ExecCmds="py <bootstrap>.py" -EnablePlugins=PythonScriptPlugin
+#       -nullrhi -nosound -unattended -nosplash -noLiveCoding
+#     where the bootstrap sets sys.argv = [script, "A2_Courtyard", "--quit"] and exec()s
+#     this file. --quit closes the editor when the build finishes (or fails).
 #
 # Spec files live in Arenas/<name>.json next to this script. After a successful build the
 # script writes Build/<name>_dump.json with every spawned actor (class, location, bounds)
@@ -383,9 +387,22 @@ def build(arena_name):
 
 def main():
     args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
-    if not args:
-        raise RuntimeError("Usage: build_arena.py <ArenaSpecName> (e.g. A2_Courtyard)")
-    build(args[0])
+    quit_when_done = "--quit" in sys.argv[1:]
+    ok = False
+    try:
+        if not args:
+            raise RuntimeError("Usage: build_arena.py <ArenaSpecName> [--quit]")
+        build(args[0])
+        ok = True
+    except Exception:
+        import traceback
+        for line in traceback.format_exc().splitlines():
+            warn(line)
+    finally:
+        log("RESULT: {}".format("SUCCESS" if ok else "FAILED"))
+        if quit_when_done:
+            log("Quitting editor (--quit)")
+            unreal.SystemLibrary.quit_editor()
 
 
 main()
