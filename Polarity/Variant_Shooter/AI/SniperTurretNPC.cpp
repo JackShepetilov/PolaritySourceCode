@@ -60,6 +60,32 @@ void ASniperTurretNPC::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Turret must never REACT to external EM fields (it slides when charged otherwise),
+	// but stays a field SOURCE: charge transfer (melee/ionization/props) keeps working.
+	// Zero the per-source multipliers instead of SetEnabled(false) — EndExplosionStun
+	// and knockback-end paths call SetEnabled(true) and would silently re-enable forces.
+	// Done in BeginPlay (not the constructor) so BP-serialized values can't override it.
+	if (EMFVelocityModifier)
+	{
+		EMFVelocityModifier->NPCForceMultiplier = 0.0f;
+		EMFVelocityModifier->PlayerForceMultiplier = 0.0f;
+		EMFVelocityModifier->ProjectileForceMultiplier = 0.0f;
+		EMFVelocityModifier->EnvironmentForceMultiplier = 0.0f;
+		EMFVelocityModifier->PhysicsPropForceMultiplier = 0.0f;
+		EMFVelocityModifier->UnknownForceMultiplier = 0.0f;
+
+		// Launched set replaces the normal set if launched filtering ever activates
+		EMFVelocityModifier->LaunchedNPCForceMultiplier = 0.0f;
+		EMFVelocityModifier->LaunchedPlayerForceMultiplier = 0.0f;
+		EMFVelocityModifier->LaunchedProjectileForceMultiplier = 0.0f;
+		EMFVelocityModifier->LaunchedEnvironmentForceMultiplier = 0.0f;
+		EMFVelocityModifier->LaunchedPhysicsPropForceMultiplier = 0.0f;
+		EMFVelocityModifier->LaunchedUnknownForceMultiplier = 0.0f;
+
+		// Capture pull bypasses the multipliers — make sure it can't engage
+		EMFVelocityModifier->bEnableViscousCapture = false;
+	}
+
 	// === DEBUG: Verify critical setup ===
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] %s BeginPlay"), *GetName());
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Controller: %s"),
@@ -72,6 +98,19 @@ void ASniperTurretNPC::BeginPlay()
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   YawBone: '%s', PitchBone: '%s'"),
 		*YawBoneName.ToString(), *PitchBoneName.ToString());
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   WeaponSocket: '%s'"), *TurretWeaponSocket.ToString());
+	if (EMFVelocityModifier)
+	{
+		// All multipliers must be 0 — non-zero means the BP overrides the C++ defaults
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   EMF mults (must be 0): NPC=%.1f Player=%.1f Proj=%.1f Env=%.1f Prop=%.1f Unk=%.1f, Viscous=%d, Charge=%.1f"),
+			EMFVelocityModifier->NPCForceMultiplier,
+			EMFVelocityModifier->PlayerForceMultiplier,
+			EMFVelocityModifier->ProjectileForceMultiplier,
+			EMFVelocityModifier->EnvironmentForceMultiplier,
+			EMFVelocityModifier->PhysicsPropForceMultiplier,
+			EMFVelocityModifier->UnknownForceMultiplier,
+			EMFVelocityModifier->bEnableViscousCapture,
+			EMFVelocityModifier->GetCharge());
+	}
 
 	// Drive aim telegraph (laser VFX + player post-process) off our own progress broadcasts
 	OnAimProgressChanged.AddDynamic(this, &ASniperTurretNPC::HandleAimProgressChanged);
