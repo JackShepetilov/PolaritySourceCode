@@ -1,0 +1,78 @@
+<svg viewBox="0 0 980 1010" xmlns="http://www.w3.org/2000/svg" role="img" style="font-family: sans-serif; background:#ffffff;">
+<title>Структура биома «остров-цитадель», версия 4 (финал обсуждения 2026-06-10)</title>
+<defs>
+<marker id="ar4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#222222"/></marker>
+<marker id="arb4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2070c8"/></marker>
+</defs>
+<text x="60" y="40" font-size="17" font-weight="500" fill="#222222">Остров-цитадель v4: низкие мальдивы, высота набирается по острову</text>
+
+<text x="60" y="80" font-size="13" font-weight="500" fill="#666666">Вид сверху</text>
+<polygon points="300,120 452,212 402,352 198,362 152,208" fill="#c9c9c9" fill-opacity="0.65" stroke="#666666" stroke-width="1.5"/>
+<g stroke="#222222" stroke-width="2">
+<line x1="175" y1="300" x2="158" y2="308"/>
+<line x1="186" y1="334" x2="170" y2="344"/>
+<line x1="210" y1="358" x2="198" y2="372"/>
+</g>
+<text x="90" y="332" font-size="11" fill="#666666">обрыв</text>
+<rect x="180" y="300" width="58" height="52" fill="#e7e2d6" stroke="#222222" stroke-width="2"/>
+<rect x="172" y="292" width="74" height="68" fill="none" stroke="#2070c8" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="209" y1="300" x2="209" y2="280" stroke="#222222" stroke-width="2"/>
+<circle cx="330" cy="178" r="13" fill="#e7e2d6" stroke="#666666" stroke-width="1.5"/>
+<circle cx="288" cy="248" r="15" fill="#e7e2d6" stroke="#666666" stroke-width="1.5"/>
+<circle cx="362" cy="300" r="18" fill="#e7e2d6" stroke="#666666" stroke-width="1.5"/>
+<circle cx="235" cy="790" r="20" fill="#c9c9c9" stroke="#666666" stroke-width="2"/>
+<text x="208" y="838" font-size="11" font-weight="500" fill="#222222">старт</text>
+<circle cx="470" cy="700" r="18" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<circle cx="660" cy="585" r="17" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<circle cx="690" cy="420" r="15" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<circle cx="590" cy="290" r="13" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<path d="M 256,782 Q 360,755 452,708" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<path d="M 487,691 Q 580,650 645,597" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<path d="M 666,568 Q 690,500 689,438" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<path d="M 681,406 Q 650,340 604,302" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<path d="M 575,283 Q 520,255 462,228" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<line x1="232" y1="770" x2="207" y2="362" stroke="#222222" stroke-width="1.5" stroke-dasharray="2 6"/>
+<path d="M 448,235 Q 400,210 352,182" fill="none" stroke="#222222" stroke-opacity="0.5" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#ar4)"/>
+<path d="M 440,245 Q 370,250 310,250" fill="none" stroke="#222222" stroke-opacity="0.5" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#ar4)"/>
+<path d="M 442,255 Q 410,280 384,292" fill="none" stroke="#222222" stroke-opacity="0.5" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#ar4)"/>
+<text x="540" y="140" font-size="12" font-weight="500" fill="#222222">цель на ближнем к старту углу,</text>
+<text x="540" y="158" font-size="12" fill="#222222">прямая видимость со старта</text>
+<line x1="536" y1="148" x2="246" y2="320" stroke="#666666" stroke-width="1"/>
+<text x="500" y="200" font-size="12" fill="#222222">3 арены — разная высота, любой порядок</text>
+<line x1="497" y1="204" x2="378" y2="296" stroke="#666666" stroke-width="1"/>
+<text x="700" y="700" font-size="12" fill="#222222">мальдивы — спираль</text>
+<text x="700" y="718" font-size="12" fill="#222222">против часовой (тир 1)</text>
+<text x="475" y="262" font-size="11" fill="#666666">высадка</text>
+
+<text x="60" y="892" font-size="13" font-weight="500" fill="#666666">Вид сбоку (вертикаль не в масштабе — высоты подписаны)</text>
+<rect x="60" y="938" width="860" height="14" fill="#2070c8" fill-opacity="0.18"/>
+<text x="888" y="966" font-size="11" fill="#666666">океан</text>
+<polygon points="100,938 108,668 176,664 640,886 668,938" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<line x1="100" y1="672" x2="100" y2="936" stroke="#222222" stroke-width="2.5"/>
+<rect x="116" y="612" width="48" height="52" fill="#e7e2d6" stroke="#666666" stroke-width="1.5"/>
+<line x1="140" y1="612" x2="140" y2="580" stroke="#222222" stroke-width="2"/>
+<circle cx="140" cy="575" r="4" fill="none" stroke="#2070c8" stroke-width="2"/>
+<text x="178" y="600" font-size="12" font-weight="500" fill="#222222">цитадель — 150–200 м</text>
+<line x1="176" y1="604" x2="158" y2="618" stroke="#666666" stroke-width="1"/>
+<text x="64" y="840" font-size="11" fill="#666666" transform="rotate(-90 64 840)">обрыв</text>
+<rect x="360" y="738" width="26" height="16" fill="#e7e2d6" stroke="#666666"/>
+<rect x="455" y="784" width="26" height="16" fill="#e7e2d6" stroke="#666666"/>
+<rect x="545" y="828" width="26" height="16" fill="#e7e2d6" stroke="#666666"/>
+<text x="300" y="712" font-size="12" fill="#222222">3 арены на разной высоте склона</text>
+<line x1="372" y1="722" x2="372" y2="736" stroke="#666666" stroke-width="1"/>
+<text x="648" y="872" font-size="11" fill="#666666">плечо 40–50 м</text>
+<rect x="716" y="880" width="44" height="58" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<rect x="800" y="896" width="40" height="42" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<rect x="872" y="912" width="36" height="26" fill="#c9c9c9" stroke="#666666" stroke-width="1.5"/>
+<rect x="722" y="870" width="14" height="10" fill="#e7e2d6" stroke="#666666"/>
+<rect x="806" y="886" width="14" height="10" fill="#e7e2d6" stroke="#666666"/>
+<rect x="877" y="902" width="14" height="10" fill="#e7e2d6" stroke="#666666"/>
+<text x="712" y="862" font-size="11" fill="#222222">25–30 м</text>
+<text x="798" y="878" font-size="11" fill="#222222">10–15 м</text>
+<text x="870" y="894" font-size="11" fill="#222222">5 м</text>
+<path d="M 872,908 Q 850,884 842,890" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<path d="M 800,892 Q 776,866 762,874" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<path d="M 716,876 Q 688,852 662,876" fill="none" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb4)"/>
+<line x1="884" y1="900" x2="166" y2="590" stroke="#222222" stroke-width="1" stroke-dasharray="2 6" stroke-opacity="0.7"/>
+<text x="612" y="998" font-size="12" fill="#222222">мальдивы низкие: к высадке не выше 30 м над водой</text>
+</svg>
