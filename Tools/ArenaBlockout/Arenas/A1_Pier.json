@@ -62,12 +62,12 @@
     { "type": "entry_trigger", "pos": [0, -3250, 150], "extent": [300, 100, 200] },
     { "type": "entry_trigger", "pos": [0, 3250, 150],  "extent": [300, 100, 200] },
 
-    { "type": "spawn", "id": "S1a", "pos": [700, 2700, 10],    "yaw": -90 },
-    { "type": "spawn", "id": "S1b", "pos": [1100, 2700, 10],   "yaw": -90 },
-    { "type": "spawn", "id": "S2a", "pos": [-1800, -300, 10],  "yaw": 0 },
-    { "type": "spawn", "id": "S2b", "pos": [-1800, 200, 10],   "yaw": 0 },
-    { "type": "spawn", "id": "S3a", "pos": [1750, -1500, 10],  "yaw": 180 },
-    { "type": "spawn", "id": "S3b", "pos": [1750, -2350, 10],  "yaw": 180 },
+    { "type": "spawn", "id": "S1a", "pos": [950, 2750, 10],    "yaw": -90 },
+    { "type": "spawn", "id": "S1b", "pos": [1350, 2750, 10],   "yaw": -90 },
+    { "type": "spawn", "id": "S2a", "pos": [-1730, -300, 10],  "yaw": 0 },
+    { "type": "spawn", "id": "S2b", "pos": [-1730, 250, 10],   "yaw": 0 },
+    { "type": "spawn", "id": "S3a", "pos": [1940, -1000, 10],  "yaw": 180 },
+    { "type": "spawn", "id": "S3b", "pos": [1940, -2650, 10],  "yaw": 180 },
     { "type": "spawn", "id": "RoofA", "pos": [-850, -900, 310], "yaw": 90 },
     { "type": "spawn", "id": "Air1", "pos": [0, 1500, 60],     "air": true, "air_height": 300 },
 

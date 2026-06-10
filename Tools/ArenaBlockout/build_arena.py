@@ -426,6 +426,17 @@ def build(arena_name):
             except Exception as e:
                 warn("NavigationLink optional props: {}".format(e))
             actor.set_editor_property("point_links", [link])
+            # PolarityPathFollowingComponent's jump traversal was built against SMART
+            # links (CustomNavLinkId) — configure the smart link to the same endpoints.
+            try:
+                actor.set_editor_property("smart_link_is_relevant", True)
+                smart = actor.get_editor_property("smart_link_comp")
+                smart.set_editor_property("link_relative_start", vec(marker["left"]))
+                smart.set_editor_property("link_relative_end", vec(marker["right"]))
+                smart.set_editor_property("link_direction", unreal.NavLinkDirection.BOTH_WAYS)
+                smart.set_editor_property("link_enabled", True)
+            except Exception as e:
+                warn("Smart link setup failed ({}) — falling back to point link only".format(e))
             label = marker.get("id", "NavLink{}".format(idx))
             finish_actor(actor, tag, "BLK_{}_{}".format(arena, label), "{}/Nav".format(arena))
             continue

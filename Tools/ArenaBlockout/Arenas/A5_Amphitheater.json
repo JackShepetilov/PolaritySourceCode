@@ -111,6 +111,6 @@
   "waves": [
     { "delay": 0.0, "entries": [["melee", 3], ["shooter", 2]] },
     { "delay": 0.0, "entries": [["shooter", 3], ["drone", 2], ["kamikaze", 2]] },
-    { "delay": 0.0, "entries": [["humanoid", 2], ["melee", 2], ["drone", 1]] }
+    { "delay": 0.0, "entries": [["melee", 3], ["shooter", 2], ["drone", 1]] }
   ]
 }

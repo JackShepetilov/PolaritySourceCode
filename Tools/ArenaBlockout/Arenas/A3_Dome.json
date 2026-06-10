@@ -52,6 +52,7 @@
     { "id": "cf2", "shape": "box", "mat": "wall", "pos": [2500, -1200, 100], "size": [150, 900, 200], "group": "Cover" },
 
     { "id": "ant_pylon", "shape": "box", "mat": "deco", "pos": [-2000, 2400, 300], "size": [700, 700, 600], "group": "Antenna" },
+    { "id": "tower_e",   "shape": "box", "mat": "deco", "pos": [2400, -300, 250],  "size": [700, 700, 500], "group": "Tower" },
 
     { "id": "blk_s",  "shape": "box", "mat": "blocker", "pos": [0, -3000, 250],    "size": [600, 40, 500], "group": "Blockers" },
     { "id": "blk_ne", "shape": "box", "mat": "blocker", "pos": [1800, 3000, 250],  "size": [600, 40, 500], "group": "Blockers" }
@@ -66,12 +67,12 @@
     { "type": "entry_trigger", "pos": [0, -3100, 150],    "extent": [300, 150, 200] },
     { "type": "entry_trigger", "pos": [1800, 3100, 150],  "extent": [300, 150, 200] },
 
-    { "type": "npc", "id": "DomeTurret", "class_key": "turret", "pos": [0, 0, 1170], "yaw": -90 },
+    { "type": "npc", "id": "TowerTurret", "class_key": "turret", "pos": [2400, -300, 530], "yaw": 180 },
 
     { "type": "spawn", "id": "G1a", "pos": [-2600, -2400, 10], "yaw": 45 },
     { "type": "spawn", "id": "G1b", "pos": [-2200, -2600, 10], "yaw": 45 },
-    { "type": "spawn", "id": "G2a", "pos": [2600, 800, 10],    "yaw": 180 },
-    { "type": "spawn", "id": "G2b", "pos": [2600, 1300, 10],   "yaw": 180 },
+    { "type": "spawn", "id": "G2a", "pos": [2650, 1250, 10],   "yaw": 180 },
+    { "type": "spawn", "id": "G2b", "pos": [2650, 1700, 10],   "yaw": 180 },
     { "type": "spawn", "id": "G3a", "pos": [-800, 2600, 10],   "yaw": -90 },
     { "type": "spawn", "id": "G3b", "pos": [-200, 2700, 10],   "yaw": -90 },
     { "type": "spawn", "id": "Roof", "pos": [0, -300, 810],    "yaw": -90 },
@@ -110,6 +111,6 @@
   "waves": [
     { "delay": 0.0, "entries": [["shooter", 3], ["melee", 1]] },
     { "delay": 0.0, "entries": [["shooter", 2], ["drone", 2], ["kamikaze", 2]] },
-    { "delay": 0.0, "entries": [["humanoid", 1], ["drone", 2]] }
+    { "delay": 0.0, "entries": [["melee", 2], ["drone", 2]] }
   ]
 }
