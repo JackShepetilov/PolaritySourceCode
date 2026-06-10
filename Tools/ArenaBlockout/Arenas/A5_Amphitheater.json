@@ -88,12 +88,12 @@
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 600] },
     { "type": "manager", "pos": [0, 0, 800] },
 
-    { "type": "nav_link", "id": "NL01_c", "pos": [0, -1400, 5],       "left": [0, -250, 0], "right": [0, 400, -350] },
-    { "type": "nav_link", "id": "NL01_w", "pos": [-2900, -1400, 5],   "left": [0, -250, 0], "right": [0, 400, -350] },
-    { "type": "nav_link", "id": "NL01_e", "pos": [2800, -1400, 5],    "left": [0, -250, 0], "right": [0, 400, -350] },
-    { "type": "nav_link", "id": "NL12_c", "pos": [200, 1200, -345],   "left": [0, -250, 0], "right": [0, 400, -350] },
-    { "type": "nav_link", "id": "NL12_w", "pos": [-2800, 1200, -345], "left": [0, -250, 0], "right": [0, 400, -350] },
-    { "type": "nav_link", "id": "NL12_e", "pos": [2900, 1200, -345],  "left": [0, -250, 0], "right": [0, 400, -350] }
+    { "type": "nav_link", "id": "NL01_c", "pos": [0, -1400, 5],       "left": [0, -300, 0], "right": [0, 650, -350] },
+    { "type": "nav_link", "id": "NL01_w", "pos": [-2900, -1400, 5],   "left": [0, -300, 0], "right": [0, 650, -350] },
+    { "type": "nav_link", "id": "NL01_e", "pos": [2800, -1400, 5],    "left": [0, -300, 0], "right": [0, 650, -350] },
+    { "type": "nav_link", "id": "NL12_c", "pos": [-300, 1200, -345],  "left": [0, -300, 0], "right": [0, 650, -350] },
+    { "type": "nav_link", "id": "NL12_w", "pos": [-2800, 1200, -345], "left": [0, -300, 0], "right": [0, 650, -350] },
+    { "type": "nav_link", "id": "NL12_e", "pos": [2900, 1200, -345],  "left": [0, -300, 0], "right": [0, 650, -350] }
   ],
 
   "navmesh_bounds": { "pos": [0, -100, -100], "size": [7600, 9400, 2600] },

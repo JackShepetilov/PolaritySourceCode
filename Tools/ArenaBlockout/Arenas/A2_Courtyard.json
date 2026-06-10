@@ -99,14 +99,14 @@
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1100] },
     { "type": "manager", "pos": [0, 0, 1300] },
 
-    { "type": "nav_link", "id": "NL_n_w", "pos": [-1200, -2500, 355], "left": [0, -150, 0], "right": [0, 450, -350] },
-    { "type": "nav_link", "id": "NL_n_e", "pos": [1200, -2500, 355],  "left": [0, -150, 0], "right": [0, 450, -350] },
-    { "type": "nav_link", "id": "NL_w_s", "pos": [-2500, 2200, 355],  "left": [-150, 0, 0], "right": [450, 0, -350] },
-    { "type": "nav_link", "id": "NL_w_n", "pos": [-2500, -2300, 355], "left": [-150, 0, 0], "right": [450, 0, -350] },
-    { "type": "nav_link", "id": "NL_e_s", "pos": [2500, 800, 355],    "left": [150, 0, 0],  "right": [-450, 0, -350] },
-    { "type": "nav_link", "id": "NL_e_n", "pos": [2500, -2200, 355],  "left": [150, 0, 0],  "right": [-450, 0, -350] },
-    { "type": "nav_link", "id": "NL_s_e", "pos": [2200, 2500, 355],   "left": [0, 150, 0],  "right": [0, -450, -350] },
-    { "type": "nav_link", "id": "NL_s_w", "pos": [-2400, 2500, 355],  "left": [0, 150, 0],  "right": [0, -450, -350] }
+    { "type": "nav_link", "id": "NL_n_w", "pos": [-1200, -2500, 355], "left": [0, -300, 0], "right": [0, 800, -350] },
+    { "type": "nav_link", "id": "NL_n_e", "pos": [1200, -2500, 355],  "left": [0, -300, 0], "right": [0, 800, -350] },
+    { "type": "nav_link", "id": "NL_w_s", "pos": [-2500, 2200, 355],  "left": [-300, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_w_n", "pos": [-2500, -2300, 355], "left": [-300, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_e_s", "pos": [2500, 500, 355],    "left": [300, 0, 0],  "right": [-800, 0, -350] },
+    { "type": "nav_link", "id": "NL_e_n", "pos": [2500, -1500, 355],  "left": [300, 0, 0],  "right": [-800, 0, -350] },
+    { "type": "nav_link", "id": "NL_s_e", "pos": [2200, 2500, 355],   "left": [0, 300, 0],  "right": [0, -800, -350] },
+    { "type": "nav_link", "id": "NL_s_w", "pos": [-2400, 2500, 355],  "left": [0, 300, 0],  "right": [0, -800, -350] }
   ],
 
   "screenshots": [

@@ -130,8 +130,49 @@ def resolve_class(path):
     return cls
 
 
+def level_disk_path(level_path):
+    """/Game/Foo/Bar -> <ProjectDir>/Content/Foo/Bar.umap"""
+    content = unreal.SystemLibrary.get_project_content_directory()
+    return os.path.normpath(os.path.join(content, level_path.replace("/Game/", "", 1) + ".umap"))
+
+
+def backup_level(level_path, arena):
+    """Copy the .umap aside before any save — cheap insurance against data loss."""
+    src = level_disk_path(level_path)
+    if not os.path.isfile(src):
+        return
+    backup_dir = os.path.join(TOOLS_DIR, "Build", "Backups")
+    if not os.path.isdir(backup_dir):
+        os.makedirs(backup_dir)
+    import shutil
+    import time
+    dst = os.path.join(backup_dir, "{}_{}.umap".format(arena, time.strftime("%Y%m%d_%H%M%S")))
+    shutil.copy2(src, dst)
+    log("Backup: {}".format(dst))
+
+
+def report_sublevels(prefix):
+    """Log the persistent level's streaming sublevels (author's debug/light levels)."""
+    try:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+        subs = world.get_editor_property("streaming_levels")
+        names = [str(s.get_editor_property("world_asset_package_name")) for s in subs if s]
+        log("{}: {} streaming sublevels {}".format(prefix, len(names), names))
+        return names
+    except Exception as e:
+        warn("Sublevel report failed: {}".format(e))
+        return []
+
+
 def open_or_create_level(les, level_path):
-    if unreal.EditorAssetLibrary.does_asset_exist(level_path):
+    # Asset registry scans asynchronously on editor boot — NEVER trust does_asset_exist
+    # alone, or a slow scan would route an EXISTING map into new_level() and blank it.
+    try:
+        unreal.AssetRegistryHelpers.get_asset_registry().wait_for_completion()
+    except Exception:
+        pass
+    exists_on_disk = os.path.isfile(level_disk_path(level_path))
+    if exists_on_disk or unreal.EditorAssetLibrary.does_asset_exist(level_path):
         if not les.load_level(level_path):
             raise RuntimeError("Failed to load level " + level_path)
         log("Loaded existing level {}".format(level_path))
@@ -350,6 +391,7 @@ def build(arena_name):
     les, eas = get_subsystems()
     mats = ensure_materials(force=False)
     open_or_create_level(les, level_path)
+    report_sublevels("After load")
     clear_tagged(eas, tag, level_path)
 
     classes = {key: resolve_class(path) for key, path in spec.get("classes", {}).items()}
@@ -505,7 +547,30 @@ def build(arena_name):
     else:
         warn("No manager marker in spec")
 
-    # --- save + dump ---
+    # --- author sublevels: guarantee they stay attached across rebuilds ---
+    for sub_path in spec.get("extra_sublevels", []):
+        try:
+            world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+            current = report_sublevels("Pre-attach check")
+            if any(sub_path in name for name in current):
+                continue
+            unreal.EditorLevelUtils.add_level_to_world(world, sub_path,
+                                                       unreal.LevelStreamingAlwaysLoaded)
+            log("Attached author sublevel {}".format(sub_path))
+        except Exception as e:
+            warn("Could not attach sublevel {}: {}".format(sub_path, e))
+
+    # --- navmesh rebuild (saved navmesh otherwise stays stale and breaks NPC nav) ---
+    try:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+        unreal.SystemLibrary.execute_console_command(world, "RebuildNavigation")
+        log("RebuildNavigation issued (if NPC nav still acts up: Build Paths in editor)")
+    except Exception as e:
+        warn("RebuildNavigation failed: {}".format(e))
+
+    # --- save + dump (with .umap backup first) ---
+    backup_level(level_path, arena)
+    report_sublevels("Before save")
     if not les.save_current_level():
         warn("save_current_level returned false")
     unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)

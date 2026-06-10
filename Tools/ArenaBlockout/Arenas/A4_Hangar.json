@@ -89,12 +89,12 @@
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 700] },
     { "type": "manager", "pos": [0, 0, 1200] },
 
-    { "type": "nav_link", "id": "NL_r1", "pos": [-950, -1800, 355], "left": [-150, 0, 0], "right": [400, 0, -350] },
-    { "type": "nav_link", "id": "NL_r2", "pos": [-950, 400, 355],   "left": [-150, 0, 0], "right": [400, 0, -350] },
-    { "type": "nav_link", "id": "NL_r3", "pos": [-950, 2600, 355],  "left": [-150, 0, 0], "right": [400, 0, -350] },
-    { "type": "nav_link", "id": "NL_r4", "pos": [950, -700, 355],   "left": [150, 0, 0],  "right": [-400, 0, -350] },
-    { "type": "nav_link", "id": "NL_r5", "pos": [950, 1500, 355],   "left": [150, 0, 0],  "right": [-400, 0, -350] },
-    { "type": "nav_link", "id": "NL_plat", "pos": [0, 2700, 405],   "left": [0, 200, 0],  "right": [0, -350, -400] }
+    { "type": "nav_link", "id": "NL_r1", "pos": [-950, -1800, 355], "left": [-250, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_r2", "pos": [-950, 400, 355],   "left": [-250, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_r3", "pos": [-950, 2600, 355],  "left": [-250, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_r4", "pos": [950, -700, 355],   "left": [250, 0, 0],  "right": [-800, 0, -350] },
+    { "type": "nav_link", "id": "NL_r5", "pos": [950, 1500, 355],   "left": [250, 0, 0],  "right": [-800, 0, -350] },
+    { "type": "nav_link", "id": "NL_plat", "pos": [0, 2700, 405],   "left": [0, 300, 0],  "right": [0, -700, -400] }
   ],
 
   "navmesh_bounds": { "pos": [0, -150, 450], "size": [5200, 8600, 1500] },

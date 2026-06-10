@@ -89,11 +89,11 @@
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1500] },
     { "type": "manager", "pos": [0, 0, 1700] },
 
-    { "type": "nav_link", "id": "NL_t1", "pos": [-700, -1500, 155], "left": [0, -250, 0], "right": [0, 350, -150] },
-    { "type": "nav_link", "id": "NL_t2", "pos": [1300, -1050, 405], "left": [0, -250, 0], "right": [0, 400, -400] },
-    { "type": "nav_link", "id": "NL_t3", "pos": [1500, 350, 655],   "left": [250, 0, 0],  "right": [-450, 0, -650] },
-    { "type": "nav_link", "id": "NL_t4", "pos": [700, 1450, 805],   "left": [0, 250, 0],  "right": [0, -400, -800] },
-    { "type": "nav_link", "id": "NL_drum", "pos": [0, -750, 805],   "left": [0, -100, 0], "right": [0, -500, -800] }
+    { "type": "nav_link", "id": "NL_t1", "pos": [-700, -1500, 155], "left": [0, -350, 0], "right": [0, 700, -150] },
+    { "type": "nav_link", "id": "NL_t2", "pos": [1000, -1050, 405], "left": [0, -350, 0], "right": [0, 700, -400] },
+    { "type": "nav_link", "id": "NL_t3", "pos": [2350, -200, 655],  "left": [-300, 0, 0], "right": [300, 0, -650] },
+    { "type": "nav_link", "id": "NL_t4", "pos": [50, 1900, 805],    "left": [300, 0, 0],  "right": [-700, 0, -800] },
+    { "type": "nav_link", "id": "NL_drum", "pos": [300, -700, 805], "left": [0, -100, 0], "right": [0, -750, -800] }
   ],
 
   "navmesh_bounds": { "pos": [0, -100, 700], "size": [7400, 8200, 3200] },

@@ -79,10 +79,10 @@
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1100] },
     { "type": "manager", "pos": [0, 0, 1300] },
 
-    { "type": "nav_link", "id": "NL_a_w", "pos": [-1250, -900, 305], "left": [100, 0, 0],  "right": [-500, 0, -300] },
-    { "type": "nav_link", "id": "NL_a_e", "pos": [-450, -900, 305],  "left": [-100, 0, 0], "right": [500, 0, -300] },
-    { "type": "nav_link", "id": "NL_b_w", "pos": [450, 1100, 305],   "left": [100, 0, 0],  "right": [-500, 0, -300] },
-    { "type": "nav_link", "id": "NL_b_e", "pos": [1250, 1100, 305],  "left": [-100, 0, 0], "right": [500, 0, -300] }
+    { "type": "nav_link", "id": "NL_a_w", "pos": [-1250, -900, 305], "left": [250, 0, 0],  "right": [-700, 0, -300] },
+    { "type": "nav_link", "id": "NL_a_e", "pos": [-450, -900, 305],  "left": [-250, 0, 0], "right": [700, 0, -300] },
+    { "type": "nav_link", "id": "NL_b_w", "pos": [450, 1100, 305],   "left": [250, 0, 0],  "right": [-700, 0, -300] },
+    { "type": "nav_link", "id": "NL_b_e", "pos": [1250, 1100, 305],  "left": [-250, 0, 0], "right": [700, 0, -300] }
   ],
 
   "navmesh_bounds": { "pos": [0, -100, 400], "size": [5400, 8200, 2200] },
