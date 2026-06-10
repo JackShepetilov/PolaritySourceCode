@@ -2285,12 +2285,16 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 		}
 	}
 
-	// Update velocity for visual purposes (affects animations, etc.)
+	// Keep CMC velocity ZEROED during the scripted slide. Feeding the per-frame "apparent
+	// velocity" here let CharacterMovement brake/move on top of SetActorLocation, so the
+	// speed the AnimBP sampled flapped between ~2x values every frame (SHAKE_DEBUG:
+	// vel=583/192/367/193...) — locomotion blendspaces flickered at frame frequency, which
+	// read as limb jitter during the knockback montage. The montage drives the visual;
+	// locomotion underneath should see a stable 0. Gameplay never reads velocity during
+	// knockback (collision/wall-slam damage is computed from Distance/Duration above).
 	if (UCharacterMovementComponent* CharMovement = GetCharacterMovement())
 	{
-		// Calculate apparent velocity for this frame
-		FVector FrameVelocity = (NextPos - CurrentPos) / DeltaTime;
-		CharMovement->Velocity = FrameVelocity;
+		CharMovement->Velocity = FVector::ZeroVector;
 	}
 
 	// Check if knockback is complete

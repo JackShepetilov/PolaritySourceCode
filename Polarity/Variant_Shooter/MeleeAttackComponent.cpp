@@ -1248,21 +1248,23 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 
 			// Optional gate: require minimum starting speed (TF2 default is 0 = works stationary)
 			float CurrentSpeed = OwnerVelocityAtAttackStart.Size();
-			const float ArrivalRadius = FMath::Max(20.0f, Settings.LungeStopDistance * 0.3f);
 			const bool bSpeedGatePassed = CurrentSpeed >= Settings.MinSpeedForLunge;
 
-			if (bSpeedGatePassed && DistToLungeTarget > ArrivalRadius)
+			if (bSpeedGatePassed && DistToLungeTarget > 1.0f)
 			{
-				// Drive at full lunge speed, but don't overshoot the target inside one frame.
+				// ==================== Continuous Proportional Homing (jitter fix v2) ====================
+				// Speed is proportional to the remaining distance, capped at LungeMaxSpeed: far away we
+				// fly at full speed, close-in the step shrinks to exactly close the gap this frame.
+				// No arrival radius and no fallback to attack-start velocity — the previous bang-bang
+				// HOLD<->HOMING flip (jitter against moving targets / flying drones) cannot happen.
+				// Full 3D: Z converges to the stop point too, so no residual vertical speed is left
+				// for the moment gravity comes back on.
 				const float SafeDt = FMath::Max(DeltaTime, 0.001f);
-				const float MaxStepSpeed = DistToLungeTarget / SafeDt;
-				const float StepSpeed = FMath::Min(Settings.LungeMaxSpeed, MaxStepSpeed);
+				const float StepSpeed = FMath::Min(Settings.LungeMaxSpeed, DistToLungeTarget / SafeDt);
 				PreservedVelocity = (ToLungeTarget / DistToLungeTarget) * StepSpeed;
 
-				// [LUNGE_DEBUG] Oscillation probe: if HOMING and ARRIVED alternate every 1-2 frames,
-				// the arrival-restore branch is shoving the player out of the arrival radius each frame.
-				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] HOMING state=%d dist=%.1f arrivalR=%.1f stepSpeed=%.0f hit=%d vel=(%.0f,%.0f,%.0f)"),
-					(int32)CurrentState, DistToLungeTarget, ArrivalRadius, StepSpeed, bHasHitThisAttack ? 1 : 0,
+				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] HOMING state=%d dist=%.1f stepSpeed=%.0f hit=%d vel=(%.0f,%.0f,%.0f)"),
+					(int32)CurrentState, DistToLungeTarget, StepSpeed, bHasHitThisAttack ? 1 : 0,
 					PreservedVelocity.X, PreservedVelocity.Y, PreservedVelocity.Z);
 
 #if WITH_EDITOR
@@ -1276,26 +1278,24 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 			}
 			else if (bSpeedGatePassed)
 			{
-				// ==================== Arrival Hold (jitter fix) ====================
-				// Inside the arrival radius: hold position instead of re-applying the attack-start
-				// velocity. The old restore shoved the player out of the radius every frame and the
-				// homing branch yanked him back — a frame-frequency oscillation (~15-25cm) that read
-				// as "the enemy jitters" at point-blank range (verified via LUNGE_DEBUG: HOMING and
-				// ARRIVED-RESTORE alternated every 1-2 frames with velocity sign flips).
-				// Z is left untouched (gravity is disabled during the lunge anyway).
-				PreservedVelocity.X = 0.0f;
-				PreservedVelocity.Y = 0.0f;
+				// At the stop point (< 1cm gap): hold still. Gravity is off during the lunge,
+				// so zeroing all three axes is safe and leaves nothing to drift on.
+				PreservedVelocity = FVector::ZeroVector;
 
-				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] ARRIVED-HOLD state=%d dist=%.1f arrivalR=%.1f hit=%d (XY velocity zeroed)"),
-					(int32)CurrentState, DistToLungeTarget, ArrivalRadius, bHasHitThisAttack ? 1 : 0);
+				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] ARRIVED-HOLD state=%d dist=%.1f hit=%d (velocity zeroed)"),
+					(int32)CurrentState, DistToLungeTarget, bHasHitThisAttack ? 1 : 0);
 			}
 		}
-		else if (Settings.bEnableLunge && MagnetismTarget.IsValid() && bTargetInKnockback)
+		else if (MagnetismTarget.IsValid())
 		{
-			// [LUNGE_DEBUG] Homing paused while target is in knockback. If HOMING resumes after this,
-			// the knockback stun ended while the Active phase was still running (post-damage re-lunge).
-			UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] PAUSED-TARGET-KNOCKBACK state=%d hit=%d vel=%.0f"),
-				(int32)CurrentState, bHasHitThisAttack ? 1 : 0, PreservedVelocity.Size());
+			// Lunge cut short (hit landed / target in knockback) while lunge gravity-off is still
+			// active: "keep current Z" would freeze whatever vertical speed the homing left — that's
+			// the fly-away when punching a drone from below. Restore the attack-start Z instead:
+			// bounded, predictable, and consistent with the XY momentum preservation above.
+			PreservedVelocity.Z = OwnerVelocityAtAttackStart.Z * Settings.MomentumPreservationRatio;
+
+			UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] POST-LUNGE state=%d hit=%d targetKb=%d vel=%.0f (attack-start vel incl. Z)"),
+				(int32)CurrentState, bHasHitThisAttack ? 1 : 0, bTargetInKnockback ? 1 : 0, PreservedVelocity.Size());
 		}
 		// No-target case: handled by a one-shot impulse on Active phase entry (see SetState).
 		// Per-frame velocity tug while target is absent has been removed.
