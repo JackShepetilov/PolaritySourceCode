@@ -157,8 +157,7 @@
 | Логика | Ассет |
 |---|---|
 | Менеджер арены | `/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager` |
-| Антенна | `/Game/Variant_Shooter/Arenas/BPs/BP_Antenna` (есть и `BP_AntennaToTransition`) |
-| Кнопка | `/Game/Variant_Shooter/Blueprints/LevelBPs/BP_Button` |
+| Антенна | `/Game/Variant_Shooter/Arenas/BPs/BP_Antenna` (кнопка активации встроена компонентом; есть и `BP_AntennaToTransition`) |
 | Координатор | `/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator` |
 | EMF-проп | `/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1` |
 | EMF-пластина | `/Game/Variant_Shooter/Blueprints/Objects/BP_EMF_AcceleratorPlate` |
@@ -168,7 +167,7 @@
 1. `BP_ArenaManager` — 1 на арену (сублевел): режим Waves (generic: 2–3 волны, 8–15 врагов суммарно) или Sustain; `EntryTriggers[]`, `ExitBlockers[]`; спавн-поинты и антенны автособираются со своего сублевела (`bAutoCollect*FromOwnLevel=true`).
 2. `AArenaSpawnPoint` × 8–15 (с запасом; группами по под-пространствам; `bAirSpawn` для дронов; `ExcludedNPCClasses` где надо).
 3. `BP_AICombatCoordinator` — 1 на арену.
-4. `BP_Antenna` + `BP_Button` (пара: `InteractionButton` на антенне) — по R10.
+4. `BP_Antenna` — по R10 (кнопка активации уже встроена в BP, отдельный актор и спаривание не нужны).
 5. `BP_EMFProp_1` кластеры (3–5 у хотспотов), `BP_EMF_AcceleratorPlate` (вертикальные связки).
 6. PlayerStart (вход), `PlayerRespawnPoint` в ArenaManager (TargetPoint), NavMeshBoundsVolume на всю арену **включая L1/L2 и дроновые объёмы** (дроны проецируют цели на навмеш). Kill-объёмы НЕ нужны (M5).
 7. RewardDoor/контейнер — если арена их использует (для антенна-флоу не обязательны).
@@ -220,4 +219,3 @@
 **Открытые:**
 1. Что именно не нравится в существующих блокаут-аренах (Arena1–4 Debug и др.) — калибрует правила §4.
 2. Замер вертикального/горизонтального словаря в `Lvl_Gym` — подтвердить [расчёт]-числа.
-3. `BP_Button` — подтвердить, что это сабкласс `AShootableButton` для пары с антенной.

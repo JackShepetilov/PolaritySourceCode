@@ -7,7 +7,6 @@
   "classes": {
     "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
     "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
-    "button": "/Game/Variant_Shooter/Blueprints/LevelBPs/BP_Button",
     "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
     "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
     "plate": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMF_AcceleratorPlate",
@@ -97,7 +96,6 @@
     { "type": "prop_cluster", "id": "C3", "pos": [-1000, 1650, 60],  "count": 4, "radius": 180 },
 
     { "type": "antenna", "id": "Antenna", "pos": [1600, 2720, 355], "yaw": -90 },
-    { "type": "button",  "id": "AntennaButton", "pos": [1300, 2700, 355], "yaw": -90 },
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1100] },
     { "type": "manager", "pos": [0, 0, 1300] }
   ],
