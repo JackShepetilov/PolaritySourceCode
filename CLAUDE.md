@@ -122,6 +122,17 @@ UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] NPC %s MoveTo result: %d"), *GetNam
 3. Особенно важно для: Enhanced Input, GameUserSettings, SaveGame, Subsystems, Slate/UMG
 4. **Особенно важно для физики:** ProjectileMovementComponent, коллизии, SimulatePhysics — ВСЕГДА проверяй порядок инициализации
 
+## UE Editor MCP Tooling (VibeUE / UnrealClaude)
+
+Установлены MCP-плагины для управления редактором: **VibeUE v3** (TCP 55557) и **UnrealClaude v1.5** (HTTP 3000); серверы зарегистрированы в `Source/.mcp.json`, работают только при запущенном редакторе.
+
+**ПЕРЕД любой работой через эти тулы прочитай `MCP_Tooling_Guide.md`** (наша конфигурация, маппинг домен→скилл, чего у нас нет). Минимум, который надо помнить всегда:
+- Во время PIE Blueprint'ы НЕ редактируются — заверши PIE и подожди 2–3 с.
+- `open_level`/level travel/тяжёлые синхронные операции (FBX-импорт) через тулинг = hard-crash редактора. Level travel — только из BP самой игры.
+- НИКОГДА не удаляй `Binaries/`/`Intermediate/` ради «починки» после крэша.
+- `success=True` от тула — не доказательство: перечитай состояние и скомпилируй BP перед «готово».
+- Имена методов/тулов бери только из фактических ответов наших версий (`get_help`, схемы тулов) — НЕ из гайдов под другие версии (наш VibeUE v3, а не v4!) и не из памяти.
+
 ## NO Unsolicited "Smart" Architecture
 
 **НИКОГДА не добавляй "умную" архитектуру без явного запроса:**
