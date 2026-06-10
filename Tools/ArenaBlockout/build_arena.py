@@ -93,28 +93,29 @@ def ensure_materials(force=False):
     for name, rgb in MATERIALS.items():
         path = "{}/MI_BLK_{}".format(MAT_DIR, name)
         if eal.does_asset_exist(path):
-            out[name] = eal.load_asset(path)
-            continue
-        mic = tools.create_asset("MI_BLK_{}".format(name), MAT_DIR,
-                                 unreal.MaterialInstanceConstant,
-                                 unreal.MaterialInstanceConstantFactoryNew())
-        if mic is None:
-            raise RuntimeError("Failed to create material instance " + path)
-        mel.set_material_instance_parent(mic, parent)
+            mic = eal.load_asset(path)
+        else:
+            mic = tools.create_asset("MI_BLK_{}".format(name), MAT_DIR,
+                                     unreal.MaterialInstanceConstant,
+                                     unreal.MaterialInstanceConstantFactoryNew())
+            if mic is None:
+                raise RuntimeError("Failed to create material instance " + path)
+            mel.set_material_instance_parent(mic, parent)
+            log("Created material instance {}".format(path))
         if param_name is None:
             names = [str(n) for n in mel.get_vector_parameter_names(mic)]
-            log("M_FlatCol vector params: {}".format(names))
             if not names:
                 raise RuntimeError("M_FlatCol has no vector parameters to tint")
             preferred = [n for n in names if "color" in n.lower() or "tint" in n.lower()]
             param_name = preferred[0] if preferred else names[0]
             log("Using vector param '{}'".format(param_name))
+        # Re-apply the tint EVERY run: parameter overrides set in a previous editor
+        # session render as the parent's default grey otherwise (observed empirically).
         mel.set_material_instance_vector_parameter_value(
             mic, param_name, unreal.LinearColor(rgb[0], rgb[1], rgb[2], 1.0))
         mel.update_material_instance(mic)
         eal.save_asset(path)
         out[name] = mic
-        log("Created material instance {}".format(path))
     return out
 
 
@@ -503,6 +504,7 @@ def shots_only(arena_name):
     with open(spec_path, "r", encoding="utf-8") as f:
         spec = json.load(f)
     les, eas = get_subsystems()
+    ensure_materials()
     if not unreal.EditorAssetLibrary.does_asset_exist(spec["level_path"]):
         raise RuntimeError("Level does not exist yet, run a full build first: " + spec["level_path"])
     if not les.load_level(spec["level_path"]):
