@@ -54,12 +54,35 @@ def bilerp_grid(g, n):
     return a * (1 - fy) * (1 - fx) + b * (1 - fy) * fx + cc * fy * (1 - fx) + d * fy * fx
 
 
-def fbm(n, octaves, base_cells, seed, persistence=0.55):
+def grid_noise(n, cells, seed, angle):
+    """Value noise on a lattice ROTATED by `angle` with smoothstep fade -
+    kills the axis-aligned banding the author flagged ('что за полосы')."""
     rng = np.random.default_rng(seed)
+    gsize = int(cells * 1.5) + 3
+    g = rng.random((gsize, gsize))
+    t = np.linspace(0.0, 1.0, n)
+    Yp, Xp = np.meshgrid(t, t, indexing="ij")
+    ca, sa = np.cos(angle), np.sin(angle)
+    u = (Xp - 0.5) * ca - (Yp - 0.5) * sa + 0.5
+    v = (Xp - 0.5) * sa + (Yp - 0.5) * ca + 0.5
+    uu = u * cells + 0.25 * cells + 1.0
+    vv = v * cells + 0.25 * cells + 1.0
+    u0 = np.clip(np.floor(uu).astype(int), 0, gsize - 2)
+    v0 = np.clip(np.floor(vv).astype(int), 0, gsize - 2)
+    fu = np.clip(uu - u0, 0.0, 1.0)
+    fv = np.clip(vv - v0, 0.0, 1.0)
+    fu = fu * fu * (3.0 - 2.0 * fu)
+    fv = fv * fv * (3.0 - 2.0 * fv)
+    return (g[v0, u0] * (1 - fv) * (1 - fu) + g[v0, u0 + 1] * (1 - fv) * fu +
+            g[v0 + 1, u0] * fv * (1 - fu) + g[v0 + 1, u0 + 1] * fv * fu)
+
+
+def fbm(n, octaves, base_cells, seed, persistence=0.55):
+    rng = np.random.default_rng(seed + 999)
     out = np.zeros((n, n))
     amp, total, cells = 1.0, 0.0, base_cells
-    for _ in range(octaves):
-        out += amp * bilerp_grid(rng.random((cells + 1, cells + 1)), n)
+    for o in range(octaves):
+        out += amp * grid_noise(n, cells, seed + o * 17, rng.uniform(0, np.pi))
         total += amp
         amp *= persistence
         cells *= 2
@@ -79,13 +102,14 @@ def sample(arr, ys, xs):
 
 def ridged(n, octaves, base_cells, seed, gain=0.55, offset=1.0):
     """Ridged multifractal with octave weight feedback (research formula:
-    r = (offset - |noise|)^2, weight_next = clamp(r*1.5, 0, 1)^0.8)."""
-    rng = np.random.default_rng(seed)
+    r = (offset - |noise|)^2, weight_next = clamp(r*1.5, 0, 1)^0.8).
+    Octave lattices are rotated (no axis-aligned stripes)."""
+    rng = np.random.default_rng(seed + 999)
     out = np.zeros((n, n))
     amp, total, cells = 0.5, 0.0, base_cells
     weight = np.ones((n, n))
-    for _ in range(octaves):
-        v = bilerp_grid(rng.random((cells + 1, cells + 1)), n) * 2.0 - 1.0
+    for o in range(octaves):
+        v = grid_noise(n, cells, seed + o * 23, rng.uniform(0, np.pi)) * 2.0 - 1.0
         r = offset - np.abs(v)
         r = r * r * weight
         weight = np.clip(r * 1.5, 0.0, 1.0) ** 0.8
@@ -126,6 +150,78 @@ def gauss3(H, passes=1, w=None):
         B = acc / 16.0
         H = B if w is None else H * (1 - w) + B * w
     return H
+
+
+def route_samples(pts, step=150.0):
+    out = []
+    for a, b in zip(pts, pts[1:]):
+        a = np.array(a, dtype=float)
+        b = np.array(b, dtype=float)
+        L = max(np.hypot(*(b - a)), 1.0)
+        k = max(2, int(L / step) + 1)
+        for i in range(k):
+            out.append(a + (b - a) * (i / (k - 1.0)))
+    return np.array(out)
+
+
+def world_to_idx(p):
+    return int(round((p[1] + HALF) / SCALE)), int(round((p[0] + HALF) / SCALE))
+
+
+def enforce_route_slope(H, pts, max_grade=0.50, step=100.0):
+    """Walkability guarantee (author: <= 30 deg everywhere on the route).
+    Forward/backward envelope along the serpentine caps the climb rate at
+    max_grade (0.50 ~ 26.6 deg, margin under 30); excess terrain is carved
+    down with a small local brush around each offending sample."""
+    P = route_samples(pts, step=step)
+    hs = np.empty(len(P))
+    for i, p in enumerate(P):
+        r, c = world_to_idx(p)
+        hs[i] = H[r, c]
+    seg = np.hypot(*(np.diff(P, axis=0).T))
+    env = hs.copy()
+    for i in range(1, len(env)):
+        env[i] = min(env[i], env[i - 1] + seg[i - 1] * max_grade)
+    for i in range(len(env) - 2, -1, -1):
+        env[i] = min(env[i], env[i + 1] + seg[i] * max_grade)
+    # cone caps: H = min(H, e + max_grade*dist). Overlaps take the MIN (no
+    # stacking, no runaway) and the carve walls are exactly the max grade.
+    carved = 0
+    for p, e, h0 in zip(P, env, hs):
+        if h0 > e + 10.0:
+            r, c = world_to_idx(p)
+            R = min(70, int((h0 - e) / (max_grade * SCALE)) + 14)
+            r0, r1 = max(0, r - R), min(N, r + R + 1)
+            c0, c1 = max(0, c - R), min(N, c + R + 1)
+            yy, xx = np.mgrid[r0 - r:r1 - r, c0 - c:c1 - c]
+            cap = e + np.hypot(yy, xx) * SCALE * max_grade
+            H[r0:r1, c0:c1] = np.minimum(H[r0:r1, c0:c1], cap)
+            carved += 1
+    return H, carved
+
+
+def report_route_slopes(H, pts, verbose=True):
+    P = route_samples(pts, step=150.0)
+    cells = [world_to_idx(p) for p in P]
+    uniq = [cells[0]]
+    for cc in cells[1:]:
+        if cc != uniq[-1]:
+            uniq.append(cc)
+    hs = np.array([H[r, c] for r, c in uniq], dtype=float)
+    pos = np.array([[c * SCALE - HALF, r * SCALE - HALF] for r, c in uniq], dtype=float)
+    P = pos
+    seg = np.hypot(*(np.diff(pos, axis=0).T))
+    grade = np.abs(np.diff(hs)) / np.maximum(seg, 1.0)
+    deg = np.degrees(np.arctan(grade))
+    over = int((deg > 30.0).sum())
+    if verbose:
+        print("route slope: max %.1f deg, p95 %.1f deg, over 30 deg: %d/%d"
+              % (deg.max(), np.percentile(deg, 95), over, len(deg)))
+        for k in np.argsort(deg)[-3:][::-1]:
+            if deg[k] > 30.0:
+                print("  hotspot %.1f deg at world (%.0f, %.0f) h %.0f->%.0f"
+                      % (deg[k], P[k][0], P[k][1], hs[k], hs[k + 1]))
+    return deg.max(), over
 
 
 def main():
@@ -198,17 +294,18 @@ def main():
     soften = smoothstep(0.55, 1.1, s) * (1.0 - in_cliff) * (H > 150)
     H = gauss3(H, passes=2, w=np.clip(soften, 0, 1) * 0.8)
 
-    # route corridor: gentle smoothing band shoulder->G1->G2->G3->Citadel
-    chain = ["shoulder", "G1", "G2", "G3", "Citadel"]
+    # route corridor: smoothing band along the SERPENTINE polyline from the
+    # layout (landing -> switchbacks -> east flank -> citadel)
+    route_pts = layout["rules"]["route_corridor"]
     corr = np.zeros_like(H)
-    for a_id, b_id in zip(chain, chain[1:]):
-        a = np.array(slots[a_id]["pos"][:2], dtype=float)
-        b = np.array(slots[b_id]["pos"][:2], dtype=float)
+    for a, b in zip(route_pts, route_pts[1:]):
+        a = np.array(a, dtype=float)
+        b = np.array(b, dtype=float)
         seg = b - a
         t_ = np.clip(((Xu - a[0]) * seg[0] + (Yu - a[1]) * seg[1]) / (seg @ seg), 0, 1)
         d_seg = np.hypot(Xu - (a[0] + t_ * seg[0]), Yu - (a[1] + t_ * seg[1]))
-        corr = np.maximum(corr, smoothstep(2600.0, 1200.0, d_seg))
-    H = gauss3(H, passes=2, w=corr * 0.55)
+        corr = np.maximum(corr, smoothstep(3000.0, 1400.0, d_seg))
+    H = gauss3(H, passes=3, w=corr * 0.6)
 
     # ---------------- maldive micro-islands (unchanged model) ----------------
     for s_ in layout["slots"]:
@@ -273,6 +370,18 @@ def main():
     # beach band: flatten the tidal strip for readable sand aprons
     beach_w = smoothstep(260.0, 40.0, np.abs(H - 60.0)) * (1.0 - in_cliff) * (1.0 - pad_core)
     H = H * (1 - beach_w * 0.45) + 60.0 * (beach_w * 0.45)
+
+    # walkability guarantee along the serpentine (author: <= 30 deg).
+    # Iterate: envelope-carve, then re-smooth the corridor band so the carve
+    # walls themselves get softened; stop when the route is clean.
+    route_pts = layout["rules"]["route_corridor"]
+    for it in range(4):
+        H, carved = enforce_route_slope(H, route_pts)
+        mx, over = report_route_slopes(H, route_pts, verbose=False)
+        print("slope pass %d: carved %d, max %.1f deg, over-30 %d" % (it + 1, carved, mx, over))
+        if carved == 0 and over == 0:
+            break
+    report_route_slopes(H, route_pts)
 
     px16 = np.clip(32768.0 + (H - SEA_FLOOR) * 1.28, 0, 65535).astype(np.uint16)
     out_png = os.path.join(OUT_DIR, "biome1_heightmap_2017.png")

@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
-  "version": 6,
-  "comment": "Phase-0 scale layout v6 (2026-06-11, author round 4): guard arenas pulled OFF the citadel onto an ARC through the island middle. Distances from the citadel along the player's arc: first guard (nearest the landing) ~0.76 of island diameter, middle ~0.54, last ~0.35. Citadel stays on the far-end east cape; maldives unchanged (CCW in UE view).",
+  "version": 7,
+  "comment": "Phase-0 scale layout v7 (2026-06-11, author round 5 - SERPENTINE): the guard route is an S-curve (switchbacks): landing -> west turn (G1) -> diagonal through the island center (G2) -> east turn (G3) -> flank approach into the citadel from the EAST. Citadel-distances kept ~0.73/0.53/0.34 D. HARD RULE: every arena reachable on foot, route slopes <= 30 deg everywhere.",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
@@ -130,7 +130,7 @@
       "pos": [
         -26000,
         30000,
-        500
+        1750
       ],
       "r": 6000,
       "note": "landing on the NW rim - the LOW far end (~20 m beach terrace): the whole climb 19->90->160 m lies ahead, across the island to the east citadel cape"
@@ -146,13 +146,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        -22000,
-        18000,
+        -20000,
+        -9000,
         2200
       ],
       "r": 5500,
-      "yaw": -162.0,
-      "note": "first guard after the landing - farthest from the citadel (~0.76 D)"
+      "yaw": -171.0,
+      "note": "first switchback, SW side (~0.73 D from citadel); route comes along the south-west beaches from the landing"
     },
     {
       "id": "G2",
@@ -165,13 +165,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        -6000,
-        2000,
-        4900
+        -5000,
+        6000,
+        5400
       ],
       "r": 5500,
-      "yaw": -135.0,
-      "note": "middle of the arc through the island center (~0.54 D)"
+      "yaw": -45.0,
+      "note": "middle switchback at the island center (~0.53 D)"
     },
     {
       "id": "G3",
@@ -184,13 +184,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        11300,
-        13700,
-        8400
+        15000,
+        18000,
+        8900
       ],
       "r": 6000,
-      "yaw": -114.0,
-      "note": "last guard, nearest the citadel (~0.35 D); A5 terraces cut into the final upslope at this yaw"
+      "yaw": -59.0,
+      "note": "last switchback (~0.34 D); A5 bowl cuts into the final upslope"
     },
     {
       "id": "Citadel",
@@ -206,13 +206,13 @@
         16000
       ],
       "r": 6500,
-      "yaw": -113.0,
-      "note": "ON THE VERY LIP of the EAST cape (160 m) - the FAR end of the island from the NW landing; cliff to the open sea, gentle land approach from the ring side (west); gate 3/3, permanent field until open; visible from the run start straight over M1"
+      "yaw": 180.0,
+      "note": "ON THE LIP of the EAST cape (160 m), far end from the landing; the serpentine flanks around and enters from the EAST side; gate 3/3, permanent field"
     }
   ],
   "rules": {
     "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, ~35 deg beach slope), arena DEAD-CENTER, open water between islands MANDATORY. Slope-guard arenas (ring around the citadel) are the only ones on the big island.",
-    "guard_ring": "guards on an ARC through the island middle (author drawing 2026-06-11): citadel-distances ~0.76D / 0.54D / 0.35D, player climbs 22->49->84->160 m along the arc; entrances face back along the arc",
+    "guard_ring": "SERPENTINE (author drawing #2): arenas on the switchback turns of an S-route, climb 22->54->89->160 m; citadel approached from its EAST flank; route slopes <= 30 deg",
     "transition_budget_uu": [
       5000,
       15000
@@ -236,6 +236,32 @@
     "maldive_heights_note": "5 m start -> <=30 m by landing: 500/1200/2000/2800",
     "budget_note": "start->M1 is the BALLISTIC TOSS (~7000 uu), not a valve; maldive hops ~16-18k path per the author's trajectory",
     "terrain_note": "GENTLE everywhere (author: 'полого везде, пляж вместо обрыва'): wide beach aprons, soft dome toward the cape, subtle pads (wide blends, NO raised rims), no empty pad discs",
-    "water_not_lethal": true
+    "water_not_lethal": true,
+    "route_corridor": [
+      [
+        -26000,
+        30000
+      ],
+      [
+        -20000,
+        -9000
+      ],
+      [
+        -5000,
+        6000
+      ],
+      [
+        15000,
+        18000
+      ],
+      [
+        33000,
+        16000
+      ],
+      [
+        37000,
+        2500
+      ]
+    ]
   }
 }
