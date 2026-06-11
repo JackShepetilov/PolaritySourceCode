@@ -251,13 +251,14 @@ def ensure_water(eas):
             zone.set_folder_path("Biome1Island/Water")
             log("Spawned WaterZone")
     if zone is not None:
-        # NORMALIZE the zone every run: a collapsed/dragged zone (seen 1x1 at a
-        # random location 2026-06-11) desyncs the rendered surface from the
-        # underwater post-process
+        # NORMALIZE the zone to the WORKING reference (headless dump of
+        # Lvl_DemoForPublisher2, 2026-06-11): the zone must sit ABOVE the
+        # terrain peaks (citadel 16000 -> 17500) and extend well past the map;
+        # the ocean spline stays SMALL (it does NOT bound the ocean surface)
         try:
-            zone.set_actor_location(unreal.Vector(0.0, 0.0, 0.0), False, False)
-            zone.set_editor_property("zone_extent", unreal.Vector2D(220000.0, 220000.0))
-            log("WaterZone normalized: loc (0,0,0), extent 220000x220000")
+            zone.set_actor_location(unreal.Vector(0.0, 0.0, 17500.0), False, False)
+            zone.set_editor_property("zone_extent", unreal.Vector2D(320000.0, 320000.0))
+            log("WaterZone normalized: loc (0,0,17500), extent 320000x320000")
         except Exception as e:
             warn("WaterZone normalize failed: {}".format(e))
 
