@@ -278,20 +278,35 @@ def ensure_dynamic_nav(eas):
 
 
 def presave_pipeline_maps():
-    """The snap/light/attach steps of OUR OWN pipeline leave arena/island maps
-    dirty, which would trip the dirty-map guard. Saving is never a loss - but
-    only auto-save maps this pipeline owns; anything else still hard-refuses."""
+    """Make the dirty-map guard pass without ever cementing author gestures:
+    - the island map + the lighting sublevel are OURS to save (snap-light and
+      attach side effects) - save just those;
+    - dirty ARENA maps are NEVER saved here: if the author dragged arena actors
+      to show a new slot (sync workflow), `--discard-arena-edits` reloads them
+      from disk (the drag intent lives in the layout JSON by then); without the
+      flag they stay dirty and the guard refuses loudly."""
     dirty = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
     if not dirty:
         return
-    names = [p.get_name() for p in dirty]
-    ours_prefix = "/Game/Variant_Shooter/Arenas/"
-    if all(n.startswith(ours_prefix) for n in names):
-        unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-        log("Pre-saved dirty pipeline maps: {}".format(names))
-    else:
-        log("Foreign unsaved maps present ({}) - leaving them to the guard"
-            .format(names))
+    keep = [p for p in dirty
+            if p.get_name() == LEVEL_PATH or p.get_name() in AUTHOR_SUBLEVELS]
+    arena_dirty = [p for p in dirty if p not in keep
+                   and p.get_name().startswith(ARENA_ROOT + "/")]
+    if keep:
+        unreal.EditorLoadingAndSavingUtils.save_packages(keep, True)
+        log("Pre-saved pipeline maps: {}".format([p.get_name() for p in keep]))
+    if arena_dirty:
+        if "--discard-arena-edits" in sys.argv:
+            reloaded, err = unreal.EditorLoadingAndSavingUtils.reload_packages(
+                arena_dirty,
+                interaction_mode=unreal.ReloadPackagesInteractionMode.ASSUME_POSITIVE)
+            log("Discarded in-editor arena edits (slot gestures already synced): "
+                "{} (reloaded={}, err='{}')".format(
+                    [p.get_name() for p in arena_dirty], reloaded, err))
+        else:
+            log("Dirty ARENA maps present: {} - NOT saving them (run sync first, "
+                "then rebuild with --discard-arena-edits)".format(
+                    [p.get_name() for p in arena_dirty]))
 
 
 def main():
