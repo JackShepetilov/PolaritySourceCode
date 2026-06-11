@@ -9,6 +9,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/SniperTurretNPC.h"
 #include "EMFVelocityModifier.h"
 
 UUpgrade_AirKick::UUpgrade_AirKick()
@@ -242,6 +243,14 @@ bool UUpgrade_AirKick::IsNPCAtMaxCharge(AShooterNPC* NPC) const
 void UUpgrade_AirKick::LaunchNPC(AShooterNPC* NPC, AShooterCharacter* Character, const FVector& HitLocation) const
 {
 	if (!NPC || !Character || !DefAirKick.IsValid())
+	{
+		return;
+	}
+
+	// Sniper turret is stationary — immune to the air-mail launch (same exclusion as TractorBeam).
+	// It doesn't override EnterLaunchedState(), and with GravityScale=0 a MOVE_Falling toss
+	// would leave it hovering in the sky forever.
+	if (NPC->IsA<ASniperTurretNPC>())
 	{
 		return;
 	}

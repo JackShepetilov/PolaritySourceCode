@@ -192,6 +192,28 @@ void ASniperTurretNPC::Tick(float DeltaTime)
 		bIsInKnockback = false;
 	}
 
+	// Hard stationary enforcement. External movers write CMC Velocity / movement mode
+	// directly (e.g. LaunchIntoAir: MOVE_Falling + scripted velocity) and the CMC moves
+	// us in ITS OWN tick — outside the Super::Tick window measured above, so the drift
+	// revert never sees it. With GravityScale=0 a single MOVE_Falling frame = hovering
+	// forever. Kill both every frame while alive.
+	if (!bIsDead)
+	{
+		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+		{
+			if (CMC->MovementMode != MOVE_Walking)
+			{
+				CMC->SetMovementMode(MOVE_Walking);
+			}
+			if (!CMC->Velocity.IsNearlyZero())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[TURRET MOVE] %s zeroing external velocity %s (mode=%d)"),
+					*GetName(), *CMC->Velocity.ToCompactString(), (int32)CMC->MovementMode.GetValue());
+				CMC->Velocity = FVector::ZeroVector;
+			}
+		}
+	}
+
 	// Rotate turret toward target when engaged
 	if (AimTarget.IsValid() && CurrentAimState != ETurretAimState::Idle)
 	{
