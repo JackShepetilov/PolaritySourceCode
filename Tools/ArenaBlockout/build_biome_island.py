@@ -94,7 +94,8 @@ def ensure_landscape(slots):
         os.path.basename(HEIGHTMAP), getattr(imp, "resolution", "?")))
     probes = [(sid, slots[sid]["pos"][0], slots[sid]["pos"][1], slots[sid]["pos"][2])
               for sid in ("M1", "M2", "M3", "M4", "shoulder", "G1", "G2", "Citadel")]
-    probes.append(("G3 bowl ctr", slots["G3"]["pos"][0], slots["G3"]["pos"][1], 8375.0))
+    probes.append(("G3 bowl ctr", slots["G3"]["pos"][0], slots["G3"]["pos"][1],
+                   slots["G3"]["pos"][2] - 625.0))
     probes.append(("open sea", 70000.0, -70000.0, -2000.0))
     bad = 0
     for label, x, y, want in probes:
@@ -135,7 +136,8 @@ def ensure_arenas(world, layout, slots):
         name = "Lvl_" + arena_name
         pkg = "{}/{}/{}".format(ARENA_ROOT, arena_name, name)
         pos = s["pos"]
-        yaw = round(entrance_yaw(s, slots), 1)
+        # explicit yaw override (guard ring etc.) beats the enter_from formula
+        yaw = float(s["yaw"]) if "yaw" in s else round(entrance_yaw(s, slots), 1)
         sl = unreal.GameplayStatics.get_streaming_level(world, pkg) or \
             unreal.GameplayStatics.get_streaming_level(world, name)
         if sl and _transform_matches(sl, pos, yaw):
@@ -162,35 +164,50 @@ def ensure_arenas(world, layout, slots):
             warn("failed to attach sublevel {}".format(pkg))
 
 
-def shore_dist(slot):
-    """Approx distance from slot center to its island waterline."""
-    if slot["kind"] != "arena":
-        return 1200.0  # waypoint on the big island - bridge end lands on the beach
-    return (slot["r"] + PAD_RIM) + slot["pos"][2] * SHORE_RUN
+def waterline_toward(svc, from_xy, to_xy):
+    """March from from_xy toward to_xy in 500 uu steps; return the first point
+    where the terrain drops below 60 uu (the waterline) - robust against any
+    coast shape, unlike analytic shore-radius guesses."""
+    ax, ay = from_xy
+    bx, by = to_xy
+    dist = math.hypot(bx - ax, by - ay)
+    ux, uy = (bx - ax) / dist, (by - ay) / dist
+    t = 0.0
+    while t < dist:
+        x, y = ax + ux * t, ay + uy * t
+        s = svc.get_height_at_location(LS_LABEL, x, y)
+        if s.valid and s.height < 60.0:
+            return x, y
+        t += 500.0
+    return bx, by
 
 
 def build_bridges(eas, mats, slots):
     """Straight plank stubs across the water hops of the maldive chain
-    (real valves become their own sublevels later)."""
+    (real valves become their own sublevels later). Each end is found by
+    sampling the actual terrain down to the waterline, then buried slightly
+    into the beach."""
+    svc = unreal.LandscapeService
     hops = [("M1", "M2"), ("M2", "M3"), ("M3", "M4"), ("M4", "shoulder")]
     for a_id, b_id in hops:
         a, b = slots[a_id], slots[b_id]
-        ax, ay = a["pos"][0], a["pos"][1]
-        bx, by = b["pos"][0], b["pos"][1]
-        dx, dy = bx - ax, by - ay
-        dist = math.hypot(dx, dy)
-        ux, uy = dx / dist, dy / dist
-        sa, sb = shore_dist(a), shore_dist(b)
-        x0, y0 = ax + ux * (sa - BRIDGE_OVERLAP), ay + uy * (sa - BRIDGE_OVERLAP)
-        x1, y1 = bx - ux * (sb - BRIDGE_OVERLAP), by - uy * (sb - BRIDGE_OVERLAP)
-        length = math.hypot(x1 - x0, y1 - y0)
+        a_xy = (a["pos"][0], a["pos"][1])
+        b_xy = (b["pos"][0], b["pos"][1])
+        x0, y0 = waterline_toward(svc, a_xy, b_xy)
+        x1, y1 = waterline_toward(svc, b_xy, a_xy)
+        dx, dy = x1 - x0, y1 - y0
+        span = math.hypot(dx, dy)
+        if span < 500.0:
+            log("Valve {}->{}: no water gap found - skipped".format(a_id, b_id))
+            continue
+        length = span + 2 * BRIDGE_OVERLAP
         piece = {"id": "valve_{}_{}".format(a_id, b_id), "shape": "box",
                  "mat": "deco", "group": "Valves",
                  "pos": [(x0 + x1) * 0.5, (y0 + y1) * 0.5, 120.0],
                  "size": [length, 700.0, 60.0],
                  "yaw": math.degrees(math.atan2(dy, dx))}
         ba.spawn_shape(eas, mats, piece, TAG, ARENA)
-        log("Valve stub {}->{}: {:.0f} uu".format(a_id, b_id, length))
+        log("Valve stub {}->{}: {:.0f} uu over water".format(a_id, b_id, span))
 
 
 def ensure_water(eas):
@@ -260,11 +277,29 @@ def ensure_dynamic_nav(eas):
         warn("could not ensure RecastNavMesh - set RuntimeGeneration=Dynamic manually")
 
 
+def presave_pipeline_maps():
+    """The snap/light/attach steps of OUR OWN pipeline leave arena/island maps
+    dirty, which would trip the dirty-map guard. Saving is never a loss - but
+    only auto-save maps this pipeline owns; anything else still hard-refuses."""
+    dirty = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
+    if not dirty:
+        return
+    names = [p.get_name() for p in dirty]
+    ours_prefix = "/Game/Variant_Shooter/Arenas/"
+    if all(n.startswith(ours_prefix) for n in names):
+        unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+        log("Pre-saved dirty pipeline maps: {}".format(names))
+    else:
+        log("Foreign unsaved maps present ({}) - leaving them to the guard"
+            .format(names))
+
+
 def main():
     if hasattr(ba, "ensure_safe_to_build"):
         ba.ensure_safe_to_build()
     layout, slots = load_layout()
     les, eas = ba.get_subsystems()
+    presave_pipeline_maps()
     ba.open_or_create_level(les, LEVEL_PATH)  # refuses over unsaved maps
     ba.backup_level(LEVEL_PATH, ARENA)
     ba.clear_tagged(eas, TAG, LEVEL_PATH)

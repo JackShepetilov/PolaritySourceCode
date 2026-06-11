@@ -1,69 +1,241 @@
 {
   "name": "Biome1_Island",
-  "version": 3,
-  "comment": "Phase-0 scale layout v3 (2026-06-11). Author corrections: v2 = far intro start + citadel IS the villa; v3 = the sea toss flies EXACTLY along the start->island-center axis and LANDS ON the first arena (M1 sits on that axis south of the island, RunLaunchPoint ~7000 uu behind it, LaunchSpeed ~3300 / pitch ~35). Spiral unwinds east from M1, landing shoulder moved to the EAST rim. Source of truth for build_island.py. Units: uu. Spiral is COUNTERCLOCKWISE.",
+  "version": 4,
+  "comment": "Phase-0 scale layout v4 (2026-06-11, author review round 2). Changes vs v3: (a) maldive chain MIRRORED to the WEST side - in the UE top view the spiral now runs COUNTERCLOCKWISE (south -> west -> north) as originally asked; (b) guard arenas form a RING at ~equal radius (~24000) around the citadel instead of a sequence; (c) island is BIGGER (R 40000) and GENTLE everywhere - beaches instead of cliffs, the only cliff is the citadel cape itself; (d) citadel sits on the VERY LIP of the SW cape with a land approach from the ring side; (e) pads are subtle (wide blends, no rims), A5's bowl cuts INTO the slope. Units: uu.",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
     "sections_per_component": 2,
     "component_count": 16,
-    "scale": [100, 100, 100],
+    "scale": [
+      100,
+      100,
+      100
+    ],
     "base_z": -2000,
     "water_z": 0,
     "extent_note": "201600x201600 centered on origin; create at location (-100800,-100800,-2000)"
   },
   "island": {
-    "center": [-4000, 18000],
-    "land_radius": 32000,
-    "peak": [-26000, -4000],
-    "peak_z": 17000,
-    "cliff_note": "south/southwest face is a near-vertical cliff; citadel(villa) sits on its lip - direct sightline from the toss arc and M1 over open water (M1 hierarchy)"
+    "center": [
+      6000,
+      16000
+    ],
+    "land_radius": 40000,
+    "peak": [
+      -18000,
+      -8000
+    ],
+    "peak_z": 16400,
+    "cliff_note": "gentle shield dome rising toward the SW cape; the ONLY cliff is the cape face under the citadel (sector ~200-250 deg from island center), everywhere else - beaches"
   },
-  "route": ["start_reef", "M1", "M2", "M3", "M4", "shoulder", "G1", "G2", "G3", "Citadel"],
+  "route": [
+    "start_reef",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "shoulder",
+    "G3",
+    "G2",
+    "G1",
+    "Citadel"
+  ],
   "slots": [
-    {"id": "start_reef", "kind": "reef", "pos": [-2690, -67000, 200], "r": 1500,
-     "note": "toss ORIGIN over water (not a valve start): RunLaunchPoint here, forward aimed EXACTLY at the island center, ballistic arc lands the player on M1's southern approach (~7000 uu, LaunchSpeed ~3300 / pitch ~35 - tune in spike)"},
-    {"id": "M1", "kind": "arena", "tier": "S", "default": "A1_Pier",
-     "pool": ["A1_Pier", "A8_Lighthouse"], "pos": [-2800, -60000, 500], "r": 4500,
-     "enter_from": "start_reef",
-     "note": "ON the start->center axis (author 2026-06-11): the player lands here from the sea toss; pier catches the landing. Entrance faces due south (yaw ~1)"},
-    {"id": "M2", "kind": "arena", "tier": "S", "default": "A8_Lighthouse",
-     "pool": ["A1_Pier", "A8_Lighthouse"], "pos": [20000, -50000, 1200], "r": 4500,
-     "enter_from": "M1",
-     "note": "lighthouse doubles as the early-spiral landmark (M3 preview of next maldives)"},
-    {"id": "M3", "kind": "arena", "tier": "M", "default": "A2_Courtyard",
-     "pool": ["A2_Courtyard", "A4_Hangar"], "pos": [38000, -28000, 2000], "r": 5500,
-     "enter_from": "M2"},
-    {"id": "M4", "kind": "arena", "tier": "M", "default": "A4_Hangar",
-     "pool": ["A2_Courtyard", "A4_Hangar"], "pos": [46000, 0, 2800], "r": 5500,
-     "enter_from": "M3"},
-    {"id": "shoulder", "kind": "waypoint", "pos": [28000, 15000, 4500], "r": 6000,
-     "note": "landing shoulder 40-50 m on the EAST rim: breather, view up the slope, no combat"},
-    {"id": "G1", "kind": "arena", "tier": "guard", "default": "A3_Dome",
-     "pool": ["A3_Dome", "A5_Amphitheater", "A7_Gallery"], "pos": [17000, 29000, 6000],
-     "r": 5500, "enter_from": "shoulder"},
-    {"id": "G2", "kind": "arena", "tier": "guard", "default": "A7_Gallery",
-     "pool": ["A3_Dome", "A5_Amphitheater", "A7_Gallery"], "pos": [2000, 36000, 7500],
-     "r": 5500, "enter_from": "shoulder"},
-    {"id": "G3", "kind": "arena", "tier": "guard", "default": "A5_Amphitheater",
-     "pool": ["A3_Dome", "A5_Amphitheater", "A7_Gallery"], "pos": [-18000, 24000, 9000],
-     "r": 6000, "enter_from": "G2",
-     "note": "A5 needs its -700 terrace bowl cut into the slope (8a.2)"},
-    {"id": "Citadel", "kind": "arena", "tier": "citadel", "default": "A6_Villa",
-     "pool": ["A6_Villa"], "pos": [-26000, -4000, 16000], "r": 6500,
-     "enter_from": "G3",
-     "note": "THE citadel arena IS the villa (author 2026-06-11): key lore arena on the cliff lip, 160 m; gate counter 3/3 guard antennas, permanent containment field until open"}
+    {
+      "id": "start_reef",
+      "kind": "reef",
+      "pos": [
+        3800,
+        -61000,
+        200
+      ],
+      "r": 1500,
+      "note": "toss ORIGIN over water: RunLaunchPoint here (author places/tunes), forward aimed at the island center, ballistic arc lands on M1 (~7000 uu)"
+    },
+    {
+      "id": "M1",
+      "kind": "arena",
+      "tier": "S",
+      "default": "A1_Pier",
+      "pool": [
+        "A1_Pier",
+        "A8_Lighthouse"
+      ],
+      "pos": [
+        4000,
+        -54000,
+        500
+      ],
+      "r": 4500,
+      "enter_from": "start_reef",
+      "note": "ON the start->center axis; player lands here from the sea toss"
+    },
+    {
+      "id": "M2",
+      "kind": "arena",
+      "tier": "S",
+      "default": "A8_Lighthouse",
+      "pool": [
+        "A1_Pier",
+        "A8_Lighthouse"
+      ],
+      "pos": [
+        -20000,
+        -42000,
+        1200
+      ],
+      "r": 4500,
+      "enter_from": "M1",
+      "note": "lighthouse = early-spiral landmark; chain heads WEST (CCW in UE view)"
+    },
+    {
+      "id": "M3",
+      "kind": "arena",
+      "tier": "M",
+      "default": "A2_Courtyard",
+      "pool": [
+        "A2_Courtyard",
+        "A4_Hangar"
+      ],
+      "pos": [
+        -36000,
+        -20000,
+        2000
+      ],
+      "r": 5500,
+      "enter_from": "M2",
+      "note": "spiral passes under the citadel cape - permanent landmark showcase"
+    },
+    {
+      "id": "M4",
+      "kind": "arena",
+      "tier": "M",
+      "default": "A4_Hangar",
+      "pool": [
+        "A2_Courtyard",
+        "A4_Hangar"
+      ],
+      "pos": [
+        -44000,
+        8000,
+        2800
+      ],
+      "r": 5500,
+      "enter_from": "M3"
+    },
+    {
+      "id": "shoulder",
+      "kind": "waypoint",
+      "pos": [
+        -26000,
+        30000,
+        5300
+      ],
+      "r": 6000,
+      "note": "landing on the NW rim: natural beach->terrace, terrain here is ~5300 (the original 40-50 m shoulder spec) - no pad disc, no combat"
+    },
+    {
+      "id": "G1",
+      "kind": "arena",
+      "tier": "guard",
+      "default": "A3_Dome",
+      "pool": [
+        "A3_Dome",
+        "A5_Amphitheater",
+        "A7_Gallery"
+      ],
+      "pos": [
+        4500,
+        200,
+        8600
+      ],
+      "r": 5500,
+      "yaw": 110.0,
+      "note": "east point of the citadel ring (R~24000 from citadel); entrance faces outward (away from citadel)"
+    },
+    {
+      "id": "G2",
+      "kind": "arena",
+      "tier": "guard",
+      "default": "A7_Gallery",
+      "pool": [
+        "A3_Dome",
+        "A5_Amphitheater",
+        "A7_Gallery"
+      ],
+      "pos": [
+        -7900,
+        13750,
+        9000
+      ],
+      "r": 5500,
+      "yaw": 155.0,
+      "note": "north point of the citadel ring; entrance faces the shoulder side"
+    },
+    {
+      "id": "G3",
+      "kind": "arena",
+      "tier": "guard",
+      "default": "A5_Amphitheater",
+      "pool": [
+        "A3_Dome",
+        "A5_Amphitheater",
+        "A7_Gallery"
+      ],
+      "pos": [
+        -26200,
+        14550,
+        9400
+      ],
+      "r": 6000,
+      "yaw": -160.0,
+      "note": "NW point of the ring, first met from the shoulder; A5 terraces (-900) cut INTO the upslope toward the citadel at this yaw - natural amphitheater, not a pit"
+    },
+    {
+      "id": "Citadel",
+      "kind": "arena",
+      "tier": "citadel",
+      "default": "A6_Villa",
+      "pool": [
+        "A6_Villa"
+      ],
+      "pos": [
+        -18000,
+        -8000,
+        16000
+      ],
+      "r": 6500,
+      "yaw": 135.0,
+      "note": "ON THE VERY LIP of the SW cape (160 m), cliff to the sea, gentle land approach from the ring side (NE); gate 3/3 guard antennas, permanent field until open"
+    }
   ],
   "rules": {
-    "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, organic wobbled edge, ~35 deg beach slope), arena DEAD-CENTER on the flat top, open water between islands is MANDATORY. Proven in Lvl_IslandSpike + make_island_heightmap.py. Slope-guard arenas (G1-G3) are the only ones sitting on the big island.",
-    "transition_budget_uu": [5000, 15000],
+    "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, ~35 deg beach slope), arena DEAD-CENTER, open water between islands MANDATORY. Slope-guard arenas (ring around the citadel) are the only ones on the big island.",
+    "guard_ring": "guards sit at ~equal radius (~24000) from the citadel, free clear order; entrances face outward from the ring; heights 86/90/94 m - the dome toward the cape makes the ring nearly iso-height, pads sit almost flush (no pits)",
+    "transition_budget_uu": [
+      5000,
+      15000
+    ],
     "long_ok_uu": 18500,
-    "intro_legs": [["start_reef", "M1"]],
+    "intro_legs": [
+      [
+        "start_reef",
+        "M1"
+      ]
+    ],
     "min_slope_slot_spacing": 10500,
-    "slope_slots": ["shoulder", "G1", "G2", "G3", "Citadel"],
+    "slope_slots": [
+      "shoulder",
+      "G1",
+      "G2",
+      "G3",
+      "Citadel"
+    ],
     "field_edge_gap_min": 2000,
-    "maldive_heights_note": "5 m start -> <=30 m by landing (interpolated): 500/1200/2000/2800",
-    "budget_note": "start->M1 is the BALLISTIC TOSS (~7000 uu flight), not a valve; maldive hops run ~16-18.5k path (vs doc 5-15k) per the author's drawn trajectory 2026-06-11 - distant island vista the whole spiral",
+    "maldive_heights_note": "5 m start -> <=30 m by landing: 500/1200/2000/2800",
+    "budget_note": "start->M1 is the BALLISTIC TOSS (~7000 uu), not a valve; maldive hops ~16-18k path per the author's trajectory",
+    "terrain_note": "GENTLE everywhere (author: 'полого везде, пляж вместо обрыва'): wide beach aprons, soft dome toward the cape, subtle pads (wide blends, NO raised rims), no empty pad discs",
     "water_not_lethal": true
   }
 }

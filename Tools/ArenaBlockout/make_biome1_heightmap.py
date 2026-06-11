@@ -1,13 +1,14 @@
 # Authors the REAL Biome1 island heightmap (2017x2017, ~2x2 km) OFFLINE from
-# Island/biome1_island_layout.json. PREVIEW WORKFLOW: review the shaded preview
-# before any import - nothing touches the editor here.
+# Island/biome1_island_layout.json (v4). PREVIEW WORKFLOW: review the shaded
+# preview before any import - nothing touches the editor here.
 #
-# Models (author 2026-06-11):
-#  - maldive slots (M1-M4): micro-island sized to its arena, arena DEAD-CENTER
-#    on an exact flat top, organic rim, open water between islands
-#  - big island: only the guards (G1-G3) + shoulder + citadel(villa) live on it;
-#    trapezoid profile - long climb from the east shoulder to the SW peak,
-#    near-vertical CLIFF on the south/south-west face under the citadel
+# v4 terrain rules (author review 2026-06-11):
+#  - GENTLE everywhere: wide beach aprons all around, soft shield dome rising
+#    toward the SW cape; the ONLY cliff is the cape face under the citadel
+#  - maldive chain on the WEST side (CCW in the UE top view: south->west->north)
+#  - guard ring at ~equal radius around the citadel, pads sit nearly flush
+#    (wide blends, no raised rims, no empty discs)
+#  - A5 (G3) bowl cuts INTO the upslope - amphitheater, not a pit
 #
 # Output:
 #   Island/biome1_heightmap_2017.png     (16-bit, px = 32768 + (z+2000)*1.28)
@@ -24,16 +25,18 @@ from PIL import Image
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 LAYOUT = os.path.join(TOOLS_DIR, "Island", "biome1_island_layout.json")
 OUT_DIR = os.path.join(TOOLS_DIR, "Island")
-SEED = 20260612
+SEED = 20260613
 
 N = 2017
 SCALE = 100.0
 HALF = (N - 1) * SCALE * 0.5        # 100800
 SEA_FLOOR = -2000.0
-PAD_RIM = 900.0                      # walkable rim around an arena's flat top
-SHORE_RUN = 1.4                      # maldive beach slope (~35 deg)
+PAD_RIM = 900.0
+MALDIVE_SHORE_RUN = 1.7              # ~30 deg maldive beach slope
 UNDERWATER_SKIRT = 3600.0
-CLIFF_SECTOR = (185.0, 285.0)        # deg, math convention, around island center
+DOME_REACH = 60000.0                 # dome falloff distance from the cape
+DOME_BASE = 2200.0
+DOME_AMP = 14000.0
 
 
 def bilerp_grid(g, n):
@@ -75,60 +78,44 @@ def main():
     coord = np.linspace(-HALF, HALF, N)   # row 0 = world SOUTH
     Xu, Yu = np.meshgrid(coord, coord)
     rng = np.random.default_rng(SEED)
-    detail = fbm(N, 6, 9, SEED + 37)
-    wx = (fbm(N, 4, 5, SEED + 11) - 0.5) * 70.0
-    wy = (fbm(N, 4, 5, SEED + 23) - 0.5) * 70.0
-    idx = np.arange(N, dtype=float)
+    detail = fbm(N, 5, 8, SEED + 37)
 
-    def warp_sample(arr):
-        ys = np.clip(idx[:, None] + wy, 0, N - 1.001)
-        xs = np.clip(idx[None, :] + wx, 0, N - 1.001)
-        y0 = np.floor(ys).astype(int)
-        x0 = np.floor(xs).astype(int)
-        fy, fx = ys - y0, xs - x0
-        return (arr[y0, x0] * (1 - fy) * (1 - fx) + arr[y0, x0 + 1] * (1 - fy) * fx +
-                arr[y0 + 1, x0] * fy * (1 - fx) + arr[y0 + 1, x0 + 1] * fy * fx)
+    H = SEA_FLOOR + (fbm(N, 4, 14, SEED + 51) - 0.5) * 220.0
 
-    Dw = warp_sample(detail)
-
-    H = SEA_FLOOR + (fbm(N, 4, 14, SEED + 51) - 0.5) * 240.0
-
-    # ---------------- big island (guards + shoulder + citadel) ----------------
+    # ---------------- big island: gentle shield toward the SW cape -----------
     ICX, ICY = isl["center"]
     R0 = isl["land_radius"]
-    p1, p2, p3 = rng.uniform(0, 2 * np.pi, 3)
+    CPX, CPY = isl["peak"]
+    p1, p2 = rng.uniform(0, 2 * np.pi, 2)
     dx, dy = Xu - ICX, Yu - ICY
     theta = np.arctan2(dy, dx)
     deg = np.degrees(theta) % 360.0
-    r_theta = R0 * (1.0 + 0.12 * np.sin(2 * theta + p1)
-                    + 0.08 * np.sin(3 * theta + p2)
-                    + 0.05 * np.sin(5 * theta + p3))
-    r_theta *= 1.0 + 0.11 * (Dw - 0.5) * 2.0
+    r_theta = R0 * (1.0 + 0.07 * np.sin(2 * theta + p1)
+                    + 0.05 * np.sin(3 * theta + p2)
+                    + 0.05 * (detail - 0.5) * 2.0)
     edge = np.hypot(dx, dy) / r_theta
-    # cliff sector: tighten the coastal falloff band so the rim drops sheer
-    in_cliff = smoothstep(CLIFF_SECTOR[0] - 18, CLIFF_SECTOR[0], deg) * \
-        smoothstep(CLIFF_SECTOR[1] + 18, CLIFF_SECTOR[1], deg)
-    inner = 0.90 - 0.55 * in_cliff       # mask reaches 1 much closer to the rim
-    M = smoothstep(1.05, inner, edge)    # 1 inland, 0 at sea
+    # the cape cliff sector (around the citadel bearing ~225 deg): tight falloff
+    in_cliff = smoothstep(202.0, 214.0, deg) * smoothstep(262.0, 250.0, deg)
+    inner = 0.78 - 0.20 * in_cliff      # wide gentle coast band, tight at the cape
+    M = smoothstep(1.04, inner, edge)
+    # headland: solid ground out to the citadel pad (never an offshore pillar)
+    pk_v = np.array([CPX - ICX, CPY - ICY], dtype=float)
+    tt = np.clip(((Xu - ICX) * pk_v[0] + (Yu - ICY) * pk_v[1]) / (pk_v @ pk_v), 0.0, 1.0)
+    dcap = np.hypot(Xu - (ICX + tt * pk_v[0]), Yu - (ICY + tt * pk_v[1]))
+    M = np.maximum(M, smoothstep(13000.0, 8000.0, dcap))
 
-    # shelf (none under the cliff - deep water at its foot)
-    shelf = smoothstep(1.6, 1.02, edge) * (1.0 - 0.85 * in_cliff)
-    H = np.maximum(H, SEA_FLOOR + shelf * 1800.0)
+    # wide beach shelf everywhere EXCEPT under the cape cliff
+    shelf = smoothstep(1.55, 1.0, edge) * (1.0 - 0.9 * in_cliff)
+    H = np.maximum(H, SEA_FLOOR + shelf * 1850.0)
 
-    # trapezoid profile: climb from the east shoulder toward the SW peak
-    sh = np.array(slots["shoulder"]["pos"][:2], dtype=float)
-    pk = np.array(isl["peak"], dtype=float)
-    axis = pk - sh
-    t_ax = np.clip(((Xu - sh[0]) * axis[0] + (Yu - sh[1]) * axis[1]) / (axis @ axis),
-                   -0.15, 1.1)
-    base = 2600.0 + 13200.0 * np.clip(t_ax, 0.0, 1.0) ** 1.25
-    peak_bump = 1800.0 * np.exp(-((Xu - pk[0]) ** 2 + (Yu - pk[1]) ** 2) / (2 * 6500.0 ** 2))
-    relief = (Dw - 0.5) * 2.0 * (250.0 + 1100.0 * M ** 2)
-    land = (base + peak_bump) * (M ** 0.85) + relief * M
+    # shield dome: height grows toward the cape; gentle relief on top
+    d_cit = np.hypot(Xu - CPX, Yu - CPY)
+    dome = DOME_BASE + DOME_AMP * np.clip(1.0 - d_cit / DOME_REACH, 0.0, 1.0) ** 1.3
+    relief = (detail - 0.5) * 2.0 * (130.0 + 380.0 * M ** 2)
+    land = dome * (M ** 1.5) + relief * M
     H = np.where(M > 0.001, np.maximum(H, land), H)
 
-    # ---------------- maldive micro-islands (arena-sized, centered) ----------
-    pads = []
+    # ---------------- maldive micro-islands (west chain, arena-sized) --------
     for s in layout["slots"]:
         x, y, z = s["pos"]
         if s["kind"] == "arena" and s.get("tier") in ("S", "M"):
@@ -137,19 +124,17 @@ def main():
             th = np.arctan2(Yu - y, Xu - x)
             f1, f2 = rng.uniform(0, 2 * np.pi, 2)
             wob = 1.0 + 0.05 * np.sin(3 * th + f1) + 0.03 * np.sin(5 * th + f2) \
-                + 0.02 * (Dw - 0.5) * 2.0
+                + 0.02 * (detail - 0.5) * 2.0
             de = d / wob
-            shore_r = top_r + z * SHORE_RUN
+            shore_r = top_r + z * MALDIVE_SHORE_RUN
             base_r = shore_r + UNDERWATER_SKIRT
             prof = np.where(
                 de <= top_r, z,
                 np.where(de <= shore_r, z * smoothstep(shore_r, top_r, de),
                          SEA_FLOOR - SEA_FLOOR * smoothstep(base_r, shore_r, de)))
             band = smoothstep(top_r, top_r + 600.0, de) * smoothstep(base_r, shore_r, de)
-            prof += (detail - 0.5) * 2.0 * 60.0 * band
+            prof += (detail - 0.5) * 2.0 * 55.0 * band
             H = np.maximum(H, prof)
-        elif s["kind"] in ("arena", "waypoint") and s.get("tier") in ("guard", "citadel", None):
-            pads.append((x, y, s["r"] + PAD_RIM, 2400.0, z))
 
     # start reef: a bare rock at the toss origin
     sx, sy, sz = slots["start_reef"]["pos"]
@@ -158,22 +143,21 @@ def main():
                     SEA_FLOOR - SEA_FLOOR * smoothstep(5200.0, 1500.0, d))
     H = np.maximum(H, np.where(d < 5200.0, rock, H))
 
-    # ---------------- exact flat pads on the big island (LAST) ---------------
-    for px_, py_, rf, bl, z in pads:
-        d = np.hypot(Xu - px_, Yu - py_)
-        th = np.arctan2(Yu - py_, Xu - px_)
-        f1, f2 = rng.uniform(0, 2 * np.pi, 2)
-        wob = 1.0 + 0.05 * np.sin(3 * th + f1) + 0.03 * np.sin(5 * th + f2) \
-            + 0.02 * (Dw - 0.5) * 2.0
-        wp = smoothstep(rf + bl, rf, d / wob)
+    # ---------------- subtle flat pads on the big island (LAST) --------------
+    # wide blends, NO rim wobble: pads read as natural local flats, not discs
+    for sid in ("G1", "G2", "G3", "Citadel"):
+        s = slots[sid]
+        x, y, z = s["pos"]
+        rf = s["r"] + PAD_RIM
+        bl = 3800.0
+        d = np.hypot(Xu - x, Yu - y)
+        wp = smoothstep(rf + bl, rf, d)
         H = H * (1 - wp) + z * wp
 
-    # G3 = A5_Amphitheater: its terraces descend to local -900 toward local +Y
-    # (8a.2: the bowl must be CARVED into the slope, not float). Directional
-    # bowl inside the pad, deep end along the arena's rotated +Y (yaw 121).
+    # A5 (G3) bowl: terraces go to -900, cut INTO the upslope along local +Y
     g3 = slots["G3"]
     gx_, gy_, gz_ = g3["pos"]
-    yaw_rad = np.radians(121.0)
+    yaw_rad = np.radians(g3.get("yaw", 0.0))
     deep = (-np.sin(yaw_rad), np.cos(yaw_rad))
     d_along = (Xu - gx_) * deep[0] + (Yu - gy_) * deep[1]
     d_rad = np.hypot(Xu - gx_, Yu - gy_)
@@ -188,14 +172,14 @@ def main():
     Image.fromarray(px16).save(out_png)
 
     # shaded preview, north up
-    gy, gx = np.gradient(H, SCALE)
-    nz = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
-    light = np.clip((-gx * -0.55 + -gy * 0.35 + 1.2) * nz, 0.0, 1.6) / 1.6
+    gy_g, gx_g = np.gradient(H, SCALE)
+    light = np.clip((-gx_g * -0.55 + -gy_g * 0.35 + 1.2) /
+                    np.sqrt(gx_g ** 2 + gy_g ** 2 + 1.0), 0.0, 1.6) / 1.6
     rgb = np.zeros((N, N, 3))
     sea = H < 0
-    depth = np.clip(-H / 2200.0, 0, 1)
-    rgb[sea] = np.stack([0.10 + 0.0 * depth[sea], 0.35 - 0.18 * depth[sea],
-                         0.55 - 0.25 * depth[sea]], axis=-1)
+    depth_c = np.clip(-H / 2200.0, 0, 1)
+    rgb[sea] = np.stack([0.10 + 0.0 * depth_c[sea], 0.35 - 0.18 * depth_c[sea],
+                         0.55 - 0.25 * depth_c[sea]], axis=-1)
     hgt = np.clip(H / 17000.0, 0, 1)
     land_col = np.stack([0.42 + 0.3 * hgt, 0.40 + 0.22 * hgt, 0.30 + 0.26 * hgt],
                         axis=-1) * light[..., None]
@@ -210,13 +194,12 @@ def main():
         print("%-12s H=%7.0f%s" % (label, H[i, j],
               "" if want is None else "  (want %d)" % want))
 
-    for sid in ("M1", "M2", "M3", "M4"):
+    for sid in ("M1", "M2", "M3", "M4", "G1", "G2", "Citadel"):
         s = slots[sid]
         probe(sid, s["pos"][0], s["pos"][1], s["pos"][2])
-    for sid in ("shoulder", "G1", "G2", "G3", "Citadel"):
-        s = slots[sid]
-        probe(sid, s["pos"][0], s["pos"][1], s["pos"][2])
-    probe("cliff foot", -34000, -22000)
+    probe("G3 bowl ctr", *slots["G3"]["pos"][:2], slots["G3"]["pos"][2] - 625)
+    probe("shoulder", *slots["shoulder"]["pos"][:2], 5300)
+    probe("cliff slope", -24000, -17000)
     probe("open sea", 70000, -70000)
     print("max H %.0f" % H.max())
     print("written:", out_png)
