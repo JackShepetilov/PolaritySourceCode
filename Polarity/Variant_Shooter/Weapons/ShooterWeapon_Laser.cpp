@@ -16,7 +16,10 @@
 #include "EMFPhysicsProp.h"
 #include "Foliage/FoliageConversionLibrary.h"
 
-namespace
+// Named (not anonymous) namespace: ShooterWeapon.cpp defines the same helper in ITS anonymous
+// namespace, and under unity builds both files can land in one TU where anonymous namespaces
+// merge — the unique name prevents the C2084 redefinition collision.
+namespace ShooterWeaponLaserPrivate
 {
 	/** Check if actor is dead after TakeDamage (synchronous check via HP/bIsDead flags) */
 	bool IsActorDeadAfterDamage(AActor* Actor)
@@ -297,7 +300,7 @@ void AShooterWeapon_Laser::ApplyBeamDamage(const FHitResult& Hit, float DeltaTim
 	// Notify weapon owner about hit (for hit markers, etc.)
 	if (WeaponOwner)
 	{
-		const bool bKilled = IsActorDeadAfterDamage(HitActor);
+		const bool bKilled = ShooterWeaponLaserPrivate::IsActorDeadAfterDamage(HitActor);
 		WeaponOwner->OnWeaponHit(
 			Hit.ImpactPoint,
 			(Hit.TraceEnd - Hit.TraceStart).GetSafeNormal(),
@@ -683,7 +686,7 @@ void AShooterWeapon_Laser::UpdateSecondHarmonic(float DeltaTime)
 				// Hitmarker
 				if (WeaponOwner)
 				{
-					const bool bKilled = IsActorDeadAfterDamage(HitA.GetActor());
+					const bool bKilled = ShooterWeaponLaserPrivate::IsActorDeadAfterDamage(HitA.GetActor());
 					WeaponOwner->OnWeaponHit(HitA.ImpactPoint, DirA, SecondHarmonicDamage, false, bKilled);
 				}
 			}
@@ -720,7 +723,7 @@ void AShooterWeapon_Laser::UpdateSecondHarmonic(float DeltaTime)
 
 				if (WeaponOwner)
 				{
-					const bool bKilled = IsActorDeadAfterDamage(HitB.GetActor());
+					const bool bKilled = ShooterWeaponLaserPrivate::IsActorDeadAfterDamage(HitB.GetActor());
 					WeaponOwner->OnWeaponHit(HitB.ImpactPoint, DirB, SecondHarmonicDamage, false, bKilled);
 				}
 			}
