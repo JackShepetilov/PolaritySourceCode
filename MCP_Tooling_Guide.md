@@ -66,6 +66,23 @@
   (`[{"id","pos","pitch","yaw","fov"}]`). Запуск через run_console_command:
   `py "<...>/snap_level.py" [shots.json]` → PNG в `Tools/ArenaBlockout/Build/Screenshots/<Level>_<id>.png`.
 
+## 1.1 Локальные патчи плагинов (повторить при обновлении плагина!)
+
+Плагины из `Plugins/` участвуют в сборке таргета PolarityEditor (первый же Build/Live Coding
+после их появления инвалидирует makefile). UHT требует уникальности **имён хедеров** и **имён
+рефлектируемых типов** во всём таргете, поэтому поверх замороженной 5.6-ветки VibeUE живут наши
+патчи (2026-06-11):
+- `Chat/ChatTypes.h` → `Chat/VibeUEChatTypes.h` (+ `.generated.h` внутри, + 5 инклюдов) — коллизия
+  имени файла с `Source/Polarity/Variant_Shooter/Stream/ChatTypes.h`;
+- `FChatMessage` → `FVibeUEChatMessage` (79 вхождений, 13 файлов чата) — коллизия engine-имени с
+  DataTable-структом `FChatMessage` из `Source/Polarity/ChatMessageTypes.h` (его переименовывать
+  НЕЛЬЗЯ — сломаются таблицы внутриигрового чата);
+- `UnrealClaude.uplugin`: `EngineVersion` 5.7.0 → 5.6.0.
+
+Первая сборка плагинов в проектном контексте — ~200 действий; Live Coding с его лимитом
+(`-LiveCodingLimit=100`) её не вытягивает — гонять `Build.bat` при закрытом редакторе. После
+этого Live Coding для .cpp-правок работает как обычно.
+
 ## 2. ЧЕГО У НАС НЕТ (в оригинале есть — не использовать вслепую)
 
 Оригинал писан под VibeUE **v4**: там основной интерфейс — `execute_python_code` + Services
