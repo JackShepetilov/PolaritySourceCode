@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
-  "version": 5,
-  "comment": "Phase-0 scale layout v5 (2026-06-11, author fix round 3): THE CITADEL SITS ON THE FAR END OF THE ISLAND FROM THE LANDING (author: 'высокая точка - на дальнем от входа конце'). West maldive chain lands on the NW shoulder; the citadel cape is the EAST point, the full island crossing lies between them; guard ring moved with the citadel. Maldive chain unchanged (CCW in UE top view).",
+  "version": 6,
+  "comment": "Phase-0 scale layout v6 (2026-06-11, author round 4): guard arenas pulled OFF the citadel onto an ARC through the island middle. Distances from the citadel along the player's arc: first guard (nearest the landing) ~0.76 of island diameter, middle ~0.54, last ~0.35. Citadel stays on the far-end east cape; maldives unchanged (CCW in UE view).",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
@@ -130,7 +130,7 @@
       "pos": [
         -26000,
         30000,
-        1950
+        500
       ],
       "r": 6000,
       "note": "landing on the NW rim - the LOW far end (~20 m beach terrace): the whole climb 19->90->160 m lies ahead, across the island to the east citadel cape"
@@ -146,13 +146,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        16200,
-        14500,
-        8600
+        -22000,
+        18000,
+        2200
       ],
       "r": 5500,
-      "yaw": -120.0,
-      "note": "west point of the citadel ring (R~24000); entrance faces outward (toward the shoulder path)"
+      "yaw": -162.0,
+      "note": "first guard after the landing - farthest from the citadel (~0.76 D)"
     },
     {
       "id": "G2",
@@ -165,13 +165,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        13800,
-        -3700,
-        9000
+        -6000,
+        2000,
+        4900
       ],
       "r": 5500,
-      "yaw": -75.0,
-      "note": "south-west point of the citadel ring; entrance faces outward"
+      "yaw": -135.0,
+      "note": "middle of the arc through the island center (~0.54 D)"
     },
     {
       "id": "G3",
@@ -184,13 +184,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        30800,
-        25700,
-        9400
+        11300,
+        13700,
+        8400
       ],
       "r": 6000,
-      "yaw": -165.0,
-      "note": "north point of the ring; A5 terraces (-900) cut INTO the upslope toward the citadel at this yaw - natural amphitheater"
+      "yaw": -114.0,
+      "note": "last guard, nearest the citadel (~0.35 D); A5 terraces cut into the final upslope at this yaw"
     },
     {
       "id": "Citadel",
@@ -212,7 +212,7 @@
   ],
   "rules": {
     "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, ~35 deg beach slope), arena DEAD-CENTER, open water between islands MANDATORY. Slope-guard arenas (ring around the citadel) are the only ones on the big island.",
-    "guard_ring": "guards ring the citadel at ~equal radius (~24000) INLAND of the east cape, free clear order; entrances face outward; heights 86/90/94 m - pads sit nearly flush on the dome",
+    "guard_ring": "guards on an ARC through the island middle (author drawing 2026-06-11): citadel-distances ~0.76D / 0.54D / 0.35D, player climbs 22->49->84->160 m along the arc; entrances face back along the arc",
     "transition_budget_uu": [
       5000,
       15000
