@@ -3834,9 +3834,13 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	// Always pass the interpolated alpha value
 	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
 
-	// FP Montage alpha — interpolate at user-specified rate (FPMontageAlphaInterpRate),
-	// push to AnimBP via reflection. Drives Control Rig.Alpha (= 1 - this) and
-	// Spine Transform Modify Bone.Alpha (= this) in the AnimGraph.
+	// FP montage alpha — interpolate at user-specified rate (FPMontageAlphaInterpRate) and
+	// push into the AnimBP's ControlRigAlpha variable via reflection. The ABP no longer
+	// writes ControlRigAlpha itself (its EventGraph Set node was removed), so C++ owns it:
+	//   1 = Control Rig ON  → arms aim along camera pitch (throw montages),
+	//   0 = Control Rig OFF → spine_05 Transform Bone handles pitch (= 1 - this, normal pose).
+	// Driven by SetFPMontageAlpha: → 1 on PlayThrowMontage/PlayYankThrowMontage, → 0 on
+	// montage end (blend times = the *AlphaBlendIn/Out props on ChargeAnimationComponent).
 	CurrentFPMontageAlpha = FMath::FInterpConstantTo(
 		CurrentFPMontageAlpha,
 		TargetFPMontageAlpha,
@@ -3848,8 +3852,8 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	{
 		if (UAnimInstance* AnimInst = FPMesh->GetAnimInstance())
 		{
-			static const FName FPMontageAlphaPropertyName(TEXT("FPMontageAlpha"));
-			FProperty* AlphaProp = AnimInst->GetClass()->FindPropertyByName(FPMontageAlphaPropertyName);
+			static const FName ControlRigAlphaPropertyName(TEXT("ControlRigAlpha"));
+			FProperty* AlphaProp = AnimInst->GetClass()->FindPropertyByName(ControlRigAlphaPropertyName);
 			if (AlphaProp)
 			{
 				if (FFloatProperty* FloatProp = CastField<FFloatProperty>(AlphaProp))
