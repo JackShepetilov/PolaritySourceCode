@@ -66,6 +66,24 @@
   (`[{"id","pos","pitch","yaw","fov"}]`). Запуск через run_console_command:
   `py "<...>/snap_level.py" [shots.json]` → PNG в `Tools/ArenaBlockout/Build/Screenshots/<Level>_<id>.png`.
 
+## 1.0a PythonAPI-сервисы: проверенные грабли (2026-06-11, живьём)
+
+Полный цикл «материал + Blueprint c графом» собран чистым python через `run_console_command`
+(см. `Tools/ArenaBlockout/make_containment_field.py` — рабочий образец):
+- Имена полей структур отличаются от C++: `MaterialNodePinInfo.name` (НЕ `pin_name`),
+  `BlueprintPinInfo.pin_name`/`.is_input` (НЕ `b_is_input`), `BlueprintCompileResult.num_errors`/
+  `.errors`/`.warnings` (НЕ `error_count`). Перед использованием новой структуры — `dir()`-probe.
+- Одновходовые материальные ноды (OneMinus/Saturate) НЕ принимают пустое имя пина в
+  `connect_expressions` — их вход зовётся `Input`, выходы `Output_0` (бери из `get_expression_pins`).
+- `BlueprintService.set_node_pin_value` на **объектные** пины (SourceMaterial и т.п.) — молчаливый
+  no-op (false). Обход: назначать материал на ИНСТАНСЕ актора после спавна, CDMI без SourceMaterial
+  берёт текущий материал слота.
+- `set_component_property` НЕ выставляет `bNotifyRigidBodyCollision` на SCS-шаблоне — включать
+  нодой `SetNotifyRigidBodyCollision` в BeginPlay.
+- Событие `ReceiveHit` уже имеет пин `HitLocation` — `BreakHitResult` не нужен. `GetTimeSeconds`
+  ждёт коннект `WorldContextObject` (подключай любой компонент).
+- `add_variable` → ОБЯЗАТЕЛЬНО `compile_blueprint` ДО создания нод с этой переменной (правило скилла).
+
 ## 1.1 Локальные патчи плагинов (повторить при обновлении плагина!)
 
 Плагины из `Plugins/` участвуют в сборке таргета PolarityEditor (первый же Build/Live Coding

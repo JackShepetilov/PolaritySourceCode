@@ -230,8 +230,35 @@ def finish_actor(actor, tag, label, folder):
     return actor
 
 
+FIELD_BP = "/Game/ArenaBlockout/BP_ContainmentField"
+FIELD_MAT = "/Game/ArenaBlockout/Materials/M_ContainmentField"
+
+
 def spawn_shape(eas, mats, piece, tag, arena):
     shape = piece.get("shape", "box")
+    mat_name = piece.get("mat", "floor")
+    # Containment fields: spawn the interactive BP (invisible hit-reveal shader,
+    # feeds hit pos/time into its DMI; built by make_containment_field.py).
+    # The BeginPlay CDMI uses slot-0 material, so the field material is assigned
+    # on the spawned INSTANCE here. Falls back to a translucent box if absent.
+    if mat_name == "field" and unreal.EditorAssetLibrary.does_asset_exist(FIELD_BP):
+        bp_class = unreal.EditorAssetLibrary.load_blueprint_class(FIELD_BP)
+        actor = eas.spawn_actor_from_class(bp_class, vec(piece["pos"]), rot(piece))
+        if actor is None:
+            warn("Failed to spawn field piece {}".format(piece.get("id", "?")))
+            return None
+        size = piece["size"]
+        actor.set_actor_scale3d(unreal.Vector(size[0] / 100.0, size[1] / 100.0, size[2] / 100.0))
+        smc = actor.get_component_by_class(unreal.StaticMeshComponent)
+        field_mat = unreal.EditorAssetLibrary.load_asset(FIELD_MAT)
+        if smc and field_mat:
+            smc.set_material(0, field_mat)
+        else:
+            warn("Field piece {}: mesh component or {} missing".format(
+                piece.get("id", "?"), FIELD_MAT))
+        group = piece.get("group", "Geo")
+        return finish_actor(actor, tag, "BLK_{}_{}".format(arena, piece.get("id", "piece")),
+                            "{}/{}".format(arena, group))
     mesh_path = CYL_MESH if shape == "cylinder" else CUBE_MESH
     mesh = unreal.EditorAssetLibrary.load_asset(mesh_path)
     actor = eas.spawn_actor_from_object(mesh, vec(piece["pos"]), rot(piece))
@@ -421,7 +448,9 @@ def build(arena_name):
     count_geo = 0
     for piece in spec.get("pieces", []):
         actor = spawn_shape(eas, mats, piece, tag, arena)
-        if actor and piece.get("mat") == "blocker":
+        # Any piece referenced by exit_blocker_ids must be wirable into the
+        # ArenaManager (red gate blockers AND containment fields alike).
+        if actor and piece.get("mat") in ("blocker", "field"):
             blockers[piece.get("id")] = actor
         if actor:
             count_geo += 1
