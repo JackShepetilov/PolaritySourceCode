@@ -28,6 +28,7 @@
 #include "Components/AudioComponent.h"
 #include "Sound/SoundAttenuation.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/SniperTurretNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "TutorialSubsystem.h"
@@ -1029,7 +1030,10 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		if (ACharacter* HitCharacter = Cast<ACharacter>(BestTarget))
 		{
 			// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
-			if (!(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
+			// Stationary turret never takes hit impulses: LaunchCharacter forces MOVE_Falling, and
+			// with the turret's GravityScale=0 every hit would push it into permanent flight.
+			if (!Cast<ASniperTurretNPC>(HitCharacter)
+				&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
 			{
 				HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
 			}
@@ -1225,7 +1229,10 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 	{
 		// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
-		if (!(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
+		// Stationary turret never takes hit impulses: LaunchCharacter forces MOVE_Falling, and
+		// with the turret's GravityScale=0 every hit would push it into permanent flight.
+		if (!Cast<ASniperTurretNPC>(HitCharacter)
+			&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
 		{
 			HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
 		}
