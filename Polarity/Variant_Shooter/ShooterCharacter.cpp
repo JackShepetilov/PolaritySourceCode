@@ -1064,6 +1064,23 @@ void AShooterCharacter::DoStartADS()
 		return;
 	}
 
+	// Don't ADS while the yank-throw montage is playing (throw interrupts ADS; don't let it
+	// re-enter mid-animation). Guarded by Montage_IsPlaying rather than PendingYankThrowWeapon
+	// alone so an interrupted montage can never leave ADS permanently blocked.
+	if (ChargeAnimationComponent && ChargeAnimationComponent->YankThrowMontage && PendingYankThrowWeapon.IsValid())
+	{
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			if (UAnimInstance* AnimInst = FPMesh->GetAnimInstance())
+			{
+				if (AnimInst->Montage_IsPlaying(ChargeAnimationComponent->YankThrowMontage))
+				{
+					return;
+				}
+			}
+		}
+	}
+
 	// Let weapon handle secondary action as ability (e.g. laser's Second Harmonic)
 	if (CurrentWeapon && CurrentWeapon->OnSecondaryAction())
 	{
@@ -2465,6 +2482,11 @@ void AShooterCharacter::ThrowYankedWeaponIfAny()
 		return;
 	}
 
+	// Throw always interrupts ADS: the montage needs the hipfire camera/FOV, and the ADS
+	// camera anchor would otherwise jump between weapons mid-throw. Re-entering ADS during
+	// the montage is blocked in DoStartADS.
+	DoStopADS();
+
 	UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>();
 
 	// Animation flow: store the yanked ref, play the dedicated yank-throw montage, and let
@@ -2472,6 +2494,28 @@ void AShooterCharacter::ThrowYankedWeaponIfAny()
 	// notify swaps weapons).
 	if (ChargeComp && ChargeComp->YankThrowMontage)
 	{
+		// The montage plays on the FP arms' CURRENT anim instance, and the discard notify
+		// spawns the dropped weapon at the yanked weapon's FP mesh transform. Both are only
+		// correct while the yanked weapon is the equipped one: its FP AnimBP carries the
+		// camera-pitch rig (spine_05 Transform Bone) and its meshes are attached + visible.
+		// If the player is holding another weapon, instant-switch to the yanked one first —
+		// visually "grab it, then throw it" (same swap pattern as DiscardYankedWeaponShared).
+		if (CurrentWeapon != YankedWeapon)
+		{
+			AShooterWeapon* OldCurrent = CurrentWeapon;
+			if (CurrentWeapon)
+			{
+				CurrentWeapon->DeactivateWeapon();
+			}
+			CurrentWeapon = YankedWeapon;
+			CurrentWeapon->ActivateWeapon();
+
+			if (UpgradeManager)
+			{
+				UpgradeManager->NotifyWeaponChanged(OldCurrent, CurrentWeapon);
+			}
+		}
+
 		PendingYankThrowWeapon = YankedWeapon;
 		ChargeComp->PlayYankThrowMontage();
 		return;
