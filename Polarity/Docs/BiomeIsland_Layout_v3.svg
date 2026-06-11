@@ -1,0 +1,101 @@
+<svg viewBox="0 0 980 1430" xmlns="http://www.w3.org/2000/svg" role="img" style="font-family: sans-serif; background:#ffffff;">
+<title>Биом 1 «остров-цитадель» — масштабный макет v1</title>
+<defs><marker id="arb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2070c8"/></marker><marker id="arg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#888888"/></marker></defs>
+<text x="60" y="40" font-size="17" font-weight="500" fill="#222222">Биом 1: остров-цитадель — макет в масштабе (v3, 2026-06-11)</text>
+<text x="60" y="62" font-size="12" fill="#666666">Ландшафт 2017×2017 @100 = 2×2 км; спираль ПРОТИВ часовой; заброс по оси старт→центр прямо на M1 → 4 мальдивы (2 S + 2 M) → плечо → 3 стража → цитадель=вилла за гейтом 3/3</text>
+<text x="60" y="100" font-size="13" font-weight="500" fill="#666666">Вид сверху (север вверх)</text>
+<rect x="170" y="150" width="620" height="620" fill="#2070c8" fill-opacity="0.10" stroke="#c9c9c9" stroke-width="1.5"/>
+<text x="178" y="760" font-size="11" fill="#666666">океан (вода Z=0, не смертельна)</text>
+<circle cx="468" cy="405" r="98" fill="#c9c9c9" fill-opacity="0.65" stroke="#666666" stroke-width="1.5"/>
+<circle cx="400" cy="472" r="43" fill="#b0a89a" fill-opacity="0.5" stroke="#8a8276" stroke-width="0.8"/>
+<circle cx="400" cy="472" r="28" fill="#b0a89a" fill-opacity="0.65" stroke="#8a8276" stroke-width="0.8"/>
+<circle cx="400" cy="472" r="14" fill="#b0a89a" fill-opacity="0.8" stroke="#8a8276" stroke-width="0.8"/>
+<line x1="365" y1="432" x2="373" y2="430" stroke="#222222" stroke-width="1.6"/>
+<line x1="373" y1="453" x2="380" y2="449" stroke="#222222" stroke-width="1.6"/>
+<line x1="385" y1="472" x2="391" y2="467" stroke="#222222" stroke-width="1.6"/>
+<line x1="401" y1="487" x2="406" y2="481" stroke="#222222" stroke-width="1.6"/>
+<line x1="419" y1="499" x2="423" y2="492" stroke="#222222" stroke-width="1.6"/>
+<line x1="440" y1="507" x2="442" y2="500" stroke="#222222" stroke-width="1.6"/>
+<line x1="462" y1="511" x2="463" y2="503" stroke="#222222" stroke-width="1.6"/>
+<line x1="484" y1="510" x2="483" y2="502" stroke="#222222" stroke-width="1.6"/>
+<text x="342" y="472" font-size="11" fill="#666666">обрыв</text>
+<line x1="472" y1="657" x2="472" y2="665" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb)"/>
+<line x1="488" y1="637" x2="522" y2="622" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb)"/>
+<line x1="553" y1="600" x2="582" y2="565" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb)"/>
+<line x1="603" y1="526" x2="615" y2="483" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb)"/>
+<line x1="605" y1="447" x2="586" y2="430" stroke="#2070c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arb)"/>
+<line x1="552" y1="396" x2="547" y2="390" stroke="#888888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arg)"/>
+<line x1="513" y1="362" x2="508" y2="359" stroke="#888888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arg)"/>
+<line x1="468" y1="360" x2="446" y2="373" stroke="#888888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arg)"/>
+<line x1="418" y1="408" x2="407" y2="446" stroke="#888888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arg)"/>
+<line x1="472" y1="666" x2="400" y2="472" stroke="#222222" stroke-width="1.5" stroke-dasharray="2 6"/>
+<circle cx="472" cy="666" r="5" fill="#c9c9c9" stroke="#666666" stroke-width="2"/>
+<text x="472" y="647" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">СТАРТ</text>
+<text x="472" y="658" font-size="10" fill="#444444" text-anchor="middle">start_reef | 2 м</text>
+<circle cx="471" cy="645" r="14" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="471" y="617" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A1_Pier</text>
+<text x="471" y="628" font-size="10" fill="#444444" text-anchor="middle">M1 | 5 м, yaw 1</text>
+<circle cx="542" cy="614" r="14" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="542" y="586" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A8_Lighthouse</text>
+<text x="542" y="597" font-size="10" fill="#444444" text-anchor="middle">M2 | 12 м, yaw -66</text>
+<circle cx="597" cy="546" r="17" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="597" y="515" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A2_Courtyard</text>
+<text x="597" y="526" font-size="10" fill="#444444" text-anchor="middle">M3 | 20 м, yaw -39</text>
+<circle cx="621" cy="460" r="17" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="621" y="429" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A4_Hangar</text>
+<text x="621" y="440" font-size="10" fill="#444444" text-anchor="middle">M4 | 28 м, yaw -16</text>
+<circle cx="566" cy="414" r="18" fill="none" stroke="#666666" stroke-width="1.4" stroke-dasharray="3 3"/>
+<text x="566" y="381" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">плечо</text>
+<text x="566" y="392" font-size="10" fill="#444444" text-anchor="middle">shoulder | 45 м</text>
+<circle cx="532" cy="371" r="17" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="532" y="340" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A3_Dome</text>
+<text x="532" y="351" font-size="10" fill="#444444" text-anchor="middle">G1 | 60 м, yaw 38</text>
+<circle cx="486" cy="349" r="17" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="486" y="318" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A7_Gallery</text>
+<text x="486" y="329" font-size="10" fill="#444444" text-anchor="middle">G2 | 75 м, yaw 51</text>
+<circle cx="425" cy="386" r="18" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="425" y="354" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A5_Amphitheater</text>
+<text x="425" y="365" font-size="10" fill="#444444" text-anchor="middle">G3 | 90 м, yaw 121</text>
+<circle cx="400" cy="472" r="20" fill="#e7e2d6" stroke="#666666" stroke-width="1.6"/>
+<text x="400" y="438" font-size="11" font-weight="500" fill="#222222" text-anchor="middle">A6_Villa</text>
+<text x="400" y="449" font-size="10" fill="#444444" text-anchor="middle">Citadel | 160 м, yaw 164</text>
+<text x="170" y="796" font-size="11" fill="#222222">синие стрелки — спираль мальдив (вэлвы по воде ~120 м пути); серые — подъём по склону (порядок стражей свободный); пунктир — прямая видимость старт→цитадель</text>
+<line x1="636" y1="818" x2="790" y2="818" stroke="#222222" stroke-width="2"/>
+<text x="636" y="832" font-size="10" fill="#222222">500 м (50 000 uu)</text>
+<text x="60" y="866" font-size="13" font-weight="500" fill="#666666">Профиль маршрута (высоты в масштабе, длины — по порядку маршрута)</text>
+<rect x="80" y="1246" width="840" height="10" fill="#2070c8" fill-opacity="0.18"/>
+<text x="926" y="1254" font-size="10" fill="#666666">вода Z=0</text>
+<polyline points="80,1242 173,1237 267,1224 360,1210 453,1196 547,1165 640,1138 733,1111 827,1084 920,958" fill="none" stroke="#666666" stroke-width="2"/>
+<circle cx="80" cy="1242" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="80" y="1220" font-size="10" fill="#222222" text-anchor="middle">старт</text>
+<text x="80" y="1232" font-size="10" fill="#444444" text-anchor="middle">2 м</text>
+<circle cx="173" cy="1237" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="173" y="1215" font-size="10" fill="#222222" text-anchor="middle">A1_Pier</text>
+<text x="173" y="1227" font-size="10" fill="#444444" text-anchor="middle">5 м</text>
+<circle cx="267" cy="1224" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="267" y="1202" font-size="10" fill="#222222" text-anchor="middle">A8_Lighthouse</text>
+<text x="267" y="1214" font-size="10" fill="#444444" text-anchor="middle">12 м</text>
+<circle cx="360" cy="1210" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="360" y="1188" font-size="10" fill="#222222" text-anchor="middle">A2_Courtyard</text>
+<text x="360" y="1200" font-size="10" fill="#444444" text-anchor="middle">20 м</text>
+<circle cx="453" cy="1196" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="453" y="1174" font-size="10" fill="#222222" text-anchor="middle">A4_Hangar</text>
+<text x="453" y="1186" font-size="10" fill="#444444" text-anchor="middle">28 м</text>
+<circle cx="547" cy="1165" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="547" y="1143" font-size="10" fill="#222222" text-anchor="middle">плечо</text>
+<text x="547" y="1155" font-size="10" fill="#444444" text-anchor="middle">45 м</text>
+<circle cx="640" cy="1138" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="640" y="1116" font-size="10" fill="#222222" text-anchor="middle">A3_Dome</text>
+<text x="640" y="1128" font-size="10" fill="#444444" text-anchor="middle">60 м</text>
+<circle cx="733" cy="1111" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="733" y="1089" font-size="10" fill="#222222" text-anchor="middle">A7_Gallery</text>
+<text x="733" y="1101" font-size="10" fill="#444444" text-anchor="middle">75 м</text>
+<circle cx="827" cy="1084" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="827" y="1062" font-size="10" fill="#222222" text-anchor="middle">A5_Amphitheater</text>
+<text x="827" y="1074" font-size="10" fill="#444444" text-anchor="middle">90 м</text>
+<circle cx="920" cy="958" r="4" fill="#e7e2d6" stroke="#222222" stroke-width="1.5"/>
+<text x="920" y="936" font-size="10" fill="#222222" text-anchor="middle">A6_Villa</text>
+<text x="920" y="948" font-size="10" fill="#444444" text-anchor="middle">160 м</text>
+<text x="60" y="1276" font-size="11" fill="#222222">мальдивы низкие (5→28 м), драма высоты — подъём по острову: плечо 45 → стражи 60/75/90 → цитадель=вилла 160 (пик 170) + обрыв в воду; старт — дальний интро-вид</text>
+<text x="60" y="1296" font-size="11" fill="#666666">Бюджеты: вэлвы 5–15 тыс. uu пути; зазор полей-стаканов ≥ 2–3 тыс.; шаг слотов склона ≥ 10.5 тыс. (см. отчёт render_island_layout.py)</text>
+</svg>
