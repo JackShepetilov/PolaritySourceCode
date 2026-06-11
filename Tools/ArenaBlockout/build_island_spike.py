@@ -78,8 +78,9 @@ def ensure_landscape():
         # additive sculpt ops would stack: reset the whole map to the base plane first
         svc.flatten_at_location(LS_LABEL, 0.0, 0.0, 80000.0, SEA_FLOOR_Z, 1.0)
         log("Reset terrain to sea floor for resculpt")
+    # v3 signature (probed): (label, cx, cy, radius, height, sharpness, add_noise, seed)
     svc.create_mountain(LS_LABEL, center_x=0.0, center_y=0.0, radius=ISLAND_R,
-                        height=PEAK_H, sharpness=1.2, b_add_noise=True, seed=7)
+                        height=PEAK_H, sharpness=1.2, add_noise=True, seed=7)
     svc.flatten_at_location(LS_LABEL, PLATEAU[0], PLATEAU[1], PLATEAU_R, PLATEAU[2], 1.0)
     svc.flatten_at_location(LS_LABEL, BEACH[0], BEACH[1], 3000.0, BEACH[2], 1.0)
     # soften the beach->slope and plateau->slope seams
