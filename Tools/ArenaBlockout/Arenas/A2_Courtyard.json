@@ -39,8 +39,8 @@
     { "id": "pl_s_e", "shape": "box", "mat": "deco", "pos": [825, 2750, 175],    "size": [4350, 500, 350], "group": "BalconyL1" },
     { "id": "pl_w",   "shape": "box", "mat": "deco", "pos": [-2750, 0, 175],     "size": [500, 6000, 350], "group": "BalconyL1" },
 
-    { "id": "ramp_ne", "shape": "box", "mat": "floor", "pos": [2150, -2100, 160],  "size": [820, 500, 60], "pitch": 26.57, "yaw": 0,   "group": "Ramps" },
-    { "id": "ramp_sw", "shape": "box", "mat": "floor", "pos": [-2150, 2100, 160],  "size": [820, 500, 60], "pitch": 26.57, "yaw": 180, "group": "Ramps" },
+    { "id": "ramp_ne", "shape": "ramp", "mat": "floor", "from": [1700, -2100, 0], "to": [2550, -2100, 350],  "width": 500, "group": "Ramps" },
+    { "id": "ramp_sw", "shape": "ramp", "mat": "floor", "from": [-1700, 2100, 0], "to": [-2550, 2100, 350], "width": 500, "group": "Ramps" },
 
     { "id": "par_w", "shape": "box", "mat": "wallrun", "pos": [-2485, -250, 450],  "size": [30, 3100, 200], "group": "Parapets" },
     { "id": "par_e", "shape": "box", "mat": "wallrun", "pos": [2485, -1000, 450],  "size": [30, 1200, 200], "group": "Parapets" },

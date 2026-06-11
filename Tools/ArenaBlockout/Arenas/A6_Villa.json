@@ -67,12 +67,11 @@
     { "id": "balus_l1_w", "shape": "box", "mat": "deco", "pos": [-1775, 1100, 950],  "size": [50, 1900, 100], "group": "L1Balustrade" },
     { "id": "balus_l1_e", "shape": "box", "mat": "deco", "pos": [1775, 725, 950],    "size": [50, 1150, 100], "group": "L1Balustrade" },
 
-    { "id": "ramp_e", "shape": "box", "mat": "floor", "pos": [2100, 750, 425],  "size": [2010, 500, 60], "pitch": 26.57, "yaw": 90,  "group": "Ramps" },
-    { "id": "ramp_w", "shape": "box", "mat": "floor", "pos": [-2100, 450, 425], "size": [2010, 500, 60], "pitch": 26.57, "yaw": -90, "group": "Ramps" },
-    { "id": "ramp_e_top", "shape": "box", "mat": "floor", "pos": [2100, 1950, 870], "size": [500, 400, 60], "group": "Ramps" },
-    { "id": "ramp_w_top", "shape": "box", "mat": "floor", "pos": [-2100, -750, 870], "size": [500, 400, 60], "group": "Ramps" },
+    { "id": "ramp_e", "shape": "ramp", "mat": "floor", "from": [2050, -300, 0], "to": [2050, 1700, 900],  "width": 500, "group": "Ramps" },
+    { "id": "ramp_w", "shape": "ramp", "mat": "floor", "from": [-2050, 1500, 0], "to": [-2050, -500, 900], "width": 500, "group": "Ramps" },
 
-    { "id": "ramp_roof", "shape": "box", "mat": "floor", "pos": [-950, 1850, 1275], "size": [1500, 450, 60], "pitch": 26.57, "yaw": 0, "group": "Ramps" },
+    { "id": "ramp_roof", "shape": "ramp", "mat": "floor", "from": [-1700, 1850, 900], "to": [-350, 1850, 1650], "width": 450, "group": "Ramps" },
+    { "id": "roof_porch", "shape": "box", "mat": "floor", "pos": [-500, 1725, 1600], "size": [600, 300, 100], "group": "Ramps" },
 
     { "id": "pergola_w", "shape": "box", "mat": "deco", "pos": [-2400, 1600, 225], "size": [600, 600, 450], "group": "Pergola" },
     { "id": "pergola_e", "shape": "box", "mat": "deco", "pos": [2400, -400, 225],  "size": [600, 600, 450], "group": "Pergola" },

@@ -237,6 +237,25 @@ FIELD_MAT = "/Game/ArenaBlockout/Materials/M_ContainmentField"
 def spawn_shape(eas, mats, piece, tag, arena):
     shape = piece.get("shape", "box")
     mat_name = piece.get("mat", "floor")
+    # "ramp": exact-fit slope between two FLOOR-TOP points. The builder solves
+    # pitch/center so the ramp's TOP surface is flush with both floors (manual
+    # center math kept producing above/below-floor seams).
+    if shape == "ramp":
+        fx, fy, fz = [float(v) for v in piece["from"]]
+        tx, ty, tz = [float(v) for v in piece["to"]]
+        width = float(piece.get("width", 500))
+        thick = float(piece.get("thick", 60))
+        dx, dy, dz = tx - fx, ty - fy, tz - fz
+        dxy = math.hypot(dx, dy)
+        slope_len = math.hypot(dxy, dz)
+        pitch = math.degrees(math.asin(dz / slope_len)) if slope_len else 0.0
+        yaw = math.degrees(math.atan2(dy, dx))
+        cz = (fz + tz) * 0.5 - (thick * 0.5) * math.cos(math.radians(pitch))
+        piece = dict(piece,
+                     pos=[(fx + tx) * 0.5, (fy + ty) * 0.5, cz],
+                     size=[slope_len + 80.0, width, thick],  # 40uu overlap per end
+                     pitch=pitch, yaw=yaw)
+        shape = "box"
     # Containment fields: spawn the interactive BP (invisible hit-reveal shader,
     # feeds hit pos/time into its DMI; built by make_containment_field.py).
     # The BeginPlay CDMI uses slot-0 material, so the field material is assigned
