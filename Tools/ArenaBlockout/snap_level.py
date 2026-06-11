@@ -167,6 +167,16 @@ def take_shots(shots, label):
     comp = cap.capture_component2d
     comp.set_editor_property("texture_target", rt)
     comp.set_editor_property("capture_every_frame", False)
+    # Fixed exposure: auto-exposure + flash blows tight white interiors to pure white.
+    try:
+        pps = comp.get_editor_property("post_process_settings")
+        pps.set_editor_property("override_auto_exposure_min_brightness", True)
+        pps.set_editor_property("override_auto_exposure_max_brightness", True)
+        pps.set_editor_property("auto_exposure_min_brightness", 1.0)
+        pps.set_editor_property("auto_exposure_max_brightness", 1.0)
+        comp.set_editor_property("post_process_settings", pps)
+    except Exception as e:
+        warn("fixed exposure setup: {}".format(e))
     transient = [cap]
 
     if not has_sun:

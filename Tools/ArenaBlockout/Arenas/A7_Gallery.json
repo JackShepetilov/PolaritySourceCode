@@ -1,0 +1,159 @@
+{
+  "name": "A7_Gallery",
+  "comment": "Центральная арена «Павильон-галерея» (ремейк Lvl_Arena2: клуатр с атриумом). Идентичность: белый квадратный павильон, центральный двор, арочные входы, эксплуатируемая крыша. Фиксы: атриум x2.5 (3300x3300, боевой круг), кольцо-галерея 1350 с потолком 900, колоннада вместо глухой аркады, 3 маршрута на крышу БЕЗ пластин (наружная парадная рампа / уступы-постаменты / wallrun по стелам), nav links на всех перепадах. Оси: вход с юга (-Y). Уровни: земля -500 / пол павильона 0 / крыша 1000.",
+  "level_path": "/Game/Variant_Shooter/Arenas/Biome1/A7_Gallery/Lvl_A7_Gallery",
+  "time_between_waves": 3.0,
+
+  "classes": {
+    "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
+    "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
+    "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
+    "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
+    "spawn_point": "/Script/Polarity.ArenaSpawnPoint",
+    "shooter": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC",
+    "melee": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_MeleeNPC",
+    "drone": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone",
+    "kamikaze": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_KamikazeDrone",
+    "turret": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_TurretNPC"
+  },
+
+  "pieces": [
+    { "id": "outer_ground", "shape": "box", "mat": "floor", "pos": [0, 0, -550],  "size": [9000, 9000, 100], "group": "Floor" },
+    { "id": "podium",       "shape": "box", "mat": "floor", "pos": [0, 0, -250],  "size": [6600, 6600, 500], "group": "Floor" },
+
+    { "id": "wall_s_w",   "shape": "box", "mat": "wall", "pos": [-1700, -3050, 450], "size": [2800, 100, 900], "group": "Walls" },
+    { "id": "wall_s_e",   "shape": "box", "mat": "wall", "pos": [1700, -3050, 450],  "size": [2800, 100, 900], "group": "Walls" },
+    { "id": "arch_s",     "shape": "box", "mat": "wall", "pos": [0, -3050, 700],     "size": [600, 100, 400],  "group": "Walls" },
+    { "id": "wall_e_n",   "shape": "box", "mat": "wall", "pos": [3050, 1700, 450],   "size": [100, 2800, 900], "group": "Walls" },
+    { "id": "wall_e_s",   "shape": "box", "mat": "wall", "pos": [3050, -1700, 450],  "size": [100, 2800, 900], "group": "Walls" },
+    { "id": "arch_e",     "shape": "box", "mat": "wall", "pos": [3050, 0, 700],      "size": [100, 600, 400],  "group": "Walls" },
+    { "id": "wall_w_n",   "shape": "box", "mat": "wall", "pos": [-3050, 1700, 450],  "size": [100, 2800, 900], "group": "Walls" },
+    { "id": "wall_w_s",   "shape": "box", "mat": "wall", "pos": [-3050, -1700, 450], "size": [100, 2800, 900], "group": "Walls" },
+    { "id": "arch_w",     "shape": "box", "mat": "wall", "pos": [-3050, 0, 700],     "size": [100, 600, 400],  "group": "Walls" },
+    { "id": "wall_n",     "shape": "box", "mat": "wall", "pos": [0, 3050, 450],      "size": [6200, 100, 900], "group": "Walls" },
+
+    { "id": "roof_n", "shape": "box", "mat": "floor", "pos": [0, 2325, 950],  "size": [6200, 1350, 100], "group": "Roof" },
+    { "id": "roof_s", "shape": "box", "mat": "floor", "pos": [0, -2325, 950], "size": [6200, 1350, 100], "group": "Roof" },
+    { "id": "roof_e", "shape": "box", "mat": "floor", "pos": [2325, 0, 950],  "size": [1350, 3300, 100], "group": "Roof" },
+    { "id": "roof_w", "shape": "box", "mat": "floor", "pos": [-2325, 0, 950], "size": [1350, 3300, 100], "group": "Roof" },
+
+    { "id": "par_out_s_w", "shape": "box", "mat": "wall", "pos": [-1450, -3075, 1100], "size": [3300, 50, 200], "group": "RoofParapet" },
+    { "id": "par_out_s_e", "shape": "box", "mat": "wall", "pos": [1950, -3075, 1100],  "size": [2300, 50, 200], "group": "RoofParapet" },
+    { "id": "par_out_n",   "shape": "box", "mat": "wall", "pos": [0, 3075, 1100],      "size": [6200, 50, 200], "group": "RoofParapet" },
+    { "id": "par_out_e",   "shape": "box", "mat": "wall", "pos": [3075, 0, 1100],      "size": [50, 6200, 200], "group": "RoofParapet" },
+    { "id": "par_out_w",   "shape": "box", "mat": "wall", "pos": [-3075, 0, 1100],     "size": [50, 6200, 200], "group": "RoofParapet" },
+
+    { "id": "par_in_n", "shape": "box", "mat": "deco", "pos": [0, 1675, 1050],  "size": [3400, 50, 100], "group": "AtriumParapet" },
+    { "id": "par_in_s", "shape": "box", "mat": "deco", "pos": [0, -1675, 1050], "size": [3400, 50, 100], "group": "AtriumParapet" },
+    { "id": "par_in_e", "shape": "box", "mat": "deco", "pos": [1675, 0, 1050],  "size": [50, 3300, 100], "group": "AtriumParapet" },
+    { "id": "par_in_w", "shape": "box", "mat": "deco", "pos": [-1675, 0, 1050], "size": [50, 3300, 100], "group": "AtriumParapet" },
+
+    { "id": "col_s_1", "shape": "box", "mat": "wall", "pos": [-1100, -1650, 450], "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_s_2", "shape": "box", "mat": "wall", "pos": [0, -1650, 450],     "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_s_3", "shape": "box", "mat": "wall", "pos": [1100, -1650, 450],  "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_n_1", "shape": "box", "mat": "wall", "pos": [-1100, 1650, 450],  "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_n_2", "shape": "box", "mat": "wall", "pos": [0, 1650, 450],      "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_n_3", "shape": "box", "mat": "wall", "pos": [1100, 1650, 450],   "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_e_1", "shape": "box", "mat": "wall", "pos": [1650, -1100, 450],  "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_e_2", "shape": "box", "mat": "wall", "pos": [1650, 0, 450],      "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_e_3", "shape": "box", "mat": "wall", "pos": [1650, 1100, 450],   "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_w_1", "shape": "box", "mat": "wall", "pos": [-1650, -1100, 450], "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_w_2", "shape": "box", "mat": "wall", "pos": [-1650, 0, 450],     "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_w_3", "shape": "box", "mat": "wall", "pos": [-1650, 1100, 450],  "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_c_se", "shape": "box", "mat": "wall", "pos": [1650, -1650, 450],  "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_c_sw", "shape": "box", "mat": "wall", "pos": [-1650, -1650, 450], "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_c_ne", "shape": "box", "mat": "wall", "pos": [1650, 1650, 450],   "size": [200, 200, 900], "group": "Colonnade" },
+    { "id": "col_c_nw", "shape": "box", "mat": "wall", "pos": [-1650, 1650, 450],  "size": [200, 200, 900], "group": "Colonnade" },
+
+    { "id": "case_s", "shape": "box", "mat": "deco", "pos": [550, -1650, 50],  "size": [700, 150, 100], "group": "Showcases" },
+    { "id": "case_n", "shape": "box", "mat": "deco", "pos": [-550, 1650, 50],  "size": [700, 150, 100], "group": "Showcases" },
+    { "id": "case_e", "shape": "box", "mat": "deco", "pos": [1650, 550, 50],   "size": [150, 700, 100], "group": "Showcases" },
+    { "id": "case_w", "shape": "box", "mat": "deco", "pos": [-1650, -550, 50], "size": [150, 700, 100], "group": "Showcases" },
+
+    { "id": "stela_x", "shape": "box", "mat": "wallrun", "pos": [-400, -600, 650], "size": [1600, 120, 1300], "group": "Stelae" },
+    { "id": "stela_y", "shape": "box", "mat": "wallrun", "pos": [500, 800, 650],   "size": [120, 1600, 1300], "group": "Stelae" },
+
+    { "id": "ped_250", "shape": "box", "mat": "deco", "pos": [1300, 1100, 125], "size": [500, 500, 250], "group": "Pedestals" },
+    { "id": "ped_600", "shape": "box", "mat": "deco", "pos": [1300, 400, 300],  "size": [500, 500, 600], "group": "Pedestals" },
+
+    { "id": "ramp_in_s", "shape": "box", "mat": "floor", "pos": [0, -3700, -220],  "size": [1000, 600, 60], "pitch": 26.57, "yaw": 90,  "group": "EntryRamps" },
+    { "id": "ramp_in_e", "shape": "box", "mat": "floor", "pos": [3700, 0, -220],   "size": [1000, 600, 60], "pitch": 26.57, "yaw": 180, "group": "EntryRamps" },
+    { "id": "ramp_in_w", "shape": "box", "mat": "floor", "pos": [-3700, 0, -220],  "size": [1000, 600, 60], "pitch": 26.57, "yaw": 0,   "group": "EntryRamps" },
+
+    { "id": "ramp_roof_s", "shape": "box", "mat": "floor", "pos": [1500, -3400, 470], "size": [2000, 450, 60], "pitch": 26.57, "yaw": 180, "group": "GrandRamp" },
+
+    { "id": "blk_s", "shape": "box", "mat": "blocker", "pos": [0, -3050, 250],  "size": [620, 60, 500], "group": "Blockers" },
+    { "id": "blk_e", "shape": "box", "mat": "blocker", "pos": [3050, 0, 250],   "size": [60, 620, 500], "group": "Blockers" },
+    { "id": "blk_w", "shape": "box", "mat": "blocker", "pos": [-3050, 0, 250],  "size": [60, 620, 500], "group": "Blockers" },
+
+    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 3160, 2200],  "size": [6420, 20, 2400], "group": "Field" },
+    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -3160, 2200], "size": [6420, 20, 2400], "group": "Field" },
+    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [3160, 0, 2200],  "size": [20, 6420, 2400], "group": "Field" },
+    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-3160, 0, 2200], "size": [20, 6420, 2400], "group": "Field" }
+  ],
+
+  "exit_blocker_ids": ["blk_s", "blk_e", "blk_w", "fld_n", "fld_s", "fld_e", "fld_w"],
+
+  "markers": [
+    { "type": "player_start",  "pos": [0, -4800, -400], "yaw": 90 },
+    { "type": "respawn_point", "pos": [0, -4500, -400], "yaw": 90 },
+
+    { "type": "entry_trigger", "pos": [0, -3150, 250],  "extent": [320, 200, 250] },
+    { "type": "entry_trigger", "pos": [3150, 0, 250],   "extent": [200, 320, 250] },
+    { "type": "entry_trigger", "pos": [-3150, 0, 250],  "extent": [200, 320, 250] },
+
+    { "type": "spawn", "id": "G1a", "pos": [-1500, 2300, 10], "yaw": -90 },
+    { "type": "spawn", "id": "G1b", "pos": [0, 2300, 10],     "yaw": -90 },
+    { "type": "spawn", "id": "G1c", "pos": [1500, 2300, 10],  "yaw": -90 },
+    { "type": "spawn", "id": "G2a", "pos": [2300, -1200, 10], "yaw": 180 },
+    { "type": "spawn", "id": "G2b", "pos": [2300, 0, 10],     "yaw": 180 },
+    { "type": "spawn", "id": "G2c", "pos": [2300, 1200, 10],  "yaw": 180 },
+    { "type": "spawn", "id": "G3a", "pos": [-1500, 2325, 1010], "yaw": -90 },
+    { "type": "spawn", "id": "G3b", "pos": [1500, 2325, 1010],  "yaw": -90 },
+    { "type": "spawn", "id": "G3c", "pos": [2325, -500, 1010],  "yaw": 180 },
+    { "type": "spawn", "id": "G4a", "pos": [-1100, 400, 10],  "yaw": 0 },
+    { "type": "spawn", "id": "G4b", "pos": [1100, 1000, 10],  "yaw": 180 },
+    { "type": "spawn", "id": "Air1", "pos": [0, 900, 60],      "air": true, "air_height": 300 },
+    { "type": "spawn", "id": "Air2", "pos": [-2325, 0, 1010],  "air": true, "air_height": 300 },
+
+    { "type": "npc", "class_key": "turret", "id": "Turret", "pos": [300, 2350, 1010], "yaw": -90 },
+
+    { "type": "prop_cluster", "id": "C_stela_x", "pos": [-400, -1100, 60],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C_stela_y", "pos": [1000, 800, 60],    "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C_gal_se",  "pos": [2400, -2400, 60],  "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "C_gal_nw",  "pos": [-2400, 1200, 60],  "count": 3, "radius": 160 },
+    { "type": "prop_cluster", "id": "C_roof_s",  "pos": [1500, -2325, 1010], "count": 3, "radius": 160 },
+
+    { "type": "antenna", "id": "Antenna", "pos": [2300, 2300, 1010], "yaw": -135 },
+    { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 2400] },
+    { "type": "manager", "pos": [0, 0, 2600] },
+
+    { "type": "nav_link", "id": "NL_roof_atr_n", "pos": [0, 1675, 1060],  "left": [0, 150, 0],  "right": [0, -600, -1000] },
+    { "type": "nav_link", "id": "NL_roof_atr_s", "pos": [0, -1675, 1060], "left": [0, -150, 0], "right": [0, 600, -1000] },
+    { "type": "nav_link", "id": "NL_roof_atr_e", "pos": [1675, 0, 1060],  "left": [150, 0, 0],  "right": [-600, 0, -1000] },
+    { "type": "nav_link", "id": "NL_roof_atr_w", "pos": [-1675, 0, 1060], "left": [-150, 0, 0], "right": [600, 0, -1000] },
+    { "type": "nav_link", "id": "NL_pod_se",     "pos": [3300, -2800, 10], "left": [-150, 0, 0], "right": [500, 0, -500] },
+    { "type": "nav_link", "id": "NL_pod_nw",     "pos": [-3300, 2800, 10], "left": [150, 0, 0],  "right": [-500, 0, -500] },
+    { "type": "nav_link", "id": "NL_ramp_top",   "pos": [600, -3150, 1010], "left": [-150, 100, 0], "right": [-100, -250, -40] },
+
+    { "type": "nav_link", "id": "NL_ped_lo", "pos": [1300, 1100, 260], "left": [-150, 150, 0], "right": [-300, -150, -250] },
+    { "type": "nav_link", "id": "NL_ped_hi", "pos": [1300, 400, 610],  "left": [-150, 150, -10], "right": [0, 350, -350] }
+  ],
+
+  "screenshots": [
+    { "id": "top",    "pos": [0, 0, 7200],         "pitch": -90, "yaw": -90 },
+    { "id": "entry",  "pos": [0, -4900, -300],     "pitch": 2,   "yaw": 90 },
+    { "id": "iso_ne", "pos": [5500, 5500, 3600],   "pitch": -26, "yaw": -135 },
+    { "id": "iso_sw", "pos": [-5500, -5500, 3600], "pitch": -26, "yaw": 45 },
+    { "id": "atrium", "pos": [-1350, -1350, 300],  "pitch": 2,   "yaw": 55 },
+    { "id": "gallery", "pos": [2325, -2400, 250],  "pitch": 2,   "yaw": 90 }
+  ],
+
+  "navmesh_bounds": { "pos": [0, 0, 750], "size": [8200, 8200, 3700] },
+
+  "waves": [
+    { "delay": 0.0, "entries": [["melee", 4], ["shooter", 2]] },
+    { "delay": 0.0, "entries": [["shooter", 3], ["drone", 2]] },
+    { "delay": 0.0, "entries": [["melee", 2], ["kamikaze", 3], ["drone", 2]] }
+  ]
+}

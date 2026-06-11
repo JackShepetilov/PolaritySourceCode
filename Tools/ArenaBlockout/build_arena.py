@@ -267,6 +267,17 @@ def take_screenshots(eas, spec, arena):
     comp = cap.capture_component2d
     comp.set_editor_property("texture_target", rt)
     comp.set_editor_property("capture_every_frame", False)
+    # Fixed exposure: auto-exposure + camera flash blows tight white interiors to
+    # pure white (observed on A4 hangar nave / A7 atrium shots).
+    try:
+        pps = comp.get_editor_property("post_process_settings")
+        pps.set_editor_property("override_auto_exposure_min_brightness", True)
+        pps.set_editor_property("override_auto_exposure_max_brightness", True)
+        pps.set_editor_property("auto_exposure_min_brightness", 1.0)
+        pps.set_editor_property("auto_exposure_max_brightness", 1.0)
+        comp.set_editor_property("post_process_settings", pps)
+    except Exception as e:
+        warn("fixed exposure setup: {}".format(e))
     # Transient lights for the lit pass — destroyed right after, never saved (the level
     # stays light-free per author rule; we simply don't save after screenshots).
     sun = eas.spawn_actor_from_class(unreal.DirectionalLight, unreal.Vector(0, 0, 3000),
