@@ -72,8 +72,8 @@
     { "id": "ramp_w", "shape": "ramp", "mat": "floor", "from": [-2100, 1600, 0], "to": [-2100, -400, 900], "width": 500, "group": "Ramps" },
     { "id": "porch_w", "shape": "box", "mat": "floor", "pos": [-2000, -600, 850], "size": [600, 400, 100], "group": "Ramps" },
 
-    { "id": "ramp_roof", "shape": "ramp", "mat": "floor", "from": [-1700, 1850, 900], "to": [-350, 1850, 1650], "width": 450, "group": "Ramps" },
-    { "id": "roof_porch", "shape": "box", "mat": "floor", "pos": [-500, 1725, 1600], "size": [600, 300, 100], "group": "Ramps" },
+    { "id": "ramp_roof", "shape": "box", "mat": "ramp", "pos": [-551.2, 1850, 1254.2], "size": [1775, 450, 60], "pitch": 25, "yaw": 0, "group": "Ramps", "comment": "РУЧНАЯ ПРАВКА АВТОРА 2026-06-11 (снята с инстанса) - НЕ пересчитывать, НЕ трогать" },
+    { "id": "roof_porch", "shape": "box", "mat": "floor", "pos": [540, 1845, 1600], "size": [600, 475, 100], "group": "Ramps", "comment": "РУЧНАЯ ПРАВКА АВТОРА - НЕ трогать" },
 
     { "id": "wr_house_w", "shape": "box", "mat": "wallrun", "pos": [-1815, 600, 500],  "size": [30, 1600, 450], "group": "Wallrun" },
     { "id": "wr_house_s", "shape": "box", "mat": "wallrun", "pos": [-200, -865, 1200], "size": [1400, 30, 450], "group": "Wallrun" },
