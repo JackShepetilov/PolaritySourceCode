@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
-  "version": 4,
-  "comment": "Phase-0 scale layout v4 (2026-06-11, author review round 2). Changes vs v3: (a) maldive chain MIRRORED to the WEST side - in the UE top view the spiral now runs COUNTERCLOCKWISE (south -> west -> north) as originally asked; (b) guard arenas form a RING at ~equal radius (~24000) around the citadel instead of a sequence; (c) island is BIGGER (R 40000) and GENTLE everywhere - beaches instead of cliffs, the only cliff is the citadel cape itself; (d) citadel sits on the VERY LIP of the SW cape with a land approach from the ring side; (e) pads are subtle (wide blends, no rims), A5's bowl cuts INTO the slope. Units: uu.",
+  "version": 5,
+  "comment": "Phase-0 scale layout v5 (2026-06-11, author fix round 3): THE CITADEL SITS ON THE FAR END OF THE ISLAND FROM THE LANDING (author: 'высокая точка - на дальнем от входа конце'). West maldive chain lands on the NW shoulder; the citadel cape is the EAST point, the full island crossing lies between them; guard ring moved with the citadel. Maldive chain unchanged (CCW in UE top view).",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
@@ -23,11 +23,11 @@
     ],
     "land_radius": 40000,
     "peak": [
-      -18000,
-      -8000
+      37000,
+      2500
     ],
     "peak_z": 16400,
-    "cliff_note": "gentle shield dome rising toward the SW cape; the ONLY cliff is the cape face under the citadel (sector ~200-250 deg from island center), everywhere else - beaches"
+    "cliff_note": "gentle shield dome rising toward the EAST cape (the citadel); the ONLY cliff is the cape's seaward face, everywhere else - beaches"
   },
   "route": [
     "start_reef",
@@ -130,10 +130,10 @@
       "pos": [
         -26000,
         30000,
-        5300
+        1950
       ],
       "r": 6000,
-      "note": "landing on the NW rim: natural beach->terrace, terrain here is ~5300 (the original 40-50 m shoulder spec) - no pad disc, no combat"
+      "note": "landing on the NW rim - the LOW far end (~20 m beach terrace): the whole climb 19->90->160 m lies ahead, across the island to the east citadel cape"
     },
     {
       "id": "G1",
@@ -146,13 +146,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        4500,
-        200,
+        16200,
+        14500,
         8600
       ],
       "r": 5500,
-      "yaw": 110.0,
-      "note": "east point of the citadel ring (R~24000 from citadel); entrance faces outward (away from citadel)"
+      "yaw": -120.0,
+      "note": "west point of the citadel ring (R~24000); entrance faces outward (toward the shoulder path)"
     },
     {
       "id": "G2",
@@ -165,13 +165,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        -7900,
-        13750,
+        13800,
+        -3700,
         9000
       ],
       "r": 5500,
-      "yaw": 155.0,
-      "note": "north point of the citadel ring; entrance faces the shoulder side"
+      "yaw": -75.0,
+      "note": "south-west point of the citadel ring; entrance faces outward"
     },
     {
       "id": "G3",
@@ -184,13 +184,13 @@
         "A7_Gallery"
       ],
       "pos": [
-        -26200,
-        14550,
+        30800,
+        25700,
         9400
       ],
       "r": 6000,
-      "yaw": -160.0,
-      "note": "NW point of the ring, first met from the shoulder; A5 terraces (-900) cut INTO the upslope toward the citadel at this yaw - natural amphitheater, not a pit"
+      "yaw": -165.0,
+      "note": "north point of the ring; A5 terraces (-900) cut INTO the upslope toward the citadel at this yaw - natural amphitheater"
     },
     {
       "id": "Citadel",
@@ -201,18 +201,18 @@
         "A6_Villa"
       ],
       "pos": [
-        -18000,
-        -8000,
+        37000,
+        2500,
         16000
       ],
       "r": 6500,
-      "yaw": 135.0,
-      "note": "ON THE VERY LIP of the SW cape (160 m), cliff to the sea, gentle land approach from the ring side (NE); gate 3/3 guard antennas, permanent field until open"
+      "yaw": -113.0,
+      "note": "ON THE VERY LIP of the EAST cape (160 m) - the FAR end of the island from the NW landing; cliff to the open sea, gentle land approach from the ring side (west); gate 3/3, permanent field until open; visible from the run start straight over M1"
     }
   ],
   "rules": {
     "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, ~35 deg beach slope), arena DEAD-CENTER, open water between islands MANDATORY. Slope-guard arenas (ring around the citadel) are the only ones on the big island.",
-    "guard_ring": "guards sit at ~equal radius (~24000) from the citadel, free clear order; entrances face outward from the ring; heights 86/90/94 m - the dome toward the cape makes the ring nearly iso-height, pads sit almost flush (no pits)",
+    "guard_ring": "guards ring the citadel at ~equal radius (~24000) INLAND of the east cape, free clear order; entrances face outward; heights 86/90/94 m - pads sit nearly flush on the dome",
     "transition_budget_uu": [
       5000,
       15000

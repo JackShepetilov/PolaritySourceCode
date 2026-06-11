@@ -1,10 +1,10 @@
 # Authors the REAL Biome1 island heightmap (2017x2017, ~2x2 km) OFFLINE from
-# Island/biome1_island_layout.json (v4). PREVIEW WORKFLOW: review the shaded
+# Island/biome1_island_layout.json (v5). PREVIEW WORKFLOW: review the shaded
 # preview before any import - nothing touches the editor here.
 #
 # v4 terrain rules (author review 2026-06-11):
 #  - GENTLE everywhere: wide beach aprons all around, soft shield dome rising
-#    toward the SW cape; the ONLY cliff is the cape face under the citadel
+#    toward the EAST cape (citadel at the FAR end from the NW landing)
 #  - maldive chain on the WEST side (CCW in the UE top view: south->west->north)
 #  - guard ring at ~equal radius around the citadel, pads sit nearly flush
 #    (wide blends, no raised rims, no empty discs)
@@ -12,7 +12,7 @@
 #
 # Output:
 #   Island/biome1_heightmap_2017.png     (16-bit, px = 32768 + (z+2000)*1.28)
-#   Island/biome1_heightmap_preview.png  (shaded, north up)
+#   Island/biome1_heightmap_preview.png  (shaded, UE TOP VIEW: +X up, +Y right)
 #
 # Run locally:  python make_biome1_heightmap.py
 
@@ -94,8 +94,10 @@ def main():
                     + 0.05 * np.sin(3 * theta + p2)
                     + 0.05 * (detail - 0.5) * 2.0)
     edge = np.hypot(dx, dy) / r_theta
-    # the cape cliff sector (around the citadel bearing ~225 deg): tight falloff
-    in_cliff = smoothstep(202.0, 214.0, deg) * smoothstep(262.0, 250.0, deg)
+    # the cape cliff sector: tight falloff around the citadel bearing (wrap-safe)
+    cape_bearing = np.degrees(np.arctan2(CPY - ICY, CPX - ICX)) % 360.0
+    ddeg = np.abs(((deg - cape_bearing + 180.0) % 360.0) - 180.0)
+    in_cliff = smoothstep(26.0, 13.0, ddeg)
     inner = 0.78 - 0.20 * in_cliff      # wide gentle coast band, tight at the cape
     M = smoothstep(1.04, inner, edge)
     # headland: solid ground out to the citadel pad (never an offshore pillar)
@@ -171,7 +173,7 @@ def main():
     out_png = os.path.join(OUT_DIR, "biome1_heightmap_2017.png")
     Image.fromarray(px16).save(out_png)
 
-    # shaded preview, north up
+    # shaded preview, UE top view orientation
     gy_g, gx_g = np.gradient(H, SCALE)
     light = np.clip((-gx_g * -0.55 + -gy_g * 0.35 + 1.2) /
                     np.sqrt(gx_g ** 2 + gy_g ** 2 + 1.0), 0.0, 1.6) / 1.6
@@ -185,8 +187,19 @@ def main():
                         axis=-1) * light[..., None]
     rgb[~sea] = land_col[~sea]
     rgb[(H > -40) & (H < 40)] = [0.85, 0.8, 0.6]
-    img = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)[::-1]
-    Image.fromarray(img).save(os.path.join(OUT_DIR, "biome1_heightmap_preview.png"))
+    img = np.rot90((np.clip(rgb, 0, 1) * 255).astype(np.uint8), k=1)
+    pim = Image.fromarray(img)
+    try:
+        from PIL import ImageDraw
+        dr = ImageDraw.Draw(pim)
+        dr.text((14, 10), "UE TOP VIEW: +X up, +Y right", fill=(255, 255, 255))
+        dr.line((30, 90, 30, 40), fill=(255, 255, 255), width=3)
+        dr.line((30, 40, 22, 52), fill=(255, 255, 255), width=3)
+        dr.line((30, 40, 38, 52), fill=(255, 255, 255), width=3)
+        dr.text((24, 96), "+X", fill=(255, 255, 255))
+    except Exception:
+        pass
+    pim.save(os.path.join(OUT_DIR, "biome1_heightmap_preview.png"))
 
     def probe(label, x, y, want=None):
         i = int(round((y + HALF) / SCALE))
@@ -198,8 +211,8 @@ def main():
         s = slots[sid]
         probe(sid, s["pos"][0], s["pos"][1], s["pos"][2])
     probe("G3 bowl ctr", *slots["G3"]["pos"][:2], slots["G3"]["pos"][2] - 625)
-    probe("shoulder", *slots["shoulder"]["pos"][:2], 5300)
-    probe("cliff slope", -24000, -17000)
+    probe("shoulder", *slots["shoulder"]["pos"][:2], 1950)
+    probe("cliff slope", 44000, -1000)
     probe("open sea", 70000, -70000)
     print("max H %.0f" % H.max())
     print("written:", out_png)
