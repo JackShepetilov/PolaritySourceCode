@@ -576,9 +576,31 @@ def build(arena_name):
         if manager:
             finish_actor(manager, tag, "BLK_{}_ArenaManager".format(arena), "{}/Logic".format(arena))
             try:
-                manager.set_editor_property("waves", build_waves(spec, classes))
-                manager.set_editor_property("time_between_waves",
-                                            float(spec.get("time_between_waves", 3.0)))
+                sustain = spec.get("sustain")
+                if sustain:
+                    # Continuous pressure mode: kill one -> another spawns.
+                    manager.set_editor_property("arena_mode", unreal.ArenaMode.SUSTAIN)
+                    pool = []
+                    for key, weight in sustain.get("pool", []):
+                        npc_cls = classes.get(key)
+                        if npc_cls is None:
+                            warn("sustain pool: unknown class key '{}'".format(key))
+                            continue
+                        entry = unreal.SustainSpawnEntry()
+                        entry.set_editor_property("npc_class", npc_cls)
+                        entry.set_editor_property("weight", float(weight))
+                        pool.append(entry)
+                    manager.set_editor_property("sustain_enemy_pool", pool)
+                    manager.set_editor_property("max_sustain_enemies",
+                                                int(sustain.get("max_alive", 5)))
+                    manager.set_editor_property("sustain_total_enemies",
+                                                int(sustain.get("total", -1)))
+                    log("ArenaManager mode=Sustain: pool={} max_alive={} total={}".format(
+                        len(pool), sustain.get("max_alive", 5), sustain.get("total", -1)))
+                else:
+                    manager.set_editor_property("waves", build_waves(spec, classes))
+                    manager.set_editor_property("time_between_waves",
+                                                float(spec.get("time_between_waves", 3.0)))
                 if triggers:
                     manager.set_editor_property("entry_triggers", triggers)
                 blocker_actors = [blockers[bid] for bid in spec.get("exit_blocker_ids", [])

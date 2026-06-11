@@ -114,9 +114,9 @@
     { "id": "dome",   "pos": [2600, -2600, 1500], "pitch": -15, "yaw": 135 }
   ],
 
-  "waves": [
-    { "delay": 0.0, "entries": [["shooter", 3], ["melee", 1]] },
-    { "delay": 0.0, "entries": [["shooter", 2], ["drone", 2], ["kamikaze", 2]] },
-    { "delay": 0.0, "entries": [["melee", 2], ["drone", 2]] }
-  ]
+  "sustain": {
+    "max_alive": 6,
+    "total": 14,
+    "pool": [["shooter", 3], ["melee", 2], ["drone", 2], ["kamikaze", 1]]
+  }
 }

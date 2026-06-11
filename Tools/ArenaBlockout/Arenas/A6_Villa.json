@@ -72,8 +72,7 @@
     { "id": "ramp_e_top", "shape": "box", "mat": "floor", "pos": [2100, 1950, 870], "size": [500, 400, 60], "group": "Ramps" },
     { "id": "ramp_w_top", "shape": "box", "mat": "floor", "pos": [-2100, -750, 870], "size": [500, 400, 60], "group": "Ramps" },
 
-    { "id": "roof_step1", "shape": "box", "mat": "floor", "pos": [-1100, 1850, 1025], "size": [500, 400, 250], "group": "RoofSteps" },
-    { "id": "roof_step2", "shape": "box", "mat": "floor", "pos": [-500, 1850, 1150],  "size": [500, 400, 500], "group": "RoofSteps" },
+    { "id": "ramp_roof", "shape": "box", "mat": "floor", "pos": [-950, 1850, 1275], "size": [1500, 450, 60], "pitch": 26.57, "yaw": 0, "group": "Ramps" },
 
     { "id": "pergola_w", "shape": "box", "mat": "deco", "pos": [-2400, 1600, 225], "size": [600, 600, 450], "group": "Pergola" },
     { "id": "pergola_e", "shape": "box", "mat": "deco", "pos": [2400, -400, 225],  "size": [600, 600, 450], "group": "Pergola" },
@@ -152,9 +151,9 @@
 
   "navmesh_bounds": { "pos": [0, 0, 1100], "size": [7800, 7800, 2800] },
 
-  "waves": [
-    { "delay": 0.0, "entries": [["melee", 4], ["shooter", 2]] },
-    { "delay": 0.0, "entries": [["shooter", 3], ["drone", 2]] },
-    { "delay": 0.0, "entries": [["melee", 2], ["drone", 2], ["kamikaze", 3]] }
-  ]
+  "sustain": {
+    "max_alive": 7,
+    "total": 17,
+    "pool": [["melee", 3], ["shooter", 3], ["drone", 2], ["kamikaze", 1]]
+  }
 }

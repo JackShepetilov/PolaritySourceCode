@@ -109,9 +109,9 @@
     { "id": "diag",  "pos": [-1850, -3000, 750], "pitch": -20, "yaw": 55 }
   ],
 
-  "waves": [
-    { "delay": 0.0, "entries": [["melee", 2], ["shooter", 2]] },
-    { "delay": 0.0, "entries": [["shooter", 3], ["melee", 1]] },
-    { "delay": 0.0, "entries": [["melee", 3], ["drone", 1]] }
-  ]
+  "sustain": {
+    "max_alive": 5,
+    "total": 13,
+    "pool": [["melee", 3], ["shooter", 3], ["drone", 1]]
+  }
 }

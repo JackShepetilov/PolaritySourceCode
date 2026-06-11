@@ -153,7 +153,7 @@ def auto_shots(center, extent):
     return shots
 
 
-def take_shots(shots, label):
+def take_shots(shots, label, show_nav=False):
     eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
     if not os.path.isdir(OUT_DIR):
@@ -177,6 +177,14 @@ def take_shots(shots, label):
         comp.set_editor_property("post_process_settings", pps)
     except Exception as e:
         warn("fixed exposure setup: {}".format(e))
+    if show_nav:
+        # Overlay navmesh + nav links (green area / link arcs) on the capture.
+        try:
+            comp.set_editor_property("show_flag_settings", [
+                unreal.EngineShowFlagsSetting(show_flag_name="Navigation", enabled=True)])
+            log("Navigation show flag enabled for capture")
+        except Exception as e:
+            warn("nav show flag: {}".format(e))
     transient = [cap]
 
     if not has_sun:
@@ -215,7 +223,8 @@ def take_shots(shots, label):
                                      unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
             comp.capture_scene()
             comp.capture_scene()  # second pass: let eye adaptation settle
-            name = "{}_{}.png".format(label, shot.get("id", "shot"))
+            suffix = "_nav" if show_nav else ""
+            name = "{}_{}{}.png".format(label, shot.get("id", "shot"), suffix)
             unreal.RenderingLibrary.export_render_target(world, rt, OUT_DIR, name)
             saved.append(name)
             log("Screenshot saved: {}".format(os.path.join(OUT_DIR, name)))
@@ -233,9 +242,12 @@ def main():
     label = world.get_name() if world else "Unknown"
     log("Snapping level '{}'".format(label))
 
+    args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
+    show_nav = "--nav" in sys.argv[1:]
+
     shots = None
-    if len(sys.argv) > 1 and sys.argv[1].strip():
-        shots_path = sys.argv[1].strip()
+    if args:
+        shots_path = args[0].strip()
         # utf-8-sig: tolerate the BOM that PowerShell 5.1 Out-File/Set-Content -Encoding utf8 writes
         with open(shots_path, "r", encoding="utf-8-sig") as f:
             shots = json.load(f)
@@ -248,7 +260,7 @@ def main():
             return
         shots = auto_shots(center, extent)
 
-    take_shots(shots, label)
+    take_shots(shots, label, show_nav=show_nav)
 
 
 main()

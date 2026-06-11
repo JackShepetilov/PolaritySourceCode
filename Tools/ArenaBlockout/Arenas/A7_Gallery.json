@@ -151,9 +151,9 @@
 
   "navmesh_bounds": { "pos": [0, 0, 750], "size": [8200, 8200, 3700] },
 
-  "waves": [
-    { "delay": 0.0, "entries": [["melee", 4], ["shooter", 2]] },
-    { "delay": 0.0, "entries": [["shooter", 3], ["drone", 2]] },
-    { "delay": 0.0, "entries": [["melee", 2], ["kamikaze", 3], ["drone", 2]] }
-  ]
+  "sustain": {
+    "max_alive": 7,
+    "total": 17,
+    "pool": [["melee", 3], ["shooter", 3], ["drone", 2], ["kamikaze", 1]]
+  }
 }

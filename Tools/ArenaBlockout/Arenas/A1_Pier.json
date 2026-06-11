@@ -99,8 +99,9 @@
     { "id": "iso_nw", "pos": [-3600, 4600, 2300], "pitch": -22, "yaw": -52 }
   ],
 
-  "waves": [
-    { "delay": 0.0, "entries": [["melee", 3], ["shooter", 1]] },
-    { "delay": 0.0, "entries": [["shooter", 2], ["drone", 2]] }
-  ]
+  "sustain": {
+    "max_alive": 4,
+    "total": 8,
+    "pool": [["melee", 3], ["shooter", 2], ["drone", 1]]
+  }
 }
