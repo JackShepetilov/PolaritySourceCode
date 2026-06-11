@@ -74,7 +74,8 @@
     { "id": "stela_y", "shape": "box", "mat": "wallrun", "pos": [500, 800, 650],   "size": [120, 1600, 1300], "group": "Stelae" },
 
     { "id": "ped_250", "shape": "box", "mat": "deco", "pos": [1300, 1100, 125], "size": [500, 500, 250], "group": "Pedestals" },
-    { "id": "ped_600", "shape": "box", "mat": "deco", "pos": [1300, 400, 300],  "size": [500, 500, 600], "group": "Pedestals" },
+    { "id": "ped_550", "shape": "box", "mat": "deco", "pos": [1300, 400, 275],  "size": [500, 500, 550], "group": "Pedestals" },
+    { "id": "ped_850", "shape": "box", "mat": "deco", "pos": [1350, -200, 425], "size": [500, 500, 850], "group": "Pedestals" },
 
     { "id": "ramp_in_s", "shape": "box", "mat": "floor", "pos": [0, -3700, -220],  "size": [1000, 600, 60], "pitch": 26.57, "yaw": 90,  "group": "EntryRamps" },
     { "id": "ramp_in_e", "shape": "box", "mat": "floor", "pos": [3700, 0, -220],   "size": [1000, 600, 60], "pitch": 26.57, "yaw": 180, "group": "EntryRamps" },
