@@ -247,6 +247,31 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		CheckForWallBounce();
 	}
 
+	// POST-TICK: Containment fields are elastic for the player on ANY contact
+	// (not just slide/air-crouch) — reuse the wall-bounce reflection directly.
+	if (MovementSettings && WallBounceCooldownRemaining <= 0.0f && CharacterOwner
+		&& !bIsMantling && !bIsWallRunning)
+	{
+		const float Speed = Velocity.Size();
+		if (Speed > 350.0f)
+		{
+			const FVector VelDir = Velocity.GetSafeNormal();
+			UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
+			const float CapsuleRadius = Capsule ? Capsule->GetScaledCapsuleRadius() : 35.0f;
+			FCollisionQueryParams FieldParams;
+			FieldParams.AddIgnoredActor(CharacterOwner);
+			FHitResult FieldHit;
+			const FVector Start = CharacterOwner->GetActorLocation();
+			const FVector End = Start + VelDir * (CapsuleRadius + 40.0f);
+			if (GetWorld()->SweepSingleByChannel(FieldHit, Start, End, FQuat::Identity, ECC_Pawn,
+					FCollisionShape::MakeSphere(CapsuleRadius * 0.8f), FieldParams)
+				&& FieldHit.GetActor() && FieldHit.GetActor()->ActorHasTag(FName("ContainmentField")))
+			{
+				PerformWallBounce(FieldHit);
+			}
+		}
+	}
+
 	UpdateMovementState();
 }
 

@@ -82,25 +82,19 @@
 
     { "id": "ramp_roof_s", "shape": "box", "mat": "floor", "pos": [1500, -3400, 470], "size": [2000, 450, 60], "pitch": 26.57, "yaw": 180, "group": "GrandRamp" },
 
-    { "id": "blk_s", "shape": "box", "mat": "blocker", "pos": [0, -3050, 250],  "size": [620, 60, 500], "group": "Blockers" },
-    { "id": "blk_e", "shape": "box", "mat": "blocker", "pos": [3050, 0, 250],   "size": [60, 620, 500], "group": "Blockers" },
-    { "id": "blk_w", "shape": "box", "mat": "blocker", "pos": [-3050, 0, 250],  "size": [60, 620, 500], "group": "Blockers" },
-
-    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 3160, 2200],  "size": [6420, 20, 2400], "group": "Field" },
-    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -3160, 2200], "size": [6420, 20, 2400], "group": "Field" },
-    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [3160, 0, 2200],  "size": [20, 6420, 2400], "group": "Field" },
-    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-3160, 0, 2200], "size": [20, 6420, 2400], "group": "Field" }
+    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 3110, 2200],  "size": [6240, 20, 2600], "group": "Field" },
+    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -3110, 2200], "size": [6240, 20, 2600], "group": "Field" },
+    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [3110, 0, 2200],  "size": [20, 6240, 2600], "group": "Field" },
+    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-3110, 0, 2200], "size": [20, 6240, 2600], "group": "Field" }
   ],
 
-  "exit_blocker_ids": ["blk_s", "blk_e", "blk_w", "fld_n", "fld_s", "fld_e", "fld_w"],
+  "exit_blocker_ids": ["fld_n", "fld_s", "fld_e", "fld_w"],
 
   "markers": [
     { "type": "player_start",  "pos": [0, -4800, -400], "yaw": 90 },
     { "type": "respawn_point", "pos": [0, -4500, -400], "yaw": 90 },
 
-    { "type": "entry_trigger", "pos": [0, -3150, 250],  "extent": [320, 200, 250] },
-    { "type": "entry_trigger", "pos": [3150, 0, 250],   "extent": [200, 320, 250] },
-    { "type": "entry_trigger", "pos": [-3150, 0, 250],  "extent": [200, 320, 250] },
+    { "type": "entry_trigger", "pos": [0, 0, 1600], "extent": [2950, 2950, 1750] },
 
     { "type": "spawn", "id": "G1a", "pos": [-1500, 2300, 10], "yaw": -90 },
     { "type": "spawn", "id": "G1b", "pos": [0, 2300, 10],     "yaw": -90 },

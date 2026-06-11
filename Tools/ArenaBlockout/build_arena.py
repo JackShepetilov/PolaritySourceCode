@@ -257,8 +257,14 @@ def spawn_shape(eas, mats, piece, tag, arena):
             warn("Field piece {}: mesh component or {} missing".format(
                 piece.get("id", "?"), FIELD_MAT))
         group = piece.get("group", "Geo")
-        return finish_actor(actor, tag, "BLK_{}_{}".format(arena, piece.get("id", "piece")),
-                            "{}/{}".format(arena, group))
+        ret = finish_actor(actor, tag, "BLK_{}_{}".format(arena, piece.get("id", "piece")),
+                           "{}/{}".format(arena, group))
+        # Gameplay markers: ApexMovement skips wallrun on NoWallRun; the elastic
+        # no-slam-damage branches in ShooterNPC/ApexMovement key off ContainmentField.
+        cur_tags = list(actor.tags)
+        cur_tags.extend(["NoWallRun", "ContainmentField"])
+        actor.set_editor_property("tags", cur_tags)
+        return ret
     mesh_path = CYL_MESH if shape == "cylinder" else CUBE_MESH
     mesh = unreal.EditorAssetLibrary.load_asset(mesh_path)
     actor = eas.spawn_actor_from_object(mesh, vec(piece["pos"]), rot(piece))

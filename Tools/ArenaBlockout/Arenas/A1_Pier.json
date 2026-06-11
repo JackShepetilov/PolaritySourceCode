@@ -49,16 +49,13 @@
 
     { "id": "plat_ant", "shape": "box", "mat": "deco", "pos": [0, 2900, 75], "size": [1200, 700, 150], "group": "Antenna" },
 
-    { "id": "blk_s", "shape": "box", "mat": "blocker", "pos": [0, -3280, 250], "size": [600, 40, 500], "group": "Blockers" },
-    { "id": "blk_n", "shape": "box", "mat": "blocker", "pos": [0, 3280, 250],  "size": [600, 40, 500], "group": "Blockers" },
-
     { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-2210, 0, 1475], "size": [20, 6640, 2650], "group": "Field" },
     { "id": "fld_e", "shape": "box", "mat": "field", "pos": [2210, 0, 1475],  "size": [20, 6640, 2650], "group": "Field" },
     { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 3310, 1475],  "size": [4440, 20, 2650], "group": "Field" },
     { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -3310, 1475], "size": [4440, 20, 2650], "group": "Field" }
   ],
 
-  "exit_blocker_ids": ["blk_s", "blk_n", "fld_w", "fld_e", "fld_n", "fld_s"],
+  "exit_blocker_ids": ["fld_w", "fld_e", "fld_n", "fld_s"],
 
   "markers": [
     { "type": "player_start",  "pos": [0, -3550, 100], "yaw": 90 },

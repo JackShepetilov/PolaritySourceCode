@@ -256,8 +256,13 @@ def build_blueprint(mat_path):
     if not hit_prop_ok:
         log("WARN: hit notifications NOT enabled - toggle 'Simulation Generates Hit"
             " Events' on FieldMesh manually")
+    # Block pawns (player+NPC) / physics props / dropped weapons, but let prop
+    # SHARDS (Destructible channel) fly through; Visibility ignore keeps wallrun
+    # traces, hitscans and the camera from snagging on an invisible wall.
     bs.set_collision_settings(BP_PATH, "FieldMesh", "QueryAndPhysics", "WorldStatic",
-                              "BlockAll", {})
+                              "BlockAll", {"Destructible": "Ignore",
+                                           "Visibility": "Ignore",
+                                           "Camera": "Ignore"})
 
     if not bs.add_variable(BP_PATH, "DMI", "MaterialInstanceDynamic"):
         fail("add_variable DMI")

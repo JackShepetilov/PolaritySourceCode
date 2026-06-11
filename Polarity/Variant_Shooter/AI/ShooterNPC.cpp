@@ -2384,9 +2384,14 @@ void AShooterNPC::HandleKnockbackWallHit(const FHitResult& WallHit)
 	FVector WallPosition = WallHit.Location + Normal * (CapsuleRadius + 5.0f);
 	SetActorLocation(WallPosition, false);
 
+	// Containment fields are elastic: the bounce below still happens, but the
+	// impact deals no wallslam damage.
+	const AActor* HitWallActor = WallHit.GetActor();
+	const bool bElasticContainmentField = HitWallActor && HitWallActor->ActorHasTag(FName("ContainmentField"));
+
 	// Apply wall slam damage first (if strong enough).
 	// Tractor-style knockback absorbs the impact without damage (NPC is "magnetically held").
-	if (PerpendicularVelocity >= WallSlamVelocityThreshold && CurrentKnockbackStyle != EKnockbackStyle::Tractor)
+	if (!bElasticContainmentField && PerpendicularVelocity >= WallSlamVelocityThreshold && CurrentKnockbackStyle != EKnockbackStyle::Tractor)
 	{
 		float ExcessVelocity = PerpendicularVelocity - WallSlamVelocityThreshold;
 		float WallSlamDamage = (ExcessVelocity / 100.0f) * WallSlamDamagePerVelocity;
@@ -3708,6 +3713,20 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 					ExitLaunchedState();
 				}
 			}
+		}
+		return;
+	}
+
+	// Containment fields are elastic: reflect the NPC instead of slam damage.
+	if (OtherActor && OtherActor->ActorHasTag(FName("ContainmentField")))
+	{
+		const FVector InVelocity = PreviousTickVelocity;
+		const float IntoWall = FVector::DotProduct(InVelocity, -Hit.ImpactNormal);
+		if (IntoWall > 0.0f)
+		{
+			const FVector Reflected = InVelocity
+				- (1.0f + WallBounceElasticity) * FVector::DotProduct(InVelocity, Hit.ImpactNormal) * Hit.ImpactNormal;
+			LaunchCharacter(Reflected, true, true);
 		}
 		return;
 	}
