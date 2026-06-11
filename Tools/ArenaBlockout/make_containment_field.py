@@ -117,7 +117,7 @@ def build_material():
     tint = param("Vector", "Tint", "0.2,0.7,1.0,1", -1700, 500)
     intensity = param("Scalar", "Intensity", "4", -1700, 700)
     pat_base = param("Scalar", "PatternBase", "0.25", -1700, 900)
-    pat_size = param("Vector", "PatternWorldSize", "500,500,500,1", -1700, 1100)
+    pat_size = param("Vector", "PatternWorldSize", "150,150,150,1", -1700, 1100)
     max_op = param("Scalar", "MaxOpacity", "0.85", -1700, 1300)
 
     tex_default = ""
@@ -127,6 +127,27 @@ def build_material():
             break
     pat_tex = param("TextureObject", "PatternTex", tex_default, -1700, 1500)
     log("Pattern texture default: " + (tex_default or "<none>"))
+    # MCP guide rule 5: the sampler type MUST match the texture's compression,
+    # otherwise the ENTIRE material silently falls back to the default grid
+    # while compile still reports success (bit us live: T_GridChecker_A is
+    # TC_Masks/noSRGB but create_parameter defaults to SAMPLERTYPE_Color).
+    if tex_default:
+        sampler = "SAMPLERTYPE_Color"
+        try:
+            tex_asset = eal.load_asset(tex_default)
+            comp_set = str(tex_asset.get_editor_property("compression_settings")).upper()
+            srgb = bool(tex_asset.get_editor_property("srgb"))
+            if "TC_MASKS" in comp_set:
+                sampler = "SAMPLERTYPE_Masks"
+            elif "TC_NORMALMAP" in comp_set:
+                sampler = "SAMPLERTYPE_Normal"
+            elif not srgb:
+                sampler = "SAMPLERTYPE_LinearColor"
+        except Exception as e:
+            warn("sampler detect: {}".format(e))
+        if not mns.set_expression_property(path, pat_tex, "SamplerType", sampler):
+            warn("set SamplerType '{}' failed".format(sampler))
+        log("PatternTex SamplerType -> {}".format(sampler))
 
     # Reveal mask: 1 - saturate(dist(WorldPos, HitPos)/Radius), squared
     wpos = expr("WorldPosition", -1400, -400)

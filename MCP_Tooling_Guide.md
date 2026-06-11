@@ -83,6 +83,18 @@
 - Событие `ReceiveHit` уже имеет пин `HitLocation` — `BreakHitResult` не нужен. `GetTimeSeconds`
   ждёт коннект `WorldContextObject` (подключай любой компонент).
 - `add_variable` → ОБЯЗАТЕЛЬНО `compile_blueprint` ДО создания нод с этой переменной (правило скилла).
+- `add_variable` для объектных типов требует ПОЛНЫЙ путь типа (`/Script/Engine.MaterialInterface`);
+  короткое имя падает.
+- `MaterialNodeService.create_parameter("TextureObject", ...)` всегда ставит `SamplerType=Color` —
+  для TC_MASKS/noSRGB текстур (T_GridChecker_A!) сразу делай
+  `set_expression_property(id, "SamplerType", "SAMPLERTYPE_Masks")`, иначе срабатывает правило 5
+  (ВЕСЬ материал — fallback в серую сетку, compile молчит). Поймано живьём 2026-06-11.
+- Свойства материальных нод в `set_expression_property` — CamelCase C++ имена
+  (`DefaultValue`, `SamplerType`), НЕ snake_case.
+- Per-instance override материала (`smc.set_material` на заспавненном инстансе) НЕ переживает
+  сериализацию уровня надёжно — материал класть в ШАБЛОН компонента BP:
+  `BlueprintService.set_component_property(BP, comp, "OverrideMaterials", '("/Game/.../M_X.M_X")')`
+  (формат — скобки + кавычки; read-back подтверждать).
 
 ## 1.1 Локальные патчи плагинов (повторить при обновлении плагина!)
 
