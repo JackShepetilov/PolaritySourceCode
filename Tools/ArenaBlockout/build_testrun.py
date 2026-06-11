@@ -100,6 +100,29 @@ def main():
         attached += 1
     log("LevelInstance arenas attached: {}".format(attached))
 
+    # Navigation: arena navmesh tiles never transform with instances, and the
+    # editor's async rebuild finishes AFTER our save (project default is Static
+    # runtime generation -> the game would load empty tiles and NPCs freeze).
+    # Make THIS map's navmesh Dynamic: it rebuilds itself on game start.
+    nav_actor = None
+    for a in eas.get_all_level_actors():
+        if a and a.get_class().get_name() == "RecastNavMesh":
+            nav_actor = a
+            break
+    if nav_actor is None:
+        # NavigationSystem creates its navdata asynchronously AFTER this script
+        # (and after our save) - spawn it explicitly so the flag lands in the save.
+        nav_actor = eas.spawn_actor_from_class(unreal.RecastNavMesh,
+                                               unreal.Vector(0.0, 0.0, 0.0))
+    if nav_actor:
+        nav_actor.set_editor_property("runtime_generation",
+                                      unreal.RuntimeGenerationType.DYNAMIC)
+        log("RecastNavMesh '{}' runtime_generation -> Dynamic".format(
+            nav_actor.get_actor_label()))
+    else:
+        unreal.log_warning("[TESTRUN] could not ensure RecastNavMesh - set "
+                           "RuntimeGeneration=Dynamic manually on the map's navmesh")
+
     unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
     log("RESULT: SUCCESS - {} (gauntlet order: {})".format(
         LEVEL_PATH, " -> ".join(n for n, _e, _z in ARENAS)))
