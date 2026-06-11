@@ -226,7 +226,8 @@ def main():
     shots = None
     if len(sys.argv) > 1 and sys.argv[1].strip():
         shots_path = sys.argv[1].strip()
-        with open(shots_path, "r", encoding="utf-8") as f:
+        # utf-8-sig: tolerate the BOM that PowerShell 5.1 Out-File/Set-Content -Encoding utf8 writes
+        with open(shots_path, "r", encoding="utf-8-sig") as f:
             shots = json.load(f)
         log("Custom shots loaded: {} ({})".format(shots_path, len(shots)))
     else:
