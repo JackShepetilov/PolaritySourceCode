@@ -34,7 +34,7 @@ SCALE = 100.0
 HALF = (N - 1) * SCALE * 0.5
 SEA_FLOOR = -2000.0
 PAD_RIM = 900.0
-MALDIVE_SHORE_RUN = 1.7
+MALDIVE_SHORE_RUN = 2.4
 UNDERWATER_SKIRT = 3600.0
 DOME_REACH = 62000.0
 DOME_BASE = 2000.0
@@ -279,6 +279,15 @@ def main():
     coast_fade = smoothstep(1.04, 0.86, edge)
     spine_n = (spine - spine.min()) / (spine.max() - spine.min())
     relief_amp = 700.0 + 2600.0 * (dome / 16000.0) + 1800.0 * in_cliff
+    corr_w = np.zeros_like(H)
+    for a_, b_ in zip(layout["rules"]["route_corridor"], layout["rules"]["route_corridor"][1:]):
+        a_ = np.array(a_, dtype=float)
+        b_ = np.array(b_, dtype=float)
+        seg_ = b_ - a_
+        t__ = np.clip(((Xu - a_[0]) * seg_[0] + (Yu - a_[1]) * seg_[1]) / (seg_ @ seg_), 0, 1)
+        d__ = np.hypot(Xu - (a_[0] + t__ * seg_[0]), Yu - (a_[1] + t__ * seg_[1]))
+        corr_w = np.maximum(corr_w, smoothstep(3600.0, 1500.0, d__))
+    relief_amp = relief_amp * (1.0 - 0.65 * corr_w)
     noise_part = (spine_n - 0.35) * relief_amp + (Dw - 0.5) * 180.0
     land = (dome + noise_part) * coast_fade
     H = np.where(M > 0.001, np.maximum(H, land), H)
@@ -340,7 +349,7 @@ def main():
         s_ = slots[sid]
         x, y, z = s_["pos"]
         rf = s_["r"] + PAD_RIM
-        bl = 3800.0
+        bl = 6200.0 if sid == "Citadel" else 3800.0
         d = np.hypot(Xu - x, Yu - y)
         wp = smoothstep(rf + bl, rf, d)
         H = H * (1 - wp) + z * wp
@@ -375,12 +384,14 @@ def main():
     # Iterate: envelope-carve, then re-smooth the corridor band so the carve
     # walls themselves get softened; stop when the route is clean.
     route_pts = layout["rules"]["route_corridor"]
-    for it in range(4):
-        H, carved = enforce_route_slope(H, route_pts)
-        mx, over = report_route_slopes(H, route_pts, verbose=False)
-        print("slope pass %d: carved %d, max %.1f deg, over-30 %d" % (it + 1, carved, mx, over))
-        if carved == 0 and over == 0:
+    for it in range(3):
+        H, carved = enforce_route_slope(H, route_pts, max_grade=0.40)
+        print("slope pass %d (0.40 cones): carved %d" % (it + 1, carved))
+        if carved == 0:
             break
+    H = gauss3(H, passes=1, w=corr * 0.45)   # soften cone rims (no scoop artifacts)
+    H, carved = enforce_route_slope(H, route_pts, max_grade=0.50)
+    print("slope guard pass (0.50): carved %d" % carved)
     report_route_slopes(H, route_pts)
 
     px16 = np.clip(32768.0 + (H - SEA_FLOOR) * 1.28, 0, 65535).astype(np.uint16)

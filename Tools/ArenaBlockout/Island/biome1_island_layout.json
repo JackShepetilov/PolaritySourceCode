@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
   "version": 7,
-  "comment": "Phase-0 scale layout v7 (2026-06-11, author round 5 - SERPENTINE): the guard route is an S-curve (switchbacks): landing -> west turn (G1) -> diagonal through the island center (G2) -> east turn (G3) -> flank approach into the citadel from the EAST. Citadel-distances kept ~0.73/0.53/0.34 D. HARD RULE: every arena reachable on foot, route slopes <= 30 deg everywhere.",
+  "comment": "Phase-0 scale layout v7 (2026-06-11, author round 5 - SERPENTINE): the guard route is an S-curve (switchbacks): landing -> west turn (G1) -> diagonal through the island center (G2) -> east turn (G3) -> flank approach into the citadel from the EAST. Citadel-distances kept ~0.73/0.53/0.34 D. HARD RULE: every arena reachable on foot, route slopes <= 30 deg everywhere. [slots synced from editor]",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
@@ -46,12 +46,12 @@
       "id": "start_reef",
       "kind": "reef",
       "pos": [
-        3800,
-        -61000,
+        32312,
+        -75837,
         200
       ],
       "r": 1500,
-      "note": "toss ORIGIN over water: RunLaunchPoint here (author places/tunes), forward aimed at the island center, ballistic arc lands on M1 (~7000 uu)"
+      "note": "toss ORIGIN over water on the M1->CITADEL axis (author 2026-06-11: the poster shot - pier ahead, citadel towering behind it); RunLaunchPoint is author-placed"
     },
     {
       "id": "M1",
@@ -63,13 +63,14 @@
         "A8_Lighthouse"
       ],
       "pos": [
-        4000,
-        -54000,
+        32730,
+        -68850,
         500
       ],
       "r": 4500,
       "enter_from": "start_reef",
-      "note": "ON the start->center axis; player lands here from the sea toss"
+      "note": "ON the start->citadel axis; player lands here from the sea toss",
+      "yaw": -3.4
     },
     {
       "id": "M2",
@@ -81,13 +82,14 @@
         "A8_Lighthouse"
       ],
       "pos": [
-        -20000,
-        -42000,
-        1200
+        3670,
+        -54320,
+        540
       ],
       "r": 4500,
       "enter_from": "M1",
-      "note": "lighthouse = early-spiral landmark; chain heads WEST (CCW in UE view)"
+      "note": "lighthouse = early-spiral landmark; chain heads WEST (CCW in UE view)",
+      "yaw": 63.4
     },
     {
       "id": "M3",
@@ -99,13 +101,14 @@
         "A4_Hangar"
       ],
       "pos": [
-        -36000,
-        -20000,
-        2000
+        -19640,
+        -42100,
+        1220
       ],
       "r": 5500,
       "enter_from": "M2",
-      "note": "spiral passes under the citadel cape - permanent landmark showcase"
+      "note": "spiral passes under the citadel cape - permanent landmark showcase",
+      "yaw": 36.0
     },
     {
       "id": "M4",
@@ -117,12 +120,13 @@
         "A4_Hangar"
       ],
       "pos": [
-        -44000,
-        8000,
-        2800
+        -34340,
+        -18250,
+        2150
       ],
       "r": 5500,
-      "enter_from": "M3"
+      "enter_from": "M3",
+      "yaw": 15.9
     },
     {
       "id": "shoulder",
@@ -130,7 +134,7 @@
       "pos": [
         -26000,
         30000,
-        1750
+        1620
       ],
       "r": 6000,
       "note": "landing on the NW rim - the LOW far end (~20 m beach terrace): the whole climb 19->90->160 m lies ahead, across the island to the east citadel cape"
@@ -146,9 +150,9 @@
         "A7_Gallery"
       ],
       "pos": [
-        -20000,
-        -9000,
-        2200
+        -4840,
+        -14970,
+        4960
       ],
       "r": 5500,
       "yaw": -171.0,
@@ -185,7 +189,7 @@
       ],
       "pos": [
         15000,
-        18000,
+        11380,
         8900
       ],
       "r": 6000,
@@ -243,8 +247,8 @@
         30000
       ],
       [
-        -20000,
-        -9000
+        -4840,
+        -14970
       ],
       [
         -5000,
@@ -252,7 +256,7 @@
       ],
       [
         15000,
-        18000
+        11380
       ],
       [
         33000,

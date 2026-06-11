@@ -164,25 +164,29 @@ def ensure_arenas(world, layout, slots):
             warn("failed to attach sublevel {}".format(pkg))
 
 
-def waterline_toward(svc, from_xy, to_xy):
-    """March from from_xy toward to_xy in 500 uu steps; return the first point
-    where the terrain drops below 60 uu (the waterline) - robust against any
-    coast shape, unlike analytic shore-radius guesses."""
+def march_to_rim(svc, from_xy, to_xy, drop_below):
+    """March from from_xy toward to_xy (400 uu steps); return the LAST point
+    (x, y, h) before the terrain drops below `drop_below` - i.e. the elevated
+    rim edge. Bridges must connect heights, not lowlands (author 2026-06-11)."""
     ax, ay = from_xy
     bx, by = to_xy
     dist = math.hypot(bx - ax, by - ay)
     ux, uy = (bx - ax) / dist, (by - ay) / dist
     t = 0.0
+    last = None
     while t < dist:
         x, y = ax + ux * t, ay + uy * t
         s = svc.get_height_at_location(LS_LABEL, x, y)
-        if s.valid and s.height < 60.0:
-            return x, y
-        t += 500.0
-    return bx, by
+        h = s.height if s.valid else -99999.0
+        if h < drop_below and last is not None:
+            return last
+        if h >= drop_below:
+            last = (x, y, h)
+        t += 400.0
+    return last if last is not None else (bx, by, drop_below)
 
 
-def build_bridges(eas, mats, slots):
+def build_bridges(eas, mats, slots, layout_island_center):
     """Straight plank stubs across the water hops of the maldive chain
     (real valves become their own sublevels later). Each end is found by
     sampling the actual terrain down to the waterline, then buried slightly
@@ -193,21 +197,27 @@ def build_bridges(eas, mats, slots):
         a, b = slots[a_id], slots[b_id]
         a_xy = (a["pos"][0], a["pos"][1])
         b_xy = (b["pos"][0], b["pos"][1])
-        x0, y0 = waterline_toward(svc, a_xy, b_xy)
-        x1, y1 = waterline_toward(svc, b_xy, a_xy)
-        dx, dy = x1 - x0, y1 - y0
-        span = math.hypot(dx, dy)
+        if b["kind"] == "arena":
+            x0, y0, h0 = march_to_rim(svc, a_xy, b_xy, a["pos"][2] - 140.0)
+            x1, y1, h1 = march_to_rim(svc, b_xy, a_xy, b["pos"][2] - 140.0)
+        else:
+            # final hop: bridge to the NEAREST island shore (march toward the
+            # island center), the player walks the beach onward - not a giant
+            # span to the distant shoulder point
+            icx, icy = layout_island_center
+            x0, y0, h0 = march_to_rim(svc, a_xy, (icx, icy), a["pos"][2] - 140.0)
+            x1, y1, h1 = march_to_rim(svc, (icx, icy), a_xy, 330.0)
+        span = math.hypot(x1 - x0, y1 - y0)
         if span < 500.0:
-            log("Valve {}->{}: no water gap found - skipped".format(a_id, b_id))
+            log("Valve {}->{}: islets touch - no bridge needed".format(a_id, b_id))
             continue
-        length = span + 2 * BRIDGE_OVERLAP
-        piece = {"id": "valve_{}_{}".format(a_id, b_id), "shape": "box",
+        piece = {"id": "valve_{}_{}".format(a_id, b_id), "shape": "ramp",
                  "mat": "deco", "group": "Valves",
-                 "pos": [(x0 + x1) * 0.5, (y0 + y1) * 0.5, 120.0],
-                 "size": [length, 700.0, 60.0],
-                 "yaw": math.degrees(math.atan2(dy, dx))}
+                 "from": [x0, y0, h0 + 20.0], "to": [x1, y1, h1 + 20.0],
+                 "width": 700.0, "thick": 80.0}
         ba.spawn_shape(eas, mats, piece, TAG, ARENA)
-        log("Valve stub {}->{}: {:.0f} uu over water".format(a_id, b_id, span))
+        log("Valve ramp {}->{}: {:.0f} uu, rim h {:.0f} -> {:.0f}".format(
+            a_id, b_id, span, h0, h1))
 
 
 def ensure_water(eas):
@@ -325,7 +335,7 @@ def main():
     ensure_arenas(world, layout, slots)
     ensure_author_extras(world)
     mats = ba.ensure_materials(force=False)
-    build_bridges(eas, mats, slots)
+    build_bridges(eas, mats, slots, layout["island"]["center"])
     ensure_dynamic_nav(eas)
     try:
         unreal.SystemLibrary.execute_console_command(world, "RebuildNavigation")
