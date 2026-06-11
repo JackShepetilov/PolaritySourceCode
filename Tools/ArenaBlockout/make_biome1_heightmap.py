@@ -366,51 +366,6 @@ def main():
              + 180.0 * smoothstep(1500.0, 3100.0, d_along))
     H = H - depth * smoothstep(g3["r"] + PAD_RIM, g3["r"] - 1500.0, d_rad)
 
-    # ---------------- author's citadel staircase (rules.citadel_stairs) ------
-    # terrain meets the lower ramp end (landing pad) and stays clear under the
-    # flights; anchors are LOCAL to the citadel slot so they follow its moves
-    st = layout["rules"].get("citadel_stairs")
-    if st:
-        cit = slots["Citadel"]
-        cy = np.radians(float(cit.get("yaw", 0.0)))
-        ca_, sa_ = np.cos(cy), np.sin(cy)
-
-        def st_world(loc):
-            wx = cit["pos"][0] + loc[0] * ca_ - loc[1] * sa_
-            wy = cit["pos"][1] + loc[0] * sa_ + loc[1] * ca_
-            return wx, wy, cit["pos"][2] + loc[2]
-
-        lx, ly, lz = st_world(st["landing_local"])
-        d_l = np.hypot(Xu - lx, Yu - ly)
-        wl = smoothstep(4200.0, 2200.0, d_l)
-        H = H * (1 - wl) + (lz - 40.0) * wl
-        for line in st["clear_lines_local"]:
-            ax_, ay_, az_ = st_world(line[0])
-            bx_, by_, bz_ = st_world(line[1])
-            L_ = max(np.hypot(bx_ - ax_, by_ - ay_), 1.0)
-            kk = int(L_ / 350.0) + 2
-            for i_ in range(kk):
-                t_ = i_ / (kk - 1.0)
-                px_, py_ = ax_ + (bx_ - ax_) * t_, ay_ + (by_ - ay_) * t_
-                cz_ = az_ + (bz_ - az_) * t_ - 130.0
-                r_ = int(round((py_ + HALF) / SCALE))
-                c_ = int(round((px_ + HALF) / SCALE))
-                R_ = 16
-                r0_, r1_ = max(0, r_ - R_), min(N, r_ + R_ + 1)
-                c0_, c1_ = max(0, c_ - R_), min(N, c_ + R_ + 1)
-                yy_, xx_ = np.mgrid[r0_ - r_:r1_ - r_, c0_ - c_:c1_ - c_]
-                cap_ = cz_ + np.hypot(yy_, xx_) * SCALE * 0.55
-                H[r0_:r1_, c0_:c1_] = np.minimum(H[r0_:r1_, c0_:c1_], cap_)
-        px_, py_, pz_ = st_world(st["platform_local"])
-        r_ = int(round((py_ + HALF) / SCALE))
-        c_ = int(round((px_ + HALF) / SCALE))
-        R_ = 14
-        r0_, r1_ = max(0, r_ - R_), min(N, r_ + R_ + 1)
-        c0_, c1_ = max(0, c_ - R_), min(N, c_ + R_ + 1)
-        yy_, xx_ = np.mgrid[r0_ - r_:r1_ - r_, c0_ - c_:c1_ - c_]
-        cap_ = (pz_ - 170.0) + np.hypot(yy_, xx_) * SCALE * 0.55
-        H[r0_:r1_, c0_:c1_] = np.minimum(H[r0_:r1_, c0_:c1_], cap_)
-
     # seam pass: soften the ring just outside the pads, never the cores
     seam = np.zeros_like(H)
     for sid in ("G1", "G2", "G3", "Citadel"):
@@ -438,6 +393,69 @@ def main():
     H, carved = enforce_route_slope(H, route_pts, max_grade=0.50)
     print("slope guard pass (0.50): carved %d" % carved)
     report_route_slopes(H, route_pts)
+
+    # ---------------- author's citadel staircase: applied LAST ---------------
+    # exact top-surface center-lines from actor transforms; clearance cap under
+    # the flights, landing meets the lower tip; numeric verification below
+    st = layout["rules"].get("citadel_stairs")
+    if st:
+        cit = slots["Citadel"]
+        cy = np.radians(float(cit.get("yaw", 0.0)))
+        ca_, sa_ = np.cos(cy), np.sin(cy)
+
+        def st_world(loc):
+            wx = cit["pos"][0] + loc[0] * ca_ - loc[1] * sa_
+            wy = cit["pos"][1] + loc[0] * sa_ + loc[1] * ca_
+            return wx, wy, cit["pos"][2] + loc[2]
+
+        def cap_disc(cx_, cy2_, cap_z, R_):
+            r_ = int(round((cy2_ + HALF) / SCALE))
+            c_ = int(round((cx_ + HALF) / SCALE))
+            r0_, r1_ = max(0, r_ - R_), min(N, r_ + R_ + 1)
+            c0_, c1_ = max(0, c_ - R_), min(N, c_ + R_ + 1)
+            yy_, xx_ = np.mgrid[r0_ - r_:r1_ - r_, c0_ - c_:c1_ - c_]
+            cap_ = cap_z + np.hypot(yy_, xx_) * SCALE * 0.55
+            H[r0_:r1_, c0_:c1_] = np.minimum(H[r0_:r1_, c0_:c1_], cap_)
+
+        for line in st["lines_top_local"]:
+            ax_, ay_, az_ = st_world(line[0])
+            bx_, by_, bz_ = st_world(line[1])
+            L_ = max(np.hypot(bx_ - ax_, by_ - ay_), 1.0)
+            kk = int(L_ / 250.0) + 2
+            for i_ in range(kk):
+                t_ = i_ / (kk - 1.0)
+                cap_disc(ax_ + (bx_ - ax_) * t_, ay_ + (by_ - ay_) * t_,
+                         az_ + (bz_ - az_) * t_ - 150.0, 18)
+        px_, py_, pz_ = st_world(st["platform_local"])
+        cap_disc(px_, py_, pz_ - 160.0, 14)
+        lx, ly, lz = st_world(st["landing_local"])
+        d_l = np.hypot(Xu - lx, Yu - ly)
+        wl = smoothstep(3400.0, 1700.0, d_l)
+        H = H * (1 - wl) + (lz - 30.0) * wl
+        # numeric verification: clearance along each flight + tip contact
+        for li, line in enumerate(st["lines_top_local"]):
+            ax_, ay_, az_ = st_world(line[0])
+            bx_, by_, bz_ = st_world(line[1])
+            worst = -1e9
+            lx0, ly0, _ = st_world(st["landing_local"])
+            kk = int(max(np.hypot(bx_ - ax_, by_ - ay_), 1.0) / 200.0) + 2
+            for i_ in range(kk):
+                t_ = i_ / (kk - 1.0)
+                sx_ = ax_ + (bx_ - ax_) * t_
+                sy_ = ay_ + (by_ - ay_) * t_
+                if np.hypot(sx_ - lx0, sy_ - ly0) < 1800.0:
+                    continue  # the landing zone MEETS the deck by design
+                r_ = int(round((sy_ + HALF) / SCALE))
+                c_ = int(round((sx_ + HALF) / SCALE))
+                top_ = az_ + (bz_ - az_) * t_
+                worst = max(worst, H[r_, c_] - (top_ - 40.0))
+            print("stairs flight %d: max protrusion above deck-40: %.0f uu %s"
+                  % (li + 1, worst, "OK" if worst <= 0 else "**BURIED**"))
+        r_ = int(round((ly + HALF) / SCALE))
+        c_ = int(round((lx + HALF) / SCALE))
+        gap = (lz - 30.0) - H[r_, c_]
+        print("stairs landing: terrain-to-tip gap %.0f uu %s"
+              % (gap, "OK" if abs(gap) <= 40 else "**MISFIT**"))
 
     px16 = np.clip(32768.0 + (H - SEA_FLOOR) * 1.28, 0, 65535).astype(np.uint16)
     out_png = os.path.join(OUT_DIR, "biome1_heightmap_2017.png")

@@ -259,40 +259,40 @@
         11380
       ],
       [
-        21627,
-        14147
+        21749,
+        12467
       ]
     ],
     "citadel_stairs": {
-      "comment": "author-built right-angle staircase INSIDE Lvl_A6_Villa (2 ramps + corner platform, labels valve_M4_shoulder2/3 + ant_plat2): local offsets relative to the citadel slot pos+yaw. Terrain must MEET the lower ramp end (landing pad) and stay CLEAR under the flights; the route-slope corridor ends at the landing - the staircase replaces the trail from there.",
+      "comment": "author right-angle staircase inside Lvl_A6_Villa (valve_M4_shoulder2/3 + ant_plat2). Anchors = LOCAL offsets from the citadel slot (pos+yaw), computed from EXACT actor transforms (not AABBs!): lines are the TOP-surface center-lines of each flight. Terrain rule: clearance cap top_z-150 under the flights, landing flattened to lower_tip_top-30; the stairs fit is applied LAST in the generator so nothing re-buries it.",
       "landing_local": [
-        15373,
-        -14237,
-        -7200
+        15251,
+        -12557,
+        -7125
       ],
-      "clear_lines_local": [
+      "lines_top_local": [
         [
           [
-            15373,
-            -14237,
-            -7200
+            15251,
+            -12557,
+            -7125
           ],
           [
-            4973,
-            -14237,
-            -3896
+            5095,
+            -15917,
+            -3895
           ]
         ],
         [
           [
-            3304,
-            -15832,
-            -3938
+            4617,
+            -15710,
+            -3836
           ],
           [
-            3304,
-            -6778,
-            100
+            1991,
+            -6900,
+            104
           ]
         ]
       ],
