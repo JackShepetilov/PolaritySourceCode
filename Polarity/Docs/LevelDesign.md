@@ -215,8 +215,9 @@
 **Фаза 1 — данные.** Арена описывается JSON-спекой (`Source/Tools/ArenaBlockout/Arenas/A2_Courtyard.json`): список примитивов (box/ramp с pos/size/rot/тегом-цветом) + маркеры (SpawnPoint/Antenna/Prop/Plate/PlayerStart...). JSON — источник истины, в git.
 
 **Фаза 2 — генерация в UE (решено: Python, плагин включает автор).** Скрипт `Source/Tools/ArenaBlockout/build_arena.py` читает JSON, чистит акторы с тегом `BLOCKOUT_<имя>`, спавнит геометрию (Engine BasicShapes + блокаут-материалы в `/Game/ArenaBlockout/Materials`) и геймплейные BP-акторы (§6), прокидывает связи (волны, триггеры, блокеры, антенна↔кнопка), сохраняет `.umap`-сублевел. Итерация = правка JSON + перезапуск. Два способа запуска:
-- **Headless (Claude, автономно):** `UnrealEditor-Cmd.exe Polarity.uproject -run=pythonscript -script="...\build_arena.py A2_Courtyard" -stdout -unattended` (редактор у автора лучше закрыть, чтобы не словить конфликт сохранения).
+- **Headless (Claude, автономно, редактор ЗАКРЫТ):** `UnrealEditor-Cmd.exe Polarity.uproject -run=pythonscript -script="...\build_arena.py A2_Courtyard" -stdout -unattended` (при открытом редакторе запрещено — конфликт сохранения).
 - **В редакторе (автор, мгновенно):** консоль `py "...\build_arena.py" A2_Courtyard` — собирает прямо в открытой сессии.
+- **В редакторе через MCP (Claude, при открытом редакторе — стандарт MCP-сессий):** `run_console_command` по REST (`POST 127.0.0.1:3000/mcp/tool/run_console_command`, команда `py "...\build_arena.py" <Arena>`) — без диалогов, автономно; вывод проверять в логе по `[ARENA_BLOCKOUT]`. Скриншоты любого открытого уровня без спеки — `snap_level.py` (детали в `MCP_Tooling_Guide.md` §1).
 
 **Фаза 3 — верификация.** Скрипт после сборки: (а) дампит фактические акторы+бounds в `Build/<арена>_dump.json`; (б) автоматически снимает **unlit-скриншоты** (камеры из секции `screenshots` спеки: топ-даун, вид со входа, 2 изо) в `Build/Screenshots/` — света в уровне нет, плоские цвета блокаута читаются и без него, Claude сам читает PNG и сверяет с правилами §4. Затем автор делает флайтру/прогон чеклиста §7. Итерация: фидбек → JSON → пересборка одной командой.
 
