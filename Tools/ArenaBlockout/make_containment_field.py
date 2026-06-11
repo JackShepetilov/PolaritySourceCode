@@ -240,6 +240,12 @@ def build_blueprint(mat_path):
 
     if not bs.add_variable(BP_PATH, "DMI", "MaterialInstanceDynamic"):
         fail("add_variable DMI")
+    # Per-instance slot overrides do NOT survive level serialization (fields came
+    # back as WorldGridMaterial in standalone) - the runtime DMI must be built
+    # from an explicit material reference instead of the slot.
+    if not bs.add_variable(BP_PATH, "FieldMaterial", "/Script/Engine.MaterialInterface", mat_path):
+        fail("add_variable FieldMaterial")
+    bs.set_variable_default_value(BP_PATH, "FieldMaterial", mat_path)
     bs.compile_blueprint(BP_PATH)  # variables must compile before node use
 
     g = "EventGraph"
@@ -254,8 +260,8 @@ def build_blueprint(mat_path):
                       (cdmi, "CreateDynamicMaterialInstance"), (set_dmi, "set DMI")):
         if not nid:
             fail("node create failed: " + what)
-    if not bs.set_node_pin_value(BP_PATH, g, cdmi, "SourceMaterial", mat_path):
-        log("WARN: SourceMaterial pin default not set")
+    # NB: object pin defaults via set_node_pin_value are a silent no-op -
+    # SourceMaterial is wired from the FieldMaterial variable below instead.
 
     def pins_of(node_id):
         return bs.get_node_pins(BP_PATH, g, node_id)
@@ -294,6 +300,10 @@ def build_blueprint(mat_path):
     connect(get_mesh, mesh_out, cdmi, "self")
     connect(cdmi, "then", set_dmi, "execute")
     connect(cdmi, "ReturnValue", set_dmi, "DMI")
+    get_fmat = bs.add_get_variable_node(BP_PATH, g, "FieldMaterial", -200, 320)
+    if not get_fmat:
+        fail("node create failed: get FieldMaterial")
+    connect(get_fmat, out_value_pin(get_fmat), cdmi, "SourceMaterial")
 
     # Hit -> BreakHitResult.Location -> ToLinearColor -> DMI.SetVectorParameterValue(HitPos)
     #     -> DMI.SetScalarParameterValue(HitTime, GetTimeSeconds)
