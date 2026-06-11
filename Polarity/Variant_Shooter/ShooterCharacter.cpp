@@ -3785,11 +3785,10 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}
-	// Yank-throw montage: force alpha=0 for its whole duration. The FP AnimBPs derive
-	// ControlRigAlpha = (1 - LeftHandIKAlpha) in their EventGraph, so alpha=0 switches the
-	// Control Rig ON — the throw animation follows camera pitch exactly like the channeling
-	// catch/hold/throw path — and frees the left hand from the weapon grip for the montage.
-	// Condition auto-clears when the montage ends, restoring the default alpha=1 below.
+	// Yank-throw montage: force alpha=0 for its whole duration — frees the left hand from
+	// the weapon-grip IK so the montage can animate both hands. (ControlRigAlpha is driven
+	// separately below via the FP-montage alpha push.) Auto-clears when the montage ends,
+	// restoring the default alpha=1.
 	else if (PendingYankThrowWeapon.IsValid() &&
 		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
 	{
@@ -3835,10 +3834,12 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
 
 	// FP montage alpha — interpolate at user-specified rate (FPMontageAlphaInterpRate) and
-	// push into the AnimBP's ControlRigAlpha variable via reflection. The ABP no longer
-	// writes ControlRigAlpha itself (its EventGraph Set node was removed), so C++ owns it:
-	//   1 = Control Rig ON  → arms aim along camera pitch (throw montages),
-	//   0 = Control Rig OFF → spine_05 Transform Bone handles pitch (= 1 - this, normal pose).
+	// push (1 - alpha) into the AnimBP's ControlRigAlpha variable via reflection. The ABP no
+	// longer writes ControlRigAlpha itself (its EventGraph Set node was removed), so C++ owns it:
+	//   no two-hand montage (alpha=0): ControlRigAlpha=1 → Control Rig runs as normal;
+	//   throw/yank-throw montage (alpha=1): ControlRigAlpha=0 → rig off, and spine_05
+	//   Transform Bone (AnimGraph computes its alpha as 1 - ControlRigAlpha) takes over the
+	//   camera-pitch follow for the montage pose.
 	// Driven by SetFPMontageAlpha: → 1 on PlayThrowMontage/PlayYankThrowMontage, → 0 on
 	// montage end (blend times = the *AlphaBlendIn/Out props on ChargeAnimationComponent).
 	CurrentFPMontageAlpha = FMath::FInterpConstantTo(
@@ -3852,6 +3853,8 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	{
 		if (UAnimInstance* AnimInst = FPMesh->GetAnimInstance())
 		{
+			const float ControlRigAlphaValue = 1.0f - CurrentFPMontageAlpha;
+
 			static const FName ControlRigAlphaPropertyName(TEXT("ControlRigAlpha"));
 			FProperty* AlphaProp = AnimInst->GetClass()->FindPropertyByName(ControlRigAlphaPropertyName);
 			if (AlphaProp)
@@ -3860,14 +3863,14 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 				{
 					if (void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInst))
 					{
-						*static_cast<float*>(ValuePtr) = CurrentFPMontageAlpha;
+						*static_cast<float*>(ValuePtr) = ControlRigAlphaValue;
 					}
 				}
 				else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(AlphaProp))
 				{
 					if (void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInst))
 					{
-						*static_cast<double*>(ValuePtr) = static_cast<double>(CurrentFPMontageAlpha);
+						*static_cast<double*>(ValuePtr) = static_cast<double>(ControlRigAlphaValue);
 					}
 				}
 			}
