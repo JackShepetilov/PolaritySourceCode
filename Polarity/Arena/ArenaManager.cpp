@@ -1582,6 +1582,45 @@ void AArenaManager::CheckStuckNPCs()
 		const FVector CurrentPos = NPC->GetActorLocation();
 		TWeakObjectPtr<AShooterNPC> WeakNPC(NPC);
 
+		// Escape guard: the entry trigger volume IS the arena interior (slightly
+		// inset from the containment fields, full stack height). An NPC outside
+		// every trigger box got knocked through/over the containment — teleport
+		// it to the nearest spawn point (keeps the sustain wave intact).
+		bool bInsideArena = EntryTriggers.Num() == 0;
+		for (const TSoftObjectPtr<AActor>& TrigRef : EntryTriggers)
+		{
+			if (const AActor* Trig = TrigRef.Get())
+			{
+				if (Trig->GetComponentsBoundingBox(true).ExpandBy(300.0f).IsInside(CurrentPos))
+				{
+					bInsideArena = true;
+					break;
+				}
+			}
+		}
+		if (!bInsideArena)
+		{
+			FVector ReturnPos = GetActorLocation();
+			float BestDistSq = FLT_MAX;
+			for (const TSoftObjectPtr<AArenaSpawnPoint>& SPRef : SpawnPoints)
+			{
+				if (const AArenaSpawnPoint* SP = SPRef.Get())
+				{
+					const float DistSq = FVector::DistSquared(SP->GetActorLocation(), CurrentPos);
+					if (DistSq < BestDistSq)
+					{
+						BestDistSq = DistSq;
+						ReturnPos = SP->GetActorLocation();
+					}
+				}
+			}
+			NPC->SetActorLocation(ReturnPos + FVector(0, 0, 150.0f), false, nullptr,
+				ETeleportType::TeleportPhysics);
+			UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] %s escaped the arena volume - teleported back to nearest spawn point"),
+				*NPC->GetName());
+			continue;
+		}
+
 		// Check if NPC has moved since last check
 		if (FVector* LastPos = NPCLastPositions.Find(WeakNPC))
 		{
