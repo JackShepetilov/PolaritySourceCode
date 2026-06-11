@@ -110,6 +110,16 @@ def main():
         # (and after our save) - spawn it explicitly so the flag lands in the save.
         nav_actor = eas.spawn_actor_from_class(unreal.RecastNavMesh,
                                                unreal.Vector(0.0, 0.0, 0.0))
+    # Bounds volumes INSIDE LevelInstances do not register at runtime (verified:
+    # gameplay debugger showed empty NavData) - the persistent level must carry
+    # ONE giant bounds covering the boulevard and every arena.
+    bounds = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume,
+                                        unreal.Vector(last_x * 0.5, -1500.0, 1200.0))
+    if bounds:
+        bounds.set_actor_scale3d(unreal.Vector((blvd_len + 12000) / 200.0,
+                                               13000 / 200.0, 6000 / 200.0))
+        ba.finish_actor(bounds, TAG, "BLK_TestRun_NavBounds", "TestRun/Nav")
+        log("Persistent NavMeshBoundsVolume spawned over the whole gauntlet")
     if nav_actor:
         nav_actor.set_editor_property("runtime_generation",
                                       unreal.RuntimeGenerationType.DYNAMIC)
