@@ -168,6 +168,21 @@ def main():
         wp = smoothstep(rf + bl, rf, d / wob)
         H = H * (1 - wp) + z * wp
 
+    # G3 = A5_Amphitheater: its terraces descend to local -900 toward local +Y
+    # (8a.2: the bowl must be CARVED into the slope, not float). Directional
+    # bowl inside the pad, deep end along the arena's rotated +Y (yaw 121).
+    g3 = slots["G3"]
+    gx_, gy_, gz_ = g3["pos"]
+    yaw_rad = np.radians(121.0)
+    deep = (-np.sin(yaw_rad), np.cos(yaw_rad))
+    d_along = (Xu - gx_) * deep[0] + (Yu - gy_) * deep[1]
+    d_rad = np.hypot(Xu - gx_, Yu - gy_)
+    depth = (500.0 * smoothstep(-3300.0, -1500.0, d_along)
+             + 250.0 * smoothstep(-700.0, 700.0, d_along)
+             + 180.0 * smoothstep(1500.0, 3100.0, d_along))
+    w_in = smoothstep(g3["r"] + PAD_RIM, g3["r"] - 1500.0, d_rad)
+    H = H - depth * w_in
+
     px16 = np.clip(32768.0 + (H - SEA_FLOOR) * 1.28, 0, 65535).astype(np.uint16)
     out_png = os.path.join(OUT_DIR, "biome1_heightmap_2017.png")
     Image.fromarray(px16).save(out_png)
