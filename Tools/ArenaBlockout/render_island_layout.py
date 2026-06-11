@@ -12,8 +12,12 @@ import sys
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LAYOUT = os.path.join(TOOLS_DIR, "Island", "biome1_island_layout.json")
-OUT_SVG = os.path.normpath(os.path.join(
-    TOOLS_DIR, "..", "..", "Polarity", "Docs", "BiomeIsland_Layout_v1.svg"))
+
+
+def out_svg_path(layout):
+    return os.path.normpath(os.path.join(
+        TOOLS_DIR, "..", "..", "Polarity", "Docs",
+        "BiomeIsland_Layout_v{}.svg".format(layout.get("version", 1))))
 
 
 def load(path):
@@ -43,15 +47,25 @@ def main():
 
     print("== transitions (route, center-to-center / approx water path) ==")
     route = layout["route"]
-    budget_lo, budget_hi = layout["rules"]["transition_budget_uu"]
+    rules = layout["rules"]
+    budget_lo, budget_hi = rules["transition_budget_uu"]
+    long_ok = rules.get("long_ok_uu", budget_hi)
+    intro = {tuple(p) for p in rules.get("intro_legs", [])}
     for a, b in zip(route, route[1:]):
         cc = dist(a, b)
         water = cc - slots[a].get("r", 0) - slots[b].get("r", 0)
-        flag = "ok" if budget_lo <= water <= budget_hi + 3000 else "CHECK"
+        if (a, b) in intro:
+            flag = "INTRO vista (deliberate)"
+        elif budget_lo <= water <= budget_hi:
+            flag = "ok"
+        elif water <= long_ok:
+            flag = "long ok (au. 2026-06-11)"
+        else:
+            flag = "CHECK"
         print("  %-10s -> %-10s  %6.0f cc  ~%5.0f path  [%s]" % (a, b, cc, water, flag))
 
-    print("== slope slot spacing (min %d) ==" % layout["rules"]["min_slope_slot_spacing"])
-    slope = ["shoulder", "G1", "G2", "G3", "Villa", "Citadel"]
+    print("== slope slot spacing (min %d) ==" % rules["min_slope_slot_spacing"])
+    slope = rules.get("slope_slots", ["shoulder", "G1", "G2", "G3", "Citadel"])
     for i, a in enumerate(slope):
         for b in slope[i + 1:]:
             cc = dist(a, b)
@@ -106,10 +120,11 @@ def main():
              'markerHeight="6" orient="auto-start-reverse">'
              '<path d="M0,0 L10,5 L0,10 z" fill="#888888"/></marker></defs>')
     e.append('<text x="60" y="40" font-size="17" font-weight="500" fill="#222222">'
-             'Биом 1: остров-цитадель — макет в масштабе (v1, 2026-06-11)</text>')
+             'Биом 1: остров-цитадель — макет в масштабе (v{}, 2026-06-11)</text>'.format(
+                 layout.get("version", 1)))
     e.append('<text x="60" y="62" font-size="12" fill="#666666">'
-             'Ландшафт 2017×2017 @100 = 2×2 км; спираль ПРОТИВ часовой; '
-             '4 мальдивы (2 S + 2 M) → плечо → 3 стража → вилла → цитадель</text>')
+             'Ландшафт 2017×2017 @100 = 2×2 км; спираль ПРОТИВ часовой; дальний старт → '
+             '4 мальдивы (2 S + 2 M) → плечо → 3 стража → цитадель=вилла за гейтом 3/3</text>')
     e.append('<text x="60" y="100" font-size="13" font-weight="500" fill="#666666">Вид сверху'
              ' (север вверх)</text>')
     # map frame = ocean
@@ -237,16 +252,18 @@ def main():
         e.append('<text x="{:.0f}" y="{:.0f}" font-size="10" fill="#444444" '
                  'text-anchor="middle">{} м</text>'.format(x, y - 10, m(z)))
     e.append('<text x="{}" y="{}" font-size="11" fill="#222222">мальдивы низкие (5→28 м), '
-             'драма высоты — подъём по острову: плечо 45 → стражи 60/75/90 → вилла 115 → '
-             'цитадель 160 (пик 170) + обрыв в воду</text>'.format(px0 - 20, prof_bot + 30))
+             'драма высоты — подъём по острову: плечо 45 → стражи 60/75/90 → '
+             'цитадель=вилла 160 (пик 170) + обрыв в воду; старт — дальний интро-вид</text>'.format(
+                 px0 - 20, prof_bot + 30))
     e.append('<text x="{}" y="{}" font-size="11" fill="#666666">Бюджеты: вэлвы 5–15 тыс. uu '
              'пути; зазор полей-стаканов ≥ 2–3 тыс.; шаг слотов склона ≥ 10.5 тыс. '
              '(см. отчёт render_island_layout.py)</text>'.format(px0 - 20, prof_bot + 50))
     e.append('</svg>')
 
-    with open(OUT_SVG, "w", encoding="utf-8") as f:
+    out = out_svg_path(layout)
+    with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(e))
-    print("\nSVG written: {}".format(OUT_SVG))
+    print("\nSVG written: {}".format(out))
 
 
 if __name__ == "__main__":
