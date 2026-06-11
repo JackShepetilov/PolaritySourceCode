@@ -272,10 +272,48 @@ def ensure_author_extras(world):
         "never spawns or touches them)")
 
 
+CANONICAL_VALVES = {"BLK_Biome1Island_valve_M1_M2", "BLK_Biome1Island_valve_M2_M3",
+                    "BLK_Biome1Island_valve_M3_M4", "BLK_Biome1Island_valve_M4_shoulder"}
+
+
+def cleanup_foreign_orphans(eas):
+    """Earlier builds spawned bridges/nav into whatever sublevel was CURRENT
+    (attaching a sublevel makes it current) - delete those orphans from arena
+    packages. The author's own copies (suffixed labels, e.g. valve_M4_shoulder2)
+    are never touched."""
+    removed = 0
+    for a in list(eas.get_all_level_actors()):
+        if a is None:
+            continue
+        try:
+            pkg = a.get_package().get_name()
+        except Exception:
+            continue
+        if pkg == LEVEL_PATH or not pkg.startswith(ARENA_ROOT + "/"):
+            continue
+        lbl = a.get_actor_label()
+        cls = a.get_class().get_name()
+        if lbl in CANONICAL_VALVES:
+            eas.destroy_actor(a)
+            removed += 1
+            log("Removed orphaned bridge '{}' from {}".format(lbl, pkg))
+        elif cls == "RecastNavMesh":
+            try:
+                if a.get_editor_property("runtime_generation") ==                         unreal.RuntimeGenerationType.DYNAMIC:
+                    eas.destroy_actor(a)
+                    removed += 1
+                    log("Removed stray DYNAMIC RecastNavMesh from {}".format(pkg))
+            except Exception:
+                pass
+    if removed:
+        log("Foreign-package cleanup: {} orphan(s) removed (their packages will "
+            "be saved at the end)".format(removed))
+
+
 def ensure_dynamic_nav(eas):
     nav = None
     for a in eas.get_all_level_actors():
-        if a and a.get_class().get_name() == "RecastNavMesh":
+        if a and a.get_class().get_name() == "RecastNavMesh" and                 ba.in_package(a, LEVEL_PATH):
             nav = a
             break
     if nav is None:
@@ -331,12 +369,16 @@ def main():
 
     ensure_landscape(slots)
     world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    cleanup_foreign_orphans(eas)
+    # SPAWN EVERYTHING FIRST: attaching a sublevel makes it the CURRENT level
+    # and editor spawns land in the current level (learned 2026-06-11: bridges
+    # ended up inside Lvl_A6_Villa). Spawns go before any attach.
     ensure_water(eas)
-    ensure_arenas(world, layout, slots)
-    ensure_author_extras(world)
+    ensure_dynamic_nav(eas)
     mats = ba.ensure_materials(force=False)
     build_bridges(eas, mats, slots, layout["island"]["center"])
-    ensure_dynamic_nav(eas)
+    ensure_arenas(world, layout, slots)
+    ensure_author_extras(world)
     try:
         unreal.SystemLibrary.execute_console_command(world, "RebuildNavigation")
         log("RebuildNavigation issued")

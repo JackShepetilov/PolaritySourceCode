@@ -366,6 +366,51 @@ def main():
              + 180.0 * smoothstep(1500.0, 3100.0, d_along))
     H = H - depth * smoothstep(g3["r"] + PAD_RIM, g3["r"] - 1500.0, d_rad)
 
+    # ---------------- author's citadel staircase (rules.citadel_stairs) ------
+    # terrain meets the lower ramp end (landing pad) and stays clear under the
+    # flights; anchors are LOCAL to the citadel slot so they follow its moves
+    st = layout["rules"].get("citadel_stairs")
+    if st:
+        cit = slots["Citadel"]
+        cy = np.radians(float(cit.get("yaw", 0.0)))
+        ca_, sa_ = np.cos(cy), np.sin(cy)
+
+        def st_world(loc):
+            wx = cit["pos"][0] + loc[0] * ca_ - loc[1] * sa_
+            wy = cit["pos"][1] + loc[0] * sa_ + loc[1] * ca_
+            return wx, wy, cit["pos"][2] + loc[2]
+
+        lx, ly, lz = st_world(st["landing_local"])
+        d_l = np.hypot(Xu - lx, Yu - ly)
+        wl = smoothstep(4200.0, 2200.0, d_l)
+        H = H * (1 - wl) + (lz - 40.0) * wl
+        for line in st["clear_lines_local"]:
+            ax_, ay_, az_ = st_world(line[0])
+            bx_, by_, bz_ = st_world(line[1])
+            L_ = max(np.hypot(bx_ - ax_, by_ - ay_), 1.0)
+            kk = int(L_ / 350.0) + 2
+            for i_ in range(kk):
+                t_ = i_ / (kk - 1.0)
+                px_, py_ = ax_ + (bx_ - ax_) * t_, ay_ + (by_ - ay_) * t_
+                cz_ = az_ + (bz_ - az_) * t_ - 130.0
+                r_ = int(round((py_ + HALF) / SCALE))
+                c_ = int(round((px_ + HALF) / SCALE))
+                R_ = 16
+                r0_, r1_ = max(0, r_ - R_), min(N, r_ + R_ + 1)
+                c0_, c1_ = max(0, c_ - R_), min(N, c_ + R_ + 1)
+                yy_, xx_ = np.mgrid[r0_ - r_:r1_ - r_, c0_ - c_:c1_ - c_]
+                cap_ = cz_ + np.hypot(yy_, xx_) * SCALE * 0.55
+                H[r0_:r1_, c0_:c1_] = np.minimum(H[r0_:r1_, c0_:c1_], cap_)
+        px_, py_, pz_ = st_world(st["platform_local"])
+        r_ = int(round((py_ + HALF) / SCALE))
+        c_ = int(round((px_ + HALF) / SCALE))
+        R_ = 14
+        r0_, r1_ = max(0, r_ - R_), min(N, r_ + R_ + 1)
+        c0_, c1_ = max(0, c_ - R_), min(N, c_ + R_ + 1)
+        yy_, xx_ = np.mgrid[r0_ - r_:r1_ - r_, c0_ - c_:c1_ - c_]
+        cap_ = (pz_ - 170.0) + np.hypot(yy_, xx_) * SCALE * 0.55
+        H[r0_:r1_, c0_:c1_] = np.minimum(H[r0_:r1_, c0_:c1_], cap_)
+
     # seam pass: soften the ring just outside the pads, never the cores
     seam = np.zeros_like(H)
     for sid in ("G1", "G2", "G3", "Citadel"):

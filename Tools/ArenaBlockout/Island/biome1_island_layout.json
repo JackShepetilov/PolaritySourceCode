@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
   "version": 7,
-  "comment": "Phase-0 scale layout v7 (2026-06-11, author round 5 - SERPENTINE): the guard route is an S-curve (switchbacks): landing -> west turn (G1) -> diagonal through the island center (G2) -> east turn (G3) -> flank approach into the citadel from the EAST. Citadel-distances kept ~0.73/0.53/0.34 D. HARD RULE: every arena reachable on foot, route slopes <= 30 deg everywhere. [slots synced from editor]",
+  "comment": "Phase-0 scale layout v7 (2026-06-11, author round 5 - SERPENTINE): the guard route is an S-curve (switchbacks): landing -> west turn (G1) -> diagonal through the island center (G2) -> east turn (G3) -> flank approach into the citadel from the EAST. Citadel-distances kept ~0.73/0.53/0.34 D. HARD RULE: every arena reachable on foot, route slopes <= 30 deg everywhere. [slots synced from editor] [slots synced from editor]",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
@@ -206,11 +206,11 @@
       ],
       "pos": [
         37000,
-        2500,
+        -90,
         16000
       ],
       "r": 6500,
-      "yaw": 180.0,
+      "yaw": -180.0,
       "note": "ON THE LIP of the EAST cape (160 m), far end from the landing; the serpentine flanks around and enters from the EAST side; gate 3/3, permanent field"
     }
   ],
@@ -259,13 +259,48 @@
         11380
       ],
       [
-        33000,
-        16000
-      ],
-      [
-        37000,
-        2500
+        21627,
+        14147
       ]
-    ]
+    ],
+    "citadel_stairs": {
+      "comment": "author-built right-angle staircase INSIDE Lvl_A6_Villa (2 ramps + corner platform, labels valve_M4_shoulder2/3 + ant_plat2): local offsets relative to the citadel slot pos+yaw. Terrain must MEET the lower ramp end (landing pad) and stay CLEAR under the flights; the route-slope corridor ends at the landing - the staircase replaces the trail from there.",
+      "landing_local": [
+        15373,
+        -14237,
+        -7200
+      ],
+      "clear_lines_local": [
+        [
+          [
+            15373,
+            -14237,
+            -7200
+          ],
+          [
+            4973,
+            -14237,
+            -3896
+          ]
+        ],
+        [
+          [
+            3304,
+            -15832,
+            -3938
+          ],
+          [
+            3304,
+            -6778,
+            100
+          ]
+        ]
+      ],
+      "platform_local": [
+        4729,
+        -16073,
+        -3890
+      ]
+    }
   }
 }
