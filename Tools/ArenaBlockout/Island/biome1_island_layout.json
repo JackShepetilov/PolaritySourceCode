@@ -55,6 +55,7 @@
      "note": "THE citadel arena IS the villa (author 2026-06-11): key lore arena on the cliff lip, 160 m; gate counter 3/3 guard antennas, permanent containment field until open"}
   ],
   "rules": {
+    "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, organic wobbled edge, ~35 deg beach slope), arena DEAD-CENTER on the flat top, open water between islands is MANDATORY. Proven in Lvl_IslandSpike + make_island_heightmap.py. Slope-guard arenas (G1-G3) are the only ones sitting on the big island.",
     "transition_budget_uu": [5000, 15000],
     "long_ok_uu": 18500,
     "intro_legs": [["start_reef", "M1"]],
