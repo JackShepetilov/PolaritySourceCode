@@ -113,6 +113,12 @@
 (`-LiveCodingLimit=100`) её не вытягивает — гонять `Build.bat` при закрытом редакторе. После
 этого Live Coding для .cpp-правок работает как обычно.
 
+⚠️ **UBA ломает линковку Live Coding-патчей** (2026-06-11): компиляция Succeeded, но
+`link.exe` падает на старте с `0xc0000142` + спам `UbaSessionServer - Too many roots added`.
+Лечение: `%APPDATA%\Unreal Engine\UnrealBuildTool\BuildConfiguration.xml` →
+`bAllowUBAExecutor=false` + `bAllowUBALocalExecutor=false` (UBT перечитывает конфиг на каждом
+LC-патче, рестарт редактора не нужен; полные локальные билды не страдают — ParallelExecutor).
+
 ## 2. ЧЕГО У НАС НЕТ (в оригинале есть — не использовать вслепую)
 
 Оригинал писан под VibeUE **v4**: там основной интерфейс — `execute_python_code` + Services
