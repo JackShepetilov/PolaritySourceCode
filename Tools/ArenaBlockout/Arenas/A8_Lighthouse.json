@@ -27,14 +27,13 @@
     { "id": "pad_ne",  "shape": "box",  "mat": "floor", "pos": [950, 1150, 570],   "size": [500, 500, 100],  "group": "Spiral" },
     { "id": "ramp_n",  "shape": "ramp", "mat": "floor", "from": [700, 1150, 620],  "to": [-700, 1150, 930],  "width": 400, "group": "Spiral" },
     { "id": "pad_nw",  "shape": "box",  "mat": "floor", "pos": [-1100, 1150, 880], "size": [800, 500, 100],  "group": "Spiral" },
-    { "id": "ramp_w",  "shape": "ramp", "mat": "floor", "from": [-1250, 900, 930], "to": [-1250, -200, 1250], "width": 400, "group": "Spiral" },
-    { "id": "bal_porch", "shape": "box", "mat": "floor", "pos": [-1150, -300, 1200], "size": [500, 400, 100], "group": "Spiral" },
+    { "id": "ramp_w",  "shape": "ramp", "mat": "floor", "from": [-1250, 900, 930], "to": [-1250, -250, 1250], "width": 400, "group": "Spiral" },
+    { "id": "pad_sw",  "shape": "box",  "mat": "floor", "pos": [-1250, -500, 1200], "size": [500, 500, 100], "group": "Spiral" },
 
     { "id": "balcony",   "shape": "box", "mat": "floor", "pos": [0, 200, 1200],   "size": [2100, 2100, 100], "group": "Balcony" },
     { "id": "bal_par_s", "shape": "box", "mat": "deco",  "pos": [0, -800, 1300],  "size": [2100, 50, 100],  "group": "Balcony" },
     { "id": "bal_par_n", "shape": "box", "mat": "deco",  "pos": [0, 1200, 1300],  "size": [2100, 50, 100],  "group": "Balcony" },
     { "id": "bal_par_w_n", "shape": "box", "mat": "deco", "pos": [-1025, 800, 1300],  "size": [50, 800, 100], "group": "Balcony" },
-    { "id": "bal_par_w_s", "shape": "box", "mat": "deco", "pos": [-1025, -650, 1300], "size": [50, 300, 100], "group": "Balcony" },
     { "id": "bal_par_e", "shape": "box", "mat": "deco",  "pos": [1025, -100, 1300], "size": [50, 1150, 100], "group": "Balcony" },
 
     { "id": "boathouse",    "shape": "box", "mat": "wall",    "pos": [-1600, -1400, 200], "size": [1600, 1000, 400], "group": "Boathouse" },

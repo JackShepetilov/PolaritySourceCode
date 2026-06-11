@@ -39,6 +39,7 @@ MATERIALS = {
     "wallrun": (0.05, 0.30, 0.85),
     "emf":     (0.95, 0.45, 0.05),
     "blocker": (0.75, 0.08, 0.08),
+    "ramp":    (0.55, 0.10, 0.75),
 }
 
 
@@ -234,35 +235,135 @@ FIELD_BP = "/Game/ArenaBlockout/BP_ContainmentField"
 FIELD_MAT = "/Game/ArenaBlockout/Materials/M_ContainmentField"
 
 
+def resolve_ramp(piece):
+    """'ramp' piece -> exact-fit tilted box between two FLOOR-TOP points.
+    Solves pitch/center so the TOP surface is flush with both floors; overlap
+    extends ONLY past the bottom point (top-side overlap pokes through slabs)."""
+    fx, fy, fz = [float(v) for v in piece["from"]]
+    tx, ty, tz = [float(v) for v in piece["to"]]
+    width = float(piece.get("width", 500))
+    thick = float(piece.get("thick", 60))
+    dx, dy, dz = tx - fx, ty - fy, tz - fz
+    dxy = math.hypot(dx, dy)
+    slope_len = math.hypot(dxy, dz)
+    pitch = math.degrees(math.asin(dz / slope_len)) if slope_len else 0.0
+    yaw = math.degrees(math.atan2(dy, dx))
+    over = 60.0
+    ux, uy, uz = dx / slope_len, dy / slope_len, dz / slope_len
+    cx = (fx + tx) * 0.5 - ux * (over * 0.5)
+    cy = (fy + ty) * 0.5 - uy * (over * 0.5)
+    cz = (fz + tz) * 0.5 - uz * (over * 0.5) \
+        - (thick * 0.5) * math.cos(math.radians(pitch))
+    mat_name = piece.get("mat", "floor")
+    return dict(piece,
+                pos=[cx, cy, cz],
+                size=[slope_len + over, width, thick],
+                pitch=pitch, yaw=yaw, shape="box",
+                mat="ramp" if mat_name == "floor" else mat_name)
+
+
+# ---- ramp QA (R13): no clipping, clear run-up, landing platform ------------
+
+def _obb(piece):
+    cx, cy, cz = [float(v) for v in piece["pos"]]
+    sx, sy, sz = [float(v) * 0.5 for v in piece["size"]]
+    p = math.radians(float(piece.get("pitch", 0.0)))
+    y = math.radians(float(piece.get("yaw", 0.0)))
+    cp, sp, cyw, syw = math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+    ax = (cp * cyw, cp * syw, sp)                  # local X (slope dir)
+    ay = (-syw, cyw, 0.0)                          # local Y
+    az = (-sp * cyw, -sp * syw, cp)                # local Z
+    return (cx, cy, cz), (sx, sy, sz), (ax, ay, az)
+
+
+def _sat_overlap(a, b, tol=15.0):
+    (ca, ha, aa), (cb, hb, ab) = a, b
+    d = (cb[0] - ca[0], cb[1] - ca[1], cb[2] - ca[2])
+    axes = list(aa) + list(ab)
+    for i in range(3):
+        for j in range(3):
+            cr = (aa[i][1] * ab[j][2] - aa[i][2] * ab[j][1],
+                  aa[i][2] * ab[j][0] - aa[i][0] * ab[j][2],
+                  aa[i][0] * ab[j][1] - aa[i][1] * ab[j][0])
+            ln = math.sqrt(cr[0] ** 2 + cr[1] ** 2 + cr[2] ** 2)
+            if ln > 1e-4:
+                axes.append((cr[0] / ln, cr[1] / ln, cr[2] / ln))
+    for ax in axes:
+        ra = sum(ha[k] * abs(aa[k][0] * ax[0] + aa[k][1] * ax[1] + aa[k][2] * ax[2])
+                 for k in range(3))
+        rb = sum(hb[k] * abs(ab[k][0] * ax[0] + ab[k][1] * ax[1] + ab[k][2] * ax[2])
+                 for k in range(3))
+        dist = abs(d[0] * ax[0] + d[1] * ax[1] + d[2] * ax[2])
+        if dist + tol >= ra + rb:
+            return False
+    return True
+
+
+def check_ramps(spec):
+    """[RAMP_CHECK]: every ramp must (1) clip nothing but floors/fields,
+    (2) have a clear run-up zone before its bottom point, (3) land on a
+    walkable platform past its top point. Returns number of failures."""
+    pieces = [resolve_ramp(p) if p.get("shape") == "ramp" else p
+              for p in spec.get("pieces", [])]
+    ramps = [(p, orig) for p, orig in zip(pieces, spec.get("pieces", []))
+             if orig.get("shape") == "ramp"]
+    fails = 0
+    for rp, orig in ramps:
+        rid = orig.get("id", "?")
+        fx, fy, fz = [float(v) for v in orig["from"]]
+        tx, ty, tz = [float(v) for v in orig["to"]]
+        dx, dy = tx - fx, ty - fy
+        dxy = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / dxy, dy / dxy
+        yaw = math.degrees(math.atan2(dy, dx))
+        width = float(orig.get("width", 500))
+        # (1) clipping vs every non-floor/field piece
+        robb = _obb(rp)
+        for other in pieces:
+            if other is rp or other.get("mat") in ("floor", "field"):
+                continue
+            if _sat_overlap(robb, _obb(other)):
+                warn("[RAMP_CHECK] {}: ramp '{}' CLIPS '{}'".format(
+                    spec["name"], rid, other.get("id", "?")))
+                fails += 1
+        # (2) clear run-up: box 600 long before the bottom point, player height
+        probe_lo = {"pos": [fx - ux * 350, fy - uy * 350, fz + 110],
+                    "size": [600, width, 200], "pitch": 0, "yaw": yaw}
+        for other in pieces:
+            if other.get("mat") in ("floor", "field") or other is rp:
+                continue
+            if _sat_overlap(_obb(probe_lo), _obb(other)):
+                warn("[RAMP_CHECK] {}: ramp '{}' run-up BLOCKED by '{}'".format(
+                    spec["name"], rid, other.get("id", "?")))
+                fails += 1
+        # (3) landing platform: a walkable top within 30uu of to.z right past the top
+        probe_hi = {"pos": [tx + ux * 200, ty + uy * 200, tz - 40],
+                    "size": [350, width, 60], "pitch": 0, "yaw": yaw}
+        landed = False
+        for other in pieces:
+            if other is rp or other.get("shape") == "cylinder":
+                continue
+            top = float(other["pos"][2]) + float(other["size"][2]) * 0.5
+            if abs(top - tz) <= 30 and _sat_overlap(_obb(probe_hi), _obb(other), tol=0.0):
+                landed = True
+                break
+        if not landed:
+            warn("[RAMP_CHECK] {}: ramp '{}' has NO landing platform at its top".format(
+                spec["name"], rid))
+            fails += 1
+    if ramps:
+        log("[RAMP_CHECK] {}: {} ramps, {} problems".format(
+            spec["name"], len(ramps), fails))
+    return fails
+
+
 def spawn_shape(eas, mats, piece, tag, arena):
     shape = piece.get("shape", "box")
     mat_name = piece.get("mat", "floor")
-    # "ramp": exact-fit slope between two FLOOR-TOP points. The builder solves
-    # pitch/center so the ramp's TOP surface is flush with both floors (manual
-    # center math kept producing above/below-floor seams).
     if shape == "ramp":
-        fx, fy, fz = [float(v) for v in piece["from"]]
-        tx, ty, tz = [float(v) for v in piece["to"]]
-        width = float(piece.get("width", 500))
-        thick = float(piece.get("thick", 60))
-        dx, dy, dz = tx - fx, ty - fy, tz - fz
-        dxy = math.hypot(dx, dy)
-        slope_len = math.hypot(dxy, dz)
-        pitch = math.degrees(math.asin(dz / slope_len)) if slope_len else 0.0
-        yaw = math.degrees(math.atan2(dy, dx))
-        # Overlap ONLY past the BOTTOM point (extending past the top makes the
-        # slope rise above the upper floor - wedge sticking out of the slab).
-        over = 60.0
-        ux, uy, uz = dx / slope_len, dy / slope_len, dz / slope_len
-        cx = (fx + tx) * 0.5 - ux * (over * 0.5)
-        cy = (fy + ty) * 0.5 - uy * (over * 0.5)
-        cz = (fz + tz) * 0.5 - uz * (over * 0.5) \
-            - (thick * 0.5) * math.cos(math.radians(pitch))
-        piece = dict(piece,
-                     pos=[cx, cy, cz],
-                     size=[slope_len + over, width, thick],
-                     pitch=pitch, yaw=yaw)
+        piece = resolve_ramp(piece)
         shape = "box"
+        mat_name = piece["mat"]
     # Containment fields: spawn the interactive BP (invisible hit-reveal shader,
     # feeds hit pos/time into its DMI; built by make_containment_field.py).
     # The BeginPlay CDMI uses slot-0 material, so the field material is assigned
@@ -466,6 +567,8 @@ def build(arena_name):
     arena = spec["name"]
     tag = "BLOCKOUT_" + arena
     level_path = spec["level_path"]
+
+    check_ramps(spec)  # R13 QA: clipping / run-up / landing — read [RAMP_CHECK] lines
 
     les, eas = get_subsystems()
     mats = ensure_materials(force=False)

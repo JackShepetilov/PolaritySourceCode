@@ -32,7 +32,7 @@
     { "id": "hedge_in_se", "shape": "box", "mat": "deco", "pos": [1700, -1700, 50],  "size": [900, 150, 100], "group": "HedgeCover" },
     { "id": "hedge_in_sw", "shape": "box", "mat": "deco", "pos": [-1700, -1500, 100], "size": [150, 900, 200], "group": "HedgeCover" },
     { "id": "hedge_in_ne", "shape": "box", "mat": "deco", "pos": [2300, 800, 100],   "size": [150, 900, 200], "group": "HedgeCover" },
-    { "id": "hedge_in_nw", "shape": "box", "mat": "deco", "pos": [-2100, 2300, 50],  "size": [900, 150, 100], "group": "HedgeCover" },
+    { "id": "hedge_in_nw", "shape": "box", "mat": "deco", "pos": [-2100, 2550, 50],  "size": [900, 150, 100], "group": "HedgeCover" },
 
     { "id": "fountain_base", "shape": "cylinder", "mat": "deco", "pos": [0, -2300, 60],  "size": [900, 900, 120], "group": "Fountain" },
     { "id": "fountain_mid",  "shape": "cylinder", "mat": "deco", "pos": [0, -2300, 220], "size": [400, 400, 200], "group": "Fountain" },
@@ -64,19 +64,16 @@
     { "id": "par_roof_e", "shape": "box", "mat": "wall", "pos": [1275, 1000, 1750],  "size": [50, 1100, 200], "group": "RoofParapet" },
 
     { "id": "balus_l1_s", "shape": "box", "mat": "deco", "pos": [0, -850, 950],      "size": [3600, 50, 100], "group": "L1Balustrade" },
-    { "id": "balus_l1_w", "shape": "box", "mat": "deco", "pos": [-1775, 1100, 950],  "size": [50, 1900, 100], "group": "L1Balustrade" },
+    { "id": "balus_l1_w", "shape": "box", "mat": "deco", "pos": [-1775, 825, 950],   "size": [50, 1350, 100], "group": "L1Balustrade" },
     { "id": "balus_l1_e", "shape": "box", "mat": "deco", "pos": [1775, 725, 950],    "size": [50, 1150, 100], "group": "L1Balustrade" },
 
-    { "id": "ramp_e", "shape": "ramp", "mat": "floor", "from": [2050, -400, 0], "to": [2050, 1600, 900],  "width": 500, "group": "Ramps" },
-    { "id": "porch_e", "shape": "box", "mat": "floor", "pos": [1950, 1800, 850], "size": [500, 400, 100], "group": "Ramps" },
-    { "id": "ramp_w", "shape": "ramp", "mat": "floor", "from": [-2050, 1600, 0], "to": [-2050, -400, 900], "width": 500, "group": "Ramps" },
-    { "id": "porch_w", "shape": "box", "mat": "floor", "pos": [-1950, -600, 850], "size": [500, 400, 100], "group": "Ramps" },
+    { "id": "ramp_e", "shape": "ramp", "mat": "floor", "from": [2100, -400, 0], "to": [2100, 1600, 900],  "width": 500, "group": "Ramps" },
+    { "id": "porch_e", "shape": "box", "mat": "floor", "pos": [2000, 1800, 850], "size": [600, 400, 100], "group": "Ramps" },
+    { "id": "ramp_w", "shape": "ramp", "mat": "floor", "from": [-2100, 1600, 0], "to": [-2100, -400, 900], "width": 500, "group": "Ramps" },
+    { "id": "porch_w", "shape": "box", "mat": "floor", "pos": [-2000, -600, 850], "size": [600, 400, 100], "group": "Ramps" },
 
     { "id": "ramp_roof", "shape": "ramp", "mat": "floor", "from": [-1700, 1850, 900], "to": [-350, 1850, 1650], "width": 450, "group": "Ramps" },
     { "id": "roof_porch", "shape": "box", "mat": "floor", "pos": [-500, 1725, 1600], "size": [600, 300, 100], "group": "Ramps" },
-
-    { "id": "pergola_w", "shape": "box", "mat": "deco", "pos": [-2400, 1600, 225], "size": [600, 600, 450], "group": "Pergola" },
-    { "id": "pergola_e", "shape": "box", "mat": "deco", "pos": [2400, -400, 225],  "size": [600, 600, 450], "group": "Pergola" },
 
     { "id": "wr_house_w", "shape": "box", "mat": "wallrun", "pos": [-1815, 600, 500],  "size": [30, 1600, 450], "group": "Wallrun" },
     { "id": "wr_house_s", "shape": "box", "mat": "wallrun", "pos": [-200, -865, 1200], "size": [1400, 30, 450], "group": "Wallrun" },
@@ -126,10 +123,6 @@
     { "type": "coordinator", "id": "Coordinator", "pos": [0, 600, 2300] },
     { "type": "manager", "pos": [0, 600, 2500] },
 
-    { "type": "nav_link", "id": "NL_perg_w_lo", "pos": [-2400, 1600, 460], "left": [0, 0, 0],    "right": [550, -250, -450] },
-    { "type": "nav_link", "id": "NL_perg_w_hi", "pos": [-1850, 1300, 910], "left": [100, 0, 0],  "right": [-500, 250, -450] },
-    { "type": "nav_link", "id": "NL_perg_e_lo", "pos": [2400, -400, 460],  "left": [0, 0, 0],    "right": [-550, 250, -450] },
-    { "type": "nav_link", "id": "NL_perg_e_hi", "pos": [1850, -100, 910],  "left": [-100, 0, 0], "right": [500, -250, -450] },
     { "type": "nav_link", "id": "NL_l1_s",      "pos": [400, -850, 910],   "left": [0, -100, 0], "right": [0, 500, -900] },
     { "type": "nav_link", "id": "NL_roof_w",    "pos": [-1275, 350, 1660], "left": [100, 0, 0],  "right": [-650, 0, -750] },
     { "type": "nav_link", "id": "NL_roof_e",    "pos": [1275, 350, 1660],  "left": [-100, 0, 0], "right": [650, 0, -750] },
