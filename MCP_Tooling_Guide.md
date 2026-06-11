@@ -113,11 +113,16 @@
 (`-LiveCodingLimit=100`) её не вытягивает — гонять `Build.bat` при закрытом редакторе. После
 этого Live Coding для .cpp-правок работает как обычно.
 
-⚠️ **UBA ломает линковку Live Coding-патчей** (2026-06-11): компиляция Succeeded, но
-`link.exe` падает на старте с `0xc0000142` + спам `UbaSessionServer - Too many roots added`.
-Лечение: `%APPDATA%\Unreal Engine\UnrealBuildTool\BuildConfiguration.xml` →
-`bAllowUBAExecutor=false` + `bAllowUBALocalExecutor=false` (UBT перечитывает конфиг на каждом
-LC-патче, рестарт редактора не нужен; полные локальные билды не страдают — ParallelExecutor).
+⚠️ **Live Coding сломался 2026-06-11, ровно после включения плагинов в таргет** (вчера
+работал): патч компилируется (Succeeded), но линк падает — `link.exe 0xc0000142` под UbaCli
++ спам `UbaSessionServer - Too many roots added (94)`. Лимит роутов зашит в бинарь UbaCli;
+LiveCodingConsole зовёт UbaCli НЕЗАВИСИМО от UBT-конфига (отключение `bAllowUBA*Executor`
+не помогло). Управляемые подозреваемые: (а) сам факт +2 плагинов в списке модулей таргета,
+(б) adaptive unity по `git status` — десятки незакоммиченных плагин-правок раздувают working
+set и пути сессии. Эксперимент: `bUseAdaptiveUnityBuild=false` в
+`%APPDATA%\Unreal Engine\UnrealBuildTool\BuildConfiguration.xml` (+ коммит плагин-правок
+схлопывает working set). Пока LC мёртв: **C++ правки собирать Visual Studio / Build.bat**
+(инкрементально 1–2 мин). Если LC оживёт — вернуть UBA-флаги в true и записать причину сюда.
 
 ## 2. ЧЕГО У НАС НЕТ (в оригинале есть — не использовать вслепую)
 
