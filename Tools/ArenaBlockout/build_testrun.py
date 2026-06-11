@@ -75,26 +75,26 @@ def main():
                                        unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0))
     ba.finish_actor(start, TAG, "BLK_TestRun_PlayerStart", "TestRun/Logic")
 
-    # --- attach arenas as LevelInstance actors (transform-capable) ---
+    # --- attach arenas as CLASSIC streaming sublevels (the author's proven way:
+    # Levels panel entries; nav bounds register, nav works). Transform is applied
+    # AT ADD TIME via add_level_to_world_with_transform - never afterwards. ---
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
     attached = 0
     for i, (name, _edge, zoff) in enumerate(ARENAS):
         pkg = "{}/{}/Lvl_{}".format(ARENA_ROOT, name, name)
-        world_asset = unreal.EditorAssetLibrary.load_asset(pkg)
-        if world_asset is None:
-            unreal.log_warning("[TESTRUN] arena level missing: {}".format(pkg))
-            continue
-        inst = eas.spawn_actor_from_class(
-            unreal.LevelInstance, unreal.Vector(i * SPACING, 0.0, float(zoff)))
-        if inst is None:
-            unreal.log_warning("[TESTRUN] LevelInstance spawn failed for {}".format(name))
-            continue
-        try:
-            inst.set_editor_property("world_asset", world_asset)
-        except Exception as e:
-            unreal.log_warning("[TESTRUN] world_asset for {}: {}".format(name, e))
-        ba.finish_actor(inst, TAG, "BLK_TestRun_LI_{}".format(name), "TestRun/Arenas")
-        attached += 1
-    log("LevelInstance arenas attached: {}".format(attached))
+        if unreal.GameplayStatics.get_streaming_level(world, pkg) or \
+           unreal.GameplayStatics.get_streaming_level(world, "Lvl_" + name):
+            attached += 1
+            continue  # already in the Levels panel - keep author's arrangement
+        xform = unreal.Transform(location=unreal.Vector(i * SPACING, 0.0, float(zoff)))
+        sl = unreal.EditorLevelUtils.add_level_to_world_with_transform(
+            world, pkg, unreal.LevelStreamingAlwaysLoaded, xform)
+        if sl:
+            attached += 1
+            log("Added sublevel {} at x={}".format(name, i * SPACING))
+        else:
+            unreal.log_warning("[TESTRUN] failed to add sublevel {}".format(pkg))
+    log("Streaming sublevels attached: {}".format(attached))
 
     # Navigation: arena navmesh tiles never transform with instances, and the
     # editor's async rebuild finishes AFTER our save (project default is Static
@@ -110,16 +110,6 @@ def main():
         # (and after our save) - spawn it explicitly so the flag lands in the save.
         nav_actor = eas.spawn_actor_from_class(unreal.RecastNavMesh,
                                                unreal.Vector(0.0, 0.0, 0.0))
-    # Bounds volumes INSIDE LevelInstances do not register at runtime (verified:
-    # gameplay debugger showed empty NavData) - the persistent level must carry
-    # ONE giant bounds covering the boulevard and every arena.
-    bounds = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume,
-                                        unreal.Vector(last_x * 0.5, -1500.0, 1200.0))
-    if bounds:
-        bounds.set_actor_scale3d(unreal.Vector((blvd_len + 12000) / 200.0,
-                                               13000 / 200.0, 6000 / 200.0))
-        ba.finish_actor(bounds, TAG, "BLK_TestRun_NavBounds", "TestRun/Nav")
-        log("Persistent NavMeshBoundsVolume spawned over the whole gauntlet")
     if nav_actor:
         nav_actor.set_editor_property("runtime_generation",
                                       unreal.RuntimeGenerationType.DYNAMIC)
