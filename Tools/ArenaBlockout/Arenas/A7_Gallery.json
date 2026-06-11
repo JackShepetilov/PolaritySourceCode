@@ -81,7 +81,8 @@
     { "id": "ramp_in_e", "shape": "box", "mat": "floor", "pos": [3700, 0, -220],   "size": [1000, 600, 60], "pitch": 26.57, "yaw": 180, "group": "EntryRamps" },
     { "id": "ramp_in_w", "shape": "box", "mat": "floor", "pos": [-3700, 0, -220],  "size": [1000, 600, 60], "pitch": 26.57, "yaw": 0,   "group": "EntryRamps" },
 
-    { "id": "ramp_roof_s", "shape": "ramp", "mat": "floor", "from": [2600, -3350, 0], "to": [900, -3350, 1000], "width": 450, "group": "GrandRamp" },
+    { "id": "ramp_shoe_s", "shape": "box", "mat": "floor", "pos": [2750, -3350, -250], "size": [500, 450, 500], "group": "GrandRamp" },
+    { "id": "ramp_roof_s", "shape": "ramp", "mat": "floor", "from": [2700, -3350, 0], "to": [900, -3350, 1000], "width": 450, "group": "GrandRamp" },
     { "id": "roof_porch_s", "shape": "box", "mat": "floor", "pos": [600, -3250, 950], "size": [400, 500, 100], "group": "GrandRamp" },
 
     { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 3110, 2200],  "size": [6240, 20, 2600], "group": "Field" },

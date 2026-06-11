@@ -250,10 +250,17 @@ def spawn_shape(eas, mats, piece, tag, arena):
         slope_len = math.hypot(dxy, dz)
         pitch = math.degrees(math.asin(dz / slope_len)) if slope_len else 0.0
         yaw = math.degrees(math.atan2(dy, dx))
-        cz = (fz + tz) * 0.5 - (thick * 0.5) * math.cos(math.radians(pitch))
+        # Overlap ONLY past the BOTTOM point (extending past the top makes the
+        # slope rise above the upper floor - wedge sticking out of the slab).
+        over = 60.0
+        ux, uy, uz = dx / slope_len, dy / slope_len, dz / slope_len
+        cx = (fx + tx) * 0.5 - ux * (over * 0.5)
+        cy = (fy + ty) * 0.5 - uy * (over * 0.5)
+        cz = (fz + tz) * 0.5 - uz * (over * 0.5) \
+            - (thick * 0.5) * math.cos(math.radians(pitch))
         piece = dict(piece,
-                     pos=[(fx + tx) * 0.5, (fy + ty) * 0.5, cz],
-                     size=[slope_len + 80.0, width, thick],  # 40uu overlap per end
+                     pos=[cx, cy, cz],
+                     size=[slope_len + over, width, thick],
                      pitch=pitch, yaw=yaw)
         shape = "box"
     # Containment fields: spawn the interactive BP (invisible hit-reveal shader,
