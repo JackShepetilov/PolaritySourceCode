@@ -36,6 +36,7 @@ ARENA_ROOT = "/Game/Variant_Shooter/Arenas/Biome1"
 SEA_FLOOR_Z = -2000.0
 WATER_Z = 0.0
 PAD_RIM = 900.0
+ARENA_LIFT = 10.0          # arenas float 10 uu above their pads (no z-fighting)
 SHORE_RUN = 1.4           # keep in sync with make_biome1_heightmap.py
 BRIDGE_OVERLAP = 800.0    # each end buried into the beach
 AUTHOR_SUBLEVELS = ["/Game/Variant_Shooter/Arenas/ArenaDebug/ArenaLightingDebug3"]
@@ -119,7 +120,7 @@ def _transform_matches(sl, pos, yaw):
         loc = t.translation
         cur_yaw = t.rotation.rotator().yaw
         return (abs(loc.x - pos[0]) < 1.0 and abs(loc.y - pos[1]) < 1.0 and
-                abs(loc.z - pos[2]) < 1.0 and
+                abs(loc.z - (pos[2] + ARENA_LIFT)) < 1.0 and
                 abs(((cur_yaw - yaw + 180.0) % 360.0) - 180.0) < 0.5)
     except Exception as e:
         warn("Cannot read level_transform ({}) - keeping as is".format(e))
@@ -154,7 +155,7 @@ def ensure_arenas(world, layout, slots):
             unreal.EditorLevelUtils.remove_level_from_world(lvl)
             log("Detached {} (slot moved)".format(name))
         xform = unreal.Transform(
-            location=unreal.Vector(pos[0], pos[1], pos[2]),
+            location=unreal.Vector(pos[0], pos[1], pos[2] + ARENA_LIFT),
             rotation=unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
         sl2 = unreal.EditorLevelUtils.add_level_to_world_with_transform(
             world, pkg, unreal.LevelStreamingAlwaysLoaded, xform)

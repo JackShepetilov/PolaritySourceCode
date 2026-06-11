@@ -301,6 +301,20 @@
         -16073,
         -3890
       ]
-    }
+    },
+    "coast_cuts": [
+      {
+        "bearing_deg": -72.0,
+        "halfwidth_deg": 21.0,
+        "depth": 0.3,
+        "comment": "author cut 1 (2026-06-11): NW lobe west of the cape - coast pulled in, beach transition"
+      },
+      {
+        "bearing_deg": 78.0,
+        "halfwidth_deg": 64.0,
+        "depth": 0.35,
+        "comment": "author cut 2: the whole east lobe - no empty forest land"
+      }
+    ]
   }
 }

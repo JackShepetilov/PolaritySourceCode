@@ -260,6 +260,12 @@ def main():
     r_theta = R0 * (1.0 + 0.07 * np.sin(2 * theta + p1)
                     + 0.05 * np.sin(3 * theta + p2)
                     + 0.06 * (Dw - 0.5) * 2.0)
+    # author coast cuts (2026-06-11): pull the coastline in over given bearing
+    # windows - the lobes become water with the standard beach transition
+    for cut in layout["rules"].get("coast_cuts", []):
+        dd_c = np.abs(((deg - (cut["bearing_deg"] % 360.0) + 180.0) % 360.0) - 180.0)
+        w_c = smoothstep(cut["halfwidth_deg"], cut["halfwidth_deg"] - 14.0, dd_c)
+        r_theta = r_theta * (1.0 - cut["depth"] * w_c)
     edge = np.hypot(dx, dy) / r_theta
     cape_bearing = np.degrees(np.arctan2(CPY - ICY, CPX - ICX)) % 360.0
     ddeg = np.abs(((deg - cape_bearing + 180.0) % 360.0) - 180.0)
