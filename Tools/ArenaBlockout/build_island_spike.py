@@ -199,17 +199,25 @@ def ensure_launch(eas):
     if cls is None:
         warn("RunLaunchPoint class not found - skipping")
         return
+    # remove previous markers in OUR level (incl. an untagged one from a failed
+    # run) - the GameMode grabs the first RunLaunchPoint it finds, duplicates
+    # would randomize the toss
+    for a in list(eas.get_all_level_actors()):
+        if a and a.get_class().get_name() == "RunLaunchPoint" and \
+           ba.in_package(a, LEVEL_PATH):
+            eas.destroy_actor(a)
     pt = eas.spawn_actor_from_class(
         cls, unreal.Vector(*LAUNCH),
         unreal.Rotator(roll=LAUNCH_ROT[0], pitch=LAUNCH_ROT[1], yaw=LAUNCH_ROT[2]))
     if pt is None:
         warn("RunLaunchPoint failed to spawn")
         return
+    pt.set_actor_location(unreal.Vector(*LAUNCH), False, False)
     pt.set_editor_property("arena_index", 0)
-    pt.set_editor_property("b_launch_from_sea", True)
+    pt.set_editor_property("launch_from_sea", True)  # C++ bLaunchFromSea
     pt.set_editor_property("launch_speed", LAUNCH_SPEED)
     ba.finish_actor(pt, TAG, "BLK_IslandSpike_RunLaunch", "IslandSpike/Logic")
-    log("RunLaunchPoint at {} pitch {} speed {} (sea toss onto the beach)".format(
+    log("RunLaunchPoint at {} pitch {} speed {} (sea toss onto A1 deck)".format(
         LAUNCH, LAUNCH_ROT[1], LAUNCH_SPEED))
 
 
