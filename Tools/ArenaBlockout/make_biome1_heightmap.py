@@ -120,14 +120,17 @@ def ridged(n, octaves, base_cells, seed, gain=0.55, offset=1.0):
     return out / total
 
 
-def thermal_erode(H, iters=55, talus=62.0, k=0.22):
-    """Talus-angle relaxation: material slides to lower neighbours where the
-    local drop exceeds the repose angle (~32 deg at 100 uu cells)."""
+def thermal_erode(H, iters=45, talus=62.0, k=0.22):
+    """Talus-angle relaxation over 8 NEIGHBOURS (4-neighbour version builds
+    axis-aligned terrace blocks on steep slopes - caught 2026-06-11). Diagonal
+    neighbours use sqrt(2)-scaled talus/НЕ flow share."""
+    nbrs = (((1, 0), 1.0), ((-1, 0), 1.0), ((0, 1), 1.0), ((0, -1), 1.0),
+            ((1, 1), 1.4142), ((1, -1), 1.4142), ((-1, 1), 1.4142), ((-1, -1), 1.4142))
     for _ in range(iters):
         delta = np.zeros_like(H)
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for (dy, dx), dist in nbrs:
             nb = np.roll(np.roll(H, dy, 0), dx, 1)
-            m = np.clip((H - nb - talus) * (k * 0.25), 0.0, None)
+            m = np.clip((H - nb - talus * dist) * (k * 0.125), 0.0, None)
             delta -= m
             delta += np.roll(np.roll(m, -dy, 0), -dx, 1)
         H = H + delta
@@ -408,47 +411,66 @@ def main():
             wy = cit["pos"][1] + loc[0] * sa_ + loc[1] * ca_
             return wx, wy, cit["pos"][2] + loc[2]
 
-        def cap_disc(cx_, cy2_, cap_z, R_):
+        def cap_disc(cx_, cy2_, cap_z, R_, flat_r=600.0):
+            # FLAT-BOTTOM cap: full depth across the deck width + margin, the
+            # cone only rises beyond flat_r (terrain must never graze the deck
+            # sides - caught by the author 2026-06-11)
             r_ = int(round((cy2_ + HALF) / SCALE))
             c_ = int(round((cx_ + HALF) / SCALE))
             r0_, r1_ = max(0, r_ - R_), min(N, r_ + R_ + 1)
             c0_, c1_ = max(0, c_ - R_), min(N, c_ + R_ + 1)
             yy_, xx_ = np.mgrid[r0_ - r_:r1_ - r_, c0_ - c_:c1_ - c_]
-            cap_ = cap_z + np.hypot(yy_, xx_) * SCALE * 0.55
+            dd_ = np.clip(np.hypot(yy_, xx_) * SCALE - flat_r, 0.0, None)
+            cap_ = cap_z + dd_ * 0.55
             H[r0_:r1_, c0_:c1_] = np.minimum(H[r0_:r1_, c0_:c1_], cap_)
 
         for line in st["lines_top_local"]:
             ax_, ay_, az_ = st_world(line[0])
             bx_, by_, bz_ = st_world(line[1])
             L_ = max(np.hypot(bx_ - ax_, by_ - ay_), 1.0)
-            kk = int(L_ / 250.0) + 2
+            kk = int(L_ / 150.0) + 2
             for i_ in range(kk):
                 t_ = i_ / (kk - 1.0)
                 cap_disc(ax_ + (bx_ - ax_) * t_, ay_ + (by_ - ay_) * t_,
-                         az_ + (bz_ - az_) * t_ - 150.0, 18)
+                         az_ + (bz_ - az_) * t_ - 150.0, 20)
         px_, py_, pz_ = st_world(st["platform_local"])
-        cap_disc(px_, py_, pz_ - 160.0, 14)
+        cap_disc(px_, py_, pz_ - 160.0, 16, flat_r=750.0)
         lx, ly, lz = st_world(st["landing_local"])
         d_l = np.hypot(Xu - lx, Yu - ly)
         wl = smoothstep(3400.0, 1700.0, d_l)
         H = H * (1 - wl) + (lz - 30.0) * wl
+        # soften the carve-trench walls around the flights WITHOUT touching the
+        # protected strip near the decks (no re-grazing; gates verify below)
+        d_st = np.full_like(H, 1e9)
+        for line in st["lines_top_local"]:
+            ax_, ay_, _ = st_world(line[0])
+            bx_, by_, _ = st_world(line[1])
+            seg_ = np.array([bx_ - ax_, by_ - ay_])
+            t_ = np.clip(((Xu - ax_) * seg_[0] + (Yu - ay_) * seg_[1]) / (seg_ @ seg_), 0, 1)
+            d_st = np.minimum(d_st, np.hypot(Xu - (ax_ + t_ * seg_[0]),
+                                             Yu - (ay_ + t_ * seg_[1])))
+        w_sm = smoothstep(3800.0, 1400.0, d_st) * smoothstep(750.0, 1250.0, d_st)
+        H = gauss3(H, passes=4, w=w_sm * 0.85)
         # numeric verification: clearance along each flight + tip contact
         for li, line in enumerate(st["lines_top_local"]):
             ax_, ay_, az_ = st_world(line[0])
             bx_, by_, bz_ = st_world(line[1])
             worst = -1e9
             lx0, ly0, _ = st_world(st["landing_local"])
-            kk = int(max(np.hypot(bx_ - ax_, by_ - ay_), 1.0) / 200.0) + 2
+            L2_ = max(np.hypot(bx_ - ax_, by_ - ay_), 1.0)
+            nx_, ny_ = -(by_ - ay_) / L2_, (bx_ - ax_) / L2_   # lateral unit
+            kk = int(L2_ / 200.0) + 2
             for i_ in range(kk):
                 t_ = i_ / (kk - 1.0)
-                sx_ = ax_ + (bx_ - ax_) * t_
-                sy_ = ay_ + (by_ - ay_) * t_
-                if np.hypot(sx_ - lx0, sy_ - ly0) < 1800.0:
+                bxx_ = ax_ + (bx_ - ax_) * t_
+                byy_ = ay_ + (by_ - ay_) * t_
+                if np.hypot(bxx_ - lx0, byy_ - ly0) < 1800.0:
                     continue  # the landing zone MEETS the deck by design
-                r_ = int(round((sy_ + HALF) / SCALE))
-                c_ = int(round((sx_ + HALF) / SCALE))
                 top_ = az_ + (bz_ - az_) * t_
-                worst = max(worst, H[r_, c_] - (top_ - 40.0))
+                for off_ in (-450.0, 0.0, 450.0):   # sides AND center
+                    r_ = int(round((byy_ + ny_ * off_ + HALF) / SCALE))
+                    c_ = int(round((bxx_ + nx_ * off_ + HALF) / SCALE))
+                    worst = max(worst, H[r_, c_] - (top_ - 40.0))
             print("stairs flight %d: max protrusion above deck-40: %.0f uu %s"
                   % (li + 1, worst, "OK" if worst <= 0 else "**BURIED**"))
         r_ = int(round((ly + HALF) / SCALE))
