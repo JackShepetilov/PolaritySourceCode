@@ -39,7 +39,8 @@ PAD_RIM = 900.0
 ARENA_LIFT = 10.0          # arenas float 10 uu above their pads (no z-fighting)
 SHORE_RUN = 1.4           # keep in sync with make_biome1_heightmap.py
 BRIDGE_OVERLAP = 800.0    # each end buried into the beach
-AUTHOR_SUBLEVELS = ["/Game/Variant_Shooter/Arenas/ArenaDebug/ArenaLightingDebug3"]
+AUTHOR_SUBLEVELS = ["/Game/Variant_Shooter/Arenas/ArenaDebug/ArenaLightingDebug3",
+                    "/Game/Variant_Shooter/Arenas/Biome1/RunLogic/Lvl_RunLogic"]
 
 
 def log(msg):
@@ -250,10 +251,15 @@ def ensure_water(eas):
             zone.set_folder_path("Biome1Island/Water")
             log("Spawned WaterZone")
     if zone is not None:
+        # NORMALIZE the zone every run: a collapsed/dragged zone (seen 1x1 at a
+        # random location 2026-06-11) desyncs the rendered surface from the
+        # underwater post-process
         try:
+            zone.set_actor_location(unreal.Vector(0.0, 0.0, 0.0), False, False)
             zone.set_editor_property("zone_extent", unreal.Vector2D(220000.0, 220000.0))
+            log("WaterZone normalized: loc (0,0,0), extent 220000x220000")
         except Exception as e:
-            warn("zone_extent not settable: {}".format(e))
+            warn("WaterZone normalize failed: {}".format(e))
 
 
 def ensure_author_extras(world):
@@ -294,6 +300,13 @@ def cleanup_foreign_orphans(eas):
             continue
         lbl = a.get_actor_label()
         cls = a.get_class().get_name()
+        if lbl.startswith("BLK_IslandSpike_"):
+            # spike-era junk that leaked into arena packages via the
+            # current-level spawn bug (launch marker, strait bridge, ...)
+            eas.destroy_actor(a)
+            removed += 1
+            log("Removed spike stray '{}' from {}".format(lbl, pkg))
+            continue
         if lbl in CANONICAL_VALVES:
             eas.destroy_actor(a)
             removed += 1
