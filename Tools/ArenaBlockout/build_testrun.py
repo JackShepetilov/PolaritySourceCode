@@ -44,14 +44,10 @@ def log(msg):
 def main():
     les, eas = ba.get_subsystems()
     mats = ba.ensure_materials(force=False)
-    # Regenerate from scratch every run: arenas attach as LevelInstance actors
-    # (the same mechanism the island will use), so a stale persistent level with
-    # origin-stacked streaming sublevels from older runs must not survive.
-    eal = unreal.EditorAssetLibrary
-    if eal.does_asset_exist(LEVEL_PATH):
-        les.new_level("/Game/__transient_testrun_switch")
-        eal.delete_asset(LEVEL_PATH)
-        log("Deleted old " + LEVEL_PATH)
+    # NEVER delete/recreate the map: the author adds debug sublevels and other
+    # manual content to it (wiped once - never again). Idempotency is tag-based:
+    # clear_tagged removes ONLY our BLOCKOUT_TestRun actors (incl. the
+    # LevelInstance arena actors), everything else survives the rebuild.
     ba.open_or_create_level(les, LEVEL_PATH)
     ba.clear_tagged(eas, TAG, LEVEL_PATH)
 
