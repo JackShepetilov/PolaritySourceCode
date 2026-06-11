@@ -1,0 +1,100 @@
+{
+  "name": "A8_Lighthouse",
+  "comment": "S-M арена «Маяк» (тир 1.5, вторая ранняя арена спирали мальдив). Доминанта — башня маяка в центре: LOS-блокер, вертикальный ландмарк биома (виден со всей спирали), спиральный подъём из 4 рамп на балкон (+1200), антенна на балконе. Вокруг — эллинг и сараи (L1 крыши, slam, wallrun). Вход с юга (-Y). Боевой круг вокруг башни.",
+  "level_path": "/Game/Variant_Shooter/Arenas/Biome1/A8_Lighthouse/Lvl_A8_Lighthouse",
+
+  "classes": {
+    "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
+    "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
+    "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
+    "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
+    "spawn_point": "/Script/Polarity.ArenaSpawnPoint",
+    "shooter": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC",
+    "melee": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_MeleeNPC",
+    "drone": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone"
+  },
+
+  "pieces": [
+    { "id": "ground",   "shape": "box", "mat": "floor", "pos": [0, 0, -50],     "size": [5200, 5200, 100], "group": "Floor" },
+    { "id": "approach", "shape": "box", "mat": "floor", "pos": [0, -2900, -50], "size": [1200, 700, 100],  "group": "Floor" },
+
+    { "id": "tower",      "shape": "cylinder", "mat": "wall", "pos": [0, 200, 900],  "size": [900, 900, 1800], "group": "Lighthouse" },
+    { "id": "tower_top",  "shape": "cylinder", "mat": "deco", "pos": [0, 200, 1900], "size": [600, 600, 200],  "group": "Lighthouse" },
+
+    { "id": "ramp_s",  "shape": "box", "mat": "floor", "pos": [0, -550, 150],   "size": [1300, 400, 60], "pitch": 13, "yaw": 0,   "group": "Spiral" },
+    { "id": "pad_se",  "shape": "box", "mat": "floor", "pos": [950, -200, 250], "size": [500, 500, 100], "group": "Spiral" },
+    { "id": "ramp_e",  "shape": "box", "mat": "floor", "pos": [950, 200, 450],  "size": [1300, 400, 60], "pitch": 13, "yaw": 90,  "group": "Spiral" },
+    { "id": "pad_ne",  "shape": "box", "mat": "floor", "pos": [950, 950, 550],  "size": [500, 500, 100], "group": "Spiral" },
+    { "id": "ramp_n",  "shape": "box", "mat": "floor", "pos": [0, 950, 750],    "size": [1300, 400, 60], "pitch": 13, "yaw": 180, "group": "Spiral" },
+    { "id": "pad_nw",  "shape": "box", "mat": "floor", "pos": [-950, 950, 850], "size": [500, 500, 100], "group": "Spiral" },
+    { "id": "ramp_w",  "shape": "box", "mat": "floor", "pos": [-950, 200, 1050], "size": [1300, 400, 60], "pitch": 13, "yaw": -90, "group": "Spiral" },
+
+    { "id": "balcony",   "shape": "box", "mat": "floor", "pos": [0, 200, 1200],   "size": [2100, 2100, 100], "group": "Balcony" },
+    { "id": "bal_par_s", "shape": "box", "mat": "deco",  "pos": [0, -800, 1300],  "size": [2100, 50, 100],  "group": "Balcony" },
+    { "id": "bal_par_n", "shape": "box", "mat": "deco",  "pos": [0, 1200, 1300],  "size": [2100, 50, 100],  "group": "Balcony" },
+    { "id": "bal_par_w", "shape": "box", "mat": "deco",  "pos": [-1025, 500, 1300], "size": [50, 1350, 100], "group": "Balcony" },
+    { "id": "bal_par_e", "shape": "box", "mat": "deco",  "pos": [1025, -100, 1300], "size": [50, 1150, 100], "group": "Balcony" },
+
+    { "id": "boathouse",    "shape": "box", "mat": "wall",    "pos": [-1600, -1400, 200], "size": [1600, 1000, 400], "group": "Boathouse" },
+    { "id": "wr_boathouse", "shape": "box", "mat": "wallrun", "pos": [-1600, -880, 250],  "size": [1400, 30, 350],   "group": "Boathouse" },
+
+    { "id": "shed_a", "shape": "box", "mat": "wall", "pos": [1500, 800, 175],  "size": [700, 700, 350], "group": "Sheds" },
+    { "id": "shed_b", "shape": "box", "mat": "wall", "pos": [1900, -300, 175], "size": [700, 700, 350], "group": "Sheds" },
+
+    { "id": "wr_breakwater", "shape": "box", "mat": "wallrun", "pos": [0, 2300, 275], "size": [1400, 30, 450], "group": "Breakwater" },
+
+    { "id": "cov_low_w",  "shape": "box", "mat": "wall", "pos": [-1500, 400, 50],   "size": [600, 150, 100], "group": "Cover" },
+    { "id": "cov_low_se", "shape": "box", "mat": "wall", "pos": [900, -1500, 50],   "size": [600, 150, 100], "group": "Cover" },
+    { "id": "cov_full_n", "shape": "box", "mat": "wall", "pos": [-800, 1800, 100],  "size": [150, 700, 200], "group": "Cover" },
+
+    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 2590, 1450],  "size": [5220, 20, 3000], "group": "Field" },
+    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -2590, 1450], "size": [5220, 20, 3000], "group": "Field" },
+    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-2590, 0, 1450], "size": [20, 5220, 3000], "group": "Field" },
+    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [2590, 0, 1450],  "size": [20, 5220, 3000], "group": "Field" }
+  ],
+
+  "exit_blocker_ids": ["fld_n", "fld_s", "fld_w", "fld_e"],
+
+  "markers": [
+    { "type": "player_start",  "pos": [0, -3050, 100], "yaw": 90 },
+    { "type": "respawn_point", "pos": [0, -2850, 100], "yaw": 90 },
+
+    { "type": "entry_trigger", "pos": [0, 0, 1400], "extent": [2480, 2480, 1500] },
+
+    { "type": "spawn", "id": "G1a", "pos": [-1900, -1900, 10], "yaw": 45 },
+    { "type": "spawn", "id": "G1b", "pos": [-2100, -800, 10],  "yaw": 0 },
+    { "type": "spawn", "id": "G2a", "pos": [1900, 1600, 10],   "yaw": -135 },
+    { "type": "spawn", "id": "G2b", "pos": [2100, 300, 10],    "yaw": 180 },
+    { "type": "spawn", "id": "G3a", "pos": [600, 700, 1310],   "yaw": -90 },
+    { "type": "spawn", "id": "Air1", "pos": [-1400, 1500, 60], "air": true, "air_height": 300 },
+
+    { "type": "prop_cluster", "id": "C_boathouse", "pos": [-900, -1700, 60], "count": 3, "radius": 160 },
+    { "type": "prop_cluster", "id": "C_sheds",     "pos": [1500, 200, 60],   "count": 3, "radius": 160 },
+    { "type": "prop_cluster", "id": "C_ramp",      "pos": [-700, -700, 60],  "count": 3, "radius": 150 },
+
+    { "type": "antenna", "id": "Antenna", "pos": [0, -700, 1260], "yaw": -90 },
+    { "type": "coordinator", "id": "Coordinator", "pos": [0, 200, 2400] },
+    { "type": "manager", "pos": [0, 200, 2600] },
+
+    { "type": "nav_link", "id": "NL_bal_s",   "pos": [350, -800, 1260],  "left": [0, 100, 0],  "right": [0, -550, -1250] },
+    { "type": "nav_link", "id": "NL_bal_e",   "pos": [1025, 500, 1260],  "left": [-100, 0, 0], "right": [600, 0, -1250] },
+    { "type": "nav_link", "id": "NL_boat",    "pos": [-1600, -1350, 410], "left": [0, -100, 0], "right": [0, 500, -400] },
+    { "type": "nav_link", "id": "NL_shed_a",  "pos": [1500, 850, 360],   "left": [0, -100, 0], "right": [0, 600, -350] }
+  ],
+
+  "screenshots": [
+    { "id": "top",    "pos": [0, 0, 5600],         "pitch": -90, "yaw": -90 },
+    { "id": "entry",  "pos": [0, -3100, 300],      "pitch": 0,   "yaw": 90 },
+    { "id": "iso_ne", "pos": [4200, 4400, 2900],   "pitch": -27, "yaw": -135 },
+    { "id": "iso_sw", "pos": [-4200, -4000, 2900], "pitch": -27, "yaw": 45 },
+    { "id": "balcony", "pos": [-1700, -1700, 1600], "pitch": -12, "yaw": 45 }
+  ],
+
+  "navmesh_bounds": { "pos": [0, 0, 1300], "size": [5400, 5400, 3200] },
+
+  "sustain": {
+    "max_alive": 4,
+    "total": 10,
+    "pool": [["melee", 3], ["shooter", 2], ["drone", 1]]
+  }
+}

@@ -68,8 +68,7 @@
     { "type": "player_start",  "pos": [0, -4250, 100], "yaw": 90 },
     { "type": "respawn_point", "pos": [0, -4150, 100], "yaw": 90 },
 
-    { "type": "entry_trigger", "pos": [0, -4150, 150],    "extent": [600, 150, 250] },
-    { "type": "entry_trigger", "pos": [-3500, 200, -200], "extent": [150, 300, 250] },
+    { "type": "entry_trigger", "pos": [0, 0, 700], "extent": [3300, 4000, 1450] },
 
     { "type": "npc", "id": "TowerTurret", "class_key": "turret", "pos": [2700, -2320, 530], "yaw": 135 },
 

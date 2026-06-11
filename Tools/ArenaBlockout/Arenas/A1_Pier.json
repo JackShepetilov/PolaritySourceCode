@@ -61,8 +61,7 @@
     { "type": "player_start",  "pos": [0, -3550, 100], "yaw": 90 },
     { "type": "respawn_point", "pos": [0, -3450, 100], "yaw": 90 },
 
-    { "type": "entry_trigger", "pos": [0, -3250, 150], "extent": [300, 100, 200] },
-    { "type": "entry_trigger", "pos": [0, 3250, 150],  "extent": [300, 100, 200] },
+    { "type": "entry_trigger", "pos": [0, 0, 1350], "extent": [2100, 3200, 1400] },
 
     { "type": "spawn", "id": "S1a", "pos": [950, 2750, 10],    "yaw": -90 },
     { "type": "spawn", "id": "S1b", "pos": [1350, 2750, 10],   "yaw": -90 },

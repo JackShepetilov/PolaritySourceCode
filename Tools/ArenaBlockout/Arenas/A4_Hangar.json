@@ -65,8 +65,7 @@
     { "type": "player_start",  "pos": [0, -4050, 100], "yaw": 90 },
     { "type": "respawn_point", "pos": [0, -3950, 100], "yaw": 90 },
 
-    { "type": "entry_trigger", "pos": [0, -3700, 150],    "extent": [300, 150, 200] },
-    { "type": "entry_trigger", "pos": [-2400, 2500, 150], "extent": [150, 300, 200] },
+    { "type": "entry_trigger", "pos": [0, 0, 450], "extent": [2100, 3500, 500] },
 
     { "type": "npc", "id": "NaveTurret", "class_key": "turret", "pos": [0, 3200, 430], "yaw": -90 },
 
