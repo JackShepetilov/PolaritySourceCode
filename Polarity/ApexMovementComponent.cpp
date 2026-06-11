@@ -268,6 +268,11 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 				&& FieldHit.GetActor() && FieldHit.GetActor()->ActorHasTag(FName("ContainmentField")))
 			{
 				PerformWallBounce(FieldHit);
+				// The sweep bounces the player BEFORE a real blocking hit lands, so the
+				// field's Event Hit (hit-reveal shader) never fires - notify it manually.
+				FieldHit.GetActor()->ReceiveHit(FieldHit.GetComponent(), CharacterOwner,
+					Capsule, false, FieldHit.ImpactPoint, FieldHit.ImpactNormal,
+					Velocity, FieldHit);
 			}
 		}
 	}
