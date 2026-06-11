@@ -806,7 +806,18 @@ def shots_only(arena_name):
     take_screenshots(eas, spec, spec["name"])
 
 
+def ensure_safe_to_build():
+    """Hard refusal instead of a hard crash: level loads during PIE kill the
+    editor (learned 2026-06-11 the expensive way - also never run builds while
+    another agent owns the editor; coordinate through the author)."""
+    ues = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
+    if ues.get_game_world() is not None:
+        raise RuntimeError("PIE is running - build refused (level load during "
+                           "PIE hard-crashes the editor). Stop PIE and retry.")
+
+
 def main():
+    ensure_safe_to_build()
     args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
     quit_when_done = "--quit" in sys.argv[1:]
     ok = False
