@@ -208,6 +208,34 @@ def ensure_water(eas):
             warn("zone_extent not settable: {}".format(e))
 
 
+AUTHOR_SUBLEVELS = ["/Game/Variant_Shooter/Arenas/ArenaDebug/ArenaLightingDebug3"]
+
+
+def ensure_author_extras(world, eas):
+    """The author's additions to this map are SACRED. The dirty-map guard in
+    open_or_create_level now refuses to run over unsaved work; this is the
+    second belt: re-attach his known sublevels if any past accident/crash left
+    them missing, and loudly report his debug character state."""
+    for pkg in AUTHOR_SUBLEVELS:
+        short = pkg.rsplit("/", 1)[-1]
+        if unreal.GameplayStatics.get_streaming_level(world, pkg) or \
+           unreal.GameplayStatics.get_streaming_level(world, short):
+            log("Author sublevel {} in place".format(short))
+            continue
+        sl = unreal.EditorLevelUtils.add_level_to_world(
+            world, pkg, unreal.LevelStreamingAlwaysLoaded)
+        if sl:
+            log("Re-attached author sublevel {}".format(short))
+        else:
+            warn("Could not re-attach author sublevel {} - add it in the "
+                 "Levels panel".format(pkg))
+    has_char = any(a for a in eas.get_all_level_actors()
+                   if a and "ShooterCharacter" in a.get_class().get_name())
+    if not has_char:
+        warn("BP_ShooterCharacter not found on the map (author places it "
+             "manually - NOT spawning one)")
+
+
 def ensure_dynamic_nav(eas):
     """Assembled-map navmesh MUST be runtime Dynamic (LevelDesign.md 8a.5)."""
     nav = None
@@ -237,6 +265,7 @@ def main():
     world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
     ensure_water(eas)
     ensure_arenas(world)
+    ensure_author_extras(world, eas)
 
     mats = ba.ensure_materials(force=False)
     ba.spawn_shape(eas, mats, BRIDGE, TAG, ARENA)

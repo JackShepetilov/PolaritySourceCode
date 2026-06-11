@@ -175,6 +175,16 @@ def report_sublevels(prefix):
 
 
 def open_or_create_level(les, level_path):
+    # NEVER load over unsaved work: a scripted load_level silently DISCARDS dirty
+    # maps (no Save? dialog) and the end-of-build save then cements the loss.
+    # Learned 2026-06-11 the hard way: wiped the author's freshly added lighting
+    # sublevel + debug character on Lvl_IslandSpike. Refuse loudly instead.
+    dirty = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
+    if dirty:
+        names = ", ".join(p.get_name() for p in dirty)
+        raise RuntimeError(
+            "UNSAVED map changes ({}) - save everything in the editor first; "
+            "a scripted level load would silently discard them".format(names))
     # Asset registry scans asynchronously on editor boot — NEVER trust does_asset_exist
     # alone, or a slow scan would route an EXISTING map into new_level() and blank it.
     try:
