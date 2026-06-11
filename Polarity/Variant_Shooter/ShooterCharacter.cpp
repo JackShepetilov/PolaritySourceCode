@@ -1044,6 +1044,18 @@ void AShooterCharacter::Tick(float DeltaTime)
 	
 }
 
+// File-scope helper (uniquely named — unity-build safe): true while the yank-throw montage is
+// actively playing on the FP arms' anim instance.
+static bool IsYankThrowMontageActiveOnFPMesh(UChargeAnimationComponent* ChargeComp, USkeletalMeshComponent* FPMesh)
+{
+	if (!ChargeComp || !ChargeComp->YankThrowMontage || !FPMesh)
+	{
+		return false;
+	}
+	UAnimInstance* AnimInst = FPMesh->GetAnimInstance();
+	return AnimInst && AnimInst->Montage_IsPlaying(ChargeComp->YankThrowMontage);
+}
+
 void AShooterCharacter::DoStartADS()
 {
 	// Don't ADS if melee attacking
@@ -1067,18 +1079,10 @@ void AShooterCharacter::DoStartADS()
 	// Don't ADS while the yank-throw montage is playing (throw interrupts ADS; don't let it
 	// re-enter mid-animation). Guarded by Montage_IsPlaying rather than PendingYankThrowWeapon
 	// alone so an interrupted montage can never leave ADS permanently blocked.
-	if (ChargeAnimationComponent && ChargeAnimationComponent->YankThrowMontage && PendingYankThrowWeapon.IsValid())
+	if (PendingYankThrowWeapon.IsValid() &&
+		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
 	{
-		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-		{
-			if (UAnimInstance* AnimInst = FPMesh->GetAnimInstance())
-			{
-				if (AnimInst->Montage_IsPlaying(ChargeAnimationComponent->YankThrowMontage))
-				{
-					return;
-				}
-			}
-		}
+		return;
 	}
 
 	// Let weapon handle secondary action as ability (e.g. laser's Second Harmonic)
@@ -3778,6 +3782,16 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	// (during channeling its SetLeftHandIKAlpha(0) sets alpha=0 to free left arm for
 	// catch/hold/throw montages — don't clobber it every Tick).
 	else if (bIsWallRunning)
+	{
+		TargetLeftHandIKAlpha = 0.0f;
+	}
+	// Yank-throw montage: force alpha=0 for its whole duration. The FP AnimBPs derive
+	// ControlRigAlpha = (1 - LeftHandIKAlpha) in their EventGraph, so alpha=0 switches the
+	// Control Rig ON — the throw animation follows camera pitch exactly like the channeling
+	// catch/hold/throw path — and frees the left hand from the weapon grip for the montage.
+	// Condition auto-clears when the montage ends, restoring the default alpha=1 below.
+	else if (PendingYankThrowWeapon.IsValid() &&
+		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}
