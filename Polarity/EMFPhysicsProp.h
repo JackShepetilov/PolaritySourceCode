@@ -661,6 +661,20 @@ private:
 	 *  Used for explosion checks so only the prop's OWN velocity counts. */
 	float CachedPreCollisionSpeed = 0.0f;
 
+	/** Full pre-collision velocity vector (same cache point as CachedPreCollisionSpeed).
+	 *  Used by the Air Mail bounce for the incidence-angle test — the post-collision
+	 *  velocity available inside OnPropHit is already reflected by the solver. */
+	FVector CachedPreCollisionVelocity = FVector::ZeroVector;
+
+	/** One-shot guard: a launched prop performs at most one Air Mail bounce per launch. */
+	bool bAirMailBounceConsumed = false;
+
+	/** Air Mail: if the player owns the upgrade and this impact qualifies (player-launched,
+	 *  not exploded, incidence angle within the 60–120° band), redirect the prop toward a
+	 *  point at the player's head height and tag it TAG_AirMailIncoming. Returns true if
+	 *  the bounce was performed. */
+	bool TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint);
+
 	// ==================== Charge Tracking State ====================
 
 	float PreviousChargeValue = 0.0f;

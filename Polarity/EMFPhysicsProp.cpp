@@ -13,6 +13,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_Wallslam.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
+#include "Upgrades/Upgrades/Upgrade_AirKick.h"
 #include "EMFVelocityModifier.h"
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -240,7 +241,8 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	// Cache speed for explosion checks (before collision callbacks modify velocity)
 	if (PropMesh)
 	{
-		CachedPreCollisionSpeed = PropMesh->GetPhysicsLinearVelocity().Size();
+		CachedPreCollisionVelocity = PropMesh->GetPhysicsLinearVelocity();
+		CachedPreCollisionSpeed = CachedPreCollisionVelocity.Size();
 	}
 
 	// Debug: always-visible capture range sphere around this prop
@@ -738,6 +740,19 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
+	// Air Mail state resolution — BEFORE the slow-prop early exit so a gently landing
+	// returned prop still clears its tag. A kicked prop resolves on this impact (the
+	// weak-impact path below carries the primed KickDamage); an un-kicked returning
+	// prop just lands.
+	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
+	}
+	else if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailIncoming))
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailIncoming);
+	}
+
 	// Early exit: nothing to do for slow/resting props that aren't in flight
 	if (!bIsInReverseFlight && CachedPreCollisionSpeed < ExplosionSpeedThreshold)
 	{
@@ -763,6 +778,9 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 					UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: Direct NPC hit → %s (Speed=%.0f), |charge|=%.1f < %.1f → weak impact"),
 						*GetName(), *OtherActor->GetName(), Speed, FMath::Abs(GetCharge()), ExplosionMinCharge);
 					ApplyWeakImpactToNPC(HitNPC, Hit.ImpactNormal, Hit.ImpactPoint);
+					// Air Mail: the prop survived (no explosion) — override the weak-impact
+					// reflection with the return-to-player flight if the impact qualifies.
+					TryAirMailBounce(Hit.ImpactNormal, Hit.ImpactPoint);
 					return;
 				}
 
@@ -844,10 +862,49 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	// End reverse flight state on any blocking collision (wall, floor, etc.)
 	if (bIsInReverseFlight)
 	{
+		// Air Mail: launched prop hit the environment without detonating — bounce it back
+		// toward the player (must run BEFORE bIsInReverseFlight is cleared: the bounce only
+		// applies to player-launched props).
+		TryAirMailBounce(Hit.ImpactNormal, Hit.ImpactPoint);
+
 		UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: bIsInReverseFlight set to FALSE due to collision with %s"),
 			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"));
 		bIsInReverseFlight = false;
 	}
+}
+
+bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint)
+{
+	// Only player-launched props return, once per launch, and only if the prop survived.
+	if (bAirMailBounceConsumed || !bIsInReverseFlight || bHasExploded || bIsDead || !PropMesh)
+	{
+		return false;
+	}
+
+	UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this);
+	if (!AirMail)
+	{
+		return false;
+	}
+
+	FVector ReturnVelocity;
+	if (!AirMail->TryComputeBounce(GetActorLocation(), CachedPreCollisionVelocity, ImpactNormal, ReturnVelocity))
+	{
+		return false;
+	}
+
+	bAirMailBounceConsumed = true;
+	PropMesh->SetPhysicsLinearVelocity(ReturnVelocity);
+	if (AirMail->GetReturnSpinSpeed() > 0.0f)
+	{
+		PropMesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * AirMail->GetReturnSpinSpeed());
+	}
+	Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
+	AirMail->PlayBounceFeedback(ImpactPoint);
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] launched prop %s bounced toward player (pre-impact speed=%.0f)"),
+		*GetName(), CachedPreCollisionSpeed);
+	return true;
 }
 
 void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
@@ -895,6 +952,17 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 					*GetName(), *HitNPC->GetName(), CachedPreCollisionSpeed, FMath::Abs(GetCharge()), ExplosionMinCharge);
 
 				ApplyWeakImpactToNPC(HitNPC, OverlapNormal, OverlapPoint);
+
+				// Air Mail: kicked-flight resolves on this NPC contact; an un-kicked launched
+				// prop that survived bounces back to the player instead of the weak reflect.
+				if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+				{
+					Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
+				}
+				else
+				{
+					TryAirMailBounce(OverlapNormal, OverlapPoint);
+				}
 				return;
 			}
 

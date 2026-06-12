@@ -9,10 +9,12 @@
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
 #include "Upgrades/UpgradeManagerComponent.h"
+#include "Upgrades/Upgrades/Upgrade_AirKick.h"
 #include "Components/StaticMeshComponent.h"
 #include "Curves/CurveFloat.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Engine/DamageEvents.h"
 
 ADroppedRangedWeapon::ADroppedRangedWeapon()
 {
@@ -61,32 +63,100 @@ void ADroppedRangedWeapon::BeginPlay()
 void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	if (!bCanStunOnImpact || !OtherActor) return;
+	if (!OtherActor || !WeaponMesh) return;
 
-	// Cooldown check — prevents one bounce from triggering multiple stun events.
+	// ==================== Air Mail: kicked flight resolves on first impact ====================
+	// The kicked weapon deals the upgrade's KickDamage to the NPC it slams into (plus the
+	// regular throw stun below, since bCanStunOnImpact is still set from the throw).
+	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
+
+		AShooterNPC* KickedNPC = Cast<AShooterNPC>(OtherActor);
+		if (KickedNPC && !KickedNPC->IsDead())
+		{
+			if (UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this))
+			{
+				AShooterCharacter* Player = AirMail->GetShooterCharacter();
+				FPointDamageEvent KickDamageEvent;
+				KickDamageEvent.DamageTypeClass = AirMail->GetKickDamageType();
+				KickDamageEvent.HitInfo = Hit;
+				KickedNPC->TakeDamage(AirMail->GetKickDamage(), KickDamageEvent,
+					Player ? Player->GetController() : nullptr, Player);
+
+				UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] kicked weapon %s slammed %s for %.0f"),
+					*GetName(), *KickedNPC->GetName(), AirMail->GetKickDamage());
+			}
+		}
+		// Fall through: the throw stun below may still apply on the same impact.
+	}
+	// Returning flight that hits anything without being kicked just lands — clear the state.
+	else if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailIncoming))
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailIncoming);
+	}
+
+	if (!bCanStunOnImpact) return;
+
+	const FVector ImpactVelocity = PreImpactVelocity;
+	const float ImpactSpeed = ImpactVelocity.Size();
+
+	// ==================== Throw stun (existing behavior) ====================
+	// Cooldown + velocity gates prevent stun-spam from a settling/rolling weapon.
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (Now - LastStunTime < StunCooldown) return;
+	if (Now - LastStunTime >= StunCooldown && ImpactSpeed >= StunImpactVelocityThreshold)
+	{
+		// Only NPCs (not props, not the player). HumanoidNPC's ApplyExplosionStun is currently
+		// no-op (immune to forces) — that's intentional per spec; passes through as no stun.
+		AShooterNPC* NPC = Cast<AShooterNPC>(OtherActor);
+		if (NPC && !NPC->IsDead())
+		{
+			NPC->ApplyExplosionStun(StunDuration, StunMontage);
+			LastStunTime = Now;
 
-	// Velocity gate — settling/rolling weapons shouldn't stun NPCs that brush against them.
-	if (!WeaponMesh) return;
-	const float ImpactSpeed = WeaponMesh->GetPhysicsLinearVelocity().Size();
-	if (ImpactSpeed < StunImpactVelocityThreshold) return;
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] %s stunned %s for %.1fs (impact speed=%.0f)"),
+				*GetName(), *NPC->GetName(), StunDuration, ImpactSpeed);
+		}
+	}
 
-	// Only NPCs (not props, not the player). HumanoidNPC's ApplyExplosionStun is currently
-	// no-op (immune to forces) — that's intentional per spec; passes through as no stun.
-	AShooterNPC* NPC = Cast<AShooterNPC>(OtherActor);
-	if (!NPC || NPC->IsDead()) return;
+	// ==================== Air Mail: bounce back to the player ====================
+	// One bounce per throw; never off the player themselves. Angle/speed gates live in the
+	// upgrade (60–120° incidence band — glancing slides don't return).
+	if (!bAirMailBounceConsumed
+		&& !OtherActor->IsA<AShooterCharacter>()
+		&& !ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		if (UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this))
+		{
+			FVector ReturnVelocity;
+			if (AirMail->TryComputeBounce(GetActorLocation(), ImpactVelocity, Hit.ImpactNormal, ReturnVelocity))
+			{
+				bAirMailBounceConsumed = true;
+				WeaponMesh->SetPhysicsLinearVelocity(ReturnVelocity);
+				if (AirMail->GetReturnSpinSpeed() > 0.0f)
+				{
+					WeaponMesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * AirMail->GetReturnSpinSpeed());
+				}
+				Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
+				AirMail->PlayBounceFeedback(Hit.ImpactPoint);
 
-	NPC->ApplyExplosionStun(StunDuration, StunMontage);
-	LastStunTime = Now;
-
-	UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] %s stunned %s for %.1fs (impact speed=%.0f)"),
-		*GetName(), *NPC->GetName(), StunDuration, ImpactSpeed);
+				UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] thrown weapon %s bounced off %s toward player (impact speed=%.0f)"),
+					*GetName(), *OtherActor->GetName(), ImpactSpeed);
+			}
+		}
+	}
 }
 
 void ADroppedRangedWeapon::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Cache pre-contact velocity for OnWeaponMeshHit — at hit-callback time the physics solver
+	// has already altered the velocity, which breaks the Air Mail incidence-angle test.
+	if (WeaponMesh && WeaponMesh->IsSimulatingPhysics())
+	{
+		PreImpactVelocity = WeaponMesh->GetPhysicsLinearVelocity();
+	}
 
 	if (bIsBeingPulled)
 	{

@@ -169,6 +169,13 @@ private:
 	/** Time of last stun event for cooldown checking (world seconds). */
 	float LastStunTime = -10.0f;
 
+	/** Velocity cached each Tick BEFORE physics contact resolution — OnComponentHit reports
+	 *  post-collision velocity, which is useless for the Air Mail incidence-angle test. */
+	FVector PreImpactVelocity = FVector::ZeroVector;
+
+	/** One-shot guard: a thrown weapon performs at most one Air Mail bounce per throw. */
+	bool bAirMailBounceConsumed = false;
+
 	// ==================== Pull State ====================
 
 	bool bIsBeingPulled = false;

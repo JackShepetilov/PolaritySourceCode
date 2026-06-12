@@ -26,6 +26,7 @@
 #include "ShooterWeapon.h"
 #include "EMFPhysicsProp.h"
 #include "Upgrades/UpgradeManagerComponent.h"
+#include "Upgrades/Upgrades/Upgrade_AirKick.h"
 #include "Foliage/FoliageConversionLibrary.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
@@ -760,6 +761,13 @@ bool UMeleeAttackComponent::IsValidMeleeTarget(AActor* HitActor) const
 
 	// Check if it's a destructible environment target (islands, etc.)
 	if (HitActor->ActorHasTag(TEXT("MeleeDestructible")))
+	{
+		return true;
+	}
+
+	// Air Mail: objects flying back to the player (incl. thrown weapons, which are plain
+	// actors) must be kickable — the upgrade redirects them on OnMeleeHit.
+	if (HitActor->ActorHasTag(UUpgrade_AirKick::TAG_AirMailIncoming))
 	{
 		return true;
 	}

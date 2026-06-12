@@ -29,6 +29,8 @@
 #include "Curves/CurveFloat.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
+#include "Polarity/Upgrades/Upgrades/Upgrade_AirKick.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
 #include "../UI/DamageNumbersSubsystem.h"
 #include "../UI/EMFChargeWidgetSubsystem.h"
@@ -3680,12 +3682,53 @@ void AShooterNPC::StopPermissionRetryTimer()
 
 // ==================== Wall Slam ====================
 
+// File-scope helper (uniquely named — unity-build safe): Air Mail bounce for a player-thrown
+// NPC that survived its impact. Computes the return-to-player velocity on the upgrade (angle
+// and speed gates included), redirects via LaunchCharacter, and tags the NPC as incoming.
+static bool TryAirMailBounceForNPC(AShooterNPC* NPC, const FVector& PreImpactVelocity,
+	const FVector& ImpactNormal, const FVector& ImpactPoint)
+{
+	if (!NPC || NPC->IsDead())
+	{
+		return false;
+	}
+
+	UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(NPC);
+	if (!AirMail)
+	{
+		return false;
+	}
+
+	FVector ReturnVelocity;
+	if (!AirMail->TryComputeBounce(NPC->GetActorLocation(), PreImpactVelocity, ImpactNormal, ReturnVelocity))
+	{
+		return false;
+	}
+
+	NPC->LaunchCharacter(ReturnVelocity, true, true);
+	NPC->Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
+	AirMail->PlayBounceFeedback(ImpactPoint);
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] thrown NPC %s survived impact and bounced toward player"),
+		*NPC->GetName());
+	return true;
+}
+
 void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
 	// Ignore if dead
 	if (bIsDead)
 	{
 		return;
+	}
+
+	// Air Mail: any capsule contact ends the "incoming" return flight (landed, or reached the
+	// player without being kicked). Remember the state for this hit's bounce gating below —
+	// a landing contact must not trigger a second bounce (one bounce per throw).
+	const bool bWasAirMailIncoming = ActorHasTag(UUpgrade_AirKick::TAG_AirMailIncoming);
+	if (bWasAirMailIncoming)
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailIncoming);
 	}
 
 	// Only apply wall slam damage during knockback
@@ -3706,11 +3749,43 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 			const float ImpactSpeed = PreviousTickVelocity.Size();
 			if (ImpactSpeed >= NPCCollisionMinVelocity)
 			{
+				// Air Mail: a kicked NPC projectile slams its target — KickDamage to BOTH
+				// (the elastic collision below still handles physics/stun as usual).
+				const bool bWasAirMailKicked = ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked);
+				if (bWasAirMailKicked)
+				{
+					Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
+					if (UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this))
+					{
+						AShooterCharacter* Player = AirMail->GetShooterCharacter();
+						AController* PlayerController = Player ? Player->GetController() : nullptr;
+						FDamageEvent KickDamageEvent;
+						KickDamageEvent.DamageTypeClass = AirMail->GetKickDamageType();
+						const float KickDamage = AirMail->GetKickDamage();
+
+						UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] kicked NPC %s rammed %s — %.0f damage to both"),
+							*GetName(), *OtherNPC->GetName(), KickDamage);
+
+						OtherNPC->TakeDamage(KickDamage, KickDamageEvent, PlayerController, Player);
+						TakeDamage(KickDamage, KickDamageEvent, PlayerController, Player);
+					}
+				}
+
+				// Thrown-by-player state must be sampled BEFORE ExitLaunchedState clears it.
+				const bool bWasThrownByPlayer = bIsLaunched || bShouldStunOnNPCImpact;
+
 				FVector CollisionPoint = (GetActorLocation() + OtherNPC->GetActorLocation()) * 0.5f;
 				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, ImpactSpeed);
 				if (bIsLaunched)
 				{
 					ExitLaunchedState();
+				}
+
+				// Air Mail: thrown NPC survived ramming an enemy → bounce toward the player.
+				// Kicked flights and landing contacts of a previous bounce don't re-bounce.
+				if (!bWasAirMailKicked && !bWasAirMailIncoming && bWasThrownByPlayer && !bIsDead)
+				{
+					TryAirMailBounceForNPC(this, PreviousTickVelocity, Hit.ImpactNormal, CollisionPoint);
 				}
 			}
 		}
@@ -3835,6 +3910,20 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 					*SurfaceType, PerpendicularVelocity, WallSlamDamage));
 		}
 #endif
+	}
+
+	// ==================== Air Mail: thrown NPC hit a surface ====================
+	// A kicked projectile's flight ends on a real slam; an un-kicked thrown NPC that SURVIVED
+	// the slam damage above bounces toward the player (landing contacts of a previous bounce
+	// carry bWasAirMailIncoming and never re-bounce — one bounce per throw). The angle gate
+	// (60–120° incidence band) lives in the upgrade, so slides along the surface don't return.
+	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
+	}
+	else if (!bWasAirMailIncoming && (bIsLaunched || bShouldStunOnNPCImpact) && !bIsDead)
+	{
+		TryAirMailBounceForNPC(this, ImpactVelocity, Hit.ImpactNormal, Hit.ImpactPoint);
 	}
 }
 

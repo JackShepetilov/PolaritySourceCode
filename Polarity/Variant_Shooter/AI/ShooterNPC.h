@@ -1053,7 +1053,7 @@ public:
 	/**
 	 * Launch this NPC into the air with the given velocity, reusing the SAME launched-state
 	 * machinery as the reverse-channeling throw — but triggered directly (no capture / plate /
-	 * second button press). Used by Air Mail when the player air-melees a max-charge enemy.
+	 * second button press). Used by Air Mail when the player kicks an incoming bounced NPC.
 	 *  - Works on already-stunned enemies: ForceResetCombatState() clears capture/launch/knockback
 	 *    guards first (and restores ground friction, so the NPC won't slide on landing).
 	 *  - Humanoids are immune: EnterLaunchedState() is a no-op override for them.
