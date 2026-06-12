@@ -299,6 +299,69 @@ def phase3():
         warn("{} instance(s) off the ground - investigate before shipping"
              .format(outliers))
 
+    # ---- cliff wall: one ISM container, full per-instance transforms ----
+    # (FoliageService cannot control rotation per instance; the wall pieces
+    # must face OUT of the slope and lean into it - author round 5)
+    cw = plan.get("cliff_wall")
+    if cw:
+        tag = cw["tag"]
+        # ALWAYS clear the old container - an empty plan means the wall
+        # approach was retired (terraced strata in the heightmap instead)
+        for a in list(eas.get_all_level_actors()):
+            if a and tag in [str(t) for t in a.tags]:
+                eas.destroy_actor(a)
+                log("removed old {} container".format(tag))
+    if cw and cw.get("instances"):
+        host = eas.spawn_actor_from_class(
+            unreal.StaticMeshActor, unreal.Vector(0.0, 0.0, 0.0),
+            unreal.Rotator(0.0, 0.0, 0.0))
+        host.set_actor_label(tag)
+        host.set_editor_property("tags", [unreal.Name(tag)])
+        host.set_folder_path("Biome1Island/ArtPass")
+        try:
+            host.static_mesh_component.set_editor_property(
+                "mobility", unreal.ComponentMobility.STATIC)
+        except Exception:
+            pass
+        def add_ism(host_actor):
+            """Instance component via SubobjectDataSubsystem (the only
+            python-exposed way in 5.6: AActor.add_component_by_class and
+            register_component are not reflected)."""
+            sds = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+            roots = sds.k2_gather_subobject_data_for_instance(host_actor)
+            params = unreal.AddNewSubobjectParams(
+                parent_handle=roots[0],
+                new_class=unreal.InstancedStaticMeshComponent)
+            handle, fail = sds.add_new_subobject(params)
+            data = sds.k2_find_subobject_data_from_handle(handle)
+            return unreal.SubobjectDataBlueprintFunctionLibrary.get_object(data)
+
+        by_mesh = {}
+        for inst in cw["instances"]:
+            by_mesh.setdefault(inst["mesh"], []).append(inst)
+        placed = 0
+        for mesh_name, insts in sorted(by_mesh.items()):
+            mesh = unreal.EditorAssetLibrary.load_asset(cw["mesh_dir"] + mesh_name)
+            if mesh is None:
+                warn("cliff mesh missing: {}".format(mesh_name))
+                continue
+            comp = add_ism(host)
+            if comp is None:
+                warn("could not create ISM component for {}".format(mesh_name))
+                continue
+            comp.set_editor_property("mobility", unreal.ComponentMobility.STATIC)
+            comp.set_static_mesh(mesh)
+            for q in insts:
+                t = unreal.Transform(
+                    location=unreal.Vector(q["x"], q["y"], q["z"]),
+                    rotation=unreal.Rotator(roll=q["roll"], pitch=q["pitch"],
+                                            yaw=q["yaw"]),
+                    scale=unreal.Vector(q["scale"], q["scale"], q["scale"]))
+                comp.add_instance(t, True)
+                placed += 1
+        log("CLIFF WALL: {} instances over {} mesh types (actor '{}')".format(
+            placed, len(by_mesh), tag))
+
     ifa_pkgs = []
     for a in eas.get_all_level_actors():
         if a and a.get_class().get_name() == "InstancedFoliageActor":

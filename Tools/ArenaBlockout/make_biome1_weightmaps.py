@@ -70,8 +70,6 @@ ROCK_DIR = ENV + "Rocks/"
 FT_ISLAND_DIR = "/Game/Variant_Shooter/Arenas/Biome1/Island"
 ROCK_GROUPS = {
     # group: (meshes, min_scale, max_scale, align_max_deg, cull, spacing, count)
-    "cliff": (["SM_Env_Rock_Cliff_01", "SM_Env_Rock_Cliff_02", "SM_Env_Rock_Cliff_03"],
-              1.5, 2.8, 75.0, 0.0, 2800.0, 120),
     "boulder": (["SM_Env_Rock_01", "SM_Env_Rock_02", "SM_Env_Rock_03",
                  "SM_Env_Rock_04", "SM_Env_Rock_05", "SM_Env_Rock_06",
                  "SM_Env_Rock_Round_01"],
@@ -82,8 +80,21 @@ ROCK_GROUPS = {
                 "SM_Env_Rock_Ground_02", "SM_Env_Rock_Small_01"],
                0.6, 1.2, 45.0, 80000.0, 800.0, 380),
 }
-ROCK_SINK = {"cliff": (100.0, 250.0), "boulder": (50.0, 140.0),
-             "debris": (20.0, 70.0)}
+ROCK_SINK = {"boulder": (50.0, 140.0), "debris": (20.0, 70.0)}
+
+# CLIFF WALL (author round 5: continuous coverage, oriented INTO the face -
+# scattered upright boulders looked ridiculous). Real coastal cliffs read as
+# horizontal COURSES of rock with a crown lip and talus feet; Synty style
+# builds that from cliff meshes laid in masonry rows along the face. Placed
+# via an ISM container (foliage cannot control per-instance rotation).
+# mesh: (width@1, weight) - widths probed in-engine 2026-06-12
+CLIFF_MESHES = {"SM_Env_Rock_Cliff_01": (500.0, 0.2),
+                "SM_Env_Rock_Cliff_02": (1185.0, 0.4),
+                "SM_Env_Rock_Cliff_03": (2227.0, 0.4)}
+CLIFF_TAG = "ARTPASS_CliffWall"
+COURSE_H = 650.0          # vertical course step (mesh height ~800-1000 scaled)
+COURSE_SPACING = 1150.0   # along-face spacing inside a course (overlap)
+CROWN_SPACING = 950.0
 
 
 def rock_ft_path(mesh_name):
@@ -321,6 +332,20 @@ def main():
     sx_, sy_, sz_ = slots["start_reef"]["pos"]
     reef_zone = smoothstep(3100.0, 2500.0, np.hypot(Xu - sx_, Yu - sy_))
     w_rock = w_rock * (1.0 - maldive_zone) * (1.0 - reef_zone)
+
+    # terraced cliff TREADS stay rock (the strata stamp flattens courses
+    # below the slope threshold - pure slope rule would stripe them green):
+    # any tread within ~500 uu of a steep riser inside the cape sector is
+    # rock; wider benches keep their grass accents
+    riser = (slope > 30.0) & (in_cliff > 0.5)
+    riser_dil = riser.copy()
+    for _ in range(5):
+        nd = riser_dil.copy()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nd |= np.roll(np.roll(riser_dil, dy, 0), dx, 1)
+        riser_dil = nd
+    w_rock = np.maximum(w_rock, (riser_dil & (in_cliff > 0.5)
+                                 & (H > 300.0)).astype(np.float32))
 
     # BEACH BY DISTANCE (author round 3: "пляж везде шириной 7-10 м") - the
     # height-band beach vanished on steep coasts and ate whole flats. Sand
@@ -613,9 +638,8 @@ def main():
     rock_ok = ((H > -300.0) & (road_d > 800.0) & (pad_d > 500.0)
                & (bowl_d > 800.0) & (cit_d > 800.0) & (stair_d > 1300.0)
                & ~bridge_keep & (maldive_zone < 0.5) & (reef_zone < 0.5))
-    steep = slope > 38.0
+    steep = slope > 36.0
     fields = {
-        "cliff": (rock_bin & steep & rock_ok).astype(np.float32),
         "boulder": (rock_bin & ~steep & rock_ok).astype(np.float32),
         "debris": (rock_dil & ~rock_bin & (slope < 27.0) & (H > 60.0)
                    & rock_ok).astype(np.float32),
@@ -627,9 +651,62 @@ def main():
         for x, y in pts:
             put_rock(rock_ft_path(pick(meshes)), x, y, rng.uniform(s0, s1))
         rock_counts[grp] = len(pts)
-    print("rocks: cliff %d, boulder %d, debris %d" % (
-        rock_counts.get("cliff", 0), rock_counts.get("boulder", 0),
-        rock_counts.get("debris", 0)))
+
+    # ---- CLIFF WALL: masonry courses over every steep face ----
+    # candidates on a course grid: key = (height band, along-face cell) ->
+    # one piece per cell = continuous overlapping rows that follow contours
+    grad = np.hypot(gx, gy)
+    face_cells = steep & rock_ok
+    crown_cells = (~steep & (slope > 16.0) & (slope < 34.0) & rock_dil
+                   & rock_ok & (H > 500.0))
+    wall = []
+
+    def lay_pieces(cells, spacing, scale_rng, pitch_fn, sink_fn, label):
+        """One course per COURSE_H height band; min-distance thinning inside
+        the band keeps along-face spacing (the first version hashed by the
+        LOCAL contour direction - keys never collided, 9018 pieces)."""
+        rr, cc = np.where(cells)
+        if not len(rr):
+            return 0
+        bands = {}
+        for r, c in zip(rr.tolist(), cc.tolist()):
+            b = int(float(H[r, c]) // COURSE_H)
+            bands.setdefault(b, []).append((c * SCALE - HALF, r * SCALE - HALF))
+        n = 0
+        for b in sorted(bands):
+            for x, y in thin_by_spacing(np.array(bands[b]), spacing, rng):
+                r = int(round((y + HALF) / SCALE))
+                c = int(round((x + HALF) / SCALE))
+                oxn, oyn = -float(gx[r, c]), -float(gy[r, c])
+                g0 = math.hypot(oxn, oyn)
+                if g0 < 1e-3:
+                    continue
+                oxn, oyn = oxn / g0, oyn / g0      # outward (downhill) dir
+                mesh = rng.choice(list(CLIFF_MESHES.keys()),
+                                  p=[w for _, w in CLIFF_MESHES.values()])
+                width = CLIFF_MESHES[mesh][0]
+                s = rng.uniform(*scale_rng)
+                yaw = math.degrees(math.atan2(oyn, oxn)) + rng.uniform(-10.0, 10.0)
+                sl = float(slope[r, c])
+                pitch = pitch_fn(sl) + rng.uniform(-5.0, 5.0)
+                roll = rng.uniform(-7.0, 7.0)
+                sink = sink_fn(width * s)
+                px = x - oxn * sink
+                py = y - oyn * sink
+                pz = hsample(px, py) - rng.uniform(80.0, 200.0)
+                wall.append({"mesh": mesh, "x": round(px, 1),
+                             "y": round(py, 1), "z": round(pz, 1),
+                             "yaw": round(yaw, 1), "pitch": round(pitch, 1),
+                             "roll": round(roll, 1), "scale": round(s, 2)})
+                n += 1
+        return n
+
+    # NOTE (author round 5->6): the masonry cliff wall is DEAD - cliffs are
+    # terraced strata in the heightmap now (make_biome1_heightmap.py). The
+    # empty instances list below makes the apply script DESTROY the old
+    # ARTPASS_CliffWall container. Boulders/debris stay as ledge accents.
+    print("rocks: wall %d (terraces replace it), boulder %d, debris %d" % (
+        len(wall), rock_counts.get("boulder", 0), rock_counts.get("debris", 0)))
 
     # rule check (author 2026-06-12): no palm may touch water - report the
     # lowest palm foot over the heightmap
@@ -686,6 +763,8 @@ def main():
         "seed": args.seed,
         "terrain_seed": args.terrain_seed,
         "foliage_type_defs": rock_type_defs,
+        "cliff_wall": {"tag": CLIFF_TAG, "mesh_dir": ROCK_DIR,
+                       "instances": wall},
         "heightmap": os.path.basename(HEIGHTMAP),
         "comment": "Biome1 island art pass v1 - generated by make_biome1_weightmaps.py; "
                    "apply with apply_biome1_art_pass.py (idempotent per foliage type)",
