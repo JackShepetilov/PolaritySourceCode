@@ -29,7 +29,12 @@ LS_LABEL = "Biome1Island"
 MAT_INST = ("/Game/PolygonNatureBiomes/PNB_Tropical_Jungle/LandscapeMaterial/"
             "M_Landscape_base_Inst")
 LI_DIR = "/Game/Variant_Shooter/Arenas/Biome1/Island"
-LAYERS = ["Sand_01", "Rockwall", "Grass", "Grass_Clovers"]
+# 'Base' (LB_AlphaBlend in the Synty master) MUST be allocated, or every
+# all-HeightBlend pixel renders BLACK (caught live 2026-06-12). Import order
+# in phase 2: Base FIRST (its import renormalizes by dumping the deficit
+# into the FIRST landscape layer - importing it last corrupts the real
+# masks), then the four real masks overwrite per-pixel weights exactly.
+LAYERS = ["Base", "Sand_01", "Rockwall", "Grass", "Grass_Clovers"]
 ISLAND_DIR = os.path.join(TOOLS_DIR, "Island")
 PLAN_PATH = os.path.join(ISLAND_DIR, "biome1_foliage_plan.json")
 AUTHOR_SUBLEVELS = ["/Game/Variant_Shooter/Arenas/ArenaDebug/ArenaLightingDebug3",

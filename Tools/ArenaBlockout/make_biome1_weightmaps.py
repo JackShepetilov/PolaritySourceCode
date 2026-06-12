@@ -350,6 +350,13 @@ def main():
             os.path.join(OUT_DIR, "biome1_weight_{}.png".format(name)))
         print("mask %-13s coverage %5.1f%% (mean weight)" %
               (name, float(arr.mean()) / 2.55))
+    # 'Base' (LB_AlphaBlend) MUST be allocated on the landscape or the Synty
+    # master renders the whole landscape BLACK (caught live 2026-06-12).
+    # Constant low weight; the apply script imports it FIRST, the four real
+    # masks then overwrite per-pixel weights (sum 255 -> Base ends ~0 but
+    # stays allocated).
+    Image.fromarray(np.full((N, N), 26, dtype=np.uint8), mode="L").save(
+        os.path.join(OUT_DIR, "biome1_weight_Base.png"))
 
     # ---------------- keep-out fields for foliage ----------------
     g1, g2, g3, cit = slots["G1"], slots["G2"], slots["G3"], slots["Citadel"]
@@ -413,12 +420,12 @@ def main():
     # palms (cells 8 ~ 25k features: a dozen grove/gap alternations around
     # the perimeter; cells 5 left 12 palms total - whole-ring misses)
     palm_grove = smoothstep(0.40, 0.54, mh.fbm(N, 4, 8, args.seed + 421))
-    # palms NEVER touch water (author review 2026-06-12): Gerstner waves ride
-    # well above Z=0, so the dry-foot floor is H>=250 (was 90 - wet). The
-    # band reaches 1100-1500 (the apron under 250 is gone) and the slope gate
-    # is palm-real 16-26 deg: the 250+ zone IS the rising coast shoulder, the
-    # old <12 deg gate left 14 palms on the whole island
-    palm_f = ((1.0 - smoothstep(1100.0, 1500.0, H)) * smoothstep(250.0, 330.0, H)
+    # palms NEVER touch water (author review 2026-06-12): the AUTHOR ocean on
+    # this map sits at Z=150 and Gerstner crests reach ~410 (audited live via
+    # verify_artpass_water.py) - dry-foot floor H>=500. The band reaches
+    # 1100-1500 and the slope gate is palm-real 16-26 deg (the <12 deg gate
+    # left 14 palms on the whole island)
+    palm_f = ((1.0 - smoothstep(1100.0, 1500.0, H)) * smoothstep(500.0, 580.0, H)
               * smoothstep(26.0, 16.0, slope) * palm_grove * keep_tree)
     # flower meadows keep the old clover-noise SHAPE (the painted layer is
     # gone), gated to actual grass so they never sit on sand pads or road
@@ -428,8 +435,11 @@ def main():
     flower_f = np.maximum(flower_f, shoulder_band * smoothstep(18.0, 10.0, slope)
                           * (masks["Grass"] / 255.0) * keep_small * (H > 80.0))
     wrack_noise = smoothstep(0.42, 0.56, mh.fbm(N, 4, 8, args.seed + 521))
-    beach_f = ((1.0 - smoothstep(100.0, 180.0, H)) * smoothstep(15.0, 45.0, H)
-               * smoothstep(16.0, 9.0, slope) * wrack_noise * keep_small)
+    # wet-sand wave zone ABOVE the real waterline (ocean Z=150, crests ~410):
+    # driftwood/seaweed sit awash, not sunk; the 170+ shore is a rising
+    # shoulder, so the slope gate is loose (wood beaches on slopes just fine)
+    beach_f = ((1.0 - smoothstep(450.0, 560.0, H)) * smoothstep(170.0, 230.0, H)
+               * smoothstep(22.0, 13.0, slope) * wrack_noise * keep_small)
 
     # ---------------- sample the plan ----------------
     plan = {}     # ft_path -> list[[x, y, z_trace]]
@@ -501,13 +511,13 @@ def main():
     for sid in ("M1", "M2", "M3", "M4"):
         s = slots[sid]
         t, run = lens[sid]
-        palm_field = ((t > 200.0) & (t < run * 0.7) & (H > 250.0)
+        palm_field = ((t > 200.0) & (t < run * 0.7) & (H > 500.0)
                       & (bridge_d > 1000.0)) * smoothstep(26.0, 16.0, slope)
         n_palm = int(rng.integers(3, 6) if s.get("tier") == "M"
                      else rng.integers(2, 5))
         for x, y in sample_field(palm_field, n_palm, rng, spacing=620.0):
             put(pick(FT_PALM if rng.random() < 0.8 else FT_BANANA), x, y)
-        drift_field = ((t > run * 0.35) & (t < run) & (H > 25.0) & (H < 140.0)
+        drift_field = ((t > run * 0.35) & (t < run) & (H > 170.0) & (H < 350.0)
                        & (bridge_d > 900.0)).astype(np.float32)
         for x, y in sample_field(drift_field, int(rng.integers(1, 4)), rng,
                                  spacing=1100.0):
@@ -527,7 +537,7 @@ def main():
             pmin = min(pmin, at(H, q[0], q[1]))
             pn += 1
     print("palms: %d total, lowest foot H=%.0f uu %s" % (
-        pn, pmin, "OK (>=250)" if pmin >= 250.0 else "**TOO WET**"))
+        pn, pmin, "OK (>=500, crest 410)" if pmin >= 500.0 else "**TOO WET**"))
 
     # live-terrain probes: apply_biome1_art_pass.py refuses to paint when the
     # open landscape does not match THIS heightmap (stale import guard)
