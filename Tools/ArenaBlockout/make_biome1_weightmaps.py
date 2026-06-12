@@ -296,14 +296,26 @@ def main():
     reef_zone = smoothstep(3100.0, 2500.0, np.hypot(Xu - sx_, Yu - sy_))
     w_rock = w_rock * (1.0 - maldive_zone) * (1.0 - reef_zone)
 
-    shoreline_jitter = (mh.fbm(N, 4, 9, args.seed + 301) - 0.5) * 170.0
-    beach = 1.0 - smoothstep(140.0 + shoreline_jitter, 330.0 + shoreline_jitter, H)
-    w_sand = beach.copy()
-    w_sand = np.maximum(w_sand, smoothstep(950.0, 430.0, road_d))     # road ribbon
-    # the whole lens above water is SAND - these islets are sandbars now
-    # (the old grass-top + sandy-ring split died with the flat-disc model)
-    w_sand = np.maximum(w_sand, maldive_zone * smoothstep(-250.0, -120.0, H))
-    w_sand = np.maximum(w_sand, reef_zone)                             # reef = all sand
+    # BEACH BY DISTANCE (author round 3: "пляж везде шириной 7-10 м") - the
+    # height-band beach vanished on steep coasts and ate whole flats. Sand
+    # ribbon = horizontal (Chebyshev) distance to the waterline, 1 px=100 uu,
+    # width jittered 7..10 px. The author ocean sits at Z=150.
+    water = H < 150.0
+    dist_px = np.where(water, 0.0, 99.0).astype(np.float32)
+    dil = water.copy()
+    for k in range(1, 12):
+        nd = dil.copy()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                       (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            nd |= np.roll(np.roll(dil, dy, 0), dx, 1)
+        ring = nd & (dist_px > 98.0)
+        dist_px[ring] = float(k)
+        dil = nd
+    beach_w = 7.0 + 3.0 * mh.fbm(N, 4, 18, args.seed + 301)   # 7..10 px
+    beach = (~water) & (dist_px <= beach_w)
+    road_bin = road_d < 690.0                  # the old soft ribbon at >0.5
+    reef_bin = reef_zone > 0.5
+    lens_dune = (maldive_zone > 0.5) & ~water  # islet land above the beach
 
     # ARENA FOOTPRINTS = SAND strictly UNDER the plates (author round 2: the
     # +300/800 halo read as a washed-out ring - grass must ADJOIN the arenas)
@@ -314,9 +326,9 @@ def main():
         d = mh.rect_dist(lx, ly, f["x0"], f["x1"], f["y0"], f["y1"])
         pad_core |= (d <= 60.0)
 
-    # maldive GRASS APRON: a contiguous green clearing hugging the arena
-    # plates (author round 2: scattered patches on sand looked wrong and did
-    # not adjoin) - from the plate edge out to an organic noise boundary
+    # maldive GRASS APRON, round 3: MUCH bigger ("вокруг арен травы очень
+    # мало") - a wide green clearing from the plate edge to a noisy boundary;
+    # dunes survive between the apron and the beach ribbon on bigger islets
     apron_noise = mh.fbm(N, 4, 90, args.seed + 631)   # ~2k features: lively edge
     grass_apron = np.zeros_like(H, dtype=bool)
     for sid in ("M1", "M2", "M3", "M4"):
@@ -325,19 +337,19 @@ def main():
         f_m = mh.load_footprint(s["default"])
         lxm, lym = mh.local_frame(Xu, Yu, s)
         fpd = mh.rect_dist(lxm, lym, f_m["x0"], f_m["x1"], f_m["y0"], f_m["y1"])
-        outer = 750.0 + (apron_noise - 0.5) * 1300.0   # organic apron edge
+        outer = 2000.0 + (apron_noise - 0.5) * 1400.0   # organic apron edge
         grass_apron |= ((fpd > 60.0) & (fpd < outer) & (H > 220.0)
                         & (t < run * 0.62))
 
     # BINARY layer resolve (author round 2: "бленда травы быть не должно,
-    # всегда вес 1") - every pixel is exactly ONE layer at 255; the texture
-    # transition at boundaries is the material's own HeightBlend job. The
-    # soft fields above stay smooth, so thresholding gives clean organic
-    # boundaries instead of texel noise.
+    # всегда вес 1") - every pixel is exactly ONE layer; the texture
+    # transition at boundaries is the material's own HeightBlend job.
+    # Priorities: rock > plates > beach/water > apron > dunes/road > grass.
     rock_bin = w_rock > 0.5
-    sand_bin = (w_sand > 0.5) & ~rock_bin
+    sand_bin = (water | beach | road_bin | reef_bin | lens_dune) & ~rock_bin
     sand_bin |= pad_core                       # plates: sand even over rock
-    sand_bin &= ~(grass_apron & ~pad_core & ~rock_bin)
+    carve = (grass_apron & ~pad_core & ~rock_bin & ~beach & ~water & ~road_bin)
+    sand_bin &= ~carve
     grass_bin = ~rock_bin & ~sand_bin
 
     meadow_noise = smoothstep(0.52, 0.66, mh.fbm(N, 4, 7, args.seed + 113))
@@ -445,11 +457,10 @@ def main():
     flower_f = np.maximum(flower_f, shoulder_band * smoothstep(18.0, 10.0, slope)
                           * (masks["Grass"] / 255.0) * keep_small * (H > 80.0))
     wrack_noise = smoothstep(0.42, 0.56, mh.fbm(N, 4, 8, args.seed + 521))
-    # wet-sand wave zone ABOVE the real waterline (ocean Z=150, crests ~410):
-    # driftwood/seaweed sit awash, not sunk; the 170+ shore is a rising
-    # shoulder, so the slope gate is loose (wood beaches on slopes just fine)
-    beach_f = ((1.0 - smoothstep(450.0, 560.0, H)) * smoothstep(170.0, 230.0, H)
-               * smoothstep(22.0, 13.0, slope) * wrack_noise * keep_small)
+    # driftwood/seaweed live ON the 7-10 m beach ribbon, above the mean
+    # waterline (ocean Z=150) so the surf washes through them
+    beach_f = ((beach & (H > 165.0)).astype(np.float32)
+               * smoothstep(24.0, 14.0, slope) * wrack_noise * keep_small)
 
     # ---------------- sample the plan ----------------
     plan = {}     # ft_path -> list[[x, y, z_exact_ground]]
@@ -535,7 +546,8 @@ def main():
                      else rng.integers(2, 5))
         for x, y in sample_field(palm_field, n_palm, rng, spacing=620.0):
             put(pick(FT_PALM if rng.random() < 0.8 else FT_BANANA), x, y)
-        drift_field = ((t > run * 0.35) & (t < run) & (H > 170.0) & (H < 350.0)
+        drift_field = ((dist_px <= beach_w + 2.0) & ~water & (H > 165.0)
+                       & (t < run + 400.0)
                        & (bridge_d > 900.0)).astype(np.float32)
         for x, y in sample_field(drift_field, int(rng.integers(1, 4)), rng,
                                  spacing=1100.0):
