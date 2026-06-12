@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Biome1 Island Layout Editor</title>
+<style>
+  :root { --bg:#15171c; --panel:#1e2128; --line:#33363f; --txt:#d7dae2;
+          --dim:#8a8f9c; --acc:#4da3ff; --ok:#39c46d; --bad:#ff5252; --warn:#ffb02e; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+               font:13px/1.45 "Segoe UI", sans-serif; overflow:hidden; }
+  #app { display:grid; grid-template-columns: 1fr 332px; grid-template-rows: 46px 1fr; height:100%; }
+  #topbar { grid-column: 1 / 3; display:flex; align-items:center; gap:8px;
+            padding:0 10px; background:var(--panel); border-bottom:1px solid var(--line); }
+  #topbar select, #topbar input[type=number] { background:#14161b; color:var(--txt);
+            border:1px solid var(--line); border-radius:4px; padding:4px 6px; }
+  button { background:#2a2e37; color:var(--txt); border:1px solid var(--line);
+           border-radius:4px; padding:5px 10px; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.primary { background:#1c4a7c; border-color:#2c6cb0; }
+  button.danger { border-color:#7c2c2c; }
+  button:disabled { opacity:.45; cursor:default; }
+  #cv { grid-row:2; grid-column:1; display:block; cursor:grab; width:100%; height:100%; }
+  #side { grid-row:2; grid-column:2; background:var(--panel); border-left:1px solid var(--line);
+          overflow-y:auto; padding:10px; }
+  .sec { border:1px solid var(--line); border-radius:6px; padding:8px; margin-bottom:10px; }
+  .sec h3 { margin:0 0 6px; font-size:12px; color:var(--acc); text-transform:uppercase; letter-spacing:.4px; }
+  .row { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  .row label { flex:0 0 108px; color:var(--dim); }
+  .row input[type=number], .row select { flex:1; min-width:0; background:#14161b; color:var(--txt);
+       border:1px solid var(--line); border-radius:4px; padding:3px 6px; }
+  .row input[type=range] { flex:1; }
+  .val { flex:0 0 52px; text-align:right; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .chip { display:inline-block; padding:2px 8px; border-radius:10px; margin:2px 3px 2px 0;
+          background:#23262e; border:1px solid var(--line); font-size:12px; }
+  .chip.ok { border-color:var(--ok); color:var(--ok); }
+  .chip.bad { border-color:var(--bad); color:var(--bad); }
+  .chip.warn { border-color:var(--warn); color:var(--warn); }
+  #log { white-space:pre-wrap; font:11px/1.4 Consolas, monospace; color:var(--dim);
+         max-height:180px; overflow-y:auto; background:#14161b; padding:6px; border-radius:4px; }
+  #status-dot { width:10px; height:10px; border-radius:50%; background:var(--bad); }
+  #busy { position:fixed; inset:0; background:rgba(10,12,16,.55); display:none;
+          align-items:center; justify-content:center; z-index:10; }
+  #busy .box { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+               padding:18px 26px; font-size:14px; }
+  .hint { color:var(--dim); font-size:11px; }
+  .pool-grid { display:grid; grid-template-columns:1fr 1fr; gap:2px 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <b>🏝️ Biome1 Layout</b>
+    <select id="layoutSel"></select>
+    <button id="btnNew" title="Дублировать текущий лейаут под новым именем">New</button>
+    <button id="btnDel" class="danger" title="Удалить лейаут (ACTIVE нельзя)">Del</button>
+    <span style="width:12px"></span>
+    <button id="btnSave">💾 Save</button>
+    <button id="btnFast" class="primary" title="Быстрое превью (~5 c, гейты приблизительные)">⚡ Fast preview</button>
+    <button id="btnFull" title="Полное разрешение 2017 (~2-3 мин, точные гейты)">🔬 Full</button>
+    <button id="btnApply" title="Активировать лейаут, полный прогон и сборка в открытом редакторе UE">🎮 Apply → UE</button>
+    <button id="btnSync" title="Подтянуть позиции арен из открытого редактора (sync_island_slots)">⟳ Sync из UE</button>
+    <span style="flex:1"></span>
+    <span class="hint" id="dirtyMark"></span>
+    <div id="status-dot" title="UE editor bridge"></div>
+  </div>
+  <canvas id="cv"></canvas>
+  <div id="side">
+    <div class="sec"><h3>Гейты <span id="gatesKind" class="hint"></span></h3><div id="gates" class="hint">— прогони превью —</div></div>
+    <div class="sec"><h3>Выбрано</h3><div id="insp" class="hint">клик по объекту на карте<br>
+      <br>Управление: ЛКМ-драг — двигать, колесо — зум, драг пустого — пан, dblclick по дороге — новая точка, Del — удалить точку дороги, Ctrl+Z — отмена.<br>
+      Стрелка слота = вход арены; ромб у мальдив = направление хвоста.</div></div>
+    <div class="sec"><h3>Остров и глобальные</h3><div id="globals"></div></div>
+    <div class="sec"><h3>Лог</h3><div id="log"></div></div>
+  </div>
+</div>
+<div id="busy"><div class="box" id="busyText">…</div></div>
+<script>
+"use strict";
+// ------------------------------------------------------------------ state --
+let META = null, LAYOUT = null, NAME = "ACTIVE";
+let EXTENT = 201600, HALF = 100800;
+let view = { k: 0.004, ox: 60, oy: 60 };
+let sel = null, dirty = false, undoStack = [];
+let previewImg = null, gatesData = null, gatesApprox = false;
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+const $ = id => document.getElementById(id);
+
+const W2S = (wx, wy) => [ (wy + HALF) * view.k + view.ox, (HALF - wx) * view.k + view.oy ];
+const S2W = (sx, sy) => [ HALF - (sy - view.oy) / view.k, (sx - view.ox) / view.k - HALF ];
+
+function slots() { return LAYOUT ? LAYOUT.slots : []; }
+function slotById(id) { return slots().find(s => s.id === id); }
+function rules() { return LAYOUT.rules; }
+function isMaldive(s) { return s.kind === "arena" && (s.tier === "S" || s.tier === "M"); }
+
+function pushUndo() {
+  undoStack.push(JSON.stringify(LAYOUT));
+  if (undoStack.length > 60) undoStack.shift();
+}
+function markDirty() { dirty = true; $("dirtyMark").textContent = "● не сохранено"; }
+function clearDirty() { dirty = false; $("dirtyMark").textContent = ""; }
+
+// ------------------------------------------------------------------- api --
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: {"Content-Type": "application/json"},
+                               body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
+  if (!r.ok && j.error === undefined) j.error = "HTTP " + r.status;
+  return j;
+}
+function busy(text) { $("busyText").textContent = text; $("busy").style.display = "flex"; }
+function unbusy() { $("busy").style.display = "none"; }
+function logOut(t) { $("log").textContent = (t || "").trim(); $("log").scrollTop = 1e6; }
+
+// -------------------------------------------------------------- rendering --
+let fitted = false;
+function fitView() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  view.k = Math.min(w, h) / EXTENT * 0.92;
+  view.ox = (w - EXTENT * view.k) / 2; view.oy = (h - EXTENT * view.k) / 2;
+}
+function resize() {
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  if (!fitted && r.width > 80 && LAYOUT) { fitView(); fitted = true; }
+  draw();
+}
+new ResizeObserver(resize).observe(cv);
+
+function yawEntranceDir(yawDeg) {           // local -Y in world (entrance)
+  const r = yawDeg * Math.PI / 180;
+  return [Math.sin(r), -Math.cos(r)];       // (wx, wy)
+}
+function footprintCorners(s) {
+  const fp = META.arenas[s.default];
+  if (!fp) return null;
+  const r = (s.yaw || 0) * Math.PI / 180, c = Math.cos(r), sn = Math.sin(r);
+  const pts = [[fp.x0, fp.y0], [fp.x1, fp.y0], [fp.x1, fp.y1], [fp.x0, fp.y1]];
+  return pts.map(([lx, ly]) => [ s.pos[0] + lx * c - ly * sn, s.pos[1] + lx * sn + ly * c ]);
+}
+function line(p, q) { ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
+
+function draw() {
+  if (!LAYOUT) return;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#10131a"; ctx.fillRect(0, 0, w, h);
+  // preview underlay
+  if (previewImg) {
+    const [sx, sy] = W2S(HALF, -HALF);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(previewImg, sx, sy, EXTENT * view.k, EXTENT * view.k);
+  }
+  const isl = LAYOUT.island;
+  // land radius ring + center + peak
+  let [cx, cy] = W2S(isl.center[0], isl.center[1]);
+  ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.setLineDash([6, 5]); ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(cx, cy, isl.land_radius * view.k, 0, 7); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 7); ctx.fill();
+  ctx.font = "11px sans-serif"; ctx.fillText("center", cx + 7, cy - 5);
+  const [px, py] = W2S(isl.peak[0], isl.peak[1]);
+  ctx.fillStyle = "#ffd24d";
+  ctx.beginPath(); ctx.moveTo(px, py - 7); ctx.lineTo(px - 6, py + 5); ctx.lineTo(px + 6, py + 5);
+  ctx.closePath(); ctx.fill(); ctx.fillText("peak/citadel cape", px + 8, py);
+  // cliff sector wedge (bearing center->peak +/- cliff_half)
+  const cb = Math.atan2(isl.peak[1] - isl.center[1], isl.peak[0] - isl.center[0]);
+  const chalf = (isl.cliff_half_deg || 26) * Math.PI / 180;
+  ctx.strokeStyle = "rgba(255,120,80,.5)";
+  for (const a of [cb - chalf, cb + chalf]) {
+    const q = W2S(isl.center[0] + Math.cos(a) * isl.land_radius * 1.25,
+                  isl.center[1] + Math.sin(a) * isl.land_radius * 1.25);
+    line([cx, cy], q);
+  }
+  // coast cuts: arcs on the ring
+  (rules().coast_cuts || []).forEach((cut, i) => {
+    const b = cut.bearing_deg * Math.PI / 180, hw = cut.halfwidth_deg * Math.PI / 180;
+    ctx.strokeStyle = (sel && sel.type === "cut" && sel.idx === i) ? "#ff8d4d" : "rgba(255,141,77,.8)";
+    ctx.lineWidth = 3 + cut.depth * 10;
+    ctx.beginPath();
+    // screen angle of world bearing b is (b - pi/2): sweep "clockwise=false"
+    // covers exactly the 2*hw window
+    ctx.arc(cx, cy, isl.land_radius * view.k, scrAng(b - hw), scrAng(b + hw), false);
+    ctx.stroke(); ctx.lineWidth = 1.2;
+    const m = W2S(isl.center[0] + Math.cos(b) * isl.land_radius,
+                  isl.center[1] + Math.sin(b) * isl.land_radius);
+    ctx.fillStyle = "#ff8d4d"; ctx.beginPath(); ctx.arc(m[0], m[1], 5, 0, 7); ctx.fill();
+    ctx.fillText("cut" + (i + 1), m[0] + 7, m[1]);
+  });
+  // route corridor
+  const corr = rules().route_corridor;
+  ctx.strokeStyle = "#b48dff"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  corr.forEach((p, i) => { const q = W2S(p[0], p[1]); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+  ctx.stroke();
+  corr.forEach((p, i) => {
+    const q = W2S(p[0], p[1]);
+    const snapped = slots().some(s => Math.hypot(p[0] - s.pos[0], p[1] - s.pos[1]) <= 300);
+    ctx.fillStyle = (sel && sel.type === "route" && sel.idx === i) ? "#fff" : "#b48dff";
+    if (snapped) { ctx.strokeStyle = "#b48dff"; ctx.strokeRect(q[0] - 5, q[1] - 5, 10, 10); }
+    else ctx.fillRect(q[0] - 4, q[1] - 4, 8, 8);
+  });
+  // citadel stairs (read-only)
+  const st = rules().citadel_stairs, cit = slotById("Citadel");
+  if (st && cit) {
+    const ry = (cit.yaw || 0) * Math.PI / 180, c = Math.cos(ry), sn = Math.sin(ry);
+    const w2 = l => W2S(cit.pos[0] + l[0] * c - l[1] * sn, cit.pos[1] + l[0] * sn + l[1] * c);
+    ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 3;
+    st.lines_top_local.forEach(l => line(w2(l[0]), w2(l[1])));
+    const ld = w2(st.landing_local);
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ld[0], ld[1], 4, 0, 7); ctx.fill();
+    ctx.fillText("лестница", ld[0] + 6, ld[1] + 4); ctx.lineWidth = 1.2;
+  }
+  // slots
+  for (const s of slots()) {
+    if (s.kind === "waypoint" || s.kind === "reef") {
+      const q = W2S(s.pos[0], s.pos[1]);
+      ctx.strokeStyle = "#7fd1c0"; ctx.strokeRect(q[0] - 4, q[1] - 4, 8, 8);
+      ctx.fillStyle = "#7fd1c0"; ctx.fillText(s.id, q[0] + 7, q[1] + 4);
+      continue;
+    }
+    const seld = sel && sel.type === "slot" && sel.id === s.id;
+    const q = W2S(s.pos[0], s.pos[1]);
+    ctx.strokeStyle = seld ? "#fff" : "#4da3ff"; ctx.lineWidth = seld ? 2.2 : 1.4;
+    ctx.beginPath(); ctx.arc(q[0], q[1], s.r * view.k, 0, 7); ctx.stroke();
+    const fpc = footprintCorners(s);
+    if (fpc) {
+      ctx.strokeStyle = seld ? "rgba(255,255,255,.9)" : "rgba(77,163,255,.55)";
+      ctx.beginPath();
+      fpc.forEach((p, i) => { const t = W2S(p[0], p[1]); i ? ctx.lineTo(t[0], t[1]) : ctx.moveTo(t[0], t[1]); });
+      ctx.closePath(); ctx.stroke();
+    }
+    // entrance arrow
+    const d = yawEntranceDir(s.yaw || 0);
+    const tip = W2S(s.pos[0] + d[0] * s.r, s.pos[1] + d[1] * s.r);
+    ctx.strokeStyle = "#ffd24d"; ctx.lineWidth = 2; line(q, tip);
+    ctx.fillStyle = "#ffd24d"; ctx.beginPath(); ctx.arc(tip[0], tip[1], 5, 0, 7); ctx.fill();
+    // maldive tail handle
+    if (isMaldive(s)) {
+      const lens = s.lens || {};
+      const tb = (lens.tail_deg !== undefined) ? lens.tail_deg * Math.PI / 180 : null;
+      if (tb !== null) {
+        const th = W2S(s.pos[0] + Math.cos(tb) * (s.r + 1800), s.pos[1] + Math.sin(tb) * (s.r + 1800));
+        ctx.strokeStyle = "#7fd1c0"; ctx.setLineDash([4, 4]); line(q, th); ctx.setLineDash([]);
+        ctx.fillStyle = "#7fd1c0";
+        ctx.save(); ctx.translate(th[0], th[1]); ctx.rotate(Math.PI / 4); ctx.fillRect(-5, -5, 10, 10); ctx.restore();
+      }
+    }
+    ctx.fillStyle = seld ? "#fff" : "#9fc8f5"; ctx.lineWidth = 1.2;
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(s.id + " · " + (s.default || ""), q[0] - 30, q[1] - s.r * view.k - 8);
+    ctx.font = "11px sans-serif";
+  }
+}
+// screen-space angle of a world bearing (for ctx.arc): world dir (cos b, sin b)
+// -> screen delta (sin b * k, -cos b * k) => atan2(dy, dx)
+function scrAng(b) { return b - Math.PI / 2; }
+
+// ------------------------------------------------------------ hit testing --
+function hitTest(sx, sy) {
+  const [wx, wy] = S2W(sx, sy);
+  const tol = 10 / view.k;
+  // route verts first
+  const corr = rules().route_corridor;
+  for (let i = 0; i < corr.length; i++)
+    if (Math.hypot(corr[i][0] - wx, corr[i][1] - wy) < tol) return { type: "route", idx: i };
+  // slot yaw tips / tail handles / bodies
+  for (const s of slots()) {
+    if (s.kind !== "arena") continue;
+    const d = yawEntranceDir(s.yaw || 0);
+    if (Math.hypot(s.pos[0] + d[0] * s.r - wx, s.pos[1] + d[1] * s.r - wy) < tol)
+      return { type: "yaw", id: s.id };
+    if (isMaldive(s) && s.lens && s.lens.tail_deg !== undefined) {
+      const tb = s.lens.tail_deg * Math.PI / 180;
+      if (Math.hypot(s.pos[0] + Math.cos(tb) * (s.r + 1800) - wx,
+                     s.pos[1] + Math.sin(tb) * (s.r + 1800) - wy) < tol)
+        return { type: "tail", id: s.id };
+    }
+  }
+  for (const s of slots()) {
+    const rad = s.kind === "arena" ? s.r : 1500;
+    if (Math.hypot(s.pos[0] - wx, s.pos[1] - wy) < Math.max(rad, tol))
+      return { type: "slot", id: s.id };
+  }
+  const isl = LAYOUT.island;
+  if (Math.hypot(isl.peak[0] - wx, isl.peak[1] - wy) < tol * 1.4) return { type: "peak" };
+  if (Math.hypot(isl.center[0] - wx, isl.center[1] - wy) < tol * 1.4) return { type: "island_center" };
+  const dc = Math.hypot(wx - isl.center[0], wy - isl.center[1]);
+  // coast cut markers on the ring
+  const cuts = rules().coast_cuts || [];
+  for (let i = 0; i < cuts.length; i++) {
+    const b = cuts[i].bearing_deg * Math.PI / 180;
+    const mx = isl.center[0] + Math.cos(b) * isl.land_radius,
+          my = isl.center[1] + Math.sin(b) * isl.land_radius;
+    if (Math.hypot(mx - wx, my - wy) < tol * 1.6) return { type: "cut", idx: i };
+  }
+  if (Math.abs(dc - isl.land_radius) < tol * 1.5) return { type: "radius" };
+  return null;
+}
+
+// ----------------------------------------------------------------- input --
+let drag = null;
+cv.addEventListener("pointerdown", e => {
+  cv.setPointerCapture(e.pointerId);
+  const hit = hitTest(e.offsetX, e.offsetY);
+  if (hit) { pushUndo(); sel = hit.type === "yaw" || hit.type === "tail" ? { type: "slot", id: hit.id } : hit;
+             drag = { hit, sx: e.offsetX, sy: e.offsetY }; renderInspector(); }
+  else { sel = null; drag = { hit: { type: "pan" }, sx: e.offsetX, sy: e.offsetY,
+                              ox: view.ox, oy: view.oy }; renderInspector(); }
+  draw();
+});
+cv.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const [wx, wy] = S2W(e.offsetX, e.offsetY);
+  const h = drag.hit;
+  if (h.type === "pan") {
+    view.ox = drag.ox + (e.offsetX - drag.sx); view.oy = drag.oy + (e.offsetY - drag.sy);
+  } else if (h.type === "slot") {
+    const s = slotById(h.id);
+    // corridor verts within 300 follow the slot (sync convention)
+    const corr = rules().route_corridor;
+    for (const p of corr)
+      if (Math.hypot(p[0] - s.pos[0], p[1] - s.pos[1]) <= 300) { p[0] = Math.round(wx); p[1] = Math.round(wy); }
+    s.pos[0] = Math.round(wx); s.pos[1] = Math.round(wy); markDirty();
+  } else if (h.type === "yaw") {
+    const s = slotById(h.id);
+    const dx = wx - s.pos[0], dy = wy - s.pos[1];
+    s.yaw = Math.round(Math.atan2(dx, -dy) * 180 / Math.PI * 10) / 10; markDirty();
+  } else if (h.type === "tail") {
+    const s = slotById(h.id);
+    s.lens = s.lens || {};
+    s.lens.tail_deg = Math.round(Math.atan2(wy - s.pos[1], wx - s.pos[0]) * 180 / Math.PI);
+    markDirty();
+  } else if (h.type === "route") {
+    const p = rules().route_corridor[h.idx]; p[0] = Math.round(wx); p[1] = Math.round(wy); markDirty();
+  } else if (h.type === "island_center") {
+    LAYOUT.island.center = [Math.round(wx), Math.round(wy)]; markDirty();
+  } else if (h.type === "peak") {
+    LAYOUT.island.peak = [Math.round(wx), Math.round(wy)]; markDirty();
+  } else if (h.type === "radius") {
+    const isl = LAYOUT.island;
+    isl.land_radius = Math.round(Math.hypot(wx - isl.center[0], wy - isl.center[1]) / 100) * 100;
+    markDirty();
+  } else if (h.type === "cut") {
+    const isl = LAYOUT.island;
+    rules().coast_cuts[h.idx].bearing_deg =
+      Math.round(Math.atan2(wy - isl.center[1], wx - isl.center[0]) * 180 / Math.PI);
+    markDirty();
+  }
+  if (h.type !== "pan") renderInspector(false);
+  draw();
+});
+cv.addEventListener("pointerup", () => { drag = null; });
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const [wx, wy] = S2W(e.offsetX, e.offsetY);
+  view.k *= f;
+  const [sx2, sy2] = W2S(wx, wy);
+  view.ox += e.offsetX - sx2; view.oy += e.offsetY - sy2;
+  draw();
+}, { passive: false });
+cv.addEventListener("dblclick", e => {
+  // insert a route vert on the nearest segment
+  const [wx, wy] = S2W(e.offsetX, e.offsetY);
+  const corr = rules().route_corridor;
+  let best = { d: 1e18, i: -1 };
+  for (let i = 0; i < corr.length - 1; i++) {
+    const [ax, ay] = corr[i], [bx, by] = corr[i + 1];
+    const L2 = (bx - ax) ** 2 + (by - ay) ** 2;
+    const t = Math.max(0, Math.min(1, ((wx - ax) * (bx - ax) + (wy - ay) * (by - ay)) / L2));
+    const d = Math.hypot(wx - (ax + t * (bx - ax)), wy - (ay + t * (by - ay)));
+    if (d < best.d) best = { d, i };
+  }
+  if (best.i >= 0 && best.d < 2500) {
+    pushUndo();
+    corr.splice(best.i + 1, 0, [Math.round(wx), Math.round(wy)]);
+    sel = { type: "route", idx: best.i + 1 }; markDirty(); renderInspector(); draw();
+  }
+});
+window.addEventListener("keydown", e => {
+  if (e.ctrlKey && e.key.toLowerCase() === "z") {
+    const prev = undoStack.pop();
+    if (prev) { LAYOUT = JSON.parse(prev); markDirty(); renderInspector(); renderGlobals(); draw(); }
+    e.preventDefault();
+  } else if (e.key === "Delete" && sel && sel.type === "route") {
+    const corr = rules().route_corridor;
+    if (corr.length > 3) { pushUndo(); corr.splice(sel.idx, 1); sel = null; markDirty(); renderInspector(); draw(); }
+  }
+});
+
+// -------------------------------------------------------------- inspector --
+function inp(label, value, oninput, opts) {
+  opts = opts || {};
+  const id = "f" + Math.random().toString(36).slice(2, 8);
+  const isRange = opts.min !== undefined;
+  const html = isRange
+    ? `<div class="row"><label>${label}</label><input id="${id}" type="range" min="${opts.min}" max="${opts.max}" step="${opts.step || 1}" value="${value}"><span class="val" id="${id}v">${value}</span></div>`
+    : `<div class="row"><label>${label}</label><input id="${id}" type="number" step="${opts.step || 1}" value="${value}"></div>`;
+  setTimeout(() => {
+    const el = $(id);
+    if (el) el.oninput = () => {
+      const v = parseFloat(el.value);
+      if ($(id + "v")) $(id + "v").textContent = v;
+      pushUndoDebounced(); oninput(v); markDirty(); draw();
+    };
+  });
+  return html;
+}
+let undoT = 0;
+function pushUndoDebounced() { const t = Date.now(); if (t - undoT > 800) { pushUndo(); undoT = t; } }
+
+function renderInspector(rebuild = true) {
+  if (!rebuild && !document.activeElement.closest?.("#insp")) {} // keep typing
+  const el = $("insp");
+  if (!sel) { el.innerHTML = '<span class="hint">клик по объекту на карте<br><br>ЛКМ-драг — двигать · колесо — зум · dblclick по дороге — новая точка · Del — удалить точку · Ctrl+Z — отмена.<br>Стрелка = вход арены; ромб = хвост мальдива.</span>'; return; }
+  if (sel.type === "slot") {
+    const s = slotById(sel.id);
+    let h = `<b>${s.id}</b> <span class="hint">(${s.kind}${s.tier ? " · " + s.tier : ""})</span>`;
+    if (s.kind === "arena") {
+      const pool = s.pool || [s.default];
+      h += `<div class="row"><label>арена</label><select id="selArena">` +
+           pool.map(a => `<option ${a === s.default ? "selected" : ""}>${a}</option>`).join("") + `</select></div>`;
+      h += `<div class="row"><label>пул</label><div class="pool-grid">` +
+           Object.keys(META.arenas).sort().map(a =>
+             `<label style="flex:none;color:var(--txt)"><input type="checkbox" data-arena="${a}" ${pool.includes(a) ? "checked" : ""}> ${a.replace("_", " ")}</label>`).join("") + `</div></div>`;
+    }
+    h += inp("x", s.pos[0], v => { s.pos[0] = v; }) + inp("y", s.pos[1], v => { s.pos[1] = v; });
+    h += inp("высота z", s.pos[2], v => { s.pos[2] = v; }, { step: 10 });
+    if (s.kind === "arena") {
+      h += inp("yaw (вход)", s.yaw || 0, v => { s.yaw = v; }, { step: 0.5 });
+      h += inp("радиус слота", s.r, v => { s.r = v; }, { step: 100 });
+    }
+    if (isMaldive(s)) {
+      const lens = s.lens = s.lens || {};
+      h += `<h3 style="margin-top:8px">Линза островка</h3>`;
+      h += inp("хвост, °", lens.tail_deg !== undefined ? lens.tail_deg : "", v => { lens.tail_deg = v; }, { step: 5 });
+      h += inp("длина хвоста", lens.tail_amp !== undefined ? lens.tail_amp : 0.30, v => { lens.tail_amp = v; }, { min: 0, max: 0.38, step: 0.02 });
+      h += inp("изрезанность", lens.ragged !== undefined ? lens.ragged : 1.0, v => { lens.ragged = v; }, { min: 0.2, max: 1.6, step: 0.05 });
+      h += inp("размер (run)", lens.run_scale !== undefined ? lens.run_scale : 1.0, v => { lens.run_scale = v; }, { min: 0.6, max: 1.6, step: 0.05 });
+      h += `<div class="hint">хвост задаётся и драгом ромба на карте; пустое поле = случайный от сида</div>`;
+    }
+    el.innerHTML = h;
+    const sa = $("selArena");
+    if (sa) sa.onchange = () => { pushUndo(); s.default = sa.value; markDirty(); draw(); };
+    el.querySelectorAll("input[data-arena]").forEach(cb => cb.onchange = () => {
+      pushUndo();
+      let pool = new Set(s.pool || [s.default]);
+      cb.checked ? pool.add(cb.dataset.arena) : pool.delete(cb.dataset.arena);
+      if (!pool.size) { cb.checked = true; pool.add(cb.dataset.arena); }
+      s.pool = [...pool];
+      if (!s.pool.includes(s.default)) s.default = s.pool[0];
+      markDirty(); renderInspector(); draw();
+    });
+  } else if (sel.type === "route") {
+    const p = rules().route_corridor[sel.idx];
+    el.innerHTML = `<b>Точка дороги #${sel.idx}</b>` +
+      inp("x", p[0], v => { p[0] = v; }) + inp("y", p[1], v => { p[1] = v; }) +
+      `<div class="hint">Del — удалить. Точки около арен прибиваются к их падам автоматически.</div>`;
+  } else if (sel.type === "cut") {
+    const c = rules().coast_cuts[sel.idx];
+    el.innerHTML = `<b>Вырез берега #${sel.idx + 1}</b>` +
+      inp("азимут, °", c.bearing_deg, v => { c.bearing_deg = v; }, { step: 1 }) +
+      inp("полуширина, °", c.halfwidth_deg, v => { c.halfwidth_deg = v; }, { min: 8, max: 80, step: 1 }) +
+      inp("глубина", c.depth, v => { c.depth = v; }, { min: 0.05, max: 0.6, step: 0.05 }) +
+      `<button id="cutDel" class="danger" style="margin-top:6px">Удалить вырез</button>`;
+    $("cutDel").onclick = () => { pushUndo(); rules().coast_cuts.splice(sel.idx, 1); sel = null; markDirty(); renderInspector(); draw(); };
+  } else if (sel.type === "island_center" || sel.type === "peak" || sel.type === "radius") {
+    renderIslandInspector(el);
+  }
+}
+function renderIslandInspector(el) {
+  const isl = LAYOUT.island;
+  el.innerHTML = `<b>Большой остров</b>` +
+    inp("центр x", isl.center[0], v => { isl.center[0] = v; }) +
+    inp("центр y", isl.center[1], v => { isl.center[1] = v; }) +
+    inp("радиус суши", isl.land_radius, v => { isl.land_radius = v; }, { min: 20000, max: 70000, step: 500 }) +
+    inp("пик x", isl.peak[0], v => { isl.peak[0] = v; }) +
+    inp("пик y", isl.peak[1], v => { isl.peak[1] = v; }) +
+    `<button id="addCut" style="margin-top:6px">+ вырез берега</button>`;
+  $("addCut").onclick = () => {
+    pushUndo();
+    (rules().coast_cuts = rules().coast_cuts || []).push({ bearing_deg: 0, halfwidth_deg: 25, depth: 0.25, comment: "editor" });
+    markDirty(); draw();
+  };
+}
+
+function renderGlobals() {
+  const isl = LAYOUT.island, r = rules();
+  $("globals").innerHTML =
+    inp("сид", LAYOUT.seed !== undefined ? LAYOUT.seed : 20260614, v => { LAYOUT.seed = Math.round(v); }) +
+    `<div class="row"><label></label><button id="rollSeed">🎲 случайный сид</button></div>` +
+    inp("купол: высота", isl.dome_amp !== undefined ? isl.dome_amp : 14200, v => { isl.dome_amp = v; }, { min: 4000, max: 22000, step: 200 }) +
+    inp("купол: база", isl.dome_base !== undefined ? isl.dome_base : 2000, v => { isl.dome_base = v; }, { min: 0, max: 5000, step: 100 }) +
+    inp("купол: радиус", isl.dome_reach !== undefined ? isl.dome_reach : 62000, v => { isl.dome_reach = v; }, { min: 30000, max: 95000, step: 1000 }) +
+    inp("купол: профиль", isl.dome_pow !== undefined ? isl.dome_pow : 1.25, v => { isl.dome_pow = v; }, { min: 0.8, max: 2.2, step: 0.05 }) +
+    inp("утёс: сектор ±°", isl.cliff_half_deg !== undefined ? isl.cliff_half_deg : 26, v => { isl.cliff_half_deg = v; }, { min: 8, max: 45, step: 1 }) +
+    inp("дорога: уклон", r.road_grade !== undefined ? r.road_grade : 0.50, v => { r.road_grade = v; }, { min: 0.35, max: 0.60, step: 0.01 }) +
+    `<div class="hint">уклон 0.50 = 26.6°; правило проекта ≤30° (0.58)</div>`;
+  setTimeout(() => { const b = $("rollSeed"); if (b) b.onclick = () => {
+    pushUndo(); LAYOUT.seed = Math.floor(Math.random() * 1e8); markDirty(); renderGlobals();
+  }; });
+}
+
+// ----------------------------------------------------------------- gates --
+function renderGates() {
+  const g = gatesData;
+  $("gatesKind").textContent = g ? (gatesApprox ? "(fast, приблизительно)" : "(полные)") : "";
+  if (!g) { $("gates").innerHTML = '<span class="hint">— прогони превью —</span>'; return; }
+  const chips = [];
+  const worstArena = Math.max(...Object.values(g.arenas));
+  const buried = Object.entries(g.arenas).filter(([k, v]) => v > (gatesApprox ? 100 : 0));
+  let arenaTxt;
+  if (buried.length) arenaTxt = buried.map(b => b[0]).join(",") + " BURIED";
+  else if (worstArena > 0) arenaTxt = `≈OK (+${worstArena.toFixed(0)} — шум fast-режима)`;
+  else arenaTxt = `OK (зазор ${(-worstArena).toFixed(0)})`;
+  chips.push(`<span class="chip ${buried.length ? "bad" : "ok"}">арены: ${arenaTxt}</span>`);
+  chips.push(`<span class="chip ${g.route_over30 > 0 ? "bad" : "ok"}">маршрут ${g.route_worst_deg}° (${g.route_over30}>30°)</span>`);
+  chips.push(`<span class="chip ${g.spikes > 0 ? "bad" : "ok"}">спайки ${g.spikes}</span>`);
+  const minWater = Math.min(...Object.values(g.water));
+  chips.push(`<span class="chip ${minWater < 1500 ? "bad" : "ok"}">вода мин ${Math.round(minWater / 100) / 10}k</span>`);
+  chips.push(`<span class="chip">складки p99 ${g.crease_p99}</span>`);
+  $("gates").innerHTML = chips.join("");
+}
+
+// --------------------------------------------------------------- actions --
+async function saveLayout() {
+  const r = await api("POST", "/api/layout?name=" + NAME, LAYOUT);
+  if (!r.ok) return alert("save failed: " + r.error);
+  clearDirty();
+}
+async function generate(kind) {
+  await saveLayout();
+  busy(kind === "full" ? "Полный прогон 2017² (~2–3 мин)…" : "Быстрое превью…");
+  const r = await api("POST", `/api/generate?name=${NAME}&kind=${kind}`);
+  unbusy();
+  if (!r.ok) { logOut(r.log || r.error); return alert("Генерация упала, смотри лог"); }
+  gatesData = r.gates; gatesApprox = r.approx; renderGates(); logOut(r.log);
+  const img = new Image();
+  img.onload = () => { previewImg = img; draw(); };
+  img.src = r.preview;
+}
+async function applyToUE() {
+  const g = gatesData ? Object.entries(gatesData.arenas).filter(([k, v]) => v > 0).length : null;
+  if (!confirm(`Применить '${NAME}' в редактор?\n` +
+      `Это активирует лейаут, прогонит полный рельеф и пересоберёт уровень.\n` +
+      (gatesData ? `Гейты: ${gatesApprox ? "приблизительные (fast)" : "полные"}.` : "Гейты ещё не прогнаны!"))) return;
+  await saveLayout();
+  busy("Apply: полный рельеф + сборка в редакторе (3–6 мин)…");
+  const r = await api("POST", "/api/apply?name=" + NAME);
+  unbusy();
+  if (r.gates) { gatesData = r.gates; gatesApprox = false; renderGates(); }
+  logOut((r.steps || []).join("\n") + "\n\n" + (r.build_log || r.log || r.error || ""));
+  alert(r.ok ? "✅ Применено и собрано в редакторе" : "⚠️ Что-то не так — смотри лог");
+}
+async function syncFromUE() {
+  if (NAME !== META.active_name && !confirm("Sync читает позиции из редактора в ACTIVE-лейаут. Переключиться на ACTIVE?")) return;
+  busy("Sync из редактора…");
+  const r = await api("POST", "/api/sync");
+  unbusy();
+  if (!r.ok) return alert(r.error);
+  NAME = META.active_name; $("layoutSel").value = NAME;
+  LAYOUT = r.layout; clearDirty(); logOut(r.log);
+  renderGlobals(); renderInspector(); draw();
+}
+
+// ------------------------------------------------------------------ init --
+async function loadLayout(name) {
+  if (dirty && !confirm("Несохранённые изменения будут потеряны. Продолжить?")) {
+    $("layoutSel").value = NAME; return;
+  }
+  const r = await api("GET", "/api/layout?name=" + name);
+  if (!r.ok) return alert(r.error);
+  NAME = name; LAYOUT = r.layout; sel = null; undoStack = []; clearDirty();
+  gatesData = null; renderGates(); renderGlobals(); renderInspector();
+  // try the latest previews
+  for (const kind of ["full", "fast"]) {
+    const img = new Image();
+    img.onload = () => { if (!previewImg) { previewImg = img; draw(); } };
+    img.src = `/api/preview?name=${name}&kind=${kind}&ts=${Date.now()}`;
+  }
+  previewImg = null; draw();
+}
+async function refreshLayouts(keep) {
+  const r = await api("GET", "/api/layouts");
+  const selEl = $("layoutSel");
+  selEl.innerHTML = r.layouts.map(n => `<option>${n}</option>`).join("");
+  selEl.value = keep || r.layouts[0];
+}
+async function pollStatus() {
+  const r = await api("GET", "/api/editor_status").catch(() => ({ bridge: false }));
+  $("status-dot").style.background = r.bridge ? "var(--ok)" : "var(--bad)";
+  $("status-dot").title = r.bridge ? "UE редактор на связи" : "UE редактор не запущен (Apply/Sync недоступны)";
+  $("btnApply").disabled = !r.bridge; $("btnSync").disabled = !r.bridge;
+}
+(async function init() {
+  META = (await api("GET", "/api/meta"));
+  EXTENT = META.extent; HALF = EXTENT / 2;
+  await refreshLayouts(META.active_name);
+  await loadLayout(META.active_name);
+  if (cv.clientWidth > 80) { fitView(); fitted = true; }
+  resize();
+  pollStatus(); setInterval(pollStatus, 12000);
+  $("layoutSel").onchange = e => loadLayout(e.target.value);
+  $("btnSave").onclick = saveLayout;
+  $("btnFast").onclick = () => generate("fast");
+  $("btnFull").onclick = () => generate("full");
+  $("btnApply").onclick = applyToUE;
+  $("btnSync").onclick = syncFromUE;
+  $("btnNew").onclick = async () => {
+    const name = prompt("Имя нового лейаута (копия текущего):", "biome1_var1");
+    if (!name) return;
+    await saveLayout();
+    const r = await api("POST", `/api/new?name=${encodeURIComponent(name)}&src=${NAME}`);
+    if (!r.ok) return alert(r.error);
+    await refreshLayouts(name); await loadLayout(name);
+  };
+  $("btnDel").onclick = async () => {
+    if (NAME === META.active_name) return alert("ACTIVE удалить нельзя");
+    if (!confirm(`Удалить лейаут '${NAME}'?`)) return;
+    await api("POST", "/api/delete?name=" + NAME);
+    await refreshLayouts(META.active_name); await loadLayout(META.active_name);
+  };
+  window.addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
+})();
+</script>
+</body>
+</html>

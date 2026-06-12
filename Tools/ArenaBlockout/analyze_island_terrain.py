@@ -6,8 +6,11 @@
 # arena". Also maps angularity (curvature hotspots) OUTSIDE the pads - the
 # ugly pleats/creases the author flagged - and route-corridor slope comfort.
 #
-# Usage: python analyze_island_terrain.py [heightmap.png]
+# Usage: python analyze_island_terrain.py [heightmap.png] [--layout PATH] [--json]
+#   Resolution is derived from the PNG size (fast previews analyze too).
+#   --json appends a machine-readable GATES_JSON line (layout editor server).
 
+import argparse
 import json
 import math
 import os
@@ -17,18 +20,26 @@ import numpy as np
 from PIL import Image
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(TOOLS_DIR)
+import make_biome1_heightmap as mh  # noqa: E402  (shared route derivation)
+
 LAYOUT = os.path.join(TOOLS_DIR, "Island", "biome1_island_layout.json")
 ARENAS_DIR = os.path.join(TOOLS_DIR, "Arenas")
 
+EXTENT = 201600.0
 N = 2017
 SCALE = 100.0
-HALF = (N - 1) * SCALE * 0.5
+HALF = EXTENT * 0.5
 SEA_FLOOR = -2000.0
 ARENA_LIFT = 10.0
+GATES = {}
 
 
 def load_height(path):
+    global N, SCALE
     px = np.asarray(Image.open(path), dtype=np.float64)
+    N = px.shape[0]
+    SCALE = EXTENT / (N - 1)
     return (px - 32768.0) / 1.28 + SEA_FLOOR
 
 
@@ -116,14 +127,20 @@ def curvature(H):
 
 
 def main():
-    hm = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        TOOLS_DIR, "Island", "biome1_heightmap_2017.png")
-    H = load_height(hm)
-    with open(LAYOUT, encoding="utf-8") as f:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("heightmap", nargs="?", default=os.path.join(
+        TOOLS_DIR, "Island", "biome1_heightmap_2017.png"))
+    ap.add_argument("--layout", default=LAYOUT)
+    ap.add_argument("--json", action="store_true",
+                    help="append a GATES_JSON line for machine parsing")
+    args = ap.parse_args()
+    H = load_height(args.heightmap)
+    with open(args.layout, encoding="utf-8") as f:
         layout = json.load(f)
     slots = {s["id"]: s for s in layout["slots"]}
 
     print("=== ARENA FIT (terrain vs walkable tops; >0 = BURIED) ===")
+    GATES["arenas"] = {}
     for s in layout["slots"]:
         if s["kind"] != "arena":
             continue
@@ -132,6 +149,7 @@ def main():
             spec = json.load(f)
         rows = check_arena_fit(H, s, spec)
         bad = [r for r in rows if r[2] > 0.0]
+        GATES["arenas"][s["id"]] = round(max(r[2] for r in rows), 1)
         print("\n[{}] {} at ({:.0f},{:.0f},{:.0f}) yaw {}".format(
             s["id"], s["default"], *s["pos"], s.get("yaw", "?")))
         if not bad:
@@ -161,19 +179,22 @@ def main():
     deg_b = np.degrees(np.arctan2(Yu - ICY, Xu - ICX)) % 360.0
     cape_b = math.degrees(math.atan2(CPY - ICY, CPX - ICX)) % 360.0
     dd = np.abs(((deg_b - cape_b + 180.0) % 360.0) - 180.0)
-    cliff = dd < 26.0
+    cliff = dd < float(isl.get("cliff_half_deg", 26.0))
     zone = land & ~pad_mask & ~cliff
     cz = np.where(zone, curv, 0.0)
+    GATES["crease_p99"] = round(float(np.percentile(cz[zone], 99)), 1)
     print("creases (Laplacian uu): p95 {:.0f}, p99 {:.0f}, max {:.0f}".format(
         np.percentile(cz[zone], 95), np.percentile(cz[zone], 99), cz.max()))
     # spike detector: lone texels vs the median of their 8 neighbours = the
     # pyramid rows left by binary masks (in-engine catch 2026-06-12)
+    cell = SCALE / 100.0
     nbrs = np.stack([np.roll(np.roll(H, dy, 0), dx, 1)
                      for dy in (-1, 0, 1) for dx in (-1, 0, 1)
                      if (dy, dx) != (0, 0)])
     med = np.median(nbrs, axis=0)
-    spikes = (np.abs(H - med) > 60.0) & zone
+    spikes = (np.abs(H - med) > 60.0 * cell) & zone
     n_sp = int(spikes.sum())
+    GATES["spikes"] = n_sp
     print("spikes (|H - nbr median| > 60): {}{}".format(
         n_sp, "" if n_sp == 0 else "  **CHECK**"))
     if n_sp:
@@ -207,6 +228,7 @@ def main():
     print("\n=== WATER GAPS (maldive hops) ===")
     isl_c = layout["island"]["center"]
     hops = [("M1", "M2"), ("M2", "M3"), ("M3", "M4"), ("M4", None)]
+    GATES["water"] = {}
     for a_id, b_id in hops:
         a = slots[a_id]["pos"]
         b = slots[b_id]["pos"] if b_id else list(isl_c) + [0]
@@ -221,33 +243,17 @@ def main():
             cur = cur + L / kk if h < -80.0 else 0.0
             best = max(best, cur)
         tag = "OK" if best >= 1500.0 else "**LAND-BRIDGED**"
+        GATES["water"]["{}-{}".format(a_id, b_id or "island")] = round(best)
         print("  {}->{}: longest water {:.0f} uu (min H {:.0f}) {}".format(
             a_id, b_id or "island", best, minh, tag))
 
-    # --- route comfort (the PLAYER path: corridor to the A5 entry, then the
-    # exit bench behind bort_s to the citadel-stairs landing; the straight
-    # line THROUGH the arena is not walked - keep in sync with the generator)
+    # --- route comfort (the PLAYER path; legs come from the GENERATOR's
+    # derive_route, so this check can never drift from the road builder)
     print("\n=== ROUTE (player path legs) ===")
-    g3 = slots["G3"]
-    cit = slots["Citadel"]
-    yaw3 = math.radians(float(g3.get("yaw", 0.0)))
-    c3, s3 = math.cos(yaw3), math.sin(yaw3)
-
-    def g3_world(lxv, lyv):
-        return (g3["pos"][0] + lxv * c3 - lyv * s3,
-                g3["pos"][1] + lxv * s3 + lyv * c3)
-
-    cyw = math.radians(float(cit.get("yaw", 0.0)))
-    cc, cs = math.cos(cyw), math.sin(cyw)
-    ll = layout["rules"]["citadel_stairs"]["landing_local"]
-    landing = (cit["pos"][0] + ll[0] * cc - ll[1] * cs,
-               cit["pos"][1] + ll[0] * cs + ll[1] * cc)
-    corr = layout["rules"]["route_corridor"]
-    legs = [list(corr[:3]) + [g3_world(0.0, -4600.0)],
-            [g3_world(1103.0, 5300.0), landing]]
+    rt = mh.derive_route(layout, slots)
     total = 0
     worst = 0.0
-    for pts in legs:
+    for pts in (rt["legA"], rt["legB"]):
         for a, b in zip(pts, pts[1:]):
             L = math.hypot(b[0] - a[0], b[1] - a[1])
             kk = max(2, int(L / 150.0))
@@ -263,7 +269,11 @@ def main():
             total += int((g > 30.0).sum())
             print("  leg ({:6.0f},{:6.0f})->({:6.0f},{:6.0f}): max {:.1f} deg".format(
                 a[0], a[1], b[0], b[1], g.max()))
+    GATES["route_worst_deg"] = round(float(worst), 1)
+    GATES["route_over30"] = int(total)
     print("route: worst {:.1f} deg, samples >30 deg: {}".format(worst, total))
+    if args.json:
+        print("GATES_JSON: " + json.dumps(GATES))
 
 
 if __name__ == "__main__":
