@@ -140,6 +140,16 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan", ClampMin = "0"))
 	float HitscanPhysicsForce = 100.0f;
 
+	/** Draw debug visualization of hitscan shots.
+	 *  Classic path (WaveDivergence == 0): camera trace ray (cyan), thin sweep corridor
+	 *  (green = pawn damaged / red = nothing hit), pawn candidates (orange) and the chosen
+	 *  target (green), wall hit (red), plus the visual tracer line from the muzzle (white) —
+	 *  the gap between white and cyan is the muzzle parallax.
+	 *  Cone path (WaveDivergence > 0): cone rings/axis, candidates green = damaged,
+	 *  red = outside cone, orange = blocked by wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
+	bool bDrawHitscanDebug = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
 	bool bHitscanDamageOwner = false;
 
