@@ -228,7 +228,14 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 		return;
 	}
 
-	if (bAffectedByExternalFields && FieldComponent && PropMesh && PropMesh->IsSimulatingPhysics())
+	// Air Mail: while the prop is flying back to the player or has been kicked, EMF forces are
+	// suppressed entirely — the player's field otherwise sucks the returning prop onto them,
+	// ruining both the incoming flight and the kick geometry.
+	const bool bAirMailFlightActive =
+		ActorHasTag(UUpgrade_AirKick::TAG_AirMailIncoming) ||
+		ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked);
+
+	if (bAffectedByExternalFields && !bAirMailFlightActive && FieldComponent && PropMesh && PropMesh->IsSimulatingPhysics())
 	{
 		ApplyEMForces(DeltaTime);
 	}

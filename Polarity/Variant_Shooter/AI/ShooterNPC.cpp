@@ -3813,6 +3813,22 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 		return;
 	}
 
+	// ==================== Air Mail: thrown NPC hit a surface ====================
+	// Placed BEFORE the wall-slam gates: the slam cooldown/velocity thresholds below are tuned
+	// for damage, not for the bounce, and their early returns swallowed nearly every throw
+	// (floor arcs, sub-threshold hits). The bounce carries its own speed/angle gates inside
+	// the upgrade (60–120° incidence band, glancing slides rejected). The function continues
+	// into the slam logic afterward — if that damage kills the NPC, the bounce flight simply
+	// ends in a corpse ("didn't survive").
+	if (!bWasAirMailIncoming
+		&& !ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked)
+		&& (bIsLaunched || bShouldStunOnNPCImpact)
+		&& !bIsDead)
+	{
+		TryAirMailBounceForNPC(this, PreviousTickVelocity, Hit.ImpactNormal, Hit.ImpactPoint,
+			/*bSkipAngleCheck=*/ false);
+	}
+
 	// Check cooldown to prevent multi-trigger on same impact
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 	if (CurrentTime - LastWallSlamTime < WallSlamCooldown)
@@ -3919,19 +3935,11 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 #endif
 	}
 
-	// ==================== Air Mail: thrown NPC hit a surface ====================
-	// A kicked projectile's flight ends on a real slam; an un-kicked thrown NPC that SURVIVED
-	// the slam damage above bounces toward the player (landing contacts of a previous bounce
-	// carry bWasAirMailIncoming and never re-bounce — one bounce per throw). The angle gate
-	// (60–120° incidence band) lives in the upgrade, so slides along the surface don't return.
+	// ==================== Air Mail: kicked NPC's flight resolves on a real slam ====================
+	// (The bounce itself runs earlier, before the slam gates.)
 	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
 	{
 		Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
-	}
-	else if (!bWasAirMailIncoming && (bIsLaunched || bShouldStunOnNPCImpact) && !bIsDead)
-	{
-		TryAirMailBounceForNPC(this, ImpactVelocity, Hit.ImpactNormal, Hit.ImpactPoint,
-			/*bSkipAngleCheck=*/ false);
 	}
 }
 
