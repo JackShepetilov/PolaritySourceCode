@@ -554,19 +554,24 @@ def main():
             fp_d = rect_dist(lxm, lym, f_m["x0"] - 250.0, f_m["x1"] + 250.0,
                              f_m["y0"] - 250.0, f_m["y1"] + 250.0)
             th = np.arctan2(Yu - y, Xu - x)
-            f0, f1, f2 = rng.uniform(0, 2 * np.pi, 3)
-            # 2-theta harmonic stretches each islet into a soft oval - chips
-            # are round, sandbars are not
-            wob = (1.0 + 0.10 * np.sin(2 * th + f0) + 0.05 * np.sin(3 * th + f1)
-                   + 0.03 * np.sin(5 * th + f2) + 0.04 * (Dw - 0.5) * 2.0)
-            t = fp_d / wob
+            ph = rng.uniform(0, 2 * np.pi, 5)
+            # COASTLINE NOISE is the point (author 2026-06-12: weak wobble left
+            # the islets reading as programmatic rounded squares). The 1-theta
+            # harmonic drags the shoreline to one side - the arena ends up at
+            # the EDGE of an asymmetric sandbar, not centered on a stamp; the
+            # higher harmonics + the field term cut bays and capes. Only the
+            # first few hundred uu around the arena pad stay rect-flavored
+            # (that is the cleared construction pad).
+            wob = (1.0 + 0.30 * np.sin(th + ph[0])
+                   + 0.18 * np.sin(2 * th + ph[1]) + 0.10 * np.sin(3 * th + ph[2])
+                   + 0.06 * np.sin(5 * th + ph[3]) + 0.04 * np.sin(7 * th + ph[4]))
+            wob = np.clip(wob + 0.30 * (Dw - 0.5) * 2.0, 0.55, 1.95)
+            gate = smootherstep(0.0, 700.0, fp_d)
+            t = np.maximum(fp_d / wob + (spine_n - 0.45) * 1300.0 * gate, 0.0)
             run = z * MALDIVE_RUN_K + MALDIVE_RUN_BASE   # mid-slope < ~30 deg
             dome = z - (z + 250.0) * smootherstep(0.0, run, t)
-            # noise floor of 20 right past the footprint edge breaks the
-            # molded look of the upper shoulder (drop-scaled alone left it
-            # clean-rect); the t-gate keeps the footprint itself untouched
-            namp = np.minimum(140.0, 20.0 + (z - dome) * 0.5) \
-                * smootherstep(0.0, 400.0, t)
+            namp = np.minimum(170.0, 30.0 + (z - dome) * 0.55) \
+                * smootherstep(0.0, 350.0, fp_d)
             dome = dome + (Dw - 0.5) * 2.0 * namp \
                 * smoothstep(run + 600.0, run - 600.0, t)
             skirt = -250.0 + (SEA_FLOOR + 250.0) \
