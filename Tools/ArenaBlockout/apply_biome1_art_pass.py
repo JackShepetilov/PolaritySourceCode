@@ -237,10 +237,15 @@ def phase3():
     # instances surface-trace onto the canopies of old not-yet-removed types
     # (floating trees, author round 2). Adds now also go with the trace OFF -
     # the plan carries exact bilinear ground Z from the heightmap.
-    # sweep the FULL roster (type_params keys), not just types present in
-    # this plan - a type that drops out of the plan must lose its old
-    # instances too (6 stale seaweed survived the first sweep)
-    for ft in sorted(set(params_by_type) | set(plan.get("instances", {}))):
+    # sweep the FULL roster (type_params keys + plan keys) AND every live
+    # art-pass rock type by prefix: types that drop out of BOTH rosters kept
+    # their instances twice (91 cliff rocks survived until the author saw
+    # them - round 6). Live-list prefix scan closes that class for good.
+    sweep = set(params_by_type) | set(plan.get("instances", {}))
+    for ft_info in unreal.FoliageService.list_foliage_types():
+        if "FT_SM_Env_Rock" in ft_info.foliage_type_path:
+            sweep.add(ft_info.foliage_type_path.split(".")[0])
+    for ft in sorted(sweep):
         if unreal.FoliageService.foliage_type_exists(ft):
             rem = unreal.FoliageService.remove_all_foliage_of_type(ft)
             r = getattr(rem, "instances_removed", 0)

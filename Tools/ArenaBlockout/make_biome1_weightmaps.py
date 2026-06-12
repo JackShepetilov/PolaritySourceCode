@@ -645,12 +645,11 @@ def main():
                    & rock_ok).astype(np.float32),
     }
     rock_counts = {}
+    # AUTHOR ROUND 6: foliage rocks are OUT entirely ("убери уебанские камни").
+    # The FT defs stay registered in TYPE_PARAMS so the apply-side roster
+    # sweep keeps CLEARING old instances; zero new ones are planned.
     for grp, (meshes, mn, mx, amax, cull, spacing, count) in ROCK_GROUPS.items():
-        pts = sample_field(fields[grp], count, rng, spacing=spacing)
-        s0, s1 = ROCK_SINK[grp]
-        for x, y in pts:
-            put_rock(rock_ft_path(pick(meshes)), x, y, rng.uniform(s0, s1))
-        rock_counts[grp] = len(pts)
+        rock_counts[grp] = 0
 
     # ---- CLIFF WALL: masonry courses over every steep face ----
     # candidates on a course grid: key = (height band, along-face cell) ->

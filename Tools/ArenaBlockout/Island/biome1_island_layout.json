@@ -27,7 +27,10 @@
       2500
     ],
     "peak_z": 16400,
-    "cliff_note": "gentle shield dome rising toward the EAST cape (the citadel); the ONLY cliff is the cape's seaward face, everywhere else - beaches"
+    "cliff_note": "gentle shield dome rising toward the EAST cape (the citadel); the ONLY cliff is the cape's seaward face, everywhere else - beaches",
+    "dome_amp": 5200,
+    "cliff_half_deg": 12,
+    "dome_base": 1100
   },
   "route": [
     "start_reef",
@@ -46,8 +49,8 @@
       "id": "start_reef",
       "kind": "reef",
       "pos": [
-        32312,
-        -75837,
+        32001,
+        -75542,
         200
       ],
       "r": 1500,
@@ -89,7 +92,8 @@
       "r": 4500,
       "enter_from": "M1",
       "note": "lighthouse = early-spiral landmark; chain heads WEST (CCW in UE view)",
-      "yaw": 63.4
+      "yaw": 63.4,
+      "lens": {}
     },
     {
       "id": "M3",
@@ -108,7 +112,7 @@
       "r": 5500,
       "enter_from": "M2",
       "note": "spiral passes under the citadel cape - permanent landmark showcase",
-      "yaw": 36.0
+      "yaw": 36
     },
     {
       "id": "M4",
@@ -120,13 +124,14 @@
         "A4_Hangar"
       ],
       "pos": [
-        -34340,
-        -18250,
+        -34006,
+        -18264,
         2150
       ],
       "r": 5500,
       "enter_from": "M3",
-      "yaw": 15.9
+      "yaw": 15.9,
+      "lens": {}
     },
     {
       "id": "shoulder",
@@ -155,7 +160,7 @@
         4960
       ],
       "r": 5500,
-      "yaw": -171.0,
+      "yaw": -171,
       "note": "first switchback, SW side (~0.73 D from citadel); route comes along the south-west beaches from the landing"
     },
     {
@@ -169,12 +174,12 @@
         "A7_Gallery"
       ],
       "pos": [
-        -5000,
-        6000,
+        -4383,
+        7113,
         5400
       ],
       "r": 5500,
-      "yaw": -45.0,
+      "yaw": -45,
       "note": "middle switchback at the island center (~0.53 D)"
     },
     {
@@ -193,7 +198,7 @@
         8900
       ],
       "r": 6000,
-      "yaw": -59.0,
+      "yaw": -59,
       "note": "last switchback (~0.34 D); A5 bowl cuts into the final upslope"
     },
     {
@@ -210,7 +215,7 @@
         16000
       ],
       "r": 6500,
-      "yaw": -180.0,
+      "yaw": -180,
       "note": "ON THE LIP of the EAST cape (160 m), far end from the landing; the serpentine flanks around and enters from the EAST side; gate 3/3, permanent field"
     }
   ],
@@ -243,16 +248,20 @@
     "water_not_lethal": true,
     "route_corridor": [
       [
-        -26000,
-        30000
+        -31890,
+        30048
+      ],
+      [
+        -18833,
+        13889
       ],
       [
         -4840,
         -14970
       ],
       [
-        -5000,
-        6000
+        -4383,
+        7113
       ],
       [
         15000,
@@ -304,17 +313,19 @@
     },
     "coast_cuts": [
       {
-        "bearing_deg": -72.0,
-        "halfwidth_deg": 21.0,
+        "bearing_deg": -72,
+        "halfwidth_deg": 21,
         "depth": 0.3,
         "comment": "author cut 1 (2026-06-11): NW lobe west of the cape - coast pulled in, beach transition"
       },
       {
-        "bearing_deg": 78.0,
-        "halfwidth_deg": 64.0,
+        "bearing_deg": 87,
+        "halfwidth_deg": 64,
         "depth": 0.35,
         "comment": "author cut 2: the whole east lobe - no empty forest land"
       }
-    ]
-  }
+    ],
+    "road_grade": 0.41
+  },
+  "seed": 15405694
 }

@@ -509,6 +509,17 @@ def report_leg(H, pts, label):
     return deg.max(), over
 
 
+STRATA_PRESETS = {
+    # major bed step / riser window (sharp) / joints amp+cells / promontory amp+cells
+    "v1": dict(major=2400.0, r0=0.30, r1=0.52, joint=1100.0, jcells=67,
+               promo=1500.0, pcells=22),
+    "v2": dict(major=4200.0, r0=0.28, r1=0.50, joint=1500.0, jcells=50,
+               promo=2200.0, pcells=16),
+    "v3": dict(major=1500.0, r0=0.32, r1=0.55, joint=900.0, jcells=67,
+               promo=1200.0, pcells=22),
+}
+
+
 # ------------------------------------------------------------------ main ----
 def main():
     ap = argparse.ArgumentParser()
@@ -522,6 +533,8 @@ def main():
                          "editor (505 ~ 4 s). ONLY 2017 may be imported to UE")
     ap.add_argument("--out", default=None, help="heightmap PNG path override")
     ap.add_argument("--preview", default=None, help="preview PNG path override")
+    ap.add_argument("--strata-preset", default="v1", choices=sorted(STRATA_PRESETS),
+                    help="cliff geology preset (offline A/B via sea-view renders)")
     args = ap.parse_args()
     set_resolution(args.res)
     cell = SCALE / 100.0    # cell-relative tunables scale (1.0 at full res)
@@ -895,47 +908,53 @@ def main():
         print("despiked %d lone texel(s)" % n_sp)
 
     # ---------------- CLIFF STRATA: layered rock geology (art, 2026-06-12) --
-    # Round 2 of the cliff look ("машинно и шумно"): uniform 550-step terraces
-    # with per-texel phase noise read as a procedural ziggurat. Real headland
-    # geology = (a) a few MASSIVE beds with thin sub-layers inside, (b) one
-    # COHERENT, gently sea-dipping bedding plane (long parallel band lines,
-    # not jitter), (c) VERTICAL joints cutting the face into buttresses,
-    # (d) treads that keep a hint of grade. All weights stay smooth; roads
-    # and the stairs corridor keep their grades via road_keep / later blocks.
-    gy_s, gx_s = np.gradient(H, SCALE)
-    sl_s = np.degrees(np.arctan(np.hypot(gx_s, gy_s)))
-    w_zone = (in_cliff * smoothstep(24.0, 34.0, sl_s)
-              * smoothstep(250.0, 600.0, H) * road_keep)
+    # Round 3 ("вавилонская башня"): fine soft banding is DEAD - the form is
+    # carried by PROMONTORY-scale mass noise + deep vertical joints + a few
+    # massive sharp-risered beds on one coherent sea-dipping bedding plane.
+    # Preset-driven for offline A/B (--strata-preset, sea-view renders).
+    # Covers ALL steep faces (not just the cape sector); maldive lenses and
+    # the G3 bowl funnel are excluded; roads via road_keep; stairs re-carve
+    # themselves in the next block.
+    P = STRATA_PRESETS[args.strata_preset]
+    mald_keep = np.ones_like(H)
+    for s_ in layout["slots"]:
+        if s_["kind"] == "arena" and s_.get("tier") in ("S", "M"):
+            x_, y_, z_ = s_["pos"]
+            reach = (s_["r"] + PAD_RIM) + z_ * MALDIVE_RUN_K \
+                + MALDIVE_RUN_BASE * 1.4 + 2500.0
+            d_ = np.hypot(Xu - x_, Yu - y_)
+            mald_keep = np.minimum(mald_keep, smoothstep(reach - 1200.0, reach, d_))
+    lx3, ly3 = local_frame(Xu, Yu, g3)
+    bowl_keep3 = smoothstep(1800.0, 2600.0, rect_dist(
+        lx3, ly3, a5["x0"] - 50.0, a5["x1"] + 50.0, a5["y0"] - 50.0, a5["y1"] + 150.0))
 
-    # (c) buttresses FIRST: ~30 m wavelength lateral relief on the steep
-    # face; the beds then cut through the buttressed form
-    joints = (fbm(N, 3, 67, seed + 833) - 0.5) * 2.0
-    H = H + joints * 380.0 * w_zone
+    def strata_zone():
+        gy_s, gx_s = np.gradient(H, SCALE)
+        sl_s = np.degrees(np.arctan(np.hypot(gx_s, gy_s)))
+        return (smoothstep(26.0, 34.0, sl_s) * smoothstep(250.0, 600.0, H)
+                * road_keep * mald_keep * bowl_keep3)
 
-    # (b) bedding plane: gentle dip toward the open sea + giant-wavelength
-    # warp - ONE smooth phase shared by every bed
+    # promontory mass noise: 60-120 m forms so the face stops being a dome
+    promo = (fbm(N, 3, P["pcells"], seed + 911) - 0.5) * 2.0
+    H = H + promo * P["promo"] * strata_zone()
+    # vertical joints/buttresses: ~30-40 m, cut through the mass
+    joints = (fbm(N, 3, P["jcells"], seed + 833) - 0.5) * 2.0
+    H = H + joints * P["joint"] * strata_zone()
+
+    # one coherent bedding plane: gentle dip to the open sea + giant warp
     cape_len = math.hypot(CPX - ICX, CPY - ICY)
     ux_d, uy_d = (CPX - ICX) / cape_len, (CPY - ICY) / cape_len
     bedding = ((Xu * ux_d + Yu * uy_d) * 0.05
                + (fbm(N, 3, 2, seed + 577) - 0.5) * 900.0)
-
-    def quantize(h_in, step, r0, r1):
-        q = (h_in + bedding) / step
-        frac = q - np.floor(q)
-        return (np.floor(q) + smootherstep(r0, r1, frac)) * step - bedding
-
-    # (a) thin sub-layers (soft banding), then massive beds (the real form)
-    gy_s, gx_s = np.gradient(H, SCALE)
-    sl_s = np.degrees(np.arctan(np.hypot(gx_s, gy_s)))
-    w_zone = (in_cliff * smoothstep(24.0, 34.0, sl_s)
-              * smoothstep(250.0, 600.0, H) * road_keep)
-    H_minor = quantize(H, 520.0, 0.55, 0.95)
-    H = H * (1.0 - w_zone * 0.42) + H_minor * (w_zone * 0.42)
-    H_major = quantize(H, 1750.0, 0.40, 0.86)
-    # (d) 0.92, not 1.0: treads keep a hint of the original grade
-    H = H * (1.0 - w_zone * 0.92) + H_major * (w_zone * 0.92)
-    print("cliff strata: %.1f%% of map layered (max weight %.2f)"
-          % (float((w_zone > 0.5).mean()) * 100.0, float(w_zone.max())))
+    w_zone = strata_zone()
+    q_b = (H + bedding) / P["major"]
+    frac_b = q_b - np.floor(q_b)
+    H_major = (np.floor(q_b) + smootherstep(P["r0"], P["r1"], frac_b)) \
+        * P["major"] - bedding
+    # 0.93, not 1.0: treads keep a hint of the original grade
+    H = H * (1.0 - w_zone * 0.93) + H_major * (w_zone * 0.93)
+    print("cliff strata[%s]: %.1f%% of map layered" % (
+        args.strata_preset, float((w_zone > 0.5).mean()) * 100.0))
 
     # ---------------- author's citadel staircase: applied LAST ---------------
     # exact top-surface center-lines from actor transforms; clearance cap under
