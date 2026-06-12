@@ -58,6 +58,18 @@
 #include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 
+// File-scope helper (uniquely named — unity-build safe): true while the yank-throw montage is
+// actively playing on the FP arms' anim instance.
+static bool IsYankThrowMontageActiveOnFPMesh(UChargeAnimationComponent* ChargeComp, USkeletalMeshComponent* FPMesh)
+{
+	if (!ChargeComp || !ChargeComp->YankThrowMontage || !FPMesh)
+	{
+		return false;
+	}
+	UAnimInstance* AnimInst = FPMesh->GetAnimInstance();
+	return AnimInst && AnimInst->Montage_IsPlaying(ChargeComp->YankThrowMontage);
+}
+
 AShooterCharacter::AShooterCharacter()
 {
 	// create the noise emitter component
@@ -250,11 +262,9 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AShooterCharacter::DoStartFiring);
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoStopFiring);
 
-		// Switch weapon — split into press/release for tap (swap) vs hold (throw yanked) detection.
-		// Tap: <YankSwapHoldThreshold sec → DoSwitchWeapon (preserves existing behavior, on release).
-		// Hold: ≥YankSwapHoldThreshold sec → ThrowYankedWeaponIfAny (fired by SwapHoldTimer).
-		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::OnSwitchWeaponPressed);
-		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Completed, this, &AShooterCharacter::OnSwitchWeaponReleased);
+		// Switch weapon — plain forward cycle on press. Hold-to-throw moved to the yanked
+		// weapon's own per-weapon switch key (see the WeaponSwitchActions loop below).
+		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::DoSwitchWeapon);
 
 		// Reverse cycle (e.g. mouse wheel down) — simple single-shot per press, no tap/hold throw logic.
 		if (SwitchWeaponBackAction)
@@ -296,11 +306,62 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		// Weapon-switch keys. Each weapon declares its own SwitchAction; we bind the listed actions and
 		// the handler resolves which OWNED weapon the pressed action selects (so several weapon classes
 		// can share one key — only one is owned at a time).
+		// The YANKED weapon's key is special: tap (<YankSwapHoldThreshold) = equip it as usual,
+		// hold (≥YankSwapHoldThreshold) = ThrowYankedWeaponIfAny (fired by SwapHoldTimer).
+		// Any other weapon's key equips instantly on press.
 		for (UInputAction* SwitchActionEntry : WeaponSwitchActions)
 		{
 			if (SwitchActionEntry)
 			{
-				EnhancedInputComponent->BindAction(SwitchActionEntry, ETriggerEvent::Triggered, this, &AShooterCharacter::DoWeaponSwitchByAction, SwitchActionEntry);
+				EnhancedInputComponent->BindActionValueLambda(SwitchActionEntry, ETriggerEvent::Started,
+					[this, SwitchActionEntry](const FInputActionValue&)
+					{
+						// Resolve which owned weapon this key selects.
+						AShooterWeapon* Target = nullptr;
+						for (AShooterWeapon* W : OwnedWeapons)
+						{
+							if (W && W->GetSwitchAction() == SwitchActionEntry)
+							{
+								Target = W;
+								break;
+							}
+						}
+
+						// Yanked weapon's key: arm the hold-to-throw timer; the equip (tap)
+						// happens on release if the threshold hasn't fired yet.
+						if (Target && Target->bWasYanked)
+						{
+							SwapKeyPressTime = GetWorld()->GetTimeSeconds();
+							bSwapKeyHeldPending = true;
+							GetWorld()->GetTimerManager().SetTimer(
+								SwapHoldTimer, this, &AShooterCharacter::OnSwapHoldThresholdFired,
+								YankSwapHoldThreshold, false);
+							return;
+						}
+
+						// Normal weapon: equip immediately on press.
+						DoWeaponSwitchByAction(SwitchActionEntry);
+					});
+
+				EnhancedInputComponent->BindActionValueLambda(SwitchActionEntry, ETriggerEvent::Completed,
+					[this, SwitchActionEntry](const FInputActionValue&)
+					{
+						// Only meaningful for the yanked weapon's armed press above.
+						if (!bSwapKeyHeldPending)
+						{
+							return;
+						}
+
+						FTimerManager& TimerMgr = GetWorld()->GetTimerManager();
+						if (TimerMgr.IsTimerActive(SwapHoldTimer))
+						{
+							// Tap: released before the hold threshold — plain equip.
+							TimerMgr.ClearTimer(SwapHoldTimer);
+							DoWeaponSwitchByAction(SwitchActionEntry);
+						}
+						// else: hold already fired (throw executed) — nothing to do.
+						bSwapKeyHeldPending = false;
+					});
 			}
 		}
 	}
@@ -596,6 +657,16 @@ void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
 {
 	if (!NewWeapon || NewWeapon == CurrentWeapon)
+	{
+		return;
+	}
+
+	// Don't let a manual switch cut the yank-throw montage short: its AnimNotifies carry the
+	// discard gameplay (dropped-weapon spawn + inventory removal), and swapping the anim
+	// instance mid-montage would leave the yanked weapon in limbo. The montage's own Lower
+	// notify performs the switch when it finishes.
+	if (PendingYankThrowWeapon.IsValid() &&
+		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
 	{
 		return;
 	}
@@ -1042,18 +1113,6 @@ void AShooterCharacter::Tick(float DeltaTime)
 
 	}*/
 	
-}
-
-// File-scope helper (uniquely named — unity-build safe): true while the yank-throw montage is
-// actively playing on the FP arms' anim instance.
-static bool IsYankThrowMontageActiveOnFPMesh(UChargeAnimationComponent* ChargeComp, USkeletalMeshComponent* FPMesh)
-{
-	if (!ChargeComp || !ChargeComp->YankThrowMontage || !FPMesh)
-	{
-		return false;
-	}
-	UAnimInstance* AnimInst = FPMesh->GetAnimInstance();
-	return AnimInst && AnimInst->Montage_IsPlaying(ChargeComp->YankThrowMontage);
 }
 
 void AShooterCharacter::DoStartADS()
@@ -2212,7 +2271,16 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 	OwnedWeapons.Add(AddedWeapon);
 	OnWeaponInventoryChanged.Broadcast();
 
-	if (bIsWeaponSwitchInProgress && bWeaponSwitchPausedAtBottom)
+	if (PendingYankThrowWeapon.IsValid() &&
+		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
+	{
+		// A yank-throw montage is playing (this weapon arrived from yanking while another
+		// yanked weapon was being thrown). Equipping now would swap the anim instance and
+		// kill the montage mid-throw — instead leave the weapon holstered in inventory;
+		// OnYankThrowLowerNotify prefers the freshest yanked weapon as the replacement, so
+		// it rises through the montage's own lower→swap flow.
+	}
+	else if (bIsWeaponSwitchInProgress && bWeaponSwitchPausedAtBottom)
 	{
 		// Yank path: lower already started/finished via BeginWeaponLower(). The mesh is
 		// either dropping or already at the bottom — finish the swap with this weapon.
@@ -2649,12 +2717,28 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 	OwnedWeapons.Remove(Yanked);
 	OnWeaponInventoryChanged.Broadcast();
 
-	// Bandolier: prefer a reserve copy of the same class over the generic non-yanked fallback.
-	// If present, promote it into OwnedWeapons so FinishWeaponSwitch's ActivateWeapon attaches +
-	// un-hides it correctly.
-	AShooterWeapon* Replacement = PromoteReserveCopyOfClass(Yanked->GetClass());
+	// Replacement priority:
+	// 1) The freshest OTHER yanked weapon — when this throw was triggered by yanking a new
+	//    weapon, the incoming yank is already holstered in OwnedWeapons (AddWeaponClassAnimated
+	//    defers its equip while the montage plays) and is what should rise.
+	// 2) Bandolier: reserve copy of the thrown class (promoted into OwnedWeapons so
+	//    FinishWeaponSwitch's ActivateWeapon attaches + un-hides it correctly).
+	// 3) Any non-yanked weapon (starter pistol, melee).
+	AShooterWeapon* Replacement = nullptr;
+	for (AShooterWeapon* W : OwnedWeapons)
+	{
+		if (W && W != Yanked && W->bWasYanked)
+		{
+			Replacement = W;
+			break;
+		}
+	}
 
-	// Fallback: non-yanked weapon (starter pistol, melee) as before.
+	if (!Replacement)
+	{
+		Replacement = PromoteReserveCopyOfClass(Yanked->GetClass());
+	}
+
 	if (!Replacement)
 	{
 		for (AShooterWeapon* W : OwnedWeapons)
@@ -2698,6 +2782,11 @@ void AShooterCharacter::DestroyOrphanedYankActor()
 }
 
 // ==================== Swap Weapon Hold Detection ====================
+// NOTE: OnSwitchWeaponPressed/OnSwitchWeaponReleased are NO LONGER BOUND — the cycle key
+// (SwitchWeaponAction) now does a plain DoSwitchWeapon on press, and hold-to-throw lives on
+// the yanked weapon's own switch key (lambdas in SetupPlayerInputComponent reusing
+// SwapHoldTimer/bSwapKeyHeldPending/OnSwapHoldThresholdFired). Definitions kept because the
+// header still declares them; remove both on the next header-touching pass.
 
 void AShooterCharacter::OnSwitchWeaponPressed()
 {

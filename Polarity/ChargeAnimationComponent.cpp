@@ -1473,17 +1473,32 @@ void UChargeAnimationComponent::CaptureHumanoidWeapon(AHumanoidNPC* Humanoid)
 	if (ShooterChar)
 	{
 		// Strict rule: at most one yanked weapon in inventory. If the player already has one,
-		// throw it away as a non-capturable physics decoration BEFORE starting the new yank.
-		// If the discarded weapon was equipped, switch to a non-yanked replacement instantly
-		// so the subsequent BeginWeaponLower has something concrete to lower.
+		// THROW it (full yank-throw montage flow) BEFORE starting the new yank.
 		ShooterChar->ThrowYankedWeaponIfAny();
 
-		// Start lowering player's current weapon NOW (in parallel with the pull flight).
-		// Lower (~0.15s) completes well before pull arrival (~0.4s), so mesh waits at the
-		// bottom. When the dropped weapon arrives via CompletePull → AddWeaponClassAnimated
-		// detects the paused-at-bottom switch and calls FinishWeaponSwitch — instant
-		// off-camera swap + raise of new weapon. No-op if player is unarmed.
-		ShooterChar->BeginWeaponLower();
+		// Did the throw montage take the FP arms? If so it owns the whole sequence: its
+		// Discard notify spawns the thrown weapon, its Lower notify lowers the hands and
+		// raises the incoming yank (AddWeaponClassAnimated holsters it until then). Starting
+		// a parallel lower here would fight the montage.
+		bool bThrowMontageOwnsArms = false;
+		if (FirstPersonMesh && YankThrowMontage)
+		{
+			if (UAnimInstance* ThrowAnimInst = FirstPersonMesh->GetAnimInstance())
+			{
+				bThrowMontageOwnsArms = ThrowAnimInst->Montage_IsPlaying(YankThrowMontage);
+			}
+		}
+
+		if (!bThrowMontageOwnsArms)
+		{
+			// No throw montage (nothing was yanked, or no montage asset) — classic flow:
+			// start lowering the current weapon NOW (in parallel with the pull flight).
+			// Lower (~0.15s) completes well before pull arrival (~0.4s), so the mesh waits at
+			// the bottom. When the dropped weapon arrives via CompletePull →
+			// AddWeaponClassAnimated detects the paused-at-bottom switch and calls
+			// FinishWeaponSwitch — instant off-camera swap + raise. No-op if player is unarmed.
+			ShooterChar->BeginWeaponLower();
+		}
 
 		// Broadcast capture event — cancels Upgrade_HealthBlast's empty-capture timer
 		// (yank IS a successful capture, so the timer should not fire).
