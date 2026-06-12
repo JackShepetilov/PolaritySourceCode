@@ -45,8 +45,11 @@ public:
 
 	/** True if the impact qualifies for the bounce: pre-impact speed above the threshold and
 	 *  incidence angle to the surface plane >= MinBounceAngleDeg (i.e. within the 60–120° band,
-	 *  glancing/sliding hits rejected). */
-	bool QualifiesForBounce(const FVector& PreImpactVelocity, const FVector& ImpactNormal) const;
+	 *  glancing/sliding hits rejected). bSkipAngleCheck bypasses the angle gate — used for
+	 *  impacts against CHARACTERS, where the capsule normal vs an arced throw trajectory makes
+	 *  the angle meaningless ("thrown INTO an enemy" always bounces). */
+	bool QualifiesForBounce(const FVector& PreImpactVelocity, const FVector& ImpactNormal,
+		bool bSkipAngleCheck = false) const;
 
 	/** Compute the return velocity from FromLocation to a point at the player's head height
 	 *  (+ReturnTargetHeightOffset), with simple gravity compensation for the flight time.
@@ -55,7 +58,7 @@ public:
 
 	/** QualifiesForBounce + ComputeReturnVelocity in one call. */
 	bool TryComputeBounce(const FVector& FromLocation, const FVector& PreImpactVelocity,
-		const FVector& ImpactNormal, FVector& OutVelocity) const;
+		const FVector& ImpactNormal, FVector& OutVelocity, bool bSkipAngleCheck = false) const;
 
 	/** Spawn the optional bounce FX/sound at the bounce point. */
 	void PlayBounceFeedback(const FVector& Location) const;
@@ -68,6 +71,8 @@ public:
 
 	/** Spin speed (deg/s) for bounced weapons/props. */
 	float GetReturnSpinSpeed() const;
+
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 protected:
 
@@ -85,4 +90,37 @@ private:
 
 	/** Kick feedback (FX + sound) at the contact point. */
 	void PlayKickFeedback(const FVector& Location, const FVector& Direction) const;
+
+	// ==================== Kick Magnet (timing assist) ====================
+	// While an AIRBORNE melee swing is in its pre-window phases, the incoming object's velocity
+	// is steered each tick so it arrives at the kick hitbox when the damage window opens.
+	// Component tick is enabled only for the duration of the swing.
+
+	/** Bound to MeleeAttackComponent->OnMeleeAttackStarted: engages the magnet for airborne swings. */
+	UFUNCTION()
+	void HandleMeleeAttackStarted();
+
+	/** Bound to MeleeAttackComponent->OnMeleeAttackEnded: safety stop. */
+	UFUNCTION()
+	void HandleMeleeAttackEnded();
+
+	/** Per-tick steering while the magnet is engaged. */
+	void UpdateKickMagnet(float DeltaTime);
+
+	/** Disable steering and the component tick. */
+	void StopKickMagnet();
+
+	/** Find the best TAG_AirMailIncoming actor inside the facing cone (closest to the camera ray). */
+	AActor* FindIncomingTargetInCone(const FVector& CamLocation, const FVector& CamDirection) const;
+
+	/** Seconds until the damage window opens in the currently playing melee montage
+	 *  (UAnimNotifyState_MeleeDamageWindow / UAnimNotify_MeleeActivate trigger time at the
+	 *  current play rate). Falls back to MagnetFallbackLeadTime if no notify is found. */
+	float ComputeTimeUntilDamageWindow(class UMeleeAttackComponent* MeleeComp) const;
+
+	/** True while the magnet is engaged (component tick enabled). */
+	bool bKickMagnetActive = false;
+
+	/** Object currently being steered toward the kick hitbox. */
+	TWeakObjectPtr<AActor> MagnetTarget;
 };

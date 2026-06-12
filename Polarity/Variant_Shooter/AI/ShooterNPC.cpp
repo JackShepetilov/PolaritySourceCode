@@ -3684,9 +3684,10 @@ void AShooterNPC::StopPermissionRetryTimer()
 
 // File-scope helper (uniquely named — unity-build safe): Air Mail bounce for a player-thrown
 // NPC that survived its impact. Computes the return-to-player velocity on the upgrade (angle
-// and speed gates included), redirects via LaunchCharacter, and tags the NPC as incoming.
+// and speed gates included; bSkipAngleCheck for body-vs-body hits where the capsule normal is
+// meaningless), redirects via LaunchCharacter, and tags the NPC as incoming.
 static bool TryAirMailBounceForNPC(AShooterNPC* NPC, const FVector& PreImpactVelocity,
-	const FVector& ImpactNormal, const FVector& ImpactPoint)
+	const FVector& ImpactNormal, const FVector& ImpactPoint, bool bSkipAngleCheck)
 {
 	if (!NPC || NPC->IsDead())
 	{
@@ -3700,7 +3701,7 @@ static bool TryAirMailBounceForNPC(AShooterNPC* NPC, const FVector& PreImpactVel
 	}
 
 	FVector ReturnVelocity;
-	if (!AirMail->TryComputeBounce(NPC->GetActorLocation(), PreImpactVelocity, ImpactNormal, ReturnVelocity))
+	if (!AirMail->TryComputeBounce(NPC->GetActorLocation(), PreImpactVelocity, ImpactNormal, ReturnVelocity, bSkipAngleCheck))
 	{
 		return false;
 	}
@@ -3783,9 +3784,11 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 
 				// Air Mail: thrown NPC survived ramming an enemy → bounce toward the player.
 				// Kicked flights and landing contacts of a previous bounce don't re-bounce.
+				// Body-vs-body hit → the capsule normal is meaningless, skip the angle gate.
 				if (!bWasAirMailKicked && !bWasAirMailIncoming && bWasThrownByPlayer && !bIsDead)
 				{
-					TryAirMailBounceForNPC(this, PreviousTickVelocity, Hit.ImpactNormal, CollisionPoint);
+					TryAirMailBounceForNPC(this, PreviousTickVelocity, Hit.ImpactNormal, CollisionPoint,
+						/*bSkipAngleCheck=*/ true);
 				}
 			}
 		}
@@ -3923,7 +3926,8 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 	}
 	else if (!bWasAirMailIncoming && (bIsLaunched || bShouldStunOnNPCImpact) && !bIsDead)
 	{
-		TryAirMailBounceForNPC(this, ImpactVelocity, Hit.ImpactNormal, Hit.ImpactPoint);
+		TryAirMailBounceForNPC(this, ImpactVelocity, Hit.ImpactNormal, Hit.ImpactPoint,
+			/*bSkipAngleCheck=*/ false);
 	}
 }
 

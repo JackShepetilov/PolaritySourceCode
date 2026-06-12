@@ -84,6 +84,45 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick", meta = (ClampMin = "0.0"))
 	float KickSpinSpeed = 720.0f;
 
+	// ==================== Kick Magnet (timing assist) ====================
+	// When the player starts an AIRBORNE melee swing while an incoming object flies at them
+	// (and they are facing it within MagnetConeHalfAngleDeg), the object's velocity is smoothly
+	// steered so it arrives at the kick hitbox exactly when the damage window opens
+	// (UAnimNotifyState_MeleeDamageWindow / UAnimNotify_MeleeActivate in the melee montage).
+
+	/** Master switch for the kick timing assist. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet")
+	bool bEnableKickMagnet = true;
+
+	/** Max angle (deg) between camera forward and the direction to the incoming object for the
+	 *  magnet to engage — the player must be facing the body. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "5.0", ClampMax = "90.0", Units = "deg"))
+	float MagnetConeHalfAngleDeg = 30.0f;
+
+	/** Search radius (cm) around the player for incoming objects when the swing starts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "100.0", Units = "cm"))
+	float MagnetSearchRadius = 2500.0f;
+
+	/** Where the kick hitbox point is, along camera forward (cm). The object is steered to
+	 *  arrive at this point when the damage window opens (melee AttackRange is ~150). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "30.0", ClampMax = "300.0", Units = "cm"))
+	float MagnetHitboxDistance = 90.0f;
+
+	/** How quickly the object's velocity blends toward the steering velocity (VInterpTo speed).
+	 *  Higher = snappier correction, lower = smoother arcs. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "1.0", ClampMax = "50.0"))
+	float MagnetVelocityInterpSpeed = 10.0f;
+
+	/** Hard cap (cm/s) on the steering velocity — prevents teleport-feel when the swing started
+	 *  very late and the object would need absurd speed to make the window. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "500.0"))
+	float MagnetMaxSpeed = 3500.0f;
+
+	/** Lead time (seconds) used when the montage has no recognizable damage-window notify
+	 *  (fallback arrival time target). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float MagnetFallbackLeadTime = 0.25f;
+
 	// ==================== Kick Feedback ====================
 
 	/** One-shot Niagara effect spawned at the kick contact point. */

@@ -128,8 +128,12 @@ void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AA
 	{
 		if (UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this))
 		{
+			// Thrown INTO a character: the capsule normal vs the throw's arced trajectory makes
+			// the incidence angle meaningless — enemy hits always qualify (speed gate remains).
+			const bool bCharacterImpact = OtherActor->IsA<APawn>();
+
 			FVector ReturnVelocity;
-			if (AirMail->TryComputeBounce(GetActorLocation(), ImpactVelocity, Hit.ImpactNormal, ReturnVelocity))
+			if (AirMail->TryComputeBounce(GetActorLocation(), ImpactVelocity, Hit.ImpactNormal, ReturnVelocity, bCharacterImpact))
 			{
 				bAirMailBounceConsumed = true;
 				WeaponMesh->SetPhysicsLinearVelocity(ReturnVelocity);

@@ -779,8 +779,8 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 						*GetName(), *OtherActor->GetName(), Speed, FMath::Abs(GetCharge()), ExplosionMinCharge);
 					ApplyWeakImpactToNPC(HitNPC, Hit.ImpactNormal, Hit.ImpactPoint);
 					// Air Mail: the prop survived (no explosion) — override the weak-impact
-					// reflection with the return-to-player flight if the impact qualifies.
-					TryAirMailBounce(Hit.ImpactNormal, Hit.ImpactPoint);
+					// reflection with the return-to-player flight. Character impact → no angle gate.
+					TryAirMailBounce(Hit.ImpactNormal, Hit.ImpactPoint, /*bCharacterImpact=*/ true);
 					return;
 				}
 
@@ -862,10 +862,12 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	// End reverse flight state on any blocking collision (wall, floor, etc.)
 	if (bIsInReverseFlight)
 	{
-		// Air Mail: launched prop hit the environment without detonating — bounce it back
-		// toward the player (must run BEFORE bIsInReverseFlight is cleared: the bounce only
-		// applies to player-launched props).
-		TryAirMailBounce(Hit.ImpactNormal, Hit.ImpactPoint);
+		// Air Mail: launched prop hit something without detonating — bounce it back toward
+		// the player (must run BEFORE bIsInReverseFlight is cleared: the bounce only applies
+		// to player-launched props). Non-explosive props reach here even for direct NPC hits
+		// (the explosive block above is bCanExplode-gated) — character hits skip the angle gate.
+		TryAirMailBounce(Hit.ImpactNormal, Hit.ImpactPoint,
+			/*bCharacterImpact=*/ OtherActor && OtherActor->IsA<APawn>());
 
 		UE_LOG(LogTemp, Warning, TEXT("[PROP_DETONATION] %s: bIsInReverseFlight set to FALSE due to collision with %s"),
 			*GetName(), OtherActor ? *OtherActor->GetName() : TEXT("NULL"));
@@ -873,11 +875,13 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	}
 }
 
-bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint)
+bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint, bool bCharacterImpact)
 {
 	// Only player-launched props return, once per launch, and only if the prop survived.
 	if (bAirMailBounceConsumed || !bIsInReverseFlight || bHasExploded || bIsDead || !PropMesh)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] prop %s bounce skipped: consumed=%d reverseFlight=%d exploded=%d dead=%d"),
+			*GetName(), bAirMailBounceConsumed ? 1 : 0, bIsInReverseFlight ? 1 : 0, bHasExploded ? 1 : 0, bIsDead ? 1 : 0);
 		return false;
 	}
 
@@ -888,12 +892,18 @@ bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVecto
 	}
 
 	FVector ReturnVelocity;
-	if (!AirMail->TryComputeBounce(GetActorLocation(), CachedPreCollisionVelocity, ImpactNormal, ReturnVelocity))
+	if (!AirMail->TryComputeBounce(GetActorLocation(), CachedPreCollisionVelocity, ImpactNormal, ReturnVelocity, bCharacterImpact))
 	{
 		return false;
 	}
 
 	bAirMailBounceConsumed = true;
+
+	// End the reverse flight HERE: UpdateReverseFlight steers the prop along the aim line every
+	// tick and would overwrite the return velocity on the very next frame (this was why bounces
+	// off NPCs appeared to do nothing — the NPC weak-impact path returns without clearing it).
+	bIsInReverseFlight = false;
+
 	PropMesh->SetPhysicsLinearVelocity(ReturnVelocity);
 	if (AirMail->GetReturnSpinSpeed() > 0.0f)
 	{
@@ -961,7 +971,7 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 				}
 				else
 				{
-					TryAirMailBounce(OverlapNormal, OverlapPoint);
+					TryAirMailBounce(OverlapNormal, OverlapPoint, /*bCharacterImpact=*/ true);
 				}
 				return;
 			}
@@ -1038,6 +1048,21 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 	}
 
 	LastCollisionDamageTime = CurrentTime;
+
+	// Air Mail: NON-explosive launched props reach this point on NPC contact (the explosive
+	// block above only runs with bCanExplode) — they survived by definition, so bounce back
+	// to the player. Kicked-flight props resolve their flight here instead.
+	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		Tags.Remove(UUpgrade_AirKick::TAG_AirMailKicked);
+	}
+	else
+	{
+		const FVector OverlapNormal = bFromSweep
+			? FVector(SweepResult.ImpactNormal)
+			: (GetActorLocation() - HitNPC->GetActorLocation()).GetSafeNormal();
+		TryAirMailBounce(OverlapNormal, ImpactPoint, /*bCharacterImpact=*/ true);
+	}
 
 	if (bLogEMForces)
 	{

@@ -671,9 +671,11 @@ private:
 
 	/** Air Mail: if the player owns the upgrade and this impact qualifies (player-launched,
 	 *  not exploded, incidence angle within the 60–120° band), redirect the prop toward a
-	 *  point at the player's head height and tag it TAG_AirMailIncoming. Returns true if
-	 *  the bounce was performed. */
-	bool TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint);
+	 *  point at the player's head height and tag it TAG_AirMailIncoming. On success also
+	 *  clears bIsInReverseFlight (otherwise UpdateReverseFlight would overwrite the return
+	 *  velocity next tick). bCharacterImpact skips the incidence-angle gate (enemy hits).
+	 *  Returns true if the bounce was performed. */
+	bool TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint, bool bCharacterImpact = false);
 
 	// ==================== Charge Tracking State ====================
 
