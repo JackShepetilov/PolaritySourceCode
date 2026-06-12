@@ -342,10 +342,17 @@ def main():
 
     meadow_noise = smoothstep(0.52, 0.66, mh.fbm(N, 4, 7, args.seed + 113))
 
-    b_rock = np.where(rock_bin & ~sand_bin, 255.0, 0.0)
-    b_sand = np.where(sand_bin, 255.0, 0.0)
+    # binary value is 229, NOT 255: the per-pixel deficit (26 = 10%) lands in
+    # 'Base' on import (the importer dumps it into the FIRST landscape layer
+    # = Base by our assignment order). With Base at exactly 0 the Synty
+    # master renders BLACK again (regressed live 2026-06-12 on the first
+    # binary import; the 0.898/0.102 main/Base ratio is the proven-good
+    # render state). 10% Base admixture is visually negligible.
+    BINV = 229.0
+    b_rock = np.where(rock_bin & ~sand_bin, BINV, 0.0)
+    b_sand = np.where(sand_bin, BINV, 0.0)
     b_clov = np.zeros_like(H)                  # clovers stay dead (round 1)
-    b_grass = 255.0 - b_rock - b_sand
+    b_grass = BINV - b_rock - b_sand
     masks = {"Sand_01": b_sand, "Rockwall": b_rock,
              "Grass": b_grass, "Grass_Clovers": b_clov}
     for name, arr in masks.items():
