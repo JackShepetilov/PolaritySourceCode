@@ -2717,6 +2717,21 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 	OwnedWeapons.Remove(Yanked);
 	OnWeaponInventoryChanged.Broadcast();
 
+	// The montage's gameplay is done — the switch flow owns the arms from here. Blend the
+	// FP-montage alpha back to 0 NOW instead of relying on OnYankThrowMontageEnded: the
+	// imminent replacement equip swaps the FP anim instance (SetAnimInstanceClass), which
+	// tears montage instances down WITHOUT firing their end delegates — that left the alpha
+	// stuck at 1 (ControlRigAlpha pushed as 0 → Control Rig off → broken running pose after
+	// re-picking a weapon class whose ABP reads ControlRigAlpha).
+	if (UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>())
+	{
+		SetFPMontageAlpha(0.0f, ChargeComp->YankThrowAlphaBlendOut);
+	}
+	else
+	{
+		SetFPMontageAlpha(0.0f, 0.2f);
+	}
+
 	// Replacement priority:
 	// 1) The freshest OTHER yanked weapon — when this throw was triggered by yanking a new
 	//    weapon, the incoming yank is already holstered in OwnedWeapons (AddWeaponClassAnimated
@@ -3921,6 +3936,29 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 
 	// Always pass the interpolated alpha value
 	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
+
+	// Watchdog: the FP-montage alpha may only stay raised while one of the two-hand throw
+	// montages is actually playing. Anim-instance teardown (SetAnimInstanceClass on weapon
+	// switch) destroys montage instances WITHOUT firing their end delegates, so the delegate
+	// path alone can leave the alpha — and thus the pushed ControlRigAlpha — stuck forever.
+	if (TargetFPMontageAlpha > 0.0f && ChargeAnimationComponent)
+	{
+		bool bThrowMontagePlaying = false;
+		if (USkeletalMeshComponent* FPMeshForCheck = GetFirstPersonMesh())
+		{
+			if (UAnimInstance* FPAnimInst = FPMeshForCheck->GetAnimInstance())
+			{
+				bThrowMontagePlaying =
+					(ChargeAnimationComponent->YankThrowMontage && FPAnimInst->Montage_IsPlaying(ChargeAnimationComponent->YankThrowMontage)) ||
+					(ChargeAnimationComponent->ThrowMontage && FPAnimInst->Montage_IsPlaying(ChargeAnimationComponent->ThrowMontage));
+			}
+		}
+
+		if (!bThrowMontagePlaying)
+		{
+			SetFPMontageAlpha(0.0f, ChargeAnimationComponent->YankThrowAlphaBlendOut);
+		}
+	}
 
 	// FP montage alpha — interpolate at user-specified rate (FPMontageAlphaInterpRate) and
 	// push (1 - alpha) into the AnimBP's ControlRigAlpha variable via reflection. The ABP no
