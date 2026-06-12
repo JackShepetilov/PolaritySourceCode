@@ -894,28 +894,48 @@ def main():
         H = assert_bowl(H)
         print("despiked %d lone texel(s)" % n_sp)
 
-    # ---------------- CLIFF STRATA: terraced rock courses (art, 2026-06-12) --
-    # The cape's seaward face reads as a smooth dune; the stylized-game canon
-    # for low-poly cliffs is TERRACED STRATA cut into the terrain itself
-    # (mesh masonry and material-only both failed art review - silhouette).
-    # Quantize H into ~550 uu courses inside the cliff sector: flat tread,
-    # smootherstep riser, phase wobbled by the warped detail field so course
-    # lines stay organic. All weights SMOOTH (iron rule); the road/stairs
-    # corridors keep their grades (road_keep; the stairs block re-flattens
-    # its landing and decks right below).
-    strata_step = 550.0
-    strata_phase = (Dw - 0.5) * 260.0
-    q_s = (H + strata_phase) / strata_step
-    frac_s = q_s - np.floor(q_s)
-    H_strata = (np.floor(q_s) + smootherstep(0.50, 0.92, frac_s)) * strata_step \
-        - strata_phase
+    # ---------------- CLIFF STRATA: layered rock geology (art, 2026-06-12) --
+    # Round 2 of the cliff look ("машинно и шумно"): uniform 550-step terraces
+    # with per-texel phase noise read as a procedural ziggurat. Real headland
+    # geology = (a) a few MASSIVE beds with thin sub-layers inside, (b) one
+    # COHERENT, gently sea-dipping bedding plane (long parallel band lines,
+    # not jitter), (c) VERTICAL joints cutting the face into buttresses,
+    # (d) treads that keep a hint of grade. All weights stay smooth; roads
+    # and the stairs corridor keep their grades via road_keep / later blocks.
     gy_s, gx_s = np.gradient(H, SCALE)
     sl_s = np.degrees(np.arctan(np.hypot(gx_s, gy_s)))
-    w_strata = (in_cliff * smoothstep(26.0, 36.0, sl_s)
-                * smoothstep(250.0, 600.0, H) * road_keep)
-    H = H * (1.0 - w_strata) + H_strata * w_strata
-    print("cliff strata: %.1f%% of map terraced (max weight %.2f)"
-          % (float((w_strata > 0.5).mean()) * 100.0, float(w_strata.max())))
+    w_zone = (in_cliff * smoothstep(24.0, 34.0, sl_s)
+              * smoothstep(250.0, 600.0, H) * road_keep)
+
+    # (c) buttresses FIRST: ~30 m wavelength lateral relief on the steep
+    # face; the beds then cut through the buttressed form
+    joints = (fbm(N, 3, 67, seed + 833) - 0.5) * 2.0
+    H = H + joints * 380.0 * w_zone
+
+    # (b) bedding plane: gentle dip toward the open sea + giant-wavelength
+    # warp - ONE smooth phase shared by every bed
+    cape_len = math.hypot(CPX - ICX, CPY - ICY)
+    ux_d, uy_d = (CPX - ICX) / cape_len, (CPY - ICY) / cape_len
+    bedding = ((Xu * ux_d + Yu * uy_d) * 0.05
+               + (fbm(N, 3, 2, seed + 577) - 0.5) * 900.0)
+
+    def quantize(h_in, step, r0, r1):
+        q = (h_in + bedding) / step
+        frac = q - np.floor(q)
+        return (np.floor(q) + smootherstep(r0, r1, frac)) * step - bedding
+
+    # (a) thin sub-layers (soft banding), then massive beds (the real form)
+    gy_s, gx_s = np.gradient(H, SCALE)
+    sl_s = np.degrees(np.arctan(np.hypot(gx_s, gy_s)))
+    w_zone = (in_cliff * smoothstep(24.0, 34.0, sl_s)
+              * smoothstep(250.0, 600.0, H) * road_keep)
+    H_minor = quantize(H, 520.0, 0.55, 0.95)
+    H = H * (1.0 - w_zone * 0.42) + H_minor * (w_zone * 0.42)
+    H_major = quantize(H, 1750.0, 0.40, 0.86)
+    # (d) 0.92, not 1.0: treads keep a hint of the original grade
+    H = H * (1.0 - w_zone * 0.92) + H_major * (w_zone * 0.92)
+    print("cliff strata: %.1f%% of map layered (max weight %.2f)"
+          % (float((w_zone > 0.5).mean()) * 100.0, float(w_zone.max())))
 
     # ---------------- author's citadel staircase: applied LAST ---------------
     # exact top-surface center-lines from actor transforms; clearance cap under
