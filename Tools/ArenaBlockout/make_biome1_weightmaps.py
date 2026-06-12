@@ -206,7 +206,11 @@ def at(field, x, y):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="ART seed (noise patches, vegetation sampling)")
+    ap.add_argument("--terrain-seed", type=int, default=mh.DEFAULT_SEED,
+                    help="seed the heightmap PNG was generated with - the "
+                         "maldive lens fields are replicated from it")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
 
@@ -247,19 +251,48 @@ def main():
     w_rock = np.maximum(smoothstep(29.0, 36.0, slope),
                         smoothstep(20.0, 30.0, slope) * in_cliff)
 
-    # maldive + reef zones: their smootherstep beach slopes peak ~38 deg and
-    # must stay SAND, and global vegetation fields must not see them at all
-    # (first run buried the rims under coastal palms + clover flowers)
+    # MALDIVE SAND-LENS resync (terrain 2026-06-12, Handoff maldive section):
+    # replicate the EXACT lens field t/run per islet - footprint rect dist
+    # warped by the 5-harmonic coast wobble + spine term. Wobble phases come
+    # from the same rng stream the heightmap consumed (TERRAIN seed: 2 island
+    # draws, then 5 per S/M arena in slot order - verified against the
+    # generator 2026-06-12), spine_n/Dw rebuilt with mh's own noise stack.
+    lens_rng = np.random.default_rng(args.terrain_seed)
+    lens_rng.uniform(0.0, 2.0 * np.pi, 2)            # island p1/p2 (consumed)
+    idx = np.arange(N, dtype=np.float32)
+    detail = mh.fbm(N, 5, 8, args.terrain_seed + 37)
+    wx = (mh.fbm(N, 4, 4, args.terrain_seed + 11) - 0.5) * 160.0
+    wy = (mh.fbm(N, 4, 4, args.terrain_seed + 23) - 0.5) * 160.0
+    ys_w = idx[:, None] + wy
+    xs_w = idx[None, :] + wx
+    spine = mh.sample(mh.ridged(N, 6, 6, args.terrain_seed + 71), ys_w, xs_w)
+    spine_n = (spine - spine.min()) / (spine.max() - spine.min())
+    Dw = mh.sample(detail, ys_w, xs_w)
+    del detail, wx, wy, ys_w, xs_w, spine
+
     maldive_zone = np.zeros_like(H)
-    sx_, sy_, sz_ = slots["start_reef"]["pos"]
-    for sid in ("M1", "M2", "M3", "M4"):
-        s = slots[sid]
+    lens = {}                                        # sid -> (t, run)
+    for s in layout["slots"]:
+        if s["kind"] != "arena" or s.get("tier") not in ("S", "M"):
+            continue
         x, y, z = s["pos"]
-        top_r = s["r"] + PAD_RIM
-        d = np.hypot(Xu - x, Yu - y)
-        outer = top_r + z * mh.MALDIVE_SHORE_RUN
+        f_m = mh.load_footprint(s["default"])
+        lxm, lym = mh.local_frame(Xu, Yu, s)
+        fp_d = mh.rect_dist(lxm, lym, f_m["x0"] - 250.0, f_m["x1"] + 250.0,
+                            f_m["y0"] - 250.0, f_m["y1"] + 250.0)
+        th = np.arctan2(Yu - y, Xu - x)
+        ph = lens_rng.uniform(0.0, 2.0 * np.pi, 5)
+        wob = (1.0 + 0.30 * np.sin(th + ph[0])
+               + 0.18 * np.sin(2 * th + ph[1]) + 0.10 * np.sin(3 * th + ph[2])
+               + 0.06 * np.sin(5 * th + ph[3]) + 0.04 * np.sin(7 * th + ph[4]))
+        wob = np.clip(wob + 0.30 * (Dw - 0.5) * 2.0, 0.60, 1.40)
+        gate = mh.smootherstep(0.0, 700.0, fp_d)
+        t = np.maximum(fp_d / wob + (spine_n - 0.45) * 1300.0 * gate, 0.0)
+        run = z * mh.MALDIVE_RUN_K + mh.MALDIVE_RUN_BASE
+        lens[s["id"]] = (t.astype(np.float32), run)
         maldive_zone = np.maximum(maldive_zone,
-                                  smoothstep(outer + 1100.0, outer + 500.0, d))
+                                  smoothstep(run + 700.0, run + 100.0, t))
+    sx_, sy_, sz_ = slots["start_reef"]["pos"]
     reef_zone = smoothstep(3100.0, 2500.0, np.hypot(Xu - sx_, Yu - sy_))
     w_rock = w_rock * (1.0 - maldive_zone) * (1.0 - reef_zone)
 
@@ -267,15 +300,9 @@ def main():
     beach = 1.0 - smoothstep(140.0 + shoreline_jitter, 330.0 + shoreline_jitter, H)
     w_sand = beach.copy()
     w_sand = np.maximum(w_sand, smoothstep(950.0, 430.0, road_d))     # road ribbon
-    for sid in ("M1", "M2", "M3", "M4"):                              # maldive shores
-        s = slots[sid]
-        x, y, z = s["pos"]
-        top_r = s["r"] + PAD_RIM
-        d = np.hypot(Xu - x, Yu - y)
-        region = smoothstep(top_r + z * mh.MALDIVE_SHORE_RUN + 1500.0,
-                            top_r + z * mh.MALDIVE_SHORE_RUN + 600.0, d)
-        below_top = 1.0 - smoothstep(z - 170.0, z - 50.0, H)
-        w_sand = np.maximum(w_sand, region * below_top)
+    # the whole lens above water is SAND - these islets are sandbars now
+    # (the old grass-top + sandy-ring split died with the flat-disc model)
+    w_sand = np.maximum(w_sand, maldive_zone * smoothstep(-250.0, -120.0, H))
     w_sand = np.maximum(w_sand, reef_zone)                             # reef = all sand
     w_sand = w_sand * (1.0 - w_rock)
 
@@ -434,28 +461,24 @@ def main():
     for x, y in beach_pts:
         put(pick(FT_DRIFT + FT_SEAWEED, None), x, y)
 
-    # maldive rings: palms on the rim ring (arena circle stays clear), a
-    # couple of driftwood pieces on the sand slope below
+    # maldive palms ON the lens (resync 2026-06-12): scattered between the
+    # construction pad edge and the mid-slope, never under water (palms by
+    # the old radii would land on the dune shoulder or in the sea - Handoff);
+    # driftwood sits lower on the shoulder
     for sid in ("M1", "M2", "M3", "M4"):
         s = slots[sid]
-        x0, y0, z0 = s["pos"]
-        ring0, ring1 = s["r"] + 150.0, s["r"] + PAD_RIM - 150.0
-        n_palm = int(rng.integers(2, 5))
-        base = rng.uniform(0.0, 2.0 * math.pi)
-        for k in range(n_palm):
-            ang = base + (2.0 * math.pi / n_palm) * k + rng.uniform(-0.45, 0.45)
-            rad = rng.uniform(ring0, ring1)
-            px2, py2 = x0 + math.cos(ang) * rad, y0 + math.sin(ang) * rad
-            if at(bridge_d, px2, py2) < 1000.0:
-                continue
-            put(pick(FT_PALM if rng.random() < 0.75 else FT_BANANA), px2, py2)
-        for _ in range(int(rng.integers(1, 4))):
-            ang = rng.uniform(0.0, 2.0 * math.pi)
-            rad = s["r"] + PAD_RIM + z0 * mh.MALDIVE_SHORE_RUN * rng.uniform(0.25, 0.6)
-            px2, py2 = x0 + math.cos(ang) * rad, y0 + math.sin(ang) * rad
-            if at(bridge_d, px2, py2) < 1000.0 or at(H, px2, py2) < 40.0:
-                continue
-            put(pick(FT_DRIFT), px2, py2)
+        t, run = lens[sid]
+        palm_field = ((t > 200.0) & (t < run * 0.7) & (H > 90.0)
+                      & (bridge_d > 1000.0)) * smoothstep(26.0, 16.0, slope)
+        n_palm = int(rng.integers(3, 6) if s.get("tier") == "M"
+                     else rng.integers(2, 5))
+        for x, y in sample_field(palm_field, n_palm, rng, spacing=620.0):
+            put(pick(FT_PALM if rng.random() < 0.8 else FT_BANANA), x, y)
+        drift_field = ((t > run * 0.35) & (t < run) & (H > 25.0) & (H < 140.0)
+                       & (bridge_d > 900.0)).astype(np.float32)
+        for x, y in sample_field(drift_field, int(rng.integers(1, 4)), rng,
+                                 spacing=1100.0):
+            put(pick(FT_DRIFT), x, y)
     # start reef: two driftwood pieces at the rim, nothing else
     for _ in range(2):
         ang = rng.uniform(0.0, 2.0 * math.pi)
@@ -463,12 +486,38 @@ def main():
         if at(H, px2, py2) > 60.0:
             put(pick(FT_DRIFT), px2, py2)
 
+    # live-terrain probes: apply_biome1_art_pass.py refuses to paint when the
+    # open landscape does not match THIS heightmap (stale import guard)
+    height_probes = [{"label": sid, "x": slots[sid]["pos"][0],
+                      "y": slots[sid]["pos"][1], "want": slots[sid]["pos"][2]}
+                     for sid in ("M1", "M2", "M3", "M4")]
+    height_probes.append({"label": "Citadel", "x": slots["Citadel"]["pos"][0],
+                          "y": slots["Citadel"]["pos"][1],
+                          "want": slots["Citadel"]["pos"][2]})
+    height_probes.append({"label": "G2 apron", "x": slots["G2"]["pos"][0],
+                          "y": slots["G2"]["pos"][1],
+                          "want": slots["G2"]["pos"][2] - 520.0})
+    height_probes.append({"label": "open sea", "x": 70000.0, "y": -70000.0,
+                          "want": SEA_FLOOR})
+    bad = 0
+    for p in height_probes:
+        got = at(H, p["x"], p["y"])
+        tol = max(90.0, abs(p["want"]) * 0.05)
+        if abs(got - p["want"]) > tol:
+            bad += 1
+            print("PROBE %-9s H=%7.0f want %7.0f **MISMATCH**"
+                  % (p["label"], got, p["want"]))
+    print("height probes vs PNG: {}/{} OK".format(len(height_probes) - bad,
+                                                  len(height_probes)))
+
     total = sum(len(v) for v in plan.values())
     plan_doc = {
         "seed": args.seed,
+        "terrain_seed": args.terrain_seed,
         "heightmap": os.path.basename(HEIGHTMAP),
         "comment": "Biome1 island art pass v1 - generated by make_biome1_weightmaps.py; "
                    "apply with apply_biome1_art_pass.py (idempotent per foliage type)",
+        "height_probes": height_probes,
         "type_params": TYPE_PARAMS,
         "instances": {ft: pts for ft, pts in sorted(plan.items())},
     }
