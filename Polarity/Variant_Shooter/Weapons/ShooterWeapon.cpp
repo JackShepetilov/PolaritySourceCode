@@ -628,6 +628,13 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 	}
 
 	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»
+	// [HITSCAN_DEBUG] Inputs of the shot: where the muzzle is, where the camera-aim point landed,
+	// and how far it is. AimDist ~= MaxAimDistance means the aim trace hit NOTHING (open area) —
+	// worst case for muzzle parallax.
+	UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] FireHitscan: Muzzle=%s AimPoint=%s AimDist=%.0f DotP=%.3f dirMode=%s"),
+		*MuzzleLocation.ToCompactString(), *TargetLocation.ToCompactString(), DistanceToTarget, DotP,
+		(DistanceToTarget < 100.0f || DotP < 0.5f) ? TEXT("ViewDir(override)") : TEXT("Muzzle->AimPoint"));
+
 	// NPC: simple line trace instead of cone hitscan.
 	// The cone system was designed for the player (camera and muzzle co-located in FPS).
 	// For NPCs, camera (eyes) and muzzle (weapon) have ~40-50u parallax offset,
@@ -702,6 +709,16 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 	float MaxDistance = bHitWall ? WallHitResult.Distance : SegmentMaxDistance;
 	FVector BeamEnd = bHitWall ? WallHitResult.ImpactPoint : End;
+
+	// [HITSCAN_DEBUG] Shot summary: divergence + sweep sphere radius + what the Visibility (wall) trace hit.
+	// SweepR is the sphere radius used by the pawn sweep below — if it's tiny (divergence ~0) the
+	// sweep behaves like a thin ray and muzzle parallax can make it miss entirely.
+	UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] === Shot: Start=%s Dir=%s | Diverg=%.2fdeg SweepR=%.1f MaxDist=%.0f | Wall=%s comp=%s dist=%.0f"),
+		*Start.ToCompactString(), *Direction.ToCompactString(),
+		DivergenceAngle, CalculateWaveRadius(MaxDistance), MaxDistance,
+		bHitWall ? *GetNameSafe(WallHitResult.GetActor()) : TEXT("none"),
+		bHitWall ? *GetNameSafe(WallHitResult.GetComponent()) : TEXT("-"),
+		bHitWall ? WallHitResult.Distance : SegmentMaxDistance);
 
 	// DEBUG: Log what the Visibility line trace hit (helps diagnose EMFPhysicsProp hits)
 	if (bHitWall && WallHitResult.GetActor())
@@ -864,6 +881,12 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		UE_LOG(LogTemp, Warning, TEXT("  - %s: Dist=%.0f, Angle=%.1fÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°, DistFromAxis=%.1f, ConeRadius=%.1f"),
 			*HitActor->GetName(), HitDistance, AngleToHit, DistanceFromAxis, ConeRadiusAtDistance);
 
+		// [HITSCAN_DEBUG] Full candidate info: which component was swept (capsule vs mesh), bone,
+		// raw sweep distance (can be << real distance for fat sweep spheres) and both cone-filter inputs.
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]   cand=%s comp=%s bone=%s | rawDist=%.0f fixDist=%.0f | dot=%.4f cosHalf=%.4f | axisDist=%.1f coneR=%.1f"),
+			*HitActor->GetName(), *GetNameSafe(Hit.GetComponent()), *Hit.BoneName.ToString(),
+			Hit.Distance, HitDistance, DotProduct, CosHalfAngle, DistanceFromAxis, ConeRadiusAtDistance);
+
 #if DEBUG_CONE_HITSCAN
 		// ===== DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ =====
 		const float DebugDuration = 2.0f;
@@ -890,7 +913,8 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		if (!bInsideCone)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("    OUTSIDE CONE"));
+			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]     -> REJECTED: OUTSIDE CONE (dot=%.4f < cosHalf=%.4f AND axisDist=%.1f > coneR=%.1f)"),
+				DotProduct, CosHalfAngle, DistanceFromAxis, ConeRadiusAtDistance);
 #if DEBUG_CONE_HITSCAN
 			// DEBUG: ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
 			DrawDebugSphere(GetWorld(), HitLocation, 20.0f, 8, FColor::Red, false, 2.0f);
@@ -915,7 +939,9 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		if (bBlocked && BlockCheck.Distance < HitDistance - 50.0f)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("    BLOCKED by wall at %.0f"), BlockCheck.Distance);
+			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]     -> REJECTED: BLOCKED by %s comp=%s at %.0f (threshold %.0f)"),
+				*GetNameSafe(BlockCheck.GetActor()), *GetNameSafe(BlockCheck.GetComponent()),
+				BlockCheck.Distance, HitDistance - 50.0f);
 #if DEBUG_CONE_HITSCAN
 			// DEBUG: ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
 			DrawDebugSphere(GetWorld(), HitLocation, 20.0f, 8, FColor::Orange, false, 2.0f);
@@ -1007,6 +1033,11 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		float ActualDamage = BestTarget->TakeDamage(FinalDamage, DamageEvent, PawnOwner ? PawnOwner->GetController() : nullptr, this);
 		const bool bKilled = IsActorDeadAfterDamage(BestTarget);
 
+		// [HITSCAN_DEBUG] dealt = what we sent into TakeDamage, applied = what TakeDamage returned.
+		// applied=0 with dealt>0 means the TARGET swallowed it (friendly-fire guard / dead / immune).
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED: target=%s dealt=%.1f applied=%.1f killed=%d"),
+			*BestTarget->GetName(), FinalDamage, ActualDamage, bKilled ? 1 : 0);
+
 		// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
 		if (WeaponOwner && ActualDamage > 0.0f)
 		{
@@ -1052,6 +1083,16 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 4: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ =====
 	UE_LOG(LogTemp, Warning, TEXT("Cone Hitscan RESULT: %d targets hit"), HitTargets.Num());
+
+	// [HITSCAN_DEBUG] The "tracer hit but no damage" case lands exactly here:
+	// sweepHits=0           -> pawn sweep never found the enemy (parallax / object type / collision off)
+	// sweepHits>0 passed=0  -> all candidates rejected (see REJECTED lines above for the reason)
+	if (!BestTarget)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] NO DAMAGE THIS SHOT: sweepHits=%d passedFilter=%d (beam drawn to %s)"),
+			SweepHits.Num(), HitTargets.Num(),
+			bHitWall ? *GetNameSafe(WallHitResult.GetActor()) : TEXT("max range"));
+	}
 
 	// If we hit a pawn, shorten beam to the pawn hit location
 	FVector EffectiveBeamEnd = BeamEnd;
