@@ -300,15 +300,41 @@ def main():
     beach = 1.0 - smoothstep(140.0 + shoreline_jitter, 330.0 + shoreline_jitter, H)
     w_sand = beach.copy()
     w_sand = np.maximum(w_sand, smoothstep(950.0, 430.0, road_d))     # road ribbon
+    # ARENA FOOTPRINTS = SAND, all of them (author review 2026-06-12: no
+    # grass under any arena - blades poke through the floor plates).
+    # Footprint bbox + 300 full, fade by +800.
+    for sid in ("G1", "G2", "G3", "Citadel"):
+        f = fp.get(sid) or mh.load_footprint(slots[sid]["default"])
+        lx, ly = mh.local_frame(Xu, Yu, slots[sid])
+        d = mh.rect_dist(lx, ly, f["x0"], f["x1"], f["y0"], f["y1"])
+        w_sand = np.maximum(w_sand, smoothstep(800.0, 300.0, d))
     # the whole lens above water is SAND - these islets are sandbars now
     # (the old grass-top + sandy-ring split died with the flat-disc model)
     w_sand = np.maximum(w_sand, maldive_zone * smoothstep(-250.0, -120.0, H))
     w_sand = np.maximum(w_sand, reef_zone)                             # reef = all sand
+    # author rule 4: islets are NOT pure sand - small grass patches around
+    # the arenas (never under them: gated to footprint+350, dry crown only)
+    patch_noise = smoothstep(0.46, 0.60, mh.fbm(N, 5, 34, args.seed + 631))
+    grass_patch = np.zeros_like(H)
+    for sid in ("M1", "M2", "M3", "M4"):
+        s = slots[sid]
+        t, run = lens[sid]
+        f_m = mh.load_footprint(s["default"])
+        lxm, lym = mh.local_frame(Xu, Yu, s)
+        fpd = mh.rect_dist(lxm, lym, f_m["x0"], f_m["x1"], f_m["y0"], f_m["y1"])
+        grass_patch = np.maximum(
+            grass_patch,
+            patch_noise * smoothstep(350.0, 700.0, fpd)
+            * smoothstep(220.0, 320.0, H)
+            * smoothstep(run * 0.62, run * 0.45, t))
+    w_sand = w_sand * (1.0 - 0.97 * grass_patch)
     w_sand = w_sand * (1.0 - w_rock)
 
-    clover_noise = mh.fbm(N, 4, 7, args.seed + 113)
-    w_clov = smoothstep(0.52, 0.66, clover_noise) * smoothstep(24.0, 14.0, slope)
-    w_clov = w_clov * np.clip(1.0 - w_rock - w_sand, 0.0, 1.0)
+    # Grass_Clovers KILLED (author review 2026-06-12: "трава это просто
+    # grass"). The layer stays in the material/assignment, but the mask is
+    # all-zero - importing it ERASES the clover weights already painted.
+    meadow_noise = smoothstep(0.52, 0.66, mh.fbm(N, 4, 7, args.seed + 113))
+    w_clov = np.zeros_like(H)
 
     w_grass = np.clip(1.0 - w_rock - w_sand - w_clov, 0.0, 1.0)
 
@@ -386,14 +412,21 @@ def main():
     # palm GROVES, not a bead string: noise gates which coast stretches get
     # palms (cells 8 ~ 25k features: a dozen grove/gap alternations around
     # the perimeter; cells 5 left 12 palms total - whole-ring misses)
-    palm_grove = smoothstep(0.44, 0.58, mh.fbm(N, 4, 8, args.seed + 421))
-    palm_f = ((1.0 - smoothstep(600.0, 950.0, H)) * smoothstep(90.0, 160.0, H)
-              * smoothstep(20.0, 12.0, slope) * palm_grove * keep_tree)
-    flower_f = (smoothstep(0.3, 0.7, masks["Grass_Clovers"] / 255.0)
-                * smoothstep(20.0, 12.0, slope) * keep_small)
+    palm_grove = smoothstep(0.40, 0.54, mh.fbm(N, 4, 8, args.seed + 421))
+    # palms NEVER touch water (author review 2026-06-12): Gerstner waves ride
+    # well above Z=0, so the dry-foot floor is H>=250 (was 90 - wet). The
+    # band reaches 1100-1500 (the apron under 250 is gone) and the slope gate
+    # is palm-real 16-26 deg: the 250+ zone IS the rising coast shoulder, the
+    # old <12 deg gate left 14 palms on the whole island
+    palm_f = ((1.0 - smoothstep(1100.0, 1500.0, H)) * smoothstep(250.0, 330.0, H)
+              * smoothstep(26.0, 16.0, slope) * palm_grove * keep_tree)
+    # flower meadows keep the old clover-noise SHAPE (the painted layer is
+    # gone), gated to actual grass so they never sit on sand pads or road
+    flower_f = (meadow_noise * smoothstep(20.0, 12.0, slope)
+                * (masks["Grass"] / 255.0) * keep_small)
     shoulder_band = smoothstep(1500.0, 1100.0, road_d) * smoothstep(650.0, 800.0, road_d)
     flower_f = np.maximum(flower_f, shoulder_band * smoothstep(18.0, 10.0, slope)
-                          * keep_small * (H > 80.0))
+                          * (masks["Grass"] / 255.0) * keep_small * (H > 80.0))
     wrack_noise = smoothstep(0.42, 0.56, mh.fbm(N, 4, 8, args.seed + 521))
     beach_f = ((1.0 - smoothstep(100.0, 180.0, H)) * smoothstep(15.0, 45.0, H)
                * smoothstep(16.0, 9.0, slope) * wrack_noise * keep_small)
@@ -468,7 +501,7 @@ def main():
     for sid in ("M1", "M2", "M3", "M4"):
         s = slots[sid]
         t, run = lens[sid]
-        palm_field = ((t > 200.0) & (t < run * 0.7) & (H > 90.0)
+        palm_field = ((t > 200.0) & (t < run * 0.7) & (H > 250.0)
                       & (bridge_d > 1000.0)) * smoothstep(26.0, 16.0, slope)
         n_palm = int(rng.integers(3, 6) if s.get("tier") == "M"
                      else rng.integers(2, 5))
@@ -485,6 +518,16 @@ def main():
         px2, py2 = sx_ + math.cos(ang) * 1900.0, sy_ + math.sin(ang) * 1900.0
         if at(H, px2, py2) > 60.0:
             put(pick(FT_DRIFT), px2, py2)
+
+    # rule check (author 2026-06-12): no palm may touch water - report the
+    # lowest palm foot over the heightmap
+    pmin, pn = 1e9, 0
+    for ftp in FT_PALM:
+        for q in plan.get(ftp, ()):
+            pmin = min(pmin, at(H, q[0], q[1]))
+            pn += 1
+    print("palms: %d total, lowest foot H=%.0f uu %s" % (
+        pn, pmin, "OK (>=250)" if pmin >= 250.0 else "**TOO WET**"))
 
     # live-terrain probes: apply_biome1_art_pass.py refuses to paint when the
     # open landscape does not match THIS heightmap (stale import guard)

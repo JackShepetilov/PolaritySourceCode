@@ -152,7 +152,9 @@ def phase2():
             for entry in w:
                 nm = str(getattr(entry, "layer_name", getattr(entry, "name", entry)))
                 wt = float(getattr(entry, "weight", getattr(entry, "value", -1.0)))
-                if want_layer in nm:
+                # exact match: "Grass" is a substring of "Grass_Clovers" and a
+                # contains-check let the later 0.0 entry overwrite the real hit
+                if nm == want_layer:
                     got = wt
         except Exception as e:
             warn("probe {} parse failed: {}".format(label, e))
@@ -175,17 +177,35 @@ def phase3():
         raise RuntimeError("plan missing: {}".format(PLAN_PATH))
     with open(PLAN_PATH, encoding="utf-8") as f:
         plan = json.load(f)
-    # foliage lands in the CURRENT level - force the persistent island level
-    # (an attached arena sublevel may still be current from the build script)
+    # foliage lands in the CURRENT level - force the persistent island level.
+    # EditorLevelUtils.make_level_current wants a LevelStreaming (caught live
+    # 2026-06-12: passing the ULevel left RunLogic current and 3775 instances
+    # moved into the author's logic sublevel) - LevelEditorSubsystem takes the
+    # ULevel directly. HARD ABORT if the switch cannot be verified.
+    les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    les.set_current_level_by_name("Lvl_Biome1_Island")   # probed 2026-06-12
+    cur_pkg = "?"
     try:
-        levels = unreal.EditorLevelUtils.get_levels(world)
-        if levels:
-            unreal.EditorLevelUtils.make_level_current(levels[0])
-            log("current level -> persistent ({})".format(
-                levels[0].get_package().get_name()))
+        cur_pkg = les.get_current_level().get_package().get_name()
     except Exception as e:
-        warn("make_level_current failed ({}) - continuing, will verify package"
-             .format(e))
+        warn("get_current_level failed: {}".format(e))
+    if cur_pkg != LEVEL_PATH:
+        raise RuntimeError("current level is {} (want {}) - foliage would "
+                           "land in a sublevel, aborting".format(cur_pkg, LEVEL_PATH))
+    log("current level -> {}".format(cur_pkg))
+
+    # clean stray IFAs BEFORE adding: FoliageService appends to the first
+    # existing InstancedFoliageActor in the world, NOT the current level's
+    # (caught live 2026-06-12: with a leftover RunLogic IFA present, all 3775
+    # fresh instances landed in it again). RunLogic never legitimately holds
+    # foliage; with no IFA anywhere the service creates one in the CURRENT
+    # (= island) level.
+    eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    for a in list(eas.get_all_level_actors()):
+        if a and a.get_class().get_name() == "InstancedFoliageActor" and \
+                a.get_package().get_name().endswith("/Lvl_RunLogic"):
+            eas.destroy_actor(a)
+            log("destroyed stray IFA in Lvl_RunLogic (pre-add cleanup)")
 
     params_by_type = plan.get("type_params", {})
     grand_add = grand_rej = 0
@@ -217,15 +237,19 @@ def phase3():
     log("FOLIAGE TOTAL: added {}, rejected {} (plan {})".format(
         grand_add, grand_rej, sum(len(v) for v in plan.get("instances", {}).values())))
 
-    eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     ifa_pkgs = []
     for a in eas.get_all_level_actors():
         if a and a.get_class().get_name() == "InstancedFoliageActor":
             ifa_pkgs.append(a.get_package().get_name())
     log("VERIFY InstancedFoliageActor packages: {}".format(ifa_pkgs))
-    if LEVEL_PATH not in ifa_pkgs:
-        warn("no IFA in the island package - instances may have landed in a "
-             "sublevel, INSPECT before saving anything else")
+    live_total = 0
+    for ft in unreal.FoliageService.list_foliage_types():
+        live_total += ft.instance_count
+    log("VERIFY live foliage instances: {}".format(live_total))
+    if LEVEL_PATH not in ifa_pkgs or live_total < grand_add:
+        raise RuntimeError("foliage did not stick to the island level "
+                           "(IFAs {}, live {} < added {}) - NOT saving"
+                           .format(ifa_pkgs, live_total, grand_add))
 
     dirty = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
     keep = [p for p in dirty
