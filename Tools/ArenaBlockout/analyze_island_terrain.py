@@ -202,6 +202,28 @@ def main():
               .format(x, y, flat[idx], H[r, c], sl[r, c]))
         k += 1
 
+    # --- open water between islands (layout rule: maldive hops MUST stay
+    # water; coastline lobes can silently land-bridge a strait on a bad seed)
+    print("\n=== WATER GAPS (maldive hops) ===")
+    isl_c = layout["island"]["center"]
+    hops = [("M1", "M2"), ("M2", "M3"), ("M3", "M4"), ("M4", None)]
+    for a_id, b_id in hops:
+        a = slots[a_id]["pos"]
+        b = slots[b_id]["pos"] if b_id else list(isl_c) + [0]
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        kk = max(2, int(L / 100.0))
+        best = cur = 0.0
+        minh = 1e9
+        for i in range(kk):
+            t = i / (kk - 1.0)
+            h = sample_h(H, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+            minh = min(minh, h)
+            cur = cur + L / kk if h < -80.0 else 0.0
+            best = max(best, cur)
+        tag = "OK" if best >= 1500.0 else "**LAND-BRIDGED**"
+        print("  {}->{}: longest water {:.0f} uu (min H {:.0f}) {}".format(
+            a_id, b_id or "island", best, minh, tag))
+
     # --- route comfort (the PLAYER path: corridor to the A5 entry, then the
     # exit bench behind bort_s to the citadel-stairs landing; the straight
     # line THROUGH the arena is not walked - keep in sync with the generator)

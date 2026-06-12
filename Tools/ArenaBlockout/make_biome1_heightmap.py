@@ -565,7 +565,10 @@ def main():
             wob = (1.0 + 0.30 * np.sin(th + ph[0])
                    + 0.18 * np.sin(2 * th + ph[1]) + 0.10 * np.sin(3 * th + ph[2])
                    + 0.06 * np.sin(5 * th + ph[3]) + 0.04 * np.sin(7 * th + ph[4]))
-            wob = np.clip(wob + 0.30 * (Dw - 0.5) * 2.0, 0.55, 1.95)
+            # upper clip 1.40: lobes any larger can land-bridge the M3-M4 and
+            # M4-island straits (open water between islands is a layout rule;
+            # the analyzer water-gap gate enforces it for every seed)
+            wob = np.clip(wob + 0.30 * (Dw - 0.5) * 2.0, 0.60, 1.40)
             gate = smootherstep(0.0, 700.0, fp_d)
             t = np.maximum(fp_d / wob + (spine_n - 0.45) * 1300.0 * gate, 0.0)
             run = z * MALDIVE_RUN_K + MALDIVE_RUN_BASE   # mid-slope < ~30 deg
