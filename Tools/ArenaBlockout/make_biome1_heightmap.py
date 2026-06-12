@@ -56,6 +56,13 @@ SCALE = 100.0
 HALF = (N - 1) * SCALE * 0.5
 SEA_FLOOR = -2000.0
 PAD_RIM = 900.0
+# Maldive SAND-LENS profile (2026-06-12): islets fall from the arena
+# footprint edge as a convex C2 shoulder, run = z * K + BASE (wobbled).
+MALDIVE_RUN_K = 2.8
+MALDIVE_RUN_BASE = 2000.0
+# DEPRECATED (pre-lens flat-disc model): only make_biome1_weightmaps.py still
+# reads this - its maldive zones/palms assume the old radial shore and need a
+# resync to the lens (see Handoff_BiomeIsland.md, maldive section).
 MALDIVE_SHORE_RUN = 2.4
 UNDERWATER_SKIRT = 3600.0
 DOME_REACH = 62000.0
@@ -532,37 +539,39 @@ def main():
                         mask=(1.0 - in_cliff) * smoothstep(120.0, 250.0, H),
                         strength=0.85, knee=30.0)
 
-    # ---------------- maldive micro-islands ----------------
-    # The ARENA FOOTPRINT stays glass-flat (plates float just 10 uu over the
-    # pad - any noise under them pokes through the floors), but the ring
-    # between the footprint and the beach gets dune noise + a sand berm at
-    # the top edge - a perfectly flat disc read as CG (author 2026-06-12).
+    # ---------------- maldive micro-islands: SAND-LENS profile ---------------
+    # Flat-top discs (with or without a berm lip) read as poker chips at eye
+    # level (author 2026-06-12, twice). Lens model: the arena footprint zone
+    # stays glass-flat (plates float 10 uu over it), and from its edge the
+    # islet falls as a CONVEX C2 shoulder straight under the waterline - no
+    # flat ring, no rim, the horizon just rolls away. Dune noise scales with
+    # the local drop, so the crown is serene and nothing pokes the floors.
     for s_ in layout["slots"]:
         x, y, z = s_["pos"]
         if s_["kind"] == "arena" and s_.get("tier") in ("S", "M"):
-            top_r = s_["r"] + PAD_RIM
-            d = np.hypot(Xu - x, Yu - y)
-            th = np.arctan2(Yu - y, Xu - x)
-            f1, f2 = rng.uniform(0, 2 * np.pi, 2)
-            wob = 1.0 + 0.05 * np.sin(3 * th + f1) + 0.03 * np.sin(5 * th + f2) \
-                + 0.03 * (Dw - 0.5) * 2.0
-            de = d / wob
-            shore_r = top_r + z * MALDIVE_SHORE_RUN
-            base_r = shore_r + UNDERWATER_SKIRT
-            prof = np.where(
-                de <= top_r, z,
-                np.where(de <= shore_r, z * smootherstep(shore_r, top_r, de),
-                         SEA_FLOOR - SEA_FLOOR * smoothstep(base_r, shore_r, de)))
             f_m = load_footprint(s_["default"])
             lxm, lym = local_frame(Xu, Yu, s_)
-            fp_d = rect_dist(lxm, lym, f_m["x0"] - 200.0, f_m["x1"] + 200.0,
-                             f_m["y0"] - 200.0, f_m["y1"] + 200.0)
-            ring_w = smootherstep(200.0, 800.0, fp_d)
-            sea_fade = smoothstep(base_r, shore_r, de)
-            prof += (Dw - 0.5) * 2.0 * 80.0 * ring_w * sea_fade
-            prof += 50.0 * ring_w * smootherstep(top_r - 600.0, top_r - 200.0, de) \
-                * smootherstep(top_r + 500.0, top_r + 150.0, de)
-            H = np.maximum(H, prof)
+            fp_d = rect_dist(lxm, lym, f_m["x0"] - 250.0, f_m["x1"] + 250.0,
+                             f_m["y0"] - 250.0, f_m["y1"] + 250.0)
+            th = np.arctan2(Yu - y, Xu - x)
+            f0, f1, f2 = rng.uniform(0, 2 * np.pi, 3)
+            # 2-theta harmonic stretches each islet into a soft oval - chips
+            # are round, sandbars are not
+            wob = (1.0 + 0.10 * np.sin(2 * th + f0) + 0.05 * np.sin(3 * th + f1)
+                   + 0.03 * np.sin(5 * th + f2) + 0.04 * (Dw - 0.5) * 2.0)
+            t = fp_d / wob
+            run = z * MALDIVE_RUN_K + MALDIVE_RUN_BASE   # mid-slope < ~30 deg
+            dome = z - (z + 250.0) * smootherstep(0.0, run, t)
+            # noise floor of 20 right past the footprint edge breaks the
+            # molded look of the upper shoulder (drop-scaled alone left it
+            # clean-rect); the t-gate keeps the footprint itself untouched
+            namp = np.minimum(140.0, 20.0 + (z - dome) * 0.5) \
+                * smootherstep(0.0, 400.0, t)
+            dome = dome + (Dw - 0.5) * 2.0 * namp \
+                * smoothstep(run + 600.0, run - 600.0, t)
+            skirt = -250.0 + (SEA_FLOOR + 250.0) \
+                * smoothstep(run, run + UNDERWATER_SKIRT, t)
+            H = np.maximum(H, np.where(t <= run, dome, skirt))
 
     # start reef: WIDE flat top (the author's launch structure stands here -
     # it must not hang over the slope; was flat r<300 only)
