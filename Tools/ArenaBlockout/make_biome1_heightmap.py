@@ -532,7 +532,11 @@ def main():
                         mask=(1.0 - in_cliff) * smoothstep(120.0, 250.0, H),
                         strength=0.85, knee=30.0)
 
-    # ---------------- maldive micro-islands (unchanged model) ----------------
+    # ---------------- maldive micro-islands ----------------
+    # The ARENA FOOTPRINT stays glass-flat (plates float just 10 uu over the
+    # pad - any noise under them pokes through the floors), but the ring
+    # between the footprint and the beach gets dune noise + a sand berm at
+    # the top edge - a perfectly flat disc read as CG (author 2026-06-12).
     for s_ in layout["slots"]:
         x, y, z = s_["pos"]
         if s_["kind"] == "arena" and s_.get("tier") in ("S", "M"):
@@ -549,8 +553,15 @@ def main():
                 de <= top_r, z,
                 np.where(de <= shore_r, z * smootherstep(shore_r, top_r, de),
                          SEA_FLOOR - SEA_FLOOR * smoothstep(base_r, shore_r, de)))
-            band = smoothstep(top_r, top_r + 600.0, de) * smoothstep(base_r, shore_r, de)
-            prof += (Dw - 0.5) * 2.0 * 70.0 * band
+            f_m = load_footprint(s_["default"])
+            lxm, lym = local_frame(Xu, Yu, s_)
+            fp_d = rect_dist(lxm, lym, f_m["x0"] - 200.0, f_m["x1"] + 200.0,
+                             f_m["y0"] - 200.0, f_m["y1"] + 200.0)
+            ring_w = smootherstep(200.0, 800.0, fp_d)
+            sea_fade = smoothstep(base_r, shore_r, de)
+            prof += (Dw - 0.5) * 2.0 * 80.0 * ring_w * sea_fade
+            prof += 50.0 * ring_w * smootherstep(top_r - 600.0, top_r - 200.0, de) \
+                * smootherstep(top_r + 500.0, top_r + 150.0, de)
             H = np.maximum(H, prof)
 
     # start reef: WIDE flat top (the author's launch structure stands here -
