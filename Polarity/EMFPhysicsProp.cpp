@@ -243,6 +243,13 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	{
 		CachedPreCollisionVelocity = PropMesh->GetPhysicsLinearVelocity();
 		CachedPreCollisionSpeed = CachedPreCollisionVelocity.Size();
+
+		// Air Mail: the launch eligibility survives the steered reverse-flight window (it ends
+		// by duration mid-air) but expires once the prop slows out of "flight" speeds.
+		if (bAirMailEligibleFlight && !bIsInReverseFlight && CachedPreCollisionSpeed < 350.0f)
+		{
+			bAirMailEligibleFlight = false;
+		}
 	}
 
 	// Debug: always-visible capture range sphere around this prop
@@ -643,6 +650,10 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 			bHasExploded = false;
 			ReverseLaunchElapsed = 0.0f;
 
+			// Air Mail: fresh player launch — eligible for one new bounce.
+			bAirMailEligibleFlight = true;
+			bAirMailBounceConsumed = false;
+
 			const float LaunchDistance = EffectiveCaptureRange * ReverseLaunchDistanceMultiplier;
 			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
 
@@ -877,11 +888,13 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 
 bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVector& ImpactPoint, bool bCharacterImpact)
 {
-	// Only player-launched props return, once per launch, and only if the prop survived.
-	if (bAirMailBounceConsumed || !bIsInReverseFlight || bHasExploded || bIsDead || !PropMesh)
+	// Only player-launched props return (the eligibility flag outlives the steered
+	// reverse-flight window), once per launch, and only if the prop survived.
+	if (bAirMailBounceConsumed || !(bIsInReverseFlight || bAirMailEligibleFlight) || bHasExploded || bIsDead || !PropMesh)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] prop %s bounce skipped: consumed=%d reverseFlight=%d exploded=%d dead=%d"),
-			*GetName(), bAirMailBounceConsumed ? 1 : 0, bIsInReverseFlight ? 1 : 0, bHasExploded ? 1 : 0, bIsDead ? 1 : 0);
+		UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] prop %s bounce skipped: consumed=%d reverseFlight=%d eligible=%d exploded=%d dead=%d"),
+			*GetName(), bAirMailBounceConsumed ? 1 : 0, bIsInReverseFlight ? 1 : 0, bAirMailEligibleFlight ? 1 : 0,
+			bHasExploded ? 1 : 0, bIsDead ? 1 : 0);
 		return false;
 	}
 
@@ -898,6 +911,7 @@ bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVecto
 	}
 
 	bAirMailBounceConsumed = true;
+	bAirMailEligibleFlight = false;
 
 	// End the reverse flight HERE: UpdateReverseFlight steers the prop along the aim line every
 	// tick and would overwrite the return velocity on the very next frame (this was why bounces
@@ -1431,6 +1445,7 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 
 	bHasExploded = true;
 	bIsInReverseFlight = false;
+	bAirMailEligibleFlight = false;
 
 	// Charge-proportionate scaling: scale = |charge| / referenceCharge, clamped
 	float ChargeScale = 1.0f;
@@ -1791,6 +1806,8 @@ void AEMFPhysicsProp::ResetProp()
 	bIsDead = false;
 	bHasExploded = false;
 	bIsInReverseFlight = false;
+	bAirMailEligibleFlight = false;
+	bAirMailBounceConsumed = false;
 	CachedPreCollisionSpeed = 0.0f;
 	CachedChargeScale = 1.0f;
 	CurrentHP = MaxHP;
@@ -1861,6 +1878,7 @@ void AEMFPhysicsProp::RestoreFromCheckpointState(const FPropCheckpointData& Stat
 			bIsDead = true;
 			bHasExploded = true;
 			bIsInReverseFlight = false;
+			bAirMailEligibleFlight = false;
 			CachedPreCollisionSpeed = 0.0f;
 			SetCharge(0.0f);
 			SetActorTickEnabled(false);

@@ -3706,12 +3706,16 @@ static bool TryAirMailBounceForNPC(AShooterNPC* NPC, const FVector& PreImpactVel
 		return false;
 	}
 
-	NPC->LaunchCharacter(ReturnVelocity, true, true);
+	// LaunchIntoAir, NOT LaunchCharacter: the knockback/launched machinery scripts the NPC's
+	// movement and silently swallows a plain LaunchCharacter. LaunchIntoAir force-resets the
+	// combat state, re-enters the launched state and writes the velocity directly (the same
+	// path the kick redirect uses, which is proven to move stunned NPCs).
+	NPC->LaunchIntoAir(ReturnVelocity);
 	NPC->Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
 	AirMail->PlayBounceFeedback(ImpactPoint);
 
-	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] thrown NPC %s survived impact and bounced toward player"),
-		*NPC->GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] thrown NPC %s survived impact and bounced toward player (vel=%.0f,%.0f,%.0f)"),
+		*NPC->GetName(), ReturnVelocity.X, ReturnVelocity.Y, ReturnVelocity.Z);
 	return true;
 }
 

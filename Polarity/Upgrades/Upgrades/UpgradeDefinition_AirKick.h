@@ -84,6 +84,24 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick", meta = (ClampMin = "0.0"))
 	float KickSpinSpeed = 720.0f;
 
+	// ==================== Kick Aim Assist (launch-time snap) ====================
+	// At the MOMENT of the kick the launch direction snaps toward the best enemy near the
+	// camera forward: the aim point leads the enemy's current velocity over the projected
+	// flight time and compensates the gravity drop. This is a one-shot launch correction —
+	// NOT mid-flight homing; after launch the body flies ballistically.
+
+	/** Master switch for the launch-time aim assist. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Aim Assist")
+	bool bEnableKickAimAssist = true;
+
+	/** Max angle (deg) between camera forward and the enemy for the snap to engage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Aim Assist", meta = (ClampMin = "2.0", ClampMax = "60.0", Units = "deg"))
+	float KickAimAssistConeHalfAngleDeg = 20.0f;
+
+	/** Max distance (cm) from the camera to the assisted enemy. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Aim Assist", meta = (ClampMin = "200.0", Units = "cm"))
+	float KickAimAssistRange = 3500.0f;
+
 	// ==================== Kick Magnet (timing assist) ====================
 	// When the player starts an AIRBORNE melee swing while an incoming object flies at them
 	// (and they are facing it within MagnetConeHalfAngleDeg), the object's velocity is smoothly

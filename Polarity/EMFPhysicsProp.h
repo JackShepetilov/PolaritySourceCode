@@ -666,8 +666,15 @@ private:
 	 *  velocity available inside OnPropHit is already reflected by the solver. */
 	FVector CachedPreCollisionVelocity = FVector::ZeroVector;
 
-	/** One-shot guard: a launched prop performs at most one Air Mail bounce per launch. */
+	/** One-shot guard: a launched prop performs at most one Air Mail bounce per launch.
+	 *  Reset when a new reverse-flight launch starts. */
 	bool bAirMailBounceConsumed = false;
+
+	/** True from launch until the prop slows down / bounces / explodes / is recaptured.
+	 *  Outlives bIsInReverseFlight: the steered reverse-flight window ends by DURATION while
+	 *  the prop keeps flying ballistically at full speed — impacts during that tail must
+	 *  still count as "thrown by the player" for the Air Mail bounce. */
+	bool bAirMailEligibleFlight = false;
 
 	/** Air Mail: if the player owns the upgrade and this impact qualifies (player-launched,
 	 *  not exploded, incidence angle within the 60–120° band), redirect the prop toward a

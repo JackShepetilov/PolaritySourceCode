@@ -241,15 +241,19 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		return;
 	}
 
-	// Kick direction: camera forward.
+	// Kick direction: camera forward...
+	FVector CamLocation = Character->GetActorLocation();
 	FVector KickDir = Character->GetActorForwardVector();
 	if (APlayerController* PC = Cast<APlayerController>(Character->GetController()))
 	{
-		FVector ViewLocation;
 		FRotator ViewRotation;
-		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		PC->GetPlayerViewPoint(CamLocation, ViewRotation);
 		KickDir = ViewRotation.Vector();
 	}
+
+	// ...snapped onto the best enemy in the assist cone at LAUNCH time (velocity-led,
+	// gravity-compensated). One-shot correction, no mid-flight homing.
+	KickDir = ComputeAssistedKickDirection(HitActor, CamLocation, KickDir);
 
 	const float KickSpeed = DefAirKick->KickSpeed;
 	bool bKicked = false;
@@ -343,6 +347,95 @@ void UUpgrade_AirKick::PlayKickFeedback(const FVector& Location, const FVector& 
 			DefAirKick->KickSoundPitch
 		);
 	}
+}
+
+FVector UUpgrade_AirKick::ComputeAssistedKickDirection(AActor* KickedBody, const FVector& CamLocation, const FVector& CamForward) const
+{
+	if (!DefAirKick.IsValid() || !DefAirKick->bEnableKickAimAssist || !KickedBody || !GetWorld())
+	{
+		return CamForward;
+	}
+
+	AShooterCharacter* Character = GetShooterCharacter();
+
+	// Best living enemy inside the assist cone (closest to the camera ray wins).
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(KickedBody);
+	if (Character)
+	{
+		QueryParams.AddIgnoredActor(Character);
+	}
+
+	TArray<FOverlapResult> Overlaps;
+	GetWorld()->OverlapMultiByObjectType(
+		Overlaps, CamLocation, FQuat::Identity, ObjectParams,
+		FCollisionShape::MakeSphere(DefAirKick->KickAimAssistRange), QueryParams);
+
+	const float CosLimit = FMath::Cos(FMath::DegreesToRadians(DefAirKick->KickAimAssistConeHalfAngleDeg));
+	const FVector BodyLocation = KickedBody->GetActorLocation();
+
+	AShooterNPC* BestTarget = nullptr;
+	float BestDot = CosLimit;
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AShooterNPC* Candidate = Cast<AShooterNPC>(Overlap.GetActor());
+		if (!Candidate || Candidate == KickedBody || Candidate->IsDead())
+		{
+			continue;
+		}
+
+		const FVector ToCandidate = (Candidate->GetActorLocation() - CamLocation).GetSafeNormal();
+		const float Dot = FVector::DotProduct(CamForward, ToCandidate);
+		if (Dot < BestDot)
+		{
+			continue;
+		}
+
+		// The kicked body needs a clear path to the target.
+		FHitResult LoSHit;
+		FCollisionQueryParams LoSParams;
+		LoSParams.AddIgnoredActor(KickedBody);
+		LoSParams.AddIgnoredActor(Candidate);
+		if (Character)
+		{
+			LoSParams.AddIgnoredActor(Character);
+		}
+		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+			LoSHit, BodyLocation, Candidate->GetActorLocation(), ECC_Visibility, LoSParams);
+		if (bBlocked)
+		{
+			continue;
+		}
+
+		BestDot = Dot;
+		BestTarget = Candidate;
+	}
+
+	if (!BestTarget)
+	{
+		return CamForward;
+	}
+
+	// Aim point = enemy position led by their velocity over the flight time (two fixed-point
+	// iterations), raised by the ballistic gravity drop so the body lands ON the enemy.
+	const float KickSpeed = FMath::Max(DefAirKick->KickSpeed, 100.0f);
+	const FVector TargetVelocity = BestTarget->GetVelocity();
+
+	float FlightTime = FVector::Dist(BodyLocation, BestTarget->GetActorLocation()) / KickSpeed;
+	FVector AimPoint = BestTarget->GetActorLocation() + TargetVelocity * FlightTime;
+	FlightTime = FVector::Dist(BodyLocation, AimPoint) / KickSpeed;
+	AimPoint = BestTarget->GetActorLocation() + TargetVelocity * FlightTime;
+
+	const float GravityMagnitude = -GetWorld()->GetGravityZ();
+	AimPoint.Z += 0.5f * GravityMagnitude * FlightTime * FlightTime;
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] kick aim assist → %s (flight t=%.2fs, target speed=%.0f)"),
+		*BestTarget->GetName(), FlightTime, TargetVelocity.Size());
+
+	return (AimPoint - BodyLocation).GetSafeNormal();
 }
 
 // ==================== Kick Magnet (timing assist) ====================

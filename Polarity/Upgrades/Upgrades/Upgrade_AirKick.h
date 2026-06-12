@@ -91,6 +91,11 @@ private:
 	/** Kick feedback (FX + sound) at the contact point. */
 	void PlayKickFeedback(const FVector& Location, const FVector& Direction) const;
 
+	/** Launch-time aim assist: returns the kick direction snapped onto the best living enemy
+	 *  inside the assist cone around camera forward (velocity-led + gravity-compensated, with
+	 *  a line-of-sight check from the kicked body). Falls back to CamForward when no target. */
+	FVector ComputeAssistedKickDirection(AActor* KickedBody, const FVector& CamLocation, const FVector& CamForward) const;
+
 	// ==================== Kick Magnet (timing assist) ====================
 	// While an AIRBORNE melee swing is in its pre-window phases, the incoming object's velocity
 	// is steered each tick so it arrives at the kick hitbox when the damage window opens.
