@@ -408,9 +408,7 @@ def build_road(H, pts, label, grade=ROAD_GRADE, step=120.0):
     g = np.abs(np.diff(env)) / np.maximum(seg, 1.0)
     print("road %-10s len %6.0f uu, profile max %.1f deg, fill/cut anchored at %d pts"
           % (label, seg.sum(), math.degrees(math.atan(g.max())), len(anchors)))
-    core = best_d < ROAD_CORE + 250.0
-    band = (best_d > ROAD_CORE + 100.0) & (best_d < 3700.0)
-    return H, core, band
+    return H, best_d
 
 
 def report_leg(H, pts, label):
@@ -530,7 +528,8 @@ def main():
     # neighbour stayed steep -> banded steps all over steep dunes. Curvature
     # weighting has no threshold feedback: planar steep faces are untouched,
     # step edges melt.
-    H = curvature_relax(H, passes=5, mask=(1.0 - in_cliff) * (H > 150.0),
+    H = curvature_relax(H, passes=5,
+                        mask=(1.0 - in_cliff) * smoothstep(120.0, 250.0, H),
                         strength=0.85, knee=30.0)
 
     # ---------------- maldive micro-islands (unchanged model) ----------------
@@ -574,11 +573,11 @@ def main():
     beach_w = smootherstep(420.0, 60.0, np.abs(H - 60.0)) * (1.0 - in_cliff) \
         * (1.0 - pad_core)
     H = H - (H - 60.0) * 0.45 * beach_w
-    H = gauss3(H, passes=2, w=np.where(np.abs(H - 60.0) < 420.0, 0.5, 0.0)
+    H = gauss3(H, passes=2, w=0.5 * smootherstep(420.0, 300.0, np.abs(H - 60.0))
                * (1.0 - in_cliff) * (1.0 - pad_core))
 
     # ---------------- crease cleanup on walkable land -----------------------
-    land_mask = ((H > 80.0) * (1.0 - in_cliff)).astype(float)
+    land_mask = smoothstep(60.0, 160.0, H) * (1.0 - in_cliff)
     H = curvature_relax(H, passes=3, mask=land_mask)
 
     # ---------------- ROADS (replaces min()-cone carving) -------------------
@@ -630,8 +629,12 @@ def main():
     bench_exit = slot_world(g3, 1103.0, 5300.0)   # where the bench strip ends
     legB = [(bench_exit[0], bench_exit[1], bench_z),
             (landing[0], landing[1], landing_z)]
-    H, coreA, bandA = build_road(H, legA, "legA")
-    road_keep = 1.0 - coreA.astype(float)         # later relax stays off
+    H, road_d = build_road(H, legA, "legA")
+    # SMOOTH keep-off-the-road weight (0 on the core, 1 beyond the wall foot).
+    # RULE (caught in-engine 2026-06-12): NO BINARY masks on height ops - a
+    # binary core mask here alternated cut/no-cut texels along the diagonal
+    # core boundary = sawtooth road walls; same class as the strip pyramids.
+    road_keep = smoothstep(430.0, 830.0, road_d)
 
     # ---------------- PADS: footprint-exact aprons (G1, G2) -----------------
     # (the road core is exempt: its profile already equals the apron inside -
@@ -643,6 +646,9 @@ def main():
         lx, ly = local_frame(Xu, Yu, s_)
         dist = rect_dist(lx, ly, f["x0"] - 500.0, f["x1"] + 500.0,
                          f["y0"] - 500.0, f["y1"] + 500.0)
+        # binary INSIDE term is safe (the stamp weight is uniformly 1 there -
+        # nothing to alternate); extending it smoothly OUTSIDE dragged the
+        # road core at the apron exits (34.7 deg dip-step)
         keep = np.maximum(road_keep, (dist <= 0.0).astype(float))
         # same shallow-blend / deep-terrace construction as the road walls:
         # the C2 blend alone peaked at 41-48 deg where the hill stands 1600+
@@ -657,7 +663,8 @@ def main():
         tgt = H * (1.0 - steep) + terrace * steep
         fea = smootherstep(6400.0, 5600.0, dist)
         H = H + (tgt - H) * keep * fea
-        collar = np.maximum(collar, ((dist > 50.0) & (dist < 4800.0)).astype(float))
+        collar = np.maximum(collar, smoothstep(0.0, 300.0, dist)
+                            * smoothstep(4800.0, 4200.0, dist))
 
     # citadel: keep the proven wide disc
     s_ = slots["Citadel"]
@@ -682,79 +689,117 @@ def main():
     H = gauss3(H, passes=2, w=seam * 0.7 * road_keep)
 
     # ---------------- G3 BOWL: exact carve under A5 --------------------------
+    # NO BINARY MASKS on height ops (caught in-engine 2026-06-12): a per-texel
+    # inside/outside decision between surfaces 100+ uu apart reads as a row of
+    # pyramids along the rotated boundary. Caps are made CONSISTENT with the
+    # contact strips instead (max-lift), strips run unmasked, and every strip
+    # application is followed by the inside-cap trim.
     g3z = g3["pos"][2] + ARENA_LIFT
     lx, ly = local_frame(Xu, Yu, g3)
     rx0, rx1 = a5["x0"] - 50.0, a5["x1"] + 50.0
     ry0, ry1 = a5["y0"] - 50.0, a5["y1"] + 150.0
     inside = (lx >= rx0) & (lx <= rx1) & (ly >= ry0) & (ly <= ry1)
 
-    # terrace floor tops by local-Y band (T0 / T1 / T2). The cap steps down
-    # 150 uu BEFORE each geometric seam (still under the upper slab - they
-    # are 550-900 thick): stepping exactly at the seam let bilinear slivers
-    # of dirt poke through the lower floor right at the terrace lips.
-    def a5_floor_band(lyv):
-        return np.where(lyv < -1550.0, 0.0,
-                        np.where(lyv < 1050.0, -350.0, -700.0))
+    # INSIDE cap: terrace floor bands (steps 150 uu before each seam, hidden
+    # under the upper slab) + under-plate/under-wall ramps that keep the dirt
+    # CONTINUOUS with the outside contacts. The ramps are SMOOTH and live
+    # entirely inside slab/wall bodies - hard rect edges here smear through
+    # bilinear sampling into false floor protrusions at the lips.
+    cap_in = g3z + np.where(ly < -1550.0, 0.0,
+                            np.where(ly < 1050.0, -350.0, -700.0)) - BOWL_CLEAR
+    # behind the T2 slab edge the dirt climbs to bench level across the
+    # bort_s body (slab covers to 4000, the wall 4000..4100)
+    cap_in = np.maximum(cap_in, g3z - 850.0
+                        + 370.0 * smoothstep(3980.0, 4100.0, ly))
+    # entry plate belly (-100): dirt rises to -60 under the plate body.
+    # The lift is GATED to its window (its fringe value equals the band cap
+    # there, so the gate is seamless) - an ungated max() leaked the baseline
+    # over the whole bowl and buried T2 by +550.
+    appr_f = (smoothstep(760.0, 640.0, np.abs(lx))
+              * smoothstep(-4590.0, -4530.0, ly) * smoothstep(-4350.0, -4410.0, ly))
+    cap_in = np.maximum(cap_in, np.where(appr_f > 0.0,
+                                         (g3z - 150.0) + 90.0 * appr_f, -1e9))
+    # side-door plate belly (-450): dirt rises to -410 under it (T1 band)
+    side_f = (smoothstep(a5["x0"] + 250.0, a5["x0"] + 50.0, lx)
+              * smoothstep(650.0, 550.0, np.abs(ly - 200.0)))
+    cap_in = np.maximum(cap_in, np.where(side_f > 0.0,
+                                         (g3z - 500.0) + 90.0 * side_f, -1e9))
 
-    floor_top = a5_floor_band(ly)
-    cap_in = g3z + floor_top - BOWL_CLEAR
-    H = np.where(inside, np.minimum(H, cap_in), H)
-    # funnel walls outside the footprint: rise from the edge cap at <=32 deg
     dist = rect_dist(lx, ly, rx0, rx1, ry0, ry1)
-    # edge cap: nearest-band floor at the rect border (clamp ly into the rect)
-    ly_cl = np.clip(ly, ry0, ry1)
-    edge_floor = a5_floor_band(ly_cl)
-    cap_out = g3z + edge_floor - BOWL_CLEAR + dist * FUNNEL_GRADE
     outside = dist > 0.0
-    H = np.where(outside, np.minimum(H, cap_out), H)
-    # contact strips (SET, not cap): entry approach, west side door, exit
-    # bench. All clamped to OUTSIDE the footprint - on first run the bench
-    # fade leaked over T2 and re-buried it (+220).
-    out_m = (dist > 0.0).astype(float)
-    # entry strip: small fade - the road already arrives AT plate level; a
-    # wide constant-height fan here painted a 47 deg step over the road climb
+    # funnel walls outside: SMOOTH band ramps (the hard 350-steps of the
+    # inside bands would make diagonal step-walls along the funnel)
+    ly_cl = np.clip(ly, ry0, ry1)
+    edge_floor = (-350.0 * smoothstep(-1550.0, -1250.0, ly_cl)
+                  - 350.0 * smoothstep(1050.0, 1350.0, ly_cl))
+    cap_out = g3z + edge_floor - BOWL_CLEAR + dist * FUNNEL_GRADE
+
+    # contact strips: entry approach (small fade - the road already arrives
+    # at plate level), west side door, exit bench behind bort_s
     appr_w = smootherstep(500.0, 150.0, np.hypot(
         np.maximum(np.abs(lx) - 650.0, 0.0),
-        np.maximum(np.maximum(a5["y0"] - 350.0 - ly, ly - (a5["y0"] + 350.0)), 0.0))) \
-        * out_m
-    H = H * (1 - appr_w) + (g3z - PLATE_GAP) * appr_w
+        np.maximum(np.maximum(a5["y0"] - 350.0 - ly, ly - (a5["y0"] + 350.0)), 0.0)))
     side_w = smootherstep(800.0, 200.0, np.hypot(
         np.maximum(np.maximum((a5["x0"] - 450.0) - lx, lx - (a5["x0"] + 150.0)), 0.0),
-        np.maximum(np.abs(ly - 200.0) - 500.0, 0.0))) * out_m
-    H = H * (1 - side_w) + (g3z - 350.0 - PLATE_GAP) * side_w
+        np.maximum(np.abs(ly - 200.0) - 400.0, 0.0)))
     bench_w = smootherstep(1500.0, 500.0, np.hypot(
         np.maximum(np.abs(lx) - 2600.0, 0.0),
-        np.maximum(np.maximum(4250.0 - ly, ly - 5300.0), 0.0))) * out_m
-    H = H * (1 - bench_w) + (g3z - 450.0 - PLATE_GAP) * bench_w
+        np.maximum(np.maximum(4120.0 - ly, ly - 5300.0), 0.0)))
+    strips = ((appr_w, g3z - PLATE_GAP), (side_w, g3z - 350.0 - PLATE_GAP),
+              (bench_w, g3z - 450.0 - PLATE_GAP))
+    # the funnel cap must never cut a strip: lift it under each strip fade
+    cap_out_l = cap_out
+    for w_, t_ in strips:
+        cap_out_l = np.maximum(cap_out_l, t_ - (1.0 - w_) * 3000.0)
+
+    def assert_bowl(Hv):
+        """Caps + contact strips + inward-fade trim, in the safe order."""
+        Hv = np.where(inside, np.minimum(Hv, cap_in), Hv)
+        Hv = np.where(outside, np.minimum(Hv, cap_out_l), Hv)
+        for w_, t_ in strips:
+            Hv = Hv * (1.0 - w_) + t_ * w_
+        return np.where(inside, np.minimum(Hv, cap_in), Hv)
+
+    H = assert_bowl(H)
     # the exit road to the citadel-stairs landing: built AFTER the bowl has
     # opened the bench (grading it against the raw mountain cut a trench)
-    H, coreB, bandB = build_road(H, legB, "legB")
-    road_keep = road_keep * (1.0 - coreB.astype(float))
-    # relax the funnel ring, then RE-ASSERT the caps (relax must not push
-    # dirt back over the terraces); roads/contacts keep their exact grades
+    H, road_dB = build_road(H, legB, "legB")
+    road_d = np.minimum(road_d, road_dB)
+    road_keep = smoothstep(430.0, 830.0, road_d)
+    # relax the funnel ring, then re-assert (relax must not push dirt back
+    # over the terraces); road cores/contacts keep their exact grades
     ring = smoothstep(3200.0, 600.0, dist) * smoothstep(-50.0, 500.0, dist)
     H = gauss3(H, passes=3, w=ring * 0.7 * road_keep)
-    H = np.where(inside, np.minimum(H, cap_in), H)
-    H = np.where(outside, np.minimum(H, cap_out), H)
-    H = H * (1 - appr_w) + (g3z - PLATE_GAP) * appr_w
-    H = H * (1 - side_w) + (g3z - 350.0 - PLATE_GAP) * side_w
-    H = H * (1 - bench_w) + (g3z - 450.0 - PLATE_GAP) * bench_w
+    H = assert_bowl(H)
 
     # ---------------- stamp-seam polish ---------------------------------------
     # Curvature-targeted relax over the road walls, pad collars and bowl ring:
     # the piecewise cap/fill surfaces (cut wall x ravine, wall x hillside)
     # intersect in sharp seams - this melts the seams and leaves the planar
     # 32 deg walls alone. Cores/contacts excluded, caps re-asserted after.
-    seam_mask = (np.maximum(np.maximum(bandA.astype(float), bandB.astype(float)),
-                            np.maximum(collar, ring))
+    road_band = smoothstep(380.0, 700.0, road_d) * smoothstep(3800.0, 3100.0, road_d)
+    seam_mask = (np.maximum(road_band, np.maximum(collar, ring))
                  * road_keep * (1.0 - in_cliff)
                  * (1.0 - np.maximum(appr_w, np.maximum(side_w, bench_w))))
     H = curvature_relax(H, passes=5, mask=seam_mask, strength=0.9, knee=28.0)
-    H = np.where(inside, np.minimum(H, cap_in), H)
-    H = np.where(outside, np.minimum(H, cap_out), H)
-    for w_, t_ in ((appr_w, g3z - PLATE_GAP), (side_w, g3z - 350.0 - PLATE_GAP),
-                   (bench_w, g3z - 450.0 - PLATE_GAP)):
-        H = np.maximum(H, H * (1 - w_) + t_ * w_)
+    H = assert_bowl(H)
+
+    # despike: lone texels vs the 8-neighbour median render as pyramids -
+    # replace them (stamp-interaction residue). TWO passes: a LINE of spikes
+    # hides its members from a single median pass. The innermost road core
+    # (anchors/contacts) stays exact; a median preserves planar walls.
+    for _ in range(4):
+        nb = [np.roll(np.roll(H, dy, 0), dx, 1)
+              for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)]
+        med8 = np.median(np.stack(nb), axis=0).astype(np.float32)
+        del nb
+        spike = (np.abs(H - med8) > 45.0) & (road_d > 250.0)
+        n_sp = int(spike.sum())
+        if not n_sp:
+            break
+        H = np.where(spike, med8, H)
+        H = assert_bowl(H)
+        print("despiked %d lone texel(s)" % n_sp)
 
     # ---------------- author's citadel staircase: applied LAST ---------------
     # exact top-surface center-lines from actor transforms; clearance cap under
@@ -837,20 +882,22 @@ def main():
     # only ~2.3k apart) - re-assert the A5 caps. Min only, no smoothing:
     # cannot bury the stairs decks (the landing center lies outside every
     # cap; funnel there is ~9.4k, well above). Then LIFT the contact strips
-    # back (max only: the entry lip wants -30, the cap enforced -150; but
-    # never pull DOWN - the bench far end riding up into the landing flatten
-    # IS the designed climb, re-setting it left a 33 deg seam).
+    # back (max only: never pull DOWN - the bench far end riding up into the
+    # landing flatten IS the designed climb, re-setting it left a 33 deg
+    # seam), and trim the inward fades with the inside cap.
     H = np.where(inside, np.minimum(H, cap_in), H)
-    H = np.where(outside, np.minimum(H, cap_out), H)
-    for w_, t_ in ((appr_w, g3z - PLATE_GAP), (side_w, g3z - 350.0 - PLATE_GAP),
-                   (bench_w, g3z - 450.0 - PLATE_GAP)):
+    H = np.where(outside, np.minimum(H, cap_out_l), H)
+    for w_, t_ in strips:
         H = np.maximum(H, H * (1 - w_) + t_ * w_)
+    H = np.where(inside, np.minimum(H, cap_in), H)
 
     # ---------------- verification on the FINAL surface ----------------------
     report_leg(H, legA, "legA")
     report_leg(H, legB, "legB")
-    bands = (("T0", a5["y0"], -1400.0, 0.0), ("T1", -1400.0, 1200.0, -350.0),
-             ("T2", 1200.0, a5["y1"], -700.0))
+    # sampling windows stay clear of the under-plate ramps and the wall body
+    # (the ramps deliberately rise above the neighbouring band there)
+    bands = (("T0", -4340.0, -1560.0, 0.0), ("T1", -1240.0, 1040.0, -350.0),
+             ("T2", 1360.0, 3940.0, -700.0))
     for name, b0, b1, ftop in bands:
         worst = -1e9
         for lyy in np.arange(b0 + 120.0, b1 - 60.0, 240.0):

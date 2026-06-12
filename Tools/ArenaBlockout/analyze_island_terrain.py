@@ -166,6 +166,22 @@ def main():
     cz = np.where(zone, curv, 0.0)
     print("creases (Laplacian uu): p95 {:.0f}, p99 {:.0f}, max {:.0f}".format(
         np.percentile(cz[zone], 95), np.percentile(cz[zone], 99), cz.max()))
+    # spike detector: lone texels vs the median of their 8 neighbours = the
+    # pyramid rows left by binary masks (in-engine catch 2026-06-12)
+    nbrs = np.stack([np.roll(np.roll(H, dy, 0), dx, 1)
+                     for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                     if (dy, dx) != (0, 0)])
+    med = np.median(nbrs, axis=0)
+    spikes = (np.abs(H - med) > 60.0) & zone
+    n_sp = int(spikes.sum())
+    print("spikes (|H - nbr median| > 60): {}{}".format(
+        n_sp, "" if n_sp == 0 else "  **CHECK**"))
+    if n_sp:
+        ys, xs2 = np.where(spikes)
+        for k in range(min(6, n_sp)):
+            r, c = ys[k], xs2[k]
+            print("  spike at ({:.0f},{:.0f}) h {:.0f} vs median {:.0f}".format(
+                c * SCALE - HALF, r * SCALE - HALF, H[r, c], med[r, c]))
     print("slope outside pads: p95 {:.1f} deg, area >35 deg: {:.1f}%".format(
         np.percentile(sl[zone], 95),
         100.0 * float((sl[zone] > 35.0).sum()) / float(zone.sum())))
