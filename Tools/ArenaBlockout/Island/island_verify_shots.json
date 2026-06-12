@@ -1,0 +1,10 @@
+[
+  {"id": "overview_se",  "pos": [95000, -65000, 40000], "pitch": -16, "yaw": 138, "fov": 75},
+  {"id": "g2_gallery",   "pos": [3500, -3500, 9000],    "pitch": -17, "yaw": 132, "fov": 80},
+  {"id": "g3_bowl",      "pos": [4500, 8000, 12500],    "pitch": -20, "yaw": 18,  "fov": 80},
+  {"id": "west_road",    "pos": [-21000, 12000, 7000],  "pitch": -20, "yaw": -45, "fov": 85},
+  {"id": "bench_exit",   "pos": [15500, 17500, 11000],  "pitch": -21, "yaw": -45, "fov": 85},
+  {"id": "citadel_view", "pos": [19500, 13500, 9800],   "pitch": 14,  "yaw": -38, "fov": 80},
+  {"id": "g2_east_road", "pos": [-1500, 2500, 9500],    "pitch": -30, "yaw": 45,  "fov": 85},
+  {"id": "maldives",     "pos": [42000, -80000, 8000],  "pitch": -9,  "yaw": 146, "fov": 75}
+]

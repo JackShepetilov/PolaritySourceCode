@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
-  "version": 7,
-  "comment": "Phase-0 scale layout v7 (2026-06-11, author round 5 - SERPENTINE): the guard route is an S-curve (switchbacks): landing -> west turn (G1) -> diagonal through the island center (G2) -> east turn (G3) -> flank approach into the citadel from the EAST. Citadel-distances kept ~0.73/0.53/0.34 D. HARD RULE: every arena reachable on foot, route slopes <= 30 deg everywhere. [slots synced from editor] [slots synced from editor]",
+  "version": 8,
+  "comment": "v8 (2026-06-12, smoothness rework, slots UNCHANGED from v7): terrain between arenas rebuilt - the serpentine is now a graded ROAD ribbon (<=26.6 deg by construction, cut+fill), G1/G2 pads hug the rotated arena footprints at the arena GROUND-PLATE level (A7 outer_ground -500 exposed again), G3 = exact local-frame bowl under A5 terraces with an exit bench behind bort_s to the citadel-stairs landing (player path: enter SW approach, fight down, antenna, hop bort_s, bench road to the stairs). Route legs and contact heights are DERIVED from slots + arena specs + citadel_stairs (route_corridor verts = author gesture: [shoulder, G1, G2, G3, landing]). make_biome1_heightmap.py --seed N varies ONLY nature layers (pillars pinned). [v7: author round 5 SERPENTINE, citadel-distances ~0.73/0.53/0.34 D] [slots synced from editor]",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,

@@ -1,24 +1,45 @@
 # Authors the REAL Biome1 island heightmap (2017x2017, ~2x2 km) OFFLINE from
-# Island/biome1_island_layout.json (v6). PREVIEW WORKFLOW: review the shaded
+# Island/biome1_island_layout.json (v7+). PREVIEW WORKFLOW: review the shaded
 # preview (UE TOP VIEW orientation) before any import - nothing touches the editor.
 #
-# Terrain recipe (researched 2026-06-11, not guessed):
+# Terrain recipe (researched 2026-06-11; smoothness rework 2026-06-11/2):
 #   1. NATURE FIRST: ridged multifractal spine (octave weight feedback) over
 #      domain-warped coordinates + gameplay dome toward the east cape
 #   2. thermal erosion (talus-angle relaxation) -> scree slopes, soft ridgelines
 #   3. exponential slope weighting on walkable land (softens knife edges,
 #      keeps the cape cliff sector sharp)
-#   4. GAMEPLAY STAMPS LAST: maldive micro-islands, guard-arc pads, citadel pad,
-#      A5 bowl, route-corridor softening, then a seam pass around pad skirts
-#   5. beach band flattening near the waterline (readable sand aprons)
+#   4. maldive micro-islands + start reef, then a C2 shore-gradient relax
+#      (NO constant-height beach shelf - that made an angular terrace)
+#   5. curvature-targeted relax of walkable land (kills pleats/creases the
+#      author flagged; cliff sector excluded)
+#   6. GAMEPLAY STAMPS LAST, all C2 (smootherstep) and footprint-exact:
+#      - ROADS: the serpentine is a graded ribbon (slope-limited profile,
+#        cut AND fill) - replaces the old min()-cone carving that left
+#        stair-step rubble next to G2
+#      - PADS: G1/G2 aprons hug the ROTATED ARENA FOOTPRINT at the arena's
+#        GROUND PLATE level (A7 keeps its sunken outer_ground: -500), the
+#        citadel keeps its wide disc
+#      - G3 BOWL: exact local-frame carve under A5's terraces (clearance
+#        caps), entry/side contact strips, exit bench behind bort_s toward
+#        the citadel-stairs landing, <=32 deg funnel walls outside
+#   7. author's citadel staircase: applied LAST (unchanged, verified)
+#
+# Variations (roguelike groundwork): --seed N re-rolls the NATURE layers
+# (spine, warp, coast wobble, maldive wobble) while every gameplay stamp,
+# route guarantee and verification stays pinned to the layout JSON. The
+# pillars (cape citadel, spawn axis, maldive chain, guard arc) live in the
+# layout, not in the seed.
 #
 # Output:
 #   Island/biome1_heightmap_2017.png     (16-bit, px = 32768 + (z+2000)*1.28)
 #   Island/biome1_heightmap_preview.png  (shaded, UE TOP VIEW: +X up, +Y right)
+#   (--seed N != default appends _seed<N> to both names)
 #
-# Run locally:  python make_biome1_heightmap.py
+# Run locally:  python make_biome1_heightmap.py [--seed N]
 
+import argparse
 import json
+import math
 import os
 
 import numpy as np
@@ -26,8 +47,9 @@ from PIL import Image
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 LAYOUT = os.path.join(TOOLS_DIR, "Island", "biome1_island_layout.json")
+ARENAS_DIR = os.path.join(TOOLS_DIR, "Arenas")
 OUT_DIR = os.path.join(TOOLS_DIR, "Island")
-SEED = 20260614
+DEFAULT_SEED = 20260614
 
 N = 2017
 SCALE = 100.0
@@ -39,21 +61,19 @@ UNDERWATER_SKIRT = 3600.0
 DOME_REACH = 62000.0
 DOME_BASE = 2000.0
 DOME_AMP = 14200.0
+ARENA_LIFT = 10.0          # build_biome_island.py floats arenas +10 uu
+PLATE_GAP = 30.0           # terrain sits 30 uu under contact plates
+ROAD_GRADE = 0.50          # ~26.6 deg profile cap (margin under the 30 rule;
+                           # 0.42 was INFEASIBLE for G2-apron -> A5-entry
+                           # (0.433 needed) and the anchor cones silently
+                           # lifted the apron edge +160)
+ROAD_CORE = 380.0          # full-weight half-width of the road ribbon
+ROAD_FADE = 2300.0         # fade-out half-width
+BOWL_CLEAR = 150.0         # clearance under A5 terrace floors
+FUNNEL_GRADE = 0.62        # ~31.8 deg bowl walls outside the footprint
 
 
-def bilerp_grid(g, n):
-    c = g.shape[0] - 1
-    t = np.linspace(0.0, c, n)
-    i0 = np.clip(np.floor(t).astype(int), 0, c - 1)
-    f = t - i0
-    a = g[np.ix_(i0, i0)]
-    b = g[np.ix_(i0, i0 + 1)]
-    cc = g[np.ix_(i0 + 1, i0)]
-    d = g[np.ix_(i0 + 1, i0 + 1)]
-    fy, fx = f[:, None], f[None, :]
-    return a * (1 - fy) * (1 - fx) + b * (1 - fy) * fx + cc * fy * (1 - fx) + d * fy * fx
-
-
+# ---------------------------------------------------------------- noise ----
 def grid_noise(n, cells, seed, angle):
     """Value noise on a lattice ROTATED by `angle` with smoothstep fade -
     kills the axis-aligned banding the author flagged ('что за полосы')."""
@@ -74,12 +94,13 @@ def grid_noise(n, cells, seed, angle):
     fu = fu * fu * (3.0 - 2.0 * fu)
     fv = fv * fv * (3.0 - 2.0 * fv)
     return (g[v0, u0] * (1 - fv) * (1 - fu) + g[v0, u0 + 1] * (1 - fv) * fu +
-            g[v0 + 1, u0] * fv * (1 - fu) + g[v0 + 1, u0 + 1] * fv * fu)
+            g[v0 + 1, u0] * fv * (1 - fu) + g[v0 + 1, u0 + 1] * fv * fu
+            ).astype(np.float32)
 
 
 def fbm(n, octaves, base_cells, seed, persistence=0.55):
     rng = np.random.default_rng(seed + 999)
-    out = np.zeros((n, n))
+    out = np.zeros((n, n), dtype=np.float32)
     amp, total, cells = 1.0, 0.0, base_cells
     for o in range(octaves):
         out += amp * grid_noise(n, cells, seed + o * 17, rng.uniform(0, np.pi))
@@ -105,9 +126,9 @@ def ridged(n, octaves, base_cells, seed, gain=0.55, offset=1.0):
     r = (offset - |noise|)^2, weight_next = clamp(r*1.5, 0, 1)^0.8).
     Octave lattices are rotated (no axis-aligned stripes)."""
     rng = np.random.default_rng(seed + 999)
-    out = np.zeros((n, n))
+    out = np.zeros((n, n), dtype=np.float32)
     amp, total, cells = 0.5, 0.0, base_cells
-    weight = np.ones((n, n))
+    weight = np.ones((n, n), dtype=np.float32)
     for o in range(octaves):
         v = grid_noise(n, cells, seed + o * 23, rng.uniform(0, np.pi)) * 2.0 - 1.0
         r = offset - np.abs(v)
@@ -142,6 +163,13 @@ def smoothstep(e0, e1, x):
     return t * t * (3.0 - 2.0 * t)
 
 
+def smootherstep(e0, e1, x):
+    """C2 fade (zero 1st AND 2nd derivative at both ends) - the stamp blend
+    that does not leave ring-creases."""
+    t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
 def gauss3(H, passes=1, w=None):
     """Cheap 3x3 blur, optionally mask-weighted."""
     for _ in range(passes):
@@ -155,11 +183,22 @@ def gauss3(H, passes=1, w=None):
     return H
 
 
+def curvature_relax(H, passes, mask, strength=0.85, knee=45.0):
+    """Blur weighted by |discrete Laplacian| inside `mask`: creases and
+    pleats relax, broad smooth forms stay untouched."""
+    for _ in range(passes):
+        L = (np.roll(H, 1, 0) + np.roll(H, -1, 0) + np.roll(H, 1, 1) +
+             np.roll(H, -1, 1) - 4.0 * H)
+        w = np.clip(np.abs(L) / knee, 0.0, 1.0) * strength * mask
+        H = gauss3(H, passes=1, w=w)
+    return H
+
+
 def route_samples(pts, step=150.0):
     out = []
     for a, b in zip(pts, pts[1:]):
-        a = np.array(a, dtype=float)
-        b = np.array(b, dtype=float)
+        a = np.array(a[:2], dtype=float)
+        b = np.array(b[:2], dtype=float)
         L = max(np.hypot(*(b - a)), 1.0)
         k = max(2, int(L / step) + 1)
         for i in range(k):
@@ -171,39 +210,210 @@ def world_to_idx(p):
     return int(round((p[1] + HALF) / SCALE)), int(round((p[0] + HALF) / SCALE))
 
 
-def enforce_route_slope(H, pts, max_grade=0.50, step=100.0):
-    """Walkability guarantee (author: <= 30 deg everywhere on the route).
-    Forward/backward envelope along the serpentine caps the climb rate at
-    max_grade (0.50 ~ 26.6 deg, margin under 30); excess terrain is carved
-    down with a small local brush around each offending sample."""
-    P = route_samples(pts, step=step)
-    hs = np.empty(len(P))
-    for i, p in enumerate(P):
-        r, c = world_to_idx(p)
-        hs[i] = H[r, c]
+# ----------------------------------------------------- arena footprints ----
+def load_footprint(arena_name):
+    """Rotated-rect bounds (LOCAL frame) + ground-plate level of an arena
+    spec: every solid piece counts, ground = lowest floor top <= 100 uu
+    (the entry/outer plates; spiral pads etc. sit higher)."""
+    with open(os.path.join(ARENAS_DIR, arena_name + ".json"), encoding="utf-8") as f:
+        spec = json.load(f)
+    x0 = y0 = 1e9
+    x1 = y1 = -1e9
+    ground = 1e9
+    for p in spec.get("pieces", []):
+        if p.get("shape") == "ramp":
+            fx, fy, fz = p["from"]
+            tx, ty, tz = p["to"]
+            w = p.get("width", 400.0) * 0.5
+            px0, px1 = min(fx, tx) - w, max(fx, tx) + w
+            py0, py1 = min(fy, ty) - w, max(fy, ty) + w
+            top = min(fz, tz)
+        else:
+            cx, cy, cz = p["pos"]
+            sx, sy, sz = [v * 0.5 for v in p["size"]]
+            px0, px1, py0, py1 = cx - sx, cx + sx, cy - sy, cy + sy
+            top = cz + sz
+        x0, x1 = min(x0, px0), max(x1, px1)
+        y0, y1 = min(y0, py0), max(y1, py1)
+        if p.get("mat") == "floor" and top <= 100.0:
+            ground = min(ground, top)
+    if ground > 1e8:
+        ground = 0.0
+    return {"x0": x0, "x1": x1, "y0": y0, "y1": y1, "ground": ground}
+
+
+def local_frame(Xu, Yu, slot):
+    """World grid -> arena-local coords for a slot (pos + yaw)."""
+    yaw = math.radians(float(slot.get("yaw", 0.0)))
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx, dy = Xu - slot["pos"][0], Yu - slot["pos"][1]
+    return dx * c + dy * s, -dx * s + dy * c
+
+
+def slot_world(slot, lx, ly):
+    yaw = math.radians(float(slot.get("yaw", 0.0)))
+    c, s = math.cos(yaw), math.sin(yaw)
+    return (slot["pos"][0] + lx * c - ly * s,
+            slot["pos"][1] + lx * s + ly * c)
+
+
+def rect_dist(lx, ly, x0, x1, y0, y1):
+    """Distance OUTSIDE an axis-aligned (local) rect; 0 inside. Rounded
+    corners by construction."""
+    dx = np.maximum(np.maximum(x0 - lx, lx - x1), 0.0)
+    dy = np.maximum(np.maximum(y0 - ly, ly - y1), 0.0)
+    return np.hypot(dx, dy)
+
+
+def apron_edge_point(slot, f, toward, margin=500.0, step=100.0):
+    """March from the slot center toward `toward`: the last point still on
+    the apron rect(+margin) = where the road crosses the apron edge. Roads
+    get an anchor here so their profile is FLAT across the whole apron
+    (a center-only anchor let the pad blend drag the climb into bumps)."""
+    cx, cy = slot["pos"][0], slot["pos"][1]
+    ux, uy = toward[0] - cx, toward[1] - cy
+    L = math.hypot(ux, uy)
+    ux, uy = ux / L, uy / L
+    yaw = math.radians(float(slot.get("yaw", 0.0)))
+    c, s = math.cos(yaw), math.sin(yaw)
+    t, last = 0.0, (cx, cy)
+    while t < L:
+        x, y = cx + ux * t, cy + uy * t
+        dx, dy = x - cx, y - cy
+        lx = dx * c + dy * s
+        ly = -dx * s + dy * c
+        ddx = max(max((f["x0"] - margin) - lx, lx - (f["x1"] + margin)), 0.0)
+        ddy = max(max((f["y0"] - margin) - ly, ly - (f["y1"] + margin)), 0.0)
+        if math.hypot(ddx, ddy) > 1.0:
+            break
+        last = (x, y)
+        t += step
+    return last
+
+
+# ----------------------------------------------------------------- roads ----
+def moving_average(v, k):
+    if k <= 1:
+        return v.copy()
+    pad = np.concatenate([np.full(k, v[0]), v, np.full(k, v[-1])])
+    ker = np.ones(2 * k + 1) / (2 * k + 1.0)
+    return np.convolve(pad, ker, mode="same")[k:-k]
+
+
+def build_road(H, pts, label, grade=ROAD_GRADE, step=120.0):
+    """Stamp one graded road ribbon. pts: [(x, y[, z_anchor]), ...].
+    Profile = smoothed terrain heights, hard-pinned at anchors, then a
+    forward/backward grade envelope (cuts); the ribbon lerp both cuts and
+    FILLS, so dips become embankments. Cut/fill walls beyond the core are
+    grade-clamped to <=32 deg (deep cuts otherwise left 45+ deg fade walls).
+    Returns (H, core_mask) - the mask keeps later relax passes OFF the road."""
+    # --- sample the polyline, carry anchor flags
+    P = []
+    anchors = []
+    for a, b in zip(pts, pts[1:]):
+        ax, ay = a[0], a[1]
+        bx, by = b[0], b[1]
+        L = max(math.hypot(bx - ax, by - ay), 1.0)
+        k = max(2, int(L / step) + 1)
+        start = 0 if not P else 1     # avoid duplicating shared vertices
+        for i in range(start, k):
+            t = i / (k - 1.0)
+            P.append((ax + (bx - ax) * t, ay + (by - ay) * t))
+    P = np.array(P)
+    # anchor indices: nearest sample to each anchored vertex
+    for v in pts:
+        if len(v) > 2:
+            d = np.hypot(P[:, 0] - v[0], P[:, 1] - v[1])
+            anchors.append((int(np.argmin(d)), float(v[2])))
+
+    hs = np.array([H[world_to_idx(p)] for p in P])
+    hs = moving_average(hs, max(1, int(1200.0 / step)))
+    for idx, z in anchors:
+        hs[idx] = z
     seg = np.hypot(*(np.diff(P, axis=0).T))
     env = hs.copy()
     for i in range(1, len(env)):
-        env[i] = min(env[i], env[i - 1] + seg[i - 1] * max_grade)
+        env[i] = min(env[i], env[i - 1] + seg[i - 1] * grade)
     for i in range(len(env) - 2, -1, -1):
-        env[i] = min(env[i], env[i + 1] + seg[i] * max_grade)
-    # cone caps: H = min(H, e + max_grade*dist). Overlaps take the MIN (no
-    # stacking, no runaway) and the carve walls are exactly the max grade.
-    carved = 0
-    for p, e, h0 in zip(P, env, hs):
-        if h0 > e + 10.0:
-            r, c = world_to_idx(p)
-            R = min(70, int((h0 - e) / (max_grade * SCALE)) + 14)
-            r0, r1 = max(0, r - R), min(N, r + R + 1)
-            c0, c1 = max(0, c - R), min(N, c + R + 1)
-            yy, xx = np.mgrid[r0 - r:r1 - r, c0 - c:c1 - c]
-            cap = e + np.hypot(yy, xx) * SCALE * max_grade
-            H[r0:r1, c0:c1] = np.minimum(H[r0:r1, c0:c1], cap)
-            carved += 1
-    return H, carved
+        env[i] = min(env[i], env[i + 1] + seg[i] * grade)
+    # anchors are hard targets: enforce |env - z| <= grade * arc_dist around
+    # each anchor (double cone). A post-envelope hard set would leave a cliff
+    # between the anchor sample and its neighbours - caught on first run.
+    arc = np.concatenate([[0.0], np.cumsum(seg)])
+    for (i1, z1), (i2, z2) in zip(anchors, anchors[1:]):
+        need = abs(z2 - z1) / max(abs(arc[i2] - arc[i1]), 1.0)
+        if need > grade:
+            print("road %s: **INFEASIBLE** anchor pair (%.0f->%.0f over %.0f uu "
+                  "= grade %.2f > %.2f) - anchors WILL drift, fix the layout"
+                  % (label, z1, z2, abs(arc[i2] - arc[i1]), need, grade))
+    for idx, z in anchors:
+        da = np.abs(arc - arc[idx])
+        env = np.minimum(env, z + da * grade)
+        env = np.maximum(env, z - da * grade)
+    # chord-fill between consecutive anchors: terrain dips under the straight
+    # anchor-to-anchor ramp get BRIDGED (causeway), not followed - the dip in
+    # front of the A5 entry left a 37 deg step at the door
+    for (i1, z1), (i2, z2) in zip(anchors, anchors[1:]):
+        if i2 <= i1:
+            continue
+        t = (arc[i1:i2 + 1] - arc[i1]) / max(arc[i2] - arc[i1], 1.0)
+        env[i1:i2 + 1] = np.maximum(env[i1:i2 + 1], z1 + (z2 - z1) * t)
+    if os.environ.get("ROAD_DEBUG"):
+        for i in range(max(0, len(P) - 26), len(P)):
+            print("  dbg %-5s arc %7.0f  hs %7.0f  env %7.0f  at (%.0f,%.0f)"
+                  % (label, arc[i], hs[i], env[i], P[i][0], P[i][1]))
+
+    # --- rasterize: windowed per micro-segment, closest-segment wins
+    best_d = np.full_like(H, 1e9)
+    best_h = np.zeros_like(H)
+    reach = 3900.0   # fade + the longest 32deg cut wall (deep cuts ~2000 uu)
+    Rc = int(reach / SCALE) + 2
+    for i in range(len(P) - 1):
+        ax, ay = P[i]
+        bx, by = P[i + 1]
+        r0, c0 = world_to_idx(((ax + bx) * 0.5, (ay + by) * 0.5))
+        rr0, rr1 = max(0, r0 - Rc), min(N, r0 + Rc + 1)
+        cc0, cc1 = max(0, c0 - Rc), min(N, c0 + Rc + 1)
+        if rr0 >= rr1 or cc0 >= cc1:
+            continue
+        xs = np.arange(cc0, cc1) * SCALE - HALF
+        ys = np.arange(rr0, rr1) * SCALE - HALF
+        Xw, Yw = np.meshgrid(xs, ys)
+        sx, sy = bx - ax, by - ay
+        ss = max(sx * sx + sy * sy, 1.0)
+        t = np.clip(((Xw - ax) * sx + (Yw - ay) * sy) / ss, 0.0, 1.0)
+        d = np.hypot(Xw - (ax + t * sx), Yw - (ay + t * sy))
+        h = env[i] + (env[i + 1] - env[i]) * t
+        win_d = best_d[rr0:rr1, cc0:cc1]
+        win_h = best_h[rr0:rr1, cc0:cc1]
+        upd = d < win_d
+        win_d[upd] = d[upd]
+        win_h[upd] = h[upd]
+    # Wall construction: C2 fade for SHALLOW edges, pure 32-deg terrace wall
+    # for DEEP cuts/fills, switched smoothly by |terrain - road|. A C2 fade
+    # against a 2000-uu cut peaks at ~63 deg mid-fade (1.875*dh/width) while
+    # staying pointwise UNDER the grade cone - so a clamp alone never bites.
+    near = best_d < 1e8
+    bh = np.where(near, best_h, H)
+    w = smootherstep(ROAD_FADE, ROAD_CORE, best_d)
+    blend = H * (1.0 - w) + bh * w
+    wall = np.maximum(np.where(near, best_d, 0.0) - ROAD_CORE, 0.0) * FUNNEL_GRADE
+    terrace = np.minimum(np.maximum(H, bh - wall), bh + wall)
+    steep = smootherstep(700.0, 1400.0, np.abs(H - bh))
+    tgt = blend * (1.0 - steep) + terrace * steep
+    feather = smootherstep(3800.0, 3100.0, np.where(near, best_d, 1e9))
+    H = H + (tgt - H) * feather
+
+    # report
+    g = np.abs(np.diff(env)) / np.maximum(seg, 1.0)
+    print("road %-10s len %6.0f uu, profile max %.1f deg, fill/cut anchored at %d pts"
+          % (label, seg.sum(), math.degrees(math.atan(g.max())), len(anchors)))
+    core = best_d < ROAD_CORE + 250.0
+    band = (best_d > ROAD_CORE + 100.0) & (best_d < 3700.0)
+    return H, core, band
 
 
-def report_route_slopes(H, pts, verbose=True):
+def report_leg(H, pts, label):
     P = route_samples(pts, step=150.0)
     cells = [world_to_idx(p) for p in P]
     uniq = [cells[0]]
@@ -211,43 +421,48 @@ def report_route_slopes(H, pts, verbose=True):
         if cc != uniq[-1]:
             uniq.append(cc)
     hs = np.array([H[r, c] for r, c in uniq], dtype=float)
-    pos = np.array([[c * SCALE - HALF, r * SCALE - HALF] for r, c in uniq], dtype=float)
-    P = pos
+    pos = np.array([[c * SCALE - HALF, r * SCALE - HALF] for r, c in uniq])
     seg = np.hypot(*(np.diff(pos, axis=0).T))
-    grade = np.abs(np.diff(hs)) / np.maximum(seg, 1.0)
-    deg = np.degrees(np.arctan(grade))
+    deg = np.degrees(np.arctan(np.abs(np.diff(hs)) / np.maximum(seg, 1.0)))
     over = int((deg > 30.0).sum())
-    if verbose:
-        print("route slope: max %.1f deg, p95 %.1f deg, over 30 deg: %d/%d"
-              % (deg.max(), np.percentile(deg, 95), over, len(deg)))
-        for k in np.argsort(deg)[-3:][::-1]:
-            if deg[k] > 30.0:
-                print("  hotspot %.1f deg at world (%.0f, %.0f) h %.0f->%.0f"
-                      % (deg[k], P[k][0], P[k][1], hs[k], hs[k + 1]))
+    print("route %-10s: max %.1f deg, p95 %.1f, over 30 deg: %d/%d"
+          % (label, deg.max(), np.percentile(deg, 95), over, len(deg)))
+    for k in np.argsort(deg)[::-1][:4]:
+        if deg[k] > 30.0:
+            print("    hotspot %.1f deg at (%.0f,%.0f) h %.0f->%.0f"
+                  % (deg[k], pos[k][0], pos[k][1], hs[k], hs[k + 1]))
     return deg.max(), over
 
 
+# ------------------------------------------------------------------ main ----
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="nature-layer seed (gameplay stamps are seed-independent)")
+    args = ap.parse_args()
+    seed = args.seed
+    suffix = "" if seed == DEFAULT_SEED else "_seed{}".format(seed)
+
     with open(LAYOUT, encoding="utf-8") as f:
         layout = json.load(f)
     slots = {s["id"]: s for s in layout["slots"]}
     isl = layout["island"]
 
-    coord = np.linspace(-HALF, HALF, N)   # row 0 = world SOUTH
+    coord = np.linspace(-HALF, HALF, N, dtype=np.float32)   # row 0 = world SOUTH
     Xu, Yu = np.meshgrid(coord, coord)
-    rng = np.random.default_rng(SEED)
-    idx = np.arange(N, dtype=float)
+    rng = np.random.default_rng(seed)
+    idx = np.arange(N, dtype=np.float32)
 
     # fields: detail fbm + two-channel domain warp + warped ridged spine
-    detail = fbm(N, 5, 8, SEED + 37)
-    wx = (fbm(N, 4, 4, SEED + 11) - 0.5) * 160.0   # broad warp, up to ~16k uu
-    wy = (fbm(N, 4, 4, SEED + 23) - 0.5) * 160.0
+    detail = fbm(N, 5, 8, seed + 37)
+    wx = (fbm(N, 4, 4, seed + 11) - 0.5) * 160.0   # broad warp, up to ~16k uu
+    wy = (fbm(N, 4, 4, seed + 23) - 0.5) * 160.0
     ys = idx[:, None] + wy
     xs = idx[None, :] + wx
-    spine = sample(ridged(N, 6, 6, SEED + 71), ys, xs)
+    spine = sample(ridged(N, 6, 6, seed + 71), ys, xs)
     Dw = sample(detail, ys, xs)
 
-    H = SEA_FLOOR + (fbm(N, 4, 14, SEED + 51) - 0.5) * 220.0
+    H = SEA_FLOOR + (fbm(N, 4, 14, seed + 51) - 0.5) * 220.0
 
     # ---------------- big island: nature first ----------------
     ICX, ICY = isl["center"]
@@ -288,8 +503,11 @@ def main():
     coast_fade = smoothstep(1.04, 0.86, edge)
     spine_n = (spine - spine.min()) / (spine.max() - spine.min())
     relief_amp = 700.0 + 2600.0 * (dome / 16000.0) + 1800.0 * in_cliff
+
+    # damp natural relief along the WHOLE serpentine (roads come later)
+    corr_pts = list(layout["rules"]["route_corridor"])
     corr_w = np.zeros_like(H)
-    for a_, b_ in zip(layout["rules"]["route_corridor"], layout["rules"]["route_corridor"][1:]):
+    for a_, b_ in zip(corr_pts, corr_pts[1:]):
         a_ = np.array(a_, dtype=float)
         b_ = np.array(b_, dtype=float)
         seg_ = b_ - a_
@@ -306,24 +524,14 @@ def main():
     H = thermal_erode(H)
     H = H_pre * (0.35 * in_cliff) + H * (1.0 - 0.35 * in_cliff)
 
-    # slope-weighted softening on walkable land (keeps the cliff sharp)
-    gy_s, gx_s = np.gradient(H, SCALE)
-    s = np.hypot(gx_s, gy_s)
-    soften = smoothstep(0.55, 1.1, s) * (1.0 - in_cliff) * (H > 150)
-    H = gauss3(H, passes=2, w=np.clip(soften, 0, 1) * 0.8)
-
-    # route corridor: smoothing band along the SERPENTINE polyline from the
-    # layout (landing -> switchbacks -> east flank -> citadel)
-    route_pts = layout["rules"]["route_corridor"]
-    corr = np.zeros_like(H)
-    for a, b in zip(route_pts, route_pts[1:]):
-        a = np.array(a, dtype=float)
-        b = np.array(b, dtype=float)
-        seg = b - a
-        t_ = np.clip(((Xu - a[0]) * seg[0] + (Yu - a[1]) * seg[1]) / (seg @ seg), 0, 1)
-        d_seg = np.hypot(Xu - (a[0] + t_ * seg[0]), Yu - (a[1] + t_ * seg[1]))
-        corr = np.maximum(corr, smoothstep(3000.0, 1400.0, d_seg))
-    H = gauss3(H, passes=3, w=corr * 0.6)
+    # curvature relax on walkable land (keeps the cliff sharp). The old
+    # SLOPE-thresholded soften (smoothstep 0.55..1.1) was the terracette
+    # machine: smoothing dropped a slope below the threshold, stopped, the
+    # neighbour stayed steep -> banded steps all over steep dunes. Curvature
+    # weighting has no threshold feedback: planar steep faces are untouched,
+    # step edges melt.
+    H = curvature_relax(H, passes=5, mask=(1.0 - in_cliff) * (H > 150.0),
+                        strength=0.85, knee=30.0)
 
     # ---------------- maldive micro-islands (unchanged model) ----------------
     for s_ in layout["slots"]:
@@ -340,78 +548,218 @@ def main():
             base_r = shore_r + UNDERWATER_SKIRT
             prof = np.where(
                 de <= top_r, z,
-                np.where(de <= shore_r, z * smoothstep(shore_r, top_r, de),
+                np.where(de <= shore_r, z * smootherstep(shore_r, top_r, de),
                          SEA_FLOOR - SEA_FLOOR * smoothstep(base_r, shore_r, de)))
             band = smoothstep(top_r, top_r + 600.0, de) * smoothstep(base_r, shore_r, de)
             prof += (Dw - 0.5) * 2.0 * 70.0 * band
             H = np.maximum(H, prof)
 
+    # start reef: WIDE flat top (the author's launch structure stands here -
+    # it must not hang over the slope; was flat r<300 only)
     sx, sy, sz = slots["start_reef"]["pos"]
     d = np.hypot(Xu - sx, Yu - sy)
-    rock = np.where(d < 1500.0, sz * smoothstep(1500.0, 300.0, d),
-                    SEA_FLOOR - SEA_FLOOR * smoothstep(5200.0, 1500.0, d))
+    rock = np.where(d < 2100.0, sz * smootherstep(2100.0, 1000.0, d),
+                    SEA_FLOOR - SEA_FLOOR * smoothstep(5200.0, 2100.0, d))
     H = np.maximum(H, np.where(d < 5200.0, rock, H))
 
-    # ---------------- gameplay pads stamped LAST ----------------
+    # ---------------- shore: C2 gradient relax (no angular shelf) -----------
+    # Pull heights toward the waterline with a C2 weight: derivative is
+    # continuous at the band edges, so no terrace lip at |H-60|=band.
     pad_core = np.zeros_like(H)
     for sid in ("G1", "G2", "G3", "Citadel"):
         s_ = slots[sid]
-        x, y, z = s_["pos"]
-        rf = s_["r"] + PAD_RIM
-        bl = 6200.0 if sid == "Citadel" else 3800.0
-        d = np.hypot(Xu - x, Yu - y)
-        wp = smoothstep(rf + bl, rf, d)
-        H = H * (1 - wp) + z * wp
-        pad_core = np.maximum(pad_core, smoothstep(rf + 400.0, rf, d))
-
-    g3 = slots["G3"]
-    gx_, gy_ = g3["pos"][0], g3["pos"][1]
-    yaw_rad = np.radians(g3.get("yaw", 0.0))
-    deep = (-np.sin(yaw_rad), np.cos(yaw_rad))
-    d_along = (Xu - gx_) * deep[0] + (Yu - gy_) * deep[1]
-    d_rad = np.hypot(Xu - gx_, Yu - gy_)
-    depth = (500.0 * smoothstep(-3300.0, -1500.0, d_along)
-             + 250.0 * smoothstep(-700.0, 700.0, d_along)
-             + 180.0 * smoothstep(1500.0, 3100.0, d_along))
-    H = H - depth * smoothstep(g3["r"] + PAD_RIM, g3["r"] - 1500.0, d_rad)
-
-    # seam pass: soften the ring just outside the pads, never the cores
-    seam = np.zeros_like(H)
-    for sid in ("G1", "G2", "G3", "Citadel"):
-        s_ = slots[sid]
         d = np.hypot(Xu - s_["pos"][0], Yu - s_["pos"][1])
-        rf = s_["r"] + PAD_RIM
-        seam = np.maximum(seam, smoothstep(rf + 4600.0, rf + 800.0, d)
-                          * smoothstep(rf - 200.0, rf + 800.0, d))
-    H = gauss3(H, passes=2, w=seam * 0.7)
+        pad_core = np.maximum(pad_core, smoothstep(s_["r"] + PAD_RIM + 400.0,
+                                                   s_["r"] + PAD_RIM, d))
+    beach_w = smootherstep(420.0, 60.0, np.abs(H - 60.0)) * (1.0 - in_cliff) \
+        * (1.0 - pad_core)
+    H = H - (H - 60.0) * 0.45 * beach_w
+    H = gauss3(H, passes=2, w=np.where(np.abs(H - 60.0) < 420.0, 0.5, 0.0)
+               * (1.0 - in_cliff) * (1.0 - pad_core))
 
-    # beach band: flatten the tidal strip for readable sand aprons
-    beach_w = smoothstep(260.0, 40.0, np.abs(H - 60.0)) * (1.0 - in_cliff) * (1.0 - pad_core)
-    H = H * (1 - beach_w * 0.45) + 60.0 * (beach_w * 0.45)
+    # ---------------- crease cleanup on walkable land -----------------------
+    land_mask = ((H > 80.0) * (1.0 - in_cliff)).astype(float)
+    H = curvature_relax(H, passes=3, mask=land_mask)
 
-    # walkability guarantee along the serpentine (author: <= 30 deg).
-    # Iterate: envelope-carve, then re-smooth the corridor band so the carve
-    # walls themselves get softened; stop when the route is clean.
-    route_pts = layout["rules"]["route_corridor"]
-    for it in range(3):
-        H, carved = enforce_route_slope(H, route_pts, max_grade=0.40)
-        print("slope pass %d (0.40 cones): carved %d" % (it + 1, carved))
-        if carved == 0:
-            break
-    H = gauss3(H, passes=1, w=corr * 0.45)   # soften cone rims (no scoop artifacts)
-    H, carved = enforce_route_slope(H, route_pts, max_grade=0.50)
-    print("slope guard pass (0.50): carved %d" % carved)
-    report_route_slopes(H, route_pts)
+    # ---------------- ROADS (replaces min()-cone carving) -------------------
+    # Corridor vertices come from the author-synced route_corridor: by
+    # convention [shoulder, G1, G2, G3, stairs-landing]. Legs and anchor
+    # heights are DERIVED from slots + arena specs, so slot drags keep working.
+    fp = {sid: load_footprint(slots[sid]["default"])
+          for sid in ("G1", "G2", "G3")}
+    g1, g2, g3, cit = slots["G1"], slots["G2"], slots["G3"], slots["Citadel"]
+    apron_z = {
+        "G1": g1["pos"][2] + ARENA_LIFT + fp["G1"]["ground"] - PLATE_GAP,
+        "G2": g2["pos"][2] + ARENA_LIFT + fp["G2"]["ground"] - PLATE_GAP,
+    }
+    # A5 contact points (local frame of the G3 slot)
+    a5 = fp["G3"]
+    appr_front = slot_world(g3, 0.0, a5["y0"] - 100.0)
+    appr_z = g3["pos"][2] + ARENA_LIFT - PLATE_GAP            # approach top = 0
+    bench_xy = slot_world(g3, 0.0, 4500.0)
+    bench_z = g3["pos"][2] + ARENA_LIFT - 450.0 - PLATE_GAP   # bort_s top = -450
+    st = layout["rules"].get("citadel_stairs")
+    cy = math.radians(float(cit.get("yaw", 0.0)))
+    ca_, sa_ = math.cos(cy), math.sin(cy)
+    ll = st["landing_local"]
+    landing = (cit["pos"][0] + ll[0] * ca_ - ll[1] * sa_,
+               cit["pos"][1] + ll[0] * sa_ + ll[1] * ca_)
+    landing_z = cit["pos"][2] + ll[2] - 30.0                  # stairs flatten target
+
+    shoulder = corr_pts[0]
+    e_g1_sh = apron_edge_point(g1, fp["G1"], shoulder)
+    e_g1_g2 = apron_edge_point(g1, fp["G1"], g2["pos"][:2])
+    e_g2_g1 = apron_edge_point(g2, fp["G2"], g1["pos"][:2])
+    e_g2_ap = apron_edge_point(g2, fp["G2"], appr_front)
+    # flat-finish anchor: the last ~1.1k before the A5 entry stays at plate
+    # level, so the entry contact strip merges into an already-level road
+    ad = math.hypot(appr_front[0] - e_g2_ap[0], appr_front[1] - e_g2_ap[1])
+    pre = (appr_front[0] - (appr_front[0] - e_g2_ap[0]) / ad * 1100.0,
+           appr_front[1] - (appr_front[1] - e_g2_ap[1]) / ad * 1100.0)
+    legA = [tuple(shoulder),
+            (e_g1_sh[0], e_g1_sh[1], apron_z["G1"]),
+            (g1["pos"][0], g1["pos"][1], apron_z["G1"]),
+            (e_g1_g2[0], e_g1_g2[1], apron_z["G1"]),
+            (e_g2_g1[0], e_g2_g1[1], apron_z["G2"]),
+            (g2["pos"][0], g2["pos"][1], apron_z["G2"]),
+            (e_g2_ap[0], e_g2_ap[1], apron_z["G2"]),
+            (pre[0], pre[1], appr_z),
+            (appr_front[0], appr_front[1], appr_z)]
+    # legB (bench -> stairs landing) is built INSIDE the bowl section: built
+    # here it would grade a trench through the not-yet-carved mountain
+    bench_exit = slot_world(g3, 1103.0, 5300.0)   # where the bench strip ends
+    legB = [(bench_exit[0], bench_exit[1], bench_z),
+            (landing[0], landing[1], landing_z)]
+    H, coreA, bandA = build_road(H, legA, "legA")
+    road_keep = 1.0 - coreA.astype(float)         # later relax stays off
+
+    # ---------------- PADS: footprint-exact aprons (G1, G2) -----------------
+    # (the road core is exempt: its profile already equals the apron inside -
+    # edge anchors - and keeps its own graded climb through the blend collar)
+    collar = np.zeros_like(H)
+    for sid in ("G1", "G2"):
+        s_ = slots[sid]
+        f = fp[sid]
+        lx, ly = local_frame(Xu, Yu, s_)
+        dist = rect_dist(lx, ly, f["x0"] - 500.0, f["x1"] + 500.0,
+                         f["y0"] - 500.0, f["y1"] + 500.0)
+        keep = np.maximum(road_keep, (dist <= 0.0).astype(float))
+        # same shallow-blend / deep-terrace construction as the road walls:
+        # the C2 blend alone peaked at 41-48 deg where the hill stands 1600+
+        # over the apron (G2 east rim)
+        H_pre = H.copy()
+        w = smootherstep(3400.0, 0.0, dist) * keep
+        H = H * (1 - w) + apron_z[sid] * w
+        wall_p = dist * FUNNEL_GRADE
+        terrace = np.minimum(np.maximum(H_pre, apron_z[sid] - wall_p),
+                             apron_z[sid] + wall_p)
+        steep = smootherstep(700.0, 1400.0, np.abs(H_pre - apron_z[sid]))
+        tgt = H * (1.0 - steep) + terrace * steep
+        fea = smootherstep(6400.0, 5600.0, dist)
+        H = H + (tgt - H) * keep * fea
+        collar = np.maximum(collar, ((dist > 50.0) & (dist < 4800.0)).astype(float))
+
+    # citadel: keep the proven wide disc
+    s_ = slots["Citadel"]
+    rf = s_["r"] + PAD_RIM
+    d = np.hypot(Xu - s_["pos"][0], Yu - s_["pos"][1])
+    wp = smootherstep(rf + 6200.0, rf, d)
+    H = H * (1 - wp) + s_["pos"][2] * wp
+
+    # seam relax just outside the aprons (never the cores)
+    seam = np.zeros_like(H)
+    for sid in ("G1", "G2"):
+        s_ = slots[sid]
+        f = fp[sid]
+        lx, ly = local_frame(Xu, Yu, s_)
+        dist = rect_dist(lx, ly, f["x0"] - 500.0, f["x1"] + 500.0,
+                         f["y0"] - 500.0, f["y1"] + 500.0)
+        seam = np.maximum(seam, smoothstep(4600.0, 800.0, dist)
+                          * smoothstep(-100.0, 800.0, dist))
+    d = np.hypot(Xu - s_["pos"][0], Yu - s_["pos"][1])
+    seam = np.maximum(seam, smoothstep(rf + 4600.0, rf + 800.0, d)
+                      * smoothstep(rf - 200.0, rf + 800.0, d))
+    H = gauss3(H, passes=2, w=seam * 0.7 * road_keep)
+
+    # ---------------- G3 BOWL: exact carve under A5 --------------------------
+    g3z = g3["pos"][2] + ARENA_LIFT
+    lx, ly = local_frame(Xu, Yu, g3)
+    rx0, rx1 = a5["x0"] - 50.0, a5["x1"] + 50.0
+    ry0, ry1 = a5["y0"] - 50.0, a5["y1"] + 150.0
+    inside = (lx >= rx0) & (lx <= rx1) & (ly >= ry0) & (ly <= ry1)
+
+    # terrace floor tops by local-Y band (T0 / T1 / T2). The cap steps down
+    # 150 uu BEFORE each geometric seam (still under the upper slab - they
+    # are 550-900 thick): stepping exactly at the seam let bilinear slivers
+    # of dirt poke through the lower floor right at the terrace lips.
+    def a5_floor_band(lyv):
+        return np.where(lyv < -1550.0, 0.0,
+                        np.where(lyv < 1050.0, -350.0, -700.0))
+
+    floor_top = a5_floor_band(ly)
+    cap_in = g3z + floor_top - BOWL_CLEAR
+    H = np.where(inside, np.minimum(H, cap_in), H)
+    # funnel walls outside the footprint: rise from the edge cap at <=32 deg
+    dist = rect_dist(lx, ly, rx0, rx1, ry0, ry1)
+    # edge cap: nearest-band floor at the rect border (clamp ly into the rect)
+    ly_cl = np.clip(ly, ry0, ry1)
+    edge_floor = a5_floor_band(ly_cl)
+    cap_out = g3z + edge_floor - BOWL_CLEAR + dist * FUNNEL_GRADE
+    outside = dist > 0.0
+    H = np.where(outside, np.minimum(H, cap_out), H)
+    # contact strips (SET, not cap): entry approach, west side door, exit
+    # bench. All clamped to OUTSIDE the footprint - on first run the bench
+    # fade leaked over T2 and re-buried it (+220).
+    out_m = (dist > 0.0).astype(float)
+    # entry strip: small fade - the road already arrives AT plate level; a
+    # wide constant-height fan here painted a 47 deg step over the road climb
+    appr_w = smootherstep(500.0, 150.0, np.hypot(
+        np.maximum(np.abs(lx) - 650.0, 0.0),
+        np.maximum(np.maximum(a5["y0"] - 350.0 - ly, ly - (a5["y0"] + 350.0)), 0.0))) \
+        * out_m
+    H = H * (1 - appr_w) + (g3z - PLATE_GAP) * appr_w
+    side_w = smootherstep(800.0, 200.0, np.hypot(
+        np.maximum(np.maximum((a5["x0"] - 450.0) - lx, lx - (a5["x0"] + 150.0)), 0.0),
+        np.maximum(np.abs(ly - 200.0) - 500.0, 0.0))) * out_m
+    H = H * (1 - side_w) + (g3z - 350.0 - PLATE_GAP) * side_w
+    bench_w = smootherstep(1500.0, 500.0, np.hypot(
+        np.maximum(np.abs(lx) - 2600.0, 0.0),
+        np.maximum(np.maximum(4250.0 - ly, ly - 5300.0), 0.0))) * out_m
+    H = H * (1 - bench_w) + (g3z - 450.0 - PLATE_GAP) * bench_w
+    # the exit road to the citadel-stairs landing: built AFTER the bowl has
+    # opened the bench (grading it against the raw mountain cut a trench)
+    H, coreB, bandB = build_road(H, legB, "legB")
+    road_keep = road_keep * (1.0 - coreB.astype(float))
+    # relax the funnel ring, then RE-ASSERT the caps (relax must not push
+    # dirt back over the terraces); roads/contacts keep their exact grades
+    ring = smoothstep(3200.0, 600.0, dist) * smoothstep(-50.0, 500.0, dist)
+    H = gauss3(H, passes=3, w=ring * 0.7 * road_keep)
+    H = np.where(inside, np.minimum(H, cap_in), H)
+    H = np.where(outside, np.minimum(H, cap_out), H)
+    H = H * (1 - appr_w) + (g3z - PLATE_GAP) * appr_w
+    H = H * (1 - side_w) + (g3z - 350.0 - PLATE_GAP) * side_w
+    H = H * (1 - bench_w) + (g3z - 450.0 - PLATE_GAP) * bench_w
+
+    # ---------------- stamp-seam polish ---------------------------------------
+    # Curvature-targeted relax over the road walls, pad collars and bowl ring:
+    # the piecewise cap/fill surfaces (cut wall x ravine, wall x hillside)
+    # intersect in sharp seams - this melts the seams and leaves the planar
+    # 32 deg walls alone. Cores/contacts excluded, caps re-asserted after.
+    seam_mask = (np.maximum(np.maximum(bandA.astype(float), bandB.astype(float)),
+                            np.maximum(collar, ring))
+                 * road_keep * (1.0 - in_cliff)
+                 * (1.0 - np.maximum(appr_w, np.maximum(side_w, bench_w))))
+    H = curvature_relax(H, passes=5, mask=seam_mask, strength=0.9, knee=28.0)
+    H = np.where(inside, np.minimum(H, cap_in), H)
+    H = np.where(outside, np.minimum(H, cap_out), H)
+    for w_, t_ in ((appr_w, g3z - PLATE_GAP), (side_w, g3z - 350.0 - PLATE_GAP),
+                   (bench_w, g3z - 450.0 - PLATE_GAP)):
+        H = np.maximum(H, H * (1 - w_) + t_ * w_)
 
     # ---------------- author's citadel staircase: applied LAST ---------------
     # exact top-surface center-lines from actor transforms; clearance cap under
     # the flights, landing meets the lower tip; numeric verification below
-    st = layout["rules"].get("citadel_stairs")
     if st:
-        cit = slots["Citadel"]
-        cy = np.radians(float(cit.get("yaw", 0.0)))
-        ca_, sa_ = np.cos(cy), np.sin(cy)
-
         def st_world(loc):
             wx = cit["pos"][0] + loc[0] * ca_ - loc[1] * sa_
             wy = cit["pos"][1] + loc[0] * sa_ + loc[1] * ca_
@@ -441,8 +789,8 @@ def main():
                          az_ + (bz_ - az_) * t_ - 150.0, 20)
         px_, py_, pz_ = st_world(st["platform_local"])
         cap_disc(px_, py_, pz_ - 160.0, 16, flat_r=750.0)
-        lx, ly, lz = st_world(st["landing_local"])
-        d_l = np.hypot(Xu - lx, Yu - ly)
+        lx2, ly2, lz = st_world(st["landing_local"])
+        d_l = np.hypot(Xu - lx2, Yu - ly2)
         wl = smoothstep(3400.0, 1700.0, d_l)
         H = H * (1 - wl) + (lz - 30.0) * wl
         # soften the carve-trench walls around the flights WITHOUT touching the
@@ -479,14 +827,47 @@ def main():
                     worst = max(worst, H[r_, c_] - (top_ - 40.0))
             print("stairs flight %d: max protrusion above deck-40: %.0f uu %s"
                   % (li + 1, worst, "OK" if worst <= 0 else "**BURIED**"))
-        r_ = int(round((ly + HALF) / SCALE))
-        c_ = int(round((lx + HALF) / SCALE))
+        r_ = int(round((ly2 + HALF) / SCALE))
+        c_ = int(round((lx2 + HALF) / SCALE))
         gap = (lz - 30.0) - H[r_, c_]
         print("stairs landing: terrain-to-tip gap %.0f uu %s"
               % (gap, "OK" if abs(gap) <= 40 else "**MISFIT**"))
 
+    # the stairs-landing flatten bleeds over the bowl's SE corner (they are
+    # only ~2.3k apart) - re-assert the A5 caps. Min only, no smoothing:
+    # cannot bury the stairs decks (the landing center lies outside every
+    # cap; funnel there is ~9.4k, well above). Then LIFT the contact strips
+    # back (max only: the entry lip wants -30, the cap enforced -150; but
+    # never pull DOWN - the bench far end riding up into the landing flatten
+    # IS the designed climb, re-setting it left a 33 deg seam).
+    H = np.where(inside, np.minimum(H, cap_in), H)
+    H = np.where(outside, np.minimum(H, cap_out), H)
+    for w_, t_ in ((appr_w, g3z - PLATE_GAP), (side_w, g3z - 350.0 - PLATE_GAP),
+                   (bench_w, g3z - 450.0 - PLATE_GAP)):
+        H = np.maximum(H, H * (1 - w_) + t_ * w_)
+
+    # ---------------- verification on the FINAL surface ----------------------
+    report_leg(H, legA, "legA")
+    report_leg(H, legB, "legB")
+    bands = (("T0", a5["y0"], -1400.0, 0.0), ("T1", -1400.0, 1200.0, -350.0),
+             ("T2", 1200.0, a5["y1"], -700.0))
+    for name, b0, b1, ftop in bands:
+        worst = -1e9
+        for lyy in np.arange(b0 + 120.0, b1 - 60.0, 240.0):
+            for lxx in np.arange(a5["x0"] + 60.0, a5["x1"] - 50.0, 240.0):
+                wxx, wyy = slot_world(g3, lxx, lyy)
+                r_, c_ = world_to_idx((wxx, wyy))
+                worst = max(worst, H[r_, c_] - (g3z + ftop))
+        # -30 = designed contact gap at plate lips; anything above -20 is real
+        print("A5 %s: terrain vs floor top %+.0f uu %s"
+              % (name, worst, "OK" if worst <= -20.0 else "**BURIED**"))
+    for sid in ("G1", "G2"):
+        s_ = slots[sid]
+        r_, c_ = world_to_idx((s_["pos"][0], s_["pos"][1]))
+        print("%s apron: H=%.0f (target %.0f)" % (sid, H[r_, c_], apron_z[sid]))
+
     px16 = np.clip(32768.0 + (H - SEA_FLOOR) * 1.28, 0, 65535).astype(np.uint16)
-    out_png = os.path.join(OUT_DIR, "biome1_heightmap_2017.png")
+    out_png = os.path.join(OUT_DIR, "biome1_heightmap_2017{}.png".format(suffix))
     Image.fromarray(px16).save(out_png)
 
     # shaded preview, UE top view orientation: hypsometric tint + hillshade
@@ -531,7 +912,7 @@ def main():
         dr.text((24, 96), "+X", fill=(255, 255, 255))
     except Exception:
         pass
-    pim.save(os.path.join(OUT_DIR, "biome1_heightmap_preview.png"))
+    pim.save(os.path.join(OUT_DIR, "biome1_heightmap_preview{}.png".format(suffix)))
 
     def probe(label, x, y, want=None):
         i = int(round((y + HALF) / SCALE))
@@ -539,10 +920,15 @@ def main():
         print("%-12s H=%7.0f%s" % (label, H[i, j],
               "" if want is None else "  (want %d)" % want))
 
-    for sid in ("M1", "M2", "M3", "M4", "G1", "G2", "Citadel"):
+    for sid in ("M1", "M2", "M3", "M4", "Citadel"):
         s_ = slots[sid]
         probe(sid, s_["pos"][0], s_["pos"][1], s_["pos"][2])
-    probe("G3 bowl ctr", *slots["G3"]["pos"][:2], slots["G3"]["pos"][2] - 625)
+    probe("G1 apron", g1["pos"][0], g1["pos"][1], apron_z["G1"])
+    probe("G2 apron", g2["pos"][0], g2["pos"][1], apron_z["G2"])
+    probe("G3 bowl ctr", g3["pos"][0], g3["pos"][1],
+          g3z - 350.0 - BOWL_CLEAR)
+    probe("A5 approach", appr_front[0], appr_front[1], appr_z)
+    probe("A5 bench", bench_xy[0], bench_xy[1], bench_z)
     probe("shoulder", *slots["shoulder"]["pos"][:2])
     probe("cliff slope", 44000, -1000)
     probe("open sea", 70000, -70000)

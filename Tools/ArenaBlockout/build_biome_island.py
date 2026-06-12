@@ -95,9 +95,16 @@ def ensure_landscape(slots):
     log("Heightmap imported: {} ({})".format(
         os.path.basename(HEIGHTMAP), getattr(imp, "resolution", "?")))
     probes = [(sid, slots[sid]["pos"][0], slots[sid]["pos"][1], slots[sid]["pos"][2])
-              for sid in ("M1", "M2", "M3", "M4", "shoulder", "G1", "G2", "Citadel")]
+              for sid in ("M1", "M2", "M3", "M4", "shoulder", "Citadel")]
+    # G1/G2 aprons sit at the arena GROUND-PLATE level (heightmap v8):
+    # G1 = slot-20, G2 = slot-520 (A7 carries its outer_ground at -500);
+    # G3 bowl center = slot-490 (T1 floor -350 minus 150 clearance + lift)
+    probes.append(("G1 apron", slots["G1"]["pos"][0], slots["G1"]["pos"][1],
+                   slots["G1"]["pos"][2] - 20.0))
+    probes.append(("G2 apron", slots["G2"]["pos"][0], slots["G2"]["pos"][1],
+                   slots["G2"]["pos"][2] - 520.0))
     probes.append(("G3 bowl ctr", slots["G3"]["pos"][0], slots["G3"]["pos"][1],
-                   slots["G3"]["pos"][2] - 625.0))
+                   slots["G3"]["pos"][2] - 490.0))
     probes.append(("open sea", 70000.0, -70000.0, -2000.0))
     bad = 0
     for label, x, y, want in probes:
