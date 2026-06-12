@@ -300,49 +300,52 @@ def main():
     beach = 1.0 - smoothstep(140.0 + shoreline_jitter, 330.0 + shoreline_jitter, H)
     w_sand = beach.copy()
     w_sand = np.maximum(w_sand, smoothstep(950.0, 430.0, road_d))     # road ribbon
-    # ARENA FOOTPRINTS = SAND, all of them (author review 2026-06-12: no
-    # grass under any arena - blades poke through the floor plates).
-    # Footprint bbox + 300 full, fade by +800.
-    for sid in ("G1", "G2", "G3", "Citadel"):
-        f = fp.get(sid) or mh.load_footprint(slots[sid]["default"])
-        lx, ly = mh.local_frame(Xu, Yu, slots[sid])
-        d = mh.rect_dist(lx, ly, f["x0"], f["x1"], f["y0"], f["y1"])
-        w_sand = np.maximum(w_sand, smoothstep(800.0, 300.0, d))
     # the whole lens above water is SAND - these islets are sandbars now
     # (the old grass-top + sandy-ring split died with the flat-disc model)
     w_sand = np.maximum(w_sand, maldive_zone * smoothstep(-250.0, -120.0, H))
     w_sand = np.maximum(w_sand, reef_zone)                             # reef = all sand
-    # author rule 4: islets are NOT pure sand - small grass patches around
-    # the arenas (never under them: gated to footprint+350, dry crown only)
-    patch_noise = smoothstep(0.46, 0.60, mh.fbm(N, 5, 34, args.seed + 631))
-    grass_patch = np.zeros_like(H)
+
+    # ARENA FOOTPRINTS = SAND strictly UNDER the plates (author round 2: the
+    # +300/800 halo read as a washed-out ring - grass must ADJOIN the arenas)
+    pad_core = np.zeros_like(H, dtype=bool)
+    for sid in ("G1", "G2", "G3", "Citadel", "M1", "M2", "M3", "M4"):
+        f = fp.get(sid) or mh.load_footprint(slots[sid]["default"])
+        lx, ly = mh.local_frame(Xu, Yu, slots[sid])
+        d = mh.rect_dist(lx, ly, f["x0"], f["x1"], f["y0"], f["y1"])
+        pad_core |= (d <= 60.0)
+
+    # maldive GRASS APRON: a contiguous green clearing hugging the arena
+    # plates (author round 2: scattered patches on sand looked wrong and did
+    # not adjoin) - from the plate edge out to an organic noise boundary
+    apron_noise = mh.fbm(N, 4, 90, args.seed + 631)   # ~2k features: lively edge
+    grass_apron = np.zeros_like(H, dtype=bool)
     for sid in ("M1", "M2", "M3", "M4"):
         s = slots[sid]
         t, run = lens[sid]
         f_m = mh.load_footprint(s["default"])
         lxm, lym = mh.local_frame(Xu, Yu, s)
         fpd = mh.rect_dist(lxm, lym, f_m["x0"], f_m["x1"], f_m["y0"], f_m["y1"])
-        grass_patch = np.maximum(
-            grass_patch,
-            patch_noise * smoothstep(350.0, 700.0, fpd)
-            * smoothstep(220.0, 320.0, H)
-            * smoothstep(run * 0.62, run * 0.45, t))
-    w_sand = w_sand * (1.0 - 0.97 * grass_patch)
-    w_sand = w_sand * (1.0 - w_rock)
+        outer = 750.0 + (apron_noise - 0.5) * 1300.0   # organic apron edge
+        grass_apron |= ((fpd > 60.0) & (fpd < outer) & (H > 220.0)
+                        & (t < run * 0.62))
 
-    # Grass_Clovers KILLED (author review 2026-06-12: "трава это просто
-    # grass"). The layer stays in the material/assignment, but the mask is
-    # all-zero - importing it ERASES the clover weights already painted.
+    # BINARY layer resolve (author round 2: "бленда травы быть не должно,
+    # всегда вес 1") - every pixel is exactly ONE layer at 255; the texture
+    # transition at boundaries is the material's own HeightBlend job. The
+    # soft fields above stay smooth, so thresholding gives clean organic
+    # boundaries instead of texel noise.
+    rock_bin = w_rock > 0.5
+    sand_bin = (w_sand > 0.5) & ~rock_bin
+    sand_bin |= pad_core                       # plates: sand even over rock
+    sand_bin &= ~(grass_apron & ~pad_core & ~rock_bin)
+    grass_bin = ~rock_bin & ~sand_bin
+
     meadow_noise = smoothstep(0.52, 0.66, mh.fbm(N, 4, 7, args.seed + 113))
-    w_clov = np.zeros_like(H)
 
-    w_grass = np.clip(1.0 - w_rock - w_sand - w_clov, 0.0, 1.0)
-
-    # byte-exact normalization (sum == 255, grass takes the remainder)
-    b_rock = np.round(w_rock * 255.0)
-    b_sand = np.round(np.minimum(w_sand * 255.0, 255.0 - b_rock))
-    b_clov = np.round(np.minimum(w_clov * 255.0, 255.0 - b_rock - b_sand))
-    b_grass = 255.0 - b_rock - b_sand - b_clov
+    b_rock = np.where(rock_bin & ~sand_bin, 255.0, 0.0)
+    b_sand = np.where(sand_bin, 255.0, 0.0)
+    b_clov = np.zeros_like(H)                  # clovers stay dead (round 1)
+    b_grass = 255.0 - b_rock - b_sand
     masks = {"Sand_01": b_sand, "Rockwall": b_rock,
              "Grass": b_grass, "Grass_Clovers": b_clov}
     for name, arr in masks.items():
@@ -442,11 +445,19 @@ def main():
                * smoothstep(22.0, 13.0, slope) * wrack_noise * keep_small)
 
     # ---------------- sample the plan ----------------
-    plan = {}     # ft_path -> list[[x, y, z_trace]]
+    plan = {}     # ft_path -> list[[x, y, z_exact_ground]]
+
+    def hsample(x, y):
+        """Bilinear ground height - instances plant at EXACT Z with the
+        surface trace OFF (author round 2: traces hit the canopy collision
+        of instances not yet removed -> floating trees)."""
+        r = np.clip((y + HALF) / SCALE, 0.0, N - 1.001)
+        c = np.clip((x + HALF) / SCALE, 0.0, N - 1.001)
+        return float(mh.sample(H, np.array([r]), np.array([c]))[0])
 
     def put(ft, x, y):
         plan.setdefault(ft, []).append(
-            [round(float(x), 1), round(float(y), 1), round(at(H, x, y) + 2500.0, 1)])
+            [round(float(x), 1), round(float(y), 1), round(hsample(x, y), 1)])
 
     def pick(paths, weights=None):
         return paths[rng.choice(len(paths), p=weights)]

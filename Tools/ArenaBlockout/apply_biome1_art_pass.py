@@ -213,13 +213,25 @@ def phase3():
             log("destroyed stray IFA in Lvl_RunLogic (pre-add cleanup)")
 
     params_by_type = plan.get("type_params", {})
+    # FULL remove sweep FIRST, adds second: interleaved remove/add let new
+    # instances surface-trace onto the canopies of old not-yet-removed types
+    # (floating trees, author round 2). Adds now also go with the trace OFF -
+    # the plan carries exact bilinear ground Z from the heightmap.
+    # sweep the FULL roster (type_params keys), not just types present in
+    # this plan - a type that drops out of the plan must lose its old
+    # instances too (6 stale seaweed survived the first sweep)
+    for ft in sorted(set(params_by_type) | set(plan.get("instances", {}))):
+        if unreal.FoliageService.foliage_type_exists(ft):
+            rem = unreal.FoliageService.remove_all_foliage_of_type(ft)
+            r = getattr(rem, "instances_removed", 0)
+            if r:
+                log("cleared {} old instance(s) of {}".format(
+                    r, ft.rsplit("/", 1)[-1]))
     grand_add = grand_rej = 0
     for ft, pts in sorted(plan.get("instances", {}).items()):
         if not unreal.FoliageService.foliage_type_exists(ft):
             warn("foliage type missing, skipped: {}".format(ft))
             continue
-        rem = unreal.FoliageService.remove_all_foliage_of_type(ft)
-        removed = getattr(rem, "instances_removed", 0)
         p = params_by_type.get(ft, {})
         mn = float(p.get("min_scale", 0.9))
         mx = float(p.get("max_scale", 1.2))
@@ -228,7 +240,7 @@ def phase3():
         for i in range(0, len(pts), BATCH):
             locs = [unreal.Vector(q[0], q[1], q[2]) for q in pts[i:i + BATCH]]
             res = unreal.FoliageService.add_foliage_instances(
-                ft, locs, mn, mx, align, True, True)
+                ft, locs, mn, mx, align, True, False)   # trace OFF: exact Z
             if not getattr(res, "success", False):
                 warn("add_foliage_instances({}) batch failed: {}".format(
                     ft, getattr(res, "error_message", "?")))
@@ -237,10 +249,33 @@ def phase3():
             rejected += res.instances_rejected
         grand_add += added
         grand_rej += rejected
-        log("{}: planned {}, removed {}, added {}, rejected {}".format(
-            ft.rsplit("/", 1)[-1], len(pts), removed, added, rejected))
+        log("{}: planned {}, added {}, rejected {}".format(
+            ft.rsplit("/", 1)[-1], len(pts), added, rejected))
     log("FOLIAGE TOTAL: added {}, rejected {} (plan {})".format(
         grand_add, grand_rej, sum(len(v) for v in plan.get("instances", {}).values())))
+    # height audit: every instance foot must sit ON the landscape (catches
+    # both floaters and stale-plan mismatches)
+    worst_dz, outliers, audited = 0.0, 0, 0
+    for ft in sorted(plan.get("instances", {})):
+        q = unreal.FoliageService.get_foliage_in_radius(ft, 0.0, 0.0, 250000.0,
+                                                        max_results=400)
+        if not getattr(q, "success", False):
+            continue
+        for inst in q.instances:
+            s = unreal.LandscapeService.get_height_at_location(
+                LS_LABEL, inst.location.x, inst.location.y)
+            if not s.valid:
+                continue
+            dz = abs(inst.location.z - s.height)
+            audited += 1
+            worst_dz = max(worst_dz, dz)
+            if dz > 200.0:
+                outliers += 1
+    log("HEIGHT AUDIT: {} instances, worst |dz| {:.0f} uu, outliers(>200) {}"
+        .format(audited, worst_dz, outliers))
+    if outliers:
+        warn("{} instance(s) off the ground - investigate before shipping"
+             .format(outliers))
 
     ifa_pkgs = []
     for a in eas.get_all_level_actors():
