@@ -361,10 +361,20 @@ def main():
     # binary import; the 0.898/0.102 main/Base ratio is the proven-good
     # render state). 10% Base admixture is visually negligible.
     BINV = 229.0
-    b_rock = np.where(rock_bin & ~sand_bin, BINV, 0.0)
-    b_sand = np.where(sand_bin, BINV, 0.0)
+    # 1-texel boundary anti-aliasing (author round 4: "ландшафт с серьёзным
+    # джиттером"): hard 0/255 texel edges render as a 1 m staircase. One 3x3
+    # blur pass + renormalize keeps zone interiors at weight 1 (the binary
+    # rule holds) and gives ONLY the boundary texels a sub-texel ramp that
+    # the material's height-blend turns into a crisp organic line.
+    f_rock = mh.gauss3(np.where(rock_bin & ~sand_bin, 1.0, 0.0).astype(np.float32),
+                       passes=1)
+    f_sand = mh.gauss3(np.where(sand_bin, 1.0, 0.0).astype(np.float32), passes=1)
+    f_grass = mh.gauss3(np.where(grass_bin, 1.0, 0.0).astype(np.float32), passes=1)
+    tot = np.maximum(f_rock + f_sand + f_grass, 1e-6)
+    b_rock = np.round(BINV * f_rock / tot)
+    b_sand = np.round(BINV * f_sand / tot)
     b_clov = np.zeros_like(H)                  # clovers stay dead (round 1)
-    b_grass = BINV - b_rock - b_sand
+    b_grass = np.clip(BINV - b_rock - b_sand, 0.0, None)
     masks = {"Sand_01": b_sand, "Rockwall": b_rock,
              "Grass": b_grass, "Grass_Clovers": b_clov}
     for name, arr in masks.items():
