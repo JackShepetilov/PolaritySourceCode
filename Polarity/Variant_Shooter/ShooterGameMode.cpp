@@ -13,8 +13,25 @@
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/LevelStreaming.h"
 #include "ContentStreaming.h"
 #include "TimerManager.h"
+
+namespace
+{
+	/** True while any streaming sublevel is still loading or not yet visible. */
+	bool AnySublevelStillStreaming(const UWorld* World)
+	{
+		for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
+		{
+			if (StreamingLevel && (!StreamingLevel->IsLevelLoaded() || !StreamingLevel->IsLevelVisible()))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+}
 
 void AShooterGameMode::BeginPlay()
 {
@@ -26,10 +43,52 @@ void AShooterGameMode::BeginPlay()
 
 	// ===== Run-start loading gate =====
 	// Run maps are identified by a RunLaunchPoint marker. On non-run maps (menu/hub) there is none,
-	// so the gate stays completely idle: no cover, no run-start sequence.
+	// so the gate stays completely idle: no cover, no run-start sequence. The marker may live in a
+	// streaming sublevel — the lookup retries while sublevels are still being added (standalone).
+	TryInitRunGate();
+}
+
+void AShooterGameMode::EnsureLoadingCover()
+{
+	// Cover the screen so the player never sees the black/unstreamed frames.
+	if (LoadingCoverWidget || !LoadingCoverClass)
+	{
+		return;
+	}
+	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	{
+		LoadingCoverWidget = CreateWidget<UUserWidget>(PC, LoadingCoverClass);
+		if (LoadingCoverWidget)
+		{
+			// Very high Z-order so it sits above the HUD and everything else.
+			LoadingCoverWidget->AddToViewport(1000);
+		}
+	}
+}
+
+void AShooterGameMode::TryInitRunGate()
+{
+	if (bRunStartTriggered)
+	{
+		return;
+	}
+
 	RunMarker = Cast<ARunLaunchPoint>(UGameplayStatics::GetActorOfClass(GetWorld(), ARunLaunchPoint::StaticClass()));
 	if (!RunMarker)
 	{
+		// In PIE the duplicated editor world already contains every always-loaded sublevel at
+		// BeginPlay, but in standalone/packaged AddToWorld is time-sliced and sublevel actors
+		// appear a few frames later. While anything is still streaming in, keep the screen
+		// covered and retry; only a complete world with no marker means "not a run map".
+		if (AnySublevelStillStreaming(GetWorld()))
+		{
+			EnsureLoadingCover();
+			GetWorldTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateUObject(this, &AShooterGameMode::TryInitRunGate));
+			return;
+		}
+		UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] No RunLaunchPoint after all sublevels loaded - non-run map, gate idle"));
+		DismissLoadingCover();
 		return;
 	}
 
@@ -38,18 +97,7 @@ void AShooterGameMode::BeginPlay()
 	// only after the world has actually drawn.
 
 	// 1. Cover the screen immediately so the player never sees the black/unstreamed frames.
-	if (LoadingCoverClass)
-	{
-		if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-		{
-			LoadingCoverWidget = CreateWidget<UUserWidget>(PC, LoadingCoverClass);
-			if (LoadingCoverWidget)
-			{
-				// Very high Z-order so it sits above the HUD and everything else.
-				LoadingCoverWidget->AddToViewport(1000);
-			}
-		}
-	}
+	EnsureLoadingCover();
 
 	// 2. Wait for the first actually-rendered frame, then start the run.
 	//    OnViewportRendered() is a real draw event in UE5.6; we latch the first one.
@@ -98,6 +146,16 @@ void AShooterGameMode::HandleWorldReady()
 	{
 		return;
 	}
+
+	// Every always-loaded sublevel must be fully added before the BP run sequence touches
+	// their actors (EnterArena etc.) — in standalone AddToWorld is time-sliced and arenas
+	// can lag the persistent level by several frames.
+	if (AnySublevelStillStreaming(GetWorld()))
+	{
+		GetWorldTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateUObject(this, &AShooterGameMode::HandleWorldReady));
+		return;
+	}
 	bRunStartTriggered = true;
 
 	// The first rendered frame is NOT "the black screen is gone": in standalone/packaged the engine
@@ -106,9 +164,6 @@ void AShooterGameMode::HandleWorldReady()
 	// (bounded, so we never hard-hang). We're behind the black cover, so this hitch is invisible — and
 	// it guarantees the toss plays on an actually-visible scene instead of behind the loading black.
 	IStreamingManager::Get().StreamAllResources(/*TimeLimit*/ 5.0f);
-
-	// TODO (when streaming sublevels are added): also wait until every required ULevelStreaming
-	// sublevel reports OnLevelShown. All sublevels are currently Always Loaded, so they're present here.
 
 	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] World ready (resources streamed) -> BP_OnRunStartReady (arena=%d, toss=%d, boss=%d)"),
 		RunMarker->ArenaIndex, RunMarker->bLaunchFromSea ? 1 : 0, RunMarker->bBossIntro ? 1 : 0);

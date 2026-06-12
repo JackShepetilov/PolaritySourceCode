@@ -212,6 +212,26 @@ def phase3():
             eas.destroy_actor(a)
             log("destroyed stray IFA in Lvl_RunLogic (pre-add cleanup)")
 
+    # ensure rock (etc.) foliage type ASSETS exist before referencing them
+    for d in plan.get("foliage_type_defs", []):
+        ftp = "{}/{}".format(LI_DIR, d["asset_name"])
+        if unreal.FoliageService.foliage_type_exists(ftp):
+            continue
+        res = unreal.FoliageService.create_foliage_type(
+            mesh_path=d["mesh"], save_path=LI_DIR, asset_name=d["asset_name"],
+            min_scale=float(d.get("min_scale", 0.8)),
+            max_scale=float(d.get("max_scale", 1.2)),
+            align_to_normal=bool(d.get("align_to_normal", True)),
+            align_to_normal_max_angle=float(d.get("align_to_normal_max_angle", 45.0)),
+            ground_slope_max_angle=90.0,
+            cull_distance_max=float(d.get("cull_distance_max", 20000.0)))
+        if getattr(res, "success", False):
+            log("FoliageType created: {}".format(res.asset_path))
+            unreal.EditorAssetLibrary.save_asset(res.asset_path)
+        else:
+            warn("create_foliage_type({}) failed: {}".format(
+                d["asset_name"], getattr(res, "error_message", "?")))
+
     params_by_type = plan.get("type_params", {})
     # FULL remove sweep FIRST, adds second: interleaved remove/add let new
     # instances surface-trace onto the canopies of old not-yet-removed types
@@ -269,9 +289,11 @@ def phase3():
             dz = abs(inst.location.z - s.height)
             audited += 1
             worst_dz = max(worst_dz, dz)
-            if dz > 200.0:
+            # rocks embed up to 250 uu below ground by design; a real floater
+            # hangs a full mesh height (1000+) above it
+            if dz > 400.0:
                 outliers += 1
-    log("HEIGHT AUDIT: {} instances, worst |dz| {:.0f} uu, outliers(>200) {}"
+    log("HEIGHT AUDIT: {} instances, worst |dz| {:.0f} uu, outliers(>400) {}"
         .format(audited, worst_dz, outliers))
     if outliers:
         warn("{} instance(s) off the ground - investigate before shipping"

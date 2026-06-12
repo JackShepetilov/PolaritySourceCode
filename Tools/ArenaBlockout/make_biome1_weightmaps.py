@@ -63,6 +63,32 @@ FT_FLOWERS = ([ENV + "SM_Env_Flowers_0{}_FoliageType".format(i) for i in (1, 2, 
 FT_DRIFT = [ENV + "SM_Env_DriftWood_0{}_FoliageType".format(i) for i in (1, 2, 3, 4, 5)]
 FT_SEAWEED = [ENV + "SM_Env_Seaweed_Beach_01_FoliageType"]
 
+# ---- rock scatter (author round 4: "скалистые места заполнены скалами") ----
+# Synty rock meshes get OWN FoliageType assets (FT_<mesh>) created by the
+# apply script in the island folder; cheapest possible runtime = ISM foliage.
+ROCK_DIR = ENV + "Rocks/"
+FT_ISLAND_DIR = "/Game/Variant_Shooter/Arenas/Biome1/Island"
+ROCK_GROUPS = {
+    # group: (meshes, min_scale, max_scale, align_max_deg, cull, spacing, count)
+    "cliff": (["SM_Env_Rock_Cliff_01", "SM_Env_Rock_Cliff_02", "SM_Env_Rock_Cliff_03"],
+              1.5, 2.8, 75.0, 0.0, 2800.0, 120),
+    "boulder": (["SM_Env_Rock_01", "SM_Env_Rock_02", "SM_Env_Rock_03",
+                 "SM_Env_Rock_04", "SM_Env_Rock_05", "SM_Env_Rock_06",
+                 "SM_Env_Rock_Round_01"],
+                0.8, 1.8, 60.0, 200000.0, 1500.0, 280),
+    "debris": (["SM_Env_Rock_Pile_01", "SM_Env_Rock_Pile_02", "SM_Env_Rock_Pile_03",
+                "SM_Env_Rock_Pile_04", "SM_Env_Rock_Pile_05", "SM_Env_Rock_Pile_06",
+                "SM_Env_Rock_Pile_07", "SM_Env_Rock_Ground_01",
+                "SM_Env_Rock_Ground_02", "SM_Env_Rock_Small_01"],
+               0.6, 1.2, 45.0, 80000.0, 800.0, 380),
+}
+ROCK_SINK = {"cliff": (100.0, 250.0), "boulder": (50.0, 140.0),
+             "debris": (20.0, 70.0)}
+
+
+def rock_ft_path(mesh_name):
+    return "{}/FT_{}".format(FT_ISLAND_DIR, mesh_name)
+
 # per-type placement params (align trees upright; small stuff hugs the ground)
 TYPE_PARAMS = {}
 for p in FT_PALM:
@@ -569,6 +595,42 @@ def main():
         if at(H, px2, py2) > 60.0:
             put(pick(FT_DRIFT), px2, py2)
 
+    # ---------------- rock scatter on rocky terrain ----------------
+    # Rocky zones get actual rock meshes (author round 4). Cheapest runtime =
+    # instanced foliage; placement embeds each rock into the slope (z = ground
+    # minus a sink) so nothing floats on the steep faces.
+    def put_rock(ft, x, y, sink):
+        plan.setdefault(ft, []).append(
+            [round(float(x), 1), round(float(y), 1),
+             round(hsample(x, y) - sink, 1)])
+
+    rock_dil = rock_bin.copy()
+    for _ in range(6):                       # +600 uu fringe for scree feet
+        nd = rock_dil.copy()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nd |= np.roll(np.roll(rock_dil, dy, 0), dx, 1)
+        rock_dil = nd
+    rock_ok = ((H > -300.0) & (road_d > 800.0) & (pad_d > 500.0)
+               & (bowl_d > 800.0) & (cit_d > 800.0) & (stair_d > 1300.0)
+               & ~bridge_keep & (maldive_zone < 0.5) & (reef_zone < 0.5))
+    steep = slope > 38.0
+    fields = {
+        "cliff": (rock_bin & steep & rock_ok).astype(np.float32),
+        "boulder": (rock_bin & ~steep & rock_ok).astype(np.float32),
+        "debris": (rock_dil & ~rock_bin & (slope < 27.0) & (H > 60.0)
+                   & rock_ok).astype(np.float32),
+    }
+    rock_counts = {}
+    for grp, (meshes, mn, mx, amax, cull, spacing, count) in ROCK_GROUPS.items():
+        pts = sample_field(fields[grp], count, rng, spacing=spacing)
+        s0, s1 = ROCK_SINK[grp]
+        for x, y in pts:
+            put_rock(rock_ft_path(pick(meshes)), x, y, rng.uniform(s0, s1))
+        rock_counts[grp] = len(pts)
+    print("rocks: cliff %d, boulder %d, debris %d" % (
+        rock_counts.get("cliff", 0), rock_counts.get("boulder", 0),
+        rock_counts.get("debris", 0)))
+
     # rule check (author 2026-06-12): no palm may touch water - report the
     # lowest palm foot over the heightmap
     pmin, pn = 1e9, 0
@@ -603,10 +665,27 @@ def main():
     print("height probes vs PNG: {}/{} OK".format(len(height_probes) - bad,
                                                   len(height_probes)))
 
+    # rock foliage types: the apply script creates these FT assets (island
+    # folder) if missing, instances below reference them by path
+    rock_type_defs = []
+    for grp, (meshes, mn, mx, amax, cull, spacing, count) in ROCK_GROUPS.items():
+        for m in meshes:
+            rock_type_defs.append({
+                "asset_name": "FT_{}".format(m),
+                "mesh": ROCK_DIR + m,
+                "min_scale": mn, "max_scale": mx,
+                "align_to_normal": True,
+                "align_to_normal_max_angle": amax,
+                "cull_distance_max": cull,
+            })
+            TYPE_PARAMS[rock_ft_path(m)] = dict(min_scale=mn, max_scale=mx,
+                                                align_to_normal=True)
+
     total = sum(len(v) for v in plan.values())
     plan_doc = {
         "seed": args.seed,
         "terrain_seed": args.terrain_seed,
+        "foliage_type_defs": rock_type_defs,
         "heightmap": os.path.basename(HEIGHTMAP),
         "comment": "Biome1 island art pass v1 - generated by make_biome1_weightmaps.py; "
                    "apply with apply_biome1_art_pass.py (idempotent per foliage type)",
@@ -639,12 +718,15 @@ def main():
     shallow = (H >= -160) & (H < 0)
     rgb[shallow] = rgb[shallow] * 0.45 + np.array([0.55, 0.75, 0.72]) * 0.55
 
+    rocks_all = tuple(rock_ft_path(m)
+                      for grp in ROCK_GROUPS.values() for m in grp[0])
     DOT = {tuple(FT_FOREST + FT_POHUT + FT_BANANA): ((10, 64, 22), 3),
            tuple(FT_PALM): ((242, 142, 36), 3),
            tuple(FT_BUSH_T + FT_BUSH_P + FT_FERN + FT_TALLGRASS): ((52, 120, 46), 1),
            tuple(FT_FLOWERS): ((232, 70, 160), 1),
            tuple(FT_DRIFT): ((132, 84, 44), 2),
-           tuple(FT_SEAWEED): ((36, 110, 108), 2)}
+           tuple(FT_SEAWEED): ((36, 110, 108), 2),
+           rocks_all: ((96, 96, 100), 2)}
     img = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
     for ft, pts in plan.items():
         col, rad = next(v for k, v in DOT.items() if ft in k)

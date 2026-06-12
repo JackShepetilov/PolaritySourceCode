@@ -67,6 +67,16 @@ protected:
 	/** Called once the world is confirmed loaded and drawn; starts the run. */
 	void HandleWorldReady();
 
+	/** Finds the run marker and arms the gate. Retries across ticks while streaming
+	 *  sublevels are still being added: in standalone/packaged, always-loaded sublevels
+	 *  AddToWorld AFTER world BeginPlay (time-sliced), so a marker living in a sublevel
+	 *  is not findable on the first tick — PIE hides this because the duplicated editor
+	 *  world is already fully composed. */
+	void TryInitRunGate();
+
+	/** Creates and shows the black loading cover once (idempotent). */
+	void EnsureLoadingCover();
+
 	/** Teleports the player to the level's ARunLaunchPoint and tosses them into the air. */
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void PerformRunLaunch();
