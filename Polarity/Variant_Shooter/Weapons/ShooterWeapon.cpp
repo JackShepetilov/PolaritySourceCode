@@ -621,6 +621,28 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â (AimVariance)
+	// === Classic hitscan (WaveDivergence == 0): trace from the CAMERA, not the muzzle ===
+	// The aim point from GetWeaponTargetLocation() lies BEHIND the enemy (pawn profiles ignore
+	// ECC_Visibility), so a muzzle-based ray keeps up to the full camera->muzzle offset of
+	// parallax at the enemy's depth — a thin ray can miss a capsule the crosshair is dead on.
+	// Re-basing to the camera viewpoint makes crosshair == bullet path; the tracer is still
+	// drawn from the muzzle (see PerformClassicHitscan).
+	FVector HitscanStart = MuzzleLocation;
+	const bool bClassicHitscan = (WaveDivergence * MaxDivergenceAngle <= KINDA_SMALL_NUMBER);
+	if (bClassicHitscan && PawnOwner && PawnOwner->IsPlayerControlled())
+	{
+		if (AController* OwnerController = PawnOwner->GetController())
+		{
+			FVector ViewPointLoc;
+			FRotator ViewPointRot;
+			OwnerController->GetPlayerViewPoint(ViewPointLoc, ViewPointRot);
+
+			const FVector RebasedDir = (TargetLocation - ViewPointLoc).GetSafeNormal();
+			HitscanStart = ViewPointLoc;
+			Direction = RebasedDir.IsNearlyZero() ? ViewPointRot.Vector() : RebasedDir;
+		}
+	}
+
 	if (AimVariance > 0.0f)
 	{
 		FVector Variance = FMath::VRand() * FMath::Tan(FMath::DegreesToRadians(AimVariance));
@@ -645,7 +667,7 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 	}
 	else
 	{
-		PerformHitscan(MuzzleLocation, Direction, 1.0f, 0);
+		PerformHitscan(HitscanStart, Direction, 1.0f, 0);
 	}
 
 	//ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
@@ -682,6 +704,14 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 
 void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount)
 {
+	// Zero divergence: the cone math degenerates and its filter rejects legitimate hits —
+	// route to the classic thin-ray path (see PerformClassicHitscan for details).
+	if (WaveDivergence * MaxDivergenceAngle <= KINDA_SMALL_NUMBER)
+	{
+		PerformClassicHitscan(Start, Direction, RemainingEnergy, ReflectionCount);
+		return;
+	}
+
 	float SegmentMaxDistance = MaxHitscanRange * RemainingEnergy;
 	FVector End = Start + Direction * SegmentMaxDistance;
 
@@ -1417,6 +1447,216 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	else if (bHitWall)
 	{
 		SpawnImpactEffect(WallHit);
+	}
+}
+
+void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount)
+{
+	const float SegmentMaxDistance = MaxHitscanRange * RemainingEnergy;
+	const FVector End = Start + Direction * SegmentMaxDistance;
+	const float SweepRadius = FMath::Max(InitialWaveRadius, 1.0f);
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.AddIgnoredActor(GetOwner());
+	QueryParams.bReturnPhysicalMaterial = true;
+
+	// --- Trace 1: world geometry (pawn profiles ignore ECC_Visibility) ---
+	FHitResult WallHit;
+	const bool bHitWall = GetWorld()->LineTraceSingleByChannel(WallHit, Start, End, ECC_Visibility, QueryParams);
+	const float WallDistance = bHitWall ? WallHit.Distance : SegmentMaxDistance;
+
+	// Damage non-pawn damageable actors (EMFPhysicsProp, convertible foliage) — same rule as the cone path
+	if (bHitWall && WallHit.GetActor() && !Cast<APawn>(WallHit.GetActor()) && WallHit.GetActor()->CanBeDamaged())
+	{
+		ApplyHitscanDamage(WallHit, RemainingEnergy, WallHit.Distance, 0.0f);
+	}
+
+	// --- Trace 2: thin pawn sweep up to the wall ---
+	// The swept volume is a thin capsule along the ray: SweepRadius units of forgiveness.
+	TArray<FHitResult> PawnHits;
+	FCollisionObjectQueryParams PawnObjectParams;
+	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	GetWorld()->SweepMultiByObjectType(
+		PawnHits,
+		Start,
+		Start + Direction * WallDistance,
+		FQuat::Identity,
+		PawnObjectParams,
+		FCollisionShape::MakeSphere(SweepRadius),
+		QueryParams);
+
+	UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] === ClassicShot: Start=%s Dir=%s | SweepR=%.1f | Wall=%s dist=%.0f | pawnHits=%d refl=%d"),
+		*Start.ToCompactString(), *Direction.ToCompactString(), SweepRadius,
+		bHitWall ? *GetNameSafe(WallHit.GetActor()) : TEXT("none"),
+		WallDistance, PawnHits.Num(), ReflectionCount);
+
+	// --- Pick the NEAREST pawn on the ray: a bullet stops at the first body ---
+	int32 BestIndex = INDEX_NONE;
+	float BestDistance = MAX_FLT;
+	for (int32 i = 0; i < PawnHits.Num(); ++i)
+	{
+		const FHitResult& Hit = PawnHits[i];
+		AActor* HitActor = Hit.GetActor();
+		if (!HitActor || !HitActor->CanBeDamaged())
+		{
+			continue;
+		}
+
+		// Initial-overlap sweep hits report Distance = 0 — use the actor location instead
+		float Dist = Hit.Distance;
+		if (Dist < 1.0f)
+		{
+			Dist = FVector::Dist(Start, HitActor->GetActorLocation());
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]   cand=%s comp=%s bone=%s dist=%.0f"),
+			*HitActor->GetName(), *GetNameSafe(Hit.GetComponent()), *Hit.BoneName.ToString(), Dist);
+
+		if (Dist < BestDistance)
+		{
+			BestDistance = Dist;
+			BestIndex = i;
+		}
+	}
+
+	// --- Apply damage to the nearest pawn with the full player multiplier stack (as in the cone path) ---
+	bool bPawnWasHit = false;
+	FVector PawnHitLocation = FVector::ZeroVector;
+	FHitResult PawnHit;
+	if (BestIndex != INDEX_NONE)
+	{
+		PawnHit = PawnHits[BestIndex];
+		AActor* HitActor = PawnHit.GetActor();
+		bPawnWasHit = true;
+		PawnHitLocation = PawnHit.ImpactPoint.IsNearlyZero() ? HitActor->GetActorLocation() : FVector(PawnHit.ImpactPoint);
+
+		const bool bIsHeadshot = (PawnHit.BoneName == FName("head") || PawnHit.BoneName == FName("Head"));
+		const float HeadshotMult = bIsHeadshot ? HeadshotMultiplier : 1.0f;
+		const float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
+
+		float ZFactorMult = 1.0f;
+		if (bUseZFactor && PawnOwner)
+		{
+			ZFactorMult = CalculateZFactorMultiplier(PawnOwner->GetActorLocation().Z, HitActor->GetActorLocation().Z);
+		}
+
+		const float TagMult = GetTagDamageMultiplier(HitActor);
+
+		float UpgradeMult = 1.0f;
+		if (PawnOwner)
+		{
+			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+			{
+				UpgradeMult = UpgradeMgr->GetCombinedDamageMultiplier(HitActor);
+			}
+		}
+
+		// No distance falloff: at zero divergence the wave radius never exceeds the target
+		// radius, so the cone path's area multiplier would be 1.0 anyway.
+		const float FinalDamage = HitscanDamage * RemainingEnergy * HeadshotMult * HeatMult * ZFactorMult * TagMult * UpgradeMult;
+
+		FDamageEvent DamageEvent;
+		if (HitscanDamageType)
+		{
+			DamageEvent.DamageTypeClass = HitscanDamageType;
+		}
+
+		const float ActualDamage = HitActor->TakeDamage(FinalDamage, DamageEvent, PawnOwner ? PawnOwner->GetController() : nullptr, this);
+		const bool bKilled = IsActorDeadAfterDamage(HitActor);
+
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),
+			*HitActor->GetName(), BestDistance, FinalDamage, ActualDamage, bKilled ? 1 : 0);
+
+		// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
+		if (WeaponOwner && ActualDamage > 0.0f)
+		{
+			WeaponOwner->OnWeaponHit(PawnHitLocation, Direction, ActualDamage, bIsHeadshot, bKilled);
+		}
+
+		// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits
+		if (PawnOwner)
+		{
+			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+			{
+				UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+			}
+		}
+
+		// Knockback / physics impulse — same exceptions as the cone path:
+		// turret would be pushed into permanent flight, the boss opts out of ionizer knockback
+		const float ImpulseForce = HitscanPhysicsForce * RemainingEnergy;
+		if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+		{
+			if (!Cast<ASniperTurretNPC>(HitCharacter)
+				&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
+			{
+				HitCharacter->LaunchCharacter(Direction * ImpulseForce, false, false);
+			}
+		}
+		else if (UPrimitiveComponent* HitComp = PawnHit.GetComponent())
+		{
+			if (HitComp->IsSimulatingPhysics())
+			{
+				HitComp->AddImpulseAtLocation(Direction * ImpulseForce, PawnHitLocation);
+			}
+		}
+
+		// Ionization (charge transfer); HitComponent gates the NPC riot-shield rule
+		ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] NO DAMAGE THIS SHOT (classic): pawnHits=%d (beam to %s)"),
+			PawnHits.Num(), bHitWall ? *GetNameSafe(WallHit.GetActor()) : TEXT("max range"));
+	}
+
+	// --- Visuals: the trace runs from the camera, but the beam must leave the MUZZLE ---
+	// Reflected segments (ReflectionCount > 0) start at the bounce point instead.
+	FVector BeamStart = Start;
+	if (ReflectionCount == 0 && PawnOwner && PawnOwner->IsPlayerControlled() && FirstPersonMesh)
+	{
+		BeamStart = FirstPersonMesh->GetSocketLocation(MuzzleSocketName);
+	}
+
+	const FVector BeamEnd = bPawnWasHit
+		? PawnHitLocation
+		: (bHitWall ? FVector(WallHit.ImpactPoint) : End);
+
+	SpawnBeamEffect(BeamStart, BeamEnd, RemainingEnergy);
+
+	if (bUseWaveVisualization)
+	{
+		SpawnWaveFronts(BeamStart, BeamEnd);
+	}
+
+	if (bPawnWasHit)
+	{
+		SpawnImpactEffect(PawnHit);
+	}
+	else if (bHitWall)
+	{
+		SpawnImpactEffect(WallHit);
+	}
+
+	// --- Metal reflection: only off a wall and only if no pawn intercepted the ray ---
+	if (bHitWall && !bPawnWasHit && MaxReflections > 0 && IsMetal(WallHit) && ReflectionCount < MaxReflections)
+	{
+		const FVector ReflectedDir = CalculateReflection(Direction, WallHit.ImpactNormal);
+		const float NewEnergy = RemainingEnergy * (1.0f - ReflectionEnergyLoss);
+
+		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] Classic reflection off %s (NewEnergy: %.2f)"),
+			*GetNameSafe(WallHit.GetActor()), NewEnergy);
+
+		SpawnReflectionEffect(WallHit.ImpactPoint, Direction, ReflectedDir);
+
+		if (ReflectionSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, ReflectionSound, WallHit.ImpactPoint, NewEnergy);
+		}
+
+		PerformClassicHitscan(WallHit.ImpactPoint + ReflectedDir * 1.0f, ReflectedDir, NewEnergy, ReflectionCount + 1);
 	}
 }
 

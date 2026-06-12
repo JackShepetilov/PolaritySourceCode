@@ -606,6 +606,16 @@ protected:
 	virtual void FireHitscan(const FVector& TargetLocation);
 	void PerformHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount);
 
+	/** Classic thin-ray hitscan, used when WaveDivergence == 0 (PerformHitscan dispatches here).
+	 *  At zero divergence the cone pipeline degenerates: the filter's dot branch needs
+	 *  DotProduct >= cos(0) = 1.0 (never true in float), and its radius branch compares the
+	 *  contact point on the capsule SURFACE (up to ~34u off axis) against InitialWaveRadius (~5u),
+	 *  so legitimate hits are rejected. This path damages the NEAREST pawn on the ray instead.
+	 *  Expects Start at the camera viewpoint for primary player shots (see FireHitscan) so the
+	 *  ray matches the crosshair; the beam VFX is still drawn from the muzzle. Wall damage,
+	 *  metal reflections, knockback and ionization behave like the cone path. */
+	void PerformClassicHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount);
+
 	/** NPC simple hitscan: straight line trace without cone sweep.
 	 *  Bypasses the cone-based system which has parallax issues for NPCs
 	 *  (camera and muzzle are at different positions, causing the cone check to reject valid hits). */
