@@ -139,10 +139,12 @@ def phase2():
             raise RuntimeError("import_weight_map({}) failed: {}".format(
                 layer, getattr(res, "error_message", "?")))
         log("imported {} <- {}".format(layer, os.path.basename(png)))
-    probes = [("G1 road/apron (sand)", -4840.0, -14970.0, "Sand_01", 0.45),
-              ("island mid (grass)", 6000.0, 16000.0, "Grass", 0.45),
-              ("open sea bed (sand)", 70000.0, -70000.0, "Sand_01", 0.9),
-              ("cape cliff (rock?)", 44000.0, -600.0, "Rockwall", None)]
+    # v9 pivot probes (sampled from the generated masks 2026-06-12): the big
+    # island is gone, so the old G1/island-mid/cape points are dead water now.
+    probes = [("Final pad (sand under villa)", -31000.0, 8000.0, "Sand_01", 0.45),
+              ("Final shoulder (grass)", -25000.0, 8000.0, "Grass", 0.45),
+              ("M3 dune shoulder (sand)", -15640.0, -42100.0, "Sand_01", 0.45),
+              ("open sea bed (sand)", 70000.0, -70000.0, "Sand_01", 0.9)]
     bad = 0
     for label, x, y, want_layer, want_min in probes:
         try:

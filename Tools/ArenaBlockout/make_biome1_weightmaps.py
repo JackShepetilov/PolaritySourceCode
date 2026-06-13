@@ -1,23 +1,28 @@
-# Biome1 island ART PASS source: bakes the 4 landscape weight masks
+# Biome1 ART PASS source: bakes the 4 landscape weight masks
 # (Sand_01 / Rockwall / Grass / Grass_Clovers - the exact layer set the
 # author painted on Lvl_DemoForPublisher2) + a deterministic foliage plan,
 # all OFFLINE from the already-authored heightmap PNG. PREVIEW WORKFLOW:
 # review biome1_artpass_preview.png before apply_biome1_art_pass.py touches
 # the editor.
 #
+# ISLAND PIVOT (layout v9, 2026-06-12): no big island - the map is maldive
+# islets M1-M4 + ONE final island (A6_Villa). Roads/aprons/bowl/citadel/
+# stairs zones are gone with it.
+#
 # Art rules (agreed with the author 2026-06-12):
-#   - sand: waterline band + the whole seabed + maldive/reef shore slopes
-#     + the serpentine ribbon (readable route, kills procedural grass on it)
-#   - rock: PURELY slope-driven (28->38 deg; the cape cliff sector bites
-#     earlier at 20->30) - plateaus stay green all the way to the citadel
-#   - clovers: low-frequency noise patches inside the grass
-#   - vegetation niches: coastal palms -> lowland jungle -> thinning upland;
-#     groves from noise + Poisson spacing, understory clustered AROUND trees
-#     (plants live in families - the main "natural" reader), flowers on
-#     clover meadows and road shoulders, driftwood/seaweed along the sand
-#   - hard keep-outs: road ribbon, G1/G2 aprons, G3 bowl, citadel disc +
-#     stairs corridors, maldive arena circles (palms only on the rim ring),
-#     start reef (author's launch point!), bridge corridors, water
+#   - sand: waterline band (7-10 m horizontal ribbon) + the whole seabed +
+#     maldive dune slopes above the beach; arena footprints = sand strictly
+#     under the plates
+#   - the FINAL island is LUSH: grass above its beach ribbon (it is the
+#     destination, not another sand dune), green clearing around the villa
+#   - rock: PURELY slope-driven (29->36 deg) - the gentle lens shoulders
+#     stay rock-free by construction
+#   - clovers: dead (author round 1) - zero mask keeps erasing the layer
+#   - vegetation niches: coastal palms, jungle/groves + understory families
+#     on the final island; maldives get their dedicated per-islet palm ring;
+#     flowers on meadow noise, driftwood/seaweed along the sand
+#   - hard keep-outs: arena footprints, bridge corridors, start reef
+#     (author's launch point!), water
 #
 # Outputs (Island/):
 #   biome1_weight_Sand_01.png / _Rockwall.png / _Grass.png / _Grass_Clovers.png
@@ -153,40 +158,6 @@ def seg_dist_field(pts, reach):
     return D
 
 
-def build_road_legs(slots, layout):
-    """Replicate the legA/legB polylines of make_biome1_heightmap (geometry
-    only - no height anchors needed for painting). Keep in sync."""
-    fp = {sid: mh.load_footprint(slots[sid]["default"]) for sid in ("G1", "G2", "G3")}
-    g1, g2, g3, cit = slots["G1"], slots["G2"], slots["G3"], slots["Citadel"]
-    corr_pts = list(layout["rules"]["route_corridor"])
-    shoulder = corr_pts[0]
-    a5 = fp["G3"]
-    appr_front = mh.slot_world(g3, 0.0, a5["y0"] - 100.0)
-    e_g1_sh = mh.apron_edge_point(g1, fp["G1"], shoulder)
-    e_g1_g2 = mh.apron_edge_point(g1, fp["G1"], g2["pos"][:2])
-    e_g2_g1 = mh.apron_edge_point(g2, fp["G2"], g1["pos"][:2])
-    e_g2_ap = mh.apron_edge_point(g2, fp["G2"], appr_front)
-    legA = [tuple(shoulder), e_g1_sh, (g1["pos"][0], g1["pos"][1]), e_g1_g2,
-            e_g2_g1, (g2["pos"][0], g2["pos"][1]), e_g2_ap,
-            (appr_front[0], appr_front[1])]
-    st = layout["rules"]["citadel_stairs"]
-    cy = math.radians(float(cit.get("yaw", 0.0)))
-    ca, sa = math.cos(cy), math.sin(cy)
-    ll = st["landing_local"]
-    landing = (cit["pos"][0] + ll[0] * ca - ll[1] * sa,
-               cit["pos"][1] + ll[0] * sa + ll[1] * ca)
-    bench_exit = mh.slot_world(g3, 1103.0, 5300.0)
-    legB = [bench_exit, landing]
-    stair_lines = []
-    for line in st["lines_top_local"]:
-        pts = []
-        for loc in line:
-            pts.append((cit["pos"][0] + loc[0] * ca - loc[1] * sa,
-                        cit["pos"][1] + loc[0] * sa + loc[1] * ca))
-        stair_lines.append(pts)
-    return legA, legB, stair_lines, fp
-
-
 def thin_by_spacing(pts, spacing, rng):
     """Random-order greedy thinning on a grid hash -> Poisson-ish layout."""
     if not len(pts):
@@ -254,7 +225,6 @@ def main():
     with open(LAYOUT, encoding="utf-8") as f:
         layout = json.load(f)
     slots = {s["id"]: s for s in layout["slots"]}
-    isl = layout["island"]
 
     px = np.asarray(Image.open(HEIGHTMAP), dtype=np.float32)
     assert px.shape == (N, N), "heightmap is {}".format(px.shape)
@@ -266,36 +236,22 @@ def main():
     gy, gx = np.gradient(H, SCALE)
     slope = np.degrees(np.arctan(np.hypot(gx, gy))).astype(np.float32)
 
-    # cape cliff sector (same construction as the heightmap generator)
-    ICX, ICY = isl["center"]
-    CPX, CPY = isl["peak"]
-    deg = np.degrees(np.arctan2(Yu - ICY, Xu - ICX)) % 360.0
-    cape_bearing = math.degrees(math.atan2(CPY - ICY, CPX - ICX)) % 360.0
-    ddeg = np.abs(((deg - cape_bearing + 180.0) % 360.0) - 180.0)
-    in_cliff = smoothstep(26.0, 13.0, ddeg)
-
-    legA, legB, stair_lines, fp = build_road_legs(slots, layout)
-    road_d = np.minimum(seg_dist_field(legA, 3000.0), seg_dist_field(legB, 3000.0))
-    stair_d = np.full_like(road_d, 1e9)
-    for line in stair_lines:
-        stair_d = np.minimum(stair_d, seg_dist_field(line, 2200.0))
-
     # ---------------- layer masks ----------------
     # rock threshold 29->36: >=30 deg is unwalkable by project rules, and the
     # author wants "пляж вместо обрыва" - the 28-30 deg coastal aprons stay
-    # green (first run painted a black ring around every shore). The cape
-    # cliff sector bites earlier so the seaward wall reads stone.
-    w_rock = np.maximum(smoothstep(29.0, 36.0, slope),
-                        smoothstep(20.0, 30.0, slope) * in_cliff)
+    # green (first run painted a black ring around every shore). With the
+    # gentle lens shoulders (v9) this catches only dune-noise pockets.
+    w_rock = smoothstep(29.0, 36.0, slope)
 
-    # MALDIVE SAND-LENS resync (terrain 2026-06-12, Handoff maldive section):
+    # ISLET SAND-LENS resync (terrain 2026-06-12, Handoff maldive section):
     # replicate the EXACT lens field t/run per islet - footprint rect dist
-    # warped by the 5-harmonic coast wobble + spine term. Wobble phases come
-    # from the same rng stream the heightmap consumed (TERRAIN seed: 2 island
-    # draws, then 5 per S/M arena in slot order - verified against the
-    # generator 2026-06-12), spine_n/Dw rebuilt with mh's own noise stack.
+    # warped by the 5-harmonic coast wobble + spine term, per-slot lens
+    # overrides honored (run_scale on the Final island!). Wobble phases come
+    # from the same rng stream the heightmap consumed (TERRAIN seed: 2 legacy
+    # island draws, then 5 per ARENA in slot order - matches the v9
+    # generator), spine_n/Dw rebuilt with mh's own noise stack.
     lens_rng = np.random.default_rng(args.terrain_seed)
-    lens_rng.uniform(0.0, 2.0 * np.pi, 2)            # island p1/p2 (consumed)
+    lens_rng.uniform(0.0, 2.0 * np.pi, 2)            # legacy island draws
     idx = np.arange(N, dtype=np.float32)
     detail = mh.fbm(N, 5, 8, args.terrain_seed + 37)
     wx = (mh.fbm(N, 4, 4, args.terrain_seed + 11) - 0.5) * 160.0
@@ -307,10 +263,11 @@ def main():
     Dw = mh.sample(detail, ys_w, xs_w)
     del detail, wx, wy, ys_w, xs_w, spine
 
-    maldive_zone = np.zeros_like(H)
+    maldive_zone = np.zeros_like(H)   # S/M islets: sandy dunes, ring planting
+    final_zone = np.zeros_like(H)     # final island: lush, global planting
     lens = {}                                        # sid -> (t, run)
     for s in layout["slots"]:
-        if s["kind"] != "arena" or s.get("tier") not in ("S", "M"):
+        if s["kind"] != "arena":
             continue
         x, y, z = s["pos"]
         f_m = mh.load_footprint(s["default"])
@@ -319,33 +276,35 @@ def main():
                             f_m["y0"] - 250.0, f_m["y1"] + 250.0)
         th = np.arctan2(Yu - y, Xu - x)
         ph = lens_rng.uniform(0.0, 2.0 * np.pi, 5)
-        wob = (1.0 + 0.30 * np.sin(th + ph[0])
-               + 0.18 * np.sin(2 * th + ph[1]) + 0.10 * np.sin(3 * th + ph[2])
-               + 0.06 * np.sin(5 * th + ph[3]) + 0.04 * np.sin(7 * th + ph[4]))
-        wob = np.clip(wob + 0.30 * (Dw - 0.5) * 2.0, 0.60, 1.40)
+        lcfg = s.get("lens", {})
+        tail_amp = float(lcfg.get("tail_amp", 0.30))
+        rag = float(lcfg.get("ragged", 1.0))
+        ph0 = (math.pi / 2.0 - math.radians(float(lcfg["tail_deg"]))
+               if "tail_deg" in lcfg else ph[0])
+        wob = (1.0 + tail_amp * np.sin(th + ph0)
+               + rag * (0.18 * np.sin(2 * th + ph[1])
+                        + 0.10 * np.sin(3 * th + ph[2])
+                        + 0.06 * np.sin(5 * th + ph[3])
+                        + 0.04 * np.sin(7 * th + ph[4])))
+        wob = np.clip(wob + 0.30 * rag * (Dw - 0.5) * 2.0, 0.60, 1.40)
         gate = mh.smootherstep(0.0, 700.0, fp_d)
-        t = np.maximum(fp_d / wob + (spine_n - 0.45) * 1300.0 * gate, 0.0)
-        run = z * mh.MALDIVE_RUN_K + mh.MALDIVE_RUN_BASE
+        t = np.maximum(fp_d / wob + (spine_n - 0.45) * 1300.0 * rag * gate, 0.0)
+        run = (z * mh.MALDIVE_RUN_K + mh.MALDIVE_RUN_BASE) \
+            * float(lcfg.get("run_scale", 1.0))
         lens[s["id"]] = (t.astype(np.float32), run)
-        maldive_zone = np.maximum(maldive_zone,
-                                  smoothstep(run + 700.0, run + 100.0, t))
+        zone = smoothstep(run + 700.0, run + 100.0, t)
+        if s.get("tier") == "final":
+            final_zone = np.maximum(final_zone, zone)
+        else:
+            maldive_zone = np.maximum(maldive_zone, zone)
     sx_, sy_, sz_ = slots["start_reef"]["pos"]
     reef_zone = smoothstep(3100.0, 2500.0, np.hypot(Xu - sx_, Yu - sy_))
-    w_rock = w_rock * (1.0 - maldive_zone) * (1.0 - reef_zone)
-
-    # terraced cliff TREADS stay rock (the strata stamp flattens courses
-    # below the slope threshold - pure slope rule would stripe them green):
-    # any tread within ~500 uu of a steep riser inside the cape sector is
-    # rock; wider benches keep their grass accents
-    riser = (slope > 30.0) & (in_cliff > 0.5)
-    riser_dil = riser.copy()
-    for _ in range(5):
-        nd = riser_dil.copy()
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nd |= np.roll(np.roll(riser_dil, dy, 0), dx, 1)
-        riser_dil = nd
-    w_rock = np.maximum(w_rock, (riser_dil & (in_cliff > 0.5)
-                                 & (H > 300.0)).astype(np.float32))
+    # no rock ANYWHERE on the islet world ('умеренно полого, без скал'):
+    # dune-noise pockets over 29 deg would read as random stone patches on
+    # the final island's grass shoulder. The Rockwall mask stays imported as
+    # an all-zero eraser (same treatment as the dead clover layer).
+    w_rock = (w_rock * (1.0 - maldive_zone) * (1.0 - final_zone)
+              * (1.0 - reef_zone))
 
     # BEACH BY DISTANCE (author round 3: "пляж везде шириной 7-10 м") - the
     # height-band beach vanished on steep coasts and ate whole flats. Sand
@@ -364,27 +323,31 @@ def main():
         dil = nd
     beach_w = 7.0 + 3.0 * mh.fbm(N, 4, 18, args.seed + 301)   # 7..10 px
     beach = (~water) & (dist_px <= beach_w)
-    road_bin = road_d < 690.0                  # the old soft ribbon at >0.5
     reef_bin = reef_zone > 0.5
-    lens_dune = (maldive_zone > 0.5) & ~water  # islet land above the beach
+    # S/M islets stay sandy dunes above the beach; the FINAL island is lush -
+    # its land above the beach ribbon is grass (it is the destination)
+    lens_dune = (maldive_zone > 0.5) & (final_zone <= 0.5) & ~water
 
     # ARENA FOOTPRINTS = SAND strictly UNDER the plates (author round 2: the
     # +300/800 halo read as a washed-out ring - grass must ADJOIN the arenas)
     pad_core = np.zeros_like(H, dtype=bool)
-    for sid in ("G1", "G2", "G3", "Citadel", "M1", "M2", "M3", "M4"):
-        f = fp.get(sid) or mh.load_footprint(slots[sid]["default"])
-        lx, ly = mh.local_frame(Xu, Yu, slots[sid])
+    for s in layout["slots"]:
+        if s["kind"] != "arena":
+            continue
+        f = mh.load_footprint(s["default"])
+        lx, ly = mh.local_frame(Xu, Yu, s)
         d = mh.rect_dist(lx, ly, f["x0"], f["x1"], f["y0"], f["y1"])
         pad_core |= (d <= 60.0)
 
-    # maldive GRASS APRON, round 3: MUCH bigger ("вокруг арен травы очень
+    # islet GRASS APRON, round 3: MUCH bigger ("вокруг арен травы очень
     # мало") - a wide green clearing from the plate edge to a noisy boundary;
     # dunes survive between the apron and the beach ribbon on bigger islets
     apron_noise = mh.fbm(N, 4, 90, args.seed + 631)   # ~2k features: lively edge
     grass_apron = np.zeros_like(H, dtype=bool)
-    for sid in ("M1", "M2", "M3", "M4"):
-        s = slots[sid]
-        t, run = lens[sid]
+    for s in layout["slots"]:
+        if s["kind"] != "arena":
+            continue
+        t, run = lens[s["id"]]
         f_m = mh.load_footprint(s["default"])
         lxm, lym = mh.local_frame(Xu, Yu, s)
         fpd = mh.rect_dist(lxm, lym, f_m["x0"], f_m["x1"], f_m["y0"], f_m["y1"])
@@ -395,15 +358,18 @@ def main():
     # BINARY layer resolve (author round 2: "бленда травы быть не должно,
     # всегда вес 1") - every pixel is exactly ONE layer; the texture
     # transition at boundaries is the material's own HeightBlend job.
-    # Priorities: rock > plates > beach/water > apron > dunes/road > grass.
+    # Priorities: rock > plates > beach/water > apron > dunes > grass.
     rock_bin = w_rock > 0.5
-    sand_bin = (water | beach | road_bin | reef_bin | lens_dune) & ~rock_bin
+    sand_bin = (water | beach | reef_bin | lens_dune) & ~rock_bin
     sand_bin |= pad_core                       # plates: sand even over rock
-    carve = (grass_apron & ~pad_core & ~rock_bin & ~beach & ~water & ~road_bin)
+    carve = (grass_apron & ~pad_core & ~rock_bin & ~beach & ~water)
     sand_bin &= ~carve
     grass_bin = ~rock_bin & ~sand_bin
 
-    meadow_noise = smoothstep(0.52, 0.66, mh.fbm(N, 4, 7, args.seed + 113))
+    # cells 28 (was 7): the noise was tuned for the 40k island - on a ~9k
+    # final island a 7-cell field is one value over the whole land (flowers
+    # came out 0 on the first v9 run)
+    meadow_noise = smoothstep(0.52, 0.66, mh.fbm(N, 4, 28, args.seed + 113))
 
     # binary value is 229, NOT 255: the per-pixel deficit (26 = 10%) lands in
     # 'Base' on import (the importer dumps it into the FIRST landscape layer
@@ -442,67 +408,58 @@ def main():
         os.path.join(OUT_DIR, "biome1_weight_Base.png"))
 
     # ---------------- keep-out fields for foliage ----------------
-    g1, g2, g3, cit = slots["G1"], slots["G2"], slots["G3"], slots["Citadel"]
+    # pad_d: distance to the NEAREST arena footprint (+500 collar), all slots
     pad_d = np.full_like(H, 1e9)
-    for sid in ("G1", "G2"):
-        f = fp[sid]
-        lx, ly = mh.local_frame(Xu, Yu, slots[sid])
+    for s in layout["slots"]:
+        if s["kind"] != "arena":
+            continue
+        f = mh.load_footprint(s["default"])
+        lx, ly = mh.local_frame(Xu, Yu, s)
         pad_d = np.minimum(pad_d, mh.rect_dist(
             lx, ly, f["x0"] - 500.0, f["x1"] + 500.0, f["y0"] - 500.0, f["y1"] + 500.0))
-    a5 = fp["G3"]
-    lx, ly = mh.local_frame(Xu, Yu, g3)
-    bowl_d = mh.rect_dist(lx, ly, a5["x0"] - 50.0, a5["x1"] + 50.0,
-                          a5["y0"] - 50.0, a5["y1"] + 150.0)
-    cit_d = np.hypot(Xu - cit["pos"][0], Yu - cit["pos"][1]) - (cit["r"] + PAD_RIM)
-    shoulder_d = np.hypot(Xu - slots["shoulder"]["pos"][0],
-                          Yu - slots["shoulder"]["pos"][1])
 
-    # bridge corridors: maldive hops where the line runs over water/beach
-    hops = [("M1", "M2"), ("M2", "M3"), ("M3", "M4")]
+    # bridge corridors: islet hops where the line runs over water/beach
+    # (consecutive ARENA entries of the route, incl. M4->Final)
+    ids = [r for r in layout["route"]
+           if r in slots and slots[r]["kind"] == "arena"]
     bridge_d = np.full_like(H, 1e9)
-    for a_id, b_id in hops:
+    for a_id, b_id in zip(ids, ids[1:]):
         bridge_d = np.minimum(bridge_d, seg_dist_field(
             [slots[a_id]["pos"][:2], slots[b_id]["pos"][:2]], 1400.0))
-    bridge_d = np.minimum(bridge_d, seg_dist_field(
-        [slots["M4"]["pos"][:2], (ICX, ICY)], 1400.0))
     bridge_keep = (bridge_d < 1000.0) & (H < 500.0)   # only near the water
 
     def keepout(tree):
-        """1 = plantable. `tree` widens road/pad margins for canopies.
-        Maldives + reef are FULLY excluded - their planting is the dedicated
-        per-slot ring pass (global fields flooded the rims on first run)."""
+        """1 = plantable. `tree` widens pad margins for canopies.
+        S/M maldives + reef are FULLY excluded - their planting is the
+        dedicated per-slot ring pass (global fields flooded the rims on
+        first run). The FINAL island stays in: it gets the full vegetation."""
         ok = np.ones_like(H)
         ok *= (H > 80.0)
-        ok *= (road_d > (1100.0 if tree else 600.0))
         ok *= (pad_d > (1100.0 if tree else 350.0))
-        ok *= (bowl_d > (2200.0 if tree else 700.0))
-        ok *= (cit_d > (1600.0 if tree else 700.0))
-        ok *= (stair_d > 1300.0)
         ok *= ~bridge_keep
         ok *= (maldive_zone < 0.5)
         ok *= (reef_zone < 0.5)
-        if tree:
-            ok *= (shoulder_d > 2500.0)
         return ok
 
     keep_tree = keepout(True)
     keep_small = keepout(False)
 
     # ---------------- vegetation fields ----------------
-    grove = smoothstep(0.46, 0.62, mh.fbm(N, 4, 6, args.seed + 211))
-    alt_thin = 1.0 - 0.45 * smoothstep(6000.0, 12000.0, H)   # plateaus stay green
+    # (global fields now effectively cover the FINAL island only - maldives
+    # and the reef are keep-out and get their dedicated ring pass below)
+    grove = smoothstep(0.46, 0.62, mh.fbm(N, 4, 20, args.seed + 211))
     grass_w = masks["Grass"] / 255.0 + masks["Grass_Clovers"] / 255.0
 
-    jungle_f = (smoothstep(26.0, 16.0, slope) * grove * alt_thin
+    jungle_f = (smoothstep(26.0, 16.0, slope) * grove
                 * smoothstep(250.0, 500.0, H) * grass_w * keep_tree)
-    # lone trees OUTSIDE the groves: thin savanna fill so the open east lawn
+    # lone trees OUTSIDE the groves: thin savanna fill so the open lawn
     # is not sterile (the grove noise left it empty on first run)
-    lone_f = ((1.0 - grove) * smoothstep(24.0, 14.0, slope) * alt_thin
+    lone_f = ((1.0 - grove) * smoothstep(24.0, 14.0, slope)
               * smoothstep(250.0, 500.0, H) * grass_w * keep_tree)
     # palm GROVES, not a bead string: noise gates which coast stretches get
-    # palms (cells 8 ~ 25k features: a dozen grove/gap alternations around
-    # the perimeter; cells 5 left 12 palms total - whole-ring misses)
-    palm_grove = smoothstep(0.40, 0.54, mh.fbm(N, 4, 8, args.seed + 421))
+    # palms (cells 20 ~ 10k features: several grove/gap alternations around
+    # the ~57k final-island perimeter)
+    palm_grove = smoothstep(0.40, 0.54, mh.fbm(N, 4, 20, args.seed + 421))
     # palms NEVER touch water (author review 2026-06-12): the AUTHOR ocean on
     # this map sits at Z=150 and Gerstner crests reach ~410 (audited live via
     # verify_artpass_water.py) - dry-foot floor H>=500. The band reaches
@@ -511,12 +468,9 @@ def main():
     palm_f = ((1.0 - smoothstep(1100.0, 1500.0, H)) * smoothstep(500.0, 580.0, H)
               * smoothstep(26.0, 16.0, slope) * palm_grove * keep_tree)
     # flower meadows keep the old clover-noise SHAPE (the painted layer is
-    # gone), gated to actual grass so they never sit on sand pads or road
+    # gone), gated to actual grass so they never sit on sand pads
     flower_f = (meadow_noise * smoothstep(20.0, 12.0, slope)
                 * (masks["Grass"] / 255.0) * keep_small)
-    shoulder_band = smoothstep(1500.0, 1100.0, road_d) * smoothstep(650.0, 800.0, road_d)
-    flower_f = np.maximum(flower_f, shoulder_band * smoothstep(18.0, 10.0, slope)
-                          * (masks["Grass"] / 255.0) * keep_small * (H > 80.0))
     wrack_noise = smoothstep(0.42, 0.56, mh.fbm(N, 4, 8, args.seed + 521))
     # driftwood/seaweed live ON the 7-10 m beach ribbon, above the mean
     # waterline (ocean Z=150) so the surf washes through them
@@ -541,8 +495,8 @@ def main():
     def pick(paths, weights=None):
         return paths[rng.choice(len(paths), p=weights)]
 
-    jungle_pts = sample_field(jungle_f, 1100, rng, spacing=680.0)
-    lone_pts = sample_field(lone_f, 170, rng, spacing=1300.0)
+    jungle_pts = sample_field(jungle_f, 450, rng, spacing=680.0)
+    lone_pts = sample_field(lone_f, 60, rng, spacing=1300.0)
     jungle_pts = (np.concatenate([jungle_pts, lone_pts])
                   if len(lone_pts) else jungle_pts)
     for x, y in jungle_pts:
@@ -554,7 +508,7 @@ def main():
         ft = pick((FT_FOREST, FT_POHUT, FT_BANANA)[grp])
         put(ft, x, y)
 
-    palm_pts = sample_field(palm_f, 170, rng, spacing=560.0)
+    palm_pts = sample_field(palm_f, 90, rng, spacing=560.0)
     for x, y in palm_pts:
         put(pick(FT_PALM), x, y)
 
@@ -583,23 +537,26 @@ def main():
             n_sat += 1
     # lone stragglers so clearings are not sterile
     for x, y in sample_field(grass_w * keep_small * smoothstep(26.0, 14.0, slope)
-                             * (H > 120.0) * 0.10, 350, rng, spacing=900.0):
+                             * (H > 120.0) * 0.10, 120, rng, spacing=900.0):
         put(pick(FT_BUSH_T + FT_FERN), x, y)
 
-    flower_pts = sample_field(flower_f, 420, rng, spacing=560.0)
+    flower_pts = sample_field(flower_f, 200, rng, spacing=560.0)
     for x, y in flower_pts:
         put(pick(FT_FLOWERS), x, y)
 
-    beach_pts = sample_field(beach_f, 130, rng, spacing=1700.0)
+    beach_pts = sample_field(beach_f, 60, rng, spacing=1700.0)
     for x, y in beach_pts:
         put(pick(FT_DRIFT + FT_SEAWEED, None), x, y)
 
     # maldive palms ON the lens (resync 2026-06-12): scattered between the
     # construction pad edge and the mid-slope, never under water (palms by
     # the old radii would land on the dune shoulder or in the sea - Handoff);
-    # driftwood sits lower on the shoulder
-    for sid in ("M1", "M2", "M3", "M4"):
-        s = slots[sid]
+    # driftwood sits lower on the shoulder. S/M islets only - the final
+    # island is covered by the global fields above.
+    for s in layout["slots"]:
+        if s["kind"] != "arena" or s.get("tier") not in ("S", "M"):
+            continue
+        sid = s["id"]
         t, run = lens[sid]
         palm_field = ((t > 200.0) & (t < run * 0.7) & (H > 500.0)
                       & (bridge_d > 1000.0)) * smoothstep(26.0, 16.0, slope)
@@ -620,91 +577,15 @@ def main():
         if at(H, px2, py2) > 60.0:
             put(pick(FT_DRIFT), px2, py2)
 
-    # ---------------- rock scatter on rocky terrain ----------------
-    # Rocky zones get actual rock meshes (author round 4). Cheapest runtime =
-    # instanced foliage; placement embeds each rock into the slope (z = ground
-    # minus a sink) so nothing floats on the steep faces.
-    def put_rock(ft, x, y, sink):
-        plan.setdefault(ft, []).append(
-            [round(float(x), 1), round(float(y), 1),
-             round(hsample(x, y) - sink, 1)])
-
-    rock_dil = rock_bin.copy()
-    for _ in range(6):                       # +600 uu fringe for scree feet
-        nd = rock_dil.copy()
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nd |= np.roll(np.roll(rock_dil, dy, 0), dx, 1)
-        rock_dil = nd
-    rock_ok = ((H > -300.0) & (road_d > 800.0) & (pad_d > 500.0)
-               & (bowl_d > 800.0) & (cit_d > 800.0) & (stair_d > 1300.0)
-               & ~bridge_keep & (maldive_zone < 0.5) & (reef_zone < 0.5))
-    steep = slope > 36.0
-    fields = {
-        "boulder": (rock_bin & ~steep & rock_ok).astype(np.float32),
-        "debris": (rock_dil & ~rock_bin & (slope < 27.0) & (H > 60.0)
-                   & rock_ok).astype(np.float32),
-    }
-    rock_counts = {}
-    # AUTHOR ROUND 6: foliage rocks are OUT entirely ("убери уебанские камни").
-    # The FT defs stay registered in TYPE_PARAMS so the apply-side roster
-    # sweep keeps CLEARING old instances; zero new ones are planned.
-    for grp, (meshes, mn, mx, amax, cull, spacing, count) in ROCK_GROUPS.items():
-        rock_counts[grp] = 0
-
-    # ---- CLIFF WALL: masonry courses over every steep face ----
-    # candidates on a course grid: key = (height band, along-face cell) ->
-    # one piece per cell = continuous overlapping rows that follow contours
-    grad = np.hypot(gx, gy)
-    face_cells = steep & rock_ok
-    crown_cells = (~steep & (slope > 16.0) & (slope < 34.0) & rock_dil
-                   & rock_ok & (H > 500.0))
+    # ---------------- rock scatter: DEAD (and the cliffs with it) ----------
+    # AUTHOR ROUND 6: foliage rocks are OUT entirely ("убери уебанские камни"),
+    # and the v9 pivot removed the cliffs the masonry wall was built for.
+    # The FT defs stay registered in TYPE_PARAMS and the empty cliff_wall
+    # instance list stays in the plan so the apply-side sweeps keep CLEARING
+    # the old instances and DESTROY the ARTPASS_CliffWall container.
     wall = []
-
-    def lay_pieces(cells, spacing, scale_rng, pitch_fn, sink_fn, label):
-        """One course per COURSE_H height band; min-distance thinning inside
-        the band keeps along-face spacing (the first version hashed by the
-        LOCAL contour direction - keys never collided, 9018 pieces)."""
-        rr, cc = np.where(cells)
-        if not len(rr):
-            return 0
-        bands = {}
-        for r, c in zip(rr.tolist(), cc.tolist()):
-            b = int(float(H[r, c]) // COURSE_H)
-            bands.setdefault(b, []).append((c * SCALE - HALF, r * SCALE - HALF))
-        n = 0
-        for b in sorted(bands):
-            for x, y in thin_by_spacing(np.array(bands[b]), spacing, rng):
-                r = int(round((y + HALF) / SCALE))
-                c = int(round((x + HALF) / SCALE))
-                oxn, oyn = -float(gx[r, c]), -float(gy[r, c])
-                g0 = math.hypot(oxn, oyn)
-                if g0 < 1e-3:
-                    continue
-                oxn, oyn = oxn / g0, oyn / g0      # outward (downhill) dir
-                mesh = rng.choice(list(CLIFF_MESHES.keys()),
-                                  p=[w for _, w in CLIFF_MESHES.values()])
-                width = CLIFF_MESHES[mesh][0]
-                s = rng.uniform(*scale_rng)
-                yaw = math.degrees(math.atan2(oyn, oxn)) + rng.uniform(-10.0, 10.0)
-                sl = float(slope[r, c])
-                pitch = pitch_fn(sl) + rng.uniform(-5.0, 5.0)
-                roll = rng.uniform(-7.0, 7.0)
-                sink = sink_fn(width * s)
-                px = x - oxn * sink
-                py = y - oyn * sink
-                pz = hsample(px, py) - rng.uniform(80.0, 200.0)
-                wall.append({"mesh": mesh, "x": round(px, 1),
-                             "y": round(py, 1), "z": round(pz, 1),
-                             "yaw": round(yaw, 1), "pitch": round(pitch, 1),
-                             "roll": round(roll, 1), "scale": round(s, 2)})
-                n += 1
-        return n
-
-    # NOTE (author round 5->6): the masonry cliff wall is DEAD - cliffs are
-    # terraced strata in the heightmap now (make_biome1_heightmap.py). The
-    # empty instances list below makes the apply script DESTROY the old
-    # ARTPASS_CliffWall container. Boulders/debris stay as ledge accents.
-    print("rocks: wall %d (terraces replace it), boulder %d, debris %d" % (
+    rock_counts = {grp: 0 for grp in ROCK_GROUPS}
+    print("rocks: wall %d, boulder %d, debris %d (all dead by author rule)" % (
         len(wall), rock_counts.get("boulder", 0), rock_counts.get("debris", 0)))
 
     # rule check (author 2026-06-12): no palm may touch water - report the
@@ -719,15 +600,9 @@ def main():
 
     # live-terrain probes: apply_biome1_art_pass.py refuses to paint when the
     # open landscape does not match THIS heightmap (stale import guard)
-    height_probes = [{"label": sid, "x": slots[sid]["pos"][0],
-                      "y": slots[sid]["pos"][1], "want": slots[sid]["pos"][2]}
-                     for sid in ("M1", "M2", "M3", "M4")]
-    height_probes.append({"label": "Citadel", "x": slots["Citadel"]["pos"][0],
-                          "y": slots["Citadel"]["pos"][1],
-                          "want": slots["Citadel"]["pos"][2]})
-    height_probes.append({"label": "G2 apron", "x": slots["G2"]["pos"][0],
-                          "y": slots["G2"]["pos"][1],
-                          "want": slots["G2"]["pos"][2] - 520.0})
+    height_probes = [{"label": s["id"], "x": s["pos"][0],
+                      "y": s["pos"][1], "want": s["pos"][2]}
+                     for s in layout["slots"] if s["kind"] == "arena"]
     height_probes.append({"label": "open sea", "x": 70000.0, "y": -70000.0,
                           "want": SEA_FLOOR})
     bad = 0

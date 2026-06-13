@@ -1,10 +1,11 @@
-# Offline diagnostics for the Biome1 island heightmap (no editor needed).
+# Offline diagnostics for the Biome1 heightmap (no editor needed).
 #
 # Checks, per arena slot, the terrain against the ACTUAL arena geometry from
 # Arenas/<name>.json (floor tops, perimeter walls, antenna plates, rotated by
 # the slot yaw): max protrusion above walkable tops = "terrain buried the
 # arena". Also maps angularity (curvature hotspots) OUTSIDE the pads - the
-# ugly pleats/creases the author flagged - and route-corridor slope comfort.
+# ugly pleats/creases the author flagged - and open-water gaps between the
+# islets of the chain (v9 pivot: islets + final island, no big island).
 #
 # Usage: python analyze_island_terrain.py [heightmap.png] [--layout PATH] [--json]
 #   Resolution is derived from the PNG size (fast previews analyze too).
@@ -14,14 +15,11 @@ import argparse
 import json
 import math
 import os
-import sys
 
 import numpy as np
 from PIL import Image
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(TOOLS_DIR)
-import make_biome1_heightmap as mh  # noqa: E402  (shared route derivation)
 
 LAYOUT = os.path.join(TOOLS_DIR, "Island", "biome1_island_layout.json")
 ARENAS_DIR = os.path.join(TOOLS_DIR, "Arenas")
@@ -165,7 +163,7 @@ def main():
     sl = slope_deg(H)
     Xu, Yu = np.meshgrid(np.linspace(-HALF, HALF, N),
                          np.linspace(-HALF, HALF, N))
-    # mask out water, pads (+blend ring) and the citadel cliff sector
+    # mask out water and arena pads (+blend ring)
     land = H > 80.0
     pad_mask = np.zeros((N, N), dtype=bool)
     for s in layout["slots"]:
@@ -173,14 +171,7 @@ def main():
             continue
         d = np.hypot(Xu - s["pos"][0], Yu - s["pos"][1])
         pad_mask |= d < (s["r"] + 900.0 + 500.0)
-    isl = layout["island"]
-    CPX, CPY = isl["peak"]
-    ICX, ICY = isl["center"]
-    deg_b = np.degrees(np.arctan2(Yu - ICY, Xu - ICX)) % 360.0
-    cape_b = math.degrees(math.atan2(CPY - ICY, CPX - ICX)) % 360.0
-    dd = np.abs(((deg_b - cape_b + 180.0) % 360.0) - 180.0)
-    cliff = dd < float(isl.get("cliff_half_deg", 26.0))
-    zone = land & ~pad_mask & ~cliff
+    zone = land & ~pad_mask
     cz = np.where(zone, curv, 0.0)
     GATES["crease_p99"] = round(float(np.percentile(cz[zone], 99)), 1)
     print("creases (Laplacian uu): p95 {:.0f}, p99 {:.0f}, max {:.0f}".format(
@@ -223,15 +214,18 @@ def main():
               .format(x, y, flat[idx], H[r, c], sl[r, c]))
         k += 1
 
-    # --- open water between islands (layout rule: maldive hops MUST stay
-    # water; coastline lobes can silently land-bridge a strait on a bad seed)
-    print("\n=== WATER GAPS (maldive hops) ===")
-    isl_c = layout["island"]["center"]
-    hops = [("M1", "M2"), ("M2", "M3"), ("M3", "M4"), ("M4", None)]
+    # --- open water between islands (layout rule: hops MUST stay water;
+    # coastline lobes can silently land-bridge a strait on a bad seed).
+    # Hops are derived from the route: consecutive ARENA entries (the
+    # reef->M1 toss leg is exempt - M1 merges with the reef by design).
+    print("\n=== WATER GAPS (islet hops) ===")
+    ids = [r for r in layout["route"]
+           if r in slots and slots[r]["kind"] == "arena"]
+    hops = list(zip(ids, ids[1:]))
     GATES["water"] = {}
     for a_id, b_id in hops:
         a = slots[a_id]["pos"]
-        b = slots[b_id]["pos"] if b_id else list(isl_c) + [0]
+        b = slots[b_id]["pos"]
         L = math.hypot(b[0] - a[0], b[1] - a[1])
         kk = max(2, int(L / 100.0))
         best = cur = 0.0
@@ -243,35 +237,9 @@ def main():
             cur = cur + L / kk if h < -80.0 else 0.0
             best = max(best, cur)
         tag = "OK" if best >= 1500.0 else "**LAND-BRIDGED**"
-        GATES["water"]["{}-{}".format(a_id, b_id or "island")] = round(best)
+        GATES["water"]["{}-{}".format(a_id, b_id)] = round(best)
         print("  {}->{}: longest water {:.0f} uu (min H {:.0f}) {}".format(
-            a_id, b_id or "island", best, minh, tag))
-
-    # --- route comfort (the PLAYER path; legs come from the GENERATOR's
-    # derive_route, so this check can never drift from the road builder)
-    print("\n=== ROUTE (player path legs) ===")
-    rt = mh.derive_route(layout, slots)
-    total = 0
-    worst = 0.0
-    for pts in (rt["legA"], rt["legB"]):
-        for a, b in zip(pts, pts[1:]):
-            L = math.hypot(b[0] - a[0], b[1] - a[1])
-            kk = max(2, int(L / 150.0))
-            hs = []
-            for i in range(kk):
-                t = i / (kk - 1.0)
-                hs.append(sample_h(H, a[0] + (b[0] - a[0]) * t,
-                                   a[1] + (b[1] - a[1]) * t))
-            hs = np.array(hs)
-            seg = L / (kk - 1.0)
-            g = np.degrees(np.arctan(np.abs(np.diff(hs)) / seg))
-            worst = max(worst, g.max())
-            total += int((g > 30.0).sum())
-            print("  leg ({:6.0f},{:6.0f})->({:6.0f},{:6.0f}): max {:.1f} deg".format(
-                a[0], a[1], b[0], b[1], g.max()))
-    GATES["route_worst_deg"] = round(float(worst), 1)
-    GATES["route_over30"] = int(total)
-    print("route: worst {:.1f} deg, samples >30 deg: {}".format(worst, total))
+            a_id, b_id, best, minh, tag))
     if args.json:
         print("GATES_JSON: " + json.dumps(GATES))
 

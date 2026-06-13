@@ -1,7 +1,7 @@
 {
   "name": "Biome1_Island",
-  "version": 8,
-  "comment": "v8 (2026-06-12, smoothness rework, slots UNCHANGED from v7): terrain between arenas rebuilt - the serpentine is now a graded ROAD ribbon (<=26.6 deg by construction, cut+fill), G1/G2 pads hug the rotated arena footprints at the arena GROUND-PLATE level (A7 outer_ground -500 exposed again), G3 = exact local-frame bowl under A5 terraces with an exit bench behind bort_s to the citadel-stairs landing (player path: enter SW approach, fight down, antenna, hop bort_s, bench road to the stairs). Route legs and contact heights are DERIVED from slots + arena specs + citadel_stairs (route_corridor verts = author gesture: [shoulder, G1, G2, G3, landing]). make_biome1_heightmap.py --seed N varies ONLY nature layers (pillars pinned). [v7: author round 5 SERPENTINE, citadel-distances ~0.73/0.53/0.34 D] [slots synced from editor]",
+  "version": 9,
+  "comment": "v9 (2026-06-12, ISLAND PIVOT - author decision): the BIG ISLAND IS GONE. The whole run = small maldive islets (M1-M4 unchanged from v8) + ONE final island: the old Citadel slot renamed 'Final', now its own scaled-up sand lens (~9-11k radius = ~1/4 of the old 40k land_radius) with A6_Villa dead-center on a low 12 m plateau, moderate slopes (lens run_scale 1.25 -> ~22 deg max mid-slope, beaches all around, NOTHING cliff-like). Removed: island dome/cape/cliff+strata, serpentine roads, G1/G2/G3 guard slots + shoulder waypoint, citadel stairs (the author removes the stair flight actors inside Lvl_A6_Villa), coast cuts. Procedural target this enables: scatter islets along an author-drawn curve, drop the final island at the end (layout editor rework pending - the old editor UI still assumes the dome/serpentine and is stale until then).",
   "landscape": {
     "resolution": 2017,
     "quads_per_section": 63,
@@ -16,33 +16,13 @@
     "water_z": 0,
     "extent_note": "201600x201600 centered on origin; create at location (-100800,-100800,-2000)"
   },
-  "island": {
-    "center": [
-      6000,
-      16000
-    ],
-    "land_radius": 40000,
-    "peak": [
-      37000,
-      2500
-    ],
-    "peak_z": 16400,
-    "cliff_note": "gentle shield dome rising toward the EAST cape (the citadel); the ONLY cliff is the cape's seaward face, everywhere else - beaches",
-    "dome_amp": 5200,
-    "cliff_half_deg": 12,
-    "dome_base": 1100
-  },
   "route": [
     "start_reef",
     "M1",
     "M2",
     "M3",
     "M4",
-    "shoulder",
-    "G3",
-    "G2",
-    "G1",
-    "Citadel"
+    "Final"
   ],
   "slots": [
     {
@@ -54,7 +34,7 @@
         200
       ],
       "r": 1500,
-      "note": "toss ORIGIN over water on the M1->CITADEL axis (author 2026-06-11: the poster shot - pier ahead, citadel towering behind it); RunLaunchPoint is author-placed"
+      "note": "toss ORIGIN over water on the M1 axis (author 2026-06-11: pier ahead in the poster shot); RunLaunchPoint is author-placed"
     },
     {
       "id": "M1",
@@ -72,7 +52,7 @@
       ],
       "r": 4500,
       "enter_from": "start_reef",
-      "note": "ON the start->citadel axis; player lands here from the sea toss",
+      "note": "player lands here from the sea toss",
       "yaw": -3.4
     },
     {
@@ -91,7 +71,7 @@
       ],
       "r": 4500,
       "enter_from": "M1",
-      "note": "lighthouse = early-spiral landmark; chain heads WEST (CCW in UE view)",
+      "note": "lighthouse = early-chain landmark; chain heads WEST (CCW in UE view)",
       "yaw": 63.4,
       "lens": {}
     },
@@ -111,7 +91,6 @@
       ],
       "r": 5500,
       "enter_from": "M2",
-      "note": "spiral passes under the citadel cape - permanent landmark showcase",
       "yaw": 36
     },
     {
@@ -134,94 +113,29 @@
       "lens": {}
     },
     {
-      "id": "shoulder",
-      "kind": "waypoint",
-      "pos": [
-        -26000,
-        30000,
-        1620
-      ],
-      "r": 6000,
-      "note": "landing on the NW rim - the LOW far end (~20 m beach terrace): the whole climb 19->90->160 m lies ahead, across the island to the east citadel cape"
-    },
-    {
-      "id": "G1",
+      "id": "Final",
       "kind": "arena",
-      "tier": "guard",
-      "default": "A3_Dome",
-      "pool": [
-        "A3_Dome",
-        "A5_Amphitheater",
-        "A7_Gallery"
-      ],
-      "pos": [
-        -4840,
-        -14970,
-        4960
-      ],
-      "r": 5500,
-      "yaw": -171,
-      "note": "first switchback, SW side (~0.73 D from citadel); route comes along the south-west beaches from the landing"
-    },
-    {
-      "id": "G2",
-      "kind": "arena",
-      "tier": "guard",
-      "default": "A7_Gallery",
-      "pool": [
-        "A3_Dome",
-        "A5_Amphitheater",
-        "A7_Gallery"
-      ],
-      "pos": [
-        -4383,
-        7113,
-        5400
-      ],
-      "r": 5500,
-      "yaw": -45,
-      "note": "middle switchback at the island center (~0.53 D)"
-    },
-    {
-      "id": "G3",
-      "kind": "arena",
-      "tier": "guard",
-      "default": "A5_Amphitheater",
-      "pool": [
-        "A3_Dome",
-        "A5_Amphitheater",
-        "A7_Gallery"
-      ],
-      "pos": [
-        15000,
-        11380,
-        8900
-      ],
-      "r": 6000,
-      "yaw": -59,
-      "note": "last switchback (~0.34 D); A5 bowl cuts into the final upslope"
-    },
-    {
-      "id": "Citadel",
-      "kind": "arena",
-      "tier": "citadel",
+      "tier": "final",
       "default": "A6_Villa",
       "pool": [
         "A6_Villa"
       ],
       "pos": [
-        37000,
-        -90,
-        16000
+        -31000,
+        8000,
+        1200
       ],
       "r": 6500,
-      "yaw": -180,
-      "note": "ON THE LIP of the EAST cape (160 m), far end from the landing; the serpentine flanks around and enters from the EAST side; gate 3/3, permanent field"
+      "enter_from": "M4",
+      "yaw": -6.5,
+      "lens": {
+        "run_scale": 1.7
+      },
+      "note": "the FINAL LOCATION island at the end of the chain (continues the CCW curve past M4): villa dead-center on a 12 m plateau, run_scale 1.7 stretches the lens to ~11k radius (visibly bigger than M4) at a ~17 deg shoulder ('умеренно полого, не скала' - author 2026-06-12). yaw derived: entrance -Y faces M4. Permanent field until the gate opens (gate rule TBD - guards are gone)."
     }
   ],
   "rules": {
-    "maldive_model": "AUTHOR SPEC 2026-06-11: each maldive = a micro-island barely bigger than its arena (flat top = arena bounding circle + ~900 uu rim, ~35 deg beach slope), arena DEAD-CENTER, open water between islands MANDATORY. Slope-guard arenas (ring around the citadel) are the only ones on the big island.",
-    "guard_ring": "SERPENTINE (author drawing #2): arenas on the switchback turns of an S-route, climb 22->54->89->160 m; citadel approached from its EAST flank; route slopes <= 30 deg",
+    "maldive_model": "AUTHOR SPEC 2026-06-11 (+pivot 2026-06-12): each islet = a micro-island barely bigger than its arena (sand-lens profile: glass-flat arena footprint, convex C2 shoulder straight under the waterline), arena DEAD-CENTER, open water between islands MANDATORY. The final island is the SAME lens model scaled up (bigger footprint + run_scale), not a different terrain type.",
     "transition_budget_uu": [
       5000,
       15000
@@ -233,99 +147,11 @@
         "M1"
       ]
     ],
-    "min_slope_slot_spacing": 10500,
-    "slope_slots": [
-      "shoulder",
-      "G1",
-      "G2",
-      "G3",
-      "Citadel"
-    ],
     "field_edge_gap_min": 2000,
-    "maldive_heights_note": "5 m start -> <=30 m by landing: 500/1200/2000/2800",
-    "budget_note": "start->M1 is the BALLISTIC TOSS (~7000 uu), not a valve; maldive hops ~16-18k path per the author's trajectory",
-    "terrain_note": "GENTLE everywhere (author: 'полого везде, пляж вместо обрыва'): wide beach aprons, soft dome toward the cape, subtle pads (wide blends, NO raised rims), no empty pad discs",
-    "water_not_lethal": true,
-    "route_corridor": [
-      [
-        -31890,
-        30048
-      ],
-      [
-        -18833,
-        13889
-      ],
-      [
-        -4840,
-        -14970
-      ],
-      [
-        -4383,
-        7113
-      ],
-      [
-        15000,
-        11380
-      ],
-      [
-        21749,
-        12467
-      ]
-    ],
-    "citadel_stairs": {
-      "comment": "author right-angle staircase inside Lvl_A6_Villa (valve_M4_shoulder2/3 + ant_plat2). Anchors = LOCAL offsets from the citadel slot (pos+yaw), computed from EXACT actor transforms (not AABBs!): lines are the TOP-surface center-lines of each flight. Terrain rule: clearance cap top_z-150 under the flights, landing flattened to lower_tip_top-30; the stairs fit is applied LAST in the generator so nothing re-buries it.",
-      "landing_local": [
-        15251,
-        -12557,
-        -7125
-      ],
-      "lines_top_local": [
-        [
-          [
-            15251,
-            -12557,
-            -7125
-          ],
-          [
-            5095,
-            -15917,
-            -3895
-          ]
-        ],
-        [
-          [
-            4617,
-            -15710,
-            -3836
-          ],
-          [
-            1991,
-            -6900,
-            104
-          ]
-        ]
-      ],
-      "platform_local": [
-        4729,
-        -16073,
-        -3890
-      ]
-    },
-    "coast_cuts": [
-      {
-        "bearing_deg": -72,
-        "halfwidth_deg": 21,
-        "depth": 0.3,
-        "comment": "author cut 1 (2026-06-11): NW lobe west of the cape - coast pulled in, beach transition"
-      },
-      {
-        "bearing_deg": 87,
-        "halfwidth_deg": 64,
-        "depth": 0.35,
-        "comment": "author cut 2: the whole east lobe - no empty forest land"
-      }
-    ],
-    "road_grade": 0.41
+    "maldive_heights_note": "gentle rise then settle: M1 500 / M2 540 / M3 1220 / M4 2150 / Final 1200 (author 2026-06-12: final arena LOW, no climb drama)",
+    "budget_note": "start->M1 is the BALLISTIC TOSS (~7000 uu), not a valve; islet hops ~16-18k path per the author's trajectory",
+    "terrain_note": "GENTLE everywhere (author: 'полого везде, пляж вместо обрыва; умеренно полого, без скал'): wide beach aprons, convex lens shoulders, no raised rims, no empty pad discs, no cliffs anywhere",
+    "water_not_lethal": true
   },
   "seed": 15405694
 }

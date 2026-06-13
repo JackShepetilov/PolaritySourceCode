@@ -1,11 +1,13 @@
-# Builds the REAL Biome1 island map (Lvl_Biome1_Island) from the layout source
+# Builds the REAL Biome1 map (Lvl_Biome1_Island) from the layout source
 # of truth (Island/biome1_island_layout.json) + the authored heightmap
 # (Island/biome1_heightmap_2017.png, made by make_biome1_heightmap.py).
 #
-# Maldive model (author 2026-06-11): M1-M4 each on their own arena-sized
-# micro-island, arena DEAD-CENTER, entrance yaw faces back along the incoming
-# leg (the author's arrows). Guards G1-G3 + citadel(=A6_Villa) on the big
-# island; G3 sits in a carved bowl (A5 terraces go to -900).
+# ISLAND PIVOT (author 2026-06-12, layout v9): the big island is GONE. The
+# run = maldive micro-islands M1-M4 + ONE final island (A6_Villa dead-center,
+# 'Final' slot) at the end of the chain. Each islet: arena DEAD-CENTER,
+# entrance yaw faces back along the incoming leg. The guard sublevels
+# (A3_Dome/A5_Amphitheater/A7_Gallery) are DETACHED from the map - the arena
+# assets stay alive for the future islet pool.
 #
 # AUTHOR-OWNED (never touched/spawned here): RunLaunchPoint, debug character,
 # his sublevels. Lighting comes from ArenaLightingDebug3 (re-attached if absent).
@@ -95,16 +97,7 @@ def ensure_landscape(slots):
     log("Heightmap imported: {} ({})".format(
         os.path.basename(HEIGHTMAP), getattr(imp, "resolution", "?")))
     probes = [(sid, slots[sid]["pos"][0], slots[sid]["pos"][1], slots[sid]["pos"][2])
-              for sid in ("M1", "M2", "M3", "M4", "shoulder", "Citadel")]
-    # G1/G2 aprons sit at the arena GROUND-PLATE level (heightmap v8):
-    # G1 = slot-20, G2 = slot-520 (A7 carries its outer_ground at -500);
-    # G3 bowl center = slot-490 (T1 floor -350 minus 150 clearance + lift)
-    probes.append(("G1 apron", slots["G1"]["pos"][0], slots["G1"]["pos"][1],
-                   slots["G1"]["pos"][2] - 20.0))
-    probes.append(("G2 apron", slots["G2"]["pos"][0], slots["G2"]["pos"][1],
-                   slots["G2"]["pos"][2] - 520.0))
-    probes.append(("G3 bowl ctr", slots["G3"]["pos"][0], slots["G3"]["pos"][1],
-                   slots["G3"]["pos"][2] - 490.0))
+              for sid in ("M1", "M2", "M3", "M4", "Final")]
     probes.append(("open sea", 70000.0, -70000.0, -2000.0))
     bad = 0
     for label, x, y, want in probes:
@@ -195,27 +188,22 @@ def march_to_rim(svc, from_xy, to_xy, drop_below):
     return last if last is not None else (bx, by, drop_below)
 
 
-def build_bridges(eas, mats, slots, layout_island_center):
-    """Straight plank stubs across the water hops of the maldive chain
+def build_bridges(eas, mats, slots, layout):
+    """Straight plank stubs across the water hops of the islet chain
     (real valves become their own sublevels later). Each end is found by
     sampling the actual terrain down to the waterline, then buried slightly
-    into the beach."""
+    into the beach. Hops = consecutive ARENA entries of the route (the
+    reef->M1 toss leg is not a valve)."""
     svc = unreal.LandscapeService
-    hops = [("M1", "M2"), ("M2", "M3"), ("M3", "M4"), ("M4", "shoulder")]
+    ids = [r for r in layout["route"]
+           if r in slots and slots[r]["kind"] == "arena"]
+    hops = list(zip(ids, ids[1:]))
     for a_id, b_id in hops:
         a, b = slots[a_id], slots[b_id]
         a_xy = (a["pos"][0], a["pos"][1])
         b_xy = (b["pos"][0], b["pos"][1])
-        if b["kind"] == "arena":
-            x0, y0, h0 = march_to_rim(svc, a_xy, b_xy, a["pos"][2] - 140.0)
-            x1, y1, h1 = march_to_rim(svc, b_xy, a_xy, b["pos"][2] - 140.0)
-        else:
-            # final hop: bridge to the NEAREST island shore (march toward the
-            # island center), the player walks the beach onward - not a giant
-            # span to the distant shoulder point
-            icx, icy = layout_island_center
-            x0, y0, h0 = march_to_rim(svc, a_xy, (icx, icy), a["pos"][2] - 140.0)
-            x1, y1, h1 = march_to_rim(svc, (icx, icy), a_xy, 330.0)
+        x0, y0, h0 = march_to_rim(svc, a_xy, b_xy, a["pos"][2] - 140.0)
+        x1, y1, h1 = march_to_rim(svc, b_xy, a_xy, b["pos"][2] - 140.0)
         span = math.hypot(x1 - x0, y1 - y0)
         if span < 500.0:
             log("Valve {}->{}: islets touch - no bridge needed".format(a_id, b_id))
@@ -288,7 +276,38 @@ def ensure_author_extras(world):
 
 
 CANONICAL_VALVES = {"BLK_Biome1Island_valve_M1_M2", "BLK_Biome1Island_valve_M2_M3",
-                    "BLK_Biome1Island_valve_M3_M4", "BLK_Biome1Island_valve_M4_shoulder"}
+                    "BLK_Biome1Island_valve_M3_M4", "BLK_Biome1Island_valve_M4_Final",
+                    # legacy big-island hop: keep matching it so pre-pivot
+                    # orphans in arena packages still get cleaned up
+                    "BLK_Biome1Island_valve_M4_shoulder"}
+
+# the island pivot (layout v9) removed these slots from the map; their
+# sublevels are detached on rebuild. The ARENA ASSETS ARE NEVER DELETED -
+# they go back into the islet pool when the procedural curve tool lands.
+STALE_ARENAS = ["A3_Dome", "A5_Amphitheater", "A7_Gallery"]
+
+
+def detach_stale_arenas(world, layout):
+    live = {s["default"] for s in layout["slots"] if s["kind"] == "arena"}
+    for arena in STALE_ARENAS:
+        if arena in live:
+            continue
+        name = "Lvl_" + arena
+        pkg = "{}/{}/{}".format(ARENA_ROOT, arena, name)
+        sl = unreal.GameplayStatics.get_streaming_level(world, pkg) or \
+            unreal.GameplayStatics.get_streaming_level(world, name)
+        if not sl:
+            log("Stale arena {} not attached - nothing to detach".format(name))
+            continue
+        lvl = sl.get_loaded_level()
+        if lvl is None or not hasattr(unreal.EditorLevelUtils,
+                                      "remove_level_from_world"):
+            warn("Stale arena {} attached but cannot detach automatically - "
+                 "remove it in the Levels panel".format(name))
+            continue
+        unreal.EditorLevelUtils.remove_level_from_world(lvl)
+        log("Detached stale arena {} (slot removed by the island pivot; "
+            "asset untouched)".format(name))
 
 
 def cleanup_foreign_orphans(eas):
@@ -392,13 +411,14 @@ def main():
     ensure_landscape(slots)
     world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
     cleanup_foreign_orphans(eas)
+    detach_stale_arenas(world, layout)
     # SPAWN EVERYTHING FIRST: attaching a sublevel makes it the CURRENT level
     # and editor spawns land in the current level (learned 2026-06-11: bridges
     # ended up inside Lvl_A6_Villa). Spawns go before any attach.
     ensure_water(eas)
     ensure_dynamic_nav(eas)
     mats = ba.ensure_materials(force=False)
-    build_bridges(eas, mats, slots, layout["island"]["center"])
+    build_bridges(eas, mats, slots, layout)
     ensure_arenas(world, layout, slots)
     ensure_author_extras(world)
     try:
@@ -407,9 +427,10 @@ def main():
     except Exception as e:
         warn("RebuildNavigation failed: {}".format(e))
     unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-    log("RESULT: SUCCESS - {} (8 arenas on layout v{} slots, maldive chain "
-        "bridged, citadel=A6 on the cliff)".format(
-            LEVEL_PATH, layout.get("version", "?")))
+    n_arenas = sum(1 for s in layout["slots"] if s["kind"] == "arena")
+    log("RESULT: SUCCESS - {} (layout v{}: {} islet arenas, chain bridged, "
+        "final island=A6_Villa, big island removed)".format(
+            LEVEL_PATH, layout.get("version", "?"), n_arenas))
 
 
 main()
