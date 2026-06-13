@@ -144,7 +144,9 @@ def phase2():
     probes = [("Final pad (sand under villa)", -31000.0, 8000.0, "Sand_01", 0.45),
               ("Final shoulder (grass)", -25000.0, 8000.0, "Grass", 0.45),
               ("M3 dune shoulder (sand)", -15640.0, -42100.0, "Sand_01", 0.45),
-              ("open sea bed (sand)", 70000.0, -70000.0, "Sand_01", 0.9)]
+              # 0.85: the binary max is 229/255=0.898 (Base keeps 10%), so 0.9
+              # is unreachable - 0.85 still proves the seabed is full sand
+              ("open sea bed (sand)", 70000.0, -70000.0, "Sand_01", 0.85)]
     bad = 0
     for label, x, y, want_layer, want_min in probes:
         try:
