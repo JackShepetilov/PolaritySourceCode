@@ -261,64 +261,70 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::EnterState(FStateTreeExecutionConte
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Проверяем можем ли выполнить рывок
-	if (!Data.Character->CanDash())
-	{
-		UE_LOG(LogTemp, Verbose, TEXT("MeleeDashTask: Cannot dash (cooldown or other state)"));
-		return EStateTreeRunStatus::Failed;
-	}
-
-	// Вычисляем направление к цели
+	// Направление к цели (для рывка и разворота)
 	FVector ToTarget = (Data.Target->GetActorLocation() - Data.Character->GetActorLocation()).GetSafeNormal2D();
-
 	if (ToTarget.IsNearlyZero())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MeleeDashTask: Target is at same location"));
-		return EStateTreeRunStatus::Failed;
+		ToTarget = Data.Character->GetActorForwardVector();
 	}
 
-	// Вычисляем финальное направление рывка в зависимости от настройки
-	FVector FinalDirection;
-
-	switch (Data.DashDirection)
+	// Пытаемся выполнить рывок. Dash возможен только если CanDash() И путь планарный
+	// (StartDash сам отсекает вертикаль/лестницу). Если рывок невозможен — НЕ падаем
+	// (иначе melee застревал бы на лестнице, ведь атака идёт ПОСЛЕ этого таска), а
+	// подбегаем к цели обычной навигацией (рампы + прыжки по навлинкам, как стрелки)
+	// до радиуса атаки.
+	bool bDashStarted = false;
+	if (Data.Character->CanDash())
 	{
-	case EDashDirection::Forward:
-		// Рывок к цели
-		FinalDirection = ToTarget;
-		break;
-
-	case EDashDirection::Left:
-		// Перпендикуляр влево от направления на цель
-		FinalDirection = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
-		break;
-
-	case EDashDirection::Right:
-		// Перпендикуляр вправо от направления на цель
-		FinalDirection = -FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
-		break;
-
-	case EDashDirection::RandomSide:
-	default:
-		// Случайно влево или вправо
+		FVector FinalDirection;
+		switch (Data.DashDirection)
 		{
-			FVector Perpendicular = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
-			FinalDirection = FMath::RandBool() ? Perpendicular : -Perpendicular;
+		case EDashDirection::Forward:
+			FinalDirection = ToTarget;
+			break;
+		case EDashDirection::Left:
+			FinalDirection = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+			break;
+		case EDashDirection::Right:
+			FinalDirection = -FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+			break;
+		case EDashDirection::RandomSide:
+		default:
+			{
+				FVector Perpendicular = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+				FinalDirection = FMath::RandBool() ? Perpendicular : -Perpendicular;
+			}
+			break;
 		}
-		break;
+		bDashStarted = Data.Character->StartDash(FinalDirection, Data.DashDistance);
 	}
-
-	// Запускаем рывок
-	bool bDashStarted = Data.Character->StartDash(FinalDirection, Data.DashDistance);
 
 	if (!bDashStarted)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("MeleeDashTask: StartDash failed (path validation)"));
-		return EStateTreeRunStatus::Failed;
+		// Навигационный подбег к цели до радиуса атаки (Tick завершит таск при входе в радиус)
+		Data.bUsingNavFallback = true;
+		EPathFollowingRequestResult::Type MoveResult = EPathFollowingRequestResult::Failed;
+		if (AAIController* AI = Cast<AAIController>(Data.Character->GetController()))
+		{
+			MoveResult = AI->MoveToActor(Data.Target, Data.Character->GetAttackRange() * 0.85f, true, true);
+		}
+		// [MELEE_DEBUG] Why this melee went nav-approach instead of dash, and whether the move was
+		// even accepted. vDelta>120 => target is up high (should route via navlink); moveResult=0
+		// (Failed) or a partial path => navmesh can't reach the target → NPC stalls at the wall foot.
+		const float VDelta = Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z;
+		const float Dist2D = FVector::Dist2D(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s DASH->NAV target=%s vDelta=%.0f dist2D=%.0f canDash=%d moveResult=%d"),
+			*GetNameSafe(Data.Character), *GetNameSafe(Data.Target), VDelta, Dist2D,
+			Data.Character->CanDash() ? 1 : 0, (int32)MoveResult);
+		return EStateTreeRunStatus::Running;
 	}
 
-	UE_LOG(LogTemp, Verbose, TEXT("MeleeDashTask: Started dash, Direction=%s, Distance=%.1f"),
-		*FinalDirection.ToString(), Data.DashDistance);
-
+	Data.bUsingNavFallback = false;
+	// [MELEE_DEBUG] A PLANAR dash was started. If this fires while the target is far above (vDelta
+	// big), the dash is lunging at the wall instead of deferring to navigation.
+	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s DASH STARTED dist=%.0f vDelta=%.0f"),
+		*GetNameSafe(Data.Character), Data.DashDistance,
+		Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z);
 	return EStateTreeRunStatus::Running;
 }
 
@@ -331,13 +337,40 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::Tick(FStateTreeExecutionContext& Co
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Проверяем выполняется ли ещё рывок
+	// Навигационный подбег (dash был невозможен): вошли в радиус атаки — готово, граф
+	// перейдёт в Attack. Иначе продолжаем движение, перезапуская MoveTo если оно встало.
+	if (Data.bUsingNavFallback)
+	{
+		if (!Data.Target)
+		{
+			return EStateTreeRunStatus::Failed;
+		}
+		if (Data.Character->IsTargetInAttackRange(Data.Target))
+		{
+			return EStateTreeRunStatus::Succeeded;
+		}
+		if (AAIController* AI = Cast<AAIController>(Data.Character->GetController()))
+		{
+			if (AI->GetMoveStatus() == EPathFollowingStatus::Idle)
+			{
+				// [MELEE_DEBUG] The nav-approach went Idle without reaching attack range — i.e. the
+				// path ENDED short (partial path to the wall foot / unreachable target up a navlink).
+				// If this spams while dist2D stays ~constant and vDelta is big, THIS is the stomp.
+				const float Dist2D = FVector::Dist2D(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
+				const float VDelta = Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z;
+				UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s NAV REISSUE (Idle, stalled) dist2D=%.0f vDelta=%.0f"),
+					*GetNameSafe(Data.Character), Dist2D, VDelta);
+				AI->MoveToActor(Data.Target, Data.Character->GetAttackRange() * 0.85f, true, true);
+			}
+		}
+		return EStateTreeRunStatus::Running;
+	}
+
+	// Рывок: ждём завершения
 	if (Data.Character->IsDashing())
 	{
 		return EStateTreeRunStatus::Running;
 	}
-
-	// Рывок завершён
 	return EStateTreeRunStatus::Succeeded;
 }
 

@@ -304,6 +304,11 @@ struct FStateTreeMeleeDashInstanceData
 	/** Направление рывка относительно цели */
 	UPROPERTY(EditAnywhere, Category = "Parameters")
 	EDashDirection DashDirection = EDashDirection::RandomSide;
+
+	/** Runtime: dash оказался невозможен (вертикаль/кулдаун/в воздухе) и таск подбегает
+	 *  к цели обычной навигацией до радиуса атаки вместо рывка. */
+	UPROPERTY()
+	bool bUsingNavFallback = false;
 };
 
 USTRUCT(meta = (DisplayName = "Melee Dash", Category = "Melee"))

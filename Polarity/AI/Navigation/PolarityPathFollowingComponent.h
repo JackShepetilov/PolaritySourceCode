@@ -31,9 +31,12 @@ public:
 
 	// ==================== Jump Parameters ====================
 
-	/** Arc height parameter for jump trajectory (0.0 = flat, 0.5 = medium arc, 1.0 = high arc) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jump Navigation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float JumpArcParam = 0.5f;
+	/** Apex clearance (uu) the jump peaks ABOVE the higher endpoint. The arc is then
+	 *  only as tall as needed — ~120-180 = a clean hop matching the obstacle, larger =
+	 *  floatier. This drives the trajectory directly (see ExecuteJump); much more
+	 *  predictable than an abstract 0..1 arc factor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jump Navigation", meta = (ClampMin = "30.0", ClampMax = "600.0"))
+	float JumpApexClearance = 150.0f;
 
 	/** Maximum time allowed for a single jump before force-completing (seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jump Navigation", meta = (ClampMin = "1.0", ClampMax = "10.0"))

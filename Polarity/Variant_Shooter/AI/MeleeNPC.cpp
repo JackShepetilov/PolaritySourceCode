@@ -16,7 +16,24 @@
 #include "DrawDebugHelpers.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
+#include "../../AI/Navigation/PolarityPathFollowingComponent.h"
 #include "EMFVelocityModifier.h"
+
+// True while our custom path-following component is mid navlink-jump. Melee per-frame position
+// overrides (dash interpolation, attack magnetism) MUST stand down during a jump — magnetism in
+// particular calls SetActorLocation() with NewPos.Z pinned to the launch height every frame, which
+// cancels the jump's vertical velocity and is why melee NPCs never land an up-jump.
+static bool IsPerformingNavLinkJump(const AMeleeNPC* NPC)
+{
+	if (const AAIController* AI = NPC ? Cast<AAIController>(NPC->GetController()) : nullptr)
+	{
+		if (const UPolarityPathFollowingComponent* PFC = Cast<UPolarityPathFollowingComponent>(AI->GetPathFollowingComponent()))
+		{
+			return PFC->IsPerformingJump();
+		}
+	}
+	return false;
+}
 
 AMeleeNPC::AMeleeNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -48,6 +65,20 @@ void AMeleeNPC::BeginPlay()
 void AMeleeNPC::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Во время прыжка по навлинку НЕ запускаем dash-интерполяцию и attack-магнетизм: обе двигают
+	// капсулу через SetActorLocation() каждый кадр (магнетизм вдобавок прижимает Z к высоте старта),
+	// что затирает баллистическую дугу прыжка — именно поэтому милишники никогда не долетают вверх.
+	// Пусть дугой владеет прыжок (CMC MOVE_Falling); melee-трейс ниже всё ещё выполняем, чтобы не
+	// потерять уже открытое окно урона.
+	if (IsPerformingNavLinkJump(this))
+	{
+		if (bDamageWindowActive && !bIsDead)
+		{
+			PerformMeleeTrace();
+		}
+		return;
+	}
 
 	// Обновление интерполяции рывка если активен (но не во время knockback/capture — иначе рывок тянет NPC вместо стана)
 	if (bIsDashing && !bIsInKnockback)
@@ -632,6 +663,13 @@ bool AMeleeNPC::CanDash() const
 		return false;
 	}
 
+	// Нельзя рывок во время прыжка по навлинку — рывок планарный (SetActorLocation затирает дугу),
+	// а StartDash к тому же зовёт AbortMove(UserAbort), что обрывает прыжок. Пусть прыжок завершится.
+	if (IsPerformingNavLinkJump(this))
+	{
+		return false;
+	}
+
 	// Проверка кулдауна
 	if (LastDashTime > 0.0f)
 	{
@@ -694,10 +732,21 @@ bool AMeleeNPC::StartDash(const FVector& Direction, float Distance, AActor* Targ
 		DashTargetActor = nullptr;
 	}
 
+	// Dash — ПЛАНАРНЫЙ рывок: при заметном перепаде высот прямая Start->End таранит
+	// лестницу/рампу, sweep блокируется и dash виснет. Пропускаем dash на вертикали —
+	// обычная навигация (рампы + прыжки по навлинкам) сама поднимет/спустит NPC, как у стрелков.
+	if (FMath::Abs(EndPos.Z - StartPos.Z) > MaxDashVerticalDelta)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s StartDash DEFER (vertical): delta %.0f > %.0f -> navigation"),
+			*GetName(), FMath::Abs(EndPos.Z - StartPos.Z), MaxDashVerticalDelta);
+		return false;
+	}
+
 	// Валидация пути (NavMesh + коллизии)
 	if (!ValidateDashPath(StartPos, EndPos))
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("MeleeNPC::StartDash - Path validation failed"));
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s StartDash DEFER (path validation failed) -> navigation"),
+			*GetName());
 		return false;
 	}
 

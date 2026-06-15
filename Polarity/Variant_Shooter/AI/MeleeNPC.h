@@ -125,6 +125,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash")
 	bool bDashTracksTarget = true;
 
+	/** Макс. перепад высоты (uu) между NPC и точкой dash, при котором dash разрешён.
+	 *  Dash — ПЛАНАРНЫЙ рывок (прямая линия), и на лестнице/рампе он таранит наклон и
+	 *  виснет. Если цель выше/ниже больше чем на это значение — dash пропускается, и
+	 *  NPC идёт обычной навигацией (рампы + прыжки по навлинкам), как стрелки. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Dash", meta = (ClampMin = "0"))
+	float MaxDashVerticalDelta = 120.0f;
+
 	// ==================== Debug ====================
 
 	/** If true, draw debug spheres for melee traces */
