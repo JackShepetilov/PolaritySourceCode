@@ -126,6 +126,25 @@ void UPolarityPathFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
 	}
 }
 
+void UPolarityPathFollowingComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	if (bIsPerformingJump)
+	{
+		// Self-drive the jump here, every frame, regardless of the path-following move's status.
+		// Previously the arc was driven only while Status==Moving (base tick -> FollowPathSegment/
+		// UpdatePathSegment). When the AI tore the move down mid-flight (StopMovement / re-pathed MoveTo
+		// (NewRequest, flags=136) / a state transition), Status went Idle, the driving stopped, and
+		// OnPathFinished restored collision and dropped the NPC = the "stomp". UpdatePathSegment re-asserts
+		// the arc velocity (via FollowPathSegment) AND detects landing, so calling it from the component
+		// tick keeps the jump alive to touchdown no matter how the move ends. Skip Super so path-following
+		// does not touch the pawn while airborne.
+		UpdatePathSegment();
+		return;
+	}
+
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+}
+
 void UPolarityPathFollowingComponent::FollowPathSegment(float DeltaTime)
 {
 	if (bIsPerformingJump)
@@ -268,6 +287,13 @@ static bool HasShootingPositionOnSameLevel(UWorld* World, AAIController* AIOwner
 
 void UPolarityPathFollowingComponent::ExecuteJump(const FVector& EndPos)
 {
+	// Already airborne — never stack a second jump on one in progress. A re-pathed move can re-enter
+	// SetMoveSegment on a navlink mid-flight; the current arc owns the pawn until it lands.
+	if (bIsPerformingJump)
+	{
+		return;
+	}
+
 	AAIController* AIOwner = Cast<AAIController>(GetOwner());
 	if (!AIOwner) return;
 
@@ -433,29 +459,55 @@ void UPolarityPathFollowingComponent::CompleteJump()
 #endif
 }
 
+void UPolarityPathFollowingComponent::AbortMove(const UObject& Instigator, FPathFollowingResultFlags::Type AbortFlags, FAIRequestID RequestID, EPathFollowingVelocityMode VelocityMode)
+{
+	// A navlink jump is a committed ballistic action. While airborne, IGNORE AI-initiated aborts
+	// (StateTree leaving Pursue, Move To finishing at its reach radius, AIController::StopMovement, a
+	// sibling transition firing as the NPC rises). Those were stopping the climb at t~0.2-0.4s — every
+	// such abort logged flags=24 (OwnerFinished|UserAbort) — and dropping the melee back down, i.e. the
+	// "stomp near the navlink": 16 of 17 melee jumps died this way, only 1 landed. The jump cannot
+	// strand — it self-terminates on landing (UpdatePathSegment) or the MaxJumpDuration timeout. Death/
+	// knockback don't cancel through AbortMove (EMF is already disabled for the flight); CancelJump() is
+	// the explicit escape hatch if we ever need a hard cancel.
+	if (bIsPerformingJump)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s AbortMove IGNORED mid-jump (flags=%u) — letting the arc finish"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("???"), (uint32)AbortFlags);
+		return;
+	}
+
+	Super::AbortMove(Instigator, AbortFlags, RequestID, VelocityMode);
+}
+
+FAIRequestID UPolarityPathFollowingComponent::RequestMove(const FAIMoveRequest& RequestData, FNavPathSharedPtr InPath)
+{
+	// Second abort route. A re-issued MoveTo (the Pursue Move To task re-pathing as the player moves)
+	// supersedes the current move via NewRequest — that's the flags=136 abort that killed every melee
+	// climb (9 launches, 0 lands). It does NOT go through the virtual AbortMove above, so we catch it
+	// here: while airborne, don't start a new move — return the in-flight jump-move's id so the caller
+	// keeps waiting on it. After landing (bIsPerformingJump cleared) the next request proceeds and the
+	// NPC walks the last stretch to the now-current target. Deferring a few hundred ms is invisible.
+	if (bIsPerformingJump)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s RequestMove DEFERRED mid-jump — keeping the arc"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("???"));
+		return GetCurrentRequestId();
+	}
+
+	return Super::RequestMove(RequestData, InPath);
+}
+
 void UPolarityPathFollowingComponent::OnPathFinished(const FPathFollowingResult& Result)
 {
 	if (bIsPerformingJump)
 	{
-		// [NAV_DEBUG] SMOKING GUN: the path finished (abort / new request / stop) WHILE a jump was
-		// in the air. If t is tiny here (~0.0-0.2s), the jump was killed on launch by a repath from
-		// the StateTree (StopMovement) — that's the "weak hop". flags decode the reason.
-		ACharacter* JumpChar = GetCharacterFromOwner(this);
-		const float DistToDest = JumpChar ? FVector::Dist(JumpChar->GetActorLocation(), JumpDestination) : -1.0f;
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP ABORTED by OnPathFinished t=%.2f dist=%.0f flags=%u"),
-			GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
-			JumpTimeElapsed, DistToDest, Result.Flags);
-
-		LandCharacter(GetCharacterFromOwner(this));
-		CompleteJump();
-
-#if WITH_EDITOR
-		if (bDebugJumps)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[%s] Jump reset — path finished (flags: %d)"),
-				GetOwner() ? *GetOwner()->GetName() : TEXT("???"), Result.Flags);
-		}
-#endif
+		// The move was torn down (abort / re-pathed MoveTo / state transition) WHILE airborne. Do NOT
+		// land or complete the jump here — restoring collision mid-flight is exactly what dropped the NPC
+		// (the "stomp": the climb died at t~0.2 with flags=136/24). The arc is now self-driven by
+		// TickComponent and lands on its own; we only let the base reset its path-following state. After
+		// touchdown the AI's next MoveTo resumes the approach to the now-current target.
+		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s move torn down mid-jump (flags=%u t=%.2f) — NOT dropping, arc continues via tick"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("???"), Result.Flags, JumpTimeElapsed);
 	}
 
 	Super::OnPathFinished(Result);

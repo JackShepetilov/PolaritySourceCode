@@ -84,6 +84,25 @@ protected:
 	/** Reset jump state when path following ends (abort, completion, etc.) */
 	virtual void OnPathFinished(const FPathFollowingResult& Result) override;
 
+	/** While airborne on a navlink jump, ignore AI-initiated aborts so the ballistic arc completes.
+	 *  The StateTree churning out of Pursue mid-flight (Move To finishing at its reach radius, a sibling
+	 *  transition firing as the NPC rises, StopMovement) was stopping the climb ~0.2s in and dropping the
+	 *  melee back down = the "stomp near the navlink". The jump self-terminates on landing or the
+	 *  MaxJumpDuration timeout, so this cannot strand. */
+	virtual void AbortMove(const UObject& Instigator, FPathFollowingResultFlags::Type AbortFlags, FAIRequestID RequestID = FAIRequestID::CurrentRequest, EPathFollowingVelocityMode VelocityMode = EPathFollowingVelocityMode::Reset) override;
+
+	/** While airborne on a navlink jump, defer re-issued MoveTo requests (the Pursue Move To task
+	 *  re-pathing to the moving player) rather than letting them supersede the jump via NewRequest —
+	 *  that was the second abort route (flags=136) that killed the climb. Returns the in-flight move's
+	 *  id so the caller keeps waiting on it; requests after landing go through normally. */
+	virtual FAIRequestID RequestMove(const FAIMoveRequest& RequestData, FNavPathSharedPtr InPath) override;
+
+	/** Drive the navlink jump from the component tick, INDEPENDENT of the path-following move. The base
+	 *  only ticks FollowPathSegment/UpdatePathSegment while Status==Moving; the AI tearing the move down
+	 *  mid-flight (via routes we can't all intercept) stopped that driving and dropped the NPC. Running
+	 *  the arc here makes it land regardless of how/whether the move ends. Skips Super while airborne. */
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
 private:
 
 	// ==================== Jump State ====================

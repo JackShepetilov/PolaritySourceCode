@@ -268,60 +268,47 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::EnterState(FStateTreeExecutionConte
 		ToTarget = Data.Character->GetActorForwardVector();
 	}
 
-	// Пытаемся выполнить рывок. Dash возможен только если CanDash() И путь планарный
-	// (StartDash сам отсекает вертикаль/лестницу). Если рывок невозможен — НЕ падаем
-	// (иначе melee застревал бы на лестнице, ведь атака идёт ПОСЛЕ этого таска), а
-	// подбегаем к цели обычной навигацией (рампы + прыжки по навлинкам, как стрелки)
-	// до радиуса атаки.
-	bool bDashStarted = false;
-	if (Data.Character->CanDash())
+	// Рывок невозможен (кулдаун / в воздухе / в прыжке) — НЕ двигаемся сами. Раньше здесь был
+	// nav-fallback (свой MoveToActor с радиусом приёмки AttackRange*0.85), который утыкался в
+	// НАЗЕМНУЮ проекцию игрока под уступом и топтался. Теперь возвращаем Failed, чтобы Chase выбрал
+	// соседнюю ветку Pursue (встроенный Move To): она подбегает и лезет по навлинкам, как у стрелков.
+	// Вертикаль отсекается ещё на ВХОДЕ в Dash условием TargetWithinDashVerticalRange, так что
+	// вертикальные цели сюда уже не попадают — только планарные рывки.
+	if (!Data.Character->CanDash())
 	{
-		FVector FinalDirection;
-		switch (Data.DashDirection)
-		{
-		case EDashDirection::Forward:
-			FinalDirection = ToTarget;
-			break;
-		case EDashDirection::Left:
-			FinalDirection = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
-			break;
-		case EDashDirection::Right:
-			FinalDirection = -FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
-			break;
-		case EDashDirection::RandomSide:
-		default:
-			{
-				FVector Perpendicular = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
-				FinalDirection = FMath::RandBool() ? Perpendicular : -Perpendicular;
-			}
-			break;
-		}
-		bDashStarted = Data.Character->StartDash(FinalDirection, Data.DashDistance);
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s Dash: CanDash=false -> defer to Pursue"), *GetNameSafe(Data.Character));
+		return EStateTreeRunStatus::Failed;
 	}
 
-	if (!bDashStarted)
+	FVector FinalDirection;
+	switch (Data.DashDirection)
 	{
-		// Навигационный подбег к цели до радиуса атаки (Tick завершит таск при входе в радиус)
-		Data.bUsingNavFallback = true;
-		EPathFollowingRequestResult::Type MoveResult = EPathFollowingRequestResult::Failed;
-		if (AAIController* AI = Cast<AAIController>(Data.Character->GetController()))
+	case EDashDirection::Forward:
+		FinalDirection = ToTarget;
+		break;
+	case EDashDirection::Left:
+		FinalDirection = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+		break;
+	case EDashDirection::Right:
+		FinalDirection = -FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+		break;
+	case EDashDirection::RandomSide:
+	default:
 		{
-			MoveResult = AI->MoveToActor(Data.Target, Data.Character->GetAttackRange() * 0.85f, true, true);
+			FVector Perpendicular = FVector::CrossProduct(ToTarget, FVector::UpVector).GetSafeNormal();
+			FinalDirection = FMath::RandBool() ? Perpendicular : -Perpendicular;
 		}
-		// [MELEE_DEBUG] Why this melee went nav-approach instead of dash, and whether the move was
-		// even accepted. vDelta>120 => target is up high (should route via navlink); moveResult=0
-		// (Failed) or a partial path => navmesh can't reach the target → NPC stalls at the wall foot.
-		const float VDelta = Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z;
-		const float Dist2D = FVector::Dist2D(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s DASH->NAV target=%s vDelta=%.0f dist2D=%.0f canDash=%d moveResult=%d"),
-			*GetNameSafe(Data.Character), *GetNameSafe(Data.Target), VDelta, Dist2D,
-			Data.Character->CanDash() ? 1 : 0, (int32)MoveResult);
-		return EStateTreeRunStatus::Running;
+		break;
 	}
 
-	Data.bUsingNavFallback = false;
-	// [MELEE_DEBUG] A PLANAR dash was started. If this fires while the target is far above (vDelta
-	// big), the dash is lunging at the wall instead of deferring to navigation.
+	if (!Data.Character->StartDash(FinalDirection, Data.DashDistance))
+	{
+		// Рывок не стартовал (путь перекрыт / уже на нужной дистанции). Отдаём управление в Pursue.
+		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s Dash: StartDash failed -> defer to Pursue"), *GetNameSafe(Data.Character));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// [MELEE_DEBUG] Планарный рывок стартовал (цель в вертикальном диапазоне — гейт пропустил).
 	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s DASH STARTED dist=%.0f vDelta=%.0f"),
 		*GetNameSafe(Data.Character), Data.DashDistance,
 		Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z);
@@ -337,36 +324,8 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::Tick(FStateTreeExecutionContext& Co
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Навигационный подбег (dash был невозможен): вошли в радиус атаки — готово, граф
-	// перейдёт в Attack. Иначе продолжаем движение, перезапуская MoveTo если оно встало.
-	if (Data.bUsingNavFallback)
-	{
-		if (!Data.Target)
-		{
-			return EStateTreeRunStatus::Failed;
-		}
-		if (Data.Character->IsTargetInAttackRange(Data.Target))
-		{
-			return EStateTreeRunStatus::Succeeded;
-		}
-		if (AAIController* AI = Cast<AAIController>(Data.Character->GetController()))
-		{
-			if (AI->GetMoveStatus() == EPathFollowingStatus::Idle)
-			{
-				// [MELEE_DEBUG] The nav-approach went Idle without reaching attack range — i.e. the
-				// path ENDED short (partial path to the wall foot / unreachable target up a navlink).
-				// If this spams while dist2D stays ~constant and vDelta is big, THIS is the stomp.
-				const float Dist2D = FVector::Dist2D(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
-				const float VDelta = Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z;
-				UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s NAV REISSUE (Idle, stalled) dist2D=%.0f vDelta=%.0f"),
-					*GetNameSafe(Data.Character), Dist2D, VDelta);
-				AI->MoveToActor(Data.Target, Data.Character->GetAttackRange() * 0.85f, true, true);
-			}
-		}
-		return EStateTreeRunStatus::Running;
-	}
-
-	// Рывок: ждём завершения
+	// Ждём завершения рывка. Подбег к цели, когда рывок невозможен, делает ветка Pursue графа
+	// (встроенный Move To), а не этот таск.
 	if (Data.Character->IsDashing())
 	{
 		return EStateTreeRunStatus::Running;
@@ -376,13 +335,46 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::Tick(FStateTreeExecutionContext& Co
 
 void FStateTreeMeleeDashTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
-	// Ничего особенного не нужно - рывок сам завершится или отменится при knockback
+	// Рывок сам завершится или отменится при knockback — спец-очистки не требуется.
 }
 
 #if WITH_EDITOR
 FText FStateTreeMeleeDashTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("Execute dash movement towards or around target"));
+}
+#endif
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Target Within Dash Vertical Range
+// True когда цель по высоте в пределах MaxDashVerticalDelta NPC. Вешается AND-ом в IF ветки Dash:
+// если цель выше/ниже порога (false) — Dash НЕ входит, и Chase падает в Pursue (встроенный Move To),
+// который лезет по навлинкам, как стрелки. Инверсии в StateTree нет, поэтому формулировка
+// "в пределах" (true = dash можно), а не "слишком вертикально".
+//////////////////////////////////////////////////////////////////
+
+bool FStateTreeTargetWithinDashVerticalRangeCondition::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Character || !Data.Target)
+	{
+		// Нет цели/персонажа — рывок смысла не имеет. false, чтобы Dash не входил (Chase -> Pursue/Idle).
+		return false;
+	}
+
+	const float VDelta = FMath::Abs(Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z);
+	const float MaxDelta = Data.Character->GetMaxDashVerticalDelta();
+	// БЕЗ лога: условие зовётся 3-5 раз за тик на каждого NPC (StateTree гоняет его при селекте и на
+	// переходах) — это давало 7000+ строк спама за сессию и снова грозило контексту. Эффект гейта
+	// виден по JUMP LAUNCH мили в логе пути (полез ли по навлинку).
+	return VDelta <= MaxDelta;
+}
+
+#if WITH_EDITOR
+FText FStateTreeTargetWithinDashVerticalRangeCondition::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Target is within dash vertical range (else: too high/low -> use Pursue/navigation)"));
 }
 #endif
 

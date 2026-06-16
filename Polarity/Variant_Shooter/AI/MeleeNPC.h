@@ -235,6 +235,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	float GetAttackRange() const { return AttackRange; }
 
+	/** Макс. перепад высоты (uu) цели относительно NPC, при котором планарный dash ещё разрешён.
+	 *  Читается StateTree-условием TargetWithinDashVerticalRange, которое гейтит ветку Dash. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Dash")
+	float GetMaxDashVerticalDelta() const { return MaxDashVerticalDelta; }
+
 	/** Returns true if currently performing an attack */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsAttacking() const { return bIsAttacking; }

@@ -304,11 +304,6 @@ struct FStateTreeMeleeDashInstanceData
 	/** Направление рывка относительно цели */
 	UPROPERTY(EditAnywhere, Category = "Parameters")
 	EDashDirection DashDirection = EDashDirection::RandomSide;
-
-	/** Runtime: dash оказался невозможен (вертикаль/кулдаун/в воздухе) и таск подбегает
-	 *  к цели обычной навигацией до радиуса атаки вместо рывка. */
-	UPROPERTY()
-	bool bUsingNavFallback = false;
 };
 
 USTRUCT(meta = (DisplayName = "Melee Dash", Category = "Melee"))
@@ -433,6 +428,46 @@ struct POLARITY_API FStateTreeDistanceToTargetCondition : public FStateTreeCondi
 	GENERATED_BODY()
 
 	using FInstanceDataType = FStateTreeDistanceToTargetInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting = EStateTreeNodeFormatting::Text) const override;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////
+// CONDITION: Target Within Dash Vertical Range
+// Гейт для ветки Dash: true когда цель по высоте в пределах MaxDashVerticalDelta NPC.
+// Вешать AND-ом к существующему "Can Dash" в IF ветки Dash. Если false (цель выше/ниже порога) —
+// Dash не выбирается, и Chase падает в Pursue (встроенный Move To), который лезет по навлинкам.
+//////////////////////////////////////////////////////////////////
+
+USTRUCT()
+struct FStateTreeTargetWithinDashVerticalRangeInstanceData
+{
+	GENERATED_BODY()
+
+	/** MeleeNPC — точка отсчёта по высоте и источник порога MaxDashVerticalDelta */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AMeleeNPC> Character;
+
+	/** Цель, чью высоту сравниваем с высотой NPC */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+};
+
+USTRUCT(DisplayName = "Target Within Dash Vertical Range", Category = "Melee")
+struct POLARITY_API FStateTreeTargetWithinDashVerticalRangeCondition : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FStateTreeTargetWithinDashVerticalRangeInstanceData;
 
 	virtual const UStruct* GetInstanceDataType() const override
 	{
