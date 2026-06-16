@@ -123,6 +123,37 @@ void UPolarityPathFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
 			JumpEnd.X, JumpEnd.Y, JumpEnd.Z);
 
 		ExecuteJump(JumpEnd);
+		return;
+	}
+
+	// Robust trigger. Pursue's Move To has "Track Moving Goal" ON, so while the player moves it re-paths
+	// ~every tick and resets the move to segment 0. That means the exact "current segment IS the navlink"
+	// check above almost never catches — the NPC reaches the navlink entry but the segment keeps resetting,
+	// so it shuffles in place (small random steps for 1-3s) until a re-path gap finally lets the segment
+	// advance onto the link. Instead, scan the path ahead for the next navlink and fire the jump as soon
+	// as we've actually reached its entry point — independent of the churning segment index.
+	if (const ACharacter* Character = GetCharacterFromOwner(this))
+	{
+		const FVector MeleeLoc = Character->GetActorLocation();
+		const float EntryTriggerDist2D = 120.0f; // ~at the entry; wide enough to beat the re-path jitter, tight enough not to launch early
+		for (int32 i = SegmentStartIndex; i + 1 < PathPoints.Num(); ++i)
+		{
+			const FNavPathPoint& LinkPoint = PathPoints[i];
+			const bool bLinkHere = FNavMeshNodeFlags(LinkPoint.Flags).IsNavLink() || LinkPoint.CustomNavLinkId.IsValid();
+			if (bLinkHere)
+			{
+				// LinkPoint = navlink entry, PathPoints[i+1] = exit. Jump once we're at the entry.
+				if (FVector::Dist2D(MeleeLoc, LinkPoint.Location) <= EntryTriggerDist2D)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP TRIGGERED (reached entry; curSeg %d, link@%d) -> (%.0f,%.0f,%.0f)"),
+						GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
+						SegmentStartIndex, i,
+						PathPoints[i + 1].Location.X, PathPoints[i + 1].Location.Y, PathPoints[i + 1].Location.Z);
+					ExecuteJump(PathPoints[i + 1].Location);
+				}
+				break; // only the next navlink in the path matters
+			}
+		}
 	}
 }
 
