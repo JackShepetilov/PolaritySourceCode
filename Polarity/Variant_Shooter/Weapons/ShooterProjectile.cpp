@@ -211,6 +211,18 @@ void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitCo
 
 			// apply damage to the character
 			UGameplayStatics::ApplyDamage(HitCharacter, FinalDamage, GetInstigator()->GetController(), this, HitDamageType);
+
+			// knockback: CharacterMovement ignores physics impulses, so launch the character instead
+			if (CharacterKnockbackForce > 0.0f)
+			{
+				// add an upward bias so explosions at the feet pop the target up (TF2-style) instead of purely sideways
+				FVector LaunchDir = HitDirection;
+				LaunchDir.Z += KnockbackUpwardBias;
+				LaunchDir = LaunchDir.GetSafeNormal();
+
+				// override XY and Z so the launch is predictable regardless of the target's current velocity
+				HitCharacter->LaunchCharacter(LaunchDir * CharacterKnockbackForce, true, true);
+			}
 		}
 	}
 

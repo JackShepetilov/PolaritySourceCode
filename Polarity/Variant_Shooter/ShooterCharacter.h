@@ -121,6 +121,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeChargeHoldReleased);
 // entry per owned ammo/melee weapon (not just the active one).
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponInventoryChanged);
 
+// Broadcast whenever the ACTIVE (held) weapon changes. NewWeapon == nullptr means the player is now
+// unarmed. The HUD crosshair binds to this to swap dot<->crosshair and load the weapon's crosshair config.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnActiveWeaponChanged, AShooterWeapon*, NewWeapon);
+
 /**
  *  A player controllable first person shooter character
  *  Manages a weapon inventory through the IShooterWeaponHolder interface
@@ -876,6 +880,11 @@ public:
 	 *  via GetOwnedWeapons(). Used by the HUD ability bar to maintain one entry per owned weapon. */
 	UPROPERTY(BlueprintAssignable, Category = "Player|Events")
 	FOnWeaponInventoryChanged OnWeaponInventoryChanged;
+
+	/** Fired whenever the active (held) weapon changes; nullptr = now unarmed. Drives the HUD crosshair
+	 *  (dot when unarmed, crosshair when armed) and carries the new weapon so the HUD can load its config. */
+	UPROPERTY(BlueprintAssignable, Category = "Player|Events")
+	FOnActiveWeaponChanged OnActiveWeaponChanged;
 
 	/** Turret aim telegraph: broadcasts full list of turrets currently aiming at the player on every change.
 	 *  BP computes per-turret intensity (e.g. dot product + curve) and drives PP settings accordingly. */

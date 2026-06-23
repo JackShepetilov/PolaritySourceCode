@@ -72,6 +72,9 @@ public:
 	/** Spin speed (deg/s) for bounced weapons/props. */
 	float GetReturnSpinSpeed() const;
 
+	/** Roll speed (deg/s) for the kicked spear (used by the per-tick in-flight orientation). */
+	float GetKickSpinSpeed() const;
+
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 protected:
@@ -87,6 +90,19 @@ private:
 	/** Bound to MeleeAttackComponent->OnMeleeHit: redirects TAG_AirMailIncoming objects. */
 	UFUNCTION()
 	void HandleMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage);
+
+	/** Redirect a single TAG_AirMailIncoming object along the (assisted) camera forward at KickSpeed,
+	 *  flip its tags and play feedback. Shared by HandleMeleeHit and the generous kick window.
+	 *  Returns true if the object was actually kicked. */
+	bool ExecuteKick(AActor* HitActor, const FVector& ContactPoint);
+
+	/** During the airborne melee damage window: find a TAG_AirMailIncoming object inside the generous
+	 *  kick reach + cone (object-type overlap, independent of the melee sweep) and kick it. */
+	void TryGenerousKickWindow();
+
+	/** Best TAG_AirMailIncoming object within KickWindowReach + KickWindowConeHalfAngleDeg of camera
+	 *  forward (closest to the aim ray wins). nullptr if none. */
+	AActor* FindKickTargetInWindow(const FVector& CamLocation, const FVector& CamDirection) const;
 
 	/** Kick feedback (FX + sound) at the contact point. */
 	void PlayKickFeedback(const FVector& Location, const FVector& Direction) const;
@@ -125,6 +141,9 @@ private:
 
 	/** True while the magnet is engaged (component tick enabled). */
 	bool bKickMagnetActive = false;
+
+	/** True once the generous kick window has connected this swing (prevents multi-kick). */
+	bool bGenerousKickConsumed = false;
 
 	/** Object currently being steered toward the kick hitbox. */
 	TWeakObjectPtr<AActor> MagnetTarget;

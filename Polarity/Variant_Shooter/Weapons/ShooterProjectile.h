@@ -47,6 +47,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 50000))
 	float PhysicsForce = 100.0f;
 
+	/** Launch velocity applied to characters caught by the hit/explosion (cm/s). CharacterMovement ignores physics impulses, so characters are launched instead of pushed. Set to 0 to disable. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 10000, Units = "cm/s"))
+	float CharacterKnockbackForce = 1200.0f;
+
+	/** Upward bias added to the knockback direction (0 = purely radial, 1 = strong upward kick). Gives the TF2-style "pop" so explosions at the feet launch up, not sideways. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 1))
+	float KnockbackUpwardBias = 0.4f;
+
 	/** Damage to apply on hit */
 	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 100))
 	float HitDamage = 25.0f;

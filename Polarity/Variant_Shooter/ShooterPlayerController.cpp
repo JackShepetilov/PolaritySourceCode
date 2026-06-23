@@ -12,6 +12,7 @@
 #include "ShooterCharacter.h"
 #include "ShooterBulletCounterUI.h"
 #include "AbilityResourceBar.h"
+#include "CrosshairWidget.h"
 #include "MeleeAttackComponent.h"
 #include "Polarity.h"
 #include "TutorialSubsystem.h"
@@ -91,6 +92,28 @@ void AShooterPlayerController::BeginPlay()
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[ABILITY_BAR] AbilityResourceBarClass is NOT set on ShooterPlayerController -> bar will never be created. Set it on the BP_ShooterPlayerController."));
+		}
+
+		// create the crosshair widget and add it to the screen
+		if (CrosshairWidgetClass)
+		{
+			CrosshairWidget = CreateWidget<UCrosshairWidget>(this, CrosshairWidgetClass);
+			if (CrosshairWidget)
+			{
+				CrosshairWidget->AddToPlayerScreen(0);
+
+				// OnPossess for the starting pawn usually fires BEFORE this BeginPlay, so the widget
+				// didn't exist yet to receive the initial weapon. If we're already possessing a
+				// character, push its current weapon now (nullptr = unarmed -> idle dot).
+				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
+				{
+					CrosshairWidget->SetActiveWeapon(PossessedCharacter->GetCurrentWeapon());
+				}
+			}
+			else
+			{
+				UE_LOG(LogPolarity, Error, TEXT("Could not spawn crosshair widget."));
+			}
 		}
 
 		// Setup IMCs and key remapping
@@ -252,6 +275,7 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		ShooterCharacter->OnPolarityChanged.AddDynamic(this, &AShooterPlayerController::OnPolarityChanged);
 		ShooterCharacter->OnChargeUpdated.AddDynamic(this, &AShooterPlayerController::OnChargeUpdated);
 		ShooterCharacter->OnMeleeWeaponEquipped.AddDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
+		ShooterCharacter->OnActiveWeaponChanged.AddDynamic(this, &AShooterPlayerController::OnActiveWeaponChanged);
 
 		// Bind melee component events directly for drop kick cooldown UI
 		if (UMeleeAttackComponent* MeleeComp = ShooterCharacter->GetMeleeAttackComponent())
@@ -274,6 +298,14 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		if (AbilityResourceBar)
 		{
 			AbilityResourceBar->InitializeFor(ShooterCharacter);
+		}
+
+		// Sync the crosshair to the (re)possessed character's current weapon. On a respawn the widget
+		// already exists (BeginPlay ran); on the very first possess it doesn't yet, and the BeginPlay
+		// block above pushes the starting weapon instead.
+		if (CrosshairWidget)
+		{
+			CrosshairWidget->SetActiveWeapon(ShooterCharacter->GetCurrentWeapon());
 		}
 
 		// force update the life bar + armor bar
@@ -315,6 +347,15 @@ void AShooterPlayerController::OnBulletCountUpdated(int32 MagazineSize, int32 Bu
 	if (BulletCounterUI)
 	{
 		BulletCounterUI->BP_UpdateBulletCounter(MagazineSize, Bullets);
+	}
+}
+
+void AShooterPlayerController::OnActiveWeaponChanged(AShooterWeapon* NewWeapon)
+{
+	// Forward to the crosshair: NewWeapon drives armed/unarmed + which config to show.
+	if (CrosshairWidget)
+	{
+		CrosshairWidget->SetActiveWeapon(NewWeapon);
 	}
 }
 

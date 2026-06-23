@@ -9,9 +9,11 @@
 
 class UInputMappingContext;
 class AShooterCharacter;
+class AShooterWeapon;
 class UShooterBulletCounterUI;
 class UUpgradeChoiceWidget;
 class UAbilityResourceBar;
+class UCrosshairWidget;
 
 /** Tells run-HUD widgets to show/hide (e.g. for cutscenes).
  *  bVisible  = appear (true) vs disappear (false).
@@ -67,6 +69,14 @@ protected:
 	/** Pointer to the ability/resource bar widget. */
 	UPROPERTY(Transient)
 	TObjectPtr<UAbilityResourceBar> AbilityResourceBar;
+
+	/** Type of crosshair widget to spawn (WBP_Crosshair). If unset, no crosshair is shown. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
+	TSubclassOf<UCrosshairWidget> CrosshairWidgetClass;
+
+	/** Pointer to the crosshair widget. */
+	UPROPERTY(Transient)
+	TObjectPtr<UCrosshairWidget> CrosshairWidget;
 
 	// ==================== Roguelite Run Widgets ====================
 
@@ -156,6 +166,10 @@ protected:
 	/** Called when melee weapon is equipped or unequipped */
 	UFUNCTION()
 	void OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
+
+	/** Called when the active (held) weapon changes; forwards it to the crosshair (nullptr = unarmed). */
+	UFUNCTION()
+	void OnActiveWeaponChanged(AShooterWeapon* NewWeapon);
 
 	// ==================== Run lifecycle handlers ====================
 

@@ -2778,6 +2778,7 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 		{
 			Yanked->DeactivateWeapon();
 			CurrentWeapon = nullptr;
+			OnActiveWeaponChanged.Broadcast(nullptr);   // now unarmed
 		}
 	}
 
@@ -2997,6 +2998,10 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 	{
 		OnMeleeWeaponEquipped.Broadcast(false, 0, 0);
 	}
+
+	// Single armed-transition choke point: every weapon that becomes active funnels through here
+	// (pickup, switch, yank-equip, save-load), so the HUD crosshair stays in sync from one place.
+	OnActiveWeaponChanged.Broadcast(Weapon);
 }
 
 void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
@@ -3051,11 +3056,12 @@ void AShooterCharacter::RemoveMeleeWeapon(AShooterWeapon* WeaponToRemove)
 	if (OwnedWeapons.Num() > 0)
 	{
 		CurrentWeapon = OwnedWeapons[0];
-		CurrentWeapon->ActivateWeapon();
+		CurrentWeapon->ActivateWeapon();   // -> OnWeaponActivated broadcasts the new active weapon
 	}
 	else
 	{
 		UpdateFirstPersonMeshVisibility();
+		OnActiveWeaponChanged.Broadcast(nullptr);   // now unarmed
 	}
 
 	// Destroy the weapon actor
@@ -3617,6 +3623,9 @@ void AShooterCharacter::Die()
 	{
 		CurrentWeapon->DeactivateWeapon();
 	}
+
+	// Hide the crosshair on death (treat as unarmed until respawn re-equips a weapon).
+	OnActiveWeaponChanged.Broadcast(nullptr);
 
 	if (AShooterGameMode* GM = Cast<AShooterGameMode>(GetWorld()->GetAuthGameMode()))
 	{

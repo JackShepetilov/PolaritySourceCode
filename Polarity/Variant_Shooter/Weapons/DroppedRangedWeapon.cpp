@@ -10,6 +10,7 @@
 #include "EMFVelocityModifier.h"
 #include "Upgrades/UpgradeManagerComponent.h"
 #include "Upgrades/Upgrades/Upgrade_AirKick.h"
+#include "Upgrades/Upgrades/AirMailSpear.h"
 #include "Components/StaticMeshComponent.h"
 #include "Curves/CurveFloat.h"
 #include "Kismet/GameplayStatics.h"
@@ -139,7 +140,7 @@ void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AA
 				WeaponMesh->SetPhysicsLinearVelocity(ReturnVelocity);
 				if (AirMail->GetReturnSpinSpeed() > 0.0f)
 				{
-					WeaponMesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * AirMail->GetReturnSpinSpeed());
+					AirMailOrientSpear(WeaponMesh, ReturnVelocity);
 				}
 				Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
 				AirMail->PlayBounceFeedback(Hit.ImpactPoint);
@@ -160,6 +161,14 @@ void ADroppedRangedWeapon::Tick(float DeltaTime)
 	if (WeaponMesh && WeaponMesh->IsSimulatingPhysics())
 	{
 		PreImpactVelocity = WeaponMesh->GetPhysicsLinearVelocity();
+	}
+
+	// Air Mail spear: while kicked, drive orientation kinematically (nose along velocity + roll)
+	// so the asymmetric body can't precess/tumble. Self-stops once the weapon slows down.
+	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this);
+		AirMailTickSpear(WeaponMesh, AirMail ? AirMail->GetKickSpinSpeed() : 720.0f);
 	}
 
 	if (bIsBeingPulled)

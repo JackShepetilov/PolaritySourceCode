@@ -14,6 +14,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
 #include "Upgrades/Upgrades/Upgrade_AirKick.h"
+#include "Upgrades/Upgrades/AirMailSpear.h"
 #include "EMFVelocityModifier.h"
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -238,6 +239,14 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	if (bAffectedByExternalFields && !bAirMailFlightActive && FieldComponent && PropMesh && PropMesh->IsSimulatingPhysics())
 	{
 		ApplyEMForces(DeltaTime);
+	}
+
+	// Air Mail spear: while kicked, drive orientation kinematically (nose along velocity + roll)
+	// so the asymmetric body can't precess/tumble. Self-stops once the prop slows down.
+	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
+	{
+		UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this);
+		AirMailTickSpear(PropMesh, AirMail ? AirMail->GetKickSpinSpeed() : 720.0f);
 	}
 
 	if (bCanBeCaptured && CapturingPlate.IsValid())
@@ -926,10 +935,9 @@ bool AEMFPhysicsProp::TryAirMailBounce(const FVector& ImpactNormal, const FVecto
 	bIsInReverseFlight = false;
 
 	PropMesh->SetPhysicsLinearVelocity(ReturnVelocity);
-	if (AirMail->GetReturnSpinSpeed() > 0.0f)
-	{
-		PropMesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * AirMail->GetReturnSpinSpeed());
-	}
+	// Spear-orient toward the player (long axis along the return velocity) instead of the old
+	// random VRand() tumble, so the incoming object reads as a spear, not a chaotic spin.
+	AirMailOrientSpear(PropMesh, ReturnVelocity);
 	Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
 	AirMail->PlayBounceFeedback(ImpactPoint);
 

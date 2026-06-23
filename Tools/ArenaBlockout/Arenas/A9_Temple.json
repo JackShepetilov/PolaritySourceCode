@@ -1,0 +1,155 @@
+{
+  "name": "A9_Temple",
+  "comment": "ФИНАЛ биома 1 — храм-зиккурат, СИММЕТРИЧНАЯ компоновка (переделка 2026-06-13 по ТЗ автора): храм В ЦЕНТРЕ ([0,0,1210], перемещён автором/мной, БЕЗ тега - clear_tagged не трогает), подъём ярусами с ДВУХ сторон (юг -Y и север +Y) к центральной платформе L4. Зеркало юг<->север с ВАРИАЦИЯМИ на севере (другой шаг колонн, узел на др. стороне, север без турели - пропы-хаб). Колоннады входа удлинены x2. Удалённый автором мусор (wallrun, боксы-укрытия, placeholder) НЕ возвращён. Узлы СМЕЩЕНЫ с оси рамп (избегаем RAMP clip). Вход юг = player_start.",
+  "level_path": "/Game/Variant_Shooter/Arenas/Biome1/A9_Temple/Lvl_A9_Temple",
+  "time_between_waves": 3.0,
+
+  "classes": {
+    "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
+    "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
+    "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
+    "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
+    "plate": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMF_AcceleratorPlate",
+    "spawn_point": "/Script/Polarity.ArenaSpawnPoint",
+    "shooter": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC",
+    "melee": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_MeleeNPC",
+    "drone": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone",
+    "humanoid": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_HumanoidNPC",
+    "kamikaze": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_KamikazeDrone",
+    "turret": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_TurretNPC"
+  },
+
+  "pieces": [
+    { "id": "ground",     "shape": "box", "mat": "floor", "pos": [0, 0, -50],     "size": [9200, 15400, 100], "group": "Floor" },
+    { "id": "approach_s", "shape": "box", "mat": "floor", "pos": [0, -7000, -50], "size": [1800, 1400, 100],  "group": "Floor" },
+    { "id": "approach_n", "shape": "box", "mat": "floor", "pos": [0, 7000, -50],  "size": [1800, 1400, 100],  "group": "Floor" },
+
+    { "id": "L4",   "shape": "box", "mat": "floor", "pos": [0, 0, 600],     "size": [4000, 3600, 1200], "group": "ZigL4", "comment": "central platform, temple at [0,0] middle" },
+    { "id": "L3_s", "shape": "box", "mat": "floor", "pos": [0, -2500, 400], "size": [2800, 2000, 800], "group": "ZigL3" },
+    { "id": "L3_n", "shape": "box", "mat": "floor", "pos": [0, 2500, 400],  "size": [2800, 2000, 800], "group": "ZigL3" },
+    { "id": "L2_s", "shape": "box", "mat": "floor", "pos": [0, -4000, 200], "size": [2600, 1800, 400], "group": "ZigL2" },
+    { "id": "L2_n", "shape": "box", "mat": "floor", "pos": [0, 4000, 200],  "size": [2600, 1800, 400], "group": "ZigL2" },
+    { "id": "L2_w", "shape": "box", "mat": "floor", "pos": [-2700, 0, 200], "size": [1800, 2600, 400], "group": "ZigL2" },
+    { "id": "L2_e", "shape": "box", "mat": "floor", "pos": [2700, 0, 200],  "size": [1800, 2600, 400], "group": "ZigL2" },
+
+    { "id": "ramp_l1s_l2s", "shape": "ramp", "mat": "floor", "from": [0, -5500, 0],   "to": [0, -4900, 400],  "width": 800, "group": "Ramps" },
+    { "id": "ramp_l2s_l3s", "shape": "ramp", "mat": "floor", "from": [0, -3900, 400], "to": [0, -3300, 800],  "width": 700, "group": "Ramps" },
+    { "id": "ramp_l3s_l4",  "shape": "ramp", "mat": "floor", "from": [0, -2100, 800], "to": [0, -1500, 1200], "width": 700, "group": "Ramps" },
+    { "id": "ramp_l1n_l2n", "shape": "ramp", "mat": "floor", "from": [0, 5500, 0],    "to": [0, 4900, 400],   "width": 800, "group": "Ramps" },
+    { "id": "ramp_l2n_l3n", "shape": "ramp", "mat": "floor", "from": [0, 3900, 400],  "to": [0, 3300, 800],   "width": 700, "group": "Ramps" },
+    { "id": "ramp_l3n_l4",  "shape": "ramp", "mat": "floor", "from": [0, 2100, 800],  "to": [0, 1500, 1200],  "width": 700, "group": "Ramps" },
+    { "id": "ramp_l1_w",    "shape": "ramp", "mat": "floor", "from": [-4300, 0, 0],   "to": [-3700, 0, 400],  "width": 800, "group": "Ramps" },
+    { "id": "ramp_l1_e",    "shape": "ramp", "mat": "floor", "from": [4300, 0, 0],    "to": [3700, 0, 400],   "width": 800, "group": "Ramps" },
+
+    { "id": "col_s_l1", "shape": "cylinder", "mat": "deco", "pos": [-900, -6400, 350], "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_l2", "shape": "cylinder", "mat": "deco", "pos": [-900, -6000, 350], "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_l3", "shape": "cylinder", "mat": "deco", "pos": [-900, -5600, 350], "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_l4", "shape": "cylinder", "mat": "deco", "pos": [-900, -5200, 350], "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_l5", "shape": "cylinder", "mat": "deco", "pos": [-900, -4800, 350], "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_l6", "shape": "cylinder", "mat": "deco", "pos": [-900, -4400, 350], "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_r1", "shape": "cylinder", "mat": "deco", "pos": [900, -6400, 350],  "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_r2", "shape": "cylinder", "mat": "deco", "pos": [900, -6000, 350],  "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_r3", "shape": "cylinder", "mat": "deco", "pos": [900, -5600, 350],  "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_r4", "shape": "cylinder", "mat": "deco", "pos": [900, -5200, 350],  "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_r5", "shape": "cylinder", "mat": "deco", "pos": [900, -4800, 350],  "size": [200, 200, 700], "group": "ColonnadeS" },
+    { "id": "col_s_r6", "shape": "cylinder", "mat": "deco", "pos": [900, -4400, 350],  "size": [200, 200, 700], "group": "ColonnadeS" },
+
+    { "id": "col_n_l1", "shape": "cylinder", "mat": "deco", "pos": [-1100, 4500, 350], "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_l2", "shape": "cylinder", "mat": "deco", "pos": [-1100, 5100, 350], "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_l3", "shape": "cylinder", "mat": "deco", "pos": [-1100, 5700, 350], "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_l4", "shape": "cylinder", "mat": "deco", "pos": [-1100, 6300, 350], "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_r1", "shape": "cylinder", "mat": "deco", "pos": [1100, 4500, 350],  "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_r2", "shape": "cylinder", "mat": "deco", "pos": [1100, 5100, 350],  "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_r3", "shape": "cylinder", "mat": "deco", "pos": [1100, 5700, 350],  "size": [250, 250, 750], "group": "ColonnadeN" },
+    { "id": "col_n_r4", "shape": "cylinder", "mat": "deco", "pos": [1100, 6300, 350],  "size": [250, 250, 750], "group": "ColonnadeN" },
+
+    { "id": "node_s_base", "shape": "cylinder", "mat": "deco", "pos": [1400, -5600, 60],  "size": [1000, 1000, 120], "group": "NodeS" },
+    { "id": "node_s_top",  "shape": "cylinder", "mat": "deco", "pos": [1400, -5600, 220], "size": [450, 450, 200],   "group": "NodeS" },
+    { "id": "node_n_base", "shape": "cylinder", "mat": "deco", "pos": [-1400, 5600, 60],  "size": [900, 900, 120],   "group": "NodeN", "comment": "variation: opposite side, smaller" },
+    { "id": "node_n_top",  "shape": "cylinder", "mat": "deco", "pos": [-1400, 5600, 240], "size": [400, 400, 240],   "group": "NodeN" },
+
+    { "id": "pav_sw", "shape": "box", "mat": "wall", "pos": [-3700, -4600, 300], "size": [1300, 1400, 600], "group": "Pavilions" },
+    { "id": "pav_se", "shape": "box", "mat": "wall", "pos": [3700, -4600, 300],  "size": [1300, 1400, 600], "group": "Pavilions" },
+    { "id": "pav_nw", "shape": "box", "mat": "wall", "pos": [-3700, 4600, 250],  "size": [1100, 1200, 500], "group": "Pavilions", "comment": "variation: smaller" },
+    { "id": "pav_ne", "shape": "box", "mat": "wall", "pos": [3700, 4600, 250],   "size": [1100, 1200, 500], "group": "Pavilions" },
+
+    { "id": "tow",       "shape": "box", "mat": "deco", "pos": [3900, -2400, 500], "size": [700, 700, 1000], "group": "Turret", "comment": "turret tower kept on SOUTH side (author raised it)" },
+    { "id": "tow_step2", "shape": "box", "mat": "deco", "pos": [3900, -2900, 400], "size": [500, 500, 800],  "group": "Turret" },
+    { "id": "tow_step1", "shape": "box", "mat": "deco", "pos": [3900, -3400, 300], "size": [500, 500, 600],  "group": "Turret" },
+
+    { "id": "crate_sw", "shape": "box", "mat": "wall", "pos": [-2400, -5400, 150], "size": [600, 600, 300], "group": "L1Fill" },
+    { "id": "crate_se", "shape": "box", "mat": "wall", "pos": [2400, -5800, 150],  "size": [600, 600, 300], "group": "L1Fill" },
+    { "id": "crate_nw", "shape": "box", "mat": "wall", "pos": [-2800, 5800, 150],  "size": [500, 500, 300], "group": "L1Fill", "comment": "variation: smaller, shifted" },
+    { "id": "crate_ne", "shape": "box", "mat": "wall", "pos": [3000, 5400, 150],   "size": [700, 700, 300], "group": "L1Fill" },
+    { "id": "stele_sw", "shape": "box", "mat": "deco", "pos": [-1900, -1200, 300], "size": [200, 200, 600], "group": "L1Fill" },
+    { "id": "stele_se", "shape": "box", "mat": "deco", "pos": [1900, -1200, 300],  "size": [200, 200, 600], "group": "L1Fill" },
+    { "id": "stele_nw", "shape": "box", "mat": "deco", "pos": [-1900, 1200, 300],  "size": [200, 200, 600], "group": "L1Fill" },
+    { "id": "stele_ne", "shape": "box", "mat": "deco", "pos": [1900, 1200, 300],   "size": [200, 200, 600], "group": "L1Fill" },
+
+    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -7710, 1800], "size": [9240, 20, 3600], "group": "Field" },
+    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 7710, 1800],  "size": [9240, 20, 3600], "group": "Field" },
+    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-4610, 0, 1800], "size": [20, 15440, 3600], "group": "Field" },
+    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [4610, 0, 1800],  "size": [20, 15440, 3600], "group": "Field" }
+  ],
+
+  "exit_blocker_ids": ["fld_s", "fld_n", "fld_w", "fld_e"],
+
+  "markers": [
+    { "type": "player_start",  "pos": [0, -7000, 100], "yaw": 90 },
+    { "type": "respawn_point", "pos": [0, -6850, 100], "yaw": 90 },
+
+    { "type": "entry_trigger", "pos": [0, 0, 1800], "extent": [4500, 7600, 1800] },
+
+    { "type": "spawn", "id": "S_sw", "pos": [-3700, -5200, 10], "yaw": 0 },
+    { "type": "spawn", "id": "S_se", "pos": [3700, -5200, 10],  "yaw": 180 },
+    { "type": "spawn", "id": "S_nw", "pos": [-3700, 5200, 10],  "yaw": 0 },
+    { "type": "spawn", "id": "S_ne", "pos": [3700, 5200, 10],   "yaw": 180 },
+    { "type": "spawn", "id": "S_w",  "pos": [-4100, 0, 10],     "yaw": 0 },
+    { "type": "spawn", "id": "S_e",  "pos": [4100, 0, 10],      "yaw": 180 },
+    { "type": "spawn", "id": "G_l2s", "pos": [0, -4000, 410],   "yaw": 90 },
+    { "type": "spawn", "id": "G_l2n", "pos": [0, 4000, 410],    "yaw": -90 },
+    { "type": "spawn", "id": "G_l3s", "pos": [0, -2500, 810],   "yaw": 90 },
+    { "type": "spawn", "id": "G_l3n", "pos": [0, 2500, 810],    "yaw": -90 },
+    { "type": "spawn", "id": "Air_s", "pos": [-1400, -3000, 60], "air": true, "air_height": 300 },
+    { "type": "spawn", "id": "Air_n", "pos": [1400, 3000, 60],   "air": true, "air_height": 300 },
+
+    { "type": "npc", "id": "Turret", "class_key": "turret", "pos": [3900, -2400, 1070], "yaw": 150 },
+
+    { "type": "prop_cluster", "id": "Cs1", "pos": [1700, -5600, 60], "count": 4, "radius": 200 },
+    { "type": "prop_cluster", "id": "Cs2", "pos": [-2000, -3400, 60], "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "Cn1", "pos": [-1700, 5600, 60],  "count": 3, "radius": 160 },
+    { "type": "prop_cluster", "id": "Cn2", "pos": [2000, 3400, 60],   "count": 4, "radius": 180 },
+    { "type": "prop_cluster", "id": "Cw",  "pos": [-3000, 0, 60],     "count": 3, "radius": 160 },
+
+    { "type": "antenna", "id": "Antenna", "pos": [0, -1300, 1210], "yaw": 90, "comment": "on L4 in front of temple (south), beacon up" },
+    { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 2200] },
+    { "type": "manager", "pos": [0, 0, 2400] },
+
+    { "type": "nav_link", "id": "NL_l1s_l2s", "pos": [0, -4900, 400], "left": [0, -300, 0], "right": [0, 500, -400] },
+    { "type": "nav_link", "id": "NL_l1n_l2n", "pos": [0, 4900, 400],  "left": [0, 300, 0],  "right": [0, -500, -400] },
+    { "type": "nav_link", "id": "NL_l1w_l2w", "pos": [-3600, 0, 400], "left": [-300, 0, 0], "right": [500, 0, -400] },
+    { "type": "nav_link", "id": "NL_l1e_l2e", "pos": [3600, 0, 400],  "left": [300, 0, 0],  "right": [-500, 0, -400] },
+    { "type": "nav_link", "id": "NL_l2s_l3s", "pos": [0, -3300, 800], "left": [0, -300, 0], "right": [0, 400, -400] },
+    { "type": "nav_link", "id": "NL_l2n_l3n", "pos": [0, 3300, 800],  "left": [0, 300, 0],  "right": [0, -400, -400] },
+    { "type": "nav_link", "id": "NL_l3s_l4",  "pos": [0, -1700, 1200], "left": [0, -300, 0], "right": [0, 400, -400] },
+    { "type": "nav_link", "id": "NL_l3n_l4",  "pos": [0, 1700, 1200],  "left": [0, 300, 0],  "right": [0, -400, -400] },
+    { "type": "nav_link", "id": "NL_l2w_l4",  "pos": [-2000, 0, 1200], "left": [-300, 0, 0], "right": [500, 0, -800] },
+    { "type": "nav_link", "id": "NL_l2e_l4",  "pos": [2000, 0, 1200],  "left": [300, 0, 0],  "right": [-500, 0, -800] }
+  ],
+
+  "navmesh_bounds": { "pos": [0, 0, 1600], "size": [9600, 16000, 3600] },
+
+  "screenshots": [
+    { "id": "top",     "pos": [0, 0, 12000],       "pitch": -90, "yaw": -90 },
+    { "id": "entry_s", "pos": [0, -7000, 300],     "pitch": -2,  "yaw": 90 },
+    { "id": "entry_n", "pos": [0, 7000, 300],      "pitch": -2,  "yaw": -90 },
+    { "id": "iso",     "pos": [6500, -7500, 4500], "pitch": -26, "yaw": 120 },
+    { "id": "temple",  "pos": [0, -2600, 1900],    "pitch": 4,   "yaw": 90 }
+  ],
+
+  "sustain": {
+    "max_alive": 8,
+    "total": 26,
+    "pool": [["melee", 5], ["shooter", 5], ["drone", 3], ["kamikaze", 1]]
+  }
+}

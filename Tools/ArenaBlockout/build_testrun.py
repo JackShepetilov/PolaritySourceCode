@@ -31,6 +31,7 @@ ARENAS = [
     ("A5_Amphitheater", -4100, 0),
     ("A6_Villa",        -4700, 0),
     ("A7_Gallery",      -4500, 500),
+    ("A9_Temple",       -4350, 0),
 ]
 SPACING = 10500
 BLVD_Y = -6400

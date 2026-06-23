@@ -11,6 +11,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "Animation/AnimMontage.h"
 #include "Engine/OverlapResult.h"
+#include "AirMailSpear.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
@@ -213,6 +214,11 @@ float UUpgrade_AirKick::GetReturnSpinSpeed() const
 	return DefAirKick.IsValid() ? DefAirKick->ReturnSpinSpeed : 0.0f;
 }
 
+float UUpgrade_AirKick::GetKickSpinSpeed() const
+{
+	return DefAirKick.IsValid() ? DefAirKick->KickSpinSpeed : 0.0f;
+}
+
 // ==================== Kick (air-melee redirect) ====================
 
 void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
@@ -241,6 +247,22 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		return;
 	}
 
+	ExecuteKick(HitActor, HitLocation);
+}
+
+bool UUpgrade_AirKick::ExecuteKick(AActor* HitActor, const FVector& ContactPoint)
+{
+	if (!DefAirKick.IsValid() || !HitActor || !HitActor->ActorHasTag(TAG_AirMailIncoming))
+	{
+		return false;
+	}
+
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character)
+	{
+		return false;
+	}
+
 	// Kick direction: camera forward...
 	FVector CamLocation = Character->GetActorLocation();
 	FVector KickDir = Character->GetActorForwardVector();
@@ -263,10 +285,7 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 		if (UStaticMeshComponent* Mesh = Weapon->WeaponMesh)
 		{
 			Mesh->SetPhysicsLinearVelocity(KickDir * KickSpeed);
-			if (DefAirKick->KickSpinSpeed > 0.0f)
-			{
-				Mesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * DefAirKick->KickSpinSpeed);
-			}
+			AirMailOrientSpear(Mesh, KickDir);
 			bKicked = true;
 		}
 	}
@@ -285,10 +304,7 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 			Prop->WeakImpactDamageByCharge = nullptr;
 
 			Mesh->SetPhysicsLinearVelocity(KickDir * KickSpeed);
-			if (DefAirKick->KickSpinSpeed > 0.0f)
-			{
-				Mesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * DefAirKick->KickSpinSpeed);
-			}
+			AirMailOrientSpear(Mesh, KickDir);
 			bKicked = true;
 		}
 	}
@@ -304,7 +320,7 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 
 	if (!bKicked)
 	{
-		return;
+		return false;
 	}
 
 	HitActor->Tags.Remove(TAG_AirMailIncoming);
@@ -313,7 +329,8 @@ void UUpgrade_AirKick::HandleMeleeHit(AActor* HitActor, const FVector& HitLocati
 	UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] %s kicked %s — speed=%.0f, kickDamage=%.0f"),
 		*Character->GetName(), *HitActor->GetName(), KickSpeed, DefAirKick->KickDamage);
 
-	PlayKickFeedback(HitLocation, KickDir);
+	PlayKickFeedback(ContactPoint, KickDir);
+	return true;
 }
 
 void UUpgrade_AirKick::PlayKickFeedback(const FVector& Location, const FVector& Direction) const
@@ -487,7 +504,7 @@ static void SetAirMailBodyVelocity(AActor* Target, const FVector& NewVelocity)
 
 void UUpgrade_AirKick::HandleMeleeAttackStarted()
 {
-	if (!DefAirKick.IsValid() || !DefAirKick->bEnableKickMagnet)
+	if (!DefAirKick.IsValid() || (!DefAirKick->bEnableKickMagnet && !DefAirKick->bEnableGenerousKickWindow))
 	{
 		return;
 	}
@@ -506,6 +523,7 @@ void UUpgrade_AirKick::HandleMeleeAttackStarted()
 	}
 
 	bKickMagnetActive = true;
+	bGenerousKickConsumed = false;
 	MagnetTarget.Reset();
 	SetComponentTickEnabled(true);
 }
@@ -544,9 +562,14 @@ void UUpgrade_AirKick::UpdateKickMagnet(float DeltaTime)
 		return;
 	}
 
-	// Steer only during the pre-window phases. Once the damage window opens (Active) the
-	// regular melee sweep takes over; any later state means the swing is done.
+	// Pre-window: magnet steering. Active (damage window): the generous kick detector takes over.
+	// Anything past Active means the swing is done.
 	const EMeleeAttackState State = MeleeComp->GetAttackState();
+	if (State == EMeleeAttackState::Active)
+	{
+		TryGenerousKickWindow();
+		return; // keep ticking — the damage window spans a few frames
+	}
 	const bool bPreWindowPhase =
 		State == EMeleeAttackState::HidingWeapon ||
 		State == EMeleeAttackState::InputDelay ||
@@ -555,6 +578,12 @@ void UUpgrade_AirKick::UpdateKickMagnet(float DeltaTime)
 	{
 		StopKickMagnet();
 		return;
+	}
+
+	// Magnet steering is optional — the generous kick window above does not depend on it.
+	if (!DefAirKick->bEnableKickMagnet)
+	{
+		return; // keep ticking into the Active window
 	}
 
 	// Camera viewpoint.
@@ -625,6 +654,90 @@ AActor* UUpgrade_AirKick::FindIncomingTargetInCone(const FVector& CamLocation, c
 		FCollisionShape::MakeSphere(DefAirKick->MagnetSearchRadius), QueryParams);
 
 	const float CosLimit = FMath::Cos(FMath::DegreesToRadians(DefAirKick->MagnetConeHalfAngleDeg));
+
+	AActor* Best = nullptr;
+	float BestDot = CosLimit; // candidates must beat the cone limit
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AActor* Candidate = Overlap.GetActor();
+		if (!Candidate || Candidate == Best || !Candidate->ActorHasTag(TAG_AirMailIncoming))
+		{
+			continue;
+		}
+
+		const FVector ToCandidate = (Candidate->GetActorLocation() - CamLocation).GetSafeNormal();
+		const float Dot = FVector::DotProduct(CamDirection, ToCandidate);
+		if (Dot >= BestDot)
+		{
+			BestDot = Dot;
+			Best = Candidate;
+		}
+	}
+
+	return Best;
+}
+
+void UUpgrade_AirKick::TryGenerousKickWindow()
+{
+	if (bGenerousKickConsumed || !DefAirKick.IsValid() || !DefAirKick->bEnableGenerousKickWindow || !GetWorld())
+	{
+		return;
+	}
+
+	AShooterCharacter* Character = GetShooterCharacter();
+	if (!Character)
+	{
+		return;
+	}
+
+	// Camera viewpoint (same source as the magnet).
+	FVector CamLocation = Character->GetActorLocation();
+	FRotator CamRotation = Character->GetActorRotation();
+	if (APlayerController* PC = Cast<APlayerController>(Character->GetController()))
+	{
+		PC->GetPlayerViewPoint(CamLocation, CamRotation);
+	}
+	else if (UCameraComponent* Camera = Character->GetFirstPersonCameraComponent())
+	{
+		CamLocation = Camera->GetComponentLocation();
+		CamRotation = Camera->GetComponentRotation();
+	}
+	const FVector CamDirection = CamRotation.Vector();
+
+	AActor* Target = FindKickTargetInWindow(CamLocation, CamDirection);
+	if (Target && ExecuteKick(Target, Target->GetActorLocation()))
+	{
+		bGenerousKickConsumed = true;
+		UE_LOG(LogTemp, Warning, TEXT("[AIR_MAIL] generous kick window connected on %s"), *Target->GetName());
+	}
+}
+
+AActor* UUpgrade_AirKick::FindKickTargetInWindow(const FVector& CamLocation, const FVector& CamDirection) const
+{
+	if (!DefAirKick.IsValid() || !GetWorld())
+	{
+		return nullptr;
+	}
+
+	AShooterCharacter* Character = GetShooterCharacter();
+
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody); // thrown weapons / props
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);        // bounced NPCs
+
+	FCollisionQueryParams QueryParams;
+	if (Character)
+	{
+		QueryParams.AddIgnoredActor(Character);
+	}
+
+	// The overlap sphere radius IS the kick reach — distance is enforced by the query itself.
+	TArray<FOverlapResult> Overlaps;
+	GetWorld()->OverlapMultiByObjectType(
+		Overlaps, CamLocation, FQuat::Identity, ObjectParams,
+		FCollisionShape::MakeSphere(DefAirKick->KickWindowReach), QueryParams);
+
+	const float CosLimit = FMath::Cos(FMath::DegreesToRadians(DefAirKick->KickWindowConeHalfAngleDeg));
 
 	AActor* Best = nullptr;
 	float BestDot = CosLimit; // candidates must beat the cone limit

@@ -180,11 +180,20 @@ def open_or_create_level(les, level_path):
     # Learned 2026-06-11 the hard way: wiped the author's freshly added lighting
     # sublevel + debug character on Lvl_IslandSpike. Refuse loudly instead.
     dirty = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
-    if dirty:
-        names = ", ".join(p.get_name() for p in dirty)
+    foreign = [p for p in dirty if p.get_name() != level_path]
+    if foreign:
+        names = ", ".join(p.get_name() for p in foreign)
         raise RuntimeError(
             "UNSAVED map changes ({}) - save everything in the editor first; "
             "a scripted level load would silently discard them".format(names))
+    if dirty:
+        # Only the level we're about to rebuild is dirty - typically leftover
+        # transient capture actors from a PRIOR build's screenshot pass (that pass
+        # is deliberately never saved, so the level stays dirty afterwards). Safe to
+        # proceed: load_level reloads it from disk and clear_tagged + respawn fully
+        # overwrites our own generation. FOREIGN maps still hard-block above, so the
+        # author's island/lighting/other arenas are never silently discarded.
+        log("Self-dirty {} ignored - reloading from disk and rebuilding".format(level_path))
     # Asset registry scans asynchronously on editor boot — NEVER trust does_asset_exist
     # alone, or a slow scan would route an EXISTING map into new_level() and blank it.
     try:

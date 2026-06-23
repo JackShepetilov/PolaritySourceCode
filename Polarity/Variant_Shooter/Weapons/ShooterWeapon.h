@@ -8,6 +8,7 @@
 #include "Animation/AnimInstance.h"
 #include "WeaponRecoilComponent.h"
 #include "TutorialTypes.h"
+#include "CrosshairConfig.h"
 #include "Chaos/ChaosEngineInterface.h"
 #include "ShooterWeapon.generated.h"
 
@@ -513,6 +514,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 10, Units = "deg"))
 	float AimVariance = 1.0f;
 
+	// ==================== Crosshair ====================
+
+	/** Per-weapon HUD crosshair appearance (texture / tint / size). Read by the HUD crosshair widget
+	 *  when this weapon is equipped. Purely visual. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Crosshair")
+	FCrosshairConfig CrosshairConfig;
+
 	// ==================== State ====================
 
 	bool bIsFiring = false;
@@ -814,6 +822,17 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Recoil")
 	const FWeaponRecoilSettings& GetRecoilSettings() const { return RecoilSettings; }
+
+	// ==================== Crosshair ====================
+
+	/** Per-weapon crosshair appearance (read by the HUD crosshair widget). */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Crosshair")
+	const FCrosshairConfig& GetCrosshairConfig() const { return CrosshairConfig; }
+
+	/** True while the trigger is held / the weapon is firing. Drives the cosmetic crosshair bloom
+	 *  (grow-on-fire). */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsFiring() const { return bIsFiring; }
 
 	// ==================== Hitscan Getters ====================
 

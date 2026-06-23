@@ -141,6 +141,24 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Magnet", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float MagnetFallbackLeadTime = 0.25f;
 
+	// ==================== Generous Kick Window ====================
+	// During the airborne melee damage window the kick connects via a forgiving object-type overlap
+	// in front of the camera (independent of the small enemy-melee sweep and its collision channel),
+	// so a near-miss on a small flying object still kicks. This is the knob to widen the kick "hitbox".
+
+	/** Master switch for the generous kick window. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Window")
+	bool bEnableGenerousKickWindow = true;
+
+	/** How far in front of the camera (cm) an incoming object is kicked during the damage window —
+	 *  the effective kick hitbox size. Larger = more forgiving. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Window", meta = (ClampMin = "50.0", ClampMax = "800.0", Units = "cm"))
+	float KickWindowReach = 300.0f;
+
+	/** Angular generosity (deg) around camera forward for the kick window. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Mail|Kick Window", meta = (ClampMin = "5.0", ClampMax = "90.0", Units = "deg"))
+	float KickWindowConeHalfAngleDeg = 40.0f;
+
 	// ==================== Kick Feedback ====================
 
 	/** One-shot Niagara effect spawned at the kick contact point. */
