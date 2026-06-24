@@ -24,6 +24,8 @@
 #include "AIController.h"
 #include "Engine/OverlapResult.h"
 #include "../Pickups/HealthPickup.h"
+#include "../Weapons/DroppedMeleeWeapon.h"
+#include "../Weapons/DroppedRangedWeapon.h"
 #include "../DamageTypes/DamageType_DroneExplosion.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
@@ -276,6 +278,8 @@ void AFlyingDrone::DroneDie()
 	bDeathSequenceStarted = true;
 	bIsDead = true;
 
+	const float CachedNPCCharge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
+
 	// Stop combat timer
 	GetWorld()->GetTimerManager().ClearTimer(CombatTimerHandle);
 
@@ -299,9 +303,89 @@ void AFlyingDrone::DroneDie()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
-	// Spawn health pickups: prop/drone kill, wall slam self-destruct, or killed while stunned by explosion
+	// Spawn death drops before explosion/deactivation can clear EMF charge or destroy the weapon actor.
 	if (!bSuppressDeathDrops)
 	{
+	if (DroppedMeleeWeaponClass)
+	{
+		const float NPCCharge = CachedNPCCharge;
+		const float DropChance = DropWeaponBaseChance;
+		const float Roll = FMath::FRand();
+
+		UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: MeleeDrop=%s Charge=%.2f BaseChance=%.2f Roll=%.3f (need < %.3f)"),
+			*GetName(), *DroppedMeleeWeaponClass->GetName(), NPCCharge, DropWeaponBaseChance, Roll, DropChance);
+
+		if (Roll < DropChance)
+		{
+			FActorSpawnParameters WeaponSpawnParams;
+			WeaponSpawnParams.SpawnCollisionHandlingOverride =
+				ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+			const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
+			ADroppedMeleeWeapon* DroppedWeapon = GetWorld()->SpawnActor<ADroppedMeleeWeapon>(
+				DroppedMeleeWeaponClass, SpawnLoc, GetActorRotation(), WeaponSpawnParams);
+
+			if (DroppedWeapon)
+			{
+				if (!FMath::IsNearlyZero(NPCCharge))
+				{
+					DroppedWeapon->SetCharge(NPCCharge);
+				}
+
+				UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: Melee drop SUCCESS - %s spawned, charge=%.2f"),
+					*GetName(), *DroppedWeapon->GetName(), DroppedWeapon->GetCharge());
+			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("[WeaponDrop] DRONE %s: Melee drop FAILED - SpawnActor returned null"), *GetName());
+			}
+		}
+	}
+
+	if (DroppedRangedWeaponTable.Num() > 0)
+	{
+		for (const FDroppedRangedWeaponEntry& Entry : DroppedRangedWeaponTable)
+		{
+			if (!Entry.DroppedWeaponClass)
+			{
+				continue;
+			}
+
+			const float Roll = FMath::FRand();
+			if (Roll < Entry.DropChance)
+			{
+				FActorSpawnParameters RangedSpawnParams;
+				RangedSpawnParams.SpawnCollisionHandlingOverride =
+					ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+				const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
+				ADroppedRangedWeapon* DroppedRanged = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
+					Entry.DroppedWeaponClass, SpawnLoc, GetActorRotation(), RangedSpawnParams);
+
+				if (DroppedRanged)
+				{
+					if (!FMath::IsNearlyZero(CachedNPCCharge))
+					{
+						DroppedRanged->SetCharge(CachedNPCCharge);
+					}
+
+					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: Ranged drop SUCCESS - %s spawned, charge=%.2f"),
+						*GetName(), *Entry.DroppedWeaponClass->GetName(), DroppedRanged->GetCharge());
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("[WeaponDrop] DRONE %s: Ranged drop FAILED - SpawnActor returned null for %s"),
+						*GetName(), *Entry.DroppedWeaponClass->GetName());
+				}
+
+				break;
+			}
+
+			UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] DRONE %s: Ranged entry %s - Roll %.3f >= Chance %.3f"),
+				*GetName(), *Entry.DroppedWeaponClass->GetName(), Roll, Entry.DropChance);
+		}
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s DroneDie(): bWasChannelingTarget=%d, HealthPickupClass=%s, bStunnedByExplosion=%d"),
 		*GetName(), bWasChannelingTarget,
 		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"),
