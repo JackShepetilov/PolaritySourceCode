@@ -2162,6 +2162,141 @@ FVector AShooterCharacter::GetWeaponTargetLocation()
 	return OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
 }
 
+static AShooterWeapon* FindOwnedWeaponWithSameSwitchAction(
+	const TArray<AShooterWeapon*>& OwnedWeapons,
+	const TSubclassOf<AShooterWeapon>& IncomingWeaponClass)
+{
+	if (!IncomingWeaponClass)
+	{
+		return nullptr;
+	}
+
+	const AShooterWeapon* IncomingDefault = IncomingWeaponClass->GetDefaultObject<AShooterWeapon>();
+	UInputAction* IncomingAction = IncomingDefault ? IncomingDefault->GetSwitchAction() : nullptr;
+	if (!IncomingAction)
+	{
+		return nullptr;
+	}
+
+	for (AShooterWeapon* OwnedWeapon : OwnedWeapons)
+	{
+		if (!OwnedWeapon || OwnedWeapon->IsA(IncomingWeaponClass))
+		{
+			continue;
+		}
+
+		if (OwnedWeapon->GetSwitchAction() == IncomingAction)
+		{
+			return OwnedWeapon;
+		}
+	}
+
+	return nullptr;
+}
+
+static bool DropOwnedRangedWeaponForPickupReplacement(
+	AShooterCharacter* Self,
+	TArray<AShooterWeapon*>& OwnedWeapons,
+	TObjectPtr<AShooterWeapon>& CurrentWeapon,
+	UUpgradeManagerComponent* UpgradeManager,
+	AShooterWeapon* WeaponToDrop,
+	const FVector& LocalSpawnOffset,
+	const FVector& LocalLinearImpulse,
+	const FVector& AngularImpulse)
+{
+	if (!Self || !WeaponToDrop)
+	{
+		return false;
+	}
+
+	const FTransform RefTransform = Self->GetActorTransform();
+
+	if (WeaponToDrop->SourceYankDropClass)
+	{
+		static const FName OptionalGripSocket(TEXT("OptionalGrip"));
+		FVector RefLocation;
+		FRotator RefRotation;
+		if (USkeletalMeshComponent* WeaponFPMesh = WeaponToDrop->GetFirstPersonMesh())
+		{
+			RefRotation = WeaponFPMesh->GetComponentRotation();
+			RefLocation = WeaponFPMesh->DoesSocketExist(OptionalGripSocket)
+				? WeaponFPMesh->GetSocketLocation(OptionalGripSocket)
+				: WeaponFPMesh->GetComponentLocation();
+		}
+		else if (USkeletalMeshComponent* WeaponTPMesh = WeaponToDrop->GetThirdPersonMesh())
+		{
+			RefRotation = WeaponTPMesh->GetComponentRotation();
+			RefLocation = WeaponTPMesh->DoesSocketExist(OptionalGripSocket)
+				? WeaponTPMesh->GetSocketLocation(OptionalGripSocket)
+				: WeaponTPMesh->GetComponentLocation();
+		}
+		else
+		{
+			RefLocation = RefTransform.GetLocation();
+			RefRotation = RefTransform.Rotator();
+		}
+
+		const FVector SpawnLoc = RefLocation + RefRotation.RotateVector(LocalSpawnOffset);
+		const FRotator SpawnRot = RefRotation;
+
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		ADroppedRangedWeapon* Discarded = Self->GetWorld()->SpawnActor<ADroppedRangedWeapon>(
+			WeaponToDrop->SourceYankDropClass, SpawnLoc, SpawnRot, Params);
+
+		if (Discarded)
+		{
+			Discarded->bCanBeCaptured = false;
+			Discarded->SetCharge(0.0f);
+			if (UEMFChargeWidgetSubsystem* WidgetSub = Self->GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+			{
+				WidgetSub->UnregisterDroppedRangedWeapon(Discarded);
+			}
+
+			if (UStaticMeshComponent* DiscardedMesh = Discarded->WeaponMesh)
+			{
+				const FVector WorldLinearImpulse = RefTransform.TransformVector(LocalLinearImpulse);
+				DiscardedMesh->AddImpulse(WorldLinearImpulse, NAME_None, /*bVelChange=*/ true);
+				DiscardedMesh->AddAngularImpulseInDegrees(AngularImpulse, NAME_None, /*bVelChange=*/ true);
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: could not spawn dropped copy for %s"),
+				*GetNameSafe(WeaponToDrop));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: %s has no SourceYankDropClass; removing without dropped copy"),
+			*GetNameSafe(WeaponToDrop));
+	}
+
+	const bool bWasCurrent = (CurrentWeapon == WeaponToDrop);
+	OwnedWeapons.Remove(WeaponToDrop);
+	Self->OnWeaponInventoryChanged.Broadcast();
+
+	if (bWasCurrent)
+	{
+		AShooterWeapon* OldCurrent = CurrentWeapon;
+		CurrentWeapon->DeactivateWeapon();
+		CurrentWeapon = nullptr;
+		Self->OnActiveWeaponChanged.Broadcast(nullptr);
+
+		if (UpgradeManager)
+		{
+			UpgradeManager->NotifyWeaponChanged(OldCurrent, nullptr);
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: dropped old %s because incoming weapon uses the same SwitchAction"),
+		*GetNameSafe(WeaponToDrop));
+
+	WeaponToDrop->Destroy();
+	return true;
+}
+
 void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass)
 {
 	AShooterWeapon* OwnedWeapon = FindWeaponOfType(WeaponClass);
@@ -2253,6 +2388,15 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 	if (AShooterWeapon* OwnedWeapon = FindWeaponOfType(WeaponClass))
 	{
 		return OwnedWeapon;
+	}
+
+	if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponWithSameSwitchAction(OwnedWeapons, WeaponClass))
+	{
+		if (!DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
+			ConflictingWeapon, YankDropSpawnOffset, YankDropLinearImpulse, YankDropAngularImpulse))
+		{
+			return nullptr;
+		}
 	}
 
 	FActorSpawnParameters SpawnParams;
