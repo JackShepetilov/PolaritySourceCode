@@ -97,7 +97,8 @@ protected:
 
 public:
 	virtual bool IsMeleeWeapon() const override { return true; }
-	virtual bool OnSecondaryAction() override { return true; } // Block ADS
+	virtual bool OnSecondaryAction() override;
+	virtual void OnSecondaryActionReleased() override;
 
 	// ==================== Combo Speed Multiplier ====================
 

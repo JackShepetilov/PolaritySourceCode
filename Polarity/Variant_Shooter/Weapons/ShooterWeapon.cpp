@@ -336,6 +336,15 @@ void AShooterWeapon::StopFiring()
 	GetWorld()->GetTimerManager().ClearTimer(RefireTimer);
 }
 
+bool AShooterWeapon::OnSecondaryAction()
+{
+	return false;
+}
+
+void AShooterWeapon::OnSecondaryActionReleased()
+{
+}
+
 void AShooterWeapon::FireOnce()
 {
 	// Single shot through the normal Fire() path (handles aim/ammo/charge/OnShotFired), then clear

@@ -101,6 +101,17 @@ void AShooterWeapon_Melee::Tick(float DeltaTime)
 	UpdateCameraFocus(DeltaTime);
 }
 
+bool AShooterWeapon_Melee::OnSecondaryAction()
+{
+	// ShooterCharacter asks weapon-specific upgrades before this. Melee still blocks ADS.
+	return true;
+}
+
+void AShooterWeapon_Melee::OnSecondaryActionReleased()
+{
+	Super::OnSecondaryActionReleased();
+}
+
 // ==================== Fire ====================
 
 void AShooterWeapon_Melee::Fire()

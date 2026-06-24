@@ -447,6 +447,30 @@ void UUpgradeManagerComponent::NotifyHealthPickupCollectedAtFullHP()
 	}
 }
 
+bool UUpgradeManagerComponent::HandleWeaponSecondaryAction(AShooterWeapon* Weapon)
+{
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value && Pair.Value->OnWeaponSecondaryAction(Weapon))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void UUpgradeManagerComponent::HandleWeaponSecondaryActionReleased(AShooterWeapon* Weapon)
+{
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->OnWeaponSecondaryActionReleased(Weapon);
+		}
+	}
+}
+
 bool UUpgradeManagerComponent::AddStoredHealthPickup()
 {
 	if (StoredHealthPickups >= MaxStoredHealthPickups)

@@ -242,6 +242,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsWallRunExternallyDisabled() const { return bWallRunExternallyDisabled; }
 
+	/** Temporary gameplay override for abilities that need CharacterMovement collision with a higher speed cap. */
+	void SetExternalMaxSpeedOverride(float MaxSpeed);
+	void ClearExternalMaxSpeedOverride();
+
 	/** Enable/disable the start-of-run launch state (suppresses air abilities while the toss arc plays). */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void SetRunLaunchActive(bool bActive);
@@ -378,6 +382,12 @@ public:
 	 *  value (not a shared DataAsset), so an upgrade may write it directly and reset to 1.0 on removal. */
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	float ExternalSpeedMultiplier = 1.0f;
+
+	UPROPERTY()
+	bool bExternalMaxSpeedOverride = false;
+
+	UPROPERTY()
+	float ExternalMaxSpeedOverride = 0.0f;
 
 	// ==================== EMF ====================
 

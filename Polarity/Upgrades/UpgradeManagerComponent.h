@@ -131,6 +131,15 @@ public:
 	/** Called when owner collects a health pickup while at full HP */
 	void NotifyHealthPickupCollectedAtFullHP();
 
+	/**
+	 * Called by AShooterWeapon when ADS / secondary action is pressed.
+	 * Returns true if an active upgrade handled the input and normal ADS should be blocked.
+	 */
+	bool HandleWeaponSecondaryAction(AShooterWeapon* Weapon);
+
+	/** Called by AShooterWeapon when ADS / secondary action is released. */
+	void HandleWeaponSecondaryActionReleased(AShooterWeapon* Weapon);
+
 	/** Query all active upgrades for their combined damage multiplier against a target */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedDamageMultiplier(AActor* Target) const;

@@ -609,10 +609,10 @@ public:
 	virtual bool IsMeleeWeapon() const { return false; }
 
 	/** Called when ADS/secondary action button pressed. Return true to block normal ADS. */
-	virtual bool OnSecondaryAction() { return false; }
+	virtual bool OnSecondaryAction();
 
 	/** Called when ADS/secondary action button released. */
-	virtual void OnSecondaryActionReleased() {}
+	virtual void OnSecondaryActionReleased();
 
 protected:
 

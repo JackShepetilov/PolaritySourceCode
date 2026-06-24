@@ -1144,6 +1144,13 @@ void AShooterCharacter::DoStartADS()
 		return;
 	}
 
+	// Let upgrades consume weapon-specific secondary actions before the weapon itself
+	// (e.g. melee charge on ADS while a sword is equipped).
+	if (CurrentWeapon && UpgradeManager && UpgradeManager->HandleWeaponSecondaryAction(CurrentWeapon))
+	{
+		return;
+	}
+
 	// Let weapon handle secondary action as ability (e.g. laser's Second Harmonic)
 	if (CurrentWeapon && CurrentWeapon->OnSecondaryAction())
 	{
@@ -1174,6 +1181,10 @@ void AShooterCharacter::DoStopADS()
 	// bWantsToAim was never set, but the weapon still needs the release callback
 	if (CurrentWeapon)
 	{
+		if (UpgradeManager)
+		{
+			UpgradeManager->HandleWeaponSecondaryActionReleased(CurrentWeapon);
+		}
 		CurrentWeapon->OnSecondaryActionReleased();
 	}
 

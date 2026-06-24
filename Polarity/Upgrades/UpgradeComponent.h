@@ -99,6 +99,15 @@ protected:
 	virtual void OnHealthPickupCollectedAtFullHP() {}
 
 	/**
+	 * Called when the currently equipped weapon receives ADS / secondary input.
+	 * Return true if this upgrade handled the input and normal ADS should be blocked.
+	 */
+	virtual bool OnWeaponSecondaryAction(AShooterWeapon* Weapon) { return false; }
+
+	/** Called when ADS / secondary input is released for the currently equipped weapon. */
+	virtual void OnWeaponSecondaryActionReleased(AShooterWeapon* Weapon) {}
+
+	/**
 	 * Return a damage multiplier that this upgrade applies to hitscan shots.
 	 * Called by the weapon BEFORE applying damage, so upgrades can scale damage up or down.
 	 * @param Target The actor being shot at

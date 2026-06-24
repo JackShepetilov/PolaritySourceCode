@@ -284,7 +284,8 @@ float UApexMovementComponent::GetMaxSpeed() const
 {
 	if (!MovementSettings)
 	{
-		return Super::GetMaxSpeed() * DamageSpeedMultiplier * ExternalSpeedMultiplier;
+		const float BaseSpeed = Super::GetMaxSpeed() * DamageSpeedMultiplier * ExternalSpeedMultiplier;
+		return bExternalMaxSpeedOverride ? FMath::Max(BaseSpeed, ExternalMaxSpeedOverride) : BaseSpeed;
 	}
 
 	float BaseSpeed;
@@ -318,7 +319,20 @@ float UApexMovementComponent::GetMaxSpeed() const
 		}
 	}
 
-	return BaseSpeed * DamageSpeedMultiplier * ExternalSpeedMultiplier;
+	const float ScaledBaseSpeed = BaseSpeed * DamageSpeedMultiplier * ExternalSpeedMultiplier;
+	return bExternalMaxSpeedOverride ? FMath::Max(ScaledBaseSpeed, ExternalMaxSpeedOverride) : ScaledBaseSpeed;
+}
+
+void UApexMovementComponent::SetExternalMaxSpeedOverride(float MaxSpeed)
+{
+	bExternalMaxSpeedOverride = MaxSpeed > 0.0f;
+	ExternalMaxSpeedOverride = bExternalMaxSpeedOverride ? MaxSpeed : 0.0f;
+}
+
+void UApexMovementComponent::ClearExternalMaxSpeedOverride()
+{
+	bExternalMaxSpeedOverride = false;
+	ExternalMaxSpeedOverride = 0.0f;
 }
 
 float UApexMovementComponent::GetMaxAcceleration() const
