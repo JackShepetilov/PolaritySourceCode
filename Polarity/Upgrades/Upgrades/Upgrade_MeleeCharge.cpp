@@ -522,7 +522,8 @@ void UUpgrade_MeleeCharge::ApplyBashDamage(AActor* Target, const FHitResult& Hit
 	const bool bKilled = IsActorDeadAfterDamage(Target);
 	if (Character)
 	{
-		const FVector HitLocation = Hit.ImpactPoint.IsNearlyZero() ? Target->GetActorLocation() : Hit.ImpactPoint;
+		const FVector ImpactPoint(Hit.ImpactPoint);
+		const FVector HitLocation = ImpactPoint.IsNearlyZero() ? Target->GetActorLocation() : ImpactPoint;
 		Character->OnWeaponHit(HitLocation, ChargeDirection, Data.BashDamage, false, bKilled, Target);
 
 		if (UUpgradeManagerComponent* UpgradeMgr = Character->GetUpgradeManager())
