@@ -97,7 +97,8 @@ void UUpgrade_MeleeCharge::OnWeaponSecondaryActionReleased(AShooterWeapon* /*Wea
 
 float UUpgrade_MeleeCharge::GetMeleeDamageMultiplier(AActor* /*Target*/) const
 {
-	if (!bPendingMeleeBoost || MeleeBoostTimeRemaining <= 0.0f)
+	const bool bChargeDamageWindowActive = bIsCharging || (bPendingMeleeBoost && MeleeBoostTimeRemaining > 0.0f);
+	if (!bChargeDamageWindowActive)
 	{
 		return 1.0f;
 	}
