@@ -79,6 +79,42 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Projectile|Explosion", meta = (ClampMin = 0, ClampMax = 5000, Units = "cm"))
 	float ExplosionRadius = 500.0f;	
 
+	/** Damage multiplier at the outer edge of the explosion. TF2-like splash uses about 0.5 at the edge. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Explosion", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ExplosionEdgeDamageMultiplier = 0.5f;
+
+	/** Falloff curve exponent from center to edge. 1 = linear, >1 keeps damage higher near the center. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Explosion", meta = (ClampMin = "0.1", ClampMax = "5.0"))
+	float ExplosionFalloffExponent = 1.0f;
+
+	/** If true, the actor directly hit by an explosive projectile receives full splash damage. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Explosion")
+	bool bDirectHitIgnoresSplashFalloff = true;
+
+	/** If true, world geometry blocks explosion damage and knockback. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Explosion")
+	bool bRequireExplosionLineOfSight = true;
+
+	/** If true, the owner can be launched by their own explosion even when self-damage is disabled. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Rocket Jump")
+	bool bEnableOwnerRocketJump = true;
+
+	/** Owner knockback multiplier when the owner is still grounded at explosion time. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Rocket Jump", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float OwnerGroundKnockbackMultiplier = 0.45f;
+
+	/** Owner knockback multiplier while airborne without crouch held. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Rocket Jump", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float OwnerAirKnockbackMultiplier = 1.0f;
+
+	/** Owner knockback multiplier while airborne with crouch held. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Rocket Jump", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float OwnerAirCrouchKnockbackMultiplier = 1.5f;
+
+	/** Self-damage multiplier for the owner. Only used when bDamageOwner is enabled. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Rocket Jump", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float OwnerSelfDamageMultiplier = 0.6f;
+
 	/** If true, this projectile has already hit another surface */
 	bool bHit = false;
 
@@ -140,11 +176,20 @@ protected:
 
 protected:
 
-	/** Looks up actors within the explosion radius and damages them */
-	void ExplosionCheck(const FVector& ExplosionCenter);
+	/** Looks up actors within the explosion radius and damages/launches them */
+	void ExplosionCheck(const FVector& ExplosionCenter, AActor* DirectHitActor);
 
 	/** Processes a projectile hit for the given actor */
 	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection);
+
+	/** Processes explosion damage and knockback for one actor */
+	void ProcessExplosionHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& ExplosionCenter, AActor* DirectHitActor);
+
+	/** Calculates TF2-style splash scale for an actor at the given distance */
+	float CalculateExplosionSplashScale(float Distance, const AActor* HitActor, const AActor* DirectHitActor) const;
+
+	/** Calculates owner-specific rocket jump multiplier from ground/air/crouch state */
+	float GetOwnerRocketJumpMultiplier(const ACharacter* HitCharacter) const;
 
 	/** Calculate damage multiplier based on target's tags */
 	float GetTagDamageMultiplier(AActor* Target) const;

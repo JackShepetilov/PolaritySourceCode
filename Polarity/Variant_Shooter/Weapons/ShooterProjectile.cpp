@@ -3,13 +3,16 @@
 
 #include "ShooterProjectile.h"
 #include "ProjectilePoolSubsystem.h"
+#include "ApexMovementComponent.h"
 #include "Components/SphereComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/DamageType.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Controller.h"
+#include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
@@ -113,7 +116,7 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	{
 		
 		// apply explosion damage centered on the projectile
-		ExplosionCheck(GetActorLocation());
+		ExplosionCheck(GetActorLocation(), Other);
 
 	} else {
 
@@ -137,7 +140,7 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	}
 }
 
-void AShooterProjectile::ExplosionCheck(const FVector& ExplosionCenter)
+void AShooterProjectile::ExplosionCheck(const FVector& ExplosionCenter, AActor* DirectHitActor)
 {
 	// do a sphere overlap check look for nearby actors to damage
 	TArray<FOverlapResult> Overlaps;
@@ -152,9 +155,10 @@ void AShooterProjectile::ExplosionCheck(const FVector& ExplosionCenter)
 
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
-	if (!bDamageOwner)
+	if (!bDamageOwner && !bEnableOwnerRocketJump)
 	{
 		QueryParams.AddIgnoredActor(GetInstigator());
+		QueryParams.AddIgnoredActor(GetOwner());
 	}
 
 	GetWorld()->OverlapMultiByObjectType(Overlaps, ExplosionCenter, FQuat::Identity, ObjectParams, OverlapShape, QueryParams);
@@ -166,18 +170,144 @@ void AShooterProjectile::ExplosionCheck(const FVector& ExplosionCenter)
 	{
 		// overlaps may return the same actor multiple times per each component overlapped
 		// ensure we only damage each actor once by adding it to a damaged list
-		if (DamagedActors.Find(CurrentOverlap.GetActor()) == INDEX_NONE)
+		AActor* HitActor = CurrentOverlap.GetActor();
+		if (HitActor && DamagedActors.Find(HitActor) == INDEX_NONE)
 		{
-			DamagedActors.Add(CurrentOverlap.GetActor());
-
-			// apply physics force away from the explosion
-			const FVector& ExplosionDir = CurrentOverlap.GetActor()->GetActorLocation() - GetActorLocation();
+			DamagedActors.Add(HitActor);
 
 			// push and/or damage the overlapped actor
-			ProcessHit(CurrentOverlap.GetActor(), CurrentOverlap.GetComponent(), GetActorLocation(), ExplosionDir.GetSafeNormal());
+			ProcessExplosionHit(HitActor, CurrentOverlap.GetComponent(), ExplosionCenter, DirectHitActor);
 		}
 			
 	}
+}
+
+void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& ExplosionCenter, AActor* DirectHitActor)
+{
+	if (!HitActor)
+	{
+		return;
+	}
+
+	const bool bIsOwner =
+		HitActor == GetInstigator() ||
+		HitActor == GetOwner();
+
+	if (bIsOwner && !bDamageOwner && !bEnableOwnerRocketJump)
+	{
+		return;
+	}
+
+	if (bRequireExplosionLineOfSight && HitActor != DirectHitActor)
+	{
+		FHitResult LOSHit;
+		FCollisionQueryParams LOSParams;
+		LOSParams.AddIgnoredActor(this);
+		LOSParams.AddIgnoredActor(HitActor);
+
+		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+			LOSHit, ExplosionCenter, HitActor->GetActorLocation(), ECC_Visibility, LOSParams);
+		if (bBlocked)
+		{
+			return;
+		}
+	}
+
+	const float Distance = FVector::Dist(ExplosionCenter, HitActor->GetActorLocation());
+	const float SplashScale = CalculateExplosionSplashScale(Distance, HitActor, DirectHitActor);
+	if (SplashScale <= 0.0f)
+	{
+		return;
+	}
+
+	const FVector HitDirection = (HitActor->GetActorLocation() - ExplosionCenter).GetSafeNormal();
+
+	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	{
+		const bool bCanAffectOwner = !bIsOwner || bDamageOwner || bEnableOwnerRocketJump;
+		if (bCanAffectOwner)
+		{
+			float TagMultiplier = GetTagDamageMultiplier(HitActor);
+			float FinalDamage = HitDamage * TagMultiplier * SplashScale;
+			if (bIsOwner)
+			{
+				FinalDamage *= OwnerSelfDamageMultiplier;
+			}
+
+			if (FinalDamage > 0.0f && (!bIsOwner || bDamageOwner))
+			{
+				FRadialDamageEvent RadialDamageEvent;
+				RadialDamageEvent.DamageTypeClass = HitDamageType;
+				RadialDamageEvent.Origin = ExplosionCenter;
+				RadialDamageEvent.Params.BaseDamage = HitDamage;
+				RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
+
+				AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
+				HitCharacter->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
+			}
+
+			if (CharacterKnockbackForce > 0.0f && (!bIsOwner || bEnableOwnerRocketJump))
+			{
+				FVector LaunchDir = HitDirection;
+				LaunchDir.Z += KnockbackUpwardBias;
+				LaunchDir = LaunchDir.GetSafeNormal();
+
+				float LaunchMultiplier = SplashScale;
+				if (bIsOwner)
+				{
+					LaunchMultiplier *= GetOwnerRocketJumpMultiplier(HitCharacter);
+				}
+
+				HitCharacter->LaunchCharacter(LaunchDir * CharacterKnockbackForce * LaunchMultiplier, true, true);
+			}
+		}
+	}
+
+	if (HitComp && HitComp->IsSimulatingPhysics())
+	{
+		HitComp->AddImpulseAtLocation(HitDirection * PhysicsForce * SplashScale, ExplosionCenter);
+	}
+}
+
+float AShooterProjectile::CalculateExplosionSplashScale(float Distance, const AActor* HitActor, const AActor* DirectHitActor) const
+{
+	if (bDirectHitIgnoresSplashFalloff && HitActor && HitActor == DirectHitActor)
+	{
+		return 1.0f;
+	}
+
+	if (ExplosionRadius <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	const float T = FMath::Clamp(Distance / ExplosionRadius, 0.0f, 1.0f);
+	return FMath::Lerp(1.0f, ExplosionEdgeDamageMultiplier, FMath::Pow(T, ExplosionFalloffExponent));
+}
+
+float AShooterProjectile::GetOwnerRocketJumpMultiplier(const ACharacter* HitCharacter) const
+{
+	if (!HitCharacter)
+	{
+		return 1.0f;
+	}
+
+	const UCharacterMovementComponent* CharacterMovement = HitCharacter->GetCharacterMovement();
+	if (!CharacterMovement || !CharacterMovement->IsFalling())
+	{
+		return OwnerGroundKnockbackMultiplier;
+	}
+
+	bool bCrouchHeld = CharacterMovement->IsCrouching();
+	if (const UApexMovementComponent* ApexMovement = Cast<UApexMovementComponent>(CharacterMovement))
+	{
+		bCrouchHeld = bCrouchHeld ||
+			ApexMovement->bIsCrouchedInAir ||
+			ApexMovement->bWantsSlideOnLand ||
+			ApexMovement->IsCrouchInputHeld();
+	}
+
+	return bCrouchHeld ? OwnerAirCrouchKnockbackMultiplier : OwnerAirKnockbackMultiplier;
 }
 
 void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection)
