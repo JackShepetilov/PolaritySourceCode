@@ -246,7 +246,9 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 				HitCharacter->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
 			}
 
-			if (CharacterKnockbackForce > 0.0f && (!bIsOwner || bEnableOwnerRocketJump))
+			const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+			const bool bFiredByPlayer = GetInstigator() && GetInstigator() == PlayerPawn;
+			if (CharacterKnockbackForce > 0.0f && bFiredByPlayer && (!bIsOwner || bEnableOwnerRocketJump))
 			{
 				FVector LaunchDir = HitDirection;
 				LaunchDir.Z += KnockbackUpwardBias;
