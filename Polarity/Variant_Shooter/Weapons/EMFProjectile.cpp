@@ -805,14 +805,24 @@ void AEMFProjectile::SpawnChargeBasedTrailVFX()
 		return;
 	}
 
-	// Stop parent's trail if it was spawned
-	if (TrailComponent)
+	if (TrailComponent && !IsValid(TrailComponent))
 	{
-		TrailComponent->Deactivate();
 		TrailComponent = nullptr;
 	}
 
-	// Spawn charge-based trail
+	if (IsValid(TrailComponent))
+	{
+		if (TrailComponent->GetAsset() == ChargeTrailVFX)
+		{
+			TrailComponent->Activate(true);
+			return;
+		}
+
+		TrailComponent->DestroyComponent();
+		TrailComponent = nullptr;
+	}
+
+	// Spawn charge-based trail and keep it alive for pooled projectile reuse.
 	TrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
 		ChargeTrailVFX,
 		CollisionComponent,
@@ -820,7 +830,7 @@ void AEMFProjectile::SpawnChargeBasedTrailVFX()
 		FVector::ZeroVector,
 		FRotator::ZeroRotator,
 		EAttachLocation::KeepRelativeOffset,
-		true
+		false
 	);
 }
 

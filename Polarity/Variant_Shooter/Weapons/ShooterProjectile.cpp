@@ -74,7 +74,7 @@ void AShooterProjectile::BeginPlay()
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::KeepRelativeOffset,
-			true
+			false // Keep the component alive; pooled projectiles reactivate it on reuse.
 		);
 	}
 }
@@ -101,7 +101,7 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	// Stop trail VFX on hit
-	if (TrailComponent)
+	if (IsValid(TrailComponent))
 	{
 		TrailComponent->Deactivate();
 	}
@@ -298,6 +298,11 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 	SetActorHiddenInGame(false);
 	SetActorTickEnabled(true);
 
+	if (TrailComponent && !IsValid(TrailComponent))
+	{
+		TrailComponent = nullptr;
+	}
+
 	// Spawn trail VFX if configured
 	if (TrailFX && !TrailComponent)
 	{
@@ -308,10 +313,10 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::KeepRelativeOffset,
-			true
+			false // Keep the component alive; pooled projectiles reactivate it on reuse.
 		);
 	}
-	else if (TrailComponent)
+	else if (IsValid(TrailComponent))
 	{
 		TrailComponent->Activate(true);
 	}
@@ -331,7 +336,7 @@ void AShooterProjectile::DeactivateToPool()
 	ProjectileMovement->Velocity = FVector::ZeroVector;
 
 	// Stop trail VFX
-	if (TrailComponent)
+	if (IsValid(TrailComponent))
 	{
 		TrailComponent->Deactivate();
 	}
