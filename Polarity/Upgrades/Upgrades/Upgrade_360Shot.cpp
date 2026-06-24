@@ -13,6 +13,31 @@
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
 #include "WeaponRecoilComponent.h"
 #include "Buildings/BuildingMarkable.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/ShooterDummy.h"
+
+namespace
+{
+	bool IsActorDeadAfter360ShotDamage(AActor* Actor)
+	{
+		if (!IsValid(Actor))
+		{
+			return true;
+		}
+
+		if (AShooterNPC* NPC = Cast<AShooterNPC>(Actor))
+		{
+			return NPC->IsDead();
+		}
+
+		if (AShooterDummy* Dummy = Cast<AShooterDummy>(Actor))
+		{
+			return Dummy->IsDead();
+		}
+
+		return Actor->IsPendingKillPending();
+	}
+}
 
 UUpgrade_360Shot::UUpgrade_360Shot()
 {
@@ -274,20 +299,39 @@ void UUpgrade_360Shot::Execute360Shot()
 	QueryParams.AddIgnoredActor(Weapon);
 	QueryParams.bReturnPhysicalMaterial = true;
 
-	// Trace by ECC_Pawn to hit NPC pawns (same as weapon's cone sweep).
-	// Also trace WorldStatic/WorldDynamic so the shot can land on buildings — needed for
-	// IBuildingMarkable. ObjectType trace returns the closest of all listed types, so a wall
-	// in front of an NPC still blocks the shot (no wall-hack regression).
-	FCollisionObjectQueryParams ObjectParams;
-	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
-	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
-	ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	// Trace world geometry separately from pawns, matching the weapon hitscan pattern.
+	// The wall trace caps pawn search distance so 360 Shot cannot hit through cover.
+	FHitResult WallHit;
+	const bool bHitWall = GetWorld()->LineTraceSingleByChannel(
+		WallHit, ViewLocation, TraceEnd, ECC_Visibility, QueryParams);
+	const float WallDistance = bHitWall ? WallHit.Distance : 500000.0f;
 
-	FHitResult HitResult;
-	bool bHit = GetWorld()->LineTraceSingleByObjectType(
-		HitResult, ViewLocation, TraceEnd, ObjectParams, QueryParams);
+	FHitResult PawnHit;
+	FCollisionObjectQueryParams PawnObjectParams;
+	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
 
-	FVector BeamEnd = bHit ? HitResult.ImpactPoint : TraceEnd;
+	const FVector PawnTraceEnd = ViewLocation + ViewDirection * WallDistance;
+	const bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
+		PawnHit, ViewLocation, PawnTraceEnd, PawnObjectParams, QueryParams);
+
+	FHitResult DamageHit = PawnHit;
+	AActor* DamageTarget = bHitPawn ? PawnHit.GetActor() : nullptr;
+
+	if (!DamageTarget && bHitWall && Cast<AShooterDummy>(WallHit.GetActor()))
+	{
+		DamageHit = WallHit;
+		DamageTarget = WallHit.GetActor();
+	}
+
+	FVector BeamEnd = TraceEnd;
+	if (DamageTarget)
+	{
+		BeamEnd = DamageHit.ImpactPoint;
+	}
+	else if (bHitWall)
+	{
+		BeamEnd = WallHit.ImpactPoint;
+	}
 
 	// Get muzzle location for VFX only (not for trace)
 	FVector MuzzleLocation = ViewLocation;
@@ -312,10 +356,10 @@ void UUpgrade_360Shot::Execute360Shot()
 		UGameplayStatics::PlaySoundAtLocation(this, Def360->ChargedFireSound, MuzzleLocation);
 	}
 
-	// Apply bonus damage if we hit something
-	if (bHit && HitResult.GetActor())
+	// Apply bonus damage only to the resolved pawn/dummy target.
+	if (DamageTarget && DamageTarget->CanBeDamaged())
 	{
-		AActor* HitActor = HitResult.GetActor();
+		AActor* HitActor = DamageTarget;
 
 		FDamageEvent DamageEvent;
 		DamageEvent.DamageTypeClass = UDamageType_Ranged::StaticClass();
@@ -323,25 +367,45 @@ void UUpgrade_360Shot::Execute360Shot()
 		const float ActualDamage = HitActor->TakeDamage(
 			Def360->BonusDamage, DamageEvent,
 			Controller, Weapon);
+		const bool bKilled = IsActorDeadAfter360ShotDamage(HitActor);
 
 		// [SHOT360_DMG] pinpoint: BonusDamage requested vs ActualDamage actually applied by the
 		// target's TakeDamage (0 = rejected, e.g. friendly-fire; full value = applied). Also logs
 		// what the upgrade's INDEPENDENT trace hit (may differ from the weapon's actual shot target).
-		UE_LOG(LogTemp, Warning, TEXT("[SHOT360_DMG] requested=%.0f -> hit '%s' (class=%s) | ActualDamage=%.0f | causer=%s instigator=%s | impact=%s"),
+		UE_LOG(LogTemp, Warning, TEXT("[SHOT360_DMG] requested=%.0f -> hit '%s' (class=%s) | ActualDamage=%.0f killed=%d | causer=%s instigator=%s | impact=%s"),
 			Def360->BonusDamage,
 			*HitActor->GetName(),
 			*HitActor->GetClass()->GetName(),
 			ActualDamage,
+			bKilled ? 1 : 0,
 			*GetNameSafe(Weapon),
 			*GetNameSafe(Controller),
-			*HitResult.ImpactPoint.ToCompactString());
+			*DamageHit.ImpactPoint.ToCompactString());
 
-		// Mark the target if it implements IBuildingMarkable. The marker VFX is spawned by the
-		// upgrade itself (so the same upgrade can later mark other markable target types).
+		if (ActualDamage > 0.0f)
+		{
+			Character->OnWeaponHit(DamageHit.ImpactPoint, ViewDirection, ActualDamage, false, bKilled, HitActor);
+
+			if (UUpgradeManagerComponent* UpgradeMgr = Character->FindComponentByClass<UUpgradeManagerComponent>())
+			{
+				UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+			}
+		}
+
+	}
+	else if (DamageTarget)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SHOT360_DMG] target '%s' (class=%s) cannot be damaged; no bonus damage applied"),
+			*DamageTarget->GetName(),
+			*DamageTarget->GetClass()->GetName());
+	}
+	else if (bHitWall && WallHit.GetActor())
+	{
+		AActor* HitActor = WallHit.GetActor();
 		const bool bIsMarkable = HitActor->Implements<UBuildingMarkable>();
 		UE_LOG(LogTemp, Warning, TEXT("[BUILDING_MARK] Hit %s | Markable=%d | ImpactPt=%s Normal=%s"),
 			*HitActor->GetName(), bIsMarkable ? 1 : 0,
-			*HitResult.ImpactPoint.ToCompactString(), *HitResult.ImpactNormal.ToCompactString());
+			*WallHit.ImpactPoint.ToCompactString(), *WallHit.ImpactNormal.ToCompactString());
 
 		if (bIsMarkable)
 		{
@@ -350,8 +414,8 @@ void UUpgrade_360Shot::Execute360Shot()
 				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 					GetWorld(),
 					Def360->MarkerVFX,
-					HitResult.ImpactPoint,
-					HitResult.ImpactNormal.Rotation(),
+					WallHit.ImpactPoint,
+					WallHit.ImpactNormal.Rotation(),
 					FVector::OneVector,
 					true,   // bAutoDestroy
 					true,   // bAutoActivate
@@ -359,10 +423,10 @@ void UUpgrade_360Shot::Execute360Shot()
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[BUILDING_MARK] MarkerVFX is null on UpgradeDefinition_360Shot — no visual marker"));
+				UE_LOG(LogTemp, Warning, TEXT("[BUILDING_MARK] MarkerVFX is null on UpgradeDefinition_360Shot - no visual marker"));
 			}
 
-			IBuildingMarkable::Execute_OnMarked(HitActor, HitResult.ImpactPoint, HitResult.ImpactNormal);
+			IBuildingMarkable::Execute_OnMarked(HitActor, WallHit.ImpactPoint, WallHit.ImpactNormal);
 		}
 	}
 	else
