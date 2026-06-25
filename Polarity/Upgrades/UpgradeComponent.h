@@ -88,6 +88,9 @@ protected:
 	/** Called when the owner deals damage to a target */
 	virtual void OnOwnerDealtDamage(AActor* Target, float Damage, bool bKilled) {}
 
+	/** Called when a specific owner weapon deals damage to a target */
+	virtual void OnWeaponDealtDamage(AShooterWeapon* Weapon, AActor* Target, float Damage, bool bKilled) {}
+
 	/**
 	 * Called whenever the owner's hitscan ionization successfully applies charge to a target.
 	 * Independent of damage — fires for 0-damage ionizer hits (wave pistol).

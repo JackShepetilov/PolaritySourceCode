@@ -529,7 +529,7 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
 			// can't be done synchronously inside Fire().
 			GetWorld()->GetTimerManager().SetTimerForNextTick(
-				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfAny));
+				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfEmpty));
 			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: magazine empty, scheduled discard for next tick"), *GetName());
 		}
 		else
@@ -694,7 +694,7 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
 			// can't be done synchronously inside Fire().
 			GetWorld()->GetTimerManager().SetTimerForNextTick(
-				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfAny));
+				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfEmpty));
 			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: hitscan magazine empty, scheduled discard for next tick"), *GetName());
 		}
 		else
@@ -1095,7 +1095,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		{
 			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
 			{
-				UpgradeMgr->NotifyOwnerDealtDamage(BestTarget, ActualDamage, bKilled);
+				UpgradeMgr->NotifyWeaponDealtDamage(this, BestTarget, ActualDamage, bKilled);
 			}
 		}
 
@@ -1304,7 +1304,7 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	{
 		if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
 		{
-			UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+			UpgradeMgr->NotifyWeaponDealtDamage(this, HitActor, ActualDamage, bKilled);
 		}
 	}
 
@@ -1594,7 +1594,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		{
 			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
 			{
-				UpgradeMgr->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+				UpgradeMgr->NotifyWeaponDealtDamage(this, HitActor, ActualDamage, bKilled);
 			}
 		}
 

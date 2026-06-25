@@ -124,6 +124,9 @@ public:
 	/** Called when owner deals damage to a target */
 	void NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled);
 
+	/** Called when a specific owner weapon deals damage to a target */
+	void NotifyWeaponDealtDamage(AShooterWeapon* Weapon, AActor* Target, float Damage, bool bKilled);
+
 	/** Called whenever owner's hitscan ionization successfully applies charge to a target.
 	 *  Decoupled from damage so 0-damage ionizers (wave pistol) still notify upgrades. */
 	void NotifyOwnerHitscanIonized(AActor* Target);

@@ -2756,6 +2756,18 @@ void AShooterCharacter::ThrowYankedWeaponIfAny()
 		/*bEnableStunOnImpact=*/ true);
 }
 
+void AShooterCharacter::ThrowYankedWeaponIfEmpty()
+{
+	for (AShooterWeapon* W : OwnedWeapons)
+	{
+		if (W && W->bWasYanked && W->GetBulletCount() <= 0)
+		{
+			ThrowYankedWeaponIfAny();
+			return;
+		}
+	}
+}
+
 void AShooterCharacter::OnYankThrowDiscardNotify()
 {
 	// Phase 1 of the animated throw: weapon visually leaves the hand. Spawn the dropped

@@ -417,6 +417,19 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 	}
 }
 
+void UUpgradeManagerComponent::NotifyWeaponDealtDamage(AShooterWeapon* Weapon, AActor* Target, float Damage, bool bKilled)
+{
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->OnWeaponDealtDamage(Weapon, Target, Damage, bKilled);
+		}
+	}
+
+	NotifyOwnerDealtDamage(Target, Damage, bKilled);
+}
+
 void UUpgradeManagerComponent::NotifyOwnerHitscanIonized(AActor* Target)
 {
 	for (auto& Pair : ActiveUpgrades)

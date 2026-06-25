@@ -1439,6 +1439,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Yank")
 	void ThrowYankedWeaponIfAny();
 
+	void ThrowYankedWeaponIfEmpty();
+
 private:
 	/** Yanked weapon currently being thrown via animation. Set by ThrowYankedWeaponIfAny,
 	 *  consumed by OnYankThrowDiscardNotify (hide+spawn) and OnYankThrowLowerNotify (switch). */
