@@ -81,6 +81,8 @@ private:
 	void HandlePreVelocityUpdate(float DeltaTime, FVector& InOutVelocity);
 	void SweepChargePath(const FVector& Start, const FVector& End);
 	void ApplyBashDamage(AActor* Target, const FHitResult& Hit);
+	bool IsValidBashTarget(AActor* Actor) const;
+	void LogBashHit(const FHitResult& Hit, bool bValidTarget, const TCHAR* Decision) const;
 	bool IsActorDeadAfterDamage(AActor* Actor) const;
 
 	UFUNCTION()

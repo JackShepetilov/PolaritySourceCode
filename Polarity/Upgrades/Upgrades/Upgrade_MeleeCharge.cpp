@@ -12,6 +12,7 @@
 #include "Engine/DamageEvents.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Upgrades/UpgradeManagerComponent.h"
 
 UUpgrade_MeleeCharge::UUpgrade_MeleeCharge()
@@ -151,6 +152,17 @@ void UUpgrade_MeleeCharge::TickComponent(float DeltaTime, ELevelTick TickType, F
 						BlockedMoveTime += DeltaTime;
 						if (BlockedMoveTime >= 0.05f)
 						{
+							if (Data.bDebugLogBashSweep)
+							{
+								UE_LOG(LogTemp, Warning,
+									TEXT("[MELEE_CHARGE_BASH] BLOCKED_MOVEMENT expected=%.1f actual=%.1f fraction=%.2f blockedTime=%.3f prev=%s current=%s"),
+									ExpectedDistance,
+									ActualDistance,
+									ExpectedDistance > KINDA_SMALL_NUMBER ? ActualDistance / ExpectedDistance : 0.0f,
+									BlockedMoveTime,
+									*PreviousChargeLocation.ToString(),
+									*CurrentLocation.ToString());
+							}
 							EndCharge(true);
 						}
 					}
@@ -485,12 +497,36 @@ void UUpgrade_MeleeCharge::SweepChargePath(const FVector& Start, const FVector& 
 	for (const FHitResult& Hit : Hits)
 	{
 		AActor* HitActor = Hit.GetActor();
-		if (!HitActor || HitActor == Character || HitActorsThisCharge.Contains(HitActor))
+		if (!HitActor || HitActor == Character)
 		{
+			if (Data.bDebugLogBashSweep)
+			{
+				LogBashHit(Hit, false, TEXT("IGNORE_NULL_OR_OWNER"));
+			}
+			continue;
+		}
+
+		if (HitActorsThisCharge.Contains(HitActor))
+		{
+			if (Data.bDebugLogBashSweep)
+			{
+				LogBashHit(Hit, IsValidBashTarget(HitActor), TEXT("IGNORE_ALREADY_HIT"));
+			}
 			continue;
 		}
 
 		HitActorsThisCharge.Add(HitActor);
+		const bool bValidBashTarget = IsValidBashTarget(HitActor);
+		if (Data.bDebugLogBashSweep)
+		{
+			LogBashHit(Hit, bValidBashTarget, bValidBashTarget ? TEXT("ACCEPT_BASH") : TEXT("IGNORE_NOT_BASH_TARGET"));
+		}
+
+		if (!bValidBashTarget)
+		{
+			continue;
+		}
+
 		ApplyBashDamage(HitActor, Hit);
 
 		if (Data.bStopOnBash)
@@ -537,6 +573,49 @@ void UUpgrade_MeleeCharge::ApplyBashDamage(AActor* Target, const FHitResult& Hit
 
 	UE_LOG(LogTemp, Warning, TEXT("[MELEE_CHARGE] BASH %s damage=%.1f killed=%d"),
 		*Target->GetName(), Data.BashDamage, bKilled ? 1 : 0);
+}
+
+bool UUpgrade_MeleeCharge::IsValidBashTarget(AActor* Actor) const
+{
+	return Actor
+		&& (Actor->IsA<AShooterNPC>()
+			|| Actor->IsA<AShooterDummy>()
+			|| Actor->IsA<AShooterCharacter>());
+}
+
+void UUpgrade_MeleeCharge::LogBashHit(const FHitResult& Hit, bool bValidTarget, const TCHAR* Decision) const
+{
+	const AActor* HitActor = Hit.GetActor();
+	const UPrimitiveComponent* HitComponent = Hit.GetComponent();
+	const FString ActorName = GetNameSafe(HitActor);
+	const FString ActorClass = HitActor ? HitActor->GetClass()->GetName() : TEXT("None");
+	const FString ComponentName = GetNameSafe(HitComponent);
+	const FString ComponentClass = HitComponent ? HitComponent->GetClass()->GetName() : TEXT("None");
+	const FString ProfileName = HitComponent ? HitComponent->GetCollisionProfileName().ToString() : TEXT("None");
+	const int32 CollisionEnabled = HitComponent ? static_cast<int32>(HitComponent->GetCollisionEnabled()) : -1;
+	const int32 ObjectType = HitComponent ? static_cast<int32>(HitComponent->GetCollisionObjectType()) : -1;
+	const int32 PawnResponse = HitComponent ? static_cast<int32>(HitComponent->GetCollisionResponseToChannel(ECC_Pawn)) : -1;
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[MELEE_CHARGE_BASH] %s valid=%d actor=%s class=%s comp=%s compClass=%s profile=%s collision=%d object=%d pawnResponse=%d blocking=%d overlap=%d startPen=%d time=%.3f distance=%.1f loc=%s impact=%s normal=%s"),
+		Decision,
+		bValidTarget ? 1 : 0,
+		*ActorName,
+		*ActorClass,
+		*ComponentName,
+		*ComponentClass,
+		*ProfileName,
+		CollisionEnabled,
+		ObjectType,
+		PawnResponse,
+		Hit.bBlockingHit ? 1 : 0,
+		Hit.bBlockingHit ? 0 : 1,
+		Hit.bStartPenetrating ? 1 : 0,
+		Hit.Time,
+		Hit.Distance,
+		*Hit.Location.ToString(),
+		*Hit.ImpactPoint.ToString(),
+		*Hit.ImpactNormal.ToString());
 }
 
 bool UUpgrade_MeleeCharge::IsActorDeadAfterDamage(AActor* Actor) const

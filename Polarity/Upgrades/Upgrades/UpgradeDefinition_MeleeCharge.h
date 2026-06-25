@@ -71,6 +71,9 @@ struct FMeleeChargeLevelData
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Debug")
 	bool bDebugDrawChargeSweep = false;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Debug")
+	bool bDebugLogBashSweep = true;
 };
 
 UCLASS(BlueprintType)
