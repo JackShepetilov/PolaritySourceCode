@@ -13,6 +13,7 @@
 #include "GameFramework/Controller.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Curves/CurveFloat.h"
 #include "Upgrades/UpgradeManagerComponent.h"
 
 UUpgrade_MeleeCharge::UUpgrade_MeleeCharge()
@@ -145,7 +146,7 @@ void UUpgrade_MeleeCharge::TickComponent(float DeltaTime, ELevelTick TickType, F
 				const FMeleeChargeLevelData& Data = GetCurrentLevelData();
 				if (Data.bEndOnBlockedMovement && ActiveChargeDuration > 0.05f)
 				{
-					const float ExpectedDistance = Data.ChargeSpeed * DeltaTime;
+					const float ExpectedDistance = GetChargeTargetSpeed() * DeltaTime;
 					const float ActualDistance = FVector::Dist2D(PreviousChargeLocation, CurrentLocation);
 					if (ExpectedDistance > KINDA_SMALL_NUMBER && ActualDistance < ExpectedDistance * Data.BlockedMoveFraction)
 					{
@@ -295,7 +296,7 @@ bool UUpgrade_MeleeCharge::StartCharge(AShooterWeapon* Weapon)
 
 	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 	{
-		FVector NewVelocity = ChargeDirection * Data.ChargeSpeed;
+		FVector NewVelocity = ChargeDirection * GetChargeTargetSpeed();
 		NewVelocity.Z = 0.0f;
 		Movement->Velocity = NewVelocity;
 	}
@@ -426,6 +427,55 @@ FVector UUpgrade_MeleeCharge::GetDesiredChargeDirection() const
 	return FVector::ForwardVector;
 }
 
+float UUpgrade_MeleeCharge::GetChargeElapsedFraction() const
+{
+	const FMeleeChargeLevelData& Data = GetCurrentLevelData();
+	if (Data.ChargeDuration <= KINDA_SMALL_NUMBER)
+	{
+		return 1.0f;
+	}
+
+	return FMath::Clamp(ActiveChargeDuration / Data.ChargeDuration, 0.0f, 1.0f);
+}
+
+float UUpgrade_MeleeCharge::GetChargeSpeedScale() const
+{
+	const FMeleeChargeLevelData& Data = GetCurrentLevelData();
+	const float ElapsedFraction = GetChargeElapsedFraction();
+
+	if (Data.ChargeSpeedScaleCurve)
+	{
+		return FMath::Max(0.0f, Data.ChargeSpeedScaleCurve->GetFloatValue(ElapsedFraction));
+	}
+
+	const float RampUpFraction = FMath::Clamp(Data.ChargeRampUpFraction, KINDA_SMALL_NUMBER, 1.0f);
+	const float FalloffFraction = FMath::Clamp(Data.ChargeFalloffFraction, KINDA_SMALL_NUMBER, 1.0f);
+	const float FalloffStartFraction = FMath::Clamp(1.0f - FalloffFraction, RampUpFraction, 1.0f);
+	const float StartScale = FMath::Max(0.0f, Data.ChargeStartSpeedScale);
+	const float EndScale = FMath::Max(0.0f, Data.ChargeEndSpeedScale);
+
+	if (ElapsedFraction < RampUpFraction)
+	{
+		const float Alpha = FMath::SmoothStep(0.0f, 1.0f, ElapsedFraction / RampUpFraction);
+		return FMath::Lerp(StartScale, 1.0f, Alpha);
+	}
+
+	if (ElapsedFraction > FalloffStartFraction)
+	{
+		const float Denominator = FMath::Max(KINDA_SMALL_NUMBER, 1.0f - FalloffStartFraction);
+		const float Alpha = FMath::SmoothStep(0.0f, 1.0f, (ElapsedFraction - FalloffStartFraction) / Denominator);
+		return FMath::Lerp(1.0f, EndScale, Alpha);
+	}
+
+	return 1.0f;
+}
+
+float UUpgrade_MeleeCharge::GetChargeTargetSpeed() const
+{
+	const FMeleeChargeLevelData& Data = GetCurrentLevelData();
+	return FMath::Max(0.0f, Data.ChargeSpeed * GetChargeSpeedScale());
+}
+
 void UUpgrade_MeleeCharge::HandlePreVelocityUpdate(float DeltaTime, FVector& InOutVelocity)
 {
 	if (!bIsCharging)
@@ -450,8 +500,19 @@ void UUpgrade_MeleeCharge::HandlePreVelocityUpdate(float DeltaTime, FVector& InO
 		ChargeDirection = DesiredDirection;
 	}
 
-	InOutVelocity = ChargeDirection * Data.ChargeSpeed;
-	InOutVelocity.Z = 0.0f;
+	const FVector TargetHorizontalVelocity = ChargeDirection * GetChargeTargetSpeed();
+	FVector CurrentHorizontalVelocity = InOutVelocity;
+	CurrentHorizontalVelocity.Z = 0.0f;
+
+	const float Response = FMath::Max(0.1f, Data.ChargeVelocityResponse);
+	const FVector NewHorizontalVelocity = FMath::VInterpTo(
+		CurrentHorizontalVelocity,
+		TargetHorizontalVelocity,
+		DeltaTime,
+		Response);
+
+	InOutVelocity.X = NewHorizontalVelocity.X;
+	InOutVelocity.Y = NewHorizontalVelocity.Y;
 }
 
 void UUpgrade_MeleeCharge::SweepChargePath(const FVector& Start, const FVector& End)

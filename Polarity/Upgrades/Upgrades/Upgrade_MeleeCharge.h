@@ -78,6 +78,9 @@ private:
 
 	const FMeleeChargeLevelData& GetCurrentLevelData() const;
 	FVector GetDesiredChargeDirection() const;
+	float GetChargeElapsedFraction() const;
+	float GetChargeSpeedScale() const;
+	float GetChargeTargetSpeed() const;
 	void HandlePreVelocityUpdate(float DeltaTime, FVector& InOutVelocity);
 	void SweepChargePath(const FVector& Start, const FVector& End);
 	void ApplyBashDamage(AActor* Target, const FHitResult& Hit);

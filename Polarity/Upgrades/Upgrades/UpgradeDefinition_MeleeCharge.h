@@ -7,6 +7,7 @@
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "UpgradeDefinition_MeleeCharge.generated.h"
 
+class UCurveFloat;
 class UDamageType;
 
 USTRUCT(BlueprintType)
@@ -29,6 +30,30 @@ struct FMeleeChargeLevelData
 	/** Horizontal charge speed in cm/s. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge", meta = (ClampMin = "100.0", ClampMax = "5000.0"))
 	float ChargeSpeed = 2000.0f;
+
+	/** Optional normalized speed profile. X = elapsed charge fraction [0..1], Y = speed scale against ChargeSpeed. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Speed")
+	TObjectPtr<UCurveFloat> ChargeSpeedScaleCurve = nullptr;
+
+	/** Speed scale at the instant the charge starts when no curve is provided. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Speed", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float ChargeStartSpeedScale = 0.55f;
+
+	/** Fraction of total charge duration spent ramping up to peak speed when no curve is provided. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Speed", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ChargeRampUpFraction = 0.12f;
+
+	/** Fraction of total charge duration spent falling off from peak speed when no curve is provided. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Speed", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ChargeFalloffFraction = 0.28f;
+
+	/** Speed scale at the end of the charge when no curve is provided. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Speed", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float ChargeEndSpeedScale = 0.35f;
+
+	/** How quickly current velocity follows the speed profile. Higher values feel snappier. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge|Speed", meta = (ClampMin = "0.1", ClampMax = "60.0"))
+	float ChargeVelocityResponse = 14.0f;
 
 	/** How quickly the charge direction steers toward camera yaw. 0 means fixed initial direction. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Charge", meta = (ClampMin = "0.0", ClampMax = "60.0"))
