@@ -335,6 +335,20 @@ void UApexMovementComponent::ClearExternalMaxSpeedOverride()
 	ExternalMaxSpeedOverride = 0.0f;
 }
 
+void UApexMovementComponent::SetExternalSlideSpeedBurstOverride(float MinBurst, float MaxBurst)
+{
+	bExternalSlideSpeedBurstOverride = true;
+	ExternalSlideMinSpeedBurst = FMath::Max(0.0f, MinBurst);
+	ExternalSlideMaxSpeedBurst = FMath::Max(0.0f, MaxBurst);
+}
+
+void UApexMovementComponent::ClearExternalSlideSpeedBurstOverride()
+{
+	bExternalSlideSpeedBurstOverride = false;
+	ExternalSlideMinSpeedBurst = 0.0f;
+	ExternalSlideMaxSpeedBurst = 0.0f;
+}
+
 float UApexMovementComponent::GetMaxAcceleration() const
 {
 	// No player acceleration during slide or wallrun - momentum only
@@ -637,8 +651,8 @@ void UApexMovementComponent::StartSlide()
 	if (SlideBoostCooldownRemaining <= 0.0f)
 	{
 		const float CurrentSpeed = Velocity.Size2D();
-		const float MinBoost = MovementSettings->SlideMinSpeedBurst;
-		const float MaxBoost = MovementSettings->SlideMaxSpeedBurst;
+		const float MinBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMinSpeedBurst : MovementSettings->SlideMinSpeedBurst;
+		const float MaxBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMaxSpeedBurst : MovementSettings->SlideMaxSpeedBurst;
 		const float MinStartSpeed = MovementSettings->SlideMinStartSpeed;
 
 		float SpeedRatio = FMath::Clamp((CurrentSpeed - MinStartSpeed) / 500.0f, 0.0f, 1.0f);
@@ -700,8 +714,8 @@ void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 	BrakingDecelerationWalking = 0.0f;
 
 	const float CurrentSpeed = Velocity.Size2D();
-	const float MinBoost = MovementSettings->SlideMinSpeedBurst;
-	const float MaxBoost = MovementSettings->SlideMaxSpeedBurst;
+	const float MinBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMinSpeedBurst : MovementSettings->SlideMinSpeedBurst;
+	const float MaxBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMaxSpeedBurst : MovementSettings->SlideMaxSpeedBurst;
 	const float MinStartSpeed = MovementSettings->SlideMinStartSpeed;
 
 	float SpeedRatio = FMath::Clamp((CurrentSpeed - MinStartSpeed) / 500.0f, 0.0f, 1.0f);
@@ -919,6 +933,32 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 
 	if (HorizontalSpeed > 0.0f)
 	{
+		FVector CurrentDir = HorizontalVel.GetSafeNormal();
+		if (MovementSettings->SlideSteeringResponse > 0.0f
+			&& CurrentMoveInput.Size() >= MovementSettings->SlideSteeringInputThreshold
+			&& CharacterOwner)
+		{
+			const FRotator YawRotation(0.0f, CharacterOwner->GetControlRotation().Yaw, 0.0f);
+			const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+			const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+			const FVector WishDir = (ForwardDir * CurrentMoveInput.Y + RightDir * CurrentMoveInput.X).GetSafeNormal2D();
+
+			if (!WishDir.IsNearlyZero())
+			{
+				const float DirectionDot = FVector::DotProduct(CurrentDir, WishDir);
+				const float BackwardScale = DirectionDot < 0.0f
+					? FMath::Clamp(MovementSettings->SlideBackwardSteeringScale, 0.0f, 1.0f)
+					: 1.0f;
+				const float Response = MovementSettings->SlideSteeringResponse * BackwardScale;
+
+				if (Response > 0.0f)
+				{
+					CurrentDir = FMath::VInterpNormalRotationTo(CurrentDir, WishDir, DeltaTime, Response);
+					HorizontalVel = CurrentDir * HorizontalSpeed;
+				}
+			}
+		}
+
 		float DecelAmount = SlideFlatDecel * DeltaTime;
 
 		if (SlopeAngle > 3.0f)
@@ -935,9 +975,8 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 		}
 
 		float NewSpeed = FMath::Max(HorizontalSpeed - DecelAmount, 0.0f);
-		FVector NewDir = HorizontalVel.GetSafeNormal();
-		Velocity.X = NewDir.X * NewSpeed;
-		Velocity.Y = NewDir.Y * NewSpeed;
+		Velocity.X = CurrentDir.X * NewSpeed;
+		Velocity.Y = CurrentDir.Y * NewSpeed;
 	}
 
 	const float SpeedAfter = Velocity.Size2D();

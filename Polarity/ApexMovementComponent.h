@@ -246,6 +246,10 @@ public:
 	void SetExternalMaxSpeedOverride(float MaxSpeed);
 	void ClearExternalMaxSpeedOverride();
 
+	/** Temporary per-character slide burst override used by weapon-specific upgrades. */
+	void SetExternalSlideSpeedBurstOverride(float MinBurst, float MaxBurst);
+	void ClearExternalSlideSpeedBurstOverride();
+
 	/** Enable/disable the start-of-run launch state (suppresses air abilities while the toss arc plays). */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void SetRunLaunchActive(bool bActive);
@@ -388,6 +392,15 @@ public:
 
 	UPROPERTY()
 	float ExternalMaxSpeedOverride = 0.0f;
+
+	UPROPERTY()
+	bool bExternalSlideSpeedBurstOverride = false;
+
+	UPROPERTY()
+	float ExternalSlideMinSpeedBurst = 0.0f;
+
+	UPROPERTY()
+	float ExternalSlideMaxSpeedBurst = 0.0f;
 
 	// ==================== EMF ====================
 

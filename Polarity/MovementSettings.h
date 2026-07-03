@@ -151,6 +151,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Additional slowdown when sliding uphill"))
 	float SlideUphillDeceleration = 600.0f;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Steering", meta = (ToolTip = "How quickly slide velocity turns toward movement input. 0 disables steering."))
+	float SlideSteeringResponse = 5.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Minimum movement input magnitude required to steer during slide."))
+	float SlideSteeringInputThreshold = 0.1f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Steering strength when input points behind current slide direction. 0 prevents instant 180-degree reversals."))
+	float SlideBackwardSteeringScale = 0.25f;
+
 	// ==================== Mantle ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle")
