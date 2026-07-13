@@ -56,7 +56,9 @@ void UAbilityHandler_EMFBurst::OnPerShotEffect_Implementation()
 		return;
 	}
 
-	Projectile->InitializeFromPlayerCharge(OwningCharacter, CachedStats.ChargePerShot);
+	// ChargePerShot is the ability resource cost only. The projectile's actual charge
+	// comes from its own class defaults so designers can tune both values independently.
+	Projectile->SetProjectileCharge(Projectile->DefaultCharge);
 
 	if (UProjectileMovementComponent* PMC = Projectile->FindComponentByClass<UProjectileMovementComponent>())
 	{
