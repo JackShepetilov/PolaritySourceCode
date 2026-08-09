@@ -1,0 +1,3 @@
+Marker file: makes UnrealBuildTool skip this whole directory tree when collecting module
+source files. Docs/ holds design documents and tooling (including a node_modules tree with
+C++ sources from sharp/yoga) that UBT would otherwise try to compile into the Polarity module.

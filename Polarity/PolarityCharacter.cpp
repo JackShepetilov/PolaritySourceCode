@@ -7,8 +7,6 @@
 #include "ChargeAnimationComponent.h"
 #include "PolarityCameraManager.h"
 #include "EMFVelocityModifier.h"
-#include "Variant_Shooter/ShooterCharacter.h"
-#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -29,16 +27,7 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
-	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("First Person Mesh"));
-	FirstPersonMesh->SetupAttachment(GetMesh());
-	FirstPersonMesh->SetOnlyOwnerSee(true);
-	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
-	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
-	// Force full per-frame pose & bone refresh so weapon/attachment world transforms can never
-	// lag behind the hand animation (default tick option only refreshes bones during montages).
-	FirstPersonMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-	FirstPersonMesh->bEnableUpdateRateOptimizations = false;
-
+	// Camera is created FIRST — the first person mesh parents to it (see below).
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
 	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCameraComponent->SetRelativeLocation(FVector(0.f, 0.f, 64.f));
@@ -48,6 +37,21 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonCameraComponent->bEnableFirstPersonScale = true;
 	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
 	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
+
+	// The FP mesh hangs off the CAMERA, not off the body mesh. The hands are modelled without a
+	// body, so they simply ride the view instead of being aimed at it by a Control Rig. Every
+	// procedural offset below (crouch, wallrun, sway, recoil, ADS) is therefore in camera space.
+	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("First Person Mesh"));
+	FirstPersonMesh->SetupAttachment(FirstPersonCameraComponent);
+	FirstPersonMesh->SetRelativeLocation(FirstPersonMeshCameraOffset);
+	FirstPersonMesh->SetRelativeRotation(FirstPersonMeshCameraRotation);
+	FirstPersonMesh->SetOnlyOwnerSee(true);
+	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
+	// Force full per-frame pose & bone refresh so weapon/attachment world transforms can never
+	// lag behind the hand animation (default tick option only refreshes bones during montages).
+	FirstPersonMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	FirstPersonMesh->bEnableUpdateRateOptimizations = false;
 
 	CameraShakeComponent = CreateDefaultSubobject<UCameraShakeComponent>(TEXT("Camera Shake"));
 
@@ -69,11 +73,15 @@ void APolarityCharacter::BeginPlay()
 		ApexMovement->MovementSettings = MovementSettings;
 	}
 
-	// Store base transform of FirstPersonMesh for offset calculations
+	// Rest pose of FirstPersonMesh under the camera. Taken from the dedicated properties rather
+	// than from the component's current relative transform: the transform is rewritten every tick
+	// by the pose pipeline, so reading it back would be a moving target.
+	FirstPersonMeshBaseLocation = FirstPersonMeshCameraOffset;
+	FirstPersonMeshBaseRotation = FirstPersonMeshCameraRotation;
 	if (FirstPersonMesh)
 	{
-		FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
-		FirstPersonMeshBaseRotation = FirstPersonMesh->GetRelativeRotation();
+		FirstPersonMesh->SetRelativeLocation(FirstPersonMeshBaseLocation);
+		FirstPersonMesh->SetRelativeRotation(FirstPersonMeshBaseRotation);
 	}
 
 	// Initialize camera shake
@@ -146,6 +154,11 @@ void APolarityCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 		{
 			EnhancedInputComponent->BindAction(CrouchSlideAction, ETriggerEvent::Started, this, &APolarityCharacter::CrouchSlideStart);
 			EnhancedInputComponent->BindAction(CrouchSlideAction, ETriggerEvent::Completed, this, &APolarityCharacter::CrouchSlideStop);
+		}
+
+		if (DashAction)
+		{
+			EnhancedInputComponent->BindAction(DashAction, ETriggerEvent::Started, this, &APolarityCharacter::DashPressed);
 		}
 
 		if (ToggleChargeAction)
@@ -236,15 +249,7 @@ void APolarityCharacter::CrouchSlideStart(const FInputActionValue& Value)
 {
 	if (ApexMovement)
 	{
-		// Check if we're about to air dash (for FOV effect)
-		bool bWillAirDash = ApexMovement->IsFalling() && ApexMovement->CanAirDash();
-
 		ApexMovement->TryCrouchSlide();
-
-		if (bWillAirDash && CameraShakeComponent)
-		{
-			CameraShakeComponent->TriggerAirDash();
-		}
 	}
 	else
 	{
@@ -261,6 +266,24 @@ void APolarityCharacter::CrouchSlideStop(const FInputActionValue& Value)
 	else
 	{
 		UnCrouch();
+	}
+}
+
+void APolarityCharacter::DashPressed(const FInputActionValue& Value)
+{
+	if (!ApexMovement)
+	{
+		return;
+	}
+
+	const bool bDashed = ApexMovement->IsMovingOnGround()
+		? ApexMovement->TryGroundDash()
+		: ApexMovement->TryAirDash();
+
+	if (bDashed && CameraShakeComponent)
+	{
+		// The existing dash FOV kick is suitable for both variants until Ground Dash needs bespoke tuning.
+		CameraShakeComponent->TriggerAirDash();
 	}
 }
 
@@ -371,6 +394,29 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 		return;
 	}
 
+	// Run aim offset is a pose layer now, so it has to be interpolated before the pose is built.
+	UpdateRunAimOffset(DeltaTime);
+
+	// Single writer for the FP mesh transform: every system contributes a layer to Location /
+	// Rotation, and the accumulated result is applied exactly once, at the end.
+	FVector  Location = FirstPersonMeshBaseLocation;
+	FRotator Rotation = FirstPersonMeshBaseRotation;
+
+	AccumulateFirstPersonPose(DeltaTime, Location, Rotation);
+
+	FirstPersonMesh->SetRelativeLocation(Location);
+	FirstPersonMesh->SetRelativeRotation(Rotation);
+
+	ApplyCameraManagerRoll();
+}
+
+void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation)
+{
+	if (!MovementSettings)
+	{
+		return;
+	}
+
 	// ==================== Movement State Detection ====================
 
 	bool bIsSliding = false;
@@ -459,33 +505,24 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 		TargetWallrunOffset = FVector::ZeroVector;
 	}
 
-	// Combine all tilts: crouch/slide + wallrun + shake
+	// Combine all tilts: crouch/slide + wallrun
 	CurrentWeaponTilt = CrouchSlideTilt + WallrunMeshTilt;
 
-	// Add shake roll
+	// ==================== Camera Roll Follow ====================
+	// APolarityCameraManager applies its roll to the final POV rotation, NOT to the camera
+	// component, so a camera-parented mesh does not inherit it. Both rolls are therefore mirrored
+	// onto the mesh by hand, each with its own follow factor:
+	//   shake roll   — 1.0 by default (the mesh always shook with it)
+	//   wallrun roll — 0.0 by default (deliberately kept off the mesh so the barrel does not
+	//                  clip into the wall the player is running on)
 	if (CameraShakeComponent)
 	{
-		CurrentWeaponTilt.Roll += CameraShakeComponent->GetCameraRotationOffset().Roll;
+		CurrentWeaponTilt.Roll += CameraShakeComponent->GetCameraRotationOffset().Roll * ShakeRollFollowAlpha;
 	}
-
-	// ==================== Camera Roll (Wallrun) ====================
-
-	// Wallrun roll is applied ONLY to camera, not to weapon mesh
-	// This prevents the weapon from clipping through walls
-	// Camera roll is already interpolated in ApexMovement, use it directly
-	float WallrunCameraRoll = 0.0f;
-	if (ApexMovement)
+	if (ApexMovement && WallrunRollFollowAlpha > 0.0f)
 	{
-		// Use the new pre-calculated camera roll (already has correct direction applied)
-		WallrunCameraRoll = ApexMovement->CurrentWallRunCameraRoll;
-
-		// Debug: log when wallrunning
-		if (ApexMovement->IsWallRunning())
-		{
-			UE_LOG(LogTemplateCharacter, Verbose, TEXT("Wallrun Camera Roll: %.2f"), WallrunCameraRoll);
-		}
+		CurrentWeaponTilt.Roll += ApexMovement->CurrentWallRunCameraRoll * WallrunRollFollowAlpha;
 	}
-
 
 	// ==================== Wallrun Offset ====================
 
@@ -512,50 +549,31 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 
 	UpdateWeaponRunSway(DeltaTime);
 
-	// ==================== Weapon Base Pose (per-weapon static tilt/offset) ====================
-	// Replaced (faded out) by crouch/slide and wallrun states.
-	// Crouch fade is smooth via CrouchSlideProgress; wallrun is a hard switch (acceptable
-	// since WallrunMeshTilt itself ramps in via ApexMovement's interpolation).
+	// ==================== Accumulate ====================
 
-	FRotator WeaponBaseTilt = FRotator::ZeroRotator;
-	FVector WeaponBaseOffset = FVector::ZeroVector;
-	if (const AShooterCharacter* AsShooter = Cast<const AShooterCharacter>(this))
+	Location += CurrentCrouchOffset;
+	Location += (CurrentADSOffset + CurrentWallrunOffset);
+	Location += CurrentRunSwayPosition;
+	// Run aim offset: "where the weapon points while running". Used to be fed into the Control
+	// Rig's aim target; with the mesh riding the camera it is a plain camera-space offset.
+	Location += CurrentAimOffset;
+
+	Rotation.Pitch += CurrentWeaponTilt.Pitch;
+	Rotation.Yaw   += CurrentWeaponTilt.Yaw;
+	Rotation.Roll  += CurrentWeaponTilt.Roll;
+	Rotation.Pitch += CurrentRunSwayRotation.Pitch;
+	Rotation.Yaw   += CurrentRunSwayRotation.Yaw;
+	Rotation.Roll  += CurrentRunSwayRotation.Roll;
+}
+
+void APolarityCharacter::ApplyCameraManagerRoll()
+{
+	// Wallrun roll is already interpolated in ApexMovement, use it directly.
+	float WallrunCameraRoll = 0.0f;
+	if (ApexMovement)
 	{
-		if (const AShooterWeapon* Weapon = AsShooter->GetCurrentWeapon())
-		{
-			const float WeaponBaseFactor = (1.0f - CrouchSlideProgress) * (bIsWallrunning ? 0.0f : 1.0f);
-			WeaponBaseTilt = Weapon->FirstPersonMeshTilt * WeaponBaseFactor;
-			WeaponBaseOffset = Weapon->FirstPersonMeshOffset * WeaponBaseFactor;
-		}
+		WallrunCameraRoll = ApexMovement->CurrentWallRunCameraRoll;
 	}
-
-	// ==================== Apply to FirstPersonMesh ====================
-
-	// Calculate final location
-	FVector NewLocation = FirstPersonMeshBaseLocation;
-	NewLocation += WeaponBaseOffset;
-	NewLocation += CurrentCrouchOffset;
-	NewLocation += (CurrentADSOffset + CurrentWallrunOffset);
-	NewLocation += CurrentRunSwayPosition; // Run sway position offset
-
-	// Calculate final rotation (base + all tilts combined)
-	FRotator NewRotation = FirstPersonMeshBaseRotation;
-	NewRotation.Pitch += WeaponBaseTilt.Pitch;
-	NewRotation.Yaw += WeaponBaseTilt.Yaw;
-	NewRotation.Roll += WeaponBaseTilt.Roll;
-	NewRotation.Pitch += CurrentWeaponTilt.Pitch;
-	NewRotation.Yaw += CurrentWeaponTilt.Yaw;
-	NewRotation.Roll += CurrentWeaponTilt.Roll;
-	// Add run sway rotation
-	NewRotation.Pitch += CurrentRunSwayRotation.Pitch;
-	NewRotation.Yaw += CurrentRunSwayRotation.Yaw;
-	NewRotation.Roll += CurrentRunSwayRotation.Roll;
-
-	// Apply transform to mesh
-	FirstPersonMesh->SetRelativeLocation(NewLocation);
-	FirstPersonMesh->SetRelativeRotation(NewRotation);
-
-	// ==================== Apply Camera Roll via CameraManager ====================
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -580,9 +598,6 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 			UE_LOG(LogTemplateCharacter, Error, TEXT("PolarityCameraManager not found!"));
 		}
 	}
-
-	// ==================== Update Aim Offset for AnimBP ====================
-	UpdateAnimInstanceAimOffset(DeltaTime);
 }
 
 // ==================== Procedural Footsteps ====================
@@ -836,9 +851,9 @@ void APolarityCharacter::UpdateWeaponRunSway(float DeltaTime)
 	CurrentRunSwayPosition = TargetPosition;
 }
 
-// ==================== Aim Offset for AnimBP ====================
+// ==================== Run Aim Offset ====================
 
-void APolarityCharacter::UpdateAnimInstanceAimOffset(float DeltaTime)
+void APolarityCharacter::UpdateRunAimOffset(float DeltaTime)
 {
 	if (!MovementSettings || !MovementSettings->bEnableRunAimOffset)
 	{
@@ -846,7 +861,6 @@ void APolarityCharacter::UpdateAnimInstanceAimOffset(float DeltaTime)
 		if (!CurrentAimOffset.IsNearlyZero())
 		{
 			CurrentAimOffset = FMath::VInterpTo(CurrentAimOffset, FVector::ZeroVector, DeltaTime, 10.0f);
-			SetAnimInstanceAimOffset(CurrentAimOffset);
 		}
 		return;
 	}
@@ -889,38 +903,4 @@ void APolarityCharacter::UpdateAnimInstanceAimOffset(float DeltaTime)
 		DeltaTime,
 		MovementSettings->AimOffsetInterpSpeed
 	);
-
-	// Send to AnimInstance
-	SetAnimInstanceAimOffset(CurrentAimOffset);
-}
-
-void APolarityCharacter::SetAnimInstanceAimOffset(const FVector& Offset)
-{
-	if (!FirstPersonMesh)
-	{
-		return;
-	}
-
-	UAnimInstance* AnimInstance = FirstPersonMesh->GetAnimInstance();
-	if (!AnimInstance)
-	{
-		return;
-	}
-
-	// Find and set the AimOffset property via reflection
-	static FName AimOffsetName(TEXT("AimOffset"));
-	FProperty* Property = AnimInstance->GetClass()->FindPropertyByName(AimOffsetName);
-
-	if (Property)
-	{
-		FStructProperty* StructProp = CastField<FStructProperty>(Property);
-		if (StructProp && StructProp->Struct == TBaseStructure<FVector>::Get())
-		{
-			void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(AnimInstance);
-			if (ValuePtr)
-			{
-				*static_cast<FVector*>(ValuePtr) = Offset;
-			}
-		}
-	}
 }

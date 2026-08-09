@@ -69,6 +69,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* CrouchSlideAction;
 
+	/** Dedicated dash action. On the ground it activates Ground Dash; in air it activates the unlocked Air Dash. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* DashAction;
+
 	/** Toggle Charge Sign Input Action */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* ToggleChargeAction;
@@ -154,6 +158,9 @@ protected:
 	void CrouchSlideStart(const FInputActionValue& Value);
 	void CrouchSlideStop(const FInputActionValue& Value);
 
+	/** Routes the dedicated dash input by movement context. */
+	void DashPressed(const FInputActionValue& Value);
+
 	/** Toggle charge button pressed */
 	UFUNCTION(BlueprintCallable, Category = "EMF")
 	void DoToggleChargePressed();
@@ -198,12 +205,34 @@ protected:
 	/** Track last jump count for double jump detection */
 	int32 LastJumpCount = 0;
 
+	// ==================== First Person Mesh Placement (camera-attached) ====================
+
+	/** Rest location of FirstPersonMesh relative to the camera. Source of truth for the pose
+	 *  pipeline — the component's own relative transform is rewritten every tick. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Placement")
+	FVector FirstPersonMeshCameraOffset = FVector::ZeroVector;
+
+	/** Rest rotation of FirstPersonMesh relative to the camera. Yaw -90 makes a standard UE
+	 *  skeleton face along the camera's forward axis. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Placement")
+	FRotator FirstPersonMeshCameraRotation = FRotator(0.0f, -90.0f, 0.0f);
+
+	/** How much of the camera shake roll is mirrored onto the mesh. 1.0 reproduces the behaviour
+	 *  from before the camera-attach refactor. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Camera Follow", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ShakeRollFollowAlpha = 1.0f;
+
+	/** How much of the wallrun camera roll is mirrored onto the mesh. 0.0 reproduces the previous
+	 *  behaviour, where the weapon deliberately did not roll into the wall being run on. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Camera Follow", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WallrunRollFollowAlpha = 0.0f;
+
 	// ==================== First Person View State ====================
 
-	/** Base relative location of FirstPersonMesh (stored on BeginPlay) */
+	/** Base relative location of FirstPersonMesh (from FirstPersonMeshCameraOffset on BeginPlay) */
 	FVector FirstPersonMeshBaseLocation = FVector::ZeroVector;
 
-	/** Base relative rotation of FirstPersonMesh (stored on BeginPlay) */
+	/** Base relative rotation of FirstPersonMesh (from FirstPersonMeshCameraRotation on BeginPlay) */
 	FRotator FirstPersonMeshBaseRotation = FRotator::ZeroRotator;
 
 	/** Current Z offset applied to FirstPersonMesh */
@@ -293,18 +322,25 @@ protected:
 	/** Update procedural weapon sway during running */
 	void UpdateWeaponRunSway(float DeltaTime);
 
-	/** Update aim offset in AnimInstance for IK targeting */
-	void UpdateAnimInstanceAimOffset(float DeltaTime);
-
-	/** Set AimOffset variable in FirstPersonMesh AnimInstance */
-	void SetAnimInstanceAimOffset(const FVector& Offset);
+	/** Interpolate the run/sprint aim offset. Applied as a camera-space pose layer. */
+	void UpdateRunAimOffset(float DeltaTime);
 
 	/** Play a procedural footstep sound - override in Blueprint for custom behavior */
 	UFUNCTION(BlueprintNativeEvent, Category = "Audio")
 	void PlayProceduralFootstep(bool bIsWallrun, bool bLeftFoot);
 
-	/** Update first person mesh position and rotation based on movement state */
+	/** Builds the FP mesh pose for this frame and applies it in a single write. Do not override
+	 *  to add offsets — override AccumulateFirstPersonPose instead. */
 	virtual void UpdateFirstPersonView(float DeltaTime);
+
+	/** Appends this class's pose layers to the accumulated FP mesh transform. All layers are in
+	 *  camera space (the mesh is parented to FirstPersonCameraComponent). Subclasses call Super
+	 *  first, then add their own. */
+	virtual void AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation);
+
+	/** Pushes wallrun + shake roll onto the PlayerCameraManager (POV-level roll, not the camera
+	 *  component — hence the separate mesh-side follow factors below). */
+	void ApplyCameraManagerRoll();
 
 public:
 
@@ -331,6 +367,9 @@ public:
 
 	/** Returns the channel/capture input action (for external bindings) */
 	UInputAction* GetChannelAction() const { return ChannelAction; }
+
+	/** Returns the dedicated ground/air dash action for HUD keybind hints. */
+	UInputAction* GetDashAction() const { return DashAction; }
 
 	/** Returns camera shake component */
 	UFUNCTION(BlueprintPure, Category = "Camera")

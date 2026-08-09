@@ -57,6 +57,7 @@
 #include "TutorialSubsystem.h"
 #include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
+#include "PlayerDeathSequenceComponent.h"
 
 // File-scope helper (uniquely named — unity-build safe): true while the yank-throw montage is
 // actively playing on the FP arms' anim instance.
@@ -92,6 +93,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the ability component (multi-slot ability inventory)
 	AbilityComponent = CreateDefaultSubobject<UAbilityComponent>(TEXT("Ability Component"));
+
+	// configurable terminal run-death presentation
+	PlayerDeathSequenceComponent = CreateDefaultSubobject<UPlayerDeathSequenceComponent>(TEXT("Player Death Sequence"));
 
 	// ==================== Melee Weapon FP Mesh ====================
 
@@ -207,8 +211,8 @@ void AShooterCharacter::BeginPlay()
 	// Initialize first person mesh visibility (hidden if no weapon)
 	UpdateFirstPersonMeshVisibility();
 
-	// update the HUD
-	OnDamaged.Broadcast(1.0f, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	// update health/armor listeners
+	BroadcastHealthChanged();
 
 	// Tutorial debug mode: reveal all HUD elements and skip all tutorials
 	if (bTutorialDebugMode)
@@ -483,8 +487,8 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		Die();
 	}
 
-	// update the HUD (HP + Armor)
-	OnDamaged.Broadcast(FMath::Max(0.0f, CurrentHP / MaxHP), MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	// update health/armor listeners
+	BroadcastHealthChanged();
 
 	// Trigger first-damage tutorial arrow (Health Bar)
 	if (!FirstDamageTutorialID.IsNone() && Damage > 0.0f)
@@ -684,12 +688,7 @@ void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
 	bIsWeaponSwitchInProgress = true;
 	bIsWeaponLowering = true;
 	WeaponSwitchProgress = 0.0f;
-
-	// Store current mesh location for interpolation
-	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-	{
-		WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
-	}
+	WeaponSwitchMeshZOffset = 0.0f;
 
 	// Play weapon switch sound
 	PlayWeaponSwitchSound();
@@ -710,14 +709,9 @@ void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
 			WeaponSwitchProgress += DeltaTime / WeaponSwitchLowerTime;
 			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
 
-			// Interpolate mesh down
-			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-			{
-				float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
-				FVector TargetLocation = WeaponSwitchMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(WeaponSwitchMeshBaseLocation, TargetLocation, Alpha);
-				FPMesh->SetRelativeLocation(NewLocation);
-			}
+			// Feed the pose pipeline instead of writing the mesh transform directly.
+			const float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
+			WeaponSwitchMeshZOffset = FMath::Lerp(0.0f, -WeaponSwitchLowerDistance, Alpha);
 
 			// Lowering complete?
 			if (WeaponSwitchProgress >= 1.0f)
@@ -742,13 +736,8 @@ void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
 	}
 	else if (bWeaponSwitchPausedAtBottom)
 	{
-		// Paused at bottom — clamp mesh to lowered position each tick (defensive against
-		// other systems that might touch FP mesh location). Wait for FinishWeaponSwitch.
-		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-		{
-			FVector TargetLocation = WeaponSwitchMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-			FPMesh->SetRelativeLocation(TargetLocation);
-		}
+		// Paused at bottom — hold the lowered offset until FinishWeaponSwitch is called.
+		WeaponSwitchMeshZOffset = -WeaponSwitchLowerDistance;
 	}
 	else
 	{
@@ -758,19 +747,10 @@ void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
 			WeaponSwitchProgress += DeltaTime / WeaponSwitchRaiseTime;
 			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
 
-			// Interpolate mesh up.
-			// Anchor includes the new weapon's per-weapon mesh offset so the rise ends
-			// exactly where APolarityCharacter::Tick will keep applying it next frame —
-			// no snap when bIsWeaponSwitchInProgress flips off.
-			if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-			{
-				float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
-				const FVector RaiseAnchor = FirstPersonMeshBaseLocation
-					+ (CurrentWeapon ? CurrentWeapon->FirstPersonMeshOffset : FVector::ZeroVector);
-				FVector LoweredLocation = RaiseAnchor - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(LoweredLocation, RaiseAnchor, Alpha);
-				FPMesh->SetRelativeLocation(NewLocation);
-			}
+			// The offset returns to 0, which is exactly the rest pose the other layers already
+			// target, so there is no snap when bIsWeaponSwitchInProgress flips off.
+			const float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
+			WeaponSwitchMeshZOffset = FMath::Lerp(-WeaponSwitchLowerDistance, 0.0f, Alpha);
 
 			// Raising complete?
 			if (WeaponSwitchProgress >= 1.0f)
@@ -817,14 +797,8 @@ void AShooterCharacter::OnWeaponSwitchLowered()
 
 void AShooterCharacter::OnWeaponSwitchRaised()
 {
-	// Restore mesh to the equipped weapon's natural rest position so the value matches
-	// what APolarityCharacter::Tick will keep applying once bIsWeaponSwitchInProgress flips off.
-	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-	{
-		const FVector EquippedTarget = FirstPersonMeshBaseLocation
-			+ (CurrentWeapon ? CurrentWeapon->FirstPersonMeshOffset : FVector::ZeroVector);
-		FPMesh->SetRelativeLocation(EquippedTarget);
-	}
+	// Clear the switch layer; the remaining layers already describe the equipped rest pose.
+	WeaponSwitchMeshZOffset = 0.0f;
 
 	// Switch complete
 	bIsWeaponSwitchInProgress = false;
@@ -1236,10 +1210,11 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		MovementSettings->ADSInterpSpeed
 	);
 
-	// ==================== Camera Position Blend ====================
-	// ADS = camera moves to the weapon's ADSCamera anchor (stays at hipfire base when alpha=0).
-	// Weapon mesh / hands stay in their normal animated pose — no Modify Bone, no skeleton hacks.
-	// Designer places ADSCamera component on the weapon at the desired sight-eye position.
+	// ==================== Camera Placement ====================
+	// ADS no longer moves the camera. The FP mesh is parented to the camera, so the weapon's
+	// ADSCamera anchor is a descendant of it — chasing that anchor with the camera would be a
+	// runaway feedback loop. Instead AccumulateFirstPersonPose slides the MESH so the anchor
+	// lands on the eye. The camera keeps only its own offsets: shake and the raised shield.
 	UCameraComponent* Camera = GetFirstPersonCameraComponent();
 	if (!Camera)
 	{
@@ -1252,31 +1227,19 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		ShakeOffset = ShakeComp->GetCameraOffset();
 	}
 
-	// Hipfire camera target in WORLD space (character actor transform * relative base + shake).
-	const FTransform CharXform = GetActorTransform();
-	const FVector BaseCameraWorld = CharXform.TransformPosition(BaseCameraLocation + ShakeOffset);
+	Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset + CurrentShieldCameraOffset);
 
-	// ADS targets — fall back to hipfire base if no ADSCamera on the weapon.
-	FVector ADSCameraWorld = BaseCameraWorld;
-	float   ADSFOV    = BaseCameraFOV;
-	float   ADSFPFOV  = BaseFirstPersonFOV;
+	// FOV targets — fall back to hipfire base if the weapon has no ADSCamera.
+	float ADSFOV   = BaseCameraFOV;
+	float ADSFPFOV = BaseFirstPersonFOV;
 	if (CurrentWeapon)
 	{
-		if (UCameraComponent* WeaponADSCam = CurrentWeapon->GetADSCamera())
+		if (const UCameraComponent* WeaponADSCam = CurrentWeapon->GetADSCamera())
 		{
-			ADSCameraWorld = WeaponADSCam->GetComponentLocation();
-			ADSFOV         = WeaponADSCam->FieldOfView;
-			ADSFPFOV       = WeaponADSCam->FirstPersonFieldOfView;
+			ADSFOV   = WeaponADSCam->FieldOfView;
+			ADSFPFOV = WeaponADSCam->FirstPersonFieldOfView;
 		}
 	}
-
-	// Lerp position by alpha and apply. Camera rotation is unchanged — bUsePawnControlRotation
-	// keeps it glued to ControlRotation, so player aim still works as usual; only the eye slides.
-	const FVector InterpCameraWorld = FMath::Lerp(BaseCameraWorld, ADSCameraWorld, CurrentADSAlpha);
-
-	// Add shield camera offset (in actor-local space → world).
-	const FVector ShieldOffsetWorld = CharXform.TransformVector(CurrentShieldCameraOffset);
-	Camera->SetWorldLocation(InterpCameraWorld + ShieldOffsetWorld);
 
 	// Lerp FOV — designer sets desired zoom directly on the weapon's ADSCamera component.
 	// CameraShakeComponent overwrites Camera->FieldOfView each frame using its own BaseFOV +
@@ -1348,11 +1311,24 @@ void AShooterCharacter::UpdateRegeneration(float DeltaTime)
 	const float OldHP = CurrentHP;
 	CurrentHP = FMath::Min(CurrentHP + CurrentRegenRate * DeltaTime, MaxHP);
 
-	// Update HUD if HP changed
+	// Update health listeners if HP changed
 	if (CurrentHP != OldHP)
 	{
-		OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+		BroadcastHealthChanged();
 	}
+}
+
+void AShooterCharacter::BroadcastHealthChanged()
+{
+	const float SafeMaxHP = FMath::Max(1.0f, MaxHP);
+	const float ClampedCurrentHP = FMath::Clamp(CurrentHP, 0.0f, SafeMaxHP);
+	const float LifePercent = ClampedCurrentHP / SafeMaxHP;
+	const float ArmorPercent = MaxArmor > 0.0f ? FMath::Clamp(CurrentArmor / MaxArmor, 0.0f, 1.0f) : 0.0f;
+
+	OnHealthChanged.Broadcast(ClampedCurrentHP, SafeMaxHP, LifePercent, ArmorPercent);
+
+	// Legacy route for existing listeners that only need normalized health/armor values.
+	OnDamaged.Broadcast(LifePercent, ArmorPercent);
 }
 
 void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
@@ -1405,10 +1381,9 @@ void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
 	}
 }
 
-void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
+void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation)
 {
-	// Call parent implementation first (sets base position of FP Mesh)
-	Super::UpdateFirstPersonView(DeltaTime);
+	Super::AccumulateFirstPersonPose(DeltaTime, Location, Rotation);
 
 	USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
 	if (!FPMesh)
@@ -1416,36 +1391,65 @@ void AShooterCharacter::UpdateFirstPersonView(float DeltaTime)
 		return;
 	}
 
-	// Get current relative transform (set by Super — the base hip-fire position)
-	FVector CurrentLocation = FPMesh->GetRelativeLocation();
-	FRotator CurrentRotation = FPMesh->GetRelativeRotation();
+	const bool bIsWallrunning = GetApexMovement() && GetApexMovement()->IsWallRunning();
 
-	// === Recoil Visual Kick ===
-	if (RecoilComponent)
+	// === Per-weapon base pose ===
+	// Faded out by crouch/slide (smoothly, via CrouchSlideProgress) and by wallrun (hard switch —
+	// acceptable, since the wallrun tilt itself ramps in through ApexMovement's interpolation).
+	if (CurrentWeapon)
 	{
-		FVector RecoilOffset = RecoilComponent->GetWeaponOffset();
-		FRotator RecoilRotation = RecoilComponent->GetWeaponRotationOffset();
-
-		if (USceneComponent* Parent = FPMesh->GetAttachParent())
-		{
-			const FRotator ParentRot = Parent->GetRelativeRotation();
-			RecoilOffset = ParentRot.UnrotateVector(RecoilOffset);
-			const FVector RotAsVec(RecoilRotation.Roll, RecoilRotation.Pitch, RecoilRotation.Yaw);
-			const FVector RotTransformed = ParentRot.UnrotateVector(RotAsVec);
-			RecoilRotation = FRotator(RotTransformed.Y, RotTransformed.Z, RotTransformed.X);
-		}
-
-		CurrentLocation += RecoilOffset;
-		CurrentRotation += RecoilRotation;
+		const float WeaponBaseFactor = (1.0f - CrouchSlideProgress) * (bIsWallrunning ? 0.0f : 1.0f);
+		Location += CurrentWeapon->FirstPersonMeshOffset * WeaponBaseFactor;
+		Rotation += CurrentWeapon->FirstPersonMeshTilt * WeaponBaseFactor;
 	}
 
-	// Apply hip-fire + recoil via relative transform
-	FPMesh->SetRelativeLocation(CurrentLocation);
-	FPMesh->SetRelativeRotation(CurrentRotation);
+	// === ADS ===
+	// Slide the mesh until the weapon's ADSCamera anchor sits on the eye. The anchor's transform
+	// RELATIVE TO THE MESH depends only on the animated pose, the socket and the weapon
+	// attachment — never on where the mesh itself sits — so there is no feedback loop here.
+	// (Moving the camera to the anchor instead, as the old code did, would be a feedback loop now
+	// that the anchor is a descendant of the camera.)
+	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
+	{
+		if (const UCameraComponent* ADSCam = CurrentWeapon->GetADSCamera())
+		{
+			const FVector AnchorInMeshSpace =
+				FPMesh->GetComponentTransform().InverseTransformPosition(ADSCam->GetComponentLocation());
 
-	// ADS pose follow is handled by the AnimBP Modify Bone driven by ADSAnchorOffset
-	// (computed in UpdateADS). No additional pitch-follow on the mesh component here —
-	// it would double up with the bone modification.
+			// Where that anchor would land in camera space with the pose accumulated so far.
+			const FVector AnchorInCameraSpace =
+				FTransform(Rotation, Location).TransformPosition(AnchorInMeshSpace);
+
+			// Target: the camera origin (the eye).
+			Location += -AnchorInCameraSpace * CurrentADSAlpha;
+		}
+	}
+
+	// === Recoil visual kick ===
+	// Straight camera-space add. The old parent-rotation un-rotate existed purely to cancel the
+	// body mesh's yaw; the camera parent needs no such correction.
+	if (RecoilComponent)
+	{
+		Location += RecoilComponent->GetWeaponOffset();
+		Rotation += RecoilComponent->GetWeaponRotationOffset();
+	}
+
+	// === Weapon switch lower/raise, plus external lowers (melee attack) ===
+	Location.Z += WeaponSwitchMeshZOffset + ExternalMeshZOffset;
+
+	// === Camera follow compensation ===
+	// The camera component itself is displaced by shake and by the raised shield (see UpdateADS).
+	// Parented to it, the mesh inherits that 1:1; hand back the fraction the designer does not
+	// want. GetRelativeLocation is capsule-space, so rotate it into camera space first.
+	if (CameraLocationFollowAlpha < 1.0f)
+	{
+		if (const UCameraComponent* Camera = GetFirstPersonCameraComponent())
+		{
+			const FVector CameraOffsetFromBase = Camera->GetRelativeLocation() - BaseCameraLocation;
+			const FVector OffsetInCameraSpace = Camera->GetRelativeRotation().UnrotateVector(CameraOffsetFromBase);
+			Location -= OffsetInCameraSpace * (1.0f - CameraLocationFollowAlpha);
+		}
+	}
 }
 
 void AShooterCharacter::OnMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
@@ -1909,13 +1913,8 @@ void AShooterCharacter::EquipStartingWeaponAnimated()
 	AShooterWeapon* Equipped = AddWeaponClassAnimated(StartingWeaponClass);
 	if (Equipped && CurrentWeapon == Equipped && !bIsWeaponSwitchInProgress)
 	{
-		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-		{
-			WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
-			// Snap to the lowered position so the raise lerp visibly brings it up from below.
-			const FVector RaiseAnchor = FirstPersonMeshBaseLocation + CurrentWeapon->FirstPersonMeshOffset;
-			FPMesh->SetRelativeLocation(RaiseAnchor - FVector(0.0f, 0.0f, 100.0f));
-		}
+		// Start from the lowered offset so the raise lerp visibly brings the weapon up from below.
+		WeaponSwitchMeshZOffset = -WeaponSwitchLowerDistance;
 
 		// Raise-only phase (skip the lower): identical motion to the weapon-switch / melee raise.
 		bIsWeaponSwitchInProgress = true;
@@ -2494,12 +2493,7 @@ void AShooterCharacter::BeginWeaponLower()
 	bIsWeaponLowering = true;
 	bWeaponSwitchPausedAtBottom = true;
 	WeaponSwitchProgress = 0.0f;
-
-	// Cache base location for interpolation
-	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-	{
-		WeaponSwitchMeshBaseLocation = FPMesh->GetRelativeLocation();
-	}
+	WeaponSwitchMeshZOffset = 0.0f;
 
 	PlayWeaponSwitchSound();
 }
@@ -2883,21 +2877,6 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 	// is scheduled below.
 	OwnedWeapons.Remove(Yanked);
 	OnWeaponInventoryChanged.Broadcast();
-
-	// The montage's gameplay is done — the switch flow owns the arms from here. Blend the
-	// FP-montage alpha back to 0 NOW instead of relying on OnYankThrowMontageEnded: the
-	// imminent replacement equip swaps the FP anim instance (SetAnimInstanceClass), which
-	// tears montage instances down WITHOUT firing their end delegates — that left the alpha
-	// stuck at 1 (ControlRigAlpha pushed as 0 → Control Rig off → broken running pose after
-	// re-picking a weapon class whose ABP reads ControlRigAlpha).
-	if (UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>())
-	{
-		SetFPMontageAlpha(0.0f, ChargeComp->YankThrowAlphaBlendOut);
-	}
-	else
-	{
-		SetFPMontageAlpha(0.0f, 0.2f);
-	}
 
 	// Replacement priority:
 	// 1) The freshest OTHER yanked weapon — when this throw was triggered by yanking a new
@@ -3707,10 +3686,34 @@ void AShooterCharacter::RestoreHealth(float Amount)
 		return;
 	}
 
+	const float OldHP = CurrentHP;
 	CurrentHP = FMath::Clamp(CurrentHP + Amount, 0.0f, MaxHP);
 
-	// Update HUD
-	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	if (CurrentHP != OldHP)
+	{
+		BroadcastHealthChanged();
+	}
+}
+
+void AShooterCharacter::ModifyMaxHP(float DeltaMaxHP, bool bHealAddedMaxHP)
+{
+	if (FMath::IsNearlyZero(DeltaMaxHP))
+	{
+		return;
+	}
+
+	const float OldMaxHP = MaxHP;
+	MaxHP = FMath::Max(1.0f, MaxHP + DeltaMaxHP);
+	const float ActualDelta = MaxHP - OldMaxHP;
+
+	if (bHealAddedMaxHP && ActualDelta > 0.0f && !IsDead())
+	{
+		CurrentHP += ActualDelta;
+	}
+
+	CurrentHP = FMath::Clamp(CurrentHP, 0.0f, MaxHP);
+
+	BroadcastHealthChanged();
 }
 
 // ==================== Health Pickup Objective ====================
@@ -3770,8 +3773,8 @@ void AShooterCharacter::RestoreArmor(float Amount)
 
 	CurrentArmor = FMath::Clamp(CurrentArmor + Amount, 0.0f, MaxArmor);
 
-	// Update HUD
-	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	// Update health/armor listeners
+	BroadcastHealthChanged();
 }
 
 // ==================== Death ====================
@@ -3807,7 +3810,60 @@ void AShooterCharacter::Die()
 	StopSlideLoopSound();
 	StopWallRunLoopSound();
 
-	// Start fade to black
+	BP_OnDeath();
+
+	// A death during an active roguelite run is terminal. EndRun clears run-scoped persistence,
+	// then the configurable presentation replaces the old immediate black fade.
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>(); Run && Run->IsRunActive())
+		{
+			Run->EndRun(ERunEndReason::PlayerDeath);
+
+			if (PlayerDeathSequenceComponent && PlayerDeathSequenceComponent->StartDeathSequence())
+			{
+				// The launched camera now sees the world mesh, so remove all first-person presentation.
+				if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+				{
+					FPMesh->SetVisibility(false, true);
+				}
+				if (MeleeWeaponFPMesh)
+				{
+					MeleeWeaponFPMesh->SetVisibility(false, true);
+				}
+				if (CurrentWeapon)
+				{
+					CurrentWeapon->SetActorHiddenInGame(true);
+				}
+
+				const float SequenceDuration = PlayerDeathSequenceComponent->GetTotalDuration();
+				UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Player death sequence started -> menu after %.2fs"),
+					SequenceDuration);
+				GetWorldTimerManager().SetTimer(
+					RespawnTimer, this, &AShooterCharacter::ReturnToMainMenuAfterRunDeath,
+					FMath::Max(0.01f, SequenceDuration), false);
+				return;
+			}
+
+			// Safe fallback when the component is disabled or could not start.
+			if (APlayerController* PC = Cast<APlayerController>(GetController()))
+			{
+				if (PC->PlayerCameraManager)
+				{
+					PC->PlayerCameraManager->StartCameraFade(
+						0.0f, 1.0f, DeathFadeOutDuration, DeathFadeColor, false, true);
+				}
+			}
+			UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Death sequence unavailable -> fallback menu fade %.2fs"),
+				DeathFadeOutDuration);
+			GetWorldTimerManager().SetTimer(
+				RespawnTimer, this, &AShooterCharacter::ReturnToMainMenuAfterRunDeath,
+				FMath::Max(0.01f, DeathFadeOutDuration), false);
+			return;
+		}
+	}
+
+	// Non-run deaths retain the existing checkpoint/respawn behavior.
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		if (PC->PlayerCameraManager)
@@ -3816,9 +3872,25 @@ void AShooterCharacter::Die()
 		}
 	}
 
-	BP_OnDeath();
-
 	GetWorld()->GetTimerManager().SetTimer(RespawnTimer, this, &AShooterCharacter::OnRespawn, RespawnTime, false);
+}
+
+void AShooterCharacter::ReturnToMainMenuAfterRunDeath()
+{
+	if (MainMenuLevel.IsNull())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RUN_FLOW] Cannot return to menu: assign MainMenuLevel on the player Blueprint"));
+		return;
+	}
+
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		PC->SetShowMouseCursor(true);
+		PC->SetInputMode(FInputModeUIOnly());
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Opening main menu map %s"), *MainMenuLevel.ToSoftObjectPath().ToString());
+	UGameplayStatics::OpenLevelBySoftObjectPtr(this, MainMenuLevel);
 }
 
 void AShooterCharacter::OnRespawn()
@@ -3900,8 +3972,8 @@ bool AShooterCharacter::RestoreFromCheckpoint(const FCheckpointData& Data)
 	// Restore armor
 	CurrentArmor = Data.Armor;
 
-	// Update HUD with both HP and armor
-	OnDamaged.Broadcast(CurrentHP / MaxHP, MaxArmor > 0.0f ? CurrentArmor / MaxArmor : 0.0f);
+	// Update listeners with both HP and armor
+	BroadcastHealthChanged();
 
 	// Restore EMF charge (reset to base/neutral)
 	CurrentCharge = Data.BaseEMFCharge;
@@ -4037,8 +4109,8 @@ void AShooterCharacter::ResetCharacterState()
 
 void AShooterCharacter::SetFPMontageAlpha(float Target, float BlendTime)
 {
-	TargetFPMontageAlpha = FMath::Clamp(Target, 0.0f, 1.0f);
-	FPMontageAlphaInterpRate = (BlendTime > KINDA_SMALL_NUMBER) ? (1.0f / BlendTime) : 999.0f;
+	// Deprecated no-op — see the header. The FP mesh is parented to the camera, so two-hand
+	// montages follow the view on their own; there is no Control Rig left to blend out.
 }
 
 void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
@@ -4066,9 +4138,8 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 		TargetLeftHandIKAlpha = 0.0f;
 	}
 	// Yank-throw montage: force alpha=0 for its whole duration — frees the left hand from
-	// the weapon-grip IK so the montage can animate both hands. (ControlRigAlpha is driven
-	// separately below via the FP-montage alpha push.) Auto-clears when the montage ends,
-	// restoring the default alpha=1.
+	// the weapon-grip IK so the montage can animate both hands. Auto-clears when the montage
+	// ends, restoring the default alpha=1.
 	else if (PendingYankThrowWeapon.IsValid() &&
 		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
 	{
@@ -4112,73 +4183,6 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 
 	// Always pass the interpolated alpha value
 	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
-
-	// Watchdog: the FP-montage alpha may only stay raised while one of the two-hand throw
-	// montages is actually playing. Anim-instance teardown (SetAnimInstanceClass on weapon
-	// switch) destroys montage instances WITHOUT firing their end delegates, so the delegate
-	// path alone can leave the alpha — and thus the pushed ControlRigAlpha — stuck forever.
-	if (TargetFPMontageAlpha > 0.0f && ChargeAnimationComponent)
-	{
-		bool bThrowMontagePlaying = false;
-		if (USkeletalMeshComponent* FPMeshForCheck = GetFirstPersonMesh())
-		{
-			if (UAnimInstance* FPAnimInst = FPMeshForCheck->GetAnimInstance())
-			{
-				bThrowMontagePlaying =
-					(ChargeAnimationComponent->YankThrowMontage && FPAnimInst->Montage_IsPlaying(ChargeAnimationComponent->YankThrowMontage)) ||
-					(ChargeAnimationComponent->ThrowMontage && FPAnimInst->Montage_IsPlaying(ChargeAnimationComponent->ThrowMontage));
-			}
-		}
-
-		if (!bThrowMontagePlaying)
-		{
-			SetFPMontageAlpha(0.0f, ChargeAnimationComponent->YankThrowAlphaBlendOut);
-		}
-	}
-
-	// FP montage alpha — interpolate at user-specified rate (FPMontageAlphaInterpRate) and
-	// push (1 - alpha) into the AnimBP's ControlRigAlpha variable via reflection. The ABP no
-	// longer writes ControlRigAlpha itself (its EventGraph Set node was removed), so C++ owns it:
-	//   no two-hand montage (alpha=0): ControlRigAlpha=1 → Control Rig runs as normal;
-	//   throw/yank-throw montage (alpha=1): ControlRigAlpha=0 → rig off, and spine_05
-	//   Transform Bone (AnimGraph computes its alpha as 1 - ControlRigAlpha) takes over the
-	//   camera-pitch follow for the montage pose.
-	// Driven by SetFPMontageAlpha: → 1 on PlayThrowMontage/PlayYankThrowMontage, → 0 on
-	// montage end (blend times = the *AlphaBlendIn/Out props on ChargeAnimationComponent).
-	CurrentFPMontageAlpha = FMath::FInterpConstantTo(
-		CurrentFPMontageAlpha,
-		TargetFPMontageAlpha,
-		DeltaTime,
-		FPMontageAlphaInterpRate
-	);
-
-	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
-	{
-		if (UAnimInstance* AnimInst = FPMesh->GetAnimInstance())
-		{
-			const float ControlRigAlphaValue = 1.0f - CurrentFPMontageAlpha;
-
-			static const FName ControlRigAlphaPropertyName(TEXT("ControlRigAlpha"));
-			FProperty* AlphaProp = AnimInst->GetClass()->FindPropertyByName(ControlRigAlphaPropertyName);
-			if (AlphaProp)
-			{
-				if (FFloatProperty* FloatProp = CastField<FFloatProperty>(AlphaProp))
-				{
-					if (void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInst))
-					{
-						*static_cast<float*>(ValuePtr) = ControlRigAlphaValue;
-					}
-				}
-				else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(AlphaProp))
-				{
-					if (void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInst))
-					{
-						*static_cast<double*>(ValuePtr) = static_cast<double>(ControlRigAlphaValue);
-					}
-				}
-			}
-		}
-	}
 }
 
 void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, float Alpha)

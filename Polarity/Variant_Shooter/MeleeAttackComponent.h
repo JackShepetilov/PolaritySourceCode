@@ -886,6 +886,13 @@ protected:
 	/** Base location of FirstPersonMesh (stored for restoration) */
 	FVector FirstPersonMeshBaseLocation = FVector::ZeroVector;
 
+	/** How far down the FP mesh drops for the melee weapon-lower (camera space, cm). */
+	UPROPERTY(EditAnywhere, Category = "Melee|Mesh Transition", meta = (ClampMin = "0.0", ClampMax = "500.0"))
+	float MeshLowerDistance = 100.0f;
+
+	/** Publishes the weapon-lower offset to the owning ShooterCharacter's pose pipeline. */
+	void SetFirstPersonMeshLowerOffset(float ZOffset);
+
 	/** Target rotation for MeleeMesh (camera-aligned) */
 	FRotator MeleeMeshTargetRotation = FRotator::ZeroRotator;
 

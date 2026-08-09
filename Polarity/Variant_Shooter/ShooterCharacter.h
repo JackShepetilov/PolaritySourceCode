@@ -20,6 +20,7 @@ class UChargeAnimationComponent;
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
+class UPlayerDeathSequenceComponent;
 class UAudioComponent;
 class UCurveFloat;
 class UCameraShakeBase;
@@ -33,6 +34,7 @@ struct FCheckpointData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDamagedDelegate, float, LifePercent, float, ArmorPercent);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FHealthChangedDelegate, float, CurrentHP, float, MaxHP, float, LifePercent, float, ArmorPercent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDamageDirectionDelegate, float, AngleDegrees, float, Damage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FHeatUpdatedDelegate, float, HeatPercent, float, DamageMultiplier);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FSpeedUpdatedDelegate, float, SpeedPercent, float, CurrentSpeed, float, MaxSpeed);
@@ -163,6 +165,10 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UAbilityComponent> AbilityComponent;
 
+	/** Configurable terminal death camera / pull / dismemberment presentation. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UPlayerDeathSequenceComponent> PlayerDeathSequenceComponent;
+
 	// ==================== Melee Weapon FP Mesh ====================
 
 	/** First-person body mesh shown instead of the normal FP mesh when melee weapon is equipped.
@@ -253,18 +259,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand IK")
 	float LeftHandIKAlphaInterpSpeed = 10.0f;
 
-	// ==================== FP Montage Alpha ====================
+	// ==================== Camera Follow ====================
 
-	/** Current interpolated alpha [0..1]. 0 = AnimBP runs Control Rig as normal,
-	 *  1 = Control Rig disabled + Spine Transform Modify Bone active (camera follow via spine). */
-	float CurrentFPMontageAlpha = 0.0f;
-
-	/** Target value FPMontageAlpha is interpolating toward. Set via SetFPMontageAlpha(). */
-	float TargetFPMontageAlpha = 0.0f;
-
-	/** Rate (units per second) for interpolation. Computed as 1.0 / BlendTime when SetFPMontageAlpha
-	 *  is called. Reaches target in approximately BlendTime seconds regardless of distance. */
-	float FPMontageAlphaInterpRate = 10.0f;
+	/** How much of the camera's own positional offsets (shake, raised shield) the FP mesh keeps.
+	 *  The mesh is parented to the camera, so it inherits them at 1.0 automatically; lower values
+	 *  give part of the movement back. 0.0 reproduces the pre-camera-attach behaviour. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Camera Follow", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CameraLocationFollowAlpha = 0.5f;
 
 	/** Max distance to use for aim traces */
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 100000, Units = "cm"))
@@ -368,8 +369,16 @@ protected:
 	/** Progress of weapon switch mesh transition (0-1) */
 	float WeaponSwitchProgress = 0.0f;
 
-	/** Base location of FirstPersonMesh for weapon switch (stored at switch start) */
-	FVector WeaponSwitchMeshBaseLocation = FVector::ZeroVector;
+	/** Camera-space Z offset contributed by the weapon switch lower/raise animation.
+	 *  0 = weapon at rest, -WeaponSwitchLowerDistance = fully lowered. Consumed as a pose layer. */
+	float WeaponSwitchMeshZOffset = 0.0f;
+
+	/** How far down the FP mesh drops during a weapon switch (camera space, cm). */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.0", ClampMax = "500.0"))
+	float WeaponSwitchLowerDistance = 100.0f;
+
+	/** Camera-space Z offset driven by external systems. See SetFirstPersonMeshExternalZOffset. */
+	float ExternalMeshZOffset = 0.0f;
 
 	/** True during lowering phase, false during raising phase */
 	bool bIsWeaponLowering = true;
@@ -852,8 +861,12 @@ public:
 	/** Bullet count updated delegate */
 	FBulletCountUpdatedDelegate OnBulletCountUpdated;
 
-	/** Damaged delegate (broadcasts both HP and Armor as normalized 0-1 percents) */
+	/** Legacy health-percent delegate. Kept for existing upgrade listeners; HUD uses OnHealthChanged. */
 	FDamagedDelegate OnDamaged;
+
+	/** Broadcast whenever current HP, max HP, or armor percent changes. */
+	UPROPERTY(BlueprintAssignable, Category = "Health")
+	FHealthChangedDelegate OnHealthChanged;
 
 	/** Damage direction delegate (angle in degrees relative to player forward, 0 = front, 90 = right, 180 = back, -90 = left) */
 	FDamageDirectionDelegate OnDamageDirection;
@@ -939,6 +952,9 @@ public:
 	/** Handle incoming damage */
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
+	/** Broadcast the current health/armor snapshot to listeners. */
+	void BroadcastHealthChanged();
+
 	/** Returns true if player is dead (HP <= 0) */
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsDead() const { return CurrentHP <= 0.0f; }
@@ -946,6 +962,10 @@ public:
 	/** Restore HP by the given amount (clamped to MaxHP). Updates UI. */
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void RestoreHealth(float Amount);
+
+	/** Add/remove maximum HP. Positive delta can optionally heal the newly-added capacity. Updates UI. */
+	UFUNCTION(BlueprintCallable, Category = "Health")
+	void ModifyMaxHP(float DeltaMaxHP, bool bHealAddedMaxHP);
 
 	/** Restore armor by the given amount (clamped to MaxArmor). Updates UI. */
 	UFUNCTION(BlueprintCallable, Category = "Armor")
@@ -1160,15 +1180,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Left Hand IK")
 	void SetLeftHandIKAlpha(float Alpha) { TargetLeftHandIKAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f); }
 
-	/** Drives the FP-montage alpha (Control Rig disable / Spine Transform enable in AnimBP).
-	 *  Smoothly interpolates Current → Target over BlendTime seconds.
-	 *  Pushed into AnimBP every Tick via reflection (property name: "FPMontageAlpha"). */
-	UFUNCTION(BlueprintCallable, Category = "Animation|FP Montage Alpha")
+	/** Camera-space Z offset on the FP mesh contributed by systems outside the character
+	 *  (MeleeAttackComponent's weapon-lower). Routed through the pose pipeline so the mesh
+	 *  transform keeps a single writer instead of components fighting over it each tick. */
+	UFUNCTION(BlueprintCallable, Category = "First Person View")
+	void SetFirstPersonMeshExternalZOffset(float ZOffset) { ExternalMeshZOffset = ZOffset; }
+
+	/** Current external FP mesh Z offset. See SetFirstPersonMeshExternalZOffset. */
+	UFUNCTION(BlueprintPure, Category = "First Person View")
+	float GetFirstPersonMeshExternalZOffset() const { return ExternalMeshZOffset; }
+
+	/** DEPRECATED no-op. Used to disable the FP Control Rig and enable a spine Modify Bone so that
+	 *  two-hand montages would follow the camera pitch. The FP mesh is parented to the camera now,
+	 *  so montages follow it for free and there is nothing to blend. Kept as a stub while the
+	 *  remaining call sites (ChargeAnimationComponent, Blueprints) are cleaned up. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|FP Montage Alpha", meta = (DeprecatedFunction, DeprecationMessage = "FP mesh follows the camera directly; this no longer does anything."))
 	void SetFPMontageAlpha(float Target, float BlendTime);
 
-	/** Current interpolated FP-montage alpha (read-only). */
-	UFUNCTION(BlueprintPure, Category = "Animation|FP Montage Alpha")
-	float GetFPMontageAlpha() const { return CurrentFPMontageAlpha; }
+	/** DEPRECATED, always 0. See SetFPMontageAlpha. */
+	UFUNCTION(BlueprintPure, Category = "Animation|FP Montage Alpha", meta = (DeprecatedFunction, DeprecationMessage = "FP mesh follows the camera directly; this is always 0."))
+	float GetFPMontageAlpha() const { return 0.0f; }
 
 	/** Gets the current left hand IK alpha */
 	UFUNCTION(BlueprintPure, Category = "Weapons|Left Hand IK")
@@ -1201,8 +1232,9 @@ protected:
 	/** Update overlay material based on current charge polarity */
 	void UpdateChargeOverlay(uint8 NewPolarity);
 
-	/** Update first person view with recoil offsets */
-	virtual void UpdateFirstPersonView(float DeltaTime) override;
+	/** Adds the shooter-specific FP mesh pose layers: per-weapon base pose, ADS, recoil,
+	 *  weapon-switch lower/raise and the camera-follow compensation. */
+	virtual void AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation) override;
 
 	/** Called when melee attack hits something */
 	UFUNCTION()
@@ -1610,6 +1642,13 @@ protected:
 
 	/** Called when this character's HP is depleted */
 	void Die();
+
+	/** Completes the death fade by leaving the run map for the main menu. */
+	void ReturnToMainMenuAfterRunDeath();
+
+	/** Assigned on the player Blueprint; C++ does not own references to game content. */
+	UPROPERTY(EditDefaultsOnly, Category = "Shooter|Run Flow", meta = (AllowedClasses = "/Script/Engine.World"))
+	TSoftObjectPtr<UWorld> MainMenuLevel;
 
 	/** Called to allow Blueprint code to react to this character's death */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter", meta = (DisplayName = "On Death"))

@@ -17,6 +17,7 @@
 #include "Engine/DamageEvents.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "ApexMovementComponent.h"
@@ -30,6 +31,7 @@
 #include "Foliage/FoliageConversionLibrary.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
+#include "Arena/SportsBall.h"
 
 UMeleeAttackComponent::UMeleeAttackComponent()
 {
@@ -654,11 +656,7 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 			if (bIsLoweringWeaponOnly)
 			{
 				// Ensure weapon is fully lowered before going to Ready
-				if (FirstPersonMesh)
-				{
-					FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-					FirstPersonMesh->SetRelativeLocation(TargetLocation);
-				}
+				SetFirstPersonMeshLowerOffset(-MeshLowerDistance);
 				// Stay in Ready state with weapon lowered, waiting for actual attack
 				SetState(EMeleeAttackState::Ready);
 				bInputLocked = false;
@@ -768,6 +766,11 @@ bool UMeleeAttackComponent::IsValidMeleeTarget(AActor* HitActor) const
 	// Air Mail: objects flying back to the player (incl. thrown weapons, which are plain
 	// actors) must be kickable — the upgrade redirects them on OnMeleeHit.
 	if (HitActor->ActorHasTag(UUpgrade_AirKick::TAG_AirMailIncoming))
+	{
+		return true;
+	}
+
+	if (Cast<ASportsBall>(HitActor))
 	{
 		return true;
 	}
@@ -895,15 +898,28 @@ void UMeleeAttackComponent::PerformHitDetection()
 
 	// Perform sphere trace
 	TArray<FHitResult> HitResults;
-	bool bHit = GetWorld()->SweepMultiByChannel(
+	FCollisionObjectQueryParams ObjectQueryParams;
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_PhysicsBody);
+
+	bool bHit = GetWorld()->SweepMultiByObjectType(
 		HitResults,
 		Start,
 		End,
 		FQuat::Identity,
-		ECC_Pawn, // Or use a custom trace channel
+		ObjectQueryParams,
 		FCollisionShape::MakeSphere(Settings.AttackRadius),
 		QueryParams
 	);
+
+	if (bHit)
+	{
+		HitResults.Sort([](const FHitResult& A, const FHitResult& B)
+		{
+			return A.Distance < B.Distance;
+		});
+	}
 
 	// Debug visualization for hit detection trace
 	if (bEnableDebugVisualization)
@@ -1002,11 +1018,26 @@ void UMeleeAttackComponent::PerformHitDetection()
 			}
 			bHasHitThisAttack = true;
 
-			// Check for headshot
-			bool bHeadshot = IsHeadshot(Hit);
+			bool bHeadshot = false;
+			float FinalDamage = 0.0f;
 
-			// Apply damage and get final damage value
-			float FinalDamage = ApplyDamage(HitActor, Hit);
+			if (ASportsBall* SportsBall = Cast<ASportsBall>(HitActor))
+			{
+				SportsBall->HandleMeleeAttackHit(
+					OwnerCharacter,
+					Hit,
+					CurrentAttackType,
+					GetTraceDirection(),
+					OwnerCharacter->GetVelocity());
+			}
+			else
+			{
+				// Check for headshot
+				bHeadshot = IsHeadshot(Hit);
+
+				// Apply damage and get final damage value
+				FinalDamage = ApplyDamage(HitActor, Hit);
+			}
 
 			// Play effects
 			PlaySound(HitSound);
@@ -2243,6 +2274,8 @@ void UMeleeAttackComponent::LowerWeapon()
 
 void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
 {
+	// The FP mesh transform has a single writer (AShooterCharacter's pose pipeline), so the
+	// weapon-lower is published as an offset instead of being written onto the component.
 	if (CurrentState == EMeleeAttackState::HidingWeapon)
 	{
 		if (Settings.HideWeaponTime > 0.0f)
@@ -2250,14 +2283,8 @@ void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
 			MeshTransitionProgress += DeltaTime / Settings.HideWeaponTime;
 			MeshTransitionProgress = FMath::Clamp(MeshTransitionProgress, 0.0f, 1.0f);
 
-			// Interpolate FirstPersonMesh down
-			if (FirstPersonMesh)
-			{
-				float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-				FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(FirstPersonMeshBaseLocation, TargetLocation, Alpha);
-				FirstPersonMesh->SetRelativeLocation(NewLocation);
-			}
+			const float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
+			SetFirstPersonMeshLowerOffset(FMath::Lerp(0.0f, -MeshLowerDistance, Alpha));
 		}
 	}
 	else if (CurrentState == EMeleeAttackState::ShowingWeapon)
@@ -2267,24 +2294,26 @@ void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
 			MeshTransitionProgress += DeltaTime / Settings.ShowWeaponTime;
 			MeshTransitionProgress = FMath::Clamp(MeshTransitionProgress, 0.0f, 1.0f);
 
-			// Interpolate FirstPersonMesh back up
-			if (FirstPersonMesh)
-			{
-				float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-				FVector CurrentLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-				FVector NewLocation = FMath::Lerp(CurrentLocation, FirstPersonMeshBaseLocation, Alpha);
-				FirstPersonMesh->SetRelativeLocation(NewLocation);
-			}
+			const float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
+			SetFirstPersonMeshLowerOffset(FMath::Lerp(-MeshLowerDistance, 0.0f, Alpha));
 		}
 	}
 	else if (CurrentState == EMeleeAttackState::Ready && bIsWeaponLowered)
 	{
 		// Keep weapon lowered while waiting for boss finisher attack
-		if (FirstPersonMesh)
-		{
-			FVector TargetLocation = FirstPersonMeshBaseLocation - FVector(0.0f, 0.0f, 100.0f);
-			FirstPersonMesh->SetRelativeLocation(TargetLocation);
-		}
+		SetFirstPersonMeshLowerOffset(-MeshLowerDistance);
+	}
+	else
+	{
+		SetFirstPersonMeshLowerOffset(0.0f);
+	}
+}
+
+void UMeleeAttackComponent::SetFirstPersonMeshLowerOffset(float ZOffset)
+{
+	if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter))
+	{
+		Shooter->SetFirstPersonMeshExternalZOffset(ZOffset);
 	}
 }
 
