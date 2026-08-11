@@ -691,6 +691,13 @@ protected:
 	/** Actor to ignore collision with during knockback */
 	TWeakObjectPtr<AActor> KnockbackIgnoreActor;
 
-	/** Get the player pawn (cached helper) */
-	APawn* GetPlayerPawn() const;
+	/** The player this drone is acting against: orbits them, dives at them, measures distance to
+	 *  them. Resolved to the nearest player on first use and then kept, because re-picking every
+	 *  frame would make the drone flip between teammates mid-orbit. "Nearest player" is the
+	 *  placeholder aggro rule from the coop handoff, not a final design. */
+	APawn* GetTargetPlayerPawn() const;
+
+	/** Backing store for GetTargetPlayerPawn. Mutable because the accessor is const and every
+	 *  caller is a read. Cleared implicitly when the pawn dies (weak pointer), which re-picks. */
+	mutable TWeakObjectPtr<APawn> TargetPlayer;
 };

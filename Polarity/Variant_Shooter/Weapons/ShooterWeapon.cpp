@@ -1,6 +1,7 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterWeapon.h"
+#include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet/GameplayStatics.h"
@@ -1402,7 +1403,17 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	// inside the moving window when it passes — so the player can dodge by stepping off the line.
 	// The Low-Health Defense upgrade slows the bolt via the player's EnemyBoltSlowMultiplier
 	// (curve-scaled), making it progressively dodgeable as HP drops.
-	if (AShooterCharacter* TargetPlayer = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)))
+	// The bolt belongs to the player being shot at: prefer whoever the pawn trace actually hit,
+	// and fall back to the player closest to where the shot lands. Using player 0 would apply one
+	// teammate's Low-Health Defense to bolts aimed at everybody.
+	AShooterCharacter* TargetPlayer = Cast<AShooterCharacter>(PawnHit.GetActor());
+	if (!TargetPlayer)
+	{
+		TargetPlayer = Cast<AShooterCharacter>(
+			CoopPlayers::GetNearest(GetWorld(), bHitWall ? WallHit.ImpactPoint : End));
+	}
+
+	if (TargetPlayer)
 	{
 		const float SpeedMult = FMath::Max(TargetPlayer->GetEnemyBoltSlowMultiplier(), 0.01f);
 		const float EffSpeed = HitscanBoltSpeed * SpeedMult;

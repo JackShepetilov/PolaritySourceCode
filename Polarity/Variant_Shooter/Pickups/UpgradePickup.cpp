@@ -1,6 +1,7 @@
-// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
+﻿// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "UpgradePickup.h"
+#include "Coop/CoopPlayers.h"
 #include "ChargeAnimationComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -324,7 +325,8 @@ void AUpgradePickup::CompletePull()
 				const FName HintID = FName(*FString::Printf(TEXT("Upgrade_%s"),
 					*UpgradeDefinition->UpgradeTag.ToString()));
 
-				TutSub->ShowHint(HintID, HintData, GetWorld()->GetFirstPlayerController());
+				// The hint belongs to whoever picked the upgrade up, not to player 0.
+				TutSub->ShowHint(HintID, HintData, Player ? Cast<APlayerController>(Player->GetController()) : nullptr);
 			}
 		}
 

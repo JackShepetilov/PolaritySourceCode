@@ -1,6 +1,7 @@
-// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
+﻿// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "Upgrade_AirKick.h"
+#include "Coop/CoopPlayers.h"
 #include "UpgradeDefinition_AirKick.h"
 #include "ShooterCharacter.h"
 #include "EMFPhysicsProp.h"
@@ -80,15 +81,22 @@ UUpgrade_AirKick* UUpgrade_AirKick::FindActiveAirMail(const UObject* WorldContex
 		return nullptr;
 	}
 
-	APlayerController* PC = World->GetFirstPlayerController();
-	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
-	if (!Pawn)
+	// Upgrade components live on the character and exist only while the upgrade is owned.
+	// TODO(COOP): the kicked prop should carry WHO kicked it and ask that character directly.
+	// Until then, return the first teammate who owns the upgrade: correct while only one player
+	// has taken Air Mail, and at least it does not silently mean "player 0".
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(World, PlayerPawns);
+
+	for (APawn* PlayerPawn : PlayerPawns)
 	{
-		return nullptr;
+		if (UUpgrade_AirKick* AirMail = PlayerPawn->FindComponentByClass<UUpgrade_AirKick>())
+		{
+			return AirMail;
+		}
 	}
 
-	// Upgrade components live on the character and exist only while the upgrade is owned.
-	return Pawn->FindComponentByClass<UUpgrade_AirKick>();
+	return nullptr;
 }
 
 bool UUpgrade_AirKick::QualifiesForBounce(const FVector& PreImpactVelocity, const FVector& ImpactNormal,

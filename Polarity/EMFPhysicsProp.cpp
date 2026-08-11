@@ -494,6 +494,10 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 	bHasPreviousPlatePosition = false;
 	bReverseLaunchInitialized = false;
 
+	// The plate is spawned with the channeling character as its Owner (UChargeAnimationComponent::
+	// SpawnPlate), which is the only link back to who is holding this prop.
+	SetSpendingCharacter(Cast<AShooterCharacter>(Plate->GetOwner()));
+
 	// Let spring/damping pull the prop smoothly to plate center (no teleport).
 	// Only zero out velocity so the prop doesn't overshoot on first capture.
 	if (PropMesh && PropMesh->IsSimulatingPhysics())
@@ -517,6 +521,40 @@ void AEMFPhysicsProp::ReleasedFromCapture()
 	{
 		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	}
+}
+
+AShooterCharacter* AEMFPhysicsProp::GetSpendingCharacter() const
+{
+	return SpendingCharacter.Get();
+}
+
+void AEMFPhysicsProp::SetSpendingCharacter(AShooterCharacter* InCharacter)
+{
+	if (!InCharacter)
+	{
+		return;
+	}
+
+	SpendingCharacter = InCharacter;
+}
+
+bool AEMFPhysicsProp::ShouldSkipPlayerForAreaEffect(const AActor* HitActor) const
+{
+	const APawn* HitPawn = Cast<APawn>(HitActor);
+	if (!HitPawn || !HitPawn->IsPlayerControlled())
+	{
+		// Not a player: NPCs and props always take the effect.
+		return false;
+	}
+
+	// Nobody blows themselves up with their own prop.
+	if (HitPawn == SpendingCharacter.Get())
+	{
+		return true;
+	}
+
+	// Everyone else on the team. Flip bTeammatesImmuneToAreaEffects to let props hit teammates.
+	return bTeammatesImmuneToAreaEffects;
 }
 
 void AEMFPhysicsProp::DetachFromPlate()
@@ -1516,12 +1554,11 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 			ECC_Pawn, DamageSphere, DamageQueryParams);
 
 		TSet<AActor*> DamagedActors;
-		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
 
 		for (const FOverlapResult& Overlap : DamageOverlaps)
 		{
 			AActor* HitActor = Overlap.GetActor();
-			if (!HitActor || HitActor == PlayerPawn || DamagedActors.Contains(HitActor))
+			if (!HitActor || ShouldSkipPlayerForAreaEffect(HitActor) || DamagedActors.Contains(HitActor))
 			{
 				continue;
 			}
@@ -1566,12 +1603,22 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 		}
 	}
 
-	// Broadcast prop impact delegate to player character
+	// Credit the character who spent this prop.
 	if (ImpactTotalDamage > 0.0f)
 	{
-		if (AShooterCharacter* Player = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)))
+		AShooterCharacter* Credited = SpendingCharacter.Get();
+		if (!Credited)
 		{
-			Player->OnPropImpact.Broadcast(this, ImpactTotalDamage, ImpactKillCount);
+			// Nobody ever held this prop (chain explosion, shot in place, NPC threw it). Single
+			// player still credits the local player so BP upgrades counting prop impacts keep
+			// firing. TODO(COOP): delete this fallback once teammates exist, it credits player 0.
+			Credited = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0));
+			UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s exploded with no spending character, credited local player 0"), *GetName());
+		}
+
+		if (Credited)
+		{
+			Credited->OnPropImpact.Broadcast(this, ImpactTotalDamage, ImpactKillCount);
 		}
 	}
 
@@ -1656,7 +1703,10 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 		}
 	}
 
-	// Stun nearby NPCs (with LOS)
+	// Stun nearby NPCs (with LOS).
+	// Players cannot be stunned from here at all: the AShooterNPC cast below filters them out
+	// before any gate runs. To let a thrown prop stun teammates, add a player branch to this loop
+	// and let ShouldSkipPlayerForAreaEffect decide, same as the damage loop above.
 	if (bApplyExplosionStun && FinalRadius > 0.0f)
 	{
 		TArray<FOverlapResult> StunOverlaps;

@@ -1,8 +1,9 @@
-// StreamSubsystem.cpp
+﻿// StreamSubsystem.cpp
 // Phases 1-4: subsystem lifecycle, viewer simulation, and donation generation.
 // Logging tag: [STREAM_DEBUG].
 
 #include "StreamSubsystem.h"
+#include "Coop/CoopPlayers.h"
 
 #include "StreamConfig.h"
 #include "StreamArenaConfig.h"
@@ -439,8 +440,10 @@ void UStreamSubsystem::EnsureLearningTrackingBindings()
 		return;
 	}
 
-	AShooterCharacter* CurrentCharacter = Cast<AShooterCharacter>(
-		UGameplayStatics::GetPlayerCharacter(GetGameInstance(), 0));
+	// Stream learning reminders are about the person at this machine (the streamer), so they track
+	// the local character rather than the team.
+	APlayerController* LocalPC = CoopPlayers::GetLocalController(GetWorld());
+	AShooterCharacter* CurrentCharacter = LocalPC ? Cast<AShooterCharacter>(LocalPC->GetPawn()) : nullptr;
 	if (TrackedCharacter.Get() != CurrentCharacter)
 	{
 		if (UApexMovementComponent* OldMovement = TrackedMovement.Get())

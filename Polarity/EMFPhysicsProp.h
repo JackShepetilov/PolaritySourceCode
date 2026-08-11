@@ -13,6 +13,7 @@
 class UEMF_FieldComponent;
 class AEMFChannelingPlateActor;
 class AShooterNPC;
+class AShooterCharacter;
 class UNiagaraSystem;
 class USoundBase;
 class UMaterialInterface;
@@ -619,6 +620,30 @@ public:
 	/** Detach from plate without fully releasing (for plate swap during reverse channeling) */
 	void DetachFromPlate();
 
+	// ==================== Coop Attribution ====================
+	// Whatever this prop does to the world, it does on behalf of the character who charged and
+	// spent it. Single player could read that off the one player controller; coop cannot, and the
+	// plate is not a substitute because it is destroyed the moment the prop is thrown.
+
+	/** Character this prop acts for. Null for props nobody has captured (world explosions, chain reactions). */
+	UFUNCTION(BlueprintPure, Category = "Coop")
+	AShooterCharacter* GetSpendingCharacter() const;
+
+	/** Set the character this prop acts for. Called on capture and deliberately NOT cleared on
+	 *  release, so a prop stays attributed while it is in the air. */
+	UFUNCTION(BlueprintCallable, Category = "Coop")
+	void SetSpendingCharacter(AShooterCharacter* InCharacter);
+
+	/** Teammates are immune to this prop's area effects. The spender is always immune regardless.
+	 *  Set to false to let a thrown prop catch the rest of the team: friendly fire is an opt-in
+	 *  gag here, not the baseline. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop")
+	bool bTeammatesImmuneToAreaEffects = true;
+
+	/** The one gate for "skip this actor because it is a player". Every area effect of this prop
+	 *  goes through here, so turning friendly fire on later stays a single-place change. */
+	bool ShouldSkipPlayerForAreaEffect(const AActor* HitActor) const;
+
 	// ==================== IShooterDummyTarget Interface ====================
 
 	virtual bool GrantsStableCharge_Implementation() const override;
@@ -693,6 +718,10 @@ private:
 
 	UPROPERTY()
 	TWeakObjectPtr<AEMFChannelingPlateActor> CapturingPlate;
+
+	/** See GetSpendingCharacter. Weak on purpose: the prop must outlive its spender dying. */
+	UPROPERTY()
+	TWeakObjectPtr<AShooterCharacter> SpendingCharacter;
 
 	FVector PreviousPlatePosition = FVector::ZeroVector;
 	bool bHasPreviousPlatePosition = false;

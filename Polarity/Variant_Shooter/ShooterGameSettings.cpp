@@ -1,6 +1,7 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterGameSettings.h"
+#include "Coop/CoopPlayers.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundMix.h"
 #include "Sound/SoundClass.h"
@@ -182,7 +183,7 @@ void UShooterGameSettings::ApplyGameplaySettings()
 		{
 			if (UWorld* World = Context.World())
 			{
-				if (APlayerController* PC = World->GetFirstPlayerController())
+				if (APlayerController* PC = CoopPlayers::GetLocalController(World))
 				{
 					if (APlayerCameraManager* CameraManager = PC->PlayerCameraManager)
 					{
@@ -206,7 +207,7 @@ void UShooterGameSettings::ApplyControlSettings()
 		{
 			if (UWorld* World = Context.World())
 			{
-				if (APlayerController* PC = World->GetFirstPlayerController())
+				if (APlayerController* PC = CoopPlayers::GetLocalController(World))
 				{
 					// Default values are typically 2.5 for both
 					// We multiply the base value by our sensitivity multipliers
@@ -364,7 +365,7 @@ void UShooterGameSettings::ApplyKeyBindings()
 		{
 			if (UWorld* World = Context.World())
 			{
-				if (APlayerController* PC = World->GetFirstPlayerController())
+				if (APlayerController* PC = CoopPlayers::GetLocalController(World))
 				{
 					if (ULocalPlayer* LocalPlayer = PC->GetLocalPlayer())
 					{

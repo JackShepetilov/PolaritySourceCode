@@ -18,6 +18,7 @@
 #include "ShooterGameMode.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
@@ -547,6 +548,27 @@ void AFlyingDrone::DroneDie()
 	);
 }
 
+namespace
+{
+	/** Player pawn that owns this drone's death explosion. The drone explodes when it dies, so the
+	 *  killing blow decides who is responsible; the owner chain is walked because the causer is
+	 *  usually a weapon or projectile rather than the character itself (same shape as
+	 *  ResolveShooterCharacterFromShooterNPCDamageCauser in ShooterNPC.cpp).
+	 *  Falls back to the nearest player: world kills and chain deaths have no player causer. */
+	APawn* ResolveExplosionOwner(const UWorld* World, AActor* KillingCauser, const FVector& Origin)
+	{
+		for (AActor* Candidate = KillingCauser; Candidate; Candidate = Candidate->GetOwner())
+		{
+			if (CoopPlayers::IsPlayer(Candidate))
+			{
+				return Cast<APawn>(Candidate);
+			}
+		}
+
+		return CoopPlayers::GetNearest(World, Origin);
+	}
+}
+
 void AFlyingDrone::TriggerExplosion()
 {
 	// Charge-proportionate scaling (like EMFPhysicsProp::Explode)
@@ -584,7 +606,9 @@ void AFlyingDrone::TriggerExplosion()
 
 		GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 
-		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+		// DamageCauser has to look like a player, otherwise ShooterNPC::TakeDamage drops it as NPC
+		// friendly fire and no damage numbers appear.
+		APawn* PlayerPawn = ResolveExplosionOwner(GetWorld(), LastKillingDamageCauser, Origin);
 
 		TSet<AActor*> DamagedActors;
 
@@ -639,12 +663,13 @@ void AFlyingDrone::TriggerExplosion()
 		}
 	}
 
-	// Broadcast impact delegate to player character
+	// Credit the same player the explosion was attributed to.
 	if (ImpactTotalDamage > 0.0f)
 	{
-		if (AShooterCharacter* Player = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)))
+		if (AShooterCharacter* Credited = Cast<AShooterCharacter>(
+			ResolveExplosionOwner(GetWorld(), LastKillingDamageCauser, GetActorLocation())))
 		{
-			Player->OnPropImpact.Broadcast(nullptr, ImpactTotalDamage, ImpactKillCount);
+			Credited->OnPropImpact.Broadcast(nullptr, ImpactTotalDamage, ImpactKillCount);
 		}
 	}
 
@@ -1282,8 +1307,10 @@ void AFlyingDrone::EnterCapturedState(UAnimMontage* OverrideMontage)
 	MeshAngularVelocity = FVector::ZeroVector;
 
 	// Set initial "away from player" rotation immediately (no interp)
-	// so UpdateDroneRotation doesn't need to chase a moving target
-	if (const ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
+	// so UpdateDroneRotation doesn't need to chase a moving target.
+	// EnterCapturedState is not told who captured the drone; capture range is short, so the
+	// nearest player is the captor in practice. TODO(COOP): pass the captor in explicitly.
+	if (const APawn* Player = CoopPlayers::GetNearest(GetWorld(), GetActorLocation()))
 	{
 		const FVector AwayFromPlayer = (GetActorLocation() - Player->GetActorLocation());
 		if (!AwayFromPlayer.IsNearlyZero())
@@ -1329,16 +1356,17 @@ void AFlyingDrone::ApplyKnockback(const FVector& InKnockbackDirection, float Dis
 		FlyingMovement->StopMovement();
 	}
 
-	// Ignore collision with player during knockback to prevent jitter from dropkick
+	// Ignore collision with the attacker during knockback to prevent jitter from dropkick.
+	// The attacker is identified by position, so ask the team who was standing there.
 	if (!AttackerLocation.IsZero())
 	{
-		if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(this, 0))
+		if (APawn* Attacker = CoopPlayers::GetNearest(GetWorld(), AttackerLocation))
 		{
-			float DistToAttacker = FVector::Dist(PlayerChar->GetActorLocation(), AttackerLocation);
+			const float DistToAttacker = FVector::Dist(Attacker->GetActorLocation(), AttackerLocation);
 			if (DistToAttacker < 300.0f) // Player is the attacker
 			{
-				KnockbackIgnoreActor = PlayerChar;
-				MoveIgnoreActorAdd(PlayerChar);
+				KnockbackIgnoreActor = Attacker;
+				MoveIgnoreActorAdd(Attacker);
 			}
 		}
 	}

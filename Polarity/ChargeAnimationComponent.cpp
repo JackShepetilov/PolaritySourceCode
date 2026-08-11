@@ -1,7 +1,8 @@
-// ChargeAnimationComponent.cpp
+﻿// ChargeAnimationComponent.cpp
 // Charge toggle animation + channeling ability implementation
 
 #include "ChargeAnimationComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/MeleeAttackComponent.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "EMFChannelingPlateActor.h"
@@ -2964,7 +2965,11 @@ float UChargeAnimationComponent::GetCaptureRangeFor(const UObject* WorldContextO
 	UWorld* World = WorldContextObject->GetWorld();
 	if (!World) return 0.0f;
 
-	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
+	// Documented as the local player's range, and used that way (UI and range previews).
+	// TODO(COOP): capture range depends on WHOSE charge is pulling, so anything gameplay-facing
+	// must ask a specific character's component (EvaluateCaptureRange) instead of this helper.
+	APlayerController* LocalPC = CoopPlayers::GetLocalController(World);
+	APawn* PlayerPawn = LocalPC ? LocalPC->GetPawn() : nullptr;
 	if (!PlayerPawn) return 0.0f;
 
 	const UChargeAnimationComponent* Comp = PlayerPawn->FindComponentByClass<UChargeAnimationComponent>();

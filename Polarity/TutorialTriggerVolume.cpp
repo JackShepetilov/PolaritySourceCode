@@ -1,7 +1,8 @@
-// TutorialTriggerVolume.cpp
+﻿// TutorialTriggerVolume.cpp
 // Trigger volume implementation
 
 #include "TutorialTriggerVolume.h"
+#include "Coop/CoopPlayers.h"
 #include "TutorialSubsystem.h"
 #include "Components/BoxComponent.h"
 #include "Components/BillboardComponent.h"
@@ -192,8 +193,10 @@ void ATutorialTriggerVolume::BindInputCompletion()
 		return;
 	}
 
-	// Get player controller
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	// Tutorials are per-player UI, so this binds on this machine's player.
+	// TODO(COOP): a teammate can trip the volume while your own hint is what should react; the
+	// completion binding should follow the pawn that entered, which needs the overlap actor here.
+	APlayerController* PC = CoopPlayers::GetLocalController(GetWorld());
 	if (!PC)
 	{
 		return;

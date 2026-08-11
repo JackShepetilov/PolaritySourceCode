@@ -16,6 +16,7 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "ShooterAIController.h"
 #include "Components/StateTreeAIComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
@@ -380,7 +381,7 @@ void AShooterNPC::Tick(float DeltaTime)
 	// [SHAKE_DEBUG] Per-frame position trace near the player to find which system moves the NPC
 	// during the melee jitter. Filter Output Log by "SHAKE_DEBUG". Remove once diagnosed.
 	// move: 0=None 1=Walking 2=NavWalking 3=Falling | aiPath: 0=Idle 1=Waiting 2=Paused 3=Moving
-	if (APawn* DebugPlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0))
+	if (APawn* DebugPlayerPawn = CoopPlayers::GetNearest(GetWorld(), GetActorLocation()))
 	{
 		if (FVector::Dist(GetActorLocation(), DebugPlayerPawn->GetActorLocation()) < 600.0f)
 		{

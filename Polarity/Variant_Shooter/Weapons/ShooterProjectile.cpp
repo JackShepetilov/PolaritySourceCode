@@ -1,7 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "ShooterProjectile.h"
+#include "Coop/CoopPlayers.h"
 #include "ProjectilePoolSubsystem.h"
 #include "ApexMovementComponent.h"
 #include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
@@ -258,8 +259,8 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 		const bool bCanAffectOwner = !bIsOwner || bDamageOwner || bEnableOwnerRocketJump;
 		if (bCanAffectOwner)
 		{
-			const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
-			const bool bFiredByPlayer = GetInstigator() && GetInstigator() == PlayerPawn;
+			// Any player's shot knocks characters back, not just player 0's.
+			const bool bFiredByPlayer = CoopPlayers::IsPlayer(GetInstigator());
 			if (CharacterKnockbackForce > 0.0f && bFiredByPlayer && (!bIsOwner || bEnableOwnerRocketJump))
 			{
 				FVector LaunchDir = HitDirection;

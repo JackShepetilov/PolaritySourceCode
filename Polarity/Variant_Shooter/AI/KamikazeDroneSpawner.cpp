@@ -2,6 +2,7 @@
 
 #include "KamikazeDroneSpawner.h"
 #include "KamikazeDroneNPC.h"
+#include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/ShooterDummy.h"
 #include "Components/SphereComponent.h"
 #include "NiagaraComponent.h"
@@ -123,9 +124,8 @@ void AKamikazeDroneSpawner::OnDetectionBeginOverlap(UPrimitiveComponent* Overlap
 {
 	if (bIsActivated) return;
 
-	// Only activate for the player character
-	ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(this, 0);
-	if (OtherActor && OtherActor == PlayerChar)
+	// Only players trip the spawner, and any of them will do: whoever walks in first starts it.
+	if (CoopPlayers::IsPlayer(OtherActor))
 	{
 		Activate();
 	}

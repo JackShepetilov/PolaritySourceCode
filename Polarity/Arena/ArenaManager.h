@@ -588,8 +588,13 @@ private:
 
 	// ==================== Camera Lock ====================
 
-	/** Lock camera on destruction epicenter, teleport player if no LOS */
+	/** Lock camera on destruction epicenter, teleport players if no LOS */
 	void StartCameraLock(const FVector& Epicenter);
+
+	/** Per-player half of StartCameraLock: make sure this pawn can actually see the epicenter,
+	 *  teleporting it to a nearby NavMesh point with line of sight if it cannot. Each player needs
+	 *  their own check, because one can be behind cover while another sees the blast fine. */
+	void EnsureLineOfSightForCameraLock(APawn* Pawn, const FVector& Epicenter);
 
 	/** Restore normal camera control */
 	void EndCameraLock();

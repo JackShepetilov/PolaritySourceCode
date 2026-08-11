@@ -1,6 +1,7 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PlayerDeathSequenceComponent.h"
+#include "Coop/CoopPlayers.h"
 
 #include "AI/ShooterNPC.h"
 #include "ShooterCharacter.h"
@@ -582,7 +583,9 @@ static FAutoConsoleCommandWithWorld GPolarityPlayerKillCommand(
 			return;
 		}
 
-		AShooterCharacter* Character = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerCharacter(World, 0));
+		// Console command: kills the player who typed it, i.e. this machine's.
+		APlayerController* LocalPC = CoopPlayers::GetLocalController(World);
+		AShooterCharacter* Character = LocalPC ? Cast<AShooterCharacter>(LocalPC->GetPawn()) : nullptr;
 		if (!Character)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[PLAYER_DEATH_SEQUENCE] polarity.player.kill: no ShooterCharacter"));
@@ -592,7 +595,7 @@ static FAutoConsoleCommandWithWorld GPolarityPlayerKillCommand(
 		const float LethalDamage = FMath::Max(1.0f,
 			Character->GetCurrentHP() + Character->GetCurrentArmor() + 1.0f);
 		FDamageEvent DamageEvent;
-		Character->TakeDamage(LethalDamage, DamageEvent, World->GetFirstPlayerController(), Character);
+		Character->TakeDamage(LethalDamage, DamageEvent, LocalPC, Character);
 		UE_LOG(LogTemp, Log, TEXT("[PLAYER_DEATH_SEQUENCE] polarity.player.kill: applied %.1f lethal damage"),
 			LethalDamage);
 	}));

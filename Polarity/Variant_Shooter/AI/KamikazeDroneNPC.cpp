@@ -17,6 +17,7 @@
 #include "Engine/OverlapResult.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
@@ -159,7 +160,7 @@ void AKamikazeDroneNPC::BeginPlay()
 	SpeedNoiseTimeOffset = InstanceRandom.FRandRange(0.0f, 100.0f);
 
 	// Initialize orbit center to player position
-	if (APawn* Player = GetPlayerPawn())
+	if (APawn* Player = GetTargetPlayerPawn())
 	{
 		OrbitCenter = Player->GetActorLocation();
 	}
@@ -515,7 +516,7 @@ void AKamikazeDroneNPC::UpdateLaunching(float DeltaTime)
 	// --- Gentle FPV arc toward orbit area ---
 	FVector DesiredDir = CurrentDir;
 
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (Player)
 	{
 		// Smoothly track player position for orbit center
@@ -683,7 +684,7 @@ void AKamikazeDroneNPC::InitiateDirectAttack(AActor* Target, FVector TargetWorld
 
 void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
 {
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (!Player)
 	{
 		return;
@@ -909,7 +910,7 @@ void AKamikazeDroneNPC::UpdatePositioning(float DeltaTime)
 	StateTimer += DeltaTime;
 	const float Alpha = FMath::Clamp(StateTimer / FMath::Max(PositioningDuration, 0.01f), 0.0f, 1.0f);
 
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (!Player)
 	{
 		BeginTelegraph(bIsRetaliating);
@@ -1343,7 +1344,7 @@ void AKamikazeDroneNPC::UpdateRecovery(float DeltaTime)
 		CMC->MaxFlySpeed = TargetSpeed;
 
 		// Turn toward orbit altitude above player (not just player position)
-		if (APawn* Player = GetPlayerPawn())
+		if (APawn* Player = GetTargetPlayerPawn())
 		{
 			const FVector MyLoc = GetActorLocation();
 			// Recovery target: player XY but at orbit altitude
@@ -1428,10 +1429,13 @@ void AKamikazeDroneNPC::InitiateParry(AController* AttackerController)
 		CMC->DisableMovement();  // MOVE_None — CMC won't interfere
 	}
 
-	// Disable collision with player during parry flight
-	if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(this, 0))
+	// Disable collision with players during parry flight. All of them: a parried drone flies
+	// through the room and must not shove whoever it passes, not just its own target.
+	TArray<APawn*> ParryFlightPlayers;
+	CoopPlayers::GetAll(GetWorld(), ParryFlightPlayers);
+	for (APawn* PlayerPawn : ParryFlightPlayers)
 	{
-		MoveIgnoreActorAdd(PlayerChar);
+		MoveIgnoreActorAdd(PlayerPawn);
 	}
 
 	// Get player look direction
@@ -1505,9 +1509,13 @@ AShooterNPC* AKamikazeDroneNPC::FindParryTarget(const FVector& PlayerLocation, c
 	FCollisionShape Sphere = FCollisionShape::MakeSphere(ParryConeLookDistance);
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
-	if (APawn* Player = UGameplayStatics::GetPlayerPawn(GetWorld(), 0))
+	// The cone search looks for an NPC to redirect the drone into, so every player is noise here,
+	// not just the one who parried.
+	TArray<APawn*> IgnoredPlayers;
+	CoopPlayers::GetAll(GetWorld(), IgnoredPlayers);
+	for (APawn* PlayerPawn : IgnoredPlayers)
 	{
-		QueryParams.AddIgnoredActor(Player);
+		QueryParams.AddIgnoredActor(PlayerPawn);
 	}
 
 	GetWorld()->OverlapMultiByChannel(Overlaps, PlayerLocation, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
@@ -1674,7 +1682,7 @@ void AKamikazeDroneNPC::UpdateParried(float DeltaTime)
 
 void AKamikazeDroneNPC::EvaluateOrbitQuality()
 {
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (!Player) return;
 
 	const FVector Center = Player->GetActorLocation();
@@ -1741,7 +1749,7 @@ void AKamikazeDroneNPC::EvaluateOrbitQuality()
 
 void AKamikazeDroneNPC::UpdateStrafing(float DeltaTime)
 {
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (!Player) return;
 
 	OrbitElapsedTime += DeltaTime;
@@ -1986,7 +1994,7 @@ void AKamikazeDroneNPC::CommitAttack()
 
 bool AKamikazeDroneNPC::CheckPlayerCollisionSweep()
 {
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (!Player) return false;
 
 	const FVector CurrentLoc = GetActorLocation();
@@ -2043,7 +2051,7 @@ FVector AKamikazeDroneNPC::CalculatePredictedPosition() const
 		return BoundsOrigin;
 	}
 
-	APawn* Player = GetPlayerPawn();
+	APawn* Player = GetTargetPlayerPawn();
 	if (!Player)
 	{
 		return GetActorLocation() + GetActorForwardVector() * 500.0f;
@@ -2290,7 +2298,7 @@ void AKamikazeDroneNPC::KamikazeDie()
 	case EKamikazeState::Attacking:
 	{
 		// Killed during attack — check distance to player
-		if (APawn* Player = GetPlayerPawn())
+		if (APawn* Player = GetTargetPlayerPawn())
 		{
 			const float DistToPlayer = FVector::Dist(GetActorLocation(), Player->GetActorLocation());
 			if (DistToPlayer <= AttackDeathDistanceThreshold)
@@ -2438,8 +2446,11 @@ void AKamikazeDroneNPC::DoExplosion(float Radius, float Damage, TSubclassOf<UDam
 
 		GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 
-		// Use PlayerPawn as DamageCauser to bypass NPC friendly-fire and show damage numbers
-		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+		// Use a player pawn as DamageCauser to bypass NPC friendly-fire and show damage numbers.
+		// The drone's own target is the closest thing to "who is responsible" that exists today.
+		// TODO(COOP): a parried drone should credit whoever parried it, which needs the parry
+		// instigator stored on the drone. Attribution pass, not this one.
+		APawn* PlayerPawn = GetTargetPlayerPawn();
 
 		TSet<AActor*> DamagedActors;
 
@@ -2609,16 +2620,17 @@ void AKamikazeDroneNPC::ApplyKnockback(const FVector& InKnockbackDirection, floa
 		FlyingMovement->StopMovement();
 	}
 
-	// Ignore player collision during knockback
+	// Ignore collision with whoever did the knocking, so the drone does not jitter against them.
+	// The attacker is identified by position, so ask the team who was standing there.
 	if (!AttackerLocation.IsZero())
 	{
-		if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(this, 0))
+		if (APawn* Attacker = CoopPlayers::GetNearest(GetWorld(), AttackerLocation))
 		{
-			float DistToAttacker = FVector::Dist(PlayerChar->GetActorLocation(), AttackerLocation);
+			const float DistToAttacker = FVector::Dist(Attacker->GetActorLocation(), AttackerLocation);
 			if (DistToAttacker < 300.0f)
 			{
-				KnockbackIgnoreActor = PlayerChar;
-				MoveIgnoreActorAdd(PlayerChar);
+				KnockbackIgnoreActor = Attacker;
+				MoveIgnoreActorAdd(Attacker);
 			}
 		}
 	}
@@ -2771,7 +2783,14 @@ bool AKamikazeDroneNPC::IsInAttackSequence() const
 
 // ==================== Helpers ====================
 
-APawn* AKamikazeDroneNPC::GetPlayerPawn() const
+APawn* AKamikazeDroneNPC::GetTargetPlayerPawn() const
 {
-	return UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+	if (APawn* Cached = TargetPlayer.Get())
+	{
+		return Cached;
+	}
+
+	APawn* Nearest = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
+	TargetPlayer = Nearest;
+	return Nearest;
 }

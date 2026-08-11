@@ -1,6 +1,7 @@
-// XPSubsystem.cpp
+﻿// XPSubsystem.cpp
 
 #include "XPSubsystem.h"
+#include "Coop/CoopPlayers.h"
 
 #include "XPConfig.h"
 #include "ShooterNPC.h"
@@ -327,12 +328,18 @@ bool UXPSubsystem::WasKillCausedByPlayer(AActor* DamageCauser) const
 {
 	if (!DamageCauser) return false;
 
-	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
-	if (!PlayerPawn) return false;
+	// A kill by ANY player counts. Checking only player 0 would silently drop every kill made by
+	// the rest of the team.
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
 
-	if (DamageCauser == PlayerPawn) return true;
-	if (DamageCauser->GetInstigator() == PlayerPawn) return true;
-	if (DamageCauser->GetOwner() == PlayerPawn) return true;
+	for (const APawn* PlayerPawn : PlayerPawns)
+	{
+		if (DamageCauser == PlayerPawn) return true;
+		if (DamageCauser->GetInstigator() == PlayerPawn) return true;
+		if (DamageCauser->GetOwner() == PlayerPawn) return true;
+	}
+
 	return false;
 }
 
@@ -460,7 +467,9 @@ namespace XPDebugCommands
 
 	static void CmdPlayerDie(const TArray<FString>& /*Args*/, UWorld* World)
 	{
-		AShooterCharacter* Player = World ? Cast<AShooterCharacter>(UGameplayStatics::GetPlayerPawn(World, 0)) : nullptr;
+		// Console command: acts on whoever typed it, i.e. this machine's player.
+		APlayerController* LocalPC = CoopPlayers::GetLocalController(World);
+		AShooterCharacter* Player = LocalPC ? Cast<AShooterCharacter>(LocalPC->GetPawn()) : nullptr;
 		if (!Player) { UE_LOG(LogTemp, Warning, TEXT("[RUN_FLOW] ShooterCharacter player pawn not found")); return; }
 		if (Player->IsDead()) { UE_LOG(LogTemp, Warning, TEXT("[RUN_FLOW] Player is already dead")); return; }
 
@@ -534,8 +543,9 @@ namespace XPDebugCommands
 
 	static UUpgradeManagerComponent* GetUpgradeManagerComp(UWorld* World)
 	{
-		if (!World) return nullptr;
-		APawn* Pawn = UGameplayStatics::GetPlayerPawn(World, 0);
+		// Debug helper for console commands: this machine's player.
+		APlayerController* LocalPC = CoopPlayers::GetLocalController(World);
+		APawn* Pawn = LocalPC ? LocalPC->GetPawn() : nullptr;
 		return Pawn ? Pawn->FindComponentByClass<UUpgradeManagerComponent>() : nullptr;
 	}
 

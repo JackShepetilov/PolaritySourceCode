@@ -2,6 +2,7 @@
 
 #include "NPCRiotShieldComponent.h"
 #include "ChargeAnimationComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "EMFVelocityModifier.h"
 #include "HumanoidNPC.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
@@ -43,10 +44,13 @@ void UNPCRiotShieldComponent::TickComponent(float DeltaTime, ELevelTick TickType
 
 	if (!bShieldActive || !bAimAtPlayer || !ShieldMesh) return;
 
-	APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	// Face the closest player: the shield covers the direction the NPC is actually threatened from.
+	// Runs every tick, but the team is at most four controllers, so the scan is free.
+	const FVector ShieldLoc = ShieldMesh->GetComponentLocation();
+
+	APawn* Player = CoopPlayers::GetNearest(GetWorld(), ShieldLoc);
 	if (!Player) return;
 
-	const FVector ShieldLoc = ShieldMesh->GetComponentLocation();
 	FVector ToPlayer = Player->GetActorLocation() - ShieldLoc;
 	ToPlayer.Z = 0.0f;
 	if (ToPlayer.IsNearlyZero()) return;

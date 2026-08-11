@@ -1,7 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "Variant_Shooter/ShooterGameMode.h"
+#include "Coop/CoopPlayers.h"
 #include "ShooterUI.h"
 #include "ShooterCharacter.h"
 #include "RunSubsystem.h"
@@ -216,20 +217,39 @@ void AShooterGameMode::PerformRunLaunch()
 		return;
 	}
 
-	AShooterCharacter* Character = Cast<AShooterCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
-	if (!Character)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: player pawn is not a ShooterCharacter"));
-		return;
-	}
+	// The whole team gets tossed into the run, not just the host.
+	// TODO(COOP): the marker is a single point, so four capsules start stacked and shove each other
+	// apart on landing. Needs either a formation of markers or a spread, which is a design call.
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
 
 	// Keep the capsule upright: take ONLY the marker's yaw for facing. The marker's pitch/roll is
 	// meant to aim the toss arc and lives in the launch VELOCITY (GetLaunchVelocity uses the marker's
 	// forward vector) — it must never tilt the character's body, or the mesh/camera break.
 	const FRotator UprightRot(0.f, RunMarker->GetActorRotation().Yaw, 0.f);
-	Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), UprightRot,
-		false, nullptr, ETeleportType::TeleportPhysics);
-	Character->BeginRunLaunch(RunMarker->GetLaunchVelocity());
+
+	int32 LaunchedCount = 0;
+	for (APawn* PlayerPawn : PlayerPawns)
+	{
+		AShooterCharacter* Character = Cast<AShooterCharacter>(PlayerPawn);
+		if (!Character)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: player pawn is not a ShooterCharacter"));
+			continue;
+		}
+
+		Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), UprightRot,
+			false, nullptr, ETeleportType::TeleportPhysics);
+		Character->BeginRunLaunch(RunMarker->GetLaunchVelocity());
+		LaunchedCount++;
+	}
+
+	if (LaunchedCount == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: nobody to launch"));
+		return;
+	}
+
 	GetWorldTimerManager().SetTimerForNextTick(
 		FTimerDelegate::CreateUObject(this, &AShooterGameMode::DismissRunTransitionScreenAfterLaunch));
 }

@@ -1,6 +1,7 @@
 // BasketballBall.cpp
 
 #include "Arena/BasketballBall.h"
+#include "Coop/CoopPlayers.h"
 
 #include "Components/StaticMeshComponent.h"
 #include "EMFChannelingPlateActor.h"
@@ -328,9 +329,8 @@ AShooterCharacter* ABasketballBall::GetReturnTargetCharacter() const
 		return Thrower;
 	}
 
-	UWorld* World = GetWorld();
-	APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
-	return PlayerController ? Cast<AShooterCharacter>(PlayerController->GetPawn()) : nullptr;
+	// Nobody threw it (fresh ball, or the thrower left): bounce back to whoever is closest.
+	return Cast<AShooterCharacter>(CoopPlayers::GetNearest(GetWorld(), GetActorLocation()));
 }
 
 bool ABasketballBall::ComputeReturnBounceVelocity(FVector& OutVelocity) const

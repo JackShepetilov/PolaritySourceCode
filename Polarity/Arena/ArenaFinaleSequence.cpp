@@ -2,6 +2,7 @@
 
 #include "ArenaFinaleSequence.h"
 #include "ArenaManager.h"
+#include "Coop/CoopPlayers.h"
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
 #include "Polarity/PolarityCharacter.h"
@@ -63,18 +64,22 @@ void AArenaFinaleSequence::StartFinaleSequence()
 		PendingKillNPCs.Add(NPC);
 	}
 
-	// Find player
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	if (!PC || !PC->GetPawn())
+	// Find the player who performs the finale.
+	// TODO(COOP): the whole sequence is built around ONE performer (it locks their input, drives
+	// their charge component and their camera). Who does it with four players, and what the other
+	// three see, is a design decision. Until then: the player closest to the sequence actor.
+	AShooterCharacter* Player = Cast<AShooterCharacter>(
+		CoopPlayers::GetNearest(GetWorld(), GetActorLocation()));
+	if (!Player)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ArenaFinaleSequence: No player controller/pawn!"));
+		UE_LOG(LogTemp, Error, TEXT("ArenaFinaleSequence: No player found!"));
 		return;
 	}
 
-	AShooterCharacter* Player = Cast<AShooterCharacter>(PC->GetPawn());
-	if (!Player)
+	APlayerController* PC = Cast<APlayerController>(Player->GetController());
+	if (!PC)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ArenaFinaleSequence: Pawn is not AShooterCharacter!"));
+		UE_LOG(LogTemp, Error, TEXT("ArenaFinaleSequence: Player has no player controller!"));
 		return;
 	}
 

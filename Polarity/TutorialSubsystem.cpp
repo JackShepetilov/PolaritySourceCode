@@ -1,7 +1,8 @@
-// TutorialSubsystem.cpp
+﻿// TutorialSubsystem.cpp
 // Tutorial management subsystem implementation
 
 #include "TutorialSubsystem.h"
+#include "Coop/CoopPlayers.h"
 #include "InputIconsDataAsset.h"
 #include "TutorialHintWidget.h"
 #include "TutorialSlideWidget.h"
@@ -988,14 +989,9 @@ APlayerController* UTutorialSubsystem::GetPlayerController(APlayerController* Pr
 		return Provided;
 	}
 
-	// Get first local player controller
-	UWorld* World = GetWorld();
-	if (World)
-	{
-		return World->GetFirstPlayerController();
-	}
-
-	return nullptr;
+	// No controller passed in: fall back to this machine's player. Hints are local UI, and every
+	// caller that knows WHOSE hint it is should keep passing Provided.
+	return CoopPlayers::GetLocalController(GetWorld());
 }
 
 TArray<FTutorialInputIconData> UTutorialSubsystem::GetIconsForInputActions(const TArray<UInputAction*>& InputActions, APlayerController* PlayerController) const

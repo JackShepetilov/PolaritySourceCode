@@ -3,6 +3,7 @@
 #include "ArenaManager.h"
 #include "ArenaFinaleSequence.h"
 #include "ArenaSpawnPoint.h"
+#include "Coop/CoopPlayers.h"
 #include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/AI/ShooterNPC.h"
 #include "Polarity/Variant_Shooter/AI/FlyingDrone.h"
@@ -445,7 +446,10 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 
 				if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
 				{
-					AIController->SetCurrentTarget(PlayerActor);
+					// Each NPC picks up whoever is closest to it, not whoever tripped the trigger:
+					// the activator can be on the far side of the arena from half the spawns.
+					AActor* NPCTarget = CoopPlayers::GetNearest(GetWorld(), NPC->GetActorLocation());
+					AIController->SetCurrentTarget(NPCTarget ? NPCTarget : PlayerActor);
 				}
 			}
 		}
@@ -679,9 +683,8 @@ void AArenaManager::ExecuteWaveSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AArena
 	AliveNPCs.Add(NPC);
 	NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
 
-	// Force-target the player so this NPC engages immediately even if spawned behind the player
-	APlayerController* PC = World->GetFirstPlayerController();
-	AActor* PlayerActor = PC ? PC->GetPawn() : nullptr;
+	// Force-target the nearest player so this NPC engages immediately even if spawned behind them
+	AActor* PlayerActor = CoopPlayers::GetNearest(World, NPC->GetActorLocation());
 	if (PlayerActor)
 	{
 		if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
@@ -1193,7 +1196,11 @@ void AArenaManager::OnPlayerRespawned()
 
 		// Player respawns inside the arena (at PlayerRespawnPoint),
 		// so BeginOverlap won't fire again. Re-activate immediately.
-		AShooterCharacter* Player = Cast<AShooterCharacter>(GetWorld()->GetFirstPlayerController()->GetPawn());
+		// OnPlayerRespawned carries no pawn, so take whoever is closest to the arena. ActivateArena
+		// only needs someone to exist: NPCs pick their own nearest target inside it.
+		// TODO(COOP): give the respawn delegate the pawn that actually respawned.
+		AShooterCharacter* Player = Cast<AShooterCharacter>(
+			CoopPlayers::GetNearest(GetWorld(), GetActorLocation()));
 		if (Player)
 		{
 			UE_LOG(LogTemp, Error, TEXT("  Calling ActivateArena. AliveNPCs before: %d"), AliveNPCs.Num());
@@ -1396,46 +1403,65 @@ AArenaSpawnPoint* AArenaManager::PickSustainSpawnPoint(TSubclassOf<AShooterNPC> 
 		FreshPoints = AllValid;
 	}
 
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	if (!PC || !PC->GetPawn())
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
+	if (PlayerPawns.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::PickSustainSpawnPoint — No player controller/pawn, using random fallback"));
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::PickSustainSpawnPoint — No players, using random fallback"));
 		AArenaSpawnPoint* Picked = FreshPoints[FMath::RandRange(0, FreshPoints.Num() - 1)];
 		RecentlyUsedSpawnPoints.Add(Picked);
 		return Picked;
 	}
 
-	const FVector PlayerEye = PC->GetPawn()->GetActorLocation() + FVector(0.0f, 0.0f, 64.0f);
+	// Eye positions of the whole team. A spawn point only counts as hidden when NOBODY can see it,
+	// and its distance is measured to the CLOSEST player, because that is who will meet the enemy.
+	TArray<FVector> PlayerEyes;
+	PlayerEyes.Reserve(PlayerPawns.Num());
+
+	FCollisionQueryParams TraceParams;
+	for (APawn* PlayerPawn : PlayerPawns)
+	{
+		PlayerEyes.Add(PlayerPawn->GetActorLocation() + FVector(0.0f, 0.0f, 64.0f));
+		TraceParams.AddIgnoredActor(PlayerPawn);
+	}
 
 	// Prefer fresh + out-of-sight points
 	TArray<AArenaSpawnPoint*> FreshOutOfSight;
 	AArenaSpawnPoint* FreshFarthestPoint = nullptr;
 	float FreshFarthestDist = -1.0f;
 
-	FCollisionQueryParams TraceParams;
-	TraceParams.AddIgnoredActor(PC->GetPawn());
-
 	for (AArenaSpawnPoint* Point : FreshPoints)
 	{
 		const FVector PointLocation = Point->GetActorLocation();
 
-		FHitResult Hit;
-		bool bBlocked = GetWorld()->LineTraceSingleByChannel(
-			Hit, PlayerEye, PointLocation, ECC_WorldStatic, TraceParams);
+		bool bHiddenFromEveryone = true;
+		float NearestPlayerDist = MAX_FLT;
 
-		float Dist = FVector::Dist(PlayerEye, PointLocation);
+		for (const FVector& PlayerEye : PlayerEyes)
+		{
+			FHitResult Hit;
+			const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
+				Hit, PlayerEye, PointLocation, ECC_WorldStatic, TraceParams);
 
-		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::PickSustainSpawnPoint — %s: LOS blocked=%d, dist=%.0f, fresh=1"),
-			*Point->GetName(), bBlocked, Dist);
+			if (!bBlocked)
+			{
+				bHiddenFromEveryone = false;
+			}
 
-		if (bBlocked)
+			NearestPlayerDist = FMath::Min(NearestPlayerDist, FVector::Dist(PlayerEye, PointLocation));
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager::PickSustainSpawnPoint — %s: hidden from all=%d, nearest player dist=%.0f, fresh=1"),
+			*Point->GetName(), bHiddenFromEveryone, NearestPlayerDist);
+
+		if (bHiddenFromEveryone)
 		{
 			FreshOutOfSight.Add(Point);
 		}
 
-		if (Dist > FreshFarthestDist)
+		if (NearestPlayerDist > FreshFarthestDist)
 		{
-			FreshFarthestDist = Dist;
+			FreshFarthestDist = NearestPlayerDist;
 			FreshFarthestPoint = Point;
 		}
 	}
@@ -1566,9 +1592,8 @@ void AArenaManager::ExecuteSustainSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AAr
 	AliveNPCs.Add(NPC);
 	NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
 
-	// Force-target the player immediately
-	APlayerController* PC = World->GetFirstPlayerController();
-	AActor* PlayerActor = PC ? PC->GetPawn() : nullptr;
+	// Force-target the nearest player immediately
+	AActor* PlayerActor = CoopPlayers::GetNearest(World, NPC->GetActorLocation());
 	if (PlayerActor)
 	{
 		if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC->GetController()))
@@ -1590,9 +1615,11 @@ void AArenaManager::CheckStuckNPCs()
 		return;
 	}
 
-	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
-	APawn* PlayerPawn = PC ? PC->GetPawn() : nullptr;
-	if (!PlayerPawn)
+	// Recovery only makes sense while somebody is playing. The team is also needed further down,
+	// to decide whether a stuck NPC is on anyone's screen before recycling it.
+	TArray<APawn*> StuckCheckPlayers;
+	CoopPlayers::GetAll(GetWorld(), StuckCheckPlayers);
+	if (StuckCheckPlayers.Num() == 0)
 	{
 		return;
 	}
@@ -1679,12 +1706,23 @@ void AArenaManager::CheckStuckNPCs()
 
 				if (Counter >= StuckKillCount)
 				{
-					// Check if NPC is visible to the player
+					// Check if the NPC is on ANY player's screen. Recycling an enemy that someone
+					// is looking at would pop it out of the world in front of them.
 					bool bInPlayerView = false;
-					if (PC->GetLocalPlayer() && PC->GetLocalPlayer()->ViewportClient)
+					for (APawn* ViewerPawn : StuckCheckPlayers)
 					{
+						APlayerController* ViewerPC = Cast<APlayerController>(ViewerPawn->GetController());
+						if (!ViewerPC || !ViewerPC->GetLocalPlayer() || !ViewerPC->GetLocalPlayer()->ViewportClient)
+						{
+							continue;
+						}
+
 						FVector2D ScreenPos;
-						bInPlayerView = PC->ProjectWorldLocationToScreen(CurrentPos, ScreenPos, true);
+						if (ViewerPC->ProjectWorldLocationToScreen(CurrentPos, ScreenPos, true))
+						{
+							bInPlayerView = true;
+							break;
+						}
 					}
 
 					if (!bInPlayerView)
@@ -1895,18 +1933,16 @@ void AArenaManager::NotifyCriticalImpact(AActor* Source, FVector Location, float
 		return;
 	}
 
-	// Block destruction if player is inside the destruction radius sphere
-	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	// Block destruction while ANY player is inside the destruction radius sphere: one teammate
+	// standing clear is not permission to collapse the arena on the other three.
+	if (const APawn* ClosestPlayer = CoopPlayers::GetNearest(GetWorld(), GetActorLocation()))
 	{
-		if (APawn* Pawn = PC->GetPawn())
+		const float PlayerDist = FVector::Dist(ClosestPlayer->GetActorLocation(), GetActorLocation());
+		if (PlayerDist < DestructionRadius)
 		{
-			const float PlayerDist = FVector::Dist(Pawn->GetActorLocation(), GetActorLocation());
-			if (PlayerDist < DestructionRadius)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Player inside destruction radius (%.0f < %.0f), ignoring critical impact"),
-					PlayerDist, DestructionRadius);
-				return;
-			}
+			UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Player inside destruction radius (%.0f < %.0f), ignoring critical impact"),
+				PlayerDist, DestructionRadius);
+			return;
 		}
 	}
 
@@ -1986,13 +2022,12 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 		ExcludedActors.Add(Island);
 	}
 
-	// Exclude the player
-	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	// Exclude every player
+	TArray<APawn*> ExcludedPlayers;
+	CoopPlayers::GetAll(GetWorld(), ExcludedPlayers);
+	for (APawn* PlayerPawn : ExcludedPlayers)
 	{
-		if (APawn* Pawn = PC->GetPawn())
-		{
-			ExcludedActors.Add(Pawn);
-		}
+		ExcludedActors.Add(PlayerPawn);
 	}
 
 	// Exclude alive NPCs
@@ -2131,13 +2166,12 @@ void AArenaManager::ExecuteArenaDestruction(const FVector& Epicenter)
 	// Line-of-sight check params
 	FCollisionQueryParams LOSParams;
 	LOSParams.AddIgnoredActor(this);
-	// Ignore the player
-	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	// Ignore every player: a teammate standing in the way must not shadow the blast
+	TArray<APawn*> LOSIgnoredPlayers;
+	CoopPlayers::GetAll(GetWorld(), LOSIgnoredPlayers);
+	for (APawn* PlayerPawn : LOSIgnoredPlayers)
 	{
-		if (APawn* Pawn = PC->GetPawn())
-		{
-			LOSParams.AddIgnoredActor(Pawn);
-		}
+		LOSParams.AddIgnoredActor(PlayerPawn);
 	}
 
 	for (int32 i = 0; i < Targets.Num(); i++)
@@ -2559,14 +2593,44 @@ void AArenaManager::StartCameraLock(const FVector& Epicenter)
 		return;
 	}
 
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	if (!PC)
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
+	if (PlayerPawns.Num() == 0)
 	{
 		return;
 	}
 
-	APawn* Pawn = PC->GetPawn();
-	if (!Pawn)
+	// The cinematic belongs to everyone: each player gets their own line-of-sight fix and their
+	// own input lock. The lock target and the timers below are shared.
+	for (APawn* PlayerPawn : PlayerPawns)
+	{
+		EnsureLineOfSightForCameraLock(PlayerPawn, Epicenter);
+
+		if (APlayerController* PlayerPC = Cast<APlayerController>(PlayerPawn->GetController()))
+		{
+			PlayerPC->SetIgnoreLookInput(true);
+			PlayerPC->SetIgnoreMoveInput(true);
+		}
+	}
+
+	CameraLockTarget = Epicenter;
+	bCameraLocked = true;
+
+	// Start per-frame camera update timer (~60fps)
+	GetWorldTimerManager().SetTimer(CameraLockUpdateHandle,
+		this, &AArenaManager::UpdateCameraLock, 0.016f, true);
+
+	// Schedule unlock after duration
+	GetWorldTimerManager().SetTimer(CameraLockEndHandle,
+		this, &AArenaManager::EndCameraLock, CameraLockDuration, false);
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Camera locked on epicenter for %.1f seconds (%d players)"),
+		CameraLockDuration, PlayerPawns.Num());
+}
+
+void AArenaManager::EnsureLineOfSightForCameraLock(APawn* Pawn, const FVector& Epicenter)
+{
+	if (!Pawn || !GetWorld())
 	{
 		return;
 	}
@@ -2662,24 +2726,6 @@ void AArenaManager::StartCameraLock(const FVector& Epicenter)
 			UE_LOG(LogTemp, Error, TEXT("ArenaManager: No NavigationSystem available for teleport!"));
 		}
 	}
-
-	// Lock camera
-	CameraLockTarget = Epicenter;
-	bCameraLocked = true;
-
-	// Disable player look + move input
-	PC->SetIgnoreLookInput(true);
-	PC->SetIgnoreMoveInput(true);
-
-	// Start per-frame camera update timer (~60fps)
-	GetWorldTimerManager().SetTimer(CameraLockUpdateHandle,
-		this, &AArenaManager::UpdateCameraLock, 0.016f, true);
-
-	// Schedule unlock after duration
-	GetWorldTimerManager().SetTimer(CameraLockEndHandle,
-		this, &AArenaManager::EndCameraLock, CameraLockDuration, false);
-
-	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: Camera locked on epicenter for %.1f seconds"), CameraLockDuration);
 }
 
 void AArenaManager::UpdateCameraLock()
@@ -2689,22 +2735,30 @@ void AArenaManager::UpdateCameraLock()
 		return;
 	}
 
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	if (!PC || !PC->GetPawn())
-	{
-		return;
-	}
-
-	const FVector EyeLocation = PC->GetPawn()->GetActorLocation() + FVector(0.0f, 0.0f, 64.0f);
-	const FVector ToTarget = CameraLockTarget - EyeLocation;
-	const FRotator TargetRotation = ToTarget.Rotation();
-
 	// Smooth interpolation — higher InterpSpeed = faster blend
 	const float InterpSpeed = (CameraBlendTime > KINDA_SMALL_NUMBER) ? (1.0f / CameraBlendTime) : 100.0f;
-	const FRotator Current = PC->GetControlRotation();
-	const FRotator NewRotation = FMath::RInterpTo(Current, TargetRotation, 0.016f, InterpSpeed);
 
-	PC->SetControlRotation(NewRotation);
+	// Every player is looking at the same epicenter, but from their own position.
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
+
+	for (APawn* PlayerPawn : PlayerPawns)
+	{
+		APlayerController* PlayerPC = Cast<APlayerController>(PlayerPawn->GetController());
+		if (!PlayerPC)
+		{
+			continue;
+		}
+
+		const FVector EyeLocation = PlayerPawn->GetActorLocation() + FVector(0.0f, 0.0f, 64.0f);
+		const FVector ToTarget = CameraLockTarget - EyeLocation;
+		const FRotator TargetRotation = ToTarget.Rotation();
+
+		const FRotator Current = PlayerPC->GetControlRotation();
+		const FRotator NewRotation = FMath::RInterpTo(Current, TargetRotation, 0.016f, InterpSpeed);
+
+		PlayerPC->SetControlRotation(NewRotation);
+	}
 }
 
 void AArenaManager::EndCameraLock()
@@ -2719,13 +2773,17 @@ void AArenaManager::EndCameraLock()
 	GetWorldTimerManager().ClearTimer(CameraLockUpdateHandle);
 	GetWorldTimerManager().ClearTimer(CameraLockEndHandle);
 
-	if (GetWorld())
+	// Give input back to everyone the lock was applied to.
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
+
+	for (APawn* PlayerPawn : PlayerPawns)
 	{
-		if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+		if (APlayerController* PlayerPC = Cast<APlayerController>(PlayerPawn->GetController()))
 		{
 			// Reset (not just decrement) — clears the ignore stack completely
-			PC->ResetIgnoreLookInput();
-			PC->ResetIgnoreMoveInput();
+			PlayerPC->ResetIgnoreLookInput();
+			PlayerPC->ResetIgnoreMoveInput();
 		}
 	}
 
@@ -2742,8 +2800,8 @@ void AArenaManager::ForceActivateArena()
 		return;
 	}
 
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	AShooterCharacter* Player = PC ? Cast<AShooterCharacter>(PC->GetPawn()) : nullptr;
+	AShooterCharacter* Player = Cast<AShooterCharacter>(
+		CoopPlayers::GetNearest(GetWorld(), GetActorLocation()));
 	if (!Player)
 	{
 		UE_LOG(LogTemp, Error, TEXT("ArenaManager::ForceActivateArena — FAILED: no player found"));
@@ -3286,7 +3344,12 @@ void AArenaManager::SaveCompletionCheckpoint()
 		return;
 	}
 
-	AShooterCharacter* Player = Cast<AShooterCharacter>(GetWorld()->GetFirstPlayerController()->GetPawn());
+	// TODO(COOP): checkpoints are single-player shaped. FCheckpointData holds ONE spawn transform
+	// and ONE character state, so a four-player team cannot be restored from it. Saving the player
+	// closest to the arena keeps single player working unchanged; team checkpoints need a design
+	// decision (per-player slots? host-only? restore everyone at the respawn point?).
+	AShooterCharacter* Player = Cast<AShooterCharacter>(
+		CoopPlayers::GetNearest(GetWorld(), GetActorLocation()));
 	if (!Player)
 	{
 		return;

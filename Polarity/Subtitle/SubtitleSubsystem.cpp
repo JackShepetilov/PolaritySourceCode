@@ -1,6 +1,7 @@
-// SubtitleSubsystem.cpp
+﻿// SubtitleSubsystem.cpp
 
 #include "SubtitleSubsystem.h"
+#include "Coop/CoopPlayers.h"
 #include "SubtitleDataAsset.h"
 #include "SubtitleWidget.h"
 #include "Blueprint/UserWidget.h"
@@ -467,7 +468,8 @@ APlayerController* USubtitleSubsystem::GetPlayerController() const
 		return nullptr;
 	}
 
-	return World->GetFirstPlayerController();
+	// Subtitles are local UI: they belong to the person reading this screen.
+	return CoopPlayers::GetLocalController(World);
 }
 
 void USubtitleSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)

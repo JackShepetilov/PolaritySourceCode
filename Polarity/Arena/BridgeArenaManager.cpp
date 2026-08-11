@@ -2,6 +2,7 @@
 
 #include "BridgeArenaManager.h"
 #include "ArenaSpawnPoint.h"
+#include "Coop/CoopPlayers.h"
 #include "ArenaWaveData.h"
 #include "Components/SplineComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -166,14 +167,18 @@ float ABridgeArenaManager::GetPlayerProgress01() const
 		return 0.0f;
 	}
 
-	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
-	APawn* PlayerPawn = PC ? PC->GetPawn() : nullptr;
-	if (!PlayerPawn)
+	// Team progress is the furthest player along the bridge: the fight's depth is set by whoever
+	// pushed deepest, not by the straggler.
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
+
+	float FurthestProgress = 0.0f;
+	for (const APawn* PlayerPawn : PlayerPawns)
 	{
-		return 0.0f;
+		FurthestProgress = FMath::Max(FurthestProgress, ProjectToBridge01(PlayerPawn->GetActorLocation()));
 	}
 
-	return ProjectToBridge01(PlayerPawn->GetActorLocation());
+	return FurthestProgress;
 }
 
 int32 ABridgeArenaManager::GetEffectiveMaxSustainEnemies() const
@@ -262,17 +267,23 @@ void ABridgeArenaManager::RefreshPlayerProjectionCache() const
 		return;
 	}
 
-	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
-	APawn* PlayerPawn = PC ? PC->GetPawn() : nullptr;
-	if (!PlayerPawn)
+	TArray<APawn*> PlayerPawns;
+	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
+	if (PlayerPawns.Num() == 0)
 	{
 		CachedPlayerProgress01 = 0.0f;
 		CachedPlayerDistanceAlongSpline = 0.0f;
 		return;
 	}
 
-	const FVector PlayerLoc = PlayerPawn->GetActorLocation();
-	CachedPlayerDistanceAlongSpline = BridgeSpline->GetDistanceAlongSplineAtLocation(
-		PlayerLoc, ESplineCoordinateSpace::World);
+	// Same rule as GetPlayerProgress01: the furthest player defines where the team is.
+	CachedPlayerDistanceAlongSpline = 0.0f;
+	for (const APawn* PlayerPawn : PlayerPawns)
+	{
+		const float Distance = BridgeSpline->GetDistanceAlongSplineAtLocation(
+			PlayerPawn->GetActorLocation(), ESplineCoordinateSpace::World);
+		CachedPlayerDistanceAlongSpline = FMath::Max(CachedPlayerDistanceAlongSpline, Distance);
+	}
+
 	CachedPlayerProgress01 = FMath::Clamp(CachedPlayerDistanceAlongSpline / CachedSplineLength, 0.0f, 1.0f);
 }
