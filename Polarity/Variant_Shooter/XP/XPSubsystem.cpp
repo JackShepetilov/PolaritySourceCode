@@ -4,6 +4,8 @@
 
 #include "XPConfig.h"
 #include "ShooterNPC.h"
+#include "ShooterCharacter.h"
+#include "Variant_Shooter/Run/Generation/BiomeRunRegistry.h"
 
 #include "UpgradeManagerComponent.h"
 #include "UpgradeRegistry.h"
@@ -14,6 +16,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/DamageType.h"
 #include "Kismet/GameplayStatics.h"
 #include "UObject/UObjectIterator.h"
 
@@ -418,6 +421,54 @@ namespace XPDebugCommands
 		Run->StartRun();
 	}
 
+	static UBiomeRunRegistry* FindFirstLoadedBiomeRegistry()
+	{
+		for (TObjectIterator<UBiomeRunRegistry> It; It; ++It)
+		{
+			UBiomeRunRegistry* Registry = *It;
+			if (Registry && !Registry->IsTemplate() && !Registry->HasAnyFlags(RF_ClassDefaultObject))
+			{
+				return Registry;
+			}
+		}
+		return nullptr;
+	}
+
+	static void CmdRunNew(const TArray<FString>& Args, UWorld* World)
+	{
+		URunSubsystem* Run = GetRun(World);
+		if (!Run) { UE_LOG(LogTemp, Warning, TEXT("RunSubsystem not found")); return; }
+
+		UBiomeRunRegistry* Registry = nullptr;
+		if (Args.Num() > 0)
+		{
+			Registry = LoadObject<UBiomeRunRegistry>(nullptr, *Args[0]);
+		}
+		else
+		{
+			Registry = FindFirstLoadedBiomeRegistry();
+		}
+
+		if (!Registry)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RUN_FLOW] No loaded biome registry. Usage: polarity.run.new [RegistryObjectPath]"));
+			return;
+		}
+
+		Run->OpenNewRunFromBiome(Registry);
+	}
+
+	static void CmdPlayerDie(const TArray<FString>& /*Args*/, UWorld* World)
+	{
+		AShooterCharacter* Player = World ? Cast<AShooterCharacter>(UGameplayStatics::GetPlayerPawn(World, 0)) : nullptr;
+		if (!Player) { UE_LOG(LogTemp, Warning, TEXT("[RUN_FLOW] ShooterCharacter player pawn not found")); return; }
+		if (Player->IsDead()) { UE_LOG(LogTemp, Warning, TEXT("[RUN_FLOW] Player is already dead")); return; }
+
+		const float LethalDamage = Player->GetCurrentHP() + Player->GetCurrentArmor() + 1.f;
+		UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Debug kill: applying %.1f lethal damage"), LethalDamage);
+		UGameplayStatics::ApplyDamage(Player, LethalDamage, nullptr, Player, UDamageType::StaticClass());
+	}
+
 	static void CmdRunEnd(const TArray<FString>& Args, UWorld* World)
 	{
 		URunSubsystem* Run = GetRun(World);
@@ -623,6 +674,16 @@ static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunStart(
 	TEXT("polarity.run.start"),
 	TEXT("Start a roguelite run (resets all skills, fires OnRunStarted)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunStart));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunNew(
+	TEXT("polarity.run.new"),
+	TEXT("Open a new run using a loaded biome registry. Usage: polarity.run.new [RegistryObjectPath]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdRunNew));
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityPlayerDie(
+	TEXT("polarity.player.die"),
+	TEXT("Kill the current ShooterCharacter through the normal damage/death path."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&XPDebugCommands::CmdPlayerDie));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdPolarityRunEnd(
 	TEXT("polarity.run.end"),

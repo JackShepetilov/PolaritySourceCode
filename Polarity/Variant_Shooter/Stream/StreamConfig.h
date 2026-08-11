@@ -36,6 +36,8 @@ class POLARITY_API UStreamConfig : public UPrimaryDataAsset
 	GENERATED_BODY()
 
 public:
+	UStreamConfig();
+
 	// ==================== Viewer math ====================
 
 	/** Peak viewer target before time-curve and rank multiplier (e.g. 50000). */
@@ -194,4 +196,42 @@ public:
 	/** Cooldown between hype bursts to prevent infinite spam. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Chat|Rate", meta = (ClampMin = "1.0"))
 	float ChatHypeBurstCooldownSec = 8.0f;
+
+	// ==================== Learning reminders ====================
+
+	/** Enables inactivity reminders for dash, equipped ability, and charged-prop explosions. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders")
+	bool bEnableLearningReminders = true;
+
+	/** Seconds without a successful ground/air dash before requesting a chat + dash-icon reminder. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders", meta = (ClampMin = "5.0"))
+	float DashReminderDelaySec = 90.0f;
+
+	/** Seconds without successfully activating an equipped ability before requesting a chat + ability-icon reminder. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders", meta = (ClampMin = "5.0"))
+	float AbilityReminderDelaySec = 90.0f;
+
+	/** Seconds without exploding a charged prop before requesting a chat reminder. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders", meta = (ClampMin = "5.0"))
+	float ChargedPropExplosionReminderDelaySec = 120.0f;
+
+	/** Delay before the same ignored mechanic may request another reminder. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders", meta = (ClampMin = "5.0"))
+	float LearningReminderRepeatDelaySec = 120.0f;
+
+	/** Maximum reminders of each type during one run. 0 disables all learning reminders. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders", meta = (ClampMin = "0"))
+	int32 LearningReminderMaxPerTypePerRun = 2;
+
+	/** Fallback chat lines used when DT_ChatReactions has no DashReminder rows. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders|Chat")
+	TArray<FText> DashReminderChatLines;
+
+	/** Fallback chat lines used when DT_ChatReactions has no AbilityReminder rows. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders|Chat")
+	TArray<FText> AbilityReminderChatLines;
+
+	/** Fallback chat lines used when DT_ChatReactions has no ChargedPropExplosionReminder rows. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stream|Learning Reminders|Chat")
+	TArray<FText> ChargedPropExplosionReminderChatLines;
 };

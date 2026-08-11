@@ -27,7 +27,7 @@ struct FKeyBindingDisplayInfo
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	TObjectPtr<UInputAction> InputAction;
 
-	/** Internal action name (from asset name) */
+	/** Stable Player Mappable mapping name used for save/remap operations */
 	UPROPERTY(BlueprintReadOnly, Category = "KeyBinding")
 	FName ActionName;
 
@@ -246,12 +246,12 @@ protected:
 
 	/**
 	 * Apply a new key binding using UEnhancedInputUserSettings::MapPlayerKey
-	 * @param Action The Input Action to rebind
+	 * @param MappingName Stable Player Mappable mapping name to rebind
 	 * @param NewKey The new key to bind
 	 * @param bIsSecondary Whether this is the secondary slot
 	 * @return True if successful
 	 */
-	bool ApplyKeyBinding(const UInputAction* Action, FKey NewKey, bool bIsSecondary);
+	bool ApplyKeyBinding(FName MappingName, FKey NewKey, bool bIsSecondary);
 
 	/** Update the cached binding after a successful change */
 	void UpdateCachedBinding(FName ActionName, FKey NewKey, bool bIsSecondary);
@@ -259,11 +259,8 @@ protected:
 	/** Find which action a key is bound to */
 	bool FindKeyConflict(FKey Key, FName ExcludeAction, FName& OutConflictingAction) const;
 
-	/** Get the mapping name for an Input Action (from PlayerMappableKeySettings) */
-	FName GetMappingNameForAction(const UInputAction* Action) const;
-
 	/** Clear a binding using EnhancedInputUserSettings */
-	void ClearBindingInternal(const UInputAction* Action, bool bIsSecondary);
+	void ClearBindingInternal(FName MappingName, bool bIsSecondary);
 
 	/** Get display name for an Input Action */
 	FText GetActionDisplayName(const UInputAction* Action) const;

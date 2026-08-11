@@ -4,6 +4,7 @@
 #include "ShooterProjectile.h"
 #include "ProjectilePoolSubsystem.h"
 #include "ApexMovementComponent.h"
+#include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
 #include "Components/SphereComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
@@ -222,30 +223,41 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 
 	const FVector HitDirection = (HitActor->GetActorLocation() - ExplosionCenter).GetSafeNormal();
 
-	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
+	const bool bIsShootableButtonOwner =
+		HitActor->FindComponentByClass<UShootableButtonComponent>() != nullptr;
+
+	// Characters already receive splash damage here. Shootable buttons also need a
+	// real TakeDamage call so their OnTakeAnyDamage binding can activate the button.
+	// Keep other WorldDynamic actors unchanged.
+	if ((HitCharacter || bIsShootableButtonOwner) && (!bIsOwner || bDamageOwner))
+	{
+		float TagMultiplier = GetTagDamageMultiplier(HitActor);
+		float ProjectileMultiplier = GetProjectileDamageMultiplier(HitActor);
+		float FinalDamage = HitDamage * TagMultiplier * ProjectileMultiplier * SplashScale;
+		if (bIsOwner)
+		{
+			FinalDamage *= OwnerSelfDamageMultiplier;
+		}
+
+		if (FinalDamage > 0.0f)
+		{
+			FRadialDamageEvent RadialDamageEvent;
+			RadialDamageEvent.DamageTypeClass = HitDamageType;
+			RadialDamageEvent.Origin = ExplosionCenter;
+			RadialDamageEvent.Params.BaseDamage = HitDamage;
+			RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
+
+			AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
+			HitActor->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
+		}
+	}
+
+	if (HitCharacter)
 	{
 		const bool bCanAffectOwner = !bIsOwner || bDamageOwner || bEnableOwnerRocketJump;
 		if (bCanAffectOwner)
 		{
-			float TagMultiplier = GetTagDamageMultiplier(HitActor);
-			float FinalDamage = HitDamage * TagMultiplier * SplashScale;
-			if (bIsOwner)
-			{
-				FinalDamage *= OwnerSelfDamageMultiplier;
-			}
-
-			if (FinalDamage > 0.0f && (!bIsOwner || bDamageOwner))
-			{
-				FRadialDamageEvent RadialDamageEvent;
-				RadialDamageEvent.DamageTypeClass = HitDamageType;
-				RadialDamageEvent.Origin = ExplosionCenter;
-				RadialDamageEvent.Params.BaseDamage = HitDamage;
-				RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
-
-				AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
-				HitCharacter->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
-			}
-
 			const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
 			const bool bFiredByPlayer = GetInstigator() && GetInstigator() == PlayerPawn;
 			if (CharacterKnockbackForce > 0.0f && bFiredByPlayer && (!bIsOwner || bEnableOwnerRocketJump))
@@ -312,6 +324,11 @@ float AShooterProjectile::GetOwnerRocketJumpMultiplier(const ACharacter* HitChar
 	return bCrouchHeld ? OwnerAirCrouchKnockbackMultiplier : OwnerAirKnockbackMultiplier;
 }
 
+float AShooterProjectile::GetProjectileDamageMultiplier(AActor* /*Target*/) const
+{
+	return 1.0f;
+}
+
 void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection)
 {
 	// have we hit a character?
@@ -322,12 +339,14 @@ void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitCo
 		{
 			// Calculate tag-based damage multiplier
 			float TagMultiplier = GetTagDamageMultiplier(HitActor);
-			float FinalDamage = HitDamage * TagMultiplier;
+			float ProjectileMultiplier = GetProjectileDamageMultiplier(HitActor);
+			float FinalDamage = HitDamage * TagMultiplier * ProjectileMultiplier;
 
-			UE_LOG(LogTemp, Warning, TEXT("Projectile::ProcessHit - Target: %s, BaseDamage: %.1f, TagMultiplier: %.2f, FinalDamage: %.1f, TagMultipliers count: %d"),
+			UE_LOG(LogTemp, Warning, TEXT("Projectile::ProcessHit - Target: %s, BaseDamage: %.1f, TagMultiplier: %.2f, ProjectileMultiplier: %.2f, FinalDamage: %.1f, TagMultipliers count: %d"),
 				*HitActor->GetName(),
 				HitDamage,
 				TagMultiplier,
+				ProjectileMultiplier,
 				FinalDamage,
 				TagDamageMultipliers.Num());
 

@@ -268,7 +268,7 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 
 		// subscribe to the pawn's delegates
 		ShooterCharacter->OnBulletCountUpdated.AddDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);
-		ShooterCharacter->OnDamaged.AddDynamic(this, &AShooterPlayerController::OnPawnDamaged);
+		ShooterCharacter->OnHealthChanged.AddDynamic(this, &AShooterPlayerController::OnPawnHealthChanged);
 		ShooterCharacter->OnDamageDirection.AddDynamic(this, &AShooterPlayerController::OnDamageDirection);
 		ShooterCharacter->OnHeatUpdated.AddDynamic(this, &AShooterPlayerController::OnHeatUpdated);
 		ShooterCharacter->OnSpeedUpdated.AddDynamic(this, &AShooterPlayerController::OnSpeedUpdated);
@@ -290,6 +290,7 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		// Rebind UI widget to new character (for HitMarker after respawn)
 		if (BulletCounterUI)
 		{
+			BulletCounterUI->BindHitMarkerToCharacter(ShooterCharacter);
 			BulletCounterUI->BP_BindToCharacter(ShooterCharacter);
 		}
 
@@ -309,7 +310,7 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		}
 
 		// force update the life bar + armor bar
-		ShooterCharacter->OnDamaged.Broadcast(1.0f, ShooterCharacter->GetMaxArmor() > 0.0f ? ShooterCharacter->GetCurrentArmor() / ShooterCharacter->GetMaxArmor() : 0.0f);
+		ShooterCharacter->BroadcastHealthChanged();
 	}
 }
 
@@ -359,11 +360,11 @@ void AShooterPlayerController::OnActiveWeaponChanged(AShooterWeapon* NewWeapon)
 	}
 }
 
-void AShooterPlayerController::OnPawnDamaged(float LifePercent, float ArmorPercent)
+void AShooterPlayerController::OnPawnHealthChanged(float CurrentHP, float MaxHP, float LifePercent, float ArmorPercent)
 {
 	if (IsValid(BulletCounterUI))
 	{
-		BulletCounterUI->BP_Damaged(LifePercent, ArmorPercent);
+		BulletCounterUI->BP_OnHealthChanged(CurrentHP, MaxHP, LifePercent, ArmorPercent);
 	}
 }
 

@@ -11,6 +11,7 @@ class UUpgradeDefinition;
 class UUpgradeComponent;
 class UUpgradeRegistry;
 class AShooterWeapon;
+class ADroppedRangedWeapon;
 class UInputAction;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinition*, Definition);
@@ -126,6 +127,9 @@ public:
 
 	/** Called when a specific owner weapon deals damage to a target */
 	void NotifyWeaponDealtDamage(AShooterWeapon* Weapon, AActor* Target, float Damage, bool bKilled);
+
+	/** Called when an enemy killed by this owner spawns a ranged weapon drop. */
+	void NotifyEnemyDroppedRangedWeapon(ADroppedRangedWeapon* DroppedWeapon, AActor* DroppingEnemy);
 
 	/** Called whenever owner's hitscan ionization successfully applies charge to a target.
 	 *  Decoupled from damage so 0-damage ionizers (wave pistol) still notify upgrades. */

@@ -12,9 +12,10 @@ class USoundBase;
 /**
  * Data asset for the "Charge Flip" upgrade.
  *
- * When the player shoots an EMF projectile (charge launcher) with the hitscan rifle,
- * the projectile explodes and fires rifle shots with multiplied damage + ionization
- * at all visible targets from the explosion point. Chain-reacts with other projectiles.
+ * When the player shoots an EMF projectile (charge launcher), or detonates an
+ * explosive EMF prop with the hitscan rifle, the explosion fires rifle shots
+ * with multiplied damage + ionization at all visible targets from the explosion point.
+ * Chain-reacts with other projectiles.
  */
 UCLASS(BlueprintType)
 class POLARITY_API UUpgradeDefinition_ChargeFlip : public UUpgradeDefinition
@@ -29,13 +30,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Charge Flip", meta = (ClampMin = "0.5", ClampMax = "20.0"))
 	float DamageMultiplier = 2.0f;
 
-	/** Positive charge applied to each hit target (ionization) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Charge Flip", meta = (ClampMin = "0.0"))
+	/** Charge delta applied to each hit target. Can be negative. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Charge Flip")
 	float IonizationChargePerHit = 5.0f;
-
-	/** Maximum positive charge that ionization can build up to */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Charge Flip", meta = (ClampMin = "0.0"))
-	float MaxIonizationCharge = 20.0f;
 
 	/** Maximum chain reaction depth (safety limit). 0 = no chaining, -1 = unlimited. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Charge Flip", meta = (ClampMin = "-1"))

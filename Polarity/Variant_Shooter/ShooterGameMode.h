@@ -10,6 +10,7 @@ class UShooterUI;
 class AShooterCharacter;
 class UUserWidget;
 class ARunLaunchPoint;
+class ABiomeRunAssembler;
 class FViewport;
 
 /**
@@ -55,6 +56,10 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<ARunLaunchPoint> RunMarker;
 
+	/** Optional runtime arena assembler on semi-procedural biome maps. */
+	UPROPERTY(Transient)
+	TObjectPtr<ABiomeRunAssembler> BiomeRunAssembler;
+
 	/** Ensures the run is started exactly once. */
 	bool bRunStartTriggered = false;
 
@@ -80,6 +85,9 @@ protected:
 	/** Teleports the player to the level's ARunLaunchPoint and tosses them into the air. */
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void PerformRunLaunch();
+
+	/** Runs one tick after BeginRunLaunch so the first visible frame already contains the toss. */
+	void DismissRunTransitionScreenAfterLaunch();
 
 public:
 

@@ -1,10 +1,10 @@
 // UpgradeChoiceWidget.h
-// Modal panel that opens on level-up, presents N random upgrades from the WHOLE registry,
+// Modal panel that opens on level-up, presents N random upgrades from the scheduled pool,
 // applies the chosen one, then processes any queued level-ups.
 //
 // Lifecycle:
 //   NativeConstruct subscribes to the deferred level-up release (fallback: UXPSubsystem::OnLevelUp).
-//   On level-up: rolls choices from the full registry (minus maxed-out), pauses game, fires BP_OnChoiceOpened().
+//   On level-up: rolls choices from the scheduled category (minus maxed-out), pauses game, fires BP_OnChoiceOpened().
 //   BP spawns N UUpgradeCardWidget instances from CurrentChoices and binds OnSelected -> ConfirmChoice.
 //   ConfirmChoice grants the upgrade, closes panel, and processes the next queued level-up if any.
 //
@@ -21,6 +21,7 @@ class UXPSubsystem;
 class UUpgradeRegistry;
 class UUpgradeDefinition;
 class UUpgradeManagerComponent;
+class UUpgradeOfferSchedule;
 
 UCLASS(Abstract, Blueprintable)
 class POLARITY_API UUpgradeChoiceWidget : public UUserWidget
@@ -66,6 +67,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Upgrade Choice")
 	TObjectPtr<UUpgradeRegistry> Registry;
 
+	/** Optional level -> category schedule. If unset, rolls from every category. */
+	UPROPERTY(EditDefaultsOnly, Category = "Upgrade Choice")
+	TObjectPtr<UUpgradeOfferSchedule> OfferSchedule;
+
 	// ==================== Internal ====================
 
 	UFUNCTION()
@@ -73,7 +78,7 @@ protected:
 
 	void OpenChoice();
 	void CloseChoice(UUpgradeDefinition* SelectedDefinition);
-	void RollChoices();
+	void RollChoices(int32 NewLevel);
 	void TryProcessNextPending();
 
 	UXPSubsystem* GetXPSubsystem() const;
@@ -85,6 +90,9 @@ protected:
 	UPROPERTY(Transient)
 	bool bIsOpen = false;
 
-	/** Count of level-ups that arrived while a choice was already open (processed FIFO after close). */
+	/** Level numbers that arrived while a choice was already open (processed FIFO after close). */
+	TArray<int32> PendingLevelUpQueue;
+
+	/** Debug/UI count mirrored from PendingLevelUpQueue.Num(). */
 	int32 PendingLevelUps = 0;
 };

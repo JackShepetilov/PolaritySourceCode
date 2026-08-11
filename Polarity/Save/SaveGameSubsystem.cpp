@@ -2,6 +2,7 @@
 // Logging tag: [SAVE_DEBUG].
 
 #include "SaveGameSubsystem.h"
+#include "TutorialSubsystem.h"
 
 #include "PolarityMetaSave.h"
 #include "PolarityRunSave.h"
@@ -441,6 +442,12 @@ void USaveGameSubsystem::GatherRun(UPolarityRunSave& Out) const
 			Out.CurrentArenaIndex     = Run->GetCurrentArenaIndex();
 			Out.ActivatedAntennaCount = Run->GetActivatedAntennaCount();
 			Out.AcquiredUpgrades      = Run->GetUpgradeLedger();
+			Out.ClearedArenaIndices = Run->GetClearedArenaIndices().Array();
+			Out.RunSeed              = Run->GetRunSeed();
+			TArray<FName> SavedArenaIds;
+			// Accessors below deliberately preserve the exact last assembled IDs in the save.
+			Run->GetCurrentBiomeAssembly(Out.AssembledBiomeId, Out.AssembledLayoutId, SavedArenaIds);
+			Out.AssembledArenaIds = MoveTemp(SavedArenaIds);
 
 			const FRunStats& Stats = Run->GetStats();
 			Out.TotalXPEarned = Stats.TotalXPEarned;
@@ -489,7 +496,12 @@ void USaveGameSubsystem::ApplyRun(const UPolarityRunSave& In)
 				In.CurrentArenaIndex,
 				In.ActivatedAntennaCount,
 				In.AcquiredUpgrades,
-				Stats);
+				Stats,
+				In.RunSeed,
+				In.AssembledBiomeId,
+				In.AssembledLayoutId,
+				In.AssembledArenaIds,
+				In.ClearedArenaIndices);
 		}
 		if (UXPSubsystem* XP = GI->GetSubsystem<UXPSubsystem>())
 		{
@@ -620,4 +632,48 @@ static FAutoConsoleCommandWithWorld GPolaritySaveDumpCmd(
 					M->UnlockedApps.Num(), Save->GetUnreadChatCount(), Save->GetResumeArenaIndex());
 			}
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GPolaritySaveTutorialCmd(
+	TEXT("polarity.save.tutorial"),
+	TEXT("Set tutorial completion. Usage: polarity.save.tutorial <0|1>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() != 1 || (Args[0] != TEXT("0") && Args[0] != TEXT("1")))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Usage: polarity.save.tutorial <0|1>"));
+			return;
+		}
+
+		USaveGameSubsystem* Save = FindSaveSubsystem(World);
+		UPolarityMetaSave* Meta = Save ? Save->GetMeta() : nullptr;
+		if (!Save || !Meta)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SAVE_DEBUG] Cannot set tutorial state: save subsystem/meta is unavailable."));
+			return;
+		}
+
+		const bool bCompleted = Args[0] == TEXT("1");
+		Meta->bTutorialCompleted = bCompleted;
+		if (bCompleted)
+		{
+			Meta->UnlockedApps.Add(FName(TEXT("raid")));
+			Meta->Chat.UnlockedGroups.Add(FName(TEXT("post_tutorial")));
+		}
+		else
+		{
+			Meta->UnlockedApps.Remove(FName(TEXT("raid")));
+			Meta->Chat.UnlockedGroups.Remove(FName(TEXT("post_tutorial")));
+			Meta->Chat.SeenGroups.Remove(FName(TEXT("post_tutorial")));
+
+			if (UTutorialSubsystem* Tutorial = World->GetGameInstance()->GetSubsystem<UTutorialSubsystem>())
+			{
+				Tutorial->ResetAllProgress();
+			}
+		}
+
+		Save->SaveMetaNow();
+		Save->OnDesktopStateChanged.Broadcast();
+		UE_LOG(LogTemp, Log, TEXT("[SAVE_DEBUG] Tutorial set to %d; raid and post_tutorial state synchronized; session tutorial hints reset when set to 0."),
+			bCompleted ? 1 : 0);
 	}));

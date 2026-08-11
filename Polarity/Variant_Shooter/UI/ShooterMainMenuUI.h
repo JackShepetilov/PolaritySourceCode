@@ -7,6 +7,8 @@
 #include "ShooterMainMenuUI.generated.h"
 
 class UShooterOptionsMenuUI;
+class UBiomeRunRegistry;
+class UTexture2D;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMainMenuRemoved);
 
@@ -60,6 +62,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Shooter|MainMenu")
 	void LoadLevel1();
 
+	/** Start a fresh roguelite run in the configured biome map. */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|MainMenu|Run")
+	void StartNewRun();
+
 	/** Load Level 2 */
 	UFUNCTION(BlueprintCallable, Category = "Shooter|MainMenu")
 	void LoadLevel2();
@@ -92,6 +98,18 @@ protected:
 	/** Level name for Level 1 button */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|MainMenu|Levels")
 	FName Level1Name = FName("Level1");
+
+	/** Assigned in WBP_MainMenu. Its Layouts array owns the valid run-start maps. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|MainMenu|Run")
+	TObjectPtr<UBiomeRunRegistry> NewRunBiomeRegistry;
+
+	/** Assigned in WBP_MainMenu; displayed across OpenLevel until RunLaunchPoint launches the player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|MainMenu|Run")
+	TSubclassOf<UUserWidget> RunLoadingScreenClass;
+
+	/** Assigned in WBP_MainMenu; rendered by the native MoviePlayer Slate spinner. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|MainMenu|Run")
+	TObjectPtr<UTexture2D> RunLoadingSpinnerTexture;
 
 	/** Level name for Level 2 button */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shooter|MainMenu|Levels")

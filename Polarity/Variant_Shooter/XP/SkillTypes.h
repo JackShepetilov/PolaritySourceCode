@@ -10,14 +10,21 @@
 #include "CoreMinimal.h"
 #include "SkillTypes.generated.h"
 
-/** Cosmetic upgrade categories — used only to colour/icon upgrade cards. No longer drives XP. */
+/**
+ * Upgrade flavour categories. Tags each UUpgradeDefinition so different activities can award
+ * different upgrade pools (normal arena -> Boring, special arena -> Fun, off-arena POI -> Weapons)
+ * and so cards get the right colour/icon. Does NOT drive XP (single-pool).
+ *
+ *  - Boring  : incremental stat bumps (+max HP, +melee damage, +max charge, ...).
+ *  - Fun     : flashy active abilities (divekick, 360 shot, dashes, ...).
+ *  - Weapons : tied to a specific picked-up weapon (have a RequiredWeaponClass field).
+ */
 UENUM(BlueprintType)
 enum class ESkillCategory : uint8
 {
-	Movement    UMETA(DisplayName = "Movement"),
-	Melee       UMETA(DisplayName = "Melee"),
-	EMF         UMETA(DisplayName = "Electrokinesis"),
-	Weapon      UMETA(DisplayName = "Weapon Handling"),
+	Boring      UMETA(DisplayName = "Boring"),
+	Fun         UMETA(DisplayName = "Fun"),
+	Weapons     UMETA(DisplayName = "Weapons"),
 };
 
 /** The run's single leveling state. Lives in XPSubsystem as one instance. */

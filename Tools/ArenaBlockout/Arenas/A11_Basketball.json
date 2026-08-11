@@ -1,0 +1,135 @@
+{
+  "name": "A11_Basketball",
+  "comment": "Compact U-shaped basketball combat bowl. Three ball kills charge the ball; a downward hoop score ends Sustain combat. L0 court + L1 side decks + west L2 booth, open central throw lane, no dead ball corners.",
+  "level_path": "/Game/Variant_Shooter/Arenas/Biome1/A11_Basketball/Lvl_A11_Basketball",
+
+  "classes": {
+    "arena_manager": "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager",
+    "antenna": "/Game/Variant_Shooter/Arenas/BPs/BP_Antenna",
+    "coordinator": "/Game/Variant_Shooter/Blueprints/AI/BP_AICombatCoordinator",
+    "spawn_point": "/Script/Polarity.ArenaSpawnPoint",
+    "basketball": "/Game/Variant_Shooter/Blueprints/LevelBPs/BP_BasketBall",
+    "basketball_hoop": "/Game/Variant_Shooter/Blueprints/LevelBPs/BP_BasketballHoop",
+    "prop": "/Game/Variant_Shooter/Blueprints/Objects/BP_EMFProp_1",
+    "melee": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_MeleeNPC",
+    "shooter": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC",
+    "drone": "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone"
+  },
+
+  "basketball": {
+    "required_score": 3,
+    "capture_range": 1200.0,
+    "min_launch_speed": 1500.0,
+    "max_launch_speed": 3200.0,
+    "max_charge_time": 1.25
+  },
+
+  "sustain": {
+    "max_alive": 5,
+    "total": -1,
+    "pool": [
+      { "class": "melee", "weight": 3.5 },
+      { "class": "shooter", "weight": 3.0 },
+      { "class": "drone", "weight": 0.75 }
+    ]
+  },
+
+  "pieces": [
+    { "id": "court", "shape": "box", "mat": "floor", "pos": [0, 0, -50], "size": [7000, 8000, 100], "group": "Floor" },
+    { "id": "approach", "shape": "box", "mat": "floor", "pos": [0, -4550, -50], "size": [1600, 1100, 100], "group": "Floor" },
+
+    { "id": "backstop_n", "shape": "box", "mat": "wall", "pos": [0, 3650, 350], "size": [7000, 200, 700], "group": "Perimeter" },
+    { "id": "board_w", "shape": "box", "mat": "wall", "pos": [-3400, 0, 300], "size": [200, 7600, 600], "group": "Perimeter" },
+    { "id": "board_e", "shape": "box", "mat": "wall", "pos": [3400, 0, 300], "size": [200, 7600, 600], "group": "Perimeter" },
+    { "id": "backstop_s_w", "shape": "box", "mat": "wall", "pos": [-2200, -3650, 200], "size": [2400, 200, 400], "group": "Perimeter" },
+    { "id": "backstop_s_e", "shape": "box", "mat": "wall", "pos": [2200, -3650, 200], "size": [2400, 200, 400], "group": "Perimeter" },
+
+    { "id": "deck_w", "shape": "box", "mat": "deco", "pos": [-2650, 0, 175], "size": [1200, 4400, 350], "group": "L1Decks" },
+    { "id": "deck_e", "shape": "box", "mat": "deco", "pos": [2650, 0, 175], "size": [1200, 4400, 350], "group": "L1Decks" },
+    { "id": "ramp_w_s", "shape": "ramp", "mat": "floor", "from": [-1800, -2700, 0], "to": [-2550, -2000, 350], "width": 560, "group": "Ramps" },
+    { "id": "ramp_w_n", "shape": "ramp", "mat": "floor", "from": [-1800, 2700, 0], "to": [-2550, 2000, 350], "width": 560, "group": "Ramps" },
+    { "id": "ramp_e_s", "shape": "ramp", "mat": "floor", "from": [1800, -2700, 0], "to": [2550, -2000, 350], "width": 560, "group": "Ramps" },
+    { "id": "ramp_e_n", "shape": "ramp", "mat": "floor", "from": [1800, 2700, 0], "to": [2550, 2000, 350], "width": 560, "group": "Ramps" },
+
+    { "id": "booth_w", "shape": "box", "mat": "deco", "pos": [-2800, 650, 650], "size": [900, 1300, 300], "group": "L2" },
+    { "id": "ramp_booth_w", "shape": "ramp", "mat": "floor", "from": [-2800, -900, 350], "to": [-2800, 0, 800], "width": 600, "group": "Ramps" },
+    { "id": "booth_guard", "shape": "box", "mat": "wallrun", "pos": [-2325, 650, 900], "size": [30, 1200, 200], "group": "L2" },
+
+    { "id": "wr_w_s", "shape": "box", "mat": "wallrun", "pos": [-3290, -1450, 430], "size": [20, 1500, 500], "group": "Wallrun" },
+    { "id": "wr_w_n", "shape": "box", "mat": "wallrun", "pos": [-3290, 1200, 430], "size": [20, 1500, 500], "group": "Wallrun" },
+    { "id": "wr_e_s", "shape": "box", "mat": "wallrun", "pos": [3290, -1450, 430], "size": [20, 1500, 500], "group": "Wallrun" },
+    { "id": "wr_e_n", "shape": "box", "mat": "wallrun", "pos": [3290, 1200, 430], "size": [20, 1500, 500], "group": "Wallrun" },
+    { "id": "par_w", "shape": "box", "mat": "wallrun", "pos": [-2035, 0, 450], "size": [30, 1700, 200], "group": "L1Decks" },
+    { "id": "par_e", "shape": "box", "mat": "wallrun", "pos": [2035, 0, 450], "size": [30, 1700, 200], "group": "L1Decks" },
+
+    { "id": "screen_mid_w", "shape": "box", "mat": "wall", "pos": [-900, -300, 100], "size": [850, 160, 200], "yaw": -25, "group": "Cover" },
+    { "id": "screen_mid_e", "shape": "box", "mat": "wall", "pos": [900, 450, 100], "size": [850, 160, 200], "yaw": 25, "group": "Cover" },
+    { "id": "cover_w_n", "shape": "box", "mat": "wall", "pos": [-1500, 1600, 100], "size": [180, 800, 200], "group": "Cover" },
+    { "id": "cover_e_n", "shape": "box", "mat": "wall", "pos": [1500, 1600, 100], "size": [180, 800, 200], "group": "Cover" },
+    { "id": "corner_w_n", "shape": "box", "mat": "wall", "pos": [-2200, 2800, 150], "size": [700, 180, 300], "group": "Cover" },
+    { "id": "corner_e_n", "shape": "box", "mat": "wall", "pos": [2200, 2800, 150], "size": [700, 180, 300], "group": "Cover" },
+
+    { "id": "paint_key", "shape": "box", "mat": "deco", "pos": [0, 2350, 1], "size": [1400, 1900, 2], "group": "CourtLines", "no_collision": true },
+    { "id": "paint_midline", "shape": "box", "mat": "deco", "pos": [0, 0, 2], "size": [6100, 35, 4], "group": "CourtLines", "no_collision": true },
+    { "id": "paint_center", "shape": "cylinder", "mat": "deco", "pos": [0, 0, 2], "size": [900, 900, 4], "group": "CourtLines", "no_collision": true },
+    { "id": "shot_left", "shape": "cylinder", "mat": "wallrun", "pos": [-1550, 950, 4], "size": [240, 240, 8], "group": "CourtLines", "no_collision": true },
+    { "id": "shot_center", "shape": "cylinder", "mat": "wallrun", "pos": [0, 650, 4], "size": [240, 240, 8], "group": "CourtLines", "no_collision": true },
+    { "id": "shot_right", "shape": "cylinder", "mat": "wallrun", "pos": [1550, 950, 4], "size": [240, 240, 8], "group": "CourtLines", "no_collision": true },
+
+    { "id": "scoreboard_panel", "shape": "box", "mat": "deco", "pos": [0, 3550, 1050], "size": [2200, 140, 800], "group": "Scoreboard" },
+    { "id": "scoreboard_header", "shape": "box", "mat": "wallrun", "pos": [0, 3465, 1490], "size": [2200, 40, 80], "group": "Scoreboard" },
+
+    { "id": "fld_n", "shape": "box", "mat": "field", "pos": [0, 4010, 1600], "size": [7040, 20, 3200], "group": "Field" },
+    { "id": "fld_s", "shape": "box", "mat": "field", "pos": [0, -4010, 1600], "size": [7040, 20, 3200], "group": "Field" },
+    { "id": "fld_w", "shape": "box", "mat": "field", "pos": [-3510, 0, 1600], "size": [20, 8040, 3200], "group": "Field" },
+    { "id": "fld_e", "shape": "box", "mat": "field", "pos": [3510, 0, 1600], "size": [20, 8040, 3200], "group": "Field" }
+  ],
+
+  "exit_blocker_ids": ["fld_n", "fld_s", "fld_w", "fld_e"],
+
+  "markers": [
+    { "type": "player_start", "pos": [0, -4550, 100], "yaw": 90 },
+    { "type": "respawn_point", "pos": [0, -3800, 100], "yaw": 90 },
+    { "type": "entry_trigger", "pos": [0, 0, 1600], "extent": [3350, 3850, 1600] },
+
+    { "type": "basketball", "pos": [0, -1450, 80], "yaw": 0 },
+    { "type": "basketball_hoop", "pos": [0, 3350, 0], "yaw": 180 },
+
+    { "type": "spawn", "id": "G_SW", "pos": [-1650, -2600, 10], "yaw": 45 },
+    { "type": "spawn", "id": "G_SE", "pos": [1650, -2600, 10], "yaw": 135 },
+    { "type": "spawn", "id": "G_W", "pos": [-2750, -900, 360], "yaw": 0 },
+    { "type": "spawn", "id": "G_E", "pos": [2750, -900, 360], "yaw": 180 },
+    { "type": "spawn", "id": "G_NW", "pos": [-2450, 1900, 360], "yaw": -30 },
+    { "type": "spawn", "id": "G_NE", "pos": [2450, 1900, 360], "yaw": -150 },
+    { "type": "spawn", "id": "G_BASE_W", "pos": [-1700, 2650, 10], "yaw": -45 },
+    { "type": "spawn", "id": "G_BASE_E", "pos": [1700, 2650, 10], "yaw": -135 },
+    { "type": "spawn", "id": "AIR_W", "pos": [-1550, 650, 80], "yaw": 0, "air": true, "air_height": 340 },
+    { "type": "spawn", "id": "AIR_E", "pos": [1550, 650, 80], "yaw": 180, "air": true, "air_height": 340 },
+
+    { "type": "prop_cluster", "id": "C_SW", "pos": [-1550, -1600, 60], "count": 3, "radius": 170 },
+    { "type": "prop_cluster", "id": "C_SE", "pos": [1550, -1600, 60], "count": 3, "radius": 170 },
+    { "type": "prop_cluster", "id": "C_NW", "pos": [-1750, 1400, 60], "count": 3, "radius": 170 },
+    { "type": "prop_cluster", "id": "C_NE", "pos": [1750, 1400, 60], "count": 3, "radius": 170 },
+
+    { "type": "antenna", "id": "Antenna", "pos": [2600, 2050, 355], "yaw": -90 },
+    { "type": "coordinator", "id": "Coordinator", "pos": [0, 0, 1900] },
+    { "type": "manager", "pos": [0, -200, 2100] },
+
+    { "type": "nav_link", "id": "NL_W_S", "pos": [-2050, -1200, 355], "left": [-300, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_W_N", "pos": [-2050, 1200, 355], "left": [-300, 0, 0], "right": [800, 0, -350] },
+    { "type": "nav_link", "id": "NL_E_S", "pos": [2050, -1200, 355], "left": [300, 0, 0], "right": [-800, 0, -350] },
+    { "type": "nav_link", "id": "NL_E_N", "pos": [2050, 1200, 355], "left": [300, 0, 0], "right": [-800, 0, -350] },
+    { "type": "nav_link", "id": "NL_L2_W_S", "pos": [-2800, 0, 805], "left": [0, 300, 0], "right": [0, -850, -450] },
+    { "type": "nav_link", "id": "NL_L2_W_N", "pos": [-2800, 1250, 805], "left": [0, -250, 0], "right": [0, 750, -450] }
+  ],
+
+  "screenshots": [
+    { "id": "top", "pos": [0, 0, 9000], "pitch": -90, "yaw": -90, "fov": 72 },
+    { "id": "entry", "pos": [0, -4550, 320], "pitch": -4, "yaw": 90, "fov": 88 },
+    { "id": "shot_lane", "pos": [0, -1800, 420], "pitch": -2, "yaw": 90, "fov": 76 },
+    { "id": "iso_e", "pos": [5400, -5200, 3300], "pitch": -25, "yaw": 135, "fov": 84 },
+    { "id": "iso_w", "pos": [-5400, -5200, 3300], "pitch": -25, "yaw": 45, "fov": 84 }
+  ],
+
+  "navmesh_bounds": { "pos": [0, 0, 1050], "size": [7800, 8800, 2800] }
+}

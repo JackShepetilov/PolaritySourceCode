@@ -6,11 +6,19 @@
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Sound/SoundBase.h"
+#include "UObject/ConstructorHelpers.h"
 
 UHitMarkerComponent::UHitMarkerComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PostPhysics;
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> IonizedSoundFinder(
+		TEXT("/Game/SFX/universfield-new-notification-08-352461.universfield-new-notification-08-352461"));
+	if (IonizedSoundFinder.Succeeded())
+	{
+		Settings.IonizedHitSound = IonizedSoundFinder.Object;
+	}
 }
 
 void UHitMarkerComponent::BeginPlay()
@@ -109,6 +117,25 @@ void UHitMarkerComponent::RegisterHit(const FVector& HitLocation, const FVector&
 		(int32)HitType, Damage, bHeadshot, bKilled);
 }
 
+void UHitMarkerComponent::RegisterIonizedHit(const FVector& HitLocation, const FVector& HitDirection)
+{
+	CurrentHitEvent.HitType = EHitMarkerType::Ionized;
+	CurrentHitEvent.Damage = 0.0f;
+	CurrentHitEvent.HitLocation = HitLocation;
+	CurrentHitEvent.HitDirection = HitDirection;
+	CurrentHitEvent.bIsKill = false;
+	CurrentHitEvent.bIsHeadshot = false;
+	CurrentHitEvent.EventTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+	HitMarkerTimeRemaining = Settings.HitMarkerDuration;
+	bHitMarkerActive = true;
+
+	OnIonizedHitMarker.Broadcast(CurrentHitEvent);
+	PlayHitSound(EHitMarkerType::Ionized);
+
+	UE_LOG(LogTemp, Log, TEXT("HitMarker: Ionized zero-damage hit at %s"), *HitLocation.ToCompactString());
+}
+
 void UHitMarkerComponent::RegisterKill()
 {
 	// Upgrade current hit to kill if active
@@ -194,6 +221,9 @@ FLinearColor UHitMarkerComponent::GetHitMarkerColor() const
 	case EHitMarkerType::Headshot:
 		return Settings.HeadshotColor;
 
+	case EHitMarkerType::Ionized:
+		return Settings.IonizedHitColor;
+
 	case EHitMarkerType::Normal:
 	default:
 		return Settings.NormalHitColor;
@@ -242,6 +272,11 @@ void UHitMarkerComponent::PlayHitSound(EHitMarkerType HitType)
 
 	case EHitMarkerType::Headshot:
 		SoundToPlay = Settings.HeadshotSound ? Settings.HeadshotSound : Settings.HitSound;
+		break;
+
+	case EHitMarkerType::Ionized:
+		SoundToPlay = Settings.IonizedHitSound;
+		Volume = Settings.IonizedHitSoundVolume;
 		break;
 
 	case EHitMarkerType::Normal:
@@ -327,6 +362,11 @@ void UHitMarkerComponent::ApplyCameraEffects(EHitMarkerType HitType)
 
 	case EHitMarkerType::Headshot:
 		PunchIntensity = Settings.HitCameraPunch * 1.5f;
+		break;
+
+	case EHitMarkerType::Ionized:
+		// Confirmation only: charge transfer deals no damage and should not punch the camera.
+		PunchIntensity = 0.0f;
 		break;
 
 	case EHitMarkerType::Normal:

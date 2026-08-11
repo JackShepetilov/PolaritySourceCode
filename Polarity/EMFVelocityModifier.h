@@ -259,6 +259,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "EMF|Capture")
 	bool IsCapturedByPlate() const { return CapturingPlate.IsValid(); }
 
+	/** True while reverse capture is actively propelling the captured NPC away from the player. */
+	bool IsReverseLaunchInProgress() const { return bReverseLaunchInitialized; }
+
 	/** Detach from plate without exiting captured state (for plate swap during reverse channeling) */
 	void DetachFromPlate();
 

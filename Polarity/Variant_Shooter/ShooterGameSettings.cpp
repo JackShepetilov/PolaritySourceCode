@@ -425,7 +425,7 @@ void UShooterGameSettings::InitializeDefaultKeyBindings()
 	CustomKeyBindings.Add(FKeyBindingEntry(FName("IA_Melee"), EKeys::V));
 
 	// Abilities
-	CustomKeyBindings.Add(FKeyBindingEntry(FName("IA_Dash"), EKeys::LeftShift));
+	CustomKeyBindings.Add(FKeyBindingEntry(FName("IA_Dash"), EKeys::LeftAlt));
 	CustomKeyBindings.Add(FKeyBindingEntry(FName("IA_SwitchPolarity"), EKeys::Q));
 
 	// Weapons

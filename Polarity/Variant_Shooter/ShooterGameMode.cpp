@@ -6,6 +6,7 @@
 #include "ShooterCharacter.h"
 #include "RunSubsystem.h"
 #include "RunLaunchPoint.h"
+#include "Run/Generation/BiomeRunAssembler.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "Blueprint/UserWidget.h"
@@ -51,13 +52,27 @@ void AShooterGameMode::BeginPlay()
 void AShooterGameMode::EnsureLoadingCover()
 {
 	// Cover the screen so the player never sees the black/unstreamed frames.
-	if (LoadingCoverWidget || !LoadingCoverClass)
+	if (LoadingCoverWidget)
 	{
 		return;
 	}
+
+	TSubclassOf<UUserWidget> CoverClass = LoadingCoverClass;
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>())
+		{
+			if (TSubclassOf<UUserWidget> RequestedClass = Run->GetRunLoadingScreenClass())
+			{
+				CoverClass = RequestedClass;
+			}
+		}
+	}
+	if (!CoverClass) return;
+
 	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
 	{
-		LoadingCoverWidget = CreateWidget<UUserWidget>(PC, LoadingCoverClass);
+		LoadingCoverWidget = CreateWidget<UUserWidget>(PC, CoverClass);
 		if (LoadingCoverWidget)
 		{
 			// Very high Z-order so it sits above the HUD and everything else.
@@ -73,6 +88,8 @@ void AShooterGameMode::TryInitRunGate()
 		return;
 	}
 
+	BiomeRunAssembler = Cast<ABiomeRunAssembler>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), ABiomeRunAssembler::StaticClass()));
 	RunMarker = Cast<ARunLaunchPoint>(UGameplayStatics::GetActorOfClass(GetWorld(), ARunLaunchPoint::StaticClass()));
 	if (!RunMarker)
 	{
@@ -156,6 +173,23 @@ void AShooterGameMode::HandleWorldReady()
 			FTimerDelegate::CreateUObject(this, &AShooterGameMode::HandleWorldReady));
 		return;
 	}
+
+	// Semi-procedural maps add their selected arena sublevels during BeginPlay. Wait until those
+	// levels, Landscape Grass exclusions and the one-time nav build are all ready as well.
+	if (BiomeRunAssembler)
+	{
+		if (BiomeRunAssembler->HasAssemblyFailed())
+		{
+			UE_LOG(LogTemp, Error, TEXT("[RUN_DEBUG] Biome assembly failed; keeping loading cover visible"));
+			return;
+		}
+		if (!BiomeRunAssembler->IsAssemblyReady())
+		{
+			GetWorldTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateUObject(this, &AShooterGameMode::HandleWorldReady));
+			return;
+		}
+	}
 	bRunStartTriggered = true;
 
 	// The first rendered frame is NOT "the black screen is gone": in standalone/packaged the engine
@@ -196,6 +230,20 @@ void AShooterGameMode::PerformRunLaunch()
 	Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), UprightRot,
 		false, nullptr, ETeleportType::TeleportPhysics);
 	Character->BeginRunLaunch(RunMarker->GetLaunchVelocity());
+	GetWorldTimerManager().SetTimerForNextTick(
+		FTimerDelegate::CreateUObject(this, &AShooterGameMode::DismissRunTransitionScreenAfterLaunch));
+}
+
+void AShooterGameMode::DismissRunTransitionScreenAfterLaunch()
+{
+	DismissLoadingCover();
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>())
+		{
+			Run->DismissRunLoadingScreen();
+		}
+	}
 }
 
 void AShooterGameMode::DismissLoadingCover()

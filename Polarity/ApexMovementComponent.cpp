@@ -94,7 +94,23 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 	if (AirDashCooldownRemaining > 0.0f)
 	{
+		const float PreviousCooldown = AirDashCooldownRemaining;
 		AirDashCooldownRemaining -= DeltaTime;
+		if (PreviousCooldown > 0.0f && AirDashCooldownRemaining <= 0.0f)
+		{
+			AirDashCooldownRemaining = 0.0f;
+			OnDashStateChanged.Broadcast();
+		}
+	}
+	if (GroundDashCooldownRemaining > 0.0f)
+	{
+		const float PreviousCooldown = GroundDashCooldownRemaining;
+		GroundDashCooldownRemaining -= DeltaTime;
+		if (PreviousCooldown > 0.0f && GroundDashCooldownRemaining <= 0.0f)
+		{
+			GroundDashCooldownRemaining = 0.0f;
+			OnDashStateChanged.Broadcast();
+		}
 	}
 	if (WallRunSameWallCooldown > 0.0f)
 	{
@@ -127,6 +143,10 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	else if (bIsWallRunning)
 	{
 		UpdateWallRun(DeltaTime);
+	}
+	else if (bIsGroundDashing)
+	{
+		UpdateGroundDash(DeltaTime);
 	}
 	else if (bIsAirDashing)
 	{
@@ -232,6 +252,13 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// A blocking hit can zero the velocity during the parent movement tick. End the dash instead
+	// of restoring its full speed into the obstacle on the next frame.
+	if (bIsGroundDashing && (!IsMovingOnGround() || Velocity.Size2D() < GroundDashSpeed * 0.35f))
+	{
+		EndGroundDash();
+	}
+
 	// POST-TICK: Slide deceleration AFTER physics
 	if (bIsSliding)
 	{
@@ -290,7 +317,11 @@ float UApexMovementComponent::GetMaxSpeed() const
 
 	float BaseSpeed;
 
-	if (bIsSliding || bIsWallRunning)
+	if (bIsGroundDashing)
+	{
+		BaseSpeed = GroundDashSpeed;
+	}
+	else if (bIsSliding || bIsWallRunning)
 	{
 		BaseSpeed = MovementSettings->SpeedCap;
 	}
@@ -349,10 +380,25 @@ void UApexMovementComponent::ClearExternalSlideSpeedBurstOverride()
 	ExternalSlideMaxSpeedBurst = 0.0f;
 }
 
+float UApexMovementComponent::GetGroundDashCooldownDuration() const
+{
+	return MovementSettings ? MovementSettings->GroundDashCooldown : 0.0f;
+}
+
+float UApexMovementComponent::GetAirDashCooldownDuration() const
+{
+	return MovementSettings ? MovementSettings->AirDashCooldown : 0.0f;
+}
+
+int32 UApexMovementComponent::GetMaxAirDashCount() const
+{
+	return MovementSettings ? MovementSettings->MaxAirDashCount : 0;
+}
+
 float UApexMovementComponent::GetMaxAcceleration() const
 {
-	// No player acceleration during slide or wallrun - momentum only
-	if (bIsSliding || bIsWallRunning)
+	// No player acceleration during slide, wallrun, or an active ground dash - momentum only.
+	if (bIsSliding || bIsWallRunning || bIsGroundDashing)
 	{
 		return 0.0f;
 	}
@@ -364,6 +410,18 @@ float UApexMovementComponent::GetMaxAcceleration() const
 
 	// Air acceleration = 0 for native UE5 (all air movement handled by ApplyAirStrafe pre-tick)
 	return IsFalling() ? 0.0f : MovementSettings->GroundAcceleration;
+}
+
+float UApexMovementComponent::GetMaxBrakingDeceleration() const
+{
+	// Keep the dash's authored speed for its short active window. Collision is still fully handled
+	// by CharacterMovement; we only suppress friction/braking while the dash is active.
+	if (bIsGroundDashing)
+	{
+		return 0.0f;
+	}
+
+	return Super::GetMaxBrakingDeceleration();
 }
 
 void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainingTime, int32 Iterations)
@@ -563,8 +621,7 @@ void UApexMovementComponent::TryCrouchSlide()
 		// Start tracking hold time for air crouch
 		AirCrouchHoldTime = 0.0f;
 
-		// Short tap = air dash (if available) - handled in StopCrouchSlide
-		// Hold = crouch in air (handled in TickComponent)
+		// Hold = crouch in air (handled in TickComponent). Air Dash has its own dedicated input.
 		return;
 	}
 
@@ -580,17 +637,6 @@ void UApexMovementComponent::TryCrouchSlide()
 
 void UApexMovementComponent::StopCrouchSlide()
 {
-	// Check if this was a quick tap (released before threshold)
-	bool bWasQuickTap = false;
-	if (IsFalling() && !bIsWallRunning && !bIsCrouchedInAir && MovementSettings)
-	{
-		// If released before becoming crouched in air, it's a quick tap
-		if (AirCrouchHoldTime < MovementSettings->AirCrouchHoldThreshold)
-		{
-			bWasQuickTap = true;
-		}
-	}
-
 	bWantsSlideOnLand = false;
 	AirCrouchHoldTime = 0.0f;
 
@@ -608,11 +654,6 @@ void UApexMovementComponent::StopCrouchSlide()
 
 	StopCrouching();
 
-	// If it was a quick tap in air, perform air dash
-	if (bWasQuickTap && CanAirDash())
-	{
-		TryAirDash();
-	}
 }
 
 // ==================== Slide ====================
@@ -1166,6 +1207,11 @@ bool UApexMovementComponent::IsValidWallRunSurface(const FHitResult& Hit) const
 		return false;
 	}
 
+	if (Hit.GetActor() && (Hit.GetActor()->ActorHasTag(FName("SportsBall")) || Hit.GetActor()->ActorHasTag(FName("BasketballBall"))))
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -1694,6 +1740,11 @@ void UApexMovementComponent::CheckForWallBounce()
 		return;
 	}
 
+	if (Hit.GetActor() && (Hit.GetActor()->ActorHasTag(FName("SportsBall")) || Hit.GetActor()->ActorHasTag(FName("BasketballBall"))))
+	{
+		return;
+	}
+
 	// Check if wall is vertical enough
 	if (FMath::Abs(Hit.Normal.Z) > 0.3f)
 	{
@@ -2044,11 +2095,90 @@ void UApexMovementComponent::UpdateJumpHold(float DeltaTime)
 	}
 }
 
+// ==================== Dash ====================
+
+bool UApexMovementComponent::CanGroundDash() const
+{
+	if (!MovementSettings || !CharacterOwner || !IsMovingOnGround() || bIsGroundDashing
+		|| bIsSliding || bIsMantling || bIsWallRunning || IsCrouching() || bRunLaunchActive)
+	{
+		return false;
+	}
+
+	return GroundDashCooldownRemaining <= 0.0f;
+}
+
+bool UApexMovementComponent::TryGroundDash()
+{
+	if (!CanGroundDash())
+	{
+		return false;
+	}
+
+	FVector DashDirection = GetLastInputVector().GetSafeNormal2D();
+	if (DashDirection.IsNearlyZero())
+	{
+		DashDirection = CharacterOwner->GetActorForwardVector().GetSafeNormal2D();
+	}
+	if (DashDirection.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const float CurrentHorizontalSpeed = Velocity.Size2D();
+	GroundDashDirection = DashDirection;
+	GroundDashSpeed = FMath::Max(CurrentHorizontalSpeed, MovementSettings->GroundDashSpeed);
+	GroundDashTimeRemaining = MovementSettings->GroundDashDuration;
+	GroundDashCooldownRemaining = MovementSettings->GroundDashCooldown;
+	bIsGroundDashing = true;
+
+	Velocity.X = GroundDashDirection.X * GroundDashSpeed;
+	Velocity.Y = GroundDashDirection.Y * GroundDashSpeed;
+
+	OnGroundDashStarted.Broadcast();
+	OnDashStateChanged.Broadcast();
+	return true;
+}
+
+void UApexMovementComponent::UpdateGroundDash(float DeltaTime)
+{
+	if (!IsMovingOnGround() || GroundDashDirection.IsNearlyZero())
+	{
+		EndGroundDash();
+		return;
+	}
+
+	GroundDashTimeRemaining -= DeltaTime;
+	if (GroundDashTimeRemaining <= 0.0f)
+	{
+		EndGroundDash();
+		return;
+	}
+
+	Velocity.X = GroundDashDirection.X * GroundDashSpeed;
+	Velocity.Y = GroundDashDirection.Y * GroundDashSpeed;
+}
+
+void UApexMovementComponent::EndGroundDash()
+{
+	if (!bIsGroundDashing)
+	{
+		return;
+	}
+
+	bIsGroundDashing = false;
+	GroundDashTimeRemaining = 0.0f;
+	GroundDashDirection = FVector::ZeroVector;
+	GroundDashSpeed = 0.0f;
+	OnGroundDashEnded.Broadcast();
+	OnDashStateChanged.Broadcast();
+}
+
 // ==================== Air Dash ====================
 
 bool UApexMovementComponent::CanAirDash() const
 {
-	if (!MovementSettings || !IsFalling() || bIsAirDashing || bIsMantling || bIsWallRunning)
+	if (!MovementSettings || !IsFalling() || bIsAirDashing || bIsGroundDashing || bIsMantling || bIsWallRunning)
 	{
 		return false;
 	}
@@ -2069,11 +2199,11 @@ bool UApexMovementComponent::CanAirDash() const
 	return RemainingAirDashCount > 0;
 }
 
-void UApexMovementComponent::TryAirDash()
+bool UApexMovementComponent::TryAirDash()
 {
 	if (!CanAirDash() || !CharacterOwner || !MovementSettings)
 	{
-		return;
+		return false;
 	}
 
 	RemainingAirDashCount--;
@@ -2127,6 +2257,8 @@ void UApexMovementComponent::TryAirDash()
 
 	// Broadcast air dash started event
 	OnAirDashStarted.Broadcast();
+	OnDashStateChanged.Broadcast();
+	return true;
 }
 
 void UApexMovementComponent::UpdateAirDash(float DeltaTime)
@@ -2140,6 +2272,7 @@ void UApexMovementComponent::UpdateAirDash(float DeltaTime)
 
 	// Broadcast air dash ended event
 	OnAirDashEnded.Broadcast();
+	OnDashStateChanged.Broadcast();
 }
 
 void UApexMovementComponent::UpdateAirDashDecay(float DeltaTime)
@@ -2217,6 +2350,7 @@ void UApexMovementComponent::UpdateAirDashRedirect(float DeltaTime)
 
 		// Start decay timer after redirect completes
 		AirDashDecayTimeRemaining = MovementSettings->AirDashDecayDuration;
+		OnDashStateChanged.Broadcast();
 		return;
 	}
 
@@ -2241,6 +2375,7 @@ void UApexMovementComponent::ResetAirAbilities()
 	bIsAirDashing = false;
 	bIsRedirecting = false;
 	AirDashRedirectTimeRemaining = 0.0f;
+	OnDashStateChanged.Broadcast();
 }
 
 // ==================== EMF ====================
@@ -2275,6 +2410,8 @@ void UApexMovementComponent::UpdateMovementState()
 		NewState = EPolarityMovementState::Mantling;
 	else if (bIsWallRunning)
 		NewState = EPolarityMovementState::WallRunning;
+	else if (bIsGroundDashing)
+		NewState = EPolarityMovementState::GroundDashing;
 	else if (bIsSliding)
 		NewState = EPolarityMovementState::Sliding;
 	else if (IsFalling())
@@ -2384,6 +2521,8 @@ void UApexMovementComponent::ResetMovementState()
 	SlideBoostCooldownRemaining = 0.0f;
 	WallRunSameWallCooldown = 0.0f;
 	AirDashCooldownRemaining = 0.0f;
+	GroundDashCooldownRemaining = 0.0f;
+	EndGroundDash();
 
 	// Reset fatigue
 	SlideFatigueCounter = 0;

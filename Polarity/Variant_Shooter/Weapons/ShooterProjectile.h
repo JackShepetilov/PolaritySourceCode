@@ -191,6 +191,9 @@ protected:
 	/** Calculates owner-specific rocket jump multiplier from ground/air/crouch state */
 	float GetOwnerRocketJumpMultiplier(const ACharacter* HitCharacter) const;
 
+	/** Additional damage multiplier for projectile subclasses. Base projectile has no extra scaling. */
+	virtual float GetProjectileDamageMultiplier(AActor* Target) const;
+
 	/** Calculate damage multiplier based on target's tags */
 	float GetTagDamageMultiplier(AActor* Target) const;
 

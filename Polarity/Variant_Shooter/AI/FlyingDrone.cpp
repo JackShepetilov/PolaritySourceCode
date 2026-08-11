@@ -32,6 +32,28 @@
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
 #include "ShooterCharacter.h"
+#include "Polarity/Upgrades/UpgradeManagerComponent.h"
+
+namespace
+{
+	AShooterCharacter* ResolveShooterCharacterFromFlyingDroneDamageCauser(AActor* DamageCauser)
+	{
+		for (AActor* Candidate = DamageCauser; Candidate; Candidate = Candidate->GetOwner())
+		{
+			if (AShooterCharacter* Character = Cast<AShooterCharacter>(Candidate))
+			{
+				return Character;
+			}
+
+			if (AShooterCharacter* InstigatorCharacter = Cast<AShooterCharacter>(Candidate->GetInstigator()))
+			{
+				return InstigatorCharacter;
+			}
+		}
+
+		return nullptr;
+	}
+}
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -367,6 +389,14 @@ void AFlyingDrone::DroneDie()
 					if (!FMath::IsNearlyZero(CachedNPCCharge))
 					{
 						DroppedRanged->SetCharge(CachedNPCCharge);
+					}
+
+					if (AShooterCharacter* KillerCharacter = ResolveShooterCharacterFromFlyingDroneDamageCauser(LastKillingDamageCauser))
+					{
+						if (UUpgradeManagerComponent* UpgradeMgr = KillerCharacter->GetUpgradeManager())
+						{
+							UpgradeMgr->NotifyEnemyDroppedRangedWeapon(DroppedRanged, this);
+						}
 					}
 
 					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: Ranged drop SUCCESS - %s spawned, charge=%.2f"),

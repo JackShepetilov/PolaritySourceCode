@@ -16,6 +16,8 @@
 #include "Engine/World.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
 
 void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 {
@@ -25,6 +27,15 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	}
 
 	if (IsTargetDead())
+	{
+		SetVisibility(ESlateVisibility::Hidden);
+		bWasVisibleLastFrame = false;
+		return;
+	}
+
+	// Props carry no shield until the player actually puts charge into them — an untouched
+	// prop is scenery, so it shows nothing at all.
+	if (bHidePropsUntilFirstCharge && BoundProp.IsValid() && !bPropHasBeenCharged)
 	{
 		SetVisibility(ESlateVisibility::Hidden);
 		bWasVisibleLastFrame = false;
@@ -112,18 +123,44 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 		ScreenPosition.X >= -200.0f && ScreenPosition.X <= ViewportSizeX + 200.0f &&
 		ScreenPosition.Y >= -200.0f && ScreenPosition.Y <= ViewportSizeY + 200.0f;
 
-	if (bValidPosition)
-	{
-		SetAlignmentInViewport(FVector2D(0.5f, 0.5f));
-		SetPositionInViewport(ScreenPosition, true);
-		SetVisibility(ESlateVisibility::HitTestInvisible);
-		bWasVisibleLastFrame = true;
-	}
-	else
+	if (!bValidPosition)
 	{
 		SetVisibility(ESlateVisibility::Hidden);
 		bWasVisibleLastFrame = false;
+		return;
 	}
+
+	// Screen-centre focus: only targets the player is actually looking at get an indicator.
+	// Measured in screen space (not as a world cone) so the gate stays constant regardless of
+	// distance, and normalised by viewport height so it is resolution- and aspect-independent.
+	if (bRequireScreenCenterFocus)
+	{
+		const FVector2D ViewportCenter(ViewportSizeX * 0.5f, ViewportSizeY * 0.5f);
+		const float RefSize = FMath::Max(static_cast<float>(ViewportSizeY), 1.0f);
+		const float NormalizedDist = FVector2D::Distance(ScreenPosition, ViewportCenter) / RefSize;
+
+		const float Outer = FMath::Max(ScreenCenterOuterRadius, ScreenCenterInnerRadius);
+		const float FadeBand = FMath::Max(Outer - ScreenCenterInnerRadius, KINDA_SMALL_NUMBER);
+		const float FocusAlpha = 1.0f - FMath::Clamp((NormalizedDist - ScreenCenterInnerRadius) / FadeBand, 0.0f, 1.0f);
+
+		if (FocusAlpha <= KINDA_SMALL_NUMBER)
+		{
+			SetVisibility(ESlateVisibility::Hidden);
+			bWasVisibleLastFrame = false;
+			return;
+		}
+
+		SetRenderOpacity(FocusAlpha);
+	}
+	else
+	{
+		SetRenderOpacity(1.0f);
+	}
+
+	SetAlignmentInViewport(FVector2D(0.5f, 0.5f));
+	SetPositionInViewport(ScreenPosition, true);
+	SetVisibility(ESlateVisibility::HitTestInvisible);
+	bWasVisibleLastFrame = true;
 }
 
 EChargeWidgetCategory UEMFChargeWidget::GetCategory() const
@@ -175,6 +212,7 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 		NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
 	}
 
+	UpdateShieldState(false);
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 	BP_OnHealthChanged(InNPC->CurrentHP, CachedMaxHP, 1.0f);
@@ -192,6 +230,10 @@ void UEMFChargeWidget::BindToProp(AEMFPhysicsProp* InProp, float InVerticalOffse
 	VerticalOffset = InVerticalOffset;
 	bIsActive = true;
 
+	// A level-placed prop may already carry an authored charge; that does not count as the
+	// player having charged it, so the indicator stays hidden until OnChargeChanged fires.
+	bPropHasBeenCharged = false;
+
 	// Bind to charge changed delegate
 	InProp->OnChargeChanged.AddDynamic(this, &UEMFChargeWidget::OnPropChargeUpdated);
 
@@ -206,6 +248,7 @@ void UEMFChargeWidget::BindToProp(AEMFPhysicsProp* InProp, float InVerticalOffse
 	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
 	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
 
+	UpdateShieldState(false);
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
@@ -232,6 +275,7 @@ void UEMFChargeWidget::BindToDroppedWeapon(ADroppedMeleeWeapon* InWeapon, float 
 	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
 	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
 
+	UpdateShieldState(false);
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
@@ -260,6 +304,7 @@ void UEMFChargeWidget::BindToDroppedRangedWeapon(ADroppedRangedWeapon* InWeapon,
 	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
 	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
 
+	UpdateShieldState(false);
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
@@ -288,6 +333,7 @@ void UEMFChargeWidget::BindToRiotShieldPickup(ARiotShieldPickup* InPickup, float
 	CurrentPolarity = (FMath::IsNearlyZero(Charge, 0.1f)) ? 0 : (Charge > 0.0f ? 1 : 2);
 	NormalizedCharge = (CachedMaxCharge > 0.0f) ? FMath::Clamp(AbsCharge / CachedMaxCharge, 0.0f, 1.0f) : 0.0f;
 
+	UpdateShieldState(false);
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
 }
@@ -326,6 +372,14 @@ void UEMFChargeWidget::ResetWidget()
 	CachedMaxCharge = 50.0f;
 	CachedMaxHP = 100.0f;
 	EffectiveMinScaleDistance = MinScaleDistance;
+
+	// Pooled widgets must not inherit the previous target's shield/focus state.
+	ShieldRemaining = 1.0f;
+	ShieldDisplayValue = ShieldMaterialMaxValue;
+	bShieldBroken = false;
+	bPropHasBeenCharged = false;
+	SetRenderOpacity(1.0f);
+
 	BP_OnWidgetReset();
 }
 
@@ -450,7 +504,68 @@ void UEMFChargeWidget::HandleChargeUpdate(float InChargeValue, uint8 InPolarity)
 	CurrentCharge = AbsCharge;
 	CurrentPolarity = InPolarity;
 
+	// First charge a prop receives at runtime is what reveals its indicator.
+	if (BoundProp.IsValid() && AbsCharge > PropFirstChargeThreshold)
+	{
+		bPropHasBeenCharged = true;
+	}
+
+	// Shield state first: BP_OnChargeUpdated handlers read ShieldDisplayValue, so it has to be
+	// current by the time that event fires.
+	UpdateShieldState(true);
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
+}
+
+void UEMFChargeWidget::UpdateShieldState(bool bAllowBreakEffects)
+{
+	ShieldRemaining = FMath::Clamp(1.0f - NormalizedCharge, 0.0f, 1.0f);
+	ShieldDisplayValue = ShieldRemaining * ShieldMaterialMaxValue;
+
+	const bool bNowBroken = (ShieldRemaining <= ShieldBrokenThreshold);
+	const bool bTransitioned = (bNowBroken != bShieldBroken);
+	bShieldBroken = bNowBroken;
+
+	BP_OnShieldUpdated(ShieldRemaining, ShieldDisplayValue, CurrentPolarity, bShieldBroken);
+
+	if (!bTransitioned)
+	{
+		return;
+	}
+
+	if (bNowBroken)
+	{
+		if (bAllowBreakEffects)
+		{
+			PlayShieldBreakSound();
+		}
+		BP_OnShieldBroken();
+	}
+	else
+	{
+		BP_OnShieldRestored();
+	}
+}
+
+void UEMFChargeWidget::PlayShieldBreakSound() const
+{
+	if (!ShieldBreakSound)
+	{
+		return;
+	}
+
+	const AActor* Target = GetBoundActor();
+	if (!Target)
+	{
+		return;
+	}
+
+	UWorld* World = Target->GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	UGameplayStatics::PlaySoundAtLocation(World, ShieldBreakSound, Target->GetActorLocation(), ShieldBreakSoundVolume);
 }
 
 void UEMFChargeWidget::OnNPCStunStart(AShooterNPC* StunnedNPC, float Duration)

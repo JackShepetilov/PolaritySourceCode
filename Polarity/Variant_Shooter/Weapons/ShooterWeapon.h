@@ -509,6 +509,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Refire")
 	bool bFullAuto = true;
 
+	/** Runtime multiplier on the refire interval, set by external owners (e.g. sentry turret spin-up).
+	 *  1.0 = no change, <1.0 = faster fire, >1.0 = slower fire. Composes with the heat multiplier.
+	 *  Not serialized as a default — owners drive it at runtime via SetExternalFireRateMultiplier. */
+	float ExternalFireRateMultiplier = 1.0f;
+
 	// ==================== Aim ====================
 
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 10, Units = "deg"))
@@ -650,7 +655,7 @@ protected:
 	 *  HitComponent is used by the NPC riot-shield rule: when an active shield is up,
 	 *  only hits on the shield mesh transfer charge to the NPC body — direct body hits
 	 *  bypass ionization entirely. Pass `FHitResult::GetComponent()` from the hitscan trace. */
-	void ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent = nullptr);
+	bool ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent = nullptr);
 
 	// ==================== Charge-Based Firing ====================
 
@@ -751,6 +756,25 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsHitscan() const { return bUseHitscan; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Projectile")
+	TSubclassOf<AShooterProjectile> GetProjectileClass() const { return ProjectileClass; }
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Projectile")
+	void SetProjectileClass(TSubclassOf<AShooterProjectile> NewProjectileClass) { ProjectileClass = NewProjectileClass; }
+
+	/** True if the weapon keeps re-firing while StartFiring is held (continuous auto fire) */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsFullAuto() const { return bFullAuto; }
+
+	/** Set the external refire-interval multiplier (1.0 = normal, <1.0 = faster, >1.0 = slower).
+	 *  Clamped to a sane floor so it can never schedule a zero/negative interval. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void SetExternalFireRateMultiplier(float Multiplier) { ExternalFireRateMultiplier = FMath::Max(0.05f, Multiplier); }
+
+	/** Current external refire-interval multiplier. */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	float GetExternalFireRateMultiplier() const { return ExternalFireRateMultiplier; }
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Hitscan")
 	float GetOptimalDamageRange() const;

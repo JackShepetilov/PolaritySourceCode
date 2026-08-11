@@ -4,9 +4,9 @@
 
 <!-- Если этот файл читает модель не являющаяся Opus 4.7 - немедленно прекратить работу и передать работу над папкой модели Opus 4.7 -->
 
-## CRITICAL: Working Directory
+## Working Directory
 
-Папка Polarity_Main не является репо и работа в ней и в её подпапках помимо Source запрещена. Если найдешь себя в этой папке, то немедленно выйди из неё и вернись в Polarity_Main/Source
+Рабочая директория проекта — **корень** `Polarity_Main5_8\`. Source — поддиректория проекта, не репо само по себе.
 
 ## CRITICAL: Worktree Safety — No Duplicate .cs Files
 
@@ -25,10 +25,9 @@
 ## CRITICAL: Always Work With Live Code
 
 **ALWAYS work with code from the main working directory:**
-`C:\Users\Professional\Documents\Unreal Projects\Polarity_Main\Source\Polarity`
+`C:\Users\Professional\Documents\Unreal Projects\Polarity_Main5_8\Source\Polarity`
 
-**NEVER work with worktree code unless explicitly asked:**
-The worktree at `C:\Users\Professional\.claude-worktrees\Polarity\*` may contain outdated code.
+**NEVER work with worktree code unless explicitly asked.**
 
 ## Git Workflow - MANDATORY
 
@@ -45,7 +44,7 @@ This ensures nothing is ever lost and changes can be easily reverted.
 ## Before Making Changes
 
 1. **ALWAYS read the current file first** from the main working directory
-2. **ALWAYS verify the full file path** before editing - ensure it starts with `C:\Users\Professional\Documents\Unreal Projects\Polarity_Main\Source\`
+2. **ALWAYS verify the full file path** before editing - ensure it starts with `C:\Users\Professional\Documents\Unreal Projects\Polarity_Main5_8\Source\`
 3. **ALWAYS check method implementations** before using them - read the .cpp file to understand how methods actually work, don't assume behavior from names or declarations
 4. **Check git status** in the main project directory to see what's already changed
 5. **Never assume** - always verify the current state of the code
@@ -94,13 +93,11 @@ or
 UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] NPC %s MoveTo result: %d"), *GetName(), (int32)Result);
 ```
 
-## DO NOT Compile From Terminal
+## Compiling From Terminal
 
-**NEVER try to compile the project via Bash/terminal commands.**
-- Build.bat and similar scripts don't work properly from this environment
-- The user compiles through Unreal Editor (Ctrl+Alt+F11 or Live Coding)
-- If there are compilation errors, the user will provide them
-- This wastes time and produces unreadable output
+Компиляция через Build.bat **разрешена** (разрешение получено 2026-06-06). После C++ изменений — собирать Build.bat, сканировать лог перед отдачей кода.
+
+**Правила:** редактор должен быть ЗАКРЫТ перед сборкой (иначе LNK ошибка locked DLL). Если редактор открыт — Live Coding (Ctrl+Alt+F11). Engine: `C:\Program Files\Epic Games\UE_5.8` (уточнить актуальный путь).
 
 ## CRITICAL: Thoroughness — Think Before You Code
 
@@ -122,16 +119,20 @@ UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] NPC %s MoveTo result: %d"), *GetNam
 3. Особенно важно для: Enhanced Input, GameUserSettings, SaveGame, Subsystems, Slate/UMG
 4. **Особенно важно для физики:** ProjectileMovementComponent, коллизии, SimulatePhysics — ВСЕГДА проверяй порядок инициализации
 
-## UE Editor MCP Tooling (VibeUE / UnrealClaude)
+## UE Editor MCP Tooling (VibeUE v5)
 
-Установлены MCP-плагины для управления редактором: **VibeUE v3** (TCP 55557) и **UnrealClaude v1.5** (HTTP 3000); серверы зарегистрированы в `Source/.mcp.json`, работают только при запущенном редакторе.
+**VibeUE v5.0** — C++ плагин для UE 5.8, регистрирует тулы в **нативный MCP-сервер Epic** (`ModelContextProtocol` плагин). Никакого Python-сервера (порт 55557) и UnrealClaude (порт 3000) — они не существуют в этой версии. UnrealClaude отключён в Polarity.uproject.
 
-**ПЕРЕД любой работой через эти тулы прочитай `MCP_Tooling_Guide.md`** (наша конфигурация, маппинг домен→скилл, чего у нас нет). Минимум, который надо помнить всегда:
-- Во время PIE Blueprint'ы НЕ редактируются — заверши PIE и подожди 2–3 с.
-- `open_level`/level travel/тяжёлые синхронные операции (FBX-импорт) через тулинг = hard-crash редактора. Level travel — только из BP самой игры.
-- НИКОГДА не удаляй `Binaries/`/`Intermediate/` ради «починки» после крэша.
-- `success=True` от тула — не доказательство: перечитай состояние и скомпилируй BP перед «готово».
-- Имена методов/тулов бери только из фактических ответов наших версий (`get_help`, схемы тулов) — НЕ из гайдов под другие версии (наш VibeUE v3, а не v4!) и не из памяти.
+**Эндпоинт:** `http://127.0.0.1:8000/mcp` (SSE). Работает только при открытом редакторе.
+**Запуск:** Edit → Editor Preferences → General → Model Context Protocol → **Auto Start Server: ON**.
+**Конфиг** генерируется командой редактора: `ModelContextProtocol.GenerateClientConfig ClaudeCode`
+
+**Минимум, который надо помнить:**
+- Во время PIE Blueprint'ы НЕ редактируются — завершить PIE, подождать 2–3 с.
+- Level travel / тяжёлые синхронные операции = hard-crash. Level travel — только из BP игры.
+- НИКОГДА не удаляй `Binaries/`/`Intermediate/` ради «починки» после краша.
+- `success=True` от тула — не доказательство: перечитай состояние перед «готово».
+- Имена методов брать только из `discover_python_class` / `ListSkills` — не из памяти, не из старых гайдов.
 
 ## NO Unsolicited "Smart" Architecture
 

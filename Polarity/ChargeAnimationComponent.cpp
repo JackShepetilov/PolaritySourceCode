@@ -26,6 +26,7 @@
 #include "Variant_Shooter/Pickups/ScriptedPickup.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "Variant_Shooter/AI/HumanoidNPC.h"
+#include "Arena/BasketballBall.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/OverlapResult.h"
 #include "Curves/CurveFloat.h"
@@ -168,6 +169,11 @@ void UChargeAnimationComponent::OnChannelButtonPressed()
 		{
 			break;
 		}
+		if (HasCapturedBasketball())
+		{
+			StartBasketballThrowCharge();
+			break;
+		}
 		BeginLaunch();
 		break;
 
@@ -182,6 +188,10 @@ void UChargeAnimationComponent::OnChannelButtonReleased()
 	// Press-press mode: release is meaningless — capture and launch are press-only.
 	if (bUsePressPressCaptureMode)
 	{
+		if (bBasketballThrowCharging)
+		{
+			ReleaseBasketballThrowCharge();
+		}
 		return;
 	}
 
@@ -282,6 +292,28 @@ void UChargeAnimationComponent::UpdateState(float DeltaTime)
 	// Press-press lockout countdown happens here too (timer-only, no separate state).
 	if (CurrentState == EChargeAnimationState::Channeling)
 	{
+		// A captured NPC/prop can die without destroying the actor (death visuals and
+		// pooling keep it alive). End the player's capture immediately instead of
+		// leaving the plate, hold montage and input state active around a dead target.
+		AActor* CapturedTarget = CurrentCapturedNPC.Get();
+		bool bCapturedTargetDied = false;
+		if (const AShooterNPC* CapturedNPC = Cast<AShooterNPC>(CapturedTarget))
+		{
+			bCapturedTargetDied = CapturedNPC->IsDead();
+		}
+		else if (const AEMFPhysicsProp* CapturedProp = Cast<AEMFPhysicsProp>(CapturedTarget))
+		{
+			bCapturedTargetDied = CapturedProp->IsDead();
+		}
+		if (bCapturedTargetDied)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CAPTURE] Ending capture because target died: %s"), *GetNameSafe(CapturedTarget));
+			ReleaseCapturedNPC();
+			ExitChanneling();
+			EnterFinishingAnimation();
+			return;
+		}
+
 		if (CachedEMFModifier && ChannelingChargeCostPerSecond > 0.0f)
 		{
 			CachedEMFModifier->DeductCharge(ChannelingChargeCostPerSecond * DeltaTime);
@@ -589,6 +621,11 @@ void UChargeAnimationComponent::ExitChanneling()
 		{
 			Prop->DetachFromPlate();
 		}
+		else if (ABasketballBall* Basketball = Cast<ABasketballBall>(CurrentCapturedNPC.Get()))
+		{
+			Basketball->ReleasedFromCapture();
+			CurrentCapturedNPC.Reset();
+		}
 		else if (ADroppedMeleeWeapon* DroppedWeapon = Cast<ADroppedMeleeWeapon>(CurrentCapturedNPC.Get()))
 		{
 			// DroppedMeleeWeapon pull is self-contained — let it finish on its own
@@ -633,6 +670,8 @@ void UChargeAnimationComponent::ExitChanneling()
 	{
 		CachedEMFModifier->SetChannelingProxyMode(false);
 	}
+
+	bBasketballThrowCharging = false;
 }
 
 void UChargeAnimationComponent::SpawnPlate(int32 ChargeSign)
@@ -757,6 +796,11 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	// scan to re-acquire). The plate transform is still updated by UpdatePlatePosition before this
 	// call, so the launch plate keeps following the camera.
 	if (CurrentState == EChargeAnimationState::ReverseChanneling)
+	{
+		return;
+	}
+
+	if (bUsePressPressCaptureMode && CurrentState == EChargeAnimationState::Channeling && HasCapturedBasketball())
 	{
 		return;
 	}
@@ -937,7 +981,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
+	enum class ECaptureTargetType { None, NPC, Prop, BasketballBall, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -1308,6 +1352,37 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		if (ABasketballBall* Basketball = Cast<ABasketballBall>(HitActor))
+		{
+			if (!Basketball->bCanBeCaptured || Basketball->IsCapturedByPlate())
+			{
+				continue;
+			}
+
+			const FVector ToTarget = Basketball->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float BasketballCaptureRange = FMath::Max(0.0f, Basketball->CaptureRange);
+			if (BasketballCaptureRange < 1.0f || DistSq > BasketballCaptureRange * BasketballCaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos && HasLineOfSight(Basketball))
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = Basketball;
+				BestTargetType = ECaptureTargetType::BasketballBall;
+			}
+			continue;
+		}
+
 		// Try Physics Prop
 		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
 		{
@@ -1350,6 +1425,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			break;
 		case ECaptureTargetType::Prop:
 			CaptureProp(Cast<AEMFPhysicsProp>(BestTarget));
+			break;
+		case ECaptureTargetType::BasketballBall:
+			CaptureBasketballBall(Cast<ABasketballBall>(BestTarget));
 			break;
 		case ECaptureTargetType::DroppedWeapon:
 			CaptureDroppedWeapon(Cast<ADroppedMeleeWeapon>(BestTarget));
@@ -1564,6 +1642,27 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	}
 }
 
+void UChargeAnimationComponent::CaptureBasketballBall(ABasketballBall* Ball)
+{
+	if (!Ball || !ChannelingPlateActor || !Ball->bCanBeCaptured)
+	{
+		return;
+	}
+
+	ReleaseCapturedNPC();
+
+	CurrentCapturedNPC = Ball;
+	ChannelingPlateActor->SetCapturedNPC(Ball);
+	Ball->SetCapturedByPlate(ChannelingPlateActor);
+
+	SpawnCaptureVFX(Ball);
+	SpawnHoldVFX();
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->OnPropCaptured.Broadcast(Ball);
+	}
+}
+
 void UChargeAnimationComponent::CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon)
 {
 	if (!Weapon)
@@ -1737,6 +1836,10 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	{
 		Prop->ReleasedFromCapture();
 	}
+	else if (ABasketballBall* Basketball = Cast<ABasketballBall>(CurrentCapturedNPC.Get()))
+	{
+		Basketball->ReleasedFromCapture();
+	}
 	else if (AEMFAcceleratorPlate* AccelPlate = Cast<AEMFAcceleratorPlate>(CurrentCapturedNPC.Get()))
 	{
 		AccelPlate->StopCapture();
@@ -1768,6 +1871,7 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	}
 
 	CurrentCapturedNPC.Reset();
+	bBasketballThrowCharging = false;
 }
 
 void UChargeAnimationComponent::PerformTapToggle()
@@ -1776,6 +1880,60 @@ void UChargeAnimationComponent::PerformTapToggle()
 	{
 		CachedEMFModifier->ToggleChargeSign();
 	}
+}
+
+bool UChargeAnimationComponent::HasCapturedBasketball() const
+{
+	return Cast<ABasketballBall>(CurrentCapturedNPC.Get()) != nullptr;
+}
+
+void UChargeAnimationComponent::StartBasketballThrowCharge()
+{
+	if (bBasketballThrowCharging || !HasCapturedBasketball())
+	{
+		return;
+	}
+
+	bBasketballThrowCharging = true;
+	BasketballThrowChargeStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+}
+
+void UChargeAnimationComponent::ReleaseBasketballThrowCharge()
+{
+	ABasketballBall* Basketball = Cast<ABasketballBall>(CurrentCapturedNPC.Get());
+	if (!Basketball)
+	{
+		bBasketballThrowCharging = false;
+		return;
+	}
+
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : BasketballThrowChargeStartTime;
+	const float HoldTime = FMath::Max(0.0f, Now - BasketballThrowChargeStartTime);
+
+	FVector CameraLoc = FVector::ZeroVector;
+	FRotator CameraRot = FRotator::ZeroRotator;
+	const bool bHasCamera = GetCameraViewPoint(CameraLoc, CameraRot);
+	const FVector AimDirection = bHasCamera ? CameraRot.Vector() : (Basketball->GetActorLocation() - CameraLoc).GetSafeNormal();
+
+	PlayThrowMontage();
+	SpawnLaunchVFX(Basketball);
+	StopHoldVFX();
+	if (ActiveCaptureVFX)
+	{
+		ActiveCaptureVFX->DeactivateImmediate();
+		ActiveCaptureVFX = nullptr;
+	}
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->OnPropLaunched.Broadcast(Basketball);
+	}
+
+	Basketball->LaunchBall(AimDirection, HoldTime, OwnerCharacter);
+	CurrentCapturedNPC.Reset();
+	bBasketballThrowCharging = false;
+
+	ExitChanneling();
+	EnterFinishingAnimation();
 }
 
 void UChargeAnimationComponent::BeginLaunch()

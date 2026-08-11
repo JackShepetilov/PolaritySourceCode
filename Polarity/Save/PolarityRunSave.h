@@ -36,6 +36,23 @@ public:
 	UPROPERTY()
 	TMap<FGameplayTag, int32> AcquiredUpgrades;
 
+	UPROPERTY()
+	TArray<int32> ClearedArenaIndices;
+
+
+	// ---- Deterministic biome assembly (additive-safe for v1 saves) ----
+	UPROPERTY()
+	int32 RunSeed = 0;
+
+	UPROPERTY()
+	FName AssembledBiomeId;
+
+	UPROPERTY()
+	FName AssembledLayoutId;
+
+	UPROPERTY()
+	TArray<FName> AssembledArenaIds;
+
 	// ---- FRunStats flattened ----
 	UPROPERTY()
 	int32 TotalXPEarned = 0;

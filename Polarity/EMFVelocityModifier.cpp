@@ -198,6 +198,7 @@ void UEMFVelocityModifier::SetEnabled(bool bNewEnabled)
 	{
 		CurrentEMForce = FVector::ZeroVector;
 		CurrentAcceleration = FVector::ZeroVector;
+		PendingImpulse = FVector::ZeroVector;
 	}
 }
 

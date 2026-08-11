@@ -56,6 +56,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAntennaCountChanged, int32, NewCo
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UUpgradeDefinition;
+class UBiomeRunRegistry;
+class UUserWidget;
+class UWorld;
+class UTexture2D;
 
 UCLASS()
 class POLARITY_API URunSubsystem : public UGameInstanceSubsystem
@@ -71,11 +75,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	void EndRun(ERunEndReason Reason);
 
+	UFUNCTION(BlueprintCallable, Category = "Run|Generation")
+	bool OpenNewRunFromBiome(UBiomeRunRegistry* BiomeRegistry,
+		TSubclassOf<UUserWidget> LoadingScreenClass = nullptr,
+		UTexture2D* LoadingSpinnerTexture = nullptr);
+
+	/** Stops the cross-map loading screen after the player has actually been launched. */
+	void DismissRunLoadingScreen();
+
+	/** The class selected by the menu; GameMode reuses it as the post-load UMG cover. */
+	TSubclassOf<UUserWidget> GetRunLoadingScreenClass() const { return RunLoadingScreenClass; }
+
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	void EnterArena(int32 ArenaIndex);
 
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	void ClearArena(int32 ArenaIndex);
+
+	UFUNCTION(BlueprintPure, Category = "Run")
+	bool IsArenaCleared(int32 ArenaIndex) const { return ClearedArenaIndices.Contains(ArenaIndex); }
+
+	const TSet<int32>& GetClearedArenaIndices() const { return ClearedArenaIndices; }
+
 
 	// ==================== State accessors ====================
 
@@ -90,6 +111,28 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Run")
 	bool IsRunActive() const { return RunState == ERunState::Active; }
+
+	// ==================== Deterministic biome assembly ====================
+
+	/** Returns the active run seed, creating one exactly once before a new run starts. */
+	UFUNCTION(BlueprintCallable, Category = "Run|Generation")
+	int32 GetOrCreateRunSeed();
+
+	UFUNCTION(BlueprintPure, Category = "Run|Generation")
+	int32 GetRunSeed() const { return RunSeed; }
+
+	/** Reuses exact arena IDs when resuming/reopening the same biome layout. */
+	bool GetSavedBiomeAssembly(FName BiomeId, FName LayoutId, TArray<FName>& OutArenaIds) const;
+
+	/** Records both the seed and resolved IDs; IDs protect saves from later registry reordering. */
+	void CommitBiomeAssembly(int32 InSeed, FName BiomeId, FName LayoutId, const TArray<FName>& ArenaIds);
+
+	void GetCurrentBiomeAssembly(FName& OutBiomeId, FName& OutLayoutId, TArray<FName>& OutArenaIds) const
+	{
+		OutBiomeId = AssembledBiomeId;
+		OutLayoutId = AssembledLayoutId;
+		OutArenaIds = AssembledArenaIds;
+	}
 
 	// ==================== Antennas (run-scoped objective progress) ====================
 
@@ -130,7 +173,8 @@ public:
 	/** Restore the whole run-tier state from a save (mid-run resume). Sets the protected fields
 	 *  directly, then fires OnAntennaCountChanged once so UI resyncs without N spurious increments. */
 	void RestoreFromSave(ERunState InState, int32 InArenaIndex, int32 InActivatedAntennas,
-		const TMap<FGameplayTag, int32>& InUpgrades, const FRunStats& InStats);
+		const TMap<FGameplayTag, int32>& InUpgrades, const FRunStats& InStats,
+		int32 InRunSeed, FName InBiomeId, FName InLayoutId, const TArray<FName>& InArenaIds, const TArray<int32>& InClearedArenaIndices);
 
 	// ==================== Events ====================
 
@@ -169,6 +213,10 @@ protected:
 	int32 CurrentArenaIndex = -1;
 
 	UPROPERTY(SaveGame)
+	TSet<int32> ClearedArenaIndices;
+
+
+	UPROPERTY(SaveGame)
 	FRunStats Stats;
 
 	/** Run-wide count of activated antennas. SaveGame so it survives a mid-run save/load. */
@@ -180,5 +228,36 @@ protected:
 	UPROPERTY(SaveGame)
 	TMap<FGameplayTag, int32> AcquiredUpgrades;
 
+	UPROPERTY(SaveGame)
+	int32 RunSeed = 0;
+
+	UPROPERTY(SaveGame)
+	FName AssembledBiomeId;
+
+	UPROPERTY(SaveGame)
+	FName AssembledLayoutId;
+
+	UPROPERTY(SaveGame)
+	TArray<FName> AssembledArenaIds;
+
+	/** Prevents two pre-StartRun maps/systems from generating different pending seeds. */
+	bool bGenerationPreparedForPendingRun = false;
+
 	double RunStartTimeSeconds = 0.0;
+
+	/** Keeps the UMG object alive while MoviePlayer holds its Slate widget across OpenLevel. */
+	UPROPERTY(Transient)
+	TObjectPtr<UUserWidget> RunLoadingScreenWidget;
+
+	/** Texture retained for the native Slate spinner while its menu widget is unloaded. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> RunLoadingSpinnerTexture;
+
+	TSubclassOf<UUserWidget> RunLoadingScreenClass;
+
+	/** Re-attaches the editor/PIE fallback immediately after blocking map travel. */
+	void HandlePostLoadMapForRunLoadingScreen(UWorld* LoadedWorld);
+
+	FDelegateHandle PostLoadMapLoadingScreenHandle;
+	bool bUsingViewportLoadingScreenFallback = false;
 };

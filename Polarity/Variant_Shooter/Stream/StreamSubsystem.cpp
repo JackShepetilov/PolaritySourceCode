@@ -10,6 +10,10 @@
 #include "ChatBroker.h"
 
 #include "Polarity/Arena/ArenaManager.h"
+#include "Polarity/ApexMovementComponent.h"
+#include "Polarity/EMFPhysicsProp.h"
+#include "Polarity/Variant_Shooter/Abilities/AbilityComponent.h"
+#include "Polarity/Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Variant_Shooter/Lore/LoreSubsystem.h"
 #include "Save/SaveGameSubsystem.h"
 #include "Save/PolarityMetaSave.h"
@@ -20,6 +24,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameplayTagContainer.h"
+#include "Kismet/GameplayStatics.h"
 #include "Stats/Stats.h"
 
 void UStreamSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -60,6 +65,8 @@ void UStreamSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UStreamSubsystem::Deinitialize()
 {
+	UnbindLearningTracking();
+
 	if (ChatBroker)
 	{
 		ChatBroker->Shutdown();
@@ -107,6 +114,15 @@ void UStreamSubsystem::Tick(float DeltaTime)
 	RecomputeViewerTarget(TimeIntoRun, LPS);
 	UpdateViewers(DeltaTime);
 	TickDonations(DeltaTime, LPS);
+
+	EnsureLearningTrackingBindings();
+	PropBindingRefreshAccumulator += DeltaTime;
+	if (PropBindingRefreshAccumulator >= 1.0f)
+	{
+		PropBindingRefreshAccumulator = 0.0f;
+		RefreshPropExplosionBindings();
+	}
+	TickLearningReminders();
 }
 
 TStatId UStreamSubsystem::GetStatId() const
@@ -215,6 +231,77 @@ bool UStreamSubsystem::SpendMetaCurrency(int64 Amount)
 	return true;
 }
 
+bool UStreamSubsystem::DebugTriggerLearningReminder(ELearningReminderType ReminderType)
+{
+	if (!bRunActive)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] Learning reminder blocked: no active run"));
+		return false;
+	}
+
+	const UStreamConfig* Cfg = Config.Get();
+	const int32 MaxPerType = Cfg ? FMath::Max(0, Cfg->LearningReminderMaxPerTypePerRun) : 2;
+	const float RepeatDelay = Cfg ? FMath::Max(5.0f, Cfg->LearningReminderRepeatDelaySec) : 120.0f;
+	int32* Count = nullptr;
+	float* NextTime = nullptr;
+
+	switch (ReminderType)
+	{
+	case ELearningReminderType::Dash:
+		Count = &DashReminderCount;
+		NextTime = &NextDashReminderTime;
+		break;
+	case ELearningReminderType::Ability:
+		Count = &AbilityReminderCount;
+		NextTime = &NextAbilityReminderTime;
+		break;
+	case ELearningReminderType::ChargedPropExplosion:
+		Count = &PropExplosionReminderCount;
+		NextTime = &NextPropExplosionReminderTime;
+		break;
+	default:
+		return false;
+	}
+
+	if (!Count || !NextTime || *Count >= MaxPerType)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] Learning reminder blocked by per-run limit (%d/%d)"),
+			Count ? *Count : 0, MaxPerType);
+		return false;
+	}
+
+	EmitLearningReminder(ReminderType);
+	++(*Count);
+	*NextTime = GetRunElapsedSeconds() + RepeatDelay;
+	return true;
+}
+
+void UStreamSubsystem::DebugResetLearningReminders()
+{
+	const float Now = GetRunElapsedSeconds();
+	DashReminderCount = 0;
+	AbilityReminderCount = 0;
+	PropExplosionReminderCount = 0;
+	NextDashReminderTime = Now + GetLearningReminderDelay(ELearningReminderType::Dash);
+	NextAbilityReminderTime = Now + GetLearningReminderDelay(ELearningReminderType::Ability);
+	NextPropExplosionReminderTime = Now + GetLearningReminderDelay(ELearningReminderType::ChargedPropExplosion);
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Learning reminder counters and timers reset"));
+}
+
+FString UStreamSubsystem::GetLearningReminderDebugStatus() const
+{
+	const UStreamConfig* Cfg = Config.Get();
+	const int32 MaxPerType = Cfg ? FMath::Max(0, Cfg->LearningReminderMaxPerTypePerRun) : 2;
+	const float Now = GetRunElapsedSeconds();
+	return FString::Printf(
+		TEXT("run=%s dash=%d/%d next=%.1fs ability=%d/%d available=%s next=%.1fs prop=%d/%d next=%.1fs"),
+		bRunActive ? TEXT("active") : TEXT("inactive"),
+		DashReminderCount, MaxPerType, FMath::Max(0.0f, NextDashReminderTime - Now),
+		AbilityReminderCount, MaxPerType, bAbilityReminderActive ? TEXT("yes") : TEXT("no"),
+		FMath::Max(0.0f, NextAbilityReminderTime - Now),
+		PropExplosionReminderCount, MaxPerType, FMath::Max(0.0f, NextPropExplosionReminderTime - Now));
+}
+
 // ==================== Run lifecycle handlers ====================
 
 void UStreamSubsystem::HandleRunStarted()
@@ -225,6 +312,17 @@ void UStreamSubsystem::HandleRunStarted()
 	ViewerTarget = 0;
 	DonationRollAccumulator = 0.0f;
 	bCurrentRunMilestoneReached = false;
+	PropBindingRefreshAccumulator = 1.0f;
+	bAbilityReminderActive = false;
+	NextDashReminderTime = GetLearningReminderDelay(ELearningReminderType::Dash);
+	NextAbilityReminderTime = GetLearningReminderDelay(ELearningReminderType::Ability);
+	NextPropExplosionReminderTime = GetLearningReminderDelay(ELearningReminderType::ChargedPropExplosion);
+	DashReminderCount = 0;
+	AbilityReminderCount = 0;
+	PropExplosionReminderCount = 0;
+
+	EnsureLearningTrackingBindings();
+	RefreshPropExplosionBindings();
 
 	if (UStyleComponent* Style = StyleComponent.Get())
 	{
@@ -244,6 +342,7 @@ void UStreamSubsystem::HandleRunStarted()
 void UStreamSubsystem::HandleRunEnded(ERunEndReason Reason)
 {
 	bRunActive = false;
+	UnbindLearningTracking();
 	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Run ended, reason=%d, final viewers=%d"), (int32)Reason, CurrentViewers);
 
 	if (ChatBroker)
@@ -300,6 +399,233 @@ void UStreamSubsystem::HandleArenaEntered(int32 ArenaIndex)
 			ChatBroker->BindArenaManager(FoundArena);
 		}
 	}
+
+	EnsureLearningTrackingBindings();
+	RefreshPropExplosionBindings();
+}
+
+// ==================== Learning reminders ====================
+
+float UStreamSubsystem::GetLearningReminderDelay(ELearningReminderType ReminderType) const
+{
+	if (const UStreamConfig* Cfg = Config.Get())
+	{
+		switch (ReminderType)
+		{
+		case ELearningReminderType::Dash:
+			return FMath::Max(5.0f, Cfg->DashReminderDelaySec);
+		case ELearningReminderType::Ability:
+			return FMath::Max(5.0f, Cfg->AbilityReminderDelaySec);
+		case ELearningReminderType::ChargedPropExplosion:
+			return FMath::Max(5.0f, Cfg->ChargedPropExplosionReminderDelaySec);
+		default:
+			break;
+		}
+	}
+
+	switch (ReminderType)
+	{
+	case ELearningReminderType::Dash: return 90.0f;
+	case ELearningReminderType::Ability: return 90.0f;
+	case ELearningReminderType::ChargedPropExplosion: return 120.0f;
+	default: return 120.0f;
+	}
+}
+
+void UStreamSubsystem::EnsureLearningTrackingBindings()
+{
+	if (!bRunActive)
+	{
+		return;
+	}
+
+	AShooterCharacter* CurrentCharacter = Cast<AShooterCharacter>(
+		UGameplayStatics::GetPlayerCharacter(GetGameInstance(), 0));
+	if (TrackedCharacter.Get() != CurrentCharacter)
+	{
+		if (UApexMovementComponent* OldMovement = TrackedMovement.Get())
+		{
+			OldMovement->OnGroundDashStarted.RemoveDynamic(this, &UStreamSubsystem::HandleDashUsed);
+			OldMovement->OnAirDashStarted.RemoveDynamic(this, &UStreamSubsystem::HandleDashUsed);
+		}
+		if (UAbilityComponent* OldAbility = TrackedAbility.Get())
+		{
+			OldAbility->OnAbilityAdded.RemoveDynamic(this, &UStreamSubsystem::HandleAbilityAdded);
+			OldAbility->OnAbilityActivated.RemoveDynamic(this, &UStreamSubsystem::HandleAbilityActivated);
+		}
+
+		TrackedCharacter = CurrentCharacter;
+		TrackedMovement = CurrentCharacter ? CurrentCharacter->GetApexMovement() : nullptr;
+		TrackedAbility = CurrentCharacter ? CurrentCharacter->GetAbilityComponent() : nullptr;
+
+		if (UApexMovementComponent* Movement = TrackedMovement.Get())
+		{
+			Movement->OnGroundDashStarted.AddUniqueDynamic(this, &UStreamSubsystem::HandleDashUsed);
+			Movement->OnAirDashStarted.AddUniqueDynamic(this, &UStreamSubsystem::HandleDashUsed);
+		}
+		if (UAbilityComponent* Ability = TrackedAbility.Get())
+		{
+			Ability->OnAbilityAdded.AddUniqueDynamic(this, &UStreamSubsystem::HandleAbilityAdded);
+			Ability->OnAbilityActivated.AddUniqueDynamic(this, &UStreamSubsystem::HandleAbilityActivated);
+		}
+	}
+
+	const bool bHasEquippedAbility = TrackedAbility.IsValid() && TrackedAbility->GetSlotCount() > 0;
+	if (bHasEquippedAbility && !bAbilityReminderActive)
+	{
+		NextAbilityReminderTime = GetRunElapsedSeconds() + GetLearningReminderDelay(ELearningReminderType::Ability);
+	}
+	bAbilityReminderActive = bHasEquippedAbility;
+}
+
+void UStreamSubsystem::UnbindLearningTracking()
+{
+	if (UApexMovementComponent* Movement = TrackedMovement.Get())
+	{
+		Movement->OnGroundDashStarted.RemoveDynamic(this, &UStreamSubsystem::HandleDashUsed);
+		Movement->OnAirDashStarted.RemoveDynamic(this, &UStreamSubsystem::HandleDashUsed);
+	}
+	if (UAbilityComponent* Ability = TrackedAbility.Get())
+	{
+		Ability->OnAbilityAdded.RemoveDynamic(this, &UStreamSubsystem::HandleAbilityAdded);
+		Ability->OnAbilityActivated.RemoveDynamic(this, &UStreamSubsystem::HandleAbilityActivated);
+	}
+	for (const TWeakObjectPtr<AEMFPhysicsProp>& PropPtr : TrackedExplosiveProps)
+	{
+		if (AEMFPhysicsProp* Prop = PropPtr.Get())
+		{
+			Prop->OnPropExploded.RemoveDynamic(this, &UStreamSubsystem::HandleChargedPropExploded);
+		}
+	}
+
+	TrackedCharacter.Reset();
+	TrackedMovement.Reset();
+	TrackedAbility.Reset();
+	TrackedExplosiveProps.Reset();
+	bAbilityReminderActive = false;
+}
+
+void UStreamSubsystem::RefreshPropExplosionBindings()
+{
+	UWorld* World = GetWorld();
+	if (!bRunActive || !World)
+	{
+		return;
+	}
+
+	TrackedExplosiveProps.RemoveAll([](const TWeakObjectPtr<AEMFPhysicsProp>& Prop)
+	{
+		return !Prop.IsValid();
+	});
+
+	for (TActorIterator<AEMFPhysicsProp> It(World); It; ++It)
+	{
+		AEMFPhysicsProp* Prop = *It;
+		if (!Prop || TrackedExplosiveProps.Contains(Prop))
+		{
+			continue;
+		}
+
+		Prop->OnPropExploded.AddUniqueDynamic(this, &UStreamSubsystem::HandleChargedPropExploded);
+		TrackedExplosiveProps.Add(Prop);
+	}
+}
+
+void UStreamSubsystem::HandleDashUsed()
+{
+	if (bRunActive)
+	{
+		NextDashReminderTime = GetRunElapsedSeconds() + GetLearningReminderDelay(ELearningReminderType::Dash);
+	}
+}
+
+void UStreamSubsystem::HandleAbilityAdded(int32 SlotIndex)
+{
+	if (bRunActive)
+	{
+		bAbilityReminderActive = true;
+		NextAbilityReminderTime = GetRunElapsedSeconds() + GetLearningReminderDelay(ELearningReminderType::Ability);
+	}
+}
+
+void UStreamSubsystem::HandleAbilityActivated(UAbilityDefinition* Definition)
+{
+	if (bRunActive)
+	{
+		NextAbilityReminderTime = GetRunElapsedSeconds() + GetLearningReminderDelay(ELearningReminderType::Ability);
+	}
+}
+
+void UStreamSubsystem::HandleChargedPropExploded(AEMFPhysicsProp* Prop, FVector Location, float DamageMultiplier)
+{
+	if (bRunActive)
+	{
+		NextPropExplosionReminderTime = GetRunElapsedSeconds()
+			+ GetLearningReminderDelay(ELearningReminderType::ChargedPropExplosion);
+	}
+}
+
+void UStreamSubsystem::TickLearningReminders()
+{
+	const UStreamConfig* Cfg = Config.Get();
+	if (!bRunActive || (Cfg && !Cfg->bEnableLearningReminders))
+	{
+		return;
+	}
+
+	const float Now = GetRunElapsedSeconds();
+	const float RepeatDelay = Cfg ? FMath::Max(5.0f, Cfg->LearningReminderRepeatDelaySec) : 120.0f;
+	const int32 MaxPerType = Cfg ? FMath::Max(0, Cfg->LearningReminderMaxPerTypePerRun) : 2;
+
+	if (DashReminderCount < MaxPerType && Now >= NextDashReminderTime)
+	{
+		EmitLearningReminder(ELearningReminderType::Dash);
+		++DashReminderCount;
+		NextDashReminderTime = Now + RepeatDelay;
+	}
+	if (bAbilityReminderActive && AbilityReminderCount < MaxPerType && Now >= NextAbilityReminderTime)
+	{
+		EmitLearningReminder(ELearningReminderType::Ability);
+		++AbilityReminderCount;
+		NextAbilityReminderTime = Now + RepeatDelay;
+	}
+	if (PropExplosionReminderCount < MaxPerType && Now >= NextPropExplosionReminderTime)
+	{
+		EmitLearningReminder(ELearningReminderType::ChargedPropExplosion);
+		++PropExplosionReminderCount;
+		NextPropExplosionReminderTime = Now + RepeatDelay;
+	}
+}
+
+void UStreamSubsystem::EmitLearningReminder(ELearningReminderType ReminderType)
+{
+	OnLearningReminderRequested.Broadcast(ReminderType);
+
+	FName EventTagName = NAME_None;
+	switch (ReminderType)
+	{
+	case ELearningReminderType::Dash:
+		EventTagName = TEXT("Chat.Event.DashReminder");
+		OnDashReminderRequested.Broadcast();
+		break;
+	case ELearningReminderType::Ability:
+		EventTagName = TEXT("Chat.Event.AbilityReminder");
+		OnAbilityReminderRequested.Broadcast();
+		break;
+	case ELearningReminderType::ChargedPropExplosion:
+		EventTagName = TEXT("Chat.Event.ChargedPropExplosionReminder");
+		break;
+	default:
+		return;
+	}
+
+	const FGameplayTag EventTag = FGameplayTag::RequestGameplayTag(EventTagName, false);
+	if (ChatBroker && EventTag.IsValid())
+	{
+		ChatBroker->EmitReaction(EventTag);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Learning reminder requested: %s"), *EventTagName.ToString());
 }
 
 // ==================== Tick helpers (skeletons) ====================

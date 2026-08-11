@@ -841,6 +841,13 @@ void AArenaManager::OnNPCDied(AShooterNPC* DeadNPC)
 
 	UE_LOG(LogTemp, Error, TEXT(">>> OnNPCDied: AliveNPCs after remove: %d, CurrentState: %d"), AliveNPCs.Num(), (int32)CurrentState);
 
+	// A scored objective owns completion; do not advance waves while its staggered kills run.
+	if (bObjectiveCompletionPending)
+	{
+		TryFinishPendingObjectiveCompletion();
+		return;
+	}
+
 	if (ArenaMode == EArenaMode::Sustain && CurrentState == EArenaState::Active)
 	{
 		// Add dead NPC to recycle pool (it will be hidden after death effects complete)
@@ -996,12 +1003,30 @@ void AArenaManager::CompleteArena()
 	NPCLastPositions.Empty();
 	NPCStuckCounter.Empty();
 
-	// Open exits
-	SetBlockersEnabled(false);
+	// Arenas with a real pending antenna keep their exits sealed until the upload is
+	// activated. Sports arenas have no antenna, so their blockers open immediately.
+	bool bWaitForAntenna = false;
+	for (const TSoftObjectPtr<AArenaAntenna>& AntennaRef : Antennas)
+	{
+		if (const AArenaAntenna* Antenna = AntennaRef.Get())
+		{
+			if (Antenna->State != EAntennaState::Activated)
+			{
+				bWaitForAntenna = true;
+				break;
+			}
+		}
+	}
+	SetBlockersEnabled(bWaitForAntenna);
 
-	// Flip antennas to "beacon mode" — sky-beam VFX guides the player to the upload location.
-	// (Antennas already Activated by mid-fight upload are not regressed by SetAllAntennasState.)
+	// Flip pending antennas to beacon mode so the player is guided to the required upload.
+	// Already activated antennas are not regressed by SetAllAntennasState.
 	SetAllAntennasState(static_cast<uint8>(EAntennaState::AvailablePostFight));
+
+	if (bWaitForAntenna)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: combat cleared; exits remain blocked until antenna activation"));
+	}
 
 	// Stop arena music (skip if finale sequence will handle it)
 	if (ArenaMusicTrack && !FinaleSequence.IsValid())
@@ -1040,6 +1065,10 @@ void AArenaManager::ResetArena()
 	// which in Sustain mode would spawn replacement enemies while we're cleaning up.
 	CurrentState = EArenaState::Idle;
 	CurrentWaveIndex = -1;
+	bObjectiveCompletionPending = false;
+	bObjectiveCompletionGrantsUpgrade = false;
+	PendingKillAllNPCs.Reset();
+	GetWorldTimerManager().ClearTimer(KillAllTimerHandle);
 
 	// Stop stuck detection
 	GetWorldTimerManager().ClearTimer(StuckCheckTimerHandle);
@@ -1250,8 +1279,11 @@ void AArenaManager::RegisterLevelEnemies()
 
 		AliveNPCs.Add(NPC);
 		NPC->OnNPCDeath.AddDynamic(this, &AArenaManager::OnNPCDied);
-		NPC->bIsPooled = true;
-		UE_LOG(LogTemp, Error, TEXT("  RegisterLevelEnemies — REGISTERED: %s (class: %s)"), *NPC->GetName(), *NPC->GetClass()->GetName());
+		NPC->bIsPooled = NPC->bAllowArenaAutoRecovery;
+		UE_LOG(LogTemp, Error,
+			TEXT("  RegisterLevelEnemies — REGISTERED: %s (class: %s, AllowAutoRecovery=%d, Pooled=%d)"),
+			*NPC->GetName(), *NPC->GetClass()->GetName(),
+			NPC->bAllowArenaAutoRecovery ? 1 : 0, NPC->bIsPooled ? 1 : 0);
 	}
 
 	InitialLevelEnemyCount = AliveNPCs.Num();
@@ -1528,7 +1560,7 @@ void AArenaManager::ExecuteSustainSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AAr
 				*SpawnedPawn->GetClass()->GetName());
 			return;
 		}
-		NPC->bIsPooled = true;
+		NPC->bIsPooled = NPC->bAllowArenaAutoRecovery;
 	}
 
 	AliveNPCs.Add(NPC);
@@ -1579,6 +1611,16 @@ void AArenaManager::CheckStuckNPCs()
 			continue;
 		}
 
+		// Scripted encounters remain tracked by the arena but own their movement and lifetime.
+		// EntryTriggers are activation volumes, so generic recovery can otherwise teleport them.
+		if (!NPC->bAllowArenaAutoRecovery)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[BOSS_ARENA_DIAG] SKIP_AUTO_RECOVERY NPC=%s Location=%s"),
+				*NPC->GetName(), *NPC->GetActorLocation().ToCompactString());
+			continue;
+		}
+
 		const FVector CurrentPos = NPC->GetActorLocation();
 		TWeakObjectPtr<AShooterNPC> WeakNPC(NPC);
 
@@ -1600,6 +1642,10 @@ void AArenaManager::CheckStuckNPCs()
 		}
 		if (!bInsideArena)
 		{
+			UE_LOG(LogTemp, Error,
+				TEXT("[ARENA_ESCAPE_DIAG] TELEPORT_REQUEST NPC=%s Class=%s Location=%s EntryTriggers=%d AllowAutoRecovery=%d"),
+				*NPC->GetName(), *NPC->GetClass()->GetName(), *CurrentPos.ToCompactString(),
+				EntryTriggers.Num(), NPC->bAllowArenaAutoRecovery ? 1 : 0);
 			FVector ReturnPos = GetActorLocation();
 			float BestDistSq = FLT_MAX;
 			for (const TSoftObjectPtr<AArenaSpawnPoint>& SPRef : SpawnPoints)
@@ -2775,6 +2821,88 @@ void AArenaManager::KillAllAliveNPCs(bool bSequential, float DelayBetweenKills, 
 	ProcessNextKillAll();
 }
 
+void AArenaManager::CompleteArenaAfterKillingAllNPCs(bool bSequential, float DelayBetweenKills,
+	UNiagaraSystem* DeathVFX, bool bSuppressDrops, bool bGrantUpgrade)
+{
+	if (CurrentState == EArenaState::Completed || bObjectiveCompletionPending)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ArenaManager: objective completion requested; waiting for %d NPC deaths (grant upgrade=%d)"),
+		GetAliveNPCs().Num(), bGrantUpgrade ? 1 : 0);
+
+	bObjectiveCompletionPending = true;
+	bObjectiveCompletionGrantsUpgrade = bGrantUpgrade;
+	PauseSustainSpawning();
+	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
+
+	KillAllAliveNPCs(bSequential, DelayBetweenKills, DeathVFX, bSuppressDrops);
+	TryFinishPendingObjectiveCompletion();
+}
+
+void AArenaManager::TryFinishPendingObjectiveCompletion()
+{
+	if (!bObjectiveCompletionPending)
+	{
+		return;
+	}
+
+	AliveNPCs.RemoveAll([](const TWeakObjectPtr<AShooterNPC>& Ptr)
+	{
+		return !Ptr.IsValid() || Ptr->IsDead();
+	});
+
+	if (!AliveNPCs.IsEmpty())
+	{
+		return;
+	}
+
+	GetWorldTimerManager().ClearTimer(KillAllTimerHandle);
+	PendingKillAllNPCs.Reset();
+	bObjectiveCompletionPending = false;
+
+	// Sports objectives replace the arena antenna. Register the same run-wide progress
+	// before CompleteArena saves its checkpoint so the count survives reload/respawn.
+	if (URunSubsystem* Run = GetGameInstance() ? GetGameInstance()->GetSubsystem<URunSubsystem>() : nullptr)
+	{
+		Run->RegisterAntennaActivated();
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: sports objective counted toward antenna run progression"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("ArenaManager: RunSubsystem not found; sports objective progression was not counted"));
+	}
+
+	CompleteArena();
+	GrantPendingObjectiveUpgrade();
+}
+
+void AArenaManager::GrantPendingObjectiveUpgrade()
+{
+	if (!bObjectiveCompletionGrantsUpgrade)
+	{
+		return;
+	}
+	bObjectiveCompletionGrantsUpgrade = false;
+
+	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)
+	{
+		Deferred->FlushAll();
+	}
+
+	if (UXPSubsystem* XP = GetGameInstance() ? GetGameInstance()->GetSubsystem<UXPSubsystem>() : nullptr)
+	{
+		XP->GrantLevel();
+		UE_LOG(LogTemp, Warning, TEXT("ArenaManager: objective completion upgrade granted after all NPCs died"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("ArenaManager: XPSubsystem not found; objective completion upgrade was not granted"));
+	}
+}
+
 void AArenaManager::ProcessNextKillAll()
 {
 	while (PendingKillAllNPCs.Num() > 0)
@@ -3022,6 +3150,9 @@ void AArenaManager::HandleAntennaActivated(AArenaAntenna* Antenna)
 	{
 		ForceCompleteArena();
 	}
+
+	// The upload is the exit condition for antenna arenas. Sports arenas never enter this path.
+	SetBlockersEnabled(false);
 
 	// Release every level-up stashed during the fight as a sequence of popups
 	if (UDeferredUpgradeQueueSubsystem* Deferred = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDeferredUpgradeQueueSubsystem>() : nullptr)

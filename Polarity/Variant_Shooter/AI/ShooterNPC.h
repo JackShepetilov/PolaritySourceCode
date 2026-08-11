@@ -395,6 +395,22 @@ protected:
 	 *  Cleared on EndKnockbackStun. */
 	bool bStunnedByNPCImpact = false;
 
+	/** EMF was forcibly disabled for a reverse-channel NPC impact and must be restored with the stun. */
+	bool bForceDisabledForNPCImpactStun = false;
+
+	/** Airborne stun waits for gravity/landing before damage, montage and stun timer begin. */
+	bool bPendingAirborneStun = false;
+	float PendingAirborneStunDuration = 0.0f;
+	float PendingAirborneStunMaxDownSpeed = 0.0f;
+	float PendingAirborneStunOriginalGravityScale = 1.0f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> PendingAirborneStunMontage;
+
+	/** Gravity used while an airborne-stunned NPC falls. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Knockback|Airborne Stun", meta = (ClampMin = "0.1"))
+	float AirborneStunGravityScale = 1.0f;
+
 	/** Currently active knockback style. Set by ApplyKnockback, consumed by collision-damage
 	 *  handlers (wall slam, NPC-NPC) and animation selection. Reset to Standard in EndKnockbackStun. */
 	EKnockbackStyle CurrentKnockbackStyle = EKnockbackStyle::Standard;
@@ -761,6 +777,9 @@ public:
 	TMap<TSubclassOf<UDamageType>, FDeathModeConfig> DeathConfigOverrides;
 
 protected:
+	/** One-shot cinematic override consumed by Die(); configured death data remains untouched. */
+	bool bForceNextDeathDismemberment = false;
+	float ForcedDismembermentImpulseMultiplier = 1.0f;
 
 	/** Damage type of the killing blow (set in TakeDamage before Die) */
 	TSubclassOf<UDamageType> LastKillingDamageType;
@@ -782,6 +801,9 @@ protected:
 
 	/** Per-frame updates */
 	virtual void Tick(float DeltaTime) override;
+
+	/** Complete a deferred airborne stun after gravity brings the NPC to the ground. */
+	virtual void Landed(const FHitResult& Hit) override;
 
 public:
 
@@ -1015,8 +1037,8 @@ private:
 	UFUNCTION()
 	void OnLaunchedMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
-	/** Exit launched state — stop montage, clear flags */
-	void ExitLaunchedState();
+	/** Exit launched state. Preserve knockback when an NPC impact already started the rebound. */
+	void ExitLaunchedState(bool bPreserveKnockback = false);
 
 	/** Check for NPC collisions during launched flight */
 	void UpdateLaunchedCollision();
@@ -1034,6 +1056,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool IsLaunched() const { return bIsLaunched; }
 
+	/** Returns true during the complete player-launch flight, including reverse propulsion before release. */
+	bool IsInPlayerLaunchFlight() const;
+
 	/** Returns true if this NPC was ever captured/launched by channeling (used for armor drop) */
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool WasChannelingTarget() const { return bWasChannelingTarget; }
@@ -1041,6 +1066,10 @@ public:
 	/** Returns true if this NPC is dead */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsDead() const { return bIsDead; }
+
+	/** Normal death cleanup/notifications, but forced through this NPC's GC dismemberment path. */
+	UFUNCTION(BlueprintCallable, Category = "Death|Cinematic")
+	void TriggerCinematicDismemberment(AActor* DamageCauser = nullptr, float ImpulseMultiplier = 1.0f);
 
 	/** If true, Die() skips all loot drops (weapons, health, armor). Used by finale sequence. */
 	bool bSuppressDeathDrops = false;
@@ -1064,6 +1093,12 @@ public:
 	/** If true, NPC is managed by a pool and won't self-destruct after death.
 	 *  Set by ArenaManager in sustain mode. */
 	bool bIsPooled = false;
+
+	/** Whether ArenaManager may teleport this NPC back into the arena, kill it as stuck,
+	 *  and recycle it through the sustain pool. Bosses and other scripted encounters
+	 *  should disable this while remaining registered for arena activation/tracking. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arena")
+	bool bAllowArenaAutoRecovery = true;
 
 	/** Reset NPC state for pool recycling. Teleports, resets HP/charge, re-enables all systems.
 	 *  Call only on pooled NPCs that have completed their death sequence (hidden).
@@ -1111,8 +1146,9 @@ protected:
 	/** Handle explosion-like elastic collision between two NPCs during knockback (legacy - uses stored knockback params) */
 	void HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector& CollisionPoint);
 
-	/** Handle elastic NPC collision with explicit impact speed (used by overlap sweep detection) */
-	void HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed);
+	/** Handle elastic NPC collision with explicit impact speed and optional incoming travel direction. */
+	void HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed,
+		const FVector& IncomingDirection = FVector::ZeroVector);
 
 	/** Check for EMF proximity with other NPCs and trigger attraction knockback if threshold exceeded */
 	void CheckEMFProximityCollision();

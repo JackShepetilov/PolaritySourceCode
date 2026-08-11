@@ -58,6 +58,10 @@ ABossCharacter::ABossCharacter(const FObjectInitializer& ObjectInitializer)
 	AttackRange = 400.0f;            // approach stops here = lunge launch distance (keep < StrafeRadius)
 	AttackCooldown = 0.6f;
 
+	// The boss is a scripted, persistent encounter. ArenaManager may track and activate it,
+	// but must never treat it as a disposable sustain NPC (escape teleport / stuck kill / pool reset).
+	bAllowArenaAutoRecovery = false;
+
 	// Solo boss — don't gate fire on the squad combat coordinator.
 	bUseCoordinator = false;
 }
@@ -69,6 +73,8 @@ void ABossCharacter::BeginPlay()
 
 	MaxHP = CurrentHP;
 	CurrentPhase = EBossPhase::Ground;
+	DiagnosticLastLocation = GetActorLocation();
+	bDiagnosticLocationInitialized = true;
 
 	if (UCharacterMovementComponent* MovementComp = GetCharacterMovement())
 	{
@@ -94,10 +100,33 @@ void ABossCharacter::BeginPlay()
 
 	UE_LOG(LogTemp, Log, TEXT("[BOSS] BeginPlay: Phase=%s, Posture=%.0f/%.0f, Weapon=%s"),
 		*BossPhaseName(CurrentPhase), CurrentHP, MaxHP, *GetNameSafe(Weapon));
+	UE_LOG(LogTemp, Warning,
+		TEXT("[BOSS_FIX_VERIFY] Build=ArenaRecoveryV1 Boss=%s AllowArenaAutoRecovery=%d IsPooled=%d Location=%s MaxPosture=%.1f"),
+		*GetName(), bAllowArenaAutoRecovery ? 1 : 0, bIsPooled ? 1 : 0,
+		*GetActorLocation().ToCompactString(), MaxHP);
 }
 
 void ABossCharacter::Tick(float DeltaTime)
 {
+	const FVector TickLocation = GetActorLocation();
+	if (bDiagnosticLocationInitialized)
+	{
+		const float LargeMoveDistance = FVector::Dist(DiagnosticLastLocation, TickLocation);
+		if (LargeMoveDistance >= 200.0f)
+		{
+			const UCharacterMovementComponent* MC = GetCharacterMovement();
+			UE_LOG(LogTemp, Error,
+				TEXT("[BOSS_TELEPORT_DIAG] Boss=%s From=%s To=%s Distance=%.1f DeltaTime=%.4f Velocity=%s MoveMode=%d Attacking=%d Knockback=%d FinisherKnockback=%d Target=%s"),
+				*GetName(), *DiagnosticLastLocation.ToCompactString(), *TickLocation.ToCompactString(),
+				LargeMoveDistance, DeltaTime, *GetVelocity().ToCompactString(),
+				MC ? static_cast<int32>(MC->MovementMode.GetValue()) : -1,
+				bIsAttacking ? 1 : 0, bIsInKnockback ? 1 : 0, bIsFinisherKnockback ? 1 : 0,
+				*GetNameSafe(CurrentMeleeTarget.Get()));
+		}
+	}
+	DiagnosticLastLocation = TickLocation;
+	bDiagnosticLocationInitialized = true;
+
 	// Finisher knockback is fully scripted (SetActorLocation) — skip the normal NPC/melee tick.
 	if (bIsFinisherKnockback)
 	{

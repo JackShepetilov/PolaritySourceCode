@@ -430,6 +430,22 @@ void UUpgradeManagerComponent::NotifyWeaponDealtDamage(AShooterWeapon* Weapon, A
 	NotifyOwnerDealtDamage(Target, Damage, bKilled);
 }
 
+void UUpgradeManagerComponent::NotifyEnemyDroppedRangedWeapon(ADroppedRangedWeapon* DroppedWeapon, AActor* DroppingEnemy)
+{
+	if (!DroppedWeapon)
+	{
+		return;
+	}
+
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->OnEnemyDroppedRangedWeapon(DroppedWeapon, DroppingEnemy);
+		}
+	}
+}
+
 void UUpgradeManagerComponent::NotifyOwnerHitscanIonized(AActor* Target)
 {
 	for (auto& Pair : ActiveUpgrades)

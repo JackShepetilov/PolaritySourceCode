@@ -5,6 +5,9 @@
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "GameFramework/PlayerController.h"
+#include "Engine/GameInstance.h"
+#include "Variant_Shooter/Run/RunSubsystem.h"
+#include "Variant_Shooter/Run/Generation/BiomeRunRegistry.h"
 
 void UShooterMainMenuUI::NativeConstruct()
 {
@@ -76,6 +79,25 @@ void UShooterMainMenuUI::LoadLevel1()
 	{
 		UGameplayStatics::OpenLevel(this, Level1Name);
 	}
+}
+
+void UShooterMainMenuUI::StartNewRun()
+{
+	if (!NewRunBiomeRegistry)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RUN_FLOW] StartNewRun failed: assign NewRunBiomeRegistry in WBP_MainMenu"));
+		return;
+	}
+
+	UGameInstance* GI = GetGameInstance();
+	URunSubsystem* Run = GI ? GI->GetSubsystem<URunSubsystem>() : nullptr;
+	if (!Run)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RUN_FLOW] StartNewRun failed: RunSubsystem is unavailable"));
+		return;
+	}
+
+	Run->OpenNewRunFromBiome(NewRunBiomeRegistry, RunLoadingScreenClass, RunLoadingSpinnerTexture);
 }
 
 void UShooterMainMenuUI::LoadLevel2()

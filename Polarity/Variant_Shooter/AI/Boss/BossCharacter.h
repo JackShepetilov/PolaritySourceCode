@@ -251,6 +251,10 @@ protected:
 	/** Cached max Posture (== starting CurrentHP). Posture threshold math uses this. */
 	float MaxHP = 1000.0f;
 
+	/** Runtime-only position sample used to identify unexpected large moves in PIE logs. */
+	FVector DiagnosticLastLocation = FVector::ZeroVector;
+	bool bDiagnosticLocationInitialized = false;
+
 	/** Slowdown state and cached default MaxWalkSpeed for restoration. */
 	bool bIsSlowed = false;
 	float DefaultMaxWalkSpeed = 0.0f;
@@ -316,6 +320,10 @@ protected:
 
 public:
 	// ==================== Phase Control ====================
+
+	/** Maximum Posture used to normalize the boss HUD. */
+	UFUNCTION(BlueprintPure, Category = "Boss|Posture")
+	float GetMaxPosture() const { return MaxHP; }
 
 	UFUNCTION(BlueprintPure, Category = "Boss|Phase")
 	EBossPhase GetCurrentPhase() const { return CurrentPhase; }

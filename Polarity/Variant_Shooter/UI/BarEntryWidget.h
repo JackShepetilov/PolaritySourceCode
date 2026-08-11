@@ -50,6 +50,9 @@ public:
 	/** Set (or clear) the keybind hint shown over this entry. Empty text + null icon hides it. */
 	void SetKeybindHint(const FText& KeyText, UTexture2D* KeyIcon);
 
+	/** Set whether the action represented by this entry can currently be used. */
+	void SetAvailable(bool bInAvailable);
+
 	/** Play the removal animation. Returns its length in seconds (0 = remove immediately). */
 	float PlayOutro();
 
@@ -81,6 +84,10 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Set Keybind Hint"))
 	void BP_SetKeybindHint(const FText& KeyText, UTexture2D* KeyIcon);
 
+	/** Let the Blueprint dim/brighten an entry without overloading its cooldown presentation. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Set Available"))
+	void BP_SetAvailable(bool bInAvailable);
+
 	/** Return the outro animation length in seconds (0 = no animation, remove immediately). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Bar Entry", meta = (DisplayName = "Play Outro"))
 	float BP_PlayOutro();
@@ -95,4 +102,7 @@ protected:
 	/** Remaining cooldown time, counted down in NativeTick. */
 	UPROPERTY(BlueprintReadOnly, Category = "Bar Entry")
 	float CooldownRemaining = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Bar Entry")
+	bool bIsAvailable = true;
 };

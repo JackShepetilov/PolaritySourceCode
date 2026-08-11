@@ -623,12 +623,12 @@ void UChatBroker::EmitReaction(FGameplayTag EventTag)
 	{
 		return;
 	}
-	if (!ReactionsTable || !EventTag.IsValid())
+	if (!EventTag.IsValid())
 	{
 		return;
 	}
 
-	TArray<FName> RowNames = ReactionsTable->GetRowNames();
+	TArray<FName> RowNames = ReactionsTable ? ReactionsTable->GetRowNames() : TArray<FName>();
 	float TotalWeight = 0.0f;
 	for (const FName& RowName : RowNames)
 	{
@@ -642,6 +642,27 @@ void UChatBroker::EmitReaction(FGameplayTag EventTag)
 	}
 	if (TotalWeight <= 0.0f)
 	{
+		const UStreamConfig* Cfg = Config.Get();
+		const FString TagString = EventTag.ToString();
+		const TArray<FText>* FallbackLines = nullptr;
+		if (Cfg && TagString.EndsWith(TEXT("DashReminder")))
+		{
+			FallbackLines = &Cfg->DashReminderChatLines;
+		}
+		else if (Cfg && TagString.EndsWith(TEXT("AbilityReminder")))
+		{
+			FallbackLines = &Cfg->AbilityReminderChatLines;
+		}
+		else if (Cfg && TagString.EndsWith(TEXT("ChargedPropExplosionReminder")))
+		{
+			FallbackLines = &Cfg->ChargedPropExplosionReminderChatLines;
+		}
+
+		if (FallbackLines && FallbackLines->Num() > 0)
+		{
+			const FText& Line = (*FallbackLines)[FMath::RandRange(0, FallbackLines->Num() - 1)];
+			Enqueue(MakeMessage(NAME_None, FString(), SubstitutePlayerName(Line), EChatMessageKind::Hint), 2);
+		}
 		return;
 	}
 

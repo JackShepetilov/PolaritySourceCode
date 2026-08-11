@@ -3,6 +3,8 @@
 #include "ShooterSettingsSubsystem.h"
 #include "ShooterGameSettings.h"
 #include "Engine/World.h"
+#include "TimerManager.h"
+#include "UObject/UObjectGlobals.h"
 
 void UShooterSettingsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -14,18 +16,18 @@ void UShooterSettingsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// Load settings on startup
 	LoadSettings();
 
-	// Bind to world initialization to apply audio/control settings when the world is ready
-	// (Subsystem initializes before the world exists, so we can't apply immediately)
-	WorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddUObject(
-		this, &UShooterSettingsSubsystem::OnWorldInitialized);
+	// A new PlayerController and CameraManager are not ready at world initialization.
+	// Apply the saved values after each map has loaded instead, including every new run.
+	PostLoadMapHandle = FCoreUObjectDelegates::PostLoadMapWithWorld.AddUObject(
+		this, &UShooterSettingsSubsystem::OnPostLoadMap);
 
 	UE_LOG(LogTemp, Log, TEXT("ShooterSettingsSubsystem initialized"));
 }
 
 void UShooterSettingsSubsystem::Deinitialize()
 {
-	// Unbind world delegate
-	FWorldDelegates::OnPostWorldInitialization.Remove(WorldInitHandle);
+	// Unbind map-load delegate
+	FCoreUObjectDelegates::PostLoadMapWithWorld.Remove(PostLoadMapHandle);
 
 	// Save settings on shutdown
 	SaveSettings();
@@ -35,22 +37,17 @@ void UShooterSettingsSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
-void UShooterSettingsSubsystem::OnWorldInitialized(UWorld* World, const UWorld::InitializationValues IVS)
+void UShooterSettingsSubsystem::OnPostLoadMap(UWorld* LoadedWorld)
 {
-	if (!World || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	if (!LoadedWorld || (LoadedWorld->WorldType != EWorldType::Game && LoadedWorld->WorldType != EWorldType::PIE))
 	{
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[AudioDebug] World ready - applying all settings on startup"));
-
-	// Now that a game world exists, apply audio, controls, and gameplay settings
-	if (UShooterGameSettings* Settings = GetSettings())
-	{
-		Settings->ApplyAudioSettings();
-		Settings->ApplyGameplaySettings();
-		Settings->ApplyControlSettings();
-	}
+	// Defer one frame so the local PlayerController and CameraManager for this map exist.
+	UE_LOG(LogTemp, Log, TEXT("[SETTINGS_FLOW] Map loaded: %s. Queuing saved settings application."), *LoadedWorld->GetName());
+	LoadedWorld->GetTimerManager().SetTimerForNextTick(
+		FTimerDelegate::CreateUObject(this, &UShooterSettingsSubsystem::ApplyAllSettings));
 }
 
 UShooterGameSettings* UShooterSettingsSubsystem::GetSettings() const
@@ -184,6 +181,7 @@ void UShooterSettingsSubsystem::ApplyAllSettings()
 {
 	if (UShooterGameSettings* Settings = GetSettings())
 	{
+		UE_LOG(LogTemp, Log, TEXT("[SETTINGS_FLOW] Applying saved settings to current world."));
 		Settings->ApplyAllCustomSettings();
 		NotifySettingsChanged();
 	}

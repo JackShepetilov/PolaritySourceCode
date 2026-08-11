@@ -172,7 +172,7 @@ void UUpgrade_LowHealthDefense::RefreshSlowedEnemies(float Strength)
 	{
 		if (AShooterNPC* NPC = Cast<AShooterNPC>(Ov.GetActor()))
 		{
-			if (NPC->IsDead())
+			if (NPC->IsDead() || NPC->IsInPlayerLaunchFlight())
 			{
 				continue;
 			}

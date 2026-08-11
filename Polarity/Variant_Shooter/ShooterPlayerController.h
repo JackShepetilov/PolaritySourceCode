@@ -119,9 +119,9 @@ protected:
 	UFUNCTION()
 	void OnBulletCountUpdated(int32 MagazineSize, int32 Bullets);
 
-	/** Called when the possessed pawn is damaged */
+	/** Called when the possessed pawn health/armor snapshot changes */
 	UFUNCTION()
-	void OnPawnDamaged(float LifePercent, float ArmorPercent);
+	void OnPawnHealthChanged(float CurrentHP, float MaxHP, float LifePercent, float ArmorPercent);
 
 	/** Called when damage is received from a direction */
 	UFUNCTION()

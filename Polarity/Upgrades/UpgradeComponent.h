@@ -9,6 +9,7 @@
 class UUpgradeDefinition;
 class AShooterCharacter;
 class AShooterWeapon;
+class ADroppedRangedWeapon;
 
 /**
  * Base class for all upgrade logic components.
@@ -90,6 +91,9 @@ protected:
 
 	/** Called when a specific owner weapon deals damage to a target */
 	virtual void OnWeaponDealtDamage(AShooterWeapon* Weapon, AActor* Target, float Damage, bool bKilled) {}
+
+	/** Called when an enemy killed by the owner spawns a ranged weapon drop. */
+	virtual void OnEnemyDroppedRangedWeapon(ADroppedRangedWeapon* DroppedWeapon, AActor* DroppingEnemy) {}
 
 	/**
 	 * Called whenever the owner's hitscan ionization successfully applies charge to a target.

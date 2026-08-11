@@ -31,12 +31,14 @@
 #include "Variant_Shooter/AI/SniperTurretNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/HitMarkerComponent.h"
 #include "TutorialSubsystem.h"
 #include "Variant_Shooter/ShooterDummy.h"
 #include "EMFPhysicsProp.h"
 #include "Foliage/FoliageConversionLibrary.h"
 #include "Upgrades/UpgradeManagerComponent.h"
 #include "EnemyBeamBoltSubsystem.h"
+#include "VFX/VFXVariantSequenceSubsystem.h"
 
 namespace
 {
@@ -1122,7 +1124,14 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		}
 
 		// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
-		ApplyHitscanIonization(BestTarget, BestHit.GetComponent());
+		const bool bIonized = ApplyHitscanIonization(BestTarget, BestHit.GetComponent());
+		if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+		{
+			if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
+			{
+				HitMarker->RegisterIonizedHit(BestHitLocation, BestToHitDir);
+			}
+		}
 	}
 
 	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 4: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ =====
@@ -1342,7 +1351,15 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	}
 
 	// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
-	ApplyHitscanIonization(HitActor, Hit.GetComponent());
+	const bool bIonized = ApplyHitscanIonization(HitActor, Hit.GetComponent());
+	if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+	{
+		if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
+		{
+			const FVector HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
+			HitMarker->RegisterIonizedHit(Hit.ImpactPoint, HitDirection);
+		}
+	}
 }
 
 void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& Direction, float EnergyMultiplier)
@@ -1618,7 +1635,14 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		}
 
 		// Ionization (charge transfer); HitComponent gates the NPC riot-shield rule
-		ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
+		const bool bIonized = ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
+		if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+		{
+			if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
+			{
+				HitMarker->RegisterIonizedHit(PawnHitLocation, Direction);
+			}
+		}
 	}
 	else
 	{
@@ -1735,7 +1759,7 @@ float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
 	return Multiplier;
 }
 
-void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
+bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
 {
 	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s bUseHitscanIonization=%d"),
 		*GetNameSafe(Target),
@@ -1744,7 +1768,7 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 
 	if (!bUseHitscanIonization || !Target)
 	{
-		return;
+		return false;
 	}
 
 	// NPC riot-shield rule: hit on body while shield is up → no charge transfer.
@@ -1752,7 +1776,7 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 	if (UNPCRiotShieldComponent::ShouldBlockBodyIonization(Target, HitComponent))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: BLOCKED by shield rule"));
-		return;
+		return false;
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: PASSED, applying charge to %s"), *Target->GetName());
@@ -1778,12 +1802,12 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 		// Already at max positive charge
 		if (CurrentCharge >= MaxIonizationCharge)
 		{
-			return;
+			return false;
 		}
 
 		const float NewCharge = FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge);
 		TargetModifier->SetCharge(NewCharge);
-		return;
+		return true;
 	}
 
 	// Route through SetCharge() for props (enables physics on first charge)
@@ -1792,10 +1816,10 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 		const float CurrentCharge = Prop->GetCharge();
 		if (CurrentCharge >= MaxIonizationCharge)
 		{
-			return;
+			return false;
 		}
 		Prop->SetCharge(FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge));
-		return;
+		return true;
 	}
 
 	// Generic fallback: raw UEMF_FieldComponent
@@ -1806,12 +1830,15 @@ void AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 
 		if (CurrentCharge >= MaxIonizationCharge)
 		{
-			return;
+			return false;
 		}
 
 		Desc.PointChargeParams.Charge = FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge);
 		TargetField->SetSourceDescription(Desc);
+		return true;
 	}
+
+	return false;
 }
 
 float AShooterWeapon::CalculateWaveRadius(float Distance) const
@@ -2112,7 +2139,7 @@ void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
 			Normal.Rotation(),
 			FVector::OneVector,
 			true,
-			true,
+			false,
 			ENCPoolMethod::None
 		);
 
@@ -2124,6 +2151,17 @@ void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
 			{
 				ImpactComp->SetFloatParameter(FName("Wavelength"), Wavelength);
 			}
+
+			if (UWorld* World = GetWorld())
+			{
+				if (UVFXVariantSequenceSubsystem* VariantSubsystem =
+					World->GetSubsystem<UVFXVariantSequenceSubsystem>())
+				{
+					VariantSubsystem->ConfigureVariantForComponent(ImpactComp);
+				}
+			}
+
+			ImpactComp->Activate(true);
 		}
 	}
 
@@ -2415,8 +2453,8 @@ float AShooterWeapon::CalculateHeatFireRateMultiplier() const
 
 float AShooterWeapon::GetCurrentRefireRate() const
 {
-	// Base refire rate multiplied by heat penalty
-	return RefireRate * CalculateHeatFireRateMultiplier();
+	// Base refire rate multiplied by heat penalty and any external multiplier (e.g. turret spin-up)
+	return RefireRate * CalculateHeatFireRateMultiplier() * ExternalFireRateMultiplier;
 }
 
 // ==================== Z-Factor ====================

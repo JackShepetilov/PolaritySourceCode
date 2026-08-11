@@ -22,6 +22,19 @@ class UStreamConfig;
 class UStreamArenaConfig;
 class UStyleComponent;
 class UChatBroker;
+class AShooterCharacter;
+class UApexMovementComponent;
+class UAbilityComponent;
+class UAbilityDefinition;
+class AEMFPhysicsProp;
+
+UENUM(BlueprintType)
+enum class ELearningReminderType : uint8
+{
+	Dash,
+	Ability,
+	ChargedPropExplosion
+};
 
 USTRUCT(BlueprintType)
 struct FDonation
@@ -41,6 +54,9 @@ struct FDonation
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnViewersChanged, int32, NewViewers);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDonationGenerated, const FDonation&, Donation);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMetaCurrencyChanged, int64, NewTotal);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLearningReminderRequested, ELearningReminderType, ReminderType);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDashReminderRequested);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAbilityReminderRequested);
 
 UCLASS()
 class POLARITY_API UStreamSubsystem : public UGameInstanceSubsystem, public FTickableGameObject
@@ -135,6 +151,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Stream|Meta")
 	bool SpendMetaCurrency(int64 Amount);
 
+	// ==================== Learning reminder debug ====================
+
+	/** Force one reminder through the real counter/chat/icon path. Returns false at the per-run limit. */
+	UFUNCTION(BlueprintCallable, Category = "Stream|Learning Reminders|Debug")
+	bool DebugTriggerLearningReminder(ELearningReminderType ReminderType);
+
+	/** Reset all three per-run reminder counters and inactivity timers. */
+	UFUNCTION(BlueprintCallable, Category = "Stream|Learning Reminders|Debug")
+	void DebugResetLearningReminders();
+
+	UFUNCTION(BlueprintPure, Category = "Stream|Learning Reminders|Debug")
+	FString GetLearningReminderDebugStatus() const;
+
 	// ==================== Events ====================
 
 	UPROPERTY(BlueprintAssignable, Category = "Stream|Events")
@@ -146,12 +175,28 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Stream|Events")
 	FOnMetaCurrencyChanged OnMetaCurrencyChanged;
 
+	/** Fired whenever the player has ignored one of the onboarding mechanics for too long. */
+	UPROPERTY(BlueprintAssignable, Category = "Stream|Learning Reminders")
+	FOnLearningReminderRequested OnLearningReminderRequested;
+
+	/** Convenience event for the dash HUD icon animation. */
+	UPROPERTY(BlueprintAssignable, Category = "Stream|Learning Reminders")
+	FOnDashReminderRequested OnDashReminderRequested;
+
+	/** Convenience event for the ability HUD icon animation. */
+	UPROPERTY(BlueprintAssignable, Category = "Stream|Learning Reminders")
+	FOnAbilityReminderRequested OnAbilityReminderRequested;
+
 protected:
 	// ==================== Run lifecycle handlers ====================
 
 	UFUNCTION() void HandleRunStarted();
 	UFUNCTION() void HandleRunEnded(ERunEndReason Reason);
 	UFUNCTION() void HandleArenaEntered(int32 ArenaIndex);
+	UFUNCTION() void HandleDashUsed();
+	UFUNCTION() void HandleAbilityAdded(int32 SlotIndex);
+	UFUNCTION() void HandleAbilityActivated(UAbilityDefinition* Definition);
+	UFUNCTION() void HandleChargedPropExploded(AEMFPhysicsProp* Prop, FVector Location, float DamageMultiplier);
 
 	// ==================== Tick driver ====================
 
@@ -166,6 +211,13 @@ protected:
 
 	/** Roll for and possibly spawn a donation this tick. */
 	void TickDonations(float DeltaTime, float LikesPerSecond);
+
+	void EnsureLearningTrackingBindings();
+	void UnbindLearningTracking();
+	void RefreshPropExplosionBindings();
+	void TickLearningReminders();
+	void EmitLearningReminder(ELearningReminderType ReminderType);
+	float GetLearningReminderDelay(ELearningReminderType ReminderType) const;
 
 	/** Sample a random donor name from config pool. */
 	FString PickDonorName() const;
@@ -218,4 +270,27 @@ protected:
 	 *  Reset on HandleRunStarted; set true via MarkRunMilestoneReached. */
 	UPROPERTY(Transient)
 	bool bCurrentRunMilestoneReached = false;
+
+	// ==================== Learning reminder tracking ====================
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AShooterCharacter> TrackedCharacter;
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UApexMovementComponent> TrackedMovement;
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UAbilityComponent> TrackedAbility;
+
+	UPROPERTY(Transient)
+	TArray<TWeakObjectPtr<AEMFPhysicsProp>> TrackedExplosiveProps;
+
+	float NextDashReminderTime = 0.0f;
+	float NextAbilityReminderTime = 0.0f;
+	float NextPropExplosionReminderTime = 0.0f;
+	float PropBindingRefreshAccumulator = 0.0f;
+	bool bAbilityReminderActive = false;
+	int32 DashReminderCount = 0;
+	int32 AbilityReminderCount = 0;
+	int32 PropExplosionReminderCount = 0;
 };

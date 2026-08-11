@@ -162,6 +162,12 @@ namespace ChatDebug
 		UE_LOG(LogTemp, Log, TEXT("  stream.run.status               Show CompletedRuns / IsFirstRun / current phase"));
 		UE_LOG(LogTemp, Log, TEXT("  stream.run.markmilestone        Force first-antenna milestone (++CompletedRuns)"));
 		UE_LOG(LogTemp, Log, TEXT("  stream.run.simulatenew          End current run + start a new one (in-PIE retest)"));
+		UE_LOG(LogTemp, Log, TEXT("  --- Learning Reminders ---"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.learning.dash            Trigger dash reminder (counts toward run limit)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.learning.ability         Trigger ability reminder (counts toward run limit)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.learning.prop            Trigger charged-prop reminder (counts toward run limit)"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.learning.status          Show counts, limits, availability and next timers"));
+		UE_LOG(LogTemp, Log, TEXT("  stream.learning.reset           Reset reminder counts and inactivity timers"));
 		UE_LOG(LogTemp, Log, TEXT("  stream.help                     This help"));
 		UE_LOG(LogTemp, Log, TEXT("================================================================"));
 	}
@@ -249,6 +255,45 @@ namespace ChatDebug
 
 		// Useful when designer wants to also test arena-entered hooks
 		Run->EnterArena(0);
+	}
+
+	// ==================== Learning reminders ====================
+
+	static void CmdLearningTrigger(ELearningReminderType Type, const TCHAR* Label, UWorld* World)
+	{
+		UStreamSubsystem* Stream = FindStream(World);
+		if (!Stream)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] StreamSubsystem not available"));
+			return;
+		}
+
+		const bool bTriggered = Stream->DebugTriggerLearningReminder(Type);
+		if (bTriggered)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Learning reminder '%s': triggered"), Label);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[STREAM_DEBUG] Learning reminder '%s': blocked"), Label);
+		}
+	}
+
+	static void CmdLearningStatus(const TArray<FString>& Args, UWorld* World)
+	{
+		if (UStreamSubsystem* Stream = FindStream(World))
+		{
+			UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Learning status: %s"), *Stream->GetLearningReminderDebugStatus());
+		}
+	}
+
+	static void CmdLearningReset(const TArray<FString>& Args, UWorld* World)
+	{
+		if (UStreamSubsystem* Stream = FindStream(World))
+		{
+			Stream->DebugResetLearningReminders();
+			UE_LOG(LogTemp, Log, TEXT("[STREAM_DEBUG] Learning status: %s"), *Stream->GetLearningReminderDebugStatus());
+		}
 	}
 }
 
@@ -354,4 +399,45 @@ static FAutoConsoleCommandWithWorldAndArgs CmdStreamRunSimulateNew(
 	TEXT("stream.run.simulatenew"),
 	TEXT("End current run (Aborted) + start a new one + enter arena 0. For in-PIE retest of opening flow."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ChatDebug::CmdRunSimulateNew)
+);
+
+// ==================== Learning reminders ====================
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamLearningDash(
+	TEXT("stream.learning.dash"),
+	TEXT("Trigger the dash learning reminder. Counts toward the per-run limit."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic([](const TArray<FString>&, UWorld* World)
+	{
+		ChatDebug::CmdLearningTrigger(ELearningReminderType::Dash, TEXT("dash"), World);
+	})
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamLearningAbility(
+	TEXT("stream.learning.ability"),
+	TEXT("Trigger the ability learning reminder. Counts toward the per-run limit."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic([](const TArray<FString>&, UWorld* World)
+	{
+		ChatDebug::CmdLearningTrigger(ELearningReminderType::Ability, TEXT("ability"), World);
+	})
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamLearningProp(
+	TEXT("stream.learning.prop"),
+	TEXT("Trigger the charged-prop explosion reminder. Counts toward the per-run limit."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic([](const TArray<FString>&, UWorld* World)
+	{
+		ChatDebug::CmdLearningTrigger(ELearningReminderType::ChargedPropExplosion, TEXT("prop"), World);
+	})
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamLearningStatus(
+	TEXT("stream.learning.status"),
+	TEXT("Show learning reminder counts, limits, availability and next timers."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ChatDebug::CmdLearningStatus)
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdStreamLearningReset(
+	TEXT("stream.learning.reset"),
+	TEXT("Reset learning reminder counts and inactivity timers."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ChatDebug::CmdLearningReset)
 );

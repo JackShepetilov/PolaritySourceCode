@@ -1,5 +1,8 @@
 // SniperTurretNPC.h
-// Stationary sniper turret NPC - progressive aim system locks onto target before firing hitscan
+// Stationary turret NPC — TF2-sentry style.
+// Continuously fires its weapon at the player while it has line of sight, using the same
+// weapon + accuracy-spread path as AShooterNPC. The barrel slews onto the target via bone
+// rotation; fire only opens once the barrel is aligned within FireAlignmentAngle.
 
 #pragma once
 
@@ -7,41 +10,42 @@
 #include "ShooterNPC.h"
 #include "SniperTurretNPC.generated.h"
 
-/** Turret aiming state machine */
+/**
+ * Turret engagement state machine.
+ * NOTE: DamageRecovery and PostFireCooldown are VESTIGIAL — kept only so existing StateTree
+ * assets / Blueprints that reference the enum don't break. The sentry never enters them.
+ * Live states: Idle / Aiming / Firing.
+ */
 UENUM(BlueprintType)
 enum class ETurretAimState : uint8
 {
-	/** No target, idle */
+	/** No target or no line of sight — not firing */
 	Idle,
-	/** Target acquired, aiming in progress (0.0 -> 1.0) */
+	/** Target acquired with LOS, barrel still slewing onto it — not firing yet */
 	Aiming,
-	/** Aim complete, firing weapon */
+	/** Target + LOS + barrel aligned — firing continuously */
 	Firing,
-	/** Recovering from damage interruption (waiting before re-aim) */
+	/** Vestigial (no longer used) */
 	DamageRecovery,
-	/** Cooldown after firing before re-aiming */
+	/** Vestigial (no longer used) */
 	PostFireCooldown
 };
 
-/** Broadcast when aim progress or state changes (for outline/UI) */
+/** Broadcast when engagement state changes. Progress is 1.0 while Firing, else 0.0. Kept for BP/UI. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTurretAimProgressChanged,
 	float, AimProgress, ETurretAimState, AimState);
 
-/** Broadcast when turret fires */
+/** Broadcast when the turret fires. Vestigial — not emitted in continuous-fire mode (weapon drives its own cadence). */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTurretFired);
 
 class UPoseableMeshComponent;
-class UNiagaraSystem;
-class UNiagaraComponent;
+class UCurveFloat;
 
 /**
- * Stationary sniper turret NPC.
- * Uses PoseableMeshComponent (skeletal) with bone-based rotation for Yaw/Pitch.
- * Progressive aiming: locks onto target over configurable duration before firing hitscan.
- *
- * Aim interrupted by:
- * - Damage above threshold: resets progress, enters recovery delay
- * - LOS break: resets progress, re-aims immediately when LOS restored
+ * Stationary sentry turret NPC.
+ * Uses a PoseableMeshComponent with bone-based Yaw/Pitch rotation to track the target.
+ * Drives its weapon directly (StartFiring/StopFiring) for continuous full-auto fire while
+ * the target is visible — accuracy/spread come from the inherited AShooterNPC weapon path.
  */
 UCLASS()
 class POLARITY_API ASniperTurretNPC : public AShooterNPC
@@ -60,28 +64,6 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UPoseableMeshComponent> TurretMesh;
 
-	// ==================== Aiming Parameters ====================
-
-	/** Duration in seconds for aim progress to go from 0.0 to 1.0 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aiming",
-		meta = (ClampMin = "0.5", ClampMax = "10.0"))
-	float AimDuration = 2.0f;
-
-	/** Delay after damage interruption before turret re-aims (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aiming",
-		meta = (ClampMin = "0.0", ClampMax = "5.0"))
-	float DamageRecoveryDelay = 1.5f;
-
-	/** Minimum damage in a single hit to interrupt aiming (below this, aim continues) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aiming",
-		meta = (ClampMin = "0.0"))
-	float AimInterruptDamageThreshold = 5.0f;
-
-	/** Cooldown after firing before re-aiming (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aiming",
-		meta = (ClampMin = "0.1", ClampMax = "5.0"))
-	float PostFireCooldownDuration = 1.0f;
-
 	// ==================== Turret Rotation ====================
 
 	/** Speed at which turret rotates to face the target (degrees/sec) */
@@ -99,6 +81,38 @@ protected:
 		meta = (ClampMin = "0.0", ClampMax = "89.0"))
 	float MaxPitchDown = 30.0f;
 
+	// ==================== Firing ====================
+
+	/** The barrel must be within this angle (degrees) of the target on BOTH yaw and pitch
+	 *  before the turret opens fire. Prevents spraying the wall while still slewing onto target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Firing",
+		meta = (ClampMin = "0.5", ClampMax = "45.0"))
+	float FireAlignmentAngle = 8.0f;
+
+	// ==================== Fire-Rate Spin-Up ====================
+
+	/** Refire-interval multiplier at the START of a burst (spin-up cold). 1.0 = no spin-up,
+	 *  3.0 = fires 3x slower when it first opens up, ramping to full speed over SpinUpDuration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Firing|Spin-Up",
+		meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float SpinUpStartMultiplier = 3.0f;
+
+	/** Seconds of continuous fire to reach full fire rate (the weapon's authored RefireRate). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Firing|Spin-Up",
+		meta = (ClampMin = "0.0", ClampMax = "15.0"))
+	float SpinUpDuration = 3.0f;
+
+	/** Seconds for the accumulated spin-up to fully decay back to cold while NOT firing
+	 *  (LOS break / player in cover). Brief breaks barely dent it; long ones reset it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Firing|Spin-Up",
+		meta = (ClampMin = "0.0", ClampMax = "15.0"))
+	float SpinDownDuration = 1.5f;
+
+	/** Optional shaping curve: maps raw spin-up alpha (0..1) to an eased alpha (0..1).
+	 *  Null = linear. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Firing|Spin-Up")
+	TObjectPtr<UCurveFloat> SpinUpCurve;
+
 	// ==================== Bone Names ====================
 
 	/** Bone name for horizontal rotation (Yaw). Set in Blueprint to match skeleton. */
@@ -115,50 +129,30 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Weapon")
 	FName TurretWeaponSocket = FName("Muzzle");
 
-	// ==================== Aim Laser Telegraph ====================
+	// ==================== Engagement State (Runtime) ====================
 
-	/** Niagara system spawned at TurretWeaponSocket while turret is aiming. Deactivates on aim interrupt, reactivates on resume. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
-	TObjectPtr<UNiagaraSystem> AimLaserVFX;
-
-	/** Additional offset applied to laser spawn point relative to the weapon socket (local space) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
-	FVector AimLaserSpawnOffset = FVector::ZeroVector;
-
-	/** User-parameter name (float) in the Niagara system that receives aim progress (0..1) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
-	FName AimLaserIntensityParam = FName("Intensity");
-
-	/** User-parameter name (vector) in the Niagara system that receives the beam end location (world space) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Turret|Aim Telegraph")
-	FName AimLaserBeamEndParam = FName("BeamEnd");
-
-	/** Currently active laser VFX component (null when not aiming). Spawn-once, Activate/Deactivate during aim cycles. */
-	UPROPERTY()
-	TObjectPtr<UNiagaraComponent> ActiveAimLaser;
-
-	/** Last player notified as being targeted. Needed to send a disengage notification after AimTarget is cleared. */
-	TWeakObjectPtr<AActor> LastTelegraphedPlayer;
-
-	// ==================== Aiming State (Runtime) ====================
-
-	/** Current aim state */
+	/** Current engagement state */
 	ETurretAimState CurrentAimState = ETurretAimState::Idle;
 
-	/** Current aim progress (0.0 to 1.0) */
-	float AimProgress = 0.0f;
-
-	/** Current target for aiming */
+	/** Current target to track and fire at */
 	TWeakObjectPtr<AActor> AimTarget;
 
-	/** Timer handle for damage recovery delay */
-	FTimerHandle DamageRecoveryTimer;
-
-	/** Timer handle for post-fire cooldown */
-	FTimerHandle PostFireCooldownTimer;
-
-	/** True if turret currently has LOS to target */
+	/** True if turret currently has LOS to the target (updated by the StateTree task) */
 	bool bHasLOS = false;
+
+	/** True while the weapon is actively firing (Weapon->StartFiring() is in effect) */
+	bool bSentryFiring = false;
+
+	/** True when the barrel is within FireAlignmentAngle of the target on both axes */
+	bool bBarrelAligned = false;
+
+	/** Current spin-up progress (0 = cold/slow, 1 = full fire rate). Ramps up while firing,
+	 *  decays while not firing, resets to 0 on a target switch. */
+	float SpinUpAlpha = 0.0f;
+
+	/** Target the current spin-up progress belongs to. A new (different) target resets SpinUpAlpha.
+	 *  Persists across brief disengagements so spin-down — not a hard reset — handles LOS breaks. */
+	TWeakObjectPtr<AActor> SpinUpTarget;
 
 	/** Current interpolated yaw angle (relative to actor forward) */
 	float CurrentYaw = 0.0f;
@@ -168,52 +162,55 @@ protected:
 
 public:
 
-	// ==================== Delegates ====================
+	// ==================== Delegates (kept for BP/UI compatibility) ====================
 
-	/** Broadcast each tick with current aim progress and state.
-	 *  Bind in Blueprint to update aim outline/reticle/indicator. */
+	/** Broadcast on engagement-state change (Progress = 1.0 while Firing, else 0.0). */
 	UPROPERTY(BlueprintAssignable, Category = "Turret|Events")
 	FOnTurretAimProgressChanged OnAimProgressChanged;
 
-	/** Broadcast when turret fires its weapon */
+	/** Vestigial — not emitted in continuous-fire mode. */
 	UPROPERTY(BlueprintAssignable, Category = "Turret|Events")
 	FOnTurretFired OnTurretFired;
 
-	// ==================== Aiming Interface (for StateTree) ====================
+	// ==================== Engagement Interface (for StateTree) ====================
 
-	/** Begin aiming at target. Starts aim progress from 0. */
+	/** Acquire a target to track. Fire opens automatically once LOS + barrel alignment are met. */
 	UFUNCTION(BlueprintCallable, Category = "Turret|Aiming")
 	void StartAiming(AActor* Target);
 
-	/** Stop aiming. Resets aim progress and clears target. */
+	/** Disengage: stop firing and clear the target. */
 	UFUNCTION(BlueprintCallable, Category = "Turret|Aiming")
 	void StopAiming();
 
-	/** Notify that LOS status changed. Lost LOS resets progress but no recovery delay. */
+	/** Notify that LOS status changed. Losing LOS stops fire immediately. */
 	UFUNCTION(BlueprintCallable, Category = "Turret|Aiming")
 	void SetLOSStatus(bool bNewHasLOS);
 
 	// ==================== State Queries ====================
 
-	/** Returns current aim state */
+	/** Returns current engagement state */
 	UFUNCTION(BlueprintPure, Category = "Turret|State")
 	ETurretAimState GetAimState() const { return CurrentAimState; }
 
-	/** Returns current aim progress (0.0 to 1.0) */
+	/** 1.0 while firing, else 0.0 (kept for BP/UI compatibility) */
 	UFUNCTION(BlueprintPure, Category = "Turret|State")
-	float GetAimProgress() const { return AimProgress; }
+	float GetAimProgress() const { return bSentryFiring ? 1.0f : 0.0f; }
 
-	/** Returns true if turret is in damage recovery state */
+	/** Vestigial — always false (damage no longer interrupts the turret) */
 	UFUNCTION(BlueprintPure, Category = "Turret|State")
-	bool IsInDamageRecovery() const { return CurrentAimState == ETurretAimState::DamageRecovery; }
+	bool IsInDamageRecovery() const { return false; }
 
-	/** Returns true if turret is actively aiming */
+	/** True if turret is engaged but not yet firing (slewing onto target) */
 	UFUNCTION(BlueprintPure, Category = "Turret|State")
 	bool IsAiming() const { return CurrentAimState == ETurretAimState::Aiming; }
 
-	/** Returns true if turret is in post-fire cooldown */
+	/** Vestigial — always false (no post-fire cooldown in continuous-fire mode) */
 	UFUNCTION(BlueprintPure, Category = "Turret|State")
-	bool IsInPostFireCooldown() const { return CurrentAimState == ETurretAimState::PostFireCooldown; }
+	bool IsInPostFireCooldown() const { return false; }
+
+	/** True while the turret is actively firing at its target */
+	UFUNCTION(BlueprintPure, Category = "Turret|State")
+	bool IsFiring() const { return CurrentAimState == ETurretAimState::Firing; }
 
 protected:
 
@@ -229,7 +226,6 @@ protected:
 		AController* EventInstigator, AActor* DamageCauser) override;
 
 	virtual void AttachWeaponMeshes(AShooterWeapon* Weapon) override;
-	virtual FVector GetWeaponTargetLocation() override;
 
 	virtual void ApplyKnockback(const FVector& InKnockbackDirection, float Distance,
 		float Duration, const FVector& AttackerLocation = FVector::ZeroVector,
@@ -240,35 +236,28 @@ protected:
 
 public:
 
-	/** LOS check from turret mesh position (public for StateTree tasks) */
+	/** LOS check from the turret muzzle (public for StateTree tasks) */
 	virtual bool HasLineOfSightTo(AActor* Target) const override;
 
 private:
 
-	// ==================== Internal Aiming Logic ====================
+	// ==================== Internal Logic ====================
 
-	/** Advance aim progress. Called from Tick when state is Aiming. */
-	void UpdateAimProgress(float DeltaTime);
-
-	/** Rotate turret mesh toward AimTarget. Called from Tick. */
+	/** Rotate turret bones toward AimTarget and update bBarrelAligned. Called from Tick. */
 	void UpdateTurretRotation(float DeltaTime);
 
-	/** Fire the weapon at the current target. Transitions to PostFireCooldown. */
-	void FireAtTarget();
+	/** Advance/decay the fire-rate spin-up and push the resulting multiplier onto the weapon. */
+	void UpdateSpinUp(float DeltaTime);
 
-	/** Called when damage recovery delay expires */
-	void OnDamageRecoveryEnd();
+	/** Map the current SpinUpAlpha (+ optional curve) to the weapon's refire multiplier and apply it. */
+	void ApplySpinUpMultiplier();
 
-	/** Called when post-fire cooldown expires */
-	void OnPostFireCooldownEnd();
+	/** Begin continuous fire (idempotent). Requires a valid weapon. */
+	void BeginSentryFire();
 
-	/** Reset aim progress and broadcast */
-	void ResetAimProgress();
+	/** Stop continuous fire (idempotent). */
+	void EndSentryFire();
 
-	/** Transition to a new aim state and broadcast */
+	/** Transition engagement state and broadcast for BP/UI. */
 	void SetAimState(ETurretAimState NewState);
-
-	/** Handler bound to OnAimProgressChanged — drives laser VFX lifecycle and notifies player character */
-	UFUNCTION()
-	void HandleAimProgressChanged(float Progress, ETurretAimState AimState);
 };

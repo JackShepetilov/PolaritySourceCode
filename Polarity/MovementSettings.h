@@ -39,6 +39,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
 	float DefaultGravityScale = 1.5f;
 
+	// ==================== Ground Dash ====================
+
+	/** Horizontal speed maintained during the ground-only dash. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground Dash", meta = (ClampMin = "0.0"))
+	float GroundDashSpeed = 1700.0f;
+
+	/** How long the ground dash maintains its speed before normal walking friction resumes. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground Dash", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float GroundDashDuration = 0.16f;
+
+	/** Time between ground dash activations. Starts immediately when the dash starts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground Dash", meta = (ClampMin = "0.0"))
+	float GroundDashCooldown = 0.65f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
 	float StandingCapsuleHalfHeight = 96.0f;
 

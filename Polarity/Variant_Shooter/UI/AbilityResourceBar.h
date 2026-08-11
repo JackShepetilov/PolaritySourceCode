@@ -12,6 +12,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ApexMovementComponent.h"
 #include "Blueprint/UserWidget.h"
 #include "AbilityResourceBar.generated.h"
 
@@ -60,6 +61,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ability Bar|Classes")
 	TSubclassOf<UBarEntryWidget> AbilityEntryClass;
 
+	/** Optional dedicated visual class for the persistent dash entry. Falls back to AbilityEntryClass. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ability Bar|Classes")
+	TSubclassOf<UBarEntryWidget> DashEntryClass;
+
 	/** Widget class for numeric entries (ammo / melee hits / heal charges). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ability Bar|Classes")
 	TSubclassOf<UBarEntryWidget> CountEntryClass;
@@ -74,6 +79,10 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ability Bar|Icons")
 	TObjectPtr<UTexture2D> HealIcon;
+
+	/** Icon for the persistent ground/air dash entry. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ability Bar|Icons")
+	TObjectPtr<UTexture2D> DashIcon;
 
 private:
 
@@ -94,6 +103,7 @@ private:
 	TWeakObjectPtr<AShooterCharacter> BoundCharacter;
 	TWeakObjectPtr<UAbilityComponent> BoundAbilityComp;
 	TWeakObjectPtr<UUpgradeManagerComponent> BoundUpgradeManager;
+	TWeakObjectPtr<UApexMovementComponent> BoundMovement;
 
 	/** Last active weapon seen by HandleBulletCount — used to detect weapon switches so the
 	 *  switch-to-equip hints (hidden on the active weapon) refresh on swap, not just on inventory change. */
@@ -115,6 +125,14 @@ private:
 
 	/** Re-evaluate the active ability: add/refresh its entry, or remove it if there is none. */
 	void RefreshAbilityEntry();
+
+	// ==================== Dash handlers ====================
+
+	UFUNCTION() void HandleDashStateChanged();
+	UFUNCTION() void HandleMovementStateChanged(EPolarityMovementState PreviousState, EPolarityMovementState NewState);
+
+	/** Persistent entry: ground cooldown on the floor, Air Dash charges/cooldown in the air. */
+	void RefreshDashEntry();
 
 	// ==================== Weapon handlers ====================
 
@@ -154,5 +172,6 @@ private:
 	// ==================== Entry keys ====================
 
 	static const FName Key_Ability;
+	static const FName Key_Dash;
 	static const FName Key_Heal;
 };

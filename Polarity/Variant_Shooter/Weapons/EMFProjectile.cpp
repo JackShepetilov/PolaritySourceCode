@@ -195,6 +195,11 @@ AActor* AEMFProjectile::SelectHomingTarget() const
 	FCollisionObjectQueryParams ObjectQuery;
 	ObjectQuery.AddObjectTypesToQuery(ECC_Pawn);
 	ObjectQuery.AddObjectTypesToQuery(ECC_WorldDynamic);
+	// Tagged props commonly use PhysicsActor (ECC_PhysicsBody), while placed target
+	// props may stay WorldStatic. The tag check below cannot help if those actors never
+	// enter the overlap result, so include both object types explicitly.
+	ObjectQuery.AddObjectTypesToQuery(ECC_PhysicsBody);
+	ObjectQuery.AddObjectTypesToQuery(ECC_WorldStatic);
 
 	World->OverlapMultiByObjectType(Overlaps, Position, FQuat::Identity, ObjectQuery, Sphere, QueryParams);
 

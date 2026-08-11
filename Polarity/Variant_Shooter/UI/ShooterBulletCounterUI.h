@@ -5,9 +5,11 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "TutorialTypes.h"
+#include "Variant_Shooter/HitMarkerComponent.h"
 #include "ShooterBulletCounterUI.generated.h"
 
 class AShooterCharacter;
+class UImage;
 
 /**
  * Charge polarity state for UI color changes
@@ -31,6 +33,13 @@ class POLARITY_API UShooterBulletCounterUI : public UUserWidget
 	GENERATED_BODY()
 
 public:
+	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+
+	/** Rebind the native hit-marker listener to the currently possessed character. */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|HitMarker")
+	void BindHitMarkerToCharacter(AShooterCharacter* NewCharacter);
 
 	/** Allows Blueprint to update sub-widgets with the new bullet count */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter", meta = (DisplayName = "UpdateBulletCounter"))
@@ -39,6 +48,10 @@ public:
 	/** Allows Blueprint to update sub-widgets with the new life/armor totals and play a damage effect on the HUD */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter", meta = (DisplayName = "Damaged"))
 	void BP_Damaged(float LifePercent, float ArmorPercent);
+
+	/** Allows Blueprint to update health UI from an exact health snapshot. */
+	UFUNCTION(BlueprintNativeEvent, Category = "Shooter|Health", meta = (DisplayName = "On Health Changed"))
+	void BP_OnHealthChanged(float CurrentHP, float MaxHP, float LifePercent, float ArmorPercent);
 
 	// ==================== Heat System UI ====================
 
@@ -169,6 +182,23 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|HitMarker", meta = (DisplayName = "ShowHitMarker"))
 	void BP_ShowHitMarker(bool bHeadshot, bool bKilled);
 
+protected:
+	/** Existing normal hitmarker image in the HUD Blueprint. */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
+	TObjectPtr<UImage> HitMarkerImage;
+
+	/** Separate electric icon used only by zero-damage ionization confirmations. */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
+	TObjectPtr<UImage> IonizedHitMarkerImage;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UHitMarkerComponent> BoundHitMarkerComponent;
+
+	UFUNCTION()
+	void HandleHitMarkerEvent(const FHitMarkerEvent& HitEvent);
+
+public:
+
 	// ==================== Damage Direction Indicator ====================
 
 	/**
@@ -182,8 +212,8 @@ public:
 	// ==================== Respawn Rebinding ====================
 
 	/**
-	 * Rebinds the widget to a new character after respawn.
-	 * Implement in Blueprint to reconnect HitMarkerComponent delegate.
+	 * Lets Blueprint refresh its character-dependent HUD references after respawn.
+	 * Native HitMarkerComponent binding is handled by BindHitMarkerToCharacter.
 	 * @param NewCharacter - the newly spawned player character
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Shooter|Respawn", meta = (DisplayName = "BindToCharacter"))

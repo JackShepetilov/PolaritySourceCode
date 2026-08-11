@@ -11,6 +11,7 @@
 #include "Variant_Shooter/Abilities/AbilityDefinition.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
+#include "ApexMovementComponent.h"
 #include "TutorialSubsystem.h"
 #include "InputAction.h"
 #include "Engine/World.h"
@@ -19,6 +20,7 @@
 #include "TimerManager.h"
 
 const FName UAbilityResourceBar::Key_Ability = FName("ability.active");
+const FName UAbilityResourceBar::Key_Dash    = FName("movement.dash");
 const FName UAbilityResourceBar::Key_Heal    = FName("resource.heal");
 
 void UAbilityResourceBar::InitializeFor(AShooterCharacter* InCharacter)
@@ -93,6 +95,14 @@ void UAbilityResourceBar::InitializeFor(AShooterCharacter* InCharacter)
 		Ability->OnCooldownEnded.AddDynamic(this, &UAbilityResourceBar::HandleCooldownEnded);
 	}
 
+	// --- Dash: separate from combat abilities, but rendered in the same resource row. ---
+	if (UApexMovementComponent* Movement = InCharacter->GetApexMovement())
+	{
+		BoundMovement = Movement;
+		Movement->OnDashStateChanged.AddDynamic(this, &UAbilityResourceBar::HandleDashStateChanged);
+		Movement->OnMovementStateChanged.AddDynamic(this, &UAbilityResourceBar::HandleMovementStateChanged);
+	}
+
 	// --- Heal charges (shared Health-Blast / Charged-Punch pool) ---
 	if (UUpgradeManagerComponent* Upgrades = InCharacter->GetUpgradeManager())
 	{
@@ -110,6 +120,7 @@ void UAbilityResourceBar::InitializeFor(AShooterCharacter* InCharacter)
 
 	// --- Seed initial state so already-owned things show immediately ---
 	RefreshAbilityEntry();
+	RefreshDashEntry();
 	RefreshHealEntry();
 	RefreshWeaponEntries();
 
@@ -129,6 +140,7 @@ void UAbilityResourceBar::InitializeFor(AShooterCharacter* InCharacter)
 			if (UAbilityResourceBar* Bar = WeakThis.Get())
 			{
 				Bar->RefreshAbilityEntry();
+				Bar->RefreshDashEntry();
 				Bar->RefreshHealEntry();
 				Bar->RefreshWeaponEntries();
 			}
@@ -180,6 +192,11 @@ void UAbilityResourceBar::UnbindAll()
 		BoundUpgradeManager->OnUpgradeGranted.RemoveDynamic(this, &UAbilityResourceBar::HandleUpgradeGranted);
 		BoundUpgradeManager->OnUpgradeRemoved.RemoveDynamic(this, &UAbilityResourceBar::HandleUpgradeRemoved);
 	}
+	if (BoundMovement.IsValid())
+	{
+		BoundMovement->OnDashStateChanged.RemoveDynamic(this, &UAbilityResourceBar::HandleDashStateChanged);
+		BoundMovement->OnMovementStateChanged.RemoveDynamic(this, &UAbilityResourceBar::HandleMovementStateChanged);
+	}
 	if (BoundCharacter.IsValid())
 	{
 		BoundCharacter->OnBulletCountUpdated.RemoveDynamic(this, &UAbilityResourceBar::HandleBulletCount);
@@ -189,6 +206,7 @@ void UAbilityResourceBar::UnbindAll()
 
 	BoundAbilityComp = nullptr;
 	BoundUpgradeManager = nullptr;
+	BoundMovement = nullptr;
 	BoundCharacter = nullptr;
 	LastSeenActiveWeapon = nullptr;
 	LastCooldownDuration = 0.0f;
@@ -260,6 +278,52 @@ void UAbilityResourceBar::RefreshAbilityEntry()
 	else
 	{
 		Entry->SetCooldown(0.0f, 0.0f);
+	}
+}
+
+// ==================== Dash ====================
+
+void UAbilityResourceBar::HandleDashStateChanged()
+{
+	RefreshDashEntry();
+}
+
+void UAbilityResourceBar::HandleMovementStateChanged(EPolarityMovementState PreviousState, EPolarityMovementState NewState)
+{
+	RefreshDashEntry();
+}
+
+void UAbilityResourceBar::RefreshDashEntry()
+{
+	if (!BoundCharacter.IsValid() || !BoundMovement.IsValid())
+	{
+		RemoveEntry(Key_Dash);
+		return;
+	}
+
+	const TSubclassOf<UBarEntryWidget> EntryClass = DashEntryClass ? DashEntryClass : AbilityEntryClass;
+	UBarEntryWidget* Entry = AddOrGetEntry(Key_Dash, EntryClass, FName("barfirst.dash"));
+	if (!Entry)
+	{
+		return;
+	}
+
+	Entry->SetIcon(DashIcon);
+	ApplyKeybindHint(Entry, BoundCharacter->GetDashAction());
+
+	UApexMovementComponent* Movement = BoundMovement.Get();
+	if (Movement->IsFalling())
+	{
+		const bool bAirDashUnlocked = BoundCharacter->bCanAirDash;
+		Entry->SetCount(Movement->RemainingAirDashCount, bAirDashUnlocked);
+		Entry->SetCooldown(Movement->GetAirDashCooldownRemaining(), Movement->GetAirDashCooldownDuration());
+		Entry->SetAvailable(bAirDashUnlocked && Movement->CanAirDash());
+	}
+	else
+	{
+		Entry->SetCount(0, false);
+		Entry->SetCooldown(Movement->GetGroundDashCooldownRemaining(), Movement->GetGroundDashCooldownDuration());
+		Entry->SetAvailable(Movement->CanGroundDash());
 	}
 }
 

@@ -65,9 +65,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
 	FGameplayTag UpgradeTag;
 
-	/** Skill that this upgrade belongs to. Choice panel pulls from the pool of the levelled-up skill. */
+	/** Upgrade flavour (Boring / Fun / Weapons). Drives which activity awards this upgrade and card colour/icon. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
-	ESkillCategory Category = ESkillCategory::Movement;
+	ESkillCategory Category = ESkillCategory::Fun;
 
 	/** Maximum level this upgrade can reach. 1 = single-level (legacy behaviour, drops out of pool after first grant). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade", meta = (ClampMin = "1"))

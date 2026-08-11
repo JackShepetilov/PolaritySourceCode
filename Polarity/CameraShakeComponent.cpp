@@ -413,6 +413,11 @@ void UCameraShakeComponent::ApplyToCamera(float DeltaTime)
 	{
 		CameraComponent->SetFieldOfView(TargetFOV);
 	}
+
+	// Keep the first person FOV locked to the world FOV. This component is the last writer of
+	// FieldOfView each frame, so mirroring here is what actually keeps the two from drifting —
+	// writing it anywhere earlier leaves the shake offset unmatched.
+	CameraComponent->FirstPersonFieldOfView = CameraComponent->FieldOfView;
 }
 
 // ==================== Helpers ====================

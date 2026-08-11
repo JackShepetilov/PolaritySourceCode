@@ -134,6 +134,14 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Boss Health")
 	float CurrentHealthPercent = 1.0f;
 
+	/** Latest authoritative Posture percent. Recovery interpolates toward this value. */
+	float TargetHealthPercent = 1.0f;
+	int32 LastLoggedRecoveryBucket = INDEX_NONE;
+
+	/** Visual interpolation speed used only when Posture is recovering. Damage remains immediate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss Health", meta = (ClampMin = "0.0"))
+	float HealthRecoveryInterpSpeed = 6.0f;
+
 	/** Cached max HP for percentage calculations */
 	float CachedMaxHP = 1.0f;
 
@@ -166,5 +174,6 @@ protected:
 	/** Unbind from current arena */
 	void UnbindFromArena();
 
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual void NativeDestruct() override;
 };

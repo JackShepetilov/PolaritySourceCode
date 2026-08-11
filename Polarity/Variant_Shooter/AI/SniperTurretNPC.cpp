@@ -5,15 +5,10 @@
 #include "Components/PoseableMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "TimerManager.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/SkeletalMesh.h"
-#include "DamageTypes/DamageType_Melee.h"
 #include "EMFVelocityModifier.h"
-#include "NiagaraSystem.h"
-#include "NiagaraComponent.h"
-#include "NiagaraFunctionLibrary.h"
-#include "ShooterCharacter.h"
+#include "Curves/CurveFloat.h"
 
 ASniperTurretNPC::ASniperTurretNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -41,16 +36,12 @@ ASniperTurretNPC::ASniperTurretNPC(const FObjectInitializer& ObjectInitializer)
 	// Turrets are immune to knockback
 	KnockbackDistanceMultiplier = 0.0f;
 
-	// Single precise shot, no burst fire
-	BurstShotCount = 1;
-	BurstCooldown = 0.0f;
-
-	// Independent firing - no coordinator
+	// Independent firing - no combat coordinator gating
 	bUseCoordinator = false;
 
-	// Turret has its own progressive aim system (AimDuration) — perception delay
-	// would cause StartShooting→TryStartShooting to defer the shot, but StopShooting
-	// is called immediately after, killing the deferred retry → shot never fires
+	// Sentry drives its weapon directly (StartFiring/StopFiring); it does NOT use the NPC
+	// burst/permission machinery. PerceptionDelay would defer StartShooting, but we bypass
+	// that path entirely, so zero it for clarity.
 	PerceptionDelay = 0.0f;
 }
 
@@ -90,51 +81,24 @@ void ASniperTurretNPC::BeginPlay()
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] %s BeginPlay"), *GetName());
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Controller: %s"),
 		GetController() ? *GetController()->GetName() : TEXT("NONE - AI won't work!"));
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Weapon: %s"),
-		Weapon ? *Weapon->GetName() : TEXT("NONE - can't shoot!"));
+	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   Weapon: %s%s"),
+		Weapon ? *Weapon->GetName() : TEXT("NONE - can't shoot!"),
+		(Weapon && !Weapon->IsFullAuto()) ? TEXT("  *** NOT FULL-AUTO: sentry will only fire once! ***") : TEXT(""));
+	if (Weapon && Weapon->IsHeatSystemEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   *** Weapon heat system is ENABLED — it slows sustained fire and fights the spin-up. Set bUseHeatSystem=false on the turret weapon. ***"));
+	}
 	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   TurretMesh: %s, SkinnedAsset: %s"),
 		TurretMesh ? TEXT("OK") : TEXT("MISSING"),
 		(TurretMesh && TurretMesh->GetSkinnedAsset()) ? TEXT("assigned") : TEXT("NONE - invisible!"));
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   YawBone: '%s', PitchBone: '%s'"),
-		*YawBoneName.ToString(), *PitchBoneName.ToString());
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   WeaponSocket: '%s'"), *TurretWeaponSocket.ToString());
-	if (EMFVelocityModifier)
-	{
-		// All multipliers must be 0 — non-zero means the BP overrides the C++ defaults
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   EMF mults (must be 0): NPC=%.1f Player=%.1f Proj=%.1f Env=%.1f Prop=%.1f Unk=%.1f, Viscous=%d, Charge=%.1f"),
-			EMFVelocityModifier->NPCForceMultiplier,
-			EMFVelocityModifier->PlayerForceMultiplier,
-			EMFVelocityModifier->ProjectileForceMultiplier,
-			EMFVelocityModifier->EnvironmentForceMultiplier,
-			EMFVelocityModifier->PhysicsPropForceMultiplier,
-			EMFVelocityModifier->UnknownForceMultiplier,
-			EMFVelocityModifier->bEnableViscousCapture,
-			EMFVelocityModifier->GetCharge());
-	}
-
-	// Drive aim telegraph (laser VFX + player post-process) off our own progress broadcasts
-	OnAimProgressChanged.AddDynamic(this, &ASniperTurretNPC::HandleAimProgressChanged);
+	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret]   YawBone: '%s', PitchBone: '%s', WeaponSocket: '%s'"),
+		*YawBoneName.ToString(), *PitchBoneName.ToString(), *TurretWeaponSocket.ToString());
 }
 
 void ASniperTurretNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	OnAimProgressChanged.RemoveDynamic(this, &ASniperTurretNPC::HandleAimProgressChanged);
-
-	if (ActiveAimLaser)
-	{
-		ActiveAimLaser->DestroyComponent();
-		ActiveAimLaser = nullptr;
-	}
-
-	// Disengage the last telegraphed player so its PP state clears when the turret is destroyed mid-aim
-	if (LastTelegraphedPlayer.IsValid())
-	{
-		if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(LastTelegraphedPlayer.Get()))
-		{
-			Shooter->NotifyTurretTargeting(this, 0.0f, false);
-		}
-		LastTelegraphedPlayer = nullptr;
-	}
+	// Make sure the weapon isn't left firing if we're torn down mid-engagement
+	EndSentryFire();
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -214,126 +178,83 @@ void ASniperTurretNPC::Tick(float DeltaTime)
 		}
 	}
 
-	// Rotate turret toward target when engaged
-	if (AimTarget.IsValid() && CurrentAimState != ETurretAimState::Idle)
+	// === Sentry engagement: track target, open/hold fire while LOS + aligned ===
+	if (!bIsDead && AimTarget.IsValid())
 	{
+		// Slew the barrel onto the target (also refreshes bBarrelAligned)
 		UpdateTurretRotation(DeltaTime);
+
+		// Keep the parent's aim target synced so GetWeaponTargetLocation() (accuracy spread)
+		// resolves against our current target.
+		CurrentAimTarget = AimTarget;
+
+		if (bHasLOS && bBarrelAligned)
+		{
+			BeginSentryFire();
+			SetAimState(ETurretAimState::Firing);
+		}
+		else
+		{
+			EndSentryFire();
+			SetAimState(ETurretAimState::Aiming);
+		}
+	}
+	else
+	{
+		EndSentryFire();
+		SetAimState(ETurretAimState::Idle);
 	}
 
-	// Advance aim progress
-	if (CurrentAimState == ETurretAimState::Aiming)
+	// Ramp the fire rate up while firing / decay it while not (drives Weapon->ExternalFireRateMultiplier)
+	if (!bIsDead)
 	{
-		UpdateAimProgress(DeltaTime);
+		UpdateSpinUp(DeltaTime);
 	}
 }
 
-// ==================== Aiming Interface ====================
+// ==================== Engagement Interface ====================
 
 void ASniperTurretNPC::StartAiming(AActor* Target)
 {
 	if (!Target || bIsDead)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] StartAiming REJECTED: Target=%s, bIsDead=%d"),
-			Target ? *Target->GetName() : TEXT("null"), bIsDead);
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] StartAiming at %s (prevState=%d, prevProgress=%.3f, bHasLOS=%d)"),
-		*Target->GetName(), (int32)CurrentAimState, AimProgress, bHasLOS);
+	// Target switch resets the spin-up. Same target re-acquired keeps its progress (SpinUpTarget
+	// is NOT cleared on disengage), so brief drops decay via spin-down rather than hard-resetting.
+	if (SpinUpTarget.Get() != Target)
+	{
+		SpinUpAlpha = 0.0f;
+		SpinUpTarget = Target;
+	}
+
 	AimTarget = Target;
-	ResetAimProgress();
+	bBarrelAligned = false;
 	SetAimState(ETurretAimState::Aiming);
 }
 
 void ASniperTurretNPC::StopAiming()
 {
+	EndSentryFire();
 	AimTarget = nullptr;
-	ResetAimProgress();
+	CurrentAimTarget = nullptr;
+	bBarrelAligned = false;
 	SetAimState(ETurretAimState::Idle);
-
-	GetWorld()->GetTimerManager().ClearTimer(DamageRecoveryTimer);
-	GetWorld()->GetTimerManager().ClearTimer(PostFireCooldownTimer);
 }
 
 void ASniperTurretNPC::SetLOSStatus(bool bNewHasLOS)
 {
-	const bool bWasLOS = bHasLOS;
 	bHasLOS = bNewHasLOS;
 
-	if (bWasLOS != bNewHasLOS)
+	// Stop firing the instant LOS breaks (Tick would also catch it next frame, but this is snappier)
+	if (!bHasLOS)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS changed: %d → %d (State: %d, AimProgress=%.3f)"),
-			bWasLOS, bNewHasLOS, (int32)CurrentAimState, AimProgress);
-	}
-
-	if (bWasLOS && !bNewHasLOS)
-	{
-		// LOS lost - reset aim progress, no recovery delay
-		if (CurrentAimState == ETurretAimState::Aiming)
-		{
-			ResetAimProgress();
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS lost but state=%d (not Aiming) — AimProgress NOT reset (%.3f)"),
-				(int32)CurrentAimState, AimProgress);
-		}
-	}
-
-	if (!bWasLOS && bNewHasLOS)
-	{
-		// LOS regained — AimProgress should be 0 if properly reset
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] LOS REGAINED: AimProgress=%.3f, State=%d %s"),
-			AimProgress, (int32)CurrentAimState,
-			AimProgress > 0.01f ? TEXT("*** NON-ZERO PROGRESS! ***") : TEXT("(OK)"));
-
-		// If turret went Idle because LOS was lost during PostFireCooldown/DamageRecovery,
-		// restart aiming now that LOS is back
-		if (CurrentAimState == ETurretAimState::Idle && AimTarget.IsValid() && !bIsDead)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] Restarting aim from Idle (LOS regained)"));
-			ResetAimProgress();
-			SetAimState(ETurretAimState::Aiming);
-		}
+		EndSentryFire();
 	}
 }
 
-// ==================== Internal Aiming Logic ====================
-
-void ASniperTurretNPC::UpdateAimProgress(float DeltaTime)
-{
-	if (!AimTarget.IsValid() || bIsDead || !bHasLOS)
-	{
-		return;
-	}
-
-	const float OldProgress = AimProgress;
-	AimProgress += DeltaTime / AimDuration;
-	AimProgress = FMath::Clamp(AimProgress, 0.0f, 1.0f);
-
-	// Log first frame of accumulation — catches cases where progress starts non-zero
-	if (OldProgress < 0.01f && AimProgress >= 0.01f)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress STARTED: %.3f → %.3f (DT=%.4f, AimDuration=%.2f)"),
-			OldProgress, AimProgress, DeltaTime, AimDuration);
-	}
-
-	// Log when halfway — for timing reference
-	if (OldProgress < 0.5f && AimProgress >= 0.5f)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress HALFWAY: %.3f (Time=%.2f)"),
-			AimProgress, GetWorld()->GetTimeSeconds());
-	}
-
-	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
-
-	if (AimProgress >= 1.0f)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] AimProgress FULL — about to fire (Time=%.2f)"),
-			GetWorld()->GetTimeSeconds());
-		FireAtTarget();
-	}
-}
+// ==================== Internal Logic ====================
 
 // Helper: compute bone's reference-pose rotation in component space
 // by walking the skeleton hierarchy from bone to root
@@ -366,6 +287,7 @@ void ASniperTurretNPC::UpdateTurretRotation(float DeltaTime)
 {
 	if (!TurretMesh || !AimTarget.IsValid())
 	{
+		bBarrelAligned = false;
 		return;
 	}
 
@@ -382,6 +304,11 @@ void ASniperTurretNPC::UpdateTurretRotation(float DeltaTime)
 	// Interpolate toward desired angles
 	CurrentYaw = FMath::FInterpConstantTo(CurrentYaw, DesiredYaw, DeltaTime, TurretRotationSpeed);
 	CurrentPitch = FMath::FInterpConstantTo(CurrentPitch, DesiredPitch, DeltaTime, TurretRotationSpeed);
+
+	// Barrel is "aligned" (fire gate) when the residual error on both axes is within tolerance
+	const float YawError = FMath::Abs(FRotator::NormalizeAxis(DesiredYaw - CurrentYaw));
+	const float PitchError = FMath::Abs(FRotator::NormalizeAxis(DesiredPitch - CurrentPitch));
+	bBarrelAligned = (YawError <= FireAlignmentAngle && PitchError <= FireAlignmentAngle);
 
 	// Apply to yaw bone: compose aim offset ON TOP of reference pose
 	if (YawBoneName != NAME_None)
@@ -402,211 +329,101 @@ void ASniperTurretNPC::UpdateTurretRotation(float DeltaTime)
 	}
 }
 
-void ASniperTurretNPC::FireAtTarget()
+void ASniperTurretNPC::UpdateSpinUp(float DeltaTime)
 {
-	if (!AimTarget.IsValid() || !Weapon || bIsDead)
+	if (!Weapon)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SniperTurret] FireAtTarget REJECTED: Target=%d, Weapon=%d, Dead=%d"),
-			AimTarget.IsValid(), Weapon != nullptr, bIsDead);
 		return;
 	}
 
-	const float Now = GetWorld()->GetTimeSeconds();
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s] ========== FIRE ATTEMPT at %s ========== (T=%.2f)"),
-		*GetName(), *AimTarget->GetName(), Now);
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   NPC state: bIsShooting=%d, bWantsToShoot=%d, bInBurstCooldown=%d, bIsInKnockback=%d, bIsCaptured=%d, bStunnedByExplosion=%d, CurrentBurstShots=%d"),
-		*GetName(), bIsShooting, bWantsToShoot, bInBurstCooldown, bIsInKnockback, bIsCaptured, bStunnedByExplosion, CurrentBurstShots);
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   PerceptionDelay=%.3f, TargetAcquiredTime=%.2f, PerceptionTarget=%s"),
-		*GetName(), PerceptionDelay, TargetAcquiredTime,
-		PerceptionDelayTrackedTarget.IsValid() ? *PerceptionDelayTrackedTarget->GetName() : TEXT("null"));
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   Weapon: %s, RefireRate=%.3f, IsHitscan=%d"),
-		*GetName(), *Weapon->GetName(), Weapon->GetActualRefireRate(), Weapon->IsHitscan());
+	// Skip work entirely when fully cold and not firing — nothing to ramp or apply.
+	if (!bSentryFiring && SpinUpAlpha <= 0.0f)
+	{
+		return;
+	}
 
-	SetAimState(ETurretAimState::Firing);
+	if (bSentryFiring)
+	{
+		// Ramp toward full speed over SpinUpDuration of continuous fire
+		SpinUpAlpha = (SpinUpDuration > 0.0f)
+			? FMath::Min(1.0f, SpinUpAlpha + DeltaTime / SpinUpDuration)
+			: 1.0f;
+	}
+	else
+	{
+		// Decay back toward cold over SpinDownDuration while not firing
+		SpinUpAlpha = (SpinDownDuration > 0.0f)
+			? FMath::Max(0.0f, SpinUpAlpha - DeltaTime / SpinDownDuration)
+			: 0.0f;
+	}
 
-	// Set aim target on parent for GetWeaponTargetLocation
+	ApplySpinUpMultiplier();
+}
+
+void ASniperTurretNPC::ApplySpinUpMultiplier()
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	// Shape the alpha (optional curve) and map to the refire-interval multiplier.
+	// Alpha 0 -> SpinUpStartMultiplier (slow), alpha 1 -> 1.0 (full authored RefireRate).
+	const float ShapedAlpha = SpinUpCurve
+		? FMath::Clamp(SpinUpCurve->GetFloatValue(SpinUpAlpha), 0.0f, 1.0f)
+		: SpinUpAlpha;
+	const float Multiplier = FMath::Lerp(SpinUpStartMultiplier, 1.0f, ShapedAlpha);
+
+	Weapon->SetExternalFireRateMultiplier(Multiplier);
+}
+
+void ASniperTurretNPC::BeginSentryFire()
+{
+	if (bSentryFiring || !Weapon || bIsDead || !AimTarget.IsValid())
+	{
+		return;
+	}
+
+	bSentryFiring = true;
 	CurrentAimTarget = AimTarget;
 
-	// === BYPASS parent's StartShooting entirely — fire weapon directly ===
-	// StartShooting → TryStartShooting has too many potential blockers
-	// (PerceptionDelay, bInBurstCooldown, permission retry, etc.)
-	// Turret's own aim system already handles all timing.
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   Calling Weapon->StartFiring()..."), *GetName());
-	Weapon->StartFiring();
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   StartFiring returned. Calling StopFiring..."), *GetName());
-	Weapon->StopFiring();
+	// Push the current spin-up multiplier BEFORE the first shot so even shot #1's scheduled
+	// cadence reflects the cold/decayed rate (StartFiring fires immediately and schedules the
+	// next shot using the multiplier in effect at that instant).
+	ApplySpinUpMultiplier();
 
-	// Reset NPC shooting state (don't leave stale flags from OnWeaponShotFired callback)
+	// Drive the weapon directly. With a full-auto weapon, StartFiring keeps re-firing at the
+	// weapon's RefireRate until StopFiring — continuous sentry fire. (A non-full-auto weapon
+	// fires a single shot; BeginPlay logs a warning in that case.)
+	Weapon->StartFiring();
+}
+
+void ASniperTurretNPC::EndSentryFire()
+{
+	if (!bSentryFiring)
+	{
+		return;
+	}
+
+	bSentryFiring = false;
+
+	if (Weapon)
+	{
+		Weapon->StopFiring();
+	}
+
+	// Keep the inherited NPC shooting flags clean — we never use the burst/permission path,
+	// and parent::TakeDamage / TryStartShooting consult these.
 	bIsShooting = false;
 	bWantsToShoot = false;
-	bInBurstCooldown = false;
-	CurrentBurstShots = 0;
-
-	UE_LOG(LogTemp, Error, TEXT("[Turret:%s]   Post-fire cleanup done."), *GetName());
-
-	OnTurretFired.Broadcast();
-
-	// Transition to post-fire cooldown
-	ResetAimProgress();
-	SetAimState(ETurretAimState::PostFireCooldown);
-
-	GetWorld()->GetTimerManager().SetTimer(
-		PostFireCooldownTimer,
-		this, &ASniperTurretNPC::OnPostFireCooldownEnd,
-		PostFireCooldownDuration, false);
-}
-
-void ASniperTurretNPC::OnDamageRecoveryEnd()
-{
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] DamageRecoveryEnd: AimProgress=%.3f, Target=%d, LOS=%d"),
-		AimProgress, AimTarget.IsValid(), bHasLOS);
-
-	if (AimTarget.IsValid() && bHasLOS && !bIsDead)
-	{
-		// Safety: ensure progress is 0 when re-entering Aiming
-		if (AimProgress > 0.01f)
-		{
-			UE_LOG(LogTemp, Error, TEXT("[SniperTurret] *** BUG: AimProgress=%.3f when entering Aiming from DamageRecovery! Resetting. ***"),
-				AimProgress);
-			ResetAimProgress();
-		}
-		SetAimState(ETurretAimState::Aiming);
-	}
-	else
-	{
-		SetAimState(ETurretAimState::Idle);
-	}
-}
-
-void ASniperTurretNPC::OnPostFireCooldownEnd()
-{
-	UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] PostFireCooldownEnd: AimProgress=%.3f, Target=%d, LOS=%d"),
-		AimProgress, AimTarget.IsValid(), bHasLOS);
-
-	if (AimTarget.IsValid() && bHasLOS && !bIsDead)
-	{
-		// Safety: ensure progress is 0 when re-entering Aiming
-		if (AimProgress > 0.01f)
-		{
-			UE_LOG(LogTemp, Error, TEXT("[SniperTurret] *** BUG: AimProgress=%.3f when entering Aiming from PostFireCooldown! Resetting. ***"),
-				AimProgress);
-			ResetAimProgress();
-		}
-		SetAimState(ETurretAimState::Aiming);
-	}
-	else
-	{
-		SetAimState(ETurretAimState::Idle);
-	}
-}
-
-void ASniperTurretNPC::ResetAimProgress()
-{
-	if (AimProgress > 0.01f)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SniperTurret] ResetAimProgress: %.3f → 0.0 (State=%d)"),
-			AimProgress, (int32)CurrentAimState);
-	}
-	AimProgress = 0.0f;
-	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
 }
 
 void ASniperTurretNPC::SetAimState(ETurretAimState NewState)
 {
 	if (CurrentAimState != NewState)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Turret:%s] State: %d → %d (T=%.2f)"), *GetName(), (int32)CurrentAimState, (int32)NewState, GetWorld()->GetTimeSeconds());
-	}
-	CurrentAimState = NewState;
-	OnAimProgressChanged.Broadcast(AimProgress, CurrentAimState);
-}
-
-// ==================== Aim Telegraph ====================
-
-void ASniperTurretNPC::HandleAimProgressChanged(float Progress, ETurretAimState AimState)
-{
-	const bool bIsActivelyAiming = (AimState == ETurretAimState::Aiming);
-
-	// ----- Laser VFX lifecycle -----
-	if (bIsActivelyAiming)
-	{
-		// Spawn on first entry; reactivate if it was previously deactivated
-		if (!ActiveAimLaser)
-		{
-			if (AimLaserVFX && TurretMesh)
-			{
-				ActiveAimLaser = UNiagaraFunctionLibrary::SpawnSystemAttached(
-					AimLaserVFX,
-					TurretMesh,
-					TurretWeaponSocket,
-					AimLaserSpawnOffset,
-					FRotator::ZeroRotator,
-					EAttachLocation::KeepRelativeOffset,
-					false  // bAutoDestroy=false — we control the lifecycle
-				);
-			}
-		}
-		else if (!ActiveAimLaser->IsActive())
-		{
-			ActiveAimLaser->Activate(true);
-		}
-
-		// Feed aim progress + beam endpoint into the Niagara system
-		if (ActiveAimLaser)
-		{
-			ActiveAimLaser->SetVariableFloat(AimLaserIntensityParam, Progress);
-
-			if (AimTarget.IsValid())
-			{
-				FVector EndLoc = AimTarget->GetActorLocation();
-				if (const ACharacter* CharTarget = Cast<ACharacter>(AimTarget.Get()))
-				{
-					if (const UCapsuleComponent* Capsule = CharTarget->GetCapsuleComponent())
-					{
-						EndLoc.Z += Capsule->GetScaledCapsuleHalfHeight();
-					}
-				}
-				ActiveAimLaser->SetVariableVec3(AimLaserBeamEndParam, EndLoc);
-			}
-		}
-	}
-	else
-	{
-		// Deactivate (not Destroy) so Niagara can fade out via its own Lifetime Energy
-		if (ActiveAimLaser && ActiveAimLaser->IsActive())
-		{
-			ActiveAimLaser->Deactivate();
-		}
-	}
-
-	// ----- Player-side post-process notification -----
-	AActor* CurrentPlayer = (bIsActivelyAiming && AimTarget.IsValid()) ? AimTarget.Get() : nullptr;
-
-	// Disengage previous player if target changed or aim stopped
-	if (LastTelegraphedPlayer.IsValid() && LastTelegraphedPlayer.Get() != CurrentPlayer)
-	{
-		if (AShooterCharacter* PrevShooter = Cast<AShooterCharacter>(LastTelegraphedPlayer.Get()))
-		{
-			PrevShooter->NotifyTurretTargeting(this, 0.0f, false);
-		}
-	}
-
-	// Engage current player (if any)
-	if (CurrentPlayer)
-	{
-		if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(CurrentPlayer))
-		{
-			Shooter->NotifyTurretTargeting(this, Progress, true);
-			LastTelegraphedPlayer = CurrentPlayer;
-		}
-		else
-		{
-			LastTelegraphedPlayer = nullptr;
-		}
-	}
-	else
-	{
-		LastTelegraphedPlayer = nullptr;
+		CurrentAimState = NewState;
+		OnAimProgressChanged.Broadcast(GetAimProgress(), CurrentAimState);
 	}
 }
 
@@ -615,35 +432,16 @@ void ASniperTurretNPC::HandleAimProgressChanged(float Progress, ETurretAimState 
 float ASniperTurretNPC::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 	AController* EventInstigator, AActor* DamageCauser)
 {
-	// Melee damage and charge transfer pass through normally
-	// Knockback is already blocked via ApplyKnockback/ApplyKnockbackVelocity overrides
+	// Melee damage and charge transfer pass through normally.
+	// Knockback is already blocked via the ApplyKnockback/ApplyKnockbackVelocity overrides.
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 
-	// CRITICAL: Parent's TakeDamage starts retaliation shooting when attacked
-	// (sets bWantsToShoot=true, bIsShooting=true, defers TryStartShooting to next tick).
-	// Turret must ONLY fire through its own aim progress system.
-	// Reset parent's shooting state so the deferred TryStartShooting exits early.
-	bIsShooting = false;
+	// The sentry fires ONLY through its own engagement logic. Parent::TakeDamage runs a
+	// retaliation path that can acquire the attacker as a target and schedule a shot —
+	// neutralize it so a hit can't make the turret fire at something outside its engagement.
+	// (Damage no longer interrupts aiming — sentries shoot through incoming fire.)
 	bWantsToShoot = false;
-
-	if (bIsDead)
-	{
-		return ActualDamage;
-	}
-
-	// Interrupt aiming if damage exceeds threshold
-	if (ActualDamage >= AimInterruptDamageThreshold
-		&& CurrentAimState == ETurretAimState::Aiming)
-	{
-		ResetAimProgress();
-		SetAimState(ETurretAimState::DamageRecovery);
-
-		GetWorld()->GetTimerManager().ClearTimer(DamageRecoveryTimer);
-		GetWorld()->GetTimerManager().SetTimer(
-			DamageRecoveryTimer,
-			this, &ASniperTurretNPC::OnDamageRecoveryEnd,
-			DamageRecoveryDelay, false);
-	}
+	bIsShooting = false;
 
 	return ActualDamage;
 }
@@ -670,27 +468,6 @@ void ASniperTurretNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 		WeaponToAttach->GetThirdPersonMesh()->AttachToComponent(
 			TurretMesh, AttachRule, TurretWeaponSocket);
 	}
-}
-
-FVector ASniperTurretNPC::GetWeaponTargetLocation()
-{
-	// Sniper turret aims directly at target center mass - no spread.
-	// Progressive aim time IS the accuracy mechanic.
-	if (AimTarget.IsValid())
-	{
-		FVector TargetLoc = AimTarget->GetActorLocation();
-		if (const ACharacter* CharTarget = Cast<ACharacter>(AimTarget.Get()))
-		{
-			if (const UCapsuleComponent* Capsule = CharTarget->GetCapsuleComponent())
-			{
-				TargetLoc.Z += Capsule->GetScaledCapsuleHalfHeight();
-			}
-		}
-		return TargetLoc;
-	}
-
-	// Fallback: aim forward
-	return GetActorLocation() + GetActorForwardVector() * AimRange;
 }
 
 void ASniperTurretNPC::ApplyKnockback(const FVector& /*KnockbackDirection*/, float /*Distance*/,

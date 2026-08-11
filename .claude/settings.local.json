@@ -1,5 +1,5 @@
 {
-  "enabledMcpjsonServers": ["vibeue", "unrealclaude"],
+  "enabledMcpjsonServers": ["unreal-mcp"],
   "permissions": {
     "allow": [
       "Bash(git push:*)",

@@ -12,6 +12,7 @@ class AEMFPhysicsProp;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class ARiotShieldPickup;
+class USoundBase;
 
 /** Category for widget clutter reduction — widgets in the same category share a visibility pool */
 UENUM(BlueprintType)
@@ -102,6 +103,22 @@ public:
 		meta = (DisplayName = "On Capture Zone Changed"))
 	void BP_OnCaptureZoneChanged(bool bInZone);
 
+	/** Called whenever the shield value changes. Drive the indicator fill from
+	 *  InShieldDisplayValue (already remapped onto the charge material's own scale). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge|Shield",
+		meta = (DisplayName = "On Shield Updated"))
+	void BP_OnShieldUpdated(float InShieldRemaining, float InShieldDisplayValue, uint8 InPolarity, bool bInBroken);
+
+	/** Called once on the intact -> broken transition (the shield-break sound plays alongside it). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge|Shield",
+		meta = (DisplayName = "On Shield Broken"))
+	void BP_OnShieldBroken();
+
+	/** Called once on the broken -> intact transition (charge bled back below the threshold). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge|Shield",
+		meta = (DisplayName = "On Shield Restored"))
+	void BP_OnShieldRestored();
+
 	// ==================== Capture Zone ====================
 
 	/** Evaluate capture candidacy for this widget's target. Returns true if the target
@@ -139,6 +156,62 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "EMF Charge")
 	uint8 GetCurrentPolarity() const { return CurrentPolarity; }
+
+	// ==================== Shield Model ====================
+	// The overhead indicator reads as a shield the player has to break rather than a meter
+	// they fill: a fresh target shows a full bar, and charging it drains that bar to zero.
+	// ShieldRemaining is simply the mirror of NormalizedCharge — no gameplay value changes.
+
+	/** Remaining shield. 1 = intact (uncharged), 0 = broken (fully charged). */
+	UFUNCTION(BlueprintPure, Category = "EMF Charge|Shield")
+	float GetShieldRemaining() const { return ShieldRemaining; }
+
+	UFUNCTION(BlueprintPure, Category = "EMF Charge|Shield")
+	bool IsShieldBroken() const { return bShieldBroken; }
+
+	/** Upper bound of the charge material's fill scalar ("Bullet Max" on M_BulletCounter).
+	 *  ShieldDisplayValue is ShieldRemaining scaled onto this range. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Shield",
+		meta = (ClampMin = "1.0"))
+	float ShieldMaterialMaxValue = 50.0f;
+
+	/** ShieldRemaining at or below this counts as broken. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Shield",
+		meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float ShieldBrokenThreshold = 0.02f;
+
+	/** Played once when the shield breaks, spatialised at the target's location. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Shield")
+	TObjectPtr<USoundBase> ShieldBreakSound;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Shield",
+		meta = (ClampMin = "0.0"))
+	float ShieldBreakSoundVolume = 1.0f;
+
+	// ==================== Screen-centre focus ====================
+
+	/** Only show the indicator while the target sits near the middle of the screen. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Focus")
+	bool bRequireScreenCenterFocus = true;
+
+	/** Fully opaque inside this radius from screen centre, as a fraction of viewport height. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Focus",
+		meta = (EditCondition = "bRequireScreenCenterFocus", ClampMin = "0.01", ClampMax = "1.0"))
+	float ScreenCenterInnerRadius = 0.18f;
+
+	/** Fully faded out past this radius. Values below the inner radius are treated as inner. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Focus",
+		meta = (EditCondition = "bRequireScreenCenterFocus", ClampMin = "0.01", ClampMax = "1.5"))
+	float ScreenCenterOuterRadius = 0.30f;
+
+	/** Physics props stay hidden until they take their first charge. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Focus")
+	bool bHidePropsUntilFirstCharge = true;
+
+	/** |charge| above which a prop counts as having been charged at least once. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Focus",
+		meta = (EditCondition = "bHidePropsUntilFirstCharge", ClampMin = "0.0"))
+	float PropFirstChargeThreshold = 0.1f;
 
 	/** Was this widget visible on screen last frame? Used for clutter counting. */
 	bool bWasVisibleLastFrame = false;
@@ -209,6 +282,22 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge")
 	bool bIsInCaptureZone = false;
 
+	/** Mirror of NormalizedCharge: 1 = intact shield, 0 = broken. */
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Shield")
+	float ShieldRemaining = 1.0f;
+
+	/** ShieldRemaining remapped onto ShieldMaterialMaxValue — feed this straight into the
+	 *  charge material's fill scalar parameter. */
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Shield")
+	float ShieldDisplayValue = 50.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Shield")
+	bool bShieldBroken = false;
+
+	/** Set once a bound prop's charge crosses PropFirstChargeThreshold at runtime. */
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Focus")
+	bool bPropHasBeenCharged = false;
+
 	float VerticalOffset = 120.0f;
 
 	/** Max charge for normalization (cached on bind) */
@@ -232,6 +321,13 @@ private:
 
 	/** Shared charge update logic */
 	void HandleChargeUpdate(float InChargeValue, uint8 InPolarity);
+
+	/** Recompute ShieldRemaining/ShieldDisplayValue/bShieldBroken from NormalizedCharge and fire
+	 *  the BP shield events. bAllowBreakEffects is false on bind so a target that is already
+	 *  fully charged doesn't pop the break sound the moment its widget appears. */
+	void UpdateShieldState(bool bAllowBreakEffects);
+
+	void PlayShieldBreakSound() const;
 
 	UFUNCTION()
 	void OnNPCStunStart(AShooterNPC* StunnedNPC, float Duration);

@@ -6,6 +6,7 @@
 #include "UpgradeRegistry.h"
 #include "UpgradeDefinition.h"
 #include "UpgradeManagerComponent.h"
+#include "UpgradeOfferSchedule.h"
 #include "DeferredUpgradeQueueSubsystem.h"
 
 #include "Engine/GameInstance.h"
@@ -69,6 +70,7 @@ void UUpgradeChoiceWidget::NativeDestruct()
 		}
 		bIsOpen = false;
 	}
+	PendingLevelUpQueue.Reset();
 	PendingLevelUps = 0;
 
 	Super::NativeDestruct();
@@ -102,12 +104,13 @@ void UUpgradeChoiceWidget::HandleLevelUp(int32 NewLevel)
 
 	if (bIsOpen)
 	{
-		++PendingLevelUps;
+		PendingLevelUpQueue.Add(NewLevel);
+		PendingLevelUps = PendingLevelUpQueue.Num();
 		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — Choice already open, queued (%d pending)"), PendingLevelUps);
 		return;
 	}
 
-	RollChoices();
+	RollChoices(NewLevel);
 	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Widget::HandleLevelUp — RollChoices returned %d choices (Registry=%s)"),
 		CurrentChoices.Num(), Registry ? *Registry->GetName() : TEXT("NULL"));
 
@@ -122,7 +125,7 @@ void UUpgradeChoiceWidget::HandleLevelUp(int32 NewLevel)
 	OpenChoice();
 }
 
-void UUpgradeChoiceWidget::RollChoices()
+void UUpgradeChoiceWidget::RollChoices(int32 NewLevel)
 {
 	CurrentChoices.Reset();
 
@@ -138,12 +141,18 @@ void UUpgradeChoiceWidget::RollChoices()
 	int32 SkippedNull = 0;
 	int32 SkippedMaxed = 0;
 	int32 SkippedConflicts = 0;
+	int32 SkippedCategory = 0;
+
+	ESkillCategory DesiredCategory = ESkillCategory::Fun;
+	const bool bFilterByCategory = OfferSchedule && OfferSchedule->TryGetCategoryForLevel(NewLevel, DesiredCategory);
 
 	// Pool = every upgrade in the registry that isn't null, isn't already at max level,
 	// and doesn't conflict with an upgrade the player already owns (mutual exclusion).
 	// No category filter — a single roll can mix Movement / Melee / EMF / Weapon cards.
 	TArray<UUpgradeDefinition*> Pool;
+	TArray<UUpgradeDefinition*> UnfilteredPool;
 	Pool.Reserve(TotalInRegistry);
+	UnfilteredPool.Reserve(TotalInRegistry);
 	for (UUpgradeDefinition* Def : Registry->AllUpgrades)
 	{
 		if (!Def) { ++SkippedNull; continue; }
@@ -157,12 +166,27 @@ void UUpgradeChoiceWidget::RollChoices()
 			++SkippedConflicts;
 			continue;
 		}
+		UnfilteredPool.Add(Def);
+		if (bFilterByCategory && Def->Category != DesiredCategory)
+		{
+			++SkippedCategory;
+			continue;
+		}
 		Pool.Add(Def);
 	}
 
+	if (bFilterByCategory && Pool.Num() == 0 && OfferSchedule->bFallbackToAllCategoriesWhenFilteredPoolEmpty)
+	{
+		Pool = MoveTemp(UnfilteredPool);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[XP_DEBUG] RollChoices: level=%d category=%d empty, falling back to all categories (%d available)"),
+			NewLevel, static_cast<int32>(DesiredCategory), Pool.Num());
+	}
+
 	UE_LOG(LogTemp, Log,
-		TEXT("[XP_DEBUG] RollChoices: registry=%d -> pool=%d (skipped: null=%d, maxed=%d, conflicts=%d)"),
-		TotalInRegistry, Pool.Num(), SkippedNull, SkippedMaxed, SkippedConflicts);
+		TEXT("[XP_DEBUG] RollChoices: level=%d categoryFilter=%d category=%d registry=%d -> pool=%d (skipped: null=%d, maxed=%d, conflicts=%d, category=%d)"),
+		NewLevel, bFilterByCategory ? 1 : 0, static_cast<int32>(DesiredCategory),
+		TotalInRegistry, Pool.Num(), SkippedNull, SkippedMaxed, SkippedConflicts, SkippedCategory);
 
 	const int32 N = FMath::Min(ChoiceCount, Pool.Num());
 	for (int32 i = 0; i < N && Pool.Num() > 0; ++i)
@@ -229,11 +253,13 @@ void UUpgradeChoiceWidget::CloseChoice(UUpgradeDefinition* SelectedDefinition)
 
 void UUpgradeChoiceWidget::TryProcessNextPending()
 {
-	while (PendingLevelUps > 0 && !bIsOpen)
+	while (PendingLevelUpQueue.Num() > 0 && !bIsOpen)
 	{
-		--PendingLevelUps;
+		const int32 QueuedLevel = PendingLevelUpQueue[0];
+		PendingLevelUpQueue.RemoveAt(0);
+		PendingLevelUps = PendingLevelUpQueue.Num();
 
-		RollChoices();
+		RollChoices(QueuedLevel);
 		if (CurrentChoices.Num() == 0)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[XP_DEBUG] Queued level-up has no upgrades — skipping (%d still pending)"), PendingLevelUps);

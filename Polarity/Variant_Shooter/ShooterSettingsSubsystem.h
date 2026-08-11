@@ -123,11 +123,11 @@ public:
 
 private:
 
-	/** Called when a world is initialized - applies settings that need a world context */
-	void OnWorldInitialized(UWorld* World, const UWorld::InitializationValues IVS);
+	/** Called after a map load, once the new world is ready to receive per-world settings. */
+	void OnPostLoadMap(UWorld* LoadedWorld);
 
-	/** Handle for the world initialization delegate */
-	FDelegateHandle WorldInitHandle;
+	/** Handle for the completed map-load delegate. */
+	FDelegateHandle PostLoadMapHandle;
 
 	/** Cached pointer to game settings */
 	UPROPERTY()

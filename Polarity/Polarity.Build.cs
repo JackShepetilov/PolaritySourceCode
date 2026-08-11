@@ -30,10 +30,12 @@ public class Polarity : ModuleRules
             "FieldSystemEngine",
             "ChaosSolverEngine",
             "Foliage",
+            "Landscape",
+            "LandscapePatch",
             "DeveloperSettings"
         });
 
-        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags", "MoviePlayer" });
 
         // Editor-only: GC batch creator needs UnrealEd (asset saving) and ContentBrowser (selection)
         if (Target.Type == TargetType.Editor)

@@ -46,6 +46,7 @@
 #include "StyleAction.h"
 #include "Polarity/Upgrades/UpgradeRegistry.h"
 #include "Variant_Shooter/Run/RunSubsystem.h"
+#include "ShooterSettingsSubsystem.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
@@ -1229,24 +1230,34 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 
 	Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset + CurrentShieldCameraOffset);
 
+	// Hipfire FOV comes from the player setting. It has to be routed through here because
+	// UShooterGameSettings::ApplyGameplaySettings applies it with APlayerCameraManager::SetFOV,
+	// and in UE 5.8 that only fills LockedFOV, which is read back solely by GetFOVAngle() and is
+	// never applied to POV.FOV — so on its own the setting never reaches the renderer. Everything
+	// downstream (shake BaseFOV, then the mirrored first person FOV) follows from this value.
+	float HipfireFOV = BaseCameraFOV;
+	if (const UGameInstance* GI = GetGameInstance())
+	{
+		if (const UShooterSettingsSubsystem* SettingsSub = GI->GetSubsystem<UShooterSettingsSubsystem>())
+		{
+			HipfireFOV = SettingsSub->GetFieldOfView();
+		}
+	}
+
 	// FOV targets — fall back to hipfire base if the weapon has no ADSCamera.
-	float ADSFOV   = BaseCameraFOV;
-	float ADSFPFOV = BaseFirstPersonFOV;
+	float ADSFOV = HipfireFOV;
 	if (CurrentWeapon)
 	{
 		if (const UCameraComponent* WeaponADSCam = CurrentWeapon->GetADSCamera())
 		{
-			ADSFOV   = WeaponADSCam->FieldOfView;
-			ADSFPFOV = WeaponADSCam->FirstPersonFieldOfView;
+			ADSFOV = WeaponADSCam->FieldOfView;
 		}
 	}
 
 	// Lerp FOV — designer sets desired zoom directly on the weapon's ADSCamera component.
 	// CameraShakeComponent overwrites Camera->FieldOfView each frame using its own BaseFOV +
-	// effect offsets, so we route our blended value through SetBaseFOV(). FirstPersonFieldOfView
-	// is not touched by the shake component, so we write it directly on the camera.
-	const float InterpFOV   = FMath::Lerp(BaseCameraFOV,      ADSFOV,   CurrentADSAlpha);
-	const float InterpFPFOV = FMath::Lerp(BaseFirstPersonFOV, ADSFPFOV, CurrentADSAlpha);
+	// effect offsets, so we route our blended value through SetBaseFOV().
+	const float InterpFOV = FMath::Lerp(HipfireFOV, ADSFOV, CurrentADSAlpha);
 	if (UCameraShakeComponent* ShakeComp = GetCameraShake())
 	{
 		ShakeComp->SetBaseFOV(InterpFOV);
@@ -1255,7 +1266,12 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	{
 		Camera->SetFieldOfView(InterpFOV);
 	}
-	Camera->FirstPersonFieldOfView = InterpFPFOV;
+
+	// First person FOV is kept EQUAL to the world FOV. Written here for the case where there is no
+	// shake component; when there is one it writes FieldOfView after us, and mirrors the first
+	// person FOV itself. The per-weapon ADSCamera->FirstPersonFieldOfView is deliberately ignored:
+	// letting it drift from the world FOV is what put the weapon out of the hands.
+	Camera->FirstPersonFieldOfView = InterpFOV;
 }
 
 void AShooterCharacter::UpdateRegeneration(float DeltaTime)

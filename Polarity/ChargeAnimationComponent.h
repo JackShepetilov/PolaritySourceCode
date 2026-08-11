@@ -19,6 +19,7 @@ class UEMFVelocityModifier;
 class AEMFChannelingPlateActor;
 class AEMFPhysicsProp;
 class AEMFAcceleratorPlate;
+class ABasketballBall;
 class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class AUpgradePickup;
@@ -548,6 +549,12 @@ protected:
 	 *  identical to the legacy hold-mode timeline. */
 	float CaptureLockoutTimeRemaining = 0.0f;
 
+	/** Press-press mode: true while the second channel press is charging a basketball throw. */
+	bool bBasketballThrowCharging = false;
+
+	/** World time when basketball throw charging began. */
+	float BasketballThrowChargeStartTime = 0.0f;
+
 	/** Cached reference to EMFVelocityModifier */
 	UPROPERTY()
 	TObjectPtr<UEMFVelocityModifier> CachedEMFModifier;
@@ -761,6 +768,9 @@ protected:
 	/** Capture a specific physics prop */
 	void CaptureProp(AEMFPhysicsProp* Prop);
 
+	/** Capture a basketball ball (direct hold/launch, no EMF propulsion). */
+	void CaptureBasketballBall(ABasketballBall* Ball);
+
 	/** Capture a dropped melee weapon (scripted pull, not physics-based) */
 	void CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon);
 
@@ -790,6 +800,15 @@ protected:
 
 	/** Release the currently captured NPC or prop */
 	void ReleaseCapturedNPC();
+
+	/** Begin charging a captured basketball throw on the second channel press. */
+	void StartBasketballThrowCharge();
+
+	/** Release a charged basketball throw. */
+	void ReleaseBasketballThrowCharge();
+
+	/** True when the currently captured target is a basketball. */
+	bool HasCapturedBasketball() const;
 
 	/** Currently captured NPC (managed by raycast during channeling) */
 	TWeakObjectPtr<AActor> CurrentCapturedNPC;

@@ -100,7 +100,7 @@ FReply UShooterKeyBindingsUI::NativeOnMouseButtonDown(const FGeometry& InGeometr
 
 		// Don't allow left click to be bound (used for UI interaction)
 		// But allow other mouse buttons, and allow left click for Fire action
-		if (PressedKey != EKeys::LeftMouseButton || ActionBeingRebound == FName("IA_Fire"))
+		if (PressedKey != EKeys::LeftMouseButton || ActionBeingRebound == FName("Fire"))
 		{
 			ProcessKeyPress(PressedKey);
 			return FReply::Handled();
@@ -229,15 +229,15 @@ void UShooterKeyBindingsUI::CancelKeyListening()
 
 void UShooterKeyBindingsUI::ClearBinding(FName ActionName, bool bIsSecondary)
 {
-	// Find the Input Action
-	TObjectPtr<UInputAction>* FoundAction = ActionNameToInputAction.Find(ActionName);
-	if (!FoundAction || !*FoundAction)
+	// Public Blueprint API keeps the historical ActionName parameter, but it now carries
+	// the stable Player Mappable mapping name.
+	if (!ActionNameToInputAction.Contains(ActionName))
 	{
 		return;
 	}
 
 	// Clear the binding using EnhancedInputUserSettings
-	ClearBindingInternal(*FoundAction, bIsSecondary);
+	ClearBindingInternal(ActionName, bIsSecondary);
 
 	// Update cached binding
 	for (FKeyBindingDisplayInfo& Info : CachedBindings)
@@ -281,38 +281,30 @@ void UShooterKeyBindingsUI::ConfirmKeyConflict()
 	// First, clear the conflicting action's binding
 	if (ConflictingActionName != NAME_None)
 	{
-		if (TObjectPtr<UInputAction>* ConflictingAction = ActionNameToInputAction.Find(ConflictingActionName))
+		// Find which slot has the conflict and clear that exact mapping row.
+		for (FKeyBindingDisplayInfo& Info : CachedBindings)
 		{
-			if (*ConflictingAction)
+			if (Info.ActionName == ConflictingActionName)
 			{
-				// Find which slot has the conflict and clear it
-				for (FKeyBindingDisplayInfo& Info : CachedBindings)
+				if (Info.PrimaryKey == PendingConflictKey)
 				{
-					if (Info.ActionName == ConflictingActionName)
-					{
-						if (Info.PrimaryKey == PendingConflictKey)
-						{
-							// Clear primary slot of conflicting action
-							ClearBindingInternal(*ConflictingAction, false);
-							Info.PrimaryKey = EKeys::Invalid;
-						}
-						else if (Info.SecondaryKey == PendingConflictKey)
-						{
-							// Clear secondary slot of conflicting action
-							ClearBindingInternal(*ConflictingAction, true);
-							Info.SecondaryKey = EKeys::Invalid;
-						}
-						break;
-					}
+					ClearBindingInternal(ConflictingActionName, false);
+					Info.PrimaryKey = EKeys::Invalid;
 				}
+				else if (Info.SecondaryKey == PendingConflictKey)
+				{
+					ClearBindingInternal(ConflictingActionName, true);
+					Info.SecondaryKey = EKeys::Invalid;
+				}
+				break;
 			}
 		}
 	}
 
 	// Now apply the new binding
-	if (ActionBeingReboundPtr)
+	if (ActionBeingRebound != NAME_None)
 	{
-		if (ApplyKeyBinding(ActionBeingReboundPtr, PendingConflictKey, bIsRebindingSecondary))
+		if (ApplyKeyBinding(ActionBeingRebound, PendingConflictKey, bIsRebindingSecondary))
 		{
 			UpdateCachedBinding(ActionBeingRebound, PendingConflictKey, bIsRebindingSecondary);
 			BP_OnKeyBindingChanged(ActionBeingRebound, PendingConflictKey, bIsRebindingSecondary);
@@ -455,9 +447,9 @@ void UShooterKeyBindingsUI::ProcessKeyPress(FKey PressedKey)
 	}
 
 	// Apply the new key binding using EnhancedInputUserSettings
-	if (ActionBeingReboundPtr)
+	if (ActionBeingRebound != NAME_None)
 	{
-		if (ApplyKeyBinding(ActionBeingReboundPtr, PressedKey, bIsRebindingSecondary))
+		if (ApplyKeyBinding(ActionBeingRebound, PressedKey, bIsRebindingSecondary))
 		{
 			// Update cached bindings
 			UpdateCachedBinding(ActionBeingRebound, PressedKey, bIsRebindingSecondary);
@@ -483,6 +475,8 @@ void UShooterKeyBindingsUI::BuildKeyBindingsList()
 
 	UEnhancedInputLocalPlayerSubsystem* Subsystem = GetEnhancedInputSubsystem();
 	UEnhancedInputUserSettings* UserSettings = GetEnhancedInputUserSettings();
+	TSet<const UInputAction*> SkippedActions;
+	TMap<FName, int32> MappingCount;
 
 	// NOTE: IMC registration moved to NativeConstruct (runs once per widget instance)
 	// to avoid corrupting input mappings on repeated BuildKeyBindingsList calls
@@ -506,9 +500,6 @@ void UShooterKeyBindingsUI::BuildKeyBindingsList()
 		// Get all mappings from this IMC
 		const TArray<FEnhancedActionKeyMapping>& Mappings = IMC->GetMappings();
 
-		// Track which actions we've already added (for primary/secondary slot handling)
-		TMap<const UInputAction*, int32> ActionMappingCount;
-
 		for (const FEnhancedActionKeyMapping& Mapping : Mappings)
 		{
 			const UInputAction* Action = Mapping.Action.Get();
@@ -516,28 +507,45 @@ void UShooterKeyBindingsUI::BuildKeyBindingsList()
 			{
 				continue;
 			}
-
-			FName ActionName = FName(*Action->GetName());
+			// GetPlayerMappableKeySettings resolves mapping-level Override Settings, action-level
+			// inherited settings, and Ignore Settings in the same way Enhanced Input does.
+			const UPlayerMappableKeySettings* KeySettings = Mapping.GetPlayerMappableKeySettings();
+			if (!KeySettings)
+			{
+				continue;
+			}
+			const FName MappingName = Mapping.GetMappingName();
+			if (MappingName.IsNone())
+			{
+				if (!SkippedActions.Contains(Action))
+				{
+					SkippedActions.Add(Action);
+					UE_LOG(LogTemp, Warning,
+						TEXT("ShooterKeyBindingsUI: Skipping mapping for '%s': effective Player Mappable settings are missing or Mapping Name is None."),
+						*Action->GetName());
+				}
+				continue;
+			}
 
 			// Check if we already have an entry for this action
-			int32* ExistingIndex = nullptr;
+			int32 ExistingIndex = INDEX_NONE;
 			for (int32 i = 0; i < CachedBindings.Num(); ++i)
 			{
-				if (CachedBindings[i].ActionName == ActionName)
+				if (CachedBindings[i].ActionName == MappingName)
 				{
-					ExistingIndex = &i;
+					ExistingIndex = i;
 					break;
 				}
 			}
 
-			if (ExistingIndex)
+			if (ExistingIndex != INDEX_NONE)
 			{
 				// This is a secondary binding for an existing action
-				int32& Count = ActionMappingCount.FindOrAdd(Action);
+				int32& Count = MappingCount.FindOrAdd(MappingName);
 				if (Count == 1)
 				{
 					// Second mapping becomes secondary key
-					CachedBindings[*ExistingIndex].SecondaryKey = Mapping.Key;
+					CachedBindings[ExistingIndex].SecondaryKey = Mapping.Key;
 				}
 				Count++;
 			}
@@ -546,16 +554,20 @@ void UShooterKeyBindingsUI::BuildKeyBindingsList()
 				// New action entry
 				FKeyBindingDisplayInfo Info;
 				Info.InputAction = const_cast<UInputAction*>(Action);
-				Info.ActionName = ActionName;
-				Info.DisplayName = GetActionDisplayName(Action);
-				Info.Category = IMCCategoryName;
+				Info.ActionName = MappingName;
+				Info.DisplayName = KeySettings->DisplayName.IsEmpty()
+					? GetActionDisplayName(Action)
+					: KeySettings->DisplayName;
+				Info.Category = KeySettings->DisplayCategory.IsEmpty()
+					? IMCCategoryName
+					: KeySettings->DisplayCategory;
 				Info.PrimaryKey = Mapping.Key;
 				Info.SecondaryKey = EKeys::Invalid;
 				Info.bCanRemap = true;
 
 				CachedBindings.Add(Info);
-				ActionNameToInputAction.Add(ActionName, const_cast<UInputAction*>(Action));
-				ActionMappingCount.Add(Action, 1);
+				ActionNameToInputAction.Add(MappingName, const_cast<UInputAction*>(Action));
+				MappingCount.Add(MappingName, 1);
 			}
 		}
 	}
@@ -572,15 +584,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 			for (FKeyBindingDisplayInfo& Info : CachedBindings)
 			{
-				// Get the mapping name for this action
-				FName MappingName = GetMappingNameForAction(Info.InputAction);
-				if (MappingName == NAME_None)
-				{
-					MappingName = Info.ActionName;
-				}
-
 				// Check if there's a custom mapping for this action
-				if (const FKeyMappingRow* MappingRow = PlayerMappedRows.Find(MappingName))
+				if (const FKeyMappingRow* MappingRow = PlayerMappedRows.Find(Info.ActionName))
 				{
 					// Mappings is a TSet<FPlayerKeyMapping>
 					const TSet<FPlayerKeyMapping>& Mappings = MappingRow->Mappings;
@@ -608,16 +613,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 	}
 
-	// Sort by category then by display name
-	CachedBindings.Sort([](const FKeyBindingDisplayInfo& A, const FKeyBindingDisplayInfo& B)
-	{
-		int32 CategoryCompare = A.Category.CompareTo(B.Category);
-		if (CategoryCompare != 0)
-		{
-			return CategoryCompare < 0;
-		}
-		return A.DisplayName.CompareTo(B.DisplayName) < 0;
-	});
+	// Intentionally preserve designer-authored order: InputMappingContexts array order first,
+	// then the first occurrence of each Mapping Name in the IMC mappings array.
 }
 
 bool UShooterKeyBindingsUI::FindKeyConflict(FKey Key, FName ExcludeAction, FName& OutConflictingAction) const
@@ -646,8 +643,16 @@ FText UShooterKeyBindingsUI::GetActionDisplayName(const UInputAction* Action) co
 		return FText::GetEmpty();
 	}
 
-	// Try to get a nice display name from the action name
-	// Remove "IA_" prefix if present and add spaces before capitals
+	// Player Mappable Key Settings are the authoritative presentation metadata.
+	if (const UPlayerMappableKeySettings* KeySettings = Action->GetPlayerMappableKeySettings())
+	{
+		if (!KeySettings->DisplayName.IsEmpty())
+		{
+			return KeySettings->DisplayName;
+		}
+	}
+
+	// Legacy fallback for diagnostics/content that has not been migrated yet.
 	FString ActionName = Action->GetName();
 
 	// Remove common prefixes
@@ -712,9 +717,9 @@ UEnhancedInputUserSettings* UShooterKeyBindingsUI::GetEnhancedInputUserSettings(
 	return nullptr;
 }
 
-bool UShooterKeyBindingsUI::ApplyKeyBinding(const UInputAction* Action, FKey NewKey, bool bIsSecondary)
+bool UShooterKeyBindingsUI::ApplyKeyBinding(FName MappingName, FKey NewKey, bool bIsSecondary)
 {
-	if (!Action)
+	if (MappingName.IsNone())
 	{
 		return false;
 	}
@@ -724,17 +729,6 @@ bool UShooterKeyBindingsUI::ApplyKeyBinding(const UInputAction* Action, FKey New
 	{
 		UE_LOG(LogTemp, Error, TEXT("ApplyKeyBinding: UserSettings is null. Make sure 'Enable User Settings' is checked in Project Settings -> Enhanced Input"));
 		return false;
-	}
-
-	// Get the mapping name from the Input Action's PlayerMappableKeySettings
-	FName MappingName = GetMappingNameForAction(Action);
-	if (MappingName == NAME_None)
-	{
-		// Fallback to action name if no mapping name is set
-		MappingName = FName(*Action->GetName());
-		UE_LOG(LogTemp, Warning, TEXT("ApplyKeyBinding: No PlayerMappableKeySettings for action '%s'. "
-			"Open this Input Action asset and set 'User Settings' to 'Player Mappable Key Settings', "
-			"then fill in the 'Name' field. Using action name as fallback."), *Action->GetName());
 	}
 
 	// Set up the mapping args
@@ -790,25 +784,9 @@ void UShooterKeyBindingsUI::UpdateCachedBinding(FName ActionName, FKey NewKey, b
 	}
 }
 
-FName UShooterKeyBindingsUI::GetMappingNameForAction(const UInputAction* Action) const
+void UShooterKeyBindingsUI::ClearBindingInternal(FName MappingName, bool bIsSecondary)
 {
-	if (!Action)
-	{
-		return NAME_None;
-	}
-
-	// Check if the action has PlayerMappableKeySettings
-	if (const UPlayerMappableKeySettings* KeySettings = Action->GetPlayerMappableKeySettings())
-	{
-		return KeySettings->Name;
-	}
-
-	return NAME_None;
-}
-
-void UShooterKeyBindingsUI::ClearBindingInternal(const UInputAction* Action, bool bIsSecondary)
-{
-	if (!Action)
+	if (MappingName.IsNone())
 	{
 		return;
 	}
@@ -817,12 +795,6 @@ void UShooterKeyBindingsUI::ClearBindingInternal(const UInputAction* Action, boo
 	if (!UserSettings)
 	{
 		return;
-	}
-
-	FName MappingName = GetMappingNameForAction(Action);
-	if (MappingName == NAME_None)
-	{
-		MappingName = FName(*Action->GetName());
 	}
 
 	// Use UnMapPlayerKey to clear the binding

@@ -19,9 +19,15 @@ void UBossHealthWidget::ShowForBoss(ABossCharacter* Boss)
 	// Store reference
 	TrackedBoss = Boss;
 
-	// Cache max HP
-	CachedMaxHP = Boss->CurrentHP;
-	CurrentHealthPercent = 1.0f;
+	// Cache the authoritative maximum, not the current value. ShowForBoss can be called again
+	// after damage; treating that reduced value as the maximum made the next regen update read 100%.
+	CachedMaxHP = FMath::Max(1.0f, Boss->GetMaxPosture());
+	CurrentHealthPercent = GetHealthPercent();
+	TargetHealthPercent = CurrentHealthPercent;
+	LastLoggedRecoveryBucket = FMath::FloorToInt(CurrentHealthPercent * 10.0f);
+	UE_LOG(LogTemp, Warning,
+		TEXT("[BOSS_HP_DIAG] SHOW Boss=%s CurrentPosture=%.2f MaxPosture=%.2f Display=%.4f Target=%.4f"),
+		*Boss->GetName(), Boss->CurrentHP, CachedMaxHP, CurrentHealthPercent, TargetHealthPercent);
 
 	// Bind to boss events
 	Boss->OnDamageTaken.AddDynamic(this, &UBossHealthWidget::OnBossDamageTaken);
@@ -66,7 +72,8 @@ void UBossHealthWidget::ShowForBoss(ABossCharacter* Boss)
 	// Notify Blueprint
 	BP_OnShow(BossName, CurrentHealthPercent);
 
-	UE_LOG(LogTemp, Log, TEXT("[BossHealthWidget] Now tracking boss: %s (HP: %.0f)"), *BossName, CachedMaxHP);
+	UE_LOG(LogTemp, Log, TEXT("[BossHealthWidget] Now tracking boss: %s (Posture: %.0f/%.0f)"),
+		*BossName, Boss->CurrentHP, CachedMaxHP);
 }
 
 void UBossHealthWidget::Hide()
@@ -98,11 +105,65 @@ void UBossHealthWidget::OnBossDamageTaken(AShooterNPC* Boss, float Damage, TSubc
 		return;
 	}
 
-	float OldHealthPercent = CurrentHealthPercent;
-	CurrentHealthPercent = GetHealthPercent();
+	const float PreviousTargetHealthPercent = TargetHealthPercent;
+	const float NewHealthPercent = GetHealthPercent();
+	TargetHealthPercent = NewHealthPercent;
 
-	// Notify Blueprint
-	BP_OnHealthChanged(CurrentHealthPercent, OldHealthPercent, Damage);
+	if (Damage > 0.0f)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BOSS_HP_DIAG] DAMAGE Boss=%s Damage=%.2f CurrentPosture=%.2f MaxPosture=%.2f DisplayBefore=%.4f TargetBefore=%.4f NewTarget=%.4f"),
+			*GetNameSafe(Boss), Damage, TrackedBoss->CurrentHP, CachedMaxHP,
+			CurrentHealthPercent, PreviousTargetHealthPercent, NewHealthPercent);
+	}
+	else
+	{
+		const int32 RecoveryBucket = FMath::FloorToInt(NewHealthPercent * 10.0f);
+		if (RecoveryBucket > LastLoggedRecoveryBucket || NewHealthPercent - PreviousTargetHealthPercent >= 0.05f)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[BOSS_HP_DIAG] RECOVERY_TARGET Boss=%s CurrentPosture=%.2f MaxPosture=%.2f Display=%.4f PreviousTarget=%.4f NewTarget=%.4f"),
+				*GetNameSafe(Boss), TrackedBoss->CurrentHP, CachedMaxHP,
+				CurrentHealthPercent, PreviousTargetHealthPercent, NewHealthPercent);
+			LastLoggedRecoveryBucket = RecoveryBucket;
+		}
+	}
+
+	// Damage should read immediately. Recovery events carry zero damage and are smoothed in
+	// NativeTick, preventing the Blueprint's direct SetPercent call from snapping to its target.
+	if (Damage > 0.0f || NewHealthPercent <= CurrentHealthPercent)
+	{
+		const float OldHealthPercent = CurrentHealthPercent;
+		CurrentHealthPercent = NewHealthPercent;
+		BP_OnHealthChanged(CurrentHealthPercent, OldHealthPercent, Damage);
+	}
+}
+
+void UBossHealthWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	if (!TrackedBoss.IsValid() || CurrentHealthPercent >= TargetHealthPercent)
+	{
+		return;
+	}
+
+	const float OldHealthPercent = CurrentHealthPercent;
+	CurrentHealthPercent = FMath::FInterpTo(
+		CurrentHealthPercent,
+		TargetHealthPercent,
+		InDeltaTime,
+		HealthRecoveryInterpSpeed);
+
+	if (FMath::IsNearlyEqual(CurrentHealthPercent, TargetHealthPercent, KINDA_SMALL_NUMBER))
+	{
+		CurrentHealthPercent = TargetHealthPercent;
+	}
+
+	if (!FMath::IsNearlyEqual(CurrentHealthPercent, OldHealthPercent))
+	{
+		BP_OnHealthChanged(CurrentHealthPercent, OldHealthPercent, 0.0f);
+	}
 }
 
 void UBossHealthWidget::OnBossPhaseChanged(EBossPhase OldPhase, EBossPhase NewPhase)
@@ -148,6 +209,7 @@ void UBossHealthWidget::UnbindFromBoss()
 	}
 
 	TrackedBoss.Reset();
+	TargetHealthPercent = CurrentHealthPercent;
 	UnbindFromArena();
 }
 

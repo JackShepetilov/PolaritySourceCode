@@ -36,6 +36,12 @@ void UBarEntryWidget::SetKeybindHint(const FText& KeyText, UTexture2D* KeyIcon)
 	BP_SetKeybindHint(KeyText, KeyIcon);
 }
 
+void UBarEntryWidget::SetAvailable(bool bInAvailable)
+{
+	bIsAvailable = bInAvailable;
+	BP_SetAvailable(bIsAvailable);
+}
+
 float UBarEntryWidget::PlayOutro()
 {
 	return BP_PlayOutro();

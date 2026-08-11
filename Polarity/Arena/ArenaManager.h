@@ -368,6 +368,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Arena", meta = (AdvancedDisplay = "bSuppressDrops"))
 	void KillAllAliveNPCs(bool bSequential = true, float DelayBetweenKills = 0.3f, UNiagaraSystem* DeathVFX = nullptr, bool bSuppressDrops = true);
 
+	/** Stop future spawns, kill tracked NPCs, then complete and optionally award one upgrade. */
+	UFUNCTION(BlueprintCallable, Category = "Arena", meta = (AdvancedDisplay = "bSuppressDrops,bGrantUpgrade"))
+	void CompleteArenaAfterKillingAllNPCs(bool bSequential = true, float DelayBetweenKills = 0.3f,
+		UNiagaraSystem* DeathVFX = nullptr, bool bSuppressDrops = true, bool bGrantUpgrade = true);
+
 	/** Scan the world and add every AArenaSpawnPoint that lives in this manager's own level
 	 *  to the SpawnPoints array (skipping duplicates). Returns the number of points added.
 	 *  Called automatically in BeginPlay if bAutoCollectSpawnPointsFromOwnLevel is true. */
@@ -666,6 +671,8 @@ private:
 
 	/** Process the next NPC in PendingKillAllNPCs queue (sequential mode of KillAllAliveNPCs). */
 	void ProcessNextKillAll();
+	void TryFinishPendingObjectiveCompletion();
+	void GrantPendingObjectiveUpgrade();
 
 	/** Shuffled queue for sequential KillAllAliveNPCs */
 	TArray<TWeakObjectPtr<AShooterNPC>> PendingKillAllNPCs;
@@ -682,4 +689,7 @@ private:
 
 	/** Timer driving the sequential kill loop */
 	FTimerHandle KillAllTimerHandle;
+
+	bool bObjectiveCompletionPending = false;
+	bool bObjectiveCompletionGrantsUpgrade = false;
 };

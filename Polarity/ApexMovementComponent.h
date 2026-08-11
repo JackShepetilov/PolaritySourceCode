@@ -20,7 +20,8 @@ enum class EPolarityMovementState : uint8
 	Sliding,
 	Falling,
 	Mantling,
-	WallRunning
+	WallRunning,
+	GroundDashing
 };
 
 UENUM(BlueprintType)
@@ -56,6 +57,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMantleStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMantleEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAirDashStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAirDashEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGroundDashStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGroundDashEnded);
+/** Broadcast whenever a dash cooldown, charge count, or active state changes. HUD clients re-read the snapshot getters. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDashStateChanged);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnJumpPerformed, bool, bIsDoubleJump);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPreVelocityUpdate, float, FVector&);
 
@@ -112,6 +117,10 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bIsAirDashing = false;
+
+	/** True while the short ground dash speed-maintenance window is active. */
+	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	bool bIsGroundDashing = false;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bIsWallRunning = false;
@@ -182,6 +191,16 @@ public:
 	FOnAirDashEnded OnAirDashEnded;
 
 	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnGroundDashStarted OnGroundDashStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnGroundDashEnded OnGroundDashEnded;
+
+	/** UI notification for dash cooldown, charges, and context changes. */
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
+	FOnDashStateChanged OnDashStateChanged;
+
+	UPROPERTY(BlueprintAssignable, Category = "Apex|Events")
 	FOnJumpPerformed OnJumpPerformed;
 
 	FOnPreVelocityUpdate OnPreVelocityUpdate;
@@ -192,6 +211,7 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual float GetMaxSpeed() const override;
 	virtual float GetMaxAcceleration() const override;
+	virtual float GetMaxBrakingDeceleration() const override;
 	virtual void ProcessLanded(const FHitResult& Hit, float remainingTime, int32 Iterations) override;
 	virtual bool DoJump(bool bReplayingMoves, float DeltaTime = 0.f) override;
 
@@ -273,13 +293,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void TryMantle();
 
-	// ==================== Air Dash ====================
+	// ==================== Dash ====================
+
+	/** Ground-only Doom-style dash. Uses CharacterMovement velocity and collision, never direct actor movement. */
+	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
+	bool CanGroundDash() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
+	bool TryGroundDash();
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	bool CanAirDash() const;
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
-	void TryAirDash();
+	bool TryAirDash();
 
 	// ==================== Smooth Crouch ====================
 
@@ -306,6 +333,24 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsSliding() const { return bIsSliding; }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsGroundDashing() const { return bIsGroundDashing; }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
+	float GetGroundDashCooldownRemaining() const { return FMath::Max(0.0f, GroundDashCooldownRemaining); }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
+	float GetGroundDashCooldownDuration() const;
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
+	float GetAirDashCooldownRemaining() const { return FMath::Max(0.0f, AirDashCooldownRemaining); }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
+	float GetAirDashCooldownDuration() const;
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
+	int32 GetMaxAirDashCount() const;
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	float GetSpeedRatio() const;
@@ -489,6 +534,12 @@ protected:
 	float AirDashCooldownRemaining = 0.0f;
 	float AirDashDecayTimeRemaining = 0.0f;
 
+	// Ground Dash state
+	float GroundDashCooldownRemaining = 0.0f;
+	float GroundDashTimeRemaining = 0.0f;
+	float GroundDashSpeed = 0.0f;
+	FVector GroundDashDirection = FVector::ZeroVector;
+
 	// Air Dash Redirect state
 	bool bIsRedirecting = false;
 	float AirDashRedirectTimeRemaining = 0.0f;
@@ -539,6 +590,8 @@ protected:
 	// Air
 	void ApplyAirStrafe(float DeltaTime);
 	void UpdateJumpHold(float DeltaTime);
+	void UpdateGroundDash(float DeltaTime);
+	void EndGroundDash();
 	void UpdateAirDash(float DeltaTime);
 	void UpdateAirDashDecay(float DeltaTime);
 	void UpdateAirDashRedirect(float DeltaTime);

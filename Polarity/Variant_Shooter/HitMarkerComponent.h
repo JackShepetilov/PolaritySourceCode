@@ -18,6 +18,7 @@ UENUM(BlueprintType)
 enum class EHitMarkerType : uint8
 {
 	Normal,			// Regular body hit
+	Ionized,		// Zero-damage hit that successfully transferred charge
 	Headshot,		// Headshot/critical hit  
 	Kill,			// Killing blow
 	HeadshotKill	// Headshot that killed
@@ -83,6 +84,10 @@ struct FHitMarkerSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
 	FLinearColor NormalHitColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
 
+	/** Ionization confirmation color */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
+	FLinearColor IonizedHitColor = FLinearColor(0.05f, 0.8f, 1.0f, 1.0f);
+
 	/** Headshot hit color */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
 	FLinearColor HeadshotColor = FLinearColor(1.0f, 0.3f, 0.3f, 1.0f);
@@ -101,6 +106,10 @@ struct FHitMarkerSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	TObjectPtr<USoundBase> HitSound;
 
+	/** Zero-damage ionization confirmation sound */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	TObjectPtr<USoundBase> IonizedHitSound;
+
 	/** Headshot sound */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	TObjectPtr<USoundBase> HeadshotSound;
@@ -116,6 +125,10 @@ struct FHitMarkerSettings
 	/** Hit sound volume */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float HitSoundVolume = 0.5f;
+
+	/** Ionization confirmation sound volume */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float IonizedHitSoundVolume = 0.5f;
 
 	/** Kill sound volume */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0"))
@@ -196,9 +209,14 @@ public:
 
 	// ==================== Events ====================
 
-	/** Called when a hit is confirmed (for UI) */
+	/** Called for damaging hits. Legacy Blueprint HUD animation binds here. */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnHitMarkerEvent OnHitMarker;
+
+	/** Called only for zero-damage ionization confirmations. Kept separate so legacy normal-hit
+	 *  Blueprint animation cannot overwrite the electric marker. */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnHitMarkerEvent OnIonizedHitMarker;
 
 	/** Called when a kill is confirmed */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
@@ -216,6 +234,10 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Hit Marker")
 	void RegisterHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled);
+
+	/** Register a successful charge transfer that dealt no damage. */
+	UFUNCTION(BlueprintCallable, Category = "Hit Marker")
+	void RegisterIonizedHit(const FVector& HitLocation, const FVector& HitDirection);
 
 	/**
 	 * Register a kill (called separately if kill happens after hit)

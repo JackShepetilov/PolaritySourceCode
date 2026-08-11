@@ -44,6 +44,7 @@
 #include "FlyingDrone.h"
 #include "KamikazeDroneNPC.h"
 #include "SniperTurretNPC.h"
+#include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
@@ -72,6 +73,24 @@ namespace
 			CMC->bUseControllerDesiredRotation = true;
 		}
 		NPC->bUseControllerRotationYaw = false;
+	}
+
+	AShooterCharacter* ResolveShooterCharacterFromShooterNPCDamageCauser(AActor* DamageCauser)
+	{
+		for (AActor* Candidate = DamageCauser; Candidate; Candidate = Candidate->GetOwner())
+		{
+			if (AShooterCharacter* Character = Cast<AShooterCharacter>(Candidate))
+			{
+				return Character;
+			}
+
+			if (AShooterCharacter* InstigatorCharacter = Cast<AShooterCharacter>(Candidate->GetInstigator()))
+			{
+				return InstigatorCharacter;
+			}
+		}
+
+		return nullptr;
 	}
 }
 
@@ -239,6 +258,10 @@ void AShooterNPC::Tick(float DeltaTime)
 	// Store velocity BEFORE Super::Tick processes any movement/collisions
 	// This gives us the "pre-collision" velocity for impact damage calculation
 	PreviousTickVelocity = GetVelocity();
+	if (bPendingAirborneStun)
+	{
+		PendingAirborneStunMaxDownSpeed = FMath::Max(PendingAirborneStunMaxDownSpeed, -PreviousTickVelocity.Z);
+	}
 
 	Super::Tick(DeltaTime);
 
@@ -405,6 +428,74 @@ void AShooterNPC::Tick(float DeltaTime)
 		}
 	}
 #endif
+}
+
+void AShooterNPC::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+
+	if (!bPendingAirborneStun)
+	{
+		return;
+	}
+
+	const float StunDurationAfterLanding = PendingAirborneStunDuration;
+	UAnimMontage* StunMontageAfterLanding = PendingAirborneStunMontage.Get();
+	const float FallSpeed = PendingAirborneStunMaxDownSpeed;
+
+	bPendingAirborneStun = false;
+	PendingAirborneStunDuration = 0.0f;
+	PendingAirborneStunMaxDownSpeed = 0.0f;
+	PendingAirborneStunMontage = nullptr;
+
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->GravityScale = PendingAirborneStunOriginalGravityScale;
+		MoveComp->Velocity = FVector::ZeroVector;
+	}
+
+	const float ExcessFallSpeed = FMath::Max(0.0f, FallSpeed - WallSlamVelocityThreshold);
+	const float FallDamage = (ExcessFallSpeed / 100.0f) * WallSlamDamagePerVelocity;
+	if (FallDamage > 0.0f)
+	{
+		FDamageEvent FallDamageEvent;
+		FallDamageEvent.DamageTypeClass = UDamageType_Wallslam::StaticClass();
+		TakeDamage(FallDamage, FallDamageEvent, nullptr, this);
+
+		if (WallSlamSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, WallSlamSound, Hit.ImpactPoint);
+		}
+		if (WallSlamVFX)
+		{
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+				GetWorld(), WallSlamVFX, Hit.ImpactPoint, Hit.ImpactNormal.Rotation(),
+				FVector(WallSlamVFXScale), true, true, ENCPoolMethod::AutoRelease);
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_STUN] %s landed: fallSpeed=%.1f damage=%.1f; grounded stun starts next tick for %.2fs"),
+		*GetName(), FallSpeed, FallDamage, StunDurationAfterLanding);
+
+	if (bIsDead || StunDurationAfterLanding <= 0.0f || !GetWorld())
+	{
+		return;
+	}
+
+	// ACharacter::Landed is invoked from CharacterMovement::ProcessLanded before the
+	// movement mode is fully changed from Falling. Start the real stun next tick so
+	// ApplyExplosionStun sees a grounded NPC and begins its timer/montage exactly once.
+	GetWorld()->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(this,
+		[this, StunDurationAfterLanding, StunMontageAfterLanding]()
+		{
+			if (bIsDead)
+			{
+				return;
+			}
+			bIsInKnockback = false;
+			bStunnedByExplosion = false;
+			ApplyExplosionStun(StunDurationAfterLanding, StunMontageAfterLanding);
+		}));
 }
 
 float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -899,6 +990,14 @@ void AShooterNPC::Die()
 					{
 						DroppedRanged->SetCharge(NPCChargeForRanged);
 					}
+
+					if (AShooterCharacter* KillerCharacter = ResolveShooterCharacterFromShooterNPCDamageCauser(LastKillingDamageCauser))
+					{
+						if (UUpgradeManagerComponent* UpgradeMgr = KillerCharacter->GetUpgradeManager())
+						{
+							UpgradeMgr->NotifyEnemyDroppedRangedWeapon(DroppedRanged, this);
+						}
+					}
 					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Ranged drop SUCCESS — %s spawned, charge=%.2f (NPC was %.2f)"),
 						*GetName(), *Entry.DroppedWeaponClass->GetName(), DroppedRanged->GetCharge(), NPCChargeForRanged);
 				}
@@ -982,7 +1081,15 @@ void AShooterNPC::Die()
 
 	// ============== DEATH MODE DISPATCH ==============
 
-	const FDeathModeConfig& DeathConfig = ResolveDeathConfig();
+	FDeathModeConfig DeathConfig = ResolveDeathConfig();
+	if (bForceNextDeathDismemberment)
+	{
+		DeathConfig.Mode = EDeathMode::Dismemberment;
+		DeathConfig.DismembermentImpulse *= ForcedDismembermentImpulseMultiplier;
+		DeathConfig.DismembermentAngularImpulse *= ForcedDismembermentImpulseMultiplier;
+		bForceNextDeathDismemberment = false;
+		ForcedDismembermentImpulseMultiplier = 1.0f;
+	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG] %s Die() — DeathMode=%d, RagdollImpulse=%.0f"),
 		*GetName(), (int32)DeathConfig.Mode, DeathConfig.RagdollImpulse);
@@ -1009,6 +1116,27 @@ void AShooterNPC::Die()
 	}
 }
 
+void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)
+{
+	if (bIsDead)
+	{
+		return;
+	}
+
+	bSuppressDeathDrops = true;
+	bForceNextDeathDismemberment = true;
+	ForcedDismembermentImpulseMultiplier = FMath::Max(0.0f, ImpulseMultiplier);
+	LastKillingDamageType = nullptr;
+	LastKillingDamageCauser = DamageCauser;
+	LastKillingHitDirection = DamageCauser
+		? (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal()
+		: FVector::UpVector;
+
+	UE_LOG(LogTemp, Log, TEXT("[PLAYER_DEATH_SEQUENCE] CINEMATIC NPC DEATH: %s impulse-x=%.2f"),
+		*GetName(), ForcedDismembermentImpulseMultiplier);
+	Die();
+}
+
 void AShooterNPC::DeferredDestruction()
 {
 	if (bIsPooled)
@@ -1027,6 +1155,9 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 {
 	// --- Core state ---
 	bIsDead = false;
+	bSuppressDeathDrops = false;
+	bForceNextDeathDismemberment = false;
+	ForcedDismembermentImpulseMultiplier = 1.0f;
 
 	// Reset HP from class defaults
 	const AShooterNPC* CDO = GetClass()->GetDefaultObject<AShooterNPC>();
@@ -1049,6 +1180,11 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	bIsKnockbackInterpolating = false;
 	bStunnedByExplosion = false;
 	bStunnedByNPCImpact = false;
+	bForceDisabledForNPCImpactStun = false;
+	bPendingAirborneStun = false;
+	PendingAirborneStunDuration = 0.0f;
+	PendingAirborneStunMaxDownSpeed = 0.0f;
+	PendingAirborneStunMontage = nullptr;
 	bShouldStunOnNPCImpact = false;
 	bCaptureEnabledByStun = false;
 	KnockbackDirection = FVector::ZeroVector;
@@ -1131,12 +1267,17 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
 	{
 		MoveComp->SetMovementMode(MOVE_Walking);
+		if (const UCharacterMovementComponent* DefaultMoveComp = CDO->GetCharacterMovement())
+		{
+			MoveComp->GravityScale = DefaultMoveComp->GravityScale;
+		}
 		MoveComp->SetComponentTickEnabled(true);
 	}
 
 	// --- EMF components ---
 	if (EMFVelocityModifier)
 	{
+		EMFVelocityModifier->SetEnabled(true);
 		EMFVelocityModifier->SetCharge(0.0f);
 		EMFVelocityModifier->SetComponentTickEnabled(true);
 	}
@@ -1901,6 +2042,80 @@ void AShooterNPC::EndHitFlash()
 
 void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 {
+	if (bIsDead || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	UCharacterMovementComponent* AirMoveComp = GetCharacterMovement();
+	const bool bAirborne = AirMoveComp && !AirMoveComp->IsMovingOnGround() && AirMoveComp->MovementMode != MOVE_None;
+	if (bAirborne)
+	{
+		const FVector FallingVelocity = AirMoveComp->Velocity;
+		if (!bPendingAirborneStun)
+		{
+			PendingAirborneStunOriginalGravityScale = AirMoveComp->GravityScale;
+			PendingAirborneStunMaxDownSpeed = FMath::Max(0.0f, -FallingVelocity.Z);
+		}
+
+		bPendingAirborneStun = true;
+		PendingAirborneStunDuration = FMath::Max(PendingAirborneStunDuration, Duration);
+		if (StunMontage)
+		{
+			PendingAirborneStunMontage = StunMontage;
+		}
+
+		// Stop every AI-owned movement source, but restore the physical flight velocity
+		// afterwards so CMC gravity can continue the fall naturally.
+		StopShooting();
+		if (AController* MyController = GetController())
+		{
+			if (AAIController* AIController = Cast<AAIController>(MyController))
+			{
+				if (UPathFollowingComponent* PathComp = AIController->GetPathFollowingComponent())
+				{
+					PathComp->AbortMove(*this, FPathFollowingResultFlags::UserAbort, FAIRequestID::CurrentRequest,
+						EPathFollowingVelocityMode::Reset);
+				}
+				AIController->StopMovement();
+				AIController->ClearFocus(EAIFocusPriority::Gameplay);
+			}
+		}
+
+		// Remove capture/reverse-plate propulsion. Gravity must be the only movement
+		// source until Landed starts the real stun.
+		if (EMFVelocityModifier && EMFVelocityModifier->IsCapturedByPlate())
+		{
+			EMFVelocityModifier->ReleasedFromCapture();
+		}
+		if (bIsCaptured)
+		{
+			ExitCapturedState();
+		}
+		if (bIsLaunched)
+		{
+			ExitLaunchedState();
+		}
+		if (EMFVelocityModifier)
+		{
+			EMFVelocityModifier->SetEnabled(false);
+			bForceDisabledForNPCImpactStun = true;
+		}
+
+		GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
+		bIsInKnockback = true;
+		bIsKnockbackInterpolating = false;
+		bStunnedByExplosion = true;
+
+		AirMoveComp->SetMovementMode(MOVE_Falling);
+		AirMoveComp->GravityScale = AirborneStunGravityScale;
+		AirMoveComp->Velocity = FallingVelocity;
+
+		UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_STUN] %s falling: velocity=%s gravity=%.2f pendingStun=%.2fs"),
+			*GetName(), *FallingVelocity.ToCompactString(), AirMoveComp->GravityScale, PendingAirborneStunDuration);
+		return;
+	}
+
 	// === DEBUG: Show guard check ===
 	if (GEngine)
 	{
@@ -2534,7 +2749,8 @@ void AShooterNPC::HandleElasticNPCCollision(AShooterNPC* OtherNPC, const FVector
 	HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, KnockbackSpeed);
 }
 
-void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed)
+void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, const FVector& CollisionPoint, float ImpactSpeed,
+	const FVector& IncomingDirection)
 {
 	if (!OtherNPC)
 	{
@@ -2560,8 +2776,14 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] HandleElasticNPCCollisionWithSpeed: %s -> %s, ImpactSpeed=%.0f"),
 		*GetName(), *OtherNPC->GetName(), ImpactSpeed);
 
-	// Calculate collision direction (from me to other NPC)
-	FVector CollisionDirection = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+	// A fast launched NPC can already be past the target when the deferred hit is handled.
+	// In that case center-to-center points backwards and would send the supposed rebound
+	// farther forward. Prefer the sampled incoming travel direction for launched impacts.
+	FVector CollisionDirection = IncomingDirection.GetSafeNormal();
+	if (CollisionDirection.IsNearlyZero())
+	{
+		CollisionDirection = (OtherNPC->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+	}
 
 	// ==================== EMF Discharge Detection ====================
 	// Check if this is an EMF-induced collision (opposite charges)
@@ -2641,15 +2863,69 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 	// Reduce scatter so NPCs die/stagger near collision point
 	KnockbackDistance *= NPCCollisionPostImpactKnockbackMultiplier;
 
-	UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to SELF %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
-		*GetName(), -CollisionDirection.X, -CollisionDirection.Y, -CollisionDirection.Z,
-		KnockbackDistance, KnockbackDuration);
-
-	// Apply knockback to myself (backwards)
-	ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
-
 	// If this NPC was launched via reverse channeling, stun the target instead of knockback.
 	// Uses bShouldStunOnNPCImpact which persists even after bIsLaunched is cleared (e.g. speed dropped).
+	const bool bReverseChannelingNPCImpact = bShouldStunOnNPCImpact;
+	if (bReverseChannelingNPCImpact)
+	{
+		// Both participants belong to the same NPC-impact stun/drop category. Set this
+		// before the airborne fall begins so a launcher killed by landing damage still
+		// follows the same health-pickup path as the NPC it struck.
+		bStunnedByNPCImpact = true;
+		OtherNPC->bStunnedByNPCImpact = true;
+
+		// Hard stop at the impact point. Do not start a rebound interpolation: it can
+		// tunnel or slide through the target depending on when the hit is delivered.
+		const FVector StopLocation = GetActorLocation();
+		bIsKnockbackInterpolating = false;
+		if (UCharacterMovementComponent* MyMoveComp = GetCharacterMovement())
+		{
+			MyMoveComp->StopMovementImmediately();
+		}
+
+		// The reverse plate is the actual force source. Release it before stunning;
+		// otherwise ModifyVelocity runs again next frame and accelerates the NPC despite
+		// StopMovementImmediately. ReleasedFromCapture also clears bIsCaptured, which
+		// would otherwise make ApplyExplosionStun reject the launcher.
+		if (EMFVelocityModifier && EMFVelocityModifier->IsCapturedByPlate())
+		{
+			EMFVelocityModifier->ReleasedFromCapture();
+		}
+		if (bIsCaptured)
+		{
+			ExitCapturedState();
+		}
+		if (bIsLaunched)
+		{
+			ExitLaunchedState();
+		}
+
+		bIsInKnockback = false;
+		bIsKnockbackInterpolating = false;
+		if (EMFVelocityModifier)
+		{
+			EMFVelocityModifier->SetEnabled(false);
+			bForceDisabledForNPCImpactStun = true;
+		}
+		SetActorLocation(StopLocation, false, nullptr, ETeleportType::TeleportPhysics);
+		if (UCharacterMovementComponent* MyMoveComp = GetCharacterMovement())
+		{
+			MyMoveComp->SetMovementMode(MOVE_Falling);
+			MyMoveComp->Velocity = FVector::ZeroVector;
+		}
+		ApplyExplosionStun(ReverseChannelingStunDuration, ReverseChannelingStunMontage);
+
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Reverse-channelled NPC %s HARD STOP: captured=%d launched=%d stunned=%d speed=%.1f duration=%.1fs"),
+			*GetName(), bIsCaptured, bIsLaunched, bStunnedByExplosion, GetVelocity().Size(), ReverseChannelingStunDuration);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NPC Collision] Applying knockback to SELF %s: Dir=(%.1f,%.1f,%.1f), Dist=%.0f, Dur=%.2f"),
+			*GetName(), -CollisionDirection.X, -CollisionDirection.Y, -CollisionDirection.Z,
+			KnockbackDistance, KnockbackDuration);
+
+		ApplyKnockback(-CollisionDirection, KnockbackDistance, KnockbackDuration, OtherNPC->GetActorLocation());
+	}
 
 	// === DEBUG: Show stun flag state ===
 	if (GEngine)
@@ -2660,7 +2936,7 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 				*OtherNPC->GetName(), OtherNPC->bIsInKnockback, OtherNPC->bIsCaptured, OtherNPC->bIsLaunched, OtherNPC->bIsDead));
 	}
 
-	if (bShouldStunOnNPCImpact)
+	if (bReverseChannelingNPCImpact)
 	{
 		bShouldStunOnNPCImpact = false; // One-shot: only stun on first NPC-NPC collision
 
@@ -2675,7 +2951,6 @@ void AShooterNPC::HandleElasticNPCCollisionWithSpeed(AShooterNPC* OtherNPC, cons
 		}
 
 		OtherNPC->ApplyExplosionStun(ReverseChannelingStunDuration, ReverseChannelingStunMontage);
-		OtherNPC->bStunnedByNPCImpact = true; // Track NPC-sourced stun for reduced HP pickup drop
 	}
 	else
 	{
@@ -3114,11 +3389,12 @@ void AShooterNPC::EndKnockbackStun()
 	// turn (runs at the player with its mesh facing a stale direction).
 	RestoreGroundCombatRotation(this);
 
-	// Re-enable EMF forces
-	if (bDisableEMFDuringKnockback && EMFVelocityModifier)
+	// Re-enable EMF forces, including the unconditional hard-disable used by NPC impact stun.
+	if ((bDisableEMFDuringKnockback || bForceDisabledForNPCImpactStun) && EMFVelocityModifier)
 	{
 		EMFVelocityModifier->SetEnabled(true);
 	}
+	bForceDisabledForNPCImpactStun = false;
 
 	// Restore focus on current target so NPC resumes facing the player
 	if (AController* MyController = GetController())
@@ -3249,10 +3525,19 @@ void AShooterNPC::OnCapturedMontageEnded(UAnimMontage* Montage, bool bInterrupte
 
 void AShooterNPC::NotifyReverseLaunchRelease()
 {
+	// Low Health Defense may have slowed this NPC before capture. Reverse-launch movement must run
+	// at real speed; the upgrade also excludes the NPC from subsequent slow scans during flight.
+	CustomTimeDilation = 1.0f;
+
 	if (bApplyReverseChannelingStun)
 	{
 		bShouldStunOnNPCImpact = true;
 	}
+}
+
+bool AShooterNPC::IsInPlayerLaunchFlight() const
+{
+	return bIsLaunched || (EMFVelocityModifier && EMFVelocityModifier->IsReverseLaunchInProgress());
 }
 
 void AShooterNPC::ExitCapturedState()
@@ -3422,7 +3707,7 @@ void AShooterNPC::OnLaunchedMontageEnded(UAnimMontage* Montage, bool bInterrupte
 	}
 }
 
-void AShooterNPC::ExitLaunchedState()
+void AShooterNPC::ExitLaunchedState(bool bPreserveKnockback)
 {
 	if (!bIsLaunched)
 	{
@@ -3430,20 +3715,26 @@ void AShooterNPC::ExitLaunchedState()
 	}
 
 	bIsLaunched = false;
-	bIsInKnockback = false;
+	if (!bPreserveKnockback)
+	{
+		bIsInKnockback = false;
+	}
 
 	// Throw recovery: this is the tail of the capture -> launch (throw) sequence, and it used to
 	// restore NEITHER rotation NOR focus — so the NPC kept a stale facing and ran at the player with
 	// its mesh turned. Re-assert the ground combat rotation mode and re-focus the target here, the
 	// same way EndKnockbackStun / ExitCapturedState do.
-	RestoreGroundCombatRotation(this);
-	if (AController* MyController = GetController())
+	if (!bPreserveKnockback)
 	{
-		if (AShooterAIController* AIController = Cast<AShooterAIController>(MyController))
+		RestoreGroundCombatRotation(this);
+		if (AController* MyController = GetController())
 		{
-			if (AActor* Target = AIController->GetCurrentTarget())
+			if (AShooterAIController* AIController = Cast<AShooterAIController>(MyController))
 			{
-				AIController->SetFocus(Target);
+				if (AActor* Target = AIController->GetCurrentTarget())
+				{
+					AIController->SetFocus(Target);
+				}
 			}
 		}
 	}
@@ -3452,8 +3743,8 @@ void AShooterNPC::ExitLaunchedState()
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Orange,
-			FString::Printf(TEXT("[RC STUN] ExitLaunchedState %s: bIsInKnockback now FALSE, bShouldStunOnNPCImpact=%d (should persist!)"),
-				*GetName(), bShouldStunOnNPCImpact));
+			FString::Printf(TEXT("[RC STUN] ExitLaunchedState %s: preserveKnockback=%d, bIsInKnockback=%d, bShouldStunOnNPCImpact=%d"),
+				*GetName(), bPreserveKnockback, bIsInKnockback, bShouldStunOnNPCImpact));
 	}
 
 	// Revert to normal force filtering weights
@@ -3536,8 +3827,9 @@ void AShooterNPC::UpdateLaunchedCollision()
 			if (PreCollisionSpeed >= NPCCollisionMinVelocity)
 			{
 				FVector CollisionPoint = Hit.ImpactPoint;
-				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, PreCollisionSpeed);
-				ExitLaunchedState();
+				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, PreCollisionSpeed,
+					PreviousTickVelocity.GetSafeNormal());
+				ExitLaunchedState(/*bPreserveKnockback=*/ true);
 				return;
 			}
 		}
@@ -3778,18 +4070,20 @@ void AShooterNPC::OnCapsuleHit(UPrimitiveComponent* HitComponent, AActor* OtherA
 
 				// Thrown-by-player state must be sampled BEFORE ExitLaunchedState clears it.
 				const bool bWasThrownByPlayer = bIsLaunched || bShouldStunOnNPCImpact;
+				const bool bWasReverseChannelingNPCImpact = bShouldStunOnNPCImpact;
 
 				FVector CollisionPoint = (GetActorLocation() + OtherNPC->GetActorLocation()) * 0.5f;
-				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, ImpactSpeed);
+				HandleElasticNPCCollisionWithSpeed(OtherNPC, CollisionPoint, ImpactSpeed,
+					PreviousTickVelocity.GetSafeNormal());
 				if (bIsLaunched)
 				{
-					ExitLaunchedState();
+					ExitLaunchedState(/*bPreserveKnockback=*/ true);
 				}
 
 				// Air Mail: thrown NPC survived ramming an enemy → bounce toward the player.
 				// Kicked flights and landing contacts of a previous bounce don't re-bounce.
 				// Body-vs-body hit → the capsule normal is meaningless, skip the angle gate.
-				if (!bWasAirMailKicked && !bWasAirMailIncoming && bWasThrownByPlayer && !bIsDead)
+				if (!bWasReverseChannelingNPCImpact && !bWasAirMailKicked && !bWasAirMailIncoming && bWasThrownByPlayer && !bIsDead)
 				{
 					TryAirMailBounceForNPC(this, PreviousTickVelocity, Hit.ImpactNormal, CollisionPoint,
 						/*bSkipAngleCheck=*/ true);

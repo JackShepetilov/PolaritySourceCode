@@ -33,6 +33,10 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonCameraComponent->SetRelativeLocation(FVector(0.f, 0.f, 64.f));
 	FirstPersonCameraComponent->SetRelativeRotation(FRotator::ZeroRotator);
 	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+	// First person FOV stays ENABLED, but is mirrored onto the world FOV every frame by
+	// UCameraShakeComponent::ApplyToCamera (the last writer of FieldOfView in the frame).
+	// Note this is NOT the same as clearing the flag: with the flag off the engine substitutes the
+	// FOV of the camera COMPONENT, which is not necessarily the FOV the frame is rendered with.
 	FirstPersonCameraComponent->bEnableFirstPersonFieldOfView = true;
 	FirstPersonCameraComponent->bEnableFirstPersonScale = true;
 	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
@@ -71,6 +75,21 @@ void APolarityCharacter::BeginPlay()
 	if (ApexMovement && MovementSettings)
 	{
 		ApexMovement->MovementSettings = MovementSettings;
+	}
+
+	// Enforce the camera parenting at runtime. Changing SetupAttachment in the constructor does NOT
+	// update content that was already saved against the old hierarchy: the Blueprint keeps an
+	// overridden template for this inherited component, and spawned instances get AttachParent =
+	// body mesh from it even though the CDO correctly reports the camera. Verified in PIE.
+	if (FirstPersonMesh && FirstPersonCameraComponent &&
+		FirstPersonMesh->GetAttachParent() != FirstPersonCameraComponent)
+	{
+		UE_LOG(LogTemplateCharacter, Warning,
+			TEXT("[FPMESH_DEBUG] FirstPersonMesh was attached to %s, re-attaching to the camera"),
+			FirstPersonMesh->GetAttachParent() ? *FirstPersonMesh->GetAttachParent()->GetName() : TEXT("nothing"));
+
+		FirstPersonMesh->AttachToComponent(FirstPersonCameraComponent,
+			FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 	}
 
 	// Rest pose of FirstPersonMesh under the camera. Taken from the dedicated properties rather
@@ -558,12 +577,20 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 	// Rig's aim target; with the mesh riding the camera it is a plain camera-space offset.
 	Location += CurrentAimOffset;
 
-	Rotation.Pitch += CurrentWeaponTilt.Pitch;
-	Rotation.Yaw   += CurrentWeaponTilt.Yaw;
-	Rotation.Roll  += CurrentWeaponTilt.Roll;
-	Rotation.Pitch += CurrentRunSwayRotation.Pitch;
-	Rotation.Yaw   += CurrentRunSwayRotation.Yaw;
-	Rotation.Roll  += CurrentRunSwayRotation.Roll;
+	// ==================== Tilt & sway, pivoted between the shoulders ====================
+	// SetRelativeRotation spins the component around ITS OWN origin, and that origin is the root
+	// of the skeleton — down at the feet, measured at ~153 cm below the eye. Adding tilt straight
+	// into Rotation therefore swung the weapon along a 154 cm arc, about 2.7 cm of travel per
+	// degree, which reads as the gun sliding away rather than nodding.
+	// Instead, rotate around a fixed point in CAMERA space. Camera space (not mesh space) is what
+	// keeps this free of feedback: the pivot never depends on where the accumulated pose put the
+	// mesh this frame. Measured in game, the midpoint between upperarm_l and upperarm_r sits at
+	// roughly (25, 5, -22), which is the value below.
+	const FVector ShoulderPivot(25.0f, 5.0f, -22.0f);
+
+	const FQuat PivotedRotation = (CurrentWeaponTilt + CurrentRunSwayRotation).Quaternion();
+	Location = ShoulderPivot + PivotedRotation.RotateVector(Location - ShoulderPivot);
+	Rotation = (PivotedRotation * Rotation.Quaternion()).Rotator();
 }
 
 void APolarityCharacter::ApplyCameraManagerRoll()
