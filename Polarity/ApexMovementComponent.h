@@ -389,6 +389,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	bool TryJump();
 
+	/** Fire the jump feedback: camera shake for whoever is locally driving this character, plus
+	 *  the OnJumpPerformed event. Called from every successful path inside DoJump, so it works
+	 *  the same whether the jump resolved from local input or from a replicated move. */
+	void NotifyJumpPerformed(bool bWasAirJump);
+
 	// ==================== Camera State (for Character to read) ====================
 
 	/** Current camera roll from wallrun - ONLY roll is used */

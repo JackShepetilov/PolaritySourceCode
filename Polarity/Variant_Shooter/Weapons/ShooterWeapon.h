@@ -526,6 +526,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Crosshair")
 	FCrosshairConfig CrosshairConfig;
 
+	/** Single entry point for every hit this weapon lands.
+	 *  On the authority it applies damage directly, exactly as before. On a client owned by a
+	 *  player it hands the hit to the owning character, which reports it to the server: a client
+	 *  writing HP locally would only kill its own copy of the target.
+	 *  Returns the damage that was actually applied on the authority, or the requested damage on
+	 *  a client, where the true number only comes back later as replicated health. */
+	float ApplyDamageToTarget(AActor* HitActor, float FinalDamage, const struct FDamageEvent& DamageEvent);
+
 	// ==================== State ====================
 
 	bool bIsFiring = false;
@@ -705,6 +713,21 @@ protected:
 
 	UFUNCTION(BlueprintCallable, Category = "SFX")
 	void PlayFireSound();
+
+	/** Muzzle flash + fire sound on this machine. The shared body of the local call and the
+	 *  multicast, so the effects can never drift apart between owner and observers. */
+	void PlayFireEffectsLocally();
+
+public:
+	/** Muzzle flash and fire sound, played on every machine that can see this weapon.
+	 *  Cosmetic only, so it is unreliable: a dropped shot effect is better than a stalled channel
+	 *  during sustained fire. Multicast originates on the authority, which is why the firing client
+	 *  plays its own effects locally first instead of waiting for the round trip.
+	 *  Public because the owning character relays a client's shot through it. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayFireEffects();
+
+protected:
 
 public:
 

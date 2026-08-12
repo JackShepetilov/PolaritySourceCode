@@ -1,4 +1,4 @@
-// ApexMovementComponent.cpp
+﻿// ApexMovementComponent.cpp
 // Titanfall 2 / Apex Legends style movement implementation
 
 #include "ApexMovementComponent.h"
@@ -458,14 +458,38 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 
 bool UApexMovementComponent::TryJump()
 {
-	bool JumpResult = DoJump(false, 0.f);
+	// Record the INTENT instead of jumping on the spot.
+	//
+	// ACharacter::Jump() only sets bPressedJump, and that flag is what rides the saved move to the
+	// server (FSavedMove_Character carries it as FLAG_JumpPressed); the server unpacks it and calls
+	// DoJump itself. Calling DoJump directly from input changed Velocity on this machine only. On a
+	// listen server host that looks correct, because the host IS the authority, but on a client the
+	// server never learns a jump happened and its position correction undoes it. That is exactly why
+	// the host could jump in the first coop session and the client could not.
+	//
+	// All of the jump logic still lives in DoJump below, which the movement component calls on both
+	// sides. The camera shake moved into NotifyJumpPerformed, so it fires from wherever the jump
+	// actually resolves rather than from the input handler.
+	if (ACharacter* OwningCharacter = Cast<ACharacter>(GetOwner()))
+	{
+		OwningCharacter->Jump();
+		return true;
+	}
 
-	if (JumpResult)
+	return false;
+}
+
+void UApexMovementComponent::NotifyJumpPerformed(bool bWasAirJump)
+{
+	// Only the person actually holding this character should feel it: on a listen server DoJump
+	// also runs for every remote player's character.
+	const ACharacter* OwningCharacter = Cast<ACharacter>(GetOwner());
+	if (OwningCharacter && OwningCharacter->IsLocallyControlled())
 	{
 		PlayCameraShake(JumpCameraShake);
 	}
 
-	return JumpResult;
+	OnJumpPerformed.Broadcast(bWasAirJump);
 }
 
 bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
@@ -513,7 +537,7 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		}
 
 		// Broadcast jump event (wall jump is not considered double jump)
-		OnJumpPerformed.Broadcast(false);
+		NotifyJumpPerformed(false);
 
 		return true;
 	}
@@ -560,7 +584,7 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		}
 
 		// Broadcast jump event (slide jump counts as first jump)
-		OnJumpPerformed.Broadcast(CurrentJumpCount > 1);
+		NotifyJumpPerformed(CurrentJumpCount > 1);
 
 		return true;
 	}
@@ -585,7 +609,7 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		}
 
 		// Broadcast jump event with double jump flag
-		OnJumpPerformed.Broadcast(CurrentJumpCount > 1);
+		NotifyJumpPerformed(CurrentJumpCount > 1);
 
 		return true;
 	}

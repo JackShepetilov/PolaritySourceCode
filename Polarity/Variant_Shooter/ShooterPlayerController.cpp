@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "Variant_Shooter/ShooterPlayerController.h"
@@ -285,6 +285,9 @@ void AShooterPlayerController::AcknowledgePossession(APawn* InPawn)
 	// OnPossess line below will disagree about which pawn it is, or this line will not appear.
 	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] AcknowledgePossession: %s"),
 		*DescribeCoopContext(this, InPawn));
+
+	// This is a client's only chance to hook its HUD up to its pawn: OnPossess never runs here.
+	BindToPossessedCharacter(InPawn);
 }
 
 void AShooterPlayerController::OnPossess(APawn* InPawn)
@@ -299,32 +302,58 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 		PossessCount, *DescribeCoopContext(this, InPawn));
 
 	// subscribe to the pawn's OnDestroyed delegate
+	InPawn->OnDestroyed.RemoveDynamic(this, &AShooterPlayerController::OnPawnDestroyed);
 	InPawn->OnDestroyed.AddDynamic(this, &AShooterPlayerController::OnPawnDestroyed);
 
-	// is this a shooter character?
+	BindToPossessedCharacter(InPawn);
+}
+
+void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
+{
+	// Called from BOTH sides. OnPossess is server only, so a client that never runs this ends up
+	// with a HUD subscribed to nothing: no health, no ammo, no weapon, no cooldowns. That is
+	// exactly what the first coop session showed, with the client's HP bar frozen at full while
+	// hit sounds still played, because those come from the character and never touch the controller.
+	//
+	// Every binding below is Remove-then-Add so calling this twice is harmless: on a listen server
+	// host both OnPossess and AcknowledgePossession fire for the same pawn.
 	if (AShooterCharacter* ShooterCharacter = Cast<AShooterCharacter>(InPawn))
 	{
 		// add the player tag
-		ShooterCharacter->Tags.Add(PlayerPawnTag);
+		ShooterCharacter->Tags.AddUnique(PlayerPawnTag);
 
 		// subscribe to the pawn's delegates
+		ShooterCharacter->OnBulletCountUpdated.RemoveDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);
 		ShooterCharacter->OnBulletCountUpdated.AddDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);
+		ShooterCharacter->OnHealthChanged.RemoveDynamic(this, &AShooterPlayerController::OnPawnHealthChanged);
 		ShooterCharacter->OnHealthChanged.AddDynamic(this, &AShooterPlayerController::OnPawnHealthChanged);
+		ShooterCharacter->OnDamageDirection.RemoveDynamic(this, &AShooterPlayerController::OnDamageDirection);
 		ShooterCharacter->OnDamageDirection.AddDynamic(this, &AShooterPlayerController::OnDamageDirection);
+		ShooterCharacter->OnHeatUpdated.RemoveDynamic(this, &AShooterPlayerController::OnHeatUpdated);
 		ShooterCharacter->OnHeatUpdated.AddDynamic(this, &AShooterPlayerController::OnHeatUpdated);
+		ShooterCharacter->OnSpeedUpdated.RemoveDynamic(this, &AShooterPlayerController::OnSpeedUpdated);
 		ShooterCharacter->OnSpeedUpdated.AddDynamic(this, &AShooterPlayerController::OnSpeedUpdated);
+		ShooterCharacter->OnPolarityChanged.RemoveDynamic(this, &AShooterPlayerController::OnPolarityChanged);
 		ShooterCharacter->OnPolarityChanged.AddDynamic(this, &AShooterPlayerController::OnPolarityChanged);
+		ShooterCharacter->OnChargeUpdated.RemoveDynamic(this, &AShooterPlayerController::OnChargeUpdated);
 		ShooterCharacter->OnChargeUpdated.AddDynamic(this, &AShooterPlayerController::OnChargeUpdated);
+		ShooterCharacter->OnMeleeWeaponEquipped.RemoveDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
 		ShooterCharacter->OnMeleeWeaponEquipped.AddDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
+		ShooterCharacter->OnActiveWeaponChanged.RemoveDynamic(this, &AShooterPlayerController::OnActiveWeaponChanged);
 		ShooterCharacter->OnActiveWeaponChanged.AddDynamic(this, &AShooterPlayerController::OnActiveWeaponChanged);
 
 		// Bind melee component events directly for drop kick cooldown UI
 		if (UMeleeAttackComponent* MeleeComp = ShooterCharacter->GetMeleeAttackComponent())
 		{
+			MeleeComp->OnDropKickCooldownStarted.RemoveDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
 			MeleeComp->OnDropKickCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
+			MeleeComp->OnDropKickCooldownEnded.RemoveDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
 			MeleeComp->OnDropKickCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
+			MeleeComp->OnMeleeCooldownStarted.RemoveDynamic(this, &AShooterPlayerController::OnMeleeCooldownStarted);
 			MeleeComp->OnMeleeCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnMeleeCooldownStarted);
+			MeleeComp->OnMeleeCooldownEnded.RemoveDynamic(this, &AShooterPlayerController::OnMeleeCooldownEnded);
 			MeleeComp->OnMeleeCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnMeleeCooldownEnded);
+			MeleeComp->OnMeleeChargeChanged.RemoveDynamic(this, &AShooterPlayerController::OnMeleeChargeChanged);
 			MeleeComp->OnMeleeChargeChanged.AddDynamic(this, &AShooterPlayerController::OnMeleeChargeChanged);
 		}
 

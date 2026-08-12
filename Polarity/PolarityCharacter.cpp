@@ -257,6 +257,16 @@ void APolarityCharacter::DoJumpStart()
 	}
 }
 
+bool APolarityCharacter::CanJumpInternal_Implementation() const
+{
+	// The engine's default gate assumes engine jump rules (grounded, JumpCurrentCount, crouch).
+	// This game's rules live entirely in UApexMovementComponent::DoJump, which tracks its own jump
+	// count and handles wall running and slide hops. Letting the default gate run would block those
+	// before DoJump ever gets a say, and it is DoJump that returns false when a jump is not
+	// available, so nothing is lost by being permissive here.
+	return ApexMovement ? true : Super::CanJumpInternal_Implementation();
+}
+
 void APolarityCharacter::DoJumpEnd()
 {
 	StopJumping();

@@ -41,6 +41,50 @@
 #include "EnemyBeamBoltSubsystem.h"
 #include "VFX/VFXVariantSequenceSubsystem.h"
 
+void AShooterWeapon::PlayFireEffectsLocally()
+{
+	SpawnMuzzleFlashEffect();
+	PlayFireSound();
+}
+
+void AShooterWeapon::Multicast_PlayFireEffects_Implementation()
+{
+	// The shooter already played these locally the moment they pulled the trigger.
+	const bool bIsShooter = PawnOwner && PawnOwner->IsLocallyControlled();
+	if (!bIsShooter)
+	{
+		PlayFireEffectsLocally();
+	}
+}
+
+float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, const FDamageEvent& DamageEvent)
+{
+	if (!IsValid(HitActor) || FinalDamage <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// A player firing from a client cannot write health itself: AShooterCharacter::TakeDamage is
+	// authority-only now, so the direct call below would silently do nothing on that machine while
+	// still looking like a hit locally. Route it through the character, which reports it upstream.
+	// NPC weapons are unaffected: AI runs on the server, where this branch is never taken.
+	if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (!OwnerCharacter->HasAuthority())
+		{
+			OwnerCharacter->DealDamage(HitActor, FinalDamage, DamageEvent.DamageTypeClass);
+
+			// Report the requested damage so local hit feedback still fires immediately. Kill
+			// feedback will not, because the client cannot know yet: it learns the outcome from
+			// replicated health a round trip later.
+			return FinalDamage;
+		}
+	}
+
+	return HitActor->TakeDamage(FinalDamage, DamageEvent,
+		PawnOwner ? PawnOwner->GetController() : nullptr, this);
+}
+
 namespace
 {
 	/** Check if actor is dead after TakeDamage (synchronous check via HP/bIsDead flags) */
@@ -83,6 +127,13 @@ namespace
 AShooterWeapon::AShooterWeapon()
 {
 	PrimaryActorTick.bCanEverTick = true;
+
+	// Teammates have to see what you are holding. Without this the weapon actor simply does not
+	// exist on anyone else's machine: the third-person mesh has nothing to attach to, so a remote
+	// player stands there in a pistol pose with empty hands. Movement is not replicated because the
+	// weapon is attached to the character and rides along with it.
+	bReplicates = true;
+	SetReplicatingMovement(false);
 
 	// create the root
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
@@ -403,11 +454,26 @@ void AShooterWeapon::Fire()
 
 	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() PROCEEDING: spawning effects, getting target..."), *GetName());
 
-	// Spawn muzzle flash effect for all weapon types
-	SpawnMuzzleFlashEffect();
+	// Muzzle flash and fire sound.
+	//
+	// Always play them here so the shooter sees and hears the shot at once, with no round trip.
+	// Then tell everyone else: the effects used to be purely local, which is why a teammate's gun
+	// fired in total silence with no tracer.
+	PlayFireEffectsLocally();
 
-	// Play fire sound with random pitch
-	PlayFireSound();
+	if (HasAuthority())
+	{
+		Multicast_PlayFireEffects();
+	}
+	else
+	{
+		// A client's shot reaches the server through AShooterCharacter::Server_ReportDamage, but a
+		// missed shot has no damage to report, so the effects need their own path upstream.
+		if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+		{
+			OwnerCharacter->Server_ReportWeaponFired(this);
+		}
+	}
 
 	// Add heat from firing
 	if (bUseHeatSystem)
@@ -1077,7 +1143,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			DamageEvent.DamageTypeClass = HitscanDamageType;
 		}
 
-		float ActualDamage = BestTarget->TakeDamage(FinalDamage, DamageEvent, PawnOwner ? PawnOwner->GetController() : nullptr, this);
+		float ActualDamage = ApplyDamageToTarget(BestTarget, FinalDamage, DamageEvent);
 		const bool bKilled = IsActorDeadAfterDamage(BestTarget);
 
 		// [HITSCAN_DEBUG] dealt = what we sent into TakeDamage, applied = what TakeDamage returned.
@@ -1295,7 +1361,7 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 		DamageEvent.DamageTypeClass = HitscanDamageType;
 	}
 
-	float ActualDamage = HitActor->TakeDamage(FinalDamage, DamageEvent, PawnOwner ? PawnOwner->GetController() : nullptr, this);
+	float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
 
 	bool bKilled = IsActorDeadAfterDamage(HitActor);
 
@@ -1605,7 +1671,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			DamageEvent.DamageTypeClass = HitscanDamageType;
 		}
 
-		const float ActualDamage = HitActor->TakeDamage(FinalDamage, DamageEvent, PawnOwner ? PawnOwner->GetController() : nullptr, this);
+		const float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
 		const bool bKilled = IsActorDeadAfterDamage(HitActor);
 
 		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),

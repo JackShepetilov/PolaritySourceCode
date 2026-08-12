@@ -294,8 +294,19 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Health", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
 	float StartingHPPercent = 1.0f;
 
-	/** Current HP remaining to this character */
+	/** Current HP remaining to this character.
+	 *  Server-owned: only the authority writes it, everyone else receives it. */
+	UPROPERTY(ReplicatedUsing = OnRep_CurrentHP)
 	float CurrentHP = 0.0f;
+
+	/** Push the replicated health down to the UI on clients, and run the cosmetic side of dying
+	 *  when the authority's HP reaches zero. */
+	UFUNCTION()
+	void OnRep_CurrentHP();
+
+	/** Client-side latch so a repeated HP replication does not replay the death.
+	 *  Never set on the authority, where Die() is driven from TakeDamage instead. */
+	bool bHasPlayedLocalDeath = false;
 
 	// ==================== Armor (DOOM Eternal-style) ====================
 
@@ -303,9 +314,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Armor")
 	float MaxArmor = 250.0f;
 
-	/** Current armor remaining (absorbs damage before health) */
-	UPROPERTY(BlueprintReadOnly, Category = "Armor")
+	/** Current armor remaining (absorbs damage before health). Server-owned, like CurrentHP. */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CurrentArmor, Category = "Armor")
 	float CurrentArmor = 0.0f;
+
+	UFUNCTION()
+	void OnRep_CurrentArmor();
 
 	// ==================== HP Regeneration ====================
 
@@ -347,8 +361,14 @@ protected:
 	/** List of weapons picked up by the character */
 	TArray<AShooterWeapon*> OwnedWeapons;
 
-	/** Weapon currently equipped and ready to shoot with */
+	/** Weapon currently equipped and ready to shoot with.
+	 *  Replicated so teammates can see which weapon is in your hands and see it change. */
+	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon)
 	TObjectPtr<AShooterWeapon> CurrentWeapon;
+
+	/** Re-attach the third-person weapon meshes on machines that only observe this character. */
+	UFUNCTION()
+	void OnRep_CurrentWeapon();
 
 	/** Reserve copies of yanked weapons held by the Bandolier upgrade. Hidden actors with
 	 *  bullet state preserved; not in OwnedWeapons, not seen by FindWeaponOfType or the
@@ -949,8 +969,29 @@ protected:
 
 public:
 
-	/** Handle incoming damage */
+	/** Handle incoming damage. Authority only: a client that calls this changes nothing. */
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	// ==================== Coop damage routing ====================
+
+	/** Deal damage on behalf of this character. Applies it directly on the authority and reports
+	 *  it to the server otherwise, so a client's shot actually lands instead of only killing its
+	 *  own local copy of the target. Every weapon owned by a player must go through here. */
+	void DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
+
+	/** Client to server half of DealDamage. Reliable: dropping a hit loses a kill.
+	 *  Unvalidated on purpose. The handoff decided this is a coop PvE game where players trust
+	 *  each other, so the server takes the client's word for the hit instead of re-simulating it. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
+
+	/** Tell the server this client's weapon fired, so it can multicast the muzzle flash and sound
+	 *  to everyone else. A miss carries no damage, so effects need their own way upstream.
+	 *  Unreliable: cosmetic, and a lost one costs a single frame of flash. */
+	UFUNCTION(Server, Unreliable)
+	void Server_ReportWeaponFired(AShooterWeapon* Weapon);
 
 	/** Broadcast the current health/armor snapshot to listeners. */
 	void BroadcastHealthChanged();

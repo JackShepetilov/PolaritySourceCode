@@ -146,6 +146,11 @@ protected:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoJumpStart();
 
+	/** ApexMovementComponent::DoJump owns every jump rule this game has (ground, air, wall, slide),
+	 *  so the engine's own gate must not veto it first. Kept permissive on purpose: DoJump returns
+	 *  false by itself when no jump is available. */
+	virtual bool CanJumpInternal_Implementation() const override;
+
 	/** Handles jump end inputs from either controls or UI interfaces */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoJumpEnd();

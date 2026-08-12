@@ -112,8 +112,12 @@ protected:
 	virtual void OnPossess(APawn* InPawn) override;
 
 	/** Client-side counterpart of OnPossess: this is where a client learns which pawn it drives.
-	 *  Overridden only to log it while the coop transition is being debugged. */
+	 *  Also the client's only chance to bind its HUD, since OnPossess never runs on a client. */
 	virtual void AcknowledgePossession(APawn* InPawn) override;
+
+	/** Subscribe this controller's HUD to the pawn it drives. Safe to call more than once, and
+	 *  called from both OnPossess (server) and AcknowledgePossession (client). */
+	void BindToPossessedCharacter(APawn* InPawn);
 
 	/** How many times this controller has possessed anything. Diagnostic for the duplicate
 	 *  OnPossess that makes the delegate AddDynamic calls fire an ensure. */

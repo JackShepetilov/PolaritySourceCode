@@ -2,6 +2,8 @@
 
 
 #include "ShooterCharacter.h"
+#include "Net/UnrealNetwork.h"
+#include "Engine/DamageEvents.h"
 #include "ShooterWeapon.h"
 #include "Upgrades/Upgrades/Upgrade_ChargedPunch.h"
 #include "Weapons/ShooterWeapon_Melee.h"
@@ -387,8 +389,112 @@ void AShooterCharacter::DoAim(float Yaw, float Pitch)
 	}
 }
 
+void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AShooterCharacter, CurrentHP);
+	DOREPLIFETIME(AShooterCharacter, CurrentArmor);
+	DOREPLIFETIME(AShooterCharacter, CurrentWeapon);
+}
+
+void AShooterCharacter::OnRep_CurrentWeapon()
+{
+	// Observers only ever learn "which weapon" — the attachment itself is local work, and the
+	// weapon actor arrives unattached because its movement is not replicated.
+	if (CurrentWeapon)
+	{
+		AttachWeaponMeshes(CurrentWeapon);
+	}
+
+	// Same event the server-side equip path fires, so the local HUD reacts identically.
+	OnActiveWeaponChanged.Broadcast(CurrentWeapon);
+}
+
+void AShooterCharacter::OnRep_CurrentHP()
+{
+	// The authority already ran the full TakeDamage path. Everyone else only learns the result,
+	// so this is where a client's HUD and death visuals catch up.
+	BroadcastHealthChanged();
+
+	if (CurrentHP <= 0.0f && !bHasPlayedLocalDeath)
+	{
+		bHasPlayedLocalDeath = true;
+		// Safe on a client: the only authority-side line in Die() is the team score, and
+		// GetAuthGameMode() already returns null here. Everything else is local presentation.
+		Die();
+	}
+	else if (CurrentHP > 0.0f)
+	{
+		// Respawn or heal: allow the next death to play again.
+		bHasPlayedLocalDeath = false;
+	}
+}
+
+void AShooterCharacter::OnRep_CurrentArmor()
+{
+	BroadcastHealthChanged();
+}
+
+void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass)
+{
+	if (!HitActor || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	if (HasAuthority())
+	{
+		FPointDamageEvent DamageEvent;
+		DamageEvent.DamageTypeClass = DamageTypeClass;
+		if (!DamageEvent.DamageTypeClass)
+		{
+			DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+		}
+		HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+		return;
+	}
+
+	// Client: the hit only counts once the server has applied it.
+	Server_ReportDamage(HitActor, Damage, DamageTypeClass);
+}
+
+void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass)
+{
+	if (!HitActor || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	FPointDamageEvent DamageEvent;
+	DamageEvent.DamageTypeClass = DamageTypeClass;
+	if (!DamageEvent.DamageTypeClass)
+	{
+		DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+	}
+	HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+}
+
+void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* Weapon)
+{
+	// Only relay effects for a weapon this character actually holds, so a stale or foreign
+	// reference cannot make someone else's gun flash.
+	if (Weapon && Weapon == CurrentWeapon)
+	{
+		Weapon->Multicast_PlayFireEffects();
+	}
+}
+
 float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
+	// Only the server decides how much health anyone has. Without this a client would kill its
+	// own local copy of a teammate while the real one stands there at full HP, which is exactly
+	// what the first coop session showed.
+	if (!HasAuthority())
+	{
+		return 0.0f;
+	}
+
 	// ignore if already dead
 	if (CurrentHP <= 0.0f)
 	{
