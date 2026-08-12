@@ -396,15 +396,42 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AShooterCharacter, CurrentHP);
 	DOREPLIFETIME(AShooterCharacter, CurrentArmor);
 	DOREPLIFETIME(AShooterCharacter, CurrentWeapon);
+	DOREPLIFETIME(AShooterCharacter, OwnedWeapons);
+}
+
+void AShooterCharacter::OnRep_OwnedWeapons()
+{
+	// Inventory arrived: the arms are allowed to exist again.
+	UpdateFirstPersonMeshVisibility();
 }
 
 void AShooterCharacter::OnRep_CurrentWeapon()
 {
+	// [COOP_DEBUG] Does the switch actually arrive on the observer, and with a resolved actor?
+	// A replicated pointer can land before the weapon actor itself is relevant here, in which case
+	// this fires with null and nothing gets attached.
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] OnRep_CurrentWeapon: Char=%s weapon=%s hidden=%d local=%d"),
+		*GetName(),
+		CurrentWeapon ? *CurrentWeapon->GetName() : TEXT("NULL"),
+		CurrentWeapon ? (CurrentWeapon->IsHidden() ? 1 : 0) : -1,
+		IsLocallyControlled() ? 1 : 0);
+
 	// Observers only ever learn "which weapon" — the attachment itself is local work, and the
 	// weapon actor arrives unattached because its movement is not replicated.
 	if (CurrentWeapon)
 	{
 		AttachWeaponMeshes(CurrentWeapon);
+
+		// Attaching the mesh is only half of holding a gun: the pose comes from the weapon's
+		// animation blueprint, and nothing sets it here otherwise. That is why a teammate's
+		// character carried the right weapon while running with empty-handed arm swings, and why a
+		// client whose equip runs on the server saw the same on its own first-person mesh.
+		// OnWeaponActivated is pure presentation (HUD, anim classes, melee mesh, recoil), so it is
+		// safe on any machine; ActivateWeapon is not, it also drives tutorials and visibility.
+		OnWeaponActivated(CurrentWeapon);
+
+		// CurrentWeapon and OwnedWeapons can arrive in either order, so re-check from both.
+		UpdateFirstPersonMeshVisibility();
 	}
 
 	// Same event the server-side equip path fires, so the local HUD reacts identically.
@@ -477,11 +504,24 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 
 void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* Weapon)
 {
-	// Only relay effects for a weapon this character actually holds, so a stale or foreign
-	// reference cannot make someone else's gun flash.
-	if (Weapon && Weapon == CurrentWeapon)
+	// Ownership, not "is it the current weapon": a shot fired a moment before a switch would
+	// otherwise be dropped because the server had already moved on, which is what made the muzzle
+	// flash visible in one direction and not the other. Ownership still stops a stale or foreign
+	// reference from making someone else's gun flash.
+	if (Weapon && OwnedWeapons.Contains(Weapon))
 	{
 		Weapon->Multicast_PlayFireEffects();
+	}
+}
+
+void AShooterCharacter::Server_ReportBeamEffect_Implementation(AShooterWeapon* Weapon, FVector Start, FVector End,
+	float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
+	float OverrideBoltLength, float OverrideRandomSeed)
+{
+	if (Weapon && OwnedWeapons.Contains(Weapon))
+	{
+		Weapon->Multicast_PlayBeamEffect(Start, End, EnergyMultiplier,
+			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
 	}
 }
 
@@ -788,17 +828,79 @@ void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
 		CurrentWeapon->StopFiring();
 	}
 
-	// Store the weapon we're switching to
-	PendingWeapon = NewWeapon;
+	// Coop: the switch is INSTANT for now, and the lower/raise animation is deliberately parked.
+	//
+	// Which weapon a character holds has to be decided by the server, otherwise teammates see
+	// whatever the server last knew while the owner sees something else, and the two never
+	// reconcile: CurrentWeapon and the actor's bHidden both replicate downward and overwrite the
+	// client's local idea. Switching locally is exactly what produced "a rifle held in a pistol
+	// stance" in the first coop session.
+	//
+	// To bring the animation back: drive the phases below from the SERVER's equip instead, and
+	// replicate the phase so observers play it too. The old code is one commit back.
+	//	PendingWeapon = NewWeapon;
+	//	bIsWeaponSwitchInProgress = true;
+	//	bIsWeaponLowering = true;
+	//	WeaponSwitchProgress = 0.0f;
+	//	WeaponSwitchMeshZOffset = 0.0f;
 
-	// Begin switch animation
-	bIsWeaponSwitchInProgress = true;
-	bIsWeaponLowering = true;
-	WeaponSwitchProgress = 0.0f;
-	WeaponSwitchMeshZOffset = 0.0f;
+	// Apply locally right away so the weapon changes in your own hands with no round trip, then
+	// let the authority make it true for everyone. The server always accepts a weapon this
+	// character owns, so this prediction cannot disagree with the confirmation.
+	EquipWeaponImmediate(NewWeapon);
+
+	if (!HasAuthority())
+	{
+		Server_RequestEquipWeapon(NewWeapon);
+	}
 
 	// Play weapon switch sound
 	PlayWeaponSwitchSound();
+}
+
+void AShooterCharacter::EquipWeaponImmediate(AShooterWeapon* NewWeapon)
+{
+	if (!NewWeapon || NewWeapon == CurrentWeapon)
+	{
+		return;
+	}
+
+	// [COOP_DEBUG] Who ran the equip, on which side, and what it hid/showed.
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] EquipWeaponImmediate: Char=%s authority=%d local=%d | old=%s new=%s"),
+		*GetName(), HasAuthority() ? 1 : 0, IsLocallyControlled() ? 1 : 0,
+		CurrentWeapon ? *CurrentWeapon->GetName() : TEXT("NULL"),
+		*NewWeapon->GetName());
+
+	// Same body the lowered phase of the animated switch used to run.
+	AShooterWeapon* OldWeapon = CurrentWeapon;
+
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->DeactivateWeapon();
+	}
+
+	CurrentWeapon = NewWeapon;
+	CurrentWeapon->ActivateWeapon();
+	PendingWeapon = nullptr;
+
+	// Observers get this through OnRep_CurrentWeapon; the local machine needs it here.
+	AttachWeaponMeshes(CurrentWeapon);
+	OnActiveWeaponChanged.Broadcast(CurrentWeapon);
+
+	if (UpgradeManager && OldWeapon != CurrentWeapon)
+	{
+		UpgradeManager->NotifyWeaponChanged(OldWeapon, CurrentWeapon);
+	}
+}
+
+void AShooterCharacter::Server_RequestEquipWeapon_Implementation(AShooterWeapon* Weapon)
+{
+	// Only ever equip something this character actually owns, so a stale or foreign reference
+	// cannot put someone else's gun in these hands.
+	if (Weapon && OwnedWeapons.Contains(Weapon))
+	{
+		EquipWeaponImmediate(Weapon);
+	}
 }
 
 void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
@@ -2431,6 +2533,18 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 
 void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass)
 {
+	// Only the server creates weapons; everyone else receives them.
+	//
+	// This used to run on every machine, which was invisible while nothing replicated: each side
+	// simply kept its own private set. Once weapon actors started replicating, every client ended
+	// up holding BOTH sets, nine actors instead of four for two players. That is what put two guns
+	// in the same socket, and it is why a client's equip request did nothing: the client handed the
+	// server a locally spawned actor, which has no network identity, so the reference arrived null.
+	if (!HasAuthority())
+	{
+		return;
+	}
+
 	AShooterWeapon* OwnedWeapon = FindWeaponOfType(WeaponClass);
 
 	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] AddWeaponClass: Class=%s, OwnedWeapon=%s (%s branch)"),
@@ -2520,6 +2634,12 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 	if (AShooterWeapon* OwnedWeapon = FindWeaponOfType(WeaponClass))
 	{
 		return OwnedWeapon;
+	}
+
+	// Server creates the weapon; a client gets it replicated. See AddWeaponClass for why.
+	if (!HasAuthority())
+	{
+		return nullptr;
 	}
 
 	if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponWithSameSwitchAction(OwnedWeapons, WeaponClass))
@@ -3496,6 +3616,12 @@ AShooterWeapon* AShooterCharacter::AddYankedReserveCopy(TSubclassOf<AShooterWeap
 	int32 BulletCount)
 {
 	if (!WeaponClass) return nullptr;
+
+	// Server creates the weapon; a client gets it replicated. See AddWeaponClass for why.
+	if (!HasAuthority())
+	{
+		return nullptr;
+	}
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = this;

@@ -358,8 +358,17 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Team")
 	uint8 TeamByte = 0;
 
-	/** List of weapons picked up by the character */
+	/** List of weapons picked up by the character.
+	 *  Replicated because the server owns weapon creation now: without this a client's inventory
+	 *  is empty, so pressing a switch key finds nothing to switch to and no request is ever sent. */
+	UPROPERTY(ReplicatedUsing = OnRep_OwnedWeapons)
 	TArray<AShooterWeapon*> OwnedWeapons;
+
+	/** The first-person arms are shown only when the character owns something, and that decision
+	 *  is made once at BeginPlay. On a client the inventory is still empty at that point, so the
+	 *  arms were hidden and nothing ever brought them back. Re-run the check when it arrives. */
+	UFUNCTION()
+	void OnRep_OwnedWeapons();
 
 	/** Weapon currently equipped and ready to shoot with.
 	 *  Replicated so teammates can see which weapon is in your hands and see it change. */
@@ -992,6 +1001,22 @@ public:
 	 *  Unreliable: cosmetic, and a lost one costs a single frame of flash. */
 	UFUNCTION(Server, Unreliable)
 	void Server_ReportWeaponFired(AShooterWeapon* Weapon);
+
+	/** Same relay for the tracer. Carries the endpoints because only the shooter computed them. */
+	UFUNCTION(Server, Unreliable)
+	void Server_ReportBeamEffect(AShooterWeapon* Weapon, FVector Start, FVector End,
+		float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
+		float OverrideBoltLength, float OverrideRandomSeed);
+
+	/** Swap to NewWeapon with no lower/raise animation. The whole equip in one step, so it can be
+	 *  run identically on the owning machine and on the authority. */
+	void EquipWeaponImmediate(AShooterWeapon* NewWeapon);
+
+	/** Ask the server to equip a weapon this character owns. Which weapon is held has to be the
+	 *  server's decision: CurrentWeapon and the weapon actor's hidden flag both replicate down, so
+	 *  a purely local switch is overwritten and teammates see a stale gun. */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestEquipWeapon(AShooterWeapon* Weapon);
 
 	/** Broadcast the current health/armor snapshot to listeners. */
 	void BroadcastHealthChanged();

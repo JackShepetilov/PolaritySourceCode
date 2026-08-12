@@ -2029,6 +2029,39 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 void AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier,
 	float OverrideBoltSpeed, float OverrideBoltSpeedVariance, float OverrideBoltLength, float OverrideRandomSeed)
 {
+	// Draw it here immediately, then make sure everyone else draws it too. Same split as the
+	// muzzle flash: the shooter must not wait a round trip to see their own tracer.
+	SpawnBeamEffectLocally(Start, End, EnergyMultiplier,
+		OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
+
+	if (HasAuthority())
+	{
+		Multicast_PlayBeamEffect(Start, End, EnergyMultiplier,
+			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
+	}
+	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+	{
+		OwnerCharacter->Server_ReportBeamEffect(this, Start, End, EnergyMultiplier,
+			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
+	}
+}
+
+void AShooterWeapon::Multicast_PlayBeamEffect_Implementation(const FVector& Start, const FVector& End,
+	float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
+	float OverrideBoltLength, float OverrideRandomSeed)
+{
+	// The shooter already drew it the instant they fired.
+	const bool bIsShooter = PawnOwner && PawnOwner->IsLocallyControlled();
+	if (!bIsShooter)
+	{
+		SpawnBeamEffectLocally(Start, End, EnergyMultiplier,
+			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
+	}
+}
+
+void AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
+	float OverrideBoltSpeed, float OverrideBoltSpeedVariance, float OverrideBoltLength, float OverrideRandomSeed)
+{
 	if (!BeamFX)
 	{
 		return;

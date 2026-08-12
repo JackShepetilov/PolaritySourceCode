@@ -697,10 +697,17 @@ protected:
 	/** Spawn the beam tracer. The optional Override* params feed the low-HP dodgeable-bolt
 	 *  values (Speed / SpeedVariance / beamLength) and a fixed RandomSeed into the Niagara asset
 	 *  so the visible tracer matches the C++ damage region. Pass < 0 to leave the asset defaults. */
+	/** Tracer. Plays here and, like the muzzle flash, on every other machine that can see this
+	 *  weapon: the beam used to be purely local, so a teammate's shots left no trail at all. */
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier = 1.0f,
 		float OverrideBoltSpeed = -1.0f, float OverrideBoltSpeedVariance = -1.0f,
 		float OverrideBoltLength = -1.0f, float OverrideRandomSeed = -1.0f);
+
+	/** The actual spawn, with no networking. Shared by the local call and the multicast. */
+	void SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
+		float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
+		float OverrideBoltLength, float OverrideRandomSeed);
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnWaveFronts(const FVector& Start, const FVector& End);
@@ -726,6 +733,12 @@ public:
 	 *  Public because the owning character relays a client's shot through it. */
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayFireEffects();
+
+	/** Tracer for everyone else. Endpoints travel with it because only the shooter traced them. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier,
+		float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
+		float OverrideBoltLength, float OverrideRandomSeed);
 
 protected:
 
