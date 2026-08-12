@@ -1,6 +1,7 @@
 // MeleeRetreatComponent.cpp
 
 #include "MeleeRetreatComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "NavigationSystem.h"
@@ -254,9 +255,8 @@ void UMeleeRetreatComponent::UpdateProximityTrigger(float DeltaTime)
 
 void UMeleeRetreatComponent::FindProximityTarget()
 {
-	// Find player pawn as default target
-	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-	{
-		ProximityTarget = PC->GetPawn();
-	}
+	// Retreat is about the player crowding THIS NPC, so take the closest one.
+	const AActor* Owner = GetOwner();
+	ProximityTarget = CoopPlayers::GetNearest(GetWorld(),
+		Owner ? Owner->GetActorLocation() : FVector::ZeroVector);
 }

@@ -919,7 +919,9 @@ void AKamikazeDroneNPC::UpdatePositioning(float DeltaTime)
 
 	// P3 (target) is dynamic — recalculate every frame from current camera direction
 	FVector P3 = Player->GetActorLocation();
-	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	// The approach point is offset along where the TARGET is looking, so it has to be that
+	// player's camera. Player 0's control rotation would aim the dive at the wrong teammate.
+	if (const APlayerController* PC = Cast<APlayerController>(Player->GetController()))
 	{
 		const FVector CamFwd = PC->GetControlRotation().Vector();
 		const FVector CamFwdXY = FVector(CamFwd.X, CamFwd.Y, 0.0f).GetSafeNormal();

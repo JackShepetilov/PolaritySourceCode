@@ -1,6 +1,7 @@
 // AICombatCoordinator.cpp
 
 #include "AICombatCoordinator.h"
+#include "Coop/CoopPlayers.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
@@ -66,13 +67,13 @@ void AAICombatCoordinator::BeginPlay()
 	Super::BeginPlay();
 	Instance = this;
 
-	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-	{
-		if (APawn* PlayerPawn = PC->GetPawn())
-		{
-			PrimaryTarget = PlayerPawn;
-		}
-	}
+	// TODO(COOP): this coordinator is built around ONE target. Battle slots, attack tokens and
+	// CachedPlayerState all hang off PrimaryTarget, so with four players the enemies would form a
+	// single ring around one of them and nobody would coordinate against the other three.
+	// Making it multi-target is a design decision (one coordinator per player? slot rings and
+	// token pools per target?), not a rename. Until that is decided: nearest player, which is
+	// identical to the old behaviour in single player and at least is not "whoever joined first".
+	PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 }
 
 void AAICombatCoordinator::Tick(float DeltaTime)
@@ -81,16 +82,10 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 
 	TimeSinceLastAttackGrant += DeltaTime;
 
-	// Re-find player if lost
+	// Re-find a target if the current one is gone. See the TODO(COOP) in BeginPlay: single target.
 	if (!PrimaryTarget.IsValid())
 	{
-		if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-		{
-			if (APawn* PlayerPawn = PC->GetPawn())
-			{
-				PrimaryTarget = PlayerPawn;
-			}
-		}
+		PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 	}
 
 	// Cleanup
