@@ -3,6 +3,7 @@
 
 #include "Variant_Shooter/ShooterGameMode.h"
 #include "Coop/CoopPlayers.h"
+#include "Components/CapsuleComponent.h"
 #include "ShooterUI.h"
 #include "ShooterCharacter.h"
 #include "RunSubsystem.h"
@@ -218,8 +219,6 @@ void AShooterGameMode::PerformRunLaunch()
 	}
 
 	// The whole team gets tossed into the run, not just the host.
-	// TODO(COOP): the marker is a single point, so four capsules start stacked and shove each other
-	// apart on landing. Needs either a formation of markers or a spread, which is a design call.
 	TArray<APawn*> PlayerPawns;
 	CoopPlayers::GetAll(GetWorld(), PlayerPawns);
 
@@ -228,19 +227,49 @@ void AShooterGameMode::PerformRunLaunch()
 	// forward vector) — it must never tilt the character's body, or the mesh/camera break.
 	const FRotator UprightRot(0.f, RunMarker->GetActorRotation().Yaw, 0.f);
 
+	// Everyone gets the SAME velocity, so the team flies as one group and lands in the same spread
+	// it started in. Only the starting point is scattered, in the horizontal plane, far enough apart
+	// that the capsules never begin overlapped: evenly spaced headings keep them separated, the
+	// jitter on heading and radius keeps the formation from looking laid out.
+	const FVector LaunchVelocity = RunMarker->GetLaunchVelocity();
+	const FVector LaunchOrigin = RunMarker->GetActorLocation();
+	const int32 PlayerCount = PlayerPawns.Num();
+
 	int32 LaunchedCount = 0;
-	for (APawn* PlayerPawn : PlayerPawns)
+	for (int32 Index = 0; Index < PlayerCount; ++Index)
 	{
-		AShooterCharacter* Character = Cast<AShooterCharacter>(PlayerPawn);
+		AShooterCharacter* Character = Cast<AShooterCharacter>(PlayerPawns[Index]);
 		if (!Character)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[RUN_DEBUG] PerformRunLaunch: player pawn is not a ShooterCharacter"));
 			continue;
 		}
 
-		Character->SetActorLocationAndRotation(RunMarker->GetActorLocation(), UprightRot,
+		FVector SpawnLocation = LaunchOrigin;
+
+		// A single player launches from the marker itself, exactly as before.
+		if (PlayerCount > 1)
+		{
+			const float CapsuleRadius = Character->GetCapsuleComponent()
+				? Character->GetCapsuleComponent()->GetScaledCapsuleRadius()
+				: 34.0f;
+
+			// Radius is measured in capsule widths, so the spread scales with the character instead
+			// of being a magic distance: min keeps two capsules clear of each other, max keeps the
+			// group tight enough to still read as one toss.
+			const float MinRadius = CapsuleRadius * 2.5f;
+			const float MaxRadius = CapsuleRadius * 4.0f;
+
+			const float SliceAngle = 2.0f * PI / static_cast<float>(PlayerCount);
+			const float Heading = SliceAngle * Index + FMath::FRandRange(-SliceAngle * 0.3f, SliceAngle * 0.3f);
+			const float Radius = FMath::FRandRange(MinRadius, MaxRadius);
+
+			SpawnLocation += FVector(FMath::Cos(Heading) * Radius, FMath::Sin(Heading) * Radius, 0.0f);
+		}
+
+		Character->SetActorLocationAndRotation(SpawnLocation, UprightRot,
 			false, nullptr, ETeleportType::TeleportPhysics);
-		Character->BeginRunLaunch(RunMarker->GetLaunchVelocity());
+		Character->BeginRunLaunch(LaunchVelocity);
 		LaunchedCount++;
 	}
 
