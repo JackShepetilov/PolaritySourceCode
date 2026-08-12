@@ -72,7 +72,7 @@ float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, c
 	{
 		if (!OwnerCharacter->HasAuthority())
 		{
-			OwnerCharacter->DealDamage(HitActor, FinalDamage, DamageEvent.DamageTypeClass);
+			OwnerCharacter->DealDamage(HitActor, FinalDamage, DamageEvent.DamageTypeClass, this);
 
 			// Report the requested damage so local hit feedback still fires immediately. Kill
 			// feedback will not, because the client cannot know yet: it learns the outcome from
@@ -2052,11 +2052,23 @@ void AShooterWeapon::Multicast_PlayBeamEffect_Implementation(const FVector& Star
 {
 	// The shooter already drew it the instant they fired.
 	const bool bIsShooter = PawnOwner && PawnOwner->IsLocallyControlled();
-	if (!bIsShooter)
+	if (bIsShooter)
 	{
-		SpawnBeamEffectLocally(Start, End, EnergyMultiplier,
-			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
+		return;
 	}
+
+	// Start over from OUR muzzle. The incoming Start came from the shooter's FIRST-person mesh,
+	// which hangs off their camera and is only ever visible to them: replayed here it puts the
+	// tracer somewhere around a teammate's head instead of at the gun we can actually see. The
+	// endpoint is genuine world data and is kept as sent.
+	FVector ObserverStart = Start;
+	if (ThirdPersonMesh)
+	{
+		ObserverStart = ThirdPersonMesh->GetSocketLocation(MuzzleSocketName);
+	}
+
+	SpawnBeamEffectLocally(ObserverStart, End, EnergyMultiplier,
+		OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
 }
 
 void AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,

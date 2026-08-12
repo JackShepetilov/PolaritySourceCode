@@ -988,13 +988,15 @@ public:
 	/** Deal damage on behalf of this character. Applies it directly on the authority and reports
 	 *  it to the server otherwise, so a client's shot actually lands instead of only killing its
 	 *  own local copy of the target. Every weapon owned by a player must go through here. */
-	void DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
+	void DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
+		AShooterWeapon* Weapon);
 
 	/** Client to server half of DealDamage. Reliable: dropping a hit loses a kill.
 	 *  Unvalidated on purpose. The handoff decided this is a coop PvE game where players trust
 	 *  each other, so the server takes the client's word for the hit instead of re-simulating it. */
 	UFUNCTION(Server, Reliable)
-	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
+	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
+		AShooterWeapon* Weapon);
 
 	/** Tell the server this client's weapon fired, so it can multicast the muzzle flash and sound
 	 *  to everyone else. A miss carries no damage, so effects need their own way upstream.
@@ -1008,9 +1010,23 @@ public:
 		float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
 		float OverrideBoltLength, float OverrideRandomSeed);
 
+	/** Where this character is aiming vertically, in degrees, for animation to use.
+	 *  Your own pitch comes from the control rotation; a teammate's comes from the pitch the pawn
+	 *  already replicates, which nothing in this project read, so remote characters always aimed
+	 *  dead level no matter where their owner was looking. Feed this into the aim offset. */
+	UFUNCTION(BlueprintPure, Category = "Coop|Aim")
+	float GetAimPitchForAnimation() const;
+
 	/** Swap to NewWeapon with no lower/raise animation. The whole equip in one step, so it can be
 	 *  run identically on the owning machine and on the authority. */
 	void EquipWeaponImmediate(AShooterWeapon* NewWeapon);
+
+	/** Tell the client that fired what its shot actually did. A client applies no damage itself, so
+	 *  without this its upgrades never see a kill and never see the real number: "on kill" effects
+	 *  would work for the host alone, which is a progression asymmetry rather than a visual one.
+	 *  Reliable: a dropped confirmation is a silently lost upgrade trigger. */
+	UFUNCTION(Client, Reliable)
+	void Client_ConfirmDamageDealt(AShooterWeapon* Weapon, AActor* HitActor, float ActualDamage, bool bKilled);
 
 	/** Ask the server to equip a weapon this character owns. Which weapon is held has to be the
 	 *  server's decision: CurrentWeapon and the weapon actor's hidden flag both replicate down, so

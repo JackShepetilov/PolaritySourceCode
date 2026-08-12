@@ -463,7 +463,29 @@ void AShooterCharacter::OnRep_CurrentArmor()
 	BroadcastHealthChanged();
 }
 
-void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass)
+namespace
+{
+	/** Is this actor dead right now? Mirrors IsActorDeadAfterDamage in ShooterWeapon.cpp. */
+	bool IsTargetDead(const AActor* Actor)
+	{
+		if (!IsValid(Actor))
+		{
+			return true;
+		}
+		if (const AShooterNPC* NPC = Cast<AShooterNPC>(Actor))
+		{
+			return NPC->IsDead();
+		}
+		if (const AShooterCharacter* Character = Cast<AShooterCharacter>(Actor))
+		{
+			return Character->IsDead();
+		}
+		return false;
+	}
+}
+
+void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
+	AShooterWeapon* Weapon)
 {
 	if (!HitActor || Damage <= 0.0f)
 	{
@@ -483,10 +505,11 @@ void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<U
 	}
 
 	// Client: the hit only counts once the server has applied it.
-	Server_ReportDamage(HitActor, Damage, DamageTypeClass);
+	Server_ReportDamage(HitActor, Damage, DamageTypeClass, Weapon);
 }
 
-void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass)
+void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, float Damage,
+	TSubclassOf<UDamageType> DamageTypeClass, AShooterWeapon* Weapon)
 {
 	if (!HitActor || Damage <= 0.0f)
 	{
@@ -499,7 +522,36 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 	{
 		DamageEvent.DamageTypeClass = UDamageType::StaticClass();
 	}
-	HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+
+	const float ActualDamage = HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+
+	// Only the server can know what the hit really did. Hand the answer back to the shooter, whose
+	// upgrades are otherwise told nothing and never fire on a kill.
+	Client_ConfirmDamageDealt(Weapon, HitActor, ActualDamage, IsTargetDead(HitActor));
+}
+
+void AShooterCharacter::Client_ConfirmDamageDealt_Implementation(AShooterWeapon* Weapon, AActor* HitActor,
+	float ActualDamage, bool bKilled)
+{
+	if (UpgradeManager && Weapon && HitActor)
+	{
+		UpgradeManager->NotifyWeaponDealtDamage(Weapon, HitActor, ActualDamage, bKilled);
+	}
+}
+
+float AShooterCharacter::GetAimPitchForAnimation() const
+{
+	// Your own aim is exact.
+	if (IsLocallyControlled())
+	{
+		return FRotator::NormalizeAxis(GetControlRotation().Pitch);
+	}
+
+	// A teammate's arrives as the pawn's replicated view pitch, 360 degrees mapped into 16 bits.
+	// Nothing in this project ever decoded it, which is why remote characters aimed dead level.
+	// GetRemoteViewPitch() is the 5.6+ accessor; the old uint8 RemoteViewPitch is deprecated.
+	constexpr float MaxUInt16 = 65535.0f;
+	return FRotator::NormalizeAxis((static_cast<float>(GetRemoteViewPitch()) * 360.0f) / MaxUInt16);
 }
 
 void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* Weapon)
