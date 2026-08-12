@@ -253,9 +253,50 @@ void AShooterPlayerController::SetupInputComponent()
 	// RegisterInputMappingContexts happen together (prevents Vector2D corruption)
 }
 
+namespace
+{
+	/** Compact description of who this controller is and where it lives, for the coop logs. */
+	FString DescribeCoopContext(const APlayerController* PC, const APawn* Pawn)
+	{
+		const UEnum* RoleEnum = StaticEnum<ENetRole>();
+		const auto RoleName = [RoleEnum](ENetRole Role)
+		{
+			return RoleEnum ? RoleEnum->GetNameStringByValue((int64)Role) : FString::FromInt((int32)Role);
+		};
+
+		return FString::Printf(
+			TEXT("PC=%s local=%d authority=%d netmode=%d | Pawn=%s class=%s localRole=%s remoteRole=%s"),
+			PC ? *PC->GetName() : TEXT("NULL"),
+			(PC && PC->IsLocalController()) ? 1 : 0,
+			(PC && PC->HasAuthority()) ? 1 : 0,
+			PC ? (int32)PC->GetNetMode() : -1,
+			Pawn ? *Pawn->GetName() : TEXT("NULL"),
+			Pawn ? *Pawn->GetClass()->GetName() : TEXT("NULL"),
+			Pawn ? *RoleName(Pawn->GetLocalRole()) : TEXT("-"),
+			Pawn ? *RoleName(Pawn->GetRemoteRole()) : TEXT("-"));
+	}
+}
+
+void AShooterPlayerController::AcknowledgePossession(APawn* InPawn)
+{
+	Super::AcknowledgePossession(InPawn);
+
+	// Client-side. If a client can see its character but cannot move it, this line and the
+	// OnPossess line below will disagree about which pawn it is, or this line will not appear.
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] AcknowledgePossession: %s"),
+		*DescribeCoopContext(this, InPawn));
+}
+
 void AShooterPlayerController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
+
+	// Server-side only. Seeing this twice for the same controller and pawn is the cause of the
+	// "InvocationList[CurFunctionIndex] != InDelegate" ensure below: every AddDynamic here would
+	// then be bound twice. PossessCount makes the repeat obvious instead of inferred.
+	PossessCount++;
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] OnPossess #%d: %s"),
+		PossessCount, *DescribeCoopContext(this, InPawn));
 
 	// subscribe to the pawn's OnDestroyed delegate
 	InPawn->OnDestroyed.AddDynamic(this, &AShooterPlayerController::OnPawnDestroyed);

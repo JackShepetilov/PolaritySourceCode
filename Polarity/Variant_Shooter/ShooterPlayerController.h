@@ -108,8 +108,16 @@ protected:
 	/** Initialize input bindings */
 	virtual void SetupInputComponent() override;
 
-	/** Pawn initialization */
+	/** Pawn initialization. Server only: clients never get this call. */
 	virtual void OnPossess(APawn* InPawn) override;
+
+	/** Client-side counterpart of OnPossess: this is where a client learns which pawn it drives.
+	 *  Overridden only to log it while the coop transition is being debugged. */
+	virtual void AcknowledgePossession(APawn* InPawn) override;
+
+	/** How many times this controller has possessed anything. Diagnostic for the duplicate
+	 *  OnPossess that makes the delegate AddDynamic calls fire an ensure. */
+	int32 PossessCount = 0;
 
 	/** Called if the possessed pawn is destroyed */
 	UFUNCTION()

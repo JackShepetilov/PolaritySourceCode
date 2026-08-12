@@ -77,6 +77,20 @@ void APolarityCharacter::BeginPlay()
 		ApexMovement->MovementSettings = MovementSettings;
 	}
 
+	// The body must always be visible to everybody except its own owner: in coop a teammate with a
+	// hidden body reads as a weapon floating through the air. bOwnerNoSee in the constructor does
+	// the "not to yourself" half, but a Blueprint can still switch the mesh off entirely, and
+	// Visible and Hidden In Game are two independent flags, so clearing one is not enough. Single
+	// player never noticed because nobody was ever looking at this mesh.
+	// Propagation is deliberately OFF: MeleeWeaponFPMesh hangs off this mesh and is meant to stay
+	// hidden until a melee weapon is equipped.
+	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	{
+		BodyMesh->SetOwnerNoSee(true);
+		BodyMesh->SetHiddenInGame(false, /*bPropagateToChildren=*/ false);
+		BodyMesh->SetVisibility(true, /*bPropagateToChildren=*/ false);
+	}
+
 	// Enforce the camera parenting at runtime. Changing SetupAttachment in the constructor does NOT
 	// update content that was already saved against the old hierarchy: the Blueprint keeps an
 	// overridden template for this inherited component, and spawned instances get AttachParent =
