@@ -106,10 +106,37 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	int32 CurrentJumpCount = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	/** The sprint decision this move was simulated with, suppression already folded in.
+	 *
+	 *  This is the value that travels to the server, so it must be the *whole* client-side answer:
+	 *  it is packed into the saved move's compressed flags and unpacked by the server, which then
+	 *  replays the move at the same speed instead of correcting the client back (the rubber band).
+	 *  Do not set it from input directly — set bSprintKeyHeld and let the per-frame fold do it,
+	 *  or the server and the client will disagree the moment something vetoes a sprint.
+	 *
+	 *  Replicated SimulatedOnly on top of that: the flags only go client -> server, so without this
+	 *  copy a teammate's sprint is invisible to everyone else and their character keeps aiming its
+	 *  weapon at the camera while running. The owner is excluded because it decided the value. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bWantsToSprint = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	/** Raw input: the sprint key is held. Purely local, never networked — the server learns the
+	 *  outcome through bWantsToSprint, not the keypress. */
+	bool bSprintKeyHeld = false;
+
+	/** World time until which sprint stays suppressed. Kept separate from the key state on
+	 *  purpose: the key is the player's *intent*, suppression is a temporary veto from something
+	 *  else. Clearing the intent instead would force the player to release and press sprint again
+	 *  after every shot. */
+	float SprintSuppressedUntil = -1000.0f;
+
+	/** World time sprinting last ended. The weapon raise gate measures from here. */
+	float SprintEndTime = -1000.0f;
+
+	/** Replicated so that machines which only watch this character can shrink its capsule and pick
+	 *  the right pose. The owner and the server agree through the saved move instead; this copy is
+	 *  for everyone else, which is why it is SimulatedOnly. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsSliding = false;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
@@ -122,7 +149,8 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bIsGroundDashing = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	/** Replicated for the same reason as bIsSliding: observers need it for the pose. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsWallRunning = false;
 
 	/** Set by external systems (e.g. ShooterCharacter when a riot shield is equipped) to fully gate wallrun. */
@@ -209,11 +237,38 @@ public:
 
 	virtual void InitializeComponent() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
+	// ==================== Network prediction ====================
+	// Sprint changes max speed, and max speed decides where the character ends up, so the server
+	// has to know about it or it will replay the client's moves slower than the client did and
+	// yank it back. The intent therefore rides along inside the saved move rather than being
+	// replicated after the fact.
+
+	virtual void UpdateFromCompressedFlags(uint8 Flags) override;
+	virtual class FNetworkPredictionData_Client* GetPredictionData_Client() const override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float GetMaxSpeed() const override;
 	virtual float GetMaxAcceleration() const override;
 	virtual float GetMaxBrakingDeceleration() const override;
 	virtual void ProcessLanded(const FHitResult& Hit, float remainingTime, int32 Iterations) override;
 	virtual bool DoJump(bool bReplayingMoves, float DeltaTime = 0.f) override;
+
+	/** Air strafe lives here and not in the tick. Everything that changes velocity has to run inside
+	 *  the movement simulation, because that is the only code the server re-runs when it replays a
+	 *  client's move and the only code a client re-runs after a correction. Done from the tick it
+	 *  happened on exactly one machine and got corrected away everywhere else. */
+	virtual void PhysFalling(float deltaTime, int32 Iterations) override;
+
+	/** Runs once per simulated move on every machine, replays included. Timers that gate movement
+	 *  (slide cooldowns, slide fatigue) live here and not in TickComponent for the same reason air
+	 *  strafe does: a tick-driven timer counts down at the local frame rate and does not rewind
+	 *  during a replay, so client and server end up gating different frames. */
+	virtual void OnMovementUpdated(float DeltaSeconds, const FVector& OldLocation, const FVector& OldVelocity) override;
+
+	/** Enforces "momentum only" for slide, wallrun and ground dash. Doing it here instead of in
+	 *  GetMaxAcceleration keeps the input direction alive in Acceleration, which is what steers a
+	 *  slide and the only input a server ever sees. */
+	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
 
 	// ==================== Input ====================
 
@@ -222,6 +277,17 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|Input")
 	void StopSprint();
+
+	/** Veto sprinting for a while without touching the player's intent. Firing and aiming call
+	 *  this every frame they are active, so sprint resumes on its own SprintSuppressionTime after
+	 *  the last shot rather than requiring the key to be pressed again.
+	 *  Duration < 0 uses SprintSuppressionTime. Extends an existing suppression, never shortens it. */
+	UFUNCTION(BlueprintCallable, Category = "Apex|Input")
+	void SuppressSprint(float Duration = -1.0f);
+
+	/** How long sprint stays vetoed after the last shot, or after aim is released. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Apex|Sprint", meta = (ClampMin = "0.0"))
+	float SprintSuppressionTime = 0.3f;
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|Input")
 	void TryCrouchSlide();
@@ -329,7 +395,18 @@ public:
 	// ==================== Queries ====================
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsSprintSuppressed() const;
+
+	/** Suppression is deliberately NOT re-tested here: it is already folded into bWantsToSprint
+	 *  once per frame, and that folded value is what the server received. Testing it again would
+	 *  let the local answer drift from the one the move was packed with. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsSprinting() const { return bWantsToSprint && !bIsSliding && !IsCrouching() && IsMovingOnGround(); }
+
+	/** World time sprinting last ended, for whoever needs to measure from it (the weapon raise
+	 *  gate does). Far in the past when the character has never sprinted. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetSprintEndTime() const { return SprintEndTime; }
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsSliding() const { return bIsSliding; }
@@ -380,6 +457,14 @@ public:
 	/** Check if forward input is held */
 	UFUNCTION(BlueprintPure, Category = "Apex|Input")
 	bool IsForwardHeld() const { return CurrentMoveInput.Y > 0.5f; }
+
+	/** The same question as IsForwardHeld, asked in a way the server can answer.
+	 *
+	 *  CurrentMoveInput is written by the local input handler, so on the server a client's pawn
+	 *  always reads "nothing held". Acceleration is the one piece of input the network carries:
+	 *  the client packs it into the saved move, the server rebuilds it from ServerMove and a replay
+	 *  restores it. Comparing it against the view direction gives back "pressing forward". */
+	bool IsAccelerationForward() const;
 
 	/** Check if crouch input is held (regardless of actual crouch state) */
 	UFUNCTION(BlueprintPure, Category = "Apex|Input")
@@ -466,6 +551,10 @@ public:
 	void UnregisterVelocityModifier(TScriptInterface<IVelocityModifier> Modifier);
 
 protected:
+	/** The saved move has to read and write the predicted state below to record a move and to put
+	 *  the component back the way it was before replaying one. */
+	friend class FSavedMove_Polarity;
+
 	// Velocity Modifiers
 	UPROPERTY()
 	TArray<TScriptInterface<IVelocityModifier>> VelocityModifiers;
@@ -613,4 +702,73 @@ protected:
 
 	/** Play camera shake */
 	void PlayCameraShake(TSubclassOf<UCameraShakeBase>);
+};
+
+/**
+ * One recorded move of this project's movement, plus the state the engine's own move does not know
+ * about. Right now that is sprint alone; wallrun, slide and the jump counter belong here too and
+ * are the reason this class exists rather than a one-off hack.
+ *
+ * The client records what it did, the server replays it from the same data. Anything that changes
+ * where the character ends up and lives outside the engine's move will otherwise be invisible to
+ * the server, which then disagrees about the destination and corrects the client.
+ */
+class POLARITY_API FSavedMove_Polarity : public FSavedMove_Character
+{
+public:
+	typedef FSavedMove_Character Super;
+
+	/** The sprint decision used for this move, already vetoed by firing or aiming if it was.
+	 *  The raw keypress deliberately does not travel: the server cannot see the trigger being
+	 *  pulled, so it has to be told the answer rather than the question. */
+	uint8 bSavedWantsToSprint : 1;
+
+	/** Sliding changes both speed and capsule height, so a server that does not know about it ends
+	 *  the move somewhere else entirely. */
+	uint8 bSavedIsSliding : 1;
+
+	/** Wall running replaces gravity and steering wholesale. Only the decision travels: the wall
+	 *  normal and direction are geometry, and the server re-derives them from its own collision
+	 *  rather than trusting numbers from a client. */
+	uint8 bSavedIsWallRunning : 1;
+
+	/** Crouch was pressed in the air, so landing turns into a slide instead of a stop. ProcessLanded
+	 *  already runs inside the simulation on both sides, but it reads this intent, and the intent is
+	 *  set from input: without the bit the server landed a client normally while the client slid,
+	 *  and corrected it back. */
+	uint8 bSavedWantsSlideOnLand : 1;
+
+	/** Predicted state below this line. It is NOT packed into the compressed flags and never goes
+	 *  to the server: the server derives its own copy by running the same slides and jumps. These
+	 *  exist so that a *replay* on the client starts from the same numbers the move was first
+	 *  simulated with. Without them every correction re-ran DoJump with a fatigue counter that had
+	 *  already been incremented and a cooldown that had kept ticking, so the slide jump came out at
+	 *  a different strength each time and the client got yanked back. */
+	uint8 bSavedJumpHeld : 1;
+	int32 SavedSlideFatigueCounter;
+	float SavedSlideFatigueDecayTimer;
+	float SavedSlideBoostCooldown;
+	float SavedSlideCooldown;
+	float SavedJumpHoldTimeRemaining;
+	int32 SavedCurrentJumpCount;
+
+	FSavedMove_Polarity();
+
+	virtual void Clear() override;
+	virtual uint8 GetCompressedFlags() const override;
+	virtual bool CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const override;
+	virtual void SetMoveFor(ACharacter* Character, float InDeltaTime, FVector const& NewAccel,
+		class FNetworkPredictionData_Client_Character& ClientData) override;
+	virtual void PrepMoveFor(ACharacter* Character) override;
+};
+
+/** Hands the engine our move type instead of the stock one. */
+class POLARITY_API FNetworkPredictionData_Client_Polarity : public FNetworkPredictionData_Client_Character
+{
+public:
+	typedef FNetworkPredictionData_Client_Character Super;
+
+	FNetworkPredictionData_Client_Polarity(const UCharacterMovementComponent& ClientMovement);
+
+	virtual FSavedMovePtr AllocateNewMove() override;
 };

@@ -259,6 +259,35 @@ void AShooterNPC::Tick(float DeltaTime)
 	// Store velocity BEFORE Super::Tick processes any movement/collisions
 	// This gives us the "pre-collision" velocity for impact damage calculation
 	PreviousTickVelocity = GetVelocity();
+
+	// Pin the off hand to the weapon, the same way the player's third person body does it. NPCs run
+	// the same anim blueprints, so the Two Bone IK node is already there; nothing was writing its
+	// transform and alpha, which left the left hand wherever the animation put it.
+	//
+	// Alpha goes to zero when there is nothing to hold, rather than passing an identity transform
+	// with a live alpha, which would drag the hand to the world origin.
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		FTransform LeftHandTarget = FTransform::Identity;
+		float LeftHandAlpha = 0.0f;
+
+		if (Weapon)
+		{
+			if (USkeletalMeshComponent* WeaponTPMesh = Weapon->GetThirdPersonMesh())
+			{
+				const FName TPGripSocket =
+					AShooterWeapon::PickThirdPersonSocket(WeaponTPMesh, LeftHandGripSocket);
+				if (WeaponTPMesh->DoesSocketExist(TPGripSocket))
+				{
+					LeftHandTarget = LeftHandIKOffset *
+						WeaponTPMesh->GetSocketTransform(TPGripSocket, ERelativeTransformSpace::RTS_World);
+					LeftHandAlpha = 1.0f;
+				}
+			}
+		}
+
+		AShooterWeapon::PushLeftHandIK(TPMesh->GetAnimInstance(), LeftHandTarget, LeftHandAlpha);
+	}
 	if (bPendingAirborneStun)
 	{
 		PendingAirborneStunMaxDownSpeed = FMath::Max(PendingAirborneStunMaxDownSpeed, -PreviousTickVelocity.Z);
@@ -676,7 +705,16 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 
 void AShooterNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 {
-	const FAttachmentTransformRules AttachmentRule(EAttachmentRule::SnapToTarget, false);
+	// Location and rotation come from the socket, scale stays whatever the weapon blueprint set.
+	// The one-argument form applies SnapToTarget to scale as well, which silently replaced a
+	// weapon's authored scale with the hand's, so the same gun was smaller on an NPC than in a
+	// player's hands. AShooterCharacter::AttachWeaponMeshes has used the explicit form for exactly
+	// this reason; the NPC path had been left behind.
+	const FAttachmentTransformRules AttachmentRule(
+		EAttachmentRule::SnapToTarget,    // Location
+		EAttachmentRule::SnapToTarget,    // Rotation
+		EAttachmentRule::KeepRelative,    // Scale
+		false);
 
 	// attach the weapon actor
 	WeaponToAttach->AttachToActor(this, AttachmentRule);
@@ -698,6 +736,12 @@ void AShooterNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 			*GetNameSafe(TPMesh->GetSkeletalMeshAsset()));
 	}
 	WeaponTPMesh->AttachToComponent(TPMesh, AttachmentRule, ThirdPersonWeaponSocket);
+
+	// Hold it the way the player holds it. Without this the NPC's weapon hangs by the mesh origin
+	// with the raw hand rotation, which is why an NPC's gun sat differently in the hand than the
+	// same gun on a player, and why NPCs could not be used to check a grip.
+	AShooterWeapon::AlignMeshToGripSocket(WeaponTPMesh,
+		AShooterWeapon::PickThirdPersonSocket(WeaponTPMesh, AShooterWeapon::OptionalGripSocketName));
 
 	// --- FP mesh attach ---
 	// NPCs usually have no FP skeletal mesh assigned (player never views them in 1st person).

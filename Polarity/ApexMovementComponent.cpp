@@ -2,6 +2,7 @@
 // Titanfall 2 / Apex Legends style movement implementation
 
 #include "ApexMovementComponent.h"
+#include "Net/UnrealNetwork.h"
 #include "MovementSettings.h"
 #include "PolarityCharacter.h"
 #include "VelocityModifier.h"
@@ -14,9 +15,20 @@ DEFINE_LOG_CATEGORY_STATIC(LogWallRun, Log, All);
 
 UApexMovementComponent::UApexMovementComponent()
 {
+	// Needed for the two state bools below: without it the component's own properties never leave
+	// the server and observers cannot tell a sliding character from a standing one.
+	SetIsReplicatedByDefault(true);
+
 	NavAgentProps.bCanCrouch = true;
 	bCanWalkOffLedgesWhenCrouching = true;
 	SetCrouchedHalfHeight(50.0f);
+
+	// Keep the feet planted when the capsule shrinks. A capsule resizes around its centre, so
+	// without this the character would rise by the height difference; the engine drops the capsule
+	// by that amount instead, once per transition and with the encroachment check that Crouch()
+	// already does. This replaces the hand-rolled per-frame SetActorLocation that used to live in
+	// UpdateCapsuleHeight and had no collision check at all.
+	bCrouchMaintainsBaseLocation = true;
 
 	AirControl = 0.0f; // Disabled - using custom ApplyAirStrafe() instead
 	JumpZVelocity = 500.0f;
@@ -83,15 +95,23 @@ void UApexMovementComponent::InitializeComponent()
 
 void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
-	// Update cooldowns
-	if (SlideCooldownRemaining > 0.0f)
+	// Fold the sprint key and any veto into the one value that gets simulated and sent. Done here,
+	// before the move for this frame is built, so the flag the server receives is the flag the
+	// character actually moved with.
+	//
+	// Locally controlled only. On a machine that merely simulates this character (the server for a
+	// remote player, or another client) there is no key and no veto, and bWantsToSprint arrives
+	// through UpdateFromCompressedFlags or replicated movement; recomputing it here would
+	// overwrite the truth with a local guess of "not sprinting".
+	if (PawnOwner && PawnOwner->IsLocallyControlled())
 	{
-		SlideCooldownRemaining -= DeltaTime;
+		bWantsToSprint = bSprintKeyHeld && !IsSprintSuppressed();
 	}
-	if (SlideBoostCooldownRemaining > 0.0f)
-	{
-		SlideBoostCooldownRemaining -= DeltaTime;
-	}
+
+	// Slide cooldowns and slide fatigue used to be counted down here. They moved into
+	// OnMovementUpdated: they gate slide entry and scale the slide jump, so they have to advance
+	// with the simulated move and rewind with it, or the client replays a jump with numbers the
+	// original simulation never had and the server hands back a different velocity.
 	if (AirDashCooldownRemaining > 0.0f)
 	{
 		const float PreviousCooldown = AirDashCooldownRemaining;
@@ -121,19 +141,14 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		WallBounceCooldownRemaining -= DeltaTime;
 	}
 
-	// Decrease slide fatigue over time when not sliding
-	if (!bIsSliding && SlideFatigueCounter > 0)
-	{
-		SlideFatigueDecayTimer += DeltaTime;
-		if (SlideFatigueDecayTimer >= 1.0f)
-		{
-			SlideFatigueCounter--;
-			SlideFatigueDecayTimer = 0.0f;
-		}
-	}
-
-	// Smooth crouch - interpolate capsule height
-	UpdateCapsuleHeight(DeltaTime);
+	// The capsule is no longer resized here. Crouching goes through bWantsToCrouch, and the engine
+	// swaps the capsule in one step with a fit check and a matching mesh offset. Resizing it every
+	// frame is what pushed the feet through the floor, left the character hanging above it, and
+	// made observed characters bob: the per-frame teleport had no collision check, and on watching
+	// machines it fought network smoothing, which already offsets the mesh.
+	//
+	// The *look* of a smooth crouch is a camera and mesh matter, and it already lives in
+	// APolarityCharacter::AccumulateFirstPersonPose (CrouchSlideProgress, CrouchCameraOffset).
 
 	// Pre-tick: Update mechanics that need to run BEFORE physics
 	if (bIsMantling)
@@ -180,14 +195,15 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 			CheckForWallRun();
 		}
 
-		ApplyAirStrafe(DeltaTime);
+		// ApplyAirStrafe used to be called here. It moved into PhysFalling: from the tick it ran
+		// outside the movement simulation, so the server never reproduced it while replaying a
+		// client's move and corrected the client back every frame. Air control therefore worked
+		// only where the tick and the simulation are the same machine — the listen server host.
 	}
 
-	// Jump hold (variable jump height)
-	if (bJumpHeld && IsFalling())
-	{
-		UpdateJumpHold(DeltaTime);
-	}
+	// Jump hold moved into PhysFalling with the air strafe: it writes Velocity.Z, so from the tick
+	// it produced a taller jump on the machine that pressed the key than on the one that replayed
+	// the move.
 
 #if ENABLE_DRAW_DEBUG
 	// Track max jump height while in air
@@ -259,14 +275,7 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		EndGroundDash();
 	}
 
-	// POST-TICK: Slide deceleration AFTER physics
-	if (bIsSliding)
-	{
-		// Check for wall bounce during slide
-		CheckForWallBounce();
-
-		UpdateSlide(DeltaTime);
-	}
+	// Slide deceleration moved into OnMovementUpdated so that it runs inside the simulated move.
 
 	// POST-TICK: Also check wall bounce for air crouch after physics
 	if (bIsCrouchedInAir && IsFalling())
@@ -397,19 +406,22 @@ int32 UApexMovementComponent::GetMaxAirDashCount() const
 
 float UApexMovementComponent::GetMaxAcceleration() const
 {
-	// No player acceleration during slide, wallrun, or an active ground dash - momentum only.
-	if (bIsSliding || bIsWallRunning || bIsGroundDashing)
-	{
-		return 0.0f;
-	}
-
+	// Slide, wallrun and ground dash are momentum only, but that is enforced in CalcVelocity now,
+	// not here. Returning 0 from this function does not just stop acceleration: ScaleInputAcceleration
+	// multiplies the input by it, so the whole Acceleration vector becomes zero and the *direction*
+	// the player is pushing is lost. That direction is the only piece of input the server receives,
+	// and slide steering needs it, so it has to survive.
 	if (!MovementSettings)
 	{
 		return Super::GetMaxAcceleration();
 	}
 
-	// Air acceleration = 0 for native UE5 (all air movement handled by ApplyAirStrafe pre-tick)
-	return IsFalling() ? 0.0f : MovementSettings->GroundAcceleration;
+	// In the air the engine's own lateral acceleration stays off — but through AirControl (0 in the
+	// constructor), not through this. Returning 0 here would make ScaleInputAcceleration zero the
+	// whole Acceleration vector, and Acceleration is how ApplyAirStrafe learns which way the player
+	// is pushing on the server and during a replay. So keep the number honest and let AirControl do
+	// the disabling: GetFallingLateralAcceleration multiplies by it and hands CalcVelocity a zero.
+	return IsFalling() ? MovementSettings->AirAcceleration : MovementSettings->GroundAcceleration;
 }
 
 float UApexMovementComponent::GetMaxBrakingDeceleration() const
@@ -628,12 +640,224 @@ void UApexMovementComponent::StartSprint()
 			return;
 		}
 	}
-	bWantsToSprint = true;
+	// Only the key state. bWantsToSprint is derived from it once per frame, so that the value the
+	// move is packed with is the same one the character actually moved at.
+	bSprintKeyHeld = true;
+}
+
+bool UApexMovementComponent::IsSprintSuppressed() const
+{
+	const UWorld* World = GetWorld();
+	return World && World->GetTimeSeconds() < SprintSuppressedUntil;
+}
+
+void UApexMovementComponent::SuppressSprint(float Duration)
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const float Length = (Duration < 0.0f) ? SprintSuppressionTime : Duration;
+
+	// Never shorten an existing veto: two systems suppressing at once should give the longer of
+	// the two, not whichever one happened to run last this frame.
+	SprintSuppressedUntil = FMath::Max(SprintSuppressedUntil, World->GetTimeSeconds() + Length);
 }
 
 void UApexMovementComponent::StopSprint()
 {
-	bWantsToSprint = false;
+	bSprintKeyHeld = false;
+}
+
+void UApexMovementComponent::UpdateFromCompressedFlags(uint8 Flags)
+{
+	Super::UpdateFromCompressedFlags(Flags);
+
+	// Server side, and on the owning client while it replays its own pending moves. Assigned
+	// straight across with no second-guessing: the bits already carry the client's final answer,
+	// suppression included, and re-deriving them here from state the server does not have is
+	// exactly how these two ends drift apart.
+	bWantsToSprint = (Flags & FSavedMove_Character::FLAG_Custom_0) != 0;
+	bIsWallRunning = (Flags & FSavedMove_Character::FLAG_Custom_2) != 0;
+
+	// Intent only. ProcessLanded turns it into the actual slide, on both sides, from inside the
+	// simulation, so nothing else about landing has to travel.
+	bWantsSlideOnLand = (Flags & FSavedMove_Character::FLAG_Custom_3) != 0;
+
+	// Slide needs the whole entry, not just the bool. StartSlide zeroes ground friction and
+	// braking deceleration, picks the slide direction and applies the entry boost; a side that
+	// only flipped the flag kept braking the character normally, finished the move somewhere else
+	// and got corrected. In game that reads as "sliding works for one player and stutters for the
+	// other". Driving the real entry/exit from the flag is the same thing the engine does with
+	// bWantsToCrouch and Crouch()/UnCrouch().
+	const bool bFlagSliding = (Flags & FSavedMove_Character::FLAG_Custom_1) != 0;
+	if (bFlagSliding != bIsSliding)
+	{
+		if (bFlagSliding)
+		{
+			StartSlide();
+		}
+		else
+		{
+			EndSlide();
+		}
+	}
+
+	// The client already made this call with state this machine does not have (its own cooldowns,
+	// its own ground check). If CanSlide() disagreed inside StartSlide, the client's answer still
+	// wins, otherwise the two would simulate different moves.
+	bIsSliding = bFlagSliding;
+}
+
+void UApexMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// SimulatedOnly: the owner already knows (it decided), and the server learns through the saved
+	// move. This copy exists purely for the machines that only watch this character.
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bWantsToSprint, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsSliding, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsWallRunning, COND_SimulatedOnly);
+}
+
+FNetworkPredictionData_Client* UApexMovementComponent::GetPredictionData_Client() const
+{
+	if (!ClientPredictionData)
+	{
+		UApexMovementComponent* MutableThis = const_cast<UApexMovementComponent*>(this);
+		MutableThis->ClientPredictionData = new FNetworkPredictionData_Client_Polarity(*this);
+	}
+	return ClientPredictionData;
+}
+
+// ==================== FSavedMove_Polarity ====================
+
+FSavedMove_Polarity::FSavedMove_Polarity()
+	: bSavedWantsToSprint(0)
+	, bSavedIsSliding(0)
+	, bSavedIsWallRunning(0)
+	, bSavedWantsSlideOnLand(0)
+	, bSavedJumpHeld(0)
+	, SavedSlideFatigueCounter(0)
+	, SavedSlideFatigueDecayTimer(0.0f)
+	, SavedSlideBoostCooldown(0.0f)
+	, SavedSlideCooldown(0.0f)
+	, SavedJumpHoldTimeRemaining(0.0f)
+	, SavedCurrentJumpCount(0)
+{
+}
+
+void FSavedMove_Polarity::Clear()
+{
+	Super::Clear();
+	bSavedWantsToSprint = 0;
+	bSavedIsSliding = 0;
+	bSavedIsWallRunning = 0;
+	bSavedWantsSlideOnLand = 0;
+	bSavedJumpHeld = 0;
+	SavedSlideFatigueCounter = 0;
+	SavedSlideFatigueDecayTimer = 0.0f;
+	SavedSlideBoostCooldown = 0.0f;
+	SavedSlideCooldown = 0.0f;
+	SavedJumpHoldTimeRemaining = 0.0f;
+	SavedCurrentJumpCount = 0;
+}
+
+uint8 FSavedMove_Polarity::GetCompressedFlags() const
+{
+	uint8 Result = Super::GetCompressedFlags();
+	if (bSavedWantsToSprint)
+	{
+		Result |= FLAG_Custom_0;
+	}
+	if (bSavedIsSliding)
+	{
+		Result |= FLAG_Custom_1;
+	}
+	if (bSavedIsWallRunning)
+	{
+		Result |= FLAG_Custom_2;
+	}
+	if (bSavedWantsSlideOnLand)
+	{
+		Result |= FLAG_Custom_3;
+	}
+	return Result;
+}
+
+bool FSavedMove_Polarity::CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const
+{
+	// Two moves may only be merged into one if they were simulated the same way. Merging a
+	// sprinting move with a walking one would send the server a single move at one speed for a
+	// stretch the client covered at two.
+	const FSavedMove_Polarity* NewPolarityMove = static_cast<const FSavedMove_Polarity*>(NewMove.Get());
+	if (NewPolarityMove &&
+		(bSavedWantsToSprint != NewPolarityMove->bSavedWantsToSprint ||
+		 bSavedIsSliding     != NewPolarityMove->bSavedIsSliding ||
+		 bSavedIsWallRunning != NewPolarityMove->bSavedIsWallRunning ||
+		 bSavedWantsSlideOnLand != NewPolarityMove->bSavedWantsSlideOnLand))
+	{
+		return false;
+	}
+	return Super::CanCombineWith(NewMove, Character, MaxDelta);
+}
+
+void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, FVector const& NewAccel,
+	FNetworkPredictionData_Client_Character& ClientData)
+{
+	Super::SetMoveFor(Character, InDeltaTime, NewAccel, ClientData);
+
+	if (const UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Character->GetCharacterMovement()))
+	{
+		bSavedWantsToSprint = Apex->bWantsToSprint ? 1 : 0;
+		bSavedIsSliding     = Apex->bIsSliding ? 1 : 0;
+		bSavedIsWallRunning = Apex->bIsWallRunning ? 1 : 0;
+		bSavedWantsSlideOnLand = Apex->bWantsSlideOnLand ? 1 : 0;
+		bSavedJumpHeld      = Apex->bJumpHeld ? 1 : 0;
+
+		SavedSlideFatigueCounter    = Apex->SlideFatigueCounter;
+		SavedSlideFatigueDecayTimer = Apex->SlideFatigueDecayTimer;
+		SavedSlideBoostCooldown     = Apex->SlideBoostCooldownRemaining;
+		SavedSlideCooldown          = Apex->SlideCooldownRemaining;
+		SavedJumpHoldTimeRemaining  = Apex->JumpHoldTimeRemaining;
+		SavedCurrentJumpCount       = Apex->CurrentJumpCount;
+	}
+}
+
+void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
+{
+	Super::PrepMoveFor(Character);
+
+	// Restore the component to the state this move was recorded in, so replaying it reproduces it.
+	if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Character->GetCharacterMovement()))
+	{
+		Apex->bWantsToSprint = bSavedWantsToSprint != 0;
+		Apex->bIsSliding     = bSavedIsSliding != 0;
+		Apex->bIsWallRunning = bSavedIsWallRunning != 0;
+		Apex->bWantsSlideOnLand = bSavedWantsSlideOnLand != 0;
+		Apex->bJumpHeld      = bSavedJumpHeld != 0;
+
+		Apex->SlideFatigueCounter         = SavedSlideFatigueCounter;
+		Apex->SlideFatigueDecayTimer      = SavedSlideFatigueDecayTimer;
+		Apex->SlideBoostCooldownRemaining = SavedSlideBoostCooldown;
+		Apex->SlideCooldownRemaining      = SavedSlideCooldown;
+		Apex->JumpHoldTimeRemaining       = SavedJumpHoldTimeRemaining;
+		Apex->CurrentJumpCount            = SavedCurrentJumpCount;
+	}
+}
+
+// ==================== FNetworkPredictionData_Client_Polarity ====================
+
+FNetworkPredictionData_Client_Polarity::FNetworkPredictionData_Client_Polarity(const UCharacterMovementComponent& ClientMovement)
+	: Super(ClientMovement)
+{
+}
+
+FSavedMovePtr FNetworkPredictionData_Client_Polarity::AllocateNewMove()
+{
+	return FSavedMovePtr(new FSavedMove_Polarity());
 }
 
 void UApexMovementComponent::TryCrouchSlide()
@@ -820,11 +1044,17 @@ void UApexMovementComponent::StartCrouching()
 	}
 
 	bWantsToCrouchSmooth = true;
-	bWantsToCrouch = true;
-	TargetCapsuleHalfHeight = GetCrouchedHalfHeight();
 
-	// Set the movement component's crouch flag immediately for IsCrouching() checks
-	CharacterOwner->bIsCrouched = true;
+	// bWantsToCrouch is the only thing that should be set here. The engine packs it into the saved
+	// move itself, so the server and every client reach the same conclusion, and
+	// UpdateCharacterStateBeforeMovement turns it into a real Crouch() with the encroachment check.
+	//
+	// bIsCrouched is deliberately NOT set by hand any more. It is a replicated property: writing it
+	// directly ran the engine's crouch on watching machines (OnRep_IsCrouched) at the same time as
+	// this component was resizing the capsule itself, and the two fought — that was the up-and-down
+	// bobbing on observed characters. IsCrouching() now becomes true one movement tick later, which
+	// is how every other UE character behaves.
+	bWantsToCrouch = true;
 }
 
 void UApexMovementComponent::StopCrouching()
@@ -843,13 +1073,11 @@ void UApexMovementComponent::StopCrouching()
 		return;
 	}
 
-	UE_LOG(LogSlide, Warning, TEXT("StopCrouching: Setting target height to %.1f"), StandingCapsuleHalfHeight);
-
 	bWantsToCrouchSmooth = false;
-	bWantsToCrouch = false;
-	TargetCapsuleHalfHeight = StandingCapsuleHalfHeight;
 
-	CharacterOwner->bIsCrouched = false;
+	// Same as StartCrouching: clear the intent and let the engine run UnCrouch(), which does its
+	// own fit check and restores the mesh offset. Nothing here touches bIsCrouched or the capsule.
+	bWantsToCrouch = false;
 }
 
 bool UApexMovementComponent::CanStandUp() const
@@ -910,59 +1138,18 @@ bool UApexMovementComponent::CanStandUp() const
 
 void UApexMovementComponent::UpdateCapsuleHeight(float DeltaTime)
 {
-	if (!CharacterOwner || StandingCapsuleHalfHeight <= 0.0f)
-	{
-		return;
-	}
-
-	UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
-	if (!Capsule)
-	{
-		return;
-	}
-
-	const float CurrentHalfHeight = Capsule->GetUnscaledCapsuleHalfHeight();
-
-	// Check if we need to interpolate
-	if (FMath::IsNearlyEqual(CurrentHalfHeight, TargetCapsuleHalfHeight, 0.1f))
-	{
-		// Snap to target if close enough
-		if (!FMath::IsNearlyEqual(CurrentHalfHeight, TargetCapsuleHalfHeight, 0.01f))
-		{
-			Capsule->SetCapsuleHalfHeight(TargetCapsuleHalfHeight);
-		}
-		return;
-	}
-
-	// Interpolate capsule height
-	const float NewHalfHeight = FMath::FInterpTo(
-		CurrentHalfHeight,
-		TargetCapsuleHalfHeight,
-		DeltaTime,
-		CapsuleInterpSpeed
-	);
-
-	// Calculate height delta (positive = growing, negative = shrinking)
-	const float HeightDelta = NewHalfHeight - CurrentHalfHeight;
-
-	// When standing up (growing), we need to move the actor UP to keep feet on ground
-	// When crouching (shrinking), we keep the actor position (head goes down)
-	// Actually for crouch: we want head to stay still, so actor moves DOWN
-	// For stand: we want feet to stay still, so actor moves UP
-
-	// The capsule center is at actor location, so:
-	// - Shrinking capsule: actor stays, head drops, feet rise -> need to move actor DOWN by HeightDelta
-	// - Growing capsule: actor stays, head rises, feet drop -> need to move actor UP by HeightDelta
-
-	// Apply the new capsule height
-	Capsule->SetCapsuleHalfHeight(NewHalfHeight);
-
-	// Move actor to keep feet on ground (move by half the delta since capsule grows from center)
-	// Negative delta (shrinking) -> move down slightly to compensate
-	// Positive delta (growing) -> move up to keep feet planted
-	FVector ActorLocation = CharacterOwner->GetActorLocation();
-	ActorLocation.Z += HeightDelta;
-	CharacterOwner->SetActorLocation(ActorLocation);
+	// Retired. This used to interpolate the capsule half height every frame and teleport the actor
+	// to compensate, which is the wrong shape for a Character: the teleport had no collision check
+	// (it pushed the capsule through floors and left characters hanging above them), it ran on
+	// every copy including simulated proxies, where it fought network smoothing, and it never
+	// compensated the mesh the way OnStartCrouch does.
+	//
+	// Crouching now goes through bWantsToCrouch, and the engine does the resize in one step with a
+	// fit check, the base-location drop (bCrouchMaintainsBaseLocation) and the mesh offset. The
+	// smooth *look* is a camera/mesh concern and lives in APolarityCharacter::AccumulateFirstPersonPose.
+	//
+	// Kept as an empty body rather than deleted so the declaration in the header stays valid; the
+	// header is untouched by this change.
 }
 
 void UApexMovementComponent::UpdateSlide(float DeltaTime)
@@ -998,15 +1185,18 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 
 	if (HorizontalSpeed > 0.0f)
 	{
+		// Steering comes from Acceleration, not CurrentMoveInput. CurrentMoveInput is written by the
+		// local input handler, so on the server a client's character always reads "no input" and its
+		// slide goes straight while the client's curves away. Acceleration is already the same
+		// direction in world space (input rotated by the control rotation), and it travels with the
+		// move. Its length is divided by the max to get back the 0..1 the threshold is written in.
 		FVector CurrentDir = HorizontalVel.GetSafeNormal();
+		const float InputStrength = Acceleration.Size2D() / FMath::Max(GetMaxAcceleration(), KINDA_SMALL_NUMBER);
 		if (MovementSettings->SlideSteeringResponse > 0.0f
-			&& CurrentMoveInput.Size() >= MovementSettings->SlideSteeringInputThreshold
+			&& InputStrength >= MovementSettings->SlideSteeringInputThreshold
 			&& CharacterOwner)
 		{
-			const FRotator YawRotation(0.0f, CharacterOwner->GetControlRotation().Yaw, 0.0f);
-			const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-			const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
-			const FVector WishDir = (ForwardDir * CurrentMoveInput.Y + RightDir * CurrentMoveInput.X).GetSafeNormal2D();
+			const FVector WishDir = Acceleration.GetSafeNormal2D();
 
 			if (!WishDir.IsNearlyZero())
 			{
@@ -1977,6 +2167,97 @@ bool UApexMovementComponent::TraceMantleSurface(FHitResult& OutHit) const
 
 // ==================== Air Movement ====================
 
+bool UApexMovementComponent::IsAccelerationForward() const
+{
+	const FVector AccelDir = Acceleration.GetSafeNormal2D();
+	if (AccelDir.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const AController* Controller = CharacterOwner ? CharacterOwner->GetController() : nullptr;
+	if (!Controller)
+	{
+		// No controller means this is a simulated proxy, which never runs this path anyway.
+		return IsForwardHeld();
+	}
+
+	// 0.7 is cos(45deg): W alone and the two W+strafe diagonals pass, pure strafe and back do not,
+	// which is the same set CurrentMoveInput.Y > 0.5 accepted.
+	const FVector ViewDir = Controller->GetControlRotation().Vector().GetSafeNormal2D();
+	return FVector::DotProduct(AccelDir, ViewDir) > 0.7f;
+}
+
+void UApexMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
+{
+	// Sliding, dashing and wall running each drive velocity themselves; the tick guarded against
+	// them before and this keeps that.
+	if (!bIsSliding && !bIsAirDashing && !bIsWallRunning)
+	{
+		ApplyAirStrafe(deltaTime);
+	}
+
+	if (bJumpHeld)
+	{
+		UpdateJumpHold(deltaTime);
+	}
+
+	Super::PhysFalling(deltaTime, Iterations);
+}
+
+void UApexMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration)
+{
+	// Momentum only: these three states drive Velocity themselves and must not get the normal input
+	// acceleration on top. The zeroing happens here rather than in GetMaxAcceleration so that
+	// Acceleration keeps pointing where the player is pushing. See GetMaxAcceleration.
+	if (bIsSliding || bIsWallRunning || bIsGroundDashing)
+	{
+		const FVector InputAcceleration = Acceleration;
+		Acceleration = FVector::ZeroVector;
+		Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
+		Acceleration = InputAcceleration;
+		return;
+	}
+
+	Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
+}
+
+void UApexMovementComponent::OnMovementUpdated(float DeltaSeconds, const FVector& OldLocation, const FVector& OldVelocity)
+{
+	Super::OnMovementUpdated(DeltaSeconds, OldLocation, OldVelocity);
+
+	// Slide deceleration and steering. This used to sit after Super::TickComponent, which is after
+	// the physics of the local frame but outside the simulated move: the server ran it on its own
+	// tick for a client's character and a replay never re-ran it at all, so the two ends braked and
+	// steered the slide differently. Here it runs once per simulated move on every machine.
+	if (bIsSliding)
+	{
+		CheckForWallBounce();
+		UpdateSlide(DeltaSeconds);
+	}
+
+	if (SlideCooldownRemaining > 0.0f)
+	{
+		SlideCooldownRemaining -= DeltaSeconds;
+	}
+	if (SlideBoostCooldownRemaining > 0.0f)
+	{
+		SlideBoostCooldownRemaining -= DeltaSeconds;
+	}
+
+	// Slide fatigue decays a step a second while not sliding. It scales the slide jump boost, which
+	// is why it counts here and not in the tick.
+	if (!bIsSliding && SlideFatigueCounter > 0)
+	{
+		SlideFatigueDecayTimer += DeltaSeconds;
+		if (SlideFatigueDecayTimer >= 1.0f)
+		{
+			SlideFatigueCounter--;
+			SlideFatigueDecayTimer = 0.0f;
+		}
+	}
+}
+
 void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 {
 #if WITH_EDITOR
@@ -1994,7 +2275,9 @@ void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 		return;
 	}
 
-	const FVector InputVector = GetLastInputVector();
+	// Acceleration, not GetLastInputVector: this runs inside the movement simulation now, and
+	// Acceleration is what the server and a replay have. See IsAccelerationForward.
+	const FVector InputVector = Acceleration;
 
 #if WITH_EDITOR
 	// Debug: show why air dive might not work
@@ -2003,7 +2286,7 @@ void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 		GEngine->AddOnScreenDebugMessage(9997, 0.0f, FColor::Yellow,
 			FString::Printf(TEXT("AirStrafe: Input=(%.2f,%.2f,%.2f), Forward=%d, Controller=%d, DiveEnabled=%d"),
 				InputVector.X, InputVector.Y, InputVector.Z,
-				IsForwardHeld() ? 1 : 0,
+				IsAccelerationForward() ? 1 : 0,
 				OwnerController ? 1 : 0,
 				MovementSettings->bEnableAirDive ? 1 : 0));
 	}
@@ -2021,7 +2304,7 @@ void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 		OwnerController = Cast<APlayerController>(OwnerCharacter->GetController());
 	}
 
-	if (MovementSettings->bEnableAirDive && IsForwardHeld() && OwnerController)
+	if (MovementSettings->bEnableAirDive && IsAccelerationForward() && OwnerController)
 	{
 		const float CameraPitch = OwnerController->GetControlRotation().Pitch;
 		// Normalize pitch to -180 to 180 range (UE stores as 0-360)
@@ -2456,6 +2739,18 @@ void UApexMovementComponent::SetMovementState(EPolarityMovementState NewState)
 	{
 		EPolarityMovementState OldState = CurrentMovementState;
 		CurrentMovementState = NewState;
+
+		// Stamp the moment sprinting ended. The weapon raise gate measures from here, so it has to
+		// be the real transition out of the sprint pose and not the moment the trigger was pulled:
+		// those differ whenever something else was already keeping the character out of a sprint.
+		if (OldState == EPolarityMovementState::Sprinting)
+		{
+			if (const UWorld* World = GetWorld())
+			{
+				SprintEndTime = World->GetTimeSeconds();
+			}
+		}
+
 		OnMovementStateChanged.Broadcast(OldState, NewState);
 	}
 }
@@ -2564,6 +2859,8 @@ void UApexMovementComponent::ResetMovementState()
 
 	// Reset input state
 	bWantsToSprint = false;
+	bSprintKeyHeld = false;
+	SprintSuppressedUntil = -1000.0f;
 	bWantsSlideOnLand = false;
 
 	// Stop velocity

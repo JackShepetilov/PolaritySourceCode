@@ -2,6 +2,8 @@
 
 #include "ShooterWeapon.h"
 #include "Coop/CoopPlayers.h"
+#include "PolarityCharacter.h"
+#include "ApexMovementComponent.h"
 #include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet/GameplayStatics.h"
@@ -279,6 +281,155 @@ void AShooterWeapon::EndPlay(EEndPlayReason::Type EndPlayReason)
 	GetWorld()->GetTimerManager().ClearTimer(RefireTimer);
 }
 
+void AShooterWeapon::PushLeftHandIK(UAnimInstance* AnimInstance, const FTransform& Transform, float Alpha)
+{
+	if (!AnimInstance)
+	{
+		return;
+	}
+
+	static const FName LeftHandIKTransformName(TEXT("LeftHandIKTransform"));
+	if (FProperty* TransformProperty = AnimInstance->GetClass()->FindPropertyByName(LeftHandIKTransformName))
+	{
+		FStructProperty* StructProp = CastField<FStructProperty>(TransformProperty);
+		if (StructProp && StructProp->Struct == TBaseStructure<FTransform>::Get())
+		{
+			if (void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(AnimInstance))
+			{
+				*static_cast<FTransform*>(ValuePtr) = Transform;
+			}
+		}
+	}
+
+	static const FName LeftHandIKAlphaName(TEXT("LeftHandIKAlpha"));
+	FProperty* AlphaProperty = AnimInstance->GetClass()->FindPropertyByName(LeftHandIKAlphaName);
+	if (!AlphaProperty)
+	{
+		return;
+	}
+
+	// Blueprint "float" is a double in UE5, but hand-authored C++ AnimBPs may still use float.
+	if (FFloatProperty* FloatProp = CastField<FFloatProperty>(AlphaProperty))
+	{
+		if (void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInstance))
+		{
+			*static_cast<float*>(ValuePtr) = Alpha;
+		}
+	}
+	else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(AlphaProperty))
+	{
+		if (void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInstance))
+		{
+			*static_cast<double*>(ValuePtr) = static_cast<double>(Alpha);
+		}
+	}
+}
+
+// ==================== Grip alignment ====================
+
+const FName AShooterWeapon::OptionalGripSocketName(TEXT("OptionalGrip"));
+const FName AShooterWeapon::ThirdPersonSocketSuffix(TEXT("_TP"));
+
+FName AShooterWeapon::PickThirdPersonSocket(const USkeletalMeshComponent* WeaponMesh, const FName BaseSocket)
+{
+	if (!WeaponMesh || BaseSocket.IsNone())
+	{
+		return BaseSocket;
+	}
+
+	const FName ThirdPersonSocket(*(BaseSocket.ToString() + ThirdPersonSocketSuffix.ToString()));
+	return WeaponMesh->DoesSocketExist(ThirdPersonSocket) ? ThirdPersonSocket : BaseSocket;
+}
+
+void AShooterWeapon::AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, const FName GripSocket)
+{
+	const FString OwnerNameForLog = WeaponMesh && WeaponMesh->GetOwner()
+		? WeaponMesh->GetOwner()->GetName()
+		: FString(TEXT("<no owner>"));
+
+	if (!WeaponMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] AlignMeshToGripSocket: WeaponMesh is null — skipping"));
+		return;
+	}
+
+	const FString MeshNameForLog = WeaponMesh->GetName();
+
+	if (!WeaponMesh->DoesSocketExist(GripSocket))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s %s: grip socket '%s' NOT FOUND — alignment skipped"),
+			*OwnerNameForLog, *MeshNameForLog, *GripSocket.ToString());
+		return;
+	}
+
+	const FTransform SocketComponent = WeaponMesh->GetSocketTransform(GripSocket, RTS_Component);
+	const FQuat    InverseRotation = SocketComponent.GetRotation().Inverse();
+	const FVector  MeshScale       = WeaponMesh->GetRelativeScale3D();
+
+	// Scaled socket offset in mesh-local axes, then unrotated into mesh-relative axes.
+	const FVector ScaledSocketLocation = SocketComponent.GetLocation() * MeshScale;
+	const FVector NewRelativeLocation  = -InverseRotation.RotateVector(ScaledSocketLocation);
+
+	// === BEFORE state ===
+	const FTransform MeshRelBefore = WeaponMesh->GetRelativeTransform();
+	const FVector    OptionalGripWorldBefore = WeaponMesh->GetSocketLocation(GripSocket);
+
+	// Where the hand socket lives in world (the attach parent + attach socket on it).
+	FVector HandSocketWorld = FVector::ZeroVector;
+	FString HandSocketLog = TEXT("<no parent>");
+	if (USceneComponent* AttachParent = WeaponMesh->GetAttachParent())
+	{
+		const FName AttachSock = WeaponMesh->GetAttachSocketName();
+		HandSocketWorld = AttachSock.IsNone() ? AttachParent->GetComponentLocation()
+		                                     : AttachParent->GetSocketLocation(AttachSock);
+		HandSocketLog = FString::Printf(TEXT("%s.%s"), *AttachParent->GetName(), *AttachSock.ToString());
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] === %s %s (grip socket '%s') ==="),
+		*OwnerNameForLog, *MeshNameForLog, *GripSocket.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Attached to: %s"), *HandSocketLog);
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Socket S (component space):  Loc=%s  Rot=%s  Scale=%s"),
+		*SocketComponent.GetLocation().ToString(),
+		*SocketComponent.GetRotation().Rotator().ToString(),
+		*SocketComponent.GetScale3D().ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Mesh BEFORE: RelLoc=%s  RelRot=%s  RelScale=%s"),
+		*MeshRelBefore.GetLocation().ToString(),
+		*MeshRelBefore.GetRotation().Rotator().ToString(),
+		*MeshScale.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Computed:    NewRelLoc=%s  NewRelRot=%s"),
+		*NewRelativeLocation.ToString(),
+		*InverseRotation.Rotator().ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Hand world = %s"), *HandSocketWorld.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world BEFORE = %s  (delta=%s)"),
+		*OptionalGripWorldBefore.ToString(),
+		*(OptionalGripWorldBefore - HandSocketWorld).ToString());
+
+	// Apply location + rotation atomically; leave scale untouched (KeepRelative scale
+	// from AttachmentRule preserved the BP-set scale and we don't want to clobber it).
+	WeaponMesh->SetRelativeLocationAndRotation(NewRelativeLocation, InverseRotation);
+
+	// === AFTER state — verify OptionalGrip actually lands at hand socket ===
+	const FVector OptionalGripWorldAfter = WeaponMesh->GetSocketLocation(GripSocket);
+	const FVector DeltaAfter = OptionalGripWorldAfter - HandSocketWorld;
+	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world AFTER  = %s  (delta=%s  len=%.4f)"),
+		*OptionalGripWorldAfter.ToString(),
+		*DeltaAfter.ToString(),
+		DeltaAfter.Size());
+
+	// Log every child's world position so we can see if scope/sight ended up where BP intended.
+	TArray<USceneComponent*> Children;
+	WeaponMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
+	for (USceneComponent* Child : Children)
+	{
+		if (!Child || Child == WeaponMesh) continue;
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Child=%s ParentSocket=%s  RelLoc=%s  WorldLoc=%s"),
+			*Child->GetName(),
+			*Child->GetAttachSocketName().ToString(),
+			*Child->GetRelativeLocation().ToString(),
+			*Child->GetComponentLocation().ToString());
+	}
+}
+
 void AShooterWeapon::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -288,6 +439,14 @@ void AShooterWeapon::Tick(float DeltaTime)
 	{
 		UpdateHeat(DeltaTime);
 	}
+
+	// The third person weapon is not steered from here any more. It used to have its world rotation
+	// rebuilt from GetBaseAimRotation every frame, because the character's body faced its movement
+	// direction and the gun in its hand therefore pointed anywhere but at the target. That was
+	// papering over the real problem: the body was never turned. The character now yaws with the
+	// camera (bUseControllerRotationYaw in AShooterCharacter) and pitches through the aim offset, so
+	// the weapon points where the owner aims for the same reason a real one does, by being held by
+	// someone facing that way.
 }
 
 void AShooterWeapon::OnOwnerDestroyed(AActor* DestroyedActor)
@@ -344,6 +503,30 @@ void AShooterWeapon::StartFiring()
 {
 	// raise the firing flag
 	bIsFiring = true;
+
+	// ==================== Sprint-out gate ====================
+	// Coming out of a sprint the weapon is still being raised, so the shot waits for the raise to
+	// finish instead of going off from the sprint pose. It is deferred rather than dropped: hold
+	// the trigger through the raise and it fires the moment the gate opens, release and StopFiring
+	// clears the timer. Deliberately measured from when sprinting *ended*, which the movement
+	// component stamps, and not from this call: the two differ when the player was already out of
+	// the sprint before pulling the trigger.
+	if (SprintToFireTime > 0.0f)
+	{
+		if (const APolarityCharacter* PolarityOwner = Cast<APolarityCharacter>(PawnOwner))
+		{
+			if (const UApexMovementComponent* Apex = PolarityOwner->GetApexMovement())
+			{
+				const float GateOpensAt = Apex->GetSprintEndTime() + SprintToFireTime;
+				const float Remaining = GateOpensAt - GetWorld()->GetTimeSeconds();
+				if (Remaining > 0.0f)
+				{
+					GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, Remaining, false);
+					return;
+				}
+			}
+		}
+	}
 
 	// check how much time has passed since we last shot
 	// this may be under the refire rate if the weapon shoots slow enough and the player is spamming the trigger

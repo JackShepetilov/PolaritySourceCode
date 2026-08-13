@@ -201,6 +201,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapons")
 	FName ThirdPersonWeaponSocket = FName("HandGrip_R");
 
+	/** Socket on the weapon that the off hand grabs. Same default as the player's, because NPCs run
+	 *  the same third person anim blueprints and hold the same weapons. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapons")
+	FName LeftHandGripSocket = FName("GripPoint_002");
+
+	/** Correction applied on top of the grip socket before the hand is pinned to it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapons")
+	FTransform LeftHandIKOffset = FTransform::Identity;
+
 	/** Max range for aiming calculations */
 	UPROPERTY(EditAnywhere, Category = "Aim")
 	float AimRange = 10000.0f;

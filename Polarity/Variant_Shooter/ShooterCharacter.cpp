@@ -74,6 +74,40 @@ static bool IsYankThrowMontageActiveOnFPMesh(UChargeAnimationComponent* ChargeCo
 	return AnimInst && AnimInst->Montage_IsPlaying(ChargeComp->YankThrowMontage);
 }
 
+// File-scope helper (uniquely named — unity-build safe): mark everything hanging under a
+// first-person mesh as first-person too.
+//
+// bOnlyOwnerSee and FirstPersonPrimitiveType are per-component and are NOT inherited by children,
+// so a sight, laser or any other mesh a Blueprint attaches under a first-person mesh renders for
+// *everyone*: the other players see it floating on the third-person body. There was already a
+// hand-written version of this for the single static mesh under MeleeWeaponFPMesh (see BeginPlay);
+// this is the same rule applied to every descendant, so new attachments stop needing their own
+// line of code.
+// File-scope helper (uniquely named — unity-build safe): hand the left-hand IK target to an
+// Animation Blueprint. The AnimBP side is a pair of loose variables rather than an interface, so
+// this is reflection by name: an AnimBP without them simply ignores the values, which is what
+// keeps unarmed and NPC anim classes from caring.
+
+static void ApplyFirstPersonVisibilityToFPSubtree(USceneComponent* Root)
+{
+	if (!Root)
+	{
+		return;
+	}
+
+	TArray<USceneComponent*> Children;
+	Root->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
+	for (USceneComponent* Child : Children)
+	{
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Child))
+		{
+			Prim->SetOnlyOwnerSee(true);
+			Prim->SetOwnerNoSee(false);
+			Prim->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::FirstPerson);
+		}
+	}
+}
+
 AShooterCharacter::AShooterCharacter()
 {
 	// create the noise emitter component
@@ -114,6 +148,18 @@ AShooterCharacter::AShooterCharacter()
 
 	// configure movement
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 600.0f, 0.0f);
+
+	// The body faces where the camera faces, always. Both of these are already the engine defaults
+	// for ACharacter; they are written out because the third person aiming depends on them.
+	//
+	// This is what makes the third person weapon point at what its owner is aiming at: the character
+	// turns, not the gun. Yaw comes from the body, pitch from the aim offset, and nothing has to
+	// steer the weapon per frame. It is also why no turn-in-place is needed here: the body cannot
+	// wind up behind the camera, because it never lags it. The price is that the character moves in
+	// every direction relative to its own facing, which is why BS_Rifle_Locomotion is a full
+	// eight-way strafe set rather than a forward-only one.
+	bUseControllerRotationYaw = true;
+	GetCharacterMovement()->bOrientRotationToMovement = false;
 }
 
 USkeletalMeshComponent* AShooterCharacter::GetMeleeMesh() const
@@ -210,6 +256,11 @@ void AShooterCharacter::BeginPlay()
 
 	// Bind movement SFX delegates
 	BindMovementSFXDelegates();
+
+	// Anything the Blueprint hung under the first-person mesh renders for everyone until it is
+	// told otherwise, so claim the whole subtree before the first frame is drawn. Weapons get
+	// the same treatment again on every attach, since their meshes arrive later.
+	ApplyFirstPersonVisibilityToFPSubtree(GetFirstPersonMesh());
 
 	// Initialize first person mesh visibility (hidden if no weapon)
 	UpdateFirstPersonMeshVisibility();
@@ -732,6 +783,16 @@ void AShooterCharacter::DoStartFiring()
 		return;
 	}
 
+	// Firing vetoes sprinting. Done here, on the input, and not on the shot itself: the shot is
+	// resolved with the server in the loop and would arrive at a different time on every machine,
+	// while the input is the same thing the movement prediction is built from. The veto does not
+	// clear the player's sprint intent, so holding the key through a firefight resumes sprinting
+	// by itself once the suppression lapses.
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SuppressSprint();
+	}
+
 	// fire the current weapon
 	if (CurrentWeapon)
 	{
@@ -1207,6 +1268,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+
 	// Boss finisher has priority over everything
 	if (bBossFinisherActive)
 	{
@@ -1224,6 +1286,18 @@ void AShooterCharacter::Tick(float DeltaTime)
 	if (bChromaticAberrationActive)
 	{
 		UpdateChromaticAberration(DeltaTime);
+	}
+
+	// Keep the sprint veto alive while the trigger or the aim button is held. Refreshing it every
+	// frame is what turns SprintSuppressionTime into "this long after the last shot" instead of
+	// "this long after the first one": a full auto burst or a held aim keeps pushing the deadline,
+	// and sprinting comes back on its own once neither is happening.
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		if (bWantsToAim || (CurrentWeapon && CurrentWeapon->IsFiring()))
+		{
+			Apex->SuppressSprint();
+		}
 	}
 
 	UpdateADS(DeltaTime);
@@ -2285,96 +2359,19 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	// socket-relative offsets stay intact and bone animation drives them correctly. (The
 	// earlier `SetWorldTransform` restore overwrote those offsets, which is what made
 	// sights/suppressors/lasers drift off their sockets the moment the weapon animated.)
-	static const FName OptionalGripSocket = FName("OptionalGrip");
+	// The maths and the logging live on AShooterWeapon so that NPCs, which attach their weapons
+	// through their own override, hold them exactly the way the player does.
+	AShooterWeapon::AlignMeshToGripSocket(Weapon->GetFirstPersonMesh(), FName("OptionalGrip"));
 
-	const FString WeaponNameForLog = Weapon->GetName();
+	USkeletalMeshComponent* ThirdPersonWeaponMesh = Weapon->GetThirdPersonMesh();
+	AShooterWeapon::AlignMeshToGripSocket(ThirdPersonWeaponMesh,
+		AShooterWeapon::PickThirdPersonSocket(ThirdPersonWeaponMesh, AShooterWeapon::OptionalGripSocketName));
 
-	auto AlignToOptionalGrip = [&WeaponNameForLog](USkeletalMeshComponent* WeaponMesh)
-	{
-		if (!WeaponMesh)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s: WeaponMesh is null — skipping"), *WeaponNameForLog);
-			return;
-		}
-
-		const FString MeshNameForLog = WeaponMesh->GetName();
-
-		if (!WeaponMesh->DoesSocketExist(OptionalGripSocket))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s %s: OptionalGrip socket NOT FOUND — alignment skipped"),
-				*WeaponNameForLog, *MeshNameForLog);
-			return;
-		}
-
-		const FTransform SocketComponent = WeaponMesh->GetSocketTransform(OptionalGripSocket, RTS_Component);
-		const FQuat    InverseRotation = SocketComponent.GetRotation().Inverse();
-		const FVector  MeshScale       = WeaponMesh->GetRelativeScale3D();
-
-		// Scaled socket offset in mesh-local axes, then unrotated into mesh-relative axes.
-		const FVector ScaledSocketLocation = SocketComponent.GetLocation() * MeshScale;
-		const FVector NewRelativeLocation  = -InverseRotation.RotateVector(ScaledSocketLocation);
-
-		// === BEFORE state ===
-		const FTransform MeshRelBefore = WeaponMesh->GetRelativeTransform();
-		const FVector    OptionalGripWorldBefore = WeaponMesh->GetSocketLocation(OptionalGripSocket);
-
-		// Where the hand socket lives in world (the attach parent + attach socket on it).
-		FVector HandSocketWorld = FVector::ZeroVector;
-		FString HandSocketLog = TEXT("<no parent>");
-		if (USceneComponent* AttachParent = WeaponMesh->GetAttachParent())
-		{
-			const FName AttachSock = WeaponMesh->GetAttachSocketName();
-			HandSocketWorld = AttachSock.IsNone() ? AttachParent->GetComponentLocation()
-			                                     : AttachParent->GetSocketLocation(AttachSock);
-			HandSocketLog = FString::Printf(TEXT("%s.%s"), *AttachParent->GetName(), *AttachSock.ToString());
-		}
-
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] === %s %s ==="), *WeaponNameForLog, *MeshNameForLog);
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Attached to: %s"), *HandSocketLog);
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Socket S (component space):  Loc=%s  Rot=%s  Scale=%s"),
-			*SocketComponent.GetLocation().ToString(),
-			*SocketComponent.GetRotation().Rotator().ToString(),
-			*SocketComponent.GetScale3D().ToString());
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Mesh BEFORE: RelLoc=%s  RelRot=%s  RelScale=%s"),
-			*MeshRelBefore.GetLocation().ToString(),
-			*MeshRelBefore.GetRotation().Rotator().ToString(),
-			*MeshScale.ToString());
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Computed:    NewRelLoc=%s  NewRelRot=%s"),
-			*NewRelativeLocation.ToString(),
-			*InverseRotation.Rotator().ToString());
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Hand world = %s"), *HandSocketWorld.ToString());
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world BEFORE = %s  (delta=%s)"),
-			*OptionalGripWorldBefore.ToString(),
-			*(OptionalGripWorldBefore - HandSocketWorld).ToString());
-
-		// Apply location + rotation atomically; leave scale untouched (KeepRelative scale
-		// from AttachmentRule preserved the BP-set scale and we don't want to clobber it).
-		WeaponMesh->SetRelativeLocationAndRotation(NewRelativeLocation, InverseRotation);
-
-		// === AFTER state — verify OptionalGrip actually lands at hand socket ===
-		const FVector OptionalGripWorldAfter = WeaponMesh->GetSocketLocation(OptionalGripSocket);
-		const FVector DeltaAfter = OptionalGripWorldAfter - HandSocketWorld;
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world AFTER  = %s  (delta=%s  len=%.4f)"),
-			*OptionalGripWorldAfter.ToString(),
-			*DeltaAfter.ToString(),
-			DeltaAfter.Size());
-
-		// Log every child's world position so we can see if scope/sight ended up where BP intended.
-		TArray<USceneComponent*> Children;
-		WeaponMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
-		for (USceneComponent* Child : Children)
-		{
-			if (!Child || Child == WeaponMesh) continue;
-			UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   Child=%s ParentSocket=%s  RelLoc=%s  WorldLoc=%s"),
-				*Child->GetName(),
-				*Child->GetAttachSocketName().ToString(),
-				*Child->GetRelativeLocation().ToString(),
-				*Child->GetComponentLocation().ToString());
-		}
-	};
-
-	AlignToOptionalGrip(Weapon->GetFirstPersonMesh());
-	AlignToOptionalGrip(Weapon->GetThirdPersonMesh());
+	// Blueprint-added attachments under the weapon's first-person mesh (sights, lasers, anything
+	// bolted on in the BP) do not inherit its owner-only rendering and would otherwise show up on
+	// the third-person body for every other player.
+	ApplyFirstPersonVisibilityToFPSubtree(Weapon->GetFirstPersonMesh());
+	ApplyFirstPersonVisibilityToFPSubtree(GetFirstPersonMesh());
 }
 
 void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
@@ -4483,6 +4480,35 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 
 	// Always pass the interpolated alpha value
 	SetAnimInstanceLeftHandIK(FinalTransform, CurrentLeftHandIKAlpha);
+
+	// Same treatment for the body everyone else sees, so a teammate's off hand sits on the weapon
+	// instead of floating beside it.
+	//
+	// Alpha is forced to zero when there is nothing to hold on to, rather than passing the
+	// interpolated value with an identity transform, which would drag the hand to the world origin.
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		FTransform TPTransform = FTransform::Identity;
+		float TPAlpha = 0.0f;
+
+		if (CurrentWeapon)
+		{
+			if (USkeletalMeshComponent* WeaponTPMesh = CurrentWeapon->GetThirdPersonMesh())
+			{
+				// A weapon may place the off hand differently on the body than on camera.
+				const FName TPGripSocket =
+					AShooterWeapon::PickThirdPersonSocket(WeaponTPMesh, LeftHandGripSocket);
+				if (WeaponTPMesh->DoesSocketExist(TPGripSocket))
+				{
+					TPTransform = LeftHandIKOffset *
+						WeaponTPMesh->GetSocketTransform(TPGripSocket, ERelativeTransformSpace::RTS_World);
+					TPAlpha = CurrentLeftHandIKAlpha;
+				}
+			}
+		}
+
+		AShooterWeapon::PushLeftHandIK(TPMesh->GetAnimInstance(), TPTransform, TPAlpha);
+	}
 }
 
 void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, float Alpha)
@@ -4501,59 +4527,9 @@ void AShooterCharacter::SetAnimInstanceLeftHandIK(const FTransform& Transform, f
 		return;
 	}
 
-	//UE_LOG(LogTemp, Log, TEXT("LeftHandIK: AnimInstance=%s, Alpha=%.2f"), *AnimInstance->GetClass()->GetName(), Alpha);
-
-	// Set LeftHandIKTransform property via reflection
-	static FName LeftHandIKTransformName(TEXT("LeftHandIKTransform"));
-	FProperty* TransformProperty = AnimInstance->GetClass()->FindPropertyByName(LeftHandIKTransformName);
-
-	if (TransformProperty)
-	{
-		FStructProperty* StructProp = CastField<FStructProperty>(TransformProperty);
-		if (StructProp && StructProp->Struct == TBaseStructure<FTransform>::Get())
-		{
-			void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(AnimInstance);
-			if (ValuePtr)
-			{
-				*static_cast<FTransform*>(ValuePtr) = Transform;
-			}
-		}
-	}
-
-	// Set LeftHandIKAlpha property via reflection
-	static FName LeftHandIKAlphaName(TEXT("LeftHandIKAlpha"));
-	FProperty* AlphaProperty = AnimInstance->GetClass()->FindPropertyByName(LeftHandIKAlphaName);
-
-	if (!AlphaProperty)
-	{
-		//UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property 'LeftHandIKAlpha' NOT FOUND in %s"), *AnimInstance->GetClass()->GetName());
-		return;
-	}
-
-	// Try as FFloatProperty first (UE4 style)
-	if (FFloatProperty* FloatProp = CastField<FFloatProperty>(AlphaProperty))
-	{
-		void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInstance);
-		if (ValuePtr)
-		{
-			*static_cast<float*>(ValuePtr) = Alpha;
-			//UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as float = %.2f"), Alpha);
-		}
-	}
-	// Try as FDoubleProperty (UE5 may use double for Blueprint floats)
-	else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(AlphaProperty))
-	{
-		void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInstance);
-		if (ValuePtr)
-		{
-			*static_cast<double*>(ValuePtr) = static_cast<double>(Alpha);
-			//UE_LOG(LogTemp, Log, TEXT("LeftHandIK: Set as double = %.2f"), Alpha);
-		}
-	}
-	else
-	{
-		//UE_LOG(LogTemp, Warning, TEXT("LeftHandIK: Property found but wrong type!"));
-	}
+	// The write itself is shared with the third person path and with NPCs, so it lives on
+	// AShooterWeapon.
+	AShooterWeapon::PushLeftHandIK(AnimInstance, Transform, Alpha);
 }
 
 // ==================== New Movement SFX/VFX Handlers ====================

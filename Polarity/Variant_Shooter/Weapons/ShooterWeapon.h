@@ -431,6 +431,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|ADS", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float ADSSoundVolume = 0.5f;
 
+	/** How long after sprinting ends this weapon needs to come up before it can fire. A shot asked
+	 *  for during that window is deferred to the end of it, not dropped, so holding the trigger
+	 *  through the raise fires the instant it opens. Releasing the trigger cancels it.
+	 *  Keep this equal to the sprint-out blend time in the anim graph, or the weapon fires out of
+	 *  a pose that has not finished coming up. Zero disables the gate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon", meta = (ClampMin = "0.0", Units = "s"))
+	float SprintToFireTime = 0.2f;
+
 	// ==================== Animation ====================
 
 	UPROPERTY(EditAnywhere, Category = "Animation")
@@ -757,6 +765,38 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	USkeletalMeshComponent* GetThirdPersonMesh() const { return ThirdPersonMesh; }
+
+	// ==================== Grip alignment ====================
+	//
+	// How a weapon sits in a hand. Whoever is holding it attaches the mesh to a hand socket first,
+	// then calls this, and the mesh is moved and turned so that its grip socket lands exactly on the
+	// hand socket, matching it in orientation as well as position. That makes the grip socket the
+	// one place where "how this weapon is held" is authored: turn the socket in the mesh editor and
+	// the weapon turns in the hand. Player and NPCs both go through here, so they hold alike.
+
+	/** The grip socket every weapon may carry. First person always uses this one. */
+	static const FName OptionalGripSocketName;
+
+	/** Suffix that marks a socket as the third person variant of another one. */
+	static const FName ThirdPersonSocketSuffix;
+
+	/** BaseSocket with "_TP" appended when the mesh carries it, BaseSocket otherwise.
+	 *
+	 *  This is how a weapon can be held one way on camera and another way on the body without the
+	 *  two settings fighting each other. First person is tuned by hand per weapon against the
+	 *  camera; third person has to look right to everybody else. Author OptionalGrip_TP to turn the
+	 *  gun in the hand, GripPoint_002_TP to move where the off hand grabs it, and first person keeps
+	 *  using OptionalGrip and GripPoint_002 as before. Add neither and nothing changes. */
+	static FName PickThirdPersonSocket(const USkeletalMeshComponent* WeaponMesh, const FName BaseSocket);
+
+	/** Lands GripSocket on the socket WeaponMesh is attached to. Does nothing if there is no such
+	 *  socket, in which case the mesh keeps hanging by its own origin. Logs under [GRIP_DEBUG]. */
+	static void AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, const FName GripSocket);
+
+	/** Writes LeftHandIKTransform and LeftHandIKAlpha on an anim instance, looked up by name. Any
+	 *  anim blueprint that declares those two picks it up and anything else is left untouched, which
+	 *  is what lets players and NPCs share one call even when they run different graphs. */
+	static void PushLeftHandIK(UAnimInstance* AnimInstance, const FTransform& Transform, float Alpha);
 
 	// ==================== Yank Origin Tag ====================
 
