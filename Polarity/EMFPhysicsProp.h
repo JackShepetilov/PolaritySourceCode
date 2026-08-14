@@ -607,6 +607,10 @@ public:
 
 	/** Mark this prop as captured by the given plate */
 	UFUNCTION(BlueprintCallable, Category = "Channeling Capture")
+	/** Turn the prop's own physics on or off. Every path that wants to simulate goes through here,
+	 *  because off the authority the answer is always no. */
+	void ApplyPropPhysicsSimulation(bool bEnable);
+
 	void SetCapturedByPlate(AEMFChannelingPlateActor* Plate);
 
 	/** Release this prop from capture */

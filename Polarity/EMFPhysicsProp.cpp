@@ -42,6 +42,14 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	PrimaryActorTick.bCanEverTick = true;
 
 	// Physics mesh as root (physics body drives actor transform)
+	// One prop, one simulation. Every machine used to run its own physics for every prop, so the
+	// same crate ended up somewhere different on each screen and the crate that killed you on your
+	// screen never moved on anybody else's. The server simulates and everyone else is shown the
+	// result. See ApplyPropPhysicsSimulation for the other half: clients must not simulate at all,
+	// or their own physics fights the transforms coming in.
+	bReplicates = true;
+	SetReplicateMovement(true);
+
 	PropMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PropMesh"));
 	SetRootComponent(PropMesh);
 	PropMesh->SetSimulatePhysics(true);
@@ -202,8 +210,15 @@ void AEMFPhysicsProp::BeginPlay()
 	// This prevents NPC depenetration impulses from triggering false explosions.
 	if (PropMesh && (FMath::IsNearlyZero(DefaultCharge) || bKeepPropMeshStatic))
 	{
-		PropMesh->SetSimulatePhysics(false);
+		ApplyPropPhysicsSimulation(false);
 		SetActorTickEnabled(false);
+	}
+
+	// The constructor turns simulation on for everybody, because there is no authority to ask yet.
+	// This is where a client takes it back off and settles for being shown where the prop went.
+	if (!HasAuthority())
+	{
+		ApplyPropPhysicsSimulation(false);
 	}
 }
 
@@ -480,6 +495,19 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 float AEMFPhysicsProp::CalculateCaptureRange() const
 {
 	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(GetCharge()));
+}
+
+void AEMFPhysicsProp::ApplyPropPhysicsSimulation(bool bEnable)
+{
+	if (!PropMesh)
+	{
+		return;
+	}
+
+	// Only the authority simulates. A client that also simulated would push its own copy around and
+	// then be corrected by the transform arriving from the server, which reads as a prop that
+	// twitches and drifts. Clients just get shown where it ended up.
+	PropMesh->SetSimulatePhysics(bEnable && HasAuthority());
 }
 
 void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
@@ -1453,7 +1481,7 @@ void AEMFPhysicsProp::SpawnDestructionGC(const FVector& DestructionOrigin)
 
 	// Hide PropMesh (GC gibs replace it visually)
 	PropMesh->SetVisibility(false);
-	PropMesh->SetSimulatePhysics(false);
+	ApplyPropPhysicsSimulation(false);
 	PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	UE_LOG(LogTemp, Log, TEXT("EMFPhysicsProp %s: GC destruction spawned, impulse=%.0f (chargeScale=%.2f), physicsTime=%.1fs, visualTime=%.1fs"),
@@ -1904,11 +1932,11 @@ void AEMFPhysicsProp::ResetProp()
 		// Static-mode subclasses never enable physics on PropMesh — they manage the mesh state themselves.
 		if (FMath::IsNearlyZero(DefaultCharge) || bKeepPropMeshStatic)
 		{
-			PropMesh->SetSimulatePhysics(false);
+			ApplyPropPhysicsSimulation(false);
 		}
 		else
 		{
-			PropMesh->SetSimulatePhysics(true);
+			ApplyPropPhysicsSimulation(true);
 		}
 
 		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
@@ -1958,7 +1986,7 @@ void AEMFPhysicsProp::RestoreFromCheckpointState(const FPropCheckpointData& Stat
 			{
 				PropMesh->SetVisibility(false);
 				PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-				PropMesh->SetSimulatePhysics(false);
+				ApplyPropPhysicsSimulation(false);
 			}
 		}
 		// Already dead — leave as is
@@ -2003,7 +2031,7 @@ void AEMFPhysicsProp::SetCharge(float NewCharge)
 	// and handle destruction via their own path (e.g. hiding PropMesh + spawning GC).
 	if (PropMesh && FMath::IsNearlyZero(OldCharge) && !FMath::IsNearlyZero(NewCharge) && !bKeepPropMeshStatic)
 	{
-		PropMesh->SetSimulatePhysics(true);
+		ApplyPropPhysicsSimulation(true);
 		SetActorTickEnabled(true);
 	}
 
