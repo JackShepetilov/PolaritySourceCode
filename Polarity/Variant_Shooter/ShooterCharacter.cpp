@@ -4157,13 +4157,21 @@ void AShooterCharacter::Die()
 
 	BP_OnDeath();
 
-	// A death during an active roguelite run is terminal. EndRun clears run-scoped persistence,
-	// then the configurable presentation replaces the old immediate black fade.
+	// A death during an active roguelite run is terminal, but in coop it is terminal for the *team*,
+	// not for whoever fell first. See ShouldRunEndOnThisDeath: the run only ends once nobody is left
+	// standing, and only the server may decide it, because only the server can see the whole team.
+	//
+	// The presentation below still plays wherever this runs, so a fallen player watches their own
+	// death; what they no longer do is take everybody else back to the menu with them.
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>(); Run && Run->IsRunActive())
 		{
-			Run->EndRun(ERunEndReason::PlayerDeath);
+			const bool bRunIsOver = ShouldRunEndOnThisDeath();
+			if (bRunIsOver)
+			{
+				Run->EndRun(ERunEndReason::PlayerDeath);
+			}
 
 			if (PlayerDeathSequenceComponent && PlayerDeathSequenceComponent->StartDeathSequence())
 			{
@@ -4182,11 +4190,14 @@ void AShooterCharacter::Die()
 				}
 
 				const float SequenceDuration = PlayerDeathSequenceComponent->GetTotalDuration();
-				UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Player death sequence started -> menu after %.2fs"),
-					SequenceDuration);
-				GetWorldTimerManager().SetTimer(
-					RespawnTimer, this, &AShooterCharacter::ReturnToMainMenuAfterRunDeath,
-					FMath::Max(0.01f, SequenceDuration), false);
+				if (bRunIsOver)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Player death sequence started -> menu after %.2fs"),
+						SequenceDuration);
+					GetWorldTimerManager().SetTimer(
+						RespawnTimer, this, &AShooterCharacter::ReturnToMainMenuAfterRunDeath,
+						FMath::Max(0.01f, SequenceDuration), false);
+				}
 				return;
 			}
 
@@ -4199,11 +4210,14 @@ void AShooterCharacter::Die()
 						0.0f, 1.0f, DeathFadeOutDuration, DeathFadeColor, false, true);
 				}
 			}
-			UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Death sequence unavailable -> fallback menu fade %.2fs"),
-				DeathFadeOutDuration);
-			GetWorldTimerManager().SetTimer(
-				RespawnTimer, this, &AShooterCharacter::ReturnToMainMenuAfterRunDeath,
-				FMath::Max(0.01f, DeathFadeOutDuration), false);
+			if (bRunIsOver)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] Death sequence unavailable -> fallback menu fade %.2fs"),
+					DeathFadeOutDuration);
+				GetWorldTimerManager().SetTimer(
+					RespawnTimer, this, &AShooterCharacter::ReturnToMainMenuAfterRunDeath,
+					FMath::Max(0.01f, DeathFadeOutDuration), false);
+			}
 			return;
 		}
 	}
@@ -4218,6 +4232,40 @@ void AShooterCharacter::Die()
 	}
 
 	GetWorld()->GetTimerManager().SetTimer(RespawnTimer, this, &AShooterCharacter::OnRespawn, RespawnTime, false);
+}
+
+bool AShooterCharacter::ShouldRunEndOnThisDeath() const
+{
+	// Only the server may answer this. CoopPlayers::GetAll walks the player controller list, and on
+	// a client the engine only keeps the local one, so a client asking "is anyone else alive" would
+	// always hear "no" and take the whole team back to the menu on its own death.
+	if (!HasAuthority())
+	{
+		return false;
+	}
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+
+	for (const APawn* Player : Players)
+	{
+		if (Player == this)
+		{
+			continue;
+		}
+
+		const AShooterCharacter* Teammate = Cast<AShooterCharacter>(Player);
+		if (Teammate && !Teammate->IsDead())
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RUN_FLOW] %s died, but %s is still up: the run continues"),
+				*GetName(), *Teammate->GetName());
+			return false;
+		}
+	}
+
+	// Nobody left standing. This is the death that ends it, and the server travel below takes
+	// everyone to the menu together.
+	return true;
 }
 
 void AShooterCharacter::ReturnToMainMenuAfterRunDeath()

@@ -1045,6 +1045,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsDead() const { return CurrentHP <= 0.0f; }
 
+	/** True when this death is the one that ends the run: the server has looked at the whole team
+	 *  and found nobody else still standing. Always false away from the server, which is what stops
+	 *  a fallen client from travelling to the menu on its own and dropping out of the session.
+	 *
+	 *  This is the half of the agreed coop death rule that exists today. The other half, lying
+	 *  downed until a teammate picks you up, is not built yet: a fallen player currently just stays
+	 *  dead and watches until the run really ends. */
+	bool ShouldRunEndOnThisDeath() const;
+
 	/** Restore HP by the given amount (clamped to MaxHP). Updates UI. */
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void RestoreHealth(float Amount);
