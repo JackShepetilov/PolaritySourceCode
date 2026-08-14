@@ -25,6 +25,12 @@ AShooterProjectile::AShooterProjectile()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
+	// The authority's projectile is the real one and everybody has to see it fly. A projectile
+	// spawned on a client never replicates anything regardless of this flag, because replication only
+	// ever originates from the authority, so the shooter's local stand-in stays local.
+	bReplicates = true;
+	SetReplicateMovement(true);
+
 	// create the collision component and assign it as the root
 	RootComponent = CollisionComponent = CreateDefaultSubobject<USphereComponent>(TEXT("Collision Component"));
 
@@ -53,6 +59,17 @@ void AShooterProjectile::BeginPlay()
 	if (bIsPooled)
 	{
 		return;
+	}
+
+	// The shooter is already looking at its own stand-in, spawned the moment it pulled the trigger.
+	// The authoritative copy still flies here and still lands the hit; it is only hidden, and only
+	// for the one player who would otherwise see the shot twice.
+	if (!HasAuthority() && !bIsCosmeticOnly)
+	{
+		if (const APawn* InstigatorPawn = GetInstigator(); InstigatorPawn && InstigatorPawn->IsLocallyControlled())
+		{
+			SetActorHiddenInGame(true);
+		}
 	}
 
 	// Normal spawn path (not from pool)
@@ -109,6 +126,32 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	if (IsValid(TrailComponent))
 	{
 		TrailComponent->Deactivate();
+	}
+
+	// Everything below this line changes the world: damage, knockback, explosions, and the noise the
+	// AI hears. Only the authority's projectile is allowed to do any of it. A client's stand-in has
+	// already done its job by being seen, and a replicated copy on a watching client must not apply
+	// the same hit a second time.
+	if (!CanAffectWorld())
+	{
+		BP_OnProjectileHit(Hit);
+
+		// Only the shooter's own stand-in clears itself away. A replicated copy belongs to the
+		// server and goes when the server's copy goes: tearing it down here would fight replication
+		// over an actor this machine does not own.
+		if (bIsCosmeticOnly)
+		{
+			if (DeferredDestructionTime > 0.0f)
+			{
+				GetWorld()->GetTimerManager().SetTimer(DestructionTimer, this,
+					&AShooterProjectile::OnDeferredDestruction, DeferredDestructionTime, false);
+			}
+			else
+			{
+				ReturnToPoolOrDestroy();
+			}
+		}
+		return;
 	}
 
 	// make AI perception noise
@@ -505,6 +548,9 @@ void AShooterProjectile::DeactivateToPool()
 
 void AShooterProjectile::ResetProjectileState()
 {
+	// Pool reuse: whatever this projectile was last time it flew, it is not that now.
+	bIsCosmeticOnly = false;
+
 	// Reset hit flag
 	bHit = false;
 

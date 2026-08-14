@@ -559,6 +559,32 @@ void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<U
 	Server_ReportDamage(HitActor, Damage, DamageTypeClass, Weapon);
 }
 
+void AShooterCharacter::Server_FireProjectile_Implementation(AShooterWeapon* Weapon,
+	const FTransform& ProjectileTransform, float ChargeMultiplier)
+{
+	// Same trust model as a reported hit: the client decided where its shot came from, and the server
+	// checks that the answer is possible rather than re-deriving it.
+	if (!Weapon || !OwnedWeapons.Contains(Weapon))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to fire a projectile from a weapon it does not own (%s) - rejected"),
+			*GetName(), *GetNameSafe(Weapon));
+		return;
+	}
+
+	// A muzzle sits on the character holding it. The margin is loose on purpose: the character has
+	// moved on this machine since the client fired, and the muzzle is an arm's length out in front.
+	static constexpr float MuzzleMarginCm = 500.0f;
+	const float MuzzleDistance = FVector::Dist(GetActorLocation(), ProjectileTransform.GetLocation());
+	if (MuzzleDistance > MuzzleMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a muzzle %.0f cm away from itself - rejected"),
+			*GetName(), MuzzleDistance);
+		return;
+	}
+
+	Weapon->SpawnProjectileAtTransform(ProjectileTransform, ChargeMultiplier, /*bCosmeticOnly*/ false);
+}
+
 void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, float Damage,
 	TSubclassOf<UDamageType> DamageTypeClass, AShooterWeapon* Weapon)
 {

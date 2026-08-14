@@ -134,6 +134,12 @@ protected:
 	/** True if this projectile is managed by the pool system */
 	bool bIsPooled = false;
 
+	/** A shooting client spawns one of these the instant it pulls the trigger so the shot leaves the
+	 *  barrel with no round trip, and asks the server for the real one at the same time. This copy
+	 *  exists to be looked at: it hurts nothing and decides nothing, and the authoritative projectile
+	 *  the server replicates is the one that lands the hit. */
+	bool bIsCosmeticOnly = false;
+
 	// ==================== VFX|Trail ====================
 
 	/** Niagara system for projectile trail effect */
@@ -156,6 +162,14 @@ public:
 
 	/** Set pooled flag before BeginPlay (called by pool subsystem during deferred spawn) */
 	void SetPooledFlag() { bIsPooled = true; }
+
+	/** Mark this one as the shooter's local stand-in. Set it before the projectile can hit anything. */
+	void SetCosmeticOnly() { bIsCosmeticOnly = true; }
+
+	/** True when this projectile may change the world: the authority's copy, and never a client's
+	 *  local stand-in. Everything cosmetic ignores it; everything that damages, explodes or pushes
+	 *  has to ask. */
+	bool CanAffectWorld() const { return HasAuthority() && !bIsCosmeticOnly; }
 
 	/** Called by pool to activate projectile for use */
 	void ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator);

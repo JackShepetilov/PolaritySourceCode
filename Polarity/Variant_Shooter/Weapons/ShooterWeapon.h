@@ -651,6 +651,7 @@ protected:
 	virtual void Fire();
 	void FireCooldownExpired();
 	virtual void FireProjectile(const FVector& TargetLocation, float ChargeMultiplier = 1.0f);
+
 	FTransform CalculateProjectileSpawnTransform(const FVector& TargetLocation) const;
 
 	virtual void FireHitscan(const FVector& TargetLocation);
@@ -803,6 +804,15 @@ public:
 	/** Lands GripSocket on the socket WeaponMesh is attached to. Does nothing if there is no such
 	 *  socket, in which case the mesh keeps hanging by its own origin. Logs under [GRIP_DEBUG]. */
 	static void AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, const FName GripSocket);
+
+	/** Puts one projectile in the world at a transform somebody else already decided on. Public
+	 *  because the authoritative one is spawned from the owning character's server RPC, after that
+	 *  RPC has checked the request.
+	 *
+	 *  Cosmetic ones are the shooter's local stand-in and come from the pool; the authoritative one
+	 *  is spawned outright, because a pooled actor is reused and a replicated actor must not be. */
+	AShooterProjectile* SpawnProjectileAtTransform(const FTransform& ProjectileTransform,
+		float ChargeMultiplier, bool bCosmeticOnly);
 
 	// ==================== Server-side validation ====================
 

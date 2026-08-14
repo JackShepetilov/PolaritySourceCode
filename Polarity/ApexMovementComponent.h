@@ -835,6 +835,21 @@ public:
 	 *  yanked back. */
 	uint8 bSavedJumpHeld : 1;
 	int32 SavedSlideFatigueCounter;
+
+	/** The wall a run was happening on, and how far into it the character was.
+	 *
+	 *  None of this is derivable from the flags: the flag says "wall running", and the geometry says
+	 *  which wall, which way along it and at what speed. A replay that restored only the flag re-ran
+	 *  UpdateWallRun against a stale normal and a clock that had already run out, so it ended the run
+	 *  it was supposed to be reproducing. Both ends showed it plainly: on a bench session the client
+	 *  logged 13 wallrun starts against 32 ends, the extras all coming out of replays. */
+	float SavedWallRunElapsedTime;
+	FVector SavedWallRunNormal;
+	FVector SavedWallRunDirection;
+	float SavedWallRunEntrySpeed;
+	float SavedWallRunPeakSpeed;
+	float SavedWallRunCurrentSpeed;
+	EWallSide SavedWallRunSide;
 	float SavedSlideFatigueDecayTimer;
 	float SavedSlideBoostCooldown;
 	float SavedSlideCooldown;

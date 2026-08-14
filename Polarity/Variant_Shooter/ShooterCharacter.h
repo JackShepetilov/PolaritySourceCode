@@ -1002,6 +1002,15 @@ public:
 	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
 		AShooterWeapon* Weapon);
 
+	/** Ask the server for the authoritative projectile, at the transform this client already fired
+	 *  its own stand-in from. Reliable: a lost one is a shot that never happened for anybody else.
+	 *
+	 *  The transform is taken on trust the same way a reported hit is, and checked the same way: the
+	 *  weapon has to belong to this character and the muzzle has to be somewhere near it. */
+	UFUNCTION(Server, Reliable)
+	void Server_FireProjectile(AShooterWeapon* Weapon, const FTransform& ProjectileTransform,
+		float ChargeMultiplier);
+
 	/** Tell the server this client's weapon fired, so it can multicast the muzzle flash and sound
 	 *  to everyone else. A miss carries no damage, so effects need their own way upstream.
 	 *  Unreliable: cosmetic, and a lost one costs a single frame of flash. */

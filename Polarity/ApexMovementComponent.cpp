@@ -815,6 +815,13 @@ FSavedMove_Polarity::FSavedMove_Polarity()
 	, SavedSlideCooldown(0.0f)
 	, SavedJumpHoldTimeRemaining(0.0f)
 	, SavedCurrentJumpCount(0)
+	, SavedWallRunElapsedTime(0.0f)
+	, SavedWallRunNormal(FVector::ZeroVector)
+	, SavedWallRunDirection(FVector::ZeroVector)
+	, SavedWallRunEntrySpeed(0.0f)
+	, SavedWallRunPeakSpeed(0.0f)
+	, SavedWallRunCurrentSpeed(0.0f)
+	, SavedWallRunSide(EWallSide::None)
 {
 }
 
@@ -829,6 +836,13 @@ void FSavedMove_Polarity::Clear()
 	SavedSlideCooldown = 0.0f;
 	SavedJumpHoldTimeRemaining = 0.0f;
 	SavedCurrentJumpCount = 0;
+	SavedWallRunElapsedTime = 0.0f;
+	SavedWallRunNormal = FVector::ZeroVector;
+	SavedWallRunDirection = FVector::ZeroVector;
+	SavedWallRunEntrySpeed = 0.0f;
+	SavedWallRunPeakSpeed = 0.0f;
+	SavedWallRunCurrentSpeed = 0.0f;
+	SavedWallRunSide = EWallSide::None;
 }
 
 
@@ -861,6 +875,14 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 		SavedSlideCooldown          = Apex->SlideCooldownRemaining;
 		SavedJumpHoldTimeRemaining  = Apex->JumpHoldTimeRemaining;
 		SavedCurrentJumpCount       = Apex->CurrentJumpCount;
+
+		SavedWallRunElapsedTime  = Apex->WallRunElapsedTime;
+		SavedWallRunNormal       = Apex->WallRunNormal;
+		SavedWallRunDirection    = Apex->WallRunDirection;
+		SavedWallRunEntrySpeed   = Apex->WallRunEntrySpeed;
+		SavedWallRunPeakSpeed    = Apex->WallRunPeakSpeed;
+		SavedWallRunCurrentSpeed = Apex->WallRunCurrentSpeed;
+		SavedWallRunSide         = Apex->WallRunSide;
 	}
 }
 
@@ -883,6 +905,14 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 		Apex->SlideCooldownRemaining      = SavedSlideCooldown;
 		Apex->JumpHoldTimeRemaining       = SavedJumpHoldTimeRemaining;
 		Apex->CurrentJumpCount            = SavedCurrentJumpCount;
+
+		Apex->WallRunElapsedTime  = SavedWallRunElapsedTime;
+		Apex->WallRunNormal       = SavedWallRunNormal;
+		Apex->WallRunDirection    = SavedWallRunDirection;
+		Apex->WallRunEntrySpeed   = SavedWallRunEntrySpeed;
+		Apex->WallRunPeakSpeed    = SavedWallRunPeakSpeed;
+		Apex->WallRunCurrentSpeed = SavedWallRunCurrentSpeed;
+		Apex->WallRunSide         = SavedWallRunSide;
 	}
 }
 

@@ -724,26 +724,33 @@ void AShooterWeapon::FireCooldownExpired()
 	WeaponOwner->OnSemiWeaponRefire();
 }
 
-void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeMultiplier)
+AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform& ProjectileTransform,
+	float ChargeMultiplier, bool bCosmeticOnly)
 {
-	// get the projectile transform
-	FTransform ProjectileTransform = CalculateProjectileSpawnTransform(TargetLocation);
-
-	// Get projectile from pool (or spawn new if pool empty)
 	AShooterProjectile* Projectile = nullptr;
-	if (UProjectilePoolSubsystem* Pool = GetWorld()->GetSubsystem<UProjectilePoolSubsystem>())
+
+	// The authority's projectile is replicated, and a pooled actor is reused rather than destroyed:
+	// clients would keep its channel open and watch it teleport back to a muzzle on the next shot.
+	// So the real one is spawned outright and only the shooter's local stand-in comes from the pool,
+	// which is where the pool was earning its keep anyway.
+	UProjectilePoolSubsystem* Pool = bCosmeticOnly ? GetWorld()->GetSubsystem<UProjectilePoolSubsystem>() : nullptr;
+	if (Pool)
 	{
 		Projectile = Pool->GetProjectile(ProjectileClass, ProjectileTransform, GetOwner(), PawnOwner);
 	}
 	else
 	{
-		// Fallback to direct spawn if pool subsystem not available
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 		SpawnParams.Owner = GetOwner();
 		SpawnParams.Instigator = PawnOwner;
 		Projectile = GetWorld()->SpawnActor<AShooterProjectile>(ProjectileClass, ProjectileTransform, SpawnParams);
+	}
+
+	if (Projectile && bCosmeticOnly)
+	{
+		Projectile->SetCosmeticOnly();
 	}
 
 	// If charge-based firing, scale projectile charge and match player polarity
@@ -769,6 +776,30 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 						PlayerSign * BaseCharge * ChargeMultiplier, PlayerSign, ChargeMultiplier);
 				}
 			}
+		}
+	}
+
+	return Projectile;
+}
+
+void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeMultiplier)
+{
+	const FTransform ProjectileTransform = CalculateProjectileSpawnTransform(TargetLocation);
+
+	if (HasAuthority())
+	{
+		SpawnProjectileAtTransform(ProjectileTransform, ChargeMultiplier, /*bCosmeticOnly*/ false);
+	}
+	else
+	{
+		// The shot leaves the barrel now, on this screen, and asks the server for the real one in the
+		// same breath. Waiting for the round trip instead would put half a ping between the trigger
+		// and the projectile, which is the one thing a player notices immediately.
+		SpawnProjectileAtTransform(ProjectileTransform, ChargeMultiplier, /*bCosmeticOnly*/ true);
+
+		if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+		{
+			OwnerCharacter->Server_FireProjectile(this, ProjectileTransform, ChargeMultiplier);
 		}
 	}
 
