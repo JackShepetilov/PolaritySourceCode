@@ -1540,6 +1540,12 @@ void UApexMovementComponent::StartWallRun(const FHitResult& WallHit, EWallSide S
 		return;
 	}
 
+	// Both ends print this. A START on the client with no matching START on the server means the
+	// server could not find the wall, and the correction that follows is what pulls the character
+	// off it; repeated pairs mean it is entering and leaving every few frames.
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s WallRun START side=%d speed=%.0f"),
+		(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), static_cast<int32>(Side), Velocity.Size2D());
+
 	// Calculate direction along wall
 	FVector AlongWall = FVector::CrossProduct(WallHit.Normal, FVector::UpVector);
 
@@ -1635,6 +1641,8 @@ void UApexMovementComponent::EndWallRun(EWallRunEndReason Reason)
 	}
 
 	UE_LOG(LogWallRun, Log, TEXT("WALLRUN ENDED: FinalSpeed=%.1f, Reason=%d"), Velocity.Size2D(), static_cast<int32>(Reason));
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s WallRun END reason=%d elapsed=%.2f"),
+		(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), static_cast<int32>(Reason), WallRunElapsedTime);
 
 	bIsWallRunning = false;
 	WallRunSide = EWallSide::None;
