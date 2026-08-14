@@ -864,6 +864,38 @@ void AShooterCharacter::Server_ReleaseProp_Implementation(AEMFPhysicsProp* Prop)
 	Prop->EndRemoteHold();
 }
 
+void AShooterCharacter::Server_RequestWeaponPickup_Implementation(ADroppedRangedWeapon* Drop, float ReportedCaptureRange)
+{
+	if (!Drop)
+	{
+		return;
+	}
+
+	// The reported reach, held to what this client's own search radius could ever have found.
+	float ClaimedRange = FMath::Max(0.0f, ReportedCaptureRange);
+	if (const UChargeAnimationComponent* Charge = GetChargeAnimationComponent())
+	{
+		ClaimedRange = FMath::Min(ClaimedRange, Charge->CaptureSearchRadius);
+	}
+
+	// Reach test with the same round-trip margin as everything else reported from a client.
+	static constexpr float PickupMarginCm = 500.0f;
+	const float DistanceToDrop = FVector::Dist(GetActorLocation(), Drop->GetActorLocation());
+	const float PickupRange = ClaimedRange + PickupMarginCm;
+	if (DistanceToDrop > PickupRange)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to pick up %s at %.0f cm, reach is %.0f - rejected"),
+			*GetName(), *Drop->GetName(), DistanceToDrop, PickupRange);
+		return;
+	}
+
+	if (!Drop->TryStartPullForClient(this))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to pick up %s, already taken or not capturable - rejected"),
+			*GetName(), *Drop->GetName());
+	}
+}
+
 void AShooterCharacter::Server_ReportIonization_Implementation(AActor* Target, AShooterWeapon* Weapon)
 {
 	if (!Target || !Weapon || !OwnedWeapons.Contains(Weapon))

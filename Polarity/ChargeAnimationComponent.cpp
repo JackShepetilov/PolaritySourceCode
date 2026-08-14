@@ -1815,7 +1815,18 @@ void UChargeAnimationComponent::CaptureDroppedRangedWeapon(ADroppedRangedWeapon*
 	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
 	if (ShooterChar)
 	{
-		Weapon->StartPull(ShooterChar);
+		if (ShooterChar->HasAuthority())
+		{
+			Weapon->StartPull(ShooterChar);
+		}
+		else
+		{
+			// The pull ends by granting a weapon, and only the server can do that, so the whole
+			// thing is asked of the server rather than flown here and confirmed afterwards. This
+			// client sees the flight arrive through replication, a ping later. Our own reach goes
+			// with the request: only this machine knows this player's charge.
+			ShooterChar->Server_RequestWeaponPickup(Weapon, EvaluateCaptureRange(FMath::Abs(Weapon->GetCharge())));
+		}
 	}
 
 	// Track as current target to prevent re-search

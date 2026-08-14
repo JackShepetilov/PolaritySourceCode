@@ -16,10 +16,20 @@
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/DamageEvents.h"
+#include "Net/UnrealNetwork.h"
 
 ADroppedRangedWeapon::ADroppedRangedWeapon()
 {
 	PrimaryActorTick.bCanEverTick = true;
+
+	// A drop is spawned by whatever died, and things die on the server. Until this replicated, a
+	// client's world had no dropped weapons in it at all: not to see, not to scan for, not to pick
+	// up — the pickup button doing nothing was the last symptom of that, not the cause.
+	//
+	// One drop, one simulation, same as AEMFPhysicsProp: the server simulates and everyone else is
+	// shown the result. See BeginPlay and PostNetReceivePhysicState for the other halves.
+	bReplicates = true;
+	SetReplicateMovement(true);
 
 	// Weapon mesh — root, physics-simulated
 	WeaponMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
@@ -35,9 +45,44 @@ ADroppedRangedWeapon::ADroppedRangedWeapon()
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
 }
 
+void ADroppedRangedWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(ADroppedRangedWeapon, bIsBeingPulled);
+	DOREPLIFETIME(ADroppedRangedWeapon, bPullComplete);
+	DOREPLIFETIME(ADroppedRangedWeapon, ReplicatedCharge);
+}
+
+void ADroppedRangedWeapon::OnRep_DropCharge()
+{
+	// Through the normal setter so anything hanging off charge (widget, visuals) behaves as it does
+	// on the server.
+	SetCharge(ReplicatedCharge);
+}
+
+void ADroppedRangedWeapon::PostNetReceivePhysicState()
+{
+	if (WeaponMesh && !WeaponMesh->IsSimulatingPhysics())
+	{
+		const FRepMovement& RepMove = GetReplicatedMovement();
+		SetActorLocationAndRotation(
+			FRepMovement::RebaseOntoLocalOrigin(RepMove.Location, this), RepMove.Rotation);
+		return;
+	}
+
+	Super::PostNetReceivePhysicState();
+}
+
 void ADroppedRangedWeapon::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Only the authority simulates the drop; everyone else is shown where it landed.
+	if (!HasAuthority() && WeaponMesh)
+	{
+		WeaponMesh->SetSimulatePhysics(false);
+	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[DroppedRangedWeapon] %s BeginPlay: Charge=%.2f, bCanBeCaptured=%d"),
 		*GetName(), GetCharge(), bCanBeCaptured);
@@ -171,10 +216,28 @@ void ADroppedRangedWeapon::Tick(float DeltaTime)
 		AirMailTickSpear(WeaponMesh, AirMail ? AirMail->GetKickSpinSpeed() : 720.0f);
 	}
 
+	// Mirror the authority's charge out to clients — their capture scan gates on it, and the value
+	// itself lives in the plugin's field component, which replicates nothing.
+	if (HasAuthority() && !FMath::IsNearlyEqual(ReplicatedCharge, GetCharge()))
+	{
+		ReplicatedCharge = GetCharge();
+	}
+
 	if (bIsBeingPulled)
 	{
 		UpdatePull(DeltaTime);
 	}
+}
+
+bool ADroppedRangedWeapon::TryStartPullForClient(AShooterCharacter* Requester)
+{
+	if (!Requester || bIsBeingPulled || bPullComplete || !bCanBeCaptured)
+	{
+		return false;
+	}
+
+	StartPull(Requester);
+	return bIsBeingPulled;
 }
 
 // ==================== Charge API ====================

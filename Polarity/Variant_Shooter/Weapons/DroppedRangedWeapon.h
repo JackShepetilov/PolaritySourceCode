@@ -142,8 +142,13 @@ public:
 	UPROPERTY()
 	TSubclassOf<AShooterWeapon> PullingClientCurrentWeaponClass;
 
-	/** Is currently being pulled toward player? */
+	/** Is currently being pulled toward player? Replicated, so a client's capture scan skips a drop
+	 *  somebody else already called dibs on instead of starting a pull the server will refuse. */
 	bool IsBeingPulled() const { return bIsBeingPulled; }
+
+	/** Server-side: begin a pull requested by a client. Returns false when the drop is already
+	 *  spoken for, so the caller can log a rejection rather than silently doing nothing. */
+	bool TryStartPullForClient(AShooterCharacter* Requester);
 
 	/** Has pull completed (weapon granted)? */
 	bool IsPullComplete() const { return bPullComplete; }
@@ -158,6 +163,13 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	/** The server simulates this drop and clients only display it, so the engine's physics-state
+	 *  correction lands on a body that is deliberately not running and does nothing at all. Take the
+	 *  transform out of the replicated state by hand instead. Exactly the fault that kept props
+	 *  frozen on clients — see AEMFPhysicsProp::PostNetReceivePhysicState. */
+	virtual void PostNetReceivePhysicState() override;
 
 	/** OnComponentHit callback for WeaponMesh — applies stun to AShooterNPC targets when
 	 *  bCanStunOnImpact is true and impact velocity exceeds StunImpactVelocityThreshold. */
@@ -178,8 +190,23 @@ private:
 
 	// ==================== Pull State ====================
 
+	/** Replicated so every client's capture scan can see that this drop is taken. Without it two
+	 *  players both start pulling the same weapon and one of them is silently refused. */
+	UPROPERTY(Replicated)
 	bool bIsBeingPulled = false;
+
+	UPROPERTY(Replicated)
 	bool bPullComplete = false;
+
+	/** The authority's charge, mirrored for clients. Capture is gated on charge sign and magnitude,
+	 *  and the value lives in the EMF plugin's field component, which replicates nothing — so a
+	 *  client scanned every drop as uncharged and refused to grab any of them. Same mirror as
+	 *  AEMFPhysicsProp::ReplicatedCharge. */
+	UPROPERTY(ReplicatedUsing = OnRep_DropCharge)
+	float ReplicatedCharge = 0.0f;
+
+	UFUNCTION()
+	void OnRep_DropCharge();
 	float PullElapsed = 0.0f;
 	FVector PullStartLocation = FVector::ZeroVector;
 	FRotator PullStartRotation = FRotator::ZeroRotator;

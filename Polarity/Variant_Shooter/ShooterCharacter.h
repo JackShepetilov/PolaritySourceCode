@@ -32,6 +32,7 @@ class UStaticMeshComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
 class AEMFPhysicsProp;
+class ADroppedRangedWeapon;
 class ARiotShield;
 struct FCheckpointData;
 
@@ -1080,6 +1081,22 @@ public:
 	/** This machine's loading cover, if one is up. */
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> LocalLoadingCover;
+
+	/** Ask the server to pull a dropped weapon toward this character and grant it on arrival.
+	 *  Reliable: a lost request is a pickup that never happens and a button that looks broken.
+	 *
+	 *  The pull itself runs on the server and everyone watches it replicate, rather than the client
+	 *  flying its own copy: the weapon only appears in the hand when the server grants it anyway
+	 *  (capacity can refuse), so predicting the flight would buy nothing but a chance to disagree
+	 *  about where the weapon is. First request wins; a second player asking for the same drop is
+	 *  refused and told so in the log.
+	 *
+	 *  Carries the client's own reach for the same reason Server_CaptureProp does: range is a
+	 *  product of the puller's charge, a player's charge is not replicated, and the server would
+	 *  otherwise measure a remote player's reach as zero and refuse every pickup. Clamped to that
+	 *  client's own search radius. */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestWeaponPickup(ADroppedRangedWeapon* Drop, float ReportedCaptureRange);
 
 	// ==================== Coop prop hold routing ====================
 	// AEMFPhysicsProp::UpdateCaptureForces runs this client's own copy of the capture spring math
