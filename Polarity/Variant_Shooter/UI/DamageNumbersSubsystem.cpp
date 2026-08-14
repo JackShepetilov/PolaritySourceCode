@@ -11,6 +11,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "Coop/CoopPlayers.h"
 
 void UDamageNumbersSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -357,7 +358,9 @@ APlayerController* UDamageNumbersSubsystem::GetLocalPlayerController() const
 		return nullptr;
 	}
 
-	return UGameplayStatics::GetPlayerController(World, 0);
+	// Damage numbers are drawn for whoever is at this screen, so this is one of the few places where
+	// asking for the local controller is right. Player zero meant the host on every machine.
+	return CoopPlayers::GetLocalController(World);
 }
 
 bool UDamageNumbersSubsystem::WorldToScreen(const FVector& WorldLocation, FVector2D& OutScreenPosition) const

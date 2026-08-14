@@ -28,8 +28,8 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Shooter")
 	TSubclassOf<UShooterUI> ShooterUIClass;
 
-	/** Pointer to the UI widget */
-	TObjectPtr<UShooterUI> ShooterUI;
+	// No HUD pointer lives here any more: see GetShooterUIClass. The GameMode holds the class, the
+	// characters hold the widgets, one per machine.
 
 	/** Map of scores by team ID */
 	TMap<uint8, int32> TeamScores;
@@ -48,9 +48,7 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Run Start")
 	TSubclassOf<UUserWidget> LoadingCoverClass;
 
-	/** Live instance of the loading cover. */
-	UPROPERTY(Transient)
-	TObjectPtr<UUserWidget> LoadingCoverWidget;
+	// Same for the loading cover: each player's own machine owns the widget covering its own screen.
 
 	/** The run-map marker found at BeginPlay; null on non-run maps (then the gate stays idle). */
 	UPROPERTY(Transient)
@@ -90,6 +88,20 @@ protected:
 	void DismissRunTransitionScreenAfterLaunch();
 
 public:
+
+	/** The HUD widget class, for the characters that actually build one.
+	 *
+	 *  A GameMode exists on the server and nowhere else, so it cannot own anybody's HUD: the widget
+	 *  it used to make belonged to player zero, which on a listen server is the host and on a client
+	 *  is a controller that is not the one looking at the screen. Each character now builds its own
+	 *  HUD on its own machine and only asks here for the class to build (see
+	 *  AShooterCharacter::HUDClass). Kept as a getter so the class stays configured in one place,
+	 *  the GameMode blueprint, exactly as before. */
+	TSubclassOf<UShooterUI> GetShooterUIClass() const { return ShooterUIClass; }
+
+	/** The loading cover class, resolved the same way EnsureLoadingCover used to resolve it
+	 *  (the run subsystem may override it). Shown per player, for the same reason as the HUD. */
+	TSubclassOf<UUserWidget> ResolveLoadingCoverClass() const;
 
 	/** Increases the score for the given team */
 	void IncrementTeamScore(uint8 TeamByte);

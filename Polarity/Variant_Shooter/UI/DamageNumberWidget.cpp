@@ -4,6 +4,7 @@
 #include "DamageNumberWidget.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
+#include "Coop/CoopPlayers.h"
 
 void UDamageNumberWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
@@ -18,8 +19,9 @@ void UDamageNumberWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 	ElapsedTime += InDeltaTime;
 	CurrentVerticalOffset += FloatSpeed * InDeltaTime;
 
-	// Get player controller for world-to-screen projection
-	APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
+	// Get player controller for world-to-screen projection. The projection is onto THIS screen, so
+	// it has to be this machine's controller and not player zero, who is the host for everyone.
+	APlayerController* PC = CoopPlayers::GetLocalController(GetWorld());
 	if (!PC)
 	{
 		return;

@@ -18,6 +18,8 @@ class UHitMarkerComponent;
 class UMeleeAttackComponent;
 class UChargeAnimationComponent;
 class UPhysicsHandleComponent;
+class UShooterUI;
+class UUserWidget;
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
@@ -1034,6 +1036,50 @@ public:
 	void Server_ReportBeamEffect(AShooterWeapon* Weapon, FVector Start, FVector End,
 		float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
 		float OverrideBoltLength, float OverrideRandomSeed);
+
+	// ==================== Coop HUD ====================
+	// A HUD belongs to a screen, and there is one screen per machine. The GameMode used to build a
+	// single widget for player zero, which is the host: clients had no HUD at all. Each character
+	// builds its own instead, and the only thing that has to cross the network is which class to
+	// build — the GameMode blueprint still owns that setting.
+
+	/** HUD class for this character's owner, handed down by the server. Replicated rather than read
+	 *  from the GameMode directly because a client has no GameMode to read. */
+	UPROPERTY(ReplicatedUsing = OnRep_HUDClass)
+	TSubclassOf<UShooterUI> HUDClass;
+
+	UFUNCTION()
+	void OnRep_HUDClass();
+
+	/** Build the HUD on this machine, if this machine is the one looking through this character's
+	 *  eyes. Idempotent on purpose: the class and the controller arrive in either order and on
+	 *  either side, so every one of those arrivals calls this and the first complete pair wins.
+	 *  On the server the pawn is possessed AFTER BeginPlay, so BeginPlay alone is not enough. */
+	void CreateLocalHUD();
+
+	virtual void PossessedBy(AController* NewController) override;
+	virtual void OnRep_Controller() override;
+
+	/** This machine's HUD widget. Null on every machine that is not driving this character. */
+	UPROPERTY(Transient)
+	TObjectPtr<UShooterUI> LocalHUD;
+
+	/** Push a score change into this player's own HUD. The score is the team's, so the GameMode
+	 *  sends it to every character rather than to a single widget it owns. */
+	UFUNCTION(Client, Reliable)
+	void Client_UpdateScore(uint8 ScoringTeam, int32 Score);
+
+	/** Cover this player's screen while a run starts, and uncover it. Per player for the same
+	 *  reason as the HUD: a client left uncovered watches the frames the cover exists to hide. */
+	UFUNCTION(Client, Reliable)
+	void Client_ShowLoadingCover(TSubclassOf<UUserWidget> CoverClass);
+
+	UFUNCTION(Client, Reliable)
+	void Client_DismissLoadingCover();
+
+	/** This machine's loading cover, if one is up. */
+	UPROPERTY(Transient)
+	TObjectPtr<UUserWidget> LocalLoadingCover;
 
 	// ==================== Coop prop hold routing ====================
 	// AEMFPhysicsProp::UpdateCaptureForces runs this client's own copy of the capture spring math

@@ -39,6 +39,8 @@
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
 #include "ShooterGameMode.h"
+#include "UI/ShooterUI.h"
+#include "Blueprint/UserWidget.h"
 #include "Kismet/GameplayStatics.h"
 #include "Curves/CurveFloat.h"
 #include "Polarity/Checkpoint/CheckpointData.h"
@@ -195,6 +197,18 @@ void AShooterCharacter::BeginPlay()
 
 	// Initialize HP based on StartingHPPercent (1.0 = full HP)
 	CurrentHP = MaxHP * FMath::Clamp(StartingHPPercent, 0.0f, 1.0f);
+
+	// Hand this character's owner the HUD class to build. Only the authority can read it — the
+	// GameMode does not exist anywhere else — so it is replicated from here and the owning client
+	// builds the widget in OnRep_HUDClass. The host is its own owner, so it builds straight away.
+	if (HasAuthority())
+	{
+		if (const AShooterGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<AShooterGameMode>() : nullptr)
+		{
+			HUDClass = GameMode->GetShooterUIClass();
+			CreateLocalHUD();
+		}
+	}
 
 	// Store base FOV and location values for ADS interpolation
 	if (UCameraComponent* Camera = GetFirstPersonCameraComponent())
@@ -453,6 +467,92 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AShooterCharacter, CurrentArmor);
 	DOREPLIFETIME(AShooterCharacter, CurrentWeapon);
 	DOREPLIFETIME(AShooterCharacter, OwnedWeapons);
+
+	// Only the owner builds a HUD, so only the owner needs to know which one.
+	DOREPLIFETIME_CONDITION(AShooterCharacter, HUDClass, COND_OwnerOnly);
+}
+
+void AShooterCharacter::OnRep_HUDClass()
+{
+	CreateLocalHUD();
+}
+
+void AShooterCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	// The server possesses the pawn after BeginPlay has already run, so this is where the host
+	// finally has a controller to build its HUD against.
+	CreateLocalHUD();
+}
+
+void AShooterCharacter::OnRep_Controller()
+{
+	Super::OnRep_Controller();
+
+	// Same on a client, for whichever of the controller and the HUD class arrives second.
+	CreateLocalHUD();
+}
+
+void AShooterCharacter::CreateLocalHUD()
+{
+	// One HUD, on the machine whose player is looking through this character. A remote copy of a
+	// teammate must not build one, and neither must a dedicated server.
+	if (LocalHUD || !HUDClass || !IsLocallyControlled())
+	{
+		return;
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->IsLocalController())
+	{
+		return;
+	}
+
+	LocalHUD = CreateWidget<UShooterUI>(PC, HUDClass);
+	if (LocalHUD)
+	{
+		LocalHUD->AddToViewport(0);
+		UE_LOG(LogTemp, Log, TEXT("[COOP_DEBUG] %s built its own HUD"), *GetName());
+	}
+}
+
+void AShooterCharacter::Client_UpdateScore_Implementation(uint8 ScoringTeam, int32 Score)
+{
+	if (LocalHUD)
+	{
+		LocalHUD->BP_UpdateScore(ScoringTeam, Score);
+	}
+}
+
+void AShooterCharacter::Client_ShowLoadingCover_Implementation(TSubclassOf<UUserWidget> CoverClass)
+{
+	if (LocalLoadingCover || !CoverClass || !IsLocallyControlled())
+	{
+		return;
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->IsLocalController())
+	{
+		return;
+	}
+
+	LocalLoadingCover = CreateWidget<UUserWidget>(PC, CoverClass);
+	if (LocalLoadingCover)
+	{
+		// Very high Z-order so it sits above the HUD and everything else.
+		LocalLoadingCover->AddToViewport(1000);
+	}
+}
+
+void AShooterCharacter::Client_DismissLoadingCover_Implementation()
+{
+	if (LocalLoadingCover)
+	{
+		LocalLoadingCover->RemoveFromParent();
+		LocalLoadingCover = nullptr;
+	}
 }
 
 void AShooterCharacter::OnRep_OwnedWeapons()

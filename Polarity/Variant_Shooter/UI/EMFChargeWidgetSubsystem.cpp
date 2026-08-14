@@ -12,6 +12,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "Coop/CoopPlayers.h"
 
 void UEMFChargeWidgetSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -528,7 +529,10 @@ APlayerController* UEMFChargeWidgetSubsystem::GetLocalPlayerController() const
 	{
 		return nullptr;
 	}
-	return UGameplayStatics::GetPlayerController(World, 0);
+	// The screen these widgets are drawn on, which is a local question by nature. Player zero is the
+	// host on every machine, so on a client this used to hand back a controller that was not the one
+	// looking at the screen, and the charge widgets never appeared there at all.
+	return CoopPlayers::GetLocalController(World);
 }
 
 const FWidgetClutterSettings& UEMFChargeWidgetSubsystem::GetClutterSettings(EChargeWidgetCategory Category) const

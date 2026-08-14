@@ -40,9 +40,10 @@ void AShooterGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// create the UI
-	ShooterUI = CreateWidget<UShooterUI>(UGameplayStatics::GetPlayerController(GetWorld(), 0), ShooterUIClass);
-	ShooterUI->AddToViewport(0);
+	// The HUD is not built here any more. A widget made by the GameMode lives on the server and
+	// belongs to player zero, so in coop the host got a HUD and every client got nothing. Each
+	// character now builds its own on its own machine, asking this GameMode only for the class
+	// (AShooterCharacter::HUDClass). Score updates reach them through IncrementTeamScore below.
 
 	// ===== Run-start loading gate =====
 	// Run maps are identified by a RunLaunchPoint marker. On non-run maps (menu/hub) there is none,
@@ -51,14 +52,8 @@ void AShooterGameMode::BeginPlay()
 	TryInitRunGate();
 }
 
-void AShooterGameMode::EnsureLoadingCover()
+TSubclassOf<UUserWidget> AShooterGameMode::ResolveLoadingCoverClass() const
 {
-	// Cover the screen so the player never sees the black/unstreamed frames.
-	if (LoadingCoverWidget)
-	{
-		return;
-	}
-
 	TSubclassOf<UUserWidget> CoverClass = LoadingCoverClass;
 	if (UGameInstance* GI = GetGameInstance())
 	{
@@ -70,15 +65,26 @@ void AShooterGameMode::EnsureLoadingCover()
 			}
 		}
 	}
-	if (!CoverClass) return;
+	return CoverClass;
+}
 
-	if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+void AShooterGameMode::EnsureLoadingCover()
+{
+	// Cover every player's screen, not player zero's. A run starts for the whole team, and a client
+	// left uncovered watches the unstreamed frames the cover exists to hide.
+	const TSubclassOf<UUserWidget> CoverClass = ResolveLoadingCoverClass();
+	if (!CoverClass)
 	{
-		LoadingCoverWidget = CreateWidget<UUserWidget>(PC, CoverClass);
-		if (LoadingCoverWidget)
+		return;
+	}
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	for (APawn* Player : Players)
+	{
+		if (AShooterCharacter* Character = Cast<AShooterCharacter>(Player))
 		{
-			// Very high Z-order so it sits above the HUD and everything else.
-			LoadingCoverWidget->AddToViewport(1000);
+			Character->Client_ShowLoadingCover(CoverClass);
 		}
 	}
 }
@@ -297,10 +303,14 @@ void AShooterGameMode::DismissRunTransitionScreenAfterLaunch()
 
 void AShooterGameMode::DismissLoadingCover()
 {
-	if (LoadingCoverWidget)
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	for (APawn* Player : Players)
 	{
-		LoadingCoverWidget->RemoveFromParent();
-		LoadingCoverWidget = nullptr;
+		if (AShooterCharacter* Character = Cast<AShooterCharacter>(Player))
+		{
+			Character->Client_DismissLoadingCover();
+		}
 	}
 }
 
@@ -317,8 +327,16 @@ void AShooterGameMode::IncrementTeamScore(uint8 TeamByte)
 	++Score;
 	TeamScores.Add(TeamByte, Score);
 
-	// update the UI
-	ShooterUI->BP_UpdateScore(TeamByte, Score);
+	// update the UI on every machine that has one — the score belongs to the team, not to the host.
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	for (APawn* Player : Players)
+	{
+		if (AShooterCharacter* Character = Cast<AShooterCharacter>(Player))
+		{
+			Character->Client_UpdateScore(TeamByte, Score);
+		}
+	}
 }
 
 bool AShooterGameMode::RespawnPlayerAtCheckpoint(APlayerController* PlayerController)
