@@ -133,8 +133,11 @@ public:
 
 	// ==================== Force Filtering ====================
 
+	/** Off by default: a charged player pulling on a charged prop fought the hand carrying it and
+	 *  kept a thrown one flying under its own power. Muted from both ends — the other half is
+	 *  UEMFVelocityModifier::PhysicsPropForceMultiplier. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
-	float PlayerForceMultiplier = 1.0f;
+	float PlayerForceMultiplier = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
 	float NPCForceMultiplier = 1.0f;
@@ -155,8 +158,9 @@ public:
 	// ==================== Launched Force Filtering ====================
 	// Second set of multipliers, active when prop is in reverse-capture flight (bIsInReverseFlight)
 
+	/** Muted for the same reason as PlayerForceMultiplier above. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
-	float LaunchedPlayerForceMultiplier = 1.0f;
+	float LaunchedPlayerForceMultiplier = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
 	float LaunchedNPCForceMultiplier = 1.0f;
@@ -624,6 +628,78 @@ public:
 	/** Detach from plate without fully releasing (for plate swap during reverse channeling) */
 	void DetachFromPlate();
 
+	/** Capture range as it applies to a specific character pulling this prop.
+	 *
+	 *  Range is a product of both charges, so it is different for each player, and the plain
+	 *  CalculateCaptureRange answers for whoever is at THIS screen (see the TODO(COOP) on
+	 *  UChargeAnimationComponent::GetCaptureRangeFor). On the server that is the host, so validating
+	 *  a client's capture or flying a client's throw with it silently used the host's charge.
+	 *  Pass the character who is actually doing the pulling; null falls back to the old answer. */
+	UFUNCTION(BlueprintPure, Category = "Channeling Capture")
+	float GetCaptureRangeForCharacter(const AShooterCharacter* Character) const;
+
+	// ==================== Remote Hold (client-held capture) ====================
+	// Only the authority simulates this prop's physics normally. While a REMOTE client is the one
+	// holding it via channeling, that client runs the same spring/damping math locally (kinematically,
+	// no physics body) for zero-latency feel and reports its result here; the server stops running its
+	// own copy of the capture and just accepts the reported transform until release. The host's own
+	// capture is untouched by any of this — it still drives the real physics body directly, because
+	// host and server are the same machine and there is no round trip to hide.
+
+	/** Character currently holding this prop over the network (null when nobody remote is holding it).
+	 *  Replicated so every client — not just the holder — can tell the prop is spoken for and refuse
+	 *  to start their own capture on it. Server-authoritative: only Server_CaptureProp sets it. */
+	UFUNCTION(BlueprintPure, Category = "Coop")
+	AShooterCharacter* GetHoldingCharacter() const { return HoldingCharacter; }
+
+	/** Server-side: accept Holder as the new remote owner of this prop's transform. Turns the prop's
+	 *  own physics off (it becomes a kinematic mirror of whatever BeginRemoteHold's caller reports)
+	 *  and switches Pawn collision to Overlap, same as the host's local capture already does. */
+	void BeginRemoteHold(AShooterCharacter* Holder, float HolderCaptureRange);
+
+	/** Capture range the current remote holder reported, or 0 when nobody remote is holding.
+	 *  See the comment on AShooterCharacter::Server_CaptureProp for why the client has to say. */
+	float GetHeldCaptureRange() const { return HeldCaptureRange; }
+
+	/** Server-side: give the prop's physics back, seeded with the last velocity the holder reported
+	 *  so a released/dropped prop keeps its momentum instead of freezing then falling straight down. */
+	void EndRemoteHold();
+
+	/** Server-side: apply a transform reported by the current holder. Called every tick while a
+	 *  remote client holds this prop; the server does not re-derive the spring math itself. */
+	void ApplyHeldTransform(const FVector& Location, const FRotator& Rotation, const FVector& LinearVelocity);
+
+	/** True while THIS machine is the one holding the prop without being the server. The holder
+	 *  simulates the prop for real and reports the result, which is what lets it be held by a
+	 *  constraint and collide with the world properly; everyone else is shown where it ended up. */
+	bool IsLocallyHeld() const { return bLocallyHeld; }
+
+	/** Let a stuck prop be pulled through world geometry. A held prop is stopped by walls, which is
+	 *  the point, but a prop wedged behind a corner would otherwise stay there while the player walks
+	 *  away. After the holder has been unable to reach it for a moment, its world collision is turned
+	 *  off so the constraint can yank it back to the hand, and turned straight back on once it
+	 *  arrives — the prop passes through the wall for that instant rather than living inside it. */
+	void SetHeldPassThrough(bool bPassThrough);
+
+	/** Break the prop apart on every machine. The gibs and the hiding of the intact mesh are both
+	 *  plain local calls inside SpawnDestructionGC, so a prop destroyed by the server broke apart
+	 *  for the host while every client kept looking at the whole thing sitting there. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayDeathVisuals(FVector DestructionOrigin);
+
+	/** Show the explosion on every machine. Only the authority ever runs Explode, so the blast, the
+	 *  sound and the light existed for the host alone and a client saw the prop silently vanish.
+	 *  Unreliable: purely cosmetic, and a lost one is a blast nobody can act on anyway. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayExplosionEffects(FVector ExplosionLocation, float VFXScale);
+
+	/** Server-side: the holder threw it. Unlike the hold, the flight is NOT predicted by the
+	 *  thrower — the server takes the physics body back and flies the prop itself, so that the hit
+	 *  it lands, the damage it deals and the explosion it sets off are all decided in one place.
+	 *  The throw is a brief one-shot, so the round trip costs a moment of travel rather than the
+	 *  continuous disconnect that made the hold need prediction. */
+	void BeginRemoteLaunch(AShooterCharacter* Thrower);
+
 	// ==================== Coop Attribution ====================
 	// Whatever this prop does to the world, it does on behalf of the character who charged and
 	// spent it. Single player could read that off the one player controller; coop cannot, and the
@@ -658,6 +734,37 @@ public:
 	// ==================== AActor Overrides ====================
 
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	/** The whole replicated-movement path, refused outright while this machine is the holder.
+	 *
+	 *  This is not just about the transform. AActor::OnRep_ReplicatedMovement compares the server's
+	 *  bRepPhysics against its own and calls SyncReplicatedPhysicsSimulation, which forces the local
+	 *  body's simulation to match the server's (ActorReplication.cpp:222). The server deliberately
+	 *  goes kinematic while a client carries a prop — so the moment that arrived, the engine switched
+	 *  the holder's own simulation OFF and the prop froze in mid-air with the constraint still
+	 *  attached to it. Measured, not guessed: the hold trace showed simulating=1 at the grab and
+	 *  simulating=0 half a second later, with the prop's position never changing again.
+	 *
+	 *  It also explains why holding worked now and then: a prop whose server copy was already
+	 *  kinematic never changed the flag, so there was nothing to sync. */
+	virtual void OnRep_ReplicatedMovement() override;
+
+	/** While this machine is holding the prop it is also the one simulating it, so the transform
+	 *  arriving from the server is its own report come back a round trip later. Applying it would
+	 *  fight the local simulation several times a second, which is exactly what made a held prop
+	 *  jitter. The holder ignores it and keeps its own answer until it lets go. */
+	virtual void PostNetReceiveLocationAndRotation() override;
+
+	/** The engine picks this path instead of the one above whenever the SERVER's copy of the prop is
+	 *  simulating, which is every prop nobody is carrying. Its normal job is to correct a client that
+	 *  is simulating too, by pushing the authority's state into the local body — and our clients
+	 *  deliberately do not simulate, so that correction landed on a body that was asleep and did
+	 *  nothing at all. That is why a prop the host pushed or blew up never moved on a client while a
+	 *  prop a client carried moved fine on the host: only the carried one travelled as a plain
+	 *  transform. Here the non-simulating case takes the transform out of the replicated state
+	 *  directly, and the holder ignores it for the same reason as above. */
+	virtual void PostNetReceivePhysicState() override;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -727,6 +834,40 @@ private:
 	UPROPERTY()
 	TWeakObjectPtr<AShooterCharacter> SpendingCharacter;
 
+	/** See GetHoldingCharacter. Strong + replicated: unlike SpendingCharacter this is server-set
+	 *  network-authoritative state, not a local attribution cache, and every machine needs to see it
+	 *  to know the prop is already spoken for. */
+	UPROPERTY(Replicated)
+	TObjectPtr<AShooterCharacter> HoldingCharacter = nullptr;
+
+	/** See IsLocallyHeld. Only ever true on a client that is itself holding this prop. */
+	bool bLocallyHeld = false;
+
+	/** See SetHeldPassThrough. */
+	bool bHeldPassThrough = false;
+
+	/** See GetHeldCaptureRange. Server-side only, set from the holder's report at capture. */
+	float HeldCaptureRange = 0.0f;
+
+	/** Distance from the hand last tick, so the hold can tell "still reeling it in" from "losing it".
+	 *  Reset on capture. See UpdateHeldByHandle. */
+	float PreviousHoldDistance = BIG_NUMBER;
+
+	/** The authority's charge, mirrored down to clients.
+	 *
+	 *  The real value lives in the EMF plugin's field component, which replicates nothing and belongs
+	 *  to another repository. Without this a client saw every prop at its DefaultCharge forever: no
+	 *  overlay, no HUD, and its own capture attempts measured against a charge that was never true. */
+	UPROPERTY(ReplicatedUsing = OnRep_Charge)
+	float ReplicatedCharge = 0.0f;
+
+	UFUNCTION()
+	void OnRep_Charge();
+
+	/** Last velocity a remote holder reported. Seeds the physics body back to life on release so the
+	 *  prop keeps its momentum instead of dropping from a standstill. */
+	FVector LastReportedVelocity = FVector::ZeroVector;
+
 	FVector PreviousPlatePosition = FVector::ZeroVector;
 	bool bHasPreviousPlatePosition = false;
 	float WeakCaptureTimer = 0.0f;
@@ -745,6 +886,25 @@ private:
 
 	/** Apply viscous capture forces when held by channeling plate */
 	void UpdateCaptureForces(float DeltaTime);
+
+	/** The held (non-throwing) half of the capture. The holder's UPhysicsHandleComponent does the
+	 *  actual moving now, so all this does is report the result to the server and give the prop up
+	 *  if it somehow ends up far outside capture range. */
+	void UpdateHeldByHandle(float DeltaTime);
+
+	/** Fly a prop thrown by a remote client. The host's throw is steered by its own channeling
+	 *  plate through UpdateCaptureForces; a remote throw has no plate on this machine, so the
+	 *  server flies it directly off the same math. */
+	void TickRemoteLaunchFlight(float DeltaTime);
+
+	/** The reverse-flight steering itself: constant forward speed, lateral convergence back onto
+	 *  the aim line, and the soft homing bias. Shared by the plate-driven (host) and plateless
+	 *  (remote throw) paths so both throws fly identically. */
+	FVector ComputeReverseFlightVelocity(const FVector& AimOrigin, const FVector& AimDir, float DeltaTime);
+
+	/** Where the throw is aimed: the eyes of the character who spent this prop. Returns false when
+	 *  there is no spender to ask, which is the one case a thrown prop cannot happen without. */
+	bool GetReverseFlightAimSource(FVector& OutOrigin, FVector& OutDirection) const;
 
 	/** Find best homing target: overlap sphere within HomingMaxRange, filter by cone + alive */
 	AShooterNPC* FindHomingTarget(const FVector& Position, const FVector& AimDirection) const;

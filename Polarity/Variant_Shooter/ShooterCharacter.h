@@ -17,6 +17,7 @@ class UWeaponRecoilComponent;
 class UHitMarkerComponent;
 class UMeleeAttackComponent;
 class UChargeAnimationComponent;
+class UPhysicsHandleComponent;
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
@@ -156,6 +157,17 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	/** Charge animation component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UChargeAnimationComponent* ChargeAnimationComponent;
+
+	/** Holds a captured physics prop in front of this character.
+	 *
+	 *  A held prop used to be pulled by a spring force, which cannot keep it in the hand: a spring
+	 *  loses to enough mass, gravity, friction and the player's own speed, so the prop trailed behind
+	 *  and dropped. This is a constraint solved by the physics engine instead, so the prop keeps its
+	 *  collision (it is stopped by walls and slides around corners) while still being held.
+	 *
+	 *  Whichever machine is holding the prop runs this, and that machine simulates the prop for real. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UPhysicsHandleComponent> PropPhysicsHandle;
 
 	/** Upgrade system manager - tracks and manages all active upgrades */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -1023,6 +1035,58 @@ public:
 		float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
 		float OverrideBoltLength, float OverrideRandomSeed);
 
+	// ==================== Coop prop hold routing ====================
+	// AEMFPhysicsProp::UpdateCaptureForces runs this client's own copy of the capture spring math
+	// kinematically (no physics body — the server owns that) purely so a held prop feels held with
+	// no round trip. These three RPCs are how the server finds out about it: it never runs the spring
+	// math itself for a remote hold, it just believes what arrives here until release.
+
+	/** Ask the server to start a remote hold on Prop. Reliable: a dropped capture request leaves the
+	 *  prop looking captured on this screen and untouched everywhere else.
+	 *
+	 *  Checked the same way a reported hit is: the prop has to be capturable, the distance has to be
+	 *  within capture range plus a round-trip margin, and nobody else can already be holding it.
+	 *
+	 *  The client has to send its own capture range, which it would otherwise never need to: range is
+	 *  a product of the puller's charge and the prop's, and a player's charge is not replicated (it
+	 *  lives in the EMF plugin's field component). The server therefore reads any remote player's
+	 *  charge as zero, computed a range of zero, and rejected every held-transform that client sent
+	 *  while also throwing at zero speed. The number is clamped to what that client's own
+	 *  CaptureSearchRadius allows, in the same spirit as clamping reported damage. */
+	UFUNCTION(Server, Reliable)
+	void Server_CaptureProp(AEMFPhysicsProp* Prop, float ReportedCaptureRange);
+
+	/** Ask the server to end this client's remote hold on Prop. Reliable: a dropped release leaves
+	 *  the prop stuck kinematic, following nothing, forever. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReleaseProp(AEMFPhysicsProp* Prop);
+
+	/** Tell the server this client's shot electrified something. Reliable: charge is the whole game
+	 *  loop, and a lost one is a shot that did nothing.
+	 *
+	 *  This needs its own way upstream because ionization carries no damage — the starting weapon
+	 *  deals none at all by design — so Server_ReportDamage never fires for it and the server never
+	 *  heard about a client charging anything. The client applies it locally too, for the instant
+	 *  feedback, and the authority's value replicates back over the top.
+	 *
+	 *  Deliberately NOT re-checked here: the riot-shield rule, which needs the exact component that
+	 *  was hit and is enforced on the shooter's machine, same trust model as a reported hit. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReportIonization(AActor* Target, AShooterWeapon* Weapon);
+
+	/** Ask the server to throw the prop this client is holding. Unlike the hold, the flight is not
+	 *  predicted here — the server takes the prop back and flies it, so the hit, the damage and the
+	 *  explosion are all decided in one place. Reliable: a dropped throw is a prop that never flies. */
+	UFUNCTION(Server, Reliable)
+	void Server_LaunchProp(AEMFPhysicsProp* Prop);
+
+	/** Report where the held prop's local spring simulation put it this tick. Unreliable: this fires
+	 *  every tick while holding, so a single lost update is invisible — the next one supersedes it.
+	 *  Rejected outright if Prop does not currently list this character as its holder. */
+	UFUNCTION(Server, Unreliable)
+	void Server_UpdateHeldPropTransform(AEMFPhysicsProp* Prop, FVector Location, FRotator Rotation,
+		FVector LinearVelocity);
+
 	/** Where this character is aiming vertically, in degrees, for animation to use.
 	 *  Your own pitch comes from the control rotation; a teammate's comes from the pitch the pawn
 	 *  already replicates, which nothing in this project read, so remote characters always aimed
@@ -1255,6 +1319,9 @@ public:
 	/** Returns the charge animation component */
 	UFUNCTION(BlueprintPure, Category = "Charge")
 	UChargeAnimationComponent* GetChargeAnimationComponent() const { return ChargeAnimationComponent; }
+
+	/** Returns the constraint that holds a captured prop. See PropPhysicsHandle. */
+	UPhysicsHandleComponent* GetPropPhysicsHandle() const { return PropPhysicsHandle; }
 
 	/** Returns the upgrade manager component */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")

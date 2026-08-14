@@ -145,9 +145,13 @@ public:
 
 	/** Multiplier for forces from Physics Prop sources.
 	 *  0.0 = ignore PhysicsProp forces, 1.0 = full effect, >1.0 = amplified, <0.0 = inverted
-	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility */
+	 *  NOT clamped - allows negative values and values > 1.0 for gameplay flexibility
+	 *
+	 *  Off by default: a charged prop and a charged character pulling on each other made a carried
+	 *  prop drag its owner around and sent a thrown one flying off on its own. The pairing is muted
+	 *  from both ends — see AEMFPhysicsProp::PlayerForceMultiplier for the other half. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Force Filtering")
-	float PhysicsPropForceMultiplier = 1.0f;
+	float PhysicsPropForceMultiplier = 0.0f;
 
 	/** Multiplier for forces from sources with unknown/unspecified owner type.
 	 *  0.0 = ignore unknown forces, 1.0 = full effect
@@ -170,8 +174,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
 	float LaunchedEnvironmentForceMultiplier = 1.0f;
 
+	/** Muted for the same reason as PhysicsPropForceMultiplier above. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
-	float LaunchedPhysicsPropForceMultiplier = 1.0f;
+	float LaunchedPhysicsPropForceMultiplier = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Launched Force Filtering")
 	float LaunchedUnknownForceMultiplier = 1.0f;

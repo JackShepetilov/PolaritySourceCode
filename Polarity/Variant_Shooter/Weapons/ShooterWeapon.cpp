@@ -2081,6 +2081,19 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 
 	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: PASSED, applying charge to %s"), *Target->GetName());
 
+	// Charging something is a change to the world, and until now a client only ever made it to its
+	// own copy: ionization carries no damage, so it never travelled with a damage report, and the
+	// starting weapon deals no damage at all. Tell the server. The local application below still
+	// runs, so the shooter sees the prop light up immediately, and the authority's value replicates
+	// back over the top of it a round trip later.
+	if (PawnOwner && !PawnOwner->HasAuthority())
+	{
+		if (AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner))
+		{
+			ShooterOwner->Server_ReportIonization(Target, this);
+		}
+	}
+
 	// Notify upgrade system of ionization-eligible hit. Fires once per valid hit regardless
 	// of whether the target was already at max charge — upgrades (e.g. PistolStun) gate
 	// per-target spam themselves via their own cooldowns.

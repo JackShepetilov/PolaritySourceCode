@@ -297,6 +297,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "0.0", Units = "cm"))
 	float FallbackCaptureRange = 500.0f;
 
+	// ==================== Prop Hold (physics constraint) ====================
+	// A captured prop is held by the character's UPhysicsHandleComponent, not by forces. The prop
+	// stays a real physics body while held, so walls stop it and corners turn it, and the numbers
+	// below are how hard the hand insists. Higher stiffness = the prop stays closer to the hand
+	// through obstacles and player movement, at the cost of shoving harder into whatever blocks it.
+
+	/** Linear stiffness of the hold. Well above the engine default (750): the complaint the hold was
+	 *  rebuilt to fix was the prop trailing behind a moving player and dropping. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "0.0"))
+	float HoldLinearStiffness = 4000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "0.0"))
+	float HoldLinearDamping = 500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "0.0"))
+	float HoldAngularStiffness = 1500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "0.0"))
+	float HoldAngularDamping = 500.0f;
+
+	/** How far (cm) the prop may sit from the hand before it counts as stuck on something. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "10.0", Units = "cm"))
+	float HoldStuckDistance = 150.0f;
+
+	/** How long (seconds) the prop may stay stuck before it is pulled through whatever is holding it
+	 *  up. Short enough not to feel broken, long enough that squeezing past a doorframe reads as
+	 *  physics rather than as the prop giving up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float HoldStuckYankDelay = 0.5f;
+
 	// ==================== VFX ====================
 
 	/** Niagara effect to spawn during charge toggle (legacy - used when polarity-based VFX not set) */
@@ -767,6 +797,26 @@ protected:
 
 	/** Capture a specific physics prop */
 	void CaptureProp(AEMFPhysicsProp* Prop);
+
+	/** Take hold of a captured prop with the character's physics constraint. */
+	void GrabPropWithHandle(AEMFPhysicsProp* Prop);
+
+	/** Let go of whatever the constraint is holding. Safe to call when it is holding nothing. */
+	void ReleasePropHandle();
+
+	/** Point the constraint at the plate and notice when the prop cannot get there. */
+	void UpdateHeldProp(float DeltaTime);
+
+	/** How long the held prop has been further from the hand than HoldStuckDistance. */
+	float HeldPropStuckTime = 0.0f;
+
+	/** Throttle for the [HOLD_DEBUG] hold trace. Remove with the logging. */
+	float HeldPropLogTime = 0.0f;
+
+	/** The prop's orientation relative to the view at the moment it was grabbed. The hold keeps it,
+	 *  so a crate picked up at an angle stays at that angle and turns with the camera, instead of
+	 *  snapping square to the view the instant it is caught. */
+	FQuat HeldPropRelativeRotation = FQuat::Identity;
 
 	/** Capture a basketball ball (direct hold/launch, no EMF propulsion). */
 	void CaptureBasketballBall(ABasketballBall* Ball);

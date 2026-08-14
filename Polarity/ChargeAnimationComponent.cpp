@@ -16,6 +16,7 @@
 #include "NiagaraComponent.h"
 #include "PolarityCharacter.h"
 #include "ShooterCharacter.h"
+#include "PhysicsEngine/PhysicsHandleComponent.h"
 #include "ShooterWeapon.h"
 #include "EMF_FieldComponent.h"
 #include "EMFPhysicsProp.h"
@@ -79,6 +80,10 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	if (CurrentState == EChargeAnimationState::Channeling || CurrentState == EChargeAnimationState::ReverseChanneling)
 	{
 		UpdatePlatePosition();
+
+		// After the plate has moved: the constraint follows it, so it has to read this frame's
+		// position rather than last frame's.
+		UpdateHeldProp(DeltaTime);
 	}
 
 	// Update beam VFX positions (capture/launch beams track plate and target)
@@ -620,6 +625,9 @@ void UChargeAnimationComponent::ExitChanneling()
 		}
 		else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
 		{
+			// Let go of the constraint too. BeginLaunch comes straight back here to re-capture onto
+			// the reverse plate, and a throw must leave the prop free rather than still on a leash.
+			ReleasePropHandle();
 			Prop->DetachFromPlate();
 		}
 		else if (ABasketballBall* Basketball = Cast<ABasketballBall>(CurrentCapturedNPC.Get()))
@@ -727,6 +735,102 @@ void UChargeAnimationComponent::DestroyPlate()
 	{
 		ChannelingPlateActor->Destroy();
 		ChannelingPlateActor = nullptr;
+	}
+}
+
+void UChargeAnimationComponent::GrabPropWithHandle(AEMFPhysicsProp* Prop)
+{
+	UPhysicsHandleComponent* Handle = ShooterCharacter ? ShooterCharacter->GetPropPhysicsHandle() : nullptr;
+	if (!Handle || !Prop || !Prop->PropMesh || !Prop->PropMesh->IsSimulatingPhysics())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[HOLD_DEBUG] GrabPropWithHandle SKIPPED: handle=%d shooterChar=%d prop=%d mesh=%d simulating=%d"),
+			Handle ? 1 : 0, ShooterCharacter ? 1 : 0, Prop ? 1 : 0,
+			(Prop && Prop->PropMesh) ? 1 : 0,
+			(Prop && Prop->PropMesh && Prop->PropMesh->IsSimulatingPhysics()) ? 1 : 0);
+		return;
+	}
+
+	Handle->SetLinearStiffness(HoldLinearStiffness);
+	Handle->SetLinearDamping(HoldLinearDamping);
+	Handle->SetAngularStiffness(HoldAngularStiffness);
+	Handle->SetAngularDamping(HoldAngularDamping);
+
+	HeldPropStuckTime = 0.0f;
+	HeldPropRelativeRotation = ChannelingPlateActor
+		? ChannelingPlateActor->GetActorQuat().Inverse() * Prop->GetActorQuat()
+		: FQuat::Identity;
+
+	// Grab it where it currently is, so it swings into the hand instead of snapping to it.
+	Handle->GrabComponentAtLocationWithRotation(
+		Prop->PropMesh, NAME_None, Prop->GetActorLocation(), Prop->GetActorRotation());
+
+	UE_LOG(LogTemp, Warning, TEXT("[HOLD_DEBUG] GrabPropWithHandle: grabbed=%s stiffness=%.0f"),
+		*GetNameSafe(Handle->GetGrabbedComponent()), HoldLinearStiffness);
+}
+
+void UChargeAnimationComponent::ReleasePropHandle()
+{
+	UPhysicsHandleComponent* Handle = ShooterCharacter ? ShooterCharacter->GetPropPhysicsHandle() : nullptr;
+	if (!Handle || !Handle->GetGrabbedComponent())
+	{
+		return;
+	}
+
+	Handle->ReleaseComponent();
+	HeldPropStuckTime = 0.0f;
+}
+
+void UChargeAnimationComponent::UpdateHeldProp(float DeltaTime)
+{
+	UPhysicsHandleComponent* Handle = ShooterCharacter ? ShooterCharacter->GetPropPhysicsHandle() : nullptr;
+	if (!Handle || !Handle->GetGrabbedComponent() || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	// The plate is where the hand holds things — it already sits at PlateOffset in front of the
+	// camera and is moved every tick, so aiming the constraint at it keeps all the existing tuning.
+	const FVector TargetLocation = ChannelingPlateActor->GetActorLocation();
+	const FQuat TargetRotation = ChannelingPlateActor->GetActorQuat() * HeldPropRelativeRotation;
+	Handle->SetTargetLocationAndRotation(TargetLocation, TargetRotation.Rotator());
+
+	AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get());
+	if (!Prop)
+	{
+		return;
+	}
+
+	// Stuck: the prop is being held up by something it cannot get around. Give it a moment to solve
+	// it as physics, then stop asking and let it come through. It passes through the obstruction for
+	// that instant and ends up in the hand, which beats leaving it wedged behind a corner while its
+	// owner walks away, and beats dropping it in the middle of a fight.
+	const float DistanceToHand = FVector::Dist(Prop->GetActorLocation(), TargetLocation);
+
+	// Throttled: enough to see whether the target is moving, whether the prop is following it, and
+	// whether the body is still simulating, without a line per frame.
+	HeldPropLogTime += DeltaTime;
+	if (HeldPropLogTime >= 0.5f)
+	{
+		HeldPropLogTime = 0.0f;
+		UE_LOG(LogTemp, Warning, TEXT("[HOLD_DEBUG] hold: target=%s prop=%s dist=%.0f simulating=%d locallyHeld=%d vel=%.0f"),
+			*TargetLocation.ToCompactString(), *Prop->GetActorLocation().ToCompactString(), DistanceToHand,
+			(Prop->PropMesh && Prop->PropMesh->IsSimulatingPhysics()) ? 1 : 0,
+			Prop->IsLocallyHeld() ? 1 : 0,
+			Prop->PropMesh ? Prop->PropMesh->GetPhysicsLinearVelocity().Size() : -1.0f);
+	}
+
+	if (DistanceToHand > HoldStuckDistance)
+	{
+		HeldPropStuckTime += DeltaTime;
+		if (HeldPropStuckTime >= HoldStuckYankDelay)
+		{
+			Prop->SetHeldPassThrough(true);
+		}
+	}
+	else
+	{
+		HeldPropStuckTime = 0.0f;
+		Prop->SetHeldPassThrough(false);
 	}
 }
 
@@ -1619,6 +1723,14 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 		return;
 	}
 
+	// Someone else is already holding it over the network. Starting our own local capture anyway
+	// would show this player a "successful" grab (beam VFX, hand animation) that the server silently
+	// rejects, and it would never resolve since nothing here retries or times out.
+	if (AShooterCharacter* Holder = Prop->GetHoldingCharacter(); Holder && Holder != ShooterCharacter)
+	{
+		return;
+	}
+
 	// Charge validation: only capture charged props with OPPOSITE sign
 	// Neutral props can't be captured (no EM interaction), same-sign are repelled
 	const float PropCharge = Prop->GetCharge();
@@ -1633,6 +1745,10 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	CurrentCapturedNPC = Prop;
 	ChannelingPlateActor->SetCapturedNPC(Prop);
 	Prop->SetCapturedByPlate(ChannelingPlateActor);
+
+	// After SetCapturedByPlate, not before: on a client that call is what turns the prop into a
+	// locally simulated body, and a constraint has nothing to grab until it is one.
+	GrabPropWithHandle(Prop);
 
 	// VFX and delegate
 	SpawnCaptureVFX(Prop);
@@ -1835,6 +1951,7 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 	}
 	else if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()))
 	{
+		ReleasePropHandle();
 		Prop->ReleasedFromCapture();
 	}
 	else if (ABasketballBall* Basketball = Cast<ABasketballBall>(CurrentCapturedNPC.Get()))

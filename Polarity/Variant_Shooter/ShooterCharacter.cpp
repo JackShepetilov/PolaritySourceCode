@@ -52,6 +52,8 @@
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
+#include "EMFPhysicsProp.h"
+#include "PhysicsEngine/PhysicsHandleComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
@@ -124,6 +126,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the charge animation component
 	ChargeAnimationComponent = CreateDefaultSubobject<UChargeAnimationComponent>(TEXT("Charge Animation Component"));
+
+	// holds a captured prop as a physics constraint rather than a spring force — see the header
+	PropPhysicsHandle = CreateDefaultSubobject<UPhysicsHandleComponent>(TEXT("Prop Physics Handle"));
 
 	// create the upgrade manager component
 	UpgradeManager = CreateDefaultSubobject<UUpgradeManagerComponent>(TEXT("Upgrade Manager"));
@@ -700,6 +705,131 @@ void AShooterCharacter::Server_ReportBeamEffect_Implementation(AShooterWeapon* W
 		Weapon->Multicast_PlayBeamEffect(Start, End, EnergyMultiplier,
 			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
 	}
+}
+
+void AShooterCharacter::Server_CaptureProp_Implementation(AEMFPhysicsProp* Prop, float ReportedCaptureRange)
+{
+	if (!Prop || !Prop->bCanBeCaptured)
+	{
+		return;
+	}
+
+	// Already holding it — the reverse-channeling re-attach path re-confirms the same capture, so
+	// this has to be a harmless no-op rather than a rejection.
+	if (Prop->GetHoldingCharacter() == this)
+	{
+		return;
+	}
+
+	if (Prop->GetHoldingCharacter() != nullptr)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to capture %s, already held by %s - rejected"),
+			*GetName(), *Prop->GetName(), *GetNameSafe(Prop->GetHoldingCharacter()));
+		return;
+	}
+
+	// Same distance margin as a reported hit: the character has moved since the client captured,
+	// and capture range already has its own generous falloff.
+	// The reported range, held to what this client's own search radius could ever have found.
+	float CaptureRange = FMath::Max(0.0f, ReportedCaptureRange);
+	if (const UChargeAnimationComponent* Charge = GetChargeAnimationComponent())
+	{
+		if (CaptureRange > Charge->CaptureSearchRadius)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a capture range of %.0f, its search radius is %.0f - clamped"),
+				*GetName(), CaptureRange, Charge->CaptureSearchRadius);
+			CaptureRange = Charge->CaptureSearchRadius;
+		}
+	}
+
+	static constexpr float CaptureMarginCm = 500.0f;
+	const float DistanceToProp = FVector::Dist(GetActorLocation(), Prop->GetActorLocation());
+	if (DistanceToProp > CaptureRange + CaptureMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to capture %s at %.0f cm, range is %.0f - rejected"),
+			*GetName(), *Prop->GetName(), DistanceToProp, CaptureRange);
+		return;
+	}
+
+	Prop->BeginRemoteHold(this, CaptureRange);
+}
+
+void AShooterCharacter::Server_ReleaseProp_Implementation(AEMFPhysicsProp* Prop)
+{
+	if (!Prop || Prop->GetHoldingCharacter() != this)
+	{
+		return;
+	}
+
+	Prop->EndRemoteHold();
+}
+
+void AShooterCharacter::Server_ReportIonization_Implementation(AActor* Target, AShooterWeapon* Weapon)
+{
+	if (!Target || !Weapon || !OwnedWeapons.Contains(Weapon))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported ionization with a weapon it does not own (%s) - rejected"),
+			*GetName(), *GetNameSafe(Weapon));
+		return;
+	}
+
+	// Same reach test as a reported hit, same margin for the round trip.
+	static constexpr float RangeMarginCm = 500.0f;
+	const float DistanceToTarget = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
+	if (DistanceToTarget > Weapon->GetMaxHitscanRange() + RangeMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported ionizing a target at %.0f cm, weapon reaches %.0f - rejected"),
+			*GetName(), DistanceToTarget, Weapon->GetMaxHitscanRange());
+		return;
+	}
+
+	// Null component: the shield rule was already applied on the shooter's machine (see the header).
+	Weapon->ApplyHitscanIonization(Target, nullptr);
+}
+
+void AShooterCharacter::Server_LaunchProp_Implementation(AEMFPhysicsProp* Prop)
+{
+	if (!Prop || Prop->GetHoldingCharacter() != this)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to throw %s it is not holding - rejected"),
+			*GetName(), *GetNameSafe(Prop));
+		return;
+	}
+
+	Prop->BeginRemoteLaunch(this);
+}
+
+void AShooterCharacter::Server_UpdateHeldPropTransform_Implementation(AEMFPhysicsProp* Prop, FVector Location,
+	FRotator Rotation, FVector LinearVelocity)
+{
+	if (!Prop || Prop->GetHoldingCharacter() != this)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a held-prop transform for %s it is not holding - rejected"),
+			*GetName(), *GetNameSafe(Prop));
+		return;
+	}
+
+	static constexpr float HoldMarginCm = 500.0f;
+	const float HoldRange = Prop->GetHeldCaptureRange();
+	const float DistanceToReport = FVector::Dist(GetActorLocation(), Location);
+	if (DistanceToReport > HoldRange + HoldMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a held prop %.0f cm away, range is %.0f - rejected"),
+			*GetName(), DistanceToReport, HoldRange);
+		return;
+	}
+
+	// Throttled: this arrives every tick of every hold.
+	static double LastHeldLogTime = 0.0;
+	const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	if (Now - LastHeldLogTime >= 0.5)
+	{
+		LastHeldLogTime = Now;
+		UE_LOG(LogTemp, Warning, TEXT("[HOLD_DEBUG] SERVER got held transform for %s at %s vel=%.0f"),
+			*Prop->GetName(), *Location.ToCompactString(), LinearVelocity.Size());
+	}
+
+	Prop->ApplyHeldTransform(Location, Rotation, LinearVelocity);
 }
 
 float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)

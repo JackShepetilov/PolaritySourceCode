@@ -32,6 +32,7 @@
 #include "Field/FieldSystemObjects.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Checkpoint/CheckpointSubsystem.h"
+#include "Net/UnrealNetwork.h"
 
 #if WITH_EDITOR
 #include "GCBatchCreatorLibrary.h"
@@ -67,6 +68,21 @@ AEMFPhysicsProp::AEMFPhysicsProp()
 	{
 		FieldComponent->SetOwnerType(EEMSourceOwnerType::PhysicsProp);
 	}
+}
+
+void AEMFPhysicsProp::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AEMFPhysicsProp, HoldingCharacter);
+	DOREPLIFETIME(AEMFPhysicsProp, ReplicatedCharge);
+}
+
+void AEMFPhysicsProp::OnRep_Charge()
+{
+	// Straight into the normal setter, so the overlay, the delegates and the physics-on-first-charge
+	// rule all fire on the client exactly as they do on the server.
+	SetCharge(ReplicatedCharge);
 }
 
 // ==================== Editor: Auto-assign GC when PropMesh changes ====================
@@ -264,9 +280,31 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 		AirMailTickSpear(PropMesh, AirMail ? AirMail->GetKickSpinSpeed() : 720.0f);
 	}
 
+	// Belt and braces for the stranding described in DetachFromPlate: whatever route the hold ended
+	// by, the flag that makes this machine ignore the server dies with the plate that justified it.
+	if (bLocallyHeld && !CapturingPlate.IsValid())
+	{
+		bLocallyHeld = false;
+		ApplyPropPhysicsSimulation(false);
+	}
+
+	// The authority is the only one who knows the real charge, and it is not replicated by the field
+	// component itself (that lives in the plugin). Mirror it so clients can see a prop light up,
+	// judge whether it can be grabbed, and show it on the HUD.
+	if (HasAuthority() && !FMath::IsNearlyEqual(ReplicatedCharge, GetCharge()))
+	{
+		ReplicatedCharge = GetCharge();
+	}
+
 	if (bCanBeCaptured && CapturingPlate.IsValid())
 	{
 		UpdateCaptureForces(DeltaTime);
+	}
+	else if (bIsInReverseFlight && HoldingCharacter && HasAuthority())
+	{
+		// A prop thrown by a remote client. The plate that would steer it lives on the thrower's
+		// machine, not this one, so the server flies it off the same math directly.
+		TickRemoteLaunchFlight(DeltaTime);
 	}
 
 	// Cache speed for explosion checks (before collision callbacks modify velocity)
@@ -497,6 +535,19 @@ float AEMFPhysicsProp::CalculateCaptureRange() const
 	return UChargeAnimationComponent::GetCaptureRangeFor(this, FMath::Abs(GetCharge()));
 }
 
+float AEMFPhysicsProp::GetCaptureRangeForCharacter(const AShooterCharacter* Character) const
+{
+	if (Character)
+	{
+		if (const UChargeAnimationComponent* Charge = Character->FindComponentByClass<UChargeAnimationComponent>())
+		{
+			return Charge->EvaluateCaptureRange(FMath::Abs(GetCharge()));
+		}
+	}
+
+	return CalculateCaptureRange();
+}
+
 void AEMFPhysicsProp::ApplyPropPhysicsSimulation(bool bEnable)
 {
 	if (!PropMesh)
@@ -504,10 +555,82 @@ void AEMFPhysicsProp::ApplyPropPhysicsSimulation(bool bEnable)
 		return;
 	}
 
-	// Only the authority simulates. A client that also simulated would push its own copy around and
-	// then be corrected by the transform arriving from the server, which reads as a prop that
-	// twitches and drifts. Clients just get shown where it ended up.
-	PropMesh->SetSimulatePhysics(bEnable && HasAuthority());
+	// The authority simulates, and so does a client while it is the one holding the prop: a held
+	// prop has to be a real physics body on the holder's machine, or the constraint holding it has
+	// nothing to pull and it cannot be stopped by walls. Every other machine is shown where the
+	// prop ended up, because a client simulating a prop nobody there is holding would push its own
+	// copy around and then be yanked back by the server's transform, which reads as twitching.
+	PropMesh->SetSimulatePhysics(bEnable && (HasAuthority() || bLocallyHeld));
+}
+
+void AEMFPhysicsProp::OnRep_ReplicatedMovement()
+{
+	if (bLocallyHeld)
+	{
+		return;
+	}
+
+	Super::OnRep_ReplicatedMovement();
+}
+
+void AEMFPhysicsProp::PostNetReceiveLocationAndRotation()
+{
+	if (bLocallyHeld)
+	{
+		return;
+	}
+
+	Super::PostNetReceiveLocationAndRotation();
+}
+
+void AEMFPhysicsProp::PostNetReceivePhysicState()
+{
+	if (bLocallyHeld)
+	{
+		return;
+	}
+
+	if (PropMesh && !PropMesh->IsSimulatingPhysics())
+	{
+		// Show where the server put it. Handing this to Super instead would try to correct a physics
+		// body that is not running, which is silently nothing.
+		const FRepMovement& RepMove = GetReplicatedMovement();
+		SetActorLocationAndRotation(
+			FRepMovement::RebaseOntoLocalOrigin(RepMove.Location, this), RepMove.Rotation);
+		return;
+	}
+
+	Super::PostNetReceivePhysicState();
+}
+
+void AEMFPhysicsProp::Multicast_PlayExplosionEffects_Implementation(FVector ExplosionLocation, float VFXScale)
+{
+	if (ExplosionVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			GetWorld(), ExplosionVFX, ExplosionLocation,
+			FRotator::ZeroRotator, FVector(VFXScale),
+			true, true, ENCPoolMethod::None);
+	}
+
+	if (ExplosionSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ExplosionSound, ExplosionLocation);
+	}
+}
+
+void AEMFPhysicsProp::SetHeldPassThrough(bool bPassThrough)
+{
+	if (bHeldPassThrough == bPassThrough || !PropMesh)
+	{
+		return;
+	}
+
+	bHeldPassThrough = bPassThrough;
+
+	const ECollisionResponse Response = bPassThrough ? ECR_Ignore : ECR_Block;
+	PropMesh->SetCollisionResponseToChannel(ECC_WorldStatic, Response);
+	PropMesh->SetCollisionResponseToChannel(ECC_WorldDynamic, Response);
 }
 
 void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
@@ -519,6 +642,7 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 
 	CapturingPlate = Plate;
 	WeakCaptureTimer = 0.0f;
+	PreviousHoldDistance = BIG_NUMBER;
 	bHasPreviousPlatePosition = false;
 	bReverseLaunchInitialized = false;
 
@@ -526,8 +650,20 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 	// SpawnPlate), which is the only link back to who is holding this prop.
 	SetSpendingCharacter(Cast<AShooterCharacter>(Plate->GetOwner()));
 
-	// Let spring/damping pull the prop smoothly to plate center (no teleport).
-	// Only zero out velocity so the prop doesn't overshoot on first capture.
+	// BeginLaunch re-captures the prop onto a fresh plate already flipped to reverse mode. Same
+	// call, opposite meaning: that one is the throw, this one is the grab.
+	const bool bIsThrow = Plate->IsInReverseMode();
+
+	// A client holding a prop simulates it itself from here on, so that the constraint on its
+	// character has a real body to hold and the prop is stopped by walls like it would be for the
+	// host. A throw hands the prop back instead: the server flies it, so that the hit it lands and
+	// the explosion it sets off are decided in one place.
+	if (!HasAuthority())
+	{
+		bLocallyHeld = !bIsThrow;
+		ApplyPropPhysicsSimulation(bLocallyHeld);
+	}
+
 	if (PropMesh && PropMesh->IsSimulatingPhysics())
 	{
 		PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
@@ -535,20 +671,118 @@ void AEMFPhysicsProp::SetCapturedByPlate(AEMFChannelingPlateActor* Plate)
 		// Switch to Overlap with Pawns: no physics impulse while captured near player
 		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[HOLD_DEBUG] %s SetCapturedByPlate: authority=%d throw=%d locallyHeld=%d simulating=%d mobility=%d charge=%.1f"),
+		*GetName(), HasAuthority() ? 1 : 0, bIsThrow ? 1 : 0, bLocallyHeld ? 1 : 0,
+		(PropMesh && PropMesh->IsSimulatingPhysics()) ? 1 : 0,
+		PropMesh ? (int32)PropMesh->Mobility.GetValue() : -1, GetCharge());
+
+	// The server's own copy of this prop has no plate at all and needs to be told what just
+	// happened, so it can either start mirroring this client's reported transform, or fly the throw.
+	if (!HasAuthority())
+	{
+		if (AShooterCharacter* Spender = SpendingCharacter.Get())
+		{
+			if (bIsThrow)
+			{
+				Spender->Server_LaunchProp(this);
+			}
+			else
+			{
+				// Our range travels with the request: only this machine knows this player's charge.
+				Spender->Server_CaptureProp(this, GetCaptureRangeForCharacter(Spender));
+			}
+		}
+	}
 }
 
 void AEMFPhysicsProp::ReleasedFromCapture()
 {
+	// A remote hold is ending — tell the server before the local state that identifies it is cleared.
+	// A throw is excluded: the throw animation finishing on the thrower's machine says nothing about
+	// where the prop is, and releasing the server's hold here would stop the flight mid-air and
+	// overwrite its live velocity with the stale one from just before the throw. A thrown prop is
+	// finished by hitting something, in OnPropHit, which is where that has always been decided.
+	const AEMFChannelingPlateActor* ReleasingPlate = CapturingPlate.Get();
+	const bool bWasRemoteHold = !HasAuthority() && ReleasingPlate && !ReleasingPlate->IsInReverseMode();
+
 	CapturingPlate.Reset();
 	bHasPreviousPlatePosition = false;
 	WeakCaptureTimer = 0.0f;
 	bReverseLaunchInitialized = false;
+
+	// Never leave a released prop able to sink through the world.
+	SetHeldPassThrough(false);
 
 	// Restore Block with Pawns: normal physics collision when free
 	if (PropMesh)
 	{
 		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	}
+
+	// Hand the prop back: this machine stops simulating it and goes back to being shown where the
+	// server says it is.
+	if (bLocallyHeld)
+	{
+		bLocallyHeld = false;
+		ApplyPropPhysicsSimulation(false);
+	}
+
+	if (bWasRemoteHold)
+	{
+		if (AShooterCharacter* Spender = SpendingCharacter.Get())
+		{
+			Spender->Server_ReleaseProp(this);
+		}
+	}
+}
+
+void AEMFPhysicsProp::BeginRemoteHold(AShooterCharacter* Holder, float HolderCaptureRange)
+{
+	if (!Holder || !bCanBeCaptured)
+	{
+		return;
+	}
+
+	HoldingCharacter = Holder;
+	HeldCaptureRange = HolderCaptureRange;
+	SetSpendingCharacter(Holder);
+
+	// The server stops driving this prop itself — it becomes a kinematic mirror of whatever the
+	// holder reports via ApplyHeldTransform, same as the host's own capture already takes the prop
+	// off the "resting/falling" path while held.
+	ApplyPropPhysicsSimulation(false);
+
+	if (PropMesh)
+	{
+		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	}
+}
+
+void AEMFPhysicsProp::EndRemoteHold()
+{
+	HoldingCharacter = nullptr;
+	HeldCaptureRange = 0.0f;
+
+	if (PropMesh)
+	{
+		PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	}
+
+	// Hand the body back to physics. A fresh SetSimulatePhysics(true) wakes the body at rest, so
+	// without this a released prop would freeze for a frame and then just fall, instead of keeping
+	// the momentum the holder was visibly carrying it with.
+	ApplyPropPhysicsSimulation(true);
+	if (PropMesh)
+	{
+		PropMesh->SetPhysicsLinearVelocity(LastReportedVelocity);
+	}
+}
+
+void AEMFPhysicsProp::ApplyHeldTransform(const FVector& Location, const FRotator& Rotation, const FVector& LinearVelocity)
+{
+	SetActorLocationAndRotation(Location, Rotation);
+	LastReportedVelocity = LinearVelocity;
 }
 
 AShooterCharacter* AEMFPhysicsProp::GetSpendingCharacter() const
@@ -590,6 +824,17 @@ void AEMFPhysicsProp::DetachFromPlate()
 	CapturingPlate.Reset();
 	bHasPreviousPlatePosition = false;
 	bReverseLaunchInitialized = false;
+
+	// A local hold cannot outlive the local plate. While bLocallyHeld is set this machine refuses
+	// every replicated update for the prop, so leaving it set after a detach that is not followed by
+	// a re-capture strands the prop: it sits wherever this client last simulated it while the server
+	// and everyone else see it somewhere else entirely. That is the crate that existed on one screen
+	// and not the other.
+	if (bLocallyHeld)
+	{
+		bLocallyHeld = false;
+		ApplyPropPhysicsSimulation(false);
+	}
 }
 
 AShooterNPC* AEMFPhysicsProp::FindHomingTarget(const FVector& Position, const FVector& AimDirection) const
@@ -651,7 +896,22 @@ AShooterNPC* AEMFPhysicsProp::FindHomingTarget(const FVector& Position, const FV
 void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 {
 	AEMFChannelingPlateActor* Plate = CapturingPlate.Get();
-	if (!Plate || !PropMesh || !PropMesh->IsSimulatingPhysics())
+	if (!Plate || !PropMesh)
+	{
+		return;
+	}
+
+	// Being held and being thrown are two different jobs sharing one plate. The hold is done by a
+	// constraint on the holder's character now, not by forces from here, so it gets its own short
+	// path; everything below stays the throw.
+	if (!Plate->IsInReverseMode())
+	{
+		UpdateHeldByHandle(DeltaTime);
+		return;
+	}
+
+	// Only the machine actually flying the prop runs the throw. Everyone else is shown the result.
+	if (!PropMesh->IsSimulatingPhysics())
 	{
 		return;
 	}
@@ -706,126 +966,214 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 		WeakCaptureTimer = 0.0f;
 	}
 
-	// Plate velocity via finite difference
-	FVector PlateVelocity = FVector::ZeroVector;
-	if (bHasPreviousPlatePosition && DeltaTime > SMALL_NUMBER)
-	{
-		PlateVelocity = (PlatePos - PreviousPlatePosition) / DeltaTime;
-	}
 	PreviousPlatePosition = PlatePos;
 	bHasPreviousPlatePosition = true;
 
-	const FVector PropVelocity = PropMesh->GetPhysicsLinearVelocity();
-	const FVector RelativeVelocity = PropVelocity - PlateVelocity;
-	const float PhysMass = PropMesh->GetMass();
+	// === REVERSE MODE: aim-line convergence ===
+	// Prop flies forward at constant speed + converges laterally onto camera aim line.
+	// SetPhysicsLinearVelocity each frame: full control, gravity doesn't accumulate.
 
-	if (Plate->IsInReverseMode())
+	if (!bReverseLaunchInitialized)
 	{
-		// === REVERSE MODE: aim-line convergence ===
-		// Prop flies forward at constant speed + converges laterally onto camera aim line.
-		// SetPhysicsLinearVelocity each frame: full control, gravity doesn't accumulate.
+		bReverseLaunchInitialized = true;
+		bIsInReverseFlight = true;
+		bHasExploded = false;
+		ReverseLaunchElapsed = 0.0f;
 
-		if (!bReverseLaunchInitialized)
+		// Air Mail: fresh player launch — eligible for one new bounce.
+		bAirMailEligibleFlight = true;
+		bAirMailBounceConsumed = false;
+
+		const float LaunchDistance = EffectiveCaptureRange * ReverseLaunchDistanceMultiplier;
+		ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
+
+		// Apply spin on launch
+		if (ReverseLaunchSpinSpeed > 0.0f)
 		{
-			bReverseLaunchInitialized = true;
-			bIsInReverseFlight = true;
-			bHasExploded = false;
-			ReverseLaunchElapsed = 0.0f;
-
-			// Air Mail: fresh player launch — eligible for one new bounce.
-			bAirMailEligibleFlight = true;
-			bAirMailBounceConsumed = false;
-
-			const float LaunchDistance = EffectiveCaptureRange * ReverseLaunchDistanceMultiplier;
-			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
-
-			// Apply spin on launch
-			if (ReverseLaunchSpinSpeed > 0.0f && PropMesh)
-			{
-				const FVector RandomAxis = FMath::VRand();
-				PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * ReverseLaunchSpinSpeed);
-			}
+			const FVector RandomAxis = FMath::VRand();
+			PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * ReverseLaunchSpinSpeed);
 		}
+	}
 
-		ReverseLaunchElapsed += DeltaTime;
+	// Aim line from the thrower's eyes. The plate's own normal is the same direction (the plate
+	// copies the camera every tick), but asking the spending character works for a prop thrown
+	// by any player, where the plate does not exist on this machine at all.
+	FVector AimOrigin;
+	FVector AimDir;
+	if (!GetReverseFlightAimSource(AimOrigin, AimDir))
+	{
+		AimOrigin = Plate->GetActorLocation();
+		AimDir = Plate->GetPlateNormal();
+	}
 
-		// Aim line from camera position along plate normal (= camera forward)
-		const FVector PropPos = GetActorLocation();
-		const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
-		const FVector AimOrigin = CamMgr ? CamMgr->GetCameraLocation() : Plate->GetActorLocation();
-		FVector AimDir = Plate->GetPlateNormal();
+	// Direct velocity set: bypasses gravity/physics artifacts, collision detection still works
+	PropMesh->SetPhysicsLinearVelocity(ComputeReverseFlightVelocity(AimOrigin, AimDir, DeltaTime));
+}
 
-		// Soft homing: bias aim direction toward nearest valid target in cone
-		if (bEnableReverseLaunchHoming && HomingStrength > 0.0f)
+void AEMFPhysicsProp::UpdateHeldByHandle(float DeltaTime)
+{
+	const AEMFChannelingPlateActor* Plate = CapturingPlate.Get();
+	if (!Plate || !PropMesh || !PropMesh->IsSimulatingPhysics())
+	{
+		return;
+	}
+
+	// Range is still what decides whether the hold survives, exactly as before — a prop dragged
+	// beyond what the charges can hold falls. What is gone is the old wall check: a wall between
+	// hand and prop used to drop it after half a second, and now the prop is expected to be stopped
+	// by that wall and pulled around it, with the holder's stuck timer resolving the hopeless cases.
+	const float EffectiveCaptureRange = GetCaptureRangeForCharacter(GetSpendingCharacter());
+	const float Distance = FVector::Dist(GetActorLocation(), Plate->GetActorLocation());
+
+	float CaptureStrength = 0.0f;
+	if (Distance < EffectiveCaptureRange)
+	{
+		const float T = Distance / EffectiveCaptureRange;
+		CaptureStrength = 1.0f - T * T * (3.0f - 2.0f * T);
+	}
+
+	// Losing the prop is for a hold that is failing, not for one that is still working. A prop being
+	// reeled in from the far edge of range starts below CaptureMinStrength by definition, and the
+	// old timer fired mid-pull: the prop dropped, snapped back to the server's copy and was
+	// immediately re-captured, which is the "pulled in, jerked back, pulled again" double grab.
+	// While the gap is closing the hold is doing its job, however weak the number looks.
+	const bool bClosing = Distance < PreviousHoldDistance - 1.0f;
+	PreviousHoldDistance = Distance;
+
+	if (CaptureStrength < CaptureMinStrength && !bClosing)
+	{
+		WeakCaptureTimer += DeltaTime;
+		if (WeakCaptureTimer >= CaptureReleaseTimeout)
 		{
-			if (AShooterNPC* Target = FindHomingTarget(PropPos, AimDir))
-			{
-				const FVector DirToTarget = (Target->GetActorLocation() - PropPos).GetSafeNormal();
-				const float RampAlpha = HomingRampUpTime > 0.0f
-					? FMath::Clamp(ReverseLaunchElapsed / HomingRampUpTime, 0.0f, 1.0f)
-					: 1.0f;
-				AimDir = FMath::Lerp(AimDir, DirToTarget, HomingStrength * RampAlpha).GetSafeNormal();
-			}
+			ReleasedFromCapture();
+			return;
 		}
-
-		// Project prop position onto aim line
-		const FVector ToTarget = PropPos - AimOrigin;
-		const float ForwardDist = FVector::DotProduct(ToTarget, AimDir);
-		const FVector NearestOnLine = AimOrigin + ForwardDist * AimDir;
-		const FVector LateralOffset = PropPos - NearestOnLine;
-
-		// Desired velocity: forward at constant speed + lateral convergence toward aim line
-		const FVector DesiredVelocity = AimDir * ReverseLaunchSpeed
-			- LateralOffset * ReverseLaunchConvergenceRate;
-
-		// Direct velocity set: bypasses gravity/physics artifacts, collision detection still works
-		PropMesh->SetPhysicsLinearVelocity(DesiredVelocity);
 	}
 	else
 	{
-		// Pull-in phase: smooth interp to plate center before switching to spring/damping
-		if (!bReverseLaunchInitialized)
+		WeakCaptureTimer = 0.0f;
+	}
+
+	// The holder is simulating this prop, and the server is not: tell it where the prop ended up.
+	if (bLocallyHeld)
+	{
+		if (AShooterCharacter* Spender = GetSpendingCharacter())
 		{
-			const float DistToPlate = FVector::Dist(Position, PlatePos);
-			if (DistToPlate < CapturePullInSnapDistance)
-			{
-				// Close enough — snap and switch to spring/damping
-				bReverseLaunchInitialized = true;
-				PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
-				SetActorLocation(PlatePos);
-			}
-			else
-			{
-				// Exponential ease toward plate center
-				const FVector NewPos = FMath::VInterpTo(Position, PlatePos, DeltaTime, CapturePullInInterpSpeed);
-				SetActorLocation(NewPos);
-				PropMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
-				return;
-			}
-		}
-
-		// Normal capture: damp all relative velocity
-		const float DampingFactor = 1.0f - FMath::Exp(-ViscosityCoefficient * CaptureStrength * DeltaTime);
-		const FVector DampingForce = -RelativeVelocity * DampingFactor * PhysMass / FMath::Max(DeltaTime, SMALL_NUMBER);
-
-		PropMesh->AddForce(DampingForce);
-
-		// Gravity counteraction
-		if (bCounterGravityWhenCaptured)
-		{
-			const float GravityZ = GetWorld()->GetGravityZ();
-			const float CounterForceZ = -GravityZ * GravityCounterStrength * CaptureStrength * PhysMass;
-			PropMesh->AddForce(FVector(0.0f, 0.0f, CounterForceZ));
-		}
-
-		// Hooke spring: force proportional to distance (stronger pull when far, gentle near center)
-		if (CaptureSpringStiffness > 0.0f)
-		{
-			const FVector ToPlate = PlatePos - Position;
-			const FVector SpringForce = ToPlate * CaptureSpringStiffness * CaptureStrength * PhysMass;
-			PropMesh->AddForce(SpringForce);
+			Spender->Server_UpdateHeldPropTransform(this, GetActorLocation(), GetActorRotation(),
+				PropMesh->GetPhysicsLinearVelocity());
 		}
 	}
+}
+
+bool AEMFPhysicsProp::GetReverseFlightAimSource(FVector& OutOrigin, FVector& OutDirection) const
+{
+	AShooterCharacter* Thrower = GetSpendingCharacter();
+	if (!Thrower)
+	{
+		return false;
+	}
+
+	// The camera, not the pawn's nominal eye height. The throw converges onto the line from the eye
+	// through the crosshair, so an origin a few centimetres off bends the whole trajectory — this is
+	// the same camera the old code read, just asked of the thrower instead of of player zero.
+	if (const APlayerController* PC = Cast<APlayerController>(Thrower->GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			OutOrigin = PC->PlayerCameraManager->GetCameraLocation();
+			OutDirection = PC->PlayerCameraManager->GetCameraRotation().Vector();
+			return true;
+		}
+	}
+
+	FRotator EyeRotation;
+	Thrower->GetActorEyesViewPoint(OutOrigin, EyeRotation);
+	OutDirection = EyeRotation.Vector();
+	return true;
+}
+
+FVector AEMFPhysicsProp::ComputeReverseFlightVelocity(const FVector& AimOrigin, const FVector& InAimDir, float DeltaTime)
+{
+	ReverseLaunchElapsed += DeltaTime;
+
+	const FVector PropPos = GetActorLocation();
+	FVector AimDir = InAimDir;
+
+	// Soft homing: bias aim direction toward nearest valid target in cone
+	if (bEnableReverseLaunchHoming && HomingStrength > 0.0f)
+	{
+		if (AShooterNPC* Target = FindHomingTarget(PropPos, AimDir))
+		{
+			const FVector DirToTarget = (Target->GetActorLocation() - PropPos).GetSafeNormal();
+			const float RampAlpha = HomingRampUpTime > 0.0f
+				? FMath::Clamp(ReverseLaunchElapsed / HomingRampUpTime, 0.0f, 1.0f)
+				: 1.0f;
+			AimDir = FMath::Lerp(AimDir, DirToTarget, HomingStrength * RampAlpha).GetSafeNormal();
+		}
+	}
+
+	// Project prop position onto aim line
+	const FVector ToTarget = PropPos - AimOrigin;
+	const float ForwardDist = FVector::DotProduct(ToTarget, AimDir);
+	const FVector NearestOnLine = AimOrigin + ForwardDist * AimDir;
+	const FVector LateralOffset = PropPos - NearestOnLine;
+
+	// Forward at constant speed + lateral convergence toward the aim line
+	return AimDir * ReverseLaunchSpeed - LateralOffset * ReverseLaunchConvergenceRate;
+}
+
+void AEMFPhysicsProp::BeginRemoteLaunch(AShooterCharacter* Thrower)
+{
+	if (!Thrower || !PropMesh)
+	{
+		return;
+	}
+
+	SetSpendingCharacter(Thrower);
+
+	// The same launch state the plate-driven path sets up on its first reverse tick. There is no
+	// plate here to trigger that, so the throw is armed directly.
+	bIsInReverseFlight = true;
+	bHasExploded = false;
+	ReverseLaunchElapsed = 0.0f;
+	bAirMailEligibleFlight = true;
+	bAirMailBounceConsumed = false;
+
+	// The range the thrower reported when it grabbed this. Deriving it here instead gave zero, because
+	// range is a product of the player's charge and the server does not have a client's charge: the
+	// throw came out as nothing but the sideways convergence term, which is what a "small shove in a
+	// random direction" is made of.
+	const float ThrowRange = HeldCaptureRange > 0.0f ? HeldCaptureRange : GetCaptureRangeForCharacter(Thrower);
+	const float LaunchDistance = ThrowRange * ReverseLaunchDistanceMultiplier;
+	ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
+
+	// The server flies it from here, so it needs the physics body back that BeginRemoteHold took
+	// away. Collision stays Overlap with pawns until the prop lands, same as while it was held.
+	ApplyPropPhysicsSimulation(true);
+
+	if (ReverseLaunchSpinSpeed > 0.0f)
+	{
+		PropMesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * ReverseLaunchSpinSpeed);
+	}
+}
+
+void AEMFPhysicsProp::TickRemoteLaunchFlight(float DeltaTime)
+{
+	if (!PropMesh || !PropMesh->IsSimulatingPhysics())
+	{
+		return;
+	}
+
+	FVector AimOrigin;
+	FVector AimDir;
+	if (!GetReverseFlightAimSource(AimOrigin, AimDir))
+	{
+		// Thrower is gone. Stop steering and let the prop finish ballistically rather than freezing.
+		bIsInReverseFlight = false;
+		return;
+	}
+
+	PropMesh->SetPhysicsLinearVelocity(ComputeReverseFlightVelocity(AimOrigin, AimDir, DeltaTime));
 }
 
 // ==================== Collision Callbacks ====================
@@ -833,6 +1181,34 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
+	// A prop thrown by a remote client has landed. This is the end of that throw, and it has to be
+	// resolved here rather than on a timer: hitting something is what "the throw is over" means, and
+	// this runs before every early exit below so a prop that lands without exploding still frees up.
+	// Whatever the impact does next (damage, detonation) is unaffected — it is decided further down,
+	// on this same authority, exactly as it always was.
+	//
+	// Only while actually in flight. A prop being carried scrapes the floor and the walls constantly,
+	// and without this gate the first of those contacts ended the hold server-side while the player
+	// was still holding it — the throw that followed was then rejected as coming from someone who
+	// was not holding anything.
+	if (HoldingCharacter && bIsInReverseFlight && HasAuthority())
+	{
+		HoldingCharacter = nullptr;
+		if (PropMesh)
+		{
+			PropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		}
+	}
+
+	// Everything past this point changes the world: damage, stun, knockback, detonation, the Air Mail
+	// bounce. A client simulates the prop it is carrying, so this callback fires there too now, and
+	// each of those would otherwise happen on that one machine and nowhere else. Same rule as
+	// AShooterProjectile::CanAffectWorld: the impact is resolved where it can be resolved once.
+	if (!HasAuthority())
+	{
+		return;
+	}
+
 	// Air Mail state resolution — BEFORE the slow-prop early exit so a gently landing
 	// returned prop still clears its tag. A kicked prop resolves on this impact (the
 	// weak-impact path below carries the primed KickDamage); an un-kicked returning
@@ -1372,11 +1748,24 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 		ReleasedFromCapture();
 	}
 
-	// Spawn GC destruction if assigned
+	// Spawn GC destruction if assigned. Every machine has to run it: it is what hides the intact
+	// mesh as well as what makes the pieces, so skipping it on a client leaves the prop standing.
 	if (PropGeometryCollection)
 	{
-		SpawnDestructionGC(GetActorLocation());
+		if (HasAuthority())
+		{
+			Multicast_PlayDeathVisuals(GetActorLocation());
+		}
+		else
+		{
+			SpawnDestructionGC(GetActorLocation());
+		}
 	}
+}
+
+void AEMFPhysicsProp::Multicast_PlayDeathVisuals_Implementation(FVector DestructionOrigin)
+{
+	SpawnDestructionGC(DestructionOrigin);
 }
 
 // ==================== Geometry Collection Destruction ====================
@@ -1520,6 +1909,16 @@ void AEMFPhysicsProp::FreezeGibs()
 void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, float VFXScaleMultiplier)
 {
 	if (bHasExploded || bIsDead)
+	{
+		return;
+	}
+
+	// An explosion damages, launches, stuns and destroys — all of it world state, none of it a
+	// client's to decide. This used to be true by accident, because only the server ever simulated
+	// a prop and so only the server's collisions fired. A client now simulates the prop it carries,
+	// so the accident is gone and the rule has to be written down. Everyone still SEES the blast:
+	// the authority multicasts the effects at the end of this function.
+	if (!HasAuthority())
 	{
 		return;
 	}
@@ -1834,20 +2233,10 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 		}
 	}
 
-	// VFX
-	if (ExplosionVFX)
-	{
-		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(), ExplosionVFX, ExplosionLocation,
-			FRotator::ZeroRotator, FVector(FinalVFXScale),
-			true, true, ENCPoolMethod::None);
-	}
-
-	// SFX
-	if (ExplosionSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, ExplosionSound, ExplosionLocation);
-	}
+	// VFX and SFX, for everyone. Explode only runs on the authority, so spawning these directly here
+	// showed the blast to the host and left every client watching the prop vanish in silence. The
+	// multicast plays them on the server too, so this is still one call.
+	Multicast_PlayExplosionEffects(ExplosionLocation, FinalVFXScale);
 
 	if (bLogEMForces)
 	{
@@ -2025,6 +2414,13 @@ void AEMFPhysicsProp::SetCharge(float NewCharge)
 	FEMSourceDescription Desc = FieldComponent->GetSourceDescription();
 	Desc.PointChargeParams.Charge = NewCharge;
 	FieldComponent->SetSourceDescription(Desc);
+
+	// Push it out to everyone. Guarded so the OnRep that calls back in here on a client cannot
+	// bounce its own value back.
+	if (HasAuthority())
+	{
+		ReplicatedCharge = NewCharge;
+	}
 
 	// Enable physics and tick when prop transitions from uncharged to charged.
 	// Static-mode subclasses (e.g. ATurretBuilding) opt out — they keep PropMesh kinematic
