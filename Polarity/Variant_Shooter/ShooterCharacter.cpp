@@ -567,6 +567,54 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 		return;
 	}
 
+	// ==================== Validation ====================
+	//
+	// The client still does the tracing, because that is what makes a shot feel instant, but the
+	// server no longer takes the result on faith. These checks are deliberately loose: every one of
+	// them either clamps or rejects something that cannot happen in normal play, so a laggy but
+	// honest hit is never lost. Rejections are logged under [NET_DEBUG].
+	//
+	// Not checked here, on purpose:
+	//  - Ammo. CurrentBullets is not replicated, so the server's copy never decrements for a client's
+	//    shot and comparing against it would reject everything.
+	//  - Line of sight. Without rewinding the target to where it stood when the client fired, a
+	//    target that stepped behind cover during the round trip looks like a wallhack. That check
+	//    belongs with lag compensation, not here.
+	//  - Rate of fire. A single trigger pull reports once per *hit*, so pellets and pierced targets
+	//    arrive as several calls in one frame; limiting per call would drop legitimate ones.
+
+	// A shooter can only be hurt by their own weapon, and only ever hurt someone else with it.
+	if (HitActor == this)
+	{
+		return;
+	}
+
+	if (!Weapon || !OwnedWeapons.Contains(Weapon))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported damage with a weapon it does not own (%s) - rejected"),
+			*GetName(), *GetNameSafe(Weapon));
+		return;
+	}
+
+	// Nothing can be shot from further away than the weapon reaches. The margin covers the distance
+	// both parties travelled during the round trip.
+	static constexpr float RangeMarginCm = 500.0f;
+	const float DistanceToTarget = FVector::Dist(GetActorLocation(), HitActor->GetActorLocation());
+	if (DistanceToTarget > Weapon->GetMaxHitscanRange() + RangeMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a hit at %.0f cm, weapon reaches %.0f - rejected"),
+			*GetName(), DistanceToTarget, Weapon->GetMaxHitscanRange());
+		return;
+	}
+
+	const float DamageCeiling = Weapon->GetMaxReportedSingleHitDamage();
+	if (Damage > DamageCeiling)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported %.0f damage, ceiling for %s is %.0f - clamped"),
+			*GetName(), Damage, *Weapon->GetName(), DamageCeiling);
+		Damage = DamageCeiling;
+	}
+
 	FPointDamageEvent DamageEvent;
 	DamageEvent.DamageTypeClass = DamageTypeClass;
 	if (!DamageEvent.DamageTypeClass)

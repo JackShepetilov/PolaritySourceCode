@@ -59,6 +59,15 @@ void AShooterWeapon::Multicast_PlayFireEffects_Implementation()
 	}
 }
 
+float AShooterWeapon::GetMaxReportedSingleHitDamage() const
+{
+	// Projectile weapons report through the projectile, which the server owns, so the hitscan number
+	// is the only one a client ever hands over. A weapon with no hitscan damage configured still
+	// needs a non-zero ceiling or every reported hit would clamp to nothing.
+	const float BaseDamage = HitscanDamage > 0.0f ? HitscanDamage : 1.0f;
+	return BaseDamage * FMath::Max(HeadshotMultiplier, 1.0f) * FMath::Max(MaxReportedDamageMultiplier, 1.0f);
+}
+
 float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, const FDamageEvent& DamageEvent)
 {
 	if (!IsValid(HitActor) || FinalDamage <= 0.0f)

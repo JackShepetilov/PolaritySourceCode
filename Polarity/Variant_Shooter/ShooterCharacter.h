@@ -992,8 +992,12 @@ public:
 		AShooterWeapon* Weapon);
 
 	/** Client to server half of DealDamage. Reliable: dropping a hit loses a kill.
-	 *  Unvalidated on purpose. The handoff decided this is a coop PvE game where players trust
-	 *  each other, so the server takes the client's word for the hit instead of re-simulating it. */
+	 *
+	 *  The client still traces and computes the damage, because re-simulating it on the server would
+	 *  cost a round trip of feel, but the server sanity-checks what arrives: the weapon has to belong
+	 *  to the shooter, the target has to be within the weapon's reach, and the number is clamped to
+	 *  what that weapon can possibly do. See the implementation for what is deliberately not checked
+	 *  and why. */
 	UFUNCTION(Server, Reliable)
 	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
 		AShooterWeapon* Weapon);

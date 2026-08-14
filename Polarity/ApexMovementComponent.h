@@ -65,6 +65,68 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnJumpPerformed, bool, bIsDoubleJum
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPreVelocityUpdate, float, FVector&);
 
 /**
+ * What this character decided to do during one simulated move.
+ *
+ * The engine gives a movement component four spare bits inside the move it already sends every
+ * frame (FSavedMove_Character::FLAG_Custom_0..3). Sprint, slide, wallrun and slide-on-land filled
+ * all four, and dash and mantle had nowhere to go, so this project sends its own byte instead. It
+ * costs one byte per move and only when something is actually happening, because zero is omitted
+ * from the stream entirely.
+ *
+ * Each entry is a DECISION the owning client made, never a measurement it took. The server re-derives
+ * every number for itself: told "wall running", it runs its own trace and finds its own wall, and if
+ * it finds none, no wallrun happens. Geometry from a client is not trusted.
+ */
+enum class EPolarityMoveFlag : uint8
+{
+	None             = 0,
+	WantsToSprint    = 1 << 0,
+	Sliding          = 1 << 1,
+	WallRunning      = 1 << 2,
+	/** Crouch was pressed in the air, so landing turns into a slide instead of a stop. */
+	WantsSlideOnLand = 1 << 3,
+	GroundDashing    = 1 << 4,
+	AirDashing       = 1 << 5,
+	/** An air dash that is being steered mid-flight rather than flying straight. */
+	AirDashRedirect  = 1 << 6,
+	Mantling         = 1 << 7,
+};
+ENUM_CLASS_FLAGS(EPolarityMoveFlag);
+
+/**
+ * One client move on the wire, with our byte appended to what the engine already sends.
+ *
+ * @see UApexMovementComponent::ServerMove_PerformMovement, which unpacks it on the server.
+ */
+struct FCharacterNetworkMoveData_Polarity : public FCharacterNetworkMoveData
+{
+	typedef FCharacterNetworkMoveData Super;
+
+	uint8 PolarityFlags = 0;
+
+	virtual void ClientFillNetworkMoveData(const FSavedMove_Character& ClientMove, ENetworkMoveType MoveType) override;
+	virtual bool Serialize(UCharacterMovementComponent& CharacterMovement, FArchive& Ar,
+		UPackageMap* PackageMap, ENetworkMoveType MoveType) override;
+};
+
+/**
+ * Holds the three moves the engine sends together: the newest one, the one before it when two are
+ * combined, and an old unacknowledged one being resent. All three have to be our type, which is the
+ * only reason this struct exists.
+ */
+struct FCharacterNetworkMoveDataContainer_Polarity : public FCharacterNetworkMoveDataContainer
+{
+	FCharacterNetworkMoveDataContainer_Polarity()
+	{
+		NewMoveData     = &PolarityMoveData[0];
+		PendingMoveData = &PolarityMoveData[1];
+		OldMoveData     = &PolarityMoveData[2];
+	}
+
+	FCharacterNetworkMoveData_Polarity PolarityMoveData[3];
+};
+
+/**
  * Titanfall 2 / Apex Legends style movement component.
  * Features: Slide with proper friction, WallRun (now slide-style), WallBounce, Mantle, Air Dash, Double Jump
  */
@@ -139,14 +201,17 @@ public:
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsSliding = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	/** Replicated for the same reason bIsSliding is: the owner and the server agree through the move,
+	 *  but a machine that only watches this character learns nothing from a move it never receives,
+	 *  and its anim blueprint would keep a dashing teammate in a plain fall. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsMantling = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsAirDashing = false;
 
 	/** True while the short ground dash speed-maintenance window is active. */
-	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsGroundDashing = false;
 
 	/** Replicated for the same reason as bIsSliding: observers need it for the pose. */
@@ -241,10 +306,45 @@ public:
 	// ==================== Network prediction ====================
 	// Sprint changes max speed, and max speed decides where the character ends up, so the server
 	// has to know about it or it will replay the client's moves slower than the client did and
-	// yank it back. The intent therefore rides along inside the saved move rather than being
-	// replicated after the fact.
+	// yank it back. Every such decision therefore rides along inside the saved move rather than
+	// being replicated after the fact. See EPolarityMoveFlag for what travels and why.
 
-	virtual void UpdateFromCompressedFlags(uint8 Flags) override;
+	/** Reads our byte off the wire and applies it, then lets the engine run the move.
+	 *  Server side only: a replaying client restores the same state through PrepMoveFor instead. */
+	virtual void ServerMove_PerformMovement(const FCharacterNetworkMoveData& MoveData) override;
+
+	/** Where the stashed byte is actually applied, with this move's acceleration already in place. */
+	virtual void MoveAutonomous(float ClientTimeStamp, float DeltaTime, uint8 CompressedFlags,
+		const FVector& NewAccel) override;
+
+	/** The byte from the move currently being unpacked. Server side only, valid for the length of
+	 *  one ServerMove_PerformMovement call. */
+	uint8 PendingPolarityFlags = 0;
+
+	/** What this character is doing right now, as the byte that goes on the wire. */
+	uint8 PackPolarityMoveFlags() const;
+
+	/** Turns a received byte into actual state. Assignment for the plain intents, and real entry and
+	 *  exit calls for anything that has to set up more than a bool: a side that only flipped
+	 *  bIsSliding kept braking normally and finished the move somewhere else, which in game read as
+	 *  "sliding works for one player and stutters for the other". Wallrun, dash and mantle are the
+	 *  same shape, so they go through their own Start/End here too. The geometry is re-derived
+	 *  locally, never taken from the client. */
+	void ApplyPolarityMoveFlags(uint8 Flags);
+
+	/** The replay counterpart: plain assignment, no entry or exit calls.
+	 *
+	 *  A replay re-runs a move that was already simulated once from exactly this state, so calling
+	 *  StartSlide and friends again would apply their entry effects a second time on top of a
+	 *  velocity that already contains them. */
+	void ApplyPolarityMoveFlagsForReplay(uint8 Flags);
+
+	/** The character's own mechanics that write velocity before the move is integrated: mantle,
+	 *  wallrun, dash and the wall checks feeding them. The engine calls this inside PerformMovement,
+	 *  which is what makes them part of the simulation the server replays. It is also where the
+	 *  engine itself resolves crouching. */
+	virtual void UpdateCharacterStateBeforeMovement(float DeltaSeconds) override;
+
 	virtual class FNetworkPredictionData_Client* GetPredictionData_Client() const override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float GetMaxSpeed() const override;
@@ -555,6 +655,11 @@ protected:
 	 *  the component back the way it was before replaying one. */
 	friend class FSavedMove_Polarity;
 
+	/** Storage the engine packs client moves into. It has to outlive every send, which is why it is
+	 *  a member here rather than a local; the constructor hands its address to the engine with
+	 *  SetNetworkMoveDataContainer and nothing else ever touches it. */
+	FCharacterNetworkMoveDataContainer_Polarity PolarityMoveDataContainer;
+
 	// Velocity Modifiers
 	UPROPERTY()
 	TArray<TScriptInterface<IVelocityModifier>> VelocityModifiers;
@@ -718,32 +823,16 @@ class POLARITY_API FSavedMove_Polarity : public FSavedMove_Character
 public:
 	typedef FSavedMove_Character Super;
 
-	/** The sprint decision used for this move, already vetoed by firing or aiming if it was.
-	 *  The raw keypress deliberately does not travel: the server cannot see the trigger being
-	 *  pulled, so it has to be told the answer rather than the question. */
-	uint8 bSavedWantsToSprint : 1;
+	/** Everything the character decided to do during this move, as the byte that goes on the wire.
+	 *  @see EPolarityMoveFlag */
+	uint8 SavedPolarityFlags;
 
-	/** Sliding changes both speed and capsule height, so a server that does not know about it ends
-	 *  the move somewhere else entirely. */
-	uint8 bSavedIsSliding : 1;
-
-	/** Wall running replaces gravity and steering wholesale. Only the decision travels: the wall
-	 *  normal and direction are geometry, and the server re-derives them from its own collision
-	 *  rather than trusting numbers from a client. */
-	uint8 bSavedIsWallRunning : 1;
-
-	/** Crouch was pressed in the air, so landing turns into a slide instead of a stop. ProcessLanded
-	 *  already runs inside the simulation on both sides, but it reads this intent, and the intent is
-	 *  set from input: without the bit the server landed a client normally while the client slid,
-	 *  and corrected it back. */
-	uint8 bSavedWantsSlideOnLand : 1;
-
-	/** Predicted state below this line. It is NOT packed into the compressed flags and never goes
-	 *  to the server: the server derives its own copy by running the same slides and jumps. These
-	 *  exist so that a *replay* on the client starts from the same numbers the move was first
-	 *  simulated with. Without them every correction re-ran DoJump with a fatigue counter that had
-	 *  already been incremented and a cooldown that had kept ticking, so the slide jump came out at
-	 *  a different strength each time and the client got yanked back. */
+	/** Predicted state below this line. It is NOT sent to the server: the server derives its own
+	 *  copy by running the same slides and jumps. These exist so that a *replay* on the client starts
+	 *  from the same numbers the move was first simulated with. Without them every correction re-ran
+	 *  DoJump with a fatigue counter that had already been incremented and a cooldown that had kept
+	 *  ticking, so the slide jump came out at a different strength each time and the client got
+	 *  yanked back. */
 	uint8 bSavedJumpHeld : 1;
 	int32 SavedSlideFatigueCounter;
 	float SavedSlideFatigueDecayTimer;
@@ -755,7 +844,6 @@ public:
 	FSavedMove_Polarity();
 
 	virtual void Clear() override;
-	virtual uint8 GetCompressedFlags() const override;
 	virtual bool CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const override;
 	virtual void SetMoveFor(ACharacter* Character, float InDeltaTime, FVector const& NewAccel,
 		class FNetworkPredictionData_Client_Character& ClientData) override;

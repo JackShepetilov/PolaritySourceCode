@@ -138,6 +138,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
 	TSubclassOf<UDamageType> HitscanDamageType;
 
+	/** How far above the headshot number one reported hit is still allowed to go.
+	 *
+	 *  A client computes its own damage and tells the server the result, so the server needs a number
+	 *  to compare against. Charge weapons scale their shot by however much charge was spent, and
+	 *  upgrades scale it further, so this is deliberately loose: it exists to catch a nonsense value,
+	 *  not to second-guess the design. Anything above the ceiling is clamped, never dropped, so a
+	 *  legitimate edge case costs a little damage instead of a whole hit. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Validation", meta = (ClampMin = "1.0"))
+	float MaxReportedDamageMultiplier = 4.0f;
+
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan", ClampMin = "0"))
 	float HitscanPhysicsForce = 100.0f;
 
@@ -792,6 +803,16 @@ public:
 	/** Lands GripSocket on the socket WeaponMesh is attached to. Does nothing if there is no such
 	 *  socket, in which case the mesh keeps hanging by its own origin. Logs under [GRIP_DEBUG]. */
 	static void AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, const FName GripSocket);
+
+	// ==================== Server-side validation ====================
+
+	/** The most one hit from this weapon may legitimately be worth. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Validation")
+	float GetMaxReportedSingleHitDamage() const;
+
+	/** How far this weapon reaches. Read by the server when it checks a reported hit. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Validation")
+	float GetMaxHitscanRange() const { return MaxHitscanRange; }
 
 	/** Writes LeftHandIKTransform and LeftHandIKAlpha on an anim instance, looked up by name. Any
 	 *  anim blueprint that declares those two picks it up and anything else is left untouched, which

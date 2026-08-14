@@ -19,6 +19,10 @@ UApexMovementComponent::UApexMovementComponent()
 	// the server and observers cannot tell a sliding character from a standing one.
 	SetIsReplicatedByDefault(true);
 
+	// Send our own move format instead of the stock one. This is what carries EPolarityMoveFlag; the
+	// container must live as long as the component, hence the member.
+	SetNetworkMoveDataContainer(PolarityMoveDataContainer);
+
 	NavAgentProps.bCanCrouch = true;
 	bCanWalkOffLedgesWhenCrouching = true;
 	SetCrouchedHalfHeight(50.0f);
@@ -112,34 +116,9 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	// OnMovementUpdated: they gate slide entry and scale the slide jump, so they have to advance
 	// with the simulated move and rewind with it, or the client replays a jump with numbers the
 	// original simulation never had and the server hands back a different velocity.
-	if (AirDashCooldownRemaining > 0.0f)
-	{
-		const float PreviousCooldown = AirDashCooldownRemaining;
-		AirDashCooldownRemaining -= DeltaTime;
-		if (PreviousCooldown > 0.0f && AirDashCooldownRemaining <= 0.0f)
-		{
-			AirDashCooldownRemaining = 0.0f;
-			OnDashStateChanged.Broadcast();
-		}
-	}
-	if (GroundDashCooldownRemaining > 0.0f)
-	{
-		const float PreviousCooldown = GroundDashCooldownRemaining;
-		GroundDashCooldownRemaining -= DeltaTime;
-		if (PreviousCooldown > 0.0f && GroundDashCooldownRemaining <= 0.0f)
-		{
-			GroundDashCooldownRemaining = 0.0f;
-			OnDashStateChanged.Broadcast();
-		}
-	}
-	if (WallRunSameWallCooldown > 0.0f)
-	{
-		WallRunSameWallCooldown -= DeltaTime;
-	}
-	if (WallBounceCooldownRemaining > 0.0f)
-	{
-		WallBounceCooldownRemaining -= DeltaTime;
-	}
+	// Every cooldown that gates a movement decision moved into OnMovementUpdated with the slide ones.
+	// A tick-driven timer counts at the local frame rate and does not rewind during a replay, so the
+	// two ends end up gating different frames and the dash a client saw never happens on the server.
 
 	// The capsule is no longer resized here. Crouching goes through bWantsToCrouch, and the engine
 	// swaps the capsule in one step with a fit check and a matching mesh offset. Resizing it every
@@ -150,56 +129,10 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	// The *look* of a smooth crouch is a camera and mesh matter, and it already lives in
 	// APolarityCharacter::AccumulateFirstPersonPose (CrouchSlideProgress, CrouchCameraOffset).
 
-	// Pre-tick: Update mechanics that need to run BEFORE physics
-	if (bIsMantling)
-	{
-		UpdateMantle(DeltaTime);
-	}
-	else if (bIsWallRunning)
-	{
-		UpdateWallRun(DeltaTime);
-	}
-	else if (bIsGroundDashing)
-	{
-		UpdateGroundDash(DeltaTime);
-	}
-	else if (bIsAirDashing)
-	{
-		if (bIsRedirecting)
-		{
-			UpdateAirDashRedirect(DeltaTime);
-		}
-		else
-		{
-			UpdateAirDash(DeltaTime);
-		}
-	}
-	else if (IsFalling() && !bIsSliding)
-	{
-#if WITH_EDITOR
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(9996, 0.0f, FColor::Orange,
-				TEXT("IN FALLING BLOCK - ApplyAirStrafe will be called"));
-		}
-#endif
-		// Check wall bounce - if forward is held OR in crouch state
-		if (IsForwardHeld() || bIsCrouchedInAir)
-		{
-			CheckForWallBounce();
-		}
-
-		// If not bounced, check for wall run
-		if (!bIsWallRunning)
-		{
-			CheckForWallRun();
-		}
-
-		// ApplyAirStrafe used to be called here. It moved into PhysFalling: from the tick it ran
-		// outside the movement simulation, so the server never reproduced it while replaying a
-		// client's move and corrected the client back every frame. Air control therefore worked
-		// only where the tick and the simulation are the same machine — the listen server host.
-	}
+	// The pre-physics mechanics block moved into UpdateCharacterStateBeforeMovement, which the engine
+	// calls from inside PerformMovement. Everything in it writes Velocity, and from the tick that
+	// happened on one machine only: the server replayed the client's move without it and corrected
+	// the client back every frame, which is why these read as "works on the host, broken elsewhere".
 
 	// Jump hold moved into PhysFalling with the air strafe: it writes Velocity.Z, so from the tick
 	// it produced a taller jump on the machine that pressed the key than on the one that replayed
@@ -453,6 +386,9 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 		EndWallRun(EWallRunEndReason::LostWall);
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s Landed: wantsSlideOnLand=%d preLandSpeed=%.0f fall=%.0f"),
+		(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), bWantsSlideOnLand ? 1 : 0, PreLandSpeed, LastFallVelocity);
+
 	if (bWantsSlideOnLand && PreLandSpeed > 0.0f)
 	{
 		Velocity.X = PreLandHorizontalVelocity.X;
@@ -671,45 +607,178 @@ void UApexMovementComponent::StopSprint()
 	bSprintKeyHeld = false;
 }
 
-void UApexMovementComponent::UpdateFromCompressedFlags(uint8 Flags)
+uint8 UApexMovementComponent::PackPolarityMoveFlags() const
 {
-	Super::UpdateFromCompressedFlags(Flags);
-
-	// Server side, and on the owning client while it replays its own pending moves. Assigned
-	// straight across with no second-guessing: the bits already carry the client's final answer,
-	// suppression included, and re-deriving them here from state the server does not have is
-	// exactly how these two ends drift apart.
-	bWantsToSprint = (Flags & FSavedMove_Character::FLAG_Custom_0) != 0;
-	bIsWallRunning = (Flags & FSavedMove_Character::FLAG_Custom_2) != 0;
-
-	// Intent only. ProcessLanded turns it into the actual slide, on both sides, from inside the
-	// simulation, so nothing else about landing has to travel.
-	bWantsSlideOnLand = (Flags & FSavedMove_Character::FLAG_Custom_3) != 0;
-
-	// Slide needs the whole entry, not just the bool. StartSlide zeroes ground friction and
-	// braking deceleration, picks the slide direction and applies the entry boost; a side that
-	// only flipped the flag kept braking the character normally, finished the move somewhere else
-	// and got corrected. In game that reads as "sliding works for one player and stutters for the
-	// other". Driving the real entry/exit from the flag is the same thing the engine does with
-	// bWantsToCrouch and Crouch()/UnCrouch().
-	const bool bFlagSliding = (Flags & FSavedMove_Character::FLAG_Custom_1) != 0;
-	if (bFlagSliding != bIsSliding)
+	uint8 Flags = 0;
+	auto Set = [&Flags](bool bCondition, EPolarityMoveFlag Flag)
 	{
-		if (bFlagSliding)
+		if (bCondition)
 		{
-			StartSlide();
+			Flags |= static_cast<uint8>(Flag);
 		}
-		else
-		{
-			EndSlide();
-		}
-	}
+	};
 
+	Set(bWantsToSprint,     EPolarityMoveFlag::WantsToSprint);
+	Set(bIsSliding,         EPolarityMoveFlag::Sliding);
+	Set(bIsWallRunning,     EPolarityMoveFlag::WallRunning);
+	Set(bWantsSlideOnLand,  EPolarityMoveFlag::WantsSlideOnLand);
+	Set(bIsGroundDashing,   EPolarityMoveFlag::GroundDashing);
+	Set(bIsAirDashing,      EPolarityMoveFlag::AirDashing);
+	Set(bIsRedirecting,     EPolarityMoveFlag::AirDashRedirect);
+	Set(bIsMantling,        EPolarityMoveFlag::Mantling);
+
+	return Flags;
+}
+
+void UApexMovementComponent::ApplyPolarityMoveFlags(uint8 Flags)
+{
+	auto Has = [Flags](EPolarityMoveFlag Flag)
+	{
+		return (Flags & static_cast<uint8>(Flag)) != 0;
+	};
+
+	// Plain intents: assigned straight across with no second-guessing. The byte already carries the
+	// client's final answer, veto included, and re-deriving it here from state the server does not
+	// have is exactly how the two ends drift apart.
+	bWantsToSprint    = Has(EPolarityMoveFlag::WantsToSprint);
+	bWantsSlideOnLand = Has(EPolarityMoveFlag::WantsSlideOnLand);
+	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
+
+	// States that need a real entry. Each Start* sets up friction, gravity, direction and speed;
+	// a side that only flipped the bool kept simulating normally and finished the move somewhere
+	// else, which is what "works for one player and stutters for the other" looks like from inside.
+	const bool bWantsSlide = Has(EPolarityMoveFlag::Sliding);
+	if (bWantsSlide != bIsSliding)
+	{
+		if (bWantsSlide) { StartSlide(); } else { EndSlide(); }
+	}
 	// The client already made this call with state this machine does not have (its own cooldowns,
 	// its own ground check). If CanSlide() disagreed inside StartSlide, the client's answer still
 	// wins, otherwise the two would simulate different moves.
-	bIsSliding = bFlagSliding;
+	bIsSliding = bWantsSlide;
+
+	// Wallrun is the one case where the client's answer does NOT simply win. Only the decision
+	// travels; the wall itself is geometry, so this side runs its own trace and uses its own normal
+	// and direction. If it finds no wall, no wallrun happens here and the client gets corrected off
+	// it, which is the correct outcome: a client cannot invent a wall.
+	const bool bWantsWallRun = Has(EPolarityMoveFlag::WallRunning);
+	if (bWantsWallRun && !bIsWallRunning)
+	{
+		CheckForWallRun();
+	}
+	else if (!bWantsWallRun && bIsWallRunning)
+	{
+		EndWallRun(EWallRunEndReason::LostWall);
+	}
+
+	// Dash and mantle end themselves from inside UpdateGroundDash / UpdateAirDash / UpdateMantle,
+	// which now run inside the simulation on every machine, so both ends stop at the same simulated
+	// moment on their own. Only the start needs driving, and the clearing below is a safety net for
+	// the case where one side's Try* refused (a cooldown that had not elapsed there, a ledge it could
+	// not find) and the two would otherwise stay disagreeing.
+	const bool bWantsGroundDash = Has(EPolarityMoveFlag::GroundDashing);
+	if (bWantsGroundDash && !bIsGroundDashing)
+	{
+		TryGroundDash();
+	}
+	else if (!bWantsGroundDash && bIsGroundDashing)
+	{
+		EndGroundDash();
+	}
+
+	const bool bWantsAirDash = Has(EPolarityMoveFlag::AirDashing);
+	if (bWantsAirDash && !bIsAirDashing)
+	{
+		TryAirDash();
+	}
+	else if (!bWantsAirDash && bIsAirDashing)
+	{
+		bIsAirDashing = false;
+	}
+
+	// Mantle moves the character along a path it computed from the ledge it found. Same rule as
+	// wallrun: the decision travels, the ledge is re-found locally.
+	const bool bWantsMantle = Has(EPolarityMoveFlag::Mantling);
+	if (bWantsMantle && !bIsMantling)
+	{
+		TryMantle();
+	}
+	else if (!bWantsMantle && bIsMantling)
+	{
+		bIsMantling = false;
+	}
 }
+
+void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint8 Flags)
+{
+	auto Has = [Flags](EPolarityMoveFlag Flag)
+	{
+		return (Flags & static_cast<uint8>(Flag)) != 0;
+	};
+
+	bWantsToSprint    = Has(EPolarityMoveFlag::WantsToSprint);
+	bIsSliding        = Has(EPolarityMoveFlag::Sliding);
+	bIsWallRunning    = Has(EPolarityMoveFlag::WallRunning);
+	bWantsSlideOnLand = Has(EPolarityMoveFlag::WantsSlideOnLand);
+	bIsGroundDashing  = Has(EPolarityMoveFlag::GroundDashing);
+	bIsAirDashing     = Has(EPolarityMoveFlag::AirDashing);
+	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
+	bIsMantling       = Has(EPolarityMoveFlag::Mantling);
+}
+
+// ==================== Client move on the wire ====================
+
+void FCharacterNetworkMoveData_Polarity::ClientFillNetworkMoveData(const FSavedMove_Character& ClientMove,
+	ENetworkMoveType MoveType)
+{
+	Super::ClientFillNetworkMoveData(ClientMove, MoveType);
+
+	// The engine only ever allocates our move type here (see FNetworkPredictionData_Client_Polarity).
+	PolarityFlags = static_cast<const FSavedMove_Polarity&>(ClientMove).SavedPolarityFlags;
+}
+
+bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& CharacterMovement,
+	FArchive& Ar, UPackageMap* PackageMap, ENetworkMoveType MoveType)
+{
+	Super::Serialize(CharacterMovement, Ar, PackageMap, MoveType);
+
+	// SerializeOptionalValue writes a single bit when the value is the default, which is the usual
+	// case: a character that is walking normally has none of these set and pays one bit per move.
+	SerializeOptionalValue<uint8>(Ar.IsSaving(), Ar, PolarityFlags, 0);
+
+	return !Ar.IsError();
+}
+
+void UApexMovementComponent::ServerMove_PerformMovement(const FCharacterNetworkMoveData& MoveData)
+{
+	// Only stash it here. The container guarantees the type, since we handed the engine our own, but
+	// this is too early to act on: the acceleration for this move has not been set yet, and wallrun
+	// entry and dash direction both read it. MoveAutonomous below applies it at the right moment.
+	PendingPolarityFlags = static_cast<const FCharacterNetworkMoveData_Polarity&>(MoveData).PolarityFlags;
+
+	Super::ServerMove_PerformMovement(MoveData);
+}
+
+void UApexMovementComponent::MoveAutonomous(float ClientTimeStamp, float DeltaTime, uint8 CompressedFlags,
+	const FVector& NewAccel)
+{
+	// The engine's own order inside MoveAutonomous is: unpack flags, resolve the jump, THEN set
+	// Acceleration from the move, then simulate. Anything that reads the input direction therefore
+	// cannot run with the flags. Our decisions do read it, so the acceleration is established first
+	// and applied again by Super a moment later, which is harmless because it is the same value.
+	//
+	// Authority only. A client replaying its own moves also lands here, but it restores this state
+	// from the saved move in PrepMoveFor, and a stale byte from the last server move would undo it.
+	if (CharacterOwner && CharacterOwner->GetLocalRole() == ROLE_Authority)
+	{
+		Acceleration = ConstrainInputAcceleration(NewAccel);
+		Acceleration = Acceleration.GetClampedToMaxSize(GetMaxAcceleration());
+		ApplyPolarityMoveFlags(PendingPolarityFlags);
+	}
+
+	Super::MoveAutonomous(ClientTimeStamp, DeltaTime, CompressedFlags, NewAccel);
+}
+
 
 void UApexMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
@@ -720,6 +789,9 @@ void UApexMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bWantsToSprint, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsSliding, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsWallRunning, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsMantling, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsAirDashing, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsGroundDashing, COND_SimulatedOnly);
 }
 
 FNetworkPredictionData_Client* UApexMovementComponent::GetPredictionData_Client() const
@@ -735,10 +807,7 @@ FNetworkPredictionData_Client* UApexMovementComponent::GetPredictionData_Client(
 // ==================== FSavedMove_Polarity ====================
 
 FSavedMove_Polarity::FSavedMove_Polarity()
-	: bSavedWantsToSprint(0)
-	, bSavedIsSliding(0)
-	, bSavedIsWallRunning(0)
-	, bSavedWantsSlideOnLand(0)
+	: SavedPolarityFlags(0)
 	, bSavedJumpHeld(0)
 	, SavedSlideFatigueCounter(0)
 	, SavedSlideFatigueDecayTimer(0.0f)
@@ -752,10 +821,7 @@ FSavedMove_Polarity::FSavedMove_Polarity()
 void FSavedMove_Polarity::Clear()
 {
 	Super::Clear();
-	bSavedWantsToSprint = 0;
-	bSavedIsSliding = 0;
-	bSavedIsWallRunning = 0;
-	bSavedWantsSlideOnLand = 0;
+	SavedPolarityFlags = 0;
 	bSavedJumpHeld = 0;
 	SavedSlideFatigueCounter = 0;
 	SavedSlideFatigueDecayTimer = 0.0f;
@@ -765,27 +831,6 @@ void FSavedMove_Polarity::Clear()
 	SavedCurrentJumpCount = 0;
 }
 
-uint8 FSavedMove_Polarity::GetCompressedFlags() const
-{
-	uint8 Result = Super::GetCompressedFlags();
-	if (bSavedWantsToSprint)
-	{
-		Result |= FLAG_Custom_0;
-	}
-	if (bSavedIsSliding)
-	{
-		Result |= FLAG_Custom_1;
-	}
-	if (bSavedIsWallRunning)
-	{
-		Result |= FLAG_Custom_2;
-	}
-	if (bSavedWantsSlideOnLand)
-	{
-		Result |= FLAG_Custom_3;
-	}
-	return Result;
-}
 
 bool FSavedMove_Polarity::CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const
 {
@@ -793,11 +838,7 @@ bool FSavedMove_Polarity::CanCombineWith(const FSavedMovePtr& NewMove, ACharacte
 	// sprinting move with a walking one would send the server a single move at one speed for a
 	// stretch the client covered at two.
 	const FSavedMove_Polarity* NewPolarityMove = static_cast<const FSavedMove_Polarity*>(NewMove.Get());
-	if (NewPolarityMove &&
-		(bSavedWantsToSprint != NewPolarityMove->bSavedWantsToSprint ||
-		 bSavedIsSliding     != NewPolarityMove->bSavedIsSliding ||
-		 bSavedIsWallRunning != NewPolarityMove->bSavedIsWallRunning ||
-		 bSavedWantsSlideOnLand != NewPolarityMove->bSavedWantsSlideOnLand))
+	if (NewPolarityMove && SavedPolarityFlags != NewPolarityMove->SavedPolarityFlags)
 	{
 		return false;
 	}
@@ -811,11 +852,8 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 
 	if (const UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Character->GetCharacterMovement()))
 	{
-		bSavedWantsToSprint = Apex->bWantsToSprint ? 1 : 0;
-		bSavedIsSliding     = Apex->bIsSliding ? 1 : 0;
-		bSavedIsWallRunning = Apex->bIsWallRunning ? 1 : 0;
-		bSavedWantsSlideOnLand = Apex->bWantsSlideOnLand ? 1 : 0;
-		bSavedJumpHeld      = Apex->bJumpHeld ? 1 : 0;
+		SavedPolarityFlags = Apex->PackPolarityMoveFlags();
+		bSavedJumpHeld     = Apex->bJumpHeld ? 1 : 0;
 
 		SavedSlideFatigueCounter    = Apex->SlideFatigueCounter;
 		SavedSlideFatigueDecayTimer = Apex->SlideFatigueDecayTimer;
@@ -833,11 +871,11 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 	// Restore the component to the state this move was recorded in, so replaying it reproduces it.
 	if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Character->GetCharacterMovement()))
 	{
-		Apex->bWantsToSprint = bSavedWantsToSprint != 0;
-		Apex->bIsSliding     = bSavedIsSliding != 0;
-		Apex->bIsWallRunning = bSavedIsWallRunning != 0;
-		Apex->bWantsSlideOnLand = bSavedWantsSlideOnLand != 0;
-		Apex->bJumpHeld      = bSavedJumpHeld != 0;
+		// A replay restores the state wholesale rather than replaying the transitions: the move was
+		// already simulated once from exactly these values, so re-running StartSlide and friends
+		// would double their entry effects.
+		Apex->ApplyPolarityMoveFlagsForReplay(SavedPolarityFlags);
+		Apex->bJumpHeld = bSavedJumpHeld != 0;
 
 		Apex->SlideFatigueCounter         = SavedSlideFatigueCounter;
 		Apex->SlideFatigueDecayTimer      = SavedSlideFatigueDecayTimer;
@@ -991,6 +1029,11 @@ void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 {
 	if (bIsSliding || bIsMantling || bIsWallRunning || SlideCooldownRemaining > 0.0f)
 	{
+		// Filter the log by [NET_DEBUG] to see why a landing did not turn into a slide. Both ends
+		// print it, so a line appearing on one side only is itself the answer.
+		UE_LOG(LogTemp, Warning,
+			TEXT("[NET_DEBUG] %s StartSlideFromAir REFUSED: sliding=%d mantling=%d wallrun=%d cooldown=%.2f"),
+			(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), bIsSliding ? 1 : 0, bIsMantling ? 1 : 0, bIsWallRunning ? 1 : 0, SlideCooldownRemaining);
 		return;
 	}
 
@@ -1308,8 +1351,10 @@ void UApexMovementComponent::CheckForWallRun()
 		return;
 	}
 
-	// Check if player is holding movement input
-	if (CurrentMoveInput.SizeSquared() < 0.1f)
+	// Acceleration, not CurrentMoveInput: this runs inside the simulation now, and on the server a
+	// client's pawn always reads "no input" from the local handler, so the wallrun the client
+	// started would never begin here and the client would be corrected off the wall.
+	if (Acceleration.SizeSquared2D() < KINDA_SMALL_NUMBER)
 	{
 		return; // No input = no wallrun
 	}
@@ -1318,15 +1363,9 @@ void UApexMovementComponent::CheckForWallRun()
 	bool bLeftWall = TraceForWall(EWallSide::Left, LeftHit);
 	bool bRightWall = TraceForWall(EWallSide::Right, RightHit);
 
-	// Convert input to world direction
-	FVector InputWorldDir = FVector::ZeroVector;
-	if (CharacterOwner)
-	{
-		const FRotator YawRotation(0, CharacterOwner->GetControlRotation().Yaw, 0);
-		const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-		const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
-		InputWorldDir = (ForwardDir * CurrentMoveInput.Y + RightDir * CurrentMoveInput.X).GetSafeNormal();
-	}
+	// Acceleration already IS the input in world space, and unlike CurrentMoveInput it travels with
+	// the move, so the server can answer this too.
+	const FVector InputWorldDir = Acceleration.GetSafeNormal2D();
 
 	auto CanStartOnWall = [&](const FHitResult& WallHit) -> bool
 	{
@@ -1637,24 +1676,24 @@ void UApexMovementComponent::UpdateWallRun(float DeltaTime)
 		return;
 	}
 
-	// Check if player is still holding input parallel to wall
-	if (CurrentMoveInput.SizeSquared() >= 0.1f && CharacterOwner)
-	{
-		const FRotator YawRotation(0, CharacterOwner->GetControlRotation().Yaw, 0);
-		const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-		const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
-		FVector InputWorldDir = (ForwardDir * CurrentMoveInput.Y + RightDir * CurrentMoveInput.X).GetSafeNormal();
-
-		float InputDot = FVector::DotProduct(InputWorldDir, WallRunDirection);
-		if (InputDot < MovementSettings->WallRunInputThreshold)
-		{
-			EndWallRun(EWallRunEndReason::LostWall);
-			return;
-		}
-	}
-	else
+	// Still pushing along the wall?
+	//
+	// This has to read Acceleration and not CurrentMoveInput. The local input handler writes
+	// CurrentMoveInput, so on the server someone else's pawn always reads "nothing held" and this
+	// branch dropped it off the wall on the very first frame. The client kept running, the server
+	// kept ending, the flag on the next move started it again, and the result was a character
+	// stuttering along the wall and then falling off it.
+	const FVector InputWorldDir = Acceleration.GetSafeNormal2D();
+	if (InputWorldDir.IsNearlyZero())
 	{
 		// No input = end wallrun
+		EndWallRun(EWallRunEndReason::LostWall);
+		return;
+	}
+
+	const float InputDot = FVector::DotProduct(InputWorldDir, WallRunDirection);
+	if (InputDot < MovementSettings->WallRunInputThreshold)
+	{
 		EndWallRun(EWallRunEndReason::LostWall);
 		return;
 	}
@@ -2188,6 +2227,51 @@ bool UApexMovementComponent::IsAccelerationForward() const
 	return FVector::DotProduct(AccelDir, ViewDir) > 0.7f;
 }
 
+void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
+{
+	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+
+	// Exactly the chain that used to sit at the top of TickComponent, in the same order. It runs
+	// here because the engine calls this from inside PerformMovement, before the move is integrated,
+	// which puts it in the simulation the server replays and a corrected client re-runs.
+	if (bIsMantling)
+	{
+		UpdateMantle(DeltaSeconds);
+	}
+	else if (bIsWallRunning)
+	{
+		UpdateWallRun(DeltaSeconds);
+	}
+	else if (bIsGroundDashing)
+	{
+		UpdateGroundDash(DeltaSeconds);
+	}
+	else if (bIsAirDashing)
+	{
+		if (bIsRedirecting)
+		{
+			UpdateAirDashRedirect(DeltaSeconds);
+		}
+		else
+		{
+			UpdateAirDash(DeltaSeconds);
+		}
+	}
+	else if (IsFalling() && !bIsSliding)
+	{
+		// Wall bounce when pushing forward, or while balled up in the air.
+		if (IsAccelerationForward() || bIsCrouchedInAir)
+		{
+			CheckForWallBounce();
+		}
+
+		if (!bIsWallRunning)
+		{
+			CheckForWallRun();
+		}
+	}
+}
+
 void UApexMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
 {
 	// Sliding, dashing and wall running each drive velocity themselves; the tick guarded against
@@ -2244,6 +2328,31 @@ void UApexMovementComponent::OnMovementUpdated(float DeltaSeconds, const FVector
 	{
 		SlideBoostCooldownRemaining -= DeltaSeconds;
 	}
+	if (WallRunSameWallCooldown > 0.0f)
+	{
+		WallRunSameWallCooldown -= DeltaSeconds;
+	}
+	if (WallBounceCooldownRemaining > 0.0f)
+	{
+		WallBounceCooldownRemaining -= DeltaSeconds;
+	}
+
+	// The dash cooldowns also drive a HUD delegate, which must fire exactly once when the cooldown
+	// actually runs out and not again on every replay of the same move.
+	auto TickDashCooldown = [this, DeltaSeconds](float& Cooldown)
+	{
+		if (Cooldown > 0.0f)
+		{
+			Cooldown -= DeltaSeconds;
+			if (Cooldown <= 0.0f)
+			{
+				Cooldown = 0.0f;
+				OnDashStateChanged.Broadcast();
+			}
+		}
+	};
+	TickDashCooldown(AirDashCooldownRemaining);
+	TickDashCooldown(GroundDashCooldownRemaining);
 
 	// Slide fatigue decays a step a second while not sliding. It scales the slide jump boost, which
 	// is why it counts here and not in the tick.
@@ -2422,7 +2531,9 @@ bool UApexMovementComponent::TryGroundDash()
 		return false;
 	}
 
-	FVector DashDirection = GetLastInputVector().GetSafeNormal2D();
+	// Acceleration, not GetLastInputVector: the latter is local to whoever read the keyboard, so the
+	// server dashed a client straight ahead regardless of which way they actually pushed.
+	FVector DashDirection = Acceleration.GetSafeNormal2D();
 	if (DashDirection.IsNearlyZero())
 	{
 		DashDirection = CharacterOwner->GetActorForwardVector().GetSafeNormal2D();
@@ -2517,7 +2628,7 @@ bool UApexMovementComponent::TryAirDash()
 
 	// Calculate target dash direction
 	FVector DashDirection;
-	const FVector InputDir = GetLastInputVector();
+	const FVector InputDir = Acceleration;
 	if (!InputDir.IsNearlyZero())
 	{
 		DashDirection = InputDir.GetSafeNormal();
