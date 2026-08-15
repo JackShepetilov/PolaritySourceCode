@@ -1095,6 +1095,25 @@ public:
 	UFUNCTION(Server, Reliable)
 	void Server_ReportMeleeDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
 
+	/** Report the shove that goes with a melee hit. Separate from the damage above because it lands
+	 *  on a different machine: damage is applied where health lives (the server), a shove has to be
+	 *  applied where the target's MOVEMENT lives, which for a player is that player's own client.
+	 *
+	 *  The numbers are computed on the swinger's machine because only it has the swing's entry speed
+	 *  and its own upgrade multipliers. Reliable: a dropped shove is a hit that visibly did nothing. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReportMeleeKnockback(AActor* Target, FVector Direction, float Distance, float Duration);
+
+	/** "You just got hit, launch yourself." Sent by the server to the owning client of the character
+	 *  being shoved, and applied there inside that client's own prediction.
+	 *
+	 *  A server that only launches its own copy is fighting a client that is still predicting its own
+	 *  movement: the two disagree every frame and the player being hit stutters instead of flying.
+	 *  Launching on both ends means the shove is part of what the client predicted, so there is
+	 *  nothing to correct. Reliable, for the same reason as above. */
+	UFUNCTION(Client, Reliable)
+	void Client_ApplyKnockback(FVector LaunchVelocity);
+
 	/** Ask the server for the authoritative projectile, at the transform this client already fired
 	 *  its own stand-in from. Reliable: a lost one is a shot that never happened for anybody else.
 	 *

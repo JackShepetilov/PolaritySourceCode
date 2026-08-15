@@ -559,6 +559,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Melee|Validation")
 	float GetMaxReportedReach() const;
 
+	/** Ceiling the authority clamps a reported shove distance to. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Validation")
+	float GetMaxReportedKnockbackDistance() const;
+
+	/** Actually shove Target, on the machine that owns the decision.
+	 *
+	 *  Static and public because the server reaches it from AShooterCharacter::Server_ReportMeleeKnockback
+	 *  when a client's punch arrives, where there is no swinging component in scope — the swing
+	 *  happened on the other machine. Everything it needs is already in the arguments.
+	 *
+	 *  An NPC is shoved outright: its movement is the server's, so the server's word is final. A
+	 *  player is shoved on BOTH ends, here and through Client_ApplyKnockback, because a player's
+	 *  movement is predicted by their own client and a one-sided launch just starts an argument. */
+	static void ApplyKnockbackOnAuthority(AActor* Target, const FVector& Direction, float Distance,
+		float Duration, const FVector& AttackerLocation);
+
 	// ==================== External Control ====================
 
 	/** When true, CanAttack() returns false. Set by ShooterCharacter when a melee weapon is equipped. */

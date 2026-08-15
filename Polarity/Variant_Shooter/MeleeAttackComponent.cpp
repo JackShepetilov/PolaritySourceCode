@@ -2061,36 +2061,91 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	}
 #endif
 
-	// Try ShooterNPC first (has distance-based ApplyKnockback)
-	if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
+	// The NPC applies its own multiplier again, so divide out the one folded in above.
+	const float DistanceToSend = Cast<AShooterNPC>(HitActor) ? (KnockbackDistance / NPCMultiplier) : KnockbackDistance;
+
+	// ==================== Who is allowed to shove ====================
+	// The numbers above could only be computed here: they need the swing's entry speed and this
+	// character's upgrade multipliers, neither of which the other machine has. Applying them is a
+	// different question, and the answer is never "whoever swung".
+	if (OwnerCharacter->HasAuthority())
 	{
-		// Note: NPC multiplier already applied to distance, so we pass it directly
-		// The NPC will apply its own multiplier again, so we need to divide it out
-		float DistanceForNPC = KnockbackDistance / NPCMultiplier;
-		NPC->ApplyKnockback(KnockbackDirection, DistanceForNPC, KnockbackDuration, PlayerCenter);
+		ApplyKnockbackOnAuthority(HitActor, KnockbackDirection, DistanceToSend, KnockbackDuration, PlayerCenter);
 		return;
 	}
 
-	// For generic characters, convert to velocity-based launch
-	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	// A client. Send it up, and locally do only what is harmless: shove an NPC on this screen too, so
+	// the hit reads instantly, and let the server's version replicate over the top. A player target
+	// gets NOTHING locally — that pawn's movement is predicted by whoever owns it, and a third
+	// machine pushing it around is pure noise.
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
 	{
-		// Convert distance/duration to velocity
-		FVector KnockbackVelocity = KnockbackDirection * (KnockbackDistance / KnockbackDuration);
-		HitCharacter->LaunchCharacter(KnockbackVelocity, true, true);
+		ShooterChar->Server_ReportMeleeKnockback(HitActor, KnockbackDirection, DistanceToSend, KnockbackDuration);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s shoved something on a client but is not a ShooterCharacter - shove dropped"),
+			*OwnerCharacter->GetName());
+	}
+
+	if (AShooterNPC* LocalNPC = Cast<AShooterNPC>(HitActor))
+	{
+		LocalNPC->ApplyKnockback(KnockbackDirection, DistanceToSend, KnockbackDuration, PlayerCenter);
+	}
+}
+
+void UMeleeAttackComponent::ApplyKnockbackOnAuthority(AActor* Target, const FVector& Direction,
+	float Distance, float Duration, const FVector& AttackerLocation)
+{
+	if (!Target || Duration <= 0.0f)
+	{
 		return;
 	}
 
-	// Fallback to physics impulse for non-characters
-	if (UPrimitiveComponent* RootPrimitive = Cast<UPrimitiveComponent>(HitActor->GetRootComponent()))
+	// An NPC's movement is the server's, so the server's shove is the whole story.
+	if (AShooterNPC* NPC = Cast<AShooterNPC>(Target))
+	{
+		NPC->ApplyKnockback(Direction, Distance, Duration, AttackerLocation);
+		return;
+	}
+
+	if (ACharacter* HitCharacter = Cast<ACharacter>(Target))
+	{
+		const FVector LaunchVelocity = Direction * (Distance / Duration);
+
+		// Here, so the authority's copy moves and everyone watching sees it.
+		HitCharacter->LaunchCharacter(LaunchVelocity, true, true);
+
+		// And on the machine that predicts this character, or the two will disagree about where it
+		// went for as long as the shove lasts. That disagreement is what the stuttering was.
+		if (AShooterCharacter* HitShooter = Cast<AShooterCharacter>(HitCharacter))
+		{
+			if (!HitShooter->IsLocallyControlled())
+			{
+				HitShooter->Client_ApplyKnockback(LaunchVelocity);
+			}
+		}
+		return;
+	}
+
+	// Fallback to physics impulse for non-characters.
+	if (UPrimitiveComponent* RootPrimitive = Cast<UPrimitiveComponent>(Target->GetRootComponent()))
 	{
 		if (RootPrimitive->IsSimulatingPhysics())
 		{
-			// Convert to impulse (mass * velocity)
-			float Mass = RootPrimitive->GetMass();
-			FVector Impulse = KnockbackDirection * (KnockbackDistance / KnockbackDuration) * Mass;
-			RootPrimitive->AddImpulse(Impulse);
+			const float Mass = RootPrimitive->GetMass();
+			RootPrimitive->AddImpulse(Direction * (Distance / Duration) * Mass);
 		}
 	}
+}
+
+float UMeleeAttackComponent::GetMaxReportedKnockbackDistance() const
+{
+	// The base shove, plus what the fastest plausible approach could add, plus headroom for the
+	// upgrade multipliers that do not replicate (Tractor Beam and friends). Same spirit as the
+	// damage ceiling: bound the absurd, never clip an honest hit.
+	const float FromSpeed = Settings.KnockbackDistancePerVelocity * FMath::Max(Settings.LungeMaxSpeed, 3000.0f);
+	return (Settings.BaseKnockbackDistance + FromSpeed) * FMath::Max(Settings.MaxReportedDamageMultiplier, 1.0f);
 }
 
 float UMeleeAttackComponent::CalculateMomentumDamage(AActor* HitActor) const

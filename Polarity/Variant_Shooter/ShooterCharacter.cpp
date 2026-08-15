@@ -1027,6 +1027,57 @@ void AShooterCharacter::Server_ReportMeleeDamage_Implementation(AActor* HitActor
 	HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
 }
 
+void AShooterCharacter::Server_ReportMeleeKnockback_Implementation(AActor* Target, FVector Direction,
+	float Distance, float Duration)
+{
+	if (!Target || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	const UMeleeAttackComponent* Melee = MeleeAttackComponent;
+	if (!Melee)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a melee shove but has no melee component - rejected"),
+			*GetName());
+		return;
+	}
+
+	// Same shape of check as a reported hit: near enough to have been hit at all, and no further than
+	// the settings on THIS machine say a shove can throw somebody.
+	static constexpr float ReachMarginCm = 500.0f;
+	const float DistanceToTarget = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
+	if (DistanceToTarget > Melee->GetMaxReportedReach() + ReachMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a melee shove at %.0f cm - rejected"),
+			*GetName(), DistanceToTarget);
+		return;
+	}
+
+	const float DistanceCeiling = Melee->GetMaxReportedKnockbackDistance();
+	if (Distance > DistanceCeiling)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a %.0f cm melee shove, ceiling is %.0f - clamped"),
+			*GetName(), Distance, DistanceCeiling);
+		Distance = DistanceCeiling;
+	}
+
+	// The attacker is whoever sent this, so its location is right here and does not need sending.
+	UMeleeAttackComponent::ApplyKnockbackOnAuthority(Target, Direction.GetSafeNormal(), Distance, Duration,
+		GetActorLocation());
+}
+
+void AShooterCharacter::Client_ApplyKnockback_Implementation(FVector LaunchVelocity)
+{
+	// The server has already launched its own copy of this character; this is the same launch on the
+	// machine that predicts this character's movement, so the two agree and nothing gets corrected.
+	// bXYOverride / bZOverride match the authority's call in ApplyKnockbackOnAuthority.
+	LaunchCharacter(LaunchVelocity, true, true);
+
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s got shoved on its own client at %.0f u/s"),
+		*GetName(), LaunchVelocity.Size());
+}
+
 void AShooterCharacter::Client_ConfirmDamageDealt_Implementation(AShooterWeapon* Weapon, AActor* HitActor,
 	float ActualDamage, bool bKilled)
 {
