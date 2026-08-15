@@ -337,4 +337,9 @@ private:
 
 	UFUNCTION()
 	void OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser);
+
+	/** Health bar feed. Bound instead of OnDamageTaken, which only ever fires on the machine that
+	 *  applied the damage — the server — so a client's bar never moved. */
+	UFUNCTION()
+	void OnNPCHealthChanged(AShooterNPC* NPC, float NewHP);
 };

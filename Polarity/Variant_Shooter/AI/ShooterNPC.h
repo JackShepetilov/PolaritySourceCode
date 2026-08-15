@@ -45,6 +45,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnNPCDamageTaken, AShooterNPC*, DamagedNPC, float, Damage, TSubclassOf<UDamageType>, DamageType, FVector, HitLocation, AActor*, DamageCauser);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnNPCDeathDetailed, AShooterNPC*, DeadNPC, TSubclassOf<UDamageType>, KillingDamageType, AActor*, KillingDamageCauser);
+/** Health moved, on any machine. Separate from OnDamageTaken because that one carries who hit what
+ *  with which weapon, and a client has none of that — it only ever learns the resulting number. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCHealthChanged, AShooterNPC*, NPC, float, NewHP);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCStunStart, AShooterNPC*, StunnedNPC, float, Duration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCStunEnd, AShooterNPC*, StunnedNPC);
 
@@ -142,9 +145,22 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	/** Current HP for this character. It dies if it reaches zero through damage */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage")
+	/** Current HP for this character. It dies if it reaches zero through damage.
+	 *
+	 *  Replicated: damage is resolved on the server, so this is another value a client never saw
+	 *  change. The charge bar next to it worked only because UEMFVelocityModifier::ReplicatedCharge
+	 *  already travelled — the health half of the same widget sat at full forever. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_CurrentHP, Category = "Damage")
 	float CurrentHP = 100.0f;
+
+	UFUNCTION()
+	void OnRep_CurrentHP();
+
+	/** Fired wherever health changed: on the authority when damage lands, on a client when the new
+	 *  value arrives. Anything drawing a health bar should listen here rather than to OnDamageTaken,
+	 *  which only ever fires where the damage was applied. */
+	UPROPERTY(BlueprintAssignable, Category = "Damage")
+	FOnNPCHealthChanged OnHealthChanged;
 
 protected:
 

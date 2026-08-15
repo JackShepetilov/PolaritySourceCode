@@ -196,6 +196,7 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 	InNPC->OnStunStart.AddDynamic(this, &UEMFChargeWidget::OnNPCStunStart);
 	InNPC->OnStunEnd.AddDynamic(this, &UEMFChargeWidget::OnNPCStunEnd);
 	InNPC->OnDamageTaken.AddDynamic(this, &UEMFChargeWidget::OnNPCDamageTaken);
+	InNPC->OnHealthChanged.AddDynamic(this, &UEMFChargeWidget::OnNPCHealthChanged);
 
 	// Cache max HP for normalization
 	CachedMaxHP = InNPC->CurrentHP;
@@ -346,6 +347,7 @@ void UEMFChargeWidget::Unbind()
 		NPC->OnStunStart.RemoveDynamic(this, &UEMFChargeWidget::OnNPCStunStart);
 		NPC->OnStunEnd.RemoveDynamic(this, &UEMFChargeWidget::OnNPCStunEnd);
 		NPC->OnDamageTaken.RemoveDynamic(this, &UEMFChargeWidget::OnNPCDamageTaken);
+		NPC->OnHealthChanged.RemoveDynamic(this, &UEMFChargeWidget::OnNPCHealthChanged);
 	}
 	if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
@@ -580,12 +582,25 @@ void UEMFChargeWidget::OnNPCStunEnd(AShooterNPC* StunnedNPC)
 
 void UEMFChargeWidget::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser)
 {
-	if (AShooterNPC* NPC = BoundNPC.Get())
+	// Kept for whatever else this hook feeds; the bar itself is driven by OnNPCHealthChanged now,
+	// which is the only one of the two that reaches a client.
+}
+
+void UEMFChargeWidget::OnNPCHealthChanged(AShooterNPC* NPC, float NewHP)
+{
+	if (NPC != BoundNPC.Get())
 	{
-		float HP = FMath::Max(NPC->CurrentHP, 0.0f);
-		float Normalized = (CachedMaxHP > 0.0f) ? FMath::Clamp(HP / CachedMaxHP, 0.0f, 1.0f) : 0.0f;
-		BP_OnHealthChanged(HP, CachedMaxHP, Normalized);
+		return;
 	}
+
+	// CachedMaxHP is taken from the NPC's HP at bind time. On the authority that is spawn time and
+	// therefore full health. On a client the widget binds when the enemy becomes relevant, which can
+	// be after it has already been hurt, and the bar would then read full at a damaged value. It
+	// self-corrects downward the moment more damage lands, and a real maximum on the NPC would fix
+	// it properly — there is no MaxHP field on the class today.
+	const float HP = FMath::Max(NewHP, 0.0f);
+	const float Normalized = (CachedMaxHP > 0.0f) ? FMath::Clamp(HP / CachedMaxHP, 0.0f, 1.0f) : 0.0f;
+	BP_OnHealthChanged(HP, CachedMaxHP, Normalized);
 }
 
 // ==================== Capture Zone ====================

@@ -701,6 +701,10 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 
 	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
+	// The same news in the form a client can also receive. Broadcast here as well as from
+	// OnRep_CurrentHP so the authority's own widgets update without waiting for a round trip.
+	OnHealthChanged.Broadcast(this, CurrentHP);
+
 	return Damage;
 }
 
@@ -1205,6 +1209,11 @@ void AShooterNPC::PlayDeathVisuals()
 	}
 }
 
+void AShooterNPC::OnRep_CurrentHP()
+{
+	OnHealthChanged.Broadcast(this, CurrentHP);
+}
+
 void AShooterNPC::OnRep_IsDead()
 {
 	if (bIsDead)
@@ -1222,6 +1231,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	// mode. Two values per NPC, once per lifetime.
 	DOREPLIFETIME(AShooterNPC, ReplicatedDeathMode);
 	DOREPLIFETIME(AShooterNPC, bIsDead);
+	DOREPLIFETIME(AShooterNPC, CurrentHP);
 }
 
 void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)
