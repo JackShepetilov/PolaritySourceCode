@@ -535,6 +535,10 @@ private:
 	 *  takes over. Also derives PrimaryTarget from the result. */
 	void UpdateNPCTargets(float DeltaTime);
 
+	/** The player this NPC is fighting, falling back to PrimaryTarget when it has none yet. Every
+	 *  per-NPC gate goes through here rather than reading PrimaryTarget directly. */
+	AActor* ResolveTargetFor(APawn* NPC) const;
+
 	void UpdatePlayerStateCache();
 	void AssignRoles();
 	float CalculateAngleFromPlayerFacing(APawn* NPC) const;

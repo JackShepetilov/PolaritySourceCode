@@ -1052,22 +1052,43 @@ float AAICombatCoordinator::CalculateAttackScore(const FRegisteredNPCData& Data)
 	return Score;
 }
 
+AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const
+{
+	// The gates below decide whether an NPC may attack, and they have to ask about the player THAT
+	// NPC is fighting. Measuring them against PrimaryTarget was survivable while it was an arbitrary
+	// but stable pick; once it became a tally of who the enemies are actually fighting, it started
+	// disagreeing with any individual enemy far more often, and the failure was silent and total:
+	// a player ran behind cover, the line-of-sight check against THEM failed, and every NPC stopped
+	// shooting at the teammate standing in the open in front of it.
+	if (const FRegisteredNPCData* Data = FindNPCData(NPC))
+	{
+		if (AActor* Remembered = Data->Target.Get())
+		{
+			return Remembered;
+		}
+	}
+	return PrimaryTarget.Get();
+}
+
 bool AAICombatCoordinator::HasLineOfSightToTarget(APawn* NPC) const
 {
-	if (!NPC || !PrimaryTarget.IsValid()) return false;
+	if (!NPC) return false;
+
+	AActor* Target = ResolveTargetFor(NPC);
+	if (!Target) return false;
 
 	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(NPC);
 
 	const FVector Start = NPC->GetPawnViewLocation();
-	const FVector End = PrimaryTarget->GetActorLocation();
+	const FVector End = Target->GetActorLocation();
 
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
 		HitResult, Start, End, ECC_Visibility, QueryParams
 	);
 
-	return !bHit || HitResult.GetActor() == PrimaryTarget.Get();
+	return !bHit || HitResult.GetActor() == Target;
 }
 
 void AAICombatCoordinator::CleanupInvalidNPCs()
@@ -1152,7 +1173,7 @@ int32 AAICombatCoordinator::CountCurrentAttackers() const
 bool AAICombatCoordinator::IsNPCInEngagementRange(APawn* NPC) const
 {
 	if (MaxEngagementDistance <= 0.0f) return true;
-	if (!PrimaryTarget.IsValid()) return true;
+	if (!ResolveTargetFor(NPC)) return true;
 
 	const float Distance = GetDistanceToTarget(NPC);
 	return Distance <= MaxEngagementDistance;
@@ -1160,8 +1181,12 @@ bool AAICombatCoordinator::IsNPCInEngagementRange(APawn* NPC) const
 
 float AAICombatCoordinator::GetDistanceToTarget(APawn* NPC) const
 {
-	if (!NPC || !PrimaryTarget.IsValid()) return MAX_FLT;
-	return FVector::Dist(NPC->GetActorLocation(), PrimaryTarget->GetActorLocation());
+	if (!NPC) return MAX_FLT;
+
+	AActor* Target = ResolveTargetFor(NPC);
+	if (!Target) return MAX_FLT;
+
+	return FVector::Dist(NPC->GetActorLocation(), Target->GetActorLocation());
 }
 
 // ==================== Debug Drawing ====================
