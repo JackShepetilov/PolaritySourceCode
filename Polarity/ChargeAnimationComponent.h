@@ -816,6 +816,26 @@ protected:
 	/** Throttle for the [HOLD_DEBUG] hold trace. Remove with the logging. */
 	float HeldPropLogTime = 0.0f;
 
+	// ==================== Reviving a downed teammate ====================
+	// The capture button does double duty: held while looking at a teammate on the floor, it picks
+	// them up instead of grabbing anything. Reviving wins over capturing, because a body in reach
+	// is a far more deliberate thing to be pointing at than whatever is behind it.
+
+	/** True between press and release of the channel button, so a hold can be measured at all —
+	 *  press-press capture mode otherwise ignores the release entirely. */
+	bool bChannelHeld = false;
+
+	/** Who this player is currently picking up, and how long they have been at it. */
+	TWeakObjectPtr<AShooterCharacter> ReviveTarget;
+	float ReviveHeldTime = 0.0f;
+
+	/** The nearest downed teammate within reach, or null. Enumerates pawns directly rather than
+	 *  through CoopPlayers::GetAll, which on a client only ever returns the local player. */
+	AShooterCharacter* FindReviveTarget() const;
+
+	/** Advance or abandon a pick-up. Called every tick. */
+	void UpdateRevive(float DeltaTime);
+
 	/** The prop's orientation relative to the view at the moment it was grabbed. The hold keeps it,
 	 *  so a crate picked up at an angle stays at that angle and turns with the camera, instead of
 	 *  snapping square to the view the instant it is caught. */

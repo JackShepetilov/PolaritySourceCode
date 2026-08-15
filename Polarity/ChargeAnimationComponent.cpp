@@ -75,6 +75,10 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	UpdateMeshTransition(DeltaTime);
 	UpdateMontagePlayRate(DeltaTime);
 
+	// Picking a teammate off the floor runs on its own, outside the channeling state machine: it
+	// has to work whether or not a capture was ever started.
+	UpdateRevive(DeltaTime);
+
 	// Update plate position during channeling states (animation flow matches legacy —
 	// the post-capture lockout lives inside Channeling as a timer, not a separate state).
 	if (CurrentState == EChargeAnimationState::Channeling || CurrentState == EChargeAnimationState::ReverseChanneling)
@@ -134,6 +138,15 @@ void UChargeAnimationComponent::OnChargeButtonReleased()
 
 void UChargeAnimationComponent::OnChannelButtonPressed()
 {
+	bChannelHeld = true;
+
+	// A teammate on the floor in reach takes the button. Reviving beats grabbing: the body is right
+	// there and deliberate, whatever is behind it is not. UpdateRevive counts the hold from here.
+	if (FindReviveTarget())
+	{
+		return;
+	}
+
 	// === Legacy hold-to-channel mode (kept for revert) ===
 	if (!bUsePressPressCaptureMode)
 	{
@@ -191,6 +204,10 @@ void UChargeAnimationComponent::OnChannelButtonPressed()
 
 void UChargeAnimationComponent::OnChannelButtonReleased()
 {
+	// Even in press-press mode the release matters for one thing: it is what ends a hold, and a
+	// pick-up is measured in how long the button stayed down. UpdateRevive drops the progress.
+	bChannelHeld = false;
+
 	// Press-press mode: release is meaningless — capture and launch are press-only.
 	if (bUsePressPressCaptureMode)
 	{
@@ -735,6 +752,67 @@ void UChargeAnimationComponent::DestroyPlate()
 	{
 		ChannelingPlateActor->Destroy();
 		ChannelingPlateActor = nullptr;
+	}
+}
+
+AShooterCharacter* UChargeAnimationComponent::FindReviveTarget() const
+{
+	if (!ShooterCharacter || ShooterCharacter->IsDowned() || !GetWorld())
+	{
+		return nullptr;
+	}
+
+	AShooterCharacter* Best = nullptr;
+	float BestDistSq = TNumericLimits<float>::Max();
+
+	// Straight over the world's pawns on purpose: CoopPlayers::GetAll walks the player controller
+	// list, and a client only has its own, so it would never see the teammate lying next to it.
+	for (TActorIterator<AShooterCharacter> It(GetWorld()); It; ++It)
+	{
+		AShooterCharacter* Other = *It;
+		if (!Other || Other == ShooterCharacter || !Other->IsDowned())
+		{
+			continue;
+		}
+
+		const float DistSq = FVector::DistSquared(ShooterCharacter->GetActorLocation(), Other->GetActorLocation());
+		if (DistSq <= FMath::Square(Other->ReviveRange) && DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			Best = Other;
+		}
+	}
+
+	return Best;
+}
+
+void UChargeAnimationComponent::UpdateRevive(float DeltaTime)
+{
+	AShooterCharacter* Target = bChannelHeld ? FindReviveTarget() : nullptr;
+
+	// Let go, walk away, or the target got up on somebody else's watch: the effort is abandoned,
+	// not banked. Holding it again starts from nothing.
+	if (!Target || Target != ReviveTarget.Get())
+	{
+		ReviveTarget = Target;
+		ReviveHeldTime = 0.0f;
+		if (!Target)
+		{
+			return;
+		}
+	}
+
+	ReviveHeldTime += DeltaTime;
+	if (ReviveHeldTime >= Target->ReviveHoldSeconds)
+	{
+		ReviveHeldTime = 0.0f;
+		ReviveTarget.Reset();
+		if (ShooterCharacter)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s finished picking up %s"),
+				*ShooterCharacter->GetName(), *Target->GetName());
+			ShooterCharacter->Server_ReviveTeammate(Target);
+		}
 	}
 }
 

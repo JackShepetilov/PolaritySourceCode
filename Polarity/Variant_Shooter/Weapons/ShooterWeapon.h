@@ -864,8 +864,19 @@ public:
 	/** Input action that switches/equips this weapon (per-weapon hotkey). May be null. */
 	UInputAction* GetSwitchAction() const { return SwitchAction; }
 
-	/** Set bullet count (used for checkpoint restore) */
-	void SetBulletCount(int32 NewCount) { CurrentBullets = FMath::Clamp(NewCount, 0, MagazineSize); }
+	/** Set bullet count (used for checkpoint restore, and by a pickup granting a partial magazine) */
+	void SetBulletCount(int32 NewCount);
+
+	/** Tell the owning client what its ammo actually is.
+	 *
+	 *  Rounds are spent by whichever machine pulls the trigger, so the server's count never moves
+	 *  for a client's shots and replicating it continuously would keep overwriting the client's
+	 *  correct number with a stale one. What DOES need to cross is the state the server alone
+	 *  decides: the magazine a pickup was granted with, and whether that weapon has finite ammo at
+	 *  all. Without it a yanked weapon read as an endless magazine on the client while the server
+	 *  had counted out forty rounds. Sent on change, not per frame. */
+	UFUNCTION(Client, Reliable)
+	void Client_SyncAmmoState(int32 InBullets, bool bInHasLimitedAmmo);
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsHitscan() const { return bUseHitscan; }

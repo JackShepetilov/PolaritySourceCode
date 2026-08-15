@@ -325,6 +325,71 @@ protected:
 	 *  Never set on the authority, where Die() is driven from TakeDamage instead. */
 	bool bHasPlayedLocalDeath = false;
 
+	// ==================== Downed and revive ====================
+	// Falling to zero HP no longer ends a player's run on its own. They go down instead: a ragdoll
+	// on the floor that a teammate can pick back up. The run only ends when the whole team is down,
+	// which is the rule ShouldRunEndOnThisDeath already encodes.
+
+	/** True while this player is down and waiting to be picked up. Server decides, everyone shows
+	 *  the ragdoll. Separate from HP so the two can arrive in any order without either side
+	 *  guessing: HP hitting zero no longer means "play the death", this flag means "go limp". */
+	UPROPERTY(ReplicatedUsing = OnRep_IsDowned)
+	bool bIsDowned = false;
+
+	UFUNCTION()
+	void OnRep_IsDowned();
+
+	/** Set only when the run really is over for this player, so the death presentation has a signal
+	 *  of its own instead of being inferred from HP it cannot tell apart from being downed. */
+	UPROPERTY(ReplicatedUsing = OnRep_TerminalDeath)
+	bool bTerminalDeath = false;
+
+	UFUNCTION()
+	void OnRep_TerminalDeath();
+
+	/** Whether the mesh is currently a ragdoll, so entering and leaving is never done twice. */
+	bool bRagdollActive = false;
+
+	/** Where the mesh sits on the capsule when it is not a ragdoll. Captured at BeginPlay, because
+	 *  standing back up has to put it back exactly and simulating physics destroys the attachment. */
+	FTransform MeshRelativeTransformOnSpawn;
+
+public:
+
+	/** Is this player down and awaiting a pick-up? */
+	UFUNCTION(BlueprintPure, Category = "Coop|Downed")
+	bool IsDowned() const { return bIsDowned; }
+
+	/** Seconds a teammate must hold the capture button to bring this player back. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Downed", meta = (ClampMin = "0.1"))
+	float ReviveHoldSeconds = 3.0f;
+
+	/** How far a rescuer can be and still work on this player, in cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Downed", meta = (ClampMin = "50.0", Units = "cm"))
+	float ReviveRange = 250.0f;
+
+	/** Fraction of max HP handed back on standing up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Downed", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float RevivePercent = 0.35f;
+
+	/** Server: put this player on the floor instead of killing them. */
+	void EnterDownedState();
+
+	/** Server: stand them back up with RevivePercent of their HP. */
+	void ReviveFromDowned();
+
+	/** Ask the server to pick a downed teammate up. Reliable: dropping it wastes the hold the
+	 *  rescuer already paid for. Checked server-side: the target has to actually be down, in range,
+	 *  and the rescuer has to be able to act at all. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReviveTeammate(AShooterCharacter* Target);
+
+	/** Go limp, or get back up. Runs on every machine, driven by bIsDowned. */
+	void ApplyDownedPresentation(bool bDowned);
+
+	// Back to the section this block interrupted — everything below was written expecting it.
+protected:
+
 	// ==================== Armor (DOOM Eternal-style) ====================
 
 	/** Maximum armor value */

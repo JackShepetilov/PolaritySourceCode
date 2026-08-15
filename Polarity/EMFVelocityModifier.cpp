@@ -8,6 +8,7 @@
 #include "GameFramework/Character.h"
 #include "DrawDebugHelpers.h"
 #include "Kismet/GameplayStatics.h"
+#include "Net/UnrealNetwork.h"
 #include "Camera/PlayerCameraManager.h"
 
 // EMF Plugin includes
@@ -18,6 +19,23 @@
 UEMFVelocityModifier::UEMFVelocityModifier()
 {
 	PrimaryComponentTick.bCanEverTick = true; // Needed for bonus charge decay
+
+	// Without this the component replicates nothing at all, whatever its properties say.
+	SetIsReplicatedByDefault(true);
+}
+
+void UEMFVelocityModifier::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(UEMFVelocityModifier, ReplicatedCharge);
+}
+
+void UEMFVelocityModifier::OnRep_ReplicatedCharge()
+{
+	// Straight into the normal setter so the overlay, the widgets and anything watching the charge
+	// react on a client exactly as they do on the server.
+	SetCharge(ReplicatedCharge);
 }
 
 void UEMFVelocityModifier::BeginPlay()
@@ -610,6 +628,13 @@ void UEMFVelocityModifier::CheckChargeChanged()
 	{
 		OnChargeChanged.Broadcast(CurrentCharge);
 		PreviousCharge = CurrentCharge;
+
+		// Every route that changes the charge ends up here — SetCharge, UpdateFieldComponentCharge,
+		// NeutralizeCharge, the toggle — so this is the one place the mirror has to be kept true.
+		if (GetOwnerRole() == ROLE_Authority)
+		{
+			ReplicatedCharge = CurrentCharge;
+		}
 	}
 }
 

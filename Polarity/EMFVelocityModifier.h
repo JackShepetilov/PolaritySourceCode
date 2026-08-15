@@ -37,6 +37,22 @@ class POLARITY_API UEMFVelocityModifier : public UActorComponent, public IVeloci
 public:
 	UEMFVelocityModifier();
 
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	// ==================== Coop: charge mirroring ====================
+
+	/** The authority's charge, mirrored down to everyone else.
+	 *
+	 *  The real value lives in the EMF plugin's UEMF_FieldComponent, which replicates nothing and
+	 *  belongs to another repository, so a client read every NPC at its spawn charge forever: no
+	 *  overlay, no charge bar, and capture range measured against a number that was never true.
+	 *  Same treatment AEMFPhysicsProp::ReplicatedCharge already gets, for the same reason. */
+	UPROPERTY(ReplicatedUsing = OnRep_ReplicatedCharge)
+	float ReplicatedCharge = 0.0f;
+
+	UFUNCTION()
+	void OnRep_ReplicatedCharge();
+
 	// ==================== EMF Parameters ====================
 
 	/** Максимальная сила, которую можно применить (для предотвращения экстремальных значений) */

@@ -2059,6 +2059,36 @@ float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
 	return Multiplier;
 }
 
+void AShooterWeapon::SetBulletCount(int32 NewCount)
+{
+	CurrentBullets = FMath::Clamp(NewCount, 0, MagazineSize);
+
+	// The authority handing out a magazine is the one case the owning client cannot work out for
+	// itself. Push it, along with whether this weapon refills or runs dry.
+	if (HasAuthority())
+	{
+		Client_SyncAmmoState(CurrentBullets, bHasLimitedAmmo);
+	}
+}
+
+void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool bInHasLimitedAmmo)
+{
+	CurrentBullets = FMath::Clamp(InBullets, 0, MagazineSize);
+	bHasLimitedAmmo = bInHasLimitedAmmo;
+
+	// The HUD reads this through the character, and only for the weapon actually in hand.
+	if (PawnOwner)
+	{
+		if (AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner))
+		{
+			if (ShooterOwner->GetCurrentWeapon() == this)
+			{
+				ShooterOwner->UpdateWeaponHUD(CurrentBullets, MagazineSize);
+			}
+		}
+	}
+}
+
 bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
 {
 	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s bUseHitscanIonization=%d"),

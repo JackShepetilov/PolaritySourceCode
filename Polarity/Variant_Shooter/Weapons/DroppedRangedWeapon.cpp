@@ -457,8 +457,10 @@ void ADroppedRangedWeapon::CompletePull()
 			// at the -1 default, so the granted weapon stays at full mag with infinite refills.
 			if (SpawnedBulletCount > 0)
 			{
-				AddedWeapon->SetBulletCount(SpawnedBulletCount);
+				// Flag first: SetBulletCount is what tells the owning client about both, so setting
+				// the flag after it would send the client "forty rounds, and they refill".
 				AddedWeapon->bHasLimitedAmmo = true;
+				AddedWeapon->SetBulletCount(SpawnedBulletCount);
 				UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] CompletePull — %s granted with %d bullets (limited ammo)"),
 					*AddedWeapon->GetName(), SpawnedBulletCount);
 			}

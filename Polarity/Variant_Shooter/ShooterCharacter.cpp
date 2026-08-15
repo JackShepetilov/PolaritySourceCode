@@ -202,6 +202,13 @@ void AShooterCharacter::BeginPlay()
 	// Initialize HP based on StartingHPPercent (1.0 = full HP)
 	CurrentHP = MaxHP * FMath::Clamp(StartingHPPercent, 0.0f, 1.0f);
 
+	// Remember where the mesh sits before anything can ragdoll it: standing back up has to restore
+	// this exactly, and by then the physics simulation has thrown the original attachment away.
+	if (const USkeletalMeshComponent* BodyMesh = GetMesh())
+	{
+		MeshRelativeTransformOnSpawn = BodyMesh->GetRelativeTransform();
+	}
+
 	// Hand this character's owner the HUD class to build. Only the authority can read it — the
 	// GameMode does not exist anywhere else — so it is replicated from here and the owning client
 	// builds the widget in OnRep_HUDClass. The host is its own owner, so it builds straight away.
@@ -474,11 +481,170 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 
 	// Only the owner builds a HUD, so only the owner needs to know which one.
 	DOREPLIFETIME_CONDITION(AShooterCharacter, HUDClass, COND_OwnerOnly);
+
+	// Everyone needs both: a downed player is a ragdoll on every screen, and a rescuer has to be
+	// able to see that the body in front of them is one that can be picked up.
+	DOREPLIFETIME(AShooterCharacter, bIsDowned);
+	DOREPLIFETIME(AShooterCharacter, bTerminalDeath);
 }
 
 void AShooterCharacter::OnRep_HUDClass()
 {
 	CreateLocalHUD();
+}
+
+// ==================== Downed and revive ====================
+
+void AShooterCharacter::EnterDownedState()
+{
+	if (!HasAuthority() || bIsDowned)
+	{
+		return;
+	}
+
+	bIsDowned = true;
+
+	// Nothing this player was in the middle of survives going down.
+	if (AbilityComponent && AbilityComponent->IsCasting())
+	{
+		AbilityComponent->CancelCast();
+	}
+	if (IsValid(CurrentWeapon))
+	{
+		CurrentWeapon->DeactivateWeapon();
+	}
+	StopSlideLoopSound();
+	StopWallRunLoopSound();
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is down, waiting for a pick-up"), *GetName());
+
+	ApplyDownedPresentation(true);
+}
+
+void AShooterCharacter::ReviveFromDowned()
+{
+	if (!HasAuthority() || !bIsDowned)
+	{
+		return;
+	}
+
+	bIsDowned = false;
+	CurrentHP = FMath::Max(1.0f, MaxHP * FMath::Clamp(RevivePercent, 0.05f, 1.0f));
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is back up with %.0f HP"), *GetName(), CurrentHP);
+
+	ApplyDownedPresentation(false);
+	BroadcastHealthChanged();
+
+	// Whatever was in hand went quiet on the way down; give it back.
+	if (IsValid(CurrentWeapon))
+	{
+		CurrentWeapon->ActivateWeapon();
+	}
+}
+
+void AShooterCharacter::OnRep_IsDowned()
+{
+	ApplyDownedPresentation(bIsDowned);
+}
+
+void AShooterCharacter::OnRep_TerminalDeath()
+{
+	if (bTerminalDeath && !bHasPlayedLocalDeath)
+	{
+		// Safe on a client: the only authority-side line in Die() is the team score, and
+		// GetAuthGameMode() already returns null here. Everything else is local presentation.
+		Die();
+	}
+}
+
+void AShooterCharacter::ApplyDownedPresentation(bool bDowned)
+{
+	if (bRagdollActive == bDowned)
+	{
+		return;
+	}
+	bRagdollActive = bDowned;
+
+	USkeletalMeshComponent* BodyMesh = GetMesh();
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+
+	if (bDowned)
+	{
+		if (Movement)
+		{
+			Movement->StopMovementImmediately();
+			Movement->DisableMovement();
+		}
+		if (BodyMesh)
+		{
+			BodyMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			BodyMesh->SetCollisionProfileName(TEXT("Ragdoll"));
+			BodyMesh->SetAllBodiesBelowSimulatePhysics(TEXT("pelvis"), true, true);
+			BodyMesh->SetSimulatePhysics(true);
+		}
+		// The capsule stops shoving people around while its owner is on the floor.
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+		{
+			Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+		if (IsLocallyControlled())
+		{
+			DisableInput(nullptr);
+		}
+		return;
+	}
+
+	// Standing back up. The mesh has to go back exactly where it was: simulating physics detaches
+	// it from the capsule, and putting it back by eye leaves the body floating or sunk.
+	if (BodyMesh)
+	{
+		BodyMesh->SetSimulatePhysics(false);
+		BodyMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		BodyMesh->SetCollisionProfileName(TEXT("CharacterMesh"));
+		BodyMesh->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+		BodyMesh->SetRelativeTransform(MeshRelativeTransformOnSpawn);
+	}
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	}
+	if (Movement)
+	{
+		Movement->SetMovementMode(MOVE_Walking);
+	}
+	if (IsLocallyControlled())
+	{
+		EnableInput(nullptr);
+	}
+}
+
+void AShooterCharacter::Server_ReviveTeammate_Implementation(AShooterCharacter* Target)
+{
+	if (!Target || Target == this || !Target->IsDowned())
+	{
+		return;
+	}
+
+	// A player on the floor cannot pick anyone else up.
+	if (bIsDowned || IsDead())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to revive %s while down itself - rejected"),
+			*GetName(), *Target->GetName());
+		return;
+	}
+
+	// Same margin as everything else reported by a client: both of them moved during the round trip.
+	static constexpr float ReviveMarginCm = 200.0f;
+	const float Distance = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
+	if (Distance > Target->ReviveRange + ReviveMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to revive %s from %.0f cm, reach is %.0f - rejected"),
+			*GetName(), *Target->GetName(), Distance, Target->ReviveRange);
+		return;
+	}
+
+	Target->ReviveFromDowned();
 }
 
 void AShooterCharacter::PossessedBy(AController* NewController)
@@ -647,14 +813,12 @@ void AShooterCharacter::OnRep_CurrentHP()
 	// so this is where a client's HUD and death visuals catch up.
 	BroadcastHealthChanged();
 
-	if (CurrentHP <= 0.0f && !bHasPlayedLocalDeath)
-	{
-		bHasPlayedLocalDeath = true;
-		// Safe on a client: the only authority-side line in Die() is the team score, and
-		// GetAuthGameMode() already returns null here. Everything else is local presentation.
-		Die();
-	}
-	else if (CurrentHP > 0.0f)
+	// Zero HP no longer means "play the death" on its own: it is also what going down looks like,
+	// and the two are told apart by flags of their own. Driving the presentation off HP here would
+	// race them — replicated fields arrive in no guaranteed order, so a downed player whose HP
+	// landed first would start dying before the flag saying otherwise turned up. See
+	// OnRep_IsDowned and OnRep_TerminalDeath.
+	if (CurrentHP > 0.0f)
 	{
 		// Respawn or heal: allow the next death to play again.
 		bHasPlayedLocalDeath = false;
@@ -1117,7 +1281,18 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	// Have we depleted HP?
 	if (CurrentHP <= 0.0f)
 	{
-		Die();
+		// Going down is not dying. The team loses a pair of hands and gains something to do about
+		// it; the run only actually ends once nobody is left to do it, which is the question
+		// ShouldRunEndOnThisDeath already answers. Note the order: this player is at zero HP by now,
+		// so it counts itself as down and the last one standing falling really is the last.
+		if (!bIsDowned && !ShouldRunEndOnThisDeath())
+		{
+			EnterDownedState();
+		}
+		else
+		{
+			Die();
+		}
 	}
 
 	// update health/armor listeners
@@ -4461,6 +4636,14 @@ void AShooterCharacter::RestoreArmor(float Amount)
 
 void AShooterCharacter::Die()
 {
+	// Tell everyone else this one is terminal, so their copy plays the death instead of guessing
+	// from HP that looks identical to being downed.
+	if (HasAuthority())
+	{
+		bTerminalDeath = true;
+	}
+	bHasPlayedLocalDeath = true;
+
 	// Cancel any in-progress ability cast. The character is REUSED on respawn (not destroyed),
 	// so AbilityComponent::EndPlay never runs and bIsCasting would carry a stuck cast into the
 	// next life — locking firing / ability activation / weapon swap permanently.
