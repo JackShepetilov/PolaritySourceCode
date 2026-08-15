@@ -190,6 +190,12 @@ void AShooterCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Applied from BOTH ends: here on the authority and on any machine whose archetype already
+	// carries the class (a client spawning BP_WizardCharacter has the pointer before this runs), and
+	// again from OnRep_ClassDefinition if it arrives later. Depending on only one of the two is the
+	// mistake that made HP, death and the HUD each fail silently in turn.
+	ApplyClassDefinition();
+
 	// ==================== Restore run-scoped upgrades (cross-level carry) ====================
 	// The character is rebuilt on every OpenLevel; the run's upgrade ledger lives on the
 	// GameInstance (URunSubsystem) and is re-applied here, then kept in sync as the player
@@ -477,6 +483,10 @@ void AShooterCharacter::DoAim(float Yaw, float Pitch)
 void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// Everyone, not owner-only: which class a teammate is decides how they look and what they can do
+	// with an item, and both of those are things the other players need to see.
+	DOREPLIFETIME(AShooterCharacter, ClassDefinition);
 
 	DOREPLIFETIME(AShooterCharacter, CurrentHP);
 	DOREPLIFETIME(AShooterCharacter, CurrentArmor);
@@ -2917,6 +2927,51 @@ void AShooterCharacter::Landed(const FHitResult& Hit)
 	EquipStartingWeaponAnimated();
 
 	UE_LOG(LogTemp, Log, TEXT("[RUN_DEBUG] Run-launch landed -> grant starting weapon"));
+}
+
+void AShooterCharacter::OnRep_ClassDefinition()
+{
+	ApplyClassDefinition();
+}
+
+EClassItemVerb AShooterCharacter::GetItemVerb() const
+{
+	return ClassDefinition ? ClassDefinition->ItemVerb : EClassItemVerb::None;
+}
+
+void AShooterCharacter::ApplyClassDefinition()
+{
+	if (!ClassDefinition)
+	{
+		// Classless is a supported state, not an error: every map and test that predates classes
+		// still spawns BP_ShooterCharacter directly.
+		return;
+	}
+
+	// The starting weapon is only supplied, not granted. Handing it over this way means the run-start
+	// path, the animated draw and everything built around them keep working untouched.
+	if (ClassDefinition->StartingWeaponClass)
+	{
+		StartingWeaponClass = ClassDefinition->StartingWeaponClass;
+	}
+
+	// Abilities are inventory, and inventory belongs to the server — UAbilityComponent::AddAbility
+	// refuses a client outright. The client learns its loadout when the slots replicate down, which
+	// is the same road a picked-up ability travels.
+	if (HasAuthority() && AbilityComponent)
+	{
+		if (ClassDefinition->PassiveAbility)
+		{
+			AbilityComponent->AddAbility(ClassDefinition->PassiveAbility);
+		}
+		if (ClassDefinition->ActiveAbility)
+		{
+			AbilityComponent->AddAbility(ClassDefinition->ActiveAbility);
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s applied class '%s' role=%d verb=%d"),
+		*GetName(), *GetNameSafe(ClassDefinition), (int32)GetLocalRole(), (int32)ClassDefinition->ItemVerb);
 }
 
 void AShooterCharacter::EquipStartingWeaponAnimated()

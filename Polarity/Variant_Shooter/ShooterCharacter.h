@@ -7,6 +7,7 @@
 #include "ShooterWeaponHolder.h"
 #include "ApexMovementComponent.h"
 #include "TutorialTypes.h"
+#include "Variant_Shooter/Classes/PlayerClassDefinition.h"
 #include "ShooterCharacter.generated.h"
 
 class AShooterWeapon;
@@ -1781,9 +1782,34 @@ public:
 	// ==================== Run Start Launch ====================
 
 	/** Weapon granted (with the animated draw) when the player first lands at the start of a run.
-	 *  Single weapon for now; hub loadout selection will set this later. */
+	 *  Supplied by the class definition when there is one; kept editable for maps and tests that
+	 *  predate classes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run Start")
 	TSubclassOf<AShooterWeapon> StartingWeaponClass;
+
+	// ==================== Player class ====================
+
+	/** Which class this character is, as data. Set as a default on the class Blueprint
+	 *  (BP_WizardCharacter and friends); see UPlayerClassDefinition for why it is data and not a C++
+	 *  subclass, and for what deliberately does NOT live in it.
+	 *
+	 *  Replicated even though a class Blueprint's default arrives with the archetype anyway, so that
+	 *  changing class at runtime later needs no rework here. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, ReplicatedUsing = OnRep_ClassDefinition, Category = "Player Class")
+	TObjectPtr<class UPlayerClassDefinition> ClassDefinition;
+
+	UFUNCTION()
+	void OnRep_ClassDefinition();
+
+	/** Push the class's data into the character: starting weapon, item verb, abilities.
+	 *
+	 *  Runs on every machine, but only the authority grants abilities — the inventory is the
+	 *  server's and replicates down. Safe to call more than once. */
+	void ApplyClassDefinition();
+
+	/** What this character does with a fully charged object, from its class. None when classless. */
+	UFUNCTION(BlueprintPure, Category = "Player Class")
+	EClassItemVerb GetItemVerb() const;
 
 	/** True from the opening sea-toss launch until the first landing. */
 	UPROPERTY(BlueprintReadOnly, Category = "Run Start")
