@@ -1084,6 +1084,17 @@ public:
 	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
 		AShooterWeapon* Weapon);
 
+	/** The same road for a punch. Melee needs its own because Server_ReportDamage is keyed on a
+	 *  weapon the character owns, and a fist is not a weapon — every melee report would have been
+	 *  rejected as "damage with a weapon it does not own". Reliable, for the same reason: a dropped
+	 *  hit is a lost kill.
+	 *
+	 *  Checked against the SERVER's own UMeleeAttackComponent settings, not against anything the
+	 *  client sent: reach comes from the swing plus whatever the lunge could have closed, and the
+	 *  ceiling from the base damage plus headroom for upgrade multipliers that do not replicate. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReportMeleeDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
+
 	/** Ask the server for the authoritative projectile, at the transform this client already fired
 	 *  its own stand-in from. Reliable: a lost one is a shot that never happened for anybody else.
 	 *

@@ -1085,6 +1085,59 @@ void UMeleeAttackComponent::PerformHitDetection()
 	}
 }
 
+void UMeleeAttackComponent::DealMeleeDamage(AActor* HitActor, float Damage,
+	TSubclassOf<UDamageType> DamageTypeClass, const FHitResult& HitResult, const FVector& ShotDirection)
+{
+	if (!HitActor || !OwnerCharacter || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	if (OwnerCharacter->HasAuthority())
+	{
+		FPointDamageEvent DamageEvent(Damage, HitResult, ShotDirection, DamageTypeClass);
+		HitActor->TakeDamage(Damage, DamageEvent, OwnerCharacter->GetController(), OwnerCharacter);
+		return;
+	}
+
+	// Client: health belongs to the server, so a local TakeDamage changes nothing on any machine —
+	// which is precisely why a client's punches used to do nothing at all. Report it instead and let
+	// the authority decide, exactly as a client's gunfire does through DealDamage.
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (!ShooterChar)
+	{
+		// Not a player character (an NPC's melee component on a client), and nothing to report
+		// through. Said out loud rather than returning quietly: a silent return here would read as
+		// "the hit never happened" in a log that shows the swing landing.
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s landed a melee hit on a client but is not a ShooterCharacter - %.0f damage dropped"),
+			*OwnerCharacter->GetName(), Damage);
+		return;
+	}
+
+	ShooterChar->Server_ReportMeleeDamage(HitActor, Damage, DamageTypeClass);
+}
+
+float UMeleeAttackComponent::GetMaxReportedSingleHitDamage() const
+{
+	// A melee component with no base damage configured still needs a non-zero ceiling, or every
+	// reported hit would clamp to nothing. Mirrors AShooterWeapon::GetMaxReportedSingleHitDamage.
+	const float Base = Settings.BaseDamage > 0.0f ? Settings.BaseDamage : 1.0f;
+	return Base
+		* FMath::Max(Settings.HeadshotMultiplier, 1.0f)
+		* FMath::Max(Settings.MaxReportedDamageMultiplier, 1.0f);
+}
+
+float UMeleeAttackComponent::GetMaxReportedReach() const
+{
+	// The swing itself, plus the ground the approach could have covered before it landed. The lunge
+	// and the dropkick dive are alternatives, never both at once, so the larger of the two is the
+	// honest bound.
+	const float Approach = FMath::Max(
+		Settings.bEnableLunge ? Settings.LungeRange : 0.0f,
+		Settings.bEnableDropKick ? Settings.DropKickMaxRange : 0.0f);
+	return Settings.AttackRange + Approach;
+}
+
 float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& HitResult)
 {
 	if (!HitActor || !OwnerCharacter)
@@ -1106,7 +1159,6 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 
 	float TotalDamage = 0.0f;
 	FVector TraceDir = GetTraceDirection();
-	AController* InstigatorController = OwnerCharacter->GetController();
 
 	// ==================== 1. Apply Base Melee Damage ====================
 	float BaseDamage = Settings.BaseDamage;
@@ -1143,14 +1195,7 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 
 	if (BaseDamage > 0.0f)
 	{
-		FPointDamageEvent BaseDamageEvent(
-			BaseDamage,
-			HitResult,
-			TraceDir,
-			Settings.DamageType  // DamageType_Melee - Base category
-		);
-
-		HitActor->TakeDamage(BaseDamage, BaseDamageEvent, InstigatorController, OwnerCharacter);
+		DealMeleeDamage(HitActor, BaseDamage, Settings.DamageType, HitResult, TraceDir);
 		TotalDamage += BaseDamage;
 	}
 
@@ -1158,14 +1203,7 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 	float MomentumDamage = CalculateMomentumDamage(HitActor);
 	if (MomentumDamage > 0.0f)
 	{
-		FPointDamageEvent MomentumDamageEvent(
-			MomentumDamage,
-			HitResult,
-			TraceDir,
-			UDamageType_MomentumBonus::StaticClass()  // Kinetic category
-		);
-
-		HitActor->TakeDamage(MomentumDamage, MomentumDamageEvent, InstigatorController, OwnerCharacter);
+		DealMeleeDamage(HitActor, MomentumDamage, UDamageType_MomentumBonus::StaticClass(), HitResult, TraceDir);
 		TotalDamage += MomentumDamage;
 	}
 
@@ -1173,14 +1211,7 @@ float UMeleeAttackComponent::ApplyDamage(AActor* HitActor, const FHitResult& Hit
 	float DropKickDamage = CalculateDropKickBonusDamage();
 	if (DropKickDamage > 0.0f)
 	{
-		FPointDamageEvent DropKickDamageEvent(
-			DropKickDamage,
-			HitResult,
-			TraceDir,
-			UDamageType_Dropkick::StaticClass()  // Kinetic category
-		);
-
-		HitActor->TakeDamage(DropKickDamage, DropKickDamageEvent, InstigatorController, OwnerCharacter);
+		DealMeleeDamage(HitActor, DropKickDamage, UDamageType_Dropkick::StaticClass(), HitResult, TraceDir);
 		TotalDamage += DropKickDamage;
 	}
 

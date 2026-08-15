@@ -2399,8 +2399,14 @@ void UApexMovementComponent::StartMeleeLunge()
 
 	// Edge only, never per frame: two of these lines, one from each machine, are what tells you the
 	// server started the same flight as the client instead of quietly not starting one.
-	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge START role=%d target=%d homing=%d startVel=%.0f to=(%.0f,%.0f,%.0f)"),
+	//
+	// The pawn name is in there because the role is not enough to read this log. On a listen server
+	// the host's OWN character and every client's character are both ROLE_Authority, so a host log
+	// full of role=3 says nothing about whose swing it was. "own" marks the pawn this machine drives.
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge START %s role=%d own=%d target=%d homing=%d startVel=%.0f to=(%.0f,%.0f,%.0f)"),
+		*GetNameSafe(CharacterOwner),
 		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+		(CharacterOwner && CharacterOwner->IsLocallyControlled()) ? 1 : 0,
 		bMeleeLungeHasTarget ? 1 : 0, bMeleeLungeHoming ? 1 : 0,
 		MeleeLungeStartVelocity.Size(), MeleeLungeTarget.X, MeleeLungeTarget.Y, MeleeLungeTarget.Z);
 }
@@ -2429,8 +2435,10 @@ void UApexMovementComponent::EndMeleeLunge()
 		GravityScale = MovementSettings ? MovementSettings->DefaultGravityScale : 1.5f;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge END role=%d gravityWasOff=%d restored=%d vel=%.0f"),
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge END %s role=%d own=%d gravityWasOff=%d restored=%d vel=%.0f"),
+		*GetNameSafe(CharacterOwner),
 		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+		(CharacterOwner && CharacterOwner->IsLocallyControlled()) ? 1 : 0,
 		bMeleeLungeGravityOff ? 1 : 0, bMeleeLungeRestoreOnEnd ? 1 : 0, Velocity.Size());
 
 	bMeleeLungeGravityOff = false;

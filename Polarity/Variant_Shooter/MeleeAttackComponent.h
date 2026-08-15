@@ -112,6 +112,13 @@ struct FMeleeAttackSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage")
 	TSubclassOf<UDamageType> DamageType;
 
+	/** Headroom the server allows over BaseDamage * HeadshotMultiplier when a client reports a melee
+	 *  hit. Upgrade multipliers (Backstab is 3x) live on the swinger's machine and are not replicated,
+	 *  so the authority cannot re-derive the real number and clamps to this instead. Mirrors
+	 *  AShooterWeapon::MaxReportedDamageMultiplier. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage", meta = (ClampMin = "1.0"))
+	float MaxReportedDamageMultiplier = 4.0f;
+
 	/** Impulse applied to hit physics objects */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage", meta = (ClampMin = "0"))
 	float HitImpulse = 500.0f;
@@ -539,6 +546,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	float GetTagDamageMultiplier(AActor* Target) const;
 
+	// ==================== Coop damage validation ====================
+	// Read by AShooterCharacter::Server_ReportMeleeDamage off the SERVER's own copy of this component,
+	// never off numbers the client sent. Both machines have it with the same Blueprint defaults.
+
+	/** Ceiling the authority clamps a reported melee hit to. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Validation")
+	float GetMaxReportedSingleHitDamage() const;
+
+	/** Furthest a melee hit can legitimately land from the swinger: the swing itself plus whatever
+	 *  the lunge or the dive could have closed on the way in. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Validation")
+	float GetMaxReportedReach() const;
+
 	// ==================== External Control ====================
 
 	/** When true, CanAttack() returns false. Set by ShooterCharacter when a melee weapon is equipped. */
@@ -937,6 +957,15 @@ protected:
 
 	/** Apply damage to hit actor, returns final damage dealt */
 	float ApplyDamage(AActor* HitActor, const FHitResult& HitResult);
+
+	/** One portion of a melee hit, routed to whoever is allowed to apply it.
+	 *
+	 *  On the authority this is a plain TakeDamage. On a client it is a report to the server, because
+	 *  health is the server's and a client calling TakeDamage locally changes nothing anywhere — which
+	 *  is exactly why a client's punches did nothing at all before this existed. Mirrors
+	 *  AShooterCharacter::DealDamage, which does the same job for gunfire. */
+	void DealMeleeDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
+		const FHitResult& HitResult, const FVector& ShotDirection);
 
 	/** Check if hit is a headshot */
 	bool IsHeadshot(const FHitResult& HitResult) const;

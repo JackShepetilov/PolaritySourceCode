@@ -971,6 +971,62 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 	Client_ConfirmDamageDealt(Weapon, HitActor, ActualDamage, IsTargetDead(HitActor));
 }
 
+void AShooterCharacter::Server_ReportMeleeDamage_Implementation(AActor* HitActor, float Damage,
+	TSubclassOf<UDamageType> DamageTypeClass)
+{
+	if (!HitActor || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	// Same trust model as a reported shot, and the same deliberate looseness: the client did the
+	// tracing, because that is what makes a punch feel instant, and the server checks that the answer
+	// is possible rather than re-deriving it. Everything here either clamps or rejects something that
+	// cannot happen in normal play.
+	if (HitActor == this)
+	{
+		return;
+	}
+
+	const UMeleeAttackComponent* Melee = MeleeAttackComponent;
+	if (!Melee)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a melee hit but has no melee component - rejected"),
+			*GetName());
+		return;
+	}
+
+	// The margin covers the ground both parties gave up during the round trip, exactly as it does for
+	// a shot. A melee reach is short, so this is proportionally generous on purpose: rejecting an
+	// honest hit costs a kill, and the ceiling below is what actually bounds the damage.
+	static constexpr float ReachMarginCm = 500.0f;
+	const float DistanceToTarget = FVector::Dist(GetActorLocation(), HitActor->GetActorLocation());
+	const float Reach = Melee->GetMaxReportedReach();
+	if (DistanceToTarget > Reach + ReachMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a melee hit at %.0f cm, melee reaches %.0f - rejected"),
+			*GetName(), DistanceToTarget, Reach);
+		return;
+	}
+
+	const float DamageCeiling = Melee->GetMaxReportedSingleHitDamage();
+	if (Damage > DamageCeiling)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported %.0f melee damage, ceiling is %.0f - clamped"),
+			*GetName(), Damage, DamageCeiling);
+		Damage = DamageCeiling;
+	}
+
+	FPointDamageEvent DamageEvent;
+	DamageEvent.DamageTypeClass = DamageTypeClass;
+	if (!DamageEvent.DamageTypeClass)
+	{
+		DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+	}
+
+	HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+}
+
 void AShooterCharacter::Client_ConfirmDamageDealt_Implementation(AShooterWeapon* Weapon, AActor* HitActor,
 	float ActualDamage, bool bKilled)
 {
