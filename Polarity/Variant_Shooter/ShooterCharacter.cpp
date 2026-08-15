@@ -21,6 +21,7 @@
 #include "WeaponRecoilComponent.h"
 #include "HitMarkerComponent.h"
 #include "MeleeAttackComponent.h"
+#include "AI/Coordination/ThreatComponent.h"
 #include "ChargeAnimationComponent.h"
 #include "ApexMovementComponent.h"
 #include "EMFVelocityModifier.h"
@@ -132,6 +133,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the charge animation component
 	ChargeAnimationComponent = CreateDefaultSubobject<UChargeAnimationComponent>(TEXT("Charge Animation Component"));
+
+	// create the threat component — the AI reads this to decide who to come after
+	ThreatComponent = CreateDefaultSubobject<UThreatComponent>(TEXT("Threat Component"));
 
 	// holds a captured prop as a physics constraint rather than a spring force — see the header
 	PropPhysicsHandle = CreateDefaultSubobject<UPhysicsHandleComponent>(TEXT("Prop Physics Handle"));

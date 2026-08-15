@@ -61,6 +61,13 @@ AAICombatCoordinator::AAICombatCoordinator()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickInterval = 0.1f; // 10Hz
+
+	// Debug drawing on by default while the group work is being looked at. This actor is spawned
+	// from C++ rather than placed, so there is no Blueprint to tick these on in, and turning them
+	// off means editing here again. Turn them off when the formations stop being interesting.
+	bDrawDebug = true;
+	bDrawBattleCircle = true;
+	bDrawRoleDebug = true;
 }
 
 void AAICombatCoordinator::BeginPlay()

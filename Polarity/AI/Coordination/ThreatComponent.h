@@ -54,11 +54,12 @@ public:
 
 	/** Threat added per point of damage this player deals to an enemy.
 	 *
-	 *  Zero by default, which means the mechanic is built and switched off. Hurting something making
-	 *  it turn on you is the most obvious source there is, but how strongly it should do that is a
-	 *  balance decision, and turning it on changes how every existing fight behaves. One number. */
+	 *  Set to a TEST value, not a balanced one: at 0.01 a fifty-point melee hit is worth half a point
+	 *  of threat, which makes that player look about a third closer for the next few seconds, and
+	 *  sustained fire stacks. Enough to see the mechanic work and far too crude to ship. How hard
+	 *  hurting something should make it turn on you is a balance decision. One number. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Threat", meta = (ClampMin = "0.0"))
-	float ThreatPerDamagePoint = 0.0f;
+	float ThreatPerDamagePoint = 0.01f;
 
 	/** How long a damage-driven impulse takes to fade. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Threat", meta = (ClampMin = "0.1"))

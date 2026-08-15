@@ -163,6 +163,12 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UChargeAnimationComponent* ChargeAnimationComponent;
 
+	/** How loudly this player is asking to be attacked. Read by the AI coordinator when it decides
+	 *  who each enemy should be fighting; a character without one is simply never louder than their
+	 *  distance, which is how targeting behaved before threat existed. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	class UThreatComponent* ThreatComponent;
+
 	/** Holds a captured physics prop in front of this character.
 	 *
 	 *  A held prop used to be pulled by a spring force, which cannot keep it in the hand: a spring
