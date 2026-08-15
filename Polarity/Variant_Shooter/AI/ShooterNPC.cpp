@@ -1303,6 +1303,59 @@ void AShooterNPC::PlayDeathVisuals()
 	}
 }
 
+void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier)
+{
+	if (!HasAuthority() || Duration <= 0.0f || bIsDead)
+	{
+		return;
+	}
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+
+	// Remember the speed on the FIRST application only. Re-applying while it is already running must
+	// not save the already-slowed speed as the thing to restore, or repeated casts would ratchet the
+	// enemy down to a crawl permanently.
+	if (!bShieldBypassActive && MoveComp)
+	{
+		ShieldBypassSavedWalkSpeed = MoveComp->MaxWalkSpeed;
+	}
+
+	bShieldBypassActive = true;
+
+	if (MoveComp && MoveSpeedMultiplier > 0.0f)
+	{
+		MoveComp->MaxWalkSpeed = ShieldBypassSavedWalkSpeed * MoveSpeedMultiplier;
+	}
+
+	// Refreshes rather than stacks: a second cast extends the window, it does not open a second one.
+	GetWorld()->GetTimerManager().SetTimer(ShieldBypassTimer, this, &AShooterNPC::EndShieldBypass,
+		Duration, false);
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s shield bypassed for %.1fs, speed %.0f -> %.0f"),
+		*GetName(), Duration, ShieldBypassSavedWalkSpeed,
+		MoveComp ? MoveComp->MaxWalkSpeed : -1.0f);
+}
+
+void AShooterNPC::EndShieldBypass()
+{
+	if (!bShieldBypassActive)
+	{
+		return;
+	}
+
+	bShieldBypassActive = false;
+
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		if (ShieldBypassSavedWalkSpeed > 0.0f)
+		{
+			MoveComp->MaxWalkSpeed = ShieldBypassSavedWalkSpeed;
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s shield bypass ended"), *GetName());
+}
+
 void AShooterNPC::OnRep_CurrentHP()
 {
 	OnHealthChanged.Broadcast(this, CurrentHP);
@@ -1326,6 +1379,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, ReplicatedDeathMode);
 	DOREPLIFETIME(AShooterNPC, bIsDead);
 	DOREPLIFETIME(AShooterNPC, CurrentHP);
+	DOREPLIFETIME(AShooterNPC, bShieldBypassActive);
 }
 
 void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)

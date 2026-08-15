@@ -1,6 +1,7 @@
 // ShooterWeapon_Laser.cpp
 
 #include "ShooterWeapon_Laser.h"
+#include "Engine/DamageEvents.h"
 #include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
 #include "NiagaraComponent.h"
@@ -340,6 +341,27 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 	if (UNPCRiotShieldComponent::ShouldBlockBodyIonization(Target, HitComponent))
 	{
 		return;
+	}
+
+	// Wizard's active: while this enemy is opened up, the beam stops filling its shield and hurts it
+	// directly instead. This is the one place the substitution can live — ionization IS the shield,
+	// so anywhere else would be adding a second meaning for the same beam.
+	//
+	// Authority only, like all damage. On a client the beam simply does nothing here, and the health
+	// it takes off arrives as replicated HP, which is how every other client-side hit already works.
+	if (AShooterNPC* BypassedNPC = Cast<AShooterNPC>(Target))
+	{
+		if (BypassedNPC->IsShieldBypassed())
+		{
+			if (GetOwner() && GetOwner()->HasAuthority())
+			{
+				FPointDamageEvent DamageEvent;
+				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+				BypassedNPC->TakeDamage(IonizationChargePerSecond * DeltaTime, DamageEvent,
+					GetInstigatorController(), GetOwner());
+			}
+			return;
+		}
 	}
 
 	const float ChargeStep = IonizationChargePerSecond * DeltaTime;

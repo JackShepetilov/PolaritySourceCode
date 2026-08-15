@@ -156,6 +156,26 @@ public:
 	UFUNCTION()
 	void OnRep_CurrentHP();
 
+	// ==================== Shield bypass (Wizard active) ====================
+
+	/** While true, ionization aimed at this enemy is converted into health damage instead of charge.
+	 *
+	 *  This is the "skip the opening phase" button: the whole time-to-kill is normally two phases,
+	 *  strip the shield then execute, and this collapses the first one for a few seconds.
+	 *
+	 *  Replicated so other machines can show it — an enemy that can suddenly be hurt directly has to
+	 *  be readable across the room, or the team cannot act on it. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Coop|Shield Bypass")
+	bool bShieldBypassActive = false;
+
+	/** Open this enemy up for the given time, and slow it while it lasts. Authority only.
+	 *  Re-applying refreshes the timer rather than stacking. */
+	UFUNCTION(BlueprintCallable, Category = "Coop|Shield Bypass")
+	void ApplyShieldBypass(float Duration, float MoveSpeedMultiplier);
+
+	UFUNCTION(BlueprintPure, Category = "Coop|Shield Bypass")
+	bool IsShieldBypassed() const { return bShieldBypassActive; }
+
 	/** Fired wherever health changed: on the authority when damage lands, on a client when the new
 	 *  value arrives. Anything drawing a health bar should listen here rather than to OnDamageTaken,
 	 *  which only ever fires where the damage was applied. */
@@ -378,6 +398,13 @@ protected:
 
 	/** Deferred destruction on death timer */
 	FTimerHandle DeathTimer;
+
+	/** Shield bypass bookkeeping. The walk speed is remembered rather than recomputed so the slow
+	 *  restores to whatever the NPC actually had, not to a class default that something else may
+	 *  have already changed. */
+	FTimerHandle ShieldBypassTimer;
+	float ShieldBypassSavedWalkSpeed = 0.0f;
+	void EndShieldBypass();
 
 	// ==================== Charge Overlay Materials ====================
 
