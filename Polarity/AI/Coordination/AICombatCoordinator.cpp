@@ -1363,10 +1363,13 @@ void AAICombatCoordinator::DrawDebugInfo()
 	const float DebugDuration = 0.0f;
 
 	// Engagement range
-	if (PrimaryTarget.IsValid() && MaxEngagementDistance > 0.0f)
+	for (const FTargetGroup& EngagementGroup : Groups)
 	{
-		DrawDebugSphere(GetWorld(), PrimaryTarget->GetActorLocation(), MaxEngagementDistance,
+	if (EngagementGroup.Target.IsValid() && MaxEngagementDistance > 0.0f)
+	{
+		DrawDebugSphere(GetWorld(), EngagementGroup.Target->GetActorLocation(), MaxEngagementDistance,
 			24, FColor::Green, false, DebugDuration, 0, 5.0f);
+	}
 	}
 
 	// Per-NPC status
@@ -1441,10 +1444,13 @@ void AAICombatCoordinator::DrawDebugInfo()
 
 		DrawDebugSphere(GetWorld(), HeadLocation, 25.0f, 8, StatusColor, false, DebugDuration, 0, 2.0f);
 
-		if (Data.bIsCurrentlyAttacking && PrimaryTarget.IsValid())
+		if (Data.bIsCurrentlyAttacking)
 		{
-			DrawDebugLine(GetWorld(), NPCLocation, PrimaryTarget->GetActorLocation(),
-				DebugColorAttacking, false, DebugDuration, 0, 3.0f);
+			if (const AActor* AttackTarget = Data.Target.Get())
+			{
+				DrawDebugLine(GetWorld(), NPCLocation, AttackTarget->GetActorLocation(),
+					DebugColorAttacking, false, DebugDuration, 0, 3.0f);
+			}
 		}
 
 		DrawDebugString(GetWorld(), HeadLocation + FVector(0, 0, 30.0f),
@@ -1632,7 +1638,9 @@ void AAICombatCoordinator::RequestStrafeSlot(APawn* Drone, float OrbitDistance, 
 {
 	if (!Drone) return;
 
-	AActor* Target = PrimaryTarget.Get();
+	// The drone orbits the player IT is hunting. Orbiting PrimaryTarget put every drone in a ring
+	// around the busiest player regardless of who it had actually picked.
+	AActor* Target = ResolveTargetFor(Drone);
 	if (!Target)
 	{
 		// Fallback: use drone's current position
@@ -1774,6 +1782,9 @@ void AAICombatCoordinator::ReleaseStrafeSlot(APawn* Drone)
 
 void AAICombatCoordinator::UpdateEnemyClusterDirection()
 {
+	// Still one direction for the whole fight rather than one per group. It biases where kamikaze
+	// drones enter from, which is a coarse hint and not a position, so the busiest player is a
+	// reasonable centre for it. Per-group would be the tidier answer if the hint ever gets sharper.
 	if (!PrimaryTarget.IsValid())
 	{
 		CachedClusterDirection = FVector::ZeroVector;

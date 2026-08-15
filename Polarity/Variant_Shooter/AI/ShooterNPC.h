@@ -360,6 +360,22 @@ protected:
 	 *  server alone, and the last of which a client is not even allowed to do. */
 	void PlayDeathVisuals();
 
+	/** The exact reverse of PlayDeathVisuals: ragdoll off, mesh back on the capsule and visible,
+	 *  collision and movement restored. Safe on any machine, and idempotent.
+	 *
+	 *  Shared by ResetForPool on the authority and by Multicast_OnRecycled on clients, so the body a
+	 *  client watched die is put back together by the same code that put the server's together. */
+	void RestoreBodyAfterDeath();
+
+	/** Tell every machine this enemy has been recycled, and where to.
+	 *
+	 *  Carries the transform rather than letting it arrive on its own: clearing bIsDead and moving
+	 *  the actor are two separate pieces of replication with no ordering between them, and a client
+	 *  that revived the body before the new position landed would show the corpse standing up at the
+	 *  spot it died. One reliable call keeps them together. */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_OnRecycled(FVector NewLocation, FRotator NewRotation);
+
 	/** Deferred destruction on death timer */
 	FTimerHandle DeathTimer;
 

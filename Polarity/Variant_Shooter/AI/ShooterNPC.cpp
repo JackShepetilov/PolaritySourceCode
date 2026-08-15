@@ -1175,6 +1175,75 @@ void AShooterNPC::Die()
 	}
 }
 
+void AShooterNPC::RestoreBodyAfterDeath()
+{
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		// 1. Stop ragdoll physics
+		MeshComp->SetSimulatePhysics(false);
+		MeshComp->SetAllBodiesSimulatePhysics(false);
+		MeshComp->bPauseAnims = false;
+		MeshComp->bBlendPhysics = false;
+
+		// 2. Snap mesh back to capsule (ragdoll may have displaced it)
+		const ACharacter* CharCDO = GetClass()->GetDefaultObject<ACharacter>();
+		MeshComp->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+		MeshComp->SetRelativeLocation(CharCDO->GetMesh()->GetRelativeLocation());
+		MeshComp->SetRelativeRotation(CharCDO->GetMesh()->GetRelativeRotation());
+
+		// 3. Reset animation to clear ragdoll bone poses
+		MeshComp->InitAnim(true);
+
+		// 4. Restore visibility and collision
+		MeshComp->SetVisibility(true);
+		MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		MeshComp->SetComponentTickEnabled(true);
+	}
+
+	SetActorHiddenInGame(false);
+	SetActorEnableCollision(true);
+	SetActorTickEnabled(true);
+
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Capsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	}
+
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->SetMovementMode(MOVE_Walking);
+		if (const AShooterNPC* NPCCDO = GetClass()->GetDefaultObject<AShooterNPC>())
+		{
+			if (const UCharacterMovementComponent* DefaultMoveComp = NPCCDO->GetCharacterMovement())
+			{
+				MoveComp->GravityScale = DefaultMoveComp->GravityScale;
+			}
+		}
+		MoveComp->SetComponentTickEnabled(true);
+	}
+}
+
+void AShooterNPC::Multicast_OnRecycled_Implementation(FVector NewLocation, FRotator NewRotation)
+{
+	// The authority has already done all of this, and doing it twice would be harmless but wasteful.
+	if (HasAuthority())
+	{
+		return;
+	}
+
+	// Position first, then the body. The other way round shows the corpse standing up where it died
+	// for however long it takes the move to arrive, which is the entire reason this carries the
+	// transform instead of trusting replication order.
+	SetActorLocation(NewLocation);
+	SetActorRotation(NewRotation);
+
+	RestoreBodyAfterDeath();
+
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s recycled on a client at %s"),
+		*GetName(), *NewLocation.ToString());
+}
+
 void AShooterNPC::PlayDeathVisuals()
 {
 	// Runs on the server from Die() and on every client from OnRep_IsDead. Nothing in here may
@@ -1294,18 +1363,9 @@ void AShooterNPC::DeferredDestruction()
 
 // ==================== Pool Recycling ====================
 
-// TODO(COOP): recycling is not replicated. This is the project's chosen model -- NPC actors are
-// never destroyed, they are reset and moved to wherever the next one would have spawned -- and it
-// runs on the authority alone, so a client sees the body it watched die stand up in place instead
-// of a fresh enemy arriving somewhere else.
-//
-// bIsDead already replicates (see OnRep_IsDead), so the shape of the fix is: clearing it has to
-// mean something on the far side too. A client needs to undo exactly what PlayDeathVisuals did --
-// capsule collision, mesh visibility, ragdoll off -- and it needs the new transform to have landed
-// first, or it un-hides the corpse at the old spot for a frame. Reviving through the same flag that
-// killed is the whole trick: one value, two edges.
-//
-// Deliberately deferred by the author, 2026-08-15. Do not do it as a side effect of something else.
+// Recycling reaches the clients through Multicast_OnRecycled at the end of this function. The model
+// is the author's and settled: NPC actors are never destroyed, they are reset and moved to wherever
+// the next one would have spawned.
 void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRotation)
 {
 	// --- Core state ---
@@ -1378,56 +1438,14 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	TM.ClearTimer(EMFProximityDamageTimer);
 	TM.ClearTimer(DeathTimer);
 
-	// --- Mesh: stop physics BEFORE teleport (ragdoll displaces mesh from capsule) ---
-	if (USkeletalMeshComponent* MeshComp = GetMesh())
-	{
-		// 1. Stop ragdoll physics
-		MeshComp->SetSimulatePhysics(false);
-		MeshComp->SetAllBodiesSimulatePhysics(false);
-		MeshComp->bPauseAnims = false;
-		MeshComp->bBlendPhysics = false;
-
-		// 2. Snap mesh back to capsule (ragdoll may have displaced it)
-		const ACharacter* CharCDO = GetClass()->GetDefaultObject<ACharacter>();
-		MeshComp->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-		MeshComp->SetRelativeLocation(CharCDO->GetMesh()->GetRelativeLocation());
-		MeshComp->SetRelativeRotation(CharCDO->GetMesh()->GetRelativeRotation());
-
-		// 3. Reset animation to clear ragdoll bone poses
-		MeshComp->InitAnim(true);
-
-		// 4. Restore visibility and collision
-		MeshComp->SetVisibility(true);
-		MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		MeshComp->SetComponentTickEnabled(true);
-	}
+	// --- Body: ragdoll off, mesh back, collision and movement restored ---
+	// Shared with the clients through Multicast_OnRecycled, so both ends put the body back the same
+	// way. Runs before the teleport because a ragdoll displaces the mesh from the capsule.
+	RestoreBodyAfterDeath();
 
 	// --- Teleport ---
 	SetActorLocation(NewLocation);
 	SetActorRotation(NewRotation);
-
-	// --- Re-enable actor ---
-	SetActorHiddenInGame(false);
-	SetActorEnableCollision(true);
-	SetActorTickEnabled(true);
-
-	// --- Capsule ---
-	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
-	{
-		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		Capsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-	}
-
-	// --- Movement ---
-	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
-	{
-		MoveComp->SetMovementMode(MOVE_Walking);
-		if (const UCharacterMovementComponent* DefaultMoveComp = CDO->GetCharacterMovement())
-		{
-			MoveComp->GravityScale = DefaultMoveComp->GravityScale;
-		}
-		MoveComp->SetComponentTickEnabled(true);
-	}
 
 	// --- EMF components ---
 	if (EMFVelocityModifier)
@@ -1513,6 +1531,9 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	{
 		ApplyExplosionStun(999999.0f, ReverseChannelingStunMontage);
 	}
+
+	// And tell everybody else, carrying the transform so the revive and the move land together.
+	Multicast_OnRecycled(NewLocation, NewRotation);
 
 	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::ResetForPool — %s recycled at %s"), *GetName(), *NewLocation.ToString());
 }
