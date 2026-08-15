@@ -10,6 +10,10 @@
 #include "Weapons/DroppedRangedWeapon.h"
 #include "Weapons/RiotShield.h"
 #include "UI/EMFChargeWidgetSubsystem.h"
+// Full types, not forward declarations: TSubclassOf of each is an RPC parameter, and the generated
+// thunk needs StaticClass().
+#include "UI/EMFChargeWidget.h"
+#include "UI/CaptureReticleWidget.h"
 #include "AI/ShooterNPC.h"
 #include "ShooterDummyInterface.h"
 #include "MovementSettings.h"
@@ -484,6 +488,14 @@ void AShooterCharacter::PossessedBy(AController* NewController)
 	// The server possesses the pawn after BeginPlay has already run, so this is where the host
 	// finally has a controller to build its HUD against.
 	CreateLocalHUD();
+
+	// And where the owning client can be told what the over-prop charge widgets look like. Read from
+	// the server's own subsystem, which the GameMode blueprint filled in at BeginPlay. On the host
+	// this call runs locally and sets what is already set, which costs nothing.
+	if (const UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr)
+	{
+		Client_ConfigureChargeWidgets(Sub->WidgetClass, Sub->ReticleWidgetClass);
+	}
 }
 
 void AShooterCharacter::OnRep_Controller()
@@ -505,6 +517,17 @@ void AShooterCharacter::CreateLocalHUD()
 
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->IsLocalController())
+	{
+		return;
+	}
+
+	// The controller has to already own this pawn, not merely be attached to it. The HUD's Construct
+	// reads Get Owning Player Pawn once and caches what it finds — on a client the pawn pointer and
+	// the controller pointer arrive by separate replication paths in no fixed order, so building the
+	// widget on the earlier of the two handed the blueprint a null pawn, the cast failed, and the
+	// HUD sat there doing nothing for the rest of the match. Wait for the pair to be complete;
+	// AShooterPlayerController::BindToPossessedCharacter calls back in once it is.
+	if (PC->GetPawn() != this)
 	{
 		return;
 	}
@@ -553,6 +576,30 @@ void AShooterCharacter::Client_DismissLoadingCover_Implementation()
 		LocalLoadingCover->RemoveFromParent();
 		LocalLoadingCover = nullptr;
 	}
+}
+
+void AShooterCharacter::Client_ConfigureChargeWidgets_Implementation(TSubclassOf<UEMFChargeWidget> InWidgetClass,
+	TSubclassOf<UCaptureReticleWidget> InReticleClass)
+{
+	UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr;
+	if (!Sub)
+	{
+		return;
+	}
+
+	if (InWidgetClass)
+	{
+		Sub->WidgetClass = InWidgetClass;
+	}
+	if (InReticleClass)
+	{
+		Sub->ReticleWidgetClass = InReticleClass;
+	}
+
+	// Anything registered while the class was missing is sitting in the pending queue; the
+	// subsystem's own tick drains it as soon as WidgetClass is set.
+	UE_LOG(LogTemp, Log, TEXT("[COOP_DEBUG] %s received charge widget classes: bar=%s reticle=%s"),
+		*GetName(), *GetNameSafe(InWidgetClass), *GetNameSafe(InReticleClass));
 }
 
 void AShooterCharacter::OnRep_OwnedWeapons()

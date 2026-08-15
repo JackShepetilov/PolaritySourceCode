@@ -322,6 +322,12 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 		// add the player tag
 		ShooterCharacter->Tags.AddUnique(PlayerPawnTag);
 
+		// The HUD belongs here for the same reason every binding below does: this is the one moment
+		// both sides agree the controller and the pawn belong to each other. The widget's Construct
+		// reads the owning pawn once and keeps it, so building it any earlier on a client gave it a
+		// null pawn and a HUD that never updated again. Idempotent, like the bindings.
+		ShooterCharacter->CreateLocalHUD();
+
 		// subscribe to the pawn's delegates
 		ShooterCharacter->OnBulletCountUpdated.RemoveDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);
 		ShooterCharacter->OnBulletCountUpdated.AddDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);

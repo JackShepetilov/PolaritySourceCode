@@ -317,9 +317,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "0.0"))
 	float HoldAngularDamping = 500.0f;
 
-	/** How far (cm) the prop may sit from the hand before it counts as stuck on something. */
+	/** How far (cm) the prop may sit from the hand before it counts as stuck on something.
+	 *  Measured on the bench: simply running and turning puts the prop up to ~180 cm behind the hand
+	 *  for a moment, so a threshold under that fires on ordinary movement and drops the prop's world
+	 *  collision while nothing is actually blocking it. This has to sit above normal catch-up. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Hold", meta = (ClampMin = "10.0", Units = "cm"))
-	float HoldStuckDistance = 150.0f;
+	float HoldStuckDistance = 300.0f;
 
 	/** How long (seconds) the prop may stay stuck before it is pulled through whatever is holding it
 	 *  up. Short enough not to feel broken, long enough that squeezing past a doorframe reads as

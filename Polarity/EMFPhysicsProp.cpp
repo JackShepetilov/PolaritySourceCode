@@ -296,6 +296,28 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 		ReplicatedCharge = GetCharge();
 	}
 
+	// Watchdog: a prop must never stay marked as somebody's when nobody is holding it. See the
+	// comment on LastHeldReportTime. Without this the prop is quietly un-grabbable for everyone
+	// else, with nothing in any log to say why — the capture simply refuses.
+	if (HasAuthority() && HoldingCharacter)
+	{
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		static constexpr float HoldSilenceTimeout = 1.0f;
+		static constexpr float MaxFlightSeconds = 6.0f;
+
+		const bool bHolderGone = !IsValid(HoldingCharacter);
+		const bool bHolderSilent = !bIsInReverseFlight && (Now - LastHeldReportTime) > HoldSilenceTimeout;
+		const bool bFlightOverran = bIsInReverseFlight && (Now - RemoteLaunchStartTime) > MaxFlightSeconds;
+
+		if (bHolderGone || bHolderSilent || bFlightOverran)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s released by watchdog (gone=%d silent=%d flightOverran=%d)"),
+				*GetName(), bHolderGone ? 1 : 0, bHolderSilent ? 1 : 0, bFlightOverran ? 1 : 0);
+			bIsInReverseFlight = false;
+			EndRemoteHold();
+		}
+	}
+
 	if (bCanBeCaptured && CapturingPlate.IsValid())
 	{
 		UpdateCaptureForces(DeltaTime);
@@ -746,6 +768,7 @@ void AEMFPhysicsProp::BeginRemoteHold(AShooterCharacter* Holder, float HolderCap
 
 	HoldingCharacter = Holder;
 	HeldCaptureRange = HolderCaptureRange;
+	LastHeldReportTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	SetSpendingCharacter(Holder);
 
 	// The server stops driving this prop itself — it becomes a kinematic mirror of whatever the
@@ -783,6 +806,10 @@ void AEMFPhysicsProp::ApplyHeldTransform(const FVector& Location, const FRotator
 {
 	SetActorLocationAndRotation(Location, Rotation);
 	LastReportedVelocity = LinearVelocity;
+
+	// Proof the holder is still there. Silence past a second is how the watchdog above notices a
+	// hold that ended without anybody saying so.
+	LastHeldReportTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 }
 
 AShooterCharacter* AEMFPhysicsProp::GetSpendingCharacter() const
@@ -1138,6 +1165,7 @@ void AEMFPhysicsProp::BeginRemoteLaunch(AShooterCharacter* Thrower)
 	ReverseLaunchElapsed = 0.0f;
 	bAirMailEligibleFlight = true;
 	bAirMailBounceConsumed = false;
+	RemoteLaunchStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 
 	// The range the thrower reported when it grabbed this. Deriving it here instead gave zero, because
 	// range is a product of the player's charge and the server does not have a client's charge: the

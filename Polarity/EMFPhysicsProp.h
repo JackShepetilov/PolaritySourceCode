@@ -849,6 +849,15 @@ private:
 	/** See GetHeldCaptureRange. Server-side only, set from the holder's report at capture. */
 	float HeldCaptureRange = 0.0f;
 
+	/** World time of the last transform its holder reported, and of the moment a throw began.
+	 *  A hold is only ever ended by the holder letting go, or by a thrown prop hitting something.
+	 *  Both can go missing — a throw that never lands a blocking hit (an Air Mail bounce clears the
+	 *  flight flag, a prop can simply coast to rest) leaves the prop marked as somebody's forever,
+	 *  and then nobody else can pick it up, silently. These two stamps are what the watchdog in Tick
+	 *  uses to notice that and hand the prop back. */
+	float LastHeldReportTime = 0.0f;
+	float RemoteLaunchStartTime = 0.0f;
+
 	/** Distance from the hand last tick, so the hold can tell "still reeling it in" from "losing it".
 	 *  Reset on capture. See UpdateHeldByHandle. */
 	float PreviousHoldDistance = BIG_NUMBER;

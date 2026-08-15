@@ -20,6 +20,8 @@ class UChargeAnimationComponent;
 class UPhysicsHandleComponent;
 class UShooterUI;
 class UUserWidget;
+class UEMFChargeWidget;
+class UCaptureReticleWidget;
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
@@ -1077,6 +1079,18 @@ public:
 
 	UFUNCTION(Client, Reliable)
 	void Client_DismissLoadingCover();
+
+	/** Hand this player's machine the widget classes for the charge bars over props and the capture
+	 *  reticle.
+	 *
+	 *  UEMFChargeWidgetSubsystem exists on every machine and registers props on every machine, but
+	 *  nothing in C++ ever sets its WidgetClass: the GameMode blueprint does, and a GameMode exists
+	 *  only on the server. So a client registered every prop and then held them all in the pending
+	 *  queue forever, waiting for a class that was never coming — no charge bars, no grab prompt.
+	 *  The server reads its own subsystem and passes the answer down. */
+	UFUNCTION(Client, Reliable)
+	void Client_ConfigureChargeWidgets(TSubclassOf<UEMFChargeWidget> InWidgetClass,
+		TSubclassOf<UCaptureReticleWidget> InReticleClass);
 
 	/** This machine's loading cover, if one is up. */
 	UPROPERTY(Transient)

@@ -755,6 +755,13 @@ void UChargeAnimationComponent::GrabPropWithHandle(AEMFPhysicsProp* Prop)
 	Handle->SetAngularStiffness(HoldAngularStiffness);
 	Handle->SetAngularDamping(HoldAngularDamping);
 
+	// The handle chases its own target before the constraint even starts pulling (bInterpolateTarget
+	// with InterpolationSpeed 50 by default), which is lag stacked on lag: the measured hold fell up
+	// to 180 cm behind a running player and then caught up, and that catch-up is what reads as the
+	// prop arriving in the hand twice. The hand is not a place the prop should have to chase — the
+	// target goes exactly where the plate is, and the constraint alone decides how hard to pull.
+	Handle->bInterpolateTarget = false;
+
 	HeldPropStuckTime = 0.0f;
 	HeldPropRelativeRotation = ChannelingPlateActor
 		? ChannelingPlateActor->GetActorQuat().Inverse() * Prop->GetActorQuat()
@@ -1491,8 +1498,13 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		// Try Physics Prop
 		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
 		{
+			// These three used to refuse in silence, which is why a prop that could not be grabbed
+			// left nothing at all in the log to explain it. Same tag as the dropped-weapon scan.
 			if (!Prop->bCanBeCaptured || Prop->IsCapturedByPlate() || Prop->IsDead())
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Prop %s skipped: canBeCaptured=%d capturedByPlate=%d dead=%d holder=%s"),
+					*Prop->GetName(), Prop->bCanBeCaptured ? 1 : 0, Prop->IsCapturedByPlate() ? 1 : 0,
+					Prop->IsDead() ? 1 : 0, *GetNameSafe(Prop->GetHoldingCharacter()));
 				continue;
 			}
 
@@ -1501,6 +1513,13 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			const float PropCaptureRange = EvaluateCaptureRange(FMath::Abs(Prop->GetCharge()));
 			if (PropCaptureRange < 1.0f || DistSq > PropCaptureRange * PropCaptureRange || DistSq < 1.0f)
 			{
+				// The puller's own charge is half of the range formula, and a zero there makes the
+				// range zero for every prop at once regardless of distance — which reads in game as
+				// "nothing is grabbable" with no icon and no explanation.
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Prop %s out of reach: propCharge=%.1f playerCharge=%.1f range=%.0f dist=%.0f"),
+					*Prop->GetName(), Prop->GetCharge(),
+					CachedEMFModifier ? CachedEMFModifier->GetCharge() : -999.0f,
+					PropCaptureRange, FMath::Sqrt(DistSq));
 				continue;
 			}
 
@@ -1728,6 +1747,8 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	// rejects, and it would never resolve since nothing here retries or times out.
 	if (AShooterCharacter* Holder = Prop->GetHoldingCharacter(); Holder && Holder != ShooterCharacter)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] CaptureProp %s refused: already held by %s"),
+			*Prop->GetName(), *Holder->GetName());
 		return;
 	}
 
@@ -1736,6 +1757,8 @@ void UChargeAnimationComponent::CaptureProp(AEMFPhysicsProp* Prop)
 	const float PropCharge = Prop->GetCharge();
 	if (FMath::IsNearlyZero(PropCharge) || PropCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] CaptureProp %s refused on charge: propCharge=%.1f channelingSign=%d (need opposite)"),
+			*Prop->GetName(), PropCharge, ChannelingChargeSign);
 		return;
 	}
 
