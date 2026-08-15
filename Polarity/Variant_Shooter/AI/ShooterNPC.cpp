@@ -1259,6 +1259,18 @@ void AShooterNPC::DeferredDestruction()
 
 // ==================== Pool Recycling ====================
 
+// TODO(COOP): recycling is not replicated. This is the project's chosen model -- NPC actors are
+// never destroyed, they are reset and moved to wherever the next one would have spawned -- and it
+// runs on the authority alone, so a client sees the body it watched die stand up in place instead
+// of a fresh enemy arriving somewhere else.
+//
+// bIsDead already replicates (see OnRep_IsDead), so the shape of the fix is: clearing it has to
+// mean something on the far side too. A client needs to undo exactly what PlayDeathVisuals did --
+// capsule collision, mesh visibility, ragdoll off -- and it needs the new transform to have landed
+// first, or it un-hides the corpse at the old spot for a frame. Reviving through the same flag that
+// killed is the whole trick: one value, two edges.
+//
+// Deliberately deferred by the author, 2026-08-15. Do not do it as a side effect of something else.
 void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRotation)
 {
 	// --- Core state ---
