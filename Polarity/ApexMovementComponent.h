@@ -69,15 +69,20 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPreVelocityUpdate, float, FVector&);
  *
  * The engine gives a movement component four spare bits inside the move it already sends every
  * frame (FSavedMove_Character::FLAG_Custom_0..3). Sprint, slide, wallrun and slide-on-land filled
- * all four, and dash and mantle had nowhere to go, so this project sends its own byte instead. It
- * costs one byte per move and only when something is actually happening, because zero is omitted
- * from the stream entirely.
+ * all four, and dash and mantle had nowhere to go, so this project sends its own word instead. It
+ * costs two bytes per move and only when something is actually happening, because zero is omitted
+ * from the stream entirely — a character that is walking normally pays one bit.
  *
  * Each entry is a DECISION the owning client made, never a measurement it took. The server re-derives
  * every number for itself: told "wall running", it runs its own trace and finds its own wall, and if
  * it finds none, no wallrun happens. Geometry from a client is not trusted.
+ *
+ * The melee lunge is the one exception, and a deliberate one: the target POSITION travels alongside
+ * the flags (see FCharacterNetworkMoveData_Polarity::MeleeLungeTarget). Letting the server pick its
+ * own lunge target from the view rotation would have the two ends fly at different enemies whenever
+ * two of them stand close together, which is the exact desync this is meant to remove.
  */
-enum class EPolarityMoveFlag : uint8
+enum class EPolarityMoveFlag : uint16
 {
 	None             = 0,
 	WantsToSprint    = 1 << 0,
@@ -90,6 +95,17 @@ enum class EPolarityMoveFlag : uint8
 	/** An air dash that is being steered mid-flight rather than flying straight. */
 	AirDashRedirect  = 1 << 6,
 	Mantling         = 1 << 7,
+	/** A melee swing is driving velocity this move: the character holds the speed the swing started
+	 *  with instead of braking, which is what makes a punch at 2000 u/s stay a punch at 2000 u/s. */
+	MeleeLunging     = 1 << 8,
+	/** The swing found somebody. Gravity is off for the flight, and Z is restored from the swing's
+	 *  start speed rather than left wherever the flight put it. */
+	MeleeLungeHasTarget = 1 << 9,
+	/** Flying at MeleeLungeTarget right now, as opposed to holding momentum next to a target that has
+	 *  already been hit or knocked back. */
+	MeleeLungeHoming = 1 << 10,
+	/** The swing missed: hand the character back the momentum it started with when the lunge ends. */
+	MeleeLungeRestore = 1 << 11,
 };
 ENUM_CLASS_FLAGS(EPolarityMoveFlag);
 
@@ -102,7 +118,11 @@ struct FCharacterNetworkMoveData_Polarity : public FCharacterNetworkMoveData
 {
 	typedef FCharacterNetworkMoveData Super;
 
-	uint8 PolarityFlags = 0;
+	uint16 PolarityFlags = 0;
+
+	/** Where the melee lunge is flying, in world space. On the wire only while MeleeLungeHoming is
+	 *  set — that flag is its presence bit, so it costs nothing at all the rest of the time. */
+	FVector_NetQuantize10 MeleeLungeTarget = FVector::ZeroVector;
 
 	virtual void ClientFillNetworkMoveData(const FSavedMove_Character& ClientMove, ENetworkMoveType MoveType) override;
 	virtual bool Serialize(UCharacterMovementComponent& CharacterMovement, FArchive& Ar,
@@ -317,12 +337,15 @@ public:
 	virtual void MoveAutonomous(float ClientTimeStamp, float DeltaTime, uint8 CompressedFlags,
 		const FVector& NewAccel) override;
 
-	/** The byte from the move currently being unpacked. Server side only, valid for the length of
+	/** The flags from the move currently being unpacked. Server side only, valid for the length of
 	 *  one ServerMove_PerformMovement call. */
-	uint8 PendingPolarityFlags = 0;
+	uint16 PendingPolarityFlags = 0;
 
-	/** What this character is doing right now, as the byte that goes on the wire. */
-	uint8 PackPolarityMoveFlags() const;
+	/** The lunge target from that same move. Applied together with the flags in MoveAutonomous. */
+	FVector PendingMeleeLungeTarget = FVector::ZeroVector;
+
+	/** What this character is doing right now, as the flags that go on the wire. */
+	uint16 PackPolarityMoveFlags() const;
 
 	/** Turns a received byte into actual state. Assignment for the plain intents, and real entry and
 	 *  exit calls for anything that has to set up more than a bool: a side that only flipped
@@ -330,14 +353,14 @@ public:
 	 *  "sliding works for one player and stutters for the other". Wallrun, dash and mantle are the
 	 *  same shape, so they go through their own Start/End here too. The geometry is re-derived
 	 *  locally, never taken from the client. */
-	void ApplyPolarityMoveFlags(uint8 Flags);
+	void ApplyPolarityMoveFlags(uint16 Flags);
 
 	/** The replay counterpart: plain assignment, no entry or exit calls.
 	 *
 	 *  A replay re-runs a move that was already simulated once from exactly this state, so calling
 	 *  StartSlide and friends again would apply their entry effects a second time on top of a
 	 *  velocity that already contains them. */
-	void ApplyPolarityMoveFlagsForReplay(uint8 Flags);
+	void ApplyPolarityMoveFlagsForReplay(uint16 Flags);
 
 	/** The character's own mechanics that write velocity before the move is integrated: mantle,
 	 *  wallrun, dash and the wall checks feeding them. The engine calls this inside PerformMovement,
@@ -637,6 +660,33 @@ public:
 	UPROPERTY()
 	float ExternalSlideMaxSpeedBurst = 0.0f;
 
+	// ==================== Melee lunge ====================
+	// UMeleeAttackComponent decides WHETHER to lunge and WHERE to; the flight itself lives here,
+	// because everything that writes Velocity has to run inside the simulated move or the server
+	// never re-runs it. Driven from the melee component's tick on the owning client and from the
+	// received flags on the server — the two never both write, because a remote client's melee
+	// component on the server is idle (it is fed by local input, which the server does not have).
+
+	/** Publish this frame's lunge decision. Safe to call every frame with the same values.
+	 *
+	 *  @param bLunging    the swing is in a phase that drives velocity (windup / active)
+	 *  @param bHasTarget  the swing acquired somebody, so gravity stays off for the flight
+	 *  @param bHoming     fly at InTarget right now, rather than just holding momentum
+	 *  @param InTarget    world position to fly to; ignored unless bHoming */
+	void SetMeleeLungeIntent(bool bLunging, bool bHasTarget, bool bHoming, const FVector& InTarget);
+
+	/** The swing ended without connecting: the momentum it started with is handed back when the
+	 *  lunge stops, so a miss does not cost the player their run. Cleared by the next lunge. */
+	void SetMeleeLungeRestoreOnEnd(bool bRestore) { bMeleeLungeRestoreOnEnd = bRestore; }
+
+	/** Tunables mirrored from FMeleeAttackSettings so this side does not have to reach into the melee
+	 *  component. Mirrored once in UMeleeAttackComponent::BeginPlay, which runs on every machine from
+	 *  the same Blueprint defaults, so both ends fly at the same speed. */
+	void SetMeleeLungeTuning(float MaxSpeed, float MomentumRatio, bool bDisableGravity);
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsMeleeLunging() const { return bIsMeleeLunging; }
+
 	// ==================== EMF ====================
 
 	UFUNCTION(BlueprintCallable, Category = "Apex|EMF")
@@ -674,6 +724,62 @@ protected:
 	TObjectPtr<APlayerController> OwnerController;
 	// Input tracking for jump lurch
 	FVector2D CurrentMoveInput = FVector2D::ZeroVector;
+
+	// ==================== Melee lunge state ====================
+	// All of it is per-move state, restored by FSavedMove_Polarity::PrepMoveFor before a replay.
+
+	/** The decision: the melee swing wants velocity this move. This is what travels, set either by
+	 *  the melee component here or by the flags off the wire on the server. */
+	bool bMeleeLungeWanted = false;
+
+	/** The state: a lunge is actually running. Kept apart from the decision above so that entry and
+	 *  exit are resolved in UpdateCharacterStateBeforeMovement, i.e. INSIDE the simulated move, on
+	 *  every machine at the same simulated moment. Doing it where the decision is made would put the
+	 *  captured momentum and the miss impulse one frame apart on the two ends. */
+	bool bIsMeleeLunging = false;
+
+	/** This lunge has a target, so gravity is off and Z is owned by the flight. */
+	bool bMeleeLungeHasTarget = false;
+
+	/** Flying at MeleeLungeTarget, as opposed to holding momentum beside a target already hit. */
+	bool bMeleeLungeHoming = false;
+
+	/** The swing missed, so EndMeleeLunge gives the entry momentum back. */
+	bool bMeleeLungeRestoreOnEnd = false;
+
+	/** THIS lunge is the one holding gravity at zero, decided once at entry and not re-derived after.
+	 *  bMeleeLungeHasTarget can go false in the middle of a flight — the enemy dies, or gets knocked
+	 *  out of the world — and deriving the restore from it would leave the character with gravity
+	 *  switched off for the rest of the run. */
+	bool bMeleeLungeGravityOff = false;
+
+	/** Where the flight is going, world space. Recomputed every frame by the melee component on the
+	 *  owning client and taken off the wire on the server — never re-derived locally, see
+	 *  EPolarityMoveFlag. */
+	FVector MeleeLungeTarget = FVector::ZeroVector;
+
+	/** The speed the swing started at, captured on this side when the lunge flag rises. A measurement,
+	 *  so each machine takes its own: by then both have simulated every earlier move identically. */
+	FVector MeleeLungeStartVelocity = FVector::ZeroVector;
+
+	/** Mirrored from FMeleeAttackSettings. @see SetMeleeLungeTuning */
+	float MeleeLungeMaxSpeed = 3000.0f;
+	float MeleeLungeMomentumRatio = 1.0f;
+	bool bMeleeLungeDisablesGravity = true;
+
+	/** Entry: capture the momentum to hold and kill gravity if the swing found somebody. */
+	void StartMeleeLunge();
+
+	/** Exit: gravity back, and the entry momentum back too if the swing missed. */
+	void EndMeleeLunge();
+
+	/** The flight itself, run from UpdateCharacterStateBeforeMovement. */
+	void UpdateMeleeLunge(float DeltaSeconds);
+
+	/** Turns gravity off for a flight that wants it off, and nothing else — the way back is
+	 *  EndMeleeLunge. GravityScale is plain component state and no part of the saved move, so a
+	 *  replay would otherwise keep whatever the last real move left there. */
+	void SyncMeleeLungeGravity();
 
 	// Slide state
 	float SlideCooldownRemaining = 0.0f;
@@ -823,9 +929,20 @@ class POLARITY_API FSavedMove_Polarity : public FSavedMove_Character
 public:
 	typedef FSavedMove_Character Super;
 
-	/** Everything the character decided to do during this move, as the byte that goes on the wire.
+	/** Everything the character decided to do during this move, as the flags that go on the wire.
 	 *  @see EPolarityMoveFlag */
-	uint8 SavedPolarityFlags;
+	uint16 SavedPolarityFlags;
+
+	/** The melee lunge's destination for this move. Unlike everything below this line it is not just
+	 *  replay state: it travels to the server too, because a lunge target is the one piece of geometry
+	 *  the server is not allowed to pick for itself. @see EPolarityMoveFlag */
+	FVector SavedMeleeLungeTarget;
+
+	/** The rest of the lunge, replay state only — the server derives these for itself, one from the
+	 *  flags and one by capturing its own velocity when the lunge starts. */
+	FVector SavedMeleeLungeStartVelocity;
+	uint8 bSavedMeleeLunging : 1;
+	uint8 bSavedMeleeLungeGravityOff : 1;
 
 	/** Predicted state below this line. It is NOT sent to the server: the server derives its own
 	 *  copy by running the same slides and jumps. These exist so that a *replay* on the client starts

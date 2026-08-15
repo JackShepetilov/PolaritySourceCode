@@ -607,14 +607,14 @@ void UApexMovementComponent::StopSprint()
 	bSprintKeyHeld = false;
 }
 
-uint8 UApexMovementComponent::PackPolarityMoveFlags() const
+uint16 UApexMovementComponent::PackPolarityMoveFlags() const
 {
-	uint8 Flags = 0;
+	uint16 Flags = 0;
 	auto Set = [&Flags](bool bCondition, EPolarityMoveFlag Flag)
 	{
 		if (bCondition)
 		{
-			Flags |= static_cast<uint8>(Flag);
+			Flags |= static_cast<uint16>(Flag);
 		}
 	};
 
@@ -627,14 +627,19 @@ uint8 UApexMovementComponent::PackPolarityMoveFlags() const
 	Set(bIsRedirecting,     EPolarityMoveFlag::AirDashRedirect);
 	Set(bIsMantling,        EPolarityMoveFlag::Mantling);
 
+	Set(bMeleeLungeWanted,        EPolarityMoveFlag::MeleeLunging);
+	Set(bMeleeLungeHasTarget,     EPolarityMoveFlag::MeleeLungeHasTarget);
+	Set(bMeleeLungeHoming,        EPolarityMoveFlag::MeleeLungeHoming);
+	Set(bMeleeLungeRestoreOnEnd,  EPolarityMoveFlag::MeleeLungeRestore);
+
 	return Flags;
 }
 
-void UApexMovementComponent::ApplyPolarityMoveFlags(uint8 Flags)
+void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
 {
 	auto Has = [Flags](EPolarityMoveFlag Flag)
 	{
-		return (Flags & static_cast<uint8>(Flag)) != 0;
+		return (Flags & static_cast<uint16>(Flag)) != 0;
 	};
 
 	// Plain intents: assigned straight across with no second-guessing. The byte already carries the
@@ -707,13 +712,23 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint8 Flags)
 	{
 		bIsMantling = false;
 	}
+
+	// The lunge is four plain decisions and a destination, all taken as given; the destination
+	// arrived with the move and was written into MeleeLungeTarget just before this call. Nothing is
+	// started or ended here on purpose — UpdateCharacterStateBeforeMovement resolves the edge inside
+	// the move a moment later, so the momentum capture and the miss impulse land on the same
+	// simulated frame here as they did on the client.
+	bMeleeLungeWanted       = Has(EPolarityMoveFlag::MeleeLunging);
+	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
+	bMeleeLungeHoming       = Has(EPolarityMoveFlag::MeleeLungeHoming);
+	bMeleeLungeRestoreOnEnd = Has(EPolarityMoveFlag::MeleeLungeRestore);
 }
 
-void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint8 Flags)
+void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint16 Flags)
 {
 	auto Has = [Flags](EPolarityMoveFlag Flag)
 	{
-		return (Flags & static_cast<uint8>(Flag)) != 0;
+		return (Flags & static_cast<uint16>(Flag)) != 0;
 	};
 
 	bWantsToSprint    = Has(EPolarityMoveFlag::WantsToSprint);
@@ -724,6 +739,17 @@ void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint8 Flags)
 	bIsAirDashing     = Has(EPolarityMoveFlag::AirDashing);
 	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
 	bIsMantling       = Has(EPolarityMoveFlag::Mantling);
+
+	bMeleeLungeWanted       = Has(EPolarityMoveFlag::MeleeLunging);
+	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
+	bMeleeLungeHoming       = Has(EPolarityMoveFlag::MeleeLungeHoming);
+	bMeleeLungeRestoreOnEnd = Has(EPolarityMoveFlag::MeleeLungeRestore);
+
+	// bIsMeleeLunging is restored by PrepMoveFor around this call, not from the flags: it is the
+	// state the move started in, and the flags carry the decision the move was made with. The gravity
+	// that goes with it is plain component state and no part of the saved move, so it has to be put
+	// back by hand or the replayed flight falls while the original one did not.
+	SyncMeleeLungeGravity();
 }
 
 // ==================== Client move on the wire ====================
@@ -734,7 +760,9 @@ void FCharacterNetworkMoveData_Polarity::ClientFillNetworkMoveData(const FSavedM
 	Super::ClientFillNetworkMoveData(ClientMove, MoveType);
 
 	// The engine only ever allocates our move type here (see FNetworkPredictionData_Client_Polarity).
-	PolarityFlags = static_cast<const FSavedMove_Polarity&>(ClientMove).SavedPolarityFlags;
+	const FSavedMove_Polarity& PolarityMove = static_cast<const FSavedMove_Polarity&>(ClientMove);
+	PolarityFlags     = PolarityMove.SavedPolarityFlags;
+	MeleeLungeTarget  = PolarityMove.SavedMeleeLungeTarget;
 }
 
 bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& CharacterMovement,
@@ -744,7 +772,23 @@ bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& 
 
 	// SerializeOptionalValue writes a single bit when the value is the default, which is the usual
 	// case: a character that is walking normally has none of these set and pays one bit per move.
-	SerializeOptionalValue<uint8>(Ar.IsSaving(), Ar, PolarityFlags, 0);
+	// Widening the flags from a byte to a word costs nothing while nothing is happening, and one
+	// extra byte only on the moves that actually carry a decision.
+	SerializeOptionalValue<uint16>(Ar.IsSaving(), Ar, PolarityFlags, 0);
+
+	// The lunge destination rides along only on the moves that have one, and the homing flag above is
+	// its presence bit — so it costs nothing at all until a swing is actually flying at somebody, and
+	// a quantised position (1/10 cm, the same precision the engine sends the character's own location
+	// at) for the handful of moves that lasts.
+	if ((PolarityFlags & static_cast<uint16>(EPolarityMoveFlag::MeleeLungeHoming)) != 0)
+	{
+		bool bLocalSuccess = true;
+		MeleeLungeTarget.NetSerialize(Ar, PackageMap, bLocalSuccess);
+	}
+	else if (Ar.IsLoading())
+	{
+		MeleeLungeTarget = FVector::ZeroVector;
+	}
 
 	return !Ar.IsError();
 }
@@ -754,7 +798,10 @@ void UApexMovementComponent::ServerMove_PerformMovement(const FCharacterNetworkM
 	// Only stash it here. The container guarantees the type, since we handed the engine our own, but
 	// this is too early to act on: the acceleration for this move has not been set yet, and wallrun
 	// entry and dash direction both read it. MoveAutonomous below applies it at the right moment.
-	PendingPolarityFlags = static_cast<const FCharacterNetworkMoveData_Polarity&>(MoveData).PolarityFlags;
+	const FCharacterNetworkMoveData_Polarity& PolarityData =
+		static_cast<const FCharacterNetworkMoveData_Polarity&>(MoveData);
+	PendingPolarityFlags     = PolarityData.PolarityFlags;
+	PendingMeleeLungeTarget  = PolarityData.MeleeLungeTarget;
 
 	Super::ServerMove_PerformMovement(MoveData);
 }
@@ -773,6 +820,10 @@ void UApexMovementComponent::MoveAutonomous(float ClientTimeStamp, float DeltaTi
 	{
 		Acceleration = ConstrainInputAcceleration(NewAccel);
 		Acceleration = Acceleration.GetClampedToMaxSize(GetMaxAcceleration());
+
+		// The destination goes in before the flags: ApplyPolarityMoveFlags starts the lunge, and a
+		// lunge that starts against last move's target flies at where the enemy used to be.
+		MeleeLungeTarget = PendingMeleeLungeTarget;
 		ApplyPolarityMoveFlags(PendingPolarityFlags);
 	}
 
@@ -808,6 +859,10 @@ FNetworkPredictionData_Client* UApexMovementComponent::GetPredictionData_Client(
 
 FSavedMove_Polarity::FSavedMove_Polarity()
 	: SavedPolarityFlags(0)
+	, SavedMeleeLungeTarget(FVector::ZeroVector)
+	, SavedMeleeLungeStartVelocity(FVector::ZeroVector)
+	, bSavedMeleeLunging(0)
+	, bSavedMeleeLungeGravityOff(0)
 	, bSavedJumpHeld(0)
 	, SavedSlideFatigueCounter(0)
 	, SavedSlideFatigueDecayTimer(0.0f)
@@ -829,6 +884,10 @@ void FSavedMove_Polarity::Clear()
 {
 	Super::Clear();
 	SavedPolarityFlags = 0;
+	SavedMeleeLungeTarget = FVector::ZeroVector;
+	SavedMeleeLungeStartVelocity = FVector::ZeroVector;
+	bSavedMeleeLunging = 0;
+	bSavedMeleeLungeGravityOff = 0;
 	bSavedJumpHeld = 0;
 	SavedSlideFatigueCounter = 0;
 	SavedSlideFatigueDecayTimer = 0.0f;
@@ -856,6 +915,13 @@ bool FSavedMove_Polarity::CanCombineWith(const FSavedMovePtr& NewMove, ACharacte
 	{
 		return false;
 	}
+	// The lunge destination moves with the enemy, so two lunging moves are only the same move if they
+	// were aimed at the same place. Merging them would send the server one flight to the newer target
+	// for a stretch the client flew in two directions.
+	if (NewPolarityMove && !SavedMeleeLungeTarget.Equals(NewPolarityMove->SavedMeleeLungeTarget, 0.1f))
+	{
+		return false;
+	}
 	return Super::CanCombineWith(NewMove, Character, MaxDelta);
 }
 
@@ -868,6 +934,13 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 	{
 		SavedPolarityFlags = Apex->PackPolarityMoveFlags();
 		bSavedJumpHeld     = Apex->bJumpHeld ? 1 : 0;
+
+		// Only worth sending while the flight is actually homing; otherwise it stays zero and the
+		// serializer spends one bit on it. @see FCharacterNetworkMoveData_Polarity::Serialize
+		SavedMeleeLungeTarget        = Apex->bMeleeLungeHoming ? Apex->MeleeLungeTarget : FVector::ZeroVector;
+		SavedMeleeLungeStartVelocity = Apex->MeleeLungeStartVelocity;
+		bSavedMeleeLunging           = Apex->bIsMeleeLunging ? 1 : 0;
+		bSavedMeleeLungeGravityOff   = Apex->bMeleeLungeGravityOff ? 1 : 0;
 
 		SavedSlideFatigueCounter    = Apex->SlideFatigueCounter;
 		SavedSlideFatigueDecayTimer = Apex->SlideFatigueDecayTimer;
@@ -896,6 +969,13 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 		// A replay restores the state wholesale rather than replaying the transitions: the move was
 		// already simulated once from exactly these values, so re-running StartSlide and friends
 		// would double their entry effects.
+		// The destination and the captured momentum go in before the flags: SyncMeleeLungeGravity at
+		// the end of ApplyPolarityMoveFlagsForReplay reads the restored flags, and UpdateMeleeLunge
+		// reads both of these on the very move being replayed.
+		Apex->MeleeLungeTarget        = SavedMeleeLungeTarget;
+		Apex->MeleeLungeStartVelocity = SavedMeleeLungeStartVelocity;
+		Apex->bIsMeleeLunging         = bSavedMeleeLunging != 0;
+		Apex->bMeleeLungeGravityOff   = bSavedMeleeLungeGravityOff != 0;
 		Apex->ApplyPolarityMoveFlagsForReplay(SavedPolarityFlags);
 		Apex->bJumpHeld = bSavedJumpHeld != 0;
 
@@ -2265,6 +2345,141 @@ bool UApexMovementComponent::IsAccelerationForward() const
 	return FVector::DotProduct(AccelDir, ViewDir) > 0.7f;
 }
 
+// ==================== Melee lunge ====================
+
+void UApexMovementComponent::SetMeleeLungeTuning(float MaxSpeed, float MomentumRatio, bool bDisableGravity)
+{
+	MeleeLungeMaxSpeed          = MaxSpeed;
+	MeleeLungeMomentumRatio     = MomentumRatio;
+	bMeleeLungeDisablesGravity  = bDisableGravity;
+}
+
+void UApexMovementComponent::SetMeleeLungeIntent(bool bLunging, bool bHasTarget, bool bHoming,
+	const FVector& InTarget)
+{
+	// Note what is NOT touched here: bMeleeLungeRestoreOnEnd, which the melee component sets on its
+	// own when it decides the swing missed, and bMeleeLungeGravityOff, which belongs to the flight
+	// that turned gravity off and is cleared by the flight that turns it back on.
+	bMeleeLungeWanted    = bLunging;
+	bMeleeLungeHasTarget = bLunging && bHasTarget;
+	bMeleeLungeHoming    = bLunging && bHoming;
+
+	// Kept at zero unless the flight is homing, so the saved move and the wire both stay empty for a
+	// lunge that is only holding momentum. @see FCharacterNetworkMoveData_Polarity::Serialize
+	MeleeLungeTarget = bMeleeLungeHoming ? InTarget : FVector::ZeroVector;
+}
+
+void UApexMovementComponent::SyncMeleeLungeGravity()
+{
+	// Deliberately one-way: this only ever turns gravity OFF for a flight that owns it. The way back
+	// is EndMeleeLunge, on the lunge's falling edge. A symmetric version that also restored the
+	// default would fire on every replayed move and stomp whoever else had gravity parked at zero at
+	// the time — UUpgrade_ChargedPunch does exactly that for its own flight.
+	//
+	// A wallrun owns gravity too for as long as it lasts (WallRunGravityScale), with EndWallRun
+	// putting it back. Leave it alone rather than fight over the same field.
+	if (bMeleeLungeGravityOff && !bIsWallRunning)
+	{
+		GravityScale = 0.0f;
+	}
+}
+
+void UApexMovementComponent::StartMeleeLunge()
+{
+	// The speed the swing began at, and the only thing the whole momentum system is built on: a
+	// punch thrown at 2000 u/s has to come out the other side still doing 2000 u/s. Measured, not
+	// received — by this move both ends have simulated everything before it the same way.
+	MeleeLungeStartVelocity = Velocity;
+
+	// Gravity off for a flight with a target, so the arc is a straight line at the enemy instead of
+	// a drop. A lunge with nobody to fly at keeps its gravity and just holds its speed. Decided here
+	// and here only — see bMeleeLungeGravityOff.
+	bMeleeLungeGravityOff = bMeleeLungeHasTarget && bMeleeLungeDisablesGravity;
+	SyncMeleeLungeGravity();
+
+	// Edge only, never per frame: two of these lines, one from each machine, are what tells you the
+	// server started the same flight as the client instead of quietly not starting one.
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge START role=%d target=%d homing=%d startVel=%.0f to=(%.0f,%.0f,%.0f)"),
+		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+		bMeleeLungeHasTarget ? 1 : 0, bMeleeLungeHoming ? 1 : 0,
+		MeleeLungeStartVelocity.Size(), MeleeLungeTarget.X, MeleeLungeTarget.Y, MeleeLungeTarget.Z);
+}
+
+void UApexMovementComponent::EndMeleeLunge()
+{
+	// A swing that missed gives the player their run back. Without this a whiff at full speed parks
+	// the character at the end of the flight, which is the one thing the momentum system exists to
+	// prevent. A swing that connected keeps whatever the flight left it with.
+	if (bMeleeLungeRestoreOnEnd)
+	{
+		FVector Restored = MeleeLungeStartVelocity * MeleeLungeMomentumRatio;
+		if (IsFalling())
+		{
+			// Don't fight gravity on the way down: the fall speed is the current one, not the one
+			// the swing started with.
+			Restored.Z = Velocity.Z;
+		}
+		Velocity = Restored;
+	}
+
+	// Gravity back. Only when this lunge is the one that took it away, and never over a wallrun,
+	// which manages the same field for itself.
+	if (bMeleeLungeGravityOff && !bIsWallRunning)
+	{
+		GravityScale = MovementSettings ? MovementSettings->DefaultGravityScale : 1.5f;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge END role=%d gravityWasOff=%d restored=%d vel=%.0f"),
+		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+		bMeleeLungeGravityOff ? 1 : 0, bMeleeLungeRestoreOnEnd ? 1 : 0, Velocity.Size());
+
+	bMeleeLungeGravityOff = false;
+	bMeleeLungeHasTarget  = false;
+	bMeleeLungeHoming     = false;
+	MeleeLungeTarget      = FVector::ZeroVector;
+}
+
+void UApexMovementComponent::UpdateMeleeLunge(float DeltaSeconds)
+{
+	if (bMeleeLungeHoming)
+	{
+		// Continuous proportional homing: speed is the remaining distance over this frame, capped at
+		// the lunge speed. Far away that is full speed; close in the step shrinks to exactly close
+		// the gap, which is what keeps a flight at a moving target (or a drone) from oscillating
+		// between "fly" and "hold". Full 3D, so Z converges too and nothing is left over for the
+		// moment gravity comes back on.
+		const FVector ToTarget = MeleeLungeTarget - UpdatedComponent->GetComponentLocation();
+		const float Distance = ToTarget.Size();
+
+		if (Distance > 1.0f)
+		{
+			const float SafeDt = FMath::Max(DeltaSeconds, 0.001f);
+			const float StepSpeed = FMath::Min(MeleeLungeMaxSpeed, Distance / SafeDt);
+			Velocity = (ToTarget / Distance) * StepSpeed;
+		}
+		else
+		{
+			// At the stop point. Gravity is off for a homing flight, so zeroing all three axes is
+			// safe and leaves nothing to drift on.
+			Velocity = FVector::ZeroVector;
+		}
+		return;
+	}
+
+	// Not homing: hold the speed the swing started with and let the axis that gravity owns keep
+	// whatever it has.
+	FVector Held = MeleeLungeStartVelocity * MeleeLungeMomentumRatio;
+	if (!bMeleeLungeHasTarget)
+	{
+		// No target was ever acquired, so gravity was never turned off and Z is a real fall.
+		Held.Z = Velocity.Z;
+	}
+	// With a target, Z stays the swing's starting Z: the homing that just stopped (a landed hit, a
+	// target knocked away) leaves a frozen vertical speed behind, and holding THAT with gravity off
+	// is the fly-away when you punch something from below.
+	Velocity = Held;
+}
+
 void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
 {
 	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
@@ -2307,6 +2522,29 @@ void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSecon
 		{
 			CheckForWallRun();
 		}
+	}
+
+	// The melee lunge goes last, and outside the chain above, because it overrides Velocity outright
+	// for as long as it lasts — the same thing it did from the melee component's tick, where it was
+	// whichever component ticked last that won. Both edges are resolved here rather than where the
+	// decision is made, so the momentum capture and the miss impulse happen on the same simulated
+	// move on the owning client, on the server and in a replay.
+	if (bMeleeLungeWanted != bIsMeleeLunging)
+	{
+		bIsMeleeLunging = bMeleeLungeWanted;
+		if (bIsMeleeLunging)
+		{
+			StartMeleeLunge();
+		}
+		else
+		{
+			EndMeleeLunge();
+		}
+	}
+
+	if (bIsMeleeLunging)
+	{
+		UpdateMeleeLunge(DeltaSeconds);
 	}
 }
 

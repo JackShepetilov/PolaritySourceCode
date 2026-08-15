@@ -50,6 +50,19 @@ void UMeleeAttackComponent::BeginPlay()
 		OwnerController = Cast<APlayerController>(OwnerCharacter->GetController());
 	}
 
+	// Hand the lunge tunables to the component that now does the flying. This runs on every machine
+	// — server included, where this component is otherwise idle for a remote player — and reads the
+	// same Blueprint defaults on each, so both ends fly at the same speed off the same settings
+	// without any of it going on the wire.
+	if (OwnerCharacter)
+	{
+		if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
+		{
+			Apex->SetMeleeLungeTuning(Settings.LungeMaxSpeed, Settings.MomentumPreservationRatio,
+				Settings.bDisableGravityDuringLunge);
+		}
+	}
+
 	// Initialize melee charges
 	MeleeCharges = Settings.MeleeMaxCharges;
 
@@ -217,6 +230,15 @@ bool UMeleeAttackComponent::StartAttack()
 	bHasHitThisAttack = false;
 	bHitEnemyThisAttack = false;
 	HitActorsThisAttack.Empty();
+	// The previous swing's miss verdict must not survive into this one, or a swing that connects
+	// still hands back the momentum of the one before it.
+	if (OwnerCharacter)
+	{
+		if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
+		{
+			Apex->SetMeleeLungeRestoreOnEnd(false);
+		}
+	}
 	MeshTransitionProgress = 0.0f;
 	MontageTimeElapsed = 0.0f;
 	bIsLoweringWeaponOnly = false; // This is a real attack, not just lowering
@@ -522,6 +544,12 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 
 		// One-shot forward boost when no lunge target was acquired.
 		// Natural friction/drag handles the falloff — no per-frame tug needed.
+		//
+		// NOTE: with bPreserveMomentum on (the shipped setting) this has no effect and never did.
+		// The swing is holding its entry speed for as long as it lasts, so the very next simulated
+		// move assigns Velocity outright and this addition is gone before it moves anybody. Left
+		// exactly as it was rather than quietly turned into a real boost — that is a feel change and
+		// the author's call. It is also why it was safe to leave behind in the tick.
 		if (!bIsDropKick && !MagnetismTarget.IsValid() && Settings.NoTargetBoostSpeed > 0.0f && OwnerCharacter)
 		{
 			if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
@@ -566,31 +594,16 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 			PlaySound(MissSound);
 
 			// ==================== Titanfall 2: Preserve Momentum on Miss ====================
-			// If player missed, restore their original momentum so they keep flying
-			// This is crucial for the Titanfall 2 feel - missing shouldn't punish your movement
+			// Missing must not punish your movement — the player keeps the speed they swung at.
+			// The impulse itself is applied by UApexMovementComponent when the lunge's falling edge
+			// is simulated, one move from now: writing Velocity from here is exactly the tick-side
+			// write this whole change exists to remove. This only records the decision, and the
+			// decision travels with the move.
 			if (Settings.bPreserveMomentum && OwnerCharacter)
 			{
-				if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+				if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
 				{
-					// Restore the velocity we had when we started the attack
-					FVector RestoredVelocity = OwnerVelocityAtAttackStart * Settings.MomentumPreservationRatio;
-
-					// Keep current Z velocity if we're falling (don't fight gravity)
-					if (Movement->IsFalling())
-					{
-						RestoredVelocity.Z = Movement->Velocity.Z;
-					}
-
-					Movement->Velocity = RestoredVelocity;
-
-#if WITH_EDITOR
-					if (GEngine)
-					{
-						GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Yellow,
-							FString::Printf(TEXT("Titanfall Melee Miss: Restored velocity %.0f"),
-								RestoredVelocity.Size()));
-					}
-#endif
+					Apex->SetMeleeLungeRestoreOnEnd(true);
 				}
 			}
 		}
@@ -1232,135 +1245,68 @@ bool UMeleeAttackComponent::IsHeadshot(const FHitResult& HitResult) const
 
 void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 {
-	// Only lunge during active phase
-	if (CurrentState != EMeleeAttackState::Active && CurrentState != EMeleeAttackState::Windup)
-	{
-		return;
-	}
-
-	if (!OwnerCharacter)
-	{
-		return;
-	}
-
-	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
-	if (!Movement)
-	{
-		return;
-	}
-
 	// ==================== Titanfall 2 Momentum System ====================
-	// Key principle: NEVER kill the player's momentum during melee
-	// This allows high-speed gameplay where you can punch while flying at 2000+ units/sec
-
-	if (Settings.bPreserveMomentum)
+	// Key principle: NEVER kill the player's momentum during melee. That is what lets you punch
+	// while flying at 2000+ units/sec and come out the other side still flying.
+	//
+	// This function no longer moves anybody. It decides, once per frame, WHETHER the swing wants
+	// velocity and WHERE it is flying, and hands that to UApexMovementComponent, which does the
+	// flying from inside the simulated move. The reason is networking, not tidiness: velocity
+	// written from a component tick is not part of the move the server replays, so the server
+	// simulated a walking player while the client flew, and corrected the client back every frame.
+	// The symptom was the usual one — it worked for the host and only for the host.
+	UApexMovementComponent* Apex = OwnerCharacter
+		? Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement())
+		: nullptr;
+	if (!Apex)
 	{
-		// Titanfall 2 style: Preserve original velocity, optionally add lunge boost
-
-		// Start with the velocity we had when we started the attack
-		// IMPORTANT: Only preserve XY velocity, let Z be affected by gravity naturally
-		FVector PreservedVelocity = OwnerVelocityAtAttackStart * Settings.MomentumPreservationRatio;
-		PreservedVelocity.Z = Movement->Velocity.Z; // Keep current Z velocity (gravity applied)
-
-		// Stop homing the instant the target is knocked back, otherwise the player keeps
-		// driving into the spot the enemy just vacated (mirrors the UpdateMagnetism guard).
-		bool bTargetInKnockback = false;
-		if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(MagnetismTarget.Get()))
-		{
-			bTargetInKnockback = TargetNPC->IsInKnockback();
-		}
-
-		// If we have a lunge target, move toward it.
-		// bHasHitThisAttack gate: once the hit has landed, never resume homing — otherwise,
-		// if the target's knockback stun ends while the Active phase is still running, the
-		// player gets dragged toward the enemy a second time.
-		if (Settings.bEnableLunge && MagnetismTarget.IsValid() && !bTargetInKnockback && !bHasHitThisAttack)
-		{
-			// ==================== Distance-Based Homing ====================
-			// LungeTargetPosition is refreshed each frame in UpdateMagnetism (XY+Z tracks the
-			// moving target). Here we drive velocity straight at the current position at
-			// LungeMaxSpeed, clamped to "don't overshoot in one frame". The lunge ends when
-			// the player arrives OR when the Active phase timer expires — not on a fixed clock.
-			FVector PlayerPos = OwnerCharacter->GetActorLocation();
-			FVector ToLungeTarget = LungeTargetPosition - PlayerPos;
-			float DistToLungeTarget = ToLungeTarget.Size();
-
-			// Optional gate: require minimum starting speed (TF2 default is 0 = works stationary)
-			float CurrentSpeed = OwnerVelocityAtAttackStart.Size();
-			const bool bSpeedGatePassed = CurrentSpeed >= Settings.MinSpeedForLunge;
-
-			if (bSpeedGatePassed && DistToLungeTarget > 1.0f)
-			{
-				// ==================== Continuous Proportional Homing (jitter fix v2) ====================
-				// Speed is proportional to the remaining distance, capped at LungeMaxSpeed: far away we
-				// fly at full speed, close-in the step shrinks to exactly close the gap this frame.
-				// No arrival radius and no fallback to attack-start velocity — the previous bang-bang
-				// HOLD<->HOMING flip (jitter against moving targets / flying drones) cannot happen.
-				// Full 3D: Z converges to the stop point too, so no residual vertical speed is left
-				// for the moment gravity comes back on.
-				const float SafeDt = FMath::Max(DeltaTime, 0.001f);
-				const float StepSpeed = FMath::Min(Settings.LungeMaxSpeed, DistToLungeTarget / SafeDt);
-				PreservedVelocity = (ToLungeTarget / DistToLungeTarget) * StepSpeed;
-
-				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] HOMING state=%d dist=%.1f stepSpeed=%.0f hit=%d vel=(%.0f,%.0f,%.0f)"),
-					(int32)CurrentState, DistToLungeTarget, StepSpeed, bHasHitThisAttack ? 1 : 0,
-					PreservedVelocity.X, PreservedVelocity.Y, PreservedVelocity.Z);
-
-#if WITH_EDITOR
-				if (GEngine && bEnableDebugVisualization)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Cyan,
-						FString::Printf(TEXT("Lunge: Dist=%.0f, Speed=%.0f"),
-							DistToLungeTarget, PreservedVelocity.Size()));
-				}
-#endif
-			}
-			else if (bSpeedGatePassed)
-			{
-				// At the stop point (< 1cm gap): hold still. Gravity is off during the lunge,
-				// so zeroing all three axes is safe and leaves nothing to drift on.
-				PreservedVelocity = FVector::ZeroVector;
-
-				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] ARRIVED-HOLD state=%d dist=%.1f hit=%d (velocity zeroed)"),
-					(int32)CurrentState, DistToLungeTarget, bHasHitThisAttack ? 1 : 0);
-			}
-		}
-		else if (MagnetismTarget.IsValid())
-		{
-			// Lunge cut short (hit landed / target in knockback) while lunge gravity-off is still
-			// active: "keep current Z" would freeze whatever vertical speed the homing left — that's
-			// the fly-away when punching a drone from below. Restore the attack-start Z instead:
-			// bounded, predictable, and consistent with the XY momentum preservation above.
-			PreservedVelocity.Z = OwnerVelocityAtAttackStart.Z * Settings.MomentumPreservationRatio;
-
-			UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] POST-LUNGE state=%d hit=%d targetKb=%d vel=%.0f (attack-start vel incl. Z)"),
-				(int32)CurrentState, bHasHitThisAttack ? 1 : 0, bTargetInKnockback ? 1 : 0, PreservedVelocity.Size());
-		}
-		// No-target case: handled by a one-shot impulse on Active phase entry (see SetState).
-		// Per-frame velocity tug while target is absent has been removed.
-
-		// Apply the final velocity
-		Movement->Velocity = PreservedVelocity;
+		return;
 	}
-	else
+
+	// Everything below is only meaningful during the two phases the swing actually flies in. Note
+	// this runs on every other frame too, and publishes "not lunging" — that falling edge is what
+	// ends the flight on both machines.
+	const bool bInLungePhase =
+		(CurrentState == EMeleeAttackState::Windup || CurrentState == EMeleeAttackState::Active);
+
+	// bIsDropKick still drives velocity from UpdateDropKick in this component's tick, so it must not
+	// also publish a lunge — the two would fight over the same field. That mechanic is a separate,
+	// still-unported case; see the drop kick note in UpdateDropKick.
+	//
+	// bPreserveMomentum off now means the swing does not drive velocity at all. The old branch for it
+	// pushed the character forward at NoTargetBoostSpeed every frame from this tick, and there is no
+	// honest way to network that without inventing wire data for a setting the project ships as true
+	// (its own comments say to keep it true). Turning it off is a "no lunge" switch now.
+	const bool bLunging = bInLungePhase && Settings.bPreserveMomentum && !bIsDropKick;
+
+	if (!bLunging)
 	{
-		// Legacy behavior (bPreserveMomentum=false): one-frame override with NoTargetBoostSpeed.
-		// Note: this branch doesn't track a lunge target — the no-target boost is applied here
-		// directly. For real target lunging, keep bPreserveMomentum=true.
-		if (Settings.NoTargetBoostSpeed <= 0.0f)
-		{
-			return;
-		}
-
-		FVector LungeVelocity = LungeDirection * Settings.NoTargetBoostSpeed;
-		LungeVelocity.Z = 0.0f;
-
-		FVector CurrentVelocity = Movement->Velocity;
-		CurrentVelocity.X = LungeVelocity.X;
-		CurrentVelocity.Y = LungeVelocity.Y;
-
-		Movement->Velocity = CurrentVelocity;
+		Apex->SetMeleeLungeIntent(false, false, false, FVector::ZeroVector);
+		return;
 	}
+
+	// Optional gate: require a minimum starting speed (TF2 default is 0 = works from standstill).
+	// A swing that fails the gate is a swing with nobody to fly at, gravity and all.
+	const bool bSpeedGatePassed = OwnerVelocityAtAttackStart.Size() >= Settings.MinSpeedForLunge;
+	const bool bHasTarget = MagnetismTarget.IsValid() && bSpeedGatePassed;
+
+	// Stop homing the instant the target is knocked back, otherwise the player keeps driving into
+	// the spot the enemy just vacated (mirrors the UpdateMagnetism guard).
+	bool bTargetInKnockback = false;
+	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(MagnetismTarget.Get()))
+	{
+		bTargetInKnockback = TargetNPC->IsInKnockback();
+	}
+
+	// bHasHitThisAttack gate: once the hit has landed, never resume homing — otherwise, if the
+	// target's knockback stun ends while the Active phase is still running, the player gets dragged
+	// toward the enemy a second time.
+	const bool bHoming = Settings.bEnableLunge && bHasTarget && !bTargetInKnockback && !bHasHitThisAttack;
+
+	// LungeTargetPosition is refreshed every frame in UpdateMagnetism and tracks the target in XY
+	// and Z both. It is the one piece of geometry that travels to the server rather than being
+	// re-derived there: two enemies side by side, and each end would pick a different one.
+	Apex->SetMeleeLungeIntent(true, bHasTarget, bHoming, LungeTargetPosition);
 
 	LungeProgress += DeltaTime / Settings.LungeDuration;
 	LungeProgress = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
@@ -1806,13 +1752,10 @@ void UMeleeAttackComponent::StartMagnetism()
 
 	StartCameraFocus(BestTarget);
 
-	if (Settings.bDisableGravityDuringLunge)
-	{
-		if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
-		{
-			Movement->GravityScale = 0.0f;
-		}
-	}
+	// Gravity is no longer switched off here. GravityScale is movement state, and setting it from
+	// this component's tick left the server's copy untouched — it kept applying gravity while the
+	// client flew flat. UApexMovementComponent now derives it from the lunge flags, which travel,
+	// and puts it back on its own when the flight ends. @see UApexMovementComponent::SyncMeleeLungeGravity
 
 #if WITH_EDITOR
 	if (GEngine)
@@ -2000,14 +1943,8 @@ void UMeleeAttackComponent::StopMagnetism()
 	DropKickTargetPosition = FVector::ZeroVector;
 	DropKickVelocity = FVector::ZeroVector;
 
-	// Restore gravity after lunge ends — only if we disabled it on lunge start
-	if (Settings.bDisableGravityDuringLunge && OwnerCharacter)
-	{
-		if (UApexMovementComponent* Movement = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
-		{
-			Movement->GravityScale = Movement->MovementSettings ? Movement->MovementSettings->DefaultGravityScale : 1.5f;
-		}
-	}
+	// Gravity is not restored here either — it comes back with the lunge's falling edge, inside the
+	// simulated move, on every machine. @see UApexMovementComponent::EndMeleeLunge
 }
 
 void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVector& ImpulseDirection, float ImpulseStrength)
@@ -3275,6 +3212,12 @@ bool UMeleeAttackComponent::TryStartDropKick()
 	return false;
 }
 
+// TODO(COOP): this still writes Velocity from the component tick, which is outside the move the
+// server replays — the same defect the lunge above was just moved out of, with the same symptom
+// waiting (works for the host, gets corrected away for a client). The port is the same shape: a
+// flag plus the dive target in EPolarityMoveFlag, and the integration in
+// UApexMovementComponent::UpdateCharacterStateBeforeMovement next to UpdateMeleeLunge. The exit
+// impulse in StopMagnetism and UpdateCoolKick have the same problem and belong in the same pass.
 void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 {
 	if (!bIsDropKick || !MagnetismTarget.IsValid() || !OwnerCharacter)
