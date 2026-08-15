@@ -35,7 +35,12 @@ public class Polarity : ModuleRules
             "DeveloperSettings"
         });
 
-        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags", "MoviePlayer" });
+        // NetCore: FVector_NetQuantize*::NetSerialize is a header-only wrapper around
+        // UE::Net::Write/ReadQuantizedVector, which is NETCORE_API. The Engine module links NetCore
+        // for its own move data; a game module that sends its own quantized vector has to as well,
+        // or it compiles clean and fails at link with LNK2019 on both symbols.
+        // @see FCharacterNetworkMoveData_Polarity::Serialize
+        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags", "MoviePlayer", "NetCore" });
 
         // Editor-only: GC batch creator needs UnrealEd (asset saving) and ContentBrowser (selection)
         if (Target.Type == TargetType.Editor)
