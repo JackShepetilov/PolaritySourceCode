@@ -2,6 +2,7 @@
 
 
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Net/UnrealNetwork.h"
 #include "ShooterWeapon.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
@@ -1118,47 +1119,109 @@ void AShooterNPC::Die()
 
 	} // end if (!bSuppressDeathDrops)
 
-	// play death sound
+	// The mode is chosen here, on the authority, and published so every machine plays the same one.
+	// It cannot be re-derived on the other side: TriggerCinematicDismemberment can force it.
+	{
+		FDeathModeConfig ChosenConfig = ResolveDeathConfig();
+		ReplicatedDeathMode = bForceNextDeathDismemberment ? EDeathMode::Dismemberment : ChosenConfig.Mode;
+	}
+
+	// The half everybody performs. On a client this same call arrives through OnRep_IsDead.
+	PlayDeathVisuals();
+
+	// And the half only the authority may: the destruction timer, the controller, the weapon. A
+	// client must not touch any of it — the server owns this actor's lifetime and the removal
+	// replicates down on its own.
+	switch (ReplicatedDeathMode)
+	{
+	case EDeathMode::Ragdoll:
+		DeactivateForDeath(ResolveDeathConfig().RagdollDuration, /*bHideMesh=*/ false);
+		break;
+
+	case EDeathMode::Dismemberment:
+	case EDeathMode::HideOnly:
+	default:
+		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
+		break;
+	}
+}
+
+void AShooterNPC::PlayDeathVisuals()
+{
+	// Runs on the server from Die() and on every client from OnRep_IsDead. Nothing in here may
+	// change the outcome of anything: it is what a death LOOKS like, not what it decides.
+	StopShooting();
+	if (Weapon)
+	{
+		Weapon->StopFiring();
+	}
+
 	if (DeathSound)
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, DeathSound, GetActorLocation());
 	}
 
-	// ============== DEATH MODE DISPATCH ==============
-
 	FDeathModeConfig DeathConfig = ResolveDeathConfig();
-	if (bForceNextDeathDismemberment)
+	DeathConfig.Mode = ReplicatedDeathMode;
+	if (ReplicatedDeathMode == EDeathMode::Dismemberment && bForceNextDeathDismemberment)
 	{
-		DeathConfig.Mode = EDeathMode::Dismemberment;
 		DeathConfig.DismembermentImpulse *= ForcedDismembermentImpulseMultiplier;
 		DeathConfig.DismembermentAngularImpulse *= ForcedDismembermentImpulseMultiplier;
 		bForceNextDeathDismemberment = false;
 		ForcedDismembermentImpulseMultiplier = 1.0f;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG] %s Die() — DeathMode=%d, RagdollImpulse=%.0f"),
-		*GetName(), (int32)DeathConfig.Mode, DeathConfig.RagdollImpulse);
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s death visuals, mode=%d, role=%d"),
+		*GetName(), (int32)ReplicatedDeathMode, (int32)GetLocalRole());
 
-	switch (DeathConfig.Mode)
+	switch (ReplicatedDeathMode)
 	{
 	case EDeathMode::Dismemberment:
-		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   → going DISMEMBERMENT path (not ragdoll!)"));
 		SpawnDeathGeometryCollection(DeathConfig);
-		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
 		break;
 
 	case EDeathMode::Ragdoll:
-		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   → going RAGDOLL path"));
 		EnableRagdollDeath(DeathConfig);
-		DeactivateForDeath(DeathConfig.RagdollDuration, /*bHideMesh=*/ false);
 		break;
 
 	case EDeathMode::HideOnly:
 	default:
-		UE_LOG(LogTemp, Warning, TEXT("[RAGDOLL_DEBUG]   → going HIDE_ONLY path"));
-		DeactivateForDeath(0.5f, /*bHideMesh=*/ true);
 		break;
 	}
+
+	// The body stops being an obstacle and stops walking about, everywhere. On the authority
+	// DeactivateForDeath repeats this and more; here it is what a client is allowed to do on its own.
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
+	}
+
+	if (ReplicatedDeathMode != EDeathMode::Ragdoll)
+	{
+		GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		GetMesh()->SetVisibility(false);
+	}
+}
+
+void AShooterNPC::OnRep_IsDead()
+{
+	if (bIsDead)
+	{
+		PlayDeathVisuals();
+	}
+}
+
+void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// The mode has to be on the wire before the flag that consumes it, and unconditional replication
+	// of both is the simplest way to guarantee a client never runs PlayDeathVisuals against a stale
+	// mode. Two values per NPC, once per lifetime.
+	DOREPLIFETIME(AShooterNPC, ReplicatedDeathMode);
+	DOREPLIFETIME(AShooterNPC, bIsDead);
 }
 
 void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)

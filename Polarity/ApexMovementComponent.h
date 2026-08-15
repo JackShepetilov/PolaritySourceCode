@@ -124,6 +124,13 @@ struct FCharacterNetworkMoveData_Polarity : public FCharacterNetworkMoveData
 	 *  set — that flag is its presence bit, so it costs nothing at all the rest of the time. */
 	FVector_NetQuantize10 MeleeLungeTarget = FVector::ZeroVector;
 
+	/** WHO it is flying at, on the same terms. Needed as well as the position because the two ends
+	 *  have to agree about move-collision: the flight parks the character inside the target's
+	 *  capsule, so both sides must ignore it for the duration or the server keeps colliding while
+	 *  the client passes through, and they disagree about where the character ended up.
+	 *  Sent the way the engine sends MovementBase. */
+	TObjectPtr<UObject> MeleeLungeTargetActor = nullptr;
+
 	virtual void ClientFillNetworkMoveData(const FSavedMove_Character& ClientMove, ENetworkMoveType MoveType) override;
 	virtual bool Serialize(UCharacterMovementComponent& CharacterMovement, FArchive& Ar,
 		UPackageMap* PackageMap, ENetworkMoveType MoveType) override;
@@ -343,6 +350,7 @@ public:
 
 	/** The lunge target from that same move. Applied together with the flags in MoveAutonomous. */
 	FVector PendingMeleeLungeTarget = FVector::ZeroVector;
+	TWeakObjectPtr<AActor> PendingMeleeLungeTargetActor;
 
 	/** What this character is doing right now, as the flags that go on the wire. */
 	uint16 PackPolarityMoveFlags() const;
@@ -673,7 +681,8 @@ public:
 	 *  @param bHasTarget  the swing acquired somebody, so gravity stays off for the flight
 	 *  @param bHoming     fly at InTarget right now, rather than just holding momentum
 	 *  @param InTarget    world position to fly to; ignored unless bHoming */
-	void SetMeleeLungeIntent(bool bLunging, bool bHasTarget, bool bHoming, const FVector& InTarget);
+	void SetMeleeLungeIntent(bool bLunging, bool bHasTarget, bool bHoming, const FVector& InTarget,
+		AActor* InTargetActor);
 
 	/** The swing ended without connecting: the momentum it started with is handed back when the
 	 *  lunge stops, so a miss does not cost the player their run. Cleared by the next lunge. */
@@ -758,6 +767,14 @@ protected:
 	 *  EPolarityMoveFlag. */
 	FVector MeleeLungeTarget = FVector::ZeroVector;
 
+	/** Who it is flying at. Both ends drop move-collision with this actor for the flight and put it
+	 *  back afterwards, so neither can end up somewhere the other cannot reach. */
+	TWeakObjectPtr<AActor> MeleeLungeTargetActor;
+
+	/** Whether this side currently has that ignore in place, so it is removed exactly once and only
+	 *  by the flight that added it. */
+	bool bMeleeLungeIgnoringTarget = false;
+
 	/** The speed the swing started at, captured on this side when the lunge flag rises. A measurement,
 	 *  so each machine takes its own: by then both have simulated every earlier move identically. */
 	FVector MeleeLungeStartVelocity = FVector::ZeroVector;
@@ -789,6 +806,9 @@ protected:
 
 	/** The flight itself, run from UpdateCharacterStateBeforeMovement. */
 	void UpdateMeleeLunge(float DeltaSeconds);
+
+	/** Drop or restore mutual move-collision with MeleeLungeTargetActor. Idempotent. */
+	void SetMeleeLungeTargetIgnored(bool bIgnore);
 
 	/** Turns gravity off for a flight that wants it off, and nothing else — the way back is
 	 *  EndMeleeLunge. GravityScale is plain component state and no part of the saved move, so a
@@ -951,6 +971,7 @@ public:
 	 *  replay state: it travels to the server too, because a lunge target is the one piece of geometry
 	 *  the server is not allowed to pick for itself. @see EPolarityMoveFlag */
 	FVector SavedMeleeLungeTarget;
+	TWeakObjectPtr<AActor> SavedMeleeLungeTargetActor;
 
 	/** The rest of the lunge, replay state only — the server derives these for itself, one from the
 	 *  flags and one by capturing its own velocity when the lunge starts. */

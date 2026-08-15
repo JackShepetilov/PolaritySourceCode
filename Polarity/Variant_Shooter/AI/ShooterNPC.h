@@ -140,6 +140,8 @@ public:
 
 	AShooterNPC(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 	/** Current HP for this character. It dies if it reaches zero through damage */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage")
 	float CurrentHP = 100.0f;
@@ -316,8 +318,31 @@ protected:
 	/** If true, this character is currently shooting its weapon */
 	bool bIsShooting = false;
 
-	/** If true, this character has already died */
+	/** If true, this character has already died.
+	 *
+	 *  Replicated, because death is decided where damage is — on the server — and a client that never
+	 *  learns about it keeps the corpse standing, animating and shooting. This class had no replicated
+	 *  properties at all before, which is exactly how that went unnoticed. */
+	UPROPERTY(ReplicatedUsing = OnRep_IsDead)
 	bool bIsDead = false;
+
+	/** Which death the server chose, so both machines play the same one. The mode is picked at the
+	 *  moment of death and can be forced (TriggerCinematicDismemberment), so it cannot be re-derived:
+	 *  a client left to guess would ragdoll a body the server tore apart. */
+	UPROPERTY(Replicated)
+	EDeathMode ReplicatedDeathMode = EDeathMode::HideOnly;
+
+	UFUNCTION()
+	void OnRep_IsDead();
+
+	/** The half of dying that every machine performs: stop shooting, play the sound, and put the body
+	 *  into whatever state ReplicatedDeathMode asks for.
+	 *
+	 *  Split out from Die() because the other half must NOT happen on a client. Die() also scores the
+	 *  kill, drops loot, tells the checkpoint subsystem, frees the coordinator slot, destroys the
+	 *  controller and the weapon and schedules the actor's destruction — all of which belong to the
+	 *  server alone, and the last of which a client is not even allowed to do. */
+	void PlayDeathVisuals();
 
 	/** Deferred destruction on death timer */
 	FTimerHandle DeathTimer;

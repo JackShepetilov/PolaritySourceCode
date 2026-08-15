@@ -1312,7 +1312,7 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 
 	if (!bLunging)
 	{
-		Apex->SetMeleeLungeIntent(false, false, false, FVector::ZeroVector);
+		Apex->SetMeleeLungeIntent(false, false, false, FVector::ZeroVector, nullptr);
 		return;
 	}
 
@@ -1337,7 +1337,7 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 	// LungeTargetPosition is refreshed every frame in UpdateMagnetism and tracks the target in XY
 	// and Z both. It is the one piece of geometry that travels to the server rather than being
 	// re-derived there: two enemies side by side, and each end would pick a different one.
-	Apex->SetMeleeLungeIntent(true, bHasTarget, bHoming, LungeTargetPosition);
+	Apex->SetMeleeLungeIntent(true, bHasTarget, bHoming, LungeTargetPosition, MagnetismTarget.Get());
 
 	LungeProgress += DeltaTime / Settings.LungeDuration;
 	LungeProgress = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
@@ -1768,18 +1768,11 @@ void UMeleeAttackComponent::StartMagnetism()
 	MagnetismTarget = BestTarget;
 	LungeTargetPosition = IdealLungePos;
 
-	// LungeStopDistance is measured from the target's capsule CENTER and is smaller than the
-	// sum of the two capsule radii, so the lunge parks the player inside the target. With both
-	// capsules blocking ECC_Pawn that triggers per-frame depenetration (the ~30cm target jitter).
-	// Mutually ignore move-collision for the lunge; restored in StopMagnetism.
-	if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(OwnerCharacter->GetRootComponent()))
-	{
-		OwnerRoot->IgnoreActorWhenMoving(BestTarget, true);
-	}
-	if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(BestTarget->GetRootComponent()))
-	{
-		TargetRoot->IgnoreActorWhenMoving(OwnerCharacter, true);
-	}
+	// The mutual move-collision ignore for the flight is NOT done here any more. It used to be, and
+	// it ran only on the swinging machine: a client passed through the enemy while the server kept
+	// colliding with it, and the two disagreed about where the character finished the lunge. It now
+	// lives in UApexMovementComponent, driven by the lunge flags, so both ends do it together.
+	// @see UApexMovementComponent::SetMeleeLungeTargetIgnored
 
 	StartCameraFocus(BestTarget);
 
@@ -1890,20 +1883,8 @@ void UMeleeAttackComponent::StopMagnetism()
 	}
 #endif
 
-	// Restore move-collision with the lunge target (added in StartMagnetism).
-	if (OwnerCharacter && MagnetismTarget.IsValid())
-	{
-		AActor* IgnoredTarget = MagnetismTarget.Get();
-		if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(OwnerCharacter->GetRootComponent()))
-		{
-			OwnerRoot->IgnoreActorWhenMoving(IgnoredTarget, false);
-		}
-		if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(IgnoredTarget->GetRootComponent()))
-		{
-			TargetRoot->IgnoreActorWhenMoving(OwnerCharacter, false);
-		}
-	}
-
+	// Move-collision is restored by UApexMovementComponent when the lunge's falling edge is
+	// simulated, on both ends. @see UApexMovementComponent::EndMeleeLunge
 	MagnetismTarget.Reset();
 
 	// Handle drop kick exit momentum before resetting state
@@ -2074,10 +2055,14 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 		return;
 	}
 
-	// A client. Send it up, and locally do only what is harmless: shove an NPC on this screen too, so
-	// the hit reads instantly, and let the server's version replicate over the top. A player target
-	// gets NOTHING locally — that pawn's movement is predicted by whoever owns it, and a third
-	// machine pushing it around is pure noise.
+	// A client. Send it up, and shove NOTHING locally.
+	//
+	// An earlier version did shove an NPC here too, for the instant read, on the theory that the
+	// server's answer would replicate over the top the way a reported ionization does. That theory
+	// does not survive contact with movement: a charge is a value that gets overwritten, a position
+	// is a stream that keeps arriving. The local shove and the replicated one fought each other for
+	// the length of the knockback and the enemy visibly stuttered. One round trip of delay is the
+	// cheaper of the two, and it is what everything else here already pays.
 	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
 	{
 		ShooterChar->Server_ReportMeleeKnockback(HitActor, KnockbackDirection, DistanceToSend, KnockbackDuration);
@@ -2086,11 +2071,6 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s shoved something on a client but is not a ShooterCharacter - shove dropped"),
 			*OwnerCharacter->GetName());
-	}
-
-	if (AShooterNPC* LocalNPC = Cast<AShooterNPC>(HitActor))
-	{
-		LocalNPC->ApplyKnockback(KnockbackDirection, DistanceToSend, KnockbackDuration, PlayerCenter);
 	}
 }
 
