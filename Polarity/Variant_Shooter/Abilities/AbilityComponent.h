@@ -27,6 +27,28 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityCancelled, UAbilityDefinit
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityCooldownStarted, float, Duration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAbilityCooldownEnded);
 
+/** One slot as it travels: what is in it and at what level.
+ *
+ *  The handlers themselves are UObjects and stay local. Each machine builds its own from this, so a
+ *  handler is a mirror rather than a replicated subobject — the same shape the rest of this project
+ *  uses, and it keeps handler authoring free of networking concerns entirely. */
+USTRUCT()
+struct FAbilitySlotState
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TObjectPtr<UAbilityDefinition> Definition = nullptr;
+
+	UPROPERTY()
+	int32 Level = 1;
+
+	bool operator==(const FAbilitySlotState& Other) const
+	{
+		return Definition == Other.Definition && Level == Other.Level;
+	}
+};
+
 UCLASS(ClassGroup = (Combat), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UAbilityComponent : public UActorComponent
 {
@@ -35,6 +57,29 @@ class POLARITY_API UAbilityComponent : public UActorComponent
 public:
 
 	UAbilityComponent();
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	// ==================== Network ====================
+	// Abilities decide things about the world — who is slowed, what takes damage — so the decision
+	// belongs to the server, and the inventory that gates it has to be known on both ends. Before
+	// this the component had no replication at all: a client's ability ran only on its own machine,
+	// which is the same defect the melee, the death and the health all had.
+
+	/** Client asks to activate whatever is in its active slot. The server re-checks everything
+	 *  TryActivate checks and runs the handler there. Reliable: a dropped press is an ability that
+	 *  visibly did nothing. */
+	UFUNCTION(Server, Reliable)
+	void Server_TryActivate();
+
+	/** The release half, for hold-style abilities. */
+	UFUNCTION(Server, Reliable)
+	void Server_OnButtonReleased();
+
+	/** Client asks to change slot. Switching is not a world decision, so the client changes locally
+	 *  at once and tells the server, which will agree — the same shape as the weapon switch. */
+	UFUNCTION(Server, Reliable)
+	void Server_SwitchToSlot(int32 SlotIndex);
 
 	// ==================== Configuration ====================
 
@@ -169,14 +214,39 @@ protected:
 
 	// ==================== State ====================
 
+	/** Local mirrors, built from ReplicatedSlots. Never replicated themselves. */
 	UPROPERTY()
 	TArray<TObjectPtr<UAbilityHandler>> EquippedHandlers;
 
+	/** What the authority says is in the inventory. Owner-only: nobody else needs to know what a
+	 *  teammate is carrying, and the cost of telling them is per-slot per-change. */
+	UPROPERTY(ReplicatedUsing = OnRep_ReplicatedSlots)
+	TArray<FAbilitySlotState> ReplicatedSlots;
+
+	UFUNCTION()
+	void OnRep_ReplicatedSlots();
+
+	UPROPERTY(ReplicatedUsing = OnRep_ActiveSlotIndex)
 	int32 ActiveSlotIndex = INDEX_NONE;
 
+	UFUNCTION()
+	void OnRep_ActiveSlotIndex();
+
+	/** Casting and cooldown are the authority's answer, replicated so the owner's HUD and its own
+	 *  activation gate agree with the machine that actually decides. */
+	UPROPERTY(Replicated)
 	bool bIsCasting = false;
 
+	UPROPERTY(Replicated)
 	float CooldownTimeRemaining = 0.0f;
+
+	/** Rebuild EquippedHandlers so they match ReplicatedSlots, keeping handlers whose definition and
+	 *  level are unchanged. Called on the authority after any inventory change and on a client from
+	 *  OnRep. */
+	void RebuildHandlersFromSlots();
+
+	/** Copy the authoritative slot list out of the live handlers. Authority side only. */
+	void PublishSlotsFromHandlers();
 
 	// ==================== Internals ====================
 
