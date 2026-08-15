@@ -377,15 +377,23 @@ void ADroppedRangedWeapon::UpdatePull(float DeltaTime)
 	const float Alpha = FMath::Clamp(PullElapsed / PullDuration, 0.0f, 1.0f);
 	const float CurvedAlpha = FMath::InterpEaseInOut(0.0f, 1.0f, Alpha, 2.0f);
 
-	// Calculate camera-relative target in world space
-	APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
-	if (!CamMgr)
+	// Calculate camera-relative target in world space, relative to the camera of whoever is actually
+	// pulling. Player zero is the host on every machine, and the pull runs on the server, so a
+	// client's pickup used to fly at the host's face and only land in the right hands at the end.
+	FVector CameraLoc;
+	FRotator CameraRot;
+	if (const APlayerController* PullerPC = Cast<APlayerController>(PullingCharacter->GetController());
+		PullerPC && PullerPC->PlayerCameraManager)
 	{
-		return;
+		CameraLoc = PullerPC->PlayerCameraManager->GetCameraLocation();
+		CameraRot = PullerPC->PlayerCameraManager->GetCameraRotation();
 	}
-
-	const FVector CameraLoc = CamMgr->GetCameraLocation();
-	const FRotator CameraRot = CamMgr->GetCameraRotation();
+	else
+	{
+		// No controller to ask (an NPC puller, or a controller not yet resolved): the pawn's own
+		// eyes are the honest fallback, and they are at least the right character's.
+		PullingCharacter->GetActorEyesViewPoint(CameraLoc, CameraRot);
+	}
 
 	// Transform offset into world space relative to camera
 	const FVector WorldTarget = CameraLoc
