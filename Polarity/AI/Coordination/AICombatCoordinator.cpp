@@ -182,6 +182,18 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 		TimeSinceLastClusterCalc = 0.0f;
 	}
 
+	// State snapshot to the log, so this can be read after the fact and compared between machines
+	// instead of depending on somebody watching the right screen at the right moment.
+	if (bLogStateSnapshot)
+	{
+		TimeSinceLastSnapshot += DeltaTime;
+		if (TimeSinceLastSnapshot >= StateSnapshotInterval)
+		{
+			LogStateSnapshot();
+			TimeSinceLastSnapshot = 0.0f;
+		}
+	}
+
 	// Debug drawing
 	if (bDrawDebug)
 	{
@@ -1367,7 +1379,10 @@ void AAICombatCoordinator::DrawDebugInfo()
 {
 	if (!GetWorld()) return;
 
-	const float DebugDuration = 0.0f;
+	// Long enough to survive until the next redraw. This actor ticks at 10Hz and these were drawn for
+	// a single frame, so at 60fps every shape was visible for a sixth of the time and the whole
+	// overlay read as a flicker rather than as a diagram.
+	const float DebugDuration = PrimaryActorTick.TickInterval * 1.5f;
 
 	// Engagement range
 	for (const FTargetGroup& EngagementGroup : Groups)
@@ -1467,20 +1482,34 @@ void AAICombatCoordinator::DrawDebugInfo()
 
 	// One summary above each player under attack, showing that group's own pressure. The global
 	// ceiling is printed alongside so the two numbers can be read against each other.
-	for (const FTargetGroup& Group : Groups)
+	for (int32 GroupIdx = 0; GroupIdx < Groups.Num(); ++GroupIdx)
 	{
+		const FTargetGroup& Group = Groups[GroupIdx];
 		AActor* GroupTarget = Group.Target.Get();
 		if (!GroupTarget) continue;
 
+		// Threat is otherwise invisible: it is a number nobody can see, which is the reason it fades
+		// in seconds rather than accumulating, and the reason it has to be on the overlay while it is
+		// being tuned. Shown in the form it is actually applied in.
+		float Threat = 0.0f;
+		if (const APawn* TargetPawn = Cast<APawn>(GroupTarget))
+		{
+			if (const UThreatComponent* ThreatComp = TargetPawn->FindComponentByClass<UThreatComponent>())
+			{
+				Threat = ThreatComp->GetThreat();
+			}
+		}
+
 		const FVector StatsLocation = GroupTarget->GetActorLocation() + FVector(0, 0, 200.0f);
 		DrawDebugString(GetWorld(), StatsLocation,
-			FString::Printf(TEXT("Group: %d enemies\nTokens R:%d/%d M:%d/%d S:%d/%d\nAttackers total: %d / %d"),
-				Group.Members.Num(),
+			FString::Printf(TEXT("GROUP %d: %d enemies\nThreat %.2f (looks %.2fx closer)\nTokens R:%d/%d M:%d/%d S:%d/%d\nAttackers total: %d / %d"),
+				GroupIdx, Group.Members.Num(),
+				Threat, 1.0f + Threat,
 				Group.Ranged.MaxTokens - Group.Ranged.GetAvailableCount(), Group.Ranged.MaxTokens,
 				Group.Melee.MaxTokens - Group.Melee.GetAvailableCount(), Group.Melee.MaxTokens,
 				Group.Special.MaxTokens - Group.Special.GetAvailableCount(), Group.Special.MaxTokens,
 				CountCurrentAttackers(), GetEffectiveMaxAttackers()),
-			nullptr, FColor::White, DebugDuration, true, 1.2f);
+			nullptr, GetGroupDebugColor(GroupIdx), DebugDuration, true, 1.2f);
 	}
 }
 
@@ -1488,43 +1517,50 @@ void AAICombatCoordinator::DrawBattleCircleDebug()
 {
 	if (!GetWorld()) return;
 
-	const float DebugDuration = 0.0f;
+	// Long enough to survive until the next redraw. This actor ticks at 10Hz and these were drawn for
+	// a single frame, so at 60fps every shape was visible for a sixth of the time and the whole
+	// overlay read as a flicker rather than as a diagram.
+	const float DebugDuration = PrimaryActorTick.TickInterval * 1.5f;
 
 	// One set of rings per group. Drawing a single set around PrimaryTarget was fine while there was
 	// only ever one formation; now there is one per player being fought, and seeing them separately
 	// is the whole point of looking.
-	for (const FTargetGroup& Group : Groups)
+	for (int32 GroupIdx = 0; GroupIdx < Groups.Num(); ++GroupIdx)
 	{
+	const FTargetGroup& Group = Groups[GroupIdx];
 	AActor* GroupTarget = Group.Target.Get();
 	if (!GroupTarget) continue;
 
 	const FVector PlayerPos = GroupTarget->GetActorLocation();
 
-	// Draw ring circles
-	auto DrawRingCircle = [this, &PlayerPos, DebugDuration](float Radius, FColor Color)
+	// One colour per GROUP rather than per ring. Which ring a slot belongs to was the useful
+	// distinction while there was only one formation; with several on screen the useful question is
+	// which formation this is, and telling two same-coloured rings apart is impossible.
+	const FColor GroupColor = GetGroupDebugColor(GroupIdx);
+
+	auto DrawRingCircle = [this, &PlayerPos, DebugDuration, GroupColor](float Radius, float Thickness)
 	{
-		DrawDebugCircle(GetWorld(), PlayerPos, Radius, 48, Color, false, DebugDuration, 0, 3.0f,
+		DrawDebugCircle(GetWorld(), PlayerPos, Radius, 48, GroupColor, false, DebugDuration, 0, Thickness,
 			FVector(1, 0, 0), FVector(0, 1, 0), false);
 	};
 
-	DrawRingCircle(InnerRingMinRadius, DebugColorInnerRing);
-	DrawRingCircle(InnerRingMaxRadius, DebugColorInnerRing);
-	DrawRingCircle(MiddleRingMinRadius, DebugColorMiddleRing);
-	DrawRingCircle(MiddleRingMaxRadius, DebugColorMiddleRing);
-	DrawRingCircle(OuterRingMinRadius, DebugColorOuterRing);
-	DrawRingCircle(OuterRingMaxRadius, DebugColorOuterRing);
+	// Inner ring drawn thickest so the three are still distinguishable within one colour.
+	DrawRingCircle(InnerRingMinRadius, 6.0f);
+	DrawRingCircle(InnerRingMaxRadius, 6.0f);
+	DrawRingCircle(MiddleRingMinRadius, 3.0f);
+	DrawRingCircle(MiddleRingMaxRadius, 3.0f);
+	DrawRingCircle(OuterRingMinRadius, 1.5f);
+	DrawRingCircle(OuterRingMaxRadius, 1.5f);
+
+	// Name the formation at its centre, so a screenshot can be read without counting circles.
+	DrawDebugString(GetWorld(), PlayerPos + FVector(0, 0, 120.0f),
+		FString::Printf(TEXT("GROUP %d: %s"), GroupIdx, *GroupTarget->GetName()),
+		nullptr, GroupColor, DebugDuration, true, 1.3f);
 
 	// Draw each slot
 	for (const FBattleSlot& Slot : Group.BattleSlots)
 	{
-		FColor SlotColor;
-		switch (Slot.Ring)
-		{
-		case EBattleRing::Inner: SlotColor = DebugColorInnerRing; break;
-		case EBattleRing::Middle: SlotColor = DebugColorMiddleRing; break;
-		case EBattleRing::Outer: SlotColor = DebugColorOuterRing; break;
-		default: SlotColor = FColor::White; break;
-		}
+		FColor SlotColor = GroupColor;
 
 		if (!Slot.IsOccupied())
 		{
@@ -1546,7 +1582,10 @@ void AAICombatCoordinator::DrawRoleDebug()
 {
 	if (!GetWorld()) return;
 
-	const float DebugDuration = 0.0f;
+	// Long enough to survive until the next redraw. This actor ticks at 10Hz and these were drawn for
+	// a single frame, so at 60fps every shape was visible for a sixth of the time and the whole
+	// overlay read as a flicker rather than as a diagram.
+	const float DebugDuration = PrimaryActorTick.TickInterval * 1.5f;
 
 	// Player state overlay, one per group
 	for (const FTargetGroup& Group : Groups)
@@ -1783,6 +1822,77 @@ void AAICombatCoordinator::ReleaseStrafeSlot(APawn* Drone)
 	{
 		return Slot.AssignedDrone.Get() == Drone;
 	});
+}
+
+void AAICombatCoordinator::LogStateSnapshot()
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Nothing registered means nothing to say. A client's coordinator is empty — the AI lives on the
+	// authority — so this keeps the client log clean rather than filling it with empty snapshots.
+	if (RegisteredNPCs.Num() == 0)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] SNAPSHOT auth=%d groups=%d registered=%d attackers=%d/%d"),
+		HasAuthority() ? 1 : 0, Groups.Num(), RegisteredNPCs.Num(),
+		CountCurrentAttackers(), GetEffectiveMaxAttackers());
+
+	for (int32 GroupIdx = 0; GroupIdx < Groups.Num(); ++GroupIdx)
+	{
+		const FTargetGroup& Group = Groups[GroupIdx];
+		const AActor* GroupTarget = Group.Target.Get();
+
+		float Threat = 0.0f;
+		if (const APawn* TargetPawn = Cast<APawn>(GroupTarget))
+		{
+			if (const UThreatComponent* ThreatComp = TargetPawn->FindComponentByClass<UThreatComponent>())
+			{
+				Threat = ThreatComp->GetThreat();
+			}
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG]   group %d target=%s enemies=%d slots=%d threat=%.2f hp=%.0f%% tokens R:%d/%d M:%d/%d S:%d/%d"),
+			GroupIdx, *GetNameSafe(GroupTarget), Group.Members.Num(), Group.BattleSlots.Num(), Threat,
+			Group.State.bIsValid ? Group.State.HPPercent * 100.0f : -1.0f,
+			Group.Ranged.MaxTokens - Group.Ranged.GetAvailableCount(), Group.Ranged.MaxTokens,
+			Group.Melee.MaxTokens - Group.Melee.GetAvailableCount(), Group.Melee.MaxTokens,
+			Group.Special.MaxTokens - Group.Special.GetAvailableCount(), Group.Special.MaxTokens);
+
+		for (int32 Index : Group.Members)
+		{
+			if (!RegisteredNPCs.IsValidIndex(Index)) continue;
+			const FRegisteredNPCData& Data = RegisteredNPCs[Index];
+			APawn* NPC = Data.NPC.Get();
+			if (!NPC) continue;
+
+			// Distance and line of sight are the two gates that decide whether this NPC may attack,
+			// so they are printed next to the answer rather than left to be inferred.
+			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG]     %s role=%d perm=%d token=%d slot=%d dist=%.0f los=%d switchPressure=%.2f"),
+				*NPC->GetName(), (int32)Data.Role, Data.bHasAttackPermission ? 1 : 0,
+				Data.bHasToken ? 1 : 0, Data.AssignedSlotIndex,
+				GetDistanceToTarget(NPC), HasLineOfSightToTarget(NPC) ? 1 : 0,
+				Data.TargetSwitchPressure);
+		}
+	}
+}
+
+FColor AAICombatCoordinator::GetGroupDebugColor(int32 GroupIndex)
+{
+	// Groups have to be told apart at a glance, which is the entire reason the overlay exists once
+	// there is more than one player being fought.
+	static const FColor Palette[] = {
+		FColor(80, 180, 255),   // blue
+		FColor(255, 160, 60),   // orange
+		FColor(140, 255, 120),  // green
+		FColor(255, 110, 220),  // pink
+	};
+	return Palette[FMath::Abs(GroupIndex) % UE_ARRAY_COUNT(Palette)];
 }
 
 // ==================== Enemy Cluster Direction ====================

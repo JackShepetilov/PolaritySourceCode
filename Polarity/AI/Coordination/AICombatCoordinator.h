@@ -216,6 +216,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Targeting", meta = (ClampMin = "0.0"))
 	float TargetSwitchDelay = 0.75f;
 
+	/** Write a full state snapshot to the log on an interval, tagged [COOP_DEBUG]. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Debug")
+	bool bLogStateSnapshot = true;
+
+	/** Seconds between snapshots. Two is slow enough not to drown the log and fast enough to catch a
+	 *  target switch, which cannot happen more often than TargetSwitchDelay anyway. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Debug", meta = (ClampMin = "0.25"))
+	float StateSnapshotInterval = 2.0f;
+
 	/** How the total pressure budget grows with the size of the team. 1.0 is linear (four players
 	 *  fight four times as much at once), 0.0 is flat (four players share what one faced). Sublinear
 	 *  is the usual co-op answer: more going on with a full team, but not proportionally more per
@@ -562,6 +571,9 @@ private:
 	// --- Battle Circle ---
 	// Battle slots, their recalc clocks and the player state cache all moved into FTargetGroup.
 
+	/** Clock for the log snapshot. */
+	float TimeSinceLastSnapshot = 0.0f;
+
 	void GenerateBattleSlots();
 	void RecalculateSlotPositions();
 	void AssignNPCsToSlots();
@@ -581,6 +593,16 @@ private:
 	 *  threat, so somebody loud looks nearer than they are. Plain distance when there is no
 	 *  UThreatComponent, which is what this did before threat existed. */
 	float GetApparentDistance(const FVector& FromLocation, APawn* Player) const;
+
+	/** A distinct colour per group, so two formations can be told apart on screen. */
+	static FColor GetGroupDebugColor(int32 GroupIndex);
+
+	/** Write the whole coordinator state to the log every so often.
+	 *
+	 *  On-screen shapes only help somebody who is looking at the right screen at the right moment,
+	 *  and they cannot be read afterwards. This is the same picture in a form that survives the
+	 *  session and can be diffed between the host's log and the client's. */
+	void LogStateSnapshot();
 
 	AActor* ResolveTargetFor(APawn* NPC) const;
 
