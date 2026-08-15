@@ -2460,23 +2460,31 @@ void UApexMovementComponent::UpdateMeleeLunge(float DeltaSeconds)
 {
 	if (bMeleeLungeHoming)
 	{
-		// Continuous proportional homing: speed is the remaining distance over this frame, capped at
+		// Continuous proportional homing: speed is the distance still to cover this frame, capped at
 		// the lunge speed. Far away that is full speed; close in the step shrinks to exactly close
 		// the gap, which is what keeps a flight at a moving target (or a drone) from oscillating
 		// between "fly" and "hold". Full 3D, so Z converges too and nothing is left over for the
 		// moment gravity comes back on.
+		//
+		// "The gap" is measured to the edge of MeleeLungeArrivalRadius, not to the point itself. That
+		// single subtraction is what makes this survive a network: dividing by delta time amplifies
+		// any difference between two machines about sixtyfold, so aiming at a point meant the server
+		// and the client could sit 7 cm and 1 cm away and come out at 440 u/s against 0. Aiming at a
+		// sphere lets the speed reach zero smoothly at its edge, and the two ends only have to agree
+		// to within its radius.
 		const FVector ToTarget = MeleeLungeTarget - UpdatedComponent->GetComponentLocation();
 		const float Distance = ToTarget.Size();
+		const float Remaining = Distance - MeleeLungeArrivalRadius;
 
-		if (Distance > 1.0f)
+		if (Remaining > 0.0f)
 		{
 			const float SafeDt = FMath::Max(DeltaSeconds, 0.001f);
-			const float StepSpeed = FMath::Min(MeleeLungeMaxSpeed, Distance / SafeDt);
+			const float StepSpeed = FMath::Min(MeleeLungeMaxSpeed, Remaining / SafeDt);
 			Velocity = (ToTarget / Distance) * StepSpeed;
 		}
 		else
 		{
-			// At the stop point. Gravity is off for a homing flight, so zeroing all three axes is
+			// Inside the radius. Gravity is off for a homing flight, so zeroing all three axes is
 			// safe and leaves nothing to drift on.
 			Velocity = FVector::ZeroVector;
 		}

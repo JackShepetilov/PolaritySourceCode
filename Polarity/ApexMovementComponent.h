@@ -762,6 +762,20 @@ protected:
 	 *  so each machine takes its own: by then both have simulated every earlier move identically. */
 	FVector MeleeLungeStartVelocity = FVector::ZeroVector;
 
+	/** How close counts as arrived, in cm. This is a NETWORK tolerance, not a design knob.
+	 *
+	 *  The flight closes the remaining distance in one frame, so its speed is distance divided by
+	 *  delta time — which multiplies any disagreement between two machines by about sixty. Measured
+	 *  on the bench: the server sat 7 cm from the stop point and the client under 1, an ordinary gap
+	 *  for a body moving at 1100 u/s, and that produced 440 u/s against 0. The client braked, the
+	 *  server pulled, and the pull felt broken.
+	 *
+	 *  A radius rather than a point fixes both halves: the speed ramps to zero as the flight reaches
+	 *  the edge of it, so there is no cliff to land on different sides of, and the two ends only have
+	 *  to agree to within this many cm instead of within one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Apex|Melee Lunge", meta = (ClampMin = "1.0", ClampMax = "100.0"))
+	float MeleeLungeArrivalRadius = 25.0f;
+
 	/** Mirrored from FMeleeAttackSettings. @see SetMeleeLungeTuning */
 	float MeleeLungeMaxSpeed = 3000.0f;
 	float MeleeLungeMomentumRatio = 1.0f;
