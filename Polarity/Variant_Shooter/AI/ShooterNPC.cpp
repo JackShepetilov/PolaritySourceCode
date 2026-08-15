@@ -3,6 +3,7 @@
 
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Net/UnrealNetwork.h"
+#include "AI/Coordination/ThreatComponent.h"
 #include "ShooterWeapon.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
@@ -704,6 +705,30 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// The same news in the form a client can also receive. Broadcast here as well as from
 	// OnRep_CurrentHP so the authority's own widgets update without waiting for a round trip.
 	OnHealthChanged.Broadcast(this, CurrentHP);
+
+	// Hurting something is the most obvious reason for it to turn on you. Authority only, because
+	// that is where the AI reads threat; a client's own copy is never consulted. Off unless
+	// ThreatPerDamagePoint has been set, so this changes nothing until somebody decides it should.
+	if (HasAuthority() && Damage > 0.0f)
+	{
+		if (APawn* CauserPawn = Cast<APawn>(DamageCauser))
+		{
+			if (UThreatComponent* Threat = CauserPawn->FindComponentByClass<UThreatComponent>())
+			{
+				Threat->AddThreat(Damage * Threat->ThreatPerDamagePoint, Threat->DamageThreatDecaySeconds);
+			}
+		}
+		else if (EventInstigator)
+		{
+			if (APawn* InstigatorPawn = EventInstigator->GetPawn())
+			{
+				if (UThreatComponent* Threat = InstigatorPawn->FindComponentByClass<UThreatComponent>())
+				{
+					Threat->AddThreat(Damage * Threat->ThreatPerDamagePoint, Threat->DamageThreatDecaySeconds);
+				}
+			}
+		}
+	}
 
 	return Damage;
 }

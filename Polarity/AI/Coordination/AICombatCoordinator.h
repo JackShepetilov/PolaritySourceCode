@@ -577,6 +577,11 @@ private:
 
 	/** The player this NPC is fighting, falling back to PrimaryTarget when it has none yet. Every
 	 *  per-NPC gate goes through here rather than reading PrimaryTarget directly. */
+	/** Distance to Player as an enemy weighs it: real distance divided by that player's current
+	 *  threat, so somebody loud looks nearer than they are. Plain distance when there is no
+	 *  UThreatComponent, which is what this did before threat existed. */
+	float GetApparentDistance(const FVector& FromLocation, APawn* Player) const;
+
 	AActor* ResolveTargetFor(APawn* NPC) const;
 
 	/** Bring Groups in line with the targets the NPCs currently hold: create the missing ones, retire

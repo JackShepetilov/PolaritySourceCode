@@ -11,6 +11,7 @@
 #include "FlyingDrone.h"
 #include "KamikazeDroneNPC.h"
 #include "ShooterCharacter.h"
+#include "ThreatComponent.h"
 
 // ==================== FTokenPool ====================
 
@@ -764,17 +765,19 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 
 		const FVector NPCLocation = NPC->GetActorLocation();
 
-		// Whoever is nearest right now. This is the candidate, NOT the answer — the answer is below,
-		// and it is mostly "keep doing what you were doing".
+		// Whoever is most worth attacking right now. This is the candidate, NOT the answer — the
+		// answer is below, and it is mostly "keep doing what you were doing".
 		//
-		// This is where a threat value plugs in when it exists: instead of raw distance, score each
-		// player as distance scaled by their current threat, and the rest of this function is
-		// unchanged. Keeping the switch rules separate from the scoring is the point.
+		// Threat divides the distance rather than being added to it, so it reads as "this player
+		// looks closer than they are". A threat of 1.0 halves the apparent distance. Scoring and the
+		// switch rules are kept apart on purpose: making somebody look closer must not also let them
+		// skip the margin and the delay, or provocation becomes a way to reintroduce the flicker
+		// those two exist to stop.
 		APawn* Nearest = nullptr;
 		float NearestDist = TNumericLimits<float>::Max();
 		for (APawn* Player : Players)
 		{
-			const float Dist = FVector::Dist(NPCLocation, Player->GetActorLocation());
+			const float Dist = GetApparentDistance(NPCLocation, Player);
 			if (Dist < NearestDist)
 			{
 				NearestDist = Dist;
@@ -803,7 +806,9 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 		// different reasons: the margin rejects a tie (two teammates side by side, distances
 		// swapping every frame), the delay rejects a pass-through (a teammate sprinting past on the
 		// way somewhere else).
-		const float CurrentDist = FVector::Dist(NPCLocation, Current->GetActorLocation());
+		// Measured the same way as the candidate, or the margin would compare a threat-weighted
+		// number against a raw one and the enemy would switch on arithmetic rather than on events.
+		const float CurrentDist = GetApparentDistance(NPCLocation, Cast<APawn>(Current));
 		if (CurrentDist - NearestDist > TargetSwitchMargin)
 		{
 			Data.TargetSwitchPressure += DeltaTime;
@@ -1190,6 +1195,26 @@ FTokenPool* AAICombatCoordinator::GetPoolFor(APawn* NPC, EAttackTokenType Type)
 	case EAttackTokenType::Special: return &Group->Special;
 	default:                        return &Group->Ranged;
 	}
+}
+
+float AAICombatCoordinator::GetApparentDistance(const FVector& FromLocation, APawn* Player) const
+{
+	if (!Player)
+	{
+		return TNumericLimits<float>::Max();
+	}
+
+	const float RealDistance = FVector::Dist(FromLocation, Player->GetActorLocation());
+
+	// No component, no threat, and the answer is plain distance — which is exactly how this behaved
+	// before threat existed, so a character without one is not a special case to handle anywhere.
+	const UThreatComponent* Threat = Player->FindComponentByClass<UThreatComponent>();
+	if (!Threat)
+	{
+		return RealDistance;
+	}
+
+	return RealDistance / (1.0f + FMath::Max(0.0f, Threat->GetThreat()));
 }
 
 AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const
