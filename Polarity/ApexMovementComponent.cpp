@@ -631,6 +631,8 @@ uint16 UApexMovementComponent::PackPolarityMoveFlags() const
 	Set(bMeleeLungeHasTarget,     EPolarityMoveFlag::MeleeLungeHasTarget);
 	Set(bMeleeLungeHoming,        EPolarityMoveFlag::MeleeLungeHoming);
 	Set(bMeleeLungeRestoreOnEnd,  EPolarityMoveFlag::MeleeLungeRestore);
+	Set(bMeleeDropKick,           EPolarityMoveFlag::MeleeDropKick);
+	Set(bMeleeDropKickForward,    EPolarityMoveFlag::MeleeDropKickForward);
 
 	return Flags;
 }
@@ -722,6 +724,8 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
 	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
 	bMeleeLungeHoming       = Has(EPolarityMoveFlag::MeleeLungeHoming);
 	bMeleeLungeRestoreOnEnd = Has(EPolarityMoveFlag::MeleeLungeRestore);
+	bMeleeDropKick          = Has(EPolarityMoveFlag::MeleeDropKick);
+	bMeleeDropKickForward   = Has(EPolarityMoveFlag::MeleeDropKickForward);
 }
 
 void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint16 Flags)
@@ -744,6 +748,8 @@ void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint16 Flags)
 	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
 	bMeleeLungeHoming       = Has(EPolarityMoveFlag::MeleeLungeHoming);
 	bMeleeLungeRestoreOnEnd = Has(EPolarityMoveFlag::MeleeLungeRestore);
+	bMeleeDropKick          = Has(EPolarityMoveFlag::MeleeDropKick);
+	bMeleeDropKickForward   = Has(EPolarityMoveFlag::MeleeDropKickForward);
 
 	// bIsMeleeLunging is restored by PrepMoveFor around this call, not from the flags: it is the
 	// state the move started in, and the flags carry the decision the move was made with. The gravity
@@ -2358,16 +2364,28 @@ bool UApexMovementComponent::IsAccelerationForward() const
 
 // ==================== Melee lunge ====================
 
-void UApexMovementComponent::SetMeleeLungeTuning(float MaxSpeed, float MomentumRatio, bool bDisableGravity)
+void UApexMovementComponent::SetMeleeLungeTuning(float MaxSpeed, float MomentumRatio, bool bDisableGravity,
+	float DropKickSpeed)
 {
 	MeleeLungeMaxSpeed          = MaxSpeed;
 	MeleeLungeMomentumRatio     = MomentumRatio;
 	bMeleeLungeDisablesGravity  = bDisableGravity;
+	MeleeDropKickSpeed          = DropKickSpeed;
 }
 
 void UApexMovementComponent::SetMeleeLungeIntent(bool bLunging, bool bHasTarget, bool bHoming,
-	const FVector& InTarget, AActor* InTargetActor)
+	const FVector& InTarget, AActor* InTargetActor, bool bDropKick, bool bDropKickForwardHeld)
 {
+	// Assigned only while the flight is on, and deliberately NOT cleared when it stops: EndMeleeLunge
+	// runs one move later and both of these are what it reads. Clearing them here would have every
+	// dropkick end as though it were a lunge, which is the same mistake the gravity ownership flag
+	// was written to avoid.
+	if (bLunging)
+	{
+		bMeleeDropKick        = bDropKick;
+		bMeleeDropKickForward = bDropKickForwardHeld;
+	}
+
 	// Note what is NOT touched here: bMeleeLungeRestoreOnEnd, which the melee component sets on its
 	// own when it decides the swing missed, and bMeleeLungeGravityOff, which belongs to the flight
 	// that turned gravity off and is cleared by the flight that turns it back on.
@@ -2439,10 +2457,44 @@ void UApexMovementComponent::StartMeleeLunge()
 
 void UApexMovementComponent::EndMeleeLunge()
 {
+	// A drop kick always leaves with half the speed it dove at, along the way the character is facing.
+	//
+	// It used to read the player's input here and zero the velocity if they were not pushing forward.
+	// That cannot survive a network: the server reads a remote pawn's input as nothing at all, so a
+	// client's dropkick would have ended in a dead stop every time. The branch is gone rather than
+	// networked, by the author's decision, and preserving the momentum is the half that matches the
+	// rest of the melee system, whose stated rule is never to kill the player's momentum.
+	if (bMeleeDropKick)
+	{
+		// Pushing forward as it ends carries you out of it at half the dive speed; letting go stops
+		// you dead. The input itself cannot be read here — the server sees a remote pawn's input as
+		// nothing — so the answer travelled as a flag decided on the machine that had it.
+		if (bMeleeDropKickForward)
+		{
+			FVector ForwardDir = UpdatedComponent ? UpdatedComponent->GetForwardVector() : FVector::ZeroVector;
+			ForwardDir.Z = 0.0f;
+			if (ForwardDir.Normalize())
+			{
+				Velocity = ForwardDir * (MeleeDropKickSpeed * 0.5f);
+			}
+		}
+		else
+		{
+			Velocity = FVector::ZeroVector;
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] DropKick exit %s role=%d forward=%d at %.0f u/s"),
+			*GetNameSafe(CharacterOwner),
+			CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+			bMeleeDropKickForward ? 1 : 0, Velocity.Size());
+
+		bMeleeDropKick        = false;
+		bMeleeDropKickForward = false;
+	}
 	// A swing that missed gives the player their run back. Without this a whiff at full speed parks
 	// the character at the end of the flight, which is the one thing the momentum system exists to
 	// prevent. A swing that connected keeps whatever the flight left it with.
-	if (bMeleeLungeRestoreOnEnd)
+	else if (bMeleeLungeRestoreOnEnd)
 	{
 		FVector Restored = MeleeLungeStartVelocity * MeleeLungeMomentumRatio;
 		if (IsFalling())
@@ -2510,6 +2562,27 @@ void UApexMovementComponent::SetMeleeLungeTargetIgnored(bool bIgnore)
 
 void UApexMovementComponent::UpdateMeleeLunge(float DeltaSeconds)
 {
+	if (bMeleeDropKick)
+	{
+		// A dive, not a lunge. Constant speed at the target rather than closing speed, which is what
+		// makes it read as dropping ON somebody instead of being pulled to them. Constant speed also
+		// sidesteps the amplification the lunge had to be protected from: nothing here divides a
+		// distance by delta time, so a small disagreement between two machines stays small.
+		if (bMeleeLungeHoming)
+		{
+			const FVector ToTarget = MeleeLungeTarget - UpdatedComponent->GetComponentLocation();
+			const FVector Direction = ToTarget.GetSafeNormal();
+			Velocity = Direction * MeleeDropKickSpeed;
+		}
+		else
+		{
+			// Tracking stopped: the target was knocked away, or the hit already landed. The original
+			// stopped dead here and this keeps that.
+			Velocity = FVector::ZeroVector;
+		}
+		return;
+	}
+
 	if (bMeleeLungeHoming)
 	{
 		// Continuous proportional homing: speed is the distance still to cover this frame, capped at

@@ -106,6 +106,14 @@ enum class EPolarityMoveFlag : uint16
 	MeleeLungeHoming = 1 << 10,
 	/** The swing missed: hand the character back the momentum it started with when the lunge ends. */
 	MeleeLungeRestore = 1 << 11,
+	/** This flight is a drop kick dive rather than a lunge: constant speed at the target instead of
+	 *  closing speed, gravity left on, and a forward exit when it ends. It reuses the lunge's target
+	 *  and target actor rather than sending a second set — it is the same shape of flight. */
+	MeleeDropKick     = 1 << 12,
+	/** The player was pushing forward as the dive ended, so they carry momentum out of it instead of
+	 *  stopping dead. A decision, not a measurement: the server reads a remote pawn's input as
+	 *  nothing at all, so it has to travel or every client dropkick would end in a dead stop. */
+	MeleeDropKickForward = 1 << 13,
 };
 ENUM_CLASS_FLAGS(EPolarityMoveFlag);
 
@@ -682,7 +690,7 @@ public:
 	 *  @param bHoming     fly at InTarget right now, rather than just holding momentum
 	 *  @param InTarget    world position to fly to; ignored unless bHoming */
 	void SetMeleeLungeIntent(bool bLunging, bool bHasTarget, bool bHoming, const FVector& InTarget,
-		AActor* InTargetActor);
+		AActor* InTargetActor, bool bDropKick = false, bool bDropKickForwardHeld = false);
 
 	/** The swing ended without connecting: the momentum it started with is handed back when the
 	 *  lunge stops, so a miss does not cost the player their run. Cleared by the next lunge. */
@@ -691,7 +699,7 @@ public:
 	/** Tunables mirrored from FMeleeAttackSettings so this side does not have to reach into the melee
 	 *  component. Mirrored once in UMeleeAttackComponent::BeginPlay, which runs on every machine from
 	 *  the same Blueprint defaults, so both ends fly at the same speed. */
-	void SetMeleeLungeTuning(float MaxSpeed, float MomentumRatio, bool bDisableGravity);
+	void SetMeleeLungeTuning(float MaxSpeed, float MomentumRatio, bool bDisableGravity, float DropKickSpeed);
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsMeleeLunging() const { return bIsMeleeLunging; }
@@ -750,6 +758,12 @@ protected:
 	/** This lunge has a target, so gravity is off and Z is owned by the flight. */
 	bool bMeleeLungeHasTarget = false;
 
+	/** The flight is a drop kick. @see EPolarityMoveFlag::MeleeDropKick */
+	bool bMeleeDropKick = false;
+
+	/** Forward was held as it ended. Consumed by EndMeleeLunge. */
+	bool bMeleeDropKickForward = false;
+
 	/** Flying at MeleeLungeTarget, as opposed to holding momentum beside a target already hit. */
 	bool bMeleeLungeHoming = false;
 
@@ -795,6 +809,7 @@ protected:
 
 	/** Mirrored from FMeleeAttackSettings. @see SetMeleeLungeTuning */
 	float MeleeLungeMaxSpeed = 3000.0f;
+	float MeleeDropKickSpeed = 2500.0f;
 	float MeleeLungeMomentumRatio = 1.0f;
 	bool bMeleeLungeDisablesGravity = true;
 

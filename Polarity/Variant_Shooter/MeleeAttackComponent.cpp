@@ -59,7 +59,7 @@ void UMeleeAttackComponent::BeginPlay()
 		if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(OwnerCharacter->GetCharacterMovement()))
 		{
 			Apex->SetMeleeLungeTuning(Settings.LungeMaxSpeed, Settings.MomentumPreservationRatio,
-				Settings.bDisableGravityDuringLunge);
+				Settings.bDisableGravityDuringLunge, Settings.DropKickDiveSpeed);
 		}
 	}
 
@@ -1300,15 +1300,14 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 	const bool bInLungePhase =
 		(CurrentState == EMeleeAttackState::Windup || CurrentState == EMeleeAttackState::Active);
 
-	// bIsDropKick still drives velocity from UpdateDropKick in this component's tick, so it must not
-	// also publish a lunge — the two would fight over the same field. That mechanic is a separate,
-	// still-unported case; see the drop kick note in UpdateDropKick.
-	//
 	// bPreserveMomentum off now means the swing does not drive velocity at all. The old branch for it
 	// pushed the character forward at NoTargetBoostSpeed every frame from this tick, and there is no
 	// honest way to network that without inventing wire data for a setting the project ships as true
 	// (its own comments say to keep it true). Turning it off is a "no lunge" switch now.
-	const bool bLunging = bInLungePhase && Settings.bPreserveMomentum && !bIsDropKick;
+	//
+	// A drop kick is the same kind of flight and rides the same channel: it reuses the target and the
+	// target actor and adds one flag, rather than opening a second set of everything.
+	const bool bLunging = bInLungePhase && (Settings.bPreserveMomentum || bIsDropKick);
 
 	if (!bLunging)
 	{
@@ -1333,6 +1332,39 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 	// target's knockback stun ends while the Active phase is still running, the player gets dragged
 	// toward the enemy a second time.
 	const bool bHoming = Settings.bEnableLunge && bHasTarget && !bTargetInKnockback && !bHasHitThisAttack;
+
+	if (bIsDropKick)
+	{
+		// Diving. Gravity stays on, as it always did for the dive, so bHasTarget is false here on
+		// purpose. The "still tracking" question is the one UpdateDropKick answers.
+		const bool bDivingNow = MagnetismTarget.IsValid() && !bHasHitThisAttack;
+
+		// Whether the player is asking to carry momentum out of the dive. Read HERE, on the machine
+		// that actually has the input, and sent as a decision — inside the simulation the server sees
+		// a remote pawn's input as nothing at all.
+		bool bForwardHeld = false;
+		if (UCharacterMovementComponent* Move = OwnerCharacter->GetCharacterMovement())
+		{
+			FVector InputVector = Move->GetPendingInputVector();
+			if (InputVector.IsNearlyZero())
+			{
+				InputVector = Move->GetLastInputVector();
+			}
+			FVector ForwardDir = OwnerCharacter->GetActorForwardVector();
+			ForwardDir.Z = 0.0f;
+			if (ForwardDir.Normalize())
+			{
+				bForwardHeld = FVector::DotProduct(InputVector, ForwardDir) > 0.1f;
+			}
+		}
+
+		Apex->SetMeleeLungeIntent(true, /*bHasTarget*/ false, bDivingNow, LungeTargetPosition,
+			MagnetismTarget.Get(), /*bDropKick*/ true, bForwardHeld);
+
+		LungeProgress += DeltaTime / Settings.LungeDuration;
+		LungeProgress = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
+		return;
+	}
 
 	// LungeTargetPosition is refreshed every frame in UpdateMagnetism and tracks the target in XY
 	// and Z both. It is the one piece of geometry that travels to the server rather than being
@@ -1887,67 +1919,11 @@ void UMeleeAttackComponent::StopMagnetism()
 	// simulated, on both ends. @see UApexMovementComponent::EndMeleeLunge
 	MagnetismTarget.Reset();
 
-	// Handle drop kick exit momentum before resetting state
-	if (bIsDropKick && OwnerCharacter)
-	{
-		if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
-		{
-			// Check if player is holding forward input
-			// Use GetPendingInputVector which reflects current frame input, not last consumed input
-			FVector InputVector = Movement->GetPendingInputVector();
-
-			// If pending is zero, try last input as fallback
-			if (InputVector.IsNearlyZero())
-			{
-				InputVector = Movement->GetLastInputVector();
-			}
-
-			FVector ForwardDir = OwnerCharacter->GetActorForwardVector();
-			ForwardDir.Z = 0.0f;
-			ForwardDir.Normalize();
-
-			// Dot product > 0 means holding forward
-			float ForwardInput = FVector::DotProduct(InputVector, ForwardDir);
-
-#if WITH_EDITOR
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::White,
-					FString::Printf(TEXT("DropKick Debug: InputVec=(%.2f,%.2f,%.2f), ForwardDot=%.2f, DropKickVel=%.0f"),
-						InputVector.X, InputVector.Y, InputVector.Z, ForwardInput, DropKickVelocity.Size()));
-			}
-#endif
-
-			if (ForwardInput > 0.1f && !DropKickVelocity.IsNearlyZero())
-			{
-				// Player is holding forward - give them exit velocity in their facing direction
-				// Halve the speed to prevent excessive momentum
-				float ExitSpeed = DropKickVelocity.Size() * 0.5f;
-				Movement->Velocity = ForwardDir * ExitSpeed;
-
-#if WITH_EDITOR
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green,
-						FString::Printf(TEXT("DropKick Exit: Forward input, speed=%.0f (halved)"), ExitSpeed));
-				}
-#endif
-			}
-			else
-			{
-				// No forward input - zero out velocity
-				Movement->Velocity = FVector::ZeroVector;
-
-#if WITH_EDITOR
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
-						TEXT("DropKick Exit: No forward input, velocity zeroed"));
-				}
-#endif
-			}
-		}
-	}
+	// The dropkick's exit momentum is applied by UApexMovementComponent on the lunge's falling edge,
+	// on both machines. It used to be done here, reading the player's input directly — which the
+	// server sees as nothing for a remote pawn, so a client's dropkick would have ended in a dead
+	// stop every time. The "was forward held" answer travels as a flag instead.
+	// @see UApexMovementComponent::EndMeleeLunge
 
 	// Reset drop kick state
 	bIsDropKick = false;
@@ -3285,12 +3261,9 @@ bool UMeleeAttackComponent::TryStartDropKick()
 	return false;
 }
 
-// TODO(COOP): this still writes Velocity from the component tick, which is outside the move the
-// server replays — the same defect the lunge above was just moved out of, with the same symptom
-// waiting (works for the host, gets corrected away for a client). The port is the same shape: a
-// flag plus the dive target in EPolarityMoveFlag, and the integration in
-// UApexMovementComponent::UpdateCharacterStateBeforeMovement next to UpdateMeleeLunge. The exit
-// impulse in StopMagnetism and UpdateCoolKick have the same problem and belong in the same pass.
+// The dive is decided here and integrated in UApexMovementComponent, the same way the lunge is.
+// Cool kick is the one velocity writer still living in this tick, left alone by the author's
+// decision; UpdateCoolKick is where it is.
 void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 {
 	if (!bIsDropKick || !MagnetismTarget.IsValid() || !OwnerCharacter)
@@ -3308,11 +3281,8 @@ void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 	{
 		if (TargetNPC->IsInKnockback() && bHasHitThisAttack)
 		{
-			// Stop player movement velocity
-			if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
-			{
-				Movement->Velocity = FVector::ZeroVector;
-			}
+			// Stop tracking. The stop itself happens inside the simulated move, when this stops
+			// publishing a dive. @see UApexMovementComponent::UpdateMeleeLunge
 			return;
 		}
 	}
@@ -3350,15 +3320,10 @@ void UMeleeAttackComponent::UpdateDropKick(float DeltaTime)
 
 	FVector NewPos = CurrentPos + MoveDirection * MoveDistance;
 
-	// Apply movement
-	if (UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
-	{
-		// Set velocity to match movement
-		Movement->Velocity = MoveDirection * Settings.DropKickDiveSpeed;
-
-		// Save velocity for exit momentum
-		DropKickVelocity = Movement->Velocity;
-	}
+	// The dive itself is integrated by UApexMovementComponent inside the simulated move; this
+	// function only decides WHERE it is going. Writing Velocity from here is what made the dropkick
+	// work for the host and get corrected away for everybody else.
+	DropKickVelocity = MoveDirection * Settings.DropKickDiveSpeed;
 
 	// Debug visualization
 	if (bEnableDebugVisualization)
