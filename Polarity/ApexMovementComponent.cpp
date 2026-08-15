@@ -2395,8 +2395,17 @@ void UApexMovementComponent::SetMeleeLungeIntent(bool bLunging, bool bHasTarget,
 
 	// Kept at zero unless the flight is homing, so the saved move and the wire both stay empty for a
 	// lunge that is only holding momentum. @see FCharacterNetworkMoveData_Polarity::Serialize
-	MeleeLungeTarget      = bMeleeLungeHoming ? InTarget : FVector::ZeroVector;
-	MeleeLungeTargetActor = bMeleeLungeHoming ? InTargetActor : nullptr;
+	MeleeLungeTarget = bMeleeLungeHoming ? InTarget : FVector::ZeroVector;
+
+	// The ACTOR is only ever assigned, never cleared here. EndMeleeLunge runs a move later and needs
+	// it to take the move-collision ignore back off; clearing it with the intent meant the ignore was
+	// added and never removed, so two players who had lunged at each other once stopped colliding for
+	// the rest of the round. Third time this exact shape has bitten: gravity ownership, the dropkick
+	// flags, and now this.
+	if (bMeleeLungeHoming && InTargetActor)
+	{
+		MeleeLungeTargetActor = InTargetActor;
+	}
 }
 
 void UApexMovementComponent::SyncMeleeLungeGravity()
@@ -2446,10 +2455,11 @@ void UApexMovementComponent::StartMeleeLunge()
 	// full of role=3 says nothing about whose swing it was. "own" marks the pawn this machine drives.
 	if (!CharacterOwner || !CharacterOwner->bClientUpdating)
 	{
-	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge START %s role=%d own=%d target=%d homing=%d startVel=%.0f to=(%.0f,%.0f,%.0f)"),
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge START %s role=%d own=%d dropkick=%d at=%s target=%d homing=%d startVel=%.0f to=(%.0f,%.0f,%.0f)"),
 		*GetNameSafe(CharacterOwner),
 		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
 		(CharacterOwner && CharacterOwner->IsLocallyControlled()) ? 1 : 0,
+		bMeleeDropKick ? 1 : 0, *GetNameSafe(MeleeLungeTargetActor.Get()),
 		bMeleeLungeHasTarget ? 1 : 0, bMeleeLungeHoming ? 1 : 0,
 		MeleeLungeStartVelocity.Size(), MeleeLungeTarget.X, MeleeLungeTarget.Y, MeleeLungeTarget.Z);
 	}

@@ -1718,6 +1718,28 @@ void UMeleeAttackComponent::StartMagnetism()
 			continue;
 		}
 
+		// Not at corpses. The filter was "is it a character", which a dead enemy still is: its actor
+		// lives on for the ragdoll, and under the pooling model it lives on indefinitely and gets
+		// parked and moved. A swing near one flew the player at whatever the body's actor location
+		// happened to be — the bench caught a lunge aimed eight metres up.
+		if (const AShooterNPC* NPCTarget = Cast<AShooterNPC>(HitActor))
+		{
+			if (NPCTarget->IsDead())
+			{
+				continue;
+			}
+		}
+
+		// Nor at a teammate who is already down. Flying at somebody waiting to be picked up is never
+		// what the swing meant, and they cannot be hurt anyway.
+		if (const AShooterCharacter* PlayerTarget = Cast<AShooterCharacter>(HitActor))
+		{
+			if (PlayerTarget->IsDowned() || PlayerTarget->IsDead())
+			{
+				continue;
+			}
+		}
+
 		FVector ToTarget = HitActor->GetActorLocation() - Start;
 		const float Dist = ToTarget.Size();
 		if (Dist <= KINDA_SMALL_NUMBER || Dist > Settings.LungeRange)
