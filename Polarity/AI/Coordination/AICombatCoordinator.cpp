@@ -779,7 +779,10 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 			Data.TargetSwitchPressure += DeltaTime;
 			if (Data.TargetSwitchPressure >= TargetSwitchDelay)
 			{
-				UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s switches from %s to %s (%.0f cm closer for %.2fs)"),
+				// Warning, not Verbose: LogTemp Verbose does not print by default, and a switch that
+				// leaves no trace is a mechanic nobody can ever confirm on the bench. Hysteresis caps
+				// this at one line per NPC per TargetSwitchDelay, so it cannot become spam.
+				UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s switches from %s to %s (%.0f cm closer for %.2fs)"),
 					*NPC->GetName(), *GetNameSafe(Current), *GetNameSafe(Nearest),
 					CurrentDist - NearestDist, Data.TargetSwitchPressure);
 
