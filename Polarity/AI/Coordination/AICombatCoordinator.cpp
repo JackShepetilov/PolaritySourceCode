@@ -67,12 +67,19 @@ void AAICombatCoordinator::BeginPlay()
 	Super::BeginPlay();
 	Instance = this;
 
-	// TODO(COOP): this coordinator is built around ONE target. Battle slots, attack tokens and
-	// CachedPlayerState all hang off PrimaryTarget, so with four players the enemies would form a
-	// single ring around one of them and nobody would coordinate against the other three.
-	// Making it multi-target is a design decision (one coordinator per player? slot rings and
-	// token pools per target?), not a rename. Until that is decided: nearest player, which is
-	// identical to the old behaviour in single player and at least is not "whoever joined first".
+	// Each NPC now carries its own remembered target (FRegisteredNPCData::Target), and PrimaryTarget
+	// is derived from those every tick: whoever the most enemies are actually fighting.
+	//
+	// TODO(COOP): what is still single-target is the ARRANGEMENT, not the choice. Battle slots, the
+	// player state cache and the strafe rings all hang off PrimaryTarget, so with four players the
+	// enemies pick their own opponents correctly but their formations are all laid out around the
+	// busiest one. The shape of the fix is known — group the NPCs by their target and give each group
+	// its own slot ring and its own token pools, with GetEffectiveMaxAttackers as the ceiling over
+	// all of them — and it is the next piece of work here.
+	//
+	// TODO(COOP): threat. UpdateNPCTargets scores candidates by raw distance; the design calls for
+	// distance scaled by a per-player threat value that loud actions spike and that decays in a few
+	// seconds. There is exactly one place to add it now, which is why this was done first.
 	PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 }
 
@@ -82,14 +89,18 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 
 	TimeSinceLastAttackGrant += DeltaTime;
 
-	// Re-find a target if the current one is gone. See the TODO(COOP) in BeginPlay: single target.
+	// Cleanup first: targeting below walks the registered list and should not walk corpses.
+	CleanupInvalidNPCs();
+
+	// Who each NPC is fighting, remembered between frames. This also derives PrimaryTarget, so the
+	// old "re-find the nearest player to the coordinator actor" is gone — that answer had nothing to
+	// do with where the fighting was.
+	UpdateNPCTargets(DeltaTime);
+
 	if (!PrimaryTarget.IsValid())
 	{
 		PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 	}
-
-	// Cleanup
-	CleanupInvalidNPCs();
 
 	// Token pools
 	UpdateTokenPools();
@@ -697,6 +708,140 @@ EBattleRing AAICombatCoordinator::GetNPCRing(APawn* NPC) const
 }
 
 // ==================== Role & Pressure ====================
+
+void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(World, Players);
+	if (Players.Num() == 0)
+	{
+		return;
+	}
+
+	for (FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		APawn* NPC = Data.NPC.Get();
+		if (!NPC)
+		{
+			continue;
+		}
+
+		const FVector NPCLocation = NPC->GetActorLocation();
+
+		// Whoever is nearest right now. This is the candidate, NOT the answer — the answer is below,
+		// and it is mostly "keep doing what you were doing".
+		//
+		// This is where a threat value plugs in when it exists: instead of raw distance, score each
+		// player as distance scaled by their current threat, and the rest of this function is
+		// unchanged. Keeping the switch rules separate from the scoring is the point.
+		APawn* Nearest = nullptr;
+		float NearestDist = TNumericLimits<float>::Max();
+		for (APawn* Player : Players)
+		{
+			const float Dist = FVector::Dist(NPCLocation, Player->GetActorLocation());
+			if (Dist < NearestDist)
+			{
+				NearestDist = Dist;
+				Nearest = Player;
+			}
+		}
+
+		AActor* Current = Data.Target.Get();
+
+		// No target, or the one it had is gone: take the nearest with no ceremony. Nothing to be
+		// loyal to.
+		if (!Current)
+		{
+			Data.Target = Nearest;
+			Data.TargetSwitchPressure = 0.0f;
+			continue;
+		}
+
+		if (Current == Nearest)
+		{
+			Data.TargetSwitchPressure = 0.0f;
+			continue;
+		}
+
+		// Somebody else is closer. Two gates before the enemy turns around, and they exist for
+		// different reasons: the margin rejects a tie (two teammates side by side, distances
+		// swapping every frame), the delay rejects a pass-through (a teammate sprinting past on the
+		// way somewhere else).
+		const float CurrentDist = FVector::Dist(NPCLocation, Current->GetActorLocation());
+		if (CurrentDist - NearestDist > TargetSwitchMargin)
+		{
+			Data.TargetSwitchPressure += DeltaTime;
+			if (Data.TargetSwitchPressure >= TargetSwitchDelay)
+			{
+				UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s switches from %s to %s (%.0f cm closer for %.2fs)"),
+					*NPC->GetName(), *GetNameSafe(Current), *GetNameSafe(Nearest),
+					CurrentDist - NearestDist, Data.TargetSwitchPressure);
+
+				Data.Target = Nearest;
+				Data.TargetSwitchPressure = 0.0f;
+			}
+		}
+		else
+		{
+			// Stopped leading. Start over rather than decay: a contender that keeps drifting in and
+			// out of the margin should never accumulate its way to a switch.
+			Data.TargetSwitchPressure = 0.0f;
+		}
+	}
+
+	// PrimaryTarget is now derived rather than chosen: whoever the most enemies are actually fighting.
+	// Everything still built around a single target (battle slots, the player state cache, the strafe
+	// rings) keeps working and now at least points at the busiest player instead of an arbitrary one.
+	// Those are the next thing to make per-target; see the TODO(COOP) in BeginPlay.
+	TMap<AActor*, int32> Tally;
+	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		if (AActor* T = Data.Target.Get())
+		{
+			Tally.FindOrAdd(T)++;
+		}
+	}
+
+	AActor* Busiest = nullptr;
+	int32 BusiestCount = 0;
+	for (const TPair<AActor*, int32>& Pair : Tally)
+	{
+		if (Pair.Value > BusiestCount)
+		{
+			BusiestCount = Pair.Value;
+			Busiest = Pair.Key;
+		}
+	}
+
+	if (Busiest)
+	{
+		PrimaryTarget = Busiest;
+	}
+}
+
+AActor* AAICombatCoordinator::GetTargetFor(APawn* NPC) const
+{
+	const FRegisteredNPCData* Data = FindNPCData(NPC);
+	return Data ? Data->Target.Get() : nullptr;
+}
+
+int32 AAICombatCoordinator::GetEffectiveMaxAttackers() const
+{
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	const int32 PlayerCount = FMath::Max(1, Players.Num());
+
+	// One player has to come out exactly at the configured number, or every existing arena is
+	// retuned by accident.
+	const float Scaled = MaxSimultaneousAttackers * FMath::Pow(static_cast<float>(PlayerCount), PressureScalingExponent);
+	return FMath::Max(MaxSimultaneousAttackers, FMath::RoundToInt(Scaled));
+}
 
 void AAICombatCoordinator::UpdatePlayerStateCache()
 {

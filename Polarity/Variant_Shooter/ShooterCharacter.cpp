@@ -1074,8 +1074,8 @@ void AShooterCharacter::Client_ApplyKnockback_Implementation(FVector LaunchVeloc
 	// bXYOverride / bZOverride match the authority's call in ApplyKnockbackOnAuthority.
 	LaunchCharacter(LaunchVelocity, true, true);
 
-	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s got shoved on its own client at %.0f u/s"),
-		*GetName(), LaunchVelocity.Size());
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s got shoved on its own client at %.0f u/s (t=%.3f)"),
+		*GetName(), LaunchVelocity.Size(), GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
 }
 
 void AShooterCharacter::Client_ConfirmDamageDealt_Implementation(AShooterWeapon* Weapon, AActor* HitActor,

@@ -2116,6 +2116,13 @@ void UMeleeAttackComponent::ApplyKnockbackOnAuthority(AActor* Target, const FVec
 		// Here, so the authority's copy moves and everyone watching sees it.
 		HitCharacter->LaunchCharacter(LaunchVelocity, true, true);
 
+		// Logged on BOTH ends on purpose. The pair of lines, and the gap between their timestamps,
+		// is the only way to tell a shove that happened once at the same simulated moment from one
+		// that happened twice half a round trip apart.
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s shoved on the authority at %.0f u/s (t=%.3f)"),
+			*HitCharacter->GetName(), LaunchVelocity.Size(),
+			HitCharacter->GetWorld() ? HitCharacter->GetWorld()->GetTimeSeconds() : 0.0f);
+
 		// And on the machine that predicts this character, or the two will disagree about where it
 		// went for as long as the shove lasts. That disagreement is what the stuttering was.
 		if (AShooterCharacter* HitShooter = Cast<AShooterCharacter>(HitCharacter))

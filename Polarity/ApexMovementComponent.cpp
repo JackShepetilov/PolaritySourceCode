@@ -2398,18 +2398,23 @@ void UApexMovementComponent::StartMeleeLunge()
 	bMeleeLungeGravityOff = bMeleeLungeHasTarget && bMeleeLungeDisablesGravity;
 	SyncMeleeLungeGravity();
 
-	// Edge only, never per frame: two of these lines, one from each machine, are what tells you the
-	// server started the same flight as the client instead of quietly not starting one.
+	// Edge only, never per frame, and never from a replay. A correction re-runs this move from the
+	// corrected state, which legitimately re-measures the entry speed and converges on the server's
+	// number — printing every one of those made a healthy convergence (805, 846, 899 against the
+	// server's 918) read like a desync and nearly cost a fix to code that was working.
 	//
 	// The pawn name is in there because the role is not enough to read this log. On a listen server
 	// the host's OWN character and every client's character are both ROLE_Authority, so a host log
 	// full of role=3 says nothing about whose swing it was. "own" marks the pawn this machine drives.
+	if (!CharacterOwner || !CharacterOwner->bClientUpdating)
+	{
 	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge START %s role=%d own=%d target=%d homing=%d startVel=%.0f to=(%.0f,%.0f,%.0f)"),
 		*GetNameSafe(CharacterOwner),
 		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
 		(CharacterOwner && CharacterOwner->IsLocallyControlled()) ? 1 : 0,
 		bMeleeLungeHasTarget ? 1 : 0, bMeleeLungeHoming ? 1 : 0,
 		MeleeLungeStartVelocity.Size(), MeleeLungeTarget.X, MeleeLungeTarget.Y, MeleeLungeTarget.Z);
+	}
 }
 
 void UApexMovementComponent::EndMeleeLunge()
@@ -2436,11 +2441,14 @@ void UApexMovementComponent::EndMeleeLunge()
 		GravityScale = MovementSettings ? MovementSettings->DefaultGravityScale : 1.5f;
 	}
 
+	if (!CharacterOwner || !CharacterOwner->bClientUpdating)
+	{
 	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] MeleeLunge END %s role=%d own=%d gravityWasOff=%d restored=%d vel=%.0f"),
 		*GetNameSafe(CharacterOwner),
 		CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
 		(CharacterOwner && CharacterOwner->IsLocallyControlled()) ? 1 : 0,
 		bMeleeLungeGravityOff ? 1 : 0, bMeleeLungeRestoreOnEnd ? 1 : 0, Velocity.Size());
+	}
 
 	bMeleeLungeGravityOff = false;
 	bMeleeLungeHasTarget  = false;

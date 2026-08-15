@@ -94,6 +94,17 @@ struct FRegisteredNPCData
 	UPROPERTY()
 	TWeakObjectPtr<APawn> NPC;
 
+	/** Which player this NPC is fighting. Remembered, not re-derived: the whole point of keeping it
+	 *  here is that "nearest player" recomputed every frame flips between two teammates standing
+	 *  near each other, and an enemy that changes its mind sixty times a second reads as broken.
+	 *  @see AAICombatCoordinator::UpdateNPCTargets */
+	UPROPERTY()
+	TWeakObjectPtr<AActor> Target;
+
+	/** How long a closer player has been closer by more than the switch margin. Reset the moment the
+	 *  contender stops leading, so a teammate has to genuinely take over, not merely brush past. */
+	float TargetSwitchPressure = 0.0f;
+
 	EAICombatRole Role = EAICombatRole::Supporter;
 	float AttackScore = 0.0f;
 	float WaitTime = 0.0f;
@@ -148,6 +159,29 @@ public:
 	/** Maximum number of NPCs that can attack simultaneously (legacy, still enforced as total cap) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination", meta = (ClampMin = "1", ClampMax = "10"))
 	int32 MaxSimultaneousAttackers = 3;
+
+	// ==================== Target selection ====================
+	// One owner for "who is this NPC fighting". Before this the answer was CoopPlayers::GetNearest
+	// recomputed at each of ~18 call sites, with no memory anywhere, so two teammates standing close
+	// together made every enemy flicker between them. It also left no single place to hang a threat
+	// value on later, which is the whole point of putting it here.
+
+	/** A contender has to be this much closer (cm) than the current target before it counts as
+	 *  leading at all. Pure distance ties are what cause the flicker. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Targeting", meta = (ClampMin = "0.0"))
+	float TargetSwitchMargin = 300.0f;
+
+	/** And it has to keep leading for this long (s) before the enemy actually turns. Together with the
+	 *  margin this is the difference between "somebody ran past" and "somebody took over". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Targeting", meta = (ClampMin = "0.0"))
+	float TargetSwitchDelay = 0.75f;
+
+	/** How the total pressure budget grows with the size of the team. 1.0 is linear (four players
+	 *  fight four times as much at once), 0.0 is flat (four players share what one faced). Sublinear
+	 *  is the usual co-op answer: more going on with a full team, but not proportionally more per
+	 *  head. @see GetEffectiveMaxAttackers */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Targeting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressureScalingExponent = 0.75f;
 
 	/** Minimum time between attack permission grants (seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination", meta = (ClampMin = "0.0", ClampMax = "2.0"))
@@ -366,6 +400,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coordination")
 	AActor* GetPrimaryTarget() const { return PrimaryTarget.Get(); }
 
+	/** Who this NPC is fighting. The single answer, remembered rather than recomputed.
+	 *
+	 *  Call sites that still ask CoopPlayers::GetNearest for themselves should move onto this: they
+	 *  each re-decide independently, so one enemy can be chasing player A while the coordinator
+	 *  arranges its battle slots around player B. That migration is deliberately not done in this
+	 *  change — it touches ~18 places across the AI and the arena, and belongs with a bench session
+	 *  rather than a blind sweep. Returns null if the NPC is not registered or has no target yet. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
+	AActor* GetTargetFor(APawn* NPC) const;
+
+	/** The global ceiling on simultaneous attackers, grown sublinearly with the size of the team.
+	 *  This is the ceiling for the WHOLE fight; per-target limits are what stop four enemies piling
+	 *  onto one player, and they come from the token pools. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
+	int32 GetEffectiveMaxAttackers() const;
+
 	/** Set the primary target for all NPCs. */
 	UFUNCTION(BlueprintCallable, Category = "Coordination")
 	void SetPrimaryTarget(AActor* Target);
@@ -480,6 +530,10 @@ private:
 
 	// --- Role & Pressure ---
 	FPlayerStateCache CachedPlayerState;
+
+	/** Give every registered NPC a target, and let it keep the one it has unless somebody genuinely
+	 *  takes over. Also derives PrimaryTarget from the result. */
+	void UpdateNPCTargets(float DeltaTime);
 
 	void UpdatePlayerStateCache();
 	void AssignRoles();
