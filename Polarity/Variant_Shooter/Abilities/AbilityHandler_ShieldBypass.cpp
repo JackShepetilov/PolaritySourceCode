@@ -67,7 +67,7 @@ void UAbilityHandler_ShieldBypass::OnActivate_Implementation()
 		return;
 	}
 
-	Target->ApplyShieldBypass(Stats.Duration, Stats.MoveSpeedMultiplier);
+	Target->ApplyShieldBypass(Stats.Duration, Stats.MoveSpeedMultiplier, Stats.RedirectDamageMultiplier);
 
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: %s opened for %.1fs by %s"),
 		*Target->GetName(), Stats.Duration, *GetNameSafe(GetOwningCharacter()));

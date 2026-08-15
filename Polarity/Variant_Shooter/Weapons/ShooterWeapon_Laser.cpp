@@ -357,7 +357,11 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 			{
 				FPointDamageEvent DamageEvent;
 				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
-				BypassedNPC->TakeDamage(IonizationChargePerSecond * DeltaTime, DamageEvent,
+				// Scaled, because charge-per-second is a rate for filling a shield and means nothing
+				// as a damage rate. Multiplier comes from the ability that opened this enemy.
+				const float RedirectedDamage = IonizationChargePerSecond * DeltaTime
+					* BypassedNPC->ShieldBypassDamageMultiplier;
+				BypassedNPC->TakeDamage(RedirectedDamage, DamageEvent,
 					GetInstigatorController(), GetOwner());
 			}
 			return;

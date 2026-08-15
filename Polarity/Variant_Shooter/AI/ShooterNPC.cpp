@@ -1303,7 +1303,7 @@ void AShooterNPC::PlayDeathVisuals()
 	}
 }
 
-void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier)
+void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier, float DamageMultiplier)
 {
 	if (!HasAuthority() || Duration <= 0.0f || bIsDead)
 	{
@@ -1321,6 +1321,7 @@ void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier)
 	}
 
 	bShieldBypassActive = true;
+	ShieldBypassDamageMultiplier = FMath::Max(0.0f, DamageMultiplier);
 
 	if (MoveComp && MoveSpeedMultiplier > 0.0f)
 	{
@@ -1380,6 +1381,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, bIsDead);
 	DOREPLIFETIME(AShooterNPC, CurrentHP);
 	DOREPLIFETIME(AShooterNPC, bShieldBypassActive);
+	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
 }
 
 void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)

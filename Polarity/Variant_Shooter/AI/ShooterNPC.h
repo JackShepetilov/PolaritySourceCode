@@ -171,7 +171,14 @@ public:
 	/** Open this enemy up for the given time, and slow it while it lasts. Authority only.
 	 *  Re-applying refreshes the timer rather than stacking. */
 	UFUNCTION(BlueprintCallable, Category = "Coop|Shield Bypass")
-	void ApplyShieldBypass(float Duration, float MoveSpeedMultiplier);
+	void ApplyShieldBypass(float Duration, float MoveSpeedMultiplier, float DamageMultiplier);
+
+	/** How hard the redirected beam hits while the window is open. The beam's own charge-per-second
+	 *  is a shield-filling rate, not a damage rate, and using it raw made the ability read as doing
+	 *  nothing. Carried on the enemy because the substitution happens in the weapon, which has no
+	 *  idea which ability opened it. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Coop|Shield Bypass")
+	float ShieldBypassDamageMultiplier = 1.0f;
 
 	UFUNCTION(BlueprintPure, Category = "Coop|Shield Bypass")
 	bool IsShieldBypassed() const { return bShieldBypassActive; }

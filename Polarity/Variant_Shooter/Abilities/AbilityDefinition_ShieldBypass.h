@@ -35,6 +35,12 @@ struct FShieldBypassLevelStats
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float MoveSpeedMultiplier = 0.5f;
 
+	/** Multiplies the beam's charge-per-second when it is redirected into health. The beam's own
+	 *  number is a shield-filling rate; at 1.0 the redirect is barely felt, which is exactly how it
+	 *  read on the bench. This is the knob that makes the window worth opening. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.0"))
+	float RedirectDamageMultiplier = 6.0f;
+
 	/** How far the caster can reach to pick a target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "100.0", Units = "cm"))
 	float Range = 4000.0f;
