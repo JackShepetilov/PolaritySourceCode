@@ -102,13 +102,19 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 		PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 	}
 
+	// Groups follow from the targets decided just above.
+	RebuildTargetGroups();
+
 	// Token pools
 	UpdateTokenPools();
 	UpdateKamikazeTokenPoolSize();
 	UpdateProximityOverrides();
-	RangedTokenPool.CleanupInvalid();
-	MeleeTokenPool.CleanupInvalid();
-	SpecialTokenPool.CleanupInvalid();
+	for (FTargetGroup& Group : Groups)
+	{
+		Group.Ranged.CleanupInvalid();
+		Group.Melee.CleanupInvalid();
+		Group.Special.CleanupInvalid();
+	}
 	KamikazeTokenPool.CleanupInvalid();
 
 	// Scores
@@ -126,30 +132,37 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 		}
 	}
 
-	// Player state cache
-	UpdatePlayerStateCache();
+	// Player state cache, one per group
+	for (FTargetGroup& Group : Groups)
+	{
+		UpdatePlayerStateCacheForGroup(Group);
+	}
 
 	// Role assignment
 	AssignRoles();
 
-	// Battle Circle
+	// Battle Circle, one ring per group. Each group keeps its own clock and its own member count, so
+	// an enemy joining the fight around one player does not rebuild the formation around another.
 	if (bUseBattleCircle)
 	{
-		TimeSinceLastSlotRecalc += DeltaTime;
+		for (FTargetGroup& Group : Groups)
+		{
+			Group.TimeSinceLastSlotRecalc += DeltaTime;
 
-		const int32 ActiveNPCCount = RegisteredNPCs.Num();
-		if (ActiveNPCCount != LastSlotNPCCount || BattleSlots.Num() == 0)
-		{
-			GenerateBattleSlots();
-			AssignNPCsToSlots();
-			LastSlotNPCCount = ActiveNPCCount;
-			TimeSinceLastSlotRecalc = 0.0f;
-		}
-		else if (TimeSinceLastSlotRecalc >= SlotRecalculationInterval)
-		{
-			RecalculateSlotPositions();
-			AssignNPCsToSlots();
-			TimeSinceLastSlotRecalc = 0.0f;
+			const int32 ActiveNPCCount = Group.Members.Num();
+			if (ActiveNPCCount != Group.LastSlotNPCCount || Group.BattleSlots.Num() == 0)
+			{
+				GenerateBattleSlotsForGroup(Group);
+				AssignNPCsToSlotsForGroup(Group);
+				Group.LastSlotNPCCount = ActiveNPCCount;
+				Group.TimeSinceLastSlotRecalc = 0.0f;
+			}
+			else if (Group.TimeSinceLastSlotRecalc >= SlotRecalculationInterval)
+			{
+				RecalculateSlotPositionsForGroup(Group);
+				AssignNPCsToSlotsForGroup(Group);
+				Group.TimeSinceLastSlotRecalc = 0.0f;
+			}
 		}
 	}
 
@@ -228,9 +241,12 @@ void AAICombatCoordinator::UnregisterNPC(APawn* NPC)
 	if (!NPC) return;
 
 	// Release any held tokens
-	RangedTokenPool.Release(NPC);
-	MeleeTokenPool.Release(NPC);
-	SpecialTokenPool.Release(NPC);
+	for (FTargetGroup& Group : Groups)
+	{
+		Group.Ranged.Release(NPC);
+		Group.Melee.Release(NPC);
+		Group.Special.Release(NPC);
+	}
 	KamikazeTokenPool.Release(NPC);
 
 	// Release strafe slot
@@ -350,28 +366,6 @@ EAttackTokenType AAICombatCoordinator::DetermineTokenType(APawn* NPC) const
 	return EAttackTokenType::Ranged;
 }
 
-FTokenPool& AAICombatCoordinator::GetPoolForType(EAttackTokenType Type)
-{
-	switch (Type)
-	{
-	case EAttackTokenType::Melee: return MeleeTokenPool;
-	case EAttackTokenType::Special: return SpecialTokenPool;
-	case EAttackTokenType::Kamikaze: return KamikazeTokenPool;
-	default: return RangedTokenPool;
-	}
-}
-
-const FTokenPool& AAICombatCoordinator::GetPoolForType(EAttackTokenType Type) const
-{
-	switch (Type)
-	{
-	case EAttackTokenType::Melee: return MeleeTokenPool;
-	case EAttackTokenType::Special: return SpecialTokenPool;
-	case EAttackTokenType::Kamikaze: return KamikazeTokenPool;
-	default: return RangedTokenPool;
-	}
-}
-
 bool AAICombatCoordinator::RequestAttackToken(APawn* Requester, EAttackTokenType TokenType)
 {
 	if (!Requester) return false;
@@ -390,7 +384,17 @@ bool AAICombatCoordinator::RequestAttackToken(APawn* Requester, EAttackTokenType
 		return true;
 	}
 
-	FTokenPool& Pool = GetPoolForType(TokenType);
+	FTokenPool* PoolPtr = GetPoolFor(Requester, TokenType);
+	if (!PoolPtr)
+	{
+		// No group yet: this NPC has not been given a target, which happens on the first tick after
+		// it registers. Said out loud rather than returning a silent false — a permanently groupless
+		// NPC would never attack anybody and nothing else would report it.
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s asked for a token with no target group yet"),
+			*GetNameSafe(Requester));
+		return false;
+	}
+	FTokenPool& Pool = *PoolPtr;
 
 	// Already holds token
 	if (Pool.HasToken(Requester))
@@ -438,9 +442,14 @@ void AAICombatCoordinator::ReleaseAttackToken(APawn* Attacker)
 {
 	if (!Attacker) return;
 
-	RangedTokenPool.Release(Attacker);
-	MeleeTokenPool.Release(Attacker);
-	SpecialTokenPool.Release(Attacker);
+	// Released from every group, not just the one it belongs to now: an NPC that switched target
+	// while holding a token would otherwise leave it behind in its old group forever.
+	for (FTargetGroup& Group : Groups)
+	{
+		Group.Ranged.Release(Attacker);
+		Group.Melee.Release(Attacker);
+		Group.Special.Release(Attacker);
+	}
 }
 
 bool AAICombatCoordinator::HasAttackToken(APawn* NPC) const
@@ -450,14 +459,22 @@ bool AAICombatCoordinator::HasAttackToken(APawn* NPC) const
 	const FRegisteredNPCData* Data = FindNPCData(NPC);
 	if (Data && Data->bProximityOverride) return true;
 
-	return RangedTokenPool.HasToken(NPC)
-		|| MeleeTokenPool.HasToken(NPC)
-		|| SpecialTokenPool.HasToken(NPC);
+	const FTargetGroup* Group = FindGroupFor(NPC);
+	if (!Group)
+	{
+		return false;
+	}
+
+	return Group->Ranged.HasToken(NPC)
+		|| Group->Melee.HasToken(NPC)
+		|| Group->Special.HasToken(NPC);
 }
 
 bool AAICombatCoordinator::TryStealToken(APawn* Requester, FTokenPool& Pool)
 {
-	if (!PrimaryTarget.IsValid() || !Requester) return false;
+	// No PrimaryTarget check any more: stealing happens within one group, so the only target that
+	// matters is the requester's own, and the gates below already ask about it.
+	if (!Requester) return false;
 
 	const bool bRequesterHasLOS = HasLineOfSightToTarget(Requester);
 	if (!bRequesterHasLOS) return false;
@@ -506,11 +523,10 @@ bool AAICombatCoordinator::TryStealToken(APawn* Requester, FTokenPool& Pool)
 
 void AAICombatCoordinator::UpdateProximityOverrides()
 {
-	if (!PrimaryTarget.IsValid()) return;
-
 	for (FRegisteredNPCData& Data : RegisteredNPCs)
 	{
 		if (!Data.NPC.IsValid()) continue;
+		// Distance to THIS NPC's own target. @see ResolveTargetFor
 		const float Dist = GetDistanceToTarget(Data.NPC.Get());
 		Data.bProximityOverride = (Dist <= ProximityOverrideDistance);
 	}
@@ -518,21 +534,29 @@ void AAICombatCoordinator::UpdateProximityOverrides()
 
 void AAICombatCoordinator::UpdateTokenPools()
 {
-	RangedTokenPool.MaxTokens = MaxRangedTokens;
-	MeleeTokenPool.MaxTokens = MaxMeleeTokens;
-	SpecialTokenPool.MaxTokens = MaxSpecialTokens;
+	// Every group gets the same per-player allowance. The team-size scaling lives in the global
+	// ceiling instead, so adding a player adds a group rather than crowding an existing one.
+	for (FTargetGroup& Group : Groups)
+	{
+		Group.Ranged.MaxTokens  = MaxRangedTokens;
+		Group.Melee.MaxTokens   = MaxMeleeTokens;
+		Group.Special.MaxTokens = MaxSpecialTokens;
+	}
 }
 
 // ==================== Battle Circle ====================
 
-void AAICombatCoordinator::GenerateBattleSlots()
+void AAICombatCoordinator::GenerateBattleSlotsForGroup(FTargetGroup& Group)
 {
-	BattleSlots.Empty();
+	Group.BattleSlots.Empty();
 
-	// Count NPCs per preferred ring
+	// Count only THIS group's NPCs per preferred ring. The ring around a player is sized by the
+	// enemies fighting that player, not by everyone alive on the level.
 	int32 InnerCount = 0, MiddleCount = 0, OuterCount = 0;
-	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	for (int32 Index : Group.Members)
 	{
+		if (!RegisteredNPCs.IsValidIndex(Index)) continue;
+		const FRegisteredNPCData& Data = RegisteredNPCs[Index];
 		if (!Data.NPC.IsValid()) continue;
 		EBattleRing Ring = GetPreferredRing(Data);
 		switch (Ring)
@@ -543,7 +567,7 @@ void AAICombatCoordinator::GenerateBattleSlots()
 		}
 	}
 
-	auto CreateSlotsForRing = [this](EBattleRing Ring, int32 Count)
+	auto CreateSlotsForRing = [&Group](EBattleRing Ring, int32 Count)
 	{
 		if (Count <= 0) return;
 		const float AngleStep = 360.0f / Count;
@@ -553,7 +577,7 @@ void AAICombatCoordinator::GenerateBattleSlots()
 			FBattleSlot Slot;
 			Slot.Ring = Ring;
 			Slot.AngleDeg = FMath::Fmod(RandomOffset + i * AngleStep, 360.0f);
-			BattleSlots.Add(Slot);
+			Group.BattleSlots.Add(Slot);
 		}
 	};
 
@@ -561,17 +585,17 @@ void AAICombatCoordinator::GenerateBattleSlots()
 	CreateSlotsForRing(EBattleRing::Middle, MiddleCount);
 	CreateSlotsForRing(EBattleRing::Outer, OuterCount);
 
-	RecalculateSlotPositions();
+	RecalculateSlotPositionsForGroup(Group);
 }
 
-void AAICombatCoordinator::RecalculateSlotPositions()
+void AAICombatCoordinator::RecalculateSlotPositionsForGroup(FTargetGroup& Group)
 {
-	if (!PrimaryTarget.IsValid()) return;
+	AActor* Target = Group.Target.Get();
+	if (!Target) return;
 
-	const FVector PlayerPos = PrimaryTarget->GetActorLocation();
-	LastSlotCalcPlayerPosition = PlayerPos;
+	const FVector PlayerPos = Target->GetActorLocation();
 
-	for (FBattleSlot& Slot : BattleSlots)
+	for (FBattleSlot& Slot : Group.BattleSlots)
 	{
 		const float Radius = GetRingMidRadius(Slot.Ring);
 		const float AngleRad = FMath::DegreesToRadians(Slot.AngleDeg);
@@ -598,14 +622,16 @@ EBattleRing AAICombatCoordinator::GetPreferredRing(const FRegisteredNPCData& Dat
 {
 	if (!Data.NPC.IsValid()) return EBattleRing::Middle;
 
-	// Role overrides for pressure system
-	if (Data.Role == EAICombatRole::Pressurer)
+	// Role overrides for pressure system. Read from the group this NPC belongs to: pressure is a
+	// response to how the player IT is fighting is doing, not to whoever is worst off on the level.
+	const FTargetGroup* Group = Groups.IsValidIndex(Data.GroupIndex) ? &Groups[Data.GroupIndex] : nullptr;
+	if (Data.Role == EAICombatRole::Pressurer && Group && Group->State.bIsValid)
 	{
-		if (CachedPlayerState.bIsValid && CachedPlayerState.HPPercent <= LowHPThreshold)
+		if (Group->State.HPPercent <= LowHPThreshold)
 		{
 			if (Cast<AMeleeNPC>(Data.NPC.Get())) return EBattleRing::Inner;
 		}
-		if (CachedPlayerState.bIsValid && CachedPlayerState.ArmorPercent <= LowArmorThreshold)
+		if (Group->State.ArmorPercent <= LowArmorThreshold)
 		{
 			return EBattleRing::Middle;
 		}
@@ -624,35 +650,38 @@ EBattleRing AAICombatCoordinator::GetPreferredRing(const FRegisteredNPCData& Dat
 	return EBattleRing::Middle;
 }
 
-void AAICombatCoordinator::AssignNPCsToSlots()
+void AAICombatCoordinator::AssignNPCsToSlotsForGroup(FTargetGroup& Group)
 {
-	// Clear all assignments
-	for (FBattleSlot& Slot : BattleSlots)
+	// Clear this group's assignments only. Touching every registered NPC here would wipe the slot
+	// another group just handed out.
+	for (FBattleSlot& Slot : Group.BattleSlots)
 	{
 		Slot.AssignedNPC = nullptr;
 	}
-	for (FRegisteredNPCData& Data : RegisteredNPCs)
+	for (int32 Index : Group.Members)
 	{
+		if (!RegisteredNPCs.IsValidIndex(Index)) continue;
+		FRegisteredNPCData& Data = RegisteredNPCs[Index];
 		Data.AssignedSlotIndex = -1;
 		Data.AssignedSlotPosition = FVector::ZeroVector;
 	}
 
-	// Build list of unassigned NPCs
+	// Only this group's NPCs compete for this group's slots.
 	TArray<int32> UnassignedNPCIndices;
-	for (int32 i = 0; i < RegisteredNPCs.Num(); ++i)
+	for (int32 Index : Group.Members)
 	{
-		if (RegisteredNPCs[i].NPC.IsValid())
+		if (RegisteredNPCs.IsValidIndex(Index) && RegisteredNPCs[Index].NPC.IsValid())
 		{
-			UnassignedNPCIndices.Add(i);
+			UnassignedNPCIndices.Add(Index);
 		}
 	}
 
 	// Two-pass: pass 0 = preferred ring only, pass 1 = any ring
 	for (int32 Pass = 0; Pass < 2; ++Pass)
 	{
-		for (int32 SlotIdx = 0; SlotIdx < BattleSlots.Num(); ++SlotIdx)
+		for (int32 SlotIdx = 0; SlotIdx < Group.BattleSlots.Num(); ++SlotIdx)
 		{
-			FBattleSlot& Slot = BattleSlots[SlotIdx];
+			FBattleSlot& Slot = Group.BattleSlots[SlotIdx];
 			if (Slot.IsOccupied()) continue;
 
 			int32 BestNPCArrayIdx = -1;
@@ -700,9 +729,10 @@ EBattleRing AAICombatCoordinator::GetNPCRing(APawn* NPC) const
 {
 	const FRegisteredNPCData* Data = FindNPCData(NPC);
 	if (!Data || Data->AssignedSlotIndex < 0) return EBattleRing::Middle;
-	if (Data->AssignedSlotIndex < BattleSlots.Num())
+	const FTargetGroup* Group = FindGroupFor(NPC);
+	if (Group && Group->BattleSlots.IsValidIndex(Data->AssignedSlotIndex))
 	{
-		return BattleSlots[Data->AssignedSlotIndex].Ring;
+		return Group->BattleSlots[Data->AssignedSlotIndex].Ring;
 	}
 	return EBattleRing::Middle;
 }
@@ -846,32 +876,31 @@ int32 AAICombatCoordinator::GetEffectiveMaxAttackers() const
 	return FMath::Max(MaxSimultaneousAttackers, FMath::RoundToInt(Scaled));
 }
 
-void AAICombatCoordinator::UpdatePlayerStateCache()
+void AAICombatCoordinator::UpdatePlayerStateCacheForGroup(FTargetGroup& Group)
 {
-	CachedPlayerState.bIsValid = false;
+	FPlayerStateCache& Cache = Group.State;
+	Cache.bIsValid = false;
 
-	if (!PrimaryTarget.IsValid()) return;
-
-	AShooterCharacter* Player = Cast<AShooterCharacter>(PrimaryTarget.Get());
+	AShooterCharacter* Player = Cast<AShooterCharacter>(Group.Target.Get());
 	if (!Player) return;
 
-	CachedPlayerState.HPPercent = Player->GetCurrentHP() / FMath::Max(1.0f, Player->GetMaxHP());
-	CachedPlayerState.ArmorPercent = Player->GetCurrentArmor() / FMath::Max(1.0f, Player->GetMaxArmor());
-	CachedPlayerState.Speed = Player->GetVelocity().Size();
-	CachedPlayerState.Position = Player->GetActorLocation();
+	Cache.HPPercent = Player->GetCurrentHP() / FMath::Max(1.0f, Player->GetMaxHP());
+	Cache.ArmorPercent = Player->GetCurrentArmor() / FMath::Max(1.0f, Player->GetMaxArmor());
+	Cache.Speed = Player->GetVelocity().Size();
+	Cache.Position = Player->GetActorLocation();
 
 	if (APlayerController* PC = Cast<APlayerController>(Player->GetController()))
 	{
-		CachedPlayerState.FacingDirection = PC->GetControlRotation().Vector();
+		Cache.FacingDirection = PC->GetControlRotation().Vector();
 	}
 
-	CachedPlayerState.bIsValid = true;
+	Cache.bIsValid = true;
 }
 
 void AAICombatCoordinator::AssignRoles()
 {
-	if (!CachedPlayerState.bIsValid) return;
-
+	// No single-cache gate any more: roles are decided per NPC against its own group's player, and
+	// one group having no valid state is no reason to leave every other enemy roleless.
 	bool bHasAggressor = false;
 
 	// Calculate angles
@@ -915,15 +944,19 @@ void AAICombatCoordinator::AssignRoles()
 			continue;
 		}
 
+		// Pressure is a response to how THIS NPC's own player is doing.
+		const FTargetGroup* Group = Groups.IsValidIndex(Data.GroupIndex) ? &Groups[Data.GroupIndex] : nullptr;
+		const bool bStateKnown = Group && Group->State.bIsValid;
+
 		// Pressurer: low HP + melee → push for health drops
-		if (CachedPlayerState.HPPercent <= LowHPThreshold && Cast<AMeleeNPC>(Data.NPC.Get()))
+		if (bStateKnown && Group->State.HPPercent <= LowHPThreshold && Cast<AMeleeNPC>(Data.NPC.Get()))
 		{
 			Data.Role = EAICombatRole::Pressurer;
 			continue;
 		}
 
 		// Pressurer: no armor → group up for channeling kills
-		if (CachedPlayerState.ArmorPercent <= LowArmorThreshold)
+		if (bStateKnown && Group->State.ArmorPercent <= LowArmorThreshold)
 		{
 			Data.Role = EAICombatRole::Pressurer;
 			continue;
@@ -956,10 +989,16 @@ void AAICombatCoordinator::AssignRoles()
 
 float AAICombatCoordinator::CalculateAngleFromPlayerFacing(APawn* NPC) const
 {
-	if (!NPC || !CachedPlayerState.bIsValid) return 0.0f;
+	if (!NPC) return 0.0f;
 
-	const FVector ToNPC = (NPC->GetActorLocation() - CachedPlayerState.Position).GetSafeNormal2D();
-	const FVector PlayerFwd = CachedPlayerState.FacingDirection.GetSafeNormal2D();
+	// The angle is measured against the player THIS NPC is fighting, not against whoever happens to
+	// be busiest — it decides whether the enemy counts as a flanker, and flanking is relative to the
+	// person being flanked.
+	const FTargetGroup* Group = FindGroupFor(NPC);
+	if (!Group || !Group->State.bIsValid) return 0.0f;
+
+	const FVector ToNPC = (NPC->GetActorLocation() - Group->State.Position).GetSafeNormal2D();
+	const FVector PlayerFwd = Group->State.FacingDirection.GetSafeNormal2D();
 
 	const float DotProduct = FVector::DotProduct(PlayerFwd, ToNPC);
 	return FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(DotProduct, -1.0f, 1.0f)));
@@ -1034,11 +1073,14 @@ void AAICombatCoordinator::UpdateAttackScores()
 
 float AAICombatCoordinator::CalculateAttackScore(const FRegisteredNPCData& Data) const
 {
-	if (!Data.NPC.IsValid() || !PrimaryTarget.IsValid()) return 0.0f;
+	if (!Data.NPC.IsValid()) return 0.0f;
+
+	const AActor* Target = ResolveTargetFor(Data.NPC.Get());
+	if (!Target) return 0.0f;
 
 	float Score = 0.0f;
 
-	const float Distance = FVector::Dist(Data.NPC->GetActorLocation(), PrimaryTarget->GetActorLocation());
+	const float Distance = FVector::Dist(Data.NPC->GetActorLocation(), Target->GetActorLocation());
 	const float NormalizedDistance = 1.0f - FMath::Clamp(Distance / MaxScoringDistance, 0.0f, 1.0f);
 	Score += NormalizedDistance * DistanceWeight;
 
@@ -1050,6 +1092,104 @@ float AAICombatCoordinator::CalculateAttackScore(const FRegisteredNPCData& Data)
 	Score += Data.WaitTime * WaitTimeWeight;
 
 	return Score;
+}
+
+void AAICombatCoordinator::RebuildTargetGroups()
+{
+	// Membership is rebuilt from scratch every tick; the groups themselves are not, because their
+	// token pools hold live grants. @see FTargetGroup
+	for (FTargetGroup& Group : Groups)
+	{
+		Group.Members.Reset();
+	}
+
+	for (int32 i = 0; i < RegisteredNPCs.Num(); ++i)
+	{
+		FRegisteredNPCData& Data = RegisteredNPCs[i];
+		Data.GroupIndex = INDEX_NONE;
+
+		AActor* Target = Data.Target.Get();
+		if (!Data.NPC.IsValid() || !Target)
+		{
+			continue;
+		}
+
+		int32 GroupIdx = Groups.IndexOfByPredicate([Target](const FTargetGroup& G)
+		{
+			return G.Target.Get() == Target;
+		});
+
+		if (GroupIdx == INDEX_NONE)
+		{
+			FTargetGroup NewGroup;
+			NewGroup.Target = Target;
+			GroupIdx = Groups.Add(MoveTemp(NewGroup));
+		}
+
+		Groups[GroupIdx].Members.Add(i);
+		Data.GroupIndex = GroupIdx;
+	}
+
+	// Retire groups nobody is fighting any more. Removing invalidates indices, so the membership
+	// pass above is redone rather than patched — it is a handful of NPCs and it runs at 10Hz.
+	const int32 Removed = Groups.RemoveAll([](const FTargetGroup& G)
+	{
+		return !G.Target.IsValid() || G.Members.Num() == 0;
+	});
+
+	if (Removed > 0)
+	{
+		for (int32 i = 0; i < RegisteredNPCs.Num(); ++i)
+		{
+			FRegisteredNPCData& Data = RegisteredNPCs[i];
+			Data.GroupIndex = Groups.IndexOfByPredicate([&Data](const FTargetGroup& G)
+			{
+				return G.Target.Get() == Data.Target.Get();
+			});
+		}
+	}
+}
+
+FTargetGroup* AAICombatCoordinator::FindGroupFor(APawn* NPC)
+{
+	const FRegisteredNPCData* Data = FindNPCData(NPC);
+	if (!Data || !Groups.IsValidIndex(Data->GroupIndex))
+	{
+		return nullptr;
+	}
+	return &Groups[Data->GroupIndex];
+}
+
+const FTargetGroup* AAICombatCoordinator::FindGroupFor(APawn* NPC) const
+{
+	const FRegisteredNPCData* Data = FindNPCData(NPC);
+	if (!Data || !Groups.IsValidIndex(Data->GroupIndex))
+	{
+		return nullptr;
+	}
+	return &Groups[Data->GroupIndex];
+}
+
+FTokenPool* AAICombatCoordinator::GetPoolFor(APawn* NPC, EAttackTokenType Type)
+{
+	// Kamikaze is deliberately global. @see FTargetGroup
+	if (Type == EAttackTokenType::Kamikaze)
+	{
+		return &KamikazeTokenPool;
+	}
+
+	FTargetGroup* Group = FindGroupFor(NPC);
+	if (!Group)
+	{
+		return nullptr;
+	}
+
+	switch (Type)
+	{
+	case EAttackTokenType::Melee:   return &Group->Melee;
+	case EAttackTokenType::Special: return &Group->Special;
+	default:                        return &Group->Ranged;
+	}
 }
 
 AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const
@@ -1287,27 +1427,40 @@ void AAICombatCoordinator::DrawDebugInfo()
 			nullptr, StatusColor, DebugDuration, true, 1.0f);
 	}
 
-	// Token pool summary
-	if (PrimaryTarget.IsValid())
+	// One summary above each player under attack, showing that group's own pressure. The global
+	// ceiling is printed alongside so the two numbers can be read against each other.
+	for (const FTargetGroup& Group : Groups)
 	{
-		const FVector StatsLocation = PrimaryTarget->GetActorLocation() + FVector(0, 0, 200.0f);
+		AActor* GroupTarget = Group.Target.Get();
+		if (!GroupTarget) continue;
+
+		const FVector StatsLocation = GroupTarget->GetActorLocation() + FVector(0, 0, 200.0f);
 		DrawDebugString(GetWorld(), StatsLocation,
-			FString::Printf(TEXT("Attackers: %d / %d\nTokens R:%d/%d M:%d/%d S:%d/%d\nRegistered: %d"),
-				CountCurrentAttackers(), MaxSimultaneousAttackers,
-				RangedTokenPool.MaxTokens - RangedTokenPool.GetAvailableCount(), RangedTokenPool.MaxTokens,
-				MeleeTokenPool.MaxTokens - MeleeTokenPool.GetAvailableCount(), MeleeTokenPool.MaxTokens,
-				SpecialTokenPool.MaxTokens - SpecialTokenPool.GetAvailableCount(), SpecialTokenPool.MaxTokens,
-				RegisteredNPCs.Num()),
+			FString::Printf(TEXT("Group: %d enemies\nTokens R:%d/%d M:%d/%d S:%d/%d\nAttackers total: %d / %d"),
+				Group.Members.Num(),
+				Group.Ranged.MaxTokens - Group.Ranged.GetAvailableCount(), Group.Ranged.MaxTokens,
+				Group.Melee.MaxTokens - Group.Melee.GetAvailableCount(), Group.Melee.MaxTokens,
+				Group.Special.MaxTokens - Group.Special.GetAvailableCount(), Group.Special.MaxTokens,
+				CountCurrentAttackers(), GetEffectiveMaxAttackers()),
 			nullptr, FColor::White, DebugDuration, true, 1.2f);
 	}
 }
 
 void AAICombatCoordinator::DrawBattleCircleDebug()
 {
-	if (!PrimaryTarget.IsValid() || !GetWorld()) return;
+	if (!GetWorld()) return;
 
-	const FVector PlayerPos = PrimaryTarget->GetActorLocation();
 	const float DebugDuration = 0.0f;
+
+	// One set of rings per group. Drawing a single set around PrimaryTarget was fine while there was
+	// only ever one formation; now there is one per player being fought, and seeing them separately
+	// is the whole point of looking.
+	for (const FTargetGroup& Group : Groups)
+	{
+	AActor* GroupTarget = Group.Target.Get();
+	if (!GroupTarget) continue;
+
+	const FVector PlayerPos = GroupTarget->GetActorLocation();
 
 	// Draw ring circles
 	auto DrawRingCircle = [this, &PlayerPos, DebugDuration](float Radius, FColor Color)
@@ -1324,7 +1477,7 @@ void AAICombatCoordinator::DrawBattleCircleDebug()
 	DrawRingCircle(OuterRingMaxRadius, DebugColorOuterRing);
 
 	// Draw each slot
-	for (const FBattleSlot& Slot : BattleSlots)
+	for (const FBattleSlot& Slot : Group.BattleSlots)
 	{
 		FColor SlotColor;
 		switch (Slot.Ring)
@@ -1348,6 +1501,7 @@ void AAICombatCoordinator::DrawBattleCircleDebug()
 				SlotColor, false, DebugDuration, 0, 1.5f);
 		}
 	}
+	}
 }
 
 void AAICombatCoordinator::DrawRoleDebug()
@@ -1356,10 +1510,13 @@ void AAICombatCoordinator::DrawRoleDebug()
 
 	const float DebugDuration = 0.0f;
 
-	// Player state overlay
-	if (PrimaryTarget.IsValid() && CachedPlayerState.bIsValid)
+	// Player state overlay, one per group
+	for (const FTargetGroup& Group : Groups)
 	{
-		const FVector PlayerLoc = PrimaryTarget->GetActorLocation();
+		if (!Group.Target.IsValid() || !Group.State.bIsValid) continue;
+
+		const FPlayerStateCache& CachedPlayerState = Group.State;
+		const FVector PlayerLoc = Group.Target->GetActorLocation();
 
 		// Facing direction arrow
 		DrawDebugDirectionalArrow(GetWorld(), PlayerLoc,

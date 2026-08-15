@@ -105,6 +105,10 @@ struct FRegisteredNPCData
 	 *  contender stops leading, so a teammate has to genuinely take over, not merely brush past. */
 	float TargetSwitchPressure = 0.0f;
 
+	/** Index into Groups, or INDEX_NONE. Rebuilt each tick alongside the membership lists; never
+	 *  trust it across a frame boundary. */
+	int32 GroupIndex = INDEX_NONE;
+
 	EAICombatRole Role = EAICombatRole::Supporter;
 	float AttackScore = 0.0f;
 	float WaitTime = 0.0f;
@@ -136,6 +140,42 @@ struct FPlayerStateCache
 	FVector Position = FVector::ZeroVector;
 	bool bIsValid = false;
 };
+
+/** Everything the coordinator arranges AROUND one player.
+ *
+ *  The coordinator used to hold exactly one of each of these and point them all at a single
+ *  PrimaryTarget, so with four players the enemies chose their opponents correctly and then formed
+ *  up around whoever happened to be busiest. A group is that same set of things, once per player
+ *  somebody is actually fighting.
+ *
+ *  Groups PERSIST between ticks. They cannot be rebuilt from scratch each frame because the token
+ *  pools hold live grants: throwing them away would hand every enemy a fresh permission to attack
+ *  sixty times a second. Membership is rebuilt each tick; the group itself is not.
+ *
+ *  Single player is the same code with one group, which is why this can be checked without a bench. */
+struct FTargetGroup
+{
+	/** The player this group forms up around. A group with no target is retired. */
+	TWeakObjectPtr<AActor> Target;
+
+	/** Indices into RegisteredNPCs. Rebuilt every tick, cheap, never persists. */
+	TArray<int32> Members;
+
+	/** Ring of positions around Target. */
+	TArray<FBattleSlot> BattleSlots;
+	float TimeSinceLastSlotRecalc = 0.0f;
+	int32 LastSlotNPCCount = -1;
+
+	/** How much pressure this ONE player is under. The global ceiling sits above all groups
+	 *  together; these are what stop four enemies piling onto the same person. */
+	FTokenPool Ranged;
+	FTokenPool Melee;
+	FTokenPool Special;
+
+	/** This player's health, armour, speed and facing, for the role and pressure system. */
+	FPlayerStateCache State;
+};
+
 
 // ==================== Coordinator ====================
 
@@ -493,9 +533,12 @@ private:
 	float GetDistanceToTarget(APawn* NPC) const;
 
 	// --- Token system ---
-	FTokenPool RangedTokenPool;
-	FTokenPool MeleeTokenPool;
-	FTokenPool SpecialTokenPool;
+	/** One per player anybody is fighting. Persistent: see FTargetGroup. */
+	TArray<FTargetGroup> Groups;
+
+	/** Kamikaze stays a single global pool on purpose. Its size follows the number of live drones,
+	 *  not the number of players, so splitting it per group would hand a four-player team four times
+	 *  the divers — linear growth, which is exactly what the sublinear ceiling exists to avoid. */
 	FTokenPool KamikazeTokenPool;
 
 	/** Time of last kamikaze token grant (for stagger enforcement) */
@@ -517,10 +560,7 @@ private:
 	TArray<FStrafeSlot> StrafeSlots;
 
 	// --- Battle Circle ---
-	TArray<FBattleSlot> BattleSlots;
-	float TimeSinceLastSlotRecalc = 0.0f;
-	FVector LastSlotCalcPlayerPosition = FVector::ZeroVector;
-	int32 LastSlotNPCCount = 0;
+	// Battle slots, their recalc clocks and the player state cache all moved into FTargetGroup.
 
 	void GenerateBattleSlots();
 	void RecalculateSlotPositions();
@@ -529,7 +569,7 @@ private:
 	float GetRingMidRadius(EBattleRing Ring) const;
 
 	// --- Role & Pressure ---
-	FPlayerStateCache CachedPlayerState;
+	// CachedPlayerState moved into FTargetGroup::State.
 
 	/** Give every registered NPC a target, and let it keep the one it has unless somebody genuinely
 	 *  takes over. Also derives PrimaryTarget from the result. */
@@ -538,6 +578,23 @@ private:
 	/** The player this NPC is fighting, falling back to PrimaryTarget when it has none yet. Every
 	 *  per-NPC gate goes through here rather than reading PrimaryTarget directly. */
 	AActor* ResolveTargetFor(APawn* NPC) const;
+
+	/** Bring Groups in line with the targets the NPCs currently hold: create the missing ones, retire
+	 *  the ones nobody is fighting any more, and refill the membership lists. */
+	void RebuildTargetGroups();
+
+	FTargetGroup* FindGroupFor(APawn* NPC);
+	const FTargetGroup* FindGroupFor(APawn* NPC) const;
+
+	/** The pool this NPC draws from: its own group's, except for kamikaze, which is global.
+	 *  Null when the NPC has no group yet. */
+	FTokenPool* GetPoolFor(APawn* NPC, EAttackTokenType Type);
+
+	/** Slots and state for one group. */
+	void GenerateBattleSlotsForGroup(FTargetGroup& Group);
+	void RecalculateSlotPositionsForGroup(FTargetGroup& Group);
+	void AssignNPCsToSlotsForGroup(FTargetGroup& Group);
+	void UpdatePlayerStateCacheForGroup(FTargetGroup& Group);
 
 	void UpdatePlayerStateCache();
 	void AssignRoles();
