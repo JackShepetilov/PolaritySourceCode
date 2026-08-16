@@ -74,13 +74,10 @@ void UAbilityHandler_ShieldBypass::OnPerShotEffect_Implementation()
 		return;
 	}
 
+	// Nothing in sight is no longer a refusal. The bolt leaves anyway, flies where the player was
+	// looking, and hunts for itself on the way -- which is what makes firing round a corner or over
+	// cover work at all. Refusing here also punished the player for the ability's own aim rules.
 	AShooterNPC* Target = FindTargetEnemy(Def->TargetSearchRange);
-	if (!Target)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no enemy within %.0f"),
-			Def->TargetSearchRange);
-		return;
-	}
 
 	// Same muzzle the burst uses, so the bolt leaves the hand the animation is throwing with rather
 	// than from the camera.
@@ -93,7 +90,10 @@ void UAbilityHandler_ShieldBypass::OnPerShotEffect_Implementation()
 		}
 	}
 
-	const FRotator Facing = (Target->GetActorLocation() - SpawnLoc).Rotation();
+	// With a target, aim at it; without one, straight down the player's aim and let the scan take over.
+	const FRotator Facing = Target
+		? (Target->GetActorLocation() - SpawnLoc).Rotation()
+		: OwningCharacter->GetBaseAimRotation();
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = OwningCharacter;
@@ -111,5 +111,6 @@ void UAbilityHandler_ShieldBypass::OnPerShotEffect_Implementation()
 		Def->Duration, Def->MoveSpeedMultiplier);
 
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: bolt away at %s from socket %s"),
-		*Target->GetName(), *Def->ProjectileSpawnSocket.ToString());
+		Target ? *Target->GetName() : TEXT("nothing yet, will scan"),
+		*Def->ProjectileSpawnSocket.ToString());
 }

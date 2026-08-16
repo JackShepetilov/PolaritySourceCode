@@ -165,8 +165,23 @@ public:
 	 *
 	 *  Replicated so other machines can show it — an enemy that can suddenly be hurt directly has to
 	 *  be readable across the room, or the team cannot act on it. */
-	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Coop|Shield Bypass")
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_ShieldBypassActive, Category = "Coop|Shield Bypass")
 	bool bShieldBypassActive = false;
+
+	UFUNCTION()
+	void OnRep_ShieldBypassActive();
+
+	/** Put the overlay on or take it off. Called on the authority when the window opens and closes,
+	 *  and on every client from OnRep, so all four screens agree about who is worth shooting. */
+	void UpdateShieldBypassOverlay();
+
+	/** Laid over the whole mesh while this enemy is open, so the rest of the team can see at a glance
+	 *  which target is worth focusing. Set per NPC class in the Blueprint.
+	 *
+	 *  Not replicated itself: bShieldBypassActive already travels, and every machine has the same
+	 *  class default, so the flag is enough to switch it on and off everywhere. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Shield Bypass")
+	TObjectPtr<class UMaterialInterface> ShieldBypassOverlayMaterial;
 
 	/** Open this enemy up for the given time, and slow it while it lasts. Authority only.
 	 *  Re-applying refreshes the timer rather than stacking. */

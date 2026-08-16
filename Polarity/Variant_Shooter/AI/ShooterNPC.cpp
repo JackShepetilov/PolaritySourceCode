@@ -1321,6 +1321,7 @@ void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier, f
 	}
 
 	bShieldBypassActive = true;
+	UpdateShieldBypassOverlay();
 	ShieldBypassDamageMultiplier = FMath::Max(0.0f, DamageMultiplier);
 
 	if (MoveComp && MoveSpeedMultiplier > 0.0f)
@@ -1371,6 +1372,25 @@ float AShooterNPC::ConsumeShieldLoan()
 	return Collected;
 }
 
+void AShooterNPC::OnRep_ShieldBypassActive()
+{
+	UpdateShieldBypassOverlay();
+}
+
+void AShooterNPC::UpdateShieldBypassOverlay()
+{
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp || !ShieldBypassOverlayMaterial)
+	{
+		return;
+	}
+
+	// Cleared with nullptr rather than swapped back to a remembered material: an overlay is a
+	// separate slot from the mesh's own materials, so there is nothing to restore and nothing to get
+	// wrong if two effects ever want it at once.
+	MeshComp->SetOverlayMaterial(bShieldBypassActive ? ShieldBypassOverlayMaterial.Get() : nullptr);
+}
+
 void AShooterNPC::EndShieldBypass()
 {
 	if (!bShieldBypassActive)
@@ -1379,6 +1399,7 @@ void AShooterNPC::EndShieldBypass()
 	}
 
 	bShieldBypassActive = false;
+	UpdateShieldBypassOverlay();
 
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
 	{

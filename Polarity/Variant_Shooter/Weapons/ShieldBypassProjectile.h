@@ -30,7 +30,24 @@ public:
 	 *  DamageMultiplier scales the enemy's own charge into the health damage delivered. */
 	void LaunchAt(AActor* Target, float Speed, float DamageMultiplier, float SlowDuration, float SlowMultiplier);
 
+	/** How far the bolt looks for something to latch onto while flying. A cast with nothing in sight
+	 *  is no longer refused: the bolt leaves anyway and finds its own target, which is what makes
+	 *  firing round a corner work. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.0", Units = "cm"))
+	float ScanRadius = 900.0f;
+
+	/** How often it looks, while it has nobody. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.02", Units = "s"))
+	float ScanInterval = 0.1f;
+
 protected:
+	virtual void Tick(float DeltaSeconds) override;
+
+	/** Look for the nearest live enemy within ScanRadius and latch onto it. */
+	void ScanForTarget();
+
+	float TimeSinceScan = 0.0f;
+
 	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection) override;
 
 	/** Who this was fired at. Held weakly: the enemy can die to somebody else mid-flight, and the
