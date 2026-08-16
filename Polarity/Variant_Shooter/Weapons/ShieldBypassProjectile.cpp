@@ -6,6 +6,11 @@
 
 AShieldBypassProjectile::AShieldBypassProjectile()
 {
+	// The bolt deals NOTHING. AShooterProjectile ships with HitDamage = 25 and applies it in
+	// ProcessHit, so a projectile that is supposed to be a delivery mechanism silently became a
+	// weapon. This ability's whole point is that it changes what OTHER fire is worth.
+	HitDamage = 0.0f;
+
 	if (ProjectileMovement)
 	{
 		// No arc and no drift: this is a guided bolt, not a thrown object. Gravity off so the flight

@@ -355,9 +355,14 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 		{
 			if (GetOwner() && GetOwner()->HasAuthority())
 			{
-				// Charge-per-second is a shield-filling rate and means nothing as a damage rate,
-				// hence the multiplier the ability carries.
-				const float RedirectedDamage = IonizationChargePerSecond * DeltaTime
+				// MAGNITUDE. Ionization is signed -- electrifying negative authors this rate as a
+				// negative number -- and multiplying it straight through produced negative damage,
+				// which TakeDamage discards. The result was an opened enemy that could be shot at
+				// forever with nothing happening at all.
+				//
+				// Charge-per-second is also a shield-filling rate and means nothing as a damage rate,
+				// hence the multiplier the ability carries on top.
+				const float RedirectedDamage = FMath::Abs(IonizationChargePerSecond) * DeltaTime
 					* OpenedNPC->ShieldBypassDamageMultiplier;
 
 				FPointDamageEvent DamageEvent;
