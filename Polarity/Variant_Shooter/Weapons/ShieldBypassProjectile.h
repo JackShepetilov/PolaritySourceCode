@@ -1,0 +1,47 @@
+// ShieldBypassProjectile.h
+// The Wizard's active, in flight: one homing bolt that turns an enemy's shield into a wound.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "ShooterProjectile.h"
+#include "ShieldBypassProjectile.generated.h"
+
+/**
+ * Flies at one locked enemy and, on arrival, converts the ionization sitting on it into health
+ * damage.
+ *
+ * True homing rather than ballistic: the target is chosen when the ability is cast and never
+ * re-picked, gravity is off, and the movement component steers hard enough that the bolt does not
+ * miss. The point of the ability is the conversion, not the marksmanship, so the flight is a
+ * delivery delay and a readable telegraph rather than a skill check.
+ *
+ * Server side. It is spawned by a handler, and handlers only ever run on the authority.
+ */
+UCLASS()
+class POLARITY_API AShieldBypassProjectile : public AShooterProjectile
+{
+	GENERATED_BODY()
+
+public:
+	AShieldBypassProjectile();
+
+	/** Lock onto Target and start flying. Speed and steering come from the ability that fired it.
+	 *  DamageMultiplier scales the enemy's own charge into the health damage delivered. */
+	void LaunchAt(AActor* Target, float Speed, float DamageMultiplier, float SlowDuration, float SlowMultiplier);
+
+protected:
+	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection) override;
+
+	/** Who this was fired at. Held weakly: the enemy can die to somebody else mid-flight, and the
+	 *  bolt must not keep it alive or crash chasing it. */
+	UPROPERTY()
+	TWeakObjectPtr<AActor> LockedTarget;
+
+	/** Charge-to-health conversion rate, from the ability's level stats. */
+	float ConversionMultiplier = 1.0f;
+
+	/** Slow applied on arrival, so the opened enemy stays where the team can use it. */
+	float ArrivalSlowDuration = 0.0f;
+	float ArrivalSlowMultiplier = 1.0f;
+};

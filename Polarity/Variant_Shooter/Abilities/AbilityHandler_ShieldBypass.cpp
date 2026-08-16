@@ -4,74 +4,121 @@
 #include "AbilityDefinition_ShieldBypass.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/Weapons/ShieldBypassProjectile.h"
+#include "Coop/CoopPlayers.h"
 #include "Engine/World.h"
-#include "CollisionQueryParams.h"
+#include "EngineUtils.h"
 
 AShooterNPC* UAbilityHandler_ShieldBypass::FindTargetEnemy(float Range) const
 {
 	AShooterCharacter* Caster = GetOwningCharacter();
-	if (!Caster || !Caster->GetWorld())
+	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
+	if (!World)
 	{
 		return nullptr;
 	}
 
-	// Same origin and direction the weapon shoots from (GetBaseAimRotation / GetPawnViewLocation),
-	// so what the ability hits is what the crosshair is on. Taking the camera transform instead
-	// would drift from the gun on any character whose body is not facing where it aims.
-	const FVector Start = Caster->GetPawnViewLocation();
-	const FVector End = Start + Caster->GetBaseAimRotation().Vector() * Range;
+	const FVector Origin = Caster->GetPawnViewLocation();
+	const FVector Aim = Caster->GetBaseAimRotation().Vector();
 
-	FCollisionQueryParams Params;
-	Params.AddIgnoredActor(Caster);
+	// Scored on two things at once, exactly as asked: how near the middle of the screen an enemy is,
+	// and how near the player. Neither alone is right -- pure screen-centre picks a distant enemy
+	// over the one in your face, pure distance picks whatever you happen to be standing next to
+	// regardless of where you are looking.
+	AShooterNPC* Best = nullptr;
+	float BestScore = -1.0f;
 
-	// A sphere rather than a line: this picks a target for a support ability, and demanding
-	// pixel-accurate aim for something that does no damage is friction with no upside.
-	FHitResult Hit;
-	const bool bHit = Caster->GetWorld()->SweepSingleByChannel(
-		Hit, Start, End, FQuat::Identity, ECC_Pawn, FCollisionShape::MakeSphere(60.0f), Params);
-
-	if (!bHit)
+	for (TActorIterator<AShooterNPC> It(World); It; ++It)
 	{
-		return nullptr;
+		AShooterNPC* Enemy = *It;
+		if (!Enemy || Enemy->IsDead())
+		{
+			continue;
+		}
+
+		FVector ToEnemy = Enemy->GetActorLocation() - Origin;
+		const float Distance = ToEnemy.Size();
+		if (Distance <= KINDA_SMALL_NUMBER || Distance > Range)
+		{
+			continue;
+		}
+		ToEnemy /= Distance;
+
+		// Behind the player is never a candidate, however close it is.
+		const float Centredness = FVector::DotProduct(Aim, ToEnemy);
+		if (Centredness <= 0.0f)
+		{
+			continue;
+		}
+
+		// Both terms in 0..1 and multiplied, so an enemy has to be reasonably central AND reasonably
+		// near to win. Multiplying rather than adding means neither term can carry a candidate that
+		// is hopeless on the other.
+		const float Nearness = 1.0f - (Distance / Range);
+		const float Score = Centredness * Nearness;
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = Enemy;
+		}
 	}
 
-	AShooterNPC* Enemy = Cast<AShooterNPC>(Hit.GetActor());
-	if (!Enemy || Enemy->IsDead())
-	{
-		return nullptr;
-	}
-	return Enemy;
+	return Best;
 }
 
 void UAbilityHandler_ShieldBypass::OnActivate_Implementation()
 {
 	const UAbilityDefinition_ShieldBypass* Def = Cast<UAbilityDefinition_ShieldBypass>(GetDefinition());
-	if (!Def)
+	AShooterCharacter* Caster = GetOwningCharacter();
+	if (!Def || !Caster || !Caster->GetWorld())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: definition is not a UAbilityDefinition_ShieldBypass"));
 		NotifyAbilityCancelled();
 		return;
 	}
 
 	const FShieldBypassLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
 
-	AShooterNPC* Target = FindTargetEnemy(Stats.Range);
-	if (!Target)
+	if (!Def->ProjectileClass)
 	{
-		// Cancelled rather than completed: nothing happened, so nothing should go on cooldown. The
-		// component only starts the cooldown on completion, which is exactly the distinction wanted
-		// here -- a miss must not cost the ability.
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no enemy under the crosshair within %.0f"),
-			Stats.Range);
+		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no ProjectileClass set on %s"),
+			*GetNameSafe(Def));
 		NotifyAbilityCancelled();
 		return;
 	}
 
-	Target->ApplyShieldBypass(Stats.Duration, Stats.MoveSpeedMultiplier, Stats.RedirectDamageMultiplier);
+	AShooterNPC* Target = FindTargetEnemy(Stats.Range);
+	if (!Target)
+	{
+		// Nothing to fire at, so nothing is spent: the component only starts a cooldown when a
+		// handler completes.
+		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no enemy within %.0f"), Stats.Range);
+		NotifyAbilityCancelled();
+		return;
+	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: %s opened for %.1fs by %s"),
-		*Target->GetName(), Stats.Duration, *GetNameSafe(GetOwningCharacter()));
+	const FVector Muzzle = Caster->GetPawnViewLocation();
+	const FRotator Facing = (Target->GetActorLocation() - Muzzle).Rotation();
 
-	// Instant: no cast to wait on, so the cooldown starts now.
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = Caster;
+	SpawnParams.Instigator = Caster;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AShieldBypassProjectile* Bolt = Caster->GetWorld()->SpawnActor<AShieldBypassProjectile>(
+		Def->ProjectileClass, Muzzle, Facing, SpawnParams);
+
+	if (!Bolt)
+	{
+		NotifyAbilityCancelled();
+		return;
+	}
+
+	Bolt->LaunchAt(Target, Stats.ProjectileSpeed, Stats.RedirectDamageMultiplier,
+		Stats.Duration, Stats.MoveSpeedMultiplier);
+
+	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: %s fired a bolt at %s (score-picked, %.0f away)"),
+		*Caster->GetName(), *Target->GetName(),
+		FVector::Dist(Caster->GetActorLocation(), Target->GetActorLocation()));
+
 	NotifyAbilityComplete();
 }

@@ -35,11 +35,15 @@ struct FShieldBypassLevelStats
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float MoveSpeedMultiplier = 0.5f;
 
-	/** Multiplies the beam's charge-per-second when it is redirected into health. The beam's own
-	 *  number is a shield-filling rate; at 1.0 the redirect is barely felt, which is exactly how it
-	 *  read on the bench. This is the knob that makes the window worth opening. */
+	/** Health damage per point of the enemy's charge, converted on impact. The bolt cashes in the
+	 *  shield the team has already built up, so this is the exchange rate between their work and the
+	 *  kill. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.0"))
 	float RedirectDamageMultiplier = 6.0f;
+
+	/** Flight speed of the bolt. Slow enough to be seen leaving, fast enough not to be waited on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "100.0", Units = "cm/s"))
+	float ProjectileSpeed = 3000.0f;
 
 	/** How far the caster can reach to pick a target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "100.0", Units = "cm"))
@@ -60,6 +64,11 @@ class POLARITY_API UAbilityDefinition_ShieldBypass : public UAbilityDefinition
 	GENERATED_BODY()
 
 public:
+	/** The bolt to fire. Left unset means the ability does nothing, which is louder than silently
+	 *  falling back to an instant hit and is the correct failure. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass")
+	TSubclassOf<class AShieldBypassProjectile> ProjectileClass;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass|Levels", meta = (TitleProperty = "Duration"))
 	TArray<FShieldBypassLevelStats> Levels;
 
