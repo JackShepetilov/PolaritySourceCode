@@ -288,6 +288,9 @@ void AShooterWeapon::EndPlay(EEndPlayReason::Type EndPlayReason)
 
 	// clear the refire timer
 	GetWorld()->GetTimerManager().ClearTimer(RefireTimer);
+
+	// and the reload timer, which would otherwise fire into a destroyed weapon
+	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
 }
 
 void AShooterWeapon::PushLeftHandIK(UAnimInstance* AnimInstance, const FTransform& Transform, float Alpha)
@@ -501,6 +504,9 @@ void AShooterWeapon::DeactivateWeapon()
 	// ensure we're no longer firing this weapon while deactivated
 	StopFiring();
 
+	// a reload the player switched away from does not finish behind their back
+	CancelReload();
+
 	// hide the weapon
 	SetActorHiddenInGame(true);
 
@@ -610,6 +616,28 @@ void AShooterWeapon::Fire()
 	{
 		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: bIsFiring is false!"), *GetName());
 		return;
+	}
+
+	// A weapon with a real magazine cannot fire while it is being filled, and an empty one starts
+	// filling itself rather than clicking forever. bIsFiring is deliberately left alone: holding the
+	// trigger through a reload should resume fire when it finishes, which FinishReload does.
+	if (bUseReload)
+	{
+		if (bIsReloading)
+		{
+			return;
+		}
+
+		if (CurrentBullets <= 0)
+		{
+			if (DryFireSound)
+			{
+				UGameplayStatics::PlaySoundAtLocation(this, DryFireSound, GetActorLocation());
+			}
+
+			StartReload();
+			return;
+		}
 	}
 
 	// Limited-ammo guard: yanked weapons that ran dry should not fire phantom shots in the
@@ -803,35 +831,7 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 		}
 	}
 
-	// play the firing montage
-	WeaponOwner->PlayFiringMontage(FiringMontage);
-
-	// add recoil
-	WeaponOwner->AddWeaponRecoil(FiringRecoil);
-
-	// consume bullets
-	--CurrentBullets;
-
-	// Magazine depleted: yanked weapons get discarded (player can't reload), others auto-refill
-	if (CurrentBullets <= 0)
-	{
-		AShooterCharacter* PlayerOwner = Cast<AShooterCharacter>(PawnOwner);
-		if (bHasLimitedAmmo && PlayerOwner)
-		{
-			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
-			// can't be done synchronously inside Fire().
-			GetWorld()->GetTimerManager().SetTimerForNextTick(
-				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfEmpty));
-			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: magazine empty, scheduled discard for next tick"), *GetName());
-		}
-		else
-		{
-			CurrentBullets = MagazineSize;  // Auto-refill: starter weapons, NPC drops, NPC owners
-		}
-	}
-
-	// update the weapon HUD
-	WeaponOwner->UpdateWeaponHUD(CurrentBullets, MagazineSize);
+	ConsumeRoundAfterShot();
 }
 
 FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& TargetLocation) const
@@ -854,7 +854,7 @@ FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& Targ
 
 // ==================== Hitscan Implementation ====================
 
-void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
+void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& OutStart, FVector& OutDirection) const
 {
 	// Use ThirdPersonMesh for NPCs, FirstPersonMesh for players
 	USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? FirstPersonMesh : ThirdPersonMesh;
@@ -958,18 +958,34 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 		*MuzzleLocation.ToCompactString(), *TargetLocation.ToCompactString(), DistanceToTarget, DotP,
 		(DistanceToTarget < 100.0f || DotP < 0.5f) ? TEXT("ViewDir(override)") : TEXT("Muzzle->AimPoint"));
 
+	OutStart = HitscanStart;
+	OutDirection = Direction;
+}
+
+void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
+{
+	FVector Start;
+	FVector Direction;
+	ResolveHitscanRay(TargetLocation, Start, Direction);
+
 	// NPC: simple line trace instead of cone hitscan.
 	// The cone system was designed for the player (camera and muzzle co-located in FPS).
 	// For NPCs, camera (eyes) and muzzle (weapon) have ~40-50u parallax offset,
 	// exceeding the 5deg cone half-angle, causing valid hits to be rejected.
 	if (PawnOwner && !PawnOwner->IsPlayerControlled())
 	{
-		PerformSimpleHitscan(MuzzleLocation, Direction, 1.0f);
+		PerformSimpleHitscan(Start, Direction, 1.0f);
 	}
 	else
 	{
-		PerformHitscan(HitscanStart, Direction, 1.0f, 0);
+		PerformHitscan(Start, Direction, 1.0f, 0);
 	}
+
+	ConsumeRoundAfterShot();
+}
+
+void AShooterWeapon::ConsumeRoundAfterShot()
+{
 
 	//ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
 	WeaponOwner->PlayFiringMontage(FiringMontage);
@@ -987,7 +1003,16 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 			// can't be done synchronously inside Fire().
 			GetWorld()->GetTimerManager().SetTimerForNextTick(
 				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfEmpty));
-			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: hitscan magazine empty, scheduled discard for next tick"), *GetName());
+			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: magazine empty, scheduled discard for next tick"), *GetName());
+		}
+		else if (bUseReload)
+		{
+			// The magazine is real: it stays empty until somebody fills it. Doing it here rather
+			// than waiting for the next trigger pull is what makes the reload feel automatic.
+			if (bAutoReloadWhenEmpty)
+			{
+				StartReload();
+			}
 		}
 		else
 		{
@@ -2059,6 +2084,98 @@ float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
 	return Multiplier;
 }
 
+// ==================== Reload ====================
+//
+// Ammunition is counted by whichever machine pulls the trigger: CurrentBullets is not replicated,
+// and the server's copy of a client's weapon never decrements (see Server_ReportDamage). A reload
+// follows the same rule -- it runs where the shooting is being counted, and needs no RPC of its own.
+// What the authority alone decides, a granted magazine, still comes down through Client_SyncAmmoState.
+
+bool AShooterWeapon::CanReload() const
+{
+	// A yanked weapon is thrown away when it runs dry rather than reloaded, whatever bUseReload says.
+	return bUseReload
+		&& !bHasLimitedAmmo
+		&& !bIsReloading
+		&& CurrentBullets < MagazineSize;
+}
+
+bool AShooterWeapon::StartReload()
+{
+	if (!CanReload())
+	{
+		return false;
+	}
+
+	bIsReloading = true;
+
+	// The refire timer would fire mid-reload and Fire() would bounce off bIsReloading, but a pending
+	// shot surviving the reload is confusing to debug. Clear it and let FinishReload restart fire.
+	GetWorld()->GetTimerManager().ClearTimer(RefireTimer);
+
+	if (ReloadMontage && WeaponOwner)
+	{
+		WeaponOwner->PlayFiringMontage(ReloadMontage);
+	}
+
+	if (ReloadSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ReloadSound, GetActorLocation());
+	}
+
+	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, ReloadTime, false);
+
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload started, %d/%d rounds, %.2fs"),
+		*GetName(), CurrentBullets, MagazineSize, ReloadTime);
+
+	return true;
+}
+
+void AShooterWeapon::FinishReload()
+{
+	bIsReloading = false;
+	CurrentBullets = MagazineSize;
+
+	if (WeaponOwner)
+	{
+		WeaponOwner->UpdateWeaponHUD(CurrentBullets, MagazineSize);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload finished, %d rounds"), *GetName(), CurrentBullets);
+
+	// The trigger was never released, so the weapon picks up where it left off. Semi-automatic
+	// weapons deliberately do not: one pull is one shot, reload or no reload.
+	if (bIsFiring && bFullAuto)
+	{
+		Fire();
+	}
+}
+
+void AShooterWeapon::CancelReload()
+{
+	if (!bIsReloading)
+	{
+		return;
+	}
+
+	bIsReloading = false;
+	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
+
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload cancelled at %d/%d rounds"),
+		*GetName(), CurrentBullets, MagazineSize);
+}
+
+float AShooterWeapon::GetReloadProgress() const
+{
+	if (!bIsReloading || ReloadTime <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	const float Remaining = GetWorld()->GetTimerManager().GetTimerRemaining(ReloadTimer);
+	return FMath::Clamp(1.0f - (Remaining / ReloadTime), 0.0f, 1.0f);
+}
+
 void AShooterWeapon::SetBulletCount(int32 NewCount)
 {
 	CurrentBullets = FMath::Clamp(NewCount, 0, MagazineSize);
@@ -2087,6 +2204,29 @@ void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool b
 			}
 		}
 	}
+}
+
+bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap) const
+{
+	// A cap is a MAGNITUDE, and this used to be tested as "CurrentCharge >= Max". With a negative
+	// IonizationChargePerHit -- the default for the electrifying weapons -- a target's charge only
+	// ever went down, so that test was never true and the Min() alongside it never clamped anything:
+	// the charge ran away with no ceiling at all. "Fully charged" was therefore not a state anything
+	// could reach, which is what made props grabbable at charges nowhere near maximum.
+	const float AbsCap = FMath::Abs(Cap);
+	if (AbsCap <= KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+	const bool bSameDirection = (CurrentCharge * IonizationChargePerHit) > 0.0f;
+	return bSameDirection && FMath::Abs(CurrentCharge) >= AbsCap;
+}
+
+float AShooterWeapon::ApplyIonizationStep(float CurrentCharge, float Cap) const
+{
+	const float AbsCap = FMath::Abs(Cap);
+	const float Stepped = CurrentCharge + IonizationChargePerHit;
+	return AbsCap > KINDA_SMALL_NUMBER ? FMath::Clamp(Stepped, -AbsCap, AbsCap) : Stepped;
 }
 
 bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
@@ -2135,6 +2275,34 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 		}
 	}
 
+	// While an enemy is opened by the Wizard's bolt, the ionization this shot would have put into its
+	// shield goes into its health instead.
+	//
+	// This is the SECOND place that has to know: the laser has its own per-second ionization path and
+	// every other weapon comes through here per hit. Hooking only the beam meant the mechanic worked
+	// for exactly one weapon nobody was holding.
+	if (AShooterNPC* OpenedNPC = Cast<AShooterNPC>(Target))
+	{
+		if (OpenedNPC->IsShieldBypassed())
+		{
+			if (HasAuthority())
+			{
+				// Magnitude: ionization is signed, and a negative rate multiplied through produces
+				// negative damage, which TakeDamage silently discards.
+				const float RedirectedDamage = FMath::Abs(IonizationChargePerHit)
+					* OpenedNPC->ShieldBypassDamageMultiplier;
+
+				FPointDamageEvent DamageEvent;
+				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+				OpenedNPC->TakeDamage(RedirectedDamage, DamageEvent, GetInstigatorController(), this);
+
+				UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Redirected %.1f ionization into health on %s"),
+					RedirectedDamage, *OpenedNPC->GetName());
+			}
+			return true;
+		}
+	}
+
 	// Try UEMFVelocityModifier first (for characters/NPCs)
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
@@ -2142,26 +2310,27 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 		// after melee's SetCharge() calls that bypass BaseCharge tracking)
 		const float CurrentCharge = TargetModifier->GetCharge();
 
-		// Already at max positive charge
-		if (CurrentCharge >= MaxIonizationCharge)
+		// The NPC's own ceiling, the same one IsAtMaxCharge() and the grab gate read.
+		const float Cap = TargetModifier->MaxBaseCharge;
+		if (IsIonizationCapReached(CurrentCharge, Cap))
 		{
 			return false;
 		}
 
-		const float NewCharge = FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge);
-		TargetModifier->SetCharge(NewCharge);
+		TargetModifier->SetCharge(ApplyIonizationStep(CurrentCharge, Cap));
 		return true;
 	}
 
 	// Route through SetCharge() for props (enables physics on first charge)
 	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
 	{
+		// The prop's own ceiling. What the weapon can push to is the prop's business, not the weapon's.
 		const float CurrentCharge = Prop->GetCharge();
-		if (CurrentCharge >= MaxIonizationCharge)
+		if (IsIonizationCapReached(CurrentCharge, Prop->MaxCharge))
 		{
 			return false;
 		}
-		Prop->SetCharge(FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge));
+		Prop->SetCharge(ApplyIonizationStep(CurrentCharge, Prop->MaxCharge));
 		return true;
 	}
 
@@ -2171,12 +2340,14 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 		FEMSourceDescription Desc = TargetField->GetSourceDescription();
 		const float CurrentCharge = Desc.PointChargeParams.Charge;
 
-		if (CurrentCharge >= MaxIonizationCharge)
+		// A bare field component has no cap of its own, so the weapon's number is the only ceiling
+		// available on this path.
+		if (IsIonizationCapReached(CurrentCharge, MaxIonizationCharge))
 		{
 			return false;
 		}
 
-		Desc.PointChargeParams.Charge = FMath::Min(CurrentCharge + IonizationChargePerHit, MaxIonizationCharge);
+		Desc.PointChargeParams.Charge = ApplyIonizationStep(CurrentCharge, MaxIonizationCharge);
 		TargetField->SetSourceDescription(Desc);
 		return true;
 	}

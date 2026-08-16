@@ -5,6 +5,8 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 
 AShieldBypassProjectile::AShieldBypassProjectile()
 {
@@ -126,6 +128,26 @@ void AShieldBypassProjectile::ScanForTarget()
 		*Best->GetName(), FMath::Sqrt(BestDistSq));
 }
 
+void AShieldBypassProjectile::Multicast_PlayImpactVFX_Implementation(FVector Location)
+{
+	if (!ImpactVFX)
+	{
+		return;
+	}
+
+	// Spawned at a location rather than attached: the bolt is about to be destroyed, and an attached
+	// system would go with it mid-burst.
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(),
+		ImpactVFX,
+		Location,
+		FRotator::ZeroRotator,
+		FVector(1.0f),
+		true,   // auto destroy
+		true,   // auto activate
+		ENCPoolMethod::None);
+}
+
 void AShieldBypassProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp,
 	const FVector& HitLocation, const FVector& HitDirection)
 {
@@ -146,6 +168,10 @@ void AShieldBypassProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* 
 		// gone into this enemy's shield goes into its health instead, multiplied. The ability does
 		// not kill anything on its own -- it changes what the team's existing fire is worth.
 		Enemy->ApplyShieldBypass(ArrivalSlowDuration, ArrivalSlowMultiplier, ConversionMultiplier);
+
+		// Fired from the same branch that opens the enemy, so the effect marks the ability landing and
+		// not merely the bolt stopping. A wall hit stays silent: nothing happened there.
+		Multicast_PlayImpactVFX(HitLocation);
 
 		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass bolt hit %s: open %.1fs, redirect x%.1f, slow x%.2f"),
 			*Enemy->GetName(), ArrivalSlowDuration, ConversionMultiplier, ArrivalSlowMultiplier);

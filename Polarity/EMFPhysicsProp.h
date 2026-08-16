@@ -452,6 +452,40 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture")
 	bool bCanBeCaptured = true;
 
+	/** |charge| a prop must carry before a throwing class may pick it up. Charging it IS the cost of
+	 *  the ammunition.
+	 *
+	 *  Its own field rather than ExplosionReferenceCharge, which is what it used to read. That one is
+	 *  an explosion-tuning number, edit-conditioned on bCanExplode, and on a prop with explosions
+	 *  switched off there is nothing keeping it meaningful -- set it to zero while tuning and the grab
+	 *  gate silently disappears, which is exactly how it "stopped working at max charge only". */
+	/** This prop's charge ceiling, as a magnitude. Ionization clamps to it whichever direction it
+	 *  drives the charge, and the prop is grabbable only once it is reached.
+	 *
+	 *  It lives here because the prop is the thing that has a maximum. The ceiling used to be the
+	 *  firing weapon's MaxIonizationCharge, which made "is this prop full" depend on what happened to
+	 *  be shooting it, and left nothing that reads the prop -- the grab gate, the reticle -- able to
+	 *  answer without asking a weapon. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", EditCondition = "bCanBeCaptured"))
+	float MaxCharge = 20.0f;
+
+	/** True once this prop sits at its ceiling. What the grab gate and the bracket reticle both ask. */
+	UFUNCTION(BlueprintPure, Category = "Channeling Capture")
+	bool IsAtMaxCharge() const
+	{
+		return MaxCharge > KINDA_SMALL_NUMBER && FMath::Abs(GetCharge()) >= MaxCharge - KINDA_SMALL_NUMBER;
+	}
+
+	/** Everything about "may this character grab this prop right now" EXCEPT range and angle, which
+	 *  the two callers evaluate differently by nature.
+	 *
+	 *  It lives here because there are two callers: the acquisition scan in UChargeAnimationComponent
+	 *  and the bracket reticle in UEMFChargeWidget. When each carried its own copy of the rules, the
+	 *  brackets promised grabs the scan then refused -- the reticle was drawn by one set of gates and
+	 *  the grab decided by another. Anything added to this function reaches both at once. */
+	UFUNCTION(BlueprintPure, Category = "Channeling Capture")
+	bool CanBeGrabbedBy(const AActor* Grabber) const;
+
 	/** Viscosity coefficient (damping strength). Higher = faster capture. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
 	float ViscosityCoefficient = 10.0f;
@@ -488,22 +522,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.0", ClampMax = "3600.0", EditCondition = "bCanBeCaptured"))
 	float ReverseLaunchSpinSpeed = 720.0f;
 
-	/** Reverse launch distance = CaptureRange * this multiplier */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.5", ClampMax = "5.0", EditCondition = "bCanBeCaptured"))
-	float ReverseLaunchDistanceMultiplier = 1.5f;
+	/** Flight speed of a thrown prop, authored directly.
+	 *
+	 *  This used to be derived: CaptureRange * DistanceMultiplier / FlightDuration. Capture range is a
+	 *  function of the charges involved, so the same prop left the hand at a different speed depending
+	 *  on how charged the thrower happened to be -- the throw was never repeatable, and no field said
+	 *  so. One number instead, and the throw is the same every time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "100.0", Units = "cm/s", EditCondition = "bCanBeCaptured"))
+	float ThrowSpeed = 3600.0f;
 
-	/** Time (seconds) of constant-speed flight during reverse capture. Speed = Distance / Duration. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "bCanBeCaptured"))
-	float ReverseLaunchFlightDuration = 0.5f;
-
-	/** How fast the prop converges onto the camera aim line (1/s).
-	 *  Higher = faster convergence. At 15, ~95% correction in 0.2s. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bCanBeCaptured"))
-	float ReverseLaunchConvergenceRate = 15.0f;
 
 	// ==================== Reverse Launch Homing ====================
 
-	/** Enable soft aim-assist homing toward nearest enemy during reverse launch flight */
+	/** Steer a thrown prop toward an enemy for as long as it is in flight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (EditCondition = "bCanBeCaptured"))
 	bool bEnableReverseLaunchHoming = true;
 
@@ -515,13 +546,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "500.0", ClampMax = "10000.0", Units = "cm", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
 	float HomingMaxRange = 3000.0f;
 
-	/** Homing strength: 0 = no homing, 1 = full lock-on. At 0.15, barely noticeable. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
-	float HomingStrength = 0.15f;
+	/** How hard the throw is bent toward its target, in cm/s^2.
+	 *
+	 *  An acceleration, not a rewrite of the velocity: it is ADDED to whatever physics already did
+	 *  that frame, so gravity still pulls, bounces still bounce and the prop still carries its
+	 *  momentum. The old rail overwrote velocity outright, which is precisely how it cancelled all
+	 *  three. At 4000 a throw crossing a room curves noticeably without ever looking flown. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "0.0", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
+	float HomingAcceleration = 4000.0f;
 
-	/** Seconds to ramp from 0 to full homing strength. Prevents instant snap on launch. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bCanBeCaptured && bEnableReverseLaunchHoming"))
-	float HomingRampUpTime = 0.1f;
 
 	// ==================== Debug ====================
 
@@ -724,6 +757,47 @@ public:
 	 *  goes through here, so turning friendly fire on later stays a single-place change. */
 	bool ShouldSkipPlayerForAreaEffect(const AActor* HitActor) const;
 
+	// ==================== Decoy (the Tank's item verb) ====================
+	// Every class charges props the same way and spends them differently. The Tank's way is this: the
+	// prop it throws does not detonate, it lands and starts making noise, and enemies near it come to
+	// fight it instead of the team. The prop is the decoy rather than something spawned in its place,
+	// which means the object the players were looking at is the object that lands, it can be shot to
+	// pieces to end the distraction early, and none of the networking around held and thrown props
+	// needed a second version of itself.
+
+	/** How long the noise lasts once thrown. TEST VALUE: how many seconds of bought attention the
+	 *  Tank's item is worth is a balance decision, not a technical one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy", meta = (ClampMin = "0.0", Units = "s"))
+	float DecoyDuration = 6.0f;
+
+	/** How far the noise carries. Enemies outside it are not distracted at all: a decoy is a local
+	 *  event, and one that emptied the whole arena would be a different mechanic. TEST VALUE. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy", meta = (ClampMin = "0.0", Units = "cm"))
+	float DecoyPullRadius = 2500.0f;
+
+	/** True while this prop is pulling aggression. Replicated, so every machine can draw it. */
+	UFUNCTION(BlueprintPure, Category = "Decoy")
+	bool IsDecoy() const { return bIsDecoy; }
+
+	/** Turn it on. Authority only — this decides what the AI does. Called from the throw when the
+	 *  thrower's class item verb is Decoy; also callable from Blueprint for tests and for anything
+	 *  else that should be loud later. */
+	UFUNCTION(BlueprintCallable, Category = "Decoy")
+	void BecomeDecoy();
+
+	/** Turn it off early: destroyed, or picked up again. Authority only; safe to call when it is not
+	 *  a decoy. */
+	UFUNCTION(BlueprintCallable, Category = "Decoy")
+	void EndDecoy();
+
+	/** Cosmetics live in the Blueprint: the siren, the flashing, the shaking. Both run on every
+	 *  machine — on the authority from BecomeDecoy/EndDecoy, on everybody else from OnRep. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Decoy")
+	void BP_OnDecoyStarted();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Decoy")
+	void BP_OnDecoyEnded();
+
 	// ==================== IShooterDummyTarget Interface ====================
 
 	virtual bool GrantsStableCharge_Implementation() const override;
@@ -877,12 +951,25 @@ private:
 	 *  prop keeps its momentum instead of dropping from a standstill. */
 	FVector LastReportedVelocity = FVector::ZeroVector;
 
+	/** See IsDecoy. Server-set; the clients get it to run the Blueprint cosmetics, and for nothing
+	 *  else — the pull itself is decided entirely on the authority, where the AI lives. */
+	UPROPERTY(ReplicatedUsing = OnRep_IsDecoy)
+	bool bIsDecoy = false;
+
+	UFUNCTION()
+	void OnRep_IsDecoy();
+
+	FTimerHandle DecoyTimer;
+
+	/** What the thrower's class does with a thrown prop, applied once at launch. Called from BOTH
+	 *  throw paths (the plate-driven host throw and BeginRemoteLaunch for a client's), because a
+	 *  verb that only worked for the host is exactly the class of bug this project keeps finding. */
+	void ApplyItemVerbOnThrow();
+
 	FVector PreviousPlatePosition = FVector::ZeroVector;
 	bool bHasPreviousPlatePosition = false;
 	float WeakCaptureTimer = 0.0f;
 	bool bReverseLaunchInitialized = false;
-	float ReverseLaunchSpeed = 0.0f;
-	float ReverseLaunchElapsed = 0.0f;
 
 	// ==================== Internal Methods ====================
 
@@ -901,15 +988,18 @@ private:
 	 *  if it somehow ends up far outside capture range. */
 	void UpdateHeldByHandle(float DeltaTime);
 
-	/** Fly a prop thrown by a remote client. The host's throw is steered by its own channeling
-	 *  plate through UpdateCaptureForces; a remote throw has no plate on this machine, so the
-	 *  server flies it directly off the same math. */
-	void TickRemoteLaunchFlight(float DeltaTime);
 
-	/** The reverse-flight steering itself: constant forward speed, lateral convergence back onto
-	 *  the aim line, and the soft homing bias. Shared by the plate-driven (host) and plateless
-	 *  (remote throw) paths so both throws fly identically. */
-	FVector ComputeReverseFlightVelocity(const FVector& AimOrigin, const FVector& AimDir, float DeltaTime);
+	/** The throw itself: hand the body a single velocity and a spin, and let physics own the rest.
+	 *  Shared by the plate-driven (host) and plateless (remote throw) paths so both leave identically. */
+	void LaunchAlongAim(const FVector& AimDir);
+
+	/** One frame of homing. Authority only: this changes where a replicated actor goes, and a client
+	 *  steering its own copy would just be corrected back every update. */
+	void TickHomingSteer(float DeltaTime);
+
+	/** Locked once acquired, so the throw commits to one enemy instead of flicking between two that
+	 *  happen to trade places in the cone mid-flight. */
+	TWeakObjectPtr<AShooterNPC> HomingTarget;
 
 	/** Where the throw is aimed: the eyes of the character who spent this prop. Returns false when
 	 *  there is no spender to ask, which is the one case a thrown prop cannot happen without. */

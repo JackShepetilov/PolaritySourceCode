@@ -633,6 +633,11 @@ void UChargeAnimationComponent::ExitChanneling()
 			}
 			CurrentCapturedNPC.Reset();
 		}
+		else if (Cast<AShooterCharacter>(CurrentCapturedNPC.Get()))
+		{
+			// Nothing to detach: a carried teammate was never on this plate. The carry is held in the
+			// server's HeldByCharacter and survives the plate being torn down and respawned.
+		}
 		else if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 		{
 			if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
@@ -998,8 +1003,28 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	// Check if current captured target is still valid and still captured
 	if (CurrentCapturedNPC.IsValid())
 	{
+		// Check ally. Without this branch an AShooterCharacter matches none of the types below and
+		// falls through to the Reset() at the bottom, so a held teammate was dropped from
+		// CurrentCapturedNPC on the very next scan tick. The hold still LOOKED right, because the
+		// ally's own modifier kept carrying them, but the throw then found nothing to re-attach and
+		// simply let go -- which is what "second press drops them" was.
+		if (AShooterCharacter* Ally = Cast<AShooterCharacter>(CurrentCapturedNPC.Get()))
+		{
+			// The server's answer if it has arrived, our own request if it has not. On a client the
+			// replicated HeldByCharacter is a round trip behind, and believing only that let this scan
+			// re-grab a teammate it had already asked for.
+			const bool bServerAgrees = (Ally->GetHeldByCharacter() == OwnerCharacter);
+			const float NowSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+			const bool bAwaitingReply = (RequestedHeldAlly.Get() == Ally)
+				&& (NowSeconds - RequestedHeldAllyTime) < RequestedHeldAllyTimeout;
+
+			if (bServerAgrees || bAwaitingReply)
+			{
+				return; // Still carried, or about to be — don't re-search
+			}
+		}
 		// Check NPC
-		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+		else if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 		{
 			UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>();
 			if (Mod && Mod->IsCapturedByPlate())
@@ -1171,7 +1196,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Prop, BasketballBall, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
+	enum class ECaptureTargetType { None, NPC, Ally, Prop, BasketballBall, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -1205,6 +1230,57 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		// Teammates. Checked before the NPC branch because AShooterNPC and AShooterCharacter are
+		// separate types and a player must never fall through into enemy rules.
+		//
+		// No charge gate and no opposite-sign gate, unlike every other target here: grabbing a
+		// teammate costs the team nothing, and making it wait on a charge state would make it
+		// unusable in the moment it is for. Range and cone are the enemy ones, so the reach of the
+		// verb stays one number.
+		if (AShooterCharacter* Ally = Cast<AShooterCharacter>(HitActor))
+		{
+			const bool bSelf = (Ally == OwnerCharacter);
+			const FVector ToAlly = Ally->GetActorLocation() - CameraLoc;
+			const float AllyDistSq = ToAlly.SizeSquared();
+			const float AllyDist = FMath::Sqrt(AllyDistSq);
+			const FVector DirToAlly = AllyDistSq > 1.0f ? ToAlly / AllyDist : FVector::ZeroVector;
+			const float AllyAngleCos = FVector::DotProduct(CameraForward, DirToAlly);
+			const float AllyMinCos = GetMaxAngleCosForDistance(AllyDist);
+			const bool bInRange = AllyDistSq >= 1.0f && AllyDistSq <= NPCCaptureFixedRange * NPCCaptureFixedRange;
+			const bool bInCone = AllyAngleCos >= AllyMinCos;
+			const bool bLOS = (!bSelf && bInRange && bInCone) ? HasLineOfSight(Ally) : false;
+
+			// Every gate at once, twice a second. Which of them refuses is the whole question when a
+			// teammate cannot be grabbed, and each of them refusing in silence is indistinguishable
+			// from the branch not running at all.
+			{
+				static float LastAllyLogTime = -100.0f;
+				const float Now = World->GetTimeSeconds();
+				if (Now - LastAllyLogTime > 0.5f)
+				{
+					LastAllyLogTime = Now;
+					UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] AllyScan %s: self=%d dead=%d hp=%.0f dist=%.0f/%.0f inRange=%d cos=%.2f/%.2f inCone=%d los=%d authority=%d"),
+						*Ally->GetName(), bSelf ? 1 : 0, Ally->IsDead() ? 1 : 0, Ally->GetCurrentHP(),
+						AllyDist, NPCCaptureFixedRange, bInRange ? 1 : 0,
+						AllyAngleCos, AllyMinCos, bInCone ? 1 : 0, bLOS ? 1 : 0,
+						OwnerCharacter && OwnerCharacter->HasAuthority() ? 1 : 0);
+				}
+			}
+
+			if (bSelf || Ally->IsDead() || !bInRange || !bInCone)
+			{
+				continue;
+			}
+
+			if (AllyAngleCos > BestAngleCos && bLOS)
+			{
+				BestAngleCos = AllyAngleCos;
+				BestTarget = Ally;
+				BestTargetType = ECaptureTargetType::Ally;
+			}
+			continue;
+		}
+
 		// Try NPC — HumanoidNPC is handled separately below (yank weapon, not body capture)
 		if (AShooterNPC* NPC = Cast<AShooterNPC>(HitActor))
 		{
@@ -1220,17 +1296,24 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 					continue;
 				}
 
-				// Charge validation: only capture NPCs with OPPOSITE charge sign
-				// Neutral NPCs can't be captured, same-sign are repelled
+				// An enemy is grabbable only once its charge is at the cap, which is the same instant
+				// its shield reads empty. Below that it is still shielded and the grab is refused.
 				const float NPCCharge = NPCModifier->GetCharge();
-				if (FMath::IsNearlyZero(NPCCharge) || NPCCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
+				if (!NPCModifier->IsAtMaxCharge())
+				{
+					continue;
+				}
+
+				// Opposite sign is still required: reaching the cap says the shield is gone, not that
+				// the polarity stopped mattering.
+				if (NPCCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
 				{
 					continue;
 				}
 
 				const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
 				const float DistSq = ToTarget.SizeSquared();
-				const float NPCCaptureRange = EvaluateCaptureRange(FMath::Abs(NPCCharge));
+				const float NPCCaptureRange = NPCCaptureFixedRange;
 				if (NPCCaptureRange < 1.0f || DistSq > NPCCaptureRange * NPCCaptureRange || DistSq < 1.0f)
 				{
 					continue;
@@ -1576,38 +1659,16 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		// Try Physics Prop
 		if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(HitActor))
 		{
-			// These three used to refuse in silence, which is why a prop that could not be grabbed
-			// left nothing at all in the log to explain it. Same tag as the dropped-weapon scan.
-			if (!Prop->bCanBeCaptured || Prop->IsCapturedByPlate() || Prop->IsDead())
+			// Every non-spatial rule now lives on the prop, so the brackets and this scan cannot
+			// disagree about what is grabbable. These used to refuse in silence, which is why a prop
+			// that could not be grabbed left nothing in the log to explain it.
+			if (!Prop->CanBeGrabbedBy(OwnerCharacter))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Prop %s skipped: canBeCaptured=%d capturedByPlate=%d dead=%d holder=%s"),
+				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Prop %s not grabbable: canBeCaptured=%d capturedByPlate=%d dead=%d charge=%.1f/%.1f holder=%s"),
 					*Prop->GetName(), Prop->bCanBeCaptured ? 1 : 0, Prop->IsCapturedByPlate() ? 1 : 0,
-					Prop->IsDead() ? 1 : 0, *GetNameSafe(Prop->GetHoldingCharacter()));
+					Prop->IsDead() ? 1 : 0, FMath::Abs(Prop->GetCharge()), Prop->ExplosionReferenceCharge,
+					*GetNameSafe(Prop->GetHoldingCharacter()));
 				continue;
-			}
-
-			// A class that throws props may only take one that is fully charged. Charging it IS the
-			// cost of the ammunition, and letting a half-charged prop be grabbed would turn the
-			// verb into "pick things up" rather than "spend a charged object".
-			// OwnerCharacter is an ACharacter here; the item verb lives on AShooterCharacter. An NPC or
-			// a classless character simply fails the cast and keeps the old behaviour.
-			const AShooterCharacter* OwnerShooter = Cast<AShooterCharacter>(OwnerCharacter);
-			if (OwnerShooter && OwnerShooter->GetItemVerb() == EClassItemVerb::Throw)
-			{
-				// "Full" means ExplosionReferenceCharge: the project's existing definition of a fully
-				// charged prop ("a prop with |charge| = ExplosionReferenceCharge explodes at exactly
-				// the base values"). Props have no charge cap of their own, so rather than invent a
-				// second number that would immediately drift from this one, the same reference is
-				// reused. If the two ever need to differ, that is a field on the prop, not a guess
-				// here.
-				const float PropCharge = FMath::Abs(Prop->GetCharge());
-				const float FullCharge = Prop->ExplosionReferenceCharge;
-				if (FullCharge > 0.0f && PropCharge < FullCharge - KINDA_SMALL_NUMBER)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Prop %s skipped: thrower needs a full charge (%.1f / %.1f)"),
-						*Prop->GetName(), PropCharge, FullCharge);
-					continue;
-				}
 			}
 
 			const FVector ToTarget = Prop->GetActorLocation() - CameraLoc;
@@ -1642,12 +1703,21 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 		}
 	}
 
+	// What the scan actually settled on. An ally can clear every gate of its own and still lose the
+	// scan to a nearer prop or enemy, and from the gate log alone those two look identical.
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] CaptureScan chose: target=%s type=%d cos=%.2f authority=%d"),
+		*GetNameSafe(BestTarget), static_cast<int32>(BestTargetType), BestAngleCos,
+		OwnerCharacter && OwnerCharacter->HasAuthority() ? 1 : 0);
+
 	if (BestTarget)
 	{
 		switch (BestTargetType)
 		{
 		case ECaptureTargetType::NPC:
 			CaptureNPC(Cast<AShooterNPC>(BestTarget));
+			break;
+		case ECaptureTargetType::Ally:
+			CaptureAlly(Cast<AShooterCharacter>(BestTarget));
 			break;
 		case ECaptureTargetType::Prop:
 			CaptureProp(Cast<AEMFPhysicsProp>(BestTarget));
@@ -1756,6 +1826,45 @@ void UChargeAnimationComponent::CaptureNPC(AShooterNPC* NPC)
 	if (ShooterCharacter)
 	{
 		ShooterCharacter->OnPropCaptured.Broadcast(NPC);
+	}
+}
+
+void UChargeAnimationComponent::CaptureAlly(AShooterCharacter* Ally)
+{
+	if (!Ally || !ChannelingPlateActor)
+	{
+		return;
+	}
+
+	ReleaseCapturedNPC();
+
+	CurrentCapturedNPC = Ally;
+	ChannelingPlateActor->SetCapturedNPC(Ally);
+
+	// The plate does NOT carry a teammate. A plate hold moves the target from the holder's machine,
+	// and a player predicts its own movement, so that hold is corrected away every update -- which is
+	// exactly why a client could never pick the host up. The carry lives in the held player's own
+	// movement simulation instead (UApexMovementComponent::UpdateHeldByAlly), driven by the
+	// replicated AShooterCharacter::HeldByCharacter that only the server writes.
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->Server_CaptureAlly(Ally);
+
+		// Noted before the reply can arrive: this is what stops the next scan tick from asking again.
+		RequestedHeldAlly = Ally;
+		RequestedHeldAllyTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] CaptureAlly %s requested: grabberAuthority=%d allyLocalRole=%d"),
+		*Ally->GetName(),
+		OwnerCharacter && OwnerCharacter->HasAuthority() ? 1 : 0,
+		static_cast<int32>(Ally->GetLocalRole()));
+
+	SpawnCaptureVFX(Ally);
+	SpawnHoldVFX();
+	if (ShooterCharacter)
+	{
+		ShooterCharacter->OnPropCaptured.Broadcast(Ally);
 	}
 }
 
@@ -2075,7 +2184,17 @@ void UChargeAnimationComponent::ReleaseCapturedNPC()
 		return;
 	}
 
-	if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+	if (AShooterCharacter* Ally = Cast<AShooterCharacter>(CurrentCapturedNPC.Get()))
+	{
+		// Only the server can end the carry, because only the server started it. Without this a
+		// dropped teammate stays pinned to a hold point nobody is holding any more.
+		if (ShooterCharacter)
+		{
+			ShooterCharacter->Server_ReleaseAlly(Ally);
+		}
+		RequestedHeldAlly.Reset();
+	}
+	else if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CAPTURE_DEBUG] ReleaseCapturedNPC (ChargeAnimComp) -> %s, CurrentState=%d, CaptureLockoutTimeRemaining=%.2f"),
 			*NPC->GetName(), (int32)CurrentState, CaptureLockoutTimeRemaining);
@@ -2235,11 +2354,32 @@ void UChargeAnimationComponent::BeginLaunch()
 		}
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] StartReverseChanneling: held=%s plate=%s"),
+		CurrentCapturedNPC.IsValid() ? *CurrentCapturedNPC->GetName() : TEXT("NOTHING"),
+		*GetNameSafe(ChannelingPlateActor));
+
 	// Re-attach the captured target to the new (reverse) plate so the same-sign field
 	// pushes it forward instead of letting it fall.
 	if (CurrentCapturedNPC.IsValid() && ChannelingPlateActor)
 	{
-		if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
+		// Teammates first: AShooterCharacter is neither of the two types below, so without this branch
+		// a held ally was never re-attached to the reverse plate at all. The throw then had nothing to
+		// act on and the ally was simply let go and dropped, which is exactly what a second press did.
+		if (AShooterCharacter* Ally = Cast<AShooterCharacter>(CurrentCapturedNPC.Get()))
+		{
+			// A teammate is not re-attached to the reverse plate at all -- they were never on the
+			// first one. The throw is one authoritative launch, aimed where this player is looking.
+			if (ShooterCharacter)
+			{
+				const FVector ThrowDir = ShooterCharacter->GetBaseAimRotation().Vector();
+				ShooterCharacter->Server_LaunchAlly(Ally, ThrowDir);
+			}
+			RequestedHeldAlly.Reset();
+			CurrentCapturedNPC.Reset();
+			ChannelingPlateActor->ClearCapturedNPC();
+			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Throw: ALLY %s launched by request"), *Ally->GetName());
+		}
+		else if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 		{
 			if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
 			{

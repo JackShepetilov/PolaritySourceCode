@@ -283,6 +283,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "1.0", ClampMax = "90.0", Units = "deg"))
 	float CaptureMaxAngle = 30.0f;
 
+	/** Grab distance for enemy bodies, flat instead of read off CaptureRangeCurve.
+	 *
+	 *  The curve is a function of |q_player| * |q_target|, and enemies are now grabbable at exactly
+	 *  one charge value -- the cap -- so the curve would be sampled at a single point and its whole
+	 *  shape wasted. A flat number is also the honest reading of "grabbable or not": there is no
+	 *  longer a range that grows as you charge the target, because the target is either at the cap or
+	 *  not a candidate at all. Props keep the curve; only body capture uses this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Channeling|Capture", meta = (ClampMin = "1.0", Units = "cm"))
+	float NPCCaptureFixedRange = 1200.0f;
+
 	/** Curve mapping (|q_player| * |q_target|) → max capture distance in cm.
 	 *  Single authoritative source of capture range for ALL captures
 	 *  (NPC body, Prop, dropped weapons, pickups, humanoid weapon/shield yank).
@@ -797,6 +807,26 @@ protected:
 
 	/** Capture a specific NPC */
 	void CaptureNPC(class AShooterNPC* NPC);
+
+	/** Grab a teammate. Same machinery as CaptureNPC, minus every charge rule: an ally is grabbable
+	 *  whatever their charge and whatever polarity either of you is, because taking one costs the
+	 *  team nothing and waiting for a charge state would make the verb unusable in a fight. */
+	void CaptureAlly(class AShooterCharacter* Ally);
+
+	/** The teammate this machine has ASKED the server to pick up, and when.
+	 *
+	 *  The carry itself is recorded in the replicated AShooterCharacter::HeldByCharacter, but on a
+	 *  client that answer is a round trip away. Without a local note of the request, the very next
+	 *  scan tick sees "holding nobody", re-selects the same teammate and asks again -- and whether
+	 *  the reply beat that tick decided whether the second key press threw or re-grabbed. That is
+	 *  what "works every other time" was.
+	 *
+	 *  Optimistic, and only until the reply is due: past RequestedHeldAllyTimeout the replicated
+	 *  value is believed instead, so a request the server refused cannot wedge the hold forever. */
+	TWeakObjectPtr<class AShooterCharacter> RequestedHeldAlly;
+	float RequestedHeldAllyTime = -100.0f;
+
+	static constexpr float RequestedHeldAllyTimeout = 1.0f;
 
 	/** Capture a specific physics prop */
 	void CaptureProp(AEMFPhysicsProp* Prop);

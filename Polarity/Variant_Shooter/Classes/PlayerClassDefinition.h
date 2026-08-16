@@ -27,8 +27,15 @@ enum class EClassItemVerb : uint8
 	Throw,
 	/** Blow it up from a distance. */
 	Detonate,
-	/** Disintegrate it into a shield. */
-	Shield,
+	/** Turn it into a decoy: a loud object thrown anywhere, which pulls enemy aggression onto itself
+	 *  for a few seconds. Replaces the earlier "disintegrate into a shield" reading of the Tank's
+	 *  verb; the handoff document's per-class section is what this follows.
+	 *
+	 *  Renaming an enum value is not free: tagged property serialisation stores the VALUE NAME, so
+	 *  DA_Class_Tank would have loaded as None and the Tank would have quietly stopped interacting
+	 *  with props at all. The redirect that prevents it is in Config/DefaultEngine.ini,
+	 *  [CoreRedirects]. */
+	Decoy,
 	/** Decompose it into healing, for yourself or a teammate. */
 	Heal
 };

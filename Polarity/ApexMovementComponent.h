@@ -384,6 +384,30 @@ public:
 	 *  engine itself resolves crouching. */
 	virtual void UpdateCharacterStateBeforeMovement(float DeltaSeconds) override;
 
+	/** Being carried by a teammate, run from inside the simulated move.
+	 *
+	 *  It lives here rather than in whoever is doing the carrying because this is the ONLY place that
+	 *  works for a player: a character predicts its own movement, so anything moving it from another
+	 *  machine is corrected away every update. Driven from AShooterCharacter::HeldByCharacter, which
+	 *  is replicated, so the held client, the server and a replay all reach the same answer.
+	 *
+	 *  The held player loses control for the duration: input is discarded here rather than blocked at
+	 *  the input layer, so the server's replay of their move discards it too. */
+	void UpdateHeldByAlly(float DeltaSeconds);
+
+	/** How hard a carried teammate is pulled to the hold point (1/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Carry", meta = (ClampMin = "1.0"))
+	float AllyHoldSpringRate = 12.0f;
+
+	/** Ceiling on the speed that pull may reach, so a carrier turning fast cannot fling the carried
+	 *  player through the level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Carry", meta = (ClampMin = "100.0", Units = "cm/s"))
+	float AllyHoldMaxSpeed = 3000.0f;
+
+	/** True while this character was moved by the carry last frame, so the exit can put the movement
+	 *  mode back exactly once instead of every frame. */
+	bool bIsHeldByAlly = false;
+
 	virtual class FNetworkPredictionData_Client* GetPredictionData_Client() const override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float GetMaxSpeed() const override;

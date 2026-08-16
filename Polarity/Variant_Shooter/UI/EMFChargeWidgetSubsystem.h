@@ -199,6 +199,24 @@ protected:
 	/** Create the reticle on first use; returns null if disabled or no PlayerController yet. */
 	UCaptureReticleWidget* GetOrCreateReticle(APlayerController* PC);
 
+public:
+	/** While true the capture scan stops driving the reticle and hides it, so an ability that wants
+	 *  the same brackets can use them without two sets fighting over one screen.
+	 *
+	 *  The reticle itself is shared rather than duplicated: it already does exactly the right job,
+	 *  and a second widget would mean two things to keep in step with the art. */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Reticle")
+	void SetReticleSuppressed(bool bSuppressed);
+
+	UFUNCTION(BlueprintPure, Category = "EMF|Reticle")
+	bool IsReticleSuppressed() const { return bReticleSuppressed; }
+
+	/** The shared reticle, for whoever is currently allowed to drive it. */
+	UCaptureReticleWidget* GetReticleForExternalUse(APlayerController* PC) { return GetOrCreateReticle(PC); }
+
+protected:
+	bool bReticleSuppressed = false;
+
 	/** Drive the reticle from the current best capture candidate (or hide it if there is none). */
 	void UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget);
 

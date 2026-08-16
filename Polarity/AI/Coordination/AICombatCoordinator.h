@@ -176,6 +176,28 @@ struct FTargetGroup
 	FPlayerStateCache State;
 };
 
+/** Something loud on the ground that enemies near it should fight instead of a player.
+ *
+ *  The Tank's item verb: a fully charged prop thrown anywhere turns into one of these for a few
+ *  seconds. It lives here rather than on the prop because "who is this NPC fighting" has exactly one
+ *  owner, and adding a second answer somewhere else is how enemies end up chasing one thing while
+ *  their formation is laid out around another.
+ *
+ *  Not a USTRUCT and not a UPROPERTY, same as FTargetGroup: plain data with weak pointers, nothing
+ *  for the garbage collector to keep alive. A decoy that is destroyed mid-pull simply stops being
+ *  found, and the NPCs holding it go back to the nearest player on the next tick. */
+struct FActiveDecoy
+{
+	TWeakObjectPtr<AActor> Actor;
+
+	/** How far its noise carries (cm). An enemy outside this is not distracted at all — the decoy is
+	 *  a local event, not a global one. */
+	float Radius = 0.0f;
+
+	/** World time it stops working. */
+	float ExpiryTime = 0.0f;
+};
+
 
 // ==================== Coordinator ====================
 
@@ -459,6 +481,30 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
 	AActor* GetTargetFor(APawn* NPC) const;
 
+	// --- Decoys ---
+
+	/** Start pulling enemies within Radius onto Decoy for Duration seconds.
+	 *
+	 *  Server-side, like every other AI decision here. Calling it again for the same actor refreshes
+	 *  the radius and the deadline rather than stacking a second entry, so a prop that somehow
+	 *  registers twice does not become twice as loud.
+	 *
+	 *  Whether a decoy should out-shout a player who is standing on top of the enemy, and how the two
+	 *  ought to weigh against each other, is a balance question nobody has answered yet: for now the
+	 *  decoy simply wins inside its radius. @see UnregisterDecoy */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Targeting")
+	void RegisterDecoy(AActor* Decoy, float Radius, float Duration);
+
+	/** Stop it working now, before its time is up: it was destroyed, or its owner cancelled it.
+	 *  Every NPC holding it is released in the same call rather than waiting for the next tick, so
+	 *  the enemies turn back at the moment the prop breaks. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Targeting")
+	void UnregisterDecoy(AActor* Decoy);
+
+	/** True while this actor is a live decoy. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
+	bool IsActiveDecoy(const AActor* Actor) const;
+
 	/** The global ceiling on simultaneous attackers, grown sublinearly with the size of the team.
 	 *  This is the ceiling for the WHOLE fight; per-target limits are what stop four enemies piling
 	 *  onto one player, and they come from the token pools. */
@@ -586,6 +632,26 @@ private:
 	/** Give every registered NPC a target, and let it keep the one it has unless somebody genuinely
 	 *  takes over. Also derives PrimaryTarget from the result. */
 	void UpdateNPCTargets(float DeltaTime);
+
+	// --- Decoys ---
+
+	/** Live decoys. Handful at most, walked once per NPC per tick at 10Hz. */
+	TArray<FActiveDecoy> ActiveDecoys;
+
+	/** Drop the expired and the destroyed. Called at the top of UpdateNPCTargets so a decoy that ran
+	 *  out is gone before anybody is targeted at it. */
+	void PruneDecoys();
+
+	/** The nearest live decoy whose radius covers NPCLocation, or null. Nearest rather than first, so
+	 *  two decoys thrown into the same room do not depend on registration order. */
+	AActor* FindDecoyFor(const FVector& NPCLocation) const;
+
+	/** Point this NPC's CONTROLLER at the decoy and lock it there for what remains of the decoy's
+	 *  life. The coordinator's own Data.Target is not what the behaviour tree reads. */
+	void ApplyDistraction(APawn* NPC, AActor* Decoy, float SecondsRemaining);
+
+	/** Release the controller lock, if this NPC has one. */
+	void ClearDistraction(APawn* NPC);
 
 	/** The player this NPC is fighting, falling back to PrimaryTarget when it has none yet. Every
 	 *  per-NPC gate goes through here rather than reading PrimaryTarget directly. */

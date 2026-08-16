@@ -5,6 +5,8 @@
 #include "ChargeAnimationComponent.h"
 #include "EMFChannelingPlateActor.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Coop/CoopPlayers.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "GameFramework/Character.h"
 #include "DrawDebugHelpers.h"
 #include "Kismet/GameplayStatics.h"
@@ -126,8 +128,10 @@ bool UEMFVelocityModifier::ModifyVelocity_Implementation(float DeltaTime, const 
 		return false;
 	}
 
-	// In proxy mode, skip charge-zero check (player's own charge may be unregistered)
-	if (!bChannelingProxyMode)
+	// In proxy mode, skip charge-zero check (player's own charge may be unregistered).
+	// Also skipped while captured: an ally is grabbable at ANY charge, including none, and this exit
+	// would otherwise refuse to run the hold and the throw for exactly that case.
+	if (!bChannelingProxyMode && !CapturingPlate.IsValid())
 	{
 		float Charge = GetCharge();
 		if (FMath::IsNearlyZero(Charge))
@@ -369,13 +373,15 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 			continue;
 		}
 
-		// Opposite-charge distance cutoff: skip sources too close with opposite charge
-		// Prevents extreme forces from Coulomb 1/r² singularity
+		// Close-range cutoff: skip any charged source inside the cutoff radius. Prevents extreme forces
+		// from the Coulomb 1/r^2 singularity, which is sign-independent -- the old version only fired
+		// for opposite signs, so same-sign pairs at contact range kept the full force. Same fix as
+		// AEMFPhysicsProp::ApplyEMForces, kept identical so the two do not drift apart.
 		if (bEnableOppositeChargeDistanceCutoff && DistSq < OppositeChargeMinDistSq)
 		{
 			const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
 			const int32 MyChargeSign = (Charge > KINDA_SMALL_NUMBER) ? 1 : ((Charge < -KINDA_SMALL_NUMBER) ? -1 : 0);
-			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
+			if (SourceChargeSign != 0 && MyChargeSign != 0)
 			{
 				bShouldApplyProximityDamping = true;
 				continue;
@@ -875,8 +881,22 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 	{
 		// === REVERSE MODE: aim-line convergence ===
 		// Target flies forward at constant speed + converges laterally onto camera aim line.
-		// Camera rotation → aim line shifts → target smoothly follows crosshair.
+		// Camera rotation -> aim line shifts -> target smoothly follows crosshair.
+		//
+		// Deliberately NOT the props' one-shot impulse. A thrown body is meant to go where it was
+		// pointed and arrive, and handing a character to gravity and capsule-vs-capsule blocking read
+		// as the throw doing something different every time.
 		bHardHoldActive = false;
+
+		// A teammate never reaches here any more. Players are not carried or thrown by plates at all:
+		// the carry is a state in the held player's OWN movement simulation
+		// (UApexMovementComponent::UpdateHeldByAlly) and the throw is one authoritative launch through
+		// AShooterCharacter::Server_LaunchAlly. Both of those exist because a plate hold moves the
+		// target from somebody else's machine, which a predicting character undoes every update.
+		if (CoopPlayers::IsPlayer(Owner))
+		{
+			return FVector::ZeroVector;
+		}
 
 		if (!bReverseLaunchInitialized)
 		{
@@ -886,7 +906,7 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 			const float LaunchDistance = CalculateCaptureRange() * ReverseLaunchDistanceMultiplier;
 			ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
 
-			// Set stun-on-impact intent NOW — the NPC may collide with another NPC
+			// Set stun-on-impact intent NOW - the NPC may collide with another NPC
 			// while still in captured state, BEFORE ReleasedFromCapture is called.
 			if (AShooterNPC* NPC = Cast<AShooterNPC>(Owner))
 			{
@@ -896,8 +916,18 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 
 		ReverseLaunchElapsed += DeltaTime;
 
-		// Aim line from camera position along plate normal (= camera forward)
-		const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
+		// Aim line from the THROWER's camera. This is the one thing not restored to how it was: it
+		// used to read player zero, so in coop a client throwing an enemy converged it onto the HOST's
+		// crosshair. The plate carries the throwing character as its Owner (SpawnPlate). Single player
+		// is unaffected either way.
+		const APlayerCameraManager* CamMgr = nullptr;
+		if (const APawn* ThrowerPawn = Cast<APawn>(Plate->GetOwner()))
+		{
+			if (const APlayerController* ThrowerPC = Cast<APlayerController>(ThrowerPawn->GetController()))
+			{
+				CamMgr = ThrowerPC->PlayerCameraManager;
+			}
+		}
 		const FVector AimOrigin = CamMgr ? CamMgr->GetCameraLocation() : Plate->GetActorLocation();
 		FVector AimDir = Plate->GetPlateNormal();
 
@@ -927,6 +957,7 @@ FVector UEMFVelocityModifier::ComputeHardHoldDelta(float DeltaTime, const FVecto
 		// Return delta: desired - current + external forces
 		return DesiredVelocity - CurrentVelocity + CurrentAcceleration * DeltaTime;
 	}
+
 
 	// === NORMAL CAPTURE MODE ===
 	const FVector ToPlate = PlatePos - Position;

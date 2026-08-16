@@ -14,6 +14,8 @@
 // thunk needs StaticClass().
 #include "UI/EMFChargeWidget.h"
 #include "UI/CaptureReticleWidget.h"
+#include "Abilities/AbilityDefinition_ShieldBypass.h"
+#include "Abilities/AbilityHandler_ShieldBypass.h"
 #include "AI/ShooterNPC.h"
 #include "ShooterDummyInterface.h"
 #include "MovementSettings.h"
@@ -360,6 +362,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AShooterCharacter::DoStartFiring);
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoStopFiring);
 
+		// Reload the equipped weapon
+		if (ReloadAction)
+		{
+			EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AShooterCharacter::DoReload);
+		}
+
 		// Switch weapon — plain forward cycle on press. Hold-to-throw moved to the yanked
 		// weapon's own per-weapon switch key (see the WeaponSwitchActions loop below).
 		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::DoSwitchWeapon);
@@ -489,6 +497,7 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AShooterCharacter, ClassDefinition);
 
 	DOREPLIFETIME(AShooterCharacter, CurrentHP);
+	DOREPLIFETIME(AShooterCharacter, HeldByCharacter);
 	DOREPLIFETIME(AShooterCharacter, CurrentArmor);
 	DOREPLIFETIME(AShooterCharacter, CurrentWeapon);
 	DOREPLIFETIME(AShooterCharacter, OwnedWeapons);
@@ -1251,6 +1260,101 @@ void AShooterCharacter::Server_ReportIonization_Implementation(AActor* Target, A
 	Weapon->ApplyHitscanIonization(Target, nullptr);
 }
 
+FVector AShooterCharacter::GetAllyHoldPoint() const
+{
+	// The same point the channeling plate sits at: eye position plus the plate's local offset turned
+	// by where this character is aiming. Both machines can compute it from replicated state alone.
+	static constexpr float HoldForwardOffset = 200.0f;
+	return GetPawnViewLocation() + GetBaseAimRotation().Vector() * HoldForwardOffset;
+}
+
+void AShooterCharacter::Server_CaptureAlly_Implementation(AShooterCharacter* Ally)
+{
+	if (!Ally || Ally == this || Ally->IsDead())
+	{
+		return;
+	}
+
+	if (Ally->HeldByCharacter != nullptr)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to pick up %s, already held by %s - rejected"),
+			*GetName(), *Ally->GetName(), *GetNameSafe(Ally->HeldByCharacter));
+		return;
+	}
+
+	static constexpr float GrabRangeCm = 1200.0f;
+	static constexpr float GrabMarginCm = 300.0f;
+	const float Distance = FVector::Dist(GetActorLocation(), Ally->GetActorLocation());
+	if (Distance > GrabRangeCm + GrabMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to pick up %s at %.0f cm - rejected"),
+			*GetName(), *Ally->GetName(), Distance);
+		return;
+	}
+
+	Ally->HeldByCharacter = this;
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Server_CaptureAlly %s picked up %s at %.0f cm"),
+		*GetName(), *Ally->GetName(), Distance);
+}
+
+void AShooterCharacter::Server_ReleaseAlly_Implementation(AShooterCharacter* Ally)
+{
+	if (!Ally || Ally->HeldByCharacter != this)
+	{
+		return;
+	}
+
+	Ally->HeldByCharacter = nullptr;
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Server_ReleaseAlly %s put down %s"), *GetName(), *Ally->GetName());
+}
+
+void AShooterCharacter::Server_LaunchAlly_Implementation(AShooterCharacter* Ally, FVector LaunchVelocity)
+{
+	if (!Ally || Ally == this || Ally->IsDead())
+	{
+		return;
+	}
+
+	// Only the carrier may throw, and only what they are actually carrying. Without this the throw is
+	// a free "shove any player in view" for anyone who asks.
+	if (Ally->HeldByCharacter != this)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to throw %s it is not holding - rejected"),
+			*GetName(), *Ally->GetName());
+		return;
+	}
+
+	// Cleared BEFORE the launch: the hold pins velocity every frame, so a launch issued while still
+	// held would be overwritten on the very next simulated move.
+	Ally->HeldByCharacter = nullptr;
+
+	// Same shape of check the prop throw makes: the client decided, the server agrees or refuses. The
+	// margin is generous on purpose -- both players have moved since the grab, and this is a teammate,
+	// so the cost of being strict is a throw that silently does nothing.
+	static constexpr float ThrowRangeCm = 1200.0f;
+	static constexpr float ThrowMarginCm = 500.0f;
+	const float Distance = FVector::Dist(GetActorLocation(), Ally->GetActorLocation());
+	if (Distance > ThrowRangeCm + ThrowMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to throw %s at %.0f cm - rejected"),
+			*GetName(), *Ally->GetName(), Distance);
+		return;
+	}
+
+	// Speed is not taken from the client. Direction is theirs -- it came from their camera and only
+	// they know where they were looking -- but how hard a throw is belongs to the game.
+	const UEMFVelocityModifier* AllyMod = Ally->FindComponentByClass<UEMFVelocityModifier>();
+	const float Speed = AllyMod ? AllyMod->AllyLaunchSpeed : 2000.0f;
+	const FVector Velocity = LaunchVelocity.GetSafeNormal() * Speed;
+
+	Ally->LaunchCharacter(Velocity, true, true);
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Server_LaunchAlly %s -> %s vel=%s"),
+		*GetName(), *Ally->GetName(), *Velocity.ToCompactString());
+}
+
 void AShooterCharacter::Server_LaunchProp_Implementation(AEMFPhysicsProp* Prop)
 {
 	if (!Prop || Prop->GetHoldingCharacter() != this)
@@ -1491,6 +1595,16 @@ void AShooterCharacter::DoStopFiring()
 	if (RecoilComponent)
 	{
 		RecoilComponent->OnFiringEnded();
+	}
+}
+
+void AShooterCharacter::DoReload()
+{
+	// The weapon owns the decision: it knows whether it has a magazine, whether that magazine is
+	// already full and whether it is the kind that gets thrown away instead of reloaded.
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StartReload();
 	}
 }
 
@@ -1925,7 +2039,16 @@ void AShooterCharacter::DoAbilityPressed()
 		}
 	}
 
-	// The ability component / active handler decide Tap-vs-Hold internally.
+	// Only an aimed ability defers its shot to the release. Everything else keeps firing on the press:
+	// moving the activation for all abilities would hand a Hold-mode charge its own release in the
+	// same frame it started, which is not a change anybody asked for.
+	if (AbilityComponent && Cast<UAbilityDefinition_ShieldBypass>(AbilityComponent->GetActiveAbility()))
+	{
+		// The player holds to see who the bolt will pick, and lets go to send it.
+		BeginAbilityAiming();
+		return;
+	}
+
 	if (AbilityComponent)
 	{
 		AbilityComponent->TryActivate();
@@ -1937,15 +2060,128 @@ void AShooterCharacter::DoAbilityReleased()
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_INPUT_DEBUG] DoAbilityReleased (C++ AbilityAction binding) @ %.3fs"),
 		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
 
+	// Hand the authority the enemy that was actually highlighted, THEN fire. Order matters: the
+	// handler reads the aim target, so it has to be there before the activation arrives.
+	if (bAbilityAiming)
+	{
+		Server_SetAbilityAimTarget(AbilityAimTarget.Get());
+		if (AbilityComponent)
+		{
+			AbilityComponent->TryActivate();
+		}
+		EndAbilityAiming();
+	}
+
 	if (AbilityComponent)
 	{
 		AbilityComponent->OnButtonReleased();
 	}
 }
 
+void AShooterCharacter::Server_SetAbilityAimTarget_Implementation(AShooterNPC* Target)
+{
+	// Believed, not re-derived, for the same reason the melee lunge's target is: the two machines
+	// would otherwise pick different enemies whenever two stand close together, and the brackets the
+	// player was looking at would have been a lie. Validated where it is used, not here.
+	AbilityAimTarget = Target;
+}
+
+void AShooterCharacter::BeginAbilityAiming()
+{
+	if (bAbilityAiming || !IsLocallyControlled())
+	{
+		return;
+	}
+	bAbilityAiming = true;
+
+	// Borrow the capture brackets rather than draw a second set. Two reticles on one screen read as
+	// noise, and the capture one is already the right shape.
+	if (UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr)
+	{
+		Sub->SetReticleSuppressed(true);
+	}
+}
+
+void AShooterCharacter::EndAbilityAiming()
+{
+	if (!bAbilityAiming)
+	{
+		return;
+	}
+	bAbilityAiming = false;
+	AbilityAimTarget = nullptr;
+
+	if (UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr)
+	{
+		if (UCaptureReticleWidget* Reticle = Sub->GetReticleForExternalUse(Cast<APlayerController>(GetController())))
+		{
+			Reticle->ClearTarget();
+		}
+		Sub->SetReticleSuppressed(false);
+	}
+}
+
+void AShooterCharacter::UpdateAbilityAiming()
+{
+	if (!bAbilityAiming || !IsLocallyControlled())
+	{
+		return;
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr;
+	if (!PC || !Sub)
+	{
+		return;
+	}
+
+	UCaptureReticleWidget* Reticle = Sub->GetReticleForExternalUse(PC);
+	if (!Reticle)
+	{
+		return;
+	}
+
+	// Same formula the handler will run, so the brackets and the bolt cannot disagree.
+	float Range = 4000.0f;
+	if (AbilityComponent)
+	{
+		if (const UAbilityDefinition_ShieldBypass* Def = Cast<UAbilityDefinition_ShieldBypass>(AbilityComponent->GetActiveAbility()))
+		{
+			Range = Def->TargetSearchRange;
+		}
+	}
+
+	AShooterNPC* Best = UAbilityHandler_ShieldBypass::ScoreBestTarget(this, Range);
+	AbilityAimTarget = Best;
+
+	if (!Best)
+	{
+		Reticle->ClearTarget();
+		return;
+	}
+
+	FVector2D Screen;
+	if (!PC->ProjectWorldLocationToScreen(Best->GetActorLocation(), Screen))
+	{
+		Reticle->ClearTarget();
+		return;
+	}
+
+	// Bracket size from the target's own bounds, so a boss gets bigger brackets than a grunt without
+	// anybody authoring a number per enemy.
+	FVector BoundsOrigin, BoundsExtent;
+	Best->GetActorBounds(true, BoundsOrigin, BoundsExtent);
+	const float Distance = FMath::Max(1.0f, FVector::Dist(GetActorLocation(), Best->GetActorLocation()));
+	const float PixelRadius = FMath::Clamp((BoundsExtent.Size() / Distance) * 600.0f, 24.0f, 400.0f);
+
+	Reticle->UpdateForTarget(Screen, PixelRadius, 0);
+}
+
 void AShooterCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	UpdateAbilityAiming();
 
 
 	// Boss finisher has priority over everything

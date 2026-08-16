@@ -11,6 +11,7 @@
 #include "FlyingDrone.h"
 #include "KamikazeDroneNPC.h"
 #include "ShooterCharacter.h"
+#include "ShooterAIController.h"
 #include "ThreatComponent.h"
 
 // ==================== FTokenPool ====================
@@ -767,12 +768,16 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 		return;
 	}
 
+	PruneDecoys();
+
 	TArray<APawn*> Players;
 	CoopPlayers::GetAll(World, Players);
 	if (Players.Num() == 0)
 	{
 		return;
 	}
+
+	const float Now = World->GetTimeSeconds();
 
 	for (FRegisteredNPCData& Data : RegisteredNPCs)
 	{
@@ -783,6 +788,41 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 		}
 
 		const FVector NPCLocation = NPC->GetActorLocation();
+
+		// A decoy beats every player inside its radius, and it takes effect on the frame it lands.
+		// Neither the switch margin nor the switch delay applies: those two exist to stop an enemy
+		// flickering between two teammates whose distances keep swapping, and a decoy is a single
+		// loud event at a fixed point. Something that takes three quarters of a second to notice a
+		// bang going off next to it does not read as being lured, it reads as being slow.
+		if (AActor* Decoy = FindDecoyFor(NPCLocation))
+		{
+			const FActiveDecoy* Entry = ActiveDecoys.FindByPredicate(
+				[Decoy](const FActiveDecoy& D) { return D.Actor.Get() == Decoy; });
+			const float Remaining = Entry ? FMath::Max(0.0f, Entry->ExpiryTime - Now) : 0.0f;
+
+			if (Data.Target.Get() != Decoy)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s pulled off %s by decoy %s (%.1fs left)"),
+					*NPC->GetName(), *GetNameSafe(Data.Target.Get()), *Decoy->GetName(), Remaining);
+			}
+
+			Data.Target = Decoy;
+			Data.TargetSwitchPressure = 0.0f;
+			ApplyDistraction(NPC, Decoy, Remaining);
+			continue;
+		}
+
+		// Was fighting a decoy that has just stopped being one — expired, or shot to pieces. Nothing
+		// to be loyal to, so it falls through to the ordinary pick below with a clean slate.
+		//
+		// Recognised by "not a player" rather than by looking the decoy up: PruneDecoys has already
+		// removed it by the time this runs, and nothing else ever puts a non-player in here.
+		if (AActor* Held = Data.Target.Get(); Held && !CoopPlayers::IsPlayer(Held))
+		{
+			ClearDistraction(NPC);
+			Data.Target.Reset();
+			Data.TargetSwitchPressure = 0.0f;
+		}
 
 		// Whoever is most worth attacking right now. This is the candidate, NOT the answer — the
 		// answer is below, and it is mostly "keep doing what you were doing".
@@ -886,6 +926,169 @@ AActor* AAICombatCoordinator::GetTargetFor(APawn* NPC) const
 {
 	const FRegisteredNPCData* Data = FindNPCData(NPC);
 	return Data ? Data->Target.Get() : nullptr;
+}
+
+// ==================== Decoys ====================
+
+void AAICombatCoordinator::RegisterDecoy(AActor* Decoy, float Radius, float Duration)
+{
+	const UWorld* World = GetWorld();
+	if (!Decoy || !World || Radius <= 0.0f || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	const float Expiry = World->GetTimeSeconds() + Duration;
+
+	if (FActiveDecoy* Existing = ActiveDecoys.FindByPredicate(
+		[Decoy](const FActiveDecoy& D) { return D.Actor.Get() == Decoy; }))
+	{
+		Existing->Radius = Radius;
+		Existing->ExpiryTime = Expiry;
+		return;
+	}
+
+	FActiveDecoy Entry;
+	Entry.Actor = Decoy;
+	Entry.Radius = Radius;
+	Entry.ExpiryTime = Expiry;
+	ActiveDecoys.Add(Entry);
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Decoy %s armed: radius=%.0f duration=%.1fs"),
+		*Decoy->GetName(), Radius, Duration);
+}
+
+void AAICombatCoordinator::UnregisterDecoy(AActor* Decoy)
+{
+	if (!Decoy)
+	{
+		return;
+	}
+
+	const int32 Removed = ActiveDecoys.RemoveAll(
+		[Decoy](const FActiveDecoy& D) { return D.Actor.Get() == Decoy; });
+
+	if (Removed == 0)
+	{
+		return;
+	}
+
+	// Let go of everyone holding it in the same call. Waiting for the next tick would be at most a
+	// tenth of a second, but the release also has to happen when the prop is destroyed, and by the
+	// next tick the pointer is null and there is no way left to tell which NPCs were on it.
+	for (FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		APawn* NPC = Data.NPC.Get();
+		if (!NPC || Data.Target.Get() != Decoy)
+		{
+			continue;
+		}
+
+		ClearDistraction(NPC);
+		Data.Target.Reset();
+		Data.TargetSwitchPressure = 0.0f;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Decoy %s is done"), *Decoy->GetName());
+}
+
+bool AAICombatCoordinator::IsActiveDecoy(const AActor* Actor) const
+{
+	const UWorld* World = GetWorld();
+	if (!Actor || !World)
+	{
+		return false;
+	}
+
+	const float Now = World->GetTimeSeconds();
+	return ActiveDecoys.ContainsByPredicate([Actor, Now](const FActiveDecoy& D)
+	{
+		return D.Actor.Get() == Actor && Now < D.ExpiryTime;
+	});
+}
+
+void AAICombatCoordinator::PruneDecoys()
+{
+	const UWorld* World = GetWorld();
+	if (!World || ActiveDecoys.Num() == 0)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+
+	// Collected first and unregistered afterwards, because UnregisterDecoy walks the NPC list and
+	// releases whoever was holding it — that is the whole reason a decoy ending has to go through
+	// one function rather than being dropped from the array here.
+	TArray<AActor*> Finished;
+	for (const FActiveDecoy& Entry : ActiveDecoys)
+	{
+		if (!Entry.Actor.IsValid())
+		{
+			continue;   // destroyed: nothing to release it from, the pointer is already gone
+		}
+		if (Now >= Entry.ExpiryTime)
+		{
+			Finished.Add(Entry.Actor.Get());
+		}
+	}
+
+	ActiveDecoys.RemoveAll([](const FActiveDecoy& D) { return !D.Actor.IsValid(); });
+
+	for (AActor* Expired : Finished)
+	{
+		UnregisterDecoy(Expired);
+	}
+}
+
+AActor* AAICombatCoordinator::FindDecoyFor(const FVector& NPCLocation) const
+{
+	const UWorld* World = GetWorld();
+	if (!World || ActiveDecoys.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	const float Now = World->GetTimeSeconds();
+
+	AActor* Best = nullptr;
+	float BestDistSq = TNumericLimits<float>::Max();
+
+	for (const FActiveDecoy& Entry : ActiveDecoys)
+	{
+		AActor* Actor = Entry.Actor.Get();
+		if (!Actor || Now >= Entry.ExpiryTime)
+		{
+			continue;
+		}
+
+		const float DistSq = FVector::DistSquared(NPCLocation, Actor->GetActorLocation());
+		if (DistSq > Entry.Radius * Entry.Radius || DistSq >= BestDistSq)
+		{
+			continue;
+		}
+
+		BestDistSq = DistSq;
+		Best = Actor;
+	}
+
+	return Best;
+}
+
+void AAICombatCoordinator::ApplyDistraction(APawn* NPC, AActor* Decoy, float SecondsRemaining)
+{
+	if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC ? NPC->GetController() : nullptr))
+	{
+		AIController->DistractTo(Decoy, SecondsRemaining);
+	}
+}
+
+void AAICombatCoordinator::ClearDistraction(APawn* NPC)
+{
+	if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC ? NPC->GetController() : nullptr))
+	{
+		AIController->EndDistraction();
+	}
 }
 
 int32 AAICombatCoordinator::GetEffectiveMaxAttackers() const

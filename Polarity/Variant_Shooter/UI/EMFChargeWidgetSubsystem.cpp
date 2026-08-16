@@ -130,8 +130,30 @@ UCaptureReticleWidget* UEMFChargeWidgetSubsystem::GetOrCreateReticle(APlayerCont
 	return ReticleWidget;
 }
 
+void UEMFChargeWidgetSubsystem::SetReticleSuppressed(bool bSuppressed)
+{
+	if (bReticleSuppressed == bSuppressed)
+	{
+		return;
+	}
+	bReticleSuppressed = bSuppressed;
+
+	// Cleared on the way in so the capture brackets are not left frozen on an old prop while the
+	// ability draws its own over the top.
+	if (bReticleSuppressed && ReticleWidget)
+	{
+		ReticleWidget->ClearTarget();
+	}
+}
+
 void UEMFChargeWidgetSubsystem::UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget)
 {
+	// Somebody else is driving the brackets right now.
+	if (bReticleSuppressed)
+	{
+		return;
+	}
+
 	if (!ReticleWidgetClass)
 	{
 		return; // reticle disabled

@@ -58,6 +58,13 @@ protected:
 	/** Enemy currently being targeted */
 	TObjectPtr<AActor> TargetEnemy;
 
+	/** What is currently holding this NPC's attention against its own perception, and until when.
+	 *  Weak: the decoy is a prop and can be destroyed mid-distraction, and that has to end the lock
+	 *  rather than leave the NPC staring at nothing. Server-side state, like everything the AI
+	 *  decides. */
+	TWeakObjectPtr<AActor> Distraction;
+	float DistractionEndTime = 0.0f;
+
 public:
 
 	/** Called when an AI perception has been updated. StateTree task delegate hook */
@@ -101,7 +108,11 @@ protected:
 
 public:
 
-	/** Sets the targeted enemy */
+	/** Sets the targeted enemy.
+	 *
+	 *  Refused while a distraction holds this NPC (see DistractTo): perception keeps firing at the
+	 *  players it can see, and without the refusal it re-pointed the NPC at one of them on the very
+	 *  next stimulus, which is a decoy that visibly does nothing. */
 	void SetCurrentTarget(AActor* Target);
 
 	/** Clears the targeted enemy */
@@ -109,6 +120,26 @@ public:
 
 	/** Returns the targeted enemy */
 	AActor* GetCurrentTarget() const { return TargetEnemy; };
+
+	// ==================== Distraction ====================
+	// A decoy is not something this NPC senses; it is something told to it. The coordinator owns the
+	// decision (it is the one place that knows every registered NPC and who each is fighting) and
+	// this is where it lands, because the behaviour tree reads the CONTROLLER's target, not the
+	// coordinator's — the same route AArenaManager uses when it makes an arena aggro.
+
+	/** Look at Decoy and refuse to look away for Seconds. Refreshing it with a new deadline is
+	 *  normal: the coordinator calls this every tick the NPC is inside the decoy's radius. */
+	void DistractTo(AActor* Decoy, float Seconds);
+
+	/** True while a valid distraction is still running. */
+	bool IsDistracted() const;
+
+	/** What is distracting this NPC, or null. */
+	AActor* GetDistraction() const;
+
+	/** Drop the lock, and drop the decoy as a target with it, so perception starts looking for a
+	 *  player again instead of leaving the NPC shooting a spent prop. */
+	void EndDistraction();
 
 protected:
 

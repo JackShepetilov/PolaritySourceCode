@@ -77,6 +77,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float MaxBaseCharge = 50.0f;
 
+	/** True when the charge has reached its accumulation cap — for an enemy this is the same instant
+	 *  its shield reads empty, which is the moment it becomes grabbable.
+	 *
+	 *  Shared rather than tested inline because the acquisition scan and the bracket reticle both ask
+	 *  the question, and two copies of it drift into brackets that promise a grab the scan refuses.
+	 *  Uses >= so bonus charge above the cap still counts. */
+	UFUNCTION(BlueprintPure, Category = "EMF|Charge Accumulation")
+	bool IsAtMaxCharge() const
+	{
+		return MaxBaseCharge > KINDA_SMALL_NUMBER
+			&& FMath::Abs(GetCharge()) >= MaxBaseCharge - KINDA_SMALL_NUMBER;
+	}
+
 	/** Заряд, добавляемый за каждый успешный удар в ближнем бою */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float ChargePerMeleeHit = 2.0f;
@@ -290,6 +303,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
 	float CaptureReleaseTimeout = 0.5f;
 
+	/** Speed a thrown TEAMMATE leaves at. Flat, and deliberately not the charge-derived speed enemies
+	 *  use: an ally is grabbable at any charge, so a charge-derived speed would be zero exactly when
+	 *  the ally happens to be uncharged. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "100.0", Units = "cm/s"))
+	float AllyLaunchSpeed = 2000.0f;
+
 	/** Reverse launch distance = CaptureRange * this multiplier */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "0.5", ClampMax = "5.0", EditCondition = "bEnableViscousCapture"))
 	float ReverseLaunchDistanceMultiplier = 1.5f;
@@ -302,6 +321,7 @@ public:
 	 *  Higher = faster convergence. At 15, ~95% correction in 0.2s. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture", meta = (ClampMin = "1.0", ClampMax = "50.0", EditCondition = "bEnableViscousCapture"))
 	float ReverseLaunchConvergenceRate = 15.0f;
+
 
 	// ==================== Reverse Launch Homing ====================
 
@@ -324,6 +344,7 @@ public:
 	/** Seconds to ramp from 0 to full homing strength. Prevents instant snap on launch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Capture|Homing", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bEnableViscousCapture && bEnableReverseLaunchHoming"))
 	float HomingRampUpTime = 0.1f;
+
 
 	/** Duration (seconds) plate force acts on non-capturable NPC with opposite charge.
 	 *  After this time, opposite-charge plate force is suppressed. Same-charge force is unaffected. */
@@ -525,6 +546,7 @@ private:
 
 	/** Elapsed time since reverse launch started (for homing ramp-up) */
 	float ReverseLaunchElapsed = 0.0f;
+
 
 	/** Calculate effective capture range based on player and NPC charges.
 	 *  Formula: BaseRange * max(1, 1 + ln(|q_player * q_npc| / NormCoeff)) */

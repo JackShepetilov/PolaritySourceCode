@@ -113,14 +113,96 @@ void AShooterAIController::OnPawnDeath(AShooterNPC* DeadNPC)
 
 void AShooterAIController::SetCurrentTarget(AActor* Target)
 {
+	// The lock, and the one place it can be enforced. Perception calls this from three sites (the
+	// stimulus lambda, the known-actor sweep on entry and the periodic poll), the arena calls it, and
+	// damage retaliation calls it; gating each of them separately would leave whichever one was
+	// missed quietly cancelling the decoy.
+	if (IsDistracted() && Target != Distraction.Get())
+	{
+		return;
+	}
+
 	TargetEnemy = Target;
 	SetFocus(Target);
 }
 
 void AShooterAIController::ClearCurrentTarget()
 {
+	// Same reason as above. The distraction is what ends the distraction — and when the decoy is
+	// destroyed IsDistracted() is already false, so a clear arriving then goes through and the NPC
+	// picks somebody up again on the next perception update.
+	if (IsDistracted())
+	{
+		return;
+	}
+
 	TargetEnemy = nullptr;
 	ClearFocus(EAIFocusPriority::Gameplay);
+}
+
+void AShooterAIController::DistractTo(AActor* Decoy, float Seconds)
+{
+	if (!Decoy || !GetWorld())
+	{
+		return;
+	}
+
+	const bool bIsNew = Distraction.Get() != Decoy;
+
+	Distraction = Decoy;
+	DistractionEndTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.0f, Seconds);
+
+	// Straight to the field, not through SetCurrentTarget: that one now refuses anything other than
+	// the distraction, and the distraction is what this is.
+	TargetEnemy = Decoy;
+	SetFocus(Decoy);
+
+	if (bIsNew)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s distracted by %s for %.1fs"),
+			*GetNameSafe(GetPawn()), *Decoy->GetName(), Seconds);
+	}
+}
+
+bool AShooterAIController::IsDistracted() const
+{
+	if (!Distraction.IsValid() || !GetWorld())
+	{
+		return false;
+	}
+	return GetWorld()->GetTimeSeconds() < DistractionEndTime;
+}
+
+AActor* AShooterAIController::GetDistraction() const
+{
+	return Distraction.Get();
+}
+
+void AShooterAIController::EndDistraction()
+{
+	AActor* Previous = Distraction.Get();
+
+	Distraction.Reset();
+	DistractionEndTime = 0.0f;
+
+	if (!Previous)
+	{
+		return;
+	}
+
+	// Let go of the decoy as a target as well, and this is not optional. A spent decoy is an ordinary
+	// prop sitting on the floor, and the NPC would happily keep shooting it forever: perception only
+	// looks for somebody new while the sense task has NO target, so a stale but still valid one is
+	// never replaced. Clearing it puts the NPC back in the "looking for someone" state, and the
+	// perception poll finds a player within half a second.
+	if (TargetEnemy == Previous)
+	{
+		TargetEnemy = nullptr;
+		ClearFocus(EAIFocusPriority::Gameplay);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s stops being distracted by %s"),
+		*GetNameSafe(GetPawn()), *Previous->GetName());
 }
 
 void AShooterAIController::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)

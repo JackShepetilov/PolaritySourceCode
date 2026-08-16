@@ -32,6 +32,7 @@
 #include "Field/FieldSystemObjects.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Checkpoint/CheckpointSubsystem.h"
+#include "AI/Coordination/AICombatCoordinator.h"
 #include "Net/UnrealNetwork.h"
 
 #if WITH_EDITOR
@@ -76,6 +77,7 @@ void AEMFPhysicsProp::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 
 	DOREPLIFETIME(AEMFPhysicsProp, HoldingCharacter);
 	DOREPLIFETIME(AEMFPhysicsProp, ReplicatedCharge);
+	DOREPLIFETIME(AEMFPhysicsProp, bIsDecoy);
 }
 
 void AEMFPhysicsProp::OnRep_Charge()
@@ -243,6 +245,10 @@ void AEMFPhysicsProp::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	GetWorld()->GetTimerManager().ClearTimer(GCFreezeTimer);
 	GetWorld()->GetTimerManager().ClearTimer(GCCleanupTimer);
 
+	// A decoy leaving the world has to hand its enemies back while its pointer is still valid: after
+	// this the coordinator would hold a weak pointer to nothing and could not tell whom to release.
+	EndDecoy();
+
 	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
 		WidgetSub->UnregisterProp(this);
@@ -322,11 +328,12 @@ void AEMFPhysicsProp::Tick(float DeltaTime)
 	{
 		UpdateCaptureForces(DeltaTime);
 	}
-	else if (bIsInReverseFlight && HoldingCharacter && HasAuthority())
+	// Homing runs for as long as the prop is in the air, and outside the capture branch above on
+	// purpose: a prop thrown by the host is still held by its plate, one thrown by a remote client
+	// has no plate on this machine at all, and both have to steer.
+	if (bIsInReverseFlight && HasAuthority())
 	{
-		// A prop thrown by a remote client. The plate that would steer it lives on the thrower's
-		// machine, not this one, so the server flies it off the same math directly.
-		TickRemoteLaunchFlight(DeltaTime);
+		TickHomingSteer(DeltaTime);
 	}
 
 	// Cache speed for explosion checks (before collision callbacks modify velocity)
@@ -393,11 +400,18 @@ void AEMFPhysicsProp::ApplyEMForces(float DeltaTime)
 			continue;
 		}
 
-		// Opposite-charge distance cutoff: skip close opposite-charge sources to prevent Coulomb 1/r² singularity
+		// Close-range cutoff: skip any charged source inside the cutoff radius to prevent the Coulomb
+		// 1/r^2 singularity.
+		//
+		// This used to fire only when the signs DIFFERED, though the singularity it exists to prevent
+		// does not care about sign at all. Same-sign pairs therefore kept the full force at contact
+		// range, and once the weapons started driving both props and enemies to the same polarity, an
+		// enemy brushing past a prop launched it across the level. Only MaxEMForce stood between the
+		// two, and that ceiling is far above what a light prop can absorb.
 		if (bEnableOppositeChargeDistanceCutoff && DistSq < OppositeChargeMinDistSq)
 		{
 			const int32 SourceChargeSign = GetSourceEffectiveChargeSign(Source);
-			if (SourceChargeSign != 0 && MyChargeSign != 0 && SourceChargeSign != MyChargeSign)
+			if (SourceChargeSign != 0 && MyChargeSign != 0)
 			{
 				bShouldApplyProximityDamping = true;
 				continue;
@@ -827,6 +841,108 @@ void AEMFPhysicsProp::SetSpendingCharacter(AShooterCharacter* InCharacter)
 	SpendingCharacter = InCharacter;
 }
 
+// ==================== Decoy ====================
+
+void AEMFPhysicsProp::ApplyItemVerbOnThrow()
+{
+	// Only the authority: what follows is a decision about what the AI does, and the client that
+	// threw the prop runs this same launch code locally for its own feel.
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const AShooterCharacter* Thrower = GetSpendingCharacter();
+	if (!Thrower)
+	{
+		return;
+	}
+
+	switch (Thrower->GetItemVerb())
+	{
+	case EClassItemVerb::Decoy:
+		BecomeDecoy();
+		break;
+
+	// Throw is the Wizard's, and it is not implemented here: it is the absence of everything else.
+	// Detonate and Heal have no implementation yet at all; when they do, this is where they attach,
+	// so that "what my class does with a charged object" is answered in one switch instead of being
+	// spread across the prop as a set of unrelated conditions.
+	default:
+		break;
+	}
+}
+
+void AEMFPhysicsProp::BecomeDecoy()
+{
+	if (!HasAuthority() || bIsDecoy || bIsDead || !GetWorld())
+	{
+		return;
+	}
+
+	if (DecoyDuration <= 0.0f || DecoyPullRadius <= 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s cannot become a decoy: duration=%.1f radius=%.0f"),
+			*GetName(), DecoyDuration, DecoyPullRadius);
+		return;
+	}
+
+	bIsDecoy = true;
+
+	if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
+	{
+		Coordinator->RegisterDecoy(this, DecoyPullRadius, DecoyDuration);
+	}
+
+	// The authority runs its own cosmetics: OnRep does not fire on the machine that made the change.
+	BP_OnDecoyStarted();
+
+	GetWorld()->GetTimerManager().SetTimer(DecoyTimer, this, &AEMFPhysicsProp::EndDecoy, DecoyDuration, false);
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is a decoy for %.1fs (thrown by %s)"),
+		*GetName(), DecoyDuration, *GetNameSafe(GetSpendingCharacter()));
+}
+
+void AEMFPhysicsProp::EndDecoy()
+{
+	// Authority only, in both directions: the flag is server-owned, and a client clearing its copy
+	// would be overwritten by the next update anyway. Clients end their cosmetics from OnRep.
+	if (!HasAuthority() || !bIsDecoy)
+	{
+		return;
+	}
+
+	bIsDecoy = false;
+
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(DecoyTimer);
+	}
+
+	// Unregistering is what releases the enemies holding it, so it has to happen even when the prop
+	// is being destroyed — that is the case where they would otherwise keep facing a dead pointer
+	// until the coordinator's next sweep.
+	if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
+	{
+		Coordinator->UnregisterDecoy(this);
+	}
+
+	BP_OnDecoyEnded();
+}
+
+void AEMFPhysicsProp::OnRep_IsDecoy()
+{
+	// Cosmetics only. Everything the decoy DOES is decided on the server.
+	if (bIsDecoy)
+	{
+		BP_OnDecoyStarted();
+	}
+	else
+	{
+		BP_OnDecoyEnded();
+	}
+}
+
 bool AEMFPhysicsProp::ShouldSkipPlayerForAreaEffect(const AActor* HitActor) const
 {
 	const APawn* HitPawn = Cast<APawn>(HitActor);
@@ -996,45 +1112,69 @@ void AEMFPhysicsProp::UpdateCaptureForces(float DeltaTime)
 	PreviousPlatePosition = PlatePos;
 	bHasPreviousPlatePosition = true;
 
-	// === REVERSE MODE: aim-line convergence ===
-	// Prop flies forward at constant speed + converges laterally onto camera aim line.
-	// SetPhysicsLinearVelocity each frame: full control, gravity doesn't accumulate.
-
-	if (!bReverseLaunchInitialized)
+	// === REVERSE MODE: one impulse, then honest physics ===
+	//
+	// The throw used to be a rail: velocity re-set every frame onto the line through the crosshair,
+	// which cancelled gravity and let the camera steer the prop in mid-air. Now it leaves the hand
+	// once and the physics engine owns everything after -- arc, bounce, spin, the momentum it carries
+	// into what it hits. There is nothing left to tune here but the speed.
+	if (bReverseLaunchInitialized)
 	{
-		bReverseLaunchInitialized = true;
-		bIsInReverseFlight = true;
-		bHasExploded = false;
-		ReverseLaunchElapsed = 0.0f;
-
-		// Air Mail: fresh player launch — eligible for one new bounce.
-		bAirMailEligibleFlight = true;
-		bAirMailBounceConsumed = false;
-
-		const float LaunchDistance = EffectiveCaptureRange * ReverseLaunchDistanceMultiplier;
-		ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
-
-		// Apply spin on launch
-		if (ReverseLaunchSpinSpeed > 0.0f)
-		{
-			const FVector RandomAxis = FMath::VRand();
-			PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * ReverseLaunchSpinSpeed);
-		}
+		return;   // already thrown; the plate no longer has anything to do with it
 	}
+	bReverseLaunchInitialized = true;
+	bIsInReverseFlight = true;
+	bHasExploded = false;
 
-	// Aim line from the thrower's eyes. The plate's own normal is the same direction (the plate
-	// copies the camera every tick), but asking the spending character works for a prop thrown
-	// by any player, where the plate does not exist on this machine at all.
+	// Air Mail: fresh player launch — eligible for one new bounce.
+	bAirMailEligibleFlight = true;
+	bAirMailBounceConsumed = false;
+
+	// What the thrower's class turns a charged prop into. This is the host's throw; the client's
+	// equivalent is in BeginRemoteLaunch.
+	ApplyItemVerbOnThrow();
+
+	// Aim from the thrower's eyes. The plate's own normal is the same direction, but asking the
+	// spending character works for a prop thrown by any player, where the plate does not exist on
+	// this machine at all.
 	FVector AimOrigin;
 	FVector AimDir;
 	if (!GetReverseFlightAimSource(AimOrigin, AimDir))
 	{
-		AimOrigin = Plate->GetActorLocation();
-		AimDir = Plate->GetPlateNormal();
+		// Deliberately NOT Plate->GetPlateNormal(): a freshly spawned launch plate still holds
+		// FVector::ForwardVector there until its first camera update, so on the one frame this reads
+		// it the answer would be world +X. Same trap that sent every thrown enemy the same way.
+		const APawn* ThrowerPawn = Cast<APawn>(Plate->GetOwner());
+		AimDir = ThrowerPawn ? ThrowerPawn->GetBaseAimRotation().Vector() : GetActorForwardVector();
 	}
 
-	// Direct velocity set: bypasses gravity/physics artifacts, collision detection still works
-	PropMesh->SetPhysicsLinearVelocity(ComputeReverseFlightVelocity(AimOrigin, AimDir, DeltaTime));
+	LaunchAlongAim(AimDir);
+
+	// NOT released here. ReleasedFromCapture restores ECR_Block against pawns, and a thrown prop has
+	// to stay Overlap until it lands: the damage, the stun and the charge transfer all arrive through
+	// the overlap path. Releasing on launch turned the throw into a prop that bounced off enemies and
+	// did nothing to them. The flight ends where it always ended -- on contact, in OnPropHit.
+}
+
+void AEMFPhysicsProp::LaunchAlongAim(const FVector& InAimDir)
+{
+	if (!PropMesh)
+	{
+		return;
+	}
+
+	const FVector AimDir = InAimDir.GetSafeNormal();
+
+	// Leaves exactly where it was aimed. Bending toward an enemy is TickHomingSteer's job now, and
+	// doing it here as well would double the correction on the first frame.
+	HomingTarget.Reset();
+	PropMesh->SetPhysicsLinearVelocity(AimDir * ThrowSpeed);
+
+	if (ReverseLaunchSpinSpeed > 0.0f)
+	{
+		const FVector RandomAxis = FMath::VRand();
+		PropMesh->SetPhysicsAngularVelocityInDegrees(RandomAxis * ReverseLaunchSpinSpeed);
+	}
 }
 
 void AEMFPhysicsProp::UpdateHeldByHandle(float DeltaTime)
@@ -1119,34 +1259,39 @@ bool AEMFPhysicsProp::GetReverseFlightAimSource(FVector& OutOrigin, FVector& Out
 	return true;
 }
 
-FVector AEMFPhysicsProp::ComputeReverseFlightVelocity(const FVector& AimOrigin, const FVector& InAimDir, float DeltaTime)
+void AEMFPhysicsProp::TickHomingSteer(float DeltaTime)
 {
-	ReverseLaunchElapsed += DeltaTime;
-
-	const FVector PropPos = GetActorLocation();
-	FVector AimDir = InAimDir;
-
-	// Soft homing: bias aim direction toward nearest valid target in cone
-	if (bEnableReverseLaunchHoming && HomingStrength > 0.0f)
+	if (!bEnableReverseLaunchHoming || HomingAcceleration <= 0.0f || !PropMesh || !PropMesh->IsSimulatingPhysics())
 	{
-		if (AShooterNPC* Target = FindHomingTarget(PropPos, AimDir))
+		return;
+	}
+
+	const FVector Velocity = PropMesh->GetPhysicsLinearVelocity();
+	const float Speed = Velocity.Size();
+	if (Speed < 1.0f)
+	{
+		return;   // nothing to steer; direction would be meaningless
+	}
+
+	// Acquire once, then commit. Re-picking every frame makes a throw flick between two enemies that
+	// trade places in the cone and arrive at neither.
+	if (!HomingTarget.IsValid() || HomingTarget->IsDead())
+	{
+		HomingTarget = FindHomingTarget(GetActorLocation(), Velocity / Speed);
+		if (!HomingTarget.IsValid())
 		{
-			const FVector DirToTarget = (Target->GetActorLocation() - PropPos).GetSafeNormal();
-			const float RampAlpha = HomingRampUpTime > 0.0f
-				? FMath::Clamp(ReverseLaunchElapsed / HomingRampUpTime, 0.0f, 1.0f)
-				: 1.0f;
-			AimDir = FMath::Lerp(AimDir, DirToTarget, HomingStrength * RampAlpha).GetSafeNormal();
+			return;
 		}
 	}
 
-	// Project prop position onto aim line
-	const FVector ToTarget = PropPos - AimOrigin;
-	const float ForwardDist = FVector::DotProduct(ToTarget, AimDir);
-	const FVector NearestOnLine = AimOrigin + ForwardDist * AimDir;
-	const FVector LateralOffset = PropPos - NearestOnLine;
+	// Turn the velocity toward the target while keeping its magnitude, and clamp how much of that
+	// turn one frame is allowed to buy. ADDED to what physics already did this frame, so gravity and
+	// any bounce it just took are still in there -- that is the whole difference from the old rail.
+	const FVector ToTarget = (HomingTarget->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+	const FVector Desired = ToTarget * Speed;
+	const FVector Steer = (Desired - Velocity).GetClampedToMaxSize(HomingAcceleration * DeltaTime);
 
-	// Forward at constant speed + lateral convergence toward the aim line
-	return AimDir * ReverseLaunchSpeed - LateralOffset * ReverseLaunchConvergenceRate;
+	PropMesh->SetPhysicsLinearVelocity(Velocity + Steer);
 }
 
 void AEMFPhysicsProp::BeginRemoteLaunch(AShooterCharacter* Thrower)
@@ -1162,46 +1307,29 @@ void AEMFPhysicsProp::BeginRemoteLaunch(AShooterCharacter* Thrower)
 	// plate here to trigger that, so the throw is armed directly.
 	bIsInReverseFlight = true;
 	bHasExploded = false;
-	ReverseLaunchElapsed = 0.0f;
 	bAirMailEligibleFlight = true;
 	bAirMailBounceConsumed = false;
 	RemoteLaunchStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 
-	// The range the thrower reported when it grabbed this. Deriving it here instead gave zero, because
-	// range is a product of the player's charge and the server does not have a client's charge: the
-	// throw came out as nothing but the sideways convergence term, which is what a "small shove in a
-	// random direction" is made of.
-	const float ThrowRange = HeldCaptureRange > 0.0f ? HeldCaptureRange : GetCaptureRangeForCharacter(Thrower);
-	const float LaunchDistance = ThrowRange * ReverseLaunchDistanceMultiplier;
-	ReverseLaunchSpeed = LaunchDistance / FMath::Max(ReverseLaunchFlightDuration, 0.01f);
+	// Same verb dispatch as the host's throw above, after SetSpendingCharacter so there is somebody
+	// to ask.
+	ApplyItemVerbOnThrow();
 
-	// The server flies it from here, so it needs the physics body back that BeginRemoteHold took
-	// away. Collision stays Overlap with pawns until the prop lands, same as while it was held.
+	// The physics body back that BeginRemoteHold took away, BEFORE the impulse: velocity set on a
+	// body that is not simulating goes nowhere.
 	ApplyPropPhysicsSimulation(true);
 
-	if (ReverseLaunchSpinSpeed > 0.0f)
-	{
-		PropMesh->SetPhysicsAngularVelocityInDegrees(FMath::VRand() * ReverseLaunchSpinSpeed);
-	}
-}
-
-void AEMFPhysicsProp::TickRemoteLaunchFlight(float DeltaTime)
-{
-	if (!PropMesh || !PropMesh->IsSimulatingPhysics())
-	{
-		return;
-	}
-
+	// One impulse and the server is done steering. The old path re-derived a speed here from the
+	// thrower's charge, which the server does not have for a client, and flew the prop by hand every
+	// tick; both of those are gone with the rail.
 	FVector AimOrigin;
 	FVector AimDir;
 	if (!GetReverseFlightAimSource(AimOrigin, AimDir))
 	{
-		// Thrower is gone. Stop steering and let the prop finish ballistically rather than freezing.
-		bIsInReverseFlight = false;
-		return;
+		AimDir = Thrower->GetActorForwardVector();
 	}
 
-	PropMesh->SetPhysicsLinearVelocity(ComputeReverseFlightVelocity(AimOrigin, AimDir, DeltaTime));
+	LaunchAlongAim(AimDir);
 }
 
 // ==================== Collision Callbacks ====================
@@ -1256,15 +1384,23 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 		return;
 	}
 
-	// Explosive impact check
-	if (bCanExplode && !bHasExploded && !bIsDead && PropMesh)
+	// Impact check. NOT gated on bCanExplode: a prop that cannot detonate still has to land its hit.
+	// Gating the whole block was why switching explosions off made thrown props pass through enemies
+	// instead of staggering them -- the weak-impact branch lived inside the explosive one.
+	if (!bHasExploded && !bIsDead && PropMesh)
 	{
 		const float Speed = CachedPreCollisionSpeed;
 		const float Threshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
 
 		if (Speed >= Threshold)
 		{
-			const bool bChargeBelowThreshold = FMath::Abs(GetCharge()) <= ExplosionMinCharge;
+			// A prop a player threw NEVER detonates on an enemy, whatever bCanExplode says and whatever
+			// it is charged to. That flag being left on is what made a fully charged throw pass through
+			// an enemy doing nothing: it cleared ExplosionMinCharge, took the detonation branch instead
+			// of the weak-impact one, and the detonation had nothing to show. Half-charged props went
+			// on working, which is what made it look like charge broke the damage.
+			const bool bChargeBelowThreshold = !bCanExplode || bIsInReverseFlight
+				|| FMath::Abs(GetCharge()) <= ExplosionMinCharge;
 
 			// Direct NPC hit
 			AShooterNPC* HitNPC = Cast<AShooterNPC>(OtherActor);
@@ -1443,14 +1579,16 @@ void AEMFPhysicsProp::OnPropOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 		return;
 	}
 
-	// Explosive props: detonate on NPC contact — launched props use lower threshold, collateral uses higher
-	if (bCanExplode && !bHasExploded)
+	// NPC contact — launched props use the lower threshold, collateral the higher one. Same reason as
+	// the sweep path above for not gating on bCanExplode: a non-explosive prop must still connect.
+	if (!bHasExploded)
 	{
 		const float OverlapThreshold = bIsInReverseFlight ? ExplosionSpeedThreshold : CollateralExplosionSpeedThreshold;
 		if (CachedPreCollisionSpeed >= OverlapThreshold)
 		{
-			// Charge gate: at or below threshold → weak impact (bounce + reduced damage/stun + half charge transfer) instead of explosion
-			if (FMath::Abs(GetCharge()) <= ExplosionMinCharge)
+			// Same rule as the sweep path: a thrown prop always lands a weak impact and never detonates,
+			// so a full charge cannot turn a working throw into one that quietly does nothing.
+			if (!bCanExplode || bIsInReverseFlight || FMath::Abs(GetCharge()) <= ExplosionMinCharge)
 			{
 				const FVector OverlapNormal = bFromSweep
 					? FVector(SweepResult.ImpactNormal)
@@ -1768,6 +1906,11 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 	bIsDead = true;
 	SetCharge(0.0f);
 	SetActorTickEnabled(false);
+
+	// Shot to pieces while it was the bait: the enemies on it are released here rather than left to
+	// notice on their own. No-op on a client and on a prop that was never a decoy.
+	EndDecoy();
+
 	OnPropDeath.Broadcast(this, Killer);
 
 	// Release from capture if held
@@ -1936,19 +2079,25 @@ void AEMFPhysicsProp::FreezeGibs()
 
 void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, float VFXScaleMultiplier)
 {
-	// A prop charged by somebody whose class THROWS things never detonates. For the Wizard a fully
-	// charged object is ammunition, not a bomb, and letting it blow up on the first thing it touches
-	// would delete the class's whole verb.
+	// A prop spent by a class that does something else with it never detonates. For the Wizard a
+	// fully charged object is ammunition, not a bomb; for the Tank it is a decoy that has to survive
+	// landing in order to be one. Letting either blow up on the first thing it touches would delete
+	// that class's whole verb.
 	//
 	// Gated here rather than at the six call sites: every one of them is a different reason to
 	// explode (impact, velocity, damage, scripted), and missing one would leave the mechanic working
 	// almost always, which is worse than not working at all.
+	//
+	// Note what this deliberately does NOT cover: a decoy shot to pieces by the enemies it attracted
+	// still dies, because that runs through Die and the HP path, not through here. Ending the
+	// distraction early by destroying the bait is the counterplay, not a bug.
 	if (const AShooterCharacter* Spender = GetSpendingCharacter())
 	{
-		if (Spender->GetItemVerb() == EClassItemVerb::Throw)
+		const EClassItemVerb Verb = Spender->GetItemVerb();
+		if (Verb == EClassItemVerb::Throw || Verb == EClassItemVerb::Decoy)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s did not explode: charged by %s, whose class throws props instead"),
-				*GetName(), *Spender->GetName());
+			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s did not explode: spent by %s, whose class uses props another way (verb=%d)"),
+				*GetName(), *Spender->GetName(), static_cast<int32>(Verb));
 			return;
 		}
 	}
@@ -2318,6 +2467,24 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 }
 
 // ==================== Charge API ====================
+
+bool AEMFPhysicsProp::CanBeGrabbedBy(const AActor* Grabber) const
+{
+	if (!bCanBeCaptured || IsCapturedByPlate() || IsDead())
+	{
+		return false;
+	}
+
+	// Only a fully charged prop can be taken. Charging it IS the cost of the ammunition, and a
+	// half-charged prop being grabbable turns the verb into "pick things up" rather than "spend a
+	// charged object".
+	//
+	// Unconditional, and specifically NOT gated on the grabber's class item verb any more. That gate
+	// came from the Wizard work and it only ever fired for a character with a PlayerClassDefinition
+	// whose ItemVerb was Throw -- on a plain BP_ShooterCharacter, GetItemVerb() returns None and the
+	// whole rule silently did not exist, which is exactly what "grabbing works at any charge" was.
+	return IsAtMaxCharge();
+}
 
 float AEMFPhysicsProp::GetCharge() const
 {

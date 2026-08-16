@@ -119,6 +119,19 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 		EMFVelocityModifier->NPCForceMultiplier = 0.0f;
 	}
 
+	// Walking into a physics prop should nudge it, not launch it across the level.
+	//
+	// Nothing in the project touched these, so the engine defaults were in force: PushForceFactor is
+	// 750000 and bPushForceScaledToMass is FALSE, which means the same shove is delivered to a crate
+	// and to a car and the prop's mass is not consulted at all. Turning the scaling on is what makes
+	// mass matter here; PushForceFactor is then the one number to tune, and it lives on the movement
+	// component in the Blueprint.
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+	{
+		Move->bPushForceScaledToMass = true;
+		Move->PushForceFactor = 20000.0f;
+	}
+
 	// === Performance: optimize animation ticking for NPCs ===
 	// Third person mesh (GetMesh()) - only tick animations when rendered
 	if (USkeletalMeshComponent* TPMesh = GetMesh())

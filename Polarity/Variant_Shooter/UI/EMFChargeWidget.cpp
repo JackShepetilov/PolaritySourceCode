@@ -648,9 +648,19 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 	{
 		if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
 		{
+			// Mirrors the acquisition scan: an enemy body is grabbable only at the charge cap, which
+			// is the instant its shield reads empty, and at a flat range rather than off the curve.
+			if (!Cast<AHumanoidNPC>(NPC) && !Mod->IsAtMaxCharge())
+			{
+				return false;
+			}
 			TargetCharge = Mod->GetCharge();
 		}
 		bRequiresOppositeSign = true;
+		if (!Cast<AHumanoidNPC>(NPC))
+		{
+			CaptureRangeOverride = ChargeComp->NPCCaptureFixedRange;
+		}
 
 		// HumanoidNPCs are never body-captured — they are weapon/shield YANK targets, so the
 		// highlight must follow the YANK gate, not the generic NPC capture-range curve. Mirror
@@ -670,6 +680,12 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 	}
 	else if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
+		// The same gate the acquisition scan runs, called rather than copied. Brackets that appear on
+		// a prop the scan will then refuse are worse than no brackets: they read as a bug in the grab.
+		if (!Prop->CanBeGrabbedBy(Player))
+		{
+			return false;
+		}
 		TargetCharge = Prop->GetCharge();
 	}
 	else if (ADroppedMeleeWeapon* Weapon = BoundDroppedWeapon.Get())

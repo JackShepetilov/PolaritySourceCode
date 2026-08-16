@@ -250,6 +250,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* ShieldToggleAction;
 
+	/** Reload the equipped weapon. Does nothing for a weapon that never runs out, which is every
+	 *  weapon until one turns bUseReload on, so the key is harmless to leave bound. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* ReloadAction;
+
 	/** Activate the currently selected ability (press = TryActivate, release = OnButtonReleased).
 	 *  Press/release split feeds the ability's own Tap-vs-Hold ActivationMode. */
 	UPROPERTY(EditAnywhere, Category = "Input")
@@ -1259,6 +1264,43 @@ public:
 	UFUNCTION(Server, Reliable)
 	void Server_LaunchProp(AEMFPhysicsProp* Prop);
 
+	/** Ask the server to throw a teammate. The client picked the target and worked the direction out
+	 *  from its own camera, but only the authority may move another player: a client launching its own
+	 *  simulated copy is overwritten by the very next replication update, which is exactly what "the
+	 *  client cannot grab the host" looked like. Reliable, for the same reason as the prop throw. */
+	UFUNCTION(Server, Reliable)
+	void Server_LaunchAlly(AShooterCharacter* Ally, FVector LaunchVelocity);
+
+	/** Ask the server to pick a teammate up. The client's scan chose the target; the server decides
+	 *  whether it happens and is the only place the hold is recorded. */
+	UFUNCTION(Server, Reliable)
+	void Server_CaptureAlly(AShooterCharacter* Ally);
+
+	/** Put a held teammate down without throwing them. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReleaseAlly(AShooterCharacter* Ally);
+
+	/** Who is carrying this character, or null. Server-owned and replicated to everyone, because the
+	 *  held player's OWN movement simulation is what carries them: their client has to know it to
+	 *  predict the hold, and every other client has to know it to draw them in the right place.
+	 *
+	 *  Deliberately a replicated property and not an EPolarityMoveFlag. A move flag carries state that
+	 *  the local player's INPUT enters, so that a replay can re-derive it; being picked up is entered
+	 *  by somebody else entirely, and there is nothing in this character's input to re-derive it from. */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Coop")
+	TObjectPtr<AShooterCharacter> HeldByCharacter;
+
+	UFUNCTION(BlueprintPure, Category = "Coop")
+	AShooterCharacter* GetHeldByCharacter() const { return HeldByCharacter; }
+
+	UFUNCTION(BlueprintPure, Category = "Coop")
+	bool IsHeldByAlly() const { return HeldByCharacter != nullptr; }
+
+	/** Where a carried teammate is held: in front of the carrier's eyes, at the same offset the
+	 *  channeling plate uses. Computed rather than replicated so the held player's own simulation can
+	 *  work it out on their machine, on the server and in a replay without anything being streamed. */
+	FVector GetAllyHoldPoint() const;
+
 	/** Report where the held prop's local spring simulation put it this tick. Unreliable: this fires
 	 *  every tick while holding, so a single lost update is invisible — the next one supersedes it.
 	 *  Rejected outright if Prop does not currently list this character as its holder. */
@@ -1391,6 +1433,11 @@ public:
 	/** Handles stop firing input */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoStopFiring();
+
+	/** Handles the reload key: asks the equipped weapon to fill its magazine. The weapon decides
+	 *  whether there is anything to do, so this is safe to press at any time. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoReload();
 
 	/** Handles switch weapon input (cycles through weapons) */
 	UFUNCTION(BlueprintCallable, Category = "Input")
@@ -1810,6 +1857,39 @@ public:
 	/** What this character does with a fully charged object, from its class. None when classless. */
 	UFUNCTION(BlueprintPure, Category = "Player Class")
 	EClassItemVerb GetItemVerb() const;
+
+	// ==================== Ability aiming (hold to aim, release to fire) ====================
+
+	/** The enemy the held ability would fire at, picked locally every frame while aiming.
+	 *
+	 *  Local on purpose: routing the preview through the server would put a round trip between the
+	 *  player's mouse and the brackets, which reads as input lag on the one part of the ability that
+	 *  is pure feedback. The pick then travels with the release so the shot agrees with it. */
+	UFUNCTION(BlueprintPure, Category = "Ability|Aiming")
+	class AShooterNPC* GetAbilityAimTarget() const { return AbilityAimTarget.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Ability|Aiming")
+	bool IsAimingAbility() const { return bAbilityAiming; }
+
+	/** Tell the authority which enemy the player actually had highlighted when they let go. */
+	UFUNCTION(Server, Reliable)
+	void Server_SetAbilityAimTarget(class AShooterNPC* Target);
+
+protected:
+	/** True between the ability key going down and coming back up. */
+	bool bAbilityAiming = false;
+
+	UPROPERTY()
+	TWeakObjectPtr<class AShooterNPC> AbilityAimTarget;
+
+	/** Re-pick the target and drive the shared capture reticle. Owning client only, once a frame. */
+	void UpdateAbilityAiming();
+
+	/** Enter and leave the aiming state, borrowing the capture reticle for the duration. */
+	void BeginAbilityAiming();
+	void EndAbilityAiming();
+
+public:
 
 	/** True from the opening sea-toss launch until the first landing. */
 	UPROPERTY(BlueprintReadOnly, Category = "Run Start")

@@ -40,7 +40,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass", meta = (ClampMin = "0.02", Units = "s"))
 	float ScanInterval = 0.1f;
 
+	/** Played where the bolt opens an enemy. One system, not a positive/negative pair like
+	 *  AEMFProjectile has: that pair is chosen by the projectile's own charge sign, and this bolt
+	 *  carries no charge, so there is nothing to switch on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bypass|VFX")
+	TObjectPtr<class UNiagaraSystem> ImpactVFX;
+
 protected:
+	/** ProcessHit runs on the authority alone, so spawning the system there would show it to the host
+	 *  and to nobody else. Reliable rather than unreliable on purpose: the bolt is destroyed right
+	 *  after the hit, and an unreliable RPC from a dying actor is the one that quietly goes missing. */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayImpactVFX(FVector Location);
+
 	virtual void Tick(float DeltaSeconds) override;
 
 	/** Look for the nearest live enemy within ScanRadius and latch onto it. */

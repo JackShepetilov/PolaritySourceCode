@@ -10,6 +10,21 @@
 
 AShooterNPC* UAbilityHandler_ShieldBypass::FindTargetEnemy(float Range) const
 {
+	// The caster may have aimed this themselves while holding the key. Their pick wins: what the
+	// brackets highlighted is what the bolt must leave for, or the reticle is a lie under any
+	// latency at all. Falls back to scoring here when there was no held aim.
+	if (OwningCharacter)
+	{
+		if (AShooterNPC* Aimed = OwningCharacter->GetAbilityAimTarget())
+		{
+			return Aimed;
+		}
+	}
+	return ScoreBestTarget(OwningCharacter, Range);
+}
+
+AShooterNPC* UAbilityHandler_ShieldBypass::ScoreBestTarget(const AShooterCharacter* OwningCharacter, float Range)
+{
 	UWorld* World = OwningCharacter ? OwningCharacter->GetWorld() : nullptr;
 	if (!World)
 	{

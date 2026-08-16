@@ -183,6 +183,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (ClampMin = "0.0", ClampMax = "100.0"))
 	float MaxIonizationCharge = 20.0f;
 
+	/** True when the target is already at ITS OWN ceiling in the direction this weapon pushes.
+	 *  Compares MAGNITUDES: a cap is a size, not a signed upper bound, and a weapon whose
+	 *  IonizationChargePerHit is negative drives the charge the other way. */
+	bool IsIonizationCapReached(float CurrentCharge, float Cap) const;
+
+	/** One ionization step, clamped to +/-Cap so the charge has a ceiling whichever direction it is
+	 *  being driven. The cap belongs to the target, not to this weapon. */
+	float ApplyIonizationStep(float CurrentCharge, float Cap) const;
+
 	// ==================== Heat System ====================
 
 	/** Enable heat system - weapon heats up when firing, damage decreases with heat */
@@ -517,6 +526,47 @@ protected:
 
 	int32 CurrentBullets = 0;
 
+	// ==================== Reload ====================
+	//
+	// Off by default, and that default is the behaviour every weapon in the project had before this
+	// existed: an empty magazine refills itself the instant it runs out, which is the same thing as
+	// infinite ammunition with a cosmetic counter on the HUD. Switch bUseReload on and the magazine
+	// becomes real -- it stays empty until it is filled, and filling it takes time the player can be
+	// caught in. There is deliberately no reserve-ammo pool: a weapon either reloads out of thin air
+	// or never runs out, and nothing in the game hands out boxes of ammunition yet.
+	//
+	// Yanked weapons (bHasLimitedAmmo) never reload whatever this says. They are thrown away when
+	// they run dry, and that is their whole point.
+
+	/** Does this weapon have a magazine that has to be reloaded, or does it never run out? */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload")
+	bool bUseReload = false;
+
+	/** How long the magazine takes to fill. Match it to the reload montage, or the weapon fires out
+	 *  of an animation that has not finished. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload", ClampMin = "0.05", Units = "s"))
+	float ReloadTime = 2.0f;
+
+	/** Start reloading on its own the moment the magazine runs out, instead of waiting to be asked. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	bool bAutoReloadWhenEmpty = true;
+
+	/** Played on the holder for the duration of the reload, first and third person both. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	TObjectPtr<UAnimMontage> ReloadMontage;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	TObjectPtr<USoundBase> ReloadSound;
+
+	/** True from the moment a reload starts until the magazine is full or the reload is cancelled. */
+	bool bIsReloading = false;
+
+	FTimerHandle ReloadTimer;
+
+	/** The magazine is full and the weapon can shoot again. Resumes automatic fire if the trigger
+	 *  was still held when the reload started. */
+	void FinishReload();
+
 	// ==================== Refire ====================
 
 	UPROPERTY(EditAnywhere, Category = "Refire", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
@@ -637,6 +687,38 @@ public:
 	 *  refire so the cadence is owned by the animation. */
 	void FireOnce();
 
+	// ==================== Reload ====================
+
+	/** Begin filling the magazine. Returns false and does nothing when there is nothing to do:
+	 *  a weapon without a magazine, one already reloading, one already full, or a yanked weapon,
+	 *  which is thrown away rather than reloaded. Safe to call from anywhere, so the reload key can
+	 *  be pressed at any time without the caller checking first. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	bool StartReload();
+
+	/** True when StartReload would actually start one. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool CanReload() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool IsReloading() const { return bIsReloading; }
+
+	/** True when this weapon has a magazine at all. False means it never runs out. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool UsesReload() const { return bUseReload; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	float GetReloadTime() const { return ReloadTime; }
+
+	/** How far along the current reload is, 0 to 1. Zero when not reloading, for a HUD bar. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	float GetReloadProgress() const;
+
+	/** Drop a reload in progress and leave the magazine as it was. Called when the weapon is put
+	 *  away; the round does not go in if the gun is no longer in the player's hands. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void CancelReload();
+
 	/** Returns true if this weapon is a melee weapon (blocks MeleeAttackComponent while equipped) */
 	virtual bool IsMeleeWeapon() const { return false; }
 
@@ -655,6 +737,19 @@ protected:
 	FTransform CalculateProjectileSpawnTransform(const FVector& TargetLocation) const;
 
 	virtual void FireHitscan(const FVector& TargetLocation);
+
+	/** Where a hitscan shot starts and which way it points, before anything is traced: muzzle or
+	 *  camera viewpoint, aim point or view direction, plus AimVariance.
+	 *
+	 *  Split out of FireHitscan so a weapon that puts several pellets in the air on one trigger pull
+	 *  can resolve the aim line once and then send its own directions through the same tracing. */
+	void ResolveHitscanRay(const FVector& TargetLocation, FVector& OutStart, FVector& OutDirection) const;
+
+	/** What one trigger pull costs, whatever it put in the air: the firing montage, the recoil kick,
+	 *  a round out of the magazine (refilled or discarded when it runs out) and the HUD that shows
+	 *  it. Called ONCE per shot -- a shotgun's pellets are one shot, not three. */
+	void ConsumeRoundAfterShot();
+
 	void PerformHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount);
 
 	/** Classic thin-ray hitscan, used when WaveDivergence == 0 (PerformHitscan dispatches here).

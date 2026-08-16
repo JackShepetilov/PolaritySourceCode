@@ -5,6 +5,7 @@
 #include "Net/UnrealNetwork.h"
 #include "MovementSettings.h"
 #include "PolarityCharacter.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "VelocityModifier.h"
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
@@ -2640,9 +2641,73 @@ void UApexMovementComponent::UpdateMeleeLunge(float DeltaSeconds)
 	Velocity = Held;
 }
 
+void UApexMovementComponent::UpdateHeldByAlly(float DeltaSeconds)
+{
+	AShooterCharacter* Shooter = Cast<AShooterCharacter>(CharacterOwner);
+	AShooterCharacter* Holder = Shooter ? Shooter->GetHeldByCharacter() : nullptr;
+
+	// A carrier who died or left keeps their grip forever otherwise: the held player stays pinned to a
+	// hold point that nothing updates, with no input of their own, and nobody left to throw them.
+	// Only the authority may end it, because only the authority owns the property.
+	if (Holder && Shooter->HasAuthority() && (Holder->IsDead() || !IsValid(Holder)))
+	{
+		Shooter->HeldByCharacter = nullptr;
+		Holder = nullptr;
+	}
+
+	if (!Holder)
+	{
+		// Let go. Falling rather than walking, because the carry ends in the air far more often than
+		// on the ground, and the engine sorts a landing out on its own.
+		if (bIsHeldByAlly)
+		{
+			bIsHeldByAlly = false;
+			SetMovementMode(MOVE_Falling);
+		}
+		return;
+	}
+
+	if (!bIsHeldByAlly)
+	{
+		bIsHeldByAlly = true;
+		SetMovementMode(MOVE_Flying);
+	}
+
+	// Control is lost while carried, and it is discarded HERE rather than at the input layer so that
+	// the server's replay of this move discards exactly the same thing. Blocking input on the owning
+	// client alone would leave the server replaying a move that still had acceleration in it.
+	Acceleration = FVector::ZeroVector;
+	if (CharacterOwner)
+	{
+		CharacterOwner->bPressedJump = false;
+	}
+
+	// A spring to the hold point rather than a teleport onto it: a teleport ignores geometry and
+	// would post a carried player through walls, while a velocity is still swept by the mover and
+	// stops on what is in the way.
+	const FVector HoldPoint = Holder->GetAllyHoldPoint();
+	const FVector ToHold = HoldPoint - UpdatedComponent->GetComponentLocation();
+	Velocity = (ToHold * AllyHoldSpringRate).GetClampedToMaxSize(AllyHoldMaxSpeed);
+}
+
 void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
 {
 	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+
+	// Being carried overrides every mechanic below it and returns: a player in someone's hands is not
+	// wallrunning, dashing or sliding, and letting those run would fight the hold for the same Velocity.
+	{
+		const AShooterCharacter* Shooter = Cast<AShooterCharacter>(CharacterOwner);
+		const bool bHeldNow = Shooter && Shooter->IsHeldByAlly();
+		if (bHeldNow || bIsHeldByAlly)
+		{
+			UpdateHeldByAlly(DeltaSeconds);
+			if (bHeldNow)
+			{
+				return;
+			}
+		}
+	}
 
 	// Exactly the chain that used to sit at the top of TickComponent, in the same order. It runs
 	// here because the engine calls this from inside PerformMovement, before the move is integrated,
