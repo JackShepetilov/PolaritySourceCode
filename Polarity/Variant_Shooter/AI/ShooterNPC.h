@@ -183,6 +183,24 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coop|Shield Bypass")
 	bool IsShieldBypassed() const { return bShieldBypassActive; }
 
+	// ==================== Shield loan (Melee active) ====================
+
+	/** Extra shield pledged against this enemy, stripped by the next melee hit on top of whatever
+	 *  that hit already takes.
+	 *
+	 *  The design's words are "borrows the enemy's shield": the loan is taken now, in exchange for a
+	 *  dash, and collected on the next swing. Replicated so a bar can show the pledged slice. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Coop|Shield Loan")
+	float PledgedShieldLoan = 0.0f;
+
+	/** Pledge Amount of this enemy's shield. Authority only. Adds to any existing pledge. */
+	UFUNCTION(BlueprintCallable, Category = "Coop|Shield Loan")
+	void AddShieldLoan(float Amount);
+
+	/** Take the pledge and clear it. Returns what was collected, zero when there was none. */
+	UFUNCTION(BlueprintCallable, Category = "Coop|Shield Loan")
+	float ConsumeShieldLoan();
+
 	/** Fired wherever health changed: on the authority when damage lands, on a client when the new
 	 *  value arrives. Anything drawing a health bar should listen here rather than to OnDamageTaken,
 	 *  which only ever fires where the damage was applied. */

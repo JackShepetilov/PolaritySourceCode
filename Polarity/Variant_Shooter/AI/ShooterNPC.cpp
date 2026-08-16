@@ -1337,6 +1337,40 @@ void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier, f
 		MoveComp ? MoveComp->MaxWalkSpeed : -1.0f);
 }
 
+void AShooterNPC::AddShieldLoan(float Amount)
+{
+	if (!HasAuthority() || Amount <= 0.0f || bIsDead)
+	{
+		return;
+	}
+	PledgedShieldLoan += Amount;
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s owes %.1f shield on the next hit"),
+		*GetName(), PledgedShieldLoan);
+}
+
+float AShooterNPC::ConsumeShieldLoan()
+{
+	if (!HasAuthority() || PledgedShieldLoan <= 0.0f)
+	{
+		return 0.0f;
+	}
+	const float Collected = PledgedShieldLoan;
+	PledgedShieldLoan = 0.0f;
+
+	// Collected off the shield itself, which is the charge. Reducing the magnitude toward zero works
+	// for either polarity, so a negatively electrified enemy pays the same debt as a positive one.
+	if (EMFVelocityModifier)
+	{
+		const float Current = EMFVelocityModifier->GetCharge();
+		const float Magnitude = FMath::Max(0.0f, FMath::Abs(Current) - Collected);
+		EMFVelocityModifier->SetCharge(FMath::Sign(Current) * Magnitude);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s paid back %.1f shield"), *GetName(), Collected);
+	return Collected;
+}
+
 void AShooterNPC::EndShieldBypass()
 {
 	if (!bShieldBypassActive)
@@ -1382,6 +1416,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, CurrentHP);
 	DOREPLIFETIME(AShooterNPC, bShieldBypassActive);
 	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
+	DOREPLIFETIME(AShooterNPC, PledgedShieldLoan);
 }
 
 void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)

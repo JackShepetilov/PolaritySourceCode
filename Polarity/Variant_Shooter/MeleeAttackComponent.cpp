@@ -1095,6 +1095,14 @@ void UMeleeAttackComponent::DealMeleeDamage(AActor* HitActor, float Damage,
 
 	if (OwnerCharacter->HasAuthority())
 	{
+		// Collect any shield pledged against this enemy first. The loan was taken in exchange for the
+		// approach; this is the swing that arrives, so this is where it is paid. Done before the
+		// damage so a hit that opens the shield and a hit that lands on health read in that order.
+		if (AShooterNPC* NPCTarget = Cast<AShooterNPC>(HitActor))
+		{
+			NPCTarget->ConsumeShieldLoan();
+		}
+
 		FPointDamageEvent DamageEvent(Damage, HitResult, ShotDirection, DamageTypeClass);
 		HitActor->TakeDamage(Damage, DamageEvent, OwnerCharacter->GetController(), OwnerCharacter);
 		return;
