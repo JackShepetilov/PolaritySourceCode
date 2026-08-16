@@ -2730,7 +2730,12 @@ void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loca
 	// acceptable, since the wallrun tilt itself ramps in through ApexMovement's interpolation).
 	if (CurrentWeapon)
 	{
-		const float WeaponBaseFactor = (1.0f - CrouchSlideProgress) * (bIsWallrunning ? 0.0f : 1.0f);
+		// Crouch and wallrun used to REPLACE this pose with mesh offsets of their own, which is what
+		// the fade is for. Once those states bend the spine instead they stop touching the mesh, so
+		// there is nothing for the neutral pose to make way for and it stays put.
+		const float WeaponBaseFactor = bDriveStatePosesFromSpine
+			? 1.0f
+			: (1.0f - CrouchSlideProgress) * (bIsWallrunning ? 0.0f : 1.0f);
 		Location += CurrentWeapon->FirstPersonMeshOffset * WeaponBaseFactor;
 		Rotation += CurrentWeapon->FirstPersonMeshTilt * WeaponBaseFactor;
 	}
