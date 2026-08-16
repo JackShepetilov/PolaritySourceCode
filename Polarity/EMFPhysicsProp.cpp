@@ -1936,6 +1936,23 @@ void AEMFPhysicsProp::FreezeGibs()
 
 void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, float VFXScaleMultiplier)
 {
+	// A prop charged by somebody whose class THROWS things never detonates. For the Wizard a fully
+	// charged object is ammunition, not a bomb, and letting it blow up on the first thing it touches
+	// would delete the class's whole verb.
+	//
+	// Gated here rather than at the six call sites: every one of them is a different reason to
+	// explode (impact, velocity, damage, scripted), and missing one would leave the mechanic working
+	// almost always, which is worse than not working at all.
+	if (const AShooterCharacter* Spender = GetSpendingCharacter())
+	{
+		if (Spender->GetItemVerb() == EClassItemVerb::Throw)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s did not explode: charged by %s, whose class throws props instead"),
+				*GetName(), *Spender->GetName());
+			return;
+		}
+	}
+
 	if (bHasExploded || bIsDead)
 	{
 		return;

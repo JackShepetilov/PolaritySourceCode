@@ -1586,6 +1586,30 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				continue;
 			}
 
+			// A class that throws props may only take one that is fully charged. Charging it IS the
+			// cost of the ammunition, and letting a half-charged prop be grabbed would turn the
+			// verb into "pick things up" rather than "spend a charged object".
+			// OwnerCharacter is an ACharacter here; the item verb lives on AShooterCharacter. An NPC or
+			// a classless character simply fails the cast and keeps the old behaviour.
+			const AShooterCharacter* OwnerShooter = Cast<AShooterCharacter>(OwnerCharacter);
+			if (OwnerShooter && OwnerShooter->GetItemVerb() == EClassItemVerb::Throw)
+			{
+				// "Full" means ExplosionReferenceCharge: the project's existing definition of a fully
+				// charged prop ("a prop with |charge| = ExplosionReferenceCharge explodes at exactly
+				// the base values"). Props have no charge cap of their own, so rather than invent a
+				// second number that would immediately drift from this one, the same reference is
+				// reused. If the two ever need to differ, that is a field on the prop, not a guess
+				// here.
+				const float PropCharge = FMath::Abs(Prop->GetCharge());
+				const float FullCharge = Prop->ExplosionReferenceCharge;
+				if (FullCharge > 0.0f && PropCharge < FullCharge - KINDA_SMALL_NUMBER)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] Prop %s skipped: thrower needs a full charge (%.1f / %.1f)"),
+						*Prop->GetName(), PropCharge, FullCharge);
+					continue;
+				}
+			}
+
 			const FVector ToTarget = Prop->GetActorLocation() - CameraLoc;
 			const float DistSq = ToTarget.SizeSquared();
 			const float PropCaptureRange = EvaluateCaptureRange(FMath::Abs(Prop->GetCharge()));
