@@ -9,6 +9,7 @@
 #include "WeaponRecoilComponent.h"
 #include "TutorialTypes.h"
 #include "CrosshairConfig.h"
+#include "MovementSettings.h"
 #include "Chaos/ChaosEngineInterface.h"
 #include "ShooterWeapon.generated.h"
 
@@ -83,6 +84,16 @@ protected:
 	// dodgeable at low HP). These values MUST mirror the enemy beam Niagara asset's Custom HLSL so
 	// the visible tracer matches the damage region — expose Speed / SpeedVariance / beamLength as
 	// User parameters on that asset (C++ pushes the effective values per shot).
+	//
+	// A PLAYER weapon can fire the same way, via bHitscanTravelsAsBolt below. That is what a shotgun
+	// pellet is: a hit that is decided when the trigger is pulled and lands when it arrives. Speed
+	// and length then describe the pellet itself, and the tracer is timed from them rather than
+	// tuned separately, so the streak and the damage are the same object by construction.
+
+	/** Fire this weapon's hits as travelling bolts instead of landing them instantly. Off leaves
+	 *  the weapon an ordinary hitscan; the enemy path is unaffected either way, it always bolts. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Firing|Bolt", meta = (EditCondition = "bUseHitscan"))
+	bool bHitscanTravelsAsBolt = false;
 
 	/** Default bolt travel speed (cm/s). Fast by default (≈ instant feel); the Low-Health Defense
 	 *  upgrade multiplies it down (EnemyBoltSlowMultiplier) so bolts become dodgeable at low HP. */
@@ -344,6 +355,7 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<UNiagaraSystem> BeamFX;
+
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan && bUseWaveVisualization"))
 	TObjectPtr<UNiagaraSystem> WaveFrontFX;
@@ -658,6 +670,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View Pose")
 	FVector FirstPersonMeshOffset = FVector::ZeroVector;
 
+	/** How the spine bends while this weapon is reloading, faded in for as long as the reload
+	 *  ANIMATION is playing. Per weapon, because every reload animation is turned differently: the
+	 *  point of it is to bring the magazine and the hands into frame, and where they are depends on
+	 *  the animation. Handed to the anim graph together with the movement states, so a reload during
+	 *  a wallrun is the sum of the two. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View Pose")
+	FFirstPersonSpinePose ReloadSpinePose;
+
+
 public:
 
 	AShooterWeapon();
@@ -710,6 +731,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetReloadTime() const { return ReloadTime; }
 
+	/** The montage this weapon plays while reloading, if it has one. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	UAnimMontage* GetReloadMontage() const { return ReloadMontage; }
+
 	/** How far along the current reload is, 0 to 1. Zero when not reloading, for a HUD bar. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetReloadProgress() const;
@@ -745,6 +770,22 @@ protected:
 	 *  can resolve the aim line once and then send its own directions through the same tracing. */
 	void ResolveHitscanRay(const FVector& TargetLocation, FVector& OutStart, FVector& OutDirection) const;
 
+	/** Where the first-person muzzle is DRAWN, in world space.
+	 *
+	 *  A first-person primitive is not rendered where it stands. FViewMatrices::Init scales its
+	 *  view-space position by (FOVCorr, FOVCorr, 1) * FirstPersonScale, where
+	 *  FOVCorr = tan(FOV/2) / tan(FirstPersonFOV/2) -- that is what lets the weapon keep its own
+	 *  field of view while the world has another one. So the muzzle socket's world position is NOT
+	 *  where the barrel appears on screen.
+	 *
+	 *  Anything attached to the mesh is drawn with the mesh and lines up for free, which is why the
+	 *  muzzle flash has always been right. Anything spawned at a world position instead -- the
+	 *  tracer -- starts wherever the socket physically is, which is somewhere else entirely. This
+	 *  puts the socket through the same transform the renderer uses, so a world-space effect can be
+	 *  placed where the barrel looks like it is. Returns the plain socket location for anything that
+	 *  is not a local player's first-person view. */
+	FVector GetFirstPersonMuzzleRenderLocation() const;
+
 	/** What one trigger pull costs, whatever it put in the air: the firing montage, the recoil kick,
 	 *  a round out of the magazine (refilled or discarded when it runs out) and the HUD that shows
 	 *  it. Called ONCE per shot -- a shotgun's pellets are one shot, not three. */
@@ -769,7 +810,11 @@ protected:
 
 	bool IsMetal(const FHitResult& Hit) const;
 	FVector CalculateReflection(const FVector& Direction, const FVector& Normal) const;
-	void ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius);
+	/** ExtraDamageMultiplier carries what a bolt cannot re-derive when it lands: heat, height
+	 *  advantage, target tags and the shooter's upgrades, all folded into one number at the moment
+	 *  the trigger was pulled. One for an ordinary instant hit, which computes them itself. */
+	void ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius,
+		float ExtraDamageMultiplier = 1.0f);
 
 	/** Calculate damage multiplier based on target's tags */
 	float GetTagDamageMultiplier(AActor* Target) const;
@@ -820,13 +865,16 @@ protected:
 	 *  so the visible tracer matches the C++ damage region. Pass < 0 to leave the asset defaults. */
 	/** Tracer. Plays here and, like the muzzle flash, on every other machine that can see this
 	 *  weapon: the beam used to be purely local, so a teammate's shots left no trail at all. */
+	/** Returns the tracer drawn on THIS machine, so a caller that knows more about the shot than the
+	 *  tracer does can put it out early -- a travelling shot hands it to its bolt, which stops it
+	 *  where the pellet actually stopped. Null on a weapon with no BeamFX. */
 	UFUNCTION(BlueprintCallable, Category = "VFX")
-	void SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier = 1.0f,
+	UNiagaraComponent* SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier = 1.0f,
 		float OverrideBoltSpeed = -1.0f, float OverrideBoltSpeedVariance = -1.0f,
 		float OverrideBoltLength = -1.0f, float OverrideRandomSeed = -1.0f);
 
 	/** The actual spawn, with no networking. Shared by the local call and the multicast. */
-	void SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
+	UNiagaraComponent* SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
 		float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
 		float OverrideBoltLength, float OverrideRandomSeed);
 

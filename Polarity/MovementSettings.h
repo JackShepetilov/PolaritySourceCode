@@ -7,6 +7,32 @@
 #include "Engine/DataAsset.h"
 #include "MovementSettings.generated.h"
 
+/**
+ * One state's contribution to the first person spine, in component space.
+ *
+ * Moving the whole first person mesh and bending the spine look nothing alike. The mesh offset
+ * takes the arms, the weapon and the camera-parented pose along as one rigid object; the spine
+ * bends the upper body and lets the animation on top of it stay readable, which is the whole point
+ * of doing it in the graph. So every state that used to shove the mesh gets a pose of its own here,
+ * and the numbers are NOT the old ones: a different pivot needs different values.
+ *
+ * Composed additively: a reload while wallrunning is the sum of both, which is exactly how those
+ * two read on screen.
+ */
+USTRUCT(BlueprintType)
+struct FFirstPersonSpinePose
+{
+	GENERATED_BODY()
+
+	/** Component-space translation applied to the spine bone, in cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spine Pose")
+	FVector Translation = FVector::ZeroVector;
+
+	/** Component-space rotation applied to the spine bone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spine Pose")
+	FRotator Rotation = FRotator::ZeroRotator;
+};
+
 UCLASS(BlueprintType)
 class POLARITY_API UMovementSettings : public UPrimaryDataAsset
 {
@@ -588,6 +614,24 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View")
 	float WeaponTiltInterpSpeed = 10.0f;
+
+	// ==================== First person spine poses ====================
+	//
+	// The same states as above, expressed as a bend of the spine instead of a shove of the whole
+	// mesh. Which of the two is actually used is APolarityCharacter::bDriveStatePosesFromSpine.
+	// The reload pose is not here: it belongs to the weapon, because every reload animation is
+	// turned differently (AShooterWeapon::ReloadSpinePose).
+
+	/** Crouch and slide share one progress value in the character, so they share one pose. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Spine Poses")
+	FFirstPersonSpinePose CrouchSlideSpinePose;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Spine Poses")
+	FFirstPersonSpinePose WallrunSpinePose;
+
+	/** How fast a spine pose fades in and out. Shared by every state, so they cannot drift apart. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Spine Poses", meta = (ClampMin = "0.5"))
+	float SpinePoseInterpSpeed = 10.0f;
 
 	// ==================== ADS ====================
 

@@ -1598,6 +1598,72 @@ void AShooterCharacter::DoStopFiring()
 	}
 }
 
+void AShooterCharacter::AccumulateFirstPersonSpinePose(float DeltaTime, FVector& Translation, FRotator& Rotation)
+{
+	Super::AccumulateFirstPersonSpinePose(DeltaTime, Translation, Rotation);
+
+	if (!MovementSettings)
+	{
+		return;
+	}
+
+	// Reload. Keyed to the animation rather than to the reload state, for the same reason the left
+	// hand IK is: a weapon with no reload montage assigned must not spend the reload leaning into a
+	// pose with nothing playing.
+	const bool bReloadAnim = IsPlayingReloadAnimation();
+	ReloadSpineAlpha = FMath::FInterpTo(ReloadSpineAlpha, bReloadAnim ? 1.0f : 0.0f,
+		DeltaTime, MovementSettings->SpinePoseInterpSpeed);
+
+	if (CurrentWeapon && ReloadSpineAlpha > KINDA_SMALL_NUMBER)
+	{
+		Translation += CurrentWeapon->ReloadSpinePose.Translation * ReloadSpineAlpha;
+		Rotation += CurrentWeapon->ReloadSpinePose.Rotation * ReloadSpineAlpha;
+	}
+}
+
+void AShooterCharacter::UpdateLeftHandPose(float DeltaTime)
+{
+	const bool bWallrunning = GetApexMovement() && GetApexMovement()->IsWallRunning();
+
+	const UAbilityComponent* AbilComp = FindComponentByClass<UAbilityComponent>();
+	const bool bCasting = AbilComp && AbilComp->IsCasting();
+
+	LeftHandWallrunAlpha = FMath::FInterpTo(LeftHandWallrunAlpha, bWallrunning ? 1.0f : 0.0f,
+		DeltaTime, LeftHandPoseInterpSpeed);
+	LeftHandCastAlpha = FMath::FInterpTo(LeftHandCastAlpha, bCasting ? 1.0f : 0.0f,
+		DeltaTime, LeftHandPoseInterpSpeed);
+
+	LeftHandPoseOffset =
+		LeftHandWallrunOffset * LeftHandWallrunAlpha +
+		LeftHandAbilityCastOffset * LeftHandCastAlpha;
+
+	static const FName LeftHandPoseOffsetName(TEXT("LeftHandPoseOffset"));
+
+	if (const USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		PushAnimVector(FPMesh->GetAnimInstance(), LeftHandPoseOffsetName, LeftHandPoseOffset);
+	}
+}
+
+bool AShooterCharacter::IsPlayingReloadAnimation() const
+{
+	if (!CurrentWeapon)
+	{
+		return false;
+	}
+
+	UAnimMontage* Montage = CurrentWeapon->GetReloadMontage();
+	if (!Montage)
+	{
+		return false;
+	}
+
+	const USkeletalMeshComponent* FPMesh = GetFirstPersonMesh();
+	UAnimInstance* AnimInstance = FPMesh ? FPMesh->GetAnimInstance() : nullptr;
+
+	return AnimInstance && AnimInstance->Montage_IsPlaying(Montage);
+}
+
 void AShooterCharacter::DoReload()
 {
 	// The weapon owns the decision: it knows whether it has a magazine, whether that magazine is
@@ -2218,6 +2284,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateADS(DeltaTime);
 	UpdateRegeneration(DeltaTime);
 	UpdateLeftHandIK(DeltaTime);
+	UpdateLeftHandPose(DeltaTime);
 	UpdateLowHealthWarning(DeltaTime);
 	UpdatePostProcessEffects(DeltaTime);
 	UpdateWeaponSwitch(DeltaTime);
@@ -5447,6 +5514,14 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	// (during channeling its SetLeftHandIKAlpha(0) sets alpha=0 to free left arm for
 	// catch/hold/throw montages — don't clobber it every Tick).
 	else if (bIsWallRunning)
+	{
+		TargetLeftHandIKAlpha = 0.0f;
+	}
+	// Reload ANIMATION (not the reload state): the montage animates both hands, one of them on the
+	// magazine, and IK pinning the left hand to the grip socket fights it the whole way. Keyed to
+	// the montage actually playing, so a weapon with no reload animation never unpins anything and
+	// the hand is released for exactly as long as something is moving it.
+	else if (IsPlayingReloadAnimation())
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}

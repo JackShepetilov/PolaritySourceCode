@@ -288,6 +288,48 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand IK")
 	float LeftHandIKAlphaInterpSpeed = 10.0f;
 
+	/** How far the reload spine pose is faded in, 0 to 1. Follows the reload ANIMATION, not the
+	 *  reload state: with auto-reload the state starts the moment the magazine empties, and a pose
+	 *  held for two and a half seconds with nothing animating is just a broken-looking player. */
+	float ReloadSpineAlpha = 0.0f;
+
+	// ==================== Left hand pose ====================
+	//
+	// Sent to the anim graph next to the IK values, in component space, for the graph to apply to
+	// the left hand. Same additive idea as the spine: each state contributes its own offset and they
+	// sum, so the states do not have to know about each other.
+
+	/** Where the left hand goes while running on a wall. Its IK is released at the same time (the
+	 *  hand is not on the weapon any more), so this is what decides where it actually sits. */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand Pose")
+	FVector LeftHandWallrunOffset = FVector::ZeroVector;
+
+	/** Where the left hand goes while an ability is being cast with it. */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand Pose")
+	FVector LeftHandAbilityCastOffset = FVector::ZeroVector;
+
+	/** How fast the left hand eases between those. */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Left Hand Pose", meta = (ClampMin = "0.5"))
+	float LeftHandPoseInterpSpeed = 10.0f;
+
+	float LeftHandWallrunAlpha = 0.0f;
+	float LeftHandCastAlpha = 0.0f;
+
+	/** This frame's left hand offset, as handed to the anim graph. */
+	FVector LeftHandPoseOffset = FVector::ZeroVector;
+
+	/** Builds the left hand offset from the states above and pushes it to the anim graph. */
+	void UpdateLeftHandPose(float DeltaTime);
+
+	/** True while the equipped weapon's reload montage is actually playing on the first person mesh.
+	 *
+	 *  Deliberately NOT the same thing as the weapon's reload STATE: with auto-reload that state
+	 *  starts the instant the magazine empties, and on a weapon with no montage assigned it lasts
+	 *  the whole reload with nothing animating. Anything that exists to get out of the animation's
+	 *  way -- the left hand IK, the pose -- has to follow the animation, not the ammo counter. */
+	UFUNCTION(BlueprintPure, Category = "Weapons|Reload")
+	bool IsPlayingReloadAnimation() const;
+
 	// ==================== Camera Follow ====================
 
 	/** How much of the camera's own positional offsets (shake, raised shield) the FP mesh keeps.
@@ -1632,6 +1674,10 @@ protected:
 	/** Adds the shooter-specific FP mesh pose layers: per-weapon base pose, ADS, recoil,
 	 *  weapon-switch lower/raise and the camera-follow compensation. */
 	virtual void AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation) override;
+
+	/** Adds the weapon-owned spine layers on top of the movement ones: right now the reload pose,
+	 *  which only this class can see because only this class knows what is being held. */
+	virtual void AccumulateFirstPersonSpinePose(float DeltaTime, FVector& Translation, FRotator& Rotation) override;
 
 	/** Called when melee attack hits something */
 	UFUNCTION()

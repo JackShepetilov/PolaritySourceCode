@@ -450,7 +450,126 @@ void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
 	FirstPersonMesh->SetRelativeLocation(Location);
 	FirstPersonMesh->SetRelativeRotation(Rotation);
 
+	// The half of the pose that goes to the skeleton rather than to the component. Built and sent
+	// every frame whatever bDriveStatePosesFromSpine says: a graph that is already wired can be
+	// looked at with the switch still off, and the values are the same either way.
+	UpdateFirstPersonSpinePose(DeltaTime);
+
 	ApplyCameraManagerRoll();
+}
+
+void APolarityCharacter::UpdateFirstPersonSpinePose(float DeltaTime)
+{
+	SpinePoseTranslation = FVector::ZeroVector;
+	SpinePoseRotation = FRotator::ZeroRotator;
+
+	AccumulateFirstPersonSpinePose(DeltaTime, SpinePoseTranslation, SpinePoseRotation);
+
+	static const FName SpineTranslationName(TEXT("SpinePoseTranslation"));
+	static const FName SpineRotationName(TEXT("SpinePoseRotation"));
+
+	if (UAnimInstance* AnimInstance = FirstPersonMesh ? FirstPersonMesh->GetAnimInstance() : nullptr)
+	{
+		PushAnimVector(AnimInstance, SpineTranslationName, SpinePoseTranslation);
+		PushAnimRotator(AnimInstance, SpineRotationName, SpinePoseRotation);
+	}
+}
+
+void APolarityCharacter::AccumulateFirstPersonSpinePose(float DeltaTime, FVector& Translation, FRotator& Rotation)
+{
+	if (!MovementSettings)
+	{
+		return;
+	}
+
+	// Crouch and slide share one progress value in this class (CrouchSlideProgress, with its
+	// deliberate straight-line in and out), so the spine layer reuses it rather than running a
+	// second timer that would drift from the mesh one.
+	SlideSpineAlpha = CrouchSlideProgress;
+
+	// Wallrun has no such value -- its mesh offsets arrive already interpolated from ApexMovement --
+	// so this layer keeps an alpha of its own.
+	const bool bWallrunning = ApexMovement && ApexMovement->IsWallRunning();
+	WallrunSpineAlpha = FMath::FInterpTo(WallrunSpineAlpha, bWallrunning ? 1.0f : 0.0f,
+		DeltaTime, MovementSettings->SpinePoseInterpSpeed);
+
+	Translation += MovementSettings->CrouchSlideSpinePose.Translation * SlideSpineAlpha;
+	Rotation += MovementSettings->CrouchSlideSpinePose.Rotation * SlideSpineAlpha;
+
+	Translation += MovementSettings->WallrunSpinePose.Translation * WallrunSpineAlpha;
+	Rotation += MovementSettings->WallrunSpinePose.Rotation * WallrunSpineAlpha;
+}
+
+// ==================== Anim graph plumbing ====================
+
+void APolarityCharacter::PushAnimVector(UAnimInstance* AnimInstance, FName PropertyName, const FVector& Value)
+{
+	if (!AnimInstance)
+	{
+		return;
+	}
+
+	if (FProperty* Property = AnimInstance->GetClass()->FindPropertyByName(PropertyName))
+	{
+		FStructProperty* StructProp = CastField<FStructProperty>(Property);
+		if (StructProp && StructProp->Struct == TBaseStructure<FVector>::Get())
+		{
+			if (void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(AnimInstance))
+			{
+				*static_cast<FVector*>(ValuePtr) = Value;
+			}
+		}
+	}
+}
+
+void APolarityCharacter::PushAnimRotator(UAnimInstance* AnimInstance, FName PropertyName, const FRotator& Value)
+{
+	if (!AnimInstance)
+	{
+		return;
+	}
+
+	if (FProperty* Property = AnimInstance->GetClass()->FindPropertyByName(PropertyName))
+	{
+		FStructProperty* StructProp = CastField<FStructProperty>(Property);
+		if (StructProp && StructProp->Struct == TBaseStructure<FRotator>::Get())
+		{
+			if (void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(AnimInstance))
+			{
+				*static_cast<FRotator*>(ValuePtr) = Value;
+			}
+		}
+	}
+}
+
+void APolarityCharacter::PushAnimFloat(UAnimInstance* AnimInstance, FName PropertyName, float Value)
+{
+	if (!AnimInstance)
+	{
+		return;
+	}
+
+	FProperty* Property = AnimInstance->GetClass()->FindPropertyByName(PropertyName);
+	if (!Property)
+	{
+		return;
+	}
+
+	// Blueprint "float" is a double in UE5, but a hand-written C++ anim instance may still use float.
+	if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Property))
+	{
+		if (void* ValuePtr = FloatProp->ContainerPtrToValuePtr<void>(AnimInstance))
+		{
+			*static_cast<float*>(ValuePtr) = Value;
+		}
+	}
+	else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(Property))
+	{
+		if (void* ValuePtr = DoubleProp->ContainerPtrToValuePtr<void>(AnimInstance))
+		{
+			*static_cast<double*>(ValuePtr) = static_cast<double>(Value);
+		}
+	}
 }
 
 void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation)
@@ -548,8 +667,12 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 		TargetWallrunOffset = FVector::ZeroVector;
 	}
 
-	// Combine all tilts: crouch/slide + wallrun
-	CurrentWeaponTilt = CrouchSlideTilt + WallrunMeshTilt;
+	// Combine all tilts: crouch/slide + wallrun.
+	// Both are state poses, so they drop out of the mesh entirely once the spine is driving them
+	// (see bDriveStatePosesFromSpine). The shake and wallrun ROLL added below are not state poses --
+	// they mirror the camera and stay on the mesh either way.
+	const float StatePoseToMesh = bDriveStatePosesFromSpine ? 0.0f : 1.0f;
+	CurrentWeaponTilt = (CrouchSlideTilt + WallrunMeshTilt) * StatePoseToMesh;
 
 	// ==================== Camera Roll Follow ====================
 	// APolarityCameraManager applies its roll to the final POV rotation, NOT to the camera
@@ -594,8 +717,11 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 
 	// ==================== Accumulate ====================
 
-	Location += CurrentCrouchOffset;
-	Location += (CurrentADSOffset + CurrentWallrunOffset);
+	// Crouch/slide and wallrun are state poses and go to the spine instead when that is switched on.
+	// ADS is not: it is where the sights have to end up, and no amount of spine bending puts them
+	// on the eye.
+	Location += CurrentCrouchOffset * StatePoseToMesh;
+	Location += CurrentADSOffset + (CurrentWallrunOffset * StatePoseToMesh);
 	Location += CurrentRunSwayPosition;
 	// Run aim offset: "where the weapon points while running". Used to be fed into the Control
 	// Rig's aim target; with the mesh riding the camera it is a plain camera-space offset.

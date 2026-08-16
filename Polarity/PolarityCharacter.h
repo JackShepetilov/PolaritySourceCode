@@ -347,6 +347,54 @@ protected:
 	 *  component — hence the separate mesh-side follow factors below). */
 	void ApplyCameraManagerRoll();
 
+	// ==================== First person spine pose ====================
+	//
+	// The states that used to shove the whole first person mesh (wallrun, slide, and the weapon's
+	// reload) can instead be handed to the animation graph as a bend of the spine. The graph applies
+	// them with one Transform (Modify) Bone in component space, so the animation playing on top
+	// stays readable instead of riding a rigid mesh offset.
+	//
+	// C++ decides WHAT the pose is, per state, and adds the states together. The graph decides how
+	// it reaches the skeleton. Adding a state later means one more line in
+	// AccumulateFirstPersonSpinePose and nothing at all in the graph.
+
+	/** Send wallrun / slide / reload to the spine instead of offsetting the whole mesh.
+	 *
+	 *  Off by default, and this is a migration switch rather than a taste one: with it on, those
+	 *  states do nothing at all until the anim graph reads SpinePoseTranslation / SpinePoseRotation
+	 *  and drives a spine bone with them. Turn it on once the graph is wired. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "First Person Pose")
+	bool bDriveStatePosesFromSpine = false;
+
+	/** This frame's spine pose, in component space, as handed to the anim graph. */
+	FVector SpinePoseTranslation = FVector::ZeroVector;
+	FRotator SpinePoseRotation = FRotator::ZeroRotator;
+
+	/** How far each state's spine pose is faded in, 0 to 1. Interpolated so states ease in and out
+	 *  instead of snapping, and summed so a reload during a wallrun is both. */
+	float SlideSpineAlpha = 0.0f;
+	float WallrunSpineAlpha = 0.0f;
+
+	/** Adds this class's spine layers. Subclasses call Super first, then add their own -- the
+	 *  weapon-owned ones (reload) live on AShooterCharacter, which is what knows about weapons. */
+	virtual void AccumulateFirstPersonSpinePose(float DeltaTime, FVector& Translation, FRotator& Rotation);
+
+	/** Builds the spine pose for this frame and hands it to the first person anim instance. */
+	void UpdateFirstPersonSpinePose(float DeltaTime);
+
+public:
+
+	// ==================== Anim graph plumbing ====================
+	//
+	// The same trick AShooterWeapon::PushLeftHandIK uses: write a named property on whatever anim
+	// instance is running, by reflection. Any graph that declares a variable of that name picks the
+	// value up, and one that does not is left alone -- so C++ never has to know which graph is on
+	// which mesh, and a graph can opt in by declaring the variable and nothing else.
+
+	static void PushAnimVector(UAnimInstance* AnimInstance, FName PropertyName, const FVector& Value);
+	static void PushAnimRotator(UAnimInstance* AnimInstance, FName PropertyName, const FRotator& Value);
+	static void PushAnimFloat(UAnimInstance* AnimInstance, FName PropertyName, float Value);
+
 public:
 
 	/** Set target ADS offset for interpolation */

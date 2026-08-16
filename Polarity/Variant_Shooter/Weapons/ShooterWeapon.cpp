@@ -962,6 +962,46 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 	OutDirection = Direction;
 }
 
+FVector AShooterWeapon::GetFirstPersonMuzzleRenderLocation() const
+{
+	const FVector MuzzleWorld = FirstPersonMesh
+		? FirstPersonMesh->GetSocketLocation(MuzzleSocketName)
+		: GetActorLocation();
+
+	const APlayerController* PC = PawnOwner ? Cast<APlayerController>(PawnOwner->GetController()) : nullptr;
+	if (!PC || !PC->PlayerCameraManager)
+	{
+		return MuzzleWorld;
+	}
+
+	const FMinimalViewInfo& POV = PC->PlayerCameraManager->GetCameraCacheView();
+
+	const float Scale = (POV.FirstPersonScale > 0.0f) ? POV.FirstPersonScale : 1.0f;
+	const float FOVCorrection = POV.CalculateFirstPersonFOVCorrectionFactor();
+
+	// Nothing to correct: the weapon is drawn with the same field of view as the world and at its
+	// own size, so where it stands is where it is seen.
+	if (FMath::IsNearlyEqual(Scale, 1.0f) && FMath::IsNearlyEqual(FOVCorrection, 1.0f))
+	{
+		return MuzzleWorld;
+	}
+
+	const FQuat ViewRotation = POV.Rotation.Quaternion();
+	const FVector Forward = ViewRotation.GetForwardVector();
+	const FVector Right = ViewRotation.GetRightVector();
+	const FVector Up = ViewRotation.GetUpVector();
+
+	const FVector Relative = MuzzleWorld - POV.Location;
+
+	// The renderer's ScaleVector, rebuilt in world space: depth takes the plain scale, the screen
+	// plane takes the FOV correction on top of it.
+	const double Depth = FVector::DotProduct(Relative, Forward) * Scale;
+	const double Lateral = FVector::DotProduct(Relative, Right) * Scale * FOVCorrection;
+	const double Vertical = FVector::DotProduct(Relative, Up) * Scale * FOVCorrection;
+
+	return POV.Location + Forward * Depth + Right * Lateral + Up * Vertical;
+}
+
 void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 {
 	FVector Start;
@@ -1565,7 +1605,8 @@ FVector AShooterWeapon::CalculateReflection(const FVector& Direction, const FVec
 	return Direction - 2.0f * FVector::DotProduct(Direction, Normal) * Normal;
 }
 
-void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius)
+void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius,
+	float ExtraDamageMultiplier)
 {
 	AActor* HitActor = Hit.GetActor();
 	if (!HitActor)
@@ -1595,7 +1636,7 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	float HeadshotMult = bIsHeadshot ? HeadshotMultiplier : 1.0f;
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¤ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
-	float FinalDamage = HitscanDamage * EnergyMultiplier * AreaMultiplier * HeadshotMult;
+	float FinalDamage = HitscanDamage * EnergyMultiplier * AreaMultiplier * HeadshotMult * ExtraDamageMultiplier;
 
 	UE_LOG(LogTemp, Warning, TEXT("Hitscan Damage: Base=%.1f x Energy=%.2f x Area=%.2f x HS=%.1f = %.1f to %s (WaveR=%.1f, TargetR=%.1f)"),
 		HitscanDamage, EnergyMultiplier, AreaMultiplier, HeadshotMult, FinalDamage,
@@ -1822,8 +1863,11 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 	const bool bHitWall = GetWorld()->LineTraceSingleByChannel(WallHit, Start, End, ECC_Visibility, QueryParams);
 	const float WallDistance = bHitWall ? WallHit.Distance : SegmentMaxDistance;
 
-	// Damage non-pawn damageable actors (EMFPhysicsProp, convertible foliage) — same rule as the cone path
-	if (bHitWall && WallHit.GetActor() && !Cast<APawn>(WallHit.GetActor()) && WallHit.GetActor()->CanBeDamaged())
+	// Damage non-pawn damageable actors (EMFPhysicsProp, convertible foliage) — same rule as the cone path.
+	// A travelling shot does not do this here: the prop is only hit when the bolt reaches it, so both
+	// the damage and the impact effect wait and are done by the bolt on arrival.
+	if (!bHitscanTravelsAsBolt
+		&& bHitWall && WallHit.GetActor() && !Cast<APawn>(WallHit.GetActor()) && WallHit.GetActor()->CanBeDamaged())
 	{
 		ApplyHitscanDamage(WallHit, RemainingEnergy, WallHit.Distance, 0.0f);
 	}
@@ -1877,6 +1921,18 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		}
 	}
 
+	// One seed for this shot. The bolt's speed and the tracer's speed are derived from it the same
+	// way (Speed + Variance * sin(Seed)), which is what keeps the streak sitting on the damage
+	// region instead of merely resembling it. Negative means this weapon does not travel.
+	const float BoltRandomSeed = bHitscanTravelsAsBolt ? FMath::FRand() * 1000.0f : -1.0f;
+
+	// Filled in below when the shot travels, then handed to the bolt in one place, so a shot on
+	// course to hit nobody is registered the same way as one that is: it still has to arrive
+	// somewhere before it is allowed to mark the wall.
+	AActor* BoltVictim = nullptr;
+	float BoltDamageMultiplier = 1.0f;
+	FName BoltHitBone = NAME_None;
+
 	// --- Apply damage to the nearest pawn with the full player multiplier stack (as in the cone path) ---
 	bool bPawnWasHit = false;
 	FVector PawnHitLocation = FVector::ZeroVector;
@@ -1909,63 +1965,76 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			}
 		}
 
-		// No distance falloff: at zero divergence the wave radius never exceeds the target
-		// radius, so the cone path's area multiplier would be 1.0 anyway.
-		const float FinalDamage = HitscanDamage * RemainingEnergy * HeadshotMult * HeatMult * ZFactorMult * TagMult * UpgradeMult;
-
-		FDamageEvent DamageEvent;
-		if (HitscanDamageType)
+		// A weapon whose hits travel does not land this one now. Everything the shot knows and the
+		// arrival cannot work out for itself is written down here and handed to the bolt below: the
+		// multiplier stack, and the bone the pellet was on course for so a headshot is still a
+		// headshot when it gets there.
+		if (bHitscanTravelsAsBolt)
 		{
-			DamageEvent.DamageTypeClass = HitscanDamageType;
+			BoltVictim = HitActor;
+			BoltDamageMultiplier = HeatMult * ZFactorMult * TagMult * UpgradeMult;
+			BoltHitBone = PawnHit.BoneName;
 		}
-
-		const float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
-		const bool bKilled = IsActorDeadAfterDamage(HitActor);
-
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),
-			*HitActor->GetName(), BestDistance, FinalDamage, ActualDamage, bKilled ? 1 : 0);
-
-		// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
-		if (WeaponOwner && ActualDamage > 0.0f)
+		else
 		{
-			WeaponOwner->OnWeaponHit(PawnHitLocation, Direction, ActualDamage, bIsHeadshot, bKilled);
-		}
+			// No distance falloff: at zero divergence the wave radius never exceeds the target
+			// radius, so the cone path's area multiplier would be 1.0 anyway.
+			const float FinalDamage = HitscanDamage * RemainingEnergy * HeadshotMult * HeatMult * ZFactorMult * TagMult * UpgradeMult;
 
-		// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits
-		if (PawnOwner)
-		{
-			if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+			FDamageEvent DamageEvent;
+			if (HitscanDamageType)
 			{
-				UpgradeMgr->NotifyWeaponDealtDamage(this, HitActor, ActualDamage, bKilled);
+				DamageEvent.DamageTypeClass = HitscanDamageType;
 			}
-		}
 
-		// Knockback / physics impulse — same exceptions as the cone path:
-		// turret would be pushed into permanent flight, the boss opts out of ionizer knockback
-		const float ImpulseForce = HitscanPhysicsForce * RemainingEnergy;
-		if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
-		{
-			if (!Cast<ASniperTurretNPC>(HitCharacter)
-				&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
-			{
-				HitCharacter->LaunchCharacter(Direction * ImpulseForce, false, false);
-			}
-		}
-		else if (UPrimitiveComponent* HitComp = PawnHit.GetComponent())
-		{
-			if (HitComp->IsSimulatingPhysics())
-			{
-				HitComp->AddImpulseAtLocation(Direction * ImpulseForce, PawnHitLocation);
-			}
-		}
+			const float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
+			const bool bKilled = IsActorDeadAfterDamage(HitActor);
 
-		// Ionization (charge transfer); HitComponent gates the NPC riot-shield rule
-		const bool bIonized = ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
-		if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
-		{
-			if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
+			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),
+				*HitActor->GetName(), BestDistance, FinalDamage, ActualDamage, bKilled ? 1 : 0);
+
+			// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
+			if (WeaponOwner && ActualDamage > 0.0f)
 			{
-				HitMarker->RegisterIonizedHit(PawnHitLocation, Direction);
+				WeaponOwner->OnWeaponHit(PawnHitLocation, Direction, ActualDamage, bIsHeadshot, bKilled);
+			}
+
+			// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits
+			if (PawnOwner)
+			{
+				if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+				{
+					UpgradeMgr->NotifyWeaponDealtDamage(this, HitActor, ActualDamage, bKilled);
+				}
+			}
+
+			// Knockback / physics impulse — same exceptions as the cone path:
+			// turret would be pushed into permanent flight, the boss opts out of ionizer knockback
+			const float ImpulseForce = HitscanPhysicsForce * RemainingEnergy;
+			if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+			{
+				if (!Cast<ASniperTurretNPC>(HitCharacter)
+					&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
+				{
+					HitCharacter->LaunchCharacter(Direction * ImpulseForce, false, false);
+				}
+			}
+			else if (UPrimitiveComponent* HitComp = PawnHit.GetComponent())
+			{
+				if (HitComp->IsSimulatingPhysics())
+				{
+					HitComp->AddImpulseAtLocation(Direction * ImpulseForce, PawnHitLocation);
+				}
+			}
+
+			// Ionization (charge transfer); HitComponent gates the NPC riot-shield rule
+			const bool bIonized = ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
+			if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+			{
+				if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
+				{
+					HitMarker->RegisterIonizedHit(PawnHitLocation, Direction);
+				}
 			}
 		}
 	}
@@ -1980,10 +2049,15 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 	FVector BeamStart = Start;
 	if (ReflectionCount == 0 && PawnOwner && PawnOwner->IsPlayerControlled() && FirstPersonMesh)
 	{
-		BeamStart = FirstPersonMesh->GetSocketLocation(MuzzleSocketName);
+		// Where the barrel LOOKS like it is, not where it stands: the first-person mesh is rendered
+		// through a transform of its own, and a tracer put at the socket's real position starts off
+		// to the side of the gun you can see. See GetFirstPersonMuzzleRenderLocation.
+		BeamStart = GetFirstPersonMuzzleRenderLocation();
 	}
 
-	const FVector BeamEnd = bPawnWasHit
+	// A travelling shot is drawn along its whole line for the same reason it flies it: where it
+	// actually stops is not decided yet. An instant one still stops at the body it hit.
+	const FVector BeamEnd = (bPawnWasHit && !bHitscanTravelsAsBolt)
 		? PawnHitLocation
 		: (bHitWall ? FVector(WallHit.ImpactPoint) : End);
 
@@ -2028,20 +2102,56 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		}
 	}
 
-	SpawnBeamEffect(BeamStart, BeamEnd, RemainingEnergy);
+	// --- Send the shot on its way, tracer and damage as one thing ---
+	//
+	// The tracer is timed off the bolt: same speed, same variance, same length, same seed, so it is
+	// not a streak that resembles the pellet, it IS the pellet. The bolt is then handed that streak
+	// and puts it out where the pellet actually stops, which is the only place that knows.
+	//
+	// The line it flies is the whole line, not just as far as whoever happens to be standing on it:
+	// that pawn may step aside before it arrives, and then the pellet carries on into the wall
+	// behind them and marks that instead.
+	if (bHitscanTravelsAsBolt)
+	{
+		const float RandSpeed = FMath::Max(
+			HitscanBoltSpeed + HitscanBoltSpeedVariance * FMath::Sin(BoltRandomSeed), 1.0f);
+
+		UNiagaraComponent* Tracer = SpawnBeamEffect(BeamStart, BeamEnd, RemainingEnergy,
+			HitscanBoltSpeed, HitscanBoltSpeedVariance, HitscanBoltLength, BoltRandomSeed);
+
+		if (UEnemyBeamBoltSubsystem* BoltSys = GetWorld()->GetSubsystem<UEnemyBeamBoltSubsystem>())
+		{
+			BoltSys->RegisterBolt(this, BoltVictim, Start, Direction, WallDistance, RandSpeed,
+				HitscanBoltLength, HitscanBoltRadius, RemainingEnergy,
+				BoltDamageMultiplier, BoltHitBone, WallHit, bHitWall, Tracer);
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[BOLT_DEBUG] %s: pellet away, target=%s line=%.0f speed=%.0f arrives in %.3fs"),
+			*GetName(), *GetNameSafe(BoltVictim), WallDistance, RandSpeed, WallDistance / RandSpeed);
+	}
+	else
+	{
+		SpawnBeamEffect(BeamStart, BeamEnd, RemainingEnergy);
+	}
 
 	if (bUseWaveVisualization)
 	{
 		SpawnWaveFronts(BeamStart, BeamEnd);
 	}
 
-	if (bPawnWasHit)
+	// The impact of a travelling shot is the bolt's business: it plays where the pellet stops and
+	// at the moment it stops there. Playing it now would put a hole in a wall the pellet has not
+	// reached, on a target that may yet step out of the way.
+	if (!bHitscanTravelsAsBolt)
 	{
-		SpawnImpactEffect(PawnHit);
-	}
-	else if (bHitWall)
-	{
-		SpawnImpactEffect(WallHit);
+		if (bPawnWasHit)
+		{
+			SpawnImpactEffect(PawnHit);
+		}
+		else if (bHitWall)
+		{
+			SpawnImpactEffect(WallHit);
+		}
 	}
 
 	// --- Metal reflection: only off a wall and only if no pawn intercepted the ray ---
@@ -2463,12 +2573,12 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 	}
 }
 
-void AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier,
+UNiagaraComponent* AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier,
 	float OverrideBoltSpeed, float OverrideBoltSpeedVariance, float OverrideBoltLength, float OverrideRandomSeed)
 {
 	// Draw it here immediately, then make sure everyone else draws it too. Same split as the
 	// muzzle flash: the shooter must not wait a round trip to see their own tracer.
-	SpawnBeamEffectLocally(Start, End, EnergyMultiplier,
+	UNiagaraComponent* LocalBeam = SpawnBeamEffectLocally(Start, End, EnergyMultiplier,
 		OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
 
 	if (HasAuthority())
@@ -2481,6 +2591,8 @@ void AShooterWeapon::SpawnBeamEffect(const FVector& Start, const FVector& End, f
 		OwnerCharacter->Server_ReportBeamEffect(this, Start, End, EnergyMultiplier,
 			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
 	}
+
+	return LocalBeam;
 }
 
 void AShooterWeapon::Multicast_PlayBeamEffect_Implementation(const FVector& Start, const FVector& End,
@@ -2508,22 +2620,28 @@ void AShooterWeapon::Multicast_PlayBeamEffect_Implementation(const FVector& Star
 		OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
 }
 
-void AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
+UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
 	float OverrideBoltSpeed, float OverrideBoltSpeedVariance, float OverrideBoltLength, float OverrideRandomSeed)
 {
 	if (!BeamFX)
 	{
-		return;
+		return nullptr;
 	}
 
+	// Spawned INACTIVE on purpose. Activating first and setting the endpoints afterwards is what the
+	// engine turns into SetVariable_Deferred (NiagaraComponent.cpp): once a system instance exists,
+	// a parameter write only lands on the NEXT tick, so the first simulated frame runs on the
+	// asset's defaults -- BeamStart and BeamEnd both zero. That is the stray tracer that starts
+	// nowhere near the muzzle and runs off to the horizon, and it shows up on some shots and not
+	// others because it depends on where the frame boundary falls. Set everything, then activate.
 	UNiagaraComponent* BeamComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 		GetWorld(),
 		BeamFX,
 		Start,
 		(End - Start).Rotation(),
 		FVector::OneVector,
-		true,
-		true,
+		/*bAutoDestroy*/ true,
+		/*bAutoActivate*/ false,
 		ENCPoolMethod::None
 	);
 
@@ -2547,6 +2665,18 @@ void AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector&
 			BeamComp->SetFloatParameter(FName("Speed"), OverrideBoltSpeed);
 			BeamComp->SetFloatParameter(FName("SpeedVariance"), OverrideBoltSpeedVariance);
 			BeamComp->SetFloatParameter(FName("beamLength"), OverrideBoltLength);
+
+			// And it goes out when it gets there. The streak flies at the speed the HLSL will
+			// compute from this seed, so how long the flight takes is known here: past that moment
+			// the bolt has either hit or been dodged, and a streak still crawling along an empty
+			// line is a lie either way. In the tracer asset "BeamFadeTime" is the particle lifetime
+			// and "FadeTime" the emitter's loop duration, so both are the flight.
+			const float RandSpeed = FMath::Max(
+				OverrideBoltSpeed + OverrideBoltSpeedVariance * FMath::Sin(UsedRandomSeed), 1.0f);
+			const float FlightTime = FVector::Dist(Start, End) / RandSpeed;
+
+			BeamComp->SetFloatParameter(FName("BeamFadeTime"), FlightTime);
+			BeamComp->SetFloatParameter(FName("FadeTime"), FlightTime);
 		}
 		UE_LOG(LogTemp, Warning, TEXT("BeamFX Distance: %.1f, Start: %s, End: %s"), FVector::Dist(Start, End), *Start.ToString(), *End.ToString());
 
@@ -2598,7 +2728,13 @@ void AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector&
 			BeamComp->SetColorParameter(FName("EFieldColor"), EFieldColor);
 			BeamComp->SetColorParameter(FName("BFieldColor"), BFieldColor);
 		}
+
+		// Everything is set, so now it may run. Activating any earlier is what turns these writes
+		// into deferred ones (see the spawn call above).
+		BeamComp->Activate(true);
 	}
+
+	return BeamComp;
 }
 
 void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
