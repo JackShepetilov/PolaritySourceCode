@@ -5,26 +5,24 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Weapons/ShieldBypassProjectile.h"
-#include "Coop/CoopPlayers.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
 AShooterNPC* UAbilityHandler_ShieldBypass::FindTargetEnemy(float Range) const
 {
-	AShooterCharacter* Caster = GetOwningCharacter();
-	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
+	UWorld* World = OwningCharacter ? OwningCharacter->GetWorld() : nullptr;
 	if (!World)
 	{
 		return nullptr;
 	}
 
-	const FVector Origin = Caster->GetPawnViewLocation();
-	const FVector Aim = Caster->GetBaseAimRotation().Vector();
+	const FVector Origin = OwningCharacter->GetPawnViewLocation();
+	const FVector Aim = OwningCharacter->GetBaseAimRotation().Vector();
 
-	// Scored on two things at once, exactly as asked: how near the middle of the screen an enemy is,
-	// and how near the player. Neither alone is right -- pure screen-centre picks a distant enemy
-	// over the one in your face, pure distance picks whatever you happen to be standing next to
-	// regardless of where you are looking.
+	// Scored on being central AND being near, multiplied rather than added. Screen-centre alone
+	// picks a distant enemy over the one in your face; distance alone picks whatever you happen to
+	// stand beside regardless of where you are looking. Multiplying means neither term can carry a
+	// candidate that is hopeless on the other.
 	AShooterNPC* Best = nullptr;
 	float BestScore = -1.0f;
 
@@ -44,18 +42,13 @@ AShooterNPC* UAbilityHandler_ShieldBypass::FindTargetEnemy(float Range) const
 		}
 		ToEnemy /= Distance;
 
-		// Behind the player is never a candidate, however close it is.
 		const float Centredness = FVector::DotProduct(Aim, ToEnemy);
 		if (Centredness <= 0.0f)
 		{
-			continue;
+			continue;   // behind the player is never a candidate, however close
 		}
 
-		// Both terms in 0..1 and multiplied, so an enemy has to be reasonably central AND reasonably
-		// near to win. Multiplying rather than adding means neither term can carry a candidate that
-		// is hopeless on the other.
-		const float Nearness = 1.0f - (Distance / Range);
-		const float Score = Centredness * Nearness;
+		const float Score = Centredness * (1.0f - Distance / Range);
 		if (Score > BestScore)
 		{
 			BestScore = Score;
@@ -66,59 +59,57 @@ AShooterNPC* UAbilityHandler_ShieldBypass::FindTargetEnemy(float Range) const
 	return Best;
 }
 
-void UAbilityHandler_ShieldBypass::OnActivate_Implementation()
+void UAbilityHandler_ShieldBypass::OnPerShotEffect_Implementation()
 {
 	const UAbilityDefinition_ShieldBypass* Def = Cast<UAbilityDefinition_ShieldBypass>(GetDefinition());
-	AShooterCharacter* Caster = GetOwningCharacter();
-	if (!Def || !Caster || !Caster->GetWorld())
+	if (!OwningCharacter || !Def)
 	{
-		NotifyAbilityCancelled();
 		return;
 	}
 
-	const FShieldBypassLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
-
-	if (!Def->ProjectileClass)
+	if (!Def->BypassProjectileClass)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no ProjectileClass set on %s"),
+		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no BypassProjectileClass set on %s"),
 			*GetNameSafe(Def));
-		NotifyAbilityCancelled();
 		return;
 	}
 
-	AShooterNPC* Target = FindTargetEnemy(Stats.Range);
+	AShooterNPC* Target = FindTargetEnemy(Def->TargetSearchRange);
 	if (!Target)
 	{
-		// Nothing to fire at, so nothing is spent: the component only starts a cooldown when a
-		// handler completes.
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no enemy within %.0f"), Stats.Range);
-		NotifyAbilityCancelled();
+		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: no enemy within %.0f"),
+			Def->TargetSearchRange);
 		return;
 	}
 
-	const FVector Muzzle = Caster->GetPawnViewLocation();
-	const FRotator Facing = (Target->GetActorLocation() - Muzzle).Rotation();
+	// Same muzzle the burst uses, so the bolt leaves the hand the animation is throwing with rather
+	// than from the camera.
+	FVector SpawnLoc = OwningCharacter->GetPawnViewLocation();
+	if (const USkeletalMeshComponent* FPMesh = OwningCharacter->GetFirstPersonMesh())
+	{
+		if (!Def->ProjectileSpawnSocket.IsNone())
+		{
+			SpawnLoc = FPMesh->GetSocketLocation(Def->ProjectileSpawnSocket);
+		}
+	}
+
+	const FRotator Facing = (Target->GetActorLocation() - SpawnLoc).Rotation();
 
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.Owner = Caster;
-	SpawnParams.Instigator = Caster;
+	SpawnParams.Owner = OwningCharacter;
+	SpawnParams.Instigator = OwningCharacter;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	AShieldBypassProjectile* Bolt = Caster->GetWorld()->SpawnActor<AShieldBypassProjectile>(
-		Def->ProjectileClass, Muzzle, Facing, SpawnParams);
-
+	AShieldBypassProjectile* Bolt = OwningCharacter->GetWorld()->SpawnActor<AShieldBypassProjectile>(
+		Def->BypassProjectileClass, SpawnLoc, Facing, SpawnParams);
 	if (!Bolt)
 	{
-		NotifyAbilityCancelled();
 		return;
 	}
 
-	Bolt->LaunchAt(Target, Stats.ProjectileSpeed, Stats.RedirectDamageMultiplier,
-		Stats.Duration, Stats.MoveSpeedMultiplier);
+	Bolt->LaunchAt(Target, Def->ProjectileSpeed, Def->RedirectDamageMultiplier,
+		Def->Duration, Def->MoveSpeedMultiplier);
 
-	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: %s fired a bolt at %s (score-picked, %.0f away)"),
-		*Caster->GetName(), *Target->GetName(),
-		FVector::Dist(Caster->GetActorLocation(), Target->GetActorLocation()));
-
-	NotifyAbilityComplete();
+	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass: bolt away at %s from socket %s"),
+		*Target->GetName(), *Def->ProjectileSpawnSocket.ToString());
 }

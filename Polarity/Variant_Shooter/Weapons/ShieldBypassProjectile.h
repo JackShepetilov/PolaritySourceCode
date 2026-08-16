@@ -8,8 +8,8 @@
 #include "ShieldBypassProjectile.generated.h"
 
 /**
- * Flies at one locked enemy and, on arrival, converts the ionization sitting on it into health
- * damage.
+ * Flies at one locked enemy and, on arrival, opens it: for a few seconds the ionization that would
+ * have filled its shield goes into its health instead, multiplied. The bolt itself deals nothing.
  *
  * True homing rather than ballistic: the target is chosen when the ability is cast and never
  * re-picked, gravity is off, and the movement component steers hard enough that the bolt does not
@@ -38,7 +38,7 @@ protected:
 	UPROPERTY()
 	TWeakObjectPtr<AActor> LockedTarget;
 
-	/** Charge-to-health conversion rate, from the ability's level stats. */
+	/** Multiplier applied to ionization while the window this bolt opens is running. */
 	float ConversionMultiplier = 1.0f;
 
 	/** Slow applied on arrival, so the opened enemy stays where the team can use it. */

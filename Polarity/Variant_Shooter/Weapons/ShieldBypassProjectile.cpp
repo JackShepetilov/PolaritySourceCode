@@ -3,8 +3,6 @@
 #include "ShieldBypassProjectile.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
-#include "EMFVelocityModifier.h"
-#include "Engine/DamageEvents.h"
 
 AShieldBypassProjectile::AShieldBypassProjectile()
 {
@@ -62,33 +60,13 @@ void AShieldBypassProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* 
 
 	if (HasAuthority() && !Enemy->IsDead())
 	{
-		// The conversion. Shield IS the ionization sitting on the enemy, so the bolt takes all of it
-		// and pays it out as health damage -- that is what "skip the opening phase" means: the work
-		// the team already did on the shield is cashed in rather than continued.
-		float Converted = 0.0f;
-		if (UEMFVelocityModifier* Modifier = Enemy->FindComponentByClass<UEMFVelocityModifier>())
-		{
-			Converted = FMath::Abs(Modifier->GetCharge());
-			Modifier->SetCharge(0.0f);
-		}
+		// Opens a window; deals nothing itself. For the length of it, the ionization that would have
+		// gone into this enemy's shield goes into its health instead, multiplied. The ability does
+		// not kill anything on its own -- it changes what the team's existing fire is worth.
+		Enemy->ApplyShieldBypass(ArrivalSlowDuration, ArrivalSlowMultiplier, ConversionMultiplier);
 
-		const float Damage = Converted * ConversionMultiplier;
-		if (Damage > 0.0f)
-		{
-			FPointDamageEvent DamageEvent;
-			DamageEvent.DamageTypeClass = UDamageType::StaticClass();
-			Enemy->TakeDamage(Damage, DamageEvent, GetInstigatorController(), GetOwner());
-		}
-
-		// And the slow, so an enemy stripped of its shield stays where the rest of the team can act
-		// on it rather than walking away from everyone who is not the caster.
-		if (ArrivalSlowDuration > 0.0f)
-		{
-			Enemy->ApplyShieldBypass(ArrivalSlowDuration, ArrivalSlowMultiplier, 1.0f);
-		}
-
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass bolt hit %s: converted %.1f charge into %.1f damage"),
-			*Enemy->GetName(), Converted, Damage);
+		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldBypass bolt hit %s: open %.1fs, redirect x%.1f, slow x%.2f"),
+			*Enemy->GetName(), ArrivalSlowDuration, ConversionMultiplier, ArrivalSlowMultiplier);
 	}
 
 	Super::ProcessHit(HitActor, HitComp, HitLocation, HitDirection);

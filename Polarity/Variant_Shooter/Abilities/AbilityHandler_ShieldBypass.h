@@ -3,30 +3,23 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AbilityHandler.h"
+#include "AbilityHandler_Burst.h"
 #include "AbilityHandler_ShieldBypass.generated.h"
 
 /**
- * Runs the Wizard's active: pick the enemy being aimed at and open it up.
- *
- * Instant -- there is no cast to hold or interrupt, so it completes in the same call that starts it
- * and the component's cooldown begins straight away.
- *
- * This only ever runs on the authority. UAbilityComponent::TryActivate sends a client's press to the
- * server and returns, so by the time a handler's OnActivate is reached the machine deciding is the
- * one that owns the enemy's state. Handlers therefore contain no networking of their own, which was
- * the point of putting the ability system on the wire before writing any of them.
+ * Rides the burst pipeline and replaces only the shot itself: the montages, the timing, the spawn
+ * socket and the audio all come from UAbilityHandler_Burst, and this puts a homing bolt where a
+ * burst projectile would have gone.
  */
 UCLASS()
-class POLARITY_API UAbilityHandler_ShieldBypass : public UAbilityHandler
+class POLARITY_API UAbilityHandler_ShieldBypass : public UAbilityHandler_Burst
 {
 	GENERATED_BODY()
 
 public:
-	virtual void OnActivate_Implementation() override;
+	virtual void OnPerShotEffect_Implementation() override;
 
 protected:
-	/** The enemy under the crosshair within Range, or null. Uses the character's aim rather than the
-	 *  camera transform directly so it matches where the weapon shoots. */
+	/** Best enemy by "central AND near", scored together. */
 	class AShooterNPC* FindTargetEnemy(float Range) const;
 };

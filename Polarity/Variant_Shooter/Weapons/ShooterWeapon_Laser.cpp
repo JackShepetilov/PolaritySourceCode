@@ -343,6 +343,31 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 		return;
 	}
 
+	// While this enemy is open, the ionization that would fill its shield goes into its health
+	// instead. This is the only place the substitution can live: ionization IS the shield, so the
+	// window has to be applied where charge is handed over, not anywhere downstream.
+	//
+	// The window is opened by the Wizard's bolt (AShieldBypassProjectile), not by this weapon --
+	// this is only where its effect is felt.
+	if (AShooterNPC* OpenedNPC = Cast<AShooterNPC>(Target))
+	{
+		if (OpenedNPC->IsShieldBypassed())
+		{
+			if (GetOwner() && GetOwner()->HasAuthority())
+			{
+				// Charge-per-second is a shield-filling rate and means nothing as a damage rate,
+				// hence the multiplier the ability carries.
+				const float RedirectedDamage = IonizationChargePerSecond * DeltaTime
+					* OpenedNPC->ShieldBypassDamageMultiplier;
+
+				FPointDamageEvent DamageEvent;
+				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
+				OpenedNPC->TakeDamage(RedirectedDamage, DamageEvent, GetInstigatorController(), GetOwner());
+			}
+			return;
+		}
+	}
+
 	const float ChargeStep = IonizationChargePerSecond * DeltaTime;
 	// Sign of accumulation: -1 for electrify-negative (default), +1 for legacy ionize-positive.
 	const float DirSign = bElectrifyNegative ? -1.0f : 1.0f;
