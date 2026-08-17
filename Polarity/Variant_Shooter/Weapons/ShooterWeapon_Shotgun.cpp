@@ -55,7 +55,6 @@ AShooterWeapon_Shotgun::AShooterWeapon_Shotgun()
 	// in the project with a magazine that has to be filled. 2.6 s is the Mozambique's full reload.
 	bUseReload = true;
 	ReloadTime = 2.6f;
-	bAutoReloadWhenEmpty = true;
 }
 
 FVector AShooterWeapon_Shotgun::GetPelletDirection(const FVector& AimDirection, const FVector2D& PatternOffset) const

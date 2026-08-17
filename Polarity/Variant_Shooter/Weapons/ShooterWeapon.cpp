@@ -630,12 +630,19 @@ void AShooterWeapon::Fire()
 
 		if (CurrentBullets <= 0)
 		{
+			// Empty. That is all this is: the trigger was pulled and there was nothing to fire.
+			// Turning it into a reload is a separate decision the weapon only makes if it was told
+			// to -- otherwise the gun clicks and stays up, and the player chooses when to reload.
 			if (DryFireSound)
 			{
 				UGameplayStatics::PlaySoundAtLocation(this, DryFireSound, GetActorLocation());
 			}
 
-			StartReload();
+			if (bReloadOnEmptyTriggerPull)
+			{
+				StartReload();
+			}
+
 			return;
 		}
 	}
@@ -1047,8 +1054,9 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 		}
 		else if (bUseReload)
 		{
-			// The magazine is real: it stays empty until somebody fills it. Doing it here rather
-			// than waiting for the next trigger pull is what makes the reload feel automatic.
+			// The magazine is real: it stays empty until somebody fills it, and by default that
+			// somebody is the player. This branch is the weapon taking that decision for them, which
+			// it only does when explicitly told to.
 			if (bAutoReloadWhenEmpty)
 			{
 				StartReload();

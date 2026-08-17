@@ -559,9 +559,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload", ClampMin = "0.05", Units = "s"))
 	float ReloadTime = 2.0f;
 
-	/** Start reloading on its own the moment the magazine runs out, instead of waiting to be asked. */
+	// Running out of ammunition and deciding to reload are two different events, and only the second
+	// one is the player's. An empty magazine on its own does nothing here: the weapon is empty, it
+	// says so by clicking, and it waits to be asked. Both shortcuts below exist because plenty of
+	// shooters do take that decision for the player, but each one is off until somebody turns it on
+	// deliberately, per weapon.
+
+	/** Start reloading by itself the moment the magazine runs out. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
-	bool bAutoReloadWhenEmpty = true;
+	bool bAutoReloadWhenEmpty = false;
+
+	/** Treat pulling the trigger on an empty magazine as asking to reload. Off means it just clicks:
+	 *  a dry fire is an answer too, and it leaves the player in charge of when the gun goes down. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	bool bReloadOnEmptyTriggerPull = false;
 
 	/** Played on the holder for the duration of the reload, first and third person both. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
