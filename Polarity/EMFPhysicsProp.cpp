@@ -17,9 +17,11 @@
 #include "Upgrades/Upgrades/AirMailSpear.h"
 #include "EMFVelocityModifier.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/AudioComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/OverlapResult.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
@@ -77,7 +79,7 @@ void AEMFPhysicsProp::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 
 	DOREPLIFETIME(AEMFPhysicsProp, HoldingCharacter);
 	DOREPLIFETIME(AEMFPhysicsProp, ReplicatedCharge);
-	DOREPLIFETIME(AEMFPhysicsProp, bIsDecoy);
+	DOREPLIFETIME(AEMFPhysicsProp, DecoyPhase);
 }
 
 void AEMFPhysicsProp::OnRep_Charge()
@@ -873,9 +875,27 @@ void AEMFPhysicsProp::ApplyItemVerbOnThrow()
 	}
 }
 
+bool AEMFPhysicsProp::CanDetonate() const
+{
+	// A prop spent by a class that does something else with it never detonates. For the Wizard a
+	// fully charged object is ammunition, not a bomb; for the Tank it is a decoy that has to survive
+	// landing in order to be one. Letting either blow up on the first thing it touches would delete
+	// that class's whole verb.
+	//
+	// Nobody's prop, nobody's verb: a world explosion or a chain reaction is free to go off.
+	const AShooterCharacter* Spender = GetSpendingCharacter();
+	if (!Spender)
+	{
+		return true;
+	}
+
+	const EClassItemVerb Verb = Spender->GetItemVerb();
+	return Verb != EClassItemVerb::Throw && Verb != EClassItemVerb::Decoy;
+}
+
 void AEMFPhysicsProp::BecomeDecoy()
 {
-	if (!HasAuthority() || bIsDecoy || bIsDead || !GetWorld())
+	if (!HasAuthority() || DecoyPhase != EPropDecoyPhase::Inactive || bIsDead || !GetWorld())
 	{
 		return;
 	}
@@ -887,57 +907,238 @@ void AEMFPhysicsProp::BecomeDecoy()
 		return;
 	}
 
-	bIsDecoy = true;
+	// The fuse. Nothing is shown, nothing sounds and nobody is pulled until it runs out: the phase is
+	// still set and replicated, because it is what stops a second throw from arming the same prop
+	// twice and what tells a joining client this prop is already spoken for.
+	DecoyPhase = EPropDecoyPhase::Arming;
+	ApplyDecoyPresentation(DecoyPhase);
+
+	// A zero arm delay is allowed and means "goes off on landing": the timer manager fires a
+	// zero-length timer on the next tick, so activation still goes through the same path.
+	GetWorld()->GetTimerManager().SetTimer(DecoyArmTimer, this, &AEMFPhysicsProp::ActivateDecoy,
+		FMath::Max(KINDA_SMALL_NUMBER, DecoyArmDelay), false);
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s armed as a decoy: goes off in %.1fs, will reach %.0f cm (thrown by %s)"),
+		*GetName(), DecoyArmDelay, DecoyPullRadius, *GetNameSafe(GetSpendingCharacter()));
+}
+
+void AEMFPhysicsProp::ActivateDecoy()
+{
+	if (!HasAuthority() || DecoyPhase != EPropDecoyPhase::Arming || !GetWorld())
+	{
+		return;
+	}
+
+	// Destroyed mid-arming: the prop is gone, and there is nothing to be loud with.
+	if (bIsDead)
+	{
+		EndDecoy();
+		return;
+	}
+
+	DecoyPhase = EPropDecoyPhase::Active;
+	ApplyDecoyPresentation(DecoyPhase);
+	BP_OnDecoyStarted();
 
 	if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
 	{
 		Coordinator->RegisterDecoy(this, DecoyPullRadius, DecoyDuration);
 	}
 
-	// The authority runs its own cosmetics: OnRep does not fire on the machine that made the change.
-	BP_OnDecoyStarted();
+	GetWorld()->GetTimerManager().SetTimer(DecoyTimer, this, &AEMFPhysicsProp::OnDecoyExpired, DecoyDuration, false);
 
-	GetWorld()->GetTimerManager().SetTimer(DecoyTimer, this, &AEMFPhysicsProp::EndDecoy, DecoyDuration, false);
-
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is a decoy for %.1fs (thrown by %s)"),
-		*GetName(), DecoyDuration, *GetNameSafe(GetSpendingCharacter()));
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is a decoy for %.1fs, radius %.0f"),
+		*GetName(), DecoyDuration, DecoyPullRadius);
 }
 
 void AEMFPhysicsProp::EndDecoy()
 {
-	// Authority only, in both directions: the flag is server-owned, and a client clearing its copy
+	// Authority only, in both directions: the phase is server-owned, and a client clearing its copy
 	// would be overwritten by the next update anyway. Clients end their cosmetics from OnRep.
-	if (!HasAuthority() || !bIsDecoy)
+	if (!HasAuthority() || DecoyPhase == EPropDecoyPhase::Inactive)
 	{
 		return;
 	}
 
-	bIsDecoy = false;
+	DecoyPhase = EPropDecoyPhase::Inactive;
 
 	if (GetWorld())
 	{
+		GetWorld()->GetTimerManager().ClearTimer(DecoyArmTimer);
 		GetWorld()->GetTimerManager().ClearTimer(DecoyTimer);
 	}
 
 	// Unregistering is what releases the enemies holding it, so it has to happen even when the prop
 	// is being destroyed — that is the case where they would otherwise keep facing a dead pointer
 	// until the coordinator's next sweep.
-	if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
+	//
+	// Not while the world is going away, though: GetCoordinator SPAWNS one when there is none, and
+	// EndPlay reaches here on level teardown, where spawning an actor is a warning at best.
+	UWorld* World = GetWorld();
+	if (World && !World->bIsTearingDown)
 	{
-		Coordinator->UnregisterDecoy(this);
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this))
+		{
+			Coordinator->UnregisterDecoy(this);
+		}
 	}
 
+	ApplyDecoyPresentation(EPropDecoyPhase::Inactive);
 	BP_OnDecoyEnded();
 }
 
-void AEMFPhysicsProp::OnRep_IsDecoy()
+void AEMFPhysicsProp::OnDecoyExpired()
+{
+	if (!HasAuthority() || DecoyPhase != EPropDecoyPhase::Active)
+	{
+		return;
+	}
+
+	const FVector Where = GetActorLocation();
+
+	// Release the enemies first, then announce it. The other order would leave a frame in which the
+	// prop is invisible and still being fought.
+	EndDecoy();
+	Multicast_PlayDecoyExpiry(Where);
+
+	// Dead without dying: no OnPropDeath, no gibs, no damage anywhere. The prop is finished as a
+	// gameplay object, which is what stops it being recharged, recaptured or shot at, and
+	// ResetProp puts it back for the checkpoint system exactly as it does after a real death.
+	bIsDead = true;
+	SetActorTickEnabled(false);
+}
+
+void AEMFPhysicsProp::Multicast_PlayDecoyExpiry_Implementation(FVector Location)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	if (DecoyExpiryVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			World, DecoyExpiryVFX, Location,
+			FRotator::ZeroRotator, FVector(DecoyExpiryVFXScale),
+			true, true, ENCPoolMethod::None);
+	}
+
+	if (DecoyExpirySound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(World, DecoyExpirySound, Location);
+	}
+
+	// On a client this also covers the case where the phase has not replicated down yet: the siren
+	// has to stop with the prop it belongs to whichever message arrives first.
+	ApplyDecoyPresentation(EPropDecoyPhase::Inactive);
+
+	// And it is gone. Hidden rather than destroyed, because a destroyed prop cannot be restored by
+	// the checkpoint system, and because the actor is what carries the charge bar registration.
+	if (PropMesh)
+	{
+		ApplyPropPhysicsSimulation(false);
+		PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PropMesh->SetVisibility(false);
+	}
+	SetActorHiddenInGame(true);
+
+	// The overhead charge bar outlives the mesh otherwise, and floats there over nothing.
+	if (UEMFChargeWidgetSubsystem* WidgetSub = World->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->UnregisterProp(this);
+	}
+}
+
+void AEMFPhysicsProp::ApplyDecoyPresentation(EPropDecoyPhase Phase)
+{
+	if (!PropMesh || PresentedPhase == Phase)
+	{
+		return;
+	}
+
+	const EPropDecoyPhase Previous = PresentedPhase;
+	PresentedPhase = Phase;
+
+	// ---- Leaving the phase we were in ----
+
+	if (Previous == EPropDecoyPhase::Active)
+	{
+		if (DecoyRadiusVFXComponent)
+		{
+			// Deactivate, not destroy: the sphere is allowed to finish the fade it is in the middle of.
+			// Normally the system has already ended by itself, having been told to last exactly as long
+			// as the pull; this matters for a decoy cut short, shot to pieces or picked back up.
+			DecoyRadiusVFXComponent->Deactivate();
+			DecoyRadiusVFXComponent = nullptr;
+		}
+
+		if (DecoyAudio)
+		{
+			DecoyAudio->FadeOut(DecoyLoopFadeOutSeconds, 0.0f);
+			DecoyAudio = nullptr;
+		}
+
+		// Back to whatever the charge is worth. UpdateChargeOverlay no-ops when the charge overlay is
+		// switched off on this prop, so the material is cleared first rather than left on.
+		PropMesh->SetOverlayMaterial(nullptr);
+		UpdateChargeOverlay(PreviousPolarity);
+	}
+
+	// ---- Entering the new one ----
+
+	if (Phase == EPropDecoyPhase::Active)
+	{
+		if (DecoyRadiusVFX)
+		{
+			// Attached to the mesh, not fired at a location: the prop can still be rolling when the
+			// fuse runs out, and a sphere left where it was would mark the wrong ground.
+			DecoyRadiusVFXComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				DecoyRadiusVFX, PropMesh, NAME_None, FVector::ZeroVector, FRotator::ZeroRotator,
+				EAttachLocation::KeepRelativeOffset, true);
+
+			// The asset is told the radius rather than knowing it, so the drawn sphere and the radius
+			// the coordinator uses cannot drift apart. Duration is the whole active phase: the sphere
+			// snaps out to full size and then stands there for as long as the pull lasts, which is what
+			// makes "am I inside it" answerable while it matters. Harmless when the system has no such
+			// parameters.
+			if (DecoyRadiusVFXComponent)
+			{
+				DecoyRadiusVFXComponent->SetFloatParameter(FName("Radius"), DecoyPullRadius);
+				DecoyRadiusVFXComponent->SetFloatParameter(FName("Duration"), FMath::Max(KINDA_SMALL_NUMBER, DecoyDuration));
+			}
+		}
+
+		if (DecoyOverlayMaterial)
+		{
+			PropMesh->SetOverlayMaterial(DecoyOverlayMaterial);
+		}
+
+		// Attached, not fired at a location, for the same reason as the sphere. Returns null on a
+		// dedicated server, which is the correct amount of noise for a machine with no ears.
+		if (DecoyLoopSound && !DecoyAudio)
+		{
+			DecoyAudio = UGameplayStatics::SpawnSoundAttached(DecoyLoopSound, PropMesh);
+		}
+	}
+}
+
+void AEMFPhysicsProp::OnRep_DecoyPhase()
 {
 	// Cosmetics only. Everything the decoy DOES is decided on the server.
-	if (bIsDecoy)
+	//
+	// A client that misses the Arming update entirely (relevancy, packet loss) gets Active on its own
+	// and loses nothing by it: the fuse is silent and invisible, so there is no announcement to miss,
+	// and ApplyDecoyPresentation goes straight to what is true now.
+	const bool bWasActive = PresentedPhase == EPropDecoyPhase::Active;
+
+	ApplyDecoyPresentation(DecoyPhase);
+
+	if (DecoyPhase == EPropDecoyPhase::Active)
 	{
 		BP_OnDecoyStarted();
 	}
-	else
+	else if (DecoyPhase == EPropDecoyPhase::Inactive && bWasActive)
 	{
 		BP_OnDecoyEnded();
 	}
@@ -1896,8 +2097,13 @@ void AEMFPhysicsProp::Die(AActor* Killer)
 		return;
 	}
 
-	// If prop can explode and hasn't yet — explode instead of just dying
-	if (bCanExplode && !bHasExploded)
+	// If prop can explode and hasn't yet — explode instead of just dying.
+	//
+	// CanDetonate is asked here as well as inside Explode, and it has to be: this branch returns on
+	// the assumption that the explosion finished the prop off, so a prop whose class refuses to
+	// detonate used to come out of Die neither exploded nor dead. Shot to pieces it simply stood
+	// there, and a decoy shot to pieces never let its enemies go.
+	if (bCanExplode && !bHasExploded && CanDetonate())
 	{
 		Explode(1.0f, 1.0f, 1.0f);
 		return;
@@ -2079,27 +2285,14 @@ void AEMFPhysicsProp::FreezeGibs()
 
 void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, float VFXScaleMultiplier)
 {
-	// A prop spent by a class that does something else with it never detonates. For the Wizard a
-	// fully charged object is ammunition, not a bomb; for the Tank it is a decoy that has to survive
-	// landing in order to be one. Letting either blow up on the first thing it touches would delete
-	// that class's whole verb.
-	//
 	// Gated here rather than at the six call sites: every one of them is a different reason to
 	// explode (impact, velocity, damage, scripted), and missing one would leave the mechanic working
 	// almost always, which is worse than not working at all.
-	//
-	// Note what this deliberately does NOT cover: a decoy shot to pieces by the enemies it attracted
-	// still dies, because that runs through Die and the HP path, not through here. Ending the
-	// distraction early by destroying the bait is the counterplay, not a bug.
-	if (const AShooterCharacter* Spender = GetSpendingCharacter())
+	if (!CanDetonate())
 	{
-		const EClassItemVerb Verb = Spender->GetItemVerb();
-		if (Verb == EClassItemVerb::Throw || Verb == EClassItemVerb::Decoy)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s did not explode: spent by %s, whose class uses props another way (verb=%d)"),
-				*GetName(), *Spender->GetName(), static_cast<int32>(Verb));
-			return;
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s did not explode: spent by %s, whose class uses props another way"),
+			*GetName(), *GetNameSafe(GetSpendingCharacter()));
+		return;
 	}
 
 	if (bHasExploded || bIsDead)
@@ -2507,6 +2700,18 @@ void AEMFPhysicsProp::ResetProp()
 	CurrentHP = MaxHP;
 	SetActorTickEnabled(true);
 
+	// A decoy that ran out and vanished also gave up its charge bar, because the widget hides itself
+	// on IsDead and a client never learns that a prop is dead. Restoring the prop has to restore the
+	// bar with it, and RegisterProp ignores a prop it already has.
+	EndDecoy();
+	if (UWorld* World = GetWorld())
+	{
+		if (UEMFChargeWidgetSubsystem* WidgetSub = World->GetSubsystem<UEMFChargeWidgetSubsystem>())
+		{
+			WidgetSub->RegisterProp(this);
+		}
+	}
+
 	// Clean up any existing GC gibs from previous death
 	GetWorld()->GetTimerManager().ClearTimer(GCFreezeTimer);
 	GetWorld()->GetTimerManager().ClearTimer(GCCleanupTimer);
@@ -2725,6 +2930,14 @@ void AEMFPhysicsProp::UpdateChargeTracking()
 void AEMFPhysicsProp::UpdateChargeOverlay(uint8 NewPolarity)
 {
 	if (!bUseChargeOverlay || !PropMesh)
+	{
+		return;
+	}
+
+	// A decoy wears its own overlay, and its charge keeps changing while it is one (enemies shoot
+	// it, it discharges). Without this the siren overlay was replaced by the ordinary charge one on
+	// the first charge event after the throw.
+	if (PresentedPhase == EPropDecoyPhase::Active && DecoyOverlayMaterial)
 	{
 		return;
 	}

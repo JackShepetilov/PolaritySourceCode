@@ -16,6 +16,11 @@
 
 class UAbilityDefinition;
 class UAbilityHandler;
+class UNiagaraSystem;
+class USoundBase;
+class AActor;
+class AController;
+struct FHitResult;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityAdded, int32, SlotIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityRemoved, int32, SlotIndex);
@@ -128,6 +133,54 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ability|Inventory")
 	bool HasAbility(UAbilityDefinition* Definition) const;
 
+	// ==================== Passive channel ====================
+	// A passive is an ability by construction -- same definition, same handler, same levels -- and
+	// nothing like one in how it is held. It is never selected, never activated, never on cooldown,
+	// and it must not eat one of MaxAbilitySlots. So it lives beside the inventory rather than in it.
+	// Putting it in a slot, which is what the first pass did, gave the player an ability they could
+	// switch to and press, and cost them a third of their inventory to carry something they never
+	// chose.
+
+	/** Install the always-on ability. Authority only, like the rest of the inventory API; the client
+	 *  learns about it when PassiveDefinition replicates and builds its own mirror handler.
+	 *  Passing null removes whatever is installed. */
+	UFUNCTION(BlueprintCallable, Category = "Ability|Passive")
+	void GrantPassive(UAbilityDefinition* Definition);
+
+	UFUNCTION(BlueprintPure, Category = "Ability|Passive")
+	UAbilityDefinition* GetPassiveAbility() const { return PassiveDefinition; }
+
+	UFUNCTION(BlueprintPure, Category = "Ability|Passive")
+	UAbilityHandler* GetPassiveHandler() const { return PassiveHandler; }
+
+	/** Told by the owning character from its TakeDamage, on the authority. Forwarded to the passive,
+	 *  which is the only thing that can answer damage today. */
+	void NotifyOwnerDamaged(float Damage, AActor* DamageCauser, AController* InstigatedBy, const FHitResult& HitInfo);
+
+	/** Play a one-shot beam on every machine, from Start to End, and a sound where it lands.
+	 *
+	 *  Abilities decide on the authority and their effects have to be seen and heard everywhere, so
+	 *  spawning either locally in a handler would leave only the server aware of it. Generic rather
+	 *  than named after the ability that needed it first: the whole contract is a system, a sound, two
+	 *  points and a scale. Both are optional on their own — null System plays no beam, null Sound
+	 *  plays no sound, and either can be used without the other.
+	 *
+	 *  The system is expected to take the end of the beam as a Vec3 user parameter named
+	 *  BeamEndPoint, which is the shape the channelling capture and launch beams already use --
+	 *  the same asset works in both places without being rebuilt. A system without that parameter
+	 *  still plays, at Start, ignoring where it was supposed to reach.
+	 *
+	 *  Unreliable: it is cosmetic, and the damage it illustrates has already happened. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayBeamVFX(UNiagaraSystem* System, USoundBase* Sound, FVector Start, FVector End, FVector Scale);
+
+	/** `polarity.ability.beamdebug 1` — log every beam and draw it as a line with a ball on each end.
+	 *
+	 *  Shared rather than a CVar read in each file, because the question being answered spans three of
+	 *  them: where the damage event said it landed, what the ability made of that, and what actually
+	 *  arrived on the far machine. One switch turns on all three or the trail has holes in it. */
+	static bool IsBeamDebugEnabled();
+
 	// ==================== Activation API ====================
 
 	UFUNCTION(BlueprintCallable, Category = "Ability|Activation")
@@ -239,6 +292,22 @@ protected:
 
 	UPROPERTY(Replicated)
 	float CooldownTimeRemaining = 0.0f;
+
+	/** The always-on ability, owner-only for the same reason the slots are: nobody else's screen has
+	 *  any use for it. */
+	UPROPERTY(ReplicatedUsing = OnRep_PassiveDefinition)
+	TObjectPtr<UAbilityDefinition> PassiveDefinition;
+
+	UFUNCTION()
+	void OnRep_PassiveDefinition();
+
+	/** Local mirror, built from PassiveDefinition on both sides. Never replicated itself. */
+	UPROPERTY()
+	TObjectPtr<UAbilityHandler> PassiveHandler;
+
+	/** Put PassiveHandler in step with PassiveDefinition. Keeps an existing handler whose definition
+	 *  is unchanged, so a passive holding a binding is not torn down for nothing. */
+	void RebuildPassiveHandler();
 
 	/** Rebuild EquippedHandlers so they match ReplicatedSlots, keeping handlers whose definition and
 	 *  level are unchanged. Called on the authority after any inventory change and on a client from

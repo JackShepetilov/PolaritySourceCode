@@ -47,6 +47,44 @@ void AShooterWeapon::PlayFireEffectsLocally()
 {
 	SpawnMuzzleFlashEffect();
 	PlayFireSound();
+
+	// The gun's own moving parts. Here rather than in Fire() because this function is what every
+	// machine runs -- the shooter directly and everybody else through Multicast_PlayFireEffects --
+	// so the action of the weapon is seen by the people watching it too, not only by its owner.
+	PlayWeaponMeshAnimation(WeaponMeshFireAnimation);
+}
+
+void AShooterWeapon::PlayWeaponMeshAnimation(UAnimationAsset* Animation)
+{
+	if (!Animation)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* Meshes[] = { FirstPersonMesh, ThirdPersonMesh };
+	for (USkeletalMeshComponent* Mesh : Meshes)
+	{
+		if (!Mesh || !Mesh->GetSkeletalMeshAsset())
+		{
+			continue;
+		}
+
+		// A weapon that runs an anim blueprint of its own keeps it: play the montage through the
+		// instance so the graph can blend it and its notifies still fire. PlayAnimation would throw
+		// the graph away for a single-node player and the weapon would freeze in that pose.
+		if (UAnimMontage* AsMontage = Cast<UAnimMontage>(Animation))
+		{
+			if (UAnimInstance* MeshAnimInstance = Mesh->GetAnimInstance())
+			{
+				MeshAnimInstance->Montage_Play(AsMontage);
+				continue;
+			}
+		}
+
+		// No graph, or a plain sequence: play it straight on the component. This is the usual case
+		// for a weapon mesh, which has nothing else to animate it.
+		Mesh->PlayAnimation(Animation, /*bLooping*/ false);
+	}
 }
 
 void AShooterWeapon::Multicast_PlayFireEffects_Implementation()
@@ -2235,6 +2273,9 @@ bool AShooterWeapon::StartReload()
 	{
 		WeaponOwner->PlayFiringMontage(ReloadMontage);
 	}
+
+	// The weapon's own reload: the magazine coming out, the pump, the shells going in.
+	PlayWeaponMeshAnimation(WeaponMeshReloadAnimation);
 
 	if (ReloadSound)
 	{

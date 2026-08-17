@@ -1467,6 +1467,39 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		PlayDamageFeedback(Damage, DamageTypeClass);
 	}
 
+	// Anything the class answers damage with (the Tank returns part of it) gets told here, on the
+	// authority, with health already moved -- so a passive can see whether this hit killed him.
+	if (AbilityComponent && Damage > 0.0f)
+	{
+		// The event's own account of where it landed: a point hit gives the real impact and bone, a
+		// radial or generic one gives the actor. Asked for here because it is gone by the time
+		// anything downstream wants it, and a reaction drawn from the wound needs both.
+		FHitResult HitInfo;
+		FVector ImpulseDir;
+		DamageEvent.GetBestHitInfo(this, DamageCauser, HitInfo, ImpulseDir);
+
+		if (UAbilityComponent::IsBeamDebugEnabled())
+		{
+			// The first link of the chain: what the event itself claimed, before any ability read it.
+			// The type matters more than the numbers -- a radial event's "best hit info" is its ORIGIN,
+			// which sits on whatever exploded rather than on the body it damaged.
+			const TCHAR* EventKind =
+				DamageEvent.IsOfType(FPointDamageEvent::ClassID)  ? TEXT("Point")  :
+				DamageEvent.IsOfType(FRadialDamageEvent::ClassID) ? TEXT("Radial") : TEXT("Generic");
+
+			UE_LOG(LogTemp, Warning,
+				TEXT("[BEAM_DEBUG] TAKEDAMAGE kind=%s dmg=%.1f causer=%s impact=%s bone='%s'")
+				TEXT(" impactDistToMe=%.0f myLocation=%s"),
+				EventKind, Damage, *GetNameSafe(DamageCauser),
+				*FVector(HitInfo.ImpactPoint).ToCompactString(),
+				*HitInfo.BoneName.ToString(),
+				FVector::Dist(FVector(HitInfo.ImpactPoint), GetActorLocation()),
+				*GetActorLocation().ToCompactString());
+		}
+
+		AbilityComponent->NotifyOwnerDamaged(Damage, DamageCauser, EventInstigator, HitInfo);
+	}
+
 	// Apply knockback for melee damage
 	if (bEnableMeleeKnockback && Damage > 0.0f && DamageTypeClass)
 	{
@@ -3268,9 +3301,12 @@ void AShooterCharacter::ApplyClassDefinition()
 	// is the same road a picked-up ability travels.
 	if (HasAuthority() && AbilityComponent)
 	{
+		// The passive goes to its own channel, not into a slot. Through AddAbility it became an
+		// ordinary ability: selectable, activatable, and eating one of three inventory slots the
+		// player never spent on it.
 		if (ClassDefinition->PassiveAbility)
 		{
-			AbilityComponent->AddAbility(ClassDefinition->PassiveAbility);
+			AbilityComponent->GrantPassive(ClassDefinition->PassiveAbility);
 		}
 		if (ClassDefinition->ActiveAbility)
 		{

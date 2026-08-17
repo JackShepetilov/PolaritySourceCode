@@ -5,7 +5,25 @@
 #include "AbilityHandler.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "EMFVelocityModifier.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "DrawDebugHelpers.h"
 #include "Net/UnrealNetwork.h"
+
+static TAutoConsoleVariable<int32> CVarAbilityBeamDebug(
+	TEXT("polarity.ability.beamdebug"),
+	0,
+	TEXT("Log and draw ability beams (the Tank's damage return today).\n")
+	TEXT("Answers one question: does the beam actually run from the player to the enemy.\n")
+	TEXT("  0 = off\n")
+	TEXT("  1 = log both ends on every machine, and draw the line for 3 seconds"),
+	ECVF_Default);
+
+bool UAbilityComponent::IsBeamDebugEnabled()
+{
+	return CVarAbilityBeamDebug.GetValueOnAnyThread() > 0;
+}
 
 UAbilityComponent::UAbilityComponent()
 {
@@ -26,6 +44,122 @@ void UAbilityComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME_CONDITION(UAbilityComponent, ActiveSlotIndex, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UAbilityComponent, bIsCasting, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UAbilityComponent, CooldownTimeRemaining, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UAbilityComponent, PassiveDefinition, COND_OwnerOnly);
+}
+
+// ==================== Passive channel ====================
+
+void UAbilityComponent::GrantPassive(UAbilityDefinition* Definition)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	if (PassiveDefinition == Definition)
+	{
+		return;
+	}
+
+	PassiveDefinition = Definition;
+	RebuildPassiveHandler();
+}
+
+void UAbilityComponent::OnRep_PassiveDefinition()
+{
+	RebuildPassiveHandler();
+}
+
+void UAbilityComponent::RebuildPassiveHandler()
+{
+	if (PassiveHandler && PassiveHandler->GetDefinition() == PassiveDefinition)
+	{
+		return;
+	}
+
+	if (PassiveHandler)
+	{
+		// Unequip first: a passive's whole existence is its bindings, and dropping the handler
+		// without telling it would leave those bound to a garbage object.
+		PassiveHandler->OnUnequip();
+		DestroyHandler(PassiveHandler);
+		PassiveHandler = nullptr;
+	}
+
+	if (!PassiveDefinition)
+	{
+		return;
+	}
+
+	// Level 1 always: there is no way to upgrade a passive yet, and inventing a path for it here
+	// would be a system nobody has asked for. When class progression arrives it goes through the
+	// same CreateHandler / SetLevel road the slots already use.
+	PassiveHandler = CreateHandler(PassiveDefinition, 1);
+	if (PassiveHandler)
+	{
+		// Slots get equipped by being switched to. A passive has no such moment, so this is it.
+		PassiveHandler->OnEquip();
+	}
+}
+
+void UAbilityComponent::NotifyOwnerDamaged(float Damage, AActor* DamageCauser, AController* InstigatedBy, const FHitResult& HitInfo)
+{
+	if (PassiveHandler)
+	{
+		PassiveHandler->OnOwnerDamaged(Damage, DamageCauser, InstigatedBy, HitInfo);
+	}
+}
+
+void UAbilityComponent::Multicast_PlayBeamVFX_Implementation(UNiagaraSystem* System, USoundBase* Sound, FVector Start, FVector End, FVector Scale)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	if (IsBeamDebugEnabled())
+	{
+		// Printed on every machine that receives the call, with the role, because the two ends are
+		// FVector RPC parameters and "the server had it right" is not evidence that the client did.
+		const AActor* Owner = GetOwner();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BEAM_DEBUG] ARRIVED role=%d owner=%s start=%s end=%s len=%.0f system=%s sound=%s"),
+			Owner ? (int32)Owner->GetLocalRole() : -1,
+			*GetNameSafe(Owner),
+			*Start.ToCompactString(), *End.ToCompactString(),
+			FVector::Dist(Start, End),
+			*GetNameSafe(System), *GetNameSafe(Sound));
+
+		// Green ball where the beam starts, red where it ends, line between. If both balls sit inside
+		// the enemy, the start was wrong before it ever got here; if they are correct and the effect
+		// still looks wrong, the asset is not using BeamEndPoint.
+		DrawDebugLine(World, Start, End, FColor::Yellow, false, 3.0f, 0, 2.0f);
+		DrawDebugSphere(World, Start, 12.0f, 8, FColor::Green, false, 3.0f, 0, 1.5f);
+		DrawDebugSphere(World, End, 12.0f, 8, FColor::Red, false, 3.0f, 0, 1.5f);
+	}
+
+	// Dedicated servers draw and hear nothing. Left to the engine rather than guarded here: a listen
+	// server IS a machine with a screen and ears, and it has to see and hear this like everybody else.
+	if (System)
+	{
+		UNiagaraComponent* Spawned = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			World, System, Start, FRotator::ZeroRotator, Scale, /*bAutoDestroy=*/ true);
+
+		if (Spawned)
+		{
+			// Same parameter name as the channelling beams. One shot, so unlike those it is never
+			// re-pointed: by the time it would matter the enemy has already been hit.
+			Spawned->SetVariableVec3(FName("BeamEndPoint"), End);
+		}
+	}
+
+	if (Sound)
+	{
+		// At the far end, not the near one: this announces the enemy taking the hit back, and a sound
+		// coming from the Tank's own wound would read as him being hurt a second time.
+		UGameplayStatics::PlaySoundAtLocation(World, Sound, End);
+	}
 }
 
 void UAbilityComponent::PublishSlotsFromHandlers()
@@ -131,6 +265,14 @@ void UAbilityComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		DestroyHandler(Handler);
 	}
 	EquippedHandlers.Empty();
+
+	if (PassiveHandler)
+	{
+		PassiveHandler->OnUnequip();
+		DestroyHandler(PassiveHandler);
+		PassiveHandler = nullptr;
+	}
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -158,6 +300,13 @@ void UAbilityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	if (bAuthority)
 	{
 		PublishSlotsFromHandlers();
+	}
+
+	// The passive gets the tick on every machine. Its own guards decide what it may do there, the
+	// same way the handler decides what it may do anywhere else.
+	if (PassiveHandler)
+	{
+		PassiveHandler->OnPassiveTick(DeltaTime);
 	}
 }
 

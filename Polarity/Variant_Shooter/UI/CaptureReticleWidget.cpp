@@ -33,6 +33,17 @@ void UCaptureReticleWidget::UpdateForTarget(const FVector2D& ScreenPosition, flo
 	}
 }
 
+void UCaptureReticleWidget::SetItemVerb(EClassItemVerb NewVerb)
+{
+	if (ItemVerb == NewVerb)
+	{
+		return;
+	}
+
+	ItemVerb = NewVerb;
+	BP_OnItemVerbChanged(ItemVerb);
+}
+
 void UCaptureReticleWidget::ClearTarget()
 {
 	if (bHasTarget)

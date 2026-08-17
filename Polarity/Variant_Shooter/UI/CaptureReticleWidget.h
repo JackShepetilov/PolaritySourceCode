@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "Variant_Shooter/Classes/PlayerClassDefinition.h"
 #include "CaptureReticleWidget.generated.h"
 
 /**
@@ -43,6 +44,31 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Capture Reticle")
 	bool HasTarget() const { return bHasTarget; }
 
+	// ==================== Owner's class ====================
+	// The brackets are the one piece of HUD that says "you can spend this", and what spending means
+	// is different for every class. The colour is the cheapest way to say which, so the widget is
+	// told the LOCAL player's item verb and the Blueprint looks the tint up.
+
+	/** Tell the reticle which class is looking at it. Pushed by EMFChargeWidgetSubsystem every frame;
+	 *  the event below only fires when the answer actually changes, so a Blueprint may do real work
+	 *  in it. */
+	void SetItemVerb(EClassItemVerb NewVerb);
+
+	/** What the local player does with a fully charged object. Drives the bracket tint.
+	 *
+	 *  None is a real answer and not an error: every map and test that predates classes spawns a
+	 *  plain BP_ShooterCharacter, and those get whatever colour the Blueprint maps None to. */
+	UFUNCTION(BlueprintPure, Category = "Capture Reticle")
+	EClassItemVerb GetItemVerb() const { return ItemVerb; }
+
+	/** Fires once whenever the local player's item verb changes, including the first time it is
+	 *  known. Late by nature: the class definition replicates down after the widget exists, so this
+	 *  fires again on a client a moment after the HUD is built. Tint from it, do not assume it has
+	 *  already fired at Construct. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Capture Reticle",
+		meta = (DisplayName = "On Item Verb Changed"))
+	void BP_OnItemVerbChanged(EClassItemVerb NewVerb);
+
 	// ==================== Layout ====================
 
 	/** Design-time pixel size of the brackets image at render scale 1.0 (square).
@@ -66,4 +92,9 @@ public:
 protected:
 	bool bHasTarget = false;
 	uint8 LastPolarity = 255; // sentinel so the first real polarity always fires the event
+
+	/** Cached so the change event is not fired every frame. Starts at None, which is also a valid
+	 *  value, so the first push of None does NOT fire — the Blueprint's own default has to be the
+	 *  None colour. Anything else needs a second sentinel for a case nobody can see. */
+	EClassItemVerb ItemVerb = EClassItemVerb::None;
 };

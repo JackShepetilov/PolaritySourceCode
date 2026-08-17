@@ -51,6 +51,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCHealthChanged, AShooterNPC*, 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNPCStunStart, AShooterNPC*, StunnedNPC, float, Duration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCStunEnd, AShooterNPC*, StunnedNPC);
 
+/** Any NPC, anywhere, has died. The per-instance delegates above answer "what happened to THIS
+ *  enemy" and need somebody holding a pointer to it; this answers "a death happened", which is what
+ *  a system watching the whole fight actually wants. Binding per instance would mean discovering
+ *  every NPC as it spawns first, and inventing that just to hear about deaths is more machinery than
+ *  the question deserves.
+ *
+ *  Static and non-dynamic: the listeners are C++ (the Tank's passive today). Fires on the authority,
+ *  inside Die, alongside the per-instance broadcasts. */
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnAnyNPCDeath, AShooterNPC* /*DeadNPC*/, TSubclassOf<UDamageType> /*KillingDamageType*/, AActor* /*KillingDamageCauser*/);
+
 class AShooterWeapon;
 class UAnimMontage;
 class UAIAccuracyComponent;
@@ -171,9 +181,14 @@ public:
 	UFUNCTION()
 	void OnRep_ShieldBypassActive();
 
-	/** Put the overlay on or take it off. Called on the authority when the window opens and closes,
-	 *  and on every client from OnRep, so all four screens agree about who is worth shooting. */
-	void UpdateShieldBypassOverlay();
+	/** Decide which status overlay this enemy should be wearing and put it on.
+	 *
+	 *  One function because there is one slot. Shield bypass and decoy distraction both want it, and
+	 *  before this each effect wrote and cleared it on its own, so whichever ended last blanked the
+	 *  other. Priority is bypass first: "this one can be hurt right now" is worth more to the team
+	 *  than "this one is busy". Called on the authority whenever either state changes and on every
+	 *  client from the matching OnRep, so all four screens agree. */
+	void RefreshStatusOverlay();
 
 	/** Laid over the whole mesh while this enemy is open, so the rest of the team can see at a glance
 	 *  which target is worth focusing. Set per NPC class in the Blueprint.
@@ -197,6 +212,32 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Coop|Shield Bypass")
 	bool IsShieldBypassed() const { return bShieldBypassActive; }
+
+	// ==================== Distraction (Tank's decoy) ====================
+
+	/** True while a decoy is holding this enemy's attention.
+	 *
+	 *  Set by AAICombatCoordinator, which is the one place that knows who is being pulled and by
+	 *  what. Replicated purely so it can be SEEN: the enemies a decoy caught have to be tellable
+	 *  from the ones it missed, or the Tank cannot know whether the throw was worth anything. */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Distracted, Category = "Coop|Distraction")
+	bool bDistracted = false;
+
+	UFUNCTION()
+	void OnRep_Distracted();
+
+	/** Worn while a decoy holds this enemy. Set per NPC class in the Blueprint, like the shield
+	 *  bypass overlay next to it, and not replicated for the same reason: the flag travels and every
+	 *  machine already has the class default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Distraction")
+	TObjectPtr<class UMaterialInterface> DistractedOverlayMaterial;
+
+	/** Authority only. Idempotent: the coordinator calls this every tick an enemy is inside a decoy's
+	 *  radius, and only a real change is allowed to cost a replication. */
+	void SetDistracted(bool bNewDistracted);
+
+	UFUNCTION(BlueprintPure, Category = "Coop|Distraction")
+	bool IsDistractedByDecoy() const { return bDistracted; }
 
 	// ==================== Shield loan (Melee active) ====================
 
@@ -826,6 +867,11 @@ public:
 	/** Called when this NPC dies with detailed kill info (damage type, causer) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCDeathDetailed OnNPCDeathDetailed;
+
+	/** Every NPC's death, for listeners that watch the fight rather than one enemy. @see FOnAnyNPCDeath.
+	 *  Static, so a listener must take its binding back off when it goes away — nothing here can
+	 *  outlive the delegate and be cleaned up for it. */
+	static FOnAnyNPCDeath OnAnyNPCDeath;
 
 	/** Called when NPC enters explosion stun state */
 	UPROPERTY(BlueprintAssignable, Category = "Events")

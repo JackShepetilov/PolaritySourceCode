@@ -9,6 +9,7 @@
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "EMFPhysicsProp.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
@@ -163,6 +164,18 @@ void UEMFChargeWidgetSubsystem::UpdateCaptureReticle(APlayerController* PC, cons
 	if (!Reticle)
 	{
 		return;
+	}
+
+	// Which class is looking at these brackets. Pushed every frame and filtered inside the widget,
+	// rather than set once at creation: the class definition is replicated, so on a client it is not
+	// there yet when the HUD is built, and a one-shot read would leave that player's reticle in the
+	// classless colour for the whole run.
+	//
+	// PC is the LOCAL controller (see the caller), which is exactly right here and would be exactly
+	// wrong for anything but presentation: on the host it silently means "the host".
+	if (const AShooterCharacter* LocalCharacter = Cast<AShooterCharacter>(PC->GetPawn()))
+	{
+		Reticle->SetItemVerb(LocalCharacter->GetItemVerb());
 	}
 
 	FVector Center;

@@ -1081,6 +1081,13 @@ void AAICombatCoordinator::ApplyDistraction(APawn* NPC, AActor* Decoy, float Sec
 	{
 		AIController->DistractTo(Decoy, SecondsRemaining);
 	}
+
+	// And say so on the enemy itself, where it can be seen. The controller knows, but a controller
+	// has no mesh and does not replicate to the machines that need to draw this.
+	if (AShooterNPC* ShooterNPC = Cast<AShooterNPC>(NPC))
+	{
+		ShooterNPC->SetDistracted(true);
+	}
 }
 
 void AAICombatCoordinator::ClearDistraction(APawn* NPC)
@@ -1088,6 +1095,11 @@ void AAICombatCoordinator::ClearDistraction(APawn* NPC)
 	if (AShooterAIController* AIController = Cast<AShooterAIController>(NPC ? NPC->GetController() : nullptr))
 	{
 		AIController->EndDistraction();
+	}
+
+	if (AShooterNPC* ShooterNPC = Cast<AShooterNPC>(NPC))
+	{
+		ShooterNPC->SetDistracted(false);
 	}
 }
 

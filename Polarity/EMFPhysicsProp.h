@@ -16,6 +16,7 @@ class AShooterNPC;
 class AShooterCharacter;
 class UNiagaraSystem;
 class USoundBase;
+class UAudioComponent;
 class UMaterialInterface;
 class UAnimMontage;
 class UCurveFloat;
@@ -28,6 +29,25 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPropChargeChanged, float, NewCha
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropExploded, AEMFPhysicsProp*, Prop, FVector, Location, float, DamageMultiplier);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnNPCStunnedByExplosion, AShooterNPC*, StunnedNPC, AEMFPhysicsProp*, ExplodedProp, float, StunDuration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropCriticalVelocityImpact, AEMFPhysicsProp*, Prop, FVector, Location, float, Speed);
+
+/**
+ * Where a thrown decoy is in its life.
+ *
+ * Arming is a fuse, in the grenade sense: the prop is in the air or on the ground, it shows nothing,
+ * makes no noise and pulls nobody, and when the delay runs out the whole thing starts at once. The
+ * gap is throwing distance — time for the Tank to place the prop and get away from where every enemy
+ * in the room is about to look — and not a warning to read.
+ */
+UENUM(BlueprintType)
+enum class EPropDecoyPhase : uint8
+{
+	/** Not a decoy. Every prop, almost always. */
+	Inactive,
+	/** Thrown, fuse burning. Shows nothing, pulls nobody. */
+	Arming,
+	/** Loud, drawing its reach, and taking every enemy inside DecoyPullRadius. */
+	Active
+};
 
 /**
  * Physics-simulated prop with full EMF system integration.
@@ -770,18 +790,33 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy", meta = (ClampMin = "0.0", Units = "s"))
 	float DecoyDuration = 6.0f;
 
+	/** The fuse: dead time between the throw and the decoy going off. Nothing is drawn, nothing sounds
+	 *  and nobody is pulled while it burns.
+	 *
+	 *  It is what lets the prop be placed rather than merely dropped — long enough to throw it across
+	 *  the room and step out of where the fighting is about to be, short enough that it is not a trap
+	 *  the Tank has to plan a fight around. TEST VALUE. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy", meta = (ClampMin = "0.0", Units = "s"))
+	float DecoyArmDelay = 1.0f;
+
 	/** How far the noise carries. Enemies outside it are not distracted at all: a decoy is a local
 	 *  event, and one that emptied the whole arena would be a different mechanic. TEST VALUE. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy", meta = (ClampMin = "0.0", Units = "cm"))
 	float DecoyPullRadius = 2500.0f;
 
-	/** True while this prop is pulling aggression. Replicated, so every machine can draw it. */
+	/** True only while this prop is actually pulling aggression, which is NOT the whole time it is a
+	 *  decoy: an arming prop is already one and pulls nobody. Everything that asks "is anybody being
+	 *  held by this" wants this answer. */
 	UFUNCTION(BlueprintPure, Category = "Decoy")
-	bool IsDecoy() const { return bIsDecoy; }
+	bool IsDecoy() const { return DecoyPhase == EPropDecoyPhase::Active; }
 
-	/** Turn it on. Authority only — this decides what the AI does. Called from the throw when the
-	 *  thrower's class item verb is Decoy; also callable from Blueprint for tests and for anything
-	 *  else that should be loud later. */
+	/** Arming or active. Replicated, so every machine can draw both. */
+	UFUNCTION(BlueprintPure, Category = "Decoy")
+	EPropDecoyPhase GetDecoyPhase() const { return DecoyPhase; }
+
+	/** Start the arming phase. Authority only — this decides what the AI does. Called from the throw
+	 *  when the thrower's class item verb is Decoy; also callable from Blueprint for tests and for
+	 *  anything else that should be loud later. */
 	UFUNCTION(BlueprintCallable, Category = "Decoy")
 	void BecomeDecoy();
 
@@ -790,13 +825,64 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Decoy")
 	void EndDecoy();
 
-	/** Cosmetics live in the Blueprint: the siren, the flashing, the shaking. Both run on every
-	 *  machine — on the authority from BecomeDecoy/EndDecoy, on everybody else from OnRep. */
+	/** Anything the Blueprint wants on top of the overlay and the noise below: shaking, a light, a
+	 *  beacon. Both run on every machine — on the authority from BecomeDecoy/EndDecoy, on everybody
+	 *  else from OnRep. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Decoy")
 	void BP_OnDecoyStarted();
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Decoy")
 	void BP_OnDecoyEnded();
+
+	// ---- Presentation ----
+	// Driven from C++ rather than left to the Blueprint, because all three have to happen on every
+	// machine and the events above are the only thing a Blueprint could hang them on. A prop that
+	// looks and sounds ordinary is a decoy nobody can tell is working.
+
+	/** The reach, drawn for as long as it is held: a translucent sphere that snaps out to
+	 *  DecoyPullRadius when the decoy goes off and stands there until it is over. It appears with the
+	 *  noise and the overlay, not before them — the fuse shows nothing at all.
+	 *
+	 *  The system is expected to expose two user floats, and this fills them in at spawn rather than
+	 *  the asset carrying its own numbers, so the drawn radius cannot drift away from the radius the
+	 *  AI actually uses:
+	 *    User.Radius   — how far to reach, in centimetres
+	 *    User.Duration — how long to stay, in seconds (the active duration)
+	 *  A system missing either parameter still plays; it just ignores what it was told. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation")
+	TObjectPtr<UNiagaraSystem> DecoyRadiusVFX;
+
+	/** Worn while the decoy is active. Takes precedence over the charge overlay for the duration, and
+	 *  the charge overlay is restored when the decoy ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation")
+	TObjectPtr<UMaterialInterface> DecoyOverlayMaterial;
+
+	/** Looped noise, attached to the prop: it moves with it and dies with it. This is the "loud" in
+	 *  a loud object, and the enemies are meant to be answering it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation")
+	TObjectPtr<USoundBase> DecoyLoopSound;
+
+	/** Fade for that loop when the decoy ends, so it does not cut off mid-siren. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation", meta = (ClampMin = "0.0", Units = "s"))
+	float DecoyLoopFadeOutSeconds = 0.25f;
+
+	/** The bang it goes out on. COSMETIC ONLY: no damage, no impulse, no stun, nothing that touches
+	 *  the world. It is a full stop on the mechanic, not an explosion — the Tank's item buys
+	 *  attention, and dealing damage on top of that would quietly hand it the Sniper's verb too. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation")
+	TObjectPtr<UNiagaraSystem> DecoyExpiryVFX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation", meta = (ClampMin = "0.1"))
+	float DecoyExpiryVFXScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Decoy|Presentation")
+	TObjectPtr<USoundBase> DecoyExpirySound;
+
+	/** Show the decoy going out on every machine, and take the prop away with it. Unreliable: it is
+	 *  cosmetic, and the thing it announces (the enemies being let go) has already happened on the
+	 *  server through the coordinator. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayDecoyExpiry(FVector Location);
 
 	// ==================== IShooterDummyTarget Interface ====================
 
@@ -951,20 +1037,58 @@ private:
 	 *  prop keeps its momentum instead of dropping from a standstill. */
 	FVector LastReportedVelocity = FVector::ZeroVector;
 
-	/** See IsDecoy. Server-set; the clients get it to run the Blueprint cosmetics, and for nothing
-	 *  else — the pull itself is decided entirely on the authority, where the AI lives. */
-	UPROPERTY(ReplicatedUsing = OnRep_IsDecoy)
-	bool bIsDecoy = false;
+	/** See GetDecoyPhase. Server-set; the clients get it to run the cosmetics, and for nothing else —
+	 *  the pull itself is decided entirely on the authority, where the AI lives. */
+	UPROPERTY(ReplicatedUsing = OnRep_DecoyPhase)
+	EPropDecoyPhase DecoyPhase = EPropDecoyPhase::Inactive;
 
 	UFUNCTION()
-	void OnRep_IsDecoy();
+	void OnRep_DecoyPhase();
 
+	/** What the local machine is currently showing. Compared against DecoyPhase so a phase that
+	 *  arrives twice, or arrives on a machine that already saw it, does not restart the siren. */
+	EPropDecoyPhase PresentedPhase = EPropDecoyPhase::Inactive;
+
+	/** Arming ends, activation begins. */
+	FTimerHandle DecoyArmTimer;
+
+	/** Activation ends. */
 	FTimerHandle DecoyTimer;
+
+	/** The looping siren while it is active. Null on a dedicated server and whenever no sound is
+	 *  authored. */
+	UPROPERTY()
+	TObjectPtr<UAudioComponent> DecoyAudio;
+
+	/** The reach sphere, kept so a decoy that ends early can take it away again. */
+	UPROPERTY()
+	TObjectPtr<class UNiagaraComponent> DecoyRadiusVFXComponent;
+
+	/** Put the local machine's presentation in step with Phase. One entry point, called on the
+	 *  authority when it changes the phase and on everybody else from OnRep, so the two can never
+	 *  drift into showing different things. Presentation only: nothing here may touch gameplay. */
+	void ApplyDecoyPresentation(EPropDecoyPhase Phase);
+
+	/** Arming is over: start pulling. Authority only, driven by DecoyArmTimer. */
+	void ActivateDecoy();
+
+	/** The timer's end of the decoy, as opposed to EndDecoy's: this is the one that goes out with a
+	 *  bang and takes the prop with it. A decoy that ends because it was destroyed or because the
+	 *  level is tearing down goes through EndDecoy alone. */
+	void OnDecoyExpired();
 
 	/** What the thrower's class does with a thrown prop, applied once at launch. Called from BOTH
 	 *  throw paths (the plate-driven host throw and BeginRemoteLaunch for a client's), because a
 	 *  verb that only worked for the host is exactly the class of bug this project keeps finding. */
 	void ApplyItemVerbOnThrow();
+
+	/** False when the class that spent this prop uses it for something other than a bomb.
+	 *
+	 *  Asked in two places, and it has to be both: Explode refuses, and Die has to know BEFORE it
+	 *  hands over to Explode. Die's explode branch returns unconditionally on the assumption that
+	 *  the explosion killed the prop, so a prop that refuses to explode was left neither exploded
+	 *  nor dead — shootable forever, and in the decoy's case never releasing the enemies on it. */
+	bool CanDetonate() const;
 
 	FVector PreviousPlatePosition = FVector::ZeroVector;
 	bool bHasPreviousPlatePosition = false;

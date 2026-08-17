@@ -97,6 +97,9 @@ namespace
 	}
 }
 
+/** One delegate for the whole class. @see FOnAnyNPCDeath. */
+FOnAnyNPCDeath AShooterNPC::OnAnyNPCDeath;
+
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -993,6 +996,10 @@ void AShooterNPC::Die()
 	OnNPCDeath.Broadcast(this);
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
+	// And the same thing for whoever is watching the whole fight instead of this one enemy. Before
+	// the loot drops below, so a listener that wants to add to them still can.
+	OnAnyNPCDeath.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
+
 	// === LOOT DROPS (skipped by finale sequence) ===
 	if (!bSuppressDeathDrops)
 	{
@@ -1334,7 +1341,7 @@ void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier, f
 	}
 
 	bShieldBypassActive = true;
-	UpdateShieldBypassOverlay();
+	RefreshStatusOverlay();
 	ShieldBypassDamageMultiplier = FMath::Max(0.0f, DamageMultiplier);
 
 	if (MoveComp && MoveSpeedMultiplier > 0.0f)
@@ -1387,21 +1394,67 @@ float AShooterNPC::ConsumeShieldLoan()
 
 void AShooterNPC::OnRep_ShieldBypassActive()
 {
-	UpdateShieldBypassOverlay();
+	RefreshStatusOverlay();
 }
 
-void AShooterNPC::UpdateShieldBypassOverlay()
+void AShooterNPC::SetDistracted(bool bNewDistracted)
 {
-	USkeletalMeshComponent* MeshComp = GetMesh();
-	if (!MeshComp || !ShieldBypassOverlayMaterial)
+	if (!HasAuthority() || bDistracted == bNewDistracted)
 	{
 		return;
 	}
 
-	// Cleared with nullptr rather than swapped back to a remembered material: an overlay is a
-	// separate slot from the mesh's own materials, so there is nothing to restore and nothing to get
-	// wrong if two effects ever want it at once.
-	MeshComp->SetOverlayMaterial(bShieldBypassActive ? ShieldBypassOverlayMaterial.Get() : nullptr);
+	bDistracted = bNewDistracted;
+	RefreshStatusOverlay();
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s %s by a decoy"),
+		*GetName(), bDistracted ? TEXT("taken") : TEXT("released"));
+}
+
+void AShooterNPC::OnRep_Distracted()
+{
+	RefreshStatusOverlay();
+}
+
+void AShooterNPC::RefreshStatusOverlay()
+{
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	UMaterialInterface* Desired = nullptr;
+	if (bShieldBypassActive && ShieldBypassOverlayMaterial)
+	{
+		Desired = ShieldBypassOverlayMaterial;
+	}
+	else if (bDistracted && DistractedOverlayMaterial)
+	{
+		Desired = DistractedOverlayMaterial;
+	}
+
+	// A hit flash borrows this slot and puts back whatever it found when it ends. Writing the slot
+	// now would be silently undone by that restore a fraction of a second later, so the change goes
+	// into what the flash is going to restore instead.
+	if (bHitFlashActive)
+	{
+		SavedOverlayBeforeFlash = Desired;
+		return;
+	}
+
+	// Nothing to show: hand the slot back to the charge overlay rather than blanking it. The old
+	// bypass-only version wrote nullptr here, which cleared a charged enemy's overlay as a side
+	// effect; that was rare enough to go unnoticed while one effect used the slot, and would not
+	// have been once a decoy started taking whole rooms at a time.
+	if (!Desired)
+	{
+		MeshComp->SetOverlayMaterial(nullptr);
+		UpdateChargeOverlay(PreviousPolarity);
+		return;
+	}
+
+	MeshComp->SetOverlayMaterial(Desired);
 }
 
 void AShooterNPC::EndShieldBypass()
@@ -1412,7 +1465,7 @@ void AShooterNPC::EndShieldBypass()
 	}
 
 	bShieldBypassActive = false;
-	UpdateShieldBypassOverlay();
+	RefreshStatusOverlay();
 
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
 	{
@@ -1449,6 +1502,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, bIsDead);
 	DOREPLIFETIME(AShooterNPC, CurrentHP);
 	DOREPLIFETIME(AShooterNPC, bShieldBypassActive);
+	DOREPLIFETIME(AShooterNPC, bDistracted);
 	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
 	DOREPLIFETIME(AShooterNPC, PledgedShieldLoan);
 }

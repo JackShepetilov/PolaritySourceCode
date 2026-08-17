@@ -19,6 +19,7 @@ class USkeletalMeshComponent;
 class UCameraComponent;
 class UAnimMontage;
 class UAnimInstance;
+class UAnimationAsset;
 class UNiagaraSystem;
 class UNiagaraComponent;
 class UPhysicalMaterial;
@@ -481,6 +482,32 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Animation")
 	UAnimMontage* FiringMontage;
+
+	// ==================== Animation|Weapon mesh ====================
+	//
+	// The two above are what the HOLDER plays: they run on the character's skeleton and move the
+	// arms. These two run on the weapon's OWN skeleton -- the bolt, the pump, the cylinder, the
+	// shell leaving the port. Different skeleton, different asset, and nothing plays them unless
+	// they are set here.
+	//
+	// Either kind of asset works, but they are not equivalent:
+	//   - a MONTAGE is played through the weapon mesh's own anim blueprint when it has one, so the
+	//     graph keeps running and the montage blends into it and carries its notifies;
+	//   - anything else (a plain sequence) is played straight on the component, which is what a
+	//     weapon with no anim blueprint needs -- and which REPLACES the graph with a single-node
+	//     player on a weapon that does have one. Give such a weapon a montage, not a sequence.
+
+	/** Played on the weapon's own meshes each time it fires. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshFireAnimation;
+
+	/** Played on the weapon's own meshes when a reload starts. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshReloadAnimation;
+
+	/** Runs one of the above on both weapon meshes: the first person one the shooter sees and the
+	 *  third person one everybody else sees. Does nothing when the asset is not set. */
+	void PlayWeaponMeshAnimation(UAnimationAsset* Animation);
 
 	UPROPERTY(EditAnywhere, Category = "Animation")
 	TSubclassOf<UAnimInstance> FirstPersonAnimInstanceClass;

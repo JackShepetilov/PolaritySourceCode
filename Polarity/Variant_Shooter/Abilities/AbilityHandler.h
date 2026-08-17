@@ -10,6 +10,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "Engine/HitResult.h"
 #include "AbilityDefinition.h"
 #include "AbilityHandler.generated.h"
 
@@ -18,6 +19,8 @@ class AShooterCharacter;
 class UAnimMontage;
 class USkeletalMeshComponent;
 class UAnimInstance;
+class AActor;
+class AController;
 
 UCLASS(Blueprintable, Abstract)
 class POLARITY_API UAbilityHandler : public UObject
@@ -62,6 +65,24 @@ public:
 	UFUNCTION(BlueprintNativeEvent, Category = "Ability")
 	void OnCancelRequested();
 	virtual void OnCancelRequested_Implementation() {}
+
+	// ==================== Passive lifecycle ====================
+	// A passive is never activated, so OnActivate and everything around it never runs for one. These
+	// are the hooks it lives on instead, driven by the component for the granted passive only. Plain
+	// virtuals rather than BlueprintNativeEvents: they run on the authority in the middle of damage
+	// and tick, and a Blueprint override there would be a trap rather than a feature.
+
+	/** Every component tick. Do not put per-frame work here — this exists for handlers that need to
+	 *  notice something changed and have nothing to be told by. */
+	virtual void OnPassiveTick(float DeltaTime) {}
+
+	/** The owning character took damage, on the authority, after armour and health were applied.
+	 *  Damage is the amount that arrived, before armour absorbed any of it.
+	 *
+	 *  HitInfo is the damage event's own best answer for where it landed, so a point hit carries the
+	 *  real impact point and bone and a generic one carries the actor. Anything drawing a reaction
+	 *  from the wound outwards needs it, and it cannot be recovered afterwards. */
+	virtual void OnOwnerDamaged(float Damage, AActor* DamageCauser, AController* InstigatedBy, const FHitResult& HitInfo) {}
 
 	// ==================== Accessors ====================
 
