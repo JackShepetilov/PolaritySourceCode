@@ -12,6 +12,7 @@
 #include "NavigationSystem.h"
 #include "AITypes.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "../../ApexMovementComponent.h"
 
 namespace
 {
@@ -1563,5 +1564,402 @@ FText FSTTask_GetRandomNavPoint::GetDescription(const FGuid& ID, FStateTreeDataV
 			"Get random nav point (radius: {0})"), FText::AsNumber(static_cast<int32>(Data->SearchRadius)));
 	}
 	return NSLOCTEXT("PolarityAI", "GetRandomNavPointDescDefault", "Get random navigable point");
+}
+#endif
+
+
+// ============================================================================
+// ShooterPush
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_ShooterPush::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC || !Data.Controller || !Data.Target || !Data.NPC->GetWorld())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	const float Now = Data.NPC->GetWorld()->GetTimeSeconds();
+
+	Data.Phase = ResolvePhase(Data);
+	Data.PreviousPhase = Data.Phase;
+	Data.bWithdrawing = false;
+	Data.DuelEnteredTime = Now;
+	Data.bHasLeg = false;
+	Data.bIsShooting = false;
+	Data.LegSign = FMath::RandBool() ? 1.0f : -1.0f;
+	Data.LastStuckCheckPosition = Data.NPC->GetActorLocation();
+	Data.LastStuckCheckTime = Now;
+
+	Data.Controller->SetFocus(Data.Target);
+	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ true);
+
+	StartLeg(Data);
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC || Data.NPC->IsDead())
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (!Data.Target || !Data.Controller)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	UWorld* const World = Data.NPC->GetWorld();
+	if (!World)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	const float Now = World->GetTimeSeconds();
+	const FVector NPCLocation = Data.NPC->GetActorLocation();
+	const float Distance = FVector::Dist2D(NPCLocation, Data.Target->GetActorLocation());
+
+	// The duel clock. Rotation is the whole reason an enemy in your face is a moment rather than a
+	// condition, so it runs off wall time from entry, not off anything the NPC achieves.
+	if (Data.Phase == EShooterPushPhase::Duel && !Data.bWithdrawing
+		&& (Now - Data.DuelEnteredTime) >= Data.DuelDuration)
+	{
+		Data.bWithdrawing = true;
+	}
+
+	// Far enough out: the push is over, the token goes back, and the distance bands take over again.
+	if (Data.bWithdrawing && Distance >= Data.WithdrawDistance)
+	{
+		Data.bWithdrawing = false;
+		Data.DuelEnteredTime = Now;
+
+		if (AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+		{
+			Coordinator->NotifyAttackComplete(Data.NPC);
+		}
+	}
+
+	Data.Phase = ResolvePhase(Data);
+
+	// ---- Phase edges ----
+	if (Data.Phase != Data.PreviousPhase)
+	{
+		UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+
+		// Sprint to Duel is where the slide lives. Asked, not assumed: CanSlide wants ground, no
+		// cooldown and SlideMinStartSpeed, so an NPC that never got up to speed simply arrives on
+		// foot and nothing here has to special-case it.
+		if (Apex && Data.PreviousPhase == EShooterPushPhase::Sprint && Data.Phase == EShooterPushPhase::Duel)
+		{
+			Apex->StopSprint();
+			if (Apex->CanSlide())
+			{
+				Apex->StartSlide();
+			}
+		}
+		else if (Apex && Data.PreviousPhase == EShooterPushPhase::Sprint)
+		{
+			Apex->StopSprint();
+		}
+
+		if (Apex && Data.Phase == EShooterPushPhase::Sprint)
+		{
+			Apex->StartSprint();
+		}
+
+		if (Data.Phase == EShooterPushPhase::Duel)
+		{
+			Data.DuelEnteredTime = Now;
+		}
+
+		// Body faces the target in every phase that shoots, so the strafe set plays and the gun
+		// points where it is firing. The silent sprint is the exception: there it faces where it is
+		// going, which is what a running animation wants.
+		SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ Data.Phase != EShooterPushPhase::Sprint);
+
+		// A leg computed for the old phase points the wrong way for the new one.
+		Data.bHasLeg = false;
+		Data.PreviousPhase = Data.Phase;
+	}
+
+	// ---- Legs ----
+	bool bNeedsNewLeg = !Data.bHasLeg || Now >= Data.LegEndTime;
+
+	if (!bNeedsNewLeg)
+	{
+		if (UPathFollowingComponent* PathComp = Data.Controller->GetPathFollowingComponent())
+		{
+			if (PathComp->DidMoveReachGoal() || PathComp->GetStatus() == EPathFollowingStatus::Idle)
+			{
+				bNeedsNewLeg = true;
+			}
+		}
+	}
+
+	// Stuck: a diagonal leg is exactly the trajectory that walks into a corner, so this is not
+	// paranoia. Abandoning the leg flips the sign and sends it the other way.
+	if (!bNeedsNewLeg && (Now - Data.LastStuckCheckTime) >= ShooterPush_StuckCheckInterval)
+	{
+		const float Moved = FVector::Dist(NPCLocation, Data.LastStuckCheckPosition);
+		Data.LastStuckCheckPosition = NPCLocation;
+		Data.LastStuckCheckTime = Now;
+
+		if (Moved < ShooterPush_StuckDistanceThreshold)
+		{
+			Data.Controller->StopMovement();
+			bNeedsNewLeg = true;
+		}
+	}
+
+	if (bNeedsNewLeg)
+	{
+		StartLeg(Data);
+	}
+
+	// ---- Fire ----
+	// Note what is NOT here: no StopMovement, no waiting for the velocity to fall. Firing happens on
+	// the move, and the price is paid in spread through the self-movement term in
+	// UAIAccuracyComponent.
+	bool bWantsFire = false;
+	switch (Data.Phase)
+	{
+	case EShooterPushPhase::Approach:
+	case EShooterPushPhase::Duel:
+		bWantsFire = true;
+		break;
+	case EShooterPushPhase::Withdraw:
+		bWantsFire = Data.bWithdrawLegFires;
+		break;
+	case EShooterPushPhase::Sprint:
+	default:
+		bWantsFire = false;
+		break;
+	}
+
+	if (bWantsFire && Data.NPC->HasLineOfSightTo(Data.Target))
+	{
+		if (!Data.bIsShooting)
+		{
+			StartShooting(Data);
+		}
+		else if (Data.NPC->IsInBurstCooldown() || !Data.NPC->IsCurrentlyShooting())
+		{
+			// Same trap the old task documented: the NPC restarts its own burst when the cooldown
+			// ends without re-checking line of sight, so the task has to close the request
+			// explicitly and let the next tick reopen it.
+			StopShooting(Data);
+		}
+	}
+	else if (Data.bIsShooting)
+	{
+		StopShooting(Data);
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FSTTask_ShooterPush::ExitState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+	ReleaseMovementState(Data);
+}
+
+EShooterPushPhase FSTTask_ShooterPush::ResolvePhase(const FInstanceDataType& Data) const
+{
+	if (Data.bWithdrawing)
+	{
+		return EShooterPushPhase::Withdraw;
+	}
+
+	if (!Data.NPC || !Data.Target)
+	{
+		return EShooterPushPhase::Approach;
+	}
+
+	const float Distance = FVector::Dist2D(Data.NPC->GetActorLocation(), Data.Target->GetActorLocation());
+
+	if (Distance > Data.SprintDistance)
+	{
+		return EShooterPushPhase::Approach;
+	}
+	if (Distance > Data.DuelDistance)
+	{
+		return EShooterPushPhase::Sprint;
+	}
+	return EShooterPushPhase::Duel;
+}
+
+FVector FSTTask_ShooterPush::ComputeLegDirection(const FInstanceDataType& Data) const
+{
+	const FVector ToTarget = (Data.Target->GetActorLocation() - Data.NPC->GetActorLocation()).GetSafeNormal2D();
+	if (ToTarget.IsNearlyZero())
+	{
+		return FVector::ForwardVector;
+	}
+
+	// The duel is pure lateral: no closing at all, which is what makes it read as a firing-range
+	// dummy rather than as another approach.
+	if (Data.Phase == EShooterPushPhase::Duel)
+	{
+		return FVector::CrossProduct(FVector::UpVector, ToTarget).GetSafeNormal() * Data.LegSign;
+	}
+
+	const FVector Base = (Data.Phase == EShooterPushPhase::Withdraw) ? -ToTarget : ToTarget;
+	return Base.RotateAngleAxis(Data.LegSign * Data.DiagonalAngleDeg, FVector::UpVector);
+}
+
+void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
+{
+	if (!Data.NPC || !Data.Controller || !Data.Target)
+	{
+		return;
+	}
+
+	UWorld* const World = Data.NPC->GetWorld();
+	UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!World || !NavSys)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+
+	const bool bDuel = Data.Phase == EShooterPushPhase::Duel;
+	const float Duration = bDuel
+		? FMath::FRandRange(Data.StrafeHoldMin, Data.StrafeHoldMax)
+		: FMath::FRandRange(Data.LegDurationMin, Data.LegDurationMax);
+
+	// Leg length follows from how fast this NPC actually moves, so retuning its speed does not
+	// silently retune the shape of its path as well.
+	const float Speed = FMath::Max(100.0f, Data.NPC->GetCharacterMovement()
+		? Data.NPC->GetCharacterMovement()->GetMaxSpeed() : 400.0f);
+	const float LegLength = Speed * Duration;
+
+	const FVector Origin = Data.NPC->GetActorLocation();
+
+	// Two tries: the intended side, then the other one. A diagonal into a wall is the normal case in
+	// a corridor, and flipping is both the cheapest answer and the one that looks deliberate.
+	FVector Destination = FVector::ZeroVector;
+	bool bFound = false;
+	for (int32 Attempt = 0; Attempt < 2 && !bFound; ++Attempt)
+	{
+		const FVector Candidate = Origin + ComputeLegDirection(Data) * LegLength;
+
+		FNavLocation NavResult;
+		if (NavSys->ProjectPointToNavigation(Candidate, NavResult, FVector(200.0f, 200.0f, 300.0f)))
+		{
+			Destination = NavResult.Location;
+			bFound = true;
+			break;
+		}
+
+		Data.LegSign = -Data.LegSign;
+	}
+
+	if (!bFound)
+	{
+		// Nowhere to go this tick. Keep facing the target and let the next tick try again rather
+		// than blindly walking off the mesh.
+		Data.bHasLeg = false;
+		Data.LegEndTime = Now + 0.25f;
+		return;
+	}
+
+	FAIMoveRequest MoveRequest;
+	MoveRequest.SetGoalLocation(Destination);
+	MoveRequest.SetAcceptanceRadius(60.0f);
+	MoveRequest.SetUsePathfinding(true);
+	MoveRequest.SetAllowPartialPath(true);
+	MoveRequest.SetProjectGoalLocation(true);
+	MoveRequest.SetCanStrafe(true);
+
+	const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+	if (Result.Code == EPathFollowingRequestResult::Failed)
+	{
+		Data.bHasLeg = false;
+		Data.LegEndTime = Now + 0.25f;
+		Data.LegSign = -Data.LegSign;
+		return;
+	}
+
+	Data.LegDestination = Destination;
+	Data.bHasLeg = true;
+	Data.LegEndTime = Now + Duration;
+	Data.LastStuckCheckPosition = Origin;
+	Data.LastStuckCheckTime = Now;
+
+	// Rolled once per leg, not per tick, so a withdrawing NPC either shoots during this leg or does
+	// not, instead of stuttering.
+	Data.bWithdrawLegFires = FMath::FRand() < Data.WithdrawFireChance;
+
+	// Next leg goes the other way. This is the zigzag.
+	Data.LegSign = -Data.LegSign;
+}
+
+void FSTTask_ShooterPush::StartShooting(FInstanceDataType& Data) const
+{
+	if (!Data.NPC || !Data.Target)
+	{
+		return;
+	}
+
+	// Permission stays where it already lives: AShooterNPC asks the coordinator itself, so this does
+	// not become a second token system with its own opinion.
+	Data.NPC->StartShooting(Data.Target);
+	Data.bIsShooting = true;
+}
+
+void FSTTask_ShooterPush::StopShooting(FInstanceDataType& Data) const
+{
+	if (Data.NPC)
+	{
+		Data.NPC->StopShooting();
+	}
+	Data.bIsShooting = false;
+}
+
+void FSTTask_ShooterPush::ReleaseMovementState(FInstanceDataType& Data) const
+{
+	StopShooting(Data);
+
+	if (!Data.NPC)
+	{
+		return;
+	}
+
+	// The sprint latch outlives this task if it is not cleared: bSprintKeyHeld is a key state, and
+	// nothing else in the NPC's world is ever going to let go of it.
+	if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+	{
+		Apex->StopSprint();
+	}
+
+	if (Data.Controller)
+	{
+		Data.Controller->StopMovement();
+	}
+}
+
+#if WITH_EDITOR
+FText FSTTask_ShooterPush::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* Data = InstanceDataView.GetPtr<FInstanceDataType>();
+	if (!Data)
+	{
+		return FText::FromString(TEXT("Push the target"));
+	}
+
+	return FText::FromString(FString::Printf(
+		TEXT("Push: fire while closing past %.0f, sprint in to %.0f, then duel for %.0fs"),
+		Data->SprintDistance, Data->DuelDistance, Data->DuelDuration));
 }
 #endif

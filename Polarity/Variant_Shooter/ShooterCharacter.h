@@ -490,9 +490,10 @@ protected:
 	/** Time since last damage was taken (for regen delay) */
 	float TimeSinceLastDamage = 0.0f;
 
-	/** Team ID for this character*/
-	UPROPERTY(EditAnywhere, Category = "Team")
-	uint8 TeamByte = 0;
+	// TeamByte moved up to APolarityCharacter, which is also where the team interface now lives.
+	// It was declared here AND on AShooterNPC, same name and same meaning, which is exactly the
+	// split that let a player pawn answer "no team" to the perception system while still counting
+	// as team 0 for the score. Default there is 0, so players keep the value they had.
 
 	/** List of weapons picked up by the character.
 	 *  Replicated because the server owns weapon creation now: without this a client's inventory
@@ -1350,12 +1351,8 @@ public:
 	void Server_UpdateHeldPropTransform(AEMFPhysicsProp* Prop, FVector Location, FRotator Rotation,
 		FVector LinearVelocity);
 
-	/** Where this character is aiming vertically, in degrees, for animation to use.
-	 *  Your own pitch comes from the control rotation; a teammate's comes from the pitch the pawn
-	 *  already replicates, which nothing in this project read, so remote characters always aimed
-	 *  dead level no matter where their owner was looking. Feed this into the aim offset. */
-	UFUNCTION(BlueprintPure, Category = "Coop|Aim")
-	float GetAimPitchForAnimation() const;
+	// GetAimPitchForAnimation moved up to APolarityCharacter so enemies get it too — see the note
+	// there. The anim blueprints must cast to PolarityCharacter, not ShooterCharacter.
 
 	/** Swap to NewWeapon with no lower/raise animation. The whole equip in one step, so it can be
 	 *  run identically on the owning machine and on the authority. */

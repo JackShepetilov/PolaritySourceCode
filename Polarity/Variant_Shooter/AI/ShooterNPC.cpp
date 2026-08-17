@@ -106,6 +106,13 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	AccuracyComponent = CreateDefaultSubobject<UAIAccuracyComponent>(TEXT("AccuracyComponent"));
 	MeleeRetreatComponent = CreateDefaultSubobject<UMeleeRetreatComponent>(TEXT("MeleeRetreatComponent"));
 
+	// Enemies. The field itself lives on APolarityCharacter, where players get it too; this is the
+	// value, and it is set here rather than left to the base default so that the base default can
+	// stay 0 (players), which is the safer thing for a class to be if nobody thought about it.
+	// Same number this class carried before the field moved up, so every enemy blueprint keeps the
+	// team it already had.
+	TeamByte = 1;
+
 	// Create EMF components for charge-based interactions
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
 	EMFVelocityModifier = CreateDefaultSubobject<UEMFVelocityModifier>(TEXT("EMFVelocityModifier"));

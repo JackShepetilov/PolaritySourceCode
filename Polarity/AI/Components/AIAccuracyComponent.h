@@ -67,6 +67,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Modifiers", meta = (ClampMin = "1.0", ClampMax = "3.0"))
 	float InAirSpreadMultiplier = 1.2f;
 
+	// ==================== Shooter's own movement ====================
+	// Everything above asks how hard the TARGET is to hit. This asks how badly this NPC is shooting
+	// because of what IT is doing, and the two multiply rather than compete: a sprinting enemy firing
+	// at a wall-running player is worse at both jobs at once.
+	//
+	// It exists because enemies now fire while moving. Without a penalty, an enemy closing the
+	// distance at full speed is strictly better than one holding still, and the push turns into a
+	// charge that simply melts whoever it picked. The penalty is what makes moving fire read as
+	// pressure rather than damage.
+
+	/** Spread multiplier at ReferenceSpeed and above. 1.0 disables the penalty entirely. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Self Movement", meta = (ClampMin = "1.0"))
+	float SelfMovementSpreadMultiplier = 1.6f;
+
+	/** Own 2D speed (cm/s) at which the full multiplier applies. Below it the penalty ramps in
+	 *  linearly, so a walking enemy is only slightly worse and a sprinting one is much worse. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Self Movement", meta = (ClampMin = "1.0"))
+	float SelfMovementReferenceSpeed = 600.0f;
+
 	// ==================== Suppression Settings ====================
 
 	/** Minimum deviation angle during suppression — guarantees a miss (degrees) */
@@ -115,6 +134,10 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Accuracy")
 	float GetCurrentSpread(AActor* Target) const;
+
+	/** How much this NPC's own movement is widening its spread right now. 1.0 when standing still. */
+	UFUNCTION(BlueprintPure, Category = "Accuracy|Self Movement")
+	float GetSelfMovementSpreadMultiplier() const;
 
 	/**
 	 * Get target's normalized speed (0-1 range).

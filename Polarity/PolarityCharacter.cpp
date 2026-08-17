@@ -1081,3 +1081,19 @@ void APolarityCharacter::UpdateRunAimOffset(float DeltaTime)
 		MovementSettings->AimOffsetInterpSpeed
 	);
 }
+
+float APolarityCharacter::GetAimPitchForAnimation() const
+{
+	// Your own aim is exact. Also true of an enemy on the server, which is where its AI controller
+	// lives, so the authority reads the real number for every character it is simulating.
+	if (IsLocallyControlled())
+	{
+		return FRotator::NormalizeAxis(GetControlRotation().Pitch);
+	}
+
+	// Everyone else arrives as the pawn's replicated view pitch, 360 degrees mapped into 16 bits.
+	// Nothing in this project ever decoded it, which is why remote characters aimed dead level.
+	// GetRemoteViewPitch() is the 5.6+ accessor; the old uint8 RemoteViewPitch is deprecated.
+	constexpr float MaxUInt16 = 65535.0f;
+	return FRotator::NormalizeAxis((static_cast<float>(GetRemoteViewPitch()) * 360.0f) / MaxUInt16);
+}

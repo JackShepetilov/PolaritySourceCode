@@ -145,7 +145,7 @@ struct FDeathModeConfig
  *  Holds and manages a weapon
  */
 UCLASS(abstract)
-class POLARITY_API AShooterNPC : public APolarityCharacter, public IShooterWeaponHolder, public IGenericTeamAgentInterface
+class POLARITY_API AShooterNPC : public APolarityCharacter, public IShooterWeaponHolder
 {
 	GENERATED_BODY()
 
@@ -293,17 +293,8 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage|SFX")
 	TObjectPtr<USoundBase> DeathSound;
 
-	/** Team byte for this character */
-	UPROPERTY(EditAnywhere, Category = "Team")
-	uint8 TeamByte = 1;
-
-	// ==================== IGenericTeamAgentInterface ====================
-
-	/** Returns the TeamId for this NPC (used by AI Perception Team Sense) */
-	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(TeamByte); }
-
-	/** Sets the TeamId for this NPC */
-	virtual void SetGenericTeamId(const FGenericTeamId& NewTeamId) override { TeamByte = NewTeamId.GetId(); }
+	// Team lives on APolarityCharacter now, one implementation for every character in the game.
+	// The value for enemies is set in this class's constructor; see the note there.
 
 	/** Pointer to the equipped weapon */
 	TObjectPtr<AShooterWeapon> Weapon;

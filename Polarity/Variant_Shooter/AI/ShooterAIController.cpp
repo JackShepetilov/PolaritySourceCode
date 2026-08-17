@@ -111,51 +111,149 @@ void AShooterAIController::OnPawnDeath(AShooterNPC* DeadNPC)
 	Destroy();
 }
 
-void AShooterAIController::SetCurrentTarget(AActor* Target)
+FTargetIntent* AShooterAIController::FindIntent(ETargetIntentSource Source)
 {
-	// The lock, and the one place it can be enforced. Perception calls this from three sites (the
-	// stimulus lambda, the known-actor sweep on entry and the periodic poll), the arena calls it, and
-	// damage retaliation calls it; gating each of them separately would leave whichever one was
-	// missed quietly cancelling the decoy.
-	if (IsDistracted() && Target != Distraction.Get())
+	return Intents.FindByPredicate([Source](const FTargetIntent& Intent) { return Intent.Source == Source; });
+}
+
+const FTargetIntent* AShooterAIController::FindIntent(ETargetIntentSource Source) const
+{
+	return Intents.FindByPredicate([Source](const FTargetIntent& Intent) { return Intent.Source == Source; });
+}
+
+void AShooterAIController::SetTargetIntent(ETargetIntentSource Source, AActor* Target, float Duration)
+{
+	const UWorld* World = GetWorld();
+	if (!World)
 	{
 		return;
 	}
 
-	TargetEnemy = Target;
-	SetFocus(Target);
+	// A null target is a withdrawal, not a request to look at nothing. Saying it this way means a
+	// caller that computed its target and got null does not have to branch.
+	if (!Target)
+	{
+		ClearTargetIntent(Source);
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+
+	FTargetIntent* Intent = FindIntent(Source);
+	if (!Intent)
+	{
+		Intent = &Intents.AddDefaulted_GetRef();
+		Intent->Source = Source;
+	}
+
+	// SetTime is only bumped when the target actually changes. A decoy refreshed sixty times a second
+	// would otherwise keep winning ties against a perception intent set later, purely by being
+	// rewritten more often, and "who asked most recently" would stop meaning anything.
+	if (Intent->Target.Get() != Target)
+	{
+		Intent->SetTime = Now;
+	}
+
+	Intent->Target = Target;
+	Intent->ExpiryTime = Duration > 0.0f ? Now + Duration : 0.0f;
+	Intent->bSet = true;
+
+	ResolveTargetIntents();
+}
+
+void AShooterAIController::ClearTargetIntent(ETargetIntentSource Source)
+{
+	const int32 Removed = Intents.RemoveAll([Source](const FTargetIntent& Intent) { return Intent.Source == Source; });
+	if (Removed > 0)
+	{
+		ResolveTargetIntents();
+	}
+}
+
+AActor* AShooterAIController::GetTargetIntent(ETargetIntentSource Source) const
+{
+	const FTargetIntent* Intent = FindIntent(Source);
+	return Intent ? Intent->Target.Get() : nullptr;
+}
+
+void AShooterAIController::ResolveTargetIntents()
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+
+	// Drop what no longer counts: run out of time, or the actor it pointed at is gone. Doing it here
+	// rather than at each read means nobody else has to remember, and it is the same walk we need for
+	// the comparison anyway.
+	Intents.RemoveAll([Now](const FTargetIntent& Intent)
+	{
+		if (!Intent.bSet || !Intent.Target.IsValid())
+		{
+			return true;
+		}
+		return Intent.ExpiryTime > 0.0f && Now >= Intent.ExpiryTime;
+	});
+
+	// Highest priority wins; equal priorities go to whoever asked most recently, which is how
+	// perception and the arena behaved back when they simply overwrote each other.
+	const FTargetIntent* Winner = nullptr;
+	for (const FTargetIntent& Intent : Intents)
+	{
+		if (!Winner
+			|| Intent.Source > Winner->Source
+			|| (Intent.Source == Winner->Source && Intent.SetTime > Winner->SetTime))
+		{
+			Winner = &Intent;
+		}
+	}
+
+	AActor* const NewTarget = Winner ? Winner->Target.Get() : nullptr;
+	if (NewTarget == TargetEnemy)
+	{
+		return;
+	}
+
+	TargetEnemy = NewTarget;
+
+	// SetFocus drives the pawn's rotation, so writing it unconditionally would make the NPC twitch
+	// every time anything touched an intent. Hence the early out above.
+	if (NewTarget)
+	{
+		SetFocus(NewTarget);
+	}
+	else
+	{
+		ClearFocus(EAIFocusPriority::Gameplay);
+	}
+}
+
+void AShooterAIController::SetCurrentTarget(AActor* Target)
+{
+	SetTargetIntent(ETargetIntentSource::Perception, Target);
 }
 
 void AShooterAIController::ClearCurrentTarget()
 {
-	// Same reason as above. The distraction is what ends the distraction — and when the decoy is
-	// destroyed IsDistracted() is already false, so a clear arriving then goes through and the NPC
-	// picks somebody up again on the next perception update.
-	if (IsDistracted())
-	{
-		return;
-	}
-
-	TargetEnemy = nullptr;
-	ClearFocus(EAIFocusPriority::Gameplay);
+	ClearTargetIntent(ETargetIntentSource::Perception);
 }
 
 void AShooterAIController::DistractTo(AActor* Decoy, float Seconds)
 {
-	if (!Decoy || !GetWorld())
+	if (!Decoy)
 	{
 		return;
 	}
 
-	const bool bIsNew = Distraction.Get() != Decoy;
+	const bool bIsNew = GetTargetIntent(ETargetIntentSource::Distraction) != Decoy;
 
-	Distraction = Decoy;
-	DistractionEndTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.0f, Seconds);
-
-	// Straight to the field, not through SetCurrentTarget: that one now refuses anything other than
-	// the distraction, and the distraction is what this is.
-	TargetEnemy = Decoy;
-	SetFocus(Decoy);
+	// The duration IS the lock. Nothing refuses anybody: the decoy simply outranks perception for as
+	// long as it has been given, and the moment it expires perception's standing request wins again
+	// without a single line of special handling.
+	SetTargetIntent(ETargetIntentSource::Distraction, Decoy, FMath::Max(0.0f, Seconds));
 
 	if (bIsNew)
 	{
@@ -166,43 +264,42 @@ void AShooterAIController::DistractTo(AActor* Decoy, float Seconds)
 
 bool AShooterAIController::IsDistracted() const
 {
-	if (!Distraction.IsValid() || !GetWorld())
-	{
-		return false;
-	}
-	return GetWorld()->GetTimeSeconds() < DistractionEndTime;
+	// No time comparison here any more: an expired intent is removed by ResolveTargetIntents, which
+	// Tick calls, so the presence of the entry is the answer.
+	return GetTargetIntent(ETargetIntentSource::Distraction) != nullptr;
 }
 
 AActor* AShooterAIController::GetDistraction() const
 {
-	return Distraction.Get();
+	return GetTargetIntent(ETargetIntentSource::Distraction);
 }
 
 void AShooterAIController::EndDistraction()
 {
-	AActor* Previous = Distraction.Get();
-
-	Distraction.Reset();
-	DistractionEndTime = 0.0f;
-
+	AActor* const Previous = GetTargetIntent(ETargetIntentSource::Distraction);
 	if (!Previous)
 	{
 		return;
 	}
 
-	// Let go of the decoy as a target as well, and this is not optional. A spent decoy is an ordinary
-	// prop sitting on the floor, and the NPC would happily keep shooting it forever: perception only
-	// looks for somebody new while the sense task has NO target, so a stale but still valid one is
-	// never replaced. Clearing it puts the NPC back in the "looking for someone" state, and the
-	// perception poll finds a player within half a second.
-	if (TargetEnemy == Previous)
-	{
-		TargetEnemy = nullptr;
-		ClearFocus(EAIFocusPriority::Gameplay);
-	}
+	ClearTargetIntent(ETargetIntentSource::Distraction);
 
+	// Note what is NOT here any more. This used to have to null TargetEnemy by hand, because a spent
+	// decoy is an ordinary prop and the sense task only looks for somebody new while it has no
+	// target, so the NPC would stand there shooting the prop forever. Now dropping the intent is
+	// enough: whatever perception last asked for wins again, and if it asked for nothing the answer
+	// becomes null on its own and the search restarts.
 	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s stops being distracted by %s"),
 		*GetNameSafe(GetPawn()), *Previous->GetName());
+}
+
+void AShooterAIController::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// Only expiries need this; everything else resolves at the moment it is written. Cheap enough to
+	// run unconditionally: the array holds at most one entry per source.
+	ResolveTargetIntents();
 }
 
 void AShooterAIController::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)

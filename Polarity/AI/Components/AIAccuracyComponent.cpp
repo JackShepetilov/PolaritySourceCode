@@ -79,7 +79,33 @@ float UAIAccuracyComponent::GetCurrentSpread(AActor* Target) const
 
 	FinalSpread *= StateMultiplier;
 
+	// And how badly WE are shooting because of what we are doing. Multiplied rather than folded into
+	// the max above: that block picks the worst of several descriptions of the same thing (the
+	// target's movement), while this is a different thing entirely.
+	FinalSpread *= GetSelfMovementSpreadMultiplier();
+
 	return FinalSpread;
+}
+
+float UAIAccuracyComponent::GetSelfMovementSpreadMultiplier() const
+{
+	if (SelfMovementSpreadMultiplier <= 1.0f || SelfMovementReferenceSpeed <= 0.0f)
+	{
+		return 1.0f;
+	}
+
+	const AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return 1.0f;
+	}
+
+	// 2D on purpose: falling does not make an NPC a worse shot in any way the player can read, and
+	// counting it would punish every drop off a ledge.
+	const float Speed = Owner->GetVelocity().Size2D();
+	const float Ratio = FMath::Clamp(Speed / SelfMovementReferenceSpeed, 0.0f, 1.0f);
+
+	return FMath::Lerp(1.0f, SelfMovementSpreadMultiplier, Ratio);
 }
 
 float UAIAccuracyComponent::GetTargetSpeedRatio(AActor* Target) const

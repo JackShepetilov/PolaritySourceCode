@@ -566,3 +566,169 @@ struct FSTTask_GetRandomNavPoint : public FStateTreeTaskCommonBase
 		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
 #endif
 };
+
+// ============================================================================
+// ShooterPush - how a shielded enemy closes on its target.
+//
+// Replaces RunAndShoot, which despite the name was a STOP-and-shoot: the moment it was allowed to
+// fire it called StopMovement, waited for its own velocity to fall below a threshold and only then
+// opened up, and it did not reposition at all while firing. Movement and fire were mutually
+// exclusive by construction, so eight enemies arranged themselves on a ring around the player and
+// took turns shooting from a standstill.
+//
+// The shape here is different in one decision that everything else follows from: THE PHASE IS A
+// FUNCTION OF DISTANCE, recomputed every tick, not a sequence with memory. So a player who charges
+// an enemy finds it already fighting at the range they created, with no code anywhere that skips a
+// phase, and the same is true running backwards.
+//
+//   Approach  (> SprintDistance)                 diagonal walk, firing
+//   Sprint    (DuelDistance .. SprintDistance)   diagonal sprint, silent
+//   Duel      (<= DuelDistance)                  lateral strafe, firing
+//   Withdraw  (mode, not a band)                 reverse of Approach, occasional fire
+//
+// The slide is not a phase; it is an event on the Sprint -> Duel boundary, and it is allowed to
+// simply not happen. UApexMovementComponent::CanSlide already requires ground, no cooldown and
+// SlideMinStartSpeed, so an enemy that never got up to speed walks into the duel instead. No branch
+// here needs to know about that.
+// ============================================================================
+
+/** Which band of the fight this NPC is in. Derived, never stored as intent. */
+UENUM()
+enum class EShooterPushPhase : uint8
+{
+	Approach,
+	Sprint,
+	Duel,
+	Withdraw
+};
+
+USTRUCT()
+struct FSTTask_ShooterPush_Data
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> NPC;
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AAIController> Controller;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	// ---- Distance bands ----
+
+	/** Beyond this the NPC is approaching on foot, firing. */
+	UPROPERTY(EditAnywhere, Category = "Distances", meta = (ClampMin = "200.0"))
+	float SprintDistance = 1200.0f;
+
+	/** Inside this the NPC stops closing and duels. */
+	UPROPERTY(EditAnywhere, Category = "Distances", meta = (ClampMin = "100.0"))
+	float DuelDistance = 600.0f;
+
+	/** How far it backs off to before handing the push to somebody else. */
+	UPROPERTY(EditAnywhere, Category = "Distances", meta = (ClampMin = "200.0"))
+	float WithdrawDistance = 1600.0f;
+
+	// ---- Movement shape ----
+
+	/** How far off the straight line each leg runs. Zero would be a beeline, which reads as a zombie;
+	 *  ninety would be a circle and never arrive. */
+	UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.0", ClampMax = "80.0"))
+	float DiagonalAngleDeg = 35.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.1"))
+	float LegDurationMin = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.1"))
+	float LegDurationMax = 1.2f;
+
+	/** Lateral hold in the duel. This is the firing-range dummy: no closing, just left and right. */
+	UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.1"))
+	float StrafeHoldMin = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.1"))
+	float StrafeHoldMax = 1.6f;
+
+	// ---- Rotation ----
+
+	/** How long it stays in the duel before withdrawing and letting somebody else come in. An enemy
+	 *  that never leaves your face reads as oppression; one that rotates gives the fight a rhythm the
+	 *  player can learn and use. */
+	UPROPERTY(EditAnywhere, Category = "Rotation", meta = (ClampMin = "0.5"))
+	float DuelDuration = 6.0f;
+
+	/** Chance per firing opportunity that a withdrawing NPC actually shoots. Withdrawal is meant to
+	 *  read as leaving, not as fighting backwards. */
+	UPROPERTY(EditAnywhere, Category = "Rotation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WithdrawFireChance = 0.35f;
+
+	// ---- Runtime ----
+
+	EShooterPushPhase Phase = EShooterPushPhase::Approach;
+	EShooterPushPhase PreviousPhase = EShooterPushPhase::Approach;
+
+	/** Which side the current leg is angled to. Flips at the end of every leg. */
+	float LegSign = 1.0f;
+
+	float LegEndTime = 0.0f;
+	FVector LegDestination = FVector::ZeroVector;
+	bool bHasLeg = false;
+
+	/** World time the duel started, for the rotation clock. */
+	float DuelEnteredTime = 0.0f;
+
+	/** True once the duel clock ran out, until the NPC is far enough away again. */
+	bool bWithdrawing = false;
+
+	/** Whether the last firing opportunity during withdrawal came up heads. Rolled once per leg so
+	 *  the NPC does not flicker between firing and not within a single leg. */
+	bool bWithdrawLegFires = false;
+
+	bool bIsShooting = false;
+
+	/** Stuck detection, same idea as the task this replaces. */
+	FVector LastStuckCheckPosition = FVector::ZeroVector;
+	float LastStuckCheckTime = 0.0f;
+};
+
+/** Seconds without progress before a leg is abandoned. */
+static constexpr float ShooterPush_StuckCheckInterval = 1.5f;
+static constexpr float ShooterPush_StuckDistanceThreshold = 25.0f;
+
+USTRUCT(DisplayName = "Shooter Push", Category = "Polarity|AI|Shooter")
+struct FSTTask_ShooterPush : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_ShooterPush_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+
+private:
+
+	/** Distance band, plus the withdrawal mode which overrides it. */
+	EShooterPushPhase ResolvePhase(const FInstanceDataType& Data) const;
+
+	/** Start a new leg in the direction this phase wants. */
+	void StartLeg(FInstanceDataType& Data) const;
+
+	/** Direction the current leg should run, already angled off the straight line. */
+	FVector ComputeLegDirection(const FInstanceDataType& Data) const;
+
+	void StartShooting(FInstanceDataType& Data) const;
+	void StopShooting(FInstanceDataType& Data) const;
+
+	/** Everything that has to be undone when the task or the phase ends: sprint latch, fire. */
+	void ReleaseMovementState(FInstanceDataType& Data) const;
+};

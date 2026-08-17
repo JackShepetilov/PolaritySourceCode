@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "GenericTeamAgentInterface.h"
 #include "Logging/LogMacros.h"
 #include "PolarityCharacter.generated.h"
 
@@ -27,7 +28,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
  *  First person character with Titanfall-style movement and EMF integration
  */
 UCLASS(abstract)
-class APolarityCharacter : public ACharacter
+class APolarityCharacter : public ACharacter, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -119,6 +120,46 @@ public:
 	/** Can the player air dash. Default false — granted by the "Air Dash" upgrade pickup. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
 	bool bCanAirDash = false;
+
+	// ==================== Team ====================
+	//
+	// Every character in this game has a side, players included. It lives here rather than on the
+	// two subclasses because there is one question ("who is this hostile to") and it must have one
+	// answer: AShooterNPC used to own the only implementation, so a player pawn answered NoTeam and
+	// was hostile to enemies only by accident of the default solver (FGenericTeamId(255) != 1).
+	// That accident stops being survivable the moment there is more than one enemy faction.
+	//
+	// Which of the two objects is asked depends on the direction: a STIMULUS SOURCE is asked
+	// through the actor itself and nothing else (FGenericTeamId::GetTeamIdentifier casts the actor,
+	// with no fallback to its controller), while a perception LISTENER is asked through the
+	// component's owner, which is the AI controller (UAIPerceptionComponent::GetTeamIdentifier).
+	// Hence the value here on the pawn, and the separate one on AShooterAIController: both are
+	// needed, and they must not disagree.
+
+	/** 0 = players, 1 = enemies. Second enemy faction takes 2 when factions land. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Team")
+	uint8 TeamByte = 0;
+
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(TeamByte); }
+
+	virtual void SetGenericTeamId(const FGenericTeamId& NewTeamId) override { TeamByte = NewTeamId.GetId(); }
+
+	// ==================== Aim ====================
+
+	/** Where this character is aiming vertically, in degrees, for animation to use.
+	 *
+	 *  Lives here rather than on AShooterCharacter because enemies need it for the same reason
+	 *  players do: a fight on two levels is the normal case, and an enemy whose gun is pinned to the
+	 *  horizon cannot show the player that it is aiming at them. AShooterNPC is not a
+	 *  AShooterCharacter, so the anim blueprints' "Cast To ShooterCharacter" simply failed for
+	 *  enemies and left the pitch at zero.
+	 *
+	 *  Works for an AI-controlled pawn without any extra plumbing: APawn::PreReplication writes
+	 *  RemoteViewPitch16 from whatever controller the pawn has, AI included, so the value reaches
+	 *  clients on its own. Note that AAIController::UpdateControlRotation zeroes pitch unless the
+	 *  focus actor is a Pawn, which is why an enemy staring at a decoy prop looks level at it. */
+	UFUNCTION(BlueprintPure, Category = "Coop|Aim")
+	float GetAimPitchForAnimation() const;
 
 public:
 	APolarityCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
