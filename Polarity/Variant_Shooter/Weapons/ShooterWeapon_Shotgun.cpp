@@ -229,3 +229,20 @@ void AShooterWeapon_Shotgun::GeneratePelletPattern()
 		*GetName(), Count,
 		GeneratedPatternLayout == EPelletPatternLayout::Ring ? TEXT("Ring") : TEXT("FilledDisc"));
 }
+
+#if WITH_EDITOR
+void AShooterWeapon_Shotgun::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName ChangedProperty = PropertyChangedEvent.GetPropertyName();
+
+	// Only the generator's own settings. Editing the pattern by hand must never trip this, or the
+	// hand-made entry would be wiped by the very act of typing it.
+	if (ChangedProperty == GET_MEMBER_NAME_CHECKED(AShooterWeapon_Shotgun, GeneratedPelletCount)
+		|| ChangedProperty == GET_MEMBER_NAME_CHECKED(AShooterWeapon_Shotgun, GeneratedPatternLayout))
+	{
+		GeneratePelletPattern();
+	}
+}
+#endif

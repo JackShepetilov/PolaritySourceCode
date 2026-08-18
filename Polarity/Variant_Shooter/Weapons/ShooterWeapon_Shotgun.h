@@ -112,6 +112,17 @@ protected:
 	UFUNCTION(CallInEditor, Category = "Shotgun|Pattern Generator")
 	void GeneratePelletPattern();
 
+#if WITH_EDITOR
+	/** Regenerates the pattern the moment either generator setting is touched.
+	 *
+	 *  The CallInEditor button above only exists where the engine has "a valid execution context":
+	 *  FObjectDetails::AddCallInEditorMethods drops every RF_ArchetypeObject and then bails out,
+	 *  which means the button is drawn for an actor placed in a level and NOT in the Blueprint
+	 *  editor's Class Defaults -- which is exactly where a weapon's pattern is authored. So the
+	 *  count and the layout double as the trigger: change either and the array below refills. */
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
 	// ==================== Firing ====================
 
 	virtual void FireHitscan(const FVector& TargetLocation) override;
