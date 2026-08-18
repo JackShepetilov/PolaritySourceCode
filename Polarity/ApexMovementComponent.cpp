@@ -1074,6 +1074,21 @@ void UApexMovementComponent::StopCrouchSlide()
 
 bool UApexMovementComponent::CanSlide() const
 {
+	// No settings asset, no slide. This used to fall back to 400 and let the slide start anyway,
+	// which was the actual bug: the rest of the slide (StartSlide's boost, and every line of
+	// UpdateSlide) reads the asset unguarded, so saying yes here promised something the slide code
+	// cannot deliver. It crashed the editor twice from FSTTask_ShooterPush, once on entry and once
+	// on the first update after entry.
+	//
+	// Refusing here rather than null-checking 138 dereferences is deliberate, and so is refusing
+	// rather than substituting a default asset: MovementSettings being null is also what makes
+	// GetMaxSpeed fall back to the Blueprint's MaxWalkSpeed, so quietly materialising defaults
+	// would change the movement speed of every character that has no asset assigned.
+	if (!MovementSettings)
+	{
+		return false;
+	}
+
 	if (bIsSliding || bIsMantling || bIsWallRunning || !IsMovingOnGround())
 	{
 		return false;
@@ -1084,8 +1099,7 @@ bool UApexMovementComponent::CanSlide() const
 		return false;
 	}
 
-	const float MinStartSpeed = MovementSettings ? MovementSettings->SlideMinStartSpeed : 400.0f;
-	return Velocity.Size2D() >= MinStartSpeed;
+	return Velocity.Size2D() >= MovementSettings->SlideMinStartSpeed;
 }
 
 void UApexMovementComponent::StartSlide()
@@ -1103,7 +1117,12 @@ void UApexMovementComponent::StartSlide()
 	GroundFriction = 0.0f;
 	BrakingDecelerationWalking = 0.0f;
 
-	if (SlideBoostCooldownRemaining <= 0.0f)
+	// MovementSettings is an EditAnywhere asset reference, and only the player's Blueprint fills it
+	// in. CanSlide() above already tolerates that (it falls back to 400 for the start speed), so the
+	// slide itself is reachable on any character - including NPCs, which is how FSTTask_ShooterPush
+	// crashed the editor here on the Sprint -> Duel edge. Without settings there is no boost, which
+	// is the same answer CanSlide gives: the slide happens, it just uses no tuned numbers.
+	if (MovementSettings && SlideBoostCooldownRemaining <= 0.0f)
 	{
 		const float CurrentSpeed = Velocity.Size2D();
 		const float MinBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMinSpeedBurst : MovementSettings->SlideMinSpeedBurst;
@@ -1126,12 +1145,58 @@ void UApexMovementComponent::StartSlide()
 	OnSlideStarted.Broadcast();
 }
 
+void UApexMovementComponent::StartSlideToPoint(const FVector& WorldPoint, float SteerRateDeg)
+{
+	if (!CanSlide())
+	{
+		return;
+	}
+
+	// Order matters: StartSlide checks CanSlide again and would refuse if the flags were already
+	// set, and UpdateSlide must never see bSlideToPoint without a point.
+	SlideTargetPoint = WorldPoint;
+	SlideSteerRateDeg = FMath::Max(0.0f, SteerRateDeg);
+	bSlideToPoint = true;
+
+	StartSlide();
+
+	if (!bIsSliding)
+	{
+		// StartSlide refused after all; do not leave the mode latched for the next, ordinary slide.
+		bSlideToPoint = false;
+	}
+}
+
+void UApexMovementComponent::UpdateSlideTargetPoint(const FVector& WorldPoint)
+{
+	if (bSlideToPoint)
+	{
+		SlideTargetPoint = WorldPoint;
+	}
+}
+
 void UApexMovementComponent::EndSlide()
 {
 	if (!bIsSliding)
 	{
 		return;
 	}
+
+	// Clear the AI mode here rather than at every call site: every exit from the slide comes
+	// through this function, and a latched bSlideToPoint would otherwise turn the player's next
+	// slide into a braking one aimed at a stale spot.
+	//
+	// Stand up in the same breath, and only for this mode. The crouch is a key state: the player
+	// holding crouch through the end of a slide means "stay crouched", which is why EndSlide must
+	// not do this generally. An NPC has no key, and the arrival is the moment it should be back on
+	// its feet - clearing the crouch from the task's next tick instead cost a frame of standing
+	// there crouched, which is exactly the delay that was visible.
+	if (bSlideToPoint)
+	{
+		StopCrouching();
+	}
+
+	bSlideToPoint = false;
 
 	UE_LOG(LogSlide, Log, TEXT("SLIDE ENDED: Duration=%.2f, FinalSpeed=%.1f"), SlideDuration, Velocity.Size2D());
 
@@ -1155,13 +1220,16 @@ void UApexMovementComponent::EndSlide()
 
 void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
 {
-	if (bIsSliding || bIsMantling || bIsWallRunning || SlideCooldownRemaining > 0.0f)
+	// Same reason as CanSlide: everything below this point reads the settings asset unguarded, so a
+	// character without one must not enter the slide at all. This is the landing door into the same
+	// state, and it does not go through CanSlide.
+	if (bIsSliding || bIsMantling || bIsWallRunning || SlideCooldownRemaining > 0.0f || !MovementSettings)
 	{
 		// Filter the log by [NET_DEBUG] to see why a landing did not turn into a slide. Both ends
 		// print it, so a line appearing on one side only is itself the answer.
 		UE_LOG(LogTemp, Warning,
-			TEXT("[NET_DEBUG] %s StartSlideFromAir REFUSED: sliding=%d mantling=%d wallrun=%d cooldown=%.2f"),
-			(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), bIsSliding ? 1 : 0, bIsMantling ? 1 : 0, bIsWallRunning ? 1 : 0, SlideCooldownRemaining);
+			TEXT("[NET_DEBUG] %s StartSlideFromAir REFUSED: sliding=%d mantling=%d wallrun=%d cooldown=%.2f settings=%d"),
+			(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), bIsSliding ? 1 : 0, bIsMantling ? 1 : 0, bIsWallRunning ? 1 : 0, SlideCooldownRemaining, MovementSettings ? 1 : 0);
 		return;
 	}
 
@@ -1325,6 +1393,16 @@ void UApexMovementComponent::UpdateCapsuleHeight(float DeltaTime)
 
 void UApexMovementComponent::UpdateSlide(float DeltaTime)
 {
+	// CanSlide now refuses without settings, so reaching here without them means the slide state
+	// arrived by another door - the network flag path in ApplyPolarityMoveFlags sets bIsSliding
+	// from the client's answer and is explicitly documented to override this machine's opinion.
+	// End it rather than read a null asset.
+	if (!MovementSettings)
+	{
+		EndSlide();
+		return;
+	}
+
 	const float SlideMinSpeed = MovementSettings->SlideMinSpeed;
 	const float SlideFlatDecel = MovementSettings->SlideFlatDeceleration;
 	const float SlideUphillDecel = MovementSettings->SlideUphillDeceleration;
@@ -1338,6 +1416,82 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 	}
 
 	SlideDuration += DeltaTime;
+
+	// ---- AI slide that has to finish on its committed spot ----
+	//
+	// Placed ahead of the SlideMinSpeed cutoff on purpose: this slide is *meant* to end up slow,
+	// because it is braking to a stop, and the ordinary cutoff would tear it down a metre or two
+	// short of the point every time.
+	//
+	// Measured from the capsule, not the actor: AI_PERCEPTION_INSIGHTS.md documents the skeleton
+	// offset putting actor location out by ~15cm, and the arrival test here works at exactly that
+	// scale.
+	if (bSlideToPoint && UpdatedComponent)
+	{
+		const FVector Here = UpdatedComponent->GetComponentLocation();
+		FVector ToPoint = SlideTargetPoint - Here;
+		ToPoint.Z = 0.0f;
+
+		const float Remaining = ToPoint.Size();
+		const float Speed2D = Velocity.Size2D();
+
+		constexpr float ArriveTolerance = 40.0f;
+		if (Remaining <= ArriveTolerance)
+		{
+			UE_LOG(LogSlide, Log, TEXT("[AI_DEBUG] slide arrived: remaining=%.0f speed=%.0f"), Remaining, Speed2D);
+			EndSlide();
+			return;
+		}
+
+		// Steer toward the spot at a bounded rate. The spot travels with the player, so without a
+		// limit the slide would snap sideways every time the player changed direction; with one it
+		// curves, which is both what a slide can physically do and what reads as an intercept.
+		if (!SlideDirection.IsNearlyZero() && SlideSteerRateDeg > 0.0f)
+		{
+			const FVector Desired = ToPoint / Remaining;
+			const float DotDir = FMath::Clamp(FVector::DotProduct(SlideDirection, Desired), -1.0f, 1.0f);
+			const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(DotDir));
+			const float MaxTurnDeg = SlideSteerRateDeg * DeltaTime;
+
+			if (AngleDeg > KINDA_SMALL_NUMBER)
+			{
+				const float TurnDeg = FMath::Min(AngleDeg, MaxTurnDeg);
+				const float TurnSign = FVector::CrossProduct(SlideDirection, Desired).Z >= 0.0f ? 1.0f : -1.0f;
+				SlideDirection = SlideDirection.RotateAngleAxis(TurnDeg * TurnSign, FVector::UpVector).GetSafeNormal2D();
+			}
+		}
+
+		// Brake to land on it: stopping in distance d from speed v needs v^2 / 2d, recomputed every
+		// frame so a player who backs away stretches the slide and one who closes shortens it.
+		const float BrakeDecel = (Speed2D * Speed2D) / (2.0f * FMath::Max(Remaining, 1.0f));
+		const float NewSpeed = FMath::Max(0.0f, Speed2D - BrakeDecel * DeltaTime);
+
+		// Stopped short and still not there - the spot moved out of reach, or something is in the
+		// way. End rather than sit in a slide going nowhere; the duel takes over on foot.
+		//
+		// The floor is SlideMinSpeed, the same one the ordinary slide below uses, and NOT a
+		// near-zero epsilon. Braking at v^2/2d is proportional to the speed squared, so it decays
+		// asymptotically: the slower it goes the weaker the braking gets, and a test against
+		// KINDA_SMALL_NUMBER is never reached. Measured in the log as two slides that logged
+		// SLIDE STARTED and no SLIDE ENDED at all - the NPC crept along at a speed indistinguishable
+		// from zero, holding the slide, and therefore holding the crouch, indefinitely. That is the
+		// enemy that "crouches at the end of the slide and sits there".
+		//
+		// SlideDuration is the second net, for the case where the spot keeps retreating fast enough
+		// to keep the speed above the floor: a charge is an event, not a state, so it gets a
+		// ceiling in seconds regardless.
+		constexpr float MaxSlideToPointDuration = 2.5f;
+		if (NewSpeed < SlideMinSpeed || SlideDuration > MaxSlideToPointDuration)
+		{
+			UE_LOG(LogSlide, Log, TEXT("[AI_DEBUG] slide gave up: remaining=%.0f speed=%.0f duration=%.2f"),
+				Remaining, NewSpeed, SlideDuration);
+			EndSlide();
+			return;
+		}
+
+		Velocity = SlideDirection * NewSpeed + FVector(0.0f, 0.0f, Velocity.Z);
+		return;
+	}
 
 	const float SpeedBefore = Velocity.Size2D();
 

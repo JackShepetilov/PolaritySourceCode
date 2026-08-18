@@ -663,6 +663,29 @@ struct FSTTask_ShooterPush_Data
 	UPROPERTY(EditAnywhere, Category = "Rotation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float WithdrawFireChance = 0.35f;
 
+	// ---- Sprint commitment ----
+
+	/** How long before arrival the charge commits to the slide. Expressed as time rather than
+	 *  distance so it survives retuning the sprint speed: the trigger distance is this times the
+	 *  speed the NPC is actually running at. */
+	UPROPERTY(EditAnywhere, Category = "Sprint", meta = (ClampMin = "0.0"))
+	float SlideLeadTime = 0.45f;
+
+	/** Lower bound on how often the sprint goal may be re-issued while the target moves. One path
+	 *  request per pusher per this interval; the goal itself moves continuously regardless. */
+	UPROPERTY(EditAnywhere, Category = "Sprint", meta = (ClampMin = "0.05"))
+	float SprintRetargetInterval = 0.25f;
+
+	/** How far the goal has to drift before re-issuing is worth a path request. Below this the old
+	 *  path is still close enough, and re-requesting only makes the run stutter. */
+	UPROPERTY(EditAnywhere, Category = "Sprint", meta = (ClampMin = "0.0"))
+	float SprintRetargetTolerance = 100.0f;
+
+	/** How fast the slide is allowed to steer toward its committed point, in degrees per second.
+	 *  This is what keeps a moving target from turning the slide into a snap. */
+	UPROPERTY(EditAnywhere, Category = "Sprint", meta = (ClampMin = "0.0"))
+	float SlideSteerRateDeg = 120.0f;
+
 	// ---- Runtime ----
 
 	EShooterPushPhase Phase = EShooterPushPhase::Approach;
@@ -670,6 +693,25 @@ struct FSTTask_ShooterPush_Data
 
 	/** Which side the current leg is angled to. Flips at the end of every leg. */
 	float LegSign = 1.0f;
+
+	/** World bearing, in degrees, of the spot on the duel ring this charge committed to - measured
+	 *  from the TARGET outwards, which is the whole point: the commitment is an angle around the
+	 *  player, not a place on the map. While the player moves, the spot travels with them and the
+	 *  run bends gradually to follow instead of picking a fresh point and snapping to it. */
+	float CommittedBearingDeg = 0.0f;
+	bool bHasCommittedBearing = false;
+
+	/** Throttle for re-issuing the sprint goal as that spot moves. */
+	float LastRetargetTime = 0.0f;
+
+	/** The charge reached its committed spot. This, and not the distance test, is what opens the
+	 *  duel: the slide stops a little short of the ring by design (arrival tolerance), so waiting
+	 *  for distance to fall under DuelDistance meant standing up and walking the last few
+	 *  centimetres before the duel would start. Arriving IS the end of the charge. */
+	bool bChargeArrived = false;
+
+	/** Edge detector for the above: true while the braking slide is running. */
+	bool bWasSlidingToPoint = false;
 
 	float LegEndTime = 0.0f;
 	FVector LegDestination = FVector::ZeroVector;

@@ -537,6 +537,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	bool TryAirDash();
 
+	// ==================== AI slide to a point ====================
+
+	/** Start a slide that has to FINISH on WorldPoint instead of running its normal decay.
+	 *
+	 *  The player's slide is tuned to feel good and is allowed to overshoot - that is what a slide
+	 *  is for. An NPC charging a duel ring cannot overshoot: sliding past the target and coming to
+	 *  rest behind it is the opposite of arriving. So this variant brakes at whatever rate actually
+	 *  stops it on the spot (v^2 / 2d, recomputed as the spot moves with the player) and steers
+	 *  toward it at a limited rate rather than snapping.
+	 *
+	 *  Runs inside UpdateSlide, which is called from OnMovementUpdated - that is, inside the
+	 *  movement simulation, where velocity is allowed to be written. Do not lift any of this into a
+	 *  component tick. */
+	void StartSlideToPoint(const FVector& WorldPoint, float SteerRateDeg);
+
+	/** Move the committed point while the slide is already running. */
+	void UpdateSlideTargetPoint(const FVector& WorldPoint);
+
+	bool IsSlidingToPoint() const { return bIsSliding && bSlideToPoint; }
+
 	// ==================== Smooth Crouch ====================
 
 	/** Start crouching with smooth capsule interpolation */
@@ -740,6 +760,17 @@ public:
 
 	void RegisterVelocityModifier(TScriptInterface<IVelocityModifier> Modifier);
 	void UnregisterVelocityModifier(TScriptInterface<IVelocityModifier> Modifier);
+
+	// ==================== AI slide-to-point state ====================
+	//
+	// Not replicated and deliberately so: these drive an AI slide, which only ever runs on the
+	// server, and what watching machines need is bIsSliding, which already replicates
+	// COND_SimulatedOnly. Nothing here changes what a client is told - only how far the server
+	// decides the slide travels.
+
+	bool bSlideToPoint = false;
+	FVector SlideTargetPoint = FVector::ZeroVector;
+	float SlideSteerRateDeg = 120.0f;
 
 protected:
 	/** The saved move has to read and write the predicted state below to record a move and to put

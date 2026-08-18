@@ -26,6 +26,34 @@ namespace
 	 *  bFaceTarget == true  → rotate the body toward the controller's focus/target (used while
 	 *                          stopped to fire, so the NPC faces the player without needing a
 	 *                          directional-strafe blendspace). */
+	/** The spot on the duel ring this charge committed to, in world space right now.
+	 *
+	 *  The bearing is fixed for the whole charge; the point is not, because it hangs off the target
+	 *  and the target walks. That is the entire trick behind following a moving player smoothly:
+	 *  re-deriving the point from a stored angle moves it by exactly as much as the player moved,
+	 *  whereas re-choosing a point on the ring would jump to a different side of them. */
+	FVector ShooterPush_RingPoint(const FSTTask_ShooterPush_Data& Data)
+	{
+		FVector Point = Data.Target->GetActorLocation()
+			+ FRotator(0.0f, Data.CommittedBearingDeg, 0.0f).Vector() * Data.DuelDistance;
+		Point.Z = Data.NPC->GetActorLocation().Z;
+		return Point;
+	}
+
+	/** Drop the sprint latch and enter the braking slide in one step. Separated only so the call site
+	 *  reads as one decision: an NPC left sprinting into a slide keeps bSprintKeyHeld set, and the
+	 *  latch outlives the slide exactly the way the crouch used to. */
+	void Apex_StopSprintAndSlide(UApexMovementComponent* Apex, const FVector& Point, float SteerRateDeg)
+	{
+		if (!Apex)
+		{
+			return;
+		}
+
+		Apex->StopSprint();
+		Apex->StartSlideToPoint(Point, SteerRateDeg);
+	}
+
 	void SetShooterRotationMode(AShooterNPC* NPC, bool bFaceTarget)
 	{
 		if (!NPC)
@@ -1593,6 +1621,10 @@ EStateTreeRunStatus FSTTask_ShooterPush::EnterState(FStateTreeExecutionContext& 
 	Data.LegSign = FMath::RandBool() ? 1.0f : -1.0f;
 	Data.LastStuckCheckPosition = Data.NPC->GetActorLocation();
 	Data.LastStuckCheckTime = Now;
+	Data.bHasCommittedBearing = false;
+	Data.LastRetargetTime = Now;
+	Data.bChargeArrived = false;
+	Data.bWasSlidingToPoint = false;
 
 	Data.Controller->SetFocus(Data.Target);
 	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ true);
@@ -1626,12 +1658,44 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 	const FVector NPCLocation = Data.NPC->GetActorLocation();
 	const float Distance = FVector::Dist2D(NPCLocation, Data.Target->GetActorLocation());
 
+	// Aim and facing are re-asserted every tick rather than only on entry, because two different
+	// things drift out from under them. The sensed target can be swapped while this state stays
+	// active, leaving focus on whoever was there at EnterState; and the rotation flags are plain
+	// bools that anything else touching the movement component can flip. Both look the same on
+	// screen: an enemy firing at the player while its body points somewhere else.
+	//
+	// Aim follows the target unconditionally - having a target and not aiming at it is never
+	// correct. Body rotation is the one exception, and only for the sprint; it is asserted below,
+	// once the phase for this tick is known.
+	if (Data.Controller->GetFocusActor() != Data.Target)
+	{
+		Data.Controller->SetFocus(Data.Target);
+	}
+
+	// Did the braking slide just finish? Asked here, before the phase is resolved, so the duel opens
+	// on the very tick the NPC arrives instead of the one after it.
+	{
+		const UApexMovementComponent* const ApexArrival =
+			Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+		const bool bSlidingToPoint = ApexArrival && ApexArrival->IsSlidingToPoint();
+
+		if (Data.bWasSlidingToPoint && !bSlidingToPoint)
+		{
+			Data.bChargeArrived = true;
+		}
+		Data.bWasSlidingToPoint = bSlidingToPoint;
+	}
+
 	// The duel clock. Rotation is the whole reason an enemy in your face is a moment rather than a
 	// condition, so it runs off wall time from entry, not off anything the NPC achieves.
 	if (Data.Phase == EShooterPushPhase::Duel && !Data.bWithdrawing
 		&& (Now - Data.DuelEnteredTime) >= Data.DuelDuration)
 	{
 		Data.bWithdrawing = true;
+
+		// The arrival latch belongs to the charge that just ended. Leaving it set would hold the
+		// next cycle in the duel the moment the withdrawal cleared.
+		Data.bChargeArrived = false;
 	}
 
 	// Far enough out: the push is over, the token goes back, and the distance bands take over again.
@@ -1646,6 +1710,7 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 		}
 	}
 
+	const EShooterPushPhase PhaseBefore = Data.PreviousPhase;
 	Data.Phase = ResolvePhase(Data);
 
 	// ---- Phase edges ----
@@ -1653,20 +1718,19 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 	{
 		UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
 
-		// Sprint to Duel is where the slide lives. Asked, not assumed: CanSlide wants ground, no
-		// cooldown and SlideMinStartSpeed, so an NPC that never got up to speed simply arrives on
-		// foot and nothing here has to special-case it.
-		if (Apex && Data.PreviousPhase == EShooterPushPhase::Sprint && Data.Phase == EShooterPushPhase::Duel)
+		// The slide is NOT fired here any more. As an event on the Sprint -> Duel boundary it was
+		// structurally too late: the boundary is crossed at duel range, so the entire slide happened
+		// on the far side of the ring and carried the NPC straight through it. It now starts
+		// SlideLeadTime before arrival, from the sprint block below, and brakes onto the spot.
+		if (Apex && Data.PreviousPhase == EShooterPushPhase::Sprint)
 		{
 			Apex->StopSprint();
-			if (Apex->CanSlide())
-			{
-				Apex->StartSlide();
-			}
 		}
-		else if (Apex && Data.PreviousPhase == EShooterPushPhase::Sprint)
+
+		// Leaving the sprint drops the commitment so the next charge picks its own side.
+		if (Data.PreviousPhase == EShooterPushPhase::Sprint && Data.Phase != EShooterPushPhase::Sprint)
 		{
-			Apex->StopSprint();
+			Data.bHasCommittedBearing = false;
 		}
 
 		if (Apex && Data.Phase == EShooterPushPhase::Sprint)
@@ -1679,14 +1743,122 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 			Data.DuelEnteredTime = Now;
 		}
 
-		// Body faces the target in every phase that shoots, so the strafe set plays and the gun
-		// points where it is firing. The silent sprint is the exception: there it faces where it is
-		// going, which is what a running animation wants.
-		SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ Data.Phase != EShooterPushPhase::Sprint);
-
 		// A leg computed for the old phase points the wrong way for the new one.
 		Data.bHasLeg = false;
 		Data.PreviousPhase = Data.Phase;
+	}
+
+	// Body rotation, every tick and not just on the phase edge, for the same drift reason as the
+	// focus above.
+	//
+	// The exception is narrower than "the sprint": it is the sprint ON FOOT. A charge turns to face
+	// where it is running because that is the action the run animation describes, but the slide at
+	// the end of it is the arrival, not the run, and by then the gun should already be pointed at
+	// the player. Leaving the body on the movement direction through the slide also swung the sight
+	// cone off the player right at the moment of closing, which is where the lost targets were
+	// coming from.
+	//
+	// Movement shape does not depend on this either way: the run is a MoveTo goal with bCanStrafe,
+	// and the slide is driven by Velocity, so neither one reads the body's facing.
+	const UApexMovementComponent* const ApexRotation = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+	const bool bChargingOnFoot = Data.Phase == EShooterPushPhase::Sprint
+		&& !(ApexRotation && ApexRotation->IsSliding());
+
+	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ !bChargingOnFoot);
+
+	// ---- The charge, while it is running ----
+	//
+	// Three things happen here and nowhere else, because all three depend on where the committed
+	// spot is RIGHT NOW rather than where it was when the leg was issued.
+	if (Data.Phase == EShooterPushPhase::Sprint && Data.bHasCommittedBearing)
+	{
+		UApexMovementComponent* const ApexRun = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+		const FVector RingPoint = ShooterPush_RingPoint(Data);
+
+		if (ApexRun && ApexRun->IsSlidingToPoint())
+		{
+			// Already sliding: hand it the spot every frame. The braking distance and the steering
+			// are recomputed from it inside the movement simulation, so a player who backs off
+			// stretches the slide and one who steps in shortens it.
+			ApexRun->UpdateSlideTargetPoint(RingPoint);
+		}
+		else if (ApexRun && !ApexRun->IsSliding())
+		{
+			// Commit to the slide by TIME to arrival, not by crossing a distance. Time is what makes
+			// this survive retuning: SlideLeadTime seconds of running is the same fraction of the
+			// approach whether the NPC covers 400 or 800 units a second.
+			const float SpeedNow = ApexRun->Velocity.Size2D();
+			const float ToPoint = FVector::Dist2D(NPCLocation, RingPoint);
+
+			if (Data.SlideLeadTime > 0.0f && SpeedNow > KINDA_SMALL_NUMBER
+				&& ToPoint <= SpeedNow * Data.SlideLeadTime)
+			{
+				Apex_StopSprintAndSlide(ApexRun, RingPoint, Data.SlideSteerRateDeg);
+			}
+			else if ((Now - Data.LastRetargetTime) >= Data.SprintRetargetInterval
+				&& FVector::Dist2D(RingPoint, Data.LegDestination) > Data.SprintRetargetTolerance)
+			{
+				// The spot has drifted far enough from the goal the path was built for. Re-issue,
+				// but on a throttle: the point moves continuously and the path request must not.
+				Data.LastRetargetTime = Now;
+				Data.bHasLeg = false;
+			}
+		}
+	}
+
+	// The crouch is a key state, exactly like the sprint latch, and it has the same problem: the
+	// slide switches it ON (StartSlide -> StartCrouching) and only the player's crouch key release
+	// (StopCrouchSlide) ever switches it OFF. An NPC has no key, so every slide left it walking
+	// around crouched for the rest of the fight. Release it as soon as the slide it belongs to is
+	// over; while sliding it must stay, because that is the slide's own pose.
+	if (UApexMovementComponent* const ApexCrouch = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+	{
+		if (!ApexCrouch->IsSliding() && ApexCrouch->IsCrouching())
+		{
+			ApexCrouch->StopCrouching();
+		}
+	}
+
+	// ---- Diagnostics ----
+	// Temporary, and deliberately reporting measurements rather than conclusions: the two complaints
+	// this has to settle are "the body does not stay locked on the player" and "it never leaves the
+	// approach", and both are unfalsifiable from watching. Filter the Output Log on [AI_DEBUG].
+	// Throttled off world time so no new instance-data field (and therefore no header change) is
+	// needed; the phase edge always logs.
+	{
+		const bool bPhaseEdge = Data.Phase != PhaseBefore;
+		if (bPhaseEdge || FMath::Fmod(Now, 0.5f) < DeltaTime)
+		{
+			UCharacterMovementComponent* const CMC = Data.NPC->GetCharacterMovement();
+			const UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(CMC);
+
+			const FVector ToTarget = (Data.Target->GetActorLocation() - NPCLocation).GetSafeNormal2D();
+			const float YawError = ToTarget.IsNearlyZero() ? -1.0f
+				: FMath::RadiansToDegrees(FMath::Acos(
+					FMath::Clamp(FVector::DotProduct(Data.NPC->GetActorForwardVector().GetSafeNormal2D(), ToTarget), -1.0f, 1.0f)));
+
+			const AActor* const Focus = Data.Controller->GetFocusActor();
+
+			UE_LOG(LogTemp, Warning, TEXT("[AI_DEBUG] %s phase=%d dist=%.0f (sprint@%.0f duel@%.0f) ")
+				TEXT("yawErr=%.1f focus=%s target=%s ctrlRot=%d orientMove=%d rotRate=%.0f ")
+				TEXT("speed=%.0f maxSpeed=%.0f hasMoveSettings=%d sprinting=%d sliding=%d los=%d withdraw=%d"),
+				*Data.NPC->GetName(),
+				static_cast<int32>(Data.Phase),
+				Distance, Data.SprintDistance, Data.DuelDistance,
+				YawError,
+				Focus ? *Focus->GetName() : TEXT("NULL"),
+				*Data.Target->GetName(),
+				CMC ? static_cast<int32>(CMC->bUseControllerDesiredRotation) : 0,
+				CMC ? static_cast<int32>(CMC->bOrientRotationToMovement) : 0,
+				CMC ? CMC->RotationRate.Yaw : 0.0f,
+				CMC ? CMC->Velocity.Size2D() : 0.0f,
+				CMC ? CMC->GetMaxSpeed() : 0.0f,
+				(Apex && Apex->MovementSettings) ? 1 : 0,
+				Apex ? static_cast<int32>(Apex->IsSprinting()) : 0,
+				Apex ? static_cast<int32>(Apex->IsSliding()) : 0,
+				Data.NPC->HasLineOfSightTo(Data.Target) ? 1 : 0,
+				Data.bWithdrawing ? 1 : 0);
+		}
 	}
 
 	// ---- Legs ----
@@ -1772,11 +1944,26 @@ void FSTTask_ShooterPush::ExitState(FStateTreeExecutionContext& Context,
 	ReleaseMovementState(Data);
 }
 
+/** Dead band on the distance thresholds. Without one, a target sitting on a boundary flips the phase
+ *  every frame; measured 291 phase changes in 630 samples before this existed. */
+static constexpr float ShooterPush_PhaseHysteresis = 150.0f;
+
+
 EShooterPushPhase FSTTask_ShooterPush::ResolvePhase(const FInstanceDataType& Data) const
 {
 	if (Data.bWithdrawing)
 	{
 		return EShooterPushPhase::Withdraw;
+	}
+
+	// The charge arrived on its committed spot, so the duel starts now - before the distance test
+	// gets a say. The braking slide stops within the arrival tolerance of the ring rather than
+	// exactly on it, which left the NPC a few dozen centimetres outside DuelDistance, still
+	// formally sprinting, having to stand up and walk in before anything happened. That gap was the
+	// pause between the slide and the duel.
+	if (Data.bChargeArrived)
+	{
+		return EShooterPushPhase::Duel;
 	}
 
 	if (!Data.NPC || !Data.Target)
@@ -1786,7 +1973,38 @@ EShooterPushPhase FSTTask_ShooterPush::ResolvePhase(const FInstanceDataType& Dat
 
 	const float Distance = FVector::Dist2D(Data.NPC->GetActorLocation(), Data.Target->GetActorLocation());
 
-	if (Distance > Data.SprintDistance)
+	// "Phase is a function of distance" was the right decision and it stays; what it was missing is
+	// that a bare threshold is not a function of distance alone once the NPC's own movement is what
+	// changes the distance. Closing in the sprint carries it past DuelDistance, the duel stops
+	// closing and it drifts back out, and the phase flips on every crossing - many times a second,
+	// because the boundary sits exactly where the NPC parks itself.
+	//
+	// Everything the player reported followed from that one flip: the sprint was entered constantly
+	// but never lasted long enough to accelerate (so no sprint, and no slide either, since CanSlide
+	// wants SlideMinStartSpeed), every edge dropped the current leg and issued a fresh MoveTo (so
+	// the zigzag legs were chopped to fragments and the NPC visibly stuttered), and the rotation
+	// mode flipped with it (so the body snapped off the target and back, "sometimes turns away").
+	//
+	// The fix is to widen whichever band the NPC is already in. Entry thresholds are unchanged, so
+	// the phase table in the design doc still reads true; only leaving costs an extra 150 units.
+	//
+	// The duel is stronger than that: it LATCHES. Author's call, and it changes the shape of the
+	// push on purpose - the sprint happens once per push, and the only way out of the duel is the
+	// withdrawal, never backwards into another sprint. Distance stops being the whole story here
+	// because the duel is the one phase whose own movement is lateral: it does not close, so it
+	// drifts, and a purely distance-driven reading would keep re-charging a target it is already
+	// standing next to. The cycle still comes back around - the duel clock sets bWithdrawing, the
+	// withdrawal runs out to WithdrawDistance, and the next tick resolves to Approach again.
+	if (Data.PreviousPhase == EShooterPushPhase::Duel)
+	{
+		return EShooterPushPhase::Duel;
+	}
+
+	const float SprintEdge = (Data.PreviousPhase == EShooterPushPhase::Approach)
+		? Data.SprintDistance
+		: Data.SprintDistance + ShooterPush_PhaseHysteresis;
+
+	if (Distance > SprintEdge)
 	{
 		return EShooterPushPhase::Approach;
 	}
@@ -1833,15 +2051,73 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 	const float Now = World->GetTimeSeconds();
 
 	const bool bDuel = Data.Phase == EShooterPushPhase::Duel;
-	const float Duration = bDuel
-		? FMath::FRandRange(Data.StrafeHoldMin, Data.StrafeHoldMax)
-		: FMath::FRandRange(Data.LegDurationMin, Data.LegDurationMax);
+	const bool bSprint = Data.Phase == EShooterPushPhase::Sprint;
 
 	// Leg length follows from how fast this NPC actually moves, so retuning its speed does not
 	// silently retune the shape of its path as well.
 	const float Speed = FMath::Max(100.0f, Data.NPC->GetCharacterMovement()
 		? Data.NPC->GetCharacterMovement()->GetMaxSpeed() : 400.0f);
-	const float LegLength = Speed * Duration;
+
+	float Duration;
+	float LegLength;
+
+	// Commit an ANGLE AROUND THE TARGET, once, and keep it for the whole charge. Everything the
+	// dynamic behaviour needs follows from storing a bearing instead of a place: while the player
+	// walks, the spot rides along with them, the run bends by however much the player moved, and the
+	// NPC never re-picks a different corner of the ring and snaps toward it.
+	auto CommitSprintBearing = [&Data]()
+	{
+		FVector FromTarget = (Data.NPC->GetActorLocation() - Data.Target->GetActorLocation()).GetSafeNormal2D();
+		if (FromTarget.IsNearlyZero())
+		{
+			FromTarget = FVector::ForwardVector;
+		}
+
+		Data.CommittedBearingDeg = FromTarget
+			.RotateAngleAxis(Data.LegSign * Data.DiagonalAngleDeg, FVector::UpVector)
+			.Rotation().Yaw;
+		Data.bHasCommittedBearing = true;
+	};
+
+	FVector SprintDestination = FVector::ZeroVector;
+
+	if (bSprint)
+	{
+		// The sprint is ONE committed run, not a zigzag: pick the spot where the duel is going to
+		// start and go there. Author's call, and it is also what makes the sprint readable - a
+		// charge that changes its mind twice on the way is not a charge.
+		//
+		// The destination is a point ON the duel ring, not a direction and a length. The first
+		// attempt at this ran a fixed heading DiagonalAngleDeg off the line to the target, with the
+		// length divided by the cosine, and that cannot work: a straight line at angle T to the
+		// target never comes closer than D*sin(T). At D=2000 and 35 degrees that floor is 1147, so a
+		// charge aimed at a 750 ring stopped dead around 800 and then re-issued a goal a few units
+		// ahead of itself, inside the acceptance radius, forever. Measured: two NPCs frozen at 827
+		// and 791 with speed 0.
+		//
+		// Anchoring on the ring instead makes the arrival exact by construction, and the heading
+		// comes out of the geometry rather than being imposed on it: still a diagonal, just one that
+		// actually lands where the duel starts.
+		if (!Data.bHasCommittedBearing)
+		{
+			CommitSprintBearing();
+		}
+
+		SprintDestination = ShooterPush_RingPoint(Data);
+		LegLength = FVector::Dist2D(Data.NPC->GetActorLocation(), SprintDestination);
+
+		// Not a pacing knob - a safety net. Without it a charge blocked by something the stuck check
+		// does not catch would hold the leg forever. Generous on purpose so it never trims a run
+		// that is actually progressing.
+		Duration = (LegLength / Speed) * 2.0f + 1.0f;
+	}
+	else
+	{
+		Duration = bDuel
+			? FMath::FRandRange(Data.StrafeHoldMin, Data.StrafeHoldMax)
+			: FMath::FRandRange(Data.LegDurationMin, Data.LegDurationMax);
+		LegLength = Speed * Duration;
+	}
 
 	const FVector Origin = Data.NPC->GetActorLocation();
 
@@ -1851,7 +2127,17 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 	bool bFound = false;
 	for (int32 Attempt = 0; Attempt < 2 && !bFound; ++Attempt)
 	{
-		const FVector Candidate = Origin + ComputeLegDirection(Data) * LegLength;
+		// On the retry the sign has already flipped, so a sprint re-commits to the mirrored bearing;
+		// any other leg just recomputes its direction.
+		if (bSprint && Attempt > 0)
+		{
+			CommitSprintBearing();
+			SprintDestination = ShooterPush_RingPoint(Data);
+		}
+
+		const FVector Candidate = bSprint
+			? SprintDestination
+			: Origin + ComputeLegDirection(Data) * LegLength;
 
 		FNavLocation NavResult;
 		if (NavSys->ProjectPointToNavigation(Candidate, NavResult, FVector(200.0f, 200.0f, 300.0f)))
@@ -1882,7 +2168,14 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 	MoveRequest.SetCanStrafe(true);
 
 	const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
-	if (Result.Code == EPathFollowingRequestResult::Failed)
+
+	// AlreadyAtGoal is not success, and treating it as one is how the NPC stood still while looking
+	// busy: a goal inside the 60cm acceptance radius makes MoveTo a no-op, the tick sees the goal
+	// reached, asks for another leg, gets another no-op, and nothing ever moves. Handle it like a
+	// finished leg instead - short retry, other side next time - so a degenerate destination costs
+	// a quarter of a second rather than the rest of the fight.
+	if (Result.Code == EPathFollowingRequestResult::Failed
+		|| Result.Code == EPathFollowingRequestResult::AlreadyAtGoal)
 	{
 		Data.bHasLeg = false;
 		Data.LegEndTime = Now + 0.25f;
@@ -1900,8 +2193,14 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 	// not, instead of stuttering.
 	Data.bWithdrawLegFires = FMath::FRand() < Data.WithdrawFireChance;
 
-	// Next leg goes the other way. This is the zigzag.
-	Data.LegSign = -Data.LegSign;
+	// Next leg goes the other way. This is the zigzag - and the sprint is exactly the phase that
+	// must not have one, so it keeps its side. If the run gets re-issued mid-charge (goal reached
+	// while still outside DuelDistance, or a projection retry), it carries on along the same
+	// diagonal instead of cutting back across itself.
+	if (!bSprint)
+	{
+		Data.LegSign = -Data.LegSign;
+	}
 }
 
 void FSTTask_ShooterPush::StartShooting(FInstanceDataType& Data) const
@@ -1940,6 +2239,14 @@ void FSTTask_ShooterPush::ReleaseMovementState(FInstanceDataType& Data) const
 	if (UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
 	{
 		Apex->StopSprint();
+
+		// Same reasoning as the sprint latch above: the slide's crouch has no key to release it, so
+		// an NPC that exits this task mid-slide would keep the crouched pose into whatever state
+		// the tree goes to next.
+		if (Apex->IsCrouching())
+		{
+			Apex->StopCrouching();
+		}
 	}
 
 	if (Data.Controller)
