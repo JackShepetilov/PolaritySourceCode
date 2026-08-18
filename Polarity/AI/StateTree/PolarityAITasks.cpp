@@ -1,4 +1,4 @@
-// PolarityAITasks.cpp
+﻿// PolarityAITasks.cpp
 
 #include "PolarityAITasks.h"
 #include "StateTreeExecutionContext.h"
@@ -13,6 +13,10 @@
 #include "AITypes.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "../../ApexMovementComponent.h"
+
+// Its own category, off by default, so the push can be watched without the log being unusable the
+// rest of the time. Turn it on in the console with:  log LogShooterPush Verbose
+DEFINE_LOG_CATEGORY_STATIC(LogShooterPush, Log, All);
 
 namespace
 {
@@ -1839,7 +1843,7 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 
 			const AActor* const Focus = Data.Controller->GetFocusActor();
 
-			UE_LOG(LogTemp, Warning, TEXT("[AI_DEBUG] %s phase=%d dist=%.0f (sprint@%.0f duel@%.0f) ")
+			UE_LOG(LogShooterPush, Verbose, TEXT("[AI_DEBUG] %s phase=%d dist=%.0f (sprint@%.0f duel@%.0f) ")
 				TEXT("yawErr=%.1f focus=%s target=%s ctrlRot=%d orientMove=%d rotRate=%.0f ")
 				TEXT("speed=%.0f maxSpeed=%.0f hasMoveSettings=%d sprinting=%d sliding=%d los=%d withdraw=%d"),
 				*Data.NPC->GetName(),
@@ -2065,8 +2069,40 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 	// dynamic behaviour needs follows from storing a bearing instead of a place: while the player
 	// walks, the spot rides along with them, the run bends by however much the player moved, and the
 	// NPC never re-picks a different corner of the ring and snaps toward it.
-	auto CommitSprintBearing = [&Data]()
+	auto CommitSprintBearing = [&Data](bool bIgnoreCoordinator)
 	{
+		// First choice: the angle the coordinator already assigned this NPC in the battle circle.
+		//
+		// This is design doc 4.4 - "the pusher keeps its slot angle and ignores only the radius" -
+		// and it is the whole answer to enemies piling into one silhouette. Without it every pusher
+		// derives its bearing from its own position, and since they are all converging on the same
+		// player they all converge on the same line, block each other's shot and end up shoulder to
+		// shoulder. The coordinator hands out spread angles already; taking the ANGLE from the slot
+		// and the RADIUS from DuelDistance means they close from different sides for free, and the
+		// ring keeps working for everybody who is not pushing.
+		if (!bIgnoreCoordinator)
+		{
+			if (const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+			{
+				FVector SlotPosition = FVector::ZeroVector;
+				if (Coordinator->GetAssignedSlotPosition(Data.NPC, SlotPosition))
+				{
+					const FVector TargetToSlot =
+						(SlotPosition - Data.Target->GetActorLocation()).GetSafeNormal2D();
+
+					if (!TargetToSlot.IsNearlyZero())
+					{
+						Data.CommittedBearingDeg = TargetToSlot.Rotation().Yaw;
+						Data.bHasCommittedBearing = true;
+						return;
+					}
+				}
+			}
+		}
+
+		// Fallback: the diagonal off its own approach line. Used when the battle circle is switched
+		// off, when this NPC holds no slot, and on the projection retry, where the point has to move
+		// to the other side and the slot angle would keep handing back the same one.
 		FVector FromTarget = (Data.NPC->GetActorLocation() - Data.Target->GetActorLocation()).GetSafeNormal2D();
 		if (FromTarget.IsNearlyZero())
 		{
@@ -2100,7 +2136,7 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 		// actually lands where the duel starts.
 		if (!Data.bHasCommittedBearing)
 		{
-			CommitSprintBearing();
+			CommitSprintBearing(/*bIgnoreCoordinator*/ false);
 		}
 
 		SprintDestination = ShooterPush_RingPoint(Data);
@@ -2128,10 +2164,12 @@ void FSTTask_ShooterPush::StartLeg(FInstanceDataType& Data) const
 	for (int32 Attempt = 0; Attempt < 2 && !bFound; ++Attempt)
 	{
 		// On the retry the sign has already flipped, so a sprint re-commits to the mirrored bearing;
-		// any other leg just recomputes its direction.
+		// any other leg just recomputes its direction. The coordinator is skipped here on purpose:
+		// its slot angle does not depend on the sign, so asking again would hand back the exact
+		// point that just failed to project.
 		if (bSprint && Attempt > 0)
 		{
-			CommitSprintBearing();
+			CommitSprintBearing(/*bIgnoreCoordinator*/ true);
 			SprintDestination = ShooterPush_RingPoint(Data);
 		}
 
