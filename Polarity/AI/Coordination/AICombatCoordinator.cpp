@@ -1521,8 +1521,8 @@ bool AAICombatCoordinator::IsCoverBlocked(const FVector& Location, const AActor*
 
 	for (const FCoverClaim& Claim : CoverClaims)
 	{
-		const AActor* const Owner = Claim.Owner.Get();
-		if (!Owner || Owner == Asker)
+		const AActor* const ClaimOwner = Claim.Owner.Get();
+		if (!ClaimOwner || ClaimOwner == Asker)
 		{
 			continue;
 		}
@@ -1581,13 +1581,13 @@ void AAICombatCoordinator::CleanupInvalidNPCs()
 	// so somebody has to sweep or the arena slowly fills with reserved spots nobody occupies.
 	CoverClaims.RemoveAll([](const FCoverClaim& Claim)
 	{
-		const AActor* const Owner = Claim.Owner.Get();
-		if (!Owner)
+		const AActor* const ClaimOwner = Claim.Owner.Get();
+		if (!ClaimOwner)
 		{
 			return true;
 		}
 
-		const AShooterNPC* const ShooterOwner = Cast<AShooterNPC>(Owner);
+		const AShooterNPC* const ShooterOwner = Cast<AShooterNPC>(ClaimOwner);
 		return ShooterOwner && ShooterOwner->IsDead();
 	});
 

@@ -141,7 +141,9 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 			continue;
 		}
 
-		Scored.Add({ Candidate, ComputeExposure(Candidate, Players, TraceParams), FVector::Dist2D(Candidate, OwnerLocation) });
+		Scored.Add({ Candidate,
+			ComputeExposure(Candidate, Players, TraceParams),
+			static_cast<float>(FVector::Dist2D(Candidate, OwnerLocation)) });
 	}
 
 	if (Scored.Num() == 0)
