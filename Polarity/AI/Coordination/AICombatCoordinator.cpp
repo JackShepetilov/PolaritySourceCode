@@ -1478,6 +1478,64 @@ float AAICombatCoordinator::GetPlayerThreat(APawn* Player) const
 	return Threat;
 }
 
+void AAICombatCoordinator::ClaimCover(AActor* NPC, const FVector& Location)
+{
+	if (!NPC)
+	{
+		return;
+	}
+
+	// One claim per NPC: taking a new corner gives up the old one automatically, so callers cannot
+	// leak by forgetting the release half of a move.
+	for (FCoverClaim& Claim : CoverClaims)
+	{
+		if (Claim.Owner.Get() == NPC)
+		{
+			Claim.Location = Location;
+			return;
+		}
+	}
+
+	CoverClaims.Add({ NPC, Location });
+}
+
+void AAICombatCoordinator::ReleaseCover(AActor* NPC)
+{
+	if (!NPC)
+	{
+		return;
+	}
+
+	CoverClaims.RemoveAll([NPC](const FCoverClaim& Claim)
+	{
+		// Dead weak pointers go with it. Same idea as CleanupInvalidNPCs: the owner that never calls
+		// release is exactly the one that died, and without this sweep its corner stays reserved for
+		// the rest of the fight.
+		return !Claim.Owner.IsValid() || Claim.Owner.Get() == NPC;
+	});
+}
+
+bool AAICombatCoordinator::IsCoverBlocked(const FVector& Location, const AActor* Asker) const
+{
+	const float RadiusSquared = CoverBlockRadius * CoverBlockRadius;
+
+	for (const FCoverClaim& Claim : CoverClaims)
+	{
+		const AActor* const Owner = Claim.Owner.Get();
+		if (!Owner || Owner == Asker)
+		{
+			continue;
+		}
+
+		if (FVector::DistSquared2D(Claim.Location, Location) < RadiusSquared)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const
 {
 	// The gates below decide whether an NPC may attack, and they have to ask about the player THAT
@@ -1519,6 +1577,20 @@ bool AAICombatCoordinator::HasLineOfSightToTarget(APawn* NPC) const
 
 void AAICombatCoordinator::CleanupInvalidNPCs()
 {
+	// Claims first, and by the same rule: an owner that has gone away cannot release its own corner,
+	// so somebody has to sweep or the arena slowly fills with reserved spots nobody occupies.
+	CoverClaims.RemoveAll([](const FCoverClaim& Claim)
+	{
+		const AActor* const Owner = Claim.Owner.Get();
+		if (!Owner)
+		{
+			return true;
+		}
+
+		const AShooterNPC* const ShooterOwner = Cast<AShooterNPC>(Owner);
+		return ShooterOwner && ShooterOwner->IsDead();
+	});
+
 	RegisteredNPCs.RemoveAll([](const FRegisteredNPCData& Data)
 	{
 		if (!Data.NPC.IsValid()) return true;

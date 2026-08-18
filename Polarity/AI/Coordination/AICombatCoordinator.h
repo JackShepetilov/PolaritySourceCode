@@ -537,6 +537,37 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coordination|Threat")
 	float GetPlayerThreat(APawn* Player) const;
 
+	// --- Cover claims ---
+	//
+	// An occupied corner blocks a radius around itself, so two enemies do not end up behind the same
+	// wall from opposite sides interfering with each other's peeks (design doc 5.5). It lives here
+	// rather than in the cover component because this is already the object that knows about every
+	// registered NPC at once.
+	//
+	// The pleasant side effect is that the second NPC to look gets the second-best spot, which is by
+	// definition more open to the dangerous players - so enemy positions spread out on their own,
+	// and it is visible.
+
+	/** Take the corner at Location for this NPC. Replaces any claim it already held. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Cover")
+	void ClaimCover(AActor* NPC, const FVector& Location);
+
+	/** Give it back. Must be called on every exit from cover, including death and pool recycling:
+	 *  leaked claims accumulate as phantom occupied corners and squeeze the NPCs into the open over
+	 *  the course of a fight, with nothing about the symptom pointing at the cause. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Cover")
+	void ReleaseCover(AActor* NPC);
+
+	/** Is this spot inside somebody else's claim? Asker is excluded so an NPC is never blocked by
+	 *  its own corner when re-covering nearby. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Cover")
+	bool IsCoverBlocked(const FVector& Location, const AActor* Asker) const;
+
+	/** How much room a claimed corner reserves. Must be comfortably larger than the cover
+	 *  component's PeekStepDistance, or two NPCs end up on opposite sides of one corner. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Cover", meta = (ClampMin = "0.0"))
+	float CoverBlockRadius = 500.0f;
+
 	/** Get the assigned slot position for an NPC. Returns false if no slot assigned. */
 	UFUNCTION(BlueprintPure, Category = "Coordination|BattleCircle")
 	bool GetAssignedSlotPosition(APawn* NPC, FVector& OutPosition) const;
@@ -580,6 +611,17 @@ private:
 
 	/** Singleton instance */
 	static TWeakObjectPtr<AAICombatCoordinator> Instance;
+
+	/** One claimed corner. Weak on the owner for the same reason FStrafeSlot is: an NPC can die,
+	 *  despawn or be recycled without anybody remembering to release, and a stale claim is a corner
+	 *  nobody can ever use again. */
+	struct FCoverClaim
+	{
+		TWeakObjectPtr<const AActor> Owner;
+		FVector Location = FVector::ZeroVector;
+	};
+
+	TArray<FCoverClaim> CoverClaims;
 
 	// --- Core helpers ---
 	FRegisteredNPCData* FindNPCData(APawn* NPC);
