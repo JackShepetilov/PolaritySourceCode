@@ -85,6 +85,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loadout")
 	EClassItemVerb ItemVerb = EClassItemVerb::None;
 
+	// ==================== Threat ====================
+
+	/** How dangerous this class looks to the enemy AI before it has done anything at all.
+	 *
+	 *  Added to the situational threat from UThreatComponent rather than competing with it: one is
+	 *  "who is loud right now", this one is "who is worth fearing regardless". The sum is what
+	 *  weights an enemy's choice of cover - it hides from whoever scores highest - and it already
+	 *  feeds target selection through AAICombatCoordinator::GetApparentDistance.
+	 *
+	 *  Same units as the situational one, which are centimetres of apparent distance: a total of 1.0
+	 *  makes a player look about half as far away as they are.
+	 *
+	 *  TEST VALUE. The scale across the four classes is a balance decision, and it is visible
+	 *  immediately in play: too big a gap and enemies ignore three players to deal with one. The
+	 *  Tank is meant to be the largest. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Threat", meta = (ClampMin = "0.0"))
+	float BaseThreat = 0.0f;
+
 	// ==================== Abilities ====================
 
 	/** Always-on ability, granted at spawn and never switched away from by the player. Passive and

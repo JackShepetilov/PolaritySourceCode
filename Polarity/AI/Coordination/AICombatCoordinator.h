@@ -531,6 +531,12 @@ public:
 
 	// --- Battle Circle API ---
 
+	/** How dangerous this player is, all in: the class's standing BaseThreat plus whatever the
+	 *  situational UThreatComponent is still carrying. The single number both target selection and
+	 *  cover choice are weighted by - see design doc 5.3 for why those must not drift apart. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Threat")
+	float GetPlayerThreat(APawn* Player) const;
+
 	/** Get the assigned slot position for an NPC. Returns false if no slot assigned. */
 	UFUNCTION(BlueprintPure, Category = "Coordination|BattleCircle")
 	bool GetAssignedSlotPosition(APawn* NPC, FVector& OutPosition) const;

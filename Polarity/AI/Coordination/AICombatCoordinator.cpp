@@ -1440,15 +1440,42 @@ float AAICombatCoordinator::GetApparentDistance(const FVector& FromLocation, APa
 
 	const float RealDistance = FVector::Dist(FromLocation, Player->GetActorLocation());
 
-	// No component, no threat, and the answer is plain distance — which is exactly how this behaved
-	// before threat existed, so a character without one is not a special case to handle anywhere.
-	const UThreatComponent* Threat = Player->FindComponentByClass<UThreatComponent>();
-	if (!Threat)
+	return RealDistance / (1.0f + GetPlayerThreat(Player));
+}
+
+float AAICombatCoordinator::GetPlayerThreat(APawn* Player) const
+{
+	if (!Player)
 	{
-		return RealDistance;
+		return 0.0f;
 	}
 
-	return RealDistance / (1.0f + FMath::Max(0.0f, Threat->GetThreat()));
+	// Two different questions, deliberately added rather than made to compete: the class says who is
+	// worth fearing at all times, the component says who is loud right now. Design doc 5.3.
+	//
+	// One number, two consumers, pulling in opposite directions on purpose. In the push it drags an
+	// enemy TOWARDS a player, because GetApparentDistance divides by it and the loud one therefore
+	// looks nearer. In the peek it pushes them AWAY from that same player, because cover is chosen
+	// to minimise exposure weighted by it. A shielded enemy walks at the Tank; a broken one hides
+	// from the Tank.
+	float Threat = 0.0f;
+
+	if (const AShooterCharacter* const ShooterPlayer = Cast<AShooterCharacter>(Player))
+	{
+		if (const UPlayerClassDefinition* const ClassDef = ShooterPlayer->ClassDefinition)
+		{
+			Threat += FMath::Max(0.0f, ClassDef->BaseThreat);
+		}
+	}
+
+	// No component, no situational threat - which is exactly how this behaved before threat existed,
+	// so a character without one is not a special case to handle anywhere.
+	if (const UThreatComponent* const ThreatComp = Player->FindComponentByClass<UThreatComponent>())
+	{
+		Threat += FMath::Max(0.0f, ThreatComp->GetThreat());
+	}
+
+	return Threat;
 }
 
 AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const
