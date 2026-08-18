@@ -106,9 +106,47 @@ float AShooterWeapon::GetMaxReportedSingleHitDamage() const
 	return BaseDamage * FMath::Max(HeadshotMultiplier, 1.0f) * FMath::Max(MaxReportedDamageMultiplier, 1.0f);
 }
 
+bool AShooterWeapon::IsTargetShieldDown(AActor* Target) const
+{
+	if (!IsValid(Target))
+	{
+		return false;
+	}
+
+	// Same components, same order and same ceilings as ApplyHitscanIonization uses to FILL the
+	// meter, so the thing that charges a target and the gate that opens when it is full can never
+	// be reading two different numbers.
+	if (const UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
+	{
+		return TargetModifier->IsAtMaxCharge();
+	}
+
+	if (const AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
+	{
+		return Prop->IsAtMaxCharge();
+	}
+
+	if (UEMF_FieldComponent* TargetField = Target->FindComponentByClass<UEMF_FieldComponent>())
+	{
+		const float CurrentCharge = TargetField->GetSourceDescription().PointChargeParams.Charge;
+		return IsIonizationCapReached(CurrentCharge, MaxIonizationCharge);
+	}
+
+	// Carries no charge at all, so it has no shield to be down. An ordinary target, hurt normally.
+	return true;
+}
+
 float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, const FDamageEvent& DamageEvent)
 {
 	if (!IsValid(HitActor) || FinalDamage <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// A finisher weapon: nothing it hits loses health until that target's shield is down. The hit
+	// still happened -- ionization, knockback and the hit marker all run in the callers, which is
+	// what makes charging a target up feel like progress rather than like missing.
+	if (bRequiresBrokenShieldToDamage && !IsTargetShieldDown(HitActor))
 	{
 		return 0.0f;
 	}

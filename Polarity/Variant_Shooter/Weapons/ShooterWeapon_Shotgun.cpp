@@ -59,7 +59,25 @@ AShooterWeapon_Shotgun::AShooterWeapon_Shotgun()
 
 FVector AShooterWeapon_Shotgun::GetPelletDirection(const FVector& AimDirection, const FVector2D& PatternOffset) const
 {
-	if (PelletSpreadAngle <= 0.0f || PatternOffset.IsNearlyZero())
+	if (PelletSpreadAngle <= 0.0f)
+	{
+		return AimDirection;
+	}
+
+	FVector2D Offset = PatternOffset;
+
+	// Per-shot wander, so the same pattern is never printed twice. Drawn as a point in a DISC and
+	// not in a square: taking two independent numbers for X and Y would put more pellets in the
+	// corners than in the middle, which is a square-shaped scatter wearing a circle's name. Root of
+	// a uniform number for the radius is what makes it even by area.
+	if (PelletJitter > 0.0f)
+	{
+		const float WanderRadius = PelletJitter * FMath::Sqrt(FMath::FRand());
+		const float WanderAngle = FMath::FRand() * 2.0f * PI;
+		Offset += FVector2D(WanderRadius * FMath::Sin(WanderAngle), WanderRadius * FMath::Cos(WanderAngle));
+	}
+
+	if (Offset.IsNearlyZero())
 	{
 		return AimDirection;
 	}
@@ -73,8 +91,8 @@ FVector AShooterWeapon_Shotgun::GetPelletDirection(const FVector& AimDirection, 
 	const float SpreadTangent = FMath::Tan(FMath::DegreesToRadians(PelletSpreadAngle));
 
 	return (AimDirection
-		+ Right * (PatternOffset.X * SpreadTangent)
-		+ Up * (PatternOffset.Y * SpreadTangent)).GetSafeNormal();
+		+ Right * (Offset.X * SpreadTangent)
+		+ Up * (Offset.Y * SpreadTangent)).GetSafeNormal();
 }
 
 void AShooterWeapon_Shotgun::FireHitscan(const FVector& TargetLocation)
@@ -158,4 +176,56 @@ void AShooterWeapon_Shotgun::FireProjectile(const FVector& TargetLocation, float
 		*GetName(), PelletPattern.Num(), PelletSpreadAngle);
 
 	ConsumeRoundAfterShot();
+}
+
+void AShooterWeapon_Shotgun::GeneratePelletPattern()
+{
+	const int32 Count = FMath::Max(GeneratedPelletCount, 1);
+
+	// Undo works on this, and the asset knows it changed: it is being pressed in the details panel
+	// of a weapon that is about to be saved.
+	Modify();
+
+	PelletPattern.Reset(Count);
+
+	// One pellet has nowhere to be but the middle, whatever the layout says.
+	if (Count == 1)
+	{
+		PelletPattern.Add(FVector2D::ZeroVector);
+	}
+	else if (GeneratedPatternLayout == EPelletPatternLayout::Ring)
+	{
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			// First pellet straight up, then round. Sine on X and cosine on Y rather than the other
+			// way about, so three pellets come out as the triangle this weapon already had instead
+			// of a rotated copy of it, and pressing the button on a correct weapon changes nothing.
+			const float Angle = (2.0f * PI * Index) / Count;
+			PelletPattern.Add(FVector2D(FMath::Sin(Angle), FMath::Cos(Angle)));
+		}
+	}
+	else
+	{
+		// Sunflower spiral. The radius goes as the SQUARE ROOT of the index, which is what spreads
+		// the pellets evenly by area instead of by radius: spacing them linearly would crowd the
+		// middle and leave the outside empty, and that is not what a pattern looks like on paper.
+		// The golden angle between successive pellets is what stops them lining up into spokes.
+		const float GoldenAngle = PI * (3.0f - FMath::Sqrt(5.0f));
+
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			// Index 0 lands dead centre and the last one lands on the rim, so the pattern always
+			// covers both what the player is aiming at and the full width they were promised.
+			const float Radius = FMath::Sqrt(static_cast<float>(Index) / static_cast<float>(Count - 1));
+			const float Angle = GoldenAngle * Index;
+
+			PelletPattern.Add(FVector2D(Radius * FMath::Sin(Angle), Radius * FMath::Cos(Angle)));
+		}
+	}
+
+	MarkPackageDirty();
+
+	UE_LOG(LogTemp, Log, TEXT("[SHOTGUN] %s: generated a pattern of %d pellets, layout %s"),
+		*GetName(), Count,
+		GeneratedPatternLayout == EPelletPatternLayout::Ring ? TEXT("Ring") : TEXT("FilledDisc"));
 }

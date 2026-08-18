@@ -181,6 +181,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
 	TMap<FName, float> TagDamageMultipliers;
 
+	/** This weapon only hurts a target whose shield is already down.
+	 *
+	 *  "Shield down" is the state the rest of the game already means by it: the target's charge has
+	 *  reached its own ceiling (UEMFVelocityModifier::IsAtMaxCharge), which is the same instant the
+	 *  enemy becomes grabbable. So a weapon with this on is a finisher: it charges the target like
+	 *  any other, and does nothing to its health until somebody has filled that meter.
+	 *
+	 *  Everything except the damage still happens on a hit -- ionization, knockback, the hit marker
+	 *  for an ionizing hit -- so the shot reads as landing rather than as passing through. A target
+	 *  with no charge at all (no EMF component) has no shield to break and takes damage normally. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
+	bool bRequiresBrokenShieldToDamage = false;
+
 	// ==================== Hitscan Ionization ====================
 
 	/** If true, hitscan hits apply a fixed positive charge to the target */
@@ -652,6 +665,13 @@ protected:
 	 *  Returns the damage that was actually applied on the authority, or the requested damage on
 	 *  a client, where the true number only comes back later as replicated health. */
 	float ApplyDamageToTarget(AActor* HitActor, float FinalDamage, const struct FDamageEvent& DamageEvent);
+	/** True when Target's shield reads empty, i.e. its charge is at its own ceiling. Answered with
+	 *  the same components and the same ceilings the ionization uses, so "the weapon can hurt it now"
+	 *  and "the meter is full" can never disagree. Targets that carry no charge at all count as
+	 *  having no shield. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Hitscan")
+	bool IsTargetShieldDown(AActor* Target) const;
+
 
 	// ==================== State ====================
 
