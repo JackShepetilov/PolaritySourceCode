@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FlyingDrone.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "FlyingAIMovementComponent.h"
 #include "ShooterWeapon.h"
 #include "Components/SphereComponent.h"
@@ -230,8 +231,13 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 	{
 		if (EMFVelocityModifier && EventInstigator)
 		{
+			// Skipped for a blade that states its own ionization: it has already charged this target
+			// through the ordinary weapon path, and paying out here as well would land the same hit
+			// twice, leaving the number on the weapon describing half of what actually happens.
+			// Everything else still comes through here -- bare fists, an enemy hitting a player, a
+			// drone -- because for those this IS where the amount is authored.
 			APawn* Attacker = EventInstigator->GetPawn();
-			if (Attacker)
+			if (Attacker && !AShooterWeapon_Melee::AttackerOverridesLegacyMeleeCharge(Attacker))
 			{
 				UEMFVelocityModifier* AttackerEMF = Attacker->FindComponentByClass<UEMFVelocityModifier>();
 				float ChargeToAdd = ChargeChangeOnMeleeHit;

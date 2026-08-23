@@ -292,6 +292,27 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 			RadialDamageEvent.Params.BaseDamage = HitDamage;
 			RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
 
+			// One entry, so the event is well formed. FRadialDamageEvent::GetBestHitInfo indexes
+			// ComponentHits[0] with only an ensure in front of it, and every reader downstream that
+			// wants to know WHERE the blast landed on this body goes through that function.
+			//
+			// Built from the blast rather than from a real sweep: the direction is what reactions
+			// use, and origin-to-victim is exactly the direction the explosion pushed. Running a
+			// proper component sweep here would be the thorough version, but it would also be a
+			// second trace per victim per explosion for a value only used to orient a wince.
+			{
+				const FVector ToVictim = (HitActor->GetActorLocation() - ExplosionCenter).GetSafeNormal();
+
+				FHitResult& BlastHit = RadialDamageEvent.ComponentHits.AddDefaulted_GetRef();
+				BlastHit.bBlockingHit = true;
+				BlastHit.HitObjectHandle = FActorInstanceHandle(HitActor);
+				BlastHit.Component = Cast<UPrimitiveComponent>(HitActor->GetRootComponent());
+				BlastHit.ImpactPoint = ExplosionCenter;
+				BlastHit.Location = ExplosionCenter;
+				BlastHit.ImpactNormal = -ToVictim;
+				BlastHit.Normal = -ToVictim;
+			}
+
 			AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
 			HitActor->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
 		}

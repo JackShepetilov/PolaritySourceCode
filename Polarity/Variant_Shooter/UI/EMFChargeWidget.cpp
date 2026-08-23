@@ -8,6 +8,8 @@
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "ChargeAnimationComponent.h"
+#include "Variant_Shooter/MeleeAttackComponent.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "EMFPhysicsProp.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
@@ -382,7 +384,32 @@ void UEMFChargeWidget::ResetWidget()
 	bPropHasBeenCharged = false;
 	SetRenderOpacity(1.0f);
 
+	// A pooled widget must not open on the previous target's damage readout. Cleared without firing
+	// the Blueprint event: the reset event below is where a Blueprint does its own tidying up.
+	DamagePreview = 0.0f;
+	bHasDamagePreview = false;
+
 	BP_OnWidgetReset();
+}
+
+void UEMFChargeWidget::SetDamagePreview(float PredictedDamage, bool bHasPreview)
+{
+	// The transition matters as much as the number: a target that drops off the list has to be told
+	// to hide the text, and that is a change from true to false with no change in the value at all.
+	const bool bVisibilityChanged = (bHasPreview != bHasDamagePreview);
+	const bool bValueChanged = bHasPreview
+		&& FMath::Abs(PredictedDamage - DamagePreview) > FMath::Max(0.0f, DamagePreviewEpsilon);
+
+	bHasDamagePreview = bHasPreview;
+	if (bHasPreview)
+	{
+		DamagePreview = PredictedDamage;
+	}
+
+	if (bVisibilityChanged || bValueChanged)
+	{
+		BP_OnDamagePreviewUpdated(DamagePreview, bHasDamagePreview);
+	}
 }
 
 AActor* UEMFChargeWidget::GetBoundActor() const
@@ -557,6 +584,15 @@ void UEMFChargeWidget::PlayShieldBreakSound() const
 
 	const AActor* Target = GetBoundActor();
 	if (!Target)
+	{
+		return;
+	}
+
+	// A target that carries a charge component announces its own break, from the same number that
+	// decides whether bullets reach its health, on every machine, whether or not a health bar
+	// happens to be on screen. Playing here as well would simply double it.
+	// @see UEMFVelocityModifier::CheckShieldStateChanged
+	if (Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
 		return;
 	}
@@ -739,6 +775,49 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 	if (AngleCos < MaxAngleCos) return false;
 
 	OutAngleCos = AngleCos;
+	return true;
+}
+
+bool UEMFChargeWidget::EvaluateLungeCandidate(
+	const APawn* Player,
+	const FVector& CameraLoc,
+	const FVector& CameraForward,
+	float& OutAngleCos) const
+{
+	OutAngleCos = -1.0f;
+	if (!bIsActive || !Player)
+	{
+		return false;
+	}
+
+	// Enemies only. A prop is not something a swing flies at, and a teammate is a target the lunge
+	// itself already refuses.
+	AShooterNPC* NPC = BoundNPC.Get();
+	if (!NPC || NPC->IsDead())
+	{
+		return false;
+	}
+
+	const AShooterCharacter* Swinger = Cast<AShooterCharacter>(Player);
+	if (!Swinger)
+	{
+		return false;
+	}
+
+	// One call, and deliberately not "get a range and an angle and test them here". There are two
+	// lunges in this project with different settings AND different shapes of aim test, and only the
+	// character knows which one is currently in charge. Brackets built from a reconstructed cone
+	// would be right for one of them and wrong for the other, which is worse than having none: they
+	// would promise a lunge that then does not happen.
+	if (!Swinger->WouldLungeAt(NPC, CameraLoc, CameraForward))
+	{
+		return false;
+	}
+
+	// Only for ranking one candidate against another, the way the capture check uses it. The accept
+	// or reject has already been made above.
+	const FVector ToTarget = NPC->GetActorLocation() - CameraLoc;
+	OutAngleCos = FVector::DotProduct(CameraForward, ToTarget.GetSafeNormal());
 	return true;
 }
 

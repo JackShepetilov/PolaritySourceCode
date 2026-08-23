@@ -119,6 +119,36 @@ public:
 		meta = (DisplayName = "On Shield Restored"))
 	void BP_OnShieldRestored();
 
+	/** How much damage a shot at this target right now would deal, for the readout above the bar.
+	 *
+	 *  Only ever shown for a class whose passive asks for it (the Sniper's, whose damage moves with
+	 *  the ground the player covers between shots) and only over an enemy that player has already
+	 *  shot. Everyone else gets bHasPreview = false for every target, forever, and the Blueprint is
+	 *  expected to hide the text then.
+	 *
+	 *  Fired only when the number actually changes, not every frame: the value moves while the
+	 *  player walks and is perfectly still while they stand, and a Blueprint that formats text has
+	 *  no business doing it sixty times a second for a number that did not move. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "EMF Charge|Damage Preview",
+		meta = (DisplayName = "On Damage Preview Updated"))
+	void BP_OnDamagePreviewUpdated(float PredictedDamage, bool bHasPreview);
+
+	/** Push a new preview value in. Called every frame by EMFChargeWidgetSubsystem; forwards to the
+	 *  Blueprint only on a real change. */
+	void SetDamagePreview(float PredictedDamage, bool bHasPreview);
+
+	UFUNCTION(BlueprintPure, Category = "EMF Charge|Damage Preview")
+	float GetDamagePreview() const { return DamagePreview; }
+
+	UFUNCTION(BlueprintPure, Category = "EMF Charge|Damage Preview")
+	bool HasDamagePreview() const { return bHasDamagePreview; }
+
+	/** Change in predicted damage small enough to be worth ignoring. Guards the Blueprint against a
+	 *  refresh per frame from floating-point noise while the player stands still. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "EMF Charge|Damage Preview",
+		meta = (ClampMin = "0.0"))
+	float DamagePreviewEpsilon = 0.1f;
+
 	// ==================== Capture Zone ====================
 
 	/** Evaluate capture candidacy for this widget's target. Returns true if the target
@@ -126,6 +156,26 @@ public:
 	 *  matching UpdateCaptureRaycast). When true, OutAngleCos = dot(CameraForward, dirToTarget);
 	 *  the subsystem uses it to pick the single best (closest-to-crosshair) candidate. */
 	bool EvaluateCaptureCandidate(
+		const APawn* Player,
+		const FVector& CameraLoc,
+		const FVector& CameraForward,
+		float& OutAngleCos) const;
+
+	/** Evaluate LUNGE candidacy for this widget's target: not "can I grab this" but "would a swing
+	 *  right now fly me at it". Same shape of answer as the capture check, and the subsystem picks
+	 *  a best out of these the same way.
+	 *
+	 *  Its own question because the two do not overlap. A grab needs a full charge and gives the
+	 *  player an object; a lunge needs the enemy to be inside a reach that GROWS as its shield comes
+	 *  off, and gives the player the enemy. For the Melee class that reach is most of a room on a
+	 *  stripped enemy, and without brackets there is nothing on screen that says so -- the player
+	 *  would have to learn the range by missing.
+	 *
+	 *  No class check anywhere in here on purpose: it asks the melee component what its reach
+	 *  actually is, so a class with no passive gets its unmodified quarter-metre and effectively
+	 *  never lights anything up, and the Melee gets the range his passive gives him. Nothing has to
+	 *  be kept in step with the class list. */
+	bool EvaluateLungeCandidate(
 		const APawn* Player,
 		const FVector& CameraLoc,
 		const FVector& CameraForward,
@@ -293,6 +343,13 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Shield")
 	bool bShieldBroken = false;
+
+	/** Last damage preview pushed in, and whether there is one at all. */
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Damage Preview")
+	float DamagePreview = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Damage Preview")
+	bool bHasDamagePreview = false;
 
 	/** Set once a bound prop's charge crosses PropFirstChargeThreshold at runtime. */
 	UPROPERTY(BlueprintReadOnly, Category = "EMF Charge|Focus")

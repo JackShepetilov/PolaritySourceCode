@@ -7,6 +7,9 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "Tickable.h"
 #include "EMFChargeWidget.h"
+// For ECaptureReticleMode, which UpdateCaptureReticle takes by value. An enum class cannot be
+// usefully forward declared here the way the widget pointer below is.
+#include "CaptureReticleWidget.h"
 #include "EMFChargeWidgetSubsystem.generated.h"
 
 class UEMFChargeWidget;
@@ -218,7 +221,7 @@ protected:
 	bool bReticleSuppressed = false;
 
 	/** Drive the reticle from the current best capture candidate (or hide it if there is none). */
-	void UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget);
+	void UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget, ECaptureReticleMode Mode);
 
 	APlayerController* GetLocalPlayerController() const;
 

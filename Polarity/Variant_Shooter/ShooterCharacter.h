@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "PolarityCharacter.h"
 #include "ShooterWeaponHolder.h"
+#include "Engine/NetSerialization.h"
 #include "ApexMovementComponent.h"
 #include "TutorialTypes.h"
 #include "Variant_Shooter/Classes/PlayerClassDefinition.h"
@@ -38,6 +39,30 @@ class AEMFPhysicsProp;
 class ADroppedRangedWeapon;
 class ARiotShield;
 struct FCheckpointData;
+
+/** Where a weapon swap currently is. Firing, reloading and abilities are all off for anything but
+ *  None, and the phase also decides whether a fresh swap request is allowed to interrupt. */
+UENUM(BlueprintType)
+enum class EWeaponSwitchPhase : uint8
+{
+	/** No swap running. */
+	None,
+	/** The old weapon is being put away. Uninterruptible: its swap point still has to fire. */
+	Holstering,
+	/** Hands are empty and the weapon that should fill them is still on its way (yank pull).
+	 *  Ends when FinishWeaponSwitch names the weapon that arrived. */
+	WaitingForWeapon,
+	/** The new weapon is coming out. A fresh swap MAY interrupt this: the player has already
+	 *  changed their mind, and making them watch an animation for a gun they no longer want is the
+	 *  kind of input lag that reads as the game ignoring them. */
+	Drawing,
+	/** The weapon is being put away for a grapple. Same holster animation as a swap, played faster,
+	 *  and with nothing waiting to replace it: both hands are about to be on the line. */
+	StowingForGrapple,
+	/** Hands are empty for the length of a grapple. Ends when the line lets go, and the weapon that
+	 *  was already in CurrentWeapon comes straight back out. */
+	StowedForGrapple,
+};
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDamagedDelegate, float, LifePercent, float, ArmorPercent);
@@ -193,30 +218,10 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UPlayerDeathSequenceComponent> PlayerDeathSequenceComponent;
 
-	// ==================== Melee Weapon FP Mesh ====================
-
-	/** First-person body mesh shown instead of the normal FP mesh when melee weapon is equipped.
-	 *  Attached to camera. Has its own AnimBP with access to character data (velocity, etc.).
-	 *  Separate from FP mesh due to retargeting issues. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components|Melee Weapon", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<USkeletalMeshComponent> MeleeWeaponFPMesh;
-
-	/** AnimBP class for MeleeWeaponFPMesh */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Weapon FP Mesh", meta = (AllowPrivateAccess = "true"))
-	TSubclassOf<UAnimInstance> MeleeWeaponFPAnimClass;
-
-	/** Location offset for MeleeWeaponFPMesh relative to camera */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Weapon FP Mesh", meta = (AllowPrivateAccess = "true"))
-	FVector MeleeWeaponFPMeshOffset = FVector::ZeroVector;
-
-	/** Rotation offset for MeleeWeaponFPMesh relative to camera */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Weapon FP Mesh", meta = (AllowPrivateAccess = "true"))
-	FRotator MeleeWeaponFPMeshRotation = FRotator::ZeroRotator;
-
-	/** Cached pointer to the first UStaticMeshComponent child of MeleeWeaponFPMesh (added in Blueprint).
-	 *  C++ controls its visibility and first-person rendering settings. */
-	UPROPERTY()
-	TObjectPtr<UStaticMeshComponent> MeleeWeaponStaticMesh;
+	// The melee weapon used to render through a dedicated first-person body (MeleeWeaponFPMesh, a
+	// UE4 mannequin) because its animation set only existed on that skeleton. Compatible skeletons
+	// now let those montages play on the normal first-person mesh, so the sword is an ordinary
+	// AShooterWeapon: its own meshes hang off the hand socket like every other weapon's.
 
 protected:
 
@@ -337,6 +342,11 @@ protected:
 	 *  give part of the movement back. 0.0 reproduces the pre-camera-attach behaviour. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Camera Follow", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CameraLocationFollowAlpha = 0.5f;
+
+	/** The crouch counter-offset actually written to the camera this frame. Kept so the follow
+	 *  compensation above can subtract it: crouch is the only camera offset the FP mesh must follow
+	 *  in full. */
+	FVector AppliedCrouchCameraOffset = FVector::ZeroVector;
 
 	/** Max distance to use for aim traces */
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 100000, Units = "cm"))
@@ -524,42 +534,56 @@ protected:
 	TArray<AShooterWeapon*> ReserveWeapons;
 
 	// ==================== Weapon Switch Animation ====================
+	// A swap is two animations from two different weapons: the one leaving plays its Holster, the
+	// one arriving plays its Draw, and the meshes change hands in between. The old procedural
+	// version of this (the whole FP mesh sliding down and back up) is gone; what is left of it is
+	// ExternalMeshZOffset, which belongs to the melee component and is not part of a swap.
+	//
+	// Everything here runs on the machine that owns the character. Which weapon is actually held is
+	// still the server's call: the swap point equips locally for an instant response and asks the
+	// authority in the same breath, exactly as the instant swap did.
 
-	/** True while weapon switch animation is in progress */
-	bool bIsWeaponSwitchInProgress = false;
+	/** Phase of the swap currently running, None when there is none. */
+	EWeaponSwitchPhase WeaponSwitchPhase = EWeaponSwitchPhase::None;
 
-	/** Weapon to switch to after lowering animation completes */
+	/** Weapon to switch to when the holster animation reaches its swap point. Null during a yank,
+	 *  where the swap point is reached before the new weapon has finished flying over. */
 	UPROPERTY()
 	TObjectPtr<AShooterWeapon> PendingWeapon = nullptr;
-
-	/** Progress of weapon switch mesh transition (0-1) */
-	float WeaponSwitchProgress = 0.0f;
-
-	/** Camera-space Z offset contributed by the weapon switch lower/raise animation.
-	 *  0 = weapon at rest, -WeaponSwitchLowerDistance = fully lowered. Consumed as a pose layer. */
-	float WeaponSwitchMeshZOffset = 0.0f;
-
-	/** How far down the FP mesh drops during a weapon switch (camera space, cm). */
-	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.0", ClampMax = "500.0"))
-	float WeaponSwitchLowerDistance = 100.0f;
 
 	/** Camera-space Z offset driven by external systems. See SetFirstPersonMeshExternalZOffset. */
 	float ExternalMeshZOffset = 0.0f;
 
-	/** True during lowering phase, false during raising phase */
-	bool bIsWeaponLowering = true;
+	/** Drives the end of each phase. For the holster half it is a failsafe behind the montage's
+	 *  swap-point notify: an interrupted montage never sends its notify, and without this the
+	 *  player would stand there holding nothing forever. For the draw half it IS the clock, since
+	 *  nothing gameplay-critical has to land on an exact frame there. */
+	FTimerHandle WeaponSwitchTimer;
 
-	/** Time to lower weapon mesh during switch */
-	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.05", ClampMax = "0.5"))
-	float WeaponSwitchLowerTime = 0.15f;
+	/** The trigger was held while the swap ran. The shot is deferred rather than dropped, the same
+	 *  bargain the sprint-out gate makes: let go and it is forgotten, keep holding and it fires the
+	 *  moment the draw finishes. */
+	bool bFireHeldThroughSwitch = false;
 
-	/** Time to raise weapon mesh during switch */
-	UPROPERTY(EditAnywhere, Category = "Weapons|Switch Animation", meta = (ClampMin = "0.05", ClampMax = "0.5"))
-	float WeaponSwitchRaiseTime = 0.15f;
+	/** The weapon is away because of a grapple, rather than because of a swap. The edge detector for
+	 *  the whole thing: it is what makes stowing and unstowing idempotent, and what lets the visual
+	 *  update notice a line that ended without anybody saying so. */
+	bool bWeaponStowedForGrapple = false;
 
-	/** True when a weapon switch was started without a target weapon (e.g. yank — pull is in flight).
-	 *  Mesh holds at the lowered position until FinishWeaponSwitch(NewWeapon) is called. */
-	bool bWeaponSwitchPausedAtBottom = false;
+	/** Frames the first-person arms stay hidden after a draw has already started. EVERY draw, not
+	 *  just the one that ends a grapple.
+	 *
+	 *  Showing them the instant the draw begins shows them in whatever pose the last animation left
+	 *  behind, for the frame or two before the montage has been evaluated and blended. What the
+	 *  player sees is a flash of the wrong pose and then a snap into the draw, and it is most
+	 *  obvious on a hand swap because the NEW weapon is already in the hand while the hand is still
+	 *  posed for the old one.
+	 *
+	 *  Counted in FRAMES rather than seconds on purpose: what is being waited for is the animation
+	 *  graph running, not an amount of time, so a slow frame should wait longer in wall-clock terms
+	 *  and a fast one shorter. Ticked down in Tick; @see UpdateFirstPersonMeshVisibility, which is
+	 *  where it actually keeps the mesh hidden. */
+	int32 FirstPersonRevealFramesLeft = 0;
 
 	/** Time before respawn after death */
 	UPROPERTY(EditAnywhere, Category = "Death", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
@@ -1079,13 +1103,6 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Character")
 	USkeletalMeshComponent* GetMeleeMesh() const;
 
-	/** Get the melee weapon FP body mesh (can return nullptr if not set up) */
-	UFUNCTION(BlueprintPure, Category = "Character")
-	USkeletalMeshComponent* GetMeleeWeaponFPMesh() const { return MeleeWeaponFPMesh; }
-
-	/** Get the static mesh child of MeleeWeaponFPMesh (the sword model) */
-	UStaticMeshComponent* GetMeleeWeaponStaticMesh() const { return MeleeWeaponStaticMesh; }
-
 	/** Remove a melee weapon from inventory (called when weapon breaks).
 	 *  Deactivates, removes from OwnedWeapons, switches to fallback, destroys. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons")
@@ -1184,11 +1201,24 @@ public:
 	UFUNCTION(Server, Unreliable)
 	void Server_ReportWeaponFired(AShooterWeapon* Weapon);
 
+	/** Tell the server this client's weapon started a reload, so it can multicast the weapon's own
+	 *  reload animation and sound to everyone else. Reliable: one per magazine, and losing it
+	 *  leaves the gun frozen for the whole reload rather than for one frame. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReportWeaponReloaded(AShooterWeapon* Weapon);
+
 	/** Same relay for the tracer. Carries the endpoints because only the shooter computed them. */
 	UFUNCTION(Server, Unreliable)
 	void Server_ReportBeamEffect(AShooterWeapon* Weapon, FVector Start, FVector End,
 		float EnergyMultiplier, float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
 		float OverrideBoltLength, float OverrideRandomSeed);
+
+	/** Same relay for the bullet landing. Carries the already-resolved surface because whether the
+	 *  target's shield was still up is a question only the shooter was present to answer, and a
+	 *  miss carries no damage to ride upstream with. */
+	UFUNCTION(Server, Unreliable)
+	void Server_ReportImpactEffect(AShooterWeapon* Weapon, FVector_NetQuantize100 Location,
+		FVector_NetQuantizeNormal Normal, uint8 SurfaceByte);
 
 	// ==================== Coop HUD ====================
 	// A HUD belongs to a screen, and there is one screen per machine. The GameMode used to build a
@@ -1306,6 +1336,13 @@ public:
 	 *  explosion are all decided in one place. Reliable: a dropped throw is a prop that never flies. */
 	UFUNCTION(Server, Reliable)
 	void Server_LaunchProp(AEMFPhysicsProp* Prop);
+
+	/** Ask the server to eat the prop this client is holding instead of throwing it: the self half of
+	 *  the Melee's item verb. Same trust model as the throw -- the client decided WHEN, the server
+	 *  decides whether it may and how much it is worth -- and reliable for the same reason: a dropped
+	 *  message is a prop the player spent and got nothing for. */
+	UFUNCTION(Server, Reliable)
+	void Server_ConsumePropForHeal(AEMFPhysicsProp* Prop);
 
 	/** Ask the server to throw a teammate. The client picked the target and worked the direction out
 	 *  from its own camera, but only the authority may move another player: a client launching its own
@@ -1509,7 +1546,19 @@ public:
 
 	/** Returns true if weapon switch is currently in progress */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
-	bool IsWeaponSwitchInProgress() const { return bIsWeaponSwitchInProgress; }
+	bool IsWeaponSwitchInProgress() const { return WeaponSwitchPhase != EWeaponSwitchPhase::None; }
+
+	/** Which half of the swap is running. */
+	UFUNCTION(BlueprintPure, Category = "Weapons")
+	EWeaponSwitchPhase GetWeaponSwitchPhase() const { return WeaponSwitchPhase; }
+
+	/** True when a new swap request would be accepted. A draw can be interrupted; putting a weapon
+	 *  away cannot, because the swap point in the middle of it still has to run. */
+	UFUNCTION(BlueprintPure, Category = "Weapons")
+	bool CanStartWeaponSwitch() const
+	{
+		return WeaponSwitchPhase == EWeaponSwitchPhase::None || WeaponSwitchPhase == EWeaponSwitchPhase::Drawing;
+	}
 
 	/** Handles start ADS input */
 	UFUNCTION(BlueprintCallable, Category = "Input")
@@ -1600,6 +1649,42 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	AShooterWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
 
+	// ==================== Lunge reach ====================
+	// There are TWO lunges in this project and only one of them runs at a time: the bare-handed one
+	// in UMeleeAttackComponent, and the copy inside AShooterWeapon_Melee, which disables the
+	// component the moment it is equipped (see SetExternallyDisabled). They have separate settings
+	// and always have had.
+	//
+	// That is survivable for the swing itself, which only ever asks its own numbers. It is not
+	// survivable for anything asking from OUTSIDE -- the class passive that extends the reach, and
+	// the HUD brackets that promise it -- because such a caller has to ask the one that is actually
+	// in charge or it describes a lunge that will not happen. These three are that question, asked
+	// in one place so a third copy cannot quietly appear.
+
+	/** Run a base lunge reach through the owner's passive. The shared half of both lunges: the
+	 *  bare-handed one and the weapon's each pass their OWN base range through this. */
+	float ApplyLungePassiveToRange(const AActor* Target, float BaseRange) const;
+
+	/** The reach that is really in charge right now, for this one target. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
+	float GetActiveLungeRangeFor(const AActor* Target) const;
+
+	/** Its ceiling, over every possible target. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
+	float GetActiveMaxLungeRange() const;
+
+	/** Would a swing right now fly this character at that actor: reach AND aim, answered by whichever
+	 *  lunge is in charge. The aim test is not the same in the two -- the component uses a fixed
+	 *  cone, the weapon sweeps a sphere along the view ray, which is a cone that widens as the
+	 *  target gets nearer -- so callers must not try to rebuild it from a range and an angle. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
+	bool WouldLungeAt(const AActor* Target, const FVector& ViewLocation, const FVector& ViewForward) const;
+
+	/** polarity.melee.lungedebug, read from both lunges. Static because AShooterWeapon_Melee runs its
+	 *  own copy of the acquisition and often has to log before it has established there is a
+	 *  character at the other end of PawnOwner at all. */
+	static bool IsLungeDebugEnabled();
+
 	/** Returns the input action that activates the ability (for HUD keybind hints; may be null). */
 	UFUNCTION(BlueprintPure, Category = "Abilities")
 	UInputAction* GetAbilityAction() const { return AbilityAction; }
@@ -1646,17 +1731,50 @@ protected:
 	/** Update ADS state and apply effects */
 	void UpdateADS(float DeltaTime);
 
-	/** Start weapon switch to specified weapon (with lowering/raising animation) */
+	/** Start a swap to NewWeapon: the held weapon plays its holster montage, and the swap happens at
+	 *  that montage's notify. Falls back to an instant equip when the weapon has no holster montage,
+	 *  so an unanimated weapon behaves exactly as it did before this system existed. */
 	void StartWeaponSwitch(AShooterWeapon* NewWeapon);
 
-	/** Update weapon switch animation */
-	void UpdateWeaponSwitch(float DeltaTime);
+	/** Play one half of a swap on the arms the owner sees and on the body everyone else sees.
+	 *  Returns how long the FP half will take, 0 when there was nothing to play. */
+	float PlayWeaponSwitchMontage(UAnimMontage* FirstPersonMontage, UAnimMontage* ThirdPersonMontage, float PlayRate);
 
-	/** Called when weapon lowering completes - performs actual weapon swap */
-	void OnWeaponSwitchLowered();
+	/** Seconds from the start of Weapon's holster montage to the moment the weapons change hands.
+	 *  Follows the swap-point notify when the animator placed one; otherwise lands where the montage
+	 *  starts blending out, because waiting for it to finish is what shows the old weapon again. */
+	float GetHolsterSwapDelay(const AShooterWeapon* Weapon) const;
 
-	/** Called when weapon raising completes - ends switch process */
-	void OnWeaponSwitchRaised();
+	/** Bring the pending weapon out: equip it, tell the authority, and play its draw montage.
+	 *  Called at the holster montage's swap point, or straight away when there is no holster half. */
+	void BeginWeaponDraw();
+
+	/** End of the draw: the phase clears and a trigger held through the swap finally fires. */
+	void FinishWeaponDraw();
+
+	// ---- Stowing for the grapple ----
+	//
+	// A grapple needs both hands, so the weapon goes away for the length of it and comes back after.
+	// It is NOT a weapon swap: nothing replaces what left, and the same weapon returns, so it runs
+	// beside StartWeaponSwitch rather than through it. What it does borrow is the phase, and that is
+	// deliberate -- firing, reloading and abilities are all gated on the phase being None, and every
+	// one of them should be off while the player has no gun in their hands.
+
+	/** Put the held weapon away for a grapple, at SpeedMultiplier times its authored holster speed.
+	 *  Idempotent: a second call while already stowed does nothing. */
+	void StowWeaponForGrapple(float SpeedMultiplier);
+
+	/** The holster animation has run: hide the weapon and sit in StowedForGrapple until the line
+	 *  lets go. */
+	void FinishGrappleStow();
+
+	/** Bring the same weapon back out at SpeedMultiplier times its authored draw speed. Safe to call
+	 *  when nothing was stowed, and safe to call mid-stow. */
+	void UnstowWeaponAfterGrapple(float SpeedMultiplier);
+
+	/** Stop whatever phase is running and drop its timer, without touching which weapon is held.
+	 *  Used when a new swap interrupts a draw, and when the character dies mid-swap. */
+	void CancelWeaponSwitch();
 
 	/** Updates first person mesh visibility based on weapon ownership */
 	void UpdateFirstPersonMeshVisibility();
@@ -1671,6 +1789,15 @@ protected:
 	/** Adds the shooter-specific FP mesh pose layers: per-weapon base pose, ADS, recoil,
 	 *  weapon-switch lower/raise and the camera-follow compensation. */
 	virtual void AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation) override;
+
+	/** Puts the weapon's sight on the camera's forward axis, blended by CurrentADSAlpha.
+	 *
+	 *  Unlike every other pose layer this one ASSIGNS instead of adding: the aimed pose is fully
+	 *  determined by where the sight sits relative to the mesh, so at alpha 1 nothing accumulated
+	 *  before it may survive. That is the point, and it is why bob, shake, tilt and the camera
+	 *  compensation need no ADS suppression flags of their own. Anything that IS meant to survive
+	 *  aiming has to be applied after this call. */
+	void AccumulateADSSightAlignment(FVector& Location, FRotator& Rotation, const USkeletalMeshComponent* FPMesh) const;
 
 	/** Adds the weapon-owned spine layers on top of the movement ones: right now the reload pose,
 	 *  which only this class can see because only this class knows what is being held. */
@@ -1797,6 +1924,28 @@ protected:
 	/** Air control saved at launch, restored on landing (run-start toss keeps a pure-physics arc). */
 	float SavedAirControl = 0.f;
 
+	// ==================== Replicated third person animation ====================
+
+	// A montage played straight onto a mesh only exists on the machine that played it. For the first
+	// person mesh that is exactly right, nobody else has one. For the third person mesh it is the
+	// bug: the reload was invisible to everyone except the player doing it.
+
+public:
+	/** Plays a montage on the third person mesh on every machine. PlayRate travels with it: a
+	 *  weapon whose swap was tuned to a duration must take that long on a teammate's screen too.
+	 *  Public because weapons drive their own third-person animation (the melee swing does). */
+	void PlayThirdPersonMontageEverywhere(UAnimMontage* Montage, float PlayRate);
+
+protected:
+	/** Plays it on THIS machine only. Both RPCs below and the local caller land here. */
+	void PlayThirdPersonMontageLocal(UAnimMontage* Montage, float PlayRate);
+
+	UFUNCTION(Server, Reliable)
+	void Server_PlayThirdPersonMontage(UAnimMontage* Montage, float PlayRate);
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayThirdPersonMontage(UAnimMontage* Montage, float PlayRate);
+
 public:
 
 	//~Begin IShooterWeaponHolder interface
@@ -1807,6 +1956,10 @@ public:
 	/** Plays the firing montage for the weapon */
 	virtual void PlayFiringMontage(UAnimMontage* Montage) override;
 
+	/** Plays the reload montage: first person locally, third person on every machine, so the other
+	 *  players see this character reload instead of just standing there. */
+	virtual void PlayReloadMontage(UAnimMontage* Montage) override;
+
 	/** Applies weapon recoil to the owner */
 	virtual void AddWeaponRecoil(float Recoil) override;
 
@@ -1815,6 +1968,15 @@ public:
 
 	/** Calculates and returns the aim location for the weapon */
 	virtual FVector GetWeaponTargetLocation() override;
+
+	/** Where this character is pointing, as a ray of the given length: the first-person camera's
+	 *  location, and the controller's rotation.
+	 *
+	 *  The one definition, and everything that traces down the crosshair must use it. It is NOT
+	 *  GetPawnViewLocation(): that is the capsule plus BaseEyeHeight, while the camera has been moved
+	 *  by crouch, camera-follow lag, shake and ADS. A trace from the wrong origin does not pass
+	 *  through the crosshair and, near any edge, hits something else entirely. */
+	void GetAimRay(float Range, FVector& OutStart, FVector& OutEnd) const;
 
 	/** Gives a weapon of this class to the owner */
 	virtual void AddWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) override;
@@ -1830,6 +1992,10 @@ public:
 
 	/** Notifies the owner that a hit was registered */
 	virtual void OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled, AActor* HitActor = nullptr) override;
+
+	/** The real body of the two. OnWeaponHit above builds a bare context and calls this, so there
+	 *  is one place where a hit turns into feedback, style credit and melee charge. */
+	virtual void OnWeaponHitFeedback(const FHitFeedbackContext& Context) override;
 
 	//~End IShooterWeaponHolder interface
 
@@ -1901,6 +2067,36 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Player Class")
 	EClassItemVerb GetItemVerb() const;
 
+	// ==================== Grapple line ====================
+	// The character owns the LOOK of the line and the routing of the decision to the machine that
+	// predicts its own movement. The swing itself is UApexMovementComponent's, inside the simulated
+	// move, because everything that writes Velocity has to be.
+
+	/** Attach or drop the grapple line. Authority entry point, called by UAbilityHandler_Grapple.
+	 *
+	 *  Both ends, for the same reason Client_ApplyKnockback exists: a server that only sets its own
+	 *  copy is arguing with a client that is still predicting its own movement, and the two disagree
+	 *  every frame. Setting it on the owning client instead makes the swing part of what that client
+	 *  predicted, and the server then receives it back inside the client's own moves. */
+	void SetGrappleLine(bool bOn, FVector Anchor, class UAbilityDefinition_Grapple* Def, int32 Level);
+
+	/** The same call on the machine that predicts this character. Reliable: a dropped one is a line
+	 *  that visibly attached and then pulled nobody. */
+	UFUNCTION(Client, Reliable)
+	void Client_SetGrappleLine(bool bOn, FVector Anchor, class UAbilityDefinition_Grapple* Def, int32 Level);
+
+	/** Draw the hook flying out, on every machine. Cosmetic and unreliable: by the time it would
+	 *  matter the line is either attached, which replicates on its own, or gone.
+	 *
+	 *  The definition travels rather than nine separate look parameters — it is an asset reference,
+	 *  so it costs one object id and every machine reads the same numbers out of it. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayGrappleThrow(FVector Anchor, float TravelTime, class UAbilityDefinition_Grapple* Def);
+
+	/** Where the line leaves the character on this machine: the first-person hand for the player
+	 *  whose screen this is, the third-person hand for everybody else. */
+	FVector GetGrappleHandLocation() const;
+
 	// ==================== Ability aiming (hold to aim, release to fire) ====================
 
 	/** The enemy the held ability would fire at, picked locally every frame while aiming.
@@ -1943,23 +2139,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void BeginRunLaunch(const FVector& LaunchVelocity);
 
-	/** Grants StartingWeaponClass and plays the procedural weapon-raise (smooth draw, same motion as the
-	 *  melee "show weapon" recovery). Called from Landed() on toss maps and from BP after the boss intro
-	 *  cutscene. No-op if StartingWeaponClass is unset. */
+	/** Grants StartingWeaponClass and plays that weapon's draw animation. Called from Landed() on toss
+	 *  maps and from BP after the boss intro cutscene. No-op if StartingWeaponClass is unset. */
 	UFUNCTION(BlueprintCallable, Category = "Run Start")
 	void EquipStartingWeaponAnimated();
 
-	/** Begin only the lower phase of a weapon switch. Mesh smoothly drops and pauses at the
-	 *  bottom waiting for FinishWeaponSwitch(NewWeapon). Used when the new weapon is in flight
-	 *  (yank pull) — lets the lower animation run in parallel with the pull so the new weapon
-	 *  arrives at an already-empty hand. No-op if a switch is already in progress or if unarmed. */
+	/** Put the held weapon away with nothing named to replace it, then wait empty-handed for
+	 *  FinishWeaponSwitch(NewWeapon). Used when the new weapon is in flight (yank pull), so the
+	 *  putting-away runs in parallel with the pull and the weapon arrives at an already-empty hand.
+	 *  bPlayHolsterMontage = false when another animation has already emptied the hands (the
+	 *  yank-throw montage), where a holster on top of it would be two animations fighting.
+	 *  No-op if a swap is already running or if unarmed. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons")
-	void BeginWeaponLower();
+	void BeginWeaponLower(bool bPlayHolsterMontage = true);
 
-	/** Complete a paused weapon switch: instantly swap to NewWeapon (off-camera at the bottom)
-	 *  and play the raise animation. NewWeapon must be in OwnedWeapons. No-op if not paused. */
+	/** Name the weapon that the waiting hands should draw. Equips it and plays its draw montage; if
+	 *  the holster half is still running, the weapon is remembered and drawn at the swap point. */
 	UFUNCTION(BlueprintCallable, Category = "Weapons")
 	void FinishWeaponSwitch(AShooterWeapon* NewWeapon);
+
+	/** The holster montage reached the frame where the weapons change hands. Called by
+	 *  UAnimNotify_WeaponSwitchSwapPoint, and by the failsafe timer if that notify never arrives. */
+	void OnWeaponSwitchSwapNotify();
 
 	/** Discards any yanked weapon in OwnedWeapons via the throw animation flow:
 	 *  plays ThrowMontage on FP arms; AnimNotifies in the montage drive the actual gameplay
@@ -2318,4 +2519,73 @@ protected:
 
 	/** End boss finisher and restore normal state */
 	void EndBossFinisher();
+
+	// ==================== Grapple line (visual) ====================
+
+	/** The cable that draws the line. ONE of them, in world space, seen by everybody including its
+	 *  owner.
+	 *
+	 *  There is deliberately no first-person / third-person pair here, unlike every montage in this
+	 *  project. The first-person mesh is drawn through the first-person rendering path, which applies
+	 *  its own FOV correction and scale, so its bones are not where they appear -- a cable attached
+	 *  to that mesh is ordinary world geometry drawn between the REAL transforms, and it comes out
+	 *  pointing somewhere else entirely. A world-space line placed by hand each frame has no such
+	 *  disagreement to have.
+	 *
+	 *  Created on demand rather than in the constructor: most characters in this game never grapple,
+	 *  and a cable component each is a cost none of them should pay to stay hidden. */
+	UPROPERTY(Transient)
+	TObjectPtr<class UCableComponent> GrappleCable;
+
+	/** Where the owner's own line leaves the screen, in camera space: forward, right, up. The near
+	 *  end has to come from the camera rather than from the hand for the reason above, so this is
+	 *  what puts it somewhere that reads as the character's arm instead of the middle of the view.
+	 *  Used when the ability's LineOrigin is Hand. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Grapple")
+	FVector GrappleFirstPersonMuzzleOffset = FVector(40.0f, -18.0f, -14.0f);
+
+	/** The same, for a line that leaves the CHEST rather than a hand -- Titanfall's, and the default.
+	 *  Centred on the view and below it, so the rope hangs into the bottom of the frame from roughly
+	 *  where the character's sternum is and stays there however the arms are animated. Camera space:
+	 *  forward, right, up. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Grapple")
+	FVector GrappleFirstPersonChestOffset = FVector(20.0f, 0.0f, -35.0f);
+
+	/** Where the visible end of the line is right now. During the throw it travels from the hand to
+	 *  the anchor; after that it is the anchor. */
+	FVector GrappleVisualEnd = FVector::ZeroVector;
+
+	/** The throw currently being drawn. Local and cosmetic on every machine, started by
+	 *  Multicast_PlayGrappleThrow. */
+	FVector GrappleVisualAnchor = FVector::ZeroVector;
+	float GrappleThrowStartTime = -1.0f;
+	float GrappleThrowTravelTime = 0.0f;
+	bool bGrappleVisualActive = false;
+
+	/** World time the drawn line must be gone by, whatever else happens. Negative means no limit.
+	 *  A backstop for the case where the swing ended on a machine that never heard about it. */
+	float GrappleVisualMaxEndTime = -1.0f;
+
+	/** Both ends of SetGrappleLine do the same work; this is that work. */
+	void ApplyGrappleLineLocally(bool bOn, FVector Anchor, class UAbilityDefinition_Grapple* Def, int32 Level);
+
+	/** The definition whose look this line is drawn with. Weak: it is an asset, and the character
+	 *  has no business keeping one alive. */
+	TWeakObjectPtr<class UAbilityDefinition_Grapple> GrappleVisualDefinition;
+
+	/** Build the cable if it does not exist yet, and push this definition's look onto it. */
+	void EnsureGrappleCable(class UAbilityDefinition_Grapple* Def);
+
+	/** Lay the rope's particles on the straight line to WorldEnd, right now.
+	 *
+	 *  UCableComponent is a Verlet simulation that seeds its particles ONCE, in OnRegister, along
+	 *  whatever EndLocation held at that moment. Without this the rope starts as a stub pointing
+	 *  along the component's own +X and visibly swings across to the anchor over the following
+	 *  second. There is no public API for placing the particles, so re-registering is the way. */
+	void ReseedGrappleCable(const FVector& WorldEnd);
+
+	/** Move the drawn line, and put it away once there is neither a throw in flight nor a line
+	 *  attached. Called from Tick on every machine; reads UApexMovementComponent::IsGrappling, which
+	 *  is replicated to simulated proxies for exactly this. */
+	void UpdateGrappleVisual(float DeltaTime);
 };

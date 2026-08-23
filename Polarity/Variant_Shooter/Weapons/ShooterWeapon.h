@@ -9,8 +9,10 @@
 #include "WeaponRecoilComponent.h"
 #include "TutorialTypes.h"
 #include "CrosshairConfig.h"
+#include "WeaponSpreadConfig.h"
 #include "MovementSettings.h"
 #include "Chaos/ChaosEngineInterface.h"
+#include "Engine/NetSerialization.h"
 #include "ShooterWeapon.generated.h"
 
 class IShooterWeaponHolder;
@@ -190,8 +192,12 @@ protected:
 	 *
 	 *  Everything except the damage still happens on a hit -- ionization, knockback, the hit marker
 	 *  for an ionizing hit -- so the shot reads as landing rather than as passing through. A target
-	 *  with no charge at all (no EMF component) has no shield to break and takes damage normally. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
+	 *  with no charge at all (no EMF component) has no shield to break and takes damage normally.
+	 *
+	 *  NOT under an EditCondition and NOT in the Hitscan category, both of which it used to be: the
+	 *  melee weapon honours this too now, and a hitscan-gated checkbox on a sword is greyed out
+	 *  forever with no way to tell that it would have worked. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage")
 	bool bRequiresBrokenShieldToDamage = false;
 
 	// ==================== Hitscan Ionization ====================
@@ -213,9 +219,17 @@ protected:
 	 *  IonizationChargePerHit is negative drives the charge the other way. */
 	bool IsIonizationCapReached(float CurrentCharge, float Cap) const;
 
+	/** The same test, for a caller whose per-hit amount is not IonizationChargePerHit. The melee
+	 *  weapon carries its own, so the two-argument form above would silently judge a sword's step by
+	 *  the hitscan number -- which on a sword is whatever the default happens to be. */
+	bool IsIonizationCapReached(float CurrentCharge, float Cap, float ChargePerHit) const;
+
 	/** One ionization step, clamped to +/-Cap so the charge has a ceiling whichever direction it is
 	 *  being driven. The cap belongs to the target, not to this weapon. */
 	float ApplyIonizationStep(float CurrentCharge, float Cap) const;
+
+	/** The same step, with the per-hit amount handed in. See the three-argument cap test above. */
+	float ApplyIonizationStep(float CurrentCharge, float Cap, float ChargePerHit) const;
 
 	// ==================== Heat System ====================
 
@@ -439,6 +453,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX", meta = (EditCondition = "bUseHitscan"))
 	TObjectPtr<USoundBase> ReflectionSound;
 
+	// ==================== SFX|Feedback ====================
+
+	/** How this weapon sounds when it lands a hit: the world impacts everyone hears and the
+	 *  confirmations only the shooter hears, in one asset shared by a whole class of weapon.
+	 *
+	 *  The per-weapon maps below still win where they are filled in, so a gun with its own impacts
+	 *  keeps them; the set fills every surface the weapon says nothing about. Leave it empty and
+	 *  behaviour is exactly what it was before sets existed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Feedback")
+	TObjectPtr<UHitFeedbackSet> FeedbackSet;
+
 	// ==================== SFX|Impact ====================
 
 	/** Default impact sound (used when surface has no PhysicalMaterial or is missing from ImpactSoundBySurface) */
@@ -522,6 +547,19 @@ protected:
 	 *  third person one everybody else sees. Does nothing when the asset is not set. */
 	void PlayWeaponMeshAnimation(UAnimationAsset* Animation);
 
+	/** Parents the ADS anchor to the best aiming reference this weapon actually has, trying in
+	 *  order: an eye-point socket on a sight attachment (SightAimSocketName), a sight socket on the
+	 *  weapon mesh (ADSSocketName), the sight MOUNT socket (ScopeMountSocketName), and finally
+	 *  nothing at all, in which case the Blueprint's own placement is kept untouched.
+	 *
+	 *  Called on equip. Idempotent: re-running it re-derives the same attachment. */
+	void ResolveADSAnchorAttachment();
+
+	/** Copies each weapon mesh's render visibility (first person primitive type, owner see / owner
+	 *  no see) onto everything parented under it, so an attachment added in the Blueprint cannot
+	 *  end up drawn in a different pass from the gun it is bolted to. */
+	void PropagateRenderVisibilityToChildren();
+
 	UPROPERTY(EditAnywhere, Category = "Animation")
 	TSubclassOf<UAnimInstance> FirstPersonAnimInstanceClass;
 
@@ -536,12 +574,70 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (EditCondition = "bUseCustomADSOffset"))
 	FVector CustomADSOffset = FVector(0.0f, 0.0f, 0.0f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0", ClampMax = "120"))
-	float CustomADSFOV = 0.0f;
+	/** THE zoom knob. How many times closer the sight picture is than the hip view: 1 = no zoom at
+	 *  all, 2 = things look twice as big, 4 = a sniper scope.
+	 *
+	 *  A multiplier and not an angle, on purpose. An angle would have to be an angle relative to
+	 *  SOMETHING, and the only "something" available is the player's own FOV setting, which the
+	 *  player is free to move between 60 and 120. Storing 40 degrees here used to mean 2.75x zoom
+	 *  for a player on 90 and NO zoom at all for a player on 60 — same weapon, same number, the
+	 *  sights simply stopped working. A multiplier means the same thing at every setting.
+	 *
+	 *  Rough starting points: pistol/shotgun 1.2 to 1.5, rifle 1.5 to 2, marksman 3, sniper 4+. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ADS", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ADSZoom = 1.5f;
 
-	/** Socket name on weapon mesh for ADS camera position (e.g. "Sight" or "ADS") */
+	/** Socket name on weapon mesh for ADS camera position (e.g. "Sight" or "ADS").
+	 *  Second choice in the chain, see ResolveADSAnchorAttachment. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FName ADSSocketName = FName("Sight");
+
+	/** Eye-point socket carried by a SIGHT ATTACHMENT component parented under the weapon mesh.
+	 *  First choice in the chain: a socket authored on the scope itself is the only one that is
+	 *  actually a sight line rather than a mounting point, and it follows the scope when swapped.
+	 *  Default matches the Low Poly Shooter Pack convention. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	FName SightAimSocketName = FName("SOCKET_Aim");
+
+	/** Socket the weapon mesh offers for MOUNTING a sight. Last-resort anchor when no eye point
+	 *  exists anywhere: it is on the rail, below and differently oriented to the real sight line,
+	 *  so a weapon that falls through to this will usually need SightRotationOffset. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	FName ScopeMountSocketName = FName("SOCKET_Scope");
+
+	/** Align the sight AXIS with the camera while aiming, not just the sight POSITION.
+	 *
+	 *  Reads the ROTATION of ADSSocketName. Nothing read that rotation before this option existed,
+	 *  so on a weapon whose socket was placed by eye for position alone it can be anything, and
+	 *  turning this on will point the barrel somewhere new and wrong. Verify the socket (its +X
+	 *  must run down the barrel), then leave this on. Off falls back to the old position-only ADS,
+	 *  which cannot actually put the shot where the crosshair is. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	bool bAlignSightRotation = true;
+
+	/** Correction folded into the sight socket's rotation before ADS alignment uses it, applied in
+	 *  the socket's own axes. Fixing the socket on the mesh is the better answer; this is for
+	 *  weapons whose mesh cannot be re-authored. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (EditCondition = "bAlignSightRotation"))
+	FRotator SightRotationOffset = FRotator::ZeroRotator;
+
+	/** Where the eye sits relative to the sight socket, in CAMERA axes: X forward, Y right, Z up.
+	 *
+	 *  The alignment on its own lands the sight socket exactly on the camera origin, and on a real
+	 *  sight mesh that socket is the optic or the front post, not an eye point — so with a zero
+	 *  offset the weapon ends up inside the player's head. X is therefore the eye relief and it is
+	 *  the one that matters; Y and Z are there to nudge a socket that sits off the sight line.
+	 *
+	 *  This is the same knob the Low Poly Shooter Pack calls OffsetAiming ("we already perform
+	 *  automatic calculations to aim perfectly through scopes, but this helps with adjusting"),
+	 *  and their own data uses it heavily: 32 for every handgun, 16 to 18 for the rifles, 4 to 8.5
+	 *  for the snipers. Ours are not their numbers — they move the ik_hand_gun bone and we move the
+	 *  whole first person mesh — so measure per weapon rather than copying the pack.
+	 *
+	 *  Measuring it: the distance the sight socket has to travel FORWARD to reach the eye position
+	 *  the weapon was hand-tuned for. On BP_ShooterWavePistol that is 61.21. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	FVector SightAimOffset = FVector::ZeroVector;
 
 	/** Second socket for ADS alignment - rear sight or stock. Both sockets will be placed on camera ray */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
@@ -550,10 +646,6 @@ protected:
 	/** Third socket below rear socket - used to lock roll (keep weapon upright) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FName ADSSocketNameBottom = FName("SightBottom");
-
-	/** Default FOV multiplier for ADS when CustomADSFOV is 0 (e.g. 0.75 = 75% of base FOV) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.3", ClampMax = "1.0"))
-	float ADSFOVMultiplier = 0.75f;
 
 	/** Blend time when entering ADS (seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
@@ -621,6 +713,42 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	TObjectPtr<USoundBase> ReloadSound;
 
+	// ==================== Switch Animation (holster / draw) ====================
+	// Four assets, because the two halves of a swap belong to two different weapons: the one going
+	// away plays its Holster, the one coming out plays its Draw. First person is what the owner
+	// sees, third person is what everybody else sees, and they are separate montages.
+	//
+	// Leave a montage empty and that half is simply skipped, which is the old instant swap. That is
+	// the fallback on purpose: a weapon nobody has animated yet still works.
+
+	/** FP arms montage for putting this weapon away. Place a "Weapon Switch - Swap Point" notify
+	 *  where the old weapon should disappear and the new one appear; without one the swap happens
+	 *  when the montage ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	TObjectPtr<UAnimMontage> HolsterMontage;
+
+	/** Third-person montage for putting this weapon away, played on every machine. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	TObjectPtr<UAnimMontage> HolsterMontageTP;
+
+	/** FP arms montage for bringing this weapon out. Firing, reloading and abilities come back when
+	 *  it finishes. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	TObjectPtr<UAnimMontage> DrawMontage;
+
+	/** Third-person montage for bringing this weapon out, played on every machine. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	TObjectPtr<UAnimMontage> DrawMontageTP;
+
+	/** How long putting this weapon away should take. The montage is stretched to fit by play rate,
+	 *  so tuning the feel never means re-exporting the animation. 0 plays it at its authored speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation", meta = (ClampMin = "0.0", ClampMax = "5.0", Units = "s"))
+	float HolsterDuration = 0.0f;
+
+	/** How long bringing this weapon out should take. Same play-rate scaling as HolsterDuration. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation", meta = (ClampMin = "0.0", ClampMax = "5.0", Units = "s"))
+	float DrawDuration = 0.0f;
+
 	/** True from the moment a reload starts until the magazine is full or the reload is cancelled. */
 	bool bIsReloading = false;
 
@@ -648,8 +776,42 @@ protected:
 
 	// ==================== Aim ====================
 
+	/** BASE spread: the half-angle of the cone a shot leaves in when the owner is standing still,
+	 *  hip-firing, and has not fired recently. Everything in SpreadConfig is expressed relative to
+	 *  this, so a weapon that was already tuned keeps its character. */
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 10, Units = "deg"))
 	float AimVariance = 1.0f;
+
+	// ==================== Spread ====================
+
+	/** How the base spread above reacts to what the player is doing and to the trigger. See
+	 *  WeaponSpreadConfig.h for the shape of the number. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aim|Spread")
+	FWeaponSpreadConfig SpreadConfig;
+
+	/** The state multiplier as it is right now, chasing the one the owner's current state asks for.
+	 *  Interpolated rather than snapped so stopping to shoot costs a beat. */
+	float CurrentStateMultiplier = 1.0f;
+
+	/** Degrees of spread added by shooting, on top of the state part. Bleeds off after
+	 *  SpreadConfig.BloomRecoveryDelay. */
+	float CurrentBloomDegrees = 0.0f;
+
+	/** Game time of the shot the bloom is currently recovering from. */
+	float TimeOfLastSpreadShot = -1000.0f;
+
+	/** Moves CurrentStateMultiplier toward the owner's state and bleeds the bloom off. Called every
+	 *  frame from Tick. */
+	void UpdateSpread(float DeltaTime);
+
+	/** The multiplier the owner's CURRENT state asks for, before interpolation: exactly one state
+	 *  wins (air > slide > sprint > crouch > walk > still), then ADS scales it by the character's
+	 *  ADS alpha. Returns StillMultiplier for an owner that is not a character. */
+	float ResolveStateSpreadMultiplier() const;
+
+	/** Adds one shot's worth of bloom and restarts the recovery delay. Called once per trigger pull
+	 *  (a shotgun's pellets are one pull, not N). */
+	void AddShotSpread();
 
 	// ==================== Crosshair ====================
 
@@ -793,6 +955,40 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	UAnimMontage* GetReloadMontage() const { return ReloadMontage; }
 
+	// ==================== Switch Animation accessors ====================
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	UAnimMontage* GetHolsterMontage() const { return HolsterMontage; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	UAnimMontage* GetHolsterMontageTP() const { return HolsterMontageTP; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	UAnimMontage* GetDrawMontage() const { return DrawMontage; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	UAnimMontage* GetDrawMontageTP() const { return DrawMontageTP; }
+
+	/** Play rate that makes Montage last exactly Duration seconds. 1.0 when either is unset, so an
+	 *  unfilled duration means "as authored" rather than "instant". */
+	static float GetSwitchPlayRate(const UAnimMontage* Montage, float Duration);
+
+	/** Play rate for this weapon's holster half. @see GetSwitchPlayRate */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	float GetHolsterPlayRate() const { return GetSwitchPlayRate(HolsterMontage, HolsterDuration); }
+
+	/** Play rate for this weapon's draw half. @see GetSwitchPlayRate */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	float GetDrawPlayRate() const { return GetSwitchPlayRate(DrawMontage, DrawDuration); }
+
+	/** Wall-clock length of the holster half, after the play rate. 0 when there is no montage. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	float GetHolsterLength() const;
+
+	/** Wall-clock length of the draw half, after the play rate. 0 when there is no montage. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
+	float GetDrawLength() const;
+
 	/** How far along the current reload is, 0 to 1. Zero when not reloading, for a HUD bar. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetReloadProgress() const;
@@ -818,6 +1014,50 @@ protected:
 	virtual void FireProjectile(const FVector& TargetLocation, float ChargeMultiplier = 1.0f);
 
 	FTransform CalculateProjectileSpawnTransform(const FVector& TargetLocation) const;
+
+	/** Launch direction that actually lands a falling projectile on TargetLocation, or a zero vector
+	 *  when the straight line is the right answer after all.
+	 *
+	 *  Hooks itself in rather than being switched on per weapon: it lives on the projectile spawn
+	 *  path, so it only ever runs for projectile weapons by construction, and it asks the projectile
+	 *  class itself whether it has gravity and how fast it flies. A weapon whose projectile does not
+	 *  fall gets a zero back and keeps firing straight, with no configuration anywhere saying so.
+	 *
+	 *  AI only. The player aims with a crosshair, and bending their shot toward whatever the aim
+	 *  trace happened to hit is aim assist, not ballistics - it would take the shot away from them
+	 *  at exactly the moment they were trying to lead it themselves. */
+	FVector SolveBallisticAim(const FVector& LaunchLocation, const FVector& TargetLocation) const;
+
+	/** How far above a flat trajectory this weapon lobs. Zero fires as flat as gravity permits,
+	 *  which is what a rocket wants; a grenade launcher wants the high solution so its shells clear
+	 *  the cover between it and whoever it is shelling.
+	 *
+	 *  Only consulted when the projectile actually falls, so it costs nothing on a flat weapon. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Ballistics")
+	bool bLobProjectiles = false;
+
+	/** Steepest launch a lob is allowed to come out at before it gives up and fires flat instead.
+	 *
+	 *  The high-arc solution degenerates towards vertical whenever the projectile carries far more
+	 *  speed than the range needs, so without a ceiling a fast shell aimed at a near target is
+	 *  launched at the sky and lands back on the shooter's own head. Fifty degrees still clears
+	 *  ordinary cover and still reads as a lobbed shot; past that it reads as a mistake.
+	 *
+	 *  If a weapon genuinely wants mortar angles, the honest lever is a SLOWER projectile, not a
+	 *  higher ceiling: at a speed matched to its range the high solution is naturally steep. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Ballistics", meta = (EditCondition = "bLobProjectiles", ClampMin = "0.0", ClampMax = "89.0"))
+	float MaxLobPitchDegrees = 50.0f;
+
+	/** How far ahead of the muzzle the arc has to be clear before it is used. Short on purpose: this
+	 *  asks whether the round can leave the barrel, not whether the whole trajectory is clean. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Ballistics", meta = (ClampMin = "0.0"))
+	float MuzzleClearanceDistance = 200.0f;
+
+	/** Log every ballistic solve: what it was asked to hit, what it decided to hit, and the angle it
+	 *  came out at. Filter the Output Log on [BALLISTIC_DEBUG]. Off by default - this is one line per
+	 *  shot per enemy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Ballistics")
+	bool bLogBallistics = false;
 
 	virtual void FireHitscan(const FVector& TargetLocation);
 
@@ -887,6 +1127,23 @@ public:
 	 *  AShooterCharacter::Server_ReportIonization rather than here. */
 	bool ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent = nullptr);
 
+	/** Ionization with the per-hit amount handed in, and WITHOUT the bUseHitscanIonization gate.
+	 *
+	 *  This is the whole of what ionizing a target means -- the riot-shield rule, the report to the
+	 *  authority, the upgrade notification, the shield-bypass redirect into health, and the walk
+	 *  through the three kinds of chargeable thing. ApplyHitscanIonization is now just its own flag
+	 *  and its own number in front of this, and the melee weapon puts its own flag and its own number
+	 *  in front of the same body.
+	 *
+	 *  Shared rather than copied deliberately: the last time the shield-bypass redirect was added to
+	 *  one ionization path and not the other, the mechanic worked for exactly one weapon. */
+	bool ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent* HitComponent, float ChargePerHit);
+
+	/** True when this weapon is a finisher and the target's shield is still up, so its damage must be
+	 *  withheld. The hit itself is not cancelled by this -- ionization, knockback and the hit marker
+	 *  all still run, which is what makes charging a target feel like progress. */
+	bool ShouldWithholdDamageForShield(AActor* Target) const;
+
 protected:
 
 	// ==================== Charge-Based Firing ====================
@@ -939,8 +1196,20 @@ protected:
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnWaveFronts(const FVector& Start, const FVector& End);
 
+	/** Resolve, play locally, then tell everyone else. Same split as the muzzle flash and the
+	 *  tracer: the shooter must not wait a round trip to see their own bullet land. */
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnImpactEffect(const FHitResult& Hit);
+
+	/** The impact on this machine. Takes an already-resolved surface rather than a hit result
+	 *  because only the shooter can decide it -- IsTargetShieldDown is read at the instant of the
+	 *  hit, and an observer re-deriving it a round trip later would answer differently and show a
+	 *  shield spark where the shooter saw blood. */
+	void SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface);
+
+	/** Which surface a hit should sound and look like: the physical material, unless the target is
+	 *  an NPC that answers for its own shield-versus-body surface. */
+	EPhysicalSurface ResolveImpactSurface(const FHitResult& Hit) const;
 
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnReflectionEffect(const FVector& Location, const FVector& IncomingDirection, const FVector& ReflectedDirection);
@@ -952,6 +1221,10 @@ protected:
 	 *  multicast, so the effects can never drift apart between owner and observers. */
 	void PlayFireEffectsLocally();
 
+	/** The weapon's own reload on this machine: the moving parts and the sound. Same split as the
+	 *  firing effects above, for the same reason. */
+	void PlayReloadEffectsLocally();
+
 public:
 	/** Muzzle flash and fire sound, played on every machine that can see this weapon.
 	 *  Cosmetic only, so it is unreliable: a dropped shot effect is better than a stalled channel
@@ -961,11 +1234,28 @@ public:
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayFireEffects();
 
+	/** The magazine coming out, the pump, the shells going in, played on every machine that can see
+	 *  this weapon. Everyone but the owner only ever has the third person mesh, so without this the
+	 *  gun sat perfectly still through a teammate's or an enemy's whole reload.
+	 *  Reliable, unlike the firing one: this happens once per magazine rather than once per shot,
+	 *  and a dropped one leaves a visibly dead weapon for the entire reload. */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayReloadEffects();
+
 	/** Tracer for everyone else. Endpoints travel with it because only the shooter traced them. */
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayBeamEffect(const FVector& Start, const FVector& End, float EnergyMultiplier,
 		float OverrideBoltSpeed, float OverrideBoltSpeedVariance,
 		float OverrideBoltLength, float OverrideRandomSeed);
+
+	/** The bullet landing, for everyone else. Where the shot ends is the loudest thing in a fight
+	 *  after the shot itself, and until this existed a teammate's rounds hit the world in silence.
+	 *
+	 *  Carries the resolved surface rather than the hit, because the surface depends on whether the
+	 *  target's shield was up at the moment of the hit and only the shooter was there for it.
+	 *  Unreliable and quantized: this is one cosmetic event per bullet. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayImpactEffect(FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte);
 
 protected:
 
@@ -984,6 +1274,34 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	USkeletalMeshComponent* GetThirdPersonMesh() const { return ThirdPersonMesh; }
+
+	/** Where shots physically leave this weapon, in world space.
+	 *
+	 *  The one place that answers it. Aiming, permission to fire and the projectile spawn were each
+	 *  measuring from a different point - the NPC's camera, the middle of its capsule, and this
+	 *  socket - and around a corner those three disagree: the camera and the capsule can be past the
+	 *  edge while the barrel is still behind it. The shot was cleared by one point and born at
+	 *  another, so it hit the wall the NPC had just stepped out of.
+	 *
+	 *  Returns the actor location when there is no mesh or no socket, so a caller never has to
+	 *  handle a zero vector. */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	FVector GetMuzzleWorldLocation() const;
+
+	/** Can a shot fired right now actually get out and reach TargetLocation.
+	 *
+	 *  Not the same question as "is there a line of sight", and the difference is the whole bug it
+	 *  exists for. A projectile is a SPHERE: it needs a corridor as wide as itself, while a zero
+	 *  width ray slips through the gap between a barrel and the edge of a corner that the shell
+	 *  cannot. An NPC leaning out of cover passes the ray test roughly half a second before the
+	 *  round could survive the trip, and every shot fired in that window detonates on the corner it
+	 *  is stepping around - reliably, every cycle, from the same spot, which is why it never looked
+	 *  like scatter.
+	 *
+	 *  Swept with the projectile's own collision radius for projectile weapons, and a plain line for
+	 *  hitscan, which really is infinitely thin. */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool CanShotReach(const FVector& TargetLocation) const;
 
 	// ==================== Grip alignment ====================
 	//
@@ -1030,6 +1348,27 @@ public:
 	/** How far this weapon reaches. Read by the server when it checks a reported hit. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Validation")
 	float GetMaxHitscanRange() const { return MaxHitscanRange; }
+
+	/** What a body shot at full energy would deal to Target right now, with the whole owner-side
+	 *  multiplier stack applied: heat, height, tags, upgrades and the class passive.
+	 *
+	 *  For DISPLAY, not for damage. It cannot include the two factors that only a real shot knows —
+	 *  the bone it lands on and the energy it has left — so it is deliberately the plain body-shot
+	 *  number, which is the one worth comparing two of. Zero for a weapon with no hitscan damage.
+	 *  @see UAbilityHandler::GetPredictedShotDamage. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Damage")
+	float PredictDamageAgainst(AActor* Target) const;
+
+	/** True when this weapon's own damage is being held back by the target's shield. Its own function
+	 *  because two damage paths ask it — the direct one here and the server's re-check of a hit a
+	 *  client reported — and they must not be able to answer it differently. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Damage")
+	bool IsShieldGateBlocking(AActor* HitActor) const;
+
+	/** Apply the owner's class passive's own damage for one hit, straight to health and past the
+	 *  shield gate. Authority only; returns what actually landed, 0 when there is no such passive.
+	 *  @see UAbilityHandler::GetBonusPierceDamage */
+	float ApplyPassivePierceDamage(AActor* HitActor);
 
 	/** Writes LeftHandIKTransform and LeftHandIKAlpha on an anim instance, looked up by name. Any
 	 *  anim blueprint that declares those two picks it up and anything else is left untouched, which
@@ -1146,8 +1485,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	FVector GetADSOffset() const { return CustomADSOffset; }
 
+	/** How many times the sights magnify. See ADSZoom. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
-	float GetCustomADSFOV() const { return CustomADSFOV; }
+	float GetADSZoom() const { return ADSZoom; }
+
+	/** Apply a magnification to a field of view and get the zoomed-in field of view back.
+	 *
+	 *  Zoom is a ratio of TANGENTS, not of angles, because that is what the projection does:
+	 *  on-screen size goes as 1/tan(FOV/2). Halving the angle is NOT 2x zoom. Every place that
+	 *  turns ADSZoom into a real FOV goes through here, so there is exactly one copy of this. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
+	static float ApplyZoomToFOV(float BaseFOVDegrees, float Zoom);
 
 	/** Returns ADS blend in time */
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
@@ -1162,6 +1510,19 @@ public:
 	/** Returns the ADS camera component (used for SetViewTarget blending) */
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	UCameraComponent* GetADSCamera() const { return ADSCameraComponent; }
+
+	/** Whether ADS should match the sight's AXIS to the camera, not only its position.
+	 *  See bAlignSightRotation for why this is per weapon rather than a global switch. */
+	UFUNCTION(BlueprintPure, Category = "ADS")
+	bool ShouldAlignSightRotation() const { return bAlignSightRotation; }
+
+	/** Correction folded into the sight socket's rotation before ADS alignment uses it. */
+	UFUNCTION(BlueprintPure, Category = "ADS")
+	FRotator GetSightRotationOffset() const { return SightRotationOffset; }
+
+	/** Eye position relative to the sight socket, in camera axes. See SightAimOffset. */
+	UFUNCTION(BlueprintPure, Category = "ADS")
+	FVector GetSightAimOffset() const { return SightAimOffset; }
 
 public:
 	// ==================== Recoil Getters ====================
@@ -1182,6 +1543,30 @@ public:
 	 *  (grow-on-fire). */
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsFiring() const { return bIsFiring; }
+
+	// ==================== Spread Getters ====================
+
+	/** The spread right now, in degrees: the half-angle of the cone a shot may leave in.
+	 *  clamp(AimVariance * state multiplier + firing bloom, 0, MaxSpreadDegrees).
+	 *  This is the single number the bullets and the crosshair both read, which is what keeps them
+	 *  from disagreeing. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Spread")
+	float GetCurrentSpreadDegrees() const;
+
+	/** How far the AIM LINE itself is allowed to wander, in degrees. The same as
+	 *  GetCurrentSpreadDegrees for an ordinary weapon; a shotgun overrides it to zero and spends
+	 *  the spread on widening its pattern instead, so the triangle stays a triangle. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Spread")
+	virtual float GetAimConeDegrees() const { return GetCurrentSpreadDegrees(); }
+
+	/** The angle the crosshair should draw as its radius. Same as GetCurrentSpreadDegrees for an
+	 *  ordinary weapon; a shotgun returns the outer edge of its pellet pattern, because that, and
+	 *  not the wander of the aim line, is the region its shot covers. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Spread")
+	virtual float GetCrosshairSpreadDegrees() const { return GetCurrentSpreadDegrees(); }
+
+	/** The per-weapon spread tuning (read by the HUD crosshair widget). */
+	const FWeaponSpreadConfig& GetSpreadConfig() const { return SpreadConfig; }
 
 	// ==================== Hitscan Getters ====================
 

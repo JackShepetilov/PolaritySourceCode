@@ -14,6 +14,7 @@ class UEMF_FieldComponent;
 class AEMFChannelingPlateActor;
 class AShooterNPC;
 class AShooterCharacter;
+class AHealthPickup;
 class UNiagaraSystem;
 class USoundBase;
 class UAudioComponent;
@@ -884,6 +885,60 @@ public:
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayDecoyExpiry(FVector Location);
 
+	// ==================== Heal (the Melee's item verb) ====================
+	// One verb, two ways to spend it, and they end in the same place. Tap the launch button and the
+	// prop is thrown and comes apart where it lands, which is how a teammate gets healed. Hold it
+	// and the prop is eaten on the spot, which is how the player heals themselves. The input half
+	// lives in UChargeAnimationComponent; this is what it calls.
+
+	/** What the prop comes apart into when a thrown one lands. Left empty is a working prop that
+	 *  simply heals nobody: the throw still resolves and the prop still goes away, there are just no
+	 *  pickups. Worth setting on the prop archetypes the Melee is expected to find. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal")
+	TSubclassOf<AHealthPickup> HealPickupClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal", meta = (ClampMin = "1", ClampMax = "10"))
+	int32 HealPickupCount = 3;
+
+	/** How far apart the pickups are scattered around the landing point. Small on purpose: they are
+	 *  meant to read as one delivery, and their own magnet radius is much larger than this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal", meta = (ClampMin = "0.0", Units = "cm"))
+	float HealPickupScatterRadius = 120.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal", meta = (ClampMin = "0.0", Units = "cm"))
+	float HealPickupFloorOffset = 20.0f;
+
+	/** Healing given straight to the player who ate the prop instead of throwing it.
+	 *
+	 *  A separate number from the pickups rather than "the same total, delivered differently": eating
+	 *  it is instant, certain and cannot be stolen, so it is allowed to be worth less than a throw
+	 *  that lands. That balance is the author's to set. TEST VALUE. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal", meta = (ClampMin = "0.0"))
+	float SelfHealAmount = 50.0f;
+
+	/** The prop coming apart, on every machine. This is the Melee's own end for a prop and it is
+	 *  meant to look and sound like medicine rather than like the decoy's bang or a detonation: it
+	 *  is the only feedback that says which verb just happened, and it plays in both halves (eaten
+	 *  in the hands, and landed at a teammate's feet). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal|Presentation")
+	TObjectPtr<UNiagaraSystem> HealDecomposeVFX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal|Presentation", meta = (ClampMin = "0.1"))
+	float HealDecomposeVFXScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Heal|Presentation")
+	TObjectPtr<USoundBase> HealDecomposeSound;
+
+	/** Eat this prop for the healing in it. Authority only; the client's side of the button goes
+	 *  through AShooterCharacter::Server_ConsumePropForHeal. */
+	UFUNCTION(BlueprintCallable, Category = "Heal")
+	void ConsumeForHeal(AShooterCharacter* User);
+
+	/** True between a Melee throwing this prop and it landing. Read by nothing else today; exposed
+	 *  because "why did this prop not explode" is otherwise unanswerable from a Blueprint. */
+	UFUNCTION(BlueprintPure, Category = "Heal")
+	bool IsPledgedToHealing() const { return bPledgedToHealing; }
+
 	// ==================== IShooterDummyTarget Interface ====================
 
 	virtual bool GrantsStableCharge_Implementation() const override;
@@ -1081,6 +1136,24 @@ private:
 	 *  throw paths (the plate-driven host throw and BeginRemoteLaunch for a client's), because a
 	 *  verb that only worked for the host is exactly the class of bug this project keeps finding. */
 	void ApplyItemVerbOnThrow();
+
+	/** Set at launch when the thrower's verb is Heal, cleared when the prop is finished. Authority
+	 *  only and deliberately not replicated: everything it gates is decided on the server, and the
+	 *  one thing clients need to see is the decompose, which arrives as its own multicast. */
+	bool bPledgedToHealing = false;
+
+	/** A thrown healing prop has landed: come apart into pickups here. */
+	void DecomposeIntoHealing(const FVector& Where);
+
+	/** The ending both halves of the verb share -- announce it, and take the prop out of the world.
+	 *  Factored out rather than duplicated because "the prop is gone" is four separate steps and
+	 *  half of them are easy to forget. */
+	void FinishAsHealing(const FVector& Where);
+
+	/** Show the prop coming apart on every machine, and take it away with it. Unreliable, like the
+	 *  decoy's: it is cosmetic, and the healing itself has already been resolved on the server. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayHealDecompose(FVector Location);
 
 	/** False when the class that spent this prop uses it for something other than a bomb.
 	 *

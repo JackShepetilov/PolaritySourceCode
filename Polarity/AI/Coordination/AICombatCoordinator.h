@@ -568,6 +568,76 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Cover", meta = (ClampMin = "0.0"))
 	float CoverBlockRadius = 500.0f;
 
+	// ==================== Relocation and covering fire ====================
+	//
+	// One squad behaviour, expressed as a contract between two roles rather than as a script. An NPC
+	// whose corner has been taken away announces that it is moving; the ones that still have an
+	// angle answer by holding their peek and firing at whoever took it. Nobody choreographs anybody:
+	// each side asks the coordinator a question about the shared situation and acts on the answer.
+	//
+	// The coordinator owns it because it is the only place that knows every NPC, every claim and
+	// every threat at once. Suppression reaches the behaviour through the SAME route a decoy does
+	// (AShooterAIController::DistractTo), because "look at this one and ignore your senses for a
+	// while" is exactly what both of them mean, and a second override system would be a second thing
+	// that can disagree with perception.
+
+	/** Announce that this NPC is abandoning its corner because Opener took it away, and that the run
+	 *  will take about ExpectedSeconds. Refuses, and returns false, when the squad already has as
+	 *  many runners as MaxSimultaneousRelocations allows - the caller then stays put and tries again
+	 *  later, which is what keeps somebody at home to do the covering. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Squad")
+	bool BeginRelocation(APawn* NPC, APawn* Opener, float ExpectedSeconds);
+
+	/** Arrived, gave up, died, or ran out of clock. Safe to call when no relocation is running. */
+	UFUNCTION(BlueprintCallable, Category = "Coordination|Squad")
+	void EndRelocation(APawn* NPC);
+
+	/** Is this NPC currently one of the runners. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Squad")
+	bool IsRelocating(const APawn* NPC) const;
+
+	/** Who, if anyone, this NPC should be suppressing right now.
+	 *
+	 *  Answers null unless there is a live relocation that this NPC is not itself performing. The
+	 *  choice among several is by threat, which is the same ordering everything else in this class
+	 *  uses, so the most dangerous opener is the one that gets sat on. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Squad")
+	APawn* GetSuppressionTarget(const APawn* NPC) const;
+
+	/** Ceiling on runners at once. Without one, a flanker who opens every corner in the room sends
+	 *  the entire squad running at the same moment and there is nobody left to cover any of them,
+	 *  which is the failure the whole mechanism exists to avoid. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Squad", meta = (ClampMin = "1"))
+	int32 MaxSimultaneousRelocations = 2;
+
+	/** Hard ceiling on one relocation's claim on the squad's attention, whatever the runner reports
+	 *  as its expected time. A runner that gets stuck must not pin its coverers in the open forever. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Squad", meta = (ClampMin = "0.5"))
+	float MaxSuppressionSeconds = 4.0f;
+
+	// ==================== Positional threat ====================
+
+	/** Threat earned by STANDING somewhere, on top of the threat earned by class and by action.
+	 *  Added per corner this player has taken away from an NPC - both ends of it visible, which is
+	 *  UCoverFinderComponent's own definition of a corner being gone.
+	 *
+	 *  This is what makes flanking a real move rather than a positioning preference: walking into
+	 *  the rear and stripping the squad's cover pulls attention the same way being a Tank does. It
+	 *  needs no decay of its own, because it is self-cancelling - the NPCs answer by moving to
+	 *  corners hidden from this player, and the moment they do, there is nothing left for it to
+	 *  score. The correction is the behaviour, not a timer.
+	 *
+	 *  Reads into GetPlayerThreat, so it amplifies BOTH directions at once by construction: shielded
+	 *  enemies find a flanker apparently nearer and walk at them, broken ones weight them heavier in
+	 *  exposure and hide from them harder. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Threat", meta = (ClampMin = "0.0"))
+	float ThreatPerOpenedCover = 0.5f;
+
+	/** How often the opened-corner census runs. Each pass is one IsCoverOpenedBy per NPC per player,
+	 *  and that call is a handful of traces, so this is the knob that decides its cost. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Threat", meta = (ClampMin = "0.1"))
+	float PositionalThreatInterval = 0.5f;
+
 	/** Get the assigned slot position for an NPC. Returns false if no slot assigned. */
 	UFUNCTION(BlueprintPure, Category = "Coordination|BattleCircle")
 	bool GetAssignedSlotPosition(APawn* NPC, FVector& OutPosition) const;
@@ -622,6 +692,34 @@ private:
 	};
 
 	TArray<FCoverClaim> CoverClaims;
+
+	/** One NPC's run to a new corner, and the player who caused it. Lives only as long as the run:
+	 *  suppression is bought per relocation, not held as a squad mood, so it cannot chain into a
+	 *  permanent state where somebody is always running and somebody is therefore always standing
+	 *  in the open. */
+	struct FRelocation
+	{
+		TWeakObjectPtr<APawn> Runner;
+		TWeakObjectPtr<APawn> Opener;
+
+		/** World time it stops mattering, whatever the runner is doing by then. */
+		float ExpiryTime = 0.0f;
+	};
+
+	TArray<FRelocation> ActiveRelocations;
+
+	/** Corner count each player has taken away, refreshed on PositionalThreatInterval. Cached rather
+	 *  than computed on demand because GetPlayerThreat is called many times per frame and this
+	 *  answer costs traces. */
+	TMap<TWeakObjectPtr<APawn>, int32> OpenedCoverCounts;
+
+	float TimeSincePositionalThreat = 0.0f;
+
+	/** Retake the opened-corner census and refresh OpenedCoverCounts. */
+	void UpdatePositionalThreat();
+
+	/** Drop relocations whose runner died or whose clock ran out. */
+	void CleanupRelocations();
 
 	// --- Core helpers ---
 	FRegisteredNPCData* FindNPCData(APawn* NPC);

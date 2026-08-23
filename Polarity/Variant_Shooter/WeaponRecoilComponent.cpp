@@ -362,8 +362,12 @@ void UWeaponRecoilComponent::UpdateCameraRecoilSpring(float DeltaTime)
 		OwnerController->AddYawInput(DeltaYaw);
 	}
 
-	// Track accumulated recoil for recovery system
-	AccumulatedRecoil.Pitch += FMath::Abs(DeltaPitch);
+	// Track accumulated recoil for recovery system.
+	// Signed, like the yaw below. It used to take FMath::Abs(DeltaPitch), which accumulated the
+	// spring's PATH LENGTH (rise plus return) instead of the view's net displacement. Since the
+	// spring is critically damped towards zero, that net displacement is zero, so recovery was
+	// spending roughly 2x the peak of every shot pulling the view DOWN from neutral.
+	AccumulatedRecoil.Pitch += DeltaPitch;
 	AccumulatedRecoil.Yaw += DeltaYaw;
 }
 
@@ -437,7 +441,15 @@ void UWeaponRecoilComponent::TriggerVisualKick(const FRotator& ViewmodelRecoil, 
 
 void UWeaponRecoilComponent::UpdateVisualKick(float DeltaTime)
 {
-	if (!Settings.bEnableVisualKick) return;
+	if (!Settings.bEnableVisualKick)
+	{
+		// Kick is the only writer of these two, so an early return that skips the write leaves
+		// them frozen at whatever the last enabled frame produced, parking the weapon off centre
+		// for as long as the flag stays off. Zero them on the way out.
+		CurrentWeaponRotation = FRotator::ZeroRotator;
+		CurrentWeaponOffset = FVector::ZeroVector;
+		return;
+	}
 
 	// Sub-step visual kick springs to prevent instability on large DeltaTime
 	constexpr float MaxSubStep = 1.0f / 60.0f;
@@ -500,7 +512,13 @@ void UWeaponRecoilComponent::UpdateCameraPunch(float DeltaTime)
 
 void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 {
-	if (!Settings.bEnableWeaponSway) return;
+	if (!Settings.bEnableWeaponSway)
+	{
+		// Same reasoning as UpdateVisualKick: sway owns this value, so it has to clear it rather
+		// than leave the last frame's offset standing.
+		CurrentSwayOffset = FRotator::ZeroRotator;
+		return;
+	}
 
 	// Smooth mouse velocity
 	SmoothedMouseVelocity = FMath::Vector2DInterpTo(
@@ -581,8 +599,9 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 	// Smooth interpolation to target sway
 	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, Settings.MouseSwayLag);
 
-	// Add sway to weapon rotation
-	CurrentWeaponRotation += CurrentSwayOffset;
+	// Sway is NOT folded into CurrentWeaponRotation. It used to be, and that made the two
+	// inseparable at the getter: kick assigned the variable, sway added to it, and one call
+	// returned the sum. ADS needs them apart (see GetWeaponKickRotation / GetWeaponSwayRotation).
 }
 
 // ==================== Ornstein-Uhlenbeck Process ====================

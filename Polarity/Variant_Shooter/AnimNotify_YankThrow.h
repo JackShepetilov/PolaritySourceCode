@@ -3,8 +3,9 @@
 //   - UAnimNotify_YankThrowDiscard — fires when the weapon should LEAVE the hand
 //     (hides held weapon meshes + spawns the dropped/thrown version at the FP mesh's
 //     world position).
-//   - UAnimNotify_YankThrowLower — fires when the empty hands should start lowering
-//     so the next weapon can be raised (triggers BeginWeaponLower + FinishWeaponSwitch).
+//   - UAnimNotify_YankThrowLower — fires when the empty hands are ready for the next weapon
+//     (triggers BeginWeaponLower + FinishWeaponSwitch; no holster montage, this montage owns
+//     the arms already).
 
 #pragma once
 

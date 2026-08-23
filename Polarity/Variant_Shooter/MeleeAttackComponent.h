@@ -546,6 +546,52 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	float GetTagDamageMultiplier(AActor* Target) const;
 
+	// ==================== Delegated lunge (melee weapon) ====================
+	// AShooterWeapon_Melee used to carry its own copy of target acquisition and lunge flight, with
+	// its own settings, and it disabled this component while equipped. That copy wrote Velocity from
+	// the weapon's Tick, which is not part of the move the server replays -- so it was host-only by
+	// construction -- and it read a separate MinSpeedForLunge that defaulted to 300, so a swing from
+	// standstill produced no lunge at all while the bare-handed one worked fine.
+	//
+	// It is gone. The weapon now borrows this lunge, the same way it already borrows the dropkick
+	// through TryStartDelegatedDropKick, so there is one implementation, one set of numbers (on the
+	// character's component, editable in BP_MeleeCharacter) and one that flies inside the simulation.
+	//
+	// What is deliberately NOT borrowed: the state machine, the animation, the damage window and the
+	// charges. The weapon keeps doing all of those itself. This lunge flies and nothing else, which
+	// is why it rides its own flag rather than putting the component into an attack state -- that
+	// would run this component's hit detection alongside the weapon's and hit everything twice.
+
+	/** Acquire a target and start flying at it, without starting an attack. Returns false when
+	 *  nothing qualified, in which case the swing simply does not lunge. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Lunge")
+	bool TryStartDelegatedLunge();
+
+	/** End a delegated lunge. Safe to call when none is running. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Lunge")
+	void EndDelegatedLunge();
+
+	/** Whatever the lunge is currently flying at, or null. The weapon asks because two of its own
+	 *  decisions used to read its own copy of this: whether an airborne swing becomes a cool kick,
+	 *  and which NPC to stop driving into once it is already being knocked back. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
+	AActor* GetLungeTargetActor() const { return MagnetismTarget.Get(); }
+
+	// ==================== Lunge reach ====================
+	// Settings.LungeRange is what a swing is worth on its own. A class passive is allowed to extend
+	// it per target -- the Melee's reaches further into an enemy whose shield the team has already
+	// broken -- so nothing decides reach by reading Settings.LungeRange directly any more.
+
+	/** How far the lunge may reach for this particular candidate, after the owner's passive has had
+	 *  its say. Returns 0 when lunging is switched off, which is also "no candidate qualifies". */
+	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
+	float GetLungeRangeFor(const AActor* Target) const;
+
+	/** The furthest any candidate could possibly be allowed to be. Sizes the acquisition sphere and
+	 *  bounds the reach the authority will accept for a reported hit. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
+	float GetMaxLungeRange() const;
+
 	// ==================== Coop damage validation ====================
 	// Read by AShooterCharacter::Server_ReportMeleeDamage off the SERVER's own copy of this component,
 	// never off numbers the client sent. Both machines have it with the same Blueprint defaults.
@@ -901,6 +947,11 @@ protected:
 
 	/** When true, dropkick is delegated from ShooterWeapon_Melee — skip mesh/animation/charges/damage */
 	bool bDelegatedDropKick = false;
+
+	/** When true, the equipped melee weapon is borrowing the lunge for its own swing. The component
+	 *  stays out of its own attack state throughout: this flag is the ONLY thing that puts UpdateLunge
+	 *  into a flying phase, and nothing else about an attack is running. */
+	bool bDelegatedLunge = false;
 
 	// ==================== Mesh Transition State ====================
 

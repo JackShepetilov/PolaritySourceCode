@@ -14,6 +14,39 @@
 DEFINE_LOG_CATEGORY_STATIC(LogSlide, Log, All);
 DEFINE_LOG_CATEGORY_STATIC(LogWallRun, Log, All);
 
+/** Draws what the velocity actually was at the instant a grapple let go, against the line it let go
+ *  from. Answers one question and no others: did the grapple hand the player a sideways velocity, or
+ *  did something after the grapple turn a straight one sideways. The debug line drawn from the
+ *  numbers we INTENDED cannot answer that, which is the whole reason this exists. */
+static TAutoConsoleVariable<int32> CVarGrappleReleaseDebug(
+	TEXT("polarity.grapple.releasedebug"),
+	0,
+	TEXT("Draw and log the velocity at the moment a grapple releases.\n")
+	TEXT("  yellow = velocity at release, scaled to 1 metre per 10 m/s\n")
+	TEXT("  cyan   = direction to the anchor at release\n")
+	TEXT("  green  = the part of the velocity ALONG the line\n")
+	TEXT("  red    = the part ACROSS it, which is what reads as a sideways shove\n")
+	TEXT("Lines persist for 4 seconds. Log tag [GRAPPLE_RELEASE]."),
+	ECVF_Cheat);
+
+static TAutoConsoleVariable<int32> CVarWallRunForAll(
+	TEXT("polarity.movement.wallrunforall"),
+	0,
+	TEXT("Give wall running back to every class, whatever their MovementSettings asset says.\n")
+	TEXT("\n")
+	TEXT("Wall running belongs to the Melee class, and that split is DATA, not code: the shared\n")
+	TEXT("MovementSettings asset has bEnableWallRun off and the Melee's own asset has it on. This\n")
+	TEXT("is the single switch that undoes the split without editing an asset or rebuilding, for\n")
+	TEXT("when the split turns out to be the wrong call or something has to be tested on a class\n")
+	TEXT("that no longer wall runs.\n")
+	TEXT("  0 = follow the settings asset (the class split is live)\n")
+	TEXT("  1 = everybody wall runs, the way it worked before classes existed\n")
+	TEXT("\n")
+	TEXT("Set it on EVERY machine in a coop session. Wall running is decided inside the movement\n")
+	TEXT("simulation, so a client that has it on and a server that does not will disagree about\n")
+	TEXT("where that player is, and the client gets pulled off the wall every frame."),
+	ECVF_Default);
+
 UApexMovementComponent::UApexMovementComponent()
 {
 	// Needed for the two state bools below: without it the component's own properties never leave
@@ -129,6 +162,11 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	//
 	// The *look* of a smooth crouch is a camera and mesh matter, and it already lives in
 	// APolarityCharacter::AccumulateFirstPersonPose (CrouchSlideProgress, CrouchCameraOffset).
+
+	// The blend weights an animation graph needs for the same two states. Cosmetic, so the tick is
+	// the right place: this runs on every machine, including the ones that only simulate this
+	// character, which is exactly where a graph still has to blend.
+	UpdateCrouchSlideAlphas(DeltaTime);
 
 	// The pre-physics mechanics block moved into UpdateCharacterStateBeforeMovement, which the engine
 	// calls from inside PerformMovement. Everything in it writes Velocity, and from the tick that
@@ -293,8 +331,75 @@ float UApexMovementComponent::GetMaxSpeed() const
 		}
 	}
 
+	// Aiming caps ground speed rather than replacing it. A cap because everything above can legally be
+	// slower - crouching, and the damage slow further down - and ADS must never be the thing that
+	// speeds a hurt, crouched player up. Sprint needs no separate handling for the same reason: the
+	// cap simply wins over it. Deliberately grounded only, so a shot taken mid-jump does not brake
+	// the jump, and deliberately not applied to the slide, wallrun or dash, whose speeds are the
+	// mechanic itself.
+	if (bIsAiming && MovementSettings->ADSSpeed > 0.0f
+		&& !bIsSliding && !bIsWallRunning && !bIsGroundDashing && !bIsAirDashing
+		&& (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
+	{
+		BaseSpeed = FMath::Min(BaseSpeed, MovementSettings->ADSSpeed);
+	}
+
 	const float ScaledBaseSpeed = BaseSpeed * DamageSpeedMultiplier * ExternalSpeedMultiplier;
 	return bExternalMaxSpeedOverride ? FMath::Max(ScaledBaseSpeed, ExternalMaxSpeedOverride) : ScaledBaseSpeed;
+}
+
+void UApexMovementComponent::SetAiming(bool bNewAiming)
+{
+	bIsAiming = bNewAiming;
+}
+
+float UApexMovementComponent::GetSlideFatigueScale() const
+{
+	// No settings means no tuned numbers, the same answer the boosts themselves give: full strength,
+	// which is what an NPC sliding through FSTTask_ShooterPush used to get before fatigue existed.
+	if (!MovementSettings)
+	{
+		return 1.0f;
+	}
+
+	const int32 Start = FMath::Max(0, MovementSettings->SlideFatigueStart);
+	const int32 End   = MovementSettings->SlideFatigueEnd;
+
+	// End at or below Start is the off switch, matching shipped Apex, where both wallrun numbers sit
+	// at 1000 and the ramp never begins.
+	if (End <= Start)
+	{
+		return 1.0f;
+	}
+	if (SlideFatigueCounter <= Start)
+	{
+		return 1.0f;
+	}
+	if (SlideFatigueCounter >= End)
+	{
+		return 0.0f;
+	}
+
+	const float Ramp = static_cast<float>(SlideFatigueCounter - Start) / static_cast<float>(End - Start);
+	const float MinScale = FMath::Clamp(MovementSettings->SlideFatigueMinScale, 0.0f, 1.0f);
+	// The floor applies only between the two ends. Landing exactly on End is a hard zero above, so a
+	// floor of 0.2 means "never weaker than a fifth, then nothing at all", not "always a fifth".
+	return FMath::Max(1.0f - Ramp, MinScale);
+}
+
+float UApexMovementComponent::ConsumeSlideBoostFatigue()
+{
+	const float Scale = GetSlideFatigueScale();
+	if (Scale <= 0.0f)
+	{
+		// Fully fatigued: no speed handed out, so nothing is booked either. Letting the counter climb
+		// here would only push the recovery further away for a boost that never happened.
+		return 0.0f;
+	}
+
+	SlideFatigueCounter++;
+	SlideFatigueDecayTimer = 0.0f;
+	return Scale;
 }
 
 void UApexMovementComponent::SetExternalMaxSpeedOverride(float MaxSpeed)
@@ -392,10 +497,38 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 
 	if (bWantsSlideOnLand && PreLandSpeed > 0.0f)
 	{
+		// Landing keeps the horizontal speed the fall arrived with. Source does the same, and
+		// CanSlide below has to see the real speed rather than whatever the engine left after its
+		// own landing handling.
 		Velocity.X = PreLandHorizontalVelocity.X;
 		Velocity.Y = PreLandHorizontalVelocity.Y;
 
-		StartSlideFromAir(LastFallVelocity);
+		// ONE door. This used to call StartSlideFromAir, a second entry with its own boost formula:
+		// the ordinary burst PLUS up to half the landing speed again, capped at SlideMaxSpeedBurst,
+		// and no SlideMinStartSpeed gate at all. That is what made a jump-then-crouch slide beat a
+		// sprint slide so badly, and Apex has no counterpart to it - slide_whileInAir is 0 there, so
+		// crouch in the air is only a crouch and the slide begins on the ground like any other.
+		//
+		// Now it is literally the ground path: same boost, same gate, same cooldown, same fatigue.
+		// Too slow to slide means crouch, exactly as TryCrouchSlide does on foot.
+		//
+		// The refusal is logged rather than silent. CanSlide is stricter than the old landing door
+		// in two ways that a player will notice: it needs SlideMinStartSpeed, and it needs the
+		// engine to have finished putting this character on the ground. Filter [NET_DEBUG] to see
+		// which one said no.
+		if (CanSlide())
+		{
+			StartSlide();
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[NET_DEBUG] %s Landing slide refused: speed=%.0f min=%.0f onGround=%d cooldown=%.2f"),
+				(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")),
+				Velocity.Size2D(), MovementSettings ? MovementSettings->SlideMinStartSpeed : -1.0f,
+				IsMovingOnGround() ? 1 : 0, SlideCooldownRemaining);
+			StartCrouching();
+		}
 		//bWantsSlideOnLand = false;
 	}
 
@@ -508,15 +641,15 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		Velocity.Y = HorizontalVelocity.Y;
 		Velocity.Z = MovementSettings->SlidehopJumpZVelocity;
 
-		if (CurrentSpeed > 0.0f && SlideFatigueCounter < 5)
+		if (CurrentSpeed > 0.0f)
 		{
-			float FatigueMultiplier = 1.0f - (SlideFatigueCounter * 0.15f);
-			FVector BoostDir = HorizontalVelocity.GetSafeNormal();
-			Velocity += BoostDir * MovementSettings->SlideJumpBoost * FMath::Max(0.2f, FatigueMultiplier);
+			const float FatigueScale = ConsumeSlideBoostFatigue();
+			if (FatigueScale > 0.0f)
+			{
+				const FVector BoostDir = HorizontalVelocity.GetSafeNormal();
+				Velocity += BoostDir * MovementSettings->SlideJumpBoost * FatigueScale;
+			}
 		}
-
-		SlideFatigueCounter = FMath::Min(SlideFatigueCounter + 1, 5);
-		SlideFatigueDecayTimer = 0.0f;
 
 		// Prevent double boost on landing
 		SlideBoostCooldownRemaining = MovementSettings->SlideboostCooldown;
@@ -635,6 +768,10 @@ uint16 UApexMovementComponent::PackPolarityMoveFlags() const
 	Set(bMeleeDropKick,           EPolarityMoveFlag::MeleeDropKick);
 	Set(bMeleeDropKickForward,    EPolarityMoveFlag::MeleeDropKickForward);
 
+	Set(bGrappleWanted,           EPolarityMoveFlag::Grappling);
+
+	Set(bIsAiming,                EPolarityMoveFlag::Aiming);
+
 	return Flags;
 }
 
@@ -651,6 +788,7 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
 	bWantsToSprint    = Has(EPolarityMoveFlag::WantsToSprint);
 	bWantsSlideOnLand = Has(EPolarityMoveFlag::WantsSlideOnLand);
 	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
+	bIsAiming         = Has(EPolarityMoveFlag::Aiming);
 
 	// States that need a real entry. Each Start* sets up friction, gravity, direction and speed;
 	// a side that only flipped the bool kept simulating normally and finished the move somewhere
@@ -727,6 +865,12 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
 	bMeleeLungeRestoreOnEnd = Has(EPolarityMoveFlag::MeleeLungeRestore);
 	bMeleeDropKick          = Has(EPolarityMoveFlag::MeleeDropKick);
 	bMeleeDropKickForward   = Has(EPolarityMoveFlag::MeleeDropKickForward);
+
+	// The grapple is one decision and an anchor, taken as given, exactly like the lunge above it:
+	// the anchor arrived with the move and was written into GrappleAnchor just before this call, and
+	// the edge is resolved a moment later inside UpdateCharacterStateBeforeMovement so the line is
+	// measured on the same simulated frame here as it was on the client.
+	bGrappleWanted = Has(EPolarityMoveFlag::Grappling);
 }
 
 void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint16 Flags)
@@ -752,6 +896,10 @@ void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint16 Flags)
 	bMeleeDropKick          = Has(EPolarityMoveFlag::MeleeDropKick);
 	bMeleeDropKickForward   = Has(EPolarityMoveFlag::MeleeDropKickForward);
 
+	bGrappleWanted          = Has(EPolarityMoveFlag::Grappling);
+
+	bIsAiming               = Has(EPolarityMoveFlag::Aiming);
+
 	// bIsMeleeLunging is restored by PrepMoveFor around this call, not from the flags: it is the
 	// state the move started in, and the flags carry the decision the move was made with. The gravity
 	// that goes with it is plain component state and no part of the saved move, so it has to be put
@@ -771,6 +919,7 @@ void FCharacterNetworkMoveData_Polarity::ClientFillNetworkMoveData(const FSavedM
 	PolarityFlags         = PolarityMove.SavedPolarityFlags;
 	MeleeLungeTarget      = PolarityMove.SavedMeleeLungeTarget;
 	MeleeLungeTargetActor = PolarityMove.SavedMeleeLungeTargetActor.Get();
+	GrappleAnchor         = PolarityMove.SavedGrappleAnchor;
 }
 
 bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& CharacterMovement,
@@ -802,6 +951,18 @@ bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& 
 		MeleeLungeTargetActor = nullptr;
 	}
 
+	// The anchor rides along on the same terms, with the Grappling flag as its presence bit: nothing
+	// at all while nobody is on a line, one quantised position for the second or two that one lasts.
+	if ((PolarityFlags & static_cast<uint16>(EPolarityMoveFlag::Grappling)) != 0)
+	{
+		bool bAnchorSuccess = true;
+		GrappleAnchor.NetSerialize(Ar, PackageMap, bAnchorSuccess);
+	}
+	else if (Ar.IsLoading())
+	{
+		GrappleAnchor = FVector::ZeroVector;
+	}
+
 	return !Ar.IsError();
 }
 
@@ -815,6 +976,7 @@ void UApexMovementComponent::ServerMove_PerformMovement(const FCharacterNetworkM
 	PendingPolarityFlags          = PolarityData.PolarityFlags;
 	PendingMeleeLungeTarget       = PolarityData.MeleeLungeTarget;
 	PendingMeleeLungeTargetActor  = Cast<AActor>(PolarityData.MeleeLungeTargetActor.Get());
+	PendingGrappleAnchor          = PolarityData.GrappleAnchor;
 
 	Super::ServerMove_PerformMovement(MoveData);
 }
@@ -838,6 +1000,11 @@ void UApexMovementComponent::MoveAutonomous(float ClientTimeStamp, float DeltaTi
 		// lunge that starts against last move's target flies at where the enemy used to be.
 		MeleeLungeTarget      = PendingMeleeLungeTarget;
 		MeleeLungeTargetActor = PendingMeleeLungeTargetActor;
+
+		// Same rule, same reason: a grapple that starts against last move's anchor swings the
+		// character around a post it is no longer attached to.
+		GrappleAnchor         = PendingGrappleAnchor;
+
 		ApplyPolarityMoveFlags(PendingPolarityFlags);
 	}
 
@@ -857,6 +1024,8 @@ void UApexMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsMantling, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsAirDashing, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsGroundDashing, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsGrappling, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, GrappleAnchor, COND_SimulatedOnly);
 }
 
 FNetworkPredictionData_Client* UApexMovementComponent::GetPredictionData_Client() const
@@ -877,6 +1046,10 @@ FSavedMove_Polarity::FSavedMove_Polarity()
 	, SavedMeleeLungeStartVelocity(FVector::ZeroVector)
 	, bSavedMeleeLunging(0)
 	, bSavedMeleeLungeGravityOff(0)
+	, SavedGrappleAnchor(FVector::ZeroVector)
+	, SavedGrappleElapsed(0.0f)
+	, SavedGrappleLowSpeedTime(0.0f)
+	, bSavedGrappling(0)
 	, bSavedJumpHeld(0)
 	, SavedSlideFatigueCounter(0)
 	// Declaration order from here down, or the compiler warns that the list lies about what runs first.
@@ -904,6 +1077,10 @@ void FSavedMove_Polarity::Clear()
 	SavedMeleeLungeStartVelocity = FVector::ZeroVector;
 	bSavedMeleeLunging = 0;
 	bSavedMeleeLungeGravityOff = 0;
+	SavedGrappleAnchor = FVector::ZeroVector;
+	SavedGrappleElapsed = 0.0f;
+	SavedGrappleLowSpeedTime = 0.0f;
+	bSavedGrappling = 0;
 	bSavedJumpHeld = 0;
 	SavedSlideFatigueCounter = 0;
 	SavedSlideFatigueDecayTimer = 0.0f;
@@ -938,6 +1115,11 @@ bool FSavedMove_Polarity::CanCombineWith(const FSavedMovePtr& NewMove, ACharacte
 	{
 		return false;
 	}
+	// And the anchor, for the same reason. Two swings around two different posts are not one move.
+	if (NewPolarityMove && !SavedGrappleAnchor.Equals(NewPolarityMove->SavedGrappleAnchor, 0.1f))
+	{
+		return false;
+	}
 	return Super::CanCombineWith(NewMove, Character, MaxDelta);
 }
 
@@ -958,6 +1140,13 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 		SavedMeleeLungeStartVelocity = Apex->MeleeLungeStartVelocity;
 		bSavedMeleeLunging           = Apex->bIsMeleeLunging ? 1 : 0;
 		bSavedMeleeLungeGravityOff   = Apex->bMeleeLungeGravityOff ? 1 : 0;
+
+		// Anchor only while a line is actually out; otherwise it stays zero and the serializer
+		// spends one bit on it. @see FCharacterNetworkMoveData_Polarity::Serialize
+		SavedGrappleAnchor     = Apex->bGrappleWanted ? Apex->GrappleAnchor : FVector::ZeroVector;
+		SavedGrappleElapsed      = Apex->GrappleElapsed;
+		SavedGrappleLowSpeedTime = Apex->GrappleLowSpeedTime;
+		bSavedGrappling        = Apex->bIsGrappling ? 1 : 0;
 
 		SavedSlideFatigueCounter    = Apex->SlideFatigueCounter;
 		SavedSlideFatigueDecayTimer = Apex->SlideFatigueDecayTimer;
@@ -994,6 +1183,15 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 		Apex->MeleeLungeStartVelocity = SavedMeleeLungeStartVelocity;
 		Apex->bIsMeleeLunging         = bSavedMeleeLunging != 0;
 		Apex->bMeleeLungeGravityOff   = bSavedMeleeLungeGravityOff != 0;
+
+		// The anchor and the timer go in before the flags, for the same reason the lunge's do:
+		// UpdateGrapple runs on the very move being replayed and reads both, and a replay that
+		// started from a fresh timer would end the swing at a different moment.
+		Apex->GrappleAnchor        = SavedGrappleAnchor;
+		Apex->GrappleElapsed       = SavedGrappleElapsed;
+		Apex->GrappleLowSpeedTime  = SavedGrappleLowSpeedTime;
+		Apex->bIsGrappling         = bSavedGrappling != 0;
+
 		Apex->ApplyPolarityMoveFlagsForReplay(SavedPolarityFlags);
 		Apex->bJumpHeld = bSavedJumpHeld != 0;
 
@@ -1132,10 +1330,17 @@ void UApexMovementComponent::StartSlide()
 		float SpeedRatio = FMath::Clamp((CurrentSpeed - MinStartSpeed) / 500.0f, 0.0f, 1.0f);
 		float BoostAmount = FMath::Lerp(MaxBoost, MinBoost, SpeedRatio);
 
+		// Fatigue was previously read by the slide hop and the landing entry but not here, and the
+		// counter was only ever raised by the hop. So slide, stand, slide again paid full price every
+		// SlideboostCooldown seconds forever: this entry was the one that accelerated without limit.
+		const float FatigueScale = ConsumeSlideBoostFatigue();
+		BoostAmount *= FatigueScale;
+
 		Velocity += SlideDirection * BoostAmount;
 		SlideBoostCooldownRemaining = MovementSettings->SlideboostCooldown;
 
-		UE_LOG(LogSlide, Log, TEXT("Slide boost: +%.1f (speed was %.1f), slide cooldown = %.1f"), BoostAmount, CurrentSpeed, SlideBoostCooldownRemaining);
+		UE_LOG(LogSlide, Log, TEXT("Slide boost: +%.1f (speed was %.1f, fatigue %d -> x%.2f), slide cooldown = %.1f"),
+			BoostAmount, CurrentSpeed, SlideFatigueCounter, FatigueScale, SlideBoostCooldownRemaining);
 	}
 
 	UE_LOG(LogSlide, Warning, TEXT("=== SLIDE STARTED === Speed=%.1f"), Velocity.Size2D());
@@ -1216,61 +1421,6 @@ void UApexMovementComponent::EndSlide()
 	}
 
 	OnSlideEnded.Broadcast();
-}
-
-void UApexMovementComponent::StartSlideFromAir(float FallSpeed)
-{
-	// Same reason as CanSlide: everything below this point reads the settings asset unguarded, so a
-	// character without one must not enter the slide at all. This is the landing door into the same
-	// state, and it does not go through CanSlide.
-	if (bIsSliding || bIsMantling || bIsWallRunning || SlideCooldownRemaining > 0.0f || !MovementSettings)
-	{
-		// Filter the log by [NET_DEBUG] to see why a landing did not turn into a slide. Both ends
-		// print it, so a line appearing on one side only is itself the answer.
-		UE_LOG(LogTemp, Warning,
-			TEXT("[NET_DEBUG] %s StartSlideFromAir REFUSED: sliding=%d mantling=%d wallrun=%d cooldown=%.2f settings=%d"),
-			(GetOwnerRole() == ROLE_Authority ? TEXT("SERVER") : TEXT("CLIENT")), bIsSliding ? 1 : 0, bIsMantling ? 1 : 0, bIsWallRunning ? 1 : 0, SlideCooldownRemaining, MovementSettings ? 1 : 0);
-		return;
-	}
-
-	bIsSliding = true;
-	SlideDuration = 0.0f;
-	SlideDirection = Velocity.GetSafeNormal2D();
-
-	// Disable native UE5 braking - all slide deceleration handled by UpdateSlide()
-	GroundFriction = MovementSettings->SlideFriction;
-	BrakingDecelerationWalking = 0.0f;
-
-	const float CurrentSpeed = Velocity.Size2D();
-	const float MinBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMinSpeedBurst : MovementSettings->SlideMinSpeedBurst;
-	const float MaxBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMaxSpeedBurst : MovementSettings->SlideMaxSpeedBurst;
-	const float MinStartSpeed = MovementSettings->SlideMinStartSpeed;
-
-	float SpeedRatio = FMath::Clamp((CurrentSpeed - MinStartSpeed) / 500.0f, 0.0f, 1.0f);
-	float BaseBoost = FMath::Lerp(MaxBoost, MinBoost, SpeedRatio);
-	const float FallBoostMultiplier = FMath::Clamp(FallSpeed / 1000.0f, 0.1f, 0.5f);
-	const float FallBoost = CurrentSpeed * FallBoostMultiplier;
-	const float TotalBoost = FMath::Min(BaseBoost + FallBoost, MaxBoost);
-
-	if (SlideDirection.IsNearlyZero())
-	{
-		SlideDirection = CharacterOwner ? CharacterOwner->GetActorForwardVector().GetSafeNormal2D() : FVector::ForwardVector;
-	}
-
-	if (SlideBoostCooldownRemaining <= 0.0f)
-	{
-		// Apply fatigue to air slide boost (same as slidehop)
-		const float FatigueMultiplier = (SlideFatigueCounter < 5)
-			? FMath::Max(0.2f, 1.0f - SlideFatigueCounter * 0.15f)
-			: 0.0f;
-		Velocity += SlideDirection * TotalBoost * FatigueMultiplier;
-		SlideBoostCooldownRemaining = MovementSettings->SlideboostCooldown;
-	}
-	UE_LOG(LogSlide, Warning, TEXT("=== SLIDE FROM AIR === Speed=%.1f, Boost=%.1f, Fatigue=%d slide cooldown = %.1f"), Velocity.Size2D(), TotalBoost, SlideFatigueCounter, SlideBoostCooldownRemaining);
-
-	StartCrouching();
-
-	OnSlideStarted.Broadcast();
 }
 
 // ==================== Smooth Crouch ====================
@@ -1389,6 +1539,43 @@ void UApexMovementComponent::UpdateCapsuleHeight(float DeltaTime)
 	//
 	// Kept as an empty body rather than deleted so the declaration in the header stays valid; the
 	// header is untouched by this change.
+}
+
+void UApexMovementComponent::UpdateCrouchSlideAlphas(float DeltaTime)
+{
+	// Slide wins over crouch: a slide is crouched by construction (StartSlide calls StartCrouching),
+	// so counting it in both alphas would hand the graph two poses at full weight and it would have
+	// to undo one of them. The pair reads as "crouch, unless it is a slide".
+	const float SlideTarget = bIsSliding ? 1.0f : 0.0f;
+
+	// Air crouch counts as crouch: bIsCrouchedInAir is the held-crouch tuck that becomes a slide on
+	// landing. Shared with the character's own pose layers through IsCrouchPoseActive so all of them
+	// start on the same frame.
+	const float CrouchTarget = IsCrouchPoseActive() ? 1.0f : 0.0f;
+
+	// Crouch runs on the same two times as the eye and the first person pose (MovementSettings
+	// CrouchDownTime / CrouchUpTime), so the animation weight arrives exactly when the view does.
+	// CrouchAlphaInterpSpeed is the fallback for a character with no settings asset.
+	if (MovementSettings)
+	{
+		const float CrouchTime = (CrouchTarget > CrouchAlpha)
+			? MovementSettings->CrouchDownTime
+			: MovementSettings->CrouchUpTime;
+
+		CrouchAlpha = PolarityInterpAlphaOverTime(CrouchAlpha, CrouchTarget, DeltaTime, CrouchTime);
+	}
+	else
+	{
+		CrouchAlpha = FMath::FInterpTo(CrouchAlpha, CrouchTarget, DeltaTime, FMath::Max(0.0f, CrouchAlphaInterpSpeed));
+	}
+
+	// The slide keeps its own speed: it is not the crouch transition, it is a state that ramps in
+	// while the character is already low.
+	SlideAlpha  = FMath::FInterpTo(SlideAlpha,  SlideTarget,  DeltaTime, FMath::Max(0.0f, SlideAlphaInterpSpeed));
+
+	// FInterpTo never quite arrives; snap the ends so a graph can compare against 0 and 1.
+	CrouchAlpha = FMath::IsNearlyEqual(CrouchAlpha, CrouchTarget, KINDA_SMALL_NUMBER) ? CrouchTarget : FMath::Clamp(CrouchAlpha, 0.0f, 1.0f);
+	SlideAlpha  = FMath::IsNearlyEqual(SlideAlpha,  SlideTarget,  KINDA_SMALL_NUMBER) ? SlideTarget  : FMath::Clamp(SlideAlpha,  0.0f, 1.0f);
 }
 
 void UApexMovementComponent::UpdateSlide(float DeltaTime)
@@ -1539,7 +1726,27 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 			}
 		}
 
+		// Flat ground bleeds speed two ways, and they are summed.
+		//
+		// The constant term is the old model: speed falls in a straight line, so distance goes as the
+		// square of entry speed. The proportional term is how Source and Apex do it
+		// (CGameMovement::Friction: drop = control * sv_friction * dt, control floored at
+		// sv_stopspeed). Under it alone speed decays as v0*exp(-f*t), which makes distance
+		// (v0 - SlideMinSpeed)/f, linear in entry speed, and duration logarithmic in it. That is what
+		// stops a fast entry from turning into a slide across the whole map.
+		//
+		// SlideMinSpeed is the floor, standing in for sv_stopspeed: it is already the speed this slide
+		// ends at, and without a floor the exponential would crawl toward it forever.
+		//
+		// Slopes stay constant on purpose. Gravity along an incline IS a constant acceleration, it is
+		// not drag, so making it speed-proportional would be wrong in both physics and in Source.
 		float DecelAmount = SlideFlatDecel * DeltaTime;
+
+		if (MovementSettings->SlideFrictionPerSecond > 0.0f)
+		{
+			const float Control = FMath::Max(HorizontalSpeed, SlideMinSpeed);
+			DecelAmount += MovementSettings->SlideFrictionPerSecond * Control * DeltaTime;
+		}
 
 		if (SlopeAngle > 3.0f)
 		{
@@ -1593,7 +1800,16 @@ float UApexMovementComponent::GetSlopeAngle() const
 
 bool UApexMovementComponent::CanWallRun() const
 {
-	if (!MovementSettings || !MovementSettings->bEnableWallRun)
+	if (!MovementSettings)
+	{
+		return false;
+	}
+
+	// Which classes wall run is data: the Melee's own MovementSettings asset has this on, the shared
+	// one everybody else points at has it off. The cvar is the one-switch way back to "everybody
+	// does", and it is deliberately the only thing that can override the asset here -- anything
+	// situational belongs on bWallRunExternallyDisabled below, which is a different question.
+	if (!MovementSettings->bEnableWallRun && CVarWallRunForAll.GetValueOnAnyThread() <= 0)
 	{
 		return false;
 	}
@@ -2844,6 +3060,407 @@ void UApexMovementComponent::UpdateHeldByAlly(float DeltaSeconds)
 	Velocity = (ToHold * AllyHoldSpringRate).GetClampedToMaxSize(AllyHoldMaxSpeed);
 }
 
+// ==================== Grapple ====================
+
+void UApexMovementComponent::SetGrappleTuning(const FGrappleMotionParams& Params)
+{
+	GrappleParams = Params;
+}
+
+void UApexMovementComponent::SetGrappleIntent(bool bOn, const FVector& InAnchor)
+{
+	// The anchor is assigned only while a line is being asked for, and deliberately NOT cleared when
+	// it stops: EndGrapple runs a move later, inside the simulation, and the cable that draws the
+	// line reads it right up to that point. Same rule as the lunge target.
+	bGrappleWanted = bOn;
+	if (bOn)
+	{
+		GrappleAnchor = InAnchor;
+	}
+}
+
+FVector UApexMovementComponent::GetGrappleAimPoint() const
+{
+	// The pull aims ABOVE the hook, not at it. Reference: grapple_lift 25, "Distance above grapple
+	// hook that player is pulled to". It is a small number doing a large job: aimed at the hook
+	// itself, a grapple onto the lip of a roof drags the player into the wall just under the lip and
+	// leaves them there. Aimed a little over it, the same grapple puts them on the roof.
+	return GrappleAnchor + FVector(0.0f, 0.0f, GrappleParams.Lift);
+}
+
+void UApexMovementComponent::StartGrapple()
+{
+	GrappleElapsed = 0.0f;
+	GrappleLowSpeedTime = 0.0f;
+	GrapplePreGravityScale = GravityScale;
+
+	const FVector ToAim = GetGrappleAimPoint() - UpdatedComponent->GetComponentLocation();
+	const FVector AimDir = ToAim.GetSafeNormal();
+
+	const bool bWasOnGround = (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking);
+
+	// What the hook does to the speed you arrive with. Reference: grapple_initialSlowFrac_human 1.0
+	// and grapple_initialSlowFracVert_human 0.4.
+	//
+	// Horizontal speed is kept whole and vertical speed is cut to a fraction, and that asymmetry is
+	// most of why a grapple feels like it CATCHES you: a player falling at speed has three fifths of
+	// the fall deleted on contact while everything they had built running is untouched. Note that
+	// this is a cut, not a clamp -- it scales whatever is there, so a slow fall is barely affected
+	// and a long drop is caught hard.
+	Velocity.X *= GrappleParams.InitialSlowFracHorizontal;
+	Velocity.Y *= GrappleParams.InitialSlowFracHorizontal;
+	Velocity.Z *= GrappleParams.InitialSlowFracVertical;
+
+	// Reference: grapple_initialImpulse_human 350, along the line.
+	Velocity += AimDir * GrappleParams.InitialImpulse;
+
+	// Reference: grapple_initialImpulseOffGround_human 50, and note how SMALL it is next to the 420
+	// this used to need. The old number existed to fight the engine: a character left walking has
+	// its floor re-found on the next move and PhysWalking flattens the pull onto the ground plane,
+	// so the line had to physically throw them clear. With gravity switched off by
+	// UpdateGrappleGravity there is nothing pulling them back down, and a nudge is enough.
+	if (bWasOnGround)
+	{
+		SetMovementMode(MOVE_Falling);
+		Velocity.Z = FMath::Max(Velocity.Z, GrappleParams.InitialImpulseOffGround);
+	}
+
+	// Reference: grapple_initialSpeedMin_human 0, "player speed is immediately set to at least this
+	// value". Off by default; it is here because it is a real lever and because a level that wants
+	// a yanking grapple should not have to fake one with the impulse.
+	if (GrappleParams.InitialSpeedMin > 0.0f)
+	{
+		const float SpeedTowardAim = FVector::DotProduct(Velocity, AimDir);
+		if (SpeedTowardAim < GrappleParams.InitialSpeedMin)
+		{
+			Velocity += AimDir * (GrappleParams.InitialSpeedMin - SpeedTowardAim);
+		}
+	}
+
+	UpdateGrappleGravity(AimDir);
+
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] Grapple START %s role=%d own=%d dist=%.0f entrySpeed=%.0f grav=%.2f anchor=(%.0f,%.0f,%.0f)"),
+		*GetNameSafe(CharacterOwner), CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+		CharacterOwner && CharacterOwner->IsLocallyControlled() ? 1 : 0,
+		ToAim.Size(), Velocity.Size(), GravityScale,
+		GrappleAnchor.X, GrappleAnchor.Y, GrappleAnchor.Z);
+}
+
+void UApexMovementComponent::EndGrapple()
+{
+	// NOTHING happens to Velocity here, and that is still the single most important line in the
+	// ability. Every centimetre per second on the clock at this instant was earned on the line, and
+	// it is all the player's to keep. The reference preserves it in full and the entire skill
+	// ceiling -- let go at the right moment and fly -- exists only because it does.
+	//
+	// Gravity, on the other hand, MUST be put back: UpdateGrappleGravity switches it off for most of
+	// a grapple, and a line that ended without restoring it would leave the player floating.
+	// Measured BEFORE the state is cleared, because the anchor is what the velocity has to be read
+	// against and this is the last moment both exist.
+	if (CVarGrappleReleaseDebug.GetValueOnAnyThread() > 0 && UpdatedComponent)
+	{
+		const FVector Origin  = UpdatedComponent->GetComponentLocation();
+		const FVector ToAim   = GetGrappleAimPoint() - Origin;
+		const FVector AimDir  = ToAim.GetSafeNormal();
+		const float   Along   = FVector::DotProduct(Velocity, AimDir);
+		const FVector AlongV  = AimDir * Along;
+		const FVector AcrossV = Velocity - AlongV;
+
+		UE_LOG(LogTemp, Warning,
+			TEXT("[GRAPPLE_RELEASE] %s speed=%.0f along=%.0f across=%.0f (across is %.0f%% of it) ")
+			TEXT("vel=(%.0f,%.0f,%.0f) aimDir=(%.2f,%.2f,%.2f) angle=%.0fdeg"),
+			*GetNameSafe(CharacterOwner),
+			Velocity.Size(), Along, AcrossV.Size(),
+			Velocity.Size() > 1.0f ? 100.0f * AcrossV.Size() / Velocity.Size() : 0.0f,
+			Velocity.X, Velocity.Y, Velocity.Z,
+			AimDir.X, AimDir.Y, AimDir.Z,
+			FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(
+				FVector::DotProduct(Velocity.GetSafeNormal(), AimDir), -1.0f, 1.0f))));
+
+		if (UWorld* World = GetWorld())
+		{
+			// 10 cm of line per 1 cm/s, so a 1500 speed draws 1.5 metres. Persistent, so the shape of
+			// the release can be walked around and looked at after it has happened.
+			static constexpr float Scale = 0.1f;
+			DrawDebugDirectionalArrow(World, Origin, Origin + Velocity * Scale, 30.0f, FColor::Yellow, false, 4.0f, 0, 3.0f);
+			DrawDebugDirectionalArrow(World, Origin, Origin + AimDir * 200.0f,  30.0f, FColor::Cyan,   false, 4.0f, 0, 3.0f);
+			DrawDebugDirectionalArrow(World, Origin, Origin + AlongV * Scale,  20.0f, FColor::Green,  false, 4.0f, 0, 2.0f);
+			DrawDebugDirectionalArrow(World, Origin, Origin + AcrossV * Scale, 20.0f, FColor::Red,    false, 4.0f, 0, 2.0f);
+		}
+	}
+
+	GrappleElapsed = 0.0f;
+	GrappleLowSpeedTime = 0.0f;
+
+	GravityScale = MovementSettings ? MovementSettings->DefaultGravityScale : GrapplePreGravityScale;
+
+	UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] Grapple END %s role=%d exitSpeed=%.0f (kept in full)"),
+		*GetNameSafe(CharacterOwner), CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+		Velocity.Size());
+}
+
+void UApexMovementComponent::UpdateGrappleGravity(const FVector& AimDir)
+{
+	// The answer to "why does a grapple in Apex feel like there is no gravity". There is not.
+	//
+	// Reference: grapple_letGravityHelpCosAngle 0.8, "Don't ignore gravity when grappling downward
+	// this much (0 is horizontal, 1 is straight down)". Turn that around and it says gravity IS
+	// ignored the rest of the time, and the name of the setting says why: gravity is let in when it
+	// is pulling the player where they were already going, and kept out when it would only fight the
+	// pull. At 0.8 the door opens for roughly the last 37 degrees before straight down, so every
+	// ordinary grapple -- up at a roof, level at a wall -- has no gravity in it at all.
+	//
+	// AimDir points from the character toward the aim point, so a line running downward has a
+	// negative Z, and -AimDir.Z is exactly the cosine measured from straight down that the reference
+	// asks for.
+	const float DownCos = -AimDir.Z;
+	float GravityFactor = (DownCos >= GrappleParams.LetGravityHelpCosAngle) ? 1.0f : 0.0f;
+
+	// Reference: grapple_gravityPushUnderContribution 2, "Pushing forward while looking 'under' the
+	// grapple point increases gravity this much".
+	//
+	// With gravity otherwise off, this is the ONLY way a player can ask to be swung under a point
+	// rather than reeled up to it, which makes it the whole of the ability's vertical steering. Read
+	// as: the player is pushing forward, and the point sits above where they are aiming.
+	//
+	// Acceleration rather than any input accessor, because this runs inside the simulated move and
+	// Acceleration is the one the server has and a replay restores. Its direction is the world-space
+	// heading of WASD, already turned by the camera.
+	// "Looking under" needs a real margin, and the first version of this did not have one. It asked
+	// only whether the hook sat higher than the aim direction, which on the ordinary grapple -- throw
+	// it up at a roof, then look level to fly -- is true for the whole ride, so holding W turned
+	// gravity on and the mechanic read as a gravity key. Looking straight AT the hook was worse: the
+	// two directions are equal there and floating-point noise decided, so gravity flickered on and
+	// off frame to frame. The player has to drop their aim clearly below the hook to ask for this.
+	if (GrappleParams.GravityPushUnderContribution > 0.0f && CharacterOwner)
+	{
+		const FVector WishDir = Acceleration.GetSafeNormal();
+		if (!WishDir.IsNearlyZero())
+		{
+			const FVector ViewDir = CharacterOwner->GetViewRotation().Vector();
+			const bool bPushingForward = FVector::DotProduct(WishDir, ViewDir.GetSafeNormal2D()) > 0.5f;
+
+			// Compared as pitch angles rather than as raw Z, so the margin means the same thing
+			// whichever way the player is facing.
+			const float AimPitchDeg  = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(AimDir.Z, -1.0f, 1.0f)));
+			const float ViewPitchDeg = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(ViewDir.Z, -1.0f, 1.0f)));
+			const bool bLookingUnder = (AimPitchDeg - ViewPitchDeg) >= GrappleParams.PushUnderMinAngleDegrees;
+
+			if (bPushingForward && bLookingUnder)
+			{
+				GravityFactor = FMath::Max(GravityFactor, GrappleParams.GravityPushUnderContribution);
+			}
+		}
+	}
+
+	// Written every simulated move rather than latched at attach, so a replay recomputes it from the
+	// same inputs instead of restoring a stale one. That is also why GravityScale is not in the
+	// saved move: it is derived, not remembered.
+	const float BaseScale = MovementSettings ? MovementSettings->DefaultGravityScale : GrapplePreGravityScale;
+	GravityScale = BaseScale * GravityFactor;
+}
+
+void UApexMovementComponent::ApplyGrappleLateralBrake(float DeltaSeconds, const FVector& AimDir)
+{
+	// Reference: grapple_decel_human 425, "Deceleration of player's speed that doesn't go toward the
+	// grapple point".
+	//
+	// This is the line that decides what the ability IS. A rope redirects sideways speed and keeps
+	// it forever, which is a pendulum and is what this code used to be. The reference deletes it at
+	// a fixed rate, so a player's motion is continuously bent toward the point they hooked instead
+	// of orbiting it. The arc they fly is what is left over from gravity and this brake fighting the
+	// pull, and it is why the reference's grapple lands where players expect while a true pendulum
+	// slings them past it.
+	if (GrappleParams.LateralDeceleration <= 0.0f)
+	{
+		return;
+	}
+
+	FVector Lateral = Velocity - AimDir * FVector::DotProduct(Velocity, AimDir);
+
+	// Reference: grapple_dontFightGravity 1, "Ignores downward speed when applying deceleration, so
+	// that gravity continues to pull you down". Without this exemption the brake would cancel a fall
+	// as eagerly as it cancels a swing, and the two settings together would leave the character on a
+	// rigid rail: gravity pulls down, the brake immediately removes exactly that, nothing moves.
+	// Exempting the downward part is what lets both be true at once.
+	if (GrappleParams.bDontFightGravity && Lateral.Z < 0.0f)
+	{
+		Lateral.Z = 0.0f;
+	}
+
+	const float LateralSpeed = Lateral.Size();
+	if (LateralSpeed <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	const float Drop = FMath::Min(GrappleParams.LateralDeceleration * DeltaSeconds, LateralSpeed);
+	Velocity -= (Lateral / LateralSpeed) * Drop;
+}
+
+void UApexMovementComponent::ApplyGrappleAirControl(float DeltaSeconds)
+{
+	// Quake/Source air acceleration: input can only ever raise the component of velocity ALONG the
+	// input direction, and only up to SwingWishSpeed. Holding a direction perpendicular to your
+	// motion therefore keeps paying out while holding one along it stops paying almost at once, so
+	// sweeping the camera while holding a strafe keeps finding new "across" and speed climbs.
+	//
+	// This does NOT reuse ApplyAirStrafe, and it must not: that one clamps horizontal speed to
+	// AirSpeedCap and, above the cap, REDIRECTS the whole horizontal velocity toward whatever key is
+	// held, which on a line reads as being shoved sideways rather than steered.
+	//
+	// The numbers here are the project's own. The reference uses its ordinary air movement during a
+	// grapple (sv_airaccelerate 10, player_extraairaccelleration 2.0) and the wish-speed cap that
+	// goes with it lives in player settings files that are in no public dump, so inventing one and
+	// calling it fidelity would be worse than keeping what is already tuned.
+	//
+	// Unlike the old version this is NOT flattened against the line. There is no rope any more, so
+	// there is no constraint waiting to undo radial input: pushing toward or away from the point is
+	// a real thing a player can do, and it composes with the pull and the brake like everything else.
+	if (GrappleParams.SwingAirAcceleration <= 0.0f)
+	{
+		return;
+	}
+
+	// Acceleration, not GetLastInputVector: this runs inside the movement simulation, and
+	// Acceleration is the one the server has and a replay restores.
+	const FVector WishDir = Acceleration.GetSafeNormal();
+	if (WishDir.IsNearlyZero())
+	{
+		return;
+	}
+
+	// How hard the player is actually pushing, 0..1. Acceleration arrives already scaled by
+	// GetMaxAcceleration, so its length is the analog amount; without this a stick at a quarter tilt
+	// steers as hard as one held to the rail.
+	const float MaxAccel = GetMaxAcceleration();
+	const float AnalogScale = (MaxAccel > KINDA_SMALL_NUMBER)
+		? FMath::Clamp(Acceleration.Size() / MaxAccel, 0.0f, 1.0f)
+		: 1.0f;
+
+	const float SpeedAlongWish = FVector::DotProduct(Velocity, WishDir);
+	const float AddSpeed = GrappleParams.SwingWishSpeed * AnalogScale - SpeedAlongWish;
+	if (AddSpeed <= 0.0f)
+	{
+		return;
+	}
+
+	const float AccelSpeed = FMath::Min(GrappleParams.SwingAirAcceleration * AnalogScale * DeltaSeconds, AddSpeed);
+	Velocity += WishDir * AccelSpeed;
+}
+
+void UApexMovementComponent::UpdateGrapple(float DeltaSeconds)
+{
+	if (!UpdatedComponent || !CharacterOwner || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+
+	GrappleElapsed += DeltaSeconds;
+
+	const FVector Location = UpdatedComponent->GetComponentLocation();
+	const FVector ToAim = GetGrappleAimPoint() - Location;
+	const float Distance = ToAim.Size();
+	if (Distance <= KINDA_SMALL_NUMBER)
+	{
+		bGrappleWanted = false;
+		return;
+	}
+
+	const FVector AimDir = ToAim / Distance;
+
+	// How this ends, decided HERE, inside the simulation, so the server and the client stop on the
+	// same simulated move rather than on two different messages.
+	//
+	// Arrival is a radius rather than a point for the reason the lunge's is: two machines are never
+	// in exactly the same place, and a hard threshold is one they can land on opposite sides of.
+	//
+	// The other one is SPEED, and it replaces the release-by-angle this used to have. The reference
+	// keeps m_grappleSwingDetachLowSpeed per player next to m_grappleHasGoodVelocity and
+	// m_grappleLastGoodVelocityTime, which describes exactly this rule: let go once the player has
+	// stopped going anywhere. There is no quarter-turn rule in the reference at all -- not in its
+	// ConVars, not in its per-player state -- and the version of it that lived here cut the best
+	// swings loose at the bottom of the first arc.
+	//
+	// A timer rather than an instant test, because the moment a player is slowest is often the
+	// moment just before the pull does its work: a line thrown from standing still starts at zero.
+	if (GrappleParams.DetachLowSpeed > 0.0f && Velocity.Size() < GrappleParams.DetachLowSpeed)
+	{
+		GrappleLowSpeedTime += DeltaSeconds;
+	}
+	else
+	{
+		GrappleLowSpeedTime = 0.0f;
+	}
+
+	const bool bArrived = Distance <= GrappleParams.ArrivalRadius;
+	const bool bTimedOut = GrappleParams.MaxDuration > 0.0f && GrappleElapsed >= GrappleParams.MaxDuration;
+	const bool bStalled = GrappleParams.DetachLowSpeedTime > 0.0f
+		&& GrappleLowSpeedTime >= GrappleParams.DetachLowSpeedTime;
+
+	if (bArrived || bTimedOut || bStalled)
+	{
+		bGrappleWanted = false;
+		return;
+	}
+
+	// 1. Gravity for this move, from the angle of the line. First, because everything below composes
+	//    with whatever PhysFalling is about to apply.
+	UpdateGrappleGravity(AimDir);
+
+	// 2. A grapple that grazes the floor must not become a walk. StartGrapple leaves the ground once,
+	//    at attach; land again halfway through an arc -- which happens on any low line -- and
+	//    PhysWalking flattens the pull onto the ground plane and spends the rest of the line
+	//    shuffling. The line lifts for as long as it points upward, not only at the moment it bit.
+	static constexpr float LiftRopePitchSin = 0.25f;   // about 15 degrees above horizontal
+	if (IsMovingOnGround() && AimDir.Z > LiftRopePitchSin)
+	{
+		SetMovementMode(MOVE_Falling);
+		Velocity.Z = FMath::Max(Velocity.Z, GrappleParams.InitialImpulseOffGround);
+	}
+
+	// 3. The pull, as a governed speed rather than an open-ended force.
+	//    Reference: grapple_pullDelay_human 0.2, then grapple_accel_human 1000 closing on a target
+	//    that lerps from grapple_speedRampMin_human 50 to grapple_speedRampMax_human 800 over
+	//    grapple_speedRampTime_human 1.5.
+	//
+	//    The delay is dead time, not a ramp: for the first fifth of a second the hook is attached and
+	//    doing nothing, and that pause is the ability's beat. What follows is a governor -- once the
+	//    player is already moving toward the point faster than the current target, the pull adds
+	//    NOTHING. That is why a grapple in the reference feels like it has a top speed and why this
+	//    code's old unbounded 2600 acceleration felt like a rocket instead.
+	const float PullElapsed = GrappleElapsed - GrappleParams.PullDelay;
+	if (PullElapsed > 0.0f)
+	{
+		const float RampAlpha = (GrappleParams.SpeedRampTime > KINDA_SMALL_NUMBER)
+			? FMath::Clamp(PullElapsed / GrappleParams.SpeedRampTime, 0.0f, 1.0f)
+			: 1.0f;
+		const float TargetSpeed = FMath::Lerp(GrappleParams.SpeedRampMin, GrappleParams.SpeedRampMax, RampAlpha);
+
+		const float SpeedTowardAim = FVector::DotProduct(Velocity, AimDir);
+		const float AddSpeed = TargetSpeed - SpeedTowardAim;
+		if (AddSpeed > 0.0f)
+		{
+			Velocity += AimDir * FMath::Min(GrappleParams.PullAcceleration * DeltaSeconds, AddSpeed);
+		}
+	}
+
+	// 4. The brake on everything that does not point at the aim point. @see ApplyGrappleLateralBrake
+	//    for why this, and not a rope, is what shapes the flight.
+	ApplyGrappleLateralBrake(DeltaSeconds, AimDir);
+
+	// 5. The player's own input. @see ApplyGrappleAirControl for why this is not the ordinary air
+	//    strafe.
+	ApplyGrappleAirControl(DeltaSeconds);
+
+	// 6. A ceiling, if one is wanted. Zero means none, and the reference has none: the ramp in step 3
+	//    already governs the only speed it cares about.
+	if (GrappleParams.MaxSpeed > 0.0f && Velocity.SizeSquared() > FMath::Square(GrappleParams.MaxSpeed))
+	{
+		Velocity = Velocity.GetSafeNormal() * GrappleParams.MaxSpeed;
+	}
+}
+
 void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
 {
 	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
@@ -2925,13 +3542,40 @@ void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSecon
 	{
 		UpdateMeleeLunge(DeltaSeconds);
 	}
+
+	// The grapple sits beside the lunge rather than in the chain above. Like the lunge it drives
+	// Velocity itself, and unlike the lunge it keeps reading the player's input every frame, because
+	// being steerable IS the ability. It also owns GravityScale for as long as it lasts, the way the
+	// wallrun does. @see UpdateGrapple.
+	if (bGrappleWanted != bIsGrappling)
+	{
+		bIsGrappling = bGrappleWanted;
+		if (bIsGrappling)
+		{
+			StartGrapple();
+		}
+		else
+		{
+			EndGrapple();
+		}
+	}
+
+	if (bIsGrappling)
+	{
+		UpdateGrapple(DeltaSeconds);
+	}
 }
 
 void UApexMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
 {
 	// Sliding, dashing and wall running each drive velocity themselves; the tick guarded against
 	// them before and this keeps that.
-	if (!bIsSliding && !bIsAirDashing && !bIsWallRunning)
+	// Grappling is in this list for a reason worth writing down: ApplyAirStrafe clamps the
+	// horizontal speed to AirSpeedCap and, above the cap, REDIRECTS the whole horizontal
+	// velocity toward whatever key is held. On a line that reads as being shoved sideways
+	// instead of steered. The grapple runs its own air control instead.
+	// @see ApplyGrappleAirControl
+	if (!bIsSliding && !bIsAirDashing && !bIsWallRunning && !bIsGrappling)
 	{
 		ApplyAirStrafe(deltaTime);
 	}
@@ -2956,6 +3600,28 @@ void UApexMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool 
 		Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
 		Acceleration = InputAcceleration;
 		return;
+	}
+
+	// The grapple is deliberately NOT in that list, and it was, briefly, which broke it on the
+	// ground. Zeroing Acceleration suppresses the engine's air control -- which this project already
+	// disables outright (AirControl = 0, see the constructor) so there was nothing to suppress -- but
+	// on a WALKING frame it also hands Super a zero input, and the engine reads a zero input as "the
+	// player let go" and applies full braking friction. A line thrown while standing therefore had
+	// its pull rubbed out every frame, did nothing for two seconds and then hit its duration.
+	// The grapple keeps the character off the ground instead. @see StartGrapple.
+	//
+	// What it takes away instead is the FRICTION, for as long as the line is out and the character
+	// is touching the floor. Both reference games do this and the reason is the same one that made
+	// the standing throw look broken: walking friction exists to stop a player who has let go of the
+	// stick, it works in a tenth of a second, and it does not care that the two seconds of speed it
+	// is erasing were earned on a rope. With it scaled away, a swing that clips the ground is a skid
+	// that keeps its speed and lifts off again; with it left alone, every swing dies on the first
+	// thing it touches. Applied to the arguments rather than to the members so that nothing outside
+	// the grapple can see it: Friction and BrakingDeceleration are what Super actually reads.
+	if (bIsGrappling && IsMovingOnGround())
+	{
+		Friction *= FMath::Max(0.0f, GrappleParams.GroundFrictionScale);
+		BrakingDeceleration *= FMath::Max(0.0f, GrappleParams.GroundBrakingScale);
 	}
 
 	Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
@@ -3009,14 +3675,20 @@ void UApexMovementComponent::OnMovementUpdated(float DeltaSeconds, const FVector
 	TickDashCooldown(AirDashCooldownRemaining);
 	TickDashCooldown(GroundDashCooldownRemaining);
 
-	// Slide fatigue decays a step a second while not sliding. It scales the slide jump boost, which
-	// is why it counts here and not in the tick.
-	if (!bIsSliding && SlideFatigueCounter > 0)
+	// Slide fatigue gives a step back every SlideFatigueRecoveryTime seconds spent not sliding. It
+	// scales every slide boost, so it counts here, inside the simulation, and not in the tick: the
+	// server replays these frames and has to arrive at the same counter the client used.
+	const float RecoveryTime = MovementSettings ? MovementSettings->SlideFatigueRecoveryTime : 1.0f;
+	if (!bIsSliding && SlideFatigueCounter > 0 && RecoveryTime > 0.0f)
 	{
 		SlideFatigueDecayTimer += DeltaSeconds;
-		if (SlideFatigueDecayTimer >= 1.0f)
+		while (SlideFatigueDecayTimer >= RecoveryTime && SlideFatigueCounter > 0)
 		{
 			SlideFatigueCounter--;
+			SlideFatigueDecayTimer -= RecoveryTime;
+		}
+		if (SlideFatigueCounter <= 0)
+		{
 			SlideFatigueDecayTimer = 0.0f;
 		}
 	}
@@ -3613,6 +4285,9 @@ void UApexMovementComponent::ResetMovementState()
 	SlideFatigueCounter = 0;
 	SlideFatigueDecayTimer = 0.0f;
 
+	// A player who died holding ADS respawns without the speed cap; the next press sets it again.
+	bIsAiming = false;
+
 	// Reset jump count
 	CurrentJumpCount = 0;
 
@@ -3622,6 +4297,8 @@ void UApexMovementComponent::ResetMovementState()
 	CurrentWallRunMeshRoll = 0.0f;
 	CurrentWallRunMeshPitch = 0.0f;
 	CurrentWallRunCameraTilt = FRotator::ZeroRotator;
+	CrouchAlpha = 0.0f;
+	SlideAlpha = 0.0f;
 
 	// Reset input state
 	bWantsToSprint = false;

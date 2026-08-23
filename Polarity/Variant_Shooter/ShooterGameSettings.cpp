@@ -173,10 +173,28 @@ void UShooterGameSettings::ApplyAudioSettings()
 
 void UShooterGameSettings::ApplyGameplaySettings()
 {
-	// FOV is typically applied per-camera or via PlayerCameraManager
-	// ScreenShakeIntensity should be read by CameraShakeComponent
-
-	// Get the first local player controller and apply FOV
+	// ScreenShakeIntensity is read by CameraShakeComponent.
+	//
+	// FOV deliberately does NOT go through APlayerCameraManager::SetFOV. That call looks harmless
+	// and is anything but: it fills LockedFOV, and LockedFOV is not confined to GetFOVAngle() the
+	// way reading PlayerCameraManager.cpp alone suggests. ULocalPlayer::GetViewPoint builds the
+	// rendered view by taking the camera cache and then OVERWRITING the FOV with GetFOVAngle(),
+	// which returns LockedFOV whenever it is above zero (LocalPlayer.cpp:715). One call here
+	// therefore PINS the rendered FOV for the rest of the session: pressing Apply in the options
+	// menu killed aim zoom outright, and it stayed dead until the level was reloaded, which is
+	// exactly how the bug was reported.
+	//
+	// It is worse than a stuck number. LockedFOV overrides FOV alone, while FirstPersonFieldOfView
+	// keeps arriving from the camera cache, so the two drift apart — the precise desync that puts
+	// the weapon out of the hands when looking up and down. The whole reason the two are mirrored
+	// in the first place is to prevent that.
+	//
+	// The setting reaches the renderer the honest way instead: AShooterCharacter::UpdateADS reads
+	// UShooterSettingsSubsystem::GetFieldOfView() every frame and drives the camera component, and
+	// UCameraShakeComponent::ApplyToCamera mirrors the first person FOV onto it. Nothing needs to
+	// be pushed from here at all.
+	//
+	// UnlockFOV releases a lock left behind by an older build or an earlier Apply in this session.
 	if (GEngine)
 	{
 		for (const FWorldContext& Context : GEngine->GetWorldContexts())
@@ -187,7 +205,7 @@ void UShooterGameSettings::ApplyGameplaySettings()
 				{
 					if (APlayerCameraManager* CameraManager = PC->PlayerCameraManager)
 					{
-						CameraManager->SetFOV(FieldOfView);
+						CameraManager->UnlockFOV();
 					}
 				}
 			}

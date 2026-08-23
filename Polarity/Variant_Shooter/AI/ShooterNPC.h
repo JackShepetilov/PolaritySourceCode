@@ -6,6 +6,7 @@
 #include "PolarityCharacter.h"
 #include "ShooterWeaponHolder.h"
 #include "GenericTeamAgentInterface.h"
+#include "Chaos/ChaosEngineInterface.h"
 #include "ShooterNPC.generated.h"
 
 class ADroppedMeleeWeapon;
@@ -303,6 +304,16 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	TSubclassOf<AShooterWeapon> WeaponClass;
 
+	/** What kind of enemy this is: weapon, shield, and how it is allowed to fight.
+	 *
+	 *  Optional. Without one this NPC behaves exactly as it did before profiles existed, using the
+	 *  numbers stored in the shared behaviour tree. With one, the tree's numbers become defaults
+	 *  that the profile may override on entry.
+	 *
+	 *  @see UEnemyCombatProfile for why the per-class numbers cannot live in the tree itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI|Class")
+	TObjectPtr<class UEnemyCombatProfile> CombatProfile;
+
 	/** Name of the first person mesh weapon socket */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapons")
 	FName FirstPersonWeaponSocket = FName("HandGrip_R");
@@ -387,6 +398,33 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float PermissionRetryInterval = 0.25f;
 
+	// ==================== Reload ====================
+
+	// The magazine, the timer and the refill all belong to the weapon (AShooterWeapon::StartReload).
+	// What lives here is only the decision to use them: an NPC that runs dry stops shooting, waits a
+	// beat, reloads, and comes back. A weapon that never runs out (bUseReload off) refills itself the
+	// instant it empties and never reaches any of this.
+
+	/** Reload when the magazine runs dry, instead of clicking on empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat|Reload")
+	bool bReloadWhenEmpty = true;
+
+	/** Pause between the magazine running out and the reload starting, so the gap reads as a
+	 *  reaction and not as a stutter. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat|Reload", meta = (ClampMin = "0.0", ClampMax = "3.0", Units = "s"))
+	float ReloadReactionDelay = 0.4f;
+
+	/** Third person reload animation, played on this NPC's own mesh. Deliberately not the weapon's
+	 *  own ReloadMontage: that one is authored for the player's first person arms. Left empty, the
+	 *  reload still happens, it just is not animated. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat|Reload")
+	TObjectPtr<UAnimMontage> NPCReloadMontage;
+
+	/** Stretch the montage to cover the weapon's ReloadTime instead of playing it at its own speed,
+	 *  so the animation and the magazine finish together whatever either is set to. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat|Reload")
+	bool bScaleReloadMontageToReloadTime = true;
+
 	// ==================== Perception Delay ====================
 
 	/** Delay (seconds) before NPC can attack after acquiring a new target.
@@ -413,6 +451,17 @@ protected:
 
 	/** If true, NPC is in burst cooldown and cannot shoot */
 	bool bInBurstCooldown = false;
+
+	// ==================== Reload State ====================
+
+	/** Fires ReloadReactionDelay after the magazine empties, and starts the reload. */
+	FTimerHandle ReloadStartTimer;
+
+	/** Fires when the weapon's magazine is full again, and puts the NPC back into the fight. */
+	FTimerHandle ReloadResumeTimer;
+
+	/** True from the magazine running dry until it is full again, reaction delay included. */
+	bool bIsReloadingWeapon = false;
 
 	/** If true, NPC has permission to attack from coordinator */
 	bool bHasAttackPermission = false;
@@ -835,9 +884,39 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop|Ranged")
 	TArray<FDroppedRangedWeaponEntry> DroppedRangedWeaponTable;
 
+	// ==================== Impact Surfaces (shield vs body) ====================
+
+	/** If true, a hit on this NPC picks its impact VFX and sound from the two surfaces below
+	 *  instead of from the physical material of whatever body part the trace landed on. That is
+	 *  what lets one enemy sound like a shield while it holds and like flesh once it is down,
+	 *  without authoring a physical material per body part. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Impact Surface")
+	bool bOverrideImpactSurface = false;
+
+	/** Surface while the shield still holds, i.e. the charge meter is NOT full yet. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Impact Surface", meta = (EditCondition = "bOverrideImpactSurface"))
+	TEnumAsByte<EPhysicalSurface> ShieldImpactSurface = SurfaceType_Default;
+
+	/** Surface once the shield is down, i.e. the charge meter is at max and shots reach the body. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Impact Surface", meta = (EditCondition = "bOverrideImpactSurface"))
+	TEnumAsByte<EPhysicalSurface> FleshImpactSurface = SurfaceType_Default;
+
 public:
 
 	float GetChargeChangeOnMeleeHit() const { return ChargeChangeOnMeleeHit; }
+
+	/** True when this NPC answers for its own impact surface. @see GetImpactSurface */
+	UFUNCTION(BlueprintPure, Category = "Visuals|Impact Surface")
+	bool UsesImpactSurfaceOverride() const { return bOverrideImpactSurface; }
+
+	/** Which surface a hit on this NPC should sound and look like. The caller decides whether the
+	 *  shield is down (AShooterWeapon::IsTargetShieldDown), so the effect and the damage gate can
+	 *  never read two different numbers. */
+	UFUNCTION(BlueprintPure, Category = "Visuals|Impact Surface")
+	EPhysicalSurface GetImpactSurface(bool bShieldDown) const
+	{
+		return bShieldDown ? FleshImpactSurface.GetValue() : ShieldImpactSurface.GetValue();
+	}
 
 	/** Delegate called when this NPC dies - can be bound in Blueprints */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
@@ -999,6 +1078,10 @@ public:
 	/** Calculates and returns the aim location for the weapon */
 	virtual FVector GetWeaponTargetLocation() override;
 
+	/** The actor this NPC is currently aiming at, for weapons that need to know where the body is
+	 *  rather than where the aim ray ended. @see IShooterWeaponHolder::GetWeaponAimActor */
+	virtual AActor* GetWeaponAimActor() const override { return CurrentAimTarget.Get(); }
+
 	/** Gives a weapon of this class to the owner */
 	virtual void AddWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) override;
 
@@ -1078,6 +1161,27 @@ protected:
 
 	/** Stop the permission retry timer */
 	void StopPermissionRetryTimer();
+
+	// ==================== Reload ====================
+
+	/** Empty magazine handling: ends the burst, gives up the attack slot and schedules the reload.
+	 *  Does nothing for a weapon with no magazine to fill, or one that still has rounds in it.
+	 *  Returns true when a reload was actually started. */
+	bool TryBeginReload();
+
+	/** Hands the reload to the weapon and starts the resume timer. */
+	void BeginReload();
+
+	/** Back into the fight: burst counter cleared, shooting retried if the NPC still wants to. */
+	void FinishReloadAndResume();
+
+	/** Drop a reload in progress and leave the magazine as it was (death, recycling, weapon lost). */
+	void AbortReload();
+
+	/** Plays NPCReloadMontage on every machine, so the other players see the reload too. The AI only
+	 *  runs on the server, so without this the reload is animated for the host and nobody else. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayReloadMontage(float PlayRate);
 
 public:
 
@@ -1283,6 +1387,21 @@ public:
 	/** Returns true if this NPC is in burst cooldown (burst completed, waiting to fire again) */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsInBurstCooldown() const { return bInBurstCooldown; }
+
+	/** Returns true while this NPC is reloading, reaction delay included */
+	UFUNCTION(BlueprintPure, Category = "Status")
+	bool IsReloadingWeapon() const { return bIsReloadingWeapon; }
+
+	/** This enemy's class profile, or null when it has none. Null is a supported answer everywhere:
+	 *  callers fall back to their own defaults rather than treating it as a configuration error. */
+	UFUNCTION(BlueprintPure, Category = "AI|Class")
+	UEnemyCombatProfile* GetCombatProfile() const { return CombatProfile; }
+
+	/** Shots fired in the current burst. Read by the peek so a class configured to leave after
+	 *  shooting can tell that it actually got a shot off, rather than guessing from elapsed time and
+	 *  abandoning a corner it never managed to fire from. */
+	UFUNCTION(BlueprintPure, Category = "Status")
+	int32 GetCurrentBurstShots() const { return CurrentBurstShots; }
 
 	/** Records the time a new target was acquired. Resets timer if target changes. */
 	void NotifyTargetAcquired(AActor* NewTarget);

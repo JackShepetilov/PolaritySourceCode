@@ -9,12 +9,27 @@
 #include "Variant_Shooter/AI/FlyingDrone.h"
 #include "EMFPhysicsProp.h"
 #include "Upgrades/UpgradeManagerComponent.h"
+#include "Coop/CoopPlayers.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 
 AHealthPickup::AHealthPickup()
 {
 	PrimaryActorTick.bCanEverTick = true;
+
+	// A pickup is one object shared by the whole team: the server owns it, everybody sees it, and
+	// whoever reaches it first takes it. Before this it did not replicate at all, so a pickup spawned
+	// on the server -- which is every pickup, since kills and the Melee's decompose are both
+	// authority-only -- simply did not exist for anybody else. In a coop game that made the whole of
+	// "throw it to a teammate" invisible to the teammate.
+	bReplicates = true;
+
+	// The flight is replicated rather than re-simulated per machine. Both the burst arc and the
+	// magnet chase depend on which player is being chased and where that player is RIGHT NOW, and
+	// two machines do not agree on either closely enough to run it twice and land in the same place.
+	// Pickups are few and short-lived, so the bandwidth is not the constraint here; the pickup being
+	// somewhere different for each viewer would be.
+	SetReplicateMovement(true);
 
 	// Pickup collision (small sphere for actual collection)
 	PickupCollision = CreateDefaultSubobject<USphereComponent>(TEXT("PickupCollision"));
@@ -47,12 +62,10 @@ void AHealthPickup::BeginPlay()
 	PickupCollision->OnComponentBeginOverlap.AddDynamic(this, &AHealthPickup::OnPickupOverlap);
 	MagnetTrigger->OnComponentBeginOverlap.AddDynamic(this, &AHealthPickup::OnMagnetOverlap);
 
-	// If bursting, disable overlaps until the arc flight completes
-	if (bIsBursting)
-	{
-		PickupCollision->SetGenerateOverlapEvents(false);
-		MagnetTrigger->SetGenerateOverlapEvents(false);
-	}
+	// NOTE: the burst's overlap suppression is NOT here any more, and could never have worked here.
+	// SpawnHealthPickups spawns with a plain SpawnActor and calls InitBurst afterwards, so BeginPlay
+	// runs while bIsBursting is still false and this branch never fired. It lives in InitBurst now,
+	// which is where the flag actually becomes true.
 
 	// Start lifetime timer
 	GetWorld()->GetTimerManager().SetTimer(
@@ -62,6 +75,14 @@ void AHealthPickup::BeginPlay()
 void AHealthPickup::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Everything below MOVES this actor or decides that it has been taken, and both belong to the
+	// authority now that the movement replicates. A client running this as well would fight the
+	// replicated position every frame and would reach its own conclusion about who collected it.
+	if (!HasAuthority())
+	{
+		return;
+	}
 
 	// --- Burst arc flight phase ---
 	if (bIsBursting)
@@ -88,9 +109,32 @@ void AHealthPickup::Tick(float DeltaTime)
 		return;
 	}
 
+	// Proximity poll, and it is not a belt-and-braces addition to the overlap events -- it is what
+	// actually makes collection reliable. A pickup that is BORN already overlapping somebody (a prop
+	// that broke against a standing player is the everyday case) registers that overlap before
+	// BeginPlay binds the delegates, so OnMagnetOverlap never fires for them, and it never fires
+	// later either: the overlap is already in the cached list and only a fresh BEGIN would report
+	// it. Standing still meant standing on a pickup that ignored you until you stepped off and back.
+	//
+	// Distance is asked once a frame instead. Cheap next to what it fixes, and it cannot be fooled
+	// by event timing.
+	AcquireMagnetTargetByProximity();
+
 	if (!MagnetTarget.IsValid())
 	{
 		return;
+	}
+
+	// Close enough to have been collected. The overlap callback still exists and still fires for the
+	// ordinary case; this is the same decision reached without it.
+	if (AShooterCharacter* Player = MagnetTarget.Get())
+	{
+		const float PickupRadius = PickupCollision ? PickupCollision->GetScaledSphereRadius() : 50.0f;
+		if (FVector::Dist(Player->GetActorLocation(), GetActorLocation()) <= PickupRadius)
+		{
+			TryCollect(Player);
+			return;
+		}
 	}
 
 	// Track elapsed time since magnet activation (reuse CurrentVelocity.X as timer)
@@ -124,6 +168,19 @@ void AHealthPickup::InitBurst(const FVector& TargetLocation)
 	BurstStartLocation = GetActorLocation();
 	BurstTargetLocation = TargetLocation;
 	BurstElapsedTime = 0.0f;
+
+	// Quiet for the length of the arc, so a pickup does not get collected in mid-flight the instant
+	// it is born inside whoever it spawned on. Done HERE rather than in BeginPlay because this is
+	// the moment the burst actually starts: BeginPlay has already run by the time the spawner calls
+	// this, with the flag still false, so the copy of this that used to live there was dead code.
+	if (PickupCollision)
+	{
+		PickupCollision->SetGenerateOverlapEvents(false);
+	}
+	if (MagnetTrigger)
+	{
+		MagnetTrigger->SetGenerateOverlapEvents(false);
+	}
 }
 
 void AHealthPickup::OnBurstComplete()
@@ -160,11 +217,49 @@ void AHealthPickup::OnMagnetOverlap(UPrimitiveComponent* OverlappedComponent, AA
 void AHealthPickup::OnPickupOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
-	AShooterCharacter* Player = Cast<AShooterCharacter>(OtherActor);
+	TryCollect(Cast<AShooterCharacter>(OtherActor));
+}
+
+void AHealthPickup::AcquireMagnetTargetByProximity()
+{
+	if (MagnetTarget.IsValid() || MagnetRadius <= 0.0f)
+	{
+		return;
+	}
+
+	// Nearest of ALL players, not "the player": this is a coop game and the pickup belongs to
+	// whoever reaches it.
+	APawn* Nearest = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
+	AShooterCharacter* Player = Cast<AShooterCharacter>(Nearest);
 	if (!Player || Player->IsDead())
 	{
 		return;
 	}
+
+	if (FVector::Dist(Player->GetActorLocation(), GetActorLocation()) <= MagnetRadius)
+	{
+		MagnetTarget = Player;
+	}
+}
+
+void AHealthPickup::TryCollect(AShooterCharacter* Player)
+{
+	if (!Player || Player->IsDead() || bCollected)
+	{
+		return;
+	}
+
+	// Health is the server's to write. A client reaching this would heal a copy of itself that the
+	// next replication update overwrites, and would destroy its own copy of a pickup still standing
+	// on every other machine.
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// Two ways in -- the overlap event and the proximity poll -- and on the frame they agree this
+	// would otherwise pay out twice.
+	bCollected = true;
 
 	// If at full HP, notify upgrade system instead of healing
 	if (Player->GetCurrentHP() >= Player->GetMaxHP())
@@ -184,28 +279,41 @@ void AHealthPickup::OnPickupOverlap(UPrimitiveComponent* OverlappedComponent, AA
 	// Notify tutorial system about health pickup collection
 	Player->NotifyHealthPickupCollected();
 
-	// Effects — always play regardless of full HP or not
+	// Effects — always play regardless of full HP or not, and on every machine. Played through a
+	// multicast rather than here: this function now only runs on the server, so a local call would
+	// mean the person who actually picked it up hears nothing.
+	Multicast_PlayCollected(GetActorLocation());
+
+	// Destruction replicates by itself, which is what takes the pickup off every screen.
+	Destroy();
+}
+
+void AHealthPickup::Multicast_PlayCollected_Implementation(FVector Location)
+{
 	if (PickupSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, PickupSound, GetActorLocation());
+		UGameplayStatics::PlaySoundAtLocation(this, PickupSound, Location);
 	}
 
 	if (PickupVFX)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(), PickupVFX, GetActorLocation(),
+			GetWorld(), PickupVFX, Location,
 			FRotator::ZeroRotator, FVector::OneVector,
 			true, true, ENCPoolMethod::None);
 	}
-
-	Destroy();
 }
 
 // ==================== Lifetime ====================
 
 void AHealthPickup::OnLifetimeExpired()
 {
-	Destroy();
+	// The timer runs on every machine, the destruction is the server's. A client destroying its own
+	// copy would take the pickup off its screen while it still exists for everybody else.
+	if (HasAuthority())
+	{
+		Destroy();
+	}
 }
 
 // ==================== Static Helpers ====================
@@ -214,6 +322,14 @@ void AHealthPickup::SpawnHealthPickups(UWorld* World, TSubclassOf<AHealthPickup>
 	const FVector& KillLocation, int32 Count, float ScatterRadius, float FloorOffset)
 {
 	if (!World || !PickupClass || Count <= 0)
+	{
+		return;
+	}
+
+	// Spawned on the authority only, and replicated out from there. Every caller today is already
+	// inside an authority check; stating it here as well means the next one cannot get it wrong and
+	// end up with pickups that exist on one machine.
+	if (!World->GetAuthGameMode() && World->GetNetMode() == NM_Client)
 	{
 		return;
 	}

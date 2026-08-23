@@ -169,6 +169,12 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 
+	// The engine's crouch hooks. It resizes the capsule in one frame and hands us how far the capsule
+	// centre moved; we take that distance as a counter-offset on the camera and let it decay, so the
+	// eye travels the same distance over CrouchDownTime / CrouchUpTime instead of teleporting.
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+
 	/** Called from Input Actions for movement input */
 	void MoveInput(const FInputActionValue& Value);
 
@@ -299,6 +305,43 @@ protected:
 	/** Saved target tilt for crouch/slide (used during exit transition) */
 	FRotator SavedCrouchSlideTilt = FRotator::ZeroRotator;
 
+	// ==================== Smooth crouch eye height ====================
+	//
+	// The capsule swaps size in one frame and the camera is parented to it, so without this the eye
+	// teleports by the whole half-height difference (46 units at the shipped sizes). OnStartCrouch /
+	// OnEndCrouch push the distance the capsule centre just moved into this counter-offset, which
+	// keeps the eye where it was, and UpdateCrouchCameraSmoothing walks it back to zero over the
+	// configured time. Physics is untouched: this never leaves the camera component.
+
+	/** Counter-offset currently applied to the camera, in capsule Z. Walks to 0. */
+	float CrouchCameraSmoothOffsetZ = 0.0f;
+
+	/** The distance CrouchCameraSmoothOffsetZ started from, so the walk is a straight line at a
+	 *  constant speed rather than an ease that never quite lands. */
+	float CrouchCameraSmoothStartZ = 0.0f;
+
+	/** How long the current walk gets: the configured time for its direction, scaled down by how much
+	 *  of the full distance is actually left, so the eye moves at one speed either way. */
+	float CrouchCameraSmoothDuration = 0.0f;
+
+	/** Seconds spent in the current walk. */
+	float CrouchCameraSmoothElapsed = 0.0f;
+
+	/** Moves CrouchCameraSmoothOffsetZ toward zero. Cosmetic, owner only. */
+	void UpdateCrouchCameraSmoothing(float DeltaTime);
+
+	/** Starts a new walk from the offset the capsule just introduced. Positive DeltaZ means the
+	 *  capsule centre moved DOWN, so the camera is held UP by that much. */
+	void PushCrouchCameraOffset(float DeltaZ, bool bGoingDown);
+
+public:
+
+	/** The crouch counter-offset, as a capsule-space vector, for whoever writes the camera's relative
+	 *  location. Zero except during a crouch transition. */
+	FVector GetCrouchCameraOffset() const { return FVector(0.0f, 0.0f, CrouchCameraSmoothOffsetZ); }
+
+protected:
+
 	// ==================== Weapon Run Sway State ====================
 
 	/** Accumulated distance for run sway phase calculation */
@@ -422,6 +465,15 @@ protected:
 
 	/** Builds the spine pose for this frame and hands it to the first person anim instance. */
 	void UpdateFirstPersonSpinePose(float DeltaTime);
+
+	/** Hands the crouch and slide blend weights to both anim instances, first person and third,
+	 *  under the names CrouchAlpha and SlideAlpha. Same opt-in rule as the spine pose: a graph that
+	 *  declares a float of that name gets it, one that does not is untouched.
+	 *
+	 *  The values themselves are UApexMovementComponent's, so a graph is free to read them straight
+	 *  off the movement component (GetCrouchAlpha / GetSlideAlpha) instead -- this exists so that a
+	 *  graph does not have to reach for the pawn at all. */
+	void PushCrouchSlideAlphasToAnim();
 
 public:
 

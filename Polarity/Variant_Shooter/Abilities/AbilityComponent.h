@@ -157,6 +157,27 @@ public:
 	 *  which is the only thing that can answer damage today. */
 	void NotifyOwnerDamaged(float Damage, AActor* DamageCauser, AController* InstigatedBy, const FHitResult& HitInfo);
 
+	/** Told by the owner's weapon after every hit it lands, on the machine that computed it.
+	 *  Forwarded to the passive, the only thing that answers hits today. */
+	void NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled);
+
+	/** A shot is leaving the owner's weapon. Forwarded to the passive, which latches whatever this
+	 *  shot is worth before the damage for it is computed. @see UAbilityHandler::OnOwnerFiredWeapon */
+	void NotifyOwnerFiredWeapon();
+
+	/** The passive's own damage for one hit on Target, which the caller applies past the weapon's
+	 *  shield gate. Zero when there is no passive or it deals none. */
+	UFUNCTION(BlueprintPure, Category = "Ability|Passive")
+	float GetPierceDamageForShot(AActor* Target) const;
+
+	/** The same for the shot the owner would fire next, for the readout over that target. */
+	UFUNCTION(BlueprintPure, Category = "Ability|Passive")
+	float GetPredictedPierceDamage(AActor* Target) const;
+
+	/** What the passive wants shown over Target as the damage a shot would do there, if anything.
+	 *  @see UAbilityHandler::GetPredictedShotDamage. */
+	bool GetPredictedShotDamage(const AActor* Target, float& OutDamage) const;
+
 	/** Play a one-shot beam on every machine, from Start to End, and a sound where it lands.
 	 *
 	 *  Abilities decide on the authority and their effects have to be seen and heard everywhere, so

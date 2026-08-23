@@ -393,6 +393,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
 	void SetBaseFOV(float NewBaseFOV) { BaseFOV = NewBaseFOV; }
 
+	/** How much of the speed FOV offset (slide, wallrun, air dash) actually reaches the camera.
+	 *  Driven by the ADS blend: 1 at the hip, 0 at full aim. A fixed number of extra degrees is a
+	 *  nudge on a wide hipfire view and a wrecking ball on a narrow sight picture, so the effect
+	 *  has to fade with the zoom rather than fight it. */
+	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
+	void SetFOVEffectScale(float NewScale) { FOVEffectScale = FMath::Clamp(NewScale, 0.0f, 1.0f); }
+
 	/** Get viewmodel bob position offset */
 	UFUNCTION(BlueprintPure, Category = "Camera Shake|Bob")
 	FVector GetViewmodelBobOffset() const { return CurrentViewmodelBobOffset; }
@@ -462,6 +469,7 @@ protected:
 
 	FVector BaseCameraLocation = FVector::ZeroVector;
 	float BaseFOV = 90.0f;
+	float FOVEffectScale = 1.0f;
 
 	// Viewmodel bob output (separate from camera)
 	FVector CurrentViewmodelBobOffset = FVector::ZeroVector;

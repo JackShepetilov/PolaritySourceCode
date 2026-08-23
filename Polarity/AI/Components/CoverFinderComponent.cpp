@@ -279,6 +279,43 @@ float UCoverFinderComponent::GetRequeryCooldownRemaining() const
 	return FMath::Max(0.0f, CoverRequeryCooldown - Elapsed);
 }
 
+bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params) const
+{
+	if (!Player)
+	{
+		return false;
+	}
+
+	const FVector EyePoint = Point + FVector(0.0f, 0.0f, EyeHeight);
+	const FVector PlayerBase = Player->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight);
+
+	// The chest first, because in the open it answers immediately and the ring never runs.
+	if (HasLineOfSight(EyePoint, PlayerBase, Params))
+	{
+		return true;
+	}
+
+	if (PlayerRingRadius <= KINDA_SMALL_NUMBER || PlayerRingSamples <= 0)
+	{
+		return false;
+	}
+
+	// Occluded at the chest, so ask whether the player is merely CLIPPING the corner rather than
+	// genuinely behind it. Without this, one step behind a wall makes a player vanish from the
+	// exposure model entirely and the ground right next to them starts scoring as good cover.
+	const float StepDeg = 360.0f / static_cast<float>(PlayerRingSamples);
+	for (int32 Index = 0; Index < PlayerRingSamples; ++Index)
+	{
+		const FVector Offset = FRotator(0.0f, StepDeg * Index, 0.0f).Vector() * PlayerRingRadius;
+		if (HasLineOfSight(EyePoint, PlayerBase + Offset, Params))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Players, const FCollisionQueryParams& Params) const
 {
 	// Exposure(H) = sum over players of Threat(P) * Visible(H, P). Visible is one or zero; the
@@ -287,23 +324,29 @@ float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<
 	// perfectly good place to stand.
 	float Exposure = 0.0f;
 
-	const FVector EyePoint = Point + FVector(0.0f, 0.0f, EyeHeight);
-
 	for (APawn* const Player : Players)
 	{
-		if (!Player)
-		{
-			continue;
-		}
-
-		const FVector PlayerChest = Player->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight);
-		if (HasLineOfSight(EyePoint, PlayerChest, Params))
+		if (CanPlayerSee(Player, Point, Params))
 		{
 			Exposure += GetThreatFor(Player);
 		}
 	}
 
 	return Exposure;
+}
+
+bool UCoverFinderComponent::IsCoverOpenedBy(const APawn* Player) const
+{
+	if (!CurrentCover.bValid || !Player)
+	{
+		return false;
+	}
+
+	FCollisionQueryParams TraceParams;
+	BuildTraceParams(TraceParams);
+
+	return CanPlayerSee(Player, CurrentCover.HideLocation, TraceParams)
+		&& CanPlayerSee(Player, CurrentCover.PeekLocation, TraceParams);
 }
 
 bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const TArray<APawn*>& Players,
@@ -350,6 +393,12 @@ bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const
 		}
 
 		// A peek point that cannot see the target is not a peek point.
+		//
+		// A STRICT chest trace, deliberately not CanPlayerSee: the ring exists to be pessimistic
+		// about being seen, and pessimism flips sign depending on which way the question runs.
+		// Assuming a player might see you costs a corner and is safe; assuming you can shoot a
+		// player because you can see the air beside them costs the whole peek and is not. Exposure
+		// gets the generous answer, marksmanship gets the honest one.
 		if (!HasLineOfSight(Projected.Location + FVector(0.0f, 0.0f, EyeHeight), TargetChest, Params))
 		{
 			continue;

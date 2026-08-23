@@ -595,6 +595,41 @@ protected:
 	/** Press-press mode: true while the second channel press is charging a basketball throw. */
 	bool bBasketballThrowCharging = false;
 
+	// ==================== Heal: tap throws, hold eats ====================
+	// The Melee's item verb has two halves on one button. The press cannot decide which, so it only
+	// starts a clock: hold past the threshold and the prop is eaten here and now, let go before it
+	// and the launch happens exactly as it always did. Same shape as the basketball's throw charge
+	// above, which is why that one is worth reading alongside this.
+
+	/** How long the launch press must be held, on a prop and with the Heal verb, before the prop is
+	 *  eaten instead of thrown.
+	 *
+	 *  Short on purpose. Every launch by this class now pays this much latency before the throw can
+	 *  be ruled out, and a throw that feels sticky is a worse trade than a self-heal that is easy to
+	 *  trigger by accident. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Charge|Heal", meta = (ClampMin = "0.05", ClampMax = "2.0", Units = "s"))
+	float HealConsumeHoldSeconds = 0.35f;
+
+	bool bHealConsumeHolding = false;
+	float HealConsumeHoldStartTime = 0.0f;
+
+	/** True when the held object is a prop AND this player's class turns props into healing. The
+	 *  server checks the same thing again before acting; this one is only about which of the two
+	 *  behaviours the button offers locally. */
+	bool CanConsumeHeldPropForHeal() const;
+
+	void StartHealConsumeHold();
+
+	/** The button came up before the threshold, so this was an ordinary launch after all. */
+	void ReleaseHealConsumeHold();
+
+	/** Ticked while the button is down: fires the consume the instant the threshold passes, rather
+	 *  than waiting for the release. The player gets the answer while still holding the button, which
+	 *  is what makes the two halves feel like different actions instead of one delayed one. */
+	void UpdateHealConsumeHold();
+
+	void ConsumeHeldPropForHeal();
+
 	/** World time when basketball throw charging began. */
 	float BasketballThrowChargeStartTime = 0.0f;
 

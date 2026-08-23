@@ -82,8 +82,8 @@ void APolarityCharacter::BeginPlay()
 	// the "not to yourself" half, but a Blueprint can still switch the mesh off entirely, and
 	// Visible and Hidden In Game are two independent flags, so clearing one is not enough. Single
 	// player never noticed because nobody was ever looking at this mesh.
-	// Propagation is deliberately OFF: MeleeWeaponFPMesh hangs off this mesh and is meant to stay
-	// hidden until a melee weapon is equipped.
+	// Propagation is deliberately OFF: children of the body mesh own their own visibility and must
+	// not be switched on wholesale by a change meant for the body itself.
 	if (USkeletalMeshComponent* BodyMesh = GetMesh())
 	{
 		BodyMesh->SetOwnerNoSee(true);
@@ -144,9 +144,18 @@ void APolarityCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Before the first person view: the pose pipeline reads the camera's relative location to hand
+	// back the fraction of its movement the mesh should not follow, so the crouch offset has to be
+	// settled for this frame first.
+	UpdateCrouchCameraSmoothing(DeltaTime);
+
 	UpdateCameraEffects(DeltaTime);
 	UpdateFirstPersonView(DeltaTime);
 	UpdateProceduralFootsteps(DeltaTime);
+
+	// Outside UpdateFirstPersonView on purpose: that one returns early without a first person mesh,
+	// and a third person only character (every NPC) still needs the crouch and slide blend weights.
+	PushCrouchSlideAlphasToAnim();
 
 	// Check for jump to trigger shake
 	if (ApexMovement)
@@ -428,6 +437,88 @@ void APolarityCharacter::DoChannelReleased()
 	}
 }
 
+// ==================== Smooth crouch eye height ====================
+
+void APolarityCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+
+	// bCrouchMaintainsBaseLocation is on, so the engine keeps the feet planted and drops the capsule
+	// centre by exactly this much in the same frame. The camera hangs off the capsule, so it drops
+	// with it; hold it up by the same distance and let the walk below spend it.
+	PushCrouchCameraOffset(ScaledHalfHeightAdjust, /*bGoingDown=*/ true);
+}
+
+void APolarityCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+
+	// Standing up is the same move with the sign flipped: the capsule centre goes UP, so the camera
+	// is held DOWN and climbs from there.
+	PushCrouchCameraOffset(-ScaledHalfHeightAdjust, /*bGoingDown=*/ false);
+}
+
+void APolarityCharacter::PushCrouchCameraOffset(float DeltaZ, bool bGoingDown)
+{
+	// Adding rather than assigning is what makes a cancelled crouch behave: tapping crouch and
+	// releasing it before the eye has arrived leaves some of the first offset unspent, and the two
+	// distances have opposite signs, so the sum is the distance actually left to travel.
+	CrouchCameraSmoothOffsetZ += DeltaZ;
+
+	const float TravelTime = MovementSettings
+		? (bGoingDown ? MovementSettings->CrouchDownTime : MovementSettings->CrouchUpTime)
+		: 0.0f;
+
+	// The time is for the FULL standing-to-crouched distance, so a walk that starts with less left to
+	// cover gets proportionally less time. Without this the eye would crawl back from a half-finished
+	// crouch, since it would spend a whole CrouchUpTime on a fraction of the distance.
+	const float FullDistance = FMath::Abs(DeltaZ);
+	const float RemainingDistance = FMath::Abs(CrouchCameraSmoothOffsetZ);
+	const float DistanceFraction = (FullDistance > KINDA_SMALL_NUMBER)
+		? FMath::Clamp(RemainingDistance / FullDistance, 0.0f, 1.0f)
+		: 0.0f;
+
+	CrouchCameraSmoothStartZ = CrouchCameraSmoothOffsetZ;
+	CrouchCameraSmoothDuration = FMath::Max(0.0f, TravelTime) * DistanceFraction;
+	CrouchCameraSmoothElapsed = 0.0f;
+
+	if (CrouchCameraSmoothDuration <= KINDA_SMALL_NUMBER)
+	{
+		// No time configured means the old instant behaviour: never hold the camera at all.
+		CrouchCameraSmoothOffsetZ = 0.0f;
+		CrouchCameraSmoothStartZ = 0.0f;
+	}
+}
+
+void APolarityCharacter::UpdateCrouchCameraSmoothing(float DeltaTime)
+{
+	if (CrouchCameraSmoothOffsetZ == 0.0f)
+	{
+		return;
+	}
+
+	if (CrouchCameraSmoothDuration <= KINDA_SMALL_NUMBER)
+	{
+		CrouchCameraSmoothOffsetZ = 0.0f;
+		return;
+	}
+
+	CrouchCameraSmoothElapsed += DeltaTime;
+
+	// Driven off elapsed time against the distance the walk started with, not off the current value:
+	// that way the eye covers the distance in exactly the configured time, whatever the frame rate,
+	// and it arrives instead of easing toward the end forever.
+	const float Remaining = 1.0f - FMath::Clamp(CrouchCameraSmoothElapsed / CrouchCameraSmoothDuration, 0.0f, 1.0f);
+	CrouchCameraSmoothOffsetZ = CrouchCameraSmoothStartZ * Remaining;
+
+	if (Remaining <= 0.0f)
+	{
+		CrouchCameraSmoothOffsetZ = 0.0f;
+		CrouchCameraSmoothStartZ = 0.0f;
+		CrouchCameraSmoothDuration = 0.0f;
+	}
+}
+
 // ==================== First Person View ====================
 
 void APolarityCharacter::UpdateFirstPersonView(float DeltaTime)
@@ -542,6 +633,35 @@ void APolarityCharacter::PushAnimRotator(UAnimInstance* AnimInstance, FName Prop
 	}
 }
 
+void APolarityCharacter::PushCrouchSlideAlphasToAnim()
+{
+	if (!ApexMovement)
+	{
+		return;
+	}
+
+	static const FName CrouchAlphaName(TEXT("CrouchAlpha"));
+	static const FName SlideAlphaName(TEXT("SlideAlpha"));
+
+	const float CrouchAlpha = ApexMovement->GetCrouchAlpha();
+	const float SlideAlpha = ApexMovement->GetSlideAlpha();
+
+	// Both meshes: the third person graph needs these on every machine (that is the one other
+	// players watch), the first person one only on the owner, and pushing to whichever exists costs
+	// nothing when a mesh has no graph or the graph declares neither name.
+	if (UAnimInstance* FPAnim = FirstPersonMesh ? FirstPersonMesh->GetAnimInstance() : nullptr)
+	{
+		PushAnimFloat(FPAnim, CrouchAlphaName, CrouchAlpha);
+		PushAnimFloat(FPAnim, SlideAlphaName, SlideAlpha);
+	}
+
+	if (UAnimInstance* TPAnim = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+	{
+		PushAnimFloat(TPAnim, CrouchAlphaName, CrouchAlpha);
+		PushAnimFloat(TPAnim, SlideAlphaName, SlideAlpha);
+	}
+}
+
 void APolarityCharacter::PushAnimFloat(UAnimInstance* AnimInstance, FName PropertyName, float Value)
 {
 	if (!AnimInstance)
@@ -582,13 +702,11 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 	// ==================== Movement State Detection ====================
 
 	bool bIsSliding = false;
-	bool bIsCrouching = false;
 	bool bIsWallrunning = false;
 
 	if (ApexMovement)
 	{
 		bIsSliding = ApexMovement->IsSliding();
-		bIsCrouching = ApexMovement->IsCrouching();
 		bIsWallrunning = ApexMovement->IsWallRunning();
 	}
 
@@ -600,9 +718,11 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 
 	if (MovementSettings->bEnableWeaponTilt && ApexMovement)
 	{
-		// Check if crouch input is held (works in air too)
-		bool bCrouchInputHeld = ApexMovement->bWantsSlideOnLand;
-		bool bIsInAir = !ApexMovement->IsMovingOnGround();
+		// Works in air too, and deliberately NOT the raw crouch button. Holding crouch in the air
+		// only becomes a crouch after AirCrouchHoldThreshold; reading the button instead meant this
+		// pose started that much earlier than the eye and the animation, and twitched on every air
+		// dash tap that never became a crouch at all. See IsCrouchPoseActive.
+		const bool bCrouchPose = ApexMovement->IsCrouchPoseActive();
 
 		if (bIsSliding)
 		{
@@ -612,9 +732,9 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 			SavedCrouchSlideOffset = MovementSettings->SlideCameraOffset;
 			TargetProgress = 1.0f;
 		}
-		else if (bIsCrouching || (bCrouchInputHeld))
+		else if (bCrouchPose)
 		{
-			// Save target values when crouching OR when crouch button held in air
+			// Save target values when crouching on the ground OR tucked in the air
 			SavedCrouchSlideTilt.Roll = MovementSettings->CrouchWeaponTiltRoll;
 			SavedCrouchSlideTilt.Pitch = MovementSettings->CrouchWeaponTiltPitch;
 			SavedCrouchSlideOffset = MovementSettings->CrouchCameraOffset;
@@ -623,12 +743,17 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 		// When not crouching/sliding, TargetProgress = 0 but we keep saved values for exit transition
 	}
 
-	// Interpolate single progress value
-	CrouchSlideProgress = FMath::FInterpTo(
+	// Interpolate single progress value.
+	//
+	// On the crouch times rather than WeaponTiltInterpSpeed: this progress moves the hands and the
+	// spine, and they belong to the same body as the eye. Two different curves for one movement is
+	// what made the old crouch read as broken - the pose eased in over its own exponential while the
+	// view had already arrived.
+	CrouchSlideProgress = PolarityInterpAlphaOverTime(
 		CrouchSlideProgress,
 		TargetProgress,
 		DeltaTime,
-		MovementSettings->WeaponTiltInterpSpeed
+		TargetProgress > CrouchSlideProgress ? MovementSettings->CrouchDownTime : MovementSettings->CrouchUpTime
 	);
 
 	// Apply progress to saved targets - this creates straight-line motion in both directions

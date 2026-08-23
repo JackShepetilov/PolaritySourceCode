@@ -151,6 +151,30 @@ private:
 	FTimerHandle LifetimeTimer;
 
 	/** Called when player enters magnet trigger radius */
+	/** Look for a player near enough to be attracted, without waiting for an overlap EVENT.
+	 *
+	 *  Exists because that event is not reliable for this actor: a pickup spawned already inside
+	 *  somebody registers the overlap before BeginPlay binds the delegate, and a BEGIN never happens
+	 *  again for an overlap that never ended. The symptom was a pickup that ignored a player who was
+	 *  standing still and worked the moment they moved. */
+	void AcquireMagnetTargetByProximity();
+
+	/** Heal this player and consume the pickup. Safe to call with null or with a dead player, and
+	 *  safe to call twice: the second call does nothing. Both the overlap callback and the proximity
+	 *  poll come through here so there is one definition of what collecting means. */
+	void TryCollect(class AShooterCharacter* Player);
+
+	/** Set the instant this pickup pays out, so the overlap event and the poll cannot both pay.
+	 *  Authority-only state: collection is decided on the server, so a client never sets it. */
+	bool bCollected = false;
+
+	/** Play the collection sound and burst on every machine. Unreliable: it is cosmetic, and the
+	 *  healing it announces has already been applied on the server. Takes the location as a
+	 *  parameter because the actor is destroyed in the same breath, and by the time this arrives on
+	 *  a client its own copy may already be gone. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayCollected(FVector Location);
+
 	UFUNCTION()
 	void OnMagnetOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 

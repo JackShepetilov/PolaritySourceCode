@@ -75,6 +75,11 @@ void UChargeAnimationComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	UpdateMeshTransition(DeltaTime);
 	UpdateMontagePlayRate(DeltaTime);
 
+	// Outside the state machine on purpose: the hold starts inside Channeling and has to be able to
+	// finish even if the state moves on under it (death, a weapon swap, the prop being shot out of
+	// the player's hands), and the check is two floats.
+	UpdateHealConsumeHold();
+
 	// Picking a teammate off the floor runs on its own, outside the channeling state machine: it
 	// has to work whether or not a capture was ever started.
 	UpdateRevive(DeltaTime);
@@ -193,6 +198,15 @@ void UChargeAnimationComponent::OnChannelButtonPressed()
 			StartBasketballThrowCharge();
 			break;
 		}
+		// Tap throws, hold eats. The press alone cannot tell which one this is, so it starts the
+		// clock and nothing else: UpdateHealConsumeHold eats the prop if the button stays down, and
+		// OnChannelButtonReleased throws it if it does not. Every other class, and this one holding
+		// anything that is not a prop, falls straight through to the launch it always had.
+		if (CanConsumeHeldPropForHeal())
+		{
+			StartHealConsumeHold();
+			break;
+		}
 		BeginLaunch();
 		break;
 
@@ -214,6 +228,12 @@ void UChargeAnimationComponent::OnChannelButtonReleased()
 		if (bBasketballThrowCharging)
 		{
 			ReleaseBasketballThrowCharge();
+		}
+		// Let go before the threshold: this was a throw. Past the threshold the prop is already gone
+		// and the flag with it, so this does nothing and the release is correctly ignored.
+		if (bHealConsumeHolding)
+		{
+			ReleaseHealConsumeHold();
 		}
 		return;
 	}
@@ -1905,11 +1925,11 @@ void UChargeAnimationComponent::CaptureHumanoidWeapon(AHumanoidNPC* Humanoid)
 		if (!bThrowMontageOwnsArms)
 		{
 			// No throw montage (nothing was yanked, or no montage asset) — classic flow:
-			// start lowering the current weapon NOW (in parallel with the pull flight).
-			// Lower (~0.15s) completes well before pull arrival (~0.4s), so the mesh waits at
-			// the bottom. When the dropped weapon arrives via CompletePull →
-			// AddWeaponClassAnimated detects the paused-at-bottom switch and calls
-			// FinishWeaponSwitch — instant off-camera swap + raise. No-op if player is unarmed.
+			// start putting the current weapon away NOW (in parallel with the pull flight), so
+			// the yanked weapon arrives at an already-empty hand. If the holster animation ends
+			// first the hands simply wait. When the dropped weapon arrives via CompletePull →
+			// AddWeaponClassAnimated sees the waiting switch and calls FinishWeaponSwitch, which
+			// equips it and plays its draw. No-op if player is unarmed.
 			ShooterChar->BeginWeaponLower();
 		}
 
@@ -2309,6 +2329,113 @@ void UChargeAnimationComponent::ReleaseBasketballThrowCharge()
 	EnterFinishingAnimation();
 }
 
+// ==================== Heal: tap throws, hold eats ====================
+
+bool UChargeAnimationComponent::CanConsumeHeldPropForHeal() const
+{
+	if (!ShooterCharacter || ShooterCharacter->GetItemVerb() != EClassItemVerb::Heal)
+	{
+		return false;
+	}
+
+	// Props only. Everything else this component can hold -- an enemy body, a yanked weapon, a
+	// teammate -- is not something the verb has an answer for, and those must keep throwing on a
+	// press with no hold delay in front of them.
+	return Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get()) != nullptr;
+}
+
+void UChargeAnimationComponent::StartHealConsumeHold()
+{
+	if (bHealConsumeHolding)
+	{
+		return;
+	}
+
+	bHealConsumeHolding = true;
+	HealConsumeHoldStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+}
+
+void UChargeAnimationComponent::ReleaseHealConsumeHold()
+{
+	if (!bHealConsumeHolding)
+	{
+		return;
+	}
+
+	bHealConsumeHolding = false;
+
+	// A tap, so this is the throw the button always meant. Deliberately not re-checking anything:
+	// the press already decided there was a prop in hand, and refusing here would eat the input.
+	BeginLaunch();
+}
+
+void UChargeAnimationComponent::UpdateHealConsumeHold()
+{
+	if (!bHealConsumeHolding)
+	{
+		return;
+	}
+
+	// The prop stopped being holdable while the button was down -- destroyed, dropped, taken. Drop
+	// the hold rather than eating whatever is there now.
+	if (!CanConsumeHeldPropForHeal())
+	{
+		bHealConsumeHolding = false;
+		return;
+	}
+
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : HealConsumeHoldStartTime;
+	if (Now - HealConsumeHoldStartTime >= HealConsumeHoldSeconds)
+	{
+		ConsumeHeldPropForHeal();
+	}
+}
+
+void UChargeAnimationComponent::ConsumeHeldPropForHeal()
+{
+	bHealConsumeHolding = false;
+
+	AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(CurrentCapturedNPC.Get());
+	if (!Prop || !ShooterCharacter)
+	{
+		return;
+	}
+
+	// Same teardown the basketball release does, and for the same reason: the hold VFX and the
+	// capture beam are attached to an object that is about to stop existing, and leaving them
+	// running strands them in the air.
+	StopHoldVFX();
+	if (ActiveCaptureVFX)
+	{
+		ActiveCaptureVFX->DeactivateImmediate();
+		ActiveCaptureVFX = nullptr;
+	}
+
+	// Let go of it physically BEFORE it stops existing. The consume hides the mesh and takes its
+	// collision away on this same machine (the multicast runs locally on the host), and a physics
+	// handle still gripping a component in that state is a warning at best. ExitChanneling below
+	// calls this again, which is a no-op once the handle is empty.
+	ReleasePropHandle();
+
+	// The host owns its own prop and acts on it directly; a client asks. Exactly the split the throw
+	// already uses (BeginLaunch's plate flow versus Server_LaunchProp), and for the same reason:
+	// HoldingCharacter is only ever set for a REMOTE hold, so a host calling the RPC would be
+	// rejected by its own validation.
+	if (ShooterCharacter->HasAuthority())
+	{
+		Prop->ConsumeForHeal(ShooterCharacter);
+	}
+	else
+	{
+		ShooterCharacter->Server_ConsumePropForHeal(Prop);
+	}
+
+	CurrentCapturedNPC.Reset();
+
+	ExitChanneling();
+	EnterFinishingAnimation();
+}
+
 void UChargeAnimationComponent::BeginLaunch()
 {
 	// Trigger Throw montage on FP mesh BEFORE plate teardown so the gesture starts immediately
@@ -2578,16 +2705,8 @@ void UChargeAnimationComponent::SwitchToFirstPersonMesh()
 		CurrentlyHiddenBones.Empty();
 	}
 
-	// Don't restore FP mesh if melee weapon is equipped — MeleeWeaponFPMesh is used instead
-	if (ShooterCharacter)
-	{
-		AShooterWeapon* CurrentWeapon = ShooterCharacter->GetCurrentWeapon();
-		if (CurrentWeapon && CurrentWeapon->IsMeleeWeapon())
-		{
-			return;
-		}
-	}
-
+	// The melee weapon no longer has a first-person body of its own, so there is nothing to keep
+	// the normal arms hidden for: they are what the sword is held in.
 	if (FirstPersonMesh)
 	{
 		FirstPersonMesh->SetVisibility(true);

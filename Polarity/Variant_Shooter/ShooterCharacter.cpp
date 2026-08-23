@@ -2,6 +2,8 @@
 
 
 #include "ShooterCharacter.h"
+#include "Variant_Shooter/AnimNotify_WeaponSwitch.h"
+#include "Animation/AnimMontage.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/DamageEvents.h"
 #include "ShooterWeapon.h"
@@ -59,6 +61,10 @@
 #include "Variant_Shooter/Run/RunSubsystem.h"
 #include "ShooterSettingsSubsystem.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
+#include "Variant_Shooter/Abilities/AbilityHandler.h"
+#include "Variant_Shooter/Abilities/AbilityDefinition_Grapple.h"
+#include "CableComponent.h"
+#include "DrawDebugHelpers.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "EMFPhysicsProp.h"
@@ -72,6 +78,41 @@
 #include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "PlayerDeathSequenceComponent.h"
+
+static TAutoConsoleVariable<int32> CVarMeleeLungeDebug(
+	TEXT("polarity.melee.lungedebug"),
+	0,
+	TEXT("Trace why a melee swing did or did not lunge.\n")
+	TEXT("\n")
+	TEXT("There are TWO lunges and they are easy to confuse when one of them silently does nothing:\n")
+	TEXT("the bare-handed one in UMeleeAttackComponent, and AShooterWeapon_Melee's own copy, which\n")
+	TEXT("takes over the moment a blade is equipped. Every line below says which one is talking.\n")
+	TEXT("\n")
+	TEXT("Prints, in order: the reach the class passive granted, every candidate the acquisition\n")
+	TEXT("swept up with its distance against its own allowed reach, whether the path was blocked,\n")
+	TEXT("and -- for the weapon -- whether the entry SPEED gate let the lunge actually fire.\n")
+	TEXT("  0 = off\n")
+	TEXT("  1 = log every swing"),
+	ECVF_Default);
+
+bool AShooterCharacter::IsLungeDebugEnabled()
+{
+	return CVarMeleeLungeDebug.GetValueOnAnyThread() > 0;
+}
+
+static TAutoConsoleVariable<int32> CVarGrappleCableDebug(
+	TEXT("polarity.grapple.cabledebug"),
+	0,
+	TEXT("Watch the grapple line's length, frame by frame.\n")
+	TEXT("\n")
+	TEXT("Answers one question and no others: does the rope stop growing when the hook lands.\n")
+	TEXT("Prints the phase (FLY or HELD), the real gap between the two ends, the CableLength the\n")
+	TEXT("component was given, and whether the movement component says the line is attached.\n")
+	TEXT("A green line is drawn along the same two points, so a rope that is visibly longer than\n")
+	TEXT("the green line is sagging rather than growing -- that is CableSlack, not the length.\n")
+	TEXT("  0 = off\n")
+	TEXT("  1 = log and draw every frame while a line is out"),
+	ECVF_Default);
 
 // File-scope helper (uniquely named — unity-build safe): true while the yank-throw montage is
 // actively playing on the FP arms' anim instance.
@@ -90,10 +131,8 @@ static bool IsYankThrowMontageActiveOnFPMesh(UChargeAnimationComponent* ChargeCo
 //
 // bOnlyOwnerSee and FirstPersonPrimitiveType are per-component and are NOT inherited by children,
 // so a sight, laser or any other mesh a Blueprint attaches under a first-person mesh renders for
-// *everyone*: the other players see it floating on the third-person body. There was already a
-// hand-written version of this for the single static mesh under MeleeWeaponFPMesh (see BeginPlay);
-// this is the same rule applied to every descendant, so new attachments stop needing their own
-// line of code.
+// *everyone*: the other players see it floating on the third-person body. This applies the rule to
+// every descendant, so new attachments stop needing their own line of code.
 // File-scope helper (uniquely named — unity-build safe): hand the left-hand IK target to an
 // Animation Blueprint. The AnimBP side is a pair of loose variables rather than an interface, so
 // this is reflection by name: an AnimBP without them simply ignores the values, which is what
@@ -116,6 +155,49 @@ static void ApplyFirstPersonVisibilityToFPSubtree(USceneComponent* Root)
 			Prim->SetOwnerNoSee(false);
 			Prim->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::FirstPerson);
 		}
+	}
+}
+
+// File-scope helper (uniquely named — unity-build safe): the mirror of the function above. Mark
+// everything hanging under a third-person mesh as third-person too.
+//
+// Same reason, other side: bOwnerNoSee and FirstPersonPrimitiveType are per-component and are NOT
+// inherited by children, so a sight, laser or any other mesh a Blueprint attaches under a
+// third-person weapon mesh renders for its owner as well, and the local player sees it hanging in
+// the air beside their own hands. This applies the rule to every descendant, so new attachments
+// stop needing their own line of code.
+//
+// Branches that the first-person side has already claimed are skipped whole, children included:
+// on any pawn whose Blueprint still parents first-person geometry under the body mesh (and on the
+// NPC path, which deliberately hangs the weapon's FP mesh on the third-person hand), walking
+// straight through would mark the arms world-space and delete them from view.
+static void ApplyThirdPersonVisibilityToTPSubtree(USceneComponent* Root)
+{
+	if (!Root)
+	{
+		return;
+	}
+
+	for (USceneComponent* Child : Root->GetAttachChildren())
+	{
+		if (!Child)
+		{
+			continue;
+		}
+
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Child))
+		{
+			if (Prim->bOnlyOwnerSee || Prim->FirstPersonPrimitiveType == EFirstPersonPrimitiveType::FirstPerson)
+			{
+				continue;
+			}
+
+			Prim->SetOnlyOwnerSee(false);
+			Prim->SetOwnerNoSee(true);
+			Prim->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::WorldSpaceRepresentation);
+		}
+
+		ApplyThirdPersonVisibilityToTPSubtree(Child);
 	}
 }
 
@@ -150,18 +232,6 @@ AShooterCharacter::AShooterCharacter()
 
 	// configurable terminal run-death presentation
 	PlayerDeathSequenceComponent = CreateDefaultSubobject<UPlayerDeathSequenceComponent>(TEXT("Player Death Sequence"));
-
-	// ==================== Melee Weapon FP Mesh ====================
-
-	// Create MeleeWeaponFPMesh - shown instead of FP mesh when melee weapon is equipped
-	MeleeWeaponFPMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MeleeWeaponFPMesh"));
-	MeleeWeaponFPMesh->SetupAttachment(GetMesh());
-	MeleeWeaponFPMesh->SetOnlyOwnerSee(true);
-	MeleeWeaponFPMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
-	MeleeWeaponFPMesh->SetCollisionProfileName(FName("NoCollision"));
-	MeleeWeaponFPMesh->SetVisibility(false, true);
-	MeleeWeaponFPMesh->bCastDynamicShadow = false;
-	MeleeWeaponFPMesh->CastShadow = false;
 
 	// configure movement
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 600.0f, 0.0f);
@@ -257,33 +327,6 @@ void AShooterCharacter::BeginPlay()
 		MeleeAttackComponent->OnMeleeHit.AddDynamic(this, &AShooterCharacter::OnMeleeHit);
 	}
 
-	// ==================== Setup Melee Weapon FP Mesh ====================
-	if (MeleeWeaponFPMesh && MeleeWeaponFPAnimClass)
-	{
-		MeleeWeaponFPMesh->SetAnimInstanceClass(MeleeWeaponFPAnimClass);
-	}
-
-	// Find the Blueprint-added StaticMesh child of MeleeWeaponFPMesh and apply FP rendering settings
-	if (MeleeWeaponFPMesh)
-	{
-		TArray<USceneComponent*> MeleeChildren;
-		MeleeWeaponFPMesh->GetChildrenComponents(false, MeleeChildren);
-		for (USceneComponent* Child : MeleeChildren)
-		{
-			if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Child))
-			{
-				MeleeWeaponStaticMesh = SMC;
-				SMC->SetOnlyOwnerSee(true);
-				SMC->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
-				SMC->SetCollisionProfileName(FName("NoCollision"));
-				SMC->bCastDynamicShadow = false;
-				SMC->CastShadow = false;
-				SMC->SetVisibility(false);
-				break;
-			}
-		}
-	}
-
 	// Configure EMF components if they exist (created in Blueprint)
 	if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
 	{
@@ -303,6 +346,10 @@ void AShooterCharacter::BeginPlay()
 	// told otherwise, so claim the whole subtree before the first frame is drawn. Weapons get
 	// the same treatment again on every attach, since their meshes arrive later.
 	ApplyFirstPersonVisibilityToFPSubtree(GetFirstPersonMesh());
+
+	// Same for the body: anything the Blueprint hung under the third-person mesh is visible to its
+	// own owner until it is told otherwise, which puts it in the middle of that player's view.
+	ApplyThirdPersonVisibilityToTPSubtree(GetMesh());
 
 	// Initialize first person mesh visibility (hidden if no weapon)
 	UpdateFirstPersonMeshVisibility();
@@ -987,7 +1034,20 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 		DamageEvent.DamageTypeClass = UDamageType::StaticClass();
 	}
 
-	const float ActualDamage = HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+	// The class passive's own damage, first and unconditionally. It is the half that is meant to
+	// reach health through a shield that is still standing, so it must not sit behind the gate the
+	// weapon's own damage sits behind. Same call the host's own shots take, so both routes into the
+	// server apply it exactly once. @see AShooterWeapon::ApplyPassivePierceDamage
+	const float PierceDamage = Weapon->ApplyPassivePierceDamage(HitActor);
+
+	// The gate is re-checked HERE rather than trusted from the client. The client now reports a hit
+	// even when its own copy said the shield was up, precisely so the pierce above can happen; that
+	// report grants the weapon's damage nothing on its own.
+	float ActualDamage = PierceDamage;
+	if (!Weapon->IsShieldGateBlocking(HitActor))
+	{
+		ActualDamage += HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+	}
 
 	// Only the server can know what the hit really did. Hand the answer back to the shooter, whose
 	// upgrades are otherwise told nothing and never fire on a kill.
@@ -1119,6 +1179,26 @@ void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* 
 	if (Weapon && OwnedWeapons.Contains(Weapon))
 	{
 		Weapon->Multicast_PlayFireEffects();
+
+		// The server does not run Fire() for a remote pawn's weapon — only these effects — so this
+		// is the ONLY place the server learns that a client pulled the trigger. A passive that
+		// spends something per shot would otherwise never spend anything on the server and would
+		// hand every client shot its maximum, forever. Arrives before the damage report, which is
+		// the order the passive is written for. @see AShooterWeapon::Fire
+		if (UAbilityComponent* Abilities = FindComponentByClass<UAbilityComponent>())
+		{
+			Abilities->NotifyOwnerFiredWeapon();
+		}
+	}
+}
+
+void AShooterCharacter::Server_ReportWeaponReloaded_Implementation(AShooterWeapon* Weapon)
+{
+	// Ownership rather than "is it equipped", for the same reason as the shot above: a reload
+	// started a moment before a weapon switch still belongs to this player.
+	if (Weapon && OwnedWeapons.Contains(Weapon))
+	{
+		Weapon->Multicast_PlayReloadEffects();
 	}
 }
 
@@ -1130,6 +1210,17 @@ void AShooterCharacter::Server_ReportBeamEffect_Implementation(AShooterWeapon* W
 	{
 		Weapon->Multicast_PlayBeamEffect(Start, End, EnergyMultiplier,
 			OverrideBoltSpeed, OverrideBoltSpeedVariance, OverrideBoltLength, OverrideRandomSeed);
+	}
+}
+
+void AShooterCharacter::Server_ReportImpactEffect_Implementation(AShooterWeapon* Weapon,
+	FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte)
+{
+	// Ownership rather than "is it equipped", same as the shot and the reload above: an impact from
+	// a bullet fired a moment before a weapon switch still belongs to this player.
+	if (Weapon && OwnedWeapons.Contains(Weapon))
+	{
+		Weapon->Multicast_PlayImpactEffect(Location, Normal, SurfaceByte);
 	}
 }
 
@@ -1352,6 +1443,120 @@ void AShooterCharacter::Server_LaunchProp_Implementation(AEMFPhysicsProp* Prop)
 	Prop->BeginRemoteLaunch(this);
 }
 
+// ==================== Lunge reach ====================
+
+float AShooterCharacter::ApplyLungePassiveToRange(const AActor* Target, float BaseRange) const
+{
+	if (BaseRange <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Asked through the ability component rather than by knowing about any particular class: the
+	// Melee's passive answers with more reach into a broken shield, every other passive and the
+	// absence of one hands the base range straight back, and nothing here learns which is which.
+	if (const UAbilityComponent* Abilities = FindComponentByClass<UAbilityComponent>())
+	{
+		if (const UAbilityHandler* Passive = Abilities->GetPassiveHandler())
+		{
+			const float Granted = FMath::Max(0.0f, Passive->ModifyLungeRange(Target, BaseRange));
+			if (IsLungeDebugEnabled())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] passive %s: base=%.0f -> %.0f for %s"),
+					*GetNameSafe(Passive->GetDefinition()), BaseRange, Granted,
+					Target ? *GetNameSafe(Target) : TEXT("<ceiling>"));
+			}
+			return Granted;
+		}
+	}
+
+	// The single most common reason the reach never grows: DA_Class_*.PassiveAbility is empty, so
+	// there is no handler to ask and the base range is all there is. Said out loud because from
+	// inside the game it looks identical to a passive that is installed and doing nothing.
+	if (IsLungeDebugEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] NO PASSIVE HANDLER on %s: reach stays at base %.0f"),
+			*GetName(), BaseRange);
+	}
+
+	return BaseRange;
+}
+
+float AShooterCharacter::GetActiveLungeRangeFor(const AActor* Target) const
+{
+	// One answer now, whatever is in hand. AShooterWeapon_Melee used to carry a second lunge with
+	// its own reach and this had to pick between them; the weapon borrows the component's lunge
+	// instead, so there is nothing left to choose.
+	if (const UMeleeAttackComponent* Melee = GetMeleeAttackComponent())
+	{
+		return Melee->GetLungeRangeFor(Target);
+	}
+
+	return 0.0f;
+}
+
+float AShooterCharacter::GetActiveMaxLungeRange() const
+{
+	// A null target is the agreed way to ask for a ceiling rather than for one enemy's answer. See
+	// UAbilityHandler::ModifyLungeRange.
+	return GetActiveLungeRangeFor(nullptr);
+}
+
+bool AShooterCharacter::WouldLungeAt(const AActor* Target, const FVector& ViewLocation, const FVector& ViewForward) const
+{
+	if (!Target)
+	{
+		return false;
+	}
+
+	const float Reach = GetActiveLungeRangeFor(Target);
+	if (Reach <= 0.0f)
+	{
+		return false;
+	}
+
+	const FVector ToTarget = Target->GetActorLocation() - ViewLocation;
+	const float Dist = ToTarget.Size();
+	if (Dist < 1.0f || Dist > Reach)
+	{
+		return false;
+	}
+
+	const FVector DirToTarget = ToTarget / Dist;
+
+	// One cone, because there is one lunge: the component's, whether the swing came from a fist or
+	// from a blade borrowing it.
+	if (const UMeleeAttackComponent* Melee = GetMeleeAttackComponent())
+	{
+		const float ConeCos = FMath::Cos(FMath::DegreesToRadians(Melee->Settings.LungeConeHalfAngle));
+		return FVector::DotProduct(ViewForward, DirToTarget) >= ConeCos;
+	}
+
+	return false;
+}
+
+void AShooterCharacter::Server_ConsumePropForHeal_Implementation(AEMFPhysicsProp* Prop)
+{
+	if (!Prop || Prop->GetHoldingCharacter() != this)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to eat %s it is not holding - rejected"),
+			*GetName(), *GetNameSafe(Prop));
+		return;
+	}
+
+	// The verb is checked HERE and not on the machine that pressed the button. A client can send
+	// this RPC whenever it likes; whether this player's class turns props into medicine is the
+	// server's answer, and taking the client's word for it would let any class heal off any prop.
+	if (GetItemVerb() != EClassItemVerb::Heal)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to eat %s but its class verb is %d - rejected"),
+			*GetName(), *GetNameSafe(Prop), (int32)GetItemVerb());
+		return;
+	}
+
+	Prop->ConsumeForHeal(this);
+}
+
 void AShooterCharacter::Server_UpdateHeldPropTransform_Implementation(AEMFPhysicsProp* Prop, FVector Location,
 	FRotator Rotation, FVector LinearVelocity)
 {
@@ -1460,8 +1665,47 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		// radial or generic one gives the actor. Asked for here because it is gone by the time
 		// anything downstream wants it, and a reaction drawn from the wound needs both.
 		FHitResult HitInfo;
-		FVector ImpulseDir;
-		DamageEvent.GetBestHitInfo(this, DamageCauser, HitInfo, ImpulseDir);
+		FVector ImpulseDir = FVector::ZeroVector;
+
+		// FRadialDamageEvent::GetBestHitInfo reads ComponentHits[0] behind nothing but an ensure, so
+		// a radial event whose ComponentHits nobody filled takes the whole game down the first time
+		// an explosion touches a player. Every radial event raised by hand in this project is built
+		// that way - the projectile, the flying drone and the kamikaze all set Origin and Params and
+		// stop there - because filling ComponentHits means running the component sweep that
+		// UGameplayStatics::ApplyRadialDamageWithFalloff does internally, and none of them go through
+		// it.
+		//
+		// Guarded here rather than only at those three sites because this is the single consumer:
+		// one check covers the sources that exist and the ones somebody adds later, which is the
+		// difference between fixing a crash and fixing this crash.
+		bool bHasUsableHitInfo = true;
+		if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
+		{
+			const FRadialDamageEvent& RadialEvent = static_cast<const FRadialDamageEvent&>(DamageEvent);
+			bHasUsableHitInfo = RadialEvent.ComponentHits.Num() > 0;
+
+			if (!bHasUsableHitInfo)
+			{
+				// Same answer GetBestHitInfo would have given, minus the crash: for a radial event
+				// the "impact" is the blast origin, not a point on the body. Downstream reactions
+				// read the direction from it, and origin-to-victim is the direction the blast came
+				// from, which is what they actually want.
+				ImpulseDir = (GetActorLocation() - RadialEvent.Origin).GetSafeNormal();
+
+				HitInfo.bBlockingHit = true;
+				HitInfo.HitObjectHandle = FActorInstanceHandle(this);
+				HitInfo.Component = Cast<UPrimitiveComponent>(GetRootComponent());
+				HitInfo.ImpactPoint = RadialEvent.Origin;
+				HitInfo.Location = RadialEvent.Origin;
+				HitInfo.ImpactNormal = -ImpulseDir;
+				HitInfo.Normal = -ImpulseDir;
+			}
+		}
+
+		if (bHasUsableHitInfo)
+		{
+			DamageEvent.GetBestHitInfo(this, DamageCauser, HitInfo, ImpulseDir);
+		}
 
 		if (UAbilityComponent::IsBeamDebugEnabled())
 		{
@@ -1578,9 +1822,12 @@ void AShooterCharacter::DoStartFiring()
 		return;
 	}
 
-	// Don't fire if weapon switch in progress
-	if (bIsWeaponSwitchInProgress)
+	// Hands are busy swapping. The shot is remembered rather than dropped, the same bargain the
+	// sprint-out gate below makes: let go of the trigger and it is forgotten, keep holding it and
+	// the weapon fires the instant the draw finishes.
+	if (IsWeaponSwitchInProgress())
 	{
+		bFireHeldThroughSwitch = true;
 		return;
 	}
 
@@ -1603,6 +1850,10 @@ void AShooterCharacter::DoStartFiring()
 
 void AShooterCharacter::DoStopFiring()
 {
+	// Letting go is an answer too: a shot queued during a swap is forgotten here rather than going
+	// off by itself once the draw ends.
+	bFireHeldThroughSwitch = false;
+
 	// stop firing the current weapon
 	if (CurrentWeapon)
 	{
@@ -1684,6 +1935,14 @@ bool AShooterCharacter::IsPlayingReloadAnimation() const
 
 void AShooterCharacter::DoReload()
 {
+	// Not while the weapon is being put away or brought out: the reload montage would fight the
+	// swap montage over the same arms, and a reload started on a gun that is leaving the hand
+	// finishes behind the player's back.
+	if (IsWeaponSwitchInProgress())
+	{
+		return;
+	}
+
 	// The weapon owns the decision: it knows whether it has a magazine, whether that magazine is
 	// already full and whether it is the kind that gets thrown away instead of reloaded.
 	if (CurrentWeapon)
@@ -1726,8 +1985,8 @@ void AShooterCharacter::CycleWeapon(int32 Direction)
 		return;
 	}
 
-	// Don't switch if already switching
-	if (bIsWeaponSwitchInProgress)
+	// Don't interrupt a weapon being put away; a draw may be interrupted. @see CanStartWeaponSwitch
+	if (!CanStartWeaponSwitch())
 	{
 		return;
 	}
@@ -1777,8 +2036,8 @@ void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 		return;
 	}
 
-	// Don't switch if already switching
-	if (bIsWeaponSwitchInProgress)
+	// Don't interrupt a weapon being put away; a draw may be interrupted. @see CanStartWeaponSwitch
+	if (!CanStartWeaponSwitch())
 	{
 		return;
 	}
@@ -1793,6 +2052,65 @@ void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 			return;
 		}
 	}
+}
+
+/** Slack added before the failsafe timer fires behind a swap-point notify. Enough that the notify
+ *  still wins the race, short enough that a genuinely interrupted swap recovers unnoticed. */
+static constexpr float WeaponSwitchFailsafeMargin = 0.1f;
+
+namespace
+{
+	/** Where in Montage the animator placed the swap point, in montage seconds. False when there is
+	 *  none, which is the case the timing below has to cover by itself. */
+	bool FindWeaponSwapPointTime(const UAnimMontage* Montage, float& OutTime)
+	{
+		if (!Montage)
+		{
+			return false;
+		}
+
+		for (const FAnimNotifyEvent& Event : Montage->Notifies)
+		{
+			if (Event.Notify && Event.Notify->IsA<UAnimNotify_WeaponSwitchSwapPoint>())
+			{
+				OutTime = Event.GetTriggerTime();
+				return true;
+			}
+		}
+
+		return false;
+	}
+}
+
+float AShooterCharacter::GetHolsterSwapDelay(const AShooterWeapon* Weapon) const
+{
+	if (!Weapon)
+	{
+		return 0.0f;
+	}
+
+	const UAnimMontage* Montage = Weapon->GetHolsterMontage();
+	if (!Montage)
+	{
+		return 0.0f;
+	}
+
+	const float Rate = FMath::Max(Weapon->GetHolsterPlayRate(), KINDA_SMALL_NUMBER);
+
+	float NotifyTime = 0.0f;
+	if (FindWeaponSwapPointTime(Montage, NotifyTime))
+	{
+		// The notify does the work at exactly the authored frame; this is only the net under it.
+		return NotifyTime / Rate + WeaponSwitchFailsafeMargin;
+	}
+
+	// Nobody placed a swap point, so the timing is ours to pick, and "when the montage ends" is the
+	// wrong answer: a montage does not end, it fades out, and what it fades back to is the idle pose
+	// holding the OLD weapon. That fade is the gap where the old gun reappears on screen. Swap as
+	// the fade begins instead, so the draw montage takes over from the holster pose and the two
+	// animations cross straight into each other.
+	const float BlendOut = Montage->GetDefaultBlendOutTime();
+	return FMath::Max(0.0f, (Montage->GetPlayLength() - BlendOut) / Rate);
 }
 
 void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
@@ -1812,37 +2130,54 @@ void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
 		return;
 	}
 
+	// A swap that is putting a weapon away owns the sequence until its swap point: the meshes have
+	// not changed hands yet, and interrupting there would strand the old weapon in the hand. A DRAW
+	// may be interrupted, and that is the case worth allowing: the player has already changed their
+	// mind, and finishing an animation for a gun they no longer want reads as ignored input.
+	if (!CanStartWeaponSwitch())
+	{
+		return;
+	}
+
+	// Interrupting a draw. The weapon it already put in our hands stays there; the code below is
+	// what puts THAT one away, so the sequence stays honest: every weapon leaves the hand through
+	// its own holster animation.
+	CancelWeaponSwitch();
+
 	// Stop firing current weapon
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->StopFiring();
 	}
 
-	// Coop: the switch is INSTANT for now, and the lower/raise animation is deliberately parked.
-	//
-	// Which weapon a character holds has to be decided by the server, otherwise teammates see
-	// whatever the server last knew while the owner sees something else, and the two never
-	// reconcile: CurrentWeapon and the actor's bHidden both replicate downward and overwrite the
-	// client's local idea. Switching locally is exactly what produced "a rifle held in a pistol
-	// stance" in the first coop session.
-	//
-	// To bring the animation back: drive the phases below from the SERVER's equip instead, and
-	// replicate the phase so observers play it too. The old code is one commit back.
-	//	PendingWeapon = NewWeapon;
-	//	bIsWeaponSwitchInProgress = true;
-	//	bIsWeaponLowering = true;
-	//	WeaponSwitchProgress = 0.0f;
-	//	WeaponSwitchMeshZOffset = 0.0f;
+	PendingWeapon = NewWeapon;
 
-	// Apply locally right away so the weapon changes in your own hands with no round trip, then
-	// let the authority make it true for everyone. The server always accepts a weapon this
-	// character owns, so this prediction cannot disagree with the confirmation.
-	EquipWeaponImmediate(NewWeapon);
-
-	if (!HasAuthority())
+	// Coop, unchanged in substance from the instant swap this replaces: which weapon a character
+	// holds is the server's decision, because CurrentWeapon and the weapon actor's hidden flag both
+	// replicate downward and overwrite a purely local idea (that is what produced "a rifle held in
+	// a pistol stance" in the first coop session). What the animation adds is only WHEN the local
+	// equip and the request to the authority happen: at the swap point instead of on the keypress.
+	// Both still happen in the same breath, so the prediction and the confirmation cannot disagree.
+	const float HolsterLength = CurrentWeapon ? CurrentWeapon->GetHolsterLength() : 0.0f;
+	if (HolsterLength <= 0.0f)
 	{
-		Server_RequestEquipWeapon(NewWeapon);
+		// No holster animation on this weapon: the instant swap, exactly as before, plus whatever
+		// draw the incoming weapon has. This is the fallback that keeps unanimated guns working.
+		PlayWeaponSwitchSound();
+		BeginWeaponDraw();
+		return;
 	}
+
+	PlayWeaponSwitchMontage(CurrentWeapon->GetHolsterMontage(), CurrentWeapon->GetHolsterMontageTP(),
+		CurrentWeapon->GetHolsterPlayRate());
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::Holstering;
+
+	// The swap normally happens on the montage's notify. This timer is the failsafe behind it (a
+	// montage cut short by death or another animation never sends its notify), and when no swap
+	// point was placed at all it is the swap itself. @see GetHolsterSwapDelay
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::OnWeaponSwitchSwapNotify,
+		FMath::Max(GetHolsterSwapDelay(CurrentWeapon), KINDA_SMALL_NUMBER), false);
 
 	// Play weapon switch sound
 	PlayWeaponSwitchSound();
@@ -1893,116 +2228,255 @@ void AShooterCharacter::Server_RequestEquipWeapon_Implementation(AShooterWeapon*
 	}
 }
 
-void AShooterCharacter::UpdateWeaponSwitch(float DeltaTime)
+float AShooterCharacter::PlayWeaponSwitchMontage(UAnimMontage* FirstPersonMontage, UAnimMontage* ThirdPersonMontage, float PlayRate)
 {
-	if (!bIsWeaponSwitchInProgress)
+	float Length = 0.0f;
+
+	// The player's own arms, on this machine only: nobody else has a copy of them.
+	if (FirstPersonMontage)
+	{
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
+			{
+				Length = AnimInstance->Montage_Play(FirstPersonMontage, PlayRate);
+			}
+		}
+	}
+
+	// The body everyone else is looking at, on every machine, at the same rate. A teammate watching
+	// must see the weapon leave the hand at the moment it actually leaves it.
+	if (ThirdPersonMontage)
+	{
+		PlayThirdPersonMontageEverywhere(ThirdPersonMontage, PlayRate);
+	}
+
+	return Length;
+}
+
+void AShooterCharacter::OnWeaponSwitchSwapNotify()
+{
+	// Only the putting-away half has a swap point. This guard is what makes the notify and its
+	// failsafe timer safe to both fire: whichever arrives second finds the phase already moved on
+	// and does nothing, so the weapons never change hands twice.
+	if (WeaponSwitchPhase != EWeaponSwitchPhase::Holstering)
 	{
 		return;
 	}
 
-	if (bIsWeaponLowering)
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	if (!PendingWeapon)
 	{
-		// Lowering phase
-		if (WeaponSwitchLowerTime > 0.0f)
+		// Yank: the hands are empty and what fills them is still flying over. Put the old weapon
+		// away for real and wait; FinishWeaponSwitch names the arrival when it lands.
+		if (CurrentWeapon)
 		{
-			WeaponSwitchProgress += DeltaTime / WeaponSwitchLowerTime;
-			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
-
-			// Feed the pose pipeline instead of writing the mesh transform directly.
-			const float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
-			WeaponSwitchMeshZOffset = FMath::Lerp(0.0f, -WeaponSwitchLowerDistance, Alpha);
-
-			// Lowering complete?
-			if (WeaponSwitchProgress >= 1.0f)
-			{
-				if (bWeaponSwitchPausedAtBottom)
-				{
-					// Yank flow: hold at bottom until FinishWeaponSwitch is called.
-					// Mark lower phase done so FinishWeaponSwitch knows mesh is already at bottom.
-					bIsWeaponLowering = false;
-				}
-				else
-				{
-					OnWeaponSwitchLowered();
-				}
-			}
+			CurrentWeapon->DeactivateWeapon();
 		}
-		else if (!bWeaponSwitchPausedAtBottom)
-		{
-			// No lowering time, switch immediately (only when not paused-at-bottom)
-			OnWeaponSwitchLowered();
-		}
+
+		WeaponSwitchPhase = EWeaponSwitchPhase::WaitingForWeapon;
+		return;
 	}
-	else if (bWeaponSwitchPausedAtBottom)
+
+	BeginWeaponDraw();
+}
+
+void AShooterCharacter::BeginWeaponDraw()
+{
+	AShooterWeapon* NewWeapon = PendingWeapon;
+	if (!NewWeapon)
 	{
-		// Paused at bottom — hold the lowered offset until FinishWeaponSwitch is called.
-		WeaponSwitchMeshZOffset = -WeaponSwitchLowerDistance;
+		// Nothing to draw: a yank whose weapon never arrived. End the swap rather than leaving the
+		// player locked out of firing forever.
+		FinishWeaponDraw();
+		return;
 	}
-	else
+
+	// Apply locally right away so the weapon changes in your own hands with no round trip, then
+	// let the authority make it true for everyone. The server always accepts a weapon this
+	// character owns, so this prediction cannot disagree with the confirmation.
+	EquipWeaponImmediate(NewWeapon);
+
+	if (!HasAuthority())
 	{
-		// Raising phase
-		if (WeaponSwitchRaiseTime > 0.0f)
-		{
-			WeaponSwitchProgress += DeltaTime / WeaponSwitchRaiseTime;
-			WeaponSwitchProgress = FMath::Clamp(WeaponSwitchProgress, 0.0f, 1.0f);
+		Server_RequestEquipWeapon(NewWeapon);
+	}
 
-			// The offset returns to 0, which is exactly the rest pose the other layers already
-			// target, so there is no snap when bIsWeaponSwitchInProgress flips off.
-			const float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, WeaponSwitchProgress, 2.0f);
-			WeaponSwitchMeshZOffset = FMath::Lerp(-WeaponSwitchLowerDistance, 0.0f, Alpha);
+	PendingWeapon = nullptr;
 
-			// Raising complete?
-			if (WeaponSwitchProgress >= 1.0f)
-			{
-				OnWeaponSwitchRaised();
-			}
-		}
-		else
-		{
-			// No raising time, finish immediately
-			OnWeaponSwitchRaised();
-		}
+	const float DrawLength = CurrentWeapon ? CurrentWeapon->GetDrawLength() : 0.0f;
+	if (DrawLength <= 0.0f)
+	{
+		// Unanimated weapon: it is simply in the hand and ready, which is the old behaviour.
+		FinishWeaponDraw();
+		return;
+	}
+
+	PlayWeaponSwitchMontage(CurrentWeapon->GetDrawMontage(), CurrentWeapon->GetDrawMontageTP(),
+		CurrentWeapon->GetDrawPlayRate());
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+
+	// The arms are held back for the first frames of the draw, exactly as they are coming out of a
+	// grapple. It is the same defect and it was visible here first: the montage above has been
+	// ASKED for, not evaluated, so this frame still holds the pose the last animation left behind
+	// while the new weapon is already in the hand. Only when there is a montage to wait for -- an
+	// unanimated weapon has no pose to arrive late. @see FirstPersonRevealFramesLeft
+	FirstPersonRevealFramesLeft = 2;
+	UpdateFirstPersonMeshVisibility();
+
+	// A timer rather than a notify: nothing gameplay-critical lands inside the draw, only its end,
+	// and an interrupted draw is cancelled explicitly by whatever interrupted it.
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
+		DrawLength, false);
+}
+
+void AShooterCharacter::FinishWeaponDraw()
+{
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::None;
+	PendingWeapon = nullptr;
+
+	// The shot the player asked for while their hands were busy. Routed back through DoStartFiring
+	// so it re-checks everything else that can veto a shot; the phase is already None, so it cannot
+	// queue itself a second time.
+	if (bFireHeldThroughSwitch)
+	{
+		bFireHeldThroughSwitch = false;
+		DoStartFiring();
 	}
 }
 
-void AShooterCharacter::OnWeaponSwitchLowered()
+void AShooterCharacter::StowWeaponForGrapple(float SpeedMultiplier)
 {
-	AShooterWeapon* OldWeapon = CurrentWeapon;
+	if (bWeaponStowedForGrapple)
+	{
+		return;
+	}
+	bWeaponStowedForGrapple = true;
 
-	// Deactivate old weapon
+	// A swap already running loses. The player asked for a grapple, both hands are needed now, and
+	// the alternative -- letting a holster-into-draw finish while the line is out -- would put a
+	// weapon back into hands that are on a rope. The weapon left holding is whatever the swap had
+	// got as far as, and that is the one that comes back afterwards.
+	CancelWeaponSwitch();
+	PendingWeapon = nullptr;
+
+	if (!CurrentWeapon)
+	{
+		// Nothing in hand to put away. Still take the phase, so that the gates which read it behave
+		// the same whether or not the character happened to be holding something.
+		WeaponSwitchPhase = EWeaponSwitchPhase::StowedForGrapple;
+		return;
+	}
+
+	CurrentWeapon->StopFiring();
+
+	const float Mult = FMath::Max(SpeedMultiplier, KINDA_SMALL_NUMBER);
+	const float Length = CurrentWeapon->GetHolsterLength() / Mult;
+
+	if (Length <= 0.0f)
+	{
+		// Unanimated weapon: it simply vanishes, which is what an unanimated swap does too.
+		FinishGrappleStow();
+		return;
+	}
+
+	// The play rate is SCALED rather than replaced, so a weapon with a deliberately heavy holster
+	// stays heavier than a light one; the multiplier is a "do it quicker", not a fixed duration.
+	PlayWeaponSwitchMontage(CurrentWeapon->GetHolsterMontage(), CurrentWeapon->GetHolsterMontageTP(),
+		CurrentWeapon->GetHolsterPlayRate() * Mult);
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::StowingForGrapple;
+
+	// A plain timer, not the swap-point notify: that notify exists to change two weapons over at an
+	// exact frame, and there is no second weapon here. Nothing gameplay-critical lands inside this
+	// animation, only its end.
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishGrappleStow,
+		Length, false);
+}
+
+void AShooterCharacter::FinishGrappleStow()
+{
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	// DeactivateWeapon rather than a bare SetActorHiddenInGame: it also stops firing, cancels a
+	// reload that would otherwise finish behind the player's back, and tells the character so the
+	// recoil and melee state come back to rest. On the authority the hidden flag replicates, which
+	// is how a teammate sees the gun leave the hand.
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->DeactivateWeapon();
 	}
 
-	// Activate new weapon
-	if (PendingWeapon)
-	{
-		CurrentWeapon = PendingWeapon;
-		CurrentWeapon->ActivateWeapon();
-		PendingWeapon = nullptr;
-	}
-
-	// Notify upgrade system about weapon change
-	if (UpgradeManager && OldWeapon != CurrentWeapon)
-	{
-		UpgradeManager->NotifyWeaponChanged(OldWeapon, CurrentWeapon);
-	}
-
-	// Start raising phase
-	bIsWeaponLowering = false;
-	WeaponSwitchProgress = 0.0f;
+	// The phase goes in BEFORE the visibility call, because the phase is what that call reads to
+	// decide the arms are away.
+	WeaponSwitchPhase = EWeaponSwitchPhase::StowedForGrapple;
+	UpdateFirstPersonMeshVisibility();
 }
 
-void AShooterCharacter::OnWeaponSwitchRaised()
+void AShooterCharacter::UnstowWeaponAfterGrapple(float SpeedMultiplier)
 {
-	// Clear the switch layer; the remaining layers already describe the equipped rest pose.
-	WeaponSwitchMeshZOffset = 0.0f;
+	if (!bWeaponStowedForGrapple)
+	{
+		return;
+	}
+	bWeaponStowedForGrapple = false;
 
-	// Switch complete
-	bIsWeaponSwitchInProgress = false;
-	bWeaponSwitchPausedAtBottom = false;  // safety reset
+	// Covers the short grapple: the line let go while the holster animation was still playing, so
+	// the weapon was never actually hidden. Activating a weapon that is already visible is harmless.
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	// The phase has to leave StowedForGrapple before the arms can come back: that is the flag the
+	// visibility rule reads. Doing it here rather than in each branch below also covers the
+	// weaponless case, where nothing else would ever put them back.
+	//
+	// But they do not come back on THIS frame, and the branch below that plays the draw sets the
+	// hold for exactly that reason. Set here as well so the weaponless and unanimated cases -- which
+	// return before ever reaching it -- still get their frames rather than popping.
+	WeaponSwitchPhase = EWeaponSwitchPhase::None;
+	FirstPersonRevealFramesLeft = 2;
+	UpdateFirstPersonMeshVisibility();
+
+	if (!CurrentWeapon)
+	{
+		return;
+	}
+
+	CurrentWeapon->ActivateWeapon();
+
+	const float Mult = FMath::Max(SpeedMultiplier, KINDA_SMALL_NUMBER);
+	const float Length = CurrentWeapon->GetDrawLength() / Mult;
+
+	if (Length <= 0.0f)
+	{
+		FinishWeaponDraw();
+		return;
+	}
+
+	PlayWeaponSwitchMontage(CurrentWeapon->GetDrawMontage(), CurrentWeapon->GetDrawMontageTP(),
+		CurrentWeapon->GetDrawPlayRate() * Mult);
+
+	// Ends through FinishWeaponDraw, which is the same ending a swap has: the phase clears and a
+	// trigger held through the grapple finally fires. Reused rather than copied precisely so that
+	// the deferred shot keeps working here too.
+	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
+		Length, false);
+}
+
+void AShooterCharacter::CancelWeaponSwitch()
+{
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::None;
 	PendingWeapon = nullptr;
+
+	// bFireHeldThroughSwitch deliberately survives: a swap interrupted by another swap is still one
+	// continuous "I am holding the trigger" from the player's side.
 }
 
 void AShooterCharacter::DoMeleeAttack()
@@ -2036,7 +2510,7 @@ void AShooterCharacter::DoMeleeAttack()
 	}
 
 	// Don't melee if weapon switch in progress
-	if (bIsWeaponSwitchInProgress)
+	if (IsWeaponSwitchInProgress())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: WeaponSwitch"));
 		return;
@@ -2121,6 +2595,13 @@ void AShooterCharacter::DoAbilityPressed()
 					*GetNameSafe(AbilityAction), *KeyList);
 			}
 		}
+	}
+
+	// Not while the weapon is being put away or brought out. An ability montage shares the FP arms
+	// with the swap, and the swap is the one the player asked for first.
+	if (IsWeaponSwitchInProgress())
+	{
+		return;
 	}
 
 	// Only an aimed ability defers its shot to the release. Everything else keeps firing on the press:
@@ -2287,6 +2768,23 @@ void AShooterCharacter::Tick(float DeltaTime)
 		UpdateChromaticAberration(DeltaTime);
 	}
 
+	// The grapple line is drawn on every machine, including the ones only watching this character:
+	// what it reads is replicated to simulated proxies for exactly that. Purely cosmetic, so it sits
+	// in the tick rather than in the movement simulation the swing itself lives in.
+	UpdateGrappleVisual(DeltaTime);
+
+	// The arms held back for a frame or two after a grapple's draw begins, so they are not shown in
+	// the pose they were stowed in. @see FirstPersonRevealFramesLeft. Reaching zero is what puts
+	// them back, and the visibility call is made once, on that frame, rather than every frame.
+	if (FirstPersonRevealFramesLeft > 0)
+	{
+		--FirstPersonRevealFramesLeft;
+		if (FirstPersonRevealFramesLeft == 0)
+		{
+			UpdateFirstPersonMeshVisibility();
+		}
+	}
+
 	// Keep the sprint veto alive while the trigger or the aim button is held. Refreshing it every
 	// frame is what turns SprintSuppressionTime into "this long after the last shot" instead of
 	// "this long after the first one": a full auto burst or a held aim keeps pushing the deadline,
@@ -2305,7 +2803,6 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateLeftHandPose(DeltaTime);
 	UpdateLowHealthWarning(DeltaTime);
 	UpdatePostProcessEffects(DeltaTime);
-	UpdateWeaponSwitch(DeltaTime);
 
 	// Update recoil component state
 	if (RecoilComponent)
@@ -2470,6 +2967,15 @@ void AShooterCharacter::DoStartADS()
 	{
 		bWantsToAim = true;
 
+		// The movement component needs its own copy: MovementSettings::ADSSpeed caps ground speed
+		// inside the movement simulation, and the bit has to ride the saved move so the server caps
+		// a remote client's pawn on the same frames. Reading bWantsToAim from there would give the
+		// server nothing, since this function only ever runs on the aiming player's machine.
+		if (UApexMovementComponent* Apex = GetApexMovement())
+		{
+			Apex->SetAiming(true);
+		}
+
 		if (CurrentWeapon)
 		{
 			CurrentWeapon->PlayADSInSound();
@@ -2504,6 +3010,13 @@ void AShooterCharacter::DoStopADS()
 
 	bWantsToAim = false;
 
+	// Unconditional, unlike the start: this also runs when bEnableADS was turned off or a weapon
+	// swallowed the press, and a stuck aim bit would leave the player capped to ADSSpeed forever.
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SetAiming(false);
+	}
+
 	// Tell recoil component we stopped aiming
 	if (RecoilComponent)
 	{
@@ -2529,7 +3042,8 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		// relative location is otherwise untouched here, so set it = base + shield offset each tick.
 		if (UCameraComponent* Cam = GetFirstPersonCameraComponent())
 		{
-			Cam->SetRelativeLocation(BaseCameraLocation + CurrentShieldCameraOffset);
+			AppliedCrouchCameraOffset = GetCrouchCameraOffset();
+			Cam->SetRelativeLocation(BaseCameraLocation + CurrentShieldCameraOffset + AppliedCrouchCameraOffset);
 		}
 		return;
 	}
@@ -2544,6 +3058,23 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		DeltaTime,
 		MovementSettings->ADSInterpSpeed
 	);
+
+	// Hand the alpha to the FP anim graph. Nothing in animation knew about aiming before this:
+	// the whole difference between hip and aimed was a component transform, so the arms kept
+	// playing the hip idle either way.
+	//
+	// The graph does NOT use this to point the weapon — AccumulateADSSightAlignment does that, and
+	// more precisely than a pose can. What the graph owes us is a CALM hold: the aimed target pose
+	// is the inverse of where the sight sits relative to the mesh, so every degree the idle swings
+	// the gun is a degree the alignment counter-swings the whole mesh, arms included.
+	//
+	// Reflection, like the other pushes here, so this is a silent no-op until an ABP declares a
+	// float named ADSAlpha. See Docs/ADS_Editor_Handoff_WavePistol_2026-08-20.md.
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		static const FName ADSAlphaName(TEXT("ADSAlpha"));
+		PushAnimFloat(FPMesh->GetAnimInstance(), ADSAlphaName, CurrentADSAlpha);
+	}
 
 	// ==================== Camera Placement ====================
 	// ADS no longer moves the camera. The FP mesh is parented to the camera, so the weapon's
@@ -2562,13 +3093,24 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		ShakeOffset = ShakeComp->GetCameraOffset();
 	}
 
-	Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset + CurrentShieldCameraOffset);
+	// The crouch counter-offset joins the camera's own offsets here, and is remembered so the pose
+	// pipeline can tell it apart from them: shake and shield are deliberately only half-followed by
+	// the hands, while a crouch has to be followed whole (the hands are part of the view, and a
+	// half-followed crouch would slide them out of the frame and back).
+	AppliedCrouchCameraOffset = GetCrouchCameraOffset();
 
-	// Hipfire FOV comes from the player setting. It has to be routed through here because
-	// UShooterGameSettings::ApplyGameplaySettings applies it with APlayerCameraManager::SetFOV,
-	// and in UE 5.8 that only fills LockedFOV, which is read back solely by GetFOVAngle() and is
-	// never applied to POV.FOV — so on its own the setting never reaches the renderer. Everything
-	// downstream (shake BaseFOV, then the mirrored first person FOV) follows from this value.
+	Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset + CurrentShieldCameraOffset + AppliedCrouchCameraOffset);
+
+	// Hipfire FOV comes from the player setting, read fresh every frame. This is the ONLY path the
+	// setting takes to the renderer, on purpose.
+	//
+	// It used to also be pushed with APlayerCameraManager::SetFOV from ApplyGameplaySettings, under
+	// the belief that LockedFOV goes nowhere. It does go somewhere: ULocalPlayer::GetViewPoint
+	// overwrites the view's FOV with GetFOVAngle() (LocalPlayer.cpp:715), so a non-zero LockedFOV
+	// pins the rendered FOV for the whole session and aim zoom simply stops existing. See the note
+	// in UShooterGameSettings::ApplyGameplaySettings.
+	//
+	// Everything downstream (shake BaseFOV, then the mirrored first person FOV) follows from here.
 	float HipfireFOV = BaseCameraFOV;
 	if (const UGameInstance* GI = GetGameInstance())
 	{
@@ -2578,23 +3120,33 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		}
 	}
 
-	// FOV targets — fall back to hipfire base if the weapon has no ADSCamera.
-	float ADSFOV = HipfireFOV;
-	if (CurrentWeapon)
-	{
-		if (const UCameraComponent* WeaponADSCam = CurrentWeapon->GetADSCamera())
-		{
-			ADSFOV = WeaponADSCam->FieldOfView;
-		}
-	}
+	// FOV target. ONE knob owns aim zoom: AShooterWeapon::ADSZoom, "how many times closer", set per
+	// weapon in its Blueprint. It is a multiplier and not an angle because an angle would have to be
+	// an angle relative to something, and the only something available is the player's own FOV
+	// setting, which the player moves. That is precisely what used to break aiming: the target FOV
+	// was authored absolutely, so a weapon tuned to 40 degrees gave 2.75x zoom to a player on 90,
+	// 1.2x to a player on 70, and NO zoom whatsoever to a player on 40. A multiplier means the same
+	// thing at every setting.
+	//
+	// The ADSCamera component's own FieldOfView is NOT read here and means nothing: that component
+	// exists to mark where the sight sits, not how much it magnifies.
+	const float ADSFOV = CurrentWeapon
+		? AShooterWeapon::ApplyZoomToFOV(HipfireFOV, CurrentWeapon->GetADSZoom())
+		: HipfireFOV;
 
-	// Lerp FOV — designer sets desired zoom directly on the weapon's ADSCamera component.
-	// CameraShakeComponent overwrites Camera->FieldOfView each frame using its own BaseFOV +
-	// effect offsets, so we route our blended value through SetBaseFOV().
+	// Blend hip to aim. Interpolating the ANGLE rather than the tangent is deliberate: a linear
+	// sweep in degrees is the shape players read as a smooth pull to the sights, and the endpoint
+	// is what has to be exact, not the path.
+	//
+	// CameraShakeComponent overwrites Camera->FieldOfView each frame using its own BaseFOV + effect
+	// offsets, so we route our blended value through SetBaseFOV(). The speed effects (slide,
+	// wallrun, air dash) are additive degrees on top of it, faded out as the sights come up so a
+	// slide cannot push the scope back open.
 	const float InterpFOV = FMath::Lerp(HipfireFOV, ADSFOV, CurrentADSAlpha);
 	if (UCameraShakeComponent* ShakeComp = GetCameraShake())
 	{
 		ShakeComp->SetBaseFOV(InterpFOV);
+		ShakeComp->SetFOVEffectScale(1.0f - CurrentADSAlpha);
 	}
 	else
 	{
@@ -2719,16 +3271,6 @@ void AShooterCharacter::UpdateChargeOverlay(uint8 NewPolarity)
 	{
 		FPMesh->SetOverlayMaterial(TargetMaterial);
 	}
-
-	// Apply overlay material to MeleeWeaponFPMesh and weapon static mesh
-	if (MeleeWeaponFPMesh)
-	{
-		MeleeWeaponFPMesh->SetOverlayMaterial(TargetMaterial);
-	}
-	if (MeleeWeaponStaticMesh)
-	{
-		MeleeWeaponStaticMesh->SetOverlayMaterial(TargetMaterial);
-	}
 }
 
 void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Location, FRotator& Rotation)
@@ -2758,39 +3300,10 @@ void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loca
 		Rotation += CurrentWeapon->FirstPersonMeshTilt * WeaponBaseFactor;
 	}
 
-	// === ADS ===
-	// Slide the mesh until the weapon's ADSCamera anchor sits on the eye. The anchor's transform
-	// RELATIVE TO THE MESH depends only on the animated pose, the socket and the weapon
-	// attachment — never on where the mesh itself sits — so there is no feedback loop here.
-	// (Moving the camera to the anchor instead, as the old code did, would be a feedback loop now
-	// that the anchor is a descendant of the camera.)
-	if (CurrentADSAlpha > KINDA_SMALL_NUMBER && CurrentWeapon)
-	{
-		if (const UCameraComponent* ADSCam = CurrentWeapon->GetADSCamera())
-		{
-			const FVector AnchorInMeshSpace =
-				FPMesh->GetComponentTransform().InverseTransformPosition(ADSCam->GetComponentLocation());
-
-			// Where that anchor would land in camera space with the pose accumulated so far.
-			const FVector AnchorInCameraSpace =
-				FTransform(Rotation, Location).TransformPosition(AnchorInMeshSpace);
-
-			// Target: the camera origin (the eye).
-			Location += -AnchorInCameraSpace * CurrentADSAlpha;
-		}
-	}
-
-	// === Recoil visual kick ===
-	// Straight camera-space add. The old parent-rotation un-rotate existed purely to cancel the
-	// body mesh's yaw; the camera parent needs no such correction.
-	if (RecoilComponent)
-	{
-		Location += RecoilComponent->GetWeaponOffset();
-		Rotation += RecoilComponent->GetWeaponRotationOffset();
-	}
-
-	// === Weapon switch lower/raise, plus external lowers (melee attack) ===
-	Location.Z += WeaponSwitchMeshZOffset + ExternalMeshZOffset;
+	// === External lowers (melee attack) ===
+	// The weapon switch used to add its own offset here, sliding the whole FP mesh down and back
+	// up. It is gone: a swap is animated now, by the two weapons involved.
+	Location.Z += ExternalMeshZOffset;
 
 	// === Camera follow compensation ===
 	// The camera component itself is displaced by shake and by the raised shield (see UpdateADS).
@@ -2800,10 +3313,102 @@ void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loca
 	{
 		if (const UCameraComponent* Camera = GetFirstPersonCameraComponent())
 		{
-			const FVector CameraOffsetFromBase = Camera->GetRelativeLocation() - BaseCameraLocation;
+			// Minus the crouch offset: that one is not a camera effect the mesh should be shielded
+			// from, it IS the view moving, and the hands ride the view.
+			const FVector CameraOffsetFromBase = Camera->GetRelativeLocation() - BaseCameraLocation - AppliedCrouchCameraOffset;
 			const FVector OffsetInCameraSpace = Camera->GetRelativeRotation().UnrotateVector(CameraOffsetFromBase);
 			Location -= OffsetInCameraSpace * (1.0f - CameraLocationFollowAlpha);
 		}
+	}
+
+	AccumulateADSSightAlignment(Location, Rotation, FPMesh);
+
+	// === Recoil kick and sway ===
+	// Deliberately AFTER the alignment. At full ADS the alignment assigns rather than adds, so
+	// every layer above is erased; these two are the ones that have to survive aiming, and each
+	// already carries its own ADS weighting from inside the recoil component (ADSWeaponFraction
+	// for the kick, ADSSwayMultiplier for the sway). Asked for separately, not through the summed
+	// getter, so the two can be weighted apart here later without touching the component.
+	//
+	// Why this does not un-aim the sights: after alignment the sight sits on the camera's forward
+	// axis. GetWeaponOffset is the kick-BACK, which runs along that same axis, and Roll turns
+	// around it, so neither moves where the sight projects on screen. Pitch and yaw would, and
+	// those are exactly what ADSWeaponFraction takes out of the weapon and gives to the camera.
+	if (RecoilComponent)
+	{
+		Location += RecoilComponent->GetWeaponOffset();
+		Rotation += RecoilComponent->GetWeaponKickRotation();
+		Rotation += RecoilComponent->GetWeaponSwayRotation();
+	}
+}
+
+void AShooterCharacter::AccumulateADSSightAlignment(FVector& Location, FRotator& Rotation, const USkeletalMeshComponent* FPMesh) const
+{
+	if (CurrentADSAlpha <= KINDA_SMALL_NUMBER || !CurrentWeapon || !FPMesh)
+	{
+		return;
+	}
+
+	const USceneComponent* Anchor = CurrentWeapon->GetADSCamera();
+	if (!Anchor)
+	{
+		return;
+	}
+
+	// Where the sight sits RELATIVE TO THE MESH. This depends only on the animated pose, the
+	// socket and the weapon attachment, never on where the mesh itself is standing, so reading it
+	// from last frame's world transform introduces no feedback loop. (Chasing the anchor with the
+	// CAMERA would be a loop, since the anchor is a descendant of the camera. That is the old
+	// design and it is not coming back.)
+	FTransform SightRelMesh = Anchor->GetComponentTransform().GetRelativeTransform(FPMesh->GetComponentTransform());
+	SightRelMesh.RemoveScaling();
+
+	// Location and Rotation are the mesh's transform in CAMERA space (the camera is the mesh's
+	// parent), so "aimed" means the sight lands on the camera origin pointing down camera forward:
+	//
+	//     SightRelMesh * MeshRelCamera == Identity      =>      MeshRelCamera == SightRelMesh^-1
+	//
+	// Same fact as the grip socket rule already in CLAUDE.md: a socket is the inverse of the pose
+	// you want the thing to end up in.
+	const FTransform Current(Rotation, Location);
+
+	// Eye relief. The alignment below puts the sight socket ON the camera origin, which is right
+	// for an abstract "aim point" and wrong for every real sight mesh, where that socket marks the
+	// optic or the front post: with no offset the weapon ends up a hand's width inside the player's
+	// head. Pushing the mesh forward along camera X after the inverse is the same correction the
+	// Low Poly Shooter Pack applies per scope as OffsetAiming, and it is applied HERE rather than
+	// folded into SightRelMesh so that it stays in camera axes -- after alignment the camera's
+	// forward IS the sight line, so X is eye relief no matter how the socket happens to be turned.
+	const FVector AimOffset = CurrentWeapon->GetSightAimOffset();
+
+	if (CurrentWeapon->ShouldAlignSightRotation())
+	{
+		const FRotator SocketCorrection = CurrentWeapon->GetSightRotationOffset();
+		if (!SocketCorrection.IsNearlyZero())
+		{
+			SightRelMesh.ConcatenateRotation(SocketCorrection.Quaternion());
+			SightRelMesh.NormalizeRotation();
+		}
+
+		FTransform Target = SightRelMesh.Inverse();
+		Target.AddToTranslation(AimOffset);
+
+		// Slerp, not a rotator sum. Adding FRotators at alpha 0.5 does not give the halfway
+		// rotation, and the error shows up as the weapon swinging into the sights along a bent
+		// arc instead of a straight one.
+		FQuat Blended = FQuat::Slerp(Current.GetRotation(), Target.GetRotation(), CurrentADSAlpha);
+		Blended.Normalize();
+
+		Location = FMath::Lerp(Current.GetTranslation(), Target.GetTranslation(), CurrentADSAlpha);
+		Rotation = Blended.Rotator();
+	}
+	else
+	{
+		// Position only. This is what ADS did before alignment existed, kept per weapon for the
+		// ones whose sight socket ROTATION has not been verified yet: nothing read that rotation
+		// until now, so a socket placed by eye for position alone will aim the barrel wrong.
+		const FVector SightInCameraSpace = Current.TransformPosition(SightRelMesh.GetTranslation());
+		Location -= (SightInCameraSpace - AimOffset) * CurrentADSAlpha;
 	}
 }
 
@@ -3310,21 +3915,504 @@ void AShooterCharacter::EquipStartingWeaponAnimated()
 		return;
 	}
 
-	// AddWeaponClassAnimated equips instantly when the player is unarmed (no draw), so play the
-	// procedural weapon-raise on top — the same FP-mesh rise the melee "show weapon" recovery uses
-	// (lerp up from the lowered position with ease-out).
+	// AddWeaponClassAnimated equips instantly when the player is unarmed: there is nothing to put
+	// away first. The half that is still worth playing is the draw, so the run does not open with a
+	// gun that was simply always there.
 	AShooterWeapon* Equipped = AddWeaponClassAnimated(StartingWeaponClass);
-	if (Equipped && CurrentWeapon == Equipped && !bIsWeaponSwitchInProgress)
+	if (Equipped && CurrentWeapon == Equipped && !IsWeaponSwitchInProgress())
 	{
-		// Start from the lowered offset so the raise lerp visibly brings the weapon up from below.
-		WeaponSwitchMeshZOffset = -WeaponSwitchLowerDistance;
+		const float DrawLength = Equipped->GetDrawLength();
+		if (DrawLength > 0.0f)
+		{
+			PlayWeaponSwitchMontage(Equipped->GetDrawMontage(), Equipped->GetDrawMontageTP(),
+				Equipped->GetDrawPlayRate());
 
-		// Raise-only phase (skip the lower): identical motion to the weapon-switch / melee raise.
-		bIsWeaponSwitchInProgress = true;
-		bIsWeaponLowering = false;
-		bWeaponSwitchPausedAtBottom = false;
-		WeaponSwitchProgress = 0.0f;
+			WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+			GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
+				DrawLength, false);
+		}
+
 		PlayWeaponSwitchSound();
+	}
+}
+
+// ==================== Grapple line ====================
+
+void AShooterCharacter::SetGrappleLine(bool bOn, FVector Anchor, UAbilityDefinition_Grapple* Def, int32 Level)
+{
+	// This machine first, then the one that predicts this character's movement. Both, always: a
+	// server that only set its own copy would be corrected away by the client's next move, and a
+	// client left out of it would be corrected INTO a swing it never predicted. @see
+	// Client_ApplyKnockback, which is the same shape for the same reason.
+	ApplyGrappleLineLocally(bOn, Anchor, Def, Level);
+
+	if (!IsLocallyControlled())
+	{
+		Client_SetGrappleLine(bOn, Anchor, Def, Level);
+	}
+}
+
+void AShooterCharacter::Client_SetGrappleLine_Implementation(bool bOn, FVector Anchor,
+	UAbilityDefinition_Grapple* Def, int32 Level)
+{
+	ApplyGrappleLineLocally(bOn, Anchor, Def, Level);
+}
+
+void AShooterCharacter::ApplyGrappleLineLocally(bool bOn, FVector Anchor, UAbilityDefinition_Grapple* Def,
+	int32 Level)
+{
+	UApexMovementComponent* Apex = GetApexMovement();
+	if (!Apex)
+	{
+		return;
+	}
+
+	// The tuning goes in before the intent: StartGrapple runs on the next simulated move and the
+	// numbers have to be the ones this line was thrown with, not the ones the last one used.
+	if (bOn && Def)
+	{
+		const FGrappleLevelStats Stats = Def->GetStatsAtLevel(Level);
+
+		// Every field, copied by hand, and it is worth saying why nobody should "simplify" this into
+		// a memcpy or a shared struct: the authored side is a UPROPERTY struct a designer edits and
+		// the movement side is a plain mirror that lives inside the simulation. They are allowed to
+		// drift apart, and the compiler catches it here when they do. This list has already lost a
+		// field once -- GroundLaunchSpeed was authored on the asset and never copied, so the asset's
+		// value did nothing at all and the component's default silently stood in for it.
+		FGrappleMotionParams Params;
+		Params.PullAcceleration             = Stats.PullAcceleration;
+		Params.SpeedRampMin                 = Stats.SpeedRampMin;
+		Params.SpeedRampMax                 = Stats.SpeedRampMax;
+		Params.SpeedRampTime                = Stats.SpeedRampTime;
+		Params.PullDelay                    = Stats.PullDelay;
+		Params.LateralDeceleration          = Stats.LateralDeceleration;
+		Params.bDontFightGravity            = Stats.bDontFightGravity;
+		Params.Lift                         = Stats.Lift;
+		Params.MaxSpeed                     = Stats.MaxSpeed;
+		Params.LetGravityHelpCosAngle       = Stats.LetGravityHelpCosAngle;
+		Params.GravityPushUnderContribution = Stats.GravityPushUnderContribution;
+		Params.InitialSlowFracHorizontal    = Stats.InitialSlowFracHorizontal;
+		Params.InitialSlowFracVertical      = Stats.InitialSlowFracVertical;
+		Params.InitialImpulse               = Stats.InitialImpulse;
+		Params.InitialImpulseOffGround      = Stats.InitialImpulseOffGround;
+		Params.InitialSpeedMin              = Stats.InitialSpeedMin;
+		Params.SwingAirAcceleration         = Stats.SwingAirAcceleration;
+		Params.SwingWishSpeed               = Stats.SwingWishSpeed;
+		Params.GroundFrictionScale          = Stats.GroundFrictionScale;
+		Params.GroundBrakingScale           = Stats.GroundBrakingScale;
+		Params.DetachLowSpeed               = Stats.DetachLowSpeed;
+		Params.DetachLowSpeedTime           = Stats.DetachLowSpeedTime;
+		Params.ArrivalRadius                = Stats.ArrivalRadius;
+		Params.MaxDuration                  = Stats.MaxDuration;
+		Apex->SetGrappleTuning(Params);
+
+		if (Stats.MaxDuration > 0.0f)
+		{
+			// A line that outlives the ability is a player stuck in the air, so the visual is given
+			// the same ceiling the swing has.
+			GrappleVisualMaxEndTime = GetWorld() ? GetWorld()->GetTimeSeconds() + Stats.MaxDuration + 0.5f : -1.0f;
+		}
+	}
+
+	Apex->SetGrappleIntent(bOn, Anchor);
+
+	// Both hands go on the line, so the weapon goes away, and comes back when the line lets go.
+	//
+	// Here rather than in Multicast_PlayGrappleThrow, and that is the coop-shaped decision in this
+	// change: this function runs on the authority and on the machine that predicts this character,
+	// which is exactly the pair every other weapon action in this class uses. A watching client is
+	// covered without doing anything itself -- the third-person montage goes out over
+	// PlayThirdPersonMontageEverywhere, and the weapon actor's hidden flag replicates down from the
+	// server. Running it on every machine instead would have each proxy play the body animation
+	// twice, once locally and once from the multicast.
+	if (Def && Def->bStowWeapon)
+	{
+		if (bOn)
+		{
+			StowWeaponForGrapple(Def->WeaponStowSpeedMultiplier);
+		}
+		else
+		{
+			UnstowWeaponAfterGrapple(Def->WeaponStowSpeedMultiplier);
+		}
+	}
+
+	if (bOn && Def && Def->AttachSound && GetWorld())
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, Def->AttachSound, Anchor);
+	}
+	else if (!bOn && Def && Def->DetachSound && GetWorld())
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, Def->DetachSound, GetActorLocation());
+	}
+}
+
+void AShooterCharacter::Multicast_PlayGrappleThrow_Implementation(FVector Anchor, float TravelTime,
+	UAbilityDefinition_Grapple* Def)
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+
+	GrappleVisualDefinition = Def;
+	EnsureGrappleCable(Def);
+
+	GrappleVisualAnchor    = Anchor;
+	GrappleVisualEnd       = GetGrappleHandLocation();
+	GrappleThrowStartTime  = GetWorld()->GetTimeSeconds();
+	GrappleThrowTravelTime = FMath::Max(0.0f, TravelTime);
+	bGrappleVisualActive   = true;
+
+	// Put the rope on the straight line between the two ends BEFORE anybody looks at it.
+	//
+	// UCableComponent is a Verlet simulation and it seeds its particles once, in OnRegister, along
+	// whatever EndLocation happened to hold at that moment -- which for a freshly built component is
+	// the default one metre along its own +X. Left alone, the rope therefore starts as a short stub
+	// pointing wherever the capsule faces and then SWINGS across to the anchor over the next second,
+	// which is exactly the "goes backward and right, then forward" arc this used to draw. Re-seeding
+	// on the throw is the only way to place those particles: there is no public API for it, and
+	// OnRegister is what does the seeding.
+	ReseedGrappleCable(GrappleVisualEnd);
+
+	if (Def && Def->AttachVFX && TravelTime <= 0.0f)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), Def->AttachVFX, Anchor);
+	}
+}
+
+FVector AShooterCharacter::GetGrappleHandLocation() const
+{
+	const UAbilityDefinition_Grapple* Def = GrappleVisualDefinition.Get();
+	const bool bFromChest = !Def || Def->LineOrigin == EGrappleLineOrigin::Chest;
+
+	// NOT the first-person mesh, however tempting. That mesh is drawn through the first-person path,
+	// which applies its own field-of-view correction and scale, so where it APPEARS and where its
+	// bones actually are in the world are two different places -- by metres. A cable is ordinary
+	// world geometry and would be drawn between the real transforms, which is how the line ended up
+	// pointing at the sky. The near end therefore comes from the camera for the player holding it.
+	if (IsLocallyControlled())
+	{
+		const FVector Offset = bFromChest ? GrappleFirstPersonChestOffset : GrappleFirstPersonMuzzleOffset;
+
+		if (const UCameraComponent* Cam = GetFirstPersonCameraComponent())
+		{
+			// Position from the component, ROTATION FROM THE CONTROLLER, and they are two different
+			// sources on purpose.
+			//
+			// The camera has bUsePawnControlRotation set (PolarityCharacter.cpp), and that flag is
+			// not applied to the component's transform when the player looks around: it is applied
+			// inside UCameraComponent::GetCameraView, which the camera manager calls at the very end
+			// of the world tick, after every actor has ticked. So anything reading the component's
+			// ROTATION during a tick is reading last frame's aim -- the line lagged the crosshair by
+			// a frame, which on a swing is most of a swing. GetViewRotation is the control rotation
+			// itself, updated in the player controller's tick before any of this runs, so it is the
+			// aim this frame will actually be drawn with.
+			//
+			// The LOCATION is the opposite way round: the component is a child of the capsule and
+			// the movement component has already moved it this frame (it ticks before its owner),
+			// so the component is current and the controller knows nothing about it.
+			const FTransform CamTransform(GetViewRotation(), Cam->GetComponentLocation());
+			return CamTransform.TransformPosition(Offset);
+		}
+		return GetActorLocation();
+	}
+
+	// Everybody else is looking at this character's body, where the bones really are where they look.
+	const FName Socket = bFromChest
+		? (Def ? Def->ChestSocket : FName("spine_03"))
+		: (Def ? Def->HandSocket  : FName("hand_l"));
+
+	if (const USkeletalMeshComponent* BodyMesh = GetMesh())
+	{
+		if (BodyMesh->DoesSocketExist(Socket))
+		{
+			return BodyMesh->GetSocketLocation(Socket);
+		}
+	}
+
+	return GetActorLocation();
+}
+
+void AShooterCharacter::EnsureGrappleCable(UAbilityDefinition_Grapple* Def)
+{
+	const int32 WantedSegments = Def ? FMath::Max(1, Def->CableSegments) : 32;
+
+	// NumSegments MUST be right before the component registers, and changing it afterwards is a
+	// crash, not a cosmetic mistake. UCableComponent::OnRegister allocates its particle array as
+	// NumSegments + 1 and never revisits it, so a component registered on the default 10 and then
+	// told it has 32 segments indexes 32 into an array of 11 the moment it simulates:
+	//   Assertion failed: (Index >= 0) & (Index < ArrayNum) ... 32 into an array of size 11
+	// So: set it first on creation, and re-register when it changes.
+	if (GrappleCable && GrappleCable->NumSegments != WantedSegments)
+	{
+		GrappleCable->UnregisterComponent();
+		GrappleCable->NumSegments = WantedSegments;
+		GrappleCable->RegisterComponent();
+	}
+
+
+	if (!GrappleCable)
+	{
+		GrappleCable = NewObject<UCableComponent>(this, UCableComponent::StaticClass(), TEXT("GrappleCable"));
+
+		// Attached to the capsule and then placed in world space by hand every frame. One cable, seen
+		// by everybody including its owner: it is world geometry, so there is nothing about it that
+		// differs between the screen of the player holding it and the screen of a teammate.
+		GrappleCable->SetupAttachment(GetRootComponent());
+
+		// ...and then told to ignore that parent completely, which is the fix for the line being
+		// drawn somewhere other than where it is aimed.
+		//
+		// UCableComponent pins its far end at EndLocation expressed in the COMPONENT's own space
+		// (UCableComponent::GetEndPositions), and its near end at the component's location. Both are
+		// written here once per frame from the character's tick -- and then the capsule keeps moving
+		// for the rest of the frame: the movement component integrates the move, and the capsule
+		// YAWS with the mouse because bUseControllerRotationYaw is on. A child component inherits
+		// all of it, so by the time the cable simulates, its idea of "the anchor" has been rotated
+		// around the player by however far they turned this frame and shifted by however far they
+		// flew. On a swing that is constant mouse movement at high speed, which is exactly the
+		// picture: a rope that points somewhere near the anchor and swings about, while a debug line
+		// drawn in absolute world coordinates from the same two numbers sits exactly right.
+		//
+		// Absolute transform makes the component's world transform the one that was written and
+		// nothing else, so the two ends stay where they were put. The rotation is left at identity
+		// for good measure, so EndLocation is a plain world-space offset.
+		GrappleCable->SetUsingAbsoluteLocation(true);
+		GrappleCable->SetUsingAbsoluteRotation(true);
+		GrappleCable->SetUsingAbsoluteScale(true);
+		GrappleCable->SetWorldRotation(FRotator::ZeroRotator);
+		GrappleCable->SetWorldScale3D(FVector::OneVector);
+
+		// And the far end is told, explicitly, that EndLocation is measured against THIS component.
+		// Without this line it is measured against the CAPSULE, which is not a thing anybody would
+		// guess and is why the rope pointed somewhere unrelated to where it was aimed.
+		//
+		// GetEndPositions resolves the end through AttachEndTo, an FComponentReference. An empty one
+		// does not mean "no attachment": FBaseComponentReference::ExtractComponent falls through to
+		//   Result = SearchActor->GetRootComponent();
+		// so the end silently resolves to the character's capsule, and EndLocation gets multiplied
+		// by the capsule's transform -- rotated by the player's yaw and offset by the player's
+		// position. Every version of this code so far wrote EndLocation in some other space (world,
+		// or the cable's own) and the engine read it in capsule space, so the far end was thrown off
+		// by the whole of the player's rotation. Pointing the reference at the cable makes the
+		// obvious reading the true one, and since the cable holds an absolute identity-rotated
+		// transform, EndLocation is then a plain world-space offset from the near end.
+		GrappleCable->SetAttachEndToComponent(GrappleCable, NAME_None);
+
+		// Everything OnRegister reads goes in BEFORE the register call. @see the note above.
+		GrappleCable->NumSegments = WantedSegments;
+
+		// The far end is PINNED. With bAttachEnd false the engine treats EndLocation as a starting
+		// position for a rope that then dangles freely, which is a rope hanging off the player rather
+		// than a line stretched to a wall.
+		GrappleCable->bAttachEnd = true;
+		GrappleCable->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+		GrappleCable->RegisterComponent();
+		GrappleCable->SetHiddenInGame(true);
+
+		// The rope simulates AFTER the character has told it where its ends are. Said out loud,
+		// because the engine does not arrange it: UActorComponent::SetupActorComponentTickFunction
+		// just registers the tick function, and a component's tick has no prerequisite on its own
+		// owner's tick. Which of the two runs first inside TG_PrePhysics is therefore whatever the
+		// tick manager happens to do, and if it is the cable, the rope is pinned to the ends of the
+		// PREVIOUS frame -- half a metre behind at swinging speed, and the sort of bug that reads as
+		// "sometimes it lags" and survives several sessions.
+		GrappleCable->PrimaryComponentTick.AddPrerequisite(this, PrimaryActorTick);
+	}
+
+	// The two engine defaults that make a grapple line look like a washing line, both set here.
+	//
+	// SolverIterations is 1 out of the box. UCableComponent is a Verlet chain whose length constraint
+	// is relaxed ONE LINK PER ITERATION, so with a single pass over 32 segments the rope can never be
+	// pulled straight no matter what CableLength says -- which is exactly why changing the slack made
+	// no visible difference whatsoever. 16 is the property's own maximum.
+	//
+	// CableGravityScale is 1 out of the box, so the rope has its own gravity, hangs in a catenary
+	// between its two ends and drops through the floor. A grapple line is under tension; it has no
+	// business sagging at all. Zero here, and the sag becomes something the asset asks for rather
+	// than something it has to fight.
+	GrappleCable->SolverIterations = 16;
+	GrappleCable->bEnableStiffness = false;
+	GrappleCable->CableForce = FVector::ZeroVector;
+
+	// CableSlack now drives the rope's OWN GRAVITY rather than its length, and that is the only way
+	// the setting has ever been able to do anything: length could not straighten the rope while the
+	// solver ran one iteration, and gravity is what was bending it. 0 is a dead straight taut line,
+	// 0.5 hangs. Worth renaming to CableSagGravity next time the header is being touched anyway.
+	GrappleCable->CableGravityScale = Def ? FMath::Clamp(Def->CableSlack, 0.0f, 1.0f) : 0.0f;
+
+	// A player on a line moves tens of centimetres per frame. Left alone the particles lag behind and
+	// the rope trails like a ribbon; resetting them on a big jump snaps it back to straight.
+	GrappleCable->bResetAfterTeleport = true;
+
+	// ...and "a big jump" has to mean a swing, not a teleport, which is the second half of the line
+	// being drawn somewhere it is not aimed.
+	//
+	// UCableComponent is a Verlet chain of free particles between two pinned ends. Move those ends
+	// quickly and the middle simply lags: the rope bows out behind the player and the far end is the
+	// only part of it that touches the anchor, so it reads as a rope pointing somewhere else even
+	// when both endpoints are exactly right. The one thing that puts every particle back on the
+	// straight line is DoTeleportCorrections, and it only runs when an end moves further in a frame
+	// than TeleportDistanceThreshold -- which ships at 500, roughly ten times further than anybody
+	// moves in a frame, so it never ran at all.
+	//
+	// Tying the threshold to the authored slack makes it a single knob: no slack asks for a rope
+	// re-laid straight on almost any movement, and slack buys the distance a rope may lag before it
+	// is snapped back. At the default 0.02 that is about 20cm per frame, so the fast half of a swing
+	// draws dead straight and a player hanging nearly still gets their sag.
+	GrappleCable->TeleportDistanceThreshold = Def
+		? FMath::Lerp(1.0f, 500.0f, FMath::Clamp(Def->CableSlack, 0.0f, 0.5f) / 0.5f)
+		: 1.0f;
+
+	// Width and material are read per frame by the proxy, so they are safe to change at any time.
+	if (Def)
+	{
+		GrappleCable->CableWidth = Def->CableWidth;
+		if (Def->CableMaterial)
+		{
+			GrappleCable->SetMaterial(0, Def->CableMaterial);
+		}
+	}
+}
+
+void AShooterCharacter::ReseedGrappleCable(const FVector& WorldEnd)
+{
+	if (!GrappleCable)
+	{
+		return;
+	}
+
+	// Position and both ends first, then re-register: OnRegister lays the particles evenly along the
+	// line from the component to EndLocation, so it has to be told the truth before it runs.
+	const FVector Start = GetGrappleHandLocation();
+	GrappleCable->SetWorldLocation(Start);
+	GrappleCable->EndLocation = WorldEnd - Start;
+
+	// Taut from the very first frame: OnRegister lays the particles out along this line, and a length
+	// longer than the span would have them sag before anybody has even seen the rope.
+	GrappleCable->CableLength = FVector::Dist(Start, WorldEnd);
+
+	GrappleCable->UnregisterComponent();
+	GrappleCable->RegisterComponent();
+}
+
+void AShooterCharacter::UpdateGrappleVisual(float DeltaTime)
+{
+	if (!bGrappleVisualActive || !GetWorld() || !GrappleCable)
+	{
+		return;
+	}
+
+	const UApexMovementComponent* Apex = GetApexMovement();
+	const bool bAttached = Apex && Apex->IsGrappling();
+	const float Now = GetWorld()->GetTimeSeconds();
+	const float SinceThrow = Now - GrappleThrowStartTime;
+	const FVector Start = GetGrappleHandLocation();
+
+	// While the hook is in flight the far end travels; once it has bitten, the far end is wherever
+	// the movement component says the line is anchored, which on a machine that is only watching is
+	// the replicated copy.
+	const bool bInFlight = SinceThrow < GrappleThrowTravelTime;
+	if (bInFlight)
+	{
+		// The hook is a thrown object, so it closes on the anchor at its own speed and nothing else
+		// decides where it is. This used to interpolate by TIME between the CURRENT hand position and
+		// the anchor, which is a different thing entirely: the near end moves while the hook is in
+		// the air, so the "hook" was dragged around by the player's own motion and never travelled at
+		// the speed the asset asks for.
+		//
+		// Measured backwards from the anchor, which is the only fixed point in the picture. The
+		// remaining gap can only shrink, so the drawn length can only grow while the hook is airborne
+		// and stops the instant it arrives -- by construction, not by hoping the timer agrees.
+		const float SpanNow = FVector::Dist(Start, GrappleVisualAnchor);
+		const float HookSpeed = (GrappleThrowTravelTime > KINDA_SMALL_NUMBER)
+			? SpanNow / GrappleThrowTravelTime
+			: 0.0f;
+		const float RemainingToAnchor = FMath::Clamp(SpanNow - HookSpeed * SinceThrow, 0.0f, SpanNow);
+
+		GrappleVisualEnd = GrappleVisualAnchor + (Start - GrappleVisualAnchor).GetSafeNormal() * RemainingToAnchor;
+	}
+	else
+	{
+		GrappleVisualEnd = bAttached ? Apex->GetGrappleAnchor() : GrappleVisualAnchor;
+
+		// The throw has landed and nothing is hanging off it. A short grace rather than an immediate
+		// cut, because the attach is decided on the server and reaches a watching machine a moment
+		// after the flight ends; without it every line would blink out and back in.
+		static constexpr float AttachGraceSeconds = 0.4f;
+		const bool bGraceExpired = SinceThrow > GrappleThrowTravelTime + AttachGraceSeconds;
+		const bool bOverstayed = GrappleVisualMaxEndTime > 0.0f && Now > GrappleVisualMaxEndTime;
+
+		if ((!bAttached && bGraceExpired) || bOverstayed)
+		{
+			bGrappleVisualActive = false;
+			GrappleVisualMaxEndTime = -1.0f;
+			GrappleCable->SetHiddenInGame(true);
+
+			// Failsafe for the weapon, not for the rope. The stow is driven by the ability telling
+			// this character the line dropped, and that message is the one thing here that can fail
+			// to arrive: an ability cancelled by death, a handler torn down mid-flight, a client
+			// that never hears the release. The rope has already given up by this point, so if the
+			// gun is still away it is away for no reason, and a player left permanently unarmed is a
+			// far worse bug than a rope drawn for an extra frame.
+			if (bWeaponStowedForGrapple)
+			{
+				const UAbilityDefinition_Grapple* Def = GrappleVisualDefinition.Get();
+				UnstowWeaponAfterGrapple(Def ? Def->WeaponStowSpeedMultiplier : 1.0f);
+			}
+			return;
+		}
+	}
+
+	// Both ends written in world space every frame. The near end is MOVED rather than left to an
+	// attachment: the point it should leave from is the camera for the owner and a bone for everyone
+	// else, and those are not the same component.
+	//
+	// The component holds an absolute transform with no rotation (@see EnsureGrappleCable), so
+	// EndLocation is simply the world-space gap between the two ends and nothing the capsule does
+	// for the rest of the frame can turn it into something else.
+	GrappleCable->SetWorldLocation(Start);
+	GrappleCable->EndLocation = GrappleVisualEnd - Start;
+
+	// Exactly the gap between the two ends, every frame. Not a fraction of it, not a multiple: the
+	// line is as long as the distance it has to cover, so it shortens as the player is reeled in and
+	// can never be longer than the span it is drawn across.
+	//
+	// The sag is not this number's job and never was -- it is the rope's own gravity, set in
+	// EnsureGrappleCable. Trying to fight a hanging rope by trimming its rest length is what the
+	// earlier version did, and it could not work: at one solver iteration the length constraint
+	// reaches one link per pass and never propagates along a 32-segment chain at all.
+	const float Span = FVector::Dist(Start, GrappleVisualEnd);
+	GrappleCable->CableLength = Span;
+	GrappleCable->SetHiddenInGame(false);
+
+	if (CVarGrappleCableDebug.GetValueOnAnyThread() > 0)
+	{
+		// The length and the gap are printed as two separate numbers on purpose: they are set from
+		// the same expression, so if they ever disagree the assignment is not the thing running.
+		UE_LOG(LogTemp, Warning,
+			TEXT("[GRAPPLE_DEBUG] %s gap=%.0f cableLen=%.0f attached=%d t=%.2f/%.2f"),
+			bInFlight ? TEXT("FLY ") : TEXT("HELD"),
+			Span, GrappleCable->CableLength, bAttached ? 1 : 0,
+			SinceThrow, GrappleThrowTravelTime);
+
+		DrawDebugLine(GetWorld(), Start, GrappleVisualEnd, FColor::Green, false, 0.0f, 0, 1.0f);
+		DrawDebugSphere(GetWorld(), GrappleVisualEnd, 10.0f, 8, FColor::Red, false, 0.0f, 0, 1.0f);
+
+		// Where the rope ACTUALLY is, straight out of its own particles, drawn in blue on top of the
+		// green line we asked for. The two used to disagree and nothing on screen said so: the debug
+		// line was drawn from the same two numbers the cable was handed, so it could only ever agree
+		// with the intent and never with the result. Anything the cable does to those numbers on the
+		// way -- a space nobody expected, a frame of lag, a simulation that has not caught up --
+		// shows up here as blue leaving green.
+		TArray<FVector> Particles;
+		GrappleCable->GetCableParticleLocations(Particles);
+		for (int32 i = 0; i + 1 < Particles.Num(); ++i)
+		{
+			DrawDebugLine(GetWorld(), Particles[i], Particles[i + 1], FColor::Blue, false, 0.0f, 0, 1.0f);
+		}
 	}
 }
 
@@ -3425,6 +4513,12 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	// the third-person body for every other player.
 	ApplyFirstPersonVisibilityToFPSubtree(Weapon->GetFirstPersonMesh());
 	ApplyFirstPersonVisibilityToFPSubtree(GetFirstPersonMesh());
+
+	// And the mirror of it: attachments under the weapon's third-person mesh do not inherit its
+	// owner-hidden rendering, so without this the shooter sees their own third-person sight or
+	// laser floating in front of the camera.
+	ApplyThirdPersonVisibilityToTPSubtree(Weapon->GetThirdPersonMesh());
+	ApplyThirdPersonVisibilityToTPSubtree(GetMesh());
 }
 
 void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
@@ -3435,13 +4529,7 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 	}
 
 	// Play on third-person mesh (visible to other players)
-	if (USkeletalMeshComponent* TPMesh = GetMesh())
-	{
-		if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
-		{
-			AnimInstance->Montage_Play(Montage);
-		}
-	}
+	PlayThirdPersonMontageLocal(Montage, 1.0f);
 
 	// Play on first-person mesh (visible to local player)
 	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
@@ -3449,6 +4537,83 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
 		{
 			AnimInstance->Montage_Play(Montage);
+		}
+	}
+}
+
+void AShooterCharacter::PlayReloadMontage(UAnimMontage* Montage)
+{
+	if (!Montage)
+	{
+		return;
+	}
+
+	// The player's own arms, on this machine only: nobody else has a copy of them.
+	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+	{
+		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
+		{
+			AnimInstance->Montage_Play(Montage);
+		}
+	}
+
+	// The body everyone else is looking at, on every machine.
+	PlayThirdPersonMontageEverywhere(Montage, 1.0f);
+}
+
+void AShooterCharacter::PlayThirdPersonMontageEverywhere(UAnimMontage* Montage, float PlayRate)
+{
+	if (!Montage)
+	{
+		return;
+	}
+
+	if (HasAuthority())
+	{
+		// The multicast runs on the server too, so this covers the listen server's own body.
+		Multicast_PlayThirdPersonMontage(Montage, PlayRate);
+		return;
+	}
+
+	// A remote client plays it immediately rather than waiting for its own message to come back off
+	// the server, then asks the server to show it to everybody else.
+	PlayThirdPersonMontageLocal(Montage, PlayRate);
+
+	if (IsLocallyControlled())
+	{
+		Server_PlayThirdPersonMontage(Montage, PlayRate);
+	}
+}
+
+void AShooterCharacter::Server_PlayThirdPersonMontage_Implementation(UAnimMontage* Montage, float PlayRate)
+{
+	Multicast_PlayThirdPersonMontage(Montage, PlayRate);
+}
+
+void AShooterCharacter::Multicast_PlayThirdPersonMontage_Implementation(UAnimMontage* Montage, float PlayRate)
+{
+	// The owning client already played this the moment it asked; playing it again here would
+	// restart the animation a round trip in.
+	if (IsLocallyControlled() && !HasAuthority())
+	{
+		return;
+	}
+
+	PlayThirdPersonMontageLocal(Montage, PlayRate);
+}
+
+void AShooterCharacter::PlayThirdPersonMontageLocal(UAnimMontage* Montage, float PlayRate)
+{
+	if (!Montage)
+	{
+		return;
+	}
+
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+		{
+			AnimInstance->Montage_Play(Montage, PlayRate);
 		}
 	}
 }
@@ -3470,29 +4635,49 @@ void AShooterCharacter::UpdateWeaponHUD(int32 CurrentAmmo, int32 MagazineSize)
 	OnBulletCountUpdated.Broadcast(MagazineSize, CurrentAmmo);
 }
 
-FVector AShooterCharacter::GetWeaponTargetLocation()
+void AShooterCharacter::GetAimRay(float Range, FVector& OutStart, FVector& OutEnd) const
 {
-	FHitResult OutHit;
+	// The ONE definition of where this character is pointing, and everything that needs to know has
+	// to come through here.
+	//
+	// The start is the first-person CAMERA, not GetPawnViewLocation(). Those are different places in
+	// this project and not by a little: the pawn view location is the capsule plus BaseEyeHeight,
+	// while the camera has been moved by crouch, by the camera-follow lag, by shake and by ADS. A
+	// trace from the wrong one leaves along a line that does not pass through the crosshair, and near
+	// any edge it hits something else entirely -- which is how the grapple ended up throwing its hook
+	// at scenery the player was not looking at.
+	//
+	// The direction is the controller's, not the camera's forward: the camera component does not
+	// follow rotation while the ADS camera is active.
+	const UCameraComponent* Cam = GetFirstPersonCameraComponent();
+	OutStart = Cam ? Cam->GetComponentLocation() : GetPawnViewLocation();
 
-	// Get aim direction from controller (works for both hip fire and ADS)
-	// GetFirstPersonCameraComponent() doesn't update rotation when ADS camera is active
-	FVector Start = GetFirstPersonCameraComponent()->GetComponentLocation();
 	FVector AimDirection;
-
-	if (AController* PC = GetController())
+	if (const AController* PC = GetController())
 	{
 		AimDirection = PC->GetControlRotation().Vector();
 	}
+	else if (Cam)
+	{
+		AimDirection = Cam->GetForwardVector();
+	}
 	else
 	{
-		AimDirection = GetFirstPersonCameraComponent()->GetForwardVector();
+		AimDirection = GetActorForwardVector();
 	}
 
-	const FVector End = Start + (AimDirection * MaxAimDistance);
+	OutEnd = OutStart + AimDirection * Range;
+}
+
+FVector AShooterCharacter::GetWeaponTargetLocation()
+{
+	FVector Start, End;
+	GetAimRay(MaxAimDistance, Start, End);
 
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
+	FHitResult OutHit;
 	GetWorld()->LineTraceSingleByChannel(OutHit, Start, End, ECC_Visibility, QueryParams);
 
 	return OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
@@ -3778,10 +4963,11 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 		// OnYankThrowLowerNotify prefers the freshest yanked weapon as the replacement, so
 		// it rises through the montage's own lower→swap flow.
 	}
-	else if (bIsWeaponSwitchInProgress && bWeaponSwitchPausedAtBottom)
+	else if (WeaponSwitchPhase == EWeaponSwitchPhase::Holstering ||
+			 WeaponSwitchPhase == EWeaponSwitchPhase::WaitingForWeapon)
 	{
-		// Yank path: lower already started/finished via BeginWeaponLower(). The mesh is
-		// either dropping or already at the bottom — finish the swap with this weapon.
+		// Yank path: BeginWeaponLower() already started putting the old weapon away, and the hands
+		// are either still doing that or already empty and waiting. Name the arrival.
 		FinishWeaponSwitch(AddedWeapon);
 	}
 	else if (bWasUnarmed || !CurrentWeapon)
@@ -3804,23 +4990,23 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 	else
 	{
 		// Player is currently holding a weapon — use the standard Q-switch pipeline.
-		// StartWeaponSwitch handles lower → OnWeaponSwitchLowered (deactivate old, activate new,
-		// notify upgrades) → raise. New weapon must already be in OwnedWeapons (it is, line above).
+		// StartWeaponSwitch plays the holster → swaps at its notify (deactivate old, activate new,
+		// notify upgrades) → draws. New weapon must already be in OwnedWeapons (it is, line above).
 		StartWeaponSwitch(AddedWeapon);
 	}
 
 	return AddedWeapon;
 }
 
-void AShooterCharacter::BeginWeaponLower()
+void AShooterCharacter::BeginWeaponLower(bool bPlayHolsterMontage)
 {
 	// Don't interrupt an already-running switch
-	if (bIsWeaponSwitchInProgress)
+	if (IsWeaponSwitchInProgress())
 	{
 		return;
 	}
 
-	// Nothing to lower — caller (e.g. yank pickup on unarmed player) will fall through to
+	// Nothing to put away — caller (e.g. yank pickup on unarmed player) will fall through to
 	// AddWeaponClassAnimated which handles instant equip.
 	if (!CurrentWeapon)
 	{
@@ -3833,34 +5019,47 @@ void AShooterCharacter::BeginWeaponLower()
 	// No PendingWeapon yet — FinishWeaponSwitch will set it
 	PendingWeapon = nullptr;
 
-	bIsWeaponSwitchInProgress = true;
-	bIsWeaponLowering = true;
-	bWeaponSwitchPausedAtBottom = true;
-	WeaponSwitchProgress = 0.0f;
-	WeaponSwitchMeshZOffset = 0.0f;
+	const float HolsterLength = bPlayHolsterMontage ? CurrentWeapon->GetHolsterLength() : 0.0f;
+	if (HolsterLength <= 0.0f)
+	{
+		// Either this weapon has no holster animation, or the hands were already emptied by another
+		// animation (the yank-throw montage) and a holster on top of it would be two animations
+		// fighting over the same arms. Straight to waiting, hands empty.
+		CurrentWeapon->DeactivateWeapon();
+		WeaponSwitchPhase = EWeaponSwitchPhase::WaitingForWeapon;
+		PlayWeaponSwitchSound();
+		return;
+	}
+
+	PlayWeaponSwitchMontage(CurrentWeapon->GetHolsterMontage(), CurrentWeapon->GetHolsterMontageTP(),
+		CurrentWeapon->GetHolsterPlayRate());
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::Holstering;
+
+	// Same timing as an ordinary swap. It matters more here: this path ends in empty hands, and a
+	// notify lost to an interruption would leave the player unable to hold anything again.
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::OnWeaponSwitchSwapNotify,
+		FMath::Max(GetHolsterSwapDelay(CurrentWeapon), KINDA_SMALL_NUMBER), false);
 
 	PlayWeaponSwitchSound();
 }
 
 void AShooterCharacter::FinishWeaponSwitch(AShooterWeapon* NewWeapon)
 {
-	if (!bIsWeaponSwitchInProgress || !bWeaponSwitchPausedAtBottom)
+	if (WeaponSwitchPhase == EWeaponSwitchPhase::Holstering)
+	{
+		// The old weapon is still being put away. Remember what arrived; the swap point draws it.
+		PendingWeapon = NewWeapon;
+		return;
+	}
+
+	if (WeaponSwitchPhase != EWeaponSwitchPhase::WaitingForWeapon)
 	{
 		return;
 	}
 
 	PendingWeapon = NewWeapon;
-	bWeaponSwitchPausedAtBottom = false;
-
-	if (bIsWeaponLowering)
-	{
-		// Lower phase still in progress — UpdateWeaponSwitch will hit OnWeaponSwitchLowered
-		// naturally when WeaponSwitchProgress reaches 1.0 (now that pause flag is cleared).
-		return;
-	}
-
-	// Lower already completed (mesh held at bottom) — trigger swap+raise immediately.
-	OnWeaponSwitchLowered();
+	BeginWeaponDraw();
 }
 
 // Shared helper: finds the first yanked weapon in OwnedWeapons, spawns a non-capturable
@@ -4258,8 +5457,9 @@ void AShooterCharacter::OnYankThrowLowerNotify()
 
 	if (Replacement)
 	{
-		BeginWeaponLower();              // animate FP arms lowering (Yanked mesh hidden, so visually empty hands lower)
-		FinishWeaponSwitch(Replacement); // schedule swap-to-replacement at bottom + raise
+		// No holster montage here: the throw montage owns these arms and has already emptied them.
+		BeginWeaponLower(/*bPlayHolsterMontage=*/ false);
+		FinishWeaponSwitch(Replacement); // equips the replacement and plays its draw
 	}
 	else
 	{
@@ -4420,43 +5620,11 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 	TSubclassOf<UAnimInstance> FPAnimClass = Weapon->GetFirstPersonAnimInstanceClass();
 	TSubclassOf<UAnimInstance> TPAnimClass = Weapon->GetThirdPersonAnimInstanceClass();
 
-	// Melee weapon: swap FP mesh to MeleeWeaponFPMesh
-	if (Weapon->IsMeleeWeapon() && MeleeWeaponFPMesh && MeleeWeaponFPMesh->GetSkeletalMeshAsset())
+	// Every weapon, melee included, drives the same first-person arms: the sword's own AnimBP
+	// comes in through FirstPersonAnimInstanceClass like any other weapon's.
+	if (FPAnimClass)
 	{
-		// Hide character's FP mesh
-		GetFirstPersonMesh()->SetVisibility(false);
-
-		// Attach MeleeWeaponFPMesh to camera
-		UCameraComponent* Camera = GetFirstPersonCameraComponent();
-		if (Camera)
-		{
-			MeleeWeaponFPMesh->AttachToComponent(
-				Camera,
-				FAttachmentTransformRules::SnapToTargetNotIncludingScale
-			);
-			MeleeWeaponFPMesh->SetRelativeLocation(MeleeWeaponFPMeshOffset);
-			MeleeWeaponFPMesh->SetRelativeRotation(MeleeWeaponFPMeshRotation);
-		}
-
-		MeleeWeaponFPMesh->SetVisibility(true, true);
-		MeleeWeaponFPMesh->HideBoneByName(FName("neck_01"), EPhysBodyOp::PBO_None);
-
-		// Play equip montage if set (draw/unsheathe animation)
-		if (AShooterWeapon_Melee* MeleeWeapon = Cast<AShooterWeapon_Melee>(Weapon))
-		{
-			if (MeleeWeapon->EquipMontage)
-			{
-				MeleeWeapon->PlayMontageOnFPMesh(MeleeWeapon->EquipMontage);
-			}
-		}
-	}
-	else
-	{
-		// Normal weapon: set FP AnimBP as usual
-		if (FPAnimClass)
-		{
-			GetFirstPersonMesh()->SetAnimInstanceClass(FPAnimClass);
-		}
+		GetFirstPersonMesh()->SetAnimInstanceClass(FPAnimClass);
 	}
 
 	if (TPAnimClass)
@@ -4499,16 +5667,6 @@ void AShooterCharacter::OnWeaponDeactivated(AShooterWeapon* Weapon)
 	if (RecoilComponent)
 	{
 		RecoilComponent->ResetRecoil();
-	}
-
-	// Restore FP mesh when melee weapon is unequipped
-	if (Weapon->IsMeleeWeapon() && MeleeWeaponFPMesh)
-	{
-		MeleeWeaponFPMesh->SetVisibility(false, true);
-		MeleeWeaponFPMesh->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
-
-		// Restore character's FP mesh visibility
-		GetFirstPersonMesh()->SetVisibility(true);
 	}
 
 	// Re-enable MeleeAttackComponent when melee weapon is unequipped
@@ -4568,17 +5726,31 @@ void AShooterCharacter::UpdateFirstPersonMeshVisibility()
 
 	const bool bHasWeapon = OwnedWeapons.Num() > 0;
 
-	// Don't show FP mesh if current weapon is melee and we have MeleeWeaponFPMesh
-	bool bMeleeWeaponOverride = false;
-	if (bHasWeapon && CurrentWeapon && CurrentWeapon->IsMeleeWeapon())
-	{
-		if (MeleeWeaponFPMesh && MeleeWeaponFPMesh->GetSkeletalMeshAsset())
-		{
-			bMeleeWeaponOverride = true;
-		}
-	}
+	// Hands go away with the gun for the length of a grapple. Hiding the weapon alone leaves a pair
+	// of empty gloves floating in front of the camera, which is what it looked like: the weapon
+	// actor is hidden by DeactivateWeapon, but the arms are a component of the CHARACTER and know
+	// nothing about it.
+	//
+	// Asked here rather than set directly at the two stow sites, because this function is what every
+	// other system calls when it changes something that affects the arms -- picking a weapon up,
+	// losing the last one, the inventory arriving on a client. Any of those firing mid-grapple would
+	// have put the hands straight back on screen.
+	// Two reasons the arms can be away, and both belong in this one expression.
+	//
+	// The phase covers a grapple holding the line. The frame counter covers the first frames of ANY
+	// draw: the montage has been asked for but the animation graph has not run yet, so the arms
+	// would be shown for a frame or two in whatever pose they were left in and then snap into the
+	// draw. Keeping the counter HERE rather than deciding it at the call sites is the same rule as
+	// the phase -- any other system calling this function during those frames would otherwise reveal
+	// the arms early and put the flash straight back.
+	const bool bStowedForGrapple = (WeaponSwitchPhase == EWeaponSwitchPhase::StowedForGrapple);
+	const bool bWaitingForDrawPose = (FirstPersonRevealFramesLeft > 0);
 
-	FPMesh->SetVisibility(bHasWeapon && !bMeleeWeaponOverride, false);
+	// PROPAGATED to children, and that is not incidental. The weapon's own first-person mesh is
+	// attached to the arms (@see AttachWeaponMeshes), so hiding the arms without propagating leaves
+	// the gun hanging in mid-air by itself -- which would trade a two-frame wrong pose for a
+	// two-frame floating rifle. Both halves of the hold have to move together.
+	FPMesh->SetVisibility(bHasWeapon && !bStowedForGrapple && !bWaitingForDrawPose, true);
 }
 
 void AShooterCharacter::OnSemiWeaponRefire()
@@ -4588,9 +5760,33 @@ void AShooterCharacter::OnSemiWeaponRefire()
 
 void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled, AActor* HitActor)
 {
+	// Callers that predate the context still work: they arrive with the shield fields at their
+	// defaults, which reads as "an ordinary hit", exactly what this call meant before.
+	// Overridden rather than inherited so the interface's default does not bounce straight back.
+	FHitFeedbackContext Context;
+	Context.HitLocation = HitLocation;
+	Context.HitDirection = HitDirection;
+	Context.Damage = Damage;
+	Context.bHeadshot = bHeadshot;
+	Context.bKilled = bKilled;
+	Context.HitActor = HitActor;
+
+	OnWeaponHitFeedback(Context);
+}
+
+void AShooterCharacter::OnWeaponHitFeedback(const FHitFeedbackContext& Context)
+{
+	const FVector& HitLocation = Context.HitLocation;
+	const float Damage = Context.Damage;
+	const bool bHeadshot = Context.bHeadshot;
+	const bool bKilled = Context.bKilled;
+	AActor* HitActor = Context.HitActor;
+
 	if (HitMarkerComponent)
 	{
-		HitMarkerComponent->RegisterHit(HitLocation, HitDirection, Damage, bHeadshot, bKilled);
+		// The 2D half. The component decides for itself whether this machine is the one that gets
+		// to hear it; the world half of the same hit already went out from the weapon.
+		HitMarkerComponent->RegisterHitFeedback(Context);
 	}
 
 	// === Stream style hook ===
@@ -4622,7 +5818,14 @@ void AShooterCharacter::OnWeaponHit(const FVector& HitLocation, const FVector& H
 	}
 
 	// Charge transfer for melee weapon hits (same logic as OnMeleeHit)
-	if (HitActor && CurrentWeapon && CurrentWeapon->IsMeleeWeapon())
+	//
+	// Stands down for a blade that states its own ionization: that weapon pays its wielder from its
+	// own MeleeChargeToAttackerPerHit, in the same place it charges the target. What this block does
+	// instead is read the amount off the VICTIM (-GetChargeChangeOnMeleeHit), which meant the same
+	// swing paid the player differently depending on what it hit, with the reason authored on the
+	// enemy rather than on the sword.
+	if (HitActor && CurrentWeapon && CurrentWeapon->IsMeleeWeapon()
+		&& !AShooterWeapon_Melee::AttackerOverridesLegacyMeleeCharge(this))
 	{
 		if (UEMFVelocityModifier* EMFMod = FindComponentByClass<UEMFVelocityModifier>())
 		{
@@ -5147,6 +6350,24 @@ void AShooterCharacter::Die()
 		AbilityComponent->CancelCast();
 	}
 
+	// Same reason as the cast above: the character is reused, so a swap caught mid-animation would
+	// carry its phase into the next life and lock firing there. The held trigger goes with it.
+	CancelWeaponSwitch();
+	bFireHeldThroughSwitch = false;
+
+	// And the grapple's stow, for exactly the same reason and with a nastier failure. The flag is
+	// what makes stowing idempotent, so a death on the line would carry a stale "already stowed"
+	// into the next life: the next grapple would decline to stow (it thinks it already has) and then
+	// unstow at the end, drawing a weapon that never left -- or, worse, the CancelCast above never
+	// runs and the player respawns permanently unarmed. CancelCast usually unwinds this properly;
+	// this line is here for the times it does not.
+	bWeaponStowedForGrapple = false;
+
+	// And the two-frame hold on the arms, for the same reused-character reason: a death landing
+	// inside that window would carry a non-zero count into the next life, where nothing counts it
+	// down until the next grapple and the arms stay hidden meanwhile.
+	FirstPersonRevealFramesLeft = 0;
+
 	if (IsValid(CurrentWeapon))
 	{
 		CurrentWeapon->DeactivateWeapon();
@@ -5192,10 +6413,6 @@ void AShooterCharacter::Die()
 				if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
 				{
 					FPMesh->SetVisibility(false, true);
-				}
-				if (MeleeWeaponFPMesh)
-				{
-					MeleeWeaponFPMesh->SetVisibility(false, true);
 				}
 				if (CurrentWeapon)
 				{
@@ -5519,6 +6736,18 @@ void AShooterCharacter::SetFPMontageAlpha(float Target, float BlendTime)
 	// montages follow the view on their own; there is no Control Rig left to blend out.
 }
 
+// True while Montage is playing on Mesh, whichever mesh that is.
+static bool IsMontagePlayingOnMesh(const USkeletalMeshComponent* Mesh, UAnimMontage* Montage)
+{
+	if (!Mesh || !Montage)
+	{
+		return false;
+	}
+
+	const UAnimInstance* AnimInstance = Mesh->GetAnimInstance();
+	return AnimInstance && AnimInstance->Montage_IsPlaying(Montage);
+}
+
 void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 {
 	// Determine target alpha based on state
@@ -5547,7 +6776,11 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	// magazine, and IK pinning the left hand to the grip socket fights it the whole way. Keyed to
 	// the montage actually playing, so a weapon with no reload animation never unpins anything and
 	// the hand is released for exactly as long as something is moving it.
-	else if (IsPlayingReloadAnimation())
+	// The body is checked as well as the arms, because on ANOTHER player's machine only the body
+	// has the montage: the first person mesh is this player's own and nobody else animates it.
+	// Without it a teammate reloaded with their off hand still welded to the grip.
+	else if (IsPlayingReloadAnimation()
+		|| (CurrentWeapon && IsMontagePlayingOnMesh(GetMesh(), CurrentWeapon->GetReloadMontage())))
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}
@@ -6241,10 +7474,6 @@ void AShooterCharacter::BeginFinisherCinematic()
 	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
 	{
 		FPMesh->SetVisibility(false, /*bPropagateToChildren=*/ true);
-	}
-	if (MeleeWeaponFPMesh)
-	{
-		MeleeWeaponFPMesh->SetVisibility(false, /*bPropagateToChildren=*/ true);
 	}
 
 	// Lock input — the cine camera (Camera Cuts) owns the view during the finisher.

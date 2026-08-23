@@ -32,7 +32,10 @@ public class Polarity : ModuleRules
             "Foliage",
             "Landscape",
             "LandscapePatch",
-            "DeveloperSettings"
+            "DeveloperSettings",
+            // CableComponent: the grapple line is drawn with UCableComponent, which lives in the
+            // engine plugin of the same name. Enabled by default, so no .uproject entry is needed.
+            "CableComponent"
         });
 
         // NetCore: FVector_NetQuantize*::NetSerialize is a header-only wrapper around

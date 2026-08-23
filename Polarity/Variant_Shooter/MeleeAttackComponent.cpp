@@ -381,6 +381,71 @@ bool UMeleeAttackComponent::StartDelegatedDropKick()
 	return bSuccess;
 }
 
+bool UMeleeAttackComponent::TryStartDelegatedLunge()
+{
+	if (!OwnerCharacter)
+	{
+		return false;
+	}
+
+	// Any previous flight ends first. A fast swinger can start the next swing while the last lunge is
+	// still publishing intent, and two overlapping acquisitions would leave the older target flying.
+	EndDelegatedLunge();
+
+	// The speed gate in UpdateLunge reads this, so it has to be the speed at the START of the swing
+	// and not whatever the velocity happens to be by the time the flight begins. On this component
+	// the gate defaults to 0 -- works from a standstill -- which is the behaviour the weapon's own
+	// copy did not have.
+	if (const UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement())
+	{
+		OwnerVelocityAtAttackStart = Movement->Velocity;
+	}
+
+	// Not a dropkick: that is the weapon's other delegation and it has its own entry point. Cleared
+	// here so a lunge started right after a dropkick cannot inherit its flags.
+	bIsDropKick = false;
+	DropKickHeightDifference = 0.0f;
+
+	StartMagnetism();
+
+	// StartMagnetism is allowed to find nothing, and a swing at empty air is not a failure -- it just
+	// does not fly. Reporting that honestly lets the weapon skip its own bookkeeping.
+	if (!MagnetismTarget.IsValid())
+	{
+		return false;
+	}
+
+	bDelegatedLunge = true;
+
+	if (AShooterCharacter::IsLungeDebugEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] COMPONENT: delegated lunge started at %s (entry speed %.0f, gate %.0f)"),
+			*GetNameSafe(MagnetismTarget.Get()), OwnerVelocityAtAttackStart.Size(), Settings.MinSpeedForLunge);
+	}
+
+	return true;
+}
+
+void UMeleeAttackComponent::EndDelegatedLunge()
+{
+	if (!bDelegatedLunge)
+	{
+		return;
+	}
+
+	bDelegatedLunge = false;
+
+	// UpdateLunge publishes "not lunging" on its next tick, and that falling edge is what actually
+	// ends the flight on both machines and gives gravity and move-collision back. StopMagnetism only
+	// clears this component's own bookkeeping.
+	StopMagnetism();
+
+	if (AShooterCharacter::IsLungeDebugEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] COMPONENT: delegated lunge ended"));
+	}
+}
+
 bool UMeleeAttackComponent::CancelAttack()
 {
 	// Can only cancel during early phases
@@ -1135,13 +1200,45 @@ float UMeleeAttackComponent::GetMaxReportedSingleHitDamage() const
 		* FMath::Max(Settings.MaxReportedDamageMultiplier, 1.0f);
 }
 
+float UMeleeAttackComponent::GetLungeRangeFor(const AActor* Target) const
+{
+	const float BaseRange = Settings.bEnableLunge ? Settings.LungeRange : 0.0f;
+	if (BaseRange <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// The owner's passive gets to extend this, through the character rather than through a lookup of
+	// its own: AShooterWeapon_Melee carries a second copy of this whole lunge and has to apply the
+	// same passive to ITS base range, and two hand-rolled copies of the lookup would be two things
+	// to keep in step.
+	if (const AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter))
+	{
+		return Shooter->ApplyLungePassiveToRange(Target, BaseRange);
+	}
+
+	return BaseRange;
+}
+
+float UMeleeAttackComponent::GetMaxLungeRange() const
+{
+	// A null target is the agreed way to ask a passive for its ceiling rather than for one enemy's
+	// answer. See UAbilityHandler::ModifyLungeRange.
+	return GetLungeRangeFor(nullptr);
+}
+
 float UMeleeAttackComponent::GetMaxReportedReach() const
 {
 	// The swing itself, plus the ground the approach could have covered before it landed. The lunge
 	// and the dropkick dive are alternatives, never both at once, so the larger of the two is the
 	// honest bound.
+	//
+	// The lunge half has to be the CEILING, not Settings.LungeRange: a Melee who crosses a room at a
+	// stripped enemy lands a hit further out than the base range, and validating against the base
+	// range would reject his own legitimate swing as reaching too far. That failure is silent from
+	// the player's side -- the swing plays, the enemy takes nothing -- so it is worth spelling out.
 	const float Approach = FMath::Max(
-		Settings.bEnableLunge ? Settings.LungeRange : 0.0f,
+		GetMaxLungeRange(),
 		Settings.bEnableDropKick ? Settings.DropKickMaxRange : 0.0f);
 	return Settings.AttackRange + Approach;
 }
@@ -1305,8 +1402,13 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 	// Everything below is only meaningful during the two phases the swing actually flies in. Note
 	// this runs on every other frame too, and publishes "not lunging" — that falling edge is what
 	// ends the flight on both machines.
+	//
+	// A delegated lunge is a third way in, and the only one that does not involve this component's
+	// own state machine at all: the melee weapon runs its own swing and borrows only the flight, so
+	// there is no Windup and no Active here to look at.
 	const bool bInLungePhase =
-		(CurrentState == EMeleeAttackState::Windup || CurrentState == EMeleeAttackState::Active);
+		(CurrentState == EMeleeAttackState::Windup || CurrentState == EMeleeAttackState::Active)
+		|| bDelegatedLunge;
 
 	// bPreserveMomentum off now means the swing does not drive velocity at all. The old branch for it
 	// pushed the character forward at NoTargetBoostSpeed every frame from this tick, and there is no
@@ -1702,6 +1804,26 @@ void UMeleeAttackComponent::StartMagnetism()
 	const FVector Forward = GetTraceDirection();
 	const float CosThreshold = FMath::Cos(FMath::DegreesToRadians(Settings.LungeConeHalfAngle));
 
+	// Two ranges, and they are not the same number any more. The sphere is sized to the furthest any
+	// enemy could possibly be allowed to be, because a target has to be FOUND before its own allowed
+	// range can be worked out from its shield; each candidate is then held to its own range in the
+	// filter below. Sizing the search to the base range instead would mean the extended reach could
+	// never see the enemy it exists for.
+	const float SearchRadius = GetMaxLungeRange();
+	if (SearchRadius <= 0.0f)
+	{
+		return;
+	}
+
+	// Says COMPONENT so a log full of lunge lines cannot be mistaken for the weapon's copy. If this
+	// line appears while a blade is equipped, something has gone wrong with SetExternallyDisabled --
+	// the two are never supposed to run in the same swing.
+	if (AShooterCharacter::IsLungeDebugEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] COMPONENT on %s: searching %.0f cm (ceiling), base %.0f, cone %.0f deg"),
+			*GetNameSafe(OwnerCharacter), SearchRadius, Settings.LungeRange, Settings.LungeConeHalfAngle);
+	}
+
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(OwnerCharacter);
 
@@ -1711,7 +1833,7 @@ void UMeleeAttackComponent::StartMagnetism()
 		Start,
 		FQuat::Identity,
 		ECC_Pawn,
-		FCollisionShape::MakeSphere(Settings.LungeRange),
+		FCollisionShape::MakeSphere(SearchRadius),
 		QueryParams
 	);
 
@@ -1748,9 +1870,13 @@ void UMeleeAttackComponent::StartMagnetism()
 			}
 		}
 
+		// Each candidate is judged against its OWN allowed reach, not against one range shared by
+		// all of them: for the Melee class that is the base range against an intact shield and much
+		// further into a broken one, so two enemies standing side by side can legitimately give
+		// different answers.
 		FVector ToTarget = HitActor->GetActorLocation() - Start;
 		const float Dist = ToTarget.Size();
-		if (Dist <= KINDA_SMALL_NUMBER || Dist > Settings.LungeRange)
+		if (Dist <= KINDA_SMALL_NUMBER || Dist > GetLungeRangeFor(HitActor))
 		{
 			continue;
 		}
@@ -1770,7 +1896,7 @@ void UMeleeAttackComponent::StartMagnetism()
 			GetWorld(),
 			Start,
 			Forward,
-			Settings.LungeRange,
+			SearchRadius,
 			FMath::DegreesToRadians(Settings.LungeConeHalfAngle),
 			FMath::DegreesToRadians(Settings.LungeConeHalfAngle),
 			16,

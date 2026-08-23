@@ -114,8 +114,105 @@ enum class EPolarityMoveFlag : uint16
 	 *  stopping dead. A decision, not a measurement: the server reads a remote pawn's input as
 	 *  nothing at all, so it has to travel or every client dropkick would end in a dead stop. */
 	MeleeDropKickForward = 1 << 13,
+	/** Hanging on the grapple line. Gravity and air strafe stay ON while this is set — the swing is
+	 *  the mechanic, and a pull that suppressed both would be the old one-shot launch again with a
+	 *  longer duration. It is also the presence bit for the anchor on the wire.
+	 *  @see FCharacterNetworkMoveData_Polarity::GrappleAnchor */
+	Grappling            = 1 << 14,
+	/** Holding ADS. It rides the move because it caps ground speed (MovementSettings::ADSSpeed), and
+	 *  a speed the server does not know about is a correction every frame the client aims. Nothing
+	 *  else about aiming travels here: the FOV, the offset and the sounds stay local. */
+	Aiming               = 1 << 15,
 };
 ENUM_CLASS_FLAGS(EPolarityMoveFlag);
+
+/**
+ * Everything the grapple swing needs to know, handed over in one piece when the line attaches.
+ *
+ * One struct rather than seven loose floats because it grew to seven and the call was becoming a
+ * row of unlabelled numbers nobody could read. It is NOT a UPROPERTY struct: the authored copy is
+ * FGrappleLevelStats on the ability asset, and this is the movement side's private mirror of it.
+ *
+ * Defaults here are only what a component does before any ability has spoken to it; the numbers a
+ * designer actually sees live on the asset.
+ */
+struct FGrappleMotionParams
+{
+	// ---- The pull. Reference: grapple_accel_human, grapple_speedRamp*, grapple_pullDelay_human ----
+
+	/** Acceleration toward the aim point, closing on the ramped target speed below rather than
+	 *  running away without limit. */
+	float PullAcceleration = 1960.0f;
+
+	/** The target speed toward the point, which itself grows from Min to Max over RampTime. */
+	float SpeedRampMin = 98.0f;
+	float SpeedRampMax = 1568.0f;
+	float SpeedRampTime = 1.5f;
+
+	/** Dead time between the hook biting and the pull starting. */
+	float PullDelay = 0.2f;
+
+	/** How hard everything NOT pointing at the aim point is braked. This is the reference's
+	 *  grapple_decel_human, and it is what makes the ability a steerable winch rather than a
+	 *  pendulum. Zero gives the pendulum back. */
+	float LateralDeceleration = 833.0f;
+
+	/** Whether that brake leaves downward speed alone, so gravity keeps working through it.
+	 *  Reference: grapple_dontFightGravity. */
+	bool bDontFightGravity = true;
+
+	/** How far above the hook the pull actually aims. Reference: grapple_lift. */
+	float Lift = 49.0f;
+
+	/** Hard ceiling on total speed. Zero means none, and the reference has none. */
+	float MaxSpeed = 0.0f;
+
+	// ---- Gravity. Reference: grapple_letGravityHelpCosAngle, grapple_gravityPushUnderContribution ----
+
+	/** Cosine from straight down past which gravity is allowed to act at all. Gravity is OFF above
+	 *  this, which is the reference's behaviour and most of what a player notices. */
+	float LetGravityHelpCosAngle = 0.8f;
+
+	/** Gravity multiplier while the player pushes forward AND looks well below the hook, and how far
+	 *  below "well below" is. The margin is what stops the mechanic reading as "W toggles gravity". */
+	float GravityPushUnderContribution = 2.0f;
+	float PushUnderMinAngleDegrees = 25.0f;
+
+	// ---- The moment it bites. Reference: grapple_initial* ----
+
+	float InitialSlowFracHorizontal = 1.0f;
+	float InitialSlowFracVertical = 0.4f;
+	float InitialImpulse = 686.0f;
+	float InitialImpulseOffGround = 98.0f;
+	float InitialSpeedMin = 0.0f;
+
+	// ---- Steering. Ours, not the reference's: its air numbers are in no public dump. ----
+
+	float SwingAirAcceleration = 5500.0f;
+	float SwingWishSpeed = 400.0f;
+
+	// ---- The ground ----
+
+	/** What is left of walking friction and of no-input braking while a line is out and the
+	 *  character is touching the floor. @see UApexMovementComponent::CalcVelocity */
+	float GroundFrictionScale = 0.05f;
+	float GroundBrakingScale = 0.0f;
+
+	// ---- Letting go ----
+
+	/** The line lets go once the player has been slower than DetachLowSpeed for DetachLowSpeedTime.
+	 *  The reference detaches on speed (m_grappleSwingDetachLowSpeed, m_grappleHasGoodVelocity), not
+	 *  on angle; the numbers are ours because its numbers are in no dump. */
+	float DetachLowSpeed = 390.0f;
+	float DetachLowSpeedTime = 0.4f;
+
+	/** Close enough to the aim point to let go automatically. */
+	float ArrivalRadius = 150.0f;
+
+	/** Longest one line may be held whatever else happens. Zero means no limit. Ours: the reference
+	 *  has no duration on the base grapple at all. */
+	float MaxDuration = 2.5f;
+};
 
 /**
  * One client move on the wire, with our byte appended to what the engine already sends.
@@ -138,6 +235,15 @@ struct FCharacterNetworkMoveData_Polarity : public FCharacterNetworkMoveData
 	 *  the client passes through, and they disagree about where the character ended up.
 	 *  Sent the way the engine sends MovementBase. */
 	TObjectPtr<UObject> MeleeLungeTargetActor = nullptr;
+
+	/** Where the grapple line is anchored, in world space. On the wire only while Grappling is set,
+	 *  on exactly the same terms as the lunge target above.
+	 *
+	 *  It travels for the same reason the lunge target does: it is one specific point, and the two
+	 *  ends must swing around the same post. The SERVER chooses it — a client cannot be trusted to
+	 *  invent geometry — and hands it to the owning client, which then sends it back inside every
+	 *  move it makes while hanging on it, so a replay of those moves swings around it too. */
+	FVector_NetQuantize10 GrappleAnchor = FVector::ZeroVector;
 
 	virtual void ClientFillNetworkMoveData(const FSavedMove_Character& ClientMove, ENetworkMoveType MoveType) override;
 	virtual bool Serialize(UCharacterMovementComponent& CharacterMovement, FArchive& Ar,
@@ -360,6 +466,9 @@ public:
 	FVector PendingMeleeLungeTarget = FVector::ZeroVector;
 	TWeakObjectPtr<AActor> PendingMeleeLungeTargetActor;
 
+	/** The grapple anchor from that same move, on the same terms. */
+	FVector PendingGrappleAnchor = FVector::ZeroVector;
+
 	/** What this character is doing right now, as the flags that go on the wire. */
 	uint16 PackPolarityMoveFlags() const;
 
@@ -469,9 +578,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void EndSlide();
 
-	/** Start slide from air landing - preserves and boosts momentum (Titanfall 2 mechanic) */
-	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
-	void StartSlideFromAir(float FallSpeed);
+	// StartSlideFromAir is gone on purpose. It was a second entry into the slide with its own boost
+	// formula and no minimum speed, so landing with crouch held beat sliding out of a sprint by a
+	// wide margin. Apex has no equivalent (slide_whileInAir is 0 there), and ProcessLanded now goes
+	// through CanSlide + StartSlide like everything else.
 
 	// ==================== WallRun (slide-style) ====================
 
@@ -498,6 +608,14 @@ public:
 	/** Temporary per-character slide burst override used by weapon-specific upgrades. */
 	void SetExternalSlideSpeedBurstOverride(float MinBurst, float MaxBurst);
 	void ClearExternalSlideSpeedBurstOverride();
+
+	/** Told by AShooterCharacter's ADS input, on the owning client. From there the bit travels in the
+	 *  saved move, so the server caps a remote pawn's speed on the same frames the client did. */
+	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
+	void SetAiming(bool bNewAiming);
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsAiming() const { return bIsAiming; }
 
 	/** Enable/disable the start-of-run launch state (suppresses air abilities while the toss arc plays). */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
@@ -575,6 +693,41 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Apex|Crouch")
 	float CapsuleInterpSpeed = 15.0f;
 
+	// ==================== Crouch / slide blend alphas ====================
+	//
+	// Purely cosmetic: how far the crouch pose and the slide pose are faded in, 0 to 1. The states
+	// themselves are booleans that flip in one frame (the engine swaps the capsule in one step),
+	// which is exactly what an animation graph cannot blend on its own -- hence a value here rather
+	// than a "is crouching" bool the graph would have to smooth itself.
+	//
+	// Kept on the movement component and not on the character on purpose: the component ticks on
+	// every machine, including simulated proxies and AI, so a watching client blends the same way
+	// the owner does. IsCrouching() is replicated and bIsSliding travels in the move flags, so both
+	// inputs to this are already correct everywhere.
+	//
+	// Nothing here touches Velocity or any movement decision, so it is allowed to live in the tick
+	// rather than inside the simulated move: a replay that rewinds the state simply re-fades from
+	// wherever the alpha stood, and nobody desyncs over a blend weight.
+
+	/** How fast the crouch alpha fades in and out, per second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Apex|Crouch")
+	float CrouchAlphaInterpSpeed = 10.0f;
+
+	/** How fast the slide alpha fades in and out, per second. Faster than crouch by default: a
+	 *  slide starts as a commitment and reads badly if it eases in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Apex|Crouch")
+	float SlideAlphaInterpSpeed = 14.0f;
+
+	/** 0 when standing, 1 when fully crouched. Slide is NOT counted here -- it has its own alpha,
+	 *  so a graph can play a different pose for it instead of both at once. Air crouch (the hold
+	 *  that turns into a slide on landing) does count: the legs are tucked either way. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetCrouchAlpha() const { return CrouchAlpha; }
+
+	/** 0 when not sliding, 1 when fully in the slide pose. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetSlideAlpha() const { return SlideAlpha; }
+
 	// ==================== Queries ====================
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
@@ -619,9 +772,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	float GetSlideDuration() const { return SlideDuration; }
 
-	/** Get current slide fatigue level (0-5) */
+	/** Number of slide boosts spent so far, before recovery gives them back. Compare against
+	 *  MovementSettings::SlideFatigueStart / SlideFatigueEnd; it is no longer capped at 5. */
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	int32 GetSlideFatigue() const { return SlideFatigueCounter; }
+
+	/** What the next slide boost would be multiplied by: 1 while rested, 0 once fully fatigued. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetSlideFatigueScale() const;
 
 	/** Reset all movement states (for respawn) */
 	UFUNCTION(BlueprintCallable, Category = "Apex|State")
@@ -652,6 +810,21 @@ public:
 	/** Check if crouch input is held (regardless of actual crouch state) */
 	UFUNCTION(BlueprintPure, Category = "Apex|Input")
 	bool IsCrouchInputHeld() const { return bWantsToCrouchSmooth; }
+
+	/** True while the VIEW should be crouched: a real engine crouch, or the air tuck once it has
+	 *  passed the hold threshold.
+	 *
+	 *  The single trigger every cosmetic layer must read - eye height, first person pose, spine and
+	 *  anim weight - because they only look like one movement if they start on the same frame. The
+	 *  raw crouch button is NOT that trigger in the air: pressing crouch there sets bWantsSlideOnLand
+	 *  immediately, and only AirCrouchHoldThreshold seconds later does the hold become a crouch at
+	 *  all. Driving the pose from the button meant the hands dived on every air dash tap and then
+	 *  came back, and on a real air crouch they had finished travelling before the eye began.
+	 *
+	 *  Slides are excluded: a slide is crouched by construction (StartSlide calls StartCrouching),
+	 *  and it has a pose of its own that would otherwise be applied on top of this one. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsCrouchPoseActive() const { return !bIsSliding && (IsCrouching() || bIsCrouchedInAir); }
 
 	/** Try to perform jump with all checks */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
@@ -747,6 +920,75 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsMeleeLunging() const { return bIsMeleeLunging; }
+
+	// ==================== Grapple ====================
+	// A STEERABLE WINCH, which is what the reference actually is. Not a pendulum, and the difference
+	// is not a matter of taste: it was read out of the shipped Apex binary's ConVar table, where the
+	// developers' own descriptions say what each number does. @see
+	// Docs/Grapple_Reference_Apex_Titanfall.md for the sources and the unit conversion.
+	//
+	// Four things act at once:
+	//
+	//   1. a PULL toward the aim point, which is the hook plus a small lift so a grapple onto a
+	//      ledge puts you on top of it. It is an acceleration closing on a TARGET SPEED, and that
+	//      target itself grows from SpeedRampMin to SpeedRampMax over SpeedRampTime, after a dead
+	//      PullDelay in which nothing happens at all.
+	//   2. a BRAKE on everything that does not point at the aim point. This is the piece that makes
+	//      it a winch: a rope keeps sideways speed forever, the reference deletes it. The arc a
+	//      player flies comes from gravity plus this brake, not from a constraint.
+	//   3. GRAVITY, which is OFF unless the line points steeply downward -- the reference's
+	//      grapple_letGravityHelpCosAngle, whose name says the intent: gravity is let in when it
+	//      pulls the player where they were already going. Pushing forward under the point turns it
+	//      back on at double strength, which is how a player asks to be swung under rather than
+	//      reeled up. A player who says a grapple has no gravity is describing this correctly.
+	//   4. the player's own INPUT, as Quake/Source air acceleration. Ours rather than the
+	//      reference's: Apex uses its ordinary air movement here and those numbers live in player
+	//      settings files that are in no public dump.
+	//
+	// The line lets go on arriving, on the player releasing, or on the player being SLOWER than
+	// DetachLowSpeed for DetachLowSpeedTime. Not on angle: there is no quarter-turn rule anywhere in
+	// the reference, neither in its ConVars nor in its per-player state. On release Velocity is left
+	// completely alone, and everything the pull earned is kept.
+	//
+	// Three earlier versions are worth naming so they are not rebuilt. One was a single
+	// LaunchCharacter impulse: a dash with a rope drawn over it. One summed the direction to the
+	// anchor with the camera's forward vector and used that as the pull -- a winch aimed by the
+	// head, with no arc to speak of. One was an idealised PENDULUM with a fixed-length rope, full
+	// gravity and perfectly conserved tangential speed; it was a better toy than either, and it was
+	// still not what the reference does.
+	//
+	// NOT implemented from the reference: the rope does not wrap around corners. The shipped binary
+	// carries m_grapplePoints[4] plus grapple_around_obstacle_accel, so up to four pivot points, and
+	// putting that here means four vectors in every networked move. Deliberately left out.
+	//
+	// Lives here, in the simulation, for the reason every velocity mechanic in this project does:
+	// PerformMovement is what the server replays and what a corrected client re-runs.
+
+	/** Publish this frame's grapple decision. Safe to call every frame with the same values.
+	 *
+	 *  @param bOn      the line is attached and pulling
+	 *  @param InAnchor world position it is attached to; ignored unless bOn */
+	void SetGrappleIntent(bool bOn, const FVector& InAnchor);
+
+	/** Tunables mirrored from the ability's own level stats, so this side does not have to reach into
+	 *  the ability system. Pushed by AShooterCharacter when the line attaches, on both the authority
+	 *  and the machine that predicts this character. */
+	void SetGrappleTuning(const FGrappleMotionParams& Params);
+
+	/** Seconds the line has been attached. Drives the pull delay and the speed ramp. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetGrappleElapsed() const { return GrappleElapsed; }
+
+	/** How long the player has been under DetachLowSpeed. At DetachLowSpeedTime the line lets go. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetGrappleLowSpeedTime() const { return GrappleLowSpeedTime; }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsGrappling() const { return bIsGrappling; }
+
+	/** Where the line is attached. Meaningless unless IsGrappling; read by the cable that draws it. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	FVector GetGrappleAnchor() const { return GrappleAnchor; }
 
 	// ==================== EMF ====================
 
@@ -885,19 +1127,102 @@ protected:
 	 *  replay would otherwise keep whatever the last real move left there. */
 	void SyncMeleeLungeGravity();
 
+	// ---- Grapple state ----
+
+	/** The decision, as it arrived from input or from the received flags. */
+	bool bGrappleWanted = false;
+
+	/** Whether the swing is actually running, so the edge can be resolved inside the move.
+	 *
+	 *  Replicated to simulated proxies only, exactly like the slide and the wallrun beside it: the
+	 *  owner decided it and the server learned it from the saved move, so this copy exists purely so
+	 *  that the other three players can SEE a line on somebody. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
+	bool bIsGrappling = false;
+
+	/** Where the line is attached, world space. Written by SetGrappleIntent and by the received
+	 *  move; never re-derived locally. Replicated on the same terms and for the same reason -- a
+	 *  cable drawn to the wrong end is worse than no cable. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
+	FVector GrappleAnchor = FVector::ZeroVector;
+
+	/** Seconds the line has been attached, against MaxDuration. Saved state, so a replay does not
+	 *  hand the player a fresh timer on every correction. */
+	float GrappleElapsed = 0.0f;
+
+	/** How long the player has been slower than DetachLowSpeed without a break.
+	 *
+	 *  The reference lets go on SPEED, not on angle: the shipped binary carries
+	 *  m_grappleSwingDetachLowSpeed next to m_grappleHasGoodVelocity and
+	 *  m_grappleLastGoodVelocityTime, and there is no quarter-turn rule anywhere in it. Saved state,
+	 *  because a replay that started this timer over would let go somewhere else. */
+	float GrappleLowSpeedTime = 0.0f;
+
+	/** GravityScale as it was before the line took it over, put back by EndGrapple.
+	 *
+	 *  Not saved state and it must not be: it is derived fresh every simulated move from the rope
+	 *  angle (@see UpdateGrappleGravity), so a replay recomputes it rather than restoring it. Only
+	 *  the value to RESTORE lives here. */
+	float GrapplePreGravityScale = 1.0f;
+
+	/** Mirrored from the ability's own level stats. @see SetGrappleTuning */
+	FGrappleMotionParams GrappleParams;
+
+	/** Where the pull actually aims: the hook, plus Lift straight up, so a grapple onto a ledge puts
+	 *  the character on top of it rather than into the wall beneath it. Reference: grapple_lift. */
+	FVector GetGrappleAimPoint() const;
+
+	/** Entry: cut the fall, add the impulse, leave the floor, start the clock. */
+	void StartGrapple();
+
+	/** Exit. Deliberately empty of momentum changes: every centimetre per second on the clock is the
+	 *  player's to keep. Puts gravity back. */
+	void EndGrapple();
+
+	/** Pull, brake, steer, and decide when to stop. Run from UpdateCharacterStateBeforeMovement,
+	 *  before the move is integrated, so the server replays exactly this. */
+	void UpdateGrapple(float DeltaSeconds);
+
+	/** Gravity for this move, from the angle of the line. Off unless the line points steeply down,
+	 *  doubled while the player pushes forward under the point. This is the single biggest
+	 *  difference between the reference and a pendulum, and the one a player feels first.
+	 *  Reference: grapple_letGravityHelpCosAngle, grapple_gravityPushUnderContribution. */
+	void UpdateGrappleGravity(const FVector& AimDir);
+
+	/** Brake everything that does not point at the aim point, optionally leaving downward speed
+	 *  alone so that gravity still works through it.
+	 *  Reference: grapple_decel_human, grapple_dontFightGravity. */
+	void ApplyGrappleLateralBrake(float DeltaSeconds, const FVector& AimDir);
+
+	/** The player's own input while on the line, as Quake/Source air acceleration.
+	 *  Deliberately not ApplyAirStrafe, whose speed cap redirects the whole horizontal velocity. */
+	void ApplyGrappleAirControl(float DeltaSeconds);
+
 	// Slide state
 	float SlideCooldownRemaining = 0.0f;
 	float SlideBoostCooldownRemaining = 0.0f;
 	float SlideDuration = 0.0f;
+	/** Boosts spent, not slides started: a boost the cooldown swallowed costs nothing. */
 	int32 SlideFatigueCounter = 0;
 	float SlideFatigueDecayTimer = 0.0f;
 	FVector SlideDirection;
+
+	/** Scales a slide boost by the fatigue already accrued, and books the boost as spent. Called at
+	 *  the three places that hand out speed for sliding: the ground entry, the landing entry and the
+	 *  slide hop. Returns 0 once fully fatigued, in which case nothing is booked. */
+	float ConsumeSlideBoostFatigue();
+
+	/** Holding ADS. Written by SetAiming on the owning client, restored from the move flags on the
+	 *  server and on replay, so GetMaxSpeed answers the same on every machine. */
+	bool bIsAiming = false;
 
 	// Saved default values (restored after slide)
 	float DefaultGroundFriction = 8.0f;
 	float DefaultBrakingDeceleration = 2048.0f;
 
 	// Smooth Crouch state
+	float CrouchAlpha = 0.0f;
+	float SlideAlpha = 0.0f;
 	float StandingCapsuleHalfHeight = 0.0f;  // Cached from capsule on init
 	float TargetCapsuleHalfHeight = 0.0f;
 	bool bWantsToCrouchSmooth = false;  // Our internal crouch flag
@@ -1015,6 +1340,9 @@ protected:
 	// Smooth Crouch
 	void UpdateCapsuleHeight(float DeltaTime);
 
+	/** Fades CrouchAlpha and SlideAlpha toward the current state. Cosmetic only. */
+	void UpdateCrouchSlideAlphas(float DeltaTime);
+
 	/** Play camera shake */
 	void PlayCameraShake(TSubclassOf<UCameraShakeBase>);
 };
@@ -1048,6 +1376,17 @@ public:
 	FVector SavedMeleeLungeStartVelocity;
 	uint8 bSavedMeleeLunging : 1;
 	uint8 bSavedMeleeLungeGravityOff : 1;
+
+	/** The grapple anchor for this move. Travels to the server for the same reason the lunge target
+	 *  does: it is geometry only the client's own trace could have chosen. */
+	FVector SavedGrappleAnchor;
+
+	/** The rest of the pull, replay state only. Both evolve during the grapple, and a replay that
+	 *  started either from zero would end the line at a different moment: the first drives the pull
+	 *  delay and the speed ramp, the second is how close the line is to letting go on low speed. */
+	float SavedGrappleElapsed;
+	float SavedGrappleLowSpeedTime;
+	uint8 bSavedGrappling : 1;
 
 	/** Predicted state below this line. It is NOT sent to the server: the server derives its own
 	 *  copy by running the same slides and jumps. These exist so that a *replay* on the client starts

@@ -14,6 +14,7 @@ class UNiagaraComponent;
 class UCameraShakeBase;
 class ABossCharacter;
 class UGeometryCollection;
+class UMeleeAttackComponent;
 
 /** Side from which a melee swing comes */
 UENUM(BlueprintType)
@@ -39,9 +40,17 @@ struct FMeleeWeaponSwingData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection", meta = (ClampMin = "0.0"))
 	float Weight = 1.0f;
 
-	/** Animation montage for this swing */
+	/** Montage played on the owner's first-person arms. This is the one the local player watches,
+	 *  so the damage-window notifies belong in HERE and nowhere else: the third-person montage
+	 *  plays on the same actor and its notifies would open the window a second time. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation")
 	TObjectPtr<UAnimMontage> SwingMontage;
+
+	/** Montage played on the third-person body, on every machine. Separate asset from SwingMontage:
+	 *  the arms and the body are different rigs and read differently on camera. Leave unset to fall
+	 *  back to SwingMontage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation")
+	TObjectPtr<UAnimMontage> SwingMontageTP;
 
 	/** Camera shake for this swing */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera")
@@ -97,6 +106,21 @@ protected:
 
 public:
 	virtual bool IsMeleeWeapon() const override { return true; }
+
+	// ==================== Lunge ====================
+	// This weapon no longer HAS a lunge. It had a full copy of target acquisition and flight, with
+	// its own settings, and it disabled UMeleeAttackComponent while equipped -- so a sword swing and
+	// a bare-handed swing were two unrelated mechanics that happened to look alike. The copy wrote
+	// velocity from the weapon's Tick, which the server does not replay, and it gated on a separate
+	// MinSpeedForLunge of 300, so swinging from standstill produced nothing at all.
+	//
+	// The swing now borrows the component's lunge (TryStartDelegatedLunge), exactly as it already
+	// borrowed the dropkick. All the numbers live on the component, editable in BP_MeleeCharacter.
+
+	/** The owner's melee component, or null. Every borrow goes through here rather than repeating
+	 *  the two casts at each call site. */
+	UMeleeAttackComponent* GetOwnerMeleeComponent() const;
+
 	virtual bool OnSecondaryAction() override;
 	virtual void OnSecondaryActionReleased() override;
 
@@ -224,17 +248,6 @@ public:
 	// ==================== Target Magnetism ====================
 
 	/** Enable predictive target magnetism (locks onto targets before swing) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Target Magnetism")
-	bool bEnableTargetMagnetism = true;
-
-	/** Range for magnetism sphere trace */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
-	float MagnetismRange = 300.0f;
-
-	/** Radius for magnetism sphere trace */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Target Magnetism", meta = (ClampMin = "0", EditCondition = "bEnableTargetMagnetism"))
-	float MagnetismRadius = 80.0f;
-
 	// ==================== Knockback ====================
 
 	/** Base knockback distance in cm */
@@ -255,29 +268,41 @@ public:
 
 	// ==================== Lunge ====================
 
-	/** Enable lunge toward targets (pre-attack magnetism lunge, not on-hit) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge")
-	bool bEnableLunge = true;
+	// ==================== Melee Ionization ====================
+	// The blade's own answer to "how much does a hit electrify what it hits", in the same shape a
+	// hitscan weapon states it. Before this existed the number was not on the weapon at all: every
+	// enemy class carried its own ChargeChangeOnMeleeHit and charged ITSELF when it took melee
+	// damage, so re-tuning "how hard the sword ionizes" meant editing every enemy in the game and
+	// two kinds of drone.
+	//
+	// That legacy path is still there and still runs for everything else -- bare fists, an enemy
+	// hitting the player, a drone -- but it stands down for hits from a blade that has the flag
+	// below on, so the two never both pay out for the same swing.
 
-	/** Speed at which player lunges toward target (cm/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0", EditCondition = "bEnableLunge"))
-	float LungeSpeed = 2000.0f;
+	/** If true, a hit from this weapon ionizes the target through the ordinary weapon path, and the
+	 *  target's own ChargeChangeOnMeleeHit stops applying to hits from this weapon. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Ionization")
+	bool bUseMeleeIonization = false;
 
-	/** Distance from target where lunge stops (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0", ClampMax = "200", EditCondition = "bEnableLunge"))
-	float LungeStopBuffer = 40.0f;
+	/** Charge added to the TARGET per hit. Signed, exactly like the hitscan one: the electrifying
+	 *  weapons drive charge negative, and a cap is a magnitude rather than an upper bound. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Ionization", meta = (EditCondition = "bUseMeleeIonization"))
+	float MeleeIonizationChargePerHit = 2.0f;
 
-	/** Maximum range for lunge target acquisition (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0", EditCondition = "bEnableLunge"))
-	float LungeMaxRange = 400.0f;
+	/** Charge given to the ATTACKER per hit, which is the melee charge transfer the design asks for.
+	 *
+	 *  Signed and applied as-is. This used to be computed on the character as the negative of the
+	 *  victim's own number, which meant the sword's payout to its wielder was authored on the enemy
+	 *  being hit -- so the same swing paid differently per enemy for no stated reason. Zero turns the
+	 *  transfer off for this weapon without touching anything else. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Ionization", meta = (EditCondition = "bUseMeleeIonization"))
+	float MeleeChargeToAttackerPerHit = 0.0f;
 
-	/** Minimum speed to trigger lunge (prevents weak lunges when stationary) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0", EditCondition = "bEnableLunge"))
-	float MinSpeedForLunge = 300.0f;
-
-	/** Lunge duration (seconds) - how long the lunge takes to complete */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Lunge", meta = (ClampMin = "0.05", ClampMax = "0.5", EditCondition = "bEnableLunge"))
-	float LungeDuration = 0.15f;
+	/** True when a hit from this actor's current weapon should suppress the target's own legacy
+	 *  ChargeChangeOnMeleeHit. Static and taking the ATTACKER because the places that ask are the
+	 *  victims -- AShooterNPC, the drones and AEMFPhysicsProp -- and all any of them has is the
+	 *  pawn that hit it. */
+	static bool AttackerOverridesLegacyMeleeCharge(const AActor* Attacker);
 
 	// ==================== Cool Kick ====================
 
@@ -339,9 +364,8 @@ public:
 
 	// ==================== Swing Animations ====================
 
-	/** Montage played on MeleeWeaponFPMesh when weapon is equipped (e.g. draw/unsheathe) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Animation")
-	TObjectPtr<UAnimMontage> EquipMontage;
+	// The draw / unsheathe animation is AShooterWeapon::DrawMontage + DrawMontageTP, played by the
+	// weapon-switch flow like every other weapon's. There is no melee-only equip montage any more.
 
 	/** Which side the first swing comes from (when starting from idle) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Animation")
@@ -430,18 +454,14 @@ protected:
 	// ==================== Target Magnetism ====================
 
 	/** Find and lock onto nearest target before swing */
-	void StartMagnetism();
 
 	/** Update magnetism lunge and target tracking */
-	void UpdateMagnetism(float DeltaTime);
 
 	/** Stop magnetism, restore gravity, handle exit momentum */
-	void StopMagnetism();
 
 	// ==================== Momentum ====================
 
 	/** Update Titanfall 2 momentum preservation during swing */
-	void UpdateMomentumPreservation(float DeltaTime);
 
 	// ==================== Cool Kick ====================
 
@@ -485,18 +505,20 @@ protected:
 
 	// ==================== Montage Control ====================
 
-	/** Stop any currently playing montage on the owner and character's MeleeWeaponFPMesh */
+	/** Stop any currently playing montage on the owner's first-person arms and body */
 	void StopCurrentMontage();
 
+	/** The owner's first-person arms, or null when the owner is not a ShooterCharacter (an NPC
+	 *  carrying this weapon has no first-person view at all). */
+	USkeletalMeshComponent* GetOwnerFirstPersonMesh() const;
+
 public:
-	/** Play montage on character's MeleeWeaponFPMesh (gets mesh from ShooterCharacter) */
-	void PlayMontageOnFPMesh(UAnimMontage* Montage, float PlayRate = 1.0f);
+	/** Play a swing on the owner: FirstPersonMontage on the local arms, ThirdPersonMontage on the
+	 *  body everywhere (so teammates see the swing). Passing null for the third-person montage
+	 *  reuses the first-person one. Combo speed is applied on top of PlayRate. */
+	void PlaySwingMontages(UAnimMontage* FirstPersonMontage, UAnimMontage* ThirdPersonMontage, float PlayRate = 1.0f);
 
 protected:
-
-	/** Cached reference to character's MeleeWeaponFPMesh */
-	UPROPERTY()
-	TObjectPtr<USkeletalMeshComponent> CachedMeleeWeaponFPMesh;
 
 	// ==================== VFX/SFX ====================
 
@@ -569,16 +591,12 @@ protected:
 	// ==================== Magnetism State ====================
 
 	/** Target locked on by magnetism (set at swing start) */
-	TWeakObjectPtr<AActor> MagnetismTarget;
 
 	/** Pre-calculated lunge target position (validated via path sweep) */
-	FVector MagnetismLungeTargetPosition = FVector::ZeroVector;
 
 	/** True while magnetism is active (between Fire and DeactivateDamageWindow) */
-	bool bIsMagnetismActive = false;
 
 	/** Lunge progress during magnetism (0-1) */
-	float LungeProgress = 0.0f;
 
 	// ==================== Cool Kick State ====================
 
@@ -634,7 +652,7 @@ protected:
 	/** Execute weapon break: spawn GC, remove from inventory, switch weapon */
 	void BreakWeapon();
 
-	/** Spawn GC destruction at MeleeWeaponStaticMesh location */
+	/** Spawn GC destruction at the weapon's third-person mesh location */
 	void SpawnBreakDestructionGC();
 
 	/** Update CurrentBullets/MagazineSize from durability and broadcast to UI */

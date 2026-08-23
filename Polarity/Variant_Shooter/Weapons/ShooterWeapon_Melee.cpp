@@ -9,6 +9,7 @@
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
+#include "EMFVelocityModifier.h"
 #include "ShooterDummyInterface.h"
 #include "PolarityCharacter.h"
 #include "ApexMovementComponent.h"
@@ -64,12 +65,6 @@ void AShooterWeapon_Melee::BeginPlay()
 	{
 		CachedPlayerController = Cast<APlayerController>(PawnOwner->GetController());
 	}
-
-	// Cache reference to character's MeleeWeaponFPMesh
-	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner))
-	{
-		CachedMeleeWeaponFPMesh = ShooterChar->GetMeleeWeaponFPMesh();
-	}
 }
 
 void AShooterWeapon_Melee::Tick(float DeltaTime)
@@ -82,17 +77,9 @@ void AShooterWeapon_Melee::Tick(float DeltaTime)
 		UpdateDamageWindow();
 	}
 
-	// Magnetism and lunge during damage window
-	if (bIsMagnetismActive)
-	{
-		UpdateMagnetism(DeltaTime);
-	}
-
-	// Momentum preservation during swing
-	if (bDamageWindowActive && bPreserveMomentum)
-	{
-		UpdateMomentumPreservation(DeltaTime);
-	}
+	// Nothing here drives the lunge any more. It belongs to UMeleeAttackComponent, whose own tick
+	// publishes the flight into the movement simulation -- which is the whole reason for the move:
+	// velocity written from this actor's Tick is not part of the move the server replays.
 
 	// Cool kick boost (independent of damage window)
 	UpdateCoolKick(DeltaTime);
@@ -174,16 +161,15 @@ void AShooterWeapon_Melee::Fire()
 		DeactivateDamageWindow();
 	}
 
-	// Stop previous magnetism
-	if (bIsMagnetismActive)
+	// Stop the previous lunge, wherever it is in its flight. Refire is faster than a lunge lasts.
+	if (UMeleeAttackComponent* MeleeComp = GetOwnerMeleeComponent())
 	{
-		StopMagnetism();
+		MeleeComp->EndDelegatedLunge();
 	}
 
 	// Reset state for new swing
 	bHitDuringWindow = false;
 	HitActorsThisSwing.Empty();
-	LungeProgress = 0.0f;
 
 	// Stop current montage so the new one can play
 	StopCurrentMontage();
@@ -209,8 +195,8 @@ void AShooterWeapon_Melee::Fire()
 			CurrentSwingData = SelectWeightedSwing(/*bAirborne=*/ true);
 			if (CurrentSwingData && CurrentSwingData->SwingMontage)
 			{
-				PlayMontageOnFPMesh(CurrentSwingData->SwingMontage);
-				WeaponOwner->PlayFiringMontage(CurrentSwingData->SwingMontage);
+				PlaySwingMontages(CurrentSwingData->SwingMontage, CurrentSwingData->SwingMontageTP,
+					CurrentSwingData->BasePlayRate);
 				PlayMeleeCameraShake(CurrentSwingData->SwingCameraShake, CurrentSwingData->SwingShakeScale);
 			}
 
@@ -224,8 +210,14 @@ void AShooterWeapon_Melee::Fire()
 
 	// ==================== Normal Attack (non-dropkick) ====================
 
-	// Start magnetism (pre-attack target lock-on)
-	StartMagnetism();
+	// Pre-attack target lock-on, borrowed from the character's melee component the same way the
+	// dropkick above is. This weapon no longer owns a lunge: one implementation, one set of numbers
+	// on BP_MeleeCharacter, and a flight that happens inside the movement simulation so it works for
+	// a client and not only for the host.
+	if (UMeleeAttackComponent* MeleeComp = GetOwnerMeleeComponent())
+	{
+		MeleeComp->TryStartDelegatedLunge();
+	}
 
 	// Determine if airborne for animation selection
 	bool bAirborne = false;
@@ -241,16 +233,13 @@ void AShooterWeapon_Melee::Fire()
 	CurrentSwingData = SelectWeightedSwing(bAirborne);
 	if (CurrentSwingData && CurrentSwingData->SwingMontage)
 	{
-		// Play on MeleeWeaponFPMesh (first-person view)
-		PlayMontageOnFPMesh(CurrentSwingData->SwingMontage);
-		// Also play on TP mesh via WeaponOwner (third-person view)
-		WeaponOwner->PlayFiringMontage(CurrentSwingData->SwingMontage);
+		PlaySwingMontages(CurrentSwingData->SwingMontage, CurrentSwingData->SwingMontageTP,
+			CurrentSwingData->BasePlayRate);
 		PlayMeleeCameraShake(CurrentSwingData->SwingCameraShake, CurrentSwingData->SwingShakeScale);
 	}
 	else if (FiringMontage)
 	{
-		PlayMontageOnFPMesh(FiringMontage);
-		WeaponOwner->PlayFiringMontage(FiringMontage);
+		PlaySwingMontages(FiringMontage, nullptr);
 	}
 
 	// Play swing sound
@@ -272,6 +261,16 @@ void AShooterWeapon_Melee::ActivateDamageWindow()
 {
 	// Drop kick manages its own damage window — ignore AnimNotify
 	if (bIsDropKick)
+	{
+		return;
+	}
+
+	// The swing now runs as two montages on the same actor (arms and body), and the notify looks
+	// the weapon up through the mesh's owner, so a notify authored into both would open the window
+	// twice and wipe the already-hit list mid-swing, letting one swing damage a target twice.
+	// Damage notifies belong in the first-person montage only; this guard makes a stray one in the
+	// third-person asset harmless instead of a double hit.
+	if (bDamageWindowActive)
 	{
 		return;
 	}
@@ -331,8 +330,12 @@ void AShooterWeapon_Melee::DeactivateDamageWindow()
 	// Stop trail VFX
 	StopSwingTrail();
 
-	// Stop magnetism and restore state
-	StopMagnetism();
+	// End the lunge with the damage window. Gravity and move-collision come back on the flight's
+	// falling edge inside the simulated move, not here.
+	if (UMeleeAttackComponent* MeleeComp = GetOwnerMeleeComponent())
+	{
+		MeleeComp->EndDelegatedLunge();
+	}
 
 	// Stop camera focus
 	StopCameraFocus();
@@ -376,8 +379,12 @@ void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
 		// Note: bHitDuringWindow was set above, so check HitActorsThisSwing count instead
 	}
 
-	// Cool kick: if airborne and this is first hit without magnetism lunge
-	if (HitActorsThisSwing.Num() == 1 && !MagnetismTarget.IsValid())
+	// Cool kick: if airborne and this is first hit without magnetism lunge.
+	// "Without a lunge" is now asked of the component that owns the lunge, rather than of a copy of
+	// the answer kept here.
+	const UMeleeAttackComponent* LungeOwner = GetOwnerMeleeComponent();
+	const bool bLungedAtSomething = LungeOwner && LungeOwner->GetLungeTargetActor() != nullptr;
+	if (HitActorsThisSwing.Num() == 1 && !bLungedAtSomething)
 	{
 		if (UCharacterMovementComponent* Movement = PawnOwner->FindComponentByClass<UCharacterMovementComponent>())
 		{
@@ -405,6 +412,26 @@ void AShooterWeapon_Melee::ProcessHit(const FHitResult& HitResult)
 			FVector HitDirection = (HitResult.ImpactPoint - PawnOwner->GetActorLocation()).GetSafeNormal();
 			WeaponOwner->OnWeaponHit(HitResult.ImpactPoint, HitDirection, MeleeDamage, bHeadshot, false, HitActor);
 			return;
+		}
+	}
+
+	// Ionize BEFORE damage, and unconditionally. On a finisher blade the damage below is withheld
+	// until the shield is down, and the charge is the only thing that moves it toward being down --
+	// doing it the other way round would make such a weapon unable to ever open its own target.
+	//
+	// HitResult.GetComponent() carries the riot-shield rule: a hit on the body while the shield is up
+	// transfers nothing, and the player has to hit the shield itself.
+	if (bUseMeleeIonization)
+	{
+		ApplyIonizationToTarget(HitActor, HitResult.GetComponent(), MeleeIonizationChargePerHit);
+
+		// The other half of the transfer: what the swing puts back into the person holding it.
+		if (!FMath::IsNearlyZero(MeleeChargeToAttackerPerHit))
+		{
+			if (UEMFVelocityModifier* AttackerEMF = PawnOwner->FindComponentByClass<UEMFVelocityModifier>())
+			{
+				AttackerEMF->AddBonusCharge(MeleeChargeToAttackerPerHit);
+			}
 		}
 	}
 
@@ -539,9 +566,34 @@ bool AShooterWeapon_Melee::PerformMeleeTrace(FHitResult& OutHit)
 	return false;
 }
 
+bool AShooterWeapon_Melee::AttackerOverridesLegacyMeleeCharge(const AActor* Attacker)
+{
+	const AShooterCharacter* Shooter = Cast<AShooterCharacter>(Attacker);
+	if (!Shooter)
+	{
+		return false;
+	}
+
+	const AShooterWeapon_Melee* Blade = Cast<AShooterWeapon_Melee>(Shooter->GetCurrentWeapon());
+	return Blade && Blade->bUseMeleeIonization;
+}
+
 float AShooterWeapon_Melee::ApplyMeleeDamage(AActor* HitActor, const FHitResult& HitResult)
 {
 	if (!HitActor || !PawnOwner)
+	{
+		return 0.0f;
+	}
+
+	// A finisher blade takes nothing off a target whose shield is still up. Checked once, for the
+	// whole swing, rather than per damage component: the momentum and dropkick bonuses are parts of
+	// the same hit, and letting them through while the base damage is withheld would mean a target
+	// that cannot be hurt still visibly loses health when the player arrives fast enough.
+	//
+	// Returns zero rather than skipping the hit: ProcessHit still plays the sound, the shake, the
+	// impact FX and the knockback, and the ionization above still ran. The swing lands, it just does
+	// not wound yet.
+	if (ShouldWithholdDamageForShield(HitActor))
 	{
 		return 0.0f;
 	}
@@ -770,291 +822,13 @@ void AShooterWeapon_Melee::ApplyCharacterImpulse(AActor* HitActor, const FVector
 
 // ==================== Target Magnetism ====================
 
-void AShooterWeapon_Melee::StartMagnetism()
+UMeleeAttackComponent* AShooterWeapon_Melee::GetOwnerMeleeComponent() const
 {
-	if (!PawnOwner || !PawnOwner->GetController())
-	{
-		return;
-	}
-
-	MagnetismTarget.Reset();
-	bIsMagnetismActive = true;
-	LungeProgress = 0.0f;
-
-	// NOTE: Drop kick is handled in Fire() via delegation to MeleeAttackComponent
-
-	// Magnetism requires bEnableTargetMagnetism
-	if (!bEnableTargetMagnetism)
-	{
-		bIsMagnetismActive = false;
-		return;
-	}
-
-	// Get camera direction for magnetism trace
-	FVector CameraLocation;
-	FRotator CameraRotation;
-	PawnOwner->GetController()->GetPlayerViewPoint(CameraLocation, CameraRotation);
-	FVector Forward = CameraRotation.Vector();
-
-	FVector Start = CameraLocation + Forward * TraceForwardOffset;
-	FVector End = Start + Forward * MagnetismRange;
-
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-	QueryParams.AddIgnoredActor(PawnOwner);
-
-	TArray<FHitResult> HitResults;
-	bool bHit = GetWorld()->SweepMultiByChannel(
-		HitResults,
-		Start,
-		End,
-		FQuat::Identity,
-		ECC_Pawn,
-		FCollisionShape::MakeSphere(MagnetismRadius),
-		QueryParams
-	);
-
-	if (bHit)
-	{
-		// Find the closest valid character target
-		float ClosestDist = FLT_MAX;
-		AActor* ClosestTarget = nullptr;
-
-		for (const FHitResult& Hit : HitResults)
-		{
-			AActor* HitActor = Hit.GetActor();
-			if (HitActor && HitActor != PawnOwner && Cast<ACharacter>(HitActor))
-			{
-				float Dist = FVector::DistSquared(Start, Hit.ImpactPoint);
-				if (Dist < ClosestDist)
-				{
-					ClosestDist = Dist;
-					ClosestTarget = HitActor;
-				}
-			}
-		}
-
-		if (ClosestTarget && bEnableLunge)
-		{
-			// Calculate lunge target position (stop at AttackRange - Buffer from enemy)
-			FVector PlayerPos = PawnOwner->GetActorLocation();
-			FVector TargetPos = ClosestTarget->GetActorLocation();
-			float DistanceToTarget = FVector::Dist(PlayerPos, TargetPos);
-
-			float StopDistance = AttackRange - LungeStopBuffer;
-			FVector DirectionFromTarget = (PlayerPos - TargetPos).GetSafeNormal();
-			FVector IdealLungePos = TargetPos + DirectionFromTarget * StopDistance;
-
-			// Path validation via SweepSphere
-			FHitResult SweepHit;
-			FCollisionQueryParams SweepParams;
-			SweepParams.AddIgnoredActor(PawnOwner);
-			SweepParams.AddIgnoredActor(ClosestTarget);
-
-			bool bPathBlocked = GetWorld()->SweepSingleByChannel(
-				SweepHit,
-				PlayerPos,
-				IdealLungePos,
-				FQuat::Identity,
-				ECC_Visibility,
-				FCollisionShape::MakeSphere(LungeStopBuffer),
-				SweepParams
-			);
-
-			if (!bPathBlocked)
-			{
-				MagnetismTarget = ClosestTarget;
-				MagnetismLungeTargetPosition = IdealLungePos;
-
-				// Lunge parks the player capsule inside the target (stop distance < capsule radii),
-				// so mutually ignore move-collision for the lunge to stop per-frame depenetration
-				// jitter on the target. Restored in StopMagnetism.
-				if (PawnOwner)
-				{
-					if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(PawnOwner->GetRootComponent()))
-					{
-						OwnerRoot->IgnoreActorWhenMoving(ClosestTarget, true);
-					}
-					if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(ClosestTarget->GetRootComponent()))
-					{
-						TargetRoot->IgnoreActorWhenMoving(PawnOwner, true);
-					}
-				}
-
-				// Start camera focus when lunge target is found
-				StartCameraFocus(ClosestTarget);
-
-				// Disable gravity during lock-on for smooth Z-alignment
-				if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
-				{
-					if (UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement())
-					{
-						Movement->GravityScale = 0.0f;
-					}
-				}
-			}
-		}
-		else if (ClosestTarget)
-		{
-			// No lunge - simple magnetism
-			MagnetismTarget = ClosestTarget;
-			StartCameraFocus(ClosestTarget);
-		}
-	}
-}
-
-void AShooterWeapon_Melee::UpdateMagnetism(float DeltaTime)
-{
-	if (!bIsMagnetismActive)
-	{
-		return;
-	}
-
-	// NOTE: Dropkick movement is handled by MeleeAttackComponent when delegated
-
-	if (!bEnableTargetMagnetism || !MagnetismTarget.IsValid() || !PawnOwner)
-	{
-		return;
-	}
-
-	AActor* Target = MagnetismTarget.Get();
-	ACharacter* TargetChar = Cast<ACharacter>(Target);
-	if (!TargetChar)
-	{
-		return;
-	}
-
-	// Skip magnetism if target NPC is in knockback state
-	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(Target))
-	{
-		if (TargetNPC->IsInKnockback())
-		{
-			return;
-		}
-	}
-
-	if (bEnableLunge)
-	{
-		// Dynamic Z-alignment: update lunge target Z to match target's current height
-		FVector TargetPos = Target->GetActorLocation();
-		FVector PlayerPos = PawnOwner->GetActorLocation();
-
-		FVector DirectionFromTarget = (PlayerPos - TargetPos);
-		DirectionFromTarget.Z = 0.0f;
-		DirectionFromTarget.Normalize();
-
-		float StopDistance = AttackRange - LungeStopBuffer;
-		FVector NewLungePos = TargetPos + DirectionFromTarget * StopDistance;
-		MagnetismLungeTargetPosition.Z = NewLungePos.Z;
-	}
-}
-
-void AShooterWeapon_Melee::StopMagnetism()
-{
-	if (!bIsMagnetismActive)
-	{
-		return;
-	}
-
-	// NOTE: Dropkick exit momentum and gravity restoration are handled by
-	// MeleeAttackComponent::StopMagnetism() when dropkick is delegated
-
-	// Restore move-collision with the lunge target (added in StartMagnetism).
-	if (PawnOwner && MagnetismTarget.IsValid())
-	{
-		AActor* IgnoredTarget = MagnetismTarget.Get();
-		if (UPrimitiveComponent* OwnerRoot = Cast<UPrimitiveComponent>(PawnOwner->GetRootComponent()))
-		{
-			OwnerRoot->IgnoreActorWhenMoving(IgnoredTarget, false);
-		}
-		if (UPrimitiveComponent* TargetRoot = Cast<UPrimitiveComponent>(IgnoredTarget->GetRootComponent()))
-		{
-			TargetRoot->IgnoreActorWhenMoving(PawnOwner, false);
-		}
-	}
-
-	MagnetismTarget.Reset();
-	bIsMagnetismActive = false;
-
-	// Restore gravity after normal magnetism lock-on
-	if (PawnOwner)
-	{
-		if (ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner))
-		{
-			if (UApexMovementComponent* Movement = Cast<UApexMovementComponent>(OwnerChar->GetCharacterMovement()))
-			{
-				Movement->GravityScale = Movement->MovementSettings ? Movement->MovementSettings->DefaultGravityScale : 1.5f;
-			}
-		}
-	}
+	const AShooterCharacter* Shooter = Cast<AShooterCharacter>(PawnOwner);
+	return Shooter ? Shooter->GetMeleeAttackComponent() : nullptr;
 }
 
 // ==================== Momentum ====================
-
-void AShooterWeapon_Melee::UpdateMomentumPreservation(float DeltaTime)
-{
-	if (!PawnOwner)
-	{
-		return;
-	}
-
-	ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner);
-	if (!OwnerChar)
-	{
-		return;
-	}
-
-	UCharacterMovementComponent* Movement = OwnerChar->GetCharacterMovement();
-	if (!Movement)
-	{
-		return;
-	}
-
-	// Only override velocity when lunging toward a target.
-	// Without a lunge target, let normal movement continue uninterrupted.
-	// Don't keep driving the player once the target is knocked back (mirrors UpdateMagnetism).
-	bool bTargetInKnockback = false;
-	if (AShooterNPC* TargetNPC = Cast<AShooterNPC>(MagnetismTarget.Get()))
-	{
-		bTargetInKnockback = TargetNPC->IsInKnockback();
-	}
-
-	if (bEnableLunge && MagnetismTarget.IsValid() && !bIsDropKick && !bTargetInKnockback)
-	{
-		FVector PlayerPos = OwnerChar->GetActorLocation();
-		FVector ToLungeTarget = MagnetismLungeTargetPosition - PlayerPos;
-		float DistToLungeTarget = ToLungeTarget.Size();
-
-		float CurrentSpeed = VelocityAtSwingStart.Size();
-		if (CurrentSpeed >= MinSpeedForLunge && DistToLungeTarget > 10.0f)
-		{
-			float LungeAlpha = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
-
-			float TimeRemaining = LungeDuration * (1.0f - LungeAlpha);
-			if (TimeRemaining > 0.01f)
-			{
-				FVector LungeVelocity = ToLungeTarget / TimeRemaining;
-
-				// Clamp to prevent excessive speeds
-				float MaxSpeed = 3000.0f;
-				if (LungeVelocity.Size() > MaxSpeed)
-				{
-					LungeVelocity = LungeVelocity.GetSafeNormal() * MaxSpeed;
-				}
-
-				LungeVelocity.Z = Movement->Velocity.Z; // Keep current Z (gravity applied)
-				Movement->Velocity = LungeVelocity;
-			}
-		}
-
-		// Update lunge progress
-		if (LungeDuration > 0.0f)
-		{
-			LungeProgress += DeltaTime / LungeDuration;
-			LungeProgress = FMath::Clamp(LungeProgress, 0.0f, 1.0f);
-		}
-	}
-}
 
 // ==================== Cool Kick ====================
 
@@ -1404,10 +1178,10 @@ void AShooterWeapon_Melee::StopCurrentMontage()
 		}
 	}
 
-	// Stop on character's MeleeWeaponFPMesh
-	if (CachedMeleeWeaponFPMesh)
+	// Stop on the owner's first-person arms
+	if (USkeletalMeshComponent* FPMesh = GetOwnerFirstPersonMesh())
 	{
-		if (UAnimInstance* AnimInstance = CachedMeleeWeaponFPMesh->GetAnimInstance())
+		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
 		{
 			if (AnimInstance->IsAnyMontagePlaying())
 			{
@@ -1417,20 +1191,47 @@ void AShooterWeapon_Melee::StopCurrentMontage()
 	}
 }
 
-void AShooterWeapon_Melee::PlayMontageOnFPMesh(UAnimMontage* Montage, float PlayRate)
+USkeletalMeshComponent* AShooterWeapon_Melee::GetOwnerFirstPersonMesh() const
 {
-	if (!Montage || !CachedMeleeWeaponFPMesh)
+	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner))
+	{
+		return ShooterChar->GetFirstPersonMesh();
+	}
+	return nullptr;
+}
+
+void AShooterWeapon_Melee::PlaySwingMontages(UAnimMontage* FirstPersonMontage, UAnimMontage* ThirdPersonMontage, float PlayRate)
+{
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
+	if (!ShooterChar)
 	{
 		return;
 	}
 
-	if (UAnimInstance* AnimInstance = CachedMeleeWeaponFPMesh->GetAnimInstance())
+	const float FinalRate = PlayRate * ComboSpeedMultiplier;
+
+	// The arms exist on this machine only, so they are played straight.
+	if (FirstPersonMontage)
 	{
-		if (!AnimInstance->Montage_IsPlaying(Montage))
+		if (USkeletalMeshComponent* FPMesh = ShooterChar->GetFirstPersonMesh())
 		{
-			// Apply combo speed multiplier on top of the caller-provided rate.
-			AnimInstance->Montage_Play(Montage, PlayRate * ComboSpeedMultiplier);
+			if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
+			{
+				if (!AnimInstance->Montage_IsPlaying(FirstPersonMontage))
+				{
+					AnimInstance->Montage_Play(FirstPersonMontage, FinalRate);
+				}
+			}
 		}
+	}
+
+	// The body is what teammates are looking at, so the swing goes out to every machine at the
+	// same rate. Falling back to the first-person montage keeps a half-authored weapon visible
+	// to the rest of the team rather than silently swinging nothing.
+	UAnimMontage* BodyMontage = ThirdPersonMontage ? ThirdPersonMontage : FirstPersonMontage;
+	if (BodyMontage)
+	{
+		ShooterChar->PlayThirdPersonMontageEverywhere(BodyMontage, FinalRate);
 	}
 }
 
@@ -1448,9 +1249,9 @@ void AShooterWeapon_Melee::ApplyComboSpeedMultiplier(float NewMultiplier)
 
 	// Adjust the play rate of any currently-playing swing montage so the visual
 	// reflects the new combo speed immediately rather than waiting for the next swing.
-	if (CachedMeleeWeaponFPMesh)
+	if (USkeletalMeshComponent* FPMesh = GetOwnerFirstPersonMesh())
 	{
-		if (UAnimInstance* AnimInstance = CachedMeleeWeaponFPMesh->GetAnimInstance())
+		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
 		{
 			if (CurrentSwingData && CurrentSwingData->SwingMontage &&
 				AnimInstance->Montage_IsPlaying(CurrentSwingData->SwingMontage))
@@ -1653,14 +1454,15 @@ void AShooterWeapon_Melee::SpawnBreakDestructionGC()
 		return;
 	}
 
-	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(PawnOwner);
-	if (!ShooterChar)
+	// The gibs are world geometry that everyone can see, so they are placed on the third-person
+	// mesh: the first-person one sits in front of the owner's camera and would scatter debris
+	// through the middle of the screen from a position nobody else shares.
+	USkeletalMeshComponent* SwordMesh = GetThirdPersonMesh();
+	if (!SwordMesh || !SwordMesh->GetSkeletalMeshAsset())
 	{
-		return;
+		SwordMesh = GetFirstPersonMesh();
 	}
-
-	UStaticMeshComponent* SwordMesh = ShooterChar->GetMeleeWeaponStaticMesh();
-	if (!SwordMesh)
+	if (!SwordMesh || !SwordMesh->GetSkeletalMeshAsset())
 	{
 		return;
 	}
@@ -1733,6 +1535,14 @@ void AShooterWeapon_Melee::SpawnBreakDestructionGC()
 
 	GCActor->SetLifeSpan(BreakGibLifetime);
 
-	// Hide the sword mesh (GC gibs replace it)
-	SwordMesh->SetVisibility(false);
+	// Hide both sword meshes (GC gibs replace them) — the owner sees the first-person one, and
+	// everybody else the third-person one, so leaving either up shows an unbroken sword.
+	if (USkeletalMeshComponent* FPSword = GetFirstPersonMesh())
+	{
+		FPSword->SetVisibility(false, /*bPropagateToChildren=*/ true);
+	}
+	if (USkeletalMeshComponent* TPSword = GetThirdPersonMesh())
+	{
+		TPSword->SetVisibility(false, /*bPropagateToChildren=*/ true);
+	}
 }

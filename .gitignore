@@ -25,3 +25,19 @@ nul
 *.pptx
 *.mp4
 vibe_ue.log
+
+# Node trees under Source/. UBT scans everything below Source/, which is why
+# Polarity/Docs/.ubtignore exists; git has to skip them for its own reason -
+# 31k files and 1.5 GB that no build ever reads.
+node_modules/
+
+# Pitch site working trees: 830 MB of video and stills even after node_modules.
+# The site is a deliverable, not source; version it somewhere that has LFS.
+Polarity/Docs/Polarity_Pitch_HTML/
+Polarity/Docs/.pitch_html_work/
+
+# Disk-usage dump, one 479 MB csv. GitHub refuses anything over 100 MB.
+Polarity/Docs/WinDirStat/
+
+# Art reference library, 180 MB. Same reason as the pitch site: not source.
+ArtRefs/

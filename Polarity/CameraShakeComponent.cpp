@@ -70,7 +70,7 @@ void UCameraShakeComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 		}
 	}
 
-	if (!Settings || !Settings->bEnableCameraShake) return;
+	if (!Settings) return;
 
 	// Reset
 	CurrentOffset = FVector::ZeroVector;
@@ -79,19 +79,27 @@ void UCameraShakeComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	CurrentViewmodelBobOffset = FVector::ZeroVector;
 	CurrentViewmodelBobRotation = FRotator::ZeroRotator;
 
-	// Update all shake instances
-	UpdateActiveShakes(DeltaTime);
+	if (Settings->bEnableCameraShake)
+	{
+		// Update all shake instances
+		UpdateActiveShakes(DeltaTime);
 
-	// Update procedural walk/sprint bob (Titanfall 2/Apex style)
-	UpdateProceduralBob(DeltaTime);
+		// Update procedural walk/sprint bob (Titanfall 2/Apex style)
+		UpdateProceduralBob(DeltaTime);
 
-	// Update continuous effects
-	UpdateSlideShake(DeltaTime);
-	UpdateWallrunBob(DeltaTime);
-	UpdateWallrunFOV(DeltaTime);
-	UpdateAirDashFOV(DeltaTime);
+		// Update continuous effects
+		UpdateSlideShake(DeltaTime);
+		UpdateWallrunBob(DeltaTime);
+		UpdateWallrunFOV(DeltaTime);
+		UpdateAirDashFOV(DeltaTime);
+	}
 
-	// Apply
+	// Apply UNCONDITIONALLY, even with shake disabled. This component is the only writer of
+	// FieldOfView on the first person camera and the only mirror of FirstPersonFieldOfView, so
+	// bailing out above left the ADS blend with nowhere to land: AShooterCharacter::UpdateADS
+	// handed its blended FOV to SetBaseFOV() and nobody ever pushed it to the camera. The symptom
+	// was "aiming does not zoom at all", far away from the shake toggle that actually caused it.
+	// With every offset zeroed just above, this path is simply "camera FOV = BaseFOV".
 	ApplyToCamera(DeltaTime);
 }
 
@@ -323,12 +331,25 @@ void UCameraShakeComponent::TriggerWallrunEnd()
 
 void UCameraShakeComponent::UpdateSlideShake(float DeltaTime)
 {
-	if (!Settings || !Settings->bEnableSlideShake) return;
+	if (!Settings) return;
 
+	// The ramp feeds BOTH the shake and the speed FOV, so it is updated before either toggle is
+	// consulted. Gating it on bEnableSlideShake would freeze the FOV effect at zero for anyone who
+	// turned the shake off.
 	float TargetIntensity = bIsSliding ? 1.0f : 0.0f;
 	SlideIntensity = FMath::FInterpTo(SlideIntensity, TargetIntensity, DeltaTime, 10.0f);
 
 	if (SlideIntensity < 0.01f) return;
+
+	// Speed FOV: additive degrees on top of the blended base, never an absolute angle. That is the
+	// whole point — an absolute number would silently overwrite the player's FOV setting, while an
+	// offset means "open up a bit more than wherever you were", which is true at every setting.
+	if (Settings->bEnableSlideFOV)
+	{
+		CurrentFOVOffset += Settings->SlideFOVAdd * SlideIntensity * Settings->CameraShakeIntensity;
+	}
+
+	if (!Settings->bEnableSlideShake) return;
 
 	SlideTime += DeltaTime;
 
@@ -407,8 +428,12 @@ void UCameraShakeComponent::ApplyToCamera(float DeltaTime)
 {
 	if (!CameraComponent) return;
 
-	// FOV
-	float TargetFOV = BaseFOV + CurrentFOVOffset;
+	// FOV. BaseFOV is the aim-blended FOV handed over by AShooterCharacter::UpdateADS, already
+	// expressed in the player's own FOV setting. The speed effects (slide, wallrun, air dash) ride
+	// on top of it as plain degrees, faded out by FOVEffectScale so that a slide taken while aiming
+	// does not push the scope back open: +12 degrees is a nudge on a 90 degree hipfire view and a
+	// wrecking ball on a 45 degree sight picture.
+	float TargetFOV = BaseFOV + CurrentFOVOffset * FOVEffectScale;
 	if (FMath::Abs(CameraComponent->FieldOfView - TargetFOV) > 0.1f)
 	{
 		CameraComponent->SetFieldOfView(TargetFOV);

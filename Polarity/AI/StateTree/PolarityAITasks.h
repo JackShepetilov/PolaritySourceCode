@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "StateTreeTaskBase.h"
+#include "StateTreeConditionBase.h"
 #include "PolarityAITasks.generated.h"
 
 class APawn;
@@ -686,6 +687,54 @@ struct FSTTask_ShooterPush_Data
 	UPROPERTY(EditAnywhere, Category = "Sprint", meta = (ClampMin = "0.0"))
 	float SlideSteerRateDeg = 120.0f;
 
+	// ---- Last stand ----
+	//
+	// The cornered variant is this same task with three knobs turned, not a second task. Everything
+	// about the movement is already here, and a duplicate would be a second copy of the slide to
+	// keep in step with this one.
+
+	/** Never hand the push over. The duel clock stops setting the withdrawal, so this NPC closes and
+	 *  stays closed: no rotation out, no letting somebody else take the front. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand")
+	bool bNeverWithdraw = false;
+
+	/** Fire through the sprint as well. Normally the charge is silent, which is what makes it read
+	 *  as a charge; one that shoots the whole way reads as somebody who has stopped budgeting. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand")
+	bool bFireWhileSprinting = false;
+
+	/** Degrees per second the committed bearing travels WHILE THE SLIDE IS RUNNING.
+	 *
+	 *  The bearing is an angle around the target, so advancing it walks the slide's target point
+	 *  around the player, and the slide follows it into an arc: the NPC skids past and around
+	 *  rather than into. Zero is the ordinary charge, which commits to one spot and brakes onto it.
+	 *
+	 *  This cannot make the movement jitter no matter how large it is. The point is only an input:
+	 *  UApexMovementComponent steers SlideDirection toward it at no more than SlideSteerRateDeg per
+	 *  second and drives Velocity from that smoothed direction, so the visible path is rate limited
+	 *  by construction.
+	 *
+	 *  Note the arc does not converge, so the slide ends on its duration ceiling or its minimum
+	 *  speed rather than on arrival. That is the intended shape here. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand", meta = (ClampMin = "0.0"))
+	float SlideOrbitRateDeg = 0.0f;
+
+	/** The charge-and-orbit above needs room to actually happen in: a slide that skids into the
+	 *  nearest wall is not the desperate lunge it is supposed to read as. Checked ONCE on entering
+	 *  Last Stand, around the TARGET (this is where the orbit happens, not where the NPC currently
+	 *  stands): a handful of traces radiate out to this distance, and the fraction that come back
+	 *  clear decides whether the arena has space for it (design decision, author's call - a tight
+	 *  corner should not get the same finishing move as an open room). Failing the check does not
+	 *  cancel Last Stand, it changes what it looks like: see bOrbitOpen below EnterState. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand", meta = (ClampMin = "0.0"))
+	float OrbitOpenRadius = 500.0f;
+
+	/** How much of the ring around the target has to come back clear for OrbitOpenRadius's check to
+	 *  call the area open. 0.5 = half the sampled directions. Lower admits tighter rooms into the
+	 *  charge-and-orbit; 1.0 demands a fully open circle. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float OrbitOpenFraction = 0.5f;
+
 	// ---- Runtime ----
 
 	EShooterPushPhase Phase = EShooterPushPhase::Approach;
@@ -762,6 +811,10 @@ private:
 	/** Distance band, plus the withdrawal mode which overrides it. */
 	EShooterPushPhase ResolvePhase(const FInstanceDataType& Data) const;
 
+	/** Last Stand only: is there room around the target for the charge-and-orbit, or is this a
+	 *  tight corner that should just get a straight approach instead? See OrbitOpenRadius. */
+	bool HasRoomToOrbit(const FInstanceDataType& Data) const;
+
 	/** Start a new leg in the direction this phase wants. */
 	void StartLeg(FInstanceDataType& Data) const;
 
@@ -773,4 +826,408 @@ private:
 
 	/** Everything that has to be undone when the task or the phase ends: sprint latch, fire. */
 	void ReleaseMovementState(FInstanceDataType& Data) const;
+};
+
+// ============================================================================
+// Shield state - the Push/Peek gate.
+//
+// "Shield" on an enemy is the charge meter, not a prop: ionization FILLS it, and the shield is down
+// once the charge sits at its own ceiling. The canonical answer already exists as
+// AShooterWeapon::IsTargetShieldDown, which reads UEMFVelocityModifier::IsAtMaxCharge, and these
+// conditions deliberately go through the same component so that "the weapon may hurt it" and "it
+// should stop pushing" can never disagree.
+//
+// Two structs rather than one with an invert flag, because that is how the knockback pair next door
+// is already shaped and a tree reads better with the intent spelled out.
+//
+// The magnitude is what matters, not the sign: charge runs both ways and either extreme is a broken
+// shield. IsAtMaxCharge already compares FMath::Abs(GetCharge()), so nothing here re-derives it.
+//
+// An enemy carrying no charge component at all answers NOT down, i.e. it keeps pushing. This is on
+// purpose and it is the one place these differ from the weapon's gate: the weapon asks "may I hurt
+// this", and a chargeless target is freely hurtable; the tree asks "has my shield broken", and an
+// enemy that never had the mechanic has not lost anything.
+// ============================================================================
+
+USTRUCT()
+struct FSTCondition_ShooterShield_Data
+{
+	GENERATED_BODY()
+
+	/** The NPC whose shield is being asked about. */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> NPC;
+};
+
+/** True once this NPC's charge has reached its ceiling, i.e. the shield is gone. */
+USTRUCT(DisplayName = "Shield Is Down", Category = "Polarity|AI|Shooter")
+struct POLARITY_API FSTCondition_ShooterShieldDown : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_ShooterShield_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+/** Whether this NPC's class is allowed to close distance at all.
+ *
+ *  An ENTER CONDITION, and it has to be one. A task that refuses on entry does not hand selection to
+ *  the next sibling: the state completes as failed, its own transitions are consulted, and with none
+ *  matching, the tree walks on to whatever comes after - which for Armed States is the roaming
+ *  search, so the enemy wanders off with its back turned. Only an enter condition makes selection
+ *  skip a state and try the next one, which is the behaviour a class that never pushes needs.
+ *
+ *  Put this on Root/Armed States/Push. An NPC with no profile answers TRUE, so the shared tree keeps
+ *  working unchanged for every enemy that has not been given a class. */
+USTRUCT(DisplayName = "Class Can Push", Category = "Polarity|AI|Shooter")
+struct POLARITY_API FSTCondition_ClassCanPush : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_ShooterShield_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+/** True once this NPC has recovered a real amount of shield. Deliberately NOT the exact negation of
+ *  the pair above: "at the ceiling" is a knife edge, and the recovery curve steps off it on its very
+ *  first frame, so an exact negation flips to true the instant the curve removes one unit of charge.
+ *  The enemy would then leave cover a fraction of a second after reaching it, which reads in game as
+ *  "it never hides at all".
+ *
+ *  Hysteresis instead: the shield breaks at the ceiling and counts as restored only once the charge
+ *  has fallen back to RecoveredFraction of that ceiling. Between the two the answer is neither, so
+ *  whichever state the tree is already in keeps running - which is exactly the cycle wanted. */
+USTRUCT(DisplayName = "Shield Is Up", Category = "Polarity|AI|Shooter")
+struct POLARITY_API FSTCondition_ShooterShieldUp : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_ShooterShield_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	/** Доля потолка заряда, до которой надо откатиться, чтобы щит считался восстановленным.
+	 *  0.5 = «половина шкалы снята». Единица вернула бы прежнее поведение ножа: щит «цел» сразу
+	 *  после первого кадра отката. Ноль означал бы «только полностью разряженный щит считается
+	 *  целым», то есть NPC сидел бы в укрытии до самого конца кривой. */
+	UPROPERTY(EditAnywhere, Category = "Shield", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float RecoveredFraction = 0.5f;
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+// ============================================================================
+// ShooterPeek - what an enemy does once its shield is gone.
+//
+// The mirror of ShooterPush. Push is how a SHIELDED enemy closes; this is how a broken one trades.
+// It does not choose the corner itself. UCoverFinderComponent already does that: an EQS ring around
+// the NPC, filtered by distance to the target and by reachability, scored by exposure weighted per
+// player threat, handing back a hide/peek PAIR. This task is only the rhythm that uses the pair.
+//
+//   Seeking   no spot yet          ask, and keep asking while the cooldown allows
+//   ToHide    walking to H         silent
+//   AtHide    behind cover         silent, re-checks that H is still worth standing in
+//   ToPeek    stepping out to P    silent
+//   AtPeek    exposed near P       STRAFING and firing, flipping direction mid-burst, then back
+//
+// AtPeek never stands still, and that is the one thing about it that is not negotiable. The push
+// next door exists because RunAndShoot was a stop-and-shoot: it braked, waited for its own velocity
+// to fall, and only then fired, so movement and fire were mutually exclusive by construction and a
+// row of enemies took turns shooting from a standstill. A peek that plants itself at P and empties a
+// magazine is the same mistake wearing a corner. So the burst runs ACROSS the lateral legs: fire
+// starts once on arrival, the legs flip underneath it, and the direction change is something the
+// player sees happen in the middle of being shot at.
+//
+// Why a beat rather than "fire until the target dies": P is by construction a place the target CAN
+// see, so an enemy that steps out and stays out is just a moving target that left its cover. The
+// return to H is the whole point of the pair, and PeekLeash is what keeps the strafe from turning
+// into a relocation.
+//
+// Why the re-check in AtHide: players move. A spot that hid from everybody stops hiding without
+// anything happening to the NPC, and UCoverFinderComponent::IsCoverStillGood is the cheap way to
+// notice (one trace per living player).
+// ============================================================================
+
+/** Where in the hide/peek rhythm this NPC currently is. */
+UENUM()
+enum class EShooterPeekPhase : uint8
+{
+	Seeking,
+	ToHide,
+	AtHide,
+	ToPeek,
+	AtPeek
+};
+
+USTRUCT()
+struct FSTTask_ShooterPeek_Data
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AShooterNPC> NPC;
+
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AAIController> Controller;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target;
+
+	// ---- Rhythm (test values, design doc 5.10) ----
+
+	/** How long it stays behind cover before stepping out again. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm", meta = (ClampMin = "0.0"))
+	float HideDuration = 1.5f;
+
+	/** Total time spent exposed, strafing and firing, before ducking back.
+	 *
+	 *  Must stay comfortably above StrafeHoldMax or the whole point is lost: the burst has to
+	 *  outlive at least one leg so the direction change happens WHILE the NPC is still shooting.
+	 *  At the defaults this is three to four legs. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm", meta = (ClampMin = "0.1"))
+	float PeekDuration = 2.0f;
+
+	// ---- Strafe while firing ----
+
+	/** How long one lateral leg runs before the direction flips. Short on purpose: the flip is the
+	 *  read, and it has to land inside the burst rather than between two bursts. */
+	UPROPERTY(EditAnywhere, Category = "Strafe", meta = (ClampMin = "0.1"))
+	float StrafeHoldMin = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category = "Strafe", meta = (ClampMin = "0.1"))
+	float StrafeHoldMax = 0.8f;
+
+	/** How far the strafe may wander from P. Without a leash the lateral legs would walk the NPC
+	 *  off its own corner and into the open, which is the one thing the hide/peek pair exists to
+	 *  prevent: P is chosen to be a step out of cover, not a new position. */
+	UPROPERTY(EditAnywhere, Category = "Strafe", meta = (ClampMin = "0.0"))
+	float PeekLeash = 250.0f;
+
+	/** How close counts as arrived. The H/P pair is only PeekStepDistance apart, so this has to stay
+	 *  well under that or the two ends collapse into one. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm", meta = (ClampMin = "10.0"))
+	float ArriveRadius = 60.0f;
+
+	/** How often, while hiding, the current spot is re-checked against the players who moved. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm", meta = (ClampMin = "0.1"))
+	float CoverRecheckInterval = 1.0f;
+
+	/** Seconds of NO PROGRESS toward the goal before the walk is written off and a different corner
+	 *  is requested. Not a pacing knob, a safety net: something standing in the doorway of H would
+	 *  otherwise hold the NPC in ToHide for the rest of the fight, and a peek that never peeks looks
+	 *  exactly like a broken tree.
+	 *
+	 *  It measures being stuck, NOT how long the walk has run, and the difference is not academic.
+	 *  As an absolute clock it cut every single walk short: measured 2026-08-18, an NPC closing on a
+	 *  corner at full speed was stopped 94 units from a 60 unit arrival radius, dropped the claim,
+	 *  and the next search sent it 1700 units the other way. Not one walk in the session finished. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm", meta = (ClampMin = "0.5"))
+	float MoveTimeout = 5.0f;
+
+	// ---- Re-evaluating the corner ----
+
+	/** How often, while hiding, the NPC asks whether somewhere better has opened up.
+	 *
+	 *  Separate from CoverRecheckInterval, which only asks whether the CURRENT spot still hides.
+	 *  This one is the ambitious question, and it is the difference between an enemy that holds a
+	 *  corner until it stops working and one that keeps reading the room. The search itself is the
+	 *  component's, so "better" means lower exposure weighted by per-player threat, and the spot can
+	 *  never be one the players are standing on: the query already rejects anything closer to the
+	 *  target than MinPeekDistance. */
+	UPROPERTY(EditAnywhere, Category = "Reposition", meta = (ClampMin = "0.5"))
+	float OpportunisticSearchInterval = 3.0f;
+
+	// ---- Last stand ----
+	//
+	// Reported by returning Succeeded, which this task does for no other reason. The tree turns that
+	// into the transition to the cornered push. Kept as a run status rather than an output flag so
+	// the tree needs no extra condition to read it.
+
+	/** A player this close to the NPC means the corner has been pushed and there is nothing left to
+	 *  peek from. Measured to the NPC, not to its hide spot, because by the time they are on top of
+	 *  it the spot is behind them. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand", meta = (ClampMin = "0.0"))
+	float LastStandPlayerDistance = 700.0f;
+
+	/** This many searches in a row came back with nothing: there is no line of retreat left. Counted
+	 *  on completed searches only, so a request refused by the cooldown does not count as a
+	 *  failure. */
+	UPROPERTY(EditAnywhere, Category = "Last Stand", meta = (ClampMin = "1"))
+	int32 LastStandFailedSearches = 3;
+
+	// ---- Squad: relocation under covering fire ----
+
+	/** A walk to a new corner longer than this is a RUN, and is announced to the squad so somebody
+	 *  covers it. Below it the NPC just walks: a short shuffle behind the same wall does not need
+	 *  two teammates standing in the open on its behalf. */
+	UPROPERTY(EditAnywhere, Category = "Squad", meta = (ClampMin = "0.0"))
+	float RelocationSprintDistance = 900.0f;
+
+	/** Estimated seconds under fire above which the run asks for covering fire rather than simply
+	 *  sprinting. Compared against the path cost the cover component measured, so it is in the same
+	 *  currency: seconds visible, weighted by how dangerous the watcher is. */
+	UPROPERTY(EditAnywhere, Category = "Squad", meta = (ClampMin = "0.0"))
+	float CoveringFireThreshold = 1.5f;
+
+	/** While suppressing, the NPC holds its peek instead of running the hide/peek cycle. It still
+	 *  strafes - a stationary suppressor is a free kill - but the strafe is leashed to the peek
+	 *  point and it never withdraws behind cover until the run it is covering is over. */
+	UPROPERTY(EditAnywhere, Category = "Squad", meta = (ClampMin = "0.0"))
+	float SuppressionStrafeLeash = 250.0f;
+
+	// ---- Runtime ----
+
+	EShooterPeekPhase Phase = EShooterPeekPhase::Seeking;
+
+	/** Seconds spent in the current phase. */
+	float PhaseElapsed = 0.0f;
+
+	/** Seconds since the last IsCoverStillGood call. */
+	float SinceRecheck = 0.0f;
+
+	/** Seconds since the last "is there anywhere better" search. */
+	float SinceOpportunisticSearch = 0.0f;
+
+	/** Completed searches in a row that found nothing. Reset by any success. */
+	int32 FailedSearches = 0;
+
+	/** Previous frame's IsSearching, so a search COMPLETING can be told from one still running.
+	 *  Without the edge there is no moment at which a failure can be counted. */
+	bool bWasSearching = false;
+
+	/** Which way the current strafe leg runs. Flips at the end of every leg. */
+	float LegSign = 1.0f;
+
+	/** Seconds spent in the current strafe leg, and how long this one was rolled to last. */
+	float LegElapsed = 0.0f;
+	float LegDuration = 0.0f;
+
+	bool bIsShooting = false;
+
+	/** Closest this NPC has been to the current move goal, and seconds since that last improved.
+	 *  MoveTimeout is spent against the SECOND of these, not against PhaseElapsed: an NPC that is
+	 *  still closing is not stuck, however long the walk takes. Measured 2026-08-18: a corner 5.0s
+	 *  away was abandoned 94 units short of a 60 unit arrival radius, and the re-search then handed
+	 *  out a corner 1700 units in the other direction, so the walk never finished even once. */
+	float BestGoalDistance = 0.0f;
+	float SinceGoalProgress = 0.0f;
+
+	/** Set while this NPC is the one running, so the sprint, the silence and the body facing its
+	 *  own direction of travel all end together and the coordinator gets told exactly once. */
+	bool bIsRelocating = false;
+
+	/** Seconds this corner has been held, across the whole hide/peek cycle rather than per phase.
+	 *  MinCornerSeconds is measured against it, so a shoot-and-scoot class cannot bounce off a
+	 *  corner it only just arrived at. */
+	float CornerElapsed = 0.0f;
+
+	/** Burst shot count seen last tick, so the moment a shot LANDS can be told from the state of
+	 *  having fired at some point. A rocketeer leaves on the edge, not on the level. */
+	int32 LastSeenBurstShots = 0;
+
+	/** Set once this corner has produced a shot, which is what bRelocateAfterFiring waits for. Reset
+	 *  with the corner, not with the peek: the point is one shot per POSITION. */
+	bool bFiredFromCorner = false;
+
+	/** Where the target was last actually visible. The grenadier shells this when it has no line;
+	 *  zero until the first sighting, which is why bHasLastSeen exists separately. */
+	FVector LastSeenTargetLocation = FVector::ZeroVector;
+	bool bHasLastSeen = false;
+
+	/** Who this NPC is suppressing for a teammate's run, or null. Not the same thing as Target: the
+	 *  whole point is that it shoots the player who opened SOMEBODY ELSE'S corner, which is usually
+	 *  not the one it was fighting. */
+	UPROPERTY()
+	TObjectPtr<APawn> SuppressionTarget = nullptr;
+
+	/** Whether this NPC has stepped out at least once since it took THIS hide spot. Until it has,
+	 *  the exposure recheck may not throw it back into the search: the recheck runs on a 1.0s clock
+	 *  and the hide lasts 1.5s, so on an open arena it always got the first word and the peek never
+	 *  happened at all. Reset when a new spot is adopted, not when returning from a peek. */
+	bool bPeekedSinceCover = false;
+};
+
+USTRUCT(DisplayName = "Shooter Peek", Category = "Polarity|AI|Shooter")
+struct FSTTask_ShooterPeek : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_ShooterPeek_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+
+private:
+
+	/** Move to Location, or report false when no path could be issued. */
+	bool TryMoveTo(FInstanceDataType& Data, const FVector& Location) const;
+
+	/** Issue one lateral leg around the target, leashed to Anchor, flipping the side if the point
+	 *  will not project onto the navmesh. Never touches the fire state: the burst runs across leg
+	 *  boundaries, which is what makes the direction change happen mid-burst. */
+	void StartStrafeLeg(FInstanceDataType& Data, const FVector& Anchor) const;
+
+	void EnterPhase(FInstanceDataType& Data, EShooterPeekPhase NewPhase) const;
+
+	/** Book-keeping for one tick of a move phase. Returns true once the NPC has gone MoveTimeout
+	 *  seconds without getting meaningfully closer to DistanceToGoal, i.e. it is actually stuck
+	 *  rather than merely slow. */
+	bool IsMoveStalled(FInstanceDataType& Data, float DeltaTime, float DistanceToGoal) const;
+
+	/** True when the path-following component has already given up on the current move (gone
+	 *  Idle) while the NPC is not actually at the goal. Distinct from IsMoveStalled: this catches
+	 *  it the tick it happens, MoveTimeout catches it only after the NPC has been motionless for
+	 *  the FULL timeout. A short grace period guards the one this is not: the frame or two right
+	 *  after issuing a fresh MoveTo, where the path follower reads Idle simply because it has not
+	 *  started moving yet. */
+	bool HasPathFollowingGivenUp(const FInstanceDataType& Data) const;
+
+	/** Ask the squad whether this NPC should be covering somebody's run right now, and take or drop
+	 *  the suppression duty accordingly. Routed through AShooterAIController::DistractTo, the same
+	 *  path a decoy uses, so there is exactly one mechanism in the project for "look at this and
+	 *  ignore your senses". Returns whether the NPC is suppressing after the call. */
+	bool UpdateSuppressionDuty(FInstanceDataType& Data) const;
+
+	/** Announce a long walk to the squad and switch the body into a run. Returns whether the squad
+	 *  granted a slot; a refusal means somebody else is already running and this NPC should keep its
+	 *  corner for now. */
+	bool BeginRelocationRun(FInstanceDataType& Data, float Distance) const;
+
+	/** Stop running: tell the squad, put the body back on the target, drop the sprint. Safe to call
+	 *  when no run is in progress. */
+	void EndRelocationRun(FInstanceDataType& Data) const;
+
+	void StartShooting(FInstanceDataType& Data, AActor* ShootAt) const;
+	void StopShooting(FInstanceDataType& Data) const;
+
+	/** Fire and claim both released. Must run on EVERY exit: a leaked cover claim leaves a phantom
+	 *  occupied corner that slowly squeezes the other NPCs into the open (design doc 5.5). */
+	void ReleaseAll(FInstanceDataType& Data) const;
 };

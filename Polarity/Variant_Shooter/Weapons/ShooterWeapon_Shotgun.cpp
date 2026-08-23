@@ -20,9 +20,27 @@ AShooterWeapon_Shotgun::AShooterWeapon_Shotgun()
 	bUseHitscan = true;
 	WaveDivergence = 0.0f;
 
-	// The pattern is the spread. AimVariance stays available for a weapon that should wander as a
-	// whole, but a Mozambique does not: it puts the same triangle in the same place every time.
-	AimVariance = 0.0f;
+	// The spread is real, but it is spent on the WIDTH of the pattern rather than on wandering the
+	// aim line (see GetPelletSpreadAngle): the triangle stays a triangle in the same place, and
+	// moving, jumping or firing pulls its corners apart. At rest and hip-firing the pattern is
+	// exactly PelletSpreadAngle, so the weapon still prints the shape it was authored with.
+	AimVariance = 1.0f;
+
+	// A shotgun opens up hard the moment the player leaves the ground and settles down hard when
+	// they crouch: that gap is what makes a slide-and-shoot a decision rather than a habit.
+	SpreadConfig.CrouchMultiplier = 0.5f;
+	SpreadConfig.WalkMultiplier = 1.8f;
+	SpreadConfig.SprintMultiplier = 3.0f;
+	SpreadConfig.SlideMultiplier = 2.2f;
+	SpreadConfig.AirMultiplier = 4.0f;
+
+	// Slow, heavy shots: one pull opens the pattern noticeably, and the recovery delay is under the
+	// refire interval so a held trigger settles a little between shots rather than stacking to the
+	// ceiling.
+	SpreadConfig.PerShotDegrees = 0.5f;
+	SpreadConfig.MaxBloomDegrees = 2.0f;
+	SpreadConfig.BloomRecoveryDelay = 0.25f;
+	SpreadConfig.BloomRecoveryRate = 3.0f;
 
 	// 17 a pellet, so 51 for a clean hit and 63 with the head multiplier on all three; five in the
 	// magazine; ~160 rounds a minute, held down rather than clicked.
@@ -57,9 +75,30 @@ AShooterWeapon_Shotgun::AShooterWeapon_Shotgun()
 	ReloadTime = 2.6f;
 }
 
+float AShooterWeapon_Shotgun::GetPelletSpreadAngle() const
+{
+	// The pattern is authored for the resting state, so the growth is measured from there: what the
+	// spread has gained (or lost) since standing still and hip-firing is what the pattern gains or
+	// loses. Anything else would have PelletSpreadAngle mean a different width depending on what
+	// AimVariance happened to be set to.
+	const float RestSpread = AimVariance * SpreadConfig.StillMultiplier;
+	const float Growth = (GetCurrentSpreadDegrees() - RestSpread) * SpreadPatternGrowth;
+
+	return FMath::Clamp(PelletSpreadAngle + Growth, MinPelletSpreadAngle, MaxPelletSpreadAngle);
+}
+
+float AShooterWeapon_Shotgun::GetAimConeDegrees() const
+{
+	return GetCurrentSpreadDegrees() * PatternWanderFraction;
+}
+
 FVector AShooterWeapon_Shotgun::GetPelletDirection(const FVector& AimDirection, const FVector2D& PatternOffset) const
 {
-	if (PelletSpreadAngle <= 0.0f)
+	// The CURRENT width, not the authored one: this is where the state of the player and the
+	// trigger reach the pellets.
+	const float SpreadAngle = GetPelletSpreadAngle();
+
+	if (SpreadAngle <= 0.0f)
 	{
 		return AimDirection;
 	}
@@ -83,12 +122,12 @@ FVector AShooterWeapon_Shotgun::GetPelletDirection(const FVector& AimDirection, 
 	}
 
 	// The offset is applied across a unit-length direction, so the angle enters as its tangent --
-	// the same construction AimVariance uses in the base class.
+	// the same construction the aim cone uses in the base class.
 	const FRotationMatrix AimBasis(AimDirection.Rotation());
 	const FVector Right = AimBasis.GetUnitAxis(EAxis::Y);
 	const FVector Up = AimBasis.GetUnitAxis(EAxis::Z);
 
-	const float SpreadTangent = FMath::Tan(FMath::DegreesToRadians(PelletSpreadAngle));
+	const float SpreadTangent = FMath::Tan(FMath::DegreesToRadians(SpreadAngle));
 
 	return (AimDirection
 		+ Right * (Offset.X * SpreadTangent)

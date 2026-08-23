@@ -44,6 +44,17 @@ void UCaptureReticleWidget::SetItemVerb(EClassItemVerb NewVerb)
 	BP_OnItemVerbChanged(ItemVerb);
 }
 
+void UCaptureReticleWidget::SetMode(ECaptureReticleMode NewMode)
+{
+	if (Mode == NewMode)
+	{
+		return;
+	}
+
+	Mode = NewMode;
+	BP_OnReticleModeChanged(Mode);
+}
+
 void UCaptureReticleWidget::ClearTarget()
 {
 	if (bHasTarget)

@@ -10,6 +10,7 @@
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "EMFPhysicsProp.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
@@ -70,6 +71,12 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 
 	// Resolve player pawn + camera for predictive capture-target selection.
 	APawn* PlayerPawn = PC->GetPawn();
+
+	// The passive of the player AT THIS SCREEN, for the overhead damage readout. Resolved once per
+	// frame rather than per widget, and deliberately from the local controller: this is a number
+	// about what the person looking at the screen would do, so on a listen server the host's own
+	// passive must not be answering for a client's targets.
+	const UAbilityComponent* LocalAbilities = PlayerPawn ? PlayerPawn->FindComponentByClass<UAbilityComponent>() : nullptr;
 	FVector CameraLoc;
 	FRotator CameraRot;
 	PC->GetPlayerViewPoint(CameraLoc, CameraRot);
@@ -77,8 +84,16 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 
 	// Pass 1: position update + evaluate each widget's capture candidacy.
 	// Best candidate = highest dot(CameraForward, dirToTarget) — same rule as UpdateCaptureRaycast.
+	//
+	// Lunge candidacy is gathered in the same sweep and kept SEPARATE. Two reasons it cannot share
+	// the winner: the capture-zone state below drives the charge bar's own "you can take this" look
+	// and would be lying about an enemy that can only be swung at, and capture has to win outright
+	// when a target offers both — spending a charged object is the deliberate act, flying at it is
+	// what happens anyway if the player just swings.
 	UEMFChargeWidget* BestWidget = nullptr;
 	float BestAngleCos = -1.0f;
+	UEMFChargeWidget* BestLungeWidget = nullptr;
+	float BestLungeAngleCos = -1.0f;
 	for (auto& Pair : ActiveWidgets)
 	{
 		if (Pair.Value)
@@ -86,6 +101,14 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 			uint8 CatIndex = static_cast<uint8>(Pair.Value->GetCategory());
 			Pair.Value->EffectiveMinScaleDistance = EffectiveDistances[CatIndex];
 			Pair.Value->UpdateScreenPosition(PC);
+
+			// What a shot at this target would be worth right now. False for every class whose
+			// passive does not offer one, which is all of them but the Sniper's, and false for a
+			// target this player has never shot. The widget hides its own text on false.
+			float PredictedDamage = 0.0f;
+			const bool bHasPreview = LocalAbilities
+				&& LocalAbilities->GetPredictedShotDamage(Pair.Value->GetBoundActor(), PredictedDamage);
+			Pair.Value->SetDamagePreview(PredictedDamage, bHasPreview);
 
 			float AngleCos = -1.0f;
 			if (Pair.Value->EvaluateCaptureCandidate(PlayerPawn, CameraLoc, CameraForward, AngleCos))
@@ -95,11 +118,22 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 					BestAngleCos = AngleCos;
 					BestWidget = Pair.Value;
 				}
+				continue;
+			}
+
+			float LungeAngleCos = -1.0f;
+			if (Pair.Value->EvaluateLungeCandidate(PlayerPawn, CameraLoc, CameraForward, LungeAngleCos))
+			{
+				if (LungeAngleCos > BestLungeAngleCos)
+				{
+					BestLungeAngleCos = LungeAngleCos;
+					BestLungeWidget = Pair.Value;
+				}
 			}
 		}
 	}
 
-	// Pass 2: apply capture-zone state — only the single best candidate is "in zone".
+	// Pass 2: apply capture-zone state — only the single best CAPTURE candidate is "in zone".
 	for (auto& Pair : ActiveWidgets)
 	{
 		if (Pair.Value)
@@ -108,8 +142,10 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// On-target capture reticle: brackets that hug the best candidate's body center.
-	UpdateCaptureReticle(PC, CameraRot, BestWidget);
+	// On-target reticle: brackets that hug the best candidate's body center. A capture beats a lunge
+	// whenever both are on offer, so the brackets never move off something the player could spend.
+	const ECaptureReticleMode ReticleMode = BestWidget ? ECaptureReticleMode::Capture : ECaptureReticleMode::Lunge;
+	UpdateCaptureReticle(PC, CameraRot, BestWidget ? BestWidget : BestLungeWidget, ReticleMode);
 }
 
 UCaptureReticleWidget* UEMFChargeWidgetSubsystem::GetOrCreateReticle(APlayerController* PC)
@@ -147,7 +183,7 @@ void UEMFChargeWidgetSubsystem::SetReticleSuppressed(bool bSuppressed)
 	}
 }
 
-void UEMFChargeWidgetSubsystem::UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget)
+void UEMFChargeWidgetSubsystem::UpdateCaptureReticle(APlayerController* PC, const FRotator& CameraRot, UEMFChargeWidget* BestWidget, ECaptureReticleMode Mode)
 {
 	// Somebody else is driving the brackets right now.
 	if (bReticleSuppressed)
@@ -182,9 +218,17 @@ void UEMFChargeWidgetSubsystem::UpdateCaptureReticle(APlayerController* PC, cons
 	float Radius = 0.0f;
 	if (!BestWidget || !BestWidget->GetTargetCenterAndRadius(Center, Radius))
 	{
+		// Note what is NOT done here: the mode is left alone. With nothing to draw there is no offer
+		// to describe, and pushing a mode anyway would fire the change event every time the player
+		// looked away from something, which is exactly the churn the event exists to avoid.
 		Reticle->ClearTarget();
 		return;
 	}
+
+	// Before the target is pushed, not after: the Blueprint reads the mode while it is drawing, and
+	// a mode that arrived a frame late would show grab-coloured brackets on the first frame of every
+	// lunge offer.
+	Reticle->SetMode(Mode);
 
 	FVector2D CenterScreen;
 	if (!PC->ProjectWorldLocationToScreen(Center, CenterScreen, false))

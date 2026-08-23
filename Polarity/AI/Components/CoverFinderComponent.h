@@ -101,6 +101,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "AI|Cover")
 	bool IsCoverStillGood() const;
 
+	/** Has this player taken this corner away from us.
+	 *
+	 *  Both ends have to be seen, and that is the definition rather than a convenience: a player who
+	 *  can see only the hide end has merely pinned the NPC behind it, which is what cover is FOR,
+	 *  and one who can see only the peek end has done nothing at all, because that end is meant to
+	 *  be seen. It is seeing BOTH that leaves nowhere to stand and nowhere to shoot from, and that
+	 *  is the thing worth relocating over.
+	 *
+	 *  Deliberately per-player rather than a total: the squad needs to know WHO opened it up in
+	 *  order to answer with suppression, and a summed exposure cannot name anybody. */
+	UFUNCTION(BlueprintPure, Category = "AI|Cover")
+	bool IsCoverOpenedBy(const APawn* Player) const;
+
 	/** Seconds until RequestCover will be allowed again. Zero when it is allowed now. */
 	UFUNCTION(BlueprintPure, Category = "AI|Cover")
 	float GetRequeryCooldownRemaining() const;
@@ -158,6 +171,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover")
 	float TargetChestHeight = 40.0f;
 
+	/** A player counts as seeing a point if ANY sample on a ring of this radius around them sees it,
+	 *  not just their chest.
+	 *
+	 *  Aiming a single trace at one point makes a player disappear the instant they step behind a
+	 *  corner, and the cover system then declares everything on the far side of that corner safe -
+	 *  including ground two steps from the player, which an NPC will happily walk onto. Treating a
+	 *  player as occupying a volume rather than a point removes the whole class of "it stopped
+	 *  seeing me the moment I clipped the wall, and moved in next to me".
+	 *
+	 *  Zero falls back to the single chest trace. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0"))
+	float PlayerRingRadius = 150.0f;
+
+	/** How many samples the ring above is made of. Four is a cross around the player, which already
+	 *  covers the case this exists for; more only matters for very thin occluders. Cost is this many
+	 *  traces per player per candidate, so it multiplies the most expensive loop in the sweep. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 PlayerRingSamples = 4;
+
 	/** Draw what the search found: candidates, the chosen H, its P, and the sight lines that decided
 	 *  it. This is how 12.7 gets verified before any behaviour reads the result. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Debug")
@@ -190,6 +222,12 @@ private:
 	 *  search: a single sweep can run close to two hundred traces, and rebuilding the list inside
 	 *  each of them turned an O(traces) job into O(traces x pawns) for no reason. */
 	bool HasLineOfSight(const FVector& From, const FVector& To, const FCollisionQueryParams& Params) const;
+
+	/** Whether Player can see Point, treating the player as a volume rather than a point. One trace
+	 *  at their chest plus PlayerRingSamples around them at PlayerRingRadius; any hit counts as
+	 *  seen. This is THE visibility question for the whole component - exposure, the peek probe and
+	 *  the cover recheck all go through it, so none of them can disagree about what "sees" means. */
+	bool CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params) const;
 
 	/** Self plus every pawn. Bodies are not cover: a teammate standing on the sight line does not
 	 *  make a corner safe, and counting them would make the choice flicker as people walk past. */

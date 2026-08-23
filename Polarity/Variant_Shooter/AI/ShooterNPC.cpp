@@ -1,7 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "Net/UnrealNetwork.h"
 #include "AI/Coordination/ThreatComponent.h"
 #include "ShooterWeapon.h"
@@ -14,6 +15,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "TimerManager.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "ShooterAIController.h"
@@ -25,6 +27,7 @@
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "EMFVelocityModifier.h"
+#include "EnemyCombatProfile.h"
 #include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/DamageEvents.h"
@@ -152,6 +155,25 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 
 void AShooterNPC::BeginPlay()
 {
+	// Equipment from the class profile, before Super: the weapon is spawned during BeginPlay from
+	// WeaponClass, so an override applied afterwards would arm this NPC with the blueprint's weapon
+	// and then quietly disagree with its own profile about what it is carrying.
+	if (CombatProfile)
+	{
+		if (CombatProfile->WeaponClass)
+		{
+			WeaponClass = CombatProfile->WeaponClass;
+		}
+
+		if (CombatProfile->ShieldCharge > 0.0f)
+		{
+			if (UEMFVelocityModifier* const Modifier = FindComponentByClass<UEMFVelocityModifier>())
+			{
+				Modifier->MaxBaseCharge = CombatProfile->ShieldCharge;
+			}
+		}
+	}
+
 	Super::BeginPlay();
 
 	// === Combat facing: strafe while facing the target ===
@@ -262,6 +284,8 @@ void AShooterNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	GetWorld()->GetTimerManager().ClearTimer(KnockbackStunTimer);
 	GetWorld()->GetTimerManager().ClearTimer(BurstCooldownTimer);
 	GetWorld()->GetTimerManager().ClearTimer(PermissionRetryTimer);
+	GetWorld()->GetTimerManager().ClearTimer(ReloadStartTimer);
+	GetWorld()->GetTimerManager().ClearTimer(ReloadResumeTimer);
 
 	// Unregister from coordinator
 	UnregisterFromCoordinator();
@@ -311,7 +335,24 @@ void AShooterNPC::Tick(float DeltaTime)
 			}
 		}
 
-		AShooterWeapon::PushLeftHandIK(TPMesh->GetAnimInstance(), LeftHandTarget, LeftHandAlpha);
+		// A reload animation takes the off hand OFF the weapon to fetch the magazine, and pinning
+		// that same hand to the grip socket fights it the whole way. Keyed to the montage actually
+		// playing, like the player's is: with no reload animation assigned nothing is moving the
+		// hand and the IK stays. The hand is released by the montage's own blend weight rather
+		// than switched off, so it lets go and takes hold again at the speed the animation blends,
+		// with no pop at either end. The montage reaches every machine through
+		// Multicast_PlayReloadMontage, so the clients let go when the server does.
+		UAnimInstance* TPAnimInstance = TPMesh->GetAnimInstance();
+
+		if (LeftHandAlpha > 0.0f && NPCReloadMontage && TPAnimInstance)
+		{
+			if (const FAnimMontageInstance* MontageInstance = TPAnimInstance->GetActiveInstanceForMontage(NPCReloadMontage))
+			{
+				LeftHandAlpha *= 1.0f - FMath::Clamp(MontageInstance->GetWeight(), 0.0f, 1.0f);
+			}
+		}
+
+		AShooterWeapon::PushLeftHandIK(TPAnimInstance, LeftHandTarget, LeftHandAlpha);
 	}
 	if (bPendingAirborneStun)
 	{
@@ -599,8 +640,13 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		// Steal charge from attacker (opposite sign to what they gain)
 		if (EMFVelocityModifier && EventInstigator)
 		{
+			// Skipped for a blade that states its own ionization: it has already charged this target
+			// through the ordinary weapon path, and paying out here as well would land the same hit
+			// twice, leaving the number on the weapon describing half of what actually happens.
+			// Everything else still comes through here -- bare fists, an enemy hitting a player, a
+			// drone -- because for those this IS where the amount is authored.
 			APawn* Attacker = EventInstigator->GetPawn();
-			if (Attacker)
+			if (Attacker && !AShooterWeapon_Melee::AttackerOverridesLegacyMeleeCharge(Attacker))
 			{
 				// Try to get attacker's EMF component to determine their charge
 				UEMFVelocityModifier* AttackerEMF = Attacker->FindComponentByClass<UEMFVelocityModifier>();
@@ -927,8 +973,9 @@ void AShooterNPC::OnSemiWeaponRefire()
 		return;
 	}
 
-	// Continue firing if we're in an active burst (permission was checked at burst start)
-	if (bIsShooting && !bInBurstCooldown)
+	// Continue firing if we're in an active burst (permission was checked at burst start).
+	// A reload holds the trigger up for its whole duration, reaction delay and magazine both.
+	if (bIsShooting && !bInBurstCooldown && !bIsReloadingWeapon)
 	{
 		// Update focus to current target position before continuing to fire
 		if (AController* MyController = GetController())
@@ -976,6 +1023,9 @@ void AShooterNPC::Die()
 
 	// Stop shooting immediately
 	StopShooting();
+
+	// A reload in progress dies with the NPC, timers and all
+	AbortReload();
 
 	// Stop the weapon from firing
 	if (Weapon)
@@ -1572,6 +1622,7 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	bExternalPermissionGranted = false;
 	CurrentBurstShots = 0;
 	CurrentAimTarget = nullptr;
+	AbortReload();
 
 	// --- Knockback/stun state ---
 	bIsInKnockback = false;
@@ -2113,6 +2164,20 @@ void AShooterNPC::TryStartShooting()
 		return;
 	}
 
+	// Reloading. FinishReloadAndResume comes back through here when the magazine is full, so no
+	// retry timer is needed, and asking the coordinator for a slot now would only waste it.
+	if (bIsReloadingWeapon)
+	{
+		return;
+	}
+
+	// Dry weapon, e.g. the NPC lost its target on the last round and has just come back to it.
+	// Fill the magazine first and let the reload bring us back here.
+	if (TryBeginReload())
+	{
+		return;
+	}
+
 	// Request attack permission from coordinator (always ask, don't cache)
 	if (RequestAttackPermission())
 	{
@@ -2158,9 +2223,21 @@ void AShooterNPC::StopShooting()
 	bWantsToShoot = false;
 	bExternalPermissionGranted = false;
 
-	// Reset perception delay tracking (target lost)
-	TargetAcquiredTime = -1.0f;
-	PerceptionDelayTrackedTarget = nullptr;
+	// Perception delay tracking is deliberately NOT reset here.
+	//
+	// PerceptionDelay documents itself as the delay "before NPC can attack after acquiring a NEW
+	// target", and NotifyTargetAcquired already implements exactly that by comparing against
+	// PerceptionDelayTrackedTarget. Clearing the tracking on every stop turned a one-off
+	// first-sight delay into a toll charged on every burst, because the next StartShooting on the
+	// SAME target then looked like a fresh acquisition and restarted the 0.75s clock.
+	//
+	// Harmless while an NPC held its trigger down for seconds at a time. Fatal for the peek, which
+	// stops firing every time it ducks back behind cover: measured 2026-08-18, a clean hide/peek
+	// cycle with a 1.72s exposed window fired zero shots, because each step out re-armed a 0.75s
+	// delay from the moment line of sight opened and the window closed before it expired.
+	//
+	// A target that genuinely changes still resets it through NotifyTargetAcquired, which is the
+	// one place that knows the difference.
 
 	// Stop retry timer
 	StopPermissionRetryTimer();
@@ -2204,8 +2281,20 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(Target);
 
+	// Asked of the WEAPON, because only it knows how wide the thing it fires is.
+	//
+	// A ray from the capsule, and even a ray from the muzzle, answers for something infinitely thin.
+	// A shell is a sphere, and it needs a corridor its own width: leaning out of cover, the ray goes
+	// clear roughly half a second before the round could survive the trip. Measured 2026-08-21, the
+	// grenadier fired at 0.50s into a 0.77s step-out - every cycle, from the same spot, into the same
+	// corner. Ten in a row is not scatter, it is a gate that says yes too early.
+	if (Weapon)
+	{
+		return Weapon->CanShotReach(Target->GetActorLocation());
+	}
+
 	FHitResult HitResult;
-	const FVector Start = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f); // Offset up from center
+	const FVector Start = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
 	const FVector End = Target->GetActorLocation();
 
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
@@ -4274,6 +4363,13 @@ void AShooterNPC::OnWeaponShotFired()
 
 	CurrentBurstShots++;
 
+	// That may have been the last round. An empty magazine outranks the burst counter: the burst
+	// ends here whether or not it was finished, and the reload replaces the burst cooldown.
+	if (TryBeginReload())
+	{
+		return;
+	}
+
 	// Check if burst complete
 	if (CurrentBurstShots >= BurstShotCount)
 	{
@@ -4307,6 +4403,136 @@ void AShooterNPC::OnBurstCooldownEnd()
 	if (bWantsToShoot && CurrentAimTarget.IsValid())
 	{
 		TryStartShooting();
+	}
+}
+
+// ==================== Reload ====================
+
+// The magazine, the timer and the refill are the weapon's (AShooterWeapon::StartReload). What is
+// here is only the decision to use them, which is the half the player already had bound to a key
+// and the NPCs never did: they pulled the trigger on an empty magazine and clicked.
+//
+// Whether an NPC reloads at all is a property of its WEAPON, not of the NPC: a weapon with
+// bUseReload off refills itself the instant it runs out, so it never empties and none of this runs.
+
+bool AShooterNPC::TryBeginReload()
+{
+	if (!bReloadWhenEmpty || bIsReloadingWeapon || bIsDead)
+	{
+		return false;
+	}
+
+	// Nothing to reload: no weapon, a weapon that never runs out, one that gets thrown away when it
+	// runs dry instead of reloaded (yanked weapons), or one that still has rounds left.
+	if (!Weapon || !Weapon->UsesReload() || Weapon->GetBulletCount() > 0 || !Weapon->CanReload())
+	{
+		return false;
+	}
+
+	bIsReloadingWeapon = true;
+
+	// Out of the fight for the duration: trigger up, and the attack slot goes back to the
+	// coordinator so another NPC can use it while this one is busy.
+	Weapon->StopFiring();
+	CurrentBurstShots = 0;
+	ReleaseAttackPermission();
+	StopPermissionRetryTimer();
+
+	GetWorldTimerManager().SetTimer(ReloadStartTimer, this, &AShooterNPC::BeginReload,
+		FMath::Max(ReloadReactionDelay, 0.01f), false);
+
+	return true;
+}
+
+void AShooterNPC::BeginReload()
+{
+	if (bIsDead || !Weapon)
+	{
+		bIsReloadingWeapon = false;
+		return;
+	}
+
+	if (!Weapon->StartReload())
+	{
+		// The weapon refused: swapped, already full, dropped between the last shot and this timer.
+		// Nothing to wait for, so go straight back to the fight.
+		FinishReloadAndResume();
+		return;
+	}
+
+	const float ReloadTime = Weapon->GetReloadTime();
+
+	if (NPCReloadMontage)
+	{
+		// One rate for both ends, so the animation and the magazine finish together whatever the
+		// weapon's ReloadTime is set to.
+		float PlayRate = 1.0f;
+		const float MontageLength = NPCReloadMontage->GetPlayLength();
+		if (bScaleReloadMontageToReloadTime && ReloadTime > KINDA_SMALL_NUMBER && MontageLength > KINDA_SMALL_NUMBER)
+		{
+			PlayRate = MontageLength / ReloadTime;
+		}
+
+		Multicast_PlayReloadMontage(PlayRate);
+	}
+
+	// The weapon fills its own magazine on its own timer; this one only decides when the NPC is
+	// allowed to shoot again, so it is deliberately not shorter than the weapon's.
+	GetWorldTimerManager().SetTimer(ReloadResumeTimer, this, &AShooterNPC::FinishReloadAndResume,
+		FMath::Max(ReloadTime, 0.05f), false);
+}
+
+void AShooterNPC::Multicast_PlayReloadMontage_Implementation(float PlayRate)
+{
+	if (!NPCReloadMontage)
+	{
+		return;
+	}
+
+	if (USkeletalMeshComponent* TPMesh = GetMesh())
+	{
+		if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+		{
+			AnimInstance->Montage_Play(NPCReloadMontage, PlayRate);
+		}
+	}
+}
+
+void AShooterNPC::FinishReloadAndResume()
+{
+	bIsReloadingWeapon = false;
+
+	GetWorldTimerManager().ClearTimer(ReloadStartTimer);
+	GetWorldTimerManager().ClearTimer(ReloadResumeTimer);
+
+	if (bIsDead)
+	{
+		return;
+	}
+
+	CurrentBurstShots = 0;
+
+	// The reload replaced the burst cooldown, so this is a fresh burst: it asks the coordinator for
+	// a slot the same way the first one did.
+	if (bWantsToShoot && CurrentAimTarget.IsValid())
+	{
+		TryStartShooting();
+	}
+}
+
+void AShooterNPC::AbortReload()
+{
+	bIsReloadingWeapon = false;
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ReloadStartTimer);
+		World->GetTimerManager().ClearTimer(ReloadResumeTimer);
+	}
+
+	if (Weapon)
+	{
+		Weapon->CancelReload();
 	}
 }
 

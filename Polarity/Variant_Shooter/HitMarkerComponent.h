@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Variant_Shooter/Feedback/HitFeedbackSet.h"
 #include "HitMarkerComponent.generated.h"
 
 class USoundBase;
@@ -12,16 +13,21 @@ class UMaterialParameterCollection;
 class APlayerCameraManager;
 
 /**
- * Type of hit for different visual/audio feedback
+ * Type of hit for different visual/audio feedback.
+ *
+ * New entries are appended, never reordered or renamed: tagged property serialization stores the
+ * NAME of an enum value, so appending is free while a rename silently resets every saved asset.
  */
 UENUM(BlueprintType)
 enum class EHitMarkerType : uint8
 {
 	Normal,			// Regular body hit
 	Ionized,		// Zero-damage hit that successfully transferred charge
-	Headshot,		// Headshot/critical hit  
+	Headshot,		// Headshot/critical hit
 	Kill,			// Killing blow
-	HeadshotKill	// Headshot that killed
+	HeadshotKill,	// Headshot that killed
+	ShieldHit,		// Landed on a shield that is still holding
+	ShieldBreak		// This hit is the one that took the shield down
 };
 
 /**
@@ -49,6 +55,14 @@ struct FHitMarkerEvent
 
 	UPROPERTY(BlueprintReadOnly)
 	bool bIsHeadshot = false;
+
+	/** The shield was still holding when this shot arrived. */
+	UPROPERTY(BlueprintReadOnly)
+	bool bIsShieldHit = false;
+
+	/** This shot is the one that took the shield down. True for exactly one hit per shield. */
+	UPROPERTY(BlueprintReadOnly)
+	bool bIsShieldBreak = false;
 
 	/** Time when this hit occurred (for expiration) */
 	float EventTime = 0.0f;
@@ -96,6 +110,19 @@ struct FHitMarkerSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
 	FLinearColor KillColor = FLinearColor(1.0f, 0.0f, 0.0f, 1.0f);
 
+	/** Colour for a hit that landed on a still-holding shield. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
+	FLinearColor ShieldHitColor = FLinearColor(0.6f, 0.85f, 1.0f, 1.0f);
+
+	/** Colour for the hit that took a shield down. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
+	FLinearColor ShieldBreakColor = FLinearColor(0.2f, 1.0f, 1.0f, 1.0f);
+
+	/** Duration for the shield break marker. Longer than an ordinary hit because it is the one
+	 *  moment in a fight that changes what the player should do next. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual", meta = (ClampMin = "0.05", ClampMax = "2.0"))
+	float ShieldBreakMarkerDuration = 0.3f;
+
 	// ==================== Audio ====================
 
 	/** Enable hit sounds */
@@ -133,6 +160,20 @@ struct FHitMarkerSettings
 	/** Kill sound volume */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float KillSoundVolume = 0.8f;
+
+	/** Fallback for the shield break confirmation, used when the firing weapon's UHitFeedbackSet
+	 *  leaves that cue empty or the weapon has no set at all. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	TObjectPtr<USoundBase> ShieldBreakSound;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float ShieldBreakSoundVolume = 0.9f;
+
+	/** Floor on the gap between two confirmations of equal or lower rank, in seconds, used when the
+	 *  firing weapon's set does not set its own. Without it a fast automatic plays a hit sound on
+	 *  every bullet and the confirmations blur into a buzz. 0 disables the limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DefaultMinCueInterval = 0.05f;
 
 	// ==================== Screen Effects ====================
 
@@ -222,7 +263,22 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnKillConfirmed OnKillConfirmed;
 
+	/** Called on the shot that takes a target's shield down. Separate from OnHitMarker (which also
+	 *  fires for the same hit) so the HUD can show the break without having to inspect the event. */
+	UPROPERTY(BlueprintAssignable, Category = "Events")
+	FOnHitMarkerEvent OnShieldBreakConfirmed;
+
 	// ==================== API ====================
+
+	/**
+	 * The one entry point. Everything else here is a convenience wrapper around it.
+	 *
+	 * Confirmation is a readout for the person who pulled the trigger and for nobody else, so this
+	 * plays flat 2D audio and only on the machine that owns this pawn. The world half of the hit --
+	 * the impact everyone can hear -- is the weapon's job, not this component's.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Hit Marker")
+	void RegisterHitFeedback(const FHitFeedbackContext& Context);
 
 	/**
 	 * Register a hit on an enemy
@@ -315,7 +371,45 @@ protected:
 	/** World time of last camera punch application (for cooldown) */
 	float LastCameraPunchTime = -100.0f;
 
+	// ==================== Pacing state ====================
+
+	/** World time the last confirmation sound actually played. */
+	float LastCueTime = -100.0f;
+
+	/** Engine frame the last hit was registered on, whether or not it was heard. Lets a shotgun's
+	 *  pellets add up into one number on screen instead of overwriting each other. */
+	uint64 LastEventFrame = 0;
+
+	/** Engine frame the last confirmation sound played on. Frames rather than seconds because
+	 *  per-frame accumulation asks "was this the same volley", and a shotgun's pellets share a
+	 *  frame exactly while their timestamps do not have to. */
+	uint64 LastCueFrame = 0;
+
+	/** Rank of the last confirmation that played, so a louder event can still cut through a
+	 *  suppression window that a quieter one opened. @see UHitFeedbackSet::GetCueRank */
+	int32 LastCueRank = -1;
+
+	/** The set the last registered hit came in with. A kill confirmed separately -- a client
+	 *  learning the outcome from replicated health a round trip later -- has no weapon to ask, and
+	 *  would otherwise fall back to the generic kill sound for every gun in the game. */
+	UPROPERTY()
+	TObjectPtr<UHitFeedbackSet> LastFeedbackSet;
+
 	// ==================== Internal ====================
+
+	/** True only on the machine whose player owns this pawn. Confirmation is a readout for one
+	 *  person; on a listen server an unguarded 2D sound plays the host every client's hits. */
+	bool IsLocalFeedback() const;
+
+	/** Which EHitMarkerType a resolved cue draws as. Visuals are a separate vocabulary from audio
+	 *  because the legacy Blueprint HUD binds to the marker type. */
+	static EHitMarkerType CueToMarkerType(EHitFeedbackCue Cue);
+
+	/** Decide whether this cue is allowed to be heard right now, and remember it if so. */
+	bool ShouldPlayCue(EHitFeedbackCue Cue, const UHitFeedbackSet* Set);
+
+	/** Play a confirmation: the weapon's set first, this component's own sounds as the fallback. */
+	void PlayCue(EHitFeedbackCue Cue, const UHitFeedbackSet* Set);
 
 	/** Play hit sound based on type */
 	void PlayHitSound(EHitMarkerType HitType);

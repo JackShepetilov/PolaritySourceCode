@@ -44,8 +44,28 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Crosshair")
 	float GetBloom01() const { return CurrentBloom; }
 
+	/** The weapon's spread this frame, in degrees. This is the number the crosshair is drawn from
+	 *  in spread mode, and the same one the bullets are fired with. */
+	UFUNCTION(BlueprintPure, Category = "Crosshair")
+	float GetSpreadDegrees() const { return CurrentSpreadDegrees; }
+
+	/** True while the crosshair is being kept off the screen by aiming down sights. */
+	UFUNCTION(BlueprintPure, Category = "Crosshair")
+	bool IsHiddenByAiming() const { return bHiddenByAiming; }
+
 protected:
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+
+	/** Draws the four spread bars (and the centre dot) when Config.bDrawProceduralTicks is on.
+	 *  Everything it needs was already resolved in NativeTick, because painting is const. */
+	virtual int32 NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
+		const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId,
+		const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+
+	/** Fired when the crosshair is taken off the screen for ADS and when it comes back. The widget
+	 *  already fades itself out natively; this is for anything else that should react. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Crosshair", meta = (DisplayName = "On Crosshair Visibility Changed"))
+	void BP_OnCrosshairVisibilityChanged(bool bVisible);
 
 	/** Crosshair size at weapon Scale 1.0 and zero bloom, as a fraction of viewport HEIGHT
 	 *  (resolution-independent). 0.06 = ~65px at 1080p. */
@@ -74,9 +94,23 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Crosshair")
 	float CurrentSizePixels = 0.0f;
 
+	UPROPERTY(BlueprintReadOnly, Category = "Crosshair")
+	float CurrentSpreadDegrees = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Crosshair")
+	bool bHiddenByAiming = false;
+
 private:
 	/** Resting on-screen size (no bloom) for the current weapon + viewport. */
 	float ComputeBaseSizePixels() const;
+
+	/** A spread cone of SpreadDegrees, projected onto the screen: the full WIDTH in pixels of the
+	 *  circle a shot can land inside. Reads the player's live FOV, so zooming does not make the
+	 *  crosshair lie. */
+	float ComputeSpreadSizePixels(float SpreadDegrees) const;
+
+	/** Applies the ADS hide (native fade) and returns true when the crosshair is currently off. */
+	bool UpdateAimingVisibility();
 
 	/** The weapon whose firing state drives bloom. Weak so a swapped/destroyed weapon can't dangle. */
 	TWeakObjectPtr<AShooterWeapon> ActiveWeapon;

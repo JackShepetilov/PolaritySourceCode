@@ -2,6 +2,7 @@
 // Physics-simulated prop with full EMF system integration
 
 #include "EMFPhysicsProp.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "Curves/CurveFloat.h"
 #include "ChargeAnimationComponent.h"
 #include "Engine/DamageEvents.h"
@@ -26,6 +27,7 @@
 #include "Engine/OverlapResult.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
+#include "Variant_Shooter/Pickups/HealthPickup.h"
 #include "Variant_Shooter/ShooterDoor.h"
 #include "ShooterCharacter.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
@@ -866,10 +868,20 @@ void AEMFPhysicsProp::ApplyItemVerbOnThrow()
 		BecomeDecoy();
 		break;
 
+	case EClassItemVerb::Heal:
+		// Nothing happens here, on purpose. The Melee's prop decomposes where it LANDS, not where it
+		// was let go: throwing it at a teammate is half of what the verb is for, and healing at the
+		// moment of release would put the pickups at the thrower's feet every time. OnPropHit is
+		// where the throw ends, so that is where this is finished.
+		bPledgedToHealing = true;
+		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s thrown as healing by %s: decomposes on impact"),
+			*GetName(), *GetNameSafe(Thrower));
+		break;
+
 	// Throw is the Wizard's, and it is not implemented here: it is the absence of everything else.
-	// Detonate and Heal have no implementation yet at all; when they do, this is where they attach,
-	// so that "what my class does with a charged object" is answered in one switch instead of being
-	// spread across the prop as a set of unrelated conditions.
+	// Detonate has no implementation yet at all; when it does, this is where it attaches, so that
+	// "what my class does with a charged object" is answered in one switch instead of being spread
+	// across the prop as a set of unrelated conditions.
 	default:
 		break;
 	}
@@ -889,8 +901,15 @@ bool AEMFPhysicsProp::CanDetonate() const
 		return true;
 	}
 
+	//
+	// Heal is in the list for the same reason as the other two, and it is the difference between the
+	// Melee's verb working and not existing: a charged prop that detonates on the first thing it
+	// touches never reaches the teammate it was thrown to, and the player sees an explosion where
+	// they expected medicine.
 	const EClassItemVerb Verb = Spender->GetItemVerb();
-	return Verb != EClassItemVerb::Throw && Verb != EClassItemVerb::Decoy;
+	return Verb != EClassItemVerb::Throw
+		&& Verb != EClassItemVerb::Decoy
+		&& Verb != EClassItemVerb::Heal;
 }
 
 void AEMFPhysicsProp::BecomeDecoy()
@@ -1044,6 +1063,101 @@ void AEMFPhysicsProp::Multicast_PlayDecoyExpiry_Implementation(FVector Location)
 	SetActorHiddenInGame(true);
 
 	// The overhead charge bar outlives the mesh otherwise, and floats there over nothing.
+	if (UEMFChargeWidgetSubsystem* WidgetSub = World->GetSubsystem<UEMFChargeWidgetSubsystem>())
+	{
+		WidgetSub->UnregisterProp(this);
+	}
+}
+
+// ==================== Heal (the Melee's item verb) ====================
+
+void AEMFPhysicsProp::ConsumeForHeal(AShooterCharacter* User)
+{
+	if (!HasAuthority() || bIsDead || !User)
+	{
+		return;
+	}
+
+	// The self half of the verb: the prop is eaten in the player's hands rather than thrown, so the
+	// healing goes straight into them instead of onto the floor. No pickups, no magnet, no travel
+	// time -- holding the button IS the aiming, and there is nobody else it could have been meant
+	// for.
+	if (SelfHealAmount > 0.0f)
+	{
+		User->RestoreHealth(SelfHealAmount);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s eaten by %s for %.0f HP"),
+		*GetName(), *User->GetName(), SelfHealAmount);
+
+	FinishAsHealing(GetActorLocation());
+}
+
+void AEMFPhysicsProp::DecomposeIntoHealing(const FVector& Where)
+{
+	if (!HasAuthority() || bIsDead)
+	{
+		return;
+	}
+
+	// The thrown half: the prop comes apart into ordinary health pickups where it landed, and their
+	// own magnet does the rest. This is what makes "throw it to a teammate" work without a single
+	// line about teammates anywhere -- a pickup heals whoever reaches it, which is the same rule the
+	// Tank's kill drops already play by, and a throw that lands short is a miss rather than an error.
+	AHealthPickup::SpawnHealthPickups(GetWorld(), HealPickupClass, Where,
+		HealPickupCount, HealPickupScatterRadius, HealPickupFloorOffset);
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s decomposed into %d health pickups at %s (thrown by %s)"),
+		*GetName(), HealPickupCount, *Where.ToCompactString(), *GetNameSafe(GetSpendingCharacter()));
+
+	FinishAsHealing(Where);
+}
+
+void AEMFPhysicsProp::FinishAsHealing(const FVector& Where)
+{
+	bPledgedToHealing = false;
+
+	Multicast_PlayHealDecompose(Where);
+
+	// Dead without dying, exactly as the decoy goes out: no OnPropDeath, no gibs, no damage. The prop
+	// is finished as a gameplay object, which is what stops it being recharged, recaptured or shot
+	// at, and ResetProp still puts it back for the checkpoint system.
+	bIsDead = true;
+	SetActorTickEnabled(false);
+}
+
+void AEMFPhysicsProp::Multicast_PlayHealDecompose_Implementation(FVector Location)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	if (HealDecomposeVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			World, HealDecomposeVFX, Location,
+			FRotator::ZeroRotator, FVector(HealDecomposeVFXScale),
+			true, true, ENCPoolMethod::None);
+	}
+
+	if (HealDecomposeSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(World, HealDecomposeSound, Location);
+	}
+
+	// And it is gone. Hidden rather than destroyed, for the same two reasons the decoy is: a
+	// destroyed prop cannot be restored by the checkpoint system, and the actor is what carries the
+	// charge bar registration.
+	if (PropMesh)
+	{
+		ApplyPropPhysicsSimulation(false);
+		PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PropMesh->SetVisibility(false);
+	}
+	SetActorHiddenInGame(true);
+
 	if (UEMFChargeWidgetSubsystem* WidgetSub = World->GetSubsystem<UEMFChargeWidgetSubsystem>())
 	{
 		WidgetSub->UnregisterProp(this);
@@ -1566,6 +1680,17 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 		return;
 	}
 
+	// The Melee's verb resolves here and takes the prop out of the world before anything below can
+	// run. Deliberately ahead of every impact branch: a prop pledged to healing must not damage,
+	// stagger or detonate on whatever it landed against, and a throw aimed at a teammate would
+	// otherwise weak-impact them on arrival. Gated on the flight so a prop being carried past a wall
+	// does not decompose in the player's hands.
+	if (bPledgedToHealing && bIsInReverseFlight)
+	{
+		DecomposeIntoHealing(Hit.ImpactPoint);
+		return;
+	}
+
 	// Air Mail state resolution — BEFORE the slow-prop early exit so a gently landing
 	// returned prop still clears its tag. A kicked prop resolves on this impact (the
 	// weak-impact path below carries the primed KickDamage); an un-kicked returning
@@ -2057,8 +2182,13 @@ float AEMFPhysicsProp::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 	{
 		if (FieldComponent && EventInstigator)
 		{
+			// Skipped for a blade that states its own ionization: it has already charged this target
+			// through the ordinary weapon path, and paying out here as well would land the same hit
+			// twice, leaving the number on the weapon describing half of what actually happens.
+			// Everything else still comes through here -- bare fists, an enemy hitting a player, a
+			// drone -- because for those this IS where the amount is authored.
 			APawn* Attacker = EventInstigator->GetPawn();
-			if (Attacker)
+			if (Attacker && !AShooterWeapon_Melee::AttackerOverridesLegacyMeleeCharge(Attacker))
 			{
 				float ChargeToAdd = ChargeChangeOnMeleeHit;
 

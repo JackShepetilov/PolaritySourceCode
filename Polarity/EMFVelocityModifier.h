@@ -18,6 +18,7 @@ struct FEMSourceDescription;
 // Делегаты
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChargeChanged, float, NewCharge);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChargeNeutralized, AActor*, OtherActor, float, PreviousCharge);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEMFShieldStateChanged, bool, bBroken);
 
 /**
  * Компонент интеграции электромагнитных сил с системой движения.
@@ -112,6 +113,49 @@ public:
 	/** Скорость убывания бонусного заряда (legacy, 0 = без убывания) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Charge Accumulation", meta = (ClampMin = "0.0"))
 	float BonusChargeDecayRate = 0.0f;
+
+	// ==================== Shield Recovery ====================
+
+	/** Как щит отрастает обратно, если по цели перестали бить.
+	 *
+	 *  Заряд это и есть щит: ноль заряда = щит цел, MaxBaseCharge = щит сломан. Поэтому
+	 *  "восстановить щит" значит СНЯТЬ модуль заряда, и кривая задаёт именно снятое количество.
+	 *
+	 *  X это секунды с последнего попадания, Y это СУММАРНО снятый заряд к этому моменту, а не
+	 *  скорость. Накопительная форма выбрана нарочно: она позволяет задать паузу перед началом
+	 *  отката (держите Y в нуле первые пару секунд), любой профиль разгона и полку, всё одной
+	 *  кривой и без единого дополнительного числа. Значение между ключами читается как есть, так
+	 *  что форма кривой это буквально форма отката.
+	 *
+	 *  Счётчик снятого обнуляется при каждом новом попадании, то есть кривая всегда играется с
+	 *  нуля от последнего удара.
+	 *
+	 *  Пусто = откат выключен, поведение ровно как было. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Shield Recovery")
+	TObjectPtr<class UCurveFloat> ShieldRecoveryCurve;
+
+	/** Секунды мира, когда по этой цели последний раз попали (заряд вырос). */
+	UFUNCTION(BlueprintPure, Category = "EMF|Shield Recovery")
+	float GetLastChargeGainTime() const { return LastChargeGainTime; }
+
+protected:
+
+	/** Отметка последнего роста заряда. С неё отсчитывается X кривой. */
+	float LastChargeGainTime = 0.0f;
+
+	/** Сколько заряда уже снято текущим проигрыванием кривой. Хранится, потому что кривая
+	 *  накопительная: снимать надо разницу с прошлым кадром, иначе откат пойдёт квадратично. */
+	float RecoveredSinceGain = 0.0f;
+
+	/** Один шаг отката. Ничего не делает без кривой, без заряда и не на сервере. */
+	void TickShieldRecovery();
+
+	/** «По цели попали»: перезапустить кривую отката с нуля. Живёт отдельной функцией, потому что
+	 *  зовётся из двух разных путей роста заряда (AddPermanentCharge и SetCharge), а разъехавшиеся
+	 *  копии этих двух строк означали бы, что часть попаданий откат не сбрасывает. */
+	void MarkChargeGained();
+
+public:
 
 	// ==================== Charge Neutralization ====================
 
@@ -361,6 +405,36 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "EMF|Events")
 	FOnChargeNeutralized OnChargeNeutralized;
 
+	/** Fires the instant this target's shield breaks, and again when it comes back.
+	 *
+	 *  Here rather than in the health bar widget because this is where the truth lives: the widget
+	 *  used to derive "broken" from its own threshold on its own copy of the charge, which is a
+	 *  second number that can disagree with IsAtMaxCharge -- the gate that actually decides whether
+	 *  bullets reach health. It also meant the most important sound in a fight only existed while a
+	 *  health bar happened to be on screen. Raised on every machine, because every machine's
+	 *  CheckChargeChanged runs (clients through OnRep_ReplicatedCharge), so listeners get it
+	 *  locally without an RPC. */
+	UPROPERTY(BlueprintAssignable, Category = "EMF|Events")
+	FOnEMFShieldStateChanged OnShieldStateChanged;
+
+	// ==================== Shield Break Feedback ====================
+
+	/** The shield coming apart, heard in the world by everyone. The shooter's own private
+	 *  confirmation is a separate sound and lives on the weapon's UHitFeedbackSet. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Shield Feedback")
+	TObjectPtr<USoundBase> ShieldBreakSound;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Shield Feedback", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float ShieldBreakSoundVolume = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Shield Feedback")
+	TObjectPtr<class USoundAttenuation> ShieldBreakSoundAttenuation;
+
+	/** True while this target's shield is down. Mirrors IsAtMaxCharge, kept as state so the
+	 *  transition can be detected rather than the level. */
+	UFUNCTION(BlueprintPure, Category = "EMF|Shield Feedback")
+	bool IsShieldBroken() const { return bShieldBrokenState; }
+
 	// ==================== Runtime State (ReadOnly) ====================
 
 	/** Текущая EM сила, действующая на персонажа */
@@ -576,4 +650,12 @@ private:
 
 	/** Проверить изменение заряда и вызвать делегат */
 	void CheckChargeChanged();
+
+	/** Compare IsAtMaxCharge against the remembered state, and on a transition raise the event and
+	 *  play the world sound. Called from CheckChargeChanged, which every route that moves the charge
+	 *  already funnels through. */
+	void CheckShieldStateChanged();
+
+	/** Cached shield state, so CheckShieldStateChanged sees edges rather than levels. */
+	bool bShieldBrokenState = false;
 };

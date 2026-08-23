@@ -11,6 +11,8 @@
 #include "DrawDebugHelpers.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
+#include "Curves/CurveFloat.h"
+#include "Sound/SoundBase.h"
 #include "Camera/PlayerCameraManager.h"
 
 // EMF Plugin includes
@@ -64,6 +66,11 @@ void UEMFVelocityModifier::BeginPlay()
 		// Initialize charge from BaseCharge
 		UpdateFieldComponentCharge();
 	}
+
+	// Seed the shield state from whatever this target spawned at, so an enemy authored at full
+	// charge does not announce a break it never had on its first charge change. After the field
+	// component is resolved, because IsAtMaxCharge reads the charge through it.
+	bShieldBrokenState = IsAtMaxCharge();
 
 	// Find and register with MovementComponent
 	if (ACharacter* Character = Cast<ACharacter>(Owner))
@@ -179,6 +186,21 @@ float UEMFVelocityModifier::GetCharge() const
 
 void UEMFVelocityModifier::SetCharge(float NewCharge)
 {
+	// Рост модуля заряда это попадание, и часы кривой отката обязаны стартовать заново именно
+	// здесь. Оружейная ионизация ходит НЕ через AddPermanentCharge, а сюда
+	// (ShooterWeapon::ApplyIonization, ShooterWeapon_Laser, перетекание заряда с пропа), поэтому
+	// без этого сброса кривая доедала бы щит прямо под огнём, а «пауза перед откатом»
+	// отсчитывалась бы от первого попадания за весь бой.
+	//
+	// Сам откат сюда не заходит: TickShieldRecovery снимает заряд через DeductCharge, который
+	// пишет BaseCharge напрямую. Перезапустить себя он не может.
+	//
+	// Сравнение по BaseCharge, а не по GetCharge(): именно BaseCharge читает и правит откат.
+	if (FMath::Abs(NewCharge) > FMath::Abs(BaseCharge) + KINDA_SMALL_NUMBER)
+	{
+		MarkChargeGained();
+	}
+
 	// Sync ChargeSign and BaseCharge from the signed value
 	if (!FMath::IsNearlyZero(NewCharge))
 	{
@@ -641,7 +663,40 @@ void UEMFVelocityModifier::CheckChargeChanged()
 		{
 			ReplicatedCharge = CurrentCharge;
 		}
+
+		// And the one place the shield's edge can be caught, for the same reason.
+		CheckShieldStateChanged();
 	}
+}
+
+void UEMFVelocityModifier::CheckShieldStateChanged()
+{
+	const bool bNowBroken = IsAtMaxCharge();
+	if (bNowBroken == bShieldBrokenState)
+	{
+		return;
+	}
+
+	bShieldBrokenState = bNowBroken;
+	OnShieldStateChanged.Broadcast(bNowBroken);
+
+	if (!bNowBroken || !ShieldBreakSound)
+	{
+		return;
+	}
+
+	const AActor* Owner = GetOwner();
+	UWorld* World = Owner ? Owner->GetWorld() : nullptr;
+	if (!World)
+	{
+		return;
+	}
+
+	// A world sound, played by each machine for itself. No multicast: the charge is already
+	// mirrored to everyone, so everyone reaches this line on their own the moment their copy of the
+	// target crosses the cap.
+	UGameplayStatics::PlaySoundAtLocation(World, ShieldBreakSound, Owner->GetActorLocation(),
+		ShieldBreakSoundVolume, 1.0f, 0.0f, ShieldBreakSoundAttenuation);
 }
 
 void UEMFVelocityModifier::OnOwnerBeginOverlap(AActor* OverlappedActor, AActor* OtherActor)
@@ -1224,6 +1279,8 @@ void UEMFVelocityModifier::TickComponent(float DeltaTime, ELevelTick TickType, F
 		UpdateFieldComponentCharge();
 	}
 
+	TickShieldRecovery();
+
 	// Scale ProjectileForceMultiplier by movement speed
 	if (bScaleProjectileForceBySpeed && MovementComponent)
 	{
@@ -1232,6 +1289,53 @@ void UEMFVelocityModifier::TickComponent(float DeltaTime, ELevelTick TickType, F
 		ProjectileForceMultiplier = FMath::Lerp(1.0f, ProjectileForceAtMaxSpeed, Alpha);
 	}
 
+}
+
+void UEMFVelocityModifier::TickShieldRecovery()
+{
+	if (!ShieldRecoveryCurve)
+	{
+		return;
+	}
+
+	// Только сервер. Заряд зеркалится в ReplicatedCharge из CheckChargeChanged, и клиент, который
+	// откатывал бы щит сам, дрался бы со своей же репликацией.
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return;
+	}
+
+	const UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Щит уже целый, откатывать нечего.
+	const float Module = FMath::Abs(BaseCharge);
+	if (Module <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	const float Elapsed = World->GetTimeSeconds() - LastChargeGainTime;
+	if (Elapsed <= 0.0f)
+	{
+		return;
+	}
+
+	// Кривая накопительная, поэтому снимаем разницу с тем, что уже сняли. Отрицательный участок
+	// кривой не должен ЗАРЯЖАТЬ цель: заряд добавляет только оружие, иначе кривая стала бы вторым,
+	// невидимым источником урона.
+	const float Target = FMath::Max(0.0f, ShieldRecoveryCurve->GetFloatValue(Elapsed));
+	const float Delta = Target - RecoveredSinceGain;
+	if (Delta <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	RecoveredSinceGain = Target;
+	DeductCharge(Delta);
 }
 
 void UEMFVelocityModifier::AddBonusCharge(float Amount)
@@ -1251,6 +1355,23 @@ void UEMFVelocityModifier::AddPermanentCharge(float Amount)
 	float NewModule = FMath::Clamp(CurrentModule + Amount, 0.0f, MaxBaseCharge);
 	BaseCharge = static_cast<float>(ChargeSign) * NewModule;
 	UpdateFieldComponentCharge();
+
+	// Попадание. Кривая отката отсчитывается отсюда и играется с нуля: держать накопленное между
+	// ударами нельзя, иначе цель, которую бьют редко но метко, откатится рывком сразу после
+	// последнего попадания.
+	if (Amount > 0.0f)
+	{
+		MarkChargeGained();
+	}
+}
+
+void UEMFVelocityModifier::MarkChargeGained()
+{
+	if (const UWorld* const World = GetWorld())
+	{
+		LastChargeGainTime = World->GetTimeSeconds();
+		RecoveredSinceGain = 0.0f;
+	}
 }
 
 void UEMFVelocityModifier::SetBaseCharge(float NewBaseCharge)

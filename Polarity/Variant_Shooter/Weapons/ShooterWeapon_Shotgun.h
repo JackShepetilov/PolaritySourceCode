@@ -57,11 +57,52 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Shotgun")
 	int32 GetPelletCount() const { return PelletPattern.Num(); }
 
-	/** Half-angle of the pattern, in degrees: the offset of a pellet at the edge of it. */
+	/** Half-angle of the pattern RIGHT NOW, in degrees: where a pellet at the edge of it goes.
+	 *
+	 *  This is the Apex-style part of the spread. An ordinary weapon spends its spread on wandering
+	 *  the aim line, which for a shotgun would shove the whole triangle sideways and leave its shape
+	 *  and its size untouched -- a player who learned the pattern would be no worse off jumping than
+	 *  standing. A shotgun spends it on the WIDTH of the pattern instead: the pellets fly further
+	 *  apart, so the same three hits at the same range now spread over a bigger target and land
+	 *  fewer of them. Same input, and the thing the player feels is the thing the number describes.
+	 *
+	 *  Authored width at rest, then opened or closed by how far the current spread has moved from
+	 *  its resting value -- so hip-firing while standing still still prints exactly the triangle
+	 *  that was authored, and crouching or aiming tightens it below that. */
 	UFUNCTION(BlueprintPure, Category = "Shotgun")
-	float GetPelletSpreadAngle() const { return PelletSpreadAngle; }
+	float GetPelletSpreadAngle() const;
+
+	/** The shotgun does not wander its aim line: the spread goes into the pattern width instead
+	 *  (GetPelletSpreadAngle). PatternWanderFraction turns some of it back on for a weapon that
+	 *  should also shake. */
+	virtual float GetAimConeDegrees() const override;
+
+	/** The crosshair draws the outer edge of the pattern, because that, and not the aim line, is
+	 *  the region the shot covers. */
+	virtual float GetCrosshairSpreadDegrees() const override { return GetPelletSpreadAngle(); }
 
 protected:
+
+	// ==================== Spread -> pattern ====================
+
+	/** How much of the weapon's spread goes into widening the pattern. 1.0 = a degree of spread is
+	 *  a degree of extra pattern radius. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shotgun|Spread", meta = (ClampMin = "0.0"))
+	float SpreadPatternGrowth = 1.0f;
+
+	/** How much of the weapon's spread ALSO wanders the whole pattern, as a fraction. Zero by
+	 *  design: a fixed pattern the player can learn is the point of this class. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shotgun|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PatternWanderFraction = 0.0f;
+
+	/** Floor on the pattern width, so aiming and crouching tighten it without collapsing it into a
+	 *  single slug. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shotgun|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0", Units = "deg"))
+	float MinPelletSpreadAngle = 0.6f;
+
+	/** Ceiling on the pattern width. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shotgun|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0", Units = "deg"))
+	float MaxPelletSpreadAngle = 12.0f;
 
 	// ==================== Pattern ====================
 

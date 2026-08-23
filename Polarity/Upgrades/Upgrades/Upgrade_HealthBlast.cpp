@@ -130,7 +130,14 @@ void AHealthBlastProjectile::OnProjectileOverlap(UPrimitiveComponent* Overlapped
 		}
 	}
 
-	// Hitmarker on the player
+	// Hitmarker on the player.
+	//
+	// TODO(COOP): this projectile is server-spawned, so for a client's blast this line runs on the
+	// server against a pawn that is not locally controlled there. UHitMarkerComponent now refuses
+	// to play confirmation on a machine that does not own the pawn, which stops the host hearing
+	// phantom hits from other people's blasts -- but it leaves the firing client with no
+	// confirmation at all. Closing that needs a client RPC carrying the hit, the same way the
+	// weapon relays its impacts. Unchanged behaviour for the host's own blast.
 	if (AShooterCharacter* Player = Cast<AShooterCharacter>(GetInstigator()))
 	{
 		if (UHitMarkerComponent* HitMarkerComp = Player->GetHitMarkerComponent())

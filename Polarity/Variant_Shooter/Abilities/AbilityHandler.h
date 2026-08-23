@@ -84,6 +84,72 @@ public:
 	 *  from the wound outwards needs it, and it cannot be recovered afterwards. */
 	virtual void OnOwnerDamaged(float Damage, AActor* DamageCauser, AController* InstigatedBy, const FHitResult& HitInfo) {}
 
+	/** Every component tick, for the ACTIVE handler, and only while it is casting.
+	 *
+	 *  Most abilities need nothing here: they drive their own pipeline from montages and timers and
+	 *  know exactly when they are finished. It exists for the ones whose end is decided somewhere
+	 *  they do not control — the grapple's swing ends inside the movement simulation, on each
+	 *  machine independently, so the ability can only notice it, never be told. */
+	virtual void OnActiveTick(float DeltaTime) {}
+
+	/** The owner landed a hit with a weapon, on the machine that computed it. Damage is what was
+	 *  actually applied, which on a client is what it ASKED for -- the true number only comes back a
+	 *  round trip later as replicated health.
+	 *
+	 *  Deliberately not authority-only, unlike OnOwnerDamaged: a passive that remembers who the
+	 *  player has shot is remembering it for that player's own screen, and the owning client is the
+	 *  only machine where that memory is worth anything. */
+	virtual void OnOwnerDealtDamage(AActor* Target, float Damage, bool bKilled) {}
+
+	/** A shot is leaving the owner's weapon, before any of that shot's damage has been worked out.
+	 *
+	 *  This is where a per-shot resource is SPENT, and the timing is deliberate rather than
+	 *  convenient: on the host, Fire() computes the damage and only then broadcasts that a shot
+	 *  happened, while a client's shot reaches the server as two RPCs with the fire report arriving
+	 *  first. Spending at the start of Fire is the only moment both routes agree on.
+	 *
+	 *  Runs on every machine that executes Fire, plus on the server for a remote pawn, where the
+	 *  server does not run Fire at all. @see AShooterCharacter::Server_ReportWeaponFired */
+	virtual void OnOwnerFiredWeapon() {}
+
+	/** Damage this passive deals ITSELF for one hit on Target, straight to health and past whatever
+	 *  shield the weapon is being held back by.
+	 *
+	 *  Not a multiplier on the weapon's damage, and the difference is the mechanic: the Sniper's
+	 *  passive is supposed to hurt an enemy whose shield is still up, which no multiplier on a
+	 *  gated number can ever do.
+	 *
+	 *  Answered for the shot that has already been latched by OnOwnerFiredWeapon, so asking twice
+	 *  for the same shot gives the same answer — a shotgun's pellets are one shot and each pellet
+	 *  carries it. Authority only in practice: the caller applies it. */
+	virtual float GetBonusPierceDamage(const AActor* Target) const { return 0.0f; }
+
+	/** The same number for the shot the owner would fire NEXT, for the HUD readout. Separate from
+	 *  the one above because they answer different questions: one is what the last trigger pull was
+	 *  worth, this is what the next one would be. */
+	virtual float GetPredictedPierceDamage(const AActor* Target) const { return 0.0f; }
+
+	/** Damage the owner's next shot would deal to Target, when this passive has a reason to show the
+	 *  player that number. False from every passive that has nothing to show, which is all of them
+	 *  but one, and false for a target this passive has no answer for.
+	 *
+	 *  Local and cosmetic: read by the overhead indicator on the machine the player is looking at. */
+	virtual bool GetPredictedShotDamage(const AActor* Target, float& OutDamage) const { return false; }
+
+	/** How far the owner's melee lunge may reach for one particular candidate.
+	 *
+	 *  Asked by UMeleeAttackComponent with its own configured LungeRange, once per candidate per
+	 *  swing. A NULL Target asks a different question: the CEILING, the largest value this handler
+	 *  could ever return for anybody. That is what the search sphere is sized to, before there is a
+	 *  candidate to judge -- a search sized to the base range would never overlap the enemy an
+	 *  extended reach exists for.
+	 *
+	 *  Unlike the two hooks above this one is NOT authority-only, and it must not become so: the
+	 *  lunge is part of the movement simulation, so the client that swings and the server that
+	 *  replays the move both ask it and both have to get the same answer. Keep it const, keep it
+	 *  free of side effects, and keep it a pure function of the target. */
+	virtual float ModifyLungeRange(const AActor* Target, float BaseRange) const { return BaseRange; }
+
 	// ==================== Accessors ====================
 
 	UFUNCTION(BlueprintPure, Category = "Ability")

@@ -85,6 +85,26 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
 	float CrouchingCapsuleHalfHeight = 50.0f;
 
+	// ==================== Crouch transition ====================
+	//
+	// The CAPSULE always swaps in a single frame: the engine does the resize together with its own
+	// encroachment check, and splitting that over several frames would mean a capsule that is neither
+	// size while it travels. What these two times drive is the VISIBLE half of the move - the eye, the
+	// first person pose and the crouch blend weight - which is what a player actually reads as "how
+	// fast do I crouch". Before they existed the capsule snapped and the eye snapped with it.
+	//
+	// Both are total travel times for the full standing <-> crouched distance, so the eye, the hands
+	// and the anim alpha all arrive together. 0 restores the old instant behaviour.
+
+	/** Seconds for the view to travel from standing down to crouched. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground|Crouch Transition", meta = (ClampMin = "0.0", ClampMax = "1.0", Units = "s"))
+	float CrouchDownTime = 0.15f;
+
+	/** Seconds for the view to travel back up to standing. Deliberately slower than going down:
+	 *  dropping is a fall, standing up is work. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground|Crouch Transition", meta = (ClampMin = "0.0", ClampMax = "1.0", Units = "s"))
+	float CrouchUpTime = 0.22f;
+
 	// ==================== Air ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
@@ -185,8 +205,30 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Speed boost at minimum entry speed. Titanfall default: 400"))
 	float SlideMaxSpeedBurst = 400.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Extra slowdown on flat ground. Works with progressive braking"))
+	/** Constant slowdown on flat ground, in cm/s^2. Speed falls in a straight line, so slide DISTANCE
+	 *  grows with the SQUARE of entry speed: half again the speed is more than twice the distance.
+	 *  That is the amplifier behind "the air slide goes miles further than the sprint slide".
+	 *  Set this to 0 in the settings asset to hand the whole job to SlideFrictionPerSecond below,
+	 *  which is how Apex does it. The two are summed, so leaving both on is a valid middle ground
+	 *  but is NOT Apex behaviour. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ClampMin = "0.0"))
 	float SlideFlatDeceleration = 200.0f;
+
+	/** Speed-proportional drag on flat ground, per second. This is the Source and Apex model:
+	 *  CGameMovement::Friction does drop = control * sv_friction * dt with control floored at
+	 *  sv_stopspeed, i.e. the faster you go the harder you bleed. Here the floor is SlideMinSpeed,
+	 *  which already is this game's stopspeed, so the tail of the slide stays crisp instead of
+	 *  asymptoting.
+	 *
+	 *  What it buys: speed decays as v0 * exp(-f * t), so distance is (v0 - SlideMinSpeed) / f, which
+	 *  is LINEAR in entry speed, and duration is ln(v0 / SlideMinSpeed) / f, which is logarithmic.
+	 *  A faster entry then reads as a faster slide rather than an endless one.
+	 *
+	 *  Picking a number: f = (entry speed - SlideMinSpeed) / (distance you want, in cm). 0.3 gives a
+	 *  1370 cm/s entry roughly 38 metres and about 6 seconds. 0 disables it and restores the old
+	 *  constant-only model. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ClampMin = "0.0"))
+	float SlideFrictionPerSecond = 0.3f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Additional slowdown when sliding uphill"))
 	float SlideUphillDeceleration = 600.0f;
@@ -199,6 +241,33 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Steering strength when input points behind current slide direction. 0 prevents instant 180-degree reversals."))
 	float SlideBackwardSteeringScale = 0.25f;
+
+	// ==================== Slide|Fatigue ====================
+	// Repeated boosts have to stop paying, or a slide-hop chain accelerates without limit.
+	// Apex has no fatigue on the slide itself (its only slide anti-spam is slide_boost_cooldown,
+	// which is SlideboostCooldown above), but it does ship this exact shape for wall runs:
+	// wallrun_strengthLossStart / wallrun_strengthLossEnd, "number of wall runs allowed before
+	// starting to lose upward strength" / "number of wall runs at which it is fully lost", with a
+	// linear ramp between the two. Both are 1000 in shipped Apex, i.e. switched off there.
+	// Set SlideFatigueEnd <= SlideFatigueStart to switch it off here the same way.
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Fatigue", meta = (ClampMin = "0", ToolTip = "Number of slide boosts that pay in full before fatigue starts. Apex analogue: wallrun_strengthLossStart"))
+	int32 SlideFatigueStart = 0;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Fatigue", meta = (ClampMin = "0", ToolTip = "Number of slide boosts at which the boost is gone entirely. At or below SlideFatigueStart disables fatigue. Apex analogue: wallrun_strengthLossEnd"))
+	int32 SlideFatigueEnd = 5;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Fatigue", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Floor on the fatigue scale while the counter is still below SlideFatigueEnd. Reaching SlideFatigueEnd drops to 0 regardless."))
+	float SlideFatigueMinScale = 0.2f;
+
+	/** Seconds not sliding before one step of fatigue is given back. 0 disables recovery.
+	 *  MUST be longer than SlideboostCooldown or the whole system is a no-op: boosts can only be
+	 *  taken once per SlideboostCooldown, so a recovery faster than that hands a step back before the
+	 *  next boost can spend one and the counter never climbs. At 4s against a 2s boost cooldown a
+	 *  chain pays half a step per boost, so a sustained slide-hop run dries up after about ten of
+	 *  them, and twenty seconds off the ground puts a fully fatigued player back to full. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide|Fatigue", meta = (ClampMin = "0.0", Units = "s"))
+	float SlideFatigueRecoveryTime = 4.0f;
 
 	// ==================== Mantle ====================
 
@@ -546,6 +615,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Slide")
 	float SlideCameraPitch = 3.0f;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Slide")
+	bool bEnableSlideFOV = true;
+
+	/** Extra degrees of field of view at full slide, ADDED to whatever the player's FOV setting and
+	 *  the aim blend produced. Never an absolute angle: an absolute number would overwrite the
+	 *  player's own setting, and would read as a zoom OUT for anyone playing above it. Same shape as
+	 *  WallrunFOVAdd and AirDashFOVAdd, and faded out while aiming by SetFOVEffectScale. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Slide")
+	float SlideFOVAdd = 12.0f;
+
 	// ==================== Camera|Wallrun ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Wallrun")
@@ -612,6 +691,8 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View")
 	float SlideWeaponTiltPitch = 3.0f;
 
+	/** No longer read: the crouch/slide tilt runs on CrouchDownTime / CrouchUpTime now, so it stays
+	 *  in step with the eye. Kept so existing settings assets do not silently lose the value. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View")
 	float WeaponTiltInterpSpeed = 10.0f;
 
@@ -642,16 +723,15 @@ public:
 	float ADSInterpSpeed = 12.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")
-	float ADSCameraFOV = 70.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")
-	float ADSFirstPersonFOV = 60.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")
 	FVector DefaultADSOffset = FVector(15.0f, 0.0f, 5.0f);
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")
-	float ADSMovementSpeedMultiplier = 0.5f;
+	/** Ground speed while aiming down sights, in cm/s. Applied as a CAP, not a replacement: crouching
+	 *  or a damage slow may still be slower than this, and it can never speed the player up. Zero or
+	 *  below leaves aiming with no effect on speed at all. Absolute like WalkSpeed and SprintSpeed,
+	 *  so the three read against each other directly. Replaces the never-read
+	 *  ADSMovementSpeedMultiplier, which was declared here and used nowhere. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float ADSSpeed = 300.0f;
 
 	// ==================== Procedural Footsteps ====================
 
@@ -769,3 +849,23 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon Sway|Aim Offset", meta = (ClampMin = "0.0"))
 	float AimOffsetMinSpeed = 200.0f;
 };
+
+/**
+ * Moves Alpha toward Target at the constant rate that covers the whole 0..1 range in TimeToTravel
+ * seconds, and lands exactly on Target instead of approaching it forever.
+ *
+ * Deliberately not FInterpTo: an exponential ease has no finish line, so two values eased with the
+ * same "speed" from different distances arrive at different moments and the eye, the hands and the
+ * anim alpha drift apart mid-crouch. A time is also the thing a designer can reason about.
+ *
+ * TimeToTravel of 0 (or less) means instant.
+ */
+FORCEINLINE float PolarityInterpAlphaOverTime(float Alpha, float Target, float DeltaTime, float TimeToTravel)
+{
+	if (TimeToTravel <= KINDA_SMALL_NUMBER)
+	{
+		return Target;
+	}
+
+	return FMath::FInterpConstantTo(Alpha, Target, DeltaTime, 1.0f / TimeToTravel);
+}

@@ -319,9 +319,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Recoil")
 	FVector GetWeaponOffset() const { return CurrentWeaponOffset; }
 
-	/** Get current visual weapon rotation offset */
+	/** Kick and sway, summed. Kept as the one-call answer for callers that want "everything the
+	 *  recoil component does to the weapon's rotation" and do not care which half is which. */
 	UFUNCTION(BlueprintPure, Category = "Recoil")
-	FRotator GetWeaponRotationOffset() const { return CurrentWeaponRotation; }
+	FRotator GetWeaponRotationOffset() const { return CurrentWeaponRotation + CurrentSwayOffset; }
+
+	/** Per-shot spring kick only, no sway. Split out from GetWeaponRotationOffset because ADS
+	 *  scales the two differently: the kick is already divided between camera and weapon by
+	 *  ADSWeaponFraction, while sway is scaled by ADSSwayMultiplier. A caller that re-applies
+	 *  them after the ADS sight alignment has to weigh them separately. */
+	UFUNCTION(BlueprintPure, Category = "Recoil")
+	FRotator GetWeaponKickRotation() const { return CurrentWeaponRotation; }
+
+	/** Sway only (mouse lag + organic breathing/tremor/jitter), no per-shot kick. */
+	UFUNCTION(BlueprintPure, Category = "Recoil")
+	FRotator GetWeaponSwayRotation() const { return CurrentSwayOffset; }
 
 	/** Get camera rotation offset from punch effect */
 	UFUNCTION(BlueprintPure, Category = "Recoil")
@@ -393,7 +405,8 @@ protected:
 	/** Current weapon position offset (read by ShooterCharacter) */
 	FVector CurrentWeaponOffset = FVector::ZeroVector;
 
-	/** Current weapon rotation offset (read by ShooterCharacter) */
+	/** Per-shot spring kick ONLY. Sway lives in CurrentSwayOffset and is summed in at the getter,
+	 *  not here. Written every frame by UpdateVisualKick, which owns it. */
 	FRotator CurrentWeaponRotation = FRotator::ZeroRotator;
 
 	/** Spring states for each visual kick axis */

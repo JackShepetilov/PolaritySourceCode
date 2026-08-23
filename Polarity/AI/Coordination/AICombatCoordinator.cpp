@@ -13,6 +13,7 @@
 #include "ShooterCharacter.h"
 #include "ShooterAIController.h"
 #include "ThreatComponent.h"
+#include "../Components/CoverFinderComponent.h"
 
 // ==================== FTokenPool ====================
 
@@ -100,6 +101,18 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 
 	// Cleanup first: targeting below walks the registered list and should not walk corpses.
 	CleanupInvalidNPCs();
+
+	// Positional threat before targeting, not after: UpdateNPCTargets is the first consumer of
+	// GetPlayerThreat this frame, and feeding it last frame's census would put the whole squad one
+	// tick behind every flank.
+	CleanupRelocations();
+
+	TimeSincePositionalThreat += DeltaTime;
+	if (TimeSincePositionalThreat >= PositionalThreatInterval)
+	{
+		TimeSincePositionalThreat = 0.0f;
+		UpdatePositionalThreat();
+	}
 
 	// Who each NPC is fighting, remembered between frames. This also derives PrimaryTarget, so the
 	// old "re-find the nearest player to the coordinator actor" is gone — that answer had nothing to
@@ -1475,6 +1488,20 @@ float AAICombatCoordinator::GetPlayerThreat(APawn* Player) const
 		Threat += FMath::Max(0.0f, ThreatComp->GetThreat());
 	}
 
+	// The third source: threat earned by standing somewhere. Read from the cached census rather than
+	// recomputed, because this function is called several times per NPC per frame and the census
+	// costs traces.
+	//
+	// Deliberately folded in HERE, into the one number both consumers read, rather than handed to
+	// them separately. That is what makes a flank amplify both halves of the behaviour at once: the
+	// same figure divides apparent distance for target selection (so shielded enemies find the
+	// flanker nearer and go at them) and weights exposure for cover choice (so broken ones hide from
+	// them harder). Splitting it would have let the two drift apart.
+	if (const int32* const OpenedCount = OpenedCoverCounts.Find(Player))
+	{
+		Threat += ThreatPerOpenedCover * static_cast<float>(*OpenedCount);
+	}
+
 	return Threat;
 }
 
@@ -1534,6 +1561,167 @@ bool AAICombatCoordinator::IsCoverBlocked(const FVector& Location, const AActor*
 	}
 
 	return false;
+}
+
+// ============================================================================
+// Positional threat, relocation and covering fire
+// ============================================================================
+
+void AAICombatCoordinator::UpdatePositionalThreat()
+{
+	OpenedCoverCounts.Reset();
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	if (Players.Num() == 0)
+	{
+		return;
+	}
+
+	// The census, and the only place the coordinator touches a cover component. It asks each NPC's
+	// own corner whether a given player has taken it away, rather than re-deriving cover geometry
+	// here: one definition of "opened", living next to the traces that answer it.
+	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		APawn* const NPC = Data.NPC.Get();
+		if (!NPC)
+		{
+			continue;
+		}
+
+		const UCoverFinderComponent* const Finder = NPC->FindComponentByClass<UCoverFinderComponent>();
+		if (!Finder || !Finder->HasCover())
+		{
+			continue;
+		}
+
+		for (APawn* const Player : Players)
+		{
+			if (Finder->IsCoverOpenedBy(Player))
+			{
+				OpenedCoverCounts.FindOrAdd(Player)++;
+			}
+		}
+	}
+}
+
+void AAICombatCoordinator::CleanupRelocations()
+{
+	const UWorld* const World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+
+	ActiveRelocations.RemoveAll([Now](const FRelocation& Entry)
+	{
+		return !Entry.Runner.IsValid() || Now >= Entry.ExpiryTime;
+	});
+}
+
+bool AAICombatCoordinator::BeginRelocation(APawn* NPC, APawn* Opener, float ExpectedSeconds)
+{
+	if (!NPC || !GetWorld())
+	{
+		return false;
+	}
+
+	CleanupRelocations();
+
+	// Already running one: refresh it rather than opening a second. A runner that re-picks its
+	// destination mid-run is still the same run as far as the squad is concerned.
+	const float Now = GetWorld()->GetTimeSeconds();
+	const float Duration = FMath::Clamp(ExpectedSeconds, 0.5f, MaxSuppressionSeconds);
+
+	for (FRelocation& Entry : ActiveRelocations)
+	{
+		if (Entry.Runner.Get() == NPC)
+		{
+			Entry.Opener = Opener;
+			Entry.ExpiryTime = Now + Duration;
+			return true;
+		}
+	}
+
+	// The ceiling. Refusing here is what leaves somebody at home: an NPC told no keeps its corner
+	// for now and asks again on its next cycle, by which time a slot has usually freed up.
+	if (ActiveRelocations.Num() >= MaxSimultaneousRelocations)
+	{
+		return false;
+	}
+
+	FRelocation Entry;
+	Entry.Runner = NPC;
+	Entry.Opener = Opener;
+	Entry.ExpiryTime = Now + Duration;
+	ActiveRelocations.Add(Entry);
+
+	UE_LOG(LogTemp, Warning, TEXT("[SQUAD_DEBUG] %s BEGIN relocation (opener %s, %.1fs, %d/%d slots)"),
+		*GetNameSafe(NPC), *GetNameSafe(Opener), Duration, ActiveRelocations.Num(), MaxSimultaneousRelocations);
+
+	return true;
+}
+
+void AAICombatCoordinator::EndRelocation(APawn* NPC)
+{
+	const int32 Removed = ActiveRelocations.RemoveAll([NPC](const FRelocation& Entry)
+	{
+		return !Entry.Runner.IsValid() || Entry.Runner.Get() == NPC;
+	});
+
+	if (Removed > 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SQUAD_DEBUG] %s END relocation"), *GetNameSafe(NPC));
+	}
+}
+
+bool AAICombatCoordinator::IsRelocating(const APawn* NPC) const
+{
+	for (const FRelocation& Entry : ActiveRelocations)
+	{
+		if (Entry.Runner.Get() == NPC)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+APawn* AAICombatCoordinator::GetSuppressionTarget(const APawn* NPC) const
+{
+	if (!NPC)
+	{
+		return nullptr;
+	}
+
+	// Ranked by threat, so when several corners fall at once the squad sits on the worst offender
+	// rather than splitting attention. This is also the priority order for the short-handed case the
+	// design calls out: with fewer coverers than openers, the openers simply go unanswered from the
+	// bottom of this ordering up, which is the correct thing to drop.
+	APawn* Best = nullptr;
+	float BestThreat = -1.0f;
+
+	for (const FRelocation& Entry : ActiveRelocations)
+	{
+		// Not your own run: the runner is busy running, and covering yourself is not a thing.
+		if (!Entry.Runner.IsValid() || Entry.Runner.Get() == NPC)
+		{
+			continue;
+		}
+
+		APawn* const Opener = Entry.Opener.Get();
+		if (!Opener)
+		{
+			continue;
+		}
+
+		const float Threat = GetPlayerThreat(Opener);
+		if (Threat > BestThreat)
+		{
+			BestThreat = Threat;
+			Best = Opener;
+		}
+	}
+
+	return Best;
 }
 
 AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const

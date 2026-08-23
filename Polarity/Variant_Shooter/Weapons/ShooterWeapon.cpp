@@ -9,6 +9,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "ShooterProjectile.h"
+#include "GameFramework/ProjectileMovementComponent.h"
+#include "Components/SphereComponent.h"
 #include "EMFProjectile.h"
 #include "ProjectilePoolSubsystem.h"
 #include "ShooterWeaponHolder.h"
@@ -18,6 +20,7 @@
 #include "Camera/CameraComponent.h"
 #include "TimerManager.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Character.h"
@@ -40,6 +43,7 @@
 #include "EMFPhysicsProp.h"
 #include "Foliage/FoliageConversionLibrary.h"
 #include "Upgrades/UpgradeManagerComponent.h"
+#include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "EnemyBeamBoltSubsystem.h"
 #include "VFX/VFXVariantSequenceSubsystem.h"
 
@@ -87,6 +91,146 @@ void AShooterWeapon::PlayWeaponMeshAnimation(UAnimationAsset* Animation)
 	}
 }
 
+void AShooterWeapon::ResolveADSAnchorAttachment()
+{
+	if (!ADSCameraComponent || !FirstPersonMesh)
+	{
+		return;
+	}
+
+	const FAttachmentTransformRules Rules = FAttachmentTransformRules::SnapToTargetNotIncludingScale;
+
+	// --- 1. A sight attachment that carries its own eye point ---
+	// The best of the three by a distance, and the only one authored FOR aiming: the socket sits
+	// behind the glass, oriented down the sight line, and it travels with the scope when the scope
+	// is swapped, so nothing needs re-tuning per attachment. This is the Low Poly Shooter Pack
+	// convention (SOCKET_Aim on SM_*_Scope_Default and on every SM_ATT_Scope_*), and iron sights
+	// there are simply "scope number zero" rather than a separate case.
+	//
+	// The whole subtree is searched, not just direct children, so a sight mounted on a rail that is
+	// itself mounted on the weapon still counts.
+	if (!SightAimSocketName.IsNone())
+	{
+		// Not "Children": AActor already has a member by that name and warnings are errors here.
+		TArray<USceneComponent*> AttachedChildren;
+		FirstPersonMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AttachedChildren);
+		for (USceneComponent* Child : AttachedChildren)
+		{
+			if (!Child || Child == ADSCameraComponent)
+			{
+				continue;
+			}
+
+			if (Child->DoesSocketExist(SightAimSocketName))
+			{
+				ADSCameraComponent->AttachToComponent(Child, Rules, SightAimSocketName);
+				UE_LOG(LogTemp, Log, TEXT("[ADS] %s: anchor on sight attachment '%s', socket '%s'."),
+					*GetName(), *Child->GetName(), *SightAimSocketName.ToString());
+				return;
+			}
+		}
+	}
+
+	// --- 2. A socket on the weapon mesh itself ---
+	// ADSSocketName first: that one is meant to BE the eye point, so if it exists it is as good as
+	// case 1. ScopeMountSocketName is the consolation prize and it is worth being clear about why:
+	// a mount socket sits on the rail, below the sight line and oriented to the rail rather than
+	// down the barrel. It puts the anchor in roughly the right place and almost certainly the wrong
+	// rotation, so expect to need SightRotationOffset, or to turn bAlignSightRotation off, on any
+	// weapon that lands here.
+	const FName Candidates[] = { ADSSocketName, ScopeMountSocketName };
+	for (const FName& SocketName : Candidates)
+	{
+		if (SocketName.IsNone() || !FirstPersonMesh->DoesSocketExist(SocketName))
+		{
+			continue;
+		}
+
+		ADSCameraComponent->AttachToComponent(FirstPersonMesh, Rules, SocketName);
+
+		if (SocketName == ScopeMountSocketName)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ADS] %s: no eye-point socket found, falling back to the "
+				"MOUNT socket '%s' on the weapon mesh. That is a rail position, not a sight line: "
+				"check the aim with a trace and expect to need SightRotationOffset."),
+				*GetName(), *SocketName.ToString());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[ADS] %s: anchor on weapon mesh socket '%s'."),
+				*GetName(), *SocketName.ToString());
+		}
+		return;
+	}
+
+	// --- 3. Nothing authored: keep whatever the Blueprint set ---
+	// Deliberately no attach call. The ADS camera keeps the parent and relative transform it was
+	// given in the Blueprint, which for a hand-placed anchor is exactly what the designer meant.
+	UE_LOG(LogTemp, Log, TEXT("[ADS] %s: no sight socket anywhere, keeping the anchor where the "
+		"Blueprint placed it (parent '%s')."),
+		*GetName(), *GetNameSafe(ADSCameraComponent->GetAttachParent()));
+}
+
+void AShooterWeapon::PropagateRenderVisibilityToChildren()
+{
+	// A sight, suppressor or laser added in the Blueprint as a child of one of the weapon meshes
+	// keeps the default render visibility, which means the first person pass and the world pass
+	// disagree about it: bolted to the FP gun it would still be drawn with the WORLD field of view
+	// and world depth, so it swims against the weapon it is attached to and clips into the scene.
+	// Nothing attached under a weapon mesh ever wants to differ from that mesh here, so it is
+	// inherited rather than left as a checkbox to remember on every new attachment.
+	auto Inherit = [](USkeletalMeshComponent* Parent)
+	{
+		if (!Parent)
+		{
+			return;
+		}
+
+		TArray<USceneComponent*> AttachedChildren;
+		Parent->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AttachedChildren);
+		for (USceneComponent* Child : AttachedChildren)
+		{
+			UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Child);
+			if (!Prim || Prim == Parent)
+			{
+				continue;
+			}
+
+			// Type first: SetFirstPersonPrimitiveType(WorldSpaceRepresentation) forces bOwnerNoSee
+			// on internally, so setting the see flags afterwards is what makes ours the last word.
+			Prim->SetFirstPersonPrimitiveType(Parent->FirstPersonPrimitiveType);
+			Prim->SetOnlyOwnerSee(Parent->bOnlyOwnerSee != 0);
+			Prim->SetOwnerNoSee(Parent->bOwnerNoSee != 0);
+		}
+	};
+
+	Inherit(FirstPersonMesh);
+	Inherit(ThirdPersonMesh);
+}
+
+void AShooterWeapon::PlayReloadEffectsLocally()
+{
+	// Both meshes: PlayWeaponMeshAnimation already covers first and third person, so the machine
+	// that runs this shows the reload on whichever copy of the weapon it can see.
+	PlayWeaponMeshAnimation(WeaponMeshReloadAnimation);
+
+	if (ReloadSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ReloadSound, GetActorLocation());
+	}
+}
+
+void AShooterWeapon::Multicast_PlayReloadEffects_Implementation()
+{
+	// Whoever started the reload already played these the moment they started it. For an NPC that
+	// is the server, which is where its AI lives.
+	const bool bIsReloader = PawnOwner && PawnOwner->IsLocallyControlled();
+	if (!bIsReloader)
+	{
+		PlayReloadEffectsLocally();
+	}
+}
+
 void AShooterWeapon::Multicast_PlayFireEffects_Implementation()
 {
 	// The shooter already played these locally the moment they pulled the trigger.
@@ -102,8 +246,64 @@ float AShooterWeapon::GetMaxReportedSingleHitDamage() const
 	// Projectile weapons report through the projectile, which the server owns, so the hitscan number
 	// is the only one a client ever hands over. A weapon with no hitscan damage configured still
 	// needs a non-zero ceiling or every reported hit would clamp to nothing.
+	// No class-passive term here on purpose. The Sniper's passive does not scale this number at all:
+	// it deals its OWN damage, decided and applied on the server, and never travels in a client's
+	// report. @see AShooterWeapon::ApplyPassivePierceDamage.
 	const float BaseDamage = HitscanDamage > 0.0f ? HitscanDamage : 1.0f;
 	return BaseDamage * FMath::Max(HeadshotMultiplier, 1.0f) * FMath::Max(MaxReportedDamageMultiplier, 1.0f);
+}
+
+float AShooterWeapon::PredictDamageAgainst(AActor* Target) const
+{
+	if (!IsValid(Target) || HitscanDamage <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// The same product the bolt path assembles, minus the two factors that only a real shot can
+	// know: whether it lands on a head, and how much energy it has left after passing through
+	// anything. So this is a body shot at full energy -- the honest baseline, and the one the player
+	// can compare two of against each other, which is the whole point of showing it.
+	const float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
+
+	float ZFactorMult = 1.0f;
+	if (bUseZFactor && PawnOwner)
+	{
+		ZFactorMult = CalculateZFactorMultiplier(PawnOwner->GetActorLocation().Z, Target->GetActorLocation().Z);
+	}
+
+	const float TagMult = GetTagDamageMultiplier(Target);
+
+	float UpgradeMult = 1.0f;
+	if (PawnOwner)
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+		{
+			UpgradeMult = UpgradeMgr->GetCombinedDamageMultiplier(Target);
+		}
+	}
+
+	float Total = HitscanDamage * HeatMult * ZFactorMult * TagMult * UpgradeMult;
+
+	// The shield gate IS applied, unlike an earlier version of this: the readout answers "what will
+	// this shot do to that enemy", and a finisher weapon against an intact shield does nothing at
+	// all with its own damage. Saying otherwise would be a lie the player then has to unlearn.
+	if (bRequiresBrokenShieldToDamage && !IsTargetShieldDown(Target))
+	{
+		Total = 0.0f;
+	}
+
+	// The class passive's own damage is added on top, and it is NOT gated: passing through a shield
+	// that is still up is the entire point of it. @see UAbilityHandler::GetBonusPierceDamage.
+	if (PawnOwner)
+	{
+		if (const UAbilityComponent* Abilities = PawnOwner->FindComponentByClass<UAbilityComponent>())
+		{
+			Total += Abilities->GetPredictedPierceDamage(Target);
+		}
+	}
+
+	return Total;
 }
 
 bool AShooterWeapon::IsTargetShieldDown(AActor* Target) const
@@ -143,13 +343,13 @@ float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, c
 		return 0.0f;
 	}
 
-	// A finisher weapon: nothing it hits loses health until that target's shield is down. The hit
-	// still happened -- ionization, knockback and the hit marker all run in the callers, which is
-	// what makes charging a target up feel like progress rather than like missing.
-	if (bRequiresBrokenShieldToDamage && !IsTargetShieldDown(HitActor))
-	{
-		return 0.0f;
-	}
+	// A finisher weapon: nothing it hits loses health from the WEAPON until that target's shield is
+	// down. The hit still happened -- ionization, knockback and the hit marker all run in the
+	// callers, which is what makes charging a target up feel like progress rather than like missing.
+	//
+	// Read here and acted on twice below, because a class passive may have damage of its own that
+	// goes past this gate, and that damage still has to be applied and still has to be reported.
+	const bool bShieldGated = IsShieldGateBlocking(HitActor);
 
 	// A player firing from a client cannot write health itself: AShooterCharacter::TakeDamage is
 	// authority-only now, so the direct call below would silently do nothing on that machine while
@@ -159,17 +359,66 @@ float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, c
 	{
 		if (!OwnerCharacter->HasAuthority())
 		{
+			// Reported even when the gate is closed, which it did NOT used to be. The report is what
+			// tells the server a hit landed at all, and the server has its own reason to care about
+			// one that the weapon cannot pay for: the shield-piercing half of a class passive. The
+			// server re-checks the gate itself, so nothing is granted by reporting.
 			OwnerCharacter->DealDamage(HitActor, FinalDamage, DamageEvent.DamageTypeClass, this);
 
 			// Report the requested damage so local hit feedback still fires immediately. Kill
 			// feedback will not, because the client cannot know yet: it learns the outcome from
 			// replicated health a round trip later.
-			return FinalDamage;
+			return bShieldGated ? 0.0f : FinalDamage;
 		}
 	}
 
+	// Authority. The passive's own damage first and unconditionally: it is the half that is supposed
+	// to reach health through a shield that is still up.
+	const float PierceDamage = ApplyPassivePierceDamage(HitActor);
+
+	if (bShieldGated)
+	{
+		return PierceDamage;
+	}
+
 	return HitActor->TakeDamage(FinalDamage, DamageEvent,
-		PawnOwner ? PawnOwner->GetController() : nullptr, this);
+		PawnOwner ? PawnOwner->GetController() : nullptr, this) + PierceDamage;
+}
+
+bool AShooterWeapon::IsShieldGateBlocking(AActor* HitActor) const
+{
+	return bRequiresBrokenShieldToDamage && !IsTargetShieldDown(HitActor);
+}
+
+float AShooterWeapon::ApplyPassivePierceDamage(AActor* HitActor)
+{
+	// Authority only, and said out loud: this writes health, and a client that ran it would change
+	// nothing anywhere else while looking to itself like it had.
+	if (!IsValid(HitActor) || !PawnOwner || !PawnOwner->HasAuthority())
+	{
+		return 0.0f;
+	}
+
+	UAbilityComponent* Abilities = PawnOwner->FindComponentByClass<UAbilityComponent>();
+	if (!Abilities)
+	{
+		return 0.0f;
+	}
+
+	const float Amount = Abilities->GetPierceDamageForShot(HitActor);
+	if (Amount <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Deliberately NOT routed through the gate above, and deliberately its own damage event: this is
+	// the passive's damage, not the weapon's, and the whole mechanic is that it does not wait for
+	// the shield to come off. AShooterNPC::TakeDamage subtracts from health directly and has no
+	// shield term of its own, so this arrives where it is meant to.
+	FPointDamageEvent PierceEvent;
+	PierceEvent.DamageTypeClass = HitscanDamageType ? HitscanDamageType : TSubclassOf<UDamageType>(UDamageType::StaticClass());
+
+	return HitActor->TakeDamage(Amount, PierceEvent, PawnOwner->GetController(), this);
 }
 
 namespace
@@ -208,6 +457,49 @@ namespace
 
 		// Fallback for unknown actor types
 		return Actor->IsPendingKillPending();
+	}
+
+	/** Above this launch speed a grounded character is knocked off its feet on purpose.
+	 *  Below it an ordinary bullet must not lift anyone. @see ApplyHitscanKnockback. */
+	constexpr float HitscanGroundedLaunchThreshold = 400.0f;
+
+	/**
+	 * Single entrance for hitscan knockback on characters.
+	 *
+	 * LaunchCharacter ALWAYS forces MOVE_Falling (CharacterMovementComponent::HandlePendingLaunch),
+	 * even for a purely horizontal impulse. For a character standing on the ground that reads to the
+	 * anim graph as "airborne", so every bullet made the NPC hop instead of playing its flinch.
+	 * Rule: a grounded character only gets launched by a deliberately strong impulse; ordinary
+	 * bullet forces are dropped and the hit shows up as the flinch reaction alone. A character
+	 * already in the air is launched as before — it is falling anyway, nothing to break.
+	 */
+	void ApplyHitscanKnockback(ACharacter* HitCharacter, const FVector& LaunchVelocity, bool bIonizerWeapon)
+	{
+		if (!IsValid(HitCharacter))
+		{
+			return;
+		}
+
+		// Stationary turret never takes hit impulses: with its GravityScale=0 the forced
+		// MOVE_Falling would push it into permanent flight.
+		if (Cast<ASniperTurretNPC>(HitCharacter))
+		{
+			return;
+		}
+
+		// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
+		if (bIonizerWeapon && Cast<ABossCharacter>(HitCharacter))
+		{
+			return;
+		}
+
+		const UCharacterMovementComponent* Movement = HitCharacter->GetCharacterMovement();
+		if (Movement && Movement->IsMovingOnGround() && LaunchVelocity.Size() < HitscanGroundedLaunchThreshold)
+		{
+			return;
+		}
+
+		HitCharacter->LaunchCharacter(LaunchVelocity, false, false);
 	}
 }
 
@@ -258,12 +550,24 @@ void AShooterWeapon::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// A weapon belongs to whoever is holding it, and every spawn path sets that owner. One thing
+	// does not: a weapon actor dragged straight into a level. It has nobody to attach its meshes
+	// to, nobody to fire it, and no HUD to update, so the only sane thing it can do is sit there
+	// and say so instead of taking the editor down on the null owner.
+	AActor* OwningActor = GetOwner();
+	if (!OwningActor)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON] %s has no owner. A weapon has to be given to a character, "
+			"not placed in the level: use a pickup for that. This one will do nothing."), *GetName());
+		return;
+	}
+
 	// subscribe to the owner's destroyed delegate
-	GetOwner()->OnDestroyed.AddDynamic(this, &AShooterWeapon::OnOwnerDestroyed);
+	OwningActor->OnDestroyed.AddDynamic(this, &AShooterWeapon::OnOwnerDestroyed);
 
 	// cast the weapon owner
-	WeaponOwner = Cast<IShooterWeaponHolder>(GetOwner());
-	PawnOwner = Cast<APawn>(GetOwner());
+	WeaponOwner = Cast<IShooterWeaponHolder>(OwningActor);
+	PawnOwner = Cast<APawn>(OwningActor);
 
 	// Cache movement component for Heat System speed calculations
 	if (ACharacter* CharOwner = Cast<ACharacter>(GetOwner()))
@@ -284,14 +588,19 @@ void AShooterWeapon::BeginPlay()
 	// fill the first ammo clip
 	CurrentBullets = MagazineSize;
 
-	// attach the meshes to the owner
+	// attach the meshes to the owner. An owner that is not a weapon holder at all (a prop, a
+	// spawner) fails the cast above and would crash here the same way the null one did.
+	if (!WeaponOwner)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON] %s is owned by %s, which is not a weapon holder. "
+			"Nothing to attach to."), *GetName(), *GetNameSafe(OwningActor));
+		return;
+	}
+
 	WeaponOwner->AttachWeaponMeshes(this);
 
-	// Attach ADS camera to sight socket on the weapon's first person mesh
-	if (ADSCameraComponent && FirstPersonMesh && FirstPersonMesh->DoesSocketExist(ADSSocketName))
-	{
-		ADSCameraComponent->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ADSSocketName);
-	}
+	ResolveADSAnchorAttachment();
+	PropagateRenderVisibilityToChildren();
 
 	// Force every component attached to the weapon's meshes (sights, suppressors, lasers,
 	// rails, etc.) to tick AFTER the mesh's animation has been evaluated AND in a later tick
@@ -528,6 +837,8 @@ void AShooterWeapon::Tick(float DeltaTime)
 		UpdateHeat(DeltaTime);
 	}
 
+	UpdateSpread(DeltaTime);
+
 	// The third person weapon is not steered from here any more. It used to have its world rotation
 	// rebuilt from GetBaseAimRotation every frame, because the character's body faced its movement
 	// direction and the gun in its hand therefore pointed anywhere but at the target. That was
@@ -535,6 +846,123 @@ void AShooterWeapon::Tick(float DeltaTime)
 	// camera (bUseControllerRotationYaw in AShooterCharacter) and pitches through the aim offset, so
 	// the weapon points where the owner aims for the same reason a real one does, by being held by
 	// someone facing that way.
+}
+
+// ==================== Spread ====================
+//
+// One number, read by the bullets and by the crosshair, so the ring on screen is the region the
+// shot can land in rather than a decoration that happens to grow at the same time.
+
+float AShooterWeapon::ResolveStateSpreadMultiplier() const
+{
+	const ACharacter* OwnerCharacter = Cast<ACharacter>(PawnOwner);
+	if (!OwnerCharacter)
+	{
+		// Turrets, drones, anything that is not a character: no states to read, so the weapon
+		// simply shoots at its base spread.
+		return SpreadConfig.StillMultiplier;
+	}
+
+	const UCharacterMovementComponent* Move = OwnerCharacter->GetCharacterMovement();
+	if (!Move)
+	{
+		return SpreadConfig.StillMultiplier;
+	}
+
+	// Exactly ONE state wins, resolved by priority. Multiplying them together would make
+	// crouch-sprinting quieter than sprinting for no reason a player could read off the screen.
+	float Multiplier = SpreadConfig.StillMultiplier;
+
+	const UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Move);
+	const bool bSliding = Apex && Apex->IsSliding();
+	const bool bSprinting = Apex && Apex->IsSprinting();
+
+	if (Move->IsFalling())
+	{
+		// Airborne covers the jump, the fall and the wall-run: the feet are not planted.
+		Multiplier = SpreadConfig.AirMultiplier;
+	}
+	else if (bSliding)
+	{
+		Multiplier = SpreadConfig.SlideMultiplier;
+	}
+	else if (bSprinting)
+	{
+		Multiplier = SpreadConfig.SprintMultiplier;
+	}
+	else if (Move->IsCrouching())
+	{
+		Multiplier = SpreadConfig.CrouchMultiplier;
+	}
+	else
+	{
+		// On foot: interpolate between standing still and walking by how fast the owner actually
+		// is, so a nudge of the stick is not the full walking penalty.
+		const FVector Velocity = OwnerCharacter->GetVelocity();
+		const float Speed2D = FVector(Velocity.X, Velocity.Y, 0.0f).Size();
+		const float SpeedAlpha = FMath::Clamp(Speed2D / FMath::Max(1.0f, SpreadConfig.WalkFullSpeed), 0.0f, 1.0f);
+		Multiplier = FMath::Lerp(SpreadConfig.StillMultiplier, SpreadConfig.WalkMultiplier, SpeedAlpha);
+	}
+
+	// Aiming down sights scales whatever came out, blended by the ADS alpha so the spread tightens
+	// over the same time the sight comes up instead of snapping at the button press.
+	if (const AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(OwnerCharacter))
+	{
+		const float ADSAlpha = FMath::Clamp(ShooterOwner->GetADSAlpha(), 0.0f, 1.0f);
+		Multiplier *= FMath::Lerp(1.0f, SpreadConfig.AdsMultiplier, ADSAlpha);
+	}
+
+	return FMath::Max(0.0f, Multiplier);
+}
+
+void AShooterWeapon::UpdateSpread(float DeltaTime)
+{
+	// The state part chases its target: standing still after a sprint has to settle, which is the
+	// whole reason a player stops before shooting.
+	const float TargetMultiplier = ResolveStateSpreadMultiplier();
+	CurrentStateMultiplier = FMath::FInterpTo(CurrentStateMultiplier, TargetMultiplier, DeltaTime, SpreadConfig.StateInterpSpeed);
+
+	// The firing bloom bleeds off, but only after a quiet moment: a delay of about one refire
+	// interval keeps a held trigger from recovering between its own shots.
+	if (CurrentBloomDegrees > 0.0f)
+	{
+		const UWorld* World = GetWorld();
+		const float Now = World ? World->GetTimeSeconds() : 0.0f;
+		if (Now - TimeOfLastSpreadShot >= SpreadConfig.BloomRecoveryDelay)
+		{
+			CurrentBloomDegrees = FMath::Max(0.0f, CurrentBloomDegrees - SpreadConfig.BloomRecoveryRate * DeltaTime);
+		}
+	}
+}
+
+void AShooterWeapon::AddShotSpread()
+{
+	float PerShot = SpreadConfig.PerShotDegrees;
+
+	if (const AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner))
+	{
+		const float ADSAlpha = FMath::Clamp(ShooterOwner->GetADSAlpha(), 0.0f, 1.0f);
+		PerShot *= FMath::Lerp(1.0f, SpreadConfig.AdsBloomMultiplier, ADSAlpha);
+	}
+
+	CurrentBloomDegrees = FMath::Min(CurrentBloomDegrees + PerShot, SpreadConfig.MaxBloomDegrees);
+
+	const UWorld* World = GetWorld();
+	TimeOfLastSpreadShot = World ? World->GetTimeSeconds() : 0.0f;
+}
+
+float AShooterWeapon::GetCurrentSpreadDegrees() const
+{
+	// An AI holding this weapon shoots at the plain base spread unless the weapon opts in: enemy
+	// accuracy is tuned through the NPC's own aim variance, and moving it from here would be a
+	// difficulty change wearing a crosshair feature's clothes.
+	if (!SpreadConfig.bApplyToAIOwners && PawnOwner && !PawnOwner->IsPlayerControlled())
+	{
+		return AimVariance;
+	}
+
+	const float Total = AimVariance * CurrentStateMultiplier + CurrentBloomDegrees;
+	return FMath::Clamp(Total, 0.0f, SpreadConfig.MaxSpreadDegrees);
 }
 
 void AShooterWeapon::OnOwnerDestroyed(AActor* DestroyedActor)
@@ -573,6 +1001,47 @@ void AShooterWeapon::ActivateWeapon()
 			}
 		}
 	}
+}
+
+float AShooterWeapon::GetSwitchPlayRate(const UAnimMontage* Montage, float Duration)
+{
+	// No montage, or no duration asked for, means "play it as the animator made it". A duration of
+	// zero must never read as "instant": that would make an unfilled field silently delete the
+	// animation instead of leaving it alone.
+	if (!Montage || Duration <= KINDA_SMALL_NUMBER)
+	{
+		return 1.0f;
+	}
+
+	const float Length = Montage->GetPlayLength();
+	if (Length <= KINDA_SMALL_NUMBER)
+	{
+		return 1.0f;
+	}
+
+	return Length / Duration;
+}
+
+float AShooterWeapon::GetHolsterLength() const
+{
+	if (!HolsterMontage)
+	{
+		return 0.0f;
+	}
+
+	const float Rate = GetHolsterPlayRate();
+	return Rate > KINDA_SMALL_NUMBER ? HolsterMontage->GetPlayLength() / Rate : 0.0f;
+}
+
+float AShooterWeapon::GetDrawLength() const
+{
+	if (!DrawMontage)
+	{
+		return 0.0f;
+	}
+
+	const float Rate = GetDrawPlayRate();
+	return Rate > KINDA_SMALL_NUMBER ? DrawMontage->GetPlayLength() / Rate : 0.0f;
 }
 
 void AShooterWeapon::DeactivateWeapon()
@@ -762,6 +1231,20 @@ void AShooterWeapon::Fire()
 	// Always play them here so the shooter sees and hears the shot at once, with no round trip.
 	// Then tell everyone else: the effects used to be purely local, which is why a teammate's gun
 	// fired in total silence with no tracer.
+	// Tell the class passive that a shot is leaving, BEFORE any of this shot's damage is worked out.
+	// Ordering is the whole point and it is not obvious: on the host, Fire() computes the damage and
+	// only then broadcasts OnShotFired, while a client's shot reaches the server as two separate
+	// RPCs with the fire report arriving FIRST. A passive that spends something on the shot can only
+	// be right on both routes if the spending happens here, at the start, on every machine that
+	// runs Fire. @see UAbilityHandler::OnOwnerFiredWeapon
+	if (PawnOwner)
+	{
+		if (UAbilityComponent* Abilities = PawnOwner->FindComponentByClass<UAbilityComponent>())
+		{
+			Abilities->NotifyOwnerFiredWeapon();
+		}
+	}
+
 	PlayFireEffectsLocally();
 
 	if (HasAuthority())
@@ -805,6 +1288,11 @@ void AShooterWeapon::Fire()
 	// update the time of our last shot
 	TimeOfLastShot = GetWorld()->GetTimeSeconds();
 	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Shot complete. TimeOfLastShot=%.2f"), *GetName(), TimeOfLastShot);
+
+	// One trigger pull opens the spread once. Deliberately here and not in the Fire* functions: a
+	// shotgun puts several pellets in the air per pull, and charging them each with a full bloom
+	// would make it the widest weapon in the game after two shots.
+	AddShotSpread();
 
 	// Notify listeners that a shot was fired (for NPC burst counting)
 	OnShotFired.Broadcast();
@@ -917,6 +1405,232 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 	ConsumeRoundAfterShot();
 }
 
+FVector AShooterWeapon::GetMuzzleWorldLocation() const
+{
+	// Same mesh choice the projectile spawn makes, so "where the shot comes from" cannot mean two
+	// different places depending on who asks.
+	USkeletalMeshComponent* const MuzzleMesh =
+		(PawnOwner && PawnOwner->IsPlayerControlled()) ? FirstPersonMesh : ThirdPersonMesh;
+
+	if (MuzzleMesh && MuzzleMesh->DoesSocketExist(MuzzleSocketName))
+	{
+		return MuzzleMesh->GetSocketLocation(MuzzleSocketName);
+	}
+
+	return GetActorLocation();
+}
+
+bool AShooterWeapon::CanShotReach(const FVector& TargetLocation) const
+{
+	const UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	const FVector Start = GetMuzzleWorldLocation();
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ShotClearance), /*bTraceComplex*/ false);
+	Params.AddIgnoredActor(this);
+	if (PawnOwner)
+	{
+		Params.AddIgnoredActor(PawnOwner);
+	}
+
+	// The shell's own radius, taken from the class that will fly. Zero for hitscan, which turns the
+	// sweep below back into the line trace it used to be.
+	float ShotRadius = 0.0f;
+	if (!bUseHitscan && ProjectileClass)
+	{
+		if (const AShooterProjectile* const ProjectileCDO = ProjectileClass->GetDefaultObject<AShooterProjectile>())
+		{
+			if (const USphereComponent* const Collision = ProjectileCDO->FindComponentByClass<USphereComponent>())
+			{
+				ShotRadius = Collision->GetUnscaledSphereRadius();
+			}
+		}
+	}
+
+	FHitResult Blocked;
+
+	if (ShotRadius > KINDA_SMALL_NUMBER)
+	{
+		return !World->SweepSingleByChannel(Blocked, Start, TargetLocation, FQuat::Identity,
+			ECC_Visibility, FCollisionShape::MakeSphere(ShotRadius), Params);
+	}
+
+	return !World->LineTraceSingleByChannel(Blocked, Start, TargetLocation, ECC_Visibility, Params);
+}
+
+FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const FVector& TargetLocation) const
+{
+	// Players are left alone. See the header: correcting their aim is aim assist, not ballistics.
+	if (!PawnOwner || PawnOwner->IsPlayerControlled())
+	{
+		return FVector::ZeroVector;
+	}
+
+	if (!ProjectileClass)
+	{
+		return FVector::ZeroVector;
+	}
+
+	// Asked of the projectile class itself rather than configured on the weapon. The two numbers
+	// that decide whether a shot needs an arc - does it fall, and how fast does it go - already live
+	// on the thing that flies, and a second copy on the weapon is a second copy to get wrong.
+	const AShooterProjectile* const ProjectileCDO = ProjectileClass->GetDefaultObject<AShooterProjectile>();
+	if (!ProjectileCDO)
+	{
+		return FVector::ZeroVector;
+	}
+
+	// Found on the CDO rather than read off a member: AShooterProjectile keeps its movement
+	// component protected, and a getter added purely so the weapon could peek at two numbers would
+	// be public API bought for one caller. The default subobject is on the CDO exactly as it will be
+	// on the spawned actor, so this reads the same values the projectile will fly with.
+	const UProjectileMovementComponent* const ProjectileMove =
+		ProjectileCDO->FindComponentByClass<UProjectileMovementComponent>();
+	if (!ProjectileMove)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const float GravityScale = ProjectileMove->ProjectileGravityScale;
+	const float LaunchSpeed = ProjectileMove->InitialSpeed;
+
+	// No gravity means the straight line already hits. This is the whole switch: a rocket configured
+	// to fly flat never enters the solver, and nothing anywhere has to be told that it is a rocket.
+	if (FMath::IsNearlyZero(GravityScale) || LaunchSpeed <= KINDA_SMALL_NUMBER)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const float GravityZ = World->GetGravityZ() * GravityScale;
+
+	// Aim at the BODY, not at the aim point that was passed in.
+	//
+	// The caller's TargetLocation comes from GetWeaponTargetLocation, which for an AI is the far end
+	// of an accuracy-spread ray traced out to AimRange - and pawns do not block that channel here,
+	// so it lands on a wall behind the enemy or in open space thousands of units past them. Solving
+	// an arc onto that point yields the launch angle that REACHES that point, so the shell flies
+	// over the target and comes down somewhere in the distance. Every "стреляет в воздух далеко за
+	// игрока" was this, and every "стреляет в стену" was the same ray ending on a wall instead.
+	//
+	// A hitscan does not care, because it only wants the direction and stops at the first thing it
+	// hits. A ballistic shot is the one caller that needs the real distance.
+	FVector BodyLocation = TargetLocation;
+	if (const AActor* const AimActor = WeaponOwner ? WeaponOwner->GetWeaponAimActor() : nullptr)
+	{
+		BodyLocation = AimActor->GetActorLocation();
+	}
+
+	if (bLogBallistics)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BALLISTIC_DEBUG] %s solve: passedTarget=%s bodyTarget=%s dist=%.0f speed=%.0f gravScale=%.2f lob=%d"),
+			*GetNameSafe(PawnOwner), *TargetLocation.ToCompactString(), *BodyLocation.ToCompactString(),
+			FVector::Dist(LaunchLocation, BodyLocation), LaunchSpeed, GravityScale, bLobProjectiles ? 1 : 0);
+	}
+
+	// The engine's own solver, and the reason not to write one: it takes the speed as FIXED, which
+	// is the constraint that actually applies here. AShooterProjectile launches at InitialSpeed
+	// along its spawn rotation, so the only free variable is the angle - exactly the problem
+	// SuggestProjectileVelocity solves, and it answers false when the target is simply out of range
+	// rather than returning a direction that quietly falls short.
+	UGameplayStatics::FSuggestProjectileVelocityParameters SolverParams(
+		this, LaunchLocation, BodyLocation, LaunchSpeed);
+
+	SolverParams.bFavorHighArc = bLobProjectiles;
+	SolverParams.OverrideGravityZ = GravityZ;
+
+	// No trace along the path. The solver's tracing modes are for picking a trajectory that misses
+	// the scenery, which is a different question from "what angle reaches this point" and costs a
+	// sweep of the whole arc per shot. Whether the shell clears the wall in front of it is already
+	// decided by the cover the NPC chose to fire from.
+	SolverParams.TraceOption = ESuggestProjVelocityTraceOption::DoNotTrace;
+
+	FVector TossVelocity = FVector::ZeroVector;
+	bool bSolved = UGameplayStatics::SuggestProjectileVelocity(SolverParams, TossVelocity);
+
+	// A high arc only means "lob" while the projectile is slow enough for the range to be a real
+	// constraint. Give the solver far more speed than the shot needs and the high solution walks
+	// towards vertical, because straight up and straight down also reaches a target a thousand units
+	// away - so a 3000 u/s shell fired at a nearby corner came out as a mortar round aimed at the
+	// sky, which is what "стреляют вверх в воздух" was.
+	//
+	// So the lob is a preference, not an instruction: if the high answer comes out steeper than a
+	// shot anybody would recognise, take the flat one instead. The flat solution still arcs - the
+	// projectile still falls - it simply stops pretending the weapon is artillery.
+	if (bSolved && bLobProjectiles)
+	{
+		const float LaunchPitchDeg = FMath::RadiansToDegrees(FMath::Asin(
+			FMath::Clamp(TossVelocity.GetSafeNormal().Z, -1.0f, 1.0f)));
+
+		if (LaunchPitchDeg > MaxLobPitchDegrees)
+		{
+			SolverParams.bFavorHighArc = false;
+			bSolved = UGameplayStatics::SuggestProjectileVelocity(SolverParams, TossVelocity);
+		}
+	}
+
+	// Out of range. Falling back to the straight line is deliberate: the shot still leaves, still
+	// lands somewhere short, and still makes noise and splash. An enemy that silently refuses to
+	// fire at a target it can see reads as broken, and the splash radius is generous enough that a
+	// short round is not a wasted one.
+	if (!bSolved)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FVector LaunchDir = TossVelocity.GetSafeNormal();
+
+	if (bLogBallistics)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BALLISTIC_DEBUG] %s launch pitch %.1f deg"),
+			*GetNameSafe(PawnOwner),
+			FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(LaunchDir.Z, -1.0f, 1.0f))));
+	}
+
+	// Is there room to launch at all. An arc leaves the muzzle at an angle, so a shooter tucked under
+	// a lintel or hugging the inside of a corner can have a clean line to the target and still put
+	// the shell into the ceiling half a metre up - which looks exactly like the enemy shooting the
+	// wall for no reason.
+	//
+	// Short trace, because this is asking "can the round get out", not "does the whole trajectory
+	// clear". The rest of the flight is the arc's business.
+	if (const UWorld* const TraceWorld = GetWorld())
+	{
+		FCollisionQueryParams ClearanceParams(SCENE_QUERY_STAT(BallisticMuzzleClearance), /*bTraceComplex*/ false);
+		ClearanceParams.AddIgnoredActor(this);
+		ClearanceParams.AddIgnoredActor(PawnOwner);
+
+		FHitResult Blocked;
+		if (TraceWorld->LineTraceSingleByChannel(Blocked, LaunchLocation,
+			LaunchLocation + LaunchDir * MuzzleClearanceDistance, ECC_Visibility, ClearanceParams))
+		{
+			// Blocked. Falling back to the straight line rather than refusing the shot: the straight
+			// line is what this weapon did before ballistics existed, it is aimed at something the
+			// NPC can actually see, and a silent enemy reads worse than a low round.
+			if (bLogBallistics)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[BALLISTIC_DEBUG] %s muzzle BLOCKED by %s -> straight line"),
+					*GetNameSafe(PawnOwner), *GetNameSafe(Blocked.GetActor()));
+			}
+
+			return FVector::ZeroVector;
+		}
+	}
+
+	return LaunchDir;
+}
+
 FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& TargetLocation) const
 {
 	// Use ThirdPersonMesh for NPCs, FirstPersonMesh for players
@@ -928,8 +1642,67 @@ FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& Targ
 	// calculate the spawn location ahead of the muzzle
 	const FVector SpawnLoc = MuzzleLoc + ((TargetLocation - MuzzleLoc).GetSafeNormal() * MuzzleOffset);
 
-	// find the aim rotation vector while applying some variance to the target
-	const FRotator AimRot = UKismetMathLibrary::FindLookAtRotation(SpawnLoc, TargetLocation + (UKismetMathLibrary::RandomUnitVector() * AimVariance));
+	// Turn the aim line inside the spread cone. This used to nudge the TARGET POINT by AimVariance
+	// centimetres, which is not a spread at all: the same number was a wide scatter at arm's length
+	// and nothing at range, and it could not agree with a crosshair drawn from an angle. The cone is
+	// the same one the hitscan path uses, so a projectile weapon and a hitscan weapon of equal
+	// spread now shoot equally wide.
+	//
+	// The straight line is the PLAYER's answer and the fallback. An AI firing a projectile that
+	// falls gets the ballistic one instead, below.
+	const float ConeDegrees = GetAimConeDegrees();
+
+	// Ballistic shots scatter their TARGET, everything else scatters its DIRECTION, and the two are
+	// not interchangeable once gravity is involved.
+	//
+	// Range off a ballistic launch goes as sin(2*theta), so pitch error turns into range error
+	// nonlinearly and brutally. Measured from this log: a 2750 unit shot at 3300 u/s solves to a
+	// 7.2 degree launch, and tilting that by five degrees of ordinary cone spread lands the round at
+	//
+	//     2.2 deg -> 852 units        12.2 deg -> 4591 units
+	//
+	// against a target at 2750. The short end of that is not a miss, it is the shell going off
+	// practically at the shooter's feet - in the corner it just leaned out of. Every "стреляет в
+	// стену" that survived the aim fix was one of those short rounds.
+	//
+	// Displacing the aim POINT instead keeps the range honest: the arc is solved to wherever the
+	// scatter put the point, so the round always travels about the right distance and lands around
+	// the target rather than somewhere between here and there. The cone is then deliberately NOT
+	// applied on top - it has already been spent.
+	FVector AimDir = FVector::ZeroVector;
+	bool bUsedBallistic = false;
+
+	{
+		FVector ScatteredTarget = TargetLocation;
+		if (ConeDegrees > 0.0f)
+		{
+			// The cone half-angle read as a lateral offset at this range, which is the same spread a
+			// hitscan of equal cone would show on the same target.
+			const float Reach = FVector::Dist(SpawnLoc, TargetLocation);
+			const float Radius = Reach * FMath::Tan(FMath::DegreesToRadians(ConeDegrees));
+
+			ScatteredTarget += FMath::VRand() * FMath::FRand() * Radius;
+		}
+
+		if (const FVector BallisticDir = SolveBallisticAim(SpawnLoc, ScatteredTarget); !BallisticDir.IsNearlyZero())
+		{
+			AimDir = BallisticDir;
+			bUsedBallistic = true;
+		}
+	}
+
+	if (!bUsedBallistic)
+	{
+		// The straight line is the PLAYER's answer and the fallback for anything that does not fall.
+		// Here the cone is the right tool, for the reason the original comment gives: it is
+		// range-independent, unlike nudging a point by a fixed number of centimetres.
+		const FVector StraightDir = (TargetLocation - SpawnLoc).GetSafeNormal();
+		AimDir = (ConeDegrees > 0.0f)
+			? UKismetMathLibrary::RandomUnitVectorInConeInDegrees(StraightDir, ConeDegrees)
+			: StraightDir;
+	}
+
+	const FRotator AimRot = AimDir.Rotation();
 
 	// return the built transform
 	return FTransform(AimRot, SpawnLoc, FVector::OneVector);
@@ -1027,10 +1800,13 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 		}
 	}
 
-	if (AimVariance > 0.0f)
+	// Spread: turn the aim line inside a cone of the weapon's CURRENT spread, not its authored base
+	// value. A uniform direction in the cone rather than a uniform vector added to it, so the shot
+	// is even across the circle instead of piling up in the middle.
+	const float AimConeDegrees = GetAimConeDegrees();
+	if (AimConeDegrees > 0.0f)
 	{
-		FVector Variance = FMath::VRand() * FMath::Tan(FMath::DegreesToRadians(AimVariance));
-		Direction = (Direction + Variance).GetSafeNormal();
+		Direction = UKismetMathLibrary::RandomUnitVectorInConeInDegrees(Direction, AimConeDegrees);
 	}
 
 	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»
@@ -1508,6 +2284,10 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		UE_LOG(LogTemp, Warning, TEXT("    BEST TARGET HIT: %s | Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f x Tag:%.2f x Upg:%.2f = %.1f"),
 			*BestTarget->GetName(), HitscanDamage, RemainingEnergy, AreaMultiplier, HeadshotMult, HeatMult, ZFactorMult, TagMult, UpgradeMult, FinalDamage);
 
+		// The shield as it stood when the bullet arrived, read before anything touches the target.
+		// @see ApplyHitscanDamage.
+		const bool bShieldDownBefore = IsTargetShieldDown(BestTarget);
+
 		// Apply damage
 		FDamageEvent DamageEvent;
 		if (HitscanDamageType)
@@ -1523,11 +2303,8 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED: target=%s dealt=%.1f applied=%.1f killed=%d"),
 			*BestTarget->GetName(), FinalDamage, ActualDamage, bKilled ? 1 : 0);
 
-		// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
-		if (WeaponOwner && ActualDamage > 0.0f)
-		{
-			WeaponOwner->OnWeaponHit(BestHitLocation, BestToHitDir, ActualDamage, bBestIsHeadshot, bKilled);
-		}
+		// Feedback goes out once, at the end of this block, when the shield reading after the shot
+		// is known. @see ApplyHitscanDamage for why it is not sent here.
 
 		// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits.
 		// Suppression Fire / future hitscan-on-hit upgrades depend on this firing for the pistol.
@@ -1538,6 +2315,12 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			{
 				UpgradeMgr->NotifyWeaponDealtDamage(this, BestTarget, ActualDamage, bKilled);
 			}
+			// And the class passive, which is the other thing on this pawn with an interest in what
+			// its shots land on. @see UAbilityHandler::OnOwnerDealtDamage.
+			if (UAbilityComponent* Abilities = PawnOwner->FindComponentByClass<UAbilityComponent>())
+			{
+				Abilities->NotifyOwnerDealtDamage(BestTarget, ActualDamage, bKilled);
+			}
 		}
 
 		// Apply physics impulse / knockback
@@ -1545,14 +2328,8 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		float ImpulseForce = HitscanPhysicsForce * RemainingEnergy * AreaMultiplier;
 		if (ACharacter* HitCharacter = Cast<ACharacter>(BestTarget))
 		{
-			// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
-			// Stationary turret never takes hit impulses: LaunchCharacter forces MOVE_Falling, and
-			// with the turret's GravityScale=0 every hit would push it into permanent flight.
-			if (!Cast<ASniperTurretNPC>(HitCharacter)
-				&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
-			{
-				HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
-			}
+			// Exceptions (turret, ionizer vs boss) and the grounded rule live in the helper.
+			ApplyHitscanKnockback(HitCharacter, ImpulseDirection * ImpulseForce, bUseHitscanIonization);
 		}
 		else if (UPrimitiveComponent* HitComp = BestHit.GetComponent())
 		{
@@ -1564,12 +2341,24 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
 		const bool bIonized = ApplyHitscanIonization(BestTarget, BestHit.GetComponent());
-		if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+
+		if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore))
 		{
-			if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
-			{
-				HitMarker->RegisterIonizedHit(BestHitLocation, BestToHitDir);
-			}
+			const bool bShieldDownAfter = IsTargetShieldDown(BestTarget);
+
+			FHitFeedbackContext Feedback;
+			Feedback.HitLocation = BestHitLocation;
+			Feedback.HitDirection = BestToHitDir;
+			Feedback.Damage = ActualDamage;
+			Feedback.bHeadshot = bBestIsHeadshot;
+			Feedback.bKilled = bKilled;
+			Feedback.bShieldHit = !bShieldDownBefore;
+			Feedback.bShieldBroken = !bShieldDownBefore && bShieldDownAfter;
+			Feedback.bZeroDamage = (ActualDamage <= 0.0f);
+			Feedback.HitActor = BestTarget;
+			Feedback.FeedbackSet = FeedbackSet;
+
+			WeaponOwner->OnWeaponHitFeedback(Feedback);
 		}
 	}
 
@@ -1605,11 +2394,42 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			DistToPawn < DistToWall ? TEXT("PAWN") : TEXT("WALL"));
 	}
 
-	SpawnBeamEffect(Start, EffectiveBeamEnd, RemainingEnergy);
+	// --- Visuals: the trace starts at the socket's REAL position, the beam must start where the
+	// barrel is SEEN. The first-person mesh is drawn through a transform of its own (FP FOV
+	// correction + FirstPersonScale), so a tracer put at the raw socket location leaves the gun
+	// from somewhere off to the side. Same correction the classic path already applies; see
+	// GetFirstPersonMuzzleRenderLocation. Reflected segments start at the bounce point instead.
+	FVector VisualStart = Start;
+	if (ReflectionCount == 0 && PawnOwner && PawnOwner->IsPlayerControlled() && FirstPersonMesh)
+	{
+		VisualStart = GetFirstPersonMuzzleRenderLocation();
+	}
+
+	// Where the tracer is claimed to start vs where the socket actually is. If the yellow sphere
+	// sits on the barrel tip on screen but the tracer leaves from somewhere else, the offset is
+	// inside the Niagara asset (local-space beam), not here. If the yellow sphere is ALSO in the
+	// wrong place, MuzzleSocketName does not exist on this mesh and GetSocketLocation quietly
+	// returned the component origin.
+	if (bDrawHitscanDebug && FirstPersonMesh)
+	{
+		const bool bSocketExists = FirstPersonMesh->DoesSocketExist(MuzzleSocketName);
+		DrawDebugSphere(GetWorld(), FirstPersonMesh->GetSocketLocation(MuzzleSocketName), 3.0f, 8,
+			bSocketExists ? FColor::Yellow : FColor::Red, false, 5.0f);
+		DrawDebugSphere(GetWorld(), VisualStart, 2.0f, 8, FColor::Magenta, false, 5.0f);
+		DrawDebugLine(GetWorld(), VisualStart, EffectiveBeamEnd, FColor::White, false, 5.0f, 0, 0.25f);
+		UE_LOG(LogTemp, Warning, TEXT("[MUZZLE_DEBUG] socketExists=%d socket=%s visualStart=%s comp=%s beamEnd=%s"),
+			bSocketExists ? 1 : 0,
+			*FirstPersonMesh->GetSocketLocation(MuzzleSocketName).ToCompactString(),
+			*VisualStart.ToCompactString(),
+			*FirstPersonMesh->GetComponentLocation().ToCompactString(),
+			*EffectiveBeamEnd.ToCompactString());
+	}
+
+	SpawnBeamEffect(VisualStart, EffectiveBeamEnd, RemainingEnergy);
 
 	if (bUseWaveVisualization)
 	{
-		SpawnWaveFronts(Start, EffectiveBeamEnd);
+		SpawnWaveFronts(VisualStart, EffectiveBeamEnd);
 	}
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â­ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
@@ -1712,6 +2532,12 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 		return;
 	}
 
+	// Read before anything touches the target: the shield's state at the moment the bullet arrived
+	// is what the feedback has to describe. Compared against the same reading taken after damage and
+	// ionization have run, it also identifies the single shot that took the shield down -- which is
+	// the one event in a firefight that tells the player their job just changed.
+	const bool bShieldDownBefore = IsTargetShieldDown(HitActor);
+
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
 	float AreaMultiplier = CalculateDamageMultiplier(Distance, WaveRadius);
 
@@ -1740,12 +2566,9 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â£ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°)
-	// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
-	if (WeaponOwner && ActualDamage > 0.0f)
-	{
-		FVector HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
-		WeaponOwner->OnWeaponHit(Hit.ImpactPoint, HitDirection, ActualDamage, bIsHeadshot, bKilled);
-	}
+	// Feedback is sent once, at the end of this function, when the shield reading after the shot is
+	// known. It used to fire here and again further down for the zero-damage case, which is how the
+	// ionizer ended up with a second entrance into the hit marker that no other caller went through.
 
 	// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits.
 	// Suppression Fire / future hitscan-on-hit upgrades depend on this firing for the pistol.
@@ -1755,6 +2578,10 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 		{
 			UpgradeMgr->NotifyWeaponDealtDamage(this, HitActor, ActualDamage, bKilled);
 		}
+		if (UAbilityComponent* Abilities = PawnOwner->FindComponentByClass<UAbilityComponent>())
+		{
+			Abilities->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+		}
 	}
 
 	//ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
@@ -1762,14 +2589,8 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	float ImpulseForce = HitscanPhysicsForce * EnergyMultiplier * AreaMultiplier;
 	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 	{
-		// The boss opts out of the ionizer weapon's knockback (it still takes damage + ionization).
-		// Stationary turret never takes hit impulses: LaunchCharacter forces MOVE_Falling, and
-		// with the turret's GravityScale=0 every hit would push it into permanent flight.
-		if (!Cast<ASniperTurretNPC>(HitCharacter)
-			&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
-		{
-			HitCharacter->LaunchCharacter(ImpulseDirection * ImpulseForce, false, false);
-		}
+		// Exceptions (turret, ionizer vs boss) and the grounded rule live in the helper.
+		ApplyHitscanKnockback(HitCharacter, ImpulseDirection * ImpulseForce, bUseHitscanIonization);
 	}
 	else
 	{
@@ -1792,13 +2613,28 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 
 	// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
 	const bool bIonized = ApplyHitscanIonization(HitActor, Hit.GetComponent());
-	if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+
+	// One door for every kind of connection this shot could have been: damage, a headshot, a kill,
+	// a shield taken down, or the ionizer's zero-damage charge transfer. Landing on a shield counts
+	// on its own: a held shield absorbs the damage entirely, so a weapon that neither hurt nor
+	// charged would otherwise hit a shield in total silence.
+	if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore))
 	{
-		if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
-		{
-			const FVector HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
-			HitMarker->RegisterIonizedHit(Hit.ImpactPoint, HitDirection);
-		}
+		const bool bShieldDownAfter = IsTargetShieldDown(HitActor);
+
+		FHitFeedbackContext Feedback;
+		Feedback.HitLocation = Hit.ImpactPoint;
+		Feedback.HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
+		Feedback.Damage = ActualDamage;
+		Feedback.bHeadshot = bIsHeadshot;
+		Feedback.bKilled = bKilled;
+		Feedback.bShieldHit = !bShieldDownBefore;
+		Feedback.bShieldBroken = !bShieldDownBefore && bShieldDownAfter;
+		Feedback.bZeroDamage = (ActualDamage <= 0.0f);
+		Feedback.HitActor = HitActor;
+		Feedback.FeedbackSet = FeedbackSet;
+
+		WeaponOwner->OnWeaponHitFeedback(Feedback);
 	}
 }
 
@@ -2071,17 +2907,16 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 				DamageEvent.DamageTypeClass = HitscanDamageType;
 			}
 
+			// The shield as it stood when the bullet arrived. @see ApplyHitscanDamage.
+			const bool bShieldDownBefore = IsTargetShieldDown(HitActor);
+
 			const float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
 			const bool bKilled = IsActorDeadAfterDamage(HitActor);
 
 			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),
 				*HitActor->GetName(), BestDistance, FinalDamage, ActualDamage, bKilled ? 1 : 0);
 
-			// Hitmarker — only on damaging hits (0-damage ionizer pistol should not flash UI)
-			if (WeaponOwner && ActualDamage > 0.0f)
-			{
-				WeaponOwner->OnWeaponHit(PawnHitLocation, Direction, ActualDamage, bIsHeadshot, bKilled);
-			}
+			// Feedback goes out once, at the end of this block. @see ApplyHitscanDamage.
 
 			// Notify upgrade system on every successful hit, incl. 0-damage ionizer hits
 			if (PawnOwner)
@@ -2090,18 +2925,17 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 				{
 					UpgradeMgr->NotifyWeaponDealtDamage(this, HitActor, ActualDamage, bKilled);
 				}
+				if (UAbilityComponent* Abilities = PawnOwner->FindComponentByClass<UAbilityComponent>())
+				{
+					Abilities->NotifyOwnerDealtDamage(HitActor, ActualDamage, bKilled);
+				}
 			}
 
-			// Knockback / physics impulse — same exceptions as the cone path:
-			// turret would be pushed into permanent flight, the boss opts out of ionizer knockback
+			// Knockback / physics impulse — same rules as the cone path, see ApplyHitscanKnockback.
 			const float ImpulseForce = HitscanPhysicsForce * RemainingEnergy;
 			if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 			{
-				if (!Cast<ASniperTurretNPC>(HitCharacter)
-					&& !(bUseHitscanIonization && Cast<ABossCharacter>(HitCharacter)))
-				{
-					HitCharacter->LaunchCharacter(Direction * ImpulseForce, false, false);
-				}
+				ApplyHitscanKnockback(HitCharacter, Direction * ImpulseForce, bUseHitscanIonization);
 			}
 			else if (UPrimitiveComponent* HitComp = PawnHit.GetComponent())
 			{
@@ -2113,12 +2947,24 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 
 			// Ionization (charge transfer); HitComponent gates the NPC riot-shield rule
 			const bool bIonized = ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
-			if (AShooterCharacter* ShooterOwner = (ActualDamage <= 0.0f && bIonized) ? Cast<AShooterCharacter>(PawnOwner) : nullptr)
+
+			if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore))
 			{
-				if (UHitMarkerComponent* HitMarker = ShooterOwner->GetHitMarkerComponent())
-				{
-					HitMarker->RegisterIonizedHit(PawnHitLocation, Direction);
-				}
+				const bool bShieldDownAfter = IsTargetShieldDown(HitActor);
+
+				FHitFeedbackContext Feedback;
+				Feedback.HitLocation = PawnHitLocation;
+				Feedback.HitDirection = Direction;
+				Feedback.Damage = ActualDamage;
+				Feedback.bHeadshot = bIsHeadshot;
+				Feedback.bKilled = bKilled;
+				Feedback.bShieldHit = !bShieldDownBefore;
+				Feedback.bShieldBroken = !bShieldDownBefore && bShieldDownAfter;
+				Feedback.bZeroDamage = (ActualDamage <= 0.0f);
+				Feedback.HitActor = HitActor;
+				Feedback.FeedbackSet = FeedbackSet;
+
+				WeaponOwner->OnWeaponHitFeedback(Feedback);
 			}
 		}
 	}
@@ -2139,6 +2985,35 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		BeamStart = GetFirstPersonMuzzleRenderLocation();
 	}
 
+	// Does the socket's WORLD position land on the barrel you can see? The yellow sphere is drawn
+	// as ordinary world geometry, so if it sits on the barrel tip on screen, the first-person mesh
+	// is rendered where its transform says and the tracer start is right; if the sphere is off to
+	// the side of the gun, the mesh is being drawn through a transform this code does not know
+	// about. Red sphere = MuzzleSocketName does not exist on this mesh and GetSocketLocation
+	// quietly handed back the component origin.
+	if (bDrawHitscanDebug && FirstPersonMesh)
+	{
+		const bool bSocketExists = FirstPersonMesh->DoesSocketExist(MuzzleSocketName);
+		const FVector SocketWorld = FirstPersonMesh->GetSocketLocation(MuzzleSocketName);
+		DrawDebugSphere(GetWorld(), SocketWorld, 3.0f, 8,
+			bSocketExists ? FColor::Yellow : FColor::Red, false, 5.0f);
+		DrawDebugSphere(GetWorld(), BeamStart, 2.0f, 8, FColor::Magenta, false, 5.0f);
+
+		const APlayerController* DebugPC = PawnOwner ? Cast<APlayerController>(PawnOwner->GetController()) : nullptr;
+		const FMinimalViewInfo DebugPOV = (DebugPC && DebugPC->PlayerCameraManager)
+			? DebugPC->PlayerCameraManager->GetCameraCacheView()
+			: FMinimalViewInfo();
+		UE_LOG(LogTemp, Warning, TEXT("[MUZZLE_DEBUG] socketExists=%d socket=%s beamStart=%s | POV loc=%s useFPParams=%d fpScale=%.3f fov=%.1f fpFov=%.1f"),
+			bSocketExists ? 1 : 0,
+			*SocketWorld.ToCompactString(),
+			*BeamStart.ToCompactString(),
+			*DebugPOV.Location.ToCompactString(),
+			DebugPOV.bUseFirstPersonParameters ? 1 : 0,
+			DebugPOV.FirstPersonScale,
+			DebugPOV.FOV,
+			DebugPOV.FirstPersonFOV);
+	}
+
 	// A travelling shot is drawn along its whole line for the same reason it flies it: where it
 	// actually stops is not decided yet. An instant one still stops at the body it hit.
 	const FVector BeamEnd = (bPawnWasHit && !bHitscanTravelsAsBolt)
@@ -2153,8 +3028,12 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		// Actual trace ray from the camera (this is where damage is decided)
 		DrawDebugLine(GetWorld(), Start, BeamEnd, FColor::Cyan, false, DebugDuration, 0, 0.5f);
 
-		// Thin sweep corridor: green = pawn damaged, red = nothing damaged
-		DrawDebugCylinder(GetWorld(), Start, Start + Direction * WallDistance, SweepRadius, 12,
+		// Thin sweep corridor: green = pawn damaged, red = nothing damaged.
+		// Capped in length on purpose. Drawn to the full trace distance it is a 12-sided cylinder
+		// a kilometre long whose near end sits a metre from the eye, and its side lines fill the
+		// whole screen with a red starburst that hides everything else in here.
+		const float DebugCorridorLength = FMath::Min(WallDistance, 1000.0f);
+		DrawDebugCylinder(GetWorld(), Start, Start + Direction * DebugCorridorLength, SweepRadius, 12,
 			bPawnWasHit ? FColor::Green : FColor::Red, false, DebugDuration, 0, 0.75f);
 
 		// Visual tracer line from the muzzle — the gap to the cyan ray is the muzzle parallax
@@ -2309,15 +3188,23 @@ bool AShooterWeapon::StartReload()
 
 	if (ReloadMontage && WeaponOwner)
 	{
-		WeaponOwner->PlayFiringMontage(ReloadMontage);
+		WeaponOwner->PlayReloadMontage(ReloadMontage);
 	}
 
-	// The weapon's own reload: the magazine coming out, the pump, the shells going in.
-	PlayWeaponMeshAnimation(WeaponMeshReloadAnimation);
+	// The weapon's own reload: the magazine coming out, the pump, the shells going in. Played here
+	// first, so the reloading player gets it with no round trip, then sent to everyone else, whose
+	// only copy of this weapon is the third person mesh.
+	PlayReloadEffectsLocally();
 
-	if (ReloadSound)
+	if (HasAuthority())
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, ReloadSound, GetActorLocation());
+		Multicast_PlayReloadEffects();
+	}
+	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+	{
+		// A client reloads on its own copy of the weapon (ammo is counted by whoever pulls the
+		// trigger), so the server has to be told before it can show anyone else.
+		OwnerCharacter->Server_ReportWeaponReloaded(this);
 	}
 
 	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, ReloadTime, false);
@@ -2405,6 +3292,11 @@ void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool b
 
 bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap) const
 {
+	return IsIonizationCapReached(CurrentCharge, Cap, IonizationChargePerHit);
+}
+
+bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap, float ChargePerHit) const
+{
 	// A cap is a MAGNITUDE, and this used to be tested as "CurrentCharge >= Max". With a negative
 	// IonizationChargePerHit -- the default for the electrifying weapons -- a target's charge only
 	// ever went down, so that test was never true and the Min() alongside it never clamped anything:
@@ -2415,15 +3307,25 @@ bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap) cons
 	{
 		return false;
 	}
-	const bool bSameDirection = (CurrentCharge * IonizationChargePerHit) > 0.0f;
+	const bool bSameDirection = (CurrentCharge * ChargePerHit) > 0.0f;
 	return bSameDirection && FMath::Abs(CurrentCharge) >= AbsCap;
 }
 
 float AShooterWeapon::ApplyIonizationStep(float CurrentCharge, float Cap) const
 {
+	return ApplyIonizationStep(CurrentCharge, Cap, IonizationChargePerHit);
+}
+
+float AShooterWeapon::ApplyIonizationStep(float CurrentCharge, float Cap, float ChargePerHit) const
+{
 	const float AbsCap = FMath::Abs(Cap);
-	const float Stepped = CurrentCharge + IonizationChargePerHit;
+	const float Stepped = CurrentCharge + ChargePerHit;
 	return AbsCap > KINDA_SMALL_NUMBER ? FMath::Clamp(Stepped, -AbsCap, AbsCap) : Stepped;
+}
+
+bool AShooterWeapon::ShouldWithholdDamageForShield(AActor* Target) const
+{
+	return bRequiresBrokenShieldToDamage && !IsTargetShieldDown(Target);
 }
 
 bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
@@ -2433,7 +3335,17 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 		HitComponent ? *HitComponent->GetName() : TEXT("null"),
 		bUseHitscanIonization);
 
-	if (!bUseHitscanIonization || !Target)
+	if (!bUseHitscanIonization)
+	{
+		return false;
+	}
+
+	return ApplyIonizationToTarget(Target, HitComponent, IonizationChargePerHit);
+}
+
+bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent* HitComponent, float ChargePerHit)
+{
+	if (!Target)
 	{
 		return false;
 	}
@@ -2486,7 +3398,7 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 			{
 				// Magnitude: ionization is signed, and a negative rate multiplied through produces
 				// negative damage, which TakeDamage silently discards.
-				const float RedirectedDamage = FMath::Abs(IonizationChargePerHit)
+				const float RedirectedDamage = FMath::Abs(ChargePerHit)
 					* OpenedNPC->ShieldBypassDamageMultiplier;
 
 				FPointDamageEvent DamageEvent;
@@ -2509,12 +3421,12 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 
 		// The NPC's own ceiling, the same one IsAtMaxCharge() and the grab gate read.
 		const float Cap = TargetModifier->MaxBaseCharge;
-		if (IsIonizationCapReached(CurrentCharge, Cap))
+		if (IsIonizationCapReached(CurrentCharge, Cap, ChargePerHit))
 		{
 			return false;
 		}
 
-		TargetModifier->SetCharge(ApplyIonizationStep(CurrentCharge, Cap));
+		TargetModifier->SetCharge(ApplyIonizationStep(CurrentCharge, Cap, ChargePerHit));
 		return true;
 	}
 
@@ -2523,11 +3435,11 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 	{
 		// The prop's own ceiling. What the weapon can push to is the prop's business, not the weapon's.
 		const float CurrentCharge = Prop->GetCharge();
-		if (IsIonizationCapReached(CurrentCharge, Prop->MaxCharge))
+		if (IsIonizationCapReached(CurrentCharge, Prop->MaxCharge, ChargePerHit))
 		{
 			return false;
 		}
-		Prop->SetCharge(ApplyIonizationStep(CurrentCharge, Prop->MaxCharge));
+		Prop->SetCharge(ApplyIonizationStep(CurrentCharge, Prop->MaxCharge, ChargePerHit));
 		return true;
 	}
 
@@ -2539,12 +3451,12 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 
 		// A bare field component has no cap of its own, so the weapon's number is the only ceiling
 		// available on this path.
-		if (IsIonizationCapReached(CurrentCharge, MaxIonizationCharge))
+		if (IsIonizationCapReached(CurrentCharge, MaxIonizationCharge, ChargePerHit))
 		{
 			return false;
 		}
 
-		Desc.PointChargeParams.Charge = ApplyIonizationStep(CurrentCharge, MaxIonizationCharge);
+		Desc.PointChargeParams.Charge = ApplyIonizationStep(CurrentCharge, MaxIonizationCharge, ChargePerHit);
 		TargetField->SetSourceDescription(Desc);
 		return true;
 	}
@@ -2889,11 +3801,8 @@ void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 	}
 }
 
-void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
+EPhysicalSurface AShooterWeapon::ResolveImpactSurface(const FHitResult& Hit) const
 {
-	const FVector Location = Hit.ImpactPoint;
-	const FVector Normal = Hit.ImpactNormal;
-
 	// Resolve surface type from hit's physical material (null-safe).
 	// Requires the trace to be done with bReturnPhysicalMaterial = true.
 	EPhysicalSurface Surface = SurfaceType_Default;
@@ -2902,8 +3811,70 @@ void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
 		Surface = PhysMat->SurfaceType;
 	}
 
-	// Pick VFX: per-surface override, otherwise default ImpactFX.
+	// An NPC that opted in answers for its own surface, so an enemy sounds like a shield while the
+	// shield holds and like a body once it is down -- without a physical material per body part.
+	// Which of the two it is comes from IsTargetShieldDown, the same gate ApplyDamageToTarget uses,
+	// so the effect the player sees can never disagree with whether the shot actually hurt.
+	if (AActor* HitActor = Hit.GetActor())
+	{
+		if (const AShooterNPC* HitNPC = Cast<AShooterNPC>(HitActor))
+		{
+			if (HitNPC->UsesImpactSurfaceOverride())
+			{
+				Surface = HitNPC->GetImpactSurface(IsTargetShieldDown(HitActor));
+			}
+		}
+	}
+
+	return Surface;
+}
+
+void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
+{
+	const EPhysicalSurface Surface = ResolveImpactSurface(Hit);
+
+	// Here first, so the shooter sees their own bullet land with no round trip, then everyone else.
+	// Identical split to the muzzle flash and the tracer above.
+	SpawnImpactEffectLocally(Hit.ImpactPoint, Hit.ImpactNormal, Surface);
+
+	if (HasAuthority())
+	{
+		Multicast_PlayImpactEffect(Hit.ImpactPoint, Hit.ImpactNormal, static_cast<uint8>(Surface));
+	}
+	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+	{
+		// A client's shot only reaches the server as damage, and a shot that hit a wall has no
+		// damage to report -- so the impact needs its own way upstream, like the muzzle flash does.
+		OwnerCharacter->Server_ReportImpactEffect(this, Hit.ImpactPoint, Hit.ImpactNormal,
+			static_cast<uint8>(Surface));
+	}
+}
+
+void AShooterWeapon::Multicast_PlayImpactEffect_Implementation(FVector_NetQuantize100 Location,
+	FVector_NetQuantizeNormal Normal, uint8 SurfaceByte)
+{
+	// The shooter already played it the instant the trace came back.
+	const bool bIsShooter = PawnOwner && PawnOwner->IsLocallyControlled();
+	if (bIsShooter)
+	{
+		return;
+	}
+
+	SpawnImpactEffectLocally(Location, Normal, static_cast<EPhysicalSurface>(SurfaceByte));
+}
+
+void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface)
+{
+	// This weapon's own per-surface entry wins where it is filled in, so a gun that was set up by
+	// hand keeps exactly what it had. The set answers for everything the weapon says nothing about.
+	const FImpactFeedback* SetEntry = FeedbackSet ? &FeedbackSet->FindImpact(Surface) : nullptr;
+
+	// Pick VFX: per-surface override, otherwise the set, otherwise default ImpactFX.
 	UNiagaraSystem* ResolvedFX = ImpactFX;
+	if (SetEntry && SetEntry->HasVFX())
+	{
+		ResolvedFX = SetEntry->VFX;
+	}
 	if (TObjectPtr<UNiagaraSystem>* FoundFX = ImpactFXBySurface.Find(Surface))
 	{
 		if (*FoundFX)
@@ -2947,27 +3918,47 @@ void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
 		}
 	}
 
-	// Pick sound: per-surface override, otherwise DefaultImpactSound.
+	// Pick sound: per-surface override, otherwise the set, otherwise DefaultImpactSound. The pitch,
+	// volume and attenuation travel with whichever of the three answered, so a set's entry is not
+	// left being mixed by numbers that belong to a different sound.
 	USoundBase* ResolvedSound = DefaultImpactSound;
+	float PitchMin = ImpactSoundPitchMin;
+	float PitchMax = ImpactSoundPitchMax;
+	float Volume = ImpactSoundVolume;
+	USoundAttenuation* Attenuation = ImpactSoundAttenuation;
+
+	if (SetEntry && SetEntry->HasSound())
+	{
+		ResolvedSound = SetEntry->Sound;
+		PitchMin = SetEntry->PitchMin;
+		PitchMax = SetEntry->PitchMax;
+		Volume = SetEntry->Volume;
+		Attenuation = SetEntry->Attenuation ? SetEntry->Attenuation.Get() : ImpactSoundAttenuation.Get();
+	}
+
 	if (TObjectPtr<USoundBase>* FoundSound = ImpactSoundBySurface.Find(Surface))
 	{
 		if (*FoundSound)
 		{
 			ResolvedSound = *FoundSound;
+			PitchMin = ImpactSoundPitchMin;
+			PitchMax = ImpactSoundPitchMax;
+			Volume = ImpactSoundVolume;
+			Attenuation = ImpactSoundAttenuation;
 		}
 	}
 
 	if (ResolvedSound)
 	{
-		const float Pitch = FMath::FRandRange(ImpactSoundPitchMin, ImpactSoundPitchMax);
+		const float Pitch = FMath::FRandRange(FMath::Min(PitchMin, PitchMax), FMath::Max(PitchMin, PitchMax));
 		UGameplayStatics::PlaySoundAtLocation(
 			this,
 			ResolvedSound,
 			Location,
-			ImpactSoundVolume,
+			Volume,
 			Pitch,
 			0.0f,
-			ImpactSoundAttenuation
+			Attenuation
 		);
 	}
 }
@@ -3301,26 +4292,19 @@ void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	OutResult.Location = SightWorldLocation;
 	OutResult.Rotation = CameraRotation;
 
-	// FOV — use weapon's custom ADS FOV if set, otherwise use ADSFOVMultiplier * base FOV.
-	// PlayerCameraManager blends between character camera FOV and this FOV automatically.
-	if (CustomADSFOV > 0.0f)
-	{
-		OutResult.FOV = CustomADSFOV;
-	}
-	else
-	{
-		// Get the character's base FOV and apply multiplier
-		float BaseFOV = 90.0f; // default fallback
-		if (ACharacter* CharOwner = Cast<ACharacter>(PawnOwner))
-		{
-			if (UCameraComponent* CharCamera = CharOwner->FindComponentByClass<UCameraComponent>())
-			{
-				// Use the camera's default FOV (not current, since it might be mid-blend)
-				BaseFOV = CharCamera->FieldOfView;
-			}
-		}
-		OutResult.FOV = BaseFOV * ADSFOVMultiplier;
-	}
+	// FOV — the same ADSZoom the normal ADS path uses, applied to whatever the view is currently at.
+	// NOTE this whole function is dormant: it only runs while the weapon is the ViewTarget, and
+	// nothing sets that any more (ADS stopped moving the camera, see AShooterCharacter::UpdateADS).
+	// It is kept correct rather than deleted so reviving SetViewTarget(Weapon) does not silently
+	// resurrect a second, disagreeing zoom.
+	OutResult.FOV = ApplyZoomToFOV(OutResult.FOV, ADSZoom);
+}
+
+float AShooterWeapon::ApplyZoomToFOV(float BaseFOVDegrees, float Zoom)
+{
+	const float SafeZoom = FMath::Max(Zoom, 0.01f);
+	const float BaseTan = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(BaseFOVDegrees, 1.0f, 179.0f) * 0.5f));
+	return FMath::RadiansToDegrees(2.0f * FMath::Atan(BaseTan / SafeZoom));
 }
 
 // ==================== Charge-Based Firing ====================

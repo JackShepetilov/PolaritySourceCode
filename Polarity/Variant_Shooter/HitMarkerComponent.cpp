@@ -3,6 +3,7 @@
 
 #include "HitMarkerComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Sound/SoundBase.h"
@@ -56,40 +57,62 @@ void UHitMarkerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 
 // ==================== API ====================
 
-void UHitMarkerComponent::RegisterHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled)
+void UHitMarkerComponent::RegisterHitFeedback(const FHitFeedbackContext& Context)
 {
-	// Determine hit type
-	EHitMarkerType HitType;
-	if (bKilled && bHeadshot)
+	// Confirmation belongs to the person who pulled the trigger and to nobody else. Without this
+	// guard a listen server host hears -- and gets a camera punch from -- every hit every client
+	// lands, because their pawns all live in the host's world too.
+	if (!IsLocalFeedback())
 	{
-		HitType = EHitMarkerType::HeadshotKill;
-	}
-	else if (bKilled)
-	{
-		HitType = EHitMarkerType::Kill;
-	}
-	else if (bHeadshot)
-	{
-		HitType = EHitMarkerType::Headshot;
-	}
-	else
-	{
-		HitType = EHitMarkerType::Normal;
+		return;
 	}
 
-	// Fill event data
+	UHitFeedbackSet* Set = Context.FeedbackSet;
+	if (Set)
+	{
+		LastFeedbackSet = Set;
+	}
+
+	const EHitFeedbackCue Cue = UHitFeedbackSet::ResolveCue(Context);
+
+	// What you HEAR and what you SEE are two vocabularies, and they do not have to agree.
+	//
+	// A held shield absorbs the damage completely, so charging one up is both "I hit a shield" and
+	// "I transferred charge". The ear wants the first, because that is what the shot landed on. The
+	// HUD wants the second, because the electric marker is what tells the player the meter moved.
+	// Deriving the visual from the audio cue would have silently retired that marker.
+	EHitMarkerType HitType = CueToMarkerType(Cue);
+	if (Context.bZeroDamage && !Context.bKilled && !Context.bShieldBroken)
+	{
+		HitType = EHitMarkerType::Ionized;
+	}
+
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+
+	// Another pellet of the same volley: it adds to the number already on screen instead of
+	// replacing it, so a shotgun reads as one hit for its full damage rather than eight small ones.
+	const bool bSameVolley = Set && Set->bAccumulatePerFrame
+		&& bHitMarkerActive && GFrameCounter == LastEventFrame;
+
 	CurrentHitEvent.HitType = HitType;
-	CurrentHitEvent.Damage = Damage;
-	CurrentHitEvent.HitLocation = HitLocation;
-	CurrentHitEvent.HitDirection = HitDirection;
-	CurrentHitEvent.bIsKill = bKilled;
-	CurrentHitEvent.bIsHeadshot = bHeadshot;
-	CurrentHitEvent.EventTime = GetWorld()->GetTimeSeconds();
+	CurrentHitEvent.Damage = bSameVolley ? CurrentHitEvent.Damage + Context.Damage : Context.Damage;
+	CurrentHitEvent.HitLocation = Context.HitLocation;
+	CurrentHitEvent.HitDirection = Context.HitDirection;
+	CurrentHitEvent.bIsKill = Context.bKilled;
+	CurrentHitEvent.bIsHeadshot = Context.bHeadshot;
+	CurrentHitEvent.bIsShieldHit = Context.bShieldHit;
+	CurrentHitEvent.bIsShieldBreak = Context.bShieldBroken;
+	CurrentHitEvent.EventTime = Now;
 
-	// Set duration based on type
-	if (bKilled)
+	// A marker that says something bigger stays up longer.
+	if (Context.bKilled)
 	{
 		HitMarkerTimeRemaining = Settings.KillMarkerDuration;
+	}
+	else if (Context.bShieldBroken)
+	{
+		HitMarkerTimeRemaining = Settings.ShieldBreakMarkerDuration;
 	}
 	else
 	{
@@ -97,47 +120,70 @@ void UHitMarkerComponent::RegisterHit(const FVector& HitLocation, const FVector&
 	}
 
 	bHitMarkerActive = true;
+	LastEventFrame = GFrameCounter;
 
-	// Broadcast event for UI
-	OnHitMarker.Broadcast(CurrentHitEvent);
+	// Two delegates, not one: the legacy Blueprint HUD animation is bound to OnHitMarker and would
+	// otherwise overwrite the electric ionization marker with an ordinary one.
+	if (HitType == EHitMarkerType::Ionized)
+	{
+		OnIonizedHitMarker.Broadcast(CurrentHitEvent);
+	}
+	else
+	{
+		OnHitMarker.Broadcast(CurrentHitEvent);
+	}
 
-	if (bKilled)
+	if (Context.bShieldBroken)
+	{
+		OnShieldBreakConfirmed.Broadcast(CurrentHitEvent);
+	}
+
+	if (Context.bKilled)
 	{
 		OnKillConfirmed.Broadcast();
 	}
 
-	// Play sound
-	PlayHitSound(HitType);
+	PlayCue(Cue, Set);
 
-	// Apply effects
-	ApplyScreenEffects(HitType);
-	ApplyCameraEffects(HitType);
+	// The screen and the camera answer to the same pacing as the sound: a shotgun that punched the
+	// camera once per pellet shook it eight times for one trigger pull.
+	if (!bSameVolley)
+	{
+		ApplyScreenEffects(HitType);
+		ApplyCameraEffects(HitType);
+	}
+}
 
-	UE_LOG(LogTemp, Log, TEXT("HitMarker: Type=%d, Damage=%.1f, Headshot=%d, Kill=%d"),
-		(int32)HitType, Damage, bHeadshot, bKilled);
+void UHitMarkerComponent::RegisterHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled)
+{
+	FHitFeedbackContext Context;
+	Context.HitLocation = HitLocation;
+	Context.HitDirection = HitDirection;
+	Context.Damage = Damage;
+	Context.bHeadshot = bHeadshot;
+	Context.bKilled = bKilled;
+
+	RegisterHitFeedback(Context);
 }
 
 void UHitMarkerComponent::RegisterIonizedHit(const FVector& HitLocation, const FVector& HitDirection)
 {
-	CurrentHitEvent.HitType = EHitMarkerType::Ionized;
-	CurrentHitEvent.Damage = 0.0f;
-	CurrentHitEvent.HitLocation = HitLocation;
-	CurrentHitEvent.HitDirection = HitDirection;
-	CurrentHitEvent.bIsKill = false;
-	CurrentHitEvent.bIsHeadshot = false;
-	CurrentHitEvent.EventTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	FHitFeedbackContext Context;
+	Context.HitLocation = HitLocation;
+	Context.HitDirection = HitDirection;
+	Context.bZeroDamage = true;
 
-	HitMarkerTimeRemaining = Settings.HitMarkerDuration;
-	bHitMarkerActive = true;
-
-	OnIonizedHitMarker.Broadcast(CurrentHitEvent);
-	PlayHitSound(EHitMarkerType::Ionized);
-
-	UE_LOG(LogTemp, Log, TEXT("HitMarker: Ionized zero-damage hit at %s"), *HitLocation.ToCompactString());
+	RegisterHitFeedback(Context);
 }
 
 void UHitMarkerComponent::RegisterKill()
 {
+	// Same rule as every other confirmation: it is a readout for one player.
+	if (!IsLocalFeedback())
+	{
+		return;
+	}
+
 	// Upgrade current hit to kill if active
 	if (bHitMarkerActive)
 	{
@@ -166,8 +212,11 @@ void UHitMarkerComponent::RegisterKill()
 
 	OnKillConfirmed.Broadcast();
 
-	// Play kill sound
-	PlayHitSound(CurrentHitEvent.HitType);
+	// Play kill sound. Through the pacing so a kill arriving right behind the hit that caused it
+	// does not double up, and so the weapon's own kill cue is used when there is one.
+	const EHitFeedbackCue KillCue = CurrentHitEvent.bIsHeadshot
+		? EHitFeedbackCue::HeadshotKill : EHitFeedbackCue::Kill;
+	PlayCue(KillCue, LastFeedbackSet);
 
 	// Apply kill effects
 	ApplyScreenEffects(CurrentHitEvent.HitType);
@@ -191,8 +240,17 @@ float UHitMarkerComponent::GetHitMarkerAlpha() const
 		return 0.0f;
 	}
 
-	// Calculate based on remaining time
-	float Duration = CurrentHitEvent.bIsKill ? Settings.KillMarkerDuration : Settings.HitMarkerDuration;
+	// Calculate based on remaining time. Same three-way choice RegisterHitFeedback made when it set
+	// the timer, or the fade would be measured against a duration the marker never had.
+	float Duration = Settings.HitMarkerDuration;
+	if (CurrentHitEvent.bIsKill)
+	{
+		Duration = Settings.KillMarkerDuration;
+	}
+	else if (CurrentHitEvent.bIsShieldBreak)
+	{
+		Duration = Settings.ShieldBreakMarkerDuration;
+	}
 	if (Duration <= 0.0f) return 0.0f;
 
 	// Quick fade in, slow fade out
@@ -221,6 +279,12 @@ FLinearColor UHitMarkerComponent::GetHitMarkerColor() const
 	case EHitMarkerType::Headshot:
 		return Settings.HeadshotColor;
 
+	case EHitMarkerType::ShieldBreak:
+		return Settings.ShieldBreakColor;
+
+	case EHitMarkerType::ShieldHit:
+		return Settings.ShieldHitColor;
+
 	case EHitMarkerType::Ionized:
 		return Settings.IonizedHitColor;
 
@@ -248,6 +312,97 @@ float UHitMarkerComponent::GetHitMarkerSize() const
 
 // ==================== Internal ====================
 
+bool UHitMarkerComponent::IsLocalFeedback() const
+{
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+
+	// Not a pawn at all: an upgrade or a test actor carrying the component. Nothing to disambiguate
+	// there, so keep the pre-coop behaviour rather than falling silent.
+	if (!OwnerPawn)
+	{
+		return true;
+	}
+
+	return OwnerPawn->IsLocallyControlled();
+}
+
+EHitMarkerType UHitMarkerComponent::CueToMarkerType(EHitFeedbackCue Cue)
+{
+	switch (Cue)
+	{
+	case EHitFeedbackCue::HeadshotKill:	return EHitMarkerType::HeadshotKill;
+	case EHitFeedbackCue::Kill:			return EHitMarkerType::Kill;
+	case EHitFeedbackCue::ShieldBreak:	return EHitMarkerType::ShieldBreak;
+	case EHitFeedbackCue::Headshot:		return EHitMarkerType::Headshot;
+	case EHitFeedbackCue::HitShield:	return EHitMarkerType::ShieldHit;
+	case EHitFeedbackCue::ZeroDamage:	return EHitMarkerType::Ionized;
+	case EHitFeedbackCue::HitFlesh:
+	default:							return EHitMarkerType::Normal;
+	}
+}
+
+bool UHitMarkerComponent::ShouldPlayCue(EHitFeedbackCue Cue, const UHitFeedbackSet* Set)
+{
+	const int32 Rank = UHitFeedbackSet::GetCueRank(Cue);
+	if (Rank < 0)
+	{
+		return false;
+	}
+
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+
+	// A set that exists speaks for itself, including when it deliberately asks for no limit at all.
+	// Only a weapon with no set falls back on the component's own default.
+	const float MinInterval = Set ? Set->MinCueInterval : Settings.DefaultMinCueInterval;
+
+	const bool bSameFrame = Set && Set->bAccumulatePerFrame && GFrameCounter == LastCueFrame;
+	const bool bWithinInterval = (MinInterval > 0.0f) && ((Now - LastCueTime) < MinInterval);
+
+	// Suppression only holds against something no more important than what is already sounding.
+	// A pellet that kills still gets heard through the pellet that merely connected before it.
+	if ((bSameFrame || bWithinInterval) && Rank <= LastCueRank)
+	{
+		return false;
+	}
+
+	LastCueTime = Now;
+	LastCueFrame = GFrameCounter;
+	LastCueRank = Rank;
+	return true;
+}
+
+void UHitMarkerComponent::PlayCue(EHitFeedbackCue Cue, const UHitFeedbackSet* Set)
+{
+	if (!Settings.bEnableHitSounds)
+	{
+		return;
+	}
+
+	if (!ShouldPlayCue(Cue, Set))
+	{
+		return;
+	}
+
+	// The firing weapon's own voice first: a shotgun and a pistol are not supposed to confirm the
+	// same way.
+	if (Set)
+	{
+		if (const FHitFeedbackCue* Configured = Set->FindCue(Cue))
+		{
+			const float Pitch = FMath::FRandRange(
+				FMath::Min(Configured->PitchMin, Configured->PitchMax),
+				FMath::Max(Configured->PitchMin, Configured->PitchMax));
+
+			UGameplayStatics::PlaySound2D(this, Configured->Sound, Configured->Volume, Pitch);
+			return;
+		}
+	}
+
+	// No set, or this set leaves that cue empty: whatever this component played before sets existed.
+	PlayHitSound(CueToMarkerType(Cue));
+}
+
 void UHitMarkerComponent::PlayHitSound(EHitMarkerType HitType)
 {
 	if (!Settings.bEnableHitSounds)
@@ -274,11 +429,19 @@ void UHitMarkerComponent::PlayHitSound(EHitMarkerType HitType)
 		SoundToPlay = Settings.HeadshotSound ? Settings.HeadshotSound : Settings.HitSound;
 		break;
 
+	case EHitMarkerType::ShieldBreak:
+		SoundToPlay = Settings.ShieldBreakSound ? Settings.ShieldBreakSound : Settings.HitSound;
+		Volume = Settings.ShieldBreakSound ? Settings.ShieldBreakSoundVolume : Settings.HitSoundVolume;
+		break;
+
 	case EHitMarkerType::Ionized:
 		SoundToPlay = Settings.IonizedHitSound;
 		Volume = Settings.IonizedHitSoundVolume;
 		break;
 
+	// A shield hit with no set to distinguish it falls back on the ordinary hit sound rather than
+	// on silence: the difference between shield and flesh is the set's job, not this fallback's.
+	case EHitMarkerType::ShieldHit:
 	case EHitMarkerType::Normal:
 	default:
 		SoundToPlay = Settings.HitSound;

@@ -110,6 +110,38 @@ void UAbilityComponent::NotifyOwnerDamaged(float Damage, AActor* DamageCauser, A
 	}
 }
 
+void UAbilityComponent::NotifyOwnerDealtDamage(AActor* Target, float Damage, bool bKilled)
+{
+	if (PassiveHandler)
+	{
+		PassiveHandler->OnOwnerDealtDamage(Target, Damage, bKilled);
+	}
+}
+
+void UAbilityComponent::NotifyOwnerFiredWeapon()
+{
+	if (PassiveHandler)
+	{
+		PassiveHandler->OnOwnerFiredWeapon();
+	}
+}
+
+float UAbilityComponent::GetPierceDamageForShot(AActor* Target) const
+{
+	// Zero, not one: this is an amount of damage added on, not a factor in a product.
+	return PassiveHandler ? FMath::Max(0.0f, PassiveHandler->GetBonusPierceDamage(Target)) : 0.0f;
+}
+
+float UAbilityComponent::GetPredictedPierceDamage(AActor* Target) const
+{
+	return PassiveHandler ? FMath::Max(0.0f, PassiveHandler->GetPredictedPierceDamage(Target)) : 0.0f;
+}
+
+bool UAbilityComponent::GetPredictedShotDamage(const AActor* Target, float& OutDamage) const
+{
+	return PassiveHandler && PassiveHandler->GetPredictedShotDamage(Target, OutDamage);
+}
+
 void UAbilityComponent::Multicast_PlayBeamVFX_Implementation(UNiagaraSystem* System, USoundBase* Sound, FVector Start, FVector End, FVector Scale)
 {
 	UWorld* World = GetWorld();
@@ -307,6 +339,17 @@ void UAbilityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	if (PassiveHandler)
 	{
 		PassiveHandler->OnPassiveTick(DeltaTime);
+	}
+
+	// And the active one, but only while it is actually casting. An ability that finishes on its own
+	// terms never overrides this; it is here for the ones whose end is decided elsewhere, such as a
+	// grapple swing that ends inside the movement simulation. @see UAbilityHandler::OnActiveTick
+	if (bIsCasting)
+	{
+		if (UAbilityHandler* Active = GetActiveHandler())
+		{
+			Active->OnActiveTick(DeltaTime);
+		}
 	}
 }
 
