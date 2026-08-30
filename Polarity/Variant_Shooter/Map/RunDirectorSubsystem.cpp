@@ -11,6 +11,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
+#include "NavigationSystem.h"
 
 namespace
 {
@@ -27,6 +28,13 @@ namespace
 		}
 		return TEXT("?");
 	}
+
+	/** Build the navmesh once when a run starts. See the call site for why this is not optional. */
+	TAutoConsoleVariable<int32> CVarBuildNavOnStart(
+		TEXT("polarity.map.buildnav"),
+		1,
+		TEXT("Build navigation once when the run director arms. Off only on maps with a baked navmesh."),
+		ECVF_Default);
 
 	const TCHAR* RoleName(EPoiRole Role)
 	{
@@ -164,6 +172,26 @@ void URunDirectorSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		PlayerInsertion = It->GetActorLocation();
 		SetPhase(ERunPhase::Open);
 		UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] Run director armed. Insertion at %s"), *PlayerInsertion.ToCompactString());
+
+		// One navigation build, at the top of the run.
+		//
+		// A run map comes up with a navmesh that covers part of itself and a navigation system that
+		// reports it has finished: measured on this bench at three landmarks out of eleven, sixty
+		// seconds in, with every squad honestly logging "MoveTo FAILED (no path?)". One Build() and
+		// it is eleven out of eleven within a dozen seconds and the war starts.
+		//
+		// It belongs here because this is the layer that says a run has begun, and a run whose
+		// armies cannot walk is not a run. On a hand-authored map with a baked navmesh this costs a
+		// moment at level start and changes nothing; turn it off with polarity.map.buildnav 0 once
+		// such a map exists.
+		if (CVarBuildNavOnStart.GetValueOnGameThread() != 0)
+		{
+			if (UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(&InWorld))
+			{
+				Nav->Build();
+				UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] Navigation build kicked at run start."));
+			}
+		}
 		break;
 	}
 }

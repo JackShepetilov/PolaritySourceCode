@@ -36,7 +36,7 @@ LEVEL_PATH = "/Game/MapEventBench/L_MapEventBench"
 TAG = "MapEventBench"
 CUBE_MESH = "/Engine/BasicShapes/Cube.Cube"
 
-GROUND = dict(size=(32000, 32000, 100), z=-50)
+GROUND = dict(size=(32000, 32000, 100), z=-50, plates=8)
 
 # Navmesh tiles. Tiles are area over TileSizeUU squared, and a dynamic navmesh builds a few of them
 # per frame: at the default 1000 uu a 640 m floor is 4096 tiles and takes minutes, during which
@@ -71,10 +71,13 @@ COLORS = dict(
     launch=(0.60, 0.40, 0.90),
 )
 
-GARRISON_A = "/Game/Squads/DA_Bench_Garrison_A"
-GARRISON_B = "/Game/Squads/DA_Bench_Garrison_B"
-SORTIE_A = "/Game/Squads/DA_Bench_Sortie_A"
-SORTIE_B = "/Game/Squads/DA_Bench_Sortie_B"
+# Where the factions come from. These are the AUTHOR's squads, not the bench's: A is people
+# (riflemen behind a juggernaut, with a grenadier), B is machines (a tracked tank escorted by
+# drones). The bench copies these compositions and only changes the task, so the two sides on the
+# ground are the two sides that were designed.
+SQUAD_A_SOURCE = "/Game/Squads/DA_SquadA_Line"
+SQUAD_B_SOURCE = "/Game/Squads/DA_SquadB_Assault"
+DRONE_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone"
 
 TEAM_PLAYERS = 0
 TEAM_A = 1
@@ -206,33 +209,54 @@ def finish(actor, label, folder):
 
 # ==================== loadouts ====================
 
-def make_loadout(name, team, task, npc_path, count):
-    """One squad composition. Reused between runs: the bench should not grow a new data asset
-    every time it is rebuilt."""
+def loadout_asset(name):
+    """Get or make the data asset. Reused between runs: the bench should not grow a new asset every
+    time it is rebuilt."""
     path = "/Game/Squads/{}".format(name)
     if unreal.EditorAssetLibrary.does_asset_exist(path):
-        asset = unreal.load_asset(path)
-    else:
-        factory = unreal.DataAssetFactory()
-        factory.set_editor_property("data_asset_class", unreal.SquadLoadout)
-        asset = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
-            name, "/Game/Squads", unreal.SquadLoadout, factory)
-        log("created {}".format(path))
+        return unreal.load_asset(path), path
 
+    factory = unreal.DataAssetFactory()
+    factory.set_editor_property("data_asset_class", unreal.SquadLoadout)
+    asset = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        name, "/Game/Squads", unreal.SquadLoadout, factory)
+    log("created {}".format(path))
+    return asset, path
+
+
+def entry(npc_path, count, commander=False):
     npc = unreal.EditorAssetLibrary.load_blueprint_class(npc_path)
     if not npc:
         raise RuntimeError("NPC class missing: " + npc_path)
+    e = unreal.SquadLoadoutEntry()
+    e.set_editor_property("npc_class", npc)
+    e.set_editor_property("count", count)
+    e.set_editor_property("provides_commander", commander)
+    return e
 
-    entry = unreal.SquadLoadoutEntry()
-    entry.set_editor_property("npc_class", npc)
-    entry.set_editor_property("count", count)
-    entry.set_editor_property("provides_commander", True)
 
-    asset.set_editor_property("members", [entry])
+def make_loadout(name, team, task, members):
+    """A squad whose COMPOSITION is the author's, not the bench's.
+
+    The first version of this file invented its own squads out of BP_ShooterNPC for both sides,
+    which quietly deleted the only thing the whole layer exists to show: the two factions play
+    differently. Faction A is people - riflemen behind a juggernaut with a grenadier - and faction B
+    is machines - a tracked tank escorted by drones. Those two shapes come from DA_SquadA_Line and
+    DA_SquadB_Assault, and anything here that disagrees with them is a bug."""
+    asset, path = loadout_asset(name)
+    asset.set_editor_property("members", members)
     asset.set_editor_property("faction_team_id", team)
     asset.set_editor_property("initial_task", task)
     unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
     return asset
+
+
+def copy_members(source_path):
+    """The author's own composition, read straight out of their asset."""
+    src = unreal.EditorAssetLibrary.load_asset(source_path)
+    if not src:
+        raise RuntimeError("Source loadout missing: " + source_path)
+    return list(src.get_editor_property("members"))
 
 
 # ==================== points ====================
@@ -361,12 +385,24 @@ def spawn_route(eas, tag, waypoints, exit_pos):
 # ==================== world ====================
 
 def ground_and_lights(eas):
+    # The floor is a GRID of plates, not one slab.
+    #
+    # This is the actual reason squads stood still for two sessions. Recast gathers geometry per
+    # navmesh tile, and one 320 m box lands inside every single tile: 256 tiles each voxelising the
+    # whole floor. Cut into 8x8 plates of 40 m, a tile touches one or two of them and the mesh
+    # builds in a blink. The tile size and the runtime generation mode were never the disease.
     mesh = unreal.EditorAssetLibrary.load_asset(CUBE_MESH)
-    floor = eas.spawn_actor_from_class(unreal.StaticMeshActor, vec(0, 0, GROUND["z"]))
-    floor.static_mesh_component.set_static_mesh(mesh)
-    floor.set_actor_scale3d(vec(GROUND["size"][0] / 100.0, GROUND["size"][1] / 100.0,
-                                GROUND["size"][2] / 100.0))
-    finish(floor, "BENCH_Ground", "Ground")
+    plates = GROUND["plates"]
+    plate_w = GROUND["size"][0] / plates
+    plate_h = GROUND["size"][1] / plates
+    for ix in range(plates):
+        for iy in range(plates):
+            cx = -GROUND["size"][0] * 0.5 + plate_w * (ix + 0.5)
+            cy = -GROUND["size"][1] * 0.5 + plate_h * (iy + 0.5)
+            plate = eas.spawn_actor_from_class(unreal.StaticMeshActor, vec(cx, cy, GROUND["z"]))
+            plate.static_mesh_component.set_static_mesh(mesh)
+            plate.set_actor_scale3d(vec(plate_w / 100.0, plate_h / 100.0, GROUND["size"][2] / 100.0))
+            finish(plate, "BENCH_Ground_{}_{}".format(ix, iy), "Ground")
 
     sun = eas.spawn_actor_from_class(unreal.DirectionalLight, vec(0, 0, 4000.0),
                                      unreal.Rotator(roll=0.0, pitch=-45.0, yaw=30.0))
@@ -377,14 +413,56 @@ def ground_and_lights(eas):
     nav.set_actor_scale3d(vec(GROUND["size"][0] / 200.0, GROUND["size"][1] / 200.0, 20.0))
     finish(nav, "BENCH_NavBounds", "Nav")
     recast = eas.spawn_actor_from_class(unreal.RecastNavMesh, vec(0, 0, 0))
-    # Dynamic, not static: a bench that needs somebody to press Build Paths before it means anything
-    # will be run once without it, and the whole afternoon goes into "why does nobody walk". The
-    # first run of this level produced exactly that: every squad logged MoveTo FAILED (no path?).
-    recast.set_editor_property("runtime_generation", unreal.RuntimeGenerationType.DYNAMIC)
+    # STATIC, and baked by bake_nav() below.
+    #
+    # Dynamic was tried twice and lost twice. Sixty-five seconds into a run, on a 320 m floor that
+    # is only 256 tiles, every squad was still logging "MoveTo FAILED (no path?)": runtime
+    # generation trickles tiles out and the map is never finished when the first sortie leaves. The
+    # one time squads did march, it was after RebuildNavigation had been typed by hand - which is
+    # not a fix, it is a person standing next to the bench.
+    recast.set_editor_property("runtime_generation", unreal.RuntimeGenerationType.STATIC)
     recast.set_editor_property("tile_size_uu", NAV_TILE_UU)
     finish(recast, "BENCH_RecastNavMesh", "Nav")
-    log("Navmesh: DYNAMIC, {:.0f} uu tiles, {:.0f}x{:.0f} grid".format(
+    log("Navmesh: STATIC, {:.0f} uu tiles, {:.0f}x{:.0f} grid - now run bake_nav()".format(
         NAV_TILE_UU, GROUND["size"][0] / NAV_TILE_UU, GROUND["size"][1] / NAV_TILE_UU))
+
+
+def bake_nav():
+    """Build the navmesh in the editor and bake it into the level.
+
+    Separate from main() because building is asynchronous and a script cannot wait inside one call:
+    run this, then check_nav() a few seconds later, then save."""
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    unreal.SystemLibrary.execute_console_command(world, "RebuildNavigation")
+    log("navmesh rebuild started - call check_nav() in a few seconds")
+
+
+def check_nav(save=False):
+    """Is the whole playable area walkable? Returns True when every landmark projects onto navmesh.
+
+    The probes are the places squads are actually sent, not a grid: a navmesh that covers the middle
+    and misses the headquarters looks fine on screen and stops the war dead."""
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    if unreal.NavigationSystemV1.is_navigation_being_built(world):
+        log("still building")
+        return False
+
+    probes = [FINAL, MISSION_WEST, MISSION_EAST, MISSION_NORTH, PLAIN_SOUTH, HQ_A_POS, HQ_B_POS,
+              LAUNCH, (0.0, -14000.0), (-14000.0, 6500.0), (14000.0, 6500.0)]
+    ext = unreal.Vector(1000, 1000, 1000)
+    missing = []
+    for (x, y) in probes:
+        if not unreal.NavigationSystemV1.project_point_to_navigation(
+                world, vec(x, y, 100.0), nav_data=None, filter_class=None, query_extent=ext):
+            missing.append((int(x), int(y)))
+
+    ok = not missing
+    log("navmesh covers {}/{} landmarks{}".format(
+        len(probes) - len(missing), len(probes), "" if ok else " | missing at {}".format(missing)))
+
+    if ok and save:
+        log("saved: {}".format(unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)))
+    return ok
 
 
 def world_settings(les):
@@ -436,13 +514,19 @@ def main():
     ground_and_lights(eas)
     run_entry(eas)
 
-    npc_a = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
-    npc_b = npc_a
+    # The two factions, taken from the author's own assets. A is people, B is machines, and the
+    # bench is worthless the moment those two look the same on the ground.
+    people = copy_members(SQUAD_A_SOURCE)     # riflemen + juggernaut + grenadier
+    machines = copy_members(SQUAD_B_SOURCE)   # tracked tank + flying drones
 
-    gar_a = make_loadout("DA_Bench_Garrison_A", TEAM_A, unreal.SquadInitialTask.DEFEND, npc_a, 3)
-    gar_b = make_loadout("DA_Bench_Garrison_B", TEAM_B, unreal.SquadInitialTask.DEFEND, npc_b, 3)
-    sor_a = make_loadout("DA_Bench_Sortie_A", TEAM_A, unreal.SquadInitialTask.ATTACK, npc_a, 4)
-    sor_b = make_loadout("DA_Bench_Sortie_B", TEAM_B, unreal.SquadInitialTask.ATTACK, npc_b, 4)
+    gar_a = make_loadout("DA_Bench_Garrison_A", TEAM_A, unreal.SquadInitialTask.DEFEND, people)
+    sor_a = make_loadout("DA_Bench_Sortie_A", TEAM_A, unreal.SquadInitialTask.ATTACK, people)
+
+    # A tank makes a poor garrison and a fine spearhead, so B holds with drones and attacks with
+    # the author's assault squad exactly as written.
+    gar_b = make_loadout("DA_Bench_Garrison_B", TEAM_B, unreal.SquadInitialTask.DEFEND,
+                         [entry(DRONE_BP, 3, commander=True)])
+    sor_b = make_loadout("DA_Bench_Sortie_B", TEAM_B, unreal.SquadInitialTask.ATTACK, machines)
 
     # Money budget: five stacks on the whole map, which is the quarter-to-a-third of sixteen cells
     # the inventory contract is tuned around. The director prints the total, so this is checkable.
