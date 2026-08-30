@@ -96,6 +96,15 @@ namespace
 		if (const AExtractionRoute* Route = Director.GetAnnouncedRoute())
 		{
 			Line(FColor::Green, FString::Printf(TEXT("RUN FOR IT: %s"), *Route->RouteTag.ToString()));
+
+			if (const AExtractionPoint* Exit = Route->Exit)
+			{
+				const float Board = Exit->GetBoardProgress();
+				if (Board > 0.0f)
+				{
+					Line(FColor::Green, FString::Printf(TEXT("BOARDING  %.0f%%"), Board * 100.0f));
+				}
+			}
 		}
 
 		for (const FPoiWarState& State : Director.GetAllPoiStates())

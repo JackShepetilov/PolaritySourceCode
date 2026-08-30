@@ -3,16 +3,19 @@
 #include "Variant_Shooter/Map/ExtractionRoute.h"
 
 #include "Variant_Shooter/Map/RunDirectorSubsystem.h"
+#include "Coop/CoopPlayers.h"
 
 #include "Components/SphereComponent.h"
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 
 // ==================== AExtractionPoint ====================
 
 AExtractionPoint::AExtractionPoint()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.TickInterval = 0.25f;
 
 	BoardGizmo = CreateDefaultSubobject<USphereComponent>(TEXT("BoardGizmo"));
 	SetRootComponent(BoardGizmo);
@@ -31,6 +34,64 @@ void AExtractionPoint::BeginPlay()
 	Super::BeginPlay();
 
 	BoardGizmo->SetSphereRadius(BoardRadius, false);
+}
+
+float AExtractionPoint::GetBoardProgress() const
+{
+	return FMath::Clamp(BoardedSeconds / FMath::Max(BoardSeconds, 0.01f), 0.0f, 1.0f);
+}
+
+void AExtractionPoint::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	URunDirectorSubsystem* Director = World ? World->GetSubsystem<URunDirectorSubsystem>() : nullptr;
+	if (!Director)
+	{
+		return;
+	}
+
+	// A door only opens for the route the team was actually given. Three exits are placed and one is
+	// drawn; walking to a different one is walking to a locked door, which is the point of drawing.
+	const AExtractionRoute* Route = Director->GetAnnouncedRoute();
+	if (Director->GetPhase() != ERunPhase::Extraction || !Route || Route->Exit != this)
+	{
+		BoardedSeconds = 0.0f;
+		return;
+	}
+
+	TArray<AActor*> Overlapping;
+	BoardGizmo->GetOverlappingActors(Overlapping, APawn::StaticClass());
+
+	bool bAnybodyAboard = false;
+	for (const AActor* Actor : Overlapping)
+	{
+		if (CoopPlayers::IsPlayer(Actor))
+		{
+			bAnybodyAboard = true;
+			break;
+		}
+	}
+
+	if (!bAnybodyAboard)
+	{
+		BoardedSeconds = 0.0f;
+		return;
+	}
+
+	BoardedSeconds += DeltaSeconds;
+
+	if (BoardedSeconds >= BoardSeconds)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] Extracted through %s"), *ExitTag.ToString());
+		Director->EndRun(true);
+	}
 }
 
 // ==================== AExtractionRoute ====================

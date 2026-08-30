@@ -400,8 +400,18 @@ def world_settings(les):
 def run_entry(eas):
     # The launch point is what tells the game this map is a run, and the director reads the team's
     # insertion from it. No second marker for the player spawn: two that can disagree is a bug.
-    launch = eas.spawn_actor_from_class(unreal.RunLaunchPoint, vec(LAUNCH[0], LAUNCH[1], 200.0))
-    launch.set_editor_property("launch_from_sea", False)
+    # Tossed out of the sea, like the first map of a real run. Not a flourish: the starting weapon
+    # is handed over in AShooterCharacter::Landed, and only while the run launch is in progress. A
+    # bench with the toss switched off spawns an unarmed player who cannot join the war at all.
+    #
+    # Aimed north, at the final, with a short arc: v=2500 at 25 degrees carries about 49 m, which
+    # puts the landing between the start and the middle of the map rather than inside somebody's
+    # garrison.
+    launch = eas.spawn_actor_from_class(
+        unreal.RunLaunchPoint, vec(LAUNCH[0], LAUNCH[1], 200.0),
+        unreal.Rotator(roll=0.0, pitch=25.0, yaw=-90.0))
+    launch.set_editor_property("launch_from_sea", True)
+    launch.set_editor_property("launch_speed", 2500.0)
     launch.set_editor_property("boss_intro", False)
     launch.set_editor_property("arena_index", 0)
     finish(launch, "BENCH_RunLaunchPoint", "MapEvents")

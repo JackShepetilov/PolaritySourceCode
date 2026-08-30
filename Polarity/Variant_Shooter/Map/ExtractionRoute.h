@@ -44,9 +44,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Extraction", meta = (ClampMin = "0.0"))
 	float BoardSeconds = 8.0f;
 
+	/** How far the boarding has got, 0..1. Zero whenever nobody is standing in it. */
+	UFUNCTION(BlueprintPure, Category = "Extraction")
+	float GetBoardProgress() const;
+
 protected:
 
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+
+	/** Boarding resets the moment the last player steps out.
+	 *
+	 *  Not a paused bar: the run out is the one place in the run where standing still has to cost
+	 *  something, and a bar that remembers turns the last fight into a game of tag around the pad. */
+	float BoardedSeconds = 0.0f;
 
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<USphereComponent> BoardGizmo;
