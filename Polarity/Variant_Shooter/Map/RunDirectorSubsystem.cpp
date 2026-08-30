@@ -40,6 +40,14 @@ namespace
 		return TEXT("?");
 	}
 
+	/** On-screen readout of the whole layer, so a run can be judged while it is being played instead
+	 *  of afterwards in a log file. Off by default; `polarity.map.hud 1` turns it on. */
+	TAutoConsoleVariable<int32> CVarMapHud(
+		TEXT("polarity.map.hud"),
+		0,
+		TEXT("Draw the run director state on screen: phase, points, mission windows, money."),
+		ECVF_Cheat);
+
 	const TCHAR* TeamName(uint8 Team)
 	{
 		switch (Team)
@@ -50,6 +58,73 @@ namespace
 		case PolarityTeams::Neutral:  return TEXT("nobody");
 		}
 		return TEXT("?");
+	}
+
+	/** Everything the director knows, in the corner of the screen.
+	 *
+	 *  Uses only the public API on purpose: this is the same view a real HUD would build, so if it
+	 *  can be drawn from here it can be drawn from a widget later. One message key per line, so the
+	 *  block redraws in place instead of scrolling. */
+	void DrawOverlay(const URunDirectorSubsystem& Director)
+	{
+		if (!GEngine)
+		{
+			return;
+		}
+
+		const float Life = 1.1f;
+		int32 Key = 71000;
+
+		auto Line = [&Key, Life](const FColor& Colour, const FString& Text)
+		{
+			GEngine->AddOnScreenDebugMessage(Key++, Life, Colour, Text);
+		};
+
+		Line(FColor::White, FString::Printf(TEXT("RUN  %s   t=%.0fs"),
+			PhaseName(Director.GetPhase()), Director.GetRunSeconds()));
+
+		const FFinalConditions Earned = Director.GetEarnedFinalConditions();
+		Line(FColor::Silver, FString::Printf(TEXT("final: waves %+d, arrival %+.0fs, entry %d   money %d"),
+			Earned.WaveDelta, Earned.ArrivalDelaySeconds, Earned.EntryQuality,
+			Director.GetMoneyStacksPlaced()));
+
+		if (Director.GetPhase() == ERunPhase::HoldingFinal)
+		{
+			Line(FColor::Orange, FString::Printf(TEXT("HOLDING  %.0f%%"), Director.GetHoldProgress() * 100.0f));
+		}
+
+		if (const AExtractionRoute* Route = Director.GetAnnouncedRoute())
+		{
+			Line(FColor::Green, FString::Printf(TEXT("RUN FOR IT: %s"), *Route->RouteTag.ToString()));
+		}
+
+		for (const FPoiWarState& State : Director.GetAllPoiStates())
+		{
+			FColor Colour = FColor::Silver;
+			if (State.bMissionWindowOpen)
+			{
+				Colour = FColor::Yellow;
+			}
+			else if (State.bContested)
+			{
+				Colour = FColor::Orange;
+			}
+			else if (State.ControllingTeam == PolarityTeams::Players)
+			{
+				Colour = FColor::Cyan;
+			}
+
+			Line(Colour, FString::Printf(TEXT("  %-16s %-8s %-7s %3.0f%%%s%s%s"),
+				*State.PoiTag.ToString(),
+				RoleName(State.Role),
+				TeamName(State.ControllingTeam),
+				State.CaptureProgress * 100.0f,
+				State.bContested ? TEXT("  FIGHT") : TEXT(""),
+				State.bMissionWindowOpen ? TEXT("  MISSION OPEN")
+					: (State.bMissionCompleted ? TEXT("  mission done")
+						: (State.bMissionExpired ? TEXT("  mission gone") : TEXT(""))),
+				State.bLoaded ? TEXT("") : TEXT("  (unloaded)")));
+		}
 	}
 }
 
@@ -92,6 +167,12 @@ void URunDirectorSubsystem::Tick(float DeltaTime)
 	if (!World || World->IsNetMode(NM_Client))
 	{
 		return;
+	}
+
+	// Drawn before the phase check: "nothing is happening" is exactly when somebody wants to look.
+	if (CVarMapHud.GetValueOnGameThread() != 0)
+	{
+		DrawOverlay(*this);
 	}
 
 	if (Phase == ERunPhase::NotStarted || Phase == ERunPhase::Ended)
