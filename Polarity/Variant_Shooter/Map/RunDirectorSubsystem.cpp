@@ -3,6 +3,7 @@
 #include "Variant_Shooter/Map/RunDirectorSubsystem.h"
 
 #include "Variant_Shooter/Map/PoiActor.h"
+#include "Variant_Shooter/Map/Banner.h"
 #include "Variant_Shooter/Map/FactionHq.h"
 #include "Variant_Shooter/Map/ExtractionRoute.h"
 #include "Variant_Shooter/Run/RunLaunchPoint.h"
@@ -131,11 +132,12 @@ namespace
 				Colour = FColor::Cyan;
 			}
 
-			Line(Colour, FString::Printf(TEXT("  %-16s %-8s %-7s %3.0f%%%s%s%s"),
+			Line(Colour, FString::Printf(TEXT("  %-16s %-8s %-7s %3.0f%%%s%s%s%s"),
 				*State.PoiTag.ToString(),
 				RoleName(State.Role),
 				TeamName(State.ControllingTeam),
 				State.CaptureProgress * 100.0f,
+				State.bBannerBroken ? TEXT("  banner down") : TEXT("  BANNER"),
 				State.bContested ? TEXT("  FIGHT") : TEXT(""),
 				State.bMissionWindowOpen ? TEXT("  MISSION OPEN")
 					: (State.bMissionCompleted ? TEXT("  mission done")
@@ -527,32 +529,35 @@ bool URunDirectorSubsystem::CompleteMission(FName PoiTag)
 
 // ==================== Headquarters ====================
 
-void URunDirectorSubsystem::NotifySabotage(uint8 FactionTeamId, ESabotageKind Kind)
+void URunDirectorSubsystem::NotifyBannerBroken(FName PoiTag, AActor* Breaker)
 {
-	switch (Kind)
+	FPoiWarState* State = FindState(PoiTag);
+	if (!State || State->bBannerBroken)
 	{
-	case ESabotageKind::Reinforcements: NoReinforcements.Add(FactionTeamId); break;
-	case ESabotageKind::Vehicles:       NoVehicles.Add(FactionTeamId); break;
-	case ESabotageKind::Power:          NoPower.Add(FactionTeamId); break;
+		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] Faction %s lost a function to sabotage (kind %d)."),
-		TeamName(FactionTeamId), static_cast<int32>(Kind));
+	State->bBannerBroken = true;
+
+	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] Banner down on %s (%s), broken by %s"),
+		*PoiTag.ToString(), RoleName(State->Role),
+		Breaker ? *Breaker->GetName() : TEXT("nobody"));
 }
 
-bool URunDirectorSubsystem::CanFactionReinforce(uint8 FactionTeamId) const
+bool URunDirectorSubsystem::IsBannerBroken(FName PoiTag) const
 {
-	return !NoReinforcements.Contains(FactionTeamId);
+	const FPoiWarState* State = FindState(PoiTag);
+	return State && State->bBannerBroken;
 }
 
-bool URunDirectorSubsystem::CanFactionFieldVehicles(uint8 FactionTeamId) const
+int32 URunDirectorSubsystem::GetBannersBrokenCount() const
 {
-	return !NoVehicles.Contains(FactionTeamId);
-}
-
-bool URunDirectorSubsystem::FactionHasPower(uint8 FactionTeamId) const
-{
-	return !NoPower.Contains(FactionTeamId);
+	int32 Count = 0;
+	for (const FPoiWarState& State : PoiStates)
+	{
+		Count += State.bBannerBroken ? 1 : 0;
+	}
+	return Count;
 }
 
 bool URunDirectorSubsystem::GetSortieTarget(uint8 FactionTeamId, const FVector& From,
@@ -723,7 +728,7 @@ void URunDirectorSubsystem::DumpState() const
 
 	for (const FPoiWarState& State : PoiStates)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG]   %s (%s) held by %s, capture %.0f%% by %s%s%s%s%s"),
+		UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG]   %s (%s) held by %s, capture %.0f%% by %s%s%s%s%s%s"),
 			*State.PoiTag.ToString(),
 			RoleName(State.Role),
 			TeamName(State.ControllingTeam),
@@ -732,6 +737,7 @@ void URunDirectorSubsystem::DumpState() const
 			State.bContested ? TEXT(", CONTESTED") : TEXT(""),
 			State.bMissionWindowOpen ? TEXT(", window OPEN") : TEXT(""),
 			State.bMissionCompleted ? TEXT(", mission done") : TEXT(""),
+			State.bBannerBroken ? TEXT(", BANNER DOWN") : TEXT(""),
 			State.bLoaded ? TEXT("") : TEXT(", streamed out"));
 	}
 }
@@ -806,36 +812,37 @@ struct FRunDirectorConsole
 		Director->SetPoiController(*State, static_cast<uint8>(FCString::Atoi(*Args[1])));
 	}
 
-	/** Break a faction function straight at the director, for testing the consequence without a
-	 *  mesh, a hitbox and a Blueprint in between. */
-	static void Sabotage(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	/** Break the banner on a point without walking there and shooting it. Goes through the actor so
+	 *  the consequence is the one the game runs, not a second copy of it. */
+	static void Banner(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
-		URunDirectorSubsystem* Director = Get(World);
-		if (!Director || Args.Num() < 2)
+		if (!Get(World) || Args.Num() < 1)
 		{
-			Ar.Log(TEXT("usage: polarity.map.sabotage <team: 1 A, 2 B> <reinforcements|vehicles|power>"));
+			Ar.Log(TEXT("usage: polarity.map.banner <PoiTag>"));
 			return;
 		}
 
-		const uint8 Team = static_cast<uint8>(FCString::Atoi(*Args[0]));
-		const FString Kind = Args[1].ToLower();
+		const FName Tag(*Args[0]);
+		for (TActorIterator<APoiActor> It(World); It; ++It)
+		{
+			if (It->PoiTag != Tag)
+			{
+				continue;
+			}
 
-		if (Kind == TEXT("reinforcements"))
-		{
-			Director->NotifySabotage(Team, ESabotageKind::Reinforcements);
+			if (ABannerActor* TheBanner = It->Banner)
+			{
+				TheBanner->Break(nullptr);
+				Ar.Logf(TEXT("broke the banner on %s"), *Args[0]);
+			}
+			else
+			{
+				Ar.Logf(TEXT("%s has no banner"), *Args[0]);
+			}
+			return;
 		}
-		else if (Kind == TEXT("vehicles"))
-		{
-			Director->NotifySabotage(Team, ESabotageKind::Vehicles);
-		}
-		else if (Kind == TEXT("power"))
-		{
-			Director->NotifySabotage(Team, ESabotageKind::Power);
-		}
-		else
-		{
-			Ar.Logf(TEXT("unknown kind '%s'"), *Args[1]);
-		}
+
+		Ar.Logf(TEXT("no point tagged %s"), *Args[0]);
 	}
 
 	/** Bench speed. A run is a quarter of an hour by design, and watching one to test a state
@@ -882,10 +889,10 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GMapCaptureCmd(
 	TEXT("Give a point to a side: polarity.map.capture <PoiTag> <team>"),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&FRunDirectorConsole::Capture));
 
-static FAutoConsoleCommandWithWorldArgsAndOutputDevice GMapSabotageCmd(
-	TEXT("polarity.map.sabotage"),
-	TEXT("Break a faction function: polarity.map.sabotage <team> <reinforcements|vehicles|power>"),
-	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&FRunDirectorConsole::Sabotage));
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GMapBannerCmd(
+	TEXT("polarity.map.banner"),
+	TEXT("Break the banner on a point: polarity.map.banner <PoiTag>"),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&FRunDirectorConsole::Banner));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GMapFastCmd(
 	TEXT("polarity.map.fast"),

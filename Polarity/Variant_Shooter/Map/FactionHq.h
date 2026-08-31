@@ -5,19 +5,20 @@
 // garrison standing in it and loot on its floor, and the team walks into it the same way it walks
 // into anything else. Everything that is true of a point is inherited rather than written twice.
 //
-// What it adds is the two things only a headquarters does: it sends squads at points the faction
-// does not hold, and it carries the objects that stop it doing so. The squads themselves are not its
-// business - USquadSpawnSubsystem already knows how to put a loadout on the ground, give it a task
-// and an objective, and let it break when it has had enough.
+// What it adds is the one thing only a headquarters does: it sends squads at points the faction does
+// not hold. The squads themselves are not its business - USquadSpawnSubsystem already knows how to
+// put a loadout on the ground, give it a task and an objective, and let it break when it has had
+// enough. What the team can take away is the banner standing in it (ABannerActor): break that and
+// this headquarters spends the rest of the run sending its weakened list instead.
 //
 // What it takes away is capture. A headquarters is broken, not taken (seminar, section 10): four
 // players besieging a base become a fourth faction and the run becomes an unbroken siege. That rule
 // lives in the director, keyed on EPoiRole::Headquarters, so there is exactly one place where it can
 // be true or false.
 //
-// Time spent here pays late: a headquarters with its reinforcements broken does not make the team
-// stronger, it makes the enemy weaker at the final. That is one of the three corners of the triangle
-// of time, and it is why this is worth building before the map is.
+// Time spent here pays late: a broken headquarters does not make the team stronger, it makes the
+// enemy weaker at the final. That is one of the three corners of the triangle of time, and it is why
+// this is worth building before the map is.
 
 #pragma once
 
@@ -26,7 +27,6 @@
 #include "FactionHq.generated.h"
 
 class USquadLoadout;
-class ASabotageTarget;
 class URunDirectorSubsystem;
 
 /** One thing a headquarters can send out. */
@@ -37,10 +37,6 @@ struct POLARITY_API FSortieEntry
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sortie")
 	TObjectPtr<USquadLoadout> Loadout = nullptr;
-
-	/** This sortie is armour. Stops being sent once the hangar is broken. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sortie")
-	bool bIsVehicle = false;
 
 	/** Relative chance of being picked. Zero never gets sent. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sortie", meta = (ClampMin = "0.0"))
@@ -69,9 +65,19 @@ public:
 
 	// ==================== Sorties ====================
 
-	/** What this headquarters can send. Empty means a headquarters that only exists to be broken. */
+	/** What this headquarters sends while its banner still stands. Empty means a headquarters that
+	 *  only exists to be broken. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties")
 	TArray<FSortieEntry> Sorties;
+
+	/** What it sends after the banner is broken, for the rest of the run.
+	 *
+	 *  This is the whole reward for taking a headquarters apart, and it is deliberately a different
+	 *  LIST rather than a multiplier: the faction should not merely arrive in smaller numbers, it
+	 *  should arrive without the thing that made it frightening. Leave it empty and a broken
+	 *  headquarters stops sending anything at all, which is the bluntest version of the same idea. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties")
+	TArray<FSortieEntry> WeakenedSorties;
 
 	/** Seconds before the first one leaves. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties", meta = (ClampMin = "0.0"))
@@ -95,21 +101,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties")
 	FName SortieSpawnPointTag = NAME_None;
 
-	// ==================== Sabotage ====================
-
-	/** The objects inside this headquarters that can be broken. Editor-placed and dragged in here:
-	 *  an actor owning actors it can see, rather than spawning them at BeginPlay. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sabotage")
-	TArray<TObjectPtr<ASabotageTarget>> SabotageTargets;
-
-	/** Called by a target when it goes. Tells the director, which is where the faction-wide effect
-	 *  actually lives. */
-	void NotifyTargetBroken(ASabotageTarget* Target);
-
 	// ==================== Queries ====================
 
 	UFUNCTION(BlueprintPure, Category = "HQ")
 	int32 GetSortiesSent() const { return SortiesSent; }
+
+	/** A headquarters answers a broken banner by dropping to its weakened list, not by spilling
+	 *  loot, so it takes the parent's hook over. */
+	virtual void NotifyBannerBroken(ABannerActor* BrokenBanner, AActor* Breaker) override;
 
 protected:
 
@@ -117,12 +116,13 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** Pick a loadout, ask the director where the faction is needed, put the squad on the ground
-	 *  with that point as its objective. Silently does nothing when the faction has no reinforcements
-	 *  left, when nothing is worth marching at, or when the cap is reached. */
+	/** Pick a loadout, ask the director where the faction is needed, put the squad on the ground with
+	 *  that point as its objective. Silently does nothing when the list it is entitled to is empty,
+	 *  when nothing is worth marching at, or when the cap is reached. */
 	void TrySendSortie();
 
-	USquadLoadout* PickSortieLoadout(bool bAllowVehicles) const;
+	/** Draw from whichever list this headquarters is entitled to right now. */
+	USquadLoadout* PickSortieLoadout() const;
 
 	float SortieTimer = 0.0f;
 	int32 SortiesSent = 0;

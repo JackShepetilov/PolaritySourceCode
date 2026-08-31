@@ -3,7 +3,7 @@
 #include "Variant_Shooter/Map/FactionHq.h"
 
 #include "Variant_Shooter/Map/RunDirectorSubsystem.h"
-#include "Variant_Shooter/Map/SabotageTarget.h"
+#include "Variant_Shooter/Map/Banner.h"
 #include "Variant_Shooter/AI/SquadSpawn/SquadSpawnSubsystem.h"
 #include "Variant_Shooter/AI/SquadSpawn/SquadSpawnPoint.h"
 #include "Variant_Shooter/AI/SquadSpawn/SquadLoadout.h"
@@ -37,14 +37,6 @@ void AFactionHq::BeginPlay()
 		Director->RegisterHq(this);
 	}
 
-	for (ASabotageTarget* Target : SabotageTargets)
-	{
-		if (Target)
-		{
-			Target->SetOwningHq(this);
-		}
-	}
-
 	SortieTimer = FirstSortieDelaySeconds;
 }
 
@@ -65,7 +57,7 @@ void AFactionHq::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!HasAuthority() || Sorties.IsEmpty())
+	if (!HasAuthority() || (Sorties.IsEmpty() && WeakenedSorties.IsEmpty()))
 	{
 		return;
 	}
@@ -80,27 +72,25 @@ void AFactionHq::Tick(float DeltaSeconds)
 	TrySendSortie();
 }
 
-void AFactionHq::NotifyTargetBroken(ASabotageTarget* Target)
+void AFactionHq::NotifyBannerBroken(ABannerActor* BrokenBanner, AActor* Breaker)
 {
-	if (!Target)
-	{
-		return;
-	}
+	Super::NotifyBannerBroken(BrokenBanner, Breaker);
 
-	if (URunDirectorSubsystem* Director = GetDirector())
-	{
-		Director->NotifySabotage(FactionTeamId, Target->Kind);
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] HQ %s lost %s"), *PoiTag.ToString(), *Target->GetName());
+	// The parent spills loot for anything that is not a headquarters. Here the consequence is the
+	// list this place is allowed to draw from for the rest of the run.
+	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] HQ %s banner down: %d sorties left in the weakened list"),
+		*PoiTag.ToString(), WeakenedSorties.Num());
 }
 
-USquadLoadout* AFactionHq::PickSortieLoadout(bool bAllowVehicles) const
+USquadLoadout* AFactionHq::PickSortieLoadout() const
 {
+	// One line decides which war this headquarters is still fighting.
+	const TArray<FSortieEntry>& Table = IsBannerBroken() ? WeakenedSorties : Sorties;
+
 	float TotalWeight = 0.0f;
-	for (const FSortieEntry& Entry : Sorties)
+	for (const FSortieEntry& Entry : Table)
 	{
-		if (Entry.Loadout && Entry.Weight > 0.0f && (bAllowVehicles || !Entry.bIsVehicle))
+		if (Entry.Loadout && Entry.Weight > 0.0f)
 		{
 			TotalWeight += Entry.Weight;
 		}
@@ -112,9 +102,9 @@ USquadLoadout* AFactionHq::PickSortieLoadout(bool bAllowVehicles) const
 	}
 
 	float Roll = FMath::FRand() * TotalWeight;
-	for (const FSortieEntry& Entry : Sorties)
+	for (const FSortieEntry& Entry : Table)
 	{
-		if (!Entry.Loadout || Entry.Weight <= 0.0f || (!bAllowVehicles && Entry.bIsVehicle))
+		if (!Entry.Loadout || Entry.Weight <= 0.0f)
 		{
 			continue;
 		}
@@ -138,13 +128,6 @@ void AFactionHq::TrySendSortie()
 		return;
 	}
 
-	// Broken reinforcements are the whole reward for taking a headquarters apart: the faction keeps
-	// what it already has on the map and gets nothing new for the rest of the run.
-	if (!Director->CanFactionReinforce(FactionTeamId))
-	{
-		return;
-	}
-
 	if (MaxSorties > 0 && SortiesSent >= MaxSorties)
 	{
 		return;
@@ -159,7 +142,7 @@ void AFactionHq::TrySendSortie()
 		return;
 	}
 
-	USquadLoadout* Loadout = PickSortieLoadout(Director->CanFactionFieldVehicles(FactionTeamId));
+	USquadLoadout* Loadout = PickSortieLoadout();
 	if (!Loadout)
 	{
 		return;

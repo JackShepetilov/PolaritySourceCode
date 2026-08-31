@@ -21,6 +21,7 @@
 class USphereComponent;
 class USquadLoadout;
 class URunDirectorSubsystem;
+class ABannerActor;
 
 /**
  * Editor-placed point of interest. One per meaningful place on the map: the three mission points,
@@ -93,12 +94,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Garrison", meta = (ClampMin = "100.0"))
 	float GarrisonScatterRadius = 1500.0f;
 
+	// ==================== Banner ====================
+
+	/** The thing standing in the middle of this place that can be broken.
+	 *
+	 *  What breaking it costs is this point's business: a headquarters drops to its weakened
+	 *  sorties, anywhere else spills its loot on the floor. A point with no banner keeps the old
+	 *  behaviour and puts its loot down when it loads, which is what a cheap safe point should do. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Banner")
+	TObjectPtr<ABannerActor> Banner = nullptr;
+
+	/** Called by the banner when somebody finishes it off. */
+	virtual void NotifyBannerBroken(ABannerActor* BrokenBanner, AActor* Breaker);
+
+	UFUNCTION(BlueprintPure, Category = "POI|Banner")
+	bool IsBannerBroken() const;
+
 	// ==================== Loot ====================
 
-	/** What this point puts on the floor, once, the first time it loads. Money entries also feed the
-	 *  budget audit: the whole map should carry a quarter to a third of the team's cells. */
+	/** What this point puts on the floor. With a banner it waits until the banner is broken; without
+	 *  one it goes down when the point loads. Money entries also feed the budget audit: the whole
+	 *  map should carry a quarter to a third of the team's cells. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot")
 	TArray<FPoiLootEntry> Loot;
+
+	/** Loot dropped by a banner lands within this radius of it (cm), not scattered over the whole
+	 *  point: it is a pile somebody just opened, and it should read as one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "50.0"))
+	float BannerLootRadius = 400.0f;
 
 	// ==================== Queries ====================
 
@@ -123,8 +146,9 @@ protected:
 	 *  that unloads and loads again does not refill the point with fresh enemies. */
 	void SpawnGarrisonOnce();
 
-	/** Same rule as the garrison, for the loot. */
-	void SpawnLootOnce();
+	/** Same rule as the garrison, for the loot. Origin is where the pile lands: the point itself
+	 *  when it loads with no banner, the banner when one is broken. */
+	void SpawnLootOnce(const FVector& Origin, float Radius);
 
 	URunDirectorSubsystem* GetDirector() const;
 

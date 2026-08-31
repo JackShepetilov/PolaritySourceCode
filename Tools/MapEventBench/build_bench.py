@@ -4,7 +4,7 @@ import unreal  # first line on purpose: execute_python_code only accepts code th
 #
 # Builds the smallest level on which the whole middle of the core loop can be watched running:
 # the run director, points of interest, mission windows, two headquarters that send squads at each
-# other, sabotage, the final, and three extraction routes to pick from.
+# other, banners that can be broken, the final, and three extraction routes to pick from.
 #
 #                          [X_North]
 #                              |
@@ -78,6 +78,7 @@ COLORS = dict(
 SQUAD_A_SOURCE = "/Game/Squads/DA_SquadA_Line"
 SQUAD_B_SOURCE = "/Game/Squads/DA_SquadB_Assault"
 DRONE_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_FlyingDrone"
+SHOOTER_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
 
 TEAM_PLAYERS = 0
 TEAM_A = 1
@@ -273,6 +274,20 @@ def loot_entry(bp_path, count, is_money, scatter=0.0):
     return e
 
 
+def spawn_banner(eas, tag, pos, color_key):
+    """The thing standing in the middle of a place that can be broken.
+
+    One per point and one per headquarters. Breaking it spills that point's loot, or drops that
+    headquarters to its weakened squads: the banner itself has no opinion, see ABannerActor."""
+    b = eas.spawn_actor_from_class(unreal.BannerActor, vec(pos[0], pos[1], 150.0))
+    b.set_editor_property("health", 400.0)
+    b.set_editor_property("only_players_can_break", True)
+    mesh = b.get_component_by_class(unreal.StaticMeshComponent)
+    if mesh:
+        mesh.set_material(0, color_material(color_key))
+    return finish(b, "BANNER_{}".format(tag), "MapEvents/Banners")
+
+
 def spawn_poi(eas, tag, pos, role, team, garrison=None, loot=None, radius=2000.0,
               mission_kind=None, reward=None, prize=None, prize_life=0.0):
     poi = eas.spawn_actor_from_class(unreal.PoiActor, vec(pos[0], pos[1], 100.0))
@@ -295,6 +310,13 @@ def spawn_poi(eas, tag, pos, role, team, garrison=None, loot=None, radius=2000.0
 
     key = {unreal.PoiRole.MISSION: "mission", unreal.PoiRole.PLAIN: "plain",
            unreal.PoiRole.FINAL: "final"}.get(role, "plain")
+
+    # Everything that carries loot carries a banner over it. The plain point is the exception on
+    # purpose: cheap safe loot should be lying on the floor, not behind a job.
+    if loot and role != unreal.PoiRole.PLAIN:
+        poi.set_editor_property("banner", spawn_banner(eas, tag, pos, key))
+        poi.set_editor_property("banner_loot_radius", 400.0)
+
     radius_disc(eas, pos, radius, key, "DISC_{}".format(tag))
     # A cone for a mission, a squat cylinder for anything else: readable from across the map, which
     # is where the decision about going there is actually made.
@@ -306,7 +328,7 @@ def spawn_poi(eas, tag, pos, role, team, garrison=None, loot=None, radius=2000.0
     return finish(poi, "POI_{}".format(tag), "MapEvents/Points")
 
 
-def spawn_hq(eas, tag, pos, team, sortie_loadout, garrison_loadout, loot):
+def spawn_hq(eas, tag, pos, team, sortie_loadout, weak_loadout, garrison_loadout, loot):
     hq = eas.spawn_actor_from_class(unreal.FactionHq, vec(pos[0], pos[1], 100.0))
     hq.set_editor_property("poi_tag", unreal.Name(tag))
     hq.set_editor_property("faction_team_id", team)
@@ -318,11 +340,15 @@ def spawn_hq(eas, tag, pos, team, sortie_loadout, garrison_loadout, loot):
     hq.set_editor_property("garrison_scatter_radius", 1100.0)
     hq.set_editor_property("loot", loot)
 
-    sortie = unreal.SortieEntry()
-    sortie.set_editor_property("loadout", sortie_loadout)
-    sortie.set_editor_property("is_vehicle", False)
-    sortie.set_editor_property("weight", 1.0)
-    hq.set_editor_property("sorties", [sortie])
+    def sortie_entry(loadout):
+        e = unreal.SortieEntry()
+        e.set_editor_property("loadout", loadout)
+        e.set_editor_property("weight", 1.0)
+        return e
+
+    # Two lists, and the banner decides which one this place is still entitled to.
+    hq.set_editor_property("sorties", [sortie_entry(sortie_loadout)])
+    hq.set_editor_property("weakened_sorties", [sortie_entry(weak_loadout)])
     hq.set_editor_property("first_sortie_delay_seconds", 20.0)
     hq.set_editor_property("sortie_interval_seconds", 60.0)
     hq.set_editor_property("sortie_scatter_radius", 600.0)
@@ -330,21 +356,8 @@ def spawn_hq(eas, tag, pos, team, sortie_loadout, garrison_loadout, loot):
     # yet: an uncapped bench had 56 pawns on the map inside four minutes.
     hq.set_editor_property("max_sorties", 3)
 
-    # Two things to break, one per consequence worth watching on a bench.
-    targets = []
-    for i, (kind, dx) in enumerate(((unreal.SabotageKind.REINFORCEMENTS, -900.0),
-                                    (unreal.SabotageKind.VEHICLES, 900.0))):
-        t = eas.spawn_actor_from_class(unreal.SabotageTarget, vec(pos[0] + dx, pos[1] + 900.0, 100.0))
-        t.set_editor_property("kind", kind)
-        t.set_editor_property("health", 200.0)
-        finish(t, "SAB_{}_{}".format(tag, i), "MapEvents/Sabotage")
-        targets.append(t)
-        marker(eas, CUBE_MESH, (pos[0] + dx, pos[1] + 900.0, 150.0),
-               (3.0, 3.0, 3.0), "sabotage", "MARK_SAB_{}_{}".format(tag, i))
-
-    hq.set_editor_property("sabotage_targets", targets)
-
     key = "hq_a" if team == TEAM_A else "hq_b"
+    hq.set_editor_property("banner", spawn_banner(eas, tag, pos, "sabotage"))
     radius_disc(eas, pos, 3000.0, key, "DISC_{}".format(tag))
     marker(eas, CUBE_MESH, (pos[0], pos[1], 500.0), (10.0, 10.0, 10.0), key, "MARK_{}".format(tag))
 
@@ -528,6 +541,14 @@ def main():
                          [entry(DRONE_BP, 3, commander=True)])
     sor_b = make_loadout("DA_Bench_Sortie_B", TEAM_B, unreal.SquadInitialTask.ATTACK, machines)
 
+    # What each side sends once its banner is down. Not "the same but fewer": the thing that made
+    # the faction frightening is what goes. A loses the juggernaut and the grenadier, B loses the
+    # tank and turns up as a pair of drones.
+    weak_a = make_loadout("DA_Bench_Weak_A", TEAM_A, unreal.SquadInitialTask.ATTACK,
+                          [entry(SHOOTER_BP, 2, commander=True)])
+    weak_b = make_loadout("DA_Bench_Weak_B", TEAM_B, unreal.SquadInitialTask.ATTACK,
+                          [entry(DRONE_BP, 2, commander=True)])
+
     # Money budget: five stacks on the whole map, which is the quarter-to-a-third of sixteen cells
     # the inventory contract is tuned around. The director prints the total, so this is checkable.
     reward = unreal.FinalConditions()
@@ -557,8 +578,8 @@ def main():
 
     # Ammo only: the money budget is spent, and a headquarters that also paid the best money would
     # make the other five points decorative.
-    spawn_hq(eas, "HQ_A", HQ_A_POS, TEAM_A, sor_a, gar_a, [loot_entry(AMMO_BP, 3, False)])
-    spawn_hq(eas, "HQ_B", HQ_B_POS, TEAM_B, sor_b, gar_b, [loot_entry(AMMO_BP, 3, False)])
+    spawn_hq(eas, "HQ_A", HQ_A_POS, TEAM_A, sor_a, weak_a, gar_a, [loot_entry(AMMO_BP, 3, False)])
+    spawn_hq(eas, "HQ_B", HQ_B_POS, TEAM_B, sor_b, weak_b, gar_b, [loot_entry(AMMO_BP, 3, False)])
 
     # Three ways out, drawn at random after the hold. Different lengths and directions on purpose:
     # a team that always leaves the same way has not been asked anything.

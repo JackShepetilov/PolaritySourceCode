@@ -3,6 +3,7 @@
 #include "Variant_Shooter/Map/PoiActor.h"
 
 #include "Variant_Shooter/Map/RunDirectorSubsystem.h"
+#include "Variant_Shooter/Map/Banner.h"
 #include "Variant_Shooter/AI/SquadSpawn/SquadSpawnSubsystem.h"
 #include "Variant_Shooter/AI/SquadSpawn/SquadLoadout.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
@@ -46,8 +47,44 @@ void APoiActor::BeginPlay()
 		Director->RegisterPoi(this);
 	}
 
+	if (Banner)
+	{
+		Banner->SetOwningPoi(this);
+	}
+
 	SpawnGarrisonOnce();
-	SpawnLootOnce();
+
+	// No banner, no ceremony: a plain point just has its loot lying there. A point WITH a banner
+	// holds it back until somebody breaks the thing, which is the whole mechanic.
+	if (!Banner)
+	{
+		SpawnLootOnce(GetActorLocation(), InfluenceRadius);
+	}
+}
+
+bool APoiActor::IsBannerBroken() const
+{
+	return Banner && Banner->bBroken;
+}
+
+void APoiActor::NotifyBannerBroken(ABannerActor* BrokenBanner, AActor* Breaker)
+{
+	if (!HasAuthority() || !BrokenBanner)
+	{
+		return;
+	}
+
+	if (URunDirectorSubsystem* Director = GetDirector())
+	{
+		Director->NotifyBannerBroken(PoiTag, Breaker);
+	}
+
+	// A headquarters answers this itself by dropping to its weakened sorties (see AFactionHq).
+	// Everywhere else the answer is the prize, and the prize is the loot.
+	if (PoiRole != EPoiRole::Headquarters)
+	{
+		SpawnLootOnce(BrokenBanner->GetActorLocation(), BannerLootRadius);
+	}
 }
 
 void APoiActor::EndPlay(const EEndPlayReason::Type Reason)
@@ -160,7 +197,7 @@ void APoiActor::SpawnGarrisonOnce()
 		*PoiTag.ToString(), Spawned, *GarrisonLoadout->GetName());
 }
 
-void APoiActor::SpawnLootOnce()
+void APoiActor::SpawnLootOnce(const FVector& Origin, float Radius)
 {
 	if (Loot.IsEmpty())
 	{
@@ -188,7 +225,6 @@ void APoiActor::SpawnLootOnce()
 		return;
 	}
 
-	const FVector Origin = GetActorLocation();
 	int32 Placed = 0;
 
 	for (const FPoiLootEntry& Entry : Loot)
@@ -198,12 +234,14 @@ void APoiActor::SpawnLootOnce()
 			continue;
 		}
 
-		const float Radius = Entry.ScatterRadius > 0.0f ? Entry.ScatterRadius : InfluenceRadius;
+		// The entry can still ask for its own spread; otherwise it uses whatever the caller chose,
+		// which is the whole point when a banner drops a pile at its feet rather than over an acre.
+		const float Spread = Entry.ScatterRadius > 0.0f ? Entry.ScatterRadius : Radius;
 
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
 			const float Angle = FMath::FRandRange(0.0f, 2.0f * PI);
-			const float Distance = Radius * FMath::Sqrt(FMath::FRand());
+			const float Distance = Spread * FMath::Sqrt(FMath::FRand());
 			const FVector Flat = Origin + FVector(FMath::Cos(Angle) * Distance, FMath::Sin(Angle) * Distance, 0.0f);
 
 			// Drop it on whatever is under that spot. A pickup floating two metres up is the same

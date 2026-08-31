@@ -106,20 +106,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Run Director|Missions")
 	FFinalConditions GetEarnedFinalConditions() const { return EarnedConditions; }
 
-	// ==================== Headquarters ====================
+	// ==================== Banners ====================
 
-	/** A headquarters lost one of its functions. Applies to the whole faction for the rest of the
-	 *  run: headquarters are broken, not captured. */
-	void NotifySabotage(uint8 FactionTeamId, ESabotageKind Kind);
+	/** The thing standing in the middle of a place has been broken. Recorded here rather than on the
+	 *  point, so it survives the point being streamed out; what it costs is decided by the point. */
+	void NotifyBannerBroken(FName PoiTag, AActor* Breaker);
 
-	UFUNCTION(BlueprintPure, Category = "Run Director|Factions")
-	bool CanFactionReinforce(uint8 FactionTeamId) const;
+	UFUNCTION(BlueprintPure, Category = "Run Director|Banners")
+	bool IsBannerBroken(FName PoiTag) const;
 
-	UFUNCTION(BlueprintPure, Category = "Run Director|Factions")
-	bool CanFactionFieldVehicles(uint8 FactionTeamId) const;
-
-	UFUNCTION(BlueprintPure, Category = "Run Director|Factions")
-	bool FactionHasPower(uint8 FactionTeamId) const;
+	/** How many banners are still standing, for the overlay and for anything that wants to know how
+	 *  much of the map has been taken apart. */
+	UFUNCTION(BlueprintPure, Category = "Run Director|Banners")
+	int32 GetBannersBrokenCount() const;
 
 	/** Where a headquarters should send its next sortie: the nearest point this faction does not
 	 *  hold, preferring one that is already contested. Returns false when the faction holds
@@ -252,11 +251,6 @@ private:
 	TWeakObjectPtr<AExtractionRoute> AnnouncedRoute;
 
 	FVector PlayerInsertion = FVector::ZeroVector;
-
-	/** Which faction lost which function. Indexed by team byte, so faction A is 1 and B is 2. */
-	TSet<uint8> NoReinforcements;
-	TSet<uint8> NoVehicles;
-	TSet<uint8> NoPower;
 
 	/** Slow tick accumulator: the war is measured in minutes, not frames. */
 	float TickAccumulator = 0.0f;

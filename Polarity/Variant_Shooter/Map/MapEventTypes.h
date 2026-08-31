@@ -31,9 +31,9 @@ enum class EPoiRole : uint8
 	Mission UMETA(DisplayName = "Mission"),
 
 	/** A faction headquarters, which is an AFactionHq: a point like any other, with a garrison and
-	 *  loot, except that no amount of standing in it hands it over. It is broken instead, one
-	 *  function at a time (ASabotageTarget). The director refuses capture on this role, so the rule
-	 *  is one line in one place. */
+	 *  loot, except that no amount of standing in it hands it over. It is broken instead, by taking
+	 *  down the banner standing in it (ABannerActor). The director refuses capture on this role, so
+	 *  the rule is one line in one place. */
 	Headquarters UMETA(DisplayName = "Headquarters"),
 
 	/** Where the run ends. Capture, then hold, then the route to the exit is announced. */
@@ -77,21 +77,6 @@ enum class EMissionKind : uint8
 
 	/** Be on this spot when the clock runs out. */
 	Hold
-};
-
-/** Which of a headquarters' functions a sabotage target is. Breaking one takes that function away
- *  from the faction for the rest of the run. */
-UENUM(BlueprintType)
-enum class ESabotageKind : uint8
-{
-	/** No more sorties leave this headquarters. */
-	Reinforcements,
-
-	/** Loadouts marked as vehicles stop appearing in its sorties. */
-	Vehicles,
-
-	/** Its points stop generating power, which is what the slow prize is made of. */
-	Power
 };
 
 /** Where the run is. One map, so this is a straight line with no branches. */
@@ -244,4 +229,10 @@ struct POLARITY_API FPoiWarState
 	/** How much money this point put on the floor, for the budget audit. */
 	UPROPERTY(BlueprintReadOnly, Category = "POI")
 	int32 MoneyStacksPlaced = 0;
+
+	/** Somebody broke the thing standing in the middle of this place. What that cost is the point's
+	 *  business - a headquarters drops to its weakened squads, anywhere else spills its loot - but
+	 *  the fact is remembered here, where it survives the point being streamed out. */
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	bool bBannerBroken = false;
 };
