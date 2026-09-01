@@ -83,7 +83,7 @@ void APoiActor::NotifyBannerBroken(ABannerActor* BrokenBanner, AActor* Breaker)
 	// Everywhere else the answer is the prize, and the prize is the loot.
 	if (PoiRole != EPoiRole::Headquarters)
 	{
-		SpawnLootOnce(BrokenBanner->GetActorLocation(), BannerLootRadius);
+		SpawnLootOnce(BrokenBanner->GetLootBurstOrigin(), BannerLootRadius, BannerLootImpulse);
 	}
 }
 
@@ -197,7 +197,7 @@ void APoiActor::SpawnGarrisonOnce()
 		*PoiTag.ToString(), Spawned, *GarrisonLoadout->GetName());
 }
 
-void APoiActor::SpawnLootOnce(const FVector& Origin, float Radius)
+void APoiActor::SpawnLootOnce(const FVector& Origin, float Radius, float Impulse)
 {
 	if (Loot.IsEmpty())
 	{
@@ -241,30 +241,59 @@ void APoiActor::SpawnLootOnce(const FVector& Origin, float Radius)
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
 			const float Angle = FMath::FRandRange(0.0f, 2.0f * PI);
-			const float Distance = Spread * FMath::Sqrt(FMath::FRand());
-			const FVector Flat = Origin + FVector(FMath::Cos(Angle) * Distance, FMath::Sin(Angle) * Distance, 0.0f);
-
-			// Drop it on whatever is under that spot. A pickup floating two metres up is the same
-			// bug as one buried in the floor, and both are invisible until somebody walks past.
-			FHitResult Hit;
-			const FVector TraceStart = Flat + FVector(0.0f, 0.0f, 1000.0f);
-			const FVector TraceEnd = Flat - FVector(0.0f, 0.0f, 3000.0f);
-
-			FCollisionQueryParams Params(TEXT("PoiLoot"), false, this);
-			if (!World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_WorldStatic, Params))
-			{
-				continue;
-			}
+			const FVector Outward(FMath::Cos(Angle), FMath::Sin(Angle), 0.0f);
 
 			FActorSpawnParameters SpawnParams;
 			SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 
+			FVector SpawnAt;
+			if (Impulse > 0.0f)
+			{
+				// Thrown, not placed. Everything starts inside the banner and physics decides where
+				// it ends up, which is the difference between loot appearing and loot coming out.
+				SpawnAt = Origin + Outward * FMath::FRandRange(0.0f, 40.0f);
+			}
+			else
+			{
+				const float Distance = Spread * FMath::Sqrt(FMath::FRand());
+				const FVector Flat = Origin + Outward * Distance;
+
+				// Laid down: find what is under that spot. A pickup floating two metres up is the
+				// same bug as one buried in the floor, and both are invisible until somebody walks
+				// past.
+				FHitResult Hit;
+				FCollisionQueryParams Params(TEXT("PoiLoot"), false, this);
+				if (!World->LineTraceSingleByChannel(Hit, Flat + FVector(0.0f, 0.0f, 1000.0f),
+					Flat - FVector(0.0f, 0.0f, 3000.0f), ECC_WorldStatic, Params))
+				{
+					continue;
+				}
+				SpawnAt = Hit.ImpactPoint + FVector(0.0f, 0.0f, 20.0f);
+			}
+
 			// Spawned into the persistent world rather than into this point's sublevel, so a piece
 			// of loot does not vanish when the player walks far enough away from where it lies.
-			if (World->SpawnActor<AInventoryPickup>(Entry.PickupClass, Hit.ImpactPoint + FVector(0.0f, 0.0f, 20.0f),
-				FRotator::ZeroRotator, SpawnParams))
+			AInventoryPickup* Dropped = World->SpawnActor<AInventoryPickup>(
+				Entry.PickupClass, SpawnAt, FRotator::ZeroRotator, SpawnParams);
+			if (!Dropped)
 			{
-				++Placed;
+				continue;
+			}
+
+			++Placed;
+
+			if (Impulse > 0.0f && Dropped->Mesh && Dropped->Mesh->IsSimulatingPhysics())
+			{
+				// Up and out, with the spread built into the direction rather than into a radius:
+				// how far a piece travels is then a consequence of the throw, and the pile lands
+				// looking scattered instead of arranged.
+				const FVector Launch = (Outward * FMath::FRandRange(0.5f, 1.0f)
+					+ FVector(0.0f, 0.0f, FMath::FRandRange(1.0f, 1.6f))).GetSafeNormal();
+
+				Dropped->Mesh->AddImpulse(Launch * Impulse * FMath::FRandRange(0.7f, 1.3f),
+					NAME_None, /*bVelChange=*/ true);
+				Dropped->Mesh->AddAngularImpulseInDegrees(
+					FMath::VRand() * Impulse, NAME_None, /*bVelChange=*/ true);
 			}
 		}
 	}

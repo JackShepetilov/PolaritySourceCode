@@ -123,6 +123,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "50.0"))
 	float BannerLootRadius = 400.0f;
 
+	/** How hard a banner throws its loot out (cm/s). Zero lays it on the floor the way a point
+	 *  without a banner does.
+	 *
+	 *  Pickups already simulate physics on the server, so this is a real throw and not an
+	 *  animation: the pile leaves the banner, bounces and settles wherever it settles. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "0.0"))
+	float BannerLootImpulse = 420.0f;
+
 	// ==================== Queries ====================
 
 	/** Everything about this point the director is holding right now. Null before registration. */
@@ -146,9 +154,10 @@ protected:
 	 *  that unloads and loads again does not refill the point with fresh enemies. */
 	void SpawnGarrisonOnce();
 
-	/** Same rule as the garrison, for the loot. Origin is where the pile lands: the point itself
-	 *  when it loads with no banner, the banner when one is broken. */
-	void SpawnLootOnce(const FVector& Origin, float Radius);
+	/** Same rule as the garrison, for the loot. Origin is where the pile comes from: the point
+	 *  itself when it loads with no banner, the banner when one is broken. Impulse above zero
+	 *  throws it out of Origin instead of laying it on the ground under Origin. */
+	void SpawnLootOnce(const FVector& Origin, float Radius, float Impulse = 0.0f);
 
 	URunDirectorSubsystem* GetDirector() const;
 

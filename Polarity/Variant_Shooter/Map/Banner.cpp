@@ -8,6 +8,15 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/World.h"
+#include "Field/FieldSystemObjects.h"
+#include "GeometryCollection/GeometryCollectionActor.h"
+#include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
+#include "Kismet/GameplayStatics.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
+#include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 
 ABannerActor::ABannerActor()
@@ -80,6 +89,25 @@ void ABannerActor::Break(AActor* Breaker)
 	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] Banner %s broken by %s"),
 		*GetName(), Breaker ? *Breaker->GetName() : TEXT("nobody"));
 
+	const FVector BreakLocation = Mesh->GetComponentLocation();
+
+	// The order is the whole reason this reads as an explosion rather than as a state change: the
+	// banner comes apart, the blast goes off, and only then does the prize come out of it. Spill
+	// the loot first and it is lying there before anything has happened to the thing holding it.
+	ShatterIntoGibs();
+
+	if (BreakVFX)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+			this, BreakVFX, BreakLocation, FRotator::ZeroRotator, FVector(BreakVFXScale),
+			true, true, ENCPoolMethod::None, true);
+	}
+
+	if (BreakSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, BreakSound, BreakLocation);
+	}
+
 	// The point decides what breaking it costs. A banner that knew would need a branch per case,
 	// and the cases belong to places, not to props.
 	if (APoiActor* Poi = OwningPoi.Get())
@@ -92,9 +120,109 @@ void ABannerActor::Break(AActor* Breaker)
 			*GetName());
 	}
 
-	// Left standing but inert: a banner that vanishes takes the landmark with it, and the team needs
-	// to be able to see from across the map that this one is already done.
+	OnBroken.Broadcast(this);
+}
+
+FVector ABannerActor::GetLootBurstOrigin() const
+{
+	return Mesh->GetComponentLocation() + FVector(0.0f, 0.0f, LootBurstHeight);
+}
+
+void ABannerActor::ShatterIntoGibs()
+{
+	// The standing mesh goes whatever happens. A banner that is still there after being broken is a
+	// landmark that lies about the state of the map.
+	Mesh->SetVisibility(false);
 	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	OnBroken.Broadcast(this);
+	UWorld* World = GetWorld();
+	if (!BannerGC || !World)
+	{
+		return;
+	}
+
+	const FTransform MeshTransform = Mesh->GetComponentTransform();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	SpawnedGibs = World->SpawnActor<AGeometryCollectionActor>(
+		MeshTransform.GetLocation(), MeshTransform.GetRotation().Rotator(), SpawnParams);
+	if (!SpawnedGibs)
+	{
+		return;
+	}
+
+	UGeometryCollectionComponent* Gibs = SpawnedGibs->GetGeometryCollectionComponent();
+	if (!Gibs)
+	{
+		SpawnedGibs->Destroy();
+		SpawnedGibs = nullptr;
+		return;
+	}
+
+	SpawnedGibs->SetActorScale3D(MeshTransform.GetScale3D());
+	Gibs->SetRestCollection(BannerGC);
+
+	// Wearing the banner's own materials, so the pieces are recognisably the thing that just stood
+	// there rather than grey rubble.
+	const int32 NumMaterials = Mesh->GetNumMaterials();
+	for (int32 Index = 0; Index < NumMaterials; ++Index)
+	{
+		if (UMaterialInterface* Material = Mesh->GetMaterial(Index))
+		{
+			Gibs->SetMaterial(Index, Material);
+		}
+	}
+
+	Gibs->SetCollisionProfileName(GibCollisionProfile);
+	Gibs->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	Gibs->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	Gibs->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+
+	Gibs->SetSimulatePhysics(true);
+	Gibs->SetEnableGravity(true);
+	Gibs->RecreatePhysicsState();
+
+	// Break every cluster at once.
+	UUniformScalar* Strain = NewObject<UUniformScalar>(SpawnedGibs);
+	Strain->Magnitude = 999999.0f;
+	Gibs->ApplyPhysicsField(true, EGeometryCollectionPhysicsTypeEnum::Chaos_ExternalClusterStrain,
+		nullptr, Strain);
+
+	GetWorldTimerManager().SetTimer(ScatterImpulseHandle, this,
+		&ABannerActor::ApplyScatterImpulse, 0.05f, false);
+
+	if (GibLifetime > 0.0f)
+	{
+		SpawnedGibs->SetLifeSpan(GibLifetime);
+	}
+
+	if (GibFreezeTime > 0.0f)
+	{
+		TWeakObjectPtr<UGeometryCollectionComponent> WeakGibs = Gibs;
+		GetWorldTimerManager().SetTimer(GibFreezeHandle,
+			FTimerDelegate::CreateLambda([WeakGibs]()
+			{
+				if (UGeometryCollectionComponent* Live = WeakGibs.Get())
+				{
+					Live->SetSimulatePhysics(false);
+				}
+			}),
+			GibFreezeTime, false);
+	}
+}
+
+void ABannerActor::ApplyScatterImpulse()
+{
+	if (!SpawnedGibs)
+	{
+		return;
+	}
+
+	if (UGeometryCollectionComponent* Gibs = SpawnedGibs->GetGeometryCollectionComponent())
+	{
+		Gibs->AddRadialImpulse(SpawnedGibs->GetActorLocation(), BreakRadius, BreakImpulse,
+			ERadialImpulseFalloff::RIF_Linear, /*bVelChange=*/ true);
+	}
 }

@@ -57,6 +57,14 @@ SPHERE_MESH = "/Engine/BasicShapes/Sphere.Sphere"
 CONE_MESH = "/Engine/BasicShapes/Cone.Cone"
 MATERIAL_DIR = "/Game/MapEventBench/Materials"
 
+# What a banner is made of when it comes apart. The mesh is a copy of the engine cube living in
+# /Game so the fracture tool has somewhere to put GC_SM_BenchBanner next to it; both are made by
+# make_banner_assets() below and then just sit there.
+BANNER_MESH = "/Game/MapEventBench/SM_BenchBanner"
+BANNER_GC = "/Game/MapEventBench/GC_SM_BenchBanner"
+BREAK_VFX = "/Game/Effects/Particles/Explosion/NS_Grenade_Explosion"
+BREAK_SOUND = "/Game/Audio/MetaSounds/sfx_Weapon_GrenadeExplosion_nl_meta"
+
 # Every place gets a coloured disc the size of its influence radius and a marker in the middle.
 # The C++ actors are invisible by design - a sphere gizmo and nothing else - which is correct for
 # shipping and useless for a bench: the first run of this level looked like an empty floor.
@@ -274,6 +282,24 @@ def loot_entry(bp_path, count, is_money, scatter=0.0):
     return e
 
 
+def make_banner_assets():
+    """The mesh a banner is, and the fractured version of it.
+
+    Both are made once and then reused. The mesh is a copy of the engine cube because
+    CreateGCFromStaticMesh writes GC_{Name} next to its source, and the source must not be in
+    /Engine. Fracturing takes a couple of minutes the first time and no time ever after."""
+    if not unreal.EditorAssetLibrary.does_asset_exist(BANNER_MESH):
+        unreal.EditorAssetLibrary.duplicate_asset(CUBE_MESH.split(".")[0], BANNER_MESH)
+        unreal.EditorAssetLibrary.save_asset(BANNER_MESH, only_if_is_dirty=False)
+        log("created {}".format(BANNER_MESH))
+
+    if not unreal.EditorAssetLibrary.does_asset_exist(BANNER_GC):
+        mesh = unreal.EditorAssetLibrary.load_asset(BANNER_MESH)
+        result = unreal.GCBatchCreatorLibrary.create_gc_from_static_mesh(mesh, 0, False)
+        log("fracture: {}".format(result.get_editor_property("message")))
+        unreal.EditorAssetLibrary.save_asset(BANNER_GC, only_if_is_dirty=False)
+
+
 def spawn_banner(eas, tag, pos, color_key):
     """The thing standing in the middle of a place that can be broken.
 
@@ -282,9 +308,27 @@ def spawn_banner(eas, tag, pos, color_key):
     b = eas.spawn_actor_from_class(unreal.BannerActor, vec(pos[0], pos[1], 150.0))
     b.set_editor_property("health", 400.0)
     b.set_editor_property("only_players_can_break", True)
+
     mesh = b.get_component_by_class(unreal.StaticMeshComponent)
     if mesh:
+        # The /Game copy, not the engine cube: the pieces have to wear the same mesh the whole
+        # thing was, and the fracture asset was built from this one.
+        sm = unreal.EditorAssetLibrary.load_asset(BANNER_MESH)
+        if sm:
+            mesh.set_static_mesh(sm)
         mesh.set_material(0, color_material(color_key))
+
+    gc = unreal.EditorAssetLibrary.load_asset(BANNER_GC)
+    if gc:
+        b.set_editor_property("banner_gc", gc)
+    vfx = unreal.EditorAssetLibrary.load_asset(BREAK_VFX)
+    if vfx:
+        b.set_editor_property("break_vfx", vfx)
+        b.set_editor_property("break_vfx_scale", 1.5)
+    snd = unreal.EditorAssetLibrary.load_asset(BREAK_SOUND)
+    if snd:
+        b.set_editor_property("break_sound", snd)
+
     return finish(b, "BANNER_{}".format(tag), "MapEvents/Banners")
 
 
@@ -426,17 +470,19 @@ def ground_and_lights(eas):
     nav.set_actor_scale3d(vec(GROUND["size"][0] / 200.0, GROUND["size"][1] / 200.0, 20.0))
     finish(nav, "BENCH_NavBounds", "Nav")
     recast = eas.spawn_actor_from_class(unreal.RecastNavMesh, vec(0, 0, 0))
-    # STATIC, and baked by bake_nav() below.
+    # DYNAMIC, and kicked once by the run director when it arms the run.
     #
-    # Dynamic was tried twice and lost twice. Sixty-five seconds into a run, on a 320 m floor that
-    # is only 256 tiles, every squad was still logging "MoveTo FAILED (no path?)": runtime
-    # generation trickles tiles out and the map is never finished when the first sortie leaves. The
-    # one time squads did march, it was after RebuildNavigation had been typed by hand - which is
-    # not a fix, it is a person standing next to the bench.
-    recast.set_editor_property("runtime_generation", unreal.RuntimeGenerationType.STATIC)
+    # The chase through this went: bigger tiles, then a plated floor, then a static bake. None of
+    # them was the disease. A run map comes up with a navmesh covering PART of itself while the
+    # navigation system reports it has finished, so it never repairs itself - three landmarks out of
+    # eleven, a minute in, every squad logging "MoveTo FAILED (no path?)". One Nav->Build() at the
+    # top of the run and it is eleven out of eleven within a dozen seconds. The editor here does not
+    # bake navigation at all, so a static mesh would arrive empty; dynamic plus that one kick is
+    # what was measured working.
+    recast.set_editor_property("runtime_generation", unreal.RuntimeGenerationType.DYNAMIC)
     recast.set_editor_property("tile_size_uu", NAV_TILE_UU)
     finish(recast, "BENCH_RecastNavMesh", "Nav")
-    log("Navmesh: STATIC, {:.0f} uu tiles, {:.0f}x{:.0f} grid - now run bake_nav()".format(
+    log("Navmesh: DYNAMIC, {:.0f} uu tiles, {:.0f}x{:.0f} grid; director builds it at run start".format(
         NAV_TILE_UU, GROUND["size"][0] / NAV_TILE_UU, GROUND["size"][1] / NAV_TILE_UU))
 
 
@@ -524,6 +570,7 @@ def main():
     clear_tagged(eas)
 
     world_settings(les)
+    make_banner_assets()
     ground_and_lights(eas)
     run_entry(eas)
 

@@ -18,6 +18,10 @@
 class APoiActor;
 class ABannerActor;
 class UStaticMeshComponent;
+class UGeometryCollection;
+class AGeometryCollectionActor;
+class UNiagaraSystem;
+class USoundBase;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBannerBroken, ABannerActor*, Banner);
 
@@ -64,6 +68,57 @@ public:
 	 *  file. */
 	void SetOwningPoi(APoiActor* Poi);
 
+	// ==================== Coming apart ====================
+	//
+	// The recipe is ARewardContainer's, which is the one in this project that has been watched
+	// working: hide the mesh, spawn a geometry collection in its place, shatter it with a strain
+	// field, and kick the pieces one tick LATER because the bodies do not exist yet in the frame
+	// the strain is applied.
+
+	/** Geometry collection matching the banner's mesh. Null means the banner simply disappears, and
+	 *  everything else about breaking it still happens. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Destruction")
+	TObjectPtr<UGeometryCollection> BannerGC;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Destruction")
+	FName GibCollisionProfile = FName("Ragdoll");
+
+	/** Radial impulse on the pieces (velocity change, cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Destruction", meta = (ClampMin = "0.0"))
+	float BreakImpulse = 700.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Destruction", meta = (ClampMin = "10.0"))
+	float BreakRadius = 300.0f;
+
+	/** Seconds the pieces lie around. Zero keeps them forever. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Destruction", meta = (ClampMin = "0.0"))
+	float GibLifetime = 30.0f;
+
+	/** Seconds before the pieces stop simulating. Zero leaves them live, which costs frames for the
+	 *  rest of the run on a map with several broken banners. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Destruction", meta = (ClampMin = "0.0"))
+	float GibFreezeTime = 4.0f;
+
+	// ==================== Noise ====================
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Effects")
+	TObjectPtr<UNiagaraSystem> BreakVFX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Effects", meta = (ClampMin = "0.1"))
+	float BreakVFXScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Effects")
+	TObjectPtr<USoundBase> BreakSound;
+
+	/** Where the loot comes out of, measured up the banner from its feet (cm). The pile is thrown
+	 *  from here rather than laid on the floor, so it reads as coming out of the thing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Effects", meta = (ClampMin = "0.0"))
+	float LootBurstHeight = 150.0f;
+
+	/** Where a pile thrown by this banner starts from. */
+	UFUNCTION(BlueprintPure, Category = "Banner")
+	FVector GetLootBurstOrigin() const;
+
 	UPROPERTY(BlueprintAssignable, Category = "Banner")
 	FOnBannerBroken OnBroken;
 
@@ -77,7 +132,20 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> Mesh;
 
+	/** Put the geometry collection where the mesh was and shatter it. */
+	void ShatterIntoGibs();
+
+	/** Kick the pieces apart. Deliberately a tick late: the strain field creates the bodies, and an
+	 *  impulse in the same frame lands on nothing. */
+	void ApplyScatterImpulse();
+
 	float MaxHealth = 400.0f;
 
 	TWeakObjectPtr<APoiActor> OwningPoi;
+
+	UPROPERTY(Transient)
+	TObjectPtr<AGeometryCollectionActor> SpawnedGibs;
+
+	FTimerHandle ScatterImpulseHandle;
+	FTimerHandle GibFreezeHandle;
 };
