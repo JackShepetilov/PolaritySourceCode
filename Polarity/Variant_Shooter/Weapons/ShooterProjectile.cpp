@@ -25,6 +25,48 @@
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 
+/** Runtime kill switch for pooling of live rounds. Console: polarity.projectile.pool 0
+ *
+ *  Exists so "is the pool the problem" can be answered in one console command instead of one build.
+ *  Zero makes every round a fresh spawn again, which is exactly how this behaved before pooling was
+ *  widened past the shooter's stand-in. If the bug goes away at 0, it is a reuse bug; if it stays,
+ *  the pool is innocent and the search moves on. */
+static TAutoConsoleVariable<int32> CVarProjectilePool(
+	TEXT("polarity.projectile.pool"),
+	1,
+	TEXT("1 - live rounds come from the projectile pool. 0 - spawn each one fresh (pre-pooling behaviour)."),
+	ECVF_Cheat);
+
+/** Per-round lifecycle trace. Console: polarity.projectile.debug 1, then filter on [PROJ_DEBUG].
+ *
+ *  One line per ENDING, which is the thing worth counting: fire a magazine and every round should
+ *  produce exactly one. Rounds that vanish leave a gap, and the reason they left is in the line. */
+static TAutoConsoleVariable<int32> CVarProjectileDebug(
+	TEXT("polarity.projectile.debug"),
+	0,
+	TEXT("1 - log how every round begins and ends. Filter the Output Log on [PROJ_DEBUG]."),
+	ECVF_Cheat);
+
+bool AShooterProjectile::IsPoolingEnabled()
+{
+	return CVarProjectilePool.GetValueOnGameThread() != 0;
+}
+
+void AShooterProjectile::TraceLifecycle(const TCHAR* Event, const AActor* Other) const
+{
+	if (CVarProjectileDebug.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[PROJ_DEBUG] %s %s | other=%s cosmetic=%d hit=%d inPool=%d collision=%d speed=%.0f weapon=%s"),
+		*GetName(), Event, *GetNameSafe(Other), bIsCosmeticOnly ? 1 : 0, bHit ? 1 : 0, bIsInPool ? 1 : 0,
+		CollisionComponent ? (int32)CollisionComponent->GetCollisionEnabled() : -1,
+		ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.0f,
+		*GetNameSafe(SourceWeapon));
+}
+
 AShooterProjectile::AShooterProjectile()
 {
 	// The ACTOR does not tick, and never did anything when it was ticking: this class has no Tick
@@ -76,7 +118,17 @@ AShooterProjectile::AShooterProjectile()
 
 	ProjectileMovement->InitialSpeed = 3000.0f;
 	ProjectileMovement->MaxSpeed = 3000.0f;
-	ProjectileMovement->bShouldBounce = true;
+	// No bounce, and this is a correctness fix rather than a taste one.
+	//
+	// A round can never legitimately reach the bounce code: NotifyHit disables its collision on the
+	// first real hit. So the only thing bouncing was ever able to do here was turn a MISSED hit into
+	// a runaway -- a round that for any reason fails to consume its hit gets deflected instead,
+	// keeps its collision and its trail, and sails off into the sky still looking for something to
+	// land on. That converts a quiet one-bullet bug into a visible stream of lost bullets.
+	//
+	// A payload that genuinely wants to bounce (a grenade) turns it on for itself, the way
+	// AHealthBlastProjectile and ANitroGate already do.
+	ProjectileMovement->bShouldBounce = false;
 
 	// THE line that decides whether the hitbox is trustworthy, so it is set here rather than left to
 	// a default a blueprint could quietly clear. A swept move tests the whole segment between last
@@ -257,6 +309,7 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	// ignore if we've already hit something else
 	if (bHit)
 	{
+		TraceLifecycle(TEXT("HIT-IGNORED-ALREADY-HIT"), Other);
 		return;
 	}
 
@@ -272,11 +325,13 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	// and WITHOUT consuming bHit: this round has not hit anything yet and must carry on flying.
 	if (Cast<AShooterProjectile>(Other))
 	{
+		TraceLifecycle(TEXT("HIT-OTHER-ROUND"), Other);
 		CollisionComponent->IgnoreActorWhenMoving(Other, true);
 		return;
 	}
 
 	bHit = true;
+	TraceLifecycle(TEXT("HIT-WORLD"), Other);
 
 	// disable collision on the projectile
 	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -864,6 +919,10 @@ float AShooterProjectile::GetTagDamageMultiplier(AActor* Target) const
 
 void AShooterProjectile::OnDeferredDestruction()
 {
+	// A round that reaches this WITHOUT bHit never landed anywhere: it ran out its flight timeout.
+	// In a magazine emptied into a wall that count should be zero.
+	TraceLifecycle(bHit ? TEXT("END-AFTER-HIT") : TEXT("END-FLIGHT-TIMEOUT"), nullptr);
+
 	// Return to pool or destroy
 	ReturnToPoolOrDestroy();
 }
@@ -892,10 +951,35 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 	// Setup instigator ignore (same as BeginPlay)
 	SetShooterMoveIgnore(true);
 
-	// Reset and activate projectile movement
-	ProjectileMovement->SetVelocityInLocalSpace(FVector(ProjectileMovement->InitialSpeed, 0.0f, 0.0f));
+	// ORDER IS THE WHOLE BUG. SetUpdatedComponent FIRST, then the velocity.
+	//
+	// A round that lands makes the engine call UProjectileMovementComponent::StopSimulating, and that
+	// function ends with SetUpdatedComponent(NULL) (ProjectileMovementComponent.cpp:546). So a used
+	// round comes back to the pool with no updated component at all.
+	//
+	// SetVelocityInLocalSpace is `if (UpdatedComponent) { Velocity = ... }` and nothing else
+	// (ProjectileMovementComponent.cpp:450). With the null still in place it does NOTHING, silently,
+	// and the round is activated with zero velocity: it drops out of the muzzle and lands at the
+	// shooter's feet. Every recycled round, so the gun works until the prewarmed pool runs out and
+	// then stops firing anything at all.
+	//
+	// Restoring the component first makes the velocity land where it was meant to. Do not swap these
+	// back: nothing warns, nothing errors, the bullets just stop.
 	ProjectileMovement->SetUpdatedComponent(CollisionComponent);
+	ProjectileMovement->SetVelocityInLocalSpace(FVector(ProjectileMovement->InitialSpeed, 0.0f, 0.0f));
 	ProjectileMovement->Activate(true);
+
+	// And a net under it, because the failure above is completely silent and looks like a content
+	// problem rather than a code one. A round that was configured with a speed and is leaving the
+	// muzzle without one is always a bug in this function.
+	if (ProjectileMovement->InitialSpeed > 0.0f && ProjectileMovement->Velocity.IsNearlyZero())
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[PROJECTILE] %s came out of the pool with no velocity despite InitialSpeed %.0f. ")
+			TEXT("Its movement component has no UpdatedComponent, so SetVelocityInLocalSpace did nothing. ")
+			TEXT("@see AShooterProjectile::ActivateFromPool"),
+			*GetName(), ProjectileMovement->InitialSpeed);
+	}
 
 	// Show actor
 	SetActorHiddenInGame(false);

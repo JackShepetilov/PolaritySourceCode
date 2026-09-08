@@ -379,6 +379,14 @@ public:
 	/** Called by pool to deactivate projectile for reuse */
 	void DeactivateToPool();
 
+	/** Whether live rounds may come from the pool. Console: polarity.projectile.pool 0 turns it off
+	 *  and every round becomes a fresh spawn again, which is how to tell a pool-reuse bug from a
+	 *  bug that would have happened anyway, without a rebuild. */
+	static bool IsPoolingEnabled();
+
+	/** One line per round, when polarity.projectile.debug is on. Filter on [PROJ_DEBUG]. */
+	void TraceLifecycle(const TCHAR* Event, const AActor* Other = nullptr) const;
+
 	/**
 	 * Start the clock that takes this round out of the world if it never hits anything.
 	 *

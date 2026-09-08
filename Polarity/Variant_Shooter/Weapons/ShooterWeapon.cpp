@@ -2486,7 +2486,7 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 		? ProjectileClass->GetDefaultObject<AShooterProjectile>() : nullptr;
 	const bool bClassReplicates = ClassCDO && ClassCDO->GetIsReplicated();
 
-	UProjectilePoolSubsystem* Pool = bClassReplicates
+	UProjectilePoolSubsystem* Pool = (bClassReplicates || !AShooterProjectile::IsPoolingEnabled())
 		? nullptr : GetWorld()->GetSubsystem<UProjectilePoolSubsystem>();
 	if (Pool)
 	{
