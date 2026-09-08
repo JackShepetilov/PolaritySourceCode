@@ -2,6 +2,23 @@
 
 #include "ShooterWeapon.h"
 #include "Coop/CoopPlayers.h"
+#include "PolarityPalette.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
+#if WITH_EDITOR
+// Icon capture only. See GenerateIconFromMesh at the bottom of this file.
+#include "Editor.h"
+#include "Animation/SkeletalMeshActor.h"
+#include "Engine/SceneCapture2D.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Engine/Texture2D.h"
+#include "Kismet/KismetRenderingLibrary.h"
+#include "Materials/MaterialInterface.h"
+#include "TextureResource.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
+#include "UObject/Package.h"
+#endif
 #include "PolarityCharacter.h"
 #include "ApexMovementComponent.h"
 #include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
@@ -17,10 +34,30 @@
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
 #include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Net/UnrealNetwork.h"
 #include "Camera/CameraComponent.h"
+#include "HAL/IConsoleManager.h"
 #include "TimerManager.h"
+
+// polarity.debug.novfx - глушилка боевых эффектов для отладки. Объявлена здесь, а не в отдельном
+// заголовке, потому что новый файл потребовал бы полной пересборки; остальные места читают её через
+// IConsoleManager::FindConsoleVariable по имени.
+static TAutoConsoleVariable<int32> CVarNoVFX(
+	TEXT("polarity.debug.novfx"),
+	0,
+	TEXT("1 - не спавнить боевые эффекты (попадания, вспышки). Для наблюдения за ИИ."),
+	ECVF_Cheat);
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
+#include "Animation/AnimationAsset.h"
+#include "Engine/DataAsset.h"
+#include "Curves/CurveVector.h"
+#include "Sound/SoundBase.h"
+#include "UObject/UnrealType.h"
+// PRAS, the recoil half of the FPS Animation Pack. Only the data asset is needed here; the
+// component that plays it lives on the character.
+#include "RecoilData.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Character.h"
@@ -47,7 +84,7 @@
 #include "EnemyBeamBoltSubsystem.h"
 #include "VFX/VFXVariantSequenceSubsystem.h"
 
-void AShooterWeapon::PlayFireEffectsLocally()
+void AShooterWeapon::PlayFireEffectsLocally(bool bLastRound)
 {
 	SpawnMuzzleFlashEffect();
 	PlayFireSound();
@@ -55,7 +92,16 @@ void AShooterWeapon::PlayFireEffectsLocally()
 	// The gun's own moving parts. Here rather than in Fire() because this function is what every
 	// machine runs -- the shooter directly and everybody else through Multicast_PlayFireEffects --
 	// so the action of the weapon is seen by the people watching it too, not only by its owner.
-	PlayWeaponMeshAnimation(WeaponMeshFireAnimation);
+	//
+	// The shot that empties the magazine gets its own animation on a weapon that has one, because
+	// the ordinary one closes the action again and the gun would then stand there looking loaded
+	// with nothing in it. Missing asset falls back to the ordinary one, so this changes nothing for
+	// a weapon whose slide does not lock back.
+	UAnimationAsset* const FireAnimation = (bLastRound && WeaponMeshLastShotAnimation)
+		? WeaponMeshLastShotAnimation
+		: WeaponMeshFireAnimation;
+
+	PlayWeaponMeshAnimation(FireAnimation);
 }
 
 void AShooterWeapon::PlayWeaponMeshAnimation(UAnimationAsset* Animation)
@@ -100,6 +146,34 @@ void AShooterWeapon::ResolveADSAnchorAttachment()
 
 	const FAttachmentTransformRules Rules = FAttachmentTransformRules::SnapToTargetNotIncludingScale;
 
+	// --- 0. The optic this weapon has actually been given ---
+	// Checked before the generic search, and that order is the whole point. A weapon whose default
+	// sight is its own Blueprint component ALSO answers to SOCKET_Aim, so once a real optic is
+	// mounted the subtree holds two candidates and only child order separates them -- an order
+	// nobody chose and which changes with how the components were made. Naming the mounted one here
+	// makes the answer deterministic.
+	if (MountedOpticMesh && MountedOpticMesh->DoesSocketExist(SightAimSocketName))
+	{
+		ADSCameraComponent->AttachToComponent(MountedOpticMesh, Rules, SightAimSocketName);
+		UE_LOG(LogTemp, Log, TEXT("[ADS] %s: anchor on the mounted optic '%s', socket '%s'."),
+			*GetName(), *MountedOpticMesh->GetName(), *SightAimSocketName.ToString());
+		return;
+	}
+
+	// A real optic is fitted but its mesh has no eye point. Worth saying out loud: the scope will be
+	// drawn and the player will aim down the weapon's own iron sights through it.
+	if (GetAttachmentOfType(EWeaponAttachmentType::Optic) && !MountedOpticMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ADS] %s: an optic is mounted but has no mesh on the first "
+			"person weapon, so the aim falls back to the weapon's own sights."), *GetName());
+	}
+
+	// While a real optic is on, the built-in sight is hidden and must not answer the search below
+	// either, or the anchor would land on a scope the player cannot see.
+	const USceneComponent* SkipComponent = (GetAttachmentOfType(EWeaponAttachmentType::Optic) != nullptr)
+		? DefaultOpticComponent.Get()
+		: nullptr;
+
 	// --- 1. A sight attachment that carries its own eye point ---
 	// The best of the three by a distance, and the only one authored FOR aiming: the socket sits
 	// behind the glass, oriented down the sight line, and it travels with the scope when the scope
@@ -116,7 +190,7 @@ void AShooterWeapon::ResolveADSAnchorAttachment()
 		FirstPersonMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AttachedChildren);
 		for (USceneComponent* Child : AttachedChildren)
 		{
-			if (!Child || Child == ADSCameraComponent)
+			if (!Child || Child == ADSCameraComponent || (SkipComponent && Child == SkipComponent))
 			{
 				continue;
 			}
@@ -138,7 +212,10 @@ void AShooterWeapon::ResolveADSAnchorAttachment()
 	// down the barrel. It puts the anchor in roughly the right place and almost certainly the wrong
 	// rotation, so expect to need SightRotationOffset, or to turn bAlignSightRotation off, on any
 	// weapon that lands here.
-	const FName Candidates[] = { ADSSocketName, ScopeMountSocketName };
+	// PackAimSocketName sits between the two on purpose. It is an eye point exactly like
+	// ADSSocketName, so it belongs above the mount; and it is second rather than first so that a
+	// weapon carrying BOTH names still answers to the one our own artists placed.
+	const FName Candidates[] = { ADSSocketName, PackAimSocketName, ScopeMountSocketName };
 	for (const FName& SocketName : Candidates)
 	{
 		if (SocketName.IsNone() || !FirstPersonMesh->DoesSocketExist(SocketName))
@@ -208,68 +285,510 @@ void AShooterWeapon::PropagateRenderVisibilityToChildren()
 	Inherit(ThirdPersonMesh);
 }
 
-void AShooterWeapon::PlayReloadEffectsLocally()
+void AShooterWeapon::ApplyChildComponentSetup()
+{
+	PropagateRenderVisibilityToChildren();
+
+	// Force every component attached to the weapon's meshes (sights, suppressors, lasers,
+	// rails, etc.) to tick AFTER the mesh's animation has been evaluated AND in a later tick
+	// group, so they cannot read stale bone/socket transforms and lag a frame behind the weapon.
+	auto ForceLateTickOnChildren = [](USkeletalMeshComponent* Parent)
+	{
+		if (!Parent) return;
+
+		TArray<USceneComponent*> AttachedChildren;
+		Parent->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AttachedChildren);
+		for (USceneComponent* Child : AttachedChildren)
+		{
+			if (!Child || Child == Parent) continue;
+
+			// 1. Hard prerequisite — child can never tick before the parent.
+			Child->AddTickPrerequisiteComponent(Parent);
+
+			// 2. Push tick into TG_PostPhysics so it runs after PrePhysics anim work AND
+			//    any DuringPhysics simulation. If the component doesn't tick at all this is
+			//    harmless; if it does (animated, particle, dynamic), it picks up the latest pose.
+			if (Child->PrimaryComponentTick.bCanEverTick)
+			{
+				Child->PrimaryComponentTick.TickGroup = TG_PostPhysics;
+			}
+		}
+	};
+	ForceLateTickOnChildren(FirstPersonMesh);
+	ForceLateTickOnChildren(ThirdPersonMesh);
+}
+
+// ==================== Attachments ====================
+//
+// The weapon is the record of what is fitted. The inventory only knows about the CELL an
+// attachment costs once the free slots are spent, and that cell points at this weapon rather than
+// holding a second copy of the attachment, so the two cannot drift apart.
+//
+// Every machine builds its own meshes from the replicated array. Nothing about a mounted part
+// travels as an RPC: the array is the message.
+
+void AShooterWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// To everybody, not owner-only: what is bolted to this gun is precisely what the other three
+	// players see on it in third person.
+	DOREPLIFETIME(AShooterWeapon, InstalledAttachments);
+
+	// The owning client presses the key and resolves it against its replicated copy of OwnedWeapons,
+	// so the slot has to travel with the weapon or number keys do nothing for a client.
+	DOREPLIFETIME(AShooterWeapon, HotkeySlot);
+}
+
+UWeaponAttachmentDefinition* AShooterWeapon::GetAttachmentOfType(EWeaponAttachmentType InType) const
+{
+	for (const TObjectPtr<UWeaponAttachmentDefinition>& Def : InstalledAttachments)
+	{
+		if (Def && Def->Type == InType)
+		{
+			return Def;
+		}
+	}
+	return nullptr;
+}
+
+bool AShooterWeapon::InstallAttachment(UWeaponAttachmentDefinition* Attachment)
+{
+	if (!HasAuthority() || !Attachment)
+	{
+		return false;
+	}
+
+	// One of each type. Replacing is done by taking the old one off first, on purpose: the cell the
+	// old attachment was paying for has to be settled before the new one can claim anything, and a
+	// silent swap here would leave the inventory holding a cell for a part that is no longer on the
+	// gun.
+	if (GetAttachmentOfType(Attachment->Type))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH] %s already carries a %s attachment. Take it off first."),
+			*GetName(), *UEnum::GetValueAsString(Attachment->Type));
+		return false;
+	}
+
+	InstalledAttachments.Add(Attachment);
+
+	// The server does not get OnRep, so it does its own rebuild. Both paths end in the same call,
+	// which is what keeps the host's gun and a client's copy of it identical.
+	RebuildAttachmentMeshes();
+
+	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: mounted %s (%s)."),
+		*GetName(), *GetNameSafe(Attachment), *UEnum::GetValueAsString(Attachment->Type));
+	return true;
+}
+
+UWeaponAttachmentDefinition* AShooterWeapon::UninstallAttachmentOfType(EWeaponAttachmentType InType)
+{
+	if (!HasAuthority())
+	{
+		return nullptr;
+	}
+
+	UWeaponAttachmentDefinition* Removed = GetAttachmentOfType(InType);
+	if (!Removed)
+	{
+		return nullptr;
+	}
+
+	InstalledAttachments.Remove(Removed);
+	RebuildAttachmentMeshes();
+
+	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: removed %s."), *GetName(), *GetNameSafe(Removed));
+	return Removed;
+}
+
+void AShooterWeapon::OnRep_InstalledAttachments()
+{
+	RebuildAttachmentMeshes();
+
+	// The HUD redraws from the inventory's delegate, and the two halves of a mount arrive as two
+	// separate replicated properties -- this array, and the cell that is or is not paying for it.
+	// Their order is not guaranteed, so whichever lands second has to ask for the redraw or the
+	// screen keeps whatever the first one left behind. @see Source/CLAUDE.md, phase 1 rule.
+	if (const AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (UInventoryComponent* Inventory = Character->GetInventoryComponent())
+		{
+			Inventory->OnInventoryChanged.Broadcast();
+		}
+	}
+}
+
+FName AShooterWeapon::ResolveAttachmentSocket(EWeaponAttachmentType InType, const USkeletalMeshComponent* Mesh) const
+{
+	if (!Mesh)
+	{
+		return NAME_None;
+	}
+
+	FName Base = AttachmentSockets.FindRef(InType);
+
+	// The optic rail already had a name before attachments existed: ADS falls back to it as an aim
+	// anchor. Reusing it here rather than requiring a duplicate entry keeps one name for one rail.
+	if (Base.IsNone() && InType == EWeaponAttachmentType::Optic)
+	{
+		Base = ScopeMountSocketName;
+	}
+
+	if (Base.IsNone())
+	{
+		return NAME_None;
+	}
+
+	// Third person takes the _TP variant when the artist authored one, exactly as the grip does
+	// (see PickThirdPersonSocket). Without a _TP socket both meshes use the same name, which is the
+	// common case and needs no extra work from anybody.
+	if (Mesh == ThirdPersonMesh)
+	{
+		const FName ThirdPersonVariant(*(Base.ToString() + TEXT("_TP")));
+		if (Mesh->DoesSocketExist(ThirdPersonVariant))
+		{
+			return ThirdPersonVariant;
+		}
+	}
+
+	// A missing socket is NOT a reason to fall back to the component origin: that mounts the part
+	// inside the receiver, which reads as a broken mesh rather than as a missing socket.
+	return Mesh->DoesSocketExist(Base) ? Base : NAME_None;
+}
+
+void AShooterWeapon::RebuildAttachmentMeshes()
+{
+	// Destroy exactly what a previous rebuild made. A sight or laser a Blueprint attached by hand
+	// is not in this array and is deliberately left where it is.
+	for (UStaticMeshComponent* Old : AttachmentMeshComponents)
+	{
+		if (Old)
+		{
+			Old->DestroyComponent();
+		}
+	}
+	AttachmentMeshComponents.Reset();
+	MountedOpticMesh = nullptr;
+
+	auto MountOn = [this](UWeaponAttachmentDefinition* Def, USkeletalMeshComponent* Parent) -> UStaticMeshComponent*
+	{
+		if (!Def || !Def->Mesh || !Parent || !Parent->GetSkeletalMeshAsset())
+		{
+			return nullptr;
+		}
+
+		const FName Socket = ResolveAttachmentSocket(Def->Type, Parent);
+		if (Socket.IsNone())
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ATTACH] %s: no mount socket for %s on mesh '%s'. The part "
+				"is NOT mounted. Author the socket, or clear that type from AttachmentSockets so "
+				"this weapon refuses it up front."),
+				*GetName(), *UEnum::GetValueAsString(Def->Type), *Parent->GetName());
+			return nullptr;
+		}
+
+		UStaticMeshComponent* Comp = NewObject<UStaticMeshComponent>(this);
+		if (!Comp)
+		{
+			return nullptr;
+		}
+
+		Comp->SetStaticMesh(Def->Mesh);
+		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Comp->SetupAttachment(Parent, Socket);
+		Comp->RegisterComponent();
+
+		// Rotation and offset from the asset, scale from the asset's own field: MountOffset is a
+		// nudge along the rail, and letting it carry a scale as well would give two places to set
+		// the same thing.
+		Comp->SetRelativeTransform(FTransform(Def->MountOffset.GetRotation(),
+			Def->MountOffset.GetLocation(), Def->MeshScale));
+
+		AttachmentMeshComponents.Add(Comp);
+		return Comp;
+	};
+
+	for (const TObjectPtr<UWeaponAttachmentDefinition>& Def : InstalledAttachments)
+	{
+		UStaticMeshComponent* FirstPersonPart = MountOn(Def, FirstPersonMesh);
+		MountOn(Def, ThirdPersonMesh);
+
+		// Remembered rather than searched for later. The eye point is found by walking the subtree
+		// for SOCKET_Aim, and on a weapon that carries a built-in scope component there would be
+		// two matches with nothing but child order between them.
+		if (Def && Def->Type == EWeaponAttachmentType::Optic && FirstPersonPart)
+		{
+			MountedOpticMesh = FirstPersonPart;
+		}
+	}
+
+	// A real optic replaces the built-in one rather than sitting next to it.
+	if (DefaultOpticComponent)
+	{
+		const bool bHasRealOptic = GetAttachmentOfType(EWeaponAttachmentType::Optic) != nullptr;
+		DefaultOpticComponent->SetVisibility(!bHasRealOptic, /*bPropagateToChildren*/ true);
+	}
+
+	// The eye point may have just moved, and the new components start with default render
+	// visibility and tick order, which would draw a first person scope in the world pass.
+	ResolveADSAnchorAttachment();
+	ApplyChildComponentSetup();
+}
+
+void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 {
 	// Both meshes: PlayWeaponMeshAnimation already covers first and third person, so the machine
 	// that runs this shows the reload on whichever copy of the weapon it can see.
-	PlayWeaponMeshAnimation(WeaponMeshReloadAnimation);
+	//
+	// Fallbacks rather than a table, because an unfilled slot has to mean "use the one this weapon
+	// always used" and not "play nothing": that is what keeps every weapon written before the pack
+	// reloading exactly as it did.
+	UAnimationAsset* WeaponAnimation = WeaponMeshReloadAnimation;
 
-	if (ReloadSound)
+	switch (Stage)
+	{
+	case EWeaponReloadStage::Secondary:
+	case EWeaponReloadStage::ShellLoop:
+		if (WeaponMeshSecondaryReloadAnimation)
+		{
+			WeaponAnimation = WeaponMeshSecondaryReloadAnimation;
+		}
+		break;
+
+	case EWeaponReloadStage::ShellEnd:
+		if (WeaponMeshReloadEndAnimation)
+		{
+			WeaponAnimation = WeaponMeshReloadEndAnimation;
+		}
+		break;
+
+	default:
+		break;
+	}
+
+	PlayWeaponMeshAnimation(WeaponAnimation);
+
+	// One sound per reload, not one per shell: the loop stage runs once for every round going in,
+	// and firing the magazine cue eight times over is a rattle rather than a reload. The shells
+	// themselves are in the animation.
+	if (ReloadSound && Stage != EWeaponReloadStage::ShellLoop && Stage != EWeaponReloadStage::ShellEnd)
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, ReloadSound, GetActorLocation());
 	}
 }
 
-void AShooterWeapon::Multicast_PlayReloadEffects_Implementation()
+void AShooterWeapon::Multicast_PlayReloadEffects_Implementation(EWeaponReloadStage Stage)
 {
 	// Whoever started the reload already played these the moment they started it. For an NPC that
 	// is the server, which is where its AI lives.
 	const bool bIsReloader = PawnOwner && PawnOwner->IsLocallyControlled();
 	if (!bIsReloader)
 	{
-		PlayReloadEffectsLocally();
+		PlayReloadEffectsLocally(Stage);
 	}
 }
 
-void AShooterWeapon::Multicast_PlayFireEffects_Implementation()
+void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
+{
+	// The arms. Which montage a stage means is decided here and nowhere else, so the two halves of
+	// a stage can never disagree about which stage they are in.
+	UAnimMontage* ArmsMontage = nullptr;
+
+	switch (Stage)
+	{
+	case EWeaponReloadStage::Primary:
+	case EWeaponReloadStage::ShellStart:
+		ArmsMontage = ReloadMontage;
+		break;
+
+	case EWeaponReloadStage::Secondary:
+	case EWeaponReloadStage::ShellLoop:
+		ArmsMontage = SecondaryReloadMontage ? SecondaryReloadMontage : ReloadMontage;
+		break;
+
+	case EWeaponReloadStage::ShellEnd:
+		ArmsMontage = ReloadEndMontage;
+		break;
+	}
+
+	if (ArmsMontage && WeaponOwner)
+	{
+		WeaponOwner->PlayReloadMontage(ArmsMontage);
+	}
+
+	// The gun's own moving parts, locally first so the reloading player waits for nothing, then to
+	// everyone else, whose only copy of this weapon is the third person mesh.
+	PlayReloadEffectsLocally(Stage);
+
+	if (HasAuthority())
+	{
+		Multicast_PlayReloadEffects(Stage);
+	}
+	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
+	{
+		// A client reloads on its own copy of the weapon (ammo is counted by whoever pulls the
+		// trigger), so the server has to be told before it can show anyone else. The stage travels
+		// with it rather than being recomputed there: the server's copy of the ammo count is not
+		// necessarily the one this decision was made from.
+		OwnerCharacter->Server_ReportWeaponReloaded(this, Stage);
+	}
+}
+
+float AShooterWeapon::GetActiveReloadTime() const
+{
+	// UsesSecondaryReload asks "is there a round in the chamber", and on a per round weapon the
+	// secondary slot holds the LOOP instead, so that question does not apply and its override must
+	// not be consulted either. What this function answers for such a weapon is the length of the
+	// opening stage, which is all that is scheduled when the reload starts.
+	const bool bSecondary = !bPerRoundReload && UsesSecondaryReload() && SecondaryReloadMontage != nullptr;
+
+	// An explicit number wins: some weapons want the magazine to land earlier than the animation
+	// ends, and that is a deliberate feel decision rather than a mistake.
+	const float Override = bSecondary ? SecondaryReloadTime : 0.0f;
+	if (Override > 0.0f)
+	{
+		return Override;
+	}
+
+	// Otherwise measure the montage that will actually play. This is the point of the whole field:
+	// a duration typed by hand drifts away from the animation the first time an animator retimes it,
+	// and the weapon then fires out of a reload that is still running.
+	if (const UAnimMontage* Montage = GetActiveReloadMontage())
+	{
+		const float Length = Montage->GetPlayLength();
+		if (Length > 0.0f)
+		{
+			return Length;
+		}
+	}
+
+	return ReloadTime;
+}
+
+void AShooterWeapon::Multicast_PlayFireEffects_Implementation(bool bLastRound)
 {
 	// The shooter already played these locally the moment they pulled the trigger.
 	const bool bIsShooter = PawnOwner && PawnOwner->IsLocallyControlled();
 	if (!bIsShooter)
 	{
-		PlayFireEffectsLocally();
+		PlayFireEffectsLocally(bLastRound);
 	}
 }
 
-float AShooterWeapon::GetMaxReportedSingleHitDamage() const
+const AShooterProjectile* AShooterWeapon::GetShotPayload() const
 {
-	// Projectile weapons report through the projectile, which the server owns, so the hitscan number
-	// is the only one a client ever hands over. A weapon with no hitscan damage configured still
-	// needs a non-zero ceiling or every reported hit would clamp to nothing.
-	// No class-passive term here on purpose. The Sniper's passive does not scale this number at all:
-	// it deals its OWN damage, decided and applied on the server, and never travels in a client's
-	// report. @see AShooterWeapon::ApplyPassivePierceDamage.
-	const float BaseDamage = HitscanDamage > 0.0f ? HitscanDamage : 1.0f;
-	return BaseDamage * FMath::Max(HeadshotMultiplier, 1.0f) * FMath::Max(MaxReportedDamageMultiplier, 1.0f);
-}
-
-float AShooterWeapon::PredictDamageAgainst(AActor* Target) const
-{
-	if (!IsValid(Target) || HitscanDamage <= 0.0f)
+	// A weapon set to hitscan puts no round in the air, and its ProjectileClass may still be filled
+	// in from the other half of its configuration -- the shotgun fires either way and its blueprint
+	// keeps both. Reading a rocket's overrides onto a trace is exactly the drift this gate exists to
+	// stop, and it is the only place the question is asked.
+	if (bUseHitscan || !ProjectileClass)
 	{
-		return 0.0f;
+		return nullptr;
 	}
 
-	// The same product the bolt path assembles, minus the two factors that only a real shot can
-	// know: whether it lands on a head, and how much energy it has left after passing through
-	// anything. So this is a body shot at full energy -- the honest baseline, and the one the player
-	// can compare two of against each other, which is the whole point of showing it.
+	return ProjectileClass->GetDefaultObject<AShooterProjectile>();
+}
+
+float AShooterWeapon::GetShotDamage() const
+{
+	// The projectile class gets the last word, and only if it asked for one. A negative override is
+	// the ordinary case and means "the gun decides", so balance stays in one field per weapon.
+	if (const AShooterProjectile* const Payload = GetShotPayload())
+	{
+		const float Override = Payload->GetDirectHitDamageOverride();
+		if (Override >= 0.0f)
+		{
+			return Override;
+		}
+	}
+
+	return HitscanDamage;
+}
+
+float AShooterWeapon::GetShotHeadshotMultiplier() const
+{
+	if (const AShooterProjectile* const Payload = GetShotPayload())
+	{
+		const float Override = Payload->GetHeadshotMultiplierOverride();
+		if (Override >= 0.0f)
+		{
+			return Override;
+		}
+	}
+
+	return HeadshotMultiplier;
+}
+
+bool AShooterWeapon::GetShotIonization(float& OutChargePerHit) const
+{
+	OutChargePerHit = IonizationChargePerHit;
+
+	if (const AShooterProjectile* const Payload = GetShotPayload())
+	{
+		switch (Payload->GetIonizationOverride())
+		{
+		case EProjectileIonization::Never:
+			OutChargePerHit = 0.0f;
+			return false;
+
+		case EProjectileIonization::Override:
+			OutChargePerHit = Payload->GetIonizationChargeOverride();
+			// The round carries the charge, so the gun's own checkbox is not consulted: that is the
+			// whole point of an ionizing payload in a launcher whose other rounds are inert.
+			return true;
+
+		case EProjectileIonization::FromWeapon:
+		default:
+			break;
+		}
+	}
+
+	if (!bUseHitscanIonization)
+	{
+		OutChargePerHit = 0.0f;
+		return false;
+	}
+
+	return true;
+}
+
+bool AShooterWeapon::DoesShotIonize() const
+{
+	float Unused = 0.0f;
+	return GetShotIonization(Unused);
+}
+
+FName AShooterWeapon::ResolveHitBone(const AActor* Target, const FVector& Start, const FVector& End) const
+{
+	const ACharacter* const AsCharacter = Cast<ACharacter>(Target);
+	USkeletalMeshComponent* const Mesh = AsCharacter ? AsCharacter->GetMesh() : nullptr;
+	if (!Mesh)
+	{
+		return NAME_None;
+	}
+
+	// The component directly, not a channel trace. CharacterMesh ignores ECC_Visibility, so a normal
+	// trace looks straight through the body; and going by object type just finds the capsule again,
+	// which is the shape that started this.
+	FHitResult MeshHit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ResolveHitBone), /*bTraceComplex*/ false);
+	if (Mesh->LineTraceComponent(MeshHit, Start, End, Params))
+	{
+		return MeshHit.BoneName;
+	}
+
+	return NAME_None;
+}
+
+float AShooterWeapon::GetShotDamageMultiplierAgainst(AActor* Target) const
+{
 	const float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
 
 	float ZFactorMult = 1.0f;
 	if (bUseZFactor && PawnOwner)
 	{
-		ZFactorMult = CalculateZFactorMultiplier(PawnOwner->GetActorLocation().Z, Target->GetActorLocation().Z);
+		ZFactorMult = CalculateZFactorMultiplier(PawnOwner->GetActorLocation().Z,
+			IsValid(Target) ? Target->GetActorLocation().Z : PawnOwner->GetActorLocation().Z);
 	}
 
 	const float TagMult = GetTagDamageMultiplier(Target);
@@ -283,7 +802,38 @@ float AShooterWeapon::PredictDamageAgainst(AActor* Target) const
 		}
 	}
 
-	float Total = HitscanDamage * HeatMult * ZFactorMult * TagMult * UpgradeMult;
+	return HeatMult * ZFactorMult * TagMult * UpgradeMult;
+}
+
+float AShooterWeapon::GetMaxReportedSingleHitDamage() const
+{
+	// Projectile weapons report through the projectile, which the server owns, so the hitscan number
+	// is the only one a client ever hands over. A weapon with no hitscan damage configured still
+	// needs a non-zero ceiling or every reported hit would clamp to nothing.
+	// No class-passive term here on purpose. The Sniper's passive does not scale this number at all:
+	// it deals its OWN damage, decided and applied on the server, and never travels in a client's
+	// report. @see AShooterWeapon::ApplyPassivePierceDamage.
+	const float ShotDamage = GetShotDamage();
+	const float BaseDamage = ShotDamage > 0.0f ? ShotDamage : 1.0f;
+	return BaseDamage * FMath::Max(GetShotHeadshotMultiplier(), 1.0f) * FMath::Max(MaxReportedDamageMultiplier, 1.0f);
+}
+
+float AShooterWeapon::PredictDamageAgainst(AActor* Target) const
+{
+	// GetShotDamage, not HitscanDamage. A projectile weapon leaves the hitscan field at zero, and
+	// this used to answer a flat zero for every one of them: the readout said the gun did nothing.
+	const float ShotDamage = GetShotDamage();
+	if (!IsValid(Target) || ShotDamage <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// The same product every real shot assembles, out of the same function, so the readout cannot
+	// drift away from what the gun does. Missing from it are the two factors only a real shot can
+	// know: whether it lands on a head, and how much energy is left after passing through anything.
+	// So this is a body shot at full energy -- the honest baseline, and the one the player can
+	// compare two of against each other, which is the whole point of showing it.
+	float Total = ShotDamage * GetShotDamageMultiplierAgainst(Target);
 
 	// The shield gate IS applied, unlike an earlier version of this: the readout answers "what will
 	// this shot do to that enemy", and a finisher weapon against an intact shield does nothing at
@@ -514,6 +1064,15 @@ AShooterWeapon::AShooterWeapon()
 	bReplicates = true;
 	SetReplicatingMovement(false);
 
+	// Mount points, seeded with the Low Poly Shooter Pack names so a weapon built on that art works
+	// with no setup at all. Per weapon, because the socket is authored on the weapon's mesh: the
+	// same scope fits two rifles whose rails are named differently. Clear an entry and that type
+	// simply cannot be mounted on this weapon, which is a legitimate answer for a gun with no rail.
+	AttachmentSockets.Add(EWeaponAttachmentType::Optic, FName("SOCKET_Scope"));
+	AttachmentSockets.Add(EWeaponAttachmentType::Magazine, FName("SOCKET_Magazine"));
+	AttachmentSockets.Add(EWeaponAttachmentType::Muzzle, FName("SOCKET_Muzzle"));
+	AttachmentSockets.Add(EWeaponAttachmentType::Stock, FName("SOCKET_Stock"));
+
 	// create the root
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 
@@ -546,9 +1105,497 @@ AShooterWeapon::AShooterWeapon()
 	ADSCameraComponent->SetupAttachment(FirstPersonMesh);
 }
 
+// ==================== FPS Animation Pack profile ====================
+//
+// Everything the pack ships as data lives in Blueprint-only classes: WeaponSettings_C,
+// ViewmodelSettings_C and the user struct F_ViewmodelAnimations. None of them has a native parent,
+// so there is nothing to cast to and reflection by property name is the only way in. Same channel
+// AShooterCharacter already uses to push Gait and ActiveAimPoint into their controller.
+//
+// The one trap worth naming: members of a user-defined STRUCT are not called what the editor shows.
+// "PrimaryReload" is stored as "PrimaryReload_9_A1B2...GUID", and the GUID differs per struct, so
+// members are matched on the prefix up to the first underscore-digit run. Object properties are
+// matched by prefix too; the top-level properties of a Blueprint CLASS keep their plain names.
+namespace PackProfile
+{
+	FProperty* FindByName(const UStruct* Owner, const TCHAR* Name)
+	{
+		return Owner ? Owner->FindPropertyByName(FName(Name)) : nullptr;
+	}
+
+	/** User struct member lookup: exact name first, then the "Name_<index>_<GUID>" form. */
+	FProperty* FindMember(const UStruct* Owner, const TCHAR* Name)
+	{
+		if (!Owner)
+		{
+			return nullptr;
+		}
+
+		if (FProperty* Exact = Owner->FindPropertyByName(FName(Name)))
+		{
+			return Exact;
+		}
+
+		const FString Prefix = FString(Name) + TEXT("_");
+		for (TFieldIterator<FProperty> It(Owner); It; ++It)
+		{
+			if (It->GetName().StartsWith(Prefix, ESearchCase::CaseSensitive))
+			{
+				return *It;
+			}
+		}
+
+		return nullptr;
+	}
+
+	/** Reads an object pointer, following a soft reference if that is how it was stored. */
+	UObject* ReadObject(const void* Container, const UStruct* Owner, const TCHAR* Name)
+	{
+		FProperty* Prop = FindMember(Owner, Name);
+		if (!Prop || !Container)
+		{
+			return nullptr;
+		}
+
+		// Soft first, and that order is not cosmetic: FSoftObjectProperty also derives from
+		// FObjectPropertyBase, so testing the base first would swallow soft references and hand
+		// back null for any asset that simply had not been loaded yet.
+		if (const FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Prop))
+		{
+			return SoftProp->GetPropertyValue_InContainer(Container).LoadSynchronous();
+		}
+
+		if (const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
+		{
+			return ObjProp->GetObjectPropertyValue_InContainer(Container);
+		}
+
+		return nullptr;
+	}
+
+	UClass* ReadClass(const void* Container, const UStruct* Owner, const TCHAR* Name)
+	{
+		FProperty* Prop = FindMember(Owner, Name);
+		if (!Prop || !Container)
+		{
+			return nullptr;
+		}
+
+		// Soft first here too, for the same reason.
+		if (const FSoftClassProperty* SoftClassProp = CastField<FSoftClassProperty>(Prop))
+		{
+			return Cast<UClass>(SoftClassProp->GetPropertyValue_InContainer(Container).LoadSynchronous());
+		}
+
+		if (const FClassProperty* ClassProp = CastField<FClassProperty>(Prop))
+		{
+			return Cast<UClass>(ClassProp->GetObjectPropertyValue_InContainer(Container));
+		}
+
+		return nullptr;
+	}
+
+	/** Blueprint numbers are doubles as often as floats, so both shapes are accepted. */
+	bool ReadNumber(const void* Container, const UStruct* Owner, const TCHAR* Name, double& Out)
+	{
+		FProperty* Prop = FindMember(Owner, Name);
+		if (!Prop || !Container)
+		{
+			return false;
+		}
+
+		if (const FDoubleProperty* D = CastField<FDoubleProperty>(Prop))
+		{
+			Out = D->GetPropertyValue_InContainer(Container);
+			return true;
+		}
+		if (const FFloatProperty* F = CastField<FFloatProperty>(Prop))
+		{
+			Out = F->GetPropertyValue_InContainer(Container);
+			return true;
+		}
+		if (const FIntProperty* I = CastField<FIntProperty>(Prop))
+		{
+			Out = I->GetPropertyValue_InContainer(Container);
+			return true;
+		}
+
+		return false;
+	}
+
+	bool ReadVector2D(const void* Container, const UStruct* Owner, const TCHAR* Name, FVector2D& Out)
+	{
+		FStructProperty* Prop = CastField<FStructProperty>(FindMember(Owner, Name));
+		if (!Prop || !Container || Prop->Struct != TBaseStructure<FVector2D>::Get())
+		{
+			return false;
+		}
+
+		if (const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container))
+		{
+			Out = *static_cast<const FVector2D*>(ValuePtr);
+			return true;
+		}
+
+		return false;
+	}
+
+	/** Address of a nested struct plus its layout, so its members can be read the same way. */
+	bool OpenStruct(const void* Container, const UStruct* Owner, const TCHAR* Name,
+		const void*& OutAddr, const UStruct*& OutStruct)
+	{
+		FStructProperty* Prop = CastField<FStructProperty>(FindByName(Owner, Name));
+		if (!Prop || !Container)
+		{
+			return false;
+		}
+
+		OutAddr = Prop->ContainerPtrToValuePtr<void>(Container);
+		OutStruct = Prop->Struct;
+		return OutAddr != nullptr && OutStruct != nullptr;
+	}
+
+	/** Writes an object pointer by name, refusing a value the property cannot legally hold.
+	 *
+	 *  The type check is the whole safety of this: the target is a Blueprint class we do not
+	 *  compile against, so a renamed or retyped field must come back as "did nothing" rather than
+	 *  as a pointer of the wrong class sitting in a slot the pack will dereference. */
+	bool WriteObject(UObject* Target, const TCHAR* Name, UObject* Value)
+	{
+		if (!Target)
+		{
+			return false;
+		}
+
+		FObjectProperty* Prop = CastField<FObjectProperty>(FindByName(Target->GetClass(), Name));
+		if (!Prop)
+		{
+			return false;
+		}
+
+		if (Value && !Value->IsA(Prop->PropertyClass))
+		{
+			return false;
+		}
+
+		Prop->SetObjectPropertyValue_InContainer(Target, Value);
+		return true;
+	}
+
+	/** The pack's controller on a pawn, found by class NAME because the class is Blueprint only.
+	 *
+	 *  Same lookup AShooterCharacter does for Gait and ActiveAimPoint. Duplicated rather than
+	 *  shared because the copy there is file local, and one six line loop in two files is cheaper
+	 *  than a header that exists only to hold it. */
+	UActorComponent* FindViewmodelController(const AActor* Owner)
+	{
+		if (!Owner)
+		{
+			return nullptr;
+		}
+
+		for (UActorComponent* Component : Owner->GetComponents())
+		{
+			if (Component && Component->GetClass()->GetName().StartsWith(TEXT("ViewmodelController")))
+			{
+				return Component;
+			}
+		}
+
+		return nullptr;
+	}
+}
+
+void AShooterWeapon::PushPackViewmodelSettings()
+{
+	if (!PackWeaponSettings || !PawnOwner)
+	{
+		return;
+	}
+
+	UActorComponent* Viewmodel = PackProfile::FindViewmodelController(PawnOwner);
+	if (!Viewmodel)
+	{
+		// Not an error. A character that was never migrated has no such component, and this weapon
+		// is then simply held by our own arms graph, which is what every pre-pack weapon does.
+		return;
+	}
+
+	// WeaponSettings is the whole profile; ActiveSettings is the UE5 viewmodel inside it, and the
+	// second one is the one that matters. Their own WeaponManager sets both on every swap, which is
+	// the behaviour being reproduced here.
+	PackProfile::WriteObject(Viewmodel, TEXT("WeaponSettings"), PackWeaponSettings);
+
+	UObject* const Viewmodel5 = PackProfile::ReadObject(
+		PackWeaponSettings, PackWeaponSettings->GetClass(), TEXT("UE5"));
+
+	if (!Viewmodel5)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PACK] %s: profile %s has no UE5 viewmodel settings, so the arms "
+			"keep the pose of whatever weapon was held before this one."),
+			*GetName(), *PackWeaponSettings->GetName());
+		return;
+	}
+
+	if (PackProfile::WriteObject(Viewmodel, TEXT("ActiveSettings"), Viewmodel5))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[PACK] %s: ActiveSettings <- %s"), *GetName(), *Viewmodel5->GetName());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[PACK] %s: could not write ActiveSettings on %s. The arms will hold "
+			"this weapon in the previous weapon's pose."), *GetName(), *Viewmodel->GetClass()->GetName());
+	}
+}
+
+void AShooterWeapon::ApplyPackWeaponSettings()
+{
+	// The override alone is a valid setup: a weapon can take PRAS recoil without taking the rest
+	// of the profile, which is how an existing gun gets their recoil without losing its own tuning.
+	ResolvedPackRecoilData = PackRecoilData;
+
+	if (!PackWeaponSettings)
+	{
+		return;
+	}
+
+	const UObject* Settings = PackWeaponSettings;
+	const UStruct* SettingsClass = Settings->GetClass();
+
+	// The profile overwrites. Assigning it is the statement "this weapon is theirs", so a value it
+	// carries replaces ours rather than deferring to it -- otherwise a gun that was set up by hand
+	// once could never be moved onto a profile without emptying eight fields first.
+	//
+	// An EMPTY slot still leaves ours alone, and that is a different rule, not an exception to this
+	// one: their MX16A4 has no hands Fire montage because PRAS does that shake, and treating the
+	// gap as "clear it" would remove a working animation in exchange for nothing.
+	auto TakeMontage = [&](TObjectPtr<UAnimMontage>& Ours, const void* Container,
+		const UStruct* Layout, const TCHAR* Name, const TCHAR* Label)
+	{
+		if (UAnimMontage* Found = Cast<UAnimMontage>(PackProfile::ReadObject(Container, Layout, Name)))
+		{
+			if (Ours != Found)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[PACK] %s: %s <- %s (was %s)"),
+					*GetName(), Label, *Found->GetName(), *GetNameSafe(Ours));
+			}
+			Ours = Found;
+		}
+	};
+
+	auto TakeAnimation = [&](TObjectPtr<UAnimationAsset>& Ours, const void* Container,
+		const UStruct* Layout, const TCHAR* Name, const TCHAR* Label)
+	{
+		if (UAnimationAsset* Found = Cast<UAnimationAsset>(PackProfile::ReadObject(Container, Layout, Name)))
+		{
+			if (Ours != Found)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[PACK] %s: %s <- %s (was %s)"),
+					*GetName(), Label, *Found->GetName(), *GetNameSafe(Ours));
+			}
+			Ours = Found;
+		}
+	};
+
+	// --- The hands. Lives one level down, in the nested ViewmodelSettings asset. ---
+	// UE5 and UE4 are two separate pointers on their side because the pack ships both rigs; we are
+	// on the UE5 one and read only that. The UE4 slot is deliberately ignored rather than used as
+	// a fallback: its montages are built for the other skeleton and would look wrong, not merely
+	// different.
+	if (const UObject* Viewmodel = PackProfile::ReadObject(Settings, SettingsClass, TEXT("UE5")))
+	{
+		const UStruct* ViewmodelClass = Viewmodel->GetClass();
+		const void* AnimsAddr = nullptr;
+		const UStruct* AnimsLayout = nullptr;
+
+		if (PackProfile::OpenStruct(Viewmodel, ViewmodelClass, TEXT("CharacterAnims"), AnimsAddr, AnimsLayout))
+		{
+			TakeMontage(DrawMontage, AnimsAddr, AnimsLayout, TEXT("Equip"), TEXT("DrawMontage"));
+			TakeMontage(HolsterMontage, AnimsAddr, AnimsLayout, TEXT("UnEquip"), TEXT("HolsterMontage"));
+			TakeMontage(ReloadMontage, AnimsAddr, AnimsLayout, TEXT("PrimaryReload"), TEXT("ReloadMontage"));
+			TakeMontage(SecondaryReloadMontage, AnimsAddr, AnimsLayout, TEXT("SecondaryReload"),
+				TEXT("SecondaryReloadMontage"));
+			TakeMontage(ReloadEndMontage, AnimsAddr, AnimsLayout, TEXT("AdditionalReload"),
+				TEXT("ReloadEndMontage"));
+
+			// Their "Fire" on the HANDS is not the shot, it is the hands working the action after
+			// it: the bolt on a Kar98K, the pump on a KXG12. Only the three manual guns fill it,
+			// and on everything else the shake of firing comes from the PRAS node instead, which is
+			// why this slot is empty on every automatic weapon they ship.
+			TakeMontage(CycleActionMontage, AnimsAddr, AnimsLayout, TEXT("Fire"),
+				TEXT("CycleActionMontage"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PACK] %s: profile %s has no UE5 viewmodel settings, so the hands "
+			"keep whatever the Blueprint gave them."), *GetName(), *PackWeaponSettings->GetName());
+	}
+
+	// --- The gun's own meshes. ---
+	{
+		const void* AnimsAddr = nullptr;
+		const UStruct* AnimsLayout = nullptr;
+
+		if (PackProfile::OpenStruct(Settings, SettingsClass, TEXT("WeaponAnims"), AnimsAddr, AnimsLayout))
+		{
+			TakeAnimation(WeaponMeshFireAnimation, AnimsAddr, AnimsLayout, TEXT("Fire"),
+				TEXT("WeaponMeshFireAnimation"));
+			TakeAnimation(WeaponMeshReloadAnimation, AnimsAddr, AnimsLayout, TEXT("PrimaryReload"),
+				TEXT("WeaponMeshReloadAnimation"));
+			TakeAnimation(WeaponMeshSecondaryReloadAnimation, AnimsAddr, AnimsLayout, TEXT("SecondaryReload"),
+				TEXT("WeaponMeshSecondaryReloadAnimation"));
+			TakeAnimation(WeaponMeshReloadEndAnimation, AnimsAddr, AnimsLayout, TEXT("AdditionalReload"),
+				TEXT("WeaponMeshReloadEndAnimation"));
+			TakeAnimation(WeaponMeshLastShotAnimation, AnimsAddr, AnimsLayout, TEXT("FireOut"),
+				TEXT("WeaponMeshLastShotAnimation"));
+		}
+	}
+
+	// --- The shape of the reload, taken from the class their own data asks for. ---
+	//
+	// Read rather than configured because they already answered it: BP_ManualAction is the class
+	// they give to exactly the two guns that load one round at a time, and nothing else. Deciding
+	// it from the animation slots instead would be guesswork, since MGX5 also fills
+	// AdditionalReload and it means a third magazine variant there, not a closing stage.
+	if (const UClass* PackWeaponClass = PackProfile::ReadClass(Settings, SettingsClass, TEXT("WeaponClass")))
+	{
+		const bool bManual = PackWeaponClass->GetName().StartsWith(TEXT("BP_ManualAction"));
+		if (bManual != bPerRoundReload)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[PACK] %s: bPerRoundReload <- %s (their class is %s)"),
+				*GetName(), bManual ? TEXT("true") : TEXT("false"), *PackWeaponClass->GetName());
+		}
+		bPerRoundReload = bManual;
+	}
+
+	// --- The anim blueprint the gun mesh runs (their ABP_<gun>). ---
+	// Set on the components rather than stored, because that is where it lives for the weapons that
+	// were wired by hand.
+	if (UClass* WeaponAnimClass = PackProfile::ReadClass(Settings, SettingsClass, TEXT("WeaponAnimInstance")))
+	{
+		USkeletalMeshComponent* const PackMeshes[] = { FirstPersonMesh, ThirdPersonMesh };
+
+		for (USkeletalMeshComponent* Mesh : PackMeshes)
+		{
+			if (Mesh && Mesh->GetAnimClass() != WeaponAnimClass)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[PACK] %s: %s anim class <- %s (was %s)"),
+					*GetName(), *Mesh->GetName(), *WeaponAnimClass->GetName(),
+					*GetNameSafe(Mesh->GetAnimClass()));
+				Mesh->SetAnimInstanceClass(WeaponAnimClass);
+			}
+		}
+	}
+
+	// --- Sound. ---
+	if (USoundBase* Found = Cast<USoundBase>(PackProfile::ReadObject(Settings, SettingsClass, TEXT("FireSound"))))
+	{
+		if (FireSound != Found)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[PACK] %s: FireSound <- %s (was %s)"),
+				*GetName(), *Found->GetName(), *GetNameSafe(FireSound));
+		}
+		FireSound = Found;
+	}
+
+	// --- Recoil. Their property is called RecoilSettings, not RecoilData. ---
+	// PackRecoilData is the one field the profile does NOT overrule, because it is not one of our
+	// legacy fields: it is a deliberate pack-side override, set on the same panel and for exactly
+	// this purpose.
+	if (!ResolvedPackRecoilData)
+	{
+		ResolvedPackRecoilData =
+			Cast<URecoilData>(PackProfile::ReadObject(Settings, SettingsClass, TEXT("RecoilSettings")));
+
+		if (ResolvedPackRecoilData)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[PACK] %s: PRAS recoil <- %s"),
+				*GetName(), *ResolvedPackRecoilData->GetName());
+		}
+	}
+
+	// --- The camera jolt. Their CameraAnimator plays this; we have no CameraAnimator and must not
+	// take one, because the same component also drives THEIR ads FOV and would fight our zoom. So
+	// only the three numbers are lifted and the playback lives on our side.
+	if (const UObject* Shake = PackProfile::ReadObject(Settings, SettingsClass, TEXT("RecoilShake")))
+	{
+		const UStruct* ShakeClass = Shake->GetClass();
+		PackShakeCurve = Cast<UCurveVector>(PackProfile::ReadObject(Shake, ShakeClass, TEXT("RotationCurve")));
+
+		double ShakeNumber = 0.0;
+		if (PackProfile::ReadNumber(Shake, ShakeClass, TEXT("PlayRate"), ShakeNumber) && ShakeNumber > KINDA_SMALL_NUMBER)
+		{
+			PackShakePlayRate = static_cast<float>(ShakeNumber);
+		}
+		if (PackProfile::ReadNumber(Shake, ShakeClass, TEXT("Smoothing"), ShakeNumber) && ShakeNumber > KINDA_SMALL_NUMBER)
+		{
+			PackShakeSmoothing = static_cast<float>(ShakeNumber);
+		}
+
+		PackProfile::ReadVector2D(Shake, ShakeClass, TEXT("Pitch"), PackShakePitchRange);
+		PackProfile::ReadVector2D(Shake, ShakeClass, TEXT("Yaw"), PackShakeYawRange);
+		PackProfile::ReadVector2D(Shake, ShakeClass, TEXT("Roll"), PackShakeRollRange);
+
+		UE_LOG(LogTemp, Log, TEXT("[PACK] %s: camera shake <- %s (curve %s, rate %.2f, smoothing %.1f, "
+			"pitch %.2f..%.2f yaw %.2f..%.2f roll %.2f..%.2f)"),
+			*GetName(), *Shake->GetName(), *GetNameSafe(PackShakeCurve), PackShakePlayRate, PackShakeSmoothing,
+			PackShakePitchRange.X, PackShakePitchRange.Y, PackShakeYawRange.X, PackShakeYawRange.Y,
+			PackShakeRollRange.X, PackShakeRollRange.Y);
+	}
+
+	// --- The two numbers, each behind its own switch (see the header for why). ---
+	double Number = 0.0;
+
+	if (PackProfile::ReadNumber(Settings, SettingsClass, TEXT("FireRate"), Number) && Number > KINDA_SMALL_NUMBER)
+	{
+		PackFireRateRPM = static_cast<float>(Number);
+
+		if (bPackSetsFireRate)
+		{
+			RefireRate = static_cast<float>(60.0 / Number);
+			UE_LOG(LogTemp, Log, TEXT("[PACK] %s: RefireRate <- %.4f s (%.0f rounds per minute)"),
+				*GetName(), RefireRate, Number);
+		}
+	}
+
+	if (bPackSetsMagazine && PackProfile::ReadNumber(Settings, SettingsClass, TEXT("Ammo"), Number) && Number >= 1.0)
+	{
+		MagazineSize = FMath::RoundToInt(Number);
+		UE_LOG(LogTemp, Log, TEXT("[PACK] %s: MagazineSize <- %d"), *GetName(), MagazineSize);
+	}
+}
+
+FRotator AShooterWeapon::RollPackShakeAmplitude() const
+{
+	// Their ranges are written MIN..MAX with the sign carried by both ends (a rifle's Roll is
+	// -1.3..-1.5), so RandRange handles the ordering rather than us assuming X < Y.
+	const float Pitch = FMath::RandRange(PackShakePitchRange.X, PackShakePitchRange.Y);
+	const float Yaw = FMath::RandRange(PackShakeYawRange.X, PackShakeYawRange.Y);
+	const float Roll = FMath::RandRange(PackShakeRollRange.X, PackShakeRollRange.Y);
+
+	return FRotator(Pitch, Yaw, Roll) * PackCameraShakeScale;
+}
+
+float AShooterWeapon::GetPackFireRateRPM() const
+{
+	if (PackFireRateRPM > KINDA_SMALL_NUMBER)
+	{
+		return PackFireRateRPM;
+	}
+
+	// No profile, only a hand-assigned recoil asset. PRAS still needs a rate, and our own interval
+	// is the same fact written the other way round.
+	return (RefireRate > KINDA_SMALL_NUMBER) ? (60.0f / RefireRate) : 600.0f;
+}
+
 void AShooterWeapon::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Before anything reads a montage, a sound or the magazine size: the profile only fills what
+	// was left empty, so running it first costs nothing and running it late would be a race.
+	ApplyPackWeaponSettings();
 
 	// A weapon belongs to whoever is holding it, and every spawn path sets that owner. One thing
 	// does not: a weapon actor dragged straight into a level. It has nobody to attach its meshes
@@ -599,36 +1646,39 @@ void AShooterWeapon::BeginPlay()
 
 	WeaponOwner->AttachWeaponMeshes(this);
 
-	ResolveADSAnchorAttachment();
-	PropagateRenderVisibilityToChildren();
-
-	// Force every component attached to the weapon's meshes (sights, suppressors, lasers,
-	// rails, etc.) to tick AFTER the mesh's animation has been evaluated AND in a later tick
-	// group, so they cannot read stale bone/socket transforms and lag a frame behind the weapon.
-	auto ForceLateTickOnChildren = [](USkeletalMeshComponent* Parent)
+	// The weapon's own built-in sight, when it carries one as a component rather than as part of
+	// the mesh. Found once, by name, BEFORE anything can be mounted: both the eye-point search and
+	// the optic mount need to know which component that is, and neither may guess.
+	if (!DefaultOpticComponentName.IsNone())
 	{
-		if (!Parent) return;
-
-		TArray<USceneComponent*> AttachedChildren;
-		Parent->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AttachedChildren);
-		for (USceneComponent* Child : AttachedChildren)
+		TArray<USceneComponent*> AllChildren;
+		if (FirstPersonMesh)
 		{
-			if (!Child || Child == Parent) continue;
-
-			// 1. Hard prerequisite — child can never tick before the parent.
-			Child->AddTickPrerequisiteComponent(Parent);
-
-			// 2. Push tick into TG_PostPhysics so it runs after PrePhysics anim work AND
-			//    any DuringPhysics simulation. If the component doesn't tick at all this is
-			//    harmless; if it does (animated, particle, dynamic), it picks up the latest pose.
-			if (Child->PrimaryComponentTick.bCanEverTick)
+			FirstPersonMesh->GetChildrenComponents(/*bIncludeAllDescendants*/ true, AllChildren);
+		}
+		for (USceneComponent* Child : AllChildren)
+		{
+			if (Child && Child->GetFName() == DefaultOpticComponentName)
 			{
-				Child->PrimaryComponentTick.TickGroup = TG_PostPhysics;
+				DefaultOpticComponent = Child;
+				break;
 			}
 		}
-	};
-	ForceLateTickOnChildren(FirstPersonMesh);
-	ForceLateTickOnChildren(ThirdPersonMesh);
+
+		if (!DefaultOpticComponent)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ATTACH] %s: DefaultOpticComponentName is '%s', but no "
+				"component under the first person mesh is called that. Mounting an optic will "
+				"leave the built-in sight visible and both will offer an eye point."),
+				*GetName(), *DefaultOpticComponentName.ToString());
+		}
+	}
+
+	// Builds the mounted meshes, then resolves the ADS anchor and inherits render visibility and
+	// tick order onto everything under the weapon meshes. On a fresh weapon there is nothing
+	// mounted and this is just those last two steps, which is what used to be written out here.
+	// A client whose weapon arrived with attachments already on it gets them built here too.
+	RebuildAttachmentMeshes();
 
 	// === Diagnostic dump of attachment transforms after equip ===
 	// Filter Output Log by [ATTACH_DEBUG] to read it.
@@ -726,6 +1776,12 @@ void AShooterWeapon::PushLeftHandIK(UAnimInstance* AnimInstance, const FTransfor
 
 const FName AShooterWeapon::OptionalGripSocketName(TEXT("OptionalGrip"));
 const FName AShooterWeapon::ThirdPersonSocketSuffix(TEXT("_TP"));
+
+// The engine's own weapon bone, present on every mannequin skeleton and used by nothing until now.
+// It sits under ik_hand_root at the top of the hierarchy rather than inside an arm, which is what
+// makes it a weapon transform rather than a hand: an animation can move the gun without moving the
+// hand that holds it, and both hands are then keyed against it.
+const FName AShooterWeapon::AnimatedWeaponSocketName(TEXT("ik_hand_gun"));
 
 FName AShooterWeapon::PickThirdPersonSocket(const USkeletalMeshComponent* WeaponMesh, const FName BaseSocket)
 {
@@ -904,14 +1960,9 @@ float AShooterWeapon::ResolveStateSpreadMultiplier() const
 		Multiplier = FMath::Lerp(SpreadConfig.StillMultiplier, SpreadConfig.WalkMultiplier, SpeedAlpha);
 	}
 
-	// Aiming down sights scales whatever came out, blended by the ADS alpha so the spread tightens
-	// over the same time the sight comes up instead of snapping at the button press.
-	if (const AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(OwnerCharacter))
-	{
-		const float ADSAlpha = FMath::Clamp(ShooterOwner->GetADSAlpha(), 0.0f, 1.0f);
-		Multiplier *= FMath::Lerp(1.0f, SpreadConfig.AdsMultiplier, ADSAlpha);
-	}
-
+	// Aiming is deliberately NOT applied here. It is the last thing multiplied in, over state and
+	// bloom together, so AdsMultiplier = 0 means zero degrees rather than "zero, plus whatever the
+	// trigger added". See GetCurrentSpreadDegrees.
 	return FMath::Max(0.0f, Multiplier);
 }
 
@@ -962,7 +2013,20 @@ float AShooterWeapon::GetCurrentSpreadDegrees() const
 	}
 
 	const float Total = AimVariance * CurrentStateMultiplier + CurrentBloomDegrees;
-	return FMath::Clamp(Total, 0.0f, SpreadConfig.MaxSpreadDegrees);
+
+	// Aiming comes LAST and scales everything, state and bloom alike, blended by the ADS alpha so
+	// the sight tightens over the same time it comes up. Applying it to the state part alone left
+	// the firing bloom untouched, which is why a weapon with AdsMultiplier = 0 still sprayed: the
+	// per-shot degrees were added after the multiplication. A scope that promises "no spread" has
+	// to beat the trigger too, so anything that must survive aiming belongs in AimVariance.
+	float AdsFactor = 1.0f;
+	if (const AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner))
+	{
+		const float ADSAlpha = FMath::Clamp(ShooterOwner->GetADSAlpha(), 0.0f, 1.0f);
+		AdsFactor = FMath::Lerp(1.0f, SpreadConfig.AdsMultiplier, ADSAlpha);
+	}
+
+	return FMath::Clamp(Total * AdsFactor, 0.0f, SpreadConfig.MaxSpreadDegrees);
 }
 
 void AShooterWeapon::OnOwnerDestroyed(AActor* DestroyedActor)
@@ -975,6 +2039,10 @@ void AShooterWeapon::ActivateWeapon()
 {
 	// unhide this weapon
 	SetActorHiddenInGame(false);
+
+	// Before the owner is told, because OnWeaponActivated is what swaps the arms anim class over,
+	// and the graph reads the hold pose out of ActiveSettings on its first update.
+	PushPackViewmodelSettings();
 
 	// notify the owner
 	WeaponOwner->OnWeaponActivated(this);
@@ -1093,14 +2161,14 @@ void AShooterWeapon::StartFiring()
 	const float TimeSinceLastShot = GetWorld()->GetTimeSeconds() - TimeOfLastShot;
 	const float CurrentRefireRate = GetCurrentRefireRate();
 
-	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] StartFiring: TimeSinceLastShot=%.3f, RefireRate=%.3f, bFullAuto=%d, Owner=%s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s] StartFiring: TimeSinceLastShot=%.3f, RefireRate=%.3f, bFullAuto=%d, Owner=%s"),
 		*GetName(), TimeSinceLastShot, CurrentRefireRate, bFullAuto,
 		PawnOwner ? *PawnOwner->GetName() : TEXT("NULL"));
 
 	if (TimeSinceLastShot > CurrentRefireRate)
 	{
 		// fire the weapon right away
-		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   -> Firing immediately"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   -> Firing immediately"), *GetName());
 		Fire();
 
 	}
@@ -1109,12 +2177,12 @@ void AShooterWeapon::StartFiring()
 		// if we're full auto, schedule the next shot
 		if (bFullAuto)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   -> Deferred (full auto): scheduling in %.3f sec"), *GetName(), TimeSinceLastShot);
+			UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   -> Deferred (full auto): scheduling in %.3f sec"), *GetName(), TimeSinceLastShot);
 			GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, TimeSinceLastShot, false);
 		}
 		else
 		{
-			UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   -> SKIPPED: not full auto and refire rate not met!"), *GetName());
+			UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   -> SKIPPED: not full auto and refire rate not met!"), *GetName());
 		}
 
 	}
@@ -1123,7 +2191,7 @@ void AShooterWeapon::StartFiring()
 void AShooterWeapon::StopFiring()
 {
 	const bool bHadPendingRefire = GetWorld()->GetTimerManager().IsTimerActive(RefireTimer);
-	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] StopFiring: bIsFiring was %d, hadPendingRefire=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s] StopFiring: bIsFiring was %d, hadPendingRefire=%d"),
 		*GetName(), bIsFiring, bHadPendingRefire);
 
 	// lower the firing flag
@@ -1153,13 +2221,13 @@ void AShooterWeapon::FireOnce()
 
 void AShooterWeapon::Fire()
 {
-	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s] Fire() called: bIsFiring=%d, bUseChargeFiring=%d, WeaponOwner=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s] Fire() called: bIsFiring=%d, bUseChargeFiring=%d, WeaponOwner=%d"),
 		*GetName(), bIsFiring, bUseChargeFiring, WeaponOwner != nullptr);
 
 	// ensure the player still wants to fire. They may have let go of the trigger
 	if (!bIsFiring)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: bIsFiring is false!"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   Fire() ABORTED: bIsFiring is false!"), *GetName());
 		return;
 	}
 
@@ -1170,7 +2238,19 @@ void AShooterWeapon::Fire()
 	{
 		if (bIsReloading)
 		{
-			return;
+			// A magazine reload cannot be walked out of: there is no half-swapped magazine, so the
+			// trigger simply does nothing until it is over.
+			//
+			// A per round reload can, and that is the point of loading one round at a time. The
+			// player takes the shot with three in the tube instead of watching the animation finish.
+			// Only with something actually loaded, though: an empty gun interrupting its own reload
+			// to dry fire would be a way to never reload at all.
+			if (!bPerRoundReload || CurrentBullets <= 0)
+			{
+				return;
+			}
+
+			InterruptPerRoundReload();
 		}
 
 		if (CurrentBullets <= 0)
@@ -1192,15 +2272,6 @@ void AShooterWeapon::Fire()
 		}
 	}
 
-	// Limited-ammo guard: yanked weapons that ran dry should not fire phantom shots in the
-	// brief window between magazine depletion and the deferred DropYankedWeaponIfAny tick.
-	if (bHasLimitedAmmo && CurrentBullets <= 0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: Fire() ABORTED — empty yanked weapon, awaiting discard"), *GetName());
-		StopFiring();
-		return;
-	}
-
 	// Check charge requirements if enabled
 	float ChargeMultiplier = 1.0f;
 	if (bUseChargeFiring)
@@ -1212,7 +2283,7 @@ void AShooterWeapon::Fire()
 			{
 				UGameplayStatics::PlaySoundAtLocation(this, DryFireSound, GetActorLocation());
 			}
-			UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: charge requirements not met!"), *GetName());
+			UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   Fire() ABORTED: charge requirements not met!"), *GetName());
 			StopFiring();
 			return;
 		}
@@ -1220,11 +2291,11 @@ void AShooterWeapon::Fire()
 
 	if (!WeaponOwner)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() ABORTED: WeaponOwner is NULL!"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   Fire() ABORTED: WeaponOwner is NULL!"), *GetName());
 		return;
 	}
 
-	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Fire() PROCEEDING: spawning effects, getting target..."), *GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   Fire() PROCEEDING: spawning effects, getting target..."), *GetName());
 
 	// Muzzle flash and fire sound.
 	//
@@ -1245,11 +2316,17 @@ void AShooterWeapon::Fire()
 		}
 	}
 
-	PlayFireEffectsLocally();
+	// Worked out here, before the round is spent: ConsumeRoundAfterShot runs later in this same call,
+	// so CurrentBullets is still the count BEFORE this shot. One left means this shot empties it.
+	// Only a weapon with a real magazine can run out; an energy weapon refills itself and never
+	// locks its action back.
+	const bool bLastRound = bUseReload && CurrentBullets <= 1;
+
+	PlayFireEffectsLocally(bLastRound);
 
 	if (HasAuthority())
 	{
-		Multicast_PlayFireEffects();
+		Multicast_PlayFireEffects(bLastRound);
 	}
 	else
 	{
@@ -1257,7 +2334,7 @@ void AShooterWeapon::Fire()
 		// missed shot has no damage to report, so the effects need their own path upstream.
 		if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
 		{
-			OwnerCharacter->Server_ReportWeaponFired(this);
+			OwnerCharacter->Server_ReportWeaponFired(this, bLastRound);
 		}
 	}
 
@@ -1270,24 +2347,24 @@ void AShooterWeapon::Fire()
 	// Get target location
 	const FVector TargetLocation = WeaponOwner->GetWeaponTargetLocation();
 
-	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   TargetLocation: (%.1f, %.1f, %.1f), bUseHitscan=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   TargetLocation: (%.1f, %.1f, %.1f), bUseHitscan=%d"),
 		*GetName(), TargetLocation.X, TargetLocation.Y, TargetLocation.Z, bUseHitscan);
 
 	// Fire based on mode
 	if (bUseHitscan)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   >>> FireHitscan <<<"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   >>> FireHitscan <<<"), *GetName());
 		FireHitscan(TargetLocation);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   >>> FireProjectile <<<"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   >>> FireProjectile <<<"), *GetName());
 		FireProjectile(TargetLocation, ChargeMultiplier);
 	}
 
 	// update the time of our last shot
 	TimeOfLastShot = GetWorld()->GetTimeSeconds();
-	UE_LOG(LogTemp, Error, TEXT("[Weapon:%s]   Shot complete. TimeOfLastShot=%.2f"), *GetName(), TimeOfLastShot);
+	UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   Shot complete. TimeOfLastShot=%.2f"), *GetName(), TimeOfLastShot);
 
 	// One trigger pull opens the spread once. Deliberately here and not in the Fire* functions: a
 	// shotgun puts several pellets in the air per pull, and charging them each with a full bloom
@@ -1350,6 +2427,15 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 	if (Projectile && bCosmeticOnly)
 	{
 		Projectile->SetCosmeticOnly();
+	}
+
+	// Which gun this round came out of. Set here, before it can touch anything, because every rule
+	// the hit obeys is read off the weapon: damage, shield gate, ionization, feedback set, upgrades.
+	// Both routes come through this function, so the authority's projectile and the shooter's local
+	// stand-in are told the same thing.
+	if (Projectile)
+	{
+		Projectile->SetSourceWeapon(this);
 	}
 
 	// If charge-based firing, scale projectile charge and match player polarity
@@ -1528,6 +2614,33 @@ FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const F
 	if (const AActor* const AimActor = WeaponOwner ? WeaponOwner->GetWeaponAimActor() : nullptr)
 	{
 		BodyLocation = AimActor->GetActorLocation();
+
+		// Where the target WILL be. A projectile that takes half a second to arrive and is aimed at
+		// where somebody is standing hits the ground they left, and at sniper ranges that is every
+		// shot at anybody moving at all.
+		//
+		// Only AI ever gets here: GetWeaponAimActor is the AI aim path, and a player aims with the
+		// mouse. So this is a property of the shooter, not of the gun.
+		const FVector TargetVelocity = AimActor->GetVelocity();
+		if (AILeadFraction > 0.0f && !TargetVelocity.IsNearlyZero())
+		{
+			const float Reach = FVector::Dist(LaunchLocation, BodyLocation);
+			const float Flight = FMath::Min(Reach / LaunchSpeed, AIMaxLeadSeconds);
+
+			FVector Lead = TargetVelocity * (Flight * AILeadFraction);
+			Lead.Z = 0.0f;   // jumps reverse inside the flight time; leading them aims at the floor
+
+			// The error rides on the lead, so it is zero against a standing target and largest
+			// against a sprinting one. That is the shape that keeps movement worth doing.
+			if (AILeadErrorFraction > 0.0f)
+			{
+				FVector Scatter = FMath::VRand() * (Lead.Size() * AILeadErrorFraction);
+				Scatter.Z = 0.0f;
+				Lead += Scatter;
+			}
+
+			BodyLocation += Lead;
+		}
 	}
 
 	if (bLogBallistics)
@@ -1813,7 +2926,7 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 	// [HITSCAN_DEBUG] Inputs of the shot: where the muzzle is, where the camera-aim point landed,
 	// and how far it is. AimDist ~= MaxAimDistance means the aim trace hit NOTHING (open area) —
 	// worst case for muzzle parallax.
-	UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] FireHitscan: Muzzle=%s AimPoint=%s AimDist=%.0f DotP=%.3f dirMode=%s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] FireHitscan: Muzzle=%s AimPoint=%s AimDist=%.0f DotP=%.3f dirMode=%s"),
 		*MuzzleLocation.ToCompactString(), *TargetLocation.ToCompactString(), DistanceToTarget, DotP,
 		(DistanceToTarget < 100.0f || DotP < 0.5f) ? TEXT("ViewDir(override)") : TEXT("Muzzle->AimPoint"));
 
@@ -1888,23 +3001,33 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 
 	//ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
 	WeaponOwner->PlayFiringMontage(FiringMontage);
+
+	// The hands working the action: the bolt on a Kar98K, the pump on a KXG12. Only manual weapons
+	// have one, and having one is what makes a weapon manual -- GetCurrentRefireRate takes this
+	// montage's length as a floor, so the gun cannot fire again until the bolt is closed.
+	//
+	// After PlayFiringMontage rather than instead of it: they are different slots on purpose, so a
+	// weapon can keep a firing flourish and still cycle.
+	if (CycleActionMontage)
+	{
+		WeaponOwner->PlayReloadMontage(CycleActionMontage);
+	}
+
 	WeaponOwner->AddWeaponRecoil(FiringRecoil);
 
 	--CurrentBullets;
 
-	// Magazine depleted: yanked weapons get discarded (player can't reload), others auto-refill
+	// The round leaves the magazine cells too. The cells hold everything the player owns for this
+	// gun and the magazine is the loaded part of it, so a shot has to come off both or the reserve
+	// would never move. Server side only; the client's own copy arrives by replication.
+	SpendPooledRound();
+
 	if (CurrentBullets <= 0)
 	{
-		AShooterCharacter* PlayerOwner = Cast<AShooterCharacter>(PawnOwner);
-		if (bHasLimitedAmmo && PlayerOwner)
-		{
-			// Defer discard to next tick — DropYankedWeaponIfAny destroys this weapon actor,
-			// can't be done synchronously inside Fire().
-			GetWorld()->GetTimerManager().SetTimerForNextTick(
-				FTimerDelegate::CreateUObject(PlayerOwner, &AShooterCharacter::ThrowYankedWeaponIfEmpty));
-			UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] %s: magazine empty, scheduled discard for next tick"), *GetName());
-		}
-		else if (bUseReload)
+		// An empty gun is just empty. It used to throw itself away here when it was a yanked
+		// weapon, which is now wrong: a dropped gun keeps its rounds and can be filled from another
+		// one of its kind, so running dry is a reason to click, not to lose the weapon.
+		if (bUseReload)
 		{
 			// The magazine is real: it stays empty until somebody fills it, and by default that
 			// somebody is the player. This branch is the weapon taking that decision for them, which
@@ -1969,7 +3092,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	// [HITSCAN_DEBUG] Shot summary: divergence + sweep sphere radius + what the Visibility (wall) trace hit.
 	// SweepR is the sphere radius used by the pawn sweep below — if it's tiny (divergence ~0) the
 	// sweep behaves like a thin ray and muzzle parallax can make it miss entirely.
-	UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] === Shot: Start=%s Dir=%s | Diverg=%.2fdeg SweepR=%.1f MaxDist=%.0f | Wall=%s comp=%s dist=%.0f"),
+	UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] === Shot: Start=%s Dir=%s | Diverg=%.2fdeg SweepR=%.1f MaxDist=%.0f | Wall=%s comp=%s dist=%.0f"),
 		*Start.ToCompactString(), *Direction.ToCompactString(),
 		DivergenceAngle, CalculateWaveRadius(MaxDistance), MaxDistance,
 		bHitWall ? *GetNameSafe(WallHitResult.GetActor()) : TEXT("none"),
@@ -2140,7 +3263,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		// [HITSCAN_DEBUG] Full candidate info: which component was swept (capsule vs mesh), bone,
 		// raw sweep distance (can be << real distance for fat sweep spheres) and both cone-filter inputs.
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]   cand=%s comp=%s bone=%s | rawDist=%.0f fixDist=%.0f | dot=%.4f cosHalf=%.4f | axisDist=%.1f coneR=%.1f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG]   cand=%s comp=%s bone=%s | rawDist=%.0f fixDist=%.0f | dot=%.4f cosHalf=%.4f | axisDist=%.1f coneR=%.1f"),
 			*HitActor->GetName(), *GetNameSafe(Hit.GetComponent()), *Hit.BoneName.ToString(),
 			Hit.Distance, HitDistance, DotProduct, CosHalfAngle, DistanceFromAxis, ConeRadiusAtDistance);
 
@@ -2171,7 +3294,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		if (!bInsideCone)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]     -> REJECTED: OUTSIDE CONE (dot=%.4f < cosHalf=%.4f AND axisDist=%.1f > coneR=%.1f)"),
+			UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG]     -> REJECTED: OUTSIDE CONE (dot=%.4f < cosHalf=%.4f AND axisDist=%.1f > coneR=%.1f)"),
 				DotProduct, CosHalfAngle, DistanceFromAxis, ConeRadiusAtDistance);
 	if (bDrawHitscanDebug)
 	{
@@ -2198,7 +3321,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		if (bBlocked && BlockCheck.Distance < HitDistance - 50.0f)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]     -> REJECTED: BLOCKED by %s comp=%s at %.0f (threshold %.0f)"),
+			UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG]     -> REJECTED: BLOCKED by %s comp=%s at %.0f (threshold %.0f)"),
 				*GetNameSafe(BlockCheck.GetActor()), *GetNameSafe(BlockCheck.GetComponent()),
 				BlockCheck.Distance, HitDistance - 50.0f);
 	if (bDrawHitscanDebug)
@@ -2234,6 +3357,17 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	// ===== PASS 2: Apply damage to the best (most central) target only =====
 	if (BestTarget)
 	{
+		// The winning candidate is very probably the CAPSULE, and a capsule carries no bone. The
+		// loop above takes the first hit per actor and skips the rest, the sweep returns them
+		// nearest-first, and the capsule encloses the body -- so the mesh hit that knew it was a
+		// head was thrown away one line into the loop. Ask the body itself, once, now that there is
+		// exactly one target to ask about.
+		if (BestHit.BoneName.IsNone())
+		{
+			BestHit.BoneName = ResolveHitBone(BestTarget, Start, Start + Direction * (BestHitDistance + 200.0f));
+			bBestIsHeadshot = (BestHit.BoneName == FName("head") || BestHit.BoneName == FName("Head"));
+		}
+
 		// Calculate wave radius at target distance
 		float WaveRadiusAtTarget = CalculateWaveRadius(BestHitDistance);
 		float TotalDistance = BestHitDistance;
@@ -2252,7 +3386,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		float AreaMultiplier = CalculateDamageMultiplier(TotalDistance, WaveRadiusAtTarget);
 
 		// Headshot check
-		float HeadshotMult = bBestIsHeadshot ? HeadshotMultiplier : 1.0f;
+		float HeadshotMult = bBestIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
 
 		// Heat System multiplier
 		float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
@@ -2300,7 +3434,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		// [HITSCAN_DEBUG] dealt = what we sent into TakeDamage, applied = what TakeDamage returned.
 		// applied=0 with dealt>0 means the TARGET swallowed it (friendly-fire guard / dead / immune).
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED: target=%s dealt=%.1f applied=%.1f killed=%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] APPLIED: target=%s dealt=%.1f applied=%.1f killed=%d"),
 			*BestTarget->GetName(), FinalDamage, ActualDamage, bKilled ? 1 : 0);
 
 		// Feedback goes out once, at the end of this block, when the shield reading after the shot
@@ -2329,7 +3463,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		if (ACharacter* HitCharacter = Cast<ACharacter>(BestTarget))
 		{
 			// Exceptions (turret, ionizer vs boss) and the grounded rule live in the helper.
-			ApplyHitscanKnockback(HitCharacter, ImpulseDirection * ImpulseForce, bUseHitscanIonization);
+			ApplyHitscanKnockback(HitCharacter, ImpulseDirection * ImpulseForce, DoesShotIonize());
 		}
 		else if (UPrimitiveComponent* HitComp = BestHit.GetComponent())
 		{
@@ -2370,7 +3504,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	// sweepHits>0 passed=0  -> all candidates rejected (see REJECTED lines above for the reason)
 	if (!BestTarget)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] NO DAMAGE THIS SHOT: sweepHits=%d passedFilter=%d (beam drawn to %s)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] NO DAMAGE THIS SHOT: sweepHits=%d passedFilter=%d (beam drawn to %s)"),
 			SweepHits.Num(), HitTargets.Num(),
 			bHitWall ? *GetNameSafe(WallHitResult.GetActor()) : TEXT("max range"));
 	}
@@ -2512,24 +3646,48 @@ FVector AShooterWeapon::CalculateReflection(const FVector& Direction, const FVec
 void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMultiplier, float Distance, float WaveRadius,
 	float ExtraDamageMultiplier)
 {
+	// A thin wrapper over the shared funnel now. What stays here is the part only a TRACE knows: the
+	// beam's remaining energy and the falloff across the wave's radius. Everything a hit of this
+	// weapon means -- shield, ionization, upgrades, knockback, the marker -- is shared with the
+	// projectile and lives in ApplyWeaponHit.
+	const float AreaMultiplier = CalculateDamageMultiplier(Distance, WaveRadius);
+	const FVector HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
+
+	UE_LOG(LogTemp, Verbose, TEXT("Hitscan: Base=%.1f x Energy=%.2f x Area=%.2f (WaveR=%.1f, TargetR=%.1f) -> %s"),
+		HitscanDamage, EnergyMultiplier, AreaMultiplier, WaveRadius, TargetEffectiveRadius,
+		*GetNameSafe(Hit.GetActor()));
+
+	ApplyWeaponHit(Hit, HitscanDamage * EnergyMultiplier * AreaMultiplier, HitDirection,
+		HitscanPhysicsForce * EnergyMultiplier * AreaMultiplier, ExtraDamageMultiplier);
+}
+
+float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, const FVector& HitDirection,
+	float ImpulseForce, float ExtraDamageMultiplier, TSubclassOf<UDamageType> OverrideDamageType,
+	bool bAllowOwnerDamage, const FDamageEvent* OverrideDamageEvent)
+{
 	AActor* HitActor = Hit.GetActor();
 	if (!HitActor)
 	{
-		return;
+		return 0.0f;
 	}
 
 	// EMF Foliage->Prop conversion: if the trace struck a UEMFConvertibleFoliageType
 	// instance, swap the foliage instance for a freshly spawned EMFPhysicsProp
 	// before any damage/ionization runs. From here on HitActor refers to the new prop.
-	if (AEMFPhysicsProp* ConvertedProp = UFoliageConversionLibrary::TryConvertFoliageInstance(Hit, HitscanDamage))
+	// BaseDamage, not HitscanDamage: this is what THIS shot carries, and a projectile weapon leaves
+	// the hitscan field at zero, which would have snapped the sapling for free.
+	if (AEMFPhysicsProp* ConvertedProp = UFoliageConversionLibrary::TryConvertFoliageInstance(Hit, BaseDamage))
 	{
 		HitActor = ConvertedProp;
 	}
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢
-	if (!bHitscanDamageOwner && HitActor == GetOwner())
+	// bAllowOwnerDamage is the caller's own answer to the same question: a projectile carries its
+	// bDamageOwner, and a rocket that is supposed to hurt the person who fired it must not be
+	// silenced by a checkbox that belongs to the trace path.
+	if (!bHitscanDamageOwner && !bAllowOwnerDamage && HitActor == GetOwner())
 	{
-		return;
+		return 0.0f;
 	}
 
 	// Read before anything touches the target: the shield's state at the moment the bullet arrived
@@ -2539,26 +3697,32 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	const bool bShieldDownBefore = IsTargetShieldDown(HitActor);
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
-	float AreaMultiplier = CalculateDamageMultiplier(Distance, WaveRadius);
+	// Wave falloff and beam energy were folded into BaseDamage and ImpulseForce by the caller: they
+	// mean nothing to a projectile, which arrives with one number and no beam behind it.
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° headshot
 	bool bIsHeadshot = (Hit.BoneName == FName("head") || Hit.BoneName == FName("Head"));
-	float HeadshotMult = bIsHeadshot ? HeadshotMultiplier : 1.0f;
+	float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¤ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
-	float FinalDamage = HitscanDamage * EnergyMultiplier * AreaMultiplier * HeadshotMult * ExtraDamageMultiplier;
+	const float FinalDamage = BaseDamage * HeadshotMult * ExtraDamageMultiplier;
 
-	UE_LOG(LogTemp, Warning, TEXT("Hitscan Damage: Base=%.1f x Energy=%.2f x Area=%.2f x HS=%.1f = %.1f to %s (WaveR=%.1f, TargetR=%.1f)"),
-		HitscanDamage, EnergyMultiplier, AreaMultiplier, HeadshotMult, FinalDamage,
-		*HitActor->GetName(), WaveRadius, TargetEffectiveRadius);
+	UE_LOG(LogTemp, Verbose, TEXT("[HIT] %s: Base=%.1f x HS=%.1f x Extra=%.2f = %.1f to %s"),
+		*GetName(), BaseDamage, HeadshotMult, ExtraDamageMultiplier, FinalDamage, *HitActor->GetName());
 
 
 	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
-	FDamageEvent DamageEvent;
-	if (HitscanDamageType)
+	FDamageEvent PointDamageEvent;
+	// A projectile carries its own damage type (fire, explosion) and it must survive the trip through
+	// a funnel whose default was written for bullets.
+	if (const TSubclassOf<UDamageType> DamageType = OverrideDamageType ? OverrideDamageType : HitscanDamageType)
 	{
-		DamageEvent.DamageTypeClass = HitscanDamageType;
+		PointDamageEvent.DamageTypeClass = DamageType;
 	}
+
+	// An explosion arrives with its event already assembled, and it is a RADIAL one: replacing it
+	// would erase the blast origin and radius that every reaction downstream reads back out.
+	const FDamageEvent& DamageEvent = OverrideDamageEvent ? *OverrideDamageEvent : PointDamageEvent;
 
 	float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
 
@@ -2585,12 +3749,22 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 	}
 
 	//ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
-	FVector ImpulseDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
-	float ImpulseForce = HitscanPhysicsForce * EnergyMultiplier * AreaMultiplier;
-	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	// The direction comes from the caller now. A trace hands over the line from muzzle to impact; a
+	// projectile hands over the direction it was actually flying, which is the honest one for an arc.
+	const FVector ImpulseDirection = HitDirection.GetSafeNormal();
+
+	// Zero means the caller pushes for itself, and an explosion does: its launch is scaled by the
+	// splash falloff and multiplied again for a rocket jump, none of which a per-bullet shove knows
+	// about. Without this guard a zero-length launch would still be handed to LaunchCharacter, which
+	// forces MOVE_Falling whatever it is given.
+	if (ImpulseForce <= 0.0f)
+	{
+		// nothing to push with
+	}
+	else if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 	{
 		// Exceptions (turret, ionizer vs boss) and the grounded rule live in the helper.
-		ApplyHitscanKnockback(HitCharacter, ImpulseDirection * ImpulseForce, bUseHitscanIonization);
+		ApplyHitscanKnockback(HitCharacter, ImpulseDirection * ImpulseForce, DoesShotIonize());
 	}
 	else
 	{
@@ -2624,7 +3798,7 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 
 		FHitFeedbackContext Feedback;
 		Feedback.HitLocation = Hit.ImpactPoint;
-		Feedback.HitDirection = (Hit.ImpactPoint - GetActorLocation()).GetSafeNormal();
+		Feedback.HitDirection = ImpulseDirection;
 		Feedback.Damage = ActualDamage;
 		Feedback.bHeadshot = bIsHeadshot;
 		Feedback.bKilled = bKilled;
@@ -2634,7 +3808,32 @@ void AShooterWeapon::ApplyHitscanDamage(const FHitResult& Hit, float EnergyMulti
 		Feedback.HitActor = HitActor;
 		Feedback.FeedbackSet = FeedbackSet;
 
-		WeaponOwner->OnWeaponHitFeedback(Feedback);
+		// Who is standing where the confirmation has to be heard.
+		//
+		// A trace is resolved on the shooter's own machine, so this call has always been a local one
+		// and the hit marker component's IsLocalFeedback guard was enough. A PROJECTILE is resolved
+		// by the authority, and when the shooter is a client that is a different computer entirely:
+		// calling straight through here would hand the marker to a machine whose guard correctly
+		// throws it away, and the shooter would hear nothing. So the confirmation is sent down to
+		// the one connection that earned it.
+		if (PawnOwner && HasAuthority() && !PawnOwner->IsLocallyControlled())
+		{
+			Client_ReportHitFeedback(Feedback);
+		}
+		else
+		{
+			WeaponOwner->OnWeaponHitFeedback(Feedback);
+		}
+	}
+
+	return ActualDamage;
+}
+
+void AShooterWeapon::Client_ReportHitFeedback_Implementation(const FHitFeedbackContext& Context)
+{
+	if (WeaponOwner)
+	{
+		WeaponOwner->OnWeaponHitFeedback(Context);
 	}
 }
 
@@ -2672,6 +3871,14 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(
 		PawnHit, Start, PawnTraceEnd, PawnObjectParams, QueryParams);
 
+	// The Pawn object query answers with the capsule, which has no bone on it, so every shot down
+	// this path was a body shot by construction. Ask the mesh once, here, before anything reads the
+	// bone off this result. @see ResolveHitBone.
+	if (bHitPawn && PawnHit.BoneName.IsNone())
+	{
+		PawnHit.BoneName = ResolveHitBone(PawnHit.GetActor(), Start, PawnTraceEnd + Direction * 200.0f);
+	}
+
 	// --- Always fire a dodgeable traveling BOLT (down the aim line) instead of an instant hitscan ---
 	// EVERY enemy hitscan shot becomes a projectile-like bolt travelling down the aim line at
 	// HitscanBoltSpeed (fast by default). Damage lands only if the player's CURRENT position is
@@ -2681,6 +3888,22 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	// The bolt belongs to the player being shot at: prefer whoever the pawn trace actually hit,
 	// and fall back to the player closest to where the shot lands. Using player 0 would apply one
 	// teammate's Low-Health Defense to bolts aimed at everybody.
+	// Shot an NPC: it lands, now, on that NPC. The bolt below is a PLAYER-facing mechanic - a window
+	// travelling down the aim line that can be stepped out of, slowed by the Low-Health Defense
+	// upgrade - and none of it means anything between two AI. Without this branch the shot resolved
+	// as "no player hit", built a bolt aimed at whatever player was nearest, and the NPC actually
+	// standing in the line took nothing: which is why rifles, LMGs and the tank's machine gun could
+	// fire at each other all day and every kill in the battle log came from a grenade or a drone.
+	if (APawn* const HitPawn = Cast<APawn>(PawnHit.GetActor());
+		bHitPawn && HitPawn && !CoopPlayers::IsPlayer(HitPawn) && HitPawn->CanBeDamaged())
+	{
+		ApplyHitscanDamage(PawnHit, EnergyMultiplier, PawnHit.Distance, 0.0f);
+
+		SpawnBeamEffect(Start, bHitWall ? WallHit.ImpactPoint : End, EnergyMultiplier);
+		SpawnImpactEffect(PawnHit);
+		return;
+	}
+
 	AShooterCharacter* TargetPlayer = Cast<AShooterCharacter>(PawnHit.GetActor());
 	if (!TargetPlayer)
 	{
@@ -2807,7 +4030,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		FCollisionShape::MakeSphere(SweepRadius),
 		QueryParams);
 
-	UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] === ClassicShot: Start=%s Dir=%s | SweepR=%.1f | Wall=%s dist=%.0f | pawnHits=%d refl=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] === ClassicShot: Start=%s Dir=%s | SweepR=%.1f | Wall=%s dist=%.0f | pawnHits=%d refl=%d"),
 		*Start.ToCompactString(), *Direction.ToCompactString(), SweepRadius,
 		bHitWall ? *GetNameSafe(WallHit.GetActor()) : TEXT("none"),
 		WallDistance, PawnHits.Num(), ReflectionCount);
@@ -2831,7 +4054,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			Dist = FVector::Dist(Start, HitActor->GetActorLocation());
 		}
 
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG]   cand=%s comp=%s bone=%s dist=%.0f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG]   cand=%s comp=%s bone=%s dist=%.0f"),
 			*HitActor->GetName(), *GetNameSafe(Hit.GetComponent()), *Hit.BoneName.ToString(), Dist);
 
 		if (Dist < BestDistance)
@@ -2864,8 +4087,16 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		bPawnWasHit = true;
 		PawnHitLocation = PawnHit.ImpactPoint.IsNearlyZero() ? HitActor->GetActorLocation() : FVector(PawnHit.ImpactPoint);
 
+		// A bullet stops at the first body, and the first shape of that body on the ray is the
+		// CAPSULE, which carries no bone. Ask the mesh itself before deciding this was not a head.
+		// @see ResolveHitBone.
+		if (PawnHit.BoneName.IsNone())
+		{
+			PawnHit.BoneName = ResolveHitBone(HitActor, Start, Start + Direction * (WallDistance + 200.0f));
+		}
+
 		const bool bIsHeadshot = (PawnHit.BoneName == FName("head") || PawnHit.BoneName == FName("Head"));
-		const float HeadshotMult = bIsHeadshot ? HeadshotMultiplier : 1.0f;
+		const float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
 		const float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
 
 		float ZFactorMult = 1.0f;
@@ -2913,7 +4144,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			const float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
 			const bool bKilled = IsActorDeadAfterDamage(HitActor);
 
-			UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),
+			UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] APPLIED(classic): target=%s dist=%.0f dealt=%.1f applied=%.1f killed=%d"),
 				*HitActor->GetName(), BestDistance, FinalDamage, ActualDamage, bKilled ? 1 : 0);
 
 			// Feedback goes out once, at the end of this block. @see ApplyHitscanDamage.
@@ -2935,7 +4166,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			const float ImpulseForce = HitscanPhysicsForce * RemainingEnergy;
 			if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 			{
-				ApplyHitscanKnockback(HitCharacter, Direction * ImpulseForce, bUseHitscanIonization);
+				ApplyHitscanKnockback(HitCharacter, Direction * ImpulseForce, DoesShotIonize());
 			}
 			else if (UPrimitiveComponent* HitComp = PawnHit.GetComponent())
 			{
@@ -2970,7 +4201,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] NO DAMAGE THIS SHOT (classic): pawnHits=%d (beam to %s)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] NO DAMAGE THIS SHOT (classic): pawnHits=%d (beam to %s)"),
 			PawnHits.Num(), bHitWall ? *GetNameSafe(WallHit.GetActor()) : TEXT("max range"));
 	}
 
@@ -3123,7 +4354,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		const FVector ReflectedDir = CalculateReflection(Direction, WallHit.ImpactNormal);
 		const float NewEnergy = RemainingEnergy * (1.0f - ReflectionEnergyLoss);
 
-		UE_LOG(LogTemp, Warning, TEXT("[HITSCAN_DEBUG] Classic reflection off %s (NewEnergy: %.2f)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] Classic reflection off %s (NewEnergy: %.2f)"),
 			*GetNameSafe(WallHit.GetActor()), NewEnergy);
 
 		SpawnReflectionEffect(WallHit.ImpactPoint, Direction, ReflectedDir);
@@ -3168,9 +4399,11 @@ bool AShooterWeapon::CanReload() const
 {
 	// A yanked weapon is thrown away when it runs dry rather than reloaded, whatever bUseReload says.
 	return bUseReload
-		&& !bHasLimitedAmmo
 		&& !bIsReloading
-		&& CurrentBullets < MagazineSize;
+		&& CurrentBullets < MagazineSize
+		// Nothing spare to load. Without this the gun would play the whole animation and come back
+		// with the same rounds it started with.
+		&& GetPooledAmmo() > CurrentBullets;
 }
 
 bool AShooterWeapon::StartReload()
@@ -3186,39 +4419,189 @@ bool AShooterWeapon::StartReload()
 	// shot surviving the reload is confusing to debug. Clear it and let FinishReload restart fire.
 	GetWorld()->GetTimerManager().ClearTimer(RefireTimer);
 
-	if (ReloadMontage && WeaponOwner)
+	if (bPerRoundReload)
 	{
-		WeaponOwner->PlayReloadMontage(ReloadMontage);
+		BeginPerRoundReload();
+		return true;
 	}
 
-	// The weapon's own reload: the magazine coming out, the pump, the shells going in. Played here
-	// first, so the reloading player gets it with no round trip, then sent to everyone else, whose
-	// only copy of this weapon is the third person mesh.
-	PlayReloadEffectsLocally();
+	// Decided once, here, and carried everywhere else. Recomputing it further down would read an
+	// ammo count that the reload is in the middle of changing, and the two halves of the animation
+	// could then disagree about which reload this is.
+	const bool bSecondary = UsesSecondaryReload() && SecondaryReloadMontage != nullptr;
+	const float ThisReloadTime = GetActiveReloadTime();
 
-	if (HasAuthority())
-	{
-		Multicast_PlayReloadEffects();
-	}
-	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
-	{
-		// A client reloads on its own copy of the weapon (ammo is counted by whoever pulls the
-		// trigger), so the server has to be told before it can show anyone else.
-		OwnerCharacter->Server_ReportWeaponReloaded(this);
-	}
+	ShellStage = bSecondary ? EWeaponReloadStage::Secondary : EWeaponReloadStage::Primary;
+	PlayReloadStage(ShellStage);
 
-	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, ReloadTime, false);
+	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, ThisReloadTime, false);
 
-	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload started, %d/%d rounds, %.2fs"),
-		*GetName(), CurrentBullets, MagazineSize, ReloadTime);
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: %s reload started, %d/%d rounds, %.2fs"),
+		*GetName(), bSecondary ? TEXT("secondary") : TEXT("primary"),
+		CurrentBullets, MagazineSize, ThisReloadTime);
 
 	return true;
+}
+
+// ==================== Per round reload ====================
+//
+// Start, then Loop once per round, then End. Every step is scheduled off the length of the montage
+// it just played, for the same reason the magazine reload is: a hand-typed duration drifts away
+// from the animation the first time somebody retimes it, and the gun then loads a round while the
+// hand is still reaching for it.
+
+void AShooterWeapon::BeginPerRoundReload()
+{
+	ShellStage = EWeaponReloadStage::ShellStart;
+	PlayReloadStage(ShellStage);
+
+	const float OpeningTime = ReloadMontage ? ReloadMontage->GetPlayLength() : 0.0f;
+
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: per round reload opening, %d/%d rounds, %.2fs"),
+		*GetName(), CurrentBullets, MagazineSize, OpeningTime);
+
+	GetWorld()->GetTimerManager().SetTimer(
+		ReloadTimer, this, &AShooterWeapon::AdvancePerRoundReload, FMath::Max(0.01f, OpeningTime), false);
+}
+
+void AShooterWeapon::AdvancePerRoundReload()
+{
+	if (!bIsReloading)
+	{
+		return;
+	}
+
+	// Credit the round the loop that just ended put in. At the END rather than at the start, so an
+	// interrupted loop gives nothing: the shell was still in the hand when the trigger was pulled.
+	if (ShellStage == EWeaponReloadStage::ShellLoop)
+	{
+		CurrentBullets = FMath::Min(MagazineSize, CurrentBullets + 1);
+
+		if (WeaponOwner)
+		{
+			WeaponOwner->UpdateWeaponHUD(CurrentBullets, MagazineSize);
+		}
+	}
+
+	// Full, or nothing left in the pouch. GetPooledAmmo answers with a full magazine for a weapon
+	// that owns no cells, so an infinite-reserve gun simply stops when the tube is full.
+	if (CurrentBullets >= MagazineSize || GetPooledAmmo() <= CurrentBullets)
+	{
+		EndPerRoundReload();
+		return;
+	}
+
+	ShellStage = EWeaponReloadStage::ShellLoop;
+	PlayReloadStage(ShellStage);
+
+	const UAnimMontage* const LoopMontage = SecondaryReloadMontage ? SecondaryReloadMontage : ReloadMontage;
+	const float LoopTime = LoopMontage ? LoopMontage->GetPlayLength() : 0.0f;
+
+	GetWorld()->GetTimerManager().SetTimer(
+		ReloadTimer, this, &AShooterWeapon::AdvancePerRoundReload, FMath::Max(0.01f, LoopTime), false);
+}
+
+void AShooterWeapon::EndPerRoundReload()
+{
+	ShellStage = EWeaponReloadStage::ShellEnd;
+
+	const float ClosingTime = ReloadEndMontage ? ReloadEndMontage->GetPlayLength() : 0.0f;
+
+	// No closing animation is a legitimate setup, and then the reload is simply over. Going through
+	// FinishReload either way keeps the "gun is usable again" moment in one place.
+	if (ClosingTime <= KINDA_SMALL_NUMBER)
+	{
+		FinishReload();
+		return;
+	}
+
+	PlayReloadStage(ShellStage);
+
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: per round reload closing, %d/%d rounds, %.2fs"),
+		*GetName(), CurrentBullets, MagazineSize, ClosingTime);
+
+	GetWorld()->GetTimerManager().SetTimer(
+		ReloadTimer, this, &AShooterWeapon::FinishReload, ClosingTime, false);
+}
+
+void AShooterWeapon::InterruptPerRoundReload()
+{
+	if (!bIsReloading)
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: per round reload interrupted at %d/%d rounds"),
+		*GetName(), CurrentBullets, MagazineSize);
+
+	bIsReloading = false;
+	ShellStage = EWeaponReloadStage::Primary;
+	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
+
+	// Deliberately no closing animation. The shot is what the player asked for and it has its own
+	// animation; playing the bolt being closed first would put a beat between the trigger and the
+	// bullet, which is exactly the delay interrupting was meant to remove.
+}
+
+int32 AShooterWeapon::GetPooledAmmo() const
+{
+	// Two weapons own no cells and both answer the same way: the energy one that never reloads, and
+	// the granted one whose magazine is real but whose reserve is endless. A full magazine is the
+	// right answer for both, because it is what CanReload compares against and what FinishReload
+	// clamps to, so the gun always has exactly one magazine available and never more.
+	if (!OwnsAmmoCells())
+	{
+		return MagazineSize;
+	}
+
+	if (const AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (const UInventoryComponent* Inventory = Character->GetInventoryComponent())
+		{
+			return Inventory->GetAmmo();
+		}
+	}
+
+	// No inventory at all - an NPC holding this gun. They are not on the cell economy, so the
+	// magazine behaves as it always did.
+	return MagazineSize;
+}
+
+void AShooterWeapon::SpendPooledRound()
+{
+	// Server only. On a listen server the host's own Fire() reaches here directly; a remote
+	// client's shot reaches the server through AShooterCharacter::Server_ReportWeaponFired, which
+	// calls this for the same reason the ability passives are notified there.
+	if (!HasAuthority() || !OwnsAmmoCells())
+	{
+		return;
+	}
+
+	if (AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (UInventoryComponent* Inventory = Character->GetInventoryComponent())
+		{
+			Inventory->ConsumeAmmo(1);
+		}
+	}
 }
 
 void AShooterWeapon::FinishReload()
 {
 	bIsReloading = false;
-	CurrentBullets = MagazineSize;
+
+	// A per round reload has already counted itself, one round per completed loop, and that count is
+	// the whole point: filling the magazine here would hand back the rounds an interrupted reload
+	// deliberately did not load.
+	if (!bPerRoundReload)
+	{
+		// Topped up out of the magazine cells, not conjured. With one magazine allowed the pool IS what
+		// is loaded, so this changes nothing until the meta grants a second one - which is exactly what
+		// makes that upgrade worth buying.
+		CurrentBullets = FMath::Min(MagazineSize, GetPooledAmmo());
+	}
+
+	ShellStage = EWeaponReloadStage::Primary;
 
 	if (WeaponOwner)
 	{
@@ -3243,6 +4626,7 @@ void AShooterWeapon::CancelReload()
 	}
 
 	bIsReloading = false;
+	ShellStage = EWeaponReloadStage::Primary;
 	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
 
 	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload cancelled at %d/%d rounds"),
@@ -3292,7 +4676,13 @@ void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool b
 
 bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap) const
 {
-	return IsIonizationCapReached(CurrentCharge, Cap, IonizationChargePerHit);
+	// GetShotIonization, not the raw field: which DIRECTION this weapon drives a target's charge is
+	// what decides whether the cap has been reached, and a payload that overrides the amount can
+	// flip that sign. Reading the gun's number here while the round applied its own is how the
+	// shield gate and the thing filling the meter would come apart.
+	float ChargePerHit = 0.0f;
+	GetShotIonization(ChargePerHit);
+	return IsIonizationCapReached(CurrentCharge, Cap, ChargePerHit);
 }
 
 bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap, float ChargePerHit) const
@@ -3313,7 +4703,11 @@ bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap, floa
 
 float AShooterWeapon::ApplyIonizationStep(float CurrentCharge, float Cap) const
 {
-	return ApplyIonizationStep(CurrentCharge, Cap, IonizationChargePerHit);
+	// Same reason as IsIonizationCapReached above: the amount comes from whatever this weapon is
+	// actually putting in the air, which a payload may have overridden.
+	float ChargePerHit = 0.0f;
+	GetShotIonization(ChargePerHit);
+	return ApplyIonizationStep(CurrentCharge, Cap, ChargePerHit);
 }
 
 float AShooterWeapon::ApplyIonizationStep(float CurrentCharge, float Cap, float ChargePerHit) const
@@ -3330,17 +4724,23 @@ bool AShooterWeapon::ShouldWithholdDamageForShield(AActor* Target) const
 
 bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
 {
-	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s bUseHitscanIonization=%d"),
+	// The round has the last word on whether this shot charges anything and by how much, so the
+	// question is asked once, in GetShotIonization, and the weapon's own checkbox is only part of
+	// the answer. A trace has no payload and falls straight through to the weapon's numbers.
+	float ChargePerHit = 0.0f;
+	const bool bIonizes = GetShotIonization(ChargePerHit);
+
+	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s ionizes=%d charge=%.2f"),
 		*GetNameSafe(Target),
 		HitComponent ? *HitComponent->GetName() : TEXT("null"),
-		bUseHitscanIonization);
+		bIonizes, ChargePerHit);
 
-	if (!bUseHitscanIonization)
+	if (!bIonizes)
 	{
 		return false;
 	}
 
-	return ApplyIonizationToTarget(Target, HitComponent, IonizationChargePerHit);
+	return ApplyIonizationToTarget(Target, HitComponent, ChargePerHit);
 }
 
 bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent* HitComponent, float ChargePerHit)
@@ -3514,6 +4914,11 @@ float AShooterWeapon::GetOwnerCharge() const
 
 void AShooterWeapon::SpawnMuzzleFlashEffect()
 {
+	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	{
+		return;
+	}
+
 	// Determine which VFX to use
 	UNiagaraSystem* VFXToSpawn = MuzzleFlashFX;
 
@@ -3622,6 +5027,11 @@ void AShooterWeapon::Multicast_PlayBeamEffect_Implementation(const FVector& Star
 UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, const FVector& End, float EnergyMultiplier,
 	float OverrideBoltSpeed, float OverrideBoltSpeedVariance, float OverrideBoltLength, float OverrideRandomSeed)
 {
+	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	{
+		return nullptr;
+	}
+
 	if (!BeamFX)
 	{
 		return nullptr;
@@ -3677,7 +5087,7 @@ UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, 
 			BeamComp->SetFloatParameter(FName("BeamFadeTime"), FlightTime);
 			BeamComp->SetFloatParameter(FName("FadeTime"), FlightTime);
 		}
-		UE_LOG(LogTemp, Warning, TEXT("BeamFX Distance: %.1f, Start: %s, End: %s"), FVector::Dist(Start, End), *Start.ToString(), *End.ToString());
+		UE_LOG(LogTemp, Verbose, TEXT("BeamFX Distance: %.1f, Start: %s, End: %s"), FVector::Dist(Start, End), *Start.ToString(), *End.ToString());
 
 		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
 		FVector UpVector = FVector::UpVector;
@@ -3738,6 +5148,11 @@ UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, 
 
 void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 {
+	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	{
+		return;
+	}
+
 	if (!WaveFrontFX)
 	{
 		return;
@@ -3865,6 +5280,17 @@ void AShooterWeapon::Multicast_PlayImpactEffect_Implementation(FVector_NetQuanti
 
 void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface)
 {
+	// Отладочное глушение эффектов. В бою на шестнадцать точек попадания и трассеры идут сотнями в
+	// секунду, и смотреть за поведением ИИ сквозь эту метель невозможно.
+	//
+	// Гасятся точечно, а не глобально: у Niagara нет выключателя, есть только снижение качества
+	// (fx.Niagara.QualityLevel), а оно эффекты не убирает. Зато достаточно закрыть два самых
+	// шумных источника - попадания оружия и вспышки дронов, - чтобы картинка стала читаемой.
+	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	{
+		return;
+	}
+
 	// This weapon's own per-surface entry wins where it is filled in, so a gun that was set up by
 	// hand keeps exactly what it had. The set answers for everything the weapon says nothing about.
 	const FImpactFeedback* SetEntry = FeedbackSet ? &FeedbackSet->FindImpact(Surface) : nullptr;
@@ -3965,6 +5391,11 @@ void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVe
 
 void AShooterWeapon::SpawnReflectionEffect(const FVector& Location, const FVector& IncomingDirection, const FVector& ReflectedDirection)
 {
+	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	{
+		return;
+	}
+
 	if (!ReflectionFX)
 	{
 		return;
@@ -4224,10 +5655,29 @@ float AShooterWeapon::CalculateHeatFireRateMultiplier() const
 	return FMath::Lerp(1.0f, MaxHeatFireRateMultiplier, CurrentHeat);
 }
 
+float AShooterWeapon::GetCycleActionSeconds() const
+{
+	// Out of line rather than in the header: reading a montage's length needs the complete type,
+	// and the header only ever holds pointers to it.
+	return CycleActionMontage ? CycleActionMontage->GetPlayLength() : 0.0f;
+}
+
 float AShooterWeapon::GetCurrentRefireRate() const
 {
 	// Base refire rate multiplied by heat penalty and any external multiplier (e.g. turret spin-up)
-	return RefireRate * CalculateHeatFireRateMultiplier() * ExternalFireRateMultiplier;
+	const float Base = RefireRate * CalculateHeatFireRateMultiplier() * ExternalFireRateMultiplier;
+
+	// A manual action cannot be outrun. The bolt has to close before the next round is under the
+	// firing pin, so the animation is a FLOOR on the interval rather than something played over the
+	// top of it: a rifle that fired through its own bolt would be lying about what it shows.
+	//
+	// A floor rather than a replacement, so a designer can still slow such a gun down further, and
+	// so the heat and turret multipliers keep working on a weapon that has no cycle at all.
+	//
+	// This is the only gate needed for both fire modes: the automatic path schedules the next shot
+	// off this number, and StartFiring compares against it before letting a semi-automatic weapon
+	// fire at all.
+	return FMath::Max(Base, GetCycleActionSeconds());
 }
 
 // ==================== Z-Factor ====================
@@ -4297,7 +5747,54 @@ void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	// nothing sets that any more (ADS stopped moving the camera, see AShooterCharacter::UpdateADS).
 	// It is kept correct rather than deleted so reviving SetViewTarget(Weapon) does not silently
 	// resurrect a second, disagreeing zoom.
-	OutResult.FOV = ApplyZoomToFOV(OutResult.FOV, ADSZoom);
+	OutResult.FOV = ApplyZoomToFOV(OutResult.FOV, GetADSZoom());
+}
+
+float AShooterWeapon::GetADSZoom() const
+{
+	float Zoom = ADSZoom;
+
+	// The mounted optic multiplies the weapon's own magnification rather than replacing it: a 2x
+	// scope on a marksman rifle that already aims at 1.5x is 3x, which is what putting a scope on
+	// that rifle means. A red dot leaves the multiplier at 1 and changes only the picture, which
+	// comes from its SOCKET_Aim and not from any number.
+	//
+	// Unless the optic says otherwise. A scope whose identity IS a number ("this is the 4x") has to
+	// give the same 4x on every rifle, and a multiplier cannot: it would be 4x on one gun and 6x on
+	// the next. Such an optic sets bOverrideADSZoom and owns the magnification outright.
+	if (const UWeaponAttachmentDefinition* Optic = GetAttachmentOfType(EWeaponAttachmentType::Optic))
+	{
+		Zoom = Optic->bOverrideADSZoom
+			? Optic->ADSZoomOverride
+			: Zoom * Optic->ADSZoomMultiplier;
+	}
+
+	// Below 1 is not zoom, it is a wide angle, and nothing in the game means to ask for one.
+	return FMath::Max(1.0f, Zoom);
+}
+
+FVector AShooterWeapon::GetSightEyeOffset() const
+{
+	// A mounted optic states its own eye relief, in the same camera axes SightAimOffset uses: X is
+	// how far in front of the eye the glass is held, Y and Z patch a socket that is off the sight
+	// line. Asked of the optic FIRST for the same reason the anchor is: the eye point is on the
+	// scope, so how far back the eye sits from it is the scope's business.
+	if (const UWeaponAttachmentDefinition* Optic = GetAttachmentOfType(EWeaponAttachmentType::Optic))
+	{
+		return FVector(Optic->EyeRelief, Optic->SightScreenNudge.X, Optic->SightScreenNudge.Y);
+	}
+
+	return SightAimOffset;
+}
+
+bool AShooterWeapon::ShouldLockSightToScreenCentre() const
+{
+	if (const UWeaponAttachmentDefinition* Optic = GetAttachmentOfType(EWeaponAttachmentType::Optic))
+	{
+		return Optic->bLockSightToScreenCentre;
+	}
+
+	return bLockSightToScreenCentre;
 }
 
 float AShooterWeapon::ApplyZoomToFOV(float BaseFOVDegrees, float Zoom)
@@ -4370,3 +5867,284 @@ bool AShooterWeapon::TryConsumeCharge(float& OutChargeMultiplier)
 		return true;
 	}
 }
+
+// ==================== Presentation ====================
+
+FLinearColor AShooterWeapon::GetAmmoColor() const
+{
+	// White is the identity for a tint, so a weapon with no tag draws its badge exactly as it was
+	// authored rather than disappearing into black.
+	return UPolarityPalette::GetColor(AmmoColorTag, FLinearColor::White);
+}
+
+FText AShooterWeapon::GetWeaponDisplayName() const
+{
+	if (!WeaponDisplayName.IsEmpty())
+	{
+		return WeaponDisplayName;
+	}
+
+	// A half-configured weapon reads as its class rather than as nothing. The "_C" Blueprint suffix
+	// is dropped because it is noise to a player and the only reason it is here at all.
+	FString Fallback = GetClass()->GetName();
+	Fallback.RemoveFromEnd(TEXT("_C"));
+	return FText::FromString(Fallback);
+}
+
+#if WITH_EDITOR
+
+namespace
+{
+	/** Unlit, pure white, two sided. Everything the icon capture draws wears this, which is what
+	 *  makes the result a silhouette instead of a small photograph of a gun. */
+	const TCHAR* WeaponSilhouetteMaterialPath =
+		TEXT("/Game/Variant_Shooter/UI/Widgets/HUD/Inventory/M_WeaponSilhouette.M_WeaponSilhouette");
+}
+
+void AShooterWeapon::GenerateIconFromMesh()
+{
+	USkeletalMesh* SourceMesh = FirstPersonMesh ? FirstPersonMesh->GetSkeletalMeshAsset() : nullptr;
+	if (!SourceMesh)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] %s has no first person mesh, nothing to capture."),
+			*GetClass()->GetName());
+		return;
+	}
+
+	UMaterialInterface* Silhouette = LoadObject<UMaterialInterface>(nullptr, WeaponSilhouetteMaterialPath);
+	if (!Silhouette)
+	{
+		// Deliberately a hard stop. Without the override the capture would still produce a picture,
+		// just a lit one of the gun's own textures, and that is worse than no icon because it looks
+		// like it worked.
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] Missing %s. The icon must be rendered white, so this is not optional."),
+			WeaponSilhouetteMaterialPath);
+		return;
+	}
+
+	// The capture happens in the open editor world, not in an FPreviewScene.
+	//
+	// A preview scene was the obvious choice and it does not work: a USceneCaptureComponent2D there
+	// renders nothing at all and hands back the cleared target. Measured, not guessed - the same
+	// mesh, material and capture settings give 6.8% coverage in the editor world and 0.0% in a
+	// preview scene.
+	//
+	// Nothing of the level leaks in, because the capture is put in ShowOnly mode with just this one
+	// mesh in the list. That is also why the two actors below can sit anywhere.
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] No editor world. Open a level and try again."));
+		return;
+	}
+
+	// Transient and temporary, so building an icon does not mark the level dirty.
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.ObjectFlags = RF_Transient;
+	SpawnParams.bTemporaryEditorActor = true;
+	SpawnParams.bHideFromSceneOutliner = true;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	const FVector Stage(0.0f, 0.0f, 200000.0f);
+
+	ASkeletalMeshActor* MeshActor = World->SpawnActor<ASkeletalMeshActor>(Stage, FRotator::ZeroRotator, SpawnParams);
+	ASceneCapture2D* CaptureActor = World->SpawnActor<ASceneCapture2D>(Stage, FRotator::ZeroRotator, SpawnParams);
+	if (!MeshActor || !CaptureActor)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] Could not spawn the capture rig."));
+		if (MeshActor) { MeshActor->Destroy(); }
+		if (CaptureActor) { CaptureActor->Destroy(); }
+		return;
+	}
+
+	// Everything from here on must reach the cleanup at the bottom, so there are no early returns
+	// between this point and it.
+	USkeletalMeshComponent* MeshComp = MeshActor->GetSkeletalMeshComponent();
+	MeshComp->SetSkeletalMeshAsset(SourceMesh);
+	for (int32 Index = 0; Index < MeshComp->GetNumMaterials(); ++Index)
+	{
+		MeshComp->SetMaterial(Index, Silhouette);
+	}
+
+	const FBoxSphereBounds Bounds = SourceMesh->GetBounds();
+	const float Radius = FMath::Max(Bounds.SphereRadius, 1.0f);
+
+	// Built through the helper rather than by hand, because the helper ends with
+	// UpdateResourceImmediate, which actually CLEARS the target. A hand-rolled NewObject +
+	// InitAutoFormat leaves it uninitialised, and the capture does not overwrite every pixel, so
+	// the background came back a uniform mid grey - measured at alpha 134 across the whole frame,
+	// which then reads as a fully opaque icon.
+	//
+	// Plain RGBA8, not the _SRGB variant: the pixels are read back by hand below and everything
+	// drawn is either pure white or pure black, so gamma cannot change the result.
+	UTextureRenderTarget2D* RenderTarget = UKismetRenderingLibrary::CreateRenderTarget2D(
+		World, IconResolution, IconResolution, RTF_RGBA8, FLinearColor::Black);
+	if (!RenderTarget)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] Could not create the render target."));
+		MeshActor->Destroy();
+		CaptureActor->Destroy();
+		return;
+	}
+
+	// Orthographic on purpose: perspective would foreshorten the barrel and the same gun would come
+	// out a different shape depending on how long it is.
+	USceneCaptureComponent2D* Capture = CaptureActor->GetCaptureComponent2D();
+	Capture->TextureTarget = RenderTarget;
+	Capture->CaptureSource = SCS_FinalColorLDR;
+	Capture->ProjectionType = ECameraProjectionMode::Orthographic;
+	// Clamped only against zero. Values below 1 are the point: they zoom in, which is how a long
+	// thin gun is made to carry its square icon as well as a stubby one does.
+	Capture->OrthoWidth = Radius * 2.0f * FMath::Max(IconCapturePadding, 0.05f);
+	Capture->bCaptureEveryFrame = false;
+	Capture->bCaptureOnMovement = false;
+	Capture->bAlwaysPersistRenderingState = true;
+	// Only the gun. This is what keeps the open level out of the picture, and it is why the rig can
+	// be parked anywhere.
+	Capture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+	Capture->ShowOnlyComponent(MeshComp);
+	// No show flag overrides. Turning eye adaptation off looked like the careful thing to do and it
+	// dimmed the gun to a fifth of its brightness: the render target holds 245 on the silhouette
+	// with the flags left alone, and 46 with them set. Nothing needs disabling anyway, because the
+	// ShowOnly list already means the only thing in frame is one unlit white mesh.
+
+	const FRotator ViewRotation(0.0f, IconCaptureYaw, 0.0f);
+	const FVector ViewDirection = ViewRotation.Vector();
+	CaptureActor->SetActorLocationAndRotation(
+		Stage + Bounds.Origin - ViewDirection * Radius * 4.0f, ViewRotation);
+
+	// Push the components' render state across before asking for a frame. Skipping this reads back
+	// the cleared target, which is black, which silently becomes a fully transparent icon.
+	// Waiting for the frame needs no explicit flush: ReadPixels below blocks on the render thread,
+	// and the capture is already ahead of it in the same queue.
+	World->SendAllEndOfFrameUpdates();
+	Capture->CaptureScene();
+
+	// Read the frame back and turn it into a real silhouette: white everywhere, coverage in the
+	// alpha.
+	//
+	// Two reasons this is done by hand rather than through RenderTargetCreateStaticTexture2DEditorOnly.
+	// First, that path infers the texture's gamma from the render target and gets it wrong, which
+	// is not a warning but an assert inside the texture builder:
+	// "MipView.GammaSpace == LayerData.SourceGammaSpace", and the editor dies. Second, even when it
+	// survives, what it produces is a white gun on an OPAQUE BLACK SQUARE - fine as a thumbnail,
+	// useless on a HUD plate, because the icon has to composite over whatever is behind it.
+	FTextureRenderTargetResource* Resource = RenderTarget->GameThread_GetRenderTargetResource();
+	TArray<FColor> Pixels;
+	const bool bRead = Resource && Resource->ReadPixels(Pixels) && Pixels.Num() == IconResolution * IconResolution;
+
+	// The rig has done its job. Torn down here rather than at the end so none of the failure exits
+	// below can leave two invisible actors parked in the level.
+	MeshActor->Destroy();
+	CaptureActor->Destroy();
+
+	if (!bRead)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] Could not read the capture back."));
+		return;
+	}
+
+	// Everything drawn wore the white unlit material, so brightness IS coverage. It is NOT reliably
+	// full brightness though: the capture goes through the tonemapper and whatever exposure the
+	// scene happens to be sitting at, and the same gun came back with a peak alpha of 46, 142 and
+	// 245 on three runs that differed in nothing but when they were taken.
+	//
+	// So the frame is normalised instead of trusted. The silhouette is a flat shape, so scaling it
+	// until its brightest pixel is opaque costs nothing, keeps the soft edges in proportion, and
+	// makes the result independent of exposure, of the material's brightness, and of how much of
+	// the frame the gun happens to fill.
+	int32 CoveredPixels = 0;
+	uint8 PeakCoverage = 0;
+	for (FColor& Pixel : Pixels)
+	{
+		const uint8 Coverage = FMath::Max3(Pixel.R, Pixel.G, Pixel.B);
+		CoveredPixels += (Coverage > 8) ? 1 : 0;
+		PeakCoverage = FMath::Max(PeakCoverage, Coverage);
+		Pixel = FColor(255, 255, 255, Coverage);
+	}
+
+	if (PeakCoverage > 0 && PeakCoverage < 255)
+	{
+		const float Gain = 255.0f / static_cast<float>(PeakCoverage);
+		for (FColor& Pixel : Pixels)
+		{
+			Pixel.A = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Pixel.A * Gain), 0, 255));
+		}
+	}
+
+	// A capture that renders nothing produces a perfectly valid, perfectly invisible icon, and that
+	// is the worst possible outcome: the button reports success and the HUD shows a blank. Refuse
+	// instead. Anything under a twentieth of a percent is not a gun, it is a failed capture.
+	const float CoveredFraction = static_cast<float>(CoveredPixels) / static_cast<float>(Pixels.Num());
+	if (CoveredFraction < 0.0005f)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[WEAPON_ICON] %s captured an empty frame (%.4f%% covered). Nothing written. ")
+			TEXT("Check that the mesh renders and that IconCaptureYaw points at it."),
+			*GetClass()->GetName(), CoveredFraction * 100.0f);
+		return;
+	}
+
+	// Saved next to the Blueprint that owns it, under a name derived from the class, so pressing
+	// the button again after a mesh swap overwrites the same asset instead of littering.
+	FString ClassName = GetClass()->GetName();
+	ClassName.RemoveFromEnd(TEXT("_C"));
+	const FString PackagePath = FPackageName::GetLongPackagePath(GetClass()->GetOutermost()->GetName());
+	const FString AssetName = TEXT("T_WeaponIcon_") + ClassName;
+	const FString PackageName = PackagePath / AssetName;
+
+	UPackage* Package = CreatePackage(*PackageName);
+	if (!Package)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] Could not create package %s."), *PackageName);
+		return;
+	}
+	Package->FullyLoad();
+
+	UTexture2D* NewIcon = FindObject<UTexture2D>(Package, *AssetName);
+	const bool bCreated = (NewIcon == nullptr);
+	if (bCreated)
+	{
+		NewIcon = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone);
+	}
+	if (!NewIcon)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_ICON] Could not create %s."), *PackageName);
+		return;
+	}
+
+	NewIcon->PreEditChange(nullptr);
+	// Declared rather than inferred. This pair is exactly what the crashed path was guessing at.
+	// Square, the full captured frame. The gun sits in a mostly transparent square and that is
+	// deliberate: the HUD and the inventory both give the icon a square slot, so a texture cropped
+	// to the gun would change shape from weapon to weapon and never line up. Cropping happens
+	// outside the game, only where a tight silhouette is actually wanted.
+	NewIcon->Source.Init(IconResolution, IconResolution, 1, 1, TSF_BGRA8,
+		reinterpret_cast<const uint8*>(Pixels.GetData()));
+	NewIcon->SRGB = true;
+	// Uncompressed: the silhouette is one hard edge between white and nothing, and DXT fringes
+	// exactly that.
+	NewIcon->CompressionSettings = TC_EditorIcon;
+	NewIcon->MipGenSettings = TMGS_NoMipmaps;
+	NewIcon->NeverStream = true;
+	NewIcon->PostEditChange();
+	NewIcon->UpdateResource();
+
+	if (bCreated)
+	{
+		FAssetRegistryModule::AssetCreated(NewIcon);
+	}
+	Package->MarkPackageDirty();
+
+	Modify();
+	Icon = NewIcon;
+	MarkPackageDirty();
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[WEAPON_ICON] %s -> %s (%s), %dx%d, peak alpha %d normalised to 255. ")
+		TEXT("Save both assets to keep it."),
+		*GetClass()->GetName(), *PackageName, bCreated ? TEXT("new") : TEXT("overwritten"),
+		IconResolution, IconResolution, PeakCoverage);
+}
+
+#endif // WITH_EDITOR

@@ -12,9 +12,42 @@ class ACharacter;
 class UPrimitiveComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
+class AShooterWeapon;
+
+/**
+ * Whether this round ionizes, and whose number decides it.
+ *
+ * Three states rather than a signed float, because ionization is SIGNED: a weapon whose charge per
+ * hit is negative electrifies the other way, so "does not ionize" cannot be spelled as zero the way
+ * HitDamage spells "defer" as a negative.
+ */
+UENUM(BlueprintType)
+enum class EProjectileIonization : uint8
+{
+	/** Whatever the gun that fired this round does. The ordinary answer for an ordinary bullet. */
+	FromWeapon UMETA(DisplayName = "From Weapon"),
+
+	/** This round never charges anything, whatever the gun is set to. A payload that is purely
+	 *  kinetic in an otherwise electrifying weapon. */
+	Never UMETA(DisplayName = "Never"),
+
+	/** This round carries its own amount, and the gun's is ignored. */
+	Override UMETA(DisplayName = "Own Amount"),
+};
 
 /**
  *  Simple projectile class for a first person shooter game
+ *
+ *  THE SPLIT between this and AShooterWeapon (the long version is on the weapon, above its Damage
+ *  section):
+ *
+ *  - The WEAPON owns what a SHOT is worth: damage, headshot, damage type, ionization, tag
+ *    multipliers, the shield gate. Same numbers whether a trace, a bolt or a round carried the shot.
+ *  - THIS class owns what the ROUND is: flight (speed, gravity, bounce, homing -- all of it on the
+ *    ProjectileMovement component, and read straight off this CDO by the weapon's ballistic solver),
+ *    what impact means (explosion, radius, falloff, rocket jump, physics force, noise), and lifetime.
+ *  - The "Weapon Overrides" section below is where a SPECIAL round overrules the gun. Every field
+ *    there defaults to deferring, so an ordinary bullet configures nothing and inherits everything.
  */
 UCLASS(abstract)
 class POLARITY_API AShooterProjectile : public AActor
@@ -27,7 +60,14 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components")
 	USphereComponent* CollisionComponent;
 
-	/** Handles movement for the projectile */
+	/** Handles movement for the projectile.
+	 *
+	 *  EVERYTHING about how this round flies is configured here and nowhere else: InitialSpeed,
+	 *  MaxSpeed, ProjectileGravityScale, bounce, homing. The weapon deliberately keeps no copy --
+	 *  AShooterWeapon::SolveBallisticAim reads speed and gravity straight off this CDO to decide
+	 *  whether a shot needs an arc, so a second set of numbers on the gun would be a second set to
+	 *  get wrong. Want a slower shell that lobs? Change it on the round, and the AI's solver follows
+	 *  with no configuration anywhere saying it should. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components")
 	UProjectileMovementComponent* ProjectileMovement;
 
@@ -47,28 +87,85 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 50000))
 	float PhysicsForce = 100.0f;
 
-	/** Launch velocity applied to characters caught by the hit/explosion (cm/s). CharacterMovement ignores physics impulses, so characters are launched instead of pushed. Set to 0 to disable. */
-	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 10000, Units = "cm/s"))
+	/** Launch velocity applied to characters caught by the EXPLOSION (cm/s). CharacterMovement ignores
+	 *  physics impulses, so characters are launched instead of pushed. Set to 0 to disable.
+	 *
+	 *  Deliberately not used by a direct hit any more. A direct hit goes through the weapon's shared
+	 *  funnel, which drops small launches on a grounded target: LaunchCharacter always forces
+	 *  MOVE_Falling, so every bullet used to make the target hop instead of playing its flinch.
+	 *  The rocket keeps this number because the pop off an explosion is the point of it. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Explosion", meta = (ClampMin = 0, ClampMax = 10000, Units = "cm/s"))
 	float CharacterKnockbackForce = 1200.0f;
 
 	/** Upward bias added to the knockback direction (0 = purely radial, 1 = strong upward kick). Gives the TF2-style "pop" so explosions at the feet launch up, not sideways. */
 	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 1))
 	float KnockbackUpwardBias = 0.4f;
 
-	/** Damage to apply on hit */
-	UPROPERTY(EditAnywhere, Category="Projectile|Hit", meta = (ClampMin = 0, ClampMax = 100))
-	float HitDamage = 25.0f;
+	/**
+	 * Damage on a direct hit, as an OVERRIDE of the weapon's number.
+	 *
+	 * Negative (the default) means "whatever the gun that fired me does", which is what an ordinary
+	 * round should say: the weapon owns the balance number, exactly as it does when it traces, and
+	 * one gun has one figure to tune instead of one per payload.
+	 *
+	 * Zero or above is a payload that insists on its own damage, and a special one should insist:
+	 * that is how a rocket stays a rocket after Upgrade_RocketProjectileSwap loads a different round
+	 * into the same launcher. The weapon reads this back through GetShotDamage, so the HUD's damage
+	 * readout still tells the truth about a gun firing an overriding payload.
+	 *
+	 * A projectile with no weapon behind it (a trap, an ability) has nothing to inherit from and
+	 * must set its own number.
+	 */
+	UPROPERTY(EditAnywhere, Category="Projectile|Weapon Overrides", meta = (ClampMin = -1, ClampMax = 100))
+	float HitDamage = -1.0f;
 
-	/** Type of damage to apply. Can be used to represent specific types of damage such as fire, explosion, etc. */
-	UPROPERTY(EditAnywhere, Category="Projectile|Hit")
+	/**
+	 * Headshot multiplier for this round, as an OVERRIDE of the weapon's number.
+	 *
+	 * Negative (the default) defers to the gun, which is what a bullet wants: one figure per weapon.
+	 * Zero or above is a payload that decides for itself, and an explosive one should decide 1.0 --
+	 * a rocket that went off against somebody's skull did not go off any harder than one that went
+	 * off against their chest, and inheriting the rifle's x2 makes a launcher a sniper by accident.
+	 *
+	 * Read through AShooterWeapon::GetShotHeadshotMultiplier, so it applies on the one path that
+	 * resolves the bone (ApplyWeaponHit) and nowhere else.
+	 */
+	UPROPERTY(EditAnywhere, Category="Projectile|Weapon Overrides", meta = (ClampMin = -1, ClampMax = 10))
+	float HeadshotMultiplierOverride = -1.0f;
+
+	/**
+	 * Whether this round charges what it hits, and whose number says by how much.
+	 *
+	 * Defaults to the gun's answer. Set it to Never for a payload that must stay purely kinetic in a
+	 * weapon that otherwise electrifies, or to Own Amount when the round is the thing carrying the
+	 * charge -- which is what makes an ionizing payload possible in a launcher whose other rounds
+	 * are not.
+	 */
+	UPROPERTY(EditAnywhere, Category="Projectile|Weapon Overrides")
+	EProjectileIonization IonizationOverride = EProjectileIonization::FromWeapon;
+
+	/** Charge this round puts into its target per hit, when IonizationOverride is Own Amount.
+	 *  Signed, exactly as the weapon's is: negative electrifies the other way. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Weapon Overrides",
+		meta = (EditCondition = "IonizationOverride == EProjectileIonization::Override", EditConditionHides))
+	float IonizationChargePerHit = 2.0f;
+
+	/** Type of damage to apply. Can be used to represent specific types of damage such as fire,
+	 *  explosion, etc. Overrides the weapon's damage type: fire and blast belong to the payload
+	 *  rather than to the barrel it left. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Weapon Overrides")
 	TSubclassOf<UDamageType> HitDamageType;
 
-	/** If true, the projectile can damage the character that shot it */
-	UPROPERTY(EditAnywhere, Category="Projectile|Hit")
+	/** If true, the projectile can damage the character that shot it. Independent of the weapon's
+	 *  own owner-damage flag on purpose: a rocket that is supposed to hurt whoever fired it must not
+	 *  be silenced by a checkbox that was written for the trace path. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Weapon Overrides")
 	bool bDamageOwner = false;
 
-	/** Damage multipliers based on target actor tags. Multiple matching tags multiply together. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Projectile|Hit")
+	/** Damage multipliers based on target actor tags. Multiple matching tags multiply together.
+	 *  Used ONLY when this round has no weapon behind it (a trap, an ability). With a gun present
+	 *  the gun's map is the one that counts, because applying both would square them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Projectile|Weapon Overrides")
 	TMap<FName, float> TagDamageMultipliers;
 
 	/** If true, the projectile will explode and apply radial damage to all actors in range */
@@ -118,6 +215,27 @@ protected:
 	/** If true, this projectile has already hit another surface */
 	bool bHit = false;
 
+	/**
+	 * The weapon that fired this round.
+	 *
+	 * Without it a projectile knows nothing about the shot it IS: not the feedback set, not the
+	 * headshot multiplier, not whether the target's shield gates damage, not that the owner has an
+	 * upgrade waiting on the hit. That is the whole reason a projectile weapon used to punch through
+	 * shields in silence while the same weapon firing traces did none of those things wrong.
+	 *
+	 * Replicated so a watching client's copy can answer for cosmetics too. Null is legal and means
+	 * "no weapon behind this one" (a trap, an ability, a projectile spawned by design with no gun),
+	 * and the old self-contained damage path is what runs then.
+	 */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category="Projectile")
+	TObjectPtr<AShooterWeapon> SourceWeapon = nullptr;
+
+	/** The hit result NotifyHit came in with, kept for the length of the ProcessHit call below it.
+	 *  ProcessHit takes a loose actor/point/direction (five subclasses override that signature), but
+	 *  the funnel needs the whole result: the bone for headshots and the physical material for the
+	 *  impact's surface. Valid only during that call, which is the only place that reads it. */
+	FHitResult DirectHit;
+
 	/** How long to wait after a hit before destroying this projectile */
 	UPROPERTY(EditAnywhere, Category="Projectile|Destruction", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
 	float DeferredDestructionTime = 5.0f;
@@ -166,6 +284,35 @@ public:
 	/** Mark this one as the shooter's local stand-in. Set it before the projectile can hit anything. */
 	void SetCosmeticOnly() { bIsCosmeticOnly = true; }
 
+	/** Tell this round which gun it came out of. Set at spawn, before it can hit anything. */
+	void SetSourceWeapon(AShooterWeapon* InWeapon) { SourceWeapon = InWeapon; }
+
+	/** Stop colliding with another round. Called on every pair of pellets a shotgun puts in the air,
+	 *  because they all leave the same muzzle point and would otherwise block each other on the
+	 *  frame they spawn. @see AShooterWeapon_Shotgun::FireProjectile */
+	void IgnoreProjectileWhileFlying(AShooterProjectile* Other);
+
+	/** The weapon that fired this round, or null for a projectile with no gun behind it. */
+	UFUNCTION(BlueprintPure, Category="Projectile")
+	AShooterWeapon* GetSourceWeapon() const { return SourceWeapon; }
+
+	/** This payload's damage override, negative when it defers to the weapon. Read by the weapon
+	 *  itself (GetShotDamage) so the damage readout can answer for a gun it has never fired. */
+	float GetDirectHitDamageOverride() const { return HitDamage; }
+
+	/** This payload's headshot override, negative when it defers to the weapon.
+	 *  @see AShooterWeapon::GetShotHeadshotMultiplier */
+	float GetHeadshotMultiplierOverride() const { return HeadshotMultiplierOverride; }
+
+	/** Whether this payload ionizes, and whose number decides.
+	 *  @see AShooterWeapon::GetShotIonization */
+	EProjectileIonization GetIonizationOverride() const { return IonizationOverride; }
+
+	/** This payload's own charge per hit. Meaningful only when GetIonizationOverride() is Override. */
+	float GetIonizationChargeOverride() const { return IonizationChargePerHit; }
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 	/** True when this projectile may change the world: the authority's copy, and never a client's
 	 *  local stand-in. Everything cosmetic ignores it; everything that damages, explodes or pushes
 	 *  has to ask. */
@@ -195,6 +342,26 @@ protected:
 
 	/** Processes a projectile hit for the given actor */
 	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection);
+
+	/**
+	 * The one door a DIRECT projectile hit goes through, and the reason subclasses no longer call
+	 * ApplyDamage by hand.
+	 *
+	 * With a SourceWeapon it hands the hit to AShooterWeapon::ApplyWeaponHit, which is the same
+	 * funnel a trace of that weapon lands in: shield gate, class passive, headshot, upgrades,
+	 * ionization, hit marker, knockback under the grounded rule. Without one it falls back to plain
+	 * damage plus a physics impulse, which is all a gunless projectile ever meant.
+	 *
+	 * FinalDamage is the caller's number BEFORE the weapon's own multipliers (the base HitDamage,
+	 * a charge-scaled one, whatever the subclass worked out).
+	 */
+	void ApplyDirectHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation,
+		const FVector& HitDirection, float FinalDamage);
+
+	/** The damage this round starts from: its own override, or the weapon's number when it defers.
+	 *  Zero with a loud log if it defers to a weapon that has no number configured, because a gun
+	 *  that silently fires blanks is the one failure nobody finds by looking at it. */
+	float ResolveDirectHitDamage() const;
 
 	/** Processes explosion damage and knockback for one actor */
 	void ProcessExplosionHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& ExplosionCenter, AActor* DirectHitActor);

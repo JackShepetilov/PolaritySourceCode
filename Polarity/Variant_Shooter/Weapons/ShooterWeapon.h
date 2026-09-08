@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
@@ -12,11 +12,17 @@
 #include "WeaponSpreadConfig.h"
 #include "MovementSettings.h"
 #include "Chaos/ChaosEngineInterface.h"
+#include "GameplayTagContainer.h"
 #include "Engine/NetSerialization.h"
+// For EWeaponAttachmentType. Included rather than forward declared because UHT needs the complete
+// enum to build the TMap property below.
+#include "Variant_Shooter/Weapons/WeaponAttachmentDefinition.h"
 #include "ShooterWeapon.generated.h"
 
 class IShooterWeaponHolder;
 class AShooterProjectile;
+class URecoilData;
+class UPrimaryDataAsset;
 class USkeletalMeshComponent;
 class UCameraComponent;
 class UAnimMontage;
@@ -25,6 +31,10 @@ class UAnimationAsset;
 class UNiagaraSystem;
 class UNiagaraComponent;
 class UPhysicalMaterial;
+class UTexture2D;
+class UStaticMesh;
+class UStaticMeshComponent;
+class USceneComponent;
 class UDamageType;
 class UCharacterMovementComponent;
 class USoundAttenuation;
@@ -74,6 +84,20 @@ protected:
 	 *  its WeaponSwitchActions list. Leave null for weapons reachable only via the cycle key. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> SwitchAction;
+
+	/** Which hotkey slot this INSTANCE sits in on its current owner, or INDEX_NONE when nobody has
+	 *  placed it.
+	 *
+	 *  The slot belongs to the PLAYER, not to the weapon class: the class weapon is always slot 0
+	 *  (key 1) and a looted one always slot 1 (key 2), so the same gun answers to key 1 in the hands
+	 *  of the class that starts with it and to key 2 when it is picked up off the ground. That is
+	 *  why this is an instance field the character writes rather than a default on the Blueprint.
+	 *
+	 *  Written on every path that puts a weapon into AShooterCharacter::OwnedWeapons; replicated
+	 *  because the key is pressed on the owning client, which is looking at a replicated copy of
+	 *  that array. SwitchAction above stays as the fallback for weapons nobody placed (NPC guns). */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Input")
+	int32 HotkeySlot = INDEX_NONE;
 
 	// ==================== Firing Mode ====================
 
@@ -138,19 +162,54 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Projectile", meta = (EditCondition = "!bUseHitscan"))
 	TSubclassOf<AShooterProjectile> ProjectileClass;
 
-	// ==================== Hitscan Settings ====================
+	// ==================== What a shot of this weapon is worth ====================
+	//
+	// THE SPLIT, and the rule that decides which side a field belongs on:
+	//
+	//   The WEAPON owns what a SHOT is worth -- damage, headshot, damage type, ionization, tag
+	//   multipliers, the shield gate. These are balance numbers for the gun, and they apply the
+	//   same whether the shot is carried by a trace, a bolt, or a projectile actor. They are NOT
+	//   under EditCondition "bUseHitscan" any more: they never were hitscan-only in the code, only
+	//   in the editor, so a projectile weapon's damage sat greyed out at 20 while the round it
+	//   fired silently inherited it.
+	//
+	//   The PROJECTILE owns what the ROUND is -- how fast it flies, whether it falls, whether it
+	//   bounces or homes, what it does on impact (explosion, radius, falloff, rocket jump, physics
+	//   force, noise), and how long it lives. None of that has a meaning for a trace.
+	//
+	//   A projectile may OVERRIDE any of the weapon's shot numbers, and a special payload should:
+	//   that is how a rocket stays a rocket after Upgrade_RocketProjectileSwap loads a different
+	//   round into the same tube. Overrides are read off the projectile CDO by GetShotPayload()
+	//   below, and only when the weapon actually fires projectiles.
+	//
+	// Genuinely hitscan-only settings (range, the bolt, divergence, reflection, the wave) keep their
+	// EditCondition and stay in the Hitscan category.
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan", ClampMin = "0"))
+	/** Damage one shot of this weapon does, BEFORE the headshot and every situational multiplier.
+	 *
+	 *  THE damage number for this weapon in both firing modes. The name is the only thing left over
+	 *  from when it meant "damage while tracing"; the projectile path has read it through
+	 *  GetShotDamage since the round stopped carrying its own. A projectile class may still override
+	 *  it (AShooterProjectile::HitDamage >= 0). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (DisplayName = "Shot Damage", ClampMin = "0"))
 	float HitscanDamage = 20.0f;
+
+	/** Multiplier when the shot lands on the head bone. Applies to traces, bolts and projectiles
+	 *  alike -- ApplyWeaponHit resolves the bone for all three. A projectile may override it
+	 *  (AShooterProjectile::HeadshotMultiplierOverride >= 0), which is how a rocket stops caring
+	 *  where on a body it went off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (ClampMin = "1.0"))
+	float HeadshotMultiplier = 2.0f;
+
+	/** Damage type for a shot of this weapon. A projectile with its own HitDamageType wins, because
+	 *  fire and explosion belong to the payload rather than to the barrel it left. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (DisplayName = "Damage Type"))
+	TSubclassOf<UDamageType> HitscanDamageType;
+
+	// ==================== Hitscan-only Settings ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan", ClampMin = "0"))
 	float MaxHitscanRange = 10000.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan", ClampMin = "1.0"))
-	float HeadshotMultiplier = 2.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
-	TSubclassOf<UDamageType> HitscanDamageType;
 
 	/** How far above the headshot number one reported hit is still allowed to go.
 	 *
@@ -176,11 +235,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
 	bool bDrawHitscanDebug = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
+	/** This weapon may hurt whoever is holding it. Read by ApplyWeaponHit for every carrier, so it
+	 *  covers a trace that came back at the shooter as well as a round that did. A projectile that
+	 *  is SUPPOSED to hurt its owner (a rocket at your own feet) says so itself with bDamageOwner
+	 *  and is not silenced by this being off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (DisplayName = "Can Damage Owner"))
 	bool bHitscanDamageOwner = false;
 
-	/** Damage multipliers based on target actor tags. Multiple matching tags multiply together. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan", meta = (EditCondition = "bUseHitscan"))
+	/** Damage multipliers based on target actor tags. Multiple matching tags multiply together.
+	 *  Folded into GetShotDamageMultiplierAgainst, which every carrier goes through, so this is the
+	 *  gun's answer for traces and rounds alike. A gunless projectile falls back to its own copy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage")
 	TMap<FName, float> TagDamageMultipliers;
 
 	/** This weapon only hurts a target whose shield is already down.
@@ -200,18 +265,23 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage")
 	bool bRequiresBrokenShieldToDamage = false;
 
-	// ==================== Hitscan Ionization ====================
+	// ==================== Ionization ====================
+	//
+	// Not hitscan-only, and it never was in the code: ApplyWeaponHit ionizes for every carrier, so a
+	// projectile weapon has been electrifying its targets all along while these three fields sat
+	// greyed out in the editor and could not be tuned. A projectile may override the per-hit amount,
+	// or refuse to ionize at all -- see AShooterProjectile::IonizationOverride.
 
-	/** If true, hitscan hits apply a fixed positive charge to the target */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (EditCondition = "bUseHitscan"))
+	/** If true, a hit from this weapon applies a fixed charge to the target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage|Ionization", meta = (DisplayName = "Use Ionization"))
 	bool bUseHitscanIonization = false;
 
-	/** Fixed positive charge added to target per hit */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (EditCondition = "bUseHitscan && bUseHitscanIonization"))
+	/** Charge added to the target per hit. Signed: negative electrifies the other way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage|Ionization", meta = (EditCondition = "bUseHitscanIonization"))
 	float IonizationChargePerHit = 2.0f;
 
-	/** Maximum positive charge that can be applied via ionization (also used by laser) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitscan|Ionization", meta = (ClampMin = "0.0", ClampMax = "100.0"))
+	/** Maximum charge MAGNITUDE ionization can drive a target to (also used by laser) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage|Ionization", meta = (ClampMin = "0.0", ClampMax = "100.0"))
 	float MaxIonizationCharge = 20.0f;
 
 	/** True when the target is already at ITS OWN ceiling in the direction this weapon pushes.
@@ -521,6 +591,18 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Animation")
 	UAnimMontage* FiringMontage;
 
+	/** The holder works the action after a shot: a bolt, a pump, a lever.
+	 *
+	 *  Setting this is what MAKES a weapon manual action. Firing is gated until the animation is
+	 *  over (GetCurrentRefireRate takes its length as a floor), so the rate of fire of such a gun is
+	 *  the length of this animation and not a number typed next to it. That is the honest way round:
+	 *  a bolt rifle that could fire before the bolt was closed would be lying about what it shows.
+	 *
+	 *  Deliberately NOT FiringMontage, which every weapon in the project may already use for a
+	 *  flourish. Overloading that one would gate twenty weapons that were never meant to be gated. */
+	UPROPERTY(EditAnywhere, Category = "Animation")
+	TObjectPtr<UAnimMontage> CycleActionMontage;
+
 	// ==================== Animation|Weapon mesh ====================
 	//
 	// The two above are what the HOLDER plays: they run on the character's skeleton and move the
@@ -539,9 +621,26 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshFireAnimation;
 
-	/** Played on the weapon's own meshes when a reload starts. */
+	/** Played on the weapon's own meshes when a reload starts. Primary slot: the empty reload. */
 	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshReloadAnimation;
+
+	/** The weapon's half of the second reload. Empty falls back to WeaponMeshReloadAnimation. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshSecondaryReloadAnimation;
+
+	/** The weapon's half of the closing stage of a per round reload. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshReloadEndAnimation;
+
+	/** Played instead of WeaponMeshFireAnimation on the shot that EMPTIES the magazine.
+	 *
+	 *  This is the slide or the bolt staying open, and it is a different animation rather than the
+	 *  same one stopped early: the ordinary fire animation returns to battery, so a gun with an
+	 *  empty magazine would sit there looking loaded. Only weapons whose action actually locks back
+	 *  have one, and empty means every shot uses the ordinary animation. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshLastShotAnimation;
 
 	/** Runs one of the above on both weapon meshes: the first person one the shooter sees and the
 	 *  third person one everybody else sees. Does nothing when the asset is not set. */
@@ -559,6 +658,162 @@ protected:
 	 *  no see) onto everything parented under it, so an attachment added in the Blueprint cannot
 	 *  end up drawn in a different pass from the gun it is bolted to. */
 	void PropagateRenderVisibilityToChildren();
+
+	// ==================== FPS Animation Pack profile ====================
+	//
+	// One pointer that carries a whole weapon. Their DA_<gun> (a WeaponSettings_C data asset) holds
+	// the fire rate, the magazine, the fire sound, the PRAS recoil asset, the camera shake, the
+	// weapon mesh's anim blueprint, the montages for the weapon mesh, AND a nested ViewmodelSettings
+	// asset with the montages for the hands. Assigning it plus the mesh reproduces every single
+	// asset that was set by hand on BP_AR, verified field by field on DA_MX16A4.
+	//
+	// NOTHING here is required. An empty profile leaves every field below exactly as the Blueprint
+	// set it, which is what keeps the twenty-odd weapons that predate the pack working untouched.
+
+	/** Their DA_<weapon> (WeaponSettings_C). Empty = this weapon is not a pack weapon and every
+	 *  field is read from the Blueprint as before.
+	 *
+	 *  Typed as UPrimaryDataAsset rather than the real class because the real class is Blueprint
+	 *  only: WeaponSettings_C has no native parent to cast to, so it is read by property name. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack")
+	TObjectPtr<UPrimaryDataAsset> PackWeaponSettings;
+
+	/** Recoil asset, when it should differ from the one inside PackWeaponSettings, or when a weapon
+	 *  wants PRAS recoil without taking the rest of the profile. Empty falls through to the
+	 *  profile's own RecoilSettings; both empty means this weapon keeps OUR recoil. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack")
+	TObjectPtr<URecoilData> PackRecoilData;
+
+	/** Amplitude of the pack's WEAPON recoil, as a multiplier on everything PRAS moves (pitch,
+	 *  kickback, yaw, roll, noise).
+	 *
+	 *  Goes through their own ScaleInput, so tuning a weapon down never edits a shared recoil asset
+	 *  that eight other guns also use. 1 is the pack author's own numbers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack",
+		meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float PackRecoilScale = 1.0f;
+
+	/** Amplitude of the pack's CAMERA jolt, the curve shake their DA calls RecoilShake.
+	 *
+	 *  Separate from PackRecoilScale on purpose: how hard the gun jumps and how hard the view is
+	 *  punched are two different tastes, and the pack ships them as two different assets. 0 turns
+	 *  the jolt off and leaves the smooth ControllerRecoil climb alone. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack",
+		meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float PackCameraShakeScale = 1.0f;
+
+	/** Escape hatch for the rate of fire: off keeps the Blueprint's own RefireRate even under a
+	 *  profile. Defaults to on, so out of the box the profile decides like everything else.
+	 *
+	 *  Exists only because a number has no "unset" the way an asset pointer does, so a weapon that
+	 *  wants their animations but its own pacing has no other way to say so. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack",
+		meta = (EditCondition = "PackWeaponSettings != nullptr"))
+	bool bPackSetsFireRate = true;
+
+	/** Same, for the magazine (their Ammo). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack",
+		meta = (EditCondition = "PackWeaponSettings != nullptr"))
+	bool bPackSetsMagazine = true;
+
+	/** Reads PackWeaponSettings over the fields below.
+	 *
+	 *  THE PROFILE WINS. Setting PackWeaponSettings is the statement "this weapon is theirs, set it
+	 *  up the way its author did", so every value the profile carries replaces ours. Our own
+	 *  montage, sound and number fields are the fallback for a weapon with NO profile, which is
+	 *  every weapon that predates the pack.
+	 *
+	 *  A slot the profile leaves empty is not an instruction to clear: MX16A4 has no hands Fire
+	 *  montage because PRAS does that shake, and blanking ours over it would take away a working
+	 *  animation to replace it with nothing.
+	 *
+	 *  Called once from BeginPlay, before anything reads a montage. Every value taken is logged
+	 *  under [PACK] so a weapon that behaves oddly can be traced to the field it inherited rather
+	 *  than to the field somebody thought they set. */
+	void ApplyPackWeaponSettings();
+
+	/** Hands this weapon's profile to the pack's ViewmodelController on the holder, so its anim
+	 *  graph poses the arms for THIS gun.
+	 *
+	 *  Not cosmetic bookkeeping: ActiveSettings is where their stack reads the hold pose from, and
+	 *  while it stayed pinned to whatever the character Blueprint was saved with, every weapon in
+	 *  the game was held in that one weapon's pose. A revolver got a rifle's grip, and every reload
+	 *  animation snapped back to the rifle hold the moment it ended, because the montage and the
+	 *  pose underneath it belonged to two different guns.
+	 *
+	 *  Called on equip. A weapon with no profile writes nothing at all rather than clearing: our own
+	 *  weapons run our own arms graph and have no pack pose to offer, and blanking the field is how
+	 *  the hands end up in the skeleton's base pose with the wrists a metre apart. */
+	void PushPackViewmodelSettings();
+
+	// The two questions the CHARACTER asks about this weapon's recoil, so both are public. The
+	// fields and the filling above stay protected: they are the weapon's own business.
+public:
+
+	/** The PRAS recoil asset this weapon should drive, or null when it has none.
+	 *
+	 *  Null is the signal that OUR WeaponRecoilComponent stays in charge, so this is the one
+	 *  question the character asks to decide which recoil system runs. */
+	UFUNCTION(BlueprintPure, Category = "FPS Animation Pack")
+	URecoilData* GetPackRecoilData() const { return ResolvedPackRecoilData; }
+
+	/** Rounds per minute for PRAS, which wants a rate rather than an interval. Taken from the
+	 *  profile when it has one, otherwise derived from our own RefireRate so a weapon with a hand
+	 *  assigned PackRecoilData and no profile still initialises correctly. */
+	UFUNCTION(BlueprintPure, Category = "FPS Animation Pack")
+	float GetPackFireRateRPM() const;
+
+	/** The camera jolt this weapon fires, or null when it has none. Null is the whole test: no
+	 *  curve means no jolt, and the smooth ControllerRecoil climb is unaffected either way. */
+	UCurveVector* GetPackShakeCurve() const { return PackShakeCurve; }
+
+	float GetPackShakePlayRate() const { return PackShakePlayRate; }
+	float GetPackShakeSmoothing() const { return PackShakeSmoothing; }
+	float GetPackCameraShakeScale() const { return PackCameraShakeScale; }
+	float GetPackRecoilScale() const { return PackRecoilScale; }
+
+	/** One shot's worth of jolt, in degrees, already scaled by PackCameraShakeScale.
+	 *
+	 *  Rolled here rather than by the caller so the ranges stay the weapon's business, and rolled
+	 *  ONCE PER SHOT rather than per frame: sampling the random range every tick would turn a
+	 *  directed kick into noise. */
+	FRotator RollPackShakeAmplitude() const;
+
+protected:
+
+	/** Resolved once in ApplyPackWeaponSettings: the override if given, else the profile's own.
+	 *  Kept rather than re-derived because it is asked once per shot. */
+	UPROPERTY(Transient)
+	TObjectPtr<URecoilData> ResolvedPackRecoilData;
+
+	/** Rounds per minute read out of the profile, 0 when it had none. */
+	UPROPERTY(Transient)
+	float PackFireRateRPM = 0.0f;
+
+	// The camera jolt, unpacked once at BeginPlay from the profile's RecoilShake asset. Held as
+	// three plain values rather than as the asset, because the asset is a Blueprint class
+	// (CameraRecoilShake_C) with no native type to hold, and re-reading it by property name every
+	// shot would be reflection in the hot path for numbers that never change.
+	UPROPERTY(Transient)
+	TObjectPtr<UCurveVector> PackShakeCurve;
+
+	UPROPERTY(Transient)
+	float PackShakePlayRate = 1.0f;
+
+	UPROPERTY(Transient)
+	float PackShakeSmoothing = 55.0f;
+
+	// Degrees, as a MIN..MAX range per axis, exactly as the pack stores them. The curve above is a
+	// normalised shape peaking at 1; these are what turn it into an angle, and they are rolled
+	// fresh on every shot so a burst does not repeat the same jolt.
+	UPROPERTY(Transient)
+	FVector2D PackShakePitchRange = FVector2D::ZeroVector;
+
+	UPROPERTY(Transient)
+	FVector2D PackShakeYawRange = FVector2D::ZeroVector;
+
+	UPROPERTY(Transient)
+	FVector2D PackShakeRollRange = FVector2D::ZeroVector;
 
 	UPROPERTY(EditAnywhere, Category = "Animation")
 	TSubclassOf<UAnimInstance> FirstPersonAnimInstanceClass;
@@ -598,6 +853,19 @@ protected:
 	 *  Default matches the Low Poly Shooter Pack convention. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FName SightAimSocketName = FName("SOCKET_Aim");
+
+	/** The FPS Animation Pack's name for the same thing ADSSocketName means, checked right after it.
+	 *
+	 *  Every one of their twenty weapon meshes carries exactly this socket and no other eye point:
+	 *  SKM_MX16A4_New has two sockets in total, AimPoint and Ejector. Their BP_WeaponBase.OnEquipped
+	 *  reads it with GetSocketTransform(RTS_Component) and that IS their whole aiming input, so a
+	 *  weapon of theirs must land here or the pack's aiming layer gets a number from somewhere else
+	 *  entirely — which is what "the gun flies over your head while aiming" looked like.
+	 *
+	 *  Deliberately a separate name rather than a changed default for ADSSocketName: our own weapons
+	 *  say "Sight", theirs say "AimPoint", and both sets have to keep working off one chain. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	FName PackAimSocketName = FName("AimPoint");
 
 	/** Socket the weapon mesh offers for MOUNTING a sight. Last-resort anchor when no eye point
 	 *  exists anywhere: it is on the rail, below and differently oriented to the real sight line,
@@ -639,6 +907,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FVector SightAimOffset = FVector::ZeroVector;
 
+	/** Hold the sight socket on the view axis every frame while aiming, so the sight picture cannot
+	 *  drift off the centre of the screen.
+	 *
+	 *  This is the weapon's own answer, used for iron sights and for a scope built into the weapon's
+	 *  Blueprint. A MOUNTED optic answers for itself (UWeaponAttachmentDefinition::bLockSightToScreenCentre)
+	 *  and overrides this, because how a scope is looked through belongs to the scope.
+	 *
+	 *  Off by default so that a weapon hand-tuned against the animation keeps aiming exactly as it
+	 *  did. Turning it on makes SightAimOffset.X a real eye relief rather than a nudge. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	bool bLockSightToScreenCentre = false;
+
 	/** Second socket for ADS alignment - rear sight or stock. Both sockets will be placed on camera ray */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FName ADSSocketNameRear = FName("SightRear");
@@ -654,6 +934,69 @@ protected:
 	/** Blend time when exiting ADS (seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float ADSBlendOutTime = 0.1f;
+
+	// ==================== Attachments ====================
+	//
+	// A socket belongs to the mesh it was authored on, and that mesh is this weapon's. Two rifles
+	// mount the same scope on sockets with different names, so the map from type to socket lives
+	// here rather than on the attachment asset. The attachment carries exactly one socket of its
+	// own -- SOCKET_Aim, the eye point -- and that one does travel with it.
+	//
+	// A missing socket is a REFUSAL, never a fallback to the component origin: an attachment
+	// mounted at the origin sits inside the gun, which reads as a broken mesh rather than as a
+	// missing socket and costs a session to work out.
+
+	/** Where each kind of attachment goes on this weapon's meshes. A type that is absent falls back
+	 *  to ScopeMountSocketName for the optic (it is the same rail) and to nothing for the rest,
+	 *  which refuses the mount and says so in the log.
+	 *
+	 *  Third person uses the same names with a "_TP" suffix when the artist authored one, the same
+	 *  rule PickThirdPersonSocket uses for the grip; without a _TP variant both meshes use the same
+	 *  socket name. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachments")
+	TMap<EWeaponAttachmentType, FName> AttachmentSockets;
+
+	/** Name of a component in this weapon's Blueprint that IS the built-in sight, when the weapon
+	 *  carries one as its own component rather than as part of the mesh.
+	 *
+	 *  It exists for exactly one reason. ResolveADSAnchorAttachment finds the eye point by looking
+	 *  for SOCKET_Aim anywhere under the weapon mesh, and a weapon whose default scope is its own
+	 *  component has that socket too. Mount a real optic and there are suddenly TWO candidates,
+	 *  with child order deciding which one wins -- which is not a decision anybody made. Naming the
+	 *  built-in one here lets it be hidden and skipped while a real optic is mounted.
+	 *
+	 *  Leave empty for a weapon whose iron sights are part of the mesh. That is the common case and
+	 *  it needs nothing: with no optic mounted the anchor falls through to ADSSocketName by itself. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachments")
+	FName DefaultOpticComponentName;
+
+	/** What is mounted right now, in mount order.
+	 *
+	 *  Replicated because a scope is not a private fact: the other three players see this gun in
+	 *  third person and have to see what is bolted to it. Every machine rebuilds its own meshes
+	 *  from OnRep, so no RPC carries the mesh itself. */
+	UPROPERTY(ReplicatedUsing = OnRep_InstalledAttachments)
+	TArray<TObjectPtr<UWeaponAttachmentDefinition>> InstalledAttachments;
+
+	UFUNCTION()
+	void OnRep_InstalledAttachments();
+
+	/** Destroy the mounted meshes and build them again from InstalledAttachments. Runs on every
+	 *  machine, from OnRep and from the server's own write, so both see the same gun. */
+	void RebuildAttachmentMeshes();
+
+	/** The socket this type mounts on for the given mesh, or NAME_None when there is not one.
+	 *
+	 *  NAME_None is a real answer and callers must treat it as a refusal. Attaching to a component
+	 *  with no socket silently lands the part at the component's own origin, which puts a scope
+	 *  inside the receiver: it looks like a broken mesh rather than a missing socket. */
+	FName ResolveAttachmentSocket(EWeaponAttachmentType InType, const USkeletalMeshComponent* Mesh) const;
+
+	/** Inherit render visibility and late tick onto everything under the weapon meshes. Called at
+	 *  BeginPlay and again after anything is mounted: a component created at runtime starts with
+	 *  the defaults, so without this a mounted scope draws in the world pass while the gun draws in
+	 *  the first person pass, and reads its socket a frame late. */
+	void ApplyChildComponentSetup();
 
 	// ==================== Recoil ====================
 
@@ -686,10 +1029,41 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload")
 	bool bUseReload = false;
 
+	/** A real magazine fed by an endless reserve: the gun runs dry and has to be reloaded, but the
+	 *  rounds it reloads with come from nowhere and cost no inventory cells.
+	 *
+	 *  This is what the starting weapon is. The two existing behaviours could not express it: with
+	 *  bUseReload off there is no magazine to run out of, and with it on the reserve lives in the
+	 *  grid, which nothing ever fills for a weapon that was granted rather than looted -- so the
+	 *  first magazine was also the last. A looted gun leaves this off and stays on the cell economy. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	bool bInfiniteReserve = false;
+
 	/** How long the magazine takes to fill. Match it to the reload montage, or the weapon fires out
 	 *  of an animation that has not finished. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload", ClampMin = "0.05", Units = "s"))
 	float ReloadTime = 2.0f;
+
+	// ==================== The second reload ====================
+	//
+	// A weapon that ran dry has to work the bolt; one with a round still chambered does not, and is
+	// noticeably quicker. The FPS Animation Pack ships both animations for every weapon it has, and
+	// the fields below are the second of the pair.
+	//
+	// The slots are named after THEIR slots (Primary / Secondary) rather than after what this
+	// weapon uses them for. That is not vagueness: the pack puts a different pair in the same two
+	// slots depending on the weapon. A rifle keeps empty and tactical there; a shotgun and a bolt
+	// action keep the start and the loop of a shell-by-shell reload, and use a third slot for its
+	// end. Naming these "Tactical" would have to be undone the moment a pump gun is migrated.
+	//
+	// Everything here is optional. Left empty, the weapon reloads exactly as it always has, which
+	// is what every weapon in the project that has not been migrated needs.
+
+	/** Seconds the second reload takes. Zero measures the montage instead, which is the answer you
+	 *  want: a hand-typed duration that drifts from the animation is precisely how a weapon ends up
+	 *  firing out of a reload that has not finished. Zero with no montage falls back to ReloadTime. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload", ClampMin = "0.0", Units = "s"))
+	float SecondaryReloadTime = 0.0f;
 
 	// Running out of ammunition and deciding to reload are two different events, and only the second
 	// one is the player's. An empty magazine on its own does nothing here: the weapon is empty, it
@@ -706,9 +1080,40 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	bool bReloadOnEmptyTriggerPull = false;
 
-	/** Played on the holder for the duration of the reload, first and third person both. */
+	/** Played on the holder for the duration of the reload, first and third person both. This is
+	 *  the PRIMARY slot: the reload with an empty magazine. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	TObjectPtr<UAnimMontage> ReloadMontage;
+
+	/** The holder's half of the second reload. Empty falls back to ReloadMontage. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	TObjectPtr<UAnimMontage> SecondaryReloadMontage;
+
+	// ==================== Third reload shape: one round at a time ====================
+	//
+	// A pump gun and a bolt rifle do not swap a magazine, they push rounds in one by one, and the
+	// animation is three assets rather than one: an opening, a loop played once per round, and a
+	// closing. The two slots above are reused rather than duplicated, because that is how the pack
+	// itself stores them and duplicating them would mean two sets of fields meaning the same thing:
+	//
+	//     ReloadMontage           -> the opening   (their PrimaryReload)
+	//     SecondaryReloadMontage  -> the loop      (their SecondaryReload)
+	//     ReloadEndMontage        -> the closing   (their AdditionalReload)
+	//
+	// That reuse is exactly why UsesSecondaryReload must never be consulted on such a weapon: for
+	// a magazine gun it answers "is there a round in the chamber", and here the same two assets
+	// mean something else entirely.
+
+	/** Rounds go in one at a time. Set from the pack profile: their WeaponClass says BP_ManualAction
+	 *  for precisely the two guns built this way, so the shape is read from their data rather than
+	 *  ticked by hand per weapon. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	bool bPerRoundReload = false;
+
+	/** The holder's closing animation for a per round reload. Empty means the reload simply ends
+	 *  after the last round, with no separate closing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bPerRoundReload"))
+	TObjectPtr<UAnimMontage> ReloadEndMontage;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	TObjectPtr<USoundBase> ReloadSound;
@@ -758,11 +1163,46 @@ protected:
 	 *  was still held when the reload started. */
 	void FinishReload();
 
+	// ==================== Per round reload state ====================
+	//
+	// The magazine reload is one timer and one animation, so it needs no state beyond bIsReloading.
+	// This one is a loop, and a loop that the player is allowed to walk out of, so it has to know
+	// which stage it is in: the closing animation must not play twice, and a round must be credited
+	// for each COMPLETED loop and no more.
+
+	/** Which stage of a per round reload is on screen. Only meaningful while bIsReloading. */
+	EWeaponReloadStage ShellStage = EWeaponReloadStage::Primary;
+
+	/** Opens a per round reload: plays the opening, then hands over to AdvancePerRoundReload. */
+	void BeginPerRoundReload();
+
+	/** One step of the loop. Credits the round the previous loop just seated, then either seats
+	 *  another or closes the reload. Timer driven, so it is also the only place that decides when a
+	 *  per round reload is finished. */
+	void AdvancePerRoundReload();
+
+	/** Plays the closing animation and schedules FinishReload behind it. */
+	void EndPerRoundReload();
+
+	/** Drop a per round reload where it stands and keep every round already seated.
+	 *
+	 *  This is what makes the reload interruptible, and interruptible is the whole point of loading
+	 *  one round at a time: the player takes the shot with three in the tube rather than watching
+	 *  the animation finish first. Nothing is refunded and nothing is lost, because each round was
+	 *  credited when its own loop ended. */
+	void InterruptPerRoundReload();
+
+	/** Plays one stage of a reload on this machine and, when this machine is allowed to, on every
+	 *  other. The single place that knows a stage maps to two assets, the arms and the gun. */
+	void PlayReloadStage(EWeaponReloadStage Stage);
+
 	// ==================== Refire ====================
 
 	UPROPERTY(EditAnywhere, Category = "Refire", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
 	float RefireRate = 0.1f;
 
+	/** Legacy scalar pitch kick, used only when bUseAdvancedRecoil is false. Dead once advanced
+	 *  recoil is on — the pattern curve in RecoilSettings.Pattern owns the kick then. */
 	UPROPERTY(EditAnywhere, Category = "Refire", meta = (ClampMin = 0, ClampMax = 10, Units = "deg"))
 	float FiringRecoil = 1.0f;
 
@@ -908,6 +1348,26 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	/** Meshes created for the mounted attachments, on both weapon meshes. Owned here so a rebuild
+	 *  can destroy exactly what it made and nothing a Blueprint added by hand. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UStaticMeshComponent>> AttachmentMeshComponents;
+
+	/** The first person mesh of the mounted OPTIC, when there is one.
+	 *
+	 *  Kept as an explicit pointer so the ADS anchor never has to guess. The generic search for
+	 *  SOCKET_Aim walks the whole subtree in child order, and on a weapon that carries a built-in
+	 *  scope component there would be two matches with nothing but that order to separate them.
+	 *  This one is checked first, so the answer does not depend on which component was made when. */
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> MountedOpticMesh;
+
+	/** The weapon's own built-in sight component, found once from DefaultOpticComponentName. Hidden
+	 *  while a real optic is mounted, and skipped by the eye-point search for the same reason. */
+	UPROPERTY(Transient)
+	TObjectPtr<USceneComponent> DefaultOpticComponent;
 
 	/** Override CalcCamera so that SetViewTarget(Weapon) produces a clean ADS camera view.
 	 *  Uses the ADS sight socket position but ControlRotation (ignoring recoil visual kick). */
@@ -948,12 +1408,59 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	bool UsesReload() const { return bUseReload; }
 
+	/** True when the magazine is real but the reserve behind it is endless. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool HasInfiniteReserve() const { return bUseReload && bInfiniteReserve; }
+
+	/** True when this weapon's rounds are carried in the inventory grid, which is the one question
+	 *  every ammo-economy caller actually asks. Both ways of being infinite answer it the same way,
+	 *  so callers test this rather than UsesReload and there is no second rule to keep in step. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool OwnsAmmoCells() const { return bUseReload && !bInfiniteReserve; }
+
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetReloadTime() const { return ReloadTime; }
 
-	/** The montage this weapon plays while reloading, if it has one. */
+	/** Seconds the reload that would start now will take. Prefers an explicit override, then the
+	 *  length of the montage that will actually play, and only then the legacy ReloadTime. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	float GetActiveReloadTime() const;
+
+	/** The montage this weapon plays while reloading, if it has one. The PRIMARY one: callers that
+	 *  need whichever is actually running want GetActiveReloadMontage instead. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	UAnimMontage* GetReloadMontage() const { return ReloadMontage; }
+
+	/** True when there is still a round in the chamber, so this reload skips working the bolt.
+	 *  Read before the magazine is refilled, which is why it is stable for a whole reload. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool UsesSecondaryReload() const { return CurrentBullets > 0; }
+
+	/** Whichever of the two reload montages this weapon would play right now.
+	 *
+	 *  A per round weapon always answers with the OPENING: it is the only stage that exists at the
+	 *  moment a reload is asked for, and the rest of the sequence is chosen a stage at a time as it
+	 *  runs. Answering with the loop here would hand the caller a fraction of a second and the gun
+	 *  would consider itself reloaded after one shell. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	UAnimMontage* GetActiveReloadMontage() const
+	{
+		if (bPerRoundReload)
+		{
+			return ReloadMontage;
+		}
+
+		return (UsesSecondaryReload() && SecondaryReloadMontage) ? SecondaryReloadMontage : ReloadMontage;
+	}
+
+	/** Rounds go in one at a time, so the reload is a loop and can be walked out of. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool IsPerRoundReload() const { return bPerRoundReload; }
+
+	/** Seconds the manual action takes, or 0 on a weapon that has none. Read as a FLOOR on the
+	 *  refire interval, which is what stops a bolt rifle firing through its own bolt. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Refire")
+	float GetCycleActionSeconds() const;
 
 	// ==================== Switch Animation accessors ====================
 
@@ -1059,6 +1566,32 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Ballistics")
 	bool bLogBallistics = false;
 
+	// ==================== AI lead ====================
+
+	/** How much of the target's own speed an AI anticipates, 0 to 1.
+	 *
+	 *  Deliberately below one. A shooter that solves the lead exactly hits a sprinting player every
+	 *  time at any range, and the answer to it is to stop moving - which inverts the whole game,
+	 *  because movement is what this project is about. At 0.7 a still target is dead, a walking one
+	 *  is in danger, and a sprinting one is usually missed by the width of a stride.
+	 *
+	 *  Horizontal only. Vertical velocity is jumps and falls, it reverses inside the flight time,
+	 *  and leading it aims the shot into the floor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|AI", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AILeadFraction = 0.7f;
+
+	/** Scatter added to the lead, as a fraction of the lead itself.
+	 *
+	 *  Proportional on purpose: the error grows with the target's speed, so it never turns a shot
+	 *  at a standing man into a miss, and it makes running work.  */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|AI", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AILeadErrorFraction = 0.15f;
+
+	/** Ceiling on the anticipated flight time. A shot across the whole map would otherwise lead a
+	 *  sprinting target by tens of metres, which looks like the AI shooting at nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|AI", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float AIMaxLeadSeconds = 2.0f;
+
 	virtual void FireHitscan(const FVector& TargetLocation);
 
 	/** Where a hitscan shot starts and which way it points, before anything is traced: muzzle or
@@ -1118,6 +1651,47 @@ protected:
 	float GetTagDamageMultiplier(AActor* Target) const;
 
 public:
+	/**
+	 * ONE funnel for a shot of this weapon that landed, whatever carried it there: an instant trace,
+	 * a travelling bolt, or a projectile actor.
+	 *
+	 * Everything a hit of this weapon means lives here and nowhere else: foliage conversion, the
+	 * shield gate, the class passive's shield-piercing damage, the headshot multiplier, the upgrade
+	 * and ability notifications, knockback under the grounded rule, ionization, and the hit marker.
+	 * A caller that applies damage itself gets none of it, which is exactly how the projectile
+	 * spent its life punching through shields in silence.
+	 *
+	 * BaseDamage is the damage BEFORE the headshot multiplier and ExtraDamageMultiplier: the caller
+	 * owns the number (the weapon's HitscanDamage, the projectile's HitDamage, a charge-scaled one),
+	 * the weapon owns the rules applied to it.
+	 *
+	 * HitDirection points INTO the target and drives both the impulse and the feedback direction.
+	 * ImpulseForce is one number for both characters and physics props, as on the hitscan path;
+	 * zero skips the push entirely, which is what a caller doing its own knockback wants.
+	 * OverrideDamageType null falls back to HitscanDamageType.
+	 *
+	 * OverrideDamageEvent lets a caller hand over an event it has already built, and an explosion
+	 * must: FRadialDamageEvent carries the blast origin and radius, and everything downstream that
+	 * asks WHERE a body was hit reads it. Building a plain event over the top would throw that away.
+	 * Null means the ordinary point-damage event assembled here.
+	 *
+	 * Returns the damage that actually landed.
+	 */
+	float ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, const FVector& HitDirection,
+		float ImpulseForce, float ExtraDamageMultiplier = 1.0f,
+		TSubclassOf<UDamageType> OverrideDamageType = nullptr,
+		bool bAllowOwnerDamage = false,
+		const FDamageEvent* OverrideDamageEvent = nullptr);
+
+	/** Hit confirmation for a shooter who is not on this machine.
+	 *
+	 *  A hitscan shot is resolved on the shooter's own machine, so its marker never needed to travel.
+	 *  A projectile is resolved by the authority, and for a client's shot that is somebody else's
+	 *  computer: the marker has to be sent back down or the shooter hears nothing at all. Unreliable
+	 *  on purpose -- a confirmation that arrives late is worse than one that never arrives. */
+	UFUNCTION(Client, Unreliable)
+	void Client_ReportHitFeedback(const FHitFeedbackContext& Context);
+
 	/** Apply ionization (fixed positive charge) to a hit target.
 	 *  HitComponent is used by the NPC riot-shield rule: when an active shield is up,
 	 *  only hits on the shield mesh transfer charge to the NPC body — direct body hits
@@ -1196,6 +1770,11 @@ protected:
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnWaveFronts(const FVector& Start, const FVector& End);
 
+public:
+	// The impact trio is public because a projectile lands this weapon's shots too, and it has to
+	// spawn the same impact the trace would have: the shooter's local stand-in plays it directly,
+	// the authority's copy goes through the networked call.
+
 	/** Resolve, play locally, then tell everyone else. Same split as the muzzle flash and the
 	 *  tracer: the shooter must not wait a round trip to see their own bullet land. */
 	UFUNCTION(BlueprintCallable, Category = "VFX")
@@ -1211,6 +1790,8 @@ protected:
 	 *  an NPC that answers for its own shield-versus-body surface. */
 	EPhysicalSurface ResolveImpactSurface(const FHitResult& Hit) const;
 
+protected:
+
 	UFUNCTION(BlueprintCallable, Category = "VFX")
 	void SpawnReflectionEffect(const FVector& Location, const FVector& IncomingDirection, const FVector& ReflectedDirection);
 
@@ -1219,11 +1800,14 @@ protected:
 
 	/** Muzzle flash + fire sound on this machine. The shared body of the local call and the
 	 *  multicast, so the effects can never drift apart between owner and observers. */
-	void PlayFireEffectsLocally();
+	/** bLastRound picks WeaponMeshLastShotAnimation over the ordinary one, and it is passed in
+	 *  rather than read off CurrentBullets because the round has not left the magazine yet when the
+	 *  effects play, and on an observer's machine the count is a replicated guess anyway. */
+	void PlayFireEffectsLocally(bool bLastRound);
 
 	/** The weapon's own reload on this machine: the moving parts and the sound. Same split as the
 	 *  firing effects above, for the same reason. */
-	void PlayReloadEffectsLocally();
+	void PlayReloadEffectsLocally(EWeaponReloadStage Stage);
 
 public:
 	/** Muzzle flash and fire sound, played on every machine that can see this weapon.
@@ -1232,7 +1816,7 @@ public:
 	 *  plays its own effects locally first instead of waiting for the round trip.
 	 *  Public because the owning character relays a client's shot through it. */
 	UFUNCTION(NetMulticast, Unreliable)
-	void Multicast_PlayFireEffects();
+	void Multicast_PlayFireEffects(bool bLastRound);
 
 	/** The magazine coming out, the pump, the shells going in, played on every machine that can see
 	 *  this weapon. Everyone but the owner only ever has the third person mesh, so without this the
@@ -1240,7 +1824,7 @@ public:
 	 *  Reliable, unlike the firing one: this happens once per magazine rather than once per shot,
 	 *  and a dropped one leaves a visibly dead weapon for the entire reload. */
 	UFUNCTION(NetMulticast, Reliable)
-	void Multicast_PlayReloadEffects();
+	void Multicast_PlayReloadEffects(EWeaponReloadStage Stage);
 
 	/** Tracer for everyone else. Endpoints travel with it because only the shooter traced them. */
 	UFUNCTION(NetMulticast, Unreliable)
@@ -1266,6 +1850,151 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "SFX")
 	void PlayADSOutSound();
+
+	// ==================== Presentation ====================
+	//
+	// What the HUD and the inventory show for this gun. It lives here rather than on the widget
+	// because the Blueprint that picks the mesh is the one that knows what the gun is called; the
+	// widgets used to fall back on the object name and printed things like "BP_AR_C_0".
+
+	/** Name on the weapon plate and in the inventory. Falls back to the class name when empty, so
+	 *  a half-configured weapon is readable rather than blank. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
+	FText WeaponDisplayName;
+
+	/** White silhouette drawn beside the ammo count.
+	 *
+	 *  Editable by hand on purpose: a silhouette that already exists should just be dropped in.
+	 *  GenerateIconFromMesh below fills it in from the first person mesh when there isn't one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
+	TObjectPtr<UTexture2D> Icon;
+
+	/** The badge beside the ammo count: rounds of this weapon's ammo with its silhouette over them,
+	 *  cut to a triangle. Authored outside the engine from Icon plus the ammo art, so it is a plain
+	 *  slot rather than something GenerateIconFromMesh produces.
+	 *
+	 *  Greyscale on purpose. It is tinted at draw time by AmmoColorTag, which is what lets the
+	 *  palette recolour every badge at once instead of eight textures being rebuilt. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
+	TObjectPtr<UTexture2D> AmmoBadge;
+
+	/** Which entry of the palette tints this weapon's ammo.
+	 *
+	 *  A class's own weapon carries that class's colour; a weapon that favours a class carries a
+	 *  related one. Both are just rows in Project Settings -> Polarity -> Palette, so the
+	 *  relationship is authored there rather than derived here. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
+	FGameplayTag AmmoColorTag;
+
+	/** The shape shown, shrunk, over a pile of this weapon's ammo.
+	 *
+	 *  Normally the same static mesh the dropped version of this weapon wears. It cannot be read
+	 *  off that actor at runtime: a Blueprint's components live in its construction script, not on
+	 *  its default object, so the mesh is named here instead. One field per weapon and one ammo
+	 *  pickup Blueprint for all of them, rather than a pickup Blueprint per gun.
+	 *
+	 *  Null just means the pile shows no weapon over it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
+	TObjectPtr<UStaticMesh> DropPreviewMesh;
+
+	/** What a pile of this weapon's rounds is, as an actor in the world.
+	 *
+	 *  Used when rounds are thrown out of the grid and when a pickup brought more than would fit.
+	 *  Before this existed, leftover rounds came back as ANOTHER WHOLE WEAPON DROP, which meant a
+	 *  full bag quietly printed a second copy of the gun for anybody standing nearby.
+	 *
+	 *  Null falls back to the inventory component's per-kind class, and if that is unset too,
+	 *  throwing rounds away is refused in the log rather than deleting them. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
+	TSubclassOf<class AAmmoPickup> AmmoPickupClass;
+
+	UFUNCTION(BlueprintPure, Category = "Presentation")
+	UStaticMesh* GetDropPreviewMesh() const { return DropPreviewMesh; }
+
+	// ==================== Magazine cells ====================
+
+	/** Every round the owner holds for this weapon, loaded ones included.
+	 *
+	 *  The inventory cells are the whole supply and CurrentBullets is the loaded part of it, which
+	 *  is why the HUD's reserve is this minus CurrentBullets rather than this on its own.
+	 *
+	 *  Returns MagazineSize for a weapon that does not reload (the energy one) and for an owner
+	 *  with no inventory (an NPC), so neither is dragged onto the cell economy. */
+	UFUNCTION(BlueprintPure, Category = "Ammo")
+	int32 GetPooledAmmo() const;
+
+	/** Take one round out of the magazine cells. Server only, and safe to call anywhere: it does
+	 *  nothing without authority, nothing for a weapon that never reloads, and nothing for an owner
+	 *  with no inventory. */
+	void SpendPooledRound();
+
+	/** Charge the drop this weapon came off was carrying.
+	 *
+	 *  Discarding a weapon used to zero the charge on the drop, which made it scenery: pickup needs
+	 *  charge, so a thrown gun could never be picked back up. It now leaves with what it arrived
+	 *  with, which is what makes "drop it and take it again" work at all. */
+	UPROPERTY(BlueprintReadWrite, Category = "Ammo")
+	float SourceDropCharge = 0.0f;
+
+	UFUNCTION(BlueprintPure, Category = "Presentation")
+	UTexture2D* GetAmmoBadge() const { return AmmoBadge; }
+
+	/** Palette colour for AmmoColorTag, white when the tag is unset or unnamed. White is the
+	 *  identity for a tint, so an unconfigured weapon draws its badge as authored. */
+	UFUNCTION(BlueprintPure, Category = "Presentation")
+	FLinearColor GetAmmoColor() const;
+
+	/** Side of the square icon texture, in pixels. */
+	UPROPERTY(EditDefaultsOnly, Category = "Presentation|Icon Capture", meta = (ClampMin = "64", ClampMax = "1024"))
+	int32 IconResolution = 512;
+
+	/** Which way the gun faces in the generated icon. The capture looks at the mesh from this yaw,
+	 *  so a weapon authored down a different axis is fixed here rather than in code.
+	 *
+	 *  0 is the side view, which is what an icon wants. The Infima weapons this project uses run
+	 *  along Y, so looking down X sees their full length; 90 looks straight into the muzzle and
+	 *  produces a sliver. Measured on SK_AR_02: 6.8% of the frame covered at 0, 0.75% at 90. */
+	UPROPERTY(EditDefaultsOnly, Category = "Presentation|Icon Capture")
+	float IconCaptureYaw = 0.0f;
+
+	/** How big the gun is drawn in its icon. This is the size knob.
+	 *
+	 *  1.0 fits the mesh's bounding sphere exactly. Below 1.0 zooms IN, which is what a long thin
+	 *  gun needs: its bounding sphere is nearly its whole length, so it ends up as a thin band in a
+	 *  square icon while a stubby pistol fills the same square comfortably. Above 1.0 pulls back.
+	 *
+	 *  Per weapon on purpose. One formula cannot make a katana and a pistol look equally weighty in
+	 *  the same square, so the last word is a number an author sets by eye.
+	 *
+	 *  Change it, then press Generate Icon From Mesh. The badge is built from the icon, so it
+	 *  follows along. */
+	UPROPERTY(EditDefaultsOnly, Category = "Presentation|Icon Capture", meta = (ClampMin = "0.25", ClampMax = "3.0"))
+	float IconCapturePadding = 1.15f;
+
+	/** WeaponDisplayName, or the class name when it is empty. */
+	UFUNCTION(BlueprintPure, Category = "Presentation")
+	FText GetWeaponDisplayName() const;
+
+	UFUNCTION(BlueprintPure, Category = "Presentation")
+	UTexture2D* GetIcon() const { return Icon; }
+
+#if WITH_EDITOR
+	/** Render the first person mesh to a white silhouette and store it in Icon.
+	 *
+	 *  The silhouette is RENDERED, not filtered out of a normal shot: the mesh is drawn with an
+	 *  unlit pure-white material on black, so brightness is coverage and nothing has to fight
+	 *  shadows, speculars or the gun's own dark textures. The result is saved as a texture asset
+	 *  next to this Blueprint, because the widget needs a UTexture2D and a loose PNG would have to
+	 *  be re-imported by hand every time the mesh changes.
+	 *
+	 *  Safe to press again after swapping the mesh: it overwrites the same asset.
+	 *
+	 *  BlueprintCallable as well as CallInEditor so it can be scripted: doing all the weapons at
+	 *  once is a loop, not twenty clicks. It only exists in editor builds, so do not put it in a
+	 *  gameplay graph. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Presentation|Icon Capture")
+	void GenerateIconFromMesh();
+#endif
 
 	// ==================== Getters ====================
 
@@ -1310,6 +2039,26 @@ public:
 	// hand socket, matching it in orientation as well as position. That makes the grip socket the
 	// one place where "how this weapon is held" is authored: turn the socket in the mesh editor and
 	// the weapon turns in the hand. Player and NPCs both go through here, so they hold alike.
+
+	/** This weapon's place in the hand is authored in the animation, not in a grip socket.
+	 *
+	 *  The LPSP animations key ik_hand_gun, and that bone IS the weapon transform: the mesh root
+	 *  rides it, so the pose already says where the gun is at every frame. Landing a grip socket on
+	 *  the hand on top of that replaces the animator's placement with a constant tuned by hand for
+	 *  a different set of animations. Both hands then miss, because both were keyed against the gun
+	 *  where the animation put it, and the off hand is the one that shows it.
+	 *
+	 *  On: the first person mesh hangs on AnimatedWeaponSocketName and keeps the relative transform
+	 *  the attach gave it, which is identity. Off: the old path, OptionalGrip lands on the hand
+	 *  socket. Third person is the same either way, the body still carries the gun on its hand.
+	 *
+	 *  Requires ik_hand_gun to be driven whenever such an animation is NOT playing, or the gun
+	 *  drops to the reference pose the moment one ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
+	bool bWeaponPoseFromAnimation = false;
+
+	/** Bone the first person mesh hangs on when bWeaponPoseFromAnimation is set. */
+	static const FName AnimatedWeaponSocketName;
 
 	/** The grip socket every weapon may carry. First person always uses this one. */
 	static const FName OptionalGripSocketName;
@@ -1399,10 +2148,29 @@ public:
 	const TSubclassOf<UAnimInstance>& GetThirdPersonAnimInstanceClass() const;
 
 	int32 GetMagazineSize() const { return MagazineSize; }
+
+	/** Rounds one ammo pickup is worth to THIS weapon.
+	 *
+	 *  Ammo is one pool for every gun, so a pile does not belong to anything; what it is WORTH does
+	 *  depend on what is in your hands, and this is where each weapon says so. Zero means "a
+	 *  magazine of this weapon", which keeps a pile equal to one reload without a second number to
+	 *  maintain. Read by AAmmoPickup::MakeItemFor from the weapon the taker is holding. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Ammo", meta = (ClampMin = "0"))
+	int32 RoundsFromPickup = 0;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetRoundsFromPickup() const { return RoundsFromPickup > 0 ? RoundsFromPickup : FMath::Max(1, MagazineSize); }
 	int32 GetBulletCount() const { return CurrentBullets; }
 
 	/** Input action that switches/equips this weapon (per-weapon hotkey). May be null. */
 	UInputAction* GetSwitchAction() const { return SwitchAction; }
+
+	/** Hotkey slot this instance was placed in by its owner; INDEX_NONE when unplaced. @see HotkeySlot */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Input")
+	int32 GetHotkeySlot() const { return HotkeySlot; }
+
+	/** Server only, called by AShooterCharacter when the weapon enters or moves inside the inventory. */
+	void SetHotkeySlot(int32 InSlot) { HotkeySlot = InSlot; }
 
 	/** Set bullet count (used for checkpoint restore, and by a pickup granting a partial magazine) */
 	void SetBulletCount(int32 NewCount);
@@ -1420,6 +2188,94 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsHitscan() const { return bUseHitscan; }
+
+	/**
+	 * What one shot of this weapon does, whatever carries it there.
+	 *
+	 * The weapon owns the balance number for both paths. HitscanDamage stopped meaning "damage when
+	 * tracing" the moment the projectile stopped carrying its own: it is THE number, and the name is
+	 * the only thing left over from when it was not.
+	 *
+	 * A projectile class may still override it, and a special payload should: that is how a rocket
+	 * stays a rocket after Upgrade_RocketProjectileSwap puts a different one in the tube. An ordinary
+	 * bullet leaves its override negative and inherits this.
+	 *
+	 * Everything that has to answer "how hard does this gun hit" goes through here, which is what
+	 * fixes the damage readout for projectile weapons: PredictDamageAgainst used to open with
+	 * `HitscanDamage <= 0 -> return 0` and show the player a flat zero for anything firing rounds.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	float GetShotDamage() const;
+
+	/**
+	 * The round this weapon actually puts in the air, or null when it puts nothing there.
+	 *
+	 * ONE place answers "is there a payload whose overrides count", and the answer is no for a
+	 * weapon set to hitscan even when a ProjectileClass is still filled in -- which is an ordinary
+	 * state to be in, because the shotgun fires either way and its blueprint keeps both configured.
+	 * Without this gate a rocket's overrides would have leaked onto a weapon firing traces.
+	 *
+	 * Returns the class default object, which carries exactly the values the spawned round will
+	 * have. Cheap: no spawn, no load beyond the class already referenced.
+	 */
+	const AShooterProjectile* GetShotPayload() const;
+
+	/**
+	 * Headshot multiplier for a shot of this weapon, after the payload has had its say.
+	 *
+	 * Every carrier asks this rather than reading HeadshotMultiplier, so a round that overrides it
+	 * (a rocket, which should not care where on a body it went off) is honoured on the projectile
+	 * path exactly as its damage override already was.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	float GetShotHeadshotMultiplier() const;
+
+	/**
+	 * Does one shot of this weapon ionize its target, and by how much.
+	 *
+	 * Returns false when nothing should be charged -- either the weapon does not ionize, or the
+	 * round it fires explicitly refuses to. OutChargePerHit is signed, as the weapon's own field is:
+	 * a negative amount electrifies the other way, so "no ionization" cannot be expressed as zero
+	 * and needs the bool.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool GetShotIonization(float& OutChargePerHit) const;
+
+	/** Whether a shot of this weapon ionizes at all, for callers that do not need the amount.
+	 *  Replaces every direct read of bUseHitscanIonization outside GetShotIonization itself: that
+	 *  field is the GUN's answer, and the round it fires may have a different one. */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool DoesShotIonize() const;
+
+	/**
+	 * Every multiplier this weapon can work out about a target at the instant of the shot, folded
+	 * into one number: heat, height advantage, target tags, the owner's upgrades.
+	 *
+	 * Assembled in one place so the trace path, the bolt and the projectile cannot drift apart on
+	 * what a hit is worth. Deliberately NOT including the headshot multiplier or the shield gate:
+	 * those need the hit itself and are applied inside ApplyWeaponHit.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	float GetShotDamageMultiplierAgainst(AActor* Target) const;
+
+	/**
+	 * Which bone a shot that landed on this actor actually struck.
+	 *
+	 * Needed because NOTHING that resolves a hit in this game gets the bone for free, and the reason
+	 * is the same everywhere: a character answers the Pawn object channel with TWO shapes, the
+	 * capsule and the skeletal mesh, and the capsule is the one that encloses the other. A sweep
+	 * returns it first, a projectile's sphere blocks against it, and a capsule hit carries no bone
+	 * at all. So the head was being shot and the shot was being read off the wrong shape.
+	 *
+	 * This traces the mesh COMPONENT directly (LineTraceComponent), which is what makes it work:
+	 * the CharacterMesh profile ignores Visibility, so an ordinary channel trace cannot see the
+	 * body at all. NAME_None means the line missed the mesh, which is a legitimate answer -- the
+	 * capsule is wider than the body, and a shot can clip it while passing beside the ribs.
+	 *
+	 * One trace, run once per shot on the target that was already chosen, so it costs nothing until
+	 * something has been hit.
+	 */
+	FName ResolveHitBone(const AActor* Target, const FVector& Start, const FVector& End) const;
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Projectile")
 	TSubclassOf<AShooterProjectile> GetProjectileClass() const { return ProjectileClass; }
@@ -1485,9 +2341,47 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	FVector GetADSOffset() const { return CustomADSOffset; }
 
-	/** How many times the sights magnify. See ADSZoom. */
+	/** How many times the sights magnify, with the mounted optic folded in. See ADSZoom.
+	 *
+	 *  Out of line because the optic is a lookup: this is the single funnel the whole game uses to
+	 *  turn magnification into a field of view, so multiplying here is what makes an attachment
+	 *  change the aim everywhere at once instead of at each call site. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
-	float GetADSZoom() const { return ADSZoom; }
+	float GetADSZoom() const;
+
+	// ==================== Attachments ====================
+	//
+	// The WEAPON is the truth about what is mounted, not the inventory. Three reasons, and each one
+	// on its own is enough: an attachment travels with the gun when the gun changes hands, the gun
+	// already replicates so teammates see the scope for free, and a weapon on the floor or in an
+	// NPC's hands has no inventory to ask.
+	//
+	// What the inventory keeps is only the CELL an attachment costs once the free slots are used
+	// up. That cell holds no copy of the attachment: it points at the same asset and at the weapon
+	// it is mounted on, so the two records cannot disagree about what is fitted.
+
+	/** Mount an attachment. Server only; the array replicates and every machine rebuilds its meshes
+	 *  from OnRep.
+	 *
+	 *  Refuses when this weapon already carries that type: an attachment is replaced by taking the
+	 *  old one off first, so the cell it was paying for is settled before the new one arrives. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
+	bool InstallAttachment(UWeaponAttachmentDefinition* Attachment);
+
+	/** Take the attachment of this type off. Returns what came off, or null when nothing was
+	 *  mounted. Server only. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
+	UWeaponAttachmentDefinition* UninstallAttachmentOfType(EWeaponAttachmentType InType);
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	UWeaponAttachmentDefinition* GetAttachmentOfType(EWeaponAttachmentType InType) const;
+
+	/** Everything mounted, in the order it was mounted. That order is what decides which ones are
+	 *  free and which ones cost a cell, so it is deliberately not sorted. */
+	const TArray<TObjectPtr<UWeaponAttachmentDefinition>>& GetInstalledAttachments() const { return InstalledAttachments; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	int32 GetInstalledAttachmentCount() const { return InstalledAttachments.Num(); }
 
 	/** Apply a magnification to a field of view and get the zoomed-in field of view back.
 	 *
@@ -1523,6 +2417,20 @@ public:
 	/** Eye position relative to the sight socket, in camera axes. See SightAimOffset. */
 	UFUNCTION(BlueprintPure, Category = "ADS")
 	FVector GetSightAimOffset() const { return SightAimOffset; }
+
+	/** Where the eye sits relative to the sight socket while aiming, in CAMERA axes: X forward (the
+	 *  eye relief), Y right, Z up -- with a mounted optic folded in.
+	 *
+	 *  The optic wins over the weapon's own SightAimOffset, because the distance a scope is held at
+	 *  belongs to the scope: the same 4x sits the same way on every rifle. With nothing mounted this
+	 *  is the weapon's own number and nothing has changed. */
+	UFUNCTION(BlueprintPure, Category = "ADS")
+	FVector GetSightEyeOffset() const;
+
+	/** Whether the sight socket is to be held on the view axis every frame while aiming. The mounted
+	 *  optic answers when there is one, otherwise the weapon's own bLockSightToScreenCentre. */
+	UFUNCTION(BlueprintPure, Category = "ADS")
+	bool ShouldLockSightToScreenCentre() const;
 
 public:
 	// ==================== Recoil Getters ====================
