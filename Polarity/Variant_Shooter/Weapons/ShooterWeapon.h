@@ -458,12 +458,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan && bUseWaveVisualization"))
 	TObjectPtr<UNiagaraSystem> WaveFrontFX;
 
-	/** Default impact VFX (used when surface has no PhysicalMaterial or is missing from ImpactFXBySurface) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	/** Default impact VFX, used when the surface has no PhysicalMaterial or is missing from
+	 *  ImpactFXBySurface. Used by BOTH firing modes: the shot that landed is the shot that landed,
+	 *  whatever carried it there. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Impact")
 	TObjectPtr<UNiagaraSystem> ImpactFX;
 
 	/** Per-surface impact VFX. Key is the SurfaceType configured in Project Settings -> Physics -> Physical Surfaces. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Impact")
 	TMap<TEnumAsByte<EPhysicalSurface>, TObjectPtr<UNiagaraSystem>> ImpactFXBySurface;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (EditCondition = "bUseHitscan"))
@@ -535,26 +537,32 @@ protected:
 	TObjectPtr<UHitFeedbackSet> FeedbackSet;
 
 	// ==================== SFX|Impact ====================
+	//
+	// Not hitscan-only. SAME mistake as the damage and ionization fields above, found the same way:
+	// AShooterProjectile::NotifyHit has always called AShooterWeapon::SpawnImpactEffect, so a
+	// projectile weapon has been asking for an impact all along -- and getting nothing, because the
+	// editor greyed these out and nobody could fill them in. No blood, no chips off the brick, and
+	// nothing anywhere saying why.
 
 	/** Default impact sound (used when surface has no PhysicalMaterial or is missing from ImpactSoundBySurface) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact")
 	TObjectPtr<USoundBase> DefaultImpactSound;
 
 	/** Per-surface impact sound. Key is the SurfaceType configured in Project Settings -> Physics -> Physical Surfaces. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact")
 	TMap<TEnumAsByte<EPhysicalSurface>, TObjectPtr<USoundBase>> ImpactSoundBySurface;
 
 	/** Optional attenuation for impact sounds (3D spatialization, falloff) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact")
 	TObjectPtr<USoundAttenuation> ImpactSoundAttenuation;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan", ClampMin = "0.5", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (ClampMin = "0.5", ClampMax = "2.0"))
 	float ImpactSoundPitchMin = 0.95f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan", ClampMin = "0.5", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (ClampMin = "0.5", ClampMax = "2.0"))
 	float ImpactSoundPitchMax = 1.05f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (EditCondition = "bUseHitscan", ClampMin = "0.0", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Impact", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float ImpactSoundVolume = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|ADS")
@@ -906,18 +914,6 @@ protected:
 	 *  the weapon was hand-tuned for. On BP_ShooterWavePistol that is 61.21. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FVector SightAimOffset = FVector::ZeroVector;
-
-	/** Hold the sight socket on the view axis every frame while aiming, so the sight picture cannot
-	 *  drift off the centre of the screen.
-	 *
-	 *  This is the weapon's own answer, used for iron sights and for a scope built into the weapon's
-	 *  Blueprint. A MOUNTED optic answers for itself (UWeaponAttachmentDefinition::bLockSightToScreenCentre)
-	 *  and overrides this, because how a scope is looked through belongs to the scope.
-	 *
-	 *  Off by default so that a weapon hand-tuned against the animation keeps aiming exactly as it
-	 *  did. Turning it on makes SightAimOffset.X a real eye relief rather than a nudge. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
-	bool bLockSightToScreenCentre = false;
 
 	/** Second socket for ADS alignment - rear sight or stock. Both sockets will be placed on camera ray */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
@@ -1841,6 +1837,35 @@ public:
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayImpactEffect(FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte);
 
+	/**
+	 * The round leaving the barrel, for every machine that is not already drawing one.
+	 *
+	 * This is what replaces replicating the projectile itself. Instead of an actor channel per round
+	 * per client fed at the actor default of 100 Hz, one unreliable event of a position and a
+	 * direction goes out once, and each client simulates the flight from it. The path is entirely
+	 * predictable -- muzzle, direction, the speed and gravity that live on the projectile class --
+	 * so a locally simulated copy and the server's copy stay together without being told to.
+	 *
+	 * The copies it makes are decoration and nothing else: SetCosmeticOnly strips them of the pawn
+	 * collision response and CanAffectWorld refuses them everything that touches the game. The
+	 * server's own unreplicated round is what lands every hit.
+	 *
+	 * Unreliable on purpose, exactly like the muzzle flash: a dropped one costs a bullet nobody saw,
+	 * and a stalled channel during sustained fire costs the whole fight.
+	 */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_SpawnCosmeticProjectile(FVector_NetQuantize100 MuzzleLocation,
+		FVector_NetQuantizeNormal Direction);
+
+	/**
+	 * Fill this weapon's projectile pool before anybody pulls a trigger.
+	 *
+	 * The pool used to prewarm itself on its first request, which is the worst possible moment: the
+	 * first shot of a fight spawned twenty actors in one frame, and the player is looking straight at
+	 * the gun when it happens. Called from BeginPlay instead, where a hitch is invisible.
+	 */
+	void PrewarmProjectilePool();
+
 protected:
 
 public:
@@ -2417,20 +2442,6 @@ public:
 	/** Eye position relative to the sight socket, in camera axes. See SightAimOffset. */
 	UFUNCTION(BlueprintPure, Category = "ADS")
 	FVector GetSightAimOffset() const { return SightAimOffset; }
-
-	/** Where the eye sits relative to the sight socket while aiming, in CAMERA axes: X forward (the
-	 *  eye relief), Y right, Z up -- with a mounted optic folded in.
-	 *
-	 *  The optic wins over the weapon's own SightAimOffset, because the distance a scope is held at
-	 *  belongs to the scope: the same 4x sits the same way on every rifle. With nothing mounted this
-	 *  is the weapon's own number and nothing has changed. */
-	UFUNCTION(BlueprintPure, Category = "ADS")
-	FVector GetSightEyeOffset() const;
-
-	/** Whether the sight socket is to be held on the view axis every frame while aiming. The mounted
-	 *  optic answers when there is one, otherwise the weapon's own bLockSightToScreenCentre. */
-	UFUNCTION(BlueprintPure, Category = "ADS")
-	bool ShouldLockSightToScreenCentre() const;
 
 public:
 	// ==================== Recoil Getters ====================

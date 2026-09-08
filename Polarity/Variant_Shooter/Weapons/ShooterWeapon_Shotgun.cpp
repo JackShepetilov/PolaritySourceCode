@@ -1,6 +1,7 @@
 // ShooterWeapon_Shotgun.cpp
 
 #include "ShooterWeapon_Shotgun.h"
+#include "ShooterProjectile.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "GameFramework/Pawn.h"
 
@@ -168,7 +169,7 @@ void AShooterWeapon_Shotgun::FireHitscan(const FVector& TargetLocation)
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[SHOTGUN_DEBUG] %s: %d pellets, spread %.2f deg, %.0f damage each"),
+	UE_LOG(LogTemp, Verbose, TEXT("[SHOTGUN_DEBUG] %s: %d pellets, spread %.2f deg, %.0f damage each"),
 		*GetName(), PelletPattern.Num(), PelletSpreadAngle, HitscanDamage);
 
 	// Once per trigger pull, not once per pellet.
@@ -189,6 +190,13 @@ void AShooterWeapon_Shotgun::FireProjectile(const FVector& TargetLocation, float
 
 	AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner);
 
+	// Every pellet of one shot leaves the SAME point, so on the frame they are born they are all
+	// sitting inside each other. The collision sphere blocks every channel, so without this they
+	// blocked each other, stopped dead at the muzzle and fell on the floor -- each one reporting a
+	// hit on its neighbour, hit marker and all. Collected here and told to ignore one another.
+	TArray<AShooterProjectile*> Pellets;
+	Pellets.Reserve(PelletPattern.Num());
+
 	for (const FVector2D& PatternOffset : PelletPattern)
 	{
 		const FVector PelletDirection = GetPelletDirection(AimDirection, PatternOffset);
@@ -196,13 +204,13 @@ void AShooterWeapon_Shotgun::FireProjectile(const FVector& TargetLocation, float
 
 		if (HasAuthority())
 		{
-			SpawnProjectileAtTransform(PelletTransform, ChargeMultiplier, /*bCosmeticOnly*/ false);
+			Pellets.Add(SpawnProjectileAtTransform(PelletTransform, ChargeMultiplier, /*bCosmeticOnly*/ false));
 		}
 		else
 		{
 			// The same split the base class makes, once per pellet: the shooter sees its own pellet
 			// leave the barrel immediately and asks the server for the real one in the same breath.
-			SpawnProjectileAtTransform(PelletTransform, ChargeMultiplier, /*bCosmeticOnly*/ true);
+			Pellets.Add(SpawnProjectileAtTransform(PelletTransform, ChargeMultiplier, /*bCosmeticOnly*/ true));
 
 			if (OwnerCharacter)
 			{
@@ -211,7 +219,23 @@ void AShooterWeapon_Shotgun::FireProjectile(const FVector& TargetLocation, float
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[SHOTGUN_DEBUG] %s: %d projectile pellets, spread %.2f deg"),
+	// Pairwise, before any of them has moved. The authority resolving a REMOTE client's shot cannot
+	// be covered from here -- it spawns its pellets one per RPC and never sees them as a group -- so
+	// AShooterProjectile::NotifyHit carries the same rule as a catch-all. This loop is what stops
+	// the shot scattering on the frame it is fired, which the catch-all alone cannot.
+	for (int32 i = 0; i < Pellets.Num(); ++i)
+	{
+		for (int32 j = i + 1; j < Pellets.Num(); ++j)
+		{
+			if (Pellets[i] && Pellets[j])
+			{
+				Pellets[i]->IgnoreProjectileWhileFlying(Pellets[j]);
+				Pellets[j]->IgnoreProjectileWhileFlying(Pellets[i]);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[SHOTGUN_DEBUG] %s: %d projectile pellets, spread %.2f deg"),
 		*GetName(), PelletPattern.Num(), PelletSpreadAngle);
 
 	ConsumeRoundAfterShot();

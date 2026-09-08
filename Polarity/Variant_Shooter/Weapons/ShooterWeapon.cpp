@@ -675,6 +675,71 @@ void AShooterWeapon::Multicast_PlayFireEffects_Implementation(bool bLastRound)
 	}
 }
 
+void AShooterWeapon::Multicast_SpawnCosmeticProjectile_Implementation(
+	FVector_NetQuantize100 MuzzleLocation, FVector_NetQuantizeNormal Direction)
+{
+	// The authority is already holding the round this is a picture of. On a listen server that is
+	// the host's own screen, and it draws the real one.
+	if (HasAuthority())
+	{
+		return;
+	}
+
+	// The shooter fired its own stand-in the instant it pulled the trigger, without waiting for this
+	// to come back. Same guard, and for the same reason, as the muzzle flash above.
+	if (PawnOwner && PawnOwner->IsLocallyControlled())
+	{
+		return;
+	}
+
+	if (!ProjectileClass || !GetWorld())
+	{
+		return;
+	}
+
+	const FVector Dir = FVector(Direction).GetSafeNormal();
+	if (Dir.IsNearlyZero())
+	{
+		return;
+	}
+
+	SpawnProjectileAtTransform(FTransform(Dir.Rotation(), FVector(MuzzleLocation), FVector::OneVector),
+		/*ChargeMultiplier*/ 1.0f, /*bCosmeticOnly*/ true);
+}
+
+void AShooterWeapon::PrewarmProjectilePool()
+{
+	if (!ProjectileClass || bUseHitscan)
+	{
+		return;
+	}
+
+	UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// A replicating class is never pooled (see SpawnProjectileAtTransform), so warming it would
+	// build a pool nothing ever draws from.
+	const AShooterProjectile* const ClassCDO = ProjectileClass->GetDefaultObject<AShooterProjectile>();
+	if (!ClassCDO || ClassCDO->GetIsReplicated())
+	{
+		return;
+	}
+
+	if (UProjectilePoolSubsystem* Pool = World->GetSubsystem<UProjectilePoolSubsystem>())
+	{
+		// Idempotent: every weapon of a class asks, and the first one to ask is the one that pays.
+		const int32 Existing = Pool->GetPoolSize(ProjectileClass);
+		const int32 Wanted = ClassCDO->GetDefaultPoolSize();
+		if (Existing < Wanted)
+		{
+			Pool->PrewarmPool(ProjectileClass, Wanted - Existing);
+		}
+	}
+}
+
 const AShooterProjectile* AShooterWeapon::GetShotPayload() const
 {
 	// A weapon set to hitscan puts no round in the air, and its ProjectileClass may still be filled
@@ -1597,6 +1662,11 @@ void AShooterWeapon::BeginPlay()
 	// was left empty, so running it first costs nothing and running it late would be a race.
 	ApplyPackWeaponSettings();
 
+	// Pay for the pool here rather than on the first trigger pull. Above the owner check on purpose:
+	// a weapon with no owner still knows what it fires, and warming the pool is the one useful thing
+	// it can do. @see PrewarmProjectilePool.
+	PrewarmProjectilePool();
+
 	// A weapon belongs to whoever is holding it, and every spawn path sets that owner. One thing
 	// does not: a weapon actor dragged straight into a level. It has nobody to attach its meshes
 	// to, nobody to fire it, and no HUD to update, so the only sane thing it can do is sit there
@@ -2405,11 +2475,19 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 {
 	AShooterProjectile* Projectile = nullptr;
 
-	// The authority's projectile is replicated, and a pooled actor is reused rather than destroyed:
-	// clients would keep its channel open and watch it teleport back to a muzzle on the next shot.
-	// So the real one is spawned outright and only the shooter's local stand-in comes from the pool,
-	// which is where the pool was earning its keep anyway.
-	UProjectilePoolSubsystem* Pool = bCosmeticOnly ? GetWorld()->GetSubsystem<UProjectilePoolSubsystem>() : nullptr;
+	// Both copies come from the pool now, the real one included.
+	//
+	// The restriction that used to be here was a consequence of replication, not of pooling: a
+	// pooled actor is reused rather than destroyed, so a client holding its channel open would have
+	// watched it teleport back to a muzzle on the next shot. Nobody holds a channel on an
+	// unreplicated round, so the objection is gone -- and a class that still replicates (AEMFProjectile)
+	// opts out below, where it would otherwise hit exactly that problem.
+	const AShooterProjectile* const ClassCDO = ProjectileClass
+		? ProjectileClass->GetDefaultObject<AShooterProjectile>() : nullptr;
+	const bool bClassReplicates = ClassCDO && ClassCDO->GetIsReplicated();
+
+	UProjectilePoolSubsystem* Pool = bClassReplicates
+		? nullptr : GetWorld()->GetSubsystem<UProjectilePoolSubsystem>();
 	if (Pool)
 	{
 		Projectile = Pool->GetProjectile(ProjectileClass, ProjectileTransform, GetOwner(), PawnOwner);
@@ -2436,6 +2514,21 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 	if (Projectile)
 	{
 		Projectile->SetSourceWeapon(this);
+	}
+
+	// Everyone else's copy of this shot.
+	//
+	// The authority's round is invisible to other machines now, so the only thing that reaches them
+	// is this: the same muzzle transform, and each client builds its own decoration from it. The
+	// shooter is skipped inside the multicast because it already fired its own the instant it pulled
+	// the trigger, and the authority is skipped because the round it is holding is the one it draws.
+	//
+	// Skipped entirely for a class that still replicates: those arrive on their own, and adding a
+	// decoration on top would show every observer two rounds for one shot.
+	if (!bCosmeticOnly && HasAuthority() && Projectile && !bClassReplicates)
+	{
+		Multicast_SpawnCosmeticProjectile(ProjectileTransform.GetLocation(),
+			ProjectileTransform.GetRotation().GetForwardVector());
 	}
 
 	// If charge-based firing, scale projectile charge and match player polarity
@@ -3102,7 +3195,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	// DEBUG: Log what the Visibility line trace hit (helps diagnose EMFPhysicsProp hits)
 	if (bHitWall && WallHitResult.GetActor())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hitscan DEBUG] Visibility trace hit: %s (Class: %s) at dist=%.0f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[Hitscan DEBUG] Visibility trace hit: %s (Class: %s) at dist=%.0f"),
 			*WallHitResult.GetActor()->GetName(),
 			*WallHitResult.GetActor()->GetClass()->GetName(),
 			WallHitResult.Distance);
@@ -3210,7 +3303,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		SweepQueryParams
 	);
 
-	UE_LOG(LogTemp, Warning, TEXT("Cone Hitscan: Sweep found %d hits, MaxRadius=%.1f, MaxDist=%.0f, Angle=%.1f"),
+	UE_LOG(LogTemp, Verbose, TEXT("Cone Hitscan: Sweep found %d hits, MaxRadius=%.1f, MaxDist=%.0f, Angle=%.1f"),
 		SweepHits.Num(), MaxConeRadius, MaxDistance, DivergenceAngle);
 
 	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 3: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¤ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° =====
@@ -3258,7 +3351,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		FVector PointOnAxis = Start + Direction * HitDistance;
 		float DistanceFromAxis = FVector::Dist(HitLocation, PointOnAxis);
 
-		UE_LOG(LogTemp, Warning, TEXT("  - %s: Dist=%.0f, Angle=%.1fÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°, DistFromAxis=%.1f, ConeRadius=%.1f"),
+		UE_LOG(LogTemp, Verbose, TEXT("  - %s: Dist=%.0f, Angle=%.1fÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°, DistFromAxis=%.1f, ConeRadius=%.1f"),
 			*HitActor->GetName(), HitDistance, AngleToHit, DistanceFromAxis, ConeRadiusAtDistance);
 
 		// [HITSCAN_DEBUG] Full candidate info: which component was swept (capsule vs mesh), bone,
@@ -3415,7 +3508,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		float FinalDamage = HitscanDamage * RemainingEnergy * AreaMultiplier * HeadshotMult * HeatMult * ZFactorMult * TagMult * UpgradeMult;
 
-		UE_LOG(LogTemp, Warning, TEXT("    BEST TARGET HIT: %s | Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f x Tag:%.2f x Upg:%.2f = %.1f"),
+		UE_LOG(LogTemp, Verbose, TEXT("    BEST TARGET HIT: %s | Damage: %.1f x Energy:%.2f x Area:%.2f x HS:%.1f x Heat:%.2f x Z:%.2f x Tag:%.2f x Upg:%.2f = %.1f"),
 			*BestTarget->GetName(), HitscanDamage, RemainingEnergy, AreaMultiplier, HeadshotMult, HeatMult, ZFactorMult, TagMult, UpgradeMult, FinalDamage);
 
 		// The shield as it stood when the bullet arrived, read before anything touches the target.
@@ -3497,7 +3590,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	}
 
 	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 4: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ =====
-	UE_LOG(LogTemp, Warning, TEXT("Cone Hitscan RESULT: %d targets hit"), HitTargets.Num());
+	UE_LOG(LogTemp, Verbose, TEXT("Cone Hitscan RESULT: %d targets hit"), HitTargets.Num());
 
 	// [HITSCAN_DEBUG] The "tracer hit but no damage" case lands exactly here:
 	// sweepHits=0           -> pawn sweep never found the enemy (parallax / object type / collision off)
@@ -3523,7 +3616,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			EffectiveBeamEnd = PawnEndPoint;
 		}
 
-		UE_LOG(LogTemp, Warning, TEXT("Pawn beam end: Target=%s, PawnDist=%.0f, WallDist=%.0f, Using=%s"),
+		UE_LOG(LogTemp, Verbose, TEXT("Pawn beam end: Target=%s, PawnDist=%.0f, WallDist=%.0f, Using=%s"),
 			*BestTarget->GetName(), DistToPawn, DistToWall,
 			DistToPawn < DistToWall ? TEXT("PAWN") : TEXT("WALL"));
 	}
@@ -3597,7 +3690,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			FVector ReflectedDir = CalculateReflection(Direction, WallHitResult.ImpactNormal);
 			float NewEnergy = RemainingEnergy * (1.0f - ReflectionEnergyLoss);
 
-			UE_LOG(LogTemp, Warning, TEXT("Cone Hitscan: Reflecting off %s (NewEnergy: %.2f)"),
+			UE_LOG(LogTemp, Verbose, TEXT("Cone Hitscan: Reflecting off %s (NewEnergy: %.2f)"),
 				*WallHitResult.GetActor()->GetName(), NewEnergy);
 
 			SpawnReflectionEffect(WallHitResult.ImpactPoint, Direction, ReflectedDir);
@@ -3955,7 +4048,7 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 		// Beam goes to wall (or max range), not stopping at pawn
 		BeamEnd = bHitWall ? WallHit.ImpactPoint : End;
 
-		UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] HIT PAWN: %s at dist=%.0f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NPC Hitscan] HIT PAWN: %s at dist=%.0f"),
 			*PawnHit.GetActor()->GetName(), PawnHit.Distance);
 		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green,
 			FString::Printf(TEXT("[NPC] DMG -> %s (%.0f)"), *PawnHit.GetActor()->GetName(), PawnHit.Distance));
@@ -3966,12 +4059,12 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 
 		if (bHitWall)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] Hit wall: %s at dist=%.0f (no pawn hit)"),
+			UE_LOG(LogTemp, Verbose, TEXT("[NPC Hitscan] Hit wall: %s at dist=%.0f (no pawn hit)"),
 				*WallHit.GetActor()->GetName(), WallHit.Distance);
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[NPC Hitscan] MISS: nothing hit"));
+			UE_LOG(LogTemp, Verbose, TEXT("[NPC Hitscan] MISS: nothing hit"));
 		}
 	}
 
@@ -4320,7 +4413,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 				BoltDamageMultiplier, BoltHitBone, WallHit, bHitWall, Tracer);
 		}
 
-		UE_LOG(LogTemp, Warning, TEXT("[BOLT_DEBUG] %s: pellet away, target=%s line=%.0f speed=%.0f arrives in %.3fs"),
+		UE_LOG(LogTemp, Verbose, TEXT("[BOLT_DEBUG] %s: pellet away, target=%s line=%.0f speed=%.0f arrives in %.3fs"),
 			*GetName(), *GetNameSafe(BoltVictim), WallDistance, RandSpeed, WallDistance / RandSpeed);
 	}
 	else
@@ -4730,7 +4823,7 @@ bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent*
 	float ChargePerHit = 0.0f;
 	const bool bIonizes = GetShotIonization(ChargePerHit);
 
-	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s ionizes=%d charge=%.2f"),
+	UE_LOG(LogTemp, Verbose, TEXT("[ION_DEBUG] ApplyHitscanIonization called: target=%s hitComp=%s ionizes=%d charge=%.2f"),
 		*GetNameSafe(Target),
 		HitComponent ? *HitComponent->GetName() : TEXT("null"),
 		bIonizes, ChargePerHit);
@@ -4754,11 +4847,11 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 	// Player must hit the shield mesh to electrify the NPC behind it.
 	if (UNPCRiotShieldComponent::ShouldBlockBodyIonization(Target, HitComponent))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: BLOCKED by shield rule"));
+		UE_LOG(LogTemp, Verbose, TEXT("[ION_DEBUG] ApplyHitscanIonization: BLOCKED by shield rule"));
 		return false;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[ION_DEBUG] ApplyHitscanIonization: PASSED, applying charge to %s"), *Target->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[ION_DEBUG] ApplyHitscanIonization: PASSED, applying charge to %s"), *Target->GetName());
 
 	// Charging something is a change to the world, and until now a client only ever made it to its
 	// own copy: ionization carries no damage, so it never travelled with a damage report, and the
@@ -4805,7 +4898,7 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
 				OpenedNPC->TakeDamage(RedirectedDamage, DamageEvent, GetInstigatorController(), this);
 
-				UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Redirected %.1f ionization into health on %s"),
+				UE_LOG(LogTemp, Verbose, TEXT("[ABILITY_DEBUG] Redirected %.1f ionization into health on %s"),
 					RedirectedDamage, *OpenedNPC->GetName());
 			}
 			return true;
@@ -5771,30 +5864,6 @@ float AShooterWeapon::GetADSZoom() const
 
 	// Below 1 is not zoom, it is a wide angle, and nothing in the game means to ask for one.
 	return FMath::Max(1.0f, Zoom);
-}
-
-FVector AShooterWeapon::GetSightEyeOffset() const
-{
-	// A mounted optic states its own eye relief, in the same camera axes SightAimOffset uses: X is
-	// how far in front of the eye the glass is held, Y and Z patch a socket that is off the sight
-	// line. Asked of the optic FIRST for the same reason the anchor is: the eye point is on the
-	// scope, so how far back the eye sits from it is the scope's business.
-	if (const UWeaponAttachmentDefinition* Optic = GetAttachmentOfType(EWeaponAttachmentType::Optic))
-	{
-		return FVector(Optic->EyeRelief, Optic->SightScreenNudge.X, Optic->SightScreenNudge.Y);
-	}
-
-	return SightAimOffset;
-}
-
-bool AShooterWeapon::ShouldLockSightToScreenCentre() const
-{
-	if (const UWeaponAttachmentDefinition* Optic = GetAttachmentOfType(EWeaponAttachmentType::Optic))
-	{
-		return Optic->bLockSightToScreenCentre;
-	}
-
-	return bLockSightToScreenCentre;
 }
 
 float AShooterWeapon::ApplyZoomToFOV(float BaseFOVDegrees, float Zoom)

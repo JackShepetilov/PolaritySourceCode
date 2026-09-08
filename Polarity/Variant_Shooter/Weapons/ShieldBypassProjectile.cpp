@@ -1,4 +1,4 @@
-// ShieldBypassProjectile.cpp
+﻿// ShieldBypassProjectile.cpp
 
 #include "ShieldBypassProjectile.h"
 #include "GameFramework/ProjectileMovementComponent.h"
@@ -12,10 +12,10 @@ AShieldBypassProjectile::AShieldBypassProjectile()
 {
 	// The bolt does NOTHING on contact. Not damage, not knockback.
 	//
-	// AShooterProjectile ships both switched on -- HitDamage 25 and CharacterKnockbackForce 1200 --
-	// and applies them in ProcessHit, so a projectile meant purely as a delivery mechanism inherited
-	// a weapon's behaviour twice over without anyone setting it. Every inherited default here is a
-	// behaviour until it is explicitly turned off.
+	// Zero here is an EXPLICIT zero, not the inherit value: the base ships HitDamage negative,
+	// meaning "take the firing weapon's number". A projectile meant purely as a delivery mechanism
+	// would otherwise pick up the damage of whatever gun launched it. Every inherited default here
+	// is a behaviour until it is explicitly turned off.
 	//
 	// This ability's whole point is that it changes what OTHER fire is worth. Anything the bolt does
 	// on its own is wrong by definition.
@@ -62,6 +62,19 @@ void AShieldBypassProjectile::LaunchAt(AActor* Target, float Speed, float Damage
 	ProjectileMovement->InitialSpeed = Speed;
 	ProjectileMovement->MaxSpeed = Speed;
 	ProjectileMovement->Velocity = GetActorForwardVector() * Speed;
+
+	// The flight timeout was armed at spawn off the class default speed, and the speed just changed.
+	// Re-arm so the distance this bolt is allowed to cover is the one measured against how fast it
+	// is actually going. Same timer handle, so this replaces rather than stacks.
+	ArmFlightTimeout();
+}
+
+void AShieldBypassProjectile::ResetProjectileState()
+{
+	Super::ResetProjectileState();
+
+	LockedTarget = nullptr;
+	TimeSinceScan = 0.0f;
 }
 
 void AShieldBypassProjectile::Tick(float DeltaSeconds)

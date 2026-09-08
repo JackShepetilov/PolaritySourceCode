@@ -30,6 +30,21 @@ AEMFProjectile::AEMFProjectile()
 	// Enable tick for EMF force calculations
 	PrimaryActorTick.bCanEverTick = true;
 
+	// Replicated, against the base class's default, and deliberately.
+	//
+	// The base stopped replicating because an ordinary bullet is something clients only LOOK at, and
+	// a look is reproducible from the fired event. This one is different in kind: it is a live EMF
+	// field source that players physically push off (rocket boost), so a client needs the actual
+	// actor the server is simulating rather than a lookalike of its own. Two independently simulated
+	// field sources would disagree about where the push comes from, and the disagreement would be
+	// felt directly in the player's movement.
+	//
+	// The cost is accepted because these are fired one or two at a time from the charge launcher,
+	// not by the hundred. AShooterWeapon::SpawnProjectileAtTransform reads this back off the CDO and
+	// skips the cosmetic multicast for classes that replicate, so nobody ends up with two.
+	bReplicates = true;
+	SetReplicateMovement(true);
+
 	// Create EMF Field Component - this is the only source of truth for charge/mass
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("EMFFieldComponent"));
 
@@ -469,40 +484,24 @@ void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, 
 	}
 
 	// Apply EMF damage (with charge scaling if enabled)
-	if (HitActor && (HitActor != GetOwner() || bDamageOwner))
+	//
+	// The charge scaling is this projectile's own business and stays here. Everything AFTER the
+	// number is worked out belongs to the weapon, so it goes through the same door as an ordinary
+	// round: ApplyDirectHit carries the shield gate, the headshot, the upgrades, the hit marker and
+	// the impulse rules. Calling ApplyDamage straight was how a charged shot could pass through a
+	// held shield and confirm nothing to the person who fired it.
+	if (HitActor && (HitActor != GetOwner() || bDamageOwner) && HitActor->CanBeDamaged())
 	{
-		// Calculate damage with charge scaling
-		float ChargeDamage = CalculateChargeDamage();
+		const float ChargeDamage = CalculateChargeDamage();
 
-		// Apply tag-based damage multiplier (inherited from ShooterProjectile)
-		float TagMultiplier = GetTagDamageMultiplier(HitActor);
-		float FinalDamage = ChargeDamage * TagMultiplier;
+		UE_LOG(LogTemp, Verbose, TEXT("[EMF] %s -> %s: charged damage %.1f (charge %.2f)"),
+			*GetName(), *HitActor->GetName(), ChargeDamage, ProjectileCharge);
 
-		UE_LOG(LogTemp, Warning, TEXT("EMFProjectile::ProcessHit - Target: %s, BaseDamage: %.1f, ChargeDamage: %.1f, TagMultiplier: %.2f, FinalDamage: %.1f, Charge: %.2f"),
-			*HitActor->GetName(),
-			HitDamage,
-			ChargeDamage,
-			TagMultiplier,
-			FinalDamage,
-			ProjectileCharge);
-
-		// Log all tags on target and all configured multipliers
-		for (const auto& Pair : TagDamageMultipliers)
-		{
-			bool bHasTag = HitActor->ActorHasTag(Pair.Key);
-			UE_LOG(LogTemp, Warning, TEXT("  EMFProjectile TagMultiplier: '%s' = %.2f, Target has tag: %s"),
-				*Pair.Key.ToString(),
-				Pair.Value,
-				bHasTag ? TEXT("YES") : TEXT("NO"));
-		}
-
-		AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
-		UGameplayStatics::ApplyDamage(HitActor, FinalDamage, InstigatorController, this, HitDamageType);
+		ApplyDirectHit(HitActor, HitComp, HitLocation, HitDirection, ChargeDamage);
 	}
-
-	// Apply physics forces (same as parent)
-	if (HitComp && HitComp->IsSimulatingPhysics())
+	else if (HitComp && HitComp->IsSimulatingPhysics())
 	{
+		// Nothing to damage, but a shove is still owed to a physics prop.
 		HitComp->AddImpulseAtLocation(HitDirection * PhysicsForce, HitLocation);
 	}
 
@@ -523,7 +522,9 @@ void AEMFProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, 
 
 float AEMFProjectile::CalculateChargeDamage() const
 {
-	float BaseDamage = HitDamage;
+	// Not HitDamage directly: that field is an override now, and its "defer to the weapon" value is
+	// negative. Reading it raw would scale a negative number by the charge and heal the target.
+	const float BaseDamage = ResolveDirectHitDamage();
 
 	if (!bUseChargeDamageScaling)
 	{
@@ -632,7 +633,7 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 	if (!bDiagnosticLogged)
 	{
 		bDiagnosticLogged = true;
-		UE_LOG(LogTemp, Warning, TEXT("=== EMFProjectile DIAGNOSTIC === MyCharge=%.2f, Mass=%.2f, Pos=(%.0f,%.0f,%.0f), Sources=%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("=== EMFProjectile DIAGNOSTIC === MyCharge=%.2f, Mass=%.2f, Pos=(%.0f,%.0f,%.0f), Sources=%d"),
 			Charge, Mass, Position.X, Position.Y, Position.Z, OtherSources.Num());
 		for (int32 i = 0; i < OtherSources.Num(); ++i)
 		{
@@ -648,7 +649,7 @@ void AEMFProjectile::ApplyEMForces(float DeltaTime)
 			case EEMSourceOwnerType::PhysicsProp: TypeStr = TEXT("PhysicsProp"); break;
 			default: TypeStr = TEXT("None/Unknown"); break;
 			}
-			UE_LOG(LogTemp, Warning, TEXT("  [%d] OwnerType=%s, SourceType=%d, Charge=%.2f, Pos=(%.0f,%.0f,%.0f), Dist=%.1f"),
+			UE_LOG(LogTemp, Verbose, TEXT("  [%d] OwnerType=%s, SourceType=%d, Charge=%.2f, Pos=(%.0f,%.0f,%.0f), Dist=%.1f"),
 				i, TypeStr, static_cast<int32>(S.SourceType), S.PointChargeParams.Charge,
 				S.Position.X, S.Position.Y, S.Position.Z, Dist);
 		}

@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
@@ -240,7 +240,30 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Projectile|Destruction", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
 	float DeferredDestructionTime = 5.0f;
 
-	/** Timer to handle deferred destruction of this projectile */
+	/**
+	 * How far this round may fly before it gives up and goes away. Zero means no limit.
+	 *
+	 * Until this existed a round that hit NOTHING was never cleaned up at all: the destruction timer
+	 * is armed by a hit, so a shot into the sky flew until the world bounds caught it, ticking and
+	 * (when it still replicated) costing bandwidth the whole way. With hundreds of bullets alive
+	 * that is the leak that matters.
+	 *
+	 * Expressed as a DISTANCE because that is the thing a designer actually knows about a weapon:
+	 * how far it is meant to reach. It is turned into one timer at launch (distance / speed) rather
+	 * than checked per frame, which is the whole point -- a per-frame distance test would hand back
+	 * the actor tick this class just stopped paying for.
+	 */
+	UPROPERTY(EditAnywhere, Category="Projectile|Destruction", meta = (ClampMin = 0, Units = "cm"))
+	float MaxTravelDistance = 50000.0f;   // 500 m. Unreal counts in centimetres.
+
+	/** Ceiling on the flight timeout when the speed is unknown or absurdly low, so nothing can live
+	 *  forever through a misconfigured projectile. */
+	UPROPERTY(EditAnywhere, Category="Projectile|Destruction", meta = (ClampMin = "0.1", ClampMax = "60.0", Units = "s"))
+	float MaxFlightSeconds = 10.0f;
+
+	/** Timer for BOTH ends of this projectile's life: the flight timeout armed at launch, and the
+	 *  deferred destruction armed by a hit. One handle on purpose -- a hit re-arms it, which cancels
+	 *  the flight timeout in the same call rather than leaving two timers racing each other. */
 	FTimerHandle DestructionTimer;
 
 	// ==================== Pooling ====================
@@ -251,6 +274,18 @@ protected:
 
 	/** True if this projectile is managed by the pool system */
 	bool bIsPooled = false;
+
+	/**
+	 * True while this one is PARKED in the pool rather than flying.
+	 *
+	 * Guards the one failure a pool cannot survive: the same actor added to the free list twice.
+	 * The pool would then hand it out for two shots at once, and those two shots would share one
+	 * collision component, one bHit flag and one timer -- so a hit would register for whichever of
+	 * them got there first and vanish for the other. Intermittent, unreproducible, and it looks
+	 * exactly like a broken hitbox, which is why it is worth a bool rather than an argument about
+	 * whether it can happen.
+	 */
+	bool bIsInPool = false;
 
 	/** A shooting client spawns one of these the instant it pulls the trigger so the shot leaves the
 	 *  barrel with no round trip, and asks the server for the real one at the same time. This copy
@@ -281,8 +316,17 @@ public:
 	/** Set pooled flag before BeginPlay (called by pool subsystem during deferred spawn) */
 	void SetPooledFlag() { bIsPooled = true; }
 
-	/** Mark this one as the shooter's local stand-in. Set it before the projectile can hit anything. */
-	void SetCosmeticOnly() { bIsCosmeticOnly = true; }
+	/**
+	 * Mark this one as decoration and strip it of everything that could affect the game.
+	 *
+	 * Call it before the projectile can hit anything. Beyond the flag it also takes the round out of
+	 * the way of PAWNS: a decoration that answers Block on the pawn channel is a solid object in the
+	 * path of every character on that machine, so a teammate could be shoved or stopped by a bullet
+	 * that does not exist anywhere else. World geometry still blocks it, so it stops at a wall where
+	 * it should; a body it flies through, and the impact the authority multicasts is what the player
+	 * actually sees land.
+	 */
+	void SetCosmeticOnly();
 
 	/** Tell this round which gun it came out of. Set at spawn, before it can hit anything. */
 	void SetSourceWeapon(AShooterWeapon* InWeapon) { SourceWeapon = InWeapon; }
@@ -313,16 +357,36 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	/** True when this projectile may change the world: the authority's copy, and never a client's
-	 *  local stand-in. Everything cosmetic ignores it; everything that damages, explodes or pushes
-	 *  has to ask. */
-	bool CanAffectWorld() const { return HasAuthority() && !bIsCosmeticOnly; }
+	/**
+	 * True when this projectile may change the world: the authority's copy, and never a decoration.
+	 * Everything cosmetic ignores it; everything that damages, explodes or pushes has to ask.
+	 *
+	 * This used to read HasAuthority() && !bIsCosmeticOnly, and that stopped being safe the moment
+	 * ordinary rounds stopped replicating. HasAuthority() means "this machine owns this actor", and
+	 * an actor a CLIENT spawned for itself is owned by that client: a non-replicated projectile
+	 * answers TRUE to HasAuthority() on every machine it exists on. So the old test would have left
+	 * a single missed SetCosmeticOnly() call able to deal damage on a player's own computer.
+	 *
+	 * The net mode is asked instead, because it is a property of the MACHINE rather than of the
+	 * actor and no spawn path can forget to set it: a client is never the authority for the game,
+	 * whatever it happens to own. bIsCosmeticOnly then rules out the host's own decorations.
+	 */
+	bool CanAffectWorld() const;
 
 	/** Called by pool to activate projectile for use */
 	void ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator);
 
 	/** Called by pool to deactivate projectile for reuse */
 	void DeactivateToPool();
+
+	/**
+	 * Start the clock that takes this round out of the world if it never hits anything.
+	 *
+	 * Reads the speed it is ACTUALLY flying at, not the class default, and must therefore be called
+	 * after whatever set that speed. Launch paths that override it (AShieldBypassProjectile::LaunchAt)
+	 * call this again; the timer handle is shared, so re-arming replaces rather than stacks.
+	 */
+	void ArmFlightTimeout();
 
 protected:
 	
@@ -331,6 +395,47 @@ protected:
 
 	/** Gameplay cleanup */
 	virtual void EndPlay(EEndPlayReason::Type EndPlayReason) override;
+
+	/**
+	 * A decoration touching a body.
+	 *
+	 *  Overlap rather than block, and that distinction is the whole design. A BLOCKING sphere is a
+	 *  real obstacle to character movement on the machine that owns it, so a bullet that exists
+	 *  nowhere else could shove or stop a live teammate. An overlapping one obstructs nobody and
+	 *  still learns exactly where it touched, which is all an impact needs.
+	 *
+	 *  Only decorations get here: the authority's round keeps Block and lands through NotifyHit.
+	 */
+	UFUNCTION()
+	void OnCosmeticOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	/**
+	 * The impact this round makes, on THIS machine.
+	 *
+	 * Who plays what depends on whether every machine has its own copy of the round:
+	 *
+	 *   non-replicated (the ordinary bullet) -- everyone simulates one and everyone plays its own
+	 *     landing. Zero RPCs per bullet, and the blood cannot be lost to a dropped unreliable
+	 *     multicast, which matters most exactly when it is busiest.
+	 *   replicated (AEMFProjectile) -- only the authority has one, so it plays locally and
+	 *     multicasts, exactly as the trace path does.
+	 */
+	void PlayImpactFeedback(const FHitResult& Hit);
+
+	/**
+	 * Fill in the physical material the hit came back without, so brick reads as brick.
+	 *
+	 * A projectile's hit is produced by the movement component's own sweep, and a component sweep
+	 * sets bReturnPhysicalMaterial to false: Hit.PhysMaterial is ALWAYS null on this path. Every
+	 * surface therefore resolved to SurfaceType_Default, and every impact played the default effect
+	 * no matter what was struck -- half of the reason a projectile weapon knocked no chips off a
+	 * wall. (The other half was that the impact fields were greyed out on the weapon.)
+	 *
+	 * Asked of the body directly rather than re-traced: the material is already on the component
+	 * that was hit, and one pointer chase per impact is cheaper than a second query.
+	 */
+	void EnsureHitPhysicalMaterial(FHitResult& Hit) const;
 
 	/** Handles collision */
 	virtual void NotifyHit(class UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp, bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit) override;
@@ -384,6 +489,21 @@ protected:
 
 	/** Called from the destruction timer to destroy this projectile */
 	void OnDeferredDestruction();
+
+	/**
+	 * Make the shooter and this round transparent to each other, or stop doing so.
+	 *
+	 * Two lists, not one, and the second is the one that used to leak. Telling the projectile to
+	 * ignore the shooter costs nothing when it dies -- the list dies with it. Telling the SHOOTER to
+	 * ignore the projectile writes into the character's own MoveIgnoreActors, which outlives the
+	 * bullet: every round anybody fired stayed in that array for the rest of the match, and the
+	 * array is walked on every single character move. Hundreds of bullets turn it into a per-move
+	 * scan over hundreds of dead pointers.
+	 *
+	 * So it is removed again the moment the round stops flying, in both endings (pooled and
+	 * destroyed).
+	 */
+	void SetShooterMoveIgnore(bool bIgnore);
 
 	/** Reset projectile state for pool reuse. Override in subclasses for custom state. */
 	virtual void ResetProjectileState();

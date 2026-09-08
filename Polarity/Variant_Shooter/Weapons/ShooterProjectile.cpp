@@ -4,6 +4,8 @@
 #include "ShooterProjectile.h"
 #include "Coop/CoopPlayers.h"
 #include "ProjectilePoolSubsystem.h"
+#include "ShooterWeapon.h"
+#include "Net/UnrealNetwork.h"
 #include "ApexMovementComponent.h"
 #include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
 #include "Components/SphereComponent.h"
@@ -20,16 +22,46 @@
 #include "TimerManager.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
+#include "PhysicsEngine/BodyInstance.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 
 AShooterProjectile::AShooterProjectile()
 {
-	PrimaryActorTick.bCanEverTick = true;
+	// The ACTOR does not tick, and never did anything when it was ticking: this class has no Tick
+	// override, so every round in the air paid tick-manager overhead for an empty call.
+	//
+	// This does NOT touch flight or collision, and the proof is already in the project rather than
+	// in reasoning: SlowPuddleProjectile and SmokeCanisterProjectile have shipped with the actor
+	// tick off and the same ProjectileMovement, and they fly and hit things. Movement and its
+	// sweeps live on the COMPONENT's own tick function, which is registered independently of the
+	// actor's; NotifyHit comes out of those sweeps, not out of AActor::Tick. The pooled path's
+	// SetActorTickEnabled(true) is a documented no-op while bCanEverTick is false.
+	//
+	// The two subclasses that genuinely need a per-frame pass turn it back on in their own
+	// constructors and always have: AEMFProjectile (charge homing) and AShieldBypassProjectile
+	// (in-flight target scan). A new subclass that needs one does the same.
+	PrimaryActorTick.bCanEverTick = false;
 
-	// The authority's projectile is the real one and everybody has to see it fly. A projectile
-	// spawned on a client never replicates anything regardless of this flag, because replication only
-	// ever originates from the authority, so the shooter's local stand-in stays local.
-	bReplicates = true;
-	SetReplicateMovement(true);
+	// An ordinary round is NOT replicated. Every machine simulates its own copy from the fired event
+	// instead, which is the only shape that survives hundreds of bullets in the air.
+	//
+	// What replication was costing: an actor channel per round per client, plus movement updates at
+	// the actor default of 100 Hz. Three hundred bullets alive in a four player game is three
+	// hundred channels being fed by the server, for a path that is entirely predictable from
+	// "muzzle here, direction there, speed known". The server keeps ONE authoritative copy that
+	// nobody watches and that decides every hit; each client draws its own from
+	// AShooterWeapon::Multicast_SpawnCosmeticProjectile.
+	//
+	// It also unlocks pooling. The reason the pool was restricted to the shooter's stand-in was that
+	// a pooled actor is reused rather than destroyed, so a client holding its channel open would see
+	// it teleport back to the muzzle on the next shot. With nobody holding a channel, that objection
+	// is gone and the real projectile can come from the pool too.
+	//
+	// A subclass whose clients must interact with the ACTOR, rather than just look at it, turns this
+	// back on in its own constructor. AEMFProjectile does, because it is a live field source that
+	// players push off.
+	bReplicates = false;
+	SetReplicateMovement(false);
 
 	// create the collision component and assign it as the root
 	RootComponent = CollisionComponent = CreateDefaultSubobject<USphereComponent>(TEXT("Collision Component"));
@@ -46,6 +78,34 @@ AShooterProjectile::AShooterProjectile()
 	ProjectileMovement->MaxSpeed = 3000.0f;
 	ProjectileMovement->bShouldBounce = true;
 
+	// THE line that decides whether the hitbox is trustworthy, so it is set here rather than left to
+	// a default a blueprint could quietly clear. A swept move tests the whole segment between last
+	// frame and this one; an unswept one teleports and tests only the destination. At 25000 cm/s a
+	// 60 fps frame is four metres of travel, so without this a round passes through a wall, and
+	// through a person, without ever being asked.
+	ProjectileMovement->bSweepCollision = true;
+
+	// Sub-stepping, and it is worth being exact about what this does and does not buy, because it is
+	// easy to mistake for the thing above.
+	//
+	// It does NOT make hit detection safer. The sweep already tests the whole segment between last
+	// frame and this one, so a straight round cannot tunnel however long the step is. And a straight
+	// round does not sub-step at all: UProjectileMovementComponent::ShouldUseSubStepping only says
+	// yes under gravity or active homing.
+	//
+	// What it buys is the SHAPE of an arc across a bad frame. A lobbed shell integrated in one 200 ms
+	// jump cuts the corner of its own trajectory and can pass beside cover it should have hit; in
+	// 20 ms slices it follows the curve it was aimed along. So this is for the grenade launcher and
+	// the homing bolt, not for the rifle.
+	ProjectileMovement->MaxSimulationTimeStep = 0.02f;
+	ProjectileMovement->MaxSimulationIterations = 12;
+
+	// A decoration reports the body it touched through this. Bound once, in the constructor, so a
+	// pooled actor keeps the binding across every reuse; the handler itself refuses to do anything
+	// unless the round is actually a decoration.
+	CollisionComponent->SetGenerateOverlapEvents(true);
+	CollisionComponent->OnComponentBeginOverlap.AddDynamic(this, &AShooterProjectile::OnCosmeticOverlap);
+
 	// set the default damage type
 	HitDamageType = UDamageType::StaticClass();
 }
@@ -61,30 +121,16 @@ void AShooterProjectile::BeginPlay()
 		return;
 	}
 
-	// The shooter is already looking at its own stand-in, spawned the moment it pulled the trigger.
-	// The authoritative copy still flies here and still lands the hit; it is only hidden, and only
-	// for the one player who would otherwise see the shot twice.
-	if (!HasAuthority() && !bIsCosmeticOnly)
-	{
-		if (const APawn* InstigatorPawn = GetInstigator(); InstigatorPawn && InstigatorPawn->IsLocallyControlled())
-		{
-			SetActorHiddenInGame(true);
-		}
-	}
+	// The hide-for-the-shooter block that used to live here is gone with replication. It asked
+	// "am I the authority's copy on somebody else's machine", and no such thing exists any more:
+	// an unreplicated round only ever exists on the machine that spawned it, and the shooter sees
+	// exactly one bullet because only one was made for it.
 
-	// Normal spawn path (not from pool)
-	// ignore the pawn that shot this projectile
-	if (APawn* InstigatorPawn = GetInstigator())
-	{
-		CollisionComponent->IgnoreActorWhenMoving(InstigatorPawn, true);
-		CollisionComponent->MoveIgnoreActors.Add(InstigatorPawn);
+	// Normal spawn path (not from pool): make the shooter and the round transparent to each other.
+	SetShooterMoveIgnore(true);
 
-		// Also ignore instigator's collision with us
-		if (UPrimitiveComponent* InstigatorRoot = Cast<UPrimitiveComponent>(InstigatorPawn->GetRootComponent()))
-		{
-			InstigatorRoot->IgnoreActorWhenMoving(this, true);
-		}
-	}
+	// Nothing hits everything. Arm the clock that ends a round which hits nothing at all.
+	ArmFlightTimeout();
 
 	// Spawn trail VFX if configured
 	if (TrailFX)
@@ -101,8 +147,105 @@ void AShooterProjectile::BeginPlay()
 	}
 }
 
+void AShooterProjectile::IgnoreProjectileWhileFlying(AShooterProjectile* Other)
+{
+	if (!IsValid(Other) || Other == this || !CollisionComponent)
+	{
+		return;
+	}
+
+	CollisionComponent->IgnoreActorWhenMoving(Other, true);
+	CollisionComponent->MoveIgnoreActors.AddUnique(Other);
+}
+
+void AShooterProjectile::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AShooterProjectile, SourceWeapon);
+}
+
+bool AShooterProjectile::CanAffectWorld() const
+{
+	// See the header for why this is the net MODE and not HasAuthority(). Short version: an
+	// unreplicated actor is owned by whatever machine made it, so a client's own bullet would
+	// answer yes to HasAuthority() and the only thing standing between it and dealing damage on
+	// that player's computer would be one flag nobody can see from here.
+	return GetNetMode() != NM_Client && !bIsCosmeticOnly;
+}
+
+void AShooterProjectile::SetCosmeticOnly()
+{
+	bIsCosmeticOnly = true;
+
+	// OVERLAP on the pawn channel, which is the one setting that gets both halves right.
+	//
+	// Block would be wrong: a blocking sphere is a real obstacle to character movement on whichever
+	// machine owns it, so a bullet that exists nowhere else could shove or stop a live teammate.
+	//
+	// Ignore would also be wrong, and this is the half worth spelling out, because it is where the
+	// blood goes. An ignored body is a body this copy never hears about, so a watcher's round would
+	// sail on through and the only impact anyone else could see would be the authority's unreliable
+	// multicast -- dropped exactly when a firefight is busiest. Overlapping tells the decoration
+	// precisely where it touched without ever standing in anyone's way, so every machine can play
+	// its own blood, from its own copy, with nothing to lose in transit.
+	//
+	// World geometry keeps Block, so a decoration still stops dead at a wall.
+	if (CollisionComponent)
+	{
+		CollisionComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+		CollisionComponent->SetGenerateOverlapEvents(true);
+	}
+}
+
+void AShooterProjectile::SetShooterMoveIgnore(bool bIgnore)
+{
+	APawn* const InstigatorPawn = GetInstigator();
+	if (!InstigatorPawn || !CollisionComponent)
+	{
+		return;
+	}
+
+	CollisionComponent->IgnoreActorWhenMoving(InstigatorPawn, bIgnore);
+
+	// The half that leaks. This writes into the CHARACTER's ignore list, which outlives the bullet
+	// by the rest of the match, and that list is walked on every character move.
+	if (UPrimitiveComponent* InstigatorRoot = Cast<UPrimitiveComponent>(InstigatorPawn->GetRootComponent()))
+	{
+		InstigatorRoot->IgnoreActorWhenMoving(this, bIgnore);
+	}
+}
+
+void AShooterProjectile::ArmFlightTimeout()
+{
+	UWorld* const World = GetWorld();
+	if (!World || MaxTravelDistance <= 0.0f)
+	{
+		return;
+	}
+
+	// The speed it is actually flying at. InitialSpeed is the configured one and Velocity is the one
+	// a launch path handed over; whichever is larger is the honest answer, and taking the larger is
+	// also the safe direction to be wrong in -- it shortens the timeout rather than extending it.
+	const float Speed = ProjectileMovement
+		? FMath::Max(ProjectileMovement->InitialSpeed, ProjectileMovement->Velocity.Size())
+		: 0.0f;
+
+	// A round with no speed configured would divide into an eternity, so the ceiling answers instead.
+	const float Seconds = (Speed > KINDA_SMALL_NUMBER)
+		? FMath::Min(MaxTravelDistance / Speed, MaxFlightSeconds)
+		: MaxFlightSeconds;
+
+	World->GetTimerManager().SetTimer(DestructionTimer, this,
+		&AShooterProjectile::OnDeferredDestruction, Seconds, false);
+}
+
 void AShooterProjectile::EndPlay(EEndPlayReason::Type EndPlayReason)
 {
+	// Before Super, because Super tears the actor down and GetInstigator has to still answer.
+	// Without this the shooter's own MoveIgnoreActors keeps a dead pointer per round fired.
+	SetShooterMoveIgnore(false);
+
 	Super::EndPlay(EndPlayReason);
 
 	// clear the destruction timer
@@ -117,6 +260,22 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 		return;
 	}
 
+	// A round never hits another round.
+	//
+	// One shotgun trigger pull puts eight of these in the air from ONE muzzle transform, and the
+	// collision sphere blocks every channel, so on the first frame they blocked each other: eight
+	// pellets stopped dead at the barrel and dropped on the floor, each one reporting a hit on its
+	// neighbour. And it DID report -- AActor::TakeDamage hands back the damage it was given even
+	// when the actor does nothing with it, so the funnel saw a live hit and played a hit marker.
+	//
+	// Ignored from here on rather than just this once, so the two stop blocking each other for good,
+	// and WITHOUT consuming bHit: this round has not hit anything yet and must carry on flying.
+	if (Cast<AShooterProjectile>(Other))
+	{
+		CollisionComponent->IgnoreActorWhenMoving(Other, true);
+		return;
+	}
+
 	bHit = true;
 
 	// disable collision on the projectile
@@ -127,6 +286,18 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	{
 		TrailComponent->Deactivate();
 	}
+
+	// The round landed somewhere, and that is worth seeing and hearing whether or not it hurt
+	// anything: a projectile weapon with no impact is a gun that shoots at walls in silence. Same
+	// split the trace's impact uses, and the two halves must not both fire on one machine.
+	//
+	//   the shooter's stand-in  -> plays it here, now, with no round trip
+	//   the authority's copy    -> plays it locally and multicasts (the multicast skips the shooter)
+	//   a watching client's copy-> nothing; the multicast already reached that machine
+	//
+	// The surface is resolved on whichever machine spawns it, which is the point of resolving it at
+	// all: an observer re-deriving a shield state a round trip later answers differently.
+	PlayImpactFeedback(Hit);
 
 	// Everything below this line changes the world: damage, knockback, explosions, and the noise the
 	// AI hears. Only the authority's projectile is allowed to do any of it. A client's stand-in has
@@ -165,9 +336,15 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 
 	} else {
 
+		// The whole hit result, kept for the length of the call below: ProcessHit's signature carries
+		// only an actor and two vectors (five subclasses override it), and the shared funnel needs
+		// the bone name for headshots and the physical material for the impact surface.
+		DirectHit = Hit;
+
 		// single hit projectile. Process the collided actor
 		ProcessHit(Other, OtherComp, Hit.ImpactPoint, -Hit.ImpactNormal);
 
+		DirectHit = FHitResult();
 	}
 
 	// pass control to BP for any extra effects
@@ -181,6 +358,123 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	else
 	{
 		// Return to pool or destroy right away
+		ReturnToPoolOrDestroy();
+	}
+}
+
+void AShooterProjectile::EnsureHitPhysicalMaterial(FHitResult& Hit) const
+{
+	if (Hit.PhysMaterial.IsValid())
+	{
+		return;
+	}
+
+	if (UPrimitiveComponent* const HitComponent = Hit.GetComponent())
+	{
+		if (FBodyInstance* const Body = HitComponent->GetBodyInstance(Hit.BoneName))
+		{
+			Hit.PhysMaterial = Body->GetSimplePhysicalMaterial();
+		}
+	}
+}
+
+void AShooterProjectile::PlayImpactFeedback(const FHitResult& Hit)
+{
+	AShooterWeapon* const Weapon = SourceWeapon;
+	if (!Weapon)
+	{
+		return;
+	}
+
+	// Nobody is looking at a dedicated server, and Niagara and sound cost the same there as anywhere.
+	if (GetNetMode() == NM_DedicatedServer && !GetIsReplicated())
+	{
+		return;
+	}
+
+	// The material the sweep did not bring. Without this every surface is SurfaceType_Default and
+	// every impact plays the same puff, whatever was struck. @see EnsureHitPhysicalMaterial.
+	FHitResult ResolvedHit = Hit;
+	EnsureHitPhysicalMaterial(ResolvedHit);
+
+	// Who plays what, and it turns on one question: does every machine have its own copy of this
+	// round?
+	//
+	// For an ordinary bullet the answer is yes, so each machine plays its own landing and there is
+	// no impact RPC per bullet anywhere in the game. That is not only cheaper, it is the RELIABLE
+	// option: the multicast is unreliable by design, so routing every impact through it would drop
+	// blood precisely when a firefight is at its busiest and there is most of it to drop.
+	//
+	// A replicating class (AEMFProjectile) only exists on the authority, so it keeps the old split:
+	// play here, multicast to everyone else.
+	if (!GetIsReplicated())
+	{
+		Weapon->SpawnImpactEffectLocally(ResolvedHit.ImpactPoint, ResolvedHit.ImpactNormal,
+			Weapon->ResolveImpactSurface(ResolvedHit));
+	}
+	else if (GetNetMode() != NM_Client)
+	{
+		Weapon->SpawnImpactEffect(ResolvedHit);
+	}
+}
+
+void AShooterProjectile::OnCosmeticOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
+{
+	// Decorations only. The authority's round blocks bodies and lands through NotifyHit, and letting
+	// it also land here would run one hit twice.
+	if (!bIsCosmeticOnly || bHit || !IsValid(OtherActor))
+	{
+		return;
+	}
+
+	// The shooter, and any round sharing this muzzle. MoveIgnoreActors stops them BLOCKING each
+	// other; it says nothing about overlaps, so without this a shotgun blooms eight impacts inside
+	// the barrel and the player is hosed in their own blood.
+	if (OtherActor == GetInstigator() || OtherActor == GetOwner() || OtherActor->IsA<AShooterProjectile>())
+	{
+		return;
+	}
+
+	bHit = true;
+
+	// Where it touched. A swept overlap carries the real contact point; without one the round's own
+	// position is the closest thing to an answer.
+	FHitResult ContactHit = bFromSweep ? SweepResult : FHitResult();
+	if (!bFromSweep)
+	{
+		ContactHit.HitObjectHandle = FActorInstanceHandle(OtherActor);
+		ContactHit.Component = OtherComp;
+		ContactHit.ImpactPoint = GetActorLocation();
+		ContactHit.Location = GetActorLocation();
+		ContactHit.ImpactNormal = ProjectileMovement
+			? -ProjectileMovement->Velocity.GetSafeNormal() : FVector::UpVector;
+	}
+
+	PlayImpactFeedback(ContactHit);
+
+	// Stop where it landed. An overlap does not halt anything by itself, so without this the
+	// decoration would sail on past the body it just splashed.
+	if (ProjectileMovement)
+	{
+		ProjectileMovement->StopMovementImmediately();
+		ProjectileMovement->Deactivate();
+	}
+	if (IsValid(TrailComponent))
+	{
+		TrailComponent->Deactivate();
+	}
+	SetActorHiddenInGame(true);
+
+	// Same ending a decoration gets when it stops at a wall, rather than a second one written here:
+	// the deferred timer exists so a trail can finish burning instead of being cut mid-particle.
+	if (DeferredDestructionTime > 0.0f)
+	{
+		GetWorld()->GetTimerManager().SetTimer(DestructionTimer, this,
+			&AShooterProjectile::OnDeferredDestruction, DeferredDestructionTime, false);
+	}
+	else
+	{
 		ReturnToPoolOrDestroy();
 	}
 }
@@ -276,9 +570,16 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 	// Keep other WorldDynamic actors unchanged.
 	if ((HitCharacter || bIsShootableButtonOwner) && (!bIsOwner || bDamageOwner))
 	{
-		float TagMultiplier = GetTagDamageMultiplier(HitActor);
+		// Resolved, not raw: HitDamage is an override whose "defer to the weapon" value is negative,
+		// and a negative base here would have the blast healing everyone inside the radius.
+		const float SplashBaseDamage = ResolveDirectHitDamage();
+
+		// With a weapon behind the blast the weapon's tag multipliers are the ones that count, and
+		// they are applied inside the funnel. Applying the projectile's here as well would square
+		// every tag on the victim. Same rule as the direct hit.
+		float TagMultiplier = SourceWeapon ? 1.0f : GetTagDamageMultiplier(HitActor);
 		float ProjectileMultiplier = GetProjectileDamageMultiplier(HitActor);
-		float FinalDamage = HitDamage * TagMultiplier * ProjectileMultiplier * SplashScale;
+		float FinalDamage = SplashBaseDamage * TagMultiplier * ProjectileMultiplier * SplashScale;
 		if (bIsOwner)
 		{
 			FinalDamage *= OwnerSelfDamageMultiplier;
@@ -289,7 +590,7 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 			FRadialDamageEvent RadialDamageEvent;
 			RadialDamageEvent.DamageTypeClass = HitDamageType;
 			RadialDamageEvent.Origin = ExplosionCenter;
-			RadialDamageEvent.Params.BaseDamage = HitDamage;
+			RadialDamageEvent.Params.BaseDamage = SplashBaseDamage;
 			RadialDamageEvent.Params.OuterRadius = ExplosionRadius;
 
 			// One entry, so the event is well formed. FRadialDamageEvent::GetBestHitInfo indexes
@@ -313,8 +614,27 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 				BlastHit.Normal = -ToVictim;
 			}
 
-			AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
-			HitActor->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
+			// Through the weapon's funnel, exactly like a direct hit, so a blast finally means the
+			// same things a bullet from the same gun means: the shield gate, the class passive's
+			// piercing damage, the upgrade and ability notifications, ionization, and a hit marker
+			// for every victim. Until now splash wrote health directly and confirmed nothing, which
+			// is why a rocket kill felt like the game had not noticed.
+			//
+			// Two things are deliberately handed over rather than left to the funnel. The radial
+			// event, because the blast origin and radius inside it are what reactions read. And an
+			// impulse of zero, because the launch below is scaled by the splash falloff and again by
+			// the rocket jump multiplier, neither of which a per-bullet shove knows about.
+			if (AShooterWeapon* Weapon = SourceWeapon)
+			{
+				Weapon->ApplyWeaponHit(RadialDamageEvent.ComponentHits[0], FinalDamage, HitDirection,
+					/*ImpulseForce*/ 0.0f, Weapon->GetShotDamageMultiplierAgainst(HitActor),
+					HitDamageType, bDamageOwner, &RadialDamageEvent);
+			}
+			else
+			{
+				AController* InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
+				HitActor->TakeDamage(FinalDamage, RadialDamageEvent, InstigatorController, this);
+			}
 		}
 	}
 
@@ -396,56 +716,128 @@ float AShooterProjectile::GetProjectileDamageMultiplier(AActor* /*Target*/) cons
 
 void AShooterProjectile::ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection)
 {
-	// have we hit a character?
-	if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
+	if (!IsValid(HitActor))
 	{
-		// ignore the owner of this projectile
-		if (HitCharacter != GetOwner() || bDamageOwner)
-		{
-			// Calculate tag-based damage multiplier
-			float TagMultiplier = GetTagDamageMultiplier(HitActor);
-			float ProjectileMultiplier = GetProjectileDamageMultiplier(HitActor);
-			float FinalDamage = HitDamage * TagMultiplier * ProjectileMultiplier;
-
-			UE_LOG(LogTemp, Warning, TEXT("Projectile::ProcessHit - Target: %s, BaseDamage: %.1f, TagMultiplier: %.2f, ProjectileMultiplier: %.2f, FinalDamage: %.1f, TagMultipliers count: %d"),
-				*HitActor->GetName(),
-				HitDamage,
-				TagMultiplier,
-				ProjectileMultiplier,
-				FinalDamage,
-				TagDamageMultipliers.Num());
-
-			// Log all tags on target and all configured multipliers
-			for (const auto& Pair : TagDamageMultipliers)
-			{
-				bool bHasTag = HitActor->ActorHasTag(Pair.Key);
-				UE_LOG(LogTemp, Warning, TEXT("  TagMultiplier: '%s' = %.2f, Target has tag: %s"),
-					*Pair.Key.ToString(),
-					Pair.Value,
-					bHasTag ? TEXT("YES") : TEXT("NO"));
-			}
-
-			// apply damage to the character
-			UGameplayStatics::ApplyDamage(HitCharacter, FinalDamage, GetInstigator()->GetController(), this, HitDamageType);
-
-			// knockback: CharacterMovement ignores physics impulses, so launch the character instead
-			if (CharacterKnockbackForce > 0.0f)
-			{
-				// add an upward bias so explosions at the feet pop the target up (TF2-style) instead of purely sideways
-				FVector LaunchDir = HitDirection;
-				LaunchDir.Z += KnockbackUpwardBias;
-				LaunchDir = LaunchDir.GetSafeNormal();
-
-				// override XY and Z so the launch is predictable regardless of the target's current velocity
-				HitCharacter->LaunchCharacter(LaunchDir * CharacterKnockbackForce, true, true);
-			}
-		}
+		return;
 	}
 
-	// have we hit a physics object?
+	// The owner gate is the projectile's own answer and stays here. The funnel is told about it
+	// rather than deciding it: the weapon's equivalent checkbox belongs to the trace path.
+	if (HitActor == GetOwner() && !bDamageOwner)
+	{
+		// Still worth a shove: bouncing a crate you are standing behind is not self-damage.
+		if (HitComp && HitComp->IsSimulatingPhysics())
+		{
+			HitComp->AddImpulseAtLocation(HitDirection * PhysicsForce, HitLocation);
+		}
+		return;
+	}
+
+	// Anything that can be hurt, not only characters. This used to test for ACharacter and drop
+	// everything else on the floor, which is why a projectile could push a physics prop around all
+	// day without ever damaging it while the same weapon firing traces destroyed it.
+	if (!HitActor->CanBeDamaged())
+	{
+		if (HitComp && HitComp->IsSimulatingPhysics())
+		{
+			HitComp->AddImpulseAtLocation(HitDirection * PhysicsForce, HitLocation);
+		}
+		return;
+	}
+
+	// The payload's own scaling (the airborne bonus subclass) is the only multiplier that belongs to
+	// the round rather than the gun. Tags, heat, height and upgrades come from the weapon inside
+	// ApplyDirectHit, so there is one place they can be wrong instead of two.
+	const float BaseDamage = ResolveDirectHitDamage() * GetProjectileDamageMultiplier(HitActor);
+
+	ApplyDirectHit(HitActor, HitComp, HitLocation, HitDirection, BaseDamage);
+}
+
+float AShooterProjectile::ResolveDirectHitDamage() const
+{
+	if (HitDamage >= 0.0f)
+	{
+		return HitDamage;
+	}
+
+	if (SourceWeapon)
+	{
+		const float WeaponDamage = SourceWeapon->GetShotDamage();
+		if (WeaponDamage > 0.0f)
+		{
+			return WeaponDamage;
+		}
+
+		UE_LOG(LogTemp, Error,
+			TEXT("[PROJECTILE] %s defers its damage to %s, and that weapon has none configured. ")
+			TEXT("Set the weapon's HitscanDamage (it is the number for BOTH firing modes now), ")
+			TEXT("or give this projectile its own HitDamage."),
+			*GetName(), *GetNameSafe(SourceWeapon));
+		return 0.0f;
+	}
+
+	UE_LOG(LogTemp, Error,
+		TEXT("[PROJECTILE] %s has no weapon behind it and no HitDamage of its own, so it does nothing. ")
+		TEXT("A projectile spawned outside a weapon must set HitDamage."),
+		*GetName());
+	return 0.0f;
+}
+
+void AShooterProjectile::ApplyDirectHit(AActor* HitActor, UPrimitiveComponent* HitComp,
+	const FVector& HitLocation, const FVector& HitDirection, float FinalDamage)
+{
+	if (!IsValid(HitActor))
+	{
+		return;
+	}
+
+	// Rebuild the whole hit. DirectHit is the real one when NotifyHit is what got us here, and it
+	// carries the two things the loose arguments cannot: the bone that decides a headshot and the
+	// physical material that decides how the impact sounds. A subclass calling this with some other
+	// actor gets a synthesised result instead, which is honest about knowing neither.
+	FHitResult Hit = DirectHit;
+	if (Hit.GetActor() != HitActor)
+	{
+		Hit = FHitResult();
+		Hit.HitObjectHandle = FActorInstanceHandle(HitActor);
+		Hit.Component = HitComp;
+		Hit.bBlockingHit = true;
+	}
+	Hit.ImpactPoint = HitLocation;
+	Hit.Location = HitLocation;
+	Hit.ImpactNormal = -HitDirection.GetSafeNormal();
+
+	// A projectile's sphere blocks against the CAPSULE, which carries no bone, so a round through
+	// somebody's head arrived as a body shot. Continue the flight line through the body and ask the
+	// mesh which bone it actually passed through. @see AShooterWeapon::ResolveHitBone.
+	if (Hit.BoneName.IsNone() && SourceWeapon)
+	{
+		const FVector Flight = HitDirection.GetSafeNormal();
+		Hit.BoneName = SourceWeapon->ResolveHitBone(HitActor,
+			HitLocation - Flight * 100.0f, HitLocation + Flight * 250.0f);
+	}
+
+	// With a gun behind it, the round lands in exactly the funnel a trace of that gun lands in:
+	// foliage conversion, shield gate, class passive, headshot, upgrade and ability notifications,
+	// ionization, hit marker, and knockback under the grounded rule. PhysicsForce is the one number
+	// for both characters and props, as on the trace path -- which is what takes the launch off a
+	// standing target, because an ordinary bullet's shove is below the threshold that lifts anyone.
+	if (AShooterWeapon* Weapon = SourceWeapon)
+	{
+		Weapon->ApplyWeaponHit(Hit, FinalDamage, HitDirection, PhysicsForce,
+			Weapon->GetShotDamageMultiplierAgainst(HitActor), HitDamageType, bDamageOwner);
+		return;
+	}
+
+	// No gun behind this round. Plain damage and a shove, which is all a gunless projectile ever
+	// meant: its own tag multipliers apply here and only here, because with a weapon present the
+	// weapon's are the ones that count and applying both would square them.
+	AController* const InstigatorController = GetInstigator() ? GetInstigator()->GetController() : nullptr;
+	UGameplayStatics::ApplyDamage(HitActor, FinalDamage * GetTagDamageMultiplier(HitActor),
+		InstigatorController, this, HitDamageType);
+
 	if (HitComp && HitComp->IsSimulatingPhysics())
 	{
-		// give some physics impulse to the object
 		HitComp->AddImpulseAtLocation(HitDirection * PhysicsForce, HitLocation);
 	}
 }
@@ -480,6 +872,10 @@ void AShooterProjectile::OnDeferredDestruction()
 
 void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AActor* NewOwner, APawn* NewInstigator)
 {
+	// Out of the free list before anything else touches it, so a return that arrives during
+	// activation cannot park an actor that is already flying.
+	bIsInPool = false;
+
 	// Reset state
 	ResetProjectileState();
 
@@ -494,16 +890,7 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
 	// Setup instigator ignore (same as BeginPlay)
-	if (NewInstigator)
-	{
-		CollisionComponent->IgnoreActorWhenMoving(NewInstigator, true);
-		CollisionComponent->MoveIgnoreActors.Add(NewInstigator);
-
-		if (UPrimitiveComponent* InstigatorRoot = Cast<UPrimitiveComponent>(NewInstigator->GetRootComponent()))
-		{
-			InstigatorRoot->IgnoreActorWhenMoving(this, true);
-		}
-	}
+	SetShooterMoveIgnore(true);
 
 	// Reset and activate projectile movement
 	ProjectileMovement->SetVelocityInLocalSpace(FVector(ProjectileMovement->InitialSpeed, 0.0f, 0.0f));
@@ -536,10 +923,18 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 	{
 		TrailComponent->Activate(true);
 	}
+
+	// Last, because it reads the speed the launch just set.
+	ArmFlightTimeout();
 }
 
 void AShooterProjectile::DeactivateToPool()
 {
+	// First, while GetInstigator still answers: take this round back out of the shooter's own
+	// ignore list. Pooling bounds the leak (the same actors come round again) but it does not
+	// remove it, and a stale entry is a pointer the character walks past on every move.
+	SetShooterMoveIgnore(false);
+
 	// Hide actor
 	SetActorHiddenInGame(true);
 	SetActorTickEnabled(false);
@@ -565,15 +960,32 @@ void AShooterProjectile::DeactivateToPool()
 
 	// Clear ignore actors for next use
 	CollisionComponent->ClearMoveIgnoreActors();
+
+	// Parked. Nothing may return it again until the pool hands it back out.
+	bIsInPool = true;
 }
 
 void AShooterProjectile::ResetProjectileState()
 {
 	// Pool reuse: whatever this projectile was last time it flew, it is not that now.
 	bIsCosmeticOnly = false;
+	SourceWeapon = nullptr;
+	DirectHit = FHitResult();
 
 	// Reset hit flag
 	bHit = false;
+
+	// THE pooling hazard for the hitbox, and it only exists because decoration and live rounds now
+	// come out of the same pool. SetCosmeticOnly drops the pawn response to Ignore; a round reused
+	// afterwards as a REAL one would keep that and fly through every person it was aimed at, hitting
+	// only walls. Silent, intermittent, and impossible to reproduce on demand -- it would depend on
+	// which slot the pool handed back. So the response is restored here, on the one path every reuse
+	// goes through, rather than trusted to be untouched.
+	if (CollisionComponent)
+	{
+		CollisionComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		CollisionComponent->UpdateOverlaps();
+	}
 
 	// Clear previous instigator ignores
 	CollisionComponent->ClearMoveIgnoreActors();
@@ -581,6 +993,13 @@ void AShooterProjectile::ResetProjectileState()
 
 void AShooterProjectile::ReturnToPoolOrDestroy()
 {
+	// Already parked. Two returns for one flight is the pool corruption described on bIsInPool, and
+	// the cheapest place to stop it is the door.
+	if (bIsInPool)
+	{
+		return;
+	}
+
 	if (bIsPooled)
 	{
 		// Return to pool for reuse

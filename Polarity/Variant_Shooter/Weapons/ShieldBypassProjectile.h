@@ -1,4 +1,4 @@
-// ShieldBypassProjectile.h
+﻿// ShieldBypassProjectile.h
 // The Wizard's active, in flight: one homing bolt that turns an enemy's shield into a wound.
 
 #pragma once
@@ -61,6 +61,14 @@ protected:
 	float TimeSinceScan = 0.0f;
 
 	virtual void ProcessHit(AActor* HitActor, UPrimitiveComponent* HitComp, const FVector& HitLocation, const FVector& HitDirection) override;
+
+	/** Wipe the guidance state before this bolt is fired again out of the pool.
+	 *
+	 *  Without it a reused bolt inherits the previous shot's LockedTarget and keeps chasing whoever
+	 *  the LAST one was aimed at, and its scan clock carries over so the first re-acquisition fires
+	 *  at the wrong moment. Harmless while this class never came out of the pool, which is exactly
+	 *  the kind of dormant bug that wakes up the day pooling is widened. */
+	virtual void ResetProjectileState() override;
 
 	/** Who this was fired at. Held weakly: the enemy can die to somebody else mid-flight, and the
 	 *  bolt must not keep it alive or crash chasing it. */
