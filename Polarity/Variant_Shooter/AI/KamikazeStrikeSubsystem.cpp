@@ -10,31 +10,6 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 
-static TAutoConsoleVariable<float> CVarKamikazeTTK(
-	TEXT("polarity.kamikaze.ttk"),
-	0.3f,
-	TEXT("Seconds the player needs to kill one kamikaze drone on target. Part of the gap between strikes."));
-
-static TAutoConsoleVariable<float> CVarKamikazeTurnSpeed(
-	TEXT("polarity.kamikaze.turnspeed"),
-	400.0f,
-	TEXT("How fast the strike schedule assumes the player turns, degrees per second."));
-
-static TAutoConsoleVariable<float> CVarKamikazeReaction(
-	TEXT("polarity.kamikaze.reaction"),
-	0.25f,
-	TEXT("Seconds from a strike's sound cue to the player starting to react, for the first strike of a run."));
-
-static TAutoConsoleVariable<float> CVarKamikazeSlack(
-	TEXT("polarity.kamikaze.slack"),
-	1.2f,
-	TEXT("Multiplier on the gap between strikes. 1 = just enough for a perfect player; higher is kinder."));
-
-static TAutoConsoleVariable<int32> CVarKamikazeKillBullets(
-	TEXT("polarity.kamikaze.killbullets"),
-	3,
-	TEXT("Rounds a kill takes. Fewer than this in the magazine and the next gap includes the reload, once."));
-
 namespace
 {
 	bool IsLiveDrone(const AKamikazeDroneNPC* Drone)
@@ -204,7 +179,7 @@ FVector UKamikazeStrikeSubsystem::GetSeparationOffset(const AKamikazeDroneNPC* D
 	return Push;
 }
 
-float UKamikazeStrikeSubsystem::PendingReloadAllowance(const APawn* Target, FTargetState& State) const
+float UKamikazeStrikeSubsystem::PendingReloadAllowance(const APawn* Target, FTargetState& State, int32 KillBullets) const
 {
 	const AShooterCharacter* const Player = Cast<AShooterCharacter>(Target);
 	const AShooterWeapon* const Weapon = Player ? Player->GetCurrentWeapon() : nullptr;
@@ -213,8 +188,7 @@ float UKamikazeStrikeSubsystem::PendingReloadAllowance(const APawn* Target, FTar
 		return 0.0f;
 	}
 
-	const int32 KillBullets = FMath::Max(1, CVarKamikazeKillBullets.GetValueOnGameThread());
-	if (Weapon->GetBulletCount() >= KillBullets)
+	if (Weapon->GetBulletCount() >= FMath::Max(1, KillBullets))
 	{
 		// Enough in the magazine: the allowance is armed again for the next time it runs dry.
 		State.bReloadAllowanceUsed = false;
@@ -247,11 +221,13 @@ bool UKamikazeStrikeSubsystem::RequestStrike(AKamikazeDroneNPC* Drone, APawn* Ta
 		return false;
 	}
 
+	// The assumptions about the player come from the drone being scheduled: a drone type can be
+	// kinder or harsher than another.
 	const float Now = World->GetTimeSeconds();
-	const float Kill = FMath::Max(0.0f, CVarKamikazeTTK.GetValueOnGameThread());
-	const float TurnSpeed = FMath::Max(1.0f, CVarKamikazeTurnSpeed.GetValueOnGameThread());
-	const float Reaction = FMath::Max(0.0f, CVarKamikazeReaction.GetValueOnGameThread());
-	const float Slack = FMath::Max(0.1f, CVarKamikazeSlack.GetValueOnGameThread());
+	const float Kill = FMath::Max(0.0f, Drone->ScheduleKillTime);
+	const float TurnSpeed = FMath::Max(1.0f, Drone->ScheduleTurnSpeed);
+	const float Reaction = FMath::Max(0.0f, Drone->ScheduleReaction);
+	const float Slack = FMath::Max(0.1f, Drone->ScheduleSlack);
 
 	const float DroneBearing = BearingDeg(Target->GetActorLocation(), Drone->GetActorLocation());
 	const float Impact = Now + FlightTime;
@@ -263,7 +239,7 @@ bool UKamikazeStrikeSubsystem::RequestStrike(AKamikazeDroneNPC* Drone, APawn* Ta
 	if (State.bHasLastStrike)
 	{
 		const float Turn = AngleBetweenDeg(State.LastStrikeBearingDeg, DroneBearing) / TurnSpeed;
-		Reload = PendingReloadAllowance(Target, State);
+		Reload = PendingReloadAllowance(Target, State, Drone->ScheduleKillBullets);
 		Earliest = State.LastImpactTime + (Kill + Turn) * Slack + Reload;
 	}
 	if (Impact < Earliest)

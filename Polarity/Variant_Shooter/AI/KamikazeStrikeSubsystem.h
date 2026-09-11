@@ -26,7 +26,8 @@ class AKamikazeDroneNPC;
  *     Order is first come, first served (the drone that got into position first strikes first);
  *     a drone that was shot goes to the front.
  *
- * Tuning (console): polarity.kamikaze.ttk, .turnspeed, .reaction, .slack, .killbullets.
+ * Tuning lives on the drone (Kamikaze|Schedule): the kill time, turn speed, reaction, slack and
+ * rounds per kill of the drone being scheduled.
  *
  * Only players are handed out here. A drone fighting another faction's pawn falls back to its own
  * target logic and is not scheduled.
@@ -43,6 +44,9 @@ public:
 
 	/** The player this drone should fly at, or null when there is no live hostile player. */
 	APawn* GetAssignedTarget(AKamikazeDroneNPC* Drone);
+
+	/** How many live kamikaze drones are currently on this player. */
+	int32 GetDronesOn(const APawn* Target) const { return CountAssigned(Target); }
 
 	/** Push that keeps a hold point clear of the other drones, so a group hangs as a loose cluster
 	 *  instead of on one spot. Zero when nobody is close. */
@@ -78,5 +82,5 @@ private:
 
 	/** Reload time to add to the next gap, or zero. Re-arms the allowance once the magazine is fine
 	 *  again; spending it is the grant's job, so a request that is refused spends nothing. */
-	float PendingReloadAllowance(const APawn* Target, FTargetState& State) const;
+	float PendingReloadAllowance(const APawn* Target, FTargetState& State, int32 KillBullets) const;
 };

@@ -108,3 +108,25 @@ def step_game():
     hb["_tag"](sp, TAG_GAME, "DT_DroneSpawner", f)
     log("ADDED: старт игрока, спавнер дронов ({})".format(DRONE_BP.split("/")[-1]))
     hb["_les"]().save_current_level()
+
+
+TAG_CARRIER = "DroneTestCarrier"
+CARRIER_BP = "/Game/Prototype/HomeBase/BP_KamikazeCarrierDrone"
+
+
+def step_carrier_spawner():
+    """Спавнер маток отдельным шагом: пересоздаёт только себя, настройки остальных акторов не трогает.
+    KeepAlive 0, то есть выключен: замеры одиночных дронов идут без маток, включать руками."""
+    hb["guard"]()
+    hb["_clear"](TAG_CARRIER)
+    cls = unreal.load_class(None, "/Script/Polarity.KeepAliveSpawner")
+    if cls is None:
+        raise RuntimeError("класса KeepAliveSpawner нет в бинарнике: сначала полный ребилд")
+    # Справа впереди, 51 м от старта, 15 м вверх: матка залетает из-за края разметки.
+    sp = hb["_eas"]().spawn_actor_from_class(cls, unreal.Vector(4500.0, 2500.0, 1500.0),
+                                             unreal.Rotator(roll=0.0, pitch=0.0, yaw=210.0))
+    sp.set_editor_property("drone_class", unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP))
+    sp.set_editor_property("keep_alive", 0)
+    hb["_tag"](sp, TAG_CARRIER, "DT_CarrierSpawner", "DroneTest/Gameplay")
+    log("ADDED: спавнер маток (KeepAlive 0, выключен)")
+    hb["_les"]().save_current_level()
