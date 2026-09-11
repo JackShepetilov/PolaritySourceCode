@@ -1,6 +1,6 @@
 // DroneTestSpawner.h
-// Debug-room helper: keeps exactly one NPC (a drone) alive. Spawns it on BeginPlay and, the moment it
-// dies, spawns the next one at the same spot. For tuning flight and parry, not for gameplay.
+// Debug-room helper: keeps KeepAlive NPCs (drones) alive, one by default. Spawns them on BeginPlay and,
+// the moment one dies, spawns the next at the same spot. For tuning flight and parry, not for gameplay.
 
 #pragma once
 
@@ -28,6 +28,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Test", meta = (ClampMin = "0.0", Units = "s"))
 	float RespawnDelay = 0.0f;
 
+	/** How many drones to keep alive at once. One by default: a single drone at a time for
+	 *  measuring; more to test how a group shares out and queues its strikes. */
+	UPROPERTY(EditAnywhere, Category = "Drone Test", meta = (ClampMin = "1", ClampMax = "20"))
+	int32 KeepAlive = 1;
+
 	/** How many drones this spawner has made so far, the current one included. */
 	UFUNCTION(BlueprintPure, Category = "Drone Test")
 	int32 GetSpawnCount() const { return SpawnCount; }
@@ -53,7 +58,6 @@ private:
 	UFUNCTION()
 	void HandleDroneDestroyed(AActor* DestroyedActor);
 
-	TWeakObjectPtr<AShooterNPC> CurrentDrone;
-	FTimerHandle RespawnTimer;
+	TArray<TWeakObjectPtr<AShooterNPC>> AliveDrones;
 	int32 SpawnCount = 0;
 };
