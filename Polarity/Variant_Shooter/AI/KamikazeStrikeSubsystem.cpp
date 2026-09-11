@@ -8,16 +8,32 @@
 #include "HAL/IConsoleManager.h"
 #include "KamikazeDroneNPC.h"
 #include "ShooterCharacter.h"
+#include "ShooterWeapon.h"
 
-static TAutoConsoleVariable<int32> CVarKamikazeMaxStrikes(
-	TEXT("polarity.kamikaze.maxstrikes"),
-	1,
-	TEXT("How many kamikaze drones may be in flight at one player at the same time."));
+static TAutoConsoleVariable<float> CVarKamikazeTTK(
+	TEXT("polarity.kamikaze.ttk"),
+	0.3f,
+	TEXT("Seconds the player needs to kill one kamikaze drone on target. Part of the gap between strikes."));
 
-static TAutoConsoleVariable<float> CVarKamikazeStrikeGap(
-	TEXT("polarity.kamikaze.strikegap"),
+static TAutoConsoleVariable<float> CVarKamikazeTurnSpeed(
+	TEXT("polarity.kamikaze.turnspeed"),
+	400.0f,
+	TEXT("How fast the strike schedule assumes the player turns, degrees per second."));
+
+static TAutoConsoleVariable<float> CVarKamikazeReaction(
+	TEXT("polarity.kamikaze.reaction"),
+	0.25f,
+	TEXT("Seconds from a strike's sound cue to the player starting to react, for the first strike of a run."));
+
+static TAutoConsoleVariable<float> CVarKamikazeSlack(
+	TEXT("polarity.kamikaze.slack"),
 	1.2f,
-	TEXT("Seconds of rest a player gets after each kamikaze strike at them ends, before the next may start."));
+	TEXT("Multiplier on the gap between strikes. 1 = just enough for a perfect player; higher is kinder."));
+
+static TAutoConsoleVariable<int32> CVarKamikazeKillBullets(
+	TEXT("polarity.kamikaze.killbullets"),
+	3,
+	TEXT("Rounds a kill takes. Fewer than this in the magazine and the next gap includes the reload, once."));
 
 namespace
 {
@@ -41,6 +57,14 @@ namespace
 		const FVector D = To - From;
 		return FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X));
 	}
+
+	float AngleBetweenDeg(float A, float B)
+	{
+		return FMath::Abs(FMath::FindDeltaAngleDegrees(A, B));
+	}
+
+	/** Hold points closer than this push apart (cm). */
+	constexpr float SeparationRadius = 400.0f;
 }
 
 void UKamikazeStrikeSubsystem::Register(AKamikazeDroneNPC* Drone)
@@ -53,7 +77,6 @@ void UKamikazeStrikeSubsystem::Register(AKamikazeDroneNPC* Drone)
 
 void UKamikazeStrikeSubsystem::Unregister(AKamikazeDroneNPC* Drone)
 {
-	EndStrike(Drone);
 	Drones.Remove(Drone);
 	Assignment.Remove(Drone);
 	for (TPair<TWeakObjectPtr<APawn>, FTargetState>& Pair : Targets)
@@ -74,7 +97,6 @@ void UKamikazeStrikeSubsystem::Cleanup()
 		}
 	}
 
-	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	for (auto It = Targets.CreateIterator(); It; ++It)
 	{
 		if (!IsLivePlayer(It.Key().Get()))
@@ -82,18 +104,7 @@ void UKamikazeStrikeSubsystem::Cleanup()
 			It.RemoveCurrent();
 			continue;
 		}
-		FTargetState& State = It.Value();
-		State.Waiting.RemoveAll([](const TWeakObjectPtr<AKamikazeDroneNPC>& D) { return !IsLiveDrone(D.Get()); });
-		// A strike whose drone vanished without ending it still ends here, and still earns the rest.
-		const int32 Removed = State.Active.RemoveAll([](const TWeakObjectPtr<AKamikazeDroneNPC>& D) { return !IsLiveDrone(D.Get()); });
-		if (Removed > 0)
-		{
-			State.LastStrikeEndTime = Now;
-		}
-		if (CountAssigned(It.Key().Get()) == 0 && State.Active.Num() == 0)
-		{
-			State.bHasBase = false;
-		}
+		It.Value().Waiting.RemoveAll([](const TWeakObjectPtr<AKamikazeDroneNPC>& D) { return !IsLiveDrone(D.Get()); });
 	}
 }
 
@@ -136,18 +147,15 @@ APawn* UKamikazeStrikeSubsystem::GetAssignedTarget(AKamikazeDroneNPC* Drone)
 
 	// Sticky: stay on the current player unless moving would actually even things out, which is
 	// only when this one carries two or more above the lightest.
-	if (APawn* const Current = Assignment.FindRef(Drone).Get())
+	const APawn* const Current = Assignment.FindRef(Drone).Get();
+	if (Current && Players.Contains(Current) && CountAssigned(Current) - MinCount < 2)
 	{
-		if (Players.Contains(Current) && CountAssigned(Current) - MinCount < 2)
-		{
-			return Current;
-		}
+		return const_cast<APawn*>(Current);
 	}
 
 	APawn* Best = nullptr;
 	int32 BestCount = TNumericLimits<int32>::Max();
 	float BestDistSq = TNumericLimits<float>::Max();
-	const APawn* const Current = Assignment.FindRef(Drone).Get();
 	for (APawn* P : Players)
 	{
 		// Leaving the current player takes this drone off their count.
@@ -163,7 +171,6 @@ APawn* UKamikazeStrikeSubsystem::GetAssignedTarget(AKamikazeDroneNPC* Drone)
 
 	if (Best != Current)
 	{
-		EndStrike(Drone);
 		for (TPair<TWeakObjectPtr<APawn>, FTargetState>& Pair : Targets)
 		{
 			Pair.Value.Waiting.Remove(Drone);
@@ -174,45 +181,49 @@ APawn* UKamikazeStrikeSubsystem::GetAssignedTarget(AKamikazeDroneNPC* Drone)
 	return Best;
 }
 
-bool UKamikazeStrikeSubsystem::GetHoldSlot(const AKamikazeDroneNPC* Drone, const APawn* Target, int32& OutIndex, int32& OutCount, float& OutBaseBearingDeg)
+FVector UKamikazeStrikeSubsystem::GetSeparationOffset(const AKamikazeDroneNPC* Drone, const FVector& Point) const
 {
-	if (!Drone || !Target)
-	{
-		return false;
-	}
-
-	OutIndex = INDEX_NONE;
-	OutCount = 0;
+	FVector Push = FVector::ZeroVector;
 	for (const TWeakObjectPtr<AKamikazeDroneNPC>& D : Drones)
 	{
 		const AKamikazeDroneNPC* const Other = D.Get();
-		if (IsLiveDrone(Other) && Assignment.FindRef(D).Get() == Target)
+		if (!IsLiveDrone(Other) || Other == Drone)
 		{
-			if (Other == Drone)
-			{
-				OutIndex = OutCount;
-			}
-			++OutCount;
+			continue;
+		}
+		// Measured against where the other drone actually is: two drones heading for nearby points
+		// part as they arrive, instead of settling onto one spot.
+		const FVector Away = Point - Other->GetActorLocation();
+		const float Dist = Away.Size();
+		if (Dist < SeparationRadius)
+		{
+			const FVector Dir = (Dist > 1.0f) ? Away / Dist : FVector(0.0f, 0.0f, 1.0f);
+			Push += Dir * (SeparationRadius - Dist);
 		}
 	}
-	if (OutIndex == INDEX_NONE)
-	{
-		return false;
-	}
-
-	// The ring starts from wherever the first drone of this target came in, so a lone drone holds on
-	// its own side and a ring does not swing round when it forms.
-	FTargetState& State = Targets.FindOrAdd(const_cast<APawn*>(Target));
-	if (!State.bHasBase)
-	{
-		State.BaseBearingDeg = BearingDeg(Target->GetActorLocation(), Drone->GetActorLocation());
-		State.bHasBase = true;
-	}
-	OutBaseBearingDeg = State.BaseBearingDeg;
-	return true;
+	return Push;
 }
 
-bool UKamikazeStrikeSubsystem::RequestStrike(AKamikazeDroneNPC* Drone, APawn* Target, bool bPriority)
+float UKamikazeStrikeSubsystem::PendingReloadAllowance(const APawn* Target, FTargetState& State) const
+{
+	const AShooterCharacter* const Player = Cast<AShooterCharacter>(Target);
+	const AShooterWeapon* const Weapon = Player ? Player->GetCurrentWeapon() : nullptr;
+	if (!Weapon || !Weapon->UsesReload())
+	{
+		return 0.0f;
+	}
+
+	const int32 KillBullets = FMath::Max(1, CVarKamikazeKillBullets.GetValueOnGameThread());
+	if (Weapon->GetBulletCount() >= KillBullets)
+	{
+		// Enough in the magazine: the allowance is armed again for the next time it runs dry.
+		State.bReloadAllowanceUsed = false;
+		return 0.0f;
+	}
+	return State.bReloadAllowanceUsed ? 0.0f : Weapon->GetReloadTime();
+}
+
+bool UKamikazeStrikeSubsystem::RequestStrike(AKamikazeDroneNPC* Drone, APawn* Target, bool bPriority, float FlightTime)
 {
 	UWorld* const World = GetWorld();
 	if (!World || !IsLiveDrone(Drone) || !IsLivePlayer(Target))
@@ -222,11 +233,6 @@ bool UKamikazeStrikeSubsystem::RequestStrike(AKamikazeDroneNPC* Drone, APawn* Ta
 	Cleanup();
 
 	FTargetState& State = Targets.FindOrAdd(Target);
-	if (State.Active.Contains(Drone))
-	{
-		return true;
-	}
-
 	if (bPriority)
 	{
 		State.Waiting.Remove(Drone);
@@ -236,30 +242,57 @@ bool UKamikazeStrikeSubsystem::RequestStrike(AKamikazeDroneNPC* Drone, APawn* Ta
 	{
 		State.Waiting.AddUnique(Drone);
 	}
-
-	const int32 MaxStrikes = FMath::Max(1, CVarKamikazeMaxStrikes.GetValueOnGameThread());
-	const bool bSlotFree = State.Active.Num() < MaxStrikes;
-	const bool bRested = World->GetTimeSeconds() - State.LastStrikeEndTime >= CVarKamikazeStrikeGap.GetValueOnGameThread();
-	const bool bFirstInLine = State.Waiting.Num() > 0 && State.Waiting[0] == Drone;
-	if (!bSlotFree || !bRested || !bFirstInLine)
+	if (State.Waiting[0] != Drone)
 	{
 		return false;
 	}
 
-	State.Waiting.RemoveAt(0);
-	State.Active.Add(Drone);
-	UE_LOG(LogTemp, Log, TEXT("[KAMIKAZE_QUEUE] %s strikes %s (%d waiting)"), *Drone->GetName(), *GetNameSafe(Target), State.Waiting.Num());
-	return true;
-}
+	const float Now = World->GetTimeSeconds();
+	const float Kill = FMath::Max(0.0f, CVarKamikazeTTK.GetValueOnGameThread());
+	const float TurnSpeed = FMath::Max(1.0f, CVarKamikazeTurnSpeed.GetValueOnGameThread());
+	const float Reaction = FMath::Max(0.0f, CVarKamikazeReaction.GetValueOnGameThread());
+	const float Slack = FMath::Max(0.1f, CVarKamikazeSlack.GetValueOnGameThread());
 
-void UKamikazeStrikeSubsystem::EndStrike(AKamikazeDroneNPC* Drone)
-{
-	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-	for (TPair<TWeakObjectPtr<APawn>, FTargetState>& Pair : Targets)
+	const float DroneBearing = BearingDeg(Target->GetActorLocation(), Drone->GetActorLocation());
+	const float Impact = Now + FlightTime;
+
+	// After the previous strike: the player kills that one, then turns from it to this one. Plus the
+	// reload, once per empty magazine.
+	float Earliest = -1.0f;
+	float Reload = 0.0f;
+	if (State.bHasLastStrike)
 	{
-		if (Pair.Value.Active.Remove(Drone) > 0)
-		{
-			Pair.Value.LastStrikeEndTime = Now;
-		}
+		const float Turn = AngleBetweenDeg(State.LastStrikeBearingDeg, DroneBearing) / TurnSpeed;
+		Reload = PendingReloadAllowance(Target, State);
+		Earliest = State.LastImpactTime + (Kill + Turn) * Slack + Reload;
 	}
+	if (Impact < Earliest)
+	{
+		return false;
+	}
+
+	// The first strike of a run has to be answerable from wherever the player is looking. Waiting
+	// cannot fix a strike that is simply too short (the drone is holding too close), so this one is
+	// reported rather than enforced: it means the hold distance is too small for the strike speed.
+	const float ViewTurn = AngleBetweenDeg(Target->GetBaseAimRotation().Yaw, DroneBearing) / TurnSpeed;
+	const float FirstNeeded = (Reaction + ViewTurn + Kill) * Slack;
+	if (FlightTime < FirstNeeded && Now - State.LastImpactTime > 2.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KAMIKAZE_QUEUE] %s: strike lands in %.2fs, a fair first strike needs %.2fs. Hold farther or strike slower."),
+			*Drone->GetName(), FlightTime, FirstNeeded);
+	}
+
+	State.Waiting.RemoveAt(0);
+	State.LastImpactTime = Impact;
+	State.LastStrikeBearingDeg = DroneBearing;
+	State.bHasLastStrike = true;
+	if (Reload > 0.0f)
+	{
+		State.bReloadAllowanceUsed = true;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[KAMIKAZE_QUEUE] %s strikes %s, lands in %.2fs%s (%d waiting)"),
+		*Drone->GetName(), *GetNameSafe(Target), FlightTime, Reload > 0.0f ? TEXT(", reload allowance given") : TEXT(""),
+		State.Waiting.Num());
+	return true;
 }

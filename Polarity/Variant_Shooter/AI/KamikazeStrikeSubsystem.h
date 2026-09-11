@@ -1,5 +1,5 @@
 // KamikazeStrikeSubsystem.h
-// Who each kamikaze drone flies at, where it hangs while it waits, and when it may strike.
+// Who each kamikaze drone flies at, and when its strike may land.
 
 #pragma once
 
@@ -10,19 +10,26 @@
 class AKamikazeDroneNPC;
 
 /**
- * Server-side bookkeeping for kamikaze drones, three jobs:
+ * Server-side bookkeeping for kamikaze drones, two jobs:
  *
  *  1. Targets are shared out EVENLY between the players: a drone goes to the player with the fewest
- *     drones on them (nearest on a tie) and only switches when that is two or more out of balance,
- *     so it does not flip between two players every frame.
- *  2. Each player's drones hang on a ring around them: one sector each, at alternating heights,
- *     so they neither stack on one point nor hide behind each other.
- *  3. Each player has a strike queue: at most polarity.kamikaze.maxstrikes drones in flight at them
- *     at once (default one), and polarity.kamikaze.strikegap seconds of rest after each strike ends.
- *     First come, first served; a drone that was shot jumps the queue.
+ *     drones on them (nearest on a tie) and only switches when that is two or more out of balance.
+ *
+ *  2. Strikes are SCHEDULED so the player can always answer every one of them. Drones may be in the
+ *     air together; what is spaced out is when they land. Between two impacts on the same player
+ *     there is at least
+ *
+ *         (time to kill + time to turn from the last drone to this one) * slack
+ *
+ *     plus, once per empty magazine, the weapon's reload time. The allowance is given once and comes
+ *     back only after the player has actually reloaded, so an empty gun is not a shield.
+ *     Order is first come, first served (the drone that got into position first strikes first);
+ *     a drone that was shot goes to the front.
+ *
+ * Tuning (console): polarity.kamikaze.ttk, .turnspeed, .reaction, .slack, .killbullets.
  *
  * Only players are handed out here. A drone fighting another faction's pawn falls back to its own
- * target logic and never queues.
+ * target logic and is not scheduled.
  */
 UCLASS()
 class POLARITY_API UKamikazeStrikeSubsystem : public UWorldSubsystem
@@ -32,41 +39,44 @@ class POLARITY_API UKamikazeStrikeSubsystem : public UWorldSubsystem
 public:
 
 	void Register(AKamikazeDroneNPC* Drone);
-
-	/** Drops the drone from everything, and ends its strike if it had one. */
 	void Unregister(AKamikazeDroneNPC* Drone);
 
 	/** The player this drone should fly at, or null when there is no live hostile player. */
 	APawn* GetAssignedTarget(AKamikazeDroneNPC* Drone);
 
-	/** The drone's place on its target's ring: index among that target's drones, how many there are,
-	 *  and the bearing the ring starts from (degrees). False when the drone is not on a ring. */
-	bool GetHoldSlot(const AKamikazeDroneNPC* Drone, const APawn* Target, int32& OutIndex, int32& OutCount, float& OutBaseBearingDeg);
+	/** Push that keeps a hold point clear of the other drones, so a group hangs as a loose cluster
+	 *  instead of on one spot. Zero when nobody is close. */
+	FVector GetSeparationOffset(const AKamikazeDroneNPC* Drone, const FVector& Point) const;
 
-	/** Ask to strike Target now. True when granted; the drone must then start its strike. A granted
-	 *  drone counts as in flight until EndStrike or Unregister. bPriority puts it at the front. */
-	bool RequestStrike(AKamikazeDroneNPC* Drone, APawn* Target, bool bPriority);
-
-	/** The strike is over (hit, miss or death): frees the slot and starts the rest gap. */
-	void EndStrike(AKamikazeDroneNPC* Drone);
+	/** Ask to strike Target now, given how long the strike takes to land. True when granted: the
+	 *  drone must start its strike this frame. False: not its turn yet, or it would land too soon
+	 *  after the previous one; ask again next frame. bPriority puts the drone at the front. */
+	bool RequestStrike(AKamikazeDroneNPC* Drone, APawn* Target, bool bPriority, float FlightTime);
 
 private:
 
 	struct FTargetState
 	{
+		/** Drones ready to strike, in the order they became ready. */
 		TArray<TWeakObjectPtr<AKamikazeDroneNPC>> Waiting;
-		TArray<TWeakObjectPtr<AKamikazeDroneNPC>> Active;
-		float LastStrikeEndTime = -100.0f;
-		float BaseBearingDeg = 0.0f;
-		bool bHasBase = false;
+
+		/** When the last granted strike was planned to land, and from which bearing it came. */
+		float LastImpactTime = -100.0f;
+		float LastStrikeBearingDeg = 0.0f;
+		bool bHasLastStrike = false;
+
+		/** The reload allowance has been given for the current empty magazine. */
+		bool bReloadAllowanceUsed = false;
 	};
 
-	/** Registration order, which is also ring order. */
 	TArray<TWeakObjectPtr<AKamikazeDroneNPC>> Drones;
-
 	TMap<TWeakObjectPtr<AKamikazeDroneNPC>, TWeakObjectPtr<APawn>> Assignment;
 	TMap<TWeakObjectPtr<APawn>, FTargetState> Targets;
 
 	void Cleanup();
 	int32 CountAssigned(const APawn* Target) const;
+
+	/** Reload time to add to the next gap, or zero. Re-arms the allowance once the magazine is fine
+	 *  again; spending it is the grant's job, so a request that is refused spends nothing. */
+	float PendingReloadAllowance(const APawn* Target, FTargetState& State) const;
 };
