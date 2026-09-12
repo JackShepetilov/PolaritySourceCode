@@ -67,6 +67,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Keep Alive")
 	int32 GetAliveCount() const;
 
+	/** Destroy everything it spawned that is still alive, without replacing any of it. For a debug
+	 *  mode switch: lower KeepAlive first or the next FillUp brings them back. */
+	UFUNCTION(BlueprintCallable, Category = "Keep Alive")
+	void DespawnAll();
+
 	/** How many this spawner has made so far. */
 	UFUNCTION(BlueprintPure, Category = "Keep Alive")
 	int32 GetSpawnCount() const { return SpawnCount; }

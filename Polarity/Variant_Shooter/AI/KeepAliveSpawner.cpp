@@ -73,6 +73,24 @@ int32 AKeepAliveSpawner::GetAliveCount() const
 	return Count;
 }
 
+void AKeepAliveSpawner::DespawnAll()
+{
+	// Empty the list before destroying: HandleDestroyed then finds nothing to remove and schedules
+	// no replacement, which is the point.
+	TArray<TWeakObjectPtr<AShooterNPC>> Doomed = MoveTemp(Alive);
+	Alive.Reset();
+
+	int32 Destroyed = 0;
+	for (const TWeakObjectPtr<AShooterNPC>& NPC : Doomed)
+	{
+		if (NPC.IsValid() && NPC->Destroy())
+		{
+			++Destroyed;
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("[KEEP_ALIVE] %s: despawned %d"), *GetName(), Destroyed);
+}
+
 void AKeepAliveSpawner::FillUp()
 {
 	const int32 Missing = KeepAlive - GetAliveCount();
