@@ -1,7 +1,7 @@
 // CrosshairWidget.h
-// Single persistent HUD crosshair (one Image). Owned + driven by AShooterPlayerController (mirrors
-// how BulletCounterUI is owned). The controller pushes the active weapon via SetActiveWeapon()
-// whenever AShooterCharacter::OnActiveWeaponChanged fires:
+// Single persistent HUD crosshair (one Image). Lives in the HUD.Slot.Crosshair slot of the HUD
+// registry, which binds it to the local character; from there it follows
+// AShooterCharacter::OnActiveWeaponChanged itself and calls SetActiveWeapon():
 //   - Weapon != nullptr -> armed: show the crosshair, apply the weapon's FCrosshairConfig.
 //   - Weapon == nullptr -> unarmed: show the simple idle dot.
 //
@@ -16,12 +16,14 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "CrosshairConfig.h"
+#include "Hud/HudBindable.h"
 #include "CrosshairWidget.generated.h"
 
+class AShooterCharacter;
 class AShooterWeapon;
 
 UCLASS(Abstract, Blueprintable)
-class POLARITY_API UCrosshairWidget : public UUserWidget
+class POLARITY_API UCrosshairWidget : public UUserWidget, public IHudBindable
 {
 	GENERATED_BODY()
 
@@ -29,6 +31,10 @@ public:
 	/** Push the currently held weapon (or nullptr when unarmed). Applies config, resets bloom, and
 	 *  fires the BP transition event. */
 	void SetActiveWeapon(AShooterWeapon* Weapon);
+
+	// IHudBindable: follow the character's active weapon on our own, nobody forwards it.
+	virtual void BindCharacter(AShooterCharacter* Character) override;
+	virtual void UnbindCharacter() override;
 
 	UFUNCTION(BlueprintPure, Category = "Crosshair")
 	bool IsArmed() const { return bArmed; }
@@ -55,6 +61,13 @@ public:
 
 protected:
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+	virtual void NativeDestruct() override;
+
+	UFUNCTION()
+	void HandleActiveWeaponChanged(AShooterWeapon* NewWeapon);
+
+	/** The character whose weapon this crosshair follows, between BindCharacter and UnbindCharacter. */
+	TWeakObjectPtr<AShooterCharacter> BoundCharacter;
 
 	/** Draws the four spread bars (and the centre dot) when Config.bDrawProceduralTicks is on.
 	 *  Everything it needs was already resolved in NativeTick, because painting is const. */

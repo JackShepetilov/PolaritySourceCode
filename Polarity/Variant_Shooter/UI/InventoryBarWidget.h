@@ -22,6 +22,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Variant_Shooter/Inventory/InventoryTypes.h"
+#include "Hud/HudBindable.h"
 #include "InventoryBarWidget.generated.h"
 
 class AShooterCharacter;
@@ -35,11 +36,16 @@ class UPanelWidget;
  * attachment containers by name, and set the attachment square class.
  */
 UCLASS(Abstract, Blueprintable)
-class POLARITY_API UInventoryBarWidget : public UUserWidget
+class POLARITY_API UInventoryBarWidget : public UUserWidget, public IHudBindable
 {
 	GENERATED_BODY()
 
 public:
+
+	// IHudBindable: the HUD registry drives this widget through InitializeFor / Shutdown.
+	virtual void BindCharacter(AShooterCharacter* Character) override { InitializeFor(Character); }
+	virtual void UnbindCharacter() override { Shutdown(); }
+
 
 	/** Bind to the character's inventory and weapons and draw the current state.
 	 *  Safe to call again after a respawn: it unbinds the previous character first. */

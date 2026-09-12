@@ -216,6 +216,39 @@ bool UCrosshairWidget::UpdateAimingVisibility()
 	return bHiddenByAiming;
 }
 
+void UCrosshairWidget::BindCharacter(AShooterCharacter* Character)
+{
+	UnbindCharacter();
+	if (!Character)
+	{
+		return;
+	}
+	BoundCharacter = Character;
+	Character->OnActiveWeaponChanged.AddUniqueDynamic(this, &UCrosshairWidget::HandleActiveWeaponChanged);
+	SetActiveWeapon(Character->GetCurrentWeapon());
+}
+
+void UCrosshairWidget::UnbindCharacter()
+{
+	if (AShooterCharacter* Character = BoundCharacter.Get())
+	{
+		Character->OnActiveWeaponChanged.RemoveDynamic(this, &UCrosshairWidget::HandleActiveWeaponChanged);
+	}
+	BoundCharacter.Reset();
+	SetActiveWeapon(nullptr);
+}
+
+void UCrosshairWidget::HandleActiveWeaponChanged(AShooterWeapon* NewWeapon)
+{
+	SetActiveWeapon(NewWeapon);
+}
+
+void UCrosshairWidget::NativeDestruct()
+{
+	UnbindCharacter();
+	Super::NativeDestruct();
+}
+
 void UCrosshairWidget::SetActiveWeapon(AShooterWeapon* Weapon)
 {
 	ActiveWeapon = Weapon;

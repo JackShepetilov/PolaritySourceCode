@@ -11,11 +11,9 @@
 #include "GameFramework/PlayerStart.h"
 #include "ShooterCharacter.h"
 #include "ShooterBulletCounterUI.h"
-#include "AbilityResourceBar.h"
-#include "Variant_Shooter/UI/InventoryBarWidget.h"
+#include "Variant_Shooter/UI/Hud/HudRegistry.h"
 #include "Variant_Shooter/UI/InventoryScreenWidget.h"
 #include "Variant_Shooter/Map/MapScreenWidget.h"
-#include "CrosshairWidget.h"
 #include "MeleeAttackComponent.h"
 #include "Polarity.h"
 #include "TutorialSubsystem.h"
@@ -184,57 +182,12 @@ void AShooterPlayerController::BeginPlay()
 
 		}
 
-		// create the ability/resource bar widget and add it to the screen
-		if (AbilityResourceBarClass)
+		// The HUD proper: weapon block, crosshair, ability bar and everything else that has a place
+		// on the screen. The registry builds it from the layout asset and follows this controller's
+		// pawn from here on, so nothing below binds those widgets by hand.
+		if (UHudRegistry* Hud = ULocalPlayer::GetSubsystem<UHudRegistry>(GetLocalPlayer()))
 		{
-			AbilityResourceBar = CreateWidget<UAbilityResourceBar>(this, AbilityResourceBarClass);
-			if (AbilityResourceBar)
-			{
-				AbilityResourceBar->AddToPlayerScreen(0);
-
-				// OnPossess for the starting pawn usually fires BEFORE this BeginPlay, so the bar
-				// didn't exist yet to bind there. If we're already possessing a character, bind now.
-				// InitializeFor is idempotent (unbinds first), so the OnPossess path stays safe for respawns.
-				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
-				{
-					UE_LOG(LogTemp, Warning, TEXT("[ABILITY_BAR] BeginPlay: binding bar to already-possessed pawn %s"), *GetNameSafe(PossessedCharacter));
-					AbilityResourceBar->InitializeFor(PossessedCharacter);
-				}
-			}
-			else
-			{
-				UE_LOG(LogPolarity, Error, TEXT("Could not spawn ability/resource bar widget."));
-			}
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[ABILITY_BAR] AbilityResourceBarClass is NOT set on ShooterPlayerController -> bar will never be created. Set it on the BP_ShooterPlayerController."));
-		}
-
-		// create the inventory block (weapon rows + cell grid) and add it to the screen
-		if (InventoryBarClass)
-		{
-			InventoryBar = CreateWidget<UInventoryBarWidget>(this, InventoryBarClass);
-			if (InventoryBar)
-			{
-				InventoryBar->AddToPlayerScreen(0);
-
-				// Same reason as the ability bar above: OnPossess for the starting pawn usually
-				// fires before this BeginPlay, so bind here when the pawn is already there.
-				// InitializeFor unbinds first, so the OnPossess path stays safe for respawns.
-				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
-				{
-					InventoryBar->InitializeFor(PossessedCharacter);
-				}
-			}
-			else
-			{
-				UE_LOG(LogPolarity, Error, TEXT("Could not spawn inventory bar widget."));
-			}
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[INV_DEBUG] InventoryBarClass is NOT set on ShooterPlayerController -> the weapon rows will never be drawn. Set it on BP_ShooterPlayerController."));
+			Hud->Build(this, HudLayout);
 		}
 
 		// create the inventory overlay. It goes on the screen once and stays there hidden: the grid
@@ -282,28 +235,6 @@ void AShooterPlayerController::BeginPlay()
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[MAP_DEBUG] MapScreenClass is NOT set on ShooterPlayerController -> the map key will do nothing. Set it on BP_ShooterPlayerController."));
-		}
-
-		// create the crosshair widget and add it to the screen
-		if (CrosshairWidgetClass)
-		{
-			CrosshairWidget = CreateWidget<UCrosshairWidget>(this, CrosshairWidgetClass);
-			if (CrosshairWidget)
-			{
-				CrosshairWidget->AddToPlayerScreen(0);
-
-				// OnPossess for the starting pawn usually fires BEFORE this BeginPlay, so the widget
-				// didn't exist yet to receive the initial weapon. If we're already possessing a
-				// character, push its current weapon now (nullptr = unarmed -> idle dot).
-				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
-				{
-					CrosshairWidget->SetActiveWeapon(PossessedCharacter->GetCurrentWeapon());
-				}
-			}
-			else
-			{
-				UE_LOG(LogPolarity, Error, TEXT("Could not spawn crosshair widget."));
-			}
 		}
 
 		// Setup IMCs and key remapping
@@ -548,8 +479,6 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 		ShooterCharacter->OnChargeUpdated.AddDynamic(this, &AShooterPlayerController::OnChargeUpdated);
 		ShooterCharacter->OnMeleeWeaponEquipped.RemoveDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
 		ShooterCharacter->OnMeleeWeaponEquipped.AddDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
-		ShooterCharacter->OnActiveWeaponChanged.RemoveDynamic(this, &AShooterPlayerController::OnActiveWeaponChanged);
-		ShooterCharacter->OnActiveWeaponChanged.AddDynamic(this, &AShooterPlayerController::OnActiveWeaponChanged);
 
 		// Bind melee component events directly for drop kick cooldown UI
 		if (UMeleeAttackComponent* MeleeComp = ShooterCharacter->GetMeleeAttackComponent())
@@ -567,32 +496,13 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 			BulletCounterUI->BP_BindToCharacter(ShooterCharacter);
 		}
 
-		// Bind the ability/resource bar to the (re)possessed character. InitializeFor unbinds the
-		// previous character first, so this is respawn-safe.
-		if (AbilityResourceBar)
-		{
-			AbilityResourceBar->InitializeFor(ShooterCharacter);
-		}
-
-		// Same for the inventory block: InitializeFor unbinds the previous character first.
-		if (InventoryBar)
-		{
-			InventoryBar->InitializeFor(ShooterCharacter);
-		}
-
-		// And for the overlay. InitializeFor closes it first, so a player who died with the
-		// inventory open comes back holding a mouse cursor over a live game.
+		// The HUD slots (weapon block, crosshair, ability bar) are rebound by the UHudRegistry,
+		// which listens to OnPossessedPawnChanged on this controller. Only the overlay is ours.
+		// InitializeFor closes it first, so a player who died with the inventory open comes back
+		// holding a mouse cursor over a live game.
 		if (InventoryScreen)
 		{
 			InventoryScreen->InitializeFor(ShooterCharacter);
-		}
-
-		// Sync the crosshair to the (re)possessed character's current weapon. On a respawn the widget
-		// already exists (BeginPlay ran); on the very first possess it doesn't yet, and the BeginPlay
-		// block above pushes the starting weapon instead.
-		if (CrosshairWidget)
-		{
-			CrosshairWidget->SetActiveWeapon(ShooterCharacter->GetCurrentWeapon());
 		}
 
 		// force update the life bar + armor bar
@@ -634,15 +544,6 @@ void AShooterPlayerController::OnBulletCountUpdated(int32 MagazineSize, int32 Bu
 	if (BulletCounterUI)
 	{
 		BulletCounterUI->BP_UpdateBulletCounter(MagazineSize, Bullets);
-	}
-}
-
-void AShooterPlayerController::OnActiveWeaponChanged(AShooterWeapon* NewWeapon)
-{
-	// Forward to the crosshair: NewWeapon drives armed/unarmed + which config to show.
-	if (CrosshairWidget)
-	{
-		CrosshairWidget->SetActiveWeapon(NewWeapon);
 	}
 }
 

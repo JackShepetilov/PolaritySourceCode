@@ -14,6 +14,7 @@
 #include "CoreMinimal.h"
 #include "ApexMovementComponent.h"
 #include "Blueprint/UserWidget.h"
+#include "Hud/HudBindable.h"
 #include "AbilityResourceBar.generated.h"
 
 class UHorizontalBox;
@@ -32,11 +33,16 @@ class UTutorialSubsystem;
  * provide an EntryContainer Horizontal Box and the entry classes / icons below.
  */
 UCLASS(Abstract, Blueprintable)
-class POLARITY_API UAbilityResourceBar : public UUserWidget
+class POLARITY_API UAbilityResourceBar : public UUserWidget, public IHudBindable
 {
 	GENERATED_BODY()
 
 public:
+
+	// IHudBindable: the HUD registry drives this widget through InitializeFor / Shutdown.
+	virtual void BindCharacter(AShooterCharacter* Character) override { InitializeFor(Character); }
+	virtual void UnbindCharacter() override { Shutdown(); }
+
 
 	/** Bind to the character's ability/weapon/upgrade systems and seed initial entries.
 	 *  Safe to call again after respawn — it unbinds the previous character first. */

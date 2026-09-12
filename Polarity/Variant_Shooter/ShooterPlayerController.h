@@ -12,11 +12,9 @@ class AShooterCharacter;
 class AShooterWeapon;
 class UShooterBulletCounterUI;
 class UUpgradeChoiceWidget;
-class UAbilityResourceBar;
-class UInventoryBarWidget;
 class UInventoryScreenWidget;
 class UMapScreenWidget;
-class UCrosshairWidget;
+class UHudLayoutAsset;
 
 /** Tells run-HUD widgets to show/hide (e.g. for cutscenes).
  *  bVisible  = appear (true) vs disappear (false).
@@ -69,21 +67,11 @@ protected:
 	/** Pointer to the bullet counter UI widget */
 	TObjectPtr<UShooterBulletCounterUI> BulletCounterUI;
 
-	/** Type of ability/resource bar widget to spawn (WBP_AbilityResourceBar). */
-	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
-	TSubclassOf<UAbilityResourceBar> AbilityResourceBarClass;
-
-	/** Pointer to the ability/resource bar widget. */
-	UPROPERTY(Transient)
-	TObjectPtr<UAbilityResourceBar> AbilityResourceBar;
-
-	/** Type of corner weapon block to spawn (WBP_InventoryBar): the two weapon rows. */
-	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
-	TSubclassOf<UInventoryBarWidget> InventoryBarClass;
-
-	/** Pointer to the corner weapon block. */
-	UPROPERTY(Transient)
-	TObjectPtr<UInventoryBarWidget> InventoryBar;
+	/** The HUD: which slots exist (the layout's root widget) and what goes into each. Built by the
+	 *  UHudRegistry of this player's LocalPlayer in BeginPlay. The weapon block, crosshair and
+	 *  ability bar live here now, not as separate widgets on this controller. */
+	UPROPERTY(EditDefaultsOnly, Category = "Shooter|UI")
+	TObjectPtr<UHudLayoutAsset> HudLayout;
 
 	/** Type of inventory overlay to spawn (WBP_InventoryScreen): the cell grid behind a key. */
 	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
@@ -102,14 +90,6 @@ protected:
 	 *  fast as every later one. */
 	UPROPERTY(Transient)
 	TObjectPtr<UMapScreenWidget> MapScreen;
-
-	/** Type of crosshair widget to spawn (WBP_Crosshair). If unset, no crosshair is shown. */
-	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
-	TSubclassOf<UCrosshairWidget> CrosshairWidgetClass;
-
-	/** Pointer to the crosshair widget. */
-	UPROPERTY(Transient)
-	TObjectPtr<UCrosshairWidget> CrosshairWidget;
 
 	// ==================== Roguelite Run Widgets ====================
 
@@ -199,10 +179,6 @@ protected:
 	/** Called when melee weapon is equipped or unequipped */
 	UFUNCTION()
 	void OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
-
-	/** Called when the active (held) weapon changes; forwards it to the crosshair (nullptr = unarmed). */
-	UFUNCTION()
-	void OnActiveWeaponChanged(AShooterWeapon* NewWeapon);
 
 	// ==================== Run lifecycle handlers ====================
 
