@@ -5,14 +5,24 @@
 #include "Components/TextBlock.h"
 #include "HudBarWidget.h"
 #include "HudShapeWidget.h"
+#include "PolarityPalette.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+
+void UHudVitalsWidget::NativeConstruct()
+{
+	Super::NativeConstruct();
+	if (Caption && CaptionColorTag.IsValid())
+	{
+		Caption->SetColorAndOpacity(FSlateColor(UPolarityPalette::GetColor(CaptionColorTag, FLinearColor::White)));
+	}
+}
 
 void UHudVitalsWidget::NativeBind(AShooterCharacter* Character)
 {
 	Character->OnHealthChanged.AddUniqueDynamic(this, &UHudVitalsWidget::HandleHealthChanged);
 	if (Plate)
 	{
-		PlateRest = Plate->FillColor;
+		PlateRest = Plate->GetFillColor();
 	}
 	Apply(Character->GetCurrentHP(), Character->GetMaxHP(), true);
 }
@@ -43,11 +53,11 @@ void UHudVitalsWidget::Apply(float CurrentHP, float MaxHP, bool bInstant)
 	{
 		if (Fraction < LastFraction - 0.001f)
 		{
-			Plate->Flash(HitFlash, 0.25f);
+			Plate->Flash(UPolarityPalette::GetColor(HitFlashTag, PlateRest), 0.25f);
 		}
 		else if (Fraction > LastFraction + 0.001f)
 		{
-			Plate->Flash(HealFlash, 0.4f);
+			Plate->Flash(UPolarityPalette::GetColor(HealFlashTag, PlateRest), 0.4f);
 		}
 	}
 	LastFraction = Fraction;
@@ -73,6 +83,6 @@ void UHudVitalsWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime
 	{
 		PulseTime += InDeltaTime;
 		const float Wave = 0.5f + 0.5f * FMath::Sin(PulseTime * LowHealthPulseHz * 2.0f * PI);
-		Plate->SetFillColor(FLinearColor::LerpUsingHSV(PlateRest, LowHealthPulse, Wave));
+		Plate->SetFillColor(FLinearColor::LerpUsingHSV(PlateRest, UPolarityPalette::GetColor(LowHealthPulseTag, PlateRest), Wave));
 	}
 }

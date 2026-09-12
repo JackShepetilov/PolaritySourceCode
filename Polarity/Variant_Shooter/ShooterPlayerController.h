@@ -10,7 +10,6 @@
 class UInputMappingContext;
 class AShooterCharacter;
 class AShooterWeapon;
-class UShooterBulletCounterUI;
 class UUpgradeChoiceWidget;
 class UInventoryScreenWidget;
 class UMapScreenWidget;
@@ -56,16 +55,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Shooter|Respawn")
 	TSubclassOf<AShooterCharacter> CharacterClass;
 
-	/** Type of bullet counter UI widget to spawn */
-	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
-	TSubclassOf<UShooterBulletCounterUI> BulletCounterUIClass;
-
 	/** Tag to grant the possessed pawn to flag it as the player */
 	UPROPERTY(EditAnywhere, Category = "Shooter|Player")
 	FName PlayerPawnTag = FName("Player");
-
-	/** Pointer to the bullet counter UI widget */
-	TObjectPtr<UShooterBulletCounterUI> BulletCounterUI;
 
 	/** The HUD: which slots exist (the layout's root widget) and what goes into each. Built by the
 	 *  UHudRegistry of this player's LocalPlayer in BeginPlay. The weapon block, crosshair and
@@ -139,46 +131,6 @@ protected:
 	/** Called if the possessed pawn is destroyed */
 	UFUNCTION()
 	void OnPawnDestroyed(AActor* DestroyedActor);
-
-	/** Called when the bullet count on the possessed pawn is updated */
-	UFUNCTION()
-	void OnBulletCountUpdated(int32 MagazineSize, int32 Bullets);
-
-	/** Called when the possessed pawn health/armor snapshot changes */
-	UFUNCTION()
-	void OnPawnHealthChanged(float CurrentHP, float MaxHP, float LifePercent, float ArmorPercent);
-
-	/** Called when damage is received from a direction */
-	UFUNCTION()
-	void OnDamageDirection(float AngleDegrees, float Damage);
-
-	/** Called when the weapon heat level is updated */
-	UFUNCTION()
-	void OnHeatUpdated(float HeatPercent, float DamageMultiplier);
-
-	/** Called when the pawn speed is updated */
-	UFUNCTION()
-	void OnSpeedUpdated(float SpeedPercent, float CurrentSpeed, float MaxSpeed);
-
-	/** Called when the charge polarity changes */
-	UFUNCTION()
-	void OnPolarityChanged(uint8 NewPolarity, float ChargeValue);
-
-	/** Called every tick with current charge value */
-	UFUNCTION()
-	void OnChargeUpdated(float ChargeValue, uint8 Polarity);
-
-	/** Called when drop kick cooldown starts */
-	UFUNCTION()
-	void OnDropKickCooldownStarted(float CooldownDuration);
-
-	/** Called when drop kick cooldown ends */
-	UFUNCTION()
-	void OnDropKickCooldownEnded();
-
-	/** Called when melee weapon is equipped or unequipped */
-	UFUNCTION()
-	void OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
 
 	// ==================== Run lifecycle handlers ====================
 

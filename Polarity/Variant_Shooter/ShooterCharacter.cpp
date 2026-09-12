@@ -94,7 +94,6 @@
 #include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFWeapon.h"
 #include "TutorialSubsystem.h"
-#include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "Variant_Shooter/ShooterPlayerController.h"
 #include "PlayerDeathSequenceComponent.h"
@@ -8241,26 +8240,15 @@ void AShooterCharacter::NotifyHealthPickupCollected()
 		return;
 	}
 
-	UShooterBulletCounterUI* HUD = TutorialSub->GetHUDWidget();
-
 	if (HealthPickupsCollected >= RequiredHealthPickups)
 	{
 		// Objective complete
 		bHealthPickupObjectiveActive = false;
 		TutorialSub->MarkCompleted(HealthPickupObjectiveTutorialID);
-
-		if (HUD)
-		{
-			HUD->BP_HideHealthPickupObjective();
-		}
 	}
 	else
 	{
-		// Update progress
-		if (HUD)
-		{
-			HUD->BP_UpdateHealthPickupObjective(HealthPickupsCollected, RequiredHealthPickups);
-		}
+		// TODO(HUD): the objective counter has no slot yet; it used to draw in the old HUD.
 	}
 }
 
@@ -8951,11 +8939,6 @@ void AShooterCharacter::UpdateLowHealthWarning(float DeltaTime)
 						{
 							bHealthPickupObjectiveActive = true;
 							HealthPickupsCollected = 0;
-
-							if (UShooterBulletCounterUI* HUD = TutorialSub->GetHUDWidget())
-							{
-								HUD->BP_ShowHealthPickupObjective(RequiredHealthPickups);
-							}
 						}
 					}
 				}

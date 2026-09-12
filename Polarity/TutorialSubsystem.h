@@ -12,7 +12,6 @@ class UInputIconsDataAsset;
 class UTutorialHintWidget;
 class UTutorialSlideWidget;
 class UReminderPanelWidget;
-class UShooterBulletCounterUI;
 class UInputAction;
 class APlayerController;
 struct FHintDisplayData;
@@ -67,13 +66,8 @@ public:
 	/**
 	 * Set the HUD widget for tutorial arrow display
 	 * Must be called before showing HUD arrows (usually from HUD initialization)
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Tutorial")
-	void SetHUDWidget(UShooterBulletCounterUI* InHUDWidget);
 
 	/** Get the current HUD widget (may be null if not yet set) */
-	UFUNCTION(BlueprintPure, Category = "Tutorial")
-	UShooterBulletCounterUI* GetHUDWidget() const { return HUDWidget; }
 
 	// ==================== Hint API ====================
 
@@ -335,9 +329,6 @@ protected:
 	UPROPERTY()
 	TSubclassOf<UTutorialSlideWidget> SlideWidgetClass;
 
-	/** HUD widget for tutorial arrows */
-	UPROPERTY()
-	TObjectPtr<UShooterBulletCounterUI> HUDWidget;
 
 	// ==================== State ====================
 

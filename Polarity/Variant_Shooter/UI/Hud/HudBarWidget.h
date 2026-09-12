@@ -4,6 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "HudShapeWidget.h"
 #include "HudBarWidget.generated.h"
 
@@ -19,11 +20,9 @@ class POLARITY_API UHudBarWidget : public UHudShapeWidget
 
 public:
 
-	UHudBarWidget();
-
-	/** The ghost that trails a drop. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Bar")
-	FLinearColor LagColor = FLinearColor(1.0f, 0.88f, 0.55f, 1.0f);
+	/** Palette colour of the ghost that trails a drop. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Bar", meta = (Categories = "Palette"))
+	FGameplayTag LagColorTag;
 
 	/** Seconds the ghost holds before draining. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Bar", meta = (ClampMin = "0"))

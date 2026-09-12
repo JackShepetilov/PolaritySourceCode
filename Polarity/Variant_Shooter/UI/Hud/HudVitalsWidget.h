@@ -4,6 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "HudJuice.h"
 #include "HudSlotWidget.h"
 #include "HudVitalsWidget.generated.h"
@@ -25,24 +26,32 @@ class POLARITY_API UHudVitalsWidget : public UHudSlotWidget
 
 public:
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice")
-	FLinearColor HitFlash = FLinearColor(1.0f, 0.95f, 0.9f, 0.95f);
+	/** Palette colour of the small caption above the bar. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals", meta = (Categories = "Palette"))
+	FGameplayTag CaptionColorTag;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice")
-	FLinearColor HealFlash = FLinearColor(0.35f, 1.0f, 0.55f, 0.9f);
+	/** Palette colour the plate flashes on a hit. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice", meta = (Categories = "Palette"))
+	FGameplayTag HitFlashTag;
+
+	/** Palette colour the plate flashes on a heal. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice", meta = (Categories = "Palette"))
+	FGameplayTag HealFlashTag;
 
 	/** Below this fraction the plate pulses. 0 turns it off. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice", meta = (ClampMin = "0", ClampMax = "1"))
 	float LowHealthFraction = 0.3f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice")
-	FLinearColor LowHealthPulse = FLinearColor(0.45f, 0.05f, 0.05f, 0.9f);
+	/** Palette colour the plate pulses toward while health is low. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice", meta = (Categories = "Palette"))
+	FGameplayTag LowHealthPulseTag;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Vitals|Juice", meta = (ClampMin = "0.1"))
 	float LowHealthPulseHz = 1.4f;
 
 protected:
 
+	virtual void NativeConstruct() override;
 	virtual void NativeBind(AShooterCharacter* Character) override;
 	virtual void NativeUnbind() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
@@ -53,11 +62,15 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Vitals", meta = (BindWidget))
 	TObjectPtr<UHudBarWidget> HealthBar;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Vitals", meta = (BindWidget))
+	/** Optional: the number. The bar alone is the agreed look, so most layouts leave this out. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vitals", meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> HealthText;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Vitals", meta = (BindWidgetOptional))
 	TObjectPtr<UHudShapeWidget> Plate;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Vitals", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> Caption;
 
 private:
 

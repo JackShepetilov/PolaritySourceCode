@@ -7,7 +7,6 @@
 #include "TutorialHintWidget.h"
 #include "TutorialSlideWidget.h"
 #include "ReminderPanelWidget.h"
-#include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "EnhancedInputSubsystems.h"
 #include "EnhancedInputComponent.h"
 #include "InputAction.h"
@@ -171,11 +170,6 @@ void UTutorialSubsystem::SetWidgetClasses(TSubclassOf<UTutorialHintWidget> HintC
 {
 	HintWidgetClass = HintClass;
 	SlideWidgetClass = SlideClass;
-}
-
-void UTutorialSubsystem::SetHUDWidget(UShooterBulletCounterUI* InHUDWidget)
-{
-	HUDWidget = InHUDWidget;
 }
 
 // ==================== Hint API ====================
@@ -456,55 +450,11 @@ bool UTutorialSubsystem::ShowHUDArrow(FName TutorialID, const FTutorialHUDArrowD
 		return false;
 	}
 
-	if (!HUDWidget)
-	{
-		UE_LOG(LogPolarity, Error, TEXT("Cannot show HUD arrow '%s' - HUD widget not set. Call SetHUDWidget() first."), *TutorialID.ToString());
-		return false;
-	}
+	// HUD arrows drew in the old HUD widget, which is gone. Nothing shows them now; the request
+	// is refused so the caller neither marks the tutorial done nor waits on a dismiss that never comes.
+	UE_LOG(LogPolarity, Log, TEXT("[TUTORIAL] HUD arrow '%s' skipped: arrows have no HUD to draw in"), *TutorialID.ToString());
+	return false;
 
-	APlayerController* PC = GetPlayerController(PlayerController);
-	if (!PC)
-	{
-		UE_LOG(LogPolarity, Error, TEXT("Cannot show HUD arrow - no valid PlayerController"));
-		return false;
-	}
-
-	// Resolve close key icon
-	UTexture2D* CloseIcon = GetIconForInputAction(ArrowData.CloseAction, PC);
-
-	// Resolve expected close key
-	ArrowExpectedCloseKey = GetFirstKeyForInputAction(ArrowData.CloseAction, PC);
-	ArrowHoldDuration = FMath::Max(0.0f, ArrowData.HoldDuration);
-	ArrowCurrentHoldTime = 0.0f;
-	bArrowHoldingCloseKey = false;
-	ActiveArrowElement = ArrowData.TargetElement;
-	ActiveHUDArrowID = TutorialID;
-	bHUDArrowActive = true;
-
-	// Notify HUD widget
-	HUDWidget->BP_ShowTutorialArrow(ArrowData.TargetElement, ArrowData.DescriptionText, CloseIcon, ArrowData.CloseHintText);
-
-	// LIGHT MODE: пауза/смена input mode/hold-input отключены — стрелка показывается поверх живого геймплея.
-	// Закрывать стрелку нужно явным вызовом CloseHUDArrow(...) из gameplay-кода.
-	// // Pause game
-	// UGameplayStatics::SetGamePaused(GetWorld(), true);
-	//
-	// // Set input mode to Game and UI so the HUD (which is the game viewport widget) can still receive input
-	// // We use GameAndUI because the HUD is not a separate focusable widget like slides
-	// FInputModeGameAndUI InputMode;
-	// InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-	// PC->SetInputMode(InputMode);
-	// PC->SetShowMouseCursor(true);
-	//
-	// // Bind Slate-level input for hold detection
-	// BindArrowInput();
-
-	OnHUDArrowShown.Broadcast(TutorialID);
-
-	UE_LOG(LogPolarity, Log, TEXT("Showing HUD arrow: %s -> %d (hold: %.1fs)"),
-		   *TutorialID.ToString(), (int32)ArrowData.TargetElement, ArrowData.HoldDuration);
-
-	return true;
 }
 
 void UTutorialSubsystem::CloseHUDArrow(bool bMarkCompleted)
@@ -521,10 +471,6 @@ void UTutorialSubsystem::CloseHUDArrow(bool bMarkCompleted)
 	// UnbindArrowInput();
 
 	// Notify HUD widget to hide arrow
-	if (HUDWidget)
-	{
-		HUDWidget->BP_HideTutorialArrow(ActiveArrowElement);
-	}
 
 	// LIGHT MODE: PC не нужен (input mode/пауза не менялись)
 	// APlayerController* PC = GetPlayerController(nullptr);
@@ -559,26 +505,6 @@ void UTutorialSubsystem::CloseHUDArrow(bool bMarkCompleted)
 void UTutorialSubsystem::RunTutorialDebugReveal(const TArray<FName>& TutorialIDsToComplete)
 {
 	UE_LOG(LogPolarity, Log, TEXT("TutorialSubsystem: Running debug reveal"));
-
-	if (HUDWidget)
-	{
-		// Flash show+hide for each HUD element so the widget can make them permanently visible
-		HUDWidget->BP_ShowTutorialArrow(EHUDElement::ChargeBar, FText::GetEmpty(), nullptr, FText::GetEmpty());
-		HUDWidget->BP_HideTutorialArrow(EHUDElement::ChargeBar);
-
-		HUDWidget->BP_ShowTutorialArrow(EHUDElement::HealthBar, FText::GetEmpty(), nullptr, FText::GetEmpty());
-		HUDWidget->BP_HideTutorialArrow(EHUDElement::HealthBar);
-
-		HUDWidget->BP_ShowTutorialArrow(EHUDElement::MeleeCharges, FText::GetEmpty(), nullptr, FText::GetEmpty());
-		HUDWidget->BP_HideTutorialArrow(EHUDElement::MeleeCharges);
-
-		HUDWidget->BP_ShowTutorialArrow(EHUDElement::FirstDepleted, FText::GetEmpty(), nullptr, FText::GetEmpty());
-		HUDWidget->BP_HideTutorialArrow(EHUDElement::FirstDepleted);
-	}
-	else
-	{
-		UE_LOG(LogPolarity, Warning, TEXT("TutorialSubsystem: Debug reveal - HUD widget not set yet"));
-	}
 
 	// Mark all specified tutorials as completed so they never trigger
 	for (const FName& ID : TutorialIDsToComplete)
@@ -631,10 +557,6 @@ void UTutorialSubsystem::HandleArrowKeyDown(const FKeyEvent& InKeyEvent)
 	{
 		bArrowHoldingCloseKey = true;
 		ArrowCurrentHoldTime = 0.0f;
-		if (HUDWidget)
-		{
-			HUDWidget->BP_UpdateTutorialHoldProgress(0.0f);
-		}
 	}
 }
 
@@ -642,10 +564,6 @@ void UTutorialSubsystem::HandleArrowKeyUp(const FKeyEvent& InKeyEvent)
 {
 	bArrowHoldingCloseKey = false;
 	ArrowCurrentHoldTime = 0.0f;
-	if (HUDWidget)
-	{
-		HUDWidget->BP_OnTutorialHoldCancelled();
-	}
 }
 
 // ==================== Reminder Panel API ====================
@@ -1146,7 +1064,6 @@ void UTutorialSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool 
 	bHasActiveHoldHints = false;
 
 	ActiveSlideWidget = nullptr;
-	HUDWidget = nullptr;
 	ReminderWidget = nullptr;
 	bReminderVisible = false;
 	bDismissKeyHeld = false;

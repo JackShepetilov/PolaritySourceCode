@@ -4,14 +4,28 @@
 
 #include "Components/TextBlock.h"
 #include "HudShapeWidget.h"
+#include "PolarityPalette.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
+
+void UHudMetalWidget::NativeConstruct()
+{
+	Super::NativeConstruct();
+	if (MetalText && NumberColorTag.IsValid())
+	{
+		MetalText->SetColorAndOpacity(FSlateColor(UPolarityPalette::GetColor(NumberColorTag, FLinearColor::White)));
+	}
+	if (Caption && CaptionColorTag.IsValid())
+	{
+		Caption->SetColorAndOpacity(FSlateColor(UPolarityPalette::GetColor(CaptionColorTag, FLinearColor::White)));
+	}
+}
 
 void UHudMetalWidget::NativeBind(AShooterCharacter* Character)
 {
 	if (Plate)
 	{
-		PlateRest = Plate->FillColor;
+		PlateRest = Plate->GetFillColor();
 	}
 	TryBindState();
 }
@@ -55,11 +69,11 @@ void UHudMetalWidget::Apply(int32 Metal, int32 MaxMetal, int32 Delta, bool bInst
 	{
 		if (Delta > 0)
 		{
-			Plate->Flash(GainFlash, 0.35f);
+			Plate->Flash(UPolarityPalette::GetColor(GainFlashTag, PlateRest), 0.35f);
 		}
 		else if (Delta < 0)
 		{
-			Plate->Flash(SpendFlash, 0.3f);
+			Plate->Flash(UPolarityPalette::GetColor(SpendFlashTag, PlateRest), 0.3f);
 		}
 	}
 	const bool bFull = MaxMetal > 0 && Metal >= MaxMetal;
@@ -68,7 +82,7 @@ void UHudMetalWidget::Apply(int32 Metal, int32 MaxMetal, int32 Delta, bool bInst
 		bAtCap = bFull;
 		if (Plate)
 		{
-			Plate->SetFillColor(bFull ? FullTint : PlateRest);
+			Plate->SetFillColor(bFull ? UPolarityPalette::GetColor(FullTintTag, PlateRest) : PlateRest);
 		}
 	}
 }

@@ -3,6 +3,7 @@
 #include "HudBarWidget.h"
 
 #include "Materials/MaterialInstanceDynamic.h"
+#include "PolarityPalette.h"
 
 namespace HudBarParams
 {
@@ -10,12 +11,6 @@ namespace HudBarParams
 	static const FName Lag(TEXT("Lag"));
 	static const FName LagColor(TEXT("LagColor"));
 	static const FName Segments(TEXT("Segments"));
-}
-
-UHudBarWidget::UHudBarWidget()
-{
-	FillColor = FLinearColor(1.0f, 0.31f, 0.29f, 1.0f);
-	TrackColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.12f);
 }
 
 void UHudBarWidget::SetFraction(float Fraction, bool bInstant)
@@ -86,7 +81,7 @@ void UHudBarWidget::PushShapeParameters()
 	Super::PushShapeParameters();
 	if (UMaterialInstanceDynamic* Mat = GetShapeMaterial())
 	{
-		Mat->SetVectorParameterValue(HudBarParams::LagColor, LagColor);
+		Mat->SetVectorParameterValue(HudBarParams::LagColor, UPolarityPalette::GetColor(LagColorTag, FLinearColor::White));
 		Mat->SetScalarParameterValue(HudBarParams::Segments, static_cast<float>(Segments));
 	}
 	PushFill();

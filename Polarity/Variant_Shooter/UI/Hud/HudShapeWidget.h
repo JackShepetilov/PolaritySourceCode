@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "GameplayTagContainer.h"
 #include "HudJuice.h"
 #include "HudShapeWidget.generated.h"
 
@@ -16,6 +17,9 @@ class UMaterialInstanceDynamic;
  * material draws a rounded parallelogram in pixel space, so the widget only has to tell it its
  * size (every tick, when it changes) and the colours. Plates put content in a Named Slot on top;
  * bars are the UHudBarWidget child.
+ *
+ * No colour is written in code: every colour is a Palette tag resolved through UPolarityPalette
+ * at construct, so the look lives in Project Settings -> Polarity -> Palette and nowhere else.
  */
 UCLASS(Abstract, Blueprintable)
 class POLARITY_API UHudShapeWidget : public UUserWidget
@@ -24,31 +28,41 @@ class POLARITY_API UHudShapeWidget : public UUserWidget
 
 public:
 
-	/** How far the top edge leads the bottom one, in slate units at 1080p. 30 is the agreed look. */
+	/** How far the top edge leads the bottom one, in slate units, for a plate LeanReferenceHeight
+	 *  tall. Shorter and taller plates lean by the same angle. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape", meta = (ClampMin = "0"))
 	float Lean = 30.0f;
+
+	/** The height Lean is quoted for. 0 = Lean is absolute pixels at any height. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape", meta = (ClampMin = "0"))
+	float LeanReferenceHeight = 120.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape", meta = (ClampMin = "0"))
 	float Radius = 8.0f;
 
-	/** Lean the other way. Plates on the right half of the screen mirror, so they all face the centre. */
+	/** Lean the other way. Plates on the left half of the screen mirror, so they all face the centre. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape")
 	bool bMirror = false;
 
-	/** Colour of the filled part (the whole plate for a plate). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape")
-	FLinearColor FillColor = FLinearColor(0.05f, 0.06f, 0.08f, 0.85f);
+	/** Palette colour of the filled part (the whole plate for a plate). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape", meta = (Categories = "Palette"))
+	FGameplayTag FillColorTag;
 
-	/** Colour of the unfilled part. Alpha 0 for a plate, a faint track for a bar. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape")
-	FLinearColor TrackColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	/** Palette colour of the unfilled part. Unset = nothing drawn there, which is what a plate wants. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD Shape", meta = (Categories = "Palette"))
+	FGameplayTag TrackColorTag;
 
 	/** Tint the fill for a moment, then settle back. */
 	UFUNCTION(BlueprintCallable, Category = "HUD Shape")
 	void Flash(FLinearColor Color, float Seconds = 0.35f);
 
+	/** Replace the resting fill colour (the palette value is the default). */
 	UFUNCTION(BlueprintCallable, Category = "HUD Shape")
 	void SetFillColor(FLinearColor Color);
+
+	/** The colour the fill rests at, from the palette unless SetFillColor changed it. */
+	UFUNCTION(BlueprintPure, Category = "HUD Shape")
+	FLinearColor GetFillColor() const { return FillFlash.Rest; }
 
 	UFUNCTION(BlueprintCallable, Category = "HUD Shape")
 	void SetMirror(bool bInMirror);

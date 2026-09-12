@@ -4,6 +4,7 @@
 
 #include "Components/Image.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "PolarityPalette.h"
 
 namespace HudShapeParams
 {
@@ -26,7 +27,8 @@ void UHudShapeWidget::NativeConstruct()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[HUD_DEBUG] %s: Shape has no material brush, nothing will be drawn"), *GetName());
 	}
-	FillFlash.Rest = FillColor;
+	// White for an unnamed fill reads as unstyled, the palette's own rule; an unset track is invisible.
+	FillFlash.Rest = UPolarityPalette::GetColor(FillColorTag, FLinearColor::White);
 	LastSize = FVector2D::ZeroVector;
 	PushShapeParameters();
 }
@@ -44,6 +46,8 @@ void UHudShapeWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	{
 		LastSize = Size;
 		ShapeMaterial->SetVectorParameterValue(HudShapeParams::Size, FLinearColor(Size.X, Size.Y, 0.0f, 0.0f));
+		const float LeanPx = LeanReferenceHeight > 0.0f ? Lean * Size.Y / LeanReferenceHeight : Lean;
+		ShapeMaterial->SetScalarParameterValue(HudShapeParams::Lean, LeanPx);
 	}
 	if (FillFlash.Remaining > 0.0f)
 	{
@@ -61,7 +65,8 @@ void UHudShapeWidget::PushShapeParameters()
 	ShapeMaterial->SetScalarParameterValue(HudShapeParams::Radius, Radius);
 	ShapeMaterial->SetScalarParameterValue(HudShapeParams::Mirror, bMirror ? 1.0f : 0.0f);
 	ShapeMaterial->SetVectorParameterValue(HudShapeParams::FillColor, FillFlash.Rest);
-	ShapeMaterial->SetVectorParameterValue(HudShapeParams::TrackColor, TrackColor);
+	ShapeMaterial->SetVectorParameterValue(HudShapeParams::TrackColor,
+		UPolarityPalette::GetColor(TrackColorTag, FLinearColor::Transparent));
 }
 
 void UHudShapeWidget::Flash(FLinearColor Color, float Seconds)
@@ -71,7 +76,6 @@ void UHudShapeWidget::Flash(FLinearColor Color, float Seconds)
 
 void UHudShapeWidget::SetFillColor(FLinearColor Color)
 {
-	FillColor = Color;
 	FillFlash.Rest = Color;
 	if (ShapeMaterial && FillFlash.Remaining <= 0.0f)
 	{

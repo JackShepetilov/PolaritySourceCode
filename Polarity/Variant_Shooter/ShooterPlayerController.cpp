@@ -10,13 +10,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerStart.h"
 #include "ShooterCharacter.h"
-#include "ShooterBulletCounterUI.h"
 #include "Variant_Shooter/UI/Hud/HudRegistry.h"
 #include "Variant_Shooter/UI/InventoryScreenWidget.h"
 #include "Variant_Shooter/Map/MapScreenWidget.h"
-#include "MeleeAttackComponent.h"
 #include "Polarity.h"
-#include "TutorialSubsystem.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 #include "RunSubsystem.h"
 #include "Variant_Shooter/ShooterGameSettings.h"
@@ -158,28 +155,6 @@ void AShooterPlayerController::BeginPlay()
 				UE_LOG(LogPolarity, Error, TEXT("Could not spawn mobile controls widget."));
 
 			}
-		}
-
-		// create the bullet counter widget and add it to the screen
-		BulletCounterUI = CreateWidget<UShooterBulletCounterUI>(this, BulletCounterUIClass);
-
-		if (BulletCounterUI)
-		{
-			BulletCounterUI->AddToPlayerScreen(0);
-
-			// Register HUD widget with tutorial subsystem for arrow display
-			if (UGameInstance* GI = GetGameInstance())
-			{
-				if (UTutorialSubsystem* TutorialSub = GI->GetSubsystem<UTutorialSubsystem>())
-				{
-					TutorialSub->SetHUDWidget(BulletCounterUI);
-				}
-			}
-		}
-		else {
-
-			UE_LOG(LogPolarity, Error, TEXT("Could not spawn bullet counter widget."));
-
 		}
 
 		// The HUD proper: weapon block, crosshair, ability bar and everything else that has a place
@@ -456,40 +431,6 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 		// add the player tag
 		ShooterCharacter->Tags.AddUnique(PlayerPawnTag);
 
-		// subscribe to the pawn's delegates
-		ShooterCharacter->OnBulletCountUpdated.RemoveDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);
-		ShooterCharacter->OnBulletCountUpdated.AddDynamic(this, &AShooterPlayerController::OnBulletCountUpdated);
-		ShooterCharacter->OnHealthChanged.RemoveDynamic(this, &AShooterPlayerController::OnPawnHealthChanged);
-		ShooterCharacter->OnHealthChanged.AddDynamic(this, &AShooterPlayerController::OnPawnHealthChanged);
-		ShooterCharacter->OnDamageDirection.RemoveDynamic(this, &AShooterPlayerController::OnDamageDirection);
-		ShooterCharacter->OnDamageDirection.AddDynamic(this, &AShooterPlayerController::OnDamageDirection);
-		ShooterCharacter->OnHeatUpdated.RemoveDynamic(this, &AShooterPlayerController::OnHeatUpdated);
-		ShooterCharacter->OnHeatUpdated.AddDynamic(this, &AShooterPlayerController::OnHeatUpdated);
-		ShooterCharacter->OnSpeedUpdated.RemoveDynamic(this, &AShooterPlayerController::OnSpeedUpdated);
-		ShooterCharacter->OnSpeedUpdated.AddDynamic(this, &AShooterPlayerController::OnSpeedUpdated);
-		ShooterCharacter->OnPolarityChanged.RemoveDynamic(this, &AShooterPlayerController::OnPolarityChanged);
-		ShooterCharacter->OnPolarityChanged.AddDynamic(this, &AShooterPlayerController::OnPolarityChanged);
-		ShooterCharacter->OnChargeUpdated.RemoveDynamic(this, &AShooterPlayerController::OnChargeUpdated);
-		ShooterCharacter->OnChargeUpdated.AddDynamic(this, &AShooterPlayerController::OnChargeUpdated);
-		ShooterCharacter->OnMeleeWeaponEquipped.RemoveDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
-		ShooterCharacter->OnMeleeWeaponEquipped.AddDynamic(this, &AShooterPlayerController::OnMeleeWeaponEquipped);
-
-		// Bind melee component events directly for drop kick cooldown UI
-		if (UMeleeAttackComponent* MeleeComp = ShooterCharacter->GetMeleeAttackComponent())
-		{
-			MeleeComp->OnDropKickCooldownStarted.RemoveDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
-			MeleeComp->OnDropKickCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
-			MeleeComp->OnDropKickCooldownEnded.RemoveDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
-			MeleeComp->OnDropKickCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
-		}
-
-		// Rebind UI widget to new character (for HitMarker after respawn)
-		if (BulletCounterUI)
-		{
-			BulletCounterUI->BindHitMarkerToCharacter(ShooterCharacter);
-			BulletCounterUI->BP_BindToCharacter(ShooterCharacter);
-		}
-
 		// The HUD slots (weapon block, crosshair, ability bar) are rebound by the UHudRegistry,
 		// which listens to OnPossessedPawnChanged on this controller. Only the overlay is ours.
 		// InitializeFor closes it first, so a player who died with the inventory open comes back
@@ -506,12 +447,6 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 
 void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 {
-	// reset the bullet counter HUD
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_UpdateBulletCounter(0, 0);
-	}
-
 	// find the player start
 	TArray<AActor*> ActorList;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerStart::StaticClass(), ActorList);
@@ -529,89 +464,5 @@ void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 			// possess the character
 			Possess(RespawnedCharacter);
 		}
-	}
-}
-
-void AShooterPlayerController::OnBulletCountUpdated(int32 MagazineSize, int32 Bullets)
-{
-	// update the UI
-	if (BulletCounterUI)
-	{
-		BulletCounterUI->BP_UpdateBulletCounter(MagazineSize, Bullets);
-	}
-}
-
-void AShooterPlayerController::OnPawnHealthChanged(float CurrentHP, float MaxHP, float LifePercent, float ArmorPercent)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnHealthChanged(CurrentHP, MaxHP, LifePercent, ArmorPercent);
-	}
-}
-
-void AShooterPlayerController::OnDamageDirection(float AngleDegrees, float Damage)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_ShowDamageDirection(AngleDegrees, Damage);
-	}
-}
-
-void AShooterPlayerController::OnHeatUpdated(float HeatPercent, float DamageMultiplier)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_UpdateHeat(HeatPercent, DamageMultiplier);
-	}
-}
-
-void AShooterPlayerController::OnSpeedUpdated(float SpeedPercent, float CurrentSpeed, float MaxSpeed)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_UpdateSpeed(SpeedPercent, CurrentSpeed, MaxSpeed);
-	}
-}
-
-void AShooterPlayerController::OnPolarityChanged(uint8 NewPolarity, float ChargeValue)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		// Convert uint8 to EChargePolarity enum
-		EChargePolarity Polarity = static_cast<EChargePolarity>(NewPolarity);
-		BulletCounterUI->BP_OnPolarityChanged(Polarity, ChargeValue);
-	}
-}
-
-void AShooterPlayerController::OnChargeUpdated(float ChargeValue, uint8 Polarity)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		EChargePolarity PolarityEnum = static_cast<EChargePolarity>(Polarity);
-		BulletCounterUI->BP_UpdateCharge(ChargeValue, PolarityEnum);
-	}
-}
-
-void AShooterPlayerController::OnDropKickCooldownStarted(float CooldownDuration)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnDropKickCooldownStarted(CooldownDuration);
-	}
-}
-
-void AShooterPlayerController::OnDropKickCooldownEnded()
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnDropKickCooldownEnded();
-	}
-}
-
-void AShooterPlayerController::OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnMeleeWeaponEquipped(bEquipped, RemainingHits, MaxHits);
 	}
 }

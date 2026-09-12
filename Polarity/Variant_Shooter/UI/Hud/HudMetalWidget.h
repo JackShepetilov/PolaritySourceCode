@@ -4,6 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "HudJuice.h"
 #include "HudSlotWidget.h"
 #include "HudMetalWidget.generated.h"
@@ -24,18 +25,27 @@ class POLARITY_API UHudMetalWidget : public UHudSlotWidget
 
 public:
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal|Juice")
-	FLinearColor GainFlash = FLinearColor(1.0f, 0.75f, 0.25f, 0.9f);
+	/** Palette colour of the small caption above the number. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal", meta = (Categories = "Palette"))
+	FGameplayTag CaptionColorTag;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal|Juice")
-	FLinearColor SpendFlash = FLinearColor(0.6f, 0.15f, 0.1f, 0.9f);
+	/** Palette colour of the number itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal", meta = (Categories = "Palette"))
+	FGameplayTag NumberColorTag;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal|Juice", meta = (Categories = "Palette"))
+	FGameplayTag GainFlashTag;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal|Juice", meta = (Categories = "Palette"))
+	FGameplayTag SpendFlashTag;
 
 	/** Plate tint while metal is at the cap, so the player knows picking up more is pointless. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal|Juice")
-	FLinearColor FullTint = FLinearColor(0.22f, 0.16f, 0.06f, 0.85f);
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Metal|Juice", meta = (Categories = "Palette"))
+	FGameplayTag FullTintTag;
 
 protected:
 
+	virtual void NativeConstruct() override;
 	virtual void NativeBind(AShooterCharacter* Character) override;
 	virtual void NativeUnbind() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
@@ -51,6 +61,9 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Metal", meta = (BindWidgetOptional))
 	TObjectPtr<UHudShapeWidget> Plate;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Metal", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> Caption;
 
 private:
 
