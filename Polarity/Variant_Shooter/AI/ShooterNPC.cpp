@@ -5,6 +5,9 @@
 #include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "Net/UnrealNetwork.h"
 #include "AI/Coordination/ThreatComponent.h"
+#include "AI/PolarityTeams.h"
+#include "AI/SmokeVisionSubsystem.h"
+#include "AI/AimPoints.h"
 #include "ShooterWeapon.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
@@ -22,10 +25,10 @@
 #include "Components/StateTreeAIComponent.h"
 #include "Coop/CoopPlayers.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
-#include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
+#include "ApexMovementComponent.h"
 #include "EMFVelocityModifier.h"
 #include "EnemyCombatProfile.h"
 #include "EMF_FieldComponent.h"
@@ -107,7 +110,14 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	AccuracyComponent = CreateDefaultSubobject<UAIAccuracyComponent>(TEXT("AccuracyComponent"));
-	MeleeRetreatComponent = CreateDefaultSubobject<UMeleeRetreatComponent>(TEXT("MeleeRetreatComponent"));
+	LootDrop = CreateDefaultSubobject<ULootDropComponent>(TEXT("LootDrop"));
+	// Melee retreat is gone: backing off because the target got close was a per-NPC reflex, and it
+	// fought with everything else that decides where an NPC stands (tactical space scoring, squad
+	// formation, squad withdrawal). Retreating is a SQUAD decision now, taken on losses rather than
+	// on proximity. The component class and its three StateTree nodes still exist so the trees keep
+	// compiling: they find nothing and do nothing.
+	// TODO: strip the retreat states out of ST_Melee and friends in the editor, then delete
+	// UMeleeRetreatComponent, its nodes, and the member below.
 
 	// Enemies. The field itself lives on APolarityCharacter, where players get it too; this is the
 	// value, and it is set here rather than left to the base default so that the base default can
@@ -387,7 +397,7 @@ void AShooterNPC::Tick(float DeltaTime)
 				? (DbgRef->GetActorLocation() - GetActorLocation()).Rotation().Yaw
 				: 0.0f;
 
-			UE_LOG(LogTemp, Warning,
+			UE_LOG(LogTemp, Verbose,
 				TEXT("[FACING_DEBUG] %s | Orient2Move=%d UseCtrlDesired=%d UseCtrlYaw=%d RotRateYaw=%.0f MoveMode=%d | Focus=%s Target=%s | ActorYaw=%.0f CtrlYaw=%.0f YawToTgt=%.0f | Speed=%.0f"),
 				*GetName(),
 				DbgCMC ? (DbgCMC->bOrientRotationToMovement ? 1 : 0) : -1,
@@ -506,7 +516,7 @@ void AShooterNPC::Tick(float DeltaTime)
 			const bool bRootMotion = GetMesh() && GetMesh()->IsPlayingRootMotion();
 			UAnimInstance* DbgAnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
 			UAnimMontage* DbgMontage = DbgAnimInst ? DbgAnimInst->GetCurrentActiveMontage() : nullptr;
-			const bool bRetreating = MeleeRetreatComponent && MeleeRetreatComponent->IsRetreating();
+			const bool bRetreating = false;
 			const float DistToPlayer = FVector::Dist(L, DebugPlayerPawn->GetActorLocation());
 
 			UE_LOG(LogTemp, Warning, TEXT("[SHAKE_DEBUG]%s %s(%s) pos=(%.1f,%.1f,%.1f) dPos=%.1f(2D=%.1f) distPl=%.0f move=%d vel=%.0f | kb=%d kbInterp=%d cap=%d launch=%d cinePull=%d aiPath=%d | emf=%.0f rootMotion=%d montage=%s retreat=%d"),
@@ -602,7 +612,13 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		return 0.0f;
 	}
 
-	// Ignore friendly fire from other NPCs
+	// Ignore friendly fire from NPCs ON THE SAME SIDE.
+	//
+	// This used to drop every hit that came from any AShooterNPC, which was the same thing while
+	// there was one enemy team. With factions it would mean two armies shooting at each other and
+	// nobody ever dying, so the test now asks whose side the shooter is on: same side, still
+	// ignored (an enemy is not allowed to kill its own squadmate by spraying through them);
+	// hostile side, the bullet lands like anyone else's.
 	if (DamageCauser)
 	{
 		// Allow collision/physics damage types from NPCs (Wallslam, EMFProximity)
@@ -615,24 +631,52 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		{
 			// Check if damage came from another ShooterNPC (through their weapon)
 			AActor* DamageOwner = DamageCauser->GetOwner();
-			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+			if (AShooterNPC* Shooter = Cast<AShooterNPC>(DamageCauser) ? Cast<AShooterNPC>(DamageCauser) : Cast<AShooterNPC>(DamageOwner))
 			{
-				return 0.0f;
+				if (!PolarityTeams::AreHostile(this, Shooter))
+				{
+					return 0.0f;
+				}
 			}
 		}
 
 		// Also check the instigator's pawn
 		if (EventInstigator)
 		{
-			if (Cast<AShooterNPC>(EventInstigator->GetPawn()))
+			if (AShooterNPC* InstigatorNPC = Cast<AShooterNPC>(EventInstigator->GetPawn()))
 			{
-				return 0.0f;
+				if (!PolarityTeams::AreHostile(this, InstigatorNPC))
+				{
+					return 0.0f;
+				}
 			}
 		}
 	}
 
 	// Reduce HP
 	CurrentHP -= Damage;
+
+	// Whoever caused this gets it banked toward their berserk payout.
+	//
+	// Read from the VICTIM's side on purpose: this function is the one funnel every kind of damage in
+	// the project passes through on the authority -- a host's own bullet, a remote client's melee
+	// arriving as a report, an explosion, a passive's pierce -- so one hook here catches all of them.
+	// Hanging it off the weapon instead would have paid out for the host and silently ignored every
+	// client. @see AShooterCharacter::NotifyBerserkDamageDealt
+	if (Damage > 0.0f)
+	{
+		if (AShooterCharacter* Attacker = ResolveShooterCharacterFromShooterNPCDamageCauser(DamageCauser))
+		{
+			Attacker->NotifyBerserkDamageDealt(Damage);
+		}
+		else if (EventInstigator)
+		{
+			if (AShooterCharacter* PawnAttacker = Cast<AShooterCharacter>(EventInstigator->GetPawn()))
+			{
+				PawnAttacker->NotifyBerserkDamageDealt(Damage);
+			}
+		}
+	}
 
 	// Check if damage is from melee attack and apply charge transfer
 	if (DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
@@ -893,11 +937,10 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 	// do we have a valid aim target?
 	if (CurrentAimTarget.IsValid())
 	{
-		// target the actor location
-		AimTarget = CurrentAimTarget.Get()->GetActorLocation();
-
-		// apply a vertical offset to target head/feet
-		AimTarget.Z += FMath::RandRange(MinAimOffsetZ, MaxAimOffsetZ);
+		// Ask the target where it should be shot at. The two offsets this used to apply described a
+		// standing human and were handed to everything, which is why a drone got shot at below its
+		// own body and never took a round.
+		AimTarget = PolarityAim::ResolveAimPoint(CurrentAimTarget.Get());
 
 		// Use AccuracyComponent for spread calculation
 		if (AccuracyComponent)
@@ -994,6 +1037,26 @@ void AShooterNPC::OnSemiWeaponRefire()
 	}
 }
 
+FLootDropContext AShooterNPC::MakeLootContext(float Charge) const
+{
+	// A drone is an AShooterNPC too, so a drone kill also counts as an "NPC" kill here. That never
+	// mattered for the old drops and does not now: the prop-or-drone line sits above the collision
+	// line in the list, and the first line of a group that passes wins.
+	const bool bKilledByDrone = Cast<AFlyingDrone>(LastKillingDamageCauser) != nullptr;
+	const bool bKilledByNPC = Cast<AShooterNPC>(LastKillingDamageCauser) != nullptr;
+
+	FLootDropContext Context;
+	Context.Location = GetActorLocation();
+	Context.Rotation = GetActorRotation();
+	// Armour only for the NPC that was channeled directly, not for one hit by the NPC being thrown.
+	Context.bChanneled = bWasChannelingTarget && !bKilledByDrone && !bStunnedByNPCImpact;
+	Context.bPropOrDroneKill = bStunnedByExplosion || AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser);
+	Context.bNPCCollisionKill = bKilledByNPC || bStunnedByNPCImpact;
+	Context.Charge = Charge;
+	Context.KillingDamageCauser = LastKillingDamageCauser;
+	return Context;
+}
+
 void AShooterNPC::Die()
 {
 	// ignore if already dead
@@ -1058,172 +1121,12 @@ void AShooterNPC::Die()
 	OnAnyNPCDeath.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
 	// === LOOT DROPS (skipped by finale sequence) ===
-	if (!bSuppressDeathDrops)
+	// What drops lives in the LootDrop list on the blueprint. All this decides is what kind of kill
+	// it was, which the list's conditions read.
+	if (!bSuppressDeathDrops && LootDrop)
 	{
-
-	// Weapon drop: NPC may drop a melee weapon
-	if (DroppedMeleeWeaponClass)
-	{
-		// Use cached charge (EMF already disabled above)
-		const float NPCCharge = CachedNPCCharge;
-		// TODO: restore charge-based formula: DropWeaponBaseChance * FMath::Abs(NPCCharge)
-		const float DropChance = DropWeaponBaseChance;
-		const float Roll = FMath::FRand();
-
-		UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: EMFCharge=%.2f (PolarityChar::Charge=%.2f), BaseChance=%.2f, Roll=%.3f (need < %.3f)"),
-			*GetName(), NPCCharge, GetCharge(), DropWeaponBaseChance, Roll, DropChance);
-
-		if (Roll < DropChance)
-		{
-			FActorSpawnParameters WeaponSpawnParams;
-			WeaponSpawnParams.SpawnCollisionHandlingOverride =
-				ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-			const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
-			UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] Spawning %s at %s"),
-				*DroppedMeleeWeaponClass->GetName(), *SpawnLoc.ToString());
-
-			ADroppedMeleeWeapon* DroppedWeapon = GetWorld()->SpawnActor<ADroppedMeleeWeapon>(
-				DroppedMeleeWeaponClass, SpawnLoc, GetActorRotation(), WeaponSpawnParams);
-
-			if (DroppedWeapon)
-			{
-				// If NPC has non-zero charge, transfer it; otherwise keep the default from FieldComponent
-				if (!FMath::IsNearlyZero(NPCCharge))
-				{
-					DroppedWeapon->SetCharge(NPCCharge);
-				}
-				UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] SUCCESS — %s spawned, charge=%.2f (NPC was %.2f)"),
-					*DroppedWeapon->GetName(), DroppedWeapon->GetCharge(), NPCCharge);
-			}
-			else
-			{
-				UE_LOG(LogTemp, Error, TEXT("[WeaponDrop] FAILED — SpawnActor returned null!"));
-			}
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Roll %.3f >= Chance %.3f — no drop"), *GetName(), Roll, DropChance);
-		}
+		LootDrop->DropLoot(MakeLootContext(CachedNPCCharge));
 	}
-	else
-	{
-		UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] %s: No DroppedMeleeWeaponClass set — skipping"), *GetName());
-	}
-
-	// Ranged weapon drop: iterate table, first success wins
-	if (DroppedRangedWeaponTable.Num() > 0)
-	{
-		const float NPCChargeForRanged = CachedNPCCharge;
-
-		for (const FDroppedRangedWeaponEntry& Entry : DroppedRangedWeaponTable)
-		{
-			if (!Entry.DroppedWeaponClass)
-			{
-				continue;
-			}
-
-			const float Roll = FMath::FRand();
-			if (Roll < Entry.DropChance)
-			{
-				FActorSpawnParameters RangedSpawnParams;
-				RangedSpawnParams.SpawnCollisionHandlingOverride =
-					ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-				const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
-
-				ADroppedRangedWeapon* DroppedRanged = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-					Entry.DroppedWeaponClass, SpawnLoc, GetActorRotation(), RangedSpawnParams);
-
-				if (DroppedRanged)
-				{
-					// If NPC has non-zero charge, transfer it; otherwise keep the default from FieldComponent
-					if (!FMath::IsNearlyZero(NPCChargeForRanged))
-					{
-						DroppedRanged->SetCharge(NPCChargeForRanged);
-					}
-
-					if (AShooterCharacter* KillerCharacter = ResolveShooterCharacterFromShooterNPCDamageCauser(LastKillingDamageCauser))
-					{
-						if (UUpgradeManagerComponent* UpgradeMgr = KillerCharacter->GetUpgradeManager())
-						{
-							UpgradeMgr->NotifyEnemyDroppedRangedWeapon(DroppedRanged, this);
-						}
-					}
-					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] %s: Ranged drop SUCCESS — %s spawned, charge=%.2f (NPC was %.2f)"),
-						*GetName(), *Entry.DroppedWeaponClass->GetName(), DroppedRanged->GetCharge(), NPCChargeForRanged);
-				}
-
-				break; // Only one ranged drop per death
-			}
-			else
-			{
-				UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] %s: Ranged entry %s — Roll %.3f >= Chance %.3f"),
-					*GetName(), *Entry.DroppedWeaponClass->GetName(), Roll, Entry.DropChance);
-			}
-		}
-	}
-
-	// Spawn pickup: channeling kills drop armor, prop/drone kills or prop-stunned kills drop health
-	UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s Die(): bWasChannelingTarget=%d, bStunnedByExplosion=%d, bStunnedByNPCImpact=%d, ArmorPickupClass=%s, HealthPickupClass=%s"),
-		*GetName(), bWasChannelingTarget, bStunnedByExplosion, bStunnedByNPCImpact,
-		ArmorPickupClass ? *ArmorPickupClass->GetName() : TEXT("NULL"),
-		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"));
-	UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s Die(): LastKillingDamageType=%s, LastKillingDamageCauser=%s (Class=%s), bShouldStunOnNPCImpact=%d"),
-		*GetName(),
-		LastKillingDamageType ? *LastKillingDamageType->GetName() : TEXT("NULL"),
-		LastKillingDamageCauser ? *LastKillingDamageCauser->GetName() : TEXT("NULL"),
-		LastKillingDamageCauser ? *LastKillingDamageCauser->GetClass()->GetName() : TEXT("NULL"),
-		bShouldStunOnNPCImpact);
-
-	// Drone kills always produce health, not armor (even if bWasChannelingTarget was propagated)
-	bool bKilledByDrone = Cast<AFlyingDrone>(LastKillingDamageCauser) != nullptr;
-	// NPC-on-NPC collision kill (DamageCauser is another ShooterNPC)
-	bool bKilledByNPC = Cast<AShooterNPC>(LastKillingDamageCauser) != nullptr;
-
-	if (bWasChannelingTarget && ArmorPickupClass && !bKilledByDrone && !bStunnedByNPCImpact)
-	{
-		// Armor only for the NPC that was directly channeled, NOT for NPCs hit by the thrown NPC
-		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning ARMOR (direct channeling target)"), *GetName());
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		GetWorld()->SpawnActor<AArmorPickup>(ArmorPickupClass, GetActorLocation(), FRotator::ZeroRotator, SpawnParams);
-	}
-	else if (HealthPickupClass &&
-		(bStunnedByExplosion || AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
-	{
-		// Prop/drone kill or prop/drone-stunned — full HP drop count
-		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning HEALTH (prop/drone/explosion-stun, count=%d)"), *GetName(), HealthPickupDropCount);
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
-	}
-	else if (HealthPickupClass && (bKilledByNPC || bStunnedByNPCImpact))
-	{
-		// Killed by NPC collision or killed while stunned by NPC impact — reduced HP drop
-		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning HEALTH (NPC kill/stun, count=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d)"), *GetName(), HealthPickupDropCount_NPCKill, bKilledByNPC, bStunnedByNPCImpact);
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount_NPCKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
-	}
-	else if (HealthPickupClass && HealthPickupDropChance_WeaponKill > 0.0f &&
-		FMath::FRand() < HealthPickupDropChance_WeaponKill)
-	{
-		// Regular weapon kill — chance-based small HP drop
-		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> Spawning HEALTH (weapon kill, chance=%.2f, count=%d)"),
-			*GetName(), HealthPickupDropChance_WeaponKill, HealthPickupDropCount_WeaponKill);
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount_WeaponKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP_DROP] %s -> NO PICKUP! ShouldDropHealth=%d, bKilledByNPC=%d, bStunnedByNPCImpact=%d, bWasChannelingTarget=%d, WeaponKillChance=%.2f, HealthPickupClass=%s"),
-			*GetName(),
-			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
-			bKilledByNPC, bStunnedByNPCImpact, bWasChannelingTarget,
-			HealthPickupDropChance_WeaponKill,
-			HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"));
-	}
-
-	} // end if (!bSuppressDeathDrops)
 
 	// The mode is chosen here, on the authority, and published so every machine plays the same one.
 	// It cannot be re-derived on the other side: TriggerCinematicDismemberment can force it.
@@ -1410,9 +1313,125 @@ void AShooterNPC::ApplyShieldBypass(float Duration, float MoveSpeedMultiplier, f
 	GetWorld()->GetTimerManager().SetTimer(ShieldBypassTimer, this, &AShooterNPC::EndShieldBypass,
 		Duration, false);
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s shield bypassed for %.1fs, speed %.0f -> %.0f"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s shield bypassed for %.1fs, speed %.0f -> %.0f"),
 		*GetName(), Duration, ShieldBypassSavedWalkSpeed,
 		MoveComp ? MoveComp->MaxWalkSpeed : -1.0f);
+}
+
+void AShooterNPC::AddTurnSlow(AActor* Source, float Multiplier)
+{
+	if (!HasAuthority() || !Source)
+	{
+		return;
+	}
+
+	TurnSlowSources.Add(Source, FMath::Clamp(Multiplier, 0.05f, 1.0f));
+	RecomputeTurnSlow();
+}
+
+void AShooterNPC::RemoveTurnSlow(AActor* Source)
+{
+	if (!HasAuthority() || !Source)
+	{
+		return;
+	}
+
+	if (TurnSlowSources.Remove(Source) > 0)
+	{
+		RecomputeTurnSlow();
+	}
+}
+
+void AShooterNPC::RecomputeTurnSlow()
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!MoveComp)
+	{
+		return;
+	}
+
+	// Read the moment it is first needed rather than in BeginPlay: the classes that drive their own
+	// rotation never come here at all, and a value cached for them would be a number nobody uses.
+	if (BaseRotationRateYaw <= 0.0f)
+	{
+		BaseRotationRateYaw = MoveComp->RotationRate.Yaw;
+		if (BaseRotationRateYaw <= 0.0f)
+		{
+			// Negative or zero means "turn instantly" to the movement component. There is nothing to
+			// scale, and writing a finite rate here would slow an NPC that was authored not to have
+			// one.
+			return;
+		}
+	}
+
+	float Strongest = 1.0f;
+	for (auto It = TurnSlowSources.CreateIterator(); It; ++It)
+	{
+		// A source destroyed without releasing is dropped here, the same way the movement slow does
+		// it, which is why the map is walked in full rather than kept as a running minimum.
+		if (!It.Key().IsValid())
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+		Strongest = FMath::Min(Strongest, It.Value());
+	}
+
+	MoveComp->RotationRate.Yaw = BaseRotationRateYaw * Strongest;
+
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s turn rate now %.0f deg/s from %d source(s)"),
+		*GetName(), MoveComp->RotationRate.Yaw, TurnSlowSources.Num());
+}
+
+void AShooterNPC::AddMovementSlow(AActor* Source, float Multiplier)
+{
+	if (!HasAuthority() || !Source)
+	{
+		return;
+	}
+
+	MovementSlowSources.Add(Source, FMath::Clamp(Multiplier, 0.05f, 1.0f));
+	RecomputeMovementSlow();
+}
+
+void AShooterNPC::RemoveMovementSlow(AActor* Source)
+{
+	if (!HasAuthority() || !Source)
+	{
+		return;
+	}
+
+	if (MovementSlowSources.Remove(Source) > 0)
+	{
+		RecomputeMovementSlow();
+	}
+}
+
+void AShooterNPC::RecomputeMovementSlow()
+{
+	UApexMovementComponent* Apex = Cast<UApexMovementComponent>(GetCharacterMovement());
+	if (!Apex)
+	{
+		return;
+	}
+
+	float Strongest = 1.0f;
+	for (auto It = MovementSlowSources.CreateIterator(); It; ++It)
+	{
+		// A source that was destroyed without releasing is dropped here. That is the only cleanup
+		// path for it, which is why the map is walked in full rather than kept as a running minimum.
+		if (!It.Key().IsValid())
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+		Strongest = FMath::Min(Strongest, It.Value());
+	}
+
+	Apex->ExternalSpeedMultiplier = Strongest;
+
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s movement slow now x%.2f from %d source(s)"),
+		*GetName(), Strongest, MovementSlowSources.Num());
 }
 
 void AShooterNPC::AddShieldLoan(float Amount)
@@ -1423,7 +1442,7 @@ void AShooterNPC::AddShieldLoan(float Amount)
 	}
 	PledgedShieldLoan += Amount;
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s owes %.1f shield on the next hit"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s owes %.1f shield on the next hit"),
 		*GetName(), PledgedShieldLoan);
 }
 
@@ -1445,7 +1464,7 @@ float AShooterNPC::ConsumeShieldLoan()
 		EMFVelocityModifier->SetCharge(FMath::Sign(Current) * Magnitude);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s paid back %.1f shield"), *GetName(), Collected);
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s paid back %.1f shield"), *GetName(), Collected);
 	return Collected;
 }
 
@@ -1464,7 +1483,7 @@ void AShooterNPC::SetDistracted(bool bNewDistracted)
 	bDistracted = bNewDistracted;
 	RefreshStatusOverlay();
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s %s by a decoy"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s %s by a decoy"),
 		*GetName(), bDistracted ? TEXT("taken") : TEXT("released"));
 }
 
@@ -1532,7 +1551,7 @@ void AShooterNPC::EndShieldBypass()
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s shield bypass ended"), *GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s shield bypass ended"), *GetName());
 }
 
 void AShooterNPC::OnRep_CurrentHP()
@@ -1624,6 +1643,13 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	CurrentAimTarget = nullptr;
 	AbortReload();
 
+	// The aiming speed cap is combat state too: a body recycled mid-burst would otherwise come back
+	// out of the pool still walking at ADS pace with nothing left to explain why.
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SetAiming(false);
+	}
+
 	// --- Knockback/stun state ---
 	bIsInKnockback = false;
 	bIsCaptured = false;
@@ -1702,10 +1728,6 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	if (AccuracyComponent)
 	{
 		AccuracyComponent->SetComponentTickEnabled(true);
-	}
-	if (MeleeRetreatComponent)
-	{
-		MeleeRetreatComponent->SetComponentTickEnabled(true);
 	}
 
 	// --- Weapon (destroyed during death — spawn fresh) ---
@@ -2061,10 +2083,6 @@ void AShooterNPC::DeactivateForDeath(float DestructionDelay, bool bHideMesh)
 	{
 		AccuracyComponent->SetComponentTickEnabled(false);
 	}
-	if (MeleeRetreatComponent)
-	{
-		MeleeRetreatComponent->SetComponentTickEnabled(false);
-	}
 
 	// Pooled NPCs: unregister from subsystems (EndPlay won't run)
 	if (bIsPooled)
@@ -2134,8 +2152,8 @@ void AShooterNPC::StartShooting(AActor* ActorToShoot, bool bHasExternalPermissio
 
 void AShooterNPC::TryStartShooting()
 {
-	// Don't shoot if dead or in knockback/captured state
-	if (bIsDead || bIsInKnockback)
+	// Don't shoot if dead, in knockback/captured state, or running for your life
+	if (bIsDead || bIsInKnockback || bCombatDisabled)
 	{
 		StopShooting();
 		return;
@@ -2203,6 +2221,22 @@ void AShooterNPC::TryStartShooting()
 			}
 		}
 
+		// A shooting NPC moves at aiming pace, the same cap the player pays for ADS
+		// (MovementSettings::ADSSpeed). It sits next to the trigger rather than in StartShooting
+		// because that is not the only way the trigger goes down: an NPC shot from behind arms
+		// itself straight into TryStartShooting from TakeDamage, and that one never touches
+		// StartShooting. It is a cap, not a speed, so anything already slower (crouch, the
+		// shield-bypass slow) stays slower.
+		//
+		// The exemptions come free from GetMaxSpeed, which applies the cap only while walking: the
+		// slide, the wallrun and both dashes keep their own speed, because there the speed IS the
+		// mechanic. An NPC Blueprint with no MovementSettings asset is unaffected either way -
+		// without the asset GetMaxSpeed falls straight through to the Blueprint's MaxWalkSpeed.
+		if (UApexMovementComponent* Apex = GetApexMovement())
+		{
+			Apex->SetAiming(true);
+		}
+
 		// Start firing (OnWeaponShotFired will be called via delegate)
 		if (Weapon)
 		{
@@ -2222,6 +2256,14 @@ void AShooterNPC::StopShooting()
 	bIsShooting = false;
 	bWantsToShoot = false;
 	bExternalPermissionGranted = false;
+
+	// Trigger up, full walking speed back. This runs on every path that ends a fight, death
+	// included (Die and the death visuals both come through here), so the cap cannot outlive the
+	// shooting that asked for it.
+	if (UApexMovementComponent* Apex = GetApexMovement())
+	{
+		Apex->SetAiming(false);
+	}
 
 	// Perception delay tracking is deliberately NOT reset here.
 	//
@@ -2273,6 +2315,15 @@ bool AShooterNPC::IsInPerceptionDelay() const
 bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 {
 	if (!Target || !GetWorld())
+	{
+		return false;
+	}
+
+	// Smoke is asked FIRST, before the weapon is asked whether its round would fit through the gap:
+	// a shell that can physically reach a target this NPC cannot see is not a shot, it is shooting
+	// through cover. @see USmokeVisionSubsystem
+	if (USmokeVisionSubsystem::IsSightBlockedInWorld(GetWorld(), GetPawnViewLocation(),
+		Target->GetActorLocation()))
 	{
 		return false;
 	}
@@ -2341,7 +2392,7 @@ void AShooterNPC::PlayHitReaction(const FVector& DamageDirection)
 		MontageToPlay = HitReactionBackMontage;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s PlayHitReaction (FLINCH): montage=%s (%s), bIsInKnockback=%d, bIsKnockbackInterpolating=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s PlayHitReaction (FLINCH): montage=%s (%s), bIsInKnockback=%d, bIsKnockbackInterpolating=%d"),
 		*GetName(), MontageToPlay ? *MontageToPlay->GetName() : TEXT("NULL"),
 		DotProduct > 0.0f ? TEXT("front") : TEXT("back"),
 		bIsInKnockback, bIsKnockbackInterpolating);
@@ -2657,14 +2708,14 @@ void AShooterNPC::ApplyExplosionStun(float Duration, UAnimMontage* StunMontage)
 
 void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Distance, float Duration, const FVector& AttackerLocation, bool bKeepEMFEnabled, EKnockbackStyle Style)
 {
-	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback ENTER: Distance=%.1f, Duration=%.2f, DistMult=%.2f, Style=%d | guards: bStunnedByExplosion=%d, bIsCaptured=%d, bIsDead=%d, bIsInKnockback=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback ENTER: Distance=%.1f, Duration=%.2f, DistMult=%.2f, Style=%d | guards: bStunnedByExplosion=%d, bIsCaptured=%d, bIsDead=%d, bIsInKnockback=%d"),
 		*GetName(), Distance, Duration, KnockbackDistanceMultiplier, (int32)Style,
 		bStunnedByExplosion, bIsCaptured, bIsDead, bIsInKnockback);
 
 	// Don't interrupt explosion stun with new knockback
 	if (bStunnedByExplosion)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: bStunnedByExplosion"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: bStunnedByExplosion"), *GetName());
 		return;
 	}
 
@@ -2673,7 +2724,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// NPC-NPC collisions while captured (HandleNPCCollision) reach this path.
 	if (bIsCaptured)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: bIsCaptured"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: bIsCaptured"), *GetName());
 		return;
 	}
 
@@ -2683,7 +2734,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// Don't apply knockback if distance is negligible
 	if (FinalDistance < 1.0f)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: FinalDistance=%.2f < 1.0 (twitch with no slide!)"), *GetName(), FinalDistance);
+		UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s ApplyKnockback BLOCKED: FinalDistance=%.2f < 1.0 (twitch with no slide!)"), *GetName(), FinalDistance);
 		return;
 	}
 
@@ -2706,7 +2757,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	KnockbackElapsedTime = 0.0f;
 	KnockbackAttackerPosition = AttackerLocation;
 
-	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s SLIDE planned: %.1f cm over %.2fs | Start=(%.0f,%.0f,%.0f) -> Target=(%.0f,%.0f,%.0f)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s SLIDE planned: %.1f cm over %.2fs | Start=(%.0f,%.0f,%.0f) -> Target=(%.0f,%.0f,%.0f)"),
 		*GetName(), FinalDistance, Duration,
 		KnockbackStartPosition.X, KnockbackStartPosition.Y, KnockbackStartPosition.Z,
 		KnockbackTargetPosition.X, KnockbackTargetPosition.Y, KnockbackTargetPosition.Z);
@@ -2773,7 +2824,7 @@ void AShooterNPC::ApplyKnockback(const FVector& InKnockbackDirection, float Dist
 	// Play animation montage. Tractor-style pulls use the captured montage so the visual
 	// matches "being yanked / held by a beam" rather than "took a hit".
 	UAnimMontage* MontageToPlay = (Style == EKnockbackStyle::Tractor) ? CapturedMontage.Get() : KnockbackMontage.Get();
-	UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s knockback montage = %s (PlayRate=%.2f)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s knockback montage = %s (PlayRate=%.2f)"),
 		*GetName(), MontageToPlay ? *MontageToPlay->GetName() : TEXT("NULL — no knockback anim assigned!"),
 		Duration > 0.0f ? 1.0f / Duration : -1.0f);
 	if (MontageToPlay)
@@ -2972,7 +3023,7 @@ void AShooterNPC::UpdateKnockbackInterpolation(float DeltaTime)
 
 		const float TraveledDist = FVector::Dist(KnockbackStartPosition, GetActorLocation());
 		const float PlannedDist = FVector::Dist(KnockbackStartPosition, KnockbackTargetPosition);
-		UE_LOG(LogTemp, Warning, TEXT("[KNOCKBACK_DEBUG] %s SLIDE complete: traveled %.1f cm of planned %.1f cm (%.0f%%), elapsed=%.2fs"),
+		UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s SLIDE complete: traveled %.1f cm of planned %.1f cm (%.0f%%), elapsed=%.2fs"),
 			*GetName(), TraveledDist, PlannedDist,
 			PlannedDist > 0.0f ? (TraveledDist / PlannedDist) * 100.0f : -1.0f,
 			KnockbackElapsedTime);

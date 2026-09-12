@@ -1,8 +1,10 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FlyingDrone.h"
+#include "HAL/IConsoleManager.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "FlyingAIMovementComponent.h"
+#include "AI/SmokeVisionSubsystem.h"
 #include "ShooterWeapon.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -16,6 +18,8 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
+#include "AI/PolarityTeams.h"
+#include "AI/AimPoints.h"
 #include "ShooterGameMode.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
@@ -25,6 +29,7 @@
 #include "../DamageTypes/DamageType_EMFProximity.h"
 #include "AIController.h"
 #include "Engine/OverlapResult.h"
+#include "Net/UnrealNetwork.h"
 #include "../Pickups/HealthPickup.h"
 #include "../Weapons/DroppedMeleeWeapon.h"
 #include "../Weapons/DroppedRangedWeapon.h"
@@ -35,27 +40,6 @@
 #include "Field/FieldSystemObjects.h"
 #include "ShooterCharacter.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
-
-namespace
-{
-	AShooterCharacter* ResolveShooterCharacterFromFlyingDroneDamageCauser(AActor* DamageCauser)
-	{
-		for (AActor* Candidate = DamageCauser; Candidate; Candidate = Candidate->GetOwner())
-		{
-			if (AShooterCharacter* Character = Cast<AShooterCharacter>(Candidate))
-			{
-				return Character;
-			}
-
-			if (AShooterCharacter* InstigatorCharacter = Cast<AShooterCharacter>(Candidate->GetInstigator()))
-			{
-				return InstigatorCharacter;
-			}
-		}
-
-		return nullptr;
-	}
-}
 
 AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -73,6 +57,19 @@ AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 	DroneMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("DroneMesh"));
 	DroneMesh->SetupAttachment(DroneCollision);
 	DroneMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Hull damage-stage FX (activated per stage from UpdateDamageStage / OnRep_DroneDamageStage)
+	DamagedHullFXComponent = CreateDefaultSubobject<UNiagaraComponent>(TEXT("DamagedHullFX"));
+	DamagedHullFXComponent->SetupAttachment(DroneMesh);
+	DamagedHullFXComponent->bAutoActivate = false;
+
+	CriticalHullFXComponent = CreateDefaultSubobject<UNiagaraComponent>(TEXT("CriticalHullFX"));
+	CriticalHullFXComponent->SetupAttachment(DroneMesh);
+	CriticalHullFXComponent->bAutoActivate = false;
+
+	RepairHealFXComponent = CreateDefaultSubobject<UNiagaraComponent>(TEXT("RepairHealFX"));
+	RepairHealFXComponent->SetupAttachment(DroneMesh);
+	RepairHealFXComponent->bAutoActivate = false;
 
 	// Load default sphere mesh (placeholder)
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere"));
@@ -102,6 +99,12 @@ AFlyingDrone::AFlyingDrone(const FObjectInitializer& ObjectInitializer)
 		CMC->bOrientRotationToMovement = false;
 		CMC->bUseControllerDesiredRotation = false;
 	}
+
+	// Shoot at the visible body, not at a human chest. The hull sits BELOW the actor origin (mesh
+	// bounds centre about -24 with the authored scale) and is only some 60 units tall, so the
+	// inherited human offsets put every burst at its lower rim or under it entirely.
+	LocalAimPoint = FVector(0.0f, 0.0f, -24.0f);
+	AimVerticalJitter = 20.0f;
 
 	// Drone doesn't use ragdoll
 	RagdollCollisionProfile = FName("NoCollision");
@@ -134,7 +137,30 @@ void AFlyingDrone::BeginPlay()
 	if (FlyingMovement)
 	{
 		FlyingMovement->OnMovementCompleted.AddDynamic(this, &AFlyingDrone::OnMovementCompleted);
+
+		// Remember the configured fly speed so stage multipliers can restore it exactly
+		BaseFlySpeed = FlyingMovement->FlySpeed;
 	}
+
+	// Capture spawn HP as the reference for damage-stage fractions
+	MaxHPAtSpawn = CurrentHP;
+
+	// Assign hull FX assets (components stay deactivated until the stage demands them)
+	if (DamagedHullFXComponent && DamagedHullFX)
+	{
+		DamagedHullFXComponent->SetAsset(DamagedHullFX);
+	}
+	if (CriticalHullFXComponent && CriticalHullFX)
+	{
+		CriticalHullFXComponent->SetAsset(CriticalHullFX);
+	}
+	if (RepairHealFXComponent && RepairHealFX)
+	{
+		RepairHealFXComponent->SetAsset(RepairHealFX);
+	}
+
+	// Initial stage pass (Intact: no VFX, no speed penalty, but keeps speeds in sync)
+	UpdateDamageStage();
 
 	// OnCapsuleHit is bound in ShooterNPC::BeginPlay() via AddDynamic.
 	// UE dynamic delegates resolve by function name through reflection,
@@ -162,6 +188,11 @@ void AFlyingDrone::Tick(float DeltaTime)
 	if (!bIsDead)
 	{
 		UpdateDroneVisuals(DeltaTime);
+
+		if (bIsRepairing)
+		{
+			TickRepair(DeltaTime);
+		}
 	}
 }
 
@@ -205,20 +236,28 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 			(DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Wallslam::StaticClass()) ||
 			 DamageEvent.DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()));
 
+		// Same rule as AShooterNPC::TakeDamage: only a shooter on the SAME side is ignored, so two
+		// factions can actually hurt each other.
 		if (!bIsCollisionDamage)
 		{
 			AActor* DamageOwner = DamageCauser->GetOwner();
-			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+			if (AShooterNPC* Shooter = Cast<AShooterNPC>(DamageCauser) ? Cast<AShooterNPC>(DamageCauser) : Cast<AShooterNPC>(DamageOwner))
 			{
-				return 0.0f;
+				if (!PolarityTeams::AreHostile(this, Shooter))
+				{
+					return 0.0f;
+				}
 			}
 		}
 
 		if (EventInstigator)
 		{
-			if (Cast<AShooterNPC>(EventInstigator->GetPawn()))
+			if (AShooterNPC* InstigatorNPC = Cast<AShooterNPC>(EventInstigator->GetPawn()))
 			{
-				return 0.0f;
+				if (!PolarityTeams::AreHostile(this, InstigatorNPC))
+				{
+					return 0.0f;
+				}
 			}
 		}
 	}
@@ -272,6 +311,34 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
 	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
+	// Damage-stage progression and repair-retreat bookkeeping
+	if (CurrentHP > 0.0f)
+	{
+		DamageSinceLastRepair += Damage;
+
+		if (bIsRepairing)
+		{
+			// A heavy single hit aborts the retreat immediately; the cooldown gates the next one
+			if (Damage >= RepairInterruptDamage)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[DRONE_DEBUG] %s repair interrupted by %.1f damage"),
+					*GetName(), Damage);
+				EndRepairRetreat(false);
+			}
+		}
+		else
+		{
+			UpdateDamageStage();
+
+			if (ShouldBeginRepair())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[DRONE_DEBUG] %s begins repair retreat (stage=%d, accDamage=%.1f)"),
+					*GetName(), static_cast<int32>(DamageStage), DamageSinceLastRepair);
+				BeginRepairRetreat();
+			}
+		}
+	}
+
 	// Check if we should die
 	if (CurrentHP <= 0.0f)
 	{
@@ -307,6 +374,13 @@ void AFlyingDrone::DroneDie()
 	bDeathSequenceStarted = true;
 	bIsDead = true;
 
+	// A dead drone repairs nothing
+	if (bIsRepairing)
+	{
+		bIsRepairing = false;
+		bRepairHovering = false;
+	}
+
 	const float CachedNPCCharge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
 
 	// Stop combat timer
@@ -333,138 +407,22 @@ void AFlyingDrone::DroneDie()
 	OnNPCDeathDetailed.Broadcast(this, LastKillingDamageType, LastKillingDamageCauser);
 
 	// Spawn death drops before explosion/deactivation can clear EMF charge or destroy the weapon actor.
-	if (!bSuppressDeathDrops)
+	if (!bSuppressDeathDrops && LootDrop)
 	{
-	if (DroppedMeleeWeaponClass)
-	{
-		const float NPCCharge = CachedNPCCharge;
-		const float DropChance = DropWeaponBaseChance;
-		const float Roll = FMath::FRand();
+		// Drones always ran their own kill rules: no armour, no reduced tier for being slammed by
+		// an enemy, and a channelled drone killed by a wall slam pays out like a prop kill (its
+		// DamageCauser is the other NPC, so ShouldDropHealth alone misses it).
+		const bool bChannelingKineticKill = bWasChannelingTarget && LastKillingDamageType &&
+			LastKillingDamageType->IsChildOf(UDamageType_Wallslam::StaticClass());
 
-		UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: MeleeDrop=%s Charge=%.2f BaseChance=%.2f Roll=%.3f (need < %.3f)"),
-			*GetName(), *DroppedMeleeWeaponClass->GetName(), NPCCharge, DropWeaponBaseChance, Roll, DropChance);
+		FLootDropContext Context = MakeLootContext(CachedNPCCharge);
+		Context.bChanneled = false;
+		Context.bNPCCollisionKill = false;
+		Context.bPropOrDroneKill = bStunnedByExplosion || bChannelingKineticKill ||
+			AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser);
 
-		if (Roll < DropChance)
-		{
-			FActorSpawnParameters WeaponSpawnParams;
-			WeaponSpawnParams.SpawnCollisionHandlingOverride =
-				ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-			const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
-			ADroppedMeleeWeapon* DroppedWeapon = GetWorld()->SpawnActor<ADroppedMeleeWeapon>(
-				DroppedMeleeWeaponClass, SpawnLoc, GetActorRotation(), WeaponSpawnParams);
-
-			if (DroppedWeapon)
-			{
-				if (!FMath::IsNearlyZero(NPCCharge))
-				{
-					DroppedWeapon->SetCharge(NPCCharge);
-				}
-
-				UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: Melee drop SUCCESS - %s spawned, charge=%.2f"),
-					*GetName(), *DroppedWeapon->GetName(), DroppedWeapon->GetCharge());
-			}
-			else
-			{
-				UE_LOG(LogTemp, Error, TEXT("[WeaponDrop] DRONE %s: Melee drop FAILED - SpawnActor returned null"), *GetName());
-			}
-		}
+		LootDrop->DropLoot(Context);
 	}
-
-	if (DroppedRangedWeaponTable.Num() > 0)
-	{
-		for (const FDroppedRangedWeaponEntry& Entry : DroppedRangedWeaponTable)
-		{
-			if (!Entry.DroppedWeaponClass)
-			{
-				continue;
-			}
-
-			const float Roll = FMath::FRand();
-			if (Roll < Entry.DropChance)
-			{
-				FActorSpawnParameters RangedSpawnParams;
-				RangedSpawnParams.SpawnCollisionHandlingOverride =
-					ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-				const FVector SpawnLoc = GetActorLocation() + DropSpawnOffset;
-				ADroppedRangedWeapon* DroppedRanged = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-					Entry.DroppedWeaponClass, SpawnLoc, GetActorRotation(), RangedSpawnParams);
-
-				if (DroppedRanged)
-				{
-					if (!FMath::IsNearlyZero(CachedNPCCharge))
-					{
-						DroppedRanged->SetCharge(CachedNPCCharge);
-					}
-
-					if (AShooterCharacter* KillerCharacter = ResolveShooterCharacterFromFlyingDroneDamageCauser(LastKillingDamageCauser))
-					{
-						if (UUpgradeManagerComponent* UpgradeMgr = KillerCharacter->GetUpgradeManager())
-						{
-							UpgradeMgr->NotifyEnemyDroppedRangedWeapon(DroppedRanged, this);
-						}
-					}
-
-					UE_LOG(LogTemp, Warning, TEXT("[WeaponDrop] DRONE %s: Ranged drop SUCCESS - %s spawned, charge=%.2f"),
-						*GetName(), *Entry.DroppedWeaponClass->GetName(), DroppedRanged->GetCharge());
-				}
-				else
-				{
-					UE_LOG(LogTemp, Error, TEXT("[WeaponDrop] DRONE %s: Ranged drop FAILED - SpawnActor returned null for %s"),
-						*GetName(), *Entry.DroppedWeaponClass->GetName());
-				}
-
-				break;
-			}
-
-			UE_LOG(LogTemp, Log, TEXT("[WeaponDrop] DRONE %s: Ranged entry %s - Roll %.3f >= Chance %.3f"),
-				*GetName(), *Entry.DroppedWeaponClass->GetName(), Roll, Entry.DropChance);
-		}
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s DroneDie(): bWasChannelingTarget=%d, HealthPickupClass=%s, bStunnedByExplosion=%d"),
-		*GetName(), bWasChannelingTarget,
-		HealthPickupClass ? *HealthPickupClass->GetName() : TEXT("NULL"),
-		bStunnedByExplosion);
-	UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s DroneDie(): LastKillingDamageType=%s, LastKillingDamageCauser=%s (Class=%s)"),
-		*GetName(),
-		LastKillingDamageType ? *LastKillingDamageType->GetName() : TEXT("NULL"),
-		LastKillingDamageCauser ? *LastKillingDamageCauser->GetName() : TEXT("NULL"),
-		LastKillingDamageCauser ? *LastKillingDamageCauser->GetClass()->GetName() : TEXT("NULL"));
-
-	// Channeling drone that died from kinetic collision (Wallslam) should also drop health
-	// (DamageCauser is the OtherNPC, not a drone/prop, so ShouldDropHealth misses it)
-	bool bIsChannelingKineticKill = bWasChannelingTarget && LastKillingDamageType &&
-		LastKillingDamageType->IsChildOf(UDamageType_Wallslam::StaticClass());
-
-	if (HealthPickupClass &&
-		(bStunnedByExplosion || bIsChannelingKineticKill ||
-		 AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser)))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> Spawning HEALTH (stunned=%d, channelingKinetic=%d, shouldDrop=%d)"),
-			*GetName(), bStunnedByExplosion, bIsChannelingKineticKill,
-			AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser));
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
-	}
-	else if (HealthPickupClass && HealthPickupDropChance_WeaponKill > 0.0f &&
-		FMath::FRand() < HealthPickupDropChance_WeaponKill)
-	{
-		// Regular weapon kill — chance-based small HP drop
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> Spawning HEALTH (weapon kill, chance=%.2f, count=%d)"),
-			*GetName(), HealthPickupDropChance_WeaponKill, HealthPickupDropCount_WeaponKill);
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount_WeaponKill, HealthPickupScatterRadius, HealthPickupFloorOffset);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[HP Drop Debug] DRONE %s -> NO PICKUP (channelingKinetic=%d, ShouldDropHealth=%d, WeaponKillChance=%.2f)"),
-			*GetName(), bIsChannelingKineticKill,
-			HealthPickupClass ? AHealthPickup::ShouldDropHealth(LastKillingDamageType, LastKillingDamageCauser) : -1,
-			HealthPickupDropChance_WeaponKill);
-	}
-	} // end if (!bSuppressDeathDrops)
 
 	if (bExplodeOnDeath)
 	{
@@ -508,6 +466,11 @@ void AFlyingDrone::DroneDie()
 	{
 		DroneMesh->SetVisibility(false);
 		DroneMesh->SetComponentTickEnabled(false);
+	}
+
+	if (RepairHealFXComponent)
+	{
+		RepairHealFXComponent->Deactivate();
 	}
 
 	// Disable EMF components and unregister from registry (inherited from ShooterNPC)
@@ -556,22 +519,29 @@ void AFlyingDrone::DroneDie()
 
 namespace
 {
-	/** Player pawn that owns this drone's death explosion. The drone explodes when it dies, so the
-	 *  killing blow decides who is responsible; the owner chain is walked because the causer is
-	 *  usually a weapon or projectile rather than the character itself (same shape as
-	 *  ResolveShooterCharacterFromShooterNPCDamageCauser in ShooterNPC.cpp).
-	 *  Falls back to the nearest player: world kills and chain deaths have no player causer. */
-	APawn* ResolveExplosionOwner(const UWorld* World, AActor* KillingCauser, const FVector& Origin)
+	/** Pawn responsible for this drone's death explosion. The killing blow decides who answers for
+	 *  it: the owner chain is walked because the causer is usually a weapon or projectile rather
+	 *  than the character itself (same shape as ResolveShooterCharacterFromShooterNPCDamageCauser
+	 *  in ShooterNPC.cpp). Any pawn qualifies, so an NPC faction's killer is attributed honestly
+	 *  as well and the friendly-fire filter works against the right side.
+	 *  Returns null for world kills / chain deaths with no pawn behind them - then the explosion
+	 *  damages everyone in radius, including the drone's own faction. */
+	APawn* ResolveExplosionInstigator(AActor* KillingCauser)
 	{
 		for (AActor* Candidate = KillingCauser; Candidate; Candidate = Candidate->GetOwner())
 		{
-			if (CoopPlayers::IsPlayer(Candidate))
+			if (APawn* PawnCandidate = Cast<APawn>(Candidate))
 			{
-				return Cast<APawn>(Candidate);
+				return PawnCandidate;
+			}
+
+			if (APawn* PawnInstigator = Cast<APawn>(Candidate->GetInstigator()))
+			{
+				return PawnInstigator;
 			}
 		}
 
-		return CoopPlayers::GetNearest(World, Origin);
+		return nullptr;
 	}
 }
 
@@ -612,9 +582,9 @@ void AFlyingDrone::TriggerExplosion()
 
 		GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 
-		// DamageCauser has to look like a player, otherwise ShooterNPC::TakeDamage drops it as NPC
-		// friendly fire and no damage numbers appear.
-		APawn* PlayerPawn = ResolveExplosionOwner(GetWorld(), LastKillingDamageCauser, Origin);
+		// Honest attribution: whoever dealt the killing blow answers for the blast, so the
+		// friendly-fire filter in each victim's TakeDamage works against the right side.
+		APawn* ExplosionInstigator = ResolveExplosionInstigator(LastKillingDamageCauser);
 
 		TSet<AActor*> DamagedActors;
 
@@ -656,7 +626,7 @@ void AFlyingDrone::TriggerExplosion()
 			RadialDamageEvent.Origin = Origin;
 			RadialDamageEvent.Params.BaseDamage = FinalExplosionDamage;
 			RadialDamageEvent.Params.OuterRadius = FinalExplosionRadius;
-			HitActor->TakeDamage(ActorDamage, RadialDamageEvent, nullptr, PlayerPawn);
+			HitActor->TakeDamage(ActorDamage, RadialDamageEvent, nullptr, ExplosionInstigator);
 
 			if (bWasAlive)
 			{
@@ -669,11 +639,12 @@ void AFlyingDrone::TriggerExplosion()
 		}
 	}
 
-	// Credit the same player the explosion was attributed to.
+	// Credit the kill assist only when a player character actually caused the death; NPC-caused
+	// blasts stay attributed to their faction without feeding player score.
 	if (ImpactTotalDamage > 0.0f)
 	{
 		if (AShooterCharacter* Credited = Cast<AShooterCharacter>(
-			ResolveExplosionOwner(GetWorld(), LastKillingDamageCauser, GetActorLocation())))
+			ResolveExplosionInstigator(LastKillingDamageCauser)))
 		{
 			Credited->OnPropImpact.Broadcast(nullptr, ImpactTotalDamage, ImpactKillCount);
 		}
@@ -892,10 +863,8 @@ FVector AFlyingDrone::GetWeaponTargetLocation()
 	if (Target && !Target->IsPendingKillPending())
 	{
 		// Target the actor location
-		AimTarget = Target->GetActorLocation();
-
-		// Apply a vertical offset to target head/body
-		AimTarget.Z += FMath::RandRange(MinAimOffsetZ, MaxAimOffsetZ);
+		// Same question, same answer as the ground NPCs: the target says where it gets shot
+		AimTarget = PolarityAim::ResolveAimPoint(Target);
 
 		// Use AccuracyComponent for spread calculation
 		if (AccuracyComponent)
@@ -1062,6 +1031,13 @@ bool AFlyingDrone::HasLineOfSightTo(AActor* Target) const
 	const FVector Start = GetActorLocation();
 	const FVector End = Target->GetActorLocation();
 
+	// Smoke, which has no collision and therefore cannot be found by the trace below.
+	// @see USmokeVisionSubsystem
+	if (USmokeVisionSubsystem::IsSightBlockedInWorld(GetWorld(), Start, End))
+	{
+		return false;
+	}
+
 	bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, QueryParams);
 
 	if (bHit)
@@ -1112,8 +1088,10 @@ AActor* AFlyingDrone::FindClosestEnemy() const
 	AActor* ClosestEnemy = nullptr;
 	float ClosestDistance = EngageRange;
 
-	TArray<AActor*> FoundActors;
-	UGameplayStatics::GetAllActorsWithTag(GetWorld(), EnemyTag, FoundActors);
+	// Sides, not the "Player" tag. Same answer while players were the only other side, and the only
+	// way a gunship can be pointed at another faction.
+	TArray<APawn*> FoundActors;
+	PolarityTeams::GatherHostilePawns(this, FoundActors);
 
 	for (AActor* Actor : FoundActors)
 	{
@@ -1158,6 +1136,15 @@ void AFlyingDrone::SpawnExplosionEffect()
 
 void AFlyingDrone::SpawnMuzzleFlashEffect()
 {
+	// Та же глушилка, что у попаданий оружия: polarity.debug.novfx. Читается по имени, потому что
+	// объявлена в ShooterWeapon.cpp - отдельный заголовок ради одного флага стоил бы пересборки.
+	static IConsoleVariable* const NoVFX =
+		IConsoleManager::Get().FindConsoleVariable(TEXT("polarity.debug.novfx"));
+	if (NoVFX && NoVFX->GetInt() != 0)
+	{
+		return;
+	}
+
 	if (!MuzzleFlashFX || !GetWorld())
 	{
 		return;
@@ -1201,8 +1188,10 @@ void AFlyingDrone::UpdateDroneRotation(float DeltaTime)
 
 	FRotator TargetRotation = GetActorRotation();
 
-	// Normal behavior: face target or movement direction
-	AActor* Target = CurrentAimTarget.Get();
+	// Honest dash pause: while dashing the drone does not track its target at all - it flies
+	// where the dash carries it and only resumes turning after the maneuver. Predictable pause
+	// instead of a jerk with continued fire.
+	AActor* Target = (IsDashing() || bIsRepairing) ? nullptr : CurrentAimTarget.Get();
 	if (Target && !Target->IsPendingKillPending())
 	{
 		const FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
@@ -1448,6 +1437,15 @@ bool AFlyingDrone::CanPerformEvasiveDash() const
 		return false;
 	}
 
+	// Running away is a full-time job. The dash is an evasion inside a fight - a sideways jink to
+	// spoil somebody's aim - and it works against an escape: the drone spends its flight jerking
+	// across the line it is trying to leave along, and covers no ground. The squad turns weapons off
+	// on a member it has ordered to run; this is the same switch, for the same reason.
+	if (IsCombatDisabled())
+	{
+		return false;
+	}
+
 	// Check evasive dash cooldown
 	const float CurrentTime = GetWorld()->GetTimeSeconds();
 	if (CurrentTime - LastEvasiveDashTime < EvasiveDashCooldown)
@@ -1505,4 +1503,186 @@ bool AFlyingDrone::TookDamageRecently(float GracePeriod) const
 
 	const float CurrentTime = GetWorld()->GetTimeSeconds();
 	return (CurrentTime - LastDamageTakenTime) <= GracePeriod;
+}
+
+// ==================== Damage Stages ====================
+
+void AFlyingDrone::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AFlyingDrone, DamageStage);
+}
+
+float AFlyingDrone::GetStageSpeedMultiplier() const
+{
+	switch (DamageStage)
+	{
+	case EDroneDamageStage::Damaged:  return DamagedSpeedMultiplier;
+	case EDroneDamageStage::Critical: return CriticalSpeedMultiplier;
+	default:                          return 1.0f;
+	}
+}
+
+float AFlyingDrone::GetStageOverheatScale() const
+{
+	return DamageStage == EDroneDamageStage::Critical ? CriticalOverheatScale : 1.0f;
+}
+
+void AFlyingDrone::UpdateDamageStage()
+{
+	const float MaxHP = MaxHPAtSpawn > 0.0f ? MaxHPAtSpawn : FMath::Max(CurrentHP, 1.0f);
+	const float HPFraction = CurrentHP / MaxHP;
+
+	EDroneDamageStage NewStage = EDroneDamageStage::Intact;
+	if (HPFraction <= CriticalStageHPFraction)
+	{
+		NewStage = EDroneDamageStage::Critical;
+	}
+	else if (HPFraction <= DamagedStageHPFraction)
+	{
+		NewStage = EDroneDamageStage::Damaged;
+	}
+
+	DamageStage = NewStage;
+
+	// Speed penalty follows the stage; the component's ApplyMovementInput pushes FlySpeed into
+	// CMC every tick, and CompleteDash restores from this same property, so one write covers all.
+	if (FlyingMovement && BaseFlySpeed > 0.0f)
+	{
+		FlyingMovement->FlySpeed = BaseFlySpeed * GetStageSpeedMultiplier();
+	}
+
+	ApplyStageVFX(NewStage);
+}
+
+void AFlyingDrone::ApplyStageVFX(EDroneDamageStage Stage)
+{
+	if (DamagedHullFXComponent)
+	{
+		if (Stage == EDroneDamageStage::Damaged || Stage == EDroneDamageStage::Critical)
+		{
+			DamagedHullFXComponent->Activate();
+		}
+		else
+		{
+			DamagedHullFXComponent->Deactivate();
+		}
+	}
+
+	if (CriticalHullFXComponent)
+	{
+		if (Stage == EDroneDamageStage::Critical)
+		{
+			CriticalHullFXComponent->Activate();
+		}
+		else
+		{
+			CriticalHullFXComponent->Deactivate();
+		}
+	}
+}
+
+void AFlyingDrone::OnRep_DroneDamageStage()
+{
+	// Clients mirror the hull VFX; speed stays server-side because AI movement is authoritative
+	ApplyStageVFX(DamageStage);
+}
+
+// ==================== Repair Retreat ====================
+
+bool AFlyingDrone::ShouldBeginRepair() const
+{
+	if (bIsRepairing || bIsDead || !GetWorld())
+	{
+		return false;
+	}
+
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (CurrentTime - LastRepairEndTime < RepairCooldown)
+	{
+		return false;
+	}
+
+	return DamageStage == EDroneDamageStage::Critical ||
+	       DamageSinceLastRepair >= RepairDamageThreshold;
+}
+
+bool AFlyingDrone::BeginRepairRetreat()
+{
+	if (bIsRepairing || bIsDead || !FlyingMovement)
+	{
+		return false;
+	}
+
+	bIsRepairing = true;
+	bRepairHovering = false;
+	RepairAnchorLocation = GetActorLocation();
+
+	// Break off: stop firing and climb straight up, out of the fight's altitude band
+	StopShooting();
+	FlyingMovement->StopMovement();
+	FlyingMovement->FlyToLocationUnclamped(RepairAnchorLocation + FVector(0.0f, 0.0f, RepairAltitude));
+
+	if (RepairHealFXComponent)
+	{
+		RepairHealFXComponent->Activate();
+	}
+
+	return true;
+}
+
+void AFlyingDrone::EndRepairRetreat(bool bCompleted)
+{
+	if (!bIsRepairing)
+	{
+		return;
+	}
+
+	bIsRepairing = false;
+	bRepairHovering = false;
+	LastRepairEndTime = GetWorld()->GetTimeSeconds();
+
+	if (RepairHealFXComponent)
+	{
+		RepairHealFXComponent->Deactivate();
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[DRONE_DEBUG] %s repair ended (%s), HP=%.1f"),
+		*GetName(), bCompleted ? TEXT("completed") : TEXT("interrupted"), CurrentHP);
+}
+
+void AFlyingDrone::TickRepair(float DeltaTime)
+{
+	if (!bIsRepairing || bIsDead || !FlyingMovement)
+	{
+		return;
+	}
+
+	// Still climbing - wait until the movement component reports arrival (or stuck-abort)
+	if (!bRepairHovering)
+	{
+		if (!FlyingMovement->IsMoving())
+		{
+			bRepairHovering = true;
+		}
+		else
+		{
+			return;
+		}
+	}
+
+	// Hovering at the repair altitude: heal up to spawn HP. Collisions are untouched, so a
+	// spotter can still shoot the drone down here.
+	const float HealedHP = FMath::Min(CurrentHP + RepairHPPerSecond * DeltaTime, MaxHPAtSpawn);
+	CurrentHP = HealedHP;
+
+	UpdateDamageStage();
+
+	if (CurrentHP >= MaxHPAtSpawn - KINDA_SMALL_NUMBER)
+	{
+		// Full repair clears the accumulated-damage trigger for the next cycle
+		DamageSinceLastRepair = 0.0f;
+		EndRepairRetreat(true);
+	}
 }

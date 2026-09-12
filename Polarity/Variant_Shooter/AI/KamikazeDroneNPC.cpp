@@ -1,6 +1,8 @@
-// KamikazeDroneNPC.cpp
+﻿// KamikazeDroneNPC.cpp
 
 #include "KamikazeDroneNPC.h"
+#include "KamikazeStrikeSubsystem.h"
+#include "HAL/IConsoleManager.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "FlyingAIMovementComponent.h"
 #include "FPVTiltComponent.h"
@@ -18,7 +20,7 @@
 #include "Engine/OverlapResult.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
-#include "Coop/CoopPlayers.h"
+#include "AI/PolarityTeams.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
@@ -26,7 +28,31 @@
 #include "../Pickups/HealthPickup.h"
 #include "ShooterGameMode.h"
 #include "AICombatCoordinator.h"
+#include "ShooterCharacter.h"
 #include "DrawDebugHelpers.h"
+
+namespace
+{
+	/** "This target is no longer worth flying at". Death is spelled differently on the two pawn
+	 *  families (AShooterNPC::IsDead, AShooterCharacter::IsDead) and neither is virtual on the
+	 *  shared base, so the question is asked here once instead of at every call site. */
+	bool IsTargetGone(const APawn* Pawn)
+	{
+		if (!IsValid(Pawn))
+		{
+			return true;
+		}
+		if (const AShooterNPC* const NPC = Cast<AShooterNPC>(Pawn))
+		{
+			return NPC->IsDead();
+		}
+		if (const AShooterCharacter* const Player = Cast<AShooterCharacter>(Pawn))
+		{
+			return Player->IsDead();
+		}
+		return false;
+	}
+}
 
 // Console variable: toggle with "Kamikaze.Debug 1" in console
 static TAutoConsoleVariable<int32> CVarKamikazeDebug(
@@ -44,12 +70,10 @@ static const TCHAR* KamikazeStateToString(EKamikazeState S)
 	switch (S)
 	{
 	case EKamikazeState::Launching:    return TEXT("Launching");
-	case EKamikazeState::Orbiting:     return TEXT("Orbiting");
-	case EKamikazeState::Positioning:  return TEXT("Positioning");
-	case EKamikazeState::Telegraphing: return TEXT("Telegraphing");
+	case EKamikazeState::Orbiting:     return TEXT("Loitering");
 	case EKamikazeState::Attacking:    return TEXT("Attacking");
 	case EKamikazeState::PostAttack:   return TEXT("PostAttack");
-	case EKamikazeState::Recovery:     return TEXT("Recovery");
+	case EKamikazeState::Recovery:     return TEXT("PullUp");
 	case EKamikazeState::Parried:      return TEXT("Parried");
 	case EKamikazeState::Dead:         return TEXT("Dead");
 	default:                           return TEXT("Unknown");
@@ -130,57 +154,78 @@ AKamikazeDroneNPC::AKamikazeDroneNPC(const FObjectInitializer& ObjectInitializer
 
 // ==================== Lifecycle ====================
 
+// polarity.debug.novfx: та же глушилка, что у оружия. Гасится только картинка - урон, звук и
+// смерть идут как обычно, иначе отладочный флаг менял бы исход боя.
+static bool KamikazeNoVFX()
+{
+	static IConsoleVariable* const Var =
+		IConsoleManager::Get().FindConsoleVariable(TEXT("polarity.debug.novfx"));
+	return Var && Var->GetInt() != 0;
+}
+
+namespace
+{
+	/** Move Current toward Desired by at most MaxDelta: an acceleration limit on a velocity. */
+	FVector StepVelocityToward(const FVector& Current, const FVector& Desired, float MaxDelta)
+	{
+		const FVector Diff = Desired - Current;
+		const float Len = Diff.Size();
+		if (Len <= MaxDelta || Len < KINDA_SMALL_NUMBER)
+		{
+			return Desired;
+		}
+		return Current + Diff / Len * MaxDelta;
+	}
+
+	/** Within this of the hold point the drone counts as holding (cm). */
+	constexpr float HoldArriveTolerance = 200.0f;
+
+	/** A recovery that cannot get back to the hold point (blocked, target moving away) gives up
+	 *  after this long and holds from wherever it is (seconds). */
+	constexpr float RecoveryMaxTime = 4.0f;
+
+	/** After the wind-up, this long to swing the nose round at low speed before the run counts
+	 *  (seconds). 180 degrees at the low-speed turn rate of 720/s is a quarter of a second. */
+	constexpr float StrikeTurnOutWindow = 0.4f;
+}
+
 void AKamikazeDroneNPC::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Initialize per-instance random
-	InstanceRandom.Initialize(GetUniqueID());
-
 	// NOTE: Collision sizes, profiles, and mesh scale are configured in Blueprint.
 	// Do NOT override them here — BeginPlay overrides break Blueprint collision setup.
 
-	// Disable FlyingAIMovementComponent tick — kamikaze drone manages CMC directly
-	// via its own state machine. FlyingAIMovementComponent's Tick calls ApplyMovementInput()
-	// which overwrites MaxFlySpeed every frame (to FlySpeed=600), fighting with our
-	// Launching/Orbiting/Attacking speed values. We only need its BeginPlay (CMC init).
+	// FlyingAIMovementComponent's tick would overwrite MaxFlySpeed every frame; only its BeginPlay
+	// (the CMC setup) is wanted here.
 	if (FlyingMovement)
 	{
 		FlyingMovement->SetComponentTickEnabled(false);
 	}
 
-	// Initialize FPV tilt
 	if (FPVTilt)
 	{
-		FPVTilt->Initialize(DroneMesh, AttackSpeed, GetUniqueID());
+		FPVTilt->Initialize(DroneMesh, StrikeSpeed, GetUniqueID());
 	}
-
-	// Initialize orbit
-	CurrentOrbitRadius = OrbitStartRadius;
-	OrbitHeightPhaseOffset = InstanceRandom.FRandRange(0.0f, UE_TWO_PI);
-	SpeedNoiseTimeOffset = InstanceRandom.FRandRange(0.0f, 100.0f);
-
-	// Initialize orbit center to player position
-	if (APawn* Player = GetTargetPlayerPawn())
-	{
-		OrbitCenter = Player->GetActorLocation();
-	}
-	else
-	{
-		OrbitCenter = GetActorLocation();
-	}
-
-	// Init OrbitAngle from actual spawn position relative to orbit center
-	// (each drone spawns at a different position, so angles are naturally varied in swarms)
-	const FVector RelToCenter = GetActorLocation() - OrbitCenter;
-	OrbitAngle = FMath::Atan2(RelToCenter.Y, RelToCenter.X);
-	OrbitCumulativeAngle = 0.0f;
 
 	CurrentState = EKamikazeState::Orbiting;
 	PreviousFrameLocation = GetActorLocation();
+	LastVelocity = GetVelocity();
 
-	// Drones are NOT viscous-capturable — they are repelled by same-charge plate forces instead
-	// bEnableViscousCapture stays false so plate forces are not skipped
+	// Spread the drift phase by instance, so a ring of drones does not sway in step.
+	DriftPhase = static_cast<float>(GetUniqueID() % 1000) * 0.001f * UE_TWO_PI;
+	RepositionSide = (GetUniqueID() % 2) ? 1.0f : -1.0f;
+
+	// Flight belongs to the authority: it moves the pawn by hand and the result replicates. A client
+	// leaves its CMC alone, because that tick is what smooths the movement it receives.
+	if (HasAuthority())
+	{
+		SetHandDrivenFlight(true);
+		if (UKamikazeStrikeSubsystem* Queue = GetStrikeQueue())
+		{
+			Queue->Register(this);
+		}
+	}
 
 	// Start flight sound at random position to desync multiple drones
 	if (FlightAudioComponent)
@@ -214,255 +259,97 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 		return;
 	}
 
-	// Update flight sound pitch based on speed
+	// Acceleration from the velocity change, lightly smoothed: it drives the bank into turns and the
+	// motor pitch. Works on clients too, from the replicated velocity.
+	{
+		const FVector Vel = GetVelocity();
+		const FVector RawAccel = (DeltaTime > KINDA_SMALL_NUMBER) ? (Vel - LastVelocity) / DeltaTime : FVector::ZeroVector;
+		SmoothedAcceleration = FMath::VInterpTo(SmoothedAcceleration, RawAccel, DeltaTime, 12.0f);
+		LastVelocity = Vel;
+	}
+
+	// Motor pitch follows thrust: high when fast, and high while speeding up, braking or turning hard.
 	if (FlightAudioComponent && FlightAudioComponent->IsPlaying())
 	{
 		const float Speed = GetVelocity().Size();
 		const float SpeedRange = FMath::Max(FlightPitchMaxSpeed - FlightPitchMinSpeed, 1.0f);
-		const float Alpha = FMath::Clamp((Speed - FlightPitchMinSpeed) / SpeedRange, 0.0f, 1.0f);
-		FlightAudioComponent->SetPitchMultiplier(FMath::Lerp(FlightPitchMin, FlightPitchMax, Alpha));
+		const float SpeedAlpha = FMath::Clamp((Speed - FlightPitchMinSpeed) / SpeedRange, 0.0f, 1.0f);
+		const float AccelAlpha = FMath::Clamp(SmoothedAcceleration.Size() / FlightPitchMaxAccel, 0.0f, 1.0f);
+		FlightAudioComponent->SetPitchMultiplier(FMath::Lerp(FlightPitchMin, FlightPitchMax, FMath::Max(SpeedAlpha, AccelAlpha)));
 	}
 
 	// Reset per-frame flags
 	bTookDamageThisFrame = false;
 
-	// Skip state machine while captured by EMF channeling
-	if (bIsCaptured)
+	// Who to fly at, from the strike queue: players shared out evenly. Null leaves GetTargetPawn to
+	// its own logic (no live player, or a faction target).
+	if (HasAuthority())
 	{
-		PreviousFrameLocation = GetActorLocation();
+		UKamikazeStrikeSubsystem* const Queue = GetStrikeQueue();
+		APawn* const NewTarget = Queue ? Queue->GetAssignedTarget(this) : nullptr;
+		if (NewTarget != QueueTarget.Get())
+		{
+			// Handed to another player: a strike granted against the old one is void.
+			bStrikeGranted = false;
+		}
+		QueueTarget = NewTarget;
+	}
+
+	// Everything below moves the pawn or decides damage, and both belong to the authority. A client
+	// sees the result through replicated movement; running the flight there as well would fly a second,
+	// local copy of the drone and detonate it on the client. Captured and knocked-back drones are
+	// driven by whoever captured or knocked them.
+	if (HasAuthority() && !bIsCaptured && !bIsInKnockback)
+	{
+		switch (CurrentState)
+		{
+		case EKamikazeState::Launching:
+			UpdateLaunching(DeltaTime);
+			break;
+		case EKamikazeState::Orbiting:
+			UpdateHold(DeltaTime, true);
+			break;
+		case EKamikazeState::Recovery:
+			UpdateHold(DeltaTime, false);
+			break;
+		case EKamikazeState::Attacking:
+			UpdateStrike(DeltaTime);
+			break;
+		case EKamikazeState::Parried:
+			UpdateParried(DeltaTime);
+			break;
+		default:
+			break;
+		}
+	}
+
+	// A state update may have just blown the drone up.
+	if (bIsDead)
+	{
 		return;
 	}
 
-	// State machine
-	switch (CurrentState)
-	{
-	case EKamikazeState::Launching:
-		UpdateLaunching(DeltaTime);
-		break;
-	case EKamikazeState::Orbiting:
-		if (bIsStrafing)
-		{
-			UpdateStrafing(DeltaTime);
-		}
-		else
-		{
-			UpdateOrbiting(DeltaTime);
-		}
-		break;
-	case EKamikazeState::Positioning:
-		UpdatePositioning(DeltaTime);
-		break;
-	case EKamikazeState::Telegraphing:
-		UpdateTelegraphing(DeltaTime);
-		break;
-	case EKamikazeState::Attacking:
-		UpdateAttacking(DeltaTime);
-		break;
-	case EKamikazeState::PostAttack:
-		UpdatePostAttack(DeltaTime);
-		break;
-	case EKamikazeState::Recovery:
-		UpdateRecovery(DeltaTime);
-		break;
-	case EKamikazeState::Parried:
-		UpdateParried(DeltaTime);
-		break;
-	default:
-		break;
-	}
-
-	// --- Stuck detection: position-based (fires once per second per drone) ---
-	// Uses actual position delta instead of GetVelocity() which can report stored
-	// CMC velocity even when the actor hasn't moved at all.
-	{
-		const float PosDelta = FVector::Dist(GetActorLocation(), PreviousFrameLocation);
-		// Accumulate distance over 1s window using a simple threshold check
-		// If position changed less than 5cm this frame and we're in an active state, count it
-		if (PosDelta < 5.0f && CurrentState != EKamikazeState::Dead && CurrentState != EKamikazeState::Telegraphing)
-		{
-			StuckAccumulator += DeltaTime;
-			if (StuckAccumulator >= 1.0f)
-			{
-				StuckAccumulator = 0.0f;
-				UCharacterMovementComponent* DbgCMC = GetCharacterMovement();
-				// Diagnose EXACT reason CMC isn't moving
-				const bool bSimPhys = DbgCMC && DbgCMC->UpdatedComponent ? DbgCMC->UpdatedComponent->IsSimulatingPhysics() : false;
-				const bool bHasCtrl = GetController() != nullptr;
-				const bool bRunNoCtrl = DbgCMC ? DbgCMC->bRunPhysicsWithNoController : false;
-				const bool bUpdCompValid = DbgCMC && DbgCMC->UpdatedComponent != nullptr;
-				const bool bIsRoot = bUpdCompValid && DbgCMC->UpdatedComponent == GetRootComponent();
-				const FVector PendInput = DbgCMC ? DbgCMC->GetPendingInputVector() : FVector::ZeroVector;
-				const FVector Accel = DbgCMC ? DbgCMC->GetCurrentAcceleration() : FVector::ZeroVector;
-				UE_LOG(LogTemp, Error, TEXT("[KAM_STUCK %s] State=%s PosDelta=%.1f StoredVel=%.0f | CMC: Mode=%d MaxFly=%.0f Tick=%d | SimPhys=%d Ctrl=%d RunNoCtrl=%d UpdComp=%d IsRoot=%d | Input=(%.0f,%.0f,%.0f) Accel=(%.0f,%.0f,%.0f) | Pos=(%.0f,%.0f,%.0f)"),
-					*GetName(), KamikazeStateToString(CurrentState), PosDelta, GetVelocity().Size(),
-					DbgCMC ? (int32)DbgCMC->MovementMode.GetValue() : -1,
-					DbgCMC ? DbgCMC->MaxFlySpeed : -1.f,
-					DbgCMC ? (int32)DbgCMC->IsComponentTickEnabled() : -1,
-					(int32)bSimPhys, (int32)bHasCtrl, (int32)bRunNoCtrl,
-					(int32)bUpdCompValid, (int32)bIsRoot,
-					PendInput.X, PendInput.Y, PendInput.Z,
-					Accel.X, Accel.Y, Accel.Z,
-					GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
-			}
-		}
-		else
-		{
-			StuckAccumulator = 0.0f;
-		}
-	}
-
-	// Update FPV tilt every frame (skip when parried — mesh spins freely)
-	if (FPVTilt && !bIsDead && CurrentState != EKamikazeState::Parried)
+	// Update FPV tilt every frame (skip when parried — mesh spins freely): nose into speed, nose up
+	// when braking, bank into turns from the sideways acceleration.
+	if (FPVTilt && CurrentState != EKamikazeState::Parried)
 	{
 		const FVector Vel = GetVelocity();
-		const float Speed = Vel.Size();
-		// Approximate acceleration from velocity change (CMC doesn't expose it directly)
-		const FVector Accel = GetCharacterMovement() ? GetCharacterMovement()->GetCurrentAcceleration() : FVector::ZeroVector;
-		FPVTilt->SetMovementState(Speed, Vel, Accel);
+		FPVTilt->SetMovementState(Vel.Size(), Vel, SmoothedAcceleration);
 	}
 
-	// Orient actor to face velocity direction (yaw only) — skip when parried (mesh spins freely)
-	const FVector Vel = GetVelocity();
-	if (!Vel.IsNearlyZero(10.0f) && CurrentState != EKamikazeState::Parried)
+	// Yaw only, and the authority's rotation replicates. Holding, the camera stays on the target the
+	// way a pilot keeps it in the goggles; everywhere else the nose follows the flight.
+	if (HasAuthority() && CurrentState != EKamikazeState::Parried)
 	{
-		const FRotator CurrentRot = GetActorRotation();
-		const FRotator TargetRot = Vel.Rotation();
-		// Use yaw interp speed appropriate to current state
-		const float YawSpeed = (CurrentState == EKamikazeState::Attacking || CurrentState == EKamikazeState::PostAttack)
-			? AttackTurnRate * AttackTurnRateMultiplier
-			: OrbitMaxTurnRate;
-		const FRotator NewRot = FMath::RInterpTo(CurrentRot, FRotator(0.0f, TargetRot.Yaw, 0.0f), DeltaTime, YawSpeed / 45.0f);
-		SetActorRotation(NewRot);
-	}
-
-	// ==================== DEBUG VISUALIZATION ====================
-#if ENABLE_DRAW_DEBUG
-	const int32 DebugLevel = CVarKamikazeDebug.GetValueOnGameThread();
-	if (DebugLevel >= 2)
-	{
-		const FVector MyLoc = GetActorLocation();
-		const float MySpeed = GetVelocity().Size();
-		const FVector MyVel = GetVelocity();
-
-		// --- State + speed text above drone ---
-		const FString StateStr = FString::Printf(TEXT("%s | Spd:%.0f | Rad:%.0f | H:%.0f | OrbitT:%.1f"),
-			KamikazeStateToString(CurrentState), MySpeed, CurrentOrbitRadius, MyLoc.Z - OrbitCenter.Z, OrbitElapsedTime);
-
-		DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 80), StateStr, nullptr, FColor::White, 0.0f, true, 1.0f);
-
-		// --- Velocity arrow (cyan) ---
-		if (!MyVel.IsNearlyZero())
+		const FVector Vel = GetVelocity();
+		const APawn* const Target = (CurrentState == EKamikazeState::Orbiting) ? GetTargetPawn() : nullptr;
+		const FVector Facing = Target ? (Target->GetActorLocation() - GetActorLocation()) : Vel;
+		if (!Facing.IsNearlyZero(10.0f))
 		{
-			DrawDebugDirectionalArrow(GetWorld(), MyLoc, MyLoc + MyVel.GetSafeNormal() * 150.0f,
-				15.0f, FColor::Cyan, false, 0.0f, 0, 2.0f);
-		}
-
-		// --- Orbit center (yellow sphere) ---
-		DrawDebugSphere(GetWorld(), OrbitCenter, 30.0f, 8, FColor::Yellow, false, 0.0f, 0, 1.5f);
-
-		// --- Orbit path (yellow circle at orbit height) ---
-		const FVector CircleCenter(OrbitCenter.X, OrbitCenter.Y, OrbitCenter.Z + OrbitBaseHeight);
-		DrawDebugCircle(GetWorld(), CircleCenter, CurrentOrbitRadius, 32,
-			FColor::Yellow, false, 0.0f, 0, 1.0f, FVector::YAxisVector, FVector::XAxisVector, false);
-
-		// --- Line from drone to orbit center (yellow dotted) ---
-		DrawDebugLine(GetWorld(), MyLoc, OrbitCenter, FColor::Yellow, false, 0.0f, 0, 0.5f);
-
-		if (CurrentState == EKamikazeState::Orbiting)
-		{
-			// --- Orbit target position (green sphere) ---
-			const float SM = CurrentOrbitRadius;
-			const float Sm = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
-			const float OTx = OrbitCenter.X + SM * FMath::Cos(OrbitAngle);
-			const float OTy = OrbitCenter.Y + Sm * FMath::Sin(OrbitAngle);
-			const float OTz = OrbitCenter.Z + OrbitBaseHeight + OrbitHeightAmplitude * FMath::Sin(OrbitAngle + OrbitHeightPhaseOffset);
-			const FVector OrbitTarget(OTx, OTy, OTz);
-			DrawDebugSphere(GetWorld(), OrbitTarget, 20.0f, 6, FColor::Green, false, 0.0f, 0, 2.0f);
-
-			// --- Line from drone to orbit target (green) ---
-			DrawDebugLine(GetWorld(), MyLoc, OrbitTarget, FColor::Green, false, 0.0f, 0, 1.5f);
-
-			// --- Distance to orbit target ---
-			const float DistToTarget = FVector::Dist(MyLoc, OrbitTarget);
-			const FString OrbitStr = FString::Printf(TEXT("DistToTarget: %.0f"), DistToTarget);
-			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), OrbitStr, nullptr, FColor::Green, 0.0f, true, 0.8f);
-		}
-
-		if (CurrentState == EKamikazeState::Telegraphing)
-		{
-			// --- Telegraph: draw Bezier curve and control points ---
-			const float DbgAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
-
-			const FVector P0 = TelegraphStartPos;
-			const FVector P1 = TelegraphPhantomOrbitCenter;
-			const FVector P3 = TelegraphStartPos + TelegraphAttackDir * TelegraphPhantomOrbitAngle;
-			const FVector P2 = P3 - TelegraphAttackDir * TelegraphPhantomOrbitSpeed;
-
-			// Draw Bezier curve as segments (orange = traveled, yellow = remaining)
-			constexpr int32 NumSegments = 20;
-			FVector PrevPt = P0;
-			for (int32 i = 1; i <= NumSegments; ++i)
-			{
-				const float st = (float)i / (float)NumSegments;
-				const float su = 1.0f - st;
-				const FVector Pt = su*su*su * P0 + 3.0f*su*su*st * P1 + 3.0f*su*st*st * P2 + st*st*st * P3;
-				DrawDebugLine(GetWorld(), PrevPt, Pt, (st <= DbgAlpha) ? FColor::Orange : FColor::Yellow, false, 0.0f, 0, 2.0f);
-				PrevPt = Pt;
-			}
-
-			// Control points: P0 green, P1 blue (orbit tangent), P2 red (attack approach), P3 magenta (end)
-			DrawDebugSphere(GetWorld(), P0, 15.0f, 4, FColor::Green, false, 0.0f, 0, 1.5f);
-			DrawDebugSphere(GetWorld(), P1, 15.0f, 4, FColor::Blue, false, 0.0f, 0, 1.5f);
-			DrawDebugSphere(GetWorld(), P2, 15.0f, 4, FColor::Red, false, 0.0f, 0, 1.5f);
-			DrawDebugSphere(GetWorld(), P3, 15.0f, 4, FColor::Magenta, false, 0.0f, 0, 1.5f);
-
-			// Control polygon (tangent handles)
-			DrawDebugLine(GetWorld(), P0, P1, FColor::Blue, false, 0.0f, 0, 0.5f);
-			DrawDebugLine(GetWorld(), P2, P3, FColor::Red, false, 0.0f, 0, 0.5f);
-
-			// Attack target
-			DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Magenta, false, 0.0f, 0, 2.0f);
-
-			// Progress text
-			const FString BezierStr = FString::Printf(TEXT("Bezier t: %.2f | Speed: %.0f"), DbgAlpha, MySpeed);
-			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 60), BezierStr, nullptr, FColor::Orange, 0.0f, true, 1.0f);
-		}
-
-		if (CurrentState == EKamikazeState::Attacking)
-		{
-			// --- Attack target (red sphere) ---
-			DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Red, false, 0.0f, 0, 3.0f);
-
-			// --- Line from drone to attack target (red) ---
-			DrawDebugLine(GetWorld(), MyLoc, AttackTargetPosition, FColor::Red, false, 0.0f, 0, 2.0f);
-		}
-
-		if (CurrentState == EKamikazeState::PostAttack)
-		{
-			// --- Direction arrow (orange) ---
-			DrawDebugDirectionalArrow(GetWorld(), MyLoc, MyLoc + AttackDirection * 300.0f,
-				20.0f, FColor::Orange, false, 0.0f, 0, 3.0f);
-		}
-
-		// --- Ground check: raycast down to show height above floor ---
-		FHitResult GroundHit;
-		if (GetWorld()->LineTraceSingleByChannel(GroundHit, MyLoc, MyLoc - FVector(0, 0, 2000), ECC_WorldStatic))
-		{
-			const float HeightAboveGround = MyLoc.Z - GroundHit.Location.Z;
-			DrawDebugLine(GetWorld(), MyLoc, GroundHit.Location, FColor::Magenta, false, 0.0f, 0, 0.5f);
-			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 40), FString::Printf(TEXT("Floor:%.0f cm"), HeightAboveGround),
-				nullptr, FColor::Magenta, 0.0f, true, 0.8f);
-		}
-
-		// --- CMC movement mode ---
-		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-		{
-			const FString MoveStr = FString::Printf(TEXT("CMC: Mode=%d MaxFly=%.0f Accel=%.0f Grav=%.1f"),
-				(int32)CMC->MovementMode.GetValue(), CMC->MaxFlySpeed, CMC->MaxAcceleration, CMC->GravityScale);
-			DrawDebugString(GetWorld(), MyLoc + FVector(0, 0, 100), MoveStr, nullptr, FColor::Silver, 0.0f, true, 0.7f);
+			const FRotator NewRot = FMath::RInterpTo(GetActorRotation(), FRotator(0.0f, Facing.Rotation().Yaw, 0.0f), DeltaTime, 6.0f);
+			SetActorRotation(NewRot);
 		}
 	}
-#endif
 
 	// Update previous location for sweep collision detection (must be last in Tick)
 	PreviousFrameLocation = GetActorLocation();
@@ -476,10 +363,13 @@ void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 	CurrentState = NewState;
 	StateTimer = 0.0f;
 
-	// Reset orbit timer when entering orbit
+	// Every arrival at the hold starts the wait from zero: a strike is always announced by a full hold.
 	if (NewState == EKamikazeState::Orbiting)
 	{
-		OrbitElapsedTime = 0.0f;
+		HoldTimer = 0.0f;
+		bProximityTimedOut = false;
+		bStrikeGranted = false;
+		bIsRetaliating = false;
 	}
 
 	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
@@ -489,6 +379,173 @@ void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 			GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z,
 			GetVelocity().Size());
 	}
+}
+
+// ==================== Flight ====================
+
+void AKamikazeDroneNPC::SetHandDrivenFlight(bool bHandDriven)
+{
+	UCharacterMovementComponent* CMC = GetCharacterMovement();
+	if (!CMC)
+	{
+		return;
+	}
+
+	// Flying mode either way: it is what collision and replicated movement expect of a pawn in the
+	// air, and gravity stays off. Only the tick changes hands.
+	CMC->SetMovementMode(MOVE_Flying);
+	CMC->SetComponentTickEnabled(!bHandDriven);
+}
+
+FHitResult AKamikazeDroneNPC::FlyMove(const FVector& NewVelocity, float DeltaTime)
+{
+	FHitResult FirstHit;
+	UCharacterMovementComponent* CMC = GetCharacterMovement();
+	if (!CMC || DeltaTime <= 0.0f)
+	{
+		return FirstHit;
+	}
+
+	CMC->Velocity = NewVelocity;
+	const FVector Delta = NewVelocity * DeltaTime;
+	if (Delta.IsNearlyZero())
+	{
+		return FirstHit;
+	}
+
+	// SafeMove, not a plain move: a drone that starts inside geometry (a carrier hanging too low, a
+	// spawn point in a wall) is pushed out first instead of sweeping from inside and passing through.
+	CMC->SafeMoveUpdatedComponent(Delta, GetActorQuat(), true, FirstHit);
+	if (FirstHit.IsValidBlockingHit())
+	{
+		// Slide along whatever it touched for the rest of the frame, and lose the speed that went into
+		// the surface: the drone skims a wall or a floor, it does not stick to it or bounce.
+		FHitResult SlideHit = FirstHit;
+		static_cast<UMovementComponent*>(CMC)->SlideAlongSurface(Delta, 1.0f - FirstHit.Time, FirstHit.Normal, SlideHit, true);
+		CMC->Velocity = FVector::VectorPlaneProject(NewVelocity, FirstHit.Normal);
+	}
+	return FirstHit;
+}
+
+FVector AKamikazeDroneNPC::GetTargetFeet(const APawn* Target) const
+{
+	if (!Target)
+	{
+		return GetActorLocation();
+	}
+	FVector Feet = Target->GetActorLocation();
+	if (const ACharacter* const TargetCharacter = Cast<ACharacter>(Target))
+	{
+		if (const UCapsuleComponent* const Capsule = TargetCharacter->GetCapsuleComponent())
+		{
+			Feet.Z -= Capsule->GetScaledCapsuleHalfHeight();
+		}
+	}
+	return Feet;
+}
+
+FVector AKamikazeDroneNPC::ComputeHoldPoint(const APawn* Target) const
+{
+	const FVector Feet = GetTargetFeet(Target);
+
+	// Bearing: the side the drone came in from, fixed when it first reached the hold (before that,
+	// the side it is on now). It does not go round the player on its own: a group from one carrier
+	// hangs together on the carrier's side, and nothing sneaks behind the player's head.
+	float BearingDeg;
+	if (bHasHoldBearing)
+	{
+		BearingDeg = HoldBearingDeg;
+	}
+	else
+	{
+		const FVector Away = GetActorLocation() - Feet;
+		BearingDeg = (FMath::Square(Away.X) + FMath::Square(Away.Y) < 1.0f)
+			? Target->GetActorRotation().Yaw + 180.0f
+			: FMath::RadiansToDegrees(FMath::Atan2(Away.Y, Away.X));
+	}
+	BearingDeg += RepositionOffsetDeg;
+
+	const float BearingRad = FMath::DegreesToRadians(BearingDeg);
+	const FVector Out(FMath::Cos(BearingRad), FMath::Sin(BearingRad), 0.0f);
+	FVector Point = Feet + Out * HoldDistance + FVector(0.0f, 0.0f, HoldHeight);
+
+	// A loose cluster, not a pile: keep clear of the other drones.
+	if (const UKamikazeStrikeSubsystem* const Queue = GetStrikeQueue())
+	{
+		Point += Queue->GetSeparationOffset(this, Point);
+	}
+
+	// Figure-eight drift while holding: sideways across the sector and a little up and down, never
+	// still. Smooth sines, so it reads as a pilot correcting, not as noise.
+	if (CurrentState == EKamikazeState::Orbiting && DriftPeriod > KINDA_SMALL_NUMBER)
+	{
+		const float W = UE_TWO_PI / DriftPeriod;
+		const float T = GetWorld()->GetTimeSeconds() * W + DriftPhase;
+		const FVector Side(-Out.Y, Out.X, 0.0f);
+		Point += Side * (DriftRadius * FMath::Sin(T)) + FVector(0.0f, 0.0f, DriftVertical * FMath::Sin(2.0f * T));
+	}
+	return Point;
+}
+
+UKamikazeStrikeSubsystem* AKamikazeDroneNPC::GetStrikeQueue() const
+{
+	const UWorld* const World = GetWorld();
+	return (World && HasAuthority()) ? World->GetSubsystem<UKamikazeStrikeSubsystem>() : nullptr;
+}
+
+void AKamikazeDroneNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UKamikazeStrikeSubsystem* Queue = GetStrikeQueue())
+	{
+		Queue->Unregister(this);
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
+FVector AKamikazeDroneNPC::ComputeStrikeAimPoint() const
+{
+	if (AttackPattern == EAttackPattern::Direct && BuildingTarget)
+	{
+		if (!DirectAttackTargetLocation.IsZero())
+		{
+			return DirectAttackTargetLocation;
+		}
+		FVector BoundsOrigin, BoundsExtent;
+		BuildingTarget->GetActorBounds(true, BoundsOrigin, BoundsExtent);
+		return BoundsOrigin;
+	}
+
+	const APawn* const Target = GetTargetPawn();
+	if (!Target)
+	{
+		// No target this frame (a munition between reacquire sweeps): keep the last aim point.
+		return AttackTargetPosition;
+	}
+
+	const FVector Feet = GetTargetFeet(Target);
+	const FVector Aim = Feet + FVector(0.0f, 0.0f, AimHeightAboveFeet);
+
+	// Lead by the time the strike needs to get there at its own speed. A constant velocity is caught
+	// exactly; only a change the turn rate cannot follow escapes.
+	const float TimeToGo = FMath::Min(FVector::Dist(GetActorLocation(), Aim) / FMath::Max(StrikeSpeed, 1.0f), MaxLeadTime);
+	FVector Led = Aim + Target->GetVelocity() * TimeToGo;
+
+	// Never below the feet: a falling target would otherwise pull the aim point into the floor.
+	Led.Z = FMath::Max(Led.Z, Feet.Z + GetCapsuleComponent()->GetScaledCapsuleRadius());
+	return Led;
+}
+
+FVector AKamikazeDroneNPC::ArriveVelocity(const FVector& Point, float SpeedCap, float Acceleration) const
+{
+	const FVector ToPoint = Point - GetActorLocation();
+	const float Dist = ToPoint.Size();
+	if (Dist < 1.0f)
+	{
+		return FVector::ZeroVector;
+	}
+	// The fastest speed from which it can still stop exactly on the point: v = sqrt(2 a d).
+	const float Speed = FMath::Min(SpeedCap, FMath::Sqrt(2.0f * Acceleration * Dist));
+	return ToPoint / Dist * Speed;
 }
 
 void AKamikazeDroneNPC::UpdateLaunching(float DeltaTime)
@@ -502,149 +559,55 @@ void AKamikazeDroneNPC::UpdateLaunching(float DeltaTime)
 		return;
 	}
 
-	// --- Direct movement: CMC tick is disabled, we drive position ourselves ---
-	// CMC->Velocity is used purely as velocity storage.
-	// This bypasses the tick-ordering bug where CMC::Tick runs before Actor::Tick,
-	// braking the velocity to zero before AddInputVector can provide input.
+	const FVector Vel = CMC->Velocity;
+	const float Speed = Vel.Size();
+	const FVector Dir = (Speed > 1.0f) ? Vel / Speed : GetActorForwardVector();
 
-	FVector CurrentVel = CMC->Velocity;
-	float CurrentSpeed = CurrentVel.Size();
-	FVector CurrentDir = (CurrentSpeed > 1.f) ? CurrentVel / CurrentSpeed : GetActorForwardVector();
-
-	// --- FPV PID stabilization: exponential speed decay toward CruiseSpeed ---
-	const float NewSpeed = FMath::FInterpTo(CurrentSpeed, CruiseSpeed, DeltaTime, LaunchDecayRate);
-
-	// --- Gentle FPV arc toward orbit area ---
-	FVector DesiredDir = CurrentDir;
-
-	APawn* Player = GetTargetPlayerPawn();
-	if (Player)
+	// Settle from the launch impulse toward the hold speed, turning gently toward where it goes next.
+	const float NewSpeed = FMath::FInterpTo(Speed, HoldSpeed, DeltaTime, LaunchDecayRate);
+	FVector NewDir = Dir;
+	if (const APawn* const Target = GetTargetPawn())
 	{
-		// Smoothly track player position for orbit center
-		OrbitCenter = FMath::VInterpTo(OrbitCenter, Player->GetActorLocation(), DeltaTime, 2.0f);
-
-		// Target: orbit-radius distance from player, at orbit altitude
-		const FVector ToPlayer = Player->GetActorLocation() - GetActorLocation();
-		const FVector ToPlayerFlat = FVector(ToPlayer.X, ToPlayer.Y, 0.0f);
-		const float DistToPlayer = ToPlayerFlat.Size();
-
-		FVector DesiredPos;
-		if (DistToPlayer > OrbitStartRadius * 0.5f)
-		{
-			// Far: arc toward player vicinity at orbit radius
-			DesiredPos = Player->GetActorLocation()
-				+ (-ToPlayerFlat.GetSafeNormal() * OrbitStartRadius)
-				+ FVector(0.0f, 0.0f, OrbitBaseHeight);
-		}
-		else
-		{
-			// Near: just aim for orbit altitude
-			DesiredPos = GetActorLocation();
-			DesiredPos.Z = Player->GetActorLocation().Z + OrbitBaseHeight;
-		}
-
-		// Rate-limited turn (LaunchSteerRate deg/s) — mimics PID yaw/pitch correction
-		const FVector ToDesired = (DesiredPos - GetActorLocation()).GetSafeNormal();
-		DesiredDir = FMath::VInterpNormalRotationTo(CurrentDir, ToDesired, DeltaTime, LaunchSteerRate);
+		const FVector Goal = ComputeHoldPoint(Target);
+		NewDir = FMath::VInterpNormalRotationTo(Dir, (Goal - GetActorLocation()).GetSafeNormal(), DeltaTime, LaunchSteerRate);
 	}
+	FlyMove(NewDir * NewSpeed, DeltaTime);
 
-	// --- Update velocity and move actor directly ---
-	const FVector NewVel = DesiredDir * NewSpeed;
-	CMC->Velocity = NewVel;
-
-	const FVector MoveDelta = NewVel * DeltaTime;
-	FHitResult Hit;
-	CMC->MoveUpdatedComponent(MoveDelta, GetActorRotation(), true, &Hit);
-	if (Hit.bBlockingHit)
+	// Settled: off to the hold like any other drone. A carrier's munition too: it takes its place on
+	// the ring and waits its turn in the strike queue.
+	const bool bSettled = StateTimer >= 0.3f && NewSpeed <= HoldSpeed * 1.15f;
+	if (bSettled || StateTimer >= MaxLaunchStabilizationTime)
 	{
-		// Compute slide direction: remove the component that goes into the surface
-		const FVector SlideDir = FVector::VectorPlaneProject(MoveDelta, Hit.Normal).GetSafeNormal();
-		const float RemainingTime = 1.f - Hit.Time;
-		if (RemainingTime > SMALL_NUMBER && !SlideDir.IsNearlyZero())
-		{
-			const FVector SlideDelta = SlideDir * (NewSpeed * RemainingTime * DeltaTime);
-			CMC->MoveUpdatedComponent(SlideDelta, GetActorRotation(), true, &Hit);
-		}
-	}
-
-	// --- Periodic diagnostics (every 0.25s, per-instance timer) ---
-	{
-		const float LogInterval = 0.25f;
-		// Use StateTimer modulo for per-instance timing (no static!)
-		const float PrevT = StateTimer - DeltaTime;
-		if (FMath::FloorToInt(StateTimer / LogInterval) != FMath::FloorToInt(PrevT / LogInterval))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[KAM_LAUNCH %s] t=%.2f | Speed=%.0f→%.0f (target=%.0f) | Dir=%s | Pos=(%.0f,%.0f,%.0f)"),
-				*GetName(), StateTimer,
-				CurrentSpeed, NewSpeed, CruiseSpeed,
-				*DesiredDir.ToCompactString(),
-				GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
-		}
-	}
-
-	// --- Transition to orbit when speed settles near CruiseSpeed ---
-	const bool bSpeedStabilized = (NewSpeed <= CruiseSpeed * 1.15f) && (NewSpeed > CruiseSpeed * 0.5f);
-	const bool bMinTimeElapsed = StateTimer >= 0.3f;
-
-	if ((bSpeedStabilized && bMinTimeElapsed) || StateTimer >= MaxLaunchStabilizationTime)
-	{
-		// Snap orbit parameters to current spatial relationship
-		if (Player)
-		{
-			OrbitCenter = Player->GetActorLocation();
-		}
-		const FVector RelToCenter = GetActorLocation() - OrbitCenter;
-		OrbitAngle = FMath::Atan2(RelToCenter.Y, RelToCenter.X);
-		OrbitCumulativeAngle = 0.0f;
-
-		// Set orbit radius from actual distance (clamped to valid range)
-		CurrentOrbitRadius = FVector::Dist2D(GetActorLocation(), OrbitCenter);
-		CurrentOrbitRadius = FMath::Clamp(CurrentOrbitRadius, OrbitMinRadius, OrbitStartRadius);
-
-		// Re-enable CMC for Orbiting state — smooth handoff with current velocity
-		CMC->SetMovementMode(MOVE_Flying);
-		CMC->MaxFlySpeed = CruiseSpeed;
-		CMC->SetComponentTickEnabled(true);
-
-		const float EntryHeightAbovePlayer = GetActorLocation().Z - OrbitCenter.Z;
-		const float ExpectedHeight = OrbitBaseHeight;
-		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Launch->Orbit | Time=%.2f Speed=%.0f->%.0f Radius=%.0f CruiseSpeed=%.0f | HeightAbovePlayer=%.0f (expected=%.0f, err=%.0f)"),
-			*GetName(), StateTimer, LaunchInitialSpeed, NewSpeed, CurrentOrbitRadius, CruiseSpeed,
-			EntryHeightAbovePlayer, ExpectedHeight, ExpectedHeight - EntryHeightAbovePlayer);
-
 		SetState(EKamikazeState::Orbiting);
 	}
 }
 
 void AKamikazeDroneNPC::InitiateLaunch(const FVector& LaunchVelocity)
 {
-	UCharacterMovementComponent* CMC = GetCharacterMovement();
-	if (!CMC) return;
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->Velocity = LaunchVelocity;
+	}
+	SetHandDrivenFlight(true);
 
-	LaunchInitialSpeed = LaunchVelocity.Size();
-
-	// Store velocity in CMC->Velocity (used as storage during Launching).
-	// CMC tick is DISABLED during launch — we move the actor directly via
-	// MoveUpdatedComponent to bypass tick-ordering issues where CMC brakes
-	// velocity to zero before Actor::Tick can call AddInputVector.
-	CMC->Velocity = LaunchVelocity;
-	CMC->SetComponentTickEnabled(false);
-
-	// Orient drone to face launch direction
 	if (!LaunchVelocity.IsNearlyZero())
 	{
 		SetActorRotation(LaunchVelocity.Rotation());
 	}
 
-	// Initialize orbit center from current position — will track toward player during launch
-	OrbitCenter = GetActorLocation();
-
+	PreviousFrameLocation = GetActorLocation();
 	SetState(EKamikazeState::Launching);
-	StateTimer = 0.0f;
 
-	UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] InitiateLaunch | Speed=%.0f Dir=%s CruiseSpeed=%.0f | Pos=(%.0f,%.0f,%.0f)"),
-		*GetName(), LaunchInitialSpeed, *LaunchVelocity.GetSafeNormal().ToCompactString(), CruiseSpeed,
+	UE_LOG(LogTemp, Log, TEXT("[Kamikaze %s] InitiateLaunch | Speed=%.0f Dir=%s | Pos=(%.0f,%.0f,%.0f)"),
+		*GetName(), LaunchVelocity.Size(), *LaunchVelocity.GetSafeNormal().ToCompactString(),
 		GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
+}
+
+void AKamikazeDroneNPC::LaunchAsHomingMunition(const FVector& LaunchVelocity)
+{
+	bSelfDesignateTarget = true;
+	bProximityTimedOut = false;
+	InitiateLaunch(LaunchVelocity);
 }
 
 void AKamikazeDroneNPC::InitiateDirectAttack(AActor* Target, FVector TargetWorldLocation)
@@ -658,24 +621,20 @@ void AKamikazeDroneNPC::InitiateDirectAttack(AActor* Target, FVector TargetWorld
 	AttackPattern = EAttackPattern::Direct;
 	BuildingTarget = Target;
 	DirectAttackTargetLocation = TargetWorldLocation;
+	AttackTargetPosition = ComputeStrikeAimPoint();
 
-	AttackTargetPosition = CalculatePredictedPosition();
-	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
-
+	const FVector Dir = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		CMC->SetComponentTickEnabled(true);
-		CMC->SetMovementMode(MOVE_Flying);
-		CMC->Velocity = AttackDirection * AttackSpeed;
+		CMC->Velocity = Dir * StrikeSpeed;
 	}
-
-	if (!AttackDirection.IsNearlyZero())
+	SetHandDrivenFlight(true);
+	if (!Dir.IsNearlyZero())
 	{
-		SetActorRotation(AttackDirection.Rotation());
+		SetActorRotation(Dir.Rotation());
 	}
 
 	PreviousFrameLocation = GetActorLocation();
-	StateTimer = 0.0f;
 	SetState(EKamikazeState::Attacking);
 
 	UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] InitiateDirectAttack | Target=%s TargetPos=%s (from %s)"),
@@ -683,733 +642,224 @@ void AKamikazeDroneNPC::InitiateDirectAttack(AActor* Target, FVector TargetWorld
 		DirectAttackTargetLocation.IsZero() ? TEXT("bounds center fallback") : TEXT("explicit hit point"));
 }
 
-void AKamikazeDroneNPC::UpdateOrbiting(float DeltaTime)
+void AKamikazeDroneNPC::UpdateHold(float DeltaTime, bool bCountTowardStrike)
 {
-	APawn* Player = GetTargetPlayerPawn();
-	if (!Player)
+	StateTimer += DeltaTime;
+
+	UCharacterMovementComponent* CMC = GetCharacterMovement();
+	if (!CMC)
 	{
 		return;
 	}
 
-	// --- Evaluate orbit quality (once per second) ---
-	OrbitEvaluationTimer += DeltaTime;
-	if (OrbitEvaluationTimer >= 1.0f)
+	// Slide from one side of the sector to the other every RepositionInterval, along the arc.
+	if (bCountTowardStrike && RepositionInterval > KINDA_SMALL_NUMBER)
 	{
-		OrbitEvaluationTimer = 0.0f;
-		EvaluateOrbitQuality();
-		if (bIsStrafing) return; // switched to strafe
-	}
-
-	// --- Update orbit center (smoothed tracking of player) ---
-	TimeSinceOrbitCenterUpdate += DeltaTime;
-	if (TimeSinceOrbitCenterUpdate >= OrbitCenterUpdateInterval)
-	{
-		TimeSinceOrbitCenterUpdate = 0.0f;
-		const FVector PlayerPos = Player->GetActorLocation();
-		OrbitCenter = FMath::VInterpTo(OrbitCenter, PlayerPos, OrbitCenterUpdateInterval, 500.0f / OrbitCenterUpdateInterval);
-	}
-
-	// --- Compute effective speed with noise ---
-	const float SpeedNoise = SpeedNoiseAmplitude * FMath::Sin((GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset) * 2.7f);
-	const float EffectiveSpeed = CruiseSpeed * (1.0f + SpeedNoise);
-	const float AngularSpeed = EffectiveSpeed / FMath::Max(CurrentOrbitRadius, 100.0f);
-
-	// --- Sync OrbitAngle to drone's actual angular position ---
-	// This prevents the orbit target from racing ahead when the drone can't keep up
-	const FVector RelativePos = GetActorLocation() - OrbitCenter;
-	const float ActualAngle = FMath::Atan2(RelativePos.Y, RelativePos.X);
-
-	// Compute how much the drone actually advanced (signed, handles wrap-around)
-	float AngleDelta = ActualAngle - OrbitAngle;
-	if (AngleDelta > UE_PI) AngleDelta -= UE_TWO_PI;
-	if (AngleDelta < -UE_PI) AngleDelta += UE_TWO_PI;
-
-	// Accumulate positive (forward) movement for lap counting
-	if (AngleDelta > 0.0f)
-	{
-		OrbitCumulativeAngle += AngleDelta;
-	}
-
-	// Snap OrbitAngle to actual drone angle
-	OrbitAngle = ActualAngle;
-
-	// --- Lap completion: shrink radius ---
-	if (OrbitCumulativeAngle >= UE_TWO_PI)
-	{
-		OrbitCumulativeAngle -= UE_TWO_PI;
-		CurrentOrbitRadius = FMath::Max(CurrentOrbitRadius - OrbitShrinkPerLap, OrbitMinRadius);
-	}
-
-	// --- Lead target: point slightly ahead on the orbit ---
-	// 0.5s of angular lead — drone chases a point ahead on the curve, not behind it
-	const float LeadAngle = AngularSpeed * 0.5f;
-	const float TargetAngle = OrbitAngle + LeadAngle;
-
-	const float SemiMajor = CurrentOrbitRadius;
-	const float SemiMinor = CurrentOrbitRadius * (1.0f - OrbitEccentricity);
-	const float TargetX = OrbitCenter.X + SemiMajor * FMath::Cos(TargetAngle);
-	const float TargetY = OrbitCenter.Y + SemiMinor * FMath::Sin(TargetAngle);
-
-	// Vertical sinusoid (use TargetAngle for consistent height at lead point)
-	const float HeightOscillation = OrbitHeightAmplitude * FMath::Sin(TargetAngle + OrbitHeightPhaseOffset);
-	const float TargetZ = OrbitCenter.Z + OrbitBaseHeight + HeightOscillation;
-
-	const FVector TargetOrbitPos(TargetX, TargetY, TargetZ);
-
-	// --- Geometry check ---
-	TimeSinceGeometryCheck += DeltaTime;
-	if (TimeSinceGeometryCheck >= GeometryCheckInterval)
-	{
-		TimeSinceGeometryCheck = 0.0f;
-
-		const FVector ForwardDir = (TargetOrbitPos - GetActorLocation()).GetSafeNormal();
-		FHitResult Hit;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(this);
-
-		const FVector GeoRayEnd = GetActorLocation() + ForwardDir * 200.0f;
-		if (GetWorld()->LineTraceSingleByChannel(Hit, GetActorLocation(), GeoRayEnd, ECC_WorldStatic, QueryParams))
+		RepositionTimer += DeltaTime;
+		if (RepositionTimer >= RepositionInterval)
 		{
-			// Obstacle ahead — track time unable to orbit
-			OrbitForcedTimer += GeometryCheckInterval;
-
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Log, TEXT("[Kamikaze %s] Orbit geometry HIT: %s (%.0fcm ahead) ForcedTimer=%.1f"),
-					*GetName(),
-					Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
-					Hit.Distance, OrbitForcedTimer);
-			}
+			RepositionTimer = 0.0f;
+			RepositionSide = -RepositionSide;
 		}
-		else
-		{
-			OrbitForcedTimer = FMath::Max(OrbitForcedTimer - GeometryCheckInterval, 0.0f);
-		}
-
-		// Forced attack if can't maintain orbit for 1.5s
-		if (OrbitForcedTimer >= 1.5f && CurrentOrbitRadius <= MinOrbitSpaceThreshold)
-		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] FORCED ATTACK (orbit blocked %.1fs, radius=%.0f < threshold=%.0f)"),
-					*GetName(), OrbitForcedTimer, CurrentOrbitRadius, MinOrbitSpaceThreshold);
-			}
-			bOrbitForced = true;
-			BeginTelegraph(false);
-			return;
-		}
+		const float TargetOffset = RepositionSide * RepositionAngle * 0.5f;
+		RepositionOffsetDeg = FMath::FInterpConstantTo(RepositionOffsetDeg, TargetOffset, DeltaTime,
+			RepositionAngle / FMath::Max(RepositionTime, 0.1f));
 	}
 
-	// --- Move drone toward orbit position (with FPV jitter) ---
-	// Separate horizontal (orbit path) and vertical (altitude) control so that
-	// limited MaxFlySpeed doesn't starve height correction when the drone is far
-	// below the target altitude.
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	APawn* const Target = GetTargetPawn();
+
+	// The side it came in from becomes its side for good: set once, the first time it holds.
+	if (bCountTowardStrike && !bHasHoldBearing && Target)
 	{
-		const FVector MyLoc = GetActorLocation();
-		const float HeightError = TargetZ - MyLoc.Z;
-
-		// Horizontal direction: XY only (orbit path)
-		const FVector HorizTarget(TargetOrbitPos.X, TargetOrbitPos.Y, MyLoc.Z);
-		const FVector HorizDir = (HorizTarget - MyLoc).GetSafeNormal();
-
-		// Blend vertical correction proportionally to height error.
-		// At 0 error -> pure horizontal; at >=200cm error -> strong vertical pull.
-		const float VerticalUrgency = FMath::Clamp(FMath::Abs(HeightError) / 200.0f, 0.0f, 1.0f);
-		const float VerticalComponent = FMath::Sign(HeightError) * VerticalUrgency * 0.6f;
-
-		FVector MoveDir = (HorizDir + FVector(0.0f, 0.0f, VerticalComponent)).GetSafeNormal();
-
-		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-		const FVector Right = FVector::CrossProduct(MoveDir, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, MoveDir);
-		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector NoisyDir = (MoveDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
-
-		const float OrbitJitterSpeed = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
-		CMC->AddInputVector(NoisyDir);
-		CMC->MaxFlySpeed = EffectiveSpeed * (1.0f + OrbitJitterSpeed);
+		const FVector Away = GetActorLocation() - GetTargetFeet(Target);
+		HoldBearingDeg = FMath::RadiansToDegrees(FMath::Atan2(Away.Y, Away.X));
+		bHasHoldBearing = true;
 	}
 
-	// --- Height diagnostics (every 0.5s) ---
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+	// Recovery opens with a punch-out: full throttle up, keeping half the forward speed, the way a
+	// pilot climbs out of a missed dive before turning back.
+	if (!bCountTowardStrike && StateTimer < PunchOutTime)
 	{
-		// Per-instance timer using OrbitElapsedTime (already accumulates)
-		const float LogInterval = 0.5f;
-		const float PrevElapsed = OrbitElapsedTime; // will be incremented below
-		const float CurElapsed = PrevElapsed + DeltaTime;
-		if (FMath::FloorToInt(CurElapsed / LogInterval) != FMath::FloorToInt(PrevElapsed / LogInterval))
-		{
-			const FVector MyLoc = GetActorLocation();
-			const FVector PlayerPos = Player->GetActorLocation();
-			const float DroneZ = MyLoc.Z;
-			const float PlayerZ = PlayerPos.Z;
-			const float OrbitCenterZ = OrbitCenter.Z;
-			const float HeightOsc = OrbitHeightAmplitude * FMath::Sin((OrbitAngle + (AngularSpeed * 0.5f)) + OrbitHeightPhaseOffset);
-			const float ComputedTargetZ = OrbitCenterZ + OrbitBaseHeight + HeightOsc;
-			const float HeightErr = ComputedTargetZ - DroneZ;
-			const float ActualVelZ = GetVelocity().Z;
-			UCharacterMovementComponent* DbgCMC = GetCharacterMovement();
-			const float CMCMaxFly = DbgCMC ? DbgCMC->MaxFlySpeed : -1.f;
-			const float CMCMaxAccel = DbgCMC ? DbgCMC->MaxAcceleration : -1.f;
-			const FVector CMCVel = DbgCMC ? DbgCMC->Velocity : FVector::ZeroVector;
-			const FVector CMCAccel = DbgCMC ? DbgCMC->GetCurrentAcceleration() : FVector::ZeroVector;
-
-			UE_LOG(LogTemp, Warning,
-				TEXT("[KAM_HEIGHT %s] DroneZ=%.0f PlayerZ=%.0f OrbCenterZ=%.0f | TargetZ=%.0f (base=%.0f + osc=%.0f) | Err=%.0f | VelZ=%.0f CMCVelZ=%.0f | AccelZ=%.0f | MaxFly=%.0f MaxAccel=%.0f | Speed=%.0f"),
-				*GetName(), DroneZ, PlayerZ, OrbitCenterZ,
-				ComputedTargetZ, OrbitBaseHeight, HeightOsc, HeightErr,
-				ActualVelZ, CMCVel.Z, CMCAccel.Z,
-				CMCMaxFly, CMCMaxAccel, GetVelocity().Size());
-		}
-	}
-
-	// --- Token-based attack check ---
-	OrbitElapsedTime += DeltaTime;
-	if (OrbitElapsedTime >= MinOrbitTimeBeforeAttack)
-	{
-		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this);
-		if (Coordinator && Coordinator->RequestAttackToken(this, EAttackTokenType::Kamikaze))
-		{
-			bIsRetaliating = false;
-			// Snapshot Bezier start state
-			PositioningStartPos = GetActorLocation();
-			PositioningPrevPos = PositioningStartPos;
-			PositioningOrbitTangent = GetVelocity().GetSafeNormal();
-			PositioningP1 = PositioningStartPos + PositioningOrbitTangent * CruiseSpeed * PositioningDuration * 0.5f;
-			if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-			{
-				CMC->StopMovementImmediately();
-				CMC->SetMovementMode(MOVE_None);
-			}
-			SetState(EKamikazeState::Positioning);
-			return;
-		}
-	}
-
-	// --- Proximity attack check ---
-	const float DistToPlayer = FVector::Dist(GetActorLocation(), Player->GetActorLocation());
-	if (CurrentOrbitRadius <= ProximityAttackRadius)
-	{
-		ProximityTimer += DeltaTime;
-		if (ProximityTimer >= ProximityAttackDelay)
-		{
-			// Emergency attack — skip positioning, go straight to telegraph
-			BeginTelegraph(false);
-			return;
-		}
-	}
-	else
-	{
-		ProximityTimer = 0.0f;
-	}
-}
-
-void AKamikazeDroneNPC::UpdatePositioning(float DeltaTime)
-{
-	StateTimer += DeltaTime;
-	const float Alpha = FMath::Clamp(StateTimer / FMath::Max(PositioningDuration, 0.01f), 0.0f, 1.0f);
-
-	APawn* Player = GetTargetPlayerPawn();
-	if (!Player)
-	{
-		BeginTelegraph(bIsRetaliating);
+		const FVector Forward(CMC->Velocity.X * 0.5f, CMC->Velocity.Y * 0.5f, 0.0f);
+		const FVector Desired = Forward + FVector(0.0f, 0.0f, PunchOutSpeed);
+		FlyMove(StepVelocityToward(CMC->Velocity, Desired, StrikeAcceleration * DeltaTime), DeltaTime);
 		return;
 	}
 
-	// P3 (target) is dynamic — recalculate every frame from current camera direction
-	FVector P3 = Player->GetActorLocation();
-	// The approach point is offset along where the TARGET is looking, so it has to be that
-	// player's camera. Player 0's control rotation would aim the dive at the wrong teammate.
-	if (const APlayerController* PC = Cast<APlayerController>(Player->GetController()))
+	// Fly to the hold point and stop there. No target: brake to a hover where it is.
+	FVector Desired = FVector::ZeroVector;
+	bool bAtHoldPoint = false;
+	if (Target)
 	{
-		const FVector CamFwd = PC->GetControlRotation().Vector();
-		const FVector CamFwdXY = FVector(CamFwd.X, CamFwd.Y, 0.0f).GetSafeNormal();
-		if (!CamFwdXY.IsNearlyZero())
-		{
-			P3 += CamFwdXY * CurrentOrbitRadius;
-		}
+		const FVector HoldPoint = ComputeHoldPoint(Target);
+		// The braking curve uses a little less than the real acceleration, so the stop never overshoots.
+		Desired = ArriveVelocity(HoldPoint, HoldSpeed, HoldAcceleration * 0.8f);
+		// The point drifts and slides, so "there" is a generous radius around it.
+		bAtHoldPoint = FVector::DistSquared(GetActorLocation(), HoldPoint) <= FMath::Square(HoldArriveTolerance * 2.0f);
 	}
-	P3.Z = Player->GetActorLocation().Z + OrbitBaseHeight;
+	FlyMove(StepVelocityToward(CMC->Velocity, Desired, HoldAcceleration * DeltaTime), DeltaTime);
 
-	// Bezier control points:
-	// P0 = PositioningStartPos (fixed)
-	// P1 = PositioningP1 (fixed — orbit tangent pull)
-	// P2 = P3 - dir_to_P3 * pullback (smooth arrival into target)
-	// P3 = dynamic frontal point
-	const FVector P0 = PositioningStartPos;
-	const FVector P1 = PositioningP1;
-	const FVector DirToP3 = (P3 - P0).GetSafeNormal();
-	const float ArcLength = FVector::Dist(P0, P3);
-	const FVector P2 = P3 - DirToP3 * ArcLength * 0.15f;
-
-	// Cubic Bezier
-	const float t = Alpha;
-	const float u = 1.0f - t;
-	FVector BezierPos = u*u*u * P0 + 3.0f*u*u*t * P1 + 3.0f*u*t*t * P2 + t*t*t * P3;
-
-	// FPV jitter (ramps up with t)
-	{
-		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-		const FVector BezierTangent = (3.0f*u*u*(P1-P0) + 6.0f*u*t*(P2-P1) + 3.0f*t*t*(P3-P2)).GetSafeNormal();
-		const FVector Right = FVector::CrossProduct(BezierTangent, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, BezierTangent);
-		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const float JitterScale = t * AttackJitterAmplitude * CruiseSpeed * 0.3f;
-		BezierPos += (Right * JitterRight + Up * JitterUp) * JitterScale;
-	}
-
-	SetActorLocation(BezierPos, false, nullptr, ETeleportType::TeleportPhysics);
-
-	// Virtual velocity for orientation + FPVTilt
-	const FVector VirtualVelocity = (DeltaTime > SMALL_NUMBER)
-		? (BezierPos - PositioningPrevPos) / DeltaTime
-		: PositioningOrbitTangent * CruiseSpeed;
-	PositioningPrevPos = BezierPos;
-
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->Velocity = VirtualVelocity;
-	}
-
-	// Complete — begin telegraph from the frontal point
-	if (Alpha >= 1.0f)
-	{
-		BeginTelegraph(bIsRetaliating);
-	}
-}
-
-void AKamikazeDroneNPC::UpdateTelegraphing(float DeltaTime)
-{
-	StateTimer += DeltaTime;
-	const float RawAlpha = FMath::Clamp(StateTimer / FMath::Max(TelegraphDuration, 0.01f), 0.0f, 1.0f);
-
-	// --- Cubic Bezier: smooth curve from orbit tangent to attack direction ---
-	// Control points stored in BeginTelegraph (repurposed phantom variables):
-	//   P0 = TelegraphStartPos
-	//   P1 = TelegraphPhantomOrbitCenter  (orbit tangent pull)
-	//   P3 = TelegraphStartPos + TelegraphAttackDir * TelegraphPhantomOrbitAngle
-	//   P2 = P3 - TelegraphAttackDir * TelegraphPhantomOrbitSpeed
-	const FVector P0 = TelegraphStartPos;
-	const FVector P1 = TelegraphPhantomOrbitCenter;
-	const FVector P3 = TelegraphStartPos + TelegraphAttackDir * TelegraphPhantomOrbitAngle;
-	const FVector P2 = P3 - TelegraphAttackDir * TelegraphPhantomOrbitSpeed;
-
-	const float t = RawAlpha;
-	const float u = 1.0f - t;
-	FVector BezierPos = u*u*u * P0 + 3.0f*u*u*t * P1 + 3.0f*u*t*t * P2 + t*t*t * P3;
-
-	// --- FPV jitter during telegraph, ramping up with t² (quiet start, noisy end) ---
-	{
-		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-		const FVector BezierTangent = (3.0f*u*u*(P1-P0) + 6.0f*u*t*(P2-P1) + 3.0f*t*t*(P3-P2)).GetSafeNormal();
-		const FVector Right = FVector::CrossProduct(BezierTangent, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, BezierTangent);
-		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		// t*t ramp: silent at start, full jitter near end; scale by CruiseSpeed for world-space amplitude
-		const float JitterScale = t * t * AttackJitterAmplitude * CruiseSpeed;
-		BezierPos += (Right * JitterRight + Up * JitterUp) * JitterScale;
-	}
-
-	SetActorLocation(BezierPos, false, nullptr, ETeleportType::TeleportPhysics);
-
-	// --- Compute virtual velocity for FPVTilt and actor rotation ---
-	const FVector VirtualVelocity = (DeltaTime > SMALL_NUMBER)
-		? (BezierPos - TelegraphPrevPos) / DeltaTime
-		: TelegraphAttackDir * CruiseSpeed;
-	TelegraphPrevPos = BezierPos;
-
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->Velocity = VirtualVelocity;
-	}
-
-	// --- Per-frame position log ---
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Telegraph Bezier | t=%.2f Pos=(%.0f,%.0f,%.0f) Spd=%.0f"),
-			*GetName(), t,
-			BezierPos.X, BezierPos.Y, BezierPos.Z,
-			VirtualVelocity.Size());
-	}
-
-	// --- Commit when complete ---
-	if (RawAlpha >= 1.0f)
-	{
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Telegraph COMPLETE | Time=%.2fs Speed=%.0f -> CommitAttack"),
-				*GetName(), StateTimer, VirtualVelocity.Size());
-		}
-		CommitAttack();
-	}
-}
-
-void AKamikazeDroneNPC::UpdateAttacking(float DeltaTime)
-{
-	StateTimer += DeltaTime;
-
-	// DEBUG: EMF force diagnostics 10x/sec during attack
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-	{
-		static float NextLogTime = 0.f;
-		const float Now = GetWorld()->GetTimeSeconds();
-		if (Now >= NextLogTime)
-		{
-			NextLogTime = Now + 0.1f;
-			const FVector EMFForce = EMFVelocityModifier ? EMFVelocityModifier->GetExternalForce_Implementation() : FVector::ZeroVector;
-			const float Charge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.f;
-			UCharacterMovementComponent* DbgCMC = GetCharacterMovement();
-			UE_LOG(LogTemp, Warning, TEXT("[KAM_ATK %s] EMF Force=%s (%.0f) | Charge=%.1f | Vel=%.0f | MaxAccel=%.0f | Enabled=%d"),
-				*GetName(), *EMFForce.ToCompactString(), EMFForce.Size(), Charge,
-				GetVelocity().Size(),
-				DbgCMC ? DbgCMC->MaxAcceleration : -1.f,
-				EMFVelocityModifier ? (int32)EMFVelocityModifier->bEnabled : -1);
-		}
-	}
-
-	// Move toward attack target with limited steering
-	const FVector CurrentDir = GetVelocity().GetSafeNormal();
-	const FVector DesiredDir = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
-
-	// Limited turn rate during attack — steer toward target but DON'T overwrite AttackDirection
-	const FVector SteeringDir = FMath::VInterpNormalRotationTo(CurrentDir, DesiredDir, DeltaTime, AttackTurnRate * AttackTurnRateMultiplier);
-
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		// --- FPV jitter: simulate construction imperfections, wind, PID noise ---
-		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-		const FVector Right = FVector::CrossProduct(SteeringDir, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, SteeringDir);
-		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector JitterOffset = (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude;
-		const FVector NoisyDir = (SteeringDir + JitterOffset).GetSafeNormal();
-
-		const float SpeedNoise = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
-		CMC->MaxFlySpeed = AttackSpeed * (1.0f + SpeedNoise);
-		CMC->AddInputVector(NoisyDir);
-
-		// DEBUG: Jitter diagnostics 10x/sec
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-		{
-			static float NextJitterLogTime = 0.f;
-			if (T >= NextJitterLogTime)
-			{
-				NextJitterLogTime = T + 0.1f;
-				const FVector ActualVel = GetVelocity();
-				const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(ActualVel.GetSafeNormal(), SteeringDir)));
-				UE_LOG(LogTemp, Warning, TEXT("[KAM_JIT %s] JitR=%.2f JitU=%.2f | NoisyAngle=%.1f° | Speed=%.0f/%.0f | Accel=%.0f"),
-					*GetName(), JitterRight, JitterUp, AngleDeg,
-					ActualVel.Size(), CMC->MaxFlySpeed, CMC->MaxAcceleration);
-			}
-		}
-	}
-
-	// --- Check player collision (sphere sweep from previous to current frame) ---
-	if (CheckPlayerCollisionSweep())
+	if (!Target)
 	{
 		return;
 	}
 
-	// --- Under-floor safety: if drone clipped through the floor, explode immediately ---
-	// Flying mode CMC can fail to resolve floor collision at high speed (1200 cm/s),
-	// allowing the drone to end up below the surface. Trace upward to detect this.
+	// Recovery: back at the point, or out of time trying, means the miss is over.
+	if (!bCountTowardStrike)
 	{
-		FHitResult FloorHit;
-		FCollisionQueryParams FloorQuery;
-		FloorQuery.AddIgnoredActor(this);
-		const FVector Loc = GetActorLocation();
-		if (GetWorld()->LineTraceSingleByChannel(FloorHit, Loc, Loc + FVector(0.0f, 0.0f, CollisionRadius + 10.0f), ECC_WorldStatic, FloorQuery))
+		if (bAtHoldPoint || StateTimer >= RecoveryMaxTime)
 		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] UNDER FLOOR detected | DroneZ=%.0f FloorZ=%.0f"),
-					*GetName(), Loc.Z, FloorHit.Location.Z);
-			}
-			CurrentState = EKamikazeState::Dead;
-			TriggerCollisionExplosion();
-			KamikazeDie();
-			return;
+			SetState(EKamikazeState::Orbiting);
+		}
+		return;
+	}
+
+	// Shot while holding: the rest of the wait is skipped and the drone goes to the front of the
+	// queue. The schedule still spaces it from the strike before.
+	if (bIsRetaliating)
+	{
+		HoldTimer = FMath::Max(HoldTimer, HoldTimeBeforeStrike);
+	}
+
+	// The wait counts only at the point and with a clear line to the target, so a strike always
+	// comes from where the player could see it hanging.
+	if (bAtHoldPoint && HoldTimer < HoldTimeBeforeStrike)
+	{
+		FHitResult LOSHit;
+		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(KamikazeHoldLOS), false, this);
+		QueryParams.AddIgnoredActor(Target);
+		const FVector AimPoint = GetTargetFeet(Target) + FVector(0.0f, 0.0f, AimHeightAboveFeet);
+		if (!GetWorld()->LineTraceSingleByChannel(LOSHit, GetActorLocation(), AimPoint, ECC_Visibility, QueryParams))
+		{
+			HoldTimer += DeltaTime;
 		}
 	}
 
-	// --- Sphere sweep forward for geometry (floor/wall) collision ---
-	// Sweep (not raycast) so the drone's physical radius is accounted for —
-	// a thin ray can slip between floor triangles or miss near-grazing surfaces,
-	// while a sphere sweep reliably detects the floor the drone is about to hit.
-	// 100 cm lookahead (~1 frame at AttackSpeed) keeps the drone from detonating
-	// while still far from the surface.
+	if (HoldTimer >= HoldTimeBeforeStrike)
 	{
-		FHitResult Hit;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(this);
-		const FVector SweepStart = GetActorLocation();
-		const FVector SweepEnd = SweepStart + GetVelocity().GetSafeNormal() * 100.0f;
-		const FCollisionShape Sphere = FCollisionShape::MakeSphere(CollisionRadius);
-		if (GetWorld()->SweepSingleByChannel(Hit, SweepStart, SweepEnd, FQuat::Identity, ECC_WorldStatic, Sphere, QueryParams))
+		bProximityTimedOut = true;
+
+		// The schedule decides when: it knows when the previous strike at this player lands, and
+		// lets this one go only if it will land late enough for the player to deal with both. So it
+		// needs to know how long this strike takes: wind-up, swinging the nose round, getting up to
+		// speed, and the run itself. A target with no schedule behind it (a faction pawn) is struck
+		// as soon as the wait is over.
+		UKamikazeStrikeSubsystem* const Queue = GetStrikeQueue();
+		const bool bQueued = Queue && QueueTarget.Get() == Target;
+		if (!bStrikeGranted)
 		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Attacking GEOMETRY IMPACT | Dist=%.0f HitActor=%s"),
-					*GetName(), Hit.Distance, Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"));
-			}
+			// An arcing run is longer than the straight line: the curve holds a constant angle off
+			// the line of sight, which stretches the path by 1 / cos of that angle.
+			const float ArcStretch = 1.0f / FMath::Cos(FMath::Atan(0.5f * StrikeArc));
+			const float RunDistance = FVector::Dist(GetActorLocation(), ComputeStrikeAimPoint()) * ArcStretch;
+			const float FlightTime = WindUpTime + StrikeTurnOutWindow * 0.5f
+				+ 0.5f * StrikeSpeed / FMath::Max(StrikeAcceleration, 1.0f)
+				+ RunDistance / FMath::Max(StrikeSpeed, 1.0f);
+			bStrikeGranted = bQueued ? Queue->RequestStrike(this, Target, bIsRetaliating, FlightTime) : true;
+		}
+		if (bStrikeGranted && bSelfStrike)
+		{
+			BeginAttack(bIsRetaliating);
+		}
+	}
+}
 
-			// Direct attack: parent's DoExplosion only damages pawns (ECC_Pawn overlap, PlayerPawn as causer),
-			// so a building target would never receive the explosion. Notify it directly with the drone as causer
-			// so the building's TakeDamage override recognizes the impact and triggers Collapse.
-			if (AttackPattern == EAttackPattern::Direct && BuildingTarget && Hit.GetActor() == BuildingTarget)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[DRONE_DIRECT] %s impact on building target %s — calling TakeDamage with self as Causer"),
-					*GetName(), *BuildingTarget->GetName());
+void AKamikazeDroneNPC::UpdateStrike(float DeltaTime)
+{
+	StateTimer += DeltaTime;
 
+	UCharacterMovementComponent* CMC = GetCharacterMovement();
+	if (!CMC)
+	{
+		return;
+	}
+
+	const bool bDirect = (AttackPattern == EAttackPattern::Direct && BuildingTarget);
+
+	// Live aim every frame, never switched off before impact.
+	AttackTargetPosition = ComputeStrikeAimPoint();
+
+	FVector ToAim = AttackTargetPosition - GetActorLocation();
+
+	// Arc: steer at a point pushed sideways by a share of the remaining distance. The push shrinks
+	// with the distance, so the path is a curve that closes onto the target instead of missing it;
+	// the drone comes in from the side rather than down the line of sight. Straight when 0.
+	if (!bDirect && StrikeArc > KINDA_SMALL_NUMBER)
+	{
+		const FVector Side = FVector::CrossProduct(ToAim, FVector::UpVector).GetSafeNormal();
+		ToAim += Side * (StrikeArcSide * StrikeArc * 0.5f * ToAim.Size());
+	}
+	const FVector DesiredDir = ToAim.GetSafeNormal();
+
+	// Wind-up: back off and up for a moment, nose dipping (the tilt reads the braking and the push),
+	// then the run. The pilot lining up the dive, and the player's cue that this one goes now.
+	const bool bWindingUp = !bDirect && StateTimer < WindUpTime;
+	if (bWindingUp)
+	{
+		const FVector Back(-DesiredDir.X, -DesiredDir.Y, 0.0f);
+		const FVector WindUpDir = (Back.GetSafeNormal() * 0.6f + FVector(0.0f, 0.0f, 0.8f)).GetSafeNormal();
+		const float WindUpSpeed = 1.5f * WindUpDistance / FMath::Max(WindUpTime, 0.05f);
+		FlyMove(StepVelocityToward(CMC->Velocity, WindUpDir * WindUpSpeed, StrikeAcceleration * DeltaTime), DeltaTime);
+		CheckContact();
+		return;
+	}
+
+	const float Speed = CMC->Velocity.Size();
+	const FVector CurrentDir = (Speed > 1.0f) ? CMC->Velocity / Speed : DesiredDir;
+
+	// Constant top speed and a turn limited by sideways grip, like a real quad: StrikeTurnRate at full
+	// speed, faster when slow (so it can snap its nose round out of the wind-up), never above 720.
+	// The path is a readable curve, which is what makes it possible to track with the crosshair.
+	const float TurnRate = FMath::Min(720.0f, StrikeTurnRate * StrikeSpeed / FMath::Max(Speed, 100.0f));
+	const FVector NewDir = FMath::VInterpNormalRotationTo(CurrentDir, DesiredDir, DeltaTime, TurnRate);
+
+	// Nose first, then throttle. Coming out of the wind-up the drone points away from the target;
+	// until the nose is round, the speed is held low, which is also what keeps the turn fast. Only in
+	// that opening moment: later in the run a drone that has lost the target overshoots and misses,
+	// it does not brake to follow.
+	const bool bTurningOut = !bDirect && StateTimer < WindUpTime + StrikeTurnOutWindow;
+	const bool bNoseRound = FVector::DotProduct(NewDir, DesiredDir) >= 0.7f;
+	const float SpeedCap = (bTurningOut && !bNoseRound) ? FMath::Min(StrikeSpeed, 300.0f) : StrikeSpeed;
+	const float NewSpeed = FMath::FInterpConstantTo(Speed, SpeedCap, DeltaTime, StrikeAcceleration);
+	const FHitResult Hit = FlyMove(NewDir * NewSpeed, DeltaTime);
+
+	if (CheckContact())
+	{
+		return;
+	}
+
+	if (bDirect)
+	{
+		// A turret's drone flies into its building: whatever it touches ends the run, and the building
+		// is told directly, because DoExplosion only damages pawns.
+		if (Hit.IsValidBlockingHit())
+		{
+			if (Hit.GetActor() == BuildingTarget)
+			{
 				FDamageEvent DmgEvent;
 				DmgEvent.DamageTypeClass = UDamageType::StaticClass();
 				BuildingTarget->TakeDamage(99999.0f, DmgEvent, GetController(), this);
 			}
-
 			CurrentState = EKamikazeState::Dead;
 			TriggerCollisionExplosion();
 			KamikazeDie();
-			return;
 		}
-	}
-
-	// --- Check if we've passed the target ---
-	// Velocity is set toward target in CommitAttack, so dot product with velocity is correct from frame 1
-	const FVector ToTarget = AttackTargetPosition - GetActorLocation();
-	const FVector TravelDir = GetVelocity().GetSafeNormal();
-	const float DotToTarget = FVector::DotProduct(ToTarget, TravelDir);
-	if (DotToTarget < 0.0f)
-	{
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PASSED TARGET | Dot=%.0f DistToTarget=%.0f -> PostAttack"),
-				*GetName(), DotToTarget, ToTarget.Size());
-		}
-		// Use current velocity direction for PostAttack inertia
-		AttackDirection = TravelDir;
-		SetState(EKamikazeState::PostAttack);
-	}
-}
-
-void AKamikazeDroneNPC::UpdatePostAttack(float DeltaTime)
-{
-	StateTimer += DeltaTime;
-
-	// Continue at attack speed along current direction (with jitter)
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-		const FVector Right = FVector::CrossProduct(AttackDirection, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, AttackDirection);
-		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector JitterOffset = (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude;
-		const FVector NoisyDir = (AttackDirection + JitterOffset).GetSafeNormal();
-
-		const float SpeedNoise = AttackSpeedJitter * FMath::Sin(T * 13.1f + 2.0f);
-		CMC->MaxFlySpeed = AttackSpeed * (1.0f + SpeedNoise);
-		CMC->AddInputVector(NoisyDir);
-	}
-
-	// --- Check player collision during post-attack inertia too ---
-	if (CheckPlayerCollisionSweep())
-	{
 		return;
 	}
 
-	// --- Under-floor safety (same as Attacking) ---
+	if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
 	{
-		FHitResult FloorHit;
-		FCollisionQueryParams FloorQuery;
-		FloorQuery.AddIgnoredActor(this);
-		const FVector Loc = GetActorLocation();
-		if (GetWorld()->LineTraceSingleByChannel(FloorHit, Loc, Loc + FVector(0.0f, 0.0f, CollisionRadius + 10.0f), ECC_WorldStatic, FloorQuery))
-		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack UNDER FLOOR detected | DroneZ=%.0f FloorZ=%.0f"),
-					*GetName(), Loc.Z, FloorHit.Location.Z);
-			}
-			CurrentState = EKamikazeState::Dead;
-			TriggerCollisionExplosion();
-			KamikazeDie();
-			return;
-		}
+		DrawDebugSphere(GetWorld(), AttackTargetPosition, 25.0f, 8, FColor::Red, false, 0.0f);
 	}
 
-	// Grace period: skip geometry sweep for first 0.15s of PostAttack.
-	// Without this, the drone arrives at the target point (where the player was), the floor is
-	// just beneath the diving trajectory, and the sweep immediately fires -> premature explosion.
-	if (StateTimer >= 0.15f)
+	// Miss: the aim point is behind the drone (it flew past, or the target moved where the turn rate
+	// could not follow), or the run took too long. Punch out and come back to the hold. Judged only
+	// once the drone is actually running, not while it is still turning out of the wind-up.
+	const bool bRunning = !bTurningOut && NewSpeed >= StrikeSpeed * 0.8f;
+	const bool bAimBehind = bRunning && FVector::DotProduct(AttackTargetPosition - GetActorLocation(), NewDir) < 0.0f;
+	if (bAimBehind || StateTimer >= StrikeMaxTime + WindUpTime)
 	{
-		// Sphere sweep forward for imminent geometry impact (100cm ahead)
-		FHitResult Hit;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(this);
-
-		const FVector SweepStart = GetActorLocation();
-		const FVector SweepEnd = SweepStart + AttackDirection * 100.0f;
-		const FCollisionShape Sphere = FCollisionShape::MakeSphere(CollisionRadius);
-
-		if (GetWorld()->SweepSingleByChannel(Hit, SweepStart, SweepEnd, FQuat::Identity, ECC_WorldStatic, Sphere, QueryParams))
-		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack GEOMETRY IMPACT | Actor=%s Comp=%s Dist=%.0f HitLoc=(%.0f,%.0f,%.0f) Dir=(%.2f,%.2f,%.2f)"),
-					*GetName(),
-					Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("null"),
-					Hit.GetComponent() ? *Hit.GetComponent()->GetName() : TEXT("null"),
-					Hit.Distance,
-					Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
-					AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
-			}
-			// Physical impact into wall/floor — FULL explosion, same as hitting the player
-			// "Crash" (reduced) is only for being shot down in the air
-			CurrentState = EKamikazeState::Dead;
-			TriggerCollisionExplosion();
-			KamikazeDie();
-			return;
-		}
-
-#if ENABLE_DRAW_DEBUG
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
-		{
-			// Draw the forward sweep (orange = no hit)
-			DrawDebugLine(GetWorld(), SweepStart, SweepEnd, FColor::Orange, false, 0.0f, 0, 1.5f);
-		}
-#endif
-	}
-
-	// After inertia time: roll crash chance or recover
-	if (StateTimer >= PostAttackInertiaTime)
-	{
-		// Calculate crash chance
-		const float Speed = GetVelocity().Size();
-		const float SpeedFactor = FMath::Clamp((Speed - CruiseSpeed) / AttackSpeed, 0.0f, 1.0f) * SpeedCrashFactor;
-
-		float PitchAngle = 0.0f;
-		if (FPVTilt)
-		{
-			// Use the current mesh pitch as proxy
-			PitchAngle = DroneMesh ? FMath::Abs(DroneMesh->GetRelativeRotation().Pitch) : 0.0f;
-		}
-		const float AngleFactor = (PitchAngle / 90.0f) * AngleCrashFactor;
-
-		const float CrashChance = BaseCrashChance + SpeedFactor + AngleFactor;
-
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack CRASH ROLL | Chance=%.2f (base=%.2f + speed=%.2f + angle=%.2f) Speed=%.0f Pitch=%.0f"),
-				*GetName(), CrashChance, BaseCrashChance, SpeedFactor, AngleFactor, Speed, PitchAngle);
-		}
-
-		if (InstanceRandom.FRand() < CrashChance)
-		{
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] PostAttack RANDOM CRASH (rolled under %.2f)"), *GetName(), CrashChance);
-			}
-			// Random crash — lost control — set Dead before KamikazeDie to prevent double dispatch
-			CurrentState = EKamikazeState::Dead;
-			TriggerCrashExplosion();
-			KamikazeDie();
-			return;
-		}
-
-		// Recovery
 		SetState(EKamikazeState::Recovery);
-	}
-}
-
-void AKamikazeDroneNPC::UpdateRecovery(float DeltaTime)
-{
-	StateTimer += DeltaTime;
-
-	// Decelerate and turn back toward orbit
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		// First frame of Recovery: restore capsule blocking pawns (was Overlap during attack)
-		if (StateTimer <= DeltaTime + SMALL_NUMBER)
-		{
-			GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-		}
-
-		// Restore normal acceleration after attack's boosted value
-		CMC->MaxAcceleration = 2048.0f;
-
-		// Gradually reduce speed back to cruise
-		const float TargetSpeed = FMath::FInterpTo(CMC->MaxFlySpeed, CruiseSpeed, DeltaTime, 3.0f);
-		CMC->MaxFlySpeed = TargetSpeed;
-
-		// Turn toward orbit altitude above player (not just player position)
-		if (APawn* Player = GetTargetPlayerPawn())
-		{
-			const FVector MyLoc = GetActorLocation();
-			// Recovery target: player XY but at orbit altitude
-			const FVector PlayerPos = Player->GetActorLocation();
-			const FVector RecoveryTarget(PlayerPos.X, PlayerPos.Y, PlayerPos.Z + OrbitBaseHeight);
-			const float HeightError = RecoveryTarget.Z - MyLoc.Z;
-
-			// Horizontal: toward player
-			const FVector HorizTarget(PlayerPos.X, PlayerPos.Y, MyLoc.Z);
-			const FVector HorizDir = (HorizTarget - MyLoc).GetSafeNormal();
-
-			// Strong vertical correction during recovery — drone must regain altitude
-			const float VerticalUrgency = FMath::Clamp(FMath::Abs(HeightError) / 150.0f, 0.0f, 1.0f);
-			const float VerticalComponent = FMath::Sign(HeightError) * VerticalUrgency * 0.8f;
-
-			const FVector RecoveryDir = (HorizDir + FVector(0.0f, 0.0f, VerticalComponent)).GetSafeNormal();
-
-			const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-			const FVector Right = FVector::CrossProduct(RecoveryDir, FVector::UpVector).GetSafeNormal();
-			const FVector Up = FVector::CrossProduct(Right, RecoveryDir);
-			const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-			const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-			const FVector NoisyDir = (RecoveryDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
-			CMC->AddInputVector(NoisyDir);
-
-			// --- Recovery height diagnostics (every 0.5s) ---
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				const float LogInterval = 0.5f;
-				if (FMath::FloorToInt(StateTimer / LogInterval) != FMath::FloorToInt((StateTimer - DeltaTime) / LogInterval))
-				{
-					UE_LOG(LogTemp, Warning,
-						TEXT("[KAM_RECOVERY %s] t=%.1f | DroneZ=%.0f TargetZ=%.0f Err=%.0f | VelZ=%.0f Speed=%.0f MaxFly=%.0f | VertUrg=%.2f VertComp=%.2f | InputDir=(%.2f,%.2f,%.2f)"),
-						*GetName(), StateTimer, MyLoc.Z, RecoveryTarget.Z, HeightError,
-						GetVelocity().Z, GetVelocity().Size(), CMC->MaxFlySpeed,
-						VerticalUrgency, VerticalComponent,
-						NoisyDir.X, NoisyDir.Y, NoisyDir.Z);
-				}
-			}
-		}
-	}
-
-	// Recovery takes ~2 seconds, then return to orbit
-	if (StateTimer >= 2.0f)
-	{
-		// Reset orbit and strafe
-		CurrentOrbitRadius = OrbitStartRadius;
-		OrbitForcedTimer = 0.0f;
-		bOrbitForced = false;
-		bIsRetaliating = false;
-		bIsStrafing = false;
-		ProximityTimer = 0.0f;
-		StrafeCumulativePhase = 0.0f;
-		OrbitEvaluationTimer = 0.0f;
-		LastBlockedRayCount = 0;
-
-		// Recalculate orbit angle based on current position relative to orbit center
-		const FVector Offset = GetActorLocation() - OrbitCenter;
-		OrbitAngle = FMath::Atan2(Offset.Y, Offset.X);
-		OrbitCumulativeAngle = 0.0f;
-
-		SetState(EKamikazeState::Orbiting);
 	}
 }
 
@@ -1425,28 +875,24 @@ void AKamikazeDroneNPC::InitiateParry(AController* AttackerController)
 		EndKnockbackStun();
 	}
 
-	// Stop CMC entirely — we drive position directly via SetActorLocation
+	// Stop CMC entirely — we drive position directly via swept MoveUpdatedComponent
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->StopMovementImmediately();
 		CMC->DisableMovement();  // MOVE_None — CMC won't interfere
 	}
 
-	// Disable collision with players during parry flight. All of them: a parried drone flies
-	// through the room and must not shove whoever it passes, not just its own target.
-	TArray<APawn*> ParryFlightPlayers;
-	CoopPlayers::GetAll(GetWorld(), ParryFlightPlayers);
-	for (APawn* PlayerPawn : ParryFlightPlayers)
-	{
-		MoveIgnoreActorAdd(PlayerPawn);
-	}
+	// Collision policy is uniform: world always blocks, pawns detected by sweeps/overlaps.
+	// No per-state response mutations — the parried drone flies with the same rules.
 
 	// Get player look direction
 	FVector PlayerLoc = FVector::ZeroVector;
 	FVector PlayerForward = FVector::ForwardVector;
+	APawn* AttackerPawn = nullptr;
 	if (AttackerController)
 	{
-		if (APawn* AttackerPawn = AttackerController->GetPawn())
+		AttackerPawn = AttackerController->GetPawn();
+		if (AttackerPawn)
 		{
 			PlayerLoc = AttackerPawn->GetActorLocation();
 			PlayerForward = AttackerPawn->GetControlRotation().Vector();
@@ -1454,7 +900,7 @@ void AKamikazeDroneNPC::InitiateParry(AController* AttackerController)
 	}
 
 	// Find redirect target in cone
-	ParryTarget = FindParryTarget(PlayerLoc, PlayerForward);
+	ParryTarget = FindParryTarget(AttackerPawn, PlayerLoc, PlayerForward);
 
 	if (ParryTarget.IsValid())
 	{
@@ -1488,12 +934,6 @@ void AKamikazeDroneNPC::InitiateParry(AController* AttackerController)
 	ParrySpiralAngle = 0.0f;
 	ParryCurrentRadius = ParrySpiralStartRadius;
 
-	// Disable capsule collision — we handle collision manually via sweeps
-	// This prevents CMC from blocking our direct position updates
-	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
-	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Overlap);
-	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Overlap);
-
 	// Reset PreviousFrameLocation so the sweep in first UpdateParried frame
 	// doesn't trace from some old position and instantly hit geometry
 	PreviousFrameLocation = GetActorLocation();
@@ -1501,10 +941,10 @@ void AKamikazeDroneNPC::InitiateParry(AController* AttackerController)
 	SetState(EKamikazeState::Parried);
 }
 
-AShooterNPC* AKamikazeDroneNPC::FindParryTarget(const FVector& PlayerLocation, const FVector& PlayerForward) const
+APawn* AKamikazeDroneNPC::FindParryTarget(const APawn* AttackerPawn, const FVector& PlayerLocation, const FVector& PlayerForward) const
 {
 	const float CosHalfAngle = FMath::Cos(FMath::DegreesToRadians(ParryConeLookHalfAngle));
-	AShooterNPC* BestTarget = nullptr;
+	APawn* BestTarget = nullptr;
 	float BestDistSq = ParryConeLookDistance * ParryConeLookDistance;
 
 	// Overlap sphere to find candidates
@@ -1512,27 +952,34 @@ AShooterNPC* AKamikazeDroneNPC::FindParryTarget(const FVector& PlayerLocation, c
 	FCollisionShape Sphere = FCollisionShape::MakeSphere(ParryConeLookDistance);
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
-	// The cone search looks for an NPC to redirect the drone into, so every player is noise here,
-	// not just the one who parried.
-	TArray<APawn*> IgnoredPlayers;
-	CoopPlayers::GetAll(GetWorld(), IgnoredPlayers);
-	for (APawn* PlayerPawn : IgnoredPlayers)
-	{
-		QueryParams.AddIgnoredActor(PlayerPawn);
-	}
 
 	GetWorld()->OverlapMultiByChannel(Overlaps, PlayerLocation, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
-		AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
-		if (!NPC || NPC == this || NPC->IsDead())
+		APawn* Candidate = Cast<APawn>(Overlap.GetActor());
+		if (!Candidate || Candidate == this)
+		{
+			continue;
+		}
+		if (AShooterNPC* CandidateNPC = Cast<AShooterNPC>(Candidate))
+		{
+			if (CandidateNPC->IsDead())
+			{
+				continue;
+			}
+		}
+
+		// The parried drone is a weapon in the parrier's hands: it redirects into the
+		// parrier's enemies. Same-side pawns (including other players) are not candidates.
+		const AActor* HostilityRef = AttackerPawn ? static_cast<const AActor*>(AttackerPawn) : static_cast<const AActor*>(this);
+		if (!PolarityTeams::AreHostile(HostilityRef, Candidate))
 		{
 			continue;
 		}
 
-		// Cone check from player position
-		const FVector ToTarget = NPC->GetActorLocation() - PlayerLocation;
+		// Cone check from parrier position
+		const FVector ToTarget = Candidate->GetActorLocation() - PlayerLocation;
 		const float DistSq = ToTarget.SizeSquared();
 		const FVector DirToTarget = ToTarget.GetSafeNormal();
 		const float CosAngle = FVector::DotProduct(PlayerForward, DirToTarget);
@@ -1543,12 +990,12 @@ AShooterNPC* AKamikazeDroneNPC::FindParryTarget(const FVector& PlayerLocation, c
 			FHitResult LOSHit;
 			FCollisionQueryParams LOSParams;
 			LOSParams.AddIgnoredActor(this);
-			LOSParams.AddIgnoredActor(NPC);
+			LOSParams.AddIgnoredActor(Candidate);
 			const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
-				LOSHit, PlayerLocation, NPC->GetActorLocation(), ECC_Visibility, LOSParams);
+				LOSHit, PlayerLocation, Candidate->GetActorLocation(), ECC_Visibility, LOSParams);
 			if (!bBlocked)
 			{
-				BestTarget = NPC;
+				BestTarget = Candidate;
 				BestDistSq = DistSq;
 			}
 		}
@@ -1572,10 +1019,11 @@ void AKamikazeDroneNPC::UpdateParried(float DeltaTime)
 	// If we have a target, update direction toward it (homing)
 	if (ParryTarget.IsValid())
 	{
-		AShooterNPC* TargetNPC = Cast<AShooterNPC>(ParryTarget.Get());
-		if (TargetNPC && !TargetNPC->IsDead())
+		APawn* TargetPawn = Cast<APawn>(ParryTarget.Get());
+		const bool bTargetAlive = TargetPawn && !(Cast<AShooterNPC>(TargetPawn) && Cast<AShooterNPC>(TargetPawn)->IsDead());
+		if (bTargetAlive)
 		{
-			const FVector ToTarget = TargetNPC->GetActorLocation() - GetActorLocation();
+			const FVector ToTarget = TargetPawn->GetActorLocation() - GetActorLocation();
 			const float DistToTarget = ToTarget.Size();
 
 			if (DistToTarget > 10.0f)
@@ -1620,58 +1068,49 @@ void AKamikazeDroneNPC::UpdateParried(float DeltaTime)
 		GravityComponent = FVector(0.0f, 0.0f, -ParryGravityBias * DeltaTime);
 	}
 
-	// Calculate new position
+	// --- Swept move: one mover for every state, world always blocks ---
 	const FVector OldLocation = GetActorLocation();
-	const FVector ForwardMove = ParryDirection * ParrySpiralForwardSpeed * DeltaTime;
-	const FVector CenterLineTarget = OldLocation + ForwardMove + GravityComponent;
-	const FVector FinalTarget = CenterLineTarget + SpiralOffset;
+	const FVector MoveDelta = (ParryDirection * ParrySpiralForwardSpeed + GravityComponent / FMath::Max(DeltaTime, KINDA_SMALL_NUMBER)) * DeltaTime + SpiralOffset;
+	const FRotator KeepRot = GetActorRotation();
 
-	// --- Geometry collision check BEFORE moving (sweep from old to new) ---
+	FHitResult MoveHit;
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		FHitResult Hit;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(this);
-		if (GetWorld()->SweepSingleByChannel(Hit, OldLocation, FinalTarget, FQuat::Identity,
-			ECC_WorldStatic, FCollisionShape::MakeSphere(CollisionRadius * 0.5f), QueryParams))
-		{
-			// Move to impact point, then explode
-			SetActorLocation(Hit.Location, false);
-			DoExplosion(ParryExplosionRadius, ParryExplosionDamage, UDamageType_KamikazeExplosion::StaticClass(), true);
-			KamikazeDie();
-			return;
-		}
+		CMC->MoveUpdatedComponent(MoveDelta, KeepRot, true, &MoveHit);
+		CMC->Velocity = MoveDelta / FMath::Max(DeltaTime, KINDA_SMALL_NUMBER);
+	}
+	else
+	{
+		SetActorLocation(GetActorLocation() + MoveDelta, true);
 	}
 
-	// --- NPC collision check at target position ---
+	// Blocked by geometry → explode at the impact point
+	if (MoveHit.bBlockingHit)
+	{
+		DoExplosion(ParryExplosionRadius, ParryExplosionDamage, UDamageType_KamikazeExplosion::StaticClass(), true);
+		KamikazeDie();
+		return;
+	}
+
+	// --- Hostile pawn contact at the new position ---
 	{
 		TArray<FOverlapResult> Overlaps;
 		FCollisionShape Sphere = FCollisionShape::MakeSphere(CollisionRadius + 20.0f);
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(this);
 
-		GetWorld()->OverlapMultiByChannel(Overlaps, FinalTarget, FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
+		GetWorld()->OverlapMultiByChannel(Overlaps, GetActorLocation(), FQuat::Identity, ECC_Pawn, Sphere, QueryParams);
 		for (const FOverlapResult& Overlap : Overlaps)
 		{
-			AShooterNPC* NPC = Cast<AShooterNPC>(Overlap.GetActor());
-			if (NPC && !NPC->IsDead() && NPC != this)
+			APawn* OverlapPawn = Cast<APawn>(Overlap.GetActor());
+			if (OverlapPawn && PolarityTeams::AreHostile(this, OverlapPawn))
 			{
-				SetActorLocation(FinalTarget, false);
 				DoExplosion(ParryExplosionRadius, ParryExplosionDamage, UDamageType_KamikazeExplosion::StaticClass(), true);
 				KamikazeDie();
 				return;
 			}
 		}
 	}
-
-	// --- Move drone (no sweep — we already checked collisions above) ---
-	SetActorLocation(FinalTarget, false);
-
-	// Store velocity for debug/orientation
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->Velocity = (FinalTarget - OldLocation) / FMath::Max(DeltaTime, KINDA_SMALL_NUMBER);
-	}
-
 
 	// Spin the mesh for visual tumble effect
 	if (DroneMesh)
@@ -1681,420 +1120,63 @@ void AKamikazeDroneNPC::UpdateParried(float DeltaTime)
 	}
 }
 
-// ==================== Orbit Quality Evaluation ====================
-
-void AKamikazeDroneNPC::EvaluateOrbitQuality()
+void AKamikazeDroneNPC::BeginAttack(bool bRetaliation)
 {
-	APawn* Player = GetTargetPlayerPawn();
-	if (!Player) return;
-
-	const FVector Center = Player->GetActorLocation();
-	const float Radius = CurrentOrbitRadius;
-	int32 BlockedCount = 0;
-
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-	QueryParams.AddIgnoredActor(Player);
-
-	for (int32 i = 0; i < 8; ++i)
-	{
-		const float Angle = (UE_TWO_PI / 8.0f) * i;
-		const FVector SamplePos = Center + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0f) * Radius;
-
-		FHitResult Hit;
-		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Center, SamplePos, ECC_WorldStatic, QueryParams);
-
-		if (bHit)
-		{
-			++BlockedCount;
-		}
-
-		// Debug: draw evaluation rays
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
-		{
-			DrawDebugLine(GetWorld(), Center, bHit ? Hit.ImpactPoint : SamplePos,
-				bHit ? FColor::Red : FColor::Green, false, 1.0f, 0, 1.0f);
-		}
-	}
-
-	LastBlockedRayCount = BlockedCount;
-
-	if (!bIsStrafing && BlockedCount >= BadOrbitThreshold)
-	{
-		// Switch to strafe
-		bIsStrafing = true;
-		StrafePhase = 0.0f;
-		StrafeCumulativePhase = 0.0f;
-
-		// Request strafe slot from coordinator
-		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this);
-		if (Coordinator)
-		{
-			Coordinator->RequestStrafeSlot(this, CurrentOrbitRadius, StrafeCenter, StrafeAxis);
-		}
-		else
-		{
-			// Fallback: strafe perpendicular to player direction at current position
-			const FVector ToPlayer = FVector(Player->GetActorLocation().X - GetActorLocation().X,
-				Player->GetActorLocation().Y - GetActorLocation().Y, 0.0f).GetSafeNormal();
-			StrafeAxis = FVector::CrossProduct(FVector::UpVector, ToPlayer).GetSafeNormal();
-			StrafeCenter = GetActorLocation();
-		}
-
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Orbit BAD (%d/8 blocked) → STRAFE"), *GetName(), BlockedCount);
-		}
-	}
-}
-
-// ==================== Strafe Movement ====================
-
-void AKamikazeDroneNPC::UpdateStrafing(float DeltaTime)
-{
-	APawn* Player = GetTargetPlayerPawn();
-	if (!Player) return;
-
-	OrbitElapsedTime += DeltaTime;
-
-	// --- Evaluate orbit quality (once per second) ---
-	OrbitEvaluationTimer += DeltaTime;
-	if (OrbitEvaluationTimer >= 1.0f)
-	{
-		OrbitEvaluationTimer = 0.0f;
-		EvaluateOrbitQuality();
-
-		// Re-request strafe slot (coordinator redistributes)
-		if (bIsStrafing)
-		{
-			AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this);
-			if (Coordinator)
-			{
-				Coordinator->RequestStrafeSlot(this, CurrentOrbitRadius, StrafeCenter, StrafeAxis);
-			}
-		}
-	}
-
-	// --- Transition back to orbit when orbit clears ---
-	if (LastBlockedRayCount < BadOrbitThreshold)
-	{
-		const float PrevSin = FMath::Sin(StrafePhase);
-		StrafePhase += StrafeFrequency * DeltaTime;
-		const float CurrSin = FMath::Sin(StrafePhase);
-		if (PrevSin * CurrSin <= 0.0f) // zero crossing
-		{
-			bIsStrafing = false;
-			const FVector Offset = GetActorLocation() - OrbitCenter;
-			OrbitAngle = FMath::Atan2(Offset.Y, Offset.X);
-			OrbitCumulativeAngle = 0.0f;
-
-			// Release strafe slot
-			if (AAICombatCoordinator* Coord = AAICombatCoordinator::GetCoordinator(this))
-			{
-				Coord->ReleaseStrafeSlot(this);
-			}
-
-			if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] Orbit CLEAR (%d/8 blocked) → ORBIT"), *GetName(), LastBlockedRayCount);
-			}
-			return;
-		}
-	}
-	else
-	{
-		StrafePhase += StrafeFrequency * DeltaTime;
-	}
-
-	// --- Lap counting: full sin period = 2PI = one "lap" ---
-	StrafeCumulativePhase += StrafeFrequency * DeltaTime;
-	if (StrafeCumulativePhase >= UE_TWO_PI)
-	{
-		StrafeCumulativePhase -= UE_TWO_PI;
-		CurrentOrbitRadius = FMath::Max(CurrentOrbitRadius - OrbitShrinkPerLap, OrbitMinRadius);
-	}
-
-	// --- Compute strafe position ---
-	const float T = GetWorld()->GetTimeSeconds() + SpeedNoiseTimeOffset;
-	const float Noise = SpeedNoiseAmplitude * FMath::Sin(T * 3.7f);
-	const float LateralOffset = StrafeAmplitude * FMath::Sin(StrafePhase + Noise);
-
-	const FVector PlayerPos = Player->GetActorLocation();
-	const FVector ToCenter = StrafeCenter - PlayerPos;
-	const FVector CenterDir = FVector(ToCenter.X, ToCenter.Y, 0.0f).GetSafeNormal();
-	const FVector BasePos = PlayerPos + CenterDir * CurrentOrbitRadius;
-	const FVector TargetPosXY = BasePos + StrafeAxis * LateralOffset;
-
-	// Height: same logic as orbit
-	const float HeightOsc = OrbitHeightAmplitude * FMath::Sin(StrafePhase + OrbitHeightPhaseOffset);
-	const float TargetZ = PlayerPos.Z + OrbitBaseHeight + HeightOsc;
-	const FVector TargetPos(TargetPosXY.X, TargetPosXY.Y, TargetZ);
-
-	// --- Move toward target (separate horizontal/vertical control) ---
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		const FVector MyLoc = GetActorLocation();
-		const float HeightError = TargetZ - MyLoc.Z;
-
-		const FVector HorizTarget(TargetPos.X, TargetPos.Y, MyLoc.Z);
-		const FVector HorizDir = (HorizTarget - MyLoc).GetSafeNormal();
-
-		const float VerticalUrgency = FMath::Clamp(FMath::Abs(HeightError) / 200.0f, 0.0f, 1.0f);
-		const float VerticalComponent = FMath::Sign(HeightError) * VerticalUrgency * 0.6f;
-
-		FVector MoveDir = (HorizDir + FVector(0.0f, 0.0f, VerticalComponent)).GetSafeNormal();
-
-		// FPV jitter (reuse existing pattern)
-		const FVector Right = FVector::CrossProduct(MoveDir, FVector::UpVector).GetSafeNormal();
-		const FVector Up = FVector::CrossProduct(Right, MoveDir);
-		const float JitterRight = FMath::Sin(T * 11.3f) * 0.6f + FMath::Sin(T * 7.1f) * 0.4f;
-		const float JitterUp    = FMath::Sin(T * 9.7f) * 0.6f + FMath::Sin(T * 5.3f) * 0.4f;
-		const FVector NoisyDir = (MoveDir + (Right * JitterRight + Up * JitterUp) * AttackJitterAmplitude).GetSafeNormal();
-
-		const float SpeedNoise = SpeedNoiseAmplitude * FMath::Sin(T * 2.7f);
-		CMC->MaxFlySpeed = CruiseSpeed * (1.0f + SpeedNoise);
-		CMC->AddInputVector(NoisyDir);
-	}
-
-	// Debug: draw strafe info
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 2)
-	{
-		DrawDebugSphere(GetWorld(), StrafeCenter, 20.0f, 6, FColor::Orange, false, 0.0f);
-		DrawDebugLine(GetWorld(), StrafeCenter - StrafeAxis * StrafeAmplitude,
-			StrafeCenter + StrafeAxis * StrafeAmplitude, FColor::Orange, false, 0.0f, 0, 2.0f);
-		DrawDebugSphere(GetWorld(), TargetPos, 15.0f, 4, FColor::Cyan, false, 0.0f);
-	}
-
-	// --- Token-based attack check (same as orbit) ---
-	if (OrbitElapsedTime >= MinOrbitTimeBeforeAttack)
-	{
-		AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(this);
-		if (Coordinator && Coordinator->RequestAttackToken(this, EAttackTokenType::Kamikaze))
-		{
-			bIsRetaliating = false;
-			PositioningStartPos = GetActorLocation();
-			PositioningPrevPos = PositioningStartPos;
-			PositioningOrbitTangent = GetVelocity().GetSafeNormal();
-			PositioningP1 = PositioningStartPos + PositioningOrbitTangent * CruiseSpeed * PositioningDuration * 0.5f;
-			if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-			{
-				CMC->StopMovementImmediately();
-				CMC->SetMovementMode(MOVE_None);
-			}
-			SetState(EKamikazeState::Positioning);
-			return;
-		}
-	}
-
-	// --- Proximity attack (same as orbit) ---
-	const float DistToPlayer = FVector::Dist(GetActorLocation(), PlayerPos);
-	if (CurrentOrbitRadius <= ProximityAttackRadius)
-	{
-		ProximityTimer += DeltaTime;
-		if (ProximityTimer >= ProximityAttackDelay)
-		{
-			// Emergency — skip positioning
-			BeginTelegraph(false);
-			return;
-		}
-	}
-	else
-	{
-		ProximityTimer = 0.0f;
-	}
-}
-
-// ==================== Attack ====================
-
-void AKamikazeDroneNPC::BeginTelegraph(bool bRetaliation)
-{
-	if (CurrentState != EKamikazeState::Orbiting && CurrentState != EKamikazeState::Positioning)
+	// The StateTree calls this, and so does the drone itself when bSelfStrike is on; both go through
+	// the same gate, so a strike starts once. A strike is only ever launched from the hold after a
+	// full wait, or straight away as retaliation, or out of a munition's launch: the player always
+	// gets either the visible hang or the shot that provoked it.
+	// Only from the hold, after the full wait (or cut short by being shot), and only once the strike
+	// queue has said yes: whoever calls this, the player gets one strike at a time.
+	const bool bFromHold = CurrentState == EKamikazeState::Orbiting && bProximityTimedOut && bStrikeGranted;
+	if (!HasAuthority() || !bFromHold)
 	{
 		return;
 	}
 
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] BeginTelegraph | Retaliation=%d OrbitForced=%d OrbitTime=%.1f"),
-			*GetName(), bRetaliation, bOrbitForced, OrbitElapsedTime);
-	}
+	bIsRetaliating = bIsRetaliating || bRetaliation;
+	bProximityTimedOut = false;
+	bStrikeGranted = false;
+	HoldTimer = 0.0f;
+	StrikeArcSide = FMath::RandBool() ? 1.0f : -1.0f;
+	AttackTargetPosition = ComputeStrikeAimPoint();
 
-	bIsRetaliating = bRetaliation;
+	SetHandDrivenFlight(true);
+	PreviousFrameLocation = GetActorLocation();
+	SetState(EKamikazeState::Attacking);
 
-	// --- Snapshot state BEFORE disabling CMC ---
-	TelegraphStartPos = GetActorLocation();
-	TelegraphPrevPos = TelegraphStartPos;
-
-	// Attack direction toward predicted player position
-	AttackTargetPosition = CalculatePredictedPosition();
-	TelegraphAttackDir = (AttackTargetPosition - TelegraphStartPos).GetSafeNormal();
-
-	// When coming from Positioning, drone is already at the frontal point facing the player.
-	// Use attack direction as tangent so telegraph goes straight — no sideways jerk.
-	const FVector OrbitTangent = (CurrentState == EKamikazeState::Positioning)
-		? TelegraphAttackDir
-		: GetVelocity().GetSafeNormal();
-
-	// --- Cubic Bezier control points (repurpose phantom variables) ---
-	// P0 = TelegraphStartPos
-	// P1 = TelegraphPhantomOrbitCenter  (orbit tangent pull — big initial curve)
-	// P2 = computed from P3 - AttackDir * TelegraphPhantomOrbitSpeed (small end curve)
-	// P3 = TelegraphStartPos + AttackDir * TelegraphPhantomOrbitAngle
-	const float ArcLength = CruiseSpeed * TelegraphDuration;
-	TelegraphPhantomOrbitCenter = TelegraphStartPos + OrbitTangent * ArcLength * 0.5f;   // P1
-	TelegraphPhantomOrbitAngle = ArcLength * 0.5f;                                       // P3 distance
-	TelegraphPhantomOrbitSpeed = ArcLength * 0.15f;                                      // P2 pull-back
-
-	// Disable CMC movement — we position the drone manually via SetActorLocation
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->StopMovementImmediately();
-		CMC->SetMovementMode(MOVE_None);
-	}
-
-	SetState(EKamikazeState::Telegraphing);
-
-	// Play telegraph sound
+	// Commit whine — the audible telegraph of the strike
 	if (TelegraphSound)
 	{
 		UGameplayStatics::PlaySoundAtLocation(GetWorld(), TelegraphSound, GetActorLocation());
 	}
 }
 
-void AKamikazeDroneNPC::CommitAttack()
+bool AKamikazeDroneNPC::CheckContact()
 {
-	// Recalculate predicted target position fresh (player may have moved during telegraph)
-	AttackTargetPosition = CalculatePredictedPosition();
-	AttackDirection = (AttackTargetPosition - GetActorLocation()).GetSafeNormal();
-
-	// Restore CMC flying mode (was MOVE_None during phantom lerp) and snap velocity
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-	{
-		CMC->SetMovementMode(MOVE_Flying);
-		CMC->Velocity = AttackDirection * AttackSpeed;
-		CMC->MaxFlySpeed = AttackSpeed;
-		CMC->MaxAcceleration = 5000.0f;
-	}
-
-	// Capsule Block→Overlap on Pawn during dive: CMC physics resolves Block collision
-	// BEFORE Actor::Tick, pushing the drone away from the player. CheckPlayerCollisionSweep
-	// then sees post-deflection positions and misses. With Overlap the drone flies through
-	// the player capsule and the sweep reliably catches intersection → explosion.
-	// WorldStatic stays Block so drone still collides with floors/walls.
-	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
-
-	if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
-	{
-		const float DistToTarget = FVector::Dist(GetActorLocation(), AttackTargetPosition);
-		UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] CommitAttack | Target=(%.0f,%.0f,%.0f) Dist=%.0f Dir=(%.2f,%.2f,%.2f)"),
-			*GetName(),
-			AttackTargetPosition.X, AttackTargetPosition.Y, AttackTargetPosition.Z,
-			DistToTarget, AttackDirection.X, AttackDirection.Y, AttackDirection.Z);
-	}
-
-	SetState(EKamikazeState::Attacking);
-}
-
-bool AKamikazeDroneNPC::CheckPlayerCollisionSweep()
-{
-	APawn* Player = GetTargetPlayerPawn();
-	if (!Player) return false;
-
-	const FVector CurrentLoc = GetActorLocation();
+	// Contact, not proximity: the drone's own sphere, inflated a little, touching a hostile pawn along
+	// this frame's path. Swept from last frame so nothing is skipped at speed.
 	const FVector SweepStart = PreviousFrameLocation;
-	const FVector SweepEnd = CurrentLoc;
+	const FVector SweepEnd = GetActorLocation();
+	const float Radius = GetCapsuleComponent()->GetScaledCapsuleRadius() + ContactFuseRadius;
 
-	// Skip if barely moved (orbiting, idle)
-	if (FVector::DistSquared(SweepStart, SweepEnd) < 1.0f) return false;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(KamikazeContact), false, this);
+	TArray<FHitResult> Hits;
+	GetWorld()->SweepMultiByChannel(Hits, SweepStart, SweepEnd, FQuat::Identity, ECC_Pawn,
+		FCollisionShape::MakeSphere(Radius), QueryParams);
 
-	// Sphere sweep from previous position to current
-	// Drone collision radius + player capsule radius (~34cm) for reliable detection
-	const float SweepRadius = CollisionRadius + 34.0f;
-
-	FHitResult Hit;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-
-	const FCollisionShape SweepSphere = FCollisionShape::MakeSphere(SweepRadius);
-
-	const bool bHit = GetWorld()->SweepSingleByChannel(
-		Hit, SweepStart, SweepEnd, FQuat::Identity,
-		ECC_Pawn, SweepSphere, QueryParams);
-
-	if (bHit && Hit.GetActor() == Player)
+	for (const FHitResult& Hit : Hits)
 	{
-		if (CVarKamikazeDebug.GetValueOnGameThread() >= 1)
+		APawn* const HitPawn = Cast<APawn>(Hit.GetActor());
+		if (HitPawn && PolarityTeams::AreHostile(this, HitPawn))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Kamikaze %s] SWEEP HIT PLAYER | SweepDist=%.0f HitDist=%.0f Radius=%.0f State=%s"),
-				*GetName(), FVector::Dist(SweepStart, SweepEnd), Hit.Distance, SweepRadius,
-				KamikazeStateToString(CurrentState));
+			CurrentState = EKamikazeState::Dead;
+			TriggerCollisionExplosion();
+			KamikazeDie();
+			return true;
 		}
-		CurrentState = EKamikazeState::Dead;
-		TriggerCollisionExplosion();
-		KamikazeDie();
-		return true;
 	}
-
 	return false;
-}
-
-FVector AKamikazeDroneNPC::CalculatePredictedPosition() const
-{
-	// Direct attack pattern: stationary actor target — no prediction, aim at the explicit world
-	// location set by InitiateDirectAttack (typically the player's hit point on the wall).
-	// Fall back to bounds center only if the explicit location wasn't provided.
-	if (AttackPattern == EAttackPattern::Direct && BuildingTarget)
-	{
-		if (!DirectAttackTargetLocation.IsZero())
-		{
-			return DirectAttackTargetLocation;
-		}
-		FVector BoundsOrigin, BoundsExtent;
-		BuildingTarget->GetActorBounds(true, BoundsOrigin, BoundsExtent);
-		return BoundsOrigin;
-	}
-
-	APawn* Player = GetTargetPlayerPawn();
-	if (!Player)
-	{
-		return GetActorLocation() + GetActorForwardVector() * 500.0f;
-	}
-
-	// Aim at upper chest level (30cm below actor origin, which is capsule center)
-	const FVector PlayerTarget = Player->GetActorLocation() - FVector(0.0f, 0.0f, 30.0f);
-
-	if (PredictionOrder == 0)
-	{
-		// Zero order: aim at current position
-		return PlayerTarget;
-	}
-
-	// First order: pos + vel * timeToImpact
-	const float Distance = FVector::Dist(GetActorLocation(), PlayerTarget);
-	const float TimeToImpact = Distance / FMath::Max(AttackSpeed, 1.0f);
-	const FVector PlayerVel = Player->GetVelocity();
-
-	FVector Predicted = PlayerTarget + PlayerVel * TimeToImpact;
-
-	// Clamp predicted position above the floor so the drone doesn't dive underground
-	// (happens when player has negative Z velocity — falling, stepping off edges, etc.)
-	FHitResult FloorHit;
-	FCollisionQueryParams FloorQuery;
-	FloorQuery.AddIgnoredActor(this);
-	FloorQuery.AddIgnoredActor(Player);
-	const FVector FloorTraceStart = FVector(Predicted.X, Predicted.Y, PlayerTarget.Z + 100.0f);
-	const FVector FloorTraceEnd = FVector(Predicted.X, Predicted.Y, Predicted.Z - 500.0f);
-	if (GetWorld()->LineTraceSingleByChannel(FloorHit, FloorTraceStart, FloorTraceEnd, ECC_WorldStatic, FloorQuery))
-	{
-		// Don't aim below the floor — clamp to floor + half capsule height
-		const float MinZ = FloorHit.Location.Z + CollisionRadius;
-		if (Predicted.Z < MinZ)
-		{
-			Predicted.Z = MinZ;
-		}
-	}
-
-	return Predicted;
 }
 
 // ==================== Damage ====================
@@ -2122,20 +1204,28 @@ float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& Dam
 			(DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Wallslam::StaticClass()) ||
 			 DamageEvent.DamageTypeClass->IsChildOf(UDamageType_EMFProximity::StaticClass()));
 
+		// Same side only, as in AShooterNPC::TakeDamage: a shooter from another faction hurts this
+		// drone exactly like a player does.
 		if (!bIsCollisionDamage)
 		{
 			AActor* DamageOwner = DamageCauser->GetOwner();
-			if (Cast<AShooterNPC>(DamageCauser) || Cast<AShooterNPC>(DamageOwner))
+			if (AShooterNPC* Shooter = Cast<AShooterNPC>(DamageCauser) ? Cast<AShooterNPC>(DamageCauser) : Cast<AShooterNPC>(DamageOwner))
 			{
-				return 0.0f;
+				if (!PolarityTeams::AreHostile(this, Shooter))
+				{
+					return 0.0f;
+				}
 			}
 		}
 
 		if (EventInstigator)
 		{
-			if (Cast<AShooterNPC>(EventInstigator->GetPawn()))
+			if (AShooterNPC* InstigatorNPC = Cast<AShooterNPC>(EventInstigator->GetPawn()))
 			{
-				return 0.0f;
+				if (!PolarityTeams::AreHostile(this, InstigatorNPC))
+				{
+					return 0.0f;
+				}
 			}
 		}
 	}
@@ -2189,20 +1279,11 @@ float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 30.0f);
 	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
-	// Retaliation: if hit during orbit → position for frontal attack
+	// Retaliation: flag only — the StateTree condition reads it and calls BeginAttack.
+	// The pawn never starts an attack on its own (single attack authority).
 	if (bRetaliateOnDamage && CurrentState == EKamikazeState::Orbiting)
 	{
 		bIsRetaliating = true;
-		PositioningStartPos = GetActorLocation();
-		PositioningPrevPos = PositioningStartPos;
-		PositioningOrbitTangent = GetVelocity().GetSafeNormal();
-		PositioningP1 = PositioningStartPos + PositioningOrbitTangent * CruiseSpeed * PositioningDuration * 0.5f;
-		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
-		{
-			CMC->StopMovementImmediately();
-			CMC->SetMovementMode(MOVE_None);
-		}
-		SetState(EKamikazeState::Positioning);
 	}
 
 	// Check for death
@@ -2270,8 +1351,12 @@ void AKamikazeDroneNPC::KamikazeDie()
 	// Stop shooting (no weapon, but base class safety)
 	StopShooting();
 
-	// Unregister from coordinator
+	// Unregister from coordinator, and from the strike queue (ends its strike, frees its ring slot)
 	UnregisterFromCoordinator();
+	if (UKamikazeStrikeSubsystem* Queue = GetStrikeQueue())
+	{
+		Queue->Unregister(this);
+	}
 
 	// Increment score
 	if (AShooterGameMode* GM = Cast<AShooterGameMode>(GetWorld()->GetAuthGameMode()))
@@ -2301,22 +1386,20 @@ void AKamikazeDroneNPC::KamikazeDie()
 		TriggerDebrisFall();
 		break;
 
-	case EKamikazeState::Positioning:
-	case EKamikazeState::Telegraphing:
 	case EKamikazeState::Attacking:
 	{
-		// Killed during attack — check distance to player
-		if (APawn* Player = GetTargetPlayerPawn())
+		// Killed during attack — check distance to target
+		if (APawn* Target = GetTargetPawn())
 		{
-			const float DistToPlayer = FVector::Dist(GetActorLocation(), Player->GetActorLocation());
-			if (DistToPlayer <= AttackDeathDistanceThreshold)
+			const float DistToTarget = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
+			if (DistToTarget <= AttackDeathDistanceThreshold)
 			{
-				// Close to player — air explosion
+				// Close to target — air explosion
 				TriggerAirExplosion();
 				break;
 			}
 		}
-		// Far from player — just debris
+		// Far from target — just debris
 		TriggerDebrisFall();
 		break;
 	}
@@ -2363,7 +1446,7 @@ void AKamikazeDroneNPC::TriggerDebrisFall()
 	}
 
 	// Crash VFX
-	if (CrashExplosionFX)
+	if (CrashExplosionFX && !KamikazeNoVFX())
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), CrashExplosionFX, GetActorLocation());
 	}
@@ -2381,11 +1464,10 @@ void AKamikazeDroneNPC::TriggerDebrisFall()
 		CMC->SetMovementMode(MOVE_Falling);
 	}
 
-	// Drop HP pickups (reward for killing)
-	if (!bSuppressDeathDrops && HealthPickupClass)
+	// Loot (reward for killing). What drops is the blueprint's LootDrop list.
+	if (!bSuppressDeathDrops && LootDrop)
 	{
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
+		LootDrop->DropLoot(MakeLootContext(0.0f));
 	}
 }
 
@@ -2431,7 +1513,7 @@ void AKamikazeDroneNPC::DoExplosion(float Radius, float Damage, TSubclassOf<UDam
 {
 	// Spawn VFX
 	UNiagaraSystem* FXToUse = (Radius >= ExplosionRadius) ? ExplosionFX : CrashExplosionFX;
-	if (FXToUse)
+	if (FXToUse && !KamikazeNoVFX())
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), FXToUse, GetActorLocation());
 	}
@@ -2458,7 +1540,7 @@ void AKamikazeDroneNPC::DoExplosion(float Radius, float Damage, TSubclassOf<UDam
 		// The drone's own target is the closest thing to "who is responsible" that exists today.
 		// TODO(COOP): a parried drone should credit whoever parried it, which needs the parry
 		// instigator stored on the drone. Attribution pass, not this one.
-		APawn* PlayerPawn = GetTargetPlayerPawn();
+		APawn* PlayerPawn = GetTargetPawn();
 
 		TSet<AActor*> DamagedActors;
 
@@ -2528,11 +1610,10 @@ void AKamikazeDroneNPC::DoExplosion(float Radius, float Damage, TSubclassOf<UDam
 		}
 	}
 
-	// Drop HP pickups
-	if (!bSuppressDeathDrops && bDropHealthPickup && HealthPickupClass)
+	// Loot, on the same explosions that used to drop health.
+	if (!bSuppressDeathDrops && bDropHealthPickup && LootDrop)
 	{
-		AHealthPickup::SpawnHealthPickups(GetWorld(), HealthPickupClass, GetActorLocation(),
-			HealthPickupDropCount, HealthPickupScatterRadius, HealthPickupFloorOffset);
+		LootDrop->DropLoot(MakeLootContext(0.0f));
 	}
 
 	// Hide mesh (explosion replaces it)
@@ -2629,17 +1710,14 @@ void AKamikazeDroneNPC::ApplyKnockback(const FVector& InKnockbackDirection, floa
 	}
 
 	// Ignore collision with whoever did the knocking, so the drone does not jitter against them.
-	// The attacker is identified by position, so ask the team who was standing there.
+	// The attacker is identified by position — ask the team system who was standing there.
 	if (!AttackerLocation.IsZero())
 	{
-		if (APawn* Attacker = CoopPlayers::GetNearest(GetWorld(), AttackerLocation))
+		APawn* Nearest = PolarityTeams::FindNearestHostilePawn(this);
+		if (Nearest && FVector::Dist(Nearest->GetActorLocation(), AttackerLocation) < 300.0f)
 		{
-			const float DistToAttacker = FVector::Dist(Attacker->GetActorLocation(), AttackerLocation);
-			if (DistToAttacker < 300.0f)
-			{
-				KnockbackIgnoreActor = Attacker;
-				MoveIgnoreActorAdd(Attacker);
-			}
+			KnockbackIgnoreActor = Nearest;
+			MoveIgnoreActorAdd(Nearest);
 		}
 	}
 
@@ -2657,8 +1735,12 @@ void AKamikazeDroneNPC::EndKnockbackStun()
 
 	Super::EndKnockbackStun();
 
-	// Restore flying mode
-	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	// Restore flying mode, and take the flight back from whatever drove the knockback.
+	if (HasAuthority() && !bIsDead && CurrentState != EKamikazeState::Parried)
+	{
+		SetHandDrivenFlight(true);
+	}
+	else if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
 		CMC->SetMovementMode(MOVE_Flying);
 	}
@@ -2782,23 +1864,85 @@ bool AKamikazeDroneNPC::TookDamageRecently(float GracePeriod) const
 
 bool AKamikazeDroneNPC::IsInAttackSequence() const
 {
-	return CurrentState == EKamikazeState::Positioning
-		|| CurrentState == EKamikazeState::Telegraphing
-		|| CurrentState == EKamikazeState::Attacking
+	return CurrentState == EKamikazeState::Attacking
 		|| CurrentState == EKamikazeState::PostAttack
+		|| CurrentState == EKamikazeState::Recovery
 		|| CurrentState == EKamikazeState::Parried;
 }
 
 // ==================== Helpers ====================
 
-APawn* AKamikazeDroneNPC::GetTargetPlayerPawn() const
+APawn* AKamikazeDroneNPC::GetTargetPawn() const
 {
-	if (APawn* Cached = TargetPlayer.Get())
+	// The strike queue shares the players out evenly; when it has handed this drone one, that is the
+	// answer. Everything below is for a drone without a player to fly at (faction fights, no players).
+	if (APawn* const Queued = QueueTarget.Get())
+	{
+		if (!IsTargetGone(Queued))
+		{
+			return Queued;
+		}
+	}
+
+	// A self-designating munition answers before the coordinator is asked: it is not registered
+	// with the coordinator, and the whole point of the mode is that each drone picks for itself
+	// and switches to somebody else once its own target is gone.
+	if (bSelfDesignateTarget)
+	{
+		if (APawn* const Current = CachedTarget.Get())
+		{
+			if (!IsTargetGone(Current))
+			{
+				return Current;
+			}
+		}
+
+		const UWorld* const World = GetWorld();
+		const float Now = World ? World->GetTimeSeconds() : 0.0f;
+		if (Now - LastReacquireTime < TargetReacquireInterval)
+		{
+			// Between sweeps: no target rather than a stale corpse. Callers keep the last aim point.
+			return nullptr;
+		}
+		LastReacquireTime = Now;
+
+		APawn* Fresh = nullptr;
+		if (const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(this))
+		{
+			// The coordinator's own sweep is the cheap one (players plus registered NPCs).
+			Fresh = Coordinator->FindNearestHostile(const_cast<AKamikazeDroneNPC*>(this));
+		}
+		if (!Fresh || IsTargetGone(Fresh))
+		{
+			Fresh = PolarityTeams::FindNearestHostilePawn(this);
+		}
+		CachedTarget = (Fresh && !IsTargetGone(Fresh)) ? Fresh : nullptr;
+		return CachedTarget.Get();
+	}
+
+	// Ask the one system that has an opinion first. The coordinator already decides who each NPC is
+	// fighting, with the switch margin and the delay that stop a drone flipping between two
+	// candidates mid-orbit, and since the target work it is the only place a decoy or a faction
+	// enemy can enter the answer. A drone reading "nearest player" instead was a second opinion that
+	// could disagree with the formation being laid out around it.
+	if (const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(this))
+	{
+		// Cast because the coordinator also hands out decoy props, and a drone dives at pawns.
+		if (APawn* const Assigned = Cast<APawn>(Coordinator->GetTargetFor(const_cast<AKamikazeDroneNPC*>(this))))
+		{
+			CachedTarget = Assigned;
+			return Assigned;
+		}
+	}
+
+	if (APawn* Cached = CachedTarget.Get())
 	{
 		return Cached;
 	}
 
-	APawn* Nearest = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
-	TargetPlayer = Nearest;
+	// No coordinator in the level, or this drone is not registered with it: nearest hostile, which
+	// is the same rule as before except that it now includes the other faction.
+	APawn* Nearest = PolarityTeams::FindNearestHostilePawn(this);
+	CachedTarget = Nearest;
 	return Nearest;
 }

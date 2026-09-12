@@ -7,6 +7,7 @@
 #include "ShooterWeaponHolder.h"
 #include "GenericTeamAgentInterface.h"
 #include "Chaos/ChaosEngineInterface.h"
+#include "Variant_Shooter/Pickups/LootDropComponent.h"
 #include "ShooterNPC.generated.h"
 
 class ADroppedMeleeWeapon;
@@ -24,21 +25,6 @@ enum class EKnockbackStyle : uint8
 	Standard,
 	/** Tractor beam pull — plays CapturedMontage instead. Collisions are absorbed without damage. */
 	Tractor,
-};
-
-/** Entry in the NPC's ranged weapon drop table */
-USTRUCT(BlueprintType)
-struct FDroppedRangedWeaponEntry
-{
-	GENERATED_BODY()
-
-	/** Dropped weapon actor class to spawn (configure mesh, weapon class, etc. in its Blueprint defaults) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
-	TSubclassOf<ADroppedRangedWeapon> DroppedWeaponClass;
-
-	/** Probability of this weapon dropping (0-1). Entries are evaluated in order; first success wins. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DropChance = 0.1f;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
@@ -214,6 +200,42 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coop|Shield Bypass")
 	bool IsShieldBypassed() const { return bShieldBypassActive; }
 
+	// ==================== Movement slows (standing in something) ====================
+	//
+	// A slow that lasts WHILE something is true, as opposed to the shield bypass above, which lasts
+	// for a duration and runs on a timer. Kept apart from that one rather than folded into it for a
+	// concrete reason: the bypass saves and restores MaxWalkSpeed, and two systems taking turns
+	// saving each other's already-slowed speed is how an enemy ends up permanently crawling. This
+	// writes UApexMovementComponent::ExternalSpeedMultiplier instead, which GetMaxSpeed multiplies in
+	// without anybody having to remember a previous value.
+	//
+	// Keyed by source so overlapping puddles do not have to coordinate, and so a source that
+	// disappears releases exactly its own contribution. Authority only: enemy movement is decided on
+	// the server and reaches clients as replicated position, so there is nothing here for a client
+	// to know.
+
+	/** Slow this enemy while Source says so. Re-applying with the same source replaces its value. */
+	void AddMovementSlow(AActor* Source, float Multiplier);
+
+	/** Let go of Source's slow. Safe to call for a source that never applied one. */
+	void RemoveMovementSlow(AActor* Source);
+
+	// ==================== Turn slow (smoke) ====================
+	//
+	// The same shape as the movement slow above, keyed by source for the same reasons, and a
+	// separate map rather than a second use of that one: they write different things and mean
+	// different things. Smoke does not slow an enemy down, it makes it slow to come round.
+	//
+	// A ground NPC turns through bUseControllerDesiredRotation, so the number being scaled is
+	// UCharacterMovementComponent::RotationRate.Yaw. Flying drones, the kamikaze and the turret
+	// rotate themselves and are simply not affected.
+
+	/** Slow this enemy's turn while Source says so. Re-applying with the same source replaces it. */
+	void AddTurnSlow(AActor* Source, float Multiplier);
+
+	/** Let go of Source's turn slow. Safe to call for a source that never applied one. */
+	void RemoveTurnSlow(AActor* Source);
+
 	// ==================== Distraction (Tank's decoy) ====================
 
 	/** True while a decoy is holding this enemy's attention.
@@ -264,15 +286,20 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Damage")
 	FOnNPCHealthChanged OnHealthChanged;
 
+	/** Everything this enemy drops on death: health, armour, weapons, metal. Fill the list in the
+	 *  blueprint; the death code only says what kind of kill it was (MakeLootContext). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Loot")
+	TObjectPtr<ULootDropComponent> LootDrop;
+
 protected:
+
+	/** What kind of kill this was, for the loot list's conditions. The rules are the ones the old
+	 *  health and armour drops used; a subclass with different rules adjusts the result. */
+	FLootDropContext MakeLootContext(float Charge) const;
 
 	/** AI accuracy component for speed-based spread */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
 	TObjectPtr<UAIAccuracyComponent> AccuracyComponent;
-
-	/** Melee retreat component for proximity-based retreat */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
-	TObjectPtr<UMeleeRetreatComponent> MeleeRetreatComponent;
 
 	/** EMF velocity modifier for charge-based interactions */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
@@ -372,14 +399,6 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Aim")
 	float AimVarianceHalfAngle = 10.0f;
 
-	/** Minimum vertical offset from the target center to apply when aiming */
-	UPROPERTY(EditAnywhere, Category = "Aim")
-	float MinAimOffsetZ = -35.0f;
-
-	/** Maximum vertical offset from the target center to apply when aiming */
-	UPROPERTY(EditAnywhere, Category = "Aim")
-	float MaxAimOffsetZ = -60.0f;
-
 	// ==================== Burst Fire & Coordination ====================
 
 	/** Maximum shots per burst */
@@ -467,6 +486,26 @@ protected:
 	bool bHasAttackPermission = false;
 
 	/** If true, NPC wants to shoot but waiting for permission */
+	/** Set while the squad is routing: this NPC has stopped being a soldier and is only running.
+	 *
+	 *  A gate rather than a repeated StopShooting() call, because the behaviour tree re-triggers fire
+	 *  the moment it sees a target, and a squad system nagging it from outside every half second
+	 *  would produce a man who fires one round per stride. */
+	UPROPERTY(BlueprintReadOnly, Category = "AI|Combat")
+	bool bCombatDisabled = false;
+
+public:
+
+	/** Switch this NPC's weapons off (a rout) or back on. Set from the squad system, which is the
+	 *  only thing that knows the squad has stopped fighting. */
+	UFUNCTION(BlueprintCallable, Category = "AI|Combat")
+	void SetCombatDisabled(bool bDisabled) { bCombatDisabled = bDisabled; }
+
+	UFUNCTION(BlueprintPure, Category = "AI|Combat")
+	bool IsCombatDisabled() const { return bCombatDisabled; }
+
+protected:
+
 	bool bWantsToShoot = false;
 
 	/** Actor currently being targeted */
@@ -526,6 +565,26 @@ protected:
 	FTimerHandle ShieldBypassTimer;
 	float ShieldBypassSavedWalkSpeed = 0.0f;
 	void EndShieldBypass();
+
+	/** Every slow currently held on this enemy, by whoever holds it. Weak keys: a source can be
+	 *  destroyed without getting the chance to release, and a dead key is dropped on the next
+	 *  recompute rather than leaving the enemy slowed forever. */
+	TMap<TWeakObjectPtr<AActor>, float> MovementSlowSources;
+
+	/** Push the strongest slow currently held into the movement component. The strongest rather than
+	 *  the product: two puddles are one wet floor, not a floor twice as sticky. */
+	void RecomputeMovementSlow();
+
+	/** Every turn slow currently held on this enemy, by whoever holds it. @see AddTurnSlow */
+	TMap<TWeakObjectPtr<AActor>, float> TurnSlowSources;
+
+	/** Push the strongest turn slow into the movement component's RotationRate. */
+	void RecomputeTurnSlow();
+
+	/** The yaw rate this NPC was built with, read once before anything has scaled it. Zero means it
+	 *  has not been read yet, which is also how a class that never turns through the movement
+	 *  component is recognised. */
+	float BaseRotationRateYaw = 0.0f;
 
 	// ==================== Charge Overlay Materials ====================
 
@@ -863,27 +922,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Charge", meta = (ClampMin = "-100.0", ClampMax = "100.0"))
 	float ChargeChangeOnMeleeHit = -25.0f;
 
-	// ==================== Weapon Drop ====================
-
-	/** Optional dropped melee weapon class to spawn on death */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
-	TSubclassOf<ADroppedMeleeWeapon> DroppedMeleeWeaponClass;
-
-	/** Base chance to drop weapon (0-1). Actual chance = BaseChance * abs(NPC_charge) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DropWeaponBaseChance = 0.5f;
-
-	/** Offset above NPC location for weapon spawn */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop")
-	FVector DropSpawnOffset = FVector(0.0f, 0.0f, 50.0f);
-
-	// ==================== Ranged Weapon Drop ====================
-
-	/** List of ranged weapons this NPC can drop on death.
-	 *  Evaluated in order; first entry that passes its roll is spawned (at most one drop). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon Drop|Ranged")
-	TArray<FDroppedRangedWeaponEntry> DroppedRangedWeaponTable;
-
 	// ==================== Impact Surfaces (shield vs body) ====================
 
 	/** If true, a hit on this NPC picks its impact VFX and sound from the two surfaces below
@@ -950,44 +988,6 @@ public:
 	/** Called when NPC exits stun state (knockback ends) */
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnNPCStunEnd OnStunEnd;
-
-	// ==================== Health Pickup Drop ====================
-
-	/** Health pickup class to spawn on non-weapon kill (set in Blueprint defaults) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup")
-	TSubclassOf<AHealthPickup> HealthPickupClass;
-
-	/** Number of health pickups to drop on kill (Doom Eternal style scatter) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
-	int32 HealthPickupDropCount = 3;
-
-	/** Number of health pickups to drop when killed by another NPC collision
-	 *  or killed while stunned by NPC impact */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
-	int32 HealthPickupDropCount_NPCKill = 2;
-
-	/** Chance (0-1) to drop health pickups on a regular weapon kill (no channeling, no prop/drone/stun).
-	 *  0 = never, 1 = always. Rolled per-kill. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float HealthPickupDropChance_WeaponKill = 0.5f;
-
-	/** Number of health pickups to drop on a regular weapon kill (if the chance roll succeeds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "1", ClampMax = "10"))
-	int32 HealthPickupDropCount_WeaponKill = 1;
-
-	/** How far pickups scatter from the kill point (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "0", ClampMax = "500", Units = "cm"))
-	float HealthPickupScatterRadius = 150.0f;
-
-	/** Height above the floor at which pickups spawn (cm). Keeps them visible and accessible. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health Pickup", meta = (ClampMin = "5", ClampMax = "200", Units = "cm"))
-	float HealthPickupFloorOffset = 30.0f;
-
-	// ==================== Armor Pickup Drop ====================
-
-	/** Armor pickup class to spawn on channeling kill (set in Blueprint defaults) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Armor Pickup")
-	TSubclassOf<AArmorPickup> ArmorPickupClass;
 
 	// ==================== Death Effects Configuration ====================
 
@@ -1098,8 +1098,9 @@ public:
 
 protected:
 
-	/** Called when HP is depleted and the character should die */
-	void Die();
+	/** Called when HP is depleted and the character should die. Virtual so subclasses can add
+	 *  death behaviour (the tracked tank explodes before the base pipeline zeroes its charge). */
+	virtual void Die();
 
 	/** Called after death to destroy the actor */
 	void DeferredDestruction();
