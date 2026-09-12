@@ -60,6 +60,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "HUD Shape")
 	void SetFillColor(FLinearColor Color);
 
+	/** Rest at the palette colour multiplied by Tint. The weapon plate takes its ammo colour this
+	 *  way, the same as tinting a grey texture: the palette sets how light the plate is, the
+	 *  tint says which hue. */
+	UFUNCTION(BlueprintCallable, Category = "HUD Shape")
+	void SetFillTint(FLinearColor Tint);
+
 	/** The colour the fill rests at, from the palette unless SetFillColor changed it. */
 	UFUNCTION(BlueprintPure, Category = "HUD Shape")
 	FLinearColor GetFillColor() const { return FillFlash.Rest; }

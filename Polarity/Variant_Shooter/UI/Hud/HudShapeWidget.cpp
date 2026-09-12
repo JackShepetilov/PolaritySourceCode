@@ -83,6 +83,12 @@ void UHudShapeWidget::SetFillColor(FLinearColor Color)
 	}
 }
 
+void UHudShapeWidget::SetFillTint(FLinearColor Tint)
+{
+	const FLinearColor Base = UPolarityPalette::GetColor(FillColorTag, FLinearColor::White);
+	SetFillColor(FLinearColor(Base.R * Tint.R, Base.G * Tint.G, Base.B * Tint.B, Base.A * Tint.A));
+}
+
 void UHudShapeWidget::SetMirror(bool bInMirror)
 {
 	bMirror = bInMirror;
