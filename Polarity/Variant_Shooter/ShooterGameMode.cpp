@@ -6,6 +6,7 @@
 #include "Components/CapsuleComponent.h"
 #include "ShooterUI.h"
 #include "ShooterCharacter.h"
+#include "ShooterPlayerState.h"
 #include "RunSubsystem.h"
 #include "RunLaunchPoint.h"
 #include "Run/Generation/BiomeRunAssembler.h"
@@ -34,6 +35,11 @@ namespace
 		}
 		return false;
 	}
+}
+
+AShooterGameMode::AShooterGameMode()
+{
+	PlayerStateClass = AShooterPlayerState::StaticClass();
 }
 
 void AShooterGameMode::BeginPlay()

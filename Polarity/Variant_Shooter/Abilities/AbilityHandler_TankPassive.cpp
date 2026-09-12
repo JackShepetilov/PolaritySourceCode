@@ -155,17 +155,19 @@ void UAbilityHandler_TankPassive::HandleAnyNPCDeath(AShooterNPC* DeadNPC, TSubcl
 		return;
 	}
 
-	// The enemy's own pickup class unless the passive overrides it, so one kind of health pickup
-	// stays one kind of health pickup.
-	const TSubclassOf<AHealthPickup> PickupClass =
-		Def->OverrideHealthPickupClass ? Def->OverrideHealthPickupClass : DeadNPC->HealthPickupClass;
+	// The health pickup from the enemy's own loot list unless the passive overrides it, so one kind
+	// of health pickup stays one kind of health pickup.
+	const ULootDropComponent* Loot = DeadNPC->LootDrop;
+	const TSubclassOf<AHealthPickup> PickupClass = Def->OverrideHealthPickupClass
+		? Def->OverrideHealthPickupClass
+		: TSubclassOf<AHealthPickup>(Loot ? Loot->FindLootClass(AHealthPickup::StaticClass()) : nullptr);
 	if (!PickupClass)
 	{
 		return;
 	}
 
-	AHealthPickup::SpawnHealthPickups(World, PickupClass, DeadNPC->GetActorLocation(),
-		Stats.KillDropCount, DeadNPC->HealthPickupScatterRadius, DeadNPC->HealthPickupFloorOffset);
+	AHealthPickup::SpawnHealthPickups(World, PickupClass, DeadNPC->GetActorLocation(), Stats.KillDropCount,
+		Loot ? Loot->ScatterRadius : 150.0f, Loot ? Loot->FloorOffset : 30.0f);
 
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] TankPassive: %s died %.0f cm from %s, dropping %d extra health"),
 		*DeadNPC->GetName(), FMath::Sqrt(DistSq), *Character->GetName(), Stats.KillDropCount);

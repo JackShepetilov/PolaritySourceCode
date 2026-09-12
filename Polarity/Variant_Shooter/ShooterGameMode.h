@@ -21,7 +21,12 @@ UCLASS(abstract)
 class POLARITY_API AShooterGameMode : public AGameModeBase
 {
 	GENERATED_BODY()
-	
+
+public:
+
+	/** Sets PlayerStateClass to AShooterPlayerState, which is where each player's metal lives. */
+	AShooterGameMode();
+
 protected:
 
 	/** Type of UI widget to spawn */
