@@ -4,7 +4,6 @@
 #include "Variant_Shooter/ShooterGameMode.h"
 #include "Coop/CoopPlayers.h"
 #include "Components/CapsuleComponent.h"
-#include "ShooterUI.h"
 #include "ShooterCharacter.h"
 #include "ShooterPlayerState.h"
 #include "RunSubsystem.h"
@@ -46,10 +45,8 @@ void AShooterGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// The HUD is not built here any more. A widget made by the GameMode lives on the server and
-	// belongs to player zero, so in coop the host got a HUD and every client got nothing. Each
-	// character now builds its own on its own machine, asking this GameMode only for the class
-	// (AShooterCharacter::HUDClass). Score updates reach them through IncrementTeamScore below.
+	// The HUD is not built here. A GameMode lives on the server and belongs to nobody's screen;
+	// each local player's UHudRegistry builds its own from the controller's layout asset.
 
 	// ===== Run-start loading gate =====
 	// Run maps are identified by a RunLaunchPoint marker. On non-run maps (menu/hub) there is none,
@@ -333,16 +330,7 @@ void AShooterGameMode::IncrementTeamScore(uint8 TeamByte)
 	++Score;
 	TeamScores.Add(TeamByte, Score);
 
-	// update the UI on every machine that has one — the score belongs to the team, not to the host.
-	TArray<APawn*> Players;
-	CoopPlayers::GetAll(GetWorld(), Players);
-	for (APawn* Player : Players)
-	{
-		if (AShooterCharacter* Character = Cast<AShooterCharacter>(Player))
-		{
-			Character->Client_UpdateScore(TeamByte, Score);
-		}
-	}
+	// Nothing shows the team score any more: the two-team scoreboard went with UI_Shooter.
 }
 
 bool AShooterGameMode::RespawnPlayerAtCheckpoint(APlayerController* PlayerController)

@@ -65,7 +65,6 @@
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
 #include "ShooterGameMode.h"
-#include "UI/ShooterUI.h"
 #include "Blueprint/UserWidget.h"
 #include "Kismet/GameplayStatics.h"
 #include "Curves/CurveFloat.h"
@@ -340,18 +339,6 @@ void AShooterCharacter::BeginPlay()
 	if (const USkeletalMeshComponent* BodyMesh = GetMesh())
 	{
 		MeshRelativeTransformOnSpawn = BodyMesh->GetRelativeTransform();
-	}
-
-	// Hand this character's owner the HUD class to build. Only the authority can read it — the
-	// GameMode does not exist anywhere else — so it is replicated from here and the owning client
-	// builds the widget in OnRep_HUDClass. The host is its own owner, so it builds straight away.
-	if (HasAuthority())
-	{
-		if (const AShooterGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<AShooterGameMode>() : nullptr)
-		{
-			HUDClass = GameMode->GetShooterUIClass();
-			CreateLocalHUD();
-		}
 	}
 
 	// Store base FOV and location values for ADS interpolation
@@ -645,17 +632,11 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AShooterCharacter, OwnedWeapons);
 
 	// Only the owner builds a HUD, so only the owner needs to know which one.
-	DOREPLIFETIME_CONDITION(AShooterCharacter, HUDClass, COND_OwnerOnly);
 
 	// Everyone needs both: a downed player is a ragdoll on every screen, and a rescuer has to be
 	// able to see that the body in front of them is one that can be picked up.
 	DOREPLIFETIME(AShooterCharacter, bIsDowned);
 	DOREPLIFETIME(AShooterCharacter, bTerminalDeath);
-}
-
-void AShooterCharacter::OnRep_HUDClass()
-{
-	CreateLocalHUD();
 }
 
 // ==================== Downed and revive ====================
@@ -1090,78 +1071,12 @@ void AShooterCharacter::PossessedBy(AController* NewController)
 {
 	Super::PossessedBy(NewController);
 
-	// The server possesses the pawn after BeginPlay has already run, so this is where the host
-	// finally has a controller to build its HUD against.
-	CreateLocalHUD();
-
-	// And where the owning client can be told what the over-prop charge widgets look like. Read from
+	// This is where the owning client can be told what the over-prop charge widgets look like. Read from
 	// the server's own subsystem, which the GameMode blueprint filled in at BeginPlay. On the host
 	// this call runs locally and sets what is already set, which costs nothing.
 	if (const UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr)
 	{
 		Client_ConfigureChargeWidgets(Sub->WidgetClass, Sub->ReticleWidgetClass);
-	}
-}
-
-void AShooterCharacter::OnRep_Controller()
-{
-	Super::OnRep_Controller();
-
-	// Same on a client, for whichever of the controller and the HUD class arrives second.
-	CreateLocalHUD();
-}
-
-void AShooterCharacter::CreateLocalHUD()
-{
-	// One HUD, on the machine whose player is looking through this character. A remote copy of a
-	// teammate must not build one, and neither must a dedicated server.
-	if (LocalHUD || !HUDClass || !IsLocallyControlled())
-	{
-		return;
-	}
-
-	APlayerController* PC = Cast<APlayerController>(GetController());
-	if (!PC || !PC->IsLocalController())
-	{
-		return;
-	}
-
-	// The controller has to already own this pawn, not merely be attached to it. The HUD's Construct
-	// reads Get Owning Player Pawn once and caches what it finds — on a client the pawn pointer and
-	// the controller pointer arrive by separate replication paths in no fixed order, so building the
-	// widget on the earlier of the two handed the blueprint a null pawn, the cast failed, and the
-	// HUD sat there doing nothing for the rest of the match. Wait for the pair to be complete;
-	// AShooterPlayerController::BindToPossessedCharacter calls back in once it is.
-	if (PC->GetPawn() != this)
-	{
-		return;
-	}
-
-	LocalHUD = CreateWidget<UShooterUI>(PC, HUDClass);
-	if (LocalHUD)
-	{
-		LocalHUD->AddToViewport(0);
-		UE_LOG(LogTemp, Log, TEXT("[COOP_DEBUG] %s built its own HUD"), *GetName());
-	}
-}
-
-void AShooterCharacter::Client_UpdateScore_Implementation(uint8 ScoringTeam, int32 Score)
-{
-	// The scoreboard has exactly two slots (UI_Shooter picks a text block with a Select on the team
-	// byte, options 0 and 1). A third side, which is what a faction war is, indexes past the last
-	// option, the Select returns None and every kill logs "Accessed None ... K2Node_Select_Default"
-	// twice. Drop what the HUD cannot show rather than spam.
-	// TODO(factions): a faction fight has more than two scores. Decide what the HUD shows before
-	// widening this - it is a design question, not a missing option pin.
-	constexpr uint8 HUDTeamSlots = 2;
-	if (ScoringTeam >= HUDTeamSlots)
-	{
-		return;
-	}
-
-	if (LocalHUD)
-	{
-		LocalHUD->BP_UpdateScore(ScoringTeam, Score);
 	}
 }
 
