@@ -19,7 +19,15 @@ enum class EAdaptiveStairFitMode : uint8
 	TargetWorldZ,
 
 	/** Actor origin is the upper landing; the viewport-editable BottomPointLocal is the exact lower connection. */
-	LocalEndpoint
+	LocalEndpoint,
+
+	/** Actor origin is the upper landing; the lower one is whatever floor is found underneath.
+	 *
+	 *  Inside a Blueprint the search is limited to the components of the actor that OWNS these
+	 *  stairs, so a staircase in a house lands on that house's floor and ignores the terrain, the
+	 *  neighbouring building and anything else the level happens to have under it. Placed on its
+	 *  own in a level, with no owner to ask, it falls back to tracing the world. */
+	FloorBelow
 };
 
 /**
@@ -51,12 +59,31 @@ public:
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Adaptive Stairs")
 	void RegenerateStairs();
 
+	/** Highest surface below WorldProbe that belongs to this staircase's own building.
+	 *
+	 *  Deliberately measured from component BOUNDS, not from a line trace. OnConstruction for a
+	 *  child actor can run before its siblings have registered collision, and a trace then reports
+	 *  empty air - intermittently, depending on construction order, which is the worst kind of
+	 *  wrong. Bounds exist as soon as the component does. */
+	bool FindOwnFloorBelow(const FVector& WorldProbe, float& OutFloorZ) const;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Adaptive Stairs|Shape")
 	EAdaptiveStairFitMode FitMode = EAdaptiveStairFitMode::TargetWorldZ;
 
 	/** Absolute world-space height of the lower connection in TargetWorldZ mode. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Adaptive Stairs|Shape", meta = (EditCondition = "FitMode == EAdaptiveStairFitMode::TargetWorldZ", Units = "cm"))
 	float TargetFloorZ = 0.f;
+
+	/** How far below the actor to look for a floor in FloorBelow mode. Nothing found within this
+	 *  distance means the stairs have nothing to stand on, and they refuse to build rather than
+	 *  guessing a length. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Adaptive Stairs|Shape", meta = (EditCondition = "FitMode == EAdaptiveStairFitMode::FloorBelow", ClampMin = "10.0", Units = "cm"))
+	float FloorSearchDepth = 2000.f;
+
+	/** Where the found floor is, in world Z. Read-only feedback: when the stairs land somewhere
+	 *  unexpected this is the number that says whose floor they picked. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Adaptive Stairs|Generated", meta = (Units = "cm"))
+	float ResolvedFloorZ = 0.f;
 
 	/** Exact lower connection relative to the actor. Drag its viewport widget for unusual spans. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Adaptive Stairs|Shape", meta = (EditCondition = "FitMode == EAdaptiveStairFitMode::LocalEndpoint", MakeEditWidget = true, Units = "cm"))

@@ -39,9 +39,8 @@ def director(w):
 
 
 def describe(state):
-    return "held={} progress={:.2f} loot_spawned={} garrison_spawned={} loaded={} money={}".format(
-        state.controlling_team, state.capture_progress, state.loot_spawned,
-        state.garrison_spawned, state.loaded, state.money_stacks_placed)
+    return "held={} progress={:.2f} garrison_spawned={} loaded={}".format(
+        state.controlling_team, state.capture_progress, state.garrison_spawned, state.loaded)
 
 
 def stage_unload():
@@ -81,8 +80,8 @@ def stage_verify():
 
     ok_state = found and state.controlling_team == int(before.split("held=")[1].split(" ")[0])
     ok_loaded = found and not state.loaded
-    ok_flags = found and state.loot_spawned and state.garrison_spawned
+    ok_flags = found and state.garrison_spawned
 
     print("  [{}] state survived the unload".format("PASS" if ok_state else "FAIL"))
     print("  [{}] point is marked streamed-out".format("PASS" if ok_loaded else "FAIL"))
-    print("  [{}] loot and garrison stay claimed (no refill on reload)".format("PASS" if ok_flags else "FAIL"))
+    print("  [{}] garrison stays claimed (no refill on reload)".format("PASS" if ok_flags else "FAIL"))

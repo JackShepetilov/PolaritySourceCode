@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "Variant_Shooter/ShooterPlayerController.h"
@@ -12,13 +12,130 @@
 #include "ShooterCharacter.h"
 #include "ShooterBulletCounterUI.h"
 #include "AbilityResourceBar.h"
+#include "Variant_Shooter/UI/InventoryBarWidget.h"
+#include "Variant_Shooter/UI/InventoryScreenWidget.h"
+#include "Variant_Shooter/Map/MapScreenWidget.h"
 #include "CrosshairWidget.h"
 #include "MeleeAttackComponent.h"
 #include "Polarity.h"
 #include "TutorialSubsystem.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 #include "RunSubsystem.h"
+#include "Variant_Shooter/ShooterGameSettings.h"
 #include "UpgradeChoiceWidget.h"
+#include "AI/SquadSpawn/SquadSpawnSubsystem.h"
+#include "AI/SquadSpawn/SquadLoadout.h"
+#include "AI/SquadSpawn/SquadScenario.h"
+
+// ==================== Squad spawn console commands ====================
+
+// ==================== Inventory overlay ====================
+
+AShooterPlayerController::AShooterPlayerController()
+{
+	// A default so the map works out of the box. Set in C++ rather than on the Blueprint because
+	// the MCP layer refuses to modify class defaults from Python (it crashes the editor), and a
+	// feature that needs a manual click before it does anything is a feature nobody turns on.
+	// A Blueprint override still wins if one is ever set.
+	MapScreenClass = UMapScreenWidget::StaticClass();
+}
+
+void AShooterPlayerController::ToggleInventoryScreen()
+{
+	// A remote controller has no viewport to open anything in, and the screen sends nothing to the
+	// server, so there is nothing here for a non-local one to do. Guarding here rather than at the
+	// input site keeps the rule with the thing it protects.
+	if (!IsLocalController() || !InventoryScreen)
+	{
+		return;
+	}
+
+	InventoryScreen->Toggle();
+}
+
+void AShooterPlayerController::CloseInventoryScreen()
+{
+	if (InventoryScreen)
+	{
+		InventoryScreen->Close();
+	}
+}
+
+bool AShooterPlayerController::IsInventoryScreenOpen() const
+{
+	return InventoryScreen && InventoryScreen->IsOpen();
+}
+
+void AShooterPlayerController::ToggleMapScreen()
+{
+	if (!IsLocalController() || !MapScreen)
+	{
+		return;
+	}
+
+	MapScreen->Toggle();
+}
+
+void AShooterPlayerController::CloseMapScreen()
+{
+	if (MapScreen)
+	{
+		MapScreen->Close();
+	}
+}
+
+bool AShooterPlayerController::IsMapScreenOpen() const
+{
+	return MapScreen && MapScreen->IsOpen();
+}
+
+void AShooterPlayerController::SquadSpawn(const FString& PointTag, const FString& LoadoutPath)
+{
+	USquadSpawnSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<USquadSpawnSubsystem>() : nullptr;
+	if (!Subsystem)
+	{
+		return;
+	}
+
+	UObject* Loaded = FSoftObjectPath(LoadoutPath).TryLoad();
+	USquadLoadout* Loadout = Cast<USquadLoadout>(Loaded);
+	if (!Loadout)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SQUAD_DEBUG] SquadSpawn: not a USquadLoadout: '%s'"), *LoadoutPath);
+		return;
+	}
+
+	const int32 Spawned = Subsystem->SpawnAtTag(FName(*PointTag), Loadout);
+	UE_LOG(LogTemp, Warning, TEXT("[SQUAD_DEBUG] SquadSpawn '%s' -> %d members"), *PointTag, Spawned);
+}
+
+void AShooterPlayerController::SquadRunScenario(const FString& ScenarioPath)
+{
+	USquadSpawnSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<USquadSpawnSubsystem>() : nullptr;
+	if (!Subsystem)
+	{
+		return;
+	}
+
+	UObject* Loaded = FSoftObjectPath(ScenarioPath).TryLoad();
+	USquadScenario* Scenario = Cast<USquadScenario>(Loaded);
+	if (!Scenario)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SQUAD_DEBUG] SquadRunScenario: not a USquadScenario: '%s'"), *ScenarioPath);
+		return;
+	}
+
+	const int32 Spawned = Subsystem->RunScenario(Scenario);
+	UE_LOG(LogTemp, Warning, TEXT("[SQUAD_DEBUG] SquadRunScenario -> %d members"), Spawned);
+}
+
+void AShooterPlayerController::SquadClear()
+{
+	if (USquadSpawnSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<USquadSpawnSubsystem>() : nullptr)
+	{
+		Subsystem->ClearAll();
+	}
+}
 
 void AShooterPlayerController::BeginPlay()
 {
@@ -94,6 +211,79 @@ void AShooterPlayerController::BeginPlay()
 			UE_LOG(LogTemp, Warning, TEXT("[ABILITY_BAR] AbilityResourceBarClass is NOT set on ShooterPlayerController -> bar will never be created. Set it on the BP_ShooterPlayerController."));
 		}
 
+		// create the inventory block (weapon rows + cell grid) and add it to the screen
+		if (InventoryBarClass)
+		{
+			InventoryBar = CreateWidget<UInventoryBarWidget>(this, InventoryBarClass);
+			if (InventoryBar)
+			{
+				InventoryBar->AddToPlayerScreen(0);
+
+				// Same reason as the ability bar above: OnPossess for the starting pawn usually
+				// fires before this BeginPlay, so bind here when the pawn is already there.
+				// InitializeFor unbinds first, so the OnPossess path stays safe for respawns.
+				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
+				{
+					InventoryBar->InitializeFor(PossessedCharacter);
+				}
+			}
+			else
+			{
+				UE_LOG(LogPolarity, Error, TEXT("Could not spawn inventory bar widget."));
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[INV_DEBUG] InventoryBarClass is NOT set on ShooterPlayerController -> the weapon rows will never be drawn. Set it on BP_ShooterPlayerController."));
+		}
+
+		// create the inventory overlay. It goes on the screen once and stays there hidden: the grid
+		// is at most eight squares, so building it up front costs nothing and the first press of the
+		// key has no hitch. Z-order above the rest of the HUD, because it covers all of it.
+		if (InventoryScreenClass)
+		{
+			InventoryScreen = CreateWidget<UInventoryScreenWidget>(this, InventoryScreenClass);
+			if (InventoryScreen)
+			{
+				InventoryScreen->AddToPlayerScreen(10);
+
+				// Same reason as the bar above: OnPossess for the starting pawn usually fires before
+				// this BeginPlay. InitializeFor unbinds first, so the OnPossess path stays safe.
+				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
+				{
+					InventoryScreen->InitializeFor(PossessedCharacter);
+				}
+			}
+			else
+			{
+				UE_LOG(LogPolarity, Error, TEXT("Could not spawn inventory screen widget."));
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[INV_DEBUG] InventoryScreenClass is NOT set on ShooterPlayerController -> the inventory key will do nothing. Set it on BP_ShooterPlayerController."));
+		}
+
+		// The map. Same shape as the inventory: built once, hidden, toggled by a key. Z-order above
+		// it, because a map read mid-fight covers everything by design.
+		if (MapScreenClass)
+		{
+			MapScreen = CreateWidget<UMapScreenWidget>(this, MapScreenClass);
+			if (MapScreen)
+			{
+				MapScreen->AddToPlayerScreen(11);
+				MapScreen->SetVisibility(ESlateVisibility::Collapsed);
+			}
+			else
+			{
+				UE_LOG(LogPolarity, Error, TEXT("Could not spawn map screen widget."));
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[MAP_DEBUG] MapScreenClass is NOT set on ShooterPlayerController -> the map key will do nothing. Set it on BP_ShooterPlayerController."));
+		}
+
 		// create the crosshair widget and add it to the screen
 		if (CrosshairWidgetClass)
 		{
@@ -153,6 +343,19 @@ void AShooterPlayerController::BeginPlay()
 				Subsystem->AddMappingContext(CurrentContext, 0);
 			}
 			UE_LOG(LogPolarity, Log, TEXT("ShooterPlayerController: Added %d IMCs"), AllContexts.Num());
+		}
+
+		// The look sensitivity has to be pushed onto THIS controller, here, because nothing else
+		// reliably does it. UShooterSettingsSubsystem hangs its apply on PostLoadMapWithWorld, and
+		// in PIE that delegate has already fired by the time a GameInstance subsystem exists, so
+		// the apply never ran and the controller kept the 2.5 baked into BP_ShooterPlayerController
+		// - about 114 on the Apex scale. The symptom was deceptive: dragging the slider felt
+		// correct (that path applies directly), so only a fresh session was wrong.
+		if (UShooterGameSettings* Settings = UShooterGameSettings::GetShooterGameSettings())
+		{
+			Settings->ApplyControlSettings();
+			UE_LOG(LogPolarity, Log, TEXT("[LOOK] Controller ready, sensitivity applied: %s"),
+				*Settings->GetSensitivityReadout().ToString());
 		}
 
 		// Subscribe to RunSubsystem to (de)spawn roguelite HUD widgets on run start/end
@@ -283,7 +486,7 @@ void AShooterPlayerController::AcknowledgePossession(APawn* InPawn)
 
 	// Client-side. If a client can see its character but cannot move it, this line and the
 	// OnPossess line below will disagree about which pawn it is, or this line will not appear.
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] AcknowledgePossession: %s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] AcknowledgePossession: %s"),
 		*DescribeCoopContext(this, InPawn));
 
 	// This is a client's only chance to hook its HUD up to its pawn: OnPossess never runs here.
@@ -298,7 +501,7 @@ void AShooterPlayerController::OnPossess(APawn* InPawn)
 	// "InvocationList[CurFunctionIndex] != InDelegate" ensure below: every AddDynamic here would
 	// then be bound twice. PossessCount makes the repeat obvious instead of inferred.
 	PossessCount++;
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] OnPossess #%d: %s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] OnPossess #%d: %s"),
 		PossessCount, *DescribeCoopContext(this, InPawn));
 
 	// subscribe to the pawn's OnDestroyed delegate
@@ -355,12 +558,6 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 			MeleeComp->OnDropKickCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownStarted);
 			MeleeComp->OnDropKickCooldownEnded.RemoveDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
 			MeleeComp->OnDropKickCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnDropKickCooldownEnded);
-			MeleeComp->OnMeleeCooldownStarted.RemoveDynamic(this, &AShooterPlayerController::OnMeleeCooldownStarted);
-			MeleeComp->OnMeleeCooldownStarted.AddDynamic(this, &AShooterPlayerController::OnMeleeCooldownStarted);
-			MeleeComp->OnMeleeCooldownEnded.RemoveDynamic(this, &AShooterPlayerController::OnMeleeCooldownEnded);
-			MeleeComp->OnMeleeCooldownEnded.AddDynamic(this, &AShooterPlayerController::OnMeleeCooldownEnded);
-			MeleeComp->OnMeleeChargeChanged.RemoveDynamic(this, &AShooterPlayerController::OnMeleeChargeChanged);
-			MeleeComp->OnMeleeChargeChanged.AddDynamic(this, &AShooterPlayerController::OnMeleeChargeChanged);
 		}
 
 		// Rebind UI widget to new character (for HitMarker after respawn)
@@ -375,6 +572,19 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 		if (AbilityResourceBar)
 		{
 			AbilityResourceBar->InitializeFor(ShooterCharacter);
+		}
+
+		// Same for the inventory block: InitializeFor unbinds the previous character first.
+		if (InventoryBar)
+		{
+			InventoryBar->InitializeFor(ShooterCharacter);
+		}
+
+		// And for the overlay. InitializeFor closes it first, so a player who died with the
+		// inventory open comes back holding a mouse cursor over a live game.
+		if (InventoryScreen)
+		{
+			InventoryScreen->InitializeFor(ShooterCharacter);
 		}
 
 		// Sync the crosshair to the (re)possessed character's current weapon. On a respawn the widget
@@ -500,30 +710,6 @@ void AShooterPlayerController::OnDropKickCooldownEnded()
 	if (IsValid(BulletCounterUI))
 	{
 		BulletCounterUI->BP_OnDropKickCooldownEnded();
-	}
-}
-
-void AShooterPlayerController::OnMeleeCooldownStarted(float TotalCooldownDuration)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnMeleeCooldownStarted(TotalCooldownDuration);
-	}
-}
-
-void AShooterPlayerController::OnMeleeCooldownEnded()
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnMeleeCooldownEnded();
-	}
-}
-
-void AShooterPlayerController::OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges)
-{
-	if (IsValid(BulletCounterUI))
-	{
-		BulletCounterUI->BP_OnMeleeChargeChanged(CurrentCharges, MaxCharges);
 	}
 }
 

@@ -1,4 +1,4 @@
-// AbilityComponent.cpp
+﻿// AbilityComponent.cpp
 
 #include "AbilityComponent.h"
 #include "AbilityDefinition.h"
@@ -369,7 +369,7 @@ int32 UAbilityComponent::AddAbility(UAbilityDefinition* Definition, int32 Level)
 	{
 		if (!Owner->HasAuthority())
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to grant itself '%s' on a client - refused"),
+			UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s tried to grant itself '%s' on a client - refused"),
 				*GetNameSafe(Owner), *GetNameSafe(Definition));
 			return INDEX_NONE;
 		}

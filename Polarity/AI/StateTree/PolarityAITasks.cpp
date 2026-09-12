@@ -6,8 +6,9 @@
 #include "../Coordination/AICombatCoordinator.h"
 #include "../Components/MeleeRetreatComponent.h"
 #include "../Components/CoverFinderComponent.h"
+#include "../Components/AIAccuracyComponent.h"
 #include "../../EMFVelocityModifier.h"
-#include "../../Coop/CoopPlayers.h"
+#include "AI/PolarityTeams.h"
 #include "../../Variant_Shooter/AI/ShooterNPC.h"
 #include "../../Variant_Shooter/AI/ShooterAIController.h"
 #include "../../Variant_Shooter/AI/EnemyCombatProfile.h"
@@ -422,7 +423,7 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::EnterState(FStateTreeExecutionContex
 		const FString PawnName = Pawn ? Pawn->GetName() : TEXT("NULL");
 		const FVector PawnLoc = Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector;
 
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s MoveWithStrafe: Result=%d, From=%s, To=%s, UsePathfinding=%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s MoveWithStrafe: Result=%d, From=%s, To=%s, UsePathfinding=%d"),
 			*PawnName, static_cast<int32>(Result.Code), *PawnLoc.ToString(), *Data.Destination.ToString(), Data.bUsePathfinding);
 
 		// Check NavMesh at both locations
@@ -432,28 +433,28 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::EnterState(FStateTreeExecutionContex
 			FNavLocation NavLoc;
 			const bool bStartOnNav = NavSys->ProjectPointToNavigation(PawnLoc, NavLoc, FVector(50, 50, 200));
 			const bool bDestOnNav = NavSys->ProjectPointToNavigation(Data.Destination, NavLoc, FVector(50, 50, 200));
-			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s NavMesh check: StartOnNav=%d, DestOnNav=%d"),
+			UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s NavMesh check: StartOnNav=%d, DestOnNav=%d"),
 				*PawnName, bStartOnNav, bDestOnNav);
 
 			if (!bStartOnNav)
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] %s NPC LOCATION IS NOT ON NAVMESH! Loc=%s"), *PawnName, *PawnLoc.ToString());
+				UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s NPC LOCATION IS NOT ON NAVMESH! Loc=%s"), *PawnName, *PawnLoc.ToString());
 			}
 			if (!bDestOnNav)
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] %s DESTINATION IS NOT ON NAVMESH! Dest=%s"), *PawnName, *Data.Destination.ToString());
+				UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s DESTINATION IS NOT ON NAVMESH! Dest=%s"), *PawnName, *Data.Destination.ToString());
 			}
 		}
 		else
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] %s NO NAVIGATION SYSTEM FOUND!"), *PawnName);
+			UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s NO NAVIGATION SYSTEM FOUND!"), *PawnName);
 		}
 	}
 
 	// Check immediate move result
 	if (Result.Code == EPathFollowingRequestResult::Failed)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] MoveWithStrafe: MoveTo FAILED immediately!"));
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] MoveWithStrafe: MoveTo FAILED immediately!"));
 		return EStateTreeRunStatus::Failed;
 	}
 
@@ -505,7 +506,7 @@ EStateTreeRunStatus FSTTask_MoveWithStrafe::Tick(FStateTreeExecutionContext& Con
 				return EStateTreeRunStatus::Succeeded;
 			}
 
-			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s MoveWithStrafe: PathFollowing is Idle - movement FAILED, dist=%.0f"),
+			UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s MoveWithStrafe: PathFollowing is Idle - movement FAILED, dist=%.0f"),
 				IdlePawn ? *IdlePawn->GetName() : TEXT("NULL"), DistToGoal);
 			return EStateTreeRunStatus::Failed;
 		}
@@ -2489,10 +2490,14 @@ void FSTTask_ShooterPush::ReleaseMovementState(FInstanceDataType& Data) const
 		}
 	}
 
-	if (Data.Controller)
+	// Only the leg this task started. Cancelling everything is how an exit from this state tore down
+	// whatever else was driving the pawn - a squad's march order, most of the time - and this state
+	// is left and re-entered several times a second.
+	if (Data.Controller && Data.bHasLeg)
 	{
 		Data.Controller->StopMovement();
 	}
+	Data.bHasLeg = false;
 }
 
 #if WITH_EDITOR
@@ -2705,7 +2710,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::EnterState(FStateTreeExecutionContext& 
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s ENTER Peek (target %s)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s ENTER Peek (target %s)"),
 		*GetNameSafe(Data.NPC), *GetNameSafe(Data.Target));
 
 	Data.Phase = EShooterPeekPhase::Seeking;
@@ -2828,21 +2833,33 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	// hiding left to do. Succeeded is the signal; the tree owns what happens next.
 	if (Data.FailedSearches >= Data.LastStandFailedSearches)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s -> LAST STAND: %d failed searches"),
+		UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s -> LAST STAND: %d failed searches"),
 			*GetNameSafe(Data.NPC), Data.FailedSearches);
 		return EStateTreeRunStatus::Succeeded;
 	}
 
 	if (Data.LastStandPlayerDistance > 0.0f)
 	{
-		// Nearest PLAYER, not the current target: somebody flanking the corner has pushed it just as
-		// much as the one being shot at, and in coop that is usually a different person.
-		if (const APawn* const Nearest = CoopPlayers::GetNearest(Data.NPC->GetWorld(), Data.NPC->GetActorLocation()))
+		// Nearest ENEMY, not the current target: somebody flanking the corner has pushed it just as
+		// much as the one being shot at, and in coop that is usually a different person. Not limited
+		// to players any more, because a rifleman of the other faction closing in is the same kind of
+		// pressure and should end the peek the same way.
+		//
+		// Through the coordinator because this runs every tick of the peek: its list is the players
+		// plus the registered NPCs, which is two arrays rather than a sweep over the level.
+		AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+		const APawn* Nearest = Coordinator ? Coordinator->FindNearestHostile(Data.NPC) : nullptr;
+		if (!Nearest)
+		{
+			Nearest = PolarityTeams::FindNearestHostilePawn(Data.NPC);
+		}
+
+		if (Nearest)
 		{
 			const float PlayerDist = FVector::Dist2D(Nearest->GetActorLocation(), Data.NPC->GetActorLocation());
 			if (PlayerDist <= Data.LastStandPlayerDistance)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s -> LAST STAND: player %s at %.0f (limit %.0f)"),
+				UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s -> LAST STAND: enemy %s at %.0f (limit %.0f)"),
 					*GetNameSafe(Data.NPC), *GetNameSafe(Nearest), PlayerDist, Data.LastStandPlayerDistance);
 				return EStateTreeRunStatus::Succeeded;
 			}
@@ -2924,7 +2941,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		{
 			// Genuinely stuck, not merely far. Drop the claim so the corner is not held by an NPC
 			// that cannot reach it, and go find another one.
-			UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s STALLED walking to H, %.0f left (best %.0f, arrive<=%.0f)"),
+			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s STALLED walking to H, %.0f left (best %.0f, arrive<=%.0f)"),
 				*GetNameSafe(Data.NPC), ToHideDistance, Data.BestGoalDistance, ShooterPeek_EffectiveArriveRadius(Data));
 
 			Finder->ReleaseCover();
@@ -2952,7 +2969,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			if (ScootProfile->bOverridePeekTuning && ScootProfile->bRelocateAfterFiring
 				&& Data.bFiredFromCorner && Data.CornerElapsed >= ScootProfile->MinCornerSeconds)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s fired from this corner, moving on (held %.1fs)"),
+				UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s fired from this corner, moving on (held %.1fs)"),
 					*GetNameSafe(Data.NPC), Data.CornerElapsed);
 
 				Finder->ReleaseCover();
@@ -2972,7 +2989,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 
 			if (!Finder->IsCoverStillGood())
 			{
-				UE_LOG(LogTemp, Warning,
+				UE_LOG(LogTemp, Verbose,
 					TEXT("[PEEK_DEBUG] %s DROPPED cover at AtHide: exposure %.2f over threshold, sat %.2fs of %.2fs"),
 					*GetNameSafe(Data.NPC), Finder->EvaluateCurrentExposure(), Data.PhaseElapsed, Data.HideDuration);
 
@@ -3056,7 +3073,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			// from any more".
 			if (!TryMoveTo(Data, Spot.PeekLocation))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s step-out REFUSED, dropping corner"),
+				UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s step-out REFUSED, dropping corner"),
 					*GetNameSafe(Data.NPC));
 
 				Finder->ReleaseCover();
@@ -3092,7 +3109,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		else if (IsMoveStalled(Data, DeltaTime, ToPeekDistance))
 		{
 			// Could not step out. Back behind cover rather than standing in the open half way.
-			UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s STALLED stepping out to P, %.0f left (best %.0f, arrive<=%.0f)"),
+			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s STALLED stepping out to P, %.0f left (best %.0f, arrive<=%.0f)"),
 				*GetNameSafe(Data.NPC), ToPeekDistance, Data.BestGoalDistance, ShooterPeek_EffectiveArriveRadius(Data));
 
 			EnterPhase(Data, EShooterPeekPhase::ToHide);
@@ -3120,7 +3137,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// been told to pin is just as useless as one that cannot see its own.
 		if (!FireTarget || !Data.NPC->HasLineOfSightTo(FireTarget))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s corner is BLIND from P, releasing"),
+			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s corner is BLIND from P, releasing"),
 				*GetNameSafe(Data.NPC));
 
 			Finder->ReleaseCover();
@@ -3287,7 +3304,7 @@ void FSTTask_ShooterPeek::ExitState(FStateTreeExecutionContext& Context,
 {
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 
-	UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s EXIT Peek from phase %s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s EXIT Peek from phase %s"),
 		*GetNameSafe(Data.NPC), PeekPhaseName(Data.Phase));
 
 	ReleaseAll(Data);
@@ -3309,6 +3326,7 @@ bool FSTTask_ShooterPeek::TryMoveTo(FInstanceDataType& Data, const FVector& Loca
 	MoveRequest.SetCanStrafe(true);
 
 	const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+	Data.bMoveIssued = Result.Code == EPathFollowingRequestResult::RequestSuccessful;
 
 	// AlreadyAtGoal counts as arrived here, unlike in the push: the H/P pair is only
 	// PeekStepDistance apart, so a leg that is already inside the acceptance radius is the normal
@@ -3400,7 +3418,7 @@ void FSTTask_ShooterPeek::StartStrafeLeg(FInstanceDataType& Data, const FVector&
 
 void FSTTask_ShooterPeek::EnterPhase(FInstanceDataType& Data, EShooterPeekPhase NewPhase) const
 {
-	UE_LOG(LogTemp, Warning, TEXT("[PEEK_DEBUG] %s phase %s -> %s (spent %.2fs)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s phase %s -> %s (spent %.2fs)"),
 		*GetNameSafe(Data.NPC), PeekPhaseName(Data.Phase), PeekPhaseName(NewPhase), Data.PhaseElapsed);
 
 	Data.Phase = NewPhase;
@@ -3501,28 +3519,29 @@ bool FSTTask_ShooterPeek::BeginRelocationRun(FInstanceDataType& Data, float Dist
 		return true;
 	}
 
-	// Who took the corner away. Asking the cover component per player rather than assuming it was
+	// Who took the corner away. Asking the cover component per candidate rather than assuming it was
 	// the current target: in coop the one who flanked is usually not the one being shot at, and
-	// naming the wrong player would point the covering fire at the wrong place.
+	// naming the wrong one would point the covering fire at the wrong place. Candidates are everyone
+	// hostile to this NPC, so a corner opened by another faction is answered the same way.
 	APawn* Opener = nullptr;
 	if (const UCoverFinderComponent* const Finder = Data.NPC->FindComponentByClass<UCoverFinderComponent>())
 	{
-		TArray<APawn*> Players;
-		CoopPlayers::GetAll(Data.NPC->GetWorld(), Players);
+		TArray<APawn*> Hostiles;
+		PolarityTeams::GatherHostilePawns(Data.NPC, Hostiles);
 
 		float WorstThreat = -1.0f;
-		for (APawn* const Player : Players)
+		for (APawn* const Hostile : Hostiles)
 		{
-			if (!Finder->IsCoverOpenedBy(Player))
+			if (!Finder->IsCoverOpenedBy(Hostile))
 			{
 				continue;
 			}
 
-			const float Threat = Coordinator->GetPlayerThreat(Player);
+			const float Threat = Coordinator->GetThreatFor(Hostile);
 			if (Threat > WorstThreat)
 			{
 				WorstThreat = Threat;
-				Opener = Player;
+				Opener = Hostile;
 			}
 		}
 	}
@@ -3653,8 +3672,14 @@ void FSTTask_ShooterPeek::ReleaseAll(FInstanceDataType& Data) const
 	if (Data.Controller)
 	{
 		Data.Controller->ClearFocus(EAIFocusPriority::Gameplay);
-		Data.Controller->StopMovement();
+
+		// Only this task's own movement, for the same reason as the push above.
+		if (Data.bMoveIssued)
+		{
+			Data.Controller->StopMovement();
+		}
 	}
+	Data.bMoveIssued = false;
 }
 
 #if WITH_EDITOR
@@ -3670,5 +3695,228 @@ FText FSTTask_ShooterPeek::GetDescription(const FGuid& ID, FStateTreeDataView In
 	return FText::FromString(FString::Printf(
 		TEXT("Peek: hide %.1fs, step out and strafe-fire %.1fs (legs %.2f-%.2fs), repeat"),
 		Data->HideDuration, Data->PeekDuration, Data->StrafeHoldMin, Data->StrafeHoldMax));
+}
+#endif
+
+// ============================================================================
+// TakeStance
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_TakeStance::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	Data.bAtStance = false;
+	Data.bUnreachable = false;
+	Data.TimeSinceMoveIssued = 0.0f;
+
+	if (!Data.Controller)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Data.bHoldFire)
+	{
+		// hold-fire is its own verb, and this is the whole of it on the way in: an ambush that keeps
+		// shooting from the previous state is not an ambush.
+		if (AShooterNPC* const NPC = Cast<AShooterNPC>(Data.Controller->GetPawn()))
+		{
+			NPC->StopShooting();
+		}
+	}
+
+	// Already standing in it. Not a failure and not a move: an ambush point chosen where the NPC
+	// happens to be is a perfectly good ambush point.
+	const APawn* const Pawn = Data.Controller->GetPawn();
+	if (Pawn && FVector::Dist2D(Pawn->GetActorLocation(), Data.StanceLocation) <= Data.AcceptanceRadius)
+	{
+		Data.bAtStance = true;
+		Data.Controller->StopMovement();
+		ApplyFacing(Data);
+		return EStateTreeRunStatus::Running;
+	}
+
+	FAIMoveRequest MoveRequest;
+	MoveRequest.SetGoalLocation(Data.StanceLocation);
+	MoveRequest.SetAcceptanceRadius(Data.AcceptanceRadius);
+	MoveRequest.SetUsePathfinding(true);
+	MoveRequest.SetAllowPartialPath(true);
+	MoveRequest.SetProjectGoalLocation(true);
+
+	const FPathFollowingRequestResult Result = Data.Controller->MoveTo(MoveRequest);
+
+	if (Result.Code == EPathFollowingRequestResult::Failed)
+	{
+		// Reported rather than failed: the tree that picked this point is the thing that can pick
+		// another one, and a failed task would drop the NPC out of the state that knows that.
+		Data.bUnreachable = true;
+		UE_LOG(LogTemp, Warning, TEXT("[AI_DEBUG] %s TakeStance: cannot reach %s"),
+			*GetNameSafe(Data.Controller->GetPawn()), *Data.StanceLocation.ToCompactString());
+		return EStateTreeRunStatus::Running;
+	}
+
+	if (Result.Code == EPathFollowingRequestResult::AlreadyAtGoal)
+	{
+		Data.bAtStance = true;
+		ApplyFacing(Data);
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FSTTask_TakeStance::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.Controller)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Data.bHoldFire)
+	{
+		if (AShooterNPC* const NPC = Cast<AShooterNPC>(Data.Controller->GetPawn()))
+		{
+			NPC->StopShooting();
+		}
+	}
+
+	// Holding: keep pointing where the stance wants, every tick. Set once and it drifts, because
+	// anything else that touches focus or rotation mode wins by being later.
+	if (Data.bAtStance)
+	{
+		ApplyFacing(Data);
+		return EStateTreeRunStatus::Running;
+	}
+
+	Data.TimeSinceMoveIssued += DeltaTime;
+
+	if (const UPathFollowingComponent* const PathComp = Data.Controller->GetPathFollowingComponent())
+	{
+		if (PathComp->DidMoveReachGoal())
+		{
+			Data.bAtStance = true;
+			Data.Controller->StopMovement();
+			ApplyFacing(Data);
+			return EStateTreeRunStatus::Running;
+		}
+
+		// Idle without having arrived means the follower gave up. The grace period is for the frame
+		// or two right after MoveTo, where Idle only means "has not started yet".
+		if (PathComp->GetStatus() == EPathFollowingStatus::Idle && Data.TimeSinceMoveIssued > 0.5f)
+		{
+			Data.bUnreachable = true;
+		}
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FSTTask_TakeStance::ExitState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (Data.Controller)
+	{
+		Data.Controller->StopMovement();
+		Data.Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	}
+}
+
+void FSTTask_TakeStance::ApplyFacing(const FInstanceDataType& Data) const
+{
+	if (!Data.Controller)
+	{
+		return;
+	}
+
+	if (IsValid(Data.FaceTarget))
+	{
+		Data.Controller->SetFocus(Data.FaceTarget);
+		return;
+	}
+
+	if (Data.FacingDirection.IsNearlyZero())
+	{
+		return;
+	}
+
+	// A focal POINT rather than a rotation: the controller already knows how to turn a body towards
+	// a point, and a stance that wants to look north is a stance looking at a spot to the north.
+	const APawn* const Pawn = Data.Controller->GetPawn();
+	if (!Pawn)
+	{
+		return;
+	}
+
+	const FVector Look = Pawn->GetActorLocation() + Data.FacingDirection.GetSafeNormal() * 1000.0f;
+	Data.Controller->SetFocalPoint(Look);
+}
+
+#if WITH_EDITOR
+FText FSTTask_TakeStance::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* Data = InstanceDataView.GetPtr<FInstanceDataType>();
+	if (Data && Data->bHoldFire)
+	{
+		return FText::FromString(TEXT("Take stance and hold fire (ambush)"));
+	}
+
+	return FText::FromString(TEXT("Take stance: move to point, hold it, face a direction"));
+}
+#endif
+
+// ============================================================================
+// SuppressiveFire
+// ============================================================================
+
+EStateTreeRunStatus FSTTask_SuppressiveFire::EnterState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	if (!Data.NPC)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	UAIAccuracyComponent* const Accuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+	if (!Accuracy)
+	{
+		// No accuracy component means no way to miss on purpose, and firing accurately while
+		// pretending to suppress would quietly turn covering fire into an execution.
+		UE_LOG(LogTemp, Warning, TEXT("[AI_DEBUG] %s SuppressiveFire: no UAIAccuracyComponent"),
+			*GetNameSafe(Data.NPC));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	Accuracy->SetSuppressiveFire(true);
+	return EStateTreeRunStatus::Running;
+}
+
+void FSTTask_SuppressiveFire::ExitState(FStateTreeExecutionContext& Context,
+	const FStateTreeTransitionResult& Transition) const
+{
+	const FInstanceDataType& Data = Context.GetInstanceData(*this);
+
+	// Off on EVERY exit, including a failure or a state change nobody planned. Whoever switches the
+	// mode on owns switching it off, and this is the only place that can promise it.
+	if (Data.NPC)
+	{
+		if (UAIAccuracyComponent* const Accuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>())
+		{
+			Accuracy->SetSuppressiveFire(false);
+		}
+	}
+}
+
+#if WITH_EDITOR
+FText FSTTask_SuppressiveFire::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Suppressive fire: aim to miss close for as long as this state runs"));
 }
 #endif

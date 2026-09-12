@@ -1,10 +1,11 @@
-// PlayerClassDefinition.h
+﻿// PlayerClassDefinition.h
 // What makes one player class different from another, as data.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "GameplayTagContainer.h"
 #include "PlayerClassDefinition.generated.h"
 
 class AShooterWeapon;
@@ -37,7 +38,16 @@ enum class EClassItemVerb : uint8
 	 *  [CoreRedirects]. */
 	Decoy,
 	/** Decompose it into healing, for yourself or a teammate. */
-	Heal
+	Heal,
+	/** Crack it open into a wall of smoke where it lands, or around your own feet if you use it in
+	 *  your hands. The Melee's verb.
+	 *
+	 *  ADDED rather than renamed from Heal, and that is not a style choice: tagged property
+	 *  serialisation stores the value NAME, so renaming would have loaded DA_Class_Melee as None and
+	 *  the class would have quietly stopped interacting with props at all -- the same trap Decoy
+	 *  already needed a CoreRedirect for. Heal stays because it still works and another class may
+	 *  want it. */
+	Smoke
 };
 
 /**
@@ -72,6 +82,15 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Identity")
 	TObjectPtr<UTexture2D> Icon;
+
+	/** This class's colour, as a name rather than a value.
+	 *
+	 *  The colour itself lives in Project Settings -> Polarity -> Palette, not here, so the things
+	 *  that share a class's identity without belonging to it - a weapon that favours the class, a
+	 *  menu accent, an ability effect - can point at the same entry instead of copying a value out
+	 *  of this asset and drifting from it later. Read it with UPolarityPalette::GetColor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Identity")
+	FGameplayTag ColorTag;
 
 	// ==================== Loadout ====================
 

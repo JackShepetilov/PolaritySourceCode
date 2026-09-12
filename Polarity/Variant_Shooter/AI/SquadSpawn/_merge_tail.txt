@@ -1,0 +1,73 @@
+	// Re-keying the members IS the merge: a squad is nothing more than a team id plus an origin, so
+	// the survivors become part of the other one, adopt its job, and fall in at the back of its
+	// formation.
+	int32 HighestSlot = -1;
+	ESquadInitialTask HostTask = ESquadInitialTask::Defend;
+	FVector HostObjective = FVector::ZeroVector;
+	bool bHostHasObjective = false;
+
+	for (const FTrackedSquadMember& Member : Members)
+	{
+		if (Member.SquadId == Best->SquadId)
+		{
+			HighestSlot = FMath::Max(HighestSlot, Member.SlotIndex);
+			HostTask = Member.Task;
+			HostObjective = Member.Objective;
+			bHostHasObjective = Member.bHasObjective;
+		}
+	}
+
+	int32 NextSlot = HighestSlot + 1;
+	for (FTrackedSquadMember& Member : Members)
+	{
+		if (Member.SquadId != Broken.SquadId)
+		{
+			continue;
+		}
+
+		const APawn* const Pawn = Member.Pawn.Get();
+		if (!Pawn || Pawn->IsPendingKillPending())
+		{
+			continue;
+		}
+
+		ReleaseWithdrawRole(Member);
+		Member.SquadId = Best->SquadId;
+		Member.SquadOrigin = Best->Anchor;
+		Member.Task = HostTask;
+		Member.Objective = HostObjective;
+		Member.bHasObjective = bHostHasObjective;
+		Member.SlotIndex = NextSlot++;
+		Member.LastIssuedDestination = FVector::ZeroVector;
+
+		// The roster moves with the id. Re-keying only the tracked member used to be the whole
+		// merge, because a squad was nothing but an id; now a squad owns a list of bodies, and one
+		// that still lists men who answer to somebody else is a squad that will try to split them
+		// off later and quietly do nothing.
+		APawn* const Body = Member.Pawn.Get();
+		Broken.RemoveMember(Body);
+		Best->AddMember(Body);
+	}
+
+	// An officer arriving with the survivors takes over a squad that has lost its own. Cheap, and it
+	// gives a reason to care which men made it back.
+	if (!Best->Commander.IsValid() && Broken.Commander.IsValid())
+	{
+		Best->Commander = Broken.Commander;
+	}
+
+	Best->InitialCount += Alive;
+	Best->LastAliveCount += Alive;
+
+	// The broken squad stops existing. Its record stays with nothing in it, which reads as "wiped"
+	// to everything else and costs one skipped iteration.
+	Broken.InitialCount = 0;
+	Broken.LastAliveCount = 0;
+	Broken.Commander.Reset();
+
+	if (UBattleLogSubsystem* const Battle = UBattleLogSubsystem::Get(this))
+	{
+		Battle->RecordNote(TEXT("merge"), FString::Printf(TEXT("squad@%.0f,%.0f"), Broken.Anchor.X, Broken.Anchor.Y),
+			Broken.TeamId, FString::Printf(TEXT("%d survivors join squad@%.0f,%.0f"), Alive, Best->Anchor.X, Best->Anchor.Y));
+	}
+

@@ -142,4 +142,21 @@ public:
 	/** How long one enemy holds the front before rotating out. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Push", meta = (EditCondition = "bOverridePushTuning", ClampMin = "0.0"))
 	float DuelDuration = 6.0f;
+
+	// ==================== Flying drone fire rhythm ====================
+
+	/** Take the drone numbers below instead of the ones stored in the tree. Same reasoning as the
+	 *  peek tuning: the fire-position tasks are shared, the rhythm is per class. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drone")
+	bool bOverrideDroneTuning = false;
+
+	/** Seconds of pre-fire telegraph before a burst: charge VFX on the muzzle and a thin beam to
+	 *  the target gaining brightness. The player's window to break line of sight or pre-fire. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drone", meta = (EditCondition = "bOverrideDroneTuning", ClampMin = "0.0"))
+	float DroneAimTelegraphDuration = 0.45f;
+
+	/** Seconds of visible overheat after a burst: smoke from the muzzle, drone visibly hanging.
+	 *  The public counter-play window — also granted to NPC factions fighting the drone. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drone", meta = (EditCondition = "bOverrideDroneTuning", ClampMin = "0.1"))
+	float DroneOverheatDuration = 2.5f;
 };

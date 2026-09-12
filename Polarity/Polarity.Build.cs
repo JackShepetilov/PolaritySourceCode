@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
 
@@ -33,6 +33,9 @@ public class Polarity : ModuleRules
             "Landscape",
             "LandscapePatch",
             "DeveloperSettings",
+            // GameplayTags is PUBLIC, not private: FGameplayTag appears in public headers
+            // (UPolarityPalette::Colors, AShooterWeapon::AmmoColorTag).
+            "GameplayTags",
             // CableComponent: the grapple line is drawn with UCableComponent, which lives in the
             // engine plugin of the same name. Enabled by default, so no .uproject entry is needed.
             "CableComponent"
@@ -43,7 +46,17 @@ public class Polarity : ModuleRules
         // for its own move data; a game module that sends its own quantized vector has to as well,
         // or it compiles clean and fails at link with LNK2019 on both symbols.
         // @see FCharacterNetworkMoveData_Polarity::Serialize
-        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "GameplayTags", "MoviePlayer", "NetCore" });
+        // RecoilAnimation is PRAS, the recoil half of the FPS Animation Pack. Public rather than
+        // private because AShooterCharacter holds a URecoilAnimationComponent as a UPROPERTY, so
+        // the type has to be visible to anything including that header.
+        //
+        // NOTE: their module declares "PlatformAllowList": ["Win64"] in FPSAnimationPack.uplugin,
+        // so this line pins the whole game module to Win64. That is what we ship today, but it is
+        // a real constraint and not an accident: adding a platform means either widening their
+        // allow list or wrapping every PRAS reference in a guard.
+        PublicDependencyModuleNames.Add("RecoilAnimation");
+
+        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "MoviePlayer", "NetCore" });
 
         // Editor-only: GC batch creator needs UnrealEd (asset saving) and ContentBrowser (selection)
         if (Target.Type == TargetType.Editor)

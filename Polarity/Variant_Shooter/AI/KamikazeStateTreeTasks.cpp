@@ -69,11 +69,11 @@ EStateTreeRunStatus FSTTask_KamikazeAttack::EnterState(FStateTreeExecutionContex
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// If drone isn't already in attack sequence (triggered by Tick retaliation/forced),
-	// begin telegraph now
+	// If drone isn't already in attack sequence (triggered by retaliation),
+	// begin the attack now — the StateTree is the single attack authority
 	if (!Data.Drone->IsInAttackSequence())
 	{
-		Data.Drone->BeginTelegraph(Data.bIsRetaliation);
+		Data.Drone->BeginAttack(Data.bIsRetaliation);
 	}
 
 	return EStateTreeRunStatus::Running;
@@ -92,18 +92,17 @@ EStateTreeRunStatus FSTTask_KamikazeAttack::Tick(FStateTreeExecutionContext& Con
 
 	switch (State)
 	{
-	case EKamikazeState::Telegraphing:
 	case EKamikazeState::Attacking:
 	case EKamikazeState::PostAttack:
 		// Still in attack sequence
 		return EStateTreeRunStatus::Running;
 
 	case EKamikazeState::Recovery:
-		// Attack sequence complete — recovery. Keep running until recovery finishes.
+		// Pull-up between attempts — keep running until loiter or self-destruct
 		return EStateTreeRunStatus::Running;
 
 	case EKamikazeState::Orbiting:
-		// Recovery complete, back to orbit — success
+		// Sequence complete, back to loiter — success
 		return EStateTreeRunStatus::Succeeded;
 
 	case EKamikazeState::Dead:
@@ -134,27 +133,28 @@ bool FSTCondition_KamikazeShouldAttack::TestCondition(FStateTreeExecutionContext
 		return false;
 	}
 
-	// Already in attack sequence (retaliation/forced triggered from Tick)
+	// Already in attack sequence (retaliation flagged)
 	if (Data.Drone->IsInAttackSequence())
 	{
 		return true;
 	}
 
-	// Retaliation: took damage while orbiting
+	// Retaliation: took damage while loitering — flag set in TakeDamage
 	if (Data.Drone->IsRetaliating())
 	{
 		return true;
 	}
 
-	// Forced: orbit can't be maintained
-	if (Data.Drone->IsOrbitForced())
+	// Emergency: loitered inside proximity radius long enough
+	if (Data.Drone->IsProximityTimedOut())
 	{
 		return true;
 	}
 
-	// Check if coordinator has granted a token
+	// Ask the coordinator for a kamikaze attack token. Requesting here is intentional:
+	// the condition is the single decision point, and holding the token reserves a dive slot.
 	AAICombatCoordinator* Coordinator = AAICombatCoordinator::GetCoordinator(Data.Drone);
-	if (Coordinator && Coordinator->HasAttackToken(Data.Drone))
+	if (Coordinator && Coordinator->RequestAttackToken(Data.Drone, EAttackTokenType::Kamikaze))
 	{
 		return true;
 	}

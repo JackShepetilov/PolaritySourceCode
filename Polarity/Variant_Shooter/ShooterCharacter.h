@@ -16,6 +16,8 @@ class UInputAction;
 class UInputComponent;
 class UPawnNoiseEmitterComponent;
 class UWeaponRecoilComponent;
+class URecoilAnimationComponent;
+class URecoilData;
 class UHitMarkerComponent;
 class UMeleeAttackComponent;
 class UChargeAnimationComponent;
@@ -27,6 +29,7 @@ class UCaptureReticleWidget;
 class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
+class UInventoryComponent;
 class UPlayerDeathSequenceComponent;
 class UAudioComponent;
 class UCurveFloat;
@@ -37,6 +40,7 @@ class UNiagaraSystem;
 class UNiagaraComponent;
 class AEMFPhysicsProp;
 class ADroppedRangedWeapon;
+class AInventoryPickup;
 class ARiotShield;
 struct FCheckpointData;
 
@@ -62,6 +66,16 @@ enum class EWeaponSwitchPhase : uint8
 	/** Hands are empty for the length of a grapple. Ends when the line lets go, and the weapon that
 	 *  was already in CurrentWeapon comes straight back out. */
 	StowedForGrapple,
+	/** The player asked for empty hands. Same holster animation as a swap with nothing waiting to
+	 *  replace it, and unlike the grapple's version nothing ends it on its own. */
+	StowingByPlayer,
+	/** Empty hands because the player asked, and they stay that way until the player asks otherwise.
+	 *  CurrentWeapon still names the weapon that will come back out, exactly as during a grapple. */
+	StowedByPlayer,
+	/** Empty hands for the length of a melee swing. Entered instantly, with no holster: the swing's
+	 *  own animation plays on the melee mesh. Ends when the swing's montage ends and the same weapon
+	 *  comes back out through its draw. */
+	StowedForMelee,
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBulletCountUpdatedDelegate, int32, MagazineSize, int32, Bullets);
@@ -81,6 +95,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FMeleeWeaponEquippedDelegate, boo
 
 // Prop capture/launch delegates (fired by ChargeAnimationComponent)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPropCaptured, AActor*, CapturedActor);
+
+/** A hit was turned away by the slide block. Carries the world direction the hit came FROM, so a
+ *  spark can be placed and a flinch can lean the right way. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FShotBlockedDelegate, FVector, FromDirection);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPropLaunched, AActor*, LaunchedActor);
 
 // Prop impact delegate (fired by EMFPhysicsProp when a launched prop damages NPCs)
@@ -177,6 +195,72 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UWeaponRecoilComponent* RecoilComponent;
 
+	/** PRAS, the FPS Animation Pack's recoil. Idle unless the weapon in hand names a recoil asset.
+	 *
+	 *  On the CHARACTER and not on the weapon, because that is where the animation node looks:
+	 *  FAnimNode_RecoilAnimationNode::PreUpdate searches the OWNER of the mesh it runs on, and the
+	 *  node lives in UE5_ABP_IK_Animation, which is a layer of the viewmodel graph on the arms.
+	 *  The arms belong to the character, so the component has to as well. Their own
+	 *  BP_ViewmodelCharacter puts it in exactly the same place. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	URecoilAnimationComponent* PackRecoilComponent;
+
+	/** The recoil asset PRAS was last initialised with, so a weapon swap re-inits and a re-equip of
+	 *  the same weapon does not. Null means PRAS is idle and OUR recoil is driving. */
+	UPROPERTY(Transient)
+	TObjectPtr<URecoilData> ActivePackRecoilData;
+
+	// ==================== Pack camera jolt ====================
+	//
+	// The pack's second recoil channel, and the one nothing was playing. Their RecoilShake asset is
+	// a rotation CURVE plus a play rate and a smoothing speed, and their CameraAnimator component
+	// runs it. We cannot take that component: it also owns their ADS field of view, which is our
+	// zoom's job, so the two would fight over the same camera every frame. The playback is
+	// therefore ours and only the curve is theirs.
+	//
+	// Deliberately NOT the same channel as the smooth climb: ControllerRecoil pushes the aim itself
+	// through AddControllerPitchInput and the shot follows it, while this is a jolt the view
+	// recovers from and the bullets never see. Mixing them would make the crosshair lie.
+
+	/** Seconds into the shake curve. Past the curve's own length the shake is finished. */
+	float PackShakePlayback = 0.0f;
+
+	/** Interpolated toward the curve's value at PackShakeSmoothing, in degrees. */
+	FRotator PackShakeCurrent = FRotator::ZeroRotator;
+
+	/** This shot's angles, rolled once when the shot went off. */
+	FRotator PackShakeAmplitude = FRotator::ZeroRotator;
+
+	/** World time of the last shot that drove PRAS, 0 when it is not running.
+	 *
+	 *  PRAS is stopped by a TIMEOUT on this and not by any firing flag, because no flag we have
+	 *  means "shots are still coming out". AShooterWeapon::bIsFiring is the trigger: StartFiring
+	 *  sets it, StopFiring clears it, and nothing in between cares whether the magazine still has
+	 *  rounds. Holding the trigger on an empty gun therefore kept their looping auto timeline
+	 *  shaking a weapon that had stopped shooting. Time since the last round is the one signal that
+	 *  is true whatever ended the burst -- empty magazine, reload, weapon switch, death. */
+	float LastPackShotTime = 0.0f;
+
+	/** Advances the jolt and lets it decay. Called every frame from Tick. */
+	void TickPackCameraShake(float DeltaTime);
+
+public:
+
+	/** Our camera shake's sway plus the pack's recoil jolt. Both are picture-only. */
+	virtual FRotator GetViewOnlyRotationOffset() const override;
+
+	// Back to the private component block this sits in (AllowPrivateAccess).
+private:
+
+	/** Rewrites a camera offset that was authored in the ACTOR's axes into whatever space the
+	 *  camera's parent happens to be in.
+	 *
+	 *  Needed because the camera changed parents. It used to hang off the capsule, whose axes are
+	 *  the actor's, so shake and crouch offsets could be written straight in. It now hangs off the
+	 *  FPCamera socket on neck_01, a bone the animation turns freely, so the same numbers meant
+	 *  "up" one frame and "sideways" the next. Returns the input unchanged on the old hierarchy. */
+	FVector ToCameraParentSpace(const USceneComponent* Camera, const FVector& ActorSpaceOffset) const;
+
 	/** Hit marker and kill confirm component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UHitMarkerComponent* HitMarkerComponent;
@@ -214,6 +298,11 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UAbilityComponent> AbilityComponent;
 
+	/** The cell grid: currency, spare magazines, ability upgrades and paid attachments.
+	 *  A ledger of capacity only - weapons keep living in OwnedWeapons and cost the grid nothing. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInventoryComponent> InventoryComponent;
+
 	/** Configurable terminal death camera / pull / dismemberment presentation. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UPlayerDeathSequenceComponent> PlayerDeathSequenceComponent;
@@ -237,9 +326,20 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* SwitchWeaponBackAction;
 
-	/** Set of weapon-switch input actions to listen for (e.g. IA_Slot1, IA_Slot2). WHICH weapon a key
-	 *  selects is declared per-weapon via AShooterWeapon::SwitchAction — so several weapon classes can
-	 *  share one key (only one is ever owned at a time). List here every action used by any weapon. */
+	/** Put the weapon away, or take it back out. One key, toggling: pressed with something in hand
+	 *  it holsters, pressed with empty hands it draws the same weapon again. Leave null and the
+	 *  feature simply is not bound. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* HolsterWeaponAction;
+
+	/** The number keys, IN SLOT ORDER: element 0 is key 1, element 1 is key 2, and so on.
+	 *
+	 *  THE ORDER IS THE MEANING [author, 2026-09-05]. A weapon no longer brings its own key: the
+	 *  character places it in a slot (class weapon → 0, anything looted → 1, @see
+	 *  ResolveHotkeySlotForWeapon) and the slot indexes this array. Reordering it in the Blueprint
+	 *  therefore moves the whole inventory, which is the point — it is the one place the layout is
+	 *  written down. AShooterWeapon::SwitchAction survives only as the fallback for a weapon nobody
+	 *  placed. */
 	UPROPERTY(EditAnywhere, Category = "Input|Weapon Hotkeys")
 	TArray<TObjectPtr<UInputAction>> WeaponSwitchActions;
 
@@ -264,6 +364,16 @@ protected:
 	 *  Press/release split feeds the ability's own Tap-vs-Hold ActivationMode. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* AbilityAction;
+
+	/** Open and close the inventory overlay. A toggle rather than a hold, because the screen is
+	 *  read and acted on, not glanced at: the corner already answers the glance. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* ToggleInventoryAction;
+
+	/** Open and close the map. A toggle rather than a hold: on a 640 metre map with a war running
+	 *  on it, reading where everybody is takes longer than a glance. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* ToggleMapAction;
 
 	/** Name of the first person mesh weapon socket */
 	UPROPERTY(EditAnywhere, Category = "Weapons")
@@ -343,11 +453,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View|Camera Follow", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CameraLocationFollowAlpha = 0.5f;
 
-	/** The crouch counter-offset actually written to the camera this frame. Kept so the follow
-	 *  compensation above can subtract it: crouch is the only camera offset the FP mesh must follow
-	 *  in full. */
-	FVector AppliedCrouchCameraOffset = FVector::ZeroVector;
-
 	/** Max distance to use for aim traces */
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 100000, Units = "cm"))
 	float MaxAimDistance = 10000.0f;
@@ -359,6 +464,11 @@ protected:
 
 	/** Current ADS alpha (0 = hip fire, 1 = fully aimed) */
 	float CurrentADSAlpha = 0.0f;
+
+	/** The middle term of Apex's ADS sensitivity formula: tan(half aim FOV) / tan(half hip FOV).
+	 *  Written by UpdateADS from the clean FOV pair, read by DoAim. Kept out of the camera's own
+	 *  FieldOfView on purpose - that one carries shake and slide wobble, and aim must not. */
+	float AdsSensitivityFovScale = 1.0f;
 
 	/** Base FOV of the camera (stored on BeginPlay) */
 	float BaseCameraFOV = 90.0f;
@@ -450,6 +560,199 @@ public:
 
 	/** Go limp, or get back up. Runs on every machine, driven by bIsDowned. */
 	void ApplyDownedPresentation(bool bDowned);
+
+	// ==================== Berserk (the Melee's active) ====================
+	//
+	// The state lives on the CHARACTER, not on the ability that handed it out, and that is the whole
+	// reason it is here: the active covers the caster AND a teammate, and that teammate is carrying
+	// some other class's ability in their slot. What is being granted is a property of the body being
+	// buffed, so the body owns it.
+	//
+	// Two effects while it runs, and they pull in opposite directions on purpose: damage arriving
+	// from behind and from the sides is cut, and everything this player DEALS is remembered and paid
+	// back as health when the window closes. Standing still and surviving is worth nothing; the class
+	// is being paid to walk in and work.
+
+	/** Server: put this player into berserk for Duration seconds. Called on the caster and, when the
+	 *  caster was looking at one, on the ally. Re-applying refreshes the window and keeps whatever
+	 *  damage has already been banked. */
+	void StartBerserk(float Duration, float FrontHalfAngle, float FlankDamageMultiplier,
+		float HealFraction, float MaxHeal);
+
+	/** Server: this player just dealt Damage to somebody. Ignored unless berserk is running.
+	 *  Fed from the victim's side (@see AShooterNPC::TakeDamage), because that is the one funnel
+	 *  every kind of damage in this project passes through on the authority. */
+	void NotifyBerserkDamageDealt(float Damage);
+
+	UFUNCTION(BlueprintPure, Category = "Coop|Berserk")
+	bool IsBerserk() const { return bIsBerserk; }
+
+	/** How much health the window has earned so far. For the HUD; the payout happens at the end. */
+	UFUNCTION(BlueprintPure, Category = "Coop|Berserk")
+	float GetBerserkPendingHeal() const;
+
+protected:
+
+	/** Running right now. Replicated because everyone has to see it: the effect, the sound and the
+	 *  teammate's own indicator all hang off it, and the cut to incoming damage is decided on the
+	 *  server where this is authoritative. */
+	UPROPERTY(ReplicatedUsing = OnRep_IsBerserk)
+	bool bIsBerserk = false;
+
+	UFUNCTION()
+	void OnRep_IsBerserk();
+
+	/** Server: close the window and pay out. */
+	void EndBerserk();
+
+	/** Blueprint hook for the effect and the sound, on every machine. Nothing here plays anything:
+	 *  what berserk LOOKS like is art, and art belongs in the Blueprint. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Coop|Berserk")
+	void BP_OnBerserkChanged(bool bActive);
+
+	/** Half-angle of the arc berserk does NOT cover, measured from where the player is facing. */
+	float BerserkFrontHalfAngle = 70.0f;
+
+	/** What a hit from outside that arc is multiplied by. */
+	float BerserkFlankMultiplier = 0.6f;
+
+	float BerserkHealFraction = 0.35f;
+	float BerserkMaxHeal = 60.0f;
+
+	/** Damage this player has dealt since the window opened. */
+	float BerserkDamageDealt = 0.0f;
+
+	FTimerHandle BerserkTimer;
+
+	/** How long the running window was opened for. Replicated, unlike the rest of the tuning above,
+	 *  because it is the only one of these numbers anybody but the server needs: the filter paces its
+	 *  heartbeat against it, and the machine drawing that filter is the one that owns the VIEW. For a
+	 *  teammate the caster covered, that is not the machine the timer is running on. */
+	UPROPERTY(Replicated)
+	float BerserkDuration = 8.0f;
+
+	// ==================== The berserk filter (owning view only) ====================
+	//
+	// Modelled on Cyberpunk 2077's Berserk cyberware. That red screen is what people remember as the
+	// "cyberpsychosis" filter, but the base game has no player-facing cyberpsychosis effect at all --
+	// the mods that add one are copying Berserk. Its parts: the world desaturates, red is gained back
+	// on top, a heavy vignette squeezes in from the edges, and the whole thing breathes on a pulse.
+	//
+	// The lesson taken from it is the one its own players wrote. The vanilla effect is loud enough
+	// that two of the most-downloaded mods for it exist purely to turn it down, the complaint being
+	// that it "makes it almost impossible to see", worse in the dark. Ours is worn for eight seconds
+	// in the middle of a firefight by the class whose whole job is to be inside one, so every number
+	// here starts well below Cyberpunk's, and the HEARTBEAT rather than the tint carries the drama.
+	//
+	// It rides on UCameraComponent::PostProcessBlendWeight, not on the individual overrides. At zero
+	// weight UCameraComponent::GetCameraView does not even copy the settings struct, so at rest this
+	// block contributes exactly nothing and the level's own post process volume is untouched. One
+	// number to animate, and no state to unwind when the window closes.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk")
+	bool bEnableBerserkFilter = true;
+
+	/** Optional post process material for what engine settings cannot do: edge warp, radial blur,
+	 *  scanlines. Blended into the same stack and handed PPIntensityParameterName every frame, so a
+	 *  material can pulse with the heartbeat instead of sitting at a fixed strength. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk")
+	TObjectPtr<UMaterialInterface> BerserkFilterMaterial;
+
+	/** The hue berserk pushes into the image. Red is Cyberpunk's; any colour works.
+	 *
+	 *  Picked in the ordinary 0..1 colour picker, because the strength below is what pushes it past
+	 *  1 -- so a dark pick and a bright pick differ in HUE, not in how hard the effect lands, which
+	 *  is the mistake a single HDR colour invites. Alpha is unused. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (HideAlphaChannel))
+	FLinearColor BerserkFilterTint = FLinearColor(1.0f, 0.15f, 0.1f, 1.0f);
+
+	/** How hard that hue is pushed. 0 leaves the colour alone entirely. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float BerserkFilterTintStrength = 0.6f;
+
+	/** How grey the rest of the world goes. 1 is untouched, 0 is black and white. Not far below the
+	 *  default: colour is how the player tells an enemy apart from the geometry behind it, and this
+	 *  ability is spent walking into a crowd. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BerserkFilterSaturation = 0.4f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float BerserkFilterVignette = 1.0f;
+
+	/** Chromatic aberration. Cyberpunk leans on this hard and gets complained at for it; ours is mild
+	 *  on purpose, because it lands worst exactly where the player is looking for targets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float BerserkFilterFringe = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BerserkFilterGrain = 0.25f;
+
+	/** Thumps per second when the window opens... */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+	float BerserkFilterHeartRate = 1.6f;
+
+	/** ...and as it runs out. Quickening is the only warning the player gets that the armour on their
+	 *  back is about to stop existing, and it is a warning they can read without looking away. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+	float BerserkFilterHeartRateEnd = 3.4f;
+
+	/** Share of the filter that rides on the heartbeat instead of sitting flat. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BerserkFilterHeartAmount = 0.4f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "2.0", Units = "s"))
+	float BerserkFilterBlendIn = 0.12f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "2.0", Units = "s"))
+	float BerserkFilterBlendOut = 0.6f;
+
+	/** 0..1 fade, before the heartbeat rides on top of it. */
+	float CurrentBerserkFilterIntensity = 0.0f;
+
+	/** Seconds since THIS machine saw the window open, and the accumulated heartbeat phase. The phase
+	 *  is accumulated rather than derived from the clock so that quickening the beat cannot jump it. */
+	float BerserkFilterElapsed = 0.0f;
+	float BerserkFilterHeartPhase = 0.0f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> BerserkFilterMID;
+
+	void UpdateBerserkFilter(float DeltaTime);
+
+	// ==================== SFX|Berserk ====================
+	//
+	// All three are spawned ATTACHED and audible to everyone, not played 2D for the wearer. A teammate
+	// hearing somebody nearby go berserk is real information in a co-op fight -- it says where the
+	// fight is about to be, and it says it without a HUD element.
+
+	/** One shot when the window opens. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Berserk")
+	TObjectPtr<USoundBase> BerserkStartSound;
+
+	/** One shot when it closes, whether it ran out or the wearer died. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Berserk")
+	TObjectPtr<USoundBase> BerserkEndSound;
+
+	/** Held for as long as the window runs. Must be an actually looping sound: nothing here restarts
+	 *  it, so a one shot in this slot plays once and leaves the rest of the window silent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Berserk")
+	TObjectPtr<USoundBase> BerserkLoopSound;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float BerserkSoundVolume = 1.0f;
+
+	/** Seconds the loop takes to fade out when the window closes, so it does not clip off under the
+	 *  end one shot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Berserk", meta = (ClampMin = "0.0", ClampMax = "3.0", Units = "s"))
+	float BerserkLoopFadeOut = 0.35f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> BerserkLoopAudioComponent;
+
+	/** Starts or stops all three, from wherever the flag changed. */
+	void UpdateBerserkAudio(bool bActive);
+
+public:
 
 	// Back to the section this block interrupted — everything below was written expecting it.
 protected:
@@ -569,6 +872,15 @@ protected:
 	 *  the whole thing: it is what makes stowing and unstowing idempotent, and what lets the visual
 	 *  update notice a line that ended without anybody saying so. */
 	bool bWeaponStowedForGrapple = false;
+
+	/** The player had already put the weapon away by hand when the grapple took over. The line
+	 *  letting go must then give the empty hands BACK, not draw a weapon the player deliberately
+	 *  holstered before ever touching the rope. */
+	bool bRestoreHolsterAfterGrapple = false;
+
+	/** Same as bRestoreHolsterAfterGrapple, for a melee swing: the player had holstered by hand, so
+	 *  the end of the swing hands the empty hands back instead of drawing. */
+	bool bRestoreHolsterAfterMelee = false;
 
 	/** Frames the first-person arms stay hidden after a draw has already started. EVERY draw, not
 	 *  just the one that ends a grapple.
@@ -1199,13 +1511,13 @@ public:
 	 *  to everyone else. A miss carries no damage, so effects need their own way upstream.
 	 *  Unreliable: cosmetic, and a lost one costs a single frame of flash. */
 	UFUNCTION(Server, Unreliable)
-	void Server_ReportWeaponFired(AShooterWeapon* Weapon);
+	void Server_ReportWeaponFired(AShooterWeapon* Weapon, bool bLastRound);
 
 	/** Tell the server this client's weapon started a reload, so it can multicast the weapon's own
 	 *  reload animation and sound to everyone else. Reliable: one per magazine, and losing it
 	 *  leaves the gun frozen for the whole reload rather than for one frame. */
 	UFUNCTION(Server, Reliable)
-	void Server_ReportWeaponReloaded(AShooterWeapon* Weapon);
+	void Server_ReportWeaponReloaded(AShooterWeapon* Weapon, EWeaponReloadStage Stage);
 
 	/** Same relay for the tracer. Carries the endpoints because only the shooter computed them. */
 	UFUNCTION(Server, Unreliable)
@@ -1291,6 +1603,18 @@ public:
 	 *  client's own search radius. */
 	UFUNCTION(Server, Reliable)
 	void Server_RequestWeaponPickup(ADroppedRangedWeapon* Drop, float ReportedCaptureRange);
+
+	/** The same request for anything that goes into the cell grid: money, spare rounds, an upgrade.
+	 *
+	 *  Split from the weapon one because the answer is different in kind. A weapon pickup either
+	 *  happens or is refused; an inventory pickup can be taken IN PART, leaving the rest lying in
+	 *  the world. A client cannot work out which of those happened without the server's copy of the
+	 *  grid, so it never tries: it asks, and watches the result replicate.
+	 *
+	 *  Carries the client's own reach for the same reason as every other capture RPC here: range is
+	 *  a product of the puller's charge, and a player's charge does not replicate. */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestInventoryPickup(AInventoryPickup* Pickup, float ReportedCaptureRange);
 
 	// ==================== Coop prop hold routing ====================
 	// AEMFPhysicsProp::UpdateCaptureForces runs this client's own copy of the capture spring math
@@ -1472,6 +1796,60 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void SetEnemyBoltSlowMultiplier(float Multiplier) { EnemyBoltSlowMultiplier = Multiplier; }
 
+	// ==================== Blocking with the blade while sliding (Melee passive) ====================
+
+	/** Is the character covering his front with the blade right this instant?
+	 *
+	 *  THE question for the animation graph, and the reason it is not "is he sliding": the guard only
+	 *  exists for the class whose passive grants it, and only with the melee weapon in hand. An anim
+	 *  graph reading bIsSliding would hold the pose for every class in every slide, including all the
+	 *  ones where the shot goes straight through -- a pose that tells the player he is protected when
+	 *  he is not.
+	 *
+	 *  Answers the same on every machine: the slide is replicated to observers, the equipped weapon
+	 *  is replicated, and the passive's level data is replicated. Nothing here is server-only. */
+	UFUNCTION(BlueprintPure, Category = "Damage|Slide Block")
+	bool IsSlideBlocking() const;
+
+	/** The guard's numbers right now, or false when there is no guard. Not a UFUNCTION: the struct
+	 *  is a plain one, mirrored from the ability asset. @see FSlideBlockParams */
+	bool GetSlideBlockParams(struct FSlideBlockParams& Out) const;
+
+	/** Draws the brackets on the target the melee focus lock is holding, and takes them down when it
+	 *  lets go. Local only, called from Tick. @see UMeleeAttackComponent::TryStartFocus */
+	void UpdateMeleeFocusReticle();
+
+	/** The arc being covered, in degrees from the facing direction. Zero when not blocking. Exposed
+	 *  for the HUD and for debug drawing; the block itself uses it directly. */
+	UFUNCTION(BlueprintPure, Category = "Damage|Slide Block")
+	float GetSlideBlockHalfAngle() const;
+
+	/** Camera shake for the owner when a hit is turned away. Assign on the character Blueprint. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Damage|Slide Block")
+	TSubclassOf<UCameraShakeBase> BlockCameraShake;
+
+	/** Scale for that shake. A blocked hit should nudge the view, not the whole screen: the block is
+	 *  the good outcome, and shaking it as hard as a real hit teaches the wrong lesson. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Damage|Slide Block", meta = (ClampMin = "0.0"))
+	float BlockCameraShakeScale = 0.6f;
+
+	/** Spark spawned on the blade when a hit is turned away. Spawned on BOTH weapon meshes on every
+	 *  machine: the first-person mesh is owner-see-only and the third-person one is owner-no-see, so
+	 *  each viewer renders exactly the one they should and neither has to be chosen here. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Damage|Slide Block")
+	TObjectPtr<UNiagaraSystem> BlockVFX;
+
+	/** Socket on the weapon meshes the spark is attached to. Missing socket = the mesh origin, which
+	 *  is inside the hilt rather than nowhere. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Damage|Slide Block")
+	FName BlockVFXSocket = FName("ImpactPoint");
+
+	/** Fired on every machine when a hit is turned away, with the world direction it came FROM.
+	 *  For sparks, sound and a flinch. Deliberately an event and not a flag: "a shot was blocked" is
+	 *  an instant, and an anim graph bool cannot represent one. */
+	UPROPERTY(BlueprintAssignable, Category = "Damage|Slide Block")
+	FShotBlockedDelegate OnShotBlocked;
+
 	/** Returns true if player is currently being knocked back */
 	UFUNCTION(BlueprintPure, Category = "Damage")
 	bool IsInKnockback() const { return bIsInKnockback; }
@@ -1515,6 +1893,30 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoReload();
 
+	/** Handles the inventory key: hands it straight to the owning controller, which owns the
+	 *  overlay widget. Nothing about the pawn changes, so nothing here is replicated. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoToggleInventory();
+
+	/** Map key. Hands off to the controller, which owns the screen. */
+	void DoToggleMap();
+
+	/** Is this player's inventory overlay up on THIS screen?
+	 *
+	 *  The overlay runs the game on (co-op: pausing for one player freezes three others) and hands
+	 *  the mouse to a cursor. So the buttons the cursor is using must stop reaching the gun, or
+	 *  every click that drags a cell also fires a shot. Local by nature: the answer comes from this
+	 *  machine's controller and is meaningless for a remote pawn, which is exactly why the gates
+	 *  that use it sit on the input handlers and not on anything the server evaluates. */
+	UFUNCTION(BlueprintPure, Category = "Input")
+	bool IsInventoryScreenOpen() const;
+
+	/** Let go of whatever the mouse was already holding when the overlay opened: a held trigger and
+	 *  a held aim would otherwise stay held for as long as the screen is up, because their release
+	 *  handlers fire against a gate that was not there when they were pressed. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void CancelActionsForInventoryScreen();
+
 	/** Handles switch weapon input (cycles through weapons) */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoSwitchWeapon();
@@ -1543,6 +1945,35 @@ public:
 	 *  action (if not already equipped). Several weapon classes may map to one action; only one is owned. */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoWeaponSwitchByAction(UInputAction* Action);
+
+	// ==================== Holster (empty hands on purpose) ====================
+	//
+	// Modelled on the grapple's stow, because it is the same thing with a different reason: the
+	// weapon is put away with its own holster animation, CurrentWeapon keeps naming it, and the
+	// phase is what every gate (firing, reload, abilities, the arms' visibility) already reads.
+	// The one difference is that nothing ends this one on its own. The player does, or a weapon
+	// switch does: asking for a weapon while empty-handed IS the answer to "take something out".
+
+	/** Toggle: put the weapon away, or draw the one that is away. Bound to HolsterWeaponAction. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void DoToggleHolsterWeapon();
+
+	/** Put the held weapon away and stay empty-handed. No-op when already away, when there is
+	 *  nothing in hand, or when something uninterruptible is running. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons")
+	void HolsterWeaponByPlayer();
+
+	/** Take the put-away weapon back out. No-op unless the hands are empty because of a holster. */
+	UFUNCTION(BlueprintCallable, Category = "Weapons")
+	void DrawHolsteredWeapon();
+
+	/** True while the hands are deliberately empty (or on their way there). */
+	UFUNCTION(BlueprintPure, Category = "Weapons")
+	bool IsWeaponHolsteredByPlayer() const
+	{
+		return WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer ||
+			   WeaponSwitchPhase == EWeaponSwitchPhase::StowingByPlayer;
+	}
 
 	/** Returns true if weapon switch is currently in progress */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
@@ -1622,6 +2053,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Recoil")
 	UWeaponRecoilComponent* GetRecoilComponent() const { return RecoilComponent; }
 
+	/** Returns the FPS Animation Pack recoil component (PRAS). */
+	UFUNCTION(BlueprintPure, Category = "Recoil")
+	URecoilAnimationComponent* GetPackRecoilComponent() const { return PackRecoilComponent; }
+
+	/** True while the weapon in hand drives PRAS, which is the same as "our recoil stands down".
+	 *
+	 *  ONE question decides it, asked in one place, because the two systems both write the view and
+	 *  stacking them would read as a weapon with double the kick rather than as a bug. */
+	UFUNCTION(BlueprintPure, Category = "Recoil")
+	bool IsPackRecoilActive() const { return ActivePackRecoilData != nullptr; }
+
+	/** Points PRAS at whatever the given weapon carries, or stands it down when it has no pack
+	 *  recoil. Safe to call repeatedly: re-initialising with the same asset is skipped.
+	 *
+	 *  Takes the weapon rather than reading CurrentWeapon because the equip path calls it while the
+	 *  swap is still in flight, and reading a member that is about to change is how this kind of
+	 *  hook ends up arming the recoil of the PREVIOUS gun. */
+	void RefreshPackRecoil(AShooterWeapon* Weapon);
+
 	/** Returns the hit marker component */
 	UFUNCTION(BlueprintPure, Category = "Hit Marker")
 	UHitMarkerComponent* GetHitMarkerComponent() const { return HitMarkerComponent; }
@@ -1644,6 +2094,10 @@ public:
 	/** Returns the ability component (multi-slot ability inventory + activation). */
 	UFUNCTION(BlueprintPure, Category = "Abilities")
 	UAbilityComponent* GetAbilityComponent() const { return AbilityComponent; }
+
+	/** Returns the cell grid (currency, magazines, ability upgrades, paid attachments). */
+	UFUNCTION(BlueprintPure, Category = "Inventory")
+	UInventoryComponent* GetInventoryComponent() const { return InventoryComponent; }
 
 	/** Returns the currently equipped weapon */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
@@ -1692,8 +2146,51 @@ public:
 	/** Read-only access to the owned-weapon inventory (excludes hidden Bandolier reserve copies). */
 	const TArray<AShooterWeapon*>& GetOwnedWeapons() const { return OwnedWeapons; }
 
-	/** Returns the input action that switches/equips the given owned weapon: its own SwitchAction if set,
-	 *  else the cycle SwitchWeaponAction. Null if neither is set. Used for the HUD "press X to equip" hint. */
+	// ==================== Weapon hotkey slots ====================
+	//
+	// Two slots, and which weapon lands in which is decided by where the weapon CAME FROM, not by
+	// the weapon asset [author, 2026-09-05]:
+	//
+	//   slot 0 (key 1) — the class weapon, StartingWeaponClass. Never evicted by a pickup.
+	//   slot 1 (key 2) — whatever was picked up last. A new pickup throws the old one on the ground.
+	//
+	// This matches the two-weapon inventory the cell contract already assumes ("базовый и
+	// подобранный", Docs/Inventory_Slot_Contract_2026-08-28.md §4), and it means a gun is on key 2
+	// when looted even if the class that starts with it has it on key 1.
+
+	/** Key 1: the weapon the run starts with. */
+	static constexpr int32 ClassWeaponHotkeySlot = 0;
+
+	/** Key 2: the looted weapon, of which there is at most one. */
+	static constexpr int32 PickedUpWeaponHotkeySlot = 1;
+
+	/** Which slot a weapon belongs in. Exact class match against StartingWeaponClass rather than
+	 *  IsA: a subclass of the class weapon is a different gun and is looted like any other. */
+	int32 ResolveHotkeySlotForWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) const;
+
+	/** @see ResolveHotkeySlotForWeaponClass. INDEX_NONE for a null weapon. */
+	int32 ResolveHotkeySlotForWeapon(const AShooterWeapon* Weapon) const;
+
+	/** Put a weapon in the slot it belongs in. Server only (the field replicates); safe to call on a
+	 *  weapon that is already placed, which is what re-equipping the class weapon does. */
+	void PlaceWeaponInHotkeySlot(AShooterWeapon* Weapon);
+
+	/** The owned weapon currently sitting in Slot, or null. */
+	AShooterWeapon* FindOwnedWeaponInHotkeySlot(int32 Slot) const;
+
+	/** The action bound to a slot, or null when the Blueprint did not list that many. */
+	UInputAction* GetWeaponHotkeyActionForSlot(int32 Slot) const;
+
+	/** Which slot a pressed action means; INDEX_NONE when the action is not one of the hotkeys. */
+	int32 GetHotkeySlotForAction(const UInputAction* Action) const;
+
+	/** The owned weapon a pressed hotkey selects: the one placed in that slot, or — for a weapon that
+	 *  no add path ever placed — one that still declares the action as its own SwitchAction. */
+	AShooterWeapon* FindOwnedWeaponForHotkeyAction(const UInputAction* Action) const;
+
+	/** Returns the input action that switches/equips the given owned weapon: the key for the slot it
+	 *  was placed in, else its own SwitchAction, else the cycle SwitchWeaponAction. Null if none of
+	 *  the three is set. Used for the HUD "press X to equip" hint. */
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	UInputAction* GetSwitchInputActionForWeapon(const AShooterWeapon* Weapon) const;
 
@@ -1701,15 +2198,31 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapons|Left Hand IK")
 	void SetLeftHandIKAlpha(float Alpha) { TargetLeftHandIKAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f); }
 
-	/** Camera-space Z offset on the FP mesh contributed by systems outside the character
-	 *  (MeleeAttackComponent's weapon-lower). Routed through the pose pipeline so the mesh
-	 *  transform keeps a single writer instead of components fighting over it each tick. */
+	/** Camera-space Z offset on the FP mesh contributed by systems outside the character. Routed
+	 *  through the pose pipeline so the mesh transform keeps a single writer. The melee swing used
+	 *  to lower the hands through this and no longer does (it stows instantly): with the camera on
+	 *  the arms' FPCamera socket, lowering the arms dragged the view down with them. */
 	UFUNCTION(BlueprintCallable, Category = "First Person View")
 	void SetFirstPersonMeshExternalZOffset(float ZOffset) { ExternalMeshZOffset = ZOffset; }
 
 	/** Current external FP mesh Z offset. See SetFirstPersonMeshExternalZOffset. */
 	UFUNCTION(BlueprintPure, Category = "First Person View")
 	float GetFirstPersonMeshExternalZOffset() const { return ExternalMeshZOffset; }
+
+	// ==================== Melee Stow ====================
+	// A melee swing empties the hands the same way a grapple does, minus the holster: the weapon
+	// vanishes on the frame the swing starts, the swing is the animation, and afterwards the same
+	// weapon comes back out through its own draw. Borrows the phase for the same reason the grapple
+	// does -- every gate on firing, reloading, swapping and abilities reads it.
+
+	/** Take the held weapon out of the hands NOW, with no holster animation. Idempotent: back-to-back
+	 *  swings, and a swing that follows the boss finisher's pre-lower, find the hands already empty. */
+	void StowWeaponForMelee();
+
+	/** Bring the same weapon back out through its draw animation, at SpeedMultiplier times its
+	 *  authored speed. Does nothing unless the hands were emptied by StowWeaponForMelee, so a grapple
+	 *  that took over mid-swing keeps the weapon until the line lets go. */
+	void DrawWeaponAfterMelee(float SpeedMultiplier);
 
 	/** DEPRECATED no-op. Used to disable the FP Control Rig and enable a spine Modify Bone so that
 	 *  two-hand montages would follow the camera pitch. The FP mesh is parented to the camera now,
@@ -1751,6 +2264,18 @@ protected:
 
 	/** End of the draw: the phase clears and a trigger held through the swap finally fires. */
 	void FinishWeaponDraw();
+
+	/** The player's holster animation has run: hide the weapon and sit in StowedByPlayer. */
+	void FinishPlayerHolster();
+
+	/** Draw Weapon with no holster half, because the hands are already empty. Handles both cases the
+	 *  ordinary draw cannot: a DIFFERENT weapon (routed through BeginWeaponDraw so the authority is
+	 *  told), and the SAME one (EquipWeaponImmediate no-ops on it, so the activate is explicit). */
+	void DrawWeaponFromEmptyHands(AShooterWeapon* Weapon);
+
+	/** Which weapon the cycle key selects, stepping Direction places from the held one and wrapping.
+	 *  May be CurrentWeapon itself when only one weapon is owned. Null when none are. */
+	AShooterWeapon* FindCycleTargetWeapon(int32 Direction) const;
 
 	// ---- Stowing for the grapple ----
 	//
@@ -1946,6 +2471,16 @@ protected:
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayThirdPersonMontage(UAnimMontage* Montage, float PlayRate);
 
+	/** Tells every machine that a hit was turned away. Unreliable on purpose: it is a spark and a
+	 *  shake, and a lost one during a firefight is worth less than a resend. The block itself is
+	 *  decided where the damage lands, on the server, and does not depend on this arriving. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_ShotBlocked(FVector_NetQuantizeNormal FromDirection);
+
+	/** The spark and the shake, on THIS machine. Called from the multicast above, and from the
+	 *  server's own local path inside it, so the host is not a special case. */
+	void PlaySlideBlockFeedback(const FVector& FromDirection);
+
 public:
 
 	//~Begin IShooterWeaponHolder interface
@@ -1968,6 +2503,16 @@ public:
 
 	/** Calculates and returns the aim location for the weapon */
 	virtual FVector GetWeaponTargetLocation() override;
+
+	/** Control rotation plus the weapon recoil layer. THE place recoil enters the view.
+	 *
+	 *  It has to be here and not at the camera manager, because this is the rotation
+	 *  UCameraComponent::GetCameraView writes onto the camera component itself (bUsePawnControlRotation
+	 *  is set in APolarityCharacter). The first-person mesh is a child of that component, so
+	 *  everything parented to the camera inherits the kick and the sights stay welded to the view.
+	 *  Applying it later, to the POV the manager hands out, moves the picture and leaves the weapon
+	 *  and its red dot standing where they were. */
+	virtual FRotator GetViewRotation() const override;
 
 	/** Where this character is pointing, as a ray of the given length: the first-person camera's
 	 *  location, and the controller's rotation.
@@ -2117,6 +2662,10 @@ public:
 protected:
 	/** True between the ability key going down and coming back up. */
 	bool bAbilityAiming = false;
+
+	/** True while the melee focus lock is the one driving the shared capture reticle. Tracked so the
+	 *  brackets are suppressed and released exactly once each, instead of every frame. */
+	bool bMeleeFocusReticleActive = false;
 
 	UPROPERTY()
 	TWeakObjectPtr<class AShooterNPC> AbilityAimTarget;

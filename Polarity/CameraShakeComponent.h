@@ -72,14 +72,23 @@ struct FBobSpringState
 	UPROPERTY()
 	float Velocity = 0.0f;
 
-	void Update(float Target, float Stiffness, float DeltaTime)
+	/** Explicit damping, the form weapon recoil needs. Damping is NOT derived from Stiffness here
+	 *  on purpose: a recoil spring has to be able to run at Stiffness = 0 (no restoring force at
+	 *  all, which is how a burst accumulates), and a derived damping would be 0 there too, leaving
+	 *  the velocity to run away. See UWeaponRecoilComponent's spring sets. */
+	void UpdateWithDamping(float Target, float Stiffness, float Damping, float DeltaTime)
 	{
-		const float Damping = 2.0f * FMath::Sqrt(Stiffness);
 		const float Error = Target - Value;
 		const float Acceleration = Stiffness * Error - Damping * Velocity;
 
 		Velocity += Acceleration * DeltaTime;
 		Value += Velocity * DeltaTime;
+	}
+
+	/** Critically damped: comes to rest without overshooting. What the bob wants. */
+	void Update(float Target, float Stiffness, float DeltaTime)
+	{
+		UpdateWithDamping(Target, Stiffness, 2.0f * FMath::Sqrt(Stiffness), DeltaTime);
 	}
 
 	void Reset(float NewValue = 0.0f)
@@ -400,6 +409,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
 	void SetFOVEffectScale(float NewScale) { FOVEffectScale = FMath::Clamp(NewScale, 0.0f, 1.0f); }
 
+	/** Told by the character whose melee component owns the lock, every frame it is locked.
+	 *
+	 *  Pushed in rather than read out: this component lives on the base character and the lock lives
+	 *  on the shooter's melee component, and reaching down from here would tie the camera to a class
+	 *  it otherwise knows nothing about. @see AShooterCharacter::UpdateMeleeFocusReticle */
+	UFUNCTION(BlueprintCallable, Category = "Camera|Focus")
+	void SetFocusing(bool bFocusing) { bIsFocusLocked = bFocusing; }
+
 	/** Get viewmodel bob position offset */
 	UFUNCTION(BlueprintPure, Category = "Camera Shake|Bob")
 	FVector GetViewmodelBobOffset() const { return CurrentViewmodelBobOffset; }
@@ -467,6 +484,12 @@ protected:
 	FRotator CurrentRotationOffset = FRotator::ZeroRotator;
 	float CurrentFOVOffset = 0.0f;
 
+	/** A target is locked right now. Set from outside; nothing here decides it. */
+	bool bIsFocusLocked = false;
+
+	/** 0..1 ramp behind bIsFocusLocked, so the lock's field of view blends instead of snapping. */
+	float FocusFOVIntensity = 0.0f;
+
 	FVector BaseCameraLocation = FVector::ZeroVector;
 	float BaseFOV = 90.0f;
 	float FOVEffectScale = 1.0f;
@@ -519,6 +542,7 @@ protected:
 	void UpdateWallrunBob(float DeltaTime);
 	void UpdateWallrunFOV(float DeltaTime);
 	void UpdateAirDashFOV(float DeltaTime);
+	void UpdateFocusFOV(float DeltaTime);
 
 	void ApplyToCamera(float DeltaTime);
 

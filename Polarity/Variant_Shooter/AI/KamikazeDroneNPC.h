@@ -1,6 +1,6 @@
 // KamikazeDroneNPC.h
-// FPV kamikaze drone — orbits in Middle Ring, dives at player with prediction, explodes on contact.
-// Supports swarms (20+), retaliation on damage, and Polarity system integration.
+// FPV kamikaze drone: hangs in the air out of melee reach, then strikes at the player in one committed
+// run with live lead, and explodes on contact. Retaliation on damage, parry by melee, Polarity charge.
 
 #pragma once
 
@@ -14,17 +14,21 @@ class UFPVTiltComponent;
 class UNiagaraSystem;
 class UAudioComponent;
 
-/** State machine for kamikaze drone behavior */
+/** State machine for kamikaze drone behavior.
+ *  The names predate the current flight model and are kept because StateTree assets and tasks
+ *  switch on them:
+ *    Orbiting   = HOLD: hangs at a point above and beside the target, out of melee reach
+ *    Attacking  = STRIKE: one committed run at the target with live lead
+ *    Recovery   = after a miss: turns back and climbs to the hold point
+ *    PostAttack = unused by the current flight model, kept for asset compatibility */
 UENUM(BlueprintType)
 enum class EKamikazeState : uint8
 {
-	Launching,      // Post-spawn: FPV PID stabilization from launch impulse
-	Orbiting,       // Circling in Middle Ring
-	Telegraphing,   // 0.3-0.4s warning before attack
-	Positioning,    // Flying to frontal attack point before committing
-	Attacking,      // Diving toward predicted position
-	PostAttack,     // Inertia after missing target
-	Recovery,       // Braking, turning, returning to orbit
+	Launching,      // Post-spawn: ejected from a spawner or a carrier, settling before it flies on its own
+	Orbiting,       // Hold (see above)
+	Attacking,      // Strike (see above)
+	PostAttack,     // Unused, kept for asset compatibility
+	Recovery,       // Back to the hold point after a miss
 	Parried,        // Melee-parried: spiraling toward target/ground, will explode with stun
 	Dead
 };
@@ -33,28 +37,37 @@ enum class EKamikazeState : uint8
 UENUM(BlueprintType)
 enum class EAttackPattern : uint8
 {
-	/** Default — orbit the player, then dive (with prediction). */
+	/** Default: hold, then strike at the target pawn with lead. */
 	Orbit,
-	/** Skip orbit/positioning/telegraph entirely — fly straight at BuildingTarget's location. */
+	/** Skip the hold and fly straight at BuildingTarget's location. */
 	Direct
 };
 
 /**
  * FPV Kamikaze Drone NPC.
  *
- * Inherits from AShooterNPC (NOT AFlyingDrone) — different movement model:
- * - No weapon (attacks by collision)
- * - Constant motion (never hovers)
- * - FPV-style visual tilt instead of stabilization springs
- * - Orbit-based approach instead of waypoint patrol
+ * Inherits from AShooterNPC (NOT AFlyingDrone): no weapon, attacks by collision.
  *
- * Uses UFlyingAIMovementComponent for base 3D flight,
- * but overrides movement logic with custom state machine.
+ * Flight is driven by hand on the authority, not through the CharacterMovementComponent's own
+ * physics: the drone computes its velocity itself every frame and moves with a swept, sliding move.
+ * That is what makes the path readable (no hidden acceleration model between the numbers below and
+ * what the player sees) and what keeps it out of geometry (every move is a sweep that slides along
+ * whatever it touches). The CMC stays as velocity storage, collision owner and replication source,
+ * and gets its own tick back only while something else drives the pawn (knockback).
+ *
+ * Why the strike is fair: the drone is out of reach of the player's hands except during its own
+ * committed strike, and the strike is a constant-speed run with a readable turn rate. Straight
+ * running cannot escape it (the lead catches a constant velocity), a velocity the drone cannot turn
+ * with can (a well-timed grapple). The parry window is simply the time the drone spends inside
+ * melee reach before contact, set by StrikeSpeed.
  */
 UCLASS()
 class POLARITY_API AKamikazeDroneNPC : public AShooterNPC
 {
 	GENERATED_BODY()
+
+	/** Reads the Schedule* tuning of the drone it is scheduling. */
+	friend class UKamikazeStrikeSubsystem;
 
 public:
 
@@ -64,7 +77,7 @@ protected:
 
 	// ==================== Components ====================
 
-	/** Flying AI movement component for 3D navigation */
+	/** Flying AI movement component, kept for the CMC setup in its BeginPlay; its tick is off */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UFlyingAIMovementComponent> FlyingMovement;
 
@@ -86,7 +99,8 @@ protected:
 
 	// ==================== Collision Settings ====================
 
-	/** Radius of the drone's collision sphere (cm) */
+	/** Radius of the drone's collision sphere at construction (cm). Every runtime check reads the
+	 *  actual capsule instead, so a Blueprint that resizes the capsule stays consistent. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Collision")
 	float CollisionRadius = 35.0f;
 
@@ -116,178 +130,190 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Combat")
 	TObjectPtr<UAnimMontage> ExplosionStunMontage;
 
-	// ==================== Attack Settings ====================
-
-	/** Speed during attack dive (cm/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
-	float AttackSpeed = 1200.0f;
-
-	/** Maximum turn rate during attack dive (degrees/s) — very limited correction */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "5", ClampMax = "40"))
-	float AttackTurnRate = 17.5f;
-
-	/** Duration of telegraph phase before attack (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0.1"))
-	float TelegraphDuration = 0.35f;
-
-	/** Duration of post-attack inertia before crash chance or recovery */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0.1", ClampMax = "2.0"))
-	float PostAttackInertiaTime = 0.5f;
-
-	/** Steering jitter amplitude during attack dive — simulates FPV imperfections (0.06 ≈ 3.4°) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0", ClampMax = "0.3"))
-	float AttackJitterAmplitude = 0.06f;
-
-	/** Speed oscillation during attack (fraction of AttackSpeed, ±4% default) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack", meta = (ClampMin = "0", ClampMax = "0.2"))
-	float AttackSpeedJitter = 0.04f;
-
-	/** Distance from target within which killing the attacking drone triggers air explosion */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
+	/** Killed mid-strike closer than this to the target: it blows up in the air instead of falling (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Combat")
 	float AttackDeathDistanceThreshold = 400.0f;
 
-	/** Attack pattern. Direct skips orbit/positioning/telegraph and dives straight at BuildingTarget. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
+	// ==================== Hold ====================
+
+	/** Horizontal distance from the target while holding (cm). Keep it well past melee reach plus the
+	 *  melee lunge, or the player can hit the drone whenever they like instead of when it strikes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold", meta = (ClampMin = "300", Units = "cm"))
+	float HoldDistance = 1200.0f;
+
+	/** Height of the hold point above the target's feet (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold", meta = (ClampMin = "0", Units = "cm"))
+	float HoldHeight = 600.0f;
+
+	/** Top speed while moving to the hold point and back to it after a miss (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold", meta = (ClampMin = "100", Units = "cm/s"))
+	float HoldSpeed = 1500.0f;
+
+	/** How fast the velocity may change while holding or recovering, in cm/s^2. Sets how wide the
+	 *  turn-around arc after a miss is. (No Units: the engine has no unit for acceleration.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold", meta = (ClampMin = "100"))
+	float HoldAcceleration = 2500.0f;
+
+	/** Seconds spent at the hold point, with line of sight, before the drone is ready to strike. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold", meta = (ClampMin = "0", Units = "s"))
+	float HoldTimeBeforeStrike = 2.0f;
+
+	/** Once the hold time is up, ask the strike queue by itself and strike when granted. Off = only
+	 *  the StateTree starts strikes (it sees the same readiness through IsProximityTimedOut, and its
+	 *  BeginAttack passes the same queue). Both on is safe: a strike starts once. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold")
+	bool bSelfStrike = true;
+
+	// ==================== Hold: staying alive in the air ====================
+	// A real FPV in acro mode does not hang still: nothing levels it, and with the camera tilted up a
+	// still drone looks at the sky. The pilot keeps it drifting and turning. These make the hold do
+	// the same, smoothly, so it stays a trackable target.
+
+	/** Sideways reach of the figure-eight drift around the hold point (cm). Zero = holds still. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold|Drift", meta = (ClampMin = "0", Units = "cm"))
+	float DriftRadius = 200.0f;
+
+	/** Up and down reach of the drift (cm): throttle never quite holds a height. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold|Drift", meta = (ClampMin = "0", Units = "cm"))
+	float DriftVertical = 40.0f;
+
+	/** Seconds for one full figure-eight. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold|Drift", meta = (ClampMin = "0.5", Units = "s"))
+	float DriftPeriod = 5.0f;
+
+	/** Every this many seconds the drone slides to the other side of its sector. Zero = never. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold|Drift", meta = (ClampMin = "0", Units = "s"))
+	float RepositionInterval = 3.0f;
+
+	/** How far it slides around the player, from one side of its sector to the other (degrees). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold|Drift", meta = (ClampMin = "0", ClampMax = "90"))
+	float RepositionAngle = 40.0f;
+
+	/** Seconds the slide takes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Hold|Drift", meta = (ClampMin = "0.1", Units = "s"))
+	float RepositionTime = 1.5f;
+
+	// ==================== Strike ====================
+
+	/** Constant speed of the strike run (cm/s). Must beat the target's top ground speed or straight
+	 *  running escapes it; the parry window is roughly (melee reach) / StrikeSpeed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "100", Units = "cm/s"))
+	float StrikeSpeed = 1200.0f;
+
+	/** How fast it gets up to StrikeSpeed from the hold, in cm/s^2. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "100"))
+	float StrikeAcceleration = 4000.0f;
+
+	/** How fast the strike can turn (degrees/s). The whole dodge knob: what the drone can turn with,
+	 *  it catches; what it cannot, it misses. Never switched off before impact. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "10", ClampMax = "720"))
+	float StrikeTurnRate = 240.0f;
+
+	/** The strike aims this far above the target's feet (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "cm"))
+	float AimHeightAboveFeet = 50.0f;
+
+	/** Longest lead the strike takes, as seconds of the target's current velocity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "s"))
+	float MaxLeadTime = 1.0f;
+
+	/** Contact means the drone's sphere, inflated by this much, touches a hostile pawn (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "cm"))
+	float ContactFuseRadius = 20.0f;
+
+	/** A strike that has not connected after this long is called a miss (seconds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0.5", Units = "s"))
+	float StrikeMaxTime = 3.0f;
+
+	/** Before the run, the drone backs off and up for this long and dips its nose: the pilot lining
+	 *  up the dive, and the player's warning that this one goes next (seconds). Zero = no wind-up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "s"))
+	float WindUpTime = 0.3f;
+
+	/** How far the wind-up backs off (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "cm"))
+	float WindUpDistance = 100.0f;
+
+	/** After a miss the drone punches out: full throttle up for this long before turning back (seconds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "s"))
+	float PunchOutTime = 0.5f;
+
+	/** Climb speed of the punch-out (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", Units = "cm/s"))
+	float PunchOutSpeed = 900.0f;
+
+	/** How much the run curves instead of coming straight (0 = straight, 1 = a wide arc to one side).
+	 *  The curve tightens as the drone closes, so it still lands. Meant to rise as a run goes on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", ClampMax = "1"))
+	float StrikeArc = 0.0f;
+
+	// ==================== Strike schedule ====================
+	// What the strike schedule assumes about the player when it spaces this drone's strike from the
+	// one before it. Deliberately constants on the drone, not read off the player's weapon: the
+	// schedule is a promise about what a player can do, not about what this one happens to carry.
+
+	/** Seconds the player needs to kill this drone once it is in the crosshair. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Schedule", meta = (ClampMin = "0", Units = "s"))
+	float ScheduleKillTime = 0.3f;
+
+	/** How fast the player is assumed to turn from one drone to the next (degrees/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Schedule", meta = (ClampMin = "1"))
+	float ScheduleTurnSpeed = 400.0f;
+
+	/** Seconds from the strike's sound cue to the player reacting, for the first strike of a run. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Schedule", meta = (ClampMin = "0", Units = "s"))
+	float ScheduleReaction = 0.25f;
+
+	/** Multiplier on the gap between strikes: 1 = just enough for a perfect player, higher is kinder. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Schedule", meta = (ClampMin = "0.1"))
+	float ScheduleSlack = 1.2f;
+
+	/** Rounds a kill takes. Fewer than this in the player's magazine and the gap before this strike
+	 *  includes the weapon's reload time, once per empty magazine. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Schedule", meta = (ClampMin = "1"))
+	int32 ScheduleKillBullets = 3;
+
+	/** How the drone reaches its target. Direct skips the hold and flies at BuildingTarget. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike")
 	EAttackPattern AttackPattern = EAttackPattern::Orbit;
 
 	/** Fixed actor target used when AttackPattern == Direct (e.g. ATurretBuilding). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Attack")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike")
 	TObjectPtr<AActor> BuildingTarget;
 
-	/** Exact world-space point the drone aims for in Direct mode. Set by InitiateDirectAttack.
-	 *  Typically the player's impact point on the target's wall — NOT the actor origin or
-	 *  bounds center, which can be empty air for tall/thin meshes. */
-	UPROPERTY(BlueprintReadOnly, Category = "Kamikaze|Attack")
+	/** Exact world-space point the drone aims for in Direct mode. Set by InitiateDirectAttack. */
+	UPROPERTY(BlueprintReadOnly, Category = "Kamikaze|Strike")
 	FVector DirectAttackTargetLocation = FVector::ZeroVector;
 
-	// ==================== Orbit Settings ====================
+	// ==================== Targeting ====================
 
-	/** Cruising speed on orbit (cm/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float CruiseSpeed = 800.0f;
+	/** Pick a target on our own instead of asking the combat coordinator, and pick a new one when
+	 *  the current one dies. A carrier's munitions are not registered with the coordinator, so
+	 *  without this they would inherit the carrier's opinion or nothing at all. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Targeting")
+	bool bSelfDesignateTarget = false;
 
-	/** Maximum turn rate while orbiting (degrees/s) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float OrbitMaxTurnRate = 90.0f;
-
-	/** Starting orbit radius (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float OrbitStartRadius = 1100.0f;
-
-	/** Minimum orbit radius — attack readiness zone (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float OrbitMinRadius = 650.0f;
-
-	/** Radius reduction per completed lap (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float OrbitShrinkPerLap = 75.0f;
-
-	/** Ellipse eccentricity (0 = circle, 1 = flat) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit", meta = (ClampMin = "0", ClampMax = "0.8"))
-	float OrbitEccentricity = 0.3f;
-
-	/** Base height above ground for orbit (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float OrbitBaseHeight = 250.0f;
-
-	/** Vertical oscillation amplitude (cm) — height varies ±Amplitude around BaseHeight */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float OrbitHeightAmplitude = 100.0f;
-
-	/** How often orbit center updates to track player (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit", meta = (ClampMin = "0.1"))
-	float OrbitCenterUpdateInterval = 0.5f;
-
-	/** How often geometry checks are performed (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit", meta = (ClampMin = "0.1"))
-	float GeometryCheckInterval = 0.25f;
-
-	/** Speed noise amplitude (fraction of CruiseSpeed) for per-instance variation */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit", meta = (ClampMin = "0", ClampMax = "0.3"))
-	float SpeedNoiseAmplitude = 0.12f;
-
-	/** Minimum orbit space threshold — forced attack if can't maintain this (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Orbit")
-	float MinOrbitSpaceThreshold = 400.0f;
-
-	/** Duration of positioning Bezier transition (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Positioning", meta = (ClampMin = "0.3", ClampMax = "3.0"))
-	float PositioningDuration = 0.8f;
-
-	// ==================== Strafe Settings ====================
-
-	/** Lateral oscillation amplitude (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strafe", meta = (ClampMin = "50", ClampMax = "800"))
-	float StrafeAmplitude = 300.0f;
-
-	/** Oscillation frequency (radians/s). 2.5 ≈ one full cycle every 2.5 seconds */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strafe", meta = (ClampMin = "0.5", ClampMax = "8.0"))
-	float StrafeFrequency = 2.5f;
-
-	/** Number of blocked rays (out of 8) to consider orbit "bad" and switch to strafe */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strafe", meta = (ClampMin = "1", ClampMax = "8"))
-	int32 BadOrbitThreshold = 5;
-
-	// ==================== Crash Settings ====================
-
-	/** Base crash chance even in open space after a miss */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Crash", meta = (ClampMin = "0", ClampMax = "1"))
-	float BaseCrashChance = 0.1f;
-
-	/** Additional crash chance from speed factor */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Crash", meta = (ClampMin = "0", ClampMax = "1"))
-	float SpeedCrashFactor = 0.2f;
-
-	/** Additional crash chance from pitch angle factor */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Crash", meta = (ClampMin = "0", ClampMax = "1"))
-	float AngleCrashFactor = 0.2f;
+	/** Minimum seconds between self-designation sweeps. The sweep walks pawns, so it is not free. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Targeting", meta = (ClampMin = "0.1"))
+	float TargetReacquireInterval = 0.5f;
 
 	// ==================== Launch Stabilization ====================
 
-	/** Max time for launch stabilization before forcing orbit transition (seconds).
-	 *  Actual transition often happens sooner when speed settles near CruiseSpeed. */
+	/** Max time for launch stabilization before forcing the hand-off (seconds). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch")
 	float MaxLaunchStabilizationTime = 1.5f;
 
-	/** Speed decay rate during launch (higher = faster deceleration).
-	 *  Simulates FPV PID-controller settling: exponential decay toward CruiseSpeed. */
+	/** Speed decay rate during launch (higher = faster settling toward HoldSpeed). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float LaunchDecayRate = 3.0f;
 
-	/** How aggressively the drone steers toward orbit path during launch (degrees/s).
-	 *  Low = gentle arc from launch tube, high = sharp snap to orbit. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch", meta = (ClampMin = "5.0", ClampMax = "120.0"))
+	/** How fast the launched drone turns toward where it is going (degrees/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Launch", meta = (ClampMin = "5.0", ClampMax = "360.0"))
 	float LaunchSteerRate = 35.0f;
 
-	// ==================== Prediction Settings ====================
+	// ==================== Retaliation ====================
 
-	/** Prediction order: 0 = zero order (aim at current pos), 1 = first order (pos + vel * t) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Prediction", meta = (ClampMin = "0", ClampMax = "1"))
-	int32 PredictionOrder = 1;
-
-	/** Turn rate multiplier for difficulty scaling during attack */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Prediction", meta = (ClampMin = "0.5", ClampMax = "2.0"))
-	float AttackTurnRateMultiplier = 1.0f;
-
-	// ==================== Orbit-to-Attack Timing ====================
-
-	/** Minimum time the drone must orbit before being eligible for token-based attack (seconds).
-	 *  Set to 0 for immediate attack eligibility (e.g. for solo drones).
-	 *  Does NOT affect retaliation or forced attacks — those always trigger immediately. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Triggers", meta = (ClampMin = "0.0"))
-	float MinOrbitTimeBeforeAttack = 2.0f;
-
-	// ==================== Proximity / Retaliation ====================
-
-	/** Radius at which proximity attack triggers if no token for too long */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Triggers")
-	float ProximityAttackRadius = 400.0f;
-
-	/** Time without token at proximity radius before emergency attack (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Triggers", meta = (ClampMin = "1.0"))
-	float ProximityAttackDelay = 3.0f;
-
-	/** If true, drone retaliates immediately when hit during orbit */
+	/** If true, the drone is flagged to strike immediately when hit while holding */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Triggers")
 	bool bRetaliateOnDamage = true;
 
@@ -355,7 +381,7 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX")
 	TObjectPtr<USoundBase> CrashSound;
 
-	/** Sound for telegraph (high-pitched whine) */
+	/** Sound played when a strike starts: the audible telegraph */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX")
 	TObjectPtr<USoundBase> TelegraphSound;
 
@@ -379,11 +405,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX", meta = (ClampMin = "0"))
 	float FlightPitchMaxSpeed = 1200.0f;
 
+	/** Acceleration that alone drives the motor pitch to maximum, in cm/s^2: the motors scream when
+	 *  the drone changes speed, not only when it is fast. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|SFX", meta = (ClampMin = "1"))
+	float FlightPitchMaxAccel = 3000.0f;
+
 protected:
 
 	// ==================== Lifecycle ====================
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
 	// ==================== Overrides from ShooterNPC ====================
@@ -417,34 +449,40 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
 	void ClearDamageTakenFlag() { bTookDamageThisFrame = false; }
 
-	/** Returns true if drone is in an attacking sequence (Telegraph/Attack/PostAttack) */
+	/** Returns true while a strike, its recovery or a parry is running */
 	UFUNCTION(BlueprintPure, Category = "Kamikaze")
 	bool IsInAttackSequence() const;
 
-	/** Returns true if orbit can't be maintained (for forced attack) */
+	/** True once the drone has held its point long enough to strike (read by the StateTree
+	 *  condition). The name is historical: it used to mean "loitered too close for too long". */
 	UFUNCTION(BlueprintPure, Category = "Kamikaze")
-	bool IsOrbitForced() const { return bOrbitForced; }
+	bool IsProximityTimedOut() const { return bProximityTimedOut; }
 
 	/** Returns true if this is a retaliation attack */
 	UFUNCTION(BlueprintPure, Category = "Kamikaze")
 	bool IsRetaliating() const { return bIsRetaliating; }
 
-	// ==================== State Machine Control (for StateTree) ====================
+	// ==================== State Machine Control ====================
 
-	/** Begin telegraph → attack sequence. Called by StateTree when attack is authorized. */
+	/** Start a strike from the hold or the recovery. Called by the StateTree, or by the drone itself
+	 *  when bSelfStrike is on and the hold time is up. Does nothing in any other state. */
 	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
-	void BeginTelegraph(bool bRetaliation = false);
+	void BeginAttack(bool bRetaliation = false);
 
-	/** Initialize launch from spawner: sets velocity and enters Launching state.
-	 *  Drone will stabilize from launch impulse (FPV PID settling) before entering orbit. */
+	/** Initialize launch from spawner: sets velocity and enters Launching state. The drone settles
+	 *  from the launch impulse and then goes to its hold point. */
 	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
 	void InitiateLaunch(const FVector& LaunchVelocity);
 
-	/** Configure this drone as a direct attacker against a fixed actor target
-	 *  (skips orbit/telegraph and dives straight toward TargetWorldLocation).
-	 *  Used by ATurretBuilding to deploy a kamikaze drone at a specific point on a building —
-	 *  the hit location on the wall, NOT the bounds center (which for tall skyscrapers is empty air).
-	 *  @param Target             Actor the drone is attacking (stored as BuildingTarget for ownership / impact dispatch)
+	/** Launch this drone as a carrier-dropped munition: eject along LaunchVelocity, settle, then hold
+	 *  and wait for the strike schedule like any other drone (the author's call: a carrier delivers,
+	 *  the schedule decides). It picks its own target when no player is available. */
+	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
+	void LaunchAsHomingMunition(const FVector& LaunchVelocity);
+
+	/** Configure this drone as a direct attacker against a fixed actor target: no hold, no lead,
+	 *  straight at TargetWorldLocation. Used by ATurretBuilding.
+	 *  @param Target             Actor the drone is attacking (stored as BuildingTarget)
 	 *  @param TargetWorldLocation Exact world-space point the drone will dive toward */
 	UFUNCTION(BlueprintCallable, Category = "Kamikaze")
 	void InitiateDirectAttack(AActor* Target, FVector TargetWorldLocation);
@@ -458,57 +496,60 @@ protected:
 
 	void SetState(EKamikazeState NewState);
 	void UpdateLaunching(float DeltaTime);
-	void UpdateOrbiting(float DeltaTime);
-	void UpdateStrafing(float DeltaTime);
-	void UpdatePositioning(float DeltaTime);
-	void UpdateTelegraphing(float DeltaTime);
-	void UpdateAttacking(float DeltaTime);
-	void UpdatePostAttack(float DeltaTime);
-
-	/** Evaluate orbit quality: 8 rays, switch to strafe if too many blocked */
-	void EvaluateOrbitQuality();
-	void UpdateRecovery(float DeltaTime);
+	void UpdateHold(float DeltaTime, bool bCountTowardStrike);
+	void UpdateStrike(float DeltaTime);
 	void UpdateParried(float DeltaTime);
 
-	// ==================== Attack Methods ====================
+	// ==================== Flight ====================
 
-	/** Commit to attack: calculate predicted position, begin dive */
-	void CommitAttack();
+	/** The one mover for every hand-driven state: store Velocity, sweep, slide along whatever is hit.
+	 *  Returns the first blocking hit of the move (not the slide), for callers that react to walls. */
+	FHitResult FlyMove(const FVector& NewVelocity, float DeltaTime);
 
-	/** Calculate predicted target position using prediction order */
-	FVector CalculatePredictedPosition() const;
+	/** Hand the pawn to our own flight (true) or back to the CMC's own tick (false). */
+	void SetHandDrivenFlight(bool bHandDriven);
+
+	/** Where the target's feet are. */
+	FVector GetTargetFeet(const APawn* Target) const;
+
+	/** Point above and beside the target, keeping the bearing the drone is already on. */
+	FVector ComputeHoldPoint(const APawn* Target) const;
+
+	/** Where the strike aims this frame: above the feet, led by the target's velocity. */
+	FVector ComputeStrikeAimPoint() const;
+
+	/** Velocity that arrives at Point and stops there, without overshoot, within SpeedCap. */
+	FVector ArriveVelocity(const FVector& Point, float SpeedCap, float Acceleration) const;
+
+	/** Hostile pawn contact along this frame's path. Returns true if the drone detonated. */
+	bool CheckContact();
 
 	// ==================== Parry Methods ====================
 
-	/** Initiate parry: find target in cone or use player look direction, enter Parried state */
+	/** Initiate parry: find target in cone or use attacker look direction, enter Parried state */
 	void InitiateParry(AController* AttackerController);
 
-	/** Find best enemy target in cone in front of player. Returns nullptr if none found. */
-	AShooterNPC* FindParryTarget(const FVector& PlayerLocation, const FVector& PlayerForward) const;
+	/** Find best hostile-of-attacker pawn in cone in front of the parrier. Returns nullptr if none found. */
+	APawn* FindParryTarget(const APawn* AttackerPawn, const FVector& PlayerLocation, const FVector& PlayerForward) const;
 
 	// ==================== Death Methods ====================
 
 	/** Master death handler — delegates to specific death type based on state */
 	void KamikazeDie();
 
-	/** Debris fall (orbit death — no explosion) */
+	/** Debris fall (hold death — no explosion) */
 	void TriggerDebrisFall();
 
-	/** Air explosion (killed during attack near target) */
+	/** Air explosion (killed during strike near target) */
 	void TriggerAirExplosion();
 
-	/** Crash explosion (hit geometry after miss) */
+	/** Crash explosion (hit geometry) */
 	void TriggerCrashExplosion();
 
 	/** Full collision explosion (direct hit on player) */
 	void TriggerCollisionExplosion();
 
-	/** Shared explosion logic: damage, stun, VFX, SFX
-	 *  @param Radius Explosion radius
-	 *  @param Damage Max damage at center
-	 *  @param DamageTypeClass Damage type for the explosion
-	 *  @param bDropHealthPickup Whether to drop HP pickups
-	 */
+	/** Shared explosion logic: damage, stun, VFX, SFX */
 	void DoExplosion(float Radius, float Damage, TSubclassOf<UDamageType> DamageTypeClass, bool bDropHealthPickup);
 
 	/** Deferred destruction */
@@ -517,126 +558,56 @@ protected:
 	/** Aggressive deactivation of all systems (performance — copied from FlyingDrone pattern) */
 	void DeactivateAllSystems();
 
-	// ==================== Orbit State ====================
+	// ==================== Hold / Strike State ====================
 
-	/** Current orbit angle (radians) — synced to drone's actual angular position */
-	float OrbitAngle = 0.0f;
+	/** Seconds held at the hold point with line of sight, toward HoldTimeBeforeStrike. */
+	float HoldTimer = 0.0f;
 
-	/** Cumulative angle traveled for lap counting (resets every 2PI) */
-	float OrbitCumulativeAngle = 0.0f;
+	/** Set once HoldTimer reaches HoldTimeBeforeStrike (read by the StateTree condition). */
+	bool bProximityTimedOut = false;
 
-	/** Current orbit radius */
-	float CurrentOrbitRadius = 1100.0f;
-
-	/** Center of the orbit (tracks player with smoothing) */
-	FVector OrbitCenter = FVector::ZeroVector;
-
-	/** Time since last orbit center update */
-	float TimeSinceOrbitCenterUpdate = 0.0f;
-
-	/** Time since last geometry check */
-	float TimeSinceGeometryCheck = 0.0f;
-
-	/** Cumulative time unable to maintain minimum orbit radius */
-	float OrbitForcedTimer = 0.0f;
-
-	/** If true, orbit can't be maintained and attack is forced */
-	bool bOrbitForced = false;
-
-	/** Per-instance phase offset for vertical sinusoid */
-	float OrbitHeightPhaseOffset = 0.0f;
-
-	/** Per-instance speed noise offset */
-	float SpeedNoiseTimeOffset = 0.0f;
-
-	/** Time at proximity radius without token */
-	float ProximityTimer = 0.0f;
-
-	// ==================== Strafe State ====================
-
-	/** If true, drone is in lateral strafe mode instead of orbiting */
-	bool bIsStrafing = false;
-
-	/** Center position for strafe oscillation (assigned by coordinator) */
-	FVector StrafeCenter = FVector::ZeroVector;
-
-	/** Lateral axis for strafe oscillation (perpendicular to player-drone direction) */
-	FVector StrafeAxis = FVector::ZeroVector;
-
-	/** Current phase of strafe sinusoid */
-	float StrafePhase = 0.0f;
-
-	/** Cumulative phase for lap counting (one full sin period = one "lap") */
-	float StrafeCumulativePhase = 0.0f;
-
-	/** Timer for orbit quality evaluation (every 1.0s) */
-	float OrbitEvaluationTimer = 0.0f;
-
-	/** Number of blocked rays in last orbit evaluation (out of 8) */
-	int32 LastBlockedRayCount = 0;
-
-	/** How long the drone has been in orbit (for MinOrbitTimeBeforeAttack) */
-	float OrbitElapsedTime = 0.0f;
-
-	// ==================== Attack State ====================
-
-	/** Target position for attack (calculated at commit) */
+	/** Aim point of the current strike, for debug drawing. */
 	FVector AttackTargetPosition = FVector::ZeroVector;
 
-	/** Attack direction (normalized) */
-	FVector AttackDirection = FVector::ForwardVector;
-
-	/** Timer for telegraph/post-attack phases */
+	/** Timer for the current state */
 	float StateTimer = 0.0f;
 
-	/** If true, attack was triggered by retaliation (bypasses token) */
+	/** If true, the drone was shot while holding: it skips the rest of the wait and goes to the front
+	 *  of the strike queue (still one strike at a time per player) */
 	bool bIsRetaliating = false;
 
-	// ==================== Positioning Bezier State ====================
-	// Cubic Bezier from orbit to frontal attack point.
-	// P0, P1 are fixed at start. P3 (target) updates dynamically each frame.
+	/** The strike queue said yes; consumed by BeginAttack. */
+	bool bStrikeGranted = false;
 
-	/** Position at start of positioning */
-	FVector PositioningStartPos = FVector::ZeroVector;
+	/** The player the strike queue handed this drone, refreshed every frame on the authority. */
+	TWeakObjectPtr<APawn> QueueTarget;
 
-	/** P1 control point (orbit tangent pull, fixed at start) */
-	FVector PositioningP1 = FVector::ZeroVector;
+	/** Per-drone phase of the drift, so a group of drones does not sway in step. */
+	float DriftPhase = 0.0f;
 
-	/** Previous frame position for virtual velocity calculation */
-	FVector PositioningPrevPos = FVector::ZeroVector;
+	/** The side it came in from, around its target (degrees), fixed the first time it holds. */
+	float HoldBearingDeg = 0.0f;
+	bool bHasHoldBearing = false;
 
-	/** Orbit tangent direction at positioning start (for P1 calculation) */
-	FVector PositioningOrbitTangent = FVector::ForwardVector;
+	/** Which way the current strike curves (+1 or -1), picked when it starts. */
+	float StrikeArcSide = 1.0f;
 
-	// ==================== Telegraph Phantom Lerp ====================
-	// Two "ghost" drones are simulated: one continues orbiting, one snaps to attack.
-	// The real drone's position is lerped between them over TelegraphDuration.
+	/** Current slide around the sector (degrees) and the side it is heading for (+1 or -1). */
+	float RepositionOffsetDeg = 0.0f;
+	float RepositionSide = 1.0f;
+	float RepositionTimer = 0.0f;
 
-	/** Drone position at telegraph start — both phantoms originate here */
-	FVector TelegraphStartPos = FVector::ZeroVector;
+	/** Velocity last frame and a smoothed acceleration, for the tilt and the motor pitch. */
+	FVector LastVelocity = FVector::ZeroVector;
+	FVector SmoothedAcceleration = FVector::ZeroVector;
 
-	/** Attack phantom direction (toward predicted target at telegraph start) */
-	FVector TelegraphAttackDir = FVector::ForwardVector;
+	/** The server's strike queue, or null on a client. */
+	class UKamikazeStrikeSubsystem* GetStrikeQueue() const;
 
-	/** Saved orbit angle for phantom orbit simulation */
-	float TelegraphPhantomOrbitAngle = 0.0f;
-
-	/** Saved effective speed for phantom orbit */
-	float TelegraphPhantomOrbitSpeed = 0.0f;
-
-	/** Saved orbit center for phantom orbit */
-	FVector TelegraphPhantomOrbitCenter = FVector::ZeroVector;
-
-	/** Previous frame's interpolated position (for computing virtual velocity) */
-	FVector TelegraphPrevPos = FVector::ZeroVector;
-
-	// ==================== Sweep Collision ====================
+	// ==================== Detonation Sweep ====================
 
 	/** Previous frame position — used for sphere sweep hit detection to prevent tunneling */
 	FVector PreviousFrameLocation = FVector::ZeroVector;
-
-	/** Sphere sweep from previous to current location. Returns true if hit player → triggers explosion + death. */
-	bool CheckPlayerCollisionSweep();
 
 	// ==================== Damage State (for StateTree) ====================
 
@@ -645,14 +616,6 @@ protected:
 
 	/** Time when last damage was taken */
 	float LastDamageTakenTime = -100.0f;
-
-	// ==================== Launch State ====================
-
-	/** Initial launch speed (set by spawner via InitiateLaunch) */
-	float LaunchInitialSpeed = 0.0f;
-
-	/** Accumulated time with near-zero position delta (for stuck detection) */
-	float StuckAccumulator = 0.0f;
 
 	// ==================== Parry State ====================
 
@@ -679,9 +642,6 @@ protected:
 
 	// ==================== Internal ====================
 
-	/** Per-instance random stream */
-	FRandomStream InstanceRandom;
-
 	/** Death sequence started flag */
 	bool bDeathSequenceStarted = false;
 
@@ -691,13 +651,18 @@ protected:
 	/** Actor to ignore collision with during knockback */
 	TWeakObjectPtr<AActor> KnockbackIgnoreActor;
 
-	/** The player this drone is acting against: orbits them, dives at them, measures distance to
-	 *  them. Resolved to the nearest player on first use and then kept, because re-picking every
-	 *  frame would make the drone flip between teammates mid-orbit. "Nearest player" is the
-	 *  placeholder aggro rule from the coop handoff, not a final design. */
-	APawn* GetTargetPlayerPawn() const;
+	/** Whoever this drone is acting against. Not necessarily a player: with factions the drone is a
+	 *  squad's expendable and can be sent at another faction's pawn.
+	 *
+	 *  The coordinator owns the choice; this only reads it, and caches the answer so a frame where
+	 *  the coordinator is missing does not make the drone flip mid-strike. Nearest hostile is the
+	 *  fallback for a drone nobody has registered. */
+	APawn* GetTargetPawn() const;
 
-	/** Backing store for GetTargetPlayerPawn. Mutable because the accessor is const and every
+	/** Backing store for GetTargetPawn. Mutable because the accessor is const and every
 	 *  caller is a read. Cleared implicitly when the pawn dies (weak pointer), which re-picks. */
-	mutable TWeakObjectPtr<APawn> TargetPlayer;
+	mutable TWeakObjectPtr<APawn> CachedTarget;
+
+	/** World time of the last self-designation sweep. Mutable for the same reason as CachedTarget. */
+	mutable float LastReacquireTime = -100.0f;
 };

@@ -1,4 +1,4 @@
-// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
+﻿// Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "ArenaManager.h"
 #include "ArenaFinaleSequence.h"
@@ -414,13 +414,13 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 		// Force pre-placed enemies to target the player immediately
 		AActor* PlayerActor = Player;
 		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] ActivateArena SUSTAIN: NavSystem=%s"), NavSys ? TEXT("EXISTS") : TEXT("NULL!!!"));
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] ActivateArena SUSTAIN: NavSystem=%s"), NavSys ? TEXT("EXISTS") : TEXT("NULL!!!"));
 		if (NavSys && PlayerActor)
 		{
 			FNavLocation NavLoc;
 			const FVector PlayerLoc = PlayerActor->GetActorLocation();
 			const bool bPlayerOnNav = NavSys->ProjectPointToNavigation(PlayerLoc, NavLoc, FVector(50, 50, 200));
-			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] Player at %s — OnNavMesh=%d"), *PlayerLoc.ToString(), bPlayerOnNav);
+			UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] Player at %s — OnNavMesh=%d"), *PlayerLoc.ToString(), bPlayerOnNav);
 		}
 
 		for (int32 i = 0; i < AliveNPCs.Num(); i++)
@@ -436,11 +436,11 @@ void AArenaManager::ActivateArena(AShooterCharacter* Player)
 					FNavLocation NavLoc;
 					const FVector NPCLoc = NPC->GetActorLocation();
 					const bool bOnNav = NavSys->ProjectPointToNavigation(NPCLoc, NavLoc, FVector(50, 50, 200));
-					UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] NPC %s at %s — OnNavMesh=%d"),
+					UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] NPC %s at %s — OnNavMesh=%d"),
 						*NPC->GetName(), *NPCLoc.ToString(), bOnNav);
 					if (!bOnNav)
 					{
-						UE_LOG(LogTemp, Error, TEXT("[NAV_DEBUG] NPC %s IS NOT ON NAVMESH!"), *NPC->GetName());
+						UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] NPC %s IS NOT ON NAVMESH!"), *NPC->GetName());
 					}
 				}
 

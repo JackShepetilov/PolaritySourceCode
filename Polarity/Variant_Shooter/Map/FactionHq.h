@@ -91,10 +91,55 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties", meta = (ClampMin = "100.0"))
 	float SortieScatterRadius = 800.0f;
 
-	/** Hard cap on sorties in one run. Zero is no cap. The population brake belongs to the faction
-	 *  director when that exists; until then this stops a long run from filling the map. */
+	/** What this headquarters sends to somewhere it already holds and is losing.
+	 *
+	 *  A separate list because reinforcing is a different job: what you want arriving at a place
+	 *  under attack is a garrison, not an assault. Empty falls back to Sorties, which is worse but
+	 *  not broken. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties")
+	TArray<FSortieEntry> ReinforcementSorties;
+
+	// ==================== Eyes ====================
+
+	/** Who this headquarters sends out alone to look: the scout drone and the sniper.
+	 *
+	 *  A separate list from every other sortie because these are not a squad. One entry sends one
+	 *  man, and what leaves is marked a lone operator, which exempts it from the merge, the surplus
+	 *  split and squad nerve - see USquad::bLoneOperator. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Scouts")
+	TArray<FSortieEntry> ScoutSorties;
+
+	/** How many of them this side keeps alive at once. Zero switches the whole thing off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Scouts", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 ScoutsWanted = 2;
+
+	/** Seconds before a dead one is replaced. Long on purpose: killing the eyes should be worth
+	 *  something, and a side that instantly re-grows them was never blinded at all. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Scouts", meta = (ClampMin = "5.0"))
+	float ScoutRespawnSeconds = 90.0f;
+
+	/** Hard cap on sorties in one run. Zero is no cap, and zero is now the default.
+	 *
+	 *  Was 3 on the bench, and that was the wrong brake: the whole war ended 2 minutes 20 seconds
+	 *  into a run whose final does not open until minute fifteen. A count of sorties says nothing
+	 *  about how crowded the map is, which is the thing anybody actually cared about. That is what
+	 *  FactionPopulationCap does now; this stays for emergencies. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties", meta = (ClampMin = "0"))
 	int32 MaxSorties = 0;
+
+	/** How many pawns of this faction may stand on the map at once, garrisons included.
+	 *
+	 *  The real brake, and the reason sorties can now be endless. Checked at the moment a squad
+	 *  leaves: under the ceiling it goes, at the ceiling it waits, and in between it goes SHORT.
+	 *  A cut-down squad rather than no squad on purpose - a ceiling that skips whole sorties makes
+	 *  the war go quiet exactly when it is busiest, which looks like the system broke. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties", meta = (ClampMin = "1"))
+	int32 FactionPopulationCap = 26;
+
+	/** Fewer than this and it is not worth opening the gates. Two men walking at a garrison is not
+	 *  a sortie, it is a delivery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HQ|Sorties", meta = (ClampMin = "1"))
+	int32 MinSortieMembers = 2;
 
 	/** Where squads appear. Leave empty to use the actor's own location; point it at a gate mesh
 	 *  otherwise, so squads do not walk out through a wall. */
@@ -121,8 +166,23 @@ protected:
 	 *  when nothing is worth marching at, or when the cap is reached. */
 	void TrySendSortie();
 
-	/** Draw from whichever list this headquarters is entitled to right now. */
-	USquadLoadout* PickSortieLoadout() const;
+	/** Keep the eyes topped up. Runs on the same tick as the sorties, on its own clock. */
+	void TickScouts(float DeltaSeconds);
+
+	/** Who is out looking right now. Weak, so a dead scout simply drops off the list. */
+	TArray<TWeakObjectPtr<APawn>> Scouts;
+
+	float ScoutTimer = 0.0f;
+
+	/** Draw from whichever list this headquarters is entitled to right now. Reinforcement draws
+	 *  from its own list when there is one, because a place under attack wants a garrison. */
+	USquadLoadout* PickSortieLoadout(EFactionAction Action) const;
+
+	/** Draw from one table. */
+	static USquadLoadout* PickWeighted(const TArray<FSortieEntry>& Table);
+
+	/** How many members the loadout would put down at full strength. */
+	static int32 LoadoutSize(const USquadLoadout* Loadout);
 
 	float SortieTimer = 0.0f;
 	int32 SortiesSent = 0;

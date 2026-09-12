@@ -1,4 +1,4 @@
-// MeleeNPC.cpp
+﻿// MeleeNPC.cpp
 // Implementation of melee combat NPC
 
 #include "MeleeNPC.h"
@@ -15,7 +15,6 @@
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
 #include "../DamageTypes/DamageType_Melee.h"
-#include "../../AI/Components/MeleeRetreatComponent.h"
 #include "../../AI/Navigation/PolarityPathFollowingComponent.h"
 #include "EMFVelocityModifier.h"
 
@@ -38,11 +37,6 @@ static bool IsPerformingNavLinkJump(const AMeleeNPC* NPC)
 AMeleeNPC::AMeleeNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// Melee NPCs don't need the retreat component - they want to be close
-	if (MeleeRetreatComponent)
-	{
-		MeleeRetreatComponent->SetActive(false);
-	}
 }
 
 void AMeleeNPC::BeginPlay()
@@ -52,11 +46,6 @@ void AMeleeNPC::BeginPlay()
 
 	Super::BeginPlay();
 
-	// Disable melee retreat component (this NPC fights in melee)
-	if (MeleeRetreatComponent)
-	{
-		MeleeRetreatComponent->SetActive(false);
-	}
 
 	// Spawn melee weapon if specified
 	SpawnMeleeWeapon();
@@ -127,7 +116,7 @@ void AMeleeNPC::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AMeleeNPC::StartMeleeAttack(AActor* Target)
 {
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] StartMeleeAttack ENTER (%s): target=%s, AttackMontages.Num=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] StartMeleeAttack ENTER (%s): target=%s, AttackMontages.Num=%d"),
 		*GetName(), Target ? *Target->GetName() : TEXT("NULL"), AttackMontages.Num());
 
 	// Track target acquisition for perception delay
@@ -136,7 +125,7 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 	// Validate
 	if (!CanAttack() || !Target || bIsDead)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] StartMeleeAttack EARLY-OUT (%s): CanAttack=%d Target=%d bIsDead=%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] StartMeleeAttack EARLY-OUT (%s): CanAttack=%d Target=%d bIsDead=%d"),
 			*GetName(), CanAttack() ? 1 : 0, Target ? 1 : 0, bIsDead ? 1 : 0);
 		return;
 	}
@@ -164,7 +153,7 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 		MontageToPlay = AttackMontages[RandomIndex];
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] StartMeleeAttack picked montage: %s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] StartMeleeAttack picked montage: %s"),
 		MontageToPlay ? *MontageToPlay->GetName() : TEXT("NONE — AttackMontages empty, using instant damage path"));
 
 	// Play attack animation
@@ -178,7 +167,7 @@ void AMeleeNPC::StartMeleeAttack(AActor* Target)
 			{
 				float MontageLength = AnimInstance->Montage_Play(MontageToPlay);
 
-				UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] Montage_Play returned length=%.2f (0 = failed; check AnimBP slot binding)"),
+				UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] Montage_Play returned length=%.2f (0 = failed; check AnimBP slot binding)"),
 					MontageLength);
 
 				// Bind to montage end
@@ -244,7 +233,7 @@ bool AMeleeNPC::CanAttack() const
 	// Нельзя атаковать если мёртв, уже атакует, в knockback или в dash
 	if (bIsDead || bIsAttacking || bIsInKnockback || bIsDashing)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): bIsDead=%d bIsAttacking=%d bIsInKnockback=%d bIsDashing=%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): bIsDead=%d bIsAttacking=%d bIsInKnockback=%d bIsDashing=%d"),
 			*GetName(), bIsDead ? 1 : 0, bIsAttacking ? 1 : 0, bIsInKnockback ? 1 : 0, bIsDashing ? 1 : 0);
 		return false;
 	}
@@ -252,7 +241,7 @@ bool AMeleeNPC::CanAttack() const
 	// Wait for perception delay to expire before attacking
 	if (IsInPerceptionDelay())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): in perception delay"), *GetName());
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): in perception delay"), *GetName());
 		return false;
 	}
 
@@ -260,7 +249,7 @@ bool AMeleeNPC::CanAttack() const
 	const float CurrentTime = GetWorld()->GetTimeSeconds();
 	if (LastAttackTime > 0.0f && (CurrentTime - LastAttackTime) < AttackCooldown)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): cooldown (since last %.2fs / %.2fs)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] CanAttack=FALSE (%s): cooldown (since last %.2fs / %.2fs)"),
 			*GetName(), CurrentTime - LastAttackTime, AttackCooldown);
 		return false;
 	}
@@ -737,7 +726,7 @@ bool AMeleeNPC::StartDash(const FVector& Direction, float Distance, AActor* Targ
 	// обычная навигация (рампы + прыжки по навлинкам) сама поднимет/спустит NPC, как у стрелков.
 	if (FMath::Abs(EndPos.Z - StartPos.Z) > MaxDashVerticalDelta)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s StartDash DEFER (vertical): delta %.0f > %.0f -> navigation"),
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] %s StartDash DEFER (vertical): delta %.0f > %.0f -> navigation"),
 			*GetName(), FMath::Abs(EndPos.Z - StartPos.Z), MaxDashVerticalDelta);
 		return false;
 	}
@@ -745,7 +734,7 @@ bool AMeleeNPC::StartDash(const FVector& Direction, float Distance, AActor* Targ
 	// Валидация пути (NavMesh + коллизии)
 	if (!ValidateDashPath(StartPos, EndPos))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s StartDash DEFER (path validation failed) -> navigation"),
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] %s StartDash DEFER (path validation failed) -> navigation"),
 			*GetName());
 		return false;
 	}

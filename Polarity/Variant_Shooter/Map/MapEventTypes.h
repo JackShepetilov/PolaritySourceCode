@@ -15,8 +15,6 @@
 #include "AI/PolarityTeams.h"
 #include "MapEventTypes.generated.h"
 
-class AInventoryPickup;
-
 /** What a point of interest is for. The map carries many of these; three carry missions, two are
  *  headquarters, one is the final. Everything else is plain loot. */
 UENUM(BlueprintType)
@@ -136,31 +134,6 @@ struct POLARITY_API FFinalConditions
 	}
 };
 
-/** One pile of something on a point. Money is the interesting one: it is what turns a cell of the
- *  grid into a decision (Docs/Inventory_Slot_Contract_2026-08-28.md). */
-USTRUCT(BlueprintType)
-struct POLARITY_API FPoiLootEntry
-{
-	GENERATED_BODY()
-
-	/** An AInventoryPickup subclass: currency, ammo, an attachment, an ability upgrade. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot")
-	TSubclassOf<AInventoryPickup> PickupClass = nullptr;
-
-	/** How many of them this point puts down. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot", meta = (ClampMin = "1", ClampMax = "20"))
-	int32 Count = 1;
-
-	/** Scattered within this radius of the point (cm). Zero uses the point's own influence radius. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot", meta = (ClampMin = "0.0"))
-	float ScatterRadius = 0.0f;
-
-	/** Counts against the money budget in the director's audit. Tick it on currency piles and on
-	 *  nothing else, or the audit reports the wrong number and the dilemma gets mistuned. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Loot")
-	bool bIsMoney = false;
-};
-
 /**
  * What the director remembers about a point.
  *
@@ -212,12 +185,8 @@ struct POLARITY_API FPoiWarState
 	UPROPERTY(BlueprintReadOnly, Category = "POI")
 	bool bMissionExpired = false;
 
-	/** Loot is put down once per run, on the first load of the point. A sublevel that unloads and
-	 *  loads again must not refill it. */
-	UPROPERTY(BlueprintReadOnly, Category = "POI")
-	bool bLootSpawned = false;
-
-	/** Garrisons follow the same rule as loot, for the same reason. */
+	/** Garrisons are spawned once per run, on the first load of the point. A sublevel that unloads
+	 *  and loads again must not refill it. */
 	UPROPERTY(BlueprintReadOnly, Category = "POI")
 	bool bGarrisonSpawned = false;
 
@@ -226,13 +195,124 @@ struct POLARITY_API FPoiWarState
 	UPROPERTY(BlueprintReadOnly, Category = "POI")
 	bool bLoaded = false;
 
-	/** How much money this point put on the floor, for the budget audit. */
-	UPROPERTY(BlueprintReadOnly, Category = "POI")
-	int32 MoneyStacksPlaced = 0;
-
 	/** Somebody broke the thing standing in the middle of this place. What that cost is the point's
 	 *  business - a headquarters drops to its weakened squads, anywhere else spills its loot - but
 	 *  the fact is remembered here, where it survives the point being streamed out. */
 	UPROPERTY(BlueprintReadOnly, Category = "POI")
 	bool bBannerBroken = false;
+
+	// ==================== What each side knows ====================
+	//
+	// Who OWNS a place is public: there is a flag standing in it and anybody walking past reads it.
+	// How many are standing in it is not. So a faction plans on what it last had eyes on, and that
+	// memory goes stale - which is the whole reason its plans can be wrong, and the reason watching
+	// them be wrong is interesting rather than a bug.
+
+	/** Live count of each side standing here. A side always knows its own strength. */
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	int32 PresentA = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	int32 PresentB = 0;
+
+	/** What faction A believes B has here, and the world time it last actually looked. */
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	int32 KnownEnemyForA = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	float KnownEnemyForATime = -100000.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	int32 KnownEnemyForB = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "POI")
+	float KnownEnemyForBTime = -100000.0f;
+
+
+	/** When each side last had somebody STANDING here, as opposed to merely being told about it.
+	 *
+	 *  Split from the intel clock the day scouts arrived, and the reason is the stagnation bonus:
+	 *  it grows a point's value the longer a faction has not been there, and it used to read the
+	 *  intel clock because looking and going were the same act. They are not any more. A scout who
+	 *  glances at a corner of the map would otherwise reset the very number that was about to send
+	 *  an assault there, and the map would quietly shrink back to three points nobody leaves. */
+	/** Сколько крови стоило этой стороне это место, с затуханием по времени.
+	 *
+	 *  Штаб раньше не помнил ничего: план считался по текущим силам врага, а что на точке уже
+	 *  положили два отряда - нет. Так и получается мясорубка, в которую подкрепления идут ровным
+	 *  ручьём, пока не кончатся. Число растёт на каждого убитого и само рассасывается, поэтому
+	 *  место дорожает после бойни и снова дешевеет, когда там давно тихо. */
+	UPROPERTY(BlueprintReadOnly, Category = "War")
+	float BloodForA = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "War")
+	float BloodForATime = -100000.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "War")
+	float BloodForB = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "War")
+	float BloodForBTime = -100000.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "War")
+	float VisitedByATime = -100000.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "War")
+	float VisitedByBTime = -100000.0f;};
+
+/** What a faction wants doing with a place next. */
+UENUM(BlueprintType)
+enum class EFactionAction : uint8
+{
+	/** March on somewhere this faction does not hold. */
+	Attack UMETA(DisplayName = "Attack"),
+
+	/** Send help to somewhere it holds and is losing. A faction that only ever attacks loses the
+	 *  map behind its own advance, which reads as an army with no idea what it owns. */
+	Reinforce UMETA(DisplayName = "Reinforce")
+};
+
+/** One line of a faction's plan: a place, what to do with it, and why it scored where it did.
+ *
+ *  A LINE of a plan rather than a stored plan, because a stored order of conquest goes stale the
+ *  moment anybody dies. The plan is rebuilt from the map every time a headquarters is ready to send
+ *  somebody, and the ordering IS the plan; keeping the score and the reason on the line is what
+ *  makes it possible to answer "why did they go there" without guessing. */
+USTRUCT(BlueprintType)
+struct POLARITY_API FFactionOrder
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	EFactionAction Action = EFactionAction::Attack;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	FName PoiTag;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	FVector Location = FVector::ZeroVector;
+
+	/** Higher is more wanted. Comparable only within one call: the scale is relative. */
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	float Score = 0.0f;
+
+	/** Which team holds the place right now, so a caller can tell an assault from an occupation. */
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	uint8 HeldBy = 255;
+
+	/** Human-readable reason the line scored what it did. Debug only; never branch on it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	FString Reason;
+
+	/** Odds the faction gives itself here, 0..1, from what it believes about both sides. Kept on
+	 *  the line because "we went and lost" and "we went at odds we knew were bad" are different
+	 *  bugs and the log has to tell them apart. */
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	float Chance = 0.0f;
+
+	/** True when the line cleared the worth threshold. A plan keeps the lines it REJECTED: the
+	 *  interesting question is usually why the faction sat still, and a list of what it looked at
+	 *  and turned down answers it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Plan")
+	bool bWorthIt = false;
 };

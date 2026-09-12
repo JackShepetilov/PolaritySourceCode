@@ -625,6 +625,25 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Slide")
 	float SlideFOVAdd = 12.0f;
 
+	// ==================== Camera|Focus lock ====================
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Focus")
+	bool bEnableFocusFOV = true;
+
+	/** Degrees of field of view ADDED while a target is locked, and it is meant to be NEGATIVE: the
+	 *  view closes in on whoever the blade has picked.
+	 *
+	 *  Same additive shape as SlideFOVAdd, and deliberately its mirror -- the slide opens the view up
+	 *  because the character is fast, the lock pulls it in because the character has chosen one
+	 *  target. The two can be live at the same time and simply add. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Focus")
+	float FocusFOVAdd = -10.0f;
+
+	/** How fast the lock's field of view arrives and leaves. Slower than the lock itself on purpose:
+	 *  an instant zoom on a target that was acquired automatically reads as a camera fault. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Focus", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+	float FocusFOVBlendSpeed = 8.0f;
+
 	// ==================== Camera|Wallrun ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Wallrun")

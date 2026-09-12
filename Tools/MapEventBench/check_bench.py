@@ -7,9 +7,10 @@ import unreal  # first line on purpose: execute_python_code only accepts code th
 # prints the same thing to the console, and the author can walk the same steps with the same
 # commands.
 #
-# The run director is a world subsystem and Python has no way to reach one (there is no
-# SubsystemBlueprintLibrary binding), so the director-side totals - phase, money, earned conditions -
-# come from the console dump in the log. Everything per-point comes from APoiActor::GetWarState.
+# The run director is a world subsystem, which Python reaches through the static
+# RunDirectorSubsystem.get_run_director(actor) - that getter exists for exactly this. Phase and
+# earned conditions still come from the console dump; everything per-point comes from
+# APoiActor::GetWarState.
 #
 # Run it while PIE is going. Each call is one snapshot; the war moves between calls, and that is the
 # point - the bench is watched in stages, not asserted once.
@@ -75,8 +76,6 @@ def main():
                   "{}/{}".format(len(pois), len(POINTS)))
 
     print("  --- war ---")
-    money = 0
-    loot_done = 0
     garrison_done = 0
     contested = 0
     windows = 0
@@ -85,8 +84,6 @@ def main():
         if not p:
             continue
         s = p.get_war_state()
-        money += s.money_stacks_placed
-        loot_done += 1 if s.loot_spawned else 0
         garrison_done += 1 if s.garrison_spawned else 0
         contested += 1 if s.contested else 0
         windows += 1 if s.mission_window_open else 0
@@ -97,11 +94,25 @@ def main():
             " MISSION-DONE" if s.mission_completed else (" MISSION-EXPIRED" if s.mission_expired else ""),
             "" if s.loaded else " streamed-out"))
 
-    total += 1
-    passed += row(4 <= money <= 6, "4 money budget", "{} stacks, target 4-6".format(money))
+    # --- loot: anchors rolled, sheets landed ---
+    #
+    # The map no longer places a fixed number of stacks: anchors roll, so this is a distribution and
+    # the check is that the machinery ran at all. The number itself is printed for the budget - the
+    # band it should sit in is 4-6 stacks on sixteen cells.
+    anchors = unreal.GameplayStatics.get_all_actors_of_class(world, unreal.LootAnchor)
+    sheets = unreal.GameplayStatics.get_all_actors_of_class(world, unreal.LootSheet)
+    on_sheets = sum(len(s.get_laid_out()) for s in sheets)
+
+    d = unreal.RunDirectorSubsystem.get_run_director(pois[POINTS[0]]) if pois else None
+    money = d.get_money_stacks_placed() if d else 0
 
     total += 1
-    passed += row(loot_done >= 6, "5 loot placed once per point", "{}/7 points".format(loot_done))
+    passed += row(money > 0, "4 money on the map",
+                  "{} stacks, budget band 4-6".format(money))
+
+    total += 1
+    passed += row(len(sheets) > 0, "5 sheets landed on anchors",
+                  "{}/{} anchors paid, {} items laid out".format(len(sheets), len(anchors), on_sheets))
 
     total += 1
     passed += row(garrison_done >= 5, "6 garrisons placed", "{}/7 points".format(garrison_done))

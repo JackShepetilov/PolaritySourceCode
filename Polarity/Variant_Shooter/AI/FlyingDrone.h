@@ -11,6 +11,16 @@ class USphereComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
 
+/** Visible damage progression on the drone hull. Thresholds are fractions of the HP the drone
+ *  spawned with; the stage drives speed penalties, overheat frequency and hull VFX. */
+UENUM(BlueprintType)
+enum class EDroneDamageStage : uint8
+{
+	Intact UMETA(DisplayName = "Intact"),
+	Damaged UMETA(DisplayName = "Damaged"),
+	Critical UMETA(DisplayName = "Critical")
+};
+
 /**
  * Flying drone enemy - a hovering robot soldier from an alien civilization.
  * Inherits weapon handling and damage systems from ShooterNPC.
@@ -113,15 +123,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
 	float TargetCheckInterval = 0.25f;
 
-	/** Tag to identify enemies (usually "Player") */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat")
-	FName EnemyTag = FName("Player");
-
 	// ==================== Evasive Dash Settings (for StateTree) ====================
 
-	/** Cooldown for evasive dash after taking damage (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Evasion", meta = (ClampMin = "0.5", ClampMax = "10.0"))
-	float EvasiveDashCooldown = 3.0f;
+	/** Cooldown for evasive dash after taking damage (seconds). Long by design: the dash used to
+	 *  fire every few seconds and wreck target tracking; between dashes evasion is a FirePosition
+	 *  relocation, not a local jerk. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Combat|Evasion", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+	float EvasiveDashCooldown = 10.0f;
 
 	/** Time of last evasive dash (for cooldown tracking) */
 	float LastEvasiveDashTime = -100.0f;
@@ -131,6 +139,93 @@ protected:
 
 	/** Time when last damage was taken (for StateTree condition with grace period) */
 	float LastDamageTakenTime = -100.0f;
+
+	// ==================== Damage Stages ====================
+
+	/** HP fraction at or below which the drone counts as Damaged (sparks + smoke, speed penalty). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Damage Stages", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float DamagedStageHPFraction = 0.6f;
+
+	/** HP fraction at or below which the drone counts as Critical (burning, bigger speed penalty,
+	 *  overheats more often). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Damage Stages", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CriticalStageHPFraction = 0.3f;
+
+	/** Movement speed multiplier while Damaged (applied to FlyingMovement fly speed). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Damage Stages", meta = (ClampMin = "0.2", ClampMax = "1.0"))
+	float DamagedSpeedMultiplier = 0.85f;
+
+	/** Movement speed multiplier while Critical. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Damage Stages", meta = (ClampMin = "0.2", ClampMax = "1.0"))
+	float CriticalSpeedMultiplier = 0.75f;
+
+	/** Overheat duration multiplier while Critical (< 1 = overheats more often, shorter window
+	 *  between bursts means the drone shoots more often but from a worse position). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Damage Stages", meta = (ClampMin = "0.2", ClampMax = "1.0"))
+	float CriticalOverheatScale = 0.7f;
+
+	/** Current visible damage stage (replicated so clients activate the matching hull VFX). */
+	UPROPERTY(ReplicatedUsing = OnRep_DroneDamageStage, BlueprintReadOnly, Category = "Drone|Damage Stages")
+	EDroneDamageStage DamageStage = EDroneDamageStage::Intact;
+
+	/** Sparks + smoke system active while Damaged (attached to DroneMesh). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|VFX")
+	TObjectPtr<UNiagaraSystem> DamagedHullFX;
+
+	/** Burning + arc discharge system active while Critical (attached to DroneMesh). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|VFX")
+	TObjectPtr<UNiagaraSystem> CriticalHullFX;
+
+	/** Runtime hull FX components (created in constructor, attached to DroneMesh). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Drone|VFX")
+	TObjectPtr<UNiagaraComponent> DamagedHullFXComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Drone|VFX")
+	TObjectPtr<UNiagaraComponent> CriticalHullFXComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Drone|VFX")
+	TObjectPtr<UNiagaraComponent> RepairHealFXComponent;
+
+	// ==================== Repair Retreat ====================
+
+	/** Cooldown between repair retreats (seconds). Not once-per-life: a big cooldown instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Repair", meta = (ClampMin = "5.0"))
+	float RepairCooldown = 75.0f;
+
+	/** Accumulated damage since the last repair that triggers a retreat on its own (even above
+	 *  the Critical threshold stage). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Repair", meta = (ClampMin = "1.0"))
+	float RepairDamageThreshold = 120.0f;
+
+	/** Height above the retreat anchor the drone climbs to (cm). ~100 m: nearly invisible from
+	 *  below but still hittable — spotting and finishing a repairing drone is the reward for
+	 *  paying attention. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Repair", meta = (ClampMin = "1000.0"))
+	float RepairAltitude = 10000.0f;
+
+	/** HP restored per second while hovering at the repair altitude. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Repair", meta = (ClampMin = "1.0"))
+	float RepairHPPerSecond = 25.0f;
+
+	/** A single hit of at least this damage aborts the repair immediately; the drone returns to
+	 *  combat without a second ascent until the cooldown elapses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|Repair", meta = (ClampMin = "1.0"))
+	float RepairInterruptDamage = 20.0f;
+
+	/** Weak heal VFX while repairing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone|VFX")
+	TObjectPtr<UNiagaraSystem> RepairHealFX;
+
+	// Runtime repair state
+	bool bIsRepairing = false;
+	bool bRepairHovering = false;
+	float LastRepairEndTime = -1000.0f;
+	float DamageSinceLastRepair = 0.0f;
+	FVector RepairAnchorLocation = FVector::ZeroVector;
+	float MaxHPAtSpawn = 0.0f;
+
+	/** FlyingMovement fly speed as configured (before damage-stage multipliers). */
+	float BaseFlySpeed = 0.0f;
 
 	// ==================== Stabilization Settings ====================
 
@@ -218,6 +313,43 @@ protected:
 
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
+
+	// ==================== Damage Stages ====================
+
+public:
+
+	/** Movement speed multiplier for the current stage (1.0 while Intact). */
+	UFUNCTION(BlueprintPure, Category = "Drone|Damage Stages")
+	float GetStageSpeedMultiplier() const;
+
+	/** Overheat duration multiplier for the current stage (1.0 while Intact). */
+	UFUNCTION(BlueprintPure, Category = "Drone|Damage Stages")
+	float GetStageOverheatScale() const;
+
+	UFUNCTION(BlueprintPure, Category = "Drone|Damage Stages")
+	EDroneDamageStage GetDamageStage() const { return DamageStage; }
+
+	// ==================== Repair Retreat ====================
+
+	/** True when the drone should break off and repair: entered Critical, or accumulated enough
+	 *  damage since the last repair, with the cooldown elapsed. */
+	UFUNCTION(BlueprintPure, Category = "Drone|Repair")
+	bool ShouldBeginRepair() const;
+
+	/** Break off combat and climb vertically to the repair altitude. Returns false if a retreat
+	 *  is impossible right now (already repairing, dead). */
+	UFUNCTION(BlueprintCallable, Category = "Drone|Repair")
+	bool BeginRepairRetreat();
+
+	/** Finish the retreat: bCompleted=true after a full heal, false when interrupted. The drone
+	 *  stays where it is; the StateTree picks the next FirePosition from here. */
+	UFUNCTION(BlueprintCallable, Category = "Drone|Repair")
+	void EndRepairRetreat(bool bCompleted);
+
+	UFUNCTION(BlueprintPure, Category = "Drone|Repair")
+	bool IsRepairing() const { return bIsRepairing; }
+
+protected:
 
 	// ==================== Overrides from ShooterNPC ====================
 
@@ -380,6 +512,23 @@ protected:
 
 	/** Spawn muzzle flash effect */
 	void SpawnMuzzleFlashEffect();
+
+	// ==================== Damage Stage Internals ====================
+
+	/** Recompute the damage stage from current HP and apply speed/VFX consequences. Server-side;
+	 *  clients mirror the VFX in OnRep_DroneDamageStage. */
+	void UpdateDamageStage();
+
+	/** Activate/deactivate hull FX components for the given stage (safe on server and client). */
+	void ApplyStageVFX(EDroneDamageStage Stage);
+
+	UFUNCTION()
+	void OnRep_DroneDamageStage();
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	/** Per-tick repair update: climb, then hover and heal until full HP or interrupted. */
+	void TickRepair(float DeltaTime);
 
 	// ==================== Combat Logic ====================
 

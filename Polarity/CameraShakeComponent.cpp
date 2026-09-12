@@ -46,6 +46,15 @@ void UCameraShakeComponent::Initialize(UCameraComponent* InCamera, UApexMovement
 	}
 }
 
+namespace
+{
+	/** Потолок шага для пружин камеры. Заметно ниже порога устойчивости самой жёсткой из них. */
+	constexpr float MaxShakeStep = 1.0f / 60.0f;
+
+	/** Смещение камеры больше этого - уже не тряска, а авария. */
+	constexpr float MaxSaneShakeOffset = 200.0f;
+}
+
 void UCameraShakeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -72,6 +81,26 @@ void UCameraShakeComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 	if (!Settings) return;
 
+	// Большой кадр разносит пружины, поэтому шаг ограничен сверху.
+	//
+	// FBobSpringState интегрируется явным методом Эйлера. У него есть порог устойчивости: при
+	// dt больше примерно 2/sqrt(Stiffness) шаг перелетает цель дальше, чем был от неё, и амплитуда
+	// растёт с каждым кадром. При Stiffness = 80 это ~0.1 с.
+	//
+	// Alt+Tab в PIE даёт ровно такие кадры: редактор душит игру в фоне до нескольких кадров в
+	// секунду. Пружина за это время расходится экспоненциально по числу кадров, интенсивность бобa
+	// вырастает до астрономических чисел, и камера уезжает далеко за карту. Возвращается она
+	// примерно за то же время, сколько её не трогали, потому что расходилась экспоненциально, а
+	// сходится с постоянной скоростью - отсюда и симметрия, которая сбивала с толку.
+	//
+	// На ускоренном времени (polarity.debug.timescale) кадр домножается ещё раз, чисел не хватает,
+	// и в пружине появляется NaN. Дальше он уезжает в относительную позицию камеры, а с ней в
+	// перволичный меш, и падает уже анимация: Assertion failed: !Pose[BoneIndex].ContainsNaN().
+	//
+	// Ограничение, а не подшаг: боб чисто косметический, и отстать на пару кадров после хитча ему
+	// можно, а вот считать его несколько раз за кадр незачем.
+	DeltaTime = FMath::Min(DeltaTime, MaxShakeStep);
+
 	// Reset
 	CurrentOffset = FVector::ZeroVector;
 	CurrentRotationOffset = FRotator::ZeroRotator;
@@ -92,6 +121,7 @@ void UCameraShakeComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 		UpdateWallrunBob(DeltaTime);
 		UpdateWallrunFOV(DeltaTime);
 		UpdateAirDashFOV(DeltaTime);
+		UpdateFocusFOV(DeltaTime);
 	}
 
 	// Apply UNCONDITIONALLY, even with shake disabled. This component is the only writer of
@@ -99,6 +129,25 @@ void UCameraShakeComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	// bailing out above left the ADS blend with nowhere to land: AShooterCharacter::UpdateADS
 	// handed its blended FOV to SetBaseFOV() and nobody ever pushed it to the camera. The symptom
 	// was "aiming does not zoom at all", far away from the shake toggle that actually caused it.
+	// Страховка на случай, если что-то всё-таки досчиталось до NaN или до бессмыслицы: лучше
+	// потерять боб на кадр, чем отдать NaN дальше по цепочке. Она заканчивается позой скелета, и
+	// там это уже не артефакт, а падение движка.
+	const bool bSane =
+		!CurrentOffset.ContainsNaN() && !CurrentRotationOffset.ContainsNaN() &&
+		FMath::IsFinite(CurrentFOVOffset) &&
+		CurrentOffset.SizeSquared() < FMath::Square(MaxSaneShakeOffset);
+	if (!bSane)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CAMERA_DEBUG] Пружины камеры разошлись, сброшены"));
+		ProceduralBob.IntensitySpring.Reset();
+		ProceduralBob.SprintBlendSpring.Reset();
+		CurrentOffset = FVector::ZeroVector;
+		CurrentRotationOffset = FRotator::ZeroRotator;
+		CurrentFOVOffset = 0.0f;
+		CurrentViewmodelBobOffset = FVector::ZeroVector;
+		CurrentViewmodelBobRotation = FRotator::ZeroRotator;
+	}
+
 	// With every offset zeroed just above, this path is simply "camera FOV = BaseFOV".
 	ApplyToCamera(DeltaTime);
 }
@@ -422,6 +471,27 @@ void UCameraShakeComponent::UpdateAirDashFOV(float DeltaTime)
 	CurrentFOVOffset += Settings->AirDashFOVAdd * AirDashFOVIntensity * Settings->CameraShakeIntensity;
 }
 
+void UCameraShakeComponent::UpdateFocusFOV(float DeltaTime)
+{
+	if (!Settings || !Settings->bEnableFocusFOV) return;
+
+	// Ramped rather than switched, and NOT gated behind an early return of its own: the ramp has to
+	// keep running on the way back down, or letting go of the lock would leave the view zoomed in.
+	FocusFOVIntensity = FMath::FInterpTo(
+		FocusFOVIntensity,
+		bIsFocusLocked ? 1.0f : 0.0f,
+		DeltaTime,
+		FMath::Max(1.0f, Settings->FocusFOVBlendSpeed)
+	);
+
+	if (FocusFOVIntensity < 0.001f) return;
+
+	// FocusFOVAdd is negative: this SUBTRACTS from the view. Not scaled by CameraShakeIntensity,
+	// unlike the speed effects -- this one is aiming feedback rather than shake, and a player who
+	// turned the shake down still needs to see which enemy the blade has picked.
+	CurrentFOVOffset += Settings->FocusFOVAdd * FocusFOVIntensity;
+}
+
 // ==================== Apply to Camera ====================
 
 void UCameraShakeComponent::ApplyToCamera(float DeltaTime)
@@ -439,10 +509,14 @@ void UCameraShakeComponent::ApplyToCamera(float DeltaTime)
 		CameraComponent->SetFieldOfView(TargetFOV);
 	}
 
-	// Keep the first person FOV locked to the world FOV. This component is the last writer of
-	// FieldOfView each frame, so mirroring here is what actually keeps the two from drifting —
-	// writing it anywhere earlier leaves the shake offset unmatched.
-	CameraComponent->FirstPersonFieldOfView = CameraComponent->FieldOfView;
+	// FirstPersonFieldOfView is deliberately NOT touched here. The viewmodel has its own fixed FOV,
+	// set on the camera component, the way Apex, CoD and CS keep the gun one size whatever the
+	// player's FOV slider says. Mirroring the world FOV into it used to stretch the hands along
+	// with the FOV setting and with every speed kick above (slide, wallrun, air dash).
+	//
+	// The catch that made it look like the two HAD to stay equal: anything drawn next to the gun
+	// but not marked FirstPersonPrimitiveType is projected with the world FOV and slides off the
+	// weapon as soon as the two differ. Fix the marking on that component, not the FOV.
 }
 
 // ==================== Helpers ====================

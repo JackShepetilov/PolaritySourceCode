@@ -1,6 +1,8 @@
-// DroppedRangedWeapon.cpp
+﻿// DroppedRangedWeapon.cpp
 
 #include "DroppedRangedWeapon.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
+#include "Variant_Shooter/Pickups/AmmoPickup.h"
 #include "ChargeAnimationComponent.h"
 #include "ShooterWeapon.h"
 #include "Variant_Shooter/ShooterCharacter.h"
@@ -271,6 +273,139 @@ void ADroppedRangedWeapon::SetCharge(float NewCharge)
 
 // ==================== Ammo Distribution ====================
 
+void ADroppedRangedWeapon::GrantAmmoToInventory(AShooterCharacter* Player, AShooterWeapon* Weapon)
+{
+	if (!Player || !Weapon || !HasAuthority())
+	{
+		return;
+	}
+
+	UInventoryComponent* Inventory = Player->GetInventoryComponent();
+	if (!Inventory || !Weapon->OwnsAmmoCells())
+	{
+		// The energy weapon owns no cells, and a character without a bag is not on this economy.
+		return;
+	}
+
+	const int32 MagSize = FMath::Max(1, Weapon->GetMagazineSize());
+	// Zero is a real answer, not "unset": a gun thrown away empty comes back empty. Only the -1
+	// default means nobody rolled a number, and that still grants a full magazine.
+	const int32 Offered = (SpawnedBulletCount >= 0) ? SpawnedBulletCount : MagSize;
+	if (Offered <= 0)
+	{
+		Weapon->SetBulletCount(0);
+		return;
+	}
+
+	FInventoryItem Item;
+	Item.Kind = EInventorySlotKind::Ammo;
+	Item.Count = Offered;
+	// One cell holds the inventory's cell size. Anything past that opens another cell, and how many
+	// cells of ammo fit is the meta's business, not this function's.
+	Item.StackMax = Inventory->GetRoundsPerAmmoCell();
+
+	const int32 Left = Inventory->TryAdd(Item);
+	const int32 Taken = Offered - Left;
+
+	// Loaded is the same rule as a reload: as much of the pool as the magazine holds. Written this
+	// way rather than "what this pickup gave" so a top-up on a half-empty gun fills it instead of
+	// replacing its rounds with the new ones.
+	Weapon->SetBulletCount(FMath::Min(MagSize, Inventory->GetAmmo()));
+
+	UE_LOG(LogTemp, Warning, TEXT("[AMMO_CELLS] %s offered %d rounds, %d taken, %d left over"),
+		*Weapon->GetName(), Offered, Taken, Left);
+
+	if (Left > 0)
+	{
+		// What did not fit stays in the world. Respawned at the player's feet rather than left on
+		// the original drop, because the original is about to be destroyed by the pickup and the
+		// player should be able to see what they could not carry.
+		SpawnLeftoverDrop(Player, Left);
+	}
+}
+
+void ADroppedRangedWeapon::CarryEnergyAmmoFrom(const AShooterWeapon* Weapon)
+{
+	if (!Weapon || !HasAuthority())
+	{
+		return;
+	}
+
+	// The reserve is the server's own number and exact. The magazine is not: rounds are counted by
+	// whoever pulls the trigger, so for a client's gun this is the server's copy, which misses the
+	// client's shots and usually reads full. Taking a thrown gun back can therefore top up its
+	// magazine. TODO(COOP): exact only once the server mirrors a client's magazine.
+	SpawnedBulletCount = Weapon->GetBulletCount();
+	CarriedEnergyReserve = Weapon->GetEnergyReserve();
+
+	UE_LOG(LogTemp, Log, TEXT("[ENERGY_AMMO] %s thrown away with %d loaded, %d in reserve"),
+		*Weapon->GetName(), SpawnedBulletCount, CarriedEnergyReserve);
+}
+
+void ADroppedRangedWeapon::GrantEnergyAmmo(AShooterWeapon* Weapon)
+{
+	if (!Weapon || !HasAuthority() || !Weapon->UsesEnergyReserve())
+	{
+		return;
+	}
+
+	const int32 MagSize = FMath::Max(1, Weapon->GetMagazineSize());
+
+	// An exact count wins over the designer's fill: zero is a real answer (a gun thrown away empty),
+	// and only the -1 default means nobody set one.
+	const int32 Loaded = (SpawnedBulletCount >= 0)
+		? FMath::Clamp(SpawnedBulletCount, 0, MagSize)
+		: FMath::Clamp(FMath::RoundToInt(EnergyMagazineFill * MagSize), 0, MagSize);
+
+	const int32 Reserve = (CarriedEnergyReserve >= 0)
+		? CarriedEnergyReserve
+		: FMath::RoundToInt(EnergyReserveMagazines * MagSize);
+
+	// The weapon was spawned a moment ago with a full reserve of its own; both of these overwrite
+	// that. SetEnergyReserve clamps to the weapon's capacity and starts the refill.
+	Weapon->SetBulletCount(Loaded);
+	Weapon->SetEnergyReserve(Reserve);
+
+	UE_LOG(LogTemp, Warning, TEXT("[ENERGY_AMMO] %s picked up from %s: %d loaded, %d in reserve (asked for %d)"),
+		*Weapon->GetName(), *GetName(), Weapon->GetBulletCount(), Weapon->GetEnergyReserve(), Reserve);
+}
+
+void ADroppedRangedWeapon::SpawnLeftoverDrop(AShooterCharacter* Player, int32 Rounds)
+{
+	if (!Player || Rounds <= 0 || !HasAuthority())
+	{
+		return;
+	}
+
+	// Rounds are not a gun. This used to spawn another whole ADroppedRangedWeapon carrying the
+	// leftover bullets, which meant a full bag PRINTED A SECOND COPY OF THE WEAPON on the floor:
+	// walk up to one drop with no room, and the team could stack identical rifles out of nothing.
+	// What is left over is ammo, so it comes back as ammo.
+	const AShooterWeapon* WeaponCDO = WeaponClass ? WeaponClass->GetDefaultObject<AShooterWeapon>() : nullptr;
+	const TSubclassOf<AAmmoPickup> PileClass = WeaponCDO ? WeaponCDO->AmmoPickupClass : nullptr;
+
+	if (!PileClass)
+	{
+		// Deliberately NOT falling back to spawning a weapon. Losing the rounds is a smaller bug
+		// than duplicating the gun, and the log says exactly which weapon needs the field set.
+		UE_LOG(LogTemp, Warning,
+			TEXT("[AMMO_CELLS] %d rounds would not fit, but %s has no AmmoPickupClass - nothing dropped"),
+			Rounds, *GetNameSafe(WeaponClass));
+		return;
+	}
+
+	FInventoryItem Pile;
+	Pile.Kind = EInventorySlotKind::Ammo;
+	Pile.Count = Rounds;
+	Pile.StackMax = GetDefault<UInventoryComponent>()->GetRoundsPerAmmoCell();
+
+	const FTransform Where(GetActorRotation(), Player->GetActorLocation());
+	if (AInventoryPickup::SpawnForItem(this, PileClass, Where, Pile, GetCharge()))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AMMO_CELLS] %d rounds would not fit, dropped as a pile at the player's feet"), Rounds);
+	}
+}
+
 void ADroppedRangedWeapon::RollSpawnedBulletCount()
 {
 	if (!WeaponClass)
@@ -459,18 +594,34 @@ void ADroppedRangedWeapon::CompletePull()
 		{
 			AddedWeapon->bWasYanked = true;
 			AddedWeapon->SourceYankDropClass = GetClass();
+			// Kept so throwing the gun away puts back a drop that can be picked up again.
+			AddedWeapon->SourceDropCharge = GetCharge();
 
-			// Limited-ammo behavior: only set when this drop was yank-spawned (HumanoidNPC called
-			// RollSpawnedBulletCount → SpawnedBulletCount > 0). Death drops leave SpawnedBulletCount
-			// at the -1 default, so the granted weapon stays at full mag with infinite refills.
-			if (SpawnedBulletCount > 0)
+			if (AddedWeapon->UsesEnergyReserve())
 			{
-				// Flag first: SetBulletCount is what tells the owning client about both, so setting
-				// the flag after it would send the client "forty rounds, and they refill".
-				AddedWeapon->bHasLimitedAmmo = true;
-				AddedWeapon->SetBulletCount(SpawnedBulletCount);
-				UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] CompletePull — %s granted with %d bullets (limited ammo)"),
-					*AddedWeapon->GetName(), SpawnedBulletCount);
+				// An energy gun keeps its rounds on itself, so none of the cell handling below
+				// applies: a magazine and a reserve, both set from this drop's Ammo|Energy numbers.
+				GrantEnergyAmmo(AddedWeapon);
+			}
+			else
+			{
+				// Limited-ammo behavior: only set when this drop was yank-spawned (HumanoidNPC called
+				// RollSpawnedBulletCount → SpawnedBulletCount > 0). Death drops leave SpawnedBulletCount
+				// at the -1 default, so the granted weapon stays at full mag with infinite refills.
+				if (SpawnedBulletCount > 0)
+				{
+					// Flag first: SetBulletCount is what tells the owning client about both, so setting
+					// the flag after it would send the client "forty rounds, and they refill".
+					AddedWeapon->bHasLimitedAmmo = true;
+					AddedWeapon->SetBulletCount(SpawnedBulletCount);
+					UE_LOG(LogTemp, Warning, TEXT("[YANK_AMMO] CompletePull — %s granted with %d bullets (limited ammo)"),
+						*AddedWeapon->GetName(), SpawnedBulletCount);
+				}
+
+				// The rounds go into the bag as well as into the gun. A cell is a magazine: the loaded
+				// one costs a cell like any other, which is why picking a weapon up costs capacity
+				// before it has fired a shot.
+				GrantAmmoToInventory(Player, AddedWeapon);
 			}
 
 			UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] CompletePull — tagged %s: bWasYanked=true, SourceYankDropClass=%s, bHasLimitedAmmo=%d"),
@@ -484,55 +635,21 @@ void ADroppedRangedWeapon::CompletePull()
 	}
 	else
 	{
-		// Player already has a weapon of this class. Bandolier opt-in: if the upgrade is
-		// owned AND the player was holding this same class when StartPull fired, the drop
-		// goes into reserve (or spills bullets on overflow). Otherwise: original skip.
-		UUpgradeManagerComponent* UpgradeMgr = Player->GetUpgradeManager();
-		const int32 MaxCopies = UpgradeMgr ? UpgradeMgr->GetBandolierMaxCopies() : 1;
-		const bool bClassMatchAtPullStart =
-			PullingClientCurrentWeaponClass && PullingClientCurrentWeaponClass == WeaponClass;
+		// Already carrying this gun, so the drop is worth exactly its ammo.
+		//
+		// This used to be the Bandolier branch, which handed the player a hidden SECOND COPY of the
+		// weapon and spilled bullets between copies once at the cap. That was a whole parallel
+		// carrying system next to the inventory, and it is gone: the Bandolier upgrade now raises
+		// how many MAGAZINE CELLS a weapon may occupy, and the rounds go into those cells like any
+		// other pickup. One system, one place to look, and the cells are what the HUD already reads.
+		//
+		// An energy gun gets nothing here: GrantAmmoToInventory returns at once for a weapon with no
+		// cells. That is the author's call (2026-09-10): nothing feeds the energy reserve except time.
+		GrantAmmoToInventory(Player, ExistingWeapon);
 
-		if (MaxCopies > 1 && bClassMatchAtPullStart)
+		if (ExistingWeapon == Player->GetCurrentWeapon())
 		{
-			// Compute the bullet count we'd hand out — fall back to a full mag if the death-drop
-			// path left SpawnedBulletCount at -1 (the player still gets ammo, not a dry weapon).
-			const int32 MagSize = WeaponClass->GetDefaultObject<AShooterWeapon>()->GetMagazineSize();
-			const int32 BulletsForCopy = (SpawnedBulletCount > 0) ? SpawnedBulletCount : MagSize;
-
-			const int32 OwnedYankedCount = Player->CountYankedCopiesOfClass(WeaponClass);
-
-			if (OwnedYankedCount < MaxCopies)
-			{
-				Player->AddYankedReserveCopy(WeaponClass, GetClass(), BulletsForCopy);
-				UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] %s pickup → reserve (%d/%d copies of %s)"),
-					*GetName(), OwnedYankedCount + 1, MaxCopies, *WeaponClass->GetName());
-			}
-			else
-			{
-				Player->SpillBulletsIntoYankedCopiesOfClass(WeaponClass, BulletsForCopy);
-				UE_LOG(LogTemp, Warning, TEXT("[BANDOLIER] %s pickup → overflow spill of %d bullets (%d/%d copies, at cap)"),
-					*GetName(), BulletsForCopy, OwnedYankedCount, MaxCopies);
-			}
-		}
-		else
-		{
-			// Duplicate pickup of an already-owned class: instead of discarding the drop,
-			// top up the existing weapon's magazine to full. SetBulletCount clamps to [0, MagazineSize].
-			const int32 MaxAmmo = ExistingWeapon->GetMagazineSize();
-			const int32 BeforeAmmo = ExistingWeapon->GetBulletCount();
-
-			ExistingWeapon->SetBulletCount(MaxAmmo);
-
-			// Refresh the ammo HUD only if this is the weapon currently in hand
-			if (ExistingWeapon == Player->GetCurrentWeapon())
-			{
-				Player->UpdateWeaponHUD(ExistingWeapon->GetBulletCount(), MaxAmmo);
-			}
-
-			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] DROPPED duplicate of %s — magazine topped up %d -> %d (MaxCopies=%d, classMatch=%d, IsCurrent=%d)"),
-				*WeaponClass->GetName(), BeforeAmmo, ExistingWeapon->GetBulletCount(),
-				MaxCopies, bClassMatchAtPullStart ? 1 : 0,
-				(ExistingWeapon == Player->GetCurrentWeapon()) ? 1 : 0);
+			Player->UpdateWeaponHUD(ExistingWeapon->GetBulletCount(), ExistingWeapon->GetMagazineSize());
 		}
 	}
 

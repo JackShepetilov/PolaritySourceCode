@@ -934,6 +934,58 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Heal")
 	void ConsumeForHeal(AShooterCharacter* User);
 
+	// ==================== Smoke (the Melee's item verb) ====================
+	//
+	// The same two halves the healing verb has, with a different payout: thrown, it cracks open into
+	// a smoke wall where it LANDS; used in the hands, it does the same thing around the player's own
+	// feet. Both go through ASmokeCanisterProjectile::DeploySmokeWall, so the wall a prop makes is
+	// the same wall the ability made when this used to be the active -- there is one implementation
+	// of "what a smoke wall is" in the project and this is a second caller of it, not a second copy.
+
+	/** The canister the wall is built out of. Its Blueprint defaults own the hop, the spawn height
+	 *  and the deadline; nothing about the flight is set here. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke")
+	TSubclassOf<class ASmokeCanisterProjectile> SmokeCanisterClass;
+
+	/** What each piece drops. A Blueprint child of ASmokeCloud, so the effect and the sound live
+	 *  where they can be seen. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke")
+	TSubclassOf<class ASmokeCloud> SmokeCloudClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "1", ClampMax = "9"))
+	int32 SmokeSplitCount = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.0", Units = "cm"))
+	float SmokeSplitSpacing = 400.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "20.0", Units = "cm"))
+	float SmokeCloudRadius = 500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.0", Units = "s"))
+	float SmokeGrowTime = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.5", Units = "s"))
+	float SmokeDuration = 11.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.0", Units = "s"))
+	float SmokeFadeTime = 1.5f;
+
+	/** How much smoke an enemy sees THROUGH before it loses you. @see USmokeVisionSubsystem */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.0", Units = "cm"))
+	float SmokeSightPenetration = 250.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float SmokeTurnRateMultiplier = 0.4f;
+
+	/** Use this prop in the hands: the wall forms around the player instead of where it was thrown.
+	 *  Authority only, same road as ConsumeForHeal. */
+	UFUNCTION(BlueprintCallable, Category = "Smoke")
+	void ConsumeForSmoke(AShooterCharacter* User);
+
+	/** True between a Melee throwing this prop and it landing. */
+	UFUNCTION(BlueprintPure, Category = "Smoke")
+	bool IsPledgedToSmoke() const { return bPledgedToSmoke; }
+
 	/** True between a Melee throwing this prop and it landing. Read by nothing else today; exposed
 	 *  because "why did this prop not explode" is otherwise unanswerable from a Blueprint. */
 	UFUNCTION(BlueprintPure, Category = "Heal")
@@ -1142,6 +1194,11 @@ private:
 	 *  one thing clients need to see is the decompose, which arrives as its own multicast. */
 	bool bPledgedToHealing = false;
 
+	/** True between a Melee throwing this prop and it landing, for the smoke verb. Separate from
+	 *  the healing pledge rather than one shared bit: a class has ONE verb, but keeping them apart
+	 *  means neither branch can be reached by the other's throw. */
+	bool bPledgedToSmoke = false;
+
 	/** A thrown healing prop has landed: come apart into pickups here. */
 	void DecomposeIntoHealing(const FVector& Where);
 
@@ -1149,6 +1206,9 @@ private:
 	 *  Factored out rather than duplicated because "the prop is gone" is four separate steps and
 	 *  half of them are easy to forget. */
 	void FinishAsHealing(const FVector& Where);
+
+	/** Build the wall and retire the prop. Where the throw ended, or the player's own feet. */
+	void DeployIntoSmoke(const FVector& Where, const FVector& TravelDirection);
 
 	/** Show the prop coming apart on every machine, and take it away with it. Unreliable, like the
 	 *  decoy's: it is cosmetic, and the healing itself has already been resolved on the server. */

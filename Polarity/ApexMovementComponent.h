@@ -1,4 +1,4 @@
-// ApexMovementComponent.h
+﻿// ApexMovementComponent.h
 // Titanfall 2 / Apex Legends style movement system
 
 #pragma once
@@ -9,6 +9,7 @@
 
 class UMovementSettings;
 class IVelocityModifier;
+class ANitroGate;
 
 UENUM(BlueprintType)
 enum class EPolarityMovementState : uint8
@@ -82,7 +83,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPreVelocityUpdate, float, FVector&);
  * own lunge target from the view rotation would have the two ends fly at different enemies whenever
  * two of them stand close together, which is the exact desync this is meant to remove.
  */
-enum class EPolarityMoveFlag : uint16
+enum class EPolarityMoveFlag : uint32
 {
 	None             = 0,
 	WantsToSprint    = 1 << 0,
@@ -123,6 +124,31 @@ enum class EPolarityMoveFlag : uint16
 	 *  a speed the server does not know about is a correction every frame the client aims. Nothing
 	 *  else about aiming travels here: the FOV, the offset and the sounds stay local. */
 	Aiming               = 1 << 15,
+	/** The jump button is DOWN right now, as opposed to having been pressed. It rides the move for
+	 *  the same reason ADS does: the hold decides how high the jump goes, and a lift the server does
+	 *  not know about is a correction on every jump.
+	 *
+	 *  Before this bit existed the hold was read from nothing at all: bJumpHeld was set when a jump
+	 *  started and never cleared, so every jump got the full JumpHoldForce whether the player held
+	 *  the key or let go of it instantly. Jumps are therefore slightly lower now for a tap and the
+	 *  same as before for a hold, which is the behaviour MovementSettings::JumpHoldTime always
+	 *  described. */
+	JumpInputHeld        = 1 << 16,
+	/** Charging the Melee's jump out of his own smoke. The DECISION travels, like the lunge target
+	 *  and the grapple anchor: whether the character was standing in his own cloud is a question
+	 *  only the owning client can answer at the instant of the press, and having each end answer it
+	 *  from its own copy of a cloud that spawns and dies milliseconds apart would swallow jumps at
+	 *  the edges of the cloud. The receiving side still refuses it while airborne or inside another
+	 *  mechanic that owns Velocity. */
+	SmokeJumpCharging    = 1 << 17,
+	/** The slide button is DOWN right now, as opposed to having been pressed.
+	 *
+	 *  Same shape and same reason as JumpInputHeld. Without it a slide that ended for any reason --
+	 *  and jumping out of one is the common reason -- could not come back while the button was still
+	 *  held, because the only thing that ever asked for a slide was the press event. The player had
+	 *  to let go and press again in the air, which is not what the reference does and not what
+	 *  anybody's hands do. */
+	SlideInputHeld       = 1 << 18,
 };
 ENUM_CLASS_FLAGS(EPolarityMoveFlag);
 
@@ -223,7 +249,7 @@ struct FCharacterNetworkMoveData_Polarity : public FCharacterNetworkMoveData
 {
 	typedef FCharacterNetworkMoveData Super;
 
-	uint16 PolarityFlags = 0;
+	uint32 PolarityFlags = 0;
 
 	/** Where the melee lunge is flying, in world space. On the wire only while MeleeLungeHoming is
 	 *  set — that flag is its presence bit, so it costs nothing at all the rest of the time. */
@@ -378,6 +404,11 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bWantsSlideOnLand = false;
 
+	/** The slide button is held down right now. Rides the move as EPolarityMoveFlag::SlideInputHeld,
+	 *  because it decides whether a landing turns back into a slide and the server has to reach the
+	 *  same answer as the client on the same frame. @see UpdateCharacterStateBeforeMovement */
+	bool bSlideInputHeld = false;
+
 	/** True when player is crouched in air (reduces hitbox) */
 	UPROPERTY(BlueprintReadOnly, Category = "Apex|State")
 	bool bIsCrouchedInAir = false;
@@ -460,7 +491,7 @@ public:
 
 	/** The flags from the move currently being unpacked. Server side only, valid for the length of
 	 *  one ServerMove_PerformMovement call. */
-	uint16 PendingPolarityFlags = 0;
+	uint32 PendingPolarityFlags = 0;
 
 	/** The lunge target from that same move. Applied together with the flags in MoveAutonomous. */
 	FVector PendingMeleeLungeTarget = FVector::ZeroVector;
@@ -470,7 +501,7 @@ public:
 	FVector PendingGrappleAnchor = FVector::ZeroVector;
 
 	/** What this character is doing right now, as the flags that go on the wire. */
-	uint16 PackPolarityMoveFlags() const;
+	uint32 PackPolarityMoveFlags() const;
 
 	/** Turns a received byte into actual state. Assignment for the plain intents, and real entry and
 	 *  exit calls for anything that has to set up more than a bool: a side that only flipped
@@ -478,14 +509,14 @@ public:
 	 *  "sliding works for one player and stutters for the other". Wallrun, dash and mantle are the
 	 *  same shape, so they go through their own Start/End here too. The geometry is re-derived
 	 *  locally, never taken from the client. */
-	void ApplyPolarityMoveFlags(uint16 Flags);
+	void ApplyPolarityMoveFlags(uint32 Flags);
 
 	/** The replay counterpart: plain assignment, no entry or exit calls.
 	 *
 	 *  A replay re-runs a move that was already simulated once from exactly this state, so calling
 	 *  StartSlide and friends again would apply their entry effects a second time on top of a
 	 *  velocity that already contains them. */
-	void ApplyPolarityMoveFlagsForReplay(uint16 Flags);
+	void ApplyPolarityMoveFlagsForReplay(uint32 Flags);
 
 	/** The character's own mechanics that write velocity before the move is integrated: mantle,
 	 *  wallrun, dash and the wall checks feeding them. The engine calls this inside PerformMovement,
@@ -524,6 +555,41 @@ public:
 	virtual float GetMaxBrakingDeceleration() const override;
 	virtual void ProcessLanded(const FHitResult& Hit, float remainingTime, int32 Iterations) override;
 	virtual bool DoJump(bool bReplayingMoves, float DeltaTime = 0.f) override;
+
+	// ==================== Jump input ====================
+
+	/** The jump button's current state, from local input on the owning client. It rides the move
+	 *  flags from there, so the server and every replay see the same hold.
+	 *
+	 *  This is what makes the hold lift a hold: before it existed nothing ever cleared bJumpHeld, so
+	 *  JumpHoldForce was applied to every jump for the full JumpHoldTime whether the key was down or
+	 *  not. @see EPolarityMoveFlag::JumpInputHeld */
+	void SetJumpInputHeld(bool bHeld);
+
+	/** Take this press as the start of a charged smoke jump, if the owner may make one here.
+	 *
+	 *  Returns true when the press was TAKEN, in which case the caller must NOT also start an
+	 *  ordinary jump. The charge itself, and the launch when the button comes back up, happen inside
+	 *  the movement simulation. A press taken and released before a single move was simulated still
+	 *  jumps: an empty charge launches at the ordinary jump height rather than being dropped. */
+	bool TryBeginSmokeCharge();
+
+	/** May a charged smoke jump start right now: on the ground, off cooldown, not inside another
+	 *  mechanic that owns Velocity, holding a passive that grants it, and standing in a cloud this
+	 *  character threw himself. */
+	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
+	bool CanStartSmokeCharge() const;
+
+	/** How full the charge is, 0 to 1. For animation, the camera and the HUD; the jump itself reads
+	 *  the timer, not this. */
+	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
+	float GetSmokeChargeAlpha() const;
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
+	bool IsChargingSmokeJump() const { return SmokeChargeTime > 0.0f; }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
+	float GetSmokeJumpCooldownRemaining() const { return SmokeJumpCooldownRemaining; }
 
 	/** Air strafe lives here and not in the tick. Everything that changes velocity has to run inside
 	 *  the movement simulation, because that is the only code the server re-runs when it replays a
@@ -1207,6 +1273,24 @@ protected:
 	float SlideFatigueDecayTimer = 0.0f;
 	FVector SlideDirection;
 
+	// ==================== Nitro gate ====================
+
+	/** The gate this character is currently standing on, or null. It is the EDGE that launches
+	 *  somebody - stepping onto a pad you were not on a moment ago - so standing still on one does
+	 *  nothing and stepping off and back on re-arms it, exactly as re-entering the volume does in
+	 *  Apex. Weak because the pad can be shot out from under the feet standing on it. */
+	TWeakObjectPtr<ANitroGate> CurrentNitroGate;
+
+	/** Asked every simulated move, from UpdateCharacterStateBeforeMovement.
+	 *
+	 *  Deliberately a question this component asks rather than something the gate tells it. An
+	 *  overlap event fires outside the movement simulation, so the velocity it wrote would be
+	 *  replayed away on the owning client and survive only on the host - the exact failure
+	 *  Docs/Gotchas/Movement_Network.md describes. The pad is a replicated actor at a replicated
+	 *  position, so asking geometry gives the owning client, the server and a replay the same
+	 *  answer without a single byte crossing the wire. */
+	void UpdateNitroGate();
+
 	/** Scales a slide boost by the fatigue already accrued, and books the boost as spent. Called at
 	 *  the three places that hand out speed for sliding: the ground entry, the landing entry and the
 	 *  slide hop. Returns 0 once fully fatigued, in which case nothing is booked. */
@@ -1251,7 +1335,45 @@ protected:
 
 	// Jump state
 	float JumpHoldTimeRemaining = 0.0f;
+	/** A jump is inside its hold window: the lift may still be applied for JumpHoldTimeRemaining
+	 *  seconds IF the button is also still down. Cleared the moment it is not. */
 	bool bJumpHeld = false;
+
+	/** The jump button, as state rather than as an event. Written by SetJumpInputHeld on the owning
+	 *  client and restored from the move flags on the server and on replay.
+	 *  @see EPolarityMoveFlag::JumpInputHeld */
+	bool bJumpInputHeld = false;
+
+	// ==================== Charged jump out of one's own smoke (Melee passive) ====================
+
+	/** The owning client decided it was standing in its own smoke when the jump was pressed, and is
+	 *  charging. Travels with the move; the receiving side takes it as given and only refuses it for
+	 *  reasons it can check for itself. @see EPolarityMoveFlag::SmokeJumpCharging */
+	bool bWantsSmokeCharge = false;
+
+	/** Seconds charged so far. Above zero means a charge is live, and it is saved in the move so a
+	 *  replay launches from the same charge the original move did. */
+	float SmokeChargeTime = 0.0f;
+
+	float SmokeJumpCooldownRemaining = 0.0f;
+
+	/** The ground speed multiplier of the charge currently running. Re-read from the passive on every
+	 *  charging move rather than saved, so it needs no room in the move: a replay re-runs the same
+	 *  move against the same level data and arrives at the same number. */
+	float SmokeChargeMoveScale = 1.0f;
+
+	/** Runs the charge and the launch, once per simulated move on every machine, from
+	 *  UpdateCharacterStateBeforeMovement. Same rule as everything else in there: it writes Velocity,
+	 *  so it has to live inside the simulated move and not in the tick. */
+	void UpdateSmokeJump(float DeltaSeconds);
+
+	/** Spend the banked charge and go. A charge too small to count leaves as an ordinary jump and
+	 *  pays no cooldown, which is what makes a tap inside the smoke behave like a tap anywhere. */
+	void LaunchSmokeJump(const struct FSmokeJumpParams& Params);
+
+	/** The owner's passive, if it grants the charged jump. Asked through UAbilityComponent rather
+	 *  than by knowing about any particular class, exactly as the lunge reach is. */
+	bool GetSmokeJumpParams(struct FSmokeJumpParams& Out) const;
 
 #if ENABLE_DRAW_DEBUG
 	// Jump metrics debug
@@ -1363,7 +1485,7 @@ public:
 
 	/** Everything the character decided to do during this move, as the flags that go on the wire.
 	 *  @see EPolarityMoveFlag */
-	uint16 SavedPolarityFlags;
+	uint32 SavedPolarityFlags;
 
 	/** The melee lunge's destination for this move. Unlike everything below this line it is not just
 	 *  replay state: it travels to the server too, because a lunge target is the one piece of geometry
@@ -1416,6 +1538,13 @@ public:
 	float SavedSlideCooldown;
 	float SavedJumpHoldTimeRemaining;
 	int32 SavedCurrentJumpCount;
+
+	/** The smoke jump's charge and cooldown as they were when this move started. Predicted state
+	 *  like everything else below the line above: the flag says "charging", and these say how far
+	 *  into the charge the move began, which is what decides how hard the launch comes out. A replay
+	 *  restored from a fresh charge would launch a different jump than the one it is reproducing. */
+	float SavedSmokeChargeTime;
+	float SavedSmokeJumpCooldown;
 
 	FSavedMove_Polarity();
 

@@ -1,5 +1,6 @@
-// WeaponRecoilComponent.cpp
-// Advanced procedural recoil system with spring-based visual kick and organic sway
+﻿// WeaponRecoilComponent.cpp
+// Apex Legends-style recoil: fixed curve pattern, exact-magnitude spring delivery into a separate
+// view layer, and springs that are themselves the whole recovery system
 
 #include "WeaponRecoilComponent.h"
 #include "ApexMovementComponent.h"
@@ -7,6 +8,59 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/KismetMathLibrary.h"
+
+namespace
+{
+	constexpr float SpringEuler = 2.71828183f;
+
+	// How far a spring x'' = -k*x - c*x', started at rest, travels from a velocity impulse of 1.
+	//
+	// Every kick is authored in degrees, and the player is entitled to get those degrees: the
+	// spring's job is to decide HOW FAST the view gets there, never how far it goes. So the impulse
+	// is divided by this factor, and retuning a spring changes the timing of a shot without
+	// changing its strength. The three cases are the three regimes of the damped oscillator, and
+	// they have to be spelled out because the recoil springs deliberately run in all three (the hot
+	// sets sit at k = 0, where there is no oscillator left at all).
+	float SpringPeakPerUnitImpulse(float Stiffness, float Damping)
+	{
+		const float C = FMath::Max(Damping, KINDA_SMALL_NUMBER);
+
+		// k = 0: nothing pulls back, the impulse just bleeds off. x(t) -> v0 / c.
+		if (Stiffness <= KINDA_SMALL_NUMBER)
+		{
+			return 1.0f / C;
+		}
+
+		const float Omega = FMath::Sqrt(Stiffness);
+		const float Zeta = C / (2.0f * Omega);
+
+		if (Zeta < 1.0f - KINDA_SMALL_NUMBER)
+		{
+			// Underdamped: overshoots zero and rings back. Peak at the first quarter swing.
+			const float OmegaD = Omega * FMath::Sqrt(1.0f - Zeta * Zeta);
+			const float TPeak = FMath::Atan2(OmegaD, Zeta * Omega) / OmegaD;
+			return (1.0f / OmegaD) * FMath::Exp(-Zeta * Omega * TPeak) * FMath::Sin(OmegaD * TPeak);
+		}
+
+		if (Zeta > 1.0f + KINDA_SMALL_NUMBER)
+		{
+			// Overdamped: crawls out and crawls back, never crossing zero.
+			const float OmegaS = Omega * FMath::Sqrt(Zeta * Zeta - 1.0f);
+			const float TPeak = FMath::Loge((Zeta * Omega + OmegaS) / (Zeta * Omega - OmegaS)) / (2.0f * OmegaS);
+			return (1.0f / (2.0f * OmegaS))
+				* (FMath::Exp((-Zeta * Omega + OmegaS) * TPeak) - FMath::Exp((-Zeta * Omega - OmegaS) * TPeak));
+		}
+
+		// Critically damped: x(t) = v0 * t * e^(-omega t), peaking at t = 1/omega.
+		return 1.0f / (SpringEuler * Omega);
+	}
+
+	float ImpulseVelocityFor(float Degrees, float Stiffness, float Damping)
+	{
+		const float Peak = SpringPeakPerUnitImpulse(Stiffness, Damping);
+		return Peak > KINDA_SMALL_NUMBER ? Degrees / Peak : 0.0f;
+	}
+}
 
 UWeaponRecoilComponent::UWeaponRecoilComponent()
 {
@@ -18,8 +72,10 @@ void UWeaponRecoilComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Initialize random stream with unique seed per component instance
-	SwayRandomStream.Initialize(GetUniqueID());
+	// Deterministic streams seeded per component instance: same burst -> same recoil, so tuning
+	// changes can be A/B compared shot for shot.
+	const int32 Seed = static_cast<int32>(GetUniqueID());
+	RecoilRandomStream.Initialize(Seed);
 
 	// Try to get references from owner
 	if (AActor* Owner = GetOwner())
@@ -43,18 +99,28 @@ void UWeaponRecoilComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	// Update time since last shot
 	TimeSinceLastShot += DeltaTime;
 
-	// Reset consecutive multiplier if not firing for a while
-	if (!bIsFiring && TimeSinceLastShot > 0.3f)
+	// The pattern's X axis is the shot counter, so nothing to advance per frame here — only the
+	// decision that the silence has lasted long enough to count as a new burst.
+	// GetBurstResetThreshold() derives that from the weapon's own refire rate.
+	if (!bIsFiring && ShotsInBurst > 0 && TimeSinceLastShot > GetBurstResetThreshold())
 	{
-		CurrentConsecutiveMultiplier = FMath::FInterpTo(CurrentConsecutiveMultiplier, 1.0f, DeltaTime, 5.0f);
-		CurrentShotIndex = 0;
+		ShotsInBurst = 0;
 	}
 
-	// Update all systems
-	UpdateCameraRecoilSpring(DeltaTime); // Must be before Recovery (feeds AccumulatedRecoil)
-	UpdateRecovery(DeltaTime);
+	// Measure look speed from raw mouse input and update tracking suppression BEFORE sway
+	// consumes (and zeroes) the per-frame deltas. Raw input is used so recoil itself cannot
+	// feed back into the measurement.
+	{
+		const float SafeDt = FMath::Max(DeltaTime, 1e-4f);
+		const float RawLookSpeed = (FMath::Abs(CurrentMouseVelocity.X) + FMath::Abs(CurrentMouseVelocity.Y)) / SafeDt;
+		SmoothedLookSpeed = FMath::FInterpTo(SmoothedLookSpeed, RawLookSpeed, DeltaTime, 8.0f);
+	}
+	UpdateSmoothingMultiplier(DeltaTime);
+
+	// Heat first: it picks which spring set the punch springs run on this frame.
+	UpdateSpringHeat(DeltaTime);
+	UpdatePunchSprings(DeltaTime);
 	UpdateVisualKick(DeltaTime);
-	UpdateCameraPunch(DeltaTime);
 	UpdateWeaponSway(DeltaTime);
 }
 
@@ -74,53 +140,60 @@ void UWeaponRecoilComponent::SetRecoilSettings(const FWeaponRecoilSettings& InSe
 
 // ==================== Firing Events ====================
 
-void UWeaponRecoilComponent::OnWeaponFired()
+float UWeaponRecoilComponent::GetBurstResetThreshold() const
 {
+	// Roughly two missed shots means the player let go; never shorter than the legacy 0.3 s so
+	// behaviour stays sane when the caller does not know its interval.
+	return FMath::Max(LastShotInterval * 2.0f, 0.3f);
+}
+
+void UWeaponRecoilComponent::OnWeaponFired(float ShotIntervalSeconds)
+{
+	// A pause longer than the burst threshold starts the pattern over even if OnFiringEnded was
+	// not seen (e.g. semi-auto tapping).
+	if (!bIsFiring || TimeSinceLastShot > GetBurstResetThreshold())
+	{
+		ShotsInBurst = 0;
+	}
+
 	bIsFiring = true;
 	TimeSinceLastShot = 0.0f;
-	bIsRecovering = false;
+	LastShotInterval = FMath::Max(ShotIntervalSeconds, 0.0f);
 
-	// Calculate total recoil for this shot
+	// Heat the spring BEFORE the shot is queued, so this shot is already delivered under the set
+	// it belongs to. Queueing first would hand the opening round of every burst to the cold spring
+	// and quietly bounce it back out from under the pattern.
+	SpringHeat = FMath::Clamp(SpringHeat + Settings.Recovery.HeatPerShot, 0.0f, 1.0f);
+
+	// Calculate total recoil for this shot (reads ShotsInBurst as the pattern's X)
 	FRotator TotalRecoil = CalculateShotRecoil();
+	++ShotsInBurst;
 
-	// Split recoil between camera and viewmodel based on ADS state (Titanfall 2-style)
-	float Fraction = bIsAiming ? Settings.ADSWeaponFraction : Settings.HipfireWeaponFraction;
-	float VMScale = bIsAiming ? Settings.ADSVMScale : Settings.HipfireVMScale;
+	// Split recoil between camera and viewmodel based on ADS state
+	const float Fraction = bIsAiming ? Settings.VisualKick.ADSWeaponFraction : Settings.VisualKick.HipfireWeaponFraction;
+	const float VMScale = bIsAiming ? Settings.VisualKick.ADSVMScale : Settings.VisualKick.HipfireVMScale;
 
 	FRotator CameraRecoil = TotalRecoil * (1.0f - Fraction);
 	FRotator ViewmodelRecoil = TotalRecoil * Fraction * VMScale;
 
-	// Apply camera portion to controller (queued into spring for smooth delivery)
-	ApplyRecoilToController(CameraRecoil);
+	// Camera portion goes into the punch layer, never into the controller.
+	QueuePunch(CameraRecoil);
 
-	// NOTE: AccumulatedRecoil is now tracked per-frame in UpdateCameraRecoilSpring()
-	// instead of being accumulated instantly here
-
-	// Generate independent roll (Titanfall 2-style: random direction per shot, not part of weaponFraction)
-	float RollMagnitude = FMath::RandRange(Settings.RollRandomMin, Settings.RollRandomMax);
-	float RollSign = FMath::RandBool() ? 1.0f : -1.0f;
-	float ShotRoll = RollSign * RollMagnitude * Settings.RollHardScale;
+	// Independent roll: cosmetic twist around the barrel axis, random direction per shot,
+	// deliberately NOT part of the camera/viewmodel split.
+	const auto& VK = Settings.VisualKick;
+	float RollMagnitude = RecoilRandomStream.FRandRange(VK.RollRandomMin, VK.RollRandomMax);
+	float RollSign = RecoilRandomStream.FRand() < 0.5f ? -1.0f : 1.0f;
+	float ShotRoll = RollSign * RollMagnitude * VK.RollHardScale;
 
 	// Trigger visual effects
-	if (Settings.bEnableVisualKick)
+	if (VK.bEnableVisualKick)
 	{
 		TriggerVisualKick(ViewmodelRecoil, ShotRoll);
 	}
 
-	if (Settings.bEnableCameraPunch)
-	{
-		TriggerCameraPunch();
-	}
-
-	// Update consecutive shot state
-	CurrentShotIndex++;
-	CurrentConsecutiveMultiplier = FMath::Min(
-		CurrentConsecutiveMultiplier * Settings.ConsecutiveShotMultiplier,
-		Settings.MaxConsecutiveMultiplier
-	);
-
-	UE_LOG(LogTemp, Verbose, TEXT("Recoil: Shot %d, Mult=%.2f, Total=(P:%.2f, Y:%.2f), Camera=(P:%.2f, Y:%.2f), VM=(P:%.2f, Y:%.2f)"),
-		CurrentShotIndex, CurrentConsecutiveMultiplier,
+	UE_LOG(LogTemp, Verbose, TEXT("Recoil: Shot=%d, Smooth=%.2f, Total=(P:%.2f, Y:%.2f), Camera=(P:%.2f, Y:%.2f), VM=(P:%.2f, Y:%.2f)"),
+		ShotsInBurst - 1, CurrentSmoothingMultiplier,
 		TotalRecoil.Pitch, TotalRecoil.Yaw,
 		CameraRecoil.Pitch, CameraRecoil.Yaw,
 		ViewmodelRecoil.Pitch, ViewmodelRecoil.Yaw);
@@ -130,21 +203,20 @@ void UWeaponRecoilComponent::FireWithOverrideSettings(const FWeaponRecoilSetting
 {
 	// Save current state
 	FWeaponRecoilSettings SavedSettings = Settings;
-	int32 SavedShotIndex = CurrentShotIndex;
-	float SavedConsecutiveMultiplier = CurrentConsecutiveMultiplier;
+	const int32 SavedShotsInBurst = ShotsInBurst;
+	const float SavedShotInterval = LastShotInterval;
 
-	// Apply override — start from shot 0 with no consecutive buildup
+	// Apply override — a one-off shot plays its pattern from the first key
 	Settings = OverrideSettings;
-	CurrentShotIndex = 0;
-	CurrentConsecutiveMultiplier = 1.0f;
+	ShotsInBurst = 0;
 
 	// Fire with override settings
 	OnWeaponFired();
 
 	// Restore original state
 	Settings = SavedSettings;
-	CurrentShotIndex = SavedShotIndex;
-	CurrentConsecutiveMultiplier = SavedConsecutiveMultiplier;
+	ShotsInBurst = SavedShotsInBurst;
+	LastShotInterval = SavedShotInterval;
 }
 
 void UWeaponRecoilComponent::OnFiringEnded()
@@ -154,11 +226,14 @@ void UWeaponRecoilComponent::OnFiringEnded()
 
 void UWeaponRecoilComponent::ResetRecoil()
 {
-	CurrentShotIndex = 0;
-	CurrentConsecutiveMultiplier = 1.0f;
-	AccumulatedRecoil = FRotator::ZeroRotator;
-	bIsRecovering = false;
+	ShotsInBurst = 0;
+	LastShotInterval = 0.0f;
+	SpringHeat = 0.0f;
 	bIsFiring = false;
+
+	PunchOffset = FRotator::ZeroRotator;
+
+	CurrentSmoothingMultiplier = 1.0f;
 
 	CurrentWeaponOffset = FVector::ZeroVector;
 	CurrentWeaponRotation = FRotator::ZeroRotator;
@@ -170,8 +245,8 @@ void UWeaponRecoilComponent::ResetRecoil()
 
 	CameraRecoilSpringPitch.Reset();
 	CameraRecoilSpringYaw.Reset();
+	CameraRecoilSpringRoll.Reset();
 
-	CurrentCameraPunch = FRotator::ZeroRotator;
 	CurrentSwayOffset = FRotator::ZeroRotator;
 
 	FMemory::Memzero(BreathingOU, sizeof(BreathingOU));
@@ -188,103 +263,112 @@ void UWeaponRecoilComponent::AddMouseInput(float DeltaYaw, float DeltaPitch)
 	CurrentMouseVelocity.X = DeltaYaw;
 	CurrentMouseVelocity.Y = DeltaPitch;
 
-	// If player is manually pulling down during recovery, reduce accumulated recoil
-	if (Settings.bAllowManualRecovery && bIsRecovering && DeltaPitch < 0.0f)
-	{
-		// Player is pulling down - reduce recovery amount
-		float ManualRecovery = FMath::Abs(DeltaPitch) * 0.8f;
-		AccumulatedRecoil.Pitch = FMath::Max(0.0f, AccumulatedRecoil.Pitch - ManualRecovery);
-	}
+	// Nothing else happens here, and that is the point. Recoil lives in its own layer now, so the
+	// mouse cannot be confused with it and there is no pending return for a pull-down to cancel:
+	// the player's aim goes where they put it, the punch unwinds underneath it on its own.
 }
 
 // ==================== Internal Methods ====================
 
 FRotator UWeaponRecoilComponent::CalculateShotRecoil()
 {
+	const auto& Pattern = Settings.Pattern;
 	FRotator Recoil = FRotator::ZeroRotator;
 
-	// Get base recoil from pattern or random
-	if (Settings.RecoilPattern.Num() > 0)
+	// The pattern shapes BOTH stances by default, which is what Apex does — hip-fire differs by
+	// having a softer spring, a bigger share going to the weapon model and a wide spread cone on
+	// top, not by losing the pattern. bPatternOnlyWhenAiming is left as an opt-out per weapon.
+	const bool bUsePattern = Pattern.RecoilCurve != nullptr &&
+		(!Pattern.bPatternOnlyWhenAiming || bIsAiming);
+
+	float ScatterRadius = 0.0f;
+
+	if (bUsePattern)
 	{
-		// Smart pattern looping: play full pattern once, then loop from mid-point
-		// This prevents repeating the aggressive opening climb
-		int32 PatternIndex;
-		if (CurrentShotIndex < Settings.RecoilPattern.Num())
-		{
-			PatternIndex = CurrentShotIndex;
-		}
-		else
-		{
-			int32 LoopStart;
-			if (Settings.PatternLoopStartIndex >= 0)
-			{
-				LoopStart = FMath::Clamp(Settings.PatternLoopStartIndex, 0, Settings.RecoilPattern.Num() - 1);
-			}
-			else
-			{
-				// Auto mid-point
-				LoopStart = Settings.RecoilPattern.Num() / 2;
-			}
-			int32 LoopLength = Settings.RecoilPattern.Num() - LoopStart;
-			PatternIndex = LoopStart + ((CurrentShotIndex - Settings.RecoilPattern.Num()) % LoopLength);
-		}
-		const FRecoilPatternPoint& PatternPoint = Settings.RecoilPattern[PatternIndex];
+		// Sample by SHOT NUMBER, not by elapsed time: the pattern is a table of "where does shot
+		// N pull", exactly one key per round in the magazine, so the shape a player learns does
+		// not change when the weapon's rate of fire is tuned or an upgrade speeds it up. Firing
+		// past the last key rides the tail (the curve's clamped end), which keeps a reloaded
+		// sustained burst predictable instead of looping back into the aggressive opening climb.
+		const FVector Sample = Pattern.RecoilCurve->GetVectorValue(static_cast<float>(ShotsInBurst));
+		Recoil.Pitch = Sample.X * Pattern.PatternScale;
+		Recoil.Yaw = Sample.Y * Pattern.PatternScale;
 
-		Recoil.Pitch = PatternPoint.Pitch;
-		Recoil.Yaw = PatternPoint.Yaw;
-
-		// Add randomness based on PatternRandomness
-		float RandomPitch = FMath::RandRange(-Settings.BaseVerticalRecoil, Settings.BaseVerticalRecoil) * 0.3f;
-		float RandomYaw = FMath::RandRange(-Settings.BaseHorizontalRecoil, Settings.BaseHorizontalRecoil);
-
-		Recoil.Pitch += RandomPitch * Settings.PatternRandomness;
-		Recoil.Yaw += RandomYaw * Settings.PatternRandomness;
+		// Third channel: this shot's scatter radius in degrees. Curves authored before the channel
+		// existed evaluate it as zero (an empty FRichCurve returns its default), so they keep
+		// behaving exactly as they did.
+		ScatterRadius = FMath::Max(Sample.Z, 0.0f) * Pattern.PatternScale * Pattern.PatternRandomScale;
 	}
 	else
 	{
-		// No pattern - use base values with full randomness
-		Recoil.Pitch = Settings.BaseVerticalRecoil + FMath::RandRange(0.0f, Settings.BaseVerticalRecoil * 0.5f);
-		Recoil.Yaw = FMath::RandRange(-Settings.BaseHorizontalRecoil, Settings.BaseHorizontalRecoil);
+		Recoil.Pitch = Pattern.BaseVerticalRecoil;
+		Recoil.Yaw = RecoilRandomStream.FRandRange(-Pattern.BaseHorizontalRecoil, Pattern.BaseHorizontalRecoil);
 	}
 
-	// Apply consecutive shot multiplier
-	Recoil.Pitch *= CurrentConsecutiveMultiplier;
-	Recoil.Yaw *= CurrentConsecutiveMultiplier;
+	// Small symmetric multiplicative variance: same shape every burst, but never pixel-identical.
+	// One shared factor per shot preserves the pitch/yaw ratio of the authored pattern.
+	const float Variance = 1.0f + RecoilRandomStream.FRandRange(-Pattern.PatternVariance, Pattern.PatternVariance);
+	Recoil.Pitch *= Variance;
+	Recoil.Yaw *= Variance;
 
-	// Apply situational multiplier (airborne, crouching, ADS, moving)
-	float SituationalMult = GetSituationalMultiplier();
+	// Scatter, and it has to be TWO independent draws. One shared draw (which is what Variance is)
+	// only stretches the kick along the direction the curve already chose, so a magazine emptied
+	// into a wall traces the same line every time, just longer or shorter. Two draws move the shot
+	// off that line, which is the only thing that turns a trace into a group.
+	if (ScatterRadius > 0.0f)
+	{
+		Recoil.Pitch += RecoilRandomStream.FRandRange(-ScatterRadius, ScatterRadius);
+		Recoil.Yaw += RecoilRandomStream.FRandRange(-ScatterRadius, ScatterRadius);
+	}
+
+	// Camera roll, a full third axis of the kick in Apex. Sign is random per shot; the very stiff
+	// roll spring turns it into a short ring rather than a lean.
+	const float RollMag = Pattern.RollBase + RecoilRandomStream.FRandRange(-Pattern.RollRandom, Pattern.RollRandom);
+	Recoil.Roll = RollMag * (RecoilRandomStream.FRand() < 0.5f ? -1.0f : 1.0f);
+
+	// Posture multipliers (airborne, crouch, ADS, moving) and external scalar (upgrades)
+	const float SituationalMult = GetSituationalMultiplier();
 	Recoil.Pitch *= SituationalMult;
 	Recoil.Yaw *= SituationalMult;
+	Recoil.Roll *= SituationalMult;
+
+	// Recoil smoothing: tracking a target suppresses the kick. Pitch and yaw only — those are aim
+	// disturbance, and suppressing them is the whole point. Roll is feedback and disturbs nothing,
+	// so taking it away while tracking would only make the weapon read as dead in the fight it is
+	// most alive in.
+	Recoil.Pitch *= CurrentSmoothingMultiplier;
+	Recoil.Yaw *= CurrentSmoothingMultiplier;
 
 	return Recoil;
 }
 
 float UWeaponRecoilComponent::GetSituationalMultiplier() const
 {
+	const auto& Sit = Settings.Situational;
 	float Multiplier = 1.0f;
 
 	// Airborne increases recoil
 	if (IsAirborne())
 	{
-		Multiplier *= Settings.AirborneRecoilMultiplier;
+		Multiplier *= Sit.AirborneMultiplier;
 	}
 
 	// Crouching reduces recoil
 	if (bIsCrouching)
 	{
-		Multiplier *= Settings.CrouchRecoilMultiplier;
+		Multiplier *= Sit.CrouchMultiplier;
 	}
 
 	// ADS reduces recoil
 	if (bIsAiming)
 	{
-		Multiplier *= Settings.ADSRecoilMultiplier;
+		Multiplier *= Sit.ADSMultiplier;
 	}
 
 	// Moving increases recoil slightly
 	if (IsMoving() && !IsAirborne())
 	{
-		Multiplier *= Settings.MovingRecoilMultiplier;
+		Multiplier *= Sit.MovingMultiplier;
 	}
 
 	// External scalar (e.g. ADS time-dilation upgrade reduces recoil while active)
@@ -316,132 +400,140 @@ bool UWeaponRecoilComponent::IsMoving() const
 	return MovementComponent->Velocity.Size2D() > 50.0f;
 }
 
-void UWeaponRecoilComponent::ApplyRecoilToController(const FRotator& Recoil)
+void UWeaponRecoilComponent::QueuePunch(const FRotator& Recoil)
 {
-	// Instead of instant AddPitchInput/AddYawInput, queue velocity impulse into springs.
-	// The springs will smoothly deliver the recoil over 2-3 frames.
-	CameraRecoilSpringPitch.Velocity += Recoil.Pitch * 30.0f;
-	CameraRecoilSpringYaw.Velocity += Recoil.Yaw * 30.0f;
+	const FRecoilSpringSet Spring = ResolveActiveSpringSet();
+	const float Hard = FMath::Clamp(Settings.Recovery.HardFraction, 0.0f, 1.0f);
+	const float Soft = 1.0f - Hard;
+
+	// Every shot arrives in two pieces, the same two Apex authors as hardScale and softScale.
+	//
+	// The hard piece lands on the offset this instant, because a snap is a thing a spring cannot
+	// produce: a spring can only approach a value, and the first frames of an approach are the
+	// slowest ones. The soft piece goes in as a velocity impulse and is sized so the spring's own
+	// peak comes out at exactly the authored degrees, which is what keeps the two knobs honest:
+	// retuning a spring changes WHEN a kick arrives and never HOW BIG it is.
+	CameraRecoilSpringPitch.Value += Recoil.Pitch * Hard;
+	CameraRecoilSpringYaw.Value   += Recoil.Yaw   * Hard;
+	CameraRecoilSpringRoll.Value  += Recoil.Roll  * Hard;
+
+	CameraRecoilSpringPitch.Velocity += ImpulseVelocityFor(Recoil.Pitch * Soft, Spring.PitchConstant, Spring.PitchDamping);
+	CameraRecoilSpringYaw.Velocity   += ImpulseVelocityFor(Recoil.Yaw   * Soft, Spring.YawConstant,   Spring.YawDamping);
+	CameraRecoilSpringRoll.Velocity  += ImpulseVelocityFor(Recoil.Roll  * Soft, Spring.RollConstant,  Spring.RollDamping);
 }
 
-// ==================== Camera Recoil Spring ====================
+// ==================== Punch Springs ====================
 
-void UWeaponRecoilComponent::UpdateCameraRecoilSpring(float DeltaTime)
+float UWeaponRecoilComponent::ResolveHeatHoldTime() const
 {
-	if (!OwnerController) return;
+	const float Authored = Settings.Recovery.HeatHoldTime;
+	if (Authored > KINDA_SMALL_NUMBER)
+	{
+		return Authored;
+	}
 
-	// Capture previous spring positions
-	float PrevPitch = CameraRecoilSpringPitch.Value;
-	float PrevYaw = CameraRecoilSpringYaw.Value;
+	// Default: the weapon's own refire interval. A held trigger then never opens a gap long enough
+	// to cool and a tap always does, without either behaviour having to be written down per weapon.
+	// Apex hand-authors the same thing (0.08 on the R-301 against a ~0.074 s interval).
+	return FMath::Max(LastShotInterval, 0.05f);
+}
 
-	// Sub-step the spring to prevent explosion on large DeltaTime (hitches, first frame, etc.)
-	// Euler integration of a stiff spring is unstable when dt is too large,
-	// causing massive single-frame camera kicks.
-	constexpr float MaxSubStep = 1.0f / 60.0f; // ~16.6ms max per step
+FRecoilSpringSet UWeaponRecoilComponent::ResolveActiveSpringSet() const
+{
+	const FRecoilRecoverySettings& R = Settings.Recovery;
+	const FRecoilSpringSet& Cold = bIsAiming ? R.ADS : R.Hipfire;
+	const FRecoilSpringSet& Hot  = bIsAiming ? R.ADSHot : R.HipfireHot;
+
+	if (SpringHeat <= KINDA_SMALL_NUMBER)
+	{
+		return Cold;
+	}
+	if (SpringHeat >= 1.0f - KINDA_SMALL_NUMBER)
+	{
+		return Hot;
+	}
+
+	FRecoilSpringSet Blend;
+	Blend.PitchConstant = FMath::Lerp(Cold.PitchConstant, Hot.PitchConstant, SpringHeat);
+	Blend.PitchDamping  = FMath::Lerp(Cold.PitchDamping,  Hot.PitchDamping,  SpringHeat);
+	Blend.YawConstant   = FMath::Lerp(Cold.YawConstant,   Hot.YawConstant,   SpringHeat);
+	Blend.YawDamping    = FMath::Lerp(Cold.YawDamping,    Hot.YawDamping,    SpringHeat);
+	Blend.RollConstant  = FMath::Lerp(Cold.RollConstant,  Hot.RollConstant,  SpringHeat);
+	Blend.RollDamping   = FMath::Lerp(Cold.RollDamping,   Hot.RollDamping,   SpringHeat);
+	return Blend;
+}
+
+void UWeaponRecoilComponent::UpdateSpringHeat(float DeltaTime)
+{
+	if (SpringHeat <= 0.0f)
+	{
+		return;
+	}
+
+	// Hold, then fade. The hold is the whole mechanism: heat is set to full by a single shot, so
+	// what separates a tap from a burst is not how much heat there is but how long it lasts.
+	if (TimeSinceLastShot < ResolveHeatHoldTime())
+	{
+		return;
+	}
+
+	const float Fade = FMath::Max(Settings.Recovery.HeatFadeTime, 0.01f);
+	SpringHeat = FMath::Max(0.0f, SpringHeat - DeltaTime / Fade);
+}
+
+void UWeaponRecoilComponent::UpdatePunchSprings(float DeltaTime)
+{
+	const FRecoilSpringSet Spring = ResolveActiveSpringSet();
+
+	// Target is zero, always. There is no recovery pass anywhere in this component and no recovery
+	// speed to tune: these three springs pulling back to zero ARE the recovery, exactly as in Apex,
+	// whose shipped ConVar help for the same constant reads "Bigger number increases the speed at
+	// which the view corrects". When the hot set puts a constant at 0 the pull simply stops, the
+	// burst piles up, and cooling hands the whole pile back in one motion.
+	//
+	// Sub-stepped because these springs are stiff — roll runs at 20000, about 22 Hz — and the
+	// symplectic Euler step above is only stable while sqrt(k) * dt stays under 2.
+	constexpr float MaxSubStep = 1.0f / 240.0f;
 	float Remaining = DeltaTime;
 	while (Remaining > KINDA_SMALL_NUMBER)
 	{
-		float Step = FMath::Min(Remaining, MaxSubStep);
-		CameraRecoilSpringPitch.Update(0.0f, Settings.CameraRecoilSpringStiffness, Step);
-		CameraRecoilSpringYaw.Update(0.0f, Settings.CameraRecoilSpringStiffness, Step);
+		const float Step = FMath::Min(Remaining, MaxSubStep);
+		CameraRecoilSpringPitch.UpdateWithDamping(0.0f, Spring.PitchConstant, Spring.PitchDamping, Step);
+		CameraRecoilSpringYaw.UpdateWithDamping(0.0f, Spring.YawConstant, Spring.YawDamping, Step);
+		CameraRecoilSpringRoll.UpdateWithDamping(0.0f, Spring.RollConstant, Spring.RollDamping, Step);
 		Remaining -= Step;
 	}
 
-	// Calculate delta this frame (how much the spring moved)
-	float DeltaPitch = CameraRecoilSpringPitch.Value - PrevPitch;
-	float DeltaYaw = CameraRecoilSpringYaw.Value - PrevYaw;
+	PunchOffset.Pitch = CameraRecoilSpringPitch.Value;
+	PunchOffset.Yaw   = CameraRecoilSpringYaw.Value;
+	PunchOffset.Roll  = CameraRecoilSpringRoll.Value;
 
-	// Apply smoothed delta to controller
-	// Negative pitch = look up (recoil goes up)
-	if (FMath::Abs(DeltaPitch) > KINDA_SMALL_NUMBER)
-	{
-		OwnerController->AddPitchInput(-DeltaPitch);
-	}
-	if (FMath::Abs(DeltaYaw) > KINDA_SMALL_NUMBER)
-	{
-		OwnerController->AddYawInput(DeltaYaw);
-	}
-
-	// Track accumulated recoil for recovery system.
-	// Signed, like the yaw below. It used to take FMath::Abs(DeltaPitch), which accumulated the
-	// spring's PATH LENGTH (rise plus return) instead of the view's net displacement. Since the
-	// spring is critically damped towards zero, that net displacement is zero, so recovery was
-	// spending roughly 2x the peak of every shot pulling the view DOWN from neutral.
-	AccumulatedRecoil.Pitch += DeltaPitch;
-	AccumulatedRecoil.Yaw += DeltaYaw;
-}
-
-// ==================== Recovery ====================
-
-void UWeaponRecoilComponent::UpdateRecovery(float DeltaTime)
-{
-	// Don't recover while actively firing
-	if (bIsFiring) return;
-
-	// Wait for recovery delay
-	if (TimeSinceLastShot < Settings.RecoveryDelay) return;
-
-	// Don't recover while camera springs are still delivering recoil
-	if (FMath::Abs(CameraRecoilSpringPitch.Velocity) > 1.0f ||
-		FMath::Abs(CameraRecoilSpringYaw.Velocity) > 1.0f)
-	{
-		return;
-	}
-
-	// No recovery if nothing accumulated
-	if (AccumulatedRecoil.IsNearlyZero(0.01f))
-	{
-		bIsRecovering = false;
-		return;
-	}
-
-	bIsRecovering = true;
-
-	// Calculate recovery amount this frame
-	float RecoveryAmount = Settings.RecoverySpeed * DeltaTime;
-
-	// Recover pitch (bring camera back down)
-	if (AccumulatedRecoil.Pitch > 0.01f)
-	{
-		float PitchRecovery = FMath::Min(RecoveryAmount, AccumulatedRecoil.Pitch);
-		AccumulatedRecoil.Pitch -= PitchRecovery;
-
-		// Apply recovery to controller (positive pitch = look down)
-		if (OwnerController)
-		{
-			OwnerController->AddPitchInput(PitchRecovery);
-		}
-	}
-
-	// Recover yaw (center horizontal)
-	if (FMath::Abs(AccumulatedRecoil.Yaw) > 0.01f)
-	{
-		float YawRecovery = FMath::Min(RecoveryAmount * 0.5f, FMath::Abs(AccumulatedRecoil.Yaw));
-		float YawSign = FMath::Sign(AccumulatedRecoil.Yaw);
-		AccumulatedRecoil.Yaw -= YawRecovery * YawSign;
-
-		if (OwnerController)
-		{
-			OwnerController->AddYawInput(-YawRecovery * YawSign);
-		}
-	}
+	// Nothing is pushed anywhere. AShooterCharacter::GetViewRotation pulls this value when the
+	// camera is posed, which happens after every actor has ticked, so the reader always gets the
+	// current frame and the component never has to know who is looking.
 }
 
 // ==================== Visual Kick (Spring-Damper) ====================
 
 void UWeaponRecoilComponent::TriggerVisualKick(const FRotator& ViewmodelRecoil, float RollKick)
 {
-	// Apply as velocity impulses to springs (not target positions)
-	// This preserves momentum from previous kicks, creating smooth continuous motion
-	KickSpringPitch.Velocity += ViewmodelRecoil.Pitch * 30.0f;
-	KickSpringYaw.Velocity += ViewmodelRecoil.Yaw * 30.0f;
-	KickSpringRoll.Velocity += RollKick * 30.0f;
-	KickSpringBack.Velocity += -Settings.KickBackDistance * 30.0f;
+	// Apply as velocity impulses to springs (not target positions).
+	// This preserves momentum from previous kicks, creating smooth continuous motion.
+	// These four run on FBobSpringState::Update, which derives critical damping, so the peak
+	// normalization has to be told the same damping the springs will actually use.
+	const float Stiffness = Settings.VisualKick.KickSpringStiffness;
+	const float Damping = 2.0f * FMath::Sqrt(Stiffness);
+	KickSpringPitch.Velocity += ImpulseVelocityFor(ViewmodelRecoil.Pitch, Stiffness, Damping);
+	KickSpringYaw.Velocity += ImpulseVelocityFor(ViewmodelRecoil.Yaw, Stiffness, Damping);
+	KickSpringRoll.Velocity += ImpulseVelocityFor(RollKick, Stiffness, Damping);
+
+	// KickBackDistance already carries its own sign convention (negative = backwards along barrel)
+	KickSpringBack.Velocity += -ImpulseVelocityFor(Settings.VisualKick.KickBackDistance, Stiffness, Damping);
 }
 
 void UWeaponRecoilComponent::UpdateVisualKick(float DeltaTime)
 {
-	if (!Settings.bEnableVisualKick)
+	if (!Settings.VisualKick.bEnableVisualKick)
 	{
 		// Kick is the only writer of these two, so an early return that skips the write leaves
 		// them frozen at whatever the last enabled frame produced, parking the weapon off centre
@@ -453,14 +545,15 @@ void UWeaponRecoilComponent::UpdateVisualKick(float DeltaTime)
 
 	// Sub-step visual kick springs to prevent instability on large DeltaTime
 	constexpr float MaxSubStep = 1.0f / 60.0f;
+	const float Stiffness = Settings.VisualKick.KickSpringStiffness;
 	float Remaining = DeltaTime;
 	while (Remaining > KINDA_SMALL_NUMBER)
 	{
 		float Step = FMath::Min(Remaining, MaxSubStep);
-		KickSpringPitch.Update(0.0f, Settings.KickSpringStiffness, Step);
-		KickSpringYaw.Update(0.0f, Settings.KickSpringStiffness, Step);
-		KickSpringRoll.Update(0.0f, Settings.KickSpringStiffness, Step);
-		KickSpringBack.Update(0.0f, Settings.KickSpringStiffness, Step);
+		KickSpringPitch.Update(0.0f, Stiffness, Step);
+		KickSpringYaw.Update(0.0f, Stiffness, Step);
+		KickSpringRoll.Update(0.0f, Stiffness, Step);
+		KickSpringBack.Update(0.0f, Stiffness, Step);
 		Remaining -= Step;
 	}
 
@@ -471,48 +564,11 @@ void UWeaponRecoilComponent::UpdateVisualKick(float DeltaTime)
 	CurrentWeaponOffset.X = KickSpringBack.Value;
 }
 
-// ==================== Camera Punch ====================
-
-void UWeaponRecoilComponent::TriggerCameraPunch()
-{
-	// Random punch direction with bias upward
-	PunchOscillationAmplitude.X = FMath::RandRange(-1.0f, 1.0f) * Settings.CameraPunchIntensity;
-	PunchOscillationAmplitude.Y = FMath::RandRange(0.0f, 1.0f) * Settings.CameraPunchIntensity;
-
-	PunchOscillationTime = 0.0f;
-}
-
-void UWeaponRecoilComponent::UpdateCameraPunch(float DeltaTime)
-{
-	if (!Settings.bEnableCameraPunch) return;
-
-	// Damped oscillation for camera punch
-	if (FMath::Abs(PunchOscillationAmplitude.X) > 0.001f || FMath::Abs(PunchOscillationAmplitude.Y) > 0.001f)
-	{
-		PunchOscillationTime += DeltaTime;
-
-		float Decay = FMath::Exp(-Settings.CameraPunchDamping * PunchOscillationTime);
-		float Phase = PunchOscillationTime * Settings.CameraPunchFrequency * 2.0f * PI;
-		float SinValue = FMath::Sin(Phase) * Decay;
-
-		CurrentCameraPunch.Yaw = PunchOscillationAmplitude.X * SinValue;
-		CurrentCameraPunch.Pitch = PunchOscillationAmplitude.Y * SinValue;
-		CurrentCameraPunch.Roll = PunchOscillationAmplitude.X * SinValue * 0.3f;
-
-		// Reset when negligible
-		if (Decay < 0.01f)
-		{
-			PunchOscillationAmplitude = FVector2D::ZeroVector;
-			CurrentCameraPunch = FRotator::ZeroRotator;
-		}
-	}
-}
-
 // ==================== Weapon Sway ====================
 
 void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 {
-	if (!Settings.bEnableWeaponSway)
+	if (!Settings.Sway.bEnableWeaponSway)
 	{
 		// Same reasoning as UpdateVisualKick: sway owns this value, so it has to clear it rather
 		// than leave the last frame's offset standing.
@@ -520,12 +576,14 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 		return;
 	}
 
+	const auto& Sway = Settings.Sway;
+
 	// Smooth mouse velocity
 	SmoothedMouseVelocity = FMath::Vector2DInterpTo(
 		SmoothedMouseVelocity,
 		CurrentMouseVelocity,
 		DeltaTime,
-		Settings.MouseSwayLag
+		Sway.MouseSwayLag
 	);
 
 	// Reset current mouse velocity (it gets set each frame from input)
@@ -534,70 +592,70 @@ void UWeaponRecoilComponent::UpdateWeaponSway(float DeltaTime)
 	// Calculate mouse sway
 	FRotator MouseSway = FRotator::ZeroRotator;
 	MouseSway.Yaw = FMath::Clamp(
-		-SmoothedMouseVelocity.X * Settings.MouseSwayIntensity,
-		-Settings.MaxMouseSwayOffset,
-		Settings.MaxMouseSwayOffset
+		-SmoothedMouseVelocity.X * Sway.MouseSwayIntensity,
+		-Sway.MaxMouseSwayOffset,
+		Sway.MaxMouseSwayOffset
 	);
 	MouseSway.Pitch = FMath::Clamp(
-		SmoothedMouseVelocity.Y * Settings.MouseSwayIntensity,
-		-Settings.MaxMouseSwayOffset,
-		Settings.MaxMouseSwayOffset
+		SmoothedMouseVelocity.Y * Sway.MouseSwayIntensity,
+		-Sway.MaxMouseSwayOffset,
+		Sway.MaxMouseSwayOffset
 	);
 
 	// Ornstein-Uhlenbeck organic sway (truly stochastic, never repeats)
 	FRotator OrganicSway = FRotator::ZeroRotator;
 
-	if (Settings.bEnableOrganicSway)
+	if (Sway.bEnableOrganicSway)
 	{
 		// Layer 1: Breathing (slow, large drift)
 		for (int32 Axis = 0; Axis < 3; ++Axis)
 		{
 			BreathingOU[Axis] = AdvanceOU(BreathingOU[Axis],
-				Settings.BreathingReversionSpeed, Settings.BreathingVolatility,
-				Settings.BreathingMaxAngle, DeltaTime);
+				Sway.BreathingReversionSpeed, Sway.BreathingVolatility,
+				Sway.BreathingMaxAngle, DeltaTime);
 		}
-		OrganicSway.Pitch += BreathingOU[0] * Settings.BreathingAxisScale.X;
-		OrganicSway.Yaw   += BreathingOU[1] * Settings.BreathingAxisScale.Y;
-		OrganicSway.Roll  += BreathingOU[2] * Settings.BreathingAxisScale.Z;
+		OrganicSway.Pitch += BreathingOU[0] * Sway.BreathingAxisScale.X;
+		OrganicSway.Yaw   += BreathingOU[1] * Sway.BreathingAxisScale.Y;
+		OrganicSway.Roll  += BreathingOU[2] * Sway.BreathingAxisScale.Z;
 
 		// Layer 2: Tremor (medium speed, hand instability)
 		for (int32 Axis = 0; Axis < 3; ++Axis)
 		{
 			TremorOU[Axis] = AdvanceOU(TremorOU[Axis],
-				Settings.TremorReversionSpeed, Settings.TremorVolatility,
-				Settings.TremorMaxAngle, DeltaTime);
+				Sway.TremorReversionSpeed, Sway.TremorVolatility,
+				Sway.TremorMaxAngle, DeltaTime);
 		}
-		OrganicSway.Pitch += TremorOU[0] * Settings.TremorAxisScale.X;
-		OrganicSway.Yaw   += TremorOU[1] * Settings.TremorAxisScale.Y;
-		OrganicSway.Roll  += TremorOU[2] * Settings.TremorAxisScale.Z;
+		OrganicSway.Pitch += TremorOU[0] * Sway.TremorAxisScale.X;
+		OrganicSway.Yaw   += TremorOU[1] * Sway.TremorAxisScale.Y;
+		OrganicSway.Roll  += TremorOU[2] * Sway.TremorAxisScale.Z;
 
 		// Layer 3: Micro-jitter (fast, nervous system noise)
 		for (int32 Axis = 0; Axis < 3; ++Axis)
 		{
 			JitterOU[Axis] = AdvanceOU(JitterOU[Axis],
-				Settings.JitterReversionSpeed, Settings.JitterVolatility,
-				Settings.JitterMaxAngle, DeltaTime);
+				Sway.JitterReversionSpeed, Sway.JitterVolatility,
+				Sway.JitterMaxAngle, DeltaTime);
 		}
-		OrganicSway.Pitch += JitterOU[0] * Settings.JitterAxisScale.X;
-		OrganicSway.Yaw   += JitterOU[1] * Settings.JitterAxisScale.Y;
-		OrganicSway.Roll  += JitterOU[2] * Settings.JitterAxisScale.Z;
+		OrganicSway.Pitch += JitterOU[0] * Sway.JitterAxisScale.X;
+		OrganicSway.Yaw   += JitterOU[1] * Sway.JitterAxisScale.Y;
+		OrganicSway.Roll  += JitterOU[2] * Sway.JitterAxisScale.Z;
 	}
 
 	// Movement sway multiplier
 	float MovementMult = 1.0f;
 	if (IsMoving())
 	{
-		MovementMult = Settings.MovementSwayMultiplier;
+		MovementMult = Sway.MovementSwayMultiplier;
 	}
 
 	// Reduce sway when aiming
-	float AimMult = bIsAiming ? Settings.ADSSwayMultiplier : 1.0f;
+	float AimMult = bIsAiming ? Sway.ADSSwayMultiplier : 1.0f;
 
 	// Combine all sway sources
 	FRotator TotalSway = (MouseSway + OrganicSway * MovementMult) * AimMult * SwayOverrideMultiplier;
 
 	// Smooth interpolation to target sway
-	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, Settings.MouseSwayLag);
+	CurrentSwayOffset = FMath::RInterpTo(CurrentSwayOffset, TotalSway, DeltaTime, Sway.MouseSwayLag);
 
 	// Sway is NOT folded into CurrentWeaponRotation. It used to be, and that made the two
 	// inseparable at the getter: kick assigned the variable, sway added to it, and one call
@@ -611,9 +669,9 @@ float UWeaponRecoilComponent::AdvanceOU(float CurrentValue, float ReversionSpeed
 	// Ornstein-Uhlenbeck: dX = θ(μ - X)dt + σ * dW
 	// μ = 0 (center), θ = ReversionSpeed, σ = Volatility
 	// Approximate Gaussian noise via Central Limit Theorem (sum of 3 uniforms)
-	float U1 = SwayRandomStream.FRandRange(-1.0f, 1.0f);
-	float U2 = SwayRandomStream.FRandRange(-1.0f, 1.0f);
-	float U3 = SwayRandomStream.FRandRange(-1.0f, 1.0f);
+	float U1 = RecoilRandomStream.FRandRange(-1.0f, 1.0f);
+	float U2 = RecoilRandomStream.FRandRange(-1.0f, 1.0f);
+	float U3 = RecoilRandomStream.FRandRange(-1.0f, 1.0f);
 	float GaussianApprox = (U1 + U2 + U3) / 1.732f; // ~N(0,1)
 
 	float Drift = ReversionSpeed * (0.0f - CurrentValue) * DeltaTime;
@@ -623,41 +681,57 @@ float UWeaponRecoilComponent::AdvanceOU(float CurrentValue, float ReversionSpeed
 	return FMath::Clamp(NewValue, -MaxAngle, MaxAngle);
 }
 
-// ==================== Default Pattern ====================
+// ==================== Editor Seeding ====================
 
-TArray<FRecoilPatternPoint> UWeaponRecoilComponent::GetDefaultAssaultRiflePattern()
+void UWeaponRecoilComponent::SeedRecoilCurve(UCurveVector* Curve, const TArray<FVector>& Keys, const TArray<float>& ScatterRadii)
 {
-	TArray<FRecoilPatternPoint> Pattern;
-	Pattern.Reserve(20);
+#if WITH_EDITOR
+	if (!Curve)
+	{
+		return;
+	}
 
-	// R-201 style: moderate opening climb, then horizontal meander
-	// Phase 1: Shots 1-5 — moderate upward climb, slight rightward drift
-	Pattern.Add(FRecoilPatternPoint(0.30f,  0.05f));   // Shot 1
-	Pattern.Add(FRecoilPatternPoint(0.35f,  0.08f));   // Shot 2
-	Pattern.Add(FRecoilPatternPoint(0.30f,  0.12f));   // Shot 3
-	Pattern.Add(FRecoilPatternPoint(0.25f,  0.10f));   // Shot 4
-	Pattern.Add(FRecoilPatternPoint(0.28f, -0.05f));   // Shot 5
+	Curve->Modify();
+	for (FRichCurve& Channel : Curve->FloatCurves)
+	{
+		Channel.Reset();
+	}
 
-	// Phase 2: Shots 6-10 — reduced vertical, alternating horizontal
-	Pattern.Add(FRecoilPatternPoint(0.18f, -0.15f));   // Shot 6
-	Pattern.Add(FRecoilPatternPoint(0.15f, -0.20f));   // Shot 7
-	Pattern.Add(FRecoilPatternPoint(0.20f,  0.10f));   // Shot 8
-	Pattern.Add(FRecoilPatternPoint(0.12f,  0.22f));   // Shot 9
-	Pattern.Add(FRecoilPatternPoint(0.15f,  0.18f));   // Shot 10
+	FRichCurve& PitchCurve = Curve->FloatCurves[0];
+	FRichCurve& YawCurve = Curve->FloatCurves[1];
+	FRichCurve& ScatterCurve = Curve->FloatCurves[2];
+	for (int32 Index = 0; Index < Keys.Num(); ++Index)
+	{
+		const FVector& Key = Keys[Index];
+		PitchCurve.AddKey(Key.X, Key.Y);
+		YawCurve.AddKey(Key.X, Key.Z);
 
-	// Phase 3: Shots 11-15 — minimal vertical, wider horizontal oscillation
-	Pattern.Add(FRecoilPatternPoint(0.10f, -0.25f));   // Shot 11
-	Pattern.Add(FRecoilPatternPoint(0.08f, -0.30f));   // Shot 12
-	Pattern.Add(FRecoilPatternPoint(0.12f, -0.10f));   // Shot 13
-	Pattern.Add(FRecoilPatternPoint(0.10f,  0.20f));   // Shot 14
-	Pattern.Add(FRecoilPatternPoint(0.08f,  0.35f));   // Shot 15
+		// Short or empty ScatterRadii is not an error: it is how a caller says "no scatter", and
+		// how every tuning script written before the third channel existed keeps working.
+		if (ScatterRadii.IsValidIndex(Index))
+		{
+			ScatterCurve.AddKey(Key.X, FMath::Max(ScatterRadii[Index], 0.0f));
+		}
+	}
+#endif
+}
 
-	// Phase 4: Shots 16-20 — near-zero vertical, horizontal meander
-	Pattern.Add(FRecoilPatternPoint(0.05f,  0.25f));   // Shot 16
-	Pattern.Add(FRecoilPatternPoint(0.10f, -0.15f));   // Shot 17
-	Pattern.Add(FRecoilPatternPoint(0.08f, -0.28f));   // Shot 18
-	Pattern.Add(FRecoilPatternPoint(0.05f,  0.10f));   // Shot 19
-	Pattern.Add(FRecoilPatternPoint(0.10f,  0.18f));   // Shot 20
+// ==================== Recoil Smoothing ====================
 
-	return Pattern;
+void UWeaponRecoilComponent::UpdateSmoothingMultiplier(float DeltaTime)
+{
+	const auto& Sm = Settings.Smoothing;
+
+	float Target = 1.0f;
+	if (Sm.bEnableRecoilSmoothing && Sm.MaxViewSpeed > Sm.MinViewSpeed)
+	{
+		// Smoothstep between MinViewSpeed (no reduction) and MaxViewSpeed (full reduction)
+		const float Alpha = FMath::Clamp(
+			(SmoothedLookSpeed - Sm.MinViewSpeed) / (Sm.MaxViewSpeed - Sm.MinViewSpeed),
+			0.0f, 1.0f);
+		const float Eased = Alpha * Alpha * (3.0f - 2.0f * Alpha);
+		Target = FMath::Lerp(1.0f, Sm.MinMultiplier, Eased);
+	}
+
+	CurrentSmoothingMultiplier = FMath::FInterpTo(CurrentSmoothingMultiplier, Target, DeltaTime, Sm.InterpSpeed);
 }

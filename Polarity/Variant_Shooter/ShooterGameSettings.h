@@ -112,9 +112,36 @@ public:
 	UPROPERTY(Config, BlueprintReadWrite, Category = "Controls", meta = (ClampMin = "0.1", ClampMax = "10.0"))
 	float MouseSensitivityY;
 
-	/** ADS (Aim Down Sights) sensitivity multiplier */
+	/** ADS (Aim Down Sights) sensitivity multiplier. Apex meaning: 1.0 is "same as the hip". */
 	UPROPERTY(Config, BlueprintReadWrite, Category = "Controls", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float ADSSensitivityMultiplier;
+
+	// ==================== Look sensitivity, one scale ====================
+	//
+	// Everything the player turns by goes through a single number on Apex's own scale:
+	//     degrees per mouse count = ApexYawPerCount * LookSensitivity
+	// where ApexYawPerCount is 0.022, the m_yaw of the Source/Titanfall line Apex sits on.
+	// So a number typed here means in this game exactly what the same number means there.
+
+	/** Look sensitivity on the Apex scale. 1.0 turns 0.022 degrees per mouse count. */
+	UPROPERTY(Config, BlueprintReadWrite, Category = "Controls", meta = (ClampMin = "0.05", ClampMax = "20.0"))
+	float LookSensitivity;
+
+	/** Mouse DPI. Only feeds the cm/360 and eDPI readout, never the turn itself. */
+	UPROPERTY(Config, BlueprintReadWrite, Category = "Controls", meta = (ClampMin = "100", ClampMax = "32000"))
+	int32 MouseDpi;
+
+	/** How many Enhanced Input units arrive per mouse count. 1.0 by the engine's own contract
+	 *  (FSceneViewport hands the pixel/count delta over untouched). Only calibration moves it. */
+	UPROPERTY(Config, BlueprintReadWrite, Category = "Controls|Advanced", meta = (ClampMin = "0.001", ClampMax = "100.0"))
+	float LookUnitsPerCount;
+
+	/** The one-time carry of the old MouseSensitivity onto the Apex scale has already run. */
+	UPROPERTY(Config)
+	bool bLookSensitivityMigrated;
+
+	/** Apex's m_yaw: degrees turned per mouse count at sensitivity 1.0. */
+	static constexpr float ApexYawPerCount = 0.022f;
 
 	/** Invert Y axis for mouse look */
 	UPROPERTY(Config, BlueprintReadWrite, Category = "Controls")
@@ -215,6 +242,36 @@ public:
 	/** Apply all custom settings */
 	UFUNCTION(BlueprintCallable, Category = "Settings")
 	void ApplyAllCustomSettings();
+
+	// ==================== Look sensitivity readout ====================
+
+	/** Degrees the view turns for one mouse count, at the current sensitivity. */
+	UFUNCTION(BlueprintPure, Category = "Settings|Look")
+	float GetDegreesPerCount() const;
+
+	/** Centimetres of mousepad for a full 360, at the DPI written in the settings. */
+	UFUNCTION(BlueprintPure, Category = "Settings|Look")
+	float GetCentimetersPer360() const;
+
+	/** Inches of mousepad for a full 360, for configs quoted the American way. */
+	UFUNCTION(BlueprintPure, Category = "Settings|Look")
+	float GetInchesPer360() const;
+
+	/** eDPI: sensitivity times DPI, the number pro configs are compared by. */
+	UFUNCTION(BlueprintPure, Category = "Settings|Look")
+	float GetEffectiveDpi() const;
+
+	/** One line for the menu: "1.60   |   32.4 cm/360   |   eDPI 1280". */
+	UFUNCTION(BlueprintPure, Category = "Settings|Look")
+	FText GetSensitivityReadout() const;
+
+	/** Trust a measured 360 over the engine, and fix LookUnitsPerCount so the readout is true. */
+	UFUNCTION(BlueprintCallable, Category = "Settings|Look")
+	void CalibrateFromMeasured360(float MeasuredCentimeters);
+
+	/** Carry the old MouseSensitivity onto the Apex scale once, keeping the feel it had. */
+	UFUNCTION(BlueprintCallable, Category = "Settings|Look")
+	void MigrateLegacySensitivity();
 
 	/** Reset all custom settings to defaults */
 	UFUNCTION(BlueprintCallable, Category = "Settings")

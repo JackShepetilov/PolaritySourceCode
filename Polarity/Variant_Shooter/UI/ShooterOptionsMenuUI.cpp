@@ -6,6 +6,9 @@
 #include "ShooterKeyBindingsUI.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/GameUserSettings.h"
+#include "Components/Slider.h"
+#include "Components/SpinBox.h"
+#include "Components/TextBlock.h"
 
 void UShooterOptionsMenuUI::NativeConstruct()
 {
@@ -14,8 +17,126 @@ void UShooterOptionsMenuUI::NativeConstruct()
 	CurrentCategory = ESettingsCategory::Audio;
 	bHasUnsavedChanges = false;
 
+	SetupSensitivityWidgets();
+
 	BP_OnMenuOpened();
 	BP_RefreshAllUI();
+}
+
+void UShooterOptionsMenuUI::SetupSensitivityWidgets()
+{
+	// The ranges are written here rather than left in the asset on purpose. They belong to the
+	// Apex scale, the scale is defined in code, and a slider whose bounds disagree with the code
+	// is exactly the kind of quiet mismatch this whole rework exists to remove.
+	constexpr float SensMin = 0.05f;
+	constexpr float SensMax = 20.0f;
+
+	if (Slider_MouseSensitivity)
+	{
+		Slider_MouseSensitivity->SetMinValue(SensMin);
+		Slider_MouseSensitivity->SetMaxValue(SensMax);
+		Slider_MouseSensitivity->SetStepSize(0.05f);
+		Slider_MouseSensitivity->OnValueChanged.AddUniqueDynamic(
+			this, &UShooterOptionsMenuUI::HandleSensitivitySliderChanged);
+	}
+
+	if (SpinBox_LookSensitivity)
+	{
+		// Typing is the point of this one, so the hard bounds and the drag bounds are the same
+		// and two decimals are shown: Apex configs are quoted to two, and a field that rounds
+		// 1.35 to 1.4 would silently refuse to hold the number the player came here to enter.
+		SpinBox_LookSensitivity->SetMinValue(SensMin);
+		SpinBox_LookSensitivity->SetMaxValue(SensMax);
+		SpinBox_LookSensitivity->SetMinSliderValue(SensMin);
+		SpinBox_LookSensitivity->SetMaxSliderValue(SensMax);
+		SpinBox_LookSensitivity->SetMinFractionalDigits(2);
+		SpinBox_LookSensitivity->SetMaxFractionalDigits(2);
+		SpinBox_LookSensitivity->SetDelta(0.0f);
+		SpinBox_LookSensitivity->OnValueChanged.AddUniqueDynamic(
+			this, &UShooterOptionsMenuUI::HandleSensitivitySpinBoxChanged);
+	}
+
+	if (SpinBox_MouseDpi)
+	{
+		SpinBox_MouseDpi->SetMinValue(100.0f);
+		SpinBox_MouseDpi->SetMaxValue(32000.0f);
+		SpinBox_MouseDpi->SetMinSliderValue(100.0f);
+		SpinBox_MouseDpi->SetMaxSliderValue(6400.0f);
+		SpinBox_MouseDpi->SetMinFractionalDigits(0);
+		SpinBox_MouseDpi->SetMaxFractionalDigits(0);
+		SpinBox_MouseDpi->SetDelta(50.0f);
+		SpinBox_MouseDpi->OnValueChanged.AddUniqueDynamic(
+			this, &UShooterOptionsMenuUI::HandleMouseDpiSpinBoxChanged);
+	}
+
+	RefreshSensitivityWidgets();
+}
+
+void UShooterOptionsMenuUI::RefreshSensitivityWidgets()
+{
+	UShooterGameSettings* Settings = GetGameSettings();
+	if (!Settings)
+	{
+		return;
+	}
+
+	// Writing a value into a widget can make it shout that its value changed, which would send us
+	// straight back in here. The guard is what makes the slider and the spin box able to follow
+	// each other instead of arguing.
+	TGuardValue<bool> Guard(bUpdatingSensitivityWidgets, true);
+
+	if (Slider_MouseSensitivity)
+	{
+		Slider_MouseSensitivity->SetValue(Settings->LookSensitivity);
+	}
+
+	if (SpinBox_LookSensitivity)
+	{
+		SpinBox_LookSensitivity->SetValue(Settings->LookSensitivity);
+	}
+
+	if (SpinBox_MouseDpi)
+	{
+		SpinBox_MouseDpi->SetValue(static_cast<float>(Settings->MouseDpi));
+	}
+
+	if (Text_SensitivityReadout)
+	{
+		Text_SensitivityReadout->SetText(Settings->GetSensitivityReadout());
+	}
+}
+
+void UShooterOptionsMenuUI::HandleSensitivitySliderChanged(float Value)
+{
+	if (bUpdatingSensitivityWidgets)
+	{
+		return;
+	}
+
+	SetMouseSensitivity(Value);
+	RefreshSensitivityWidgets();
+}
+
+void UShooterOptionsMenuUI::HandleSensitivitySpinBoxChanged(float Value)
+{
+	if (bUpdatingSensitivityWidgets)
+	{
+		return;
+	}
+
+	SetMouseSensitivity(Value);
+	RefreshSensitivityWidgets();
+}
+
+void UShooterOptionsMenuUI::HandleMouseDpiSpinBoxChanged(float Value)
+{
+	if (bUpdatingSensitivityWidgets)
+	{
+		return;
+	}
+
+	SetMouseDpi(FMath::RoundToInt(Value));
+	RefreshSensitivityWidgets();
 }
 
 void UShooterOptionsMenuUI::NativeDestruct()
@@ -99,7 +220,12 @@ void UShooterOptionsMenuUI::RevertSettings()
 		// Reload settings from disk
 		Settings->LoadSettings();
 
+		// The look slider previews itself while you drag it, so backing out has to put the view
+		// back too. Reloading the number alone would leave the aim on the value being cancelled.
+		Settings->ApplyControlSettings();
+
 		bHasUnsavedChanges = false;
+		RefreshSensitivityWidgets();
 		BP_OnSettingsReverted();
 		BP_RefreshAllUI();
 	}
@@ -116,6 +242,8 @@ void UShooterOptionsMenuUI::ResetCategoryToDefaults()
 			break;
 		case ESettingsCategory::Controls:
 			Settings->ResetControlsToDefaults();
+			// Same reason as Revert: the number on screen and the aim under the hand must agree.
+			Settings->ApplyControlSettings();
 			break;
 		case ESettingsCategory::Graphics:
 			Settings->SetToDefaults(); // Parent class handles graphics
@@ -131,6 +259,7 @@ void UShooterOptionsMenuUI::ResetCategoryToDefaults()
 		}
 
 		bHasUnsavedChanges = true;
+		RefreshSensitivityWidgets();
 		BP_RefreshAllUI();
 	}
 }
@@ -140,7 +269,9 @@ void UShooterOptionsMenuUI::ResetAllToDefaults()
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
 		Settings->ResetToDefaults();
+		Settings->ApplyControlSettings();
 		bHasUnsavedChanges = true;
+		RefreshSensitivityWidgets();
 		BP_RefreshAllUI();
 	}
 }
@@ -245,7 +376,7 @@ float UShooterOptionsMenuUI::GetMouseSensitivity() const
 {
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
-		return Settings->MouseSensitivity;
+		return Settings->LookSensitivity;
 	}
 	return 1.0f;
 }
@@ -254,8 +385,11 @@ void UShooterOptionsMenuUI::SetMouseSensitivity(float Value)
 {
 	if (UShooterGameSettings* Settings = GetGameSettings())
 	{
-		Settings->MouseSensitivity = FMath::Clamp(Value, 0.1f, 10.0f);
-		MarkSettingModified(FName("MouseSensitivity"));
+		// One scale reaches the view now, and the slider writes straight onto it. Applying here
+		// rather than on "Apply" is deliberate: sensitivity is judged by feel, not by a number.
+		Settings->LookSensitivity = FMath::Clamp(Value, 0.05f, 20.0f);
+		Settings->ApplyControlSettings();
+		MarkSettingModified(FName("LookSensitivity"));
 	}
 }
 
@@ -311,6 +445,51 @@ void UShooterOptionsMenuUI::SetADSSensitivityMultiplier(float Value)
 		Settings->ADSSensitivityMultiplier = FMath::Clamp(Value, 0.1f, 2.0f);
 		MarkSettingModified(FName("ADSSensitivityMultiplier"));
 	}
+}
+
+int32 UShooterOptionsMenuUI::GetMouseDpi() const
+{
+	if (UShooterGameSettings* Settings = GetGameSettings())
+	{
+		return Settings->MouseDpi;
+	}
+	return 800;
+}
+
+void UShooterOptionsMenuUI::SetMouseDpi(int32 Value)
+{
+	if (UShooterGameSettings* Settings = GetGameSettings())
+	{
+		Settings->MouseDpi = FMath::Clamp(Value, 100, 32000);
+		MarkSettingModified(FName("MouseDpi"));
+	}
+}
+
+float UShooterOptionsMenuUI::GetCentimetersPer360() const
+{
+	if (UShooterGameSettings* Settings = GetGameSettings())
+	{
+		return Settings->GetCentimetersPer360();
+	}
+	return 0.0f;
+}
+
+float UShooterOptionsMenuUI::GetEffectiveDpi() const
+{
+	if (UShooterGameSettings* Settings = GetGameSettings())
+	{
+		return Settings->GetEffectiveDpi();
+	}
+	return 0.0f;
+}
+
+FText UShooterOptionsMenuUI::GetSensitivityReadout() const
+{
+	if (UShooterGameSettings* Settings = GetGameSettings())
+	{
+		return Settings->GetSensitivityReadout();
+	}
+	return FText::GetEmpty();
 }
 
 bool UShooterOptionsMenuUI::GetInvertMouseY() const

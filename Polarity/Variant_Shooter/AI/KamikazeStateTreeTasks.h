@@ -47,7 +47,7 @@ struct POLARITY_API FSTTask_KamikazeOrbit : public FStateTreeTaskCommonBase
 
 //////////////////////////////////////////////////////////////////
 // TASK: Kamikaze Attack
-// Manages the attack sequence: Telegraph → Attack → PostAttack → Recovery/Crash.
+// Manages the attack sequence: Attack → PostAttack → PullUp/Crash.
 // Returns Succeeded on recovery, Failed on crash/death.
 //////////////////////////////////////////////////////////////////
 

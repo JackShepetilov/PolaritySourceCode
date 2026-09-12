@@ -8,10 +8,17 @@
 #include "Variant_Shooter/Map/ExtractionRoute.h"
 #include "Variant_Shooter/Run/RunLaunchPoint.h"
 
+#include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
+#include "AI/FactionContactMemory.h"
+#include "Coop/CoopPlayers.h"
+#include "Variant_Shooter/AI/SquadSpawn/SquadSpawnSubsystem.h"
+
+#include "GameFramework/Pawn.h"
+#include "GameFramework/WorldSettings.h"
 #include "NavigationSystem.h"
 
 namespace
@@ -57,6 +64,34 @@ namespace
 		TEXT("Draw the run director state on screen: phase, points, mission windows, money."),
 		ECVF_Cheat);
 
+	/** The same state, but IN THE WORLD and through walls.
+	 *
+	 *  The text HUD answers "what is the state of the war" and cannot answer "which of those places
+	 *  am I looking at", which is the question anybody actually has while standing on the map. A
+	 *  label floating over the point answers it in one glance and costs nothing to read.
+	 *
+	 *  Deliberately a cheat cvar and deliberately off: this is a wallhack, and it is for working on
+	 *  the game, not for playing it. */
+	/** Run the war faster than real time.
+	 *
+	 *  Watching whether the factions actually take ground is a question about minutes, not seconds,
+	 *  and sitting through those minutes at 1x to find out is most of the cost of testing the map.
+	 *
+	 *  Applied through world settings rather than the engine's slomo so it survives the map screen
+	 *  and does not need cheats switched on. It clamps itself to the world's own limits (20x by
+	 *  default), and physics gets unhappy well before that, so treat anything past ~8 as a toy. */
+	TAutoConsoleVariable<float> CVarTimeScale(
+		TEXT("polarity.debug.timescale"),
+		1.0f,
+		TEXT("Global time dilation for debugging: 1 is normal, 4 runs the war four times faster."),
+		ECVF_Cheat);
+
+	TAutoConsoleVariable<int32> CVarMapDraw(
+		TEXT("polarity.map.draw"),
+		0,
+		TEXT("Label every point of interest in the world: who holds it, who is on it, what it wants."),
+		ECVF_Cheat);
+
 	const TCHAR* TeamName(uint8 Team)
 	{
 		switch (Team)
@@ -74,6 +109,65 @@ namespace
 	 *  Uses only the public API on purpose: this is the same view a real HUD would build, so if it
 	 *  can be drawn from here it can be drawn from a widget later. One message key per line, so the
 	 *  block redraws in place instead of scrolling. */
+	FColor TeamColour(uint8 Team)
+	{
+		switch (Team)
+		{
+		case PolarityTeams::Players:  return FColor::Cyan;
+		case PolarityTeams::FactionA: return FColor(80, 140, 255);    // blue, as on the bench discs
+		case PolarityTeams::FactionB: return FColor(255, 90, 80);     // red
+		default:                      return FColor(210, 210, 210);   // nobody
+		}
+	}
+
+	/** A label over every place, in the world, readable through everything.
+	 *
+	 *  Answers the question the text HUD cannot: WHICH of these is the one in front of me. Also
+	 *  prints what the holding faction believes about the place, because "nine men are standing
+	 *  here doing nothing" and "nine men are standing here because they think four enemies are
+	 *  still in front of them" look identical from outside and are completely different bugs. */
+	void DrawWorldLabels(const URunDirectorSubsystem& Director, UWorld* World)
+	{
+		if (!World)
+		{
+			return;
+		}
+
+		// Just over one tick of the director, so the label is redrawn before it can flicker.
+		const float Life = 1.1f;
+
+		for (const FPoiWarState& State : Director.GetAllPoiStates())
+		{
+			const FColor Colour = State.bContested ? FColor::Orange : TeamColour(State.ControllingTeam);
+			const FVector Base = State.Location;
+
+			// A beam, so the place is findable from across the map and not only when read.
+			DrawDebugLine(World, Base, Base + FVector(0.0f, 0.0f, 2500.0f), Colour, false, Life,
+				SDPG_Foreground, 12.0f);
+
+			const int32 DemandA = Director.GetDemandAt(PolarityTeams::FactionA, State.PoiTag);
+			const int32 DemandB = Director.GetDemandAt(PolarityTeams::FactionB, State.PoiTag);
+
+			FString Text = FString::Printf(TEXT("%s  [%s]"), *State.PoiTag.ToString(),
+				TeamName(State.ControllingTeam));
+			Text += FString::Printf(TEXT("\nA %d here, wants %d (believes %d)"),
+				State.PresentA, DemandA, State.KnownEnemyForA);
+			Text += FString::Printf(TEXT("\nB %d here, wants %d (believes %d)"),
+				State.PresentB, DemandB, State.KnownEnemyForB);
+			if (State.CaptureProgress > 0.0f)
+			{
+				Text += FString::Printf(TEXT("\ncapture %.0f%% by %s"),
+					State.CaptureProgress * 100.0f, TeamName(State.CapturingTeam));
+			}
+			if (State.bContested)
+			{
+				Text += TEXT("\nCONTESTED");
+			}
+
+			DrawDebugString(World, Base + FVector(0.0f, 0.0f, 2700.0f), Text, nullptr, Colour, Life, true);
+		}
+	}
+
 	void DrawOverlay(const URunDirectorSubsystem& Director)
 	{
 		if (!GEngine)
@@ -208,10 +302,29 @@ void URunDirectorSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
+	// Only written when it actually moves, and compared against what the world really holds rather
+	// than against a remembered value: a remembered one goes stale the moment PIE restarts, and we
+	// would then never re-apply. Pre-clamped to the world's own limits so an out-of-range request
+	// does not make this rewrite the same clamped number every frame.
+	if (AWorldSettings* const Settings = const_cast<UWorld*>(World)->GetWorldSettings())
+	{
+		const float Wanted = FMath::Clamp(CVarTimeScale.GetValueOnGameThread(),
+			Settings->MinGlobalTimeDilation, Settings->MaxGlobalTimeDilation);
+		if (!FMath::IsNearlyEqual(Settings->TimeDilation, Wanted, 0.001f))
+		{
+			Settings->SetTimeDilation(Wanted);
+		}
+	}
+
 	// Drawn before the phase check: "nothing is happening" is exactly when somebody wants to look.
 	if (CVarMapHud.GetValueOnGameThread() != 0)
 	{
 		DrawOverlay(*this);
+	}
+
+	if (CVarMapDraw.GetValueOnGameThread() != 0)
+	{
+		DrawWorldLabels(*this, GetWorld());
 	}
 
 	if (Phase == ERunPhase::NotStarted || Phase == ERunPhase::Ended)
@@ -220,6 +333,11 @@ void URunDirectorSubsystem::Tick(float DeltaTime)
 	}
 
 	RunSeconds += DeltaTime;
+
+	// Squads on the road stop counting as strength once their clock runs out: either they arrived
+	// and the live count sees them, or they died on the way, and a faction that keeps counting the
+	// dead reinforces a place nobody ever reached.
+	PruneCommitments();
 
 	// The final opens on the clock, softly: the number of missions done changes what the final is
 	// like, never whether it happens. A hard gate would throw away every run that went wrong, and
@@ -235,6 +353,10 @@ void URunDirectorSubsystem::Tick(float DeltaTime)
 		return;
 	}
 	TickAccumulator = 0.0f;
+
+	// What the soldiers saw becomes what the staff knows. Slow on purpose: this is the same clock
+	// the rest of the war thinks on.
+	UpdateIntelFromContacts();
 
 	// Nothing else needs a heartbeat yet: points report themselves, headquarters run their own
 	// timers. This is the seam where the faction director will simulate points nobody has loaded.
@@ -349,16 +471,14 @@ uint8 URunDirectorSubsystem::GetPoiController(FName PoiTag) const
 	return State ? State->ControllingTeam : PolarityTeams::Neutral;
 }
 
-bool URunDirectorSubsystem::TryClaimLootSpawn(FName PoiTag, int32 MoneyStacks)
+bool URunDirectorSubsystem::TryClaimOnce(FName Key)
 {
-	FPoiWarState* State = FindState(PoiTag);
-	if (!State || State->bLootSpawned)
+	if (Key.IsNone() || ClaimedOnce.Contains(Key))
 	{
 		return false;
 	}
 
-	State->bLootSpawned = true;
-	State->MoneyStacksPlaced = MoneyStacks;
+	ClaimedOnce.Add(Key);
 	return true;
 }
 
@@ -397,6 +517,25 @@ void URunDirectorSubsystem::ReportPoiPresence(const APoiActor* Poi, int32 Player
 
 	const bool bWasContested = State.bContested;
 	State.bContested = SidesPresent >= 2;
+
+	// Presence is ground truth and lives here. What each side BELIEVES about the other is no longer
+	// written in this function: standing on a point is only one of the two ways to learn something,
+	// and it was the only one being counted. UpdateIntelFromContacts now folds both together, so
+	// that a side which was told about an enemy by a scout is not overwritten a moment later by
+	// this function insisting it can only know what it is standing on.
+	State.PresentA = FactionAPresent;
+	State.PresentB = FactionBPresent;
+
+	// Standing here is its own fact, on its own clock. Only boots on the ground write it.
+	const float NowHere = Poi->GetWorld() ? Poi->GetWorld()->GetTimeSeconds() : 0.0f;
+	if (FactionAPresent > 0)
+	{
+		State.VisitedByATime = NowHere;
+	}
+	if (FactionBPresent > 0)
+	{
+		State.VisitedByBTime = NowHere;
+	}
 
 	// A headquarters is broken, not taken. It is a point in every other respect - it has a garrison,
 	// loot on the floor and a fight in it - but no amount of standing in one hands it over. Four
@@ -443,6 +582,243 @@ void URunDirectorSubsystem::ReportPoiPresence(const APoiActor* Poi, int32 Player
 	if (State.Role == EPoiRole::Final)
 	{
 		TickFinal(State, PlayersPresent, DeltaSeconds);
+	}
+}
+
+bool URunDirectorSubsystem::FindScoutPost(uint8 FactionTeamId, const FVector& From,
+	FVector& OutLocation, FName& OutWatchTag) const
+{
+	const UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	// Home. Without it there is no "far side" to speak of, so the post degenerates to standing on
+	// the point itself, which is the one place an observer must not be.
+	FVector Home = FVector::ZeroVector;
+	bool bHaveHome = false;
+	for (const TWeakObjectPtr<AFactionHq>& WeakHq : Headquarters)
+	{
+		if (const AFactionHq* const Hq = WeakHq.Get())
+		{
+			if (Hq->FactionTeamId == FactionTeamId)
+			{
+				Home = Hq->GetActorLocation();
+				bHaveHome = true;
+				break;
+			}
+		}
+	}
+
+	const bool bIsA = FactionTeamId == PolarityTeams::FactionA;
+	const float Now = World->GetTimeSeconds();
+
+	const FPoiWarState* Best = nullptr;
+	float BestScore = -1.0f;
+
+	for (const FPoiWarState& State : PoiStates)
+	{
+		// A headquarters is not worth watching: it is never taken, only broken, and what is
+		// standing in it does not change what the war does next.
+		if (State.Role == EPoiRole::Headquarters || State.ControllingTeam == FactionTeamId)
+		{
+			continue;
+		}
+
+		// Staleness first: the whole job is to look at what nobody has looked at. Distance second
+		// and only as a tie-break, because sending the one pair of eyes you have to the nearest
+		// place would put it where the garrisons already are.
+		const float SeenAt = bIsA ? State.KnownEnemyForATime : State.KnownEnemyForBTime;
+		const float Stale = FMath::Min(Now - SeenAt, 600.0f);
+		const float Reach = FVector::Dist(From, State.Location);
+		const float Score = Stale - Reach / 10000.0f;
+
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = &State;
+		}
+	}
+
+	if (!Best)
+	{
+		return false;
+	}
+
+	// The far side, measured from home. Standing behind a place is how you see what is coming out
+	// of it, and it is also the approach nobody watches: their own side arrives from the other way.
+	FVector Outward = bHaveHome ? (Best->Location - Home) : (Best->Location - From);
+	Outward.Z = 0.0f;
+	if (!Outward.Normalize())
+	{
+		Outward = FVector::ForwardVector;
+	}
+
+	OutLocation = Best->Location + Outward * ScoutPostRadius;
+	OutWatchTag = Best->PoiTag;
+	return true;
+}
+
+float URunDirectorSubsystem::BloodAt(uint8 FactionTeamId, const FPoiWarState& State, float Now) const
+{
+	const bool bIsA = FactionTeamId == PolarityTeams::FactionA;
+	const float Value = bIsA ? State.BloodForA : State.BloodForB;
+	const float At = bIsA ? State.BloodForATime : State.BloodForBTime;
+	if (Value <= 0.0f || PlanBloodHalfLife <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Экспоненциальное выцветание, а не порог: место должно дешеветь постепенно, иначе фракция
+	// стоит в стороне ровно N секунд и потом кидается туда всей массой, как по будильнику.
+	return Value * FMath::Pow(0.5f, (Now - At) / PlanBloodHalfLife);
+}
+
+void URunDirectorSubsystem::NotifyLosses(uint8 FactionTeamId, FName PoiTag, int32 Count)
+{
+	if (Count <= 0 || PoiTag.IsNone())
+	{
+		return;
+	}
+
+	FPoiWarState* const State = FindState(PoiTag);
+	if (!State)
+	{
+		return;
+	}
+
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	const bool bIsA = FactionTeamId == PolarityTeams::FactionA;
+
+	// Сначала выцветаем к текущему моменту, потом добавляем свежее. Иначе старая кровь оживала бы
+	// каждым новым трупом на полную величину.
+	const float Aged = BloodAt(FactionTeamId, *State, Now);
+	if (bIsA)
+	{
+		State->BloodForA = Aged + static_cast<float>(Count);
+		State->BloodForATime = Now;
+	}
+	else
+	{
+		State->BloodForB = Aged + static_cast<float>(Count);
+		State->BloodForBTime = Now;
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[WAR_DEBUG] faction %d lost %d at %s, blood now %.1f"),
+		FactionTeamId, Count, *PoiTag.ToString(), Aged + static_cast<float>(Count));
+}
+
+void URunDirectorSubsystem::UpdateIntelFromContacts()
+{
+	UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const UFactionContactMemory* const Memory = UFactionContactMemory::Get(this);
+	const USquadSpawnSubsystem* const Squads = World->GetSubsystem<USquadSpawnSubsystem>();
+	const float Now = World->GetTimeSeconds();
+
+	// A contact nobody can pin to a point is still worth something if it is standing next to one.
+	// Deliberately nearest-and-inside-the-radius rather than nearest outright: a man in the middle
+	// of the map belongs to no point, and pretending otherwise would put phantom armies on whichever
+	// point happened to be least far away.
+	auto NearestTag = [this](const FVector& Where) -> FName
+	{
+		FName Best = NAME_None;
+		float BestSq = IntelContactRadius * IntelContactRadius;
+		for (const FPoiWarState& State : PoiStates)
+		{
+			const float DistSq = FVector::DistSquared(Where, State.Location);
+			if (DistSq <= BestSq)
+			{
+				BestSq = DistSq;
+				Best = State.PoiTag;
+			}
+		}
+		return Best;
+	};
+
+	const uint8 Sides[2] = { PolarityTeams::FactionA, PolarityTeams::FactionB };
+	for (const uint8 Side : Sides)
+	{
+		// Where this side thinks the enemy is, counted by point.
+		TMap<FName, int32> Counted;
+		if (Memory)
+		{
+			TArray<FFactionContact> Contacts;
+			Memory->GetContacts(Side, Contacts);
+			for (const FFactionContact& Contact : Contacts)
+			{
+				AActor* const Enemy = Contact.Enemy.Get();
+				if (!Enemy)
+				{
+					continue;
+				}
+
+				FName Tag = NAME_None;
+
+				// The cheat, and it is a deliberate one: instead of guessing a destination from a
+				// heading, ask the enemy squad where it was sent. A guess that is wrong sends a
+				// garrison to the wrong point, and that does not read as fog of war, it reads as
+				// the AI being stupid.
+				//
+				// Players are left out of it by the author's call: a player has no objective tag
+				// and no predictable destination, and a faction that tried to predict one would
+				// spend the whole run reinforcing wherever he happened to be pointing.
+				if (Squads && !CoopPlayers::IsPlayer(Enemy))
+				{
+					if (const APawn* const Pawn = Cast<APawn>(Enemy))
+					{
+						Tag = Squads->GetObjectiveTagOfPawn(Pawn);
+					}
+				}
+
+				if (Tag.IsNone())
+				{
+					Tag = NearestTag(Contact.LastKnownLocation);
+				}
+
+				if (!Tag.IsNone())
+				{
+					++Counted.FindOrAdd(Tag);
+				}
+			}
+		}
+
+		const bool bIsA = Side == PolarityTeams::FactionA;
+		for (FPoiWarState& State : PoiStates)
+		{
+			const bool bStandingHere = bIsA ? State.PresentA > 0 : State.PresentB > 0;
+			const int32 Counting = bStandingHere ? (bIsA ? State.PresentB : State.PresentA) : 0;
+			const int32 Reported = Counted.FindRef(State.PoiTag);
+
+			// Both channels, and the larger wins. Counting the bodies in front of you cannot see
+			// the column that has not arrived; a scout's report cannot see the man behind the wall.
+			const int32 Believed = FMath::Max(Counting, Reported);
+
+			// Silence is not the same as "nobody there", and writing a fresh zero would claim it
+			// was. A side that has learned nothing this second keeps its old number and lets it
+			// age out on PlanIntelSeconds, which is exactly what not knowing is supposed to feel
+			// like. The one exception is standing on the point: there, zero is a fact.
+			if (Believed <= 0 && !bStandingHere)
+			{
+				continue;
+			}
+
+			if (bIsA)
+			{
+				State.KnownEnemyForA = Believed;
+				State.KnownEnemyForATime = Now;
+			}
+			else
+			{
+				State.KnownEnemyForB = Believed;
+				State.KnownEnemyForBTime = Now;
+			}
+		}
 	}
 }
 
@@ -560,42 +936,324 @@ int32 URunDirectorSubsystem::GetBannersBrokenCount() const
 	return Count;
 }
 
-bool URunDirectorSubsystem::GetSortieTarget(uint8 FactionTeamId, const FVector& From,
-	FVector& OutTarget, FName& OutPoiTag) const
+void URunDirectorSubsystem::NotifySortieSent(uint8 FactionTeamId, FName PoiTag, int32 Members)
 {
-	const FPoiWarState* Best = nullptr;
-	float BestScore = TNumericLimits<float>::Max();
+	if (Members <= 0 || PoiTag.IsNone())
+	{
+		return;
+	}
+
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	Commitments.Add({FactionTeamId, PoiTag, Members, Now});
+
+	if (FactionTeamId < UE_ARRAY_COUNT(LastCommitTime))
+	{
+		LastCommitTime[FactionTeamId] = Now;
+	}
+}
+
+int32 URunDirectorSubsystem::GetCommittedForce(uint8 FactionTeamId, FName PoiTag) const
+{
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	int32 Total = 0;
+	for (const FFactionCommitment& C : Commitments)
+	{
+		if (C.TeamId == FactionTeamId && C.PoiTag == PoiTag
+			&& Now - C.SentAt <= PlanCommitmentSeconds)
+		{
+			Total += C.Members;
+		}
+	}
+	return Total;
+}
+
+void URunDirectorSubsystem::PruneCommitments()
+{
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	Commitments.RemoveAll([this, Now](const FFactionCommitment& C)
+	{
+		return Now - C.SentAt > PlanCommitmentSeconds;
+	});
+}
+
+int32 URunDirectorSubsystem::GetDemandAt(uint8 FactionTeamId, FName PoiTag) const
+{
+	const FPoiWarState* const State = FindState(PoiTag);
+	if (!State)
+	{
+		return PlanTokenGarrison;
+	}
+
+	// What we believe is facing us here. Same fog rule as the plan: strength is known only while
+	// somebody of ours is standing here to count it, and the memory goes stale.
+	const bool bIsA = FactionTeamId == PolarityTeams::FactionA;
+	const float SeenAt = bIsA ? State->KnownEnemyForATime : State->KnownEnemyForBTime;
+	const int32 SeenCount = bIsA ? State->KnownEnemyForA : State->KnownEnemyForB;
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+	const bool bFresh = (Now - SeenAt) <= PlanIntelSeconds;
+	const int32 Threat = bFresh ? SeenCount : 0;
+
+	// Nobody there and nobody expected: a watch, not a garrison. This is what makes a quiet point
+	// give its surplus up instead of hoarding twenty men who have nothing to shoot at.
+	if (Threat <= 0)
+	{
+		return PlanTokenGarrison;
+	}
+
+	const int32 Wanted = FMath::CeilToInt(Threat * PlanSuperiorityWanted);
+	return FMath::Max(Wanted, PlanTokenGarrison);
+}
+
+float URunDirectorSubsystem::CurrentWorthThreshold(uint8 FactionTeamId) const
+{
+	if (FactionTeamId >= UE_ARRAY_COUNT(LastCommitTime))
+	{
+		return PlanWorthThreshold;
+	}
+
+	// Impatience. A side that has done nothing for a while lowers its own bar until something
+	// clears it. Without this both factions can decide that nothing anywhere is worth it and the
+	// map goes quiet, which is exactly the failure the threshold was added to prevent, inverted.
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	const float Idle = Now - LastCommitTime[FactionTeamId];
+	const float Patience = FMath::Clamp(1.0f - Idle / FMath::Max(PlanImpatienceSeconds, 1.0f), 0.0f, 1.0f);
+	return PlanWorthThreshold * Patience;
+}
+
+void URunDirectorSubsystem::BuildFactionPlan(uint8 FactionTeamId, const FVector& From,
+	int32 ForceAvailable, TArray<FFactionOrder>& OutPlan) const
+{
+	OutPlan.Reset();
+
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	const float Threshold = CurrentWorthThreshold(FactionTeamId);
+
+	// The scan for the enemy headquarters lived here, to place points on "their side of the map"
+	// for the deep-strike term. That term is gone (see the cost block below), and with it the only
+	// reason this plan ever needed to know where anybody lives.
 
 	for (const FPoiWarState& State : PoiStates)
 	{
-		if (State.Role == EPoiRole::Headquarters || State.ControllingTeam == FactionTeamId)
+		// A headquarters is broken, not taken (see ReportPoiPresence), so marching at one is asking
+		// for a siege that cannot end. It stays out of the plan on both sides.
+		if (State.Role == EPoiRole::Headquarters)
 		{
 			continue;
 		}
 
-		// Distance decides, but a point where somebody is already fighting is worth a detour: that
-		// is what turns two armies into one war instead of two parallel garrison swaps.
-		float Score = FVector::Dist(From, State.Location);
+		const bool bOurs = State.ControllingTeam == FactionTeamId;
+		const bool bLosingIt = bOurs && State.CaptureProgress > 0.0f
+			&& State.CapturingTeam != FactionTeamId && State.CapturingTeam != PolarityTeams::Neutral;
+
+		// Ours and safe: nothing to want. Ours and being taken: worth sending help.
+		if (bOurs && !bLosingIt && !State.bContested)
+		{
+			continue;
+		}
+
+		FFactionOrder Order;
+		Order.Action = bOurs ? EFactionAction::Reinforce : EFactionAction::Attack;
+		Order.PoiTag = State.PoiTag;
+		Order.Location = State.Location;
+		Order.HeldBy = State.ControllingTeam;
+
+		// When this faction last had somebody standing here. It is the same clock the odds are
+		// judged on, hoisted above PRIZE because staleness is now worth something in its own right
+		// and not only as a reason to distrust a headcount. Defaults to -100000, so a place nobody
+		// has ever visited reads as maximally stale from the first second of the run.
+		const bool bIsA = FactionTeamId == PolarityTeams::FactionA;
+		const float SeenAt = bIsA ? State.KnownEnemyForATime : State.KnownEnemyForBTime;
+		const int32 SeenCount = bIsA ? State.KnownEnemyForA : State.KnownEnemyForB;
+		const float Stale = Now - SeenAt;
+		const bool bFresh = Stale <= PlanIntelSeconds;
+
+		// ---- PRIZE: what the place is worth holding ----
+		float Prize = 1.0f;
+		FString Why;
+		if (State.Role == EPoiRole::Mission || State.Role == EPoiRole::Final)
+		{
+			Prize *= PlanObjectiveBonus;
+			Why += TEXT("objective ");
+		}
+
+		// Финал должен что-то значить и для фракций. Раньше открытие фазы меняло правила только для
+		// игрока: армии продолжали делить окраины, и финальной схватки не случалось вообще.
+		if (State.Role == EPoiRole::Final
+			&& (Phase == ERunPhase::FinalOpen || Phase == ERunPhase::HoldingFinal))
+		{
+			Prize *= PlanFinalBonus;
+			Why += TEXT("FINAL ");
+		}
+		if (!bOurs && State.ControllingTeam == PolarityTeams::Neutral)
+		{
+			Prize *= PlanNeutralBonus;
+			Why += TEXT("neutral ");
+		}
+
+		// A place this faction has not set foot on in a long time is worth more for exactly that
+		// reason. Not because the loot grew: because a corner of the map nobody has walked into is
+		// where the run stops being a war and becomes two garrisons trading the same three points.
+		//
+		// The bench 2026-09-06 is the case this exists for. The north point sat at score 0.42
+		// against a bar of 0.55, every second of a whole run, and the number never moved, because
+		// nothing in the plan changed when nothing happened. A cost that is fixed and a prize that
+		// is fixed produce a verdict that is fixed, and "never" is a perfectly stable answer.
+		//
+		// Deliberately per faction and read off the intel clock rather than a new field: the clock
+		// already means "when did WE last stand here", the two sides forget separately, and walking
+		// in resets it for free. A point being fought over cannot go stale for either side.
+		if (!bOurs && PlanStagnationSeconds > 0.0f)
+		{
+			// Neglect is about not having GONE, not about not having looked. A scout's report is
+			// exactly the thing that must not count here.
+			const float Unvisited = Now - (bIsA ? State.VisitedByATime : State.VisitedByBTime);
+			const float Neglect = FMath::Clamp(Unvisited / PlanStagnationSeconds, 0.0f, 1.0f);
+			if (Neglect > 0.0f)
+			{
+				Prize *= 1.0f + PlanStagnationBonus * Neglect;
+				Why += FString::Printf(TEXT("neglect%.0f%% "), Neglect * 100.0f);
+			}
+		}
+		if (bOurs)
+		{
+			// Defence is worth more the closer the place is to being lost, but only up to the point
+			// where CHANCE decides it is already gone. Wanting it badly and being able to save it
+			// are different questions and they are answered in different terms on purpose.
+			const float Urgency = FMath::Max(State.CaptureProgress, State.bContested ? 0.25f : 0.0f);
+			Prize *= 1.0f + PlanDefenceUrgency * Urgency;
+			Why += FString::Printf(TEXT("defend%.0f%% "), Urgency * 100.0f);
+		}
+
+		// ---- CHANCE: the odds this faction gives itself, on what it BELIEVES ----
+		const int32 MineHere = bIsA ? State.PresentA : State.PresentB;
+		const int32 Committed = GetCommittedForce(FactionTeamId, State.PoiTag);
+
+		// Stale or never looked: assume a garrison. A faction that assumes empty walks into every
+		// wall on the map; one that assumes an army never leaves home.
+		const float TheirForce = bFresh ? float(SeenCount) : float(PlanAssumedGarrison);
+
+		// Men there, men on the road, and men the asker is about to put on the road. All three, or
+		// an attack is judged on a force of zero and can never be worth making.
+		const float MyForce = float(MineHere + Committed + FMath::Max(ForceAvailable, 0));
+		const float Wanted = TheirForce * PlanSuperiorityWanted;
+		const float Chance = (MyForce + Wanted) > 0.0f
+			? FMath::Clamp(MyForce / (MyForce + Wanted), 0.0f, 1.0f)
+			: 1.0f;
+
+		Why += FString::Printf(TEXT("| mine %.0f(+%d sent,+%d ready) theirs %.0f%s "),
+			float(MineHere), Committed, FMath::Max(ForceAvailable, 0), TheirForce,
+			bFresh ? TEXT("") : TEXT("?"));
+
+		// ---- COST: the walk, plus a flat premium for ground somebody else holds ----
+		//
+		// This used to carry a second, geometric term: how deep into their country the place sits,
+		// as a fraction of the span between the two headquarters. It was measured from the distance
+		// to the asker, and then used to divide a cost that is ALREADY that distance. Far points
+		// were charged for being far twice over, and no amount of tuning the threshold could undo
+		// it, because the double charge grows with the same number the first charge does.
+		//
+		// The bench showed the result on 2026-09-06: the north point scored prize 1.35 against a
+		// cost of 3.19 and could never clear the bar, so nobody attacked it for a whole run.
+		//
+		// What survives is the part that is not distance: taking a place off somebody costs more
+		// than walking onto an empty one, whoever holds it and wherever it is.
+		const float Dist = FVector::Dist(From, State.Location);
+		float Cost = 1.0f + Dist / FMath::Max(PlanDistanceHalfLife, 1.0f);
+		if (!bOurs && State.ControllingTeam != PolarityTeams::Neutral)
+		{
+			Cost *= FMath::Max(PlanHeldGroundCost, 0.01f);
+			Why += TEXT("held ");
+		}
+
+		// Место, где эта сторона только что положила людей, дорожает. Именно цена, а не приз: точка
+		// не перестала быть нужной оттого, что там убивают - она перестала быть дешёвой.
+		const float Blood = BloodAt(FactionTeamId, State, Now);
+		if (Blood > 0.05f)
+		{
+			Cost *= 1.0f + PlanBloodCost * Blood;
+			Why += FString::Printf(TEXT("blood%.1f "), Blood);
+		}
+
+		// Somebody is already fighting there. Finishing a fight beats starting one, and this is
+		// what turns two armies into one war instead of two parallel garrison swaps.
+		float Worth = Prize * Chance / FMath::Max(Cost, 0.01f);
 		if (State.bContested)
 		{
-			Score *= 0.5f;
+			Worth *= PlanContestedBonus;
+			Why += TEXT("contested ");
 		}
 
-		if (Score < BestScore)
-		{
-			BestScore = Score;
-			Best = &State;
-		}
+		Order.Score = Worth;
+		Order.Chance = Chance;
+		Order.bWorthIt = Worth >= Threshold;
+		Order.Reason = Why + FString::Printf(TEXT("| prize %.2f chance %.2f cost %.2f"),
+			Prize, Chance, Cost);
+		OutPlan.Add(Order);
 	}
 
-	if (!Best)
+	OutPlan.Sort([](const FFactionOrder& A, const FFactionOrder& B) { return A.Score > B.Score; });
+}
+
+bool URunDirectorSubsystem::GetFactionOrder(uint8 FactionTeamId, const FVector& From,
+	int32 ForceAvailable, FFactionOrder& OutOrder) const
+{
+	TArray<FFactionOrder> Plan;
+	BuildFactionPlan(FactionTeamId, From, ForceAvailable, Plan);
+	if (Plan.IsEmpty())
 	{
 		return false;
 	}
 
-	OutTarget = Best->Location;
-	OutPoiTag = Best->PoiTag;
+	// The candle. The best line on the map can still be a bad idea, and saying so is the whole
+	// point: a faction that always acts on its favourite option feeds itself into one fight one
+	// squad at a time. Refusing is a decision, and the caller waits and tries again later, by
+	// which time impatience has lowered the bar or somebody has died and changed the odds.
+	if (!Plan[0].bWorthIt)
+	{
+		UE_LOG(LogTemp, Verbose,
+			TEXT("[WAR_DEBUG] faction %d holds: best is %s at %.3f, threshold %.3f"),
+			FactionTeamId, *Plan[0].PoiTag.ToString(), Plan[0].Score,
+			CurrentWorthThreshold(FactionTeamId));
+		return false;
+	}
+
+	OutOrder = Plan[0];
 	return true;
+}
+
+void URunDirectorSubsystem::DumpFactionPlan(uint8 FactionTeamId) const
+{
+	TArray<FFactionOrder> Plan;
+
+	// From the faction's own headquarters, because that is who will act on it.
+	FVector From = FVector::ZeroVector;
+	for (const TWeakObjectPtr<AFactionHq>& Weak : Headquarters)
+	{
+		if (const AFactionHq* Hq = Weak.Get())
+		{
+			if (Hq->FactionTeamId == FactionTeamId)
+			{
+				From = Hq->GetActorLocation();
+				break;
+			}
+		}
+	}
+
+	// A dump is a question about the map, not a plan to act on, so it asks with a typical squad's
+	// worth of force rather than pretending nobody is available.
+	BuildFactionPlan(FactionTeamId, From, PlanTokenGarrison, Plan);
+	UE_LOG(LogTemp, Log, TEXT("[WAR_DEBUG] plan for faction %d, %d lines, threshold %.3f:"),
+		FactionTeamId, Plan.Num(), CurrentWorthThreshold(FactionTeamId));
+	for (const FFactionOrder& Line : Plan)
+	{
+		// Rejected lines are printed too. "Why did nobody move" is the question this log exists to
+		// answer, and it is only answerable if the things that were turned down are visible.
+		UE_LOG(LogTemp, Log, TEXT("[WAR_DEBUG]   %s %-9s %-18s worth %.3f  held by %d  (%s)"),
+			Line.bWorthIt ? TEXT("GO  ") : TEXT("skip"),
+			Line.Action == EFactionAction::Attack ? TEXT("ATTACK") : TEXT("REINFORCE"),
+			*Line.PoiTag.ToString(), Line.Score, Line.HeldBy, *Line.Reason);
+	}
 }
 
 // ==================== Final and extraction ====================
@@ -707,14 +1365,9 @@ void URunDirectorSubsystem::SetPhase(ERunPhase NewPhase)
 
 // ==================== Audit ====================
 
-int32 URunDirectorSubsystem::GetMoneyStacksPlaced() const
+void URunDirectorSubsystem::ReportMoneyStacks(int32 Stacks)
 {
-	int32 Total = 0;
-	for (const FPoiWarState& State : PoiStates)
-	{
-		Total += State.MoneyStacksPlaced;
-	}
-	return Total;
+	MoneyStacksOnMap += FMath::Max(0, Stacks);
 }
 
 void URunDirectorSubsystem::DumpState() const

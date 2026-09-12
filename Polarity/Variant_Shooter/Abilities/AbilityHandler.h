@@ -22,6 +22,48 @@ class UAnimInstance;
 class AActor;
 class AController;
 
+/**
+ * The Melee passive's charged jump out of its own smoke, handed to the movement simulation in one
+ * piece rather than as five loose floats read one at a time.
+ *
+ * A plain struct, not a USTRUCT: the authored copy is FMeleePassiveLevelStats on the ability asset,
+ * and this is the movement side's private mirror of it, exactly as FGrappleMotionParams is for the
+ * grapple.
+ */
+struct FSmokeJumpParams
+{
+	/** Upward speed at a full charge. A charge of nothing gives MovementSettings::JumpZVelocity, so
+	 *  a tap inside the smoke is an ordinary jump. */
+	float MaxZVelocity = 1400.0f;
+
+	/** How long the charge takes to fill. Holding past it adds nothing. */
+	float MaxChargeTime = 0.55f;
+
+	/** Horizontal speed added along the input direction at a full charge, scaled down with it. */
+	float ForwardBoost = 400.0f;
+
+	/** Ground speed multiplier while charging: the wind-up is meant to be visible and committing. */
+	float ChargeMoveScale = 0.35f;
+
+	/** Seconds before another charged jump. Only a jump that actually came out charged pays it. */
+	float Cooldown = 6.0f;
+};
+
+/**
+ * The Melee passive's guard: what the blade covers while sliding, and how much of a hit it eats.
+ *
+ * A plain struct for the same reason FSmokeJumpParams is one: the authored copy lives on the ability
+ * asset, and this is the private mirror the damage code reads.
+ */
+struct FSlideBlockParams
+{
+	/** Half-angle of the covered arc, measured from where the character is facing. Zero = no block. */
+	float HalfAngle = 0.0f;
+
+	/** Fraction of a blocked hit that still lands. 0 is a total block, 1 is none at all. */
+	float DamageMultiplier = 1.0f;
+};
+
 UCLASS(Blueprintable, Abstract)
 class POLARITY_API UAbilityHandler : public UObject
 {
@@ -149,6 +191,22 @@ public:
 	 *  replays the move both ask it and both have to get the same answer. Keep it const, keep it
 	 *  free of side effects, and keep it a pure function of the target. */
 	virtual float ModifyLungeRange(const AActor* Target, float BaseRange) const { return BaseRange; }
+
+	/** Does this passive grant the charged jump out of one's own smoke, and with what numbers?
+	 *
+	 *  Same contract as ModifyLungeRange above and for the same reason: the jump is resolved inside
+	 *  the movement simulation, so the owning client, the server replaying its move and a client
+	 *  replaying after a correction all ask this and all have to get the same answer. Const, no side
+	 *  effects, no state. Returning false is the answer for every passive that is not the Melee's,
+	 *  and for the Melee's before its level data has replicated. */
+	virtual bool GetSmokeJumpParams(FSmokeJumpParams& Out) const { return false; }
+
+	/** The guard this passive grants while its owner slides with a melee weapon. False for every
+	 *  passive but the Melee's.
+	 *
+	 *  Read on the server when damage lands and on EVERY machine to answer "am I blocking right
+	 *  now" for the animation, so it stays a pure read of the level data with no side effects. */
+	virtual bool GetSlideBlockParams(FSlideBlockParams& Out) const { return false; }
 
 	// ==================== Accessors ====================
 

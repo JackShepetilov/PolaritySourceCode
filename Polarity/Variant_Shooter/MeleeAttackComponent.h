@@ -36,12 +36,12 @@ UENUM(BlueprintType)
 enum class EMeleeAttackState : uint8
 {
 	Ready,			// Can attack
-	HidingWeapon,	// Transitioning FirstPersonMesh down, hiding weapon
-	InputDelay,		// Input delay before windup
-	Windup,			// Wind-up phase (can be interrupted)
-	Active,			// Damage-dealing phase
-	Recovery,		// Recovery phase
-	ShowingWeapon,	// Transitioning MeleeMesh out, showing FirstPersonMesh
+	HidingWeapon,	// UNUSED since the weapon stows instantly. Kept so saved values and readers still load.
+	InputDelay,		// UNUSED, as above.
+	Windup,			// Montage playing, damage window not opened yet (the notify opens it)
+	Active,			// Damage window, opened and closed by AnimNotifyState_MeleeDamageWindow
+	Recovery,		// Rest of the montage after the damage window; ends when the montage does
+	ShowingWeapon,	// Swing over, the weapon's own draw is running on the character; no new swing until it ends
 	Cooldown		// On cooldown
 };
 
@@ -289,53 +289,15 @@ struct FMeleeAttackSettings
 
 	// ==================== Timing ====================
 
-	/** Time to transition FirstPersonMesh down before attack */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing|Mesh Transition", meta = (ClampMin = "0.05", ClampMax = "0.5"))
-	float HideWeaponTime = 0.15f;
-
-	/** Time to transition MeleeMesh out and FirstPersonMesh back */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing|Mesh Transition", meta = (ClampMin = "0.05", ClampMax = "0.5"))
-	float ShowWeaponTime = 0.15f;
-
-	/** Delay between input and attack start (prevents spam) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0", ClampMax = "0.5"))
-	float InputDelayTime = 0.1f;
-
-	/** Time before damage is dealt (wind-up) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0", ClampMax = "1"))
-	float WindupTime = 0.05f;
-
-	/** Duration of active damage window */
+	/** The swing has no timers of its own: it lasts as long as its montage, and the damage window is
+	 *  wherever AnimNotifyState_MeleeDamageWindow sits in it. This is only the damage window for a
+	 *  swing with NO montage to carry the notify, and the minimum window of a drop kick. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0.05", ClampMax = "0.5"))
 	float ActiveTime = 0.15f;
 
-	/** Recovery time after attack */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0", ClampMax = "1"))
-	float RecoveryTime = 0.2f;
-
-	/** Cooldown before next attack */
+	/** Cooldown before next attack. Only applied after a swing that hit an enemy. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing", meta = (ClampMin = "0", ClampMax = "2"))
 	float Cooldown = 0.5f;
-
-	// ==================== Melee Cooldown (Charge System) ====================
-
-	/** Total cooldown time for all melee charges to recover (seconds). Divided evenly among charges. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown", meta = (ClampMin = "0", ClampMax = "30"))
-	float MeleeTotalCooldown = 8.0f;
-
-	/** Maximum number of melee charges */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown", meta = (ClampMin = "1", ClampMax = "5"))
-	int32 MeleeMaxCharges = 2;
-
-	/**
-	 * When true, the charge system is bypassed entirely:
-	 *  - CanAttack ignores MeleeCharges
-	 *  - Hits never consume charges
-	 *  - Settings.Cooldown still applies between attacks (refire rate)
-	 * Use for "spammable melee" builds where only the Settings.Cooldown gate matters.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee Cooldown")
-	bool bDisableCharges = true;
 
 	// ==================== Movement ====================
 
@@ -360,9 +322,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDropKickHit, AActor*, HitActor
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeAttackEnded);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDropKickCooldownStarted, float, CooldownDuration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDropKickCooldownEnded);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMeleeChargeChanged, int32, CurrentCharges, int32, MaxCharges);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMeleeCooldownStarted, float, TotalCooldownDuration);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleeCooldownEnded);
 
 /**
  * Component that provides quick melee attack capability.
@@ -388,6 +347,12 @@ public:
 	/** Melee attack settings */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
 	FMeleeAttackSettings Settings;
+
+	/** How fast the weapon comes back out after a swing, as a multiplier on the weapon's OWN draw
+	 *  animation (2 = twice as fast). Scales rather than replaces, so a heavy gun stays slower than a
+	 *  light one. This is the knob upgrades turn; the draw animation itself stays the weapon's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+	float DrawSpeedMultiplier = 1.0f;
 
 	// ==================== Animation ====================
 
@@ -523,18 +488,6 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Events")
 	FOnDropKickCooldownEnded OnDropKickCooldownEnded;
 
-	/** Called when melee charges change (attack consumed or charge recovered) */
-	UPROPERTY(BlueprintAssignable, Category = "Events")
-	FOnMeleeChargeChanged OnMeleeChargeChanged;
-
-	/** Called when melee cooldown starts (charges dropped below max) */
-	UPROPERTY(BlueprintAssignable, Category = "Events")
-	FOnMeleeCooldownStarted OnMeleeCooldownStarted;
-
-	/** Called when melee cooldown ends (all charges fully recovered) */
-	UPROPERTY(BlueprintAssignable, Category = "Events")
-	FOnMeleeCooldownEnded OnMeleeCooldownEnded;
-
 	// ==================== Tag-Based Damage Multipliers ====================
 
 	/** Damage multipliers based on target actor tags (AActor::Tags). Multiple matching tags multiply together.
@@ -576,6 +529,105 @@ public:
 	 *  and which NPC to stop driving into once it is already being knocked back. */
 	UFUNCTION(BlueprintPure, Category = "Melee|Lunge")
 	AActor* GetLungeTargetActor() const { return MagnetismTarget.Get(); }
+
+	// ==================== Focus lock (hold aim) ====================
+	//
+	// The swing does NOT pick a victim from wherever the camera happens to be pointing any more.
+	// The player holds the aim button, that locks the best target inside the reach the passive
+	// grants, the view then follows that target, and the lunge flies at it and at nothing else.
+	//
+	// Local to the machine that pressed the button, all of it. The view is the client's own (the
+	// server receives it as the pawn's rotation like any other frame), and the lunge target already
+	// travels inside the saved move, so nothing new goes on the wire.
+	// @see FCharacterNetworkMoveData_Polarity::MeleeLungeTarget
+
+	/** Lock the best candidate under the crosshair. False when nothing qualifies, in which case the
+	 *  button did nothing and the caller should treat the press as unused.
+	 *
+	 *  Failing does NOT mean the button is finished: the hold is remembered (@see SetFocusHeld) and
+	 *  the lock takes the first target that walks into reach, without a second press. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Focus")
+	bool TryStartFocus();
+
+	/** Remember that the aim button is DOWN, separately from whether anything is locked.
+	 *
+	 *  This is the difference between "the press missed" and "the player is still asking". A press
+	 *  with nothing in reach used to be thrown away, so a player holding the button through an
+	 *  approach had to let go and press again the moment an enemy became lockable -- which is not
+	 *  something anybody does mid-fight, so the lock read as broken. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Focus")
+	void SetFocusHeld(bool bHeld);
+
+	/** Let go. Safe to call when nothing is locked. */
+	UFUNCTION(BlueprintCallable, Category = "Melee|Focus")
+	void StopFocus();
+
+	UFUNCTION(BlueprintPure, Category = "Melee|Focus")
+	bool IsFocusing() const { return FocusTarget.IsValid(); }
+
+	/** What the view is being held on, or null. Read by the HUD to draw the brackets. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Focus")
+	AActor* GetFocusTarget() const { return FocusTarget.Get(); }
+
+	/** WHERE on the target the lock points, and where the brackets get drawn.
+	 *
+	 *  One function for both on purpose. Until this existed each of the two asked the target for
+	 *  GetActorLocation() separately, which is the actor's pivot -- on a Character that is the middle
+	 *  of the capsule, i.e. the belt. Nothing was ever attached to the enemy; the lock was staring at
+	 *  a pivot. Two call sites answering the question independently is also how the brackets and the
+	 *  camera end up disagreeing, and a reticle that is not where the camera is going is a lie. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Focus")
+	FVector GetFocusAimPoint(const AActor* Target) const;
+
+	/** Bone on the target to aim at. `spine_04` is the upper chest on the UE5 mannequin the NPCs use;
+	 *  `head` and `spine_05` are the other two that read as deliberate.
+	 *
+	 *  A bone is the only answer that follows the animation, so a target that ducks, staggers or goes
+	 *  to ragdoll drags the lock with it instead of leaving it pointed at where the capsule still is.
+	 *  Empty, or a name this particular target's skeleton does not have, falls through to the height
+	 *  fraction below: the tank and the drones have no humanoid rig, and a lock that only worked on
+	 *  infantry would be worse than one that aims a little roughly at everything. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus")
+	FName FocusAimBone = TEXT("spine_04");
+
+	/** Fallback height as a fraction of the target's own bounds: 0 is the feet, 0.5 the middle (which
+	 *  is exactly what the pivot gave and why the old lock looked at the belt), 1 the top of the head.
+	 *  A fraction rather than a distance so a tank and a grunt are both aimed at the same PROPORTION
+	 *  of themselves without a number authored per enemy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FocusAimHeightFraction = 0.72f;
+
+	/** Final nudge in world Z on top of whichever of the two above answered. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus", meta = (ClampMin = "-200.0", ClampMax = "200.0", Units = "cm"))
+	float FocusAimZOffset = 0.0f;
+
+	/** How fast the view swings onto the locked target. A pull, not a pin: the mouse keeps working
+	 *  and this keeps winning while the button is held, which is what makes it feel like a lock
+	 *  rather than like losing control of the camera. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus", meta = (ClampMin = "0.5", ClampMax = "60.0"))
+	float FocusTrackingSpeed = 18.0f;
+
+	/** Inside this many degrees the view is put EXACTLY on the target instead of being interpolated
+	 *  the rest of the way.
+	 *
+	 *  An interpolation alone never arrives: it halves the error every frame, so a moving target sits
+	 *  permanently a few degrees off centre and the lock reads as sloppy no matter how high the speed
+	 *  above is. The snap is what makes it a lock. Small on purpose -- it is the last step of a pull
+	 *  the player can still fight, not a magnet that grabs the camera from across the screen. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus", meta = (ClampMin = "0.0", ClampMax = "20.0", Units = "deg"))
+	float FocusHardSnapDegrees = 4.0f;
+
+	/** How often a held button that has nothing to lock looks again, in seconds. The search is a
+	 *  sphere overlap, so it is not free enough to run every frame for a button that is being held
+	 *  down for a whole approach. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus", meta = (ClampMin = "0.02", ClampMax = "1.0", Units = "s"))
+	float FocusRetryInterval = 0.1f;
+
+	/** Slack before a lock breaks on range, as a multiplier of the target's own allowed reach. A
+	 *  lock that broke at the exact centimetre the lunge stops being legal would flicker on and off
+	 *  while the two of you move. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee|Focus", meta = (ClampMin = "1.0", ClampMax = "3.0"))
+	float FocusBreakRangeSlack = 1.25f;
 
 	// ==================== Lunge reach ====================
 	// Settings.LungeRange is what a swing is worth on its own. A class passive is allowed to extend
@@ -644,7 +696,7 @@ public:
 
 	/**
 	 * Start a delegated dropkick (called by ShooterWeapon_Melee).
-	 * Handles only movement and hit detection — skips animations, mesh transitions, charges, damage.
+	 * Handles only movement and hit detection — skips animations, mesh transitions, damage.
 	 * The calling weapon handles its own animation and damage via OnDropKickHit delegate.
 	 * @return true if dropkick started successfully
 	 */
@@ -740,44 +792,15 @@ public:
 	float GetDropKickCooldownRemaining() const { return DropKickCooldownRemaining; }
 
 	/**
-	 * Get current melee charges
-	 */
-	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
-	int32 GetMeleeCharges() const { return MeleeCharges; }
-
-	/**
-	 * Get max melee charges from settings
-	 */
-	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
-	int32 GetMaxMeleeCharges() const { return Settings.MeleeMaxCharges; }
-
-	/**
-	 * Get recovery time per single charge (TotalCooldown / MaxCharges)
-	 */
-	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
-	float GetChargeRecoveryTime() const;
-
-	/**
-	 * Get charge recovery progress toward next charge (0 = just started, 1 = ready)
-	 */
-	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
-	float GetChargeRecoveryProgress() const;
-
-	/**
-	 * Check if there are enough charges for a regular melee attack
-	 */
-	UFUNCTION(BlueprintPure, Category = "Melee|Charges")
-	bool HasMeleeCharges() const { return MeleeCharges >= 1; }
-
-	/**
-	 * Lower the weapon (transition FirstPersonMesh down) without starting an attack.
-	 * Used for boss finisher approach phase.
+	 * Take the weapon out of the hands now, without starting an attack. Used by the boss finisher's
+	 * approach: the finisher's own swing then finds the hands empty, and its end draws the weapon.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	void LowerWeapon();
 
 	/**
-	 * Check if weapon is currently lowered
+	 * Check if the weapon was taken away by LowerWeapon (boss finisher) and the finisher's swing
+	 * has not ended yet
 	 */
 	UFUNCTION(BlueprintPure, Category = "Melee")
 	bool IsWeaponLowered() const { return bIsWeaponLowered; }
@@ -901,6 +924,17 @@ protected:
 	UPROPERTY()
 	TWeakObjectPtr<AActor> MagnetismTarget;
 
+	/** What the player is holding the view on. Set by TryStartFocus, cleared when the button comes
+	 *  up or the target stops qualifying. Weak: it can die mid-lock, which is the common case. */
+	TWeakObjectPtr<AActor> FocusTarget;
+
+	/** The aim button is down. Outlives a failed press and a lock that broke, which is what lets the
+	 *  next valid target be taken without another press. @see SetFocusHeld */
+	bool bFocusHeld = false;
+
+	/** Counts down to the next look for a target while the button is held and nothing is locked. */
+	float FocusRetryTimer = 0.0f;
+
 	/** Target position for lunge (calculated during magnetism start with path validation) */
 	FVector LungeTargetPosition = FVector::ZeroVector;
 
@@ -914,14 +948,6 @@ protected:
 
 	/** Direction for cool kick boost (movement direction at hit time) */
 	FVector CoolKickDirection = FVector::ZeroVector;
-
-	// ==================== Melee Charge State ====================
-
-	/** Current melee charges available */
-	int32 MeleeCharges = 0;
-
-	/** Time remaining until next charge recovers */
-	float ChargeRecoveryTimer = 0.0f;
 
 	// ==================== Combo Speed State ====================
 
@@ -945,7 +971,7 @@ protected:
 	/** Remaining drop kick cooldown time (seconds) */
 	float DropKickCooldownRemaining = 0.0f;
 
-	/** When true, dropkick is delegated from ShooterWeapon_Melee — skip mesh/animation/charges/damage */
+	/** When true, dropkick is delegated from ShooterWeapon_Melee — skip mesh/animation/damage */
 	bool bDelegatedDropKick = false;
 
 	/** When true, the equipped melee weapon is borrowing the lunge for its own swing. The component
@@ -958,27 +984,9 @@ protected:
 	/** Current attack type (determined at attack start) */
 	EMeleeAttackType CurrentAttackType = EMeleeAttackType::Ground;
 
-	/** Mesh transition progress (0-1) */
-	float MeshTransitionProgress = 0.0f;
-
-	/** True if weapon is currently lowered (for boss finisher) */
+	/** The weapon was taken away by LowerWeapon (boss finisher approach). Cleared when a swing ends.
+	 *  Read by the hit code to skip the hit camera shake during the finisher. */
 	bool bIsWeaponLowered = false;
-
-	/** True if we're only lowering weapon without starting an attack (boss finisher approach) */
-	bool bIsLoweringWeaponOnly = false;
-
-	/** Base rotation of FirstPersonMesh (stored for restoration) */
-	FRotator FirstPersonMeshBaseRotation = FRotator::ZeroRotator;
-
-	/** Base location of FirstPersonMesh (stored for restoration) */
-	FVector FirstPersonMeshBaseLocation = FVector::ZeroVector;
-
-	/** How far down the FP mesh drops for the melee weapon-lower (camera space, cm). */
-	UPROPERTY(EditAnywhere, Category = "Melee|Mesh Transition", meta = (ClampMin = "0.0", ClampMax = "500.0"))
-	float MeshLowerDistance = 100.0f;
-
-	/** Publishes the weapon-lower offset to the owning ShooterCharacter's pose pipeline. */
-	void SetFirstPersonMeshLowerOffset(float ZOffset);
 
 	/** Target rotation for MeleeMesh (camera-aligned) */
 	FRotator MeleeMeshTargetRotation = FRotator::ZeroRotator;
@@ -1103,14 +1111,9 @@ protected:
 	/** Update cool kick boost */
 	void UpdateCoolKick(float DeltaTime);
 
-	// ==================== Melee Charges ====================
-
-	/** Consume melee charges. If bResetRecoveryTimer is true, resets recovery timer (used for dropkick). */
-	void ConsumeMeleeCharges(int32 Count, bool bResetRecoveryTimer = false);
-
 	// ==================== Drop Kick ====================
 
-	/** Check if drop kick conditions are met (airborne + looking down + has charges) */
+	/** Check if drop kick conditions are met (airborne + looking down) */
 	bool ShouldPerformDropKick() const;
 
 	/** Perform cone trace for drop kick and find target */
@@ -1142,16 +1145,20 @@ protected:
 	/** Default empty animation data for fallback */
 	FMeleeAnimationData DefaultAnimationData;
 
-	/** Begin hiding FirstPersonMesh (transition down) */
-	void BeginHideWeapon();
+	/** Empty the hands for the swing, instantly (AShooterCharacter::StowWeaponForMelee). */
+	void HideWeaponForSwing();
 
-	/** Update mesh transition (hide/show progress) */
-	void UpdateMeshTransition(float DeltaTime);
+	/** Bring the weapon back through its draw, at DrawSpeedMultiplier (AShooterCharacter::DrawWeaponAfterMelee). */
+	void DrawWeaponBack();
 
-	/** Switch visibility: hide FirstPersonMesh, show MeleeMesh */
+	/** The montage is over: melee mesh away, weapon drawn back, then Cooldown or Ready. The one
+	 *  place a swing ends, whichever way it got there. */
+	void EndSwing();
+
+	/** Attach the MeleeMesh to the camera and show it. The hands are the character's business. */
 	void SwitchToMeleeMesh();
 
-	/** Switch visibility: hide MeleeMesh, show FirstPersonMesh */
+	/** Detach and hide the MeleeMesh. The hands are the character's business. */
 	void SwitchToFirstPersonMesh();
 
 	/** Update MeleeMesh rotation to match camera */
@@ -1167,12 +1174,31 @@ protected:
 	UFUNCTION()
 	void OnMeleeMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
+	/** Called when the melee montage STARTS blending out. This, not the end, is where the swing
+	 *  ends: the melee mesh's graph has nothing under the slot, so the blend-out tail is a blend
+	 *  toward the reference pose and must not be seen. */
+	UFUNCTION()
+	void OnMeleeMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
+
 	/** Auto-detect mesh references if not set */
 	void AutoDetectMeshReferences();
 
 	// ==================== Camera Focus ====================
 
 	/** Start camera focus on target */
+	/** The best target under the crosshair by the lunge's own rules: inside the cone, inside the
+	 *  reach that candidate specifically is allowed, alive, and not a downed teammate. Shared by the
+	 *  focus lock and by nothing else now -- the swing reads the lock instead of searching. */
+	AActor* FindBestLungeCandidate() const;
+
+	/** Does this target still deserve the lock: alive, still standing, still inside its own reach
+	 *  plus the slack. */
+	bool IsFocusTargetStillValid(const AActor* Target) const;
+
+	/** Holds the view on the locked target, and drops the lock when it stops qualifying. Runs on the
+	 *  locking machine only. */
+	void UpdateFocus(float DeltaTime);
+
 	void StartCameraFocus(AActor* Target);
 
 	/** Update camera focus interpolation */

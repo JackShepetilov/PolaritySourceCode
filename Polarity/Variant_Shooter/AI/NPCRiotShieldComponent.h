@@ -16,6 +16,7 @@ class USkeletalMeshComponent;
 class UPrimitiveComponent;
 class ARiotShieldPickup;
 class AShooterCharacter;
+class APawn;
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class POLARITY_API UNPCRiotShieldComponent : public UActorComponent
@@ -103,6 +104,14 @@ protected:
 	float AimYawOffsetDeg = 0.0f;
 
 private:
+	/** Who the shield is currently turned towards, and when that was last worked out.
+	 *
+	 *  Cached because the answer costs a sweep over the level's pawns and the shield aims every
+	 *  frame. A quarter of a second of staleness is invisible on a mesh that interpolates its yaw
+	 *  anyway, and it keeps a crowd of shielded enemies off the frame budget. */
+	TWeakObjectPtr<APawn> AimThreat;
+	float TimeSinceThreatSearch = 0.0f;
+
 	/** Runtime visual mesh. Created and registered when activation succeeds. */
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> ShieldMesh;

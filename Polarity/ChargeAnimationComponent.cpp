@@ -26,6 +26,7 @@
 #include "Variant_Shooter/Pickups/UpgradePickup.h"
 #include "Variant_Shooter/Pickups/AbilityPickup.h"
 #include "Variant_Shooter/Pickups/ScriptedPickup.h"
+#include "Variant_Shooter/Pickups/InventoryPickup.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
 #include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "Arena/BasketballBall.h"
@@ -582,6 +583,7 @@ void UChargeAnimationComponent::EnterChanneling()
 				Cast<AUpgradePickup>(Captured) ||
 				Cast<AAbilityPickup>(Captured) ||
 				Cast<AScriptedPickup>(Captured) ||
+				Cast<AInventoryPickup>(Captured) ||
 				Cast<ARiotShieldPickup>(Captured));
 
 			if (bSelfContainedPull)
@@ -700,6 +702,11 @@ void UChargeAnimationComponent::ExitChanneling()
 		else if (AScriptedPickup* SPickup = Cast<AScriptedPickup>(CurrentCapturedNPC.Get()))
 		{
 			// ScriptedPickup pull is self-contained — let it finish on its own
+			CurrentCapturedNPC.Reset();
+		}
+		else if (AInventoryPickup* InvPickup = Cast<AInventoryPickup>(CurrentCapturedNPC.Get()))
+		{
+			// AInventoryPickup pull is self-contained - let it finish on its own
 			CurrentCapturedNPC.Reset();
 		}
 		else if (ARiotShieldPickup* ShieldPickup = Cast<ARiotShieldPickup>(CurrentCapturedNPC.Get()))
@@ -834,7 +841,7 @@ void UChargeAnimationComponent::UpdateRevive(float DeltaTime)
 		ReviveTarget.Reset();
 		if (ShooterCharacter)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s finished picking up %s"),
+			UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s finished picking up %s"),
 				*ShooterCharacter->GetName(), *Target->GetName());
 			ShooterCharacter->Server_ReviveTeammate(Target);
 		}
@@ -1108,6 +1115,14 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				return; // Still pulling — don't re-search
 			}
 		}
+		// Check AInventoryPickup (pull is self-contained - just check if still in progress)
+		else if (AInventoryPickup* InvPickup = Cast<AInventoryPickup>(CurrentCapturedNPC.Get()))
+		{
+			if (InvPickup->IsBeingPulled())
+			{
+				return; // Still pulling - don't re-search
+			}
+		}
 		// Check RiotShieldPickup (pull is self-contained — just check if still in progress)
 		else if (ARiotShieldPickup* ShieldPickup = Cast<ARiotShieldPickup>(CurrentCapturedNPC.Get()))
 		{
@@ -1216,7 +1231,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Ally, Prop, BasketballBall, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
+	enum class ECaptureTargetType { None, NPC, Ally, Prop, BasketballBall, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, InventoryPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -1279,7 +1294,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 				if (Now - LastAllyLogTime > 0.5f)
 				{
 					LastAllyLogTime = Now;
-					UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] AllyScan %s: self=%d dead=%d hp=%.0f dist=%.0f/%.0f inRange=%d cos=%.2f/%.2f inCone=%d los=%d authority=%d"),
+					UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] AllyScan %s: self=%d dead=%d hp=%.0f dist=%.0f/%.0f inRange=%d cos=%.2f/%.2f inCone=%d los=%d authority=%d"),
 						*Ally->GetName(), bSelf ? 1 : 0, Ally->IsDead() ? 1 : 0, Ally->GetCurrentHP(),
 						AllyDist, NPCCaptureFixedRange, bInRange ? 1 : 0,
 						AllyAngleCos, AllyMinCos, bInCone ? 1 : 0, bLOS ? 1 : 0,
@@ -1613,6 +1628,46 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
+		// Try AInventoryPickup: money, rounds, anything that costs a cell. Same gate as the upgrade
+		// and ability pickups (any charge sign, just not zero), because a pile of money has no
+		// polarity to match and asking the player to flip theirs to pick it up buys nothing.
+		if (AInventoryPickup* InvPickup = Cast<AInventoryPickup>(HitActor))
+		{
+			if (!InvPickup->bCanBeCaptured || InvPickup->IsBeingPulled() || InvPickup->IsPullComplete())
+			{
+				continue;
+			}
+
+			const float PickupCharge = InvPickup->GetCharge();
+			if (FMath::IsNearlyZero(PickupCharge))
+			{
+				continue;
+			}
+
+			const FVector ToTarget = InvPickup->GetActorLocation() - CameraLoc;
+			const float DistSq = ToTarget.SizeSquared();
+			const float CaptureRange = InvPickup->CalculateCaptureRange();
+			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
+			{
+				continue;
+			}
+
+			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
+			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
+			if (AngleCos < GetMaxAngleCosForDistance(FMath::Sqrt(DistSq)))
+			{
+				continue;
+			}
+
+			if (AngleCos > BestAngleCos && HasLineOfSight(InvPickup))
+			{
+				BestAngleCos = AngleCos;
+				BestTarget = InvPickup;
+				BestTargetType = ECaptureTargetType::InventoryPickup;
+			}
+			continue;
+		}
+
 		// Try RiotShieldPickup — fixed-range capture, no charge-sign requirement (shield can be charge-less).
 		if (ARiotShieldPickup* ShieldPickup = Cast<ARiotShieldPickup>(HitActor))
 		{
@@ -1725,7 +1780,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 
 	// What the scan actually settled on. An ally can clear every gate of its own and still lose the
 	// scan to a nearer prop or enemy, and from the gate log alone those two look identical.
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] CaptureScan chose: target=%s type=%d cos=%.2f authority=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] CaptureScan chose: target=%s type=%d cos=%.2f authority=%d"),
 		*GetNameSafe(BestTarget), static_cast<int32>(BestTargetType), BestAngleCos,
 		OwnerCharacter && OwnerCharacter->HasAuthority() ? 1 : 0);
 
@@ -1759,6 +1814,9 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			break;
 		case ECaptureTargetType::ScriptedPickup:
 			CaptureScriptedPickup(Cast<AScriptedPickup>(BestTarget));
+			break;
+		case ECaptureTargetType::InventoryPickup:
+			CaptureInventoryPickup(Cast<AInventoryPickup>(BestTarget));
 			break;
 		case ECaptureTargetType::RiotShieldPickup:
 			CaptureRiotShieldPickup(Cast<ARiotShieldPickup>(BestTarget));
@@ -1875,7 +1933,7 @@ void UChargeAnimationComponent::CaptureAlly(AShooterCharacter* Ally)
 		RequestedHeldAllyTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] CaptureAlly %s requested: grabberAuthority=%d allyLocalRole=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] CaptureAlly %s requested: grabberAuthority=%d allyLocalRole=%d"),
 		*Ally->GetName(),
 		OwnerCharacter && OwnerCharacter->HasAuthority() ? 1 : 0,
 		static_cast<int32>(Ally->GetLocalRole()));
@@ -2150,6 +2208,37 @@ void UChargeAnimationComponent::CaptureScriptedPickup(AScriptedPickup* Pickup)
 	CurrentCapturedNPC = Pickup;
 }
 
+void UChargeAnimationComponent::CaptureInventoryPickup(AInventoryPickup* Pickup)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	// Release previous target if any
+	ReleaseCapturedNPC();
+
+	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
+	if (ShooterChar)
+	{
+		if (ShooterChar->HasAuthority())
+		{
+			Pickup->StartPull(ShooterChar);
+		}
+		else
+		{
+			// The flight ends in a write to the grid, and the grid is the server's. Worse than the
+			// weapon case: this pickup can be taken IN PART, so a client flying its own copy would
+			// have to guess how much fit and would be wrong whenever the bag was nearly full. Our own
+			// reach travels with the request, because only this machine knows this player's charge.
+			ShooterChar->Server_RequestInventoryPickup(Pickup, EvaluateCaptureRange(FMath::Abs(Pickup->GetCharge())));
+		}
+	}
+
+	// Track as current target to prevent re-search
+	CurrentCapturedNPC = Pickup;
+}
+
 void UChargeAnimationComponent::CaptureRiotShieldPickup(ARiotShieldPickup* Pickup)
 {
 	if (!Pickup)
@@ -2333,7 +2422,15 @@ void UChargeAnimationComponent::ReleaseBasketballThrowCharge()
 
 bool UChargeAnimationComponent::CanConsumeHeldPropForHeal() const
 {
-	if (!ShooterCharacter || ShooterCharacter->GetItemVerb() != EClassItemVerb::Heal)
+	// Both verbs that DO something with a prop in the hands: the Melee's smoke opens around him, the
+	// healing verb is eaten. Anything else keeps throwing on a press with no hold in front of it.
+	if (!ShooterCharacter)
+	{
+		return false;
+	}
+
+	const EClassItemVerb Verb = ShooterCharacter->GetItemVerb();
+	if (Verb != EClassItemVerb::Heal && Verb != EClassItemVerb::Smoke)
 	{
 		return false;
 	}
@@ -2481,7 +2578,7 @@ void UChargeAnimationComponent::BeginLaunch()
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] StartReverseChanneling: held=%s plate=%s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] StartReverseChanneling: held=%s plate=%s"),
 		CurrentCapturedNPC.IsValid() ? *CurrentCapturedNPC->GetName() : TEXT("NOTHING"),
 		*GetNameSafe(ChannelingPlateActor));
 
@@ -2504,7 +2601,7 @@ void UChargeAnimationComponent::BeginLaunch()
 			RequestedHeldAlly.Reset();
 			CurrentCapturedNPC.Reset();
 			ChannelingPlateActor->ClearCapturedNPC();
-			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Throw: ALLY %s launched by request"), *Ally->GetName());
+			UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] Throw: ALLY %s launched by request"), *Ally->GetName());
 		}
 		else if (AShooterNPC* NPC = Cast<AShooterNPC>(CurrentCapturedNPC.Get()))
 		{

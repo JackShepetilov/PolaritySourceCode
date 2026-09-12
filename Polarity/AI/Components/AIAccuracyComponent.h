@@ -96,6 +96,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppression", meta = (ClampMin = "5.0", ClampMax = "45.0"))
 	float MaxSuppressionSpread = 20.0f;
 
+	// ==================== Suppressive Fire Settings ====================
+	// The OTHER half of suppression, and the two must not be confused. Everything above is about an
+	// NPC that IS being suppressed: somebody is shooting at it and its aim falls apart. This is an
+	// NPC that CHOOSES to suppress: it aims to miss close, so that the target stays behind cover
+	// while a teammate moves. Same donut pattern, different reason and a tighter ring, because a
+	// deliberate pin should read as "those rounds are for me" rather than as bad shooting.
+
+	/** Minimum deviation while firing suppressive (degrees). Above zero, so the shots miss. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppressive Fire", meta = (ClampMin = "0.5", ClampMax = "30.0"))
+	float MinSuppressiveFireSpread = 3.0f;
+
+	/** Maximum deviation while firing suppressive (degrees). Keep it small: rounds have to land near
+	 *  enough to be read as aimed at the target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppressive Fire", meta = (ClampMin = "1.0", ClampMax = "45.0"))
+	float MaxSuppressiveFireSpread = 9.0f;
+
 	// ==================== Runtime State ====================
 
 	/** Last calculated spread value (for debugging) */
@@ -189,6 +205,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppression")
 	float GetSuppressionTimeRemaining() const { return SuppressionTimeRemaining; }
 
+	// ==================== Suppressive Fire API ====================
+
+	/** Turn deliberate suppressive fire on or off.
+	 *
+	 *  A mode rather than a timed effect on purpose: it lasts exactly as long as the behaviour that
+	 *  wants it, and the behaviour is the only thing that knows when the teammate has finished
+	 *  moving. Whoever switches it on owns switching it off. */
+	UFUNCTION(BlueprintCallable, Category = "Accuracy|Suppressive Fire")
+	void SetSuppressiveFire(bool bEnabled);
+
+	/** True while this NPC is deliberately shooting to pin rather than to kill. */
+	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppressive Fire")
+	bool IsFiringSuppressive() const { return bSuppressiveFire; }
+
 protected:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -207,6 +237,10 @@ protected:
 private:
 	/** True when NPC is in suppression state (forced misses) */
 	bool bIsSuppressed = false;
+
+	/** True while this NPC is deliberately firing to pin somebody. Runtime intent set by behaviour,
+	 *  never authored on the component, which is why it is not a UPROPERTY. */
+	bool bSuppressiveFire = false;
 
 	/** Seconds remaining in current suppression */
 	float SuppressionTimeRemaining = 0.0f;

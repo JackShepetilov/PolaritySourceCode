@@ -63,18 +63,8 @@ void UMeleeAttackComponent::BeginPlay()
 		}
 	}
 
-	// Initialize melee charges
-	MeleeCharges = Settings.MeleeMaxCharges;
-
 	// Auto-detect mesh references
 	AutoDetectMeshReferences();
-
-	// Store base transforms for FirstPersonMesh
-	if (FirstPersonMesh)
-	{
-		FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
-		FirstPersonMeshBaseRotation = FirstPersonMesh->GetRelativeRotation();
-	}
 
 	// Initially hide MeleeMesh
 	if (MeleeMesh)
@@ -91,33 +81,10 @@ void UMeleeAttackComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	UpdateLunge(DeltaTime);
 	UpdateMagnetism(DeltaTime);
 	UpdateCoolKick(DeltaTime);
-	UpdateMeshTransition(DeltaTime);
 	UpdateMeleeMeshRotation();
 	UpdateMontagePlayRate(DeltaTime);
+	UpdateFocus(DeltaTime);
 	UpdateCameraFocus(DeltaTime);
-
-	// Update melee charge recovery
-	if (MeleeCharges < Settings.MeleeMaxCharges && ChargeRecoveryTimer > 0.0f)
-	{
-		ChargeRecoveryTimer -= DeltaTime;
-		if (ChargeRecoveryTimer <= 0.0f)
-		{
-			MeleeCharges++;
-			OnMeleeChargeChanged.Broadcast(MeleeCharges, Settings.MeleeMaxCharges);
-
-			if (MeleeCharges < Settings.MeleeMaxCharges)
-			{
-				// Carry over overshoot into next charge recovery
-				float RecoveryTime = GetChargeRecoveryTime();
-				ChargeRecoveryTimer = RecoveryTime + ChargeRecoveryTimer; // Timer is negative, so this subtracts overshoot
-			}
-			else
-			{
-				ChargeRecoveryTimer = 0.0f;
-				OnMeleeCooldownEnded.Broadcast();
-			}
-		}
-	}
 
 	// Update drop kick cooldown
 	if (DropKickCooldownRemaining > 0.0f)
@@ -176,8 +143,8 @@ static ABossCharacter* FindFinisherBossInCone(UWorld* World, AActor* Owner, cons
 
 bool UMeleeAttackComponent::StartAttack()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === StartAttack ENTER === State=%d, bInputLocked=%d, bExternallyDisabled=%d, MeleeCharges=%d, bIsDropKick=%d, bHasHitThisAttack=%d"),
-		(int32)CurrentState, bInputLocked, bExternallyDisabled, MeleeCharges, bIsDropKick, bHasHitThisAttack);
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === StartAttack ENTER === State=%d, bInputLocked=%d, bExternallyDisabled=%d, bIsDropKick=%d, bHasHitThisAttack=%d"),
+		(int32)CurrentState, bInputLocked, bExternallyDisabled, bIsDropKick, bHasHitThisAttack);
 
 	bool bCanAttackNow = CanAttack();
 	bool bIsCurrentlyAttacking = IsAttacking();
@@ -239,9 +206,7 @@ bool UMeleeAttackComponent::StartAttack()
 			Apex->SetMeleeLungeRestoreOnEnd(false);
 		}
 	}
-	MeshTransitionProgress = 0.0f;
 	MontageTimeElapsed = 0.0f;
-	bIsLoweringWeaponOnly = false; // This is a real attack, not just lowering
 	// Cleared so the Windup gate can reliably detect "no montage this swing" (timer fallback).
 	CurrentMeleeMontage = nullptr;
 
@@ -276,42 +241,26 @@ bool UMeleeAttackComponent::StartAttack()
 	LungeDirection = GetLungeDirection();
 	LungeProgress = 0.0f;
 
-	// Broadcast dropkick delegate immediately on input, before HidingWeapon phase
+	// Broadcast dropkick delegate immediately on input, before the swing starts
 	if (ShouldPerformDropKick() && HasDropKickTarget())
 	{
 		OnDropKickStarted.Broadcast();
 	}
 
-	// Skip hiding weapon if already lowered (boss finisher case)
-	if (bIsWeaponLowered)
-	{
-		// Weapon already down - do all the things that normally happen after HidingWeapon
-		SwitchToMeleeMesh();
-		StartMagnetism();
-		// Charges are consumed on HIT, not on swing (see PerformHitDetection)
-		PlayAttackAnimation();
-		PlaySwingCameraShake();
-		PlaySound(SwingSound);
-		OnMeleeAttackStarted.Broadcast();
+	// The weapon leaves the hands on THIS frame, with no holster and no lowering: the swing itself is
+	// the animation. It comes back through its own draw once the montage is over (@see EndSwing).
+	// Already empty after the boss finisher's pre-lower, or after a swing cut short by a drop kick;
+	// the stow is idempotent and simply finds them so.
+	HideWeaponForSwing();
+	SwitchToMeleeMesh();
+	StartMagnetism();
+	PlayAttackAnimation();
+	PlaySwingCameraShake();
+	PlaySound(SwingSound);
+	OnMeleeAttackStarted.Broadcast();
 
-		// Go to appropriate next state. The damage window (Active) is opened by the
-		// animation notify, so funnel into the "armed" Windup state and wait for it
-		// (instead of letting the timer fall straight through to Active).
-		if (Settings.InputDelayTime > 0.0f)
-		{
-			SetState(EMeleeAttackState::InputDelay);
-		}
-		else
-		{
-			SetState(EMeleeAttackState::Windup);
-		}
-	}
-	else
-	{
-		// Start with mesh transition (hiding weapon)
-		BeginHideWeapon();
-		SetState(EMeleeAttackState::HidingWeapon);
-	}
+	// Armed and waiting: the damage window (Active) is opened by the montage's notify, not by a timer.
+	SetState(EMeleeAttackState::Windup);
 
 	return true;
 }
@@ -448,16 +397,15 @@ void UMeleeAttackComponent::EndDelegatedLunge()
 
 bool UMeleeAttackComponent::CancelAttack()
 {
-	// Can only cancel during early phases
-	if (CurrentState != EMeleeAttackState::HidingWeapon &&
-		CurrentState != EMeleeAttackState::InputDelay &&
-		CurrentState != EMeleeAttackState::Windup)
+	// Can only cancel before the damage window opens
+	if (CurrentState != EMeleeAttackState::Windup)
 	{
 		return false;
 	}
 
 	StopAttackAnimation();
 	SwitchToFirstPersonMesh();
+	DrawWeaponBack();
 	bInputLocked = false;
 	SetState(EMeleeAttackState::Ready);
 
@@ -497,14 +445,6 @@ bool UMeleeAttackComponent::CanAttack() const
 		}
 	}
 
-	// Must have at least 1 melee charge — unless the charge system is disabled
-	// (then the Settings.Cooldown timer alone gates refire).
-	if (!Settings.bDisableCharges && MeleeCharges < 1)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - MeleeCharges=%d (need >=1)"), MeleeCharges);
-		return false;
-	}
-
 	// Check airborne restriction
 	UCharacterMovementComponent* Movement = OwnerCharacter->GetCharacterMovement();
 	if (Movement)
@@ -525,12 +465,12 @@ bool UMeleeAttackComponent::CanAttack() const
 
 bool UMeleeAttackComponent::IsAttacking() const
 {
-	return CurrentState == EMeleeAttackState::HidingWeapon ||
-		CurrentState == EMeleeAttackState::InputDelay ||
-		CurrentState == EMeleeAttackState::Windup ||
+	// The draw that follows a swing (ShowingWeapon) is NOT part of it: it belongs to the character's
+	// weapon phase, and swaps may cut it short exactly as they cut any draw short. Only a new swing
+	// may not -- CanAttack wants Ready.
+	return CurrentState == EMeleeAttackState::Windup ||
 		CurrentState == EMeleeAttackState::Active ||
-		CurrentState == EMeleeAttackState::Recovery ||
-		CurrentState == EMeleeAttackState::ShowingWeapon;
+		CurrentState == EMeleeAttackState::Recovery;
 }
 
 float UMeleeAttackComponent::GetCooldownProgress() const
@@ -573,19 +513,10 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		}
 		break;
 
-	case EMeleeAttackState::HidingWeapon:
-		// Mesh-transition timings are NOT scaled by combo speed — these are visual
-		// transitions (swap to MeleeMesh / back) and should stay constant.
-		StateTimeRemaining = Settings.HideWeaponTime;
-		MeshTransitionProgress = 0.0f;
-		break;
-
-	case EMeleeAttackState::InputDelay:
-		StateTimeRemaining = Settings.InputDelayTime / ComboSpeedMultiplier;
-		break;
-
 	case EMeleeAttackState::Windup:
-		StateTimeRemaining = Settings.WindupTime / ComboSpeedMultiplier;
+		// No wind-up time: the swing is armed from its first frame and waits for the notify. The
+		// timer only has to reach zero for UpdateState to look at the no-montage fallback.
+		StateTimeRemaining = 0.0f;
 		break;
 
 	case EMeleeAttackState::Active:
@@ -601,7 +532,7 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 		{
 			// Active phase fallback timer kept large — the real Active End is driven by
 			// the UAnimNotifyState_MeleeDamageWindow's NotifyEnd (calls DeactivateDamageWindowFromNotify
-			// which transitions Active -> Recovery) OR by OnMeleeMontageEnded if the notify is missing.
+			// which transitions Active -> Recovery) OR by the montage starting to blend out.
 			StateTimeRemaining = (MontageTotalDuration > 0.0f)
 				? (MontageTotalDuration / ComboSpeedMultiplier) + 0.5f  // safety buffer past natural end
 				: (Settings.ActiveTime / ComboSpeedMultiplier);
@@ -636,12 +567,24 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 
 	case EMeleeAttackState::Recovery:
 	{
-		// Recovery is now a zero-duration pass-through state. Cleanup (StopMagnetism,
-		// miss-momentum restore, dropkick cooldown) still happens here, but the next
-		// tick immediately transitions to ShowingWeapon. The "natural" wait between
-		// the swing finishing and the next swing being allowed is driven by Settings.Cooldown
-		// downstream, plus the residual montage tail.
+		// The rest of the montage after the damage window. The swing ends when the animation does,
+		// through OnMeleeMontageBlendingOut; this timer is only the fallback for a montage that is
+		// cut from outside and never reports its own end. With no montage playing (drop kick, a
+		// delegated swing) there is nothing to wait for, and the next tick ends the swing.
 		StateTimeRemaining = 0.0f;
+		if (CurrentMeleeMontage && MeleeMesh)
+		{
+			if (const UAnimInstance* AnimInstance = MeleeMesh->GetAnimInstance())
+			{
+				if (AnimInstance->Montage_IsPlaying(CurrentMeleeMontage))
+				{
+					const float Rate = FMath::Max(FMath::Abs(AnimInstance->Montage_GetPlayRate(CurrentMeleeMontage)), KINDA_SMALL_NUMBER);
+					const float Left = CurrentMeleeMontage->GetPlayLength() - AnimInstance->Montage_GetPosition(CurrentMeleeMontage);
+					// Generous on purpose: the play rate curve can slow the tail down after this point.
+					StateTimeRemaining = FMath::Max(0.0f, Left) / Rate + 0.5f;
+				}
+			}
+		}
 		StopSwingTrailFX();
 
 		// Start drop kick cooldown BEFORE StopMagnetism (which resets bIsDropKick)
@@ -676,21 +619,9 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 	}
 
 	case EMeleeAttackState::ShowingWeapon:
-		if (bDelegatedDropKick)
-		{
-			// Delegated: skip mesh transitions entirely
-			StateTimeRemaining = 0.0f;
-		}
-		else
-		{
-			// Mesh-transition timing — keep constant (see HidingWeapon comment).
-			StateTimeRemaining = Settings.ShowWeaponTime;
-			MeshTransitionProgress = 0.0f;
-			bIsWeaponLowered = false; // Reset lowered state when showing weapon
-			bIsLoweringWeaponOnly = false; // Also reset lowering-only flag
-			StopAttackAnimation();
-			SwitchToFirstPersonMesh();
-		}
+		// The weapon's own draw is running on the character. No timer: UpdateState watches the
+		// character's phase, so a draw that is cut short (a grapple, a swap) releases this too.
+		StateTimeRemaining = 0.0f;
 		break;
 
 	case EMeleeAttackState::Cooldown:
@@ -704,6 +635,9 @@ void UMeleeAttackComponent::SetState(EMeleeAttackState NewState)
 			StateTimeRemaining = Settings.Cooldown / ComboSpeedMultiplier;
 		}
 		OnMeleeAttackEnded.Broadcast();
+		break;
+
+	default:
 		break;
 	}
 }
@@ -729,45 +663,6 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 		// Transition to next state
 		switch (CurrentState)
 		{
-		case EMeleeAttackState::HidingWeapon:
-			// If only lowering weapon (boss finisher approach), don't start attack
-			if (bIsLoweringWeaponOnly)
-			{
-				// Ensure weapon is fully lowered before going to Ready
-				SetFirstPersonMeshLowerOffset(-MeshLowerDistance);
-				// Stay in Ready state with weapon lowered, waiting for actual attack
-				SetState(EMeleeAttackState::Ready);
-				bInputLocked = false;
-			}
-			else
-			{
-				// Mesh transition complete - switch meshes and start attack
-				SwitchToMeleeMesh();
-				StartMagnetism();
-				// Charges are consumed on HIT, not on swing (see PerformHitDetection)
-				PlayAttackAnimation();
-				PlaySwingCameraShake();
-				PlaySound(SwingSound);
-				OnMeleeAttackStarted.Broadcast();
-
-				if (Settings.InputDelayTime > 0.0f)
-				{
-					SetState(EMeleeAttackState::InputDelay);
-				}
-				else
-				{
-					// Funnel into the "armed" Windup state even when WindupTime == 0 —
-					// the damage window (Active) is opened by the animation notify, not here.
-					SetState(EMeleeAttackState::Windup);
-				}
-			}
-			break;
-
-		case EMeleeAttackState::InputDelay:
-			// Always advance to the armed Windup state; the notify opens the damage window.
-			SetState(EMeleeAttackState::Windup);
-			break;
-
 		case EMeleeAttackState::Windup:
 			// Damage window (Active) is opened by the animation notify
 			// (ActivateDamageWindowFromNotify), NOT by this timer. Park here and wait for it.
@@ -784,20 +679,21 @@ void UMeleeAttackComponent::UpdateState(float DeltaTime)
 			break;
 
 		case EMeleeAttackState::Recovery:
-			SetState(EMeleeAttackState::ShowingWeapon);
+			// Only reached when the montage never reported its end (or there was none).
+			EndSwing();
 			break;
 
 		case EMeleeAttackState::ShowingWeapon:
-			// Skip cooldown if we didn't hit an enemy (allows spam-hitting props)
-			if (bHitEnemyThisAttack)
+		{
+			// Held here, re-checked every tick, until the draw is over.
+			const AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter);
+			if (!Shooter || Shooter->GetWeaponSwitchPhase() != EWeaponSwitchPhase::Drawing)
 			{
-				SetState(EMeleeAttackState::Cooldown);
-			}
-			else
-			{
-				SetState(EMeleeAttackState::Ready);
+				// Skip cooldown if we didn't hit an enemy (allows spam-hitting props)
+				SetState(bHitEnemyThisAttack ? EMeleeAttackState::Cooldown : EMeleeAttackState::Ready);
 			}
 			break;
+		}
 
 		case EMeleeAttackState::Cooldown:
 			SetState(EMeleeAttackState::Ready);
@@ -906,9 +802,8 @@ void UMeleeAttackComponent::PerformHitDetection()
 			// Valid hit!
 			HitActorsThisAttack.Add(Target);
 
-			// Consume charges on first hit of this attack
+			// An enemy was hit: the swing earns its cooldown
 			bHitEnemyThisAttack = true;
-			ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
 
 			// Check for headshot (approximate - use upper part of target)
 			bool bHeadshot = IsHeadshot(FakeHit);
@@ -1081,18 +976,10 @@ void UMeleeAttackComponent::PerformHitDetection()
 				StartCoolKick();
 			}
 
-			// Consume charges on first hit of this attack, but only against enemies (not props/destructibles)
+			// Only an enemy earns the swing its cooldown, not a prop or a destructible
 			if (!bHasHitThisAttack && Cast<AShooterNPC>(HitActor))
 			{
 				bHitEnemyThisAttack = true;
-				if (bIsDropKick)
-				{
-					ConsumeMeleeCharges(FMath::Min(Settings.MeleeMaxCharges, MeleeCharges), /*bResetRecoveryTimer=*/ true);
-				}
-				else
-				{
-					ConsumeMeleeCharges(1);
-				}
 			}
 			bHasHitThisAttack = true;
 
@@ -1519,6 +1406,11 @@ void UMeleeAttackComponent::PlayAttackAnimation()
 			EndDelegate.BindUObject(this, &UMeleeAttackComponent::OnMeleeMontageEnded);
 			AnimInstance->Montage_SetEndDelegate(EndDelegate, AnimData.AttackMontage);
 
+			// And to the start of its blend-out, which is where the swing actually ends.
+			FOnMontageBlendingOutStarted BlendOutDelegate;
+			BlendOutDelegate.BindUObject(this, &UMeleeAttackComponent::OnMeleeMontageBlendingOut);
+			AnimInstance->Montage_SetBlendingOutDelegate(BlendOutDelegate, AnimData.AttackMontage);
+
 			UE_LOG(LogTemp, Warning, TEXT("[AIRBORNE_DEBUG] PlayAttackAnimation: type=%d (0=Ground,1=Airborne,2=Sliding) montage='%s' totalLen=%.3fs playRate=%.2f -> realDuration=%.3fs basePlayRate=%.2f comboMult=%.2f"),
 				(int32)CurrentAttackType,
 				*AnimData.AttackMontage->GetName(),
@@ -1776,27 +1668,184 @@ void UMeleeAttackComponent::SpawnImpactFX(const FVector& Location, const FVector
 	}
 }
 
-void UMeleeAttackComponent::StartMagnetism()
+// ==================== Focus lock ====================
+
+bool UMeleeAttackComponent::TryStartFocus()
 {
-	if (!Settings.bEnableLunge || !OwnerCharacter)
+	// The machine that pressed the button and no other. The view is this client's own, and the lunge
+	// target it produces travels inside the saved move like it always did.
+	if (!Settings.bEnableLunge || !OwnerCharacter || !OwnerCharacter->IsLocallyControlled())
+	{
+		return false;
+	}
+
+	AActor* Candidate = FindBestLungeCandidate();
+	if (!Candidate)
+	{
+		// Nothing in reach. The press was not used, so the caller is free to do whatever it did
+		// before -- aim down sights, or nothing at all.
+		return false;
+	}
+
+	FocusTarget = Candidate;
+
+	if (AShooterCharacter::IsLungeDebugEnabled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] FOCUS on %s: locked %s at %.0f cm (allowed %.0f)"),
+			*GetNameSafe(OwnerCharacter), *GetNameSafe(Candidate),
+			FVector::Dist(GetTraceStart(), Candidate->GetActorLocation()), GetLungeRangeFor(Candidate));
+	}
+
+	return true;
+}
+
+void UMeleeAttackComponent::StopFocus()
+{
+	// Drops the TARGET, not the request. Called both when the button comes up and when a locked
+	// target stops qualifying (it died, it went down, it left reach), and those two must not mean the
+	// same thing: an enemy dying under a held button should hand the lock to the next one, not end
+	// the lock until the player presses again. Letting go is SetFocusHeld(false).
+	FocusTarget.Reset();
+}
+
+void UMeleeAttackComponent::SetFocusHeld(bool bHeld)
+{
+	bFocusHeld = bHeld;
+
+	// Look on the very next frame rather than after a full interval: the press itself already looked
+	// once, and this is for the case where that look found nothing.
+	FocusRetryTimer = 0.0f;
+
+	if (!bHeld)
+	{
+		FocusTarget.Reset();
+	}
+}
+
+bool UMeleeAttackComponent::IsFocusTargetStillValid(const AActor* Target) const
+{
+	if (!IsValid(Target) || !OwnerCharacter)
+	{
+		return false;
+	}
+
+	// The same two exclusions the search applies, re-asked every frame: a target can die or go down
+	// while it is being held, and holding the view on a corpse is the failure this catches.
+	if (const AShooterNPC* NPCTarget = Cast<AShooterNPC>(Target))
+	{
+		if (NPCTarget->IsDead())
+		{
+			return false;
+		}
+	}
+
+	if (const AShooterCharacter* PlayerTarget = Cast<AShooterCharacter>(Target))
+	{
+		if (PlayerTarget->IsDowned() || PlayerTarget->IsDead())
+		{
+			return false;
+		}
+	}
+
+	// Range only, deliberately: no cone. Once locked, the target is allowed to be anywhere on screen
+	// -- holding the view on it is the mechanic, and re-testing the cone would fight the very thing
+	// the lock is doing.
+	const float Allowed = GetLungeRangeFor(Target) * FMath::Max(1.0f, FocusBreakRangeSlack);
+	return Allowed > 0.0f
+		&& FVector::DistSquared(GetTraceStart(), Target->GetActorLocation()) <= FMath::Square(Allowed);
+}
+
+FVector UMeleeAttackComponent::GetFocusAimPoint(const AActor* Target) const
+{
+	if (!Target)
+	{
+		return FVector::ZeroVector;
+	}
+
+	// The bone first. It is the only answer that moves with the target's animation, and it is also
+	// the only one the author can point at something specific with.
+	if (!FocusAimBone.IsNone())
+	{
+		if (const USkeletalMeshComponent* Mesh = Target->FindComponentByClass<USkeletalMeshComponent>())
+		{
+			// DoesSocketExist covers both real sockets and bones, which is what makes this safe to
+			// point at a rig that does not have the bone: it answers false instead of handing back
+			// the component's own origin, which is what GetSocketLocation does on a miss and would
+			// have looked like the lock silently aiming at the feet.
+			if (Mesh->DoesSocketExist(FocusAimBone))
+			{
+				return Mesh->GetSocketLocation(FocusAimBone) + FVector(0.0f, 0.0f, FocusAimZOffset);
+			}
+		}
+	}
+
+	// No skeleton, or no such bone on it. Height off the target's own collision bounds.
+	FVector Origin, Extent;
+	Target->GetActorBounds(true, Origin, Extent);
+
+	const float Bottom = Origin.Z - Extent.Z;
+	const float Height = Extent.Z * 2.0f;
+
+	return FVector(
+		Origin.X,
+		Origin.Y,
+		Bottom + Height * FMath::Clamp(FocusAimHeightFraction, 0.0f, 1.0f) + FocusAimZOffset);
+}
+
+void UMeleeAttackComponent::UpdateFocus(float DeltaTime)
+{
+	// Held with nothing locked: keep looking. This is the whole "do not make me press again" half of
+	// the mechanic -- the player asks once, by holding, and the lock answers as soon as it can.
+	if (bFocusHeld && !FocusTarget.IsValid())
+	{
+		FocusRetryTimer -= DeltaTime;
+		if (FocusRetryTimer <= 0.0f)
+		{
+			FocusRetryTimer = FMath::Max(0.02f, FocusRetryInterval);
+			TryStartFocus();
+		}
+	}
+
+	if (!FocusTarget.IsValid())
 	{
 		return;
 	}
 
-	MagnetismTarget.Reset();
-	bIsDropKick = false;
-	DropKickHeightDifference = 0.0f;
-
-	// Check for drop kick first (airborne + looking down)
-	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: checking dropkick..."));
-	if (ShouldPerformDropKick() && TryStartDropKick())
+	if (!OwnerController || !OwnerCharacter || !IsFocusTargetStillValid(FocusTarget.Get()))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: DROPKICK started successfully!"));
-		// Drop kick started successfully - skip normal lunge
+		StopFocus();
 		return;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: dropkick NOT started, proceeding with normal lunge"));
 
+	// A pull, not a pin. The player's own mouse movement is applied to the control rotation as usual
+	// and this leans it back toward the target every frame, so the lock can be fought and aimed
+	// around instead of taking the camera away.
+	const FRotator Current = OwnerController->GetControlRotation();
+
+	FRotator Desired = (GetFocusAimPoint(FocusTarget.Get()) - GetTraceStart()).Rotation();
+	Desired.Roll = Current.Roll;
+
+	// Inside the snap window the view is PUT on the target, not pulled toward it.
+	//
+	// An interpolation is asymptotic: it closes a fraction of the error per frame and therefore never
+	// arrives, so against anything that moves the target sits a few degrees off centre for the whole
+	// lock. That residual error is exactly what read as "вяло наводится". The pull still does the
+	// long part of the swing, which is what keeps the camera from being snatched away.
+	const float ErrorDegrees = FMath::Abs(FRotator::NormalizeAxis(Desired.Yaw - Current.Yaw))
+		+ FMath::Abs(FRotator::NormalizeAxis(Desired.Pitch - Current.Pitch));
+
+	if (ErrorDegrees <= FocusHardSnapDegrees)
+	{
+		OwnerController->SetControlRotation(Desired);
+		return;
+	}
+
+	OwnerController->SetControlRotation(
+		FMath::RInterpTo(Current, Desired, DeltaTime, FMath::Max(0.5f, FocusTrackingSpeed)));
+}
+
+AActor* UMeleeAttackComponent::FindBestLungeCandidate() const
+{
 	// ==================== Cone-based Target Acquisition (TF2-style) ====================
 	// Sphere overlap within LungeRange, filtered by dot-product against camera forward.
 	// Picks the candidate with the highest dot (most centered in the cone).
@@ -1812,7 +1861,7 @@ void UMeleeAttackComponent::StartMagnetism()
 	const float SearchRadius = GetMaxLungeRange();
 	if (SearchRadius <= 0.0f)
 	{
-		return;
+		return nullptr;
 	}
 
 	// Says COMPONENT so a log full of lunge lines cannot be mistaken for the weapon's copy. If this
@@ -1906,8 +1955,50 @@ void UMeleeAttackComponent::StartMagnetism()
 		);
 	}
 
+	return BestTarget;
+}
+
+void UMeleeAttackComponent::StartMagnetism()
+{
+	if (!Settings.bEnableLunge || !OwnerCharacter)
+	{
+		return;
+	}
+
+	MagnetismTarget.Reset();
+	bIsDropKick = false;
+	DropKickHeightDifference = 0.0f;
+
+	// Check for drop kick first (airborne + looking down)
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: checking dropkick..."));
+	if (ShouldPerformDropKick() && TryStartDropKick())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: DROPKICK started successfully!"));
+		// Drop kick started successfully - skip normal lunge
+		return;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartMagnetism: dropkick NOT started, proceeding with normal lunge"));
+
+	// ==================== The locked target, and only it ====================
+	// The swing no longer looks for a victim. An automatic pull toward whatever the camera happened
+	// to cross is exactly what this rework removed: the player holds aim, that locks a target inside
+	// the reach the passive grants, and the swing flies at that one or at nobody.
+	//
+	// A swing with no lock still swings. It just does not travel, which is what NoTargetBoostSpeed
+	// further down is for.
+	AActor* BestTarget = nullptr;
+	if (FocusTarget.IsValid() && IsFocusTargetStillValid(FocusTarget.Get()))
+	{
+		BestTarget = FocusTarget.Get();
+	}
+
 	if (!BestTarget)
 	{
+		if (AShooterCharacter::IsLungeDebugEnabled())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[LUNGE_DEBUG] COMPONENT on %s: no focus lock, swing does not travel"),
+				*GetNameSafe(OwnerCharacter));
+		}
 		return;
 	}
 
@@ -1973,8 +2064,8 @@ void UMeleeAttackComponent::StartMagnetism()
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Green,
-			FString::Printf(TEXT("Lunge: Target=%s, StopAt=%.0fcm, Dot=%.2f"),
-				*BestTarget->GetName(), Settings.LungeStopDistance, BestDot));
+			FString::Printf(TEXT("Lunge: locked Target=%s, StopAt=%.0fcm"),
+				*BestTarget->GetName(), Settings.LungeStopDistance));
 	}
 #endif
 }
@@ -2389,92 +2480,64 @@ const FMeleeAnimationData& UMeleeAttackComponent::GetCurrentAnimationData() cons
 	return DefaultAnimationData;
 }
 
-void UMeleeAttackComponent::BeginHideWeapon()
-{
-	MeshTransitionProgress = 0.0f;
-
-	// Store current FirstPersonMesh transform
-	if (FirstPersonMesh)
-	{
-		FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
-		FirstPersonMeshBaseRotation = FirstPersonMesh->GetRelativeRotation();
-	}
-}
-
 void UMeleeAttackComponent::LowerWeapon()
 {
-	if (bIsWeaponLowered)
-	{
-		return;
-	}
-
+	// Boss finisher approach: the hands go away now, and the finisher's own swing brings the weapon
+	// back when it ends (@see EndSwing). Nothing is lowered any more -- the weapon simply leaves.
 	bIsWeaponLowered = true;
-	bIsLoweringWeaponOnly = true;
-	BeginHideWeapon();
-	SetState(EMeleeAttackState::HidingWeapon);
+	HideWeaponForSwing();
 }
 
-void UMeleeAttackComponent::UpdateMeshTransition(float DeltaTime)
+void UMeleeAttackComponent::HideWeaponForSwing()
 {
-	// The FP mesh transform has a single writer (AShooterCharacter's pose pipeline), so the
-	// weapon-lower is published as an offset instead of being written onto the component.
-	if (CurrentState == EMeleeAttackState::HidingWeapon)
+	// The character owns the hands: taking the weapon away is its weapon phase, so that firing,
+	// reloading, swapping and abilities are all shut off by the gates that already read it.
+	if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter))
 	{
-		if (Settings.HideWeaponTime > 0.0f)
-		{
-			MeshTransitionProgress += DeltaTime / Settings.HideWeaponTime;
-			MeshTransitionProgress = FMath::Clamp(MeshTransitionProgress, 0.0f, 1.0f);
-
-			const float Alpha = FMath::InterpEaseIn(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-			SetFirstPersonMeshLowerOffset(FMath::Lerp(0.0f, -MeshLowerDistance, Alpha));
-		}
-	}
-	else if (CurrentState == EMeleeAttackState::ShowingWeapon)
-	{
-		if (Settings.ShowWeaponTime > 0.0f)
-		{
-			MeshTransitionProgress += DeltaTime / Settings.ShowWeaponTime;
-			MeshTransitionProgress = FMath::Clamp(MeshTransitionProgress, 0.0f, 1.0f);
-
-			const float Alpha = FMath::InterpEaseOut(0.0f, 1.0f, MeshTransitionProgress, 2.0f);
-			SetFirstPersonMeshLowerOffset(FMath::Lerp(-MeshLowerDistance, 0.0f, Alpha));
-		}
-	}
-	else if (CurrentState == EMeleeAttackState::Ready && bIsWeaponLowered)
-	{
-		// Keep weapon lowered while waiting for boss finisher attack
-		SetFirstPersonMeshLowerOffset(-MeshLowerDistance);
-	}
-	else
-	{
-		SetFirstPersonMeshLowerOffset(0.0f);
+		Shooter->StowWeaponForMelee();
 	}
 }
 
-void UMeleeAttackComponent::SetFirstPersonMeshLowerOffset(float ZOffset)
+void UMeleeAttackComponent::DrawWeaponBack()
 {
 	if (AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter))
 	{
-		Shooter->SetFirstPersonMeshExternalZOffset(ZOffset);
+		Shooter->DrawWeaponAfterMelee(DrawSpeedMultiplier);
 	}
+}
+
+void UMeleeAttackComponent::EndSwing()
+{
+	// Already blending out if we got here naturally; stopping it again is harmless, clears
+	// CurrentMeleeMontage, and keeps the third person montage in step as it always has.
+	StopAttackAnimation();
+
+	// A delegated drop kick never took the hands or showed the melee mesh: the melee weapon runs
+	// its own animation, and has nothing to be given back.
+	if (!bDelegatedDropKick)
+	{
+		SwitchToFirstPersonMesh();
+		DrawWeaponBack();
+	}
+
+	bIsWeaponLowered = false;
+
+	// The draw is not interruptible by the next swing: sit in ShowingWeapon, where CanAttack says no,
+	// until the character's draw has finished (@see UpdateState). A weapon with no draw animation,
+	// or no weapon at all, has nothing to wait for.
+	const AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter);
+	if (!bDelegatedDropKick && Shooter && Shooter->GetWeaponSwitchPhase() == EWeaponSwitchPhase::Drawing)
+	{
+		SetState(EMeleeAttackState::ShowingWeapon);
+		return;
+	}
+
+	// Skip cooldown if we didn't hit an enemy (allows spam-hitting props)
+	SetState(bHitEnemyThisAttack ? EMeleeAttackState::Cooldown : EMeleeAttackState::Ready);
 }
 
 void UMeleeAttackComponent::SwitchToMeleeMesh()
 {
-	if (FirstPersonMesh)
-	{
-		FirstPersonMesh->SetVisibility(false);
-	}
-
-	// Hide current weapon
-	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
-	{
-		if (AShooterWeapon* Weapon = ShooterChar->GetCurrentWeapon())
-		{
-			Weapon->SetActorHiddenInGame(true);
-		}
-	}
-
 	if (MeleeMesh)
 	{
 		// ==================== Attach to Camera ====================
@@ -2540,29 +2603,8 @@ void UMeleeAttackComponent::SwitchToFirstPersonMesh()
 		CurrentlyHiddenBones.Empty();
 	}
 
-	if (FirstPersonMesh)
-	{
-		// Only restore FP mesh visibility if the player actually has a weapon
-		bool bShouldShow = true;
-		if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
-		{
-			bShouldShow = ShooterChar->GetCurrentWeapon() != nullptr;
-		}
-		if (bShouldShow)
-		{
-			FirstPersonMesh->SetVisibility(true);
-		}
-		// Location will be interpolated back in UpdateMeshTransition
-	}
-
-	// Show current weapon
-	if (AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter))
-	{
-		if (AShooterWeapon* Weapon = ShooterChar->GetCurrentWeapon())
-		{
-			Weapon->SetActorHiddenInGame(false);
-		}
-	}
+	// The arms and the weapon are NOT shown here. They come back through the character's draw
+	// (@see DrawWeaponBack), which is what plays the weapon's own draw animation.
 }
 
 void UMeleeAttackComponent::UpdateMeleeMeshRotation()
@@ -2576,10 +2618,7 @@ void UMeleeAttackComponent::UpdateMeleeMeshRotation()
 	// (e.g., dynamic offset adjustments, special effects, etc.)
 
 	// Only process if mesh is active and not attached (fallback mode)
-	if (CurrentState != EMeleeAttackState::InputDelay &&
-		CurrentState != EMeleeAttackState::Windup &&
-		CurrentState != EMeleeAttackState::Active &&
-		CurrentState != EMeleeAttackState::Recovery)
+	if (!IsAttacking())
 	{
 		return;
 	}
@@ -2686,22 +2725,36 @@ void UMeleeAttackComponent::OnMeleeMontageEnded(UAnimMontage* Montage, bool bInt
 		return;
 	}
 
-	CurrentMeleeMontage = nullptr;
-
-	// Drive the swing's end through the montage instead of fixed Settings timers.
-	// If we're still in Active or Recovery when the montage ends naturally, jump
-	// straight to ShowingWeapon — Recovery is now zero-duration (cleanup-only) and
-	// Active has a long safety timer that we want to short-circuit.
-	if (!bInterrupted &&
-		(CurrentState == EMeleeAttackState::Active ||
-		 CurrentState == EMeleeAttackState::Recovery ||
-		 CurrentState == EMeleeAttackState::Windup ||
-		 CurrentState == EMeleeAttackState::InputDelay))
+	// Normally the swing already ended when this montage started blending out, and EndSwing has
+	// cleared CurrentMeleeMontage, so this is not reached. It is the safety net for a montage that
+	// ended without ever blending out.
+	if (!bInterrupted && IsAttacking())
 	{
-		// Includes the armed Windup/InputDelay states: if the montage ends without ever
-		// firing the damage-window notify, finish the swing cleanly (no stuck input lock).
-		SetState(EMeleeAttackState::ShowingWeapon);
+		OnMeleeMontageBlendingOut(Montage, false);
+		return;
 	}
+
+	CurrentMeleeMontage = nullptr;
+}
+
+void UMeleeAttackComponent::OnMeleeMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)
+{
+	// Interrupted means someone else stopped it (a drop kick cutting in, a cancel, the charged
+	// punch taking the mesh over), and that someone owns what happens next.
+	if (bInterrupted || Montage != CurrentMeleeMontage || !IsAttacking())
+	{
+		return;
+	}
+
+	// A damage window still open at the end of the animation closes here, and a swing whose montage
+	// never carried the notify at all still gets its miss handling: both go through Recovery, which
+	// is where that cleanup lives.
+	if (CurrentState != EMeleeAttackState::Recovery)
+	{
+		SetState(EMeleeAttackState::Recovery);
+	}
+
+	EndSwing();
 }
 
 void UMeleeAttackComponent::AutoDetectMeshReferences()
@@ -2987,8 +3040,8 @@ void UMeleeAttackComponent::EndRecoveryFromNotify()
 void UMeleeAttackComponent::EnterMeleeMeshView()
 {
 	// Force-cancel any in-flight regular swing so the external upgrade owns the view.
-	// CancelAttack only works in early phases (HidingWeapon / InputDelay / Windup) —
-	// if we're past that, we just stop the anim and switch state to Ready.
+	// CancelAttack only works before the damage window opens; past that, we just stop
+	// the anim and switch state to Ready. The hands stay empty either way.
 	if (CurrentState != EMeleeAttackState::Ready)
 	{
 		StopAttackAnimation();
@@ -2999,6 +3052,7 @@ void UMeleeAttackComponent::EnterMeleeMeshView()
 		SetState(EMeleeAttackState::Ready);
 	}
 
+	HideWeaponForSwing();
 	SwitchToMeleeMesh();
 
 	// Kill anything still playing on MeleeMesh (e.g. a ground swing montage that's
@@ -3017,6 +3071,7 @@ void UMeleeAttackComponent::EnterMeleeMeshView()
 void UMeleeAttackComponent::ExitMeleeMeshView()
 {
 	SwitchToFirstPersonMesh();
+	DrawWeaponBack();
 }
 
 void UMeleeAttackComponent::PlayMontageOnMeleeMesh(UAnimMontage* Montage, float PlayRate)
@@ -3101,13 +3156,6 @@ bool UMeleeAttackComponent::ShouldPerformDropKick() const
 	if (DropKickCooldownRemaining > 0.0f)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] ShouldDropKick: FALSE - cooldown remaining: %.1f"), DropKickCooldownRemaining);
-		return false;
-	}
-
-	// Must have at least 1 melee charge for dropkick — bypassed if charges disabled.
-	if (!Settings.bDisableCharges && MeleeCharges < 1)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] ShouldDropKick: FALSE - MeleeCharges=%d"), MeleeCharges);
 		return false;
 	}
 
@@ -3641,78 +3689,6 @@ float UMeleeAttackComponent::GetDropKickCooldownProgress() const
 	}
 
 	return 1.0f - (DropKickCooldownRemaining / Settings.DropKickCooldown);
-}
-
-// ==================== Melee Charge System ====================
-
-void UMeleeAttackComponent::ConsumeMeleeCharges(int32 Count, bool bResetRecoveryTimer)
-{
-	// Charge system bypassed — only Settings.Cooldown gates refire.
-	if (Settings.bDisableCharges)
-	{
-		return;
-	}
-
-	const int32 OldCharges = MeleeCharges;
-	MeleeCharges = FMath::Max(0, MeleeCharges - FMath::Max(0, Count));
-
-	const bool bChargesChanged = (MeleeCharges != OldCharges);
-
-	if (MeleeCharges < Settings.MeleeMaxCharges)
-	{
-		const float RecoveryTime = GetChargeRecoveryTime();
-
-		if (bResetRecoveryTimer)
-		{
-			// Dropkick: reset timer to full recovery time
-			ChargeRecoveryTimer = RecoveryTime;
-		}
-		else if (OldCharges == Settings.MeleeMaxCharges && bChargesChanged)
-		{
-			// Was at max charges, start recovery timer for the first time
-			ChargeRecoveryTimer = RecoveryTime;
-		}
-		// else: timer already running from a previous charge loss, let it continue
-	}
-
-	if (bChargesChanged)
-	{
-		OnMeleeChargeChanged.Broadcast(MeleeCharges, Settings.MeleeMaxCharges);
-
-		// Calculate actual remaining time until all charges are full:
-		// ChargeRecoveryTimer (time to next charge) + remaining charges after that × RecoveryTime
-		const int32 ChargesMissing = Settings.MeleeMaxCharges - MeleeCharges;
-		const float RecoveryTimePerCharge = GetChargeRecoveryTime();
-		const float RemainingTime = ChargeRecoveryTimer + FMath::Max(0, ChargesMissing - 1) * RecoveryTimePerCharge;
-
-		// Fire every time charges are consumed so BP can restart its timer with correct duration
-		OnMeleeCooldownStarted.Broadcast(RemainingTime);
-	}
-}
-
-float UMeleeAttackComponent::GetChargeRecoveryTime() const
-{
-	if (Settings.MeleeMaxCharges <= 0)
-	{
-		return 0.0f;
-	}
-	return Settings.MeleeTotalCooldown / static_cast<float>(Settings.MeleeMaxCharges);
-}
-
-float UMeleeAttackComponent::GetChargeRecoveryProgress() const
-{
-	if (MeleeCharges >= Settings.MeleeMaxCharges)
-	{
-		return 1.0f; // Fully charged
-	}
-
-	const float RecoveryTime = GetChargeRecoveryTime();
-	if (RecoveryTime <= 0.0f)
-	{
-		return 1.0f;
-	}
-
-	return 1.0f - (ChargeRecoveryTimer / RecoveryTime);
 }
 
 // ==================== Tag-Based Damage ====================

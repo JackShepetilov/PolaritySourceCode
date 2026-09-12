@@ -110,15 +110,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Effects")
 	TObjectPtr<USoundBase> BreakSound;
 
-	/** Where the loot comes out of, measured up the banner from its feet (cm). The pile is thrown
-	 *  from here rather than laid on the floor, so it reads as coming out of the thing. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Banner|Effects", meta = (ClampMin = "0.0"))
-	float LootBurstHeight = 150.0f;
-
-	/** Where a pile thrown by this banner starts from. */
-	UFUNCTION(BlueprintPure, Category = "Banner")
-	FVector GetLootBurstOrigin() const;
-
 	UPROPERTY(BlueprintAssignable, Category = "Banner")
 	FOnBannerBroken OnBroken;
 

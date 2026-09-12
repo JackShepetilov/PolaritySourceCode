@@ -1,4 +1,4 @@
-// AICombatCoordinator.h
+﻿// AICombatCoordinator.h
 // Global coordinator for NPC attack permissions, token-based combat, battle circle positioning, and role/pressure management
 
 #pragma once
@@ -131,7 +131,7 @@ struct FRegisteredNPCData
 };
 
 /** Cached player state for pressure system */
-struct FPlayerStateCache
+struct FTargetStateCache
 {
 	float HPPercent = 1.0f;
 	float ArmorPercent = 0.0f;
@@ -173,7 +173,7 @@ struct FTargetGroup
 	FTokenPool Special;
 
 	/** This player's health, armour, speed and facing, for the role and pressure system. */
-	FPlayerStateCache State;
+	FTargetStateCache State;
 };
 
 /** Something loud on the ground that enemies near it should fight instead of a player.
@@ -471,6 +471,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coordination")
 	AActor* GetPrimaryTarget() const { return PrimaryTarget.Get(); }
 
+	/** Every NPC the coordinator knows about, as it stores them.
+	 *
+	 *  For code that needs to visit ALL of them and is not allowed to walk the level to do it --
+	 *  TActorIterator over a real map costs thousands of visits, and anything doing that on a timer
+	 *  is a frame cost nobody asked for. Entries can be stale: the pawns are weak, so callers check.
+	 *  @see USmokeVisionSubsystem, which sweeps this once for every cloud in the world. */
+	const TArray<FRegisteredNPCData>& GetRegisteredNPCs() const { return RegisteredNPCs; }
+
 	/** Who this NPC is fighting. The single answer, remembered rather than recomputed.
 	 *
 	 *  Call sites that still ask CoopPlayers::GetNearest for themselves should move onto this: they
@@ -480,6 +488,17 @@ public:
 	 *  rather than a blind sweep. Returns null if the NPC is not registered or has no target yet. */
 	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
 	AActor* GetTargetFor(APawn* NPC) const;
+
+	/** Closest pawn Asker fights, from the people the coordinator already knows about: the players
+	 *  plus every registered NPC.
+	 *
+	 *  A cheap answer for code that asks every frame. PolarityTeams::FindNearestHostilePawn sweeps
+	 *  the level's actors and is correct everywhere, including for enemies that have never
+	 *  registered, but it is far too expensive to call sixty times a second per NPC. This one walks
+	 *  two arrays. Use it when the question is "who is crowding me right now", where an idle
+	 *  unregistered enemy on the far side of the map cannot be the answer anyway. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
+	APawn* FindNearestHostile(APawn* Asker) const;
 
 	// --- Decoys ---
 
@@ -535,7 +554,7 @@ public:
 	 *  situational UThreatComponent is still carrying. The single number both target selection and
 	 *  cover choice are weighted by - see design doc 5.3 for why those must not drift apart. */
 	UFUNCTION(BlueprintPure, Category = "Coordination|Threat")
-	float GetPlayerThreat(APawn* Player) const;
+	float GetThreatFor(APawn* Player) const;
 
 	// --- Cover claims ---
 	//
@@ -627,7 +646,7 @@ public:
 	 *  corners hidden from this player, and the moment they do, there is nothing left for it to
 	 *  score. The correction is the behaviour, not a timer.
 	 *
-	 *  Reads into GetPlayerThreat, so it amplifies BOTH directions at once by construction: shielded
+	 *  Reads into GetThreatFor, so it amplifies BOTH directions at once by construction: shielded
 	 *  enemies find a flanker apparently nearer and walk at them, broken ones weight them heavier in
 	 *  exposure and hide from them harder. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Threat", meta = (ClampMin = "0.0"))
@@ -709,7 +728,7 @@ private:
 	TArray<FRelocation> ActiveRelocations;
 
 	/** Corner count each player has taken away, refreshed on PositionalThreatInterval. Cached rather
-	 *  than computed on demand because GetPlayerThreat is called many times per frame and this
+	 *  than computed on demand because GetThreatFor is called many times per frame and this
 	 *  answer costs traces. */
 	TMap<TWeakObjectPtr<APawn>, int32> OpenedCoverCounts;
 
@@ -833,7 +852,7 @@ private:
 	void GenerateBattleSlotsForGroup(FTargetGroup& Group);
 	void RecalculateSlotPositionsForGroup(FTargetGroup& Group);
 	void AssignNPCsToSlotsForGroup(FTargetGroup& Group);
-	void UpdatePlayerStateCacheForGroup(FTargetGroup& Group);
+	void UpdateTargetStateCacheForGroup(FTargetGroup& Group);
 
 	void UpdatePlayerStateCache();
 	void AssignRoles();

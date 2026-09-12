@@ -1,7 +1,8 @@
 // MeleeRetreatComponent.cpp
 
 #include "MeleeRetreatComponent.h"
-#include "Coop/CoopPlayers.h"
+#include "AI/PolarityTeams.h"
+#include "AI/Coordination/AICombatCoordinator.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "NavigationSystem.h"
@@ -255,8 +256,21 @@ void UMeleeRetreatComponent::UpdateProximityTrigger(float DeltaTime)
 
 void UMeleeRetreatComponent::FindProximityTarget()
 {
-	// Retreat is about the player crowding THIS NPC, so take the closest one.
-	const AActor* Owner = GetOwner();
-	ProximityTarget = CoopPlayers::GetNearest(GetWorld(),
-		Owner ? Owner->GetActorLocation() : FVector::ZeroVector);
+	// Retreat is about whoever is crowding THIS NPC, so take the closest enemy. Players were the
+	// only possible answer before factions; the feeling being modelled is somebody in your face,
+	// and it does not care which side they came from.
+	//
+	// The coordinator answers from the players plus its registered NPCs, which is what this runs on
+	// every frame while there is nobody near. The level-wide sweep is the fallback for a world with
+	// no coordinator in it.
+	APawn* const Owner = Cast<APawn>(GetOwner());
+	if (AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(GetOwner()))
+	{
+		ProximityTarget = Coordinator->FindNearestHostile(Owner);
+	}
+
+	if (!ProximityTarget.IsValid())
+	{
+		ProximityTarget = PolarityTeams::FindNearestHostilePawn(GetOwner());
+	}
 }

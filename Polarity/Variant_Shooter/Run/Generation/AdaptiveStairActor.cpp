@@ -6,6 +6,8 @@
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/World.h"
+#include "Components/ChildActorComponent.h"
 
 AAdaptiveStairActor::AAdaptiveStairActor()
 {
@@ -90,6 +92,64 @@ AAdaptiveStairActor::AAdaptiveStairActor()
 #endif
 }
 
+bool AAdaptiveStairActor::FindOwnFloorBelow(const FVector& WorldProbe, float& OutFloorZ) const
+{
+	// Кто нам хозяин. Лестница внутри блюпринта это ChildActorComponent, и его владелец - тот самый
+	// дом, чей пол мы ищем. Без владельца мы стоим на уровне сами по себе, и спрашивать некого.
+	const AActor* const Host = GetParentActor();
+
+	bool bFound = false;
+	float Best = TNumericLimits<float>::Lowest();
+
+	if (Host)
+	{
+		TArray<UPrimitiveComponent*> Parts;
+		Host->GetComponents<UPrimitiveComponent>(Parts);
+		for (const UPrimitiveComponent* const Part : Parts)
+		{
+			if (!Part || Part->IsA<UBoxComponent>() || Part->IsA<UArrowComponent>())
+			{
+				continue;   // свои же вспомогательные объёмы полом не считаются
+			}
+
+			const FBox Box = Part->Bounds.GetBox();
+			// Стоим ли мы над этой деталью, и её верх ниже нас.
+			if (WorldProbe.X < Box.Min.X || WorldProbe.X > Box.Max.X
+				|| WorldProbe.Y < Box.Min.Y || WorldProbe.Y > Box.Max.Y)
+			{
+				continue;
+			}
+			if (Box.Max.Z > WorldProbe.Z || WorldProbe.Z - Box.Max.Z > FloorSearchDepth)
+			{
+				continue;
+			}
+			if (Box.Max.Z > Best)
+			{
+				Best = Box.Max.Z;
+				bFound = true;
+			}
+		}
+	}
+	else if (const UWorld* const World = GetWorld())
+	{
+		// Одиночная лестница на уровне: спрашивать некого, смотрим на мир как раньше.
+		FHitResult Hit;
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(AdaptiveStairFloor), false, this);
+		if (World->LineTraceSingleByChannel(Hit, WorldProbe,
+				WorldProbe - FVector(0.f, 0.f, FloorSearchDepth), ECC_Visibility, Params))
+		{
+			Best = Hit.ImpactPoint.Z;
+			bFound = true;
+		}
+	}
+
+	if (bFound)
+	{
+		OutFloorZ = Best;
+	}
+	return bFound;
+}
+
 void AAdaptiveStairActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
@@ -152,6 +212,47 @@ void AAdaptiveStairActor::RegenerateStairs()
 		HorizontalDirection = FVector::ForwardVector;
 		HeadingYawDegrees = 0.f;
 	}
+	else if (FitMode == EAdaptiveStairFitMode::FloorBelow)
+	{
+		HorizontalDirection = FVector::ForwardVector;
+		HeadingYawDegrees = 0.f;
+
+		// Курица и яйцо: длина марша зависит от высоты, а высота - от того, куда марш дотянется.
+		// Два прохода это распутывают. Первый меряет прямо под верхней площадкой, второй - под тем
+		// местом, куда лестница по этой высоте доходит, и оно и есть настоящая точка приземления.
+		const FVector Origin = GetActorLocation();
+		const FVector Forward = GetActorForwardVector();
+		FVector Probe = Origin;
+		float FloorZ = 0.f;
+		bool bFound = false;
+
+		for (int32 Pass = 0; Pass < 2; ++Pass)
+		{
+			float Found = 0.f;
+			if (!FindOwnFloorBelow(Probe, Found))
+			{
+				break;
+			}
+			bFound = true;
+			FloorZ = Found;
+
+			const float PassRise = Origin.Z - FloorZ;
+			const int32 Steps = FMath::Max(1, FMath::CeilToInt(PassRise / FMath::Max(MaxRiserHeight, 1.f)));
+			Probe = Origin + Forward * (DesiredTreadDepth * static_cast<float>(Steps));
+		}
+
+		if (!bFound)
+		{
+			ClearGeneratedGeometry();
+			GeneratedValidationMessage = TEXT("FloorBelow: nothing to land on within FloorSearchDepth.");
+			UE_LOG(LogTemp, Warning, TEXT("AdaptiveStairs invalid: %s - %s"),
+				*GetName(), *GeneratedValidationMessage);
+			return;
+		}
+
+		ResolvedFloorZ = FloorZ;
+		Rise = Origin.Z - FloorZ;
+	}
 	else
 	{
 		Rise = -BottomPointLocal.Z;
@@ -189,7 +290,7 @@ void AAdaptiveStairActor::RegenerateStairs()
 
 	GeneratedStepCount = FMath::Clamp(RequestedStepCount, 1, MaxGeneratedSteps);
 	GeneratedRiserHeight = Rise / static_cast<float>(GeneratedStepCount);
-	if (FitMode == EAdaptiveStairFitMode::TargetWorldZ)
+	if (FitMode == EAdaptiveStairFitMode::TargetWorldZ || FitMode == EAdaptiveStairFitMode::FloorBelow)
 	{
 		GeneratedTreadDepth = DesiredTreadDepth;
 		HorizontalRun = GeneratedTreadDepth * static_cast<float>(GeneratedStepCount);

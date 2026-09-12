@@ -1,8 +1,9 @@
-// CoverFinderComponent.cpp
+﻿// CoverFinderComponent.cpp
 
 #include "CoverFinderComponent.h"
 
-#include "Coop/CoopPlayers.h"
+#include "AI/PolarityTeams.h"
+#include "AI/TacticalSpace.h"
 #include "AI/Coordination/AICombatCoordinator.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "NavigationSystem.h"
@@ -100,8 +101,8 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		return;
 	}
 
-	TArray<APawn*> Players;
-	GatherPlayers(Players);
+	TArray<APawn*> Observers;
+	GatherObservers(Observers);
 
 	// Built once for the whole sweep, not per trace. See BuildTraceParams.
 	FCollisionQueryParams TraceParams;
@@ -120,11 +121,23 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		FVector Location;
 		float Exposure;
 		float DistanceToNPC;
+
+		/** Friendly presence minus hostile presence at this spot, see TacticalSpace */
+		float SpaceScore;
 	};
 
 	const FVector OwnerLocation = GetOwner()->GetActorLocation();
 	TArray<FScoredCandidate> Scored;
 	Scored.Reserve(Candidates.Num());
+
+	// Who is standing where, once for the whole search. Cover that is safe from fire but sits alone
+	// inside the enemy formation is not cover, it is a hole in your own line.
+	TacticalSpace::FSpaceContext SpaceContext;
+	TacticalSpace::BuildContext(GetOwner(), SpaceContext);
+
+	TacticalSpace::FSpaceWeights SpaceWeights;
+	SpaceWeights.AllyWeight = AllyCohesionWeight;
+	SpaceWeights.EnemyWeight = EnemyAvoidWeight;
 
 	for (const FVector& Candidate : Candidates)
 	{
@@ -142,8 +155,9 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		}
 
 		Scored.Add({ Candidate,
-			ComputeExposure(Candidate, Players, TraceParams),
-			static_cast<float>(FVector::Dist2D(Candidate, OwnerLocation)) });
+			ComputeExposure(Candidate, Observers, TraceParams),
+			static_cast<float>(FVector::Dist2D(Candidate, OwnerLocation)),
+			TacticalSpace::ScorePosition(SpaceContext, Candidate, SpaceWeights) });
 	}
 
 	if (Scored.Num() == 0)
@@ -154,13 +168,19 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		return;
 	}
 
-	// Lowest exposure wins; nearest breaks the tie, so an enemy does not cross the arena for a spot
-	// no better than the one at its feet.
-	Scored.Sort([](const FScoredCandidate& A, const FScoredCandidate& B)
+	// Exposure and ground, in one number, with distance breaking ties so an enemy does not cross the
+	// arena for a spot no better than the one at its feet. Exposure used to decide alone, which is
+	// how NPCs ended up scattered through the enemy squad: a lone covered corner behind their line
+	// scored better than a mediocre one next to a teammate.
+	const float SpaceScale = SpaceScoreWeight;
+	Scored.Sort([SpaceScale](const FScoredCandidate& A, const FScoredCandidate& B)
 	{
-		if (!FMath::IsNearlyEqual(A.Exposure, B.Exposure))
+		const float RankA = A.Exposure - SpaceScale * A.SpaceScore;
+		const float RankB = B.Exposure - SpaceScale * B.SpaceScore;
+
+		if (!FMath::IsNearlyEqual(RankA, RankB, 0.01f))
 		{
-			return A.Exposure < B.Exposure;
+			return RankA < RankB;
 		}
 		return A.DistanceToNPC < B.DistanceToNPC;
 	});
@@ -172,7 +192,7 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	for (int32 Index = 0; Index < ProbeCount; ++Index)
 	{
 		FVector PeekLocation = FVector::ZeroVector;
-		if (!ProbePeekLocation(Scored[Index].Location, Players, TraceParams, PeekLocation))
+		if (!ProbePeekLocation(Scored[Index].Location, Observers, TraceParams, PeekLocation))
 		{
 			// No corner here. Not a failure, just not cover: this is what separates a real angle
 			// from open ground that happens to be far away.
@@ -194,7 +214,7 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		{
 			DrawCandidates.Add(Entry.Location);
 		}
-		DrawDebugForResult(DrawCandidates, Players, TraceParams);
+		DrawDebugForResult(DrawCandidates, Observers, TraceParams);
 	}
 
 	if (!Chosen.bValid)
@@ -253,13 +273,13 @@ float UCoverFinderComponent::EvaluateCurrentExposure() const
 		return 0.0f;
 	}
 
-	TArray<APawn*> Players;
-	GatherPlayers(Players);
+	TArray<APawn*> Observers;
+	GatherObservers(Observers);
 
 	FCollisionQueryParams TraceParams;
 	BuildTraceParams(TraceParams);
 
-	return ComputeExposure(CurrentCover.HideLocation, Players, TraceParams);
+	return ComputeExposure(CurrentCover.HideLocation, Observers, TraceParams);
 }
 
 bool UCoverFinderComponent::IsCoverStillGood() const
@@ -316,7 +336,7 @@ bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Poi
 	return false;
 }
 
-float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Players, const FCollisionQueryParams& Params) const
+float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params) const
 {
 	// Exposure(H) = sum over players of Threat(P) * Visible(H, P). Visible is one or zero; the
 	// weighting is what turns "hidden" into "hidden from the ones that matter". A zero means hidden
@@ -324,7 +344,7 @@ float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<
 	// perfectly good place to stand.
 	float Exposure = 0.0f;
 
-	for (APawn* const Player : Players)
+	for (APawn* const Player : Observers)
 	{
 		if (CanPlayerSee(Player, Point, Params))
 		{
@@ -349,7 +369,7 @@ bool UCoverFinderComponent::IsCoverOpenedBy(const APawn* Player) const
 		&& CanPlayerSee(Player, CurrentCover.PeekLocation, TraceParams);
 }
 
-bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const TArray<APawn*>& Players,
+bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const TArray<APawn*>& Observers,
 	const FCollisionQueryParams& Params, FVector& OutPeek) const
 {
 	const AActor* const Target = SearchTarget.Get();
@@ -407,7 +427,7 @@ bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const
 		// Both sides valid: take the one the rest of the team can see least of. That is "lean out
 		// on the angle where only the person you are shooting can see you", and it comes free from
 		// numbers this function is computing anyway rather than needing a rule of its own.
-		const float SideExposure = ComputeExposure(Projected.Location, Players, Params);
+		const float SideExposure = ComputeExposure(Projected.Location, Observers, Params);
 		if (SideExposure < BestExposure)
 		{
 			BestExposure = SideExposure;
@@ -443,27 +463,30 @@ void UCoverFinderComponent::BuildTraceParams(FCollisionQueryParams& OutParams) c
 	}
 }
 
-void UCoverFinderComponent::GatherPlayers(TArray<APawn*>& OutPlayers) const
+void UCoverFinderComponent::GatherObservers(TArray<APawn*>& OutObservers) const
 {
-	OutPlayers.Reset();
-	CoopPlayers::GetAll(GetWorld(), OutPlayers);
+	// Everyone this NPC is hiding FROM, which is everyone hostile to it. Players were the whole
+	// answer while they were the only other side; with factions a rifleman needs the corner that is
+	// hidden from the faction shooting at it, and that is not necessarily the corner hidden from the
+	// players.
+	PolarityTeams::GatherHostilePawns(GetOwner(), OutObservers);
 }
 
-float UCoverFinderComponent::GetThreatFor(APawn* Player) const
+float UCoverFinderComponent::GetThreatFor(APawn* Observer) const
 {
 	if (const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(GetOwner()))
 	{
 		// The same weight target selection uses, so the push walking towards a player and the peek
 		// hiding from them are two readings of one number rather than two systems disagreeing.
-		return Coordinator->GetPlayerThreat(Player);
+		return Coordinator->GetThreatFor(Observer);
 	}
 
-	// No coordinator: every player counts the same, so exposure degrades to "how many can see me",
+	// No coordinator: every observer counts the same, so exposure degrades to "how many can see me",
 	// which is still a usable ordering.
 	return 1.0f;
 }
 
-void UCoverFinderComponent::DrawDebugForResult(const TArray<FVector>& Candidates, const TArray<APawn*>& Players,
+void UCoverFinderComponent::DrawDebugForResult(const TArray<FVector>& Candidates, const TArray<APawn*>& Observers,
 	const FCollisionQueryParams& Params) const
 {
 	UWorld* const World = GetWorld();
@@ -474,7 +497,7 @@ void UCoverFinderComponent::DrawDebugForResult(const TArray<FVector>& Candidates
 
 	for (const FVector& Candidate : Candidates)
 	{
-		const float Exposure = ComputeExposure(Candidate, Players, Params);
+		const float Exposure = ComputeExposure(Candidate, Observers, Params);
 
 		// Green is hidden from everybody who matters, red is standing in the open. The point of
 		// drawing every candidate and not just the winner is that the interesting failure is "it

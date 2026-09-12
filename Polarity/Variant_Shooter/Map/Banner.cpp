@@ -123,11 +123,6 @@ void ABannerActor::Break(AActor* Breaker)
 	OnBroken.Broadcast(this);
 }
 
-FVector ABannerActor::GetLootBurstOrigin() const
-{
-	return Mesh->GetComponentLocation() + FVector(0.0f, 0.0f, LootBurstHeight);
-}
-
 void ABannerActor::ShatterIntoGibs()
 {
 	// The standing mesh goes whatever happens. A banner that is still there after being broken is a

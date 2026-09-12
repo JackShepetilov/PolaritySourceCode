@@ -62,23 +62,84 @@ UShooterGameSettings* UShooterSettingsSubsystem::GetSettings() const
 
 // ==================== Quick Access Methods ====================
 
+// The old pair now reads and writes the one scale, so widgets already bound to it keep working
+// and start meaning something: the number they show is the Apex number.
+
 float UShooterSettingsSubsystem::GetMouseSensitivity() const
 {
-	if (UShooterGameSettings* Settings = GetSettings())
-	{
-		return Settings->MouseSensitivity;
-	}
-	return 1.0f;
+	return GetLookSensitivity();
 }
 
 void UShooterSettingsSubsystem::SetMouseSensitivity(float NewSensitivity)
 {
+	SetLookSensitivity(NewSensitivity);
+}
+
+float UShooterSettingsSubsystem::GetLookSensitivity() const
+{
 	if (UShooterGameSettings* Settings = GetSettings())
 	{
-		Settings->MouseSensitivity = FMath::Clamp(NewSensitivity, 0.1f, 10.0f);
-		OnSensitivityChanged.Broadcast(Settings->MouseSensitivity);
+		return Settings->LookSensitivity;
+	}
+	return 1.0f;
+}
+
+void UShooterSettingsSubsystem::SetLookSensitivity(float NewSensitivity)
+{
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		Settings->LookSensitivity = FMath::Clamp(NewSensitivity, 0.05f, 20.0f);
+		// Applied on the spot: a sensitivity slider you cannot feel while dragging is useless.
+		Settings->ApplyControlSettings();
+		OnSensitivityChanged.Broadcast(Settings->LookSensitivity);
 		OnSettingsChanged.Broadcast();
 	}
+}
+
+int32 UShooterSettingsSubsystem::GetMouseDpi() const
+{
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		return Settings->MouseDpi;
+	}
+	return 800;
+}
+
+void UShooterSettingsSubsystem::SetMouseDpi(int32 NewDpi)
+{
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		// DPI never touches the turn, only the readout, so nothing needs reapplying.
+		Settings->MouseDpi = FMath::Clamp(NewDpi, 100, 32000);
+		OnSettingsChanged.Broadcast();
+	}
+}
+
+float UShooterSettingsSubsystem::GetCentimetersPer360() const
+{
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		return Settings->GetCentimetersPer360();
+	}
+	return 0.0f;
+}
+
+float UShooterSettingsSubsystem::GetEffectiveDpi() const
+{
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		return Settings->GetEffectiveDpi();
+	}
+	return 0.0f;
+}
+
+FText UShooterSettingsSubsystem::GetSensitivityReadout() const
+{
+	if (UShooterGameSettings* Settings = GetSettings())
+	{
+		return Settings->GetSensitivityReadout();
+	}
+	return FText::GetEmpty();
 }
 
 float UShooterSettingsSubsystem::GetFieldOfView() const
@@ -203,7 +264,7 @@ void UShooterSettingsSubsystem::NotifySettingsChanged()
 	if (UShooterGameSettings* Settings = GetSettings())
 	{
 		OnAudioSettingsChanged.Broadcast(Settings->MasterVolume);
-		OnSensitivityChanged.Broadcast(Settings->MouseSensitivity);
+		OnSensitivityChanged.Broadcast(Settings->LookSensitivity);
 		OnFOVChanged.Broadcast(Settings->FieldOfView);
 	}
 }

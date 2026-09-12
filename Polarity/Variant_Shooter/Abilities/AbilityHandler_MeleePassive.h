@@ -33,6 +33,16 @@ class POLARITY_API UAbilityHandler_MeleePassive : public UAbilityHandler
 public:
 	virtual float ModifyLungeRange(const AActor* Target, float BaseRange) const override;
 
+	/** The charged smoke jump's numbers at the current level. Same both-sides contract as the reach
+	 *  above: the movement simulation asks it on the owning client, on the server and again on every
+	 *  replay, so it stays a pure read of the level data. */
+	virtual bool GetSmokeJumpParams(FSmokeJumpParams& Out) const override;
+
+	/** The arc the blade covers during a slide, and how much it eats, at the current level. Same
+	 *  both-sides contract as the two above: the server asks it when a shot lands, and every machine
+	 *  asks it to decide whether to hold the guard pose. */
+	virtual bool GetSlideBlockParams(FSlideBlockParams& Out) const override;
+
 protected:
 	/** How much of this actor's shield is gone, 0 (untouched) to 1 (stripped).
 	 *

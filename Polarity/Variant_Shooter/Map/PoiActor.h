@@ -111,25 +111,29 @@ public:
 	bool IsBannerBroken() const;
 
 	// ==================== Loot ====================
+	//
+	// A point owns no loot. It owns what it is WORTH, and the generator turns that into things:
+	// loot lives on ALootSheet, sheets land on ALootAnchor, anchors are placed by hand inside a
+	// point, and every one of them asks the point below for these two numbers.
 
-	/** What this point puts on the floor. With a banner it waits until the banner is broken; without
-	 *  one it goes down when the point loads. Money entries also feed the budget audit: the whole
-	 *  map should carry a quarter to a third of the team's cells. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot")
-	TArray<FPoiLootEntry> Loot;
-
-	/** Loot dropped by a banner lands within this radius of it (cm), not scattered over the whole
-	 *  point: it is a pile somebody just opened, and it should read as one. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "50.0"))
-	float BannerLootRadius = 400.0f;
-
-	/** How hard a banner throws its loot out (cm/s). Zero lays it on the floor the way a point
-	 *  without a banner does.
+	/** How rich this place is, 0..1. Continuous on purpose [author, 2026-09-02]: there are no
+	 *  Basic / Mid / High presets, so two points can differ by a hair instead of by a bucket.
 	 *
-	 *  Pickups already simulate physics on the server, so this is a real throw and not an
-	 *  animation: the pile leaves the banner, bounces and settles wherever it settles. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "0.0"))
-	float BannerLootImpulse = 420.0f;
+	 *  Set by hand for now. A later pass hands out roles and quality across the map procedurally
+	 *  [author, 2026-09-02], and that pass writes this through SetLootQuality rather than
+	 *  replacing it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LootQuality = 0.35f;
+
+	/** How far one thing here can stray from that quality, 0..1. Zero makes the place hand out
+	 *  exactly what it is worth every single time, which is a place nobody searches twice. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "POI|Loot", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LootSpread = 0.15f;
+
+	/** For the procedural pass that will hand these out. Takes effect for every sheet rolled after
+	 *  it: a point already searched keeps what it gave. */
+	UFUNCTION(BlueprintCallable, Category = "POI|Loot")
+	void SetLootQuality(float InQuality, float InSpread);
 
 	// ==================== Queries ====================
 
@@ -153,11 +157,6 @@ protected:
 	/** Put the garrison down. Runs once per run, guarded by the director's war state, so a sublevel
 	 *  that unloads and loads again does not refill the point with fresh enemies. */
 	void SpawnGarrisonOnce();
-
-	/** Same rule as the garrison, for the loot. Origin is where the pile comes from: the point
-	 *  itself when it loads with no banner, the banner when one is broken. Impulse above zero
-	 *  throws it out of Origin instead of laying it on the ground under Origin. */
-	void SpawnLootOnce(const FVector& Origin, float Radius, float Impulse = 0.0f);
 
 	URunDirectorSubsystem* GetDirector() const;
 

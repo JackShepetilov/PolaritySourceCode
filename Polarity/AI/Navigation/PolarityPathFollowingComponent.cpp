@@ -1,4 +1,4 @@
-// PolarityPathFollowingComponent.cpp
+﻿// PolarityPathFollowingComponent.cpp
 // Custom path following that handles NavLink traversal via character jumps
 
 #include "PolarityPathFollowingComponent.h"
@@ -105,7 +105,7 @@ void UPolarityPathFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
 	}
 
 	// [NAV_DEBUG] Log every segment to see if NavLinks appear in paths at all
-	UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s SetMoveSegment %d/%d Flags=%u CustomLinkId=%s IsNavLink=%s Pos=(%.0f,%.0f,%.0f)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s SetMoveSegment %d/%d Flags=%u CustomLinkId=%s IsNavLink=%s Pos=(%.0f,%.0f,%.0f)"),
 		GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 		SegmentStartIndex, PathPoints.Num() - 1,
 		CurrentPoint.Flags,
@@ -117,7 +117,7 @@ void UPolarityPathFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
 	{
 		const FVector& JumpEnd = PathPoints[NextIndex].Location;
 
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP TRIGGERED seg %d -> (%.0f, %.0f, %.0f)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP TRIGGERED seg %d -> (%.0f, %.0f, %.0f)"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 			SegmentStartIndex,
 			JumpEnd.X, JumpEnd.Y, JumpEnd.Z);
@@ -145,7 +145,7 @@ void UPolarityPathFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
 				// LinkPoint = navlink entry, PathPoints[i+1] = exit. Jump once we're at the entry.
 				if (FVector::Dist2D(MeleeLoc, LinkPoint.Location) <= EntryTriggerDist2D)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP TRIGGERED (reached entry; curSeg %d, link@%d) -> (%.0f,%.0f,%.0f)"),
+					UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP TRIGGERED (reached entry; curSeg %d, link@%d) -> (%.0f,%.0f,%.0f)"),
 						GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 						SegmentStartIndex, i,
 						PathPoints[i + 1].Location.X, PathPoints[i + 1].Location.Y, PathPoints[i + 1].Location.Z);
@@ -234,7 +234,7 @@ void UPolarityPathFollowingComponent::UpdatePathSegment()
 				// [NAV_DEBUG] Outcome: REACHED the destination (good) or FLIGHT time elapsed while
 				// still short. On success expect airAge ~= flight (NOT half) and landZ ~= destZ.
 				const FVector LandPos = Character->GetActorLocation();
-				UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP LAND cond=%s airAge=%.2f/flight=%.2f dist=%.0f landZ=%.0f destZ=%.0f"),
+				UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP LAND cond=%s airAge=%.2f/flight=%.2f dist=%.0f landZ=%.0f destZ=%.0f"),
 					GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 					(DistToDest <= JumpLandingTolerance) ? TEXT("REACHED") : TEXT("FLIGHT_ELAPSED"),
 					AirAge, Flight, DistToDest, LandPos.Z, JumpDestination.Z);
@@ -247,7 +247,7 @@ void UPolarityPathFollowingComponent::UpdatePathSegment()
 		// Timeout safety (wall-clock).
 		if (AirAge >= MaxJumpDuration)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP TIMEOUT after %.2fs (MaxJumpDuration=%.1f)"),
+			UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP TIMEOUT after %.2fs (MaxJumpDuration=%.1f)"),
 				GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 				AirAge, MaxJumpDuration);
 			LandCharacter(GetCharacterFromOwner(this));
@@ -331,7 +331,7 @@ void UPolarityPathFollowingComponent::ExecuteJump(const FVector& EndPos)
 	// Hard override — NavLink jumps manually blocked
 	if (!bAllowNavLinkJumps)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP BLOCKED: bAllowNavLinkJumps=false"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP BLOCKED: bAllowNavLinkJumps=false"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"));
 		AIOwner->GetPathFollowingComponent()->AbortMove(*AIOwner, FPathFollowingResultFlags::MovementStop);
 		return;
@@ -340,7 +340,7 @@ void UPolarityPathFollowingComponent::ExecuteJump(const FVector& EndPos)
 	ACharacter* Character = Cast<ACharacter>(AIOwner->GetPawn());
 	if (!Character) return;
 
-	UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP EXECUTING to (%.0f,%.0f,%.0f)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP EXECUTING to (%.0f,%.0f,%.0f)"),
 		GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 		EndPos.X, EndPos.Y, EndPos.Z);
 
@@ -412,7 +412,7 @@ void UPolarityPathFollowingComponent::ExecuteJump(const FVector& EndPos)
 	// and compare against how the jump actually resolves (LAND / ABORTED / TIMEOUT below).
 	{
 		const FVector HorizDelta(Delta.X, Delta.Y, 0.0f);
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP LAUNCH V=(%.0f,%.0f,%.0f) Vz=%.0f flight=%.2f HDist=%.0f VDelta=%.0f g=%.0f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP LAUNCH V=(%.0f,%.0f,%.0f) Vz=%.0f flight=%.2f HDist=%.0f VDelta=%.0f g=%.0f"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"),
 			LaunchVelocity.X, LaunchVelocity.Y, LaunchVelocity.Z,
 			VzUp, FlightTime, HorizDelta.Size(), Delta.Z, EffectiveGravityZ);
@@ -502,7 +502,7 @@ void UPolarityPathFollowingComponent::AbortMove(const UObject& Instigator, FPath
 	// the explicit escape hatch if we ever need a hard cancel.
 	if (bIsPerformingJump)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s AbortMove IGNORED mid-jump (flags=%u) — letting the arc finish"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s AbortMove IGNORED mid-jump (flags=%u) — letting the arc finish"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"), (uint32)AbortFlags);
 		return;
 	}
@@ -520,7 +520,7 @@ FAIRequestID UPolarityPathFollowingComponent::RequestMove(const FAIMoveRequest& 
 	// NPC walks the last stretch to the now-current target. Deferring a few hundred ms is invisible.
 	if (bIsPerformingJump)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s RequestMove DEFERRED mid-jump — keeping the arc"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s RequestMove DEFERRED mid-jump — keeping the arc"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"));
 		return GetCurrentRequestId();
 	}
@@ -537,7 +537,7 @@ void UPolarityPathFollowingComponent::OnPathFinished(const FPathFollowingResult&
 		// (the "stomp": the climb died at t~0.2 with flags=136/24). The arc is now self-driven by
 		// TickComponent and lands on its own; we only let the base reset its path-following state. After
 		// touchdown the AI's next MoveTo resumes the approach to the now-current target.
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s move torn down mid-jump (flags=%u t=%.2f) — NOT dropping, arc continues via tick"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s move torn down mid-jump (flags=%u t=%.2f) — NOT dropping, arc continues via tick"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"), Result.Flags, JumpTimeElapsed);
 	}
 
@@ -548,7 +548,7 @@ void UPolarityPathFollowingComponent::CancelJump()
 {
 	if (bIsPerformingJump)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NAV_DEBUG] %s JUMP CANCELLED externally t=%.2f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[NAV_DEBUG] %s JUMP CANCELLED externally t=%.2f"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("???"), JumpTimeElapsed);
 
 		LandCharacter(GetCharacterFromOwner(this));

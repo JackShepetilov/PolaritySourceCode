@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "Variant_Shooter/AI/ShooterAIController.h"
@@ -13,6 +13,9 @@
 #include "EngineUtils.h"  // For TActorIterator
 #include "AI/Navigation/PathFollowingAgentInterface.h"
 #include "AI/Navigation/PolarityPathFollowingComponent.h"
+#include "AI/FactionContactMemory.h"
+#include "Coop/CoopPlayers.h"
+#include "AI/PolarityTeams.h"
 
 AShooterAIController::AShooterAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPolarityPathFollowingComponent>(TEXT("PathFollowingComponent")))
@@ -82,6 +85,13 @@ void AShooterAIController::OnPossess(APawn* InPawn)
 		// add the team tag to the pawn
 		NPC->Tags.Add(TeamTag);
 
+		// Take the side from the pawn, so the two team ids cannot disagree.
+		// Both objects have to carry one (a stimulus source answers through the actor, a perception
+		// listener through its controller), and until now they were two independent numbers that
+		// happened to both say 1. With factions the pawn is where a designer sets the side, so the
+		// controller follows it rather than holding a second opinion.
+		SetGenericTeamId(FGenericTeamId::GetTeamIdentifier(NPC));
+
 		// subscribe to the pawn's OnDeath delegate
 		NPC->OnNPCDeath.AddDynamic(this, &AShooterAIController::OnPawnDeath);
 
@@ -94,6 +104,45 @@ void AShooterAIController::OnPossess(APawn* InPawn)
 		// Force perception update on possess (needed for checkpoint respawn)
 		ForcePerceptionUpdate();
 	}
+}
+
+void AShooterAIController::BroadcastContactAt(AActor* Enemy, const FVector& Location, bool bSeenNow)
+{
+	if (!Enemy)
+	{
+		return;
+	}
+
+	if (UFactionContactMemory* const Memory = UFactionContactMemory::Get(this))
+	{
+		Memory->ReportContact(GetGenericTeamId().GetId(), Enemy, Location, GetPawn(), bSeenNow);
+	}
+}
+
+void AShooterAIController::BroadcastContact(AActor* Enemy)
+{
+	if (Enemy)
+	{
+		BroadcastContactAt(Enemy, Enemy->GetActorLocation(), /*bSeenNow*/ true);
+	}
+}
+
+bool AShooterAIController::IsHostileTo(const AActor* Other) const
+{
+	if (!Other || Other == GetPawn())
+	{
+		return false;
+	}
+
+	if (PolarityTeams::ShouldIgnorePlayers() && CoopPlayers::IsPlayer(Other))
+	{
+		return false;
+	}
+
+	// Neutral, not hostile, for anything that has no side at all: the engine's default attitude
+	// answers Neutral when the other actor does not implement the team interface, so props, pickups
+	// and decoys stay out of this the same way they stayed out of the Player-tag test.
+	return FGenericTeamId::GetAttitude(this, Other) == ETeamAttitude::Hostile;
 }
 
 void AShooterAIController::OnPawnDeath(AShooterNPC* DeadNPC)
@@ -198,11 +247,23 @@ void AShooterAIController::ResolveTargetIntents()
 		return Intent.ExpiryTime > 0.0f && Now >= Intent.ExpiryTime;
 	});
 
+	// Testing aid: with polarity.ai.IgnorePlayers on, a player is not a target for anybody. Filtered
+	// here rather than at acquisition so that flipping the cvar mid-run also drops the targets that
+	// were already standing, and so no path into the AI (perception, arena script, decoy) can put a
+	// player back. Lets a faction war be watched from inside without being the most interesting
+	// thing on the battlefield.
+	const bool bIgnorePlayers = PolarityTeams::ShouldIgnorePlayers();
+
 	// Highest priority wins; equal priorities go to whoever asked most recently, which is how
 	// perception and the arena behaved back when they simply overwrote each other.
 	const FTargetIntent* Winner = nullptr;
 	for (const FTargetIntent& Intent : Intents)
 	{
+		if (bIgnorePlayers && CoopPlayers::IsPlayer(Intent.Target.Get()))
+		{
+			continue;
+		}
+
 		if (!Winner
 			|| Intent.Source > Winner->Source
 			|| (Intent.Source == Winner->Source && Intent.SetTime > Winner->SetTime))
@@ -257,7 +318,7 @@ void AShooterAIController::DistractTo(AActor* Decoy, float Seconds)
 
 	if (bIsNew)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s distracted by %s for %.1fs"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s distracted by %s for %.1fs"),
 			*GetNameSafe(GetPawn()), *Decoy->GetName(), Seconds);
 	}
 }
@@ -289,7 +350,7 @@ void AShooterAIController::EndDistraction()
 	// target, so the NPC would stand there shooting the prop forever. Now dropping the intent is
 	// enough: whatever perception last asked for wins again, and if it asked for nothing the answer
 	// becomes null on its own and the search restarts.
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s stops being distracted by %s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s stops being distracted by %s"),
 		*GetNameSafe(GetPawn()), *Previous->GetName());
 }
 
@@ -326,6 +387,14 @@ void AShooterAIController::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimul
 		{
 			// Enemy lost (sight sense returned false = no longer visible)
 			OnEnemyLost.Broadcast(Actor);
+		}
+
+		// The side learns what this pair of eyes learned. Both edges matter and they mean different
+		// things: gaining sight writes a position somebody is looking at, losing it leaves the last
+		// position with nobody watching, which is exactly the thing worth searching.
+		if (IsHostileTo(Actor))
+		{
+			BroadcastContactAt(Actor, Stimulus.StimulusLocation, Stimulus.WasSuccessfullySensed());
 		}
 	}
 

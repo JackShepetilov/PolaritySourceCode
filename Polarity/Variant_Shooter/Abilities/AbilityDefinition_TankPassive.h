@@ -100,7 +100,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank Passive|Levels", meta = (TitleProperty = "KillDropRadius"))
 	TArray<FTankPassiveLevelStats> Levels;
 
-	/** What an enemy killed nearby drops. Left empty means the enemy's own HealthPickupClass is used,
+	/** What an enemy killed nearby drops. Left empty means the health pickup in the enemy's own loot list is used,
 	 *  which is almost always what is wanted: one kind of health pickup in the game. Set it only to
 	 *  make the Tank's bonus drop visibly different from an ordinary one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank Passive")

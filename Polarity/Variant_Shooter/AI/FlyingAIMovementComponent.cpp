@@ -133,6 +133,25 @@ void UFlyingAIMovementComponent::FlyToActor(AActor* InTargetActor, float CustomA
 	StuckCheckTime = 0.0f;
 }
 
+void UFlyingAIMovementComponent::FlyToLocationUnclamped(const FVector& TargetLocation, float CustomAcceptanceRadius)
+{
+	if (!CharacterOwner)
+	{
+		return;
+	}
+
+	// Clear actor target
+	TargetActor.Reset();
+
+	// Skip ValidateTargetHeight deliberately: the caller manages altitude (repair ascent).
+	CurrentTargetLocation = TargetLocation;
+	CurrentAcceptanceRadius = (CustomAcceptanceRadius > 0.0f) ? CustomAcceptanceRadius : AcceptanceRadius;
+	bIsMovingToTarget = true;
+
+	// Reset stuck detection for new movement
+	StuckCheckTime = 0.0f;
+}
+
 void UFlyingAIMovementComponent::StopMovement()
 {
 	bIsMovingToTarget = false;

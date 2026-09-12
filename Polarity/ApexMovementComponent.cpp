@@ -6,6 +6,11 @@
 #include "MovementSettings.h"
 #include "PolarityCharacter.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/Abilities/NitroGate.h"
+#include "Variant_Shooter/Abilities/NitroGateSubsystem.h"
+#include "Variant_Shooter/Abilities/AbilityComponent.h"
+#include "Variant_Shooter/Abilities/AbilityHandler.h"
+#include "AI/SmokeVisionSubsystem.h"
 #include "VelocityModifier.h"
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
@@ -344,6 +349,14 @@ float UApexMovementComponent::GetMaxSpeed() const
 		BaseSpeed = FMath::Min(BaseSpeed, MovementSettings->ADSSpeed);
 	}
 
+	// The smoke jump's wind-up. A multiplier and not a cap, unlike ADS above: the charge is a
+	// commitment, so it should take the same fraction off a walk as off a sprint. Grounded only,
+	// which costs nothing since the charge cancels itself the moment the character leaves the floor.
+	if (SmokeChargeTime > 0.0f && (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
+	{
+		BaseSpeed *= SmokeChargeMoveScale;
+	}
+
 	const float ScaledBaseSpeed = BaseSpeed * DamageSpeedMultiplier * ExternalSpeedMultiplier;
 	return bExternalMaxSpeedOverride ? FMath::Max(ScaledBaseSpeed, ExternalMaxSpeedOverride) : ScaledBaseSpeed;
 }
@@ -576,6 +589,12 @@ void UApexMovementComponent::NotifyJumpPerformed(bool bWasAirJump)
 
 bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 {
+	// A charge already owns this press: it decides the height itself and launches on release.
+	if (SmokeChargeTime > 0.0f || bWantsSmokeCharge)
+	{
+		return false;
+	}
+
 	if (!MovementSettings)
 	{
 		return Super::DoJump(bReplayingMoves, DeltaTime);
@@ -741,14 +760,14 @@ void UApexMovementComponent::StopSprint()
 	bSprintKeyHeld = false;
 }
 
-uint16 UApexMovementComponent::PackPolarityMoveFlags() const
+uint32 UApexMovementComponent::PackPolarityMoveFlags() const
 {
-	uint16 Flags = 0;
+	uint32 Flags = 0;
 	auto Set = [&Flags](bool bCondition, EPolarityMoveFlag Flag)
 	{
 		if (bCondition)
 		{
-			Flags |= static_cast<uint16>(Flag);
+			Flags |= static_cast<uint32>(Flag);
 		}
 	};
 
@@ -756,6 +775,7 @@ uint16 UApexMovementComponent::PackPolarityMoveFlags() const
 	Set(bIsSliding,         EPolarityMoveFlag::Sliding);
 	Set(bIsWallRunning,     EPolarityMoveFlag::WallRunning);
 	Set(bWantsSlideOnLand,  EPolarityMoveFlag::WantsSlideOnLand);
+	Set(bSlideInputHeld,    EPolarityMoveFlag::SlideInputHeld);
 	Set(bIsGroundDashing,   EPolarityMoveFlag::GroundDashing);
 	Set(bIsAirDashing,      EPolarityMoveFlag::AirDashing);
 	Set(bIsRedirecting,     EPolarityMoveFlag::AirDashRedirect);
@@ -772,14 +792,17 @@ uint16 UApexMovementComponent::PackPolarityMoveFlags() const
 
 	Set(bIsAiming,                EPolarityMoveFlag::Aiming);
 
+	Set(bJumpInputHeld,           EPolarityMoveFlag::JumpInputHeld);
+	Set(bWantsSmokeCharge,        EPolarityMoveFlag::SmokeJumpCharging);
+
 	return Flags;
 }
 
-void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
+void UApexMovementComponent::ApplyPolarityMoveFlags(uint32 Flags)
 {
 	auto Has = [Flags](EPolarityMoveFlag Flag)
 	{
-		return (Flags & static_cast<uint16>(Flag)) != 0;
+		return (Flags & static_cast<uint32>(Flag)) != 0;
 	};
 
 	// Plain intents: assigned straight across with no second-guessing. The byte already carries the
@@ -787,8 +810,15 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
 	// have is exactly how the two ends drift apart.
 	bWantsToSprint    = Has(EPolarityMoveFlag::WantsToSprint);
 	bWantsSlideOnLand = Has(EPolarityMoveFlag::WantsSlideOnLand);
+	bSlideInputHeld   = Has(EPolarityMoveFlag::SlideInputHeld);
 	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
 	bIsAiming         = Has(EPolarityMoveFlag::Aiming);
+
+	// The jump button and the smoke charge claimed with it. Both are plain intents for the same
+	// reason sprint is: the client already answered "am I holding it" and "was I standing in my own
+	// smoke when I pressed", and this side cannot answer either better than it did.
+	bJumpInputHeld    = Has(EPolarityMoveFlag::JumpInputHeld);
+	bWantsSmokeCharge = Has(EPolarityMoveFlag::SmokeJumpCharging);
 
 	// States that need a real entry. Each Start* sets up friction, gravity, direction and speed;
 	// a side that only flipped the bool kept simulating normally and finished the move somewhere
@@ -873,21 +903,25 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint16 Flags)
 	bGrappleWanted = Has(EPolarityMoveFlag::Grappling);
 }
 
-void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint16 Flags)
+void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint32 Flags)
 {
 	auto Has = [Flags](EPolarityMoveFlag Flag)
 	{
-		return (Flags & static_cast<uint16>(Flag)) != 0;
+		return (Flags & static_cast<uint32>(Flag)) != 0;
 	};
 
 	bWantsToSprint    = Has(EPolarityMoveFlag::WantsToSprint);
 	bIsSliding        = Has(EPolarityMoveFlag::Sliding);
 	bIsWallRunning    = Has(EPolarityMoveFlag::WallRunning);
 	bWantsSlideOnLand = Has(EPolarityMoveFlag::WantsSlideOnLand);
+	bSlideInputHeld   = Has(EPolarityMoveFlag::SlideInputHeld);
 	bIsGroundDashing  = Has(EPolarityMoveFlag::GroundDashing);
 	bIsAirDashing     = Has(EPolarityMoveFlag::AirDashing);
 	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
 	bIsMantling       = Has(EPolarityMoveFlag::Mantling);
+
+	bJumpInputHeld    = Has(EPolarityMoveFlag::JumpInputHeld);
+	bWantsSmokeCharge = Has(EPolarityMoveFlag::SmokeJumpCharging);
 
 	bMeleeLungeWanted       = Has(EPolarityMoveFlag::MeleeLunging);
 	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
@@ -931,13 +965,13 @@ bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& 
 	// case: a character that is walking normally has none of these set and pays one bit per move.
 	// Widening the flags from a byte to a word costs nothing while nothing is happening, and one
 	// extra byte only on the moves that actually carry a decision.
-	SerializeOptionalValue<uint16>(Ar.IsSaving(), Ar, PolarityFlags, 0);
+	SerializeOptionalValue<uint32>(Ar.IsSaving(), Ar, PolarityFlags, 0);
 
 	// The lunge destination rides along only on the moves that have one, and the homing flag above is
 	// its presence bit — so it costs nothing at all until a swing is actually flying at somebody, and
 	// a quantised position (1/10 cm, the same precision the engine sends the character's own location
 	// at) for the handful of moves that lasts.
-	if ((PolarityFlags & static_cast<uint16>(EPolarityMoveFlag::MeleeLungeHoming)) != 0)
+	if ((PolarityFlags & static_cast<uint32>(EPolarityMoveFlag::MeleeLungeHoming)) != 0)
 	{
 		bool bLocalSuccess = true;
 		MeleeLungeTarget.NetSerialize(Ar, PackageMap, bLocalSuccess);
@@ -953,7 +987,7 @@ bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& 
 
 	// The anchor rides along on the same terms, with the Grappling flag as its presence bit: nothing
 	// at all while nobody is on a line, one quantised position for the second or two that one lasts.
-	if ((PolarityFlags & static_cast<uint16>(EPolarityMoveFlag::Grappling)) != 0)
+	if ((PolarityFlags & static_cast<uint32>(EPolarityMoveFlag::Grappling)) != 0)
 	{
 		bool bAnchorSuccess = true;
 		GrappleAnchor.NetSerialize(Ar, PackageMap, bAnchorSuccess);
@@ -1065,6 +1099,8 @@ FSavedMove_Polarity::FSavedMove_Polarity()
 	, SavedSlideCooldown(0.0f)
 	, SavedJumpHoldTimeRemaining(0.0f)
 	, SavedCurrentJumpCount(0)
+	, SavedSmokeChargeTime(0.0f)
+	, SavedSmokeJumpCooldown(0.0f)
 {
 }
 
@@ -1088,6 +1124,8 @@ void FSavedMove_Polarity::Clear()
 	SavedSlideCooldown = 0.0f;
 	SavedJumpHoldTimeRemaining = 0.0f;
 	SavedCurrentJumpCount = 0;
+	SavedSmokeChargeTime = 0.0f;
+	SavedSmokeJumpCooldown = 0.0f;
 	SavedWallRunElapsedTime = 0.0f;
 	SavedWallRunNormal = FVector::ZeroVector;
 	SavedWallRunDirection = FVector::ZeroVector;
@@ -1154,6 +1192,8 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 		SavedSlideCooldown          = Apex->SlideCooldownRemaining;
 		SavedJumpHoldTimeRemaining  = Apex->JumpHoldTimeRemaining;
 		SavedCurrentJumpCount       = Apex->CurrentJumpCount;
+		SavedSmokeChargeTime        = Apex->SmokeChargeTime;
+		SavedSmokeJumpCooldown      = Apex->SmokeJumpCooldownRemaining;
 
 		SavedWallRunElapsedTime  = Apex->WallRunElapsedTime;
 		SavedWallRunNormal       = Apex->WallRunNormal;
@@ -1201,6 +1241,8 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 		Apex->SlideCooldownRemaining      = SavedSlideCooldown;
 		Apex->JumpHoldTimeRemaining       = SavedJumpHoldTimeRemaining;
 		Apex->CurrentJumpCount            = SavedCurrentJumpCount;
+		Apex->SmokeChargeTime             = SavedSmokeChargeTime;
+		Apex->SmokeJumpCooldownRemaining  = SavedSmokeJumpCooldown;
 
 		Apex->WallRunElapsedTime  = SavedWallRunElapsedTime;
 		Apex->WallRunNormal       = SavedWallRunNormal;
@@ -1226,6 +1268,10 @@ FSavedMovePtr FNetworkPredictionData_Client_Polarity::AllocateNewMove()
 
 void UApexMovementComponent::TryCrouchSlide()
 {
+	// The button is now DOWN, and that outlives this one call: a slide ended by a jump has to be able
+	// to come back on landing without a second press. @see EPolarityMoveFlag::SlideInputHeld
+	bSlideInputHeld = true;
+
 	if (IsFalling() && !bIsWallRunning)
 	{
 		bWantsSlideOnLand = true;
@@ -1249,6 +1295,7 @@ void UApexMovementComponent::TryCrouchSlide()
 
 void UApexMovementComponent::StopCrouchSlide()
 {
+	bSlideInputHeld = false;
 	bWantsSlideOnLand = false;
 	AirCrouchHoldTime = 0.0f;
 
@@ -1421,6 +1468,113 @@ void UApexMovementComponent::EndSlide()
 	}
 
 	OnSlideEnded.Broadcast();
+}
+
+// ==================== Nitro gate ====================
+
+void UApexMovementComponent::UpdateNitroGate()
+{
+	const UWorld* World = GetWorld();
+	if (!World || !UpdatedComponent || !CharacterOwner)
+	{
+		return;
+	}
+
+	UNitroGateSubsystem* GateRegistry = World->GetSubsystem<UNitroGateSubsystem>();
+	if (!GateRegistry)
+	{
+		return;
+	}
+
+	// The capsule's bottom, not the actor's origin: the pad is a thing on the floor and the height
+	// window it accepts is measured from the floor.
+	const float HalfHeight = CharacterOwner->GetCapsuleComponent()
+		? CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()
+		: 0.0f;
+	const FVector Feet = UpdatedComponent->GetComponentLocation() - FVector(0.0f, 0.0f, HalfHeight);
+
+	ANitroGate* Gate = GateRegistry->FindGateUnder(Feet);
+
+	// Same answer as last move, including "no gate both times": nothing to do. This is the edge
+	// detection, and it is what makes the launch happen once per entry.
+	if (Gate == CurrentNitroGate.Get())
+	{
+		return;
+	}
+
+	CurrentNitroGate = Gate;
+
+	if (!Gate)
+	{
+		return;
+	}
+
+	const APolarityCharacter* Character = Cast<APolarityCharacter>(CharacterOwner);
+	if (!Gate->WantsToBoost(Character))
+	{
+		return;
+	}
+
+	// Refuse rather than fight: a mantle, a wallrun or a dash owns Velocity outright for its
+	// duration, and a launch on top of one would be two systems writing the same vector on the same
+	// frame. Airborne is refused for the same reason it is a gate on the FLOOR - you have to step on
+	// it, not fly over it.
+	if (!IsMovingOnGround() || bIsMantling || bIsWallRunning || bIsGroundDashing || bIsAirDashing
+		|| bIsMeleeLunging || bIsGrappling)
+	{
+		return;
+	}
+
+	// Direction: keep going the way you came in, and fall back to the way the gate faces for
+	// somebody who was standing still on it. Both are values every machine has - the velocity
+	// travels in the saved move and the facing is replicated on the gate - so the client, the server
+	// and a replay pick the same one.
+	FVector Direction = Velocity.GetSafeNormal2D();
+	if (Direction.IsNearlyZero())
+	{
+		Direction = Gate->GetPadForward();
+	}
+	if (Direction.IsNearlyZero())
+	{
+		return;
+	}
+
+	const float LaunchSpeed = Gate->GetBoostSpeed();
+
+	// The slide's own entry rules are the wrong judge here. CanSlide refuses below
+	// SlideMinStartSpeed and inside the post-slide cooldown, and both would mean "the gate does
+	// nothing for the player who walked onto it", which is the one thing it must always do.
+	SlideCooldownRemaining = 0.0f;
+	Velocity = Direction * LaunchSpeed + FVector(0.0f, 0.0f, Velocity.Z);
+
+	if (!bIsSliding)
+	{
+		// StartSlide hands out the ordinary entry boost and books it against the fatigue counter.
+		// The gate's speed is a fixed number that owes nothing to the slide's economy, so the boost
+		// is overwritten below and the fatigue it charged is handed back - otherwise stepping on a
+		// gate would quietly tax the player's next real slide.
+		const float SavedBoostCooldown = SlideBoostCooldownRemaining;
+		const int32 SavedFatigue = SlideFatigueCounter;
+
+		StartSlide();
+
+		SlideBoostCooldownRemaining = SavedBoostCooldown;
+		SlideFatigueCounter = SavedFatigue;
+
+		if (!bIsSliding)
+		{
+			// Something else refused the slide after all. Leave the velocity alone rather than
+			// launching a player who is not sliding at a slide's speed.
+			return;
+		}
+	}
+
+	Velocity = Direction * LaunchSpeed + FVector(0.0f, 0.0f, Velocity.Z);
+	SlideDirection = Direction;
+
+	UE_LOG(LogSlide, Log, TEXT("Nitro gate launch: %s at %.0f u/s"), *GetNameSafe(CharacterOwner), LaunchSpeed);
+
+	Gate->NotifyLaunched(Feet);
 }
 
 // ==================== Smooth Crouch ====================
@@ -3237,7 +3391,11 @@ void UApexMovementComponent::UpdateGrappleGravity(const FVector& AimDir)
 		const FVector WishDir = Acceleration.GetSafeNormal();
 		if (!WishDir.IsNearlyZero())
 		{
-			const FVector ViewDir = CharacterOwner->GetViewRotation().Vector();
+			// Control rotation, NOT GetViewRotation: AShooterCharacter overrides the latter to add
+			// the weapon recoil layer, and that layer is client-local state which does not travel
+			// in the saved move. Reading it here would let a shot fired mid-grapple decide gravity
+			// differently on the client and on the server, and the client would be corrected for it.
+			const FVector ViewDir = CharacterOwner->GetControlRotation().Vector();
 			const bool bPushingForward = FVector::DotProduct(WishDir, ViewDir.GetSafeNormal2D()) > 0.5f;
 
 			// Compared as pitch angles rather than as raw Z, so the margin means the same thing
@@ -3480,6 +3638,32 @@ void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSecon
 		}
 	}
 
+	// A held slide button keeps asking for the landing slide, every airborne frame.
+	//
+	// This is the whole fix for "slide does not work after a slide jump": the only thing that ever
+	// set bWantsSlideOnLand was the button's PRESS, and jumping out of a slide clears it, so a player
+	// who never let go got nothing on landing. Re-asserting it here rather than in the input callback
+	// is what makes it survive the network: this hook runs inside the movement simulation, so the
+	// server and the client's own replay reach the same answer from the same flag.
+	//
+	// Wallrun and the dashes are excluded because they own the character's velocity and end in their
+	// own ways; a slide armed underneath them would fire the moment they finish.
+	if (bSlideInputHeld && IsFalling() && !bIsWallRunning && !bIsAirDashing && !bIsMantling)
+	{
+		bWantsSlideOnLand = true;
+	}
+
+	// Ahead of the chain below rather than inside it: stepping onto a nitro gate STARTS a slide, so
+	// it has to be decided before the chain reads bIsSliding, and it refuses on its own for every
+	// state in that chain that owns Velocity. Here for the same reason as everything else in this
+	// function - it writes Velocity, so it belongs in the simulated move.
+	UpdateNitroGate();
+
+	// Next to the gate above and for the same reason: it writes Velocity, so it belongs in the
+	// simulated move. Ahead of the chain below because a charge REFUSES while any of those states is
+	// running, and it has to see them as the move found them.
+	UpdateSmokeJump(DeltaSeconds);
+
 	// Exactly the chain that used to sit at the top of TickComponent, in the same order. It runs
 	// here because the engine calls this from inside PerformMovement, before the move is integrated,
 	// which puts it in the simulation the server replays and a corrected client re-runs.
@@ -3657,6 +3841,10 @@ void UApexMovementComponent::OnMovementUpdated(float DeltaSeconds, const FVector
 	{
 		WallBounceCooldownRemaining -= DeltaSeconds;
 	}
+	if (SmokeJumpCooldownRemaining > 0.0f)
+	{
+		SmokeJumpCooldownRemaining = FMath::Max(0.0f, SmokeJumpCooldownRemaining - DeltaSeconds);
+	}
 
 	// The dash cooldowns also drive a HUD delegate, which must fire exactly once when the cooldown
 	// actually runs out and not again on every replay of the same move.
@@ -3825,8 +4013,23 @@ void UApexMovementComponent::ApplyAirStrafe(float DeltaTime)
 
 void UApexMovementComponent::UpdateJumpHold(float DeltaTime)
 {
-	if (!MovementSettings || !bJumpHeld || JumpHoldTimeRemaining <= 0.0f)
+	if (!MovementSettings || !bJumpHeld)
 	{
+		return;
+	}
+
+	// The lift ends when the button comes up, which is the whole point of a hold.
+	//
+	// It used to end on nothing at all: bJumpHeld was set when a jump started and never cleared
+	// anywhere, so JumpHoldForce was handed to EVERY jump for the full JumpHoldTime whether the key
+	// was down or not. That made JumpHoldTime a flat addition to JumpZVelocity and the "hold" in its
+	// name a description of a mechanic that was not running. Now that the button state travels with
+	// the move (@see EPolarityMoveFlag::JumpInputHeld) the server and every replay agree about it,
+	// so a tap is a lower jump on every machine instead of only on the one reading the keyboard.
+	if (!bJumpInputHeld || JumpHoldTimeRemaining <= 0.0f)
+	{
+		bJumpHeld = false;
+		JumpHoldTimeRemaining = 0.0f;
 		return;
 	}
 
@@ -3836,6 +4039,200 @@ void UApexMovementComponent::UpdateJumpHold(float DeltaTime)
 	{
 		Velocity.Z += MovementSettings->JumpHoldForce * DeltaTime;
 	}
+}
+
+// ==================== Charged jump out of one's own smoke ====================
+
+/** A charge shorter than this fraction of the full one is treated as a tap: an ordinary jump at the
+ *  ordinary height, and no cooldown. It is what keeps the mechanic from eating a jump when a player
+ *  standing in his own smoke simply wanted to hop over something. */
+static constexpr float SmokeJumpMinChargeAlpha = 0.15f;
+
+void UApexMovementComponent::SetJumpInputHeld(bool bHeld)
+{
+	// Input only. What it means for the jump is decided inside the simulated move, on every machine,
+	// so that the owning client, the server and a replay all end the lift on the same frame.
+	bJumpInputHeld = bHeld;
+}
+
+bool UApexMovementComponent::GetSmokeJumpParams(FSmokeJumpParams& Out) const
+{
+	// Asked through the ability component rather than by knowing about any particular class, exactly
+	// as the lunge reach is: the Melee's passive answers, every other passive and the absence of one
+	// says no, and nothing here learns which is which.
+	const AActor* Owner = GetOwner();
+	const UAbilityComponent* Abilities = Owner ? Owner->FindComponentByClass<UAbilityComponent>() : nullptr;
+	const UAbilityHandler* Passive = Abilities ? Abilities->GetPassiveHandler() : nullptr;
+	return Passive && Passive->GetSmokeJumpParams(Out);
+}
+
+bool UApexMovementComponent::CanStartSmokeCharge() const
+{
+	if (!CharacterOwner || !UpdatedComponent || bWantsSmokeCharge || SmokeChargeTime > 0.0f
+		|| SmokeJumpCooldownRemaining > 0.0f)
+	{
+		return false;
+	}
+
+	// The same refusal list UpdateNitroGate uses, and for the same reason: each of these owns
+	// Velocity outright for its duration.
+	if (!IsMovingOnGround() || bIsGroundDashing || bIsAirDashing || bIsMantling
+		|| bIsWallRunning || bIsMeleeLunging || bIsGrappling || bIsHeldByAlly)
+	{
+		return false;
+	}
+
+	FSmokeJumpParams Params;
+	if (!GetSmokeJumpParams(Params))
+	{
+		return false;
+	}
+
+	const UWorld* World = GetWorld();
+	const USmokeVisionSubsystem* Smoke = World ? World->GetSubsystem<USmokeVisionSubsystem>() : nullptr;
+	return Smoke && Smoke->IsInsideSmokeFrom(UpdatedComponent->GetComponentLocation(), CharacterOwner);
+}
+
+bool UApexMovementComponent::TryBeginSmokeCharge()
+{
+	if (!CanStartSmokeCharge())
+	{
+		return false;
+	}
+
+	// A latch, not a copy of the button: it stays up until the simulation resolves it, so a press and
+	// release that both land between two simulated moves still produce a jump rather than vanishing.
+	bWantsSmokeCharge = true;
+	return true;
+}
+
+float UApexMovementComponent::GetSmokeChargeAlpha() const
+{
+	FSmokeJumpParams Params;
+	if (SmokeChargeTime <= 0.0f || !GetSmokeJumpParams(Params))
+	{
+		return 0.0f;
+	}
+
+	return FMath::Clamp(SmokeChargeTime / Params.MaxChargeTime, 0.0f, 1.0f);
+}
+
+void UApexMovementComponent::UpdateSmokeJump(float DeltaSeconds)
+{
+	// The common case, and it costs one branch: nobody in this world is charging anything.
+	if (!bWantsSmokeCharge)
+	{
+		return;
+	}
+
+	FSmokeJumpParams Params;
+	if (!GetSmokeJumpParams(Params))
+	{
+		// The passive is gone -- a class swap, or a client whose PassiveDefinition has not arrived
+		// yet. Drop the charge rather than guessing at numbers the other end would not share.
+		bWantsSmokeCharge = false;
+		SmokeChargeTime = 0.0f;
+		return;
+	}
+
+	// Refuse rather than fight. Cancelling costs no cooldown: the charge was never spent.
+	if (!IsMovingOnGround() || bIsGroundDashing || bIsAirDashing || bIsMantling
+		|| bIsWallRunning || bIsMeleeLunging || bIsGrappling || bIsHeldByAlly)
+	{
+		bWantsSmokeCharge = false;
+		SmokeChargeTime = 0.0f;
+		SmokeChargeMoveScale = 1.0f;
+		return;
+	}
+
+	// Re-read every charging move instead of being saved in it: a replay runs the same move against
+	// the same level data and arrives at the same number. @see GetMaxSpeed
+	SmokeChargeMoveScale = Params.ChargeMoveScale;
+
+	if (bJumpInputHeld)
+	{
+		SmokeChargeTime = FMath::Min(SmokeChargeTime + DeltaSeconds, Params.MaxChargeTime);
+		return;
+	}
+
+	// The button came up. Whatever was banked, that is the jump.
+	//
+	// Deliberately NOT re-checking the smoke here. The cloud is measured once, at the press, by the
+	// only machine that can answer at that instant; a second check at release would let a cloud that
+	// expired mid-charge, or a step over its edge, swallow a jump the player had already committed
+	// to. @see EPolarityMoveFlag::SmokeJumpCharging
+	LaunchSmokeJump(Params);
+}
+
+void UApexMovementComponent::LaunchSmokeJump(const FSmokeJumpParams& Params)
+{
+	const float Alpha = FMath::Clamp(SmokeChargeTime / FMath::Max(Params.MaxChargeTime, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+
+	bWantsSmokeCharge = false;
+	SmokeChargeTime = 0.0f;
+	SmokeChargeMoveScale = 1.0f;
+
+	const float BaseZ = MovementSettings ? MovementSettings->JumpZVelocity : Velocity.Z;
+
+	// Launching out of a slide keeps every bit of the speed the slide built.
+	//
+	// The horizontal velocity is read BEFORE the slide ends and written back after, the same order
+	// the slide hop in DoJump uses and for the same reason: EndSlide puts friction and braking back,
+	// and a launch that let it run first would leave with whatever survived that frame instead of
+	// with what the player earned. Charging through a slide and leaving at the end of it is the
+	// whole point of the mechanic working here at all.
+	if (bIsSliding)
+	{
+		const FVector Horizontal(Velocity.X, Velocity.Y, 0.0f);
+		EndSlide();
+		Velocity.X = Horizontal.X;
+		Velocity.Y = Horizontal.Y;
+	}
+
+	if (Alpha < SmokeJumpMinChargeAlpha)
+	{
+		// A tap. An ordinary jump, and the cooldown stays untouched.
+		Velocity.Z = BaseZ;
+	}
+	else
+	{
+		Velocity.Z = FMath::Lerp(BaseZ, Params.MaxZVelocity, Alpha);
+
+		// Acceleration, not GetLastInputVector: the latter is local to whoever read the keyboard, so
+		// the server would launch a client straight ahead regardless of which way they pushed. Same
+		// reason the ground dash reads it. @see Docs/Gotchas/Movement_Network.md
+		//
+		// Falling back to the direction of travel matters for the slide: a slide is steered with
+		// small inputs and often has none at the moment the button comes up, and a launch that read
+		// that as "no direction" would drop the boost exactly when the player is fastest.
+		FVector Forward = Acceleration.GetSafeNormal2D();
+		if (Forward.IsNearlyZero())
+		{
+			Forward = Velocity.GetSafeNormal2D();
+		}
+		if (!Forward.IsNearlyZero())
+		{
+			Velocity += Forward * (Params.ForwardBoost * Alpha);
+		}
+
+		SmokeJumpCooldownRemaining = Params.Cooldown;
+	}
+
+	// The ground jump is spent and the air jump is not: the launch is a jump, not a free extra one.
+	CurrentJumpCount = 1;
+	SetMovementMode(MOVE_Falling);
+
+	// No hold lift on top of this. The button is up -- that is why we are here -- and the charge
+	// already decided the height.
+	bJumpHeld = false;
+	JumpHoldTimeRemaining = 0.0f;
+
+	if (CharacterOwner)
+	{
+		CharacterOwner->OnJumped();
+	}
+
+	NotifyJumpPerformed(false);
 }
 
 // ==================== Dash ====================

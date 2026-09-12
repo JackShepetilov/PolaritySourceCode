@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterGameSettings.h"
 #include "Coop/CoopPlayers.h"
@@ -6,8 +6,11 @@
 #include "Sound/SoundMix.h"
 #include "Sound/SoundClass.h"
 #include "AudioDevice.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerInput.h"
+#include "HAL/IConsoleManager.h"
 #include "EnhancedInputSubsystems.h"
 #include "UserSettings/EnhancedInputUserSettings.h"
 
@@ -39,7 +42,11 @@ void UShooterGameSettings::SetCustomDefaults()
 	MouseSensitivity = 1.0f;
 	MouseSensitivityX = 1.0f;
 	MouseSensitivityY = 1.0f;
-	ADSSensitivityMultiplier = 0.7f;
+	ADSSensitivityMultiplier = 1.0f;
+	LookSensitivity = 2.0f;
+	MouseDpi = 800;
+	LookUnitsPerCount = 1.0f;
+	bLookSensitivityMigrated = false;
 	bInvertMouseY = false;
 	bInvertMouseX = false;
 	bToggleADS = false;
@@ -213,35 +220,171 @@ void UShooterGameSettings::ApplyGameplaySettings()
 	}
 }
 
+float UShooterGameSettings::GetDegreesPerCount() const
+{
+	// This is the whole scale, and it is the definition of the number in the menu:
+	// sensitivity 1.0 turns 0.022 degrees per count, exactly as it does in Apex.
+	return ApexYawPerCount * LookSensitivity;
+}
+
+float UShooterGameSettings::GetInchesPer360() const
+{
+	const float DegreesPerCount = GetDegreesPerCount();
+	if (DegreesPerCount <= KINDA_SMALL_NUMBER || MouseDpi <= 0)
+	{
+		return 0.0f;
+	}
+
+	const float CountsPer360 = 360.0f / DegreesPerCount;
+	return CountsPer360 / static_cast<float>(MouseDpi);
+}
+
+float UShooterGameSettings::GetCentimetersPer360() const
+{
+	return GetInchesPer360() * 2.54f;
+}
+
+float UShooterGameSettings::GetEffectiveDpi() const
+{
+	return LookSensitivity * static_cast<float>(MouseDpi);
+}
+
+FText UShooterGameSettings::GetSensitivityReadout() const
+{
+	// The sensitivity itself is deliberately absent: the spin box next to this line already shows
+	// it, and a number printed twice is a number that can look like it disagrees with itself.
+	// What belongs here is what the player cannot read off the setting - what it means on the desk.
+	return FText::FromString(FString::Printf(
+		TEXT("%.1f cm/360   |   eDPI %.0f"),
+		GetCentimetersPer360(),
+		GetEffectiveDpi()));
+}
+
+void UShooterGameSettings::CalibrateFromMeasured360(float MeasuredCentimeters)
+{
+	// The engine says one Enhanced Input unit is one mouse count, and for a captured mouse it is.
+	// A measured 360 outranks that claim: mouse drivers, pointer speed and a scaled desktop all
+	// sit between the sensor and FSceneViewport. So we solve for the real ratio and store it,
+	// and from then on the number in the menu is the number on the mousepad.
+	if (MeasuredCentimeters <= KINDA_SMALL_NUMBER || MouseDpi <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LOOK] Calibration needs a positive measured 360 and a DPI."));
+		return;
+	}
+
+	const float AppliedYawScale = GetDegreesPerCount() / FMath::Max(LookUnitsPerCount, KINDA_SMALL_NUMBER);
+	if (AppliedYawScale <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	const float MeasuredCounts = (MeasuredCentimeters / 2.54f) * static_cast<float>(MouseDpi);
+	const float MeasuredDegreesPerCount = 360.0f / MeasuredCounts;
+
+	// Two things move together, and they have to. The measurement says what one count is really
+	// worth, which fixes the units ratio; and the aim the player just measured is the aim he
+	// wants to keep, so the label moves onto it instead of the aim moving onto the label.
+	LookUnitsPerCount = FMath::Clamp(MeasuredDegreesPerCount / AppliedYawScale, 0.001f, 100.0f);
+	LookSensitivity = FMath::Clamp(MeasuredDegreesPerCount / ApexYawPerCount, 0.05f, 20.0f);
+
+	UE_LOG(LogTemp, Log, TEXT("[LOOK] Calibrated on %.1f cm: one input unit is %.4f mouse counts. %s"),
+		MeasuredCentimeters, LookUnitsPerCount, *GetSensitivityReadout().ToString());
+
+	ApplyControlSettings();
+	SaveSettings();
+}
+
+void UShooterGameSettings::MigrateLegacySensitivity()
+{
+	if (bLookSensitivityMigrated)
+	{
+		return;
+	}
+
+	bLookSensitivityMigrated = true;
+
+	// The old chain multiplied a hardcoded 2.5 by MouseSensitivity and the X trim, and handed
+	// that straight to InputYawScale, which is degrees per input unit. Dividing by m_yaw turns
+	// the same feel into the same number on Apex's scale, so nobody's aim moves on this update.
+	const float LegacyDegreesPerCount = 2.5f * MouseSensitivity * MouseSensitivityX;
+	const float Carried = LegacyDegreesPerCount / ApexYawPerCount;
+
+	// Carrying the feel over is only worth doing while the feel was a real one. The old number
+	// went through a hardcoded 2.5 that nobody could read off the menu, so it could just as
+	// easily be a slider somebody dragged at random. A carried value outside the playable range
+	// is that case, and reproducing it faithfully would only preserve nonsense: take the default.
+	if (Carried >= 0.05f && Carried <= 20.0f)
+	{
+		LookSensitivity = Carried;
+		UE_LOG(LogTemp, Log, TEXT("[LOOK] Carried the old sensitivity %.4f onto the Apex scale: %.2f."),
+			MouseSensitivity, LookSensitivity);
+	}
+	else
+	{
+		// Spelled out rather than left to "whatever LoadConfig happened not to overwrite".
+		LookSensitivity = 2.0f;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[LOOK] The old sensitivity %.4f carries to %.2f on the Apex scale, which is off any "
+			     "playable range - it was never a tuned value. Falling back to the default %.2f."),
+			MouseSensitivity, Carried, LookSensitivity);
+	}
+}
+
+static float GetEngineMouseAxisScale(APlayerController* PC)
+{
+	// Enhanced Input does not hand the pawn the raw mouse count. UEnhancedInputSubsystemInterface,
+	// while it rebuilds the control mappings, reads the AxisConfig entry for the mapped key and,
+	// whenever its Sensitivity is not 1, INJECTS a UInputModifierScalar carrying that value into
+	// the mapping (EnhancedInputSubsystemInterface.cpp:672). The project ships Mouse2D at 0.07, so
+	// every count arrives as 0.07 of a unit - a factor of 14.29 that is invisible in the mapping
+	// asset, because it was never authored there.
+	//
+	// Asking the engine for the number beats hardcoding it: change the ini and the aim stays true.
+	if (PC && PC->PlayerInput)
+	{
+		FInputAxisProperties AxisProperties;
+		if (PC->PlayerInput->GetAxisProperties(EKeys::Mouse2D, AxisProperties)
+			&& AxisProperties.Sensitivity > KINDA_SMALL_NUMBER)
+		{
+			return AxisProperties.Sensitivity;
+		}
+	}
+
+	return 1.0f;
+}
+
 void UShooterGameSettings::ApplyControlSettings()
 {
-	// Apply mouse sensitivity to all player controllers
-	// Note: In UE 5.0+ InputYawScale/InputPitchScale are deprecated
-	// We use the deprecated setters which still work if bEnableLegacyInputScales is true in InputSettings
-	// Alternatively, use Enhanced Input Scalar Modifier for modern approach
-	if (GEngine)
+	MigrateLegacySensitivity();
+
+	// One number reaches the view, and it reaches it as degrees. Two scales stand between a mouse
+	// count and the turn, so both have to be divided out for the menu's number to mean what it
+	// means in Apex: the engine's own mouse axis scale, and any leftover units-per-count override.
+	const float DegreesPerCount = GetDegreesPerCount();
+
+	if (!GEngine)
 	{
-		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		return;
+	}
+
+	for (const FWorldContext& Context : GEngine->GetWorldContexts())
+	{
+		if (UWorld* World = Context.World())
 		{
-			if (UWorld* World = Context.World())
+			if (APlayerController* PC = CoopPlayers::GetLocalController(World))
 			{
-				if (APlayerController* PC = CoopPlayers::GetLocalController(World))
-				{
-					// Default values are typically 2.5 for both
-					// We multiply the base value by our sensitivity multipliers
-					const float BaseSensitivity = 2.5f;
+				const float Units = FMath::Max(GetEngineMouseAxisScale(PC) * LookUnitsPerCount, KINDA_SMALL_NUMBER);
+				const float BaseScale = DegreesPerCount / Units;
 
-					const float YawScale = BaseSensitivity * MouseSensitivity * MouseSensitivityX * (bInvertMouseX ? -1.0f : 1.0f);
-					// UE default PitchScale is -2.5 (negative = standard non-inverted look)
-					// So normal (non-inverted) must be negative, inverted must be positive
-					const float PitchScale = BaseSensitivity * MouseSensitivity * MouseSensitivityY * (bInvertMouseY ? 1.0f : -1.0f);
+				const float YawScale = BaseScale * MouseSensitivityX * (bInvertMouseX ? -1.0f : 1.0f);
+				// A negative pitch scale is the non-inverted look in UE, so the flag flips the sign
+				// rather than setting it. Apex keeps m_pitch equal to m_yaw, and so do we.
+				const float PitchScale = BaseScale * MouseSensitivityY * (bInvertMouseY ? 1.0f : -1.0f);
 
-					// Use deprecated setters (still work with bEnableLegacyInputScales=true)
-					PRAGMA_DISABLE_DEPRECATION_WARNINGS
-					PC->SetDeprecatedInputYawScale(YawScale);
-					PC->SetDeprecatedInputPitchScale(PitchScale);
-					PRAGMA_ENABLE_DEPRECATION_WARNINGS
-				}
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				PC->SetDeprecatedInputYawScale(YawScale);
+				PC->SetDeprecatedInputPitchScale(PitchScale);
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			}
 		}
 	}
@@ -279,7 +422,11 @@ void UShooterGameSettings::ResetControlsToDefaults()
 	MouseSensitivity = 1.0f;
 	MouseSensitivityX = 1.0f;
 	MouseSensitivityY = 1.0f;
-	ADSSensitivityMultiplier = 0.7f;
+	ADSSensitivityMultiplier = 1.0f;
+	LookSensitivity = 2.0f;
+	MouseDpi = 800;
+	// The calibration constant is deliberately NOT reset here: it describes the machine, not
+	// the taste, and a player who reset his controls would otherwise lose a measured 360.
 	bInvertMouseY = false;
 	bInvertMouseX = false;
 	bToggleADS = false;
@@ -485,3 +632,104 @@ const FKeyBindingEntry* UShooterGameSettings::FindKeyBinding(FName ActionName) c
 	}
 	return nullptr;
 }
+
+// ==================== Console: see and set the look sensitivity ====================
+//
+// The menu shows the same numbers, but these read out of the running game with no widget in the
+// way, which is what you want while proving the scale is real.
+
+namespace LookSensitivityDebug
+{
+	static void Print(const TCHAR* Prefix)
+	{
+		UShooterGameSettings* Settings = UShooterGameSettings::GetShooterGameSettings();
+		if (!Settings)
+		{
+			return;
+		}
+
+		// The console gets the full picture, the menu gets the readable half.
+		const FString Line = FString::Printf(TEXT("%ssens %.2f   |   %s   |   %.4f deg/count"),
+			Prefix,
+			Settings->LookSensitivity,
+			*Settings->GetSensitivityReadout().ToString(),
+			Settings->GetDegreesPerCount());
+		UE_LOG(LogTemp, Log, TEXT("%s"), *Line);
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 6.0f, FColor::Cyan, Line);
+		}
+	}
+
+	static void CmdShow()
+	{
+		Print(TEXT("[LOOK] "));
+	}
+
+	static void CmdSet(const TArray<FString>& Args)
+	{
+		UShooterGameSettings* Settings = UShooterGameSettings::GetShooterGameSettings();
+		if (!Settings || Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[LOOK] Usage: polarity.sens.set <value>"));
+			return;
+		}
+
+		Settings->LookSensitivity = FMath::Clamp(FCString::Atof(*Args[0]), 0.05f, 20.0f);
+		Settings->ApplyControlSettings();
+		Settings->SaveSettings();
+		Print(TEXT("[LOOK] set -> "));
+	}
+
+	static void CmdDpi(const TArray<FString>& Args)
+	{
+		UShooterGameSettings* Settings = UShooterGameSettings::GetShooterGameSettings();
+		if (!Settings || Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[LOOK] Usage: polarity.sens.dpi <value>"));
+			return;
+		}
+
+		Settings->MouseDpi = FMath::Clamp(FCString::Atoi(*Args[0]), 100, 32000);
+		Settings->SaveSettings();
+		Print(TEXT("[LOOK] dpi -> "));
+	}
+
+	static void CmdCalibrate(const TArray<FString>& Args)
+	{
+		UShooterGameSettings* Settings = UShooterGameSettings::GetShooterGameSettings();
+		if (!Settings || Args.Num() < 1)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[LOOK] Usage: polarity.sens.calibrate <measured cm for one 360>"));
+			return;
+		}
+
+		Settings->CalibrateFromMeasured360(FCString::Atof(*Args[0]));
+		Print(TEXT("[LOOK] calibrated -> "));
+	}
+}
+
+static FAutoConsoleCommand GPolaritySensShowCmd(
+	TEXT("polarity.sens"),
+	TEXT("Show the look sensitivity: Apex value, cm/360, eDPI, degrees per mouse count."),
+	FConsoleCommandDelegate::CreateStatic(&LookSensitivityDebug::CmdShow)
+);
+
+static FAutoConsoleCommand GPolaritySensSetCmd(
+	TEXT("polarity.sens.set"),
+	TEXT("Set the look sensitivity on the Apex scale. Usage: polarity.sens.set <value>"),
+	FConsoleCommandWithArgsDelegate::CreateStatic(&LookSensitivityDebug::CmdSet)
+);
+
+static FAutoConsoleCommand GPolaritySensDpiCmd(
+	TEXT("polarity.sens.dpi"),
+	TEXT("Tell the game your mouse DPI so cm/360 and eDPI mean something. Usage: polarity.sens.dpi <value>"),
+	FConsoleCommandWithArgsDelegate::CreateStatic(&LookSensitivityDebug::CmdDpi)
+);
+
+static FAutoConsoleCommand GPolaritySensCalibrateCmd(
+	TEXT("polarity.sens.calibrate"),
+	TEXT("Measure one real 360 on the mousepad and type the centimetres; the readout stops guessing. "
+	     "Usage: polarity.sens.calibrate <cm>"),
+	FConsoleCommandWithArgsDelegate::CreateStatic(&LookSensitivityDebug::CmdCalibrate)
+);

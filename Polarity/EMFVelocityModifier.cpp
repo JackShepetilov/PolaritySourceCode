@@ -1,4 +1,4 @@
-// EMFVelocityModifier.cpp
+﻿// EMFVelocityModifier.cpp
 
 #include "EMFVelocityModifier.h"
 #include "ApexMovementComponent.h"
@@ -474,7 +474,7 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 		// (the opposite-charge cutoff doesn't cover repulsion). Filter Output Log by SHAKE_EMF.
 		if (Source.OwnerType == EEMSourceOwnerType::Player && SourceForce.SizeSquared() > FMath::Square(500.0f))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[SHAKE_EMF] %s force from PLAYER: (%.0f,%.0f,%.0f) size=%.0f dist=%.0f myCharge=%.2f mult=%.2f"),
+			UE_LOG(LogTemp, Verbose, TEXT("[SHAKE_EMF] %s force from PLAYER: (%.0f,%.0f,%.0f) size=%.0f dist=%.0f myCharge=%.2f mult=%.2f"),
 				GetOwner() ? *GetOwner()->GetName() : TEXT("?"),
 				SourceForce.X, SourceForce.Y, SourceForce.Z, SourceForce.Size(),
 				FMath::Sqrt(DistSq), Charge, Multiplier);
@@ -585,7 +585,7 @@ FVector UEMFVelocityModifier::ComputeVelocityDelta(float DeltaTime, const FVecto
 	// DEBUG: Final velocity delta for drones
 	if (!VelocityDelta.IsNearlyZero(0.1f))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[EMF RESULT] %s | VelDelta: %s | Force: %s | Mass: %.1f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[EMF RESULT] %s | VelDelta: %s | Force: %s | Mass: %.1f"),
 			*GetOwner()->GetName(), *VelocityDelta.ToCompactString(), *CurrentEMForce.ToCompactString(), Mass);
 	}
 

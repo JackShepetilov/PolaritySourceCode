@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "GenericTeamAgentInterface.h"
+#include "Perception/AISightTargetInterface.h"
+#include "AI/AimTargetInterface.h"
 #include "Logging/LogMacros.h"
 #include "PolarityCharacter.generated.h"
 
@@ -28,9 +30,49 @@ DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
  *  First person character with Titanfall-style movement and EMF integration
  */
 UCLASS(abstract)
-class APolarityCharacter : public ACharacter, public IGenericTeamAgentInterface
+class APolarityCharacter : public ACharacter, public IGenericTeamAgentInterface, public IAimTargetInterface,
+	public IAISightTargetInterface
 {
 	GENERATED_BODY()
+
+public:
+
+	// ==================== Being seen ====================
+
+	/** Whether this body can be seen from where an observer is standing.
+	 *
+	 *  Implementing this takes the line-of-sight test away from UAISense_Sight and gives it to the
+	 *  target, which is the engine's own hook for exactly that (@see UAISense_Sight::ComputeVisibility).
+	 *  It is where smoke lives: the wall test below is what the sense would have done anyway, and
+	 *  the smoke test on top of it is the new part.
+	 *
+	 *  On the common ancestor of the player and AShooterNPC on purpose, so smoke blinds a faction
+	 *  war exactly the way it blinds an enemy looking at a player.
+	 *
+	 *  The sight radius and the vision cone are checked by the sense BEFORE this is called, so this
+	 *  answers only the question of what is in the way. */
+	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context,
+		FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested,
+		float& OutSightStrength, int32* UserData = nullptr,
+		const FOnPendingVisibilityQueryProcessedDelegate* Delegate = nullptr) override;
+
+	// ==================== Being shot at ====================
+
+	/** Where a shooter aims at this body, relative to the actor origin. The default is the chest of
+	 *  a standing human: it is what the old shooter-side offsets (-35..-60 around the capsule
+	 *  centre) described, moved to the only object that actually knows this shape. Subclasses that
+	 *  are not human-shaped set their own in the constructor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Targeting")
+	FVector LocalAimPoint = FVector(0.0f, 0.0f, -47.0f);
+
+	/** Half range of the vertical scatter a shooter adds around that point */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Targeting", meta = (ClampMin = "0.0"))
+	float AimVerticalJitter = 12.5f;
+
+	virtual FVector GetLocalAimPoint() const override { return LocalAimPoint; }
+	virtual float GetAimVerticalJitter() const override { return AimVerticalJitter; }
+
+private:
 
 	/** Pawn mesh: first person view (arms; seen only by self) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -331,14 +373,22 @@ protected:
 	void UpdateCrouchCameraSmoothing(float DeltaTime);
 
 	/** Starts a new walk from the offset the capsule just introduced. Positive DeltaZ means the
-	 *  capsule centre moved DOWN, so the camera is held UP by that much. */
+	 *  capsule centre moved DOWN, so the hands are held UP by that much. */
 	void PushCrouchCameraOffset(float DeltaZ, bool bGoingDown);
+
+	/** How far the actor really moved during a crouch change: the half-height difference on the
+	 *  ground, and zero in the air, where the engine resizes the capsule without moving anything. */
+	float GetCrouchBaseMove(float ScaledHalfHeightAdjust) const;
 
 public:
 
-	/** The crouch counter-offset, as a capsule-space vector, for whoever writes the camera's relative
-	 *  location. Zero except during a crouch transition. */
-	FVector GetCrouchCameraOffset() const { return FVector(0.0f, 0.0f, CrouchCameraSmoothOffsetZ); }
+	/** The crouch counter-offset, in capsule Z. Zero except during a crouch transition.
+	 *
+	 *  Applied to the FIRST PERSON MESH at the end of AccumulateFirstPersonPose, not to the camera:
+	 *  the mesh is the thing parented to the capsule, so the mesh is what a resize teleports. Kept
+	 *  public because it reads as "how far the view is currently being held", which is the question
+	 *  anything looking at a crouch transition wants to ask. */
+	float GetCrouchCameraOffsetZ() const { return CrouchCameraSmoothOffsetZ; }
 
 protected:
 
@@ -520,6 +570,19 @@ public:
 	/** Returns camera shake component */
 	UFUNCTION(BlueprintPure, Category = "Camera")
 	UCameraShakeComponent* GetCameraShake() const { return CameraShakeComponent; }
+
+	/** Rotation that moves the PICTURE and nothing else: camera bob sway, landing, slide, wallrun
+	 *  lean, and on AShooterCharacter the FPS pack's recoil jolt.
+	 *
+	 *  Read by APolarityCameraManager::UpdateViewTarget, which runs after CalcCamera, so it never
+	 *  reaches the control rotation. That separation is the whole point and it is the same one the
+	 *  pack makes: their CameraAnimator writes the shake onto the camera with SetWorldRotation and
+	 *  leaves the controller alone, while their ControllerRecoil goes through AddControllerPitchInput
+	 *  because THAT one is supposed to drag the aim with it.
+	 *
+	 *  Putting any of this in GetViewRotation instead would send the bullets after it: GetAimRay
+	 *  reads the same function, so walking would make shots wander. */
+	virtual FRotator GetViewOnlyRotationOffset() const;
 
 	/** Current procedural run-sway position offset (in FP-mesh local space). Updated each tick. */
 	const FVector& GetCurrentRunSwayPosition() const { return CurrentRunSwayPosition; }

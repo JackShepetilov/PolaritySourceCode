@@ -1,7 +1,21 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
+// FIRST, and it has to stay first: UBT fails the build with "Expected ShooterCharacter.h to be first
+// header included" otherwise. It had drifted down to sixth and nothing complained, because Live
+// Coding does not run the check -- only a full rebuild does, which is a slow way to find out.
 #include "ShooterCharacter.h"
+
+#include "UObject/UnrealType.h"
+#include "HAL/IConsoleManager.h"
+#include "Curves/CurveVector.h"
+// PRAS, the recoil half of the FPS Animation Pack.
+#include "RecoilAnimationComponent.h"
+#include "RecoilData.h"
+// ShouldRunEndOnThisDeath calls CoopPlayers::GetAll. This file compiled without the include only by
+// luck: unity builds put it next to a translation unit that had one, and the first change that
+// reshuffled the blobs took that away. Same fault as the one written up in InventoryTypes.cpp.
+#include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/AnimNotify_WeaponSwitch.h"
 #include "Animation/AnimMontage.h"
 #include "Net/UnrealNetwork.h"
@@ -10,6 +24,7 @@
 #include "Upgrades/Upgrades/Upgrade_ChargedPunch.h"
 #include "Weapons/ShooterWeapon_Melee.h"
 #include "Weapons/DroppedRangedWeapon.h"
+#include "Variant_Shooter/Pickups/InventoryPickup.h"
 #include "Weapons/RiotShield.h"
 #include "UI/EMFChargeWidgetSubsystem.h"
 // Full types, not forward declarations: TSubclassOf of each is an RPC parameter, and the generated
@@ -41,8 +56,10 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Camera/CameraComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
@@ -60,7 +77,10 @@
 #include "Polarity/Upgrades/UpgradeRegistry.h"
 #include "Variant_Shooter/Run/RunSubsystem.h"
 #include "ShooterSettingsSubsystem.h"
+#include "ShooterGameSettings.h"
+#include "Engine/GameInstance.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/Abilities/AbilityHandler.h"
 #include "Variant_Shooter/Abilities/AbilityDefinition_Grapple.h"
 #include "CableComponent.h"
@@ -77,6 +97,7 @@
 #include "TutorialSubsystem.h"
 #include "Variant_Shooter/UI/ShooterBulletCounterUI.h"
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
+#include "Variant_Shooter/ShooterPlayerController.h"
 #include "PlayerDeathSequenceComponent.h"
 
 static TAutoConsoleVariable<int32> CVarMeleeLungeDebug(
@@ -203,11 +224,26 @@ static void ApplyThirdPersonVisibilityToTPSubtree(USceneComponent* Root)
 
 AShooterCharacter::AShooterCharacter()
 {
+	// The map key, defaulted here rather than on the Blueprint. Class defaults cannot be edited
+	// from Python (the tooling blocks it because it crashes the editor), so a content reference a
+	// new feature needs either gets clicked in by hand or gets a default in code. A Blueprint that
+	// sets its own still wins.
+	static ConstructorHelpers::FObjectFinder<UInputAction> MapAction(
+		TEXT("/Game/Variant_Shooter/Input/IA_ToggleMap"));
+	if (MapAction.Succeeded())
+	{
+		ToggleMapAction = MapAction.Object;
+	}
+
 	// create the noise emitter component
 	PawnNoiseEmitter = CreateDefaultSubobject<UPawnNoiseEmitterComponent>(TEXT("Pawn Noise Emitter"));
 
 	// create the recoil component
 	RecoilComponent = CreateDefaultSubobject<UWeaponRecoilComponent>(TEXT("Recoil Component"));
+
+	// create the FPS Animation Pack recoil component (PRAS). Costs nothing while idle: it does not
+	// tick until Init is given a recoil asset, which only a pack weapon provides.
+	PackRecoilComponent = CreateDefaultSubobject<URecoilAnimationComponent>(TEXT("Pack Recoil Component"));
 
 	// create the hit marker component
 	HitMarkerComponent = CreateDefaultSubobject<UHitMarkerComponent>(TEXT("Hit Marker Component"));
@@ -229,6 +265,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the ability component (multi-slot ability inventory)
 	AbilityComponent = CreateDefaultSubobject<UAbilityComponent>(TEXT("Ability Component"));
+
+	// create the cell grid (currency, magazines, ability upgrades, paid attachments)
+	InventoryComponent = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory Component"));
 
 	// configurable terminal run-death presentation
 	PlayerDeathSequenceComponent = CreateDefaultSubobject<UPlayerDeathSequenceComponent>(TEXT("Player Death Sequence"));
@@ -267,6 +306,18 @@ void AShooterCharacter::BeginPlay()
 	// again from OnRep_ClassDefinition if it arrives later. Depending on only one of the two is the
 	// mistake that made HP, death and the HUD each fail silently in turn.
 	ApplyClassDefinition();
+
+	// The class weapon (or this character's own StartingWeaponClass when the class names none,
+	// which ApplyClassDefinition just settled) arrives on every spawn, not only after the run-start
+	// toss: a map without a launch, a test level or a respawn otherwise starts empty-handed.
+	// Server only: AddWeaponClassAnimated refuses a client, the weapon replicates down. Next tick
+	// rather than now, because the server possesses the pawn after BeginPlay, and the draw and the
+	// HUD it feeds both want the controller that arrives in between.
+	if (HasAuthority())
+	{
+		GetWorldTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateUObject(this, &AShooterCharacter::EquipStartingWeaponAnimated));
+	}
 
 	// ==================== Restore run-scoped upgrades (cross-level carry) ====================
 	// The character is rebuilt on every OpenLevel; the run's upgrade ledger lives on the
@@ -415,6 +466,18 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AShooterCharacter::DoReload);
 		}
 
+		// Open and close the inventory overlay.
+		if (ToggleInventoryAction)
+		{
+			EnhancedInputComponent->BindAction(ToggleInventoryAction, ETriggerEvent::Started, this, &AShooterCharacter::DoToggleInventory);
+		}
+
+		// The map.
+		if (ToggleMapAction)
+		{
+			EnhancedInputComponent->BindAction(ToggleMapAction, ETriggerEvent::Started, this, &AShooterCharacter::DoToggleMap);
+		}
+
 		// Switch weapon — plain forward cycle on press. Hold-to-throw moved to the yanked
 		// weapon's own per-weapon switch key (see the WeaponSwitchActions loop below).
 		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::DoSwitchWeapon);
@@ -423,6 +486,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		if (SwitchWeaponBackAction)
 		{
 			EnhancedInputComponent->BindAction(SwitchWeaponBackAction, ETriggerEvent::Started, this, &AShooterCharacter::DoSwitchWeaponBackward);
+		}
+
+		// Put the weapon away / take it back out. One key, toggling.
+		if (HolsterWeaponAction)
+		{
+			EnhancedInputComponent->BindAction(HolsterWeaponAction, ETriggerEvent::Started, this, &AShooterCharacter::DoToggleHolsterWeapon);
 		}
 
 		// ADS (hold to aim)
@@ -456,9 +525,10 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoAbilityReleased);
 		}
 
-		// Weapon-switch keys. Each weapon declares its own SwitchAction; we bind the listed actions and
-		// the handler resolves which OWNED weapon the pressed action selects (so several weapon classes
-		// can share one key — only one is owned at a time).
+		// Weapon-switch keys. Position in WeaponSwitchActions IS the slot number, so the handler
+		// resolves the pressed action to a slot and equips whatever the character placed there
+		// (class weapon in slot 0, loot in slot 1). Which physical key each action is remains the
+		// Input Action's business, not this code's.
 		// The YANKED weapon's key is special: tap (<YankSwapHoldThreshold) = equip it as usual,
 		// hold (≥YankSwapHoldThreshold) = ThrowYankedWeaponIfAny (fired by SwapHoldTimer).
 		// Any other weapon's key equips instantly on press.
@@ -469,16 +539,9 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 				EnhancedInputComponent->BindActionValueLambda(SwitchActionEntry, ETriggerEvent::Started,
 					[this, SwitchActionEntry](const FInputActionValue&)
 					{
-						// Resolve which owned weapon this key selects.
-						AShooterWeapon* Target = nullptr;
-						for (AShooterWeapon* W : OwnedWeapons)
-						{
-							if (W && W->GetSwitchAction() == SwitchActionEntry)
-							{
-								Target = W;
-								break;
-							}
-						}
+						// Resolve which owned weapon this key selects: the one sitting in the slot
+						// this action indexes.
+						AShooterWeapon* Target = FindOwnedWeaponForHotkeyAction(SwitchActionEntry);
 
 						// Yanked weapon's key: arm the hold-to-throw timer; the equip (tap)
 						// happens on release if the threshold hasn't fired yet.
@@ -522,6 +585,36 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 void AShooterCharacter::DoAim(float Yaw, float Pitch)
 {
+	// Apex's aim sensitivity is a product of three things, and until now we had only the first:
+	//     ADS degrees per count = hip degrees per count * FOV scale * per-optic multiplier
+	// The FOV scale is what keeps a hand movement worth the same distance on the screen as the
+	// sight zooms in; without it, aiming through a 2x would feel twice as fast as the hip and the
+	// player has to relearn the gun. The multiplier is the player's own taste on top, 1.0 being
+	// "leave the match alone" - the same meaning the number carries in Apex's own menu.
+	//
+	// Both ride CurrentADSAlpha rather than the intent flag, so the change arrives with the sight
+	// instead of snapping on at the press. AdsSensitivityFovScale already carries the alpha,
+	// because UpdateADS builds it from the blended FOV.
+	if (CurrentADSAlpha > 0.0f)
+	{
+		float AdsScale = AdsSensitivityFovScale;
+
+		if (const UGameInstance* GI = GetGameInstance())
+		{
+			if (const UShooterSettingsSubsystem* SettingsSub = GI->GetSubsystem<UShooterSettingsSubsystem>())
+			{
+				if (const UShooterGameSettings* Settings = SettingsSub->GetSettings())
+				{
+					AdsScale *= FMath::Lerp(1.0f, Settings->ADSSensitivityMultiplier,
+						FMath::Clamp(CurrentADSAlpha, 0.0f, 1.0f));
+				}
+			}
+		}
+
+		Yaw *= AdsScale;
+		Pitch *= AdsScale;
+	}
+
 	// Call parent implementation
 	Super::DoAim(Yaw, Pitch);
 
@@ -544,6 +637,8 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AShooterCharacter, ClassDefinition);
 
 	DOREPLIFETIME(AShooterCharacter, CurrentHP);
+	DOREPLIFETIME(AShooterCharacter, bIsBerserk);
+	DOREPLIFETIME(AShooterCharacter, BerserkDuration);
 	DOREPLIFETIME(AShooterCharacter, HeldByCharacter);
 	DOREPLIFETIME(AShooterCharacter, CurrentArmor);
 	DOREPLIFETIME(AShooterCharacter, CurrentWeapon);
@@ -564,6 +659,280 @@ void AShooterCharacter::OnRep_HUDClass()
 }
 
 // ==================== Downed and revive ====================
+
+// ==================== Berserk (the Melee's active) ====================
+
+void AShooterCharacter::StartBerserk(float Duration, float FrontHalfAngle, float FlankDamageMultiplier,
+	float HealFraction, float MaxHeal)
+{
+	if (!HasAuthority() || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	// A downed player is not fighting, and handing them a window they cannot spend would pay out on
+	// the damage they deal after being picked back up.
+	if (bIsDowned || CurrentHP <= 0.0f)
+	{
+		return;
+	}
+
+	BerserkFrontHalfAngle  = FMath::Clamp(FrontHalfAngle, 0.0f, 179.0f);
+	BerserkFlankMultiplier = FMath::Clamp(FlankDamageMultiplier, 0.0f, 1.0f);
+	BerserkHealFraction    = FMath::Max(0.0f, HealFraction);
+	BerserkMaxHeal         = FMath::Max(0.0f, MaxHeal);
+
+	// Replicated, and the filter's heartbeat is paced against it. A refresh that arrives mid-window
+	// does NOT rewind that heartbeat -- the beat keeps saying "nearly over" for a window that has just
+	// been extended. Left alone deliberately: the cooldown is three times the duration, so the only
+	// way to refresh is a SECOND melee player covering you, and buying a replicated restart stamp for
+	// that is more machinery than the wrong answer costs.
+	BerserkDuration = Duration;
+
+	// Re-applying REFRESHES rather than restarts: the damage already banked stays banked. A second
+	// cast landing on a teammate mid-window must not delete what that teammate has earned.
+	if (!bIsBerserk)
+	{
+		BerserkDamageDealt = 0.0f;
+		bIsBerserk = true;
+		OnRep_IsBerserk();
+	}
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(BerserkTimer, this, &AShooterCharacter::EndBerserk, Duration, false);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s berserk for %.1fs (flank x%.2f outside %.0f deg)"),
+		*GetName(), Duration, BerserkFlankMultiplier, BerserkFrontHalfAngle);
+}
+
+void AShooterCharacter::NotifyBerserkDamageDealt(float Damage)
+{
+	if (!HasAuthority() || !bIsBerserk || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	BerserkDamageDealt += Damage;
+}
+
+float AShooterCharacter::GetBerserkPendingHeal() const
+{
+	return FMath::Clamp(BerserkDamageDealt * BerserkHealFraction, 0.0f, BerserkMaxHeal);
+}
+
+void AShooterCharacter::EndBerserk()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const float Heal = GetBerserkPendingHeal();
+
+	bIsBerserk = false;
+	BerserkDamageDealt = 0.0f;
+	OnRep_IsBerserk();
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(BerserkTimer);
+	}
+
+	// Nothing dealt, nothing given. That is the bet the ability makes: it is not survivability, it is
+	// payment for work, and a player who spent the window hiding gets exactly what they earned.
+	if (Heal > 0.0f)
+	{
+		RestoreHealth(Heal);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s berserk ended, healed %.0f"), *GetName(), Heal);
+}
+
+void AShooterCharacter::OnRep_IsBerserk()
+{
+	// Runs on every machine including the server, which calls it by hand: the effect and the sound
+	// are the same work everywhere, and duplicating that into the setter is how the two drift apart.
+
+	// The clocks are reset on the EDGE, not in the tick, so that the heartbeat and the fade always
+	// start from the same place regardless of which machine noticed the flag first.
+	if (bIsBerserk)
+	{
+		BerserkFilterElapsed = 0.0f;
+		BerserkFilterHeartPhase = 0.0f;
+	}
+
+	UpdateBerserkAudio(bIsBerserk);
+
+	BP_OnBerserkChanged(bIsBerserk);
+}
+
+void AShooterCharacter::UpdateBerserkAudio(bool bActive)
+{
+	// Dedicated servers render nothing and hear nothing, and spawning audio components there is pure
+	// waste on the machine that can least afford it. A listen server's host is a real player, so this
+	// is a check for "no audio device", not for "not the owner".
+	UWorld* World = GetWorld();
+	if (!World || World->GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	// Always stop first. The window can close through EndBerserk, through death, or through a client
+	// seeing the flag flip after a missed update, and every one of those has to leave one loop at
+	// most behind. FadeOut rather than Stop so it does not clip under the end one shot.
+	if (BerserkLoopAudioComponent)
+	{
+		BerserkLoopAudioComponent->FadeOut(BerserkLoopFadeOut, 0.0f);
+		BerserkLoopAudioComponent = nullptr;
+	}
+
+	USoundBase* OneShot = bActive ? BerserkStartSound : BerserkEndSound;
+	if (OneShot)
+	{
+		UGameplayStatics::SpawnSoundAttached(
+			OneShot,
+			GetRootComponent(),
+			NAME_None,
+			FVector::ZeroVector,
+			EAttachLocation::KeepRelativeOffset,
+			true,                       // bStopWhenAttachedToDestroyed
+			BerserkSoundVolume);        // the rest defaults; bAutoDestroy defaults true, which is
+			                            // what a fire-and-forget one shot wants
+	}
+
+	if (bActive && BerserkLoopSound)
+	{
+		BerserkLoopAudioComponent = UGameplayStatics::SpawnSoundAttached(
+			BerserkLoopSound,
+			GetRootComponent(),
+			NAME_None,
+			FVector::ZeroVector,
+			EAttachLocation::KeepRelativeOffset,
+			false,                      // bStopWhenAttachedToDestroyed
+			BerserkSoundVolume,
+			1.0f,                       // pitch
+			0.0f,                       // start time
+			nullptr,                    // attenuation
+			nullptr,                    // concurrency
+			true);                      // bAutoDestroy -- a loop never ends on its own, so what this
+			                            // really means is "clean yourself up once FadeOut finishes"
+	}
+}
+
+void AShooterCharacter::UpdateBerserkFilter(float DeltaTime)
+{
+	// The wearer's own view and nobody else's. A remote pawn's camera component is not the one this
+	// machine renders through, so writing post process onto it would be silently doing nothing.
+	if (!IsLocallyControlled())
+	{
+		return;
+	}
+
+	UCameraComponent* Camera = GetFirstPersonCameraComponent();
+	if (!Camera)
+	{
+		return;
+	}
+
+	// Downed is checked as well as the flag: being put on the floor mid-window leaves the window
+	// technically running on the server, and a red screen over a bleed-out is unreadable exactly when
+	// the player most needs to see who is coming to pick them up.
+	const bool bWant = bEnableBerserkFilter && bIsBerserk && !IsDead() && !IsDowned();
+	const float BlendTime = bWant ? BerserkFilterBlendIn : BerserkFilterBlendOut;
+	const float Target = bWant ? 1.0f : 0.0f;
+
+	// Constant rather than exponential interpolation: a fade that is specified in seconds should
+	// actually take those seconds, and FInterpTo never arrives.
+	CurrentBerserkFilterIntensity = (BlendTime > UE_KINDA_SMALL_NUMBER)
+		? FMath::FInterpConstantTo(CurrentBerserkFilterIntensity, Target, DeltaTime, 1.0f / BlendTime)
+		: Target;
+
+	if (CurrentBerserkFilterIntensity <= UE_KINDA_SMALL_NUMBER)
+	{
+		// Fully out. A weight of zero is enough to hand the camera back untouched -- GetCameraView
+		// does not even copy the settings struct below zero weight -- so the overrides set further
+		// down can stay where they are and there is nothing to unwind.
+		if (Camera->PostProcessBlendWeight != 0.0f)
+		{
+			Camera->PostProcessBlendWeight = 0.0f;
+			if (BerserkFilterMID)
+			{
+				Camera->PostProcessSettings.RemoveBlendable(BerserkFilterMID.Get());
+			}
+		}
+
+		BerserkFilterElapsed = 0.0f;
+		BerserkFilterHeartPhase = 0.0f;
+		return;
+	}
+
+	BerserkFilterElapsed += DeltaTime;
+
+	// The beat quickens as the window empties. Clamped rather than wrapped: running past the duration
+	// should sit at "about to end", not roll back around to calm.
+	const float Alpha = (BerserkDuration > UE_KINDA_SMALL_NUMBER)
+		? FMath::Clamp(BerserkFilterElapsed / BerserkDuration, 0.0f, 1.0f)
+		: 0.0f;
+
+	BerserkFilterHeartPhase += DeltaTime * FMath::Lerp(BerserkFilterHeartRate, BerserkFilterHeartRateEnd, Alpha);
+
+	// Sharpened hard, so the beat is mostly silence with a thump in it. A plain sine would read as a
+	// slow throb sitting on the image for the whole window, which is the exact complaint Cyberpunk's
+	// version collects.
+	const float Beat = FMath::Pow(FMath::Abs(FMath::Sin(UE_PI * BerserkFilterHeartPhase)), 6.0f);
+	const float Weight = CurrentBerserkFilterIntensity * FMath::Lerp(1.0f - BerserkFilterHeartAmount, 1.0f, Beat);
+
+	FPostProcessSettings& PP = Camera->PostProcessSettings;
+
+	PP.bOverride_ColorSaturation = true;
+	PP.ColorSaturation = FVector4(BerserkFilterSaturation, BerserkFilterSaturation, BerserkFilterSaturation, 1.0f);
+
+	// The tint is LIFTED above a gain of 1, never multiplied toward it.
+	//
+	// A gain of 1 in a channel means "leave this channel alone", so lerping the gain toward the tint
+	// colour would pull the channels the hue does not use BELOW 1 and darken the image. That is
+	// exactly the complaint the original collects: unusable in the dark. Lifting instead means every
+	// channel is >= 1, the picture only ever gets brighter, and the hue arrives as the difference
+	// between the channels rather than as a loss in two of them.
+	PP.bOverride_ColorGain = true;
+	PP.ColorGain = FVector4(
+		1.0f + BerserkFilterTint.R * BerserkFilterTintStrength,
+		1.0f + BerserkFilterTint.G * BerserkFilterTintStrength,
+		1.0f + BerserkFilterTint.B * BerserkFilterTintStrength,
+		1.0f);
+
+	PP.bOverride_VignetteIntensity = true;
+	PP.VignetteIntensity = BerserkFilterVignette;
+
+	PP.bOverride_SceneFringeIntensity = true;
+	PP.SceneFringeIntensity = BerserkFilterFringe;
+
+	PP.bOverride_FilmGrainIntensity = true;
+	PP.FilmGrainIntensity = BerserkFilterGrain;
+
+	if (BerserkFilterMaterial)
+	{
+		if (!BerserkFilterMID || BerserkFilterMID->Parent != BerserkFilterMaterial)
+		{
+			BerserkFilterMID = UMaterialInstanceDynamic::Create(BerserkFilterMaterial, this);
+		}
+
+		if (BerserkFilterMID)
+		{
+			// Handed the beat as well as the fade, so a material can drive its own warp off the pulse
+			// instead of sitting at one strength for the window.
+			BerserkFilterMID->SetScalarParameterValue(PPIntensityParameterName, Weight);
+
+			// AddBlendable updates the weight of an entry it already holds rather than appending a
+			// second one, so calling it every frame does not grow the array.
+			PP.AddBlendable(BerserkFilterMID.Get(), 1.0f);
+		}
+	}
+
+	Camera->PostProcessBlendWeight = Weight;
+}
 
 void AShooterCharacter::EnterDownedState()
 {
@@ -586,7 +955,7 @@ void AShooterCharacter::EnterDownedState()
 	StopSlideLoopSound();
 	StopWallRunLoopSound();
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is down, waiting for a pick-up"), *GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s is down, waiting for a pick-up"), *GetName());
 
 	ApplyDownedPresentation(true);
 }
@@ -601,7 +970,7 @@ void AShooterCharacter::ReviveFromDowned()
 	bIsDowned = false;
 	CurrentHP = FMath::Max(1.0f, MaxHP * FMath::Clamp(RevivePercent, 0.05f, 1.0f));
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is back up with %.0f HP"), *GetName(), CurrentHP);
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s is back up with %.0f HP"), *GetName(), CurrentHP);
 
 	ApplyDownedPresentation(false);
 	BroadcastHealthChanged();
@@ -778,6 +1147,18 @@ void AShooterCharacter::CreateLocalHUD()
 
 void AShooterCharacter::Client_UpdateScore_Implementation(uint8 ScoringTeam, int32 Score)
 {
+	// The scoreboard has exactly two slots (UI_Shooter picks a text block with a Select on the team
+	// byte, options 0 and 1). A third side, which is what a faction war is, indexes past the last
+	// option, the Select returns None and every kill logs "Accessed None ... K2Node_Select_Default"
+	// twice. Drop what the HUD cannot show rather than spam.
+	// TODO(factions): a faction fight has more than two scores. Decide what the HUD shows before
+	// widening this - it is a design question, not a missing option pin.
+	constexpr uint8 HUDTeamSlots = 2;
+	if (ScoringTeam >= HUDTeamSlots)
+	{
+		return;
+	}
+
 	if (LocalHUD)
 	{
 		LocalHUD->BP_UpdateScore(ScoringTeam, Score);
@@ -849,7 +1230,7 @@ void AShooterCharacter::OnRep_CurrentWeapon()
 	// [COOP_DEBUG] Does the switch actually arrive on the observer, and with a resolved actor?
 	// A replicated pointer can land before the weapon actor itself is relevant here, in which case
 	// this fires with null and nothing gets attached.
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] OnRep_CurrentWeapon: Char=%s weapon=%s hidden=%d local=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] OnRep_CurrentWeapon: Char=%s weapon=%s hidden=%d local=%d"),
 		*GetName(),
 		CurrentWeapon ? *CurrentWeapon->GetName() : TEXT("NULL"),
 		CurrentWeapon ? (CurrentWeapon->IsHidden() ? 1 : 0) : -1,
@@ -1170,7 +1551,7 @@ void AShooterCharacter::Client_ConfirmDamageDealt_Implementation(AShooterWeapon*
 	}
 }
 
-void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* Weapon)
+void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* Weapon, bool bLastRound)
 {
 	// Ownership, not "is it the current weapon": a shot fired a moment before a switch would
 	// otherwise be dropped because the server had already moved on, which is what made the muzzle
@@ -1178,7 +1559,10 @@ void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* 
 	// reference from making someone else's gun flash.
 	if (Weapon && OwnedWeapons.Contains(Weapon))
 	{
-		Weapon->Multicast_PlayFireEffects();
+		// bLastRound is relayed rather than recomputed: the server's copy of the magazine is not the
+		// count the shooter's animation was chosen from, and on a client-owned weapon it lags behind
+		// by a replication tick, so recomputing here would lock the slide back on the wrong shot.
+		Weapon->Multicast_PlayFireEffects(bLastRound);
 
 		// The server does not run Fire() for a remote pawn's weapon — only these effects — so this
 		// is the ONLY place the server learns that a client pulled the trigger. A passive that
@@ -1189,16 +1573,29 @@ void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* 
 		{
 			Abilities->NotifyOwnerFiredWeapon();
 		}
+
+		// Same reason, same place: the round has to leave the magazine cells on the server, and
+		// this is the only moment the server hears about a client's shot. The host does not come
+		// through here at all - its own Fire() spends the round directly.
+		Weapon->SpendPooledRound();
 	}
 }
 
-void AShooterCharacter::Server_ReportWeaponReloaded_Implementation(AShooterWeapon* Weapon)
+void AShooterCharacter::Server_ReportWeaponReloaded_Implementation(AShooterWeapon* Weapon, EWeaponReloadStage Stage)
 {
 	// Ownership rather than "is it equipped", for the same reason as the shot above: a reload
 	// started a moment before a weapon switch still belongs to this player.
+	//
+	// The stage is relayed rather than recomputed here: the client decided it from its own ammo
+	// count, and that is the count the animation was chosen from. It arrives once per stage, so a
+	// per round reload sends one of these per shell rather than one per magazine.
 	if (Weapon && OwnedWeapons.Contains(Weapon))
 	{
-		Weapon->Multicast_PlayReloadEffects();
+		Weapon->Multicast_PlayReloadEffects(Stage);
+
+		// The only moment the server hears that a client started reloading, so the energy refill
+		// is held back here, same as the shot report above holds it for a shot.
+		Weapon->PauseEnergyRegen(Weapon->GetActiveReloadTime());
 	}
 }
 
@@ -1313,6 +1710,38 @@ void AShooterCharacter::Server_RequestWeaponPickup_Implementation(ADroppedRanged
 	}
 }
 
+void AShooterCharacter::Server_RequestInventoryPickup_Implementation(AInventoryPickup* Pickup, float ReportedCaptureRange)
+{
+	if (!Pickup)
+	{
+		return;
+	}
+
+	// Same shape as the weapon request above: the reported reach is held to what this client's own
+	// search radius could ever have found, then given the round-trip margin every reported number
+	// in this class gets.
+	float ClaimedRange = FMath::Max(0.0f, ReportedCaptureRange);
+	if (const UChargeAnimationComponent* Charge = GetChargeAnimationComponent())
+	{
+		ClaimedRange = FMath::Min(ClaimedRange, Charge->CaptureSearchRadius);
+	}
+
+	static constexpr float PickupMarginCm = 500.0f;
+	const float DistanceToPickup = FVector::Dist(GetActorLocation(), Pickup->GetActorLocation());
+	if (DistanceToPickup > ClaimedRange + PickupMarginCm)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to take %s at %.0f cm, reach is %.0f - rejected"),
+			*GetName(), *Pickup->GetName(), DistanceToPickup, ClaimedRange + PickupMarginCm);
+		return;
+	}
+
+	if (!Pickup->TryStartPullForClient(this))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to take %s, already taken or not capturable - rejected"),
+			*GetName(), *Pickup->GetName());
+	}
+}
+
 void AShooterCharacter::Server_ReportIonization_Implementation(AActor* Target, AShooterWeapon* Weapon)
 {
 	if (!Target || !Weapon || !OwnedWeapons.Contains(Weapon))
@@ -1353,7 +1782,7 @@ void AShooterCharacter::Server_CaptureAlly_Implementation(AShooterCharacter* All
 
 	if (Ally->HeldByCharacter != nullptr)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to pick up %s, already held by %s - rejected"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s tried to pick up %s, already held by %s - rejected"),
 			*GetName(), *Ally->GetName(), *GetNameSafe(Ally->HeldByCharacter));
 		return;
 	}
@@ -1363,14 +1792,14 @@ void AShooterCharacter::Server_CaptureAlly_Implementation(AShooterCharacter* All
 	const float Distance = FVector::Dist(GetActorLocation(), Ally->GetActorLocation());
 	if (Distance > GrabRangeCm + GrabMarginCm)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to pick up %s at %.0f cm - rejected"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s tried to pick up %s at %.0f cm - rejected"),
 			*GetName(), *Ally->GetName(), Distance);
 		return;
 	}
 
 	Ally->HeldByCharacter = this;
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Server_CaptureAlly %s picked up %s at %.0f cm"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] Server_CaptureAlly %s picked up %s at %.0f cm"),
 		*GetName(), *Ally->GetName(), Distance);
 }
 
@@ -1383,7 +1812,7 @@ void AShooterCharacter::Server_ReleaseAlly_Implementation(AShooterCharacter* All
 
 	Ally->HeldByCharacter = nullptr;
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Server_ReleaseAlly %s put down %s"), *GetName(), *Ally->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] Server_ReleaseAlly %s put down %s"), *GetName(), *Ally->GetName());
 }
 
 void AShooterCharacter::Server_LaunchAlly_Implementation(AShooterCharacter* Ally, FVector LaunchVelocity)
@@ -1397,7 +1826,7 @@ void AShooterCharacter::Server_LaunchAlly_Implementation(AShooterCharacter* Ally
 	// a free "shove any player in view" for anyone who asks.
 	if (Ally->HeldByCharacter != this)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to throw %s it is not holding - rejected"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s tried to throw %s it is not holding - rejected"),
 			*GetName(), *Ally->GetName());
 		return;
 	}
@@ -1414,7 +1843,7 @@ void AShooterCharacter::Server_LaunchAlly_Implementation(AShooterCharacter* Ally
 	const float Distance = FVector::Dist(GetActorLocation(), Ally->GetActorLocation());
 	if (Distance > ThrowRangeCm + ThrowMarginCm)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s tried to throw %s at %.0f cm - rejected"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s tried to throw %s at %.0f cm - rejected"),
 			*GetName(), *Ally->GetName(), Distance);
 		return;
 	}
@@ -1427,7 +1856,7 @@ void AShooterCharacter::Server_LaunchAlly_Implementation(AShooterCharacter* Ally
 
 	Ally->LaunchCharacter(Velocity, true, true);
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Server_LaunchAlly %s -> %s vel=%s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] Server_LaunchAlly %s -> %s vel=%s"),
 		*GetName(), *Ally->GetName(), *Velocity.ToCompactString());
 }
 
@@ -1535,6 +1964,94 @@ bool AShooterCharacter::WouldLungeAt(const AActor* Target, const FVector& ViewLo
 	return false;
 }
 
+// ==================== Blocking with the blade while sliding ====================
+
+bool AShooterCharacter::GetSlideBlockParams(FSlideBlockParams& Out) const
+{
+	// Sliding, with the blade, and only if the class passive grants it. All three are known on every
+	// machine, which is what lets the animation ask this question and get the server's answer.
+	if (!ApexMovement || !ApexMovement->IsSliding())
+	{
+		return false;
+	}
+
+	// The fiction is the weapon in the way. A rifle held across the chest would be a different
+	// mechanic with a different pose, so a ranged weapon blocks nothing.
+	if (!CurrentWeapon || !CurrentWeapon->IsMeleeWeapon())
+	{
+		return false;
+	}
+
+	// Asked through the ability component rather than by knowing about any particular class, exactly
+	// as the lunge reach and the smoke jump are.
+	if (const UAbilityComponent* Abilities = FindComponentByClass<UAbilityComponent>())
+	{
+		if (const UAbilityHandler* Passive = Abilities->GetPassiveHandler())
+		{
+			return Passive->GetSlideBlockParams(Out);
+		}
+	}
+
+	return false;
+}
+
+float AShooterCharacter::GetSlideBlockHalfAngle() const
+{
+	FSlideBlockParams Params;
+	return GetSlideBlockParams(Params) ? Params.HalfAngle : 0.0f;
+}
+
+bool AShooterCharacter::IsSlideBlocking() const
+{
+	FSlideBlockParams Params;
+	return GetSlideBlockParams(Params);
+}
+
+void AShooterCharacter::Multicast_ShotBlocked_Implementation(FVector_NetQuantizeNormal FromDirection)
+{
+	OnShotBlocked.Broadcast(FromDirection);
+	PlaySlideBlockFeedback(FromDirection);
+}
+
+void AShooterCharacter::PlaySlideBlockFeedback(const FVector& FromDirection)
+{
+	// The shake is 2D feedback and belongs to exactly one pair of eyes: the player who blocked. A
+	// listen server that skipped this guard would shake the host's view for every client's block.
+	// Same rule the hit marker follows. @see Docs/Gotchas/Weapons.md
+	if (BlockCameraShake && IsLocallyControlled())
+	{
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			PC->ClientStartCameraShake(BlockCameraShake, BlockCameraShakeScale);
+		}
+	}
+
+	if (!BlockVFX)
+	{
+		return;
+	}
+
+	// ALWAYS on the camera, never on a weapon socket.
+	//
+	// The socket route was tried and dropped: the katana has no socket to hang this on, and adding
+	// one is art work that this effect should not be waiting on. The camera is the one component
+	// that always exists, always faces where the player looks, and moves with them -- an effect
+	// placed in the world is four metres behind a sliding player before it fades, which reads as the
+	// effect never playing at all.
+	USceneComponent* Anchor = GetFirstPersonCameraComponent();
+	if (!Anchor)
+	{
+		Anchor = GetRootComponent();
+	}
+
+	// Roughly where the blade is held: ahead of the eyes and a little down. Camera space, so X is
+	// forward, Y right, Z up.
+	const FVector Offset(120.0f, 0.0f, -20.0f);
+
+	UNiagaraFunctionLibrary::SpawnSystemAttached(BlockVFX, Anchor, NAME_None,
+		Offset, FRotator::ZeroRotator, EAttachLocation::KeepRelativeOffset, true);
+}
+
 void AShooterCharacter::Server_ConsumePropForHeal_Implementation(AEMFPhysicsProp* Prop)
 {
 	if (!Prop || Prop->GetHoldingCharacter() != this)
@@ -1547,10 +2064,19 @@ void AShooterCharacter::Server_ConsumePropForHeal_Implementation(AEMFPhysicsProp
 	// The verb is checked HERE and not on the machine that pressed the button. A client can send
 	// this RPC whenever it likes; whether this player's class turns props into medicine is the
 	// server's answer, and taking the client's word for it would let any class heal off any prop.
-	if (GetItemVerb() != EClassItemVerb::Heal)
+	// Two verbs answer this button now, and which one is the server's call for the same reason it
+	// always was: a client can send this RPC whenever it likes.
+	const EClassItemVerb Verb = GetItemVerb();
+	if (Verb != EClassItemVerb::Heal && Verb != EClassItemVerb::Smoke)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to eat %s but its class verb is %d - rejected"),
-			*GetName(), *GetNameSafe(Prop), (int32)GetItemVerb());
+		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s tried to use %s but its class verb is %d - rejected"),
+			*GetName(), *GetNameSafe(Prop), (int32)Verb);
+		return;
+	}
+
+	if (Verb == EClassItemVerb::Smoke)
+	{
+		Prop->ConsumeForSmoke(this);
 		return;
 	}
 
@@ -1604,6 +2130,125 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	if (CurrentHP <= 0.0f)
 	{
 		return 0.0f;
+	}
+
+	// The Melee's passive: a slide with the blade up turns the front into a wall.
+	//
+	// Here rather than at any of the places that FIRE, and that is the whole reason it works at all:
+	// an enemy hitscan is not a projectile anybody could collide with, it is a damage region walking
+	// down a frozen line (@see FEnemyBeamBolt), so there is nothing to put a shield collider in front
+	// of. Every kind of incoming damage does end up in this one function, so one check covers bolts,
+	// real projectiles, the explosions they make and a melee swing alike.
+	//
+	// Before the armour, so the blade takes its share before the armour pays for the rest.
+	// Berserk: the back and the sides are armoured while the window runs.
+	//
+	// The mirror of the slide block just below, deliberately: the blade covers the FRONT, so this
+	// covers everything the blade cannot. The two can be live at once and simply multiply, which is
+	// the Melee sliding into a fight with his own buff up -- that is the class working as intended,
+	// not a stacking bug, and neither number is allowed to reach zero on its own.
+	//
+	// Same place, before the armour, so every downstream reader (armour, health, the direction
+	// indicator, the passives) describes the hit that actually landed.
+	if (Damage > 0.0f && bIsBerserk)
+	{
+		FVector SourceLocation = FVector::ZeroVector;
+		bool bHasSource = false;
+
+		if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
+		{
+			SourceLocation = static_cast<const FRadialDamageEvent&>(DamageEvent).Origin;
+			bHasSource = true;
+		}
+		else if (DamageCauser)
+		{
+			SourceLocation = DamageCauser->GetActorLocation();
+			bHasSource = true;
+		}
+		else if (EventInstigator && EventInstigator->GetPawn())
+		{
+			SourceLocation = EventInstigator->GetPawn()->GetActorLocation();
+			bHasSource = true;
+		}
+
+		if (bHasSource)
+		{
+			FVector FromDirection = SourceLocation - GetActorLocation();
+			FromDirection.Z = 0.0f;
+
+			FVector Facing = GetActorForwardVector();
+			Facing.Z = 0.0f;
+
+			if (FromDirection.Normalize() && Facing.Normalize())
+			{
+				const float FrontCos = FMath::Cos(FMath::DegreesToRadians(BerserkFrontHalfAngle));
+				if (FVector::DotProduct(Facing, FromDirection) < FrontCos)
+				{
+					Damage *= FMath::Clamp(BerserkFlankMultiplier, 0.0f, 1.0f);
+				}
+			}
+		}
+	}
+
+	FSlideBlockParams BlockParams;
+	if (Damage > 0.0f && GetSlideBlockParams(BlockParams))
+	{
+		FVector SourceLocation = FVector::ZeroVector;
+		bool bHasSource = false;
+
+		if (DamageEvent.IsOfType(FRadialDamageEvent::ClassID))
+		{
+			// The blast origin, read straight off the event rather than through GetBestHitInfo: the
+			// radial events raised by hand in this project leave ComponentHits empty, and that path
+			// takes the game down. @see the guard further down this same function.
+			SourceLocation = static_cast<const FRadialDamageEvent&>(DamageEvent).Origin;
+			bHasSource = true;
+		}
+		else if (DamageCauser)
+		{
+			// A bolt names the weapon, a projectile names itself, a swing names the blade. All three
+			// sit on the line the damage travelled, which is the only thing the arc test needs.
+			SourceLocation = DamageCauser->GetActorLocation();
+			bHasSource = true;
+		}
+		else if (EventInstigator && EventInstigator->GetPawn())
+		{
+			SourceLocation = EventInstigator->GetPawn()->GetActorLocation();
+			bHasSource = true;
+		}
+
+		if (bHasSource)
+		{
+			FVector FromDirection = SourceLocation - GetActorLocation();
+			FromDirection.Z = 0.0f;
+
+			if (FromDirection.Normalize())
+			{
+				FVector Facing = GetActorForwardVector();
+				Facing.Z = 0.0f;
+
+				if (Facing.Normalize()
+					&& FVector::DotProduct(Facing, FromDirection)
+						>= FMath::Cos(FMath::DegreesToRadians(BlockParams.HalfAngle)))
+				{
+					// The rest of the function runs on the REDUCED number, and that is the point of
+					// doing it here: the armour, the health, the direction indicator, the hurt
+					// feedback and anything a passive is told about all describe the hit that
+					// actually landed, rather than the one the blade already ate.
+					Damage *= BlockParams.DamageMultiplier;
+
+					// Announced even when nothing at all got through: the spark and the shake are
+					// how the player learns the guard is working, and a total block is exactly the
+					// case where they have nothing else to go on.
+					Multicast_ShotBlocked(FromDirection);
+
+					if (Damage <= 0.0f)
+					{
+						return 0.0f;
+					}
+				}
+			}
+		}
 	}
 
 	// Armor absorption (DOOM Eternal-style): armor absorbs damage before health
@@ -1803,6 +2448,13 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 
 void AShooterCharacter::DoStartFiring()
 {
+	// The cursor owns the mouse while the inventory overlay is up. Without this the same left
+	// click that picks a cell up also empties a magazine into the wall behind the screen.
+	if (IsInventoryScreenOpen())
+	{
+		return;
+	}
+
 	// Don't fire if melee attacking
 	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
 	{
@@ -1864,6 +2516,15 @@ void AShooterCharacter::DoStopFiring()
 	if (RecoilComponent)
 	{
 		RecoilComponent->OnFiringEnded();
+	}
+
+	// PRAS gets the same news, but ONLY while it is the one driving. Their Stop() walks into
+	// RefreshControllerCompensation, which reads RecoilData without checking it, so calling Stop on
+	// a component that was never given an asset is a null dereference. Their Play() does guard, so
+	// the asymmetry is easy to miss: the call that looks harmless is the dangerous one.
+	if (PackRecoilComponent && IsPackRecoilActive())
+	{
+		PackRecoilComponent->Stop();
 	}
 }
 
@@ -1933,6 +2594,50 @@ bool AShooterCharacter::IsPlayingReloadAnimation() const
 	return AnimInstance && AnimInstance->Montage_IsPlaying(Montage);
 }
 
+void AShooterCharacter::DoToggleInventory()
+{
+	// The overlay belongs to the controller, not the pawn: it survives a respawn, and it is the
+	// controller that owns the input mode it takes over. Nothing here is replicated, and nothing
+	// about the pawn changes, so there is no server call on this path at all.
+	if (AShooterPlayerController* ShooterPC = Cast<AShooterPlayerController>(GetController()))
+	{
+		ShooterPC->ToggleInventoryScreen();
+
+		// Whatever the mouse was holding when the screen came up is let go here. The gates below
+		// stop the NEXT press from reaching the gun, but a trigger already held would simply stay
+		// held: its release runs while the screen is open and is not gated, but nothing fires the
+		// release until the player lets go, and by then the shooting has been going on the whole
+		// time the cursor was dragging cells around.
+		if (ShooterPC->IsInventoryScreenOpen())
+		{
+			CancelActionsForInventoryScreen();
+		}
+	}
+}
+
+void AShooterCharacter::DoToggleMap()
+{
+	// Same reasoning as the inventory: the screen belongs to the controller, survives a respawn,
+	// and is the thing that owns the input mode it takes over.
+	if (AShooterPlayerController* const ShooterPC = Cast<AShooterPlayerController>(GetController()))
+	{
+		ShooterPC->ToggleMapScreen();
+	}
+}
+
+bool AShooterCharacter::IsInventoryScreenOpen() const
+{
+	const AShooterPlayerController* ShooterPC = Cast<AShooterPlayerController>(GetController());
+	return ShooterPC && ShooterPC->IsInventoryScreenOpen();
+}
+
+void AShooterCharacter::CancelActionsForInventoryScreen()
+{
+	// Both releases are unconditional by design, so calling them when nothing was held is free.
+	DoStopFiring();
+	DoStopADS();
+}
+
 void AShooterCharacter::DoReload()
 {
 	// Not while the weapon is being put away or brought out: the reload montage would fight the
@@ -1963,6 +2668,28 @@ void AShooterCharacter::DoSwitchWeaponBackward()
 	CycleWeapon(-1);
 }
 
+AShooterWeapon* AShooterCharacter::FindCycleTargetWeapon(int32 Direction) const
+{
+	const int32 Count = OwnedWeapons.Num();
+	if (Count == 0)
+	{
+		return nullptr;
+	}
+
+	// Find the index of the current weapon in the owned list
+	int32 WeaponIndex = OwnedWeapons.Find(CurrentWeapon);
+	if (WeaponIndex == INDEX_NONE)
+	{
+		WeaponIndex = 0;
+	}
+
+	// Step by Direction (+1 = next, -1 = previous), wrapping around both ends.
+	// Adding Count before the modulo keeps the result non-negative when Direction == -1.
+	WeaponIndex = (WeaponIndex + Direction + Count) % Count;
+
+	return OwnedWeapons[WeaponIndex];
+}
+
 void AShooterCharacter::CycleWeapon(int32 Direction)
 {
 	// Don't switch if melee attacking
@@ -1985,6 +2712,16 @@ void AShooterCharacter::CycleWeapon(int32 Direction)
 		return;
 	}
 
+	// Hands deliberately empty: the cycle key is ALSO "take something back out", so it is answered
+	// here rather than refused by the CanStartWeaponSwitch gate below. There is no holster half to
+	// play — the hands are already empty — so this goes straight to a draw, and with a single owned
+	// weapon the step lands back on that weapon and simply draws it again.
+	if (WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer)
+	{
+		DrawWeaponFromEmptyHands(FindCycleTargetWeapon(Direction));
+		return;
+	}
+
 	// Don't interrupt a weapon being put away; a draw may be interrupted. @see CanStartWeaponSwitch
 	if (!CanStartWeaponSwitch())
 	{
@@ -1994,21 +2731,170 @@ void AShooterCharacter::CycleWeapon(int32 Direction)
 	// Ensure we have at least two weapons to switch between
 	if (OwnedWeapons.Num() > 1)
 	{
-		// Find the index of the current weapon in the owned list
-		int32 WeaponIndex = OwnedWeapons.Find(CurrentWeapon);
-		if (WeaponIndex == INDEX_NONE)
-		{
-			WeaponIndex = 0;
-		}
-
-		// Step by Direction (+1 = next, -1 = previous), wrapping around both ends.
-		// Adding Count before the modulo keeps the result non-negative when Direction == -1.
-		const int32 Count = OwnedWeapons.Num();
-		WeaponIndex = (WeaponIndex + Direction + Count) % Count;
-
 		// Start animated switch to the new weapon
-		StartWeaponSwitch(OwnedWeapons[WeaponIndex]);
+		StartWeaponSwitch(FindCycleTargetWeapon(Direction));
 	}
+}
+
+void AShooterCharacter::DoToggleHolsterWeapon()
+{
+	switch (WeaponSwitchPhase)
+	{
+	case EWeaponSwitchPhase::StowedByPlayer:
+		DrawHolsteredWeapon();
+		break;
+
+	case EWeaponSwitchPhase::StowingByPlayer:
+		// Already on its way down. Answering the press by reversing mid-animation would need a
+		// draw that starts from the holster's current pose, and there is no such montage.
+		break;
+
+	default:
+		HolsterWeaponByPlayer();
+		break;
+	}
+}
+
+void AShooterCharacter::HolsterWeaponByPlayer()
+{
+	// A grapple owns the hands while the line is out; the weapon is already away for a better
+	// reason, and putting it "away" again would leave the phase pointing at the wrong owner.
+	if (bWeaponStowedForGrapple)
+	{
+		return;
+	}
+
+	// The same three things that veto a swap, for the same reasons: all of them are mid-animation on
+	// the arms this holster would take over. @see CycleWeapon
+	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
+	{
+		return;
+	}
+	if (ChargeAnimationComponent && ChargeAnimationComponent->IsAnimating())
+	{
+		return;
+	}
+	if (AbilityComponent && AbilityComponent->IsCasting())
+	{
+		return;
+	}
+
+	// A weapon on its way into the hands may be turned back; one on its way out owns its sequence
+	// until the swap point. @see CanStartWeaponSwitch
+	if (!CanStartWeaponSwitch())
+	{
+		return;
+	}
+
+	if (!CurrentWeapon)
+	{
+		// Nothing in hand. Unlike the grapple this does NOT take the phase: an unarmed player
+		// pressing the key would otherwise be stuck in a holster nothing can draw them out of.
+		return;
+	}
+
+	// Interrupting a draw. The weapon it already put in our hands is the one being put away, which
+	// keeps the rule that every weapon leaves the hand through its own holster animation.
+	CancelWeaponSwitch();
+	PendingWeapon = nullptr;
+
+	CurrentWeapon->StopFiring();
+
+	const float HolsterLength = CurrentWeapon->GetHolsterLength();
+	if (HolsterLength <= 0.0f)
+	{
+		// Unanimated weapon: it simply vanishes, which is what an unanimated swap does too.
+		FinishPlayerHolster();
+		return;
+	}
+
+	PlayWeaponSwitchMontage(CurrentWeapon->GetHolsterMontage(), CurrentWeapon->GetHolsterMontageTP(),
+		CurrentWeapon->GetHolsterPlayRate());
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::StowingByPlayer;
+
+	// A plain timer over the whole montage, not the swap-point notify: that notify exists to change
+	// two weapons over at an exact frame, and there is no second weapon here. Same choice the
+	// grapple's stow makes, and for the same reason.
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishPlayerHolster,
+		HolsterLength, false);
+
+	PlayWeaponSwitchSound();
+}
+
+void AShooterCharacter::FinishPlayerHolster()
+{
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	// DeactivateWeapon rather than a bare hide: it also stops firing, cancels a reload that would
+	// otherwise finish behind the player's back, and replicates the hidden flag so teammates see the
+	// gun leave the hand. @see FinishGrappleStow
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->DeactivateWeapon();
+	}
+
+	// Phase first: it is what the visibility rule below reads to decide the arms are away.
+	WeaponSwitchPhase = EWeaponSwitchPhase::StowedByPlayer;
+	UpdateFirstPersonMeshVisibility();
+}
+
+void AShooterCharacter::DrawHolsteredWeapon()
+{
+	if (WeaponSwitchPhase != EWeaponSwitchPhase::StowedByPlayer)
+	{
+		return;
+	}
+
+	DrawWeaponFromEmptyHands(CurrentWeapon);
+}
+
+void AShooterCharacter::DrawWeaponFromEmptyHands(AShooterWeapon* Weapon)
+{
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+
+	// Leave the holstered phase before anything else: it is what the arms' visibility reads, and the
+	// unanimated branches below return through FinishWeaponDraw, which does not touch visibility. Do
+	// it here and every one of them gets the arms back.
+	WeaponSwitchPhase = EWeaponSwitchPhase::None;
+	FirstPersonRevealFramesLeft = 2;
+	UpdateFirstPersonMeshVisibility();
+
+	if (!Weapon)
+	{
+		// Empty-handed with nothing to draw (every weapon was dropped while away). Ending in None
+		// rather than in the holster is deliberate: the player is unarmed, not holstered.
+		return;
+	}
+
+	if (Weapon != CurrentWeapon)
+	{
+		// A different weapon: the ordinary draw, which equips locally and tells the authority in the
+		// same breath. The holster half is skipped because the hands already paid for it.
+		PendingWeapon = Weapon;
+		BeginWeaponDraw();
+		return;
+	}
+
+	// The same weapon coming back out. EquipWeaponImmediate no-ops when the weapon is already
+	// CurrentWeapon, so it would never be re-activated and would stay hidden -- the activate has to
+	// be explicit here, exactly as it is coming off a grapple.
+	CurrentWeapon->ActivateWeapon();
+
+	const float DrawLength = CurrentWeapon->GetDrawLength();
+	if (DrawLength <= 0.0f)
+	{
+		FinishWeaponDraw();
+		return;
+	}
+
+	PlayWeaponSwitchMontage(CurrentWeapon->GetDrawMontage(), CurrentWeapon->GetDrawMontageTP(),
+		CurrentWeapon->GetDrawPlayRate());
+
+	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
+		DrawLength, false);
 }
 
 void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
@@ -2036,21 +2922,30 @@ void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 		return;
 	}
 
+	AShooterWeapon* TargetWeapon = FindOwnedWeaponForHotkeyAction(Action);
+	if (!TargetWeapon)
+	{
+		return;
+	}
+
+	// Hands deliberately empty: naming a weapon is how the player asks for one back, so the number
+	// keys answer while holstered exactly as the cycle key does, and with no holster half to play.
+	if (WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer)
+	{
+		DrawWeaponFromEmptyHands(TargetWeapon);
+		return;
+	}
+
 	// Don't interrupt a weapon being put away; a draw may be interrupted. @see CanStartWeaponSwitch
 	if (!CanStartWeaponSwitch())
 	{
 		return;
 	}
 
-	// Equip the owned weapon whose per-weapon SwitchAction matches the pressed key (if not already held).
-	// Several weapon classes can share one action, but only one is ever owned, so the match is unambiguous.
-	for (AShooterWeapon* TargetWeapon : OwnedWeapons)
+	// Equip whatever sits in the slot this key indexes (if it is not already in hand).
+	if (TargetWeapon != CurrentWeapon)
 	{
-		if (TargetWeapon && TargetWeapon->GetSwitchAction() == Action && TargetWeapon != CurrentWeapon)
-		{
-			StartWeaponSwitch(TargetWeapon);
-			return;
-		}
+		StartWeaponSwitch(TargetWeapon);
 	}
 }
 
@@ -2191,7 +3086,7 @@ void AShooterCharacter::EquipWeaponImmediate(AShooterWeapon* NewWeapon)
 	}
 
 	// [COOP_DEBUG] Who ran the equip, on which side, and what it hid/showed.
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] EquipWeaponImmediate: Char=%s authority=%d local=%d | old=%s new=%s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] EquipWeaponImmediate: Char=%s authority=%d local=%d | old=%s new=%s"),
 		*GetName(), HasAuthority() ? 1 : 0, IsLocallyControlled() ? 1 : 0,
 		CurrentWeapon ? *CurrentWeapon->GetName() : TEXT("NULL"),
 		*NewWeapon->GetName());
@@ -2357,6 +3252,21 @@ void AShooterCharacter::StowWeaponForGrapple(float SpeedMultiplier)
 	}
 	bWeaponStowedForGrapple = true;
 
+	// Remembered BEFORE CancelWeaponSwitch clears the phase. The player who holstered by hand and
+	// then grappled asked for empty hands twice; the line letting go must give them back what they
+	// asked for, not draw a weapon they had already put away.
+	bRestoreHolsterAfterGrapple = (WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer);
+
+	// A grapple fired mid-swing finds the hands already empty, and the weapon deactivated: it takes
+	// the phase over, and the swing's own draw then stands down (@see DrawWeaponAfterMelee). The
+	// player's hand holster, if the swing had remembered one, is carried over to the line.
+	const bool bHandsEmptyForMelee = (WeaponSwitchPhase == EWeaponSwitchPhase::StowedForMelee);
+	if (bHandsEmptyForMelee)
+	{
+		bRestoreHolsterAfterGrapple = bRestoreHolsterAfterMelee;
+		bRestoreHolsterAfterMelee = false;
+	}
+
 	// A swap already running loses. The player asked for a grapple, both hands are needed now, and
 	// the alternative -- letting a holster-into-draw finish while the line is out -- would put a
 	// weapon back into hands that are on a rope. The weapon left holding is whatever the swap had
@@ -2364,10 +3274,13 @@ void AShooterCharacter::StowWeaponForGrapple(float SpeedMultiplier)
 	CancelWeaponSwitch();
 	PendingWeapon = nullptr;
 
-	if (!CurrentWeapon)
+	if (!CurrentWeapon || bRestoreHolsterAfterGrapple || bHandsEmptyForMelee)
 	{
-		// Nothing in hand to put away. Still take the phase, so that the gates which read it behave
-		// the same whether or not the character happened to be holding something.
+		// Nothing in hand to put away, either because the character was holding nothing or because
+		// the player had already holstered by hand -- in which case the weapon is deactivated and
+		// the arms are already off screen, and playing a holster on top of that would animate
+		// putting away a gun that is not there. Still take the phase, so that the gates which read
+		// it behave the same whether or not the character happened to be holding something.
 		WeaponSwitchPhase = EWeaponSwitchPhase::StowedForGrapple;
 		return;
 	}
@@ -2429,6 +3342,16 @@ void AShooterCharacter::UnstowWeaponAfterGrapple(float SpeedMultiplier)
 	// the weapon was never actually hidden. Activating a weapon that is already visible is harmless.
 	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
 
+	// The player had put the weapon away by hand before the line went out. Hand the empty hands back
+	// rather than drawing: the grapple borrowed this state, it did not create it.
+	if (bRestoreHolsterAfterGrapple)
+	{
+		bRestoreHolsterAfterGrapple = false;
+		WeaponSwitchPhase = EWeaponSwitchPhase::StowedByPlayer;
+		UpdateFirstPersonMeshVisibility();
+		return;
+	}
+
 	// The phase has to leave StowedForGrapple before the arms can come back: that is the flag the
 	// visibility rule reads. Doing it here rather than in each branch below also covers the
 	// weaponless case, where nothing else would ever put them back.
@@ -2462,6 +3385,94 @@ void AShooterCharacter::UnstowWeaponAfterGrapple(float SpeedMultiplier)
 	// Ends through FinishWeaponDraw, which is the same ending a swap has: the phase clears and a
 	// trigger held through the grapple finally fires. Reused rather than copied precisely so that
 	// the deferred shot keeps working here too.
+	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+
+	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
+		Length, false);
+}
+
+void AShooterCharacter::StowWeaponForMelee()
+{
+	// The line owns empty hands already. The swing borrows them and gives nothing back: the grapple's
+	// own unstow is what brings the weapon out when the line lets go.
+	if (bWeaponStowedForGrapple)
+	{
+		return;
+	}
+
+	// Back-to-back swings, and the swing that follows the boss finisher's pre-lower.
+	if (WeaponSwitchPhase == EWeaponSwitchPhase::StowedForMelee)
+	{
+		return;
+	}
+
+	// Remembered BEFORE CancelWeaponSwitch clears the phase, for the same reason the grapple does it:
+	// a player who holstered by hand asked for empty hands, and the end of the swing must not draw.
+	bRestoreHolsterAfterMelee = (WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer ||
+								 WeaponSwitchPhase == EWeaponSwitchPhase::StowingByPlayer);
+
+	// Whatever swap was running loses, a draw included: the player asked to hit something now.
+	CancelWeaponSwitch();
+	PendingWeapon = nullptr;
+
+	// DeactivateWeapon rather than a bare hide: it stops firing, cancels a reload that would otherwise
+	// finish behind the player's back, and replicates the hidden flag. A weapon the player had already
+	// holstered is deactivated already, and deactivating it again is harmless.
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StopFiring();
+		CurrentWeapon->DeactivateWeapon();
+	}
+
+	// Phase first: it is what the visibility rule below reads to decide the arms are away.
+	WeaponSwitchPhase = EWeaponSwitchPhase::StowedForMelee;
+	UpdateFirstPersonMeshVisibility();
+}
+
+void AShooterCharacter::DrawWeaponAfterMelee(float SpeedMultiplier)
+{
+	// Only the swing's own stow is undone here. A grapple that started mid-swing has taken the phase,
+	// and the weapon comes back when the line lets go, not now.
+	if (WeaponSwitchPhase != EWeaponSwitchPhase::StowedForMelee)
+	{
+		return;
+	}
+
+	if (bRestoreHolsterAfterMelee)
+	{
+		bRestoreHolsterAfterMelee = false;
+		WeaponSwitchPhase = EWeaponSwitchPhase::StowedByPlayer;
+		UpdateFirstPersonMeshVisibility();
+		return;
+	}
+
+	// From here on it is the grapple's unstow line for line: the arms come back held for two frames
+	// so the draw pose is evaluated before they are seen, and the draw ends through FinishWeaponDraw
+	// so a trigger held through the swing still fires the moment the weapon is up.
+	WeaponSwitchPhase = EWeaponSwitchPhase::None;
+	FirstPersonRevealFramesLeft = 2;
+	UpdateFirstPersonMeshVisibility();
+
+	if (!CurrentWeapon)
+	{
+		return;
+	}
+
+	CurrentWeapon->ActivateWeapon();
+
+	const float Mult = FMath::Max(SpeedMultiplier, KINDA_SMALL_NUMBER);
+	const float Length = CurrentWeapon->GetDrawLength() / Mult;
+
+	if (Length <= 0.0f)
+	{
+		FinishWeaponDraw();
+		return;
+	}
+
+	// SCALED rather than replaced, as with the grapple: a heavy weapon stays slower than a light one.
+	PlayWeaponSwitchMontage(CurrentWeapon->GetDrawMontage(), CurrentWeapon->GetDrawMontageTP(),
+		CurrentWeapon->GetDrawPlayRate() * Mult);
+
 	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
 
 	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
@@ -2686,6 +3697,84 @@ void AShooterCharacter::EndAbilityAiming()
 	}
 }
 
+void AShooterCharacter::UpdateMeleeFocusReticle()
+{
+	if (!IsLocallyControlled())
+	{
+		return;
+	}
+
+	const bool bFocusing = MeleeAttackComponent && MeleeAttackComponent->IsFocusing();
+
+	// The camera pulls in while a target is held. Pushed before the early-out below, because the
+	// camera also needs to be told the frame the lock ENDS, and that frame the reticle work below is
+	// already finished. @see UCameraShakeComponent::SetFocusing
+	if (UCameraShakeComponent* Shake = GetCameraShake())
+	{
+		Shake->SetFocusing(bFocusing);
+	}
+
+	// The whole thing costs one bool test on every frame nobody is locking anything, which is almost
+	// all of them.
+	if (!bFocusing && !bMeleeFocusReticleActive)
+	{
+		return;
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr;
+	if (!PC || !Sub)
+	{
+		return;
+	}
+
+	UCaptureReticleWidget* Reticle = Sub->GetReticleForExternalUse(PC);
+
+	if (!bFocusing)
+	{
+		if (Reticle)
+		{
+			Reticle->ClearTarget();
+		}
+		Sub->SetReticleSuppressed(false);
+		bMeleeFocusReticleActive = false;
+		return;
+	}
+
+	if (!bMeleeFocusReticleActive)
+	{
+		// Borrow the capture brackets rather than draw a second set, exactly as ability aiming does.
+		// Two reticles on one screen read as noise, and this one is already the right shape.
+		Sub->SetReticleSuppressed(true);
+		bMeleeFocusReticleActive = true;
+	}
+
+	AActor* Target = MeleeAttackComponent->GetFocusTarget();
+
+	// The same point the lock is aiming at, asked of the same function. Reading GetActorLocation()
+	// here instead would put the brackets on the target's pivot while the camera went somewhere else,
+	// and the player would be told a lie about where they are pointing.
+	FVector2D Screen;
+	if (!Target || !Reticle
+		|| !PC->ProjectWorldLocationToScreen(MeleeAttackComponent->GetFocusAimPoint(Target), Screen))
+	{
+		if (Reticle)
+		{
+			Reticle->ClearTarget();
+		}
+		return;
+	}
+
+	// Bracket size from the target's own bounds, so a boss gets bigger brackets than a grunt without
+	// anybody authoring a number per enemy.
+	FVector BoundsOrigin, BoundsExtent;
+	Target->GetActorBounds(true, BoundsOrigin, BoundsExtent);
+	const float Distance = FMath::Max(1.0f, FVector::Dist(GetActorLocation(), Target->GetActorLocation()));
+	const float PixelRadius = FMath::Clamp((BoundsExtent.Size() / Distance) * 600.0f, 24.0f, 400.0f);
+
+	Reticle->UpdateForTarget(Screen, PixelRadius, 0);
+}
+
 void AShooterCharacter::UpdateAbilityAiming()
 {
 	if (!bAbilityAiming || !IsLocallyControlled())
@@ -2742,11 +3831,394 @@ void AShooterCharacter::UpdateAbilityAiming()
 	Reticle->UpdateForTarget(Screen, PixelRadius, 0);
 }
 
+namespace
+{
+	// ==================== FPS Animation Pack: state handoff ====================
+	//
+	// The pack drives its whole viewmodel stack from three values on its ViewmodelController, and
+	// that component is a BLUEPRINT class. There is no native type to cast to and no typed setter
+	// to call, so the only way to hand it state from C++ is by property name. This is the same
+	// trick APolarityCharacter::PushAnimFloat uses on anim instances, kept local to this file
+	// because the target here is a component rather than a UAnimInstance.
+	//
+	// A missing property is silence on purpose: a character that has not been migrated has no such
+	// component at all, and every one of these writes is then a no-op rather than a crash.
+
+	void PushObjectDouble(UObject* Target, FName PropertyName, double Value)
+	{
+		if (!Target)
+		{
+			return;
+		}
+
+		FProperty* Property = Target->GetClass()->FindPropertyByName(PropertyName);
+
+		// Blueprint "float" is a double in UE5, but the pack could rebuild the component in C++
+		// one day, so both widths are handled.
+		if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(Property))
+		{
+			DoubleProp->SetPropertyValue_InContainer(Target, Value);
+		}
+		else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Property))
+		{
+			FloatProp->SetPropertyValue_InContainer(Target, static_cast<float>(Value));
+		}
+	}
+
+	void PushObjectTransform(UObject* Target, FName PropertyName, const FTransform& Value)
+	{
+		if (!Target)
+		{
+			return;
+		}
+
+		FStructProperty* StructProp = CastField<FStructProperty>(Target->GetClass()->FindPropertyByName(PropertyName));
+		if (StructProp && StructProp->Struct == TBaseStructure<FTransform>::Get())
+		{
+			if (void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(Target))
+			{
+				*static_cast<FTransform*>(ValuePtr) = Value;
+			}
+		}
+	}
+
+	void PushObjectBool(UObject* Target, FName PropertyName, bool bValue)
+	{
+		if (!Target)
+		{
+			return;
+		}
+
+		if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Target->GetClass()->FindPropertyByName(PropertyName)))
+		{
+			// Not a plain memory write: a Blueprint bool is a bitfield, and SetPropertyValue_InContainer
+			// is what knows the mask.
+			BoolProp->SetPropertyValue_InContainer(Target, bValue);
+		}
+	}
+
+	FTransform ReadObjectTransform(UObject* Target, FName PropertyName, bool& bFound)
+	{
+		bFound = false;
+		if (!Target)
+		{
+			return FTransform::Identity;
+		}
+
+		FStructProperty* StructProp = CastField<FStructProperty>(Target->GetClass()->FindPropertyByName(PropertyName));
+		if (StructProp && StructProp->Struct == TBaseStructure<FTransform>::Get())
+		{
+			if (const void* ValuePtr = StructProp->ContainerPtrToValuePtr<void>(Target))
+			{
+				bFound = true;
+				return *static_cast<const FTransform*>(ValuePtr);
+			}
+		}
+
+		return FTransform::Identity;
+	}
+
+	/** The pack's controller, found by class name because the class itself is Blueprint-only. */
+	UActorComponent* FindViewmodelController(const AActor* Owner)
+	{
+		if (!Owner)
+		{
+			return nullptr;
+		}
+
+		for (UActorComponent* Component : Owner->GetComponents())
+		{
+			if (Component && Component->GetClass()->GetName().StartsWith(TEXT("ViewmodelController")))
+			{
+				return Component;
+			}
+		}
+
+		return nullptr;
+	}
+
+	// ==================== One-shot aiming diagnostic ====================
+	//
+	// Written because "the gun goes up over my head when I aim" is a distance and a direction, and
+	// at least three unrelated faults draw that same picture: the eye socket sitting somewhere
+	// other than the eye, our own attach putting the gun in the wrong place, or the pack's layer
+	// moving ik_hand_gun toward the wrong target. Everything below is therefore printed as a
+	// NUMBER IN CAMERA SPACE (+X forward, +Y right, +Z up), where the three faults look different.
+	//
+	// Off unless asked for. `polarity.ads.dump 1` arms it; the next completed aim prints one block
+	// and disarms it again, so a request costs exactly one block and never leaks into normal play.
+	// Kept rather than deleted because the same numbers answer the next aiming question too (a
+	// mounted optic has to drive AimPoint to the same near-zero the iron sights reach).
+	TAutoConsoleVariable<int32> CVarDumpADS(
+		TEXT("polarity.ads.dump"),
+		0,
+		TEXT("Set to 1 to log one block of aiming diagnostics on the next completed aim, in camera space."),
+		ECVF_Cheat);
+
+	void DumpADSDiagnostics(const AShooterCharacter* Self, float Alpha, const AShooterWeapon* Weapon)
+	{
+		if (Alpha < 0.9f || CVarDumpADS.GetValueOnGameThread() == 0)
+		{
+			return;
+		}
+
+		if (!Self || !Self->IsLocallyControlled())
+		{
+			return;
+		}
+
+		CVarDumpADS->Set(0, ECVF_SetByConsole);
+
+		const UCameraComponent* Cam = Self->GetFirstPersonCameraComponent();
+		const USkeletalMeshComponent* Arms = Self->GetFirstPersonMesh();
+
+		if (!Cam || !Arms)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ADS_DUMP] no camera (%d) or no arms mesh (%d), nothing to measure."),
+				static_cast<int32>(Cam != nullptr), static_cast<int32>(Arms != nullptr));
+			return;
+		}
+
+		const FTransform CamT = Cam->GetComponentTransform();
+		auto InCam = [&CamT](const FVector& World) { return CamT.InverseTransformPosition(World); };
+		auto V = [](const FVector& In) { return FString::Printf(TEXT("(%7.2f %7.2f %7.2f)"), In.X, In.Y, In.Z); };
+
+		UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] ================ aiming, alpha %.2f ================"), Alpha);
+		UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] pawn %s"), *Self->GetName());
+
+		// --- 1. Hierarchy. Which of the two schemes is actually live right now. ---
+		UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] arms   parent=%s socket=%s rel=%s"),
+			*GetNameSafe(Arms->GetAttachParent()), *Arms->GetAttachSocketName().ToString(),
+			*V(Arms->GetRelativeLocation()));
+		UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] camera parent=%s socket=%s rel=%s  -> scheme: %s"),
+			*GetNameSafe(Cam->GetAttachParent()), *Cam->GetAttachSocketName().ToString(),
+			*V(Cam->GetRelativeLocation()),
+			Cam->GetAttachParent() == Arms ? TEXT("THEIRS (camera on mesh)") : TEXT("OURS (mesh on camera)"));
+
+		// --- 2. Eye height. The one number the whole inversion was validated on. ---
+		if (const UCapsuleComponent* Capsule = Self->GetCapsuleComponent())
+		{
+			const double EyeAboveCentre = Cam->GetComponentLocation().Z - Capsule->GetComponentLocation().Z;
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] eye above capsule centre = %.2f cm (was 64.00 before the "
+				"inversion; far from it means the arms offset is wrong, not the aiming)"), EyeAboveCentre);
+		}
+
+		// --- 3. The pack's own eye socket, measured on the live posed mesh. ---
+		static const FName EyeSocket(TEXT("FPCamera"));
+		if (Arms->DoesSocketExist(EyeSocket))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] FPCamera socket: in arms space %s, in camera space %s "
+				"(camera space must be ~zero, it IS the camera)"),
+				*V(Arms->GetSocketTransform(EyeSocket, RTS_Component).GetTranslation()),
+				*V(InCam(Arms->GetSocketLocation(EyeSocket))));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ADS_DUMP] arms mesh has NO FPCamera socket."));
+		}
+
+		// --- 4. Where the pack is holding the gun bone. This is the line that answers the ---
+		// question: if ik_hand_gun is up in camera space then THEIR layer moved it and the aim
+		// point we feed is what is wrong; if it is at chest height then the bone is fine and the
+		// gun is displaced by our own attach.
+		static const TCHAR* const BonesOfInterest[] =
+			{ TEXT("VB ik_hand_gun"), TEXT("ik_hand_gun"), TEXT("hand_r"), TEXT("head") };
+
+		for (const TCHAR* BoneName : BonesOfInterest)
+		{
+			const FName Bone(BoneName);
+			if (Arms->DoesSocketExist(Bone))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] bone %-16s in camera space %s"),
+					BoneName, *V(InCam(Arms->GetSocketLocation(Bone))));
+			}
+		}
+
+		if (!Weapon)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] no weapon in hand, stopping here."));
+			return;
+		}
+
+		// --- 5. The gun itself. ---
+		const USkeletalMeshComponent* WeaponMesh = Weapon->GetFirstPersonMesh();
+		if (WeaponMesh)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] weapon %s mesh=%s"),
+				*Weapon->GetName(), *GetNameSafe(WeaponMesh->GetSkeletalMeshAsset()));
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] weapon attached to %s socket=%s"),
+				*GetNameSafe(WeaponMesh->GetAttachParent()), *WeaponMesh->GetAttachSocketName().ToString());
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] weapon ORIGIN in camera space %s   <-- this is "
+				"\"over my head\" expressed as a number"),
+				*V(InCam(WeaponMesh->GetComponentLocation())));
+
+			static const FName PackAim(TEXT("AimPoint"));
+			if (WeaponMesh->DoesSocketExist(PackAim))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] AimPoint socket in camera space %s   <-- aiming "
+					"works when THIS is near zero"),
+					*V(InCam(WeaponMesh->GetSocketLocation(PackAim))));
+			}
+		}
+
+		// --- 6. What we hand the pack, and what it actually holds. ---
+		const USceneComponent* Anchor = Weapon->GetADSCamera();
+		if (Anchor && WeaponMesh)
+		{
+			FTransform AnchorRelMesh =
+				Anchor->GetComponentTransform().GetRelativeTransform(WeaponMesh->GetComponentTransform());
+			AnchorRelMesh.RemoveScaling();
+
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] anchor parent=%s socket=%s"),
+				*GetNameSafe(Anchor->GetAttachParent()), *Anchor->GetAttachSocketName().ToString());
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] anchor rel weapon %s rot %s"),
+				*V(AnchorRelMesh.GetTranslation()), *AnchorRelMesh.Rotator().ToCompactString());
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] -> we push ActiveAimPoint = %s (their formula negates "
+				"the location and keeps the rotation)"),
+				*V(-AnchorRelMesh.GetTranslation()));
+		}
+
+		if (UActorComponent* Viewmodel = FindViewmodelController(Self))
+		{
+			bool bFound = false;
+			const FTransform Held = ReadObjectTransform(Viewmodel, TEXT("ActiveAimPoint"), bFound);
+			UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] component holds ActiveAimPoint = %s rot %s (found=%d)"),
+				*V(Held.GetTranslation()), *Held.Rotator().ToCompactString(), static_cast<int32>(bFound));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[ADS_DUMP] no ViewmodelController on the pawn: the pack is being fed "
+				"nothing at all."));
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[ADS_DUMP] ================ end ================"));
+	}
+}
+
 void AShooterCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
 	UpdateAbilityAiming();
+	UpdateMeleeFocusReticle();
+
+	// ==================== FPS Animation Pack: state handoff ====================
+	//
+	// Their stack reads everything about the player from three values, and nothing else. Gait is
+	// their own scale rather than a speed: 0 standing, 1 walking, 2 sprinting, 3 tactical sprint.
+	// We have no tactical sprint, so the top of the range stays unused rather than being faked.
+	if (UActorComponent* Viewmodel = FindViewmodelController(this))
+	{
+		double Gait = 0.0;
+
+		if (MovementSettings && MovementSettings->WalkSpeed > KINDA_SMALL_NUMBER)
+		{
+			const double Speed = GetVelocity().Size2D();
+
+			if (Speed <= MovementSettings->WalkSpeed)
+			{
+				Gait = Speed / MovementSettings->WalkSpeed;
+			}
+			else
+			{
+				const double SprintRange = FMath::Max(
+					static_cast<double>(MovementSettings->SprintSpeed - MovementSettings->WalkSpeed), 1.0);
+
+				Gait = 1.0 + (Speed - MovementSettings->WalkSpeed) / SprintRange;
+			}
+		}
+
+		// Speed alone would report a sprint whenever anything else pushes the character fast (a
+		// slide, a grapple, a launch pad), and their sprint pose would then play mid-air. The
+		// movement component knows the difference, so the top of the range is gated on it.
+		if (!(ApexMovement && ApexMovement->IsSprinting()))
+		{
+			Gait = FMath::Min(Gait, 1.0);
+		}
+
+		PushObjectDouble(Viewmodel, TEXT("Gait"), FMath::Clamp(Gait, 0.0, 2.0));
+		PushObjectBool(Viewmodel, TEXT("IsAiming"), IsAiming());
+		PushObjectBool(Viewmodel, TEXT("IsPressingTrigger"),
+			CurrentWeapon != nullptr && CurrentWeapon->IsFiring());
+
+		// Where the eye goes when aiming, as a transform ON THE WEAPON rather than a point in the
+		// world: their aiming layer moves the gun until this lands on the sight line, so it needs
+		// the offset from the weapon's own origin and nothing else.
+		//
+		// THE FORMULA IS THEIRS, COPIED EXACTLY, and it is not the obvious one. Read out of
+		// BP_WeaponBase.OnEquipped (nodes F15BFBD4 -> 683F11D7 -> 72888BBE), their three components
+		// are built like this:
+		//
+		//     Location = GetSocketTransform("AimPoint", RTS_Component).Location * -1.0
+		//     Rotation = GetSocketTransform("AimPoint", RTS_Component).Rotation        (NOT inverted)
+		//     Scale    = GetSocketTransform("AimPoint", RTS_Component).Scale
+		//
+		// So ActiveAimPoint is not "where the sight is", it is the CORRECTION that brings the sight
+		// back to the gun's own origin, with the location pre-negated and the rotation left alone.
+		// Feeding the un-negated location instead points the correction the wrong way and doubles
+		// it, which is why aiming used to throw the weapon up over the player's head. The layer's
+		// internals are not the contract here; matching their three numbers is, and that is
+		// checkable without reading a single animation node.
+		//
+		// Ours comes from ResolveADSAnchorAttachment rather than from the socket directly, and that
+		// is the whole point: it has already picked the best eye point this weapon has -- SOCKET_Aim
+		// on a mounted optic first, then the weapon's own sight, then their AimPoint, then the
+		// mount. With no optic fitted the chain lands on AimPoint and this produces bit for bit what
+		// their own weapon would have produced; with an optic fitted the same feed carries our
+		// attachment system through an aiming layer that knows nothing about attachments.
+		if (CurrentWeapon)
+		{
+			const USceneComponent* Anchor = CurrentWeapon->GetADSCamera();
+			const USkeletalMeshComponent* WeaponMesh = CurrentWeapon->GetFirstPersonMesh();
+
+			if (Anchor && WeaponMesh)
+			{
+				FTransform AimPointOnWeapon =
+					Anchor->GetComponentTransform().GetRelativeTransform(WeaponMesh->GetComponentTransform());
+				AimPointOnWeapon.RemoveScaling();
+				AimPointOnWeapon.SetTranslation(-AimPointOnWeapon.GetTranslation());
+
+				PushObjectTransform(Viewmodel, TEXT("ActiveAimPoint"), AimPointOnWeapon);
+			}
+		}
+	}
+
+	// Stopping PRAS. Two tests, and the second is not redundant.
+	//
+	// IsFiring() cannot be used for either: it is the TRIGGER, set in StartFiring and cleared in
+	// StopFiring, and nothing in between cares whether the magazine still has rounds. That is what
+	// made the first attempt at this a no-op.
+	if (LastPackShotTime > 0.0f && PackRecoilComponent && IsPackRecoilActive())
+	{
+		// 1. The gun ran dry. Known exactly, so the shaking ends on the same frame as the shots
+		//    instead of a seventh of a second later. Gated on UsesReload because a weapon without a
+		//    real magazine refills itself in ConsumeRoundAfterShot and keeps firing, so an empty
+		//    count there means nothing.
+		const bool bRanDry = CurrentWeapon
+			&& CurrentWeapon->UsesReload()
+			&& CurrentWeapon->GetBulletCount() <= 0;
+
+		// 2. Everything else that ends a burst, caught by the gap between rounds: reload, weapon
+		//    switch, holster, death, an ammo pool that ran out. One net instead of a hook per case,
+		//    and a new case cannot forget to add itself.
+		//
+		//    1.75 refire intervals is comfortably longer than the gap inside a burst, so a steady
+		//    stream is never cut, and short enough to go quiet in 0.15 s at 720 rounds per minute.
+		const float Interval = CurrentWeapon
+			? FMath::Max(CurrentWeapon->GetActualRefireRate(), 0.01f)
+			: 0.1f;
+
+		const bool bTimedOut = (GetWorld()->GetTimeSeconds() - LastPackShotTime) > Interval * 1.75f;
+
+		if (bRanDry || bTimedOut)
+		{
+			PackRecoilComponent->Stop();
+			LastPackShotTime = 0.0f;
+		}
+	}
+
+	TickPackCameraShake(DeltaTime);
+
 
 
 	// Boss finisher has priority over everything
@@ -2803,6 +4275,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateLeftHandPose(DeltaTime);
 	UpdateLowHealthWarning(DeltaTime);
 	UpdatePostProcessEffects(DeltaTime);
+	UpdateBerserkFilter(DeltaTime);
 
 	// Update recoil component state
 	if (RecoilComponent)
@@ -2923,6 +4396,12 @@ void AShooterCharacter::Tick(float DeltaTime)
 
 void AShooterCharacter::DoStartADS()
 {
+	// Right click belongs to the cursor while the overlay is up, same as the left one.
+	if (IsInventoryScreenOpen())
+	{
+		return;
+	}
+
 	// Don't ADS if melee attacking
 	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
 	{
@@ -2947,6 +4426,34 @@ void AShooterCharacter::DoStartADS()
 	if (PendingYankThrowWeapon.IsValid() &&
 		IsYankThrowMontageActiveOnFPMesh(ChargeAnimationComponent, GetFirstPersonMesh()))
 	{
+		return;
+	}
+
+	// Holding aim with a melee kit LOCKS a target instead of aiming down sights. The class's reach
+	// exists to be spent on somebody specific, and choosing that somebody is the player's job now:
+	// the swing no longer pulls him at whatever the camera crossed.
+	//
+	// Ahead of the two hooks below rather than behind them, and it matters for exactly one case: the
+	// melee-charge upgrade also lives on this button. The lock only takes the press when there is
+	// something in reach to lock, so the charge still gets the button everywhere else.
+	// The hold is remembered even when this press finds nothing to lock, so a player who holds the
+	// button through an approach gets the lock the instant somebody walks into reach. Without it the
+	// press was thrown away and the player had to release and press again mid-fight.
+	// Only with a blade in hand, and that is narrower than it used to be on purpose: a held button
+	// that keeps looking for somebody to lock would otherwise grab the camera of a rifle player who
+	// aimed down sights next to an enemy. The lock belongs to the kit whose reach it exists for.
+	if (MeleeAttackComponent && Cast<AShooterWeapon_Melee>(CurrentWeapon))
+	{
+		MeleeAttackComponent->SetFocusHeld(true);
+
+		if (MeleeAttackComponent->TryStartFocus())
+		{
+			return;
+		}
+	}
+	else if (MeleeAttackComponent && MeleeAttackComponent->TryStartFocus())
+	{
+		// Everyone else keeps the old behaviour exactly: one press, one look, no memory.
 		return;
 	}
 
@@ -2986,11 +4493,27 @@ void AShooterCharacter::DoStartADS()
 		{
 			RecoilComponent->SetAiming(true);
 		}
+
+		// PRAS keeps a separate aimed profile too (their PitchAim/YawAim against PitchHip/YawHip),
+		// so it has to hear the same edge. Told here rather than every frame: it is a state change,
+		// not a value.
+		if (PackRecoilComponent)
+		{
+			PackRecoilComponent->SetAimingStatus(true);
+		}
 	}
 }
 
 void AShooterCharacter::DoStopADS()
 {
+	// The lock lets go with the button, always, whether or not this press was the one that took it.
+	// A lock left standing would hold the camera on an enemy the player has stopped asking for.
+	// SetFocusHeld rather than StopFocus: this is the release, so the standing request dies with it.
+	if (MeleeAttackComponent)
+	{
+		MeleeAttackComponent->SetFocusHeld(false);
+	}
+
 	// Notify weapon that secondary action button was released
 	// Must come before bWantsToAim check: when OnSecondaryAction() returned true,
 	// bWantsToAim was never set, but the weapon still needs the release callback
@@ -3022,6 +4545,11 @@ void AShooterCharacter::DoStopADS()
 	{
 		RecoilComponent->SetAiming(false);
 	}
+
+	if (PackRecoilComponent)
+	{
+		PackRecoilComponent->SetAimingStatus(false);
+	}
 }
 
 void AShooterCharacter::UpdateADS(float DeltaTime)
@@ -3042,8 +4570,8 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		// relative location is otherwise untouched here, so set it = base + shield offset each tick.
 		if (UCameraComponent* Cam = GetFirstPersonCameraComponent())
 		{
-			AppliedCrouchCameraOffset = GetCrouchCameraOffset();
-			Cam->SetRelativeLocation(BaseCameraLocation + CurrentShieldCameraOffset + AppliedCrouchCameraOffset);
+			Cam->SetRelativeLocation(
+				BaseCameraLocation + ToCameraParentSpace(Cam, CurrentShieldCameraOffset));
 		}
 		return;
 	}
@@ -3058,6 +4586,8 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		DeltaTime,
 		MovementSettings->ADSInterpSpeed
 	);
+
+	DumpADSDiagnostics(this, CurrentADSAlpha, CurrentWeapon);
 
 	// Hand the alpha to the FP anim graph. Nothing in animation knew about aiming before this:
 	// the whole difference between hip and aimed was a component transform, so the arms kept
@@ -3093,13 +4623,13 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		ShakeOffset = ShakeComp->GetCameraOffset();
 	}
 
-	// The crouch counter-offset joins the camera's own offsets here, and is remembered so the pose
-	// pipeline can tell it apart from them: shake and shield are deliberately only half-followed by
-	// the hands, while a crouch has to be followed whole (the hands are part of the view, and a
-	// half-followed crouch would slide them out of the frame and back).
-	AppliedCrouchCameraOffset = GetCrouchCameraOffset();
-
-	Camera->SetRelativeLocation(BaseCameraLocation + ShakeOffset + CurrentShieldCameraOffset + AppliedCrouchCameraOffset);
+	// The crouch counter-offset used to be added here. It is on the FIRST PERSON MESH now
+	// (APolarityCharacter::AccumulateFirstPersonPose), because the mesh is what the capsule resize
+	// actually teleports under the pack hierarchy and the camera is parented to it. Adding it in
+	// both places would move the eye twice; adding it only here moved the eye and left the hands
+	// behind, which is the jerk this fixed. See the comment at the end of that function.
+	Camera->SetRelativeLocation(
+		BaseCameraLocation + ToCameraParentSpace(Camera, ShakeOffset + CurrentShieldCameraOffset));
 
 	// Hipfire FOV comes from the player setting, read fresh every frame. This is the ONLY path the
 	// setting takes to the renderer, on purpose.
@@ -3143,6 +4673,19 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	// wallrun, air dash) are additive degrees on top of it, faded out as the sights come up so a
 	// slide cannot push the scope back open.
 	const float InterpFOV = FMath::Lerp(HipfireFOV, ADSFOV, CurrentADSAlpha);
+
+	// Apex scales aim sensitivity by the FOV it aims through, and so do we:
+	//     ADS degrees per count = hip degrees per count * FovScale * per-optic multiplier
+	// FovScale is the tangent ratio, which is the only ratio that keeps a hand movement worth the
+	// same distance ON THE SCREEN through the zoom. Because ApplyZoomToFOV is itself defined in
+	// tangent space, this comes out to exactly 1/ADSZoom at full aim - a 2x sight halves the turn.
+	// Taken from the clean FOV pair rather than the camera, which by now carries shake and slide.
+	{
+		const float HipTan = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(HipfireFOV, 1.0f, 179.0f) * 0.5f));
+		const float AimTan = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(InterpFOV, 1.0f, 179.0f) * 0.5f));
+		AdsSensitivityFovScale = (HipTan > KINDA_SMALL_NUMBER) ? (AimTan / HipTan) : 1.0f;
+	}
+
 	if (UCameraShakeComponent* ShakeComp = GetCameraShake())
 	{
 		ShakeComp->SetBaseFOV(InterpFOV);
@@ -3153,11 +4696,9 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		Camera->SetFieldOfView(InterpFOV);
 	}
 
-	// First person FOV is kept EQUAL to the world FOV. Written here for the case where there is no
-	// shake component; when there is one it writes FieldOfView after us, and mirrors the first
-	// person FOV itself. The per-weapon ADSCamera->FirstPersonFieldOfView is deliberately ignored:
-	// letting it drift from the world FOV is what put the weapon out of the hands.
-	Camera->FirstPersonFieldOfView = InterpFOV;
+	// The first person FOV is NOT written here: the viewmodel keeps its own fixed FOV from the
+	// camera component, and aiming zooms the world only. See the note at the end of
+	// UCameraShakeComponent's FOV block for why the two used to be kept equal.
 }
 
 void AShooterCharacter::UpdateRegeneration(float DeltaTime)
@@ -3313,9 +4854,10 @@ void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loca
 	{
 		if (const UCameraComponent* Camera = GetFirstPersonCameraComponent())
 		{
-			// Minus the crouch offset: that one is not a camera effect the mesh should be shielded
-			// from, it IS the view moving, and the hands ride the view.
-			const FVector CameraOffsetFromBase = Camera->GetRelativeLocation() - BaseCameraLocation - AppliedCrouchCameraOffset;
+			// The crouch offset used to be subtracted out here, because it was one of the things
+			// written to the camera above. It no longer is: it lives on the mesh now, so there is
+			// nothing to take back out and the camera carries only shake and the raised shield.
+			const FVector CameraOffsetFromBase = Camera->GetRelativeLocation() - BaseCameraLocation;
 			const FVector OffsetInCameraSpace = Camera->GetRelativeRotation().UnrotateVector(CameraOffsetFromBase);
 			Location -= OffsetInCameraSpace * (1.0f - CameraLocationFollowAlpha);
 		}
@@ -3345,6 +4887,25 @@ void AShooterCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loca
 void AShooterCharacter::AccumulateADSSightAlignment(FVector& Location, FRotator& Rotation, const USkeletalMeshComponent* FPMesh) const
 {
 	if (CurrentADSAlpha <= KINDA_SMALL_NUMBER || !CurrentWeapon || !FPMesh)
+	{
+		return;
+	}
+
+	// This whole function is written for the hierarchy where the CAMERA is the mesh's parent, which
+	// is what the algebra below depends on: Location and Rotation are read as the mesh's transform
+	// in camera space. Since the FPS Animation Pack hierarchy went in (camera hangs off the mesh at
+	// the FPCamera socket) that is no longer true, and worse, moving the mesh now moves the camera
+	// with it -- so aligning the sight to the camera by moving the mesh is a feedback loop, the very
+	// one the comment further down warns about.
+	//
+	// In that hierarchy the aiming is the pack's to do: its layer moves ik_hand_gun, which is a
+	// different branch from the neck the camera sits on, so the gun can be aimed without dragging
+	// the view. We feed it ActiveAimPoint from Tick.
+	//
+	// Detected rather than configured, so a character still on the old hierarchy (anything whose
+	// arms mesh has no FPCamera socket, see APolarityCharacter::BeginPlay) keeps the old aiming.
+	const UCameraComponent* ViewCamera = GetFirstPersonCameraComponent();
+	if (ViewCamera && ViewCamera->GetAttachParent() == FPMesh)
 	{
 		return;
 	}
@@ -3904,7 +5465,7 @@ void AShooterCharacter::ApplyClassDefinition()
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s applied class '%s' role=%d verb=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s applied class '%s' role=%d verb=%d"),
 		*GetName(), *GetNameSafe(ClassDefinition), (int32)GetLocalRole(), (int32)ClassDefinition->ItemVerb);
 }
 
@@ -3913,6 +5474,17 @@ void AShooterCharacter::EquipStartingWeaponAnimated()
 	if (!StartingWeaponClass)
 	{
 		return;
+	}
+
+	// Already in the hands: granted at spawn (BeginPlay), and now the run-start toss lands or the
+	// boss intro ends and asks again. Nothing to hand over, and replaying the draw on a gun that
+	// never left the hands reads as a hiccup.
+	if (AShooterWeapon* Owned = FindWeaponOfType(StartingWeaponClass))
+	{
+		if (CurrentWeapon == Owned)
+		{
+			return;
+		}
 	}
 
 	// AddWeaponClassAnimated equips instantly when the player is unarmed: there is nothing to put
@@ -4466,8 +6038,21 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	// attach the weapon actor
 	Weapon->AttachToActor(this, AttachmentRule);
 
+	// Where the first person gun hangs, and whether anything is allowed to move it afterwards.
+	//
+	// Two placement systems exist and only one of them may run. The old one parks the gun on the
+	// hand and then shifts it so a grip socket lands on that hand: the pose says nothing about the
+	// weapon, so a constant has to. The other one reads the placement out of the animation, which
+	// keys ik_hand_gun frame by frame. Run both and the constant wins, overwriting the animator's
+	// placement with one tuned against different animations, and every hand keyed against the gun
+	// misses by the difference.
+	const bool bPoseFromAnimation = Weapon->bWeaponPoseFromAnimation;
+	const FName FirstPersonSocket = bPoseFromAnimation
+		? AShooterWeapon::AnimatedWeaponSocketName
+		: FirstPersonWeaponSocket;
+
 	// attach the weapon meshes
-	Weapon->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonWeaponSocket);
+	Weapon->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonSocket);
 	Weapon->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, ThirdPersonWeaponSocket);
 
 	// If the weapon mesh has an OptionalGrip socket, shift the mesh's relative transform so
@@ -4502,7 +6087,15 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 	// sights/suppressors/lasers drift off their sockets the moment the weapon animated.)
 	// The maths and the logging live on AShooterWeapon so that NPCs, which attach their weapons
 	// through their own override, hold them exactly the way the player does.
-	AShooterWeapon::AlignMeshToGripSocket(Weapon->GetFirstPersonMesh(), FName("OptionalGrip"));
+	//
+	// Skipped entirely when the animation owns the placement: SnapToTarget already left the mesh at
+	// identity on ik_hand_gun, which is exactly where the animator had it, and there is nothing left
+	// to correct. Third person is aligned either way, because the body carries the gun on its hand
+	// socket and no animation is placing it there.
+	if (!bPoseFromAnimation)
+	{
+		AShooterWeapon::AlignMeshToGripSocket(Weapon->GetFirstPersonMesh(), FName("OptionalGrip"));
+	}
 
 	USkeletalMeshComponent* ThirdPersonWeaponMesh = Weapon->GetThirdPersonMesh();
 	AShooterWeapon::AlignMeshToGripSocket(ThirdPersonWeaponMesh,
@@ -4620,9 +6213,31 @@ void AShooterCharacter::PlayThirdPersonMontageLocal(UAnimMontage* Montage, float
 
 void AShooterCharacter::AddWeaponRecoil(float Recoil)
 {
+	// PRAS first, and exclusively. Both systems write the view, so running them together would not
+	// read as a bug but as a weapon with twice the kick, which is far harder to notice and to
+	// attribute. The weapon decides which one runs simply by carrying a recoil asset or not.
+	if (IsPackRecoilActive() && PackRecoilComponent)
+	{
+		PackRecoilComponent->Play();
+
+		// Stamped here because this function runs once per ROUND (ConsumeRoundAfterShot calls it),
+		// which is exactly the event no flag on the weapon reports.
+		LastPackShotTime = GetWorld()->GetTimeSeconds();
+
+		// The jolt restarts on every shot rather than accumulating, which is what makes a burst
+		// read as a burst: each round yanks the view from wherever the last one left it.
+		if (CurrentWeapon && CurrentWeapon->GetPackShakeCurve())
+		{
+			PackShakePlayback = 0.0f;
+			PackShakeAmplitude = CurrentWeapon->RollPackShakeAmplitude();
+		}
+
+		return;
+	}
+
 	if (CurrentWeapon && CurrentWeapon->UsesAdvancedRecoil() && RecoilComponent)
 	{
-		RecoilComponent->OnWeaponFired();
+		RecoilComponent->OnWeaponFired(CurrentWeapon->GetActualRefireRate());
 	}
 	else
 	{
@@ -4630,9 +6245,242 @@ void AShooterCharacter::AddWeaponRecoil(float Recoil)
 	}
 }
 
+static TAutoConsoleVariable<float> CVarCameraAnimCurves(
+	TEXT("polarity.camera.animcurves"),
+	1.0f,
+	TEXT("Scale of the animated camera motion baked into the first person animations.\n")
+	TEXT("\n")
+	TEXT("The FPS pack does not ship camera ANIMATIONS that anything plays. It bakes the camera\n")
+	TEXT("bone of an A_Cam_* sequence into three float curves on the HANDS animation --\n")
+	TEXT("CameraPitch, CameraYaw, CameraRoll, in degrees -- and reads them back at runtime. So a\n")
+	TEXT("reload turns the view because the reload animation carries the turn, not because anyone\n")
+	TEXT("started a second asset. 59 of their UE5 animations already carry these curves.\n")
+	TEXT("\n")
+	TEXT("  0   = off, the view stops following the animation (A/B against the old feel)\n")
+	TEXT("  1   = as authored\n")
+	TEXT("  >1  = exaggerate, to see whether a curve is arriving at all"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCameraAnimCurvesDebug(
+	TEXT("polarity.camera.animcurves.debug"),
+	0,
+	TEXT("Put the three camera curves on screen, live.\n")
+	TEXT("\n")
+	TEXT("Answers the one question the picture cannot: does the curve REACH us. A curve that was\n")
+	TEXT("never authored and a curve that the anim graph drops on the way both look like a still\n")
+	TEXT("camera, and only the number tells them apart. Zero while a reload plays means the graph\n")
+	TEXT("is eating it; non-zero while the view stands still means the fault is downstream.\n")
+	TEXT("  0 = off\n")
+	TEXT("  1 = show pitch/yaw/roll every frame"),
+	ECVF_Cheat);
+
+FRotator AShooterCharacter::GetViewOnlyRotationOffset() const
+{
+	// Same channel as the bob sway, on purpose: the pack's jolt is picture-only too. Their
+	// CameraAnimator writes it onto the camera and never touches the controller, while the aim
+	// climb they DO want comes from PRAS's ControllerRecoil through AddControllerPitchInput.
+	//
+	// The animated half of their camera arrives here as well, and for the same reason: it is the
+	// picture leaning with the hands, and letting it move the CONTROL rotation would make a reload
+	// walk the crosshair off the target and pull the bullets with it.
+	FRotator FromCurves = FRotator::ZeroRotator;
+
+	const float CurveScale = CVarCameraAnimCurves.GetValueOnGameThread();
+
+	if (!FMath::IsNearlyZero(CurveScale))
+	{
+		// Their CameraAnimator reads Character->Mesh, because for them the arms ARE the character
+		// mesh. Ours is the third person body, which carries no such curves and would answer zero
+		// without any warning, so the first person component is asked for by name.
+		//
+		// During a melee swing the arms are hidden and the swing plays on the melee mesh, so the
+		// swing's camera curves are THERE. Asked only while it is on screen: hidden, it keeps
+		// whatever its last montage left behind and must not go on turning the view.
+		const USkeletalMeshComponent* CurveMesh = GetFirstPersonMesh();
+		if (const USkeletalMeshComponent* SwingMesh = GetMeleeMesh(); SwingMesh && SwingMesh->IsVisible())
+		{
+			CurveMesh = SwingMesh;
+		}
+
+		if (CurveMesh)
+		{
+			if (const UAnimInstance* Anim = CurveMesh->GetAnimInstance())
+			{
+				static const FName CurveNamePitch(TEXT("CameraPitch"));
+				static const FName CurveNameYaw(TEXT("CameraYaw"));
+				static const FName CurveNameRoll(TEXT("CameraRoll"));
+
+				// An animation without the curves answers zero, so there is nothing to reset
+				// between weapons and no state to keep: the montage that is playing IS the state.
+				FromCurves.Pitch = Anim->GetCurveValue(CurveNamePitch) * CurveScale;
+				FromCurves.Yaw = Anim->GetCurveValue(CurveNameYaw) * CurveScale;
+				FromCurves.Roll = Anim->GetCurveValue(CurveNameRoll) * CurveScale;
+
+				if (GEngine && CVarCameraAnimCurvesDebug.GetValueOnGameThread() > 0)
+				{
+					GEngine->AddOnScreenDebugMessage(
+						// A fixed key so the line is replaced rather than stacked.
+						(uint64)0x43414D43, 0.0f, FColor::Cyan,
+						FString::Printf(TEXT("[CAM_CURVES] pitch %.2f  yaw %.2f  roll %.2f  (x%.2f)"),
+							FromCurves.Pitch, FromCurves.Yaw, FromCurves.Roll, CurveScale));
+				}
+			}
+		}
+	}
+
+	return Super::GetViewOnlyRotationOffset() + PackShakeCurrent + FromCurves;
+}
+
+FVector AShooterCharacter::ToCameraParentSpace(const USceneComponent* Camera, const FVector& ActorSpaceOffset) const
+{
+	if (!Camera || ActorSpaceOffset.IsNearlyZero())
+	{
+		return ActorSpaceOffset;
+	}
+
+	const USceneComponent* Parent = Camera->GetAttachParent();
+
+	// Old hierarchy: the parent is the capsule, whose axes ARE the actor's. Nothing to convert, and
+	// converting anyway would be a round trip through two inverses for no gain.
+	if (!Parent || Parent == GetCapsuleComponent())
+	{
+		return ActorSpaceOffset;
+	}
+
+	const FTransform ParentSpace = Parent->GetSocketTransform(Camera->GetAttachSocketName(), RTS_World);
+	const FVector WorldOffset = GetActorTransform().TransformVectorNoScale(ActorSpaceOffset);
+
+	return ParentSpace.InverseTransformVectorNoScale(WorldOffset);
+}
+
+void AShooterCharacter::TickPackCameraShake(float DeltaTime)
+{
+	const UCurveVector* Curve = CurrentWeapon ? CurrentWeapon->GetPackShakeCurve() : nullptr;
+
+	FRotator Target = FRotator::ZeroRotator;
+
+	if (Curve)
+	{
+		float MinTime = 0.0f;
+		float MaxTime = 0.0f;
+		Curve->GetTimeRange(MinTime, MaxTime);
+
+		PackShakePlayback += DeltaTime * CurrentWeapon->GetPackShakePlayRate();
+
+		// Past the end of the curve the target is simply zero, and the interpolation below carries
+		// the view home. No separate "recovering" state: the curve's own tail IS the recovery.
+		if (PackShakePlayback < MaxTime)
+		{
+			const FVector Shape = Curve->GetVectorValue(PackShakePlayback);
+			Target = FRotator(Shape.X * PackShakeAmplitude.Pitch,
+				Shape.Y * PackShakeAmplitude.Yaw,
+				Shape.Z * PackShakeAmplitude.Roll);
+		}
+	}
+
+	// Their Smoothing is an interpolation SPEED, not a time, which is why 55 is a sane number here
+	// and would be nonsense as a duration.
+	const float Smoothing = (Curve && CurrentWeapon) ? CurrentWeapon->GetPackShakeSmoothing() : 20.0f;
+
+	PackShakeCurrent = FMath::RInterpTo(PackShakeCurrent, Target, DeltaTime, Smoothing);
+}
+
+void AShooterCharacter::RefreshPackRecoil(AShooterWeapon* Weapon)
+{
+	if (!PackRecoilComponent)
+	{
+		return;
+	}
+
+	URecoilData* Wanted = Weapon ? Weapon->GetPackRecoilData() : nullptr;
+
+	if (Wanted == ActivePackRecoilData)
+	{
+		return;
+	}
+
+	ActivePackRecoilData = Wanted;
+
+	if (!Wanted)
+	{
+		// Standing down rather than merely being ignored: a half-played recoil left running would
+		// keep writing the gun bone under a weapon that is no longer theirs.
+		PackRecoilComponent->Stop();
+		UE_LOG(LogTemp, Log, TEXT("[PACK] %s: no pack recoil on this weapon, our WeaponRecoilComponent "
+			"is driving."), *GetName());
+		return;
+	}
+
+	// Burst length stays 0: we have no burst fire mode, and their component reads it only in the
+	// Burst state. Feeding a made up number would arm a state nothing can enter.
+	PackRecoilComponent->Init(Wanted, Weapon->GetPackFireRateRPM(), /*Bursts*/ 0);
+
+	// Amplitude. Reset first: ScaleInput MULTIPLIES into the current scale rather than replacing
+	// it, so without the reset every weapon swap would compound the last weapon's number.
+	PackRecoilComponent->ResetInputScale();
+
+	const float Amplitude = Weapon->GetPackRecoilScale();
+	if (!FMath::IsNearlyEqual(Amplitude, 1.0f))
+	{
+		FInputScale_PRAS Scale;
+		Scale.Pitch *= Amplitude;
+		Scale.Kick *= Amplitude;
+		Scale.KickR *= Amplitude;
+		Scale.KickUp *= Amplitude;
+		Scale.Yaw *= Amplitude;
+		Scale.Roll *= Amplitude;
+		Scale.Noise *= Amplitude;
+		PackRecoilComponent->ScaleInput(Scale);
+	}
+
+	PackRecoilComponent->SetFireMode(Weapon->IsFullAuto() ? EFireMode_PRAS::Auto : EFireMode_PRAS::Semi);
+	PackRecoilComponent->SetAimingStatus(IsAiming());
+
+	UE_LOG(LogTemp, Log, TEXT("[PACK] %s: PRAS armed with %s at %.0f rounds per minute (%s)."),
+		*GetName(), *Wanted->GetName(), Weapon->GetPackFireRateRPM(),
+		Weapon->IsFullAuto() ? TEXT("auto") : TEXT("semi"));
+}
+
 void AShooterCharacter::UpdateWeaponHUD(int32 CurrentAmmo, int32 MagazineSize)
 {
 	OnBulletCountUpdated.Broadcast(MagazineSize, CurrentAmmo);
+}
+
+FRotator AShooterCharacter::GetViewRotation() const
+{
+	FRotator ViewRotation = Super::GetViewRotation();
+
+	if (!RecoilComponent)
+	{
+		return ViewRotation;
+	}
+
+	// The single point where weapon recoil enters the view, and everything else follows from it.
+	//
+	// UCameraComponent::GetCameraView calls this (through the pawn) and writes the result onto the
+	// camera component with SetWorldRotation, because bUsePawnControlRotation is set on the
+	// first-person camera in APolarityCharacter.
+	//
+	// NOTE, and it is a change: the mesh USED to be parented to the camera, so the weapon and its
+	// sight inherited the kick through attachment. Since the FPS Animation Pack hierarchy went in
+	// (see APolarityCharacter::BeginPlay) the camera is the CHILD of the mesh, so a kick applied
+	// here moves the view and leaves the gun where it was. That is why the pack's own recoil moves
+	// the gun from the anim graph instead, and why our punch now reads as a pure view kick.
+	//
+	// Applying the kick further downstream instead — to the POV the camera manager hands out after
+	// CalcCamera — moves only the picture. The camera component is not touched there, so the weapon
+	// and its red dot stay put while the view climbs off them.
+	//
+	// Normalize FIRST: a control rotation reports pitch in [0, 360), so looking 10 degrees down is
+	// 350, and clamping that against a signed limit would slam the view to the top of its range.
+	ViewRotation.Normalize();
+
+	const FRotator Punch = RecoilComponent->GetPunchRotation();
+	ViewRotation.Pitch = FMath::Clamp(ViewRotation.Pitch + Punch.Pitch, -89.0f, 89.0f);
+	ViewRotation.Yaw += Punch.Yaw;
+	ViewRotation.Roll += Punch.Roll;
+
+	return ViewRotation;
 }
 
 void AShooterCharacter::GetAimRay(float Range, FVector& OutStart, FVector& OutEnd) const
@@ -4652,10 +6500,13 @@ void AShooterCharacter::GetAimRay(float Range, FVector& OutStart, FVector& OutEn
 	const UCameraComponent* Cam = GetFirstPersonCameraComponent();
 	OutStart = Cam ? Cam->GetComponentLocation() : GetPawnViewLocation();
 
+	// GetViewRotation, not GetControlRotation: the override adds the weapon recoil layer, and that
+	// is what makes recoil real rather than a screen effect. The same call feeds the camera
+	// component, so the bullets and the picture are kicked by one number and cannot drift apart.
 	FVector AimDirection;
-	if (const AController* PC = GetController())
+	if (GetController())
 	{
-		AimDirection = PC->GetControlRotation().Vector();
+		AimDirection = GetViewRotation().Vector();
 	}
 	else if (Cam)
 	{
@@ -4681,38 +6532,6 @@ FVector AShooterCharacter::GetWeaponTargetLocation()
 	GetWorld()->LineTraceSingleByChannel(OutHit, Start, End, ECC_Visibility, QueryParams);
 
 	return OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
-}
-
-static AShooterWeapon* FindOwnedWeaponWithSameSwitchAction(
-	const TArray<AShooterWeapon*>& OwnedWeapons,
-	const TSubclassOf<AShooterWeapon>& IncomingWeaponClass)
-{
-	if (!IncomingWeaponClass)
-	{
-		return nullptr;
-	}
-
-	const AShooterWeapon* IncomingDefault = IncomingWeaponClass->GetDefaultObject<AShooterWeapon>();
-	UInputAction* IncomingAction = IncomingDefault ? IncomingDefault->GetSwitchAction() : nullptr;
-	if (!IncomingAction)
-	{
-		return nullptr;
-	}
-
-	for (AShooterWeapon* OwnedWeapon : OwnedWeapons)
-	{
-		if (!OwnedWeapon || OwnedWeapon->IsA(IncomingWeaponClass))
-		{
-			continue;
-		}
-
-		if (OwnedWeapon->GetSwitchAction() == IncomingAction)
-		{
-			return OwnedWeapon;
-		}
-	}
-
-	return nullptr;
 }
 
 static bool DropOwnedRangedWeaponForPickupReplacement(
@@ -4768,8 +6587,33 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 
 		if (Discarded)
 		{
-			Discarded->bCanBeCaptured = false;
-			Discarded->SetCharge(0.0f);
+			// The ammo leaves with the gun and comes back with it. The cells are emptied here and
+			// the number rides on the drop, so picking the same weapon up again returns exactly what
+			// was thrown away rather than a fresh magazine.
+			//
+			// bCanBeCaptured used to be false here: a discarded weapon was pure decoration. That is
+			// no longer true, because a gun now carries its rounds and throwing one away has to be
+			// recoverable.
+			Discarded->bCanBeCaptured = true;
+			// Only for a weapon that keeps its rounds in the grid. One with an endless reserve has
+			// no cells to empty, and writing the zero this would return would mark the drop as
+			// thrown away empty instead of leaving it at the "nobody rolled a number" default.
+			if (UInventoryComponent* Inv = Self->GetInventoryComponent())
+			{
+				if (WeaponToDrop->OwnsAmmoCells())
+				{
+					Discarded->SpawnedBulletCount = Inv->TakeAllAmmo();
+				}
+				else if (WeaponToDrop->UsesEnergyReserve())
+				{
+					Discarded->CarryEnergyAmmoFrom(WeaponToDrop);
+				}
+
+				// Attachments travel with the gun, so the cells they were paying for come back
+				// empty. The parts stay bolted to the weapon that just left.
+				Inv->ReleaseAttachmentCellsFor(WeaponToDrop);
+			}
+			Discarded->SetCharge(WeaponToDrop->SourceDropCharge);
 			if (UEMFChargeWidgetSubsystem* WidgetSub = Self->GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
 			{
 				WidgetSub->UnregisterDroppedRangedWeapon(Discarded);
@@ -4811,8 +6655,8 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: dropped old %s because incoming weapon uses the same SwitchAction"),
-		*GetNameSafe(WeaponToDrop));
+	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: dropped old %s because the incoming weapon claims hotkey slot %d"),
+		*GetNameSafe(WeaponToDrop), WeaponToDrop->GetHotkeySlot());
 
 	WeaponToDrop->Destroy();
 	return true;
@@ -4841,6 +6685,19 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 
 	if (!OwnedWeapon)
 	{
+		// One weapon per slot, same rule as the animated path: this arrival evicts whoever holds the
+		// slot it resolves to. Without this a melee pickup and a gun pickup would both claim the
+		// loot slot and only one of them would answer to the key.
+		const int32 IncomingSlot = ResolveHotkeySlotForWeaponClass(WeaponClass);
+		if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponInHotkeySlot(IncomingSlot))
+		{
+			if (!DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
+				ConflictingWeapon, YankDropSpawnOffset, YankDropLinearImpulse, YankDropAngularImpulse))
+			{
+				return;
+			}
+		}
+
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.Owner = this;
 		SpawnParams.Instigator = this;
@@ -4857,6 +6714,7 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Spawned new %s: MagazineSize=%d, bHasLimitedAmmo=%d"),
 				*GetNameSafe(AddedWeapon), AddedWeapon->GetMagazineSize(), AddedWeapon->bHasLimitedAmmo ? 1 : 0);
 
+			PlaceWeaponInHotkeySlot(AddedWeapon);
 			OwnedWeapons.Add(AddedWeapon);
 			OnWeaponInventoryChanged.Broadcast();
 
@@ -4868,6 +6726,16 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 			AShooterWeapon* OldWeapon = CurrentWeapon;
 			CurrentWeapon = AddedWeapon;
 			CurrentWeapon->ActivateWeapon();
+
+			// Picking something up ends a hand-holster, same as on the animated path: the player
+			// just reached for this weapon. Without it the arms stay hidden by the phase and the
+			// pickup is invisible in perfectly working hands.
+			if (WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer)
+			{
+				WeaponSwitchPhase = EWeaponSwitchPhase::None;
+				FirstPersonRevealFramesLeft = 2;
+				UpdateFirstPersonMeshVisibility();
+			}
 
 			// Notify upgrade system about new weapon
 			if (UpgradeManager)
@@ -4929,7 +6797,12 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 		return nullptr;
 	}
 
-	if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponWithSameSwitchAction(OwnedWeapons, WeaponClass))
+	// One weapon per slot: the arrival evicts whoever is standing there. For a pickup that is the
+	// previous trophy going back on the ground; the class weapon is never the one evicted, because
+	// the only thing that resolves to its slot is the class weapon itself, and owning it already
+	// returned above.
+	const int32 IncomingSlot = ResolveHotkeySlotForWeaponClass(WeaponClass);
+	if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponInHotkeySlot(IncomingSlot))
 	{
 		if (!DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
 			ConflictingWeapon, YankDropSpawnOffset, YankDropLinearImpulse, YankDropAngularImpulse))
@@ -4951,6 +6824,7 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 	}
 
 	const bool bWasUnarmed = (OwnedWeapons.Num() == 0);
+	PlaceWeaponInHotkeySlot(AddedWeapon);
 	OwnedWeapons.Add(AddedWeapon);
 	OnWeaponInventoryChanged.Broadcast();
 
@@ -4969,6 +6843,14 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 		// Yank path: BeginWeaponLower() already started putting the old weapon away, and the hands
 		// are either still doing that or already empty and waiting. Name the arrival.
 		FinishWeaponSwitch(AddedWeapon);
+	}
+	else if (WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer)
+	{
+		// Picked something up with the hands deliberately empty. Drawing it is the answer: the
+		// player just reached for this weapon, which is the same statement as pressing its key.
+		// Without this branch StartWeaponSwitch below would be refused by CanStartWeaponSwitch and
+		// the pickup would land in the inventory invisibly.
+		DrawWeaponFromEmptyHands(AddedWeapon);
 	}
 	else if (bWasUnarmed || !CurrentWeapon)
 	{
@@ -5157,9 +7039,25 @@ static void DiscardYankedWeaponShared(
 
 		if (Discarded)
 		{
-			// Pure decoration — block re-capture and EMF interaction.
-			Discarded->bCanBeCaptured = false;
-			Discarded->SetCharge(0.0f);
+			// Same as the slot-replacement drop above: the rounds go with the gun, and the gun can
+			// be picked back up. See the comment there.
+			Discarded->bCanBeCaptured = true;
+			if (UInventoryComponent* Inv = Self->GetInventoryComponent())
+			{
+				if (YankedWeapon->OwnsAmmoCells())
+				{
+					Discarded->SpawnedBulletCount = Inv->TakeAllAmmo();
+				}
+				else if (YankedWeapon->UsesEnergyReserve())
+				{
+					Discarded->CarryEnergyAmmoFrom(YankedWeapon);
+				}
+
+				// Same as the slot-replacement drop above: the attachments go with the gun and stop
+				// costing this player anything.
+				Inv->ReleaseAttachmentCellsFor(YankedWeapon);
+			}
+			Discarded->SetCharge(YankedWeapon->SourceDropCharge);
 
 			// SetCharge re-registers with the widget subsystem; explicitly unregister so no
 			// charge UI floats over the discarded weapon.
@@ -5632,6 +7530,9 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 		GetMesh()->SetAnimInstanceClass(TPAnimClass);
 	}
 
+	// Which recoil system this weapon uses is decided here, once per equip, not per shot.
+	RefreshPackRecoil(Weapon);
+
 	if (RecoilComponent && Weapon->UsesAdvancedRecoil())
 	{
 		RecoilComponent->SetRecoilSettings(Weapon->GetRecoilSettings());
@@ -5743,14 +7644,34 @@ void AShooterCharacter::UpdateFirstPersonMeshVisibility()
 	// draw. Keeping the counter HERE rather than deciding it at the call sites is the same rule as
 	// the phase -- any other system calling this function during those frames would otherwise reveal
 	// the arms early and put the flash straight back.
-	const bool bStowedForGrapple = (WeaponSwitchPhase == EWeaponSwitchPhase::StowedForGrapple);
+	//
+	// StowedByPlayer joins it for the same reason with a different cause: the player asked for empty
+	// hands. Only the finished state, not StowingByPlayer -- the arms have to be on screen for the
+	// holster animation, which is the whole point of playing one.
+	const bool bHandsStowed = (WeaponSwitchPhase == EWeaponSwitchPhase::StowedForGrapple ||
+									WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer ||
+									WeaponSwitchPhase == EWeaponSwitchPhase::StowedForMelee);
 	const bool bWaitingForDrawPose = (FirstPersonRevealFramesLeft > 0);
+	const bool bShowArms = bHasWeapon && !bHandsStowed && !bWaitingForDrawPose;
 
 	// PROPAGATED to children, and that is not incidental. The weapon's own first-person mesh is
 	// attached to the arms (@see AttachWeaponMeshes), so hiding the arms without propagating leaves
 	// the gun hanging in mid-air by itself -- which would trade a two-frame wrong pose for a
 	// two-frame floating rifle. Both halves of the hold have to move together.
-	FPMesh->SetVisibility(bHasWeapon && !bStowedForGrapple && !bWaitingForDrawPose, true);
+	//
+	// Everything EXCEPT the camera's branch. With the FPS pack hierarchy the camera hangs off the arms
+	// at FPCamera, and the melee mesh hangs off the camera during a swing, so a plain propagate hid
+	// the swing the moment the hands went away -- and showed the melee mesh under the camera at every
+	// other call. The melee component owns that mesh's visibility; this rule owns the hold.
+	FPMesh->SetVisibility(bShowArms, false);
+	const USceneComponent* ViewCamera = GetFirstPersonCameraComponent();
+	for (USceneComponent* Child : FPMesh->GetAttachChildren())
+	{
+		if (Child && Child != ViewCamera)
+		{
+			Child->SetVisibility(bShowArms, true);
+		}
+	}
 }
 
 void AShooterCharacter::OnSemiWeaponRefire()
@@ -5883,6 +7804,108 @@ AShooterWeapon* AShooterCharacter::FindWeaponOfType(TSubclassOf<AShooterWeapon> 
 	return nullptr;
 }
 
+int32 AShooterCharacter::ResolveHotkeySlotForWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) const
+{
+	if (!WeaponClass)
+	{
+		return INDEX_NONE;
+	}
+
+	if (StartingWeaponClass)
+	{
+		// Exact class, not IsA: a subclass of the class weapon is a different gun, and if it turned
+		// up on the ground it was looted like anything else.
+		return (WeaponClass == StartingWeaponClass) ? ClassWeaponHotkeySlot : PickedUpWeaponHotkeySlot;
+	}
+
+	// No class weapon configured — the maps and tests that predate classes. There is no "the one you
+	// started with" to point at, so the first weapon to arrive takes key 1 and everything after it is
+	// loot. Without this every weapon on such a map would resolve to the same slot and evict the last
+	// one, leaving the player with exactly one gun.
+	return FindOwnedWeaponInHotkeySlot(ClassWeaponHotkeySlot) ? PickedUpWeaponHotkeySlot : ClassWeaponHotkeySlot;
+}
+
+int32 AShooterCharacter::ResolveHotkeySlotForWeapon(const AShooterWeapon* Weapon) const
+{
+	return Weapon ? ResolveHotkeySlotForWeaponClass(Weapon->GetClass()) : INDEX_NONE;
+}
+
+void AShooterCharacter::PlaceWeaponInHotkeySlot(AShooterWeapon* Weapon)
+{
+	if (!Weapon)
+	{
+		return;
+	}
+
+	const int32 Slot = ResolveHotkeySlotForWeapon(Weapon);
+	Weapon->SetHotkeySlot(Slot);
+
+	UE_LOG(LogTemp, Verbose, TEXT("[WEAPON_SLOT] %s placed in slot %d (%s)"),
+		*GetNameSafe(Weapon), Slot,
+		Slot == ClassWeaponHotkeySlot ? TEXT("class weapon") : TEXT("looted"));
+}
+
+AShooterWeapon* AShooterCharacter::FindOwnedWeaponInHotkeySlot(int32 Slot) const
+{
+	if (Slot == INDEX_NONE)
+	{
+		return nullptr;
+	}
+
+	for (AShooterWeapon* Weapon : OwnedWeapons)
+	{
+		if (Weapon && Weapon->GetHotkeySlot() == Slot)
+		{
+			return Weapon;
+		}
+	}
+
+	return nullptr;
+}
+
+UInputAction* AShooterCharacter::GetWeaponHotkeyActionForSlot(int32 Slot) const
+{
+	return WeaponSwitchActions.IsValidIndex(Slot) ? WeaponSwitchActions[Slot].Get() : nullptr;
+}
+
+int32 AShooterCharacter::GetHotkeySlotForAction(const UInputAction* Action) const
+{
+	if (!Action)
+	{
+		return INDEX_NONE;
+	}
+
+	for (int32 Index = 0; Index < WeaponSwitchActions.Num(); ++Index)
+	{
+		if (WeaponSwitchActions[Index].Get() == Action)
+		{
+			return Index;
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+AShooterWeapon* AShooterCharacter::FindOwnedWeaponForHotkeyAction(const UInputAction* Action) const
+{
+	if (AShooterWeapon* Placed = FindOwnedWeaponInHotkeySlot(GetHotkeySlotForAction(Action)))
+	{
+		return Placed;
+	}
+
+	// Nothing in that slot. A weapon that no add path placed still answers to the key its asset
+	// names, so checkpoint restores and hand-granted weapons keep working while they are unplaced.
+	for (AShooterWeapon* Weapon : OwnedWeapons)
+	{
+		if (Weapon && Weapon->GetHotkeySlot() == INDEX_NONE && Weapon->GetSwitchAction() == Action)
+		{
+			return Weapon;
+		}
+	}
+
+	return nullptr;
+}
+
 UInputAction* AShooterCharacter::GetSwitchInputActionForWeapon(const AShooterWeapon* Weapon) const
 {
 	if (!Weapon)
@@ -5890,13 +7913,21 @@ UInputAction* AShooterCharacter::GetSwitchInputActionForWeapon(const AShooterWea
 		return nullptr;
 	}
 
-	// The hotkey now lives on the weapon itself.
+	// The slot the character put it in wins: that is the whole of the "class weapon on 1, loot on 2"
+	// rule, and the HUD hint has to say the same key the input binding will answer to.
+	if (UInputAction* SlotAction = GetWeaponHotkeyActionForSlot(Weapon->GetHotkeySlot()))
+	{
+		return SlotAction;
+	}
+
+	// Unplaced weapon (nothing on the player takes this path today; an NPC gun does) — fall back to
+	// the key the asset declares for itself.
 	if (UInputAction* WeaponAction = Weapon->GetSwitchAction())
 	{
 		return WeaponAction;
 	}
 
-	// No per-weapon hotkey — the only route to this weapon is the forward-cycle key.
+	// No hotkey at all — the only route to this weapon is the forward-cycle key.
 	return SwitchWeaponAction;
 }
 
@@ -6017,6 +8048,9 @@ AShooterWeapon* AShooterCharacter::PromoteReserveCopyOfClass(TSubclassOf<AShoote
 	if (!Promoted) return nullptr;
 
 	ReserveWeapons.Remove(Promoted);
+	// A reserve copy was never placed while it was hidden; it takes the slot of the copy it is
+	// replacing, which the caller has already removed from OwnedWeapons.
+	PlaceWeaponInHotkeySlot(Promoted);
 	OwnedWeapons.Add(Promoted);
 	OnWeaponInventoryChanged.Broadcast();
 
@@ -6342,6 +8376,24 @@ void AShooterCharacter::Die()
 	}
 	bHasPlayedLocalDeath = true;
 
+	// The berserk window dies with the wearer, and for the same reused-character reason as the cast
+	// below: a window left running would carry into the NEXT life and hand it free armour on its
+	// flanks until the old timer happened to fire. Cleared here rather than through EndBerserk
+	// because EndBerserk pays out, and health handed to a corpse is a resurrection. Clients stop
+	// their loop when the flag arrives.
+	if (HasAuthority() && bIsBerserk)
+	{
+		bIsBerserk = false;
+		BerserkDamageDealt = 0.0f;
+
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(BerserkTimer);
+		}
+
+		OnRep_IsBerserk();
+	}
+
 	// Cancel any in-progress ability cast. The character is REUSED on respawn (not destroyed),
 	// so AbilityComponent::EndPlay never runs and bIsCasting would carry a stuck cast into the
 	// next life — locking firing / ability activation / weapon swap permanently.
@@ -6362,6 +8414,10 @@ void AShooterCharacter::Die()
 	// runs and the player respawns permanently unarmed. CancelCast usually unwinds this properly;
 	// this line is here for the times it does not.
 	bWeaponStowedForGrapple = false;
+
+	// Same story for the hand-holstered state the grapple may have borrowed: carried into the next
+	// life it would end the first grapple by hiding the arms instead of drawing.
+	bRestoreHolsterAfterGrapple = false;
 
 	// And the two-frame hold on the arms, for the same reused-character reason: a death landing
 	// inside that window would carry a non-zero count into the next life, where nothing counts it
@@ -6780,7 +8836,7 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	// has the montage: the first person mesh is this player's own and nobody else animates it.
 	// Without it a teammate reloaded with their off hand still welded to the grip.
 	else if (IsPlayingReloadAnimation()
-		|| (CurrentWeapon && IsMontagePlayingOnMesh(GetMesh(), CurrentWeapon->GetReloadMontage())))
+		|| (CurrentWeapon && IsMontagePlayingOnMesh(GetMesh(), CurrentWeapon->GetActiveReloadMontage())))
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}

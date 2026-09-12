@@ -25,6 +25,15 @@ FVector UAIAccuracyComponent::CalculateAimDirection(const FVector& TargetLocatio
 		return ApplyDonutSpread(BaseDirection, MinSuppressionSpread, MaxSuppressionSpread);
 	}
 
+	// Deliberate suppressive fire. Checked AFTER being suppressed, not before: an NPC that is itself
+	// under fire shoots worse than it means to, and the wider ring is the honest answer for that. The
+	// two states are unrelated and can both be true.
+	if (bSuppressiveFire)
+	{
+		LastCalculatedSpread = MinSuppressiveFireSpread;
+		return ApplyDonutSpread(BaseDirection, MinSuppressiveFireSpread, MaxSuppressiveFireSpread);
+	}
+
 	if (!Target)
 	{
 		// No target, use base spread only
@@ -253,6 +262,19 @@ void UAIAccuracyComponent::ApplySuppression(float Duration, float DiminishingFac
 
 		OnSuppressionStart.Broadcast(Duration);
 	}
+}
+
+void UAIAccuracyComponent::SetSuppressiveFire(bool bEnabled)
+{
+	if (bSuppressiveFire == bEnabled)
+	{
+		return;
+	}
+
+	bSuppressiveFire = bEnabled;
+
+	UE_LOG(LogTemp, Log, TEXT("[AI_DEBUG] %s suppressive fire %s"),
+		*GetNameSafe(GetOwner()), bEnabled ? TEXT("ON") : TEXT("OFF"));
 }
 
 void UAIAccuracyComponent::ClearSuppression()

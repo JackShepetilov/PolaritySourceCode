@@ -5,7 +5,7 @@
 #
 # Usage:
 #   In-editor console:  py "<...>/Source/Tools/ArenaBlockout/build_arena.py" A2_Courtyard
-#   Headless (full editor; -run=pythonscript commandlet CRASHES on new_level — do not use):
+#   Headless (full editor; -run=pythonscript commandlet CRASHES on new_level вЂ” do not use):
 #     UnrealEditor-Cmd.exe "<...>/Polarity.uproject" /Engine/Maps/Entry
 #       -ExecCmds="py <bootstrap>.py" -EnablePlugins=PythonScriptPlugin
 #       -nullrhi -nosound -unattended -nosplash -noLiveCoding
@@ -29,6 +29,8 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 MAT_DIR = "/Game/ArenaBlockout/Materials"
 
 CUBE_MESH = "/Engine/BasicShapes/Cube.Cube"
+# Optional kit mesh with a floor-corner pivot; set per-spec via "box_mesh".
+BOX_MESH = None
 CYL_MESH = "/Engine/BasicShapes/Cylinder.Cylinder"
 
 # Blockout palette (R11 in LevelDesign.md): one neutral ramp + accents.
@@ -117,7 +119,7 @@ def ensure_materials(force=False):
         mel.update_material_instance(mic)
         eal.save_asset(path)
         out[name] = mic
-    # Containment field: translucent glass for the "стакан" walls that keep drones
+    # Containment field: translucent glass for the "СЃС‚Р°РєР°РЅ" walls that keep drones
     # (and the player) inside during combat. Wired into ExitBlockers via the spec.
     glass = eal.load_asset("/Game/LevelPrototyping/PolygonPrototype/Materials/M_PolygonPrototype_Glass")
     out["field"] = glass if glass else out["wall"]
@@ -142,7 +144,7 @@ def level_disk_path(level_path):
 
 
 def backup_level(level_path, arena):
-    """Copy the .umap aside before any save — cheap insurance against data loss."""
+    """Copy the .umap aside before any save вЂ” cheap insurance against data loss."""
     src = level_disk_path(level_path)
     if not os.path.isfile(src):
         return
@@ -194,7 +196,7 @@ def open_or_create_level(les, level_path):
         # overwrites our own generation. FOREIGN maps still hard-block above, so the
         # author's island/lighting/other arenas are never silently discarded.
         log("Self-dirty {} ignored - reloading from disk and rebuilding".format(level_path))
-    # Asset registry scans asynchronously on editor boot — NEVER trust does_asset_exist
+    # Asset registry scans asynchronously on editor boot вЂ” NEVER trust does_asset_exist
     # alone, or a slow scan would route an EXISTING map into new_level() and blank it.
     try:
         unreal.AssetRegistryHelpers.get_asset_registry().wait_for_completion()
@@ -214,7 +216,7 @@ def open_or_create_level(les, level_path):
 def in_package(actor, package_name):
     """True if the actor lives in the given level package.
 
-    The author adds his own sublevels (debug character, lighting) to built arenas —
+    The author adds his own sublevels (debug character, lighting) to built arenas вЂ”
     we must NEVER touch actors outside the arena's persistent level package."""
     try:
         return actor.get_package().get_name() == package_name
@@ -413,7 +415,30 @@ def spawn_shape(eas, mats, piece, tag, arena):
         return ret
     mesh_path = CYL_MESH if shape == "cylinder" else CUBE_MESH
     mesh = unreal.EditorAssetLibrary.load_asset(mesh_path)
-    actor = eas.spawn_actor_from_object(mesh, vec(piece["pos"]), rot(piece))
+    rot_spec = rot(piece)
+    if shape == "box" and BOX_MESH:
+        # Corner-pivot kit mesh (e.g. SM_Bld_Block_1x1_01: pivot at a floor-level
+        # corner, mesh spans -100..0 x 0..100 x 0..100 locally). Only for unrotated
+        # boxes; rotated pieces keep the center-pivot cube. loc = (max.x, min.y, min.z).
+        if abs(float(piece.get("pitch", 0.0))) < 0.01 and abs(float(piece.get("yaw", 0.0))) < 0.01:
+            kit = unreal.EditorAssetLibrary.load_asset(BOX_MESH)
+            if kit is not None:
+                mesh = kit
+                size = piece["size"]
+                sx, sy, sz = [v / 2.0 for v in size]
+                loc_pos = [piece["pos"][0] + sx, piece["pos"][1] - sy, piece["pos"][2] - sz]
+                actor = eas.spawn_actor_from_object(mesh, vec(loc_pos), rot_spec)
+                if actor is None:
+                    warn("Failed to spawn piece {}".format(piece.get("id", "?")))
+                    return None
+                actor.set_actor_scale3d(unreal.Vector(size[0] / 100.0, size[1] / 100.0, size[2] / 100.0))
+                smc = actor.static_mesh_component
+                smc.set_material(0, mats.get(mat_name, mats["floor"]))
+                group = piece.get("group", "Geo")
+                return finish_actor(actor, tag, "BLK_{}_{}".format(arena, piece.get("id", "piece")),
+                                    "{}/{}".format(arena, group))
+            warn("box_mesh '{}' not found - falling back to Cube".format(BOX_MESH))
+    actor = eas.spawn_actor_from_object(mesh, vec(piece["pos"]), rot_spec)
     if actor is None:
         warn("Failed to spawn piece {}".format(piece.get("id", "?")))
         return None
@@ -430,7 +455,7 @@ def spawn_shape(eas, mats, piece, tag, arena):
 # NO lighting is ever spawned: the author adds lighting as a separate sublevel.
 # Verification screenshots are rendered via a transient SceneCapture2D with the
 # Lighting show-flag disabled (= unlit, flat blockout colors). Synchronous, no
-# viewport involved — works headless where editor viewports don't redraw.
+# viewport involved вЂ” works headless where editor viewports don't redraw.
 
 def take_screenshots(eas, spec, arena):
     shots = spec.get("screenshots") or []
@@ -457,7 +482,7 @@ def take_screenshots(eas, spec, arena):
         comp.set_editor_property("post_process_settings", pps)
     except Exception as e:
         warn("fixed exposure setup: {}".format(e))
-    # Transient lights for the lit pass — destroyed right after, never saved (the level
+    # Transient lights for the lit pass вЂ” destroyed right after, never saved (the level
     # stays light-free per author rule; we simply don't save after screenshots).
     sun = eas.spawn_actor_from_class(unreal.DirectionalLight, unreal.Vector(0, 0, 3000),
                                      unreal.Rotator(roll=0.0, pitch=-55.0, yaw=35.0))
@@ -468,7 +493,7 @@ def take_screenshots(eas, spec, arena):
             "intensity", 3.0)
     except Exception as e:
         warn("fill light intensity: {}".format(e))
-    # Camera-mounted "flash" so interiors (closed shells like the hangar) are visible —
+    # Camera-mounted "flash" so interiors (closed shells like the hangar) are visible вЂ”
     # the directional lights can't reach inside.
     flash = eas.spawn_actor_from_class(unreal.PointLight, unreal.Vector(0, 0, 0))
     try:
@@ -503,7 +528,7 @@ def spawn_navmesh_bounds(eas, tag, arena, spec):
         return
     actor = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume, vec(nav_spec["pos"]))
     if actor is None:
-        warn("NavMeshBoundsVolume failed to spawn — add manually in editor")
+        warn("NavMeshBoundsVolume failed to spawn вЂ” add manually in editor")
         return
     size = nav_spec["size"]
     # Default brush is a 200uu cube; scale to requested size.
@@ -584,10 +609,12 @@ def build(arena_name):
         spec = json.load(f)
 
     arena = spec["name"]
+    global BOX_MESH
+    BOX_MESH = spec.get("box_mesh")
     tag = "BLOCKOUT_" + arena
     level_path = spec["level_path"]
 
-    check_ramps(spec)  # R13 QA: clipping / run-up / landing — read [RAMP_CHECK] lines
+    check_ramps(spec)  # R13 QA: clipping / run-up / landing вЂ” read [RAMP_CHECK] lines
 
     les, eas = get_subsystems()
     mats = ensure_materials(force=False)
@@ -672,7 +699,7 @@ def build(arena_name):
                 warn("NavigationLink optional props: {}".format(e))
             actor.set_editor_property("point_links", [link])
             # PolarityPathFollowingComponent's jump traversal was built against SMART
-            # links (CustomNavLinkId) — configure the smart link to the same endpoints.
+            # links (CustomNavLinkId) вЂ” configure the smart link to the same endpoints.
             try:
                 actor.set_editor_property("smart_link_is_relevant", True)
                 smart = actor.get_editor_property("smart_link_comp")
@@ -681,7 +708,7 @@ def build(arena_name):
                 smart.set_editor_property("link_direction", unreal.NavLinkDirection.BOTH_WAYS)
                 smart.set_editor_property("link_enabled", True)
             except Exception as e:
-                warn("Smart link setup failed ({}) — falling back to point link only".format(e))
+                warn("Smart link setup failed ({}) вЂ” falling back to point link only".format(e))
             label = marker.get("id", "NavLink{}".format(idx))
             finish_actor(actor, tag, "BLK_{}_{}".format(arena, label), "{}/Nav".format(arena))
             continue
@@ -766,7 +793,7 @@ def build(arena_name):
                 log("ArenaManager configured: {} waves, {} triggers, {} blockers".format(
                     len(spec.get("waves", [])), len(triggers), len(blocker_actors)))
             except Exception as e:
-                warn("ArenaManager wiring failed: {} — configure in Details panel".format(e))
+                warn("ArenaManager wiring failed: {} вЂ” configure in Details panel".format(e))
         else:
             warn("ArenaManager failed to spawn")
     else:

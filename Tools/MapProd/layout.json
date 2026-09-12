@@ -1,0 +1,329 @@
+{
+ "world": {
+  "play_m": 1371.8388241151367,
+  "land_m": 2394.0,
+  "components": 38,
+  "beach_m": 511.08058794243163,
+  "size_uu": 239400.0,
+  "vertices": 2395,
+  "density": 8.501857148613144
+ },
+ "slots": [
+  {
+   "id": "HUB",
+   "ring": "hub",
+   "tier": "hub",
+   "sector": null,
+   "x_m": -119.5,
+   "y_m": 67.3
+  },
+  {
+   "id": "I0",
+   "ring": "inner",
+   "tier": "major",
+   "sector": 0,
+   "x_m": 20.1,
+   "y_m": 253.5
+  },
+  {
+   "id": "I1",
+   "ring": "inner",
+   "tier": "major",
+   "sector": 3,
+   "x_m": -351.0,
+   "y_m": 144.5
+  },
+  {
+   "id": "I2",
+   "ring": "inner",
+   "tier": "major",
+   "sector": 6,
+   "x_m": -13.7,
+   "y_m": -198.7
+  },
+  {
+   "id": "M0",
+   "ring": "mid",
+   "tier": "buffer",
+   "sector": 0,
+   "x_m": 374.9,
+   "y_m": -79.6
+  },
+  {
+   "id": "M1",
+   "ring": "mid",
+   "tier": "buffer",
+   "sector": 2,
+   "x_m": 40.3,
+   "y_m": 406.6
+  },
+  {
+   "id": "M2",
+   "ring": "mid",
+   "tier": "buffer",
+   "sector": 4,
+   "x_m": -504.2,
+   "y_m": 164.7
+  },
+  {
+   "id": "M3",
+   "ring": "mid",
+   "tier": "buffer",
+   "sector": 6,
+   "x_m": -203.1,
+   "y_m": -290.2
+  },
+  {
+   "id": "O0",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 0,
+   "x_m": 584.8,
+   "y_m": 57.9
+  },
+  {
+   "id": "O1",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 1,
+   "x_m": 368.6,
+   "y_m": 511.5
+  },
+  {
+   "id": "O2",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 2,
+   "x_m": -90.6,
+   "y_m": 595.9
+  },
+  {
+   "id": "O3",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 3,
+   "x_m": -506.6,
+   "y_m": 319.2
+  },
+  {
+   "id": "O4",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 4,
+   "x_m": -584.8,
+   "y_m": -124.4
+  },
+  {
+   "id": "O5",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 5,
+   "x_m": -372.0,
+   "y_m": -502.8
+  },
+  {
+   "id": "O6",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 6,
+   "x_m": 54.1,
+   "y_m": -595.9
+  },
+  {
+   "id": "O7",
+   "ring": "outer",
+   "tier": "major",
+   "sector": 7,
+   "x_m": 464.1,
+   "y_m": -332.3
+  }
+ ],
+ "lanes": [
+  [
+   "HUB",
+   "I0"
+  ],
+  [
+   "HUB",
+   "I1"
+  ],
+  [
+   "HUB",
+   "I2"
+  ],
+  [
+   "I0",
+   "M0"
+  ],
+  [
+   "I0",
+   "M1"
+  ],
+  [
+   "I1",
+   "M2"
+  ],
+  [
+   "I1",
+   "M3"
+  ],
+  [
+   "I2",
+   "M0"
+  ],
+  [
+   "I2",
+   "M3"
+  ],
+  [
+   "M0",
+   "O0"
+  ],
+  [
+   "M0",
+   "O7"
+  ],
+  [
+   "M1",
+   "O1"
+  ],
+  [
+   "M1",
+   "O2"
+  ],
+  [
+   "M2",
+   "O3"
+  ],
+  [
+   "M2",
+   "O4"
+  ],
+  [
+   "M3",
+   "O5"
+  ],
+  [
+   "M3",
+   "O6"
+  ],
+  [
+   "O0",
+   "O1"
+  ],
+  [
+   "O0",
+   "O7"
+  ],
+  [
+   "O1",
+   "O2"
+  ],
+  [
+   "O2",
+   "O3"
+  ],
+  [
+   "O3",
+   "O4"
+  ],
+  [
+   "O4",
+   "O5"
+  ],
+  [
+   "O5",
+   "O6"
+  ],
+  [
+   "O6",
+   "O7"
+  ]
+ ],
+ "runs": [
+  {
+   "seed": 3,
+   "roles": {
+    "HUB": "NEUTRAL",
+    "I0": "MISSION",
+    "I1": "NEUTRAL",
+    "I2": "MISSION",
+    "M0": "NEUTRAL",
+    "M1": "NEUTRAL",
+    "M2": "NEUTRAL",
+    "M3": "NEUTRAL",
+    "O0": "NEUTRAL",
+    "O1": "HQ_A",
+    "O2": "EXTRACT",
+    "O3": "HQ_B",
+    "O4": "MISSION",
+    "O5": "EXTRACT",
+    "O6": "HQ_A",
+    "O7": "HQ_B"
+   }
+  },
+  {
+   "seed": 5,
+   "roles": {
+    "HUB": "NEUTRAL",
+    "I0": "NEUTRAL",
+    "I1": "MISSION",
+    "I2": "MISSION",
+    "M0": "NEUTRAL",
+    "M1": "NEUTRAL",
+    "M2": "NEUTRAL",
+    "M3": "NEUTRAL",
+    "O0": "HQ_B",
+    "O1": "MISSION",
+    "O2": "HQ_A",
+    "O3": "HQ_B",
+    "O4": "EXTRACT",
+    "O5": "HQ_A",
+    "O6": "EXTRACT",
+    "O7": "NEUTRAL"
+   }
+  },
+  {
+   "seed": 9,
+   "roles": {
+    "HUB": "NEUTRAL",
+    "I0": "EXTRACT",
+    "I1": "NEUTRAL",
+    "I2": "MISSION",
+    "M0": "NEUTRAL",
+    "M1": "NEUTRAL",
+    "M2": "NEUTRAL",
+    "M3": "NEUTRAL",
+    "O0": "MISSION",
+    "O1": "HQ_B",
+    "O2": "NEUTRAL",
+    "O3": "MISSION",
+    "O4": "HQ_A",
+    "O5": "HQ_B",
+    "O6": "EXTRACT",
+    "O7": "HQ_A"
+   }
+  },
+  {
+   "seed": 14,
+   "roles": {
+    "HUB": "EXTRACT",
+    "I0": "MISSION",
+    "I1": "NEUTRAL",
+    "I2": "NEUTRAL",
+    "M0": "NEUTRAL",
+    "M1": "NEUTRAL",
+    "M2": "NEUTRAL",
+    "M3": "NEUTRAL",
+    "O0": "HQ_A",
+    "O1": "MISSION",
+    "O2": "NEUTRAL",
+    "O3": "HQ_B",
+    "O4": "EXTRACT",
+    "O5": "HQ_A",
+    "O6": "HQ_B",
+    "O7": "MISSION"
+   }
+  }
+ ]
+}

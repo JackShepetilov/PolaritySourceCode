@@ -150,6 +150,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "1"))
 	int32 MaxCandidatesToProbe = 10;
 
+	// ==================== Holding ground ====================
+
+	/** How much the friendly/hostile presence at a spot counts against its exposure. One unit here
+	 *  trades against one hostile able to see the spot, so 1.5 means "being with the squad is worth
+	 *  about one and a half extra pairs of eyes on me". Zero restores pure exposure picking. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Space", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float SpaceScoreWeight = 1.5f;
+
+	/** Pull toward teammates */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Space", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float AllyCohesionWeight = 1.0f;
+
+	/** Push away from the enemy formation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Space", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float EnemyAvoidWeight = 1.0f;
+
 	/** Floor on how often a full search may run. The most important number here: if invalidation
 	 *  keeps firing because the players are running around the arena, this is the only thing between
 	 *  the fight and a flood of queries (design doc 5.9). */
@@ -207,7 +223,7 @@ private:
 	void OnQueryFinished(TSharedPtr<FEnvQueryResult> Result);
 
 	/** Sum of the threat of every living player with a line to this point. */
-	float ComputeExposure(const FVector& Point, const TArray<APawn*>& Players, const FCollisionQueryParams& Params) const;
+	float ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params) const;
 
 	/** Try to find a P beside this H. Returns false when there is no corner here, which is what
 	 *  disqualifies a candidate that is merely far away behind something.
@@ -215,7 +231,7 @@ private:
 	 *  Probes both perpendiculars. If both work, the one with the lower exposure to the OTHER
 	 *  players wins - that is "peek round one corner at a time", and it falls out of numbers that
 	 *  have already been computed rather than needing logic of its own (design doc 5.5a). */
-	bool ProbePeekLocation(const FVector& HideLocation, const TArray<APawn*>& Players,
+	bool ProbePeekLocation(const FVector& HideLocation, const TArray<APawn*>& Observers,
 		const FCollisionQueryParams& Params, FVector& OutPeek) const;
 
 	/** Line of sight between two world points. Params carries the pawn ignore list, built once per
@@ -233,14 +249,16 @@ private:
 	 *  make a corner safe, and counting them would make the choice flicker as people walk past. */
 	void BuildTraceParams(FCollisionQueryParams& OutParams) const;
 
-	/** Living players, from the coop helper. Never "the player": there are up to four. */
-	void GatherPlayers(TArray<APawn*>& OutPlayers) const;
+	/** Everyone this NPC is hiding from: every pawn hostile to the owner, players included. Never
+	 *  "the player", and no longer "the players" either: an NPC of another faction is somebody to
+	 *  take cover from in exactly the same way. */
+	void GatherObservers(TArray<APawn*>& OutObservers) const;
 
-	/** Threat weight for a player, via the coordinator so class and situational threat stay one
+	/** Threat weight for one observer, via the coordinator so class and situational threat stay one
 	 *  number shared with target selection. */
-	float GetThreatFor(APawn* Player) const;
+	float GetThreatFor(APawn* Observer) const;
 
-	void DrawDebugForResult(const TArray<FVector>& Candidates, const TArray<APawn*>& Players,
+	void DrawDebugForResult(const TArray<FVector>& Candidates, const TArray<APawn*>& Observers,
 		const FCollisionQueryParams& Params) const;
 
 	UPROPERTY()

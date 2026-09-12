@@ -1,6 +1,8 @@
-// AICombatCoordinator.cpp
+﻿// AICombatCoordinator.cpp
 
 #include "AICombatCoordinator.h"
+#include "AI/PolarityTeams.h"
+#include "AI/SmokeVisionSubsystem.h"
 #include "Coop/CoopPlayers.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
@@ -64,12 +66,13 @@ AAICombatCoordinator::AAICombatCoordinator()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickInterval = 0.1f; // 10Hz
 
-	// Debug drawing on by default while the group work is being looked at. This actor is spawned
-	// from C++ rather than placed, so there is no Blueprint to tick these on in, and turning them
-	// off means editing here again. Turn them off when the formations stop being interesting.
-	bDrawDebug = true;
-	bDrawBattleCircle = true;
-	bDrawRoleDebug = true;
+	// Debug drawing off. It used to default on here "while the group work is being looked at",
+	// which was invisible on levels that place the Blueprint (it has the flags off) and covered
+	// every generated level in debug geometry, because those get the raw C++ actor from
+	// GetCoordinator's auto-spawn. Turn them on per level on the placed actor, or here temporarily.
+	bDrawDebug = false;
+	bDrawBattleCircle = false;
+	bDrawRoleDebug = false;
 }
 
 void AAICombatCoordinator::BeginPlay()
@@ -90,7 +93,13 @@ void AAICombatCoordinator::BeginPlay()
 	// TODO(COOP): threat. UpdateNPCTargets scores candidates by raw distance; the design calls for
 	// distance scaled by a per-player threat value that loud actions spike and that decays in a few
 	// seconds. There is exactly one place to add it now, which is why this was done first.
-	PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
+	//
+	// The two fallbacks in this file reach for a player directly instead of asking hostility, so
+	// polarity.ai.IgnorePlayers has to be honoured here by hand. Without it every NPC correctly
+	// refuses to target the player and the coordinator hands them one anyway, per group.
+	PrimaryTarget = PolarityTeams::ShouldIgnorePlayers()
+		? nullptr
+		: CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 }
 
 void AAICombatCoordinator::Tick(float DeltaTime)
@@ -103,7 +112,7 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 	CleanupInvalidNPCs();
 
 	// Positional threat before targeting, not after: UpdateNPCTargets is the first consumer of
-	// GetPlayerThreat this frame, and feeding it last frame's census would put the whole squad one
+	// GetThreatFor this frame, and feeding it last frame's census would put the whole squad one
 	// tick behind every flank.
 	CleanupRelocations();
 
@@ -119,7 +128,7 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 	// do with where the fighting was.
 	UpdateNPCTargets(DeltaTime);
 
-	if (!PrimaryTarget.IsValid())
+	if (!PrimaryTarget.IsValid() && !PolarityTeams::ShouldIgnorePlayers())
 	{
 		PrimaryTarget = CoopPlayers::GetNearest(GetWorld(), GetActorLocation());
 	}
@@ -157,7 +166,7 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 	// Player state cache, one per group
 	for (FTargetGroup& Group : Groups)
 	{
-		UpdatePlayerStateCacheForGroup(Group);
+		UpdateTargetStateCacheForGroup(Group);
 	}
 
 	// Role assignment
@@ -783,9 +792,24 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 
 	PruneDecoys();
 
-	TArray<APawn*> Players;
-	CoopPlayers::GetAll(World, Players);
-	if (Players.Num() == 0)
+	// Everybody who can be fought, not "the players". Two sources, and both are needed: players are
+	// not registered with the coordinator, and registered NPCs are not players. Hostility is decided
+	// per asker further down, so this list is the same for everyone and gets built once.
+	//
+	// Performance: O(N*(P+N)) distance checks per run, N registered NPCs and P players, at the
+	// coordinator's 10 Hz. Thirty enemies and four players is about a thousand cheap comparisons a
+	// tick, well under 0.05 ms. It becomes worth bucketing only in the hundreds.
+	TArray<APawn*> Combatants;
+	CoopPlayers::GetAll(World, Combatants);
+	for (const FRegisteredNPCData& Entry : RegisteredNPCs)
+	{
+		if (APawn* const Registered = Entry.NPC.Get())
+		{
+			Combatants.AddUnique(Registered);
+		}
+	}
+
+	if (Combatants.Num() == 0)
 	{
 		return;
 	}
@@ -815,7 +839,7 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 
 			if (Data.Target.Get() != Decoy)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s pulled off %s by decoy %s (%.1fs left)"),
+				UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s pulled off %s by decoy %s (%.1fs left)"),
 					*NPC->GetName(), *GetNameSafe(Data.Target.Get()), *Decoy->GetName(), Remaining);
 			}
 
@@ -828,9 +852,11 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 		// Was fighting a decoy that has just stopped being one — expired, or shot to pieces. Nothing
 		// to be loyal to, so it falls through to the ordinary pick below with a clean slate.
 		//
-		// Recognised by "not a player" rather than by looking the decoy up: PruneDecoys has already
-		// removed it by the time this runs, and nothing else ever puts a non-player in here.
-		if (AActor* Held = Data.Target.Get(); Held && !CoopPlayers::IsPlayer(Held))
+		// Recognised by "not somebody this NPC fights" rather than by looking the decoy up:
+		// PruneDecoys has already removed it by the time this runs. A decoy prop carries no team, so
+		// it is never hostile to anyone, which is the same test that used to read "not a player" and
+		// now also lets an enemy of another faction stay a legitimate target.
+		if (AActor* Held = Data.Target.Get(); Held && !PolarityTeams::AreHostile(NPC, Held))
 		{
 			ClearDistraction(NPC);
 			Data.Target.Reset();
@@ -847,13 +873,18 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 		// those two exist to stop.
 		APawn* Nearest = nullptr;
 		float NearestDist = TNumericLimits<float>::Max();
-		for (APawn* Player : Players)
+		for (APawn* Candidate : Combatants)
 		{
-			const float Dist = GetApparentDistance(NPCLocation, Player);
+			if (!PolarityTeams::AreHostile(NPC, Candidate))
+			{
+				continue;
+			}
+
+			const float Dist = GetApparentDistance(NPCLocation, Candidate);
 			if (Dist < NearestDist)
 			{
 				NearestDist = Dist;
-				Nearest = Player;
+				Nearest = Candidate;
 			}
 		}
 
@@ -889,7 +920,7 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 				// Warning, not Verbose: LogTemp Verbose does not print by default, and a switch that
 				// leaves no trace is a mechanic nobody can ever confirm on the bench. Hysteresis caps
 				// this at one line per NPC per TargetSwitchDelay, so it cannot become spam.
-				UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s switches from %s to %s (%.0f cm closer for %.2fs)"),
+				UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s switches from %s to %s (%.0f cm closer for %.2fs)"),
 					*NPC->GetName(), *GetNameSafe(Current), *GetNameSafe(Nearest),
 					CurrentDist - NearestDist, Data.TargetSwitchPressure);
 
@@ -941,6 +972,50 @@ AActor* AAICombatCoordinator::GetTargetFor(APawn* NPC) const
 	return Data ? Data->Target.Get() : nullptr;
 }
 
+APawn* AAICombatCoordinator::FindNearestHostile(APawn* Asker) const
+{
+	if (!Asker)
+	{
+		return nullptr;
+	}
+
+	const FVector From = Asker->GetActorLocation();
+	APawn* Nearest = nullptr;
+	float NearestDistSq = TNumericLimits<float>::Max();
+
+	auto Consider = [&](APawn* Candidate)
+	{
+		if (!PolarityTeams::AreHostile(Asker, Candidate))
+		{
+			return;
+		}
+
+		const float DistSq = FVector::DistSquared(From, Candidate->GetActorLocation());
+		if (DistSq < NearestDistSq)
+		{
+			NearestDistSq = DistSq;
+			Nearest = Candidate;
+		}
+	};
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	for (APawn* const Player : Players)
+	{
+		Consider(Player);
+	}
+
+	for (const FRegisteredNPCData& Entry : RegisteredNPCs)
+	{
+		if (APawn* const Registered = Entry.NPC.Get())
+		{
+			Consider(Registered);
+		}
+	}
+
+	return Nearest;
+}
+
 // ==================== Decoys ====================
 
 void AAICombatCoordinator::RegisterDecoy(AActor* Decoy, float Radius, float Duration)
@@ -967,7 +1042,7 @@ void AAICombatCoordinator::RegisterDecoy(AActor* Decoy, float Radius, float Dura
 	Entry.ExpiryTime = Expiry;
 	ActiveDecoys.Add(Entry);
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Decoy %s armed: radius=%.0f duration=%.1fs"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] Decoy %s armed: radius=%.0f duration=%.1fs"),
 		*Decoy->GetName(), Radius, Duration);
 }
 
@@ -1002,7 +1077,7 @@ void AAICombatCoordinator::UnregisterDecoy(AActor* Decoy)
 		Data.TargetSwitchPressure = 0.0f;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] Decoy %s is done"), *Decoy->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] Decoy %s is done"), *Decoy->GetName());
 }
 
 bool AAICombatCoordinator::IsActiveDecoy(const AActor* Actor) const
@@ -1128,22 +1203,42 @@ int32 AAICombatCoordinator::GetEffectiveMaxAttackers() const
 	return FMath::Max(MaxSimultaneousAttackers, FMath::RoundToInt(Scaled));
 }
 
-void AAICombatCoordinator::UpdatePlayerStateCacheForGroup(FTargetGroup& Group)
+void AAICombatCoordinator::UpdateTargetStateCacheForGroup(FTargetGroup& Group)
 {
-	FPlayerStateCache& Cache = Group.State;
+	FTargetStateCache& Cache = Group.State;
 	Cache.bIsValid = false;
 
-	AShooterCharacter* Player = Cast<AShooterCharacter>(Group.Target.Get());
-	if (!Player) return;
+	// Any pawn, not only a player. The geometry half of this cache (where the target is, which way
+	// it faces, how fast it moves) is what lays out the battle circle and decides who counts as a
+	// flanker, and a group formed around an enemy of another faction needs all of it.
+	APawn* const Target = Cast<APawn>(Group.Target.Get());
+	if (!Target) return;
 
-	Cache.HPPercent = Player->GetCurrentHP() / FMath::Max(1.0f, Player->GetMaxHP());
-	Cache.ArmorPercent = Player->GetCurrentArmor() / FMath::Max(1.0f, Player->GetMaxArmor());
-	Cache.Speed = Player->GetVelocity().Size();
-	Cache.Position = Player->GetActorLocation();
+	Cache.Speed = Target->GetVelocity().Size();
+	Cache.Position = Target->GetActorLocation();
 
-	if (APlayerController* PC = Cast<APlayerController>(Player->GetController()))
+	// Where the target is looking. A player answers through the control rotation, because the pawn's
+	// own yaw lags the camera; an AI pawn has no camera, so its actor rotation IS its facing.
+	if (const AController* const Controller = Target->GetController())
 	{
-		Cache.FacingDirection = PC->GetControlRotation().Vector();
+		Cache.FacingDirection = Controller->GetControlRotation().Vector();
+	}
+	else
+	{
+		Cache.FacingDirection = Target->GetActorForwardVector();
+	}
+
+	// The health half stays a player question. Pressure (the Pressurer role, melee closing in on a
+	// hurt target) is tuned against the player's HP and armour, and an NPC has neither a max HP to
+	// divide by nor armour at all. Left at full, which is exactly what the pressure rules read as
+	// "no reason to pile on" — an honest neutral rather than a made-up number.
+	Cache.HPPercent = 1.0f;
+	Cache.ArmorPercent = 0.0f;
+
+	if (const AShooterCharacter* const Player = Cast<AShooterCharacter>(Target))
+	{
+		Cache.HPPercent = Player->GetCurrentHP() / FMath::Max(1.0f, Player->GetMaxHP());
+		Cache.ArmorPercent = Player->GetCurrentArmor() / FMath::Max(1.0f, Player->GetMaxArmor());
 	}
 
 	Cache.bIsValid = true;
@@ -1453,10 +1548,10 @@ float AAICombatCoordinator::GetApparentDistance(const FVector& FromLocation, APa
 
 	const float RealDistance = FVector::Dist(FromLocation, Player->GetActorLocation());
 
-	return RealDistance / (1.0f + GetPlayerThreat(Player));
+	return RealDistance / (1.0f + GetThreatFor(Player));
 }
 
-float AAICombatCoordinator::GetPlayerThreat(APawn* Player) const
+float AAICombatCoordinator::GetThreatFor(APawn* Player) const
 {
 	if (!Player)
 	{
@@ -1571,15 +1666,27 @@ void AAICombatCoordinator::UpdatePositionalThreat()
 {
 	OpenedCoverCounts.Reset();
 
-	TArray<APawn*> Players;
-	CoopPlayers::GetAll(GetWorld(), Players);
-	if (Players.Num() == 0)
+	// Whoever can open a corner, which is anyone hostile to the NPC standing behind it. The census
+	// used to ask about players only, and that was the same "there is one enemy side" assumption as
+	// the Player tag: a rifleman of faction 2 who walks around a rock earns no threat, so nobody
+	// relocates and nobody covers them.
+	TArray<APawn*> Openers;
+	CoopPlayers::GetAll(GetWorld(), Openers);
+	for (const FRegisteredNPCData& Entry : RegisteredNPCs)
+	{
+		if (APawn* const Registered = Entry.NPC.Get())
+		{
+			Openers.AddUnique(Registered);
+		}
+	}
+
+	if (Openers.Num() == 0)
 	{
 		return;
 	}
 
 	// The census, and the only place the coordinator touches a cover component. It asks each NPC's
-	// own corner whether a given player has taken it away, rather than re-deriving cover geometry
+	// own corner whether a given opener has taken it away, rather than re-deriving cover geometry
 	// here: one definition of "opened", living next to the traces that answer it.
 	for (const FRegisteredNPCData& Data : RegisteredNPCs)
 	{
@@ -1595,11 +1702,16 @@ void AAICombatCoordinator::UpdatePositionalThreat()
 			continue;
 		}
 
-		for (APawn* const Player : Players)
+		for (APawn* const Opener : Openers)
 		{
-			if (Finder->IsCoverOpenedBy(Player))
+			if (!PolarityTeams::AreHostile(NPC, Opener))
 			{
-				OpenedCoverCounts.FindOrAdd(Player)++;
+				continue;
+			}
+
+			if (Finder->IsCoverOpenedBy(Opener))
+			{
+				OpenedCoverCounts.FindOrAdd(Opener)++;
 			}
 		}
 	}
@@ -1713,7 +1825,7 @@ APawn* AAICombatCoordinator::GetSuppressionTarget(const APawn* NPC) const
 			continue;
 		}
 
-		const float Threat = GetPlayerThreat(Opener);
+		const float Threat = GetThreatFor(Opener);
 		if (Threat > BestThreat)
 		{
 			BestThreat = Threat;
@@ -1755,6 +1867,13 @@ bool AAICombatCoordinator::HasLineOfSightToTarget(APawn* NPC) const
 
 	const FVector Start = NPC->GetPawnViewLocation();
 	const FVector End = Target->GetActorLocation();
+
+	// Smoke, which has no collision and therefore cannot be found by the trace below.
+	// @see USmokeVisionSubsystem
+	if (USmokeVisionSubsystem::IsSightBlockedInWorld(GetWorld(), Start, End))
+	{
+		return false;
+	}
 
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
 		HitResult, Start, End, ECC_Visibility, QueryParams
@@ -2094,7 +2213,7 @@ void AAICombatCoordinator::DrawRoleDebug()
 	{
 		if (!Group.Target.IsValid() || !Group.State.bIsValid) continue;
 
-		const FPlayerStateCache& CachedPlayerState = Group.State;
+		const FTargetStateCache& CachedPlayerState = Group.State;
 		const FVector PlayerLoc = Group.Target->GetActorLocation();
 
 		// Facing direction arrow
@@ -2341,7 +2460,7 @@ void AAICombatCoordinator::LogStateSnapshot()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] SNAPSHOT auth=%d groups=%d registered=%d attackers=%d/%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] SNAPSHOT auth=%d groups=%d registered=%d attackers=%d/%d"),
 		HasAuthority() ? 1 : 0, Groups.Num(), RegisteredNPCs.Num(),
 		CountCurrentAttackers(), GetEffectiveMaxAttackers());
 
@@ -2359,7 +2478,7 @@ void AAICombatCoordinator::LogStateSnapshot()
 			}
 		}
 
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG]   group %d target=%s enemies=%d slots=%d threat=%.2f hp=%.0f%% tokens R:%d/%d M:%d/%d S:%d/%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG]   group %d target=%s enemies=%d slots=%d threat=%.2f hp=%.0f%% tokens R:%d/%d M:%d/%d S:%d/%d"),
 			GroupIdx, *GetNameSafe(GroupTarget), Group.Members.Num(), Group.BattleSlots.Num(), Threat,
 			Group.State.bIsValid ? Group.State.HPPercent * 100.0f : -1.0f,
 			Group.Ranged.MaxTokens - Group.Ranged.GetAvailableCount(), Group.Ranged.MaxTokens,
@@ -2375,7 +2494,7 @@ void AAICombatCoordinator::LogStateSnapshot()
 
 			// Distance and line of sight are the two gates that decide whether this NPC may attack,
 			// so they are printed next to the answer rather than left to be inferred.
-			UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG]     %s role=%d perm=%d token=%d slot=%d dist=%.0f los=%d switchPressure=%.2f"),
+			UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG]     %s role=%d perm=%d token=%d slot=%d dist=%.0f los=%d switchPressure=%.2f"),
 				*NPC->GetName(), (int32)Data.Role, Data.bHasAttackPermission ? 1 : 0,
 				Data.bHasToken ? 1 : 0, Data.AssignedSlotIndex,
 				GetDistanceToTarget(NPC), HasLineOfSightToTarget(NPC) ? 1 : 0,

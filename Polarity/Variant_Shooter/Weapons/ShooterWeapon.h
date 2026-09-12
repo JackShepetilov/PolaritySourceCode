@@ -1114,6 +1114,91 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	TObjectPtr<USoundBase> ReloadSound;
 
+	// ==================== Energy reserve (Apex season 30) ====================
+	//
+	// A real magazine fed by a reserve that lives on the gun and refills by itself: a whole magazine
+	// every EnergySecondsPerMagazine, up to EnergyReserveMagazines of them. Shooting or reloading
+	// holds the refill back for EnergyRegenDelay. It keeps refilling while the gun is holstered,
+	// because the timer is on the weapon rather than on whatever is in the player's hands.
+	//
+	// On by default for every gun, and it OVERRIDES bUseReload and bInfiniteReserve for a gun a
+	// player is holding: that is the author's call (2026-09-10) to make every weapon energy first
+	// and decide about the cell economy afterwards. Untick it to put a weapon back on the other two.
+	//
+	// Players only. An NPC holding the same class keeps the behaviour it always had, because an NPC
+	// that emptied its reserve would simply stop shooting. Melee never.
+	//
+	// The reserve is the UNLOADED rounds only, not the whole supply the way the cells count it. A
+	// shot therefore never touches it, and the number on the HUD does not twitch on every shot while
+	// the server catches up with the client's trigger.
+
+	/** Every gun a player holds is an energy weapon unless this is unticked. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy")
+	bool bRegeneratingReserve = true;
+
+	/** How many full magazines the reserve refills up to. Apex uses 2 to 4. A bigger magazine makes
+	 *  each of these deeper; it does not change how many there are. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy", meta = (EditCondition = "bRegeneratingReserve", ClampMin = "0", ClampMax = "20"))
+	int32 EnergyReserveMagazines = 3;
+
+	/** Seconds to refill one whole magazine, whatever its size: a bigger magazine refills faster in
+	 *  rounds per second, not slower. Apex: 18, Wildcard mode 12. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy", meta = (EditCondition = "bRegeneratingReserve", ClampMin = "0.1", Units = "s"))
+	float EnergySecondsPerMagazine = 18.0f;
+
+	/** Quiet time after a shot or a reload before the refill starts again. Apex does not publish its
+	 *  number, so this one is a starting guess to tune by feel. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy", meta = (EditCondition = "bRegeneratingReserve", ClampMin = "0.0", Units = "s"))
+	float EnergyRegenDelay = 1.0f;
+
+	/** Unloaded rounds in the reserve. The server decides it and it travels to the owner only: the
+	 *  other players never see this gun's reserve. */
+	UPROPERTY(ReplicatedUsing = OnRep_EnergyReserve)
+	int32 EnergyReserve = 0;
+
+	UFUNCTION()
+	void OnRep_EnergyReserve();
+
+	FTimerHandle EnergyRegenTimer;
+
+	/** One round back into the reserve. Server only, looping timer, stops itself when full. */
+	void TickEnergyRegen();
+
+	/** (Re)start the refill so its first round lands FirstDelay plus one round's time from now. */
+	void ArmEnergyRegen(float FirstDelay);
+
+	/** Take rounds out of the reserve on the machine that reloaded, and tell the server. */
+	void DrawEnergyReserve(int32 Rounds);
+
+	/** The owning client's reload, reported. On the weapon rather than routed through the character,
+	 *  because it only ever writes this weapon's own reserve and can only lower it. */
+	UFUNCTION(Server, Reliable)
+	void Server_DrawEnergyReserve(int32 Rounds);
+
+	/** Nudge the owner's ammo widgets. Always broadcasts the weapon IN HAND, so a holstered gun
+	 *  refilling does not paint its numbers over the one the player is holding. */
+	void RefreshOwnerAmmoHUD();
+
+	// ==================== Magazine attachment ====================
+
+	/** Magazine size with no attachment fitted. Taken in BeginPlay once the pack profile has had its
+	 *  say; zero before that, which is how ApplyMagazineModifiers knows it is too early to run. */
+	int32 BaseMagazineSize = 0;
+
+	/** The one funnel for magazine attachments: size, and the holstered reload. Runs on every
+	 *  machine, from the server's own install and from OnRep, the same way the meshes are rebuilt,
+	 *  because MagazineSize itself is not replicated and every copy of the gun needs the right one. */
+	void ApplyMagazineModifiers();
+
+	/** Gold perk. Polled rather than hooked into the dozen places that put a weapon away: all it asks
+	 *  is "is this still the gun in hand", on the machine that counts the rounds. */
+	FTimerHandle HolsteredReloadTimer;
+
+	/** World time the gun was first seen out of hand; negative while it is held. */
+	float HolsteredSince = -1.0f;
+
+	void PollHolsteredReload();
+
 	// ==================== Switch Animation (holster / draw) ====================
 	// Four assets, because the two halves of a swap belong to two different weapons: the one going
 	// away plays its Holster, the one coming out plays its Draw. First person is what the owner
@@ -1400,19 +1485,47 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	bool IsReloading() const { return bIsReloading; }
 
-	/** True when this weapon has a magazine at all. False means it never runs out. */
+	/** True when this weapon has a magazine at all. False means it never runs out. An energy weapon
+	 *  always has one, whatever bUseReload says. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
-	bool UsesReload() const { return bUseReload; }
+	bool UsesReload() const { return bUseReload || UsesEnergyReserve(); }
 
 	/** True when the magazine is real but the reserve behind it is endless. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
-	bool HasInfiniteReserve() const { return bUseReload && bInfiniteReserve; }
+	bool HasInfiniteReserve() const { return bUseReload && bInfiniteReserve && !UsesEnergyReserve(); }
 
 	/** True when this weapon's rounds are carried in the inventory grid, which is the one question
 	 *  every ammo-economy caller actually asks. Both ways of being infinite answer it the same way,
-	 *  so callers test this rather than UsesReload and there is no second rule to keep in step. */
+	 *  so callers test this rather than UsesReload and there is no second rule to keep in step.
+	 *  An energy weapon owns no cells either: its reserve lives on the gun. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
-	bool OwnsAmmoCells() const { return bUseReload && !bInfiniteReserve; }
+	bool OwnsAmmoCells() const { return bUseReload && !bInfiniteReserve && !UsesEnergyReserve(); }
+
+	/** True when a player is holding this and its reserve refills by itself. False for NPC owners
+	 *  and for melee whatever the flag says. @see bRegeneratingReserve */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	bool UsesEnergyReserve() const;
+
+	/** True when there is a reserve with a NUMBER behind the magazine: cells or energy. What the
+	 *  HUD asks before it draws a reserve count instead of an infinity sign. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	bool HasFiniteReserve() const { return OwnsAmmoCells() || UsesEnergyReserve(); }
+
+	/** Unloaded rounds in the energy reserve. Valid on the server and on the owning client. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetEnergyReserve() const { return EnergyReserve; }
+
+	/** Most the energy reserve refills to: EnergyReserveMagazines full magazines. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetEnergyReserveCapacity() const { return FMath::Max(0, EnergyReserveMagazines) * FMath::Max(1, MagazineSize); }
+
+	/** Set the energy reserve, clamped to capacity, and restart the refill if there is room. Server
+	 *  only: a pickup deciding what the gun arrives with. */
+	void SetEnergyReserve(int32 Rounds);
+
+	/** Hold the refill back: EnergyRegenDelay plus ExtraSeconds from now. Server only, and a no-op
+	 *  for anything that is not an energy weapon, so both report paths can call it blindly. */
+	void PauseEnergyRegen(float ExtraSeconds = 0.0f);
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetReloadTime() const { return ReloadTime; }

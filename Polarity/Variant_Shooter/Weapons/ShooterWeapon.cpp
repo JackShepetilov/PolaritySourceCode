@@ -338,6 +338,10 @@ void AShooterWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	// The owning client presses the key and resolves it against its replicated copy of OwnedWeapons,
 	// so the slot has to travel with the weapon or number keys do nothing for a client.
 	DOREPLIFETIME(AShooterWeapon, HotkeySlot);
+
+	// Owner only: the reserve is read by the reload and by the HUD, and both live on the machine of
+	// whoever is holding the gun. Nobody else has a reason to know it.
+	DOREPLIFETIME_CONDITION(AShooterWeapon, EnergyReserve, COND_OwnerOnly);
 }
 
 UWeaponAttachmentDefinition* AShooterWeapon::GetAttachmentOfType(EWeaponAttachmentType InType) const
@@ -370,11 +374,22 @@ bool AShooterWeapon::InstallAttachment(UWeaponAttachmentDefinition* Attachment)
 		return false;
 	}
 
+	// The attachment says which guns it fits, and an empty list fits none. Refused here rather than
+	// only greyed out in the inventory screen, because this is the one door every mount goes through.
+	if (!Attachment->FitsWeapon(GetClass()))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH] %s does not fit %s: the weapon is not on its list "
+			"(CompatibleWeapons, or MagazineSizeByWeapon for a magazine)."),
+			*GetNameSafe(Attachment), *GetClass()->GetName());
+		return false;
+	}
+
 	InstalledAttachments.Add(Attachment);
 
 	// The server does not get OnRep, so it does its own rebuild. Both paths end in the same call,
 	// which is what keeps the host's gun and a client's copy of it identical.
 	RebuildAttachmentMeshes();
+	ApplyMagazineModifiers();
 
 	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: mounted %s (%s)."),
 		*GetName(), *GetNameSafe(Attachment), *UEnum::GetValueAsString(Attachment->Type));
@@ -396,6 +411,7 @@ UWeaponAttachmentDefinition* AShooterWeapon::UninstallAttachmentOfType(EWeaponAt
 
 	InstalledAttachments.Remove(Removed);
 	RebuildAttachmentMeshes();
+	ApplyMagazineModifiers();
 
 	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: removed %s."), *GetName(), *GetNameSafe(Removed));
 	return Removed;
@@ -404,6 +420,7 @@ UWeaponAttachmentDefinition* AShooterWeapon::UninstallAttachmentOfType(EWeaponAt
 void AShooterWeapon::OnRep_InstalledAttachments()
 {
 	RebuildAttachmentMeshes();
+	ApplyMagazineModifiers();
 
 	// The HUD redraws from the inventory's delegate, and the two halves of a mount arrive as two
 	// separate replicated properties -- this array, and the cell that is or is not paying for it.
@@ -623,6 +640,11 @@ void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 	if (HasAuthority())
 	{
 		Multicast_PlayReloadEffects(Stage);
+
+		// The host's own reload. A client's arrives in AShooterCharacter::Server_ReportWeaponReloaded
+		// and pauses there. The reload length is only an estimate on that side, which is fine: the
+		// draw at the end of the reload pauses the refill again anyway.
+		PauseEnergyRegen(GetActiveReloadTime());
 	}
 	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
 	{
@@ -1662,6 +1684,13 @@ void AShooterWeapon::BeginPlay()
 	// was left empty, so running it first costs nothing and running it late would be a race.
 	ApplyPackWeaponSettings();
 
+	// The magazine size as authored, with the profile applied and no attachment yet. Taken here and
+	// not earlier: on a client the attachment array can arrive before BeginPlay, and a base taken
+	// from a size that was already multiplied would multiply twice. ApplyMagazineModifiers ran as a
+	// no-op in that case and gets its real run now, before the first magazine is filled below.
+	BaseMagazineSize = MagazineSize;
+	ApplyMagazineModifiers();
+
 	// Pay for the pool here rather than on the first trigger pull. Above the owner check on purpose:
 	// a weapon with no owner still knows what it fires, and warming the pool is the one useful thing
 	// it can do. @see PrewarmProjectilePool.
@@ -1704,6 +1733,14 @@ void AShooterWeapon::BeginPlay()
 
 	// fill the first ammo clip
 	CurrentBullets = MagazineSize;
+
+	// A gun comes into the world with a full energy reserve. A pickup that means to hand over less
+	// overwrites it straight after the spawn (ADroppedRangedWeapon::GrantEnergyAmmo). Server only:
+	// the owning client gets the number by replication.
+	if (HasAuthority() && UsesEnergyReserve())
+	{
+		SetEnergyReserve(GetEnergyReserveCapacity());
+	}
 
 	// attach the meshes to the owner. An owner that is not a weapon holder at all (a prop, a
 	// spawner) fails the cast above and would crash here the same way the null one did.
@@ -2304,7 +2341,7 @@ void AShooterWeapon::Fire()
 	// A weapon with a real magazine cannot fire while it is being filled, and an empty one starts
 	// filling itself rather than clicking forever. bIsFiring is deliberately left alone: holding the
 	// trigger through a reload should resume fire when it finishes, which FinishReload does.
-	if (bUseReload)
+	if (UsesReload())
 	{
 		if (bIsReloading)
 		{
@@ -2390,7 +2427,7 @@ void AShooterWeapon::Fire()
 	// so CurrentBullets is still the count BEFORE this shot. One left means this shot empties it.
 	// Only a weapon with a real magazine can run out; an energy weapon refills itself and never
 	// locks its action back.
-	const bool bLastRound = bUseReload && CurrentBullets <= 1;
+	const bool bLastRound = UsesReload() && CurrentBullets <= 1;
 
 	PlayFireEffectsLocally(bLastRound);
 
@@ -3120,7 +3157,7 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 		// An empty gun is just empty. It used to throw itself away here when it was a yanked
 		// weapon, which is now wrong: a dropped gun keeps its rounds and can be filled from another
 		// one of its kind, so running dry is a reason to click, not to lose the weapon.
-		if (bUseReload)
+		if (UsesReload())
 		{
 			// The magazine is real: it stays empty until somebody fills it, and by default that
 			// somebody is the player. This branch is the weapon taking that decision for them, which
@@ -4491,7 +4528,7 @@ float AShooterWeapon::GetTagDamageMultiplier(AActor* Target) const
 bool AShooterWeapon::CanReload() const
 {
 	// A yanked weapon is thrown away when it runs dry rather than reloaded, whatever bUseReload says.
-	return bUseReload
+	return UsesReload()
 		&& !bIsReloading
 		&& CurrentBullets < MagazineSize
 		// Nothing spare to load. Without this the gun would play the whole animation and come back
@@ -4568,7 +4605,12 @@ void AShooterWeapon::AdvancePerRoundReload()
 	// interrupted loop gives nothing: the shell was still in the hand when the trigger was pulled.
 	if (ShellStage == EWeaponReloadStage::ShellLoop)
 	{
+		const int32 Before = CurrentBullets;
 		CurrentBullets = FMath::Min(MagazineSize, CurrentBullets + 1);
+
+		// The shell came out of the energy reserve. The cells need nothing here: they count the
+		// loaded rounds too, so moving one into the tube does not change what they hold.
+		DrawEnergyReserve(CurrentBullets - Before);
 
 		if (WeaponOwner)
 		{
@@ -4638,6 +4680,14 @@ void AShooterWeapon::InterruptPerRoundReload()
 
 int32 AShooterWeapon::GetPooledAmmo() const
 {
+	// Energy first: it owns no cells either, but unlike the two below its supply has an end. The
+	// reserve holds only the unloaded rounds, so the whole supply is the two added together, which
+	// is the shape CanReload and FinishReload already expect from the cells.
+	if (UsesEnergyReserve())
+	{
+		return CurrentBullets + EnergyReserve;
+	}
+
 	// Two weapons own no cells and both answer the same way: the energy one that never reloads, and
 	// the granted one whose magazine is real but whose reserve is endless. A full magazine is the
 	// right answer for both, because it is what CanReload compares against and what FinishReload
@@ -4665,7 +4715,21 @@ void AShooterWeapon::SpendPooledRound()
 	// Server only. On a listen server the host's own Fire() reaches here directly; a remote
 	// client's shot reaches the server through AShooterCharacter::Server_ReportWeaponFired, which
 	// calls this for the same reason the ability passives are notified there.
-	if (!HasAuthority() || !OwnsAmmoCells())
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// An energy shot spends nothing from the reserve (the round was already loaded), but it is the
+	// one moment the server hears about every shot on both routes, which makes it the place to hold
+	// the refill back.
+	if (UsesEnergyReserve())
+	{
+		PauseEnergyRegen();
+		return;
+	}
+
+	if (!OwnsAmmoCells())
 	{
 		return;
 	}
@@ -4691,7 +4755,12 @@ void AShooterWeapon::FinishReload()
 		// Topped up out of the magazine cells, not conjured. With one magazine allowed the pool IS what
 		// is loaded, so this changes nothing until the meta grants a second one - which is exactly what
 		// makes that upgrade worth buying.
+		const int32 Before = CurrentBullets;
 		CurrentBullets = FMath::Min(MagazineSize, GetPooledAmmo());
+
+		// The cells count loaded rounds too, so for them this was only a move. The energy reserve
+		// does not, so what went into the magazine has to come out of it.
+		DrawEnergyReserve(CurrentBullets - Before);
 	}
 
 	ShellStage = EWeaponReloadStage::Primary;
@@ -4765,6 +4834,255 @@ void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool b
 			}
 		}
 	}
+}
+
+// ==================== Energy reserve ====================
+//
+// The server owns the number and runs the refill. The owning client gets it by replication and
+// takes rounds out of it the moment its own reload finishes, telling the server as it does. A shot
+// never touches the reserve, so there is no traffic per shot beyond the report that already exists.
+
+bool AShooterWeapon::UsesEnergyReserve() const
+{
+	// The owner decides, not the class: the same rifle is energy in a player's hands and endless in
+	// an NPC's. By type rather than IsPlayerControlled, which is false on the server between spawn
+	// and possession and would let a freshly granted gun miss its reserve.
+	return bRegeneratingReserve && !IsMeleeWeapon() && Cast<AShooterCharacter>(PawnOwner) != nullptr;
+}
+
+void AShooterWeapon::SetEnergyReserve(int32 Rounds)
+{
+	if (!HasAuthority() || !UsesEnergyReserve())
+	{
+		return;
+	}
+
+	const int32 Capacity = GetEnergyReserveCapacity();
+	EnergyReserve = FMath::Clamp(Rounds, 0, Capacity);
+
+	// Room left means the refill runs, and without the quiet period: nothing was just fired.
+	if (EnergyReserve < Capacity)
+	{
+		ArmEnergyRegen(0.0f);
+	}
+	else
+	{
+		GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
+	}
+
+	RefreshOwnerAmmoHUD();
+
+	UE_LOG(LogTemp, Log, TEXT("[ENERGY_AMMO] %s: reserve set to %d/%d"), *GetName(), EnergyReserve, Capacity);
+}
+
+void AShooterWeapon::PauseEnergyRegen(float ExtraSeconds)
+{
+	if (!HasAuthority() || !UsesEnergyReserve())
+	{
+		return;
+	}
+
+	// Full: nothing to hold back. The next reload that takes rounds out arms the refill itself.
+	if (EnergyReserve >= GetEnergyReserveCapacity())
+	{
+		GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
+		return;
+	}
+
+	ArmEnergyRegen(EnergyRegenDelay + FMath::Max(0.0f, ExtraSeconds));
+}
+
+void AShooterWeapon::ArmEnergyRegen(float FirstDelay)
+{
+	// One round at a time, at whatever rate refills a whole magazine in EnergySecondsPerMagazine.
+	// Worked out from the live MagazineSize, so a bigger magazine refills faster in rounds per
+	// second and takes the same time per magazine, which is the Apex rule.
+	const float Interval = FMath::Max(0.01f, EnergySecondsPerMagazine / FMath::Max(1, MagazineSize));
+
+	GetWorldTimerManager().SetTimer(
+		EnergyRegenTimer, this, &AShooterWeapon::TickEnergyRegen, Interval, true, FirstDelay + Interval);
+}
+
+void AShooterWeapon::TickEnergyRegen()
+{
+	const int32 Capacity = GetEnergyReserveCapacity();
+	if (!UsesEnergyReserve() || EnergyReserve >= Capacity)
+	{
+		GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
+		return;
+	}
+
+	++EnergyReserve;
+	RefreshOwnerAmmoHUD();
+
+	if (EnergyReserve >= Capacity)
+	{
+		GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
+	}
+}
+
+void AShooterWeapon::DrawEnergyReserve(int32 Rounds)
+{
+	if (Rounds <= 0 || !UsesEnergyReserve())
+	{
+		return;
+	}
+
+	// Taken here at once, on whichever machine reloaded, so the HUD and the next CanReload are right
+	// without waiting a round trip. The server does the same sum and replicates the same answer.
+	EnergyReserve = FMath::Max(0, EnergyReserve - Rounds);
+
+	if (HasAuthority())
+	{
+		PauseEnergyRegen();
+	}
+	else
+	{
+		Server_DrawEnergyReserve(Rounds);
+	}
+}
+
+void AShooterWeapon::Server_DrawEnergyReserve_Implementation(int32 Rounds)
+{
+	// Clamped, and it can only ever lower the number: the worst a lying client can do is empty its
+	// own gun.
+	DrawEnergyReserve(FMath::Clamp(Rounds, 0, MagazineSize));
+}
+
+void AShooterWeapon::OnRep_EnergyReserve()
+{
+	RefreshOwnerAmmoHUD();
+}
+
+void AShooterWeapon::RefreshOwnerAmmoHUD()
+{
+	// Widgets exist only on the machine the player is sitting at. The server's copy of a client's
+	// gun refilling has nobody to show it to.
+	if (!PawnOwner || !PawnOwner->IsLocallyControlled())
+	{
+		return;
+	}
+
+	// The weapon in hand, not this one: the event carries a single pair of numbers, and every
+	// listener reads it as the gun the player is holding.
+	if (AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (const AShooterWeapon* Held = ShooterOwner->GetCurrentWeapon())
+		{
+			ShooterOwner->UpdateWeaponHUD(Held->GetBulletCount(), Held->GetMagazineSize());
+		}
+	}
+}
+
+// ==================== Magazine attachment ====================
+
+void AShooterWeapon::ApplyMagazineModifiers()
+{
+	// Too early (BeginPlay has not taken the base yet, and will call this itself), or a weapon whose
+	// "magazine" is something else entirely: melee keeps its hit count there.
+	if (BaseMagazineSize <= 0 || IsMeleeWeapon())
+	{
+		return;
+	}
+
+	const UWeaponAttachmentDefinition* Mag = GetAttachmentOfType(EWeaponAttachmentType::Magazine);
+
+	// The gold perk's poll runs only while a magazine that has it is fitted.
+	if (Mag && Mag->bReloadsWhileHolstered)
+	{
+		if (!GetWorldTimerManager().IsTimerActive(HolsteredReloadTimer))
+		{
+			HolsteredSince = -1.0f;
+			GetWorldTimerManager().SetTimer(
+				HolsteredReloadTimer, this, &AShooterWeapon::PollHolsteredReload, 0.25f, true);
+		}
+	}
+	else
+	{
+		GetWorldTimerManager().ClearTimer(HolsteredReloadTimer);
+	}
+
+	// The magazine's own number for this gun, or the gun's own size with none fitted. Never derived
+	// from the current size, so swapping a blue mag for a purple one lands on the purple number.
+	// Zero from the table means this gun is not listed; InstallAttachment refuses that, so it only
+	// happens for a table edited while the magazine was already on, and then the base is the answer.
+	const int32 Listed = Mag ? Mag->GetMagazineSizeFor(GetClass()) : 0;
+	const int32 NewSize = FMath::Clamp(Listed > 0 ? Listed : BaseMagazineSize, 1, 999);
+	if (NewSize == MagazineSize)
+	{
+		return;
+	}
+
+	const int32 OldSize = MagazineSize;
+	MagazineSize = NewSize;
+
+	// A smaller magazine cannot keep what the bigger one held. The spare rounds are lost rather than
+	// handed back: the loaded count lives on the shooter's machine and the reserve on the server, and
+	// a client ADDING to its reserve is the one direction the server never takes its word for.
+	CurrentBullets = FMath::Min(CurrentBullets, MagazineSize);
+
+	// The energy reserve is counted in magazines, so its capacity just moved with the magazine.
+	// Going through the setter clamps a shrunk reserve and restarts the refill, which also picks up
+	// the new per-round interval.
+	if (HasAuthority() && UsesEnergyReserve())
+	{
+		SetEnergyReserve(EnergyReserve);
+	}
+
+	RefreshOwnerAmmoHUD();
+
+	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: magazine %d -> %d (base %d, %s)"),
+		*GetName(), OldSize, MagazineSize, BaseMagazineSize, Mag ? *Mag->GetName() : TEXT("no magazine"));
+}
+
+void AShooterWeapon::PollHolsteredReload()
+{
+	// Rounds are counted on the machine that pulls the trigger, so that is the only one allowed to
+	// load them. Everywhere else this poll has nothing to do.
+	if (!PawnOwner || !PawnOwner->IsLocallyControlled())
+	{
+		return;
+	}
+
+	const AShooterCharacter* ShooterOwner = Cast<AShooterCharacter>(PawnOwner);
+	if (!ShooterOwner)
+	{
+		return;
+	}
+
+	// In hand, including while stowed for the grapple: that is not a holster, the gun comes straight
+	// back. Empty hands by the player's own choice DO count, the way holstering both guns does in
+	// Apex: CurrentWeapon keeps pointing at the put-away gun then, so it needs its own test.
+	const bool bInHand = ShooterOwner->GetCurrentWeapon() == this
+		&& ShooterOwner->GetWeaponSwitchPhase() != EWeaponSwitchPhase::StowedByPlayer;
+	if (bInHand)
+	{
+		HolsteredSince = -1.0f;
+		return;
+	}
+
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (HolsteredSince < 0.0f)
+	{
+		HolsteredSince = Now;
+		return;
+	}
+
+	const UWeaponAttachmentDefinition* Mag = GetAttachmentOfType(EWeaponAttachmentType::Magazine);
+	const float Delay = Mag ? Mag->HolsteredReloadDelay : 0.0f;
+	if (Now - HolsteredSince < Delay || !CanReload())
+	{
+		return;
+	}
+
+	// The same sum as FinishReload, minus the animation: nobody is looking at this gun.
+	const int32 Before = CurrentBullets;
+	CurrentBullets = FMath::Min(MagazineSize, GetPooledAmmo());
+	DrawEnergyReserve(CurrentBullets - Before);
+	RefreshOwnerAmmoHUD();
+
+	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: reloaded in the holster, %d -> %d rounds"),
+		*GetName(), Before, CurrentBullets);
 }
 
 bool AShooterWeapon::IsIonizationCapReached(float CurrentCharge, float Cap) const

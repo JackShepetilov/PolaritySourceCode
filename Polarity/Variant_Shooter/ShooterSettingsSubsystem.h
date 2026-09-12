@@ -59,13 +59,41 @@ public:
 
 	// ==================== Quick Access Methods ====================
 
-	/** Get current mouse sensitivity */
+	/** Get the look sensitivity. Kept name; it now reads the one Apex-scale number. */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
 	float GetMouseSensitivity() const;
 
-	/** Set mouse sensitivity and broadcast change */
+	/** Set the look sensitivity. Kept name; forwards to the one Apex-scale number. */
 	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
 	void SetMouseSensitivity(float NewSensitivity);
+
+	/** Look sensitivity on the Apex scale: 1.0 turns 0.022 degrees per mouse count. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	float GetLookSensitivity() const;
+
+	/** Set the look sensitivity and apply it to the view straight away. */
+	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
+	void SetLookSensitivity(float NewSensitivity);
+
+	/** The DPI the player told us about, used only for the readout. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	int32 GetMouseDpi() const;
+
+	/** Tell the game the mouse DPI so cm/360 and eDPI mean something. */
+	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
+	void SetMouseDpi(int32 NewDpi);
+
+	/** Centimetres of mousepad for one full 360 at the current sensitivity and DPI. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	float GetCentimetersPer360() const;
+
+	/** eDPI: sensitivity times DPI, the number pro configs get compared by. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	float GetEffectiveDpi() const;
+
+	/** One ready-made line for the menu, with all of the above in it. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	FText GetSensitivityReadout() const;
 
 	/** Get current field of view */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Gameplay")

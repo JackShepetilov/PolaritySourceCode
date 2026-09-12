@@ -67,6 +67,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo")
 	bool bForceLimitedAmmo = false;
 
+	// ==================== Ammo: energy weapons ====================
+	//
+	// What an energy gun arrives with when it is picked up off the floor. Both numbers are in
+	// MAGAZINES of the weapon being granted, so one drop blueprint stays right when a magazine size
+	// changes. A cells weapon ignores all of this and goes through GrantAmmoToInventory as before.
+
+	/** How full the loaded magazine is: 1 is full, 0.5 half, 0 empty. Ignored when the drop already
+	 *  carries an exact count: a yank roll (bForceLimitedAmmo, AmmoDistributionCurve) or a gun a
+	 *  player threw away. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Energy", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EnergyMagazineFill = 1.0f;
+
+	/** Magazines in RESERVE on top of the loaded one. 1 means one in the gun and one spare. Capped
+	 *  by the weapon's own EnergyReserveMagazines, which is how far it refills by itself later. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Energy", meta = (ClampMin = "0.0", ClampMax = "20.0"))
+	float EnergyReserveMagazines = 1.0f;
+
+	/** Exact reserve of an energy gun a player threw away, so taking it back returns what was
+	 *  thrown. -1 means this drop was not thrown by a player, and EnergyReserveMagazines applies. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ammo|Energy")
+	int32 CarriedEnergyReserve = -1;
+
+	/** Remember what an energy gun being thrown away holds. Server only, called on the discard. */
+	void CarryEnergyAmmoFrom(const AShooterWeapon* Weapon);
+
+	/** Load an energy gun that was just picked up from this drop. Server only. */
+	void GrantEnergyAmmo(AShooterWeapon* Weapon);
+
 	// ==================== Capture Settings ====================
 
 	/** Can be captured by channeling? */
@@ -159,6 +187,14 @@ public:
 	 *  granted weapon stays at full mag with infinite refills (current behavior preserved). */
 	UFUNCTION(BlueprintCallable, Category = "Ammo")
 	void RollSpawnedBulletCount();
+
+	/** Put the drop's rounds into the player's magazine cells and load the gun with whatever the
+	 *  bag accepted. What did not fit is dropped again at the player's feet. */
+	void GrantAmmoToInventory(AShooterCharacter* Player, AShooterWeapon* Weapon);
+
+	/** Re-drop the rounds that would not fit, so a full bag costs the player ammo it can see
+	 *  rather than ammo that silently vanished. */
+	void SpawnLeftoverDrop(AShooterCharacter* Player, int32 Rounds);
 
 protected:
 	virtual void BeginPlay() override;

@@ -1,0 +1,253 @@
+{
+  "_comment": "Источник истины по рельефу карты. Правила: Docs/LevelDesign_Rules_Map_2026-09-01.md",
+  "world": {
+    "landscape_label": "MapTerrain",
+    "quads_per_section": 63,
+    "sections_per_component": 1,
+    "component_count": 10,
+    "vertex_spacing_uu": 100.0,
+    "z_scale": 100.0,
+    "_size_uu": 63000.0,
+    "_vertices": 631
+  },
+  "_pads_comment": "pad_z это отметка площадки. flat = 0.62*radius + 500 (кольцо укрытий, П28). is_poi=false снимает требование П13: старт это не боевая точка.",
+  "pads": [
+    {
+      "id": "HQ_A",
+      "xy": [
+        -24000.0,
+        0.0
+      ],
+      "radius": 6000.0,
+      "flat": 4220.0,
+      "blend": 2500.0,
+      "pad_z": 0.0
+    },
+    {
+      "id": "HQ_B",
+      "xy": [
+        24000.0,
+        0.0
+      ],
+      "radius": 6000.0,
+      "flat": 4220.0,
+      "blend": 2500.0,
+      "pad_z": 1200.0
+    },
+    {
+      "id": "FINAL",
+      "xy": [
+        0.0,
+        0.0
+      ],
+      "radius": 5000.0,
+      "flat": 3600.0,
+      "blend": 2500.0,
+      "pad_z": 600.0
+    },
+    {
+      "id": "P_Mission_West",
+      "xy": [
+        -12000.0,
+        -6000.0
+      ],
+      "radius": 4000.0,
+      "flat": 3000.0,
+      "blend": 2500.0,
+      "pad_z": 400.0
+    },
+    {
+      "id": "P_Mission_East",
+      "xy": [
+        12000.0,
+        -6000.0
+      ],
+      "radius": 4000.0,
+      "flat": 3000.0,
+      "blend": 2500.0,
+      "pad_z": 900.0
+    },
+    {
+      "id": "P_Mission_North",
+      "xy": [
+        0.0,
+        -16000.0
+      ],
+      "radius": 4000.0,
+      "flat": 3000.0,
+      "blend": 2500.0,
+      "pad_z": 1400.0
+    },
+    {
+      "id": "P_Plain_South",
+      "xy": [
+        -9000.0,
+        9000.0
+      ],
+      "radius": 4000.0,
+      "flat": 3000.0,
+      "blend": 2500.0,
+      "pad_z": 200.0
+    },
+    {
+      "id": "LAUNCH",
+      "xy": [
+        0.0,
+        20000.0
+      ],
+      "radius": 3000.0,
+      "flat": 2400.0,
+      "blend": 2500.0,
+      "pad_z": 0.0,
+      "is_poi": false
+    }
+  ],
+  "_lanes_comment": [
+    "Лейны это коридоры между точками, и они же ротации. Вся высокая местность это то, что",
+    "лейнами и площадками НЕ занято, поэтому ширина лейна и есть разница между горлом и открыткой:",
+    "у узкого стены рядом, у широкого они далеко. Отдельного параметра на это нет намеренно.",
+    "",
+    "Асимметрия (решение автора 2026-09-01):",
+    "  Запад, фракция A: своя земля широкая и открытая, но вход в центр через горло.",
+    "  Восток, фракция B: своя земля узкая и резаная, зато фланг в центр открытый.",
+    "  Север: приз на высоте 1400. С запада горло, с востока открытый подъём.",
+    "  Юг: земля игроков, широкая, от старта до центра без единого горла."
+  ],
+  "lanes": [
+    {
+      "from": "HQ_A",
+      "to": "P_Mission_West",
+      "kind": "open",
+      "width": 6500.0
+    },
+    {
+      "from": "HQ_A",
+      "to": "P_Plain_South",
+      "kind": "choke",
+      "width": 2400.0
+    },
+    {
+      "from": "HQ_A",
+      "to": "FINAL",
+      "kind": "choke",
+      "width": 2200.0
+    },
+    {
+      "from": "P_Mission_West",
+      "to": "FINAL",
+      "kind": "open",
+      "width": 5500.0
+    },
+    {
+      "from": "P_Mission_West",
+      "to": "P_Mission_North",
+      "kind": "choke",
+      "width": 2000.0
+    },
+    {
+      "from": "HQ_B",
+      "to": "P_Mission_East",
+      "kind": "choke",
+      "width": 2000.0
+    },
+    {
+      "from": "HQ_B",
+      "to": "FINAL",
+      "kind": "open",
+      "width": 6000.0
+    },
+    {
+      "from": "P_Mission_East",
+      "to": "FINAL",
+      "kind": "choke",
+      "width": 2600.0
+    },
+    {
+      "from": "P_Mission_East",
+      "to": "P_Mission_North",
+      "kind": "open",
+      "width": 4500.0
+    },
+    {
+      "from": "P_Plain_South",
+      "to": "FINAL",
+      "kind": "open",
+      "width": 7500.0
+    },
+    {
+      "from": "P_Plain_South",
+      "to": "LAUNCH",
+      "kind": "open",
+      "width": 8000.0
+    }
+  ],
+  "_walls_comment": [
+    "Стена это НЕ обрыв. Обрыв круче 50 градусов на сетке 100 uu всегда даёт по плечам тонкую",
+    "полосу 30-50, а она запрещена П19 и рвёт навмеш. Поэтому стена это высокое плато с пологим",
+    "подъёмом: перелезть можно, но это подъём на 12 метров под уклон 23 градуса, на виду и медленно.",
+    "Навмеш при этом остаётся сплошным, что П32-П34 и требуют."
+  ],
+  "walls": {
+    "height": 2200.0,
+    "wall_slope_deg": 25.0,
+    "crest": 700.0,
+    "crest_span_uu": 3000.0
+  },
+  "_noise_comment": "Длинные волны. Гасятся на площадках и в лейнах, чтобы коридор оставался коридором.",
+  "noise": {
+    "seed": 20260901,
+    "waves": [
+      {
+        "wavelength": 11000.0,
+        "amplitude": 110.0
+      },
+      {
+        "wavelength": 7000.0,
+        "amplitude": 70.0
+      },
+      {
+        "wavelength": 4200.0,
+        "amplitude": 40.0
+      }
+    ]
+  },
+  "_extractions_comment": "Проверка П52: две из трёх разнесены минимум на 500 м.",
+  "extractions": [
+    {
+      "id": "EXIT_N",
+      "xy": [
+        0.0,
+        -28000.0
+      ]
+    },
+    {
+      "id": "EXIT_W",
+      "xy": [
+        -28000.0,
+        13000.0
+      ]
+    },
+    {
+      "id": "EXIT_E",
+      "xy": [
+        28000.0,
+        13000.0
+      ]
+    }
+  ],
+  "checks": {
+    "forbidden_slope_band_deg": [
+      30.0,
+      50.0
+    ],
+    "max_slope_deg": 30.0,
+    "pad_max_slope_deg": 5.0,
+    "poi_spacing_uu": [
+      11400.0,
+      22800.0
+    ],
+    "sightline_break_below_uu": 20000.0,
+    "eye_height_uu": 160.0,
+    "extraction_min_gap_uu": 50000.0
+  }
+}

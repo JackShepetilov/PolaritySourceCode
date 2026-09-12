@@ -270,10 +270,6 @@ struct FStateTreeSenseEnemiesInstanceData
 	UPROPERTY(EditAnywhere, Category = Output)
 	bool bHasInvestigateLocation = false;
 
-	/** Tag required on sensed actors */
-	UPROPERTY(EditAnywhere, Category = Parameter)
-	FName SenseTag = FName("Player");
-
 	/** Line of sight cone half angle to consider a full sense */
 	UPROPERTY(EditAnywhere, Category = Parameter)
 	float DirectLineOfSightCone = 85.0f;

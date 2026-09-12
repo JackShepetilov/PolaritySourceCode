@@ -7,7 +7,6 @@
 #include "Variant_Shooter/AI/SquadSpawn/SquadSpawnSubsystem.h"
 #include "Variant_Shooter/AI/SquadSpawn/SquadLoadout.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
-#include "Variant_Shooter/Pickups/InventoryPickup.h"
 
 #include "AI/PolarityTeams.h"
 #include "Components/SphereComponent.h"
@@ -53,13 +52,12 @@ void APoiActor::BeginPlay()
 	}
 
 	SpawnGarrisonOnce();
+}
 
-	// No banner, no ceremony: a plain point just has its loot lying there. A point WITH a banner
-	// holds it back until somebody breaks the thing, which is the whole mechanic.
-	if (!Banner)
-	{
-		SpawnLootOnce(GetActorLocation(), InfluenceRadius);
-	}
+void APoiActor::SetLootQuality(float InQuality, float InSpread)
+{
+	LootQuality = FMath::Clamp(InQuality, 0.0f, 1.0f);
+	LootSpread = FMath::Clamp(InSpread, 0.0f, 1.0f);
 }
 
 bool APoiActor::IsBannerBroken() const
@@ -80,11 +78,10 @@ void APoiActor::NotifyBannerBroken(ABannerActor* BrokenBanner, AActor* Breaker)
 	}
 
 	// A headquarters answers this itself by dropping to its weakened sorties (see AFactionHq).
-	// Everywhere else the answer is the prize, and the prize is the loot.
-	if (PoiRole != EPoiRole::Headquarters)
-	{
-		SpawnLootOnce(BrokenBanner->GetLootBurstOrigin(), BannerLootRadius, BannerLootImpulse);
-	}
+	//
+	// An ordinary point does NOT answer it yet. Breaking its banner used to spill the point's loot;
+	// loot moved to sheets on anchors [author, 2026-09-02] and nothing was put in its place, so on
+	// every role but Headquarters the break is currently recorded and nothing else.
 }
 
 void APoiActor::EndPlay(const EEndPlayReason::Type Reason)
@@ -192,112 +189,10 @@ void APoiActor::SpawnGarrisonOnce()
 		return;
 	}
 
-	const int32 Spawned = Squads->SpawnSquadMembers(GetActorLocation(), GarrisonScatterRadius, GarrisonLoadout, nullptr);
+	// The tag matters as much as the bodies: a garrison that does not know which place it is FOR
+	// can never be asked how many are wanted there, and so can never give its surplus up.
+	const int32 Spawned = Squads->SpawnSquadMembers(GetActorLocation(), GarrisonScatterRadius,
+		GarrisonLoadout, nullptr, 0, PoiTag);
 	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] POI %s garrison: %d members from %s"),
 		*PoiTag.ToString(), Spawned, *GarrisonLoadout->GetName());
-}
-
-void APoiActor::SpawnLootOnce(const FVector& Origin, float Radius, float Impulse)
-{
-	if (Loot.IsEmpty())
-	{
-		return;
-	}
-
-	URunDirectorSubsystem* Director = GetDirector();
-	UWorld* World = GetWorld();
-	if (!Director || !World)
-	{
-		return;
-	}
-
-	int32 MoneyStacks = 0;
-	for (const FPoiLootEntry& Entry : Loot)
-	{
-		if (Entry.bIsMoney)
-		{
-			MoneyStacks += Entry.Count;
-		}
-	}
-
-	if (!Director->TryClaimLootSpawn(PoiTag, MoneyStacks))
-	{
-		return;
-	}
-
-	int32 Placed = 0;
-
-	for (const FPoiLootEntry& Entry : Loot)
-	{
-		if (!Entry.PickupClass)
-		{
-			continue;
-		}
-
-		// The entry can still ask for its own spread; otherwise it uses whatever the caller chose,
-		// which is the whole point when a banner drops a pile at its feet rather than over an acre.
-		const float Spread = Entry.ScatterRadius > 0.0f ? Entry.ScatterRadius : Radius;
-
-		for (int32 i = 0; i < Entry.Count; ++i)
-		{
-			const float Angle = FMath::FRandRange(0.0f, 2.0f * PI);
-			const FVector Outward(FMath::Cos(Angle), FMath::Sin(Angle), 0.0f);
-
-			FActorSpawnParameters SpawnParams;
-			SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-			FVector SpawnAt;
-			if (Impulse > 0.0f)
-			{
-				// Thrown, not placed. Everything starts inside the banner and physics decides where
-				// it ends up, which is the difference between loot appearing and loot coming out.
-				SpawnAt = Origin + Outward * FMath::FRandRange(0.0f, 40.0f);
-			}
-			else
-			{
-				const float Distance = Spread * FMath::Sqrt(FMath::FRand());
-				const FVector Flat = Origin + Outward * Distance;
-
-				// Laid down: find what is under that spot. A pickup floating two metres up is the
-				// same bug as one buried in the floor, and both are invisible until somebody walks
-				// past.
-				FHitResult Hit;
-				FCollisionQueryParams Params(TEXT("PoiLoot"), false, this);
-				if (!World->LineTraceSingleByChannel(Hit, Flat + FVector(0.0f, 0.0f, 1000.0f),
-					Flat - FVector(0.0f, 0.0f, 3000.0f), ECC_WorldStatic, Params))
-				{
-					continue;
-				}
-				SpawnAt = Hit.ImpactPoint + FVector(0.0f, 0.0f, 20.0f);
-			}
-
-			// Spawned into the persistent world rather than into this point's sublevel, so a piece
-			// of loot does not vanish when the player walks far enough away from where it lies.
-			AInventoryPickup* Dropped = World->SpawnActor<AInventoryPickup>(
-				Entry.PickupClass, SpawnAt, FRotator::ZeroRotator, SpawnParams);
-			if (!Dropped)
-			{
-				continue;
-			}
-
-			++Placed;
-
-			if (Impulse > 0.0f && Dropped->Mesh && Dropped->Mesh->IsSimulatingPhysics())
-			{
-				// Up and out, with the spread built into the direction rather than into a radius:
-				// how far a piece travels is then a consequence of the throw, and the pile lands
-				// looking scattered instead of arranged.
-				const FVector Launch = (Outward * FMath::FRandRange(0.5f, 1.0f)
-					+ FVector(0.0f, 0.0f, FMath::FRandRange(1.0f, 1.6f))).GetSafeNormal();
-
-				Dropped->Mesh->AddImpulse(Launch * Impulse * FMath::FRandRange(0.7f, 1.3f),
-					NAME_None, /*bVelChange=*/ true);
-				Dropped->Mesh->AddAngularImpulseInDegrees(
-					FMath::VRand() * Impulse, NAME_None, /*bVelChange=*/ true);
-			}
-		}
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[MAP_DEBUG] POI %s loot: %d pickups placed, %d of them money"),
-		*PoiTag.ToString(), Placed, MoneyStacks);
 }

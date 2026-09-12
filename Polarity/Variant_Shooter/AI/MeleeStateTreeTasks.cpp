@@ -1,4 +1,4 @@
-// MeleeStateTreeTasks.cpp
+﻿// MeleeStateTreeTasks.cpp
 // Implementation of StateTree Tasks and Conditions for MeleeNPC
 
 #include "MeleeStateTreeTasks.h"
@@ -17,35 +17,35 @@ EStateTreeRunStatus FStateTreeMeleeAttackTask::EnterState(FStateTreeExecutionCon
 {
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask::EnterState — Character=%s, Target=%s"),
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] MeleeAttackTask::EnterState — Character=%s, Target=%s"),
 		Data.Character ? *Data.Character->GetName() : TEXT("NULL"),
 		Data.Target ? *Data.Target->GetName() : TEXT("NULL"));
 
 	// Проверяем что всё валидно
 	if (!Data.Character || !Data.Target)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: Invalid Character or Target"));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: Invalid Character or Target"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Проверяем можем ли атаковать
 	if (!Data.Character->CanAttack())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: CanAttack=false (see CanAttack log above for reason)"));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: CanAttack=false (see CanAttack log above for reason)"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Проверяем дистанцию
 	if (!Data.Character->IsTargetInAttackRange(Data.Target))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: Target not in range"));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] MeleeAttackTask FAIL: Target not in range"));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// Начинаем атаку
 	Data.Character->StartMeleeAttack(Data.Target);
 
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] MeleeAttackTask STARTED on %s"), *Data.Target->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] MeleeAttackTask STARTED on %s"), *Data.Target->GetName());
 
 	return EStateTreeRunStatus::Running;
 }
@@ -106,14 +106,14 @@ bool FStateTreeIsInMeleeRangeCondition::TestCondition(FStateTreeExecutionContext
 
 	if (!Data.Character || !Data.Target)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] IsInMeleeRange = FALSE (Character or Target null)"));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] IsInMeleeRange = FALSE (Character or Target null)"));
 		return false;
 	}
 
 	const float Distance = FVector::Dist(Data.Character->GetActorLocation(), Data.Target->GetActorLocation());
 	const float Range = Data.Character->GetAttackRange();
 	const bool bInRange = Distance <= Range;
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] IsInMeleeRange: dist=%.0f, range=%.0f, result=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] IsInMeleeRange: dist=%.0f, range=%.0f, result=%d"),
 		Distance, Range, bInRange ? 1 : 0);
 
 	return bInRange;
@@ -136,12 +136,12 @@ bool FStateTreeCanMeleeAttackCondition::TestCondition(FStateTreeExecutionContext
 
 	if (!Data.Character)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanMeleeAttack = FALSE (Character null)"));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] CanMeleeAttack = FALSE (Character null)"));
 		return false;
 	}
 
 	const bool bCan = Data.Character->CanAttack();
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] CanMeleeAttack: %d  (NPC=%s)"), bCan ? 1 : 0, *Data.Character->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] CanMeleeAttack: %d  (NPC=%s)"), bCan ? 1 : 0, *Data.Character->GetName());
 	return bCan;
 }
 
@@ -208,7 +208,7 @@ bool FStateTreeHasValidTargetCondition::TestCondition(FStateTreeExecutionContext
 
 	const bool bIsValid = Data.Target != nullptr && IsValid(Data.Target);
 
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] HasValidTarget [owner=%s]: target=%s, valid=%d"),
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] HasValidTarget [owner=%s]: target=%s, valid=%d"),
 		*GetNameSafe(Context.GetOwner()),
 		Data.Target ? *Data.Target->GetName() : TEXT("NULL"),
 		bIsValid ? 1 : 0);
@@ -276,7 +276,7 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::EnterState(FStateTreeExecutionConte
 	// вертикальные цели сюда уже не попадают — только планарные рывки.
 	if (!Data.Character->CanDash())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s Dash: CanDash=false -> defer to Pursue"), *GetNameSafe(Data.Character));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] %s Dash: CanDash=false -> defer to Pursue"), *GetNameSafe(Data.Character));
 		return EStateTreeRunStatus::Failed;
 	}
 
@@ -304,12 +304,12 @@ EStateTreeRunStatus FStateTreeMeleeDashTask::EnterState(FStateTreeExecutionConte
 	if (!Data.Character->StartDash(FinalDirection, Data.DashDistance))
 	{
 		// Рывок не стартовал (путь перекрыт / уже на нужной дистанции). Отдаём управление в Pursue.
-		UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s Dash: StartDash failed -> defer to Pursue"), *GetNameSafe(Data.Character));
+		UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] %s Dash: StartDash failed -> defer to Pursue"), *GetNameSafe(Data.Character));
 		return EStateTreeRunStatus::Failed;
 	}
 
 	// [MELEE_DEBUG] Планарный рывок стартовал (цель в вертикальном диапазоне — гейт пропустил).
-	UE_LOG(LogTemp, Warning, TEXT("[MELEE_DEBUG] %s DASH STARTED dist=%.0f vDelta=%.0f"),
+	UE_LOG(LogTemp, Verbose, TEXT("[MELEE_DEBUG] %s DASH STARTED dist=%.0f vDelta=%.0f"),
 		*GetNameSafe(Data.Character), Data.DashDistance,
 		Data.Target->GetActorLocation().Z - Data.Character->GetActorLocation().Z);
 	return EStateTreeRunStatus::Running;

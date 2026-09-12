@@ -260,6 +260,36 @@ public:
 	virtual FGenericTeamId GetGenericTeamId() const override { return TeamId; }
 	virtual void SetGenericTeamId(const FGenericTeamId& NewTeamId) override { TeamId = NewTeamId; }
 
+	/** Is Other somebody this NPC fights? The single answer for "friend or foe", replacing the
+	 *  "does the actor carry the Player tag" test the sense task used to run.
+	 *
+	 *  A tag test only ever had one answer, so it could not survive a second enemy faction: an NPC
+	 *  of faction 2 carries no Player tag and would be invisible to faction 1. Team attitude asks
+	 *  the actual question instead, and it already knows about players (team 0) and enemies
+	 *  (team 1) because both sides carry a team id today.
+	 *
+	 *  Attitude is asked FROM the controller (the perception listener) TO the actor, because that
+	 *  is the direction the engine itself uses: FGenericTeamId::GetTeamIdentifier casts the actor
+	 *  with no fallback to its controller, so the target side must answer through its pawn. */
+	UFUNCTION(BlueprintPure, Category = "AI|Team")
+	bool IsHostileTo(const AActor* Other) const;
+
+	/** Tell this NPC's whole side where an enemy is. The "broadcast-contact" verb.
+	 *
+	 *  Called automatically on every sight edge (see OnPerceptionUpdated), so behaviour only needs to
+	 *  call it for things perception cannot see for itself: a shot arriving from off-screen, a squad
+	 *  order naming somebody, a scripted reveal.
+	 *
+	 *  Deliberately shares the OBSERVATION and not the decision. Everyone on the side learns a
+	 *  position; each of them still chooses what to do with it, which is what keeps the enemies
+	 *  reading as people who talk to each other rather than as one mind with many bodies. */
+	void BroadcastContactAt(AActor* Enemy, const FVector& Location, bool bSeenNow);
+
+	/** Same, at the enemy's current position, and reachable from Blueprint. Separate name rather than
+	 *  an overload because UnrealHeaderTool does not allow overloaded UFUNCTIONs. */
+	UFUNCTION(BlueprintCallable, Category = "AI|Team")
+	void BroadcastContact(AActor* Enemy);
+
 protected:
 	/** Broadcast detected enemy to nearby teammates via Team Sense */
 	void BroadcastEnemyToTeam(AActor* DetectedEnemy, const FVector& LastKnownLocation);

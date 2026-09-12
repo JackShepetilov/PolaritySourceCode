@@ -185,6 +185,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flying|Movement")
 	void FlyToActor(AActor* TargetActor, float CustomAcceptanceRadius = -1.0f);
 
+	/**
+	 * Fly to a location WITHOUT the hover-height clamp (Min/MaxHoverHeight).
+	 * Used for deliberate out-of-bounds maneuvers like the repair retreat ascent,
+	 * which must climb far above normal combat altitude.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Flying|Movement")
+	void FlyToLocationUnclamped(const FVector& TargetLocation, float CustomAcceptanceRadius = -1.0f);
+
 	/** Stop current movement */
 	UFUNCTION(BlueprintCallable, Category = "Flying|Movement")
 	void StopMovement();

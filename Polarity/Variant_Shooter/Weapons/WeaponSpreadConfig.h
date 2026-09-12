@@ -1,4 +1,4 @@
-// WeaponSpreadConfig.h
+﻿// WeaponSpreadConfig.h
 // How wide a weapon shoots, as one number the whole game agrees on.
 //
 // The spread is an ANGLE in degrees: the half-angle of the cone a bullet may leave in. An angle
@@ -20,7 +20,13 @@
 //             off after a short delay. This part is added, not multiplied, so a burst opens even a
 //             pinpoint weapon by a known amount.
 //
-// Total = clamp(Base * StateMultiplier + Bloom, 0, MaxSpreadDegrees).
+//   ADS     - the sight, applied LAST and to the sum of the other two. It is deliberately outside
+//             the state part: a scope whose AdsMultiplier is 0 has to mean zero degrees, and if
+//             aiming only scaled the state half then the firing bloom would still be added on top
+//             and the weapon would keep spraying while aimed. Anything that must survive aiming
+//             belongs in the weapon's AimVariance, not here.
+//
+// Total = clamp((Base * StateMultiplier + Bloom) * AdsMultiplier, 0, MaxSpreadDegrees).
 
 #pragma once
 
@@ -72,8 +78,9 @@ struct FWeaponSpreadConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|State", meta = (ClampMin = "0.0"))
 	float AirMultiplier = 3.0f;
 
-	/** Multiplies whatever state came out, blended in by the character's ADS alpha, so the spread
-	 *  tightens over the same time the sight comes up rather than snapping at the button press. */
+	/** Multiplies the FINISHED number (state and bloom together), blended in by the character's ADS
+	 *  alpha so the spread tightens over the same time the sight comes up rather than snapping at
+	 *  the button press. 0 means a perfectly accurate weapon while aimed, trigger included. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|State", meta = (ClampMin = "0.0"))
 	float AdsMultiplier = 0.25f;
 
@@ -102,7 +109,10 @@ struct FWeaponSpreadConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|Bloom", meta = (ClampMin = "0.0", Units = "deg/s"))
 	float BloomRecoveryRate = 4.0f;
 
-	/** Scales the per-shot addition while aiming down sights, blended by the ADS alpha. */
+	/** Scales the per-shot addition while aiming down sights, blended by the ADS alpha. This is an
+	 *  EXTRA on the bloom alone and stacks with AdsMultiplier, which is applied later over the sum:
+	 *  a shot fired while fully aimed contributes PerShotDegrees * this * AdsMultiplier. Leave it at
+	 *  1.0 unless the bloom specifically needs to behave differently from the base spread in ADS. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|Bloom", meta = (ClampMin = "0.0"))
 	float AdsBloomMultiplier = 0.5f;
 

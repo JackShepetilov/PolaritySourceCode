@@ -1,4 +1,4 @@
-// PolarityAITasks.h
+﻿// PolarityAITasks.h
 // StateTree tasks for Polarity AI system
 
 #pragma once
@@ -1097,6 +1097,15 @@ struct FSTTask_ShooterPeek_Data
 
 	EShooterPeekPhase Phase = EShooterPeekPhase::Seeking;
 
+	/** True while a move THIS task asked for is in flight.
+	 *
+	 *  Exists so that leaving the task cancels only its own movement. Cancelling everything on exit
+	 *  is the same mistake the tank's hold-position task made: this state is left and re-entered
+	 *  several times a second, and each exit was tearing down whatever else was driving the pawn -
+	 *  in practice a squad's march order, which is why an entire squad stood at its spawn point
+	 *  rotating on the spot for a whole battle. */
+	bool bMoveIssued = false;
+
 	/** Seconds spent in the current phase. */
 	float PhaseElapsed = 0.0f;
 
@@ -1230,4 +1239,125 @@ private:
 	/** Fire and claim both released. Must run on EVERY exit: a leaked cover claim leaves a phantom
 	 *  occupied corner that slowly squeezes the other NPCs into the open (design doc 5.5). */
 	void ReleaseAll(FInstanceDataType& Data) const;
+};
+
+// ============================================================================
+// TakeStance - move to a point, stop, and hold facing a direction
+//
+// The "take-stance" verb: the whole of an ambush position, a defended doorway or a firing point,
+// with no opinion about shooting. Deliberately thin, and deliberately NOT a move task with extras:
+// what separates a stance from a move is that arriving is the START of the behaviour rather than
+// the end of it. The task keeps running once it is there, holding the pose, and reports bAtStance
+// so the tree can transition on arrival without the task having to finish.
+// ============================================================================
+
+USTRUCT()
+struct FSTTask_TakeStance_Data
+{
+	GENERATED_BODY()
+
+	/** AI controller doing the moving. */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<AAIController> Controller;
+
+	/** Where to stand. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	FVector StanceLocation = FVector::ZeroVector;
+
+	/** Which way to look once there. Zero means "keep whatever direction the arrival left", which is
+	 *  what a stance facing the way it walked in wants. Ignored while FaceTarget is set. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	FVector FacingDirection = FVector::ZeroVector;
+
+	/** Watch this actor instead of a fixed direction. An ambush usually wants the direction (nobody
+	 *  to watch yet); a held doorway usually wants the actor. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> FaceTarget = nullptr;
+
+	/** How close counts as arrived. Passed to the move request, so the engine's own reach test
+	 *  decides, rather than a second number of ours disagreeing with it (see the AcceptanceRadius
+	 *  note in CLAUDE.md: the engine adds the agent radius on top). */
+	UPROPERTY(EditAnywhere, Category = "Parameter", meta = (ClampMin = "10.0"))
+	float AcceptanceRadius = 60.0f;
+
+	/** Stop shooting on the way in and while holding. An ambush is a stance that must not open fire;
+	 *  a defended doorway is a stance that keeps firing. One flag is the whole difference. */
+	UPROPERTY(EditAnywhere, Category = "Parameter")
+	bool bHoldFire = false;
+
+	/** True once the NPC is standing in the stance. Output for transitions: the task itself keeps
+	 *  running, because holding the position IS the behaviour. */
+	UPROPERTY(EditAnywhere, Category = "Output")
+	bool bAtStance = false;
+
+	/** Set when the move could not be issued or the path follower gave up. Lets the tree pick another
+	 *  point instead of the task failing outright and dropping the NPC out of its state. */
+	UPROPERTY(EditAnywhere, Category = "Output")
+	bool bUnreachable = false;
+
+	/** Seconds since the move was issued, for the give-up grace period. */
+	float TimeSinceMoveIssued = 0.0f;
+};
+
+USTRUCT(DisplayName = "Take Stance", Category = "Polarity|AI")
+struct FSTTask_TakeStance : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_TakeStance_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+
+private:
+	/** Point the body and the aim where the stance wants them. Called every tick while held, because
+	 *  a focus set once drifts the moment anything else touches rotation. */
+	void ApplyFacing(const FInstanceDataType& Data) const;
+};
+
+// ============================================================================
+// SuppressiveFire - shoot to pin rather than to kill, for as long as this state runs
+//
+// The "fire-suppressive" verb. Holds the accuracy component's suppressive mode on, and nothing
+// else: what to shoot at and when to shoot is still Shoot With Accuracy or Burst Fire running
+// beside it. Two thin things in one state beat one task that does both, because the mode also has
+// to be usable by a push that suppresses on the move.
+// ============================================================================
+
+USTRUCT()
+struct FSTTask_SuppressiveFire_Data
+{
+	GENERATED_BODY()
+
+	/** The NPC whose aim is being spoiled on purpose. */
+	UPROPERTY(EditAnywhere, Category = "Context")
+	TObjectPtr<APawn> NPC;
+};
+
+USTRUCT(DisplayName = "Suppressive Fire", Category = "Polarity|AI|Shooter")
+struct FSTTask_SuppressiveFire : public FStateTreeTaskCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTTask_SuppressiveFire_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
 };

@@ -1,7 +1,9 @@
-// EMFPhysicsProp.cpp
+﻿// EMFPhysicsProp.cpp
 // Physics-simulated prop with full EMF system integration
 
 #include "EMFPhysicsProp.h"
+#include "Variant_Shooter/Weapons/SmokeCanisterProjectile.h"
+#include "Variant_Shooter/Abilities/SmokeCloud.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "Curves/CurveFloat.h"
 #include "ChargeAnimationComponent.h"
@@ -868,13 +870,22 @@ void AEMFPhysicsProp::ApplyItemVerbOnThrow()
 		BecomeDecoy();
 		break;
 
+	case EClassItemVerb::Smoke:
+		// Same shape as the healing pledge below and for the same reason: the wall belongs where the
+		// prop LANDS. Cracking it open at the moment of release would put every wall at the thrower's
+		// own feet, which is the one place he can already put one by using it in his hands.
+		bPledgedToSmoke = true;
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s thrown as smoke by %s: opens on impact"),
+			*GetName(), *GetNameSafe(Thrower));
+		break;
+
 	case EClassItemVerb::Heal:
 		// Nothing happens here, on purpose. The Melee's prop decomposes where it LANDS, not where it
 		// was let go: throwing it at a teammate is half of what the verb is for, and healing at the
 		// moment of release would put the pickups at the thrower's feet every time. OnPropHit is
 		// where the throw ends, so that is where this is finished.
 		bPledgedToHealing = true;
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s thrown as healing by %s: decomposes on impact"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s thrown as healing by %s: decomposes on impact"),
 			*GetName(), *GetNameSafe(Thrower));
 		break;
 
@@ -909,7 +920,8 @@ bool AEMFPhysicsProp::CanDetonate() const
 	const EClassItemVerb Verb = Spender->GetItemVerb();
 	return Verb != EClassItemVerb::Throw
 		&& Verb != EClassItemVerb::Decoy
-		&& Verb != EClassItemVerb::Heal;
+		&& Verb != EClassItemVerb::Heal
+		&& Verb != EClassItemVerb::Smoke;
 }
 
 void AEMFPhysicsProp::BecomeDecoy()
@@ -921,7 +933,7 @@ void AEMFPhysicsProp::BecomeDecoy()
 
 	if (DecoyDuration <= 0.0f || DecoyPullRadius <= 0.0f)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s cannot become a decoy: duration=%.1f radius=%.0f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s cannot become a decoy: duration=%.1f radius=%.0f"),
 			*GetName(), DecoyDuration, DecoyPullRadius);
 		return;
 	}
@@ -937,7 +949,7 @@ void AEMFPhysicsProp::BecomeDecoy()
 	GetWorld()->GetTimerManager().SetTimer(DecoyArmTimer, this, &AEMFPhysicsProp::ActivateDecoy,
 		FMath::Max(KINDA_SMALL_NUMBER, DecoyArmDelay), false);
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s armed as a decoy: goes off in %.1fs, will reach %.0f cm (thrown by %s)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s armed as a decoy: goes off in %.1fs, will reach %.0f cm (thrown by %s)"),
 		*GetName(), DecoyArmDelay, DecoyPullRadius, *GetNameSafe(GetSpendingCharacter()));
 }
 
@@ -966,7 +978,7 @@ void AEMFPhysicsProp::ActivateDecoy()
 
 	GetWorld()->GetTimerManager().SetTimer(DecoyTimer, this, &AEMFPhysicsProp::OnDecoyExpired, DecoyDuration, false);
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s is a decoy for %.1fs, radius %.0f"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s is a decoy for %.1fs, radius %.0f"),
 		*GetName(), DecoyDuration, DecoyPullRadius);
 }
 
@@ -1087,10 +1099,53 @@ void AEMFPhysicsProp::ConsumeForHeal(AShooterCharacter* User)
 		User->RestoreHealth(SelfHealAmount);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s eaten by %s for %.0f HP"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s eaten by %s for %.0f HP"),
 		*GetName(), *User->GetName(), SelfHealAmount);
 
 	FinishAsHealing(GetActorLocation());
+}
+
+// ==================== Smoke (the Melee's item verb) ====================
+
+void AEMFPhysicsProp::ConsumeForSmoke(AShooterCharacter* User)
+{
+	if (!HasAuthority() || bIsDead || !User)
+	{
+		return;
+	}
+
+	// Used in the hands: the wall forms around the player. That is the whole difference between the
+	// two halves of this verb -- a throw puts cover where you are going, this puts cover where you
+	// already are, and both cost the same charged prop.
+	DeployIntoSmoke(User->GetActorLocation(), User->GetActorForwardVector().GetSafeNormal2D());
+
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s cracked open by %s for smoke"),
+		*GetName(), *User->GetName());
+}
+
+void AEMFPhysicsProp::DeployIntoSmoke(const FVector& Where, const FVector& TravelDirection)
+{
+	if (!HasAuthority() || bIsDead)
+	{
+		return;
+	}
+
+	bPledgedToSmoke = false;
+
+	FSmokeCloudShape Shape;
+	Shape.Radius   = SmokeCloudRadius;
+	Shape.GrowTime = SmokeGrowTime;
+	Shape.Duration = SmokeDuration;
+	Shape.FadeTime = SmokeFadeTime;
+
+	ASmokeCanisterProjectile::DeploySmokeWall(GetWorld(), SmokeCanisterClass, GetOwner(),
+		GetSpendingCharacter(), Where, TravelDirection, Shape, SmokeCloudClass,
+		SmokeSightPenetration, SmokeTurnRateMultiplier, SmokeSplitCount, SmokeSplitSpacing);
+
+	// Dead without dying, exactly as the healing verb and the decoy go out: no OnPropDeath, no gibs,
+	// no damage. The smoke itself is the feedback, so there is no second effect played here.
+	bIsDead = true;
+	SetActorTickEnabled(false);
 }
 
 void AEMFPhysicsProp::DecomposeIntoHealing(const FVector& Where)
@@ -1107,7 +1162,7 @@ void AEMFPhysicsProp::DecomposeIntoHealing(const FVector& Where)
 	AHealthPickup::SpawnHealthPickups(GetWorld(), HealPickupClass, Where,
 		HealPickupCount, HealPickupScatterRadius, HealPickupFloorOffset);
 
-	UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s decomposed into %d health pickups at %s (thrown by %s)"),
+	UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s decomposed into %d health pickups at %s (thrown by %s)"),
 		*GetName(), HealPickupCount, *Where.ToCompactString(), *GetNameSafe(GetSpendingCharacter()));
 
 	FinishAsHealing(Where);
@@ -1688,6 +1743,15 @@ void AEMFPhysicsProp::OnPropHit(UPrimitiveComponent* HitComp, AActor* OtherActor
 	if (bPledgedToHealing && bIsInReverseFlight)
 	{
 		DecomposeIntoHealing(Hit.ImpactPoint);
+		return;
+	}
+
+	// The smoke verb ends its throw the same way, and for the same reasons: no damage, no stagger, no
+	// detonation on whatever it reached. The direction of travel is handed on because the wall lies
+	// ACROSS it. @see ASmokeCanisterProjectile::DeploySmokeWall
+	if (bPledgedToSmoke && bIsInReverseFlight)
+	{
+		DeployIntoSmoke(Hit.ImpactPoint, GetVelocity().GetSafeNormal2D());
 		return;
 	}
 
@@ -2420,7 +2484,7 @@ void AEMFPhysicsProp::Explode(float DamageMultiplier, float RadiusMultiplier, fl
 	// almost always, which is worse than not working at all.
 	if (!CanDetonate())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[COOP_DEBUG] %s did not explode: spent by %s, whose class uses props another way"),
+		UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s did not explode: spent by %s, whose class uses props another way"),
 			*GetName(), *GetNameSafe(GetSpendingCharacter()));
 		return;
 	}

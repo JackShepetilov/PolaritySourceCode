@@ -1,0 +1,263 @@
+{
+ "coast_rocks": [
+  {
+   "x_m": -150.6,
+   "y_m": -999.0,
+   "z_m": 2.3,
+   "yaw_deg": -8.6,
+   "in_water": false
+  },
+  {
+   "x_m": -300.6,
+   "y_m": -999.7,
+   "z_m": -2.03,
+   "yaw_deg": -16.7,
+   "in_water": true
+  },
+  {
+   "x_m": -307.8,
+   "y_m": -939.8,
+   "z_m": 1.2,
+   "yaw_deg": -18.1,
+   "in_water": false
+  },
+  {
+   "x_m": -42.8,
+   "y_m": -1053.0,
+   "z_m": -0.28,
+   "yaw_deg": -2.3,
+   "in_water": true
+  },
+  {
+   "x_m": -227.8,
+   "y_m": -1006.0,
+   "z_m": -0.04,
+   "yaw_deg": -12.8,
+   "in_water": true
+  },
+  {
+   "x_m": -133.5,
+   "y_m": -1018.3,
+   "z_m": 0.59,
+   "yaw_deg": -7.5,
+   "in_water": false
+  },
+  {
+   "x_m": 761.5,
+   "y_m": -723.2,
+   "z_m": -0.43,
+   "yaw_deg": 46.5,
+   "in_water": true
+  },
+  {
+   "x_m": 707.5,
+   "y_m": -799.2,
+   "z_m": -1.16,
+   "yaw_deg": 41.5,
+   "in_water": true
+  },
+  {
+   "x_m": 722.8,
+   "y_m": -797.8,
+   "z_m": -2.43,
+   "yaw_deg": 42.2,
+   "in_water": true
+  },
+  {
+   "x_m": 619.8,
+   "y_m": -854.0,
+   "z_m": -0.11,
+   "yaw_deg": 36.0,
+   "in_water": true
+  },
+  {
+   "x_m": 681.9,
+   "y_m": -784.5,
+   "z_m": 0.1,
+   "yaw_deg": 41.0,
+   "in_water": false
+  },
+  {
+   "x_m": 971.9,
+   "y_m": 370.4,
+   "z_m": -1.54,
+   "yaw_deg": 110.9,
+   "in_water": true
+  },
+  {
+   "x_m": 950.1,
+   "y_m": 146.0,
+   "z_m": -0.0,
+   "yaw_deg": 98.7,
+   "in_water": true
+  },
+  {
+   "x_m": 929.3,
+   "y_m": 187.6,
+   "z_m": 1.81,
+   "yaw_deg": 101.4,
+   "in_water": false
+  },
+  {
+   "x_m": 942.0,
+   "y_m": 391.1,
+   "z_m": 0.04,
+   "yaw_deg": 112.5,
+   "in_water": false
+  },
+  {
+   "x_m": 963.0,
+   "y_m": 153.9,
+   "z_m": -0.47,
+   "yaw_deg": 99.1,
+   "in_water": true
+  },
+  {
+   "x_m": 977.8,
+   "y_m": 173.5,
+   "z_m": -1.81,
+   "yaw_deg": 100.1,
+   "in_water": true
+  },
+  {
+   "x_m": 695.7,
+   "y_m": 771.6,
+   "z_m": 0.54,
+   "yaw_deg": 138.0,
+   "in_water": false
+  },
+  {
+   "x_m": 622.6,
+   "y_m": 844.1,
+   "z_m": -0.0,
+   "yaw_deg": 143.6,
+   "in_water": true
+  },
+  {
+   "x_m": 471.3,
+   "y_m": 952.5,
+   "z_m": -0.6,
+   "yaw_deg": 153.7,
+   "in_water": true
+  },
+  {
+   "x_m": 607.6,
+   "y_m": 820.3,
+   "z_m": 1.89,
+   "yaw_deg": 143.5,
+   "in_water": false
+  },
+  {
+   "x_m": -272.1,
+   "y_m": 983.6,
+   "z_m": -0.57,
+   "yaw_deg": 195.5,
+   "in_water": true
+  },
+  {
+   "x_m": -136.6,
+   "y_m": 951.0,
+   "z_m": 1.95,
+   "yaw_deg": 188.2,
+   "in_water": false
+  },
+  {
+   "x_m": -389.4,
+   "y_m": 943.9,
+   "z_m": -0.18,
+   "yaw_deg": 202.4,
+   "in_water": true
+  },
+  {
+   "x_m": -944.9,
+   "y_m": 372.2,
+   "z_m": 1.99,
+   "yaw_deg": 248.5,
+   "in_water": false
+  },
+  {
+   "x_m": -919.2,
+   "y_m": 411.3,
+   "z_m": 2.19,
+   "yaw_deg": 245.9,
+   "in_water": false
+  },
+  {
+   "x_m": -1019.6,
+   "y_m": 218.8,
+   "z_m": -0.0,
+   "yaw_deg": 257.9,
+   "in_water": true
+  },
+  {
+   "x_m": -951.7,
+   "y_m": 442.2,
+   "z_m": -0.78,
+   "yaw_deg": 245.1,
+   "in_water": true
+  },
+  {
+   "x_m": -925.1,
+   "y_m": 405.9,
+   "z_m": 1.94,
+   "yaw_deg": 246.3,
+   "in_water": false
+  },
+  {
+   "x_m": -1024.7,
+   "y_m": 302.4,
+   "z_m": -1.76,
+   "yaw_deg": 253.6,
+   "in_water": true
+  },
+  {
+   "x_m": -936.7,
+   "y_m": 471.7,
+   "z_m": -1.18,
+   "yaw_deg": 243.3,
+   "in_water": true
+  },
+  {
+   "x_m": -936.2,
+   "y_m": -363.5,
+   "z_m": 0.29,
+   "yaw_deg": 291.2,
+   "in_water": false
+  },
+  {
+   "x_m": -802.2,
+   "y_m": -540.7,
+   "z_m": -0.02,
+   "yaw_deg": 304.0,
+   "in_water": true
+  },
+  {
+   "x_m": -762.6,
+   "y_m": -559.1,
+   "z_m": 1.02,
+   "yaw_deg": 306.2,
+   "in_water": false
+  },
+  {
+   "x_m": -876.7,
+   "y_m": -438.4,
+   "z_m": 0.37,
+   "yaw_deg": 296.6,
+   "in_water": false
+  },
+  {
+   "x_m": -773.7,
+   "y_m": -615.6,
+   "z_m": -2.14,
+   "yaw_deg": 308.5,
+   "in_water": true
+  },
+  {
+   "x_m": -881.3,
+   "y_m": -449.6,
+   "z_m": 0.0,
+   "yaw_deg": 297.0,
+   "in_water": false
+  }
+ ]
+}

@@ -1,4 +1,4 @@
-// ChargeAnimationComponent.h
+﻿// ChargeAnimationComponent.h
 // Charge toggle animation system with channeling ability
 // Supports tap (instant toggle) and hold (channeling plate) modes
 
@@ -24,6 +24,7 @@ class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class AUpgradePickup;
 class AAbilityPickup;
+class AInventoryPickup;
 class AScriptedPickup;
 class AHumanoidNPC;
 
@@ -923,6 +924,11 @@ protected:
 
 	/** Capture a scripted pickup (scripted pull, same as UpgradePickup but no upgrade) */
 	void CaptureScriptedPickup(AScriptedPickup* Pickup);
+
+	/** Capture an inventory pickup: money, rounds, an upgrade, anything that costs a cell.
+	 *  Unlike the pickups above, this one can be refused or taken in part, and the decision is the
+	 *  server's, so a client asks rather than flying its own copy. */
+	void CaptureInventoryPickup(AInventoryPickup* Pickup);
 
 	/** Capture a riot shield pickup (scripted pull, equips shield on arrival). */
 	void CaptureRiotShieldPickup(class ARiotShieldPickup* Pickup);

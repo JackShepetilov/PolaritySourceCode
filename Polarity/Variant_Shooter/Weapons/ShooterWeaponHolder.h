@@ -10,6 +10,39 @@
 class AShooterWeapon;
 class UAnimMontage;
 
+/**
+ *  Which reload animation a weapon is playing right now.
+ *
+ *  This used to be a bool called bSecondary, which was enough while a reload had exactly two
+ *  shapes. The FPS Animation Pack ships a third: rounds that go in one at a time, which is Start,
+ *  then Loop once per round, then End. Three stages do not fit in a bool, and they travel over the
+ *  same wire as the other two, so the bool became this.
+ *
+ *  The value is decided by whoever pulls the trigger and RELAYED, never recomputed on the far side:
+ *  the server's ammo count is not the count the animation was chosen from.
+ *
+ *  Lives on the holder interface rather than on the weapon because both ends of that relay need it,
+ *  and this header is the one the weapon and the character already share.
+ */
+UENUM(BlueprintType)
+enum class EWeaponReloadStage : uint8
+{
+	/** Magazine reload with an empty chamber: the long one, with the bolt worked at the end. */
+	Primary,
+
+	/** Magazine reload with a round still chambered: the short one. */
+	Secondary,
+
+	/** Per round reload, opening: the gun comes down and the hand goes to the pouch. */
+	ShellStart,
+
+	/** Per round reload, one round seated. Plays once per round. */
+	ShellLoop,
+
+	/** Per round reload, closing: the action is shut and the gun comes back up. */
+	ShellEnd
+};
+
 
 // This class does not need to be modified.
 UINTERFACE(MinimalAPI)

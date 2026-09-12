@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 
 #include "Variant_Shooter/AI/ShooterStateTreeUtility.h"
@@ -8,6 +8,7 @@
 #include "AIController.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "ShooterAIController.h"
+#include "AI/SmokeVisionSubsystem.h"
 #include "StateTreeAsyncExecutionContext.h"
 
 bool FStateTreeLineOfSightToTargetCondition::TestCondition(FStateTreeExecutionContext& Context) const
@@ -28,6 +29,15 @@ bool FStateTreeLineOfSightToTargetCondition::TestCondition(FStateTreeExecutionCo
 
 	// is the facing outside of our cone half angle?
 	if (FacingDot <= MaxDot)
+	{
+		return !InstanceData.bMustHaveLineOfSight;
+	}
+
+	// Smoke, which has no collision and therefore cannot be found by the traces below. Checked once
+	// for the whole fan rather than per trace: the cloud is metres across and the fan spans one
+	// body. @see USmokeVisionSubsystem
+	if (USmokeVisionSubsystem::IsSightBlockedInWorld(InstanceData.Character->GetWorld(),
+		InstanceData.Character->GetPawnViewLocation(), InstanceData.Target->GetActorLocation()))
 	{
 		return !InstanceData.bMustHaveLineOfSight;
 	}
@@ -219,15 +229,14 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 		// get the instance data
 		FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
 
-		// Capture Controller, Character, and SenseTag by value (safe - they're pointers/simple types)
+		// Capture Controller and Character by value (safe - they're pointers/simple types)
 		// Capture WeakContext to access InstanceData only when context is valid
 		AShooterAIController* Controller = InstanceData.Controller;
 		AShooterNPC* Character = InstanceData.Character;
-		FName SenseTag = InstanceData.SenseTag;
 
 		// bind the perception updated delegate on the controller
 		InstanceData.Controller->OnShooterPerceptionUpdated.BindLambda(
-			[WeakContext = Context.MakeWeakExecutionContext(), Controller, Character, SenseTag](AActor* SensedActor, const FAIStimulus& Stimulus)
+			[WeakContext = Context.MakeWeakExecutionContext(), Controller, Character](AActor* SensedActor, const FAIStimulus& Stimulus)
 			{
 					// Verify captured objects are still valid
 				if (!IsValid(Controller) || !IsValid(Character))
@@ -239,7 +248,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
 				FInstanceDataType* InstanceData = StrongContext.IsValid() ? StrongContext.GetInstanceDataPtr<FInstanceDataType>() : nullptr;
 
-				if (SensedActor->ActorHasTag(SenseTag))
+				if (Controller->IsHostileTo(SensedActor))
 				{
 					// Run a line trace between the character and the sensed actor
 					FCollisionQueryParams QueryParams;
@@ -354,8 +363,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 					continue;
 				}
 
-				// Проверяем тег
-				if (!KnownActor->ActorHasTag(InstanceData.SenseTag))
+				// Проверяем сторону, а не тег
+				if (!InstanceData.Controller->IsHostileTo(KnownActor))
 				{
 					continue;
 				}
@@ -411,7 +420,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 		InstanceData.TargetActor = ControllerTarget;
 		InstanceData.bHasTarget = IsValid(ControllerTarget);
 
-		UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s SYNC: prev=%s -> new=%s (bHasTarget=%d)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s SYNC: prev=%s -> new=%s (bHasTarget=%d)"),
 			*GetNameSafe(InstanceData.Character),
 			*GetNameSafe(PrevInstanceTarget),
 			*GetNameSafe(ControllerTarget),
@@ -421,7 +430,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 	// Safety: clear target if the actor was destroyed (GC may not have cleared the pointer yet)
 	if (InstanceData.bHasTarget && !IsValid(InstanceData.TargetActor))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s SAFETY-CLEAR: TargetActor invalid, calling ClearCurrentTarget"),
+		UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s SAFETY-CLEAR: TargetActor invalid, calling ClearCurrentTarget"),
 			*GetNameSafe(InstanceData.Character));
 
 		InstanceData.TargetActor = nullptr;
@@ -437,7 +446,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 	{
 		InstanceData.TimeSinceLastPoll = 0.0f;
 
-		UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s HEARTBEAT: bHasTarget=%d ControllerTarget=%s InstanceTarget=%s"),
+		UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s HEARTBEAT: bHasTarget=%d ControllerTarget=%s InstanceTarget=%s"),
 			*GetNameSafe(InstanceData.Character),
 			InstanceData.bHasTarget ? 1 : 0,
 			*GetNameSafe(InstanceData.Controller->GetCurrentTarget()),
@@ -451,14 +460,14 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 				TArray<AActor*> KnownActors;
 				PerceptionComp->GetKnownPerceivedActors(nullptr, KnownActors);
 
-				UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL: KnownActors.Num=%d (looking for tag '%s')"),
+				UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s POLL: KnownActors.Num=%d (looking for team %d hostiles)"),
 					*GetNameSafe(InstanceData.Character),
 					KnownActors.Num(),
-					*InstanceData.SenseTag.ToString());
+					(int32)InstanceData.Controller->GetGenericTeamId().GetId());
 
 				for (AActor* KnownActor : KnownActors)
 				{
-					if (!KnownActor || !KnownActor->ActorHasTag(InstanceData.SenseTag))
+					if (!KnownActor || !InstanceData.Controller->IsHostileTo(KnownActor))
 					{
 						continue;
 					}
@@ -477,7 +486,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 						QueryParams
 					);
 
-					UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL-LOS: candidate=%s LOSBlocked=%d (blocker=%s)"),
+					UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s POLL-LOS: candidate=%s LOSBlocked=%d (blocker=%s)"),
 						*GetNameSafe(InstanceData.Character),
 						*GetNameSafe(KnownActor),
 						bHit ? 1 : 0,
@@ -489,7 +498,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 						InstanceData.TargetActor = KnownActor;
 						InstanceData.bHasTarget = true;
 						InstanceData.bHasInvestigateLocation = false;
-						UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL-ACQUIRED: %s"),
+						UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s POLL-ACQUIRED: %s"),
 							*GetNameSafe(InstanceData.Character), *GetNameSafe(KnownActor));
 						break;
 					}
@@ -497,7 +506,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[SENSE_DEBUG] %s POLL: PerceptionComponent NULL!"),
+				UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s POLL: PerceptionComponent NULL!"),
 					*GetNameSafe(InstanceData.Character));
 			}
 		}

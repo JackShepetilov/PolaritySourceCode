@@ -9,6 +9,9 @@
 class UShooterGameSettings;
 class UShooterSettingsSubsystem;
 class UShooterKeyBindingsUI;
+class USlider;
+class USpinBox;
+class UTextBlock;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnOptionsMenuClosed);
 
@@ -174,6 +177,70 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
 	void SetADSSensitivityMultiplier(float Value);
+
+	/** Mouse DPI. Feeds the cm/360 and eDPI readout only, never the turn. */
+	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
+	int32 GetMouseDpi() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
+	void SetMouseDpi(int32 Value);
+
+	/** Centimetres of mousepad for one full 360, for the live readout under the slider. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	float GetCentimetersPer360() const;
+
+	/** eDPI: sensitivity times DPI, the number pro configs get compared by. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	float GetEffectiveDpi() const;
+
+	/** The whole readout as one line, ready to bind to a TextBlock. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Settings|Controls")
+	FText GetSensitivityReadout() const;
+
+	// ==================== The sensitivity row ====================
+	//
+	// The widgets are found by name and wired here, so the row's behaviour lives in one place
+	// instead of in loose Blueprint nodes. All four are optional: a menu missing any of them
+	// still opens, and whatever is present still works.
+
+	/** Drag the sensitivity. Range is set from code to the Apex scale, not in the asset. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<USlider> Slider_MouseSensitivity;
+
+	/** Type the sensitivity. This is the one that lets an Apex config be copied digit for digit. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<USpinBox> SpinBox_LookSensitivity;
+
+	/** Type the mouse DPI, so the line below can say a true cm/360. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<USpinBox> SpinBox_MouseDpi;
+
+	/** Live readout under the row: cm/360, eDPI, degrees per count. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> Text_SensitivityReadout;
+
+	/** Push the current settings back into the row's widgets. */
+	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
+	void RefreshSensitivityWidgets();
+
+protected:
+
+	/** Set the widgets' ranges and hook their events. Runs once, on construct. */
+	void SetupSensitivityWidgets();
+
+	UFUNCTION()
+	void HandleSensitivitySliderChanged(float Value);
+
+	UFUNCTION()
+	void HandleSensitivitySpinBoxChanged(float Value);
+
+	UFUNCTION()
+	void HandleMouseDpiSpinBoxChanged(float Value);
+
+	/** Guards the slider and the spin box against answering each other's updates forever. */
+	bool bUpdatingSensitivityWidgets = false;
+
+public:
 
 	UFUNCTION(BlueprintCallable, Category = "Settings|Controls")
 	bool GetInvertMouseY() const;

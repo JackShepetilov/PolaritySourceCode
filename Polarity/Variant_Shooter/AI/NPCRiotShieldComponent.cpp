@@ -2,7 +2,7 @@
 
 #include "NPCRiotShieldComponent.h"
 #include "ChargeAnimationComponent.h"
-#include "Coop/CoopPlayers.h"
+#include "AI/PolarityTeams.h"
 #include "EMFVelocityModifier.h"
 #include "HumanoidNPC.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
@@ -44,14 +44,21 @@ void UNPCRiotShieldComponent::TickComponent(float DeltaTime, ELevelTick TickType
 
 	if (!bShieldActive || !bAimAtPlayer || !ShieldMesh) return;
 
-	// Face the closest player: the shield covers the direction the NPC is actually threatened from.
-	// Runs every tick, but the team is at most four controllers, so the scan is free.
+	// Face the closest enemy: the shield covers the direction the NPC is actually threatened from,
+	// and with factions that direction is not always where the players are.
 	const FVector ShieldLoc = ShieldMesh->GetComponentLocation();
 
-	APawn* Player = CoopPlayers::GetNearest(GetWorld(), ShieldLoc);
-	if (!Player) return;
+	TimeSinceThreatSearch += DeltaTime;
+	if (!AimThreat.IsValid() || TimeSinceThreatSearch >= 0.25f)
+	{
+		TimeSinceThreatSearch = 0.0f;
+		AimThreat = PolarityTeams::FindNearestHostilePawn(GetOwner());
+	}
 
-	FVector ToPlayer = Player->GetActorLocation() - ShieldLoc;
+	APawn* Threat = AimThreat.Get();
+	if (!Threat) return;
+
+	FVector ToPlayer = Threat->GetActorLocation() - ShieldLoc;
 	ToPlayer.Z = 0.0f;
 	if (ToPlayer.IsNearlyZero()) return;
 

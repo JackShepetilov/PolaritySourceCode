@@ -13,6 +13,9 @@ class AShooterWeapon;
 class UShooterBulletCounterUI;
 class UUpgradeChoiceWidget;
 class UAbilityResourceBar;
+class UInventoryBarWidget;
+class UInventoryScreenWidget;
+class UMapScreenWidget;
 class UCrosshairWidget;
 
 /** Tells run-HUD widgets to show/hide (e.g. for cutscenes).
@@ -29,6 +32,10 @@ UCLASS(abstract)
 class POLARITY_API AShooterPlayerController : public APlayerController
 {
 	GENERATED_BODY()
+
+public:
+
+	AShooterPlayerController();
 
 protected:
 
@@ -69,6 +76,32 @@ protected:
 	/** Pointer to the ability/resource bar widget. */
 	UPROPERTY(Transient)
 	TObjectPtr<UAbilityResourceBar> AbilityResourceBar;
+
+	/** Type of corner weapon block to spawn (WBP_InventoryBar): the two weapon rows. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
+	TSubclassOf<UInventoryBarWidget> InventoryBarClass;
+
+	/** Pointer to the corner weapon block. */
+	UPROPERTY(Transient)
+	TObjectPtr<UInventoryBarWidget> InventoryBar;
+
+	/** Type of inventory overlay to spawn (WBP_InventoryScreen): the cell grid behind a key. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
+	TSubclassOf<UInventoryScreenWidget> InventoryScreenClass;
+
+	/** Pointer to the inventory overlay. Created hidden and toggled by ToggleInventoryScreen. */
+	UPROPERTY(Transient)
+	TObjectPtr<UInventoryScreenWidget> InventoryScreen;
+
+	/** Type of map screen to spawn. Leave unset and the map key does nothing; set it to a Blueprint
+	 *  subclass of UMapScreenWidget to restyle without touching code. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
+	TSubclassOf<UMapScreenWidget> MapScreenClass;
+
+	/** The map screen. Created hidden at startup rather than on demand, so the first press is as
+	 *  fast as every later one. */
+	UPROPERTY(Transient)
+	TObjectPtr<UMapScreenWidget> MapScreen;
 
 	/** Type of crosshair widget to spawn (WBP_Crosshair). If unset, no crosshair is shown. */
 	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
@@ -163,18 +196,6 @@ protected:
 	UFUNCTION()
 	void OnDropKickCooldownEnded();
 
-	/** Called when melee cooldown starts (charges below max) */
-	UFUNCTION()
-	void OnMeleeCooldownStarted(float TotalCooldownDuration);
-
-	/** Called when melee cooldown ends (all charges recovered) */
-	UFUNCTION()
-	void OnMeleeCooldownEnded();
-
-	/** Called when melee charges change */
-	UFUNCTION()
-	void OnMeleeChargeChanged(int32 CurrentCharges, int32 MaxCharges);
-
 	/** Called when melee weapon is equipped or unequipped */
 	UFUNCTION()
 	void OnMeleeWeaponEquipped(bool bEquipped, int32 RemainingHits, int32 MaxHits);
@@ -195,6 +216,48 @@ protected:
 	void DestroyRunWidgets();
 
 public:
+
+	// ==================== Inventory overlay ====================
+
+	/** Show or hide the inventory overlay. Purely local: the screen is UI, it sends nothing to the
+	 *  server, and a remote controller has no viewport to put it in. */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
+	void ToggleInventoryScreen();
+
+	/** Hide the inventory overlay if it is open. Called when the pawn dies, so input never stays
+	 *  in cursor mode with a corpse underneath it. */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
+	void CloseInventoryScreen();
+
+	UFUNCTION(BlueprintPure, Category = "Shooter|UI")
+	bool IsInventoryScreenOpen() const;
+
+	/** Show or hide the map. Local only, same as the inventory: it is a picture of state the client
+	 *  already has, and it sends nothing anywhere. */
+	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
+	void ToggleMapScreen();
+
+	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
+	void CloseMapScreen();
+
+	UFUNCTION(BlueprintPure, Category = "Shooter|UI")
+	bool IsMapScreenOpen() const;
+
+	// ==================== Squad spawn console commands ====================
+	// First Exec functions in the project; they route into USquadSpawnSubsystem.
+	// Usage:  SquadSpawn <PointTag> <LoadoutPath> | SquadRunScenario <ScenarioPath> | SquadClear
+
+	/** Spawn a squad at every spawn point with the given tag */
+	UFUNCTION(Exec, Category = "Squad")
+	void SquadSpawn(const FString& PointTag, const FString& LoadoutPath);
+
+	/** Run a whole scenario (pairs of point tag -> loadout) */
+	UFUNCTION(Exec, Category = "Squad")
+	void SquadRunScenario(const FString& ScenarioPath);
+
+	/** Destroy everything the squad system spawned */
+	UFUNCTION(Exec, Category = "Squad")
+	void SquadClear();
 
 	// ==================== HUD cutscene visibility ====================
 

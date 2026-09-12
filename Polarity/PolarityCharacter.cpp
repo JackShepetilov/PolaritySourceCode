@@ -7,8 +7,13 @@
 #include "ChargeAnimationComponent.h"
 #include "PolarityCameraManager.h"
 #include "EMFVelocityModifier.h"
+#include "AI/SmokeVisionSubsystem.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerInput.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "EnhancedInputComponent.h"
@@ -27,7 +32,9 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
-	// Camera is created FIRST — the first person mesh parents to it (see below).
+	// Created before the mesh only because other members below reference it. The attachment is the
+	// other way round now (mesh -> camera), and is set after the mesh exists; BeginPlay enforces it
+	// on saved content, which is the path that actually runs.
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
 	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCameraComponent->SetRelativeLocation(FVector(0.f, 0.f, 64.f));
@@ -42,11 +49,12 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
 	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
 
-	// The FP mesh hangs off the CAMERA, not off the body mesh. The hands are modelled without a
-	// body, so they simply ride the view instead of being aimed at it by a Control Rig. Every
-	// procedural offset below (crouch, wallrun, sway, recoil, ADS) is therefore in camera space.
+	// The FP mesh hangs off the CAPSULE and the camera hangs off the MESH, at its FPCamera socket.
+	// See the block in BeginPlay for why, and for the fallback when a mesh has no such socket.
+	// Every procedural offset below (crouch, wallrun, sway, recoil, ADS) is therefore in capsule
+	// space now, and moves the view along with the hands instead of moving the hands past it.
 	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("First Person Mesh"));
-	FirstPersonMesh->SetupAttachment(FirstPersonCameraComponent);
+	FirstPersonMesh->SetupAttachment(GetCapsuleComponent());
 	FirstPersonMesh->SetRelativeLocation(FirstPersonMeshCameraOffset);
 	FirstPersonMesh->SetRelativeRotation(FirstPersonMeshCameraRotation);
 	FirstPersonMesh->SetOnlyOwnerSee(true);
@@ -57,6 +65,9 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 	FirstPersonMesh->bEnableUpdateRateOptimizations = false;
 
+	FirstPersonCameraComponent->SetupAttachment(FirstPersonMesh, FName(TEXT("FPCamera")));
+	FirstPersonCameraComponent->SetRelativeLocation(FVector::ZeroVector);
+
 	CameraShakeComponent = CreateDefaultSubobject<UCameraShakeComponent>(TEXT("Camera Shake"));
 
 	GetMesh()->SetOwnerNoSee(true);
@@ -66,6 +77,17 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	GetCharacterMovement()->BrakingDecelerationFalling = 0.0f;
 	GetCharacterMovement()->AirControl = 0.0f; // Disabled - custom ApplyAirStrafe() handles all air movement
 	// GravityScale is set from MovementSettings in ApexMovementComponent::InitializeComponent()
+}
+
+FRotator APolarityCharacter::GetViewOnlyRotationOffset() const
+{
+	// UCameraShakeComponent has been computing this every frame since it was written, and until now
+	// nothing read it: GetCameraRotationOffset() had no callers anywhere in the project. The
+	// positional half of the bob was wired and the rotational half was not, which is why walking
+	// felt like it had no camera bob at all rather than a weak one -- the sway IS the bob.
+	const UCameraShakeComponent* ShakeComp = GetCameraShake();
+
+	return ShakeComp ? ShakeComp->GetCameraRotationOffset() : FRotator::ZeroRotator;
 }
 
 void APolarityCharacter::BeginPlay()
@@ -91,19 +113,69 @@ void APolarityCharacter::BeginPlay()
 		BodyMesh->SetVisibility(true, /*bPropagateToChildren=*/ false);
 	}
 
-	// Enforce the camera parenting at runtime. Changing SetupAttachment in the constructor does NOT
+	// Enforce the view hierarchy at runtime. Changing SetupAttachment in the constructor does NOT
 	// update content that was already saved against the old hierarchy: the Blueprint keeps an
-	// overridden template for this inherited component, and spawned instances get AttachParent =
-	// body mesh from it even though the CDO correctly reports the camera. Verified in PIE.
-	if (FirstPersonMesh && FirstPersonCameraComponent &&
-		FirstPersonMesh->GetAttachParent() != FirstPersonCameraComponent)
+	// overridden template for this inherited component, and a spawned instance gets its
+	// AttachParent from that template rather than from the CDO. Verified in PIE.
+	//
+	// The hierarchy is the FPS Animation Pack's, and it is the opposite of what this project used
+	// until 2026-09-08:
+	//
+	//     capsule -> FirstPersonMesh -> FirstPersonCameraComponent (socket FPCamera, on neck_01)
+	//
+	// The eye rides the animated neck, so breathing, landing and weapon motion reach the view
+	// instead of stopping at the hands. It also removes the hand-tuned mesh offset: the old scheme
+	// pushed the mesh down by exactly the height of its own head bone (-162.575 cm) to line the
+	// head up with a free-standing camera, which is what the FPCamera socket does natively.
+	if (FirstPersonMesh && FirstPersonCameraComponent)
 	{
-		UE_LOG(LogTemplateCharacter, Warning,
-			TEXT("[FPMESH_DEBUG] FirstPersonMesh was attached to %s, re-attaching to the camera"),
-			FirstPersonMesh->GetAttachParent() ? *FirstPersonMesh->GetAttachParent()->GetName() : TEXT("nothing"));
+		static const FName EyeSocket(TEXT("FPCamera"));
 
-		FirstPersonMesh->AttachToComponent(FirstPersonCameraComponent,
-			FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		// No socket means somebody swapped the arms for a mesh that does not carry the pack's eye
+		// point. Falling back keeps the game playable and says so loudly, rather than parenting the
+		// camera to the mesh root and putting the view in the character's feet.
+		if (!FirstPersonMesh->DoesSocketExist(EyeSocket))
+		{
+			UE_LOG(LogTemplateCharacter, Error,
+				TEXT("[FPMESH_DEBUG] first person mesh has no '%s' socket, keeping the old "
+					 "camera-parented hierarchy. The view will not follow the animation."),
+				*EyeSocket.ToString());
+
+			if (FirstPersonMesh->GetAttachParent() != FirstPersonCameraComponent)
+			{
+				FirstPersonMesh->AttachToComponent(FirstPersonCameraComponent,
+					FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			}
+		}
+		else
+		{
+			if (FirstPersonMesh->GetAttachParent() != GetCapsuleComponent())
+			{
+				UE_LOG(LogTemplateCharacter, Warning,
+					TEXT("[FPMESH_DEBUG] FirstPersonMesh was attached to %s, re-attaching to the capsule"),
+					FirstPersonMesh->GetAttachParent() ? *FirstPersonMesh->GetAttachParent()->GetName() : TEXT("nothing"));
+
+				FirstPersonMesh->AttachToComponent(GetCapsuleComponent(),
+					FAttachmentTransformRules::KeepRelativeTransform);
+			}
+
+			if (FirstPersonCameraComponent->GetAttachParent() != FirstPersonMesh ||
+				FirstPersonCameraComponent->GetAttachSocketName() != EyeSocket)
+			{
+				UE_LOG(LogTemplateCharacter, Warning,
+					TEXT("[FPMESH_DEBUG] camera was attached to %s, re-attaching to the mesh socket '%s'"),
+					FirstPersonCameraComponent->GetAttachParent() ? *FirstPersonCameraComponent->GetAttachParent()->GetName() : TEXT("nothing"),
+					*EyeSocket.ToString());
+
+				FirstPersonCameraComponent->AttachToComponent(FirstPersonMesh,
+					FAttachmentTransformRules::SnapToTargetNotIncludingScale, EyeSocket);
+			}
+
+			// The socket places the eye. Any leftover offset from the old scheme would move it off
+			// the head again, so it is cleared here rather than trusted to be zero in content.
+			FirstPersonCameraComponent->SetRelativeLocation(FVector::ZeroVector);
+			FirstPersonCameraComponent->SetRelativeRotation(FRotator::ZeroRotator);
+		}
 	}
 
 	// Rest pose of FirstPersonMesh under the camera. Taken from the dedicated properties rather
@@ -258,7 +330,16 @@ void APolarityCharacter::DoJumpStart()
 {
 	if (ApexMovement)
 	{
-		ApexMovement->TryJump();
+		// The button state first: it rides the move, and the hold lift and the smoke charge both
+		// read it inside the simulation rather than reading the keyboard.
+		ApexMovement->SetJumpInputHeld(true);
+
+		// Standing in his own smoke, the Melee charges instead of jumping, and lets go to launch.
+		// The charge takes the press whole; anybody else, and the Melee anywhere else, jumps.
+		if (!ApexMovement->TryBeginSmokeCharge())
+		{
+			ApexMovement->TryJump();
+		}
 	}
 	else
 	{
@@ -278,6 +359,13 @@ bool APolarityCharacter::CanJumpInternal_Implementation() const
 
 void APolarityCharacter::DoJumpEnd()
 {
+	if (ApexMovement)
+	{
+		// Only the button goes down here. A charge waiting on it is resolved inside the next
+		// simulated move, on every machine, and not from this input handler.
+		ApexMovement->SetJumpInputHeld(false);
+	}
+
 	StopJumping();
 }
 
@@ -439,27 +527,56 @@ void APolarityCharacter::DoChannelReleased()
 
 // ==================== Smooth crouch eye height ====================
 
+float APolarityCharacter::GetCrouchBaseMove(float ScaledHalfHeightAdjust) const
+{
+	// How far the ACTOR actually moved, which is not always what the callback was handed.
+	//
+	// The engine only slides the capsule to keep the feet planted while bCrouchMaintainsBaseLocation
+	// is set, and it sets that flag from the movement mode: true on MOVE_Walking and false on
+	// everything else (CharacterMovementComponent.cpp, OnMovementModeChanged). So crouching in the
+	// air, or on a wallrun, resizes the capsule WITHOUT moving the actor -- while OnStartCrouch is
+	// still handed the full half-height difference either way.
+	//
+	// Compensating by that number regardless is how an air crouch used to punt the view 38 cm up
+	// and back down for nothing. The flag is read rather than the mode, because the flag is what the
+	// engine itself branched on one line earlier.
+	const UCharacterMovementComponent* Movement = GetCharacterMovement();
+
+	return (Movement && Movement->bCrouchMaintainsBaseLocation) ? ScaledHalfHeightAdjust : 0.0f;
+}
+
 void APolarityCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
 {
 	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
 
-	// bCrouchMaintainsBaseLocation is on, so the engine keeps the feet planted and drops the capsule
-	// centre by exactly this much in the same frame. The camera hangs off the capsule, so it drops
-	// with it; hold it up by the same distance and let the walk below spend it.
-	PushCrouchCameraOffset(ScaledHalfHeightAdjust, /*bGoingDown=*/ true);
+	// The engine keeps the feet planted and drops the capsule centre by exactly this much in the
+	// same frame. The FIRST PERSON MESH hangs off the capsule, so it drops with it; hold it up by
+	// the same distance and let the walk below spend it.
+	//
+	// Note the engine has already compensated GetMesh() -- the third person body -- and nothing
+	// anywhere compensates the first person one. That is the whole reason this exists.
+	PushCrouchCameraOffset(GetCrouchBaseMove(ScaledHalfHeightAdjust), /*bGoingDown=*/ true);
 }
 
 void APolarityCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
 {
 	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
 
-	// Standing up is the same move with the sign flipped: the capsule centre goes UP, so the camera
-	// is held DOWN and climbs from there.
-	PushCrouchCameraOffset(-ScaledHalfHeightAdjust, /*bGoingDown=*/ false);
+	// Standing up is the same move with the sign flipped: the capsule centre goes UP, so the hands
+	// are held DOWN and climb from there.
+	PushCrouchCameraOffset(-GetCrouchBaseMove(ScaledHalfHeightAdjust), /*bGoingDown=*/ false);
 }
 
 void APolarityCharacter::PushCrouchCameraOffset(float DeltaZ, bool bGoingDown)
 {
+	// Nothing moved, so there is nothing to compensate. An early out rather than falling through,
+	// because the zero-duration branch at the bottom CLEARS the offset, and a crouch taken in the
+	// air arrives here with zero while a walk from the crouch before it is still running.
+	if (FMath::IsNearlyZero(DeltaZ))
+	{
+		return;
+	}
+
 	// Adding rather than assigning is what makes a cancelled crouch behave: tapping crouch and
 	// releasing it before the eye has arrived leaves some of the first offset unspent, and the two
 	// distances have opposite signs, so the sum is the distance actually left to travel.
@@ -589,6 +706,27 @@ void APolarityCharacter::AccumulateFirstPersonSpinePose(float DeltaTime, FVector
 
 	Translation += MovementSettings->WallrunSpinePose.Translation * WallrunSpineAlpha;
 	Rotation += MovementSettings->WallrunSpinePose.Rotation * WallrunSpineAlpha;
+
+	// ==================== The procedural crouch and slide, re-routed ====================
+	//
+	// CrouchCameraOffset, SlideCameraOffset and the two slide tilts have always existed and have
+	// always moved the MESH COMPONENT. Moving the component slides the whole viewmodel, arms, gun
+	// and eye together, which is why a slide lean built out of them reads as the camera drifting
+	// rather than as the player ducking.
+	//
+	// Sent to the spine instead they become what they were describing all along: the body leaning.
+	// The values and the field names do not change, so a number tuned on the component means the
+	// same thing here -- but the AXES are the bone's now, not the camera's, so expect to retune the
+	// magnitudes once and not to re-derive them.
+	//
+	// Both halves are behind the same switch that takes them off the mesh (bDriveStatePosesFromSpine
+	// in AccumulateFirstPersonPose, through StatePoseToMesh), so they are never applied twice and
+	// never lost: the switch moves them from one place to the other and nothing else.
+	if (bDriveStatePosesFromSpine)
+	{
+		Translation += SavedCrouchSlideOffset * CrouchSlideProgress;
+		Rotation += SavedCrouchSlideTilt * CrouchSlideProgress;
+	}
 }
 
 // ==================== Anim graph plumbing ====================
@@ -866,6 +1004,20 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 	const FQuat PivotedRotation = (CurrentWeaponTilt + CurrentRunSwayRotation).Quaternion();
 	Location = ShoulderPivot + PivotedRotation.RotateVector(Location - ShoulderPivot);
 	Rotation = (PivotedRotation * Rotation.Quaternion()).Rotator();
+
+	// ==================== Crouch counter-offset ====================
+	//
+	// Last, and outside the pivot on purpose: this is not a pose, it is the mesh standing still in
+	// the world while the capsule under it changed size. Rotating it with the weapon tilt would
+	// smear a vertical hold sideways.
+	//
+	// It goes on the MESH rather than on the camera, and that is the whole fix. Under the pack
+	// hierarchy the mesh hangs off the capsule and the camera hangs off the mesh's neck, so the
+	// capsule resize teleports the HANDS and the camera merely rides along. Holding the camera up
+	// instead left the eye still and snapped the arms 38 cm underneath it, which is what "the mesh
+	// jerks when crouching" was. Held here, the hands stay put, the eye stays put because it is
+	// parented to them, and both walk down together over CrouchDownTime.
+	Location.Z += CrouchCameraSmoothOffsetZ;
 }
 
 void APolarityCharacter::ApplyCameraManagerRoll()
@@ -1221,4 +1373,53 @@ float APolarityCharacter::GetAimPitchForAnimation() const
 	// GetRemoteViewPitch() is the 5.6+ accessor; the old uint8 RemoteViewPitch is deprecated.
 	constexpr float MaxUInt16 = 65535.0f;
 	return FRotator::NormalizeAxis((static_cast<float>(GetRemoteViewPitch()) * 360.0f) / MaxUInt16);
+}
+
+UAISense_Sight::EVisibilityResult APolarityCharacter::CanBeSeenFrom(const FCanBeSeenFromContext& Context,
+	FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested,
+	float& OutSightStrength, int32* UserData, const FOnPendingVisibilityQueryProcessedDelegate* Delegate)
+{
+	OutNumberOfLoSChecksPerformed = 0;
+	OutNumberOfAsyncLosCheckRequested = 0;
+	OutSightStrength = 0.0f;
+
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return UAISense_Sight::EVisibilityResult::NotVisible;
+	}
+
+	// The same point the sense would have traced to, so nothing about WHERE a body is seen changes
+	// by taking the test over.
+	const FVector TargetLocation = GetActorLocation();
+
+	// Half one: the walls. This is UAISense_Sight's own default test, reproduced -- ECC_Visibility is
+	// what DefaultSightCollisionChannel resolves to for this project, and a hit only counts as
+	// blocking if it is something other than this body or a part of it.
+	const FCollisionQueryParams QueryParams(TEXT("AILineOfSightSmoke"), true, Context.IgnoreActor);
+	FHitResult Hit;
+	const bool bHit = World->LineTraceSingleByChannel(Hit, Context.ObserverLocation, TargetLocation,
+		ECC_Visibility, QueryParams);
+	++OutNumberOfLoSChecksPerformed;
+
+	if (bHit)
+	{
+		const AActor* HitActor = Hit.HitObjectHandle.FetchActor();
+		if (!HitActor || !HitActor->IsOwnedBy(this))
+		{
+			return UAISense_Sight::EVisibilityResult::NotVisible;
+		}
+	}
+
+	// Half two: the smoke. Geometry rather than a trace, because the clouds have no collision at all
+	// -- @see USmokeVisionSubsystem. Costs one emptiness check when nothing is burning, which is
+	// almost always.
+	if (USmokeVisionSubsystem::IsSightBlockedInWorld(World, Context.ObserverLocation, TargetLocation))
+	{
+		return UAISense_Sight::EVisibilityResult::NotVisible;
+	}
+
+	OutSeenLocation = TargetLocation;
+	OutSightStrength = 1.0f;
+	return UAISense_Sight::EVisibilityResult::Visible;
 }
