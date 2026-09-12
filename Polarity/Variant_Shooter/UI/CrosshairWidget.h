@@ -10,6 +10,16 @@
 // size in pixels (resolution-independent: BaseHeightFraction * viewport height * weapon Scale, then
 // * (1 + bloom * BloomScaleAdd)). LAYOUT is the Blueprint's job: inherit this class, place the
 // crosshair Image + idle dot, and resize the Image from the size events below.
+//
+// HIT MARKER: the Blueprint places two Images over the centre, "HitMarkerImage" (HUDMain) and
+// "IonizedHitMarkerImage" (HUDMain_Electrified). Each tick C++ finds them by name and shows one or
+// neither straight from the bound character's UHitMarkerComponent, which owns the timer, colour
+// and pulse. They show while aiming down sights and while unarmed: the sight replaces the
+// crosshair, not the confirmation. The ADS hide therefore only skips the bars in NativePaint; it
+// does not fade or collapse the widget.
+//
+// The gap is converted from screen pixels to layout units through the paint geometry's own scale,
+// so the widget can sit in a HUD slot of any size.
 
 #pragma once
 
@@ -75,8 +85,9 @@ protected:
 		const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId,
 		const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 
-	/** Fired when the crosshair is taken off the screen for ADS and when it comes back. The widget
-	 *  already fades itself out natively; this is for anything else that should react. */
+	/** Fired when the crosshair is taken off the screen for ADS and when it comes back. The
+	 *  code-drawn bars stop painting on their own; a Blueprint that draws its own Image hides it
+	 *  from here. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Crosshair", meta = (DisplayName = "On Crosshair Visibility Changed"))
 	void BP_OnCrosshairVisibilityChanged(bool bVisible);
 

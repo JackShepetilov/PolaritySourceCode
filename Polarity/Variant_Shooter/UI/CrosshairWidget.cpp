@@ -2,7 +2,9 @@
 
 #include "CrosshairWidget.h"
 #include "ShooterWeapon.h"
+#include "Variant_Shooter/HitMarkerComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Components/Image.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "Camera/PlayerCameraManager.h"
@@ -71,6 +73,45 @@ float UCrosshairWidget::ComputeSpreadSizePixels(float SpreadDegrees) const
 		FMath::Max(ActiveConfig.MaxSizePixels, ViewportY));
 }
 
+namespace
+{
+	/** The hit confirmation lives on the character, not here: UHitMarkerComponent keeps the timer,
+	 *  the colour and the size, and the crosshair only shows what it reports. */
+	const UHitMarkerComponent* FindHitMarker(const TWeakObjectPtr<AShooterCharacter>& Character)
+	{
+		const AShooterCharacter* Bound = Character.Get();
+		return Bound ? Bound->GetHitMarkerComponent() : nullptr;
+	}
+
+	/** One of the two hit marker pictures: shown at the component's colour and fade, scaled by its
+	 *  pulse (and the kill multiplier), or collapsed. */
+	void DriveHitMarkerImage(UImage* Image, bool bShow, const UHitMarkerComponent* Marker)
+	{
+		if (!Image)
+		{
+			return;
+		}
+		if (!bShow || !Marker)
+		{
+			if (Image->GetVisibility() != ESlateVisibility::Collapsed)
+			{
+				Image->SetVisibility(ESlateVisibility::Collapsed);
+			}
+			return;
+		}
+
+		Image->SetVisibility(ESlateVisibility::HitTestInvisible);
+		Image->SetColorAndOpacity(Marker->GetHitMarkerColor().CopyWithNewOpacity(Marker->GetHitMarkerAlpha()));
+
+		// GetHitMarkerSize is the resting size times the kill multiplier times a pulse that grows
+		// as the marker fades. Dividing the resting size back out leaves that as a plain scale, so
+		// the picture keeps the size the designer gave it and only breathes.
+		const float RestingSize = FMath::Max(Marker->Settings.HitMarkerSize, KINDA_SMALL_NUMBER);
+		const float Scale = Marker->GetHitMarkerSize() / RestingSize;
+		Image->SetRenderScale(FVector2D(Scale, Scale));
+	}
+}
+
 int32 UCrosshairWidget::NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
 	const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId,
 	const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
@@ -98,20 +139,14 @@ int32 UCrosshairWidget::NativePaint(const FPaintArgs& Args, const FGeometry& All
 
 	// CurrentSizePixels is in real SCREEN pixels, because that is the only unit an angle can be
 	// projected into honestly. Slate draws in layout units, which the UI's DPI scaling has already
-	// divided down. The ratio of the two sizes IS that scale factor, and taking it from the geometry
-	// we are painting into needs no assumptions about how the DPI curve is set up.
-	float PixelsToLocal = 1.0f;
-	if (const APlayerController* PC = GetOwningPlayer())
-	{
-		int32 ViewportX = 0, ViewportY = 0;
-		PC->GetViewportSize(ViewportX, ViewportY);
-		if (ViewportX > 0)
-		{
-			PixelsToLocal = LocalSize.X / static_cast<float>(ViewportX);
-		}
-	}
+	// divided down, and the geometry we are painting into carries exactly that scale. This used to
+	// be derived from the widget's own width over the viewport's, which quietly assumed the widget
+	// spans the whole viewport: in a 500x500 HUD slot that shrank the gap to a quarter, and that is
+	// how the crosshair "broke" when it moved under the registry.
+	const float LayoutScale = AllottedGeometry.GetAccumulatedLayoutTransform().GetScale();
+	const float PixelsToLocal = LayoutScale > KINDA_SMALL_NUMBER ? 1.0f / LayoutScale : 1.0f;
 
-	// The gap: distance from the centre to the INNER end of each bar. This is the whole contract —
+	// The gap: distance from the centre to the INNER end of each bar. This is the whole contract:
 	// the inner ends sit on the edge of the spread cone, so the square they bound is the region a
 	// shot can land in.
 	const float Gap = FMath::Max(CurrentSizePixels * 0.5f * PixelsToLocal, 0.0f);
@@ -122,9 +157,10 @@ int32 UCrosshairWidget::NativePaint(const FPaintArgs& Args, const FGeometry& All
 	const float Thickness = FMath::Max(ActiveConfig.TickThickness, 1.0f);
 	const float Outline = FMath::Max(ActiveConfig.OutlineThickness, 0.0f);
 
-	// Fold in whatever opacity the widget is being drawn with, so a fade on this widget fades the
-	// bars too. Custom-drawn elements do not inherit it on their own.
-	const float ParentAlpha = InWidgetStyle.GetColorAndOpacityTint().A * GetRenderOpacity();
+	// Whatever opacity our parents are drawn with. Custom-drawn elements do not inherit it on
+	// their own. (Our own RenderOpacity is already blended into the style by the time Slate calls
+	// us.)
+	const float ParentAlpha = InWidgetStyle.GetColorAndOpacityTint().A;
 
 	FLinearColor TickColor = ActiveConfig.Color;
 	TickColor.A *= ParentAlpha;
@@ -205,9 +241,10 @@ bool UCrosshairWidget::UpdateAimingVisibility()
 	{
 		bHiddenByAiming = bShouldHide;
 
-		// Opacity, not Visibility: a collapsed or hidden widget is not ticked by Slate, so hiding
-		// this one that way would switch off the very code that has to bring it back.
-		SetRenderOpacity(bHiddenByAiming ? 0.0f : 1.0f);
+		// Only the bars go: NativePaint skips them while this is set. Neither Visibility nor
+		// RenderOpacity is touched. A collapsed widget is not ticked, so it could never bring itself
+		// back, and a transparent one takes the hit marker down with it, which is the one thing
+		// the player still needs to see while aiming.
 		Invalidate(EInvalidateWidgetReason::Paint);
 
 		BP_OnCrosshairVisibilityChanged(!bHiddenByAiming);
@@ -271,7 +308,6 @@ void UCrosshairWidget::SetActiveWeapon(AShooterWeapon* Weapon)
 	if (bHiddenByAiming)
 	{
 		bHiddenByAiming = false;
-		SetRenderOpacity(1.0f);
 		BP_OnCrosshairVisibilityChanged(true);
 	}
 
@@ -284,7 +320,20 @@ void UCrosshairWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	// Unarmed: nothing animates — the BP shows a static dot.
+	// ---- Hit marker: the two pictures the Blueprint places, driven from the component ----
+	// Found by name rather than BindWidgetOptional so this stays a .cpp-only change; the lookup is
+	// a map read. Shown while aiming down sights and while unarmed too: the sight replaces the
+	// crosshair, not the confirmation, and a punch lands without a gun in hand.
+	{
+		const UHitMarkerComponent* Marker = FindHitMarker(BoundCharacter);
+		FHitMarkerEvent Event;
+		const bool bUp = Marker && Marker->GetActiveHitMarker(Event);
+		const bool bIonized = bUp && Event.HitType == EHitMarkerType::Ionized;
+		DriveHitMarkerImage(Cast<UImage>(GetWidgetFromName(TEXT("HitMarkerImage"))), bUp && !bIonized, Marker);
+		DriveHitMarkerImage(Cast<UImage>(GetWidgetFromName(TEXT("IonizedHitMarkerImage"))), bIonized, Marker);
+	}
+
+	// Unarmed: nothing else animates.
 	if (!bArmed)
 	{
 		return;
