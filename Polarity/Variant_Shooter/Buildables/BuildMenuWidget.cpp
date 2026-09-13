@@ -7,7 +7,9 @@
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
 #include "Engine/Texture2D.h"
+#include "Kismet/GameplayStatics.h"
 #include "PolarityPalette.h"
+#include "Sound/SoundBase.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
 #include "Variant_Shooter/UI/Hud/HudShapeWidget.h"
@@ -94,6 +96,15 @@ void UBuildMenuEntryWidget::SetState(EBuildMenuEntryState State, int32 BuiltCoun
 	BP_OnStateChanged(State, BuiltCount, MaxCount, bSelected);
 }
 
+void UBuildMenuEntryWidget::FlashRefused(FLinearColor Color)
+{
+	if (Plate)
+	{
+		Plate->Flash(Color, 0.35f);
+	}
+	BP_OnRefused();
+}
+
 // ==================== Menu ====================
 
 void UBuildMenuWidget::NativeConstruct()
@@ -110,6 +121,7 @@ void UBuildMenuWidget::NativeBind(AShooterCharacter* Character)
 	{
 		Builder = Found;
 		Found->OnModeChanged.AddUniqueDynamic(this, &UBuildMenuWidget::HandleModeChanged);
+		Found->OnSlotRefused.AddUniqueDynamic(this, &UBuildMenuWidget::HandleSlotRefused);
 		RebuildEntries();
 		ApplyMode(Found->GetMode());
 	}
@@ -121,6 +133,7 @@ void UBuildMenuWidget::NativeUnbind()
 	if (UBuilderComponent* const Bound = Builder.Get())
 	{
 		Bound->OnModeChanged.RemoveDynamic(this, &UBuildMenuWidget::HandleModeChanged);
+		Bound->OnSlotRefused.RemoveDynamic(this, &UBuildMenuWidget::HandleSlotRefused);
 	}
 	Builder.Reset();
 	if (AShooterPlayerState* const BoundState = State.Get())
@@ -261,4 +274,19 @@ void UBuildMenuWidget::HandleMetalChanged(int32 Metal, int32 MaxMetal, int32 Del
 void UBuildMenuWidget::HandleOwnedBuildablesChanged()
 {
 	RefreshEntries();
+}
+
+void UBuildMenuWidget::HandleSlotRefused(int32 SlotIndex, EBuildablePlacementResult Result)
+{
+	// Only rows have a plate to flash; a refusal from the ghost (bad spot on confirm) lands on the
+	// row of the kind being placed, which is the same index.
+	if (Entries.IsValidIndex(SlotIndex) && Entries[SlotIndex])
+	{
+		Entries[SlotIndex]->FlashRefused(UPolarityPalette::GetColor(RefusedFlashTag, FLinearColor::Red));
+	}
+	// 2D and local by construction: this widget only exists on the screen of the player who pressed.
+	if (RefusedSound)
+	{
+		UGameplayStatics::PlaySound2D(this, RefusedSound);
+	}
 }

@@ -20,6 +20,7 @@ class UBuildableDefinition;
 class UHudShapeWidget;
 class UImage;
 class UPanelWidget;
+class USoundBase;
 class UTextBlock;
 
 UENUM(BlueprintType)
@@ -47,6 +48,10 @@ public:
 	void Setup(const UBuildableDefinition* Definition, int32 KeyNumber);
 	void SetState(EBuildMenuEntryState State, int32 BuiltCount, int32 MaxCount, bool bSelected);
 
+	/** The key was pressed and nothing could be done: too poor, or the kind is full. The plate
+	 *  flashes so the press is seen to land somewhere, which a log line never is. */
+	void FlashRefused(FLinearColor Color);
+
 	UPROPERTY(BlueprintReadOnly, Category = "Build Menu")
 	FLinearColor AvailableColor = FLinearColor::White;
 
@@ -66,6 +71,9 @@ protected:
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Build Menu", meta = (DisplayName = "On State Changed"))
 	void BP_OnStateChanged(EBuildMenuEntryState State, int32 BuiltCount, int32 MaxCount, bool bSelected);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Build Menu", meta = (DisplayName = "On Refused"))
+	void BP_OnRefused();
 
 	UPROPERTY(BlueprintReadOnly, Category = "Build Menu", meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> KeyText;
@@ -121,6 +129,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build Menu|Colors", meta = (Categories = "Palette"))
 	FGameplayTag PlateSelectedColorTag;
 
+	/** The plate flashes this when a key is pressed on a row that cannot be built (no metal, or the
+	 *  kind is full). The metal plate's spend flash is the natural choice. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build Menu|Colors", meta = (Categories = "Palette"))
+	FGameplayTag RefusedFlashTag;
+
+	/** Played 2D, on this screen only, together with the flash: the "you cannot do that" buzz. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build Menu")
+	TObjectPtr<USoundBase> RefusedSound;
+
 	/** Stay on screen while the ghost is out (with the chosen row lit), or hide with the menu. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build Menu")
 	bool bShowWhilePlacing = true;
@@ -140,6 +157,9 @@ protected:
 
 	UFUNCTION()
 	void HandleOwnedBuildablesChanged();
+
+	UFUNCTION()
+	void HandleSlotRefused(int32 SlotIndex, EBuildablePlacementResult Result);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Build Menu", meta = (DisplayName = "On Menu Shown"))
 	void BP_OnMenuShown(bool bShown);
