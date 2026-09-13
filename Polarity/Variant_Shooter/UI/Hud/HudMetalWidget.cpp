@@ -2,6 +2,7 @@
 
 #include "HudMetalWidget.h"
 
+#include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
 #include "HudShapeWidget.h"
 #include "PolarityPalette.h"
@@ -18,6 +19,29 @@ void UHudMetalWidget::NativeConstruct()
 	if (Caption && CaptionColorTag.IsValid())
 	{
 		Caption->SetColorAndOpacity(FSlateColor(UPolarityPalette::GetColor(CaptionColorTag, FLinearColor::White)));
+	}
+
+	// The floating numbers: colours from the palette, the font from the designer or, failing that,
+	// the counter's own face at a smaller size, so the two always match.
+	Deltas.HoldTime = DeltaHoldTime;
+	Deltas.FadeTime = DeltaFadeTime;
+	Deltas.Rise = DeltaRise;
+	Deltas.MaxEntries = FMath::Max(1, MaxDeltas);
+	Deltas.GainColor = UPolarityPalette::GetColor(GainColorTag, FLinearColor::White);
+	Deltas.LossColor = UPolarityPalette::GetColor(LossColorTag, FLinearColor::White);
+	if (DeltaFont.HasValidFont())
+	{
+		Deltas.Font = DeltaFont;
+	}
+	else if (MetalText)
+	{
+		Deltas.Font = MetalText->GetFont();
+		Deltas.Font.Size = DeltaFontSize;
+	}
+	if (MetalText)
+	{
+		Deltas.ShadowOffset = MetalText->GetShadowOffset();
+		Deltas.ShadowColor = MetalText->GetShadowColorAndOpacity();
 	}
 }
 
@@ -37,6 +61,8 @@ void UHudMetalWidget::NativeUnbind()
 		Bound->OnMetalChanged.RemoveDynamic(this, &UHudMetalWidget::HandleMetalChanged);
 	}
 	State.Reset();
+	// A respawn's first draw is a fresh number, not a "+200" gain.
+	Deltas.Clear();
 }
 
 void UHudMetalWidget::TryBindState()
@@ -64,6 +90,10 @@ void UHudMetalWidget::Apply(int32 Metal, int32 MaxMetal, int32 Delta, bool bInst
 	if (MetalMaxText)
 	{
 		MetalMaxText->SetText(FText::AsNumber(MaxMetal));
+	}
+	if (!bInstant)
+	{
+		Deltas.Push(Delta, DeltaStack, this);
 	}
 	if (Plate && !bInstant)
 	{
@@ -95,4 +125,5 @@ void UHudMetalWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 		TryBindState();
 	}
 	Number.Update(InDeltaTime, MetalText);
+	Deltas.Update(InDeltaTime);
 }
