@@ -2555,6 +2555,21 @@ public:
 	 *  reserve of the same class is preferred over a fallback non-yanked weapon. */
 	AShooterWeapon* PromoteReserveCopyOfClass(TSubclassOf<AShooterWeapon> WeaponClass);
 
+	/** Hand a weapon over to a building (the engineer's turret), server only.
+	 *
+	 *  The same leaving a gun does when a pickup replaces it, minus the drop on the floor: its
+	 *  rounds are taken out of the cells (or read off the energy reserve) and reported back so the
+	 *  mount can load them, its attachments stop costing this player cells, it leaves the inventory,
+	 *  the hands switch to whatever else is owned (a reserve copy first, then any other gun, else
+	 *  empty hands), and the actor is destroyed. The mount spawns its own copy of the class: a gun
+	 *  never changes owner alive, the same rule every other hand-over in the project keeps.
+	 *
+	 *  OutLoadedRounds is this machine's count, which for a client's gun is the stale server copy;
+	 *  the caller that has the client's own report should prefer it. OutReserveRounds is -1 for a
+	 *  gun whose reserve is endless here, so the mount can decide what an endless gun brings.
+	 *  False when Weapon is not one of this character's. */
+	bool ReleaseWeaponToMount(AShooterWeapon* Weapon, int32& OutLoadedRounds, int32& OutReserveRounds);
+
 	/** Add a weapon of this class with the same animated lower→swap→raise transition that
 	 *  Q-switch uses. If the player is unarmed (no CurrentWeapon), falls back to instant equip.
 	 *  If a paused-at-bottom switch is already in progress (BeginWeaponLower was called), this

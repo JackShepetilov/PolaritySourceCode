@@ -27,7 +27,8 @@ enum class EHitMarkerType : uint8
 	Kill,			// Killing blow
 	HeadshotKill,	// Headshot that killed
 	ShieldHit,		// Landed on a shield that is still holding
-	ShieldBreak		// This hit is the one that took the shield down
+	ShieldBreak,	// This hit is the one that took the shield down
+	Remote			// Landed by the player's turret, not by the gun in their hands
 };
 
 /**
@@ -63,6 +64,11 @@ struct FHitMarkerEvent
 	/** This shot is the one that took the shield down. True for exactly one hit per shield. */
 	UPROPERTY(BlueprintReadOnly)
 	bool bIsShieldBreak = false;
+
+	/** Landed by the player's turret. HitType is Remote for these whatever else the hit was, so the
+	 *  HUD can keep the kill and headshot flags and still draw the other picture. */
+	UPROPERTY(BlueprintReadOnly)
+	bool bIsRemote = false;
 
 	/** Time when this hit occurred (for expiration) */
 	float EventTime = 0.0f;
@@ -122,6 +128,19 @@ struct FHitMarkerSettings
 	 *  moment in a fight that changes what the player should do next. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual", meta = (ClampMin = "0.05", ClampMax = "2.0"))
 	float ShieldBreakMarkerDuration = 0.3f;
+
+	/** Colour for a hit the player's turret landed. Dimmer than an own hit on purpose: it is news
+	 *  from across the room, not the shot they just took. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
+	FLinearColor RemoteHitColor = FLinearColor(0.75f, 0.75f, 0.75f, 0.8f);
+
+	/** Size of the turret's marker as a fraction of an own hit's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float RemoteMarkerSizeMultiplier = 0.7f;
+
+	/** How long the turret's marker stays. A turret kill uses KillMarkerDuration like any kill. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float RemoteMarkerDuration = 0.12f;
 
 	// ==================== Audio ====================
 
@@ -404,6 +423,9 @@ protected:
 	/** Which EHitMarkerType a resolved cue draws as. Visuals are a separate vocabulary from audio
 	 *  because the legacy Blueprint HUD binds to the marker type. */
 	static EHitMarkerType CueToMarkerType(EHitFeedbackCue Cue);
+
+	/** How long a marker for this event stays up: kill, shield break, turret, or plain hit. */
+	float ResolveMarkerDuration(const FHitMarkerEvent& Event) const;
 
 	/** Decide whether this cue is allowed to be heard right now, and remember it if so. */
 	bool ShouldPlayCue(EHitFeedbackCue Cue, const UHitFeedbackSet* Set);

@@ -86,6 +86,13 @@ void UHitMarkerComponent::RegisterHitFeedback(const FHitFeedbackContext& Context
 	{
 		HitType = EHitMarkerType::Ionized;
 	}
+	// The turret's hit has one picture whatever it did; the kill and headshot flags ride along on
+	// the event for a HUD that wants to tint it. The sound still comes from the cue, so a turret
+	// kill is heard as a kill, in the turret's own quieter voice.
+	if (Context.bRemote)
+	{
+		HitType = EHitMarkerType::Remote;
+	}
 
 	const UWorld* World = GetWorld();
 	const float Now = World ? World->GetTimeSeconds() : 0.0f;
@@ -103,21 +110,11 @@ void UHitMarkerComponent::RegisterHitFeedback(const FHitFeedbackContext& Context
 	CurrentHitEvent.bIsHeadshot = Context.bHeadshot;
 	CurrentHitEvent.bIsShieldHit = Context.bShieldHit;
 	CurrentHitEvent.bIsShieldBreak = Context.bShieldBroken;
+	CurrentHitEvent.bIsRemote = Context.bRemote;
 	CurrentHitEvent.EventTime = Now;
 
 	// A marker that says something bigger stays up longer.
-	if (Context.bKilled)
-	{
-		HitMarkerTimeRemaining = Settings.KillMarkerDuration;
-	}
-	else if (Context.bShieldBroken)
-	{
-		HitMarkerTimeRemaining = Settings.ShieldBreakMarkerDuration;
-	}
-	else
-	{
-		HitMarkerTimeRemaining = Settings.HitMarkerDuration;
-	}
+	HitMarkerTimeRemaining = ResolveMarkerDuration(CurrentHitEvent);
 
 	bHitMarkerActive = true;
 	LastEventFrame = GFrameCounter;
@@ -146,12 +143,32 @@ void UHitMarkerComponent::RegisterHitFeedback(const FHitFeedbackContext& Context
 	PlayCue(Cue, Set);
 
 	// The screen and the camera answer to the same pacing as the sound: a shotgun that punched the
-	// camera once per pellet shook it eight times for one trigger pull.
-	if (!bSameVolley)
+	// camera once per pellet shook it eight times for one trigger pull. A turret's hit gets neither:
+	// the player did not fire, and a camera that jolts on its own reads as being hit, not hitting.
+	if (!bSameVolley && !Context.bRemote)
 	{
 		ApplyScreenEffects(HitType);
 		ApplyCameraEffects(HitType);
 	}
+}
+
+float UHitMarkerComponent::ResolveMarkerDuration(const FHitMarkerEvent& Event) const
+{
+	// One place for the choice, read both when the timer is set and when the fade is measured
+	// against it, so the marker can never fade against a duration it was not given.
+	if (Event.bIsKill)
+	{
+		return Settings.KillMarkerDuration;
+	}
+	if (Event.bIsShieldBreak)
+	{
+		return Settings.ShieldBreakMarkerDuration;
+	}
+	if (Event.bIsRemote)
+	{
+		return Settings.RemoteMarkerDuration;
+	}
+	return Settings.HitMarkerDuration;
 }
 
 void UHitMarkerComponent::RegisterHit(const FVector& HitLocation, const FVector& HitDirection, float Damage, bool bHeadshot, bool bKilled)
@@ -240,17 +257,9 @@ float UHitMarkerComponent::GetHitMarkerAlpha() const
 		return 0.0f;
 	}
 
-	// Calculate based on remaining time. Same three-way choice RegisterHitFeedback made when it set
-	// the timer, or the fade would be measured against a duration the marker never had.
-	float Duration = Settings.HitMarkerDuration;
-	if (CurrentHitEvent.bIsKill)
-	{
-		Duration = Settings.KillMarkerDuration;
-	}
-	else if (CurrentHitEvent.bIsShieldBreak)
-	{
-		Duration = Settings.ShieldBreakMarkerDuration;
-	}
+	// Same choice RegisterHitFeedback made when it set the timer, or the fade would be measured
+	// against a duration the marker never had.
+	const float Duration = ResolveMarkerDuration(CurrentHitEvent);
 	if (Duration <= 0.0f) return 0.0f;
 
 	// Quick fade in, slow fade out
@@ -288,6 +297,9 @@ FLinearColor UHitMarkerComponent::GetHitMarkerColor() const
 	case EHitMarkerType::Ionized:
 		return Settings.IonizedHitColor;
 
+	case EHitMarkerType::Remote:
+		return Settings.RemoteHitColor;
+
 	case EHitMarkerType::Normal:
 	default:
 		return Settings.NormalHitColor;
@@ -301,6 +313,10 @@ float UHitMarkerComponent::GetHitMarkerSize() const
 	if (CurrentHitEvent.bIsKill)
 	{
 		BaseSize *= Settings.KillMarkerSizeMultiplier;
+	}
+	if (CurrentHitEvent.bIsRemote)
+	{
+		BaseSize *= Settings.RemoteMarkerSizeMultiplier;
 	}
 
 	// Slight pulse effect based on alpha

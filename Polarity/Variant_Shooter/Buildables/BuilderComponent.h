@@ -21,6 +21,7 @@
 class ABuildableActor;
 class ABuildablePreview;
 class AShooterCharacter;
+class ATurretBuildable;
 class AShooterPlayerState;
 class UEnhancedInputComponent;
 class UEnhancedInputLocalPlayerSubsystem;
@@ -85,6 +86,12 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Builder|Input")
 	TObjectPtr<UInputAction> CancelAction;
+
+	/** Hand the gun in hand to the turret in front of the player. Mapped in the ordinary weapons
+	 *  context; does nothing unless a turret of the player's side is under the aim within its
+	 *  FeedReachCm. Any player may feed any turret of the side. */
+	UPROPERTY(EditDefaultsOnly, Category = "Builder|Input")
+	TObjectPtr<UInputAction> FeedAction;
 
 	/** Above the weapons context (0), so a slot key is ours first. */
 	UPROPERTY(EditDefaultsOnly, Category = "Builder|Input")
@@ -159,6 +166,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Builder")
 	void RequestDemolish(int32 SlotIndex);
 
+	/** Give the held gun to the turret under the aim. Local: finds the turret, then asks the server
+	 *  with this machine's own magazine count (the server's copy of a client's count is stale). */
+	UFUNCTION(BlueprintCallable, Category = "Builder")
+	void FeedTurret();
+
+	/** The turret of the player's side under the aim, within its FeedReachCm, or null. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	ATurretBuildable* FindTurretUnderAim() const;
+
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	int32 GetPlacingSlot() const { return PlacingSlot; }
 
@@ -216,6 +232,10 @@ protected:
 
 	UFUNCTION(Server, Reliable)
 	void Server_DemolishBuildable(int32 SlotIndex);
+
+	/** The server checks everything again (reach, side, room) and takes the gun. */
+	UFUNCTION(Server, Reliable)
+	void Server_FeedTurret(ATurretBuildable* Turret, int32 ReportedLoadedRounds);
 
 private:
 

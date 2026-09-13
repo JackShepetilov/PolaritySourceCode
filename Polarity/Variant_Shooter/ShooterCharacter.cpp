@@ -7988,6 +7988,82 @@ AShooterWeapon* AShooterCharacter::PromoteReserveCopyOfClass(TSubclassOf<AShoote
 	return Promoted;
 }
 
+bool AShooterCharacter::ReleaseWeaponToMount(AShooterWeapon* Weapon, int32& OutLoadedRounds, int32& OutReserveRounds)
+{
+	OutLoadedRounds = 0;
+	OutReserveRounds = -1;
+	if (!HasAuthority() || !Weapon || !OwnedWeapons.Contains(Weapon))
+	{
+		return false;
+	}
+
+	OutLoadedRounds = Weapon->GetBulletCount();
+
+	// The rounds go with the gun, the same way they go onto a drop: out of the cells for a looted
+	// gun, off the reserve for an energy one. The cells hold the whole supply, loaded part included,
+	// so the reserve is what is left after the magazine.
+	if (UInventoryComponent* Inv = GetInventoryComponent())
+	{
+		if (Weapon->OwnsAmmoCells())
+		{
+			OutReserveRounds = FMath::Max(0, Inv->TakeAllAmmo() - OutLoadedRounds);
+		}
+		else if (Weapon->UsesEnergyReserve())
+		{
+			OutReserveRounds = Weapon->GetEnergyReserve();
+		}
+		Inv->ReleaseAttachmentCellsFor(Weapon);
+	}
+
+	const bool bWasCurrent = (CurrentWeapon == Weapon);
+	OwnedWeapons.Remove(Weapon);
+	OnWeaponInventoryChanged.Broadcast();
+
+	if (bWasCurrent)
+	{
+		// Straight to the next gun, no animation: the hands are already at the turret. The reserve
+		// copy of the same class first, then anything else owned, then nothing at all, which the
+		// character already knows how to be (a pickup replacement leaves it there too).
+		AShooterWeapon* const OldCurrent = CurrentWeapon;
+		CurrentWeapon->DeactivateWeapon();
+
+		AShooterWeapon* Replacement = PromoteReserveCopyOfClass(Weapon->GetClass());
+		if (!Replacement)
+		{
+			for (AShooterWeapon* W : OwnedWeapons)
+			{
+				if (W)
+				{
+					Replacement = W;
+					break;
+				}
+			}
+		}
+
+		CurrentWeapon = Replacement;
+		if (CurrentWeapon)
+		{
+			CurrentWeapon->ActivateWeapon();
+		}
+		else
+		{
+			OnActiveWeaponChanged.Broadcast(nullptr);
+		}
+		UpdateFirstPersonMeshVisibility();
+
+		if (UpgradeManager)
+		{
+			UpgradeManager->NotifyWeaponChanged(OldCurrent, CurrentWeapon);
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s released %s to a mount: %d loaded, %d reserve, now holding %s"),
+		*GetName(), *Weapon->GetName(), OutLoadedRounds, OutReserveRounds, *GetNameSafe(CurrentWeapon));
+
+	Weapon->Destroy();
+	return true;
+}
+
 // ==================== Damage Feedback ====================
 
 void AShooterCharacter::PlayDamageFeedback(float Damage, TSubclassOf<UDamageType> DamageTypeClass)

@@ -4,6 +4,7 @@
 
 #include "BuildableActor.h"
 #include "BuildablePreview.h"
+#include "TurretBuildable.h"
 #include "Camera/CameraComponent.h"
 #include "CollisionQueryParams.h"
 #include "Coop/CoopPlayers.h"
@@ -18,6 +19,7 @@
 #include "TimerManager.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
 UBuilderComponent::UBuilderComponent()
 {
@@ -103,6 +105,77 @@ void UBuilderComponent::SetupInput(UEnhancedInputComponent* Input)
 	{
 		Input->BindAction(CancelAction, ETriggerEvent::Started, this, &UBuilderComponent::HandleCancelPressed);
 	}
+	if (FeedAction)
+	{
+		Input->BindAction(FeedAction, ETriggerEvent::Started, this, &UBuilderComponent::FeedTurret);
+	}
+}
+
+// ==================== Feeding a turret ====================
+
+ATurretBuildable* UBuilderComponent::FindTurretUnderAim() const
+{
+	const AShooterCharacter* const Character = GetCharacter();
+	if (!Character || !GetWorld())
+	{
+		return nullptr;
+	}
+	// Generous ray, then the turret's own reach decides: every turret may set its own.
+	FVector Start, End;
+	Character->GetAimRay(1000.0f, Start, End);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(TurretFeedAim), /*bTraceComplex*/ false);
+	Params.AddIgnoredActor(Character);
+	FHitResult Hit;
+	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	{
+		return nullptr;
+	}
+	ATurretBuildable* const Turret = Cast<ATurretBuildable>(Hit.GetActor());
+	if (!Turret || Turret->IsDestroyed() || Hit.Distance > Turret->FeedReachCm)
+	{
+		return nullptr;
+	}
+	return Turret;
+}
+
+void UBuilderComponent::FeedTurret()
+{
+	if (!IsLocallyControlled() || Mode != EBuilderMode::Idle)
+	{
+		return;
+	}
+	const AShooterCharacter* const Character = GetCharacter();
+	ATurretBuildable* const Turret = FindTurretUnderAim();
+	if (!Character || !Turret)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[TURRET_DEBUG] feed: no turret under the aim"));
+		return;
+	}
+	const AShooterWeapon* const Held = Character->GetCurrentWeapon();
+	if (!Held)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: nothing in hand"));
+		return;
+	}
+	Server_FeedTurret(Turret, Held->GetBulletCount());
+}
+
+void UBuilderComponent::Server_FeedTurret_Implementation(ATurretBuildable* Turret, int32 ReportedLoadedRounds)
+{
+	AShooterCharacter* const Character = GetCharacter();
+	if (!Character || !Turret || Turret->IsDestroyed())
+	{
+		return;
+	}
+	// Reach is checked from the pawn, not re-traced: the client aimed at it a round trip ago and
+	// may have turned since. What matters is that the turret is next to them.
+	const float Reach = Turret->FeedReachCm + 150.0f;
+	if (FVector::DistSquared(Character->GetActorLocation(), Turret->GetActorLocation()) > Reach * Reach)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed refused: %s is too far from %s"), *Character->GetName(), *Turret->GetName());
+		return;
+	}
+	Turret->AcceptWeaponFrom(Character, ReportedLoadedRounds);
 }
 
 UEnhancedInputLocalPlayerSubsystem* UBuilderComponent::ResolveInputSubsystem()

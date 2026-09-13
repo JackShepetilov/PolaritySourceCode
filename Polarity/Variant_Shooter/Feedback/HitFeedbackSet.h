@@ -136,6 +136,12 @@ struct FHitFeedbackContext
 	UPROPERTY(BlueprintReadWrite, Category = "Hit")
 	bool bZeroDamage = false;
 
+	/** Landed by something the player owns but is not holding: a turret firing the gun they gave
+	 *  it. The confirmation is theirs, but it is a report, not a reward: it draws as its own
+	 *  smaller marker, speaks with its own quieter set, and never punches the camera. */
+	UPROPERTY(BlueprintReadWrite, Category = "Hit")
+	bool bRemote = false;
+
 	UPROPERTY(BlueprintReadWrite, Category = "Hit")
 	TObjectPtr<AActor> HitActor = nullptr;
 

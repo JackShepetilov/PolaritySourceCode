@@ -313,6 +313,12 @@ public:
 	/** Get default pool size for this projectile class */
 	int32 GetDefaultPoolSize() const { return DefaultPoolSize; }
 
+	/** Whether landing sets off a blast, and how far it reaches. Read off the CDO by anything that
+	 *  has to keep its distance from its own shot: a turret does not fire a rocket at a target
+	 *  standing inside the radius that would come back to it. */
+	bool IsExplosiveOnHit() const { return bExplodeOnHit; }
+	float GetExplosionRadius() const { return bExplodeOnHit ? ExplosionRadius : 0.0f; }
+
 	/** Set pooled flag before BeginPlay (called by pool subsystem during deferred spawn) */
 	void SetPooledFlag() { bIsPooled = true; }
 

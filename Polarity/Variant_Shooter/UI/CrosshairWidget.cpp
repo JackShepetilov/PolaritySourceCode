@@ -329,8 +329,14 @@ void UCrosshairWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime
 		FHitMarkerEvent Event;
 		const bool bUp = Marker && Marker->GetActiveHitMarker(Event);
 		const bool bIonized = bUp && Event.HitType == EHitMarkerType::Ionized;
-		DriveHitMarkerImage(Cast<UImage>(GetWidgetFromName(TEXT("HitMarkerImage"))), bUp && !bIonized, Marker);
+		// The third picture is the turret's: a hit the player's building landed with the gun they
+		// gave it. Optional in the Blueprint; without it the turret's hits fall back on the ordinary
+		// picture, at the component's dimmer colour and smaller size.
+		UImage* RemoteImage = Cast<UImage>(GetWidgetFromName(TEXT("RemoteHitMarkerImage")));
+		const bool bRemote = bUp && Event.HitType == EHitMarkerType::Remote && RemoteImage != nullptr;
+		DriveHitMarkerImage(Cast<UImage>(GetWidgetFromName(TEXT("HitMarkerImage"))), bUp && !bIonized && !bRemote, Marker);
 		DriveHitMarkerImage(Cast<UImage>(GetWidgetFromName(TEXT("IonizedHitMarkerImage"))), bIonized, Marker);
+		DriveHitMarkerImage(RemoteImage, bRemote, Marker);
 	}
 
 	// Unarmed: nothing else animates.

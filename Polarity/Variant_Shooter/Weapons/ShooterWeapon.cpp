@@ -1,6 +1,7 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterWeapon.h"
+#include "AI/PolarityTeams.h"
 #include "Coop/CoopPlayers.h"
 #include "PolarityPalette.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
@@ -2111,6 +2112,13 @@ void AShooterWeapon::AddShotSpread()
 
 float AShooterWeapon::GetCurrentSpreadDegrees() const
 {
+	// Clamped into a turret: a vice does not shake. The mount limits the gun by range instead, and
+	// that range is read off the spread the gun would have in a player's hands (GetAimVariance).
+	if (bMounted)
+	{
+		return 0.0f;
+	}
+
 	// An AI holding this weapon shoots at the plain base spread unless the weapon opts in: enemy
 	// accuracy is tuned through the NPC's own aim variance, and moving it from here would be a
 	// difficulty change wearing a crosshair feature's clothes.
@@ -2525,9 +2533,13 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 
 	UProjectilePoolSubsystem* Pool = (bClassReplicates || !AShooterProjectile::IsPoolingEnabled())
 		? nullptr : GetWorld()->GetSubsystem<UProjectilePoolSubsystem>();
+	// Who answers for this round. The pawn holding the gun, and when nothing is holding it (a
+	// turret), whoever the mount named as the weapon's instigator: that is how a turret's kill
+	// reaches its owner's tally (UXPSubsystem::WasKillCausedByPlayer walks the instigator).
+	APawn* const RoundInstigator = PawnOwner ? PawnOwner : GetInstigator();
 	if (Pool)
 	{
-		Projectile = Pool->GetProjectile(ProjectileClass, ProjectileTransform, GetOwner(), PawnOwner);
+		Projectile = Pool->GetProjectile(ProjectileClass, ProjectileTransform, GetOwner(), RoundInstigator);
 	}
 	else
 	{
@@ -2535,7 +2547,7 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 		SpawnParams.Owner = GetOwner();
-		SpawnParams.Instigator = PawnOwner;
+		SpawnParams.Instigator = RoundInstigator;
 		Projectile = GetWorld()->SpawnActor<AShooterProjectile>(ProjectileClass, ProjectileTransform, SpawnParams);
 	}
 
@@ -2681,7 +2693,8 @@ bool AShooterWeapon::CanShotReach(const FVector& TargetLocation) const
 FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const FVector& TargetLocation) const
 {
 	// Players are left alone. See the header: correcting their aim is aim assist, not ballistics.
-	if (!PawnOwner || PawnOwner->IsPlayerControlled())
+	// Everything else, an AI pawn or a turret with no pawn at all, is handed the solved arc.
+	if (PawnOwner && PawnOwner->IsPlayerControlled())
 	{
 		return FVector::ZeroVector;
 	}
@@ -4111,6 +4124,119 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	// Spawn impact: prefer pawn hit (closer), otherwise the wall behind it.
 	// Without this, impact would always appear on the wall — even when a pawn intercepted the shot.
 	if (bPawnWasHit)
+	{
+		SpawnImpactEffect(PawnHit);
+	}
+	else if (bHitWall)
+	{
+		SpawnImpactEffect(WallHit);
+	}
+}
+
+// ==================== Mounted: a gun clamped into a building ====================
+
+void AShooterWeapon::FireMounted(const FVector& TargetLocation)
+{
+	if (!HasAuthority() || !GetWorld())
+	{
+		return;
+	}
+	if (!ThirdPersonMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: FireMounted with no third person mesh, no muzzle to fire from"), *GetName());
+		return;
+	}
+
+	// The shot is seen and heard everywhere. There is no shooter to skip inside the multicast
+	// (PawnOwner is null, so bIsShooter is false on every machine) and the authority plays its own
+	// copy here, the way Fire() does.
+	PlayFireEffectsLocally(false);
+	Multicast_PlayFireEffects(false);
+
+	if (bUseHeatSystem)
+	{
+		AddHeat(HeatPerShot);
+	}
+
+	if (bUseHitscan)
+	{
+		// Straight from the muzzle at the point the mount chose. No cone (GetCurrentSpreadDegrees
+		// answers zero while mounted) and no camera re-basing: there is no camera.
+		const FVector Start = ThirdPersonMesh->GetSocketLocation(MuzzleSocketName);
+		const FVector Direction = (TargetLocation - Start).GetSafeNormal();
+		if (Direction.IsNearlyZero())
+		{
+			return;
+		}
+		PerformMountedHitscan(Start, Direction);
+	}
+	else
+	{
+		// The same transform a pawn's shot would get: the third person muzzle, the ballistic arc
+		// for a round that falls, the straight line for one that does not.
+		const FTransform ProjectileTransform = CalculateProjectileSpawnTransform(TargetLocation);
+		SpawnProjectileAtTransform(ProjectileTransform, 1.0f, /*bCosmeticOnly*/ false);
+	}
+
+	TimeOfLastShot = GetWorld()->GetTimeSeconds();
+	OnShotFired.Broadcast();
+
+	// Loud enough for the AI to hear, from where the gun actually is.
+	MakeNoise(ShotLoudness, nullptr, GetActorLocation(), ShotNoiseRange, ShotNoiseTag);
+}
+
+void AShooterWeapon::PerformMountedHitscan(const FVector& Start, const FVector& Direction)
+{
+	const float TraceDistance = MaxHitscanRange;
+	const FVector End = Start + Direction * TraceDistance;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.AddIgnoredActor(GetOwner());
+	QueryParams.bReturnPhysicalMaterial = true;
+
+	// Wall first, then the first pawn before it: the same two traces as the NPC path, because
+	// pawns do not block the visibility channel here and a pawn is found by object type only.
+	FHitResult WallHit;
+	const bool bHitWall = GetWorld()->LineTraceSingleByChannel(WallHit, Start, End, ECC_Visibility, QueryParams);
+	const float WallDistance = bHitWall ? WallHit.Distance : TraceDistance;
+
+	FHitResult PawnHit;
+	FCollisionObjectQueryParams PawnObjectParams;
+	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+	const FVector PawnTraceEnd = Start + Direction * WallDistance;
+	const bool bHitPawn = GetWorld()->LineTraceSingleByObjectType(PawnHit, Start, PawnTraceEnd, PawnObjectParams, QueryParams);
+
+	if (bHitPawn && PawnHit.BoneName.IsNone())
+	{
+		PawnHit.BoneName = ResolveHitBone(PawnHit.GetActor(), Start, PawnTraceEnd + Direction * 200.0f);
+	}
+
+	// Only an enemy of the mount takes the round. A teammate standing in the line simply stops it,
+	// which is what a body in front of a gun does; the NPC path would have fired a bolt at them.
+	AActor* const PawnActor = bHitPawn ? PawnHit.GetActor() : nullptr;
+	const bool bHostilePawn = PawnActor && PawnActor->CanBeDamaged() && PolarityTeams::AreHostile(GetOwner(), PawnActor);
+
+	FVector BeamEnd = bHitWall ? WallHit.ImpactPoint : End;
+	if (bHostilePawn)
+	{
+		ApplyHitscanDamage(PawnHit, 1.0f, PawnHit.Distance, 0.0f);
+		UE_LOG(LogTemp, Verbose, TEXT("[TURRET_DEBUG] %s hit %s at %.0f"), *GetName(), *PawnActor->GetName(), PawnHit.Distance);
+	}
+	else if (bHitPawn)
+	{
+		// Stopped by a body that is not a target: the tracer ends there and nothing is hurt.
+		BeamEnd = PawnHit.ImpactPoint;
+	}
+	else if (bHitWall && WallHit.GetActor() && !Cast<APawn>(WallHit.GetActor()) && WallHit.GetActor()->CanBeDamaged())
+	{
+		// A prop, a crate, an enemy building: the same as any other gun's round landing on it. A
+		// friendly building answers its own TakeDamage with nothing, so this cannot hurt the base.
+		ApplyHitscanDamage(WallHit, 1.0f, WallHit.Distance, 0.0f);
+	}
+
+	SpawnBeamEffect(Start, BeamEnd, 1.0f);
+	if (bHitPawn)
 	{
 		SpawnImpactEffect(PawnHit);
 	}

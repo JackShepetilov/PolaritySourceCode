@@ -12,5 +12,12 @@ exec(compile(open(p, encoding="utf-8").read(), p, "exec"), {"__name__": "__main_
 - `ed2_input.py`: `IA_Build*`, `IMC_BuildMenu`, `IMC_BuildPlacement`, `B` в `IMC_Weapons`, компонент на `BP_ShooterCharacter1`.
 - `ed3_widgets.py`: `WBP_BuildMenu(Entry)`, `WBP_BuildableStatus(Entry)`, слоты в `WBP_HudRoot`, строки в `DA_HudLayout`.
 - `ed4_refusal.py`: цвет и звук отказа в `WBP_BuildMenu`. **Только после полного ребилда** с `RefusedFlashTag`/`RefusedSound`.
+- `ed5_turret.py`: `IA_FeedTurret` на первую свободную клавишу из списка в `IMC_Weapons`, `FeedAction` на
+  персонаже, `BP_Buildable_Turret` на `ATurretBuildable` (тиски на кубе, тяжёлые стволы, дроп-классы),
+  `DA_HitFeedback_Turret` (копия набора, вдвое тише), `RemoteHitMarkerImage` в прицеле. **Только после
+  полного ребилда** с `ATurretBuildable`. Клавишу и список тяжёлых стволов проверить в логе.
 
-Все уже выполнены 2026-09-13, кроме `ed4_refusal.py`.
+- `ed6_turret_ranges.py`: стартовые `MountedRangeCm` на стволах (классовые + те, что дают дропы) и
+  потолок радиуса турели 40 м. **Только после ребилда** с полем `MountedRangeCm`.
+
+`ed1`..`ed3`, `ed5` выполнены 2026-09-13; `ed4` и `ed6` ждут своего ребилда.

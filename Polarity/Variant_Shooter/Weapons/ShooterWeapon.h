@@ -1303,6 +1303,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = 0, ClampMax = 10, Units = "deg"))
 	float AimVariance = 1.0f;
 
+	/** How far the engineer's turret fires this gun, cm, when it is clamped into a vice. 0 means
+	 *  "work it out from the spread" (ATurretBuildable::ComputeRangeFor: the distance at which the
+	 *  gun's hip cone still fits inside a body), which only tells guns apart once AimVariance is
+	 *  tuned per gun. Set a number here to say it outright. [author, 2026-09-13] */
+	UPROPERTY(EditAnywhere, Category = "Aim|Turret", meta = (ClampMin = 0, Units = "cm"))
+	float MountedRangeCm = 0.0f;
+
 	// ==================== Spread ====================
 
 	/** How the base spread above reacts to what the player is doing and to the trigger. See
@@ -2600,7 +2607,55 @@ public:
 	/** The per-weapon spread tuning (read by the HUD crosshair widget). */
 	const FWeaponSpreadConfig& GetSpreadConfig() const { return SpreadConfig; }
 
+	/** The base spread on its own, before any state, bloom or sight: what the weapon is when
+	 *  nothing is helping or hurting it. A turret reads this to decide how far it trusts the gun. */
+	float GetAimVariance() const { return AimVariance; }
+
+	/** The authored turret range, cm; 0 when the gun leaves it to the turret's formula. */
+	float GetMountedRangeCm() const { return MountedRangeCm; }
+
 	// ==================== Hitscan Getters ====================
 
 	float GetHitscanDamage() const { return HitscanDamage; }
+
+	// ==================== Mounted: a gun clamped into a building ====================
+	//
+	// The engineer's turret has no barrel of its own. A player hands it a gun, and the turret fires
+	// THAT: the gun's damage, magazine, rate of fire, projectile and feedback set, through the gun's
+	// own hit path, so everything a hit means (shield gate, headshots, ionization, the owner's hit
+	// marker) keeps meaning it. What the turret does NOT get is Fire(): that path assumes a pawn is
+	// holding the trigger in fifty places, and a mount is not a pawn. FireMounted is the narrow door
+	// for it. Ammunition, montages, recoil and the HUD are the mount's business and are left alone.
+
+	/** Clamped into a mount. Spread goes to zero: a vice does not shake, and the mount already limits
+	 *  the gun by range instead. Set by the mount right after the spawn, server only; nothing about
+	 *  it is replicated because nothing on a client reads a mounted gun's spread. */
+	void SetMounted(bool bInMounted) { bMounted = bInMounted; }
+	bool IsMounted() const { return bMounted; }
+
+	/** The socket the shot leaves from, so a mount can ask the third person mesh where the muzzle
+	 *  is (and whether the mesh has one at all: most of the pack's do not, see Weapons.md). */
+	FName GetMuzzleSocketName() const { return MuzzleSocketName; }
+
+	/** Whether this class of gun keeps an energy reserve when a player holds it. By class, unlike
+	 *  UsesEnergyReserve, which answers for the current owner: a mount handing a gun back as a pickup
+	 *  has to know which kind of ammunition to write on the drop. */
+	bool IsEnergyClass() const { return bRegeneratingReserve && !IsMeleeWeapon(); }
+
+	/** One shot from a mount, server only. Plays the fire effects everywhere, then either traces a
+	 *  hitscan from the third person muzzle straight at TargetLocation (no cone: the mount aims) and
+	 *  applies the hit through ApplyHitscanDamage, or launches the projectile at it. Damage, shield
+	 *  gate, feedback and kill credit all go through the ordinary hit path. Does not touch
+	 *  CurrentBullets, montages, recoil or the HUD: the mount counts its own rounds. */
+	void FireMounted(const FVector& TargetLocation);
+
+private:
+
+	/** A mount's hitscan: wall first, then the pawn in front of it, exactly like the NPC path, but
+	 *  the pawn is damaged only when it is hostile to the mount, and a friendly one in the way simply
+	 *  stops the shot. The NPC path treats a player it hits as the thing to shoot a bolt at, which
+	 *  is the last thing a player's own turret should do. */
+	void PerformMountedHitscan(const FVector& Start, const FVector& Direction);
+
+	bool bMounted = false;
 };
