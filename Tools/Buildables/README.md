@@ -20,4 +20,7 @@ exec(compile(open(p, encoding="utf-8").read(), p, "exec"), {"__name__": "__main_
 - `ed6_turret_ranges.py`: стартовые `MountedRangeCm` на стволах (классовые + те, что дают дропы) и
   потолок радиуса турели 40 м. **Только после ребилда** с полем `MountedRangeCm`.
 
-`ed1`..`ed3`, `ed5` выполнены 2026-09-13; `ed4` и `ed6` ждут своего ребилда.
+- `ed7_feed_widget.py`: `WBP_TurretFeed(Entry)`, слот `HUD.Slot.TurretFeed` в `WBP_HudRoot`, строка в
+  `DA_HudLayout`, Escape в `IMC_BuildMenu`. **Только после ребилда** с `UTurretFeedWidget`.
+
+`ed1`..`ed3`, `ed5`, `ed6` выполнены 2026-09-13; `ed4` и `ed7` ждут ребилда с виджетом.

@@ -332,7 +332,7 @@ TSubclassOf<ADroppedRangedWeapon> ATurretBuildable::ResolveDropClass(const AShoo
 
 // ==================== Feeding ====================
 
-bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 ReportedLoadedRounds)
+bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 ReportedLoadedRounds, AShooterWeapon* Weapon)
 {
 	if (!HasAuthority() || !Donor)
 	{
@@ -349,13 +349,17 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 		return false;
 	}
 
-	AShooterWeapon* const Held = Donor->GetCurrentWeapon();
-	if (!Held || Held->IsMeleeWeapon())
+	// The gun named by the menu, or the one in hand. Either way it has to be the donor's own: the
+	// client names an actor, and an actor is not a proof of ownership.
+	AShooterWeapon* const Held = Weapon ? Weapon : Donor->GetCurrentWeapon();
+	if (!Held || Held->IsMeleeWeapon() || !Donor->GetOwnedWeapons().Contains(Held))
 	{
-		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused: %s holds no gun"), *GetName(), *Donor->GetName());
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused: %s has no such gun (%s)"), *GetName(), *Donor->GetName(), *GetNameSafe(Held));
 		return false;
 	}
-	if (Donor->GetWeaponSwitchPhase() != EWeaponSwitchPhase::None)
+	// Taking the gun out of the hands mid-swing or mid-holster would leave the switch machinery
+	// pointing at nothing; a gun that is not in the hands leaves without touching it.
+	if (Held == Donor->GetCurrentWeapon() && Donor->GetWeaponSwitchPhase() != EWeaponSwitchPhase::None)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused: %s is mid-switch or holstered (phase %d)"),
 			*GetName(), *Donor->GetName(), static_cast<int32>(Donor->GetWeaponSwitchPhase()));
@@ -399,22 +403,22 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 	// gun's BeginPlay asks AttachWeaponMeshes which vice it belongs to.
 	const USceneComponent* const Mount = ViceMounts.IsValidIndex(ViceIndex) ? ViceMounts[ViceIndex] : nullptr;
 	const FTransform SpawnTransform = Mount ? Mount->GetComponentTransform() : GetActorTransform();
-	AShooterWeapon* const Weapon = GetWorld()->SpawnActorDeferred<AShooterWeapon>(WeaponClass, SpawnTransform,
+	AShooterWeapon* const Mounted = GetWorld()->SpawnActorDeferred<AShooterWeapon>(WeaponClass, SpawnTransform,
 		this, GetOwnerPawn(), ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-	if (!Weapon)
+	if (!Mounted)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[TURRET_DEBUG] %s could not spawn %s; the donor's gun is gone"), *GetName(), *WeaponClass->GetName());
 		return false;
 	}
-	Weapon->SetMounted(true);
-	Weapon->SourceYankDropClass = DropClass;
-	Weapon->SourceDropCharge = DropCharge;
-	ViceWeapons[ViceIndex] = Weapon;
-	Weapon->FinishSpawning(SpawnTransform);
-	Weapon->ActivateWeapon();
+	Mounted->SetMounted(true);
+	Mounted->SourceYankDropClass = DropClass;
+	Mounted->SourceDropCharge = DropCharge;
+	ViceWeapons[ViceIndex] = Mounted;
+	Mounted->FinishSpawning(SpawnTransform);
+	Mounted->ActivateWeapon();
 
 	FTurretVice& Vice = Vices[ViceIndex];
-	Vice.Range = ComputeRangeFor(Weapon);
+	Vice.Range = ComputeRangeFor(Mounted);
 	Vice.NextShotTime = 0.0f;
 	Vice.ReloadEndTime = -1.0f;
 	Vice.DropClass = DropClass;
@@ -424,8 +428,8 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 
 	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s took %s from %s into vice %d: %d loaded, %d reserve (cap %d), range %.0f cm, %s, refire %.2f s, drop %s"),
 		*GetName(), *WeaponClass->GetName(), *Donor->GetName(), ViceIndex, ViceRounds[ViceIndex], ViceReserve[ViceIndex],
-		ReserveCapacityOf(ViceIndex), Vice.Range, Weapon->IsHitscan() ? TEXT("hitscan") : TEXT("projectile"),
-		Weapon->GetActualRefireRate(), *GetNameSafe(DropClass));
+		ReserveCapacityOf(ViceIndex), Vice.Range, Mounted->IsHitscan() ? TEXT("hitscan") : TEXT("projectile"),
+		Mounted->GetActualRefireRate(), *GetNameSafe(DropClass));
 
 	OnBuildableChanged.Broadcast(this);
 	return true;

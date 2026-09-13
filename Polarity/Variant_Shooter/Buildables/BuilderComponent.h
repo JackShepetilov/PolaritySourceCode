@@ -21,6 +21,7 @@
 class ABuildableActor;
 class ABuildablePreview;
 class AShooterCharacter;
+class AShooterWeapon;
 class ATurretBuildable;
 class AShooterPlayerState;
 class UEnhancedInputComponent;
@@ -37,11 +38,14 @@ enum class EBuilderMode : uint8
 	/** The menu is up, waiting for a slot. */
 	Menu,
 	/** A ghost is out, waiting for a spot. */
-	Placing
+	Placing,
+	/** The feed menu is up in front of a turret, waiting for a weapon to be picked. */
+	Feeding
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FBuilderModeChangedDelegate, EBuilderMode, Mode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBuilderPlacementDelegate, int32, SlotIndex, EBuildablePlacementResult, Result);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FBuilderFeedRefusedDelegate, int32, WeaponIndex);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UBuilderComponent : public UActorComponent
@@ -87,9 +91,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Builder|Input")
 	TObjectPtr<UInputAction> CancelAction;
 
-	/** Hand the gun in hand to the turret in front of the player. Mapped in the ordinary weapons
-	 *  context; does nothing unless a turret of the player's side is under the aim within its
-	 *  FeedReachCm. Any player may feed any turret of the side. */
+	/** Open the feed menu for the turret in front of the player (and close it again). Mapped in the
+	 *  ordinary weapons context; does nothing unless a turret of the player's side is under the aim
+	 *  within its FeedReachCm. Any player may feed any turret of the side. */
 	UPROPERTY(EditDefaultsOnly, Category = "Builder|Input")
 	TObjectPtr<UInputAction> FeedAction;
 
@@ -145,6 +149,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	bool IsPlacing() const { return Mode == EBuilderMode::Placing; }
 
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	bool IsFeeding() const { return Mode == EBuilderMode::Feeding; }
+
 	// ==================== Placement ====================
 
 	/** Close the menu and bring out the ghost for a slot. Refused when the slot is full or the
@@ -166,10 +173,32 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Builder")
 	void RequestDemolish(int32 SlotIndex);
 
-	/** Give the held gun to the turret under the aim. Local: finds the turret, then asks the server
-	 *  with this machine's own magazine count (the server's copy of a client's count is stale). */
+	// ==================== Feeding a turret ====================
+	//
+	// The feed key in front of a turret opens a menu of the player's guns; a number key gives that
+	// gun to the turret. The same mapping context as the build menu (the number keys), the same
+	// shape of widget (UTurretFeedWidget), and the same rule: the menu draws, the keys act.
+
+	/** Open the feed menu for the turret under the aim, or close it if it is open. */
 	UFUNCTION(BlueprintCallable, Category = "Builder")
-	void FeedTurret();
+	void ToggleFeedMenu();
+
+	UFUNCTION(BlueprintCallable, Category = "Builder")
+	void CloseFeedMenu();
+
+	/** Give the Nth gun of GetFeedWeapons to the feed target. Refused (OnFeedRefused) when the
+	 *  turret has no vice for it. Asks the server with this machine's own magazine count (the
+	 *  server's copy of a client's count is stale), then closes the menu. */
+	UFUNCTION(BlueprintCallable, Category = "Builder")
+	void FeedWeapon(int32 WeaponIndex);
+
+	/** The turret the feed menu is open for, or null. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	ATurretBuildable* GetFeedTarget() const;
+
+	/** The guns the menu offers, in hotkey order: every owned ranged weapon. Index = menu row. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	void GetFeedWeapons(TArray<AShooterWeapon*>& OutWeapons) const;
 
 	/** The turret of the player's side under the aim, within its FeedReachCm, or null. */
 	UFUNCTION(BlueprintPure, Category = "Builder")
@@ -212,6 +241,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Builder")
 	FBuilderPlacementDelegate OnSlotRefused;
 
+	/** A feed row was pressed and the turret has no vice for that gun. */
+	UPROPERTY(BlueprintAssignable, Category = "Builder")
+	FBuilderFeedRefusedDelegate OnFeedRefused;
+
 	// ==================== Debug (authority) ====================
 
 	/** Put a slot's building at the aim point for free, skipping the menu and the ghost. What the
@@ -235,7 +268,7 @@ protected:
 
 	/** The server checks everything again (reach, side, room) and takes the gun. */
 	UFUNCTION(Server, Reliable)
-	void Server_FeedTurret(ATurretBuildable* Turret, int32 ReportedLoadedRounds);
+	void Server_FeedTurret(ATurretBuildable* Turret, AShooterWeapon* Weapon, int32 ReportedLoadedRounds);
 
 private:
 
@@ -280,4 +313,7 @@ private:
 
 	int32 DemolishHoldSlot = -1;
 	FTimerHandle DemolishHoldTimer;
+
+	/** The turret the feed menu is open for. Weak: it can die while the menu is up. */
+	TWeakObjectPtr<ATurretBuildable> FeedTarget;
 };

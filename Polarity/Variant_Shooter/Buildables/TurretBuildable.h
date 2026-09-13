@@ -223,12 +223,12 @@ public:
 
 	// ==================== Actions (server) ====================
 
-	/** Take the gun out of Donor's hands into a vice. ReportedLoadedRounds is the donor's own count
-	 *  of the magazine (a client's is more current than the server's copy); below zero uses the
-	 *  server's. False, with a reason in the log, when there is no gun, no room, or the turret is
-	 *  not standing. */
+	/** Take a gun from Donor into a vice: Weapon when given (one of the donor's own), else the gun
+	 *  in their hands. ReportedLoadedRounds is the donor's own count of the magazine (a client's is
+	 *  more current than the server's copy); below zero uses the server's. False, with a reason in
+	 *  the log, when there is no gun, no room, or the turret is not standing. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Turret")
-	bool AcceptWeaponFrom(AShooterCharacter* Donor, int32 ReportedLoadedRounds = -1);
+	bool AcceptWeaponFrom(AShooterCharacter* Donor, int32 ReportedLoadedRounds = -1, AShooterWeapon* Weapon = nullptr);
 
 	// ==================== IShooterWeaponHolder ====================
 

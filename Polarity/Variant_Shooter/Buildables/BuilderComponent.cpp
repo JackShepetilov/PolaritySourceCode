@@ -43,6 +43,7 @@ void UBuilderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	DestroyPreview();
 	PopMapping(PlacementMappingContext);
 	PopMapping(MenuMappingContext);
+	FeedTarget.Reset();
 	Mode = EBuilderMode::Idle;
 	Super::EndPlay(EndPlayReason);
 }
@@ -107,7 +108,7 @@ void UBuilderComponent::SetupInput(UEnhancedInputComponent* Input)
 	}
 	if (FeedAction)
 	{
-		Input->BindAction(FeedAction, ETriggerEvent::Started, this, &UBuilderComponent::FeedTurret);
+		Input->BindAction(FeedAction, ETriggerEvent::Started, this, &UBuilderComponent::ToggleFeedMenu);
 	}
 }
 
@@ -138,9 +139,42 @@ ATurretBuildable* UBuilderComponent::FindTurretUnderAim() const
 	return Turret;
 }
 
-void UBuilderComponent::FeedTurret()
+ATurretBuildable* UBuilderComponent::GetFeedTarget() const
 {
-	if (!IsLocallyControlled() || Mode != EBuilderMode::Idle)
+	return FeedTarget.Get();
+}
+
+void UBuilderComponent::GetFeedWeapons(TArray<AShooterWeapon*>& OutWeapons) const
+{
+	OutWeapons.Reset();
+	const AShooterCharacter* const Character = GetCharacter();
+	if (!Character)
+	{
+		return;
+	}
+	// Every ranged gun the player owns, in inventory order (the class weapon first, the looted
+	// one after it), which is also the order of the hotkeys.
+	for (AShooterWeapon* const Weapon : Character->GetOwnedWeapons())
+	{
+		if (IsValid(Weapon) && !Weapon->IsMeleeWeapon())
+		{
+			OutWeapons.Add(Weapon);
+		}
+	}
+}
+
+void UBuilderComponent::ToggleFeedMenu()
+{
+	if (!IsLocallyControlled())
+	{
+		return;
+	}
+	if (Mode == EBuilderMode::Feeding)
+	{
+		CloseFeedMenu();
+		return;
+	}
+	if (Mode != EBuilderMode::Idle)
 	{
 		return;
 	}
@@ -148,19 +182,83 @@ void UBuilderComponent::FeedTurret()
 	ATurretBuildable* const Turret = FindTurretUnderAim();
 	if (!Character || !Turret)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[TURRET_DEBUG] feed: no turret under the aim"));
+		// Say what the aim did find, so "F does nothing" reads as "you were 4 m away" or "you were
+		// looking at the wall next to it" rather than as a dead key.
+		FString What = TEXT("nothing");
+		if (Character && GetWorld())
+		{
+			FVector Start, End;
+			Character->GetAimRay(1000.0f, Start, End);
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(TurretFeedAim), false);
+			Params.AddIgnoredActor(Character);
+			FHitResult Hit;
+			if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+			{
+				const ATurretBuildable* const Far = Cast<ATurretBuildable>(Hit.GetActor());
+				What = Far
+					? FString::Printf(TEXT("%s at %.0f cm, reach is %.0f"), *Far->GetName(), Hit.Distance, Far->FeedReachCm)
+					: FString::Printf(TEXT("%s at %.0f cm"), *GetNameSafe(Hit.GetActor()), Hit.Distance);
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: no turret under the aim (aim found %s)"), *What);
 		return;
 	}
-	const AShooterWeapon* const Held = Character->GetCurrentWeapon();
-	if (!Held)
+	if (!Turret->IsActive())
 	{
-		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: nothing in hand"));
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: %s is not standing yet"), *Turret->GetName());
 		return;
 	}
-	Server_FeedTurret(Turret, Held->GetBulletCount());
+	TArray<AShooterWeapon*> Weapons;
+	GetFeedWeapons(Weapons);
+	if (Weapons.Num() == 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: %s owns no gun to give"), *Character->GetName());
+		return;
+	}
+	FeedTarget = Turret;
+	PushMapping(MenuMappingContext);
+	SetMode(EBuilderMode::Feeding);
 }
 
-void UBuilderComponent::Server_FeedTurret_Implementation(ATurretBuildable* Turret, int32 ReportedLoadedRounds)
+void UBuilderComponent::CloseFeedMenu()
+{
+	if (Mode != EBuilderMode::Feeding)
+	{
+		return;
+	}
+	PopMapping(MenuMappingContext);
+	FeedTarget.Reset();
+	SetMode(EBuilderMode::Idle);
+}
+
+void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
+{
+	if (Mode != EBuilderMode::Feeding || !IsLocallyControlled())
+	{
+		return;
+	}
+	ATurretBuildable* const Turret = FeedTarget.Get();
+	TArray<AShooterWeapon*> Weapons;
+	GetFeedWeapons(Weapons);
+	if (!Turret || !Weapons.IsValidIndex(WeaponIndex))
+	{
+		return;
+	}
+	AShooterWeapon* const Weapon = Weapons[WeaponIndex];
+	// The same question the server will ask, asked here first so a refusal is instant and local:
+	// the row flashes instead of a round trip ending in silence.
+	int32 ViceIndex = INDEX_NONE;
+	if (!Turret->FindViceFor(Weapon->GetClass(), ViceIndex))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: %s has no vice for %s"), *Turret->GetName(), *Weapon->GetClass()->GetName());
+		OnFeedRefused.Broadcast(WeaponIndex);
+		return;
+	}
+	Server_FeedTurret(Turret, Weapon, Weapon->GetBulletCount());
+	CloseFeedMenu();
+}
+
+void UBuilderComponent::Server_FeedTurret_Implementation(ATurretBuildable* Turret, AShooterWeapon* Weapon, int32 ReportedLoadedRounds)
 {
 	AShooterCharacter* const Character = GetCharacter();
 	if (!Character || !Turret || Turret->IsDestroyed())
@@ -175,7 +273,7 @@ void UBuilderComponent::Server_FeedTurret_Implementation(ATurretBuildable* Turre
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed refused: %s is too far from %s"), *Character->GetName(), *Turret->GetName());
 		return;
 	}
-	Turret->AcceptWeaponFrom(Character, ReportedLoadedRounds);
+	Turret->AcceptWeaponFrom(Character, ReportedLoadedRounds, Weapon);
 }
 
 UEnhancedInputLocalPlayerSubsystem* UBuilderComponent::ResolveInputSubsystem()
@@ -218,7 +316,7 @@ void UBuilderComponent::SetMode(EBuilderMode NewMode)
 		return;
 	}
 	Mode = NewMode;
-	SetComponentTickEnabled(Mode == EBuilderMode::Placing);
+	SetComponentTickEnabled(Mode == EBuilderMode::Placing || Mode == EBuilderMode::Feeding);
 	OnModeChanged.Broadcast(Mode);
 }
 
@@ -271,6 +369,8 @@ void UBuilderComponent::ToggleMenu()
 
 void UBuilderComponent::OpenMenu()
 {
+	// One menu at a time: the build key over the feed menu swaps them.
+	CloseFeedMenu();
 	const AShooterCharacter* const Character = GetCharacter();
 	if (!Character || !IsLocallyControlled() || Character->IsDead() || Mode != EBuilderMode::Idle)
 	{
@@ -301,6 +401,11 @@ void UBuilderComponent::CloseMenu()
 
 void UBuilderComponent::HandleSlotPressed(int32 SlotIndex)
 {
+	if (Mode == EBuilderMode::Feeding)
+	{
+		FeedWeapon(SlotIndex);
+		return;
+	}
 	if (Mode != EBuilderMode::Menu || !IsValidSlot(SlotIndex))
 	{
 		return;
@@ -348,6 +453,10 @@ void UBuilderComponent::HandleCancelPressed()
 	else if (Mode == EBuilderMode::Menu)
 	{
 		CloseMenu();
+	}
+	else if (Mode == EBuilderMode::Feeding)
+	{
+		CloseFeedMenu();
 	}
 }
 
@@ -532,6 +641,21 @@ bool UBuilderComponent::ComputePlacementTransform(FTransform& OutTransform) cons
 void UBuilderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (Mode == EBuilderMode::Feeding)
+	{
+		// The menu is a conversation with one turret: it ends when the turret goes, or the player
+		// walks off, or dies.
+		const AShooterCharacter* const Character = GetCharacter();
+		const ATurretBuildable* const Turret = FeedTarget.Get();
+		const float Reach = Turret ? Turret->FeedReachCm + 100.0f : 0.0f;
+		if (!Character || Character->IsDead() || !Turret || Turret->IsDestroyed()
+			|| FVector::DistSquared(Character->GetActorLocation(), Turret->GetActorLocation()) > Reach * Reach)
+		{
+			CloseFeedMenu();
+		}
+		return;
+	}
 
 	if (Mode != EBuilderMode::Placing)
 	{
