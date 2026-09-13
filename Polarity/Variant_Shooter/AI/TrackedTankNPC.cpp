@@ -19,6 +19,10 @@
 #include "AIController.h"
 #include "ShooterAIController.h"
 #include "AI/PolarityTeams.h"
+// Was borrowed from a unity-build neighbour until 2026-09-13; the blobs reshuffled and this file
+// stopped seeing the type (Build_Cpp.md: an include added elsewhere in the module breaks a file
+// that never had its own).
+#include "EMFVelocityModifier.h"
 #include "../DamageTypes/DamageType_DroneExplosion.h"
 
 namespace

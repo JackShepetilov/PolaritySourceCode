@@ -29,6 +29,7 @@ class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
 class UInventoryComponent;
+class UBuilderComponent;
 class UPlayerDeathSequenceComponent;
 class UAudioComponent;
 class UCurveFloat;
@@ -301,6 +302,11 @@ private:
 	 *  A ledger of capacity only - weapons keep living in OwnedWeapons and cost the grid nothing. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UInventoryComponent> InventoryComponent;
+
+	/** The engineer's kit: build menu, placement ghost, the request to the server. The buildings it
+	 *  puts down belong to the PlayerState, not to this character (see UBuilderComponent). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UBuilderComponent> BuilderComponent;
 
 	/** Configurable terminal death camera / pull / dismemberment presentation. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -2071,6 +2077,10 @@ public:
 	/** Returns the cell grid (currency, magazines, ability upgrades, paid attachments). */
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	UInventoryComponent* GetInventoryComponent() const { return InventoryComponent; }
+
+	/** Returns the builder (build menu, placement ghost, demolish). */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	UBuilderComponent* GetBuilderComponent() const { return BuilderComponent; }
 
 	/** Returns the currently equipped weapon */
 	UFUNCTION(BlueprintPure, Category = "Weapons")

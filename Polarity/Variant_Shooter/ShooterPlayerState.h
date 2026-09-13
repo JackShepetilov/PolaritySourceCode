@@ -19,7 +19,11 @@
 #include "GameFramework/PlayerState.h"
 #include "ShooterPlayerState.generated.h"
 
+class ABuildableActor;
+class UBuildableDefinition;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FMetalChangedDelegate, int32, Metal, int32, MaxMetal, int32, Delta);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOwnedBuildablesChangedDelegate);
 
 UCLASS()
 class POLARITY_API AShooterPlayerState : public APlayerState
@@ -69,10 +73,44 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Metal")
 	FMetalChangedDelegate OnMetalChanged;
 
+	// ==================== Buildables ====================
+	// The buildings this player has standing. Here for the same reason the metal is: the character
+	// is the thing that dies, and a TF2 building outlives its engineer. Replicated to everyone, so
+	// the owner's HUD panel and, later, a teammate's map can both read it.
+
+	/** Every building this player owns, in the order they were placed. An entry can arrive on a
+	 *  client before the actor it names has; readers skip nulls and get another notification once
+	 *  the reference resolves. */
+	UFUNCTION(BlueprintPure, Category = "Buildables")
+	TArray<ABuildableActor*> GetOwnedBuildables() const;
+
+	/** How many of one kind are standing (or going up). Null counts everything. */
+	UFUNCTION(BlueprintPure, Category = "Buildables")
+	int32 CountOwnedBuildables(const UBuildableDefinition* Definition) const;
+
+	/** All standing buildings of one kind. Two ends of a teleporter find each other through this. */
+	UFUNCTION(BlueprintPure, Category = "Buildables")
+	void GetOwnedBuildablesOfKind(const UBuildableDefinition* Definition, TArray<ABuildableActor*>& OutBuildables) const;
+
+	/** Server only. Called by the builder on spawn and by the building itself on death. */
+	void RegisterBuildable(ABuildableActor* Buildable);
+	void UnregisterBuildable(ABuildableActor* Buildable);
+
+	/** Fires on every machine when the list changes. */
+	UPROPERTY(BlueprintAssignable, Category = "Buildables")
+	FOwnedBuildablesChangedDelegate OnOwnedBuildablesChanged;
+
 protected:
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	UPROPERTY(ReplicatedUsing = OnRep_OwnedBuildables)
+	TArray<TObjectPtr<ABuildableActor>> OwnedBuildables;
+
+	UFUNCTION()
+	void OnRep_OwnedBuildables();
 
 	/** Replicated to everyone, not only the owner. It is one integer, and a teammate being able to
 	 *  see who has metal for a turret is exactly the kind of thing a coop HUD will want. */

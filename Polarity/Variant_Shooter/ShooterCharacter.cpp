@@ -25,6 +25,7 @@
 #include "Weapons/ShooterWeapon_Melee.h"
 #include "Weapons/DroppedRangedWeapon.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
+#include "Variant_Shooter/Buildables/BuilderComponent.h"
 #include "Weapons/RiotShield.h"
 #include "UI/EMFChargeWidgetSubsystem.h"
 // Full types, not forward declarations: TSubclassOf of each is an RPC parameter, and the generated
@@ -266,6 +267,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the cell grid (currency, magazines, ability upgrades, paid attachments)
 	InventoryComponent = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory Component"));
+
+	// the engineer's kit: build menu, placement ghost, demolish
+	BuilderComponent = CreateDefaultSubobject<UBuilderComponent>(TEXT("Builder Component"));
 
 	// configurable terminal run-death presentation
 	PlayerDeathSequenceComponent = CreateDefaultSubobject<UPlayerDeathSequenceComponent>(TEXT("Player Death Sequence"));
@@ -509,6 +513,13 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		{
 			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Started, this, &AShooterCharacter::DoAbilityPressed);
 			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoAbilityReleased);
+		}
+
+		// Building: the menu key, the slot keys and the placement keys. The actions themselves live
+		// on the component, next to the mapping contexts it pushes and pops.
+		if (BuilderComponent)
+		{
+			BuilderComponent->SetupInput(EnhancedInputComponent);
 		}
 
 		// Weapon-switch keys. Position in WeaponSwitchActions IS the slot number, so the handler

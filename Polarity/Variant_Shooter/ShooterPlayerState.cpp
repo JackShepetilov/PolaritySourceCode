@@ -1,6 +1,8 @@
 // ShooterPlayerState.cpp
 
 #include "ShooterPlayerState.h"
+#include "Variant_Shooter/Buildables/BuildableActor.h"
+#include "Variant_Shooter/Buildables/BuildableDefinition.h"
 #include "Variant_Shooter/Pickups/MetalPickup.h"
 #include "Variant_Shooter/Pickups/LootDropComponent.h"
 #include "Coop/CoopPlayers.h"
@@ -24,12 +26,102 @@ void AShooterPlayerState::BeginPlay()
 	}
 }
 
+void AShooterPlayerState::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// The player is gone (left the session): their buildings go with them, as an engineer's do when
+	// he leaves the server. Not on a world teardown, where everything is dying anyway. Walk a copy:
+	// each Demolish unregisters.
+	const bool bPlayerLeft = EndPlayReason == EEndPlayReason::Destroyed || EndPlayReason == EEndPlayReason::RemovedFromWorld;
+	const bool bWorldGoing = GetWorld() && GetWorld()->bIsTearingDown;
+	if (HasAuthority() && bPlayerLeft && !bWorldGoing && OwnedBuildables.Num() > 0)
+	{
+		TArray<TObjectPtr<ABuildableActor>> Standing = OwnedBuildables;
+		for (ABuildableActor* Buildable : Standing)
+		{
+			if (Buildable)
+			{
+				Buildable->Demolish();
+			}
+		}
+		OwnedBuildables.Reset();
+	}
+
+	Super::EndPlay(EndPlayReason);
+}
+
 void AShooterPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(AShooterPlayerState, Metal);
 	DOREPLIFETIME(AShooterPlayerState, MaxMetal);
+	DOREPLIFETIME(AShooterPlayerState, OwnedBuildables);
+}
+
+// ==================== Buildables ====================
+
+TArray<ABuildableActor*> AShooterPlayerState::GetOwnedBuildables() const
+{
+	TArray<ABuildableActor*> Out;
+	Out.Reserve(OwnedBuildables.Num());
+	for (const TObjectPtr<ABuildableActor>& Buildable : OwnedBuildables)
+	{
+		Out.Add(Buildable.Get());
+	}
+	return Out;
+}
+
+int32 AShooterPlayerState::CountOwnedBuildables(const UBuildableDefinition* Definition) const
+{
+	int32 Count = 0;
+	for (const TObjectPtr<ABuildableActor>& Buildable : OwnedBuildables)
+	{
+		if (Buildable && !Buildable->IsDestroyed() && (!Definition || Buildable->GetDefinition() == Definition))
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+void AShooterPlayerState::GetOwnedBuildablesOfKind(const UBuildableDefinition* Definition, TArray<ABuildableActor*>& OutBuildables) const
+{
+	OutBuildables.Reset();
+	for (const TObjectPtr<ABuildableActor>& Buildable : OwnedBuildables)
+	{
+		if (Buildable && !Buildable->IsDestroyed() && (!Definition || Buildable->GetDefinition() == Definition))
+		{
+			OutBuildables.Add(Buildable);
+		}
+	}
+}
+
+void AShooterPlayerState::RegisterBuildable(ABuildableActor* Buildable)
+{
+	if (!HasAuthority() || !Buildable || OwnedBuildables.Contains(Buildable))
+	{
+		return;
+	}
+	OwnedBuildables.Add(Buildable);
+	// The host gets no OnRep for its own write; same announcement, same path.
+	OnRep_OwnedBuildables();
+}
+
+void AShooterPlayerState::UnregisterBuildable(ABuildableActor* Buildable)
+{
+	if (!HasAuthority() || !Buildable)
+	{
+		return;
+	}
+	if (OwnedBuildables.Remove(Buildable) > 0)
+	{
+		OnRep_OwnedBuildables();
+	}
+}
+
+void AShooterPlayerState::OnRep_OwnedBuildables()
+{
+	OnOwnedBuildablesChanged.Broadcast();
 }
 
 int32 AShooterPlayerState::AddMetal(int32 Amount)
