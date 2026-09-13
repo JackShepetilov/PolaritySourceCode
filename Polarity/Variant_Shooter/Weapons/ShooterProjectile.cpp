@@ -252,8 +252,22 @@ void AShooterProjectile::SetCosmeticOnly()
 
 void AShooterProjectile::SetShooterMoveIgnore(bool bIgnore)
 {
+	if (!CollisionComponent)
+	{
+		return;
+	}
+
+	// A holder that is not a pawn (the engineer's turret) is solid to the round it just fired: the
+	// round starts at the grip, a hair above the turret's own mesh, and a shot aimed downward began
+	// inside that mesh and blew up under the turret. The owner is the weapon's holder; for a pawn's
+	// gun that is the instigator itself and this changes nothing.
+	if (AActor* const OwnerActor = GetOwner(); OwnerActor && OwnerActor != GetInstigator())
+	{
+		CollisionComponent->IgnoreActorWhenMoving(OwnerActor, bIgnore);
+	}
+
 	APawn* const InstigatorPawn = GetInstigator();
-	if (!InstigatorPawn || !CollisionComponent)
+	if (!InstigatorPawn)
 	{
 		return;
 	}

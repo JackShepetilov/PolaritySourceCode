@@ -27,8 +27,39 @@
 static TAutoConsoleVariable<int32> CVarTurretDebug(
 	TEXT("polarity.turret.debug"),
 	0,
-	TEXT("1: draw every turret's barrel rays (green = on a target), ranges and the line to its target, and log its decisions with [TURRET_DEBUG]."),
+	TEXT("1: draw every turret's barrel rays (green = on a target), ranges and the line to its target, and log its decisions with [TURRET_DEBUG]: target changes, every shot, and why a vice is holding fire."),
 	ECVF_Default);
+
+namespace TurretGate
+{
+	/** Why a vice did not fire this frame. Logged under polarity.turret.debug when it changes, so
+	 *  "the turret is not shooting" has a one-line answer instead of a guess. Debug bookkeeping
+	 *  only, kept out of the class so it costs no header. */
+	enum EGate : uint8 { None, NoGun, Reloading, Empty, NoTarget, Refire, OutOfRange, BarrelOff, NotAligned, LowChance, BlastTooClose, NoSight, Fired };
+	static const TCHAR* Names[] = { TEXT("-"), TEXT("no gun"), TEXT("reloading"), TEXT("empty"), TEXT("no target"), TEXT("refire"),
+		TEXT("out of range"), TEXT("barrel not on a body"), TEXT("barrel not aligned with the led point"), TEXT("hit chance too low"),
+		TEXT("target inside own blast radius"), TEXT("no line of sight"), TEXT("FIRED") };
+	static TMap<TWeakObjectPtr<const ATurretBuildable>, TArray<uint8>> LastGates;
+
+	static void Report(const ATurretBuildable* Turret, int32 ViceIndex, EGate Gate, const TCHAR* Extra = TEXT(""))
+	{
+		if (CVarTurretDebug.GetValueOnGameThread() == 0)
+		{
+			return;
+		}
+		TArray<uint8>& Gates = LastGates.FindOrAdd(Turret);
+		if (Gates.Num() <= ViceIndex)
+		{
+			Gates.SetNumZeroed(ViceIndex + 1);
+		}
+		if (Gates[ViceIndex] == Gate && Gate != Fired)
+		{
+			return;
+		}
+		Gates[ViceIndex] = Gate;
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s vice %d: %s%s"), *GetNameSafe(Turret), ViceIndex, Names[Gate], Extra);
+	}
+}
 
 ATurretBuildable::ATurretBuildable()
 {
@@ -997,6 +1028,7 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 			// The gun went away under us (destroyed from outside). Forget it cleanly.
 			ClearVice(ViceIndex);
 		}
+		TurretGate::Report(this, ViceIndex, TurretGate::NoGun);
 		return;
 	}
 	FTurretVice& Vice = Vices[ViceIndex];
@@ -1005,6 +1037,7 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 	{
 		if (Now < Vice.ReloadEndTime)
 		{
+			TurretGate::Report(this, ViceIndex, TurretGate::Reloading);
 			return;
 		}
 		FinishReload(ViceIndex);
@@ -1015,12 +1048,19 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 		{
 			StartReload(ViceIndex, Now);
 		}
+		TurretGate::Report(this, ViceIndex, TurretGate::Empty);
 		return;
 	}
 
 	AActor* const Target = IsValid(CurrentTarget) ? CurrentTarget.Get() : nullptr;
-	if (!Target || Now < Vice.NextShotTime)
+	if (!Target)
 	{
+		TurretGate::Report(this, ViceIndex, TurretGate::NoTarget);
+		return;
+	}
+	if (Now < Vice.NextShotTime)
+	{
+		TurretGate::Report(this, ViceIndex, TurretGate::Refire);
 		return;
 	}
 
@@ -1030,6 +1070,8 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 	const float Distance = FVector::Dist(AimPoint, Muzzle);
 	if (Distance > Vice.Range || Distance < 1.0f)
 	{
+		TurretGate::Report(this, ViceIndex, TurretGate::OutOfRange,
+			*FString::Printf(TEXT(" (%.0f of %.0f cm)"), Distance, Vice.Range));
 		return;
 	}
 
@@ -1040,8 +1082,11 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 		AActor* OnActor = nullptr;
 		if (!IsBarrelOnHostile(ViceIndex, OnActor))
 		{
+			TurretGate::Report(this, ViceIndex, TurretGate::BarrelOff);
 			return;
 		}
+		TurretGate::Report(this, ViceIndex, TurretGate::Fired,
+			*FString::Printf(TEXT(" hitscan at %s, %.0f cm, %d round(s) left"), *GetNameSafe(OnActor), Distance, ViceRounds[ViceIndex] - 1));
 		FireVice(ViceIndex, AimPoint, Now);
 		return;
 	}
@@ -1054,6 +1099,9 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 	const float CosToAim = FVector::DotProduct(BarrelDirectionOf(ViceIndex), ToAim);
 	if (CosToAim < FMath::Cos(AngularRadius))
 	{
+		TurretGate::Report(this, ViceIndex, TurretGate::NotAligned,
+			*FString::Printf(TEXT(" (off by %.1f deg, body is %.1f deg wide)"),
+				FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(CosToAim, -1.0f, 1.0f))), FMath::RadiansToDegrees(AngularRadius)));
 		return;
 	}
 	const FVector Velocity = Target->GetVelocity();
@@ -1062,17 +1110,25 @@ void ATurretBuildable::TickVice(int32 ViceIndex, float Now)
 	const float HitChance = FMath::Clamp(1.0f - Drift / FMath::Max(AngularRadius, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
 	if (HitChance < MinProjectileHitChance)
 	{
+		TurretGate::Report(this, ViceIndex, TurretGate::LowChance,
+			*FString::Printf(TEXT(" (%.0f%% < %.0f%%, flight %.2f s, across %.0f cm/s)"), HitChance * 100.0f, MinProjectileHitChance * 100.0f, FlightTime, Across.Size()));
 		return;
 	}
 	const float Blast = ExplosionRadiusOf(Weapon);
 	if (Blast > 0.0f && Distance < Blast * 1.25f)
 	{
+		TurretGate::Report(this, ViceIndex, TurretGate::BlastTooClose,
+			*FString::Printf(TEXT(" (%.0f cm, blast %.0f)"), Distance, Blast));
 		return;
 	}
 	if (!HasLineOfSightTo(Muzzle, Target, AimPoint))
 	{
+		TurretGate::Report(this, ViceIndex, TurretGate::NoSight);
 		return;
 	}
+	TurretGate::Report(this, ViceIndex, TurretGate::Fired,
+		*FString::Printf(TEXT(" projectile at %s, %.0f cm, lead %.2f s, chance %.0f%%, %d round(s) left"),
+			*GetNameSafe(Target), Distance, FlightTime, HitChance * 100.0f, ViceRounds[ViceIndex] - 1));
 	FireVice(ViceIndex, AimPoint, Now);
 }
 
