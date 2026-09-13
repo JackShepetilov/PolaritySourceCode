@@ -123,11 +123,18 @@ void FHudDeltaStack::Push(int32 Delta, UPanelWidget* Panel, UObject* Outer)
 	Text->SetShadowOffset(ShadowOffset);
 	Text->SetShadowColorAndOpacity(ShadowColor);
 	Text->SetVisibility(ESlateVisibility::HitTestInvisible);
-	Text->SetRenderTransformPivot(FVector2D(0.5, 1.0));
+	Text->SetRenderTransformPivot(FVector2D(1.0, 1.0));
+
+	// Right-justified inside a box wide enough for "+200": a merge that adds a digit then changes
+	// nothing about the layout. Text set during a tick is painted that same frame in the OLD
+	// geometry, so a number whose box grew would hang past its slot for one frame.
+	Text->SetJustification(ETextJustify::Right);
+	Text->SetMinDesiredWidth(Font.Size * 2.6f);
+
 	Panel->AddChild(Text);
 	if (UVerticalBoxSlot* BoxSlot = Cast<UVerticalBoxSlot>(Text->Slot))
 	{
-		BoxSlot->SetHorizontalAlignment(HAlign_Center);
+		BoxSlot->SetHorizontalAlignment(HAlign_Right);
 	}
 
 	FEntry& Entry = Entries.AddDefaulted_GetRef();
