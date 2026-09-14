@@ -2756,7 +2756,16 @@ FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const F
 	FVector BodyLocation = TargetLocation;
 	if (const AActor* const AimActor = WeaponOwner ? WeaponOwner->GetWeaponAimActor() : nullptr)
 	{
-		BodyLocation = AimActor->GetActorLocation();
+		// Only the DISTANCE comes from the body. The direction stays the one that was passed in:
+		// that ray already carries the NPC's accuracy spread (UAIAccuracyComponent) and the
+		// weapon's own cone, and taking the body's location outright threw both away, so every
+		// ballistic shot solved straight into the centre of the capsule no matter what the spread
+		// was set to. That was "сбривают с средней дистанции" at 15 degrees of BaseSpread.
+		const float BodyReach = FVector::Dist(LaunchLocation, AimActor->GetActorLocation());
+		const FVector AimRay = (TargetLocation - LaunchLocation).GetSafeNormal();
+		BodyLocation = AimRay.IsNearlyZero()
+			? AimActor->GetActorLocation()
+			: LaunchLocation + AimRay * BodyReach;
 
 		// Where the target WILL be. A projectile that takes half a second to arrive and is aimed at
 		// where somebody is standing hits the ground they left, and at sniper ranges that is every
