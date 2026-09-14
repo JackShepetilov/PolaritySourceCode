@@ -40,6 +40,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Spawn Point")
 	FTransform GetSpawnTransform(bool bForAirUnit) const;
 
+	/** Where an NPC of this class actually appears: flying units get the air offset, walkers are
+	 *  put on the navmesh (or the ground under the point) at capsule height. Shared by every
+	 *  spawner that uses these points. */
+	FTransform ResolveSpawnTransformFor(TSubclassOf<AShooterNPC> NPCClass) const;
+
 	/** Delay (seconds) between ArenaManager requesting a spawn and the NPC actually appearing.
 	 *  0 = spawn immediately (default). Subclasses (e.g. telegraphed) override this. */
 	virtual float GetTelegraphDelay() const { return 0.0f; }

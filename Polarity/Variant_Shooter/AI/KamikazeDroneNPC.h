@@ -110,6 +110,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Combat")
 	float CollisionDamage = 40.0f;
 
+	/** Damage to a player building (ABuildableActor) it dives into on a direct attack. The base's
+	 *  core has 1000: this is how many dives it takes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Combat", meta = (ClampMin = "0.0"))
+	float BuildingStrikeDamage = 100.0f;
+
 	/** Explosion radius on direct player hit (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Combat")
 	float ExplosionRadius = 300.0f;

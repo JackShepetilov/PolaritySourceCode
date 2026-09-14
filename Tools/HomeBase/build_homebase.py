@@ -25,7 +25,6 @@ LEVEL = "/Game/Prototype/HomeBase/L_HomeBase"
 MAT_DIR = "/Game/Prototype/HomeBase/Materials"
 CARRIER_BP = "/Game/Prototype/HomeBase/BP_KamikazeCarrierDrone"
 GAMEMODE = "/Game/Variant_Shooter/Blueprints/BP_ShooterGameMode"
-ARENA_BP = "/Game/Variant_Shooter/Arenas/BPs/BP_ArenaManager"
 TAG_GEO = "HomeBaseGen"
 TAG_ENV = "HomeBaseEnv"
 TAG_GAME = "HomeBaseGame"
@@ -465,9 +464,14 @@ def step_geo():
 
 # ==================== игровая часть ====================
 
-WAVES = [[1], [2]]            # маток на волну
-TIME_BETWEEN_WAVES = 20.0
+WAVES = [[1], [2]]            # авторские волны: маток на волну
+WAVE_INTERVAL = 90.0          # волны по часам, живая предыдущая их не задерживает
+FIRST_WAVE_DELAY = 20.0
+ENDLESS_GROWTH = 1.12         # бюджет бесконечной волны к предыдущей
 AIR_SPAWN_HEIGHT = 3500.0     # над землёй у кромки тумана: примерно 10 м выше макушки
+CORE_AT = (900.0, 1300.0)     # ядро базы во дворе, под открытым небом: под крышей дрон бьёт крышу
+CORE_SIZE = 300.0
+CORE_DEFEND_RADIUS = 4000.0   # нет игрока ближе 40 м: матки бьют ядро
 
 
 def step_gameplay():
@@ -498,6 +502,20 @@ def step_gameplay():
         _tag(sp, TAG_GAME, "HB_CarrierSpawn_" + name, f)
         points.append(sp)
 
+    # Ядро базы: постройка с большим HP. Пока рядом нет игрока, матки роняют дроны в него, а не
+    # в пешек (правило автора 2026-09-14). Ставится готовым, без чертежа: ключ его не чинит.
+    core = eas.spawn_actor_from_class(unreal.SiegeCoreBuildable,
+                                      kit_pivot((CORE_AT[0], CORE_AT[1], H + CORE_SIZE * 0.5),
+                                                (CORE_SIZE, CORE_SIZE, CORE_SIZE), unreal.Rotator()),
+                                      unreal.Rotator())
+    core.mesh.set_static_mesh(_mesh(KIT_BOX))
+    core.mesh.set_material(0, material("console"))
+    core.set_actor_scale3d(unreal.Vector(CORE_SIZE / 100.0, CORE_SIZE / 100.0, CORE_SIZE / 100.0))
+    core.set_editor_property("defend_radius", CORE_DEFEND_RADIUS)
+    _tag(core, TAG_GAME, "HB_SiegeCore", f)
+    text("SiegeCore_Label", CORE_AT[0], CORE_AT[1], H + CORE_SIZE + 120.0, "ЯДРО БАЗЫ", size=50.0,
+         folder=f, tag=TAG_GAME)
+
     carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
     waves = []
     for counts in WAVES:
@@ -507,18 +525,27 @@ def step_gameplay():
         e.set_editor_property("count", counts[0])
         w.set_editor_property("entries", [e])
         waves.append(w)
-    am = eas.spawn_actor_from_class(unreal.EditorAssetLibrary.load_blueprint_class(ARENA_BP),
-                                    unreal.Vector(0.0, 0.0, H + 400.0))
-    am.set_editor_property("waves", waves)
-    am.set_editor_property("time_between_waves", TIME_BETWEEN_WAVES)
-    am.set_editor_property("entry_triggers", [trig])
-    am.set_editor_property("spawn_points", points)
-    _tag(am, TAG_GAME, "HB_SiegeArena", f)
+    kind = unreal.SiegeEnemyType()
+    kind.set_editor_property("npc_class", carrier)
+    kind.set_editor_property("cost", 1.0)
+    kind.set_editor_property("first_wave", 1)
+    kind.set_editor_property("weight", 1.0)
+    sd = eas.spawn_actor_from_class(unreal.SiegeDirector, unreal.Vector(0.0, 0.0, H + 400.0))
+    sd.set_editor_property("authored_waves", waves)
+    sd.set_editor_property("endless_pool", [kind])
+    sd.set_editor_property("endless_budget_growth", ENDLESS_GROWTH)
+    sd.set_editor_property("wave_interval", WAVE_INTERVAL)
+    sd.set_editor_property("first_wave_delay", FIRST_WAVE_DELAY)
+    sd.set_editor_property("start_triggers", [trig])
+    sd.set_editor_property("spawn_points", points)
+    sd.set_editor_property("cores", [core])
+    _tag(sd, TAG_GAME, "HB_SiegeDirector", f)
 
     nav = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume, unreal.Vector(0.0, 0.0, 1500.0))
     nav.set_actor_scale3d(unreal.Vector(36000.0 / 200.0, 36000.0 / 200.0, 4500.0 / 200.0))
     _tag(nav, TAG_GAME, "HB_NavBounds", f)
-    log("ADDED: старт игрока, триггер осады, 2 точки маток, арена ({} волн), границы навмеша".format(len(waves)))
+    log("ADDED: старт игрока, триггер осады, ядро, 2 точки маток, директор осады ({} авторских волн, "
+        "дальше бесконечно x{}), границы навмеша".format(len(waves), ENDLESS_GROWTH))
     _les().save_current_level()
 
 

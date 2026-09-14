@@ -17,6 +17,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "ShooterCharacter.h"
 #include "TimerManager.h"
+#include "Variant_Shooter/Siege/SiegeCoreBuildable.h"
 
 namespace
 {
@@ -39,6 +40,13 @@ namespace
 			return Player->IsDead();
 		}
 		return false;
+	}
+
+	/** A core that is gone, or that a player has come home to defend: back to the pawns. */
+	bool IsGoneCore(const AActor* Core)
+	{
+		const ASiegeCoreBuildable* const Building = Cast<ASiegeCoreBuildable>(Core);
+		return !IsValid(Building) || Building->IsDestroyed() || Building->IsDefended();
 	}
 
 	FVector FeetOf(const APawn* Pawn)
@@ -186,12 +194,25 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 {
 	StopDroneStateTree();
 
-	// Target: the nearest live hostile, re-picked once a second. A new target means a new side.
+	// Target: the base's core while nobody is defending it, else the nearest live hostile. Re-picked
+	// once a second. A new target means a new side.
 	TargetReacquireTimer -= DeltaTime;
 	APawn* Target = StandoffTarget.Get();
-	if (IsGoneTarget(Target) || TargetReacquireTimer <= 0.0f)
+	AActor* Core = SiegeCore.Get();
+	if (IsGoneTarget(Target) || (Core && IsGoneCore(Core)) || TargetReacquireTimer <= 0.0f)
 	{
 		TargetReacquireTimer = CarrierReacquireInterval;
+
+		AActor* const FreshCore = ASiegeCoreBuildable::FindUndefended(GetWorld(), GetActorLocation());
+		if (FreshCore != Core)
+		{
+			SiegeCore = FreshCore;
+			bHasStandoffBearing = false;
+			Core = FreshCore;
+			UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] Carrier %s target: %s"), *GetName(),
+				Core ? *FString::Printf(TEXT("core %s (undefended)"), *Core->GetName()) : TEXT("pawns"));
+		}
+
 		APawn* Fresh = nullptr;
 		if (const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(this))
 		{
@@ -208,20 +229,23 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 		if (Fresh != Target)
 		{
 			StandoffTarget = Fresh;
-			bHasStandoffBearing = false;
+			if (!Core)
+			{
+				bHasStandoffBearing = false;
+			}
 			Target = Fresh;
 		}
 	}
 
 	UFlyingAIMovementComponent* const Mover = GetFlyingMovement();
-	if (!Target || !Mover)
+	if ((!Target && !Core) || !Mover)
 	{
 		return;
 	}
 
 	// Standoff point: on the side it came in from, swinging across its sector now and then so it has
 	// to be found again, never closer than StandoffDistance.
-	const FVector Feet = FeetOf(Target);
+	const FVector Feet = Core ? Core->GetActorLocation() : FeetOf(Target);
 	if (!bHasStandoffBearing)
 	{
 		const FVector Away = GetActorLocation() - Feet;
@@ -264,19 +288,24 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 		return;
 	}
 
-	int32 DronesOnTarget = 0;
-	if (const UKamikazeStrikeSubsystem* const Queue = GetWorld()->GetSubsystem<UKamikazeStrikeSubsystem>())
+	// The per-target cap is about not burying a player; a core is buried on purpose, the cooldown
+	// alone paces the dives.
+	if (!Core)
 	{
-		DronesOnTarget = Queue->GetDronesOn(Target);
-	}
-	if (DronesOnTarget + DronesPerSalvo > MaxDronesPerTarget)
-	{
-		return;
+		int32 DronesOnTarget = 0;
+		if (const UKamikazeStrikeSubsystem* const Queue = GetWorld()->GetSubsystem<UKamikazeStrikeSubsystem>())
+		{
+			DronesOnTarget = Queue->GetDronesOn(Target);
+		}
+		if (DronesOnTarget + DronesPerSalvo > MaxDronesPerTarget)
+		{
+			return;
+		}
 	}
 
 	FHitResult LOSHit;
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(CarrierLOS), false, this);
-	QueryParams.AddIgnoredActor(Target);
+	QueryParams.AddIgnoredActor(Core ? Core : static_cast<AActor*>(Target));
 	const FVector Seen = Feet + FVector(0.0f, 0.0f, 100.0f);
 	if (GetWorld()->LineTraceSingleByChannel(LOSHit, GetActorLocation(), Seen, ECC_Visibility, QueryParams))
 	{
@@ -421,7 +450,17 @@ bool AKamikazeCarrierDrone::DeployKamikaze()
 		? FMath::VRandCone(LaunchDir, FMath::DegreesToRadians(LaunchSpreadAngle))
 		: LaunchDir;
 
-	Munition->LaunchAsHomingMunition(SpreadDir * LaunchSpeed);
+	if (AActor* const Core = SiegeCore.Get(); Core && !IsGoneCore(Core))
+	{
+		// Nobody home: straight into the core, no hold and no schedule. Zero aim point = the
+		// building's bounds centre (see InitiateDirectAttack), which for a box on the ground is the
+		// box. The same path a marked skyscraper's drone takes.
+		Munition->InitiateDirectAttack(Core, FVector::ZeroVector);
+	}
+	else
+	{
+		Munition->LaunchAsHomingMunition(SpreadDir * LaunchSpeed);
+	}
 
 	if (!bInfinitePayload)
 	{

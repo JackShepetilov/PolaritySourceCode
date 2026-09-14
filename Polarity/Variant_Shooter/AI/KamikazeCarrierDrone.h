@@ -241,6 +241,11 @@ private:
 	void StopDroneStateTree();
 
 	TWeakObjectPtr<APawn> StandoffTarget;
+
+	/** The base's core, while nobody is defending it (ASiegeCoreBuildable::FindUndefended). Set,
+	 *  it replaces the pawn: the carrier stands off from the core and every munition it drops
+	 *  dives straight into it. Re-picked with the target, so a player coming home takes it back. */
+	TWeakObjectPtr<AActor> SiegeCore;
 	float TargetReacquireTimer = 0.0f;
 	float StandoffBearingDeg = 0.0f;
 	bool bHasStandoffBearing = false;

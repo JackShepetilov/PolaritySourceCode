@@ -30,6 +30,7 @@
 #include "AICombatCoordinator.h"
 #include "ShooterCharacter.h"
 #include "DrawDebugHelpers.h"
+#include "Variant_Shooter/Buildables/BuildableActor.h"
 
 namespace
 {
@@ -831,14 +832,16 @@ void AKamikazeDroneNPC::UpdateStrike(float DeltaTime)
 	if (bDirect)
 	{
 		// A turret's drone flies into its building: whatever it touches ends the run, and the building
-		// is told directly, because DoExplosion only damages pawns.
+		// is told directly, because DoExplosion only damages pawns. A player building takes the
+		// tuned number; the old marked skyscraper (ATurretBuilding) is meant to go in one hit.
 		if (Hit.IsValidBlockingHit())
 		{
 			if (Hit.GetActor() == BuildingTarget)
 			{
 				FDamageEvent DmgEvent;
 				DmgEvent.DamageTypeClass = UDamageType::StaticClass();
-				BuildingTarget->TakeDamage(99999.0f, DmgEvent, GetController(), this);
+				const float Damage = BuildingTarget->IsA<ABuildableActor>() ? BuildingStrikeDamage : 99999.0f;
+				BuildingTarget->TakeDamage(Damage, DmgEvent, GetController(), this);
 			}
 			CurrentState = EKamikazeState::Dead;
 			TriggerCollisionExplosion();

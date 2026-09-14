@@ -611,48 +611,8 @@ void AArenaManager::SpawnWave(int32 WaveIndex)
 
 FTransform AArenaManager::ResolveSpawnTransform(AArenaSpawnPoint* SpawnPoint, TSubclassOf<AShooterNPC> NPCClass) const
 {
-	if (!SpawnPoint || !NPCClass)
-	{
-		return FTransform::Identity;
-	}
-
-	const bool bIsFlyingUnit = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
-	FTransform Result = SpawnPoint->GetSpawnTransform(bIsFlyingUnit);
-	FVector SpawnLocation = Result.GetLocation();
-
-	if (!bIsFlyingUnit)
-	{
-		const ACharacter* CDO = NPCClass->GetDefaultObject<ACharacter>();
-		const float CapsuleHalfHeight = (CDO ? CDO->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 96.0f) + 10.0f;
-
-		UWorld* World = GetWorld();
-		UNavigationSystemV1* NavSys = World ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
-		if (NavSys)
-		{
-			FNavLocation NavResult;
-			const FVector ProjectionExtent(50.0f, 50.0f, 500.0f);
-			if (NavSys->ProjectPointToNavigation(SpawnLocation, NavResult, ProjectionExtent))
-			{
-				SpawnLocation.X = NavResult.Location.X;
-				SpawnLocation.Y = NavResult.Location.Y;
-				SpawnLocation.Z = NavResult.Location.Z + CapsuleHalfHeight;
-			}
-			else if (World)
-			{
-				FHitResult GroundHit;
-				FCollisionQueryParams TraceParams;
-				const FVector TraceStart = SpawnLocation + FVector(0.0f, 0.0f, 200.0f);
-				const FVector TraceEnd = SpawnLocation - FVector(0.0f, 0.0f, 500.0f);
-				if (World->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
-				{
-					SpawnLocation.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
-				}
-			}
-		}
-	}
-
-	Result.SetLocation(SpawnLocation);
-	return Result;
+	// The recipe lives on the point now, so the siege director spawns exactly the same way.
+	return SpawnPoint ? SpawnPoint->ResolveSpawnTransformFor(NPCClass) : FTransform::Identity;
 }
 
 void AArenaManager::ExecuteWaveSpawnAt(TSubclassOf<AShooterNPC> NPCClass, AArenaSpawnPoint* SpawnPoint)
