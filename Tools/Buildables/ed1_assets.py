@@ -140,9 +140,10 @@ def main():
 
     # ---------- definitions ----------
     defs = {
-        "DA_Buildable_Turret":     ("Buildable.Turret",     "Turret",     "BP_Buildable_Turret",     130, 10.5, 1),
-        "DA_Buildable_Dispenser":  ("Buildable.Dispenser",  "Dispenser",  "BP_Buildable_Dispenser",  100, 21.0, 1),
-        "DA_Buildable_Teleporter": ("Buildable.Teleporter", "Teleporter", "BP_Buildable_Teleporter", 50,  21.0, 2),
+        # Limits per player: more than one of each kind [author, 2026-09-14]; the teleporter's 4 is two pairs.
+        "DA_Buildable_Turret":     ("Buildable.Turret",     "Turret",     "BP_Buildable_Turret",     130, 10.5, 3),
+        "DA_Buildable_Dispenser":  ("Buildable.Dispenser",  "Dispenser",  "BP_Buildable_Dispenser",  100, 21.0, 2),
+        "DA_Buildable_Teleporter": ("Buildable.Teleporter", "Teleporter", "BP_Buildable_Teleporter", 50,  21.0, 4),
     }
     for name, (tname, disp, bp, cost, btime, maxc) in defs.items():
         p = ROOT + "/" + name

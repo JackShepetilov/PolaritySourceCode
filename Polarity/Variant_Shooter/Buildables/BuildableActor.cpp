@@ -324,10 +324,12 @@ EBuildableWrenchResult ABuildableActor::ReceiveWrenchHit(AShooterPlayerState* Hi
 		BoostMultiplier = Definition->WrenchBuildBoost;
 		Result = EBuildableWrenchResult::SpedUpConstruction;
 	}
-	else if (Health < MaxHealth && Hitter)
+	else if (Health < MaxHealth - 0.5f && Hitter)
 	{
 		// Repair: as much as one hit puts back, capped by what is missing and by what the hitter
 		// can pay for at RepairHealthPerMetal. Partial when short of metal, nothing when broke.
+		// Half a point missing is the floor: float error left 149.99 under 150, and a hit on a
+		// whole building cost one metal for no repair.
 		const float Missing = MaxHealth - Health;
 		const float Wanted = FMath::Min(Definition->WrenchRepairHealth, Missing);
 		const int32 MetalNeeded = FMath::CeilToInt(Wanted / Definition->RepairHealthPerMetal);
