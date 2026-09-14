@@ -483,7 +483,10 @@ CORE_AT = (900.0, 1300.0)     # ядро базы во дворе, под отк
 CORE_SIZE = 300.0
 CORE_DEFEND_RADIUS = 4000.0   # нет игрока ближе 40 м: матки бьют ядро
 SHOOTER_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
-GROUND_SPAWN_R = 14000.0      # пехота выходит из тумана (fog_r 150 м) по трём подходам
+GROUND_SPAWN_R = 14000.0      # пехота выходит из тумана (fog_r 150 м)
+GROUND_SPAWN_STEP_DEG = 45    # кольцо наземных точек
+AIR_SPAWN_R = 16000.0
+AIR_SPAWN_STEP_DEG = 90       # кольцо воздушных точек
 # Бесконечный пул: (класс, цена в бюджете, с какой волны, вес). Матка это бесконечные дроны, поэтому
 # она дорогая; пехотинец дешёвый и частый. Пехота с третьей волны (автор 2026-09-14).
 ENDLESS_POOL = [("carrier", 1.0, 1, 1.0), ("shooter", 0.25, 3, 3.0)]
@@ -509,36 +512,35 @@ def step_gameplay():
     carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
     shooter = unreal.EditorAssetLibrary.load_blueprint_class(SHOOTER_BP)
 
-    points = []
-    for name, (x, y), gz in (("North", (16000.0, 0.0), lay["spawn_ground_z"]["north"]),
-                             ("West", (0.0, -16000.0), lay["spawn_ground_z"]["west"])):
+    # Точки спавна со всех сторон (автор 2026-09-14): воздух кольцом через 90 градусов на AIR_SPAWN_R,
+    # земля кольцом через 45 градусов у кромки тумана плюс две точки на подходах (дорога, овраг).
+    # Высота земли снимается трассой; директор всё равно проецирует пешего на навмеш. У склонов без
+    # подхода (уступ на востоке) навмеш может не довести: это видно по MoveTo FAILED в логе.
+    def spawn_point(label, x, y, z, excluded, air=False):
         yaw = math.degrees(math.atan2(-y, -x))
-        sp = eas.spawn_actor_from_class(unreal.ArenaSpawnPoint, unreal.Vector(x, y, gz),
+        sp = eas.spawn_actor_from_class(unreal.ArenaSpawnPoint, unreal.Vector(x, y, z),
                                         unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
-        sp.set_editor_property("air_spawn", True)
-        sp.set_editor_property("air_spawn_height", AIR_SPAWN_HEIGHT)
-        sp.set_editor_property("excluded_npc_classes", [shooter])   # воздух только маткам
-        _tag(sp, TAG_GAME, "HB_CarrierSpawn_" + name, f)
-        points.append(sp)
+        if air:
+            sp.set_editor_property("air_spawn", True)
+            sp.set_editor_property("air_spawn_height", AIR_SPAWN_HEIGHT)
+        sp.set_editor_property("excluded_npc_classes", excluded)
+        _tag(sp, TAG_GAME, label, f)
+        return sp
 
-    # Пехота: по одной точке на каждый наземный подход, у кромки тумана. Север это поле, юг это
-    # дорога-серпантин (точка дороги ближе всего к GROUND_SPAWN_R), запад это овраг (та же выборка).
-    # Высота снимается трассой по земле; директор всё равно проецирует пешего на навмеш.
+    points = []
+    for a in range(0, 360, AIR_SPAWN_STEP_DEG):
+        x, y = polar(a, AIR_SPAWN_R)
+        points.append(spawn_point("HB_AirSpawn_{:03d}".format(a), x, y, _ground_z(x, y), [shooter], air=True))
+
     def nearest_to_r(pts, r):
         return min(pts, key=lambda p: abs(math.hypot(p[0], p[1]) - r))
-    road_pt = nearest_to_r(lay["road"], GROUND_SPAWN_R)
-    ravine_pt = nearest_to_r(lay["ravine"], GROUND_SPAWN_R)
-    for name, (x, y) in (("NorthField", (GROUND_SPAWN_R, 0.0)),
-                         ("SouthRoad", tuple(road_pt)),
-                         ("WestRavine", tuple(ravine_pt))):
+    ground = [("Ring_{:03d}".format(a), polar(a, GROUND_SPAWN_R)) for a in range(0, 360, GROUND_SPAWN_STEP_DEG)]
+    ground.append(("SouthRoad", tuple(nearest_to_r(lay["road"], GROUND_SPAWN_R))))
+    ground.append(("WestRavine", tuple(nearest_to_r(lay["ravine"], GROUND_SPAWN_R))))
+    for name, (x, y) in ground:
         gz = _ground_z(x, y)
-        yaw = math.degrees(math.atan2(-y, -x))
-        sp = eas.spawn_actor_from_class(unreal.ArenaSpawnPoint, unreal.Vector(x, y, gz),
-                                        unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
-        sp.set_editor_property("excluded_npc_classes", [carrier])   # земля не маткам
-        _tag(sp, TAG_GAME, "HB_GroundSpawn_" + name, f)
-        points.append(sp)
-        log("ground spawn {} at ({:.0f}, {:.0f}, {:.0f}), r={:.0f}".format(name, x, y, gz, math.hypot(x, y)))
+        points.append(spawn_point("HB_GroundSpawn_" + name, x, y, gz, [carrier]))
+    log("точек спавна: {} воздух, {} земля".format(360 // AIR_SPAWN_STEP_DEG, len(ground)))
 
     # Ядро базы: постройка с большим HP. Пока рядом нет игрока, матки роняют дроны в него, а не
     # в пешек (правило автора 2026-09-14). Ставится готовым, без чертежа: ключ его не чинит.
@@ -585,8 +587,8 @@ def step_gameplay():
     nav = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume, unreal.Vector(0.0, 0.0, 1500.0))
     nav.set_actor_scale3d(unreal.Vector(36000.0 / 200.0, 36000.0 / 200.0, 4500.0 / 200.0))
     _tag(nav, TAG_GAME, "HB_NavBounds", f)
-    log("ADDED: старт игрока, триггер осады, ядро, 2 точки маток, директор осады ({} авторских волн, "
-        "дальше бесконечно x{}), границы навмеша".format(len(waves), ENDLESS_GROWTH))
+    log("ADDED: старт игрока, триггер осады, ядро, {} точек спавна, директор осады ({} авторских волн, "
+        "дальше бесконечно x{}), границы навмеша".format(len(points), len(waves), ENDLESS_GROWTH))
     _les().save_current_level()
 
 
