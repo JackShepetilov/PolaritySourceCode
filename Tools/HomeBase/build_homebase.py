@@ -191,6 +191,16 @@ def material(name):
 _count = {"n": 0}
 
 
+def _ground_z(x, y, default=0.0):
+    """Высота земли трассой сверху вниз (Visibility). Нет попадания: default."""
+    hit = unreal.SystemLibrary.line_trace_single(
+        _world(), unreal.Vector(x, y, 6000.0), unreal.Vector(x, y, -3000.0),
+        unreal.TraceTypeQuery.ECC_VISIBILITY, False, [], unreal.DrawDebugTrace.NONE, True)
+    if hit and hit.to_tuple()[0]:
+        return hit.to_tuple()[5].z   # impact_point
+    return default
+
+
 def kit_pivot(center, size, rot):
     """Где поставить угловой пивот кита, чтобы центр коробки оказался в center.
     Центр кита в локальных координатах после масштаба: (-sx/2, sy/2, sz/2). Оси берутся у движка,
@@ -465,13 +475,18 @@ def step_geo():
 # ==================== игровая часть ====================
 
 WAVES = [[1], [2]]            # авторские волны: маток на волну
-WAVE_INTERVAL = 90.0          # волны по часам, живая предыдущая их не задерживает
+WAVE_INTERVAL = 20.0          # волны по часам, живая предыдущая их не задерживает (автор 2026-09-14)
 FIRST_WAVE_DELAY = 0.0           # зашёл в триггер, первая волна сразу (автор 2026-09-14)
-ENDLESS_GROWTH = 1.12         # бюджет бесконечной волны к предыдущей
+ENDLESS_GROWTH = 1.5          # бюджет бесконечной волны к предыдущей (автор 2026-09-14)
 AIR_SPAWN_HEIGHT = 3500.0     # над землёй у кромки тумана: примерно 10 м выше макушки
 CORE_AT = (900.0, 1300.0)     # ядро базы во дворе, под открытым небом: под крышей дрон бьёт крышу
 CORE_SIZE = 300.0
 CORE_DEFEND_RADIUS = 4000.0   # нет игрока ближе 40 м: матки бьют ядро
+SHOOTER_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
+GROUND_SPAWN_R = 14000.0      # пехота выходит из тумана (fog_r 150 м) по трём подходам
+# Бесконечный пул: (класс, цена в бюджете, с какой волны, вес). Матка это бесконечные дроны, поэтому
+# она дорогая; пехотинец дешёвый и частый. Пехота с третьей волны (автор 2026-09-14).
+ENDLESS_POOL = [("carrier", 1.0, 1, 1.0), ("shooter", 0.25, 3, 3.0)]
 
 
 def step_gameplay():
@@ -491,6 +506,9 @@ def step_gameplay():
     trig.collision_component.set_box_extent(unreal.Vector(150.0, 150.0, 120.0))
     _tag(trig, TAG_GAME, "HB_SiegeStartTrigger", f)
 
+    carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
+    shooter = unreal.EditorAssetLibrary.load_blueprint_class(SHOOTER_BP)
+
     points = []
     for name, (x, y), gz in (("North", (16000.0, 0.0), lay["spawn_ground_z"]["north"]),
                              ("West", (0.0, -16000.0), lay["spawn_ground_z"]["west"])):
@@ -499,8 +517,28 @@ def step_gameplay():
                                         unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
         sp.set_editor_property("air_spawn", True)
         sp.set_editor_property("air_spawn_height", AIR_SPAWN_HEIGHT)
+        sp.set_editor_property("excluded_npc_classes", [shooter])   # воздух только маткам
         _tag(sp, TAG_GAME, "HB_CarrierSpawn_" + name, f)
         points.append(sp)
+
+    # Пехота: по одной точке на каждый наземный подход, у кромки тумана. Север это поле, юг это
+    # дорога-серпантин (точка дороги ближе всего к GROUND_SPAWN_R), запад это овраг (та же выборка).
+    # Высота снимается трассой по земле; директор всё равно проецирует пешего на навмеш.
+    def nearest_to_r(pts, r):
+        return min(pts, key=lambda p: abs(math.hypot(p[0], p[1]) - r))
+    road_pt = nearest_to_r(lay["road"], GROUND_SPAWN_R)
+    ravine_pt = nearest_to_r(lay["ravine"], GROUND_SPAWN_R)
+    for name, (x, y) in (("NorthField", (GROUND_SPAWN_R, 0.0)),
+                         ("SouthRoad", tuple(road_pt)),
+                         ("WestRavine", tuple(ravine_pt))):
+        gz = _ground_z(x, y)
+        yaw = math.degrees(math.atan2(-y, -x))
+        sp = eas.spawn_actor_from_class(unreal.ArenaSpawnPoint, unreal.Vector(x, y, gz),
+                                        unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
+        sp.set_editor_property("excluded_npc_classes", [carrier])   # земля не маткам
+        _tag(sp, TAG_GAME, "HB_GroundSpawn_" + name, f)
+        points.append(sp)
+        log("ground spawn {} at ({:.0f}, {:.0f}, {:.0f}), r={:.0f}".format(name, x, y, gz, math.hypot(x, y)))
 
     # Ядро базы: постройка с большим HP. Пока рядом нет игрока, матки роняют дроны в него, а не
     # в пешек (правило автора 2026-09-14). Ставится готовым, без чертежа: ключ его не чинит.
@@ -516,7 +554,6 @@ def step_gameplay():
     text("SiegeCore_Label", CORE_AT[0], CORE_AT[1], H + CORE_SIZE + 120.0, "ЯДРО БАЗЫ", size=50.0,
          folder=f, tag=TAG_GAME)
 
-    carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
     waves = []
     for counts in WAVES:
         w = unreal.ArenaWave()
@@ -525,14 +562,18 @@ def step_gameplay():
         e.set_editor_property("count", counts[0])
         w.set_editor_property("entries", [e])
         waves.append(w)
-    kind = unreal.SiegeEnemyType()
-    kind.set_editor_property("npc_class", carrier)
-    kind.set_editor_property("cost", 1.0)
-    kind.set_editor_property("first_wave", 1)
-    kind.set_editor_property("weight", 1.0)
+    classes = {"carrier": carrier, "shooter": shooter}
+    pool = []
+    for key, cost, first_wave, weight in ENDLESS_POOL:
+        kind = unreal.SiegeEnemyType()
+        kind.set_editor_property("npc_class", classes[key])
+        kind.set_editor_property("cost", cost)
+        kind.set_editor_property("first_wave", first_wave)
+        kind.set_editor_property("weight", weight)
+        pool.append(kind)
     sd = eas.spawn_actor_from_class(unreal.SiegeDirector, unreal.Vector(0.0, 0.0, H + 400.0))
     sd.set_editor_property("authored_waves", waves)
-    sd.set_editor_property("endless_pool", [kind])
+    sd.set_editor_property("endless_pool", pool)
     sd.set_editor_property("endless_budget_growth", ENDLESS_GROWTH)
     sd.set_editor_property("wave_interval", WAVE_INTERVAL)
     sd.set_editor_property("first_wave_delay", FIRST_WAVE_DELAY)

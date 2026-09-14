@@ -12,6 +12,8 @@
 #include "Net/UnrealNetwork.h"
 #include "SiegeCoreBuildable.h"
 #include "TimerManager.h"
+#include "Variant_Shooter/AI/FlyingDrone.h"
+#include "Variant_Shooter/AI/ShooterAIController.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 
 ASiegeDirector::ASiegeDirector()
@@ -209,6 +211,14 @@ void ASiegeDirector::ScheduleNextWave(float Delay)
 	const AGameStateBase* const GameState = World ? World->GetGameState() : nullptr;
 	const float Now = GameState ? GameState->GetServerWorldTimeSeconds() : (World ? World->GetTimeSeconds() : 0.0f);
 	NextWaveServerTime = Now + Delay;
+	if (Delay <= KINDA_SMALL_NUMBER)
+	{
+		// SetTimer with a zero rate clears the timer instead of firing it. Next tick, not now: the
+		// caller may be an overlap callback, and a wave spawning inside it is asking for trouble.
+		GetWorldTimerManager().ClearTimer(WaveTimer);
+		WaveTimer = GetWorldTimerManager().SetTimerForNextTick(this, &ASiegeDirector::StartWave);
+		return;
+	}
 	GetWorldTimerManager().SetTimer(WaveTimer, this, &ASiegeDirector::StartWave, Delay, false);
 }
 
@@ -412,6 +422,28 @@ void ASiegeDirector::SpawnOne(TSubclassOf<AShooterNPC> NPCClass)
 
 	Alive.Add(NPC);
 	NPC->OnNPCDeath.AddDynamic(this, &ASiegeDirector::OnEnemyDied);
+
+	// A walker at the fog line has no line of sight to anybody, and an NPC that has not seen a
+	// player never moves (AI_StateTree.md). Point it at the nearest one so it marches on the base;
+	// its own perception takes over from there. The carriers drive themselves and are left alone.
+	if (!NPCClass->IsChildOf(AFlyingDrone::StaticClass()))
+	{
+		if (AActor* const Nearest = CoopPlayers::GetNearest(World, NPC->GetActorLocation()))
+		{
+			if (AShooterAIController* const AIController = Cast<AShooterAIController>(NPC->GetController()))
+			{
+				AIController->SetCurrentTarget(Nearest);
+				TWeakObjectPtr<AShooterAIController> WeakAIC = AIController;
+				GetWorldTimerManager().SetTimerForNextTick([WeakAIC]()
+				{
+					if (AShooterAIController* const AIC = WeakAIC.Get())
+					{
+						AIC->ForcePerceptionUpdate();
+					}
+				});
+			}
+		}
+	}
 	UE_LOG(LogTemp, Verbose, TEXT("[SIEGE_DEBUG] %s: spawned %s at %s"), *GetName(), *NPC->GetName(), *Point->GetName());
 }
 

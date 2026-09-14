@@ -78,9 +78,9 @@ public:
 	TArray<FSiegeEnemyType> EndlessPool;
 
 	/** Budget of each endless wave over the one before. 1.0 = the same every wave (never ends);
-	 *  1.12 doubles about every six waves. */
+	 *  1.5 doubles every second wave (the author's number, 2026-09-14). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Endless", meta = (ClampMin = "1.0"))
-	float EndlessBudgetGrowth = 1.12f;
+	float EndlessBudgetGrowth = 1.5f;
 
 	/** Budget of the first endless wave. 0 = the last authored wave's cost times the growth, so the
 	 *  curve continues from where the author left it. */
@@ -95,12 +95,12 @@ public:
 
 	/** From the siege starting to the first wave (seconds). Time to look around and build. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Clock", meta = (ClampMin = "0.0", Units = "s"))
-	float FirstWaveDelay = 20.0f;
+	float FirstWaveDelay = 0.0f;
 
 	/** From one wave starting to the next (seconds). The last wave being alive does not delay it:
 	 *  they stack, and the stack is the pressure. An authored wave's DelayBeforeWave is added. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Clock", meta = (ClampMin = "1.0", Units = "s"))
-	float WaveInterval = 60.0f;
+	float WaveInterval = 20.0f;
 
 	// ==================== Spawn ====================
 
