@@ -144,6 +144,20 @@ ATurretBuildable* UBuilderComponent::GetFeedTarget() const
 	return FeedTarget.Get();
 }
 
+const ATurretBuildable* UBuilderComponent::GetFeedTurretDefaults() const
+{
+	if (Mode == EBuilderMode::Feeding)
+	{
+		return FeedTarget.Get();
+	}
+	if (Mode == EBuilderMode::PickingWeapon || Mode == EBuilderMode::Placing)
+	{
+		const UBuildableDefinition* const Def = GetDefinition(PlacingSlot);
+		return (Def && Def->ActorClass) ? Cast<ATurretBuildable>(Def->ActorClass->GetDefaultObject()) : nullptr;
+	}
+	return nullptr;
+}
+
 void UBuilderComponent::GetFeedWeapons(TArray<AShooterWeapon*>& OutWeapons) const
 {
 	OutWeapons.Reset();
@@ -354,6 +368,7 @@ void UBuilderComponent::ToggleMenu()
 	switch (Mode)
 	{
 	case EBuilderMode::Menu:
+	case EBuilderMode::PickingWeapon:
 		CloseMenu();
 		break;
 	case EBuilderMode::Placing:
@@ -393,10 +408,78 @@ void UBuilderComponent::CloseMenu()
 	}
 	DemolishHoldSlot = -1;
 	PopMapping(MenuMappingContext);
-	if (Mode == EBuilderMode::Menu)
+	if (Mode == EBuilderMode::Menu || Mode == EBuilderMode::PickingWeapon)
 	{
+		PendingFeedWeapon.Reset();
 		SetMode(EBuilderMode::Idle);
 	}
+}
+
+bool UBuilderComponent::IsTurretSlot(int32 SlotIndex) const
+{
+	const UBuildableDefinition* const Def = GetDefinition(SlotIndex);
+	return Def && Def->ActorClass && Def->ActorClass->IsChildOf(ATurretBuildable::StaticClass());
+}
+
+void UBuilderComponent::BeginWeaponPick(int32 SlotIndex)
+{
+	// The same refusals the ghost would give, first: a full slot or an empty purse should not open
+	// a gun list that leads nowhere.
+	if (CountBuilt(SlotIndex) >= GetMaxCount(SlotIndex))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] slot %d refused: limit %d reached"), SlotIndex, GetMaxCount(SlotIndex));
+		OnSlotRefused.Broadcast(SlotIndex, EBuildablePlacementResult::Blocked);
+		return;
+	}
+	if (!CanAfford(SlotIndex))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] slot %d refused: cannot afford %d metal"), SlotIndex, Buildables[SlotIndex]->MetalCost);
+		OnSlotRefused.Broadcast(SlotIndex, EBuildablePlacementResult::Blocked);
+		return;
+	}
+	TArray<AShooterWeapon*> Weapons;
+	GetFeedWeapons(Weapons);
+	if (Weapons.Num() == 0)
+	{
+		// A turret is a vice for a gun; with no gun to give there is nothing to place.
+		UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] slot %d refused: no gun to give the turret"), SlotIndex);
+		OnSlotRefused.Broadcast(SlotIndex, EBuildablePlacementResult::Blocked);
+		return;
+	}
+	PlacingSlot = SlotIndex;
+	PendingFeedWeapon.Reset();
+	// The menu context stays: the number keys now pick a gun.
+	SetMode(EBuilderMode::PickingWeapon);
+}
+
+void UBuilderComponent::PickWeaponForPlacement(int32 WeaponIndex)
+{
+	if (Mode != EBuilderMode::PickingWeapon || !IsLocallyControlled())
+	{
+		return;
+	}
+	TArray<AShooterWeapon*> Weapons;
+	GetFeedWeapons(Weapons);
+	const ATurretBuildable* const Fresh = GetFeedTurretDefaults();
+	if (!Weapons.IsValidIndex(WeaponIndex) || !Fresh)
+	{
+		return;
+	}
+	AShooterWeapon* const Weapon = Weapons[WeaponIndex];
+	int32 ViceIndex = INDEX_NONE;
+	if (!Fresh->FindViceFor(Weapon->GetClass(), ViceIndex))
+	{
+		// A heavy gun into a fresh turret: its vice opens at level 3.
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] pick: a new turret has no vice for %s"), *Weapon->GetClass()->GetName());
+		OnFeedRefused.Broadcast(WeaponIndex);
+		return;
+	}
+	const int32 SlotIndex = PlacingSlot;
+	PendingFeedWeapon = Weapon;
+	// Straight on to the ghost. BeginPlacement closes the menu, which would clear the pick, so the
+	// pick is set again after it.
+	BeginPlacement(SlotIndex);
+	PendingFeedWeapon = Weapon;
 }
 
 void UBuilderComponent::HandleSlotPressed(int32 SlotIndex)
@@ -404,6 +487,11 @@ void UBuilderComponent::HandleSlotPressed(int32 SlotIndex)
 	if (Mode == EBuilderMode::Feeding)
 	{
 		FeedWeapon(SlotIndex);
+		return;
+	}
+	if (Mode == EBuilderMode::PickingWeapon)
+	{
+		PickWeaponForPlacement(SlotIndex);
 		return;
 	}
 	if (Mode != EBuilderMode::Menu || !IsValidSlot(SlotIndex))
@@ -421,6 +509,11 @@ void UBuilderComponent::HandleSlotPressed(int32 SlotIndex)
 		return;
 	}
 
+	if (IsTurretSlot(SlotIndex))
+	{
+		BeginWeaponPick(SlotIndex);
+		return;
+	}
 	BeginPlacement(SlotIndex);
 }
 
@@ -458,6 +551,12 @@ void UBuilderComponent::HandleCancelPressed()
 	{
 		CloseFeedMenu();
 	}
+	else if (Mode == EBuilderMode::PickingWeapon)
+	{
+		// One step back: the gun list goes, the build menu is up again.
+		PendingFeedWeapon.Reset();
+		SetMode(EBuilderMode::Menu);
+	}
 }
 
 void UBuilderComponent::RequestDemolish(int32 SlotIndex)
@@ -489,6 +588,13 @@ void UBuilderComponent::BeginPlacement(int32 SlotIndex)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] slot %d refused: cannot afford %d metal"), SlotIndex, Buildables[SlotIndex]->MetalCost);
 		OnSlotRefused.Broadcast(SlotIndex, EBuildablePlacementResult::Blocked);
+		return;
+	}
+
+	if (IsTurretSlot(SlotIndex) && !PendingFeedWeapon.IsValid())
+	{
+		// A turret is never placed empty: the gun is chosen first, then the ghost.
+		BeginWeaponPick(SlotIndex);
 		return;
 	}
 
@@ -546,6 +652,7 @@ void UBuilderComponent::CancelPlacement()
 	}
 
 	PlacingSlot = -1;
+	PendingFeedWeapon.Reset();
 	SetMode(EBuilderMode::Idle);
 }
 
@@ -563,10 +670,21 @@ void UBuilderComponent::ConfirmPlacement()
 
 	const int32 SlotIndex = PlacingSlot;
 	const FTransform Transform = LastPlacementTransform;
-	// The ghost leaves on the press, not on the answer: a round trip of waiting would read as a
-	// stuck button. If the server refuses, nothing appears and the metal never moved.
+	AShooterWeapon* const Weapon = PendingFeedWeapon.Get();
+	if (IsTurretSlot(SlotIndex) && !Weapon)
+	{
+		// The gun went away while the ghost was out (dropped, taken by a pickup): no turret.
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] place refused: the chosen gun is gone"));
+		OnSlotRefused.Broadcast(SlotIndex, EBuildablePlacementResult::Blocked);
+		CancelPlacement();
+		return;
+	}
+	// The request goes first, while the gun is still holstered: on the host it runs right here,
+	// and the turret takes the gun before the hands reach for it. Then the ghost leaves on the
+	// press, not on the answer: a round trip of waiting would read as a stuck button. If the
+	// server refuses, nothing appears and the metal never moved.
+	Server_PlaceBuildable(SlotIndex, Transform, Weapon, Weapon ? Weapon->GetBulletCount() : -1);
 	CancelPlacement();
-	Server_PlaceBuildable(SlotIndex, Transform);
 }
 
 void UBuilderComponent::RotatePreview()
@@ -706,9 +824,37 @@ void UBuilderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 // ==================== Server ====================
 
-void UBuilderComponent::Server_PlaceBuildable_Implementation(int32 SlotIndex, FTransform Transform)
+void UBuilderComponent::Server_PlaceBuildable_Implementation(int32 SlotIndex, FTransform Transform, AShooterWeapon* Weapon, int32 ReportedLoadedRounds)
 {
-	SpawnBuildable(SlotIndex, Transform, true);
+	AShooterCharacter* const Character = GetCharacter();
+	if (IsTurretSlot(SlotIndex))
+	{
+		// No gun, no turret: checked before anything is spent or spawned, and checked against the
+		// donor's own list, because the client names an actor and an actor is not a proof.
+		if (!Character || !IsValid(Weapon) || Weapon->IsMeleeWeapon() || !Character->GetOwnedWeapons().Contains(Weapon))
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] place refused: %s did not name one of their guns (%s)"),
+				*GetNameSafe(Character), *GetNameSafe(Weapon));
+			return;
+		}
+	}
+	ABuildableActor* const Placed = SpawnBuildable(SlotIndex, Transform, true);
+	ATurretBuildable* const Turret = Cast<ATurretBuildable>(Placed);
+	if (Turret && !Turret->AcceptWeaponFrom(Character, ReportedLoadedRounds, Weapon))
+	{
+		// It refused after all (the gun changed hands in the same tick): a turret with nothing in
+		// it is not a turret. Take it down and give the metal back.
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s would not take %s at placement; demolished, metal returned"),
+			*Turret->GetName(), *GetNameSafe(Weapon));
+		if (AShooterPlayerState* const State = GetOwnerPlayerState())
+		{
+			if (const UBuildableDefinition* const Def = GetDefinition(SlotIndex))
+			{
+				State->AddMetal(Def->MetalCost);
+			}
+		}
+		Turret->Demolish();
+	}
 }
 
 void UBuilderComponent::Server_DemolishBuildable_Implementation(int32 SlotIndex)
@@ -806,7 +952,17 @@ ABuildableActor* UBuilderComponent::DebugPlace(int32 SlotIndex)
 		UE_LOG(LogTemp, Warning, TEXT("[BUILD_DEBUG] no floor under the aim point"));
 		return nullptr;
 	}
-	return SpawnBuildable(SlotIndex, Transform, false);
+	ABuildableActor* const Placed = SpawnBuildable(SlotIndex, Transform, false);
+	// The debug command is allowed an empty turret (it can be fed with polarity.turret.feed), but
+	// takes the held gun when there is one, so the usual test needs one command less.
+	if (ATurretBuildable* const Turret = Cast<ATurretBuildable>(Placed))
+	{
+		if (AShooterCharacter* const Owner = GetCharacter(); Owner && Owner->GetCurrentWeapon())
+		{
+			Turret->AcceptWeaponFrom(Owner, -1, nullptr);
+		}
+	}
+	return Placed;
 }
 
 // ==================== Console ====================

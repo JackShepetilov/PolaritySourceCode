@@ -39,8 +39,11 @@ enum class EBuilderMode : uint8
 	Menu,
 	/** A ghost is out, waiting for a spot. */
 	Placing,
-	/** The feed menu is up in front of a turret, waiting for a weapon to be picked. */
-	Feeding
+	/** The feed menu is up in front of a standing turret, waiting for a weapon to be picked. */
+	Feeding,
+	/** The turret slot was pressed in the build menu: the gun list is up, and the ghost waits for
+	 *  a pick. A turret is never placed empty [author, 2026-09-14]. */
+	PickingWeapon
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FBuilderModeChangedDelegate, EBuilderMode, Mode);
@@ -152,6 +155,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	bool IsFeeding() const { return Mode == EBuilderMode::Feeding; }
 
+	/** Either gun list is up: for a standing turret, or for the one about to be placed. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	bool IsPickingGun() const { return Mode == EBuilderMode::Feeding || Mode == EBuilderMode::PickingWeapon; }
+
 	// ==================== Placement ====================
 
 	/** Close the menu and bring out the ghost for a slot. Refused when the slot is full or the
@@ -195,6 +202,16 @@ public:
 	/** The turret the feed menu is open for, or null. */
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	ATurretBuildable* GetFeedTarget() const;
+
+	/** What the gun list measures its rows against: the standing turret while feeding, else the
+	 *  class defaults of the turret about to be placed (a fresh one, level 1, every vice empty).
+	 *  Null when no gun list is up. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	const ATurretBuildable* GetFeedTurretDefaults() const;
+
+	/** The gun chosen for the turret being placed, or null. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	AShooterWeapon* GetPendingFeedWeapon() const { return PendingFeedWeapon.Get(); }
 
 	/** The guns the menu offers, in hotkey order: every owned ranged weapon. Index = menu row. */
 	UFUNCTION(BlueprintPure, Category = "Builder")
@@ -259,9 +276,10 @@ protected:
 
 	/** The request. The server does not trust the transform, it checks it: room, ground, reach,
 	 *  limit, price, in that order, and refuses silently (the ghost is already gone on the client,
-	 *  the metal never moved, the weapon is back). */
+	 *  the metal never moved, the weapon is back). A turret comes with the gun chosen for it and
+	 *  is refused without one; other kinds ignore the gun. */
 	UFUNCTION(Server, Reliable)
-	void Server_PlaceBuildable(int32 SlotIndex, FTransform Transform);
+	void Server_PlaceBuildable(int32 SlotIndex, FTransform Transform, AShooterWeapon* Weapon, int32 ReportedLoadedRounds);
 
 	UFUNCTION(Server, Reliable)
 	void Server_DemolishBuildable(int32 SlotIndex);
@@ -291,6 +309,11 @@ private:
 
 	void HandleSlotPressed(int32 SlotIndex);
 	void HandleSlotReleased(int32 SlotIndex);
+
+	/** The turret slot was pressed: put the gun list up instead of the ghost. */
+	void BeginWeaponPick(int32 SlotIndex);
+	void PickWeaponForPlacement(int32 WeaponIndex);
+	bool IsTurretSlot(int32 SlotIndex) const;
 	void HandleDemolishHoldFired();
 	void HandleCancelPressed();
 
@@ -316,4 +339,7 @@ private:
 
 	/** The turret the feed menu is open for. Weak: it can die while the menu is up. */
 	TWeakObjectPtr<ATurretBuildable> FeedTarget;
+
+	/** The gun picked for the turret being placed; goes with the placement request. */
+	TWeakObjectPtr<AShooterWeapon> PendingFeedWeapon;
 };

@@ -8040,16 +8040,24 @@ bool AShooterCharacter::ReleaseWeaponToMount(AShooterWeapon* Weapon, int32& OutL
 			}
 		}
 
+		// With the gun holstered by the player (a building being placed), the next gun is not drawn
+		// here: it stays put and the draw that ends the placement brings it up, or brings nothing up
+		// when there is nothing left. Activating it now would show a gun in hidden hands.
+		const bool bHolsteredByPlayer = WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer
+			|| WeaponSwitchPhase == EWeaponSwitchPhase::StowingByPlayer;
 		CurrentWeapon = Replacement;
-		if (CurrentWeapon)
+		if (CurrentWeapon && !bHolsteredByPlayer)
 		{
 			CurrentWeapon->ActivateWeapon();
 		}
-		else
+		else if (!CurrentWeapon)
 		{
 			OnActiveWeaponChanged.Broadcast(nullptr);
 		}
-		UpdateFirstPersonMeshVisibility();
+		if (!bHolsteredByPlayer)
+		{
+			UpdateFirstPersonMeshVisibility();
+		}
 
 		if (UpgradeManager)
 		{

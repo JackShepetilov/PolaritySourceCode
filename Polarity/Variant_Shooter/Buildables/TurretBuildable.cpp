@@ -338,7 +338,9 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 	{
 		return false;
 	}
-	if (!IsActive())
+	// While rising or standing. A turret placed with its gun takes it at once, before the first
+	// frame of construction; a destroyed one takes nothing.
+	if (GetBuildableState() != EBuildableState::Active && GetBuildableState() != EBuildableState::Constructing)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused a gun: not standing (state %d)"), *GetName(), static_cast<int32>(GetBuildableState()));
 		return false;
@@ -358,8 +360,12 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 		return false;
 	}
 	// Taking the gun out of the hands mid-swing or mid-holster would leave the switch machinery
-	// pointing at nothing; a gun that is not in the hands leaves without touching it.
-	if (Held == Donor->GetCurrentWeapon() && Donor->GetWeaponSwitchPhase() != EWeaponSwitchPhase::None)
+	// pointing at nothing; a gun that is not in the hands leaves without touching it. The player's
+	// own holster is the exception: placing a building puts the gun away, and the placement hands
+	// it over while it is still away (ReleaseWeaponToMount leaves the next gun for the draw).
+	const EWeaponSwitchPhase Phase = Donor->GetWeaponSwitchPhase();
+	const bool bHolsteredByPlayer = Phase == EWeaponSwitchPhase::StowedByPlayer || Phase == EWeaponSwitchPhase::StowingByPlayer;
+	if (Held == Donor->GetCurrentWeapon() && Phase != EWeaponSwitchPhase::None && !bHolsteredByPlayer)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused: %s is mid-switch or holstered (phase %d)"),
 			*GetName(), *Donor->GetName(), static_cast<int32>(Donor->GetWeaponSwitchPhase()));

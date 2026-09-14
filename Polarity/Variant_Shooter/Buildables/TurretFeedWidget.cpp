@@ -186,7 +186,9 @@ void UTurretFeedWidget::RebuildEntries()
 void UTurretFeedWidget::RefreshEntries()
 {
 	UBuilderComponent* const Bound = Builder.Get();
-	ATurretBuildable* const Turret = Bound ? Bound->GetFeedTarget() : nullptr;
+	// A standing turret while feeding; the class defaults (fresh, level 1, empty) while picking the
+	// gun for one about to be placed.
+	const ATurretBuildable* const Turret = Bound ? Bound->GetFeedTurretDefaults() : nullptr;
 	if (!Bound || !Turret)
 	{
 		return;
@@ -194,15 +196,22 @@ void UTurretFeedWidget::RefreshEntries()
 
 	if (TitleText)
 	{
-		const UBuildableDefinition* const Definition = Turret->GetDefinition();
-		int32 Free = 0;
-		for (int32 Vice = 0; Vice < Turret->GetUnlockedViceCount(); ++Vice)
+		if (Bound->GetMode() == EBuilderMode::PickingWeapon)
 		{
-			Free += Turret->GetViceWeapon(Vice) ? 0 : 1;
+			TitleText->SetText(NSLOCTEXT("TurretFeed", "PickTitle", "Turret: pick the gun to give it"));
 		}
-		TitleText->SetText(FText::Format(NSLOCTEXT("TurretFeed", "Title", "{0}, level {1}: {2} of {3} vices free"),
-			Definition ? Definition->DisplayName : NSLOCTEXT("TurretFeed", "Turret", "Turret"),
-			FText::AsNumber(Turret->GetBuildLevel()), FText::AsNumber(Free), FText::AsNumber(Turret->GetUnlockedViceCount())));
+		else
+		{
+			const UBuildableDefinition* const Definition = Turret->GetDefinition();
+			int32 Free = 0;
+			for (int32 Vice = 0; Vice < Turret->GetUnlockedViceCount(); ++Vice)
+			{
+				Free += Turret->GetViceWeapon(Vice) ? 0 : 1;
+			}
+			TitleText->SetText(FText::Format(NSLOCTEXT("TurretFeed", "Title", "{0}, level {1}: {2} of {3} vices free"),
+				Definition ? Definition->DisplayName : NSLOCTEXT("TurretFeed", "Turret", "Turret"),
+				FText::AsNumber(Turret->GetBuildLevel()), FText::AsNumber(Free), FText::AsNumber(Turret->GetUnlockedViceCount())));
+		}
 	}
 
 	TArray<AShooterWeapon*> Weapons;
@@ -237,7 +246,7 @@ void UTurretFeedWidget::RefreshEntries()
 
 void UTurretFeedWidget::ApplyMode(EBuilderMode Mode)
 {
-	const bool bWantShown = Mode == EBuilderMode::Feeding;
+	const bool bWantShown = Mode == EBuilderMode::Feeding || Mode == EBuilderMode::PickingWeapon;
 	if (bWantShown != bMenuVisible)
 	{
 		bMenuVisible = bWantShown;
