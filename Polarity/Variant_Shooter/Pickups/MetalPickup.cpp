@@ -40,8 +40,7 @@ void AMetalPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// No lifetime timer here: BeginPlay runs for hand-placed piles too, and those must stay. Only a
-	// dropped pile expires, and every drop goes through InitBurst.
+	// Neither placed stock nor earned rewards expire.
 }
 
 void AMetalPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -64,7 +63,7 @@ void AMetalPickup::Tick(float DeltaTime)
 	if (bIsBursting)
 	{
 		BurstElapsedTime += DeltaTime;
-		const float Alpha = FMath::Clamp(BurstElapsedTime / BurstDuration, 0.0f, 1.0f);
+		const float Alpha = FMath::Clamp(BurstElapsedTime / FMath::Max(BurstDuration, 0.01f), 0.0f, 1.0f);
 		const float EasedAlpha = 1.0f - FMath::Square(1.0f - Alpha);
 
 		const FVector FlatPos = FMath::Lerp(BurstStartLocation, BurstTargetLocation, EasedAlpha);
@@ -108,23 +107,31 @@ void AMetalPickup::Tick(float DeltaTime)
 
 	// Starts slow and ramps up, the same curve the health pickup uses.
 	MagnetElapsed += DeltaTime;
-	const float SpeedAlpha = FMath::Clamp(MagnetElapsed * MagnetAcceleration / MagnetSpeed, 0.0f, 1.0f);
-	const float CurrentSpeed = FMath::Lerp(MagnetSpeed * 0.1f, MagnetSpeed, SpeedAlpha * SpeedAlpha);
+	// Distant air kills must arrive promptly too; near the player use the ordinary magnet speed.
+	const float FlightSpeed = bAutoCollectDrop ? FMath::Max(MagnetSpeed, Distance / 1.5f) : MagnetSpeed;
+	const float SafeSpeed = FMath::Max(FlightSpeed, 1.0f);
+	const float SpeedAlpha = FMath::Clamp(MagnetElapsed * MagnetAcceleration / FMath::Max(MagnetSpeed, 1.0f), 0.0f, 1.0f);
+	const float CurrentSpeed = FMath::Lerp(SafeSpeed * 0.1f, SafeSpeed, SpeedAlpha * SpeedAlpha);
 	const float MoveDistance = FMath::Min(CurrentSpeed * DeltaTime, Distance);
 	SetActorLocation(GetActorLocation() + (ToTarget / Distance) * MoveDistance);
 }
 
 void AMetalPickup::InitBurst(const FVector& TargetLocation)
 {
+	if (!HasAuthority())
+	{
+		return;
+	}
+	bAutoCollectDrop = true;
+	bAlwaysRelevant = true;
 	bIsBursting = true;
 	BurstStartLocation = GetActorLocation();
 	BurstTargetLocation = TargetLocation;
 	BurstElapsedTime = 0.0f;
 
-	if (HasAuthority())
-	{
-		GetWorldTimerManager().SetTimer(LifetimeTimer, this, &AMetalPickup::OnLifetimeExpired, Lifetime, false);
-	}
+	GetWorldTimerManager().ClearTimer(LifetimeTimer);
+	SetLifeSpan(0.0f);
+	UE_LOG(LogTemp, Log, TEXT("[METAL_DEBUG] %s auto-collect reward: %d metal"), *GetName(), Amount);
 }
 
 bool AMetalPickup::HasRoom(const AShooterCharacter* Player)
@@ -135,7 +142,7 @@ bool AMetalPickup::HasRoom(const AShooterCharacter* Player)
 
 void AMetalPickup::AcquireMagnetTarget()
 {
-	if (MagnetRadius <= 0.0f)
+	if (!bAutoCollectDrop && MagnetRadius <= 0.0f)
 	{
 		return;
 	}
@@ -146,7 +153,7 @@ void AMetalPickup::AcquireMagnetTarget()
 
 	const FVector Here = GetActorLocation();
 	AShooterCharacter* Best = nullptr;
-	float BestDistSq = FMath::Square(MagnetRadius);
+	float BestDistSq = bAutoCollectDrop ? TNumericLimits<float>::Max() : FMath::Square(MagnetRadius);
 
 	for (APawn* Pawn : Players)
 	{
@@ -223,8 +230,5 @@ void AMetalPickup::Multicast_PlayCollected_Implementation(FVector Location)
 
 void AMetalPickup::OnLifetimeExpired()
 {
-	if (HasAuthority())
-	{
-		Destroy();
-	}
+	// Also harmless for a timer left over from an older live session.
 }

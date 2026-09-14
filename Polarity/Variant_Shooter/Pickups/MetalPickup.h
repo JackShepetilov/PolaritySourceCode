@@ -45,8 +45,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Metal Pickup", meta = (ClampMin = "10.0", Units = "cm"))
 	float PickupRadius = 60.0f;
 
-	/** Seconds on the floor before a DROPPED pile disappears. A pile placed on the level by hand
-	 *  never expires: it is part of the level, not loot from a fight. */
+	/** Legacy setting retained for existing assets. Metal rewards no longer expire. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Metal Pickup", meta = (ClampMin = "1.0", Units = "s"))
 	float Lifetime = 30.0f;
 
@@ -75,8 +74,7 @@ public:
 
 	// ==================== Spawning ====================
 
-	/** Start the arc from where the pile was spawned to TargetLocation. No collection mid-flight.
-	 *  Called by ULootDropComponent, which is the only thing that drops piles. */
+	/** Brief local scatter, then automatic collection from any distance. No floor is required. */
 	void InitBurst(const FVector& TargetLocation);
 
 protected:
@@ -90,8 +88,7 @@ private:
 	/** True when this player can take at least one unit right now. */
 	static bool HasRoom(const AShooterCharacter* Player);
 
-	/** Nearest living player with room inside MagnetRadius. Not just the nearest player: when the
-	 *  nearest one is full, the next one should still get the pile. */
+	/** Nearest living player with room. Dropped rewards ignore MagnetRadius; placed stock does not. */
 	void AcquireMagnetTarget();
 
 	/** Give as much as fits. Destroys the pile when it is empty, keeps the rest otherwise. */
@@ -105,6 +102,7 @@ private:
 	void OnLifetimeExpired();
 
 	bool bIsBursting = false;
+	bool bAutoCollectDrop = false;
 	FVector BurstStartLocation = FVector::ZeroVector;
 	FVector BurstTargetLocation = FVector::ZeroVector;
 	float BurstElapsedTime = 0.0f;

@@ -134,7 +134,22 @@ void ULootDropComponent::SpawnEntry(UWorld* World, const FLootDropEntry& Entry, 
 	if (Class->IsChildOf(AHealthPickup::StaticClass()) || Class->IsChildOf(AMetalPickup::StaticClass()))
 	{
 		TArray<FVector> Points;
-		ComputeScatterPoints(World, Context.Location, Entry.Count, InScatterRadius, InFloorOffset, Points);
+		if (Class->IsChildOf(AMetalPickup::StaticClass()))
+		{
+			// Coins scatter briefly at the kill, then fly to a player. Do not trace for a floor:
+			// an airborne kill can be above a cliff or outside the old 50 m trace range.
+			const float StartAngle = FMath::FRandRange(0.0f, 2.0f * PI);
+			for (int32 Index = 0; Index < Entry.Count; ++Index)
+			{
+				const float Angle = StartAngle + 2.0f * PI * Index / Entry.Count;
+				Points.Add(Context.Location + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0f)
+					* FMath::Clamp(InScatterRadius, 0.0f, 150.0f));
+			}
+		}
+		else
+		{
+			ComputeScatterPoints(World, Context.Location, Entry.Count, InScatterRadius, InFloorOffset, Points);
+		}
 
 		FActorSpawnParameters Params;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
