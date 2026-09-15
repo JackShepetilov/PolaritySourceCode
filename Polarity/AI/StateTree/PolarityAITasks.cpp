@@ -1822,7 +1822,8 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 		// structurally too late: the boundary is crossed at duel range, so the entire slide happened
 		// on the far side of the ring and carried the NPC straight through it. It now starts
 		// SlideLeadTime before arrival, from the sprint block below, and brakes onto the spot.
-		if (Apex && Data.PreviousPhase == EShooterPushPhase::Sprint)
+		if (Apex && (Data.PreviousPhase == EShooterPushPhase::Sprint
+			|| Data.PreviousPhase == EShooterPushPhase::Approach))
 		{
 			Apex->StopSprint();
 		}
@@ -1856,6 +1857,28 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 		Data.PreviousPhase = Data.Phase;
 	}
 
+	// Unseen approach is travel, not the committed close-range charge. LOS can change without
+	// a phase edge, so update the sprint key every tick and release it as soon as combat is visible.
+	const bool bHasLOS = Data.NPC->HasLineOfSightTo(Data.Target);
+	const UEnemyCombatProfile* const ApproachProfile = Data.NPC->GetCombatProfile();
+	const bool bSprintApproach = Data.Phase == EShooterPushPhase::Approach
+		&& !Data.bNeverWithdraw && !bHasLOS
+		&& (!ApproachProfile || ApproachProfile->bSprintWhenPushing);
+	if (Data.Phase == EShooterPushPhase::Approach)
+	{
+		if (UApexMovementComponent* const ApexApproach = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+		{
+			if (bSprintApproach && !ApexApproach->IsSliding())
+			{
+				ApexApproach->StartSprint();
+			}
+			else
+			{
+				ApexApproach->StopSprint();
+			}
+		}
+	}
+
 	// Body rotation, every tick and not just on the phase edge, for the same drift reason as the
 	// focus above.
 	//
@@ -1878,8 +1901,8 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 	// aimed up to 57 degrees off the player while the shots themselves still went to the player.
 	// That is the "fires a burst that does not come out parallel to the barrel".
 	const UApexMovementComponent* const ApexRotation = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
-	const bool bChargingOnFoot = Data.Phase == EShooterPushPhase::Sprint
-		&& !Data.bFireWhileSprinting
+	const bool bChargingOnFoot = (bSprintApproach || (Data.Phase == EShooterPushPhase::Sprint
+		&& !Data.bFireWhileSprinting))
 		&& !(ApexRotation && ApexRotation->IsSliding());
 
 	SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ !bChargingOnFoot);
@@ -1991,7 +2014,7 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 				(Apex && Apex->MovementSettings) ? 1 : 0,
 				Apex ? static_cast<int32>(Apex->IsSprinting()) : 0,
 				Apex ? static_cast<int32>(Apex->IsSliding()) : 0,
-				Data.NPC->HasLineOfSightTo(Data.Target) ? 1 : 0,
+				bHasLOS ? 1 : 0,
 				Data.bWithdrawing ? 1 : 0);
 		}
 	}
@@ -2054,7 +2077,7 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 		break;
 	}
 
-	if (bWantsFire && Data.NPC->HasLineOfSightTo(Data.Target))
+	if (bWantsFire && bHasLOS)
 	{
 		if (!Data.bIsShooting)
 		{
