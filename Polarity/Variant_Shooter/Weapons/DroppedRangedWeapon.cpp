@@ -595,8 +595,7 @@ void ADroppedRangedWeapon::CompletePull()
 			AddedWeapon->bWasYanked = true;
 			// Enemy drops have a finite initial reserve. The player may spend it, but it never
 			// silently turns into the regenerating base energy weapon.
-			AddedWeapon->bFiniteEnergyReserve = AddedWeapon->bRegeneratingReserve;
-			AddedWeapon->bRegeneratingReserve = false;
+			AddedWeapon->ConfigureFiniteEnergyReserve();
 			AddedWeapon->SourceYankDropClass = GetClass();
 			// Kept so throwing the gun away puts back a drop that can be picked up again.
 			AddedWeapon->SourceDropCharge = GetCharge();

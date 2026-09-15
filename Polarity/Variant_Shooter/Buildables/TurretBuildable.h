@@ -158,6 +158,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
 	int32 MetalPerRound = 1;
 
+	/** Bundle size bought for one metal, by weapon class.  A parent class covers its children;
+	 *  leave absent for the one-round default.  This makes cheap bullets tunable without floats. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
+	TMap<TSubclassOf<AShooterWeapon>, int32> RoundsPerMetalByWeapon;
+
 	/** Total metal one wrench hit may invest, shared by repair, ammo and upgrade. */
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "0"))
 	int32 WrenchMetalBudget = 28;
@@ -328,6 +333,7 @@ private:
 	static float ProjectileSpeedOf(const AShooterWeapon* Weapon);
 	static float ExplosionRadiusOf(const AShooterWeapon* Weapon);
 	int32 ReserveCapacityOf(int32 ViceIndex) const;
+	int32 RoundsPerMetalFor(const AShooterWeapon* Weapon) const;
 	TSubclassOf<ADroppedRangedWeapon> ResolveDropClass(const AShooterWeapon* Weapon) const;
 	APawn* GetOwnerPawn() const;
 	AShooterCharacter* GetOwnerCharacter() const;

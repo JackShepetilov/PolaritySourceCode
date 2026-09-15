@@ -296,6 +296,22 @@ int32 ATurretBuildable::ReserveCapacityOf(int32 ViceIndex) const
 	return Weapon ? FMath::Max(0, ReserveMagazines) * FMath::Max(1, Weapon->GetMagazineSize()) : 0;
 }
 
+int32 ATurretBuildable::RoundsPerMetalFor(const AShooterWeapon* Weapon) const
+{
+	if (!Weapon)
+	{
+		return 1;
+	}
+	for (const TPair<TSubclassOf<AShooterWeapon>, int32>& Pair : RoundsPerMetalByWeapon)
+	{
+		if (Pair.Key && Weapon->IsA(Pair.Key))
+		{
+			return FMath::Max(1, Pair.Value);
+		}
+	}
+	return 1;
+}
+
 TSubclassOf<ADroppedRangedWeapon> ATurretBuildable::ResolveDropClass(const AShooterWeapon* Weapon) const
 {
 	if (!Weapon)
@@ -600,18 +616,20 @@ bool ATurretBuildable::OnWrenchHitExtra(AShooterPlayerState* Hitter, int32& Rema
 		const AShooterWeapon* const ViceWeapon = GetViceWeapon(Index);
 		const int32 Magazine = ViceWeapon ? FMath::Max(1, ViceWeapon->GetMagazineSize()) : 0;
 		const int32 Room = ReserveCapacityOf(Index) + Magazine - (ViceRounds[Index] + ViceReserve[Index]);
-		const int32 Affordable = RemainingBudget / MetalPerRound;
+		const int32 Bundle = RoundsPerMetalFor(ViceWeapon);
+		const int32 Affordable = (RemainingBudget / MetalPerRound) * Bundle;
 		const int32 Rounds = FMath::Min3(RoundsPerWrenchHit - Bought, Room, Affordable);
 		if (Rounds <= 0)
 		{
 			continue;
 		}
-		if (!Hitter->TrySpendMetal(Rounds * MetalPerRound))
+		const int32 MetalCost = FMath::DivideAndRoundUp(Rounds, Bundle) * MetalPerRound;
+		if (!Hitter->TrySpendMetal(MetalCost))
 		{
 			continue;
 		}
 		ViceReserve[Index] += Rounds;
-		RemainingBudget -= Rounds * MetalPerRound;
+		RemainingBudget -= MetalCost;
 		Bought += Rounds;
 		if (ViceRounds[Index] <= 0 && Vices[Index].ReloadEndTime < 0.0f)
 		{

@@ -5085,6 +5085,26 @@ void AShooterWeapon::SetEnergyReserve(int32 Rounds)
 	UE_LOG(LogTemp, Log, TEXT("[ENERGY_AMMO] %s: reserve set to %d/%d"), *GetName(), EnergyReserve, Capacity);
 }
 
+void AShooterWeapon::ConfigureFiniteEnergyReserve()
+{
+	if (!HasAuthority() || IsMeleeWeapon())
+	{
+		return;
+	}
+
+	bRegeneratingReserve = false;
+	bFiniteEnergyReserve = true;
+	GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
+}
+
+int32 AShooterWeapon::GetDispenserFuelValue(int32 LoadedRounds, int32 ReserveRounds) const
+{
+	const int32 Rounds = FMath::Max(0, LoadedRounds) + FMath::Max(0, ReserveRounds);
+	const int32 FullRounds = FMath::Max(1, GetMagazineSize() + GetEnergyReserveCapacity());
+	const float AmmoFraction = FMath::Clamp(static_cast<float>(Rounds) / FullRounds, 0.0f, 1.0f);
+	return FMath::Max(0, EmptyWeaponFuelValue + FMath::RoundToInt(FullAmmoFuelValue * AmmoFraction));
+}
+
 void AShooterWeapon::PauseEnergyRegen(float ExtraSeconds)
 {
 	if (!HasAuthority() || !UsesEnergyReserve())

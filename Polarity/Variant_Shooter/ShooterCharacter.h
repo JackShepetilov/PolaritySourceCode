@@ -867,6 +867,8 @@ protected:
 	 *  player would stand there holding nothing forever. For the draw half it IS the clock, since
 	 *  nothing gameplay-critical has to land on an exact frame there. */
 	FTimerHandle WeaponSwitchTimer;
+	/** Starts a paused reload during the authored portion of the draw instead of after it. */
+	FTimerHandle ReloadResumeTimer;
 
 	/** The trigger was held while the swap ran. The shot is deferred rather than dropped, the same
 	 *  bargain the sprint-out gate makes: let go and it is forgotten, keep holding and it fires the

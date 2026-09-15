@@ -3,6 +3,7 @@
 #include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
+#include "Net/UnrealNetwork.h"
 
 ADispenserBuildable::ADispenserBuildable()
 {
@@ -15,7 +16,51 @@ void ADispenserBuildable::AddFuel(int32 Amount)
 	{
 		return;
 	}
-	Fuel = FMath::Max(0, Fuel + Amount);
+	Fuel = FMath::Clamp(Fuel + Amount, 0, MaxFuel);
+	OnBuildableChanged.Broadcast(this);
+}
+
+bool ADispenserBuildable::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeapon* Weapon)
+{
+	if (!HasAuthority() || !Donor || !Weapon || Weapon->IsMeleeWeapon() || !IsActive())
+	{
+		return false;
+	}
+
+	const float Reach = ServiceRadius + 150.0f;
+	if (FVector::DistSquared(Donor->GetActorLocation(), GetActorLocation()) > FMath::Square(Reach))
+	{
+		return false;
+	}
+
+	int32 Loaded = 0;
+	int32 Reserve = -1;
+	if (!Donor->ReleaseWeaponToMount(Weapon, Loaded, Reserve))
+	{
+		return false;
+	}
+
+	// An endless class weapon has no removable reserve.  Its chassis still has its tuned value;
+	// its default full reserve is used solely for the authored initial-price ratio.
+	if (Reserve < 0)
+	{
+		Reserve = Weapon->UsesEnergyReserve() ? Weapon->GetEnergyReserveCapacity() : 0;
+	}
+	AddFuel(Weapon->GetDispenserFuelValue(Loaded, Reserve));
+	UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] %s sacrificed %s for %d fuel"),
+		*Donor->GetName(), *GetNameSafe(Weapon), Fuel);
+	return true;
+}
+
+void ADispenserBuildable::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(ADispenserBuildable, Fuel);
+}
+
+void ADispenserBuildable::OnRep_Fuel()
+{
+	OnBuildableChanged.Broadcast(this);
 }
 
 void ADispenserBuildable::TickActive(float DeltaSeconds)

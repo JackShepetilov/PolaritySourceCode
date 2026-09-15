@@ -333,51 +333,50 @@ EBuildableWrenchResult ABuildableActor::ReceiveWrenchHit(AShooterPlayerState* Hi
 		BoostMultiplier = Definition->WrenchBuildBoost;
 		Result = EBuildableWrenchResult::SpedUpConstruction;
 	}
-	else if (Health < MaxHealth - 0.5f && Hitter)
+	else
 	{
-		// Repair: as much as one hit puts back, capped by what is missing and by what the hitter
-		// can pay for at RepairHealthPerMetal. Partial when short of metal, nothing when broke.
-		// Half a point missing is the floor: float error left 149.99 under 150, and a hit on a
-		// whole building cost one metal for no repair.
-		const float Missing = MaxHealth - Health;
-		const float Wanted = FMath::Min(Definition->WrenchRepairHealth, Missing);
-		const int32 MetalNeeded = FMath::CeilToInt(Wanted / Definition->RepairHealthPerMetal);
-		const int32 MetalSpent = FMath::Min(MetalNeeded, RemainingBudget);
-		if (MetalSpent > 0 && Hitter->TrySpendMetal(MetalSpent))
+		// One hit has one wallet budget.  Repair claims first, then a subclass may buy ammunition
+		// from the exact remainder, and only the remainder after that can advance an upgrade.
+		if (Health < MaxHealth - 0.5f && Hitter)
 		{
-			const float Healed = FMath::Min(Wanted, MetalSpent * Definition->RepairHealthPerMetal);
-			SetHealth(Health + Healed);
-			RemainingBudget -= MetalSpent;
-			Result = EBuildableWrenchResult::Repaired;
-			UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] %s repaired %.0f for %d metal by %s -> %.0f/%.0f"),
-				*GetName(), Healed, MetalSpent, *Hitter->GetPlayerName(), Health, MaxHealth);
-		}
-	}
-	else if (OnWrenchHitExtra(Hitter, RemainingBudget))
-	{
-		Result = EBuildableWrenchResult::Repaired;
-	}
-	else if (Hitter && BuildLevel < Definition->GetMaxLevel())
-	{
-		// Upgrade: a fixed slice of metal per hit, all or nothing, until the level is paid for.
-		const int32 Cost = GetUpgradeCost();
-		const int32 Slice = FMath::Min3(Definition->WrenchUpgradeMetal, Cost - UpgradeMetal, RemainingBudget);
-		if (Slice > 0 && Hitter->TrySpendMetal(Slice))
-		{
-			UpgradeMetal += Slice;
-			RemainingBudget -= Slice;
-			Result = EBuildableWrenchResult::UpgradeProgress;
-			if (UpgradeMetal >= Cost)
+			const float Missing = MaxHealth - Health;
+			const float Wanted = FMath::Min(Definition->WrenchRepairHealth, Missing);
+			const int32 MetalNeeded = FMath::CeilToInt(Wanted / Definition->RepairHealthPerMetal);
+			const int32 MetalSpent = FMath::Min(MetalNeeded, RemainingBudget);
+			if (MetalSpent > 0 && Hitter->TrySpendMetal(MetalSpent))
 			{
-				BuildLevel += 1;
-				UpgradeMetal = 0;
-				MaxHealth = Definition->GetLevelStats(BuildLevel).MaxHealth;
-				// TF2 hands a fresh level full health, and so does this.
-				SetHealth(MaxHealth);
-				OnLevelChanged(BuildLevel);
-				BP_OnLevelChanged(BuildLevel);
-				Result = EBuildableWrenchResult::Upgraded;
-				UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] %s upgraded to level %d by %s"), *GetName(), BuildLevel, *Hitter->GetPlayerName());
+				const float Healed = FMath::Min(Wanted, MetalSpent * Definition->RepairHealthPerMetal);
+				SetHealth(Health + Healed);
+				RemainingBudget -= MetalSpent;
+				Result = EBuildableWrenchResult::Repaired;
+				UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] %s repaired %.0f for %d metal by %s -> %.0f/%.0f"),
+					*GetName(), Healed, MetalSpent, *Hitter->GetPlayerName(), Health, MaxHealth);
+			}
+		}
+		if (OnWrenchHitExtra(Hitter, RemainingBudget) && Result == EBuildableWrenchResult::Nothing)
+		{
+			Result = EBuildableWrenchResult::Repaired;
+		}
+		if (Hitter && BuildLevel < Definition->GetMaxLevel())
+		{
+			const int32 Cost = GetUpgradeCost();
+			const int32 Slice = FMath::Min3(Definition->WrenchUpgradeMetal, Cost - UpgradeMetal, RemainingBudget);
+			if (Slice > 0 && Hitter->TrySpendMetal(Slice))
+			{
+				UpgradeMetal += Slice;
+				RemainingBudget -= Slice;
+				Result = EBuildableWrenchResult::UpgradeProgress;
+				if (UpgradeMetal >= Cost)
+				{
+					BuildLevel += 1;
+					UpgradeMetal = 0;
+					MaxHealth = Definition->GetLevelStats(BuildLevel).MaxHealth;
+					SetHealth(MaxHealth);
+					OnLevelChanged(BuildLevel);
+					BP_OnLevelChanged(BuildLevel);
+					Result = EBuildableWrenchResult::Upgraded;
+					UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] %s upgraded to level %d by %s"), *GetName(), BuildLevel, *Hitter->GetPlayerName());
+				}
 			}
 		}
 	}

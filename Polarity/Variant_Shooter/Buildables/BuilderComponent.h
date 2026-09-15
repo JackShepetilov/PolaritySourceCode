@@ -23,6 +23,7 @@ class ABuildablePreview;
 class AShooterCharacter;
 class AShooterWeapon;
 class ATurretBuildable;
+class ADispenserBuildable;
 class AShooterPlayerState;
 class UEnhancedInputComponent;
 class UEnhancedInputLocalPlayerSubsystem;
@@ -220,6 +221,7 @@ public:
 	/** The turret of the player's side under the aim, within its FeedReachCm, or null. */
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	ATurretBuildable* FindTurretUnderAim() const;
+	ADispenserBuildable* FindDispenserUnderAim() const;
 
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	int32 GetPlacingSlot() const { return PlacingSlot; }
@@ -287,6 +289,9 @@ protected:
 	/** The server checks everything again (reach, side, room) and takes the gun. */
 	UFUNCTION(Server, Reliable)
 	void Server_FeedTurret(ATurretBuildable* Turret, AShooterWeapon* Weapon, int32 ReportedLoadedRounds);
+
+	UFUNCTION(Server, Reliable)
+	void Server_FuelDispenser(ADispenserBuildable* Dispenser, AShooterWeapon* Weapon);
 
 private:
 

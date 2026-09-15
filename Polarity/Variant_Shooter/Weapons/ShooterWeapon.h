@@ -1541,6 +1541,21 @@ public:
 	 *  only: a pickup deciding what the gun arrives with. */
 	void SetEnergyReserve(int32 Rounds);
 
+	/** Turn a freshly captured enemy gun into a finite-reserve weapon.  This is deliberately a
+	 *  server-side operation: a client may choose to capture a drop, but it may not turn a weapon
+	 *  into a self-refilling one by changing its local copy. */
+	void ConfigureFiniteEnergyReserve();
+
+	/** Value yielded when this physical weapon is sacrificed to a dispenser.  Empty chassis and a
+	 *  full ammunition load are tuned separately per weapon class; 60 + 40 gives the requested
+	 *  60/40 full-weapon split and partial ammunition scales linearly. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0"))
+	int32 EmptyWeaponFuelValue = 60;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0"))
+	int32 FullAmmoFuelValue = 40;
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetDispenserFuelValue(int32 LoadedRounds, int32 ReserveRounds) const;
+
 	/** Hold the refill back: EnergyRegenDelay plus ExtraSeconds from now. Server only, and a no-op
 	 *  for anything that is not an energy weapon, so both report paths can call it blindly. */
 	void PauseEnergyRegen(float ExtraSeconds = 0.0f);
@@ -1633,6 +1648,8 @@ public:
 	void CancelReload();
 	void SuspendReloadForHolster();
 	void ResumeReloadAfterEquip();
+	bool HasPendingReloadResume() const { return bReloadResumePending && !bReloadCommitted; }
+	float GetReloadResumeEquipStart() const { return ReloadResumeEquipStart; }
 
 	/** Commit the loaded rounds at the authored bolt-click notify. Safe to call more than once. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")

@@ -2817,6 +2817,17 @@ void AShooterCharacter::DrawWeaponFromEmptyHands(AShooterWeapon* Weapon)
 		CurrentWeapon->GetDrawPlayRate());
 
 	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+	if (CurrentWeapon->HasPendingReloadResume())
+	{
+		const float ResumeAt = DrawLength * FMath::Clamp(CurrentWeapon->GetReloadResumeEquipStart(), 0.0f, 1.0f);
+		GetWorldTimerManager().SetTimer(ReloadResumeTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (WeaponSwitchPhase == EWeaponSwitchPhase::Drawing && CurrentWeapon)
+			{
+				CurrentWeapon->ResumeReloadAfterEquip();
+			}
+		}), FMath::Max(0.0f, ResumeAt), false);
+	}
 
 	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
 		DrawLength, false);
@@ -3155,6 +3166,7 @@ void AShooterCharacter::BeginWeaponDraw()
 void AShooterCharacter::FinishWeaponDraw()
 {
 	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+	GetWorldTimerManager().ClearTimer(ReloadResumeTimer);
 
 	WeaponSwitchPhase = EWeaponSwitchPhase::None;
 	PendingWeapon = nullptr;
@@ -3411,6 +3423,7 @@ void AShooterCharacter::DrawWeaponAfterMelee(float SpeedMultiplier)
 void AShooterCharacter::CancelWeaponSwitch()
 {
 	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+	GetWorldTimerManager().ClearTimer(ReloadResumeTimer);
 
 	WeaponSwitchPhase = EWeaponSwitchPhase::None;
 	PendingWeapon = nullptr;

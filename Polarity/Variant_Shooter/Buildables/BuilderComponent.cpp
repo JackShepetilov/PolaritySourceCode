@@ -5,6 +5,7 @@
 #include "BuildableActor.h"
 #include "BuildablePreview.h"
 #include "TurretBuildable.h"
+#include "DispenserBuildable.h"
 #include "Camera/CameraComponent.h"
 #include "CollisionQueryParams.h"
 #include "Coop/CoopPlayers.h"
@@ -139,6 +140,26 @@ ATurretBuildable* UBuilderComponent::FindTurretUnderAim() const
 	return Turret;
 }
 
+ADispenserBuildable* UBuilderComponent::FindDispenserUnderAim() const
+{
+	const AShooterCharacter* const Character = GetCharacter();
+	if (!Character || !GetWorld())
+	{
+		return nullptr;
+	}
+	FVector Start, End;
+	Character->GetAimRay(1000.0f, Start, End);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DispenserFuelAim), false);
+	Params.AddIgnoredActor(Character);
+	FHitResult Hit;
+	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	{
+		return nullptr;
+	}
+	ADispenserBuildable* const Dispenser = Cast<ADispenserBuildable>(Hit.GetActor());
+	return Dispenser && !Dispenser->IsDestroyed() && Hit.Distance <= Dispenser->ServiceRadius ? Dispenser : nullptr;
+}
+
 ATurretBuildable* UBuilderComponent::GetFeedTarget() const
 {
 	return FeedTarget.Get();
@@ -194,6 +215,17 @@ void UBuilderComponent::ToggleFeedMenu()
 	}
 	const AShooterCharacter* const Character = GetCharacter();
 	ATurretBuildable* const Turret = FindTurretUnderAim();
+	if (!Turret)
+	{
+		if (ADispenserBuildable* const Dispenser = FindDispenserUnderAim())
+		{
+			if (AShooterWeapon* const Weapon = Character ? Character->GetCurrentWeapon() : nullptr; Weapon && !Weapon->IsMeleeWeapon())
+			{
+				Server_FuelDispenser(Dispenser, Weapon);
+			}
+			return;
+		}
+	}
 	if (!Character || !Turret)
 	{
 		// Say what the aim did find, so "F does nothing" reads as "you were 4 m away" or "you were
@@ -288,6 +320,15 @@ void UBuilderComponent::Server_FeedTurret_Implementation(ATurretBuildable* Turre
 		return;
 	}
 	Turret->AcceptWeaponFrom(Character, ReportedLoadedRounds, Weapon);
+}
+
+void UBuilderComponent::Server_FuelDispenser_Implementation(ADispenserBuildable* Dispenser, AShooterWeapon* Weapon)
+{
+	AShooterCharacter* const Character = GetCharacter();
+	if (Character && Dispenser && !Dispenser->IsDestroyed())
+	{
+		Dispenser->AcceptWeaponForFuel(Character, Weapon);
+	}
 }
 
 UEnhancedInputLocalPlayerSubsystem* UBuilderComponent::ResolveInputSubsystem()
