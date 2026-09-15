@@ -2232,8 +2232,7 @@ void AShooterWeapon::DeactivateWeapon()
 	// ensure we're no longer firing this weapon while deactivated
 	StopFiring();
 
-	// a reload the player switched away from does not finish behind their back
-	CancelReload();
+	SuspendReloadForHolster();
 
 	// hide the weapon
 	SetActorHiddenInGame(true);
@@ -4936,6 +4935,55 @@ void AShooterWeapon::CancelReload()
 		*GetName(), CurrentBullets, MagazineSize);
 }
 
+void AShooterWeapon::SuspendReloadForHolster()
+{
+	if (!bIsReloading) return;
+	const UAnimMontage* Montage = GetActiveReloadMontage();
+	float Progress = GetReloadProgress();
+	if (AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (USkeletalMeshComponent* Mesh = Character->GetFirstPersonMesh())
+		{
+			if (UAnimInstance* Anim = Mesh->GetAnimInstance(); Anim && Montage && Anim->Montage_IsPlaying(Montage))
+			{
+				Progress = FMath::Clamp(Anim->Montage_GetPosition(Montage) / FMath::Max(Montage->GetPlayLength(), KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+			}
+		}
+	}
+	SuspendedReloadProgress = Progress;
+	bReloadResumePending = true;
+	bIsReloading = false;
+	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
+}
+
+void AShooterWeapon::ResumeReloadAfterEquip()
+{
+	if (!bReloadResumePending || bReloadCommitted || !CanReload())
+	{
+		bReloadResumePending = false;
+		return;
+	}
+	bReloadResumePending = false;
+	bIsReloading = true;
+	bReloadCommitted = false;
+	PlayReloadStage(ShellStage);
+	const float Remaining = FMath::Max(0.01f, GetActiveReloadTime() * (1.0f - SuspendedReloadProgress));
+	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, Remaining, false);
+	if (AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
+	{
+		if (USkeletalMeshComponent* Mesh = Character->GetFirstPersonMesh())
+		{
+			if (UAnimInstance* Anim = Mesh->GetAnimInstance())
+			{
+				if (UAnimMontage* Montage = GetActiveReloadMontage())
+				{
+					Anim->Montage_SetPosition(Montage, SuspendedReloadProgress * Montage->GetPlayLength());
+				}
+			}
+		}
+	}
+}
+
 void AShooterWeapon::CommitReloadFromNotify()
 {
 	// The named bolt-click notify is authoritative for the visual reload moment. The timer remains
@@ -5009,7 +5057,7 @@ bool AShooterWeapon::UsesEnergyReserve() const
 	// The owner decides, not the class: the same rifle is energy in a player's hands and endless in
 	// an NPC's. By type rather than IsPlayerControlled, which is false on the server between spawn
 	// and possession and would let a freshly granted gun miss its reserve.
-	return bRegeneratingReserve && !IsMeleeWeapon() && Cast<AShooterCharacter>(PawnOwner) != nullptr;
+	return (bRegeneratingReserve || bFiniteEnergyReserve) && !IsMeleeWeapon() && Cast<AShooterCharacter>(PawnOwner) != nullptr;
 }
 
 void AShooterWeapon::SetEnergyReserve(int32 Rounds)
@@ -5056,6 +5104,10 @@ void AShooterWeapon::PauseEnergyRegen(float ExtraSeconds)
 
 void AShooterWeapon::ArmEnergyRegen(float FirstDelay)
 {
+	if (!bRegeneratingReserve)
+	{
+		return;
+	}
 	// One round at a time, at whatever rate refills a whole magazine in EnergySecondsPerMagazine.
 	// Worked out from the live MagazineSize, so a bigger magazine refills faster in rounds per
 	// second and takes the same time per magazine, which is the Apex rule.
@@ -5068,7 +5120,7 @@ void AShooterWeapon::ArmEnergyRegen(float FirstDelay)
 void AShooterWeapon::TickEnergyRegen()
 {
 	const int32 Capacity = GetEnergyReserveCapacity();
-	if (!UsesEnergyReserve() || EnergyReserve >= Capacity)
+	if (!bRegeneratingReserve || !UsesEnergyReserve() || EnergyReserve >= Capacity)
 	{
 		GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
 		return;

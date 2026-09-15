@@ -3158,6 +3158,10 @@ void AShooterCharacter::FinishWeaponDraw()
 
 	WeaponSwitchPhase = EWeaponSwitchPhase::None;
 	PendingWeapon = nullptr;
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->ResumeReloadAfterEquip();
+	}
 
 	// The shot the player asked for while their hands were busy. Routed back through DoStartFiring
 	// so it re-checks everything else that can veto a shot; the phase is already None, so it cannot

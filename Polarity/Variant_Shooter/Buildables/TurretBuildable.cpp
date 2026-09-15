@@ -578,7 +578,7 @@ void ATurretBuildable::OnLevelChanged(int32 NewLevel)
 	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s level %d: %d vice(s) open"), *GetName(), NewLevel, GetUnlockedViceCount());
 }
 
-bool ATurretBuildable::OnWrenchHitExtra(AShooterPlayerState* Hitter)
+bool ATurretBuildable::OnWrenchHitExtra(AShooterPlayerState* Hitter, int32& RemainingBudget)
 {
 	if (!Hitter || MetalPerRound <= 0)
 	{
@@ -600,7 +600,7 @@ bool ATurretBuildable::OnWrenchHitExtra(AShooterPlayerState* Hitter)
 		const AShooterWeapon* const ViceWeapon = GetViceWeapon(Index);
 		const int32 Magazine = ViceWeapon ? FMath::Max(1, ViceWeapon->GetMagazineSize()) : 0;
 		const int32 Room = ReserveCapacityOf(Index) + Magazine - (ViceRounds[Index] + ViceReserve[Index]);
-		const int32 Affordable = Hitter->GetMetal() / MetalPerRound;
+		const int32 Affordable = RemainingBudget / MetalPerRound;
 		const int32 Rounds = FMath::Min3(RoundsPerWrenchHit - Bought, Room, Affordable);
 		if (Rounds <= 0)
 		{
@@ -611,6 +611,7 @@ bool ATurretBuildable::OnWrenchHitExtra(AShooterPlayerState* Hitter)
 			continue;
 		}
 		ViceReserve[Index] += Rounds;
+		RemainingBudget -= Rounds * MetalPerRound;
 		Bought += Rounds;
 		if (ViceRounds[Index] <= 0 && Vices[Index].ReloadEndTime < 0.0f)
 		{

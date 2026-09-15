@@ -158,6 +158,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
 	int32 MetalPerRound = 1;
 
+	/** Total metal one wrench hit may invest, shared by repair, ammo and upgrade. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "0"))
+	int32 WrenchMetalBudget = 28;
+
 	/** Most rounds one wrench hit buys, across all vices. TF2: 40. */
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
 	int32 RoundsPerWrenchHit = 40;
@@ -256,7 +260,8 @@ protected:
 	// ==================== ABuildableActor hooks ====================
 
 	virtual void TickActive(float DeltaSeconds) override;
-	virtual bool OnWrenchHitExtra(AShooterPlayerState* Hitter) override;
+	virtual bool OnWrenchHitExtra(AShooterPlayerState* Hitter, int32& RemainingBudget) override;
+	virtual int32 GetWrenchMetalBudget() const override { return WrenchMetalBudget; }
 	virtual void OnLevelChanged(int32 NewLevel) override;
 	virtual void OnDestroyed_Native() override;
 

@@ -202,7 +202,11 @@ protected:
 
 	/** A wrench hit that neither sped construction nor repaired anything. Return true to say the hit
 	 *  was used (a sentry restocking its shells), false to let it go into the upgrade. Server only. */
-	virtual bool OnWrenchHitExtra(AShooterPlayerState* Hitter) { return false; }
+	/** Subclasses consume from RemainingBudget for their own resources (ammo, fuel, etc.). */
+	virtual bool OnWrenchHitExtra(AShooterPlayerState* Hitter, int32& RemainingBudget) { return false; }
+
+	/** -1 keeps legacy unlimited-per-hit behavior; specialized buildings may bound the hit. */
+	virtual int32 GetWrenchMetalBudget() const { return -1; }
 
 	/** The building is dead. Server only, before the loot and the destroy. */
 	virtual void OnDestroyed_Native() {}

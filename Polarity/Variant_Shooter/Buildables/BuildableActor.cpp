@@ -316,6 +316,15 @@ EBuildableWrenchResult ABuildableActor::ReceiveWrenchHit(AShooterPlayerState* Hi
 
 	const float Now = GetWorld()->GetTimeSeconds();
 	EBuildableWrenchResult Result = EBuildableWrenchResult::Nothing;
+	int32 RemainingBudget = Hitter ? Hitter->GetMetal() : 0;
+	if (Hitter)
+	{
+		const int32 HitBudget = GetWrenchMetalBudget();
+		if (HitBudget >= 0)
+		{
+			RemainingBudget = FMath::Min(RemainingBudget, HitBudget);
+		}
+	}
 
 	if (State == EBuildableState::Constructing)
 	{
@@ -333,17 +342,18 @@ EBuildableWrenchResult ABuildableActor::ReceiveWrenchHit(AShooterPlayerState* Hi
 		const float Missing = MaxHealth - Health;
 		const float Wanted = FMath::Min(Definition->WrenchRepairHealth, Missing);
 		const int32 MetalNeeded = FMath::CeilToInt(Wanted / Definition->RepairHealthPerMetal);
-		const int32 MetalSpent = FMath::Min(MetalNeeded, Hitter->GetMetal());
+		const int32 MetalSpent = FMath::Min(MetalNeeded, RemainingBudget);
 		if (MetalSpent > 0 && Hitter->TrySpendMetal(MetalSpent))
 		{
 			const float Healed = FMath::Min(Wanted, MetalSpent * Definition->RepairHealthPerMetal);
 			SetHealth(Health + Healed);
+			RemainingBudget -= MetalSpent;
 			Result = EBuildableWrenchResult::Repaired;
 			UE_LOG(LogTemp, Log, TEXT("[BUILD_DEBUG] %s repaired %.0f for %d metal by %s -> %.0f/%.0f"),
 				*GetName(), Healed, MetalSpent, *Hitter->GetPlayerName(), Health, MaxHealth);
 		}
 	}
-	else if (OnWrenchHitExtra(Hitter))
+	else if (OnWrenchHitExtra(Hitter, RemainingBudget))
 	{
 		Result = EBuildableWrenchResult::Repaired;
 	}
@@ -351,10 +361,11 @@ EBuildableWrenchResult ABuildableActor::ReceiveWrenchHit(AShooterPlayerState* Hi
 	{
 		// Upgrade: a fixed slice of metal per hit, all or nothing, until the level is paid for.
 		const int32 Cost = GetUpgradeCost();
-		const int32 Slice = FMath::Min(Definition->WrenchUpgradeMetal, Cost - UpgradeMetal);
+		const int32 Slice = FMath::Min3(Definition->WrenchUpgradeMetal, Cost - UpgradeMetal, RemainingBudget);
 		if (Slice > 0 && Hitter->TrySpendMetal(Slice))
 		{
 			UpgradeMetal += Slice;
+			RemainingBudget -= Slice;
 			Result = EBuildableWrenchResult::UpgradeProgress;
 			if (UpgradeMetal >= Cost)
 			{

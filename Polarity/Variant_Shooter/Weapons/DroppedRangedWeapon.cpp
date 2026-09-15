@@ -593,6 +593,10 @@ void ADroppedRangedWeapon::CompletePull()
 		if (AShooterWeapon* AddedWeapon = Player->FindWeaponOfType(WeaponClass))
 		{
 			AddedWeapon->bWasYanked = true;
+			// Enemy drops have a finite initial reserve. The player may spend it, but it never
+			// silently turns into the regenerating base energy weapon.
+			AddedWeapon->bFiniteEnergyReserve = AddedWeapon->bRegeneratingReserve;
+			AddedWeapon->bRegeneratingReserve = false;
 			AddedWeapon->SourceYankDropClass = GetClass();
 			// Kept so throwing the gun away puts back a drop that can be picked up again.
 			AddedWeapon->SourceDropCharge = GetCharge();
@@ -645,7 +649,40 @@ void ADroppedRangedWeapon::CompletePull()
 		//
 		// An energy gun gets nothing here: GrantAmmoToInventory returns at once for a weapon with no
 		// cells. That is the author's call (2026-09-10): nothing feeds the energy reserve except time.
-		GrantAmmoToInventory(Player, ExistingWeapon);
+		if (ExistingWeapon->UsesEnergyReserve())
+		{
+			const int32 Mag = ExistingWeapon->GetMagazineSize();
+			const int32 OfferedLoaded = SpawnedBulletCount >= 0
+				? FMath::Clamp(SpawnedBulletCount, 0, Mag)
+				: FMath::Clamp(FMath::RoundToInt(EnergyMagazineFill * Mag), 0, Mag);
+			const int32 OfferedReserve = CarriedEnergyReserve >= 0
+				? FMath::Max(0, CarriedEnergyReserve)
+				: FMath::Max(0, FMath::RoundToInt(EnergyReserveMagazines * Mag));
+			const int32 LoadedRoom = FMath::Max(0, Mag - ExistingWeapon->GetBulletCount());
+			const int32 AddLoaded = FMath::Min(LoadedRoom, OfferedLoaded);
+			ExistingWeapon->SetBulletCount(ExistingWeapon->GetBulletCount() + AddLoaded);
+			const int32 ReserveRoom = FMath::Max(0, ExistingWeapon->GetEnergyReserveCapacity() - ExistingWeapon->GetEnergyReserve());
+			const int32 AddReserve = FMath::Min(ReserveRoom, OfferedReserve);
+			ExistingWeapon->SetEnergyReserve(ExistingWeapon->GetEnergyReserve() + AddReserve);
+			const int32 Left = (OfferedLoaded - AddLoaded) + (OfferedReserve - AddReserve);
+			if (Left > 0)
+			{
+				ADroppedRangedWeapon* Leftover = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
+					GetClass(), Player->GetActorLocation(), Player->GetActorRotation());
+				if (Leftover)
+				{
+					Leftover->WeaponClass = WeaponClass;
+					Leftover->EnergyMagazineFill = 0.0f;
+					Leftover->EnergyReserveMagazines = static_cast<float>(Left) / FMath::Max(1, Mag);
+					Leftover->bCanBeCaptured = true;
+					Leftover->SetCharge(GetCharge());
+				}
+			}
+		}
+		else
+		{
+			GrantAmmoToInventory(Player, ExistingWeapon);
+		}
 
 		if (ExistingWeapon == Player->GetCurrentWeapon())
 		{

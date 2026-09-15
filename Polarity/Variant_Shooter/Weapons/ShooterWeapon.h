@@ -1080,6 +1080,10 @@ protected:
 	 *  the PRIMARY slot: the reload with an empty magazine. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	TObjectPtr<UAnimMontage> ReloadMontage;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ReloadResumeEquipStart = 0.25f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", Units = "s"))
+	float ReloadResumeBlendDuration = 0.2f;
 
 	/** The holder's half of the second reload. Empty falls back to ReloadMontage. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
@@ -1135,6 +1139,9 @@ protected:
 	/** Every gun a player holds is an energy weapon unless this is unticked. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy")
 	bool bRegeneratingReserve = true;
+	/** Set on an enemy/drop weapon: finite reserve is usable but never refills. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy")
+	bool bFiniteEnergyReserve = false;
 
 	/** How many full magazines the reserve refills up to. Apex uses 2 to 4. A bigger magazine makes
 	 *  each of these deeper; it does not change how many there are. */
@@ -1239,6 +1246,8 @@ protected:
 	bool bIsReloading = false;
 	/** True after the author placed the readiness notify. Prevents the fallback timer from crediting twice. */
 	bool bReloadCommitted = false;
+	float SuspendedReloadProgress = 0.0f;
+	bool bReloadResumePending = false;
 
 	FTimerHandle ReloadTimer;
 
@@ -1622,6 +1631,8 @@ public:
 	 *  away; the round does not go in if the gun is no longer in the player's hands. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReload();
+	void SuspendReloadForHolster();
+	void ResumeReloadAfterEquip();
 
 	/** Commit the loaded rounds at the authored bolt-click notify. Safe to call more than once. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
