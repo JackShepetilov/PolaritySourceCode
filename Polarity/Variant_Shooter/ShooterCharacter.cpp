@@ -3462,10 +3462,13 @@ void AShooterCharacter::DoMeleeAttack()
 		return;
 	}
 
-	// Don't melee if weapon switch in progress
-	if (IsWeaponSwitchInProgress())
+	// A readiness notify belongs to the melee montage, so it is allowed to cut straight through the
+	// draw it started.  StowedForMelee and Drawing are both hand-ownership states, not cooldowns.
+	// StartAttack/StowWeaponForMelee cancels that draw and keeps the weapon's suspended reload state.
+	const bool bMeleeReadyWindow = MeleeAttackComponent && MeleeAttackComponent->CanAttack();
+	if (IsWeaponSwitchInProgress() && !bMeleeReadyWindow)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: WeaponSwitch"));
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] BLOCKED: WeaponSwitch before melee readiness"));
 		return;
 	}
 

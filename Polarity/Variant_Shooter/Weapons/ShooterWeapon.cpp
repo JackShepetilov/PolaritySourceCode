@@ -52,8 +52,11 @@ static TAutoConsoleVariable<int32> CVarNoVFX(
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimationAsset.h"
+#include "Animation/AnimSingleNodeInstance.h"
+#include "AlphaBlend.h"
 #include "Engine/DataAsset.h"
 #include "Curves/CurveVector.h"
+#include "Curves/CurveFloat.h"
 #include "Sound/SoundBase.h"
 #include "UObject/UnrealType.h"
 // PRAS, the recoil half of the FPS Animation Pack. Only the data asset is needed here; the
@@ -553,6 +556,103 @@ void AShooterWeapon::RebuildAttachmentMeshes()
 	ApplyChildComponentSetup();
 }
 
+UAnimationAsset* AShooterWeapon::GetReloadWeaponAnimation(EWeaponReloadStage Stage) const
+{
+	UAnimationAsset* Animation = WeaponMeshReloadAnimation;
+	if (Stage == EWeaponReloadStage::Secondary || Stage == EWeaponReloadStage::ShellLoop)
+	{
+		Animation = WeaponMeshSecondaryReloadAnimation ? WeaponMeshSecondaryReloadAnimation.Get() : Animation;
+	}
+	else if (Stage == EWeaponReloadStage::ShellEnd && WeaponMeshReloadEndAnimation)
+	{
+		Animation = WeaponMeshReloadEndAnimation;
+	}
+	return Animation;
+}
+
+void AShooterWeapon::StopReloadAudio()
+{
+	if (ReloadAudioComponent)
+	{
+		ReloadAudioComponent->Stop();
+		ReloadAudioComponent = nullptr;
+	}
+}
+
+void AShooterWeapon::PlayReloadAudioAtProgress(float Progress)
+{
+	StopReloadAudio();
+	if (!ReloadSound)
+	{
+		return;
+	}
+	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(ReloadSound, GetRootComponent());
+	if (ReloadAudioComponent)
+	{
+		const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * FMath::Max(0.0f, ReloadSound->GetDuration());
+		ReloadAudioComponent->Play(StartTime);
+	}
+}
+
+void AShooterWeapon::PauseWeaponReloadAnimation(UAnimationAsset* Animation, float& InOutProgress)
+{
+	if (!Animation)
+	{
+		return;
+	}
+	const float Length = FMath::Max(Animation->GetPlayLength(), KINDA_SMALL_NUMBER);
+	for (USkeletalMeshComponent* Mesh : { FirstPersonMesh, ThirdPersonMesh })
+	{
+		if (!Mesh) continue;
+		if (UAnimMontage* Montage = Cast<UAnimMontage>(Animation))
+		{
+			if (UAnimInstance* Anim = Mesh->GetAnimInstance(); Anim && Anim->Montage_IsPlaying(Montage))
+			{
+				InOutProgress = FMath::Clamp(Anim->Montage_GetPosition(Montage) / Length, 0.0f, 1.0f);
+				Anim->Montage_Pause(Montage);
+			}
+		}
+		else if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance())
+		{
+			InOutProgress = FMath::Clamp(SingleNode->GetCurrentTime() / Length, 0.0f, 1.0f);
+			SingleNode->SetPlaying(false);
+		}
+	}
+}
+
+void AShooterWeapon::ResumeWeaponReloadAnimation(UAnimationAsset* Animation, float Progress)
+{
+	if (!Animation)
+	{
+		return;
+	}
+	const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * Animation->GetPlayLength();
+	for (USkeletalMeshComponent* Mesh : { FirstPersonMesh, ThirdPersonMesh })
+	{
+		if (!Mesh) continue;
+		if (UAnimMontage* Montage = Cast<UAnimMontage>(Animation))
+		{
+			if (UAnimInstance* Anim = Mesh->GetAnimInstance())
+			{
+				FAlphaBlendArgs BlendArgs;
+				BlendArgs.BlendTime = ReloadResumeBlendDuration;
+				BlendArgs.BlendOption = ReloadResumeBlendOption;
+				BlendArgs.CustomCurve = ReloadResumeBlendCurve;
+				Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, 1.0f, EMontagePlayReturnType::MontageLength, StartTime, false);
+			}
+		}
+		else
+		{
+			Mesh->PlayAnimation(Animation, false);
+			if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance())
+			{
+				SingleNode->SetPosition(StartTime, false);
+				SingleNode->SetPlaying(true);
+			}
+		}
+	}
+}
+
 void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 {
 	// Both meshes: PlayWeaponMeshAnimation already covers first and third person, so the machine
@@ -561,37 +661,14 @@ void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 	// Fallbacks rather than a table, because an unfilled slot has to mean "use the one this weapon
 	// always used" and not "play nothing": that is what keeps every weapon written before the pack
 	// reloading exactly as it did.
-	UAnimationAsset* WeaponAnimation = WeaponMeshReloadAnimation;
-
-	switch (Stage)
-	{
-	case EWeaponReloadStage::Secondary:
-	case EWeaponReloadStage::ShellLoop:
-		if (WeaponMeshSecondaryReloadAnimation)
-		{
-			WeaponAnimation = WeaponMeshSecondaryReloadAnimation;
-		}
-		break;
-
-	case EWeaponReloadStage::ShellEnd:
-		if (WeaponMeshReloadEndAnimation)
-		{
-			WeaponAnimation = WeaponMeshReloadEndAnimation;
-		}
-		break;
-
-	default:
-		break;
-	}
-
-	PlayWeaponMeshAnimation(WeaponAnimation);
+	PlayWeaponMeshAnimation(GetReloadWeaponAnimation(Stage));
 
 	// One sound per reload, not one per shell: the loop stage runs once for every round going in,
 	// and firing the magazine cue eight times over is a rattle rather than a reload. The shells
 	// themselves are in the animation.
 	if (ReloadSound && Stage != EWeaponReloadStage::ShellLoop && Stage != EWeaponReloadStage::ShellEnd)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, ReloadSound, GetActorLocation());
+		PlayReloadAudioAtProgress(0.0f);
 	}
 }
 
@@ -4805,6 +4882,7 @@ void AShooterWeapon::InterruptPerRoundReload()
 		*GetName(), CurrentBullets, MagazineSize);
 
 	bIsReloading = false;
+	StopReloadAudio();
 	ShellStage = EWeaponReloadStage::Primary;
 	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
 
@@ -4947,10 +5025,15 @@ void AShooterWeapon::SuspendReloadForHolster()
 			if (UAnimInstance* Anim = Mesh->GetAnimInstance(); Anim && Montage && Anim->Montage_IsPlaying(Montage))
 			{
 				Progress = FMath::Clamp(Anim->Montage_GetPosition(Montage) / FMath::Max(Montage->GetPlayLength(), KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+				Anim->Montage_Pause(Montage);
 			}
 		}
 	}
 	SuspendedReloadProgress = Progress;
+	SuspendedReloadWeaponProgress = Progress;
+	PauseWeaponReloadAnimation(GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
+	SuspendedReloadSoundProgress = Progress;
+	StopReloadAudio();
 	bReloadResumePending = true;
 	bIsReloading = false;
 	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
@@ -4966,22 +5049,33 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 	bReloadResumePending = false;
 	bIsReloading = true;
 	bReloadCommitted = false;
-	PlayReloadStage(ShellStage);
-	const float Remaining = FMath::Max(0.01f, GetActiveReloadTime() * (1.0f - SuspendedReloadProgress));
-	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, Remaining, false);
-	if (AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
+	// Resume both independent skeletons at their recorded positions.  Starting the stage normally
+	// would restart the weapon mesh at zero and replay its audio, which is visibly out of sync.
+	if (UAnimMontage* Montage = GetActiveReloadMontage())
 	{
-		if (USkeletalMeshComponent* Mesh = Character->GetFirstPersonMesh())
+		if (AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
 		{
-			if (UAnimInstance* Anim = Mesh->GetAnimInstance())
+			if (USkeletalMeshComponent* Mesh = Character->GetFirstPersonMesh())
 			{
-				if (UAnimMontage* Montage = GetActiveReloadMontage())
+				if (UAnimInstance* Anim = Mesh->GetAnimInstance())
 				{
-					Anim->Montage_SetPosition(Montage, SuspendedReloadProgress * Montage->GetPlayLength());
+					FAlphaBlendArgs BlendArgs;
+					BlendArgs.BlendTime = ReloadResumeBlendDuration;
+					BlendArgs.BlendOption = ReloadResumeBlendOption;
+					BlendArgs.CustomCurve = ReloadResumeBlendCurve;
+					Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, 1.0f,
+						EMontagePlayReturnType::MontageLength, SuspendedReloadProgress * Montage->GetPlayLength(), false);
 				}
 			}
 		}
 	}
+	ResumeWeaponReloadAnimation(GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
+	if (ShellStage != EWeaponReloadStage::ShellLoop && ShellStage != EWeaponReloadStage::ShellEnd)
+	{
+		PlayReloadAudioAtProgress(SuspendedReloadSoundProgress);
+	}
+	const float Remaining = FMath::Max(0.01f, GetActiveReloadTime() * (1.0f - SuspendedReloadProgress));
+	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, Remaining, false);
 }
 
 void AShooterWeapon::CommitReloadFromNotify()

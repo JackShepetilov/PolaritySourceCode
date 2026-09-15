@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AlphaBlend.h"
 #include "GameFramework/Actor.h"
 #include "ShooterWeaponHolder.h"
 #include "Animation/AnimInstance.h"
@@ -40,6 +41,8 @@ class UCharacterMovementComponent;
 class USoundAttenuation;
 class UEMF_FieldComponent;
 class UInputAction;
+class UCurveFloat;
+class UAudioComponent;
 
 // Delegate for heat updates (for UI binding)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHeatChanged, float, NewHeat);
@@ -653,6 +656,11 @@ protected:
 	/** Runs one of the above on both weapon meshes: the first person one the shooter sees and the
 	 *  third person one everybody else sees. Does nothing when the asset is not set. */
 	void PlayWeaponMeshAnimation(UAnimationAsset* Animation);
+	UAnimationAsset* GetReloadWeaponAnimation(EWeaponReloadStage Stage) const;
+	void PauseWeaponReloadAnimation(UAnimationAsset* Animation, float& InOutProgress);
+	void ResumeWeaponReloadAnimation(UAnimationAsset* Animation, float Progress);
+	void StopReloadAudio();
+	void PlayReloadAudioAtProgress(float Progress);
 
 	/** Parents the ADS anchor to the best aiming reference this weapon actually has, trying in
 	 *  order: an eye-point socket on a sight attachment (SightAimSocketName), a sight socket on the
@@ -1080,10 +1088,17 @@ protected:
 	 *  the PRIMARY slot: the reload with an empty magazine. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	TObjectPtr<UAnimMontage> ReloadMontage;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	/** Normalized draw position (0=start, 1=end) at which a holstered reload blends back in. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "0..1 position through the draw montage where the saved reload begins blending in; 0 starts immediately, 1 waits for the draw end."))
 	float ReloadResumeEquipStart = 0.25f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", Units = "s"))
+	/** Time of the actual montage crossfade from draw to the saved reload position. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", Units = "s", ToolTip = "Seconds used to blend from the draw pose into the saved reload pose."))
 	float ReloadResumeBlendDuration = 0.2f;
+	/** Shape of that crossfade. Custom uses ReloadResumeBlendCurve. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ToolTip = "Easing shape for the reload-resume blend. Select Custom to use Reload Resume Blend Curve."))
+	EAlphaBlendOption ReloadResumeBlendOption = EAlphaBlendOption::HermiteCubic;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (EditCondition = "ReloadResumeBlendOption == EAlphaBlendOption::Custom", ToolTip = "Optional 0..1 curve used only when Reload Resume Blend Option is Custom."))
+	TObjectPtr<UCurveFloat> ReloadResumeBlendCurve;
 
 	/** The holder's half of the second reload. Empty falls back to ReloadMontage. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
@@ -1247,7 +1262,11 @@ protected:
 	/** True after the author placed the readiness notify. Prevents the fallback timer from crediting twice. */
 	bool bReloadCommitted = false;
 	float SuspendedReloadProgress = 0.0f;
+	float SuspendedReloadWeaponProgress = 0.0f;
+	float SuspendedReloadSoundProgress = 0.0f;
 	bool bReloadResumePending = false;
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> ReloadAudioComponent;
 
 	FTimerHandle ReloadTimer;
 

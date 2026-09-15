@@ -2535,9 +2535,8 @@ void UMeleeAttackComponent::EndSwing()
 
 	bIsWeaponLowered = false;
 
-	// The draw is not interruptible by the next swing: sit in ShowingWeapon, where CanAttack says no,
-	// until the character's draw has finished (@see UpdateState). A weapon with no draw animation,
-	// or no weapon at all, has nothing to wait for.
+	// The draw is cosmetic recovery.  A new input is still held behind CanAttack's normal cooldown,
+	// while the authored readiness notify can explicitly open the next swing during this draw.
 	const AShooterCharacter* Shooter = Cast<AShooterCharacter>(OwnerCharacter);
 	if (!bDelegatedDropKick && Shooter && Shooter->GetWeaponSwitchPhase() == EWeaponSwitchPhase::Drawing)
 	{
