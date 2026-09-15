@@ -72,3 +72,19 @@ public:
 	virtual FLinearColor GetEditorColor() override { return FLinearColor(1.0f, 0.5f, 0.0f, 1.0f); } // Orange
 #endif
 };
+
+/** Author placed at the next-melee-ready point. It deliberately does not depend on equip completion. */
+UCLASS(DisplayName = "Melee: Ready For Next Attack")
+class POLARITY_API UAnimNotify_MeleeReady : public UAnimNotify
+{
+	GENERATED_BODY()
+
+public:
+	UAnimNotify_MeleeReady();
+	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+		const FAnimNotifyEventReference& EventReference) override;
+	virtual FString GetNotifyName_Implementation() const override;
+#if WITH_EDITOR
+	virtual FLinearColor GetEditorColor() override { return FLinearColor(0.2f, 0.8f, 1.0f, 1.0f); }
+#endif
+};

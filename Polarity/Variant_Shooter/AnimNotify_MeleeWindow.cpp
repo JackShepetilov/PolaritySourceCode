@@ -200,3 +200,25 @@ FString UAnimNotifyState_MeleeDamageWindow::GetNotifyName_Implementation() const
 {
 	return TEXT("Melee Damage Window");
 }
+
+UAnimNotify_MeleeReady::UAnimNotify_MeleeReady()
+{
+#if WITH_EDITORONLY_DATA
+	NotifyColor = FColor(51, 204, 255);
+#endif
+}
+
+void UAnimNotify_MeleeReady::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+	const FAnimNotifyEventReference& EventReference)
+{
+	Super::Notify(MeshComp, Animation, EventReference);
+	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
+	{
+		MeleeComp->NotifyMeleeReadyFromNotify();
+	}
+}
+
+FString UAnimNotify_MeleeReady::GetNotifyName_Implementation() const
+{
+	return TEXT("Melee: Ready For Next Attack");
+}

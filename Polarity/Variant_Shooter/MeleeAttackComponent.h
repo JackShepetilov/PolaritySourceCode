@@ -865,6 +865,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	void EndRecoveryFromNotify();
 
+	/** Marks the authored next-melee-ready point. The next swing may interrupt recovery/equip. */
+	UFUNCTION(BlueprintCallable, Category = "Melee")
+	void NotifyMeleeReadyFromNotify();
+
 	// ==================== Combo Speed Multiplier ====================
 
 	/**
@@ -885,6 +889,8 @@ protected:
 
 	/** Current attack state */
 	EMeleeAttackState CurrentState = EMeleeAttackState::Ready;
+	/** Set by the authored ready notify; consumed when the next swing starts. */
+	bool bReadyForNextAttackFromNotify = false;
 
 	/** Time remaining in current state */
 	float StateTimeRemaining = 0.0f;

@@ -1237,6 +1237,8 @@ protected:
 
 	/** True from the moment a reload starts until the magazine is full or the reload is cancelled. */
 	bool bIsReloading = false;
+	/** True after the author placed the readiness notify. Prevents the fallback timer from crediting twice. */
+	bool bReloadCommitted = false;
 
 	FTimerHandle ReloadTimer;
 
@@ -1620,6 +1622,10 @@ public:
 	 *  away; the round does not go in if the gun is no longer in the player's hands. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReload();
+
+	/** Commit the loaded rounds at the authored bolt-click notify. Safe to call more than once. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void CommitReloadFromNotify();
 
 	/** Returns true if this weapon is a melee weapon (blocks MeleeAttackComponent while equipped) */
 	virtual bool IsMeleeWeapon() const { return false; }

@@ -177,6 +177,19 @@ bool UMeleeAttackComponent::StartAttack()
 		return false;
 	}
 
+	// A readiness notify may arrive during recovery or while the previous weapon draw is blending.
+	// Cut that presentation cleanly and let this new swing own the mesh from its first frame.
+	if (bReadyForNextAttackFromNotify && CurrentState != EMeleeAttackState::Ready)
+	{
+		StopAttackAnimation();
+		StopSwingTrailFX();
+		StopMagnetism();
+		StopCameraFocus();
+		SwitchToFirstPersonMesh();
+		SetState(EMeleeAttackState::Ready);
+	}
+	bReadyForNextAttackFromNotify = false;
+
 	// ==================== Boss Finisher Trigger (start of swing) ====================
 	// If a finisher-phase boss is within the lunge cone/range as the swing starts, run the cinematic
 	// finisher INSTEAD of a melee attack. Returning here fully cancels the swing — none of the attack
@@ -422,7 +435,7 @@ bool UMeleeAttackComponent::CanAttack() const
 	}
 
 	// Must be ready and input not locked
-	if (CurrentState != EMeleeAttackState::Ready || bInputLocked)
+	if ((!bReadyForNextAttackFromNotify && CurrentState != EMeleeAttackState::Ready) || bInputLocked)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - State=%d (need Ready=0), bInputLocked=%d"), (int32)CurrentState, bInputLocked);
 		return false;
@@ -3033,6 +3046,18 @@ void UMeleeAttackComponent::EndRecoveryFromNotify()
 {
 	// No-op — Recovery now passes through in a single tick (StateTimeRemaining = 0).
 	// Kept declared in the header for source compatibility with any external caller.
+}
+
+void UMeleeAttackComponent::NotifyMeleeReadyFromNotify()
+{
+	if (CurrentState == EMeleeAttackState::Windup || CurrentState == EMeleeAttackState::Active ||
+		CurrentState == EMeleeAttackState::Recovery)
+	{
+		bReadyForNextAttackFromNotify = true;
+		bInputLocked = false;
+		UE_LOG(LogTemp, Log, TEXT("[MELEE_DEBUG] %s: authored ready notify opened next-attack window"),
+			*GetNameSafe(GetOwner()));
+	}
 }
 
 // ==================== External / Charged Punch API ====================

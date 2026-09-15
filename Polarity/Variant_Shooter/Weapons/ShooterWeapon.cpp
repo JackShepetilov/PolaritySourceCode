@@ -4679,6 +4679,7 @@ bool AShooterWeapon::StartReload()
 	}
 
 	bIsReloading = true;
+	bReloadCommitted = false;
 
 	// The refire timer would fire mid-reload and Fire() would bounce off bIsReloading, but a pending
 	// shot surviving the reload is confusing to debug. Clear it and let FinishReload restart fire.
@@ -4880,6 +4881,11 @@ void AShooterWeapon::SpendPooledRound()
 
 void AShooterWeapon::FinishReload()
 {
+	if (bReloadCommitted)
+	{
+		return;
+	}
+	bReloadCommitted = true;
 	bIsReloading = false;
 
 	// A per round reload has already counted itself, one round per completed loop, and that count is
@@ -4928,6 +4934,27 @@ void AShooterWeapon::CancelReload()
 
 	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload cancelled at %d/%d rounds"),
 		*GetName(), CurrentBullets, MagazineSize);
+}
+
+void AShooterWeapon::CommitReloadFromNotify()
+{
+	// The named bolt-click notify is authoritative for the visual reload moment. The timer remains
+	// a fallback for old montages, but this guard makes notify + fallback idempotent.
+	if (!bIsReloading || bReloadCommitted)
+	{
+		return;
+	}
+
+	if (bPerRoundReload)
+	{
+		// Per-round montages already credit each shell at their loop boundary. Keep the named notify
+		// harmless on those assets rather than filling the whole tube a second time.
+		return;
+	}
+
+	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
+	FinishReload();
+	UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: readiness notify committed reload once"), *GetName());
 }
 
 float AShooterWeapon::GetReloadProgress() const
