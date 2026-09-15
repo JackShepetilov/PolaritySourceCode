@@ -484,7 +484,7 @@ CORE_SIZE = 300.0
 CORE_DEFEND_RADIUS = 4000.0   # нет игрока ближе 40 м: матки бьют ядро
 SHOOTER_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
 GROUND_SPAWN_R = 9000.0       # на 50 м ближе к базе (автор 2026-09-15)
-GROUND_SPAWN_STEP_DEG = 45    # кольцо наземных точек
+GROUND_SPAWN_ANGLES = [180.0 + i * 180.0 / 7.0 for i in range(8)]  # 8 точек вне восточного обрыва
 AIR_SPAWN_R = 16000.0
 AIR_SPAWN_STEP_DEG = 90       # кольцо воздушных точек
 # Бесконечный пул: (класс, цена в бюджете, с какой волны, вес). Матка это бесконечные дроны, поэтому
@@ -512,10 +512,9 @@ def step_gameplay():
     carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
     shooter = unreal.EditorAssetLibrary.load_blueprint_class(SHOOTER_BP)
 
-    # Точки спавна со всех сторон (автор 2026-09-14): воздух кольцом через 90 градусов на AIR_SPAWN_R,
-    # земля кольцом через 45 градусов у кромки тумана плюс две точки на подходах (дорога, овраг).
-    # Высота земли снимается трассой; директор всё равно проецирует пешего на навмеш. У склонов без
-    # подхода (уступ на востоке) навмеш может не довести: это видно по MoveTo FAILED в логе.
+    # Воздух по кругу; 8 наземных точек по западной полуокружности (юг-запад-север),
+    # плюс дорога и овраг. Восточный обрыв исключён по решению автора 2026-09-15.
+    # Высота земли снимается трассой; директор проецирует пешего на навмеш.
     def spawn_point(label, x, y, z, excluded, air=False):
         yaw = math.degrees(math.atan2(-y, -x))
         sp = eas.spawn_actor_from_class(unreal.ArenaSpawnPoint, unreal.Vector(x, y, z),
@@ -534,7 +533,7 @@ def step_gameplay():
 
     def nearest_to_r(pts, r):
         return min(pts, key=lambda p: abs(math.hypot(p[0], p[1]) - r))
-    ground = [("Ring_{:03d}".format(a), polar(a, GROUND_SPAWN_R)) for a in range(0, 360, GROUND_SPAWN_STEP_DEG)]
+    ground = [("Approach_{:02d}".format(i), polar(a, GROUND_SPAWN_R)) for i, a in enumerate(GROUND_SPAWN_ANGLES)]
     ground.append(("SouthRoad", tuple(nearest_to_r(lay["road"], GROUND_SPAWN_R))))
     ground.append(("WestRavine", tuple(nearest_to_r(lay["ravine"], GROUND_SPAWN_R))))
     for name, (x, y) in ground:
