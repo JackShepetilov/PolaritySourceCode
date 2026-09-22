@@ -92,6 +92,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AI|Cover")
 	void ReleaseCover();
 
+	/** Extra threat actors (anything hostile that is NOT a pawn: a sentry turret, a gun platform)
+	 *  that count against a spot's exposure. Pawns are gathered automatically; these come from the
+	 *  behaviour that knows the threat, and are held weak so a destroyed turret stops counting on
+	 *  its own. Passing an empty array clears them. */
+	UFUNCTION(BlueprintCallable, Category = "AI|Cover")
+	void SetExtraObservers(const TArray<AActor*>& InObservers);
+
 	/** Recompute the exposure of the spot the NPC is standing in. Players move, so a good H stops
 	 *  being one without anything happening to the NPC. Cheap: one trace per living player. */
 	UFUNCTION(BlueprintCallable, Category = "AI|Cover")
@@ -245,6 +252,11 @@ private:
 	 *  the cover recheck all go through it, so none of them can disagree about what "sees" means. */
 	bool CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params) const;
 
+	/** Whether a non-pawn threat actor can see Point. The observer's own body must be ignored:
+	 *  a turret's eye is inside its own bounds, and without the ignore the trace would be blocked
+	 *  by the observer itself on every line. */
+	bool CanActorSee(const AActor* Observer, const FVector& Point, const FCollisionQueryParams& Params) const;
+
 	/** Self plus every pawn. Bodies are not cover: a teammate standing on the sight line does not
 	 *  make a corner safe, and counting them would make the choice flicker as people walk past. */
 	void BuildTraceParams(FCollisionQueryParams& OutParams) const;
@@ -274,4 +286,7 @@ private:
 	/** Set while this component holds a claim, so ReleaseCover can be called unconditionally from
 	 *  every exit path without the coordinator seeing spurious releases. */
 	bool bHoldsClaim = false;
+
+	/** Non-pawn threats whose sight counts against exposure, see SetExtraObservers. */
+	TArray<TWeakObjectPtr<AActor>> ExtraObservers;
 };

@@ -2,6 +2,7 @@
 
 #include "TurretFeedWidget.h"
 
+#include "BuildableActor.h"
 #include "BuildableDefinition.h"
 #include "Components/Image.h"
 #include "Components/PanelWidget.h"
@@ -186,6 +187,41 @@ void UTurretFeedWidget::RebuildEntries()
 void UTurretFeedWidget::RefreshEntries()
 {
 	UBuilderComponent* const Bound = Builder.Get();
+
+	// The same menu in front of a dispenser: every owned ranged gun melts for fuel, priced the way
+	// the server will price it when the key is pressed.
+	const ABuildableActor* const Dispenser = Bound ? Bound->GetFeedDispenserTarget() : nullptr;
+	if (Bound && Dispenser)
+	{
+		if (TitleText)
+		{
+			TitleText->SetText(FText::Format(
+				NSLOCTEXT("TurretFeed", "DispenserTitle", "Dispenser, {0} units: pick a gun to melt"),
+				FText::AsNumber(Dispenser->GetFuel())));
+		}
+
+		TArray<AShooterWeapon*> Weapons;
+		Bound->GetFeedWeapons(Weapons);
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
+		{
+			UTurretFeedEntryWidget* const Entry = Entries[Index];
+			const AShooterWeapon* const Weapon = Weapons.IsValidIndex(Index) ? Weapons[Index] : nullptr;
+			if (!Entry || !Weapon)
+			{
+				continue;
+			}
+
+			const int32 Loaded = Weapon->GetBulletCount();
+			const int32 Reserve = Weapon->UsesEnergyReserve()
+				? Weapon->GetEnergyReserve()
+				: FMath::Max(0, Weapon->GetPooledAmmo() - Loaded);
+			const int32 Fuel = Weapon->GetDispenserFuelValue(Loaded, Reserve);
+			Entry->SetState(ETurretFeedEntryState::Available,
+				FText::Format(NSLOCTEXT("TurretFeed", "MeltsFor", "melts for {0}"), FText::AsNumber(Fuel)));
+		}
+		return;
+	}
+
 	// A standing turret while feeding; the class defaults (fresh, level 1, empty) while picking the
 	// gun for one about to be placed.
 	const ATurretBuildable* const Turret = Bound ? Bound->GetFeedTurretDefaults() : nullptr;

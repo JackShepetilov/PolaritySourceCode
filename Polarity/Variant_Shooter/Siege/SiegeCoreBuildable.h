@@ -36,4 +36,14 @@ public:
 	/** The nearest standing core to From that no player is defending, or null when every core is
 	 *  either defended or gone. What an attacker asks before it picks a pawn. */
 	static ASiegeCoreBuildable* FindUndefended(const UWorld* World, const FVector& From);
+
+	/** The nearest standing core to From, defended or not. What an attacker asks when it has no
+	 *  player to fight: the tower-defence rule is that the base itself is the default target. */
+	static ASiegeCoreBuildable* FindNearest(const UWorld* World, const FVector& From);
+
+private:
+
+	/** Walk the cores: the nearest standing one, dropped when bRequireUndefended and a player
+	 *  stands inside its DefendRadius. */
+	static ASiegeCoreBuildable* FindCore(const UWorld* World, const FVector& From, bool bRequireUndefended);
 };

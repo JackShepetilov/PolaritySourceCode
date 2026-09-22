@@ -32,6 +32,16 @@ bool ASiegeCoreBuildable::IsDefended() const
 
 ASiegeCoreBuildable* ASiegeCoreBuildable::FindUndefended(const UWorld* World, const FVector& From)
 {
+	return FindCore(World, From, /*bRequireUndefended*/ true);
+}
+
+ASiegeCoreBuildable* ASiegeCoreBuildable::FindNearest(const UWorld* World, const FVector& From)
+{
+	return FindCore(World, From, /*bRequireUndefended*/ false);
+}
+
+ASiegeCoreBuildable* ASiegeCoreBuildable::FindCore(const UWorld* World, const FVector& From, bool bRequireUndefended)
+{
 	if (!World)
 	{
 		return nullptr;
@@ -43,7 +53,7 @@ ASiegeCoreBuildable* ASiegeCoreBuildable::FindUndefended(const UWorld* World, co
 	for (TActorIterator<ASiegeCoreBuildable> It(World); It; ++It)
 	{
 		ASiegeCoreBuildable* const Core = *It;
-		if (!IsValid(Core) || Core->IsDestroyed() || Core->IsDefended())
+		if (!IsValid(Core) || Core->IsDestroyed() || (bRequireUndefended && Core->IsDefended()))
 		{
 			continue;
 		}

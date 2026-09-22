@@ -18,6 +18,8 @@
 #include "BuildableActor.generated.h"
 
 class AShooterPlayerState;
+class AShooterCharacter;
+class AShooterWeapon;
 class UBoxComponent;
 class UBuildableDefinition;
 class ULootDropComponent;
@@ -100,6 +102,40 @@ public:
 	/** Called by the builder between SpawnActorDeferred and FinishSpawning, so BeginPlay already
 	 *  knows what it is and whose it is. */
 	void InitializeBuildable(UBuildableDefinition* InDefinition, AShooterPlayerState* InOwner);
+
+	// ==================== Dispenser behaviour ====================
+	//
+	// A building IS a dispenser when its definition carries the Buildable.Dispenser tag, or when
+	// its class is ADispenserBuildable. The behaviour lives on this base class so a dispenser
+	// Blueprint that predates ADispenserBuildable and is a DIRECT child of ABuildableActor still
+	// heals, still dispenses fuel and still takes sacrificed weapons (BP_Buildable_Dispenser is
+	// exactly that Blueprint).
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Dispenser|Healing", meta = (ClampMin = "0.0"))
+	float HealPerSecond = 12.0f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Dispenser|Healing", meta = (ClampMin = "0.0", Units = "cm"))
+	float ServiceRadius = 350.0f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Dispenser|Ammo", meta = (ClampMin = "0.0"))
+	float AmmoRoundsPerSecond = 2.0f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Dispenser|Ammo", meta = (ClampMin = "1"))
+	int32 MaxFuel = 240;
+
+	/** True when this building behaves as a dispenser, whatever its class. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser")
+	bool IsDispenser() const;
+
+	/** Fuel units in the hopper, fed by sacrificed weapons and burned into ammunition. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser")
+	int32 GetFuel() const { return DispenserFuel; }
+
+	/** Refill the hopper (a weapon was just melted into it). */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Dispenser")
+	void AddFuel(int32 Amount);
+
+	/** Melt one of Donor's ranged weapons into fuel through the same authoritative inventory
+	 *  release a turret uses. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Dispenser")
+	bool AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeapon* Weapon);
 
 	// ==================== State ====================
 
@@ -197,8 +233,14 @@ protected:
 	virtual void OnStateChanged(EBuildableState OldState, EBuildableState NewState) {}
 
 	/** Every frame while Active, server only. Where a turret looks for targets and a dispenser
-	 *  heals. Off by default: a building that needs it turns its tick on in its own constructor. */
-	virtual void TickActive(float DeltaSeconds) {}
+	 *  heals. The base implementation runs the dispenser behaviour when this building is one. */
+	virtual void TickActive(float DeltaSeconds);
+
+	/** The heal/ammunition heartbeat, everything the base does for dispenser buildings. Server. */
+	void TickDispenserBehavior(float DeltaSeconds);
+
+	/** Whether the actor keeps ticking while active: the subclass flag, or being a dispenser. */
+	bool NeedsActiveTick() const { return bTickWhileActive || IsDispenser(); }
 
 	/** A wrench hit that neither sped construction nor repaired anything. Return true to say the hit
 	 *  was used (a sentry restocking its shells), false to let it go into the upgrade. Server only. */
@@ -255,6 +297,9 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_UpgradeMetal, BlueprintReadOnly, Category = "Buildable")
 	int32 UpgradeMetal = 0;
 
+	UPROPERTY(ReplicatedUsing = OnRep_DispenserFuel, BlueprintReadOnly, Category = "Dispenser|Ammo", meta = (ClampMin = "0"))
+	int32 DispenserFuel = 0;
+
 	UFUNCTION()
 	void OnRep_OwnerPlayerState();
 
@@ -272,6 +317,9 @@ protected:
 
 	UFUNCTION()
 	void OnRep_UpgradeMetal();
+
+	UFUNCTION()
+	void OnRep_DispenserFuel();
 
 	/** Effects of the death, everywhere. */
 	UFUNCTION(NetMulticast, Reliable)
@@ -310,4 +358,7 @@ private:
 	/** Construction boost from wrench hits, server only. */
 	float BoostUntilTime = 0.0f;
 	float BoostMultiplier = 0.0f;
+
+	/** Fractional rounds hoarded by the dispenser's AmmoRoundsPerSecond between whole rounds. */
+	float AmmoAccumulator = 0.0f;
 };

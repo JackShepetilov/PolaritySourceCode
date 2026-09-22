@@ -27,6 +27,7 @@ class UPrimaryDataAsset;
 class USkeletalMeshComponent;
 class UCameraComponent;
 class UAnimMontage;
+class UAnimSequenceBase;
 class UAnimInstance;
 class UAnimationAsset;
 class UNiagaraSystem;
@@ -661,6 +662,27 @@ protected:
 	void ResumeWeaponReloadAnimation(UAnimationAsset* Animation, float Progress);
 	void StopReloadAudio();
 	void PlayReloadAudioAtProgress(float Progress);
+	/** Restart the reload audio from OffsetSeconds into the track, with no duration-fraction
+	 *  multiplication. The offset is what SuspendReloadForHolster captured from the component's own
+	 *  playback clock, so a cue or metasound with a misleading GetDuration cannot restart the wrong
+	 *  part of the track. */
+	void RestartReloadAudioAtSeconds(float OffsetSeconds);
+
+	/** True when a reload animation (montage OR plain sequence: notifies live on the shared
+	 *  UAnimSequenceBase) carries its own PlaySound notifies. Its audio then comes from the
+	 *  animation, and the one-track ReloadSound is redundant noise (and restarts at the wrong part
+	 *  of a cue): it is skipped on start and not replayed on resume. */
+	bool ReloadMontageCarriesAudio(const UAnimSequenceBase* AnimSeq) const;
+
+	/** The arms montage a reload stage plays. Shared by PlayReloadStage and the audio decision. */
+	UAnimMontage* GetArmsMontageForStage(EWeaponReloadStage Stage) const;
+
+	/** Read the reload montages' PlaySound notifies and adopt their sound as NotifiedReloadSound. */
+	void DiscoverNotifiedReloadSound();
+
+	/** Stop any ACTIVE sound in the world playing NotifiedReloadSound: the notify's one-shot, which
+	 *  our own component cannot reach. */
+	void StopNotifiedReloadSoundInWorld();
 
 	/** Parents the ADS anchor to the best aiming reference this weapon actually has, trying in
 	 *  order: an eye-point socket on a sight attachment (SightAimSocketName), a sight socket on the
@@ -1263,10 +1285,27 @@ protected:
 	bool bReloadCommitted = false;
 	float SuspendedReloadProgress = 0.0f;
 	float SuspendedReloadWeaponProgress = 0.0f;
-	float SuspendedReloadSoundProgress = 0.0f;
+	/** Where the reload AUDIO left off when it was suspended, in SECONDS into the track. Measured
+	 *  from the component's own playback clock (world time), not from a montage fraction: ReloadSound
+	 *  may be a cue or metasound whose GetDuration is misleading, and a fraction of a wrong duration
+	 *  is exactly the "wrong tail plays on resume" bug. -1 means no audio was running. */
+	float SuspendedReloadSoundTime = -1.0f;
 	bool bReloadResumePending = false;
 	UPROPERTY(Transient)
 	TObjectPtr<UAudioComponent> ReloadAudioComponent;
+
+	/** World time the reload audio actually started playing at, for the clock above. */
+	float ReloadAudioWorldStartTime = -1.0f;
+	/** The offset in seconds ReloadAudioComponent was last started from. */
+	float ReloadAudioStartOffset = 0.0f;
+
+	/** The reload SOUND discovered from the PlaySound notifies inside the reload montages. The
+	 *  animation-pack weapons carry their reload audio there (a one-shot we cannot stop or resume);
+	 *  when one is found, the weapon TAKES THE PLAYBACK OVER: it stops the notify's sound at stow
+	 *  through the audio device, and replays the same asset from the recorded position on resume. */
+	TObjectPtr<USoundBase> NotifiedReloadSound;
+	/** World time that notify's sound began: montage start plus its trigger time. */
+	float NotifiedReloadSoundBeginWorldTime = -1.0f;
 
 	FTimerHandle ReloadTimer;
 

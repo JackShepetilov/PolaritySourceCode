@@ -2725,6 +2725,10 @@ void AShooterCharacter::HolsterWeaponByPlayer()
 
 	CurrentWeapon->StopFiring();
 
+	// Suspend a running reload right here, at the start of the holster, exactly as a weapon switch
+	// does: the sound and the animation must stop the moment the gun starts leaving the hand.
+	CurrentWeapon->SuspendReloadForHolster();
+
 	const float HolsterLength = CurrentWeapon->GetHolsterLength();
 	if (HolsterLength <= 0.0f)
 	{
@@ -2979,6 +2983,11 @@ void AShooterCharacter::StartWeaponSwitch(AShooterWeapon* NewWeapon)
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->StopFiring();
+		// A reload is put on hold THE INSTANT the switch starts, not at the swap point later in the
+		// holster montage: its sound and animation would keep playing over the holster otherwise,
+		// and a quick switch back reads as the reload never having paused. The draw of the weapon
+		// coming back into the hand resumes it from the recorded position.
+		CurrentWeapon->SuspendReloadForHolster();
 	}
 
 	PendingWeapon = NewWeapon;
@@ -3157,6 +3166,21 @@ void AShooterCharacter::BeginWeaponDraw()
 	FirstPersonRevealFramesLeft = 2;
 	UpdateFirstPersonMeshVisibility();
 
+	// A reload this weapon had put on hold resumes partway through the draw, blending in from the
+	// draw pose, exactly as it does after a melee swing or a manual holster. FinishWeaponDraw
+	// remains the failsafe: it resumes whatever a cancelled timer did not.
+	if (CurrentWeapon->HasPendingReloadResume())
+	{
+		const float ResumeAt = DrawLength * FMath::Clamp(CurrentWeapon->GetReloadResumeEquipStart(), 0.0f, 1.0f);
+		GetWorldTimerManager().SetTimer(ReloadResumeTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (WeaponSwitchPhase == EWeaponSwitchPhase::Drawing && CurrentWeapon)
+			{
+				CurrentWeapon->ResumeReloadAfterEquip();
+			}
+		}), FMath::Max(0.0f, ResumeAt), false);
+	}
+
 	// A timer rather than a notify: nothing gameplay-critical lands inside the draw, only its end,
 	// and an interrupted draw is cancelled explicitly by whatever interrupted it.
 	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
@@ -3227,6 +3251,10 @@ void AShooterCharacter::StowWeaponForGrapple(float SpeedMultiplier)
 	}
 
 	CurrentWeapon->StopFiring();
+
+	// The line needs both hands NOW, so a reload gets suspended at the start of the grapple stow,
+	// the same way a switch or a manual holster suspends it.
+	CurrentWeapon->SuspendReloadForHolster();
 
 	const float Mult = FMath::Max(SpeedMultiplier, KINDA_SMALL_NUMBER);
 	const float Length = CurrentWeapon->GetHolsterLength() / Mult;
@@ -3415,6 +3443,20 @@ void AShooterCharacter::DrawWeaponAfterMelee(float SpeedMultiplier)
 		CurrentWeapon->GetDrawPlayRate() * Mult);
 
 	WeaponSwitchPhase = EWeaponSwitchPhase::Drawing;
+	// A reload suspended by this melee swing resumes partway through the draw, just as it does when
+	// the player manually draws a holstered weapon.  Waiting for FinishWeaponDraw made this route
+	// ignore Reload Resume Equip Start entirely and caused the visible hard cut at the draw's end.
+	if (CurrentWeapon->HasPendingReloadResume())
+	{
+		const float ResumeAt = Length * FMath::Clamp(CurrentWeapon->GetReloadResumeEquipStart(), 0.0f, 1.0f);
+		GetWorldTimerManager().SetTimer(ReloadResumeTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (WeaponSwitchPhase == EWeaponSwitchPhase::Drawing && CurrentWeapon)
+			{
+				CurrentWeapon->ResumeReloadAfterEquip();
+			}
+		}), FMath::Max(0.0f, ResumeAt), false);
+	}
 
 	GetWorldTimerManager().SetTimer(WeaponSwitchTimer, this, &AShooterCharacter::FinishWeaponDraw,
 		Length, false);

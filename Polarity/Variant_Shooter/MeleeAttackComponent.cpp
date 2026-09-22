@@ -434,8 +434,12 @@ bool UMeleeAttackComponent::CanAttack() const
 		return false;
 	}
 
-	// Must be ready and input not locked
-	if ((!bReadyForNextAttackFromNotify && CurrentState != EMeleeAttackState::Ready) || bInputLocked)
+	// The authored ready notify is the explicit handoff to the next swing.  It intentionally beats
+	// both the recovery state and the input lock from the previous swing: otherwise the notify can
+	// fire correctly but the character-side weapon-switch gate still sees CanAttack() as false.
+	const bool bReadyNotifyOpened = bReadyForNextAttackFromNotify;
+	if ((!bReadyNotifyOpened && CurrentState != EMeleeAttackState::Ready)
+		|| (!bReadyNotifyOpened && bInputLocked))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] CanAttack: FALSE - State=%d (need Ready=0), bInputLocked=%d"), (int32)CurrentState, bInputLocked);
 		return false;

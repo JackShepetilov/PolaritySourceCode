@@ -424,15 +424,22 @@ void ASiegeDirector::SpawnOne(TSubclassOf<AShooterNPC> NPCClass)
 	NPC->OnNPCDeath.AddDynamic(this, &ASiegeDirector::OnEnemyDied);
 
 	// A walker at the fog line has no line of sight to anybody, and an NPC that has not seen a
-	// player never moves (AI_StateTree.md). Point it at the nearest one so it marches on the base;
-	// its own perception takes over from there. The carriers drive themselves and are left alone.
+	// player never moves (AI_StateTree.md). The tower-defence rule names the base's core as its
+	// first target, so its first step is taken now rather than on the controller's own 1s fallback
+	// scan; perception takes over the moment a player shows. No core (a misconfigured map) keeps
+	// the old nearest-player directive. The carriers drive themselves and are left alone.
 	if (!NPCClass->IsChildOf(AFlyingDrone::StaticClass()))
 	{
-		if (AActor* const Nearest = CoopPlayers::GetNearest(World, NPC->GetActorLocation()))
+		AActor* MarchTarget = ASiegeCoreBuildable::FindNearest(World, NPC->GetActorLocation());
+		if (!MarchTarget)
+		{
+			MarchTarget = CoopPlayers::GetNearest(World, NPC->GetActorLocation());
+		}
+		if (MarchTarget)
 		{
 			if (AShooterAIController* const AIController = Cast<AShooterAIController>(NPC->GetController()))
 			{
-				AIController->SetCurrentTarget(Nearest);
+				AIController->SetCurrentTarget(MarchTarget);
 				TWeakObjectPtr<AShooterAIController> WeakAIC = AIController;
 				GetWorldTimerManager().SetTimerForNextTick([WeakAIC]()
 				{

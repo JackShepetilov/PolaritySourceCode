@@ -188,9 +188,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ammo")
 	void RollSpawnedBulletCount();
 
-	/** Put the drop's rounds into the player's magazine cells and load the gun with whatever the
-	 *  bag accepted. What did not fit is dropped again at the player's feet. */
-	void GrantAmmoToInventory(AShooterCharacter* Player, AShooterWeapon* Weapon);
+	/** Put the drop's rounds into the player's magazine cells. bFillMagazine only tops the magazine
+	 *  up from the bag for a gun this drop just granted; picking up a second copy of an owned gun
+	 *  passes false so the whole pickup goes into the reserve and the current magazine is left
+	 *  exactly as it was (the reload key moves the rounds, not the pickup). What did not fit is
+	 *  dropped again at the player's feet. */
+	void GrantAmmoToInventory(AShooterCharacter* Player, AShooterWeapon* Weapon, bool bFillMagazine = true);
 
 	/** Re-drop the rounds that would not fit, so a full bag costs the player ammo it can see
 	 *  rather than ammo that silently vanished. */

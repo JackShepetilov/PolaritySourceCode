@@ -204,6 +204,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	ATurretBuildable* GetFeedTarget() const;
 
+	/** The dispenser the feed menu is open for (the same menu, donating weapons for fuel), or null.
+	 *  Typed as the base buildable: the project's dispenser Blueprint derives from ABuildableActor
+	 *  directly and counts as a dispenser through its definition's Buildable.Dispenser tag. */
+	UFUNCTION(BlueprintPure, Category = "Builder")
+	ABuildableActor* GetFeedDispenserTarget() const;
+
 	/** What the gun list measures its rows against: the standing turret while feeding, else the
 	 *  class defaults of the turret about to be placed (a fresh one, level 1, every vice empty).
 	 *  Null when no gun list is up. */
@@ -221,7 +227,7 @@ public:
 	/** The turret of the player's side under the aim, within its FeedReachCm, or null. */
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	ATurretBuildable* FindTurretUnderAim() const;
-	ADispenserBuildable* FindDispenserUnderAim() const;
+	ABuildableActor* FindDispenserUnderAim() const;
 
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	int32 GetPlacingSlot() const { return PlacingSlot; }
@@ -291,7 +297,7 @@ protected:
 	void Server_FeedTurret(ATurretBuildable* Turret, AShooterWeapon* Weapon, int32 ReportedLoadedRounds);
 
 	UFUNCTION(Server, Reliable)
-	void Server_FuelDispenser(ADispenserBuildable* Dispenser, AShooterWeapon* Weapon);
+	void Server_FuelDispenser(ABuildableActor* Dispenser, AShooterWeapon* Weapon);
 
 private:
 
@@ -344,6 +350,9 @@ private:
 
 	/** The turret the feed menu is open for. Weak: it can die while the menu is up. */
 	TWeakObjectPtr<ATurretBuildable> FeedTarget;
+
+	/** The dispenser the feed menu is open for. Weak, and exclusive with FeedTarget. */
+	TWeakObjectPtr<ABuildableActor> FeedDispenserTarget;
 
 	/** The gun picked for the turret being placed; goes with the placement request. */
 	TWeakObjectPtr<AShooterWeapon> PendingFeedWeapon;

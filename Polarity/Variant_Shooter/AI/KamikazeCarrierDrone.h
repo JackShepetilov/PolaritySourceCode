@@ -138,10 +138,18 @@ protected:
 
 	// ==================== Hitbox ====================
 
+	/** The airframe itself catches rounds (its own collision hulls). While on, Hitbox is disabled:
+	 *  bullets and hitscan land straight on the mesh. Requires the mesh asset to have collision
+	 *  (simple convex hulls) - without hulls the wings catch nothing, so turn this off to go back
+	 *  to the fitted box. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Carrier|Hitbox")
+	bool bMeshAsHitbox = true;
+
 	/** What bullets hit. The capsule is the movement body and a sphere; the carrier's mesh is a flat,
 	 *  wide airframe, so the capsule missed the arms and caught empty air above the hull. This box
 	 *  follows the mesh (it is attached to it, so it tilts with it), is found by weapon traces like
-	 *  any pawn, and blocks nothing: movement and walls still go by the capsule. */
+	 *  any pawn, and blocks only ballistic rounds (ECC_WorldDynamic): movement, walls and pawns still
+	 *  go by the capsule, exactly as before. Disabled while bMeshAsHitbox is on. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Carrier|Hitbox")
 	TObjectPtr<UBoxComponent> Hitbox;
 

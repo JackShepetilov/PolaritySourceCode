@@ -16,6 +16,7 @@
 #include "AI/FactionContactMemory.h"
 #include "Coop/CoopPlayers.h"
 #include "AI/PolarityTeams.h"
+#include "Variant_Shooter/Siege/SiegeCoreBuildable.h"
 
 AShooterAIController::AShooterAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPolarityPathFollowingComponent>(TEXT("PathFollowingComponent")))
@@ -272,7 +273,17 @@ void AShooterAIController::ResolveTargetIntents()
 		}
 	}
 
-	AActor* const NewTarget = Winner ? Winner->Target.Get() : nullptr;
+	AActor* NewTarget = Winner ? Winner->Target.Get() : nullptr;
+
+	// On a siege map, an NPC with nothing to fight marches on the base. This runs under every intent:
+	// the moment perception, script or anything else names a target, that request wins back — which
+	// is the "a visible player matters, the core is the default" rule the siege wants. No core on the
+	// map means SiegeCore is null and every non-siege fight behaves exactly as before.
+	if (!NewTarget)
+	{
+		NewTarget = SiegeCore.Get();
+	}
+
 	if (NewTarget == TargetEnemy)
 	{
 		return;
@@ -358,6 +369,15 @@ void AShooterAIController::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Keep the siege-core companion fresh before the resolve below reads it. A world holds one or
+	// two cores, so the walk is cheap even at scale.
+	SiegeCoreRefreshTimer -= DeltaTime;
+	if (SiegeCoreRefreshTimer <= 0.0f)
+	{
+		SiegeCoreRefreshTimer = SiegeCoreRefreshInterval;
+		RefreshSiegeCore();
+	}
+
 	// Only expiries need this; everything else resolves at the moment it is written. Cheap enough to
 	// run unconditionally: the array holds at most one entry per source.
 	ResolveTargetIntents();
@@ -412,10 +432,36 @@ void AShooterAIController::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimul
 	}
 }
 
+void AShooterAIController::RefreshSiegeCore()
+{
+	const UWorld* const World = GetWorld();
+	const APawn* const PossessedPawn = GetPawn();
+	ASiegeCoreBuildable* const Core = (World && PossessedPawn)
+		? ASiegeCoreBuildable::FindNearest(World, PossessedPawn->GetActorLocation())
+		: nullptr;
+	if (Core != SiegeCore.Get())
+	{
+		SiegeCore = Core;
+		UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s fallback core: %s"),
+			*GetNameSafe(GetPawn()), Core ? *Core->GetName() : TEXT("none"));
+	}
+
+	// New companion, new answer: an NPC that was standing idle must now turn towards the march.
+	ResolveTargetIntents();
+}
+
 void AShooterAIController::OnPerceptionForgotten(AActor* Actor)
 {
 	// Broadcast Blueprint event
 	OnEnemyLost.Broadcast(Actor);
+
+	// On a siege map, losing sight of the current target hands it back to the core. Without this the
+	// standing Perception intent would keep the NPC chasing a player it cannot see, and the resolved
+	// answer would never reach the siege fallback. Maps without a core keep the old pursuit rule.
+	if (Actor && GetTargetIntent(ETargetIntentSource::Perception) == Actor && SiegeCore.IsValid())
+	{
+		ClearCurrentTarget();
+	}
 
 	// pass the data to the StateTree delegate hook
 	OnShooterPerceptionForgotten.ExecuteIfBound(Actor);

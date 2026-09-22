@@ -11,11 +11,12 @@
 /**
  * Manages visual rotation of a drone mesh to simulate FPV flight characteristics.
  *
- * Pitch correlates with speed (faster = more forward tilt).
- * Roll correlates with lateral acceleration (turning = banking).
- * Yaw lags behind pitch/roll for authentic FPV feel.
- * Dual-sine wobble adds per-instance micro-corrections.
- * Slightly underdamped spring produces 2-4% overshoot on angle changes.
+ * The body's pitch/yaw follow the flight path (the pawn's rotation); this component adds the FPV
+ * accents on top. Pitch follows forward acceleration (nose dips when speeding up, rises when
+ * braking). Roll correlates with lateral acceleration (bank into turns). Yaw lags behind pitch/roll.
+ * Dual-sine wobble adds per-instance micro-corrections. Slightly underdamped spring produces 2-4%
+ * overshoot. The mesh's Blueprint-authored base rotation is preserved and the tilt is composed on
+ * top of it.
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class POLARITY_API UFPVTiltComponent : public UActorComponent
@@ -48,9 +49,16 @@ public:
 
 	// ==================== Tilt Parameters ====================
 
-	/** Maximum forward pitch angle (degrees) at max speed */
+	/** Maximum nose dip (degrees) under forward acceleration at or beyond PitchAccelerationReference.
+	 *  Backward acceleration (braking, backing off) raises the nose by the same amount. */
 	UPROPERTY(EditAnywhere, Category = "FPV Tilt|Pitch", meta = (ClampMin = "0", ClampMax = "90"))
 	float MaxPitchAngle = 70.0f;
+
+	/** Forward acceleration (cm/s^2) that reaches the full MaxPitchAngle nose dip. Half of it = half
+	 *  the angle. Tuned so the strike run-up (4000) nearly pegs the nose down, while the hold drift
+	 *  (a few hundred) sways gently. */
+	UPROPERTY(EditAnywhere, Category = "FPV Tilt|Pitch", meta = (ClampMin = "1"))
+	float PitchAccelerationReference = 3000.0f;
 
 	/** Interpolation speed for pitch changes */
 	UPROPERTY(EditAnywhere, Category = "FPV Tilt|Pitch", meta = (ClampMin = "0.1"))
@@ -108,6 +116,10 @@ private:
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> TargetMesh;
 
+	/** Blueprint-authored relative rotation of the mesh, read at Initialize and preserved: the tilt
+	 *  is always composed on top of it, never written instead of it. */
+	FRotator BaseRelativeRotation = FRotator::ZeroRotator;
+
 	/** Max speed used for pitch normalization */
 	float MaxSpeed = 1200.0f;
 
@@ -125,15 +137,12 @@ private:
 	FRotator AngularVelocity = FRotator::ZeroRotator;
 	FRotator TargetAngles = FRotator::ZeroRotator;
 
-	/** Previous velocity for deceleration detection */
-	FVector PreviousVelocity = FVector::ZeroVector;
-
 	bool bInitialized = false;
 
 	// ==================== Internal Methods ====================
 
-	/** Calculate target pitch from speed */
-	float CalculateTargetPitch(float CurrentSpeed, bool bDecelerating) const;
+	/** Calculate target pitch from forward acceleration (nose dips under thrust, rises on braking) */
+	float CalculateTargetPitch(const FVector& Acceleration) const;
 
 	/** Calculate target roll from lateral acceleration */
 	float CalculateTargetRoll(const FVector& Velocity, const FVector& Acceleration) const;

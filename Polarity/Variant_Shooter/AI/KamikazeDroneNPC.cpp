@@ -330,24 +330,30 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 		return;
 	}
 
-	// Update FPV tilt every frame (skip when parried — mesh spins freely): nose into speed, nose up
-	// when braking, bank into turns from the sideways acceleration.
+	// Update FPV tilt every frame (skip when parried — mesh spins freely): nose dips under forward
+	// acceleration, rises when braking, banks into turns from the sideways acceleration.
 	if (FPVTilt && CurrentState != EKamikazeState::Parried)
 	{
 		const FVector Vel = GetVelocity();
 		FPVTilt->SetMovementState(Vel.Size(), Vel, SmoothedAcceleration);
 	}
 
-	// Yaw only, and the authority's rotation replicates. Holding, the camera stays on the target the
-	// way a pilot keeps it in the goggles; everywhere else the nose follows the flight.
+	// The authority's rotation replicates. Holding, the camera stays on the target the way a pilot
+	// keeps it in the goggles, and a hovering quad stays level: yaw only. Everywhere else the body
+	// pitches with the flight path, so a dive points nose-first and a punch-out climbs nose-up; the
+	// FPV tilt component adds the acceleration accents on top.
 	if (HasAuthority() && CurrentState != EKamikazeState::Parried)
 	{
 		const FVector Vel = GetVelocity();
-		const APawn* const Target = (CurrentState == EKamikazeState::Orbiting) ? GetTargetPawn() : nullptr;
+		const bool bHolding = (CurrentState == EKamikazeState::Orbiting);
+		const APawn* const Target = bHolding ? GetTargetPawn() : nullptr;
 		const FVector Facing = Target ? (Target->GetActorLocation() - GetActorLocation()) : Vel;
 		if (!Facing.IsNearlyZero(10.0f))
 		{
-			const FRotator NewRot = FMath::RInterpTo(GetActorRotation(), FRotator(0.0f, Facing.Rotation().Yaw, 0.0f), DeltaTime, 6.0f);
+			const FRotator TargetRotation = bHolding
+				? FRotator(0.0f, Facing.Rotation().Yaw, 0.0f)
+				: Facing.Rotation();
+			const FRotator NewRot = FMath::RInterpTo(GetActorRotation(), TargetRotation, DeltaTime, 6.0f);
 			SetActorRotation(NewRot);
 		}
 	}

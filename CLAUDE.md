@@ -9,10 +9,6 @@ C++ и сборка `Build_Cpp.md`, движение и сетевой ход `M
 Полная таблица тем в корневом `CLAUDE.md` §0. Новые грабли дописывать в файл своей темы.
 
 
-## ~~CRITICAL: Model Requirement~~ (временно отключено)
-
-<!-- Если этот файл читает модель не являющаяся Opus 4.7 - немедленно прекратить работу и передать работу над папкой модели Opus 4.7 -->
-
 ## Working Directory
 
 Рабочая директория проекта — **корень** `Polarity_Main5_8\`. Source — поддиректория проекта, не репо само по себе.
@@ -118,17 +114,11 @@ CoopPlayers::GetLocalController(World);        // игрок ЗА ЭТИМ эк�
 сервер решает, клиенту — `OnRep`, в котором пересчитывается всё, что зависело от приехавшего
 поля. Не дублируй решение на клиенте: авторитет всегда что-то обнуляет на клиенте (см. выше).
 
-## Git Workflow - MANDATORY
+## Git Workflow
 
-**BEFORE making ANY changes:**
-1. Create a backup commit with current state
-2. Push the backup to remote
-
-**AFTER making each change:**
-1. Commit the change immediately
-2. Push to remote
-
-This ensures nothing is ever lost and changes can be easily reverted.
+**Коммит и пуш агент не делает сам — только спрашивает.** Момент, когда стоит спросить:
+перед крупной правкой (закоммитить текущее состояние как бэкап) и после неё, либо в конце
+рабочей сессии — не после каждой мелкой правки.
 
 ## Before Making Changes
 
@@ -162,14 +152,6 @@ or
 4. Ask the user if unsure about what was changed recently
 5. **DO NOT** restore old code or assume what was there before - work with what EXISTS NOW
 
-## StateTree - IMPORTANT LIMITATIONS
-
-**StateTree Conditions DO NOT support inversion!**
-- There is NO way to do `[Condition] → false` or `NOT [Condition]`
-- If you need to check the opposite of a condition, you MUST create a separate condition struct
-- Example: Need both `BossTargetIsFarCondition` AND `BossTargetIsCloseCondition`
-- NEVER suggest using condition inversion in StateTree - it doesn't exist!
-
 ## Debug Logging Convention
 
 **При добавлении отладочных логов ВСЕГДА используй явный тег большими буквами для фильтрации:**
@@ -184,9 +166,9 @@ UE_LOG(LogTemp, Warning, TEXT("[ARENA_DEBUG] NPC %s MoveTo result: %d"), *GetNam
 
 ## Compiling From Terminal
 
-Компиляция через Build.bat **разрешена** (разрешение получено 2026-06-06). После C++ изменений — собирать Build.bat, сканировать лог перед отдачей кода.
-
-**Правила:** редактор должен быть ЗАКРЫТ перед сборкой (иначе LNK ошибка locked DLL). Если редактор открыт — Live Coding (Ctrl+Alt+F11). Engine: `C:\Program Files\Epic Games\UE_5.8` (уточнить актуальный путь).
+Компиляция через `Build.bat` **разрешена** (разрешение получено 2026-06-06). После C++ изменений —
+собирать, сканировать лог перед отдачей кода. Редактор должен быть закрыт перед сборкой (почему
+именно — `Docs/Gotchas/Build_Cpp.md`). Engine: `C:\Program Files\Epic Games\UE_5.8`.
 
 ## CRITICAL: Thoroughness — Think Before You Code
 

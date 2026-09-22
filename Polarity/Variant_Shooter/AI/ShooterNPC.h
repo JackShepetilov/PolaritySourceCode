@@ -58,6 +58,8 @@ class UMaterialInterface;
 class UEMFVelocityModifier;
 class UEMF_FieldComponent;
 class UNiagaraSystem;
+class UCoverFinderComponent;
+class ATurretBuildable;
 class AHealthPickup;
 class AArmorPickup;
 class UGeometryCollection;
@@ -361,6 +363,73 @@ protected:
 	/** Max range for aiming calculations */
 	UPROPERTY(EditAnywhere, Category = "Aim")
 	float AimRange = 10000.0f;
+
+	// ==================== Siege March ====================
+
+	/** How close (cm, 2D) to a siege core this NPC marches before opening fire on it. */
+	UPROPERTY(EditAnywhere, Category = "AI|Siege", meta = (ClampMin = "0.0", Units = "cm"))
+	float SiegeCoreEngageDistance = 1800.0f;
+
+	/** How often the march re-issues its move order while walking to the core. The StateTree's roam
+	 *  state keeps handing out its own destinations, and this cadence is what keeps the core winning. */
+	UPROPERTY(EditAnywhere, Category = "AI|Siege", meta = (ClampMin = "0.1", Units = "s"))
+	float SiegeCoreMoveReissueInterval = 0.75f;
+
+	/** Counts down to the next move-order reissue. */
+	float SiegeMoveReissueTimer = 0.0f;
+
+	/** The core this NPC is currently marching on, or null when the march is off. */
+	TWeakObjectPtr<AActor> SiegeMarchTarget;
+
+	/** Where the turret-cover machine is in its H -> peek -> H loop. */
+	enum class ETurretCoverPhase : uint8
+	{
+		Inactive,	// No turret threat.
+		Seeking,	// Requesting/awaiting a cover search result.
+		ToHide,		// Walking to the hide spot.
+		AtHide,		// Hiding, counting down to the next peek.
+		Peeking,	// Stepped out, firing at the turret.
+	};
+	ETurretCoverPhase TurretCoverPhase = ETurretCoverPhase::Inactive;
+
+	/** The turret this NPC is playing cover against. Null while the machine is inactive. */
+	TWeakObjectPtr<ATurretBuildable> TurretThreat;
+
+	/** Counts down to the next threat scan. */
+	float TurretScanTimer = 0.0f;
+
+	/** Phase-local countdown (peek / hide). */
+	float TurretCoverTimer = 0.0f;
+
+	/** Counts down to the next cover move re-issue. */
+	float TurretMoveReissueTimer = 0.0f;
+
+	// ==================== Turret Cover ====================
+
+	/** How far (cm, 2D) a hostile sentry turret can be to send this NPC toward cover. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.0", Units = "cm"))
+	float TurretThreatRadius = 4000.0f;
+
+	/** How often the turret threat scan runs and the cover state re-validates itself. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
+	float TurretCoverScanInterval = 0.5f;
+
+	/** How long one peek out of cover lasts before ducking back behind it. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
+	float TurretCoverPeekTime = 0.7f;
+
+	/** How long the NPC stays behind cover between peeks. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
+	float TurretCoverHideTime = 1.2f;
+
+	/** Arrival radius (cm) for the walk to the hide spot and the peek step. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "20.0", Units = "cm"))
+	float TurretCoverArriveRadius = 120.0f;
+
+	/** How often the cover move order is re-issued, which is what keeps the StateTree's own movement
+	 *  orders from pulling the NPC away mid-cover. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
+	float TurretCoverMoveReissueInterval = 0.5f;
 
 	// ==================== Hit Reactions ====================
 
@@ -1053,6 +1122,42 @@ protected:
 
 	/** Complete a deferred airborne stun after gravity brings the NPC to the ground. */
 	virtual void Landed(const FHitResult& Hit) override;
+
+	/** One per-frame slot of the siege march: while the controller's resolved target is a siege
+	 *  core, walk towards it and shoot it, without waiting for the StateTree to notice. The tree
+	 *  reacts to perceived players, not to controller-assigned targets, so the march has to live
+	 *  here rather than in the tree. */
+	void TickSiegeMarch(float DeltaTime);
+
+	/** Turn the march off (target changed away from the core, combat states, flying classes). */
+	void EndSiegeMarch();
+
+	/** One per-frame slot of the turret-cover machine. When a hostile sentry turret threatens this
+	 *  NPC, it stops whatever it was doing (the siege march included), finds a corner through
+	 *  UCoverFinderComponent and plays H -> peek-and-fire -> H against the turret, exactly like the
+	 *  old shield-break Peek did against players. Cover is only ever taken from turrets now: the
+	 *  tree's shield-break trigger is disabled (see FSTCondition_ShooterShieldDown). */
+	void TickTurretCover(float DeltaTime);
+
+	/** Leave the turret-cover machine completely: stop firing at the turret, drop the cover claim
+	 *  and extra observers, and clear the Turret intent so the ordinary targeting takes over. */
+	void EndTurretCover();
+
+	/** The nearest active hostile sentry turret that is aimed at this NPC or has line of sight to
+	 *  it, within TurretThreatRadius. Null when none. */
+	ATurretBuildable* FindTurretThreat() const;
+
+	/** Every active hostile sentry turret within Radius of this NPC: the full threat set the cover
+	 *  search must account for, not just the one being shot at. */
+	void CollectTurretThreats(TArray<AActor*>& OutThreats, float Radius) const;
+
+	/** Alive, active and inside Radius of this NPC. Radius is per-call so the caller can apply
+	 *  hysteresis (a wider ring to leave by than to enter by). */
+	bool IsTurretThreatValid(const ATurretBuildable* Turret, float Radius) const;
+
+	/** Crouch (or stand back up) for the exposed part of the turret peek, when the class profile
+	 *  asks for the crouch-peek (UEnemyCombatProfile::bCrouchWhenPeeking). */
+	void SetTurretPeekCrouch(bool bCrouched);
 
 public:
 

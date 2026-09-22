@@ -2,6 +2,7 @@
 
 #include "FPVTiltComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "GameFramework/Actor.h"
 
 UFPVTiltComponent::UFPVTiltComponent()
 {
@@ -12,6 +13,10 @@ void UFPVTiltComponent::Initialize(UStaticMeshComponent* InMesh, float InMaxSpee
 {
 	TargetMesh = InMesh;
 	MaxSpeed = FMath::Max(InMaxSpeed, 1.0f);
+
+	// The Blueprint-authored rotation of the mesh is the drone's real orientation (where its nose
+	// is). The tilt is applied on top of it, never instead of it.
+	BaseRelativeRotation = TargetMesh ? TargetMesh->GetRelativeRotation() : FRotator::ZeroRotator;
 
 	WobbleRandom.Initialize(InSeed);
 	WobbleTimeOffset = WobbleRandom.FRandRange(0.0f, 100.0f);
@@ -35,16 +40,13 @@ void UFPVTiltComponent::SetMovementState(float CurrentSpeed, const FVector& Velo
 
 	AccumulatedTime += DeltaTime;
 
-	// Detect deceleration: speed decreasing
-	const bool bDecelerating = Velocity.SizeSquared() < PreviousVelocity.SizeSquared() * 0.9f;
-	PreviousVelocity = Velocity;
-
 	// --- Calculate target angles ---
 
-	// Pitch: forward tilt based on speed, negative when braking
-	const float TargetPitch = CalculateTargetPitch(CurrentSpeed, bDecelerating);
+	// Pitch: the body already follows the flight path (the pawn's rotation). This adds the honest FPV
+	// accent on top: nose dips under forward acceleration and rises under braking.
+	const float TargetPitch = CalculateTargetPitch(Acceleration);
 
-	// Roll: bank into turns based on lateral acceleration
+	// Roll: bank into turns from the sideways acceleration.
 	const float TargetRoll = CalculateTargetRoll(Velocity, Acceleration);
 
 	// Yaw: align mesh forward direction with velocity (just offset, not absolute)
@@ -68,22 +70,24 @@ void UFPVTiltComponent::SetMovementState(float CurrentSpeed, const FVector& Velo
 	// --- Update spring (with overshoot) ---
 	UpdateSpring(DeltaTime);
 
-	// --- Apply to mesh ---
-	TargetMesh->SetRelativeRotation(CurrentAngles);
+	// --- Apply to mesh on top of the Blueprint-authored base orientation ---
+	// Composed base-first, tilt-second: the tilt is expressed in the corrected body frame (nose
+	// +X), so pitch and roll angles mean what their names say regardless of the asset's own axes.
+	const FQuat TiltQuat = CurrentAngles.Quaternion();
+	const FQuat BaseQuat = BaseRelativeRotation.Quaternion();
+	TargetMesh->SetRelativeRotation((TiltQuat * BaseQuat).Rotator());
 }
 
-float UFPVTiltComponent::CalculateTargetPitch(float CurrentSpeed, bool bDecelerating) const
+float UFPVTiltComponent::CalculateTargetPitch(const FVector& Acceleration) const
 {
-	if (bDecelerating)
-	{
-		// Nose up when braking: -15 to -25 degrees based on deceleration
-		const float SpeedRatio = FMath::Clamp(CurrentSpeed / MaxSpeed, 0.0f, 1.0f);
-		return -MaxPitchAngle * 0.35f * (1.0f - SpeedRatio);
-	}
-
-	// Forward pitch: power curve gives quick ramp at low speeds, plateau at high
-	const float SpeedRatio = FMath::Clamp(CurrentSpeed / MaxSpeed, 0.0f, 1.0f);
-	return MaxPitchAngle * FMath::Pow(SpeedRatio, 0.7f);
+	// Nose follows thrust: forward acceleration dips the nose, braking raises it. Signed and
+	// symmetric, so backing off (the wind-up, or a punch-out against the forward vector) lifts the
+	// nose exactly like a real quad. Positive UE pitch points the nose up, so acceleration takes the
+	// negative.
+	const FVector Forward = GetOwner() ? GetOwner()->GetActorForwardVector() : FVector::ForwardVector;
+	const float ForwardAccel = FVector::DotProduct(Acceleration, Forward);
+	const float Alpha = FMath::Clamp(ForwardAccel / FMath::Max(PitchAccelerationReference, 1.0f), -1.0f, 1.0f);
+	return -MaxPitchAngle * Alpha;
 }
 
 float UFPVTiltComponent::CalculateTargetRoll(const FVector& Velocity, const FVector& Acceleration) const
@@ -93,15 +97,16 @@ float UFPVTiltComponent::CalculateTargetRoll(const FVector& Velocity, const FVec
 		return 0.0f;
 	}
 
-	// Lateral acceleration = cross product of velocity direction and acceleration
-	// Positive = turning right, Negative = turning left
+	// Lateral acceleration = cross product of velocity direction and acceleration.
+	// Positive = turning right. A positive UE roll lifts the right side (that is a LEFT bank), so
+	// banking into a right turn takes the negative of the lateral sign.
 	const FVector VelDir = Velocity.GetSafeNormal();
 	const FVector HorizAccel = FVector(Acceleration.X, Acceleration.Y, 0.0f);
 
 	// Cross product Z component gives lateral acceleration magnitude with sign
 	const float LateralAccel = FVector::CrossProduct(VelDir, HorizAccel).Z;
 
-	return FMath::Clamp(LateralAccel * BankMultiplier, -MaxRollAngle, MaxRollAngle);
+	return -FMath::Clamp(LateralAccel * BankMultiplier, -MaxRollAngle, MaxRollAngle);
 }
 
 float UFPVTiltComponent::CalculateWobble(float Time, float AxisOffset) const

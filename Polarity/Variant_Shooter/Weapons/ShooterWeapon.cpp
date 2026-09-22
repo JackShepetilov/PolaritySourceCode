@@ -1,8 +1,16 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterWeapon.h"
 #include "AI/PolarityTeams.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimNotifies/AnimNotify_PlaySound.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/AnimSequenceBase.h"
+#include "AudioDevice.h"
 #include "Coop/CoopPlayers.h"
+#include "Sound/SoundBase.h"
+#include "UObject/FieldIterator.h"
+#include "UObject/SoftObjectPtr.h"
 #include "PolarityPalette.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
 #if WITH_EDITOR
@@ -34,6 +42,7 @@
 #include "ShooterWeaponHolder.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
+#include "Components/AudioComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Net/UnrealNetwork.h"
@@ -41,13 +50,13 @@
 #include "HAL/IConsoleManager.h"
 #include "TimerManager.h"
 
-// polarity.debug.novfx - глушилка боевых эффектов для отладки. Объявлена здесь, а не в отдельном
-// заголовке, потому что новый файл потребовал бы полной пересборки; остальные места читают её через
-// IConsoleManager::FindConsoleVariable по имени.
+// polarity.debug.novfx - �������� ������ �������� ��� �������. ��������� �����, � �� � ���������
+// ���������, ������ ��� ����� ���� ���������� �� ������ ����������; ��������� ����� ������ � �����
+// IConsoleManager::FindConsoleVariable �� �����.
 static TAutoConsoleVariable<int32> CVarNoVFX(
 	TEXT("polarity.debug.novfx"),
 	0,
-	TEXT("1 - не спавнить боевые эффекты (попадания, вспышки). Для наблюдения за ИИ."),
+	TEXT("1 - �� �������� ������ ������� (���������, �������). ��� ���������� �� ��."),
 	ECVF_Cheat);
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
@@ -306,7 +315,7 @@ void AShooterWeapon::ApplyChildComponentSetup()
 		{
 			if (!Child || Child == Parent) continue;
 
-			// 1. Hard prerequisite — child can never tick before the parent.
+			// 1. Hard prerequisite � child can never tick before the parent.
 			Child->AddTickPrerequisiteComponent(Parent);
 
 			// 2. Push tick into TG_PostPhysics so it runs after PrePhysics anim work AND
@@ -577,21 +586,350 @@ void AShooterWeapon::StopReloadAudio()
 		ReloadAudioComponent->Stop();
 		ReloadAudioComponent = nullptr;
 	}
+	ReloadAudioWorldStartTime = -1.0f;
+	ReloadAudioStartOffset = 0.0f;
+
+	// Reload sounds played through montage notifies and animation-pack Blueprints are their own
+	// live UAudioComponents attached to the weapon meshes and the arms. Whatever is sounding there
+	// the moment the weapon is stowed is the reload's noise, so it all gets cut with it [2026-09-16].
+	auto StopAttachedAudio = [](USceneComponent* Root)
+	{
+		if (!Root)
+		{
+			return;
+		}
+		TArray<USceneComponent*> Children;
+		Root->GetChildrenComponents(/*bIncludeAllDescendants*/ true, Children);
+		Children.Add(Root);
+		for (USceneComponent* Child : Children)
+		{
+			if (UAudioComponent* const Audio = Cast<UAudioComponent>(Child))
+			{
+				Audio->Stop();
+			}
+		}
+	};
+	StopAttachedAudio(FirstPersonMesh);
+	StopAttachedAudio(ThirdPersonMesh);
+	if (const AShooterCharacter* const Character = Cast<AShooterCharacter>(PawnOwner))
+	{
+		StopAttachedAudio(Character->GetFirstPersonMesh());
+	}
+
+	// The notify-spawned one-shot itself (not attached anywhere we can sweep) dies through the
+	// audio device: everything playing the montage's own reload sound is the reload's noise.
+	StopNotifiedReloadSoundInWorld();
 }
 
 void AShooterWeapon::PlayReloadAudioAtProgress(float Progress)
 {
 	StopReloadAudio();
-	if (!ReloadSound)
+	USoundBase* const Snd = NotifiedReloadSound ? NotifiedReloadSound.Get() : ReloadSound.Get();
+	if (!Snd)
 	{
 		return;
 	}
-	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(ReloadSound, GetRootComponent());
+	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(Snd, GetRootComponent());
 	if (ReloadAudioComponent)
 	{
-		const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * FMath::Max(0.0f, ReloadSound->GetDuration());
+		const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * FMath::Max(0.0f, Snd->GetDuration());
 		ReloadAudioComponent->Play(StartTime);
+		// The resume path needs the audio's OWN clock, not a montage fraction: a cue's GetDuration
+		// may not match the audible content, and Play(StartTime) clamps into it invisibly.
+		ReloadAudioWorldStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		ReloadAudioStartOffset = FMath::Max(0.0f, StartTime);
+		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload audio started (offs %.2fs, sound %s, dur %.2fs)"),
+			*GetName(), ReloadAudioStartOffset, *GetNameSafe(Snd), Snd->GetDuration());
 	}
+}
+
+void AShooterWeapon::RestartReloadAudioAtSeconds(float OffsetSeconds)
+{
+	StopReloadAudio();
+	USoundBase* const Snd = NotifiedReloadSound ? NotifiedReloadSound.Get() : ReloadSound.Get();
+	if (!Snd)
+	{
+		return;
+	}
+	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(Snd, GetRootComponent());
+	if (ReloadAudioComponent)
+	{
+		ReloadAudioComponent->Play(FMath::Max(0.0f, OffsetSeconds));
+		ReloadAudioWorldStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		ReloadAudioStartOffset = FMath::Max(0.0f, OffsetSeconds);
+		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload audio resumed at %.2fs (sound %s, dur %.2fs)"),
+			*GetName(), ReloadAudioStartOffset, *GetNameSafe(Snd), Snd->GetDuration());
+	}
+}
+
+namespace
+{
+	/** The sound a notify carries, wherever its class keeps it. The animation pack's reload montages
+	 *  use their own Blueprint notify classes (not UAnimNotify_PlaySound), with the cue in a plain
+	 *  UPROPERTY of theirs, so the scan walks every object property on the notify and takes the
+	 *  first USoundBase it finds, one struct level deep when the audio is packed in a struct. */
+	USoundBase* FindSoundOnNotify(const UObject* Notify)
+	{
+		if (!Notify)
+		{
+			return nullptr;
+		}
+		if (const UAnimNotify_PlaySound* const Play = Cast<UAnimNotify_PlaySound>(Notify))
+		{
+			return Play->Sound;
+		}
+		for (TFieldIterator<FObjectProperty> It(Notify->GetClass()); It; ++It)
+		{
+			if (It->PropertyClass && It->PropertyClass->IsChildOf<USoundBase>())
+			{
+				if (USoundBase* const Snd = Cast<USoundBase>(It->GetObjectPropertyValue_InContainer(Notify)))
+				{
+					return Snd;
+				}
+			}
+		}
+		for (TFieldIterator<FStructProperty> It(Notify->GetClass()); It; ++It)
+		{
+			const void* const StructPtr = It->ContainerPtrToValuePtr<void>(Notify);
+			for (TFieldIterator<FObjectProperty> Inner(It->Struct); Inner; ++Inner)
+			{
+				if (Inner->PropertyClass && Inner->PropertyClass->IsChildOf<USoundBase>())
+				{
+					if (USoundBase* const Snd = Cast<USoundBase>(Inner->GetObjectPropertyValue(StructPtr)))
+					{
+						return Snd;
+					}
+				}
+			}
+		}
+		for (TFieldIterator<FSoftObjectProperty> It(Notify->GetClass()); It; ++It)
+		{
+			USoundBase* const Snd = Cast<USoundBase>(It->GetPropertyValue_InContainer(Notify).ToSoftObjectPath().TryLoad());
+			if (Snd)
+			{
+				return Snd;
+			}
+		}
+		return nullptr;
+	}
+}
+
+bool AShooterWeapon::ReloadMontageCarriesAudio(const UAnimSequenceBase* AnimSeq) const
+{
+	if (!AnimSeq)
+	{
+		return false;
+	}
+	auto ListHasAudio = [this](const TArray<FAnimNotifyEvent>& List)
+	{
+		for (const FAnimNotifyEvent& Event : List)
+		{
+			if (FindSoundOnNotify(Event.Notify) || FindSoundOnNotify(Event.NotifyStateClass.Get()))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	if (ListHasAudio(AnimSeq->Notifies))
+	{
+		return true;
+	}
+	// The pack's weapon montages wrap plain sequences: the audible notifies live on the section's
+	// sequence, not on the montage's own track.
+	if (const UAnimMontage* const AsMontage = Cast<UAnimMontage>(AnimSeq))
+	{
+		for (const FCompositeSection& Section : AsMontage->CompositeSections)
+		{
+			if (const UAnimSequenceBase* const Linked = Section.GetLinkedSequence())
+			{
+				if (ListHasAudio(Linked->Notifies))
+				{
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+void AShooterWeapon::DiscoverNotifiedReloadSound()
+{
+	NotifiedReloadSound = nullptr;
+	NotifiedReloadSoundBeginWorldTime = -1.0f;
+
+	float TriggerTime = -1.0f;
+
+	// Where the sound may live, in the order the animation pack actually plays them:
+	//  1. the reload montages WE play (the DA's WeaponAnims.PrimaryReload and the arms montage);
+	//  2. the reload montage the WEAPON MESH'S OWN ANIM BLUEPRINT holds as a property and plays
+	//     itself (the pack's ABP_<gun>) — the pack pistols keep their reload there;
+	//  3. a USoundBase property on the pack's WeaponSettings data asset (like the FireSound slot).
+	auto ScanAnimForSound = [&](const UAnimSequenceBase* AnimSeq)
+	{
+		if (!AnimSeq || NotifiedReloadSound)
+		{
+			return;
+		}
+		auto ScanList = [&](const TArray<FAnimNotifyEvent>& List, float TimeOffset)
+		{
+			for (const FAnimNotifyEvent& Event : List)
+			{
+				USoundBase* Snd = FindSoundOnNotify(Event.Notify);
+				if (!Snd)
+				{
+					Snd = FindSoundOnNotify(Event.NotifyStateClass.Get());
+				}
+				if (Snd)
+				{
+					NotifiedReloadSound = Snd;
+					TriggerTime = TimeOffset + FMath::Max(0.0f, Event.GetTriggerTime());
+					return true;
+				}
+			}
+			return false;
+		};
+
+		if (ScanList(AnimSeq->Notifies, 0.0f))
+		{
+			return;
+		}
+
+		// A montage whose sections wrap plain sequences (the pack's AM_* weapon montages are
+		// exactly this): the audible PlaySound notifies live on the SECTION'S SEQUENCE, and the
+		// montage's own track is empty. The trigger time is the section's start plus the notify's
+		// time inside its sequence.
+		if (const UAnimMontage* const AsMontage = Cast<UAnimMontage>(AnimSeq))
+		{
+			for (const FCompositeSection& Section : AsMontage->CompositeSections)
+			{
+				if (const UAnimSequenceBase* const Linked = Section.GetLinkedSequence())
+				{
+					if (ScanList(Linked->Notifies, FMath::Max(0.0f, Section.GetTime())))
+					{
+						return;
+					}
+				}
+			}
+		}
+	};
+
+	const UAnimationAsset* const Candidates[] = { GetReloadWeaponAnimation(ShellStage), GetArmsMontageForStage(ShellStage) };
+	for (const UAnimationAsset* const Anim : Candidates)
+	{
+		ScanAnimForSound(Cast<UAnimSequenceBase>(Anim));
+	}
+
+	if (!NotifiedReloadSound && FirstPersonMesh)
+	{
+		if (const UAnimInstance* const WeaponAnim = FirstPersonMesh->GetAnimInstance())
+		{
+			FString HeldMontageNames;
+			for (TFieldIterator<FObjectProperty> It(WeaponAnim->GetClass()); It; ++It)
+			{
+				if (!It->PropertyClass || !It->PropertyClass->IsChildOf<UAnimSequenceBase>())
+				{
+					continue;
+				}
+				const UAnimSequenceBase* const Held = Cast<UAnimSequenceBase>(It->GetObjectPropertyValue_InContainer(WeaponAnim));
+				HeldMontageNames += FString::Printf(TEXT("%s=%s "), *It->GetName(), *GetNameSafe(Held));
+				if (FString(It->GetName()).Contains(TEXT("Reload"), ESearchCase::IgnoreCase))
+				{
+					ScanAnimForSound(Held);
+				}
+			}
+			if (!NotifiedReloadSound)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: weapon ABP %s holds anims: %s"),
+					*GetName(), *GetNameSafe(WeaponAnim->GetClass()), *HeldMontageNames);
+			}
+		}
+	}
+
+	if (!NotifiedReloadSound && PackWeaponSettings)
+	{
+		FString SoundPropNames;
+		for (TFieldIterator<FObjectProperty> It(PackWeaponSettings->GetClass()); It; ++It)
+		{
+			if (!It->PropertyClass || !It->PropertyClass->IsChildOf<USoundBase>())
+			{
+				continue;
+			}
+			USoundBase* const Snd = Cast<USoundBase>(It->GetObjectPropertyValue_InContainer(PackWeaponSettings));
+			SoundPropNames += FString::Printf(TEXT("%s=%s "), *It->GetName(), *GetNameSafe(Snd));
+			if (Snd && FString(It->GetName()).Contains(TEXT("Reload"), ESearchCase::IgnoreCase))
+			{
+				NotifiedReloadSound = Snd;
+				TriggerTime = 0.0f;
+				break;
+			}
+		}
+		if (!NotifiedReloadSound)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: DA %s sound properties: %s"),
+				*GetName(), *GetNameSafe(PackWeaponSettings), SoundPropNames.IsEmpty() ? TEXT("(none)") : *SoundPropNames);
+		}
+	}
+
+	if (NotifiedReloadSound && GetWorld())
+	{
+		// The notify fires this many seconds after the montage starts, which is right about now.
+		NotifiedReloadSoundBeginWorldTime = GetWorld()->GetTimeSeconds() + TriggerTime;
+		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload audio comes from a montage notify (%s at %.2fs) - playback taken over"),
+			*GetName(), *GetNameSafe(NotifiedReloadSound), TriggerTime);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: no reload sound found in the montages, the weapon ABP or the DA"),
+			*GetName());
+	}
+}
+
+void AShooterWeapon::StopNotifiedReloadSoundInWorld()
+{
+	if (!NotifiedReloadSound || !GetWorld())
+	{
+		return;
+	}
+	FAudioDevice* const AudioDevice = GetWorld()->GetAudioDevice().GetAudioDevice();
+	if (!AudioDevice)
+	{
+		return;
+	}
+	int32 Stopped = 0;
+	for (FActiveSound* Active : AudioDevice->GetActiveSounds())
+	{
+		if (Active && Active->GetSound() == NotifiedReloadSound)
+		{
+			AudioDevice->StopActiveSound(Active);
+			++Stopped;
+		}
+	}
+	if (Stopped > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: stopped %d world sound(s) of %s at stow"),
+			*GetName(), Stopped, *GetNameSafe(NotifiedReloadSound));
+	}
+}
+
+UAnimMontage* AShooterWeapon::GetArmsMontageForStage(EWeaponReloadStage Stage) const
+{
+	// Which montage a stage means for the ARMS is decided here and nowhere else, so the two halves
+	// of a stage (the hands and the gun) can never disagree about which stage they are in.
+	switch (Stage)
+	{
+	case EWeaponReloadStage::Primary:
+	case EWeaponReloadStage::ShellStart:
+		return ReloadMontage.Get();
+
+	case EWeaponReloadStage::Secondary:
+	case EWeaponReloadStage::ShellLoop:
+		return SecondaryReloadMontage ? SecondaryReloadMontage.Get() : ReloadMontage.Get();
+
+	case EWeaponReloadStage::ShellEnd:
+		return ReloadEndMontage.Get();
+	}
+	return ReloadMontage.Get();
 }
 
 void AShooterWeapon::PauseWeaponReloadAnimation(UAnimationAsset* Animation, float& InOutProgress)
@@ -609,7 +947,9 @@ void AShooterWeapon::PauseWeaponReloadAnimation(UAnimationAsset* Animation, floa
 			if (UAnimInstance* Anim = Mesh->GetAnimInstance(); Anim && Anim->Montage_IsPlaying(Montage))
 			{
 				InOutProgress = FMath::Clamp(Anim->Montage_GetPosition(Montage) / Length, 0.0f, 1.0f);
-				Anim->Montage_Pause(Montage);
+				// Stopped, not paused: a paused instance keeps its weight forever and would hold
+				// the bolt open under every frame that follows [2026-09-15].
+				Anim->Montage_Stop(KINDA_SMALL_NUMBER, Montage);
 			}
 		}
 		else if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance())
@@ -634,6 +974,10 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(UAnimationAsset* Animation, flo
 		{
 			if (UAnimInstance* Anim = Mesh->GetAnimInstance())
 			{
+				// Sweep away any leftover instance of the same montage first: two weighted copies
+				// of one reload average against each other (the misplaced magazine) and the frozen
+				// one re-asserts its open-bolt frame once the resumed copy finishes [2026-09-15].
+				Anim->Montage_Stop(KINDA_SMALL_NUMBER, Montage);
 				FAlphaBlendArgs BlendArgs;
 				BlendArgs.BlendTime = ReloadResumeBlendDuration;
 				BlendArgs.BlendOption = ReloadResumeBlendOption;
@@ -643,8 +987,16 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(UAnimationAsset* Animation, flo
 		}
 		else
 		{
-			Mesh->PlayAnimation(Animation, false);
-			if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance())
+			// Keep the already-paused single-node player when it is still this reload.  Calling
+			// PlayAnimation first evaluates frame zero for one frame before SetPosition catches up;
+			// that is the magazine/bolt pop seen when a holstered reload returns.
+			UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance();
+			if (!SingleNode || SingleNode->GetCurrentAsset() != Animation)
+			{
+				Mesh->PlayAnimation(Animation, false);
+				SingleNode = Mesh->GetSingleNodeInstance();
+			}
+			if (SingleNode)
 			{
 				SingleNode->SetPosition(StartTime, false);
 				SingleNode->SetPlaying(true);
@@ -666,9 +1018,26 @@ void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 	// One sound per reload, not one per shell: the loop stage runs once for every round going in,
 	// and firing the magazine cue eight times over is a rattle rather than a reload. The shells
 	// themselves are in the animation.
+	//
+	// Only when NOTHING else plays the audio. For an animation-pack weapon (PackWeaponSettings) the
+	// pack's own notifies and components play the correct per-weapon sound, and the shared one-track
+	// ReloadSound is a wrong-sounding extra layer (the log showed every pack gun running the same
+	// leftover SC_WEP_AR_02_Reload_Empty). The montage-notify check covers the non-pack weapons
+	// whose montages already carry sounds of their own.
+	const bool bAudioFromElsewhere = (PackWeaponSettings != nullptr)
+		|| (NotifiedReloadSound != nullptr)
+		|| ReloadMontageCarriesAudio(GetArmsMontageForStage(Stage));
 	if (ReloadSound && Stage != EWeaponReloadStage::ShellLoop && Stage != EWeaponReloadStage::ShellEnd)
 	{
-		PlayReloadAudioAtProgress(0.0f);
+		if (bAudioFromElsewhere)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: stage %d audio is pack/montage-driven - shared ReloadSound skipped"),
+				*GetName(), static_cast<int32>(Stage));
+		}
+		else
+		{
+			PlayReloadAudioAtProgress(0.0f);
+		}
 	}
 }
 
@@ -685,26 +1054,9 @@ void AShooterWeapon::Multicast_PlayReloadEffects_Implementation(EWeaponReloadSta
 
 void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 {
-	// The arms. Which montage a stage means is decided here and nowhere else, so the two halves of
-	// a stage can never disagree about which stage they are in.
-	UAnimMontage* ArmsMontage = nullptr;
-
-	switch (Stage)
-	{
-	case EWeaponReloadStage::Primary:
-	case EWeaponReloadStage::ShellStart:
-		ArmsMontage = ReloadMontage;
-		break;
-
-	case EWeaponReloadStage::Secondary:
-	case EWeaponReloadStage::ShellLoop:
-		ArmsMontage = SecondaryReloadMontage ? SecondaryReloadMontage : ReloadMontage;
-		break;
-
-	case EWeaponReloadStage::ShellEnd:
-		ArmsMontage = ReloadEndMontage;
-		break;
-	}
+	// The arms. Which montage a stage means is decided in GetArmsMontageForStage and nowhere else,
+	// so the two halves of a stage can never disagree about which stage they are in.
+	UAnimMontage* const ArmsMontage = GetArmsMontageForStage(Stage);
 
 	if (ArmsMontage && WeaponOwner)
 	{
@@ -1186,7 +1538,7 @@ namespace
 	 * anim graph as "airborne", so every bullet made the NPC hop instead of playing its flinch.
 	 * Rule: a grounded character only gets launched by a deliberately strong impulse; ordinary
 	 * bullet forces are dropped and the hit shows up as the flinch reaction alone. A character
-	 * already in the air is launched as before — it is falling anyway, nothing to break.
+	 * already in the air is launched as before � it is falling anyway, nothing to break.
 	 */
 	void ApplyHitscanKnockback(ACharacter* HitCharacter, const FVector& LaunchVelocity, bool bIonizerWeapon)
 	{
@@ -1987,7 +2339,7 @@ void AShooterWeapon::AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, c
 
 	if (!WeaponMesh)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] AlignMeshToGripSocket: WeaponMesh is null — skipping"));
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] AlignMeshToGripSocket: WeaponMesh is null � skipping"));
 		return;
 	}
 
@@ -1995,7 +2347,7 @@ void AShooterWeapon::AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, c
 
 	if (!WeaponMesh->DoesSocketExist(GripSocket))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s %s: grip socket '%s' NOT FOUND — alignment skipped"),
+		UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG] %s %s: grip socket '%s' NOT FOUND � alignment skipped"),
 			*OwnerNameForLog, *MeshNameForLog, *GripSocket.ToString());
 		return;
 	}
@@ -2046,7 +2398,7 @@ void AShooterWeapon::AlignMeshToGripSocket(USkeletalMeshComponent* WeaponMesh, c
 	// from AttachmentRule preserved the BP-set scale and we don't want to clobber it).
 	WeaponMesh->SetRelativeLocationAndRotation(NewRelativeLocation, InverseRotation);
 
-	// === AFTER state — verify OptionalGrip actually lands at hand socket ===
+	// === AFTER state � verify OptionalGrip actually lands at hand socket ===
 	const FVector OptionalGripWorldAfter = WeaponMesh->GetSocketLocation(GripSocket);
 	const FVector DeltaAfter = OptionalGripWorldAfter - HandSocketWorld;
 	UE_LOG(LogTemp, Warning, TEXT("[GRIP_DEBUG]   OptGrip world AFTER  = %s  (delta=%s  len=%.4f)"),
@@ -2824,8 +3176,8 @@ FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const F
 	// of an accuracy-spread ray traced out to AimRange - and pawns do not block that channel here,
 	// so it lands on a wall behind the enemy or in open space thousands of units past them. Solving
 	// an arc onto that point yields the launch angle that REACHES that point, so the shell flies
-	// over the target and comes down somewhere in the distance. Every "стреляет в воздух далеко за
-	// игрока" was this, and every "стреляет в стену" was the same ray ending on a wall instead.
+	// over the target and comes down somewhere in the distance. Every "�������� � ������ ������ ��
+	// ������" was this, and every "�������� � �����" was the same ray ending on a wall instead.
 	//
 	// A hitscan does not care, because it only wants the direction and stops at the first thing it
 	// hits. A ballistic shot is the one caller that needs the real distance.
@@ -2836,7 +3188,7 @@ FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const F
 		// that ray already carries the NPC's accuracy spread (UAIAccuracyComponent) and the
 		// weapon's own cone, and taking the body's location outright threw both away, so every
 		// ballistic shot solved straight into the centre of the capsule no matter what the spread
-		// was set to. That was "сбривают с средней дистанции" at 15 degrees of BaseSpread.
+		// was set to. That was "�������� � ������� ���������" at 15 degrees of BaseSpread.
 		const float BodyReach = FVector::Dist(LaunchLocation, AimActor->GetActorLocation());
 		const FVector AimRay = (TargetLocation - LaunchLocation).GetSafeNormal();
 		BodyLocation = AimRay.IsNearlyZero()
@@ -2903,7 +3255,7 @@ FVector AShooterWeapon::SolveBallisticAim(const FVector& LaunchLocation, const F
 	// constraint. Give the solver far more speed than the shot needs and the high solution walks
 	// towards vertical, because straight up and straight down also reaches a target a thousand units
 	// away - so a 3000 u/s shell fired at a nearby corner came out as a mortar round aimed at the
-	// sky, which is what "стреляют вверх в воздух" was.
+	// sky, which is what "�������� ����� � ������" was.
 	//
 	// So the lob is a preference, not an instruction: if the high answer comes out steeper than a
 	// shot anybody would recognise, take the flat one instead. The flat solution still arcs - the
@@ -3003,8 +3355,8 @@ FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& Targ
 	//     2.2 deg -> 852 units        12.2 deg -> 4591 units
 	//
 	// against a target at 2750. The short end of that is not a miss, it is the shell going off
-	// practically at the shooter's feet - in the corner it just leaned out of. Every "стреляет в
-	// стену" that survived the aim fix was one of those short rounds.
+	// practically at the shooter's feet - in the corner it just leaned out of. Every "�������� �
+	// �����" that survived the aim fix was one of those short rounds.
 	//
 	// Displacing the aim POINT instead keeps the range honest: the arc is solved to wherever the
 	// scatter put the point, so the round always travels about the right distance and lands around
@@ -3057,7 +3409,7 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 	USkeletalMeshComponent* MuzzleMesh = (PawnOwner && PawnOwner->IsPlayerControlled()) ? FirstPersonMesh : ThirdPersonMesh;
 	const FVector MuzzleLocation = MuzzleMesh->GetSocketLocation(MuzzleSocketName);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°)
+	// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� (A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�)
 	FVector ViewDir = FVector::ForwardVector;
 	FVector ViewLocation = MuzzleLocation; // Fallback
 
@@ -3067,27 +3419,27 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 		ViewLocation = PawnOwner->GetPawnViewLocation();
 	}
 
-	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°)
+	// A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?, A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? (A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�)
 	FVector ToTargetVector = TargetLocation - MuzzleLocation;
 	float DistanceToTarget = ToTargetVector.Size();
 	FVector ToTargetDir = ToTargetVector.GetSafeNormal();
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
-	// 1.0 = ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾, 0.0 = 90 ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â², -1.0 = ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´
+	// A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�
+	// 1.0 = A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?, 0.0 = 90 A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?, -1.0 = A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 	float DotP = FVector::DotProduct(ToTargetDir, ViewDir);
 
-	// === ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â§ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ ===
+	// === A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a��A�A? ===
 
-	// 1. ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¯ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â (ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â) - ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â· ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+	// 1. A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A�A? A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?A?A?a�sA�A?a��A?A??�A�A?A?A?A?a�sA�A�a�?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? (A??�A�A?A?A?A?a�sA�A?a��A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?) - A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 	//DrawDebugLine(GetWorld(), ViewLocation, TargetLocation, FColor::Green, false, 3.0f, 0, 1.0f);
 
-	// 2. ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ "ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾" ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â«ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â (ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â) - ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+	// 2. A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A�A? "A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a��A�A?A??�A�A?A?A?A?a�sA�A�a�?A??�A�A?A?a��A�A?" A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? (A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?) - A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 	//DrawDebugLine(GetWorld(), MuzzleLocation, TargetLocation, FColor::Red, false, 3.0f, 0, 1.0f);
 
-	// 3. ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°), ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡
+	// 3. A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�), A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�?, A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?
 	//DrawDebugSphere(GetWorld(), MuzzleLocation, 10.0f, 12, FColor::Blue, false, 3.0f);
 
-	// 4. ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
+	// 4. A??�A�A?A?A?A?a�sA�A?a�zA?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 	FString DebugMsg = FString::Printf(TEXT("Dist: %.1f | Dot: %.3f | Fix Applied: %s"),
 		DistanceToTarget,
 		DotP,
@@ -3095,34 +3447,34 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 
 	//GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow, DebugMsg);
 
-	// === ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¦ ===
+	// === A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A? A??�A�A?A?a��A�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� ===
 
 	FVector Direction;
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â£ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸:
-	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ 100 ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ (1 ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬) ÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ (< 0.5 ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ 60 ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²)
+	// A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?:
+	// A??�A�A?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� 100 A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A? (1 A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�) A??�A�A?A?a�?A�a�?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�?A�a�? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? (< 0.5 A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? 60 A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?)
 	if (DistanceToTarget < 100.0f || DotP < 0.5f)
 	{
-		// FIX: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹
+		// FIX: A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A?
 		Direction = ViewDir;
 		//UE_LOG(LogTemp, Warning, TEXT("FireHitscan: FIXED direction used (Too close or bad angle)"));
 	}
 	else
 	{
-		// STANDARD: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âº ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// STANDARD: A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 		Direction = ToTargetDir;
 	}
 
-	// === ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¤ÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ===
-	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ 2 ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+	// === A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�?A�a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a��A�A?A??�A�A?A?A?A?a�sA�A�a�?A??�A�A?A?a��A�A? A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? ===
+	// A??�A�A?A?A?A?a�sA�A?a��A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? 2 A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�
 	//DrawDebugLine(GetWorld(), MuzzleLocation, MuzzleLocation + (Direction * 200.0f), FColor::Yellow, false, 3.0f, 0, 2.0f);
 
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â (AimVariance)
+	// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? (AimVariance)
 	// === Classic hitscan (WaveDivergence == 0): trace from the CAMERA, not the muzzle ===
 	// The aim point from GetWeaponTargetLocation() lies BEHIND the enemy (pawn profiles ignore
 	// ECC_Visibility), so a muzzle-based ray keeps up to the full camera->muzzle offset of
-	// parallax at the enemy's depth — a thin ray can miss a capsule the crosshair is dead on.
+	// parallax at the enemy's depth � a thin ray can miss a capsule the crosshair is dead on.
 	// Re-basing to the camera viewpoint makes crosshair == bullet path; the tracer is still
 	// drawn from the muzzle (see PerformClassicHitscan).
 	FVector HitscanStart = MuzzleLocation;
@@ -3150,9 +3502,9 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 		Direction = UKismetMathLibrary::RandomUnitVectorInConeInDegrees(Direction, AimConeDegrees);
 	}
 
-	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»
+	// A??�A�A?A?A?A?a�sA�A?a�zA?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�
 	// [HITSCAN_DEBUG] Inputs of the shot: where the muzzle is, where the camera-aim point landed,
-	// and how far it is. AimDist ~= MaxAimDistance means the aim trace hit NOTHING (open area) —
+	// and how far it is. AimDist ~= MaxAimDistance means the aim trace hit NOTHING (open area) �
 	// worst case for muzzle parallax.
 	UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] FireHitscan: Muzzle=%s AimPoint=%s AimDist=%.0f DotP=%.3f dirMode=%s"),
 		*MuzzleLocation.ToCompactString(), *TargetLocation.ToCompactString(), DistanceToTarget, DotP,
@@ -3227,7 +3579,7 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 void AShooterWeapon::ConsumeRoundAfterShot()
 {
 
-	//ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+	//A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�
 	WeaponOwner->PlayFiringMontage(FiringMontage);
 
 	// The hands working the action: the bolt on a Kar98K, the pump on a KXG12. Only manual weapons
@@ -3275,13 +3627,13 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 }
 
 // ========================================
-// DEBUG: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+// DEBUG: A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a��A�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a��A�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�
 // (compile-time DEBUG_CONE_HITSCAN replaced by the runtime bDrawHitscanDebug weapon flag)
 // ========================================
 
 void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount)
 {
-	// Zero divergence: the cone math degenerates and its filter rejects legitimate hits —
+	// Zero divergence: the cone math degenerates and its filter rejects legitimate hits �
 	// route to the classic thin-ray path (see PerformClassicHitscan for details).
 	if (WaveDivergence * MaxDivergenceAngle <= KINDA_SMALL_NUMBER)
 	{
@@ -3292,20 +3644,20 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	float SegmentMaxDistance = MaxHitscanRange * RemainingEnergy;
 	FVector End = Start + Direction * SegmentMaxDistance;
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦)
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� (A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�)
 	float DivergenceAngle = WaveDivergence * MaxDivergenceAngle;
 	float ConeHalfAngleRad = FMath::DegreesToRadians(DivergenceAngle);
 	float CosHalfAngle = FMath::Cos(ConeHalfAngleRad);
 
-	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 1: Line trace ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹) =====
+	// ===== A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�a�? 1: Line trace A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?) =====
 	FHitResult WallHitResult;
 	FCollisionQueryParams WallQueryParams;
 	WallQueryParams.AddIgnoredActor(this);
 	WallQueryParams.AddIgnoredActor(GetOwner());
 	WallQueryParams.bReturnPhysicalMaterial = true;
 
-	// Используем ECC_Visibility channel вместо ObjectType - 
-	// он корректно учитывает collision responses и игнорирует triggers/overlaps
+	// ���������� ECC_Visibility channel ������ ObjectType - 
+	// �� ��������� ��������� collision responses � ���������� triggers/overlaps
 	bool bHitWall = GetWorld()->LineTraceSingleByChannel(
 		WallHitResult,
 		Start,
@@ -3318,7 +3670,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	FVector BeamEnd = bHitWall ? WallHitResult.ImpactPoint : End;
 
 	// [HITSCAN_DEBUG] Shot summary: divergence + sweep sphere radius + what the Visibility (wall) trace hit.
-	// SweepR is the sphere radius used by the pawn sweep below — if it's tiny (divergence ~0) the
+	// SweepR is the sphere radius used by the pawn sweep below � if it's tiny (divergence ~0) the
 	// sweep behaves like a thin ray and muzzle parallax can make it miss entirely.
 	UE_LOG(LogTemp, Verbose, TEXT("[HITSCAN_DEBUG] === Shot: Start=%s Dir=%s | Diverg=%.2fdeg SweepR=%.1f MaxDist=%.0f | Wall=%s comp=%s dist=%.0f"),
 		*Start.ToCompactString(), *Direction.ToCompactString(),
@@ -3350,21 +3702,21 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 	if (bDrawHitscanDebug)
 	{
-	// ===== DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° =====
+	// ===== DEBUG: A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� =====
 	const float DebugDuration = 2.0f;
 	const bool bPersistent = false;
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â)
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? (A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?)
 	DrawDebugLine(GetWorld(), Start, BeamEnd, FColor::Green, bPersistent, DebugDuration, 0, 2.0f);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° (ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°)
+	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� (A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�)
 	DrawDebugSphere(GetWorld(), Start, 5.0f, 8, FColor::Blue, bPersistent, DebugDuration);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦)
+	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A� (A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�, A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A�)
 	DrawDebugSphere(GetWorld(), BeamEnd, 10.0f, 8, bHitWall ? FColor::Red : FColor::Green, bPersistent, DebugDuration);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
-	const int32 NumConeLines = 16; // ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
+	const int32 NumConeLines = 16; // A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�
 	FVector Right = FVector::CrossProduct(Direction, FVector::UpVector).GetSafeNormal();
 	if (Right.IsNearlyZero())
 	{
@@ -3372,7 +3724,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	}
 	FVector Up = FVector::CrossProduct(Right, Direction).GetSafeNormal();
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�
 	TArray<float> DebugDistances = { 100.0f, 500.0f, 1000.0f, MaxDistance * 0.5f, MaxDistance };
 
 	for (float DebugDist : DebugDistances)
@@ -3382,37 +3734,37 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		float ConeRadius = CalculateWaveRadius(DebugDist);
 		FVector ConeCenter = Start + Direction * DebugDist;
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 		FVector PrevPoint = ConeCenter + Right * ConeRadius;
 		for (int32 i = 1; i <= NumConeLines; i++)
 		{
 			float Angle = (float)i / (float)NumConeLines * 2.0f * PI;
 			FVector PointOnCircle = ConeCenter + (Right * FMath::Cos(Angle) + Up * FMath::Sin(Angle)) * ConeRadius;
 
-			// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â)
+			// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� (A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?)
 			DrawDebugLine(GetWorld(), PrevPoint, PointOnCircle, FColor::Yellow, bPersistent, DebugDuration, 0, 1.0f);
 
 			PrevPoint = PointOnCircle;
 		}
 
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âº ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ 4-ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½)
+		// A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a��A�A? 4-A??�A?a��E?A?a��A�A?)
 		for (int32 i = 0; i < NumConeLines; i += 4)
 		{
 			float Angle = (float)i / (float)NumConeLines * 2.0f * PI;
 			FVector PointOnCircle = ConeCenter + (Right * FMath::Cos(Angle) + Up * FMath::Sin(Angle)) * ConeRadius;
 
-			// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ)
+			// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a��A�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� (A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�)
 			DrawDebugLine(GetWorld(), Start, PointOnCircle, FColor::Orange, bPersistent, DebugDuration, 0, 0.5f);
 		}
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (wireframe)
+		// A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? (wireframe)
 		DrawDebugCircle(GetWorld(), ConeCenter, ConeRadius, 32, FColor::Cyan, bPersistent, DebugDuration, 0, 1.0f, Up, Right, false);
 	}
 	// ===== END DEBUG =====
 	}
 
-	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 2: Multi Sweep ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¥ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° =====
-	// ÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+	// ===== A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�a�? 2: Multi Sweep A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� =====
+	// A??�A�A?A?a�?A�a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�
 	TArray<FHitResult> SweepHits;
 	TArray<AActor*> HitTargets;
 
@@ -3424,10 +3776,10 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	FCollisionObjectQueryParams PawnObjectParams;
 	PawnObjectParams.AddObjectTypesToQuery(ECC_Pawn);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â sweep = ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? sweep = A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	float MaxConeRadius = CalculateWaveRadius(MaxDistance);
 
-	// Multi sweep ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
+	// Multi sweep A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?
 	GetWorld()->SweepMultiByObjectType(
 		SweepHits,
 		Start,
@@ -3441,7 +3793,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	UE_LOG(LogTemp, Verbose, TEXT("Cone Hitscan: Sweep found %d hits, MaxRadius=%.1f, MaxDist=%.0f, Angle=%.1f"),
 		SweepHits.Num(), MaxConeRadius, MaxDistance, DivergenceAngle);
 
-	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 3: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¤ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° =====
+	// ===== A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�a�? 3: A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� =====
 	// Best target tracking (single-target: only damage the most central enemy)
 	AActor* BestTarget = nullptr;
 	FHitResult BestHit;
@@ -3459,34 +3811,34 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			continue;
 		}
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
+		// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�
 		FVector HitLocation = Hit.ImpactPoint;
 		float HitDistance = Hit.Distance;
 
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â sweep ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ Distance ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ 0 ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+		// A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? sweep A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? Distance A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? 0 A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?
+		// A??�A�A?A?A?A?a�sA�A?a�zA? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�
 		if (HitDistance < 1.0f)
 		{
 			HitDistance = FVector::Dist(Start, HitActor->GetActorLocation());
 			HitLocation = HitActor->GetActorLocation();
 		}
 
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âº ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
+		// A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A� A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?
 		FVector ToHit = HitLocation - Start;
 		FVector ToHitDir = ToHit.GetSafeNormal();
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» - ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+		// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� - A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�
 		float DotProduct = FVector::DotProduct(Direction, ToHitDir);
 		float AngleToHit = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(DotProduct, -1.0f, 1.0f)));
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 		float ConeRadiusAtDistance = CalculateWaveRadius(HitDistance);
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
+		// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?
 		FVector PointOnAxis = Start + Direction * HitDistance;
 		float DistanceFromAxis = FVector::Dist(HitLocation, PointOnAxis);
 
-		UE_LOG(LogTemp, Verbose, TEXT("  - %s: Dist=%.0f, Angle=%.1fÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°, DistFromAxis=%.1f, ConeRadius=%.1f"),
+		UE_LOG(LogTemp, Verbose, TEXT("  - %s: Dist=%.0f, Angle=%.1fA??�A?a��A?A?a�sA�A�, DistFromAxis=%.1f, ConeRadius=%.1f"),
 			*HitActor->GetName(), HitDistance, AngleToHit, DistanceFromAxis, ConeRadiusAtDistance);
 
 		// [HITSCAN_DEBUG] Full candidate info: which component was swept (capsule vs mesh), bone,
@@ -3497,27 +3849,27 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 	if (bDrawHitscanDebug)
 	{
-		// ===== DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ =====
+		// ===== DEBUG: A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? =====
 		const float DebugDuration = 2.0f;
 		const bool bPersistent = false;
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âº ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 		DrawDebugLine(GetWorld(), Start, HitLocation, FColor::White, bPersistent, DebugDuration, 0, 1.0f);
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?
 		DrawDebugSphere(GetWorld(), PointOnAxis, 8.0f, 6, FColor::Magenta, bPersistent, DebugDuration);
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ DistanceFromAxis)
+		// A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? DistanceFromAxis)
 		DrawDebugLine(GetWorld(), PointOnAxis, HitLocation, FColor::Magenta, bPersistent, DebugDuration, 0, 2.0f);
 		// ===== END DEBUG =====
 	}
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸:
-		// 1) ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â£ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œ
-		// 2) ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?:
+		// 1) A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�?A�a�?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�?A�a�?
+		// 2) A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 		bool bInsideCone = (DotProduct >= CosHalfAngle) || (DistanceFromAxis <= ConeRadiusAtDistance);
 
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬)
+		// A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A� A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? (A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�)
 		if (HitDistance < 200.0f)
 		{
-			bInsideCone = true; // ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼
+			bInsideCone = true; // A??�A�A?A?A?A?a�sA�A?a�zA? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 		}
 
 		if (!bInsideCone)
@@ -3526,13 +3878,13 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 				DotProduct, CosHalfAngle, DistanceFromAxis, ConeRadiusAtDistance);
 	if (bDrawHitscanDebug)
 	{
-			// DEBUG: ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+			// DEBUG: A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�
 			DrawDebugSphere(GetWorld(), HitLocation, 20.0f, 8, FColor::Red, false, 2.0f);
 	}
 			continue;
 		}
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½
+		// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a��A�A?
 		FHitResult BlockCheck;
 		FCollisionQueryParams BlockQueryParams;
 		BlockQueryParams.AddIgnoredActor(this);
@@ -3554,18 +3906,18 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 				BlockCheck.Distance, HitDistance - 50.0f);
 	if (bDrawHitscanDebug)
 	{
-			// DEBUG: ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+			// DEBUG: A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 			DrawDebugSphere(GetWorld(), HitLocation, 20.0f, 8, FColor::Orange, false, 2.0f);
 	}
 			continue;
 		}
 
-		// === ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¦ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¬ ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ===
+		// === A??�A�A?A?a�sA�A�A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� A??�A�A?A?a��A�A?A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A?a��A�A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? ===
 		HitTargets.Add(HitActor);
 
 	if (bDrawHitscanDebug)
 	{
-		// DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// DEBUG: A??�A�A?A?A?A?a�sA�A?a��A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 		DrawDebugSphere(GetWorld(), HitLocation, 25.0f, 12, FColor::Green, false, 2.0f);
 	}
 
@@ -3724,7 +4076,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		}
 	}
 
-	// ===== ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¨ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ 4: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ =====
+	// ===== A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?A?A?a�sA�A�a�? 4: A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A? =====
 	UE_LOG(LogTemp, Verbose, TEXT("Cone Hitscan RESULT: %d targets hit"), HitTargets.Num());
 
 	// [HITSCAN_DEBUG] The "tracer hit but no damage" case lands exactly here:
@@ -3794,7 +4146,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		SpawnWaveFronts(VisualStart, EffectiveBeamEnd);
 	}
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â­ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
+	// A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�
 	// Decide impact target: pawn (if hit closer than wall) or wall.
 	// The wall trace uses ECC_Visibility which passes through pawns, so without this check
 	// the impact would always appear on the surface BEHIND a hit pawn.
@@ -3819,7 +4171,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 	// Reflection happens only off a wall, and only if the shot wasn't intercepted by a pawn.
 	if (bHitWall && !bImpactOnPawn)
 	{
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
+		// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�
 		if (MaxReflections > 0 && IsMetal(WallHitResult) && ReflectionCount < MaxReflections)
 		{
 			FVector ReflectedDir = CalculateReflection(Direction, WallHitResult.ImpactNormal);
@@ -3840,8 +4192,8 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		}
 	}
 
-	// === DEBUG: ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ===
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸:
+	// === DEBUG: A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� ===
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?:
 	/*
 	DrawDebugCone(GetWorld(), Start, Direction, MaxDistance, ConeHalfAngleRad, ConeHalfAngleRad,
 		12, FColor::Yellow, false, 2.0f, 0, 1.0f);
@@ -3867,7 +4219,7 @@ bool AShooterWeapon::IsMetal(const FHitResult& Hit) const
 
 FVector AShooterWeapon::CalculateReflection(const FVector& Direction, const FVector& Normal) const
 {
-	// R = D - 2(DÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·N)N
+	// R = D - 2(DA??�A?a��A?A?a�sA�A�N)N
 	return Direction - 2.0f * FVector::DotProduct(Direction, Normal) * Normal;
 }
 
@@ -3909,7 +4261,7 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 		HitActor = ConvertedProp;
 	}
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢
+	// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�?, A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A�A??�A?a��E?A?a��A?a��a�?
 	// bAllowOwnerDamage is the caller's own answer to the same question: a projectile carries its
 	// bDamageOwner, and a rocket that is supposed to hurt the person who fired it must not be
 	// silenced by a checkbox that belongs to the trace path.
@@ -3924,22 +4276,22 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 	// the one event in a firefight that tells the player their job just changed.
 	const bool bShieldDownBefore = IsTargetShieldDown(HitActor);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	// Wave falloff and beam energy were folded into BaseDamage and ImpulseForce by the caller: they
 	// mean nothing to a projectile, which arrives with one number and no beam behind it.
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° headshot
+	// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� headshot
 	bool bIsHeadshot = (Hit.BoneName == FName("head") || Hit.BoneName == FName("Head"));
 	float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¤ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	const float FinalDamage = BaseDamage * HeadshotMult * ExtraDamageMultiplier;
 
 	UE_LOG(LogTemp, Verbose, TEXT("[HIT] %s: Base=%.1f x HS=%.1f x Extra=%.2f = %.1f to %s"),
 		*GetName(), BaseDamage, HeadshotMult, ExtraDamageMultiplier, FinalDamage, *HitActor->GetName());
 
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
+	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	FDamageEvent PointDamageEvent;
 	// A projectile carries its own damage type (fire, explosion) and it must survive the trip through
 	// a funnel whose default was written for bullets.
@@ -3957,7 +4309,7 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 	bool bKilled = IsActorDeadAfterDamage(HitActor);
 
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â£ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°)
+	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�)
 	// Feedback is sent once, at the end of this function, when the shield reading after the shot is
 	// known. It used to fire here and again further down for the zero-damage case, which is how the
 	// ionizer ended up with a second entrance into the hit marker that no other caller went through.
@@ -3976,7 +4328,7 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 		}
 	}
 
-	//ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â
+	//A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?
 	// The direction comes from the caller now. A trace hands over the line from muzzle to impact; a
 	// projectile hands over the direction it was actually flying, which is the honest one for an arc.
 	const FVector ImpulseDirection = HitDirection.GetSafeNormal();
@@ -4110,7 +4462,7 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	// --- Always fire a dodgeable traveling BOLT (down the aim line) instead of an instant hitscan ---
 	// EVERY enemy hitscan shot becomes a projectile-like bolt travelling down the aim line at
 	// HitscanBoltSpeed (fast by default). Damage lands only if the player's CURRENT position is
-	// inside the moving window when it passes — so the player can dodge by stepping off the line.
+	// inside the moving window when it passes � so the player can dodge by stepping off the line.
 	// The Low-Health Defense upgrade slows the bolt via the player's EnemyBoltSlowMultiplier
 	// (curve-scaled), making it progressively dodgeable as HP drops.
 	// The bolt belongs to the player being shot at: prefer whoever the pawn trace actually hit,
@@ -4164,11 +4516,11 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 			SpawnImpactEffect(WallHit);
 		}
 
-		UE_LOG(LogTemp, Verbose, TEXT("[BOLT_DEBUG] Enemy bolt down aim line — speedMult=%.2f randSpeed=%.0f maxDist=%.0f"),
+		UE_LOG(LogTemp, Verbose, TEXT("[BOLT_DEBUG] Enemy bolt down aim line � speedMult=%.2f randSpeed=%.0f maxDist=%.0f"),
 			SpeedMult, RandSpeed, WallDistance);
 		return; // damage is deferred to the bolt subsystem (dodgeable)
 	}
-	// (No local player resolved → fall through to the instant hitscan path below as a safety fallback.)
+	// (No local player resolved > fall through to the instant hitscan path below as a safety fallback.)
 
 	// --- Determine beam endpoint and apply pawn damage ---
 	FVector BeamEnd;
@@ -4207,7 +4559,7 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 	SpawnBeamEffect(Start, BeamEnd, EnergyMultiplier);
 
 	// Spawn impact: prefer pawn hit (closer), otherwise the wall behind it.
-	// Without this, impact would always appear on the wall — even when a pawn intercepted the shot.
+	// Without this, impact would always appear on the wall � even when a pawn intercepted the shot.
 	if (bPawnWasHit)
 	{
 		SpawnImpactEffect(PawnHit);
@@ -4347,7 +4699,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 	const bool bHitWall = GetWorld()->LineTraceSingleByChannel(WallHit, Start, End, ECC_Visibility, QueryParams);
 	const float WallDistance = bHitWall ? WallHit.Distance : SegmentMaxDistance;
 
-	// Damage non-pawn damageable actors (EMFPhysicsProp, convertible foliage) — same rule as the cone path.
+	// Damage non-pawn damageable actors (EMFPhysicsProp, convertible foliage) � same rule as the cone path.
 	// A travelling shot does not do this here: the prop is only hit when the bolt reaches it, so both
 	// the damage and the impact effect wait and are done by the bolt on arrival.
 	if (!bHitscanTravelsAsBolt
@@ -4388,7 +4740,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			continue;
 		}
 
-		// Initial-overlap sweep hits report Distance = 0 — use the actor location instead
+		// Initial-overlap sweep hits report Distance = 0 � use the actor location instead
 		float Dist = Hit.Distance;
 		if (Dist < 1.0f)
 		{
@@ -4503,7 +4855,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 				}
 			}
 
-			// Knockback / physics impulse — same rules as the cone path, see ApplyHitscanKnockback.
+			// Knockback / physics impulse � same rules as the cone path, see ApplyHitscanKnockback.
 			const float ImpulseForce = HitscanPhysicsForce * RemainingEnergy;
 			if (ACharacter* HitCharacter = Cast<ACharacter>(HitActor))
 			{
@@ -4608,7 +4960,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		DrawDebugCylinder(GetWorld(), Start, Start + Direction * DebugCorridorLength, SweepRadius, 12,
 			bPawnWasHit ? FColor::Green : FColor::Red, false, DebugDuration, 0, 0.75f);
 
-		// Visual tracer line from the muzzle — the gap to the cyan ray is the muzzle parallax
+		// Visual tracer line from the muzzle � the gap to the cyan ray is the muzzle parallax
 		DrawDebugLine(GetWorld(), BeamStart, BeamEnd, FColor::White, false, DebugDuration, 0, 0.25f);
 
 		// Wall hit point
@@ -4774,6 +5126,11 @@ bool AShooterWeapon::StartReload()
 	const float ThisReloadTime = GetActiveReloadTime();
 
 	ShellStage = bSecondary ? EWeaponReloadStage::Secondary : EWeaponReloadStage::Primary;
+
+	// Before the stage plays: if this weapon's reload audio lives in a montage notify, adopt it now
+	// so the whole suspend/resume machinery can control it.
+	DiscoverNotifiedReloadSound();
+
 	PlayReloadStage(ShellStage);
 
 	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, ThisReloadTime, false);
@@ -4965,6 +5322,22 @@ void AShooterWeapon::FinishReload()
 	bReloadCommitted = true;
 	bIsReloading = false;
 
+	// The reload ends here, so its audio ends here too. The bolt-click notify commits before the
+	// tracks' natural end, and the rattle left over has to stop when the gun is usable again
+	// rather than play on under the first shots. A short fade keeps the click itself audible
+	// while the tail is cut [2026-09-15].
+	if (ReloadAudioComponent)
+	{
+		UAudioComponent* const Fading = ReloadAudioComponent;
+		ReloadAudioComponent = nullptr;
+		Fading->FadeOut(0.25f, 0.0f, EAudioFaderCurve::Linear);
+	}
+
+	// The takeover of a notify-driven reload sound ends with the reload: a later stow must not
+	// hunt-and-stop the same asset playing for somebody else's reload.
+	NotifiedReloadSound = nullptr;
+	NotifiedReloadSoundBeginWorldTime = -1.0f;
+
 	// A per round reload has already counted itself, one round per completed loop, and that count is
 	// the whole point: filling the magazine here would hand back the rounds an interrupted reload
 	// deliberately did not load.
@@ -5007,6 +5380,7 @@ void AShooterWeapon::CancelReload()
 
 	bIsReloading = false;
 	ShellStage = EWeaponReloadStage::Primary;
+	StopReloadAudio();
 	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
 
 	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: reload cancelled at %d/%d rounds"),
@@ -5015,7 +5389,14 @@ void AShooterWeapon::CancelReload()
 
 void AShooterWeapon::SuspendReloadForHolster()
 {
-	if (!bIsReloading) return;
+	if (!bIsReloading)
+	{
+		// The reload may already be committed and bIsReloading cleared while its audio tail is
+		// still rolling. Putting the gun away (a switch, a melee swing) has to cut that too, or
+		// the reload rattle keeps playing over the next weapon [2026-09-15].
+		StopReloadAudio();
+		return;
+	}
 	const UAnimMontage* Montage = GetActiveReloadMontage();
 	float Progress = GetReloadProgress();
 	if (AShooterCharacter* Character = Cast<AShooterCharacter>(PawnOwner))
@@ -5025,14 +5406,37 @@ void AShooterWeapon::SuspendReloadForHolster()
 			if (UAnimInstance* Anim = Mesh->GetAnimInstance(); Anim && Montage && Anim->Montage_IsPlaying(Montage))
 			{
 				Progress = FMath::Clamp(Anim->Montage_GetPosition(Montage) / FMath::Max(Montage->GetPlayLength(), KINDA_SMALL_NUMBER), 0.0f, 1.0f);
-				Anim->Montage_Pause(Montage);
+				// Stopped, not paused. A paused instance keeps its full weight on the shared arms
+				// mesh forever: it freezes its frame into every later animation, pulls the resumed
+				// reload toward that frame and snaps the pose back to it the moment the resumed
+				// instance ends. Resume replays from the recorded position instead of unpausing.
+				Anim->Montage_Stop(KINDA_SMALL_NUMBER, Montage);
 			}
 		}
 	}
 	SuspendedReloadProgress = Progress;
 	SuspendedReloadWeaponProgress = Progress;
 	PauseWeaponReloadAnimation(GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
-	SuspendedReloadSoundProgress = Progress;
+
+	// The audio's own clock, in seconds, is the only honest answer to "where did the sound stop":
+	// ReloadSound may be a cue or metasound whose GetDuration does not describe its content, and
+	// multiplying a montage fraction by a wrong duration restarts the wrong tail of the track.
+	SuspendedReloadSoundTime = -1.0f;
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	if (ReloadAudioComponent && ReloadAudioComponent->IsPlaying() && ReloadAudioWorldStartTime >= 0.0f)
+	{
+		SuspendedReloadSoundTime = ReloadAudioStartOffset + FMath::Max(0.0f, Now - ReloadAudioWorldStartTime);
+	}
+	else if (NotifiedReloadSound && NotifiedReloadSoundBeginWorldTime >= 0.0f)
+	{
+		// The sound was spawned by the montage notify and is not our component yet: its position is
+		// the wall clock since the notify fired.
+		SuspendedReloadSoundTime = FMath::Max(0.0f, Now - NotifiedReloadSoundBeginWorldTime);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload suspended at arms %.2f, audio %.2fs (%s)"),
+		*GetName(), Progress, SuspendedReloadSoundTime, *GetNameSafe(ReloadSound));
+
 	StopReloadAudio();
 	bReloadResumePending = true;
 	bIsReloading = false;
@@ -5059,6 +5463,10 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 			{
 				if (UAnimInstance* Anim = Mesh->GetAnimInstance())
 				{
+					// Sweep away any leftover instance of the same montage so the blend-in starts
+					// from the draw pose alone and nothing stays behind to re-assert its frame
+					// after the resumed reload ends [2026-09-15].
+					Anim->Montage_Stop(KINDA_SMALL_NUMBER, Montage);
 					FAlphaBlendArgs BlendArgs;
 					BlendArgs.BlendTime = ReloadResumeBlendDuration;
 					BlendArgs.BlendOption = ReloadResumeBlendOption;
@@ -5072,7 +5480,35 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 	ResumeWeaponReloadAnimation(GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
 	if (ShellStage != EWeaponReloadStage::ShellLoop && ShellStage != EWeaponReloadStage::ShellEnd)
 	{
-		PlayReloadAudioAtProgress(SuspendedReloadSoundProgress);
+		// The reload's audio lives in a montage notify we have taken over: the resumed montage
+		// would not re-fire its already-passed notify, so WE keep playing the same sound from
+		// where it stopped.
+		if (NotifiedReloadSound)
+		{
+			RestartReloadAudioAtSeconds(SuspendedReloadSoundTime >= 0.0f ? SuspendedReloadSoundTime : 0.0f);
+		}
+		else
+		{
+			// Same split as at the start: pack weapons and montage-notify weapons resume their own
+			// audio NATURALLY; replaying the shared track on top would double the sound and land on
+			// a random part of the cue.
+			const bool bAudioFromElsewhere = (PackWeaponSettings != nullptr)
+				|| ReloadMontageCarriesAudio(GetActiveReloadMontage());
+			if (bAudioFromElsewhere)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: resumed reload audio is pack/montage-driven - shared ReloadSound not replayed"),
+					*GetName());
+			}
+			else if (SuspendedReloadSoundTime >= 0.0f)
+			{
+				RestartReloadAudioAtSeconds(SuspendedReloadSoundTime);
+			}
+			else
+			{
+				// No audio was live at the suspend: fall back to the arms fraction.
+				PlayReloadAudioAtProgress(SuspendedReloadProgress);
+			}
+		}
 	}
 	const float Remaining = FMath::Max(0.01f, GetActiveReloadTime() * (1.0f - SuspendedReloadProgress));
 	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, Remaining, false);
@@ -5489,7 +5925,7 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 		return false;
 	}
 
-	// NPC riot-shield rule: hit on body while shield is up → no charge transfer.
+	// NPC riot-shield rule: hit on body while shield is up > no charge transfer.
 	// Player must hit the shield mesh to electrify the NPC behind it.
 	if (UNPCRiotShieldComponent::ShouldBlockBodyIonization(Target, HitComponent))
 	{
@@ -5513,7 +5949,7 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 	}
 
 	// Notify upgrade system of ionization-eligible hit. Fires once per valid hit regardless
-	// of whether the target was already at max charge — upgrades (e.g. PistolStun) gate
+	// of whether the target was already at max charge � upgrades (e.g. PistolStun) gate
 	// per-target spam themselves via their own cooldowns.
 	if (PawnOwner)
 	{
@@ -5605,13 +6041,13 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 
 float AShooterWeapon::CalculateWaveRadius(float Distance) const
 {
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â£ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ WaveDivergence
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ WaveDivergence = 0, ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» = 0 (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â)
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ WaveDivergence = 1, ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» = MaxDivergenceAngle
+	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? WaveDivergence
+	// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A? WaveDivergence = 0, A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� = 0 (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?)
+	// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A? WaveDivergence = 1, A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� = MaxDivergenceAngle
 	float DivergenceAngle = WaveDivergence * MaxDivergenceAngle;
 	float TangentAngle = FMath::Tan(FMath::DegreesToRadians(DivergenceAngle));
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â = ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â + ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? = A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? + A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 	float Radius = InitialWaveRadius + Distance * TangentAngle;
 
 	return Radius;
@@ -5619,17 +6055,17 @@ float AShooterWeapon::CalculateWaveRadius(float Distance) const
 
 float AShooterWeapon::CalculateDamageMultiplier(float Distance, float WaveRadius) const
 {
-	// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ <= ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸, ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢
+	// A??�A�A?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? <= A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?, A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?
 	if (WaveRadius <= TargetEffectiveRadius)
 	{
 		return 1.0f;
 	}
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ = (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ / ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹)
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ~ RÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â², ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ = (TargetRadius / WaveRadius)ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â²
+	// A??�A�A?A?a�?A�a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? = (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? / A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?)
+	// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? ~ RA??�A?a��A?A?a�sA�A?, A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?: A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? = (TargetRadius / WaveRadius)A??�A?a��A?A?a�sA�A?
 	float AreaRatio = (TargetEffectiveRadius * TargetEffectiveRadius) / (WaveRadius * WaveRadius);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼
+	// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 	return FMath::Max(AreaRatio, MinDamageMultiplier);
 }
 
@@ -5795,7 +6231,7 @@ UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, 
 
 	if (BeamComp)
 	{
-		// ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹
+		// A??�A�A?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A?
 		BeamComp->SetVectorParameter(FName("BeamStart"), Start);
 		BeamComp->SetVectorParameter(FName("BeamEnd"), End);
 		BeamComp->SetFloatParameter(FName("Energy"), EnergyMultiplier);
@@ -5828,7 +6264,7 @@ UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, 
 		}
 		UE_LOG(LogTemp, Verbose, TEXT("BeamFX Distance: %.1f, Start: %s, End: %s"), FVector::Dist(Start, End), *Start.ToString(), *End.ToString());
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½
+		// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?
 		FVector UpVector = FVector::UpVector;
 		FVector RightVector = FVector::RightVector;
 
@@ -5845,11 +6281,11 @@ UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, 
 			}
 		}
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 		BeamComp->SetVectorParameter(FName("UpVector"), UpVector);
 		BeamComp->SetVectorParameter(FName("RightVector"), RightVector);
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
+		// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a��A�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�
 		float BeamDistance = FVector::Distance(Start, End);
 		float StartRadius = CalculateWaveRadius(0.0f);
 		float EndRadius = CalculateWaveRadius(BeamDistance);
@@ -5859,12 +6295,12 @@ UNiagaraComponent* AShooterWeapon::SpawnBeamEffectLocally(const FVector& Start, 
 		BeamComp->SetFloatParameter(FName("MaxDivergenceAngle"), MaxDivergenceAngle);
 		BeamComp->SetFloatParameter(FName("TargetRadius"), TargetEffectiveRadius);
 
-		// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â)
+		// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A? (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?)
 		BeamComp->SetFloatParameter(FName("WaveDivergence"), WaveDivergence);
 		BeamComp->SetFloatParameter(FName("MaxRange"), MaxHitscanRange);
 		BeamComp->SetFloatParameter(FName("MinEnergy"), MinDamageMultiplier);
 
-		// Wave-ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹
+		// Wave-A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A?
 		if (bUseWaveVisualization)
 		{
 			BeamComp->SetFloatParameter(FName("Wavelength"), Wavelength);
@@ -5900,12 +6336,12 @@ void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 	FVector Direction = (End - Start).GetSafeNormal();
 	float Distance = FVector::Distance(Start, End);
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°
-	float StartRadius = CalculateWaveRadius(0.0f);  // ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ (InitialWaveRadius)
-	float EndRadius = CalculateWaveRadius(Distance); // ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
+	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�
+	float StartRadius = CalculateWaveRadius(0.0f);  // A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� (InitialWaveRadius)
+	float EndRadius = CalculateWaveRadius(Distance); // A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�
 	float DivergenceAngle = WaveDivergence * MaxDivergenceAngle;
 
-	// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ Niagara ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
+	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? Niagara A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�
 	UNiagaraComponent* ConeComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 		GetWorld(),
 		WaveFrontFX,
@@ -5919,7 +6355,7 @@ void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 
 	if (ConeComp)
 	{
-		// === ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ===
+		// === A??�A�A?A?A?A?a�sA�A�a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A� ===
 		ConeComp->SetVectorParameter(FName("BeamStart"), Start);
 		ConeComp->SetVectorParameter(FName("BeamEnd"), End);
 		ConeComp->SetVectorParameter(FName("BeamDirection"), Direction);
@@ -5928,17 +6364,17 @@ void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 		ConeComp->SetFloatParameter(FName("EndRadius"), EndRadius);
 		ConeComp->SetFloatParameter(FName("DivergenceAngle"), DivergenceAngle);
 
-		// === ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ===
+		// === A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? ===
 		ConeComp->SetFloatParameter(FName("TravelSpeed"), WavePacketSpeed);
 		ConeComp->SetFloatParameter(FName("Lifetime"), BeamFadeTime);
 		ConeComp->SetFloatParameter(FName("ExpansionSpeed"), WaveFrontExpansionSpeed);
 
-		// === ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â» ===
+		// === A??�A�A?A?A?A?a�sA�A?a�zA?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� ===
 		ConeComp->SetColorParameter(FName("WaveColor"), EFieldColor);
 		ConeComp->SetFloatParameter(FName("Wavelength"), Wavelength);
 		ConeComp->SetFloatParameter(FName("Energy"), 1.0f);
 
-		// === ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â (ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°) ===
+		// === A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? (A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�) ===
 		FVector RightVector = FVector::CrossProduct(Direction, FVector::UpVector).GetSafeNormal();
 		if (RightVector.IsNearlyZero())
 		{
@@ -5949,7 +6385,7 @@ void AShooterWeapon::SpawnWaveFronts(const FVector& Start, const FVector& End)
 		ConeComp->SetVectorParameter(FName("UpVector"), UpVector);
 		ConeComp->SetVectorParameter(FName("RightVector"), RightVector);
 
-		// === ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ===
+		// === A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A? ===
 		ConeComp->SetFloatParameter(FName("WaveDivergence"), WaveDivergence);
 		ConeComp->SetFloatParameter(FName("MinDamageMultiplier"), MinDamageMultiplier);
 	}
@@ -6019,12 +6455,12 @@ void AShooterWeapon::Multicast_PlayImpactEffect_Implementation(FVector_NetQuanti
 
 void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface)
 {
-	// Отладочное глушение эффектов. В бою на шестнадцать точек попадания и трассеры идут сотнями в
-	// секунду, и смотреть за поведением ИИ сквозь эту метель невозможно.
+	// ���������� �������� ��������. � ��� �� ����������� ����� ��������� � �������� ���� ������� �
+	// �������, � �������� �� ���������� �� ������ ��� ������ ����������.
 	//
-	// Гасятся точечно, а не глобально: у Niagara нет выключателя, есть только снижение качества
-	// (fx.Niagara.QualityLevel), а оно эффекты не убирает. Зато достаточно закрыть два самых
-	// шумных источника - попадания оружия и вспышки дронов, - чтобы картинка стала читаемой.
+	// ������� �������, � �� ���������: � Niagara ��� �����������, ���� ������ �������� ��������
+	// (fx.Niagara.QualityLevel), � ��� ������� �� �������. ���� ���������� ������� ��� �����
+	// ������ ��������� - ��������� ������ � ������� ������, - ����� �������� ����� ��������.
 	if (CVarNoVFX.GetValueOnGameThread() != 0)
 	{
 		return;
@@ -6211,7 +6647,7 @@ void AShooterWeapon::PlayFireSound()
 
 float AShooterWeapon::GetOptimalDamageRange() const
 {
-	// ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ WaveRadius == TargetEffectiveRadius
+	// A??�A�A?A?a��A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?A?A?a��A?A�A�A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� WaveRadius == TargetEffectiveRadius
 	// WaveRadius = InitialWaveRadius + Distance * tan(DivergenceAngle)
 	// TargetRadius = InitialRadius + OptimalDistance * tan(Angle)
 	// OptimalDistance = (TargetRadius - InitialRadius) / tan(Angle)
@@ -6221,7 +6657,7 @@ float AShooterWeapon::GetOptimalDamageRange() const
 
 	if (TangentAngle <= KINDA_SMALL_NUMBER)
 	{
-		// ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸
+		// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A? A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?A?A?a��A?A�A�A?A?A?a�sA�A�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 		return MaxHitscanRange;
 	}
 
@@ -6448,7 +6884,7 @@ void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	// This is called by PlayerCameraManager when this weapon is the ViewTarget (during ADS).
 	// We provide the sight socket's WORLD POSITION but use ControlRotation for camera direction.
 	// This way the camera sits at the weapon's sight, but does NOT inherit visual recoil kick
-	// from the hands mesh — only the spring-smoothed camera recoil via AddPitchInput affects it.
+	// from the hands mesh � only the spring-smoothed camera recoil via AddPitchInput affects it.
 
 	if (!ADSCameraComponent || !PawnOwner)
 	{
@@ -6474,14 +6910,14 @@ void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 		}
 	}
 
-	// Use ControlRotation — this includes spring camera recoil (via AddPitchInput) but NOT
+	// Use ControlRotation � this includes spring camera recoil (via AddPitchInput) but NOT
 	// the visual weapon kick (which only affects FP Mesh relative transform).
 	FRotator CameraRotation = PawnOwner->GetControlRotation();
 
 	OutResult.Location = SightWorldLocation;
 	OutResult.Rotation = CameraRotation;
 
-	// FOV — the same ADSZoom the normal ADS path uses, applied to whatever the view is currently at.
+	// FOV � the same ADSZoom the normal ADS path uses, applied to whatever the view is currently at.
 	// NOTE this whole function is dormant: it only runs while the weapon is the ViewTarget, and
 	// nothing sets that any more (ADS stopped moving the camera, see AShooterCharacter::UpdateADS).
 	// It is kept correct rather than deleted so reviving SetViewTarget(Weapon) does not silently

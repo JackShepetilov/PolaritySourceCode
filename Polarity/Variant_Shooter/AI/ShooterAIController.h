@@ -12,6 +12,7 @@ class UAIPerceptionComponent;
 class UPolarityPathFollowingComponent;
 struct FAIStimulus;
 class AShooterNPC;
+class ASiegeCoreBuildable;
 
 DECLARE_DELEGATE_TwoParams(FShooterPerceptionUpdatedDelegate, AActor*, const FAIStimulus&);
 DECLARE_DELEGATE_OneParam(FShooterPerceptionForgottenDelegate, AActor*);
@@ -53,6 +54,12 @@ enum class ETargetIntentSource : uint8
 	 *  the coordinator keeps its own answer and the behaviour tree never reads it. Wiring it up is
 	 *  what finally makes those two agree. */
 	Coordinator = 60,
+
+	/** A hostile sentry turret this NPC is taking cover from. Outranks perception deliberately: an
+	 *  NPC under a turret's fire plays the corner even while it can also see a player, because the
+	 *  turret is the thing pinning it. Written by the NPC's own turret-cover machine
+	 *  (AShooterNPC::TickTurretCover), which is also the only reader that starts and ends it. */
+	Turret = 80,
 
 	/** A decoy. Outranks everything because that is the whole mechanic: a fully charged prop should
 	 *  hold a room even though every NPC in it can plainly see a player. */
@@ -240,6 +247,29 @@ public:
 	 *  is nothing the sense task starts looking for somebody, which is what stops the NPC standing
 	 *  there shooting a spent prop. */
 	void EndDistraction();
+
+	// ==================== Siege fallback ====================
+	// On a map with an ASiegeCoreBuildable the answer for "nobody is visible" is the base's core. It
+	// sits UNDER every intent — perception, script and distraction keep their own order and the core
+	// only speaks when none of them names a target — which is the tower-defence rule: a visible
+	// player matters, the march on the core is the default.
+	//
+	// The walker spawned at the fog line is the case this exists for: an NPC that has never seen a
+	// player would otherwise stand where it spawned for the whole siege.
+
+	/** The core being marched on, or null when the map has none or the last one fell. Re-found on a
+	 *  slow cadence; a world holds one or two cores, so the walk is cheap. */
+	TWeakObjectPtr<ASiegeCoreBuildable> SiegeCore;
+
+	/** How often SiegeCore is re-found. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|Siege", meta = (Units = "s"))
+	float SiegeCoreRefreshInterval = 1.0f;
+
+	/** Counts down to the next re-find. */
+	float SiegeCoreRefreshTimer = 0.0f;
+
+	/** Re-find the nearest live core of this world. */
+	void RefreshSiegeCore();
 
 protected:
 

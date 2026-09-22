@@ -7,15 +7,20 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Coop/CoopPlayers.h"
+#include "DispenserBuildable.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Controller.h"
+#include "GameplayTagContainer.h"
 #include "Net/UnrealNetwork.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/Pickups/LootDropComponent.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
 ABuildableActor::ABuildableActor()
 {
@@ -69,6 +74,7 @@ void ABuildableActor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 	DOREPLIFETIME(ABuildableActor, BuildLevel);
 	DOREPLIFETIME(ABuildableActor, ConstructionProgress);
 	DOREPLIFETIME(ABuildableActor, UpgradeMetal);
+	DOREPLIFETIME(ABuildableActor, DispenserFuel);
 }
 
 // ==================== Setup ====================
@@ -108,7 +114,7 @@ void ABuildableActor::BeginPlay()
 	}
 
 	VisualProgress = ConstructionProgress;
-	SetActorTickEnabled(State == EBuildableState::Constructing || (State == EBuildableState::Active && bTickWhileActive));
+	SetActorTickEnabled(State == EBuildableState::Constructing || (State == EBuildableState::Active && NeedsActiveTick()));
 	RefreshVisuals();
 }
 
@@ -199,6 +205,139 @@ void ABuildableActor::Tick(float DeltaSeconds)
 	{
 		TickActive(DeltaSeconds);
 	}
+}
+
+// ==================== Dispenser behaviour ====================
+
+bool ABuildableActor::IsDispenser() const
+{
+	if (IsA<ADispenserBuildable>())
+	{
+		return true;
+	}
+	// The blueprint dispenser in the project (BP_Buildable_Dispenser) is a DIRECT child of this
+	// class; its definition's Buildable.Dispenser tag is what makes it one.
+	return Definition
+		&& Definition->BuildableTag.MatchesTag(FGameplayTag::RequestGameplayTag(TEXT("Buildable.Dispenser")));
+}
+
+void ABuildableActor::TickActive(float DeltaSeconds)
+{
+	// The base class runs the dispenser heartbeat; a turret subclass overrides this with its own.
+	if (IsDispenser())
+	{
+		TickDispenserBehavior(DeltaSeconds);
+	}
+}
+
+void ABuildableActor::TickDispenserBehavior(float DeltaSeconds)
+{
+	if (!HasAuthority() || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	AmmoAccumulator += AmmoRoundsPerSecond * DeltaSeconds;
+	for (APawn* Pawn : Players)
+	{
+		AShooterCharacter* Player = Cast<AShooterCharacter>(Pawn);
+		if (!Player || FVector::DistSquared(Player->GetActorLocation(), GetActorLocation()) > FMath::Square(ServiceRadius))
+		{
+			continue;
+		}
+
+		Player->RestoreHealth(HealPerSecond * DeltaSeconds);
+		AShooterWeapon* const Weapon = Player->GetCurrentWeapon();
+		if (!Weapon || DispenserFuel <= 0 || AmmoAccumulator < 1.0f)
+		{
+			continue;
+		}
+
+		if (Weapon->UsesEnergyReserve())
+		{
+			const int32 Room = Weapon->GetEnergyReserveCapacity() - Weapon->GetEnergyReserve();
+			const int32 Rounds = FMath::Min3(FMath::FloorToInt(AmmoAccumulator), Room, DispenserFuel);
+			if (Rounds > 0)
+			{
+				Weapon->SetEnergyReserve(Weapon->GetEnergyReserve() + Rounds);
+				DispenserFuel -= Rounds;
+				AmmoAccumulator -= Rounds;
+			}
+			continue;
+		}
+
+		// A looted gun carries its spare rounds in the inventory cells. Fuel fills that reserve the
+		// same way an ammo pile would, limited only by the room in the bag.
+		if (Weapon->OwnsAmmoCells())
+		{
+			if (UInventoryComponent* const Inventory = Player->GetInventoryComponent())
+			{
+				const int32 Rounds = FMath::Min(FMath::FloorToInt(AmmoAccumulator), DispenserFuel);
+				if (Rounds > 0)
+				{
+					FInventoryItem Item;
+					Item.Kind = EInventorySlotKind::Ammo;
+					Item.Count = Rounds;
+					Item.StackMax = Inventory->GetRoundsPerAmmoCell();
+					const int32 Added = Rounds - Inventory->TryAdd(Item);
+					if (Added > 0)
+					{
+						DispenserFuel -= Added;
+						AmmoAccumulator -= Added;
+					}
+				}
+			}
+		}
+	}
+}
+
+void ABuildableActor::AddFuel(int32 Amount)
+{
+	if (!HasAuthority() || Amount <= 0)
+	{
+		return;
+	}
+	DispenserFuel = FMath::Clamp(DispenserFuel + Amount, 0, MaxFuel);
+	OnBuildableChanged.Broadcast(this);
+}
+
+bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeapon* Weapon)
+{
+	if (!HasAuthority() || !Donor || !Weapon || Weapon->IsMeleeWeapon() || !IsActive())
+	{
+		return false;
+	}
+
+	const float Reach = ServiceRadius + 150.0f;
+	if (FVector::DistSquared(Donor->GetActorLocation(), GetActorLocation()) > FMath::Square(Reach))
+	{
+		return false;
+	}
+
+	int32 Loaded = 0;
+	int32 Reserve = -1;
+	if (!Donor->ReleaseWeaponToMount(Weapon, Loaded, Reserve))
+	{
+		return false;
+	}
+
+	// An endless class weapon has no removable reserve. Its chassis still has its tuned value; its
+	// default full reserve is used solely for the authored initial-price ratio.
+	if (Reserve < 0)
+	{
+		Reserve = Weapon->UsesEnergyReserve() ? Weapon->GetEnergyReserveCapacity() : 0;
+	}
+	AddFuel(Weapon->GetDispenserFuelValue(Loaded, Reserve));
+	UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] %s sacrificed %s for %d fuel (hopper now %d)"),
+		*Donor->GetName(), *GetNameSafe(Weapon), Weapon->GetDispenserFuelValue(Loaded, Reserve), DispenserFuel);
+	return true;
+}
+
+void ABuildableActor::OnRep_DispenserFuel()
+{
+	OnBuildableChanged.Broadcast(this);
 }
 
 // ==================== Construction ====================
@@ -427,7 +566,7 @@ void ABuildableActor::OnRep_State(EBuildableState OldState)
 		BP_OnConstructionFinished();
 	}
 	// The tick exists for the construction and, after it, only for a kind that asked.
-	SetActorTickEnabled(State == EBuildableState::Constructing || (State == EBuildableState::Active && bTickWhileActive));
+	SetActorTickEnabled(State == EBuildableState::Constructing || (State == EBuildableState::Active && NeedsActiveTick()));
 	OnStateChanged(OldState, State);
 	RefreshVisuals();
 	Announce();

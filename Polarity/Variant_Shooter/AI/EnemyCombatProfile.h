@@ -108,6 +108,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek", meta = (EditCondition = "bOverridePeekTuning", ClampMin = "0.1"))
 	float PeekDuration = 2.0f;
 
+	/** Crouch for the whole exposed part of the peek: down when the step out begins, fire from the
+	 *  crouch, stand back up on the way home to the hide spot. A smaller target while trading, at
+	 *  the cost of the peek moving at crouch speed. The grenadier's way of peeking; classes that
+	 *  must stand while trading (or whose shots come from standing height) turn this off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek")
+	bool bCrouchWhenPeeking = true;
+
 	/** Abandon this corner after a burst and go find another one, instead of settling into the
 	 *  hide/peek rhythm from the same spot.
 	 *

@@ -68,15 +68,18 @@ AKamikazeCarrierDrone::AKamikazeCarrierDrone(const FObjectInitializer& ObjectIni
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	// A pawn-typed box that weapon traces find (they query by object type Pawn) and that responds to
-	// nothing, so it never blocks movement, walls or the player. Attached to the mesh so it tilts
-	// with the airframe.
+	// A pawn-typed box that weapon traces find (they query by object type Pawn) and that answers
+	// WorldDynamic alone: ballistic rounds sweep with their own object type and land only on bodies
+	// that BLOCK it, so without that one channel a rocket or a bolt flew through the airframe while
+	// the capsule still caught it. Everything else stays ignored, so it never blocks movement, walls
+	// or the player. Attached to the mesh so it tilts with the airframe.
 	Hitbox = CreateDefaultSubobject<UBoxComponent>(TEXT("Hitbox"));
 	USceneComponent* const HitboxParent = DroneMesh ? static_cast<USceneComponent*>(DroneMesh.Get()) : GetRootComponent();
 	Hitbox->SetupAttachment(HitboxParent);
 	Hitbox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	Hitbox->SetCollisionObjectType(ECC_Pawn);
 	Hitbox->SetCollisionResponseToAllChannels(ECR_Ignore);
+	Hitbox->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
 	Hitbox->SetGenerateOverlapEvents(false);
 	Hitbox->SetCanEverAffectNavigation(false);
 	Hitbox->CanCharacterStepUpOn = ECB_No;
@@ -108,7 +111,29 @@ void AKamikazeCarrierDrone::BeginPlay()
 
 	PayloadRemaining = PayloadCapacity;
 
-	if (bFitHitboxToMesh)
+	if (bMeshAsHitbox)
+	{
+		// The airframe itself catches rounds: pawn-typed queries (weapon sweeps, hitscan) find the
+		// mesh's own collision hulls, and ballistic rounds block on it exactly as they block on a
+		// pawn's capsule. The fitted box is turned off - one body per shape, and no ten-centimetre
+		// second surface around the hull.
+		//
+		// This only works while the mesh ASSET has collision (simple convex hulls). A hull-less
+		// airframe catches nothing here, so the fitted box stays as the fallback: flip
+		// bMeshAsHitbox off in the Blueprint, or give the asset hulls (mesh editor -> Collision).
+		if (DroneMesh && Hitbox)
+		{
+			DroneMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			DroneMesh->SetCollisionObjectType(ECC_Pawn);
+			DroneMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+			DroneMesh->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+			DroneMesh->SetGenerateOverlapEvents(false);
+			DroneMesh->CanCharacterStepUpOn = ECB_No;
+
+			Hitbox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+	}
+	else if (bFitHitboxToMesh)
 	{
 		FitHitboxToMesh();
 	}

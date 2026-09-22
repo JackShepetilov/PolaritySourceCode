@@ -2543,42 +2543,14 @@ FText FSTTask_ShooterPush::GetDescription(const FGuid& ID, FStateTreeDataView In
 // Shield state conditions
 // ============================================================================
 
-namespace
-{
-	/** The one place these conditions decide what "shield" means, so the two of them cannot drift
-	 *  apart. Mirrors AShooterWeapon::IsTargetShieldDown for the enemy case: the charge meter lives
-	 *  on UEMFVelocityModifier and IsAtMaxCharge already compares the MAGNITUDE against that
-	 *  component's own ceiling, which is what makes either polarity count as broken.
-	 *
-	 *  bOutHasShield says whether the question applied at all. An NPC with no charge component has
-	 *  no shield to lose, and the callers below deliberately answer "not down" for it rather than
-	 *  inheriting the weapon's "freely hurtable" reading. */
-	bool IsShooterShieldDown(const AShooterNPC* NPC, bool& bOutHasShield)
-	{
-		bOutHasShield = false;
-
-		if (!IsValid(NPC))
-		{
-			return false;
-		}
-
-		const UEMFVelocityModifier* const Modifier = NPC->FindComponentByClass<UEMFVelocityModifier>();
-		if (!Modifier)
-		{
-			return false;
-		}
-
-		bOutHasShield = true;
-		return Modifier->IsAtMaxCharge();
-	}
-}
-
 bool FSTCondition_ShooterShieldDown::TestCondition(FStateTreeExecutionContext& Context) const
 {
-	const FInstanceDataType& Data = Context.GetInstanceData(*this);
-
-	bool bHasShield = false;
-	return IsShooterShieldDown(Data.NPC, bHasShield) && bHasShield;
+	// The old shield rule - "the shield broke, run to cover" - is gone by design (author, 2026-09-17).
+	// A player who breaks the shield no longer scares the NPC into the Peek corner: it keeps pushing
+	// and fighting. Cover is now ONLY ever taken from sentry turrets, and that behaviour lives in
+	// AShooterNPC::TickTurretCover rather than in this tree, so this condition's slot in the tree
+	// simply never fires. Kept as a named condition so the tree asset keeps its shape.
+	return false;
 }
 
 bool FSTCondition_ClassCanPush::TestCondition(FStateTreeExecutionContext& Context) const
@@ -3447,6 +3419,29 @@ void FSTTask_ShooterPeek::EnterPhase(FInstanceDataType& Data, EShooterPeekPhase 
 	Data.Phase = NewPhase;
 	Data.PhaseElapsed = 0.0f;
 
+	// The crouch-peek rhythm: down when the step out begins, back up on the walk home (or whenever
+	// the corner is dropped). Down and up happen here rather than at the movement calls, because
+	// this is the one funnel every phase change goes through regardless of which branch asked for it.
+	if (Data.NPC)
+	{
+		const UEnemyCombatProfile* const StanceProfile = Data.NPC->GetCombatProfile();
+		if (StanceProfile && StanceProfile->bCrouchWhenPeeking)
+		{
+			if (UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+			{
+				if (NewPhase == EShooterPeekPhase::ToPeek)
+				{
+					Apex->StartCrouching();
+				}
+				else if ((NewPhase == EShooterPeekPhase::ToHide || NewPhase == EShooterPeekPhase::Seeking)
+					&& Apex->IsCrouching())
+				{
+					Apex->StopCrouching();
+				}
+			}
+		}
+	}
+
 	// A fresh goal, so the progress watchdog starts over. Seeded at the float maximum rather than at
 	// zero: the first tick of the new phase must be able to count as an improvement, whatever the
 	// distance to the new goal happens to be.
@@ -3667,6 +3662,19 @@ void FSTTask_ShooterPeek::StopShooting(FInstanceDataType& Data) const
 void FSTTask_ShooterPeek::ReleaseAll(FInstanceDataType& Data) const
 {
 	StopShooting(Data);
+
+	// The crouch belongs to the peek: an exit through any other door (tree transition, knockback,
+	// death) must not leave the NPC walking around at crouch height.
+	if (Data.NPC && Data.NPC->GetCombatProfile() && Data.NPC->GetCombatProfile()->bCrouchWhenPeeking)
+	{
+		if (UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+		{
+			if (Apex->IsCrouching())
+			{
+				Apex->StopCrouching();
+			}
+		}
+	}
 
 	// Both squad duties are claims on somebody else's behaviour, so both must be given back on EVERY
 	// exit, death and recycling included - the same rule the cover claim already lives under, and

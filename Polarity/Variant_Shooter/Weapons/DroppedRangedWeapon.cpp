@@ -273,7 +273,7 @@ void ADroppedRangedWeapon::SetCharge(float NewCharge)
 
 // ==================== Ammo Distribution ====================
 
-void ADroppedRangedWeapon::GrantAmmoToInventory(AShooterCharacter* Player, AShooterWeapon* Weapon)
+void ADroppedRangedWeapon::GrantAmmoToInventory(AShooterCharacter* Player, AShooterWeapon* Weapon, bool bFillMagazine)
 {
 	if (!Player || !Weapon || !HasAuthority())
 	{
@@ -293,7 +293,12 @@ void ADroppedRangedWeapon::GrantAmmoToInventory(AShooterCharacter* Player, AShoo
 	const int32 Offered = (SpawnedBulletCount >= 0) ? SpawnedBulletCount : MagSize;
 	if (Offered <= 0)
 	{
-		Weapon->SetBulletCount(0);
+		// A freshly granted gun from an empty drop starts dry. An already owned one must not be
+		// emptied by the pickup: picking up an empty copy takes nothing from the player's weapon.
+		if (bFillMagazine)
+		{
+			Weapon->SetBulletCount(0);
+		}
 		return;
 	}
 
@@ -307,10 +312,14 @@ void ADroppedRangedWeapon::GrantAmmoToInventory(AShooterCharacter* Player, AShoo
 	const int32 Left = Inventory->TryAdd(Item);
 	const int32 Taken = Offered - Left;
 
-	// Loaded is the same rule as a reload: as much of the pool as the magazine holds. Written this
-	// way rather than "what this pickup gave" so a top-up on a half-empty gun fills it instead of
-	// replacing its rounds with the new ones.
-	Weapon->SetBulletCount(FMath::Min(MagSize, Inventory->GetAmmo()));
+	if (bFillMagazine)
+	{
+		// Only a gun this drop just granted reaches for its first magazine. Written this way rather
+		// than "what this pickup gave" so a top-up on a half-empty gun fills it instead of replacing
+		// its rounds with the new ones. A second copy leaves the magazine alone on purpose: its
+		// rounds land in the reserve, the reload key moves them.
+		Weapon->SetBulletCount(FMath::Min(MagSize, Inventory->GetAmmo()));
+	}
 
 	UE_LOG(LogTemp, Warning, TEXT("[AMMO_CELLS] %s offered %d rounds, %d taken, %d left over"),
 		*Weapon->GetName(), Offered, Taken, Left);
@@ -645,9 +654,8 @@ void ADroppedRangedWeapon::CompletePull()
 		// carrying system next to the inventory, and it is gone: the Bandolier upgrade now raises
 		// how many MAGAZINE CELLS a weapon may occupy, and the rounds go into those cells like any
 		// other pickup. One system, one place to look, and the cells are what the HUD already reads.
-		//
-		// An energy gun gets nothing here: GrantAmmoToInventory returns at once for a weapon with no
-		// cells. That is the author's call (2026-09-10): nothing feeds the energy reserve except time.
+		// An energy gun gets nothing from the cells, so its whole pickup lands in its own reserve:
+		// loaded and spare alike, never touching the current magazine (2026-09-15).
 		if (ExistingWeapon->UsesEnergyReserve())
 		{
 			const int32 Mag = ExistingWeapon->GetMagazineSize();
@@ -657,13 +665,11 @@ void ADroppedRangedWeapon::CompletePull()
 			const int32 OfferedReserve = CarriedEnergyReserve >= 0
 				? FMath::Max(0, CarriedEnergyReserve)
 				: FMath::Max(0, FMath::RoundToInt(EnergyReserveMagazines * Mag));
-			const int32 LoadedRoom = FMath::Max(0, Mag - ExistingWeapon->GetBulletCount());
-			const int32 AddLoaded = FMath::Min(LoadedRoom, OfferedLoaded);
-			ExistingWeapon->SetBulletCount(ExistingWeapon->GetBulletCount() + AddLoaded);
+
 			const int32 ReserveRoom = FMath::Max(0, ExistingWeapon->GetEnergyReserveCapacity() - ExistingWeapon->GetEnergyReserve());
-			const int32 AddReserve = FMath::Min(ReserveRoom, OfferedReserve);
+			const int32 AddReserve = FMath::Min(ReserveRoom, OfferedLoaded + OfferedReserve);
 			ExistingWeapon->SetEnergyReserve(ExistingWeapon->GetEnergyReserve() + AddReserve);
-			const int32 Left = (OfferedLoaded - AddLoaded) + (OfferedReserve - AddReserve);
+			const int32 Left = (OfferedLoaded + OfferedReserve) - AddReserve;
 			if (Left > 0)
 			{
 				ADroppedRangedWeapon* Leftover = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
@@ -680,7 +686,9 @@ void ADroppedRangedWeapon::CompletePull()
 		}
 		else
 		{
-			GrantAmmoToInventory(Player, ExistingWeapon);
+			// A second copy is worth only its rounds, and they land in the reserve cells: the
+			// current magazine is not topped up by the pickup.
+			GrantAmmoToInventory(Player, ExistingWeapon, /*bFillMagazine*/ false);
 		}
 
 		if (ExistingWeapon == Player->GetCurrentWeapon())

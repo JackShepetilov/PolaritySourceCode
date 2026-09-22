@@ -266,6 +266,18 @@ void UCoverFinderComponent::ReleaseCover()
 	CurrentCover = FCoverSpot();
 }
 
+void UCoverFinderComponent::SetExtraObservers(const TArray<AActor*>& InObservers)
+{
+	ExtraObservers.Reset(InObservers.Num());
+	for (AActor* const Observer : InObservers)
+	{
+		if (Observer)
+		{
+			ExtraObservers.Add(Observer);
+		}
+	}
+}
+
 float UCoverFinderComponent::EvaluateCurrentExposure() const
 {
 	if (!CurrentCover.bValid)
@@ -336,6 +348,23 @@ bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Poi
 	return false;
 }
 
+bool UCoverFinderComponent::CanActorSee(const AActor* Observer, const FVector& Point, const FCollisionQueryParams& Params) const
+{
+	if (!Observer)
+	{
+		return false;
+	}
+
+	FVector Origin = FVector::ZeroVector;
+	FVector Extent = FVector::ZeroVector;
+	Observer->GetActorBounds(true, Origin, Extent, false);
+
+	FCollisionQueryParams LocalParams = Params;
+	LocalParams.AddIgnoredActor(Observer);
+
+	return HasLineOfSight(Origin, Point + FVector(0.0f, 0.0f, EyeHeight), LocalParams);
+}
+
 float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params) const
 {
 	// Exposure(H) = sum over players of Threat(P) * Visible(H, P). Visible is one or zero; the
@@ -349,6 +378,19 @@ float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<
 		if (CanPlayerSee(Player, Point, Params))
 		{
 			Exposure += GetThreatFor(Player);
+		}
+	}
+
+	// Non-pawn threats count at full weight: a turret either sees the spot or it does not, and while
+	// an NPC is playing cover against one, the turret IS the fight.
+	for (const TWeakObjectPtr<AActor>& Observer : ExtraObservers)
+	{
+		if (const AActor* const Threat = Observer.Get())
+		{
+			if (CanActorSee(Threat, Point, Params))
+			{
+				Exposure += 1.0f;
+			}
 		}
 	}
 

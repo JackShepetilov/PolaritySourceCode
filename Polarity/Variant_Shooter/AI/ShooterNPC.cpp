@@ -53,6 +53,9 @@
 #include "FlyingDrone.h"
 #include "KamikazeDroneNPC.h"
 #include "SniperTurretNPC.h"
+#include "Variant_Shooter/Siege/SiegeCoreBuildable.h"
+#include "../../AI/Components/CoverFinderComponent.h"
+#include "Variant_Shooter/Buildables/TurretBuildable.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
@@ -377,6 +380,14 @@ void AShooterNPC::Tick(float DeltaTime)
 		return;
 	}
 
+	// The siege march runs off the controller's resolved target, which the StateTree cannot see:
+	// the tree only reacts to its own perception events, so the march must be driven from here.
+	TickSiegeMarch(DeltaTime);
+
+	// A turret under the hat overrides everything the NPC was doing, the march included: it plays
+	// the corner until the turret is gone.
+	TickTurretCover(DeltaTime);
+
 	// [FACING_DEBUG] Throttled (~1/sec) snapshot of the rotation chain, to find out why NPCs
 	// don't face the player. Filter the Output Log by: FACING_DEBUG  (remove after diagnosis)
 	if (UWorld* DbgWorld = GetWorld())
@@ -534,6 +545,396 @@ void AShooterNPC::Tick(float DeltaTime)
 		}
 	}
 #endif
+}
+
+void AShooterNPC::TickSiegeMarch(float DeltaTime)
+{
+	// The march is a walker's business: flying units drive themselves and a turret cannot walk.
+	if (IsA<AFlyingDrone>() || IsA<AKamikazeDroneNPC>() || IsA<ASniperTurretNPC>())
+	{
+		return;
+	}
+
+	// Movement-locked states (knockback, capture, launch) own the body until they end.
+	if (bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled)
+	{
+		EndSiegeMarch();
+		return;
+	}
+
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	if (!AIController)
+	{
+		return;
+	}
+
+	AActor* const CurrentTarget = AIController->GetCurrentTarget();
+	if (!CurrentTarget || !CurrentTarget->IsA<ASiegeCoreBuildable>())
+	{
+		// A visible player (or anything the intents name) is back in charge: hand the body over.
+		EndSiegeMarch();
+		return;
+	}
+
+	if (CurrentTarget != SiegeMarchTarget.Get())
+	{
+		SiegeMarchTarget = CurrentTarget;
+		SiegeMoveReissueTimer = 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s marches on %s"), *GetName(), *CurrentTarget->GetName());
+	}
+
+	const float Dist2D = FVector::Dist2D(GetActorLocation(), CurrentTarget->GetActorLocation());
+	const bool bInRange = Dist2D <= SiegeCoreEngageDistance;
+
+	// Re-issue on a cadence in both regimes: while marching it keeps the core ahead of the
+	// StateTree's roam destinations, and while firing it pins the NPC to the fire line.
+	SiegeMoveReissueTimer -= DeltaTime;
+	if (SiegeMoveReissueTimer <= 0.0f)
+	{
+		SiegeMoveReissueTimer = SiegeCoreMoveReissueInterval;
+		AIController->MoveToActor(CurrentTarget, FMath::Max(0.0f, SiegeCoreEngageDistance - 100.0f));
+	}
+
+	if (bInRange && HasLineOfSightTo(CurrentTarget))
+	{
+		if (!bWantsToShoot || CurrentAimTarget.Get() != CurrentTarget)
+		{
+			StartShooting(CurrentTarget);
+		}
+	}
+	else if (bWantsToShoot && CurrentAimTarget.Get() == CurrentTarget)
+	{
+		StopShooting();
+	}
+}
+
+void AShooterNPC::EndSiegeMarch()
+{
+	if (SiegeMarchTarget.IsValid() && bWantsToShoot && CurrentAimTarget.Get() == SiegeMarchTarget.Get())
+	{
+		StopShooting();
+	}
+	SiegeMarchTarget = nullptr;
+}
+
+// ==================== Turret Cover ====================
+
+void AShooterNPC::TickTurretCover(float DeltaTime)
+{
+	// The corner game is a walker's business, and shooting the turret back needs a gun in hand.
+	if (IsA<AFlyingDrone>() || IsA<AKamikazeDroneNPC>() || IsA<ASniperTurretNPC>()
+		|| !Weapon || Weapon->IsMeleeWeapon())
+	{
+		return;
+	}
+
+	// Movement-locked states own the body; the machine holds its position and resumes after.
+	if (bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled)
+	{
+		return;
+	}
+
+	UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>();
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	if (!AIController)
+	{
+		return;
+	}
+
+	// Enter and leave on one cadence. The scan is cheap: a world holds a handful of turrets.
+	TurretScanTimer -= DeltaTime;
+	const bool bScanNow = TurretScanTimer <= 0.0f;
+	if (bScanNow)
+	{
+		TurretScanTimer = TurretCoverScanInterval;
+	}
+
+	if (TurretCoverPhase == ETurretCoverPhase::Inactive)
+	{
+		if (!bScanNow)
+		{
+			return;
+		}
+
+		ATurretBuildable* const Threat = FindTurretThreat();
+		if (!Threat)
+		{
+			return;
+		}
+
+		TurretThreat = Threat;
+
+		// A standing Turret intent outranks perception, so while this runs the NPC's resolved target
+		// IS the turret: the siege march sees a non-core target and steps aside, and the tree follows
+		// on its own terms. Cleared by EndTurretCover.
+		AIController->SetTargetIntent(ETargetIntentSource::Turret, Threat);
+
+		if (Finder)
+		{
+			TArray<AActor*> Threats;
+			CollectTurretThreats(Threats, TurretThreatRadius);
+			Finder->SetExtraObservers(Threats);
+		}
+
+		TurretCoverPhase = ETurretCoverPhase::Seeking;
+		TurretCoverTimer = 0.0f;
+		TurretMoveReissueTimer = 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s takes cover from %s"), *GetName(), *GetNameSafe(Threat));
+		return;
+	}
+
+	// Re-validate the threat against the wider ring: entering needs the tight one, leaving should
+	// tolerate a step or two of drift, or every reposition would end the entire cover.
+	if (bScanNow)
+	{
+		const ATurretBuildable* const Threat = TurretThreat.Get();
+		if (!Threat || !IsTurretThreatValid(Threat, TurretThreatRadius * 1.25f))
+		{
+			EndTurretCover();
+			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s threat gone, cover ended"), *GetName());
+			return;
+		}
+	}
+
+	if (!Finder)
+	{
+		// No cover component and no way to get one on this class: stand down cleanly.
+		EndTurretCover();
+		return;
+	}
+
+	AActor* const ThreatActor = TurretThreat.Get();
+
+	switch (TurretCoverPhase)
+	{
+	case ETurretCoverPhase::Seeking:
+		if (Finder->HasCover())
+		{
+			TurretCoverPhase = ETurretCoverPhase::ToHide;
+			TurretMoveReissueTimer = 0.0f;
+		}
+		else if (!Finder->IsSearching())
+		{
+			// Refused (cooldown, no query) is not fatal: ask again next tick until one sticks.
+			Finder->RequestCover(ThreatActor);
+		}
+		break;
+
+	case ETurretCoverPhase::ToHide:
+	{
+		const FVector Hide = Finder->GetCover().HideLocation;
+		TurretMoveReissueTimer -= DeltaTime;
+		if (TurretMoveReissueTimer <= 0.0f)
+		{
+			TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
+			AIController->MoveToLocation(Hide, TurretCoverArriveRadius);
+		}
+
+		const float Arrive = TurretCoverArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+		if (FVector::Dist2D(GetActorLocation(), Hide) <= Arrive)
+		{
+			TurretCoverPhase = ETurretCoverPhase::AtHide;
+			TurretCoverTimer = TurretCoverHideTime;
+		}
+		break;
+	}
+
+	case ETurretCoverPhase::AtHide:
+	{
+		// Hold the corner honestly: if the turret found an angle, ask for fresh cover.
+		if (bScanNow && !Finder->IsCoverStillGood())
+		{
+			TurretCoverPhase = ETurretCoverPhase::Seeking;
+			break;
+		}
+
+		// Pin the feet to the hide spot on a cadence; the StateTree's own wander orders lose.
+		TurretMoveReissueTimer -= DeltaTime;
+		if (TurretMoveReissueTimer <= 0.0f)
+		{
+			TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
+			AIController->MoveToLocation(Finder->GetCover().HideLocation, TurretCoverArriveRadius);
+		}
+
+		TurretCoverTimer -= DeltaTime;
+		if (TurretCoverTimer <= 0.0f)
+		{
+			TurretCoverPhase = ETurretCoverPhase::Peeking;
+			TurretCoverTimer = TurretCoverPeekTime;
+			TurretMoveReissueTimer = 0.0f;
+			// The step out is the exposed part of the cycle: down as it begins (the grenadier's way).
+			SetTurretPeekCrouch(/*bCrouched*/ true);
+		}
+		break;
+	}
+
+	case ETurretCoverPhase::Peeking:
+	{
+		const FVector Peek = Finder->GetCover().PeekLocation;
+		TurretMoveReissueTimer -= DeltaTime;
+		if (TurretMoveReissueTimer <= 0.0f)
+		{
+			TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
+			AIController->MoveToLocation(Peek, FMath::Max(30.0f, TurretCoverArriveRadius * 0.5f));
+		}
+
+		const float PeekArrive = TurretCoverArriveRadius * 0.5f + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+		if (FVector::Dist2D(GetActorLocation(), Peek) <= PeekArrive)
+		{
+			// Fire from the shoulder only: stepping out is the moment to shoot the turret.
+			if (!bWantsToShoot || CurrentAimTarget.Get() != ThreatActor)
+			{
+				StartShooting(ThreatActor);
+			}
+		}
+
+		TurretCoverTimer -= DeltaTime;
+		if (TurretCoverTimer <= 0.0f)
+		{
+			if (bWantsToShoot && CurrentAimTarget.Get() == ThreatActor)
+			{
+				StopShooting();
+			}
+			// The walk home is exposed but not a firing plate: up before turning around.
+			SetTurretPeekCrouch(/*bCrouched*/ false);
+			TurretCoverPhase = ETurretCoverPhase::ToHide;
+		}
+		break;
+	}
+
+	default:
+		break;
+	}
+}
+
+void AShooterNPC::EndTurretCover()
+{
+	if (TurretThreat.IsValid() && bWantsToShoot && CurrentAimTarget.Get() == TurretThreat.Get())
+	{
+		StopShooting();
+	}
+
+	if (AShooterAIController* const AIController = Cast<AShooterAIController>(GetController()))
+	{
+		AIController->ClearTargetIntent(ETargetIntentSource::Turret);
+	}
+
+	// Both halves of the cover claim must go: the spot and the extra observers.
+	if (UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>())
+	{
+		Finder->ReleaseCover();
+		Finder->SetExtraObservers(TArray<AActor*>());
+	}
+
+	// Never leave the machine at crouch height, whatever door the exit came through.
+	SetTurretPeekCrouch(/*bCrouched*/ false);
+
+	TurretCoverPhase = ETurretCoverPhase::Inactive;
+	TurretThreat = nullptr;
+	TurretCoverTimer = 0.0f;
+}
+
+ATurretBuildable* AShooterNPC::FindTurretThreat() const
+{
+	if (!GetWorld())
+	{
+		return nullptr;
+	}
+
+	ATurretBuildable* Nearest = nullptr;
+	float NearestDistSq = TNumericLimits<float>::Max();
+	for (TActorIterator<ATurretBuildable> It(GetWorld()); It; ++It)
+	{
+		ATurretBuildable* const Turret = *It;
+		if (!IsValid(Turret) || Turret->IsDestroyed() || !Turret->IsActive())
+		{
+			continue;
+		}
+
+		const float DistSq = FVector::DistSquared2D(GetActorLocation(), Turret->GetActorLocation());
+		if (DistSq > TurretThreatRadius * TurretThreatRadius)
+		{
+			continue;
+		}
+
+		// Two independent witnesses of danger, either is enough: the turret is tracking me right
+		// now, or it has a line to me (which is the moment before the vice starts turning).
+		const bool bTurretAiming = Turret->GetCurrentTarget() == this;
+
+		FVector TurretOrigin = FVector::ZeroVector;
+		FVector TurretExtent = FVector::ZeroVector;
+		Turret->GetActorBounds(true, TurretOrigin, TurretExtent, false);
+
+		const FVector MyChest = GetActorLocation() + FVector(0.0f, 0.0f, GetSimpleCollisionHalfHeight());
+		FCollisionQueryParams Params(FName(TEXT("TurretThreat")), /*bTraceComplex*/ false);
+		Params.AddIgnoredActor(this);
+		Params.AddIgnoredActor(Turret);
+		const bool bTurretSees = !GetWorld()->LineTraceTestByChannel(TurretOrigin, MyChest, ECC_Visibility, Params);
+
+		if (!bTurretAiming && !bTurretSees)
+		{
+			continue;
+		}
+
+		if (DistSq < NearestDistSq)
+		{
+			NearestDistSq = DistSq;
+			Nearest = Turret;
+		}
+	}
+	return Nearest;
+}
+
+void AShooterNPC::CollectTurretThreats(TArray<AActor*>& OutThreats, float Radius) const
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+
+	const float RadiusSq = Radius * Radius;
+	for (TActorIterator<ATurretBuildable> It(GetWorld()); It; ++It)
+	{
+		ATurretBuildable* const Turret = *It;
+		if (!IsValid(Turret) || Turret->IsDestroyed() || !Turret->IsActive())
+		{
+			continue;
+		}
+		if (FVector::DistSquared2D(GetActorLocation(), Turret->GetActorLocation()) <= RadiusSq)
+		{
+			OutThreats.Add(Turret);
+		}
+	}
+}
+
+bool AShooterNPC::IsTurretThreatValid(const ATurretBuildable* Turret, float Radius) const
+{
+	return Turret && IsValid(Turret) && !Turret->IsDestroyed() && Turret->IsActive()
+		&& FVector::DistSquared2D(GetActorLocation(), Turret->GetActorLocation()) <= Radius * Radius;
+}
+
+void AShooterNPC::SetTurretPeekCrouch(bool bCrouched)
+{
+	const UEnemyCombatProfile* const Profile = GetCombatProfile();
+	if (!Profile || !Profile->bCrouchWhenPeeking)
+	{
+		return;
+	}
+
+	UApexMovementComponent* const Apex = GetApexMovement();
+	if (!Apex)
+	{
+		return;
+	}
+
+	if (bCrouched)
+	{
+		Apex->StartCrouching();
+	}
+	else if (Apex->IsCrouching())
+	{
+		Apex->StopCrouching();
+	}
 }
 
 void AShooterNPC::Landed(const FHitResult& Hit)

@@ -9,6 +9,7 @@
 #include "Camera/CameraComponent.h"
 #include "CollisionQueryParams.h"
 #include "Coop/CoopPlayers.h"
+#include "Engine/Engine.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
@@ -45,6 +46,7 @@ void UBuilderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	PopMapping(PlacementMappingContext);
 	PopMapping(MenuMappingContext);
 	FeedTarget.Reset();
+	FeedDispenserTarget.Reset();
 	Mode = EBuilderMode::Idle;
 	Super::EndPlay(EndPlayReason);
 }
@@ -115,6 +117,19 @@ void UBuilderComponent::SetupInput(UEnhancedInputComponent* Input)
 
 // ==================== Feeding a turret ====================
 
+namespace
+{
+	// A refusal on the feed key must be SEEN, not only logged: five meters, a building still going
+	// up, or no gun at all would otherwise read as a dead key [2026-09-15].
+	void ShowFeedHint(int32 Key, const FString& Text)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(197700 + Key, 3.5f, FColor::Yellow, Text);
+		}
+	}
+}
+
 ATurretBuildable* UBuilderComponent::FindTurretUnderAim() const
 {
 	const AShooterCharacter* const Character = GetCharacter();
@@ -140,7 +155,7 @@ ATurretBuildable* UBuilderComponent::FindTurretUnderAim() const
 	return Turret;
 }
 
-ADispenserBuildable* UBuilderComponent::FindDispenserUnderAim() const
+ABuildableActor* UBuilderComponent::FindDispenserUnderAim() const
 {
 	const AShooterCharacter* const Character = GetCharacter();
 	if (!Character || !GetWorld())
@@ -156,13 +171,22 @@ ADispenserBuildable* UBuilderComponent::FindDispenserUnderAim() const
 	{
 		return nullptr;
 	}
-	ADispenserBuildable* const Dispenser = Cast<ADispenserBuildable>(Hit.GetActor());
-	return Dispenser && !Dispenser->IsDestroyed() && Hit.Distance <= Dispenser->ServiceRadius ? Dispenser : nullptr;
+	// The ray has already limited the aim to 10 m. Distance is not gated here: the caller checks it
+	// against the dispenser's own reach and TELLS the player why, instead of the F key doing
+	// nothing [2026-09-15]. A dispenser is a dispenser by its definition's tag, not by its class
+	// (BP_Buildable_Dispenser is a direct ABuildableActor child).
+	ABuildableActor* const Buildable = Cast<ABuildableActor>(Hit.GetActor());
+	return Buildable && !Buildable->IsDestroyed() && Buildable->IsDispenser() ? Buildable : nullptr;
 }
 
 ATurretBuildable* UBuilderComponent::GetFeedTarget() const
 {
 	return FeedTarget.Get();
+}
+
+ABuildableActor* UBuilderComponent::GetFeedDispenserTarget() const
+{
+	return FeedDispenserTarget.Get();
 }
 
 const ATurretBuildable* UBuilderComponent::GetFeedTurretDefaults() const
@@ -217,12 +241,40 @@ void UBuilderComponent::ToggleFeedMenu()
 	ATurretBuildable* const Turret = FindTurretUnderAim();
 	if (!Turret)
 	{
-		if (ADispenserBuildable* const Dispenser = FindDispenserUnderAim())
+		// The dispenser takes the same menu, not an instant sacrifice of the held gun: pressing a
+		// number key melts that gun for fuel. Every refusal says WHY on the screen and in the log,
+		// because a silent "F over a dispenser does nothing" is how this read as broken before.
+		if (ABuildableActor* const Dispenser = FindDispenserUnderAim())
 		{
-			if (AShooterWeapon* const Weapon = Character ? Character->GetCurrentWeapon() : nullptr; Weapon && !Weapon->IsMeleeWeapon())
+			if (!Dispenser->IsActive())
 			{
-				Server_FuelDispenser(Dispenser, Weapon);
+				ShowFeedHint(1, TEXT("Dispenser: still being built - finish it with wrench hits"));
+				UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] feed: %s is not standing yet"), *Dispenser->GetName());
+				return;
 			}
+
+			const float Reach = Dispenser->ServiceRadius + 150.0f;
+			const float Dist = Character ? FVector::Dist(Character->GetActorLocation(), Dispenser->GetActorLocation()) : Reach + 1.0f;
+			if (Dist > Reach)
+			{
+				ShowFeedHint(2, FString::Printf(TEXT("Dispenser is %.1f m away - move in to %.1f m"),
+					Dist / 100.0f, Reach / 100.0f));
+				UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] feed: %s is %.0f cm away, reach is %.0f"),
+					*Dispenser->GetName(), Dist, Reach);
+				return;
+			}
+
+			TArray<AShooterWeapon*> Weapons;
+			GetFeedWeapons(Weapons);
+			if (Weapons.Num() == 0)
+			{
+				ShowFeedHint(3, TEXT("Dispenser: you own no gun to melt for fuel"));
+				UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] feed: %s owns no gun to melt"), *Character->GetName());
+				return;
+			}
+			FeedDispenserTarget = Dispenser;
+			PushMapping(MenuMappingContext);
+			SetMode(EBuilderMode::Feeding);
 			return;
 		}
 	}
@@ -241,12 +293,16 @@ void UBuilderComponent::ToggleFeedMenu()
 			if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
 			{
 				const ATurretBuildable* const Far = Cast<ATurretBuildable>(Hit.GetActor());
+				// The class goes in too: the F key "refusing" a hit actor whose name SAYS dispenser
+				// needs to show what that actor actually is before it can be fixed.
 				What = Far
 					? FString::Printf(TEXT("%s at %.0f cm, reach is %.0f"), *Far->GetName(), Hit.Distance, Far->FeedReachCm)
-					: FString::Printf(TEXT("%s at %.0f cm"), *GetNameSafe(Hit.GetActor()), Hit.Distance);
+					: FString::Printf(TEXT("%s [%s] at %.0f cm"), *GetNameSafe(Hit.GetActor()),
+						*GetNameSafe(Hit.GetActor()->GetClass()), Hit.Distance);
 			}
 		}
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: no turret under the aim (aim found %s)"), *What);
+		ShowFeedHint(5, FString::Printf(TEXT("Feed: no turret or dispenser under the aim (found %s)"), *What));
 		return;
 	}
 	if (!Turret->IsActive())
@@ -274,6 +330,7 @@ void UBuilderComponent::CloseFeedMenu()
 	}
 	PopMapping(MenuMappingContext);
 	FeedTarget.Reset();
+	FeedDispenserTarget.Reset();
 	SetMode(EBuilderMode::Idle);
 }
 
@@ -283,6 +340,35 @@ void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
 	{
 		return;
 	}
+
+	// The dispenser menu: any ranged gun is fuel, so there is no vice question. The same reach and
+	// state questions the server will ask are asked here first, so a refusal is instant and visible.
+	if (ABuildableActor* const Dispenser = FeedDispenserTarget.Get())
+	{
+		TArray<AShooterWeapon*> Weapons;
+		GetFeedWeapons(Weapons);
+		if (!Weapons.IsValidIndex(WeaponIndex))
+		{
+			return;
+		}
+
+		const AShooterCharacter* const Character = GetCharacter();
+		const bool bRefused = !Dispenser || Dispenser->IsDestroyed() || !Dispenser->IsActive()
+			|| !Character
+			|| FVector::DistSquared(Character->GetActorLocation(), Dispenser->GetActorLocation())
+				> FMath::Square(Dispenser->ServiceRadius + 150.0f);
+		if (bRefused)
+		{
+			ShowFeedHint(4, TEXT("Dispenser refused: out of reach or still being built"));
+			OnFeedRefused.Broadcast(WeaponIndex);
+			return;
+		}
+
+		Server_FuelDispenser(Dispenser, Weapons[WeaponIndex]);
+		CloseFeedMenu();
+		return;
+	}
+
 	ATurretBuildable* const Turret = FeedTarget.Get();
 	TArray<AShooterWeapon*> Weapons;
 	GetFeedWeapons(Weapons);
@@ -322,7 +408,7 @@ void UBuilderComponent::Server_FeedTurret_Implementation(ATurretBuildable* Turre
 	Turret->AcceptWeaponFrom(Character, ReportedLoadedRounds, Weapon);
 }
 
-void UBuilderComponent::Server_FuelDispenser_Implementation(ADispenserBuildable* Dispenser, AShooterWeapon* Weapon)
+void UBuilderComponent::Server_FuelDispenser_Implementation(ABuildableActor* Dispenser, AShooterWeapon* Weapon)
 {
 	AShooterCharacter* const Character = GetCharacter();
 	if (Character && Dispenser && !Dispenser->IsDestroyed())
@@ -803,9 +889,19 @@ void UBuilderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 	if (Mode == EBuilderMode::Feeding)
 	{
-		// The menu is a conversation with one turret: it ends when the turret goes, or the player
-		// walks off, or dies.
+		// The menu is a conversation with one building: it ends when the building goes, or the
+		// player walks off, or dies.
 		const AShooterCharacter* const Character = GetCharacter();
+		if (ABuildableActor* const Dispenser = FeedDispenserTarget.Get())
+		{
+			const float Reach = Dispenser->ServiceRadius + 100.0f;
+			if (!Character || Character->IsDead() || Dispenser->IsDestroyed()
+				|| FVector::DistSquared(Character->GetActorLocation(), Dispenser->GetActorLocation()) > Reach * Reach)
+			{
+				CloseFeedMenu();
+			}
+			return;
+		}
 		const ATurretBuildable* const Turret = FeedTarget.Get();
 		const float Reach = Turret ? Turret->FeedReachCm + 100.0f : 0.0f;
 		if (!Character || Character->IsDead() || !Turret || Turret->IsDestroyed()
