@@ -13,6 +13,7 @@ class ADroppedMeleeWeapon;
 class ADroppedRangedWeapon;
 class ARiotShieldPickup;
 class USoundBase;
+class UShieldFieldComponent;
 
 /** Category for widget clutter reduction — widgets in the same category share a visibility pool */
 UENUM(BlueprintType)
@@ -305,6 +306,10 @@ protected:
 	/** The NPC this widget is tracking (mutually exclusive with BoundProp) */
 	TWeakObjectPtr<AShooterNPC> BoundNPC;
 
+	/** The bound NPC's shield field, when it has one. Its OnShieldChanged drives the shield half of
+	 *  this widget; targets without a field keep the charge-derived reading. */
+	TWeakObjectPtr<UShieldFieldComponent> BoundShieldField;
+
 	/** The prop this widget is tracking (mutually exclusive with BoundNPC) */
 	TWeakObjectPtr<AEMFPhysicsProp> BoundProp;
 
@@ -372,6 +377,11 @@ private:
 
 	UFUNCTION()
 	void OnNPCChargeUpdated(float InChargeValue, uint8 InPolarity);
+
+	/** The shield moved on the bound enemy. The field is the shield's number now - it moves with
+	 *  damage, not with charge - so this is where the shield half of the widget comes from. */
+	UFUNCTION()
+	void OnNPCShieldChanged(float CurrentShield, float MaxShield);
 
 	UFUNCTION()
 	void OnPropChargeUpdated(float InNewCharge, uint8 InNewPolarity);

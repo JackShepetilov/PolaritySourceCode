@@ -4,7 +4,7 @@
 #include "AbilityDefinition_ShieldRestore.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
-#include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Engine/World.h"
 
 AShooterNPC* UAbilityHandler_ShieldRestore::FindTargetEnemy(float Range) const
@@ -52,19 +52,17 @@ void UAbilityHandler_ShieldRestore::OnActivate_Implementation()
 		return;
 	}
 
-	UEMFVelocityModifier* Modifier = Target->FindComponentByClass<UEMFVelocityModifier>();
-	if (!Modifier)
+	UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(Target);
+	if (!Shield)
 	{
 		NotifyAbilityCancelled();
 		return;
 	}
 
-	// Shield is the inverse of charge, so giving it back means pulling the magnitude toward zero.
 	// You can only hand back what was taken, which is what makes an untouched enemy worth nothing
-	// and a nearly stripped one worth everything -- no separate bookkeeping needed to create the
-	// incentive the design asks for.
-	const float Current = Modifier->GetCharge();
-	const float Restorable = FMath::Min(FMath::Abs(Current), Stats.MaxShieldRestored);
+	// and a nearly stripped one worth everything -- the incentive the design asks for, now measured
+	// on the pool instead of on the charge meter.
+	const float Restorable = FMath::Min(Shield->GetMaxShield() - Shield->GetCurrentShield(), Stats.MaxShieldRestored);
 	if (Restorable <= KINDA_SMALL_NUMBER)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldRestore: %s has a full shield, nothing to give back"),
@@ -73,7 +71,7 @@ void UAbilityHandler_ShieldRestore::OnActivate_Implementation()
 		return;
 	}
 
-	Modifier->SetCharge(FMath::Sign(Current) * (FMath::Abs(Current) - Restorable));
+	Shield->AddShield(Restorable);
 	Caster->RestoreHealth(Restorable * Stats.HealPerShieldRestored);
 
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] ShieldRestore: gave %s back %.1f shield, healed %s for %.1f"),

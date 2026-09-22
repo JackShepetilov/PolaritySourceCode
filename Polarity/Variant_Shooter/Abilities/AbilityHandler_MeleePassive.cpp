@@ -3,6 +3,7 @@
 #include "AbilityHandler_MeleePassive.h"
 #include "AbilityDefinition_MeleePassive.h"
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "GameFramework/Actor.h"
 
 float UAbilityHandler_MeleePassive::GetShieldStrippedFraction(const AActor* Target)
@@ -10,6 +11,13 @@ float UAbilityHandler_MeleePassive::GetShieldStrippedFraction(const AActor* Targ
 	if (!Target)
 	{
 		return 0.0f;
+	}
+
+	// Enemies answer through their shield field, which is the same door the weapon's damage gate
+	// asks. Everyone else falls through to the legacy charge reading below.
+	if (const UShieldFieldComponent* const Field = UShieldFieldStatics::GetShieldField(Target))
+	{
+		return Field->GetStrippedFraction();
 	}
 
 	const UEMFVelocityModifier* Mod = Target->FindComponentByClass<UEMFVelocityModifier>();

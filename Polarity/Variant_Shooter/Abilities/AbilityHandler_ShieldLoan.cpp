@@ -5,6 +5,7 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Engine/World.h"
 
 AShooterNPC* UAbilityHandler_ShieldLoan::FindTargetEnemy(float Range) const
@@ -55,10 +56,15 @@ void UAbilityHandler_ShieldLoan::OnActivate_Implementation()
 		return;
 	}
 
-	// The loan is a slice of what is actually on the enemy right now, so it is worth more against
-	// somebody the team has already been working on.
+	// The loan is a slice of what has actually been taken off the enemy so far, so it is worth more
+	// against somebody the team has already been working on. The field is the same door everyone
+	// else asks; a charge carrier without one (a player, today) keeps the legacy reading.
 	float AvailableShield = 0.0f;
-	if (const UEMFVelocityModifier* Modifier = Target->FindComponentByClass<UEMFVelocityModifier>())
+	if (const UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(Target))
+	{
+		AvailableShield = Shield->GetMaxShield() * Shield->GetStrippedFraction();
+	}
+	else if (const UEMFVelocityModifier* Modifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
 		AvailableShield = FMath::Abs(Modifier->GetCharge());
 	}

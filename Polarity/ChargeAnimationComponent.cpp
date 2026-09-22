@@ -7,6 +7,7 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "EMFChannelingPlateActor.h"
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Camera/CameraComponent.h"
@@ -1331,10 +1332,13 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 					continue;
 				}
 
-				// An enemy is grabbable only once its charge is at the cap, which is the same instant
-				// its shield reads empty. Below that it is still shielded and the grab is refused.
+				// An enemy is grabbable only once its shield is broken - the same door the weapon's
+				// damage gate asks, so the reticle and the gate cannot disagree. (Was: charge at the
+				// cap, which meant the same thing while the shield WAS the charge meter.)
 				const float NPCCharge = NPCModifier->GetCharge();
-				if (!NPCModifier->IsAtMaxCharge())
+				const UShieldFieldComponent* const ShieldField = UShieldFieldStatics::GetShieldField(NPC);
+				const bool bGrabbable = ShieldField ? ShieldField->IsBroken() : NPCModifier->IsAtMaxCharge();
+				if (!bGrabbable)
 				{
 					continue;
 				}

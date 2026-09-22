@@ -430,10 +430,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "EMF|Shield Feedback")
 	TObjectPtr<class USoundAttenuation> ShieldBreakSoundAttenuation;
 
-	/** True while this target's shield is down. Mirrors IsAtMaxCharge, kept as state so the
+	/** True while this target's shield is down. Mirrors the shield field, kept as state so the
 	 *  transition can be detected rather than the level. */
 	UFUNCTION(BlueprintPure, Category = "EMF|Shield Feedback")
 	bool IsShieldBroken() const { return bShieldBrokenState; }
+
+	/** The shield's mirror, for the listeners that still bind here. Called BY UShieldFieldComponent
+	 *  on a whole<->broken transition: the shield owns the truth, this only repeats it. Keeps the
+	 *  old OnShieldStateChanged listeners and the world break sound working through the rework. */
+	UFUNCTION(BlueprintCallable, Category = "EMF|Shield Feedback")
+	void MirrorShieldBrokenState(bool bBroken);
 
 	// ==================== Runtime State (ReadOnly) ====================
 
@@ -651,11 +657,10 @@ private:
 	/** Проверить изменение заряда и вызвать делегат */
 	void CheckChargeChanged();
 
-	/** Compare IsAtMaxCharge against the remembered state, and on a transition raise the event and
-	 *  play the world sound. Called from CheckChargeChanged, which every route that moves the charge
-	 *  already funnels through. */
-	void CheckShieldStateChanged();
+	// (The old CheckShieldStateChanged is gone: the shield owns its state now and mirrors it in
+	// through MirrorShieldBrokenState. A charge change is not a shield change any more.)
 
-	/** Cached shield state, so CheckShieldStateChanged sees edges rather than levels. */
+	/** Cached shield mirror, so a transition is caught as an edge rather than a level. Written by
+	 *  UShieldFieldComponent (the shield owns the truth); see MirrorShieldBrokenState. */
 	bool bShieldBrokenState = false;
 };

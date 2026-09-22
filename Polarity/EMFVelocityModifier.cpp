@@ -1,6 +1,7 @@
 ﻿// EMFVelocityModifier.cpp
 
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "ApexMovementComponent.h"
 #include "ChargeAnimationComponent.h"
 #include "EMFChannelingPlateActor.h"
@@ -67,10 +68,16 @@ void UEMFVelocityModifier::BeginPlay()
 		UpdateFieldComponentCharge();
 	}
 
-	// Seed the shield state from whatever this target spawned at, so an enemy authored at full
-	// charge does not announce a break it never had on its first charge change. After the field
-	// component is resolved, because IsAtMaxCharge reads the charge through it.
-	bShieldBrokenState = IsAtMaxCharge();
+	// Seed the shield mirror from the field, which owns the truth now (the shield rework). An actor
+	// without a field - a player, today - keeps the legacy charge reading.
+	if (const UShieldFieldComponent* const Shield = Owner->FindComponentByClass<UShieldFieldComponent>())
+	{
+		bShieldBrokenState = Shield->IsBroken();
+	}
+	else
+	{
+		bShieldBrokenState = IsAtMaxCharge();
+	}
 
 	// Find and register with MovementComponent
 	if (ACharacter* Character = Cast<ACharacter>(Owner))
@@ -664,23 +671,30 @@ void UEMFVelocityModifier::CheckChargeChanged()
 			ReplicatedCharge = CurrentCharge;
 		}
 
-		// And the one place the shield's edge can be caught, for the same reason.
-		CheckShieldStateChanged();
+		// The shield's edge is NOT caught here any more: a charge change stopped meaning a shield
+		// change the moment the shield got a pool of its own. UShieldFieldComponent mirrors its
+		// transitions into this component (MirrorShieldBrokenState), so nothing is lost.
 	}
 }
 
-void UEMFVelocityModifier::CheckShieldStateChanged()
+// The shield's mirror, for every listener that still binds here. Called BY UShieldFieldComponent on
+// a transition, on every machine (the server in its mutation, the client in OnRep), so the event
+// and the world break sound fire exactly once per break with no RPC - the same promise the old
+// charge-mirror made, now about a state this component does not own.
+//
+// What this is NOT any more: a reading of the charge meter. A charge change stopped meaning a
+// shield change the moment the shield got a pool of its own.
+void UEMFVelocityModifier::MirrorShieldBrokenState(bool bBroken)
 {
-	const bool bNowBroken = IsAtMaxCharge();
-	if (bNowBroken == bShieldBrokenState)
+	if (bBroken == bShieldBrokenState)
 	{
 		return;
 	}
 
-	bShieldBrokenState = bNowBroken;
-	OnShieldStateChanged.Broadcast(bNowBroken);
+	bShieldBrokenState = bBroken;
+	OnShieldStateChanged.Broadcast(bBroken);
 
-	if (!bNowBroken || !ShieldBreakSound)
+	if (!bBroken || !ShieldBreakSound)
 	{
 		return;
 	}
@@ -692,13 +706,9 @@ void UEMFVelocityModifier::CheckShieldStateChanged()
 		return;
 	}
 
-	// A world sound, played by each machine for itself. No multicast: the charge is already
-	// mirrored to everyone, so everyone reaches this line on their own the moment their copy of the
-	// target crosses the cap.
 	UGameplayStatics::PlaySoundAtLocation(World, ShieldBreakSound, Owner->GetActorLocation(),
 		ShieldBreakSoundVolume, 1.0f, 0.0f, ShieldBreakSoundAttenuation);
 }
-
 void UEMFVelocityModifier::OnOwnerBeginOverlap(AActor* OverlappedActor, AActor* OtherActor)
 {
 	if (!OtherActor || OtherActor == GetOwner() || !bCanNeutralizeOnContact)

@@ -13,6 +13,7 @@
 #include "EMFPhysicsProp.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Engine/World.h"
@@ -203,6 +204,15 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 	// Cache max HP for normalization
 	CachedMaxHP = InNPC->CurrentHP;
 
+	// The shield is the field's number now, and it moves with damage rather than with charge, so the
+	// widget listens to the field itself. A bind without a field (never an NPC today, but the guard
+	// is free) keeps the charge-derived reading inside UpdateShieldState.
+	if (UShieldFieldComponent* const Shield = InNPC->FindComponentByClass<UShieldFieldComponent>())
+	{
+		BoundShieldField = Shield;
+		Shield->OnShieldChanged.AddDynamic(this, &UEMFChargeWidget::OnNPCShieldChanged);
+	}
+
 	// Cache max charge and get initial state
 	if (UEMFVelocityModifier* EMF = InNPC->FindComponentByClass<UEMFVelocityModifier>())
 	{
@@ -351,6 +361,11 @@ void UEMFChargeWidget::Unbind()
 		NPC->OnDamageTaken.RemoveDynamic(this, &UEMFChargeWidget::OnNPCDamageTaken);
 		NPC->OnHealthChanged.RemoveDynamic(this, &UEMFChargeWidget::OnNPCHealthChanged);
 	}
+	if (UShieldFieldComponent* const Shield = BoundShieldField.Get())
+	{
+		Shield->OnShieldChanged.RemoveDynamic(this, &UEMFChargeWidget::OnNPCShieldChanged);
+	}
+	BoundShieldField.Reset();
 	if (AEMFPhysicsProp* Prop = BoundProp.Get())
 	{
 		Prop->OnChargeChanged.RemoveDynamic(this, &UEMFChargeWidget::OnPropChargeUpdated);
@@ -547,10 +562,24 @@ void UEMFChargeWidget::HandleChargeUpdate(float InChargeValue, uint8 InPolarity)
 
 void UEMFChargeWidget::UpdateShieldState(bool bAllowBreakEffects)
 {
-	ShieldRemaining = FMath::Clamp(1.0f - NormalizedCharge, 0.0f, 1.0f);
+	// An enemy's shield is the field's number now: it moves with damage, not with charge, so it is
+	// read off the component. Everything else (props, dropped weapons, pickups) keeps the
+	// charge-derived reading that predates the field.
+	const UShieldFieldComponent* const Field =
+		(BoundNPC.IsValid() ? BoundNPC->FindComponentByClass<UShieldFieldComponent>() : nullptr);
+
+	if (Field)
+	{
+		ShieldRemaining = Field->GetShieldFraction();
+	}
+	else
+	{
+		ShieldRemaining = FMath::Clamp(1.0f - NormalizedCharge, 0.0f, 1.0f);
+	}
+
 	ShieldDisplayValue = ShieldRemaining * ShieldMaterialMaxValue;
 
-	const bool bNowBroken = (ShieldRemaining <= ShieldBrokenThreshold);
+	const bool bNowBroken = Field ? Field->IsBroken() : (ShieldRemaining <= ShieldBrokenThreshold);
 	const bool bTransitioned = (bNowBroken != bShieldBroken);
 	bShieldBroken = bNowBroken;
 
@@ -591,7 +620,7 @@ void UEMFChargeWidget::PlayShieldBreakSound() const
 	// A target that carries a charge component announces its own break, from the same number that
 	// decides whether bullets reach its health, on every machine, whether or not a health bar
 	// happens to be on screen. Playing here as well would simply double it.
-	// @see UEMFVelocityModifier::CheckShieldStateChanged
+	// @see UEMFVelocityModifier::MirrorShieldBrokenState
 	if (Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
 		return;
@@ -614,6 +643,14 @@ void UEMFChargeWidget::OnNPCStunStart(AShooterNPC* StunnedNPC, float Duration)
 void UEMFChargeWidget::OnNPCStunEnd(AShooterNPC* StunnedNPC)
 {
 	BP_OnStunEnd();
+}
+
+void UEMFChargeWidget::OnNPCShieldChanged(float CurrentShield, float MaxShield)
+{
+	// The shield is the field's number; a charge update never carries it any more. Break effects are
+	// allowed here: the widget's own break sound only fires for targets whose field has no charge
+	// component to announce it, and the field always has one on an enemy.
+	UpdateShieldState(true);
 }
 
 void UEMFChargeWidget::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser)
@@ -684,9 +721,13 @@ bool UEMFChargeWidget::EvaluateCaptureCandidate(
 	{
 		if (UEMFVelocityModifier* Mod = NPC->FindComponentByClass<UEMFVelocityModifier>())
 		{
-			// Mirrors the acquisition scan: an enemy body is grabbable only at the charge cap, which
-			// is the instant its shield reads empty, and at a flat range rather than off the curve.
-			if (!Cast<AHumanoidNPC>(NPC) && !Mod->IsAtMaxCharge())
+			// Mirrors the acquisition scan (ChargeAnimationComponent): an enemy body is grabbable only
+			// once its shield field is broken, and at a flat range rather than off the curve. The
+			// field is asked first because the charge cap stopped meaning "grabbable" when the shield
+			// stopped being the charge meter.
+			const UShieldFieldComponent* const Shield = NPC->FindComponentByClass<UShieldFieldComponent>();
+			const bool bGrabbable = Shield ? Shield->IsBroken() : Mod->IsAtMaxCharge();
+			if (!Cast<AHumanoidNPC>(NPC) && !bGrabbable)
 			{
 				return false;
 			}

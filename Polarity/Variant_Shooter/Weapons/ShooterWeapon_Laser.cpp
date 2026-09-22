@@ -10,6 +10,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "../DamageTypes/DamageType_EMFWeapon.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/ShooterCharacter.h"
@@ -343,35 +344,11 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 		return;
 	}
 
-	// While this enemy is open, the ionization that would fill its shield goes into its health
-	// instead. This is the only place the substitution can live: ionization IS the shield, so the
-	// window has to be applied where charge is handed over, not anywhere downstream.
-	//
-	// The window is opened by the Wizard's bolt (AShieldBypassProjectile), not by this weapon --
-	// this is only where its effect is felt.
-	if (AShooterNPC* OpenedNPC = Cast<AShooterNPC>(Target))
-	{
-		if (OpenedNPC->IsShieldBypassed())
-		{
-			if (GetOwner() && GetOwner()->HasAuthority())
-			{
-				// MAGNITUDE. Ionization is signed -- electrifying negative authors this rate as a
-				// negative number -- and multiplying it straight through produced negative damage,
-				// which TakeDamage discards. The result was an opened enemy that could be shot at
-				// forever with nothing happening at all.
-				//
-				// Charge-per-second is also a shield-filling rate and means nothing as a damage rate,
-				// hence the multiplier the ability carries on top.
-				const float RedirectedDamage = FMath::Abs(IonizationChargePerSecond) * DeltaTime
-					* OpenedNPC->ShieldBypassDamageMultiplier;
-
-				FPointDamageEvent DamageEvent;
-				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
-				OpenedNPC->TakeDamage(RedirectedDamage, DamageEvent, GetInstigatorController(), GetOwner());
-			}
-			return;
-		}
-	}
+	// The Wizard's window used to be handled right here - the beam's ionization redirected into
+	// health. It is NOT any more: the window means damage ignores the field entirely
+	// (AShooterNPC::TakeDamage), one rule that covers every weapon instead of a redirect per
+	// ionization path. The beam simply keeps chewing what an opened enemy has left, which is
+	// nothing, and that is the point.
 
 	const float ChargeStep = IonizationChargePerSecond * DeltaTime;
 	// Sign of accumulation: -1 for electrify-negative (default), +1 for legacy ionize-positive.
@@ -399,17 +376,13 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 		return FMath::Min(CurrentCharge + ChargeStep, ChargeCap);
 	};
 
-	// Try UEMFVelocityModifier first (for characters/NPCs)
-	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
+	// Enemies: one door, same as every other weapon. The beam's per-second rate becomes the same
+	// per-second strip the field understands, and bElectrifyNegative keeps choosing the polarity.
+	// (The charge paths below are for targets without a field: props, dropped weapons, raw carriers.)
+	if (UShieldFieldComponent* const TargetShield = UShieldFieldStatics::GetShieldField(Target))
 	{
-		// Use GetCharge() to read actual FieldComponent charge (not BaseCharge which may be stale
-		// after melee's SetCharge() calls that bypass BaseCharge tracking)
-		const float CurrentCharge = TargetModifier->GetCharge();
-		const float NewCharge = StepToward(CurrentCharge);
-		if (NewCharge != CurrentCharge)
-		{
-			TargetModifier->SetCharge(NewCharge);
-		}
+		const float SignedStep = IonizationChargePerSecond * DeltaTime * (bElectrifyNegative ? -1.0f : 1.0f);
+		TargetShield->ApplyIonization(SignedStep, FMath::Abs(SignedStep), GetOwner());
 		return;
 	}
 

@@ -5973,42 +5973,29 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 		}
 	}
 
-	// While an enemy is opened by the Wizard's bolt, the ionization this shot would have put into its
-	// shield goes into its health instead.
+	// An enemy owns its shield through UShieldFieldComponent, and that is the only thing ionization
+	// talks to now: it strips the pool and hands the shot's polarity to the field.
 	//
-	// This is the SECOND place that has to know: the laser has its own per-second ionization path and
-	// every other weapon comes through here per hit. Hooking only the beam meant the mechanic worked
-	// for exactly one weapon nobody was holding.
-	if (AShooterNPC* OpenedNPC = Cast<AShooterNPC>(Target))
+	// The Wizard's window used to be handled right here - ionization redirected into health, in a
+	// second place that had to know about it. It is NOT any more: the window means damage ignores
+	// the field (AShooterNPC::TakeDamage), one rule that covers the team's gunfire, the beam and
+	// this shot, instead of a redirect per ionization path.
+	// @see UShieldFieldStatics::IsShieldUp
+	if (UShieldFieldComponent* const TargetShield = UShieldFieldStatics::GetShieldField(Target))
 	{
-		if (OpenedNPC->IsShieldBypassed())
-		{
-			if (HasAuthority())
-			{
-				// Magnitude: ionization is signed, and a negative rate multiplied through produces
-				// negative damage, which TakeDamage silently discards.
-				const float RedirectedDamage = FMath::Abs(ChargePerHit)
-					* OpenedNPC->ShieldBypassDamageMultiplier;
-
-				FPointDamageEvent DamageEvent;
-				DamageEvent.DamageTypeClass = UDamageType::StaticClass();
-				OpenedNPC->TakeDamage(RedirectedDamage, DamageEvent, GetInstigatorController(), this);
-
-				UE_LOG(LogTemp, Verbose, TEXT("[ABILITY_DEBUG] Redirected %.1f ionization into health on %s"),
-					RedirectedDamage, *OpenedNPC->GetName());
-			}
-			return true;
-		}
+		TargetShield->ApplyIonization(ChargePerHit, FMath::Abs(ChargePerHit), PawnOwner);
+		return true;
 	}
 
-	// Try UEMFVelocityModifier first (for characters/NPCs)
+	// Everyone else keeps the charge paths that predate the field, read in the same order
+	// IsTargetShieldDown reads them, so the thing that charges a target and the gate that opens when
+	// it is full still agree on the numbers.
 	if (UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
 		// Use GetCharge() to read actual FieldComponent charge (not BaseCharge which may be stale
 		// after melee's SetCharge() calls that bypass BaseCharge tracking)
 		const float CurrentCharge = TargetModifier->GetCharge();
 
-		// The NPC's own ceiling, the same one IsAtMaxCharge() and the grab gate read.
 		const float Cap = TargetModifier->MaxBaseCharge;
 		if (IsIonizationCapReached(CurrentCharge, Cap, ChargePerHit))
 		{

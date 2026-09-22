@@ -9,6 +9,7 @@
 #include "Variant_Shooter/Pickups/HealthPickup.h"
 #include "AI/Coordination/ThreatComponent.h"
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
@@ -241,27 +242,38 @@ void UAbilityHandler_TankPassive::OnOwnerDamaged(float Damage, AActor* DamageCau
 		return;
 	}
 
-	// Shield is the charge magnitude, exactly as the Tank's active reads it: what the team has
-	// already stripped off this enemy is what makes hitting the Tank expensive. An untouched enemy
-	// pays nothing, which is what stops this from being a flat damage aura.
-	const UEMFVelocityModifier* Modifier = Attacker->FindComponentByClass<UEMFVelocityModifier>();
-	if (!Modifier)
+	// How much the team has already stripped off this enemy is what makes hitting the Tank
+	// expensive. An untouched enemy pays nothing, which is what stops this from being a flat damage
+	// aura. Enemies answer through their shield field (the same door the weapon's gate asks); a
+	// charge carrier without one - a player, today - keeps the legacy reading against its own cap.
+	const UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(Attacker);
+	float Scale = 0.0f;
+	float Stripped = 0.0f;
+	float MaxStrippable = 0.0f;
+	if (Shield)
+	{
+		MaxStrippable = Shield->GetMaxShield();
+		Stripped = MaxStrippable * Shield->GetStrippedFraction();
+		Scale = Shield->GetStrippedFraction();
+	}
+	else if (const UEMFVelocityModifier* Modifier = Attacker->FindComponentByClass<UEMFVelocityModifier>())
+	{
+		// Normalised against this enemy's own cap rather than a number kept here: a constant in the
+		// ability would quietly disagree with every target tuned away from whatever it was set to.
+		if (Modifier->MaxBaseCharge > KINDA_SMALL_NUMBER)
+		{
+			MaxStrippable = Modifier->MaxBaseCharge;
+			Stripped = FMath::Abs(Modifier->GetCharge());
+			Scale = FMath::Clamp(Stripped / MaxStrippable, 0.0f, 1.0f);
+		}
+	}
+
+	if (Scale <= KINDA_SMALL_NUMBER)
 	{
 		return;
 	}
 
-	// Normalised against this enemy's own cap rather than a number kept here. MaxBaseCharge is where
-	// the shield reads empty (IsAtMaxCharge), it is authored per enemy, and a constant in the ability
-	// would quietly disagree with every enemy tuned away from whatever it was set to.
-	const float MaxStrippable = Modifier->MaxBaseCharge;
-	if (MaxStrippable <= KINDA_SMALL_NUMBER)
-	{
-		return;
-	}
-
-	const float Stripped = FMath::Abs(Modifier->GetCharge());
 	const FTankPassiveLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
-	const float Scale = FMath::Clamp(Stripped / MaxStrippable, 0.0f, 1.0f);
 
 	const float Reflected = FMath::Min(Damage * Stats.ReflectFractionAtFullStrip * Scale, Stats.MaxReflectPerHit);
 	if (Reflected <= KINDA_SMALL_NUMBER)

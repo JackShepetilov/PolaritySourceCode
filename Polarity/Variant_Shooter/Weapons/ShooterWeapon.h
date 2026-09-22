@@ -254,14 +254,14 @@ protected:
 
 	/** This weapon only hurts a target whose shield is already down.
 	 *
-	 *  "Shield down" is the state the rest of the game already means by it: the target's charge has
-	 *  reached its own ceiling (UEMFVelocityModifier::IsAtMaxCharge), which is the same instant the
-	 *  enemy becomes grabbable. So a weapon with this on is a finisher: it charges the target like
-	 *  any other, and does nothing to its health until somebody has filled that meter.
+	 *  "Shield down" is the state the rest of the game already means by it: the target's shield
+	 *  field is empty (UShieldFieldStatics::IsShieldUp), which is the same instant the enemy becomes
+	 *  grabbable. So a weapon with this on is a finisher: it chews the target's shield pool like
+	 *  any other weapon does, and does nothing to its health until somebody has emptied it.
 	 *
 	 *  Everything except the damage still happens on a hit -- ionization, knockback, the hit marker
-	 *  for an ionizing hit -- so the shot reads as landing rather than as passing through. A target
-	 *  with no charge at all (no EMF component) has no shield to break and takes damage normally.
+	 *  -- so the shot reads as landing rather than as passing through. A target with no shield field
+	 *  (a player, a prop) has no shield to break and takes damage normally.
 	 *
 	 *  NOT under an EditCondition and NOT in the Hitscan category, both of which it used to be: the
 	 *  melee weapon honours this too now, and a hitscan-gated checkbox on a sword is greyed out

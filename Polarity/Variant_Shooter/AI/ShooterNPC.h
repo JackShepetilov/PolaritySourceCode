@@ -57,7 +57,6 @@ class USoundBase;
 class UMaterialInterface;
 class UEMFVelocityModifier;
 class UEMF_FieldComponent;
-class UShieldFieldComponent;
 class UNiagaraSystem;
 class UCoverFinderComponent;
 class ATurretBuildable;
@@ -311,12 +310,6 @@ protected:
 	/** EMF field component for electromagnetic charge storage */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
 	TObjectPtr<UEMF_FieldComponent> FieldComponent;
-
-	/** This enemy's shield. Owns the answer to "does it still have one", which the weapon's damage
-	 *  gate, the AI's push/peek condition, the impact-surface choice and the HUD all ask through
-	 *  UShieldFieldStatics. See ShieldFieldComponent.h for why it is a component of its own. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
-	TObjectPtr<UShieldFieldComponent> ShieldField;
 
 	/** Name of the collision profile to use during ragdoll death */
 	UPROPERTY(EditAnywhere, Category = "Damage")

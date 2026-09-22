@@ -48,9 +48,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment")
 	TSubclassOf<AShooterWeapon> WeaponClass;
 
-	/** Overrides the charge ceiling on this NPC's UEMFVelocityModifier when above zero, which is
-	 *  the same thing as how much shield it has: charge fills up to the cap and the shield is gone
-	 *  when it gets there, so a bigger cap is a longer fight. Zero leaves the component alone. */
+	/** This class's shield, as a number of points: it sizes the enemy's shield field (the pool of
+	 *  durability incoming damage chews through) and, kept equal to it, the polarity meter's
+	 *  ceiling, so a fully stripped field leaves the meter exactly where it used to end up. Zero
+	 *  leaves both components at their defaults. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment", meta = (ClampMin = "0.0"))
 	float ShieldCharge = 0.0f;
 
