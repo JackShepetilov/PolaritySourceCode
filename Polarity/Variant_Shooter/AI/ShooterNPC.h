@@ -398,8 +398,19 @@ protected:
 	/** Counts down to the next threat scan. */
 	float TurretScanTimer = 0.0f;
 
-	/** Phase-local countdown (peek / hide). */
+	/** Phase-local countdown (peek / hide). During Peeking this counts the WALK to the corner until
+	 *  the NPC gets there, and only then becomes the exposed window. @see bTurretPeekArrived */
 	float TurretCoverTimer = 0.0f;
+
+	/** True once the current peek has actually reached the peek point.
+	 *
+	 *  The exposed window has to be time spent AT the corner, not time spent walking to it. Measured
+	 *  2026-09-22: of 84 peeks only 20 ever arrived, because TurretCoverPeekTime (0.7s) started
+	 *  counting the moment the NPC left cover and a crouched walk to P ate 0.57s of it. The other 64
+	 *  stepped out, ran out of clock halfway and turned around without firing a shot - which is
+	 *  exactly the "pacing in and out of cover without shooting" the machine looked like from
+	 *  outside. Arrivals that did make it had 0.13s to shoot in. */
+	bool bTurretPeekArrived = false;
 
 	/** Counts down to the next cover move re-issue. */
 	float TurretMoveReissueTimer = 0.0f;
@@ -414,9 +425,16 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
 	float TurretCoverScanInterval = 0.5f;
 
-	/** How long one peek out of cover lasts before ducking back behind it. */
+	/** How long one peek out of cover lasts before ducking back behind it. Counted from ARRIVAL at
+	 *  the peek point, so it is the time the NPC is actually exposed and shooting. */
 	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
-	float TurretCoverPeekTime = 0.7f;
+	float TurretCoverPeekTime = 1.2f;
+
+	/** How long the NPC is allowed to spend WALKING to the peek point before giving up on that
+	 *  corner. Separate from the window above so a peek point that turns out to be unreachable costs
+	 *  one approach rather than hanging the machine out in the open for ever. */
+	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.2", Units = "s"))
+	float TurretCoverPeekApproachTime = 2.5f;
 
 	/** How long the NPC stays behind cover between peeks. */
 	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
@@ -467,6 +485,30 @@ protected:
 	/** Cone variance to apply while aiming */
 	UPROPERTY(EditAnywhere, Category = "Aim")
 	float AimVarianceHalfAngle = 10.0f;
+
+	/** How far off the line to its target an NPC may be pointing and still pull the trigger, in
+	 *  degrees.
+	 *
+	 *  An NPC turns through bUseControllerDesiredRotation, which is RATE LIMITED, so for a good
+	 *  fraction of a second after it acquires a target or steps out of cover it is still pointing
+	 *  where it was pointing before. Nothing used to stop it firing during that turn, and
+	 *  GetWeaponTargetLocation hands the weapon the first thing its ray touches - which, from a body
+	 *  that has not come round yet at a corner it is peeking past, is the corner. So the shot was
+	 *  aimed at the wall on purpose, by a chain that was working exactly as written.
+	 *
+	 *  Worst on a grenadier: one rocket per magazine means the wasted shot is the ENTIRE peek, and
+	 *  zeroing every spread setting on the gun cannot help, because the spread was never the reason.
+	 *
+	 *  The turret in this project already refuses to fire off-aim (ATurretBuildable checks its barrel
+	 *  direction before each shot); this is the same rule for the people. Generous on purpose - it
+	 *  means "roughly pointing at it", not marksmanship. Zero disables the gate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat", meta = (ClampMin = "0.0", ClampMax = "180.0"))
+	float MaxFireAimErrorDegrees = 25.0f;
+
+	/** Whether this NPC is pointing close enough to its current target to be allowed to shoot.
+	 *  @see MaxFireAimErrorDegrees */
+	UFUNCTION(BlueprintPure, Category = "AI|Combat")
+	bool IsAimedAtTarget() const;
 
 	// ==================== Burst Fire & Coordination ====================
 

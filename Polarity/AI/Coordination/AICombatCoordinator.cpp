@@ -323,6 +323,22 @@ bool AAICombatCoordinator::RequestAttackPermission(APawn* Requester)
 
 	if (Data->bHasAttackPermission) return true;
 
+	// A building is not a person, and the token queue below is a courtesy owed to people. Its whole
+	// job is that a PLAYER is never shot at by the entire room at once, which is a readability rule
+	// about somebody who has to see it coming and react. A turret or a siege core has nothing to
+	// react with, and a group formed around one hands out FTokenPool::MaxTokens (2) permissions:
+	// rationing a twenty-strong wave down to two shooters would leave the rest standing at the
+	// objective with their weapons down, which is exactly what a siege must never look like.
+	//
+	// Range and line of sight above still apply, so this is not "always yes" - it is "no queue".
+	if (const AActor* const ResolvedTarget = ResolveTargetFor(Requester))
+	{
+		if (!ResolvedTarget->IsA<APawn>())
+		{
+			return true;
+		}
+	}
+
 	// Try token acquisition
 	EAttackTokenType Type = DetermineTokenType(Requester);
 	if (RequestAttackToken(Requester, Type))
@@ -847,6 +863,36 @@ void AAICombatCoordinator::UpdateNPCTargets(float DeltaTime)
 			Data.TargetSwitchPressure = 0.0f;
 			ApplyDistraction(NPC, Decoy, Remaining);
 			continue;
+		}
+
+		// The controller can resolve to something this scan can never produce on its own: a turret
+		// pinning the NPC (ETargetIntentSource::Turret, written by AShooterNPC::TickTurretCover) or the
+		// siege core it falls back to marching on when it cannot see a player (a plain fallback inside
+		// AShooterAIController::ResolveTargetIntents, not even stored as an intent, so
+		// GetTargetIntent cannot see it either). The scan below only ever considers PAWNS
+		// (CoopPlayers::GetAll plus RegisteredNPCs, see above this loop), so neither could ever win it,
+		// and Data.Target kept naming whatever player this NPC saw last - engagement range and
+		// line-of-sight below were then measured against THAT player's position while the NPC stood
+		// next to the turret or core it was actually fighting.
+		//
+		// Trusting the controller whenever its answer is not a pawn covers both today's cases and
+		// whatever non-pawn objective shows up next, without adding one more special case here per
+		// type. It still yields to the decoy branch above (equivalent to Distraction outranking
+		// Turret), because a decoy is meant to pull an NPC off a turret or core it is fighting.
+		if (AShooterAIController* const ShooterAI = Cast<AShooterAIController>(NPC->GetController()))
+		{
+			AActor* const ControllerTarget = ShooterAI->GetCurrentTarget();
+			if (ControllerTarget && !ControllerTarget->IsA<APawn>())
+			{
+				if (Data.Target.Get() != ControllerTarget)
+				{
+					UE_LOG(LogTemp, Verbose, TEXT("[COOP_DEBUG] %s target -> objective %s (was %s)"),
+						*NPC->GetName(), *GetNameSafe(ControllerTarget), *GetNameSafe(Data.Target.Get()));
+				}
+				Data.Target = ControllerTarget;
+				Data.TargetSwitchPressure = 0.0f;
+				continue;
+			}
 		}
 
 		// Was fighting a decoy that has just stopped being one — expired, or shot to pieces. Nothing

@@ -296,7 +296,29 @@ float UCoverFinderComponent::EvaluateCurrentExposure() const
 
 bool UCoverFinderComponent::IsCoverStillGood() const
 {
-	return CurrentCover.bValid && EvaluateCurrentExposure() <= CoverLostExposureThreshold;
+	if (!CurrentCover.bValid)
+	{
+		return false;
+	}
+
+	// Judged against what this spot was worth WHEN IT WAS CHOSEN, not against an absolute ideal.
+	//
+	// The search never refuses a bad map: it ranks the candidates and takes the best one that has a
+	// peek, however exposed that winner is. On open ground covered by a turret every candidate is
+	// seen, so the winner legitimately scores above CoverLostExposureThreshold - and comparing it
+	// against that threshold made this return false for the very spot the search had just handed
+	// over. The caller reads that as "cover lost" and goes back to searching, the search returns the
+	// same spot, and the NPC bounces on the recheck cadence for ever.
+	//
+	// Measured 2026-09-22 in a live siege: 143 Seeking -> ToHide transitions for 12 engagements, at
+	// exactly the 0.5s recheck interval, with an identical H and P every time. From outside it looks
+	// like an enemy pacing in and out of a corner under fire without ever shooting back.
+	//
+	// So the question this answers is "has it got WORSE" - which is the thing actually worth
+	// relocating over, because that means somebody has walked around and opened the corner up. A
+	// spot that is merely as exposed as it was when nothing better existed stays usable, and the NPC
+	// fights from it instead of freezing.
+	return EvaluateCurrentExposure() <= FMath::Max(CoverLostExposureThreshold, CurrentCover.Exposure);
 }
 
 float UCoverFinderComponent::GetRequeryCooldownRemaining() const

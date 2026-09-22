@@ -362,6 +362,17 @@ float ABuildableActor::TakeDamage(float Damage, const FDamageEvent& DamageEvent,
 
 	AActor* const Source = PolarityTeams::ResolveDamageSource(DamageCauser, EventInstigator);
 	const bool bSameSide = Source && PolarityTeams::GetTeam(Source) == TeamByte;
+
+	// [BUILD_DEBUG] "the turret takes no damage at all" has two completely different causes and no
+	// way to tell them apart from outside: either nothing ever reaches this function (the shots miss,
+	// or the collision never registers), or it is reached and refused here. The absence of this line
+	// is the first answer; the line itself, with both team numbers on it, is the second.
+	UE_LOG(LogTemp, Log,
+		TEXT("[BUILD_DEBUG] %s TakeDamage %.1f from %s (causer %s) | sourceTeam=%d myTeam=%d sameSide=%d type=%s"),
+		*GetName(), Damage, *GetNameSafe(Source), *GetNameSafe(DamageCauser),
+		Source ? PolarityTeams::GetTeam(Source) : 255, TeamByte, bSameSide,
+		*GetNameSafe(DamageEvent.DamageTypeClass));
+
 	if (bSameSide)
 	{
 		// No friendly fire on a building, the same rule the NPCs keep among themselves. A friendly
