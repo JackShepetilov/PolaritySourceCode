@@ -42,6 +42,7 @@
 #include "ShooterWeaponHolder.h"
 #include "EMF_FieldComponent.h"
 #include "EMFVelocityModifier.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Components/AudioComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -1383,6 +1384,19 @@ bool AShooterWeapon::IsTargetShieldDown(AActor* Target) const
 	// Same components, same order and same ceilings as ApplyHitscanIonization uses to FILL the
 	// meter, so the thing that charges a target and the gate that opens when it is full can never
 	// be reading two different numbers.
+	//
+	// An enemy owns its shield through UShieldFieldComponent, and that is the same door the AI's
+	// push/peek condition and the HUD go through, so "may I hurt it" and "should it stop pushing"
+	// cannot drift apart again. The component derives its answer from the charge meter today (see
+	// its header), which is the number this function read here before - what changed is who owns
+	// the answer, not what it is. @see UShieldFieldStatics::IsShieldUp
+	if (const UShieldFieldComponent* const TargetShield = UShieldFieldStatics::GetShieldField(Target))
+	{
+		return TargetShield->IsBroken();
+	}
+
+	// Everyone else keeps the rule that predates the field, in the order it was written: a charge
+	// carrier that is not an enemy (a player, today) reads broken at its own ceiling...
 	if (const UEMFVelocityModifier* TargetModifier = Target->FindComponentByClass<UEMFVelocityModifier>())
 	{
 		return TargetModifier->IsAtMaxCharge();

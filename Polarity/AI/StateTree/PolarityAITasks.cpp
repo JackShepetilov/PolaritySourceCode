@@ -8,6 +8,7 @@
 #include "../Components/CoverFinderComponent.h"
 #include "../Components/AIAccuracyComponent.h"
 #include "../../EMFVelocityModifier.h"
+#include "../../Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "AI/PolarityTeams.h"
 #include "../../Variant_Shooter/AI/ShooterNPC.h"
 #include "../../Variant_Shooter/AI/ShooterAIController.h"
@@ -2572,31 +2573,24 @@ bool FSTCondition_ShooterShieldUp::TestCondition(FStateTreeExecutionContext& Con
 {
 	const FInstanceDataType& Data = Context.GetInstanceData(*this);
 
-	// No charge component means the mechanic never applied, and such an NPC must keep pushing, so it
+	// No shield component means the mechanic never applied, and such an NPC must keep pushing, so it
 	// reads as shielded here. Same reasoning as the comment on the pair in the header.
 	if (!IsValid(Data.NPC))
 	{
 		return true;
 	}
 
-	const UEMFVelocityModifier* const Modifier = Data.NPC->FindComponentByClass<UEMFVelocityModifier>();
-	if (!Modifier)
-	{
-		return true;
-	}
-
-	const float Cap = Modifier->MaxBaseCharge;
-	if (Cap <= KINDA_SMALL_NUMBER)
+	const UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(Data.NPC);
+	if (!Shield)
 	{
 		return true;
 	}
 
 	// Deliberately NOT !IsAtMaxCharge(): see the header. The ceiling is where the shield BREAKS; it
-	// counts as restored only after the recovery curve has taken the charge back down to a fraction
-	// of that ceiling. Magnitude, so either polarity reads the same way, exactly as IsAtMaxCharge does.
-	const float Charge = FMath::Abs(Modifier->GetCharge());
-	const float Threshold = Cap * RecoveredFraction;
-	const bool bUp = Charge <= Threshold;
+	// counts as restored only after the meter has come back down to a fraction of that ceiling.
+	// The threshold itself is unchanged - what changed is that this arithmetic left the predicate
+	// and now lives on the component, which is the same one the weapon's damage gate asks.
+	const bool bUp = Shield->GetStrippedFraction() <= RecoveredFraction;
 
 	// Deliberately NOT logged. A transition condition is evaluated every tick of every NPC, so a log
 	// here produced tens of lines per second per enemy and buried every other diagnostic in the

@@ -831,19 +831,25 @@ private:
 // ============================================================================
 // Shield state - the Push/Peek gate.
 //
-// "Shield" on an enemy is the charge meter, not a prop: ionization FILLS it, and the shield is down
-// once the charge sits at its own ceiling. The canonical answer already exists as
-// AShooterWeapon::IsTargetShieldDown, which reads UEMFVelocityModifier::IsAtMaxCharge, and these
-// conditions deliberately go through the same component so that "the weapon may hurt it" and "it
-// should stop pushing" can never disagree.
+// "Shield" on an enemy is a meter that ionization FILLS, and the shield is down once that meter sits
+// at its own ceiling. Both the weapon's damage gate and these conditions now go through
+// UShieldFieldComponent (via UShieldFieldStatics::GetShieldField) instead of each reading a charge
+// of their own, so "the weapon may hurt it" and "it should stop pushing" cannot disagree by
+// construction. @see ShieldFieldComponent.h and Docs/Shield_Field_Rework_Plan_2026-09-22.md
+//
+// The two still ask it DIFFERENTLY, and that is deliberate: the weapon asks "is the shield up" (the
+// ceiling, exactly), while these ask "has it recovered" - a FRACTION of the ceiling, because the
+// ceiling is where the shield BREAKS and a meter that has come back down to RecoveredFraction of it
+// counts as restored. That threshold is the whole reason ShieldUp is not simply !ShieldDown.
 //
 // Two structs rather than one with an invert flag, because that is how the knockback pair next door
 // is already shaped and a tree reads better with the intent spelled out.
 //
-// The magnitude is what matters, not the sign: charge runs both ways and either extreme is a broken
-// shield. IsAtMaxCharge already compares FMath::Abs(GetCharge()), so nothing here re-derives it.
+// The magnitude is what matters, not the sign: the meter runs both ways and either extreme is a
+// broken shield. The component's GetStrippedFraction compares magnitudes, so nothing here
+// re-derives it.
 //
-// An enemy carrying no charge component at all answers NOT down, i.e. it keeps pushing. This is on
+// An enemy carrying no shield component at all answers NOT down, i.e. it keeps pushing. This is on
 // purpose and it is the one place these differ from the weapon's gate: the weapon asks "may I hurt
 // this", and a chargeless target is freely hurtable; the tree asks "has my shield broken", and an
 // enemy that never had the mechanic has not lost anything.

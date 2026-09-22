@@ -32,7 +32,7 @@
 #include "EMFVelocityModifier.h"
 #include "EnemyCombatProfile.h"
 #include "EMF_FieldComponent.h"
-#include "Kismet/GameplayStatics.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
 #include "Curves/CurveFloat.h"
@@ -144,6 +144,18 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 		// NPCs don't react to other NPCs' EM forces
 		EMFVelocityModifier->NPCForceMultiplier = 0.0f;
 	}
+
+	// The shield, as a component of its own.
+	//
+	// It owns the answer to "does this enemy still have a shield", which the weapon's damage gate,
+	// the AI's push/peek condition, the impact-surface choice and the HUD all ask through
+	// UShieldFieldStatics - one door instead of each of them reading a charge for itself, which is
+	// how "may I hurt it" and "should it stop pushing" were able to drift apart.
+	//
+	// Today it derives that answer from the charge meter, so this changes no behaviour; the pool of
+	// real shield HP goes in behind the same door in Phase 1 of the rework.
+	// @see ShieldFieldComponent.h
+	ShieldField = CreateDefaultSubobject<UShieldFieldComponent>(TEXT("ShieldField"));
 
 	// Walking into a physics prop should nudge it, not launch it across the level.
 	//
