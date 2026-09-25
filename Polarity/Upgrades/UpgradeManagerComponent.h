@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "GameplayTagContainer.h"
+#include "UpgradeDefinition.h"
 #include "UpgradeManagerComponent.generated.h"
 
 class UUpgradeDefinition;
@@ -17,6 +18,47 @@ class UInputAction;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, UUpgradeDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnUpgradeLeveledUp, UUpgradeDefinition*, Definition, int32, NewLevel);
+
+/** How a dispenser card changes the player's upgrades. */
+UENUM(BlueprintType)
+enum class EUpgradeOfferKind : uint8
+{
+	/** Not owned, its slot free (or a passive): granted at the card's level. */
+	New,
+	/** Already owned: raised by the card's levels. */
+	LevelUp,
+	/** Its slot holds another upgrade: that one goes, this one comes a level above it (Hades). */
+	Replace,
+};
+
+/** One card of a dispenser offer, decided entirely on the server. */
+USTRUCT(BlueprintType)
+struct FUpgradeOfferCard
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
+	TObjectPtr<UUpgradeDefinition> Definition = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
+	EUpgradeOfferKind Kind = EUpgradeOfferKind::New;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
+	EUpgradeRarity Rarity = EUpgradeRarity::Common;
+
+	/** Level before (0 for a new one) and after taking the card. */
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
+	int32 FromLevel = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
+	int32 ToLevel = 1;
+
+	/** Replace only: the upgrade that leaves its slot. */
+	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
+	TObjectPtr<UUpgradeDefinition> Replaces = nullptr;
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnUpgradeOfferChanged);
 
 /** Broadcast when the shared health-pickup pool count changes (used by HealthBlast, ChargedPunch, future upgrades) */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStoredHealthPickupsChanged, int32, CurrentCount, int32, MaxCount);
@@ -80,6 +122,52 @@ public:
 	/** Get the active component for a specific upgrade (nullptr if not owned) */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	UUpgradeComponent* GetUpgradeComponent(FGameplayTag UpgradeTag) const;
+
+	// ==================== Dispenser offers ====================
+	//
+	// Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md. The server builds the cards, the owner
+	// sees them (PendingOffer replicates to the owner only), picks one, and the server applies it on
+	// both machines. Nothing else in this component is networked: an upgrade's logic runs wherever
+	// it was granted, so a dispenser pick is granted on the server AND on the owning client.
+
+	/** The upgrade this player holds in Slot, or null. None (passives) is never "held". */
+	UUpgradeDefinition* GetOwnedInSlot(EUpgradeSlot Slot) const;
+
+	/** Every card this player could be offered right now, before rarity: in the pool, unlocked by
+	 *  MinWave, not maxed, not in conflict, and with room under LevelCap. Server. */
+	void GatherOfferCandidates(const class UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
+		TArray<FUpgradeOfferCard>& OutCandidates) const;
+
+	/** Draw one card per rarity from the candidates, weighted by OfferWeight, no repeats. Fewer
+	 *  cards when the pool runs short. Server. */
+	void BuildOffer(const class UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
+		const TArray<EUpgradeRarity>& Rarities, TArray<FUpgradeOfferCard>& OutOffer) const;
+
+	UFUNCTION(BlueprintPure, Category = "Upgrades|Offer")
+	bool HasPendingOffer() const { return PendingOffer.Num() > 0; }
+
+	UFUNCTION(BlueprintPure, Category = "Upgrades|Offer")
+	const TArray<FUpgradeOfferCard>& GetPendingOffer() const { return PendingOffer; }
+
+	/** Hand the cards to the player. Server. */
+	void SetPendingOffer(const TArray<FUpgradeOfferCard>& Offer);
+
+	/** Server time of the last spin, for the dispenser's cooldown. */
+	float GetLastSpinServerTime() const { return LastSpinServerTime; }
+	void MarkSpin(float ServerTime) { LastSpinServerTime = ServerTime; }
+
+	/** The owner picks card Index. Checked again on the server; the card is applied on both machines. */
+	UFUNCTION(Server, Reliable)
+	void Server_PickOffer(int32 Index);
+
+	/** Owner side of a pick: the same card, applied locally. Skipped where the server already did it. */
+	UFUNCTION(Client, Reliable)
+	void Client_ApplyOfferCard(const FUpgradeOfferCard& Card);
+
+	UPROPERTY(BlueprintAssignable, Category = "Upgrades|Offer")
+	FOnUpgradeOfferChanged OnOfferChanged;
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	// ==================== Persistence ====================
 
@@ -215,6 +303,18 @@ private:
 	/** Map of UpgradeTag -> active upgrade component */
 	UPROPERTY()
 	TMap<FGameplayTag, TObjectPtr<UUpgradeComponent>> ActiveUpgrades;
+
+	/** The cards waiting for this player's pick. Owner only. */
+	UPROPERTY(ReplicatedUsing = OnRep_PendingOffer)
+	TArray<FUpgradeOfferCard> PendingOffer;
+
+	UFUNCTION()
+	void OnRep_PendingOffer();
+
+	/** Remove the replaced upgrade, then grant or raise the card's upgrade to its ToLevel. */
+	bool ApplyOfferCard(const FUpgradeOfferCard& Card);
+
+	float LastSpinServerTime = -1000.0f;
 
 	/** Shared pool counter — see GetStoredHealthPickups. */
 	UPROPERTY()

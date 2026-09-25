@@ -7,10 +7,216 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "Upgrades/Upgrade_Bandolier.h"
+#include "Net/UnrealNetwork.h"
 
 UUpgradeManagerComponent::UUpgradeManagerComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+
+	// For the dispenser offer only: its cards replicate to the owner and its pick is an RPC.
+	SetIsReplicatedByDefault(true);
+}
+
+void UUpgradeManagerComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME_CONDITION(UUpgradeManagerComponent, PendingOffer, COND_OwnerOnly);
+}
+
+// ==================== Dispenser offers ====================
+
+UUpgradeDefinition* UUpgradeManagerComponent::GetOwnedInSlot(EUpgradeSlot Slot) const
+{
+	if (Slot == EUpgradeSlot::None)
+	{
+		return nullptr;
+	}
+	for (const TPair<FGameplayTag, TObjectPtr<UUpgradeComponent>>& Pair : ActiveUpgrades)
+	{
+		UUpgradeDefinition* const Def = Pair.Value ? Pair.Value->UpgradeDefinition.Get() : nullptr;
+		if (Def && Def->Slot == Slot)
+		{
+			return Def;
+		}
+	}
+	return nullptr;
+}
+
+void UUpgradeManagerComponent::GatherOfferCandidates(const UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
+	TArray<FUpgradeOfferCard>& OutCandidates) const
+{
+	OutCandidates.Reset();
+	if (!Registry)
+	{
+		return;
+	}
+	for (UUpgradeDefinition* const Def : Registry->AllUpgrades)
+	{
+		if (!Def || !Def->bInDispenserPool || !Def->UpgradeTag.IsValid() || !Def->ComponentClass || Def->MinWave > Wave)
+		{
+			continue;
+		}
+
+		// The level this upgrade may reach right now: its own ceiling, and the wave's.
+		const int32 Cap = FMath::Min(Def->MaxLevel, FMath::Max(1, LevelCap));
+		const int32 Owned = GetUpgradeLevel(Def->UpgradeTag);
+
+		FUpgradeOfferCard Card;
+		Card.Definition = Def;
+		if (Owned > 0)
+		{
+			if (Owned >= Cap)
+			{
+				continue;
+			}
+			Card.Kind = EUpgradeOfferKind::LevelUp;
+			Card.FromLevel = Owned;
+		}
+		else
+		{
+			if (OwnsConflicting(Def))
+			{
+				continue;
+			}
+			if (UUpgradeDefinition* const Holder = GetOwnedInSlot(Def->Slot))
+			{
+				Card.Kind = EUpgradeOfferKind::Replace;
+				Card.Replaces = Holder;
+			}
+		}
+		OutCandidates.Add(Card);
+	}
+}
+
+void UUpgradeManagerComponent::BuildOffer(const UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
+	const TArray<EUpgradeRarity>& Rarities, TArray<FUpgradeOfferCard>& OutOffer) const
+{
+	OutOffer.Reset();
+	TArray<FUpgradeOfferCard> Candidates;
+	GatherOfferCandidates(Registry, Wave, LevelCap, Candidates);
+
+	for (const EUpgradeRarity Rarity : Rarities)
+	{
+		if (Candidates.Num() == 0)
+		{
+			break;
+		}
+
+		// Weighted draw, and the drawn one leaves the bag: no upgrade twice in one offer.
+		float Total = 0.0f;
+		for (const FUpgradeOfferCard& Candidate : Candidates)
+		{
+			Total += FMath::Max(0.01f, Candidate.Definition->OfferWeight);
+		}
+		float Pick = FMath::FRand() * Total;
+		int32 Chosen = Candidates.Num() - 1;
+		for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+		{
+			Pick -= FMath::Max(0.01f, Candidates[Index].Definition->OfferWeight);
+			if (Pick <= 0.0f)
+			{
+				Chosen = Index;
+				break;
+			}
+		}
+		FUpgradeOfferCard Card = Candidates[Chosen];
+		Candidates.RemoveAtSwap(Chosen);
+
+		// Rarity is levels: Common one, Rare two, Epic three, Legendary four, then clipped to what
+		// the upgrade and the wave allow. A replacement comes at least one above what it replaces.
+		Card.Rarity = Rarity;
+		const int32 Levels = static_cast<int32>(Rarity) + 1;
+		const int32 Cap = FMath::Min(Card.Definition->MaxLevel, FMath::Max(1, LevelCap));
+		switch (Card.Kind)
+		{
+		case EUpgradeOfferKind::LevelUp:
+			Card.ToLevel = FMath::Min(Cap, Card.FromLevel + Levels);
+			break;
+		case EUpgradeOfferKind::Replace:
+		{
+			const int32 ReplacedLevel = Card.Replaces ? GetUpgradeLevel(Card.Replaces->UpgradeTag) : 0;
+			Card.ToLevel = FMath::Min(Cap, FMath::Max(Levels, ReplacedLevel + 1));
+			break;
+		}
+		default:
+			Card.ToLevel = FMath::Min(Cap, Levels);
+			break;
+		}
+		OutOffer.Add(Card);
+	}
+}
+
+void UUpgradeManagerComponent::SetPendingOffer(const TArray<FUpgradeOfferCard>& Offer)
+{
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return;
+	}
+	PendingOffer = Offer;
+	OnOfferChanged.Broadcast();
+}
+
+void UUpgradeManagerComponent::OnRep_PendingOffer()
+{
+	OnOfferChanged.Broadcast();
+}
+
+void UUpgradeManagerComponent::Server_PickOffer_Implementation(int32 Index)
+{
+	if (!PendingOffer.IsValidIndex(Index))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s picked card %d of %d: no such card"), *GetNameSafe(GetOwner()), Index, PendingOffer.Num());
+		return;
+	}
+	const FUpgradeOfferCard Card = PendingOffer[Index];
+	PendingOffer.Reset();
+	OnOfferChanged.Broadcast();
+
+	const bool bApplied = ApplyOfferCard(Card);
+	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s took %s (kind %d, %s, Lv %d -> %d%s): %s"),
+		*GetNameSafe(GetOwner()), Card.Definition ? *Card.Definition->DisplayName.ToString() : TEXT("?"),
+		static_cast<int32>(Card.Kind), *UEnum::GetDisplayValueAsText(Card.Rarity).ToString(), Card.FromLevel, Card.ToLevel,
+		Card.Replaces ? *FString::Printf(TEXT(", replaces %s"), *Card.Replaces->DisplayName.ToString()) : TEXT(""),
+		bApplied ? TEXT("applied") : TEXT("FAILED"));
+
+	// The owner's copy of the upgrade. On a listen host the owner is this very machine and the
+	// server's grant above already is its copy.
+	const APawn* const Pawn = Cast<APawn>(GetOwner());
+	if (bApplied && Pawn && !Pawn->IsLocallyControlled())
+	{
+		Client_ApplyOfferCard(Card);
+	}
+}
+
+void UUpgradeManagerComponent::Client_ApplyOfferCard_Implementation(const FUpgradeOfferCard& Card)
+{
+	if (GetOwnerRole() == ROLE_Authority)
+	{
+		return;
+	}
+	ApplyOfferCard(Card);
+}
+
+bool UUpgradeManagerComponent::ApplyOfferCard(const FUpgradeOfferCard& Card)
+{
+	UUpgradeDefinition* const Def = Card.Definition;
+	if (!Def)
+	{
+		return false;
+	}
+	if (Card.Kind == EUpgradeOfferKind::Replace && Card.Replaces)
+	{
+		RemoveUpgrade(Card.Replaces->UpgradeTag);
+	}
+	// GrantUpgrade adds one level per call; the guard stops a definition that refuses to level.
+	for (int32 Guard = 0; GetUpgradeLevel(Def->UpgradeTag) < Card.ToLevel && Guard < 16; ++Guard)
+	{
+		if (!GrantUpgrade(Def))
+		{
+			break;
+		}
+	}
+	return GetUpgradeLevel(Def->UpgradeTag) > 0;
 }
 
 void UUpgradeManagerComponent::BeginPlay()

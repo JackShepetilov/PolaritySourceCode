@@ -913,9 +913,6 @@ protected:
 	/** Capture a dropped melee weapon (scripted pull, not physics-based) */
 	void CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon);
 
-	/** Capture a dropped ranged weapon (scripted pull, not physics-based) */
-	void CaptureDroppedRangedWeapon(ADroppedRangedWeapon* Weapon);
-
 	/** Capture an upgrade pickup (scripted pull, not physics-based) */
 	void CaptureUpgradePickup(AUpgradePickup* Pickup);
 

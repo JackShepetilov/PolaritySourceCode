@@ -46,6 +46,9 @@ class POLARITY_API UTurretFeedEntryWidget : public UUserWidget
 public:
 
 	void Setup(const AShooterWeapon* Weapon, int32 KeyNumber);
+
+	/** The same row for a dispenser card: name, a detail line where the ammo goes, an icon. */
+	void SetupCard(int32 KeyNumber, const FText& Name, const FText& Detail, UTexture2D* CardIcon);
 	void SetState(ETurretFeedEntryState State, const FText& Status);
 
 	/** The key was pressed and the turret had no vice for this gun. The plate flashes so the press
@@ -142,6 +145,10 @@ protected:
 
 	UFUNCTION()
 	void HandleTurretChanged(ABuildableActor* Buildable);
+
+	/** The local player's dispenser offer arrived or was taken: the rows switch between guns and cards. */
+	UFUNCTION()
+	void HandleOfferChanged();
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Turret Feed", meta = (DisplayName = "On Menu Shown"))
 	void BP_OnMenuShown(bool bShown);

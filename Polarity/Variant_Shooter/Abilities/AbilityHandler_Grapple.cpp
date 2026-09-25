@@ -3,9 +3,11 @@
 #include "AbilityHandler_Grapple.h"
 #include "AbilityDefinition_Grapple.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "ApexMovementComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "TimerManager.h"
 
 void UAbilityHandler_Grapple::OnActivate_Implementation()
@@ -27,6 +29,27 @@ void UAbilityHandler_Grapple::OnActivate_Implementation()
 		return;
 	}
 
+	// A press with the brackets on a dropped weapon fetches it instead of swinging. The owning client
+	// says which drop (it is the one that drew the brackets); the claim is checked here with a little
+	// slack, because the client measured its distance a round trip ago.
+	if (Def->bCanFetchWeapons)
+	{
+		static constexpr float FetchClaimMarginCm = 300.0f;
+		ADroppedRangedWeapon* Claim = Caster->ConsumeGrappleFetchClaim();
+		if (Claim && IsFetchable(Caster, Claim, Def, FetchClaimMarginCm))
+		{
+			StartFetch(Claim);
+			return;
+		}
+		if (Claim)
+		{
+			// Falls through to an ordinary throw: the player pressed the button, and a hook that
+			// went nowhere at all would read as a dropped input.
+			UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s claimed %s, but it is taken or out of reach - throwing normally"),
+				*Caster->GetName(), *Claim->GetName());
+		}
+	}
+
 	const FGrappleLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
 
 	// Anchored on world geometry, so it traces visibility rather than pawns: a hook that grabbed an
@@ -44,22 +67,23 @@ void UAbilityHandler_Grapple::OnActivate_Implementation()
 	Params.AddIgnoredActor(Caster);
 
 	FHitResult Hit;
-	if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Grapple: nothing to anchor to within %.0f"), Stats.Range);
-		NotifyAbilityCancelled();
-		return;
-	}
-
-	PendingAnchor = Hit.ImpactPoint;
+	const bool bHit = World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
+	PendingAnchor = bHit ? Hit.ImpactPoint : End;
 	const float Distance = FVector::Dist(Caster->GetActorLocation(), PendingAnchor);
+	const bool bCanAttach = bHit && Distance >= Stats.MinAnchorDistance;
 
-	// Too close is refused rather than clamped: at arm's length this stops being a line and becomes
-	// a free dash off any wall, which is not what the class is being given.
-	if (Distance < Stats.MinAnchorDistance)
+	// A miss still launches the hook all the way down the aim ray. The visual retracts on its own;
+	// only a valid hit is allowed to start the movement simulation.
+	// The aim ray starts at the camera, unlike the actor origin used by MinAnchorDistance.
+	// Use the ray distance for flight timing so a miss reaches exactly Range at the authored speed.
+	const float FlightDistance = FVector::Dist(Start, PendingAnchor);
+	const float TravelTime = FlightDistance / FMath::Max(Stats.HookTravelSpeed, 1.0f);
+	Caster->Multicast_PlayGrappleThrow(PendingAnchor, TravelTime, bCanAttach,
+		const_cast<UAbilityDefinition_Grapple*>(Def), nullptr);
+	if (!bCanAttach)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] Grapple: anchor only %.0f away, minimum is %.0f"),
-			Distance, Stats.MinAnchorDistance);
+		UE_LOG(LogTemp, Log, TEXT("[ABILITY_DEBUG] Grapple: fired but no valid anchor (hit=%d, distance=%.0f)"),
+			bHit ? 1 : 0, Distance);
 		NotifyAbilityCancelled();
 		return;
 	}
@@ -69,10 +93,6 @@ void UAbilityHandler_Grapple::OnActivate_Implementation()
 
 	// The hook flies before it bites. That delay is not decoration: it is why a long throw is a
 	// commitment, and it is the whole of what the cable is drawn along on every machine.
-	const float TravelTime = Stats.HookTravelSpeed > 0.0f ? Distance / Stats.HookTravelSpeed : 0.0f;
-	Caster->Multicast_PlayGrappleThrow(PendingAnchor, TravelTime,
-		const_cast<UAbilityDefinition_Grapple*>(Def));
-
 	if (TravelTime > 0.0f)
 	{
 		World->GetTimerManager().SetTimer(HookTravelTimer, this, &UAbilityHandler_Grapple::AttachLine,
@@ -140,13 +160,236 @@ void UAbilityHandler_Grapple::OnButtonReleased_Implementation()
 
 void UAbilityHandler_Grapple::OnCancelRequested_Implementation()
 {
+	if (bFetchInFlight)
+	{
+		AbortFetch();
+		return;
+	}
 	ReleaseLine(true);
 }
 
 void UAbilityHandler_Grapple::OnUnequip_Implementation()
 {
+	if (bFetchInFlight)
+	{
+		AbortFetch();
+		return;
+	}
 	// A line left attached to a character that no longer has the ability would pull forever.
 	ReleaseLine(true);
+}
+
+// ==================== Fetch ====================
+
+bool UAbilityHandler_Grapple::IsFetchable(const AShooterCharacter* Caster, const ADroppedRangedWeapon* Drop,
+	const UAbilityDefinition_Grapple* Def, float ExtraRadius)
+{
+	if (!Caster || !IsValid(Drop) || !Def || !Def->bCanFetchWeapons)
+	{
+		return false;
+	}
+
+	// Already on its way to somebody, already granted, or never meant to be picked up.
+	if (!Drop->bCanBeCaptured || !Drop->WeaponClass || Drop->IsBeingPulled() || Drop->IsPullComplete()
+		|| Drop->IsHidden())
+	{
+		return false;
+	}
+
+	const float Radius = Def->WeaponFetchRadius + FMath::Max(0.0f, ExtraRadius);
+	return FVector::DistSquared(Caster->GetActorLocation(), Drop->GetActorLocation()) <= FMath::Square(Radius);
+}
+
+ADroppedRangedWeapon* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCharacter* Caster,
+	const UAbilityDefinition_Grapple* Def)
+{
+	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
+	if (!World || !Def || !Def->bCanFetchWeapons)
+	{
+		return nullptr;
+	}
+
+	// Down the character's own aim ray, the same one the throw leaves along. @see GetAimRay
+	FVector Start, End;
+	Caster->GetAimRay(1.0f, Start, End);
+	const FVector AimDirection = (End - Start).GetSafeNormal();
+	if (AimDirection.IsNearlyZero())
+	{
+		return nullptr;
+	}
+	const float AimCos = FMath::Cos(FMath::DegreesToRadians(Def->WeaponFetchAimAngle));
+
+	struct FCandidate
+	{
+		ADroppedRangedWeapon* Drop;
+		FVector Center;
+		float Cos;
+	};
+	TArray<FCandidate, TInlineAllocator<8>> Candidates;
+
+	// Every drop in the world, which is a handful: the radius test inside IsFetchable throws almost
+	// all of them out before any vector maths.
+	for (TActorIterator<ADroppedRangedWeapon> It(World); It; ++It)
+	{
+		ADroppedRangedWeapon* Drop = *It;
+		if (!IsFetchable(Caster, Drop, Def))
+		{
+			continue;
+		}
+
+		// The middle of the mesh, not the actor origin: a rifle's pivot can sit at its butt, and the
+		// brackets and the hook both go where the player sees the gun.
+		FVector Center, Extent;
+		Drop->GetActorBounds(true, Center, Extent);
+		const FVector ToDrop = Center - Start;
+		const float Distance = ToDrop.Size();
+		if (Distance < 1.0f)
+		{
+			continue;
+		}
+
+		// Looked at = within the authored angle, OR the crosshair is on the drop's own silhouette.
+		// The second matters up close, where a gun at your feet is far wider than a few degrees.
+		const float Cos = FVector::DotProduct(AimDirection, ToDrop / Distance);
+		const float SizeCos = FMath::Cos(FMath::Atan2(Extent.Size(), Distance));
+		if (Cos < FMath::Min(AimCos, SizeCos))
+		{
+			continue;
+		}
+
+		Candidates.Add({ Drop, Center, Cos });
+	}
+
+	// Closest to the crosshair first, and only the winners pay for a trace.
+	Candidates.Sort([](const FCandidate& A, const FCandidate& B) { return A.Cos > B.Cos; });
+
+	for (const FCandidate& Candidate : Candidates)
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(GrappleFetchSight), false, Caster);
+		Params.AddIgnoredActor(Candidate.Drop);
+
+		FHitResult Hit;
+		if (!World->LineTraceSingleByChannel(Hit, Start, Candidate.Center, ECC_Visibility, Params))
+		{
+			return Candidate.Drop;
+		}
+	}
+
+	return nullptr;
+}
+
+void UAbilityHandler_Grapple::StartFetch(ADroppedRangedWeapon* Drop)
+{
+	UAbilityDefinition_Grapple* Def = Cast<UAbilityDefinition_Grapple>(GetDefinition());
+	AShooterCharacter* Caster = GetOwningCharacter();
+	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
+	if (!Def || !Caster || !World || !Drop)
+	{
+		NotifyAbilityCancelled();
+		return;
+	}
+
+	PendingFetch = Drop;
+	bFetchInFlight = true;
+
+	FVector Start, End;
+	Caster->GetAimRay(1.0f, Start, End);
+	FVector Anchor, Extent;
+	Drop->GetActorBounds(true, Anchor, Extent);
+
+	// The same flight speed as any throw, so a fetch reads as the same hook.
+	const FGrappleLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
+	const float TravelTime = FVector::Dist(Start, Anchor) / FMath::Max(Stats.HookTravelSpeed, 1.0f);
+
+	// bCanAttach false: nobody swings. The drop rides the line back instead. @see UpdateGrappleVisual
+	Caster->Multicast_PlayGrappleThrow(Anchor, TravelTime, false, Def, Drop);
+
+	// Both hands go on the line, exactly as for a swing. The new gun is drawn when it arrives.
+	// @see ADroppedRangedWeapon::CompletePull
+	Caster->BeginWeaponFetchStow(Def);
+
+	UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s threw at %s, %.0f cm, travel %.2fs"),
+		*Caster->GetName(), *Drop->GetName(), FVector::Dist(Caster->GetActorLocation(), Drop->GetActorLocation()),
+		TravelTime);
+
+	if (TravelTime > 0.0f)
+	{
+		World->GetTimerManager().SetTimer(FetchTravelTimer, this, &UAbilityHandler_Grapple::FinishFetch,
+			TravelTime, false);
+	}
+	else
+	{
+		FinishFetch();
+	}
+}
+
+void UAbilityHandler_Grapple::FinishFetch()
+{
+	if (!bFetchInFlight)
+	{
+		return;
+	}
+	bFetchInFlight = false;
+
+	ADroppedRangedWeapon* Drop = PendingFetch.Get();
+	PendingFetch.Reset();
+	AShooterCharacter* Caster = GetOwningCharacter();
+
+	// No radius test here, on purpose: the hook already reached it, and walking away while it flew
+	// should not snap the line. Only "somebody else got there first" is a refusal, and the pull's
+	// own gate answers that.
+	// The tag goes on before the pull starts: it decides where the pull flies (the line's origin, not
+	// the camera offset) and how the weapon is handed over (straight into the hand, no swap
+	// animation). Read by ADroppedRangedWeapon::UpdatePull and CompletePull under the same name.
+	static const FName GrappleFetchPullTag(TEXT("GrappleFetchPull"));
+	const bool bCanTake = Drop && Caster && !Drop->IsBeingPulled() && !Drop->IsPullComplete();
+	if (bCanTake)
+	{
+		Drop->Tags.AddUnique(GrappleFetchPullTag);
+	}
+
+	if (bCanTake && Drop->TryStartPullForClient(Caster))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s hooked %s, pulling it in"), *Caster->GetName(), *Drop->GetName());
+	}
+	else
+	{
+		// Refused after all: take our mark back off, so a later yank of the same drop behaves as a
+		// yank. Only when this call put it there -- a drop already flying to somebody else keeps theirs.
+		if (bCanTake)
+		{
+			Drop->Tags.Remove(GrappleFetchPullTag);
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s's hook arrived, but %s is gone or already taken"),
+			*GetNameSafe(Caster), *GetNameSafe(Drop));
+
+		// Nothing is coming back, so the weapon that was put away comes back out.
+		if (Caster)
+		{
+			Caster->FinishWeaponFetch(false);
+		}
+	}
+
+	// Cancelled rather than completed: completing is what starts the cooldown, and a fetch must not
+	// cost one. The hook is free again the moment it has let go of the weapon.
+	NotifyAbilityCancelled();
+}
+
+void UAbilityHandler_Grapple::AbortFetch()
+{
+	bFetchInFlight = false;
+	PendingFetch.Reset();
+
+	if (AShooterCharacter* Caster = GetOwningCharacter())
+	{
+		if (UWorld* World = Caster->GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(FetchTravelTimer);
+		}
+		Caster->FinishWeaponFetch(false);
+	}
+
+	NotifyAbilityCancelled();
 }
 
 void UAbilityHandler_Grapple::ReleaseLine(bool bCancelled)

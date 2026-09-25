@@ -16,7 +16,7 @@
 #include "AI/FactionContactMemory.h"
 #include "Coop/CoopPlayers.h"
 #include "AI/PolarityTeams.h"
-#include "Variant_Shooter/Siege/SiegeCoreBuildable.h"
+#include "Variant_Shooter/Buildables/BuildableActor.h"
 
 AShooterAIController::AShooterAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPolarityPathFollowingComponent>(TEXT("PathFollowingComponent")))
@@ -436,8 +436,8 @@ void AShooterAIController::RefreshSiegeCore()
 {
 	const UWorld* const World = GetWorld();
 	const APawn* const PossessedPawn = GetPawn();
-	ASiegeCoreBuildable* const Core = (World && PossessedPawn)
-		? ASiegeCoreBuildable::FindNearest(World, PossessedPawn->GetActorLocation())
+	ABuildableActor* const Core = (World && PossessedPawn)
+		? ABuildableActor::FindNearestCore(World, PossessedPawn->GetActorLocation())
 		: nullptr;
 	if (Core != SiegeCore.Get())
 	{

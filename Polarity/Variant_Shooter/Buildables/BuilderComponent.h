@@ -210,6 +210,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Builder")
 	ABuildableActor* GetFeedDispenserTarget() const;
 
+	/** The dispenser casino's receipt (bet, multiplier, payout), on the screen of the player who
+	 *  bet. A debug line for now; the server decides, this only shows it. */
+	UFUNCTION(Client, Reliable)
+	void Client_ShowCasinoReceipt(const FString& Receipt);
+
 	/** What the gun list measures its rows against: the standing turret while feeding, else the
 	 *  class defaults of the turret about to be placed (a fresh one, level 1, every vice empty).
 	 *  Null when no gun list is up. */

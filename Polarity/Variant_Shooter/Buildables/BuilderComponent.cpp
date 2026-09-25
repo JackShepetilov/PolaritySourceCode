@@ -21,6 +21,7 @@
 #include "TimerManager.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
+#include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
 UBuilderComponent::UBuilderComponent()
@@ -266,7 +267,8 @@ void UBuilderComponent::ToggleFeedMenu()
 
 			TArray<AShooterWeapon*> Weapons;
 			GetFeedWeapons(Weapons);
-			if (Weapons.Num() == 0)
+			const UUpgradeManagerComponent* const Upgrades = Character ? Character->GetUpgradeManager() : nullptr;
+			if (Weapons.Num() == 0 && !(Upgrades && Upgrades->HasPendingOffer()))
 			{
 				ShowFeedHint(3, TEXT("Dispenser: you own no gun to melt for fuel"));
 				UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] feed: %s owns no gun to melt"), *Character->GetName());
@@ -345,6 +347,19 @@ void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
 	// state questions the server will ask are asked here first, so a refusal is instant and visible.
 	if (ABuildableActor* const Dispenser = FeedDispenserTarget.Get())
 	{
+		// An offer waiting: the number key takes that card, and the menu closes on the pick.
+		AShooterCharacter* const Picker = GetCharacter();
+		if (UUpgradeManagerComponent* const Upgrades = Picker ? Picker->GetUpgradeManager() : nullptr;
+			Upgrades && Upgrades->HasPendingOffer())
+		{
+			if (Upgrades->GetPendingOffer().IsValidIndex(WeaponIndex))
+			{
+				Upgrades->Server_PickOffer(WeaponIndex);
+				CloseFeedMenu();
+			}
+			return;
+		}
+
 		TArray<AShooterWeapon*> Weapons;
 		GetFeedWeapons(Weapons);
 		if (!Weapons.IsValidIndex(WeaponIndex))
@@ -364,8 +379,9 @@ void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
 			return;
 		}
 
+		// The menu stays open: the offer replicates back in a moment and the rows turn into its cards.
+		// A refusal (cooldown, a pick pending) comes back as a receipt on the screen.
 		Server_FuelDispenser(Dispenser, Weapons[WeaponIndex]);
-		CloseFeedMenu();
 		return;
 	}
 
@@ -379,8 +395,11 @@ void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
 	AShooterWeapon* const Weapon = Weapons[WeaponIndex];
 	// The same question the server will ask, asked here first so a refusal is instant and local:
 	// the row flashes instead of a round trip ending in silence.
+	// A gun of a class already in a vice tops that vice up with its rounds and stays in the hands;
+	// with no free vice, a taken one of the right kind is swapped.
 	int32 ViceIndex = INDEX_NONE;
-	if (!Turret->FindViceFor(Weapon->GetClass(), ViceIndex))
+	if (Turret->FindTopUpViceFor(Weapon) == INDEX_NONE && !Turret->FindViceFor(Weapon->GetClass(), ViceIndex)
+		&& Turret->FindSwapViceFor(Weapon) == INDEX_NONE)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] feed: %s has no vice for %s"), *Turret->GetName(), *Weapon->GetClass()->GetName());
 		OnFeedRefused.Broadcast(WeaponIndex);
@@ -414,6 +433,17 @@ void UBuilderComponent::Server_FuelDispenser_Implementation(ABuildableActor* Dis
 	if (Character && Dispenser && !Dispenser->IsDestroyed())
 	{
 		Dispenser->AcceptWeaponForFuel(Character, Weapon);
+	}
+}
+
+void UBuilderComponent::Client_ShowCasinoReceipt_Implementation(const FString& Receipt)
+{
+	// Logged on the client too, so a client's own log holds its bets and not only the host's.
+	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s"), *Receipt);
+	if (GEngine)
+	{
+		// Key -1: every spin gets its own line, so a quick run of bets stays readable as a column.
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Emerald, Receipt);
 	}
 }
 

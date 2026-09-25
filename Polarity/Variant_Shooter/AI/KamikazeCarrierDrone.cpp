@@ -17,7 +17,9 @@
 #include "NiagaraFunctionLibrary.h"
 #include "ShooterCharacter.h"
 #include "TimerManager.h"
-#include "Variant_Shooter/Siege/SiegeCoreBuildable.h"
+#include "Variant_Shooter/Buildables/BuildableActor.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
+#include "Variant_Shooter/Siege/SiegeDirector.h"
 
 namespace
 {
@@ -45,8 +47,8 @@ namespace
 	/** A core that is gone, or that a player has come home to defend: back to the pawns. */
 	bool IsGoneCore(const AActor* Core)
 	{
-		const ASiegeCoreBuildable* const Building = Cast<ASiegeCoreBuildable>(Core);
-		return !IsValid(Building) || Building->IsDestroyed() || Building->IsDefended();
+		const ABuildableActor* const Building = Cast<ABuildableActor>(Core);
+		return !IsValid(Building) || !Building->IsSiegeCore() || Building->IsDestroyed() || Building->IsDefended();
 	}
 
 	FVector FeetOf(const APawn* Pawn)
@@ -228,7 +230,7 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 	{
 		TargetReacquireTimer = CarrierReacquireInterval;
 
-		AActor* const FreshCore = ASiegeCoreBuildable::FindUndefended(GetWorld(), GetActorLocation());
+		AActor* const FreshCore = ABuildableActor::FindUndefendedCore(GetWorld(), GetActorLocation());
 		if (FreshCore != Core)
 		{
 			SiegeCore = FreshCore;
@@ -307,32 +309,14 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 
 	// Drop only from position, with the target in sight, and only while the target is not already
 	// busy with enough drones: the carrier feeds the fight, it does not bury the player.
-	const bool bInPosition = FVector::DistSquared(GetActorLocation(), StandoffPoint) <= FMath::Square(StandoffTolerance);
-	if (!bInPosition || !CanDeploySalvo())
+	bInDropPosition = FVector::DistSquared(GetActorLocation(), StandoffPoint) <= FMath::Square(StandoffTolerance);
+
+	// On a siege director's clock the director says when; this frame only told it where we are.
+	if (IsPacedExternally())
 	{
 		return;
 	}
-
-	// The per-target cap is about not burying a player; a core is buried on purpose, the cooldown
-	// alone paces the dives.
-	if (!Core)
-	{
-		int32 DronesOnTarget = 0;
-		if (const UKamikazeStrikeSubsystem* const Queue = GetWorld()->GetSubsystem<UKamikazeStrikeSubsystem>())
-		{
-			DronesOnTarget = Queue->GetDronesOn(Target);
-		}
-		if (DronesOnTarget + DronesPerSalvo > MaxDronesPerTarget)
-		{
-			return;
-		}
-	}
-
-	FHitResult LOSHit;
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(CarrierLOS), false, this);
-	QueryParams.AddIgnoredActor(Core ? Core : static_cast<AActor*>(Target));
-	const FVector Seen = Feet + FVector(0.0f, 0.0f, 100.0f);
-	if (GetWorld()->LineTraceSingleByChannel(LOSHit, GetActorLocation(), Seen, ECC_Visibility, QueryParams))
+	if (!bInDropPosition || !CanDeploySalvo() || !HasDropWindow())
 	{
 		return;
 	}
@@ -340,13 +324,112 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 	DeploySalvo();
 }
 
-bool AKamikazeCarrierDrone::CanDeploySalvo() const
+bool AKamikazeCarrierDrone::HasDropWindow() const
 {
-	if (!HasAuthority() || IsDead() || (!bInfinitePayload && PayloadRemaining <= 0) || PendingInSalvo > 0 || !PayloadDroneClass)
+	UWorld* const World = GetWorld();
+	AActor* const Core = SiegeCore.Get();
+	APawn* const Target = StandoffTarget.Get();
+	if (!World || (!Core && IsGoneTarget(Target)))
 	{
 		return false;
 	}
-	return GetSalvoCooldownRemaining() <= 0.0f;
+
+	// The per-target cap is about not burying a player; a core is buried on purpose, the cooldown
+	// alone paces the dives.
+	if (!Core)
+	{
+		int32 DronesOnTarget = 0;
+		if (const UKamikazeStrikeSubsystem* const StrikeQueue = World->GetSubsystem<UKamikazeStrikeSubsystem>())
+		{
+			DronesOnTarget = StrikeQueue->GetDronesOn(Target);
+		}
+		if (DronesOnTarget + DronesPerSalvo > MaxDronesPerTarget)
+		{
+			return false;
+		}
+	}
+
+	const FVector Feet = Core ? Core->GetActorLocation() : FeetOf(Target);
+	FHitResult LOSHit;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(CarrierLOS), false, this);
+	QueryParams.AddIgnoredActor(Core ? Core : static_cast<AActor*>(Target));
+	const FVector Seen = Feet + FVector(0.0f, 0.0f, 100.0f);
+	return !World->LineTraceSingleByChannel(LOSHit, GetActorLocation(), Seen, ECC_Visibility, QueryParams);
+}
+
+// ==================== Siege pacing ====================
+
+void AKamikazeCarrierDrone::SetSalvoPacer(ASiegeDirector* Director)
+{
+	SalvoPacer = Director;
+}
+
+bool AKamikazeCarrierDrone::IsPacedExternally() const
+{
+	const ASiegeDirector* const Director = SalvoPacer.Get();
+	return bSelfDriven && Director && Director->IsPacingCarriers();
+}
+
+bool AKamikazeCarrierDrone::IsReadyForPacedSalvo(float MinInterval) const
+{
+	if (!bSelfDriven || !bInDropPosition || !CanDeploySalvoIgnoringCooldown())
+	{
+		return false;
+	}
+	const UWorld* const World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+	if (Now - LastSalvoTime < MinInterval)
+	{
+		return false;
+	}
+	// Last, it is the one with a trace in it.
+	return HasDropWindow();
+}
+
+bool AKamikazeCarrierDrone::DeployPacedSalvo(float MinInterval)
+{
+	return IsReadyForPacedSalvo(MinInterval) && StartSalvo();
+}
+
+void AKamikazeCarrierDrone::AddSiegePower(float Delta)
+{
+	if (!HasAuthority() || IsDead() || Delta <= 0.0f)
+	{
+		return;
+	}
+	SiegePower += Delta;
+
+	UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(this);
+	if (Shield)
+	{
+		if (BaseMaxShield < 0.0f)
+		{
+			BaseMaxShield = Shield->GetMaxShield();
+		}
+		// Grow the pool first, then fill the new part. A broken shield only gets the bigger pool:
+		// breaking one has to stick, or an overflow roll would undo the player's work mid-fight.
+		const bool bWasUp = Shield->IsShieldUp();
+		Shield->SetMaxShield(BaseMaxShield * SiegePower);
+		if (bWasUp)
+		{
+			Shield->AddShield(BaseMaxShield * Delta);
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] Carrier %s power +%.2f = %.2f, shield %.0f/%.0f%s"),
+		*GetName(), Delta, SiegePower,
+		Shield ? Shield->GetCurrentShield() : 0.0f, Shield ? Shield->GetMaxShield() : 0.0f,
+		Shield ? TEXT("") : TEXT(" (no shield field on this Blueprint: power only speeds the drops)"));
+}
+
+bool AKamikazeCarrierDrone::CanDeploySalvoIgnoringCooldown() const
+{
+	return HasAuthority() && !IsDead() && (bInfinitePayload || PayloadRemaining > 0) && PendingInSalvo <= 0 && PayloadDroneClass.Get() != nullptr;
+}
+
+bool AKamikazeCarrierDrone::CanDeploySalvo() const
+{
+	return CanDeploySalvoIgnoringCooldown() && GetSalvoCooldownRemaining() <= 0.0f;
 }
 
 float AKamikazeCarrierDrone::GetSalvoCooldownRemaining() const
@@ -358,11 +441,11 @@ float AKamikazeCarrierDrone::GetSalvoCooldownRemaining() const
 
 bool AKamikazeCarrierDrone::DeploySalvo()
 {
-	if (!CanDeploySalvo())
-	{
-		return false;
-	}
+	return CanDeploySalvo() && StartSalvo();
+}
 
+bool AKamikazeCarrierDrone::StartSalvo()
+{
 	const UWorld* const World = GetWorld();
 	LastSalvoTime = World ? World->GetTimeSeconds() : 0.0f;
 

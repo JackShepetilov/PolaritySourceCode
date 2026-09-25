@@ -3087,6 +3087,24 @@ FVector AShooterWeapon::GetMuzzleWorldLocation() const
 		return MuzzleMesh->GetSocketLocation(MuzzleSocketName);
 	}
 
+	// No such socket on this mesh. The projectile spawn asks the same mesh for the same socket, and a
+	// missing socket gives it the mesh's own origin - the gun in the hand - so that is the answer here
+	// too. The actor location it used to fall back to is the OWNER'S capsule centre (the weapon actor
+	// is attached at the root): SKM_RPG7 has no "Muzzle" socket, so every grenadier asked "can my shot
+	// get out" from its waist, and behind a waist-high wall the answer was always no while the rocket
+	// itself would have cleared it (turret bench 2026-09-23, muzzle 88 cm up on a standing NPC).
+	if (MuzzleMesh)
+	{
+		static TSet<TWeakObjectPtr<const UClass>> Warned;
+		if (!Warned.Contains(GetClass()))
+		{
+			Warned.Add(GetClass());
+			UE_LOG(LogTemp, Warning, TEXT("[WEAPON_DEBUG] %s: no socket '%s' on %s, muzzle taken from the mesh origin"),
+				*GetClass()->GetName(), *MuzzleSocketName.ToString(), *GetNameSafe(MuzzleMesh->GetSkeletalMeshAsset()));
+		}
+		return MuzzleMesh->GetComponentLocation();
+	}
+
 	return GetActorLocation();
 }
 
@@ -4498,8 +4516,33 @@ void AShooterWeapon::PerformSimpleHitscan(const FVector& Start, const FVector& D
 		return;
 	}
 
+	// Struck a building. Its hitbox answers the Pawn object query (ABuildableActor::Hitbox is ECC_Pawn
+	// precisely so this query finds it) but it is not a pawn, so neither branch around this one knew
+	// what it was: the shot fell through to the player bolt below and was handed to whichever player
+	// stood nearest to where it landed. That is how a player standing behind his own turret was being
+	// shot with the rounds aimed at the turret, and why the turret itself never took a point.
+	// Damaged once: when the Visibility trace above already stopped on this same building, the wall
+	// branch has paid for the hit.
+	if (AActor* const Struck = PawnHit.GetActor(); bHitPawn && Struck && !Cast<APawn>(Struck))
+	{
+		if (Struck->CanBeDamaged() && !(bHitWall && WallHit.GetActor() == Struck))
+		{
+			ApplyHitscanDamage(PawnHit, EnergyMultiplier, PawnHit.Distance, 0.0f);
+		}
+		SpawnBeamEffect(Start, PawnHit.ImpactPoint, EnergyMultiplier);
+		SpawnImpactEffect(PawnHit);
+		return;
+	}
+
+	// The bolt is a mechanic about a PLAYER being shot at: a dodgeable window walking down the aim line.
+	// A round the NPC aimed at something else (a turret, a siege core) that simply missed must not be
+	// re-addressed to whoever happens to stand nearest to where it landed. A player physically in the
+	// line is still found by the pawn query and still gets the bolt; only the guess is withheld.
+	const AActor* const ShooterAim = WeaponOwner ? WeaponOwner->GetWeaponAimActor() : nullptr;
+	const bool bAimedAtPlayer = !ShooterAim || CoopPlayers::IsPlayer(ShooterAim);
+
 	AShooterCharacter* TargetPlayer = Cast<AShooterCharacter>(PawnHit.GetActor());
-	if (!TargetPlayer)
+	if (!TargetPlayer && bAimedAtPlayer)
 	{
 		TargetPlayer = Cast<AShooterCharacter>(
 			CoopPlayers::GetNearest(GetWorld(), bHitWall ? WallHit.ImpactPoint : End));
@@ -5641,12 +5684,30 @@ void AShooterWeapon::ConfigureFiniteEnergyReserve()
 	GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
 }
 
-int32 AShooterWeapon::GetDispenserFuelValue(int32 LoadedRounds, int32 ReserveRounds) const
+float AShooterWeapon::GetDepositMoneyPerRound() const
 {
+	// By class, not by owner: the gun is priced while it is still in the hands and again after it
+	// has been released, and UsesEnergyReserve() answers differently on the two sides of that.
+	if (IsEnergyClass())
+	{
+		return 0.0f;
+	}
+
+	// The base size, so a fitted extended magazine does not make every round cheaper.
+	const int32 Magazine = BaseMagazineSize > 0 ? BaseMagazineSize : GetMagazineSize();
+	return FMath::Max(0.0f, DepositMoneyPerMagazine) / FMath::Max(1, Magazine);
+}
+
+int32 AShooterWeapon::GetDepositMoneyValue(int32 LoadedRounds, int32 ReserveRounds) const
+{
+	const int32 Base = FMath::Max(0, DepositBaseMoney);
+	if (IsEnergyClass())
+	{
+		return Base + FMath::Max(0, DepositEnergyAmmoMoney);
+	}
+
 	const int32 Rounds = FMath::Max(0, LoadedRounds) + FMath::Max(0, ReserveRounds);
-	const int32 FullRounds = FMath::Max(1, GetMagazineSize() + GetEnergyReserveCapacity());
-	const float AmmoFraction = FMath::Clamp(static_cast<float>(Rounds) / FullRounds, 0.0f, 1.0f);
-	return FMath::Max(0, EmptyWeaponFuelValue + FMath::RoundToInt(FullAmmoFuelValue * AmmoFraction));
+	return Base + FMath::RoundToInt(Rounds * GetDepositMoneyPerRound());
 }
 
 void AShooterWeapon::PauseEnergyRegen(float ExtraSeconds)

@@ -3077,6 +3077,25 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	{
 		const float ToPeekDistance = FVector::Dist2D(NPCLocation, Spot.PeekLocation);
 
+		// The slide of a slide peek. It cannot start from a standstill (SlideMinStartSpeed), so it is
+		// launched mid-run, the first frame the run-up sprint has the speed, while there is still
+		// ground to slide over - the same launch-on-the-move ShooterPush uses. A run too short to ever
+		// get there simply arrives running.
+		if (Data.bPeekSlide && !Data.bPeekSlideStarted && ToPeekDistance > 120.0f)
+		{
+			if (UApexMovementComponent* const SlideApex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+			{
+				SlideApex->StartSlideToPoint(Spot.PeekLocation, 120.0f);
+				if (SlideApex->IsSliding())
+				{
+					Data.bPeekSlideStarted = true;
+					SlideApex->StopSprint();
+					UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s slides into P (%.0f to go)"),
+						*GetNameSafe(Data.NPC), ToPeekDistance);
+				}
+			}
+		}
+
 		// Same fallback as ToHide, and needed for the same reason: P is a step out from a wall, so
 		// it is subject to the identical capsule-versus-geometry gap. Measured in the same session,
 		// the abandoned step-outs sat at 90 and 95 units.
@@ -3093,7 +3112,12 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 
 			// Fire is NOT started here any more - it has been running since the step out began, and
 			// the unified block after this switch owns it. See there.
-			StartStrafeLeg(Data, Spot.PeekLocation);
+			// Over low cover the NPC fights from behind the wall it is standing at: no strafe, a
+			// sideways leg would walk it off the cover.
+			if (!Spot.bPeekOver)
+			{
+				StartStrafeLeg(Data, Spot.PeekLocation);
+			}
 		}
 		else if (IsMoveStalled(Data, DeltaTime, ToPeekDistance))
 		{
@@ -3124,7 +3148,22 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// Measured against whoever this NPC is actually shooting at, which while suppressing is the
 		// teammate's opener rather than its own target. A corner that cannot see the player it has
 		// been told to pin is just as useless as one that cannot see its own.
-		if (!FireTarget || !Data.NPC->HasLineOfSightTo(FireTarget))
+		//
+		// Not in the first 0.3s: the pose of the peek is still arriving then. Standing up over a low
+		// wall, or getting up at the end of a slide, takes the capsule and the gun a few frames, and a
+		// muzzle still below the wall on the first tick would condemn a perfectly good corner.
+		UApexMovementComponent* const PeekApex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+		if (Data.bPeekSlideStarted && PeekApex && !PeekApex->IsSliding())
+		{
+			// The slide into P just ended (EndSlide stood the NPC up): now take the rolled pose.
+			Data.bPeekSlideStarted = false;
+			if (Data.bPeekCrouch)
+			{
+				PeekApex->StartCrouching();
+			}
+		}
+		const bool bPoseSettled = Data.PhaseElapsed >= 0.3f && !(PeekApex && PeekApex->IsSliding());
+		if (bPoseSettled && (!FireTarget || !Data.NPC->HasLineOfSightTo(FireTarget)))
 		{
 			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s corner is BLIND from P, releasing"),
 				*GetNameSafe(Data.NPC));
@@ -3145,7 +3184,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		if (bSuppressing)
 		{
 			Data.LegElapsed += DeltaTime;
-			if (Data.LegElapsed >= Data.LegDuration)
+			if (Data.LegElapsed >= Data.LegDuration && !Spot.bPeekOver)
 			{
 				Data.LegSign = -Data.LegSign;
 				StartStrafeLeg(Data, Spot.PeekLocation);
@@ -3167,7 +3206,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// burst carries on across it, so the flip lands in the middle of being shot at rather than
 		// between two bursts.
 		Data.LegElapsed += DeltaTime;
-		if (Data.LegElapsed >= Data.LegDuration)
+		if (Data.LegElapsed >= Data.LegDuration && !Spot.bPeekOver)
 		{
 			Data.LegSign = -Data.LegSign;
 			StartStrafeLeg(Data, Spot.PeekLocation);
@@ -3413,25 +3452,86 @@ void FSTTask_ShooterPeek::EnterPhase(FInstanceDataType& Data, EShooterPeekPhase 
 	Data.Phase = NewPhase;
 	Data.PhaseElapsed = 0.0f;
 
-	// The crouch-peek rhythm: down when the step out begins, back up on the walk home (or whenever
-	// the corner is dropped). Down and up happen here rather than at the movement calls, because
-	// this is the one funnel every phase change goes through regardless of which branch asked for it.
+	// The pose of the cycle. Here rather than at the movement calls, because this is the one funnel
+	// every phase change goes through regardless of which branch asked for it.
+	//   AtHide  - down behind LOW cover (it hides a crouched body only), otherwise standing.
+	//   ToPeek  - this peek's rolls (profile chances): a slide run-up sprints, a crouch peek goes down
+	//             for the step out; over low cover neither, the peek is standing up where it is.
+	//   AtPeek  - over low cover: stand, that IS the peek.
+	//   ToHide / Seeking - up, and any run-up sprint off.
 	if (Data.NPC)
 	{
-		const UEnemyCombatProfile* const StanceProfile = Data.NPC->GetCombatProfile();
-		if (StanceProfile && StanceProfile->bCrouchWhenPeeking)
+		UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+		const UCoverFinderComponent* const StanceFinder = Data.NPC->FindComponentByClass<UCoverFinderComponent>();
+		const bool bLow = StanceFinder && StanceFinder->HasCover() && StanceFinder->GetCover().bLowCover;
+		const bool bOver = StanceFinder && StanceFinder->HasCover() && StanceFinder->GetCover().bPeekOver;
+
+		if (Apex)
 		{
-			if (UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+			switch (NewPhase)
 			{
-				if (NewPhase == EShooterPeekPhase::ToPeek)
+			case EShooterPeekPhase::AtHide:
+				if (bLow)
 				{
 					Apex->StartCrouching();
 				}
-				else if ((NewPhase == EShooterPeekPhase::ToHide || NewPhase == EShooterPeekPhase::Seeking)
-					&& Apex->IsCrouching())
+				break;
+
+			case EShooterPeekPhase::ToPeek:
+			{
+				const UEnemyCombatProfile* const StanceProfile = Data.NPC->GetCombatProfile();
+				Data.bPeekCrouch = !bOver && StanceProfile && StanceProfile->RollCrouchPeek();
+				Data.bPeekSlide = !bOver && StanceProfile && StanceProfile->RollSlidePeek();
+				Data.bPeekSlideStarted = false;
+				if (Data.bPeekSlide)
+				{
+					// Up and running: the slide needs the speed (SlideMinStartSpeed), see ToPeek.
+					if (Apex->IsCrouching())
+					{
+						Apex->StopCrouching();
+					}
+					Apex->StartSprint();
+				}
+				else if (Data.bPeekCrouch)
+				{
+					Apex->StartCrouching();
+				}
+				else if (!bOver && Apex->IsCrouching())
 				{
 					Apex->StopCrouching();
 				}
+				UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s peek rolls: low=%d over=%d crouch=%d slide=%d"),
+					*GetNameSafe(Data.NPC), bLow, bOver, Data.bPeekCrouch, Data.bPeekSlide);
+				break;
+			}
+
+			case EShooterPeekPhase::AtPeek:
+				if (Data.bPeekSlide && Apex->IsSprinting())
+				{
+					Apex->StopSprint();
+				}
+				if (bOver && Apex->IsCrouching())
+				{
+					Apex->StopCrouching();
+				}
+				break;
+
+			case EShooterPeekPhase::ToHide:
+			case EShooterPeekPhase::Seeking:
+				if (Apex->IsCrouching() && !(bOver && NewPhase == EShooterPeekPhase::ToHide))
+				{
+					Apex->StopCrouching();
+				}
+				if (Data.bPeekSlide && Apex->IsSprinting())
+				{
+					Apex->StopSprint();
+				}
+				Data.bPeekSlide = false;
+				Data.bPeekSlideStarted = false;
+				break;
+
+			default:
+				break;
 			}
 		}
 	}
@@ -3657,9 +3757,11 @@ void FSTTask_ShooterPeek::ReleaseAll(FInstanceDataType& Data) const
 {
 	StopShooting(Data);
 
-	// The crouch belongs to the peek: an exit through any other door (tree transition, knockback,
-	// death) must not leave the NPC walking around at crouch height.
-	if (Data.NPC && Data.NPC->GetCombatProfile() && Data.NPC->GetCombatProfile()->bCrouchWhenPeeking)
+	// The crouch belongs to the peek (and to low cover), and so does the slide run-up sprint: an exit
+	// through any other door (tree transition, knockback, death) must not leave the NPC walking around
+	// at crouch height or with its sprint latched (a latched sprint drops the rifle arms, see the
+	// turret-cover gotcha).
+	if (Data.NPC)
 	{
 		if (UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
 		{
@@ -3667,7 +3769,13 @@ void FSTTask_ShooterPeek::ReleaseAll(FInstanceDataType& Data) const
 			{
 				Apex->StopCrouching();
 			}
+			if (Data.bPeekSlide && Apex->IsSprinting())
+			{
+				Apex->StopSprint();
+			}
 		}
+		Data.bPeekSlide = false;
+		Data.bPeekSlideStarted = false;
 	}
 
 	// Both squad duties are claims on somebody else's behaviour, so both must be given back on EVERY

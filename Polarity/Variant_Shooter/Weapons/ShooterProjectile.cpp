@@ -8,6 +8,7 @@
 #include "Net/UnrealNetwork.h"
 #include "ApexMovementComponent.h"
 #include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
+#include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "Components/SphereComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
@@ -606,6 +607,18 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 		return;
 	}
 
+	// A building is measured to the centre of its box, not to its actor location: the turret's actor
+	// location is on the floor under its base and the siege core's is the bottom corner of the kit box
+	// (its pivot). The line of sight would end inside the floor, and a blast a metre from a building
+	// would read as out of range.
+	const bool bIsBuilding = HitActor->IsA<ABuildableActor>();
+	FVector VictimPoint = HitActor->GetActorLocation();
+	if (bIsBuilding)
+	{
+		FVector BoundsExtent = FVector::ZeroVector;
+		HitActor->GetActorBounds(true, VictimPoint, BoundsExtent);
+	}
+
 	if (bRequireExplosionLineOfSight && HitActor != DirectHitActor)
 	{
 		FHitResult LOSHit;
@@ -614,21 +627,21 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 		LOSParams.AddIgnoredActor(HitActor);
 
 		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(
-			LOSHit, ExplosionCenter, HitActor->GetActorLocation(), ECC_Visibility, LOSParams);
+			LOSHit, ExplosionCenter, VictimPoint, ECC_Visibility, LOSParams);
 		if (bBlocked)
 		{
 			return;
 		}
 	}
 
-	const float Distance = FVector::Dist(ExplosionCenter, HitActor->GetActorLocation());
+	const float Distance = FVector::Dist(ExplosionCenter, VictimPoint);
 	const float SplashScale = CalculateExplosionSplashScale(Distance, HitActor, DirectHitActor);
 	if (SplashScale <= 0.0f)
 	{
 		return;
 	}
 
-	const FVector HitDirection = (HitActor->GetActorLocation() - ExplosionCenter).GetSafeNormal();
+	const FVector HitDirection = (VictimPoint - ExplosionCenter).GetSafeNormal();
 
 	ACharacter* HitCharacter = Cast<ACharacter>(HitActor);
 	const bool bIsShootableButtonOwner =
@@ -636,8 +649,11 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 
 	// Characters already receive splash damage here. Shootable buttons also need a
 	// real TakeDamage call so their OnTakeAnyDamage binding can activate the button.
+	// Buildings (turret, siege core, dispenser) are damageable by design and sort out friendly fire
+	// in their own TakeDamage; before they were on this list a rocket that struck a turret dead
+	// centre dealt nothing (turret bench 2026-09-22: 22 rockets on target, 0 damage).
 	// Keep other WorldDynamic actors unchanged.
-	if ((HitCharacter || bIsShootableButtonOwner) && (!bIsOwner || bDamageOwner))
+	if ((HitCharacter || bIsShootableButtonOwner || bIsBuilding) && (!bIsOwner || bDamageOwner))
 	{
 		// Resolved, not raw: HitDamage is an override whose "defer to the weapon" value is negative,
 		// and a negative base here would have the blast healing everyone inside the radius.

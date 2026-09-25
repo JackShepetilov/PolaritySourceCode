@@ -72,6 +72,11 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Buildable Status", meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> HealthText;
 
+	/** A turret's guns, one line per open vice: "M1911  8 / 12  +48", "empty" for a vice with no
+	 *  gun. Collapsed for anything that is not a turret, and while it is still going up. */
+	UPROPERTY(BlueprintReadOnly, Category = "Buildable Status", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> AmmoText;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Buildable Status", meta = (BindWidgetOptional))
 	TObjectPtr<UHudBarWidget> HealthBar;
 

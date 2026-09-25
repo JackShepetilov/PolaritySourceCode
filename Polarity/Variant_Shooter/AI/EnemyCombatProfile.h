@@ -109,12 +109,40 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek", meta = (EditCondition = "bOverridePeekTuning", ClampMin = "0.1"))
 	float PeekDuration = 2.0f;
 
-	/** Crouch for the whole exposed part of the peek: down when the step out begins, fire from the
-	 *  crouch, stand back up on the way home to the hide spot. A smaller target while trading, at
-	 *  the cost of the peek moving at crouch speed. The grenadier's way of peeking; classes that
-	 *  must stand while trading (or whose shots come from standing height) turn this off. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek")
-	bool bCrouchWhenPeeking = true;
+	/** Chance, rolled once per peek, that this peek is taken crouched: down at the peek point, fire
+	 *  from the crouch, up again on the way home. 1 is every peek, 0 is never. Replaces the old
+	 *  on/off bCrouchWhenPeeking (an asset that had it off loads as 0). A peek over LOW cover ignores
+	 *  this: it is taken standing, because standing is what clears the wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CrouchPeekChance = 1.0f;
+
+	/** Chance, rolled once per peek, that the step out to a side peek is a slide instead of a walk.
+	 *  Only for high cover with a side peek point (a low wall is peeked over, in place). The NPC runs
+	 *  at the peek point and slides the last stretch once it has the speed for it; if the crouch roll
+	 *  also passed it stays down when the slide ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SlidePeekChance = 0.0f;
+
+	/** Seconds at the peek point, on target, before the trigger may go down. The telegraph: a player
+	 *  sees the enemy come up and settle before it fires. 0 fires as soon as the gun is on target. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek", meta = (ClampMin = "0.0", Units = "s"))
+	float PeekAimHoldSeconds = 0.0f;
+
+	/** Seconds the NPC stays out after its magazine runs dry before ducking back to reload. Mostly for
+	 *  one-round launchers, which empty on every peek: long enough to be seen firing, short enough
+	 *  not to stand in the open with an empty tube. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Peek", meta = (ClampMin = "0.0", Units = "s"))
+	float HoldAfterLastRoundSeconds = 0.2f;
+
+	/** One roll for the peek about to start. */
+	bool RollCrouchPeek() const { return CrouchPeekChance > 0.0f && FMath::FRand() < CrouchPeekChance; }
+	bool RollSlidePeek() const { return SlidePeekChance > 0.0f && FMath::FRand() < SlidePeekChance; }
+
+	/** Load-only: the old on/off switch. PostLoad turns an "off" into CrouchPeekChance 0. */
+	UPROPERTY(meta = (DeprecatedProperty))
+	bool bCrouchWhenPeeking_DEPRECATED = true;
+
+	virtual void PostLoad() override;
 
 	/** Abandon this corner after a burst and go find another one, instead of settling into the
 	 *  hide/peek rhythm from the same spot.

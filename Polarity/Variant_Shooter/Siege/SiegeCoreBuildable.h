@@ -1,14 +1,13 @@
 // SiegeCoreBuildable.h
-// The thing the siege is after when nobody is home.
+// A siege core placed straight into a level.
 //
-// A building with a lot of health and one rule (the author's, 2026-09-14): while a player stands
-// within DefendRadius of it, the enemy fights the players as usual; the moment nobody is that
-// close, the enemy turns on the core itself. That is what makes leaving the base a decision: the
-// turrets hold the line for a while, and the core is the clock that says how long.
+// The core's rule and its finders live on ABuildableActor (bSiegeCore, DefendRadius, IsDefended,
+// FindUndefendedCore / FindNearestCore), because on a real siege map the core is the first
+// dispenser a player builds (ASiegeDirector::NotifyBuildablePlaced). This class is what a bench
+// level uses instead: a building that is the core from the start, with a lot of health.
 //
-// Placed straight into the level for now (no builder, no owner), so it starts Active at full
-// health like any level-placed ABuildableActor. Without a UBuildableDefinition the wrench does
-// nothing to it; repair needs one, see ReceiveWrenchHit.
+// Placed straight into the level (no builder, no owner), so it starts Active at full health like
+// any level-placed ABuildableActor. Without a UBuildableDefinition the wrench does nothing to it.
 
 #pragma once
 
@@ -24,26 +23,4 @@ class POLARITY_API ASiegeCoreBuildable : public ABuildableActor
 public:
 
 	ASiegeCoreBuildable();
-
-	/** No player within this of the core (cm): the enemy attacks the core instead of the players. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Siege", meta = (ClampMin = "0.0", Units = "cm"))
-	float DefendRadius = 4000.0f;
-
-	/** A player is within DefendRadius. Server-side answer: only the server sees every pawn. */
-	UFUNCTION(BlueprintPure, Category = "Siege")
-	bool IsDefended() const;
-
-	/** The nearest standing core to From that no player is defending, or null when every core is
-	 *  either defended or gone. What an attacker asks before it picks a pawn. */
-	static ASiegeCoreBuildable* FindUndefended(const UWorld* World, const FVector& From);
-
-	/** The nearest standing core to From, defended or not. What an attacker asks when it has no
-	 *  player to fight: the tower-defence rule is that the base itself is the default target. */
-	static ASiegeCoreBuildable* FindNearest(const UWorld* World, const FVector& From);
-
-private:
-
-	/** Walk the cores: the nearest standing one, dropped when bRequireUndefended and a player
-	 *  stands inside its DefendRadius. */
-	static ASiegeCoreBuildable* FindCore(const UWorld* World, const FVector& From, bool bRequireUndefended);
 };

@@ -14,6 +14,12 @@
 // wave each kind unlocks at. Growth above 1 is deliberate: a wave that only grows linearly is
 // outrun by the metal it drops, and an endless mode has to end.
 //
+// The clock is a ceiling, not the only trigger: when the base goes quiet the next wave is sent
+// early (bEarlyWaveOnLull), so the break a player gets is the walk in from the fog, not a timer.
+// A wave comes out one enemy at a time (SpawnTrickleInterval), on a ring around the director
+// rather than on placed points, and the carriers are capped: one rolled past MaxCarriersAlive
+// becomes power for the living ones, and one clock here paces every carrier's drops.
+//
 // Server only: it spawns and it counts. The few numbers a HUD wants are replicated.
 
 #pragma once
@@ -21,10 +27,12 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Arena/ArenaWaveData.h"
+#include "Curves/CurveFloat.h"
 #include "SiegeDirector.generated.h"
 
 class AArenaSpawnPoint;
 class ABuildableActor;
+class AKamikazeCarrierDrone;
 class AShooterNPC;
 class ASiegeCoreBuildable;
 class UPrimitiveComponent;
@@ -102,9 +110,81 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Clock", meta = (ClampMin = "1.0", Units = "s"))
 	float WaveInterval = 20.0f;
 
+	// ==================== Pacing ====================
+
+	/** Send the next wave early when the base goes quiet. The clock stays the ceiling: a player
+	 *  away on a raid does not thin the enemy out, so the pile at home keeps growing on the clock. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Pacing")
+	bool bEarlyWaveOnLull = true;
+
+	/** Quiet = the budget cost of every enemy this director spawned and is still alive is at or
+	 *  under this (a carrier costs 1, a shooter 0.25 on L_HomeBase). All of them count, not only the
+	 *  ones near the base: a wave still walking in from the fog is not a lull. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Pacing", meta = (ClampMin = "0.0", EditCondition = "bEarlyWaveOnLull"))
+	float LullPressureCost = 0.25f;
+
+	/** From the lull to the early wave (seconds). The walk in from the spawn ring comes on top, and
+	 *  that walk is most of the time the player has to build. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Pacing", meta = (ClampMin = "0.0", Units = "s", EditCondition = "bEarlyWaveOnLull"))
+	float LullWaveDelay = 2.0f;
+
+	/** A wave comes out one enemy at a time, this far apart (seconds). 0 = the whole wave at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Pacing", meta = (ClampMin = "0.0", Units = "s"))
+	float SpawnTrickleInterval = 0.75f;
+
+	/** Measuring only: an enemy within this of the director counts as "at the base", and every
+	 *  stretch with none is logged as a break ([SIEGE_DEBUG] break at base). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Pacing", meta = (ClampMin = "0.0", Units = "cm"))
+	float BaseRingRadius = 6000.0f;
+
 	// ==================== Spawn ====================
 
-	/** Where the enemy enters. The same markers the arenas use, air spawn included. */
+	/** Spawn on a ring around this director instead of on placed points: a walker on a random
+	 *  reachable spot of the ground ring, a flyer in the widest gap between the flyers already up.
+	 *  The placed points stay as the fallback for when the ring finds nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn")
+	bool bUseSpawnRing = true;
+
+	/** Distance of the ground ring from the director (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bUseSpawnRing"))
+	float GroundRingRadius = 9000.0f;
+
+	/** A walker lands up to this much nearer or farther than GroundRingRadius (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bUseSpawnRing"))
+	float GroundRingDepth = 1000.0f;
+
+	/** Where on the ground ring walkers may appear: X from, Y to, in degrees counterclockwise seen
+	 *  from above, 0 = +X (east), 90 = +Y. (180, 360) is the western half. Empty = the whole ring. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (EditCondition = "bUseSpawnRing"))
+	TArray<FVector2D> GroundRingArcs;
+
+	/** Distance of the air ring from the director (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bUseSpawnRing"))
+	float AirRingRadius = 16000.0f;
+
+	/** A flyer appears this high above the ground under it (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bUseSpawnRing"))
+	float AirRingHeight = 3500.0f;
+
+	/** Same as GroundRingArcs, for flyers. Empty = the whole ring. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (EditCondition = "bUseSpawnRing"))
+	TArray<FVector2D> AirRingArcs;
+
+	/** No spawn nearer than this to a live enemy or to anything spawned in the last few seconds (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bUseSpawnRing"))
+	float MinSpawnSeparation = 500.0f;
+
+	/** Random spots a walker's spawn tries before it falls back to the placed points. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (ClampMin = "1", ClampMax = "32", EditCondition = "bUseSpawnRing"))
+	int32 SpawnRingAttempts = 8;
+
+	/** A walker's spot must have a full navmesh path to the base's core (or to the director when
+	 *  there is no core yet), so nobody is born in a pit or on a ledge. One path query per try. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn", meta = (EditCondition = "bUseSpawnRing"))
+	bool bRequirePathToBase = true;
+
+	/** Where the enemy enters when the ring is off or finds nothing. The same markers the arenas
+	 *  use, air spawn included. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn")
 	TArray<TSoftObjectPtr<AArenaSpawnPoint>> SpawnPoints;
 
@@ -112,9 +192,41 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Spawn")
 	bool bAutoCollectSpawnPoints = true;
 
+	// ==================== Carriers ====================
+
+	/** At most this many carriers alive at once. A carrier rolled past it is not spawned: its cost
+	 *  is split evenly between the living carriers as power (more shield, more drops), so the field
+	 *  holds as much carrier as the budget bought, in fewer bodies. 0 = no cap. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Carriers", meta = (ClampMin = "0"))
+	int32 MaxCarriersAlive = 4;
+
+	/** One clock for every carrier's drops instead of each carrier's own cooldown. Its rate is the
+	 *  sum over living carriers of power / SalvoCooldown, and each tick of it goes to one carrier
+	 *  that is ready (in position, in sight, target not full), picked by power. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Carriers")
+	bool bPaceCarrierSalvos = true;
+
+	/** Shortest gap between two salvos of one carrier (seconds). Past it a strong carrier's extra
+	 *  power stops adding drops and only its shield keeps growing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Carriers", meta = (ClampMin = "0.5", Units = "s", EditCondition = "bPaceCarrierSalvos"))
+	float MinCarrierSalvoInterval = 4.0f;
+
+	/** X: wave number. Y: kamikaze drones allowed on one player at once (rounded, 1..20). Applied
+	 *  to every carrier at each wave start and to each new one. No keys = the carriers' own
+	 *  MaxDronesPerTarget. A dive on an undefended core is never capped by this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Carriers")
+	FRuntimeFloatCurve DronesPerTargetByWave;
+
 	// ==================== Start ====================
 
-	/** Actors whose overlap by a player starts the siege (a console in the house). */
+	/** The first dispenser a player builds becomes the base's core and starts the siege
+	 *  (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md). While on, StartTriggers are not listened
+	 *  to: putting the base down is the "ready". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Start")
+	bool bStartWhenDispenserBuilt = true;
+
+	/** Actors whose overlap by a player starts the siege (a console in the house). Ignored while
+	 *  bStartWhenDispenserBuilt is on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Start")
 	TArray<TSoftObjectPtr<AActor>> StartTriggers;
 
@@ -124,8 +236,9 @@ public:
 
 	// ==================== Base ====================
 
-	/** What the siege is after. Empty = every ASiegeCoreBuildable in the world at BeginPlay. When
-	 *  the last of them falls the base is lost and the clock stops. */
+	/** Level-placed cores. Empty = every ASiegeCoreBuildable in the world at BeginPlay. A dispenser
+	 *  that becomes the core joins them at runtime. When the last core falls the base is lost and
+	 *  the clock stops. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Base")
 	TArray<TSoftObjectPtr<ASiegeCoreBuildable>> Cores;
 
@@ -160,6 +273,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Siege")
 	float GetWaveBudget(int32 WaveNumber) const;
 
+	/** DronesPerTargetByWave at this wave, rounded and clamped. -1 = the curve has no keys. */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	int32 GetDronesPerTargetForWave(int32 WaveNumber) const;
+
+	/** The carriers this director spawned should drop on its clock, not their own. */
+	bool IsPacingCarriers() const { return bPaceCarrierSalvos && bSiegeActive; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Siege|Events")
 	FOnSiegeStarted OnSiegeStarted;
 
@@ -182,6 +302,10 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Siege")
 	void CallNextWaveNow();
 
+	/** A player's building has just been put down. The first dispenser on this map becomes the
+	 *  core and starts the siege, when bStartWhenDispenserBuilt. Server only. */
+	void NotifyBuildablePlaced(ABuildableActor* Building);
+
 	/** The director of this world, or null. One per level. */
 	static ASiegeDirector* Get(const UWorld* World);
 
@@ -198,12 +322,67 @@ private:
 	void CollectCores();
 	void RegisterStartTriggers();
 
+	/** Watch Core for its fall. */
+	void RegisterCore(ABuildableActor* Core);
+
+	/** A core in the list is still standing. */
+	bool HasStandingCore() const;
+
 	void ScheduleNextWave(float Delay);
 	void StartWave();
 	void SpawnAuthoredWave(const FArenaWave& Wave);
 	void SpawnEndlessWave(int32 WaveNumber);
-	void SpawnOne(TSubclassOf<AShooterNPC> NPCClass);
+
+	/** Put one enemy in the trickle queue. */
+	void EnqueueSpawn(TSubclassOf<AShooterNPC> NPCClass);
+
+	/** Spawn now. False when it was not spawned: no spot found, or a carrier past the cap (whose
+	 *  cost then went to the living carriers). */
+	bool SpawnOne(TSubclassOf<AShooterNPC> NPCClass);
 	AArenaSpawnPoint* PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass);
+
+	// ---- Spawn ring ----
+
+	bool FindRingSpawn(TSubclassOf<AShooterNPC> NPCClass, FTransform& OutTransform);
+	bool FindGroundRingSpawn(TSubclassOf<AShooterNPC> NPCClass, FTransform& OutTransform);
+	bool FindAirRingSpawn(TSubclassOf<AShooterNPC> NPCClass, FTransform& OutTransform);
+
+	/** Nothing solid in a body of this size here, and no live enemy or fresh spawn too near. */
+	bool IsSpawnSpotFree(const FVector& Location, float Radius, float HalfHeight) const;
+
+	/** The ground under this XY, traced from far above and below the director. */
+	bool TraceGroundAt(const FVector& FlatLocation, FVector& OutGround) const;
+
+	/** Bearing of a location around this director, degrees 0..360, 0 = +X. */
+	float BearingOf(const FVector& Location) const;
+
+	// ---- Carriers ----
+
+	/** Live carriers this director spawned. */
+	void GatherLiveCarriers(TArray<AKamikazeCarrierDrone*>& OutCarriers) const;
+
+	/** A carrier past MaxCarriersAlive: hand its cost to the living ones. True = absorbed, do not spawn. */
+	bool TryAbsorbCarrierOverflow(TSubclassOf<AShooterNPC> NPCClass);
+
+	void ApplyDronesPerTarget(AKamikazeCarrierDrone* Carrier) const;
+
+	// ---- Pulse ----
+
+	/** Four times a second while the siege runs: the trickle, the lull check, the carrier clock,
+	 *  and the break log. */
+	void Pulse();
+	void TickSpawnQueue(float Now);
+	void TickLull(float Now);
+	void TickCarrierPacing(float DeltaTime);
+	void TickBreakLog(float Now);
+
+	/** Budget cost of every live enemy this director spawned. */
+	float GetAliveCost() const;
+
+	/** An authored wave's DelayBeforeWave, 0 for an endless one. */
+	float GetExtraDelayBefore(int32 WaveNumber) const;
+
+	float GetServerNow() const;
 
 	/** Budget cost of one of this class: its EndlessPool entry, else 1. */
 	float CostOf(TSubclassOf<AShooterNPC> NPCClass) const;
@@ -222,8 +401,32 @@ private:
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 
 	TArray<TWeakObjectPtr<AArenaSpawnPoint>> ResolvedSpawnPoints;
-	TArray<TWeakObjectPtr<ASiegeCoreBuildable>> ResolvedCores;
+	TArray<TWeakObjectPtr<ABuildableActor>> ResolvedCores;
 	TArray<TWeakObjectPtr<AShooterNPC>> Alive;
 	FTimerHandle WaveTimer;
 	int32 NextSpawnPointIndex = 0;
+
+	/** Enemies of the waves so far that have not come out yet, oldest first. */
+	TArray<TSubclassOf<AShooterNPC>> SpawnQueue;
+	float NextTrickleTime = 0.0f;
+
+	/** Where things were put down lately, so the next one keeps its distance. */
+	struct FRecentSpawn
+	{
+		FVector Location = FVector::ZeroVector;
+		float Time = 0.0f;
+		bool bAir = false;
+	};
+	TArray<FRecentSpawn> RecentSpawns;
+
+	FTimerHandle PulseTimer;
+	float LastPulseTime = -1.0f;
+
+	/** Salvos owed by the shared carrier clock, held at one while nobody is ready. */
+	float PacedSalvoCredit = 0.0f;
+
+	bool bBaseQuiet = false;
+	float BaseQuietSince = 0.0f;
+
+	bool bWarnedNoBaseNav = false;
 };

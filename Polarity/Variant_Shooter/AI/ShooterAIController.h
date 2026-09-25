@@ -12,7 +12,7 @@ class UAIPerceptionComponent;
 class UPolarityPathFollowingComponent;
 struct FAIStimulus;
 class AShooterNPC;
-class ASiegeCoreBuildable;
+class ABuildableActor;
 
 DECLARE_DELEGATE_TwoParams(FShooterPerceptionUpdatedDelegate, AActor*, const FAIStimulus&);
 DECLARE_DELEGATE_OneParam(FShooterPerceptionForgottenDelegate, AActor*);
@@ -249,7 +249,7 @@ public:
 	void EndDistraction();
 
 	// ==================== Siege fallback ====================
-	// On a map with an ASiegeCoreBuildable the answer for "nobody is visible" is the base's core. It
+	// On a map with a siege core (ABuildableActor::IsSiegeCore) the answer for "nobody is visible" is the base's core. It
 	// sits UNDER every intent — perception, script and distraction keep their own order and the core
 	// only speaks when none of them names a target — which is the tower-defence rule: a visible
 	// player matters, the march on the core is the default.
@@ -259,7 +259,7 @@ public:
 
 	/** The core being marched on, or null when the map has none or the last one fell. Re-found on a
 	 *  slow cadence; a world holds one or two cores, so the walk is cheap. */
-	TWeakObjectPtr<ASiegeCoreBuildable> SiegeCore;
+	TWeakObjectPtr<ABuildableActor> SiegeCore;
 
 	/** How often SiegeCore is re-found. */
 	UPROPERTY(EditAnywhere, Category = "Shooter|Siege", meta = (Units = "s"))

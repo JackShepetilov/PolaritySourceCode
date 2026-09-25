@@ -1,8 +1,8 @@
 // DroppedRangedWeapon.h
 // World actor for a ranged weapon dropped by an NPC on death.
-// Player captures it via EMF channeling (scripted pull to camera-relative point),
-// then it equips as a permanent ShooterWeapon.
-// Works identically to DroppedMeleeWeapon but grants regular weapons.
+// Player fetches it with the grapple from a fixed radius (UAbilityHandler_Grapple::FindFetchTarget);
+// the hook starts a scripted pull to a camera-relative point, then it equips as a permanent
+// ShooterWeapon. The EMF charge it still carries no longer decides whether it can be taken.
 
 #pragma once
 

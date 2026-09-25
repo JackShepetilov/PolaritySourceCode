@@ -48,6 +48,15 @@ struct FCoverSpot
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cover")
 	bool bValid = false;
+
+	/** Low cover: a standing body here is seen, a crouched one is not. The NPC waits crouched. */
+	UPROPERTY(BlueprintReadOnly, Category = "Cover")
+	bool bLowCover = false;
+
+	/** The peek is taken over the top, in place: PeekLocation IS HideLocation and "stepping out"
+	 *  means standing up. Only ever set on low cover whose standing muzzle clears the wall. */
+	UPROPERTY(BlueprintReadOnly, Category = "Cover")
+	bool bPeekOver = false;
 };
 
 /** Fired when a cover search finishes. bFound is false when nothing survived the probes, which is a
@@ -229,8 +238,17 @@ private:
 	/** EQS came back. Everything expensive happens here, once, off the back of an async result. */
 	void OnQueryFinished(TSharedPtr<FEnvQueryResult> Result);
 
-	/** Sum of the threat of every living player with a line to this point. */
-	float ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params) const;
+	/** Sum of the threat of every living player with a line to this point, plus 1 per extra observer
+	 *  that sees it. bCrouched asks about a crouched body at the point instead of a standing one. */
+	float ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params,
+		bool bCrouched = false) const;
+
+	/** The owner's body heights over a navmesh point: chest and head, standing or crouched, from its
+	 *  capsule and its movement component's crouched height. */
+	void GetBodySampleHeights(bool bCrouched, float& OutChest, float& OutHead, float& OutSideReach) const;
+
+	/** For low cover: can a standing muzzle at the hide spot itself see the target over the wall. */
+	bool CanShootOverFrom(const FVector& HideLocation, const FCollisionQueryParams& Params) const;
 
 	/** Try to find a P beside this H. Returns false when there is no corner here, which is what
 	 *  disqualifies a candidate that is merely far away behind something.
@@ -250,12 +268,14 @@ private:
 	 *  at their chest plus PlayerRingSamples around them at PlayerRingRadius; any hit counts as
 	 *  seen. This is THE visibility question for the whole component - exposure, the peek probe and
 	 *  the cover recheck all go through it, so none of them can disagree about what "sees" means. */
-	bool CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params) const;
+	bool CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params,
+		bool bCrouched = false) const;
 
 	/** Whether a non-pawn threat actor can see Point. The observer's own body must be ignored:
 	 *  a turret's eye is inside its own bounds, and without the ignore the trace would be blocked
 	 *  by the observer itself on every line. */
-	bool CanActorSee(const AActor* Observer, const FVector& Point, const FCollisionQueryParams& Params) const;
+	bool CanActorSee(const AActor* Observer, const FVector& Point, const FCollisionQueryParams& Params,
+		bool bCrouched = false) const;
 
 	/** Self plus every pawn. Bodies are not cover: a teammate standing on the sight line does not
 	 *  make a corner safe, and counting them would make the choice flicker as people walk past. */

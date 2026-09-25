@@ -15,8 +15,11 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "GenericTeamAgentInterface.h"
+#include "Curves/CurveFloat.h"
+#include "Polarity/Upgrades/UpgradeDefinition.h"
 #include "BuildableActor.generated.h"
 
+class UUpgradeRegistry;
 class AShooterPlayerState;
 class AShooterCharacter;
 class AShooterWeapon;
@@ -132,10 +135,107 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Dispenser")
 	void AddFuel(int32 Amount);
 
-	/** Melt one of Donor's ranged weapons into fuel through the same authoritative inventory
-	 *  release a turret uses. */
+	/** Take one of Donor's ranged weapons through the same authoritative inventory release a
+	 *  turret uses, and bet it: its fair price (AShooterWeapon::GetDepositMoneyValue) is the stake,
+	 *  and every card of the upgrade offer rolls its own rarity from stake x PayoutCurve. One gun,
+	 *  one spin. Refused before the gun leaves the hands while a pick is pending or on cooldown. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Dispenser")
 	bool AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeapon* Weapon);
+
+	// ==================== Dispenser casino ====================
+	//
+	// Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md. Each card of an offer rolls its own
+	// value: stake x PayoutCurve(roll), the curve drawn by inverse transform (a uniform roll 0..1
+	// on X, the multiplier on Y; a wide flat stretch is common, a steep tail is rare). The value
+	// against the thresholds below is the card's rarity, and the wave's level cap clips it.
+
+	/** X: uniform roll 0..1. Y: multiplier on the stake. Keep it rising left to right. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino")
+	FRuntimeFloatCurve PayoutCurve;
+
+	/** Every upgrade the offers draw from (those with bInDispenserPool). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino")
+	TSoftObjectPtr<UUpgradeRegistry> UpgradeRegistry;
+
+	/** Cards per offer. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino", meta = (ClampMin = "1", ClampMax = "5"))
+	int32 OfferCardCount = 3;
+
+	/** Card value (stake x multiplier) at which a card is Rare, Epic, Legendary. Below Rare: Common. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino", meta = (ClampMin = "0.0"))
+	float RareValue = 60.0f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino", meta = (ClampMin = "0.0"))
+	float EpicValue = 120.0f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino", meta = (ClampMin = "0.0"))
+	float LegendaryValue = 240.0f;
+
+	/** Highest upgrade level an offer may give, by siege wave (index = wave, 0 before the first;
+	 *  the last entry holds from there on). The guard against a player out-growing the run early. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino")
+	TArray<int32> MaxLevelByWave;
+
+	/** Seconds a player waits between two spins, on top of having to pick the last offer first. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino", meta = (ClampMin = "0.0", Units = "s"))
+	float SpinCooldownSeconds = 4.0f;
+
+	/** Rarity of a card worth Value. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser|Casino")
+	EUpgradeRarity RarityForValue(float Value) const;
+
+	/** Level cap of the current siege wave (MaxLevelByWave; no director or empty table: no cap). */
+	UFUNCTION(BlueprintPure, Category = "Dispenser|Casino")
+	int32 GetCurrentLevelCap() const;
+
+	/** Current siege wave, 0 before the first or without a director. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser|Casino")
+	int32 GetCurrentWave() const;
+
+	/** Multiplier for one roll in 0..1, never negative. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser|Casino")
+	float EvaluatePayoutMultiplier(float Roll) const;
+
+	/** Average multiplier of PayoutCurve (return to player), integrated over Samples steps. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser|Casino")
+	float ComputePayoutMean(int32 Samples = 1000) const;
+
+	/** Fair price of everything bet here so far. */
+	UFUNCTION(BlueprintPure, Category = "Dispenser|Casino")
+	int32 GetTotalDepositedMoney() const { return TotalDepositedMoney; }
+
+	/** Health gained per unit of fair price bet here, maximum and current alike. The core grows
+	 *  from what it is fed (the bet, not the payout: luck at the casino does not build walls). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dispenser|Casino", meta = (ClampMin = "0.0"))
+	float HealthPerDepositedMoney = 1.0f;
+
+	// ==================== Siege core ====================
+	//
+	// The one rule of the core (the author's, 2026-09-14): while a player stands within DefendRadius
+	// of it, the enemy fights the players as usual; the moment nobody is that close, the enemy turns
+	// on the core itself. A building becomes the core either by being an ASiegeCoreBuildable placed
+	// in a level (a bench), or by being the first dispenser a player builds on a siege map
+	// (ASiegeDirector::NotifyBuildablePlaced).
+
+	/** No player within this of the core (cm): the enemy attacks the core instead of the players. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Siege", meta = (ClampMin = "0.0", Units = "cm"))
+	float DefendRadius = 4000.0f;
+
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	bool IsSiegeCore() const { return bSiegeCore; }
+
+	/** Make this building what the siege is after. Server only. */
+	void MakeSiegeCore();
+
+	/** A player is within DefendRadius. Server-side answer: only the server sees every pawn. */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	bool IsDefended() const;
+
+	/** The nearest standing core to From that no player is defending, or null when every core is
+	 *  either defended or gone. What an attacker asks before it picks a pawn. */
+	static ABuildableActor* FindUndefendedCore(const UWorld* World, const FVector& From);
+
+	/** The nearest standing core to From, defended or not. What an attacker asks when it has no
+	 *  player to fight: the tower-defence rule is that the base itself is the default target. */
+	static ABuildableActor* FindNearestCore(const UWorld* World, const FVector& From);
 
 	// ==================== State ====================
 
@@ -300,6 +400,10 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_DispenserFuel, BlueprintReadOnly, Category = "Dispenser|Ammo", meta = (ClampMin = "0"))
 	int32 DispenserFuel = 0;
 
+	/** What the siege is after. Replicated so a HUD can mark it. */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Siege")
+	bool bSiegeCore = false;
+
 	UFUNCTION()
 	void OnRep_OwnerPlayerState();
 
@@ -338,6 +442,10 @@ private:
 	void FinishConstruction();
 	void Die(bool bDemolished);
 
+	/** Why Donor may not spin now (a pick pending, cooldown, empty pool), or empty when they may.
+	 *  Asked before the gun leaves the hands. */
+	FString GetSpinRefusal(const AShooterCharacter* Donor) const;
+
 	/** True for the kind of hit that counts as the wrench: melee, from a player on this side. */
 	bool IsWrenchHit(const FDamageEvent& DamageEvent, AActor* DamageCauser) const;
 
@@ -361,4 +469,14 @@ private:
 
 	/** Fractional rounds hoarded by the dispenser's AmmoRoundsPerSecond between whole rounds. */
 	float AmmoAccumulator = 0.0f;
+
+	/** Server only, behind GetTotalDepositedMoney. */
+	int32 TotalDepositedMoney = 0;
+
+	/** Health the bets have added on top of the level's own, so a wrench upgrade keeps it. */
+	float DepositHealthBonus = 0.0f;
+
+	/** Walk the cores: the nearest standing one, dropped when bRequireUndefended and a player
+	 *  stands inside its DefendRadius. */
+	static ABuildableActor* FindCore(const UWorld* World, const FVector& From, bool bRequireUndefended);
 };

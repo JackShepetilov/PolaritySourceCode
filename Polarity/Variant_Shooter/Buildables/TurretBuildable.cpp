@@ -4,19 +4,26 @@
 
 #include "AI/AimPoints.h"
 #include "AI/PolarityTeams.h"
+#include "AnimationRuntime.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Coop/CoopPlayers.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSocket.h"
 #include "Engine/World.h"
+#include "Rendering/SkeletalMeshLODRenderData.h"
+#include "Rendering/SkeletalMeshRenderData.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "HAL/IConsoleManager.h"
 #include "Net/UnrealNetwork.h"
+#include "TurretAnimInstance.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Feedback/HitFeedbackSet.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
 #include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
@@ -29,6 +36,18 @@ static TAutoConsoleVariable<int32> CVarTurretDebug(
 	0,
 	TEXT("1: draw every turret's barrel rays (green = on a target), ranges and the line to its target, and log its decisions with [TURRET_DEBUG]: target changes, every shot, and why a vice is holding fire."),
 	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarTurretHeadTest(
+	TEXT("polarity.turret.headtest"),
+	0,
+	TEXT("1: every articulated turret ignores its target and runs the skeleton check in place: the head turns round at its turn rate, nods through the full pitch range and the jaw opens and closes. Visual only; the guns still fire on their own checks, so test without enemies."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarTurretInfiniteAmmo(
+	TEXT("polarity.turret.infiniteammo"),
+	0,
+	TEXT("1: turrets never spend a round, so a test fight is not decided by the magazine. The turret bench turns it on for its run and off again after."),
+	ECVF_Cheat);
 
 namespace TurretGate
 {
@@ -68,6 +87,17 @@ ATurretBuildable::ATurretBuildable()
 
 	TurnRateDegPerSecByLevel = { 150.0f, 200.0f, 260.0f };
 
+	// The articulated body. Under the building mesh so it rises with the construction and hides with
+	// the death; purely visual (the static mesh and the hitbox keep the collision). The pose is
+	// refreshed even off screen: the server reads the muzzle off the gun seated on it.
+	TurretMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("TurretMesh"));
+	TurretMesh->SetupAttachment(Mesh);
+	TurretMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	TurretMesh->SetGenerateOverlapEvents(false);
+	TurretMesh->SetCanEverAffectNavigation(false);
+	TurretMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	TurretMesh->AnimClass = UTurretAnimInstance::StaticClass();
+
 	// One mount per possible vice, all created up front: a component cannot be added to a class
 	// later, and which ones are in use is a matter of level, not of existence. Their transforms
 	// are the Blueprint's to set on the real mesh. Under the root, not the mesh: the mesh carries
@@ -98,6 +128,15 @@ void ATurretBuildable::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(ATurretBuildable, CurrentTarget);
 }
 
+void ATurretBuildable::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+	// Before BeginPlay and before any gun: a gun's BeginPlay seats it on vice 0, and vice 0 has to
+	// be on the socket by then.
+	SetupArticulatedHead();
+}
+
 void ATurretBuildable::BeginPlay()
 {
 	Super::BeginPlay();
@@ -107,12 +146,263 @@ void ATurretBuildable::BeginPlay()
 	{
 		USceneComponent* const Mount = ViceMounts.IsValidIndex(Index) ? ViceMounts[Index] : nullptr;
 		RestRelativeRotations[Index] = Mount ? Mount->GetRelativeRotation() : FRotator::ZeroRotator;
-		Vices[Index].BarrelRotation = Mount
-			? Mount->GetComponentQuat().RotateVector(BarrelLocalDirection.GetSafeNormal()).Rotation()
-			: GetActorRotation();
+		Vices[Index].BarrelRotation = Mount ? BarrelDirectionOf(Index).Rotation() : GetActorRotation();
+	}
+
+	if (bArticulatedHead)
+	{
+		// The static body is the placement ghost, the hitbox size and the collision; the skeleton is
+		// what is seen. Hidden rather than cleared, so those three keep working.
+		Mesh->SetHiddenInGame(true, false);
+		// The pose reads this frame's angles, not last frame's.
+		TurretMesh->AddTickPrerequisiteActor(this);
 	}
 
 	SyncNetOwner();
+}
+
+// ==================== The articulated head ====================
+
+void ATurretBuildable::SetupArticulatedHead()
+{
+	bArticulatedHead = false;
+	const USkeletalMesh* const Asset = TurretMesh ? TurretMesh->GetSkeletalMeshAsset() : nullptr;
+	if (!Asset)
+	{
+		// The placeholder turret: free mounts, as before.
+		return;
+	}
+
+	const FReferenceSkeleton& RefSkeleton = Asset->GetRefSkeleton();
+	const USkeletalMeshSocket* const Socket = Asset->FindSocket(WeaponMountSocket);
+	const int32 YawIndex = RefSkeleton.FindBoneIndex(YawBoneName);
+	const int32 PitchIndex = RefSkeleton.FindBoneIndex(PitchBoneName);
+	const int32 SocketBone = Socket ? RefSkeleton.FindBoneIndex(Socket->BoneName) : INDEX_NONE;
+	if (YawIndex == INDEX_NONE || PitchIndex == INDEX_NONE || SocketBone == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: %s is not an articulated turret (yaw bone %s %s, pitch bone %s %s, socket %s %s); vices stay free mounts"),
+			*GetName(), *Asset->GetName(),
+			*YawBoneName.ToString(), YawIndex != INDEX_NONE ? TEXT("ok") : TEXT("MISSING"),
+			*PitchBoneName.ToString(), PitchIndex != INDEX_NONE ? TEXT("ok") : TEXT("MISSING"),
+			*WeaponMountSocket.ToString(), SocketBone != INDEX_NONE ? TEXT("ok") : TEXT("MISSING (add it on weapon_mount in the mesh asset)"));
+		return;
+	}
+	if (!JawBoneName.IsNone() && RefSkeleton.FindBoneIndex(JawBoneName) == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: jaw bone %s not in %s, the jaw will not move"),
+			*GetName(), *JawBoneName.ToString(), *Asset->GetName());
+	}
+	if (!RefSkeleton.BoneIsChildOf(SocketBone, PitchIndex) && SocketBone != PitchIndex)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: socket %s hangs off %s, which does not follow the pitch bone %s; the gun will not tilt with the head"),
+			*GetName(), *WeaponMountSocket.ToString(), *Socket->BoneName.ToString(), *PitchBoneName.ToString());
+	}
+
+	// The barrel's direction with the head at rest, in the mesh's space: the socket in the reference
+	// pose, then the gripped gun's barrel inside the mount. Everything the aim needs from the asset.
+	MountAtRest = Socket->GetSocketLocalTransform() * FAnimationRuntime::GetComponentSpaceTransformRefPose(RefSkeleton, SocketBone);
+	HeadBarrelDirection = MountAtRest.GetRotation().RotateVector(BarrelLocalDirection.GetSafeNormal()).GetSafeNormal();
+	if (HeadBarrelDirection.IsNearlyZero())
+	{
+		HeadBarrelDirection = FVector::ForwardVector;
+	}
+
+	// Vice 0 becomes the socket. Location and rotation from the socket, scale absolute: a gun keeps
+	// its authored size whatever scale the meshes above it carry.
+	if (USceneComponent* const Mount = ViceMounts.IsValidIndex(HeadViceIndex) ? ViceMounts[HeadViceIndex].Get() : nullptr)
+	{
+		Mount->AttachToComponent(TurretMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, WeaponMountSocket);
+		Mount->SetRelativeLocationAndRotation(FVector::ZeroVector, FQuat::Identity);
+		Mount->SetAbsolute(false, false, true);
+		Mount->SetRelativeScale3D(FVector::OneVector);
+	}
+
+	HeadRotation = FRotator::ZeroRotator;
+	JawOffsetCm = 0.0f;
+	bArticulatedHead = true;
+
+	// A barrel along the pitch axis cannot be tilted onto anything: the head turns but never lines
+	// up, and the vice never fires. Seen 2026-09-23 with BarrelLocalDirection +X while the pack's
+	// guns lie along the mount's +Y. Say it loudly instead of failing quietly.
+	if (FMath::Abs(HeadBarrelDirection.Y) > 0.9f)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[TURRET_DEBUG] %s: the barrel at rest lies along the head's pitch axis (%s): the head cannot aim it and the vice will not fire. Fix BarrelLocalDirection or the %s socket rotation."),
+			*GetName(), *HeadBarrelDirection.ToCompactString(), *WeaponMountSocket.ToString());
+	}
+	else if (HeadBarrelDirection.X < 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: the gun points out of the BACK of the head (%s); it aims, but the head faces away from the target. Turn the %s socket 180 deg in yaw."),
+			*GetName(), *HeadBarrelDirection.ToCompactString(), *WeaponMountSocket.ToString());
+	}
+
+	const FRotator Bias = HeadBarrelDirection.Rotation();
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s articulated head: %s, vice %d on socket %s (bone %s), barrel at rest %s = %.1f deg yaw, %.1f deg pitch off the head's +X%s"),
+		*GetName(), *Asset->GetName(), HeadViceIndex, *WeaponMountSocket.ToString(), *Socket->BoneName.ToString(),
+		*HeadBarrelDirection.ToCompactString(), Bias.Yaw, Bias.Pitch,
+		(FMath::Abs(Bias.Yaw) > 5.0f || FMath::Abs(Bias.Pitch) > 5.0f) ? TEXT(" (compensated, but check the socket rotation or BarrelLocalDirection)") : TEXT(""));
+}
+
+FRotator ATurretBuildable::SolveHeadAngles(const FVector& Direction) const
+{
+	// Head frame = Yaw(about Z) * Pitch(about Y), the barrel at rest is B. Pitch first: yaw never
+	// changes Z, so pitch alone has to bring B's height to the wanted one. In the XZ plane B has
+	// length R and angle Phi, and FRotator's pitch moves that angle directly: z = R sin(pitch + Phi).
+	// Then yaw turns what pitch left in the XY plane onto the wanted heading.
+	const FVector Wanted = Direction.GetSafeNormal();
+	const FVector& B = HeadBarrelDirection;
+	const float R = FMath::Sqrt(B.X * B.X + B.Z * B.Z);
+	if (R < KINDA_SMALL_NUMBER || Wanted.IsNearlyZero())
+	{
+		return Wanted.Rotation();
+	}
+	const float Phi = FMath::Atan2(B.Z, B.X);
+	// sin(pitch + Phi) = z has two roots; take the one with the smaller tilt. With the barrel along
+	// -X the principal root is a pitch near 180, which the limit then clamps to -60 and the barrel
+	// never lines up (2026-09-23: not a single shot). The other root is the same aim, level.
+	const float Asin = FMath::Asin(FMath::Clamp(Wanted.Z / R, -1.0f, 1.0f));
+	const float PitchA = FMath::UnwindRadians(Asin - Phi);
+	const float PitchB = FMath::UnwindRadians(UE_PI - Asin - Phi);
+	const float Pitch = FMath::Abs(PitchA) <= FMath::Abs(PitchB) ? PitchA : PitchB;
+	const float XAfterPitch = B.X * FMath::Cos(Pitch) - B.Z * FMath::Sin(Pitch);
+	const float Yaw = FMath::Atan2(Wanted.Y, Wanted.X) - FMath::Atan2(B.Y, XAfterPitch);
+	return FRotator(FMath::RadiansToDegrees(Pitch), FMath::RadiansToDegrees(Yaw), 0.0f).GetNormalized();
+}
+
+void ATurretBuildable::UpdateHeadAim(float DeltaSeconds, const AActor* Target)
+{
+	const float TurnRate = TurnRateDegPerSec();
+	FRotator Goal = FRotator::ZeroRotator;
+
+	if (CVarTurretHeadTest.GetValueOnGameThread() != 0)
+	{
+		// The skeleton check: round and round at the turn rate, nodding end to end every 4 s.
+		const float Time = GetWorld()->GetTimeSeconds();
+		HeadRotation.Yaw = FRotator::NormalizeAxis(HeadRotation.Yaw + TurnRate * DeltaSeconds);
+		HeadRotation.Pitch = MaxPitchDegrees * FMath::Sin(Time * UE_TWO_PI / 4.0f);
+		HeadRotation.Roll = 0.0f;
+		Vices[HeadViceIndex].BarrelRotation = BarrelDirectionOf(HeadViceIndex).Rotation();
+		return;
+	}
+
+	// The rest pose is the reference pose: looking down the mesh's +X, level.
+	if (Target && GetViceWeapon(HeadViceIndex))
+	{
+		float FlightTime = 0.0f;
+		const FVector WantedDirection = (ComputeAimPointFor(HeadViceIndex, Target, FlightTime) - MuzzleLocationOf(HeadViceIndex)).GetSafeNormal();
+		Goal = WantedDirection.IsNearlyZero()
+			? HeadRotation
+			: SolveHeadAngles(TurretMesh->GetComponentQuat().UnrotateVector(WantedDirection));
+	}
+	Goal.Pitch = FMath::Clamp(Goal.Pitch, -MaxPitchDegrees, MaxPitchDegrees);
+	Goal.Roll = 0.0f;
+
+	// Joint angles at the same constant rate as a free mount. RInterpConstantTo takes the short way
+	// round in yaw; the yaw is kept in (-180, 180], which is the same pose either side of the seam.
+	HeadRotation = FMath::RInterpConstantTo(HeadRotation, Goal, DeltaSeconds, TurnRate);
+	HeadRotation.Yaw = FRotator::NormalizeAxis(HeadRotation.Yaw);
+	HeadRotation.Pitch = FMath::Clamp(HeadRotation.Pitch, -MaxPitchDegrees, MaxPitchDegrees);
+	HeadRotation.Roll = 0.0f;
+
+	Vices[HeadViceIndex].BarrelRotation = BarrelDirectionOf(HeadViceIndex).Rotation();
+}
+
+void ATurretBuildable::UpdateJaw(float DeltaSeconds)
+{
+	if (!bArticulatedHead)
+	{
+		return;
+	}
+	const float Clamp = bJawClampMeasured ? JawClampTargetCm : JawClampOffsetCm;
+	float Goal = GetViceWeapon(HeadViceIndex) ? Clamp : 0.0f;
+	if (CVarTurretHeadTest.GetValueOnGameThread() != 0)
+	{
+		// Open, closed, open, every 2 s.
+		Goal = FMath::Frac(GetWorld()->GetTimeSeconds() / 2.0f) < 0.5f ? Clamp : 0.0f;
+	}
+	JawOffsetCm = FMath::FInterpConstantTo(JawOffsetCm, Goal, DeltaSeconds, JawSpeedCmPerSec);
+}
+
+void ATurretBuildable::MeasureJawClamp(const AShooterWeapon* Weapon)
+{
+	bJawClampMeasured = false;
+	const USceneComponent* const Mount = ViceMounts.IsValidIndex(HeadViceIndex) ? ViceMounts[HeadViceIndex].Get() : nullptr;
+	const USkeletalMeshComponent* const Gun = Weapon ? Weapon->GetThirdPersonMesh() : nullptr;
+	const USkeletalMesh* const GunAsset = Gun ? Gun->GetSkeletalMeshAsset() : nullptr;
+	if (!bArticulatedHead || !Mount || !GunAsset)
+	{
+		return;
+	}
+
+	// The gun's mesh space -> the vice -> the head at rest. The first step is read off the live
+	// transforms (both hang on the same socket, so the head's pose cancels out), the second is the
+	// socket in the reference pose. In head space the jaw moves along +Y and the pads bear on the
+	// box around the mount given by JawContactHalfLength/Height.
+	const FTransform GunToHead = Gun->GetComponentTransform().GetRelativeTransform(Mount->GetComponentTransform()) * MountAtRest;
+	const FVector Center = MountAtRest.GetLocation();
+
+	// The gun's side toward the moving jaw (+Y) and away from it, inside the contact box. From the
+	// vertices where the CPU still has them (always in the editor), else from the bounds.
+	float Near = -UE_BIG_NUMBER;
+	float Far = UE_BIG_NUMBER;
+	int32 Counted = 0;
+	const FSkeletalMeshRenderData* const Render = GunAsset->GetResourceForRendering();
+	if (Render && Render->LODRenderData.Num() > 0)
+	{
+		const FPositionVertexBuffer& Positions = Render->LODRenderData[0].StaticVertexBuffers.PositionVertexBuffer;
+		if (Positions.GetVertexData() && Positions.GetNumVertices() > 0)
+		{
+			for (uint32 Index = 0; Index < Positions.GetNumVertices(); ++Index)
+			{
+				const FVector Point = GunToHead.TransformPosition(FVector(Positions.VertexPosition(Index)));
+				if (FMath::Abs(Point.X - Center.X) > JawContactHalfLengthCm || FMath::Abs(Point.Z - Center.Z) > JawContactHalfHeightCm)
+				{
+					continue;
+				}
+				Near = FMath::Max(Near, Point.Y);
+				Far = FMath::Min(Far, Point.Y);
+				++Counted;
+			}
+		}
+	}
+	const TCHAR* Source = TEXT("vertices");
+	if (Counted == 0)
+	{
+		// No vertex data, or nothing of the gun where the pads are: the whole gun's box, which is
+		// wider than the grip at worst, so the jaw stops early rather than inside the gun.
+		const FBox Box = GunAsset->GetBounds().GetBox().TransformBy(GunToHead);
+		if (!Box.IsValid)
+		{
+			return;
+		}
+		Near = Box.Max.Y;
+		Far = Box.Min.Y;
+		Source = TEXT("bounds");
+	}
+
+	// A vise holds a gun between both jaws: first lay the gun against the fixed jaw (its face is where
+	// the moving one stops fully closed), then bring the moving jaw down onto the other side. The shift
+	// is across the vice only, so the barrel's direction does not change, only where it starts.
+	const float FixedFace = JawFaceRestYCm + JawClosedLimitCm;
+	const float Seat = FixedFace - Far;
+	const FVector SeatInMount = MountAtRest.InverseTransformVectorNoScale(FVector(0.0f, Seat, 0.0f));
+	if (USkeletalMeshComponent* const TPMesh = Weapon->GetThirdPersonMesh())
+	{
+		TPMesh->AddRelativeLocation(SeatInMount);
+	}
+	if (USkeletalMeshComponent* const FPMesh = Weapon->GetFirstPersonMesh())
+	{
+		FPMesh->AddRelativeLocation(SeatInMount);
+	}
+	const float GunFar = Far + Seat;
+	const float GunNear = Near + Seat;
+
+	// Bring the pad face down onto the near side, a hair into it, and never past the travel.
+	JawClampTargetCm = FMath::Clamp(GunNear - JawSqueezeCm - JawFaceRestYCm, JawClosedLimitCm, JawOpenLimitCm);
+	bJawClampMeasured = true;
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s jaw on %s: %.2f cm wide at the pads (%s, %d pts), gun seated %.2f cm across onto the fixed jaw -> spans %.2f..%.2f, jaw %.2f cm (face at %.2f)%s"),
+		*GetName(), *GetNameSafe(GunAsset), Near - Far, Source, Counted, Seat, GunFar, GunNear, JawClampTargetCm,
+		JawFaceRestYCm + JawClampTargetCm,
+		Near - Far > JawOpenLimitCm - JawClosedLimitCm ? TEXT(" | WIDER than the vice opens: jaw stays fully open") : TEXT(""));
 }
 
 // ==================== Queries ====================
@@ -172,6 +462,49 @@ bool ATurretBuildable::FindViceFor(TSubclassOf<AShooterWeapon> WeaponClass, int3
 		}
 	}
 	return false;
+}
+
+int32 ATurretBuildable::FindTopUpViceFor(const AShooterWeapon* Weapon) const
+{
+	// A gun that refills itself or never runs out has no rounds to give: it would feed the turret
+	// forever, and an empty turret is meant to be silent until someone brings it a gun.
+	if (!Weapon || Weapon->IsMeleeWeapon() || Weapon->IsEnergyClass() || Weapon->HasInfiniteReserve())
+	{
+		return INDEX_NONE;
+	}
+	for (int32 Index = 0; Index < GetUnlockedViceCount(); ++Index)
+	{
+		const AShooterWeapon* const ViceWeapon = GetViceWeapon(Index);
+		if (ViceWeapon && ViceWeapon->GetClass() == Weapon->GetClass())
+		{
+			return Index;
+		}
+	}
+	return INDEX_NONE;
+}
+
+int32 ATurretBuildable::FindSwapViceFor(const AShooterWeapon* Weapon) const
+{
+	if (!Weapon || Weapon->IsMeleeWeapon())
+	{
+		return INDEX_NONE;
+	}
+	const bool bRocket = IsRocketClass(Weapon->GetClass());
+	for (int32 Index = 0; Index < GetUnlockedViceCount(); ++Index)
+	{
+		// The same heavy/ordinary rule as a free vice. A gun of the same class is never a swap: it
+		// either tops the vice up or, refilling itself, has nothing to add.
+		if ((Index == RocketViceIndex) != bRocket)
+		{
+			continue;
+		}
+		const AShooterWeapon* const ViceWeapon = GetViceWeapon(Index);
+		if (ViceWeapon && ViceWeapon->GetClass() != Weapon->GetClass())
+		{
+			return Index;
+		}
+	}
+	return INDEX_NONE;
 }
 
 int32 ATurretBuildable::FindViceOf(const AShooterWeapon* Weapon) const
@@ -290,28 +623,6 @@ float ATurretBuildable::ExplosionRadiusOf(const AShooterWeapon* Weapon)
 	return CDO ? CDO->GetExplosionRadius() : 0.0f;
 }
 
-int32 ATurretBuildable::ReserveCapacityOf(int32 ViceIndex) const
-{
-	const AShooterWeapon* const Weapon = GetViceWeapon(ViceIndex);
-	return Weapon ? FMath::Max(0, ReserveMagazines) * FMath::Max(1, Weapon->GetMagazineSize()) : 0;
-}
-
-int32 ATurretBuildable::RoundsPerMetalFor(const AShooterWeapon* Weapon) const
-{
-	if (!Weapon)
-	{
-		return 1;
-	}
-	for (const TPair<TSubclassOf<AShooterWeapon>, int32>& Pair : RoundsPerMetalByWeapon)
-	{
-		if (Pair.Key && Weapon->IsA(Pair.Key))
-		{
-			return FMath::Max(1, Pair.Value);
-		}
-	}
-	return 1;
-}
-
 TSubclassOf<ADroppedRangedWeapon> ATurretBuildable::ResolveDropClass(const AShooterWeapon* Weapon) const
 {
 	if (!Weapon)
@@ -388,12 +699,29 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 		return false;
 	}
 
+	// Rounds come only from guns (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md, section 0.3):
+	// a gun of a class a vice already holds hands over its rounds and stays with the player; a new
+	// gun goes into a free vice with every round it carries. Metal buys none.
+	const int32 TopUpIndex = FindTopUpViceFor(Held);
+	if (TopUpIndex != INDEX_NONE)
+	{
+		return TopUpVice(Donor, Held, TopUpIndex, ReportedLoadedRounds);
+	}
+
+	// No free vice: a taken one of the right kind is swapped, its gun put down once the new one has
+	// actually left the donor's hands (the author's call, 2026-09-24).
 	int32 ViceIndex = INDEX_NONE;
+	bool bSwap = false;
 	if (!FindViceFor(Held->GetClass(), ViceIndex))
 	{
-		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused %s: no free vice for it (level %d, heavy %d)"),
-			*GetName(), *Held->GetClass()->GetName(), GetBuildLevel(), IsRocketClass(Held->GetClass()) ? 1 : 0);
-		return false;
+		ViceIndex = FindSwapViceFor(Held);
+		if (ViceIndex == INDEX_NONE)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s refused %s: no free vice and nothing to swap (level %d, heavy %d)"),
+				*GetName(), *Held->GetClass()->GetName(), GetBuildLevel(), IsRocketClass(Held->GetClass()) ? 1 : 0);
+			return false;
+		}
+		bSwap = true;
 	}
 
 	// Everything the new copy has to inherit, read before the donor's gun is destroyed.
@@ -414,6 +742,10 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 		Loaded = ReportedLoadedRounds;
 	}
 	Loaded = FMath::Clamp(Loaded, 0, Magazine);
+	if (bSwap)
+	{
+		EjectViceWeapon(ViceIndex, Donor);
+	}
 	if (Reserve < 0)
 	{
 		Reserve = FMath::Max(0, InfiniteReserveMagazinesGranted) * Magazine;
@@ -446,11 +778,12 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 	Vice.DropClass = DropClass;
 	Vice.DropCharge = DropCharge;
 	ViceRounds[ViceIndex] = Loaded;
-	ViceReserve[ViceIndex] = FMath::Min(Reserve, ReserveCapacityOf(ViceIndex));
+	// No ceiling: every round the gun brought is kept, the same as a looted gun in the hands.
+	ViceReserve[ViceIndex] = FMath::Max(0, Reserve);
 
-	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s took %s from %s into vice %d: %d loaded, %d reserve (cap %d), range %.0f cm, %s, refire %.2f s, drop %s"),
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s took %s from %s into vice %d: %d loaded, %d reserve, range %.0f cm, %s, refire %.2f s, drop %s"),
 		*GetName(), *WeaponClass->GetName(), *Donor->GetName(), ViceIndex, ViceRounds[ViceIndex], ViceReserve[ViceIndex],
-		ReserveCapacityOf(ViceIndex), Vice.Range, Mounted->IsHitscan() ? TEXT("hitscan") : TEXT("projectile"),
+		Vice.Range, Mounted->IsHitscan() ? TEXT("hitscan") : TEXT("projectile"),
 		Mounted->GetActualRefireRate(), *GetNameSafe(DropClass));
 
 	OnBuildableChanged.Broadcast(this);
@@ -503,6 +836,12 @@ void ATurretBuildable::AttachWeaponMeshes(AShooterWeapon* Weapon)
 		FPMesh->AttachToComponent(Mount, Rules);
 		AShooterWeapon::AlignMeshToGripSocket(FPMesh, AShooterWeapon::OptionalGripSocketName);
 		FPMesh->SetVisibility(false, true);
+	}
+
+	// Now that the gun lies where it will stay, find where the jaw has to stop to hold it.
+	if (IsHeadVice(ViceIndex) && FindViceOf(Weapon) == HeadViceIndex)
+	{
+		MeasureJawClamp(Weapon);
 	}
 }
 
@@ -594,57 +933,6 @@ void ATurretBuildable::OnLevelChanged(int32 NewLevel)
 	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s level %d: %d vice(s) open"), *GetName(), NewLevel, GetUnlockedViceCount());
 }
 
-bool ATurretBuildable::OnWrenchHitExtra(AShooterPlayerState* Hitter, int32& RemainingBudget)
-{
-	if (!Hitter || MetalPerRound <= 0)
-	{
-		return false;
-	}
-	// TF2's restock: one hit buys up to RoundsPerWrenchHit rounds at MetalPerRound each, as far as
-	// the hitter's metal and the vices' room go. Into the reserve; a vice that ran dry starts its
-	// reload right away, so the first hit after silence is also the one that brings the gun back.
-	int32 Bought = 0;
-	const float Now = GetWorld()->GetTimeSeconds();
-	for (int32 Index = 0; Index < GetUnlockedViceCount() && Bought < RoundsPerWrenchHit; ++Index)
-	{
-		if (!GetViceWeapon(Index))
-		{
-			continue;
-		}
-		// Room counts the magazine too: a vice with a full reserve and a half-spent magazine can still
-		// take rounds, and the reload moves them down when the magazine runs dry.
-		const AShooterWeapon* const ViceWeapon = GetViceWeapon(Index);
-		const int32 Magazine = ViceWeapon ? FMath::Max(1, ViceWeapon->GetMagazineSize()) : 0;
-		const int32 Room = ReserveCapacityOf(Index) + Magazine - (ViceRounds[Index] + ViceReserve[Index]);
-		const int32 Bundle = RoundsPerMetalFor(ViceWeapon);
-		const int32 Affordable = (RemainingBudget / MetalPerRound) * Bundle;
-		const int32 Rounds = FMath::Min3(RoundsPerWrenchHit - Bought, Room, Affordable);
-		if (Rounds <= 0)
-		{
-			continue;
-		}
-		const int32 MetalCost = FMath::DivideAndRoundUp(Rounds, Bundle) * MetalPerRound;
-		if (!Hitter->TrySpendMetal(MetalCost))
-		{
-			continue;
-		}
-		ViceReserve[Index] += Rounds;
-		RemainingBudget -= MetalCost;
-		Bought += Rounds;
-		if (ViceRounds[Index] <= 0 && Vices[Index].ReloadEndTime < 0.0f)
-		{
-			StartReload(Index, Now);
-		}
-	}
-	if (Bought > 0)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s restocked %d round(s) for %d metal by %s"),
-			*GetName(), Bought, Bought * MetalPerRound, *Hitter->GetPlayerName());
-		OnBuildableChanged.Broadcast(this);
-	}
-	return Bought > 0;
-}
-
 void ATurretBuildable::OnDestroyed_Native()
 {
 	// Whatever way it goes, the guns come back out: a destroyed turret is not also a lost gun.
@@ -708,6 +996,90 @@ void ATurretBuildable::DropViceWeapon(int32 ViceIndex)
 	ClearVice(ViceIndex);
 }
 
+void ATurretBuildable::EjectViceWeapon(int32 ViceIndex, AShooterCharacter* Donor)
+{
+	AShooterWeapon* const Weapon = GetViceWeapon(ViceIndex);
+	if (!Weapon)
+	{
+		return;
+	}
+
+	// A gun with a floor version goes down next to the turret with its rounds, the same way a
+	// destroyed turret lets its guns go.
+	const TSubclassOf<ADroppedRangedWeapon> DropClass = Vices[ViceIndex].DropClass ? Vices[ViceIndex].DropClass : ResolveDropClass(Weapon);
+	if (DropClass || !Donor)
+	{
+		DropViceWeapon(ViceIndex);
+		return;
+	}
+
+	// No floor version (a gun that only ever came from a level pickup): it would vanish, so it goes
+	// back into the donor's hands instead, as loot, with every round it had left.
+	const TSubclassOf<AShooterWeapon> WeaponClass = Weapon->GetClass();
+	const int32 Loaded = ViceRounds[ViceIndex];
+	const int32 Reserve = ViceReserve[ViceIndex];
+	Weapon->Destroy();
+	ClearVice(ViceIndex);
+
+	Donor->AddWeaponClass(WeaponClass);
+	if (AShooterWeapon* const Returned = Donor->FindWeaponOfType(WeaponClass))
+	{
+		Returned->ConfigureFiniteEnergyReserve();
+		Returned->SetBulletCount(Loaded);
+		Returned->SetEnergyReserve(Reserve);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s: swapped %s out of vice %d back to %s's hands (no floor version) with %d + %d rounds"),
+		*GetName(), *WeaponClass->GetName(), ViceIndex, *Donor->GetName(), Loaded, Reserve);
+}
+
+bool ATurretBuildable::TopUpVice(AShooterCharacter* Donor, AShooterWeapon* Weapon, int32 ViceIndex, int32 ReportedLoadedRounds)
+{
+	if (!Donor || !Weapon || !ViceReserve.IsValidIndex(ViceIndex))
+	{
+		return false;
+	}
+
+	// Loaded: the donor's own count when it sent one, the way a mounted gun is read. Spare: off the
+	// gun for a looted (energy) one, out of the cells for a cell gun, which hold the loaded part too.
+	const int32 Magazine = FMath::Max(1, Weapon->GetMagazineSize());
+	const int32 Loaded = FMath::Clamp(ReportedLoadedRounds >= 0 ? ReportedLoadedRounds : Weapon->GetBulletCount(), 0, Magazine);
+	int32 Spare = 0;
+	if (Weapon->UsesEnergyReserve())
+	{
+		Spare = Weapon->GetEnergyReserve();
+		Weapon->SetEnergyReserve(0);
+	}
+	else if (Weapon->OwnsAmmoCells())
+	{
+		if (UInventoryComponent* const Inventory = Donor->GetInventoryComponent())
+		{
+			Spare = FMath::Max(0, Inventory->TakeAllAmmo() - Loaded);
+		}
+	}
+	Weapon->SetBulletCount(0);
+
+	const int32 Rounds = Loaded + Spare;
+	if (Rounds <= 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s: %s's %s is empty, nothing to top up vice %d with"),
+			*GetName(), *Donor->GetName(), *Weapon->GetClass()->GetName(), ViceIndex);
+		return false;
+	}
+
+	ViceReserve[ViceIndex] += Rounds;
+	// A vice that ran dry starts its reload at once, so the rounds that bring it back are also the
+	// ones that make it fire.
+	if (ViceRounds[ViceIndex] <= 0 && Vices[ViceIndex].ReloadEndTime < 0.0f)
+	{
+		StartReload(ViceIndex, GetWorld()->GetTimeSeconds());
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s: %s topped up vice %d with %d round(s) from %s (%d loaded + %d spare), reserve now %d; the gun stays with them"),
+		*GetName(), *Donor->GetName(), ViceIndex, Rounds, *Weapon->GetClass()->GetName(), Loaded, Spare, ViceReserve[ViceIndex]);
+	OnBuildableChanged.Broadcast(this);
+	return true;
+}
+
 void ATurretBuildable::ClearVice(int32 ViceIndex)
 {
 	if (!Vices.IsValidIndex(ViceIndex))
@@ -732,6 +1104,8 @@ void ATurretBuildable::Tick(float DeltaSeconds)
 	{
 		UpdateAim(DeltaSeconds);
 	}
+	// The jaw works while the turret rises too: a turret placed with its gun takes it at once.
+	UpdateJaw(DeltaSeconds);
 	Super::Tick(DeltaSeconds);
 }
 
@@ -747,6 +1121,12 @@ FRotator ATurretBuildable::BarrelRotationFor(const FVector& WorldDirection) cons
 
 FVector ATurretBuildable::BarrelDirectionOf(int32 ViceIndex) const
 {
+	// The head's barrel from the joint angles, not from the socket: the bones are posed after this
+	// actor ticks, so the socket still shows last frame's aim while the angles are already this one's.
+	if (IsHeadVice(ViceIndex))
+	{
+		return TurretMesh->GetComponentQuat().RotateVector(HeadRotation.Quaternion().RotateVector(HeadBarrelDirection));
+	}
 	const USceneComponent* const Mount = ViceMounts.IsValidIndex(ViceIndex) ? ViceMounts[ViceIndex] : nullptr;
 	return Mount ? Mount->GetComponentQuat().RotateVector(BarrelLocalDirection.GetSafeNormal()) : GetActorForwardVector();
 }
@@ -795,6 +1175,12 @@ void ATurretBuildable::UpdateAim(float DeltaSeconds)
 
 	for (int32 Index = 0; Index < MaxVices; ++Index)
 	{
+		if (IsHeadVice(Index))
+		{
+			// This mount is the head's socket: it is aimed by the joints, never rotated directly.
+			UpdateHeadAim(DeltaSeconds, Target);
+			continue;
+		}
 		USceneComponent* const Mount = ViceMounts.IsValidIndex(Index) ? ViceMounts[Index] : nullptr;
 		if (!Mount)
 		{
@@ -1173,7 +1559,10 @@ void ATurretBuildable::FireVice(int32 ViceIndex, const FVector& AimPoint, float 
 	Weapon->SetInstigator(GetOwnerPawn());
 	Weapon->FireMounted(AimPoint);
 
-	ViceRounds[ViceIndex] = FMath::Max(0, ViceRounds[ViceIndex] - 1);
+	if (CVarTurretInfiniteAmmo.GetValueOnGameThread() == 0)
+	{
+		ViceRounds[ViceIndex] = FMath::Max(0, ViceRounds[ViceIndex] - 1);
+	}
 	Vices[ViceIndex].NextShotTime = Now + FMath::Max(0.05f, Weapon->GetActualRefireRate());
 	if (ViceRounds[ViceIndex] <= 0 && ViceReserve[ViceIndex] > 0)
 	{
@@ -1294,6 +1683,11 @@ namespace TurretDebug
 		UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s level %d, %d vice(s), target %s, turn %.0f deg/s"),
 			*Turret->GetName(), Turret->GetBuildLevel(), Turret->GetUnlockedViceCount(),
 			*GetNameSafe(Turret->GetCurrentTarget()), Turret->TurnRateDegPerSec());
+		if (Turret->HasArticulatedHead())
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG]   head: yaw %.1f, pitch %.1f (limit %.0f), jaw %.2f cm"),
+				Turret->GetHeadYaw(), Turret->GetHeadPitch(), Turret->MaxPitchDegrees, Turret->GetJawOffsetCm());
+		}
 		for (int32 Index = 0; Index < ATurretBuildable::MaxVices; ++Index)
 		{
 			const AShooterWeapon* const Weapon = Turret->GetViceWeapon(Index);

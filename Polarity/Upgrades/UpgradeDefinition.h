@@ -12,6 +12,34 @@ class UUpgradeComponent;
 class UInputAction;
 
 /**
+ * The action an upgrade belongs to, Hades-style: one upgrade per slot, and a new one for a taken
+ * slot replaces the old. None is a passive: it takes no slot and sits next to anything.
+ * Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md.
+ */
+UENUM(BlueprintType)
+enum class EUpgradeSlot : uint8
+{
+	None,
+	Jump,
+	Aim,
+	Slide,
+	Sprint,
+	Grapple,
+	Melee,
+	Ability,
+};
+
+/** How good a dispenser card is. Rolled per card from the bet; each step is one more level. */
+UENUM(BlueprintType)
+enum class EUpgradeRarity : uint8
+{
+	Common,
+	Rare,
+	Epic,
+	Legendary,
+};
+
+/**
  * One "stat row" displayed on the upgrade card in the level-up Choice UI — Hades-style.
  * E.g. { Label = "Doom Damage", Value = "100" }.
  */
@@ -82,6 +110,25 @@ public:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade")
 	TArray<FGameplayTag> MutuallyExclusiveWith;
+
+	// ==================== Dispenser slot machine ====================
+
+	/** Offered by the dispenser. Off by default, so an upgrade joins the pool on purpose. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser")
+	bool bInDispenserPool = false;
+
+	/** The action this upgrade takes: one per slot, a new one replaces the old. None = passive. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser")
+	EUpgradeSlot Slot = EUpgradeSlot::None;
+
+	/** First siege wave this may be offered in (0 = before the first wave). Keeps the strong ones
+	 *  out of the opening minutes. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser", meta = (ClampMin = "0"))
+	int32 MinWave = 0;
+
+	/** Relative chance to be drawn among the eligible upgrades. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser", meta = (ClampMin = "0.01"))
+	float OfferWeight = 1.0f;
 
 	// ==================== Shared Health-Pickup Pool ====================
 

@@ -20,6 +20,10 @@
 #include "Engine/DamageEvents.h"
 #include "Net/UnrealNetwork.h"
 
+// Marks a pull started by the grapple rather than by a yank. Server-side only, like the pull itself;
+// written by UAbilityHandler_Grapple::FinishFetch with the same name.
+static const FName GrappleFetchPullTag(TEXT("GrappleFetchPull"));
+
 ADroppedRangedWeapon::ADroppedRangedWeapon()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -263,12 +267,9 @@ void ADroppedRangedWeapon::SetCharge(float NewCharge)
 		FieldComponent->SetSourceDescription(Desc);
 	}
 
-	// Register (or re-register) charge widget
-	if (UEMFChargeWidgetSubsystem* WidgetSub = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
-	{
-		WidgetSub->UnregisterDroppedRangedWeapon(this);
-		WidgetSub->RegisterDroppedRangedWeapon(this);
-	}
+	// No charge widget over a dropped gun any more. It was there to say "channel the opposite sign to
+	// take this"; the grapple fetches drops now, and the brackets plus the weapon card say everything
+	// the player needs. @see AShooterCharacter::UpdateGrappleFetchAiming
 }
 
 // ==================== Ammo Distribution ====================
@@ -539,9 +540,12 @@ void ADroppedRangedWeapon::UpdatePull(float DeltaTime)
 		PullingCharacter->GetActorEyesViewPoint(CameraLoc, CameraRot);
 	}
 
-	// Transform offset into world space relative to camera
-	const FVector WorldTarget = CameraLoc
-		+ CameraRot.RotateVector(PullTargetOffset);
+	// Transform offset into world space relative to camera. A grapple fetch instead reels the weapon
+	// in to where the line leaves the character, so the gun arrives at the end of the rope rather
+	// than at a point beside it. Re-read every tick: the player keeps moving while it flies.
+	const FVector WorldTarget = ActorHasTag(GrappleFetchPullTag)
+		? PullingCharacter->GetGrappleHandLocation()
+		: CameraLoc + CameraRot.RotateVector(PullTargetOffset);
 	const FRotator WorldTargetRot = CameraRot + PullTargetRotation;
 
 	// Interpolate
@@ -571,8 +575,15 @@ void ADroppedRangedWeapon::CompletePull()
 	SetActorHiddenInGame(true);
 	SetActorEnableCollision(false);
 
+	const bool bGrappleFetch = ActorHasTag(GrappleFetchPullTag);
+
 	if (!PullingCharacter.IsValid() || !WeaponClass)
 	{
+		// A fetch put the puller's weapon away; with nothing to give, give that one back.
+		if (bGrappleFetch && PullingCharacter.IsValid())
+		{
+			PullingCharacter->FinishWeaponFetch(false);
+		}
 		Destroy();
 		return;
 	}
@@ -593,9 +604,19 @@ void ADroppedRangedWeapon::CompletePull()
 
 	if (!ExistingWeapon)
 	{
-		// Grant a new weapon (permanent) with animated lower→swap→raise transition.
-		// AddWeaponClassAnimated falls back to instant equip if player is unarmed.
-		Player->AddWeaponClassAnimated(WeaponClass);
+		// Grant a new weapon (permanent). A yank plays the animated lower→swap→raise transition
+		// (AddWeaponClassAnimated falls back to instant equip if the player is unarmed). A grapple
+		// fetch does not: its throw already put the old weapon away, so the new one goes straight
+		// into the hand here and FinishWeaponFetch below plays its draw. Running the swap on top
+		// would bring the old weapon out only to holster it again.
+		if (bGrappleFetch)
+		{
+			Player->AddWeaponClass(WeaponClass);
+		}
+		else
+		{
+			Player->AddWeaponClassAnimated(WeaponClass);
+		}
 
 		// Tag the freshly-added weapon as yank-acquired so the strict "one yanked weapon at a time"
 		// rule (ThrowYankedWeaponIfAny) can identify and discard it on subsequent yanks.
@@ -695,6 +716,13 @@ void ADroppedRangedWeapon::CompletePull()
 		{
 			Player->UpdateWeaponHUD(ExistingWeapon->GetBulletCount(), ExistingWeapon->GetMagazineSize());
 		}
+	}
+
+	// The hands went on the rope at the throw. Now the gun is here: draw what is in hand, which is
+	// the fetched gun when it was granted and the old one when the drop was worth only its rounds.
+	if (bGrappleFetch)
+	{
+		Player->FinishWeaponFetch(/*bGotWeapon*/ !ExistingWeapon);
 	}
 
 	// Destroy this world actor (weapon is now in player's inventory)

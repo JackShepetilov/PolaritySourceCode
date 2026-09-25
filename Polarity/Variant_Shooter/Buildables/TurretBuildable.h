@@ -22,6 +22,15 @@
 // Server-authoritative like every building: the server picks targets, turns the vices and fires;
 // clients get the guns (replicated actors that attach themselves), the ammunition counts for the
 // HUD and the current target, and turn their own copies of the vices toward it for the look of it.
+//
+// The articulated head. With a skeletal mesh on TurretMesh (root > turret_yaw > turret_pitch >
+// jaw_slide, weapon_mount), vice 0 stops being a free-floating mount: it rides the WeaponMount
+// socket, and aiming it means turning the head. The turret keeps two joint angles (yaw about the
+// mesh's +Z, pitch about the head's +Y, 0/0 = the reference pose looking down +X) and the moving
+// jaw's offset along the head's +Y; UTurretAnimInstance turns those into bones. Everything is done
+// in the mesh's component space against the reference pose, so the bones' own axes (whatever the
+// FBX export made of them) never enter the math. The other vices stay free mounts until their
+// level has a mesh of its own.
 
 #pragma once
 
@@ -35,6 +44,7 @@ class AShooterCharacter;
 class AShooterWeapon;
 class UHitFeedbackSet;
 class USceneComponent;
+class USkeletalMeshComponent;
 
 /** Server-side state of one vice. The parts a client needs (the gun, the counts) live in the
  *  replicated arrays on the turret, indexed the same way. */
@@ -85,6 +95,70 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TArray<TObjectPtr<USceneComponent>> ViceMounts;
 
+	/** The articulated turret (SK_T01 and later levels). Rides the building mesh, so it rises with
+	 *  the construction. Leave it empty and the turret is the old static one with free mounts. When
+	 *  it has a mesh with the head bones and the WeaponMount socket, the static Mesh is hidden in
+	 *  game (it stays as the placement ghost, the hitbox size and the collision) and vice 0 is
+	 *  seated on the socket. Keep its scale at 1: the asset is authored in real centimetres. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<USkeletalMeshComponent> TurretMesh;
+
+	// ==================== Settings: articulated head ====================
+
+	/** Socket on TurretMesh the head's vice sits on. Put it on the weapon_mount bone in the skeletal
+	 *  mesh asset; its offset and rotation are where a gripped gun lies. The gun's barrel should come
+	 *  out along the head's +X at rest, and a small error is compensated (the log says how much). */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head")
+	FName WeaponMountSocket = TEXT("WeaponMount");
+
+	/** Turns about the mesh's vertical axis, carrying everything above the base. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head")
+	FName YawBoneName = TEXT("turret_yaw");
+
+	/** Tilts about the head's crosswise axis, carrying the vice and the weapon mount. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head")
+	FName PitchBoneName = TEXT("turret_pitch");
+
+	/** Slides along the head's +Y to close on the gun. None = the jaw does not move. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head")
+	FName JawBoneName = TEXT("jaw_slide");
+
+	/** Fallback clamp: where the moving jaw goes from its rest (open) position when a gun is in the
+	 *  vice and its width could not be measured, cm along the head's +Y. Negative closes. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (Units = "cm"))
+	float JawClampOffsetCm = -3.0f;
+
+	/** The moving jaw's pad face at rest, along the mesh's +Y, cm. The jaw closes by bringing this
+	 *  face down onto the gun's side. SK_Polarity_T01: 4.5 (jaw pivot 7.5, pad 3.0 in front of it). */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (Units = "cm"))
+	float JawFaceRestYCm = 4.5f;
+
+	/** The jaw's travel from rest: fully closed (pads touching) and fully open. SK_Polarity_T01:
+	 *  -9.9 and +4.1 (9.9 cm open at rest, 0 to 14 cm in all). */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (Units = "cm"))
+	float JawClosedLimitCm = -9.9f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (Units = "cm"))
+	float JawOpenLimitCm = 4.1f;
+
+	/** How far the pad goes past the gun's surface, so the grip reads as a squeeze, not a touch. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (ClampMin = "0.0", Units = "cm"))
+	float JawSqueezeCm = 0.15f;
+
+	/** The part of the gun the pads actually bear on: this far along the barrel either side of the
+	 *  mount, and this far up and down. Only the gun's surface inside it decides where the jaw stops,
+	 *  so a scope or a side lever elsewhere does not hold the jaw open. SK_Polarity_T01's pads are
+	 *  5.2 cm long. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (ClampMin = "0.1", Units = "cm"))
+	float JawContactHalfLengthCm = 2.6f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (ClampMin = "0.1", Units = "cm"))
+	float JawContactHalfHeightCm = 4.0f;
+
+	/** How fast the jaw travels, cm per second. */
+	UPROPERTY(EditDefaultsOnly, Category = "Turret|Head", meta = (ClampMin = "0.1", Units = "cm/s"))
+	float JawSpeedCmPerSec = 20.0f;
+
 	// ==================== Settings: vices ====================
 
 	/** Direction the barrel points in a mount's space once a gun is gripped by it. Set once, with
@@ -117,7 +191,8 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Aim")
 	TArray<float> TurnRateDegPerSecByLevel;
 
-	/** How far a vice may pitch up or down. */
+	/** How far a vice may pitch up or down. For the articulated head it is the joint's own limit
+	 *  (relative to the base, not the horizon): set it to the safe range the asset report gives. */
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Aim", meta = (ClampMin = "0.0", ClampMax = "89.0", Units = "deg"))
 	float MaxPitchDegrees = 60.0f;
 
@@ -154,26 +229,9 @@ public:
 
 	// ==================== Settings: ammunition ====================
 
-	/** Metal one round costs at the wrench. TF2: 1 per shell. */
-	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
-	int32 MetalPerRound = 1;
-
-	/** Bundle size bought for one metal, by weapon class.  A parent class covers its children;
-	 *  leave absent for the one-round default.  This makes cheap bullets tunable without floats. */
-	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
-	TMap<TSubclassOf<AShooterWeapon>, int32> RoundsPerMetalByWeapon;
-
-	/** Total metal one wrench hit may invest, shared by repair, ammo and upgrade. */
+	/** Most metal one wrench hit may invest. Only the upgrade spends metal now. */
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "0"))
 	int32 WrenchMetalBudget = 28;
-
-	/** Most rounds one wrench hit buys, across all vices. TF2: 40. */
-	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "1"))
-	int32 RoundsPerWrenchHit = 40;
-
-	/** Reserve a vice holds on top of the loaded magazine, in magazines of its gun. */
-	UPROPERTY(EditDefaultsOnly, Category = "Turret|Ammo", meta = (ClampMin = "0"))
-	int32 ReserveMagazines = 4;
 
 	/** What a gun with an endless reserve in a player's hands (the class weapon) brings with it, in
 	 *  magazines. It had no reserve to hand over, and the turret will not pretend it did. */
@@ -227,8 +285,36 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Turret")
 	bool FindViceFor(TSubclassOf<AShooterWeapon> WeaponClass, int32& OutViceIndex) const;
 
+	/** A vice already holding a gun of exactly this one's class, which Weapon can top up with its
+	 *  rounds while the player keeps it; INDEX_NONE when there is none. A self-refilling gun (the
+	 *  class weapon) never tops up: it would feed the turret forever. Checked before FindViceFor. */
+	UFUNCTION(BlueprintPure, Category = "Turret")
+	int32 FindTopUpViceFor(const AShooterWeapon* Weapon) const;
+
+	/** A taken vice Weapon may replace, when there is no free one: open, of the right kind (heavy or
+	 *  ordinary) and holding a gun of another class. The old gun drops to the floor with its rounds,
+	 *  or goes back to the donor's hands when it has no floor version. INDEX_NONE when none. */
+	UFUNCTION(BlueprintPure, Category = "Turret")
+	int32 FindSwapViceFor(const AShooterWeapon* Weapon) const;
+
 	UFUNCTION(BlueprintPure, Category = "Turret")
 	bool IsRocketClass(TSubclassOf<AShooterWeapon> WeaponClass) const;
+
+	/** True when TurretMesh carries a usable skeleton and vice 0 is aimed by turning the head. */
+	UFUNCTION(BlueprintPure, Category = "Turret|Head")
+	bool HasArticulatedHead() const { return bArticulatedHead; }
+
+	/** Head joint angles, degrees: yaw about the mesh's +Z, pitch about the head's +Y (positive is
+	 *  up). 0/0 is the reference pose. What UTurretAnimInstance puts on the bones. */
+	UFUNCTION(BlueprintPure, Category = "Turret|Head")
+	float GetHeadYaw() const { return HeadRotation.Yaw; }
+
+	UFUNCTION(BlueprintPure, Category = "Turret|Head")
+	float GetHeadPitch() const { return HeadRotation.Pitch; }
+
+	/** The moving jaw's offset from its rest (open) position along the head's +Y, cm. */
+	UFUNCTION(BlueprintPure, Category = "Turret|Head")
+	float GetJawOffsetCm() const { return JawOffsetCm; }
 
 	// ==================== Actions (server) ====================
 
@@ -258,6 +344,8 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+	virtual void PostInitializeComponents() override;
+
 protected:
 
 	virtual void BeginPlay() override;
@@ -265,7 +353,6 @@ protected:
 	// ==================== ABuildableActor hooks ====================
 
 	virtual void TickActive(float DeltaSeconds) override;
-	virtual bool OnWrenchHitExtra(AShooterPlayerState* Hitter, int32& RemainingBudget) override;
 	virtual int32 GetWrenchMetalBudget() const override { return WrenchMetalBudget; }
 	virtual void OnLevelChanged(int32 NewLevel) override;
 	virtual void OnDestroyed_Native() override;
@@ -319,21 +406,41 @@ private:
 	void DropViceWeapon(int32 ViceIndex);
 	void ClearVice(int32 ViceIndex);
 
+	/** Empty ViceIndex for a swap: its gun to the floor, or to Donor's hands without a floor version. */
+	void EjectViceWeapon(int32 ViceIndex, AShooterCharacter* Donor);
+
+	/** Pour Weapon's rounds into ViceIndex's reserve; the donor keeps the emptied gun. */
+	bool TopUpVice(AShooterCharacter* Donor, AShooterWeapon* Weapon, int32 ViceIndex, int32 ReportedLoadedRounds);
+
 	// ==================== Every machine: aiming ====================
 
 	void UpdateAim(float DeltaSeconds);
+	void UpdateHeadAim(float DeltaSeconds, const AActor* Target);
+	void UpdateJaw(float DeltaSeconds);
 	FVector ComputeAimPointFor(int32 ViceIndex, const AActor* Target, float& OutFlightTime) const;
 	FRotator BarrelRotationFor(const FVector& WorldDirection) const;
 	FVector BarrelDirectionOf(int32 ViceIndex) const;
 	FVector MuzzleLocationOf(int32 ViceIndex) const;
+
+	// ==================== Every machine: the articulated head ====================
+
+	/** Check TurretMesh, seat vice 0 on the socket, read the barrel's rest direction. */
+	void SetupArticulatedHead();
+	bool IsHeadVice(int32 ViceIndex) const { return bArticulatedHead && ViceIndex == HeadViceIndex; }
+
+	/** The joint angles that point the barrel down Direction, given in the mesh's space. Exact for a
+	 *  barrel that is not quite along +X at rest. */
+	FRotator SolveHeadAngles(const FVector& Direction) const;
+
+	/** Measure this gun's width where the pads bear, lay it against the fixed jaw and set where the
+	 *  moving jaw stops to squeeze it. Off the gun's mesh as it sits in the vice. */
+	void MeasureJawClamp(const AShooterWeapon* Weapon);
 
 	// ==================== Helpers ====================
 
 	float ComputeRangeFor(const AShooterWeapon* Weapon) const;
 	static float ProjectileSpeedOf(const AShooterWeapon* Weapon);
 	static float ExplosionRadiusOf(const AShooterWeapon* Weapon);
-	int32 ReserveCapacityOf(int32 ViceIndex) const;
-	int32 RoundsPerMetalFor(const AShooterWeapon* Weapon) const;
 	TSubclassOf<ADroppedRangedWeapon> ResolveDropClass(const AShooterWeapon* Weapon) const;
 	APawn* GetOwnerPawn() const;
 	AShooterCharacter* GetOwnerCharacter() const;
@@ -348,6 +455,27 @@ private:
 
 	/** Rest pose of each mount, relative to the root, taken at BeginPlay. */
 	TArray<FRotator> RestRelativeRotations;
+
+	/** The vice the head carries. */
+	static constexpr int32 HeadViceIndex = 0;
+
+	bool bArticulatedHead = false;
+
+	/** Head joint angles (Pitch, Yaw; Roll always 0). Simulated on every machine like the mounts. */
+	FRotator HeadRotation = FRotator::ZeroRotator;
+
+	/** The jaw's offset along the head's +Y, cm. */
+	float JawOffsetCm = 0.0f;
+
+	/** Where a gripped gun's barrel points with the head at rest, in the mesh's space. */
+	FVector HeadBarrelDirection = FVector::ForwardVector;
+
+	/** The head's vice (the socket) at rest, in the mesh's space. */
+	FTransform MountAtRest = FTransform::Identity;
+
+	/** The jaw offset that squeezes the gun now in the head's vice; JawClampOffsetCm until measured. */
+	float JawClampTargetCm = 0.0f;
+	bool bJawClampMeasured = false;
 
 	float NextScanTime = 0.0f;
 };

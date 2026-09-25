@@ -8,6 +8,7 @@
 #include "KamikazeCarrierDrone.generated.h"
 
 class AKamikazeDroneNPC;
+class ASiegeDirector;
 class UBoxComponent;
 class UNiagaraSystem;
 
@@ -60,6 +61,35 @@ public:
 	/** True while a salvo still owes munitions on the drop timer. */
 	UFUNCTION(BlueprintPure, Category = "Carrier")
 	bool IsSalvoInProgress() const { return PendingInSalvo > 0; }
+
+	// ==================== Siege pacing ====================
+	// A carrier spawned by ASiegeDirector drops on the director's clock, not its own cooldown, and
+	// carries the power of the carriers the cap kept out (ASiegeDirector::MaxCarriersAlive).
+
+	/** 1 = an ordinary carrier; each carrier kept out by the cap adds its share. */
+	UFUNCTION(BlueprintPure, Category = "Carrier|Siege")
+	float GetSiegePower() const { return SiegePower; }
+
+	/** More power: the shield pool grows by Delta times the base pool, and so does the shield
+	 *  itself unless it is broken (a broken shield stays broken). The paced drop rate follows
+	 *  SiegePower on its own. Authority only. */
+	void AddSiegePower(float Delta);
+
+	/** Drop on this director's clock while it paces. Null or not pacing = the own cooldown. */
+	void SetSalvoPacer(ASiegeDirector* Director);
+
+	/** Would drop right now if asked: alive, loaded, in position, target in sight and not full,
+	 *  and at least MinInterval since the last salvo. The own cooldown is not asked. */
+	bool IsReadyForPacedSalvo(float MinInterval) const;
+
+	/** The pacer's order: start a salvo now when IsReadyForPacedSalvo. */
+	bool DeployPacedSalvo(float MinInterval);
+
+	/** The Blueprint's cooldown: one salvo per this at power 1. */
+	float GetBaseSalvoCooldown() const { return SalvoCooldown; }
+
+	/** Kamikaze drones on one pawn target before this carrier holds its drops. */
+	void SetMaxDronesPerTarget(int32 NewMax) { MaxDronesPerTarget = FMath::Clamp(NewMax, 1, 20); }
 
 protected:
 
@@ -240,6 +270,29 @@ private:
 	/** Timer entry point for the munitions after the first one in a salvo. */
 	void DeployNextInSalvo();
 
+	/** CanDeploySalvo without the cooldown: alive, loaded, not mid-salvo. */
+	bool CanDeploySalvoIgnoringCooldown() const;
+
+	/** Start a salvo, no questions asked: the callers have asked them. */
+	bool StartSalvo();
+
+	/** From where it hangs now: the target is not already full of drones and is in sight. */
+	bool HasDropWindow() const;
+
+	/** SetSalvoPacer was given a director that is pacing right now. */
+	bool IsPacedExternally() const;
+
+	// ---- Siege pacing ----
+
+	TWeakObjectPtr<ASiegeDirector> SalvoPacer;
+	float SiegePower = 1.0f;
+
+	/** Shield pool at power 1, taken the first time power is added. Negative = not taken yet. */
+	float BaseMaxShield = -1.0f;
+
+	/** Last self-driven frame found it at its standoff point. */
+	bool bInDropPosition = false;
+
 	// ---- Self-driven behavior ----
 
 	/** One frame of the self-driven behavior: pick the target, hold the standoff point, drop. */
@@ -250,7 +303,7 @@ private:
 
 	TWeakObjectPtr<APawn> StandoffTarget;
 
-	/** The base's core, while nobody is defending it (ASiegeCoreBuildable::FindUndefended). Set,
+	/** The base's core, while nobody is defending it (ABuildableActor::FindUndefendedCore). Set,
 	 *  it replaces the pawn: the carrier stands off from the core and every munition it drops
 	 *  dives straight into it. Re-picked with the target, so a player coming home takes it back. */
 	TWeakObjectPtr<AActor> SiegeCore;

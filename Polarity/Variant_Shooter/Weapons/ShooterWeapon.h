@@ -1591,9 +1591,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetEnergyReserve() const { return EnergyReserve; }
 
-	/** Most the energy reserve refills to: EnergyReserveMagazines full magazines. */
+	/** Most the energy reserve holds. A self-refilling gun refills to EnergyReserveMagazines full
+	 *  magazines. A looted (finite) gun never refills, so its reserve has no ceiling: stacking rounds
+	 *  into one gun is what the dispenser pays for (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md). */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
-	int32 GetEnergyReserveCapacity() const { return FMath::Max(0, EnergyReserveMagazines) * FMath::Max(1, MagazineSize); }
+	int32 GetEnergyReserveCapacity() const
+	{
+		return bFiniteEnergyReserve ? UnlimitedReserveRounds : FMath::Max(0, EnergyReserveMagazines) * FMath::Max(1, MagazineSize);
+	}
+
+	/** "No ceiling" as a number: far above anything a run collects, far below int32 overflow when
+	 *  pickups add to it. */
+	static constexpr int32 UnlimitedReserveRounds = 1000000;
 
 	/** Set the energy reserve, clamped to capacity, and restart the refill if there is room. Server
 	 *  only: a pickup deciding what the gun arrives with. */
@@ -1604,15 +1613,25 @@ public:
 	 *  into a self-refilling one by changing its local copy. */
 	void ConfigureFiniteEnergyReserve();
 
-	/** Value yielded when this physical weapon is sacrificed to a dispenser.  Empty chassis and a
-	 *  full ammunition load are tuned separately per weapon class; 60 + 40 gives the requested
-	 *  60/40 full-weapon split and partial ammunition scales linearly. */
+	/** The fair rate: money this physical gun is worth handed to the dispenser, before the casino
+	 *  turns it into a bet (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md, section 0.1).
+	 *  Base + rounds x (money per magazine / base magazine size). Priced per magazine so a full
+	 *  magazine of any gun is worth the same, and never capped: every extra round pays. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0"))
-	int32 EmptyWeaponFuelValue = 60;
+	int32 DepositBaseMoney = 30;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0.0"))
+	float DepositMoneyPerMagazine = 10.0f;
+
+	/** A self-refilling class gun cannot be stuffed, so its rounds are this flat sum instead. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0"))
-	int32 FullAmmoFuelValue = 40;
+	int32 DepositEnergyAmmoMoney = 20;
+
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
-	int32 GetDispenserFuelValue(int32 LoadedRounds, int32 ReserveRounds) const;
+	int32 GetDepositMoneyValue(int32 LoadedRounds, int32 ReserveRounds) const;
+
+	/** Money one round adds at the fair rate. Zero for a self-refilling class gun. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	float GetDepositMoneyPerRound() const;
 
 	/** Hold the refill back: EnergyRegenDelay plus ExtraSeconds from now. Server only, and a no-op
 	 *  for anything that is not an energy weapon, so both report paths can call it blindly. */
@@ -2098,6 +2117,11 @@ public:
 	 *  a half-configured weapon is readable rather than blank. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
 	FText WeaponDisplayName;
+
+	/** One line under the name on the weapon card shown over a dropped copy of this gun. Empty hides
+	 *  the line. @see UWeaponDropCardWidget */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation", meta = (MultiLine = "true"))
+	FText WeaponDescription;
 
 	/** White silhouette drawn beside the ammo count.
 	 *

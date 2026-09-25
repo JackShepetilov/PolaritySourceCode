@@ -12,6 +12,7 @@
 #include "PolarityPalette.h"
 #include "Sound/SoundBase.h"
 #include "TurretBuildable.h"
+#include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/UI/Hud/HudShapeWidget.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
@@ -39,6 +40,34 @@ void UTurretFeedEntryWidget::Setup(const AShooterWeapon* Weapon, int32 KeyNumber
 		if (Weapon && Weapon->GetIcon())
 		{
 			Icon->SetBrushFromTexture(Weapon->GetIcon(), false);
+			Icon->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		}
+		else
+		{
+			Icon->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+}
+
+void UTurretFeedEntryWidget::SetupCard(int32 KeyNumber, const FText& Name, const FText& Detail, UTexture2D* CardIcon)
+{
+	if (KeyText)
+	{
+		KeyText->SetText(FText::AsNumber(KeyNumber));
+	}
+	if (NameText)
+	{
+		NameText->SetText(Name);
+	}
+	if (AmmoText)
+	{
+		AmmoText->SetText(Detail);
+	}
+	if (Icon)
+	{
+		if (CardIcon)
+		{
+			Icon->SetBrushFromTexture(CardIcon, false);
 			Icon->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 		}
 		else
@@ -104,6 +133,10 @@ void UTurretFeedWidget::NativeBind(AShooterCharacter* Character)
 	if (Character)
 	{
 		Character->OnWeaponInventoryChanged.AddUniqueDynamic(this, &UTurretFeedWidget::HandleInventoryChanged);
+		if (UUpgradeManagerComponent* const Upgrades = Character->GetUpgradeManager())
+		{
+			Upgrades->OnOfferChanged.AddUniqueDynamic(this, &UTurretFeedWidget::HandleOfferChanged);
+		}
 	}
 	if (Found)
 	{
@@ -119,6 +152,10 @@ void UTurretFeedWidget::NativeUnbind()
 	if (AShooterCharacter* const Bound = GetBoundCharacter())
 	{
 		Bound->OnWeaponInventoryChanged.RemoveDynamic(this, &UTurretFeedWidget::HandleInventoryChanged);
+		if (UUpgradeManagerComponent* const Upgrades = Bound->GetUpgradeManager())
+		{
+			Upgrades->OnOfferChanged.RemoveDynamic(this, &UTurretFeedWidget::HandleOfferChanged);
+		}
 	}
 	if (UBuilderComponent* const BoundBuilder = Builder.Get())
 	{
@@ -165,6 +202,39 @@ void UTurretFeedWidget::RebuildEntries()
 	const FLinearColor Unavailable = UPolarityPalette::GetColor(UnavailableColorTag, FLinearColor::Gray);
 	const FLinearColor PlateRest = UPolarityPalette::GetColor(PlateColorTag, FLinearColor::Black);
 
+	// At a dispenser with an offer waiting, the rows are the cards and the number keys pick one.
+	const AShooterCharacter* const OfferPlayer = GetBoundCharacter();
+	const UUpgradeManagerComponent* const Upgrades = OfferPlayer ? OfferPlayer->GetUpgradeManager() : nullptr;
+	if (Bound->GetFeedDispenserTarget() && Upgrades && Upgrades->HasPendingOffer())
+	{
+		const TArray<FUpgradeOfferCard>& Offer = Upgrades->GetPendingOffer();
+		for (int32 Index = 0; Index < Offer.Num(); ++Index)
+		{
+			const FUpgradeOfferCard& Card = Offer[Index];
+			UTurretFeedEntryWidget* const Entry = Card.Definition ? CreateWidget<UTurretFeedEntryWidget>(this, EntryClass) : nullptr;
+			if (!Entry)
+			{
+				continue;
+			}
+			const FText Rarity = UEnum::GetDisplayValueAsText(Card.Rarity);
+			const FText Detail = Card.Kind == EUpgradeOfferKind::LevelUp
+				? FText::Format(NSLOCTEXT("TurretFeed", "CardUp", "Lv {0} -> {1}"), FText::AsNumber(Card.FromLevel), FText::AsNumber(Card.ToLevel))
+				: Card.Kind == EUpgradeOfferKind::Replace && Card.Replaces
+					? FText::Format(NSLOCTEXT("TurretFeed", "CardReplace", "Lv {0}, replaces {1}"), FText::AsNumber(Card.ToLevel), Card.Replaces->DisplayName)
+					: FText::Format(NSLOCTEXT("TurretFeed", "CardNew", "new, Lv {0}"), FText::AsNumber(Card.ToLevel));
+			Entry->AvailableColor = Available;
+			Entry->UnavailableColor = Unavailable;
+			Entry->PlateRestColor = PlateRest;
+			Entry->SetupCard(FirstKeyNumber + Index,
+				FText::Format(NSLOCTEXT("TurretFeed", "CardName", "[{0}] {1}"), Rarity, Card.Definition->DisplayName),
+				Detail, Card.Definition->Icon);
+			EntryPanel->AddChild(Entry);
+			Entries.Add(Entry);
+		}
+		RefreshEntries();
+		return;
+	}
+
 	TArray<AShooterWeapon*> Weapons;
 	Bound->GetFeedWeapons(Weapons);
 	for (int32 Index = 0; Index < Weapons.Num(); ++Index)
@@ -188,16 +258,34 @@ void UTurretFeedWidget::RefreshEntries()
 {
 	UBuilderComponent* const Bound = Builder.Get();
 
-	// The same menu in front of a dispenser: every owned ranged gun melts for fuel, priced the way
-	// the server will price it when the key is pressed.
+	// The same menu in front of a dispenser: every owned ranged gun is a bet at its fair price,
+	// priced the way the server will price it when the key is pressed.
 	const ABuildableActor* const Dispenser = Bound ? Bound->GetFeedDispenserTarget() : nullptr;
+	const AShooterCharacter* const OfferOwner = GetBoundCharacter();
+	const UUpgradeManagerComponent* const OfferUpgrades = OfferOwner ? OfferOwner->GetUpgradeManager() : nullptr;
+	if (Bound && Dispenser && OfferUpgrades && OfferUpgrades->HasPendingOffer())
+	{
+		if (TitleText)
+		{
+			TitleText->SetText(NSLOCTEXT("TurretFeed", "OfferTitle", "Dispenser: take one card"));
+		}
+		const TArray<FUpgradeOfferCard>& Offer = OfferUpgrades->GetPendingOffer();
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
+		{
+			if (UTurretFeedEntryWidget* const Entry = Entries[Index])
+			{
+				const UUpgradeDefinition* const Def = Offer.IsValidIndex(Index) ? Offer[Index].Definition.Get() : nullptr;
+				Entry->SetState(ETurretFeedEntryState::Available,
+					Def ? Def->GetDescriptionForLevel(Offer[Index].ToLevel) : FText::GetEmpty());
+			}
+		}
+		return;
+	}
 	if (Bound && Dispenser)
 	{
 		if (TitleText)
 		{
-			TitleText->SetText(FText::Format(
-				NSLOCTEXT("TurretFeed", "DispenserTitle", "Dispenser, {0} units: pick a gun to melt"),
-				FText::AsNumber(Dispenser->GetFuel())));
+			TitleText->SetText(NSLOCTEXT("TurretFeed", "DispenserTitle", "Dispenser: pick a gun to bet"));
 		}
 
 		TArray<AShooterWeapon*> Weapons;
@@ -215,9 +303,9 @@ void UTurretFeedWidget::RefreshEntries()
 			const int32 Reserve = Weapon->UsesEnergyReserve()
 				? Weapon->GetEnergyReserve()
 				: FMath::Max(0, Weapon->GetPooledAmmo() - Loaded);
-			const int32 Fuel = Weapon->GetDispenserFuelValue(Loaded, Reserve);
+			const int32 Bet = Weapon->GetDepositMoneyValue(Loaded, Reserve);
 			Entry->SetState(ETurretFeedEntryState::Available,
-				FText::Format(NSLOCTEXT("TurretFeed", "MeltsFor", "melts for {0}"), FText::AsNumber(Fuel)));
+				FText::Format(NSLOCTEXT("TurretFeed", "BetsFor", "bet {0}"), FText::AsNumber(Bet)));
 		}
 		return;
 	}
@@ -260,11 +348,39 @@ void UTurretFeedWidget::RefreshEntries()
 		{
 			continue;
 		}
+		// While feeding a standing turret, a gun of a class already in a vice tops it up with its
+		// rounds and stays in the hands. The count is the one the server will take.
+		const int32 TopUpVice = Bound->GetMode() == EBuilderMode::Feeding ? Turret->FindTopUpViceFor(Weapon) : INDEX_NONE;
 		int32 ViceIndex = INDEX_NONE;
-		if (Turret->FindViceFor(Weapon->GetClass(), ViceIndex))
+		if (TopUpVice != INDEX_NONE)
+		{
+			const int32 Loaded = Weapon->GetBulletCount();
+			const int32 Rounds = Loaded + (Weapon->UsesEnergyReserve()
+				? Weapon->GetEnergyReserve()
+				: FMath::Max(0, Weapon->GetPooledAmmo() - Loaded));
+			if (Rounds > 0)
+			{
+				Entry->SetState(ETurretFeedEntryState::Available,
+					FText::Format(NSLOCTEXT("TurretFeed", "TopUp", "top up vice {0}: +{1} rounds, keep the gun"),
+						FText::AsNumber(TopUpVice + 1), FText::AsNumber(Rounds)));
+			}
+			else
+			{
+				Entry->SetState(ETurretFeedEntryState::Unavailable, NSLOCTEXT("TurretFeed", "Empty", "empty, nothing to top up with"));
+			}
+		}
+		else if (Turret->FindViceFor(Weapon->GetClass(), ViceIndex))
 		{
 			Entry->SetState(ETurretFeedEntryState::Available,
 				FText::Format(NSLOCTEXT("TurretFeed", "ToVice", "vice {0}"), FText::AsNumber(ViceIndex + 1)));
+		}
+		else if (const int32 SwapVice = Bound->GetMode() == EBuilderMode::Feeding ? Turret->FindSwapViceFor(Weapon) : INDEX_NONE;
+			SwapVice != INDEX_NONE)
+		{
+			const AShooterWeapon* const Old = Turret->GetViceWeapon(SwapVice);
+			Entry->SetState(ETurretFeedEntryState::Available,
+				FText::Format(NSLOCTEXT("TurretFeed", "Swap", "swap vice {0}: {1} comes out"),
+					FText::AsNumber(SwapVice + 1), Old ? Old->GetWeaponDisplayName() : FText::GetEmpty()));
 		}
 		else if (Turret->IsRocketClass(Weapon->GetClass()))
 		{
@@ -275,8 +391,29 @@ void UTurretFeedWidget::RefreshEntries()
 		}
 		else
 		{
-			Entry->SetState(ETurretFeedEntryState::Unavailable, NSLOCTEXT("TurretFeed", "NoVice", "no free vice"));
+			// Say why: a gun of a class already in a vice that still cannot top it up is one that
+			// refills itself (the class weapon), and "no free vice" would read as a bug.
+			bool bSameClassInVice = false;
+			for (int32 Vice = 0; Vice < Turret->GetUnlockedViceCount(); ++Vice)
+			{
+				const AShooterWeapon* const ViceWeapon = Turret->GetViceWeapon(Vice);
+				if (ViceWeapon && ViceWeapon->GetClass() == Weapon->GetClass())
+				{
+					bSameClassInVice = true;
+				}
+			}
+			Entry->SetState(ETurretFeedEntryState::Unavailable, bSameClassInVice
+				? NSLOCTEXT("TurretFeed", "RefillsItself", "refills itself, cannot top up")
+				: NSLOCTEXT("TurretFeed", "NoVice", "no free vice"));
 		}
+	}
+}
+
+void UTurretFeedWidget::HandleOfferChanged()
+{
+	if (bMenuVisible)
+	{
+		RebuildEntries();
 	}
 }
 

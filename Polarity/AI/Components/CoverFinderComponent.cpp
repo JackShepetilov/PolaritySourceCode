@@ -7,14 +7,69 @@
 #include "AI/Coordination/AICombatCoordinator.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "NavigationSystem.h"
+#include "NavigationPath.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
+#include "Misc/ScopeExit.h"
 
 // Filter the Output Log on [COVER_DEBUG] to follow a search end to end.
 DEFINE_LOG_CATEGORY_STATIC(LogCover, Log, All);
+
+namespace CoverRoute
+{
+	/** Closer than this to a threat on the way is running past it. */
+	static constexpr float ThreatClearance = 500.0f;
+
+	/** ...but only when the route gets that close IN THE MIDDLE: a corner that is itself near the
+	 *  turret (they all are, peek range is 8-25 m) is judged by its exposure, not here. */
+	static constexpr float EndpointSlack = 150.0f;
+
+	/** Whether the walk From -> To, as the navmesh routes it, runs past any of Threats: some point of
+	 *  it closer than ThreatClearance to a threat and clearly closer than both ends of the walk are.
+	 *  "Past" and not merely "near": retreating AWAY from a turret the NPC is standing next to is fine.
+	 *  No path at all answers false; the move itself will fail and route to Seeking. */
+	static bool RunsPastThreat(UWorld* World, AActor* Querier, const FVector& From, const FVector& To,
+		const TArray<const AActor*>& Threats, const AActor*& OutThreat, float& OutClosest)
+	{
+		UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+		if (!NavSys || Threats.Num() == 0)
+		{
+			return false;
+		}
+		const UNavigationPath* const Route = NavSys->FindPathToLocationSynchronously(World, From, To, Querier);
+		if (!Route || Route->PathPoints.Num() < 2)
+		{
+			return false;
+		}
+		for (const AActor* const Threat : Threats)
+		{
+			if (!Threat)
+			{
+				continue;
+			}
+			const FVector At = Threat->GetActorLocation();
+			const float EndsClosest = FMath::Min(FVector::Dist2D(From, At), FVector::Dist2D(To, At));
+			float Closest = TNumericLimits<float>::Max();
+			for (int32 Index = 1; Index < Route->PathPoints.Num(); ++Index)
+			{
+				const FVector OnSegment = FMath::ClosestPointOnSegment(At, Route->PathPoints[Index - 1], Route->PathPoints[Index]);
+				Closest = FMath::Min(Closest, static_cast<float>(FVector::Dist2D(OnSegment, At)));
+			}
+			if (Closest < ThreatClearance && Closest < EndsClosest - EndpointSlack)
+			{
+				OutThreat = Threat;
+				OutClosest = Closest;
+				return true;
+			}
+		}
+		return false;
+	}
+}
 
 UCoverFinderComponent::UCoverFinderComponent()
 {
@@ -84,6 +139,16 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 {
 	bSearchInFlight = false;
 
+	// [COVER_DEBUG] TIMING: what one scoring pass costs on the game thread (the EQS part before it runs
+	// time-sliced and is not counted). Logged at Log so the bench sees it; one line per search.
+	const double TimingStart = FPlatformTime::Seconds();
+	ON_SCOPE_EXIT
+	{
+		UE_LOG(LogCover, Log, TEXT("[COVER_DEBUG] TIMING %s: %.3f ms, %d candidates"),
+			*GetNameSafe(GetOwner()), (FPlatformTime::Seconds() - TimingStart) * 1000.0,
+			Result.IsValid() ? Result->Items.Num() : 0);
+	};
+
 	AActor* const Target = SearchTarget.Get();
 	if (!Result.IsValid() || !Result->IsSuccessful() || !Target)
 	{
@@ -124,6 +189,12 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 
 		/** Friendly presence minus hostile presence at this spot, see TacticalSpace */
 		float SpaceScore;
+
+		/** Seen by one of the extra observers (a turret). A tier of its own, see the sort. */
+		bool bSeenByExtra;
+
+		/** Hidden only crouched: the numbers above are the crouched ones, and the NPC will wait down. */
+		bool bLow;
 	};
 
 	const FVector OwnerLocation = GetOwner()->GetActorLocation();
@@ -154,10 +225,43 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 			continue;
 		}
 
+		auto SeenByExtraAt = [this, &Candidate, &TraceParams](bool bCrouched)
+		{
+			for (const TWeakObjectPtr<AActor>& Observer : ExtraObservers)
+			{
+				if (Observer.IsValid() && CanActorSee(Observer.Get(), Candidate, TraceParams, bCrouched))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+		// Standing first. Only a spot that is seen standing is asked again crouched, so high cover and
+		// open ground cost what they did and only the candidates that might be LOW cover pay for the
+		// second pass. Low = the crouched body is strictly better off than the standing one.
+		float Exposure = ComputeExposure(Candidate, Observers, TraceParams, /*bCrouched*/ false);
+		bool bSeenByExtra = SeenByExtraAt(false);
+		bool bLow = false;
+		if (Exposure > KINDA_SMALL_NUMBER || bSeenByExtra)
+		{
+			const float CrouchedExposure = ComputeExposure(Candidate, Observers, TraceParams, /*bCrouched*/ true);
+			const bool bCrouchedSeenByExtra = SeenByExtraAt(true);
+			const bool bBetterTier = bSeenByExtra && !bCrouchedSeenByExtra;
+			const bool bBetterSameTier = bSeenByExtra == bCrouchedSeenByExtra && CrouchedExposure < Exposure - KINDA_SMALL_NUMBER;
+			if (bBetterTier || bBetterSameTier)
+			{
+				bLow = true;
+				Exposure = CrouchedExposure;
+				bSeenByExtra = bCrouchedSeenByExtra;
+			}
+		}
+
 		Scored.Add({ Candidate,
-			ComputeExposure(Candidate, Observers, TraceParams),
+			Exposure,
 			static_cast<float>(FVector::Dist2D(Candidate, OwnerLocation)),
-			TacticalSpace::ScorePosition(SpaceContext, Candidate, SpaceWeights) });
+			TacticalSpace::ScorePosition(SpaceContext, Candidate, SpaceWeights),
+			bSeenByExtra, bLow });
 	}
 
 	if (Scored.Num() == 0)
@@ -175,6 +279,15 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	const float SpaceScale = SpaceScoreWeight;
 	Scored.Sort([SpaceScale](const FScoredCandidate& A, const FScoredCandidate& B)
 	{
+		// A turret's view is not traded for company. The ground bonus below can outweigh a whole unit
+		// of exposure (SpaceScoreWeight 1.5 against a turret's 1.0), and did: on the bench one arrival in
+		// five was at a spot the search KNEW the turret saw, chosen over a hidden one because a teammate
+		// stood nearer to it. A turret does not flinch at numbers; the hidden spots go first, always.
+		if (A.bSeenByExtra != B.bSeenByExtra)
+		{
+			return !A.bSeenByExtra;
+		}
+
 		const float RankA = A.Exposure - SpaceScale * A.SpaceScore;
 		const float RankB = B.Exposure - SpaceScale * B.SpaceScore;
 
@@ -189,19 +302,56 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	FCoverSpot Chosen;
 	const int32 ProbeCount = FMath::Min(Scored.Num(), FMath::Max(1, MaxCandidatesToProbe));
 
+	// Everyone the walk to the corner must not run past: hostile pawns and the extra observers (turrets).
+	TArray<const AActor*> RouteThreats;
+	RouteThreats.Reserve(Observers.Num() + ExtraObservers.Num());
+	for (const APawn* const Observer : Observers)
+	{
+		RouteThreats.Add(Observer);
+	}
+	for (const TWeakObjectPtr<AActor>& Observer : ExtraObservers)
+	{
+		if (const AActor* const Threat = Observer.Get())
+		{
+			RouteThreats.Add(Threat);
+		}
+	}
+
 	for (int32 Index = 0; Index < ProbeCount; ++Index)
 	{
+		// Low cover whose standing muzzle clears the wall is peeked OVER, in place: P is H, and
+		// stepping out means standing up. Otherwise (high cover, or a low wall too tall to shoot over
+		// from where it stands) the usual side step.
 		FVector PeekLocation = FVector::ZeroVector;
-		if (!ProbePeekLocation(Scored[Index].Location, Observers, TraceParams, PeekLocation))
+		const bool bPeekOver = Scored[Index].bLow && CanShootOverFrom(Scored[Index].Location, TraceParams);
+		if (bPeekOver)
+		{
+			PeekLocation = Scored[Index].Location;
+		}
+		else if (!ProbePeekLocation(Scored[Index].Location, Observers, TraceParams, PeekLocation))
 		{
 			// No corner here. Not a failure, just not cover: this is what separates a real angle
 			// from open ground that happens to be far away.
 			continue;
 		}
 
+		// A good corner on the far side of the enemy is not reachable, it is a charge. Checked after
+		// the peek probe (the cheaper filter) and only for the handful that pass it: one navmesh query
+		// per surviving candidate.
+		const AActor* PastThreat = nullptr;
+		float PastClosest = 0.0f;
+		if (CoverRoute::RunsPastThreat(GetWorld(), GetOwner(), OwnerLocation, Scored[Index].Location, RouteThreats, PastThreat, PastClosest))
+		{
+			UE_LOG(LogCover, Log, TEXT("[COVER_DEBUG] %s: corner %s refused, the way there passes %.0fcm from %s"),
+				*GetNameSafe(GetOwner()), *Scored[Index].Location.ToCompactString(), PastClosest, *GetNameSafe(PastThreat));
+			continue;
+		}
+
 		Chosen.HideLocation = Scored[Index].Location;
 		Chosen.PeekLocation = PeekLocation;
 		Chosen.Exposure = Scored[Index].Exposure;
+		Chosen.bLowCover = Scored[Index].bLow;
+		Chosen.bPeekOver = bPeekOver;
 		Chosen.bValid = true;
 		break;
 	}
@@ -291,7 +441,8 @@ float UCoverFinderComponent::EvaluateCurrentExposure() const
 	FCollisionQueryParams TraceParams;
 	BuildTraceParams(TraceParams);
 
-	return ComputeExposure(CurrentCover.HideLocation, Observers, TraceParams);
+	// Asked in the pose the NPC waits in: crouched behind low cover, standing behind high.
+	return ComputeExposure(CurrentCover.HideLocation, Observers, TraceParams, CurrentCover.bLowCover);
 }
 
 bool UCoverFinderComponent::IsCoverStillGood() const
@@ -333,20 +484,63 @@ float UCoverFinderComponent::GetRequeryCooldownRemaining() const
 	return FMath::Max(0.0f, CoverRequeryCooldown - Elapsed);
 }
 
-bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params) const
+void UCoverFinderComponent::GetBodySampleHeights(bool bCrouched, float& OutChest, float& OutHead, float& OutSideReach) const
+{
+	// A BODY at the spot, not one point at EyeHeight. EyeHeight (60 on the shooters) is knee height:
+	// a low wall hides it and leaves the chest and the head in the open. Measured 2026-09-23 on the
+	// turret bench: a quarter of all arrivals at a spot scored hidden were in the turret's view.
+	// Crouched is the same body at the movement component's crouched height, which is what tells low
+	// cover (hidden only crouched) from high cover (hidden standing) from no cover at all.
+	const ACharacter* const OwnerCharacter = Cast<ACharacter>(GetOwner());
+	const UCapsuleComponent* const Capsule = OwnerCharacter ? OwnerCharacter->GetCapsuleComponent() : nullptr;
+	const UCharacterMovementComponent* const Move = OwnerCharacter ? OwnerCharacter->GetCharacterMovement() : nullptr;
+
+	const float StandingHeight = Capsule ? Capsule->GetScaledCapsuleHalfHeight() * 2.0f : 180.0f;
+	const float CrouchedHeight = Move ? Move->GetCrouchedHalfHeight() * 2.0f : StandingHeight * 0.6f;
+	const float Height = bCrouched ? CrouchedHeight : StandingHeight;
+
+	OutChest = Height * 0.6f;
+	OutHead = Height * 0.92f;
+	// The body's half width plus arrival slack: the NPC stops within about a metre of the spot.
+	OutSideReach = (Capsule ? Capsule->GetScaledCapsuleRadius() : 34.0f) + 40.0f;
+}
+
+bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Point, const FCollisionQueryParams& Params,
+	bool bCrouched) const
 {
 	if (!Player)
 	{
 		return false;
 	}
 
-	const FVector EyePoint = Point + FVector(0.0f, 0.0f, EyeHeight);
-	const FVector PlayerBase = Player->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight);
+	float Chest = 0.0f;
+	float Head = 0.0f;
+	float SideReach = 0.0f;
+	GetBodySampleHeights(bCrouched, Chest, Head, SideReach);
 
-	// The chest first, because in the open it answers immediately and the ring never runs.
-	if (HasLineOfSight(EyePoint, PlayerBase, Params))
+	const FVector PlayerBase = Player->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight);
+	const FVector ChestPoint = Point + FVector(0.0f, 0.0f, Chest);
+
+	// The chest first, because in the open it answers immediately and nothing else runs.
+	if (HasLineOfSight(ChestPoint, PlayerBase, Params))
 	{
 		return true;
+	}
+
+	// Then the rest of the body, straight at the player: the head over the wall, the shoulders round
+	// its ends. Three traces, and only for a spot the chest trace called hidden.
+	const FVector Across = FVector::CrossProduct(FVector::UpVector, (PlayerBase - Point).GetSafeNormal2D());
+	const FVector BodyPoints[] = {
+		Point + FVector(0.0f, 0.0f, Head),
+		ChestPoint + Across * SideReach,
+		ChestPoint - Across * SideReach,
+	};
+	for (const FVector& BodyPoint : BodyPoints)
+	{
+		if (HasLineOfSight(BodyPoint, PlayerBase, Params))
+		{
+			return true;
+		}
 	}
 
 	if (PlayerRingRadius <= KINDA_SMALL_NUMBER || PlayerRingSamples <= 0)
@@ -354,14 +548,16 @@ bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Poi
 		return false;
 	}
 
-	// Occluded at the chest, so ask whether the player is merely CLIPPING the corner rather than
-	// genuinely behind it. Without this, one step behind a wall makes a player vanish from the
-	// exposure model entirely and the ground right next to them starts scoring as good cover.
+	// Occluded, so ask whether the player is merely CLIPPING the corner rather than genuinely behind
+	// it. Without this, one step behind a wall makes a player vanish from the exposure model entirely
+	// and the ground right next to them starts scoring as good cover. From the chest only: the ring is
+	// about the player's volume, and running it from every body sample would cost four times as much
+	// for a question the chest already answers.
 	const float StepDeg = 360.0f / static_cast<float>(PlayerRingSamples);
 	for (int32 Index = 0; Index < PlayerRingSamples; ++Index)
 	{
 		const FVector Offset = FRotator(0.0f, StepDeg * Index, 0.0f).Vector() * PlayerRingRadius;
-		if (HasLineOfSight(EyePoint, PlayerBase + Offset, Params))
+		if (HasLineOfSight(ChestPoint, PlayerBase + Offset, Params))
 		{
 			return true;
 		}
@@ -370,7 +566,8 @@ bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Poi
 	return false;
 }
 
-bool UCoverFinderComponent::CanActorSee(const AActor* Observer, const FVector& Point, const FCollisionQueryParams& Params) const
+bool UCoverFinderComponent::CanActorSee(const AActor* Observer, const FVector& Point, const FCollisionQueryParams& Params,
+	bool bCrouched) const
 {
 	if (!Observer)
 	{
@@ -384,10 +581,53 @@ bool UCoverFinderComponent::CanActorSee(const AActor* Observer, const FVector& P
 	FCollisionQueryParams LocalParams = Params;
 	LocalParams.AddIgnoredActor(Observer);
 
-	return HasLineOfSight(Origin, Point + FVector(0.0f, 0.0f, EyeHeight), LocalParams);
+	// Chest and head over the spot, and the chest a body's width plus the arrival slack to either side
+	// across the observer's line. Any one of them seen is seen. @see GetBodySampleHeights
+	float Chest = 0.0f;
+	float Head = 0.0f;
+	float SideReach = 0.0f;
+	GetBodySampleHeights(bCrouched, Chest, Head, SideReach);
+
+	const FVector Across = FVector::CrossProduct(FVector::UpVector, (Point - Origin).GetSafeNormal2D());
+	const FVector Samples[] = {
+		Point + FVector(0.0f, 0.0f, Chest),
+		Point + FVector(0.0f, 0.0f, Head),
+		Point + Across * SideReach + FVector(0.0f, 0.0f, Chest),
+		Point - Across * SideReach + FVector(0.0f, 0.0f, Chest),
+	};
+	for (const FVector& Sample : Samples)
+	{
+		if (HasLineOfSight(Origin, Sample, LocalParams))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
-float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params) const
+bool UCoverFinderComponent::CanShootOverFrom(const FVector& HideLocation, const FCollisionQueryParams& Params) const
+{
+	const AActor* const Target = SearchTarget.Get();
+	if (!Target)
+	{
+		return false;
+	}
+
+	// Muzzle height of a standing NPC, a little under the head: what actually has to clear the wall.
+	float Chest = 0.0f;
+	float Head = 0.0f;
+	float SideReach = 0.0f;
+	GetBodySampleHeights(/*bCrouched*/ false, Chest, Head, SideReach);
+	const FVector Muzzle = HideLocation + FVector(0.0f, 0.0f, Head * 0.85f);
+
+	// The target is not its own obstacle (a building target is solid, and its chest sits inside it).
+	FCollisionQueryParams SeeTargetParams = Params;
+	SeeTargetParams.AddIgnoredActor(Target);
+	return HasLineOfSight(Muzzle, Target->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight), SeeTargetParams);
+}
+
+float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params,
+	bool bCrouched) const
 {
 	// Exposure(H) = sum over players of Threat(P) * Visible(H, P). Visible is one or zero; the
 	// weighting is what turns "hidden" into "hidden from the ones that matter". A zero means hidden
@@ -397,7 +637,7 @@ float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<
 
 	for (APawn* const Player : Observers)
 	{
-		if (CanPlayerSee(Player, Point, Params))
+		if (CanPlayerSee(Player, Point, Params, bCrouched))
 		{
 			Exposure += GetThreatFor(Player);
 		}
@@ -409,7 +649,7 @@ float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<
 	{
 		if (const AActor* const Threat = Observer.Get())
 		{
-			if (CanActorSee(Threat, Point, Params))
+			if (CanActorSee(Threat, Point, Params, bCrouched))
 			{
 				Exposure += 1.0f;
 			}
@@ -429,8 +669,14 @@ bool UCoverFinderComponent::IsCoverOpenedBy(const APawn* Player) const
 	FCollisionQueryParams TraceParams;
 	BuildTraceParams(TraceParams);
 
-	return CanPlayerSee(Player, CurrentCover.HideLocation, TraceParams)
-		&& CanPlayerSee(Player, CurrentCover.PeekLocation, TraceParams);
+	// The hide end in the pose it is held in. A peek over the top has no second end: P is H standing,
+	// and being seen there is the point of it, so the hide end alone decides.
+	const bool bHideSeen = CanPlayerSee(Player, CurrentCover.HideLocation, TraceParams, CurrentCover.bLowCover);
+	if (CurrentCover.bPeekOver)
+	{
+		return bHideSeen;
+	}
+	return bHideSeen && CanPlayerSee(Player, CurrentCover.PeekLocation, TraceParams);
 }
 
 bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const TArray<APawn*>& Observers,
@@ -483,7 +729,13 @@ bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const
 		// Assuming a player might see you costs a corner and is safe; assuming you can shoot a
 		// player because you can see the air beside them costs the whole peek and is not. Exposure
 		// gets the generous answer, marksmanship gets the honest one.
-		if (!HasLineOfSight(Projected.Location + FVector(0.0f, 0.0f, EyeHeight), TargetChest, Params))
+		//
+		// The target itself is not an obstacle to seeing it. Pawns were already ignored (Params), but
+		// a building target is solid, and TargetChest sits inside its box: without this every probe
+		// against a turret or a core would stop on the target's own surface and report "no line".
+		FCollisionQueryParams SeeTargetParams = Params;
+		SeeTargetParams.AddIgnoredActor(Target);
+		if (!HasLineOfSight(Projected.Location + FVector(0.0f, 0.0f, EyeHeight), TargetChest, SeeTargetParams))
 		{
 			continue;
 		}

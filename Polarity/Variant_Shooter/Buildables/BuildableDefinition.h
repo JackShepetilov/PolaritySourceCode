@@ -101,13 +101,10 @@ public:
 
 	// ==================== The wrench ====================
 
-	/** Health one hit puts back, before the metal cap. TF2: 102. */
+	/** Health one hit puts back, free: repair costs the time spent at the base, not metal
+	 *  (the author's call, 2026-09-24). TF2: 102, for 3 health per metal. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wrench", meta = (ClampMin = "0.0"))
 	float WrenchRepairHealth = 102.0f;
-
-	/** Health bought by one metal. TF2: 3 for a sentry or dispenser, 5 for a teleporter. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wrench", meta = (ClampMin = "0.1"))
-	float RepairHealthPerMetal = 3.0f;
 
 	/** Metal one hit moves from the hitter into the upgrade. A hit with less than this does nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wrench", meta = (ClampMin = "1"))

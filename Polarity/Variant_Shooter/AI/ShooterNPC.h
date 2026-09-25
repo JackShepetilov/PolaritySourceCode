@@ -412,6 +412,14 @@ protected:
 	 *  outside. Arrivals that did make it had 0.13s to shoot in. */
 	bool bTurretPeekArrived = false;
 
+	/** Rolled once per peek from the class profile (CrouchPeekChance / SlidePeekChance): whether this
+	 *  peek is taken crouched, and whether the step out to a side peek is a slide. */
+	bool bTurretPeekCrouch = false;
+	bool bTurretPeekSlide = false;
+
+	/** The slide of this peek has been launched (it needs speed first, so it starts mid-walk). */
+	bool bTurretPeekSlideStarted = false;
+
 	/** Counts down to the next cover move re-issue. */
 	float TurretMoveReissueTimer = 0.0f;
 
@@ -1197,8 +1205,8 @@ protected:
 	 *  hysteresis (a wider ring to leave by than to enter by). */
 	bool IsTurretThreatValid(const ATurretBuildable* Turret, float Radius) const;
 
-	/** Crouch (or stand back up) for the exposed part of the turret peek, when the class profile
-	 *  asks for the crouch-peek (UEnemyCombatProfile::bCrouchWhenPeeking). */
+	/** Crouch, or stand back up. The DECISION (the profile's chance, low cover) is the caller's; this
+	 *  only does it, and logs it. */
 	void SetTurretPeekCrouch(bool bCrouched);
 
 public:

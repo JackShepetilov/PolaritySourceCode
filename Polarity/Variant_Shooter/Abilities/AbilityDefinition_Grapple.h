@@ -71,7 +71,7 @@ struct FGrappleLevelStats
 	/** How fast the hook itself flies out. The pull does not begin until it lands, which is what
 	 *  gives the ability its opening beat and what the cable is drawn along.
 	 *  Reference: grapple_shootVel 3000 * 1.96 = 5880. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple", meta = (ClampMin = "0.0", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple", meta = (DisplayName = "Hook Flight Speed", ClampMin = "1.0", Units = "cm/s", ToolTip = "Speed of the outbound hook in centimetres per second. Edit this in Levels > [level] > Grapple."))
 	float HookTravelSpeed = 5880.0f;
 
 	// ---- The pull ----
@@ -353,6 +353,38 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Weapon", meta = (ClampMin = "0.1", ClampMax = "8.0"))
 	float WeaponStowSpeedMultiplier = 2.0f;
 
+	// ==================== Fetch ====================
+	// Dropped weapons are picked up with the hook: look at one from inside the radius, the brackets
+	// close on it, throw, and the hook comes back with the weapon. The same rule decides the brackets
+	// on the owning client and the claim on the server. @see UAbilityHandler_Grapple::FindFetchTarget
+	//
+	// Not in FGrappleLevelStats: the pickup radius is a rule of the loot, not something a grapple
+	// upgrade should stretch. A fetch never costs the cooldown.
+
+	/** Whether a throw at a bracketed dropped weapon fetches it instead of swinging. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch")
+	bool bCanFetchWeapons = true;
+
+	/** How far from the player a dropped weapon can be and still be fetched. One number for every
+	 *  drop, measured from the character to the drop. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (ClampMin = "100.0", Units = "cm", EditCondition = "bCanFetchWeapons"))
+	float WeaponFetchRadius = 1500.0f;
+
+	/** How far off the crosshair a drop may sit and still count as looked at. A small drop at the
+	 *  edge of the radius is a few pixels wide, so the test is this angle OR the drop's own size on
+	 *  screen, whichever is more forgiving. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "deg", EditCondition = "bCanFetchWeapons"))
+	float WeaponFetchAimAngle = 6.0f;
+
+	/** Inside this distance the name over the brackets grows into the full weapon card. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bCanFetchWeapons"))
+	float WeaponCardFullDistance = 600.0f;
+
+	/** The widget that names the bracketed weapon and, up close, shows its card. Empty shows only the
+	 *  brackets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (EditCondition = "bCanFetchWeapons"))
+	TSubclassOf<class UWeaponDropCardWidget> WeaponCardWidgetClass;
+
 	// ==================== Look ====================
 
 	/** Material on the cable that draws the line. Left empty draws the cable in the engine default,
@@ -362,6 +394,10 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (ClampMin = "0.1", ClampMax = "20.0"))
 	float CableWidth = 2.0f;
+
+	/** World distance along the cable covered by one repeat of its braid texture. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (DisplayName = "Cable Texture Repeat Length", ClampMin = "1.0", Units = "cm"))
+	float CableTextureRepeatLength = 12.0f;
 
 	/** Segments in the cable. More sags more smoothly and costs more.
 	 *
@@ -376,6 +412,22 @@ public:
 	 *  reads as a beam rather than a rope; a little sag is what makes it look like one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float CableSlack = 0.02f;
+
+	/** Cosmetic sideways movement of the hook head while it is in flight (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "cm"))
+	float HookFlightWobble = 5.0f;
+
+	/** Speed of an unlatched hook returning to the player (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (ClampMin = "100.0", Units = "cm/s"))
+	float HookRetractSpeed = 11760.0f;
+
+	/** Small alternating force on the middle of an attached cable; its ends remain fixed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (ClampMin = "0.0"))
+	float CableWobbleForce = 900.0f;
+
+	/** Maximum view-only bank around the sight line during a swing, in degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look", meta = (ClampMin = "0.0", ClampMax = "20.0", Units = "deg"))
+	float CameraRollDegrees = 6.0f;
 
 	/** Where the line leaves the character. @see EGrappleLineOrigin. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Look")

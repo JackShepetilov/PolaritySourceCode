@@ -1232,7 +1232,7 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	);
 
 	// Unified scoring: best target closest to crosshair
-	enum class ECaptureTargetType { None, NPC, Ally, Prop, BasketballBall, DroppedWeapon, DroppedRangedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, InventoryPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
+	enum class ECaptureTargetType { None, NPC, Ally, Prop, BasketballBall, DroppedWeapon, UpgradePickup, AbilityPickup, ScriptedPickup, InventoryPickup, RiotShieldPickup, HumanoidWeapon, HumanoidShield };
 	AActor* BestTarget = nullptr;
 	float BestAngleCos = -1.0f; // worst possible (cos 180°)
 	ECaptureTargetType BestTargetType = ECaptureTargetType::None;
@@ -1463,55 +1463,10 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			continue;
 		}
 
-		// Try DroppedRangedWeapon (same priority as DroppedMeleeWeapon/props)
-		if (ADroppedRangedWeapon* DroppedRanged = Cast<ADroppedRangedWeapon>(HitActor))
+		// Dropped ranged weapons are not taken by channeling any more: the grapple fetches them, from a
+		// fixed radius, and the charge they carry plays no part in it. @see UAbilityHandler_Grapple::FindFetchTarget
+		if (Cast<ADroppedRangedWeapon>(HitActor))
 		{
-			if (!DroppedRanged->bCanBeCaptured || DroppedRanged->IsBeingPulled() || DroppedRanged->IsPullComplete())
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s skipped: bCanBeCaptured=%d, pulling=%d, pullComplete=%d"),
-					*DroppedRanged->GetName(), DroppedRanged->bCanBeCaptured, DroppedRanged->IsBeingPulled(), DroppedRanged->IsPullComplete());
-				continue;
-			}
-
-			// Charge validation: only capture weapons with OPPOSITE charge sign
-			const float RangedCharge = DroppedRanged->GetCharge();
-			if (FMath::IsNearlyZero(RangedCharge) || RangedCharge * static_cast<float>(ChannelingChargeSign) > 0.0f)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s REJECTED charge: Charge=%.2f, ChannelingSign=%d (need opposite)"),
-					*DroppedRanged->GetName(), RangedCharge, static_cast<int32>(ChannelingChargeSign));
-				continue;
-			}
-
-			// Range check using weapon's own logarithmic capture range
-			const FVector ToTarget = DroppedRanged->GetActorLocation() - CameraLoc;
-			const float DistSq = ToTarget.SizeSquared();
-			const float CaptureRange = DroppedRanged->CalculateCaptureRange();
-			if (DistSq > CaptureRange * CaptureRange || DistSq < 1.0f)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s OUT OF RANGE: dist=%.0f, captureRange=%.0f"),
-					*DroppedRanged->GetName(), FMath::Sqrt(DistSq), CaptureRange);
-				continue;
-			}
-
-			const FVector DirToTarget = ToTarget.GetUnsafeNormal();
-			const float AngleCos = FVector::DotProduct(CameraForward, DirToTarget);
-			const float AdaptedMaxAngleCosRanged = GetMaxAngleCosForDistance(FMath::Sqrt(DistSq));
-			if (AngleCos < AdaptedMaxAngleCosRanged)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s OUT OF ANGLE: cos=%.2f, minCos=%.2f"),
-					*DroppedRanged->GetName(), AngleCos, AdaptedMaxAngleCosRanged);
-				continue;
-			}
-
-			UE_LOG(LogTemp, Warning, TEXT("[CaptureScan] DroppedRangedWeapon %s VALID TARGET: charge=%.2f, dist=%.0f/%.0f, angle=%.2f"),
-				*DroppedRanged->GetName(), RangedCharge, FMath::Sqrt(DistSq), CaptureRange, AngleCos);
-
-			if (AngleCos > BestAngleCos && HasLineOfSight(DroppedRanged))
-			{
-				BestAngleCos = AngleCos;
-				BestTarget = DroppedRanged;
-				BestTargetType = ECaptureTargetType::DroppedRangedWeapon;
-			}
 			continue;
 		}
 
@@ -1806,9 +1761,6 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 			break;
 		case ECaptureTargetType::DroppedWeapon:
 			CaptureDroppedWeapon(Cast<ADroppedMeleeWeapon>(BestTarget));
-			break;
-		case ECaptureTargetType::DroppedRangedWeapon:
-			CaptureDroppedRangedWeapon(Cast<ADroppedRangedWeapon>(BestTarget));
 			break;
 		case ECaptureTargetType::UpgradePickup:
 			CaptureUpgradePickup(Cast<AUpgradePickup>(BestTarget));
@@ -2111,38 +2063,6 @@ void UChargeAnimationComponent::CaptureDroppedWeapon(ADroppedMeleeWeapon* Weapon
 	if (ShooterChar)
 	{
 		Weapon->StartPull(ShooterChar);
-	}
-
-	// Track as current target to prevent re-search
-	CurrentCapturedNPC = Weapon;
-}
-
-void UChargeAnimationComponent::CaptureDroppedRangedWeapon(ADroppedRangedWeapon* Weapon)
-{
-	if (!Weapon)
-	{
-		return;
-	}
-
-	// Release previous target if any
-	ReleaseCapturedNPC();
-
-	// Start scripted pull (weapon manages its own interpolation in Tick)
-	AShooterCharacter* ShooterChar = Cast<AShooterCharacter>(OwnerCharacter);
-	if (ShooterChar)
-	{
-		if (ShooterChar->HasAuthority())
-		{
-			Weapon->StartPull(ShooterChar);
-		}
-		else
-		{
-			// The pull ends by granting a weapon, and only the server can do that, so the whole
-			// thing is asked of the server rather than flown here and confirmed afterwards. This
-			// client sees the flight arrive through replication, a ping later. Our own reach goes
-			// with the request: only this machine knows this player's charge.
-			ShooterChar->Server_RequestWeaponPickup(Weapon, EvaluateCaptureRange(FMath::Abs(Weapon->GetCharge())));
-		}
 	}
 
 	// Track as current target to prevent re-search

@@ -7,6 +7,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "ShooterWeaponHolder.h"
 #include "ShooterWeapon.h"
+#include "Variant_Shooter/ShooterCharacter.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 
@@ -80,6 +81,20 @@ void AShooterPickup::OnOverlap(UPrimitiveComponent* OverlappedComponent, AActor*
 	if (IShooterWeaponHolder* WeaponHolder = Cast<IShooterWeaponHolder>(OtherActor))
 	{
 		WeaponHolder->AddWeaponClass(WeaponClass);
+
+		// A gun off the floor is loot, the same as one taken from an enemy: its reserve is what it
+		// came with and never refills. Only the player's class weapon refills itself. Without this
+		// a picked-up gun could top a turret up forever (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md).
+		if (AShooterCharacter* const Player = Cast<AShooterCharacter>(OtherActor))
+		{
+			if (Player->ResolveHotkeySlotForWeaponClass(WeaponClass) != AShooterCharacter::ClassWeaponHotkeySlot)
+			{
+				if (AShooterWeapon* const Granted = Player->FindWeaponOfType(WeaponClass))
+				{
+					Granted->ConfigureFiniteEnergyReserve();
+				}
+			}
+		}
 
 		// hide this mesh
 		SetActorHiddenInGame(true);

@@ -83,6 +83,8 @@
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/Abilities/AbilityHandler.h"
 #include "Variant_Shooter/Abilities/AbilityDefinition_Grapple.h"
+#include "Variant_Shooter/Abilities/AbilityHandler_Grapple.h"
+#include "Variant_Shooter/UI/WeaponDropCardWidget.h"
 #include "CableComponent.h"
 #include "DrawDebugHelpers.h"
 #include "NiagaraFunctionLibrary.h"
@@ -431,6 +433,14 @@ void AShooterCharacter::EndPlay(EEndPlayReason::Type EndPlayReason)
 	// Stop any looping sounds
 	StopSlideLoopSound();
 	StopWallRunLoopSound();
+
+	// The weapon card lives in the viewport, not on this actor, and would otherwise stay on screen.
+	ClearGrappleFetchAiming();
+	if (WeaponDropCard)
+	{
+		WeaponDropCard->RemoveFromParent();
+		WeaponDropCard = nullptr;
+	}
 
 	Super::EndPlay(EndPlayReason);
 
@@ -1181,6 +1191,14 @@ void AShooterCharacter::OnRep_CurrentWeapon()
 
 	// Same event the server-side equip path fires, so the local HUD reacts identically.
 	OnActiveWeaponChanged.Broadcast(CurrentWeapon);
+
+	// A fetch that finished on the server before this weapon got here was waiting for it to draw.
+	// A null arrival is also the signal when the RPC could not name the weapon yet.
+	if (bPendingFetchDraw && PendingFetchDrawWeapon.IsExplicitlyNull() && CurrentWeapon)
+	{
+		PendingFetchDrawWeapon = CurrentWeapon;
+	}
+	TryFinishPendingFetchDraw(false);
 }
 
 void AShooterCharacter::OnRep_CurrentHP()
@@ -1603,38 +1621,6 @@ void AShooterCharacter::Server_ReleaseProp_Implementation(AEMFPhysicsProp* Prop)
 	Prop->EndRemoteHold();
 }
 
-void AShooterCharacter::Server_RequestWeaponPickup_Implementation(ADroppedRangedWeapon* Drop, float ReportedCaptureRange)
-{
-	if (!Drop)
-	{
-		return;
-	}
-
-	// The reported reach, held to what this client's own search radius could ever have found.
-	float ClaimedRange = FMath::Max(0.0f, ReportedCaptureRange);
-	if (const UChargeAnimationComponent* Charge = GetChargeAnimationComponent())
-	{
-		ClaimedRange = FMath::Min(ClaimedRange, Charge->CaptureSearchRadius);
-	}
-
-	// Reach test with the same round-trip margin as everything else reported from a client.
-	static constexpr float PickupMarginCm = 500.0f;
-	const float DistanceToDrop = FVector::Dist(GetActorLocation(), Drop->GetActorLocation());
-	const float PickupRange = ClaimedRange + PickupMarginCm;
-	if (DistanceToDrop > PickupRange)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to pick up %s at %.0f cm, reach is %.0f - rejected"),
-			*GetName(), *Drop->GetName(), DistanceToDrop, PickupRange);
-		return;
-	}
-
-	if (!Drop->TryStartPullForClient(this))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s asked to pick up %s, already taken or not capturable - rejected"),
-			*GetName(), *Drop->GetName());
-	}
-}
-
 void AShooterCharacter::Server_RequestInventoryPickup_Implementation(AInventoryPickup* Pickup, float ReportedCaptureRange)
 {
 	if (!Pickup)
@@ -1642,9 +1628,8 @@ void AShooterCharacter::Server_RequestInventoryPickup_Implementation(AInventoryP
 		return;
 	}
 
-	// Same shape as the weapon request above: the reported reach is held to what this client's own
-	// search radius could ever have found, then given the round-trip margin every reported number
-	// in this class gets.
+	// The reported reach is held to what this client's own search radius could ever have found, then
+	// given the round-trip margin every reported number in this class gets.
 	float ClaimedRange = FMath::Max(0.0f, ReportedCaptureRange);
 	if (const UChargeAnimationComponent* Charge = GetChargeAnimationComponent())
 	{
@@ -2041,12 +2026,27 @@ void AShooterCharacter::Server_UpdateHeldPropTransform_Implementation(AEMFPhysic
 	Prop->ApplyHeldTransform(Location, Rotation, LinearVelocity);
 }
 
+// Players take no damage at all while set. Checked at the top of TakeDamage because every kind of
+// incoming damage ends up there (see the slide block below). For benches, where the observer stands
+// near a fight that is not about them: on the turret bench the player starts right behind the turret
+// the enemies are shooting at and catches their stray rounds.
+static TAutoConsoleVariable<int32> CVarPlayerGod(
+	TEXT("polarity.player.god"),
+	0,
+	TEXT("1: players take no damage from anything. Bench/debug only."),
+	ECVF_Default);
+
 float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
 	// Only the server decides how much health anyone has. Without this a client would kill its
 	// own local copy of a teammate while the real one stands there at full HP, which is exactly
 	// what the first coop session showed.
 	if (!HasAuthority())
+	{
+		return 0.0f;
+	}
+
+	if (CVarPlayerGod.GetValueOnGameThread() != 0)
 	{
 		return 0.0f;
 	}
@@ -3612,6 +3612,14 @@ void AShooterCharacter::DoAbilityPressed()
 		return;
 	}
 
+	// The grapple fetches whatever drop the brackets are on. The claim goes first so the server has
+	// it when the activation lands (same actor channel, both reliable, so they arrive in order), and
+	// it goes even when it is null, so an old claim cannot ride along on a press that aimed at a wall.
+	if (AbilityComponent && Cast<UAbilityDefinition_Grapple>(AbilityComponent->GetActiveAbility()))
+	{
+		Server_SetGrappleFetchTarget(GrappleFetchTarget.Get());
+	}
+
 	if (AbilityComponent)
 	{
 		AbilityComponent->TryActivate();
@@ -3639,6 +3647,120 @@ void AShooterCharacter::DoAbilityReleased()
 	{
 		AbilityComponent->OnButtonReleased();
 	}
+}
+
+void AShooterCharacter::Server_SetGrappleFetchTarget_Implementation(ADroppedRangedWeapon* Drop)
+{
+	// Believed here and checked where it is used, like the ability aim target below: the handler
+	// runs the reach and availability test itself. @see UAbilityHandler_Grapple::OnActivate
+	GrappleFetchClaim = Drop;
+}
+
+ADroppedRangedWeapon* AShooterCharacter::ConsumeGrappleFetchClaim()
+{
+	ADroppedRangedWeapon* Claim = GrappleFetchClaim.Get();
+	GrappleFetchClaim.Reset();
+	return Claim;
+}
+
+void AShooterCharacter::BeginWeaponFetchStow(const UAbilityDefinition_Grapple* Def)
+{
+	if (!HasAuthority() || !Def || !Def->bStowWeapon || bWeaponStowedForFetch)
+	{
+		return;
+	}
+	bWeaponStowedForFetch = true;
+	FetchStowSpeedMultiplier = Def->WeaponStowSpeedMultiplier;
+
+	// The same stow a swing uses, on the same pair of machines SetGrappleLine uses: here, and on the
+	// one that predicts this character. A watching client needs nothing -- the third-person montage
+	// and the weapon's hidden flag reach it on their own.
+	StowWeaponForGrapple(FetchStowSpeedMultiplier);
+	if (!IsLocallyControlled())
+	{
+		Client_BeginWeaponFetchStow(FetchStowSpeedMultiplier);
+	}
+}
+
+void AShooterCharacter::Client_BeginWeaponFetchStow_Implementation(float SpeedMultiplier)
+{
+	// A draw still waiting from the previous fetch loses to the new throw.
+	bPendingFetchDraw = false;
+	GetWorldTimerManager().ClearTimer(FetchDrawTimeoutTimer);
+	StowWeaponForGrapple(SpeedMultiplier);
+}
+
+void AShooterCharacter::FinishWeaponFetch(bool bGotWeapon)
+{
+	if (!HasAuthority() || !bWeaponStowedForFetch)
+	{
+		return;
+	}
+	bWeaponStowedForFetch = false;
+
+	// A swing thrown while the fetched gun was still flying has the hands on its line now. Its own
+	// release draws, and it will draw CurrentWeapon, which is already the new gun.
+	if (const UApexMovementComponent* Apex = GetApexMovement(); Apex && Apex->IsGrappling())
+	{
+		return;
+	}
+
+	DrawAfterWeaponFetch(FetchStowSpeedMultiplier, bGotWeapon);
+	if (!IsLocallyControlled())
+	{
+		Client_FinishWeaponFetch(CurrentWeapon, FetchStowSpeedMultiplier, bGotWeapon);
+	}
+}
+
+void AShooterCharacter::Client_FinishWeaponFetch_Implementation(AShooterWeapon* Expected, float SpeedMultiplier,
+	bool bGotWeapon)
+{
+	// The server's CurrentWeapon is usually a gun spawned this very frame, and this RPC tends to
+	// overtake its replication. Drawing now would draw the OLD weapon and then have it swapped out
+	// under the animation, so the draw waits for OnRep_CurrentWeapon to bring the new one. A null
+	// Expected is exactly that case (the reference could not be resolved yet).
+	bPendingFetchDraw = true;
+	bPendingFetchGotWeapon = bGotWeapon;
+	PendingFetchDrawMultiplier = SpeedMultiplier;
+	PendingFetchDrawWeapon = Expected;
+
+	// Never leave the hands empty on a lost update: after this long, draw whatever is there.
+	static constexpr float FetchDrawTimeoutSeconds = 1.0f;
+	GetWorldTimerManager().SetTimer(FetchDrawTimeoutTimer,
+		FTimerDelegate::CreateWeakLambda(this, [this]() { TryFinishPendingFetchDraw(true); }),
+		FetchDrawTimeoutSeconds, false);
+
+	TryFinishPendingFetchDraw(false);
+}
+
+void AShooterCharacter::TryFinishPendingFetchDraw(bool bForce)
+{
+	if (!bPendingFetchDraw)
+	{
+		return;
+	}
+
+	const AShooterWeapon* Expected = PendingFetchDrawWeapon.Get();
+	const bool bArrived = Expected ? (CurrentWeapon == Expected) : false;
+	if (!bArrived && !bForce)
+	{
+		return;
+	}
+
+	bPendingFetchDraw = false;
+	GetWorldTimerManager().ClearTimer(FetchDrawTimeoutTimer);
+	DrawAfterWeaponFetch(PendingFetchDrawMultiplier, bPendingFetchGotWeapon);
+}
+
+void AShooterCharacter::DrawAfterWeaponFetch(float SpeedMultiplier, bool bGotWeapon)
+{
+	// Picking a gun up is reaching for it, which ends a hand-holster the same way a pickup does on
+	// every other path. A fetch that came back empty hands the holster back instead.
+	if (bGotWeapon)
+	{
+		bRestoreHolsterAfterGrapple = false;
+	}
+	UnstowWeaponAfterGrapple(SpeedMultiplier);
 }
 
 void AShooterCharacter::Server_SetAbilityAimTarget_Implementation(AShooterNPC* Target)
@@ -3816,6 +3938,141 @@ void AShooterCharacter::UpdateAbilityAiming()
 	const float PixelRadius = FMath::Clamp((BoundsExtent.Size() / Distance) * 600.0f, 24.0f, 400.0f);
 
 	Reticle->UpdateForTarget(Screen, PixelRadius, 0);
+}
+
+void AShooterCharacter::UpdateGrappleFetchAiming()
+{
+	if (!IsLocallyControlled())
+	{
+		return;
+	}
+
+	// The brackets promise "press now and the hook brings this back", so they show only when that is
+	// true: the grapple is the ability in hand, it can fire right now, and nothing else has already
+	// borrowed the brackets for a different promise.
+	const UAbilityDefinition_Grapple* Def = AbilityComponent
+		? Cast<UAbilityDefinition_Grapple>(AbilityComponent->GetActiveAbility()) : nullptr;
+	ADroppedRangedWeapon* Target = nullptr;
+	if (Def && Def->bCanFetchWeapons && AbilityComponent->CanActivate()
+		&& !bAbilityAiming && !bMeleeFocusReticleActive)
+	{
+		Target = UAbilityHandler_Grapple::FindFetchTarget(this, Def);
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr;
+	if (!Target || !PC || !Sub)
+	{
+		ClearGrappleFetchAiming();
+		return;
+	}
+	GrappleFetchTarget = Target;
+
+	// Every frame rather than once: the melee lock and ability aiming release the brackets when they
+	// end, and that must not hand them back to the capture scan while a drop is still bracketed. The
+	// call is a no-op when nothing changes.
+	Sub->SetReticleSuppressed(true);
+	bGrappleFetchReticleActive = true;
+
+	UCaptureReticleWidget* Reticle = Sub->GetReticleForExternalUse(PC);
+
+	FVector Center, Extent;
+	Target->GetActorBounds(true, Center, Extent);
+	FVector2D Screen;
+	if (!PC->ProjectWorldLocationToScreen(Center, Screen))
+	{
+		if (Reticle)
+		{
+			Reticle->ClearTarget();
+		}
+		if (WeaponDropCard)
+		{
+			WeaponDropCard->HideCard();
+		}
+		return;
+	}
+
+	// Bracket size from the drop's own bounds, the same rule the other borrowers use.
+	const float Distance = FMath::Max(1.0f, FVector::Dist(GetActorLocation(), Center));
+	const float PixelRadius = FMath::Clamp((Extent.Size() / Distance) * 600.0f, 24.0f, 400.0f);
+
+	if (Reticle)
+	{
+		// The capture look, not the lunge one: this is an offer to take the thing.
+		Reticle->SetMode(ECaptureReticleMode::Capture);
+		Reticle->UpdateForTarget(Screen, PixelRadius, 0);
+	}
+
+	if (!Def->WeaponCardWidgetClass)
+	{
+		return;
+	}
+
+	if (WeaponDropCard && WeaponDropCard->GetClass() != Def->WeaponCardWidgetClass)
+	{
+		WeaponDropCard->RemoveFromParent();
+		WeaponDropCard = nullptr;
+	}
+	if (!WeaponDropCard)
+	{
+		WeaponDropCard = CreateWidget<UWeaponDropCardWidget>(PC, Def->WeaponCardWidgetClass);
+		if (!WeaponDropCard)
+		{
+			return;
+		}
+		// Above the brackets (80) and the overhead charge bars (90), so the card is never under them.
+		WeaponDropCard->AddToViewport(95);
+	}
+
+	// The key the player presses, as their bindings have it, so the card cannot name the wrong one.
+	FText KeyLabel;
+	if (const ULocalPlayer* LP = PC->GetLocalPlayer())
+	{
+		if (UEnhancedInputLocalPlayerSubsystem* Input = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+		{
+			const TArray<FKey> Keys = Input->QueryKeysMappedToAction(AbilityAction);
+			if (Keys.Num() > 0)
+			{
+				KeyLabel = Keys[0].GetDisplayName(false);
+			}
+		}
+	}
+
+	const bool bFullCard = FVector::Dist(GetActorLocation(), Target->GetActorLocation()) <= Def->WeaponCardFullDistance;
+	WeaponDropCard->ShowForDrop(Target, this, Screen, PixelRadius, bFullCard, KeyLabel);
+}
+
+void AShooterCharacter::ClearGrappleFetchAiming()
+{
+	GrappleFetchTarget = nullptr;
+
+	if (WeaponDropCard)
+	{
+		WeaponDropCard->HideCard();
+	}
+
+	if (!bGrappleFetchReticleActive)
+	{
+		return;
+	}
+	bGrappleFetchReticleActive = false;
+
+	// Somebody else took the brackets over this frame: leave them theirs.
+	if (bAbilityAiming || bMeleeFocusReticleActive)
+	{
+		return;
+	}
+
+	UEMFChargeWidgetSubsystem* Sub = GetWorld() ? GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>() : nullptr;
+	if (!Sub)
+	{
+		return;
+	}
+	if (UCaptureReticleWidget* Reticle = Sub->GetReticleForExternalUse(Cast<APlayerController>(GetController())))
+	{
+		Reticle->ClearTarget();
+	}
+	Sub->SetReticleSuppressed(false);
 }
 
 namespace
@@ -4086,6 +4343,8 @@ void AShooterCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// First of the three that borrow the brackets, so the other two always get the last word on them.
+	UpdateGrappleFetchAiming();
 	UpdateAbilityAiming();
 	UpdateMeleeFocusReticle();
 
@@ -4231,6 +4490,21 @@ void AShooterCharacter::Tick(float DeltaTime)
 	// what it reads is replicated to simulated proxies for exactly that. Purely cosmetic, so it sits
 	// in the tick rather than in the movement simulation the swing itself lives in.
 	UpdateGrappleVisual(DeltaTime);
+	if (IsLocallyControlled())
+	{
+		float TargetRoll = 0.0f;
+		const UApexMovementComponent* GrappleMovement = GetApexMovement();
+		const UAbilityDefinition_Grapple* GrappleDef = GrappleVisualDefinition.Get();
+		if (GrappleMovement && GrappleMovement->IsGrappling() && GrappleDef)
+		{
+			const FVector ViewRight = GetViewRotation().RotateVector(FVector::RightVector);
+			const FVector ToAnchor = (GrappleMovement->GetGrappleAnchor() - GetActorLocation()).GetSafeNormal();
+			const float SidePull = FVector::DotProduct(ToAnchor, ViewRight);
+			const float SideMotion = FMath::Clamp(FVector::DotProduct(GetVelocity(), ViewRight) / 1800.0f, -1.0f, 1.0f);
+			TargetRoll = GrappleDef->CameraRollDegrees * FMath::Clamp(0.65f * SidePull + 0.35f * SideMotion, -1.0f, 1.0f);
+		}
+		GrappleCameraRoll = FMath::FInterpTo(GrappleCameraRoll, TargetRoll, DeltaTime, 8.0f);
+	}
 
 	// The arms held back for a frame or two after a grapple's draw begins, so they are not shown in
 	// the pose they were stowed in. @see FirstPersonRevealFramesLeft. Reaching zero is what puts
@@ -5607,7 +5881,7 @@ void AShooterCharacter::ApplyGrappleLineLocally(bool bOn, FVector Anchor, UAbili
 }
 
 void AShooterCharacter::Multicast_PlayGrappleThrow_Implementation(FVector Anchor, float TravelTime,
-	UAbilityDefinition_Grapple* Def)
+	bool bCanAttach, UAbilityDefinition_Grapple* Def, AActor* FetchTarget)
 {
 	if (!GetWorld())
 	{
@@ -5619,9 +5893,26 @@ void AShooterCharacter::Multicast_PlayGrappleThrow_Implementation(FVector Anchor
 
 	GrappleVisualAnchor    = Anchor;
 	GrappleVisualEnd       = GetGrappleHandLocation();
+	GrappleThrowOrigin     = GrappleVisualEnd;
 	GrappleThrowStartTime  = GetWorld()->GetTimeSeconds();
 	GrappleThrowTravelTime = FMath::Max(0.0f, TravelTime);
 	bGrappleVisualActive   = true;
+	bGrappleVisualCanAttach = bCanAttach;
+	bGrappleVisualRetracting = false;
+	GrappleVisualFetchTarget = FetchTarget;
+	bGrappleVisualIsFetch = FetchTarget != nullptr;
+	const float RetractSpeed = Def ? FMath::Max(Def->HookRetractSpeed, 100.0f) : 11760.0f;
+	GrappleVisualMaxEndTime = bCanAttach ? -1.0f
+		: GrappleThrowStartTime + GrappleThrowTravelTime
+			+ FVector::Dist(GrappleThrowOrigin, Anchor) / RetractSpeed + 0.25f;
+
+	// A fetch comes back at the drop's own pace and only after the server has started its pull, which
+	// a watching machine hears about a ping later. The backstop has to cover both.
+	if (FetchTarget)
+	{
+		static constexpr float FetchReturnAllowanceSeconds = 2.0f;
+		GrappleVisualMaxEndTime += FetchReturnAllowanceSeconds;
+	}
 
 	// Put the rope on the straight line between the two ends BEFORE anybody looks at it.
 	//
@@ -5869,6 +6160,7 @@ void AShooterCharacter::UpdateGrappleVisual(float DeltaTime)
 	const float Now = GetWorld()->GetTimeSeconds();
 	const float SinceThrow = Now - GrappleThrowStartTime;
 	const FVector Start = GetGrappleHandLocation();
+	const UAbilityDefinition_Grapple* VisualDef = GrappleVisualDefinition.Get();
 
 	// While the hook is in flight the far end travels; once it has bitten, the far end is wherever
 	// the movement component says the line is anchored, which on a machine that is only watching is
@@ -5876,26 +6168,72 @@ void AShooterCharacter::UpdateGrappleVisual(float DeltaTime)
 	const bool bInFlight = SinceThrow < GrappleThrowTravelTime;
 	if (bInFlight)
 	{
-		// The hook is a thrown object, so it closes on the anchor at its own speed and nothing else
-		// decides where it is. This used to interpolate by TIME between the CURRENT hand position and
-		// the anchor, which is a different thing entirely: the near end moves while the hook is in
-		// the air, so the "hook" was dragged around by the player's own motion and never travelled at
-		// the speed the asset asks for.
-		//
-		// Measured backwards from the anchor, which is the only fixed point in the picture. The
-		// remaining gap can only shrink, so the drawn length can only grow while the hook is airborne
-		// and stops the instant it arrives -- by construction, not by hoping the timer agrees.
-		const float SpanNow = FVector::Dist(Start, GrappleVisualAnchor);
-		const float HookSpeed = (GrappleThrowTravelTime > KINDA_SMALL_NUMBER)
-			? SpanNow / GrappleThrowTravelTime
-			: 0.0f;
-		const float RemainingToAnchor = FMath::Clamp(SpanNow - HookSpeed * SinceThrow, 0.0f, SpanNow);
-
-		GrappleVisualEnd = GrappleVisualAnchor + (Start - GrappleVisualAnchor).GetSafeNormal() * RemainingToAnchor;
+		// Follow the original shot ray at the authored speed. The hand can move during flight;
+		// measuring a fresh hand-to-anchor span every frame changes the speed and apparent reach.
+		// The server has already limited the ray to Range, so a miss reaches that endpoint once.
+		const float FlightAlpha = FMath::Clamp(
+			SinceThrow / FMath::Max(GrappleThrowTravelTime, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+		GrappleVisualEnd = FMath::Lerp(GrappleThrowOrigin, GrappleVisualAnchor, FlightAlpha);
+		if (VisualDef && VisualDef->HookFlightWobble > 0.0f)
+		{
+			const FVector FlightDirection = (GrappleVisualAnchor - Start).GetSafeNormal();
+			FVector Side = FVector::CrossProduct(FlightDirection, FVector::UpVector).GetSafeNormal();
+			if (Side.IsNearlyZero())
+			{
+				Side = FVector::RightVector;
+			}
+			const FVector Up = FVector::CrossProduct(Side, FlightDirection).GetSafeNormal();
+			const float Envelope = FMath::Sin(FlightAlpha * PI);
+			GrappleVisualEnd += VisualDef->HookFlightWobble * Envelope *
+				(Side * FMath::Sin(SinceThrow * 42.0f) + Up * 0.45f * FMath::Sin(SinceThrow * 61.0f));
+		}
 	}
 	else
 	{
-		GrappleVisualEnd = bAttached ? Apex->GetGrappleAnchor() : GrappleVisualAnchor;
+		if (bAttached)
+		{
+			GrappleVisualEnd = Apex->GetGrappleAnchor();
+		}
+		// A fetch: the hook has the weapon, so the far end rides on it while it flies to the player.
+		// It waits at the drop for a short grace first, because the pull is started on the server and a
+		// watching machine sees it begin a ping after the hook arrived. If the pull never starts (the
+		// drop went to somebody else), the line falls through to an ordinary empty retract below.
+		const ADroppedRangedWeapon* FetchDrop = Cast<ADroppedRangedWeapon>(GrappleVisualFetchTarget.Get());
+		static constexpr float FetchPullGraceSeconds = 0.4f;
+		const bool bFollowFetch = FetchDrop && !FetchDrop->IsHidden() && !FetchDrop->IsPullComplete()
+			&& (FetchDrop->IsBeingPulled() || SinceThrow < GrappleThrowTravelTime + FetchPullGraceSeconds);
+		if (!bGrappleVisualCanAttach && bFollowFetch)
+		{
+			FVector DropCenter, DropExtent;
+			FetchDrop->GetActorBounds(true, DropCenter, DropExtent);
+			GrappleVisualEnd = DropCenter;
+		}
+		else if (!bGrappleVisualCanAttach)
+		{
+			if (!bGrappleVisualRetracting)
+			{
+				// From wherever the end is now: after a fetch that is the weapon's last position, which
+				// is usually right in front of the camera, so the empty line is gone in a frame or two.
+				if (!bGrappleVisualIsFetch)
+				{
+					GrappleVisualEnd = GrappleVisualAnchor;
+				}
+				bGrappleVisualRetracting = true;
+			}
+			const float RetractSpeed = VisualDef ? FMath::Max(VisualDef->HookRetractSpeed, 100.0f) : 11760.0f;
+			GrappleVisualEnd = FMath::VInterpConstantTo(GrappleVisualEnd, Start, DeltaTime, RetractSpeed);
+			if (FVector::DistSquared(GrappleVisualEnd, Start) < FMath::Square(10.0f)
+				|| (GrappleVisualMaxEndTime > 0.0f && Now >= GrappleVisualMaxEndTime))
+			{
+				bGrappleVisualActive = false;
+				GrappleCable->SetHiddenInGame(true);
+				return;
+			}
+		}
+		else if (!bAttached)
+		{
+			GrappleVisualEnd = GrappleVisualAnchor;
+		}
 
 		// The throw has landed and nothing is hanging off it. A short grace rather than an immediate
 		// cut, because the attach is decided on the server and reaches a watching machine a moment
@@ -5904,7 +6242,7 @@ void AShooterCharacter::UpdateGrappleVisual(float DeltaTime)
 		const bool bGraceExpired = SinceThrow > GrappleThrowTravelTime + AttachGraceSeconds;
 		const bool bOverstayed = GrappleVisualMaxEndTime > 0.0f && Now > GrappleVisualMaxEndTime;
 
-		if ((!bAttached && bGraceExpired) || bOverstayed)
+		if ((bGrappleVisualCanAttach && !bAttached && bGraceExpired) || bOverstayed)
 		{
 			bGrappleVisualActive = false;
 			GrappleVisualMaxEndTime = -1.0f;
@@ -5945,6 +6283,25 @@ void AShooterCharacter::UpdateGrappleVisual(float DeltaTime)
 	// reaches one link per pass and never propagates along a 32-segment chain at all.
 	const float Span = FVector::Dist(Start, GrappleVisualEnd);
 	GrappleCable->CableLength = Span;
+	// During launch and return this is a straight, moving shot rather than a simulated hanging
+	// line. The engine reinitializes its particles between the current endpoints whenever one
+	// moves beyond this threshold; keep it at 1 cm so the rendered tube cannot trail past the
+	// authored hook position. Once attached, restore the slack-dependent simulation threshold.
+	GrappleCable->TeleportDistanceThreshold = !bAttached ? 1.0f
+		: (VisualDef ? FMath::Lerp(1.0f, 500.0f,
+			FMath::Clamp(VisualDef->CableSlack, 0.0f, 0.5f) / 0.5f) : 1.0f);
+	GrappleCable->TileMaterial = Span / FMath::Max(VisualDef ? VisualDef->CableTextureRepeatLength : 12.0f, 1.0f);
+	GrappleCable->CableForce = FVector::ZeroVector;
+	if (bAttached && VisualDef && VisualDef->CableWobbleForce > 0.0f)
+	{
+		const FVector Direction = (GrappleVisualEnd - Start).GetSafeNormal();
+		FVector Side = FVector::CrossProduct(Direction, FVector::UpVector).GetSafeNormal();
+		if (Side.IsNearlyZero())
+		{
+			Side = FVector::RightVector;
+		}
+		GrappleCable->CableForce = Side * (VisualDef->CableWobbleForce * FMath::Sin(Now * 23.0f));
+	}
 	GrappleCable->SetHiddenInGame(false);
 
 	if (CVarGrappleCableDebug.GetValueOnAnyThread() > 0)
@@ -6315,7 +6672,9 @@ FRotator AShooterCharacter::GetViewOnlyRotationOffset() const
 		}
 	}
 
-	return Super::GetViewOnlyRotationOffset() + PackShakeCurrent + FromCurves;
+	FRotator Result = Super::GetViewOnlyRotationOffset() + PackShakeCurrent + FromCurves;
+	Result.Roll += GrappleCameraRoll;
+	return Result;
 }
 
 FVector AShooterCharacter::ToCameraParentSpace(const USceneComponent* Camera, const FVector& ActorSpaceOffset) const

@@ -4,6 +4,8 @@
 
 #include "BuildableActor.h"
 #include "BuildableDefinition.h"
+#include "TurretBuildable.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Components/Image.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
@@ -114,6 +116,40 @@ void UBuildableStatusEntryWidget::Refresh(bool bInstant)
 		}
 		StatusText->SetText(Status);
 		StatusText->SetColorAndOpacity(FSlateColor(DimTextColor));
+	}
+	if (AmmoText)
+	{
+		// Rounds and reserve are replicated per vice and every change of either broadcasts
+		// OnBuildableChanged (OnRep_Ammo on clients), so this stays current without a tick.
+		const ATurretBuildable* const Turret = Cast<ATurretBuildable>(Followed);
+		if (!Turret || Followed->GetBuildableState() != EBuildableState::Active)
+		{
+			AmmoText->SetVisibility(ESlateVisibility::Collapsed);
+		}
+		else
+		{
+			TArray<FText> Lines;
+			bool bAnyRounds = false;
+			for (int32 Vice = 0; Vice < Turret->GetUnlockedViceCount(); ++Vice)
+			{
+				const AShooterWeapon* const Gun = Turret->GetViceWeapon(Vice);
+				if (!Gun)
+				{
+					Lines.Add(NSLOCTEXT("BuildableStatus", "ViceEmpty", "empty"));
+					continue;
+				}
+				const int32 Rounds = Turret->GetViceRounds(Vice);
+				const int32 Reserve = Turret->GetViceReserve(Vice);
+				bAnyRounds |= Rounds + Reserve > 0;
+				Lines.Add(FText::Format(NSLOCTEXT("BuildableStatus", "ViceAmmo", "{0}  {1} / {2}  +{3}"),
+					Gun->GetWeaponDisplayName(), FText::AsNumber(Rounds), FText::AsNumber(Gun->GetMagazineSize()),
+					FText::AsNumber(Reserve)));
+			}
+			AmmoText->SetText(FText::Join(FText::FromString(TEXT("\n")), Lines));
+			// Dim when every gun is dry: the turret is standing but no longer defending anything.
+			AmmoText->SetColorAndOpacity(FSlateColor(bAnyRounds ? TextColor : DimTextColor));
+			AmmoText->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
 	}
 	BP_OnRefreshed(Followed);
 }

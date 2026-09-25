@@ -1569,28 +1569,12 @@ public:
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> LocalLoadingCover;
 
-	/** Ask the server to pull a dropped weapon toward this character and grant it on arrival.
-	 *  Reliable: a lost request is a pickup that never happens and a button that looks broken.
+	/** Ask the server to pull anything that goes into the cell grid: money, spare rounds, an upgrade.
 	 *
-	 *  The pull itself runs on the server and everyone watches it replicate, rather than the client
-	 *  flying its own copy: the weapon only appears in the hand when the server grants it anyway
-	 *  (capacity can refuse), so predicting the flight would buy nothing but a chance to disagree
-	 *  about where the weapon is. First request wins; a second player asking for the same drop is
-	 *  refused and told so in the log.
-	 *
-	 *  Carries the client's own reach for the same reason Server_CaptureProp does: range is a
-	 *  product of the puller's charge, a player's charge is not replicated, and the server would
-	 *  otherwise measure a remote player's reach as zero and refuse every pickup. Clamped to that
-	 *  client's own search radius. */
-	UFUNCTION(Server, Reliable)
-	void Server_RequestWeaponPickup(ADroppedRangedWeapon* Drop, float ReportedCaptureRange);
-
-	/** The same request for anything that goes into the cell grid: money, spare rounds, an upgrade.
-	 *
-	 *  Split from the weapon one because the answer is different in kind. A weapon pickup either
-	 *  happens or is refused; an inventory pickup can be taken IN PART, leaving the rest lying in
-	 *  the world. A client cannot work out which of those happened without the server's copy of the
-	 *  grid, so it never tries: it asks, and watches the result replicate.
+	 *  An inventory pickup can be taken IN PART, leaving the rest lying in the world. A client cannot
+	 *  work out whether that happened without the server's copy of the grid, so it never tries: it
+	 *  asks, and watches the result replicate. (Dropped weapons are not taken this way any more: the
+	 *  grapple fetches them. @see Server_SetGrappleFetchTarget)
 	 *
 	 *  Carries the client's own reach for the same reason as every other capture RPC here: range is
 	 *  a product of the puller's charge, and a player's charge does not replicate. */
@@ -2634,13 +2618,53 @@ public:
 	 *  matter the line is either attached, which replicates on its own, or gone.
 	 *
 	 *  The definition travels rather than nine separate look parameters — it is an asset reference,
-	 *  so it costs one object id and every machine reads the same numbers out of it. */
+	 *  so it costs one object id and every machine reads the same numbers out of it.
+	 *
+	 *  FetchTarget is set when the hook was thrown at a dropped weapon rather than at the world: the
+	 *  line then comes back WITH the weapon, its far end riding on the drop while the drop flies to
+	 *  the player, instead of retracting empty. Null for every ordinary throw. */
 	UFUNCTION(NetMulticast, Unreliable)
-	void Multicast_PlayGrappleThrow(FVector Anchor, float TravelTime, class UAbilityDefinition_Grapple* Def);
+	void Multicast_PlayGrappleThrow(FVector Anchor, float TravelTime, bool bCanAttach,
+		class UAbilityDefinition_Grapple* Def, AActor* FetchTarget);
 
 	/** Where the line leaves the character on this machine: the first-person hand for the player
 	 *  whose screen this is, the third-person hand for everybody else. */
 	FVector GetGrappleHandLocation() const;
+
+	// ==================== Grapple fetch (dropped weapons) ====================
+	// A dropped weapon is picked up by throwing the grapple at it. The owning client decides WHICH
+	// drop, because it is the one showing the brackets; the server checks the claim and does the
+	// throw. @see UAbilityHandler_Grapple::FindFetchTarget for the one rule both sides use.
+
+	/** The drop the brackets are on right now. Owning client only; null everywhere else. */
+	class ADroppedRangedWeapon* GetGrappleFetchTarget() const { return GrappleFetchTarget.Get(); }
+
+	/** Tell the authority which drop was bracketed when the ability key went down. Sent immediately
+	 *  before the activation and on the same actor channel, so it arrives first. Null is sent too,
+	 *  so a press that bracketed nothing cannot fetch the drop from an older press. */
+	UFUNCTION(Server, Reliable)
+	void Server_SetGrappleFetchTarget(class ADroppedRangedWeapon* Drop);
+
+	/** Hand the handler the drop the client claimed, and forget it: one claim, one throw. */
+	class ADroppedRangedWeapon* ConsumeGrappleFetchClaim();
+
+	/** A fetch throw is leaving: put the held weapon away exactly as a grapple swing does. Authority
+	 *  entry point; mirrored to the owning client the same way SetGrappleLine is. */
+	void BeginWeaponFetchStow(const class UAbilityDefinition_Grapple* Def);
+
+	/** The fetch is over: draw whatever is now CurrentWeapon -- the fetched gun when it was granted,
+	 *  the old one when the fetch came back empty. Authority entry point. Does nothing unless
+	 *  BeginWeaponFetchStow ran, and leaves the hands alone while a swing line is attached (the
+	 *  swing's own release draws). bGotWeapon ends a hand-holster the player had before the throw. */
+	void FinishWeaponFetch(bool bGotWeapon);
+
+	UFUNCTION(Client, Reliable)
+	void Client_BeginWeaponFetchStow(float SpeedMultiplier);
+
+	/** Expected is the server's CurrentWeapon. It is usually brand new and may land after this RPC,
+	 *  so the draw waits for OnRep_CurrentWeapon to deliver it (with a short timeout). */
+	UFUNCTION(Client, Reliable)
+	void Client_FinishWeaponFetch(AShooterWeapon* Expected, float SpeedMultiplier, bool bGotWeapon);
 
 	// ==================== Ability aiming (hold to aim, release to fire) ====================
 
@@ -2676,6 +2700,48 @@ protected:
 	/** Enter and leave the aiming state, borrowing the capture reticle for the duration. */
 	void BeginAbilityAiming();
 	void EndAbilityAiming();
+
+	/** Owning client: the drop the brackets are on. @see GetGrappleFetchTarget */
+	UPROPERTY()
+	TWeakObjectPtr<class ADroppedRangedWeapon> GrappleFetchTarget;
+
+	/** Authority: the drop the client claimed with its last press. @see ConsumeGrappleFetchClaim */
+	UPROPERTY()
+	TWeakObjectPtr<class ADroppedRangedWeapon> GrappleFetchClaim;
+
+	/** True while the fetch scan is the one driving the shared capture reticle. Same bookkeeping as
+	 *  bMeleeFocusReticleActive: suppress and release the brackets once each, not every frame. */
+	bool bGrappleFetchReticleActive = false;
+
+	/** Authority: a fetch stowed the weapon and has not drawn it back yet. */
+	bool bWeaponStowedForFetch = false;
+
+	/** Stow speed of the fetch in progress, reused for the draw at its end. */
+	float FetchStowSpeedMultiplier = 1.0f;
+
+	/** Owning client: the server finished the fetch, the draw is waiting for CurrentWeapon to match. */
+	bool bPendingFetchDraw = false;
+	bool bPendingFetchGotWeapon = false;
+	float PendingFetchDrawMultiplier = 1.0f;
+	TWeakObjectPtr<AShooterWeapon> PendingFetchDrawWeapon;
+	FTimerHandle FetchDrawTimeoutTimer;
+
+	/** Owning client: draw now if CurrentWeapon is the expected one, or bForce. */
+	void TryFinishPendingFetchDraw(bool bForce);
+
+	/** Both machines: the actual draw at the end of a fetch. */
+	void DrawAfterWeaponFetch(float SpeedMultiplier, bool bGotWeapon);
+
+	/** The weapon card over the bracketed drop. Created on first use, on the owning client only. */
+	UPROPERTY(Transient)
+	TObjectPtr<class UWeaponDropCardWidget> WeaponDropCard;
+
+	/** Pick the drop the grapple would fetch, and drive the brackets and the weapon card over it.
+	 *  Owning client only, once a frame. */
+	void UpdateGrappleFetchAiming();
+
+	/** Drop the brackets and the card, if the fetch scan was the one showing them. */
+	void ClearGrappleFetchAiming();
 
 public:
 
@@ -3100,9 +3166,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Grapple")
 	FVector GrappleFirstPersonChestOffset = FVector(20.0f, 0.0f, -35.0f);
 
-	/** Where the visible end of the line is right now. During the throw it travels from the hand to
-	 *  the anchor; after that it is the anchor. */
+	/** Where the visible end of the line is right now. During a miss it also returns to the hand. */
 	FVector GrappleVisualEnd = FVector::ZeroVector;
+	FVector GrappleThrowOrigin = FVector::ZeroVector;
 
 	/** The throw currently being drawn. Local and cosmetic on every machine, started by
 	 *  Multicast_PlayGrappleThrow. */
@@ -3110,10 +3176,21 @@ protected:
 	float GrappleThrowStartTime = -1.0f;
 	float GrappleThrowTravelTime = 0.0f;
 	bool bGrappleVisualActive = false;
+	bool bGrappleVisualCanAttach = false;
+	bool bGrappleVisualRetracting = false;
+	float GrappleCameraRoll = 0.0f;
 
 	/** World time the drawn line must be gone by, whatever else happens. Negative means no limit.
 	 *  A backstop for the case where the swing ended on a machine that never heard about it. */
 	float GrappleVisualMaxEndTime = -1.0f;
+
+	/** The drop this throw is fetching, if it is a fetch. While the drop is on its way to the player
+	 *  the line's far end rides on it. @see Multicast_PlayGrappleThrow */
+	TWeakObjectPtr<AActor> GrappleVisualFetchTarget;
+
+	/** Whether this throw is a fetch at all. Kept apart from the pointer above, which goes stale the
+	 *  moment the fetched drop is granted and destroyed, while the line is still coming home. */
+	bool bGrappleVisualIsFetch = false;
 
 	/** Both ends of SetGrappleLine do the same work; this is that work. */
 	void ApplyGrappleLineLocally(bool bOn, FVector Anchor, class UAbilityDefinition_Grapple* Def, int32 Level);

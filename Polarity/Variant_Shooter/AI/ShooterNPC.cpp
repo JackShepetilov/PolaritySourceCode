@@ -21,6 +21,8 @@
 #include "Animation/AnimMontage.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavigationSystem.h"
+#include "NavigationPath.h"
 #include "ShooterAIController.h"
 #include "Components/StateTreeAIComponent.h"
 #include "Coop/CoopPlayers.h"
@@ -53,7 +55,7 @@
 #include "FlyingDrone.h"
 #include "KamikazeDroneNPC.h"
 #include "SniperTurretNPC.h"
-#include "Variant_Shooter/Siege/SiegeCoreBuildable.h"
+#include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "../../AI/Components/CoverFinderComponent.h"
 #include "Variant_Shooter/Buildables/TurretBuildable.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
@@ -62,9 +64,240 @@
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Field/FieldSystemObjects.h"
 #include "CameraShakeComponent.h"
+#include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
+
+// ==================== Bench instrumentation (polarity.ai.bench) ====================
+//
+// For the turret/siege bench (L_TurretSiegeBench, Source/Tools/TurretBench). Everything here is
+// debug bookkeeping keyed by NPC in cpp-local maps rather than members, so it costs no header and
+// stays Live Coding compatible. Off by default; nothing below runs unless the variable is set.
+namespace NPCBench
+{
+	static TAutoConsoleVariable<int32> CVarBench(
+		TEXT("polarity.ai.bench"),
+		0,
+		TEXT("1: every walking shooter NPC draws its state over its head (turret-cover phase, target, why it is or is not ")
+		TEXT("firing), a line for every shot (green = the aim ray reaches the target, red = it stops on something else), ")
+		TEXT("and logs one [BENCH] line per shot and per death. Read by Source/Tools/TurretBench/bench_report."),
+		ECVF_Default);
+
+	static bool IsOn()
+	{
+		return CVarBench.GetValueOnGameThread() != 0;
+	}
+
+	/** What the last aim ray of this NPC ended on. Written where the ray is traced
+	 *  (GetWeaponTargetLocation), read where the shot is reported (OnWeaponShotFired). */
+	struct FAimRecord
+	{
+		TWeakObjectPtr<AActor> RayHit;
+		FVector From = FVector::ZeroVector;
+		FVector To = FVector::ZeroVector;
+	};
+
+	/** The last firing gate this NPC went through, as a code and as words. Code 0 is FIRING. */
+	struct FGateRecord
+	{
+		uint8 Code = 0xFF;
+		FString Text;
+	};
+
+	static TMap<TWeakObjectPtr<const AActor>, FAimRecord> LastAim;
+	static TMap<TWeakObjectPtr<const AActor>, FGateRecord> LastGate;
+
+	/** The maps are keyed by weak pointers and never shrink on their own; a long bench run spawns
+	 *  and kills NPCs for minutes. Emptying them now and then only costs one frame of stale labels. */
+	template <typename T>
+	static void Prune(TMap<TWeakObjectPtr<const AActor>, T>& Map)
+	{
+		if (Map.Num() > 256)
+		{
+			Map.Empty();
+		}
+	}
+
+	/** What a ray stopped on, in words a person placed there: the actor label where there is one
+	 *  (PIE runs in the editor, which keeps them - "Pillar_1" rather than "StaticMeshActor_23"),
+	 *  the object name otherwise. bCreateIfNone false: asking must not invent a label. */
+	static FString ReadableName(const AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return TEXT("nothing");
+		}
+#if WITH_EDITOR
+		const FString& Label = Actor->GetActorLabel(false);
+		if (!Label.IsEmpty())
+		{
+			return Label;
+		}
+#endif
+		return Actor->GetName();
+	}
+
+	static const TCHAR* CoverPhaseName(uint8 Phase)
+	{
+		static const TCHAR* Names[] = { TEXT("-"), TEXT("SEEKING cover"), TEXT("TO HIDE"), TEXT("AT HIDE"), TEXT("PEEKING") };
+		return Phase < UE_ARRAY_COUNT(Names) ? Names[Phase] : TEXT("?");
+	}
+
+	/** Last STEER probe per NPC, so it logs once a second rather than every frame. */
+	static TMap<TWeakObjectPtr<const AActor>, float> LastSteerProbe;
+
+	/** Last POSE probe per NPC (twice a second). */
+	static TMap<TWeakObjectPtr<const AActor>, float> LastPoseProbe;
+
+	/** SPIN probe: yaw turned and ground covered over the current half-second window, per NPC. */
+	struct FSpinWindow
+	{
+		float LastYaw = 0.0f;
+		float TurnedDegrees = 0.0f;
+		float Elapsed = 0.0f;
+		float SpeedSum = 0.0f;
+		int32 Frames = 0;
+		bool bPrimed = false;
+	};
+	static TMap<TWeakObjectPtr<const AActor>, FSpinWindow> SpinWindows;
+
+	/** Rounds that left the barrel during the current turret peek window (reset on arrival at P). */
+	static TMap<TWeakObjectPtr<const AActor>, int32> ShotsThisWindow;
+
+	/** STALL probe: when this NPC last moved or fired while holding a target, and whether the
+	 *  current stall has been reported already. */
+	static TMap<TWeakObjectPtr<const AActor>, float> LastBusyTime;
+	static TSet<TWeakObjectPtr<const AActor>> StallReported;
+
+	/** SPRINT-STUCK probe: since when this NPC has been "sprinting" while standing, and whether that
+	 *  episode has been reported. The rifle arms drop the gun for a sprint, moving or not. */
+	static TMap<TWeakObjectPtr<const AActor>, float> SprintStandSince;
+	static TSet<TWeakObjectPtr<const AActor>> SprintStuckReported;
+
+	/** The active StateTree states of an NPC's controller, "A > B > C", or "-" when none runs. */
+	static FString ActiveStates(const AController* Controller)
+	{
+		const UStateTreeAIComponent* const Tree = Controller ? Controller->FindComponentByClass<UStateTreeAIComponent>() : nullptr;
+		if (!Tree)
+		{
+			return TEXT("-");
+		}
+		FString Out;
+		for (const FName& Name : Tree->GetActiveStateNames())
+		{
+			Out += Out.IsEmpty() ? Name.ToString() : TEXT(">") + Name.ToString();
+		}
+		return Out.IsEmpty() ? FString(TEXT("-")) : Out;
+	}
+
+	/** Whether the turret has a clear line from its own middle to Point: the same test FindTurretThreat
+	 *  uses for "the turret can see me". */
+	static bool TurretSees(const AActor* Turret, const FVector& Point, const AActor* Ignore)
+	{
+		if (!Turret || !Turret->GetWorld())
+		{
+			return false;
+		}
+		FVector Origin = FVector::ZeroVector;
+		FVector Extent = FVector::ZeroVector;
+		Turret->GetActorBounds(true, Origin, Extent, false);
+		FCollisionQueryParams Params(FName(TEXT("BenchTurretSees")), /*bTraceComplex*/ false);
+		Params.AddIgnoredActor(Turret);
+		if (Ignore)
+		{
+			Params.AddIgnoredActor(Ignore);
+		}
+		return !Turret->GetWorld()->LineTraceTestByChannel(Origin, Point, ECC_Visibility, Params);
+	}
+}
+
+// ==================== Turret cover: who owns the head and the feet ====================
+namespace TurretCoverOwnership
+{
+	/** One above Gameplay. The StateTree's stance and peek tasks set gameplay focus of their own, and
+	 *  at equal priority the last writer of the frame wins, so the head flicked between their point
+	 *  and the turret. A higher priority simply outranks them without having to stop them. */
+	static const EAIFocusPriority::Type FocusPriority = static_cast<EAIFocusPriority::Type>(EAIFocusPriority::Gameplay + 1);
+
+	static TAutoConsoleVariable<int32> CVarPauseTree(
+		TEXT("polarity.ai.turretcover.pausetree"),
+		1,
+		TEXT("1: the NPC's StateTree is paused while it plays the corner against a turret, so the corner machine alone ")
+		TEXT("moves it (the tree's own move orders used to arrive between the machine's and yank the NPC about). ")
+		TEXT("0: both run, as before."),
+		ECVF_Default);
+
+	/** NPCs whose tree the corner machine paused: only those are resumed, and a pooled or otherwise
+	 *  reused NPC whose cover ended without EndTurretCover is healed on its next Inactive tick. */
+	static TSet<TWeakObjectPtr<const AActor>> PausedTrees;
+
+	/** NPCs whose muzzle saw the threat at least once during the current peek window. A corner where it
+	 *  never does is dropped at the end of the window instead of being replayed for ever. cpp-local
+	 *  rather than a member so the header, and Live Coding, stay untouched. */
+	static TSet<TWeakObjectPtr<const AActor>> MuzzleClearedThisWindow;
+
+	static void PauseTree(AShooterNPC* NPC, AAIController* Controller)
+	{
+		if (CVarPauseTree.GetValueOnGameThread() == 0 || !Controller)
+		{
+			return;
+		}
+		if (UStateTreeAIComponent* const Tree = Controller->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			if (!Tree->IsPaused())
+			{
+				Tree->PauseLogic(TEXT("TurretCover"));
+				PausedTrees.Add(NPC);
+				UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s StateTree paused for the corner game"), *GetNameSafe(NPC));
+			}
+		}
+	}
+
+	static void ResumeTree(AShooterNPC* NPC, AAIController* Controller)
+	{
+		if (!PausedTrees.Remove(NPC) || !Controller)
+		{
+			return;
+		}
+		if (UStateTreeAIComponent* const Tree = Controller->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			if (Tree->IsPaused())
+			{
+				Tree->ResumeLogic(TEXT("TurretCover"));
+				UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s StateTree resumed"), *GetNameSafe(NPC));
+			}
+		}
+	}
+}
 
 namespace
 {
+	/** Where a walker should path to when it marches on a building. A building carves a hole in the
+	 *  navmesh under itself, so its own location is usually not on the mesh and a path to it fails
+	 *  outright: the walker then stands at the fog line for the whole siege. The old level-placed
+	 *  core got away with it only because its pivot sat on a corner, at the edge of the hole; a
+	 *  dispenser's pivot is at its centre. The nearest point on the mesh inside the building's own
+	 *  bounds (plus a margin) is the edge of that hole, which is reachable. */
+	bool ResolveSiegeMoveGoal(const UWorld* World, const AActor* Building, FVector& OutGoal)
+	{
+		const UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+		if (!NavSys || !Building)
+		{
+			return false;
+		}
+
+		const FBox Bounds = Building->GetComponentsBoundingBox();
+		const FVector Center = Bounds.IsValid ? Bounds.GetCenter() : Building->GetActorLocation();
+		const FVector Extent = (Bounds.IsValid ? Bounds.GetExtent() : FVector::ZeroVector) + FVector(150.0f, 150.0f, 300.0f);
+
+		FNavLocation OnMesh;
+		if (!NavSys->ProjectPointToNavigation(Center, OnMesh, Extent))
+		{
+			return false;
+		}
+		OutGoal = OnMesh.Location;
+		return true;
+	}
+
 	/** Re-assert the BeginPlay combat rotation mode for a GROUND NPC after a stun / capture /
 	 *  launch / pull ends. These states cache the rotation flags into shared members and disable
 	 *  them; when states overlap (e.g. captured while already knocked back, or a throw that recovers
@@ -388,6 +621,244 @@ void AShooterNPC::Tick(float DeltaTime)
 	// the corner until the turret is gone.
 	TickTurretCover(DeltaTime);
 
+	// [BENCH] State over the head, redrawn every frame: what this NPC is doing and why it is or is
+	// not shooting, in words, so the bench can be read by eye without the log.
+	if (NPCBench::IsOn() && !IsA<AFlyingDrone>() && !IsA<AKamikazeDroneNPC>())
+	{
+		const NPCBench::FGateRecord* const Gate = NPCBench::LastGate.Find(this);
+		const uint8 GateCode = Gate ? Gate->Code : 0xFF;
+		FColor Colour = FColor::White;
+		if (GateCode == 0)
+		{
+			Colour = FColor::Green;
+		}
+		else if (GateCode == 3 || GateCode == 4 || GateCode == 5 || GateCode == 6 || GateCode == 8 || GateCode == 9)
+		{
+			Colour = FColor::Yellow;
+		}
+		else if (GateCode != 0xFF)
+		{
+			Colour = FColor::Red;
+		}
+
+		const UCharacterMovementComponent* const Move = GetCharacterMovement();
+		FString Cover = NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase));
+		if (TurretCoverPhase == ETurretCoverPhase::Peeking)
+		{
+			Cover += bTurretPeekArrived ? TEXT(" (at P)") : TEXT(" (walking to P)");
+		}
+
+		const bool bSuppressed = AccuracyComponent && AccuracyComponent->IsSuppressed();
+		const bool bSuppFire = AccuracyComponent && AccuracyComponent->IsFiringSuppressive();
+		const FString Label = FString::Printf(
+			TEXT("%s  [%s]  HP %.0f\ncover: %s%s\ntarget: %s\n%s%s%s\nmag %d/%d%s%s"),
+			*GetName(), Weapon ? *Weapon->GetClass()->GetName() : TEXT("no weapon"), CurrentHP,
+			*Cover, SiegeMarchTarget.IsValid() ? TEXT("   march: core") : TEXT(""),
+			*GetNameSafe(CurrentAimTarget.Get()),
+			Gate ? *Gate->Text : TEXT("(never tried to shoot)"),
+			bSuppressed ? TEXT("  [SUPPRESSED: misses on purpose]") : TEXT(""),
+			bSuppFire ? TEXT("  [SUPPRESSIVE FIRE: misses on purpose]") : TEXT(""),
+			Weapon ? Weapon->GetBulletCount() : 0, Weapon ? Weapon->GetMagazineSize() : 0,
+			bIsReloadingWeapon ? TEXT("  RELOADING") : TEXT(""),
+			Move && Move->IsCrouching() ? TEXT("  CROUCH") : TEXT(""));
+
+		DrawDebugString(GetWorld(), FVector(0.0f, 0.0f, GetSimpleCollisionHalfHeight() + 70.0f), Label,
+			this, Colour, 0.0f, true, 1.1f);
+
+		// The corner it is playing: green = where it hides, cyan = where it steps out to shoot.
+		if (TurretCoverPhase != ETurretCoverPhase::Inactive)
+		{
+			if (const UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>())
+			{
+				if (Finder->HasCover())
+				{
+					const FCoverSpot& Spot = Finder->GetCover();
+					DrawDebugSphere(GetWorld(), Spot.HideLocation + FVector(0, 0, 30), 30.0f, 8, FColor::Green, false, -1.0f, 0, 2.0f);
+					DrawDebugSphere(GetWorld(), Spot.PeekLocation + FVector(0, 0, 30), 22.0f, 8, FColor::Cyan, false, -1.0f, 0, 2.0f);
+					DrawDebugLine(GetWorld(), Spot.HideLocation + FVector(0, 0, 30), Spot.PeekLocation + FVector(0, 0, 30),
+						FColor::Cyan, false, -1.0f, 0, 1.5f);
+				}
+			}
+		}
+
+		// [BENCH] STEER: who is actually driving the feet. Once a second, while the corner machine or the
+		// siege march owns this NPC: where its path follower is taking it, against where the owner
+		// wants it. OTHER means some third party (the StateTree, a squad order) moved it in between the
+		// owner's re-issued orders - which, several times a second, is what jerking looks like.
+		if (TurretCoverPhase != ETurretCoverPhase::Inactive || SiegeMarchTarget.IsValid())
+		{
+			const float Now = GetWorld()->GetTimeSeconds();
+			float& LastProbe = NPCBench::LastSteerProbe.FindOrAdd(this, -100.0f);
+			AAIController* const SteerController = Cast<AAIController>(GetController());
+			const UPathFollowingComponent* const Path = SteerController ? SteerController->GetPathFollowingComponent() : nullptr;
+			if (Now - LastProbe >= 1.0f && Path && Path->GetStatus() == EPathFollowingStatus::Moving)
+			{
+				LastProbe = Now;
+				const FVector Goal = Path->GetPathDestination();
+				FString Expected = TEXT("-");
+				FVector ExpectedAt = FVector::ZeroVector;
+				if (TurretCoverPhase != ETurretCoverPhase::Inactive)
+				{
+					if (const UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>(); Finder && Finder->HasCover())
+					{
+						const bool bToPeek = TurretCoverPhase == ETurretCoverPhase::Peeking;
+						Expected = bToPeek ? TEXT("P") : TEXT("H");
+						ExpectedAt = bToPeek ? Finder->GetCover().PeekLocation : Finder->GetCover().HideLocation;
+					}
+				}
+				else if (const AActor* const Core = SiegeMarchTarget.Get())
+				{
+					Expected = TEXT("core");
+					ExpectedAt = Core->GetActorLocation();
+				}
+				// The core is a MoveToActor with a wide acceptance, so its goal may sit anywhere on the way
+				// in; within 6 m of the core counts as the march.
+				const float Tolerance = Expected == TEXT("core") ? 600.0f : 150.0f;
+				const bool bMine = Expected != TEXT("-") && FVector::Dist2D(Goal, ExpectedAt) <= Tolerance;
+				UE_LOG(LogTemp, Log, TEXT("[BENCH] STEER npc=%s owner=%s cover=%s goalOff=%.0f treePaused=%d"),
+					*GetName(), bMine ? TEXT("MINE") : TEXT("OTHER"),
+					NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)),
+					Expected != TEXT("-") ? FVector::Dist2D(Goal, ExpectedAt) : -1.0f,
+					TurretCoverOwnership::PausedTrees.Contains(this) ? 1 : 0);
+			}
+		}
+
+		// [BENCH] SPIN: turning on the spot. Over each half second, the total yaw the body swept and its
+		// average ground speed; more than 90 degrees while standing is logged with everything that can
+		// turn a pawn: the focus actor and focal point, the controller, the path follower, the tree.
+		{
+			NPCBench::FSpinWindow& Spin = NPCBench::SpinWindows.FindOrAdd(this);
+			const float Yaw = GetActorRotation().Yaw;
+			if (Spin.bPrimed)
+			{
+				Spin.TurnedDegrees += FMath::Abs(FMath::FindDeltaAngleDegrees(Spin.LastYaw, Yaw));
+			}
+			Spin.bPrimed = true;
+			Spin.LastYaw = Yaw;
+			Spin.Elapsed += DeltaTime;
+			Spin.SpeedSum += GetVelocity().Size2D();
+			++Spin.Frames;
+			if (Spin.Elapsed >= 0.5f)
+			{
+				const float AvgSpeed = Spin.Frames > 0 ? Spin.SpeedSum / Spin.Frames : 0.0f;
+				if (Spin.TurnedDegrees >= 90.0f && AvgSpeed < 80.0f)
+				{
+					const AAIController* const SpinController = Cast<AAIController>(GetController());
+					const UPathFollowingComponent* const SpinPath = SpinController ? SpinController->GetPathFollowingComponent() : nullptr;
+					const bool bPathMoving = SpinPath && SpinPath->GetStatus() == EPathFollowingStatus::Moving;
+					const FVector Focal = SpinController ? SpinController->GetFocalPoint() : FVector::ZeroVector;
+					UE_LOG(LogTemp, Log,
+						TEXT("[BENCH] SPIN npc=%s turned=%.0f in %.2fs avgSpeed=%.0f | cover=%s march=%d crouch=%d shooting=%d | actorYaw=%.0f ctrlYaw=%.0f | focus=%s focalDist=%.0f focalYaw=%.0f | path=%s goalDist=%.0f | treePaused=%d orient=%d ctrlDesired=%d"),
+						*GetName(), Spin.TurnedDegrees, Spin.Elapsed, AvgSpeed,
+						NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)), SiegeMarchTarget.IsValid() ? 1 : 0,
+						Move && Move->IsCrouching() ? 1 : 0, bIsShooting ? 1 : 0,
+						Yaw, SpinController ? SpinController->GetControlRotation().Yaw : -999.0f,
+						*GetNameSafe(SpinController ? SpinController->GetFocusActor() : nullptr),
+						FVector::Dist2D(Focal, GetActorLocation()), (Focal - GetActorLocation()).Rotation().Yaw,
+						bPathMoving ? TEXT("MOVING") : TEXT("idle"),
+						bPathMoving ? FVector::Dist2D(SpinPath->GetPathDestination(), GetActorLocation()) : -1.0f,
+						TurretCoverOwnership::PausedTrees.Contains(this) ? 1 : 0,
+						Move && Move->bOrientRotationToMovement ? 1 : 0, Move && Move->bUseControllerDesiredRotation ? 1 : 0);
+				}
+				Spin.TurnedDegrees = 0.0f;
+				Spin.Elapsed = 0.0f;
+				Spin.SpeedSum = 0.0f;
+				Spin.Frames = 0;
+			}
+		}
+
+		// [BENCH] SPRINT-STUCK: the sprint latch on while standing still for over a second. That is the
+		// gun-at-the-side pose (ABP_TP_Rifle drops its aim layer on IsSprinting, moving or not).
+		if (const UApexMovementComponent* const SprintApex = GetApexMovement())
+		{
+			const float Now = GetWorld()->GetTimeSeconds();
+			if (SprintApex->IsSprinting() && GetVelocity().Size2D() < 50.0f)
+			{
+				const float Since = NPCBench::SprintStandSince.FindOrAdd(this, Now);
+				if (Now - Since >= 1.0f && !NPCBench::SprintStuckReported.Contains(this))
+				{
+					NPCBench::SprintStuckReported.Add(this);
+					UE_LOG(LogTemp, Log, TEXT("[BENCH] SPRINT-STUCK npc=%s cover=%s march=%d tree=%s treePaused=%d"),
+						*GetName(), NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)),
+						SiegeMarchTarget.IsValid() ? 1 : 0, *NPCBench::ActiveStates(GetController()),
+						TurretCoverOwnership::PausedTrees.Contains(this) ? 1 : 0);
+				}
+			}
+			else
+			{
+				NPCBench::SprintStandSince.Remove(this);
+				NPCBench::SprintStuckReported.Remove(this);
+			}
+		}
+
+		// [BENCH] STALL: holding a target, standing still and not firing for three seconds. "Standing there
+		// with its arms down" and "stepped out, sat, never fired" are both this. Reloading counts as busy,
+		// a round leaving the barrel resets it (OnWeaponShotFired). Reported once per stall, with every
+		// party that could be the reason: the corner machine, the siege march, the tree, the path follower,
+		// the last firing gate.
+		{
+			const float Now = GetWorld()->GetTimeSeconds();
+			AShooterAIController* const StallController = Cast<AShooterAIController>(GetController());
+			AActor* const StallTarget = StallController ? StallController->GetCurrentTarget() : nullptr;
+			const bool bBusy = !StallTarget || GetVelocity().Size2D() > 20.0f || bIsReloadingWeapon;
+			float& LastBusy = NPCBench::LastBusyTime.FindOrAdd(this, Now);
+			if (bBusy)
+			{
+				LastBusy = Now;
+				NPCBench::StallReported.Remove(this);
+			}
+			else if (Now - LastBusy >= 3.0f && !NPCBench::StallReported.Contains(this))
+			{
+				NPCBench::StallReported.Add(this);
+				const UPathFollowingComponent* const StallPath = StallController ? StallController->GetPathFollowingComponent() : nullptr;
+				const NPCBench::FGateRecord* const StallGate = NPCBench::LastGate.Find(this);
+				UE_LOG(LogTemp, Log,
+					TEXT("[BENCH] STALL npc=%s for=%.1fs target=%s dist=%.0f muzzleSees=%d | cover=%s arrived=%d march=%d | tree=%s treePaused=%d | path=%s | wants=%d shooting=%d gate=\"%s\" | crouch=%d focus=%s hp=%.0f"),
+					*GetName(), Now - LastBusy, *GetNameSafe(StallTarget),
+					FVector::Dist(GetActorLocation(), StallTarget->GetActorLocation()),
+					HasLineOfSightTo(StallTarget) ? 1 : 0,
+					NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)), bTurretPeekArrived ? 1 : 0,
+					SiegeMarchTarget.IsValid() ? 1 : 0,
+					*NPCBench::ActiveStates(StallController), TurretCoverOwnership::PausedTrees.Contains(this) ? 1 : 0,
+					StallPath && StallPath->GetStatus() == EPathFollowingStatus::Moving ? TEXT("MOVING") : TEXT("idle"),
+					bWantsToShoot ? 1 : 0, bIsShooting ? 1 : 0, StallGate ? *StallGate->Text : TEXT("never tried"),
+					Move && Move->IsCrouching() ? 1 : 0,
+					*GetNameSafe(StallController ? StallController->GetFocusActor() : nullptr), CurrentHP);
+			}
+		}
+
+		// [BENCH] POSE: where the body, the controller and the gun point, against where the threat is.
+		// Twice a second while the corner game runs. Separates "the body is not turned" (actor yaw off)
+		// from "the body is turned but the animation holds the gun sideways" (actor yaw on, gun yaw off).
+		if (TurretCoverPhase != ETurretCoverPhase::Inactive)
+		{
+			const float Now = GetWorld()->GetTimeSeconds();
+			float& LastPose = NPCBench::LastPoseProbe.FindOrAdd(this, -100.0f);
+			const AActor* const Threat = TurretThreat.Get();
+			if (Now - LastPose >= 0.5f && Threat)
+			{
+				LastPose = Now;
+				const AAIController* const PoseController = Cast<AAIController>(GetController());
+				const USkeletalMeshComponent* const GunMesh = Weapon ? Weapon->GetThirdPersonMesh() : nullptr;
+				// The barrel as a line, grip (mesh origin) to muzzle: independent of how the socket's axes
+				// happen to be authored, which a socket rotation is not.
+				const float GunYaw = GunMesh && GunMesh->DoesSocketExist(Weapon->GetMuzzleSocketName())
+					? (GunMesh->GetSocketLocation(Weapon->GetMuzzleSocketName()) - GunMesh->GetComponentLocation()).Rotation().Yaw
+					: -999.0f;
+				UE_LOG(LogTemp, Log,
+					TEXT("[BENCH] POSE npc=%s cover=%s arrived=%d crouch=%d shooting=%d | actorYaw=%.0f ctrlYaw=%.0f toThreat=%.0f muzzleYaw=%.0f gunMeshYaw=%.0f | ctrlDesired=%d orient=%d ctrlYawFlag=%d rate=%.0f | focus=%s speed=%.0f"),
+					*GetName(), NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)), bTurretPeekArrived ? 1 : 0,
+					Move && Move->IsCrouching() ? 1 : 0, bIsShooting ? 1 : 0,
+					GetActorRotation().Yaw, PoseController ? PoseController->GetControlRotation().Yaw : -999.0f,
+					(Threat->GetActorLocation() - GetActorLocation()).Rotation().Yaw, GunYaw,
+					GunMesh ? GunMesh->GetComponentRotation().Yaw : -999.0f,
+					Move && Move->bUseControllerDesiredRotation ? 1 : 0, Move && Move->bOrientRotationToMovement ? 1 : 0,
+					bUseControllerRotationYaw ? 1 : 0, Move ? Move->RotationRate.Yaw : -1.0f,
+					*GetNameSafe(PoseController ? PoseController->GetFocusActor() : nullptr), GetVelocity().Size2D());
+			}
+		}
+	}
+
 	// [FACING_DEBUG] Throttled (~1/sec) snapshot of the rotation chain, to find out why NPCs
 	// don't face the player. Filter the Output Log by: FACING_DEBUG  (remove after diagnosis)
 	if (UWorld* DbgWorld = GetWorld())
@@ -569,7 +1040,8 @@ void AShooterNPC::TickSiegeMarch(float DeltaTime)
 	}
 
 	AActor* const CurrentTarget = AIController->GetCurrentTarget();
-	if (!CurrentTarget || !CurrentTarget->IsA<ASiegeCoreBuildable>())
+	const ABuildableActor* const CoreTarget = Cast<ABuildableActor>(CurrentTarget);
+	if (!CoreTarget || !CoreTarget->IsSiegeCore())
 	{
 		// A visible player (or anything the intents name) is back in charge: hand the body over.
 		EndSiegeMarch();
@@ -592,7 +1064,15 @@ void AShooterNPC::TickSiegeMarch(float DeltaTime)
 	if (SiegeMoveReissueTimer <= 0.0f)
 	{
 		SiegeMoveReissueTimer = SiegeCoreMoveReissueInterval;
-		AIController->MoveToActor(CurrentTarget, FMath::Max(0.0f, SiegeCoreEngageDistance - 100.0f));
+		const float Acceptance = FMath::Max(0.0f, SiegeCoreEngageDistance - 100.0f);
+		FVector Goal;
+		const EPathFollowingRequestResult::Type Request = ResolveSiegeMoveGoal(GetWorld(), CurrentTarget, Goal)
+			? AIController->MoveToLocation(Goal, Acceptance)
+			: AIController->MoveToActor(CurrentTarget, Acceptance);
+		if (Request == EPathFollowingRequestResult::Failed)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SIEGE_DEBUG] %s: no path to %s"), *GetName(), *CurrentTarget->GetName());
+		}
 	}
 
 	if (bInRange && HasLineOfSightTo(CurrentTarget))
@@ -655,6 +1135,13 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 
 	if (TurretCoverPhase == ETurretCoverPhase::Inactive)
 	{
+		// A tree the corner machine paused must never stay paused once the machine is idle, whichever
+		// door the cover was left through (EndTurretCover resumes it; a recycled NPC may skip that).
+		if (TurretCoverOwnership::PausedTrees.Contains(this))
+		{
+			TurretCoverOwnership::ResumeTree(this, AIController);
+		}
+
 		if (!bScanNow)
 		{
 			return;
@@ -702,6 +1189,26 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 		// on its own terms. Cleared by EndTurretCover.
 		AIController->SetTargetIntent(ETargetIntentSource::Turret, Threat);
 
+		// The corner machine owns the feet from here on. The tree kept issuing move orders of its own
+		// between the machine's re-issues, and each one swung the path somewhere else for a moment:
+		// that was the jerking in and around the corner. The turret intent already outranks
+		// perception, so pausing the tree changes nothing about what the NPC fights.
+		TurretCoverOwnership::PauseTree(this, AIController);
+
+		// The tree was frozen mid-task, and some of its tasks change the BODY and undo it on the way out:
+		// ShooterPeek's relocation run and ShooterPush's charge turn sprint on and put the body onto the
+		// direction of travel. Paused, their exit never runs, and both stick for the whole corner game.
+		// A stuck sprint is what the rifle arms read ("sprinting" drops ABP_TP_Rifle's aim layer, and
+		// ApexMovementComponent::IsSprinting does not ask whether it is moving at all): the NPC stood at
+		// the corner with its gun hanging at its side, the muzzle socket pointing at the floor, and the
+		// muzzle check answering "no clear path" while its rounds still reached the turret. A stuck
+		// travel-facing is the sideways crouch. Undo both, here, where the machine takes over.
+		if (UApexMovementComponent* const Apex = GetApexMovement())
+		{
+			Apex->StopSprint();
+		}
+		RestoreGroundCombatRotation(this);
+
 		if (Finder)
 		{
 			TArray<AActor*> Threats;
@@ -738,14 +1245,90 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 
 	AActor* const ThreatActor = TurretThreat.Get();
 
+	// Eyes on the threat for the whole corner game, hidden or out. An NPC ducking behind the wall
+	// keeps watching where the turret is instead of turning to wherever its feet go and swinging back
+	// on the next step out; hiding, it looks at the corner the turret is behind, which is where the
+	// danger will come from. One priority above Gameplay (see TurretCoverOwnership::FocusPriority).
+	if (ThreatActor && AIController->GetFocusActorForPriority(TurretCoverOwnership::FocusPriority) != ThreatActor)
+	{
+		AIController->SetFocus(ThreatActor, TurretCoverOwnership::FocusPriority);
+	}
+
+	// Nothing in the corner game sprints, so a sprint latch here is somebody else's leftover (see the
+	// entry above). Cheap enough to hold every tick rather than trust that nothing sets it again.
+	// The one sprint the corner game makes itself (the run-up to a slide peek) is exempt.
+	const bool bOwnSlideRunUp = TurretCoverPhase == ETurretCoverPhase::Peeking && bTurretPeekSlide && !bTurretPeekArrived;
+	if (UApexMovementComponent* const CornerApex = GetApexMovement(); CornerApex && CornerApex->IsSprinting() && !bOwnSlideRunUp)
+	{
+		CornerApex->StopSprint();
+	}
+
 	switch (TurretCoverPhase)
 	{
 	case ETurretCoverPhase::Seeking:
 		if (Finder->HasCover())
 		{
-			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s Seeking -> ToHide, H=%s P=%s"),
+			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s Seeking -> ToHide, H=%s P=%s low=%d over=%d"),
 				*GetName(), *Finder->GetCover().HideLocation.ToCompactString(),
-				*Finder->GetCover().PeekLocation.ToCompactString());
+				*Finder->GetCover().PeekLocation.ToCompactString(),
+				Finder->GetCover().bLowCover ? 1 : 0, Finder->GetCover().bPeekOver ? 1 : 0);
+
+			// [BENCH] ROUTE: the walk to the new corner, as the path follower will take it. How close it
+			// passes to the turret and to any player, and how much of it the turret can see: a corner
+			// reached through the open is a corner paid for in hits before it is ever used.
+			if (NPCBench::IsOn())
+			{
+				UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+				const UNavigationPath* const Route = NavSys
+					? NavSys->FindPathToLocationSynchronously(GetWorld(), GetActorLocation(), Finder->GetCover().HideLocation, this)
+					: nullptr;
+				if (Route && Route->PathPoints.Num() > 1)
+				{
+					TArray<APawn*> Players;
+					CoopPlayers::GetAll(GetWorld(), Players);
+					const FVector TurretAt = ThreatActor ? ThreatActor->GetActorLocation() : FVector::ZeroVector;
+					float MinToTurret = TNumericLimits<float>::Max();
+					float MinToPlayer = TNumericLimits<float>::Max();
+					float Length = 0.0f;
+					int32 Samples = 0;
+					int32 Seen = 0;
+					for (int32 Index = 1; Index < Route->PathPoints.Num(); ++Index)
+					{
+						const FVector A = Route->PathPoints[Index - 1];
+						const FVector B = Route->PathPoints[Index];
+						const float Segment = FVector::Dist(A, B);
+						Length += Segment;
+						const int32 Steps = FMath::Max(1, FMath::CeilToInt(Segment / 100.0f));
+						for (int32 Step = 0; Step <= Steps; ++Step)
+						{
+							const FVector Point = FMath::Lerp(A, B, static_cast<float>(Step) / Steps);
+							++Samples;
+							MinToTurret = FMath::Min(MinToTurret, static_cast<float>(FVector::Dist2D(Point, TurretAt)));
+							for (const APawn* const Player : Players)
+							{
+								MinToPlayer = FMath::Min(MinToPlayer, static_cast<float>(FVector::Dist2D(Point, Player->GetActorLocation())));
+							}
+							// Head height of a standing NPC over the path point on the floor.
+							if (NPCBench::TurretSees(ThreatActor, Point + FVector(0.0f, 0.0f, 150.0f), this))
+							{
+								++Seen;
+							}
+						}
+					}
+					UE_LOG(LogTemp, Log,
+						TEXT("[BENCH] ROUTE npc=%s length=%.0f minToTurret=%.0f minToPlayer=%.0f seenByTurret=%d%% (%d/%d) fromTurret=%.0f hToTurret=%.0f"),
+						*GetName(), Length, MinToTurret, Players.Num() > 0 ? MinToPlayer : -1.0f,
+						Samples > 0 ? 100 * Seen / Samples : 0, Seen, Samples,
+						FVector::Dist2D(GetActorLocation(), TurretAt), FVector::Dist2D(Finder->GetCover().HideLocation, TurretAt));
+				}
+			}
+
+			// Whatever it was shooting while it looked for a corner stops here: the walk to H is the walk
+			// out of the turret's view, and from AtHide there is nothing to hit.
+			if (bWantsToShoot && CurrentAimTarget.Get() == ThreatActor)
+			{
+				StopShooting();
+			}
 			TurretCoverPhase = ETurretCoverPhase::ToHide;
 			TurretMoveReissueTimer = 0.0f;
 		}
@@ -763,6 +1346,23 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 					*GetName(), *GetNameSafe(ThreatActor), bStarted, Finder->GetRequeryCooldownRemaining());
 			}
 		}
+
+		// No corner (yet, or at all: every candidate seen, refused for its route, or the search on
+		// cooldown). The tree is paused, so nothing else will act: without this the NPC stood in the
+		// turret's view with its hands down, neither hiding nor shooting (bench 2026-09-23, [BENCH]
+		// STALL cover=SEEKING treePaused=1). It is exposed anyway, so it fights from where it is.
+		if (TurretCoverPhase == ETurretCoverPhase::Seeking && ThreatActor && bScanNow)
+		{
+			const bool bSeekMuzzleClear = HasLineOfSightTo(ThreatActor);
+			if (bSeekMuzzleClear && (!bWantsToShoot || CurrentAimTarget.Get() != ThreatActor))
+			{
+				StartShooting(ThreatActor);
+			}
+			else if (!bSeekMuzzleClear && bWantsToShoot && CurrentAimTarget.Get() == ThreatActor)
+			{
+				StopShooting();
+			}
+		}
 		break;
 
 	case ETurretCoverPhase::ToHide:
@@ -776,19 +1376,49 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 			break;
 		}
 
+		// Tighter than the peek's radius, and on purpose. The hide spot is scored as a body standing ON
+		// it, and the full TurretCoverArriveRadius (120) plus the engine's capsule slack parked NPCs up
+		// to 1.6 m off it - out of the shadow the spot was chosen for. Measured 2026-09-23: arrivals
+		// 115-150 cm off a hidden H, in the turret's view and being shot. The same radius is used for
+		// the drift check at AtHide, so a legitimate parking spot never reads as drifted.
+		const float HideAccept = FMath::Max(30.0f, TurretCoverArriveRadius * 0.35f);
 		const FVector Hide = Finder->GetCover().HideLocation;
 		TurretMoveReissueTimer -= DeltaTime;
 		if (TurretMoveReissueTimer <= 0.0f)
 		{
 			TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
-			AIController->MoveToLocation(Hide, TurretCoverArriveRadius);
+			AIController->MoveToLocation(Hide, HideAccept);
 		}
 
-		const float Arrive = TurretCoverArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+		const float Arrive = HideAccept + GetSimpleCollisionRadius() * 1.1f + 5.0f;
 		if (FVector::Dist2D(GetActorLocation(), Hide) <= Arrive)
 		{
+			// [BENCH] HIDE: arrived behind the corner. Can the turret see this NPC right now, where it
+			// actually stands (not the H the finder scored), at the head and at the chest?
+			if (NPCBench::IsOn())
+			{
+				// In the pose it will wait in: crouched behind low cover (the crouch lands on this same
+				// tick, below), standing otherwise.
+				const FVector Feet = GetActorLocation() - FVector(0.0f, 0.0f, GetSimpleCollisionHalfHeight());
+				const UCharacterMovementComponent* const HideMove = GetCharacterMovement();
+				const float BodyHeight = Finder->GetCover().bLowCover && HideMove
+					? HideMove->GetCrouchedHalfHeight() * 2.0f : GetSimpleCollisionHalfHeight() * 2.0f;
+				UE_LOG(LogTemp, Log,
+					TEXT("[BENCH] HIDE npc=%s seesHead=%d seesChest=%d targetedByTurret=%d standOffH=%.0f exposureNow=%.2f exposureChosen=%.2f low=%d"),
+					*GetName(),
+					NPCBench::TurretSees(ThreatActor, Feet + FVector(0.0f, 0.0f, BodyHeight * 0.92f), this) ? 1 : 0,
+					NPCBench::TurretSees(ThreatActor, Feet + FVector(0.0f, 0.0f, BodyHeight * 0.6f), this) ? 1 : 0,
+					TurretThreat.IsValid() && TurretThreat->GetCurrentTarget() == this ? 1 : 0,
+					FVector::Dist2D(GetActorLocation(), Hide), Finder->EvaluateCurrentExposure(), Finder->GetCover().Exposure,
+					Finder->GetCover().bLowCover ? 1 : 0);
+			}
 			TurretCoverPhase = ETurretCoverPhase::AtHide;
 			TurretCoverTimer = TurretCoverHideTime;
+			// Low cover hides a crouched body only: wait down behind it.
+			if (Finder->GetCover().bLowCover)
+			{
+				SetTurretPeekCrouch(/*bCrouched*/ true);
+			}
 		}
 		break;
 	}
@@ -814,15 +1444,32 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 		// corner. Re-pinning on drift keeps the thing this cadence exists for (something else dragged
 		// us away) and drops the thing it never meant to do.
 		const FVector HideSpot = Finder->GetCover().HideLocation;
-		const float HideArrive = TurretCoverArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+		const float HideAccept = FMath::Max(30.0f, TurretCoverArriveRadius * 0.35f);
+		const float HideArrive = HideAccept + GetSimpleCollisionRadius() * 1.1f + 5.0f;
 		if (FVector::Dist2D(GetActorLocation(), HideSpot) > HideArrive)
 		{
 			TurretMoveReissueTimer -= DeltaTime;
 			if (TurretMoveReissueTimer <= 0.0f)
 			{
 				TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
-				AIController->MoveToLocation(HideSpot, TurretCoverArriveRadius);
+				AIController->MoveToLocation(HideSpot, HideAccept);
 			}
+		}
+
+		// Never step out with an empty gun. A one-round launcher is empty after every peek and its
+		// reload is longer than the whole exposed window, so it used to step out, stand in the open
+		// reloading and step back without a shot: 17 of 33 grenadier windows on the turret bench
+		// (2026-09-22). Reload here, behind the corner, and only then go. A gun that cannot reload at
+		// all (no ammo left) does not hold the NPC here for ever: TryBeginReload refuses, and the
+		// peek goes ahead as it always did.
+		if (Weapon && Weapon->UsesReload() && Weapon->GetBulletCount() <= 0 && !bIsReloadingWeapon)
+		{
+			TryBeginReload();
+		}
+		if (bIsReloadingWeapon)
+		{
+			TurretCoverTimer = FMath::Max(TurretCoverTimer, 0.25f);
+			break;
 		}
 
 		TurretCoverTimer -= DeltaTime;
@@ -834,9 +1481,33 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 			TurretCoverTimer = TurretCoverPeekApproachTime;
 			bTurretPeekArrived = false;
 			TurretMoveReissueTimer = 0.0f;
-			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s AtHide -> Peeking on %s (approach<=%.2f, window=%.2f, perceptionDelay=%d)"),
+
+			// This peek's pose, rolled once from the class profile. A peek OVER low cover is always
+			// taken standing (standing is what clears the wall) and never slides (it does not move).
+			const UEnemyCombatProfile* const PeekProfile = GetCombatProfile();
+			const bool bOver = Finder->GetCover().bPeekOver;
+			bTurretPeekCrouch = !bOver && PeekProfile && PeekProfile->RollCrouchPeek();
+			bTurretPeekSlide = !bOver && PeekProfile && PeekProfile->RollSlidePeek();
+			bTurretPeekSlideStarted = false;
+
+			// Up for the walk out of a low hide (crouch-walking to P is what ate the old windows), and
+			// a sprint when this step out is to be a slide: the slide needs the speed, see Peeking.
+			if (!bOver)
+			{
+				SetTurretPeekCrouch(/*bCrouched*/ false);
+			}
+			if (bTurretPeekSlide)
+			{
+				if (UApexMovementComponent* const SlideApex = GetApexMovement())
+				{
+					SlideApex->StartSprint();
+				}
+			}
+
+			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s AtHide -> Peeking on %s (approach<=%.2f, window=%.2f, perceptionDelay=%d) low=%d over=%d crouch=%d slide=%d"),
 				*GetName(), *GetNameSafe(ThreatActor), TurretCoverPeekApproachTime, TurretCoverPeekTime,
-				IsInPerceptionDelay());
+				IsInPerceptionDelay(), Finder->GetCover().bLowCover ? 1 : 0, bOver ? 1 : 0,
+				bTurretPeekCrouch ? 1 : 0, bTurretPeekSlide ? 1 : 0);
 			// Deliberately NOT crouching here. Crouch is the pose for TRADING, and taking it at the
 			// moment the NPC steps off meant crawling to the corner at crouch speed, which is what ate
 			// the old window. It goes down on arrival instead, where it buys the smaller target it was
@@ -858,15 +1529,44 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 		//
 		// Once arrived, the feet are done: the focus set by StartShooting is what should be turning
 		// this pawn, and nothing else may argue with it.
+		UApexMovementComponent* const PeekApex = GetApexMovement();
+		const bool bSlidingNow = PeekApex && PeekApex->IsSliding();
 		if (!bTurretPeekArrived)
 		{
-			TurretMoveReissueTimer -= DeltaTime;
-			if (TurretMoveReissueTimer <= 0.0f)
+			// The slide takes over the feet: a move order issued mid-slide would fight its steering.
+			if (!bSlidingNow)
 			{
-				TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
-				AIController->MoveToLocation(Peek, FMath::Max(30.0f, TurretCoverArriveRadius * 0.5f));
+				TurretMoveReissueTimer -= DeltaTime;
+				if (TurretMoveReissueTimer <= 0.0f)
+				{
+					TurretMoveReissueTimer = TurretCoverMoveReissueInterval;
+					AIController->MoveToLocation(Peek, FMath::Max(30.0f, TurretCoverArriveRadius * 0.5f));
+				}
+			}
+
+			// A slide cannot start from a standstill (SlideMinStartSpeed), so it is launched mid-run,
+			// the first frame the sprint has the speed for it, and only while there is still ground to
+			// slide over. StartSlideToPoint refuses on its own while the speed is short; the attempt is
+			// free. Too short a run to ever get there simply arrives running.
+			if (bTurretPeekSlide && !bTurretPeekSlideStarted && PeekApex && FVector::Dist2D(GetActorLocation(), Peek) > 120.0f)
+			{
+				PeekApex->StartSlideToPoint(Peek, 120.0f);
+				if (PeekApex->IsSliding())
+				{
+					bTurretPeekSlideStarted = true;
+					PeekApex->StopSprint();
+					UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s slides into P (%.0fcm, %.0f cm/s)"),
+						*GetName(), FVector::Dist2D(GetActorLocation(), Peek), GetVelocity().Size2D());
+				}
 			}
 		}
+
+		// The window, and inside it the aim hold: seconds on target before the trigger may go down, the
+		// telegraph a player reads as "it is coming up to shoot". The window is stretched to fit the
+		// hold plus a moment to actually fire, so a long hold cannot eat the whole peek.
+		const UEnemyCombatProfile* const WindowProfile = GetCombatProfile();
+		const float AimHold = WindowProfile ? WindowProfile->PeekAimHoldSeconds : 0.0f;
+		const float WindowLength = FMath::Max(TurretCoverPeekTime, AimHold + 0.6f);
 
 		const float PeekArrive = TurretCoverArriveRadius * 0.5f + GetSimpleCollisionRadius() * 1.1f + 5.0f;
 		if (!bTurretPeekArrived && FVector::Dist2D(GetActorLocation(), Peek) <= PeekArrive)
@@ -874,8 +1574,24 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 			// Arrived. THIS is where the exposed window begins, and where the crouch and the trigger
 			// belong: everything before now was travel.
 			bTurretPeekArrived = true;
-			TurretCoverTimer = TurretCoverPeekTime;
-			SetTurretPeekCrouch(/*bCrouched*/ true);
+			TurretCoverOwnership::MuzzleClearedThisWindow.Remove(this);
+			NPCBench::ShotsThisWindow.Add(this, 0);
+			TurretCoverTimer = WindowLength;
+			if (PeekApex && PeekApex->IsSprinting())
+			{
+				PeekApex->StopSprint();
+			}
+			// The pose. Over low cover: stand up, that IS the peek. Otherwise the rolled crouch, except
+			// mid-slide: the slide stands the NPC up when it ends (EndSlide), so the pose waits for it
+			// (below) rather than being undone a moment later.
+			if (Finder->GetCover().bPeekOver)
+			{
+				SetTurretPeekCrouch(/*bCrouched*/ false);
+			}
+			else if (!bSlidingNow)
+			{
+				SetTurretPeekCrouch(bTurretPeekCrouch);
+			}
 
 			UE_LOG(LogTemp, Log,
 				TEXT("[TURRET_DEBUG] %s at P, window %.2f opens on %s (permission=%d reloading=%d perceptionDelay=%d weapon=%s)"),
@@ -883,9 +1599,84 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 				bIsReloadingWeapon, IsInPerceptionDelay(), *GetNameSafe(Weapon));
 		}
 
-		if (bTurretPeekArrived && (!bWantsToShoot || CurrentAimTarget.Get() != ThreatActor))
+		if (bTurretPeekArrived)
 		{
-			StartShooting(ThreatActor);
+			// The round leaves from the MUZZLE, not the eye, and around a corner the two disagree by the
+			// width of a shoulder: the eye sees the turret while the launcher on the other shoulder is
+			// still behind the wall, and a rocket fired then goes into the wall at point blank (4 of 19
+			// on the bench, 2026-09-22). HasLineOfSightTo asks the weapon, with the round's own radius.
+			const bool bMuzzleClear = HasLineOfSightTo(ThreatActor);
+
+			// The corner was vetted by the finder's probe at STANDING eye height. Crouched, the barrel
+			// sits lower and off to one side, below the top of the very cover it is peeking round: the
+			// user's 2026-09-23 session had a grenadier crouch at the same P for a minute, 85 "no clear
+			// path" and not one shot. Stand back up, which puts the gun where the corner was vetted.
+			// The slide into P has just ended (EndSlide stood the NPC up): now take the rolled pose.
+			if (bTurretPeekSlideStarted && !bSlidingNow)
+			{
+				bTurretPeekSlideStarted = false;
+				SetTurretPeekCrouch(bTurretPeekCrouch);
+			}
+
+			if (!bMuzzleClear)
+			{
+				if (PeekApex && PeekApex->IsCrouching() && !bSlidingNow)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s at P, crouched muzzle blocked to %s: standing up"),
+						*GetName(), *GetNameSafe(ThreatActor));
+					SetTurretPeekCrouch(/*bCrouched*/ false);
+				}
+			}
+			else
+			{
+				TurretCoverOwnership::MuzzleClearedThisWindow.Add(this);
+			}
+
+			// Seconds since arrival, against the aim hold: on target and still, not yet firing.
+			const bool bAimHeld = WindowLength - TurretCoverTimer >= AimHold;
+			if (bMuzzleClear && bAimHeld && (!bWantsToShoot || CurrentAimTarget.Get() != ThreatActor))
+			{
+				StartShooting(ThreatActor);
+			}
+			else if (!bMuzzleClear && bWantsToShoot && CurrentAimTarget.Get() == ThreatActor)
+			{
+				StopShooting();
+			}
+			if (!bMuzzleClear && bScanNow)
+			{
+				// What is in the way, and from how high the muzzle is asking: a line from the muzzle to
+				// the threat, the first thing it hits and how far along.
+				FString Blocker = TEXT("-");
+				float BlockDist = -1.0f;
+				float MuzzleUp = -1.0f;
+				if (Weapon && ThreatActor)
+				{
+					const FVector Muzzle = Weapon->GetMuzzleWorldLocation();
+					MuzzleUp = Muzzle.Z - (GetActorLocation().Z - GetSimpleCollisionHalfHeight());
+					FHitResult Hit;
+					FCollisionQueryParams Params(FName(TEXT("MuzzleBlockDiag")), false);
+					Params.AddIgnoredActor(this);
+					Params.AddIgnoredActor(Weapon);
+					Params.AddIgnoredActor(ThreatActor);
+					if (GetWorld()->LineTraceSingleByChannel(Hit, Muzzle, PolarityAim::ResolveAimPoint(ThreatActor), ECC_Visibility, Params))
+					{
+						Blocker = NPCBench::ReadableName(Hit.GetActor());
+						BlockDist = Hit.Distance;
+					}
+				}
+				UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s at P, muzzle has no clear path to %s: holding fire (over=%d crouch=%d muzzleUp=%.0f lineBlockedBy=%s at %.0fcm)"),
+					*GetName(), *GetNameSafe(ThreatActor), Finder->GetCover().bPeekOver ? 1 : 0,
+					PeekApex && PeekApex->IsCrouching() ? 1 : 0, MuzzleUp, *Blocker, BlockDist);
+			}
+		}
+
+		// The last round in the magazine just left: the rest of the window would be standing in the
+		// open with an empty gun. Duck back now and reload behind the corner (the AtHide hold above).
+		// A short beat rather than zero, so the shot visibly leaves before the NPC turns away.
+		const float HoldAfterLastRound = WindowProfile ? WindowProfile->HoldAfterLastRoundSeconds : 0.2f;
+		if (bTurretPeekArrived && bIsReloadingWeapon && TurretCoverTimer > HoldAfterLastRound)
+		{
+			TurretCoverTimer = HoldAfterLastRound;
 		}
 
 		TurretCoverTimer -= DeltaTime;
@@ -894,11 +1685,24 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 			// Two different endings, and telling them apart is the whole point of the split clock:
 			// a finished trade, or a corner the NPC never reached at all.
 			const bool bTraded = bTurretPeekArrived;
+			// Reached, but the gun never once had a way out to the threat, standing up included: this
+			// corner cannot be fought from, and keeping it replays the same empty window for ever.
+			const bool bMuzzleEverClear = TurretCoverOwnership::MuzzleClearedThisWindow.Remove(this) > 0;
+			bool bKeepCorner = bTraded;
 			if (bTraded)
 			{
+				const NPCBench::FGateRecord* const WindowGate = NPCBench::LastGate.Find(this);
 				UE_LOG(LogTemp, Log,
-					TEXT("[TURRET_DEBUG] %s peek window ends on %s: everGotPermission=%d stillReloading=%d"),
-					*GetName(), *GetNameSafe(ThreatActor), bHasAttackPermission, bIsReloadingWeapon);
+					TEXT("[TURRET_DEBUG] %s peek window ends on %s: everGotPermission=%d stillReloading=%d muzzleEverClear=%d shots=%d lastGate=\"%s\""),
+					*GetName(), *GetNameSafe(ThreatActor), bHasAttackPermission, bIsReloadingWeapon, bMuzzleEverClear,
+					NPCBench::ShotsThisWindow.FindRef(this), WindowGate ? *WindowGate->Text : TEXT("never tried"));
+				if (!bMuzzleEverClear)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s muzzle never cleared from P=%s - dropping this corner"),
+						*GetName(), *Peek.ToCompactString());
+					Finder->ReleaseCover();
+					bKeepCorner = false;
+				}
 			}
 			else
 			{
@@ -913,13 +1717,20 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 			{
 				StopShooting();
 			}
-			// The walk home is exposed but not a firing plate: up before turning around.
-			SetTurretPeekCrouch(/*bCrouched*/ false);
+			// The walk home is exposed but not a firing plate: up before turning around. Over low cover
+			// there is no walk: back down behind the wall where it stands.
+			const bool bOverAndKept = bKeepCorner && Finder->HasCover() && Finder->GetCover().bPeekOver;
+			SetTurretPeekCrouch(/*bCrouched*/ bOverAndKept);
+			if (PeekApex && PeekApex->IsSprinting())
+			{
+				PeekApex->StopSprint();
+			}
 			bTurretPeekArrived = false;
+			bTurretPeekSlideStarted = false;
 
 			// A corner that was dropped no longer has an H to walk back to - GetCover() is blank now,
 			// and ToHide would march the NPC to the world origin. Send it to find another one.
-			TurretCoverPhase = bTraded ? ETurretCoverPhase::ToHide : ETurretCoverPhase::Seeking;
+			TurretCoverPhase = bKeepCorner ? ETurretCoverPhase::ToHide : ETurretCoverPhase::Seeking;
 		}
 		break;
 	}
@@ -939,6 +1750,8 @@ void AShooterNPC::EndTurretCover()
 	if (AShooterAIController* const AIController = Cast<AShooterAIController>(GetController()))
 	{
 		AIController->ClearTargetIntent(ETargetIntentSource::Turret);
+		AIController->ClearFocus(TurretCoverOwnership::FocusPriority);
+		TurretCoverOwnership::ResumeTree(this, AIController);
 	}
 
 	// Both halves of the cover claim must go: the spot and the extra observers.
@@ -955,6 +1768,7 @@ void AShooterNPC::EndTurretCover()
 	TurretThreat = nullptr;
 	TurretCoverTimer = 0.0f;
 	bTurretPeekArrived = false;
+	TurretCoverOwnership::MuzzleClearedThisWindow.Remove(this);
 }
 
 ATurretBuildable* AShooterNPC::FindTurretThreat() const
@@ -1038,12 +1852,6 @@ bool AShooterNPC::IsTurretThreatValid(const ATurretBuildable* Turret, float Radi
 
 void AShooterNPC::SetTurretPeekCrouch(bool bCrouched)
 {
-	const UEnemyCombatProfile* const Profile = GetCombatProfile();
-	if (!Profile || !Profile->bCrouchWhenPeeking)
-	{
-		return;
-	}
-
 	UApexMovementComponent* const Apex = GetApexMovement();
 	if (!Apex)
 	{
@@ -1576,6 +2384,15 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 
 	GetWorld()->LineTraceSingleByChannel(OutHit, AimSource, AimTarget, ECC_Visibility, QueryParams);
 
+	if (NPCBench::IsOn())
+	{
+		NPCBench::Prune(NPCBench::LastAim);
+		NPCBench::FAimRecord& Record = NPCBench::LastAim.FindOrAdd(this);
+		Record.RayHit = OutHit.bBlockingHit ? OutHit.GetActor() : nullptr;
+		Record.From = AimSource;
+		Record.To = OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
+	}
+
 	// [AIM_DEBUG] What this shot is actually pointed at. "They keep missing" and "they are shooting
 	// the wall" are the same sentence from outside and completely different bugs inside, and this is
 	// the line that separates them: it names the thing the aim ray ended on. If that is not the
@@ -1687,6 +2504,13 @@ void AShooterNPC::Die()
 
 	// raise the dead flag
 	bIsDead = true;
+
+	if (NPCBench::IsOn())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BENCH] DIED npc=%s cover=%s target=%s"),
+			*GetName(), NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)),
+			*GetNameSafe(CurrentAimTarget.Get()));
+	}
 
 	// Cache charge before disabling EMF (needed for weapon drops below)
 	const float CachedNPCCharge = EMFVelocityModifier ? EMFVelocityModifier->GetCharge() : 0.0f;
@@ -2778,17 +3602,16 @@ void AShooterNPC::TryStartShooting()
 	// every call would bury the log, so the reason is printed only when it CHANGES for this NPC.
 	// cpp-local static rather than a member, so adding it does not touch the header and this stays
 	// Live Coding compatible (same trick as the SHAKE_DEBUG history above).
-	static TMap<TWeakObjectPtr<const AActor>, uint8> ShootBlockReasons;
-	if (ShootBlockReasons.Num() > 256)
-	{
-		ShootBlockReasons.Empty();
-	}
+	// The record lives in NPCBench so the bench can print it over the NPC's head; the log line is
+	// independent of the bench and always on.
+	NPCBench::Prune(NPCBench::LastGate);
 	auto ReportShootGate = [this](uint8 Reason, const TCHAR* Text)
 	{
-		uint8& Last = ShootBlockReasons.FindOrAdd(this, 0xFF);
-		if (Last != Reason)
+		NPCBench::FGateRecord& Last = NPCBench::LastGate.FindOrAdd(this);
+		if (Last.Code != Reason)
 		{
-			Last = Reason;
+			Last.Code = Reason;
+			Last.Text = Text;
 			UE_LOG(LogTemp, Log, TEXT("[SHOOT_DEBUG] %s: %s (target %s)"),
 				*GetName(), Text, *GetNameSafe(CurrentAimTarget.Get()));
 		}
@@ -2836,6 +3659,16 @@ void AShooterNPC::TryStartShooting()
 		return;
 	}
 
+	// The weapon is loading on its own account (whatever started it, and whatever this NPC's flag
+	// thinks): a trigger pulled now is refused by the weapon and never pulled again. Ask again shortly.
+	if (Weapon && Weapon->IsReloading())
+	{
+		ReportShootGate(5, TEXT("BLOCKED reloading"));
+		GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
+			&AShooterNPC::TryStartShooting, 0.1f, false);
+		return;
+	}
+
 	// Dry weapon, e.g. the NPC lost its target on the last round and has just come back to it.
 	// Fill the magazine first and let the reload bring us back here.
 	if (TryBeginReload())
@@ -2854,6 +3687,28 @@ void AShooterNPC::TryStartShooting()
 		GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
 			&AShooterNPC::TryStartShooting, 0.1f, false);
 		return;
+	}
+
+	// The barrel is still behind the corner. The eye sees the target (that is how it got this far) while
+	// the gun, on the other shoulder and lower, points into the cover the NPC is standing at: a rocket
+	// fired now bursts on that wall at point blank. Measured 2026-09-23, grenadiers firing at the player
+	// from cover. Only the first few metres are asked about: cover further out, in front of the TARGET,
+	// is what suppressive fire is meant to hit, and a whole-path check would silence it.
+	if (Weapon && CurrentAimTarget.IsValid())
+	{
+		static constexpr float MuzzleCoverCheckDistance = 250.0f;
+		const FVector Muzzle = Weapon->GetMuzzleWorldLocation();
+		const FVector ToAim = PolarityAim::ResolveAimPoint(CurrentAimTarget.Get()) - Muzzle;
+		const float AimDistance = ToAim.Size();
+		// Stop short of the target itself, so a target standing inside the check is not its own wall.
+		const float Check = FMath::Min(MuzzleCoverCheckDistance, AimDistance - 60.0f);
+		if (Check > 0.0f && !Weapon->CanShotReach(Muzzle + ToAim / AimDistance * Check))
+		{
+			ReportShootGate(9, TEXT("BLOCKED muzzle against cover"));
+			GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
+				&AShooterNPC::TryStartShooting, 0.1f, false);
+			return;
+		}
 	}
 
 	// Request attack permission from coordinator (always ask, don't cache)
@@ -3003,6 +3858,28 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 	// corner. Ten in a row is not scatter, it is a gate that says yes too early.
 	if (Weapon)
 	{
+		// CanShotReach sweeps to the point and counts ANY blocking hit as "cannot reach", the target
+		// included. A pawn never trips that (pawns ignore Visibility), but a building is solid by
+		// design - and its actor location is inside it (the core's is even its bottom corner, the kit
+		// pivot). So for a building the sweep always ended on the building's own skin and the answer
+		// was always no: a siege march that could walk to the core and never once be allowed to shoot
+		// it. Stop the sweep at the building's bounding sphere instead; what stands in front of that
+		// is still an honest obstacle.
+		if (!Target->IsA<APawn>())
+		{
+			FVector Origin = FVector::ZeroVector;
+			FVector Extent = FVector::ZeroVector;
+			Target->GetActorBounds(true, Origin, Extent);
+			const FVector From = Weapon->GetMuzzleWorldLocation();
+			const FVector ToCentre = Origin - From;
+			const float Distance = ToCentre.Size();
+			const float Skin = Extent.Size();
+			if (Distance <= Skin)
+			{
+				return true;   // already touching it
+			}
+			return Weapon->CanShotReach(From + ToCentre / Distance * (Distance - Skin));
+		}
 		return Weapon->CanShotReach(Target->GetActorLocation());
 	}
 
@@ -5068,6 +5945,44 @@ void AShooterNPC::ReleaseAttackPermission()
 
 void AShooterNPC::OnWeaponShotFired()
 {
+	// [BENCH] One line per round that left the barrel, before any early out: a round fired while
+	// bIsShooting is already false still went somewhere, and the report counts rounds, not intent.
+	++NPCBench::ShotsThisWindow.FindOrAdd(this);
+	NPCBench::LastBusyTime.Add(this, GetWorld()->GetTimeSeconds());
+	if (NPCBench::IsOn())
+	{
+		AActor* const Target = CurrentAimTarget.Get();
+		const NPCBench::FAimRecord* const Record = NPCBench::LastAim.Find(this);
+		AActor* const RayHit = Record ? Record->RayHit.Get() : nullptr;
+		const bool bOnTarget = Target && RayHit == Target;
+		const UCharacterMovementComponent* const Move = GetCharacterMovement();
+
+		// spread/supp/suppfire: UAIAccuracyComponent has two modes that miss ON PURPOSE (a donut
+		// around the target): being suppressed, and the StateTree's SuppressiveFire task. A shot
+		// fired in either never reaches the target however the aim itself works, so the report has
+		// to be able to tell those rounds apart from real misses.
+		UE_LOG(LogTemp, Log,
+			TEXT("[BENCH] SHOT npc=%s weapon=%s target=%s ray=%s onTarget=%d dist=%.0f crouched=%d spread=%.1f supp=%d suppfire=%d cover=%s"),
+			*GetName(), *GetNameSafe(Weapon ? Weapon->GetClass() : nullptr), *GetNameSafe(Target),
+			*NPCBench::ReadableName(RayHit), bOnTarget ? 1 : 0,
+			Target ? FVector::Dist(GetActorLocation(), Target->GetActorLocation()) : -1.0f,
+			Move && Move->IsCrouching() ? 1 : 0,
+			AccuracyComponent ? AccuracyComponent->LastCalculatedSpread : -1.0f,
+			AccuracyComponent && AccuracyComponent->IsSuppressed() ? 1 : 0,
+			AccuracyComponent && AccuracyComponent->IsFiringSuppressive() ? 1 : 0,
+			NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)));
+
+		if (Record)
+		{
+			DrawDebugLine(GetWorld(), Record->From, Record->To, bOnTarget ? FColor::Green : FColor::Red,
+				false, 0.5f, 0, 3.0f);
+			if (!bOnTarget)
+			{
+				DrawDebugSphere(GetWorld(), Record->To, 18.0f, 8, FColor::Red, false, 0.5f, 0, 2.0f);
+			}
+		}
+	}
+
 	// Only count shots if we're actively shooting
 	if (!bIsShooting)
 	{
@@ -5213,6 +6128,17 @@ void AShooterNPC::Multicast_PlayReloadMontage_Implementation(float PlayRate)
 
 void AShooterNPC::FinishReloadAndResume()
 {
+	// The weapon's own word, not this timer's. ReloadTime is the weapon's setting, but a pack weapon
+	// whose reload is timed by its montage runs longer: the RPG7 took 4.17s against the timer's ~3.3.
+	// Clearing the flag early let the grenadier leave cover and pull the trigger on a tube still
+	// loading; the weapon refused the shot, nothing asked again, and the whole peek went by without a
+	// round (turret bench 2026-09-23, 7 of 38 grenadier windows). Keep waiting while it is loading.
+	if (!bIsDead && Weapon && Weapon->IsReloading())
+	{
+		GetWorldTimerManager().SetTimer(ReloadResumeTimer, this, &AShooterNPC::FinishReloadAndResume, 0.1f, false);
+		return;
+	}
+
 	bIsReloadingWeapon = false;
 
 	GetWorldTimerManager().ClearTimer(ReloadStartTimer);

@@ -476,12 +476,9 @@ def step_geo():
 
 WAVES = [[1], [2]]            # авторские волны: маток на волну
 WAVE_INTERVAL = 20.0          # волны по часам, живая предыдущая их не задерживает (автор 2026-09-14)
-FIRST_WAVE_DELAY = 0.0           # зашёл в триггер, первая волна сразу (автор 2026-09-14)
+FIRST_WAVE_DELAY = 0.0           # поставил раздатчик, первая волна сразу (автор 2026-09-23; было: триггер)
 ENDLESS_GROWTH = 1.5          # бюджет бесконечной волны к предыдущей (автор 2026-09-14)
 AIR_SPAWN_HEIGHT = 3500.0     # над землёй у кромки тумана: примерно 10 м выше макушки
-CORE_AT = (900.0, 1300.0)     # ядро базы во дворе, под открытым небом: под крышей дрон бьёт крышу
-CORE_SIZE = 300.0
-CORE_DEFEND_RADIUS = 4000.0   # нет игрока ближе 40 м: матки бьют ядро
 SHOOTER_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
 GROUND_SPAWN_R = 9000.0       # на 50 м ближе к базе (автор 2026-09-15)
 GROUND_SPAWN_ANGLES = [180.0 + i * 180.0 / 7.0 for i in range(8)]  # 8 точек вне восточного обрыва
@@ -541,19 +538,9 @@ def step_gameplay():
         points.append(spawn_point("HB_GroundSpawn_" + name, x, y, gz, [carrier]))
     log("точек спавна: {} воздух, {} земля".format(360 // AIR_SPAWN_STEP_DEG, len(ground)))
 
-    # Ядро базы: постройка с большим HP. Пока рядом нет игрока, матки роняют дроны в него, а не
-    # в пешек (правило автора 2026-09-14). Ставится готовым, без чертежа: ключ его не чинит.
-    core = eas.spawn_actor_from_class(unreal.SiegeCoreBuildable,
-                                      kit_pivot((CORE_AT[0], CORE_AT[1], H + CORE_SIZE * 0.5),
-                                                (CORE_SIZE, CORE_SIZE, CORE_SIZE), unreal.Rotator()),
-                                      unreal.Rotator())
-    core.mesh.set_static_mesh(_mesh(KIT_BOX))
-    core.mesh.set_material(0, material("console"))
-    core.set_actor_scale3d(unreal.Vector(CORE_SIZE / 100.0, CORE_SIZE / 100.0, CORE_SIZE / 100.0))
-    core.set_editor_property("defend_radius", CORE_DEFEND_RADIUS)
-    _tag(core, TAG_GAME, "HB_SiegeCore", f)
-    text("SiegeCore_Label", CORE_AT[0], CORE_AT[1], H + CORE_SIZE + 120.0, "ЯДРО БАЗЫ", size=50.0,
-         folder=f, tag=TAG_GAME)
+    # Ядра на уровне нет (автор 2026-09-23): ядром становится первый раздатчик, который поставит
+    # игрок, и его постановка запускает осаду (ASiegeDirector::bStartWhenDispenserBuilt). Радиус
+    # обороны раздатчик берёт из своего DefendRadius (4000 по умолчанию, как было у куба).
 
     waves = []
     for counts in WAVES:
@@ -578,15 +565,23 @@ def step_gameplay():
     sd.set_editor_property("endless_budget_growth", ENDLESS_GROWTH)
     sd.set_editor_property("wave_interval", WAVE_INTERVAL)
     sd.set_editor_property("first_wave_delay", FIRST_WAVE_DELAY)
+    # Кольцо спавна вместо точек (2026-09-24): те же радиусы и та же западная дуга, что у точек
+    # выше; точки остаются запасным вариантом, если кольцо не нашло места.
+    sd.set_editor_property("use_spawn_ring", True)
+    sd.set_editor_property("ground_ring_radius", GROUND_SPAWN_R)
+    sd.set_editor_property("ground_ring_arcs", [unreal.Vector2D(GROUND_SPAWN_ANGLES[0], GROUND_SPAWN_ANGLES[-1])])
+    sd.set_editor_property("air_ring_radius", AIR_SPAWN_R)
+    sd.set_editor_property("air_ring_height", AIR_SPAWN_HEIGHT)
     sd.set_editor_property("start_triggers", [trig])
     sd.set_editor_property("spawn_points", points)
-    sd.set_editor_property("cores", [core])
+    sd.set_editor_property("cores", [])
+    sd.set_editor_property("start_when_dispenser_built", True)
     _tag(sd, TAG_GAME, "HB_SiegeDirector", f)
 
     nav = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume, unreal.Vector(0.0, 0.0, 1500.0))
     nav.set_actor_scale3d(unreal.Vector(36000.0 / 200.0, 36000.0 / 200.0, 4500.0 / 200.0))
     _tag(nav, TAG_GAME, "HB_NavBounds", f)
-    log("ADDED: старт игрока, триггер осады, ядро, {} точек спавна, директор осады ({} авторских волн, "
+    log("ADDED: старт игрока, триггер осады (не слушается, старт по раздатчику), {} точек спавна, директор осады ({} авторских волн, "
         "дальше бесконечно x{}), границы навмеша".format(len(points), len(waves), ENDLESS_GROWTH))
     _les().save_current_level()
 

@@ -1178,6 +1178,13 @@ struct FSTTask_ShooterPeek_Data
 	 *  and the hide lasts 1.5s, so on an open arena it always got the first word and the peek never
 	 *  happened at all. Reset when a new spot is adopted, not when returning from a peek. */
 	bool bPeekedSinceCover = false;
+
+	/** Rolled once per peek from the class profile (CrouchPeekChance / SlidePeekChance). */
+	bool bPeekCrouch = false;
+	bool bPeekSlide = false;
+
+	/** The slide of this peek has been launched (it needs the speed of a run first). */
+	bool bPeekSlideStarted = false;
 };
 
 USTRUCT(DisplayName = "Shooter Peek", Category = "Polarity|AI|Shooter")
