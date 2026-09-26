@@ -376,14 +376,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "deg", EditCondition = "bCanFetchWeapons"))
 	float WeaponFetchAimAngle = 6.0f;
 
-	/** Inside this distance the name over the brackets grows into the full weapon card. */
+	/** Inside this distance the name over the brackets grows into the full loot card. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "bCanFetchWeapons"))
-	float WeaponCardFullDistance = 600.0f;
+	float LootCardFullDistance = 600.0f;
 
-	/** The widget that names the bracketed weapon and, up close, shows its card. Empty shows only the
+	/** The widget that names the bracketed item and, up close, shows its card. Empty shows only the
 	 *  brackets. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch", meta = (EditCondition = "bCanFetchWeapons"))
-	TSubclassOf<class UWeaponDropCardWidget> WeaponCardWidgetClass;
+	TSubclassOf<class ULootCardWidget> LootCardWidgetClass;
 
 	// ==================== Look ====================
 

@@ -4,6 +4,8 @@
 #include "ShooterWeapon.h"
 #include "Variant_Shooter/HitMarkerComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "ApexMovementComponent.h"
+#include "PolarityPalette.h"
 #include "Components/Image.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
@@ -116,7 +118,10 @@ int32 UCrosshairWidget::NativePaint(const FPaintArgs& Args, const FGeometry& All
 	const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId,
 	const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
 {
-	const int32 BaseLayer = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	// The jump cooldown bar first and whatever the state of the gun: it is about the jump.
+	const int32 BaseLayer = PaintJumpCooldownBar(AllottedGeometry, OutDrawElements,
+		Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled),
+		InWidgetStyle);
 
 	if (!bArmed || !ActiveConfig.bDrawProceduralTicks || bHiddenByAiming)
 	{
@@ -225,6 +230,38 @@ int32 UCrosshairWidget::NativePaint(const FPaintArgs& Args, const FGeometry& All
 	return TickLayer;
 }
 
+int32 UCrosshairWidget::PaintJumpCooldownBar(const FGeometry& AllottedGeometry, FSlateWindowElementList& OutDrawElements,
+	int32 LayerId, const FWidgetStyle& InWidgetStyle) const
+{
+	const FSlateBrush* WhiteBrush = FCoreStyle::Get().GetBrush("WhiteBrush");
+	const FVector2D LocalSize(AllottedGeometry.GetLocalSize());
+	if (JumpCooldownFraction <= 0.0f || !WhiteBrush || LocalSize.X <= 0.0f || LocalSize.Y <= 0.0f)
+	{
+		return LayerId;
+	}
+
+	const float ParentAlpha = InWidgetStyle.GetColorAndOpacityTint().A;
+	FLinearColor Track = UPolarityPalette::GetColor(JumpCooldownTrackColorTag, FLinearColor(0.0f, 0.0f, 0.0f, 0.5f));
+	FLinearColor Fill = UPolarityPalette::GetColor(JumpCooldownFillColorTag, FLinearColor(1.0f, 1.0f, 1.0f, 0.9f));
+	Track.A *= ParentAlpha;
+	Fill.A *= ParentAlpha;
+
+	const FVector2D Size(JumpCooldownBarWidth, JumpCooldownBarHeight);
+	const FVector2D TopLeft(LocalSize.X * 0.5 - Size.X * 0.5, LocalSize.Y * 0.5 + JumpCooldownBarOffset);
+	const float Ready = FMath::Clamp(1.0f - JumpCooldownFraction, 0.0f, 1.0f);
+
+	FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
+		AllottedGeometry.ToPaintGeometry(FVector2f(Size), FSlateLayoutTransform(FVector2f(TopLeft))),
+		WhiteBrush, ESlateDrawEffect::None, Track);
+	if (Ready > 0.0f)
+	{
+		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 2,
+			AllottedGeometry.ToPaintGeometry(FVector2f(Size.X * Ready, Size.Y), FSlateLayoutTransform(FVector2f(TopLeft))),
+			WhiteBrush, ESlateDrawEffect::None, Fill);
+	}
+	return LayerId + 2;
+}
+
 bool UCrosshairWidget::UpdateAimingVisibility()
 {
 	bool bShouldHide = false;
@@ -319,6 +356,18 @@ void UCrosshairWidget::SetActiveWeapon(AShooterWeapon* Weapon)
 void UCrosshairWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	// ---- Jump slot cooldown: read before any early return, it shows armed or not ----
+	{
+		const AShooterCharacter* Character = BoundCharacter.Get();
+		const UApexMovementComponent* Movement = Character ? Character->GetApexMovement() : nullptr;
+		const float NewFraction = Movement ? Movement->GetJumpSlotCooldownFraction() : 0.0f;
+		if (!FMath::IsNearlyEqual(NewFraction, JumpCooldownFraction))
+		{
+			JumpCooldownFraction = NewFraction;
+			Invalidate(EInvalidateWidgetReason::Paint);
+		}
+	}
 
 	// ---- Hit marker: the two pictures the Blueprint places, driven from the component ----
 	// Found by name rather than BindWidgetOptional so this stays a .cpp-only change; the lookup is

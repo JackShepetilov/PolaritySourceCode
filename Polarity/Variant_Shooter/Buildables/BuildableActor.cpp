@@ -9,6 +9,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Coop/CoopPlayers.h"
 #include "DispenserBuildable.h"
+#include "DispenserSlotMachineComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -18,8 +19,6 @@
 #include "GameplayTagContainer.h"
 #include "HAL/IConsoleManager.h"
 #include "Net/UnrealNetwork.h"
-#include "Polarity/Upgrades/UpgradeManagerComponent.h"
-#include "Polarity/Upgrades/UpgradeRegistry.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Melee.h"
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
@@ -29,31 +28,8 @@
 #include "Variant_Shooter/Siege/SiegeDirector.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
-static TAutoConsoleVariable<int32> CVarCasinoFair(
-	TEXT("polarity.casino.fair"),
-	0,
-	TEXT("1: the dispenser skips the spin: every card is valued at the stake exactly (multiplier 1), to compare against the casino."),
-	ECVF_Cheat);
-
 ABuildableActor::ABuildableActor()
 {
-	// The starting payout curve, linear between keys so its average is easy to reason about:
-	// 30% of rolls pay nothing, the middle hovers around the bet, the last 2% climb to x10.
-	// Mean about 0.975 (polarity.casino.sim prints the exact figure of whatever the asset holds).
-	if (FRichCurve* const Payout = PayoutCurve.GetRichCurve())
-	{
-		const TPair<float, float> Keys[] = {
-			{0.00f, 0.0f}, {0.30f, 0.0f}, {0.55f, 0.6f}, {0.75f, 1.3f}, {0.90f, 2.5f}, {0.98f, 4.5f}, {1.00f, 10.0f}};
-		for (const TPair<float, float>& Key : Keys)
-		{
-			Payout->SetKeyInterpMode(Payout->AddKey(Key.Key, Key.Value), RCIM_Linear);
-		}
-	}
-	UpgradeRegistry = TSoftObjectPtr<UUpgradeRegistry>(
-		FSoftObjectPath(TEXT("/Game/Variant_Shooter/Blueprints/Upgrades/DA_UpgradeRegistry.DA_UpgradeRegistry")));
-	// Level 1 through the first wave, 2 from the second, 3 from the fourth.
-	MaxLevelByWave = {1, 1, 2, 2, 3};
-
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
 
@@ -85,6 +61,7 @@ ABuildableActor::ABuildableActor()
 	Hitbox->InitBoxExtent(FVector(50.0f, 50.0f, 50.0f));
 
 	LootDrop = CreateDefaultSubobject<ULootDropComponent>(TEXT("Loot Drop"));
+	SlotMachine = CreateDefaultSubobject<UDispenserSlotMachineComponent>(TEXT("Slot Machine"));
 
 	// The quick melee only swings at pawns, dummies and actors carrying this tag
 	// (UMeleeAttackComponent::IsValidMeleeTarget); without it the wrench never connects. The tag is
@@ -382,8 +359,8 @@ bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeap
 		return false;
 	}
 
-	// Refused while the gun is still in the hands: a pick pending, the cooldown, nothing to offer.
-	const FString Refusal = GetSpinRefusal(Donor);
+	// Refused while the gun is still in the hands: the machine is busy with a spin.
+	const FString Refusal = SlotMachine ? SlotMachine->GetSpinRefusal(Donor) : FString(TEXT("Dispenser: no slot machine"));
 	if (!Refusal.IsEmpty())
 	{
 		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s refused at %s: %s"), *Donor->GetName(), *GetName(), *Refusal);
@@ -393,15 +370,9 @@ bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeap
 		}
 		return false;
 	}
-	UUpgradeManagerComponent* const Upgrades = Donor->GetUpgradeManager();
-	const UUpgradeRegistry* const Registry = UpgradeRegistry.LoadSynchronous();
 
-	// Everything the receipt needs from the gun, read while it still exists: the release destroys it.
+	// Read while the gun still exists: the release destroys it.
 	const FString WeaponName = Weapon->GetWeaponDisplayName().ToString();
-	const bool bFlatAmmo = Weapon->IsEnergyClass();
-	const int32 BaseMoney = FMath::Max(0, Weapon->DepositBaseMoney);
-	const int32 FlatAmmoMoney = FMath::Max(0, Weapon->DepositEnergyAmmoMoney);
-	const float PerRound = Weapon->GetDepositMoneyPerRound();
 
 	int32 Loaded = 0;
 	int32 Reserve = -1;
@@ -409,15 +380,12 @@ bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeap
 	{
 		return false;
 	}
+	const float Magazines = Weapon->GetDepositMagazines(Loaded, FMath::Max(0, Reserve));
+	TotalDepositedMagazines += Magazines;
 
-	// The same arithmetic as AShooterWeapon::GetDepositMoneyValue, from the numbers read above.
-	const int32 Rounds = FMath::Max(0, Loaded) + FMath::Max(0, Reserve);
-	const int32 Bet = BaseMoney + (bFlatAmmo ? FlatAmmoMoney : FMath::RoundToInt(Rounds * PerRound));
-	TotalDepositedMoney += Bet;
-
-	// The building grows from what it is fed: maximum and current health alike, so a bet is also a
-	// repair. From the bet, never the payout.
-	const float HealthGain = Bet * FMath::Max(0.0f, HealthPerDepositedMoney);
+	// The building grows from what it is fed: maximum and current health alike, so a feed is also a
+	// repair. From the stake, never from what the reels gave.
+	const float HealthGain = Magazines * FMath::Max(0.0f, HealthPerMagazine);
 	if (HealthGain > 0.0f)
 	{
 		DepositHealthBonus += HealthGain;
@@ -425,51 +393,11 @@ bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeap
 		SetHealth(Health + HealthGain);
 		OnBuildableChanged.Broadcast(this);
 	}
+	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s fed %s to %s: %d loaded + %d reserve = %.1f magazines (total %.1f, health %.0f/%.0f%s)"),
+		*Donor->GetName(), *WeaponName, *GetName(), Loaded, FMath::Max(0, Reserve), Magazines, TotalDepositedMagazines,
+		Health, MaxHealth, bSiegeCore ? TEXT(", core") : TEXT(""));
 
-	// The spin: every card rolls its own value, stake x curve, and the value is its rarity. Fair mode
-	// values every card at the stake exactly, for comparing against the casino.
-	const bool bFair = CVarCasinoFair.GetValueOnGameThread() != 0;
-	const int32 Wave = GetCurrentWave();
-	const int32 LevelCap = GetCurrentLevelCap();
-	TArray<EUpgradeRarity> Rarities;
-	FString Rolls;
-	for (int32 Card = 0; Card < OfferCardCount; ++Card)
-	{
-		const float Roll = FMath::FRand();
-		const float Multiplier = bFair ? 1.0f : EvaluatePayoutMultiplier(Roll);
-		const float Value = Bet * Multiplier;
-		const EUpgradeRarity Rarity = RarityForValue(Value);
-		Rarities.Add(Rarity);
-		Rolls += FString::Printf(TEXT("%s[roll %.2f x%.2f = %.0f %s]"), Rolls.IsEmpty() ? TEXT("") : TEXT(" "),
-			Roll, Multiplier, Value, *UEnum::GetDisplayValueAsText(Rarity).ToString());
-	}
-
-	TArray<FUpgradeOfferCard> Offer;
-	Upgrades->BuildOffer(Registry, Wave, LevelCap, Rarities, Offer);
-	Upgrades->SetPendingOffer(Offer);
-	Upgrades->MarkSpin(GetWorld()->GetTimeSeconds());
-
-	const FString AmmoPart = bFlatAmmo
-		? FString::Printf(TEXT("+ %d energy flat"), FlatAmmoMoney)
-		: FString::Printf(TEXT("+ %d rounds x %.2f"), Rounds, PerRound);
-	FString Receipt = FString::Printf(TEXT("%s: base %d %s = stake %d%s | wave %d, level cap %d | %s"),
-		*WeaponName, BaseMoney, *AmmoPart, Bet, bFair ? TEXT(" (FAIR)") : TEXT(""), Wave, LevelCap, *Rolls);
-	for (int32 Index = 0; Index < Offer.Num(); ++Index)
-	{
-		const FUpgradeOfferCard& Card = Offer[Index];
-		Receipt += FString::Printf(TEXT("
-  %d) %s %s Lv %d->%d%s"), Index + 1,
-			*UEnum::GetDisplayValueAsText(Card.Rarity).ToString(), *Card.Definition->DisplayName.ToString(),
-			Card.FromLevel, Card.ToLevel,
-			Card.Replaces ? *FString::Printf(TEXT(" (replaces %s)"), *Card.Replaces->DisplayName.ToString()) : TEXT(""));
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s bet at %s: %s (total deposited here %d, health %.0f/%.0f%s)"),
-		*Donor->GetName(), *GetName(), *Receipt, TotalDepositedMoney, Health, MaxHealth, bSiegeCore ? TEXT(", core") : TEXT(""));
-	if (UBuilderComponent* const Builder = Donor->FindComponentByClass<UBuilderComponent>())
-	{
-		Builder->Client_ShowCasinoReceipt(Receipt);
-	}
+	SlotMachine->StartSpin(Donor, Magazines, WeaponName);
 	return true;
 }
 
@@ -538,85 +466,6 @@ ABuildableActor* ABuildableActor::FindCore(const UWorld* World, const FVector& F
 		}
 	}
 	return Nearest;
-}
-
-EUpgradeRarity ABuildableActor::RarityForValue(float Value) const
-{
-	if (Value >= LegendaryValue)
-	{
-		return EUpgradeRarity::Legendary;
-	}
-	if (Value >= EpicValue)
-	{
-		return EUpgradeRarity::Epic;
-	}
-	if (Value >= RareValue)
-	{
-		return EUpgradeRarity::Rare;
-	}
-	return EUpgradeRarity::Common;
-}
-
-int32 ABuildableActor::GetCurrentWave() const
-{
-	const ASiegeDirector* const Director = ASiegeDirector::Get(GetWorld());
-	return Director ? FMath::Max(0, Director->CurrentWave) : 0;
-}
-
-int32 ABuildableActor::GetCurrentLevelCap() const
-{
-	if (MaxLevelByWave.Num() == 0)
-	{
-		return TNumericLimits<int32>::Max();
-	}
-	return FMath::Max(1, MaxLevelByWave[FMath::Clamp(GetCurrentWave(), 0, MaxLevelByWave.Num() - 1)]);
-}
-
-FString ABuildableActor::GetSpinRefusal(const AShooterCharacter* Donor) const
-{
-	const UUpgradeManagerComponent* const Upgrades = Donor ? Donor->GetUpgradeManager() : nullptr;
-	if (!Upgrades)
-	{
-		return TEXT("Dispenser: no upgrade manager on this player");
-	}
-	if (Upgrades->HasPendingOffer())
-	{
-		return TEXT("Dispenser: pick one of your cards first");
-	}
-	const float Wait = Upgrades->GetLastSpinServerTime() + SpinCooldownSeconds - GetWorld()->GetTimeSeconds();
-	if (Wait > 0.0f)
-	{
-		return FString::Printf(TEXT("Dispenser: cooling down, %.1f s"), Wait);
-	}
-	TArray<FUpgradeOfferCard> Candidates;
-	Upgrades->GatherOfferCandidates(UpgradeRegistry.LoadSynchronous(), GetCurrentWave(), GetCurrentLevelCap(), Candidates);
-	if (Candidates.Num() == 0)
-	{
-		return TEXT("Dispenser: nothing left to offer you at this wave");
-	}
-	return FString();
-}
-
-float ABuildableActor::EvaluatePayoutMultiplier(float Roll) const
-{
-	const FRichCurve* const Curve = PayoutCurve.GetRichCurveConst();
-	if (!Curve || Curve->GetNumKeys() == 0)
-	{
-		return 1.0f;
-	}
-	return FMath::Max(0.0f, Curve->Eval(FMath::Clamp(Roll, 0.0f, 1.0f)));
-}
-
-float ABuildableActor::ComputePayoutMean(int32 Samples) const
-{
-	// Midpoint rule over the roll axis: the mean of a uniform roll pushed through the curve.
-	const int32 N = FMath::Max(1, Samples);
-	double Sum = 0.0;
-	for (int32 i = 0; i < N; ++i)
-	{
-		Sum += EvaluatePayoutMultiplier((i + 0.5f) / N);
-	}
-	return static_cast<float>(Sum / N);
 }
 
 void ABuildableActor::OnRep_DispenserFuel()
@@ -939,141 +788,3 @@ void ABuildableActor::RefreshVisuals()
 		break;
 	}
 }
-
-// ==================== Casino debug ====================
-
-namespace CasinoDebug
-{
-	/** polarity.casino.sim [cards=1000] [stake=80]: the curve's average and bands, then the rarity
-	 *  shares N cards at that stake would get, against the first dispenser in the world (or the C++
-	 *  defaults when none is standing). Nothing is granted. */
-	static void CmdSim(const TArray<FString>& Args, UWorld* World)
-	{
-		const int32 Spins = FMath::Max(1, Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 1000);
-		const int32 Bet = FMath::Max(1, Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 80);
-
-		const ABuildableActor* Machine = nullptr;
-		if (World)
-		{
-			for (TActorIterator<ABuildableActor> It(World); It; ++It)
-			{
-				if (It->IsDispenser())
-				{
-					Machine = *It;
-					break;
-				}
-			}
-		}
-		const bool bDefaults = Machine == nullptr;
-		if (bDefaults)
-		{
-			Machine = GetDefault<ABuildableActor>();
-		}
-
-		// Band shares straight off the curve, on the same grid as the mean.
-		constexpr int32 Grid = 1000;
-		int32 Zero = 0, Under1 = 0, AtLeast1 = 0, AtLeast2 = 0, AtLeast5 = 0;
-		for (int32 i = 0; i < Grid; ++i)
-		{
-			const float M = Machine->EvaluatePayoutMultiplier((i + 0.5f) / Grid);
-			Zero += (M < 0.005f) ? 1 : 0;
-			Under1 += (M >= 0.005f && M < 1.0f) ? 1 : 0;
-			AtLeast1 += (M >= 1.0f) ? 1 : 0;
-			AtLeast2 += (M >= 2.0f) ? 1 : 0;
-			AtLeast5 += (M >= 5.0f) ? 1 : 0;
-		}
-
-		// Card rarities at this stake: what an offer of this gun would look like, card by card.
-		int32 ByRarity[4] = {0, 0, 0, 0};
-		for (int32 i = 0; i < Spins; ++i)
-		{
-			const EUpgradeRarity Rarity = Machine->RarityForValue(Bet * Machine->EvaluatePayoutMultiplier(FMath::FRand()));
-			++ByRarity[static_cast<int32>(Rarity)];
-		}
-
-		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] sim on %s: curve mean x%.3f, max x%.2f | multiplier 0 %.1f%%, under 1 %.1f%%, 1+ %.1f%%, 2+ %.1f%%, 5+ %.1f%%"),
-			bDefaults ? TEXT("C++ defaults (no dispenser in world)") : *Machine->GetName(),
-			Machine->ComputePayoutMean(), Machine->EvaluatePayoutMultiplier(1.0f),
-			Zero * 100.0f / Grid, Under1 * 100.0f / Grid, AtLeast1 * 100.0f / Grid, AtLeast2 * 100.0f / Grid, AtLeast5 * 100.0f / Grid);
-		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] sim %d cards at stake %d: common %.1f%%, rare %.1f%%, epic %.1f%%, legendary %.1f%% (thresholds %.0f / %.0f / %.0f, wave %d, level cap %d)"),
-			Spins, Bet, ByRarity[0] * 100.0f / Spins, ByRarity[1] * 100.0f / Spins, ByRarity[2] * 100.0f / Spins, ByRarity[3] * 100.0f / Spins,
-			Machine->RareValue, Machine->EpicValue, Machine->LegendaryValue, Machine->GetCurrentWave(), Machine->GetCurrentLevelCap());
-	}
-}
-
-namespace CasinoDebug
-{
-	/** polarity.casino.pick N: take card N (1-based) of this screen's player's pending offer. */
-	static void CmdPick(const TArray<FString>& Args, UWorld* World)
-	{
-		const APlayerController* const PC = CoopPlayers::GetLocalController(World);
-		const AShooterCharacter* const Player = PC ? Cast<AShooterCharacter>(PC->GetPawn()) : nullptr;
-		UUpgradeManagerComponent* const Upgrades = Player ? Player->GetUpgradeManager() : nullptr;
-		if (!Upgrades || !Upgrades->HasPendingOffer())
-		{
-			UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] pick: no pending offer on this screen's player"));
-			return;
-		}
-		Upgrades->Server_PickOffer(FMath::Max(1, Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 1) - 1);
-	}
-
-	/** polarity.casino.offer [stake=80]: an offer as if a gun of that stake was bet, no gun taken, no
-	 *  cooldown. Host or standalone. */
-	static void CmdOffer(const TArray<FString>& Args, UWorld* World)
-	{
-		const APlayerController* const PC = CoopPlayers::GetLocalController(World);
-		const AShooterCharacter* const Player = PC ? Cast<AShooterCharacter>(PC->GetPawn()) : nullptr;
-		UUpgradeManagerComponent* const Upgrades = Player ? Player->GetUpgradeManager() : nullptr;
-		if (!Upgrades || !Player->HasAuthority())
-		{
-			UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] offer: host or standalone only"));
-			return;
-		}
-		const ABuildableActor* Machine = GetDefault<ABuildableActor>();
-		for (TActorIterator<ABuildableActor> It(World); It; ++It)
-		{
-			if (It->IsDispenser())
-			{
-				Machine = *It;
-				break;
-			}
-		}
-		const float Stake = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 80.0f;
-		TArray<EUpgradeRarity> Rarities;
-		for (int32 Card = 0; Card < Machine->OfferCardCount; ++Card)
-		{
-			Rarities.Add(Machine->RarityForValue(Stake * Machine->EvaluatePayoutMultiplier(FMath::FRand())));
-		}
-		TArray<FUpgradeOfferCard> Offer;
-		Upgrades->BuildOffer(Machine->UpgradeRegistry.LoadSynchronous(), Machine->GetCurrentWave(), Machine->GetCurrentLevelCap(), Rarities, Offer);
-		Upgrades->SetPendingOffer(Offer);
-		for (int32 Index = 0; Index < Offer.Num(); ++Index)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] offer %d) %s %s Lv %d->%d"), Index + 1,
-				*UEnum::GetDisplayValueAsText(Offer[Index].Rarity).ToString(), *Offer[Index].Definition->DisplayName.ToString(),
-				Offer[Index].FromLevel, Offer[Index].ToLevel);
-		}
-		if (Offer.Num() == 0)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] offer: the pool has nothing for this player (is anything marked bInDispenserPool?)"));
-		}
-	}
-}
-
-static FAutoConsoleCommandWithWorldAndArgs CmdCasinoPick(
-	TEXT("polarity.casino.pick"),
-	TEXT("Take card N (1-based) of your pending dispenser offer. Usage: polarity.casino.pick [N=1]"),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&CasinoDebug::CmdPick)
-);
-
-static FAutoConsoleCommandWithWorldAndArgs CmdCasinoOffer(
-	TEXT("polarity.casino.offer"),
-	TEXT("Get a dispenser offer as if a gun of that stake was bet, no gun, no cooldown. Host only. Usage: polarity.casino.offer [stake=80]"),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&CasinoDebug::CmdOffer)
-);
-
-static FAutoConsoleCommandWithWorldAndArgs CmdCasinoSim(
-	TEXT("polarity.casino.sim"),
-	TEXT("Dry-run the dispenser: the payout curve, then the card rarities N cards at a stake would get. Usage: polarity.casino.sim [cards=1000] [stake=80]"),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&CasinoDebug::CmdSim)
-);

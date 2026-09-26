@@ -14,6 +14,7 @@
 #include "InventoryDragDropOperation.generated.h"
 
 class AShooterWeapon;
+class UUpgradeDefinition;
 
 UCLASS()
 class POLARITY_API UInventoryDragDropOperation : public UDragDropOperation
@@ -43,4 +44,14 @@ public:
 	 *  server re-reads the cell it is told about and never trusts this. */
 	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
 	TObjectPtr<UWeaponAttachmentDefinition> DraggedAttachment = nullptr;
+
+	/** Set when the drag started on an action slot (jump, slide...): which slot of the layout.
+	 *  INDEX_NONE for every other drag. */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	int32 SourceUpgradeSlot = INDEX_NONE;
+
+	/** What is being carried, when it is an upgrade. A HINT for the cursor, like DraggedAttachment:
+	 *  an action slot lights up only for an upgrade of its own. The server re-reads everything. */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	TObjectPtr<UUpgradeDefinition> DraggedUpgrade = nullptr;
 };

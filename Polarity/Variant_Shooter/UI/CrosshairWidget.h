@@ -26,6 +26,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "CrosshairConfig.h"
+#include "GameplayTagContainer.h"
 #include "Hud/HudBindable.h"
 #include "CrosshairWidget.generated.h"
 
@@ -124,6 +125,35 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Crosshair")
 	bool bHiddenByAiming = false;
 
+	// ==================== Jump slot cooldown bar ====================
+	//
+	// A thin bar under the crosshair while the upgrade in the jump slot (extra jump, charged jump,
+	// air dash) is cooling down. It fills as the cooldown runs out and disappears when ready. Drawn
+	// in NativePaint like the ticks, but also while unarmed and while aiming: it is about the jump,
+	// not the gun.
+
+	/** Cooldown left, 0 (ready, bar hidden) to 1 (just used). Read from the movement each tick. */
+	UPROPERTY(BlueprintReadOnly, Category = "Crosshair|Jump Cooldown")
+	float JumpCooldownFraction = 0.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Crosshair|Jump Cooldown", meta = (ClampMin = "1.0"))
+	float JumpCooldownBarWidth = 40.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Crosshair|Jump Cooldown", meta = (ClampMin = "1.0"))
+	float JumpCooldownBarHeight = 3.0f;
+
+	/** Distance from the centre of the screen down to the bar, in layout units. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Crosshair|Jump Cooldown", meta = (ClampMin = "0.0"))
+	float JumpCooldownBarOffset = 30.0f;
+
+	/** Palette colour of the filled part (Project Settings -> Polarity -> Palette). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Crosshair|Jump Cooldown")
+	FGameplayTag JumpCooldownFillColorTag;
+
+	/** Palette colour of the empty track behind it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Crosshair|Jump Cooldown")
+	FGameplayTag JumpCooldownTrackColorTag;
+
 private:
 	/** Resting on-screen size (no bloom) for the current weapon + viewport. */
 	float ComputeBaseSizePixels() const;
@@ -135,6 +165,10 @@ private:
 
 	/** Applies the ADS hide (native fade) and returns true when the crosshair is currently off. */
 	bool UpdateAimingVisibility();
+
+	/** Draws the jump cooldown bar on top of LayerId; returns the highest layer used. */
+	int32 PaintJumpCooldownBar(const FGeometry& AllottedGeometry, FSlateWindowElementList& OutDrawElements,
+		int32 LayerId, const FWidgetStyle& InWidgetStyle) const;
 
 	/** The weapon whose firing state drives bloom. Weak so a swapped/destroyed weapon can't dangle. */
 	TWeakObjectPtr<AShooterWeapon> ActiveWeapon;

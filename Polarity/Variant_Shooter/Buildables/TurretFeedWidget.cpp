@@ -12,7 +12,7 @@
 #include "PolarityPalette.h"
 #include "Sound/SoundBase.h"
 #include "TurretBuildable.h"
-#include "Polarity/Upgrades/UpgradeManagerComponent.h"
+#include "DispenserSlotMachineComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/UI/Hud/HudShapeWidget.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
@@ -133,10 +133,6 @@ void UTurretFeedWidget::NativeBind(AShooterCharacter* Character)
 	if (Character)
 	{
 		Character->OnWeaponInventoryChanged.AddUniqueDynamic(this, &UTurretFeedWidget::HandleInventoryChanged);
-		if (UUpgradeManagerComponent* const Upgrades = Character->GetUpgradeManager())
-		{
-			Upgrades->OnOfferChanged.AddUniqueDynamic(this, &UTurretFeedWidget::HandleOfferChanged);
-		}
 	}
 	if (Found)
 	{
@@ -152,10 +148,6 @@ void UTurretFeedWidget::NativeUnbind()
 	if (AShooterCharacter* const Bound = GetBoundCharacter())
 	{
 		Bound->OnWeaponInventoryChanged.RemoveDynamic(this, &UTurretFeedWidget::HandleInventoryChanged);
-		if (UUpgradeManagerComponent* const Upgrades = Bound->GetUpgradeManager())
-		{
-			Upgrades->OnOfferChanged.RemoveDynamic(this, &UTurretFeedWidget::HandleOfferChanged);
-		}
 	}
 	if (UBuilderComponent* const BoundBuilder = Builder.Get())
 	{
@@ -164,6 +156,7 @@ void UTurretFeedWidget::NativeUnbind()
 	}
 	Builder.Reset();
 	WatchTurret(nullptr);
+	WatchMachine(nullptr);
 	ApplyMode(EBuilderMode::Idle);
 }
 
@@ -202,32 +195,27 @@ void UTurretFeedWidget::RebuildEntries()
 	const FLinearColor Unavailable = UPolarityPalette::GetColor(UnavailableColorTag, FLinearColor::Gray);
 	const FLinearColor PlateRest = UPolarityPalette::GetColor(PlateColorTag, FLinearColor::Black);
 
-	// At a dispenser with an offer waiting, the rows are the cards and the number keys pick one.
+	// At a dispenser with this player's boxes open, the rows are the cards and the number keys take one.
 	const AShooterCharacter* const OfferPlayer = GetBoundCharacter();
-	const UUpgradeManagerComponent* const Upgrades = OfferPlayer ? OfferPlayer->GetUpgradeManager() : nullptr;
-	if (Bound->GetFeedDispenserTarget() && Upgrades && Upgrades->HasPendingOffer())
+	const ABuildableActor* const OfferDispenser = Bound->GetFeedDispenserTarget();
+	const UDispenserSlotMachineComponent* const Machine = OfferDispenser ? OfferDispenser->GetSlotMachine() : nullptr;
+	if (Machine && Machine->GetSpin().Phase == EDispenserSpinPhase::Open && Machine->IsSpinner(OfferPlayer))
 	{
-		const TArray<FUpgradeOfferCard>& Offer = Upgrades->GetPendingOffer();
-		for (int32 Index = 0; Index < Offer.Num(); ++Index)
+		const TArray<FDispenserCard>& Cards = Machine->GetSpin().Cards;
+		for (int32 Index = 0; Index < Cards.Num(); ++Index)
 		{
-			const FUpgradeOfferCard& Card = Offer[Index];
-			UTurretFeedEntryWidget* const Entry = Card.Definition ? CreateWidget<UTurretFeedEntryWidget>(this, EntryClass) : nullptr;
+			UTurretFeedEntryWidget* const Entry = CreateWidget<UTurretFeedEntryWidget>(this, EntryClass);
 			if (!Entry)
 			{
 				continue;
 			}
-			const FText Rarity = UEnum::GetDisplayValueAsText(Card.Rarity);
-			const FText Detail = Card.Kind == EUpgradeOfferKind::LevelUp
-				? FText::Format(NSLOCTEXT("TurretFeed", "CardUp", "Lv {0} -> {1}"), FText::AsNumber(Card.FromLevel), FText::AsNumber(Card.ToLevel))
-				: Card.Kind == EUpgradeOfferKind::Replace && Card.Replaces
-					? FText::Format(NSLOCTEXT("TurretFeed", "CardReplace", "Lv {0}, replaces {1}"), FText::AsNumber(Card.ToLevel), Card.Replaces->DisplayName)
-					: FText::Format(NSLOCTEXT("TurretFeed", "CardNew", "new, Lv {0}"), FText::AsNumber(Card.ToLevel));
+			const FDispenserCard& Card = Cards[Index];
+			UTexture2D* const CardIcon = Card.Outcome == EDispenserCardOutcome::Upgrade && Card.Upgrade.Definition
+				? Card.Upgrade.Definition->Icon.Get() : nullptr;
 			Entry->AvailableColor = Available;
 			Entry->UnavailableColor = Unavailable;
 			Entry->PlateRestColor = PlateRest;
-			Entry->SetupCard(FirstKeyNumber + Index,
-				FText::Format(NSLOCTEXT("TurretFeed", "CardName", "[{0}] {1}"), Rarity, Card.Definition->DisplayName),
-				Detail, Card.Definition->Icon);
+			Entry->SetupCard(FirstKeyNumber + Index, Machine->DescribeCard(Index), FText::GetEmpty(), CardIcon);
 			EntryPanel->AddChild(Entry);
 			Entries.Add(Entry);
 		}
@@ -262,24 +250,48 @@ void UTurretFeedWidget::RefreshEntries()
 	// priced the way the server will price it when the key is pressed.
 	const ABuildableActor* const Dispenser = Bound ? Bound->GetFeedDispenserTarget() : nullptr;
 	const AShooterCharacter* const OfferOwner = GetBoundCharacter();
-	const UUpgradeManagerComponent* const OfferUpgrades = OfferOwner ? OfferOwner->GetUpgradeManager() : nullptr;
-	if (Bound && Dispenser && OfferUpgrades && OfferUpgrades->HasPendingOffer())
+	const UDispenserSlotMachineComponent* const OfferMachine = Dispenser ? Dispenser->GetSlotMachine() : nullptr;
+	if (Bound && OfferMachine && OfferMachine->GetSpin().Phase == EDispenserSpinPhase::Open && OfferMachine->IsSpinner(OfferOwner))
 	{
 		if (TitleText)
 		{
-			TitleText->SetText(NSLOCTEXT("TurretFeed", "OfferTitle", "Dispenser: take one card"));
+			TitleText->SetText(NSLOCTEXT("TurretFeed", "OfferTitle", "Dispenser: take one card (or hook it)"));
 		}
-		const TArray<FUpgradeOfferCard>& Offer = OfferUpgrades->GetPendingOffer();
+		const TArray<FDispenserCard>& Cards = OfferMachine->GetSpin().Cards;
 		for (int32 Index = 0; Index < Entries.Num(); ++Index)
 		{
-			if (UTurretFeedEntryWidget* const Entry = Entries[Index])
+			UTurretFeedEntryWidget* const Entry = Entries[Index];
+			if (!Entry || !Cards.IsValidIndex(Index))
 			{
-				const UUpgradeDefinition* const Def = Offer.IsValidIndex(Index) ? Offer[Index].Definition.Get() : nullptr;
-				Entry->SetState(ETurretFeedEntryState::Available,
-					Def ? Def->GetDescriptionForLevel(Offer[Index].ToLevel) : FText::GetEmpty());
+				continue;
+			}
+			const FDispenserCard& Card = Cards[Index];
+			if (Card.Outcome == EDispenserCardOutcome::Dud)
+			{
+				Entry->SetState(ETurretFeedEntryState::Unavailable, NSLOCTEXT("TurretFeed", "CardEmpty", "empty box"));
+			}
+			else if (Card.Outcome == EDispenserCardOutcome::Upgrade && Card.Upgrade.Definition)
+			{
+				Entry->SetState(ETurretFeedEntryState::Available, Card.Upgrade.Definition->GetDescriptionForLevel(Card.Upgrade.ToLevel));
+			}
+			else if (Card.Outcome == EDispenserCardOutcome::Attachment)
+			{
+				Entry->SetState(ETurretFeedEntryState::Available, NSLOCTEXT("TurretFeed", "CardAttachment", "into your bag"));
+			}
+			else
+			{
+				Entry->SetState(ETurretFeedEntryState::Available, NSLOCTEXT("TurretFeed", "CardBuff", "right now"));
 			}
 		}
 		return;
+	}
+	if (Bound && OfferMachine && OfferMachine->GetSpin().Phase != EDispenserSpinPhase::Idle)
+	{
+		if (TitleText)
+		{
+			const FString Busy = OfferMachine->GetSpinRefusal(OfferOwner);
+			TitleText->SetText(FText::FromString(Busy.IsEmpty() ? FString(TEXT("Dispenser: spinning...")) : Busy));
+		}
 	}
 	if (Bound && Dispenser)
 	{
@@ -303,9 +315,11 @@ void UTurretFeedWidget::RefreshEntries()
 			const int32 Reserve = Weapon->UsesEnergyReserve()
 				? Weapon->GetEnergyReserve()
 				: FMath::Max(0, Weapon->GetPooledAmmo() - Loaded);
-			const int32 Bet = Weapon->GetDepositMoneyValue(Loaded, Reserve);
+			const float Magazines = Weapon->GetDepositMagazines(Loaded, Reserve);
+			FNumberFormattingOptions OneDecimal;
+			OneDecimal.MaximumFractionalDigits = 1;
 			Entry->SetState(ETurretFeedEntryState::Available,
-				FText::Format(NSLOCTEXT("TurretFeed", "BetsFor", "bet {0}"), FText::AsNumber(Bet)));
+				FText::Format(NSLOCTEXT("TurretFeed", "StakeMags", "stake {0} mag"), FText::AsNumber(Magazines, &OneDecimal)));
 		}
 		return;
 	}
@@ -409,11 +423,24 @@ void UTurretFeedWidget::RefreshEntries()
 	}
 }
 
-void UTurretFeedWidget::HandleOfferChanged()
+void UTurretFeedWidget::HandleMachineChanged(UDispenserSlotMachineComponent* Machine)
 {
 	if (bMenuVisible)
 	{
 		RebuildEntries();
+	}
+}
+
+void UTurretFeedWidget::WatchMachine(UDispenserSlotMachineComponent* Machine)
+{
+	if (UDispenserSlotMachineComponent* const Old = WatchedMachine.Get(); Old && Old != Machine)
+	{
+		Old->OnSpinChanged.RemoveDynamic(this, &UTurretFeedWidget::HandleMachineChanged);
+	}
+	WatchedMachine = Machine;
+	if (Machine)
+	{
+		Machine->OnSpinChanged.AddUniqueDynamic(this, &UTurretFeedWidget::HandleMachineChanged);
 	}
 }
 
@@ -428,6 +455,8 @@ void UTurretFeedWidget::ApplyMode(EBuilderMode Mode)
 	}
 	UBuilderComponent* const Bound = Builder.Get();
 	WatchTurret(bMenuVisible && Bound ? Bound->GetFeedTarget() : nullptr);
+	const ABuildableActor* const WatchedDispenser = bMenuVisible && Bound ? Bound->GetFeedDispenserTarget() : nullptr;
+	WatchMachine(WatchedDispenser ? WatchedDispenser->GetSlotMachine() : nullptr);
 	if (bMenuVisible)
 	{
 		// Rebuilt on every opening: the guns change between visits (one was just given away).

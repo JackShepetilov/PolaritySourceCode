@@ -14,6 +14,9 @@ class UUpgradeRegistry;
 class AShooterWeapon;
 class ADroppedRangedWeapon;
 class UInputAction;
+class UInventoryComponent;
+class UDispenserUpgradePool;
+struct FJumpSlotParams;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeGranted, UUpgradeDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnUpgradeRemoved, UUpgradeDefinition*, Definition);
@@ -57,8 +60,6 @@ struct FUpgradeOfferCard
 	UPROPERTY(BlueprintReadOnly, Category = "Upgrade Offer")
 	TObjectPtr<UUpgradeDefinition> Replaces = nullptr;
 };
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnUpgradeOfferChanged);
 
 /** Broadcast when the shared health-pickup pool count changes (used by HealthBlast, ChargedPunch, future upgrades) */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStoredHealthPickupsChanged, int32, CurrentCount, int32, MaxCount);
@@ -123,51 +124,76 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	UUpgradeComponent* GetUpgradeComponent(FGameplayTag UpgradeTag) const;
 
-	// ==================== Dispenser offers ====================
+	// ==================== Dispenser cards ====================
 	//
-	// Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md. The server builds the cards, the owner
-	// sees them (PendingOffer replicates to the owner only), picks one, and the server applies it on
-	// both machines. Nothing else in this component is networked: an upgrade's logic runs wherever
-	// it was granted, so a dispenser pick is granted on the server AND on the owning client.
+	// Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md. The slot machine
+	// (UDispenserSlotMachineComponent) decides on the server and asks this component two things:
+	// which upgrade card this player can be offered at a rolled rarity, and to grant the one taken.
+	// Nothing else here is networked: an upgrade's logic runs wherever it was granted, so a taken
+	// card is granted on the server AND on the owning client.
 
-	/** The upgrade this player holds in Slot, or null. None (passives) is never "held". */
-	UUpgradeDefinition* GetOwnedInSlot(EUpgradeSlot Slot) const;
+	/** The upgrade this player holds in Pool slot SlotIndex, with its level, or null. A slot that
+	 *  is not exclusive (a bag of passives) is never "held". */
+	UUpgradeDefinition* GetOwnedInSlot(const class UDispenserUpgradePool* Pool, int32 SlotIndex, int32& OutLevel) const;
 
-	/** Every card this player could be offered right now, before rarity: in the pool, unlocked by
-	 *  MinWave, not maxed, not in conflict, and with room under LevelCap. Server. */
-	void GatherOfferCandidates(const class UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
-		TArray<FUpgradeOfferCard>& OutCandidates) const;
+	/** One upgrade card for this player at no more than MaxRarity, or false when nothing fits.
+	 *  Only levels ABOVE what the player has: above the upgrade's own level when owned, above the
+	 *  held one's level when it would replace it in an exclusive slot. Among what fits, the highest
+	 *  authored rarity wins (closest to the roll), then the lowest such level per upgrade, then a
+	 *  draw by the pool entry weight. Exclude keeps an offer from showing one upgrade twice. Server. */
+	bool BuildUpgradeCard(const class UDispenserUpgradePool* Pool, EUpgradeRarity MaxRarity,
+		const TArray<const UUpgradeDefinition*>& Exclude, FUpgradeOfferCard& OutCard) const;
 
-	/** Draw one card per rarity from the candidates, weighted by OfferWeight, no repeats. Fewer
-	 *  cards when the pool runs short. Server. */
-	void BuildOffer(const class UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
-		const TArray<EUpgradeRarity>& Rarities, TArray<FUpgradeOfferCard>& OutOffer) const;
+	/** Grant a taken card here and on the owning client. Server. @see AcquireUpgrade */
+	bool GrantOfferCard(const FUpgradeOfferCard& Card);
 
-	UFUNCTION(BlueprintPure, Category = "Upgrades|Offer")
-	bool HasPendingOffer() const { return PendingOffer.Num() > 0; }
+	/** One more level of Definition: on the server it goes through AcquireUpgrade (a world upgrade
+	 *  pickup taken with the grapple), elsewhere it is the plain local GrantUpgrade. */
+	bool GrantUpgradeEverywhere(UUpgradeDefinition* Definition);
 
-	UFUNCTION(BlueprintPure, Category = "Upgrades|Offer")
-	const TArray<FUpgradeOfferCard>& GetPendingOffer() const { return PendingOffer; }
+	// ==================== Action slots and the bag ====================
+	//
+	// The action slots (jump, aim, slide...) are the exclusive slots of SlotLayout, the same pool
+	// asset the dispenser draws from. A slot holds one upgrade; spare ones are cells of the
+	// inventory (EInventorySlotKind::AbilityUpgrade, level in FInventorySlot::Level) and are dragged
+	// onto the slot in the inventory screen. Everything here is decided on the server; the owning
+	// client gets each change through Client_SetUpgradeLevel, the bag through inventory replication.
 
-	/** Hand the cards to the player. Server. */
-	void SetPendingOffer(const TArray<FUpgradeOfferCard>& Offer);
+	/** The slot layout: which upgrade belongs to which action slot. */
+	const UDispenserUpgradePool* GetSlotLayout() const;
 
-	/** Server time of the last spin, for the dispenser's cooldown. */
-	float GetLastSpinServerTime() const { return LastSpinServerTime; }
-	void MarkSpin(float ServerTime) { LastSpinServerTime = ServerTime; }
+	/** Level of Definition waiting in the bag, 0 when it is not there. OutCell gets its cell. */
+	int32 GetBaggedLevel(const UUpgradeDefinition* Definition, int32* OutCell = nullptr) const;
 
-	/** The owner picks card Index. Checked again on the server; the card is applied on both machines. */
+	/** Level of Definition equipped or in the bag, whichever is higher. */
+	int32 GetOwnedLevelAnywhere(const UUpgradeDefinition* Definition) const;
+
+	/** The player takes Definition at Level (a dispenser card, a world pickup). A copy in the bag
+	 *  merges into it; in an exclusive slot it goes straight in and whatever was there goes to the
+	 *  bag, or to the floor when the bag is full [author, 2026-09-26]. Never lowers a level. Server. */
+	bool AcquireUpgrade(UUpgradeDefinition* Definition, int32 Level);
+
+	/** Put the upgrade in bag cell CellIndex into its action slot; the one it replaces takes that
+	 *  cell. Server; the inventory screen of a client asks through Server_EquipFromBag. */
+	bool EquipFromBag(int32 CellIndex);
+
 	UFUNCTION(Server, Reliable)
-	void Server_PickOffer(int32 Index);
+	void Server_EquipFromBag(int32 CellIndex);
 
-	/** Owner side of a pick: the same card, applied locally. Skipped where the server already did it. */
+	/** Take the upgrade out of action slot SlotIndex into bag cell CellIndex (INDEX_NONE: the first
+	 *  empty one). A cell holding an upgrade of the same slot is swapped in. Server. */
+	bool UnequipToBag(int32 SlotIndex, int32 CellIndex);
+
+	UFUNCTION(Server, Reliable)
+	void Server_UnequipToBag(int32 SlotIndex, int32 CellIndex);
+
+	/** Owner side of every server change: Definition at Level, 0 = removed. Skipped on the host. */
 	UFUNCTION(Client, Reliable)
-	void Client_ApplyOfferCard(const FUpgradeOfferCard& Card);
+	void Client_SetUpgradeLevel(UUpgradeDefinition* Definition, int32 Level);
 
-	UPROPERTY(BlueprintAssignable, Category = "Upgrades|Offer")
-	FOnUpgradeOfferChanged OnOfferChanged;
-
-	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	/** What the equipped jump-slot upgrade does to the jump button, or false when the slot is
+	 *  empty. Read by the movement simulation on the owning client and on the server. */
+	bool GetJumpSlotParams(FJumpSlotParams& Out) const;
 
 	// ==================== Persistence ====================
 
@@ -298,23 +324,30 @@ protected:
 
 	virtual void BeginPlay() override;
 
+	/** Which upgrade belongs to which action slot. The dispenser pool: the slots the machine hands
+	 *  out are the slots the inventory shows. */
+	UPROPERTY(EditDefaultsOnly, Category = "Upgrades|Slots")
+	TSoftObjectPtr<UDispenserUpgradePool> SlotLayout;
+
 private:
 
 	/** Map of UpgradeTag -> active upgrade component */
 	UPROPERTY()
 	TMap<FGameplayTag, TObjectPtr<UUpgradeComponent>> ActiveUpgrades;
 
-	/** The cards waiting for this player's pick. Owner only. */
-	UPROPERTY(ReplicatedUsing = OnRep_PendingOffer)
-	TArray<FUpgradeOfferCard> PendingOffer;
+	/** Bring Definition to exactly Level here (0 removes it). */
+	void SetUpgradeLevelLocal(UUpgradeDefinition* Definition, int32 Level);
 
-	UFUNCTION()
-	void OnRep_PendingOffer();
+	/** SetUpgradeLevelLocal here and on the owning client. Server. */
+	void SetUpgradeLevelEverywhere(UUpgradeDefinition* Definition, int32 Level);
 
-	/** Remove the replaced upgrade, then grant or raise the card's upgrade to its ToLevel. */
-	bool ApplyOfferCard(const FUpgradeOfferCard& Card);
+	/** Put Definition at Level in the bag; the floor when the bag is full. Server. */
+	void StashUpgrade(UUpgradeDefinition* Definition, int32 Level);
 
-	float LastSpinServerTime = -1000.0f;
+	UInventoryComponent* GetInventory() const;
+
+	/** Index of the exclusive slot Definition belongs to, or INDEX_NONE (passive or not laid out). */
+	int32 FindExclusiveSlotOf(const UUpgradeDefinition* Definition) const;
 
 	/** Shared pool counter — see GetStoredHealthPickups. */
 	UPROPERTY()

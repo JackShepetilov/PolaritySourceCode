@@ -24,6 +24,7 @@
 #include "Upgrades/Upgrades/Upgrade_ChargedPunch.h"
 #include "Weapons/ShooterWeapon_Melee.h"
 #include "Weapons/DroppedRangedWeapon.h"
+#include "Abilities/GrappleFetchable.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
 #include "Variant_Shooter/Buildables/BuilderComponent.h"
 #include "Weapons/RiotShield.h"
@@ -84,7 +85,8 @@
 #include "Variant_Shooter/Abilities/AbilityHandler.h"
 #include "Variant_Shooter/Abilities/AbilityDefinition_Grapple.h"
 #include "Variant_Shooter/Abilities/AbilityHandler_Grapple.h"
-#include "Variant_Shooter/UI/WeaponDropCardWidget.h"
+#include "Variant_Shooter/UI/LootCardWidget.h"
+#include "Variant_Shooter/UI/LootOutline.h"
 #include "CableComponent.h"
 #include "DrawDebugHelpers.h"
 #include "NiagaraFunctionLibrary.h"
@@ -434,13 +436,15 @@ void AShooterCharacter::EndPlay(EEndPlayReason::Type EndPlayReason)
 	StopSlideLoopSound();
 	StopWallRunLoopSound();
 
-	// The weapon card lives in the viewport, not on this actor, and would otherwise stay on screen.
+	// The loot card lives in the viewport, not on this actor, and would otherwise stay on screen.
 	ClearGrappleFetchAiming();
-	if (WeaponDropCard)
+	if (LootCard)
 	{
-		WeaponDropCard->RemoveFromParent();
-		WeaponDropCard = nullptr;
+		LootCard->RemoveFromParent();
+		LootCard = nullptr;
 	}
+	LootOutline::UninstallPostProcess(this);
+	LootOutlineInstance = nullptr;
 
 	Super::EndPlay(EndPlayReason);
 
@@ -3649,16 +3653,40 @@ void AShooterCharacter::DoAbilityReleased()
 	}
 }
 
-void AShooterCharacter::Server_SetGrappleFetchTarget_Implementation(ADroppedRangedWeapon* Drop)
+void AShooterCharacter::Server_SetGrappleFetchTarget_Implementation(AActor* FetchTarget)
 {
 	// Believed here and checked where it is used, like the ability aim target below: the handler
 	// runs the reach and availability test itself. @see UAbilityHandler_Grapple::OnActivate
-	GrappleFetchClaim = Drop;
+	GrappleFetchClaim = FetchTarget;
 }
 
-ADroppedRangedWeapon* AShooterCharacter::ConsumeGrappleFetchClaim()
+void AShooterCharacter::WatchGrappleFetch(AActor* Item)
 {
-	ADroppedRangedWeapon* Claim = GrappleFetchClaim.Get();
+	WatchedFetch = Item;
+	if (UWorld* const World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(WatchedFetchTimer, this, &AShooterCharacter::PollWatchedFetch, 0.1f, true);
+	}
+}
+
+void AShooterCharacter::PollWatchedFetch()
+{
+	// Arrived (taken), or gone: the hands come back out. The item's own arrival grants whatever it
+	// grants; this only ends the stow the throw began. @see BeginWeaponFetchStow
+	AActor* const Item = WatchedFetch.Get();
+	const IGrappleFetchable* const Fetchable = GrappleFetch::Resolve(Item);
+	if (Item && Fetchable && !Fetchable->IsGrappleFetchDone() && Fetchable->IsGrappleFetchInFlight())
+	{
+		return;
+	}
+	GetWorldTimerManager().ClearTimer(WatchedFetchTimer);
+	WatchedFetch.Reset();
+	FinishWeaponFetch(false);
+}
+
+AActor* AShooterCharacter::ConsumeGrappleFetchClaim()
+{
+	AActor* Claim = GrappleFetchClaim.Get();
 	GrappleFetchClaim.Reset();
 	return Claim;
 }
@@ -3947,12 +3975,27 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 		return;
 	}
 
+	// Rarity outlines on every pickup, whatever the ability in hand: a few passes a second is enough
+	// for things that lie still, and the material goes on the camera the first time through.
+	if (UWorld* const OutlineWorld = GetWorld())
+	{
+		if (!LootOutlineInstance && LootOutlineMaterial)
+		{
+			LootOutlineInstance = LootOutline::InstallPostProcess(this, LootOutlineMaterial);
+		}
+		if (LootOutlineInstance && OutlineWorld->GetTimeSeconds() >= NextLootOutlineRefresh)
+		{
+			NextLootOutlineRefresh = OutlineWorld->GetTimeSeconds() + 0.25;
+			LootOutline::Refresh(this);
+		}
+	}
+
 	// The brackets promise "press now and the hook brings this back", so they show only when that is
 	// true: the grapple is the ability in hand, it can fire right now, and nothing else has already
 	// borrowed the brackets for a different promise.
 	const UAbilityDefinition_Grapple* Def = AbilityComponent
 		? Cast<UAbilityDefinition_Grapple>(AbilityComponent->GetActiveAbility()) : nullptr;
-	ADroppedRangedWeapon* Target = nullptr;
+	AActor* Target = nullptr;
 	if (Def && Def->bCanFetchWeapons && AbilityComponent->CanActivate()
 		&& !bAbilityAiming && !bMeleeFocusReticleActive)
 	{
@@ -3985,9 +4028,9 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 		{
 			Reticle->ClearTarget();
 		}
-		if (WeaponDropCard)
+		if (LootCard)
 		{
-			WeaponDropCard->HideCard();
+			LootCard->HideCard();
 		}
 		return;
 	}
@@ -4003,25 +4046,26 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 		Reticle->UpdateForTarget(Screen, PixelRadius, 0);
 	}
 
-	if (!Def->WeaponCardWidgetClass)
+	// One card for whatever is bracketed; the card itself hides when the item has nothing to say.
+	if (!Def->LootCardWidgetClass)
 	{
 		return;
 	}
 
-	if (WeaponDropCard && WeaponDropCard->GetClass() != Def->WeaponCardWidgetClass)
+	if (LootCard && LootCard->GetClass() != Def->LootCardWidgetClass)
 	{
-		WeaponDropCard->RemoveFromParent();
-		WeaponDropCard = nullptr;
+		LootCard->RemoveFromParent();
+		LootCard = nullptr;
 	}
-	if (!WeaponDropCard)
+	if (!LootCard)
 	{
-		WeaponDropCard = CreateWidget<UWeaponDropCardWidget>(PC, Def->WeaponCardWidgetClass);
-		if (!WeaponDropCard)
+		LootCard = CreateWidget<ULootCardWidget>(PC, Def->LootCardWidgetClass);
+		if (!LootCard)
 		{
 			return;
 		}
 		// Above the brackets (80) and the overhead charge bars (90), so the card is never under them.
-		WeaponDropCard->AddToViewport(95);
+		LootCard->AddToViewport(95);
 	}
 
 	// The key the player presses, as their bindings have it, so the card cannot name the wrong one.
@@ -4038,17 +4082,17 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 		}
 	}
 
-	const bool bFullCard = FVector::Dist(GetActorLocation(), Target->GetActorLocation()) <= Def->WeaponCardFullDistance;
-	WeaponDropCard->ShowForDrop(Target, this, Screen, PixelRadius, bFullCard, KeyLabel);
+	const bool bFullCard = FVector::Dist(GetActorLocation(), Target->GetActorLocation()) <= Def->LootCardFullDistance;
+	LootCard->ShowFor(Target, this, Screen, PixelRadius, bFullCard, KeyLabel);
 }
 
 void AShooterCharacter::ClearGrappleFetchAiming()
 {
 	GrappleFetchTarget = nullptr;
 
-	if (WeaponDropCard)
+	if (LootCard)
 	{
-		WeaponDropCard->HideCard();
+		LootCard->HideCard();
 	}
 
 	if (!bGrappleFetchReticleActive)
@@ -6198,10 +6242,11 @@ void AShooterCharacter::UpdateGrappleVisual(float DeltaTime)
 		// It waits at the drop for a short grace first, because the pull is started on the server and a
 		// watching machine sees it begin a ping after the hook arrived. If the pull never starts (the
 		// drop went to somebody else), the line falls through to an ordinary empty retract below.
-		const ADroppedRangedWeapon* FetchDrop = Cast<ADroppedRangedWeapon>(GrappleVisualFetchTarget.Get());
+		const AActor* const FetchDrop = GrappleVisualFetchTarget.Get();
+		const IGrappleFetchable* const Fetched = GrappleFetch::Resolve(FetchDrop);
 		static constexpr float FetchPullGraceSeconds = 0.4f;
-		const bool bFollowFetch = FetchDrop && !FetchDrop->IsHidden() && !FetchDrop->IsPullComplete()
-			&& (FetchDrop->IsBeingPulled() || SinceThrow < GrappleThrowTravelTime + FetchPullGraceSeconds);
+		const bool bFollowFetch = Fetched && !FetchDrop->IsHidden() && !Fetched->IsGrappleFetchDone()
+			&& (Fetched->IsGrappleFetchInFlight() || SinceThrow < GrappleThrowTravelTime + FetchPullGraceSeconds);
 		if (!bGrappleVisualCanAttach && bFollowFetch)
 		{
 			FVector DropCenter, DropExtent;

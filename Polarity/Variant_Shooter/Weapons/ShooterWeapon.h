@@ -1613,25 +1613,18 @@ public:
 	 *  into a self-refilling one by changing its local copy. */
 	void ConfigureFiniteEnergyReserve();
 
-	/** The fair rate: money this physical gun is worth handed to the dispenser, before the casino
-	 *  turns it into a bet (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md, section 0.1).
-	 *  Base + rounds x (money per magazine / base magazine size). Priced per magazine so a full
-	 *  magazine of any gun is worth the same, and never capped: every extra round pays. */
+	/** Rounds that make one magazine of dispenser stake. 0 = the gun's base magazine. Set it on guns
+	 *  whose magazine is tiny (a rocket launcher's single rocket, a shotgun's handful), or nine of
+	 *  their "magazines" would be a jackpot for the price of nine shells. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0"))
-	int32 DepositBaseMoney = 30;
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0.0"))
-	float DepositMoneyPerMagazine = 10.0f;
+	int32 DepositRoundsPerMagazine = 0;
 
-	/** A self-refilling class gun cannot be stuffed, so its rounds are this flat sum instead. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo|Economy", meta = (ClampMin = "0"))
-	int32 DepositEnergyAmmoMoney = 20;
-
+	/** The dispenser stake of this gun: only its rounds, counted in magazines (DepositRoundsPerMagazine,
+	 *  else its BASE magazine, so a fitted extended one does not make every round cheaper). The gun
+	 *  itself is worth nothing: an empty gun stakes 0.
+	 *  Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
-	int32 GetDepositMoneyValue(int32 LoadedRounds, int32 ReserveRounds) const;
-
-	/** Money one round adds at the fair rate. Zero for a self-refilling class gun. */
-	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
-	float GetDepositMoneyPerRound() const;
+	float GetDepositMagazines(int32 LoadedRounds, int32 ReserveRounds) const;
 
 	/** Hold the refill back: EnergyRegenDelay plus ExtraSeconds from now. Server only, and a no-op
 	 *  for anything that is not an energy weapon, so both report paths can call it blindly. */
@@ -2118,8 +2111,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
 	FText WeaponDisplayName;
 
+	/** What kind of gun this is (Weapon.Type.AR, .SMG, ...). Shown as a chip on the loot card, over
+	 *  the gun and over every attachment that fits it. Display only: which attachments fit is still
+	 *  the attachment's own list of classes. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation", meta = (Categories = "Weapon.Type"))
+	FGameplayTag WeaponType;
+
 	/** One line under the name on the weapon card shown over a dropped copy of this gun. Empty hides
-	 *  the line. @see UWeaponDropCardWidget */
+	 *  the line. @see ULootCardWidget */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation", meta = (MultiLine = "true"))
 	FText WeaponDescription;
 
@@ -2609,6 +2608,10 @@ public:
 	 *  change the aim everywhere at once instead of at each call site. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	float GetADSZoom() const;
+
+	/** The magnification with this optic fitted instead of the current one (null: iron sights). What
+	 *  the loot card compares against GetADSZoom. */
+	float GetADSZoomWith(const UWeaponAttachmentDefinition* Optic) const;
 
 	// ==================== Attachments ====================
 	//

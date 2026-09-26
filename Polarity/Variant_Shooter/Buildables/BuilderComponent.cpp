@@ -21,7 +21,7 @@
 #include "TimerManager.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
-#include "Polarity/Upgrades/UpgradeManagerComponent.h"
+#include "DispenserSlotMachineComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
 UBuilderComponent::UBuilderComponent()
@@ -267,8 +267,9 @@ void UBuilderComponent::ToggleFeedMenu()
 
 			TArray<AShooterWeapon*> Weapons;
 			GetFeedWeapons(Weapons);
-			const UUpgradeManagerComponent* const Upgrades = Character ? Character->GetUpgradeManager() : nullptr;
-			if (Weapons.Num() == 0 && !(Upgrades && Upgrades->HasPendingOffer()))
+			const UDispenserSlotMachineComponent* const Machine = Dispenser->GetSlotMachine();
+			const bool bMyCardsOpen = Machine && Machine->GetSpin().Phase == EDispenserSpinPhase::Open && Machine->IsSpinner(Character);
+			if (Weapons.Num() == 0 && !bMyCardsOpen)
 			{
 				ShowFeedHint(3, TEXT("Dispenser: you own no gun to melt for fuel"));
 				UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] feed: %s owns no gun to melt"), *Character->GetName());
@@ -347,15 +348,23 @@ void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
 	// state questions the server will ask are asked here first, so a refusal is instant and visible.
 	if (ABuildableActor* const Dispenser = FeedDispenserTarget.Get())
 	{
-		// An offer waiting: the number key takes that card, and the menu closes on the pick.
-		AShooterCharacter* const Picker = GetCharacter();
-		if (UUpgradeManagerComponent* const Upgrades = Picker ? Picker->GetUpgradeManager() : nullptr;
-			Upgrades && Upgrades->HasPendingOffer())
+		// The machine is busy. Its boxes open for this player: the number key takes that card (the
+		// grapple does the same from a distance) and the menu closes. Anyone else waits.
+		const AShooterCharacter* const Picker = GetCharacter();
+		if (const UDispenserSlotMachineComponent* const Machine = Dispenser->GetSlotMachine();
+			Machine && Machine->GetSpin().Phase != EDispenserSpinPhase::Idle)
 		{
-			if (Upgrades->GetPendingOffer().IsValidIndex(WeaponIndex))
+			const FDispenserSpin& Spin = Machine->GetSpin();
+			if (Spin.Phase == EDispenserSpinPhase::Open && Machine->IsSpinner(Picker)
+				&& Spin.Cards.IsValidIndex(WeaponIndex) && Spin.Cards[WeaponIndex].Outcome != EDispenserCardOutcome::Dud)
 			{
-				Upgrades->Server_PickOffer(WeaponIndex);
+				Server_TakeDispenserCard(Dispenser, WeaponIndex);
 				CloseFeedMenu();
+			}
+			else
+			{
+				ShowFeedHint(5, Machine->GetSpinRefusal(Picker));
+				OnFeedRefused.Broadcast(WeaponIndex);
 			}
 			return;
 		}
@@ -379,8 +388,8 @@ void UBuilderComponent::FeedWeapon(int32 WeaponIndex)
 			return;
 		}
 
-		// The menu stays open: the offer replicates back in a moment and the rows turn into its cards.
-		// A refusal (cooldown, a pick pending) comes back as a receipt on the screen.
+		// The menu stays open: the spin replicates back in a moment and the rows turn into its cards.
+		// A refusal (the machine busy) comes back as a receipt on the screen.
 		Server_FuelDispenser(Dispenser, Weapons[WeaponIndex]);
 		return;
 	}
@@ -434,6 +443,23 @@ void UBuilderComponent::Server_FuelDispenser_Implementation(ABuildableActor* Dis
 	{
 		Dispenser->AcceptWeaponForFuel(Character, Weapon);
 	}
+}
+
+void UBuilderComponent::Server_TakeDispenserCard_Implementation(ABuildableActor* Dispenser, int32 CardIndex)
+{
+	AShooterCharacter* const Character = GetCharacter();
+	UDispenserSlotMachineComponent* const Machine = Dispenser ? Dispenser->GetSlotMachine() : nullptr;
+	if (!Character || !Machine || Dispenser->IsDestroyed())
+	{
+		return;
+	}
+	const float Reach = Dispenser->ServiceRadius + 300.0f;
+	if (FVector::DistSquared(Character->GetActorLocation(), Dispenser->GetActorLocation()) > FMath::Square(Reach))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s: menu take refused, too far from %s"), *Character->GetName(), *Dispenser->GetName());
+		return;
+	}
+	Machine->TakeCard(CardIndex, Character);
 }
 
 void UBuilderComponent::Client_ShowCasinoReceipt_Implementation(const FString& Receipt)

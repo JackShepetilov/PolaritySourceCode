@@ -3,6 +3,8 @@
 #include "Variant_Shooter/UI/InventorySlotWidget.h"
 #include "Variant_Shooter/UI/InventoryDragDropOperation.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
+#include "Upgrades/DispenserUpgradePool.h"
+#include "Upgrades/UpgradeDefinition.h"
 
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
@@ -27,8 +29,11 @@ void UInventorySlotWidget::SetCell(EInventoryCellVisual InVisual, EInventorySlot
 
 	// The number is only meaningful where a cell can be partly full. Showing "1" on an upgrade
 	// would be noise on a HUD read out of the corner of the eye.
+	// An upgrade shows its level instead: two copies of the same upgrade at two levels are two
+	// different decisions.
 	const bool bShowCount =
-		(InKind == EInventorySlotKind::Currency || InKind == EInventorySlotKind::Ammo) && InCount > 0;
+		(InKind == EInventorySlotKind::Currency || InKind == EInventorySlotKind::Ammo
+			|| InKind == EInventorySlotKind::AbilityUpgrade) && InCount > 0;
 
 	// Whatever parts the Blueprint supplied get driven from here first, then the Blueprint gets its
 	// turn. That order matters: BP_SetCell is the override hook, so anything it sets has to be able
@@ -103,7 +108,9 @@ void UInventorySlotWidget::ApplyLook(UTexture2D* InIcon, float FillRatio, bool b
 
 		if (bShowCount)
 		{
-			CountText->SetText(FText::AsNumber(Count));
+			CountText->SetText(Kind == EInventorySlotKind::AbilityUpgrade
+				? FText::Format(NSLOCTEXT("Inventory", "UpgradeLevel", "Lv {0}"), FText::AsNumber(Count))
+				: FText::AsNumber(Count));
 			CountText->SetColorAndOpacity(FSlateColor(KindColor));
 		}
 	}
@@ -124,8 +131,14 @@ void UInventorySlotWidget::SetFromSlot(const FInventorySlot& InSlot, UTexture2D*
 
 	// An empty cell keeps a fill of zero by carrying no stack at all; a filled one that does not
 	// stack reports 1/1 so the Blueprint sees a full square.
-	const int32 EffectiveStackMax = InSlot.IsEmpty() ? 0 : FMath::Max(1, InSlot.StackMax);
-	const int32 EffectiveCount = InSlot.IsEmpty() ? 0 : FMath::Max(1, InSlot.Count);
+	int32 EffectiveStackMax = InSlot.IsEmpty() ? 0 : FMath::Max(1, InSlot.StackMax);
+	int32 EffectiveCount = InSlot.IsEmpty() ? 0 : FMath::Max(1, InSlot.Count);
+
+	// An upgrade's number is its level; a full square either way.
+	if (InSlot.Kind == EInventorySlotKind::AbilityUpgrade)
+	{
+		EffectiveCount = EffectiveStackMax = FMath::Max(1, InSlot.Level);
+	}
 
 	// Recorded before SetCell, because SetCell is what repaints and ColorForKind reads this.
 
@@ -139,6 +152,19 @@ void UInventorySlotWidget::SetAttachmentTarget(AShooterWeapon* InWeapon, UWeapon
 {
 	AttachmentWeapon = InWeapon;
 	MountedAttachment = Mounted;
+}
+
+void UInventorySlotWidget::SetUpgradeSlotTarget(int32 InSlotIndex, const UDispenserUpgradePool* InLayout, UUpgradeDefinition* Equipped)
+{
+	UpgradeSlotIndex = InSlotIndex;
+	UpgradeSlotLayout = InLayout;
+	EquippedUpgrade = Equipped;
+}
+
+bool UInventorySlotWidget::AcceptsUpgrade(const UUpgradeDefinition* Upgrade) const
+{
+	const UDispenserUpgradePool* Layout = UpgradeSlotLayout.Get();
+	return Upgrade && Layout && UpgradeSlotIndex != INDEX_NONE && Layout->FindSlotOf(Upgrade) == UpgradeSlotIndex;
 }
 
 // ==================== Drag and drop ====================
@@ -158,7 +184,8 @@ void UInventorySlotWidget::SetAttachmentTarget(AShooterWeapon* InWeapon, UWeapon
 FReply UInventorySlotWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
 	const bool bHasSomethingToDrag = (GridIndex != INDEX_NONE && Visual == EInventoryCellVisual::Filled)
-		|| (AttachmentWeapon && MountedAttachment);
+		|| (AttachmentWeapon && MountedAttachment)
+		|| (UpgradeSlotIndex != INDEX_NONE && EquippedUpgrade);
 
 	if (bHasSomethingToDrag && InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
@@ -177,8 +204,9 @@ void UInventorySlotWidget::NativeOnDragDetected(const FGeometry& InGeometry, con
 
 	const bool bFromGrid = GridIndex != INDEX_NONE && Visual == EInventoryCellVisual::Filled;
 	const bool bFromWeapon = AttachmentWeapon != nullptr && MountedAttachment != nullptr;
+	const bool bFromUpgradeSlot = UpgradeSlotIndex != INDEX_NONE && EquippedUpgrade != nullptr;
 
-	if (!bFromGrid && !bFromWeapon)
+	if (!bFromGrid && !bFromWeapon && !bFromUpgradeSlot)
 	{
 		return;
 	}
@@ -192,6 +220,12 @@ void UInventorySlotWidget::NativeOnDragDetected(const FGeometry& InGeometry, con
 		// A hint for the cursor only, so a weapon's squares can refuse an obvious mismatch without
 		// asking the server. The server re-reads the cell and never trusts this.
 		Operation->DraggedAttachment = Cast<UWeaponAttachmentDefinition>(CurrentPayload);
+		Operation->DraggedUpgrade = Cast<UUpgradeDefinition>(CurrentPayload);
+	}
+	else if (bFromUpgradeSlot)
+	{
+		Operation->SourceUpgradeSlot = UpgradeSlotIndex;
+		Operation->DraggedUpgrade = EquippedUpgrade;
 	}
 	else
 	{
@@ -247,6 +281,18 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
 		return true;
 	}
 
+	// --- This square is an action slot ---
+	if (UpgradeSlotIndex != INDEX_NONE)
+	{
+		// Only from the bag, and only an upgrade of this slot. Swallowed either way, for the same
+		// reason a weapon's square swallows: this drop was aimed here, not at the floor.
+		if (Dragged->SourceIndex != INDEX_NONE && AcceptsUpgrade(Dragged->DraggedUpgrade))
+		{
+			OnUpgradeEquip.ExecuteIfBound(Dragged->SourceIndex, UpgradeSlotIndex);
+		}
+		return true;
+	}
+
 	// --- This square is a cell of the bag ---
 	if (GridIndex == INDEX_NONE)
 	{
@@ -266,6 +312,13 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
 		return true;
 	}
 
+	// Dragged out of an action slot: this cell is where it should land.
+	if (Dragged->SourceUpgradeSlot != INDEX_NONE)
+	{
+		OnUpgradeUnequip.ExecuteIfBound(Dragged->SourceUpgradeSlot, GridIndex);
+		return true;
+	}
+
 	if (Dragged->SourceIndex == INDEX_NONE || Dragged->SourceIndex == GridIndex)
 	{
 		return true;
@@ -280,16 +333,22 @@ void UInventorySlotWidget::NativeOnDragEnter(const FGeometry& InGeometry, const 
 {
 	Super::NativeOnDragEnter(InGeometry, InDragDropEvent, InOperation);
 
-	const bool bIsDropTarget = (GridIndex != INDEX_NONE || AttachmentWeapon != nullptr)
+	const bool bIsDropTarget = (GridIndex != INDEX_NONE || AttachmentWeapon != nullptr || UpgradeSlotIndex != INDEX_NONE)
 		&& Visual != EInventoryCellVisual::Locked;
 
 	const UInventoryDragDropOperation* Dragged = Cast<UInventoryDragDropOperation>(InOperation);
 
 	// A gun's square lights up only for an attachment that fits that gun, so a 4x scope dragged over
 	// the pistol stays dark instead of promising a mount the server will refuse.
-	const bool bFits = !AttachmentWeapon
+	bool bFits = !AttachmentWeapon
 		|| (Dragged && Dragged->DraggedAttachment
 			&& Dragged->DraggedAttachment->FitsWeapon(AttachmentWeapon->GetClass()));
+
+	// An action slot lights up only for an upgrade of its own, dragged out of the bag.
+	if (UpgradeSlotIndex != INDEX_NONE)
+	{
+		bFits = Dragged && Dragged->SourceIndex != INDEX_NONE && AcceptsUpgrade(Dragged->DraggedUpgrade);
+	}
 
 	if (bIsDropTarget && Dragged && bFits)
 	{

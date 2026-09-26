@@ -6,6 +6,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Variant_Shooter/Abilities/GrappleFetchable.h"
 #include "RiotShieldPickup.generated.h"
 
 class USphereComponent;
@@ -14,7 +15,7 @@ class UEMF_FieldComponent;
 class ARiotShield;
 
 UCLASS()
-class POLARITY_API ARiotShieldPickup : public AActor
+class POLARITY_API ARiotShieldPickup : public AActor, public IGrappleFetchable
 {
 	GENERATED_BODY()
 
@@ -32,6 +33,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Pickup")
 	bool IsBeingPulled() const { return bIsBeingPulled; }
 
+	// ==================== IGrappleFetchable ====================
+	// Taken with the grapple, not the channeled yank (the author's call, 2026-09-25): the yank
+	// keeps enemies, props and teammates.
+	virtual bool CanBeGrappleFetchedBy(const AShooterCharacter* Caster) const override
+	{
+		return Caster && bCanBeCaptured && !bIsBeingPulled && true && !IsHidden();
+	}
+	virtual bool BeginGrappleFetchPull(AShooterCharacter* Caster) override { StartPull(Caster); return bIsBeingPulled; }
+	virtual bool IsGrappleFetchInFlight() const override { return bIsBeingPulled; }
+	virtual bool IsGrappleFetchDone() const override { return IsHidden() || IsActorBeingDestroyed(); }
+
 	/** Arm/disarm impact-stun. Called by ARiotShield::ThrowAway when the player actively throws. Default false
 	 *  so passively-spawned pickups don't stun NPCs that walk into them. */
 	void SetCanStunOnImpact(bool bEnable) { bCanStunOnImpact = bEnable; }
@@ -46,6 +58,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UFUNCTION()
 	void OnOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);

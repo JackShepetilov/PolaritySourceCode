@@ -54,6 +54,9 @@ void AScriptedPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
+
 	// Sync collision radii
 	PickupCollision->SetSphereRadius(PickupRadius);
 	TooltipTrigger->SetSphereRadius(TooltipRadius);
@@ -324,4 +327,10 @@ void AScriptedPickup::OnTooltipEndOverlap(UPrimitiveComponent* OverlappedCompone
 	{
 		Tooltip->BP_OnTooltipHide();
 	}
+}
+
+void AScriptedPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
 }

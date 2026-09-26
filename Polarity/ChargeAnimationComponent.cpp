@@ -29,6 +29,7 @@
 #include "Variant_Shooter/Pickups/ScriptedPickup.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
 #include "Variant_Shooter/Weapons/RiotShieldPickup.h"
+#include "Variant_Shooter/Abilities/GrappleFetchable.h"
 #include "Variant_Shooter/AI/HumanoidNPC.h"
 #include "Arena/BasketballBall.h"
 #include "EngineUtils.h" // TActorIterator
@@ -1262,6 +1263,13 @@ void UChargeAnimationComponent::UpdateCaptureRaycast(const FVector& CameraLoc, c
 	{
 		AActor* HitActor = Overlap.GetActor();
 		if (!HitActor)
+		{
+			continue;
+		}
+
+		// Items are the grapple's (IGrappleFetchable: weapons, upgrades, rounds, money, attachments,
+		// abilities, shields). The yank keeps enemies, props and teammates. The author's call, 2026-09-25.
+		if (GrappleFetch::Resolve(HitActor))
 		{
 			continue;
 		}

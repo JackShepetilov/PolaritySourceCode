@@ -24,6 +24,8 @@ class UTextBlock;
 class AShooterWeapon;
 class UDragDropOperation;
 class UTexture2D;
+class UUpgradeDefinition;
+class UDispenserUpgradePool;
 
 /** One cell was dropped onto another. From and To are grid indices; the screen turns them into the
  *  server call, because the square itself has no business knowing about inventories or networks. */
@@ -36,6 +38,13 @@ DECLARE_DELEGATE_TwoParams(FOnInventoryAttachmentInstall, int32 /*FromIndex*/, A
  *  or INDEX_NONE for "anywhere it fits", which is what a drop on empty screen means. */
 DECLARE_DELEGATE_ThreeParams(FOnInventoryAttachmentRemove, AShooterWeapon* /*Weapon*/,
 	EWeaponAttachmentType /*Type*/, int32 /*ToIndex*/);
+
+/** A grid cell holding an upgrade was dropped on the action slot it belongs to. */
+DECLARE_DELEGATE_TwoParams(FOnInventoryUpgradeEquip, int32 /*FromIndex*/, int32 /*SlotIndex*/);
+
+/** The upgrade in an action slot was dragged to a grid cell (ToIndex), or to empty screen
+ *  (INDEX_NONE: the first free cell). */
+DECLARE_DELEGATE_TwoParams(FOnInventoryUpgradeUnequip, int32 /*SlotIndex*/, int32 /*ToIndex*/);
 
 /** How the square should read. Independent of what is in it: an empty grid cell and an empty
  *  attachment slot are the same state wearing two different Blueprints. */
@@ -112,6 +121,17 @@ public:
 	 *  in it right now, or null for an empty slot, and it is what decides whether this square can
 	 *  START a drag -- an empty slot has nothing to take off. */
 	void SetAttachmentTarget(AShooterWeapon* InWeapon, UWeaponAttachmentDefinition* Mounted);
+
+	/** Tell the square it is action slot InSlotIndex of Layout (jump, slide...), and what is in it.
+	 *  The third identity, beside a grid cell and a weapon's attachment slot. Equipped decides
+	 *  whether it can start a drag; Layout lets it refuse an upgrade of another slot at once. */
+	void SetUpgradeSlotTarget(int32 InSlotIndex, const UDispenserUpgradePool* InLayout, UUpgradeDefinition* Equipped);
+
+	/** Fired on an action slot when a grid cell with an upgrade of that slot is dropped on it. */
+	FOnInventoryUpgradeEquip OnUpgradeEquip;
+
+	/** Fired on the grid cell an action slot's upgrade was dragged onto. */
+	FOnInventoryUpgradeUnequip OnUpgradeUnequip;
 
 	/** Bound by the screen. Fired on the square that was dropped ON, with the dragged square's
 	 *  index first. */
@@ -255,5 +275,18 @@ private:
 	 *  carried and a weapon's squares can refuse an obvious mismatch without a round trip. */
 	UPROPERTY(Transient)
 	TObjectPtr<UObject> CurrentPayload;
+
+	/** Which action slot this square is, or INDEX_NONE. Exclusive with the other two identities. */
+	int32 UpgradeSlotIndex = INDEX_NONE;
+
+	/** The pool asset the slot index points into. An asset, so it outlives the square anyway. */
+	TWeakObjectPtr<const UDispenserUpgradePool> UpgradeSlotLayout;
+
+	/** The upgrade in this action slot right now; null means nothing to drag off. */
+	UPROPERTY(Transient)
+	TObjectPtr<UUpgradeDefinition> EquippedUpgrade;
+
+	/** True when Upgrade belongs in this action slot. */
+	bool AcceptsUpgrade(const UUpgradeDefinition* Upgrade) const;
 
 };

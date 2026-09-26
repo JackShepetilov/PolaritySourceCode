@@ -20,5 +20,6 @@ bool FInventorySlot::operator==(const FInventorySlot& Other) const
 		&& StackMax == Other.StackMax
 		&& bInstalled == Other.bInstalled
 		&& InstalledOnWeapon == Other.InstalledOnWeapon
-		&& PickupClass == Other.PickupClass;
+		&& PickupClass == Other.PickupClass
+		&& Level == Other.Level;
 }

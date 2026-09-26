@@ -304,6 +304,15 @@ protected:
 	UFUNCTION(Server, Reliable)
 	void Server_FuelDispenser(ABuildableActor* Dispenser, AShooterWeapon* Weapon);
 
+public:
+
+	/** Take card CardIndex of this player's open spin at Dispenser from the menu, without the grapple.
+	 *  The server checks reach and ownership; the machine checks the rest. */
+	UFUNCTION(Server, Reliable)
+	void Server_TakeDispenserCard(ABuildableActor* Dispenser, int32 CardIndex);
+
+protected:
+
 private:
 
 	// ==================== Server side ====================

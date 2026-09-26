@@ -110,6 +110,11 @@ struct FInventorySlot
 	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
 	TSubclassOf<AInventoryPickup> PickupClass = nullptr;
 
+	/** AbilityUpgrade only: the level the upgrade was at when it went into the bag. Equipping it
+	 *  from the cell brings it back at exactly this level. 0 for every other kind. */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	int32 Level = 0;
+
 	bool IsEmpty() const { return Kind == EInventorySlotKind::Empty; }
 
 	/** Currency and ammo merge into a partial cell of the same thing; the others never do. */
@@ -161,6 +166,10 @@ struct FInventoryItem
 	 *  FInventorySlot::PickupClass. */
 	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
 	TSubclassOf<AInventoryPickup> PickupClass = nullptr;
+
+	/** AbilityUpgrade only: the upgrade's level. Carried into the cell. @see FInventorySlot::Level */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory", meta = (ClampMin = "0"))
+	int32 Level = 0;
 
 	bool IsValid() const { return Kind != EInventorySlotKind::Empty && Count > 0 && StackMax > 0; }
 

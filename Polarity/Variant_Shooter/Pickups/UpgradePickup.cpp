@@ -59,6 +59,9 @@ void AUpgradePickup::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
+
 	// Sync collision radii
 	PickupCollision->SetSphereRadius(PickupRadius);
 	TooltipTrigger->SetSphereRadius(TooltipRadius);
@@ -66,9 +69,10 @@ void AUpgradePickup::BeginPlay()
 	// Position tooltip above the mesh
 	TooltipWidgetComponent->SetRelativeLocation(FVector(0.0f, 0.0f, TooltipHeight));
 
-	// Bind tooltip overlaps (no pickup overlap — capture only via channeling)
-	TooltipTrigger->OnComponentBeginOverlap.AddDynamic(this, &AUpgradePickup::OnTooltipBeginOverlap);
-	TooltipTrigger->OnComponentEndOverlap.AddDynamic(this, &AUpgradePickup::OnTooltipEndOverlap);
+	// No hologram any more: the loot card over the bracketed item says the same thing (the author,
+	// 2026-09-26). The trigger and the widget component stay on the class so the Blueprints that
+	// configure them still load, but nothing opens them.
+	TooltipTrigger->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	// Store initial mesh Z for bob effect
 	if (Mesh)
@@ -83,18 +87,6 @@ void AUpgradePickup::BeginPlay()
 			IdleVFX, PickupCollision, NAME_None,
 			FVector::ZeroVector, FRotator::ZeroRotator, EAttachLocation::KeepRelativeOffset,
 			true);
-	}
-
-	// Initialize tooltip widget from definition
-	if (TooltipWidgetClass && UpgradeDefinition)
-	{
-		TooltipWidgetComponent->SetWidgetClass(TooltipWidgetClass);
-		TooltipWidgetComponent->InitWidget();
-
-		if (UUpgradeTooltipWidget* Tooltip = Cast<UUpgradeTooltipWidget>(TooltipWidgetComponent->GetWidget()))
-		{
-			Tooltip->InitFromDefinition(UpgradeDefinition);
-		}
 	}
 
 }
@@ -205,7 +197,6 @@ void AUpgradePickup::UpdatePull(float DeltaTime)
 		// Player gone — re-enable collision and abort pull
 		bIsBeingPulled = false;
 		PickupCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-		TooltipTrigger->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		return;
 	}
 
@@ -291,7 +282,9 @@ void AUpgradePickup::CompletePull()
 	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] CompletePull: calling GrantUpgrade('%s', tag=%s)"),
 		*UpgradeDefinition->DisplayName.ToString(),
 		*UpgradeDefinition->UpgradeTag.ToString());
-	if (UpgradeMgr->GrantUpgrade(UpgradeDefinition))
+	// Everywhere it has to run: the grapple starts this pull on the server, and an upgrade's logic runs
+	// wherever it was granted, so the owning client gets its copy through the manager.
+	if (UpgradeMgr->GrantUpgradeEverywhere(UpgradeDefinition))
 	{
 		// Effects
 		if (PickupSound)
@@ -376,4 +369,10 @@ void AUpgradePickup::OnTooltipEndOverlap(UPrimitiveComponent* OverlappedComponen
 	{
 		Tooltip->BP_OnTooltipHide();
 	}
+}
+
+void AUpgradePickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
 }

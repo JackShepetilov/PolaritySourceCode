@@ -10,7 +10,9 @@
 #include "Variant_Shooter/Abilities/NitroGateSubsystem.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "Variant_Shooter/Abilities/AbilityHandler.h"
-#include "AI/SmokeVisionSubsystem.h"
+#include "Upgrades/JumpSlotParams.h"
+#include "Upgrades/UpgradeManagerComponent.h"
+#include "CameraShakeComponent.h"
 #include "VelocityModifier.h"
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
@@ -349,12 +351,12 @@ float UApexMovementComponent::GetMaxSpeed() const
 		BaseSpeed = FMath::Min(BaseSpeed, MovementSettings->ADSSpeed);
 	}
 
-	// The smoke jump's wind-up. A multiplier and not a cap, unlike ADS above: the charge is a
+	// The charged jump's wind-up. A multiplier and not a cap, unlike ADS above: the charge is a
 	// commitment, so it should take the same fraction off a walk as off a sprint. Grounded only,
 	// which costs nothing since the charge cancels itself the moment the character leaves the floor.
-	if (SmokeChargeTime > 0.0f && (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
+	if (JumpChargeTime > 0.0f && (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
 	{
-		BaseSpeed *= SmokeChargeMoveScale;
+		BaseSpeed *= JumpChargeMoveScale;
 	}
 
 	const float ScaledBaseSpeed = BaseSpeed * DamageSpeedMultiplier * ExternalSpeedMultiplier;
@@ -446,14 +448,26 @@ float UApexMovementComponent::GetGroundDashCooldownDuration() const
 	return MovementSettings ? MovementSettings->GroundDashCooldown : 0.0f;
 }
 
+// The air dash is a jump-slot upgrade (UUpgrade_AirDash): charges and cooldown come from its level,
+// speed is MovementSettings::AirDashSpeed times its multiplier. Nothing in the slot: no dash.
+
 float UApexMovementComponent::GetAirDashCooldownDuration() const
 {
-	return MovementSettings ? MovementSettings->AirDashCooldown : 0.0f;
+	FJumpSlotParams Slot;
+	return GetJumpSlotParams(Slot) && Slot.Mode == EJumpSlotMode::AirDash ? Slot.Cooldown : 0.0f;
 }
 
 int32 UApexMovementComponent::GetMaxAirDashCount() const
 {
-	return MovementSettings ? MovementSettings->MaxAirDashCount : 0;
+	FJumpSlotParams Slot;
+	return GetJumpSlotParams(Slot) && Slot.Mode == EJumpSlotMode::AirDash ? Slot.AirDashCharges : 0;
+}
+
+float UApexMovementComponent::GetAirDashSpeed() const
+{
+	FJumpSlotParams Slot;
+	const float Multiplier = GetJumpSlotParams(Slot) && Slot.Mode == EJumpSlotMode::AirDash ? Slot.AirDashSpeedMultiplier : 1.0f;
+	return MovementSettings ? MovementSettings->AirDashSpeed * Multiplier : 0.0f;
 }
 
 float UApexMovementComponent::GetMaxAcceleration() const
@@ -497,6 +511,7 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 
 	Super::ProcessLanded(Hit, remainingTime, Iterations);
 	CurrentJumpCount = 0;
+	bAirJumpedThisFlight = false;
 	LastWallRunEndReason = EWallRunEndReason::None;
 	ResetAirAbilities();
 
@@ -590,7 +605,7 @@ void UApexMovementComponent::NotifyJumpPerformed(bool bWasAirJump)
 bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 {
 	// A charge already owns this press: it decides the height itself and launches on release.
-	if (SmokeChargeTime > 0.0f || bWantsSmokeCharge)
+	if (JumpChargeTime > 0.0f || bWantsJumpCharge)
 	{
 		return false;
 	}
@@ -600,9 +615,13 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		return Super::DoJump(bReplayingMoves, DeltaTime);
 	}
 
+	// What the jump slot says the button does. An empty slot is one jump and nothing in the air:
+	// MovementSettings used to hand everybody a double jump, and it is an upgrade now.
+	FJumpSlotParams Slot;
+	GetJumpSlotParams(Slot);
 	const APolarityCharacter* PolChar = Cast<APolarityCharacter>(GetOwner());
-	const bool bAllowAirJump = !PolChar || PolChar->bCanDoubleJump;
-	const int32 MaxJumps = bAllowAirJump ? MovementSettings->MaxJumpCount : 1;
+	const bool bAllowAirJump = Slot.Mode == EJumpSlotMode::ExtraJump && (!PolChar || PolChar->bCanDoubleJump);
+	const int32 MaxJumps = bAllowAirJump ? 1 + Slot.ExtraJumps : 1;
 
 	// Wall jump - player pushed off wall, NO double jump allowed after
 	if (bIsWallRunning)
@@ -644,6 +663,29 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 	}
 
 	if (CurrentJumpCount >= MaxJumps)
+	{
+		// Out of jumps in the air: with the air dash in the jump slot the press dashes instead.
+		// Only here, after the jumps are spent, so a jump off a ledge the player walked off and the
+		// jump out of a wallrun stay jumps.
+		if (Slot.Mode == EJumpSlotMode::AirDash && IsFalling() && TryAirDash())
+		{
+			const ACharacter* OwningCharacter = Cast<ACharacter>(GetOwner());
+			if (!bReplayingMoves && OwningCharacter && OwningCharacter->IsLocallyControlled())
+			{
+				if (UCameraShakeComponent* Shake = OwningCharacter->FindComponentByClass<UCameraShakeComponent>())
+				{
+					Shake->TriggerAirDash();
+				}
+			}
+		}
+		// False either way: a dash is not a jump, and a true here would make the engine count one.
+		return false;
+	}
+
+	// An air jump. Locked while the slot cools down, except for the rest of the flight whose first
+	// air jump started that cooldown [author, 2026-09-26].
+	const bool bIsAirJump = IsFalling() && CurrentJumpCount >= 1;
+	if (bIsAirJump && JumpSlotCooldownRemaining > 0.0f && !bAirJumpedThisFlight)
 	{
 		return false;
 	}
@@ -696,6 +738,12 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 		Velocity.Z = MovementSettings->JumpZVelocity;
 		CurrentJumpCount++;
 		SetMovementMode(MOVE_Falling);
+
+		if (bIsAirJump && !bAirJumpedThisFlight)
+		{
+			bAirJumpedThisFlight = true;
+			JumpSlotCooldownRemaining = Slot.Cooldown;
+		}
 
 		if (CurrentJumpCount == 1)
 		{
@@ -793,7 +841,7 @@ uint32 UApexMovementComponent::PackPolarityMoveFlags() const
 	Set(bIsAiming,                EPolarityMoveFlag::Aiming);
 
 	Set(bJumpInputHeld,           EPolarityMoveFlag::JumpInputHeld);
-	Set(bWantsSmokeCharge,        EPolarityMoveFlag::SmokeJumpCharging);
+	Set(bWantsJumpCharge,        EPolarityMoveFlag::JumpCharging);
 
 	return Flags;
 }
@@ -814,11 +862,11 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint32 Flags)
 	bIsRedirecting    = Has(EPolarityMoveFlag::AirDashRedirect);
 	bIsAiming         = Has(EPolarityMoveFlag::Aiming);
 
-	// The jump button and the smoke charge claimed with it. Both are plain intents for the same
-	// reason sprint is: the client already answered "am I holding it" and "was I standing in my own
-	// smoke when I pressed", and this side cannot answer either better than it did.
+	// The jump button and the charge claimed with it. Both are plain intents for the same reason
+	// sprint is: the client already answered "am I holding it" and "did the press start a charge",
+	// and this side cannot answer either better than it did.
 	bJumpInputHeld    = Has(EPolarityMoveFlag::JumpInputHeld);
-	bWantsSmokeCharge = Has(EPolarityMoveFlag::SmokeJumpCharging);
+	bWantsJumpCharge = Has(EPolarityMoveFlag::JumpCharging);
 
 	// States that need a real entry. Each Start* sets up friction, gravity, direction and speed;
 	// a side that only flipped the bool kept simulating normally and finished the move somewhere
@@ -921,7 +969,7 @@ void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint32 Flags)
 	bIsMantling       = Has(EPolarityMoveFlag::Mantling);
 
 	bJumpInputHeld    = Has(EPolarityMoveFlag::JumpInputHeld);
-	bWantsSmokeCharge = Has(EPolarityMoveFlag::SmokeJumpCharging);
+	bWantsJumpCharge = Has(EPolarityMoveFlag::JumpCharging);
 
 	bMeleeLungeWanted       = Has(EPolarityMoveFlag::MeleeLunging);
 	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
@@ -1099,8 +1147,9 @@ FSavedMove_Polarity::FSavedMove_Polarity()
 	, SavedSlideCooldown(0.0f)
 	, SavedJumpHoldTimeRemaining(0.0f)
 	, SavedCurrentJumpCount(0)
-	, SavedSmokeChargeTime(0.0f)
-	, SavedSmokeJumpCooldown(0.0f)
+	, SavedJumpChargeTime(0.0f)
+	, SavedJumpSlotCooldown(0.0f)
+	, bSavedAirJumpedThisFlight(0)
 {
 }
 
@@ -1124,8 +1173,9 @@ void FSavedMove_Polarity::Clear()
 	SavedSlideCooldown = 0.0f;
 	SavedJumpHoldTimeRemaining = 0.0f;
 	SavedCurrentJumpCount = 0;
-	SavedSmokeChargeTime = 0.0f;
-	SavedSmokeJumpCooldown = 0.0f;
+	SavedJumpChargeTime = 0.0f;
+	SavedJumpSlotCooldown = 0.0f;
+	bSavedAirJumpedThisFlight = 0;
 	SavedWallRunElapsedTime = 0.0f;
 	SavedWallRunNormal = FVector::ZeroVector;
 	SavedWallRunDirection = FVector::ZeroVector;
@@ -1192,8 +1242,9 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 		SavedSlideCooldown          = Apex->SlideCooldownRemaining;
 		SavedJumpHoldTimeRemaining  = Apex->JumpHoldTimeRemaining;
 		SavedCurrentJumpCount       = Apex->CurrentJumpCount;
-		SavedSmokeChargeTime        = Apex->SmokeChargeTime;
-		SavedSmokeJumpCooldown      = Apex->SmokeJumpCooldownRemaining;
+		SavedJumpChargeTime        = Apex->JumpChargeTime;
+		SavedJumpSlotCooldown      = Apex->JumpSlotCooldownRemaining;
+		bSavedAirJumpedThisFlight  = Apex->bAirJumpedThisFlight ? 1 : 0;
 
 		SavedWallRunElapsedTime  = Apex->WallRunElapsedTime;
 		SavedWallRunNormal       = Apex->WallRunNormal;
@@ -1241,8 +1292,9 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 		Apex->SlideCooldownRemaining      = SavedSlideCooldown;
 		Apex->JumpHoldTimeRemaining       = SavedJumpHoldTimeRemaining;
 		Apex->CurrentJumpCount            = SavedCurrentJumpCount;
-		Apex->SmokeChargeTime             = SavedSmokeChargeTime;
-		Apex->SmokeJumpCooldownRemaining  = SavedSmokeJumpCooldown;
+		Apex->JumpChargeTime             = SavedJumpChargeTime;
+		Apex->JumpSlotCooldownRemaining  = SavedJumpSlotCooldown;
+		Apex->bAirJumpedThisFlight       = bSavedAirJumpedThisFlight != 0;
 
 		Apex->WallRunElapsedTime  = SavedWallRunElapsedTime;
 		Apex->WallRunNormal       = SavedWallRunNormal;
@@ -2311,7 +2363,9 @@ void UApexMovementComponent::EndWallRun(EWallRunEndReason Reason)
 	}
 
 	// After any wallrun, allow exactly one air jump (treated as double jump)
-	const int32 MaxJumps = MovementSettings ? MovementSettings->MaxJumpCount : 2;
+	FJumpSlotParams Slot;
+	GetJumpSlotParams(Slot);
+	const int32 MaxJumps = Slot.Mode == EJumpSlotMode::ExtraJump ? 1 + Slot.ExtraJumps : 1;
 	CurrentJumpCount = FMath::Max(CurrentJumpCount, MaxJumps - 1);
 
 	OnWallRunChanged.Broadcast(false, EWallSide::None);
@@ -3662,7 +3716,7 @@ void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSecon
 	// Next to the gate above and for the same reason: it writes Velocity, so it belongs in the
 	// simulated move. Ahead of the chain below because a charge REFUSES while any of those states is
 	// running, and it has to see them as the move found them.
-	UpdateSmokeJump(DeltaSeconds);
+	UpdateChargedJump(DeltaSeconds);
 
 	// Exactly the chain that used to sit at the top of TickComponent, in the same order. It runs
 	// here because the engine calls this from inside PerformMovement, before the move is integrated,
@@ -3841,9 +3895,9 @@ void UApexMovementComponent::OnMovementUpdated(float DeltaSeconds, const FVector
 	{
 		WallBounceCooldownRemaining -= DeltaSeconds;
 	}
-	if (SmokeJumpCooldownRemaining > 0.0f)
+	if (JumpSlotCooldownRemaining > 0.0f)
 	{
-		SmokeJumpCooldownRemaining = FMath::Max(0.0f, SmokeJumpCooldownRemaining - DeltaSeconds);
+		JumpSlotCooldownRemaining = FMath::Max(0.0f, JumpSlotCooldownRemaining - DeltaSeconds);
 	}
 
 	// The dash cooldowns also drive a HUD delegate, which must fire exactly once when the cooldown
@@ -4041,12 +4095,11 @@ void UApexMovementComponent::UpdateJumpHold(float DeltaTime)
 	}
 }
 
-// ==================== Charged jump out of one's own smoke ====================
+// ==================== Jump slot: charged jump ====================
 
 /** A charge shorter than this fraction of the full one is treated as a tap: an ordinary jump at the
- *  ordinary height, and no cooldown. It is what keeps the mechanic from eating a jump when a player
- *  standing in his own smoke simply wanted to hop over something. */
-static constexpr float SmokeJumpMinChargeAlpha = 0.15f;
+ *  ordinary height, and no cooldown. It is what keeps the charged jump from eating a quick hop. */
+static constexpr float JumpChargeMinAlpha = 0.15f;
 
 void UApexMovementComponent::SetJumpInputHeld(bool bHeld)
 {
@@ -4055,21 +4108,38 @@ void UApexMovementComponent::SetJumpInputHeld(bool bHeld)
 	bJumpInputHeld = bHeld;
 }
 
-bool UApexMovementComponent::GetSmokeJumpParams(FSmokeJumpParams& Out) const
+bool UApexMovementComponent::GetJumpSlotParams(FJumpSlotParams& Out) const
 {
-	// Asked through the ability component rather than by knowing about any particular class, exactly
-	// as the lunge reach is: the Melee's passive answers, every other passive and the absence of one
-	// says no, and nothing here learns which is which.
+	// Asked through the upgrade manager rather than by knowing about any particular upgrade. The
+	// upgrade components exist on the server and on the owning client, which are exactly the two
+	// machines that simulate this move.
 	const AActor* Owner = GetOwner();
-	const UAbilityComponent* Abilities = Owner ? Owner->FindComponentByClass<UAbilityComponent>() : nullptr;
-	const UAbilityHandler* Passive = Abilities ? Abilities->GetPassiveHandler() : nullptr;
-	return Passive && Passive->GetSmokeJumpParams(Out);
+	const UUpgradeManagerComponent* Upgrades = Owner ? Owner->FindComponentByClass<UUpgradeManagerComponent>() : nullptr;
+	Out = FJumpSlotParams();
+	return Upgrades && Upgrades->GetJumpSlotParams(Out);
 }
 
-bool UApexMovementComponent::CanStartSmokeCharge() const
+float UApexMovementComponent::GetJumpSlotCooldownFraction() const
 {
-	if (!CharacterOwner || !UpdatedComponent || bWantsSmokeCharge || SmokeChargeTime > 0.0f
-		|| SmokeJumpCooldownRemaining > 0.0f)
+	FJumpSlotParams Slot;
+	if (!GetJumpSlotParams(Slot))
+	{
+		return 0.0f;
+	}
+
+	const float Remaining = Slot.Mode == EJumpSlotMode::AirDash ? AirDashCooldownRemaining : JumpSlotCooldownRemaining;
+	if (Remaining <= 0.0f)
+	{
+		return 0.0f;
+	}
+	// A cooldown started by a different upgrade (swapped mid-cooldown) can be longer than this one's.
+	return Slot.Cooldown > KINDA_SMALL_NUMBER ? FMath::Clamp(Remaining / Slot.Cooldown, 0.0f, 1.0f) : 1.0f;
+}
+
+bool UApexMovementComponent::CanStartJumpCharge() const
+{
+	if (!CharacterOwner || !UpdatedComponent || bWantsJumpCharge || JumpChargeTime > 0.0f
+		|| JumpSlotCooldownRemaining > 0.0f)
 	{
 		return false;
 	}
@@ -4082,56 +4152,50 @@ bool UApexMovementComponent::CanStartSmokeCharge() const
 		return false;
 	}
 
-	FSmokeJumpParams Params;
-	if (!GetSmokeJumpParams(Params))
-	{
-		return false;
-	}
-
-	const UWorld* World = GetWorld();
-	const USmokeVisionSubsystem* Smoke = World ? World->GetSubsystem<USmokeVisionSubsystem>() : nullptr;
-	return Smoke && Smoke->IsInsideSmokeFrom(UpdatedComponent->GetComponentLocation(), CharacterOwner);
+	FJumpSlotParams Slot;
+	return GetJumpSlotParams(Slot) && Slot.Mode == EJumpSlotMode::ChargedJump;
 }
 
-bool UApexMovementComponent::TryBeginSmokeCharge()
+bool UApexMovementComponent::TryBeginJumpCharge()
 {
-	if (!CanStartSmokeCharge())
+	if (!CanStartJumpCharge())
 	{
 		return false;
 	}
 
 	// A latch, not a copy of the button: it stays up until the simulation resolves it, so a press and
 	// release that both land between two simulated moves still produce a jump rather than vanishing.
-	bWantsSmokeCharge = true;
+	bWantsJumpCharge = true;
 	return true;
 }
 
-float UApexMovementComponent::GetSmokeChargeAlpha() const
+float UApexMovementComponent::GetJumpChargeAlpha() const
 {
-	FSmokeJumpParams Params;
-	if (SmokeChargeTime <= 0.0f || !GetSmokeJumpParams(Params))
+	FJumpSlotParams Slot;
+	if (JumpChargeTime <= 0.0f || !GetJumpSlotParams(Slot) || Slot.Mode != EJumpSlotMode::ChargedJump)
 	{
 		return 0.0f;
 	}
 
-	return FMath::Clamp(SmokeChargeTime / Params.MaxChargeTime, 0.0f, 1.0f);
+	return FMath::Clamp(JumpChargeTime / Slot.ChargeTime, 0.0f, 1.0f);
 }
 
-void UApexMovementComponent::UpdateSmokeJump(float DeltaSeconds)
+void UApexMovementComponent::UpdateChargedJump(float DeltaSeconds)
 {
 	// The common case, and it costs one branch: nobody in this world is charging anything.
-	if (!bWantsSmokeCharge)
+	if (!bWantsJumpCharge)
 	{
 		return;
 	}
 
-	FSmokeJumpParams Params;
-	if (!GetSmokeJumpParams(Params))
+	FJumpSlotParams Slot;
+	if (!GetJumpSlotParams(Slot) || Slot.Mode != EJumpSlotMode::ChargedJump)
 	{
-		// The passive is gone -- a class swap, or a client whose PassiveDefinition has not arrived
-		// yet. Drop the charge rather than guessing at numbers the other end would not share.
-		bWantsSmokeCharge = false;
-		SmokeChargeTime = 0.0f;
+		// The upgrade left the slot mid-charge, or a client whose grant has not arrived yet. Drop the
+		// charge rather than guessing at numbers the other end would not share.
+		bWantsJumpCharge = false;
+		JumpChargeTime = 0.0f;
+		JumpChargeMoveScale = 1.0f;
 		return;
 	}
 
@@ -4139,38 +4203,33 @@ void UApexMovementComponent::UpdateSmokeJump(float DeltaSeconds)
 	if (!IsMovingOnGround() || bIsGroundDashing || bIsAirDashing || bIsMantling
 		|| bIsWallRunning || bIsMeleeLunging || bIsGrappling || bIsHeldByAlly)
 	{
-		bWantsSmokeCharge = false;
-		SmokeChargeTime = 0.0f;
-		SmokeChargeMoveScale = 1.0f;
+		bWantsJumpCharge = false;
+		JumpChargeTime = 0.0f;
+		JumpChargeMoveScale = 1.0f;
 		return;
 	}
 
 	// Re-read every charging move instead of being saved in it: a replay runs the same move against
 	// the same level data and arrives at the same number. @see GetMaxSpeed
-	SmokeChargeMoveScale = Params.ChargeMoveScale;
+	JumpChargeMoveScale = Slot.ChargeMoveScale;
 
 	if (bJumpInputHeld)
 	{
-		SmokeChargeTime = FMath::Min(SmokeChargeTime + DeltaSeconds, Params.MaxChargeTime);
+		JumpChargeTime = FMath::Min(JumpChargeTime + DeltaSeconds, Slot.ChargeTime);
 		return;
 	}
 
 	// The button came up. Whatever was banked, that is the jump.
-	//
-	// Deliberately NOT re-checking the smoke here. The cloud is measured once, at the press, by the
-	// only machine that can answer at that instant; a second check at release would let a cloud that
-	// expired mid-charge, or a step over its edge, swallow a jump the player had already committed
-	// to. @see EPolarityMoveFlag::SmokeJumpCharging
-	LaunchSmokeJump(Params);
+	LaunchChargedJump(Slot);
 }
 
-void UApexMovementComponent::LaunchSmokeJump(const FSmokeJumpParams& Params)
+void UApexMovementComponent::LaunchChargedJump(const FJumpSlotParams& Params)
 {
-	const float Alpha = FMath::Clamp(SmokeChargeTime / FMath::Max(Params.MaxChargeTime, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+	const float Alpha = FMath::Clamp(JumpChargeTime / FMath::Max(Params.ChargeTime, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
 
-	bWantsSmokeCharge = false;
-	SmokeChargeTime = 0.0f;
-	SmokeChargeMoveScale = 1.0f;
+	bWantsJumpCharge = false;
+	JumpChargeTime = 0.0f;
+	JumpChargeMoveScale = 1.0f;
 
 	const float BaseZ = MovementSettings ? MovementSettings->JumpZVelocity : Velocity.Z;
 
@@ -4179,8 +4238,7 @@ void UApexMovementComponent::LaunchSmokeJump(const FSmokeJumpParams& Params)
 	// The horizontal velocity is read BEFORE the slide ends and written back after, the same order
 	// the slide hop in DoJump uses and for the same reason: EndSlide puts friction and braking back,
 	// and a launch that let it run first would leave with whatever survived that frame instead of
-	// with what the player earned. Charging through a slide and leaving at the end of it is the
-	// whole point of the mechanic working here at all.
+	// with what the player earned.
 	if (bIsSliding)
 	{
 		const FVector Horizontal(Velocity.X, Velocity.Y, 0.0f);
@@ -4189,14 +4247,14 @@ void UApexMovementComponent::LaunchSmokeJump(const FSmokeJumpParams& Params)
 		Velocity.Y = Horizontal.Y;
 	}
 
-	if (Alpha < SmokeJumpMinChargeAlpha)
+	if (Alpha < JumpChargeMinAlpha)
 	{
 		// A tap. An ordinary jump, and the cooldown stays untouched.
 		Velocity.Z = BaseZ;
 	}
 	else
 	{
-		Velocity.Z = FMath::Lerp(BaseZ, Params.MaxZVelocity, Alpha);
+		Velocity.Z = FMath::Lerp(BaseZ, Params.ChargeMaxZVelocity, Alpha);
 
 		// Acceleration, not GetLastInputVector: the latter is local to whoever read the keyboard, so
 		// the server would launch a client straight ahead regardless of which way they pushed. Same
@@ -4212,13 +4270,13 @@ void UApexMovementComponent::LaunchSmokeJump(const FSmokeJumpParams& Params)
 		}
 		if (!Forward.IsNearlyZero())
 		{
-			Velocity += Forward * (Params.ForwardBoost * Alpha);
+			Velocity += Forward * (Params.ChargeForwardBoost * Alpha);
 		}
 
-		SmokeJumpCooldownRemaining = Params.Cooldown;
+		JumpSlotCooldownRemaining = Params.Cooldown;
 	}
 
-	// The ground jump is spent and the air jump is not: the launch is a jump, not a free extra one.
+	// The ground jump is spent. The charged jump holds the jump slot, so there is no air jump after.
 	CurrentJumpCount = 1;
 	SetMovementMode(MOVE_Falling);
 
@@ -4325,12 +4383,11 @@ bool UApexMovementComponent::CanAirDash() const
 		return false;
 	}
 
-	if (const APolarityCharacter* PolChar = Cast<APolarityCharacter>(GetOwner()))
+	// Only with the air dash in the jump slot.
+	FJumpSlotParams Slot;
+	if (!GetJumpSlotParams(Slot) || Slot.Mode != EJumpSlotMode::AirDash)
 	{
-		if (!PolChar->bCanAirDash)
-		{
-			return false;
-		}
+		return false;
 	}
 
 	if (AirDashCooldownRemaining > 0.0f)
@@ -4370,7 +4427,7 @@ bool UApexMovementComponent::TryAirDash()
 
 	// Check if we should redirect or do standard dash
 	const bool bShouldRedirect = MovementSettings->bEnableAirDashRedirect
-		&& CurrentHorizontalSpeed > MovementSettings->AirDashSpeed
+		&& CurrentHorizontalSpeed > GetAirDashSpeed()
 		&& CurrentHorizontalSpeed >= MovementSettings->AirDashRedirectMinSpeed;
 
 	if (bShouldRedirect)
@@ -4390,7 +4447,7 @@ bool UApexMovementComponent::TryAirDash()
 	{
 		// Standard dash: set velocity to AirDashSpeed
 		bIsAirDashing = true;
-		Velocity = DashDirection * MovementSettings->AirDashSpeed;
+		Velocity = DashDirection * GetAirDashSpeed();
 		Velocity.Z = 0.0f;
 
 		// Start decay timer
@@ -4409,7 +4466,7 @@ void UApexMovementComponent::UpdateAirDash(float DeltaTime)
 
 	if (MovementSettings)
 	{
-		AirDashCooldownRemaining = MovementSettings->AirDashCooldown;
+		AirDashCooldownRemaining = GetAirDashCooldownDuration();
 	}
 
 	// Broadcast air dash ended event
@@ -4488,7 +4545,7 @@ void UApexMovementComponent::UpdateAirDashRedirect(float DeltaTime)
 
 		bIsRedirecting = false;
 		bIsAirDashing = false;
-		AirDashCooldownRemaining = MovementSettings->AirDashCooldown;
+		AirDashCooldownRemaining = GetAirDashCooldownDuration();
 
 		// Start decay timer after redirect completes
 		AirDashDecayTimeRemaining = MovementSettings->AirDashDecayDuration;
@@ -4513,7 +4570,7 @@ void UApexMovementComponent::UpdateAirDashRedirect(float DeltaTime)
 
 void UApexMovementComponent::ResetAirAbilities()
 {
-	RemainingAirDashCount = MovementSettings ? MovementSettings->MaxAirDashCount : 1;
+	RemainingAirDashCount = GetMaxAirDashCount();
 	bIsAirDashing = false;
 	bIsRedirecting = false;
 	AirDashRedirectTimeRemaining = 0.0f;
@@ -4676,6 +4733,11 @@ void UApexMovementComponent::ResetMovementState()
 	WallRunSameWallCooldown = 0.0f;
 	AirDashCooldownRemaining = 0.0f;
 	GroundDashCooldownRemaining = 0.0f;
+	JumpSlotCooldownRemaining = 0.0f;
+	bAirJumpedThisFlight = false;
+	bWantsJumpCharge = false;
+	JumpChargeTime = 0.0f;
+	JumpChargeMoveScale = 1.0f;
 	EndGroundDash();
 
 	// Reset fatigue

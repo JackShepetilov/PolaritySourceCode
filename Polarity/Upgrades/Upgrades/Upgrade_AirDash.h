@@ -7,13 +7,13 @@
 #include "Upgrade_AirDash.generated.h"
 
 /**
- * "Air Dash" Upgrade — pure unlock.
+ * "Air Dash" upgrade, a jump-slot upgrade: jump pressed in the air dashes instead of jumping.
  *
- * On activation: sets APolarityCharacter::bCanAirDash to true.
- * On deactivation: sets it back to false.
+ * Holds no state and writes nothing. The movement simulation asks GetJumpSlotParams on every
+ * machine that simulates the move and reads the charges, cooldown and speed from the level data.
  *
- * The actual dash logic, charges, cooldown and redirect parameters live on the
- * owner's ApexMovementComponent / MovementSettings.
+ * It used to write those numbers into the shared MovementSettings asset, which in co-op handed
+ * one player's dash to everybody using the same asset. Nothing is written now.
  */
 UCLASS(BlueprintType, meta = (DisplayName = "Air Dash"))
 class POLARITY_API UUpgrade_AirDash : public UUpgradeComponent
@@ -24,26 +24,11 @@ public:
 
 	UUpgrade_AirDash();
 
+	virtual bool GetJumpSlotParams(FJumpSlotParams& Out) const override;
+
 protected:
 
+	/** Only the HUD flag: AbilityResourceBar shows the dash entry while it is set. */
 	virtual void OnUpgradeActivated() override;
 	virtual void OnUpgradeDeactivated() override;
-	virtual void OnLevelChanged(int32 OldLevel, int32 NewLevel) override;
-
-private:
-
-	/** Reads UpgradeDefinition_AirDash.LevelData[Level-1] and applies it to MovementSettings. */
-	void ApplyForLevel(int32 Level);
-
-	/** Snapshot the current MovementSettings values so OnUpgradeDeactivated can restore them. */
-	void CaptureBaseline();
-
-	/** Restore original MovementSettings values captured in OnUpgradeActivated. */
-	void RevertToBaseline();
-
-	// Cached baseline of MovementSettings fields we modify (set in OnUpgradeActivated).
-	int32 BaselineMaxAirDashCount = 1;
-	float BaselineAirDashCooldown = 1.5f;
-	float BaselineAirDashSpeed = 800.0f;
-	bool bBaselineCaptured = false;
 };

@@ -31,6 +31,7 @@ class UInventorySlotWidget;
 class UPanelWidget;
 class UTexture2D;
 class UUniformGridPanel;
+class UUpgradeDefinition;
 
 /**
  * Full-screen inventory. Inherit in Blueprint (WBP_InventoryScreen), give it the containers below
@@ -100,6 +101,12 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UPanelWidget> SecondWeaponAttachments;
 
+	/** The action slots (jump, aim, slide...): one labelled square per exclusive slot of the
+	 *  upgrade layout, holding the equipped upgrade. Upgrades are dragged here from the grid and
+	 *  back. Optional; built in C++ at runtime, the WBP only supplies the row. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ActionSlots;
+
 	// ==================== Classes and icons (set in the WBP) ====================
 
 	/** 74x74 square used in the grid. */
@@ -109,6 +116,10 @@ protected:
 	/** 48x48 square used under a weapon. Same C++ class, different Blueprint. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen|Classes")
 	TSubclassOf<UInventorySlotWidget> AttachmentSlotClass;
+
+	/** Square used for an action slot. Empty: the grid cell's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen|Classes")
+	TSubclassOf<UInventorySlotWidget> ActionSlotClass;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen|Icons")
 	TObjectPtr<UTexture2D> CurrencyIcon;
@@ -166,6 +177,21 @@ private:
 	/** A mounted attachment was dragged off a weapon, onto a cell or onto the background. */
 	void HandleAttachmentRemove(AShooterWeapon* Weapon, EWeaponAttachmentType InType, int32 ToIndex);
 
+	/** Draw the action slots from the layout and what is equipped in each. */
+	void RebuildActionSlots();
+
+	/** A grid cell with an upgrade was dropped on its action slot. */
+	void HandleUpgradeEquip(int32 FromIndex, int32 SlotIndex);
+
+	/** An action slot's upgrade was dragged to a cell (or the background: INDEX_NONE). */
+	void HandleUpgradeUnequip(int32 SlotIndex, int32 ToIndex);
+
+	UFUNCTION()
+	void HandleUpgradeChanged(UUpgradeDefinition* Definition);
+
+	UFUNCTION()
+	void HandleUpgradeLeveled(UUpgradeDefinition* Definition, int32 NewLevel);
+
 	/** Reuses the square already at Index in Container, or spawns one. */
 	UInventorySlotWidget* GetOrCreateSquare(UPanelWidget* Container, int32 Index, TSubclassOf<UInventorySlotWidget> SquareClass);
 
@@ -202,6 +228,13 @@ private:
 	/** Squares currently in the grid, in display order. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UInventorySlotWidget>> GridSquares;
+
+	/** Action slot squares, one per exclusive slot of the layout, in layout order. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UInventorySlotWidget>> ActionSquares;
+
+	/** Layout slot index each of ActionSquares stands for (passive slots are skipped). */
+	TArray<int32> ActionSquareSlotIndices;
 
 	bool bIsOpen = false;
 };

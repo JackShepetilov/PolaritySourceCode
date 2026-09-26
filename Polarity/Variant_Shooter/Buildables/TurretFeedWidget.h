@@ -23,6 +23,8 @@ class UImage;
 class UPanelWidget;
 class USoundBase;
 class UTextBlock;
+class UTexture2D;
+class UDispenserSlotMachineComponent;
 
 UENUM(BlueprintType)
 enum class ETurretFeedEntryState : uint8
@@ -146,9 +148,9 @@ protected:
 	UFUNCTION()
 	void HandleTurretChanged(ABuildableActor* Buildable);
 
-	/** The local player's dispenser offer arrived or was taken: the rows switch between guns and cards. */
+	/** The watched dispenser's spin changed: the rows switch between guns and cards. */
 	UFUNCTION()
-	void HandleOfferChanged();
+	void HandleMachineChanged(UDispenserSlotMachineComponent* Machine);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Turret Feed", meta = (DisplayName = "On Menu Shown"))
 	void BP_OnMenuShown(bool bShown);
@@ -166,6 +168,10 @@ private:
 	void RefreshEntries();
 	void ApplyMode(EBuilderMode Mode);
 	void WatchTurret(ATurretBuildable* Turret);
+
+	/** Follow the open dispenser's slot machine while its menu is up. */
+	void WatchMachine(UDispenserSlotMachineComponent* Machine);
+	TWeakObjectPtr<UDispenserSlotMachineComponent> WatchedMachine;
 
 	TWeakObjectPtr<UBuilderComponent> Builder;
 	TWeakObjectPtr<ATurretBuildable> WatchedTurret;

@@ -330,13 +330,13 @@ void APolarityCharacter::DoJumpStart()
 {
 	if (ApexMovement)
 	{
-		// The button state first: it rides the move, and the hold lift and the smoke charge both
-		// read it inside the simulation rather than reading the keyboard.
+		// The button state first: it rides the move, and the hold lift and the charge both read it
+		// inside the simulation rather than reading the keyboard.
 		ApexMovement->SetJumpInputHeld(true);
 
-		// Standing in his own smoke, the Melee charges instead of jumping, and lets go to launch.
-		// The charge takes the press whole; anybody else, and the Melee anywhere else, jumps.
-		if (!ApexMovement->TryBeginSmokeCharge())
+		// With the charged jump in the jump slot, a press on the ground charges instead of jumping,
+		// and letting go launches. The charge takes the press whole.
+		if (!ApexMovement->TryBeginJumpCharge())
 		{
 			ApexMovement->TryJump();
 		}
@@ -416,9 +416,8 @@ void APolarityCharacter::DashPressed(const FInputActionValue& Value)
 		return;
 	}
 
-	const bool bDashed = ApexMovement->IsMovingOnGround()
-		? ApexMovement->TryGroundDash()
-		: ApexMovement->TryAirDash();
+	// Ground only. The air dash is a jump-slot upgrade now and goes off the jump button.
+	const bool bDashed = ApexMovement->IsMovingOnGround() && ApexMovement->TryGroundDash();
 
 	if (bDashed && CameraShakeComponent)
 	{

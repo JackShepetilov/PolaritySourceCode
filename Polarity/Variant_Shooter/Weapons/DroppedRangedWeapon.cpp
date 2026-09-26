@@ -21,7 +21,7 @@
 #include "Net/UnrealNetwork.h"
 
 // Marks a pull started by the grapple rather than by a yank. Server-side only, like the pull itself;
-// written by UAbilityHandler_Grapple::FinishFetch with the same name.
+// written by BeginGrappleFetchPull.
 static const FName GrappleFetchPullTag(TEXT("GrappleFetchPull"));
 
 ADroppedRangedWeapon::ADroppedRangedWeapon()
@@ -83,6 +83,9 @@ void ADroppedRangedWeapon::PostNetReceivePhysicState()
 void ADroppedRangedWeapon::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
 
 	// Only the authority simulates the drop; everyone else is shown where it landed.
 	if (!HasAuthority() && WeaponMesh)
@@ -233,6 +236,37 @@ void ADroppedRangedWeapon::Tick(float DeltaTime)
 	{
 		UpdatePull(DeltaTime);
 	}
+}
+
+void ADroppedRangedWeapon::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
+}
+
+bool ADroppedRangedWeapon::CanBeGrappleFetchedBy(const AShooterCharacter* Caster) const
+{
+	// Already on its way to somebody, already granted, or never meant to be picked up.
+	return Caster && bCanBeCaptured && WeaponClass && !bIsBeingPulled && !bPullComplete && !IsHidden();
+}
+
+bool ADroppedRangedWeapon::BeginGrappleFetchPull(AShooterCharacter* Caster)
+{
+	// The tag goes on before the pull starts: it decides where the pull flies (the line's origin, not
+	// the camera offset) and how the weapon is handed over (straight into the hand, no swap
+	// animation). Read by UpdatePull and CompletePull.
+	if (!Caster || bIsBeingPulled || bPullComplete)
+	{
+		return false;
+	}
+	Tags.AddUnique(GrappleFetchPullTag);
+	if (TryStartPullForClient(Caster))
+	{
+		return true;
+	}
+	// Refused after all: take the mark back off, so a later yank of the same drop behaves as a yank.
+	Tags.Remove(GrappleFetchPullTag);
+	return false;
 }
 
 bool ADroppedRangedWeapon::TryStartPullForClient(AShooterCharacter* Requester)

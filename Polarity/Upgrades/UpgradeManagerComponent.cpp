@@ -7,216 +7,493 @@
 #include "ShooterCharacter.h"
 #include "ShooterWeapon.h"
 #include "Upgrades/Upgrade_Bandolier.h"
-#include "Net/UnrealNetwork.h"
+#include "DispenserUpgradePool.h"
+#include "JumpSlotParams.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
 
 UUpgradeManagerComponent::UUpgradeManagerComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
 
-	// For the dispenser offer only: its cards replicate to the owner and its pick is an RPC.
+	// A server change reaches the owning client through Client_SetUpgradeLevel, and a component
+	// RPC needs a replicated component.
 	SetIsReplicatedByDefault(true);
+
+	SlotLayout = TSoftObjectPtr<UDispenserUpgradePool>(FSoftObjectPath(
+		TEXT("/Game/Variant_Shooter/Blueprints/Upgrades/DA_DispenserUpgradePool.DA_DispenserUpgradePool")));
 }
 
-void UUpgradeManagerComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+// ==================== Dispenser cards ====================
+
+namespace
 {
-	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	DOREPLIFETIME_CONDITION(UUpgradeManagerComponent, PendingOffer, COND_OwnerOnly);
+	/** An upgrade as a bag cell. PickupClass stays empty: a dropped cell of it becomes the
+	 *  inventory's per-kind pickup. */
+	FInventoryItem MakeUpgradeItem(UUpgradeDefinition* Definition, int32 Level)
+	{
+		FInventoryItem Item;
+		Item.Kind = EInventorySlotKind::AbilityUpgrade;
+		Item.Payload = Definition;
+		Item.Count = 1;
+		Item.StackMax = 1;
+		Item.Level = FMath::Max(1, Level);
+		return Item;
+	}
 }
 
-// ==================== Dispenser offers ====================
-
-UUpgradeDefinition* UUpgradeManagerComponent::GetOwnedInSlot(EUpgradeSlot Slot) const
+UUpgradeDefinition* UUpgradeManagerComponent::GetOwnedInSlot(const UDispenserUpgradePool* Pool, int32 SlotIndex, int32& OutLevel) const
 {
-	if (Slot == EUpgradeSlot::None)
+	OutLevel = 0;
+	if (!Pool || !Pool->Slots.IsValidIndex(SlotIndex) || !Pool->Slots[SlotIndex].bExclusive)
 	{
 		return nullptr;
 	}
-	for (const TPair<FGameplayTag, TObjectPtr<UUpgradeComponent>>& Pair : ActiveUpgrades)
+	for (const FDispenserUpgradeEntry& Entry : Pool->Slots[SlotIndex].Upgrades)
 	{
-		UUpgradeDefinition* const Def = Pair.Value ? Pair.Value->UpgradeDefinition.Get() : nullptr;
-		if (Def && Def->Slot == Slot)
+		UUpgradeDefinition* const Def = Entry.Upgrade;
+		const int32 Level = Def ? GetUpgradeLevel(Def->UpgradeTag) : 0;
+		if (Level > 0)
 		{
+			OutLevel = Level;
 			return Def;
 		}
 	}
 	return nullptr;
 }
 
-void UUpgradeManagerComponent::GatherOfferCandidates(const UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
-	TArray<FUpgradeOfferCard>& OutCandidates) const
+bool UUpgradeManagerComponent::BuildUpgradeCard(const UDispenserUpgradePool* Pool, EUpgradeRarity MaxRarity,
+	const TArray<const UUpgradeDefinition*>& Exclude, FUpgradeOfferCard& OutCard) const
 {
-	OutCandidates.Reset();
-	if (!Registry)
+	if (!Pool)
 	{
-		return;
+		return false;
 	}
-	for (UUpgradeDefinition* const Def : Registry->AllUpgrades)
+
+	// One candidate per upgrade: the best level it can offer at this rarity, with its pool weight.
+	TArray<FUpgradeOfferCard> Candidates;
+	TArray<float> Weights;
+	for (int32 SlotIndex = 0; SlotIndex < Pool->Slots.Num(); ++SlotIndex)
 	{
-		if (!Def || !Def->bInDispenserPool || !Def->UpgradeTag.IsValid() || !Def->ComponentClass || Def->MinWave > Wave)
+		int32 HeldLevel = 0;
+		UUpgradeDefinition* const Held = GetOwnedInSlot(Pool, SlotIndex, HeldLevel);
+
+		for (const FDispenserUpgradeEntry& Entry : Pool->Slots[SlotIndex].Upgrades)
+		{
+			UUpgradeDefinition* const Def = Entry.Upgrade;
+			if (!Def || Entry.Weight <= 0.0f || !Def->UpgradeTag.IsValid() || !Def->ComponentClass || Exclude.Contains(Def))
+			{
+				continue;
+			}
+			// A copy waiting in the bag counts as owned: offering a level the player already
+			// carries would be a card worth nothing.
+			const int32 Equipped = GetUpgradeLevel(Def->UpgradeTag);
+			const int32 Bagged = GetBaggedLevel(Def);
+			const int32 Owned = FMath::Max(Equipped, Bagged);
+			if (Owned == 0 && OwnsConflicting(Def) && Def != Held)
+			{
+				continue;
+			}
+
+			// The level to beat: its own when owned, the held one's when it would replace it.
+			FUpgradeOfferCard Card;
+			Card.Definition = Def;
+			int32 Floor = 0;
+			if (Equipped > 0)
+			{
+				Card.Kind = EUpgradeOfferKind::LevelUp;
+				Card.FromLevel = Owned;
+				Floor = Owned;
+			}
+			else if (Held)
+			{
+				Card.Kind = EUpgradeOfferKind::Replace;
+				Card.Replaces = Held;
+				Card.FromLevel = Bagged;
+				Floor = FMath::Max(HeldLevel, Bagged);
+			}
+			else if (Bagged > 0)
+			{
+				Card.Kind = EUpgradeOfferKind::LevelUp;
+				Card.FromLevel = Bagged;
+				Floor = Bagged;
+			}
+
+			int32 BestLevel = 0;
+			EUpgradeRarity BestRarity = EUpgradeRarity::Common;
+			for (int32 Level = Floor + 1; Level <= Def->MaxLevel; ++Level)
+			{
+				const EUpgradeRarity Rarity = Def->GetLevelRarity(Level);
+				if (Rarity > MaxRarity)
+				{
+					continue;
+				}
+				// Highest rarity wins; for the same rarity the lowest level, so nothing is skipped
+				// without a reason.
+				if (BestLevel == 0 || Rarity > BestRarity)
+				{
+					BestLevel = Level;
+					BestRarity = Rarity;
+				}
+			}
+			if (BestLevel == 0)
+			{
+				continue;
+			}
+			Card.ToLevel = BestLevel;
+			Card.Rarity = BestRarity;
+			Candidates.Add(Card);
+			Weights.Add(Entry.Weight);
+		}
+	}
+	if (Candidates.Num() == 0)
+	{
+		return false;
+	}
+
+	// Only the rarest that fits: a legendary roll offers a legendary level when there is one.
+	EUpgradeRarity Top = EUpgradeRarity::Common;
+	for (const FUpgradeOfferCard& Candidate : Candidates)
+	{
+		Top = FMath::Max(Top, Candidate.Rarity);
+	}
+	float Total = 0.0f;
+	for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+	{
+		Total += Candidates[Index].Rarity == Top ? Weights[Index] : 0.0f;
+	}
+	float Pick = FMath::FRand() * Total;
+	OutCard = Candidates.Last();
+	for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+	{
+		if (Candidates[Index].Rarity != Top)
 		{
 			continue;
 		}
-
-		// The level this upgrade may reach right now: its own ceiling, and the wave's.
-		const int32 Cap = FMath::Min(Def->MaxLevel, FMath::Max(1, LevelCap));
-		const int32 Owned = GetUpgradeLevel(Def->UpgradeTag);
-
-		FUpgradeOfferCard Card;
-		Card.Definition = Def;
-		if (Owned > 0)
+		OutCard = Candidates[Index];
+		Pick -= Weights[Index];
+		if (Pick <= 0.0f)
 		{
-			if (Owned >= Cap)
-			{
-				continue;
-			}
-			Card.Kind = EUpgradeOfferKind::LevelUp;
-			Card.FromLevel = Owned;
+			break;
 		}
-		else
-		{
-			if (OwnsConflicting(Def))
-			{
-				continue;
-			}
-			if (UUpgradeDefinition* const Holder = GetOwnedInSlot(Def->Slot))
-			{
-				Card.Kind = EUpgradeOfferKind::Replace;
-				Card.Replaces = Holder;
-			}
-		}
-		OutCandidates.Add(Card);
 	}
+	return true;
 }
 
-void UUpgradeManagerComponent::BuildOffer(const UUpgradeRegistry* Registry, int32 Wave, int32 LevelCap,
-	const TArray<EUpgradeRarity>& Rarities, TArray<FUpgradeOfferCard>& OutOffer) const
-{
-	OutOffer.Reset();
-	TArray<FUpgradeOfferCard> Candidates;
-	GatherOfferCandidates(Registry, Wave, LevelCap, Candidates);
-
-	for (const EUpgradeRarity Rarity : Rarities)
-	{
-		if (Candidates.Num() == 0)
-		{
-			break;
-		}
-
-		// Weighted draw, and the drawn one leaves the bag: no upgrade twice in one offer.
-		float Total = 0.0f;
-		for (const FUpgradeOfferCard& Candidate : Candidates)
-		{
-			Total += FMath::Max(0.01f, Candidate.Definition->OfferWeight);
-		}
-		float Pick = FMath::FRand() * Total;
-		int32 Chosen = Candidates.Num() - 1;
-		for (int32 Index = 0; Index < Candidates.Num(); ++Index)
-		{
-			Pick -= FMath::Max(0.01f, Candidates[Index].Definition->OfferWeight);
-			if (Pick <= 0.0f)
-			{
-				Chosen = Index;
-				break;
-			}
-		}
-		FUpgradeOfferCard Card = Candidates[Chosen];
-		Candidates.RemoveAtSwap(Chosen);
-
-		// Rarity is levels: Common one, Rare two, Epic three, Legendary four, then clipped to what
-		// the upgrade and the wave allow. A replacement comes at least one above what it replaces.
-		Card.Rarity = Rarity;
-		const int32 Levels = static_cast<int32>(Rarity) + 1;
-		const int32 Cap = FMath::Min(Card.Definition->MaxLevel, FMath::Max(1, LevelCap));
-		switch (Card.Kind)
-		{
-		case EUpgradeOfferKind::LevelUp:
-			Card.ToLevel = FMath::Min(Cap, Card.FromLevel + Levels);
-			break;
-		case EUpgradeOfferKind::Replace:
-		{
-			const int32 ReplacedLevel = Card.Replaces ? GetUpgradeLevel(Card.Replaces->UpgradeTag) : 0;
-			Card.ToLevel = FMath::Min(Cap, FMath::Max(Levels, ReplacedLevel + 1));
-			break;
-		}
-		default:
-			Card.ToLevel = FMath::Min(Cap, Levels);
-			break;
-		}
-		OutOffer.Add(Card);
-	}
-}
-
-void UUpgradeManagerComponent::SetPendingOffer(const TArray<FUpgradeOfferCard>& Offer)
+bool UUpgradeManagerComponent::GrantOfferCard(const FUpgradeOfferCard& Card)
 {
 	if (GetOwnerRole() != ROLE_Authority)
 	{
-		return;
+		return false;
 	}
-	PendingOffer = Offer;
-	OnOfferChanged.Broadcast();
+	// Card.Replaces needs no handling of its own: AcquireUpgrade moves whatever holds the slot to
+	// the bag, which is the same upgrade the card named when it was built.
+	return AcquireUpgrade(Card.Definition, Card.ToLevel);
 }
 
-void UUpgradeManagerComponent::OnRep_PendingOffer()
+bool UUpgradeManagerComponent::GrantUpgradeEverywhere(UUpgradeDefinition* Definition)
 {
-	OnOfferChanged.Broadcast();
-}
-
-void UUpgradeManagerComponent::Server_PickOffer_Implementation(int32 Index)
-{
-	if (!PendingOffer.IsValidIndex(Index))
+	if (!Definition || GetOwnerRole() != ROLE_Authority)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s picked card %d of %d: no such card"), *GetNameSafe(GetOwner()), Index, PendingOffer.Num());
+		return GrantUpgrade(Definition);
+	}
+	return AcquireUpgrade(Definition, GetOwnedLevelAnywhere(Definition) + 1);
+}
+
+// ==================== Action slots and the bag ====================
+
+const UDispenserUpgradePool* UUpgradeManagerComponent::GetSlotLayout() const
+{
+	return SlotLayout.LoadSynchronous();
+}
+
+UInventoryComponent* UUpgradeManagerComponent::GetInventory() const
+{
+	const AShooterCharacter* Character = Cast<AShooterCharacter>(GetOwner());
+	return Character ? Character->GetInventoryComponent() : nullptr;
+}
+
+int32 UUpgradeManagerComponent::FindExclusiveSlotOf(const UUpgradeDefinition* Definition) const
+{
+	const UDispenserUpgradePool* Layout = GetSlotLayout();
+	const int32 SlotIndex = (Layout && Definition) ? Layout->FindSlotOf(Definition) : INDEX_NONE;
+	return (SlotIndex != INDEX_NONE && Layout->Slots[SlotIndex].bExclusive) ? SlotIndex : INDEX_NONE;
+}
+
+int32 UUpgradeManagerComponent::GetBaggedLevel(const UUpgradeDefinition* Definition, int32* OutCell) const
+{
+	if (OutCell)
+	{
+		*OutCell = INDEX_NONE;
+	}
+	const UInventoryComponent* Inventory = GetInventory();
+	if (!Definition || !Inventory)
+	{
+		return 0;
+	}
+
+	int32 Best = 0;
+	const TArray<FInventorySlot>& Cells = Inventory->GetSlots();
+	for (int32 Index = 0; Index < Cells.Num(); ++Index)
+	{
+		const FInventorySlot& Cell = Cells[Index];
+		if (Cell.Kind == EInventorySlotKind::AbilityUpgrade && Cell.Payload == Definition)
+		{
+			const int32 Level = FMath::Max(1, Cell.Level);
+			if (Level > Best)
+			{
+				Best = Level;
+				if (OutCell)
+				{
+					*OutCell = Index;
+				}
+			}
+		}
+	}
+	return Best;
+}
+
+int32 UUpgradeManagerComponent::GetOwnedLevelAnywhere(const UUpgradeDefinition* Definition) const
+{
+	if (!Definition)
+	{
+		return 0;
+	}
+	return FMath::Max(GetUpgradeLevel(Definition->UpgradeTag), GetBaggedLevel(Definition));
+}
+
+void UUpgradeManagerComponent::SetUpgradeLevelLocal(UUpgradeDefinition* Definition, int32 Level)
+{
+	if (!Definition || !Definition->UpgradeTag.IsValid())
+	{
 		return;
 	}
-	const FUpgradeOfferCard Card = PendingOffer[Index];
-	PendingOffer.Reset();
-	OnOfferChanged.Broadcast();
 
-	const bool bApplied = ApplyOfferCard(Card);
-	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s took %s (kind %d, %s, Lv %d -> %d%s): %s"),
-		*GetNameSafe(GetOwner()), Card.Definition ? *Card.Definition->DisplayName.ToString() : TEXT("?"),
-		static_cast<int32>(Card.Kind), *UEnum::GetDisplayValueAsText(Card.Rarity).ToString(), Card.FromLevel, Card.ToLevel,
-		Card.Replaces ? *FString::Printf(TEXT(", replaces %s"), *Card.Replaces->DisplayName.ToString()) : TEXT(""),
-		bApplied ? TEXT("applied") : TEXT("FAILED"));
+	Level = FMath::Clamp(Level, 0, FMath::Max(1, Definition->MaxLevel));
+	const int32 Current = GetUpgradeLevel(Definition->UpgradeTag);
+	if (Level == Current)
+	{
+		return;
+	}
 
-	// The owner's copy of the upgrade. On a listen host the owner is this very machine and the
-	// server's grant above already is its copy.
+	// Levels only go up on a live component, so a lower level is a fresh grant.
+	if (Level == 0 || Current > Level)
+	{
+		RemoveUpgrade(Definition->UpgradeTag);
+		if (Level == 0)
+		{
+			return;
+		}
+	}
+
+	// GrantUpgrade adds one level per call; the guard stops a definition that refuses to level.
+	for (int32 Guard = 0; GetUpgradeLevel(Definition->UpgradeTag) < Level && Guard < 16; ++Guard)
+	{
+		if (!GrantUpgrade(Definition))
+		{
+			break;
+		}
+	}
+}
+
+void UUpgradeManagerComponent::SetUpgradeLevelEverywhere(UUpgradeDefinition* Definition, int32 Level)
+{
+	SetUpgradeLevelLocal(Definition, Level);
+
+	// The owner's copy of the upgrade. On a listen host the owner is this very machine and the call
+	// above already is its copy. Reliable RPCs on one actor arrive in order, so a remove followed by
+	// a grant in the same swap lands on the client in the same order.
 	const APawn* const Pawn = Cast<APawn>(GetOwner());
-	if (bApplied && Pawn && !Pawn->IsLocallyControlled())
+	if (GetOwnerRole() == ROLE_Authority && Pawn && !Pawn->IsLocallyControlled())
 	{
-		Client_ApplyOfferCard(Card);
+		Client_SetUpgradeLevel(Definition, Level);
 	}
 }
 
-void UUpgradeManagerComponent::Client_ApplyOfferCard_Implementation(const FUpgradeOfferCard& Card)
+void UUpgradeManagerComponent::Client_SetUpgradeLevel_Implementation(UUpgradeDefinition* Definition, int32 Level)
 {
 	if (GetOwnerRole() == ROLE_Authority)
 	{
 		return;
 	}
-	ApplyOfferCard(Card);
+	SetUpgradeLevelLocal(Definition, Level);
 }
 
-bool UUpgradeManagerComponent::ApplyOfferCard(const FUpgradeOfferCard& Card)
+void UUpgradeManagerComponent::StashUpgrade(UUpgradeDefinition* Definition, int32 Level)
 {
-	UUpgradeDefinition* const Def = Card.Definition;
-	if (!Def)
+	UInventoryComponent* Inventory = GetInventory();
+	if (!Definition || Level <= 0 || !Inventory)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] StashUpgrade: '%s' Lv %d has no bag to go to - lost"),
+			*GetNameSafe(Definition), Level);
+		return;
+	}
+
+	const FInventoryItem Item = MakeUpgradeItem(Definition, Level);
+	if (Inventory->TryAdd(Item) == 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] '%s' Lv %d went to the bag"), *GetNameSafe(Definition), Level);
+		return;
+	}
+	if (Inventory->DropItemToWorld(Item))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] bag full: '%s' Lv %d dropped on the floor"), *GetNameSafe(Definition), Level);
+		return;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] bag full and no drop class for upgrades: '%s' Lv %d lost. "
+		"Set DropClassByKind[AbilityUpgrade] on the inventory."), *GetNameSafe(Definition), Level);
+}
+
+bool UUpgradeManagerComponent::AcquireUpgrade(UUpgradeDefinition* Definition, int32 Level)
+{
+	if (!Definition || GetOwnerRole() != ROLE_Authority)
 	{
 		return false;
 	}
-	if (Card.Kind == EUpgradeOfferKind::Replace && Card.Replaces)
+
+	// A copy in the bag merges into the one being taken: one upgrade, the higher level.
+	int32 BagCell = INDEX_NONE;
+	const int32 Bagged = GetBaggedLevel(Definition, &BagCell);
+	if (Bagged > 0)
 	{
-		RemoveUpgrade(Card.Replaces->UpgradeTag);
-	}
-	// GrantUpgrade adds one level per call; the guard stops a definition that refuses to level.
-	for (int32 Guard = 0; GetUpgradeLevel(Def->UpgradeTag) < Card.ToLevel && Guard < 16; ++Guard)
-	{
-		if (!GrantUpgrade(Def))
+		if (UInventoryComponent* Inventory = GetInventory())
 		{
-			break;
+			Inventory->ClearSlot(BagCell);
 		}
 	}
-	return GetUpgradeLevel(Def->UpgradeTag) > 0;
+	Level = FMath::Max3(Level, Bagged, GetUpgradeLevel(Definition->UpgradeTag));
+
+	// An exclusive slot holds one: the new one goes in, the old one to the bag.
+	const int32 SlotIndex = FindExclusiveSlotOf(Definition);
+	if (SlotIndex != INDEX_NONE)
+	{
+		int32 HeldLevel = 0;
+		UUpgradeDefinition* const Held = GetOwnedInSlot(GetSlotLayout(), SlotIndex, HeldLevel);
+		if (Held && Held != Definition)
+		{
+			SetUpgradeLevelEverywhere(Held, 0);
+			StashUpgrade(Held, HeldLevel);
+		}
+	}
+
+	SetUpgradeLevelEverywhere(Definition, Level);
+	const bool bOk = GetUpgradeLevel(Definition->UpgradeTag) > 0;
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] Acquire '%s' Lv %d (slot %d) -> %s"),
+		*GetNameSafe(Definition), Level, SlotIndex, bOk ? TEXT("equipped") : TEXT("REFUSED"));
+	return bOk;
+}
+
+bool UUpgradeManagerComponent::EquipFromBag(int32 CellIndex)
+{
+	UInventoryComponent* Inventory = GetInventory();
+	if (GetOwnerRole() != ROLE_Authority || !Inventory || !Inventory->GetSlots().IsValidIndex(CellIndex))
+	{
+		return false;
+	}
+
+	const FInventorySlot Cell = Inventory->GetSlots()[CellIndex];
+	UUpgradeDefinition* const Definition = Cast<UUpgradeDefinition>(Cell.Payload);
+	const int32 SlotIndex = FindExclusiveSlotOf(Definition);
+	if (Cell.Kind != EInventorySlotKind::AbilityUpgrade || !Definition || SlotIndex == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] EquipFromBag: cell %d holds no upgrade with an action slot"), CellIndex);
+		return false;
+	}
+
+	int32 HeldLevel = 0;
+	UUpgradeDefinition* const Held = GetOwnedInSlot(GetSlotLayout(), SlotIndex, HeldLevel);
+	const int32 Level = FMath::Max(FMath::Max(1, Cell.Level), Held == Definition ? HeldLevel : 0);
+
+	// The held one takes the cell the new one leaves: a swap, so a full bag never blocks it.
+	FInventoryItem Back;
+	if (Held && Held != Definition)
+	{
+		Back = MakeUpgradeItem(Held, HeldLevel);
+		SetUpgradeLevelEverywhere(Held, 0);
+	}
+	Inventory->ReplaceSlot(CellIndex, Back);
+	SetUpgradeLevelEverywhere(Definition, Level);
+
+	if (GetUpgradeLevel(Definition->UpgradeTag) == 0)
+	{
+		// Refused (mutually exclusive with something else owned). Put both back as they were.
+		UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] EquipFromBag: '%s' refused, swap undone"), *GetNameSafe(Definition));
+		Inventory->ReplaceSlot(CellIndex, MakeUpgradeItem(Definition, Cell.Level));
+		if (Held && Held != Definition)
+		{
+			SetUpgradeLevelEverywhere(Held, HeldLevel);
+		}
+		return false;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] EquipFromBag: cell %d '%s' Lv %d into slot %d, '%s' back to the cell"),
+		CellIndex, *GetNameSafe(Definition), Level, SlotIndex, *GetNameSafe(Held != Definition ? Held : nullptr));
+	return true;
+}
+
+void UUpgradeManagerComponent::Server_EquipFromBag_Implementation(int32 CellIndex)
+{
+	EquipFromBag(CellIndex);
+}
+
+bool UUpgradeManagerComponent::UnequipToBag(int32 SlotIndex, int32 CellIndex)
+{
+	UInventoryComponent* Inventory = GetInventory();
+	if (GetOwnerRole() != ROLE_Authority || !Inventory)
+	{
+		return false;
+	}
+
+	int32 HeldLevel = 0;
+	UUpgradeDefinition* const Held = GetOwnedInSlot(GetSlotLayout(), SlotIndex, HeldLevel);
+	if (!Held)
+	{
+		return false;
+	}
+
+	const TArray<FInventorySlot>& Cells = Inventory->GetSlots();
+	if (CellIndex == INDEX_NONE)
+	{
+		CellIndex = Cells.IndexOfByPredicate([](const FInventorySlot& Cell) { return Cell.IsEmpty(); });
+	}
+	if (!Cells.IsValidIndex(CellIndex))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[UPGRADE_DEBUG] UnequipToBag: no free cell for '%s'"), *GetNameSafe(Held));
+		return false;
+	}
+
+	// Dropped onto another upgrade of the same slot: that one goes in, this one takes its cell.
+	if (Cells[CellIndex].Kind == EInventorySlotKind::AbilityUpgrade)
+	{
+		return FindExclusiveSlotOf(Cast<UUpgradeDefinition>(Cells[CellIndex].Payload)) == SlotIndex
+			&& EquipFromBag(CellIndex);
+	}
+	if (!Cells[CellIndex].IsEmpty())
+	{
+		return false;
+	}
+
+	Inventory->ReplaceSlot(CellIndex, MakeUpgradeItem(Held, HeldLevel));
+	SetUpgradeLevelEverywhere(Held, 0);
+	UE_LOG(LogTemp, Warning, TEXT("[UPGRADE_DEBUG] UnequipToBag: '%s' Lv %d from slot %d to cell %d"),
+		*GetNameSafe(Held), HeldLevel, SlotIndex, CellIndex);
+	return true;
+}
+
+void UUpgradeManagerComponent::Server_UnequipToBag_Implementation(int32 SlotIndex, int32 CellIndex)
+{
+	UnequipToBag(SlotIndex, CellIndex);
+}
+
+bool UUpgradeManagerComponent::GetJumpSlotParams(FJumpSlotParams& Out) const
+{
+	for (const TPair<FGameplayTag, TObjectPtr<UUpgradeComponent>>& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value && Pair.Value->GetJumpSlotParams(Out))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void UUpgradeManagerComponent::BeginPlay()

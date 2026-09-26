@@ -31,26 +31,6 @@ float UAbilityHandler_MeleePassive::GetShieldStrippedFraction(const AActor* Targ
 	return FMath::Clamp(FMath::Abs(Mod->GetCharge()) / Mod->MaxBaseCharge, 0.0f, 1.0f);
 }
 
-bool UAbilityHandler_MeleePassive::GetSmokeJumpParams(FSmokeJumpParams& Out) const
-{
-	const UAbilityDefinition_MeleePassive* Def = Cast<UAbilityDefinition_MeleePassive>(GetDefinition());
-	if (!Def)
-	{
-		return false;
-	}
-
-	const FMeleePassiveLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
-
-	// A charge time of zero would divide the alpha by nothing and hand out a full-strength jump for
-	// a tap, so it is the one value that is floored rather than trusted.
-	Out.MaxZVelocity    = FMath::Max(0.0f, Stats.SmokeJumpMaxZVelocity);
-	Out.MaxChargeTime   = FMath::Max(0.05f, Stats.SmokeJumpMaxChargeTime);
-	Out.ForwardBoost    = FMath::Max(0.0f, Stats.SmokeJumpForwardBoost);
-	Out.ChargeMoveScale = FMath::Clamp(Stats.SmokeJumpChargeMoveScale, 0.0f, 1.0f);
-	Out.Cooldown        = FMath::Max(0.0f, Stats.SmokeJumpCooldown);
-	return true;
-}
-
 bool UAbilityHandler_MeleePassive::GetSlideBlockParams(FSlideBlockParams& Out) const
 {
 	const UAbilityDefinition_MeleePassive* Def = Cast<UAbilityDefinition_MeleePassive>(GetDefinition());

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Variant_Shooter/Abilities/GrappleFetchable.h"
 #include "ScriptedPickup.generated.h"
 
 class USphereComponent;
@@ -25,7 +26,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnScriptedPickupCollected, AShooter
  * Uses the same tooltip widget as UpgradePickup, but tooltip data is set directly.
  */
 UCLASS(Blueprintable)
-class POLARITY_API AScriptedPickup : public AActor
+class POLARITY_API AScriptedPickup : public AActor, public IGrappleFetchable
 {
 	GENERATED_BODY()
 
@@ -163,6 +164,17 @@ public:
 	/** Is currently being pulled toward player? */
 	bool IsBeingPulled() const { return bIsBeingPulled; }
 
+	// ==================== IGrappleFetchable ====================
+	// Taken with the grapple, not the channeled yank (the author's call, 2026-09-25): the yank
+	// keeps enemies, props and teammates.
+	virtual bool CanBeGrappleFetchedBy(const AShooterCharacter* Caster) const override
+	{
+		return Caster && bCanBeCaptured && !bIsBeingPulled && !bPullComplete && !IsHidden();
+	}
+	virtual bool BeginGrappleFetchPull(AShooterCharacter* Caster) override { StartPull(Caster); return bIsBeingPulled; }
+	virtual bool IsGrappleFetchInFlight() const override { return bIsBeingPulled; }
+	virtual bool IsGrappleFetchDone() const override { return bPullComplete || IsHidden(); }
+
 	/** Has pull completed? */
 	bool IsPullComplete() const { return bPullComplete; }
 
@@ -173,6 +185,7 @@ public:
 protected:
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
 private:

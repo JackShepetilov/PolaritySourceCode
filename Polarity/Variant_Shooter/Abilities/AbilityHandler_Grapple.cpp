@@ -3,7 +3,7 @@
 #include "AbilityHandler_Grapple.h"
 #include "AbilityDefinition_Grapple.h"
 #include "Variant_Shooter/ShooterCharacter.h"
-#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
+#include "GrappleFetchable.h"
 #include "ApexMovementComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Engine/World.h"
@@ -35,7 +35,7 @@ void UAbilityHandler_Grapple::OnActivate_Implementation()
 	if (Def->bCanFetchWeapons)
 	{
 		static constexpr float FetchClaimMarginCm = 300.0f;
-		ADroppedRangedWeapon* Claim = Caster->ConsumeGrappleFetchClaim();
+		AActor* Claim = Caster->ConsumeGrappleFetchClaim();
 		if (Claim && IsFetchable(Caster, Claim, Def, FetchClaimMarginCm))
 		{
 			StartFetch(Claim);
@@ -181,26 +181,26 @@ void UAbilityHandler_Grapple::OnUnequip_Implementation()
 
 // ==================== Fetch ====================
 
-bool UAbilityHandler_Grapple::IsFetchable(const AShooterCharacter* Caster, const ADroppedRangedWeapon* Drop,
+bool UAbilityHandler_Grapple::IsFetchable(const AShooterCharacter* Caster, const AActor* Target,
 	const UAbilityDefinition_Grapple* Def, float ExtraRadius)
 {
-	if (!Caster || !IsValid(Drop) || !Def || !Def->bCanFetchWeapons)
+	if (!Caster || !IsValid(Target) || !Def || !Def->bCanFetchWeapons)
 	{
 		return false;
 	}
 
-	// Already on its way to somebody, already granted, or never meant to be picked up.
-	if (!Drop->bCanBeCaptured || !Drop->WeaponClass || Drop->IsBeingPulled() || Drop->IsPullComplete()
-		|| Drop->IsHidden())
+	// The item decides whether it is free and whether this player may have it.
+	const IGrappleFetchable* const Fetchable = GrappleFetch::Resolve(Target);
+	if (!Fetchable || !Fetchable->CanBeGrappleFetchedBy(Caster))
 	{
 		return false;
 	}
 
 	const float Radius = Def->WeaponFetchRadius + FMath::Max(0.0f, ExtraRadius);
-	return FVector::DistSquared(Caster->GetActorLocation(), Drop->GetActorLocation()) <= FMath::Square(Radius);
+	return FVector::DistSquared(Caster->GetActorLocation(), Target->GetActorLocation()) <= FMath::Square(Radius);
 }
 
-ADroppedRangedWeapon* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCharacter* Caster,
+AActor* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCharacter* Caster,
 	const UAbilityDefinition_Grapple* Def)
 {
 	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
@@ -221,17 +221,18 @@ ADroppedRangedWeapon* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCha
 
 	struct FCandidate
 	{
-		ADroppedRangedWeapon* Drop;
+		AActor* Drop;
 		FVector Center;
 		float Cos;
 	};
 	TArray<FCandidate, TInlineAllocator<8>> Candidates;
 
-	// Every drop in the world, which is a handful: the radius test inside IsFetchable throws almost
-	// all of them out before any vector maths.
-	for (TActorIterator<ADroppedRangedWeapon> It(World); It; ++It)
+	// Every fetchable in the world, which is a handful: the radius test inside IsFetchable throws
+	// almost all of them out before any vector maths.
+	TArray<AActor*> Fetchables;
+	GrappleFetch::GetAll(World, Fetchables);
+	for (AActor* Drop : Fetchables)
 	{
-		ADroppedRangedWeapon* Drop = *It;
 		if (!IsFetchable(Caster, Drop, Def))
 		{
 			continue;
@@ -267,6 +268,9 @@ ADroppedRangedWeapon* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCha
 	{
 		FCollisionQueryParams Params(SCENE_QUERY_STAT(GrappleFetchSight), false, Caster);
 		Params.AddIgnoredActor(Candidate.Drop);
+		// And whatever holds it: a slot machine item lies inside its dispenser's collision and hitbox,
+		// which would otherwise hide it from every angle.
+		Params.AddIgnoredActor(Candidate.Drop->GetOwner());
 
 		FHitResult Hit;
 		if (!World->LineTraceSingleByChannel(Hit, Start, Candidate.Center, ECC_Visibility, Params))
@@ -278,7 +282,7 @@ ADroppedRangedWeapon* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCha
 	return nullptr;
 }
 
-void UAbilityHandler_Grapple::StartFetch(ADroppedRangedWeapon* Drop)
+void UAbilityHandler_Grapple::StartFetch(AActor* Drop)
 {
 	UAbilityDefinition_Grapple* Def = Cast<UAbilityDefinition_Grapple>(GetDefinition());
 	AShooterCharacter* Caster = GetOwningCharacter();
@@ -331,35 +335,25 @@ void UAbilityHandler_Grapple::FinishFetch()
 	}
 	bFetchInFlight = false;
 
-	ADroppedRangedWeapon* Drop = PendingFetch.Get();
+	AActor* Drop = PendingFetch.Get();
 	PendingFetch.Reset();
 	AShooterCharacter* Caster = GetOwningCharacter();
 
 	// No radius test here, on purpose: the hook already reached it, and walking away while it flew
-	// should not snap the line. Only "somebody else got there first" is a refusal, and the pull's
-	// own gate answers that.
-	// The tag goes on before the pull starts: it decides where the pull flies (the line's origin, not
-	// the camera offset) and how the weapon is handed over (straight into the hand, no swap
-	// animation). Read by ADroppedRangedWeapon::UpdatePull and CompletePull under the same name.
-	static const FName GrappleFetchPullTag(TEXT("GrappleFetchPull"));
-	const bool bCanTake = Drop && Caster && !Drop->IsBeingPulled() && !Drop->IsPullComplete();
-	if (bCanTake)
-	{
-		Drop->Tags.AddUnique(GrappleFetchPullTag);
-	}
-
-	if (bCanTake && Drop->TryStartPullForClient(Caster))
+	// should not snap the line. Only "somebody else got there first" is a refusal, and the item's
+	// own pull gate answers that.
+	IGrappleFetchable* const Fetchable = GrappleFetch::Resolve(Drop);
+	if (Fetchable && Caster && Fetchable->BeginGrappleFetchPull(Caster))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s hooked %s, pulling it in"), *Caster->GetName(), *Drop->GetName());
+		// A weapon gives the hands back itself; anything else is watched until it has arrived.
+		if (!Fetchable->FinishesFetchItself())
+		{
+			Caster->WatchGrappleFetch(Drop);
+		}
 	}
 	else
 	{
-		// Refused after all: take our mark back off, so a later yank of the same drop behaves as a
-		// yank. Only when this call put it there -- a drop already flying to somebody else keeps theirs.
-		if (bCanTake)
-		{
-			Drop->Tags.Remove(GrappleFetchPullTag);
-		}
 		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s's hook arrived, but %s is gone or already taken"),
 			*GetNameSafe(Caster), *GetNameSafe(Drop));
 

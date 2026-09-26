@@ -6,6 +6,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Variant_Shooter/Abilities/GrappleFetchable.h"
 #include "AbilityPickup.generated.h"
 
 class USphereComponent;
@@ -25,7 +26,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityPickupCollected, AShooterC
  * is added to the player's UAbilityComponent.
  */
 UCLASS(Blueprintable)
-class POLARITY_API AAbilityPickup : public AActor
+class POLARITY_API AAbilityPickup : public AActor, public IGrappleFetchable
 {
 	GENERATED_BODY()
 
@@ -109,6 +110,17 @@ public:
 	void StartPull(AShooterCharacter* PullingPlayer);
 
 	bool IsBeingPulled() const { return bIsBeingPulled; }
+
+	// ==================== IGrappleFetchable ====================
+	// Taken with the grapple, not the channeled yank (the author's call, 2026-09-25): the yank
+	// keeps enemies, props and teammates.
+	virtual bool CanBeGrappleFetchedBy(const AShooterCharacter* Caster) const override
+	{
+		return Caster && bCanBeCaptured && !bIsBeingPulled && !bPullComplete && !IsHidden();
+	}
+	virtual bool BeginGrappleFetchPull(AShooterCharacter* Caster) override { StartPull(Caster); return bIsBeingPulled; }
+	virtual bool IsGrappleFetchInFlight() const override { return bIsBeingPulled; }
+	virtual bool IsGrappleFetchDone() const override { return bPullComplete || IsHidden(); }
 	bool IsPullComplete() const { return bPullComplete; }
 
 	UPROPERTY(BlueprintAssignable, Category = "Ability Pickup")
@@ -123,6 +135,7 @@ public:
 protected:
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
 private:

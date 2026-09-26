@@ -54,6 +54,9 @@ void AInventoryPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
+
 	// Only the authority simulates; everyone else is shown where it landed. A pickup that is a
 	// place rather than a dropped thing does not simulate anywhere.
 	if (Mesh)
@@ -418,4 +421,10 @@ AInventoryPickup* AInventoryPickup::SpawnForItem(const UObject* WorldContextObje
 	Pickup->FinishSpawning(Where);
 
 	return Pickup;
+}
+
+void AInventoryPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
 }

@@ -2631,22 +2631,27 @@ public:
 	 *  whose screen this is, the third-person hand for everybody else. */
 	FVector GetGrappleHandLocation() const;
 
-	// ==================== Grapple fetch (dropped weapons) ====================
-	// A dropped weapon is picked up by throwing the grapple at it. The owning client decides WHICH
-	// drop, because it is the one showing the brackets; the server checks the claim and does the
-	// throw. @see UAbilityHandler_Grapple::FindFetchTarget for the one rule both sides use.
+	// ==================== Grapple fetch ====================
+	// A dropped weapon, or a slot machine item, is picked up by throwing the grapple at it
+	// (IGrappleFetchable). The owning client decides WHICH one, because it is the one showing the
+	// brackets; the server checks the claim and does the throw.
+	// @see UAbilityHandler_Grapple::FindFetchTarget for the one rule both sides use.
 
-	/** The drop the brackets are on right now. Owning client only; null everywhere else. */
-	class ADroppedRangedWeapon* GetGrappleFetchTarget() const { return GrappleFetchTarget.Get(); }
+	/** The fetchable the brackets are on right now. Owning client only; null everywhere else. */
+	AActor* GetGrappleFetchTarget() const { return GrappleFetchTarget.Get(); }
 
-	/** Tell the authority which drop was bracketed when the ability key went down. Sent immediately
-	 *  before the activation and on the same actor channel, so it arrives first. Null is sent too,
-	 *  so a press that bracketed nothing cannot fetch the drop from an older press. */
+	/** Tell the authority which fetchable was bracketed when the ability key went down. Sent
+	 *  immediately before the activation and on the same actor channel, so it arrives first. Null is
+	 *  sent too, so a press that bracketed nothing cannot fetch the target of an older press. */
 	UFUNCTION(Server, Reliable)
-	void Server_SetGrappleFetchTarget(class ADroppedRangedWeapon* Drop);
+	void Server_SetGrappleFetchTarget(AActor* FetchTarget);
 
-	/** Hand the handler the drop the client claimed, and forget it: one claim, one throw. */
-	class ADroppedRangedWeapon* ConsumeGrappleFetchClaim();
+	/** Hand the handler the fetchable the client claimed, and forget it: one claim, one throw. */
+	AActor* ConsumeGrappleFetchClaim();
+
+	/** A hooked item that does not end the fetch itself (anything but a weapon): draw the stowed
+	 *  weapon back once it has arrived or gone. Authority. */
+	void WatchGrappleFetch(AActor* Item);
 
 	/** A fetch throw is leaving: put the held weapon away exactly as a grapple swing does. Authority
 	 *  entry point; mirrored to the owning client the same way SetGrappleLine is. */
@@ -2701,13 +2706,18 @@ protected:
 	void BeginAbilityAiming();
 	void EndAbilityAiming();
 
-	/** Owning client: the drop the brackets are on. @see GetGrappleFetchTarget */
+	/** Owning client: the fetchable the brackets are on. @see GetGrappleFetchTarget */
 	UPROPERTY()
-	TWeakObjectPtr<class ADroppedRangedWeapon> GrappleFetchTarget;
+	TWeakObjectPtr<AActor> GrappleFetchTarget;
 
-	/** Authority: the drop the client claimed with its last press. @see ConsumeGrappleFetchClaim */
+	/** Authority: the fetchable the client claimed with its last press. @see ConsumeGrappleFetchClaim */
 	UPROPERTY()
-	TWeakObjectPtr<class ADroppedRangedWeapon> GrappleFetchClaim;
+	TWeakObjectPtr<AActor> GrappleFetchClaim;
+
+	/** Authority: the hooked item WatchGrappleFetch is waiting on, and its poll. */
+	TWeakObjectPtr<AActor> WatchedFetch;
+	FTimerHandle WatchedFetchTimer;
+	void PollWatchedFetch();
 
 	/** True while the fetch scan is the one driving the shared capture reticle. Same bookkeeping as
 	 *  bMeleeFocusReticleActive: suppress and release the brackets once each, not every frame. */
@@ -2732,9 +2742,25 @@ protected:
 	/** Both machines: the actual draw at the end of a fetch. */
 	void DrawAfterWeaponFetch(float SpeedMultiplier, bool bGotWeapon);
 
-	/** The weapon card over the bracketed drop. Created on first use, on the owning client only. */
+	/** The loot card over the bracketed item. Created on first use, on the owning client only. */
 	UPROPERTY(Transient)
-	TObjectPtr<class UWeaponDropCardWidget> WeaponDropCard;
+	TObjectPtr<class ULootCardWidget> LootCard;
+
+	/** The instance of LootOutlineMaterial on this player's camera. Owning client only. */
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInstanceDynamic> LootOutlineInstance;
+
+	/** World time of the next pass over the pickups' outline stencils. */
+	double NextLootOutlineRefresh = 0.0;
+
+public:
+	/** Post process material that outlines every pickup in its rarity colour (LootOutline.h). Takes
+	 *  CommonColor / RareColor / EpicColor / LegendaryColor, filled from the palette. Empty: no
+	 *  outlines. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Loot")
+	TObjectPtr<UMaterialInterface> LootOutlineMaterial;
+
+protected:
 
 	/** Pick the drop the grapple would fetch, and drive the brackets and the weapon card over it.
 	 *  Owning client only, once a frame. */

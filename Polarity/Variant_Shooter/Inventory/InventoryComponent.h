@@ -149,6 +149,14 @@ public:
 	UFUNCTION(Server, Reliable)
 	void Server_DropSlotToWorld(int32 SlotIndex);
 
+	/** Put Item on the floor in front of the owner without it ever touching a cell: what does not
+	 *  fit in the bag when something is pushed out of an action slot. Server only. */
+	bool DropItemToWorld(const FInventoryItem& Item);
+
+	/** Overwrite one cell with a single non-stacking Item, or empty it when Item is not valid. The
+	 *  upgrade manager's swap between an action slot and a cell. Server only. */
+	bool ReplaceSlot(int32 SlotIndex, const FInventoryItem& Item);
+
 	/** Grow or shrink capacity. Shrinking discards the cells that fall off the end, so the meta
 	 *  must never call this downwards on a live run. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory")

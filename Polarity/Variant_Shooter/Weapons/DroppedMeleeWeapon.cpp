@@ -34,6 +34,9 @@ void ADroppedMeleeWeapon::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
+
 	UE_LOG(LogTemp, Warning, TEXT("[DroppedWeapon] %s BeginPlay: Charge=%.2f, bCanBeCaptured=%d, FieldComp=%s, WeaponMesh=%s"),
 		*GetName(), GetCharge(), bCanBeCaptured,
 		FieldComponent ? *FieldComponent->GetName() : TEXT("NULL"),
@@ -303,4 +306,10 @@ void ADroppedMeleeWeapon::SpawnBreakGC(const FTransform& BreakTransform)
 
 	// Self-destruct gibs after lifetime
 	GCActor->SetLifeSpan(BreakGibLifetime);
+}
+
+void ADroppedMeleeWeapon::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
 }

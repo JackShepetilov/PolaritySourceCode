@@ -134,13 +134,11 @@ enum class EPolarityMoveFlag : uint32
 	 *  same as before for a hold, which is the behaviour MovementSettings::JumpHoldTime always
 	 *  described. */
 	JumpInputHeld        = 1 << 16,
-	/** Charging the Melee's jump out of his own smoke. The DECISION travels, like the lunge target
-	 *  and the grapple anchor: whether the character was standing in his own cloud is a question
-	 *  only the owning client can answer at the instant of the press, and having each end answer it
-	 *  from its own copy of a cloud that spawns and dies milliseconds apart would swallow jumps at
-	 *  the edges of the cloud. The receiving side still refuses it while airborne or inside another
-	 *  mechanic that owns Velocity. */
-	SmokeJumpCharging    = 1 << 17,
+	/** Charging the jump-slot charged jump (UUpgrade_ChargedJump). The DECISION travels, like the
+	 *  lunge target and the grapple anchor, so a press and release that land between two moves still
+	 *  jump. The receiving side still refuses it while airborne, without the upgrade, or inside
+	 *  another mechanic that owns Velocity. */
+	JumpCharging    = 1 << 17,
 	/** The slide button is DOWN right now, as opposed to having been pressed.
 	 *
 	 *  Same shape and same reason as JumpInputHeld. Without it a slide that ended for any reason --
@@ -566,30 +564,36 @@ public:
 	 *  not. @see EPolarityMoveFlag::JumpInputHeld */
 	void SetJumpInputHeld(bool bHeld);
 
-	/** Take this press as the start of a charged smoke jump, if the owner may make one here.
+	/** Take this press as the start of a charged jump, if the owner may make one here.
 	 *
 	 *  Returns true when the press was TAKEN, in which case the caller must NOT also start an
 	 *  ordinary jump. The charge itself, and the launch when the button comes back up, happen inside
 	 *  the movement simulation. A press taken and released before a single move was simulated still
 	 *  jumps: an empty charge launches at the ordinary jump height rather than being dropped. */
-	bool TryBeginSmokeCharge();
+	bool TryBeginJumpCharge();
 
-	/** May a charged smoke jump start right now: on the ground, off cooldown, not inside another
-	 *  mechanic that owns Velocity, holding a passive that grants it, and standing in a cloud this
-	 *  character threw himself. */
-	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
-	bool CanStartSmokeCharge() const;
+	/** May a charged jump start right now: on the ground, off cooldown, not inside another mechanic
+	 *  that owns Velocity, and the charged jump equipped in the jump slot. */
+	UFUNCTION(BlueprintPure, Category = "Apex|Jump Slot")
+	bool CanStartJumpCharge() const;
 
 	/** How full the charge is, 0 to 1. For animation, the camera and the HUD; the jump itself reads
 	 *  the timer, not this. */
-	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
-	float GetSmokeChargeAlpha() const;
+	UFUNCTION(BlueprintPure, Category = "Apex|Jump Slot")
+	float GetJumpChargeAlpha() const;
 
-	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
-	bool IsChargingSmokeJump() const { return SmokeChargeTime > 0.0f; }
+	/** True from the press that started a charge to the launch. */
+	UFUNCTION(BlueprintPure, Category = "Apex|Jump Slot")
+	bool IsChargingJump() const { return bWantsJumpCharge || JumpChargeTime > 0.0f; }
 
-	UFUNCTION(BlueprintPure, Category = "Apex|Smoke Jump")
-	float GetSmokeJumpCooldownRemaining() const { return SmokeJumpCooldownRemaining; }
+	/** The jump slot's cooldown, 0 (ready) to 1 (just used), whichever upgrade is equipped. The
+	 *  crosshair's cooldown bar. 0 with nothing in the slot. */
+	UFUNCTION(BlueprintPure, Category = "Apex|Jump Slot")
+	float GetJumpSlotCooldownFraction() const;
+
+	/** What the upgrade in the jump slot does, or false when the slot is empty. Read by the
+	 *  simulation on the owning client, the server and every replay. @see FJumpSlotParams */
+	bool GetJumpSlotParams(struct FJumpSlotParams& Out) const;
 
 	/** Air strafe lives here and not in the tick. Everything that changes velocity has to run inside
 	 *  the movement simulation, because that is the only code the server re-runs when it replays a
@@ -830,6 +834,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
 	int32 GetMaxAirDashCount() const;
+
+	/** MovementSettings::AirDashSpeed times the air dash upgrade's multiplier. */
+	UFUNCTION(BlueprintPure, Category = "Apex|Dash")
+	float GetAirDashSpeed() const;
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	float GetSpeedRatio() const;
@@ -1344,36 +1352,39 @@ protected:
 	 *  @see EPolarityMoveFlag::JumpInputHeld */
 	bool bJumpInputHeld = false;
 
-	// ==================== Charged jump out of one's own smoke (Melee passive) ====================
+	// ==================== Jump slot (UUpgrade_ExtraJump / ChargedJump / AirDash) ====================
 
-	/** The owning client decided it was standing in its own smoke when the jump was pressed, and is
-	 *  charging. Travels with the move; the receiving side takes it as given and only refuses it for
-	 *  reasons it can check for itself. @see EPolarityMoveFlag::SmokeJumpCharging */
-	bool bWantsSmokeCharge = false;
+	/** The owning client pressed jump with the charged jump equipped and is charging. Travels with
+	 *  the move; the receiving side takes it as given and only refuses it for reasons it can check
+	 *  for itself. @see EPolarityMoveFlag::JumpCharging */
+	bool bWantsJumpCharge = false;
 
 	/** Seconds charged so far. Above zero means a charge is live, and it is saved in the move so a
 	 *  replay launches from the same charge the original move did. */
-	float SmokeChargeTime = 0.0f;
+	float JumpChargeTime = 0.0f;
 
-	float SmokeJumpCooldownRemaining = 0.0f;
+	/** Cooldown of the extra jump and of the charged jump (the air dash keeps its own
+	 *  AirDashCooldownRemaining). Saved in the move. */
+	float JumpSlotCooldownRemaining = 0.0f;
+
+	/** An air jump was already made in this flight: the rest of the flight's air jumps ignore the
+	 *  cooldown that first one started [author, 2026-09-26: cooldown per flight]. Cleared on landing.
+	 *  Saved in the move. */
+	bool bAirJumpedThisFlight = false;
 
 	/** The ground speed multiplier of the charge currently running. Re-read from the passive on every
 	 *  charging move rather than saved, so it needs no room in the move: a replay re-runs the same
 	 *  move against the same level data and arrives at the same number. */
-	float SmokeChargeMoveScale = 1.0f;
+	float JumpChargeMoveScale = 1.0f;
 
 	/** Runs the charge and the launch, once per simulated move on every machine, from
 	 *  UpdateCharacterStateBeforeMovement. Same rule as everything else in there: it writes Velocity,
 	 *  so it has to live inside the simulated move and not in the tick. */
-	void UpdateSmokeJump(float DeltaSeconds);
+	void UpdateChargedJump(float DeltaSeconds);
 
 	/** Spend the banked charge and go. A charge too small to count leaves as an ordinary jump and
-	 *  pays no cooldown, which is what makes a tap inside the smoke behave like a tap anywhere. */
-	void LaunchSmokeJump(const struct FSmokeJumpParams& Params);
-
-	/** The owner's passive, if it grants the charged jump. Asked through UAbilityComponent rather
-	 *  than by knowing about any particular class, exactly as the lunge reach is. */
-	bool GetSmokeJumpParams(struct FSmokeJumpParams& Out) const;
+	 *  pays no cooldown, which is what keeps a tap an ordinary jump. */
+	void LaunchChargedJump(const struct FJumpSlotParams& Params);
 
 #if ENABLE_DRAW_DEBUG
 	// Jump metrics debug
@@ -1539,12 +1550,13 @@ public:
 	float SavedJumpHoldTimeRemaining;
 	int32 SavedCurrentJumpCount;
 
-	/** The smoke jump's charge and cooldown as they were when this move started. Predicted state
+	/** The charged jump's charge and the jump slot's cooldown as they were when this move started. Predicted state
 	 *  like everything else below the line above: the flag says "charging", and these say how far
 	 *  into the charge the move began, which is what decides how hard the launch comes out. A replay
 	 *  restored from a fresh charge would launch a different jump than the one it is reproducing. */
-	float SavedSmokeChargeTime;
-	float SavedSmokeJumpCooldown;
+	float SavedJumpChargeTime;
+	float SavedJumpSlotCooldown;
+	uint8 bSavedAirJumpedThisFlight : 1;
 
 	FSavedMove_Polarity();
 

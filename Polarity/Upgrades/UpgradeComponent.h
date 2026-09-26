@@ -10,6 +10,7 @@ class UUpgradeDefinition;
 class AShooterCharacter;
 class AShooterWeapon;
 class ADroppedRangedWeapon;
+struct FJumpSlotParams;
 
 /**
  * Base class for all upgrade logic components.
@@ -140,6 +141,15 @@ protected:
 	 * @return Multiplier (1.0 = no change, >1.0 = stronger knockback, <1.0 = weaker)
 	 */
 	virtual float GetMeleeKnockbackDistanceMultiplier(AActor* Target) const { return 1.0f; }
+
+public:
+
+	/**
+	 * The jump slot's answer to the movement simulation: return true and fill Out if this upgrade
+	 * changes what the jump button does. Asked on the owning client, on the server and on every
+	 * replay, so it must be a pure read of the level data. @see FJumpSlotParams
+	 */
+	virtual bool GetJumpSlotParams(FJumpSlotParams& Out) const { return false; }
 
 private:
 

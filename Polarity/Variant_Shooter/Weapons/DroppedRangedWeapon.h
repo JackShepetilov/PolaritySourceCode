@@ -8,6 +8,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Variant_Shooter/Abilities/GrappleFetchable.h"
 #include "DroppedRangedWeapon.generated.h"
 
 class UStaticMeshComponent;
@@ -21,12 +22,20 @@ class UCurveFloat;
 struct FHitResult;
 
 UCLASS(Blueprintable)
-class POLARITY_API ADroppedRangedWeapon : public AActor
+class POLARITY_API ADroppedRangedWeapon : public AActor, public IGrappleFetchable
 {
 	GENERATED_BODY()
 
 public:
 	ADroppedRangedWeapon();
+
+	// ==================== IGrappleFetchable ====================
+
+	virtual bool CanBeGrappleFetchedBy(const AShooterCharacter* Caster) const override;
+	virtual bool BeginGrappleFetchPull(AShooterCharacter* Caster) override;
+	virtual bool IsGrappleFetchInFlight() const override { return bIsBeingPulled; }
+	virtual bool IsGrappleFetchDone() const override { return bPullComplete || IsHidden(); }
+	virtual bool FinishesFetchItself() const override { return true; }
 
 	// ==================== Components ====================
 
@@ -201,6 +210,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 

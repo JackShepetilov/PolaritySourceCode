@@ -574,6 +574,7 @@ int32 UInventoryComponent::TryAdd(const FInventoryItem& Item)
 		// already exists does not change what that cell is, and the first pickup's class is as
 		// good an answer as the second's.
 		Slot.PickupClass = Item.PickupClass;
+		Slot.Level = Item.Level;
 
 		const int32 Moved = FMath::Min(Slot.StackMax, Remaining);
 		Slot.Count = Moved;
@@ -708,43 +709,22 @@ bool UInventoryComponent::DropSlotToWorld(int32 SlotIndex)
 
 	const FInventorySlot& Source = Slots[SlotIndex];
 
-	// What the player picked up is what the player throws away. Only when the cell was never filled
-	// by a pickup at all -- rounds handed over by a weapon drop, a console command -- is there
-	// nothing to put back, and then the per-kind class answers instead.
-	TSubclassOf<AInventoryPickup> SpawnClass = Source.PickupClass;
-
-	if (!SpawnClass)
-	{
-		if (const TSubclassOf<AInventoryPickup>* ByKind = DropClassByKind.Find(Source.Kind))
-		{
-			SpawnClass = *ByKind;
-		}
-	}
-	if (!SpawnClass)
-	{
-		SpawnClass = DroppedItemClass;
-	}
-
-	if (!SpawnClass)
-	{
-		// Loudly, and without emptying the cell: an item that vanished because a class reference
-		// was unset is the worst possible outcome of a mis-click.
-		UE_LOG(LogInventory, Warning,
-			TEXT("[INV_DEBUG] DropSlotToWorld: cell %d has no pickup to become (kind %d, no per-kind class, no fallback) on %s - nothing dropped, cell kept"),
-			SlotIndex, static_cast<int32>(Source.Kind), *GetNameSafe(GetOwner()));
-		return false;
-	}
-
 	FInventoryItem Dropped;
 	Dropped.Kind = Source.Kind;
 	Dropped.Payload = Source.Payload;
 	Dropped.Count = Source.Count;
 	Dropped.StackMax = FMath::Max(1, Source.StackMax);
-	Dropped.PickupClass = SpawnClass;
+	// What the player picked up is what the player throws away. Only when the cell was never filled
+	// by a pickup at all -- rounds handed over by a weapon drop, a console command -- is there
+	// nothing to put back, and then the per-kind class answers instead (DropItemToWorld).
+	Dropped.PickupClass = Source.PickupClass;
+	Dropped.Level = Source.Level;
 
-	if (!AInventoryPickup::SpawnForItem(this, SpawnClass, GetDropTransform(), Dropped, 0.0f))
+	if (!DropItemToWorld(Dropped))
 	{
-		UE_LOG(LogInventory, Warning, TEXT("[INV_DEBUG] DropSlotToWorld: spawn failed - cell kept"));
+		// Without emptying the cell: an item that vanished because a class reference was unset is
+		// the worst possible outcome of a mis-click.
+		UE_LOG(LogInventory, Warning, TEXT("[INV_DEBUG] DropSlotToWorld: cell %d not dropped - cell kept"), SlotIndex);
 		return false;
 	}
 
@@ -760,6 +740,65 @@ bool UInventoryComponent::DropSlotToWorld(int32 SlotIndex)
 void UInventoryComponent::Server_DropSlotToWorld_Implementation(int32 SlotIndex)
 {
 	DropSlotToWorld(SlotIndex);
+}
+
+bool UInventoryComponent::DropItemToWorld(const FInventoryItem& Item)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Item.IsValid())
+	{
+		return false;
+	}
+
+	TSubclassOf<AInventoryPickup> SpawnClass = Item.PickupClass;
+	if (!SpawnClass)
+	{
+		if (const TSubclassOf<AInventoryPickup>* ByKind = DropClassByKind.Find(Item.Kind))
+		{
+			SpawnClass = *ByKind;
+		}
+	}
+	if (!SpawnClass)
+	{
+		SpawnClass = DroppedItemClass;
+	}
+	if (!SpawnClass)
+	{
+		UE_LOG(LogInventory, Warning,
+			TEXT("[INV_DEBUG] DropItemToWorld: no pickup to become (kind %d, no per-kind class, no fallback) on %s"),
+			static_cast<int32>(Item.Kind), *GetNameSafe(GetOwner()));
+		return false;
+	}
+
+	FInventoryItem Dropped = Item;
+	Dropped.PickupClass = SpawnClass;
+	if (!AInventoryPickup::SpawnForItem(this, SpawnClass, GetDropTransform(), Dropped, 0.0f))
+	{
+		UE_LOG(LogInventory, Warning, TEXT("[INV_DEBUG] DropItemToWorld: spawn failed"));
+		return false;
+	}
+	return true;
+}
+
+bool UInventoryComponent::ReplaceSlot(int32 SlotIndex, const FInventoryItem& Item)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Slots.IsValidIndex(SlotIndex))
+	{
+		return false;
+	}
+
+	FInventorySlot NewSlot;
+	if (Item.IsValid())
+	{
+		NewSlot.Kind = Item.Kind;
+		NewSlot.Payload = Item.Payload;
+		NewSlot.Count = 1;
+		NewSlot.StackMax = 1;
+		NewSlot.PickupClass = Item.PickupClass;
+		NewSlot.Level = Item.Level;
+	}
+	Slots[SlotIndex] = NewSlot;
+	OnInventoryChanged.Broadcast();
+	return true;
 }
 
 void UInventoryComponent::SetSlotCount(int32 NewCount)

@@ -5684,30 +5684,12 @@ void AShooterWeapon::ConfigureFiniteEnergyReserve()
 	GetWorldTimerManager().ClearTimer(EnergyRegenTimer);
 }
 
-float AShooterWeapon::GetDepositMoneyPerRound() const
+float AShooterWeapon::GetDepositMagazines(int32 LoadedRounds, int32 ReserveRounds) const
 {
-	// By class, not by owner: the gun is priced while it is still in the hands and again after it
-	// has been released, and UsesEnergyReserve() answers differently on the two sides of that.
-	if (IsEnergyClass())
-	{
-		return 0.0f;
-	}
-
-	// The base size, so a fitted extended magazine does not make every round cheaper.
-	const int32 Magazine = BaseMagazineSize > 0 ? BaseMagazineSize : GetMagazineSize();
-	return FMath::Max(0.0f, DepositMoneyPerMagazine) / FMath::Max(1, Magazine);
-}
-
-int32 AShooterWeapon::GetDepositMoneyValue(int32 LoadedRounds, int32 ReserveRounds) const
-{
-	const int32 Base = FMath::Max(0, DepositBaseMoney);
-	if (IsEnergyClass())
-	{
-		return Base + FMath::Max(0, DepositEnergyAmmoMoney);
-	}
-
+	const int32 PerMagazine = DepositRoundsPerMagazine > 0 ? DepositRoundsPerMagazine
+		: (BaseMagazineSize > 0 ? BaseMagazineSize : GetMagazineSize());
 	const int32 Rounds = FMath::Max(0, LoadedRounds) + FMath::Max(0, ReserveRounds);
-	return Base + FMath::RoundToInt(Rounds * GetDepositMoneyPerRound());
+	return static_cast<float>(Rounds) / FMath::Max(1, PerMagazine);
 }
 
 void AShooterWeapon::PauseEnergyRegen(float ExtraSeconds)
@@ -6989,6 +6971,11 @@ void AShooterWeapon::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 
 float AShooterWeapon::GetADSZoom() const
 {
+	return GetADSZoomWith(GetAttachmentOfType(EWeaponAttachmentType::Optic));
+}
+
+float AShooterWeapon::GetADSZoomWith(const UWeaponAttachmentDefinition* Optic) const
+{
 	float Zoom = ADSZoom;
 
 	// The mounted optic multiplies the weapon's own magnification rather than replacing it: a 2x
@@ -6999,7 +6986,7 @@ float AShooterWeapon::GetADSZoom() const
 	// Unless the optic says otherwise. A scope whose identity IS a number ("this is the 4x") has to
 	// give the same 4x on every rifle, and a multiplier cannot: it would be 4x on one gun and 6x on
 	// the next. Such an optic sets bOverrideADSZoom and owns the magnification outright.
-	if (const UWeaponAttachmentDefinition* Optic = GetAttachmentOfType(EWeaponAttachmentType::Optic))
+	if (Optic)
 	{
 		Zoom = Optic->bOverrideADSZoom
 			? Optic->ADSZoomOverride

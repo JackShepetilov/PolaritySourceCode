@@ -8,6 +8,8 @@
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "AbilityHandler_Grapple.generated.h"
 
+class AActor;
+
 /**
  * Throws the line and decides when it lets go. It does NOT move anybody.
  *
@@ -36,23 +38,24 @@ public:
 	 *  ability has to NOTICE that it ended rather than be the one to end it. */
 	virtual void OnActiveTick(float DeltaTime) override;
 
-	/** The dropped weapon this character is looking at from inside the fetch radius, or null.
+	/** The fetchable (IGrappleFetchable: a dropped weapon, a slot machine item) this character is
+	 *  looking at from inside the fetch radius, or null.
 	 *
 	 *  Static and public because the brackets have to run the SAME rule on the owning client that
 	 *  the claim is checked against here, or the brackets promise a fetch the throw then refuses.
-	 *  Cheap enough for a frame: one pass over the drops in the world, one trace for the winner. */
-	static class ADroppedRangedWeapon* FindFetchTarget(const class AShooterCharacter* Caster,
+	 *  Cheap enough for a frame: one pass over the registered fetchables, one trace for the winner. */
+	static AActor* FindFetchTarget(const class AShooterCharacter* Caster,
 		const class UAbilityDefinition_Grapple* Def);
 
-	/** Whether this drop can be fetched by this character right now, ignoring where they look.
+	/** Whether Target can be fetched by this character right now, ignoring where they look.
 	 *  ExtraRadius is the round-trip slack the server grants a client's claim. */
-	static bool IsFetchable(const class AShooterCharacter* Caster, const class ADroppedRangedWeapon* Drop,
+	static bool IsFetchable(const class AShooterCharacter* Caster, const AActor* Target,
 		const class UAbilityDefinition_Grapple* Def, float ExtraRadius = 0.0f);
 
 protected:
-	/** Throw at a dropped weapon instead of the world. The hook flies, bites the drop, and the drop
-	 *  then flies back to the caster on its own pull. Never swings, never costs the cooldown. */
-	void StartFetch(class ADroppedRangedWeapon* Drop);
+	/** Throw at a fetchable instead of the world. The hook flies, bites it, and it then flies back
+	 *  to the caster on its own pull. Never swings, never costs the cooldown. */
+	void StartFetch(AActor* Target);
 
 	/** The fetch hook has reached the drop: start its pull toward the caster and end the ability. */
 	void FinishFetch();
@@ -60,8 +63,8 @@ protected:
 	/** Called for any cancel while a fetch hook is still in the air. */
 	void AbortFetch();
 
-	/** The drop the hook is flying at. Weak: another player may take it first. */
-	TWeakObjectPtr<class ADroppedRangedWeapon> PendingFetch;
+	/** The fetchable the hook is flying at. Weak: another player may take it first. */
+	TWeakObjectPtr<AActor> PendingFetch;
 
 	/** True between a fetch throw and the hook reaching the drop. Separate from PendingFetch because
 	 *  the drop can be destroyed mid-flight and the ability still has to be ended. */

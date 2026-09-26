@@ -79,6 +79,9 @@ void ARiotShieldPickup::SetCharge(float NewCharge)
 void ARiotShieldPickup::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
 }
 
 void ARiotShieldPickup::OnMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
@@ -263,4 +266,10 @@ void ARiotShieldPickup::OnOverlap(UPrimitiveComponent* OverlappedComponent, AAct
 {
 	// Intentionally empty — pickup acquisition is exclusively driven by the channel/grab key
 	// (StartPull → UpdatePull → TryEquipOnPullingCharacter). Walking over the pickup never picks it up.
+}
+
+void ARiotShieldPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
 }

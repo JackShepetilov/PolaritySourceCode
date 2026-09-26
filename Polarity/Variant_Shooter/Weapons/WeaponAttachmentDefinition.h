@@ -22,6 +22,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Polarity/Upgrades/UpgradeDefinition.h"
 #include "WeaponAttachmentDefinition.generated.h"
 
 class UStaticMesh;
@@ -73,6 +74,20 @@ public:
 	/** The square in the grid and the square beside the weapon draw this. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment")
 	TObjectPtr<UTexture2D> Icon;
+
+	// ==================== Dispenser ====================
+	// Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md.
+
+	/** How rare this is at the dispenser. In a family it is also the tier, Apex-style: white, blue,
+	 *  purple, gold. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Dispenser")
+	EUpgradeRarity Rarity = EUpgradeRarity::Common;
+
+	/** The tiers of one attachment share a family ("Mag.Light": light magazine T1..T4). The dispenser
+	 *  then offers a tier only ABOVE the best of the family the player already has. Empty: a
+	 *  standalone item (a particular scope), offered regardless. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Dispenser")
+	FName Family;
 
 	// ==================== The thing on the gun ====================
 

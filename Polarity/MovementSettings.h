@@ -136,9 +136,6 @@ public:
 	float JumpZVelocity = 500.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Jump")
-	int32 MaxJumpCount = 2;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Jump")
 	float JumpHoldTime = 0.2f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Jump")
@@ -475,14 +472,9 @@ public:
 
 	// ==================== Air Dash ====================
 
+	/** Base dash speed. Charges, cooldown and a speed multiplier are the air dash upgrade's. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash")
 	float AirDashSpeed = 800.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash")
-	float AirDashCooldown = 1.5f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash")
-	int32 MaxAirDashCount = 1;
 
 	/** Time threshold to distinguish short tap (air dash) vs hold (air crouch) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air Dash", meta = (ClampMin = "0.05", ClampMax = "0.5", ToolTip = "Short tap < this time = air dash, hold >= this time = crouch in air"))

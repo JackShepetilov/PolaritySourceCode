@@ -155,11 +155,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
 	bool bCanSprint = true;
 
-	/** Can the player perform air jumps (any jump after the first one — uses MovementSettings->MaxJumpCount as the cap) */
+	/** Master switch for air jumps. How many there are is the Extra Jump upgrade's (jump slot). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
 	bool bCanDoubleJump = true;
 
-	/** Can the player air dash. Default false — granted by the "Air Dash" upgrade pickup. */
+	/** HUD flag only, set by the Air Dash upgrade. The dash itself reads the jump slot. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
 	bool bCanAirDash = false;
 

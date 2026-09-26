@@ -35,6 +35,9 @@ void AAbilityPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// On every machine: the owning client's brackets search this list, the server's claim check too.
+	GrappleFetch::Register(this);
+
 	PickupCollision->SetSphereRadius(PickupRadius);
 
 	if (Mesh)
@@ -223,4 +226,10 @@ void AAbilityPickup::CompletePull()
 	}
 
 	Destroy();
+}
+
+void AAbilityPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrappleFetch::Unregister(this);
+	Super::EndPlay(EndPlayReason);
 }

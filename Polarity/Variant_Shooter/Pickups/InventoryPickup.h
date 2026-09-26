@@ -24,6 +24,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Variant_Shooter/Inventory/InventoryTypes.h"
+#include "Variant_Shooter/Abilities/GrappleFetchable.h"
 #include "InventoryPickup.generated.h"
 
 class UEMF_FieldComponent;
@@ -34,7 +35,7 @@ class USoundBase;
 class AShooterCharacter;
 
 UCLASS(Blueprintable)
-class POLARITY_API AInventoryPickup : public AActor
+class POLARITY_API AInventoryPickup : public AActor, public IGrappleFetchable
 {
 	GENERATED_BODY()
 
@@ -125,6 +126,17 @@ public:
 	bool TryStartPullForClient(AShooterCharacter* Requester);
 
 	bool IsBeingPulled() const { return bIsBeingPulled; }
+
+	// ==================== IGrappleFetchable ====================
+	// Taken with the grapple, not the channeled yank (the author's call, 2026-09-25): the yank
+	// keeps enemies, props and teammates.
+	virtual bool CanBeGrappleFetchedBy(const AShooterCharacter* Caster) const override
+	{
+		return Caster && bCanBeCaptured && !bIsBeingPulled && !bPullComplete && !IsHidden();
+	}
+	virtual bool BeginGrappleFetchPull(AShooterCharacter* Caster) override { return TryStartPullForClient(Caster); }
+	virtual bool IsGrappleFetchInFlight() const override { return bIsBeingPulled; }
+	virtual bool IsGrappleFetchDone() const override { return bPullComplete || IsHidden(); }
 	bool IsPullComplete() const { return bPullComplete; }
 
 	/** Spawn one of these holding InItem. Used by the drop-from-a-cell path and by anything else
@@ -148,6 +160,7 @@ public:
 protected:
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 

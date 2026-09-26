@@ -11,25 +11,9 @@
 class UUpgradeComponent;
 class UInputAction;
 
-/**
- * The action an upgrade belongs to, Hades-style: one upgrade per slot, and a new one for a taken
- * slot replaces the old. None is a passive: it takes no slot and sits next to anything.
- * Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md.
- */
-UENUM(BlueprintType)
-enum class EUpgradeSlot : uint8
-{
-	None,
-	Jump,
-	Aim,
-	Slide,
-	Sprint,
-	Grapple,
-	Melee,
-	Ability,
-};
-
-/** How good a dispenser card is. Rolled per card from the bet; each step is one more level. */
+/** How rare a level of an upgrade is. Authored per level (FUpgradeLevelDisplay::Rarity); the
+ *  dispenser rolls a rarity per card and offers levels up to it.
+ *  Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md. */
 UENUM(BlueprintType)
 enum class EUpgradeRarity : uint8
 {
@@ -76,6 +60,10 @@ struct FUpgradeLevelDisplay
 	/** Stat rows shown on the card when this level is being offered. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade Level Display")
 	TArray<FUpgradeStat> Stats;
+
+	/** How rare this level is at the dispenser. A card of a lower rolled rarity never offers it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade Level Display")
+	EUpgradeRarity Rarity = EUpgradeRarity::Common;
 };
 
 /**
@@ -112,23 +100,14 @@ public:
 	TArray<FGameplayTag> MutuallyExclusiveWith;
 
 	// ==================== Dispenser slot machine ====================
+	// Which slot an upgrade belongs to, whether the dispenser offers it and how often, is set in the
+	// pool asset (UDispenserUpgradePool), not here. The rarity of each level is in LevelDisplays.
 
-	/** Offered by the dispenser. Off by default, so an upgrade joins the pool on purpose. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser")
-	bool bInDispenserPool = false;
-
-	/** The action this upgrade takes: one per slot, a new one replaces the old. None = passive. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser")
-	EUpgradeSlot Slot = EUpgradeSlot::None;
-
-	/** First siege wave this may be offered in (0 = before the first wave). Keeps the strong ones
-	 *  out of the opening minutes. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser", meta = (ClampMin = "0"))
-	int32 MinWave = 0;
-
-	/** Relative chance to be drawn among the eligible upgrades. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Upgrade|Dispenser", meta = (ClampMin = "0.01"))
-	float OfferWeight = 1.0f;
+	/** Rarity of Level (1-based) at the dispenser; Common where LevelDisplays has no entry. */
+	EUpgradeRarity GetLevelRarity(int32 Level) const
+	{
+		return LevelDisplays.IsValidIndex(Level - 1) ? LevelDisplays[Level - 1].Rarity : EUpgradeRarity::Common;
+	}
 
 	// ==================== Shared Health-Pickup Pool ====================
 
