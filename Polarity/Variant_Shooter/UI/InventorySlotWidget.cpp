@@ -5,6 +5,7 @@
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Upgrades/DispenserUpgradePool.h"
 #include "Upgrades/UpgradeDefinition.h"
+#include "Variant_Shooter/Inventory/InventoryIconSettings.h"
 
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
@@ -49,6 +50,12 @@ FLinearColor UInventorySlotWidget::ColorForKind() const
 	// With one pool [author, 2026-09-01] there is only one kind of rounds, and it wears the colour
 	// of its kind like everything else.
 
+	// A thing with a rarity wears the rarity colour: the icon is a white silhouette for this.
+	if (bUseRarityTint && (Kind == EInventorySlotKind::Attachment || Kind == EInventorySlotKind::AbilityUpgrade))
+	{
+		return UInventoryIconSettings::GetRarityColor(TintRarity);
+	}
+
 	if (const FLinearColor* Found = KindColors.Find(Kind))
 	{
 		return *Found;
@@ -56,13 +63,44 @@ FLinearColor UInventorySlotWidget::ColorForKind() const
 	return DefaultColor;
 }
 
+void UInventorySlotWidget::SetRarityTint(bool bInUse, EUpgradeRarity InRarity)
+{
+	bUseRarityTint = bInUse;
+	TintRarity = InRarity;
+}
+
+void UInventorySlotWidget::SetFromWeaponSlot(AShooterWeapon* Weapon, EWeaponAttachmentType Type, int32 FreeSlots)
+{
+	UWeaponAttachmentDefinition* Here = Weapon ? Weapon->GetAttachmentOfType(Type) : nullptr;
+	const int32 MountedCount = Weapon ? Weapon->GetInstalledAttachmentCount() : 0;
+
+	// Filled when something is in it; free while the gun has free mounts left; Paid otherwise,
+	// which is usable but takes a cell out of the bag. The first FreeSlots mounts are the free
+	// ones, the same subtraction the inventory does.
+	EInventoryCellVisual CellVisual = EInventoryCellVisual::Paid;
+	if (Here)
+	{
+		CellVisual = EInventoryCellVisual::Filled;
+	}
+	else if (MountedCount < FreeSlots)
+	{
+		CellVisual = EInventoryCellVisual::Empty;
+	}
+
+	SetRarityTint(Here != nullptr, Here ? Here->Rarity : EUpgradeRarity::Common);
+	SetCell(CellVisual, Here ? EInventorySlotKind::Attachment : EInventorySlotKind::Empty,
+		Here ? Here->GetDisplayIcon() : UInventoryIconSettings::GetTypeIcon(Type), Here ? 1 : 0, Here ? 1 : 0);
+}
+
 void UInventorySlotWidget::ApplyLook(UTexture2D* InIcon, float FillRatio, bool bShowCount)
 {
 	const bool bLocked = (Visual == EInventoryCellVisual::Locked);
 	const bool bGhost = (Visual == EInventoryCellVisual::HeldByAttachment);
+	// An empty weapon slot shows its type's icon as a hint of what goes there, as faint as a ghost.
+	const bool bHint = (Visual == EInventoryCellVisual::Empty || Visual == EInventoryCellVisual::Paid);
 
 	FLinearColor KindColor = ColorForKind();
-	if (bGhost)
+	if (bGhost || bHint)
 	{
 		KindColor.A *= GhostOpacity;
 	}
@@ -140,6 +178,20 @@ void UInventorySlotWidget::SetFromSlot(const FInventorySlot& InSlot, UTexture2D*
 		EffectiveCount = EffectiveStackMax = FMath::Max(1, InSlot.Level);
 	}
 
+	// Rarity tint: an attachment's own rarity, an upgrade's at the level it is carried at.
+	if (const UWeaponAttachmentDefinition* Attachment = Cast<UWeaponAttachmentDefinition>(InSlot.Payload))
+	{
+		SetRarityTint(true, Attachment->Rarity);
+	}
+	else if (const UUpgradeDefinition* Upgrade = Cast<UUpgradeDefinition>(InSlot.Payload))
+	{
+		SetRarityTint(true, Upgrade->GetLevelRarity(FMath::Max(1, InSlot.Level)));
+	}
+	else
+	{
+		SetRarityTint(false);
+	}
+
 	// Recorded before SetCell, because SetCell is what repaints and ColorForKind reads this.
 
 	// What is actually in the cell, so a drag off this square can say what it is carrying.
@@ -148,10 +200,18 @@ void UInventorySlotWidget::SetFromSlot(const FInventorySlot& InSlot, UTexture2D*
 	SetCell(NewVisual, InSlot.Kind, InIcon, EffectiveCount, EffectiveStackMax);
 }
 
-void UInventorySlotWidget::SetAttachmentTarget(AShooterWeapon* InWeapon, UWeaponAttachmentDefinition* Mounted)
+void UInventorySlotWidget::SetAttachmentTarget(AShooterWeapon* InWeapon, UWeaponAttachmentDefinition* Mounted,
+	EWeaponAttachmentType InSlotType)
 {
 	AttachmentWeapon = InWeapon;
 	MountedAttachment = Mounted;
+	AttachmentSlotType = InSlotType;
+}
+
+bool UInventorySlotWidget::AcceptsAttachment(const UWeaponAttachmentDefinition* Attachment) const
+{
+	return Attachment && AttachmentWeapon && Attachment->Type == AttachmentSlotType
+		&& Attachment->FitsWeapon(AttachmentWeapon->GetClass());
 }
 
 void UInventorySlotWidget::SetUpgradeSlotTarget(int32 InSlotIndex, const UDispenserUpgradePool* InLayout, UUpgradeDefinition* Equipped)
@@ -239,6 +299,7 @@ void UInventorySlotWidget::NativeOnDragDetected(const FGeometry& InGeometry, con
 	UClass* VisualClass = DragVisualClass ? DragVisualClass.Get() : GetClass();
 	if (UInventorySlotWidget* Ghost = CreateWidget<UInventorySlotWidget>(this, VisualClass))
 	{
+		Ghost->SetRarityTint(bUseRarityTint, TintRarity);
 		Ghost->SetCell(Visual, Kind, CurrentIcon, Count, StackMax);
 		Operation->DefaultDragVisual = Ghost;
 	}
@@ -273,8 +334,7 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
 		//
 		// And only onto a gun it fits. The server checks the same thing and has the last word; this
 		// just saves a round trip that was always going to be refused.
-		if (Dragged->SourceIndex != INDEX_NONE && Dragged->DraggedAttachment
-			&& Dragged->DraggedAttachment->FitsWeapon(AttachmentWeapon->GetClass()))
+		if (Dragged->SourceIndex != INDEX_NONE && AcceptsAttachment(Dragged->DraggedAttachment))
 		{
 			OnAttachmentInstall.ExecuteIfBound(Dragged->SourceIndex, AttachmentWeapon);
 		}
@@ -340,9 +400,8 @@ void UInventorySlotWidget::NativeOnDragEnter(const FGeometry& InGeometry, const 
 
 	// A gun's square lights up only for an attachment that fits that gun, so a 4x scope dragged over
 	// the pistol stays dark instead of promising a mount the server will refuse.
-	bool bFits = !AttachmentWeapon
-		|| (Dragged && Dragged->DraggedAttachment
-			&& Dragged->DraggedAttachment->FitsWeapon(AttachmentWeapon->GetClass()));
+	// A gun's square lights up only for an attachment of its own type that fits the gun.
+	bool bFits = !AttachmentWeapon || (Dragged && AcceptsAttachment(Dragged->DraggedAttachment));
 
 	// An action slot lights up only for an upgrade of its own, dragged out of the bag.
 	if (UpgradeSlotIndex != INDEX_NONE)

@@ -109,7 +109,7 @@ private:
 	void RebuildWeaponRow(int32 RowIndex, AShooterWeapon* Weapon, const UInventoryComponent* Inventory);
 	/** Draw one weapon's attachment squares. Read only: the corner is glanced at while shooting, so
 	 *  nothing here is a drop target and nothing starts a drag. Fitting is done on the overlay. */
-	void RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots, int32 MaxSlots);
+	void RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots);
 
 	/** Reuses the square already at Index in Container, or spawns one. Reuse matters because the
 	 *  block is rebuilt on every pickup, and rebuilding from scratch would restart any Blueprint

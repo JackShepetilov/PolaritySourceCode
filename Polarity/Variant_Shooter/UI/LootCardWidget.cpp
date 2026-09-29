@@ -12,6 +12,7 @@
 #include "Variant_Shooter/Pickups/ScriptedPickup.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
+#include "Variant_Shooter/Inventory/InventoryIconSettings.h"
 #include "Variant_Shooter/Abilities/AbilityDefinition.h"
 #include "Variant_Shooter/Buildables/DispenserCardPickup.h"
 #include "Variant_Shooter/Buildables/DispenserSlotMachineComponent.h"
@@ -442,7 +443,7 @@ namespace LootCardFill
 	{
 		Data.Category = ELootCardCategory::Attachment;
 		Data.Title    = OrClassName(Attachment->DisplayName, Attachment);
-		Data.Icon     = Attachment->Icon;
+		Data.Icon     = Attachment->GetDisplayIcon();
 		SetRarity(Data, Rarity);
 
 		// The kinds of gun it fits, as chips. A magazine keeps its list in its size table.
@@ -655,18 +656,8 @@ namespace LootCardFill
 
 FLinearColor ULootCardWidget::GetRarityColor(EUpgradeRarity Rarity)
 {
-	const TCHAR* TagName = TEXT("Palette.Rarity.Common");
-	switch (Rarity)
-	{
-	case EUpgradeRarity::Rare:      TagName = TEXT("Palette.Rarity.Rare"); break;
-	case EUpgradeRarity::Epic:      TagName = TEXT("Palette.Rarity.Epic"); break;
-	case EUpgradeRarity::Legendary: TagName = TEXT("Palette.Rarity.Legendary"); break;
-	default: break;
-	}
-	// Not an error when the tag is missing: the dispenser's colours stand until the author sets the
-	// palette entry in Project Settings -> Polarity -> Palette.
-	const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(TagName), false);
-	return UPolarityPalette::GetColor(Tag, UDispenserSlotMachineComponent::RarityColor(Rarity));
+	// One source for rarity colours, shared with the inventory's icons.
+	return UInventoryIconSettings::GetRarityColor(Rarity);
 }
 
 bool ULootCardWidget::BuildData(const AActor* Target, const AShooterCharacter* Viewer, const FText& KeyLabel,

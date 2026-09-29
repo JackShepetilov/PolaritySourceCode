@@ -1305,7 +1305,8 @@ protected:
 	float ConsumeSlideBoostFatigue();
 
 	/** Holding ADS. Written by SetAiming on the owning client, restored from the move flags on the
-	 *  server and on replay, so GetMaxSpeed answers the same on every machine. */
+	 *  server and on replay. Observers receive it for third-person animation. */
+	UPROPERTY(Replicated)
 	bool bIsAiming = false;
 
 	// Saved default values (restored after slide)

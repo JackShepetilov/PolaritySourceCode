@@ -2,6 +2,20 @@
 
 #include "WeaponAttachmentDefinition.h"
 #include "ShooterWeapon.h"
+#include "Variant_Shooter/Inventory/InventoryIconSettings.h"
+
+UTexture2D* UWeaponAttachmentDefinition::GetDisplayIcon() const
+{
+	if (Icon)
+	{
+		return Icon;
+	}
+	if (UTexture2D* FamilyIcon = UInventoryIconSettings::GetFamilyIcon(Family))
+	{
+		return FamilyIcon;
+	}
+	return UInventoryIconSettings::GetTypeIcon(Type);
+}
 
 namespace
 {

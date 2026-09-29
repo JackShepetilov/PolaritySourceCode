@@ -1,0 +1,22 @@
+import unreal
+w=unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+assert w
+subject=next(p for p in unreal.GameplayStatics.get_all_actors_of_class(w,unreal.ShooterCharacter) if p.is_locally_controlled())
+pc=subject.get_controller()
+pc.set_ignore_move_input(True);pc.set_ignore_look_input(True)
+subject.un_crouch()
+subject.get_apex_movement().stop_movement_immediately()
+subject.get_apex_movement().set_aiming(True)
+pc.set_control_rotation(unreal.Rotator(pitch=0,yaw=subject.get_actor_rotation().yaw))
+cameras=unreal.GameplayStatics.get_all_actors_of_class(w,unreal.CameraActor)
+print('CAMERAS',cameras)
+camera=cameras[-1]
+target=subject.get_actor_location()+unreal.Vector(0,0,25)
+loc=target+subject.get_actor_forward_vector()*250+subject.get_actor_right_vector()*170+unreal.Vector(0,0,15)
+camera.set_actor_location(loc,False,True)
+camera.set_actor_rotation(unreal.MathLibrary.find_look_at_rotation(loc,target),False)
+subject.get_editor_property('mesh').set_owner_no_see(False)
+subject.get_current_weapon().get_third_person_mesh().set_owner_no_see(False)
+pc.set_view_target_with_blend(camera)
+unreal.SystemLibrary.execute_console_command(w,'r.SetRes 1920x1080w')
+print('CAMERA READY',subject.get_actor_location())

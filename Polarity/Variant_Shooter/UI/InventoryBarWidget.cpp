@@ -4,6 +4,7 @@
 
 #include "Components/PanelWidget.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
+#include "Variant_Shooter/Inventory/InventoryIconSettings.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/UI/InventorySlotWidget.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
@@ -102,14 +103,11 @@ void UInventoryBarWidget::Rebuild()
 
 	if (Inventory)
 	{
-		// Attachment slots are per weapon and the count is the same for both, so both rows get the
-		// same numbers. What is fitted differs, so each row is given its own weapon.
+		// The free mount count is the same for both guns; the slots and what is in them are each
+		// gun's own.
 		const int32 FreeSlots = Inventory->GetFreeAttachmentSlots();
-		const int32 MaxSlots = Inventory->GetMaxFreeAttachmentSlots();
-		RebuildAttachmentSlots(FirstWeaponAttachments,
-			Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, FreeSlots, MaxSlots);
-		RebuildAttachmentSlots(SecondWeaponAttachments,
-			Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, FreeSlots, MaxSlots);
+		RebuildAttachmentSlots(FirstWeaponAttachments, Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, FreeSlots);
+		RebuildAttachmentSlots(SecondWeaponAttachments, Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, FreeSlots);
 	}
 }
 
@@ -142,45 +140,31 @@ void UInventoryBarWidget::RebuildWeaponRow(int32 RowIndex, AShooterWeapon* Weapo
 	BP_SetWeaponRow(RowIndex, Weapon, Ammo, MagazineSize, Reserve, bInfinite, bIsEquipped);
 }
 
-void UInventoryBarWidget::RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon,
-	int32 FreeSlots, int32 MaxSlots)
+void UInventoryBarWidget::RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots)
 {
 	if (!Container || !AttachmentSlotClass)
 	{
 		return;
 	}
 
-	const TArray<TObjectPtr<UWeaponAttachmentDefinition>>* Mounted =
-		Weapon ? &Weapon->GetInstalledAttachments() : nullptr;
+	// Same squares as the overlay, in the same order. @see UInventoryScreenWidget::RebuildAttachmentSlots
+	TArray<EWeaponAttachmentType> Types;
+	UInventoryIconSettings::GetWeaponSlotTypes(Weapon, Types);
 
-	for (int32 Index = 0; Index < MaxSlots; ++Index)
+	for (int32 Index = 0; Index < Types.Num(); ++Index)
 	{
-		UInventorySlotWidget* Square = GetOrCreateSquare(Container, Index, AttachmentSlotClass);
-		if (!Square)
+		if (UInventorySlotWidget* Square = GetOrCreateSquare(Container, Index, AttachmentSlotClass))
 		{
-			continue;
+			// Deliberately NOT given an attachment target. Without one the square cannot start a drag
+			// or take a drop, which is what keeps the corner a readout: fitting an attachment is a
+			// decision, and decisions live behind the inventory key.
+			Square->SetFromWeaponSlot(Weapon, Types[Index], FreeSlots);
 		}
+	}
 
-		UWeaponAttachmentDefinition* Here =
-			(Mounted && Mounted->IsValidIndex(Index)) ? (*Mounted)[Index].Get() : nullptr;
-
-		// Same three states as the overlay, read the same way: filled, free, or costing a cell.
-		EInventoryCellVisual CellVisual = EInventoryCellVisual::Paid;
-		if (Here)
-		{
-			CellVisual = EInventoryCellVisual::Filled;
-		}
-		else if (Index < FreeSlots)
-		{
-			CellVisual = EInventoryCellVisual::Empty;
-		}
-
-		Square->SetCell(CellVisual, Here ? EInventorySlotKind::Attachment : EInventorySlotKind::Empty,
-			Here ? Here->Icon.Get() : nullptr, Here ? 1 : 0, Here ? 1 : 0);
-
-		// Deliberately NOT given an attachment target. Without one the square cannot start a drag
-		// or take a drop, which is what keeps the corner a readout: fitting an attachment is a
-		// decision, and decisions live behind the inventory key.
+	while (Container->GetChildrenCount() > Types.Num())
+	{
+		Container->RemoveChildAt(Container->GetChildrenCount() - 1);
 	}
 }
 

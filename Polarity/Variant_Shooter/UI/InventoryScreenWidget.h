@@ -165,11 +165,11 @@ private:
 	void RebuildWeaponPanels(const UInventoryComponent& Inventory);
 	/** Draw one weapon's attachment squares and wire them up.
 	 *
-	 *  The squares are CAPACITY, not types: which of the four kinds an attachment is comes from the
-	 *  attachment, so a part dropped on any usable square of this weapon goes to its own slot. That
-	 *  is the layout in the contract -- a row of squares beside the weapon plate -- rather than four
-	 *  labelled holes the player has to aim at. */
-	void RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots, int32 MaxSlots);
+	 *  One square per slot TYPE the gun has (AShooterWeapon::AttachmentSlots), in the one order the
+	 *  whole game uses (UInventoryIconSettings::AttachmentSlotOrder), Apex-style [author,
+	 *  2026-09-26]. An empty square shows its type's icon, dimmed; it takes only an attachment of
+	 *  that type that fits the gun. The first FreeSlots mounts are free, later ones cost a cell. */
+	void RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots);
 
 	/** A grid cell was dropped on a weapon's square. */
 	void HandleAttachmentInstall(int32 FromIndex, AShooterWeapon* Weapon);

@@ -35,6 +35,7 @@ class ABuildableActor;
 class AKamikazeCarrierDrone;
 class AShooterNPC;
 class ASiegeCoreBuildable;
+class ASiegeLane;
 class UPrimitiveComponent;
 
 /** One kind of enemy the endless phase may buy. */
@@ -59,6 +60,56 @@ struct FSiegeEnemyType
 	float Weight = 1.0f;
 };
 
+/**
+ * One kind of creep in a lane pack (Docs/MOBA_Lanes_Concept_2026-09-29.md, the Dota 2 model).
+ *
+ * Dota's lane wave, for scale: every 30 s, 3 melee + 1 ranged per lane; a siege creep from the 11th
+ * wave and every 10th after (every 5 min); one more melee at 15, 30 and 45 min, one more ranged at
+ * 40, a second siege at 35; creeps upgraded every 7.5 min. Every one of those is a row here: a count
+ * that grows with the clock, and a wave rhythm.
+ */
+USTRUCT(BlueprintType)
+struct FSiegeCreepKind
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege")
+	TSubclassOf<AShooterNPC> NPCClass;
+
+	/** How many per pack when CountByMinute has no keys. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege", meta = (ClampMin = "0"))
+	int32 BaseCount = 1;
+
+	/** X: minutes since the siege started. Y: how many per pack (rounded). Step keys make Dota's
+	 *  "+1 at 15 min". No keys = BaseCount the whole run. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege")
+	FRuntimeFloatCurve CountByMinute;
+
+	/** Added per player in the game, on top of the count. The opening pack of the author's plan is
+	 *  BaseCount 0, CountPerPlayer 1, LastWave 1: one grunt per player. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege", meta = (ClampMin = "0.0"))
+	float CountPerPlayer = 0.0f;
+
+	/** First wave this kind comes in, from 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege", meta = (ClampMin = "1"))
+	int32 FirstWave = 1;
+
+	/** From FirstWave on, only every Nth wave carries it (Dota's siege creep: FirstWave 11, 10). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege", meta = (ClampMin = "1"))
+	int32 EveryNthWave = 1;
+
+	/** Last wave it comes in. 0 = to the end. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege", meta = (ClampMin = "0"))
+	int32 LastWave = 0;
+
+	/** Only these lanes (ASiegeLane::LaneName) get it. Empty = every open lane. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege")
+	TArray<FName> OnlyLanes;
+
+	/** Count this kind comes to in this wave on this lane, 0 = not in it. */
+	int32 CountFor(int32 WaveNumber, float Minutes, int32 NumPlayers, FName LaneName) const;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSiegeStarted);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSiegeWaveStarted, int32, WaveNumber);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSiegeBaseLost);
@@ -77,6 +128,95 @@ public:
 	/** Hand-written waves, in order. Wave N of the siege is entry N-1 here. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Waves")
 	TArray<FArenaWave> AuthoredWaves;
+
+	// ==================== Lanes ====================
+
+	/** A lane map: every wave is one pack on each open ASiegeLane of the level, made of LanePack.
+	 *  Replaces the authored and endless waves and the spawn ring while on. Off, or no lane on the
+	 *  level, or an empty pack = the old ring siege (L_HomeBase). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes")
+	bool bUseLanes = true;
+
+	/** What one pack is made of, row by row. See FSiegeCreepKind for Dota's numbers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (TitleProperty = "NPCClass"))
+	TArray<FSiegeCreepKind> LanePack;
+
+	/** One lane at a time, round the cycle (author 2026-09-29): a pack on the first lane, the next
+	 *  lane LanePackInterval later, and so on, then the cycle starts over. A solo player can walk the
+	 *  front from lane to lane instead of being hit on all three at once. A wave is one full cycle,
+	 *  so FSiegeCreepKind's wave rules (FirstWave, EveryNthWave) still count per lane. Off = every
+	 *  lane at once every WaveInterval, as Dota does. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes")
+	bool bStaggerLanes = true;
+
+	/** Seconds between two packs, for one player. Each lane then gets a pack every
+	 *  LanePackInterval x (open lanes) seconds: 30 s and three lanes is a pack per lane every 90 s solo. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "1.0", Units = "s", EditCondition = "bStaggerLanes"))
+	float LanePackInterval = 30.0f;
+
+	/** The pack rate grows with the players: the interval is divided by their number. Three players at
+	 *  30 s get a pack every 10 s, a pack per lane every 30 s: Dota's rate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (EditCondition = "bStaggerLanes"))
+	bool bPackRatePerPlayer = true;
+
+	/** The order of the cycle, by ASiegeLane::LaneName. Lanes not listed come after, by name. Empty =
+	 *  by name. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (EditCondition = "bStaggerLanes"))
+	TArray<FName> LaneOrder;
+
+	/** Seconds between two packs now (LanePackInterval over the players when bPackRatePerPlayer). */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	float GetLanePackInterval() const { return GetLanePackIntervalFor(GetHumanPlayerCount()); }
+
+	/** The same for a given number of players. */
+	float GetLanePackIntervalFor(int32 NumPlayers) const;
+
+	/** People in the game, bots' player states left out (at least 1). */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	int32 GetHumanPlayerCount() const;
+
+	/** The open lanes in the order of the cycle. */
+	void GetCycleLanes(TArray<ASiegeLane*>& OutLanes) const;
+
+	/** Creeps get stronger every this many seconds of the siege (Dota: 450, every 7.5 min). 0 = never. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "0.0", Units = "s"))
+	float CreepUpgradeInterval = 450.0f;
+
+	/** Each upgrade multiplies a new creep's health by this. Multiplied, not added: the upgrades
+	 *  compound, and that compounding is the exponent the siege needs to end a run (a linear enemy is
+	 *  outrun by the metal it drops, Siege_Director_Plan). 1 = no growth. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "1.0"))
+	float CreepHealthPerUpgrade = 1.15f;
+
+	/** A flyer in a pack comes in this high over the lane's start (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "0.0", Units = "cm"))
+	float LaneAirHeight = 3500.0f;
+
+	/** A pack member that found no free spot keeps trying this long before it is dropped (seconds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "0.0", Units = "s"))
+	float LaneSpawnRetrySeconds = 10.0f;
+
+	/** Lane creeps that got past every turret stop at the core and fight it; this is how close to the
+	 *  lane's base end a creep counts as having walked it (cm). Copied onto every creep. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "0.0", Units = "cm"))
+	float LaneEndDistance = 2500.0f;
+
+	/** A carrier on a lane only goes for what is this near it (cm), a bit past its own standoff
+	 *  (AKamikazeCarrierDrone::StandoffDistance, 40 m). Copied onto every creep. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Siege|Lanes", meta = (ClampMin = "0.0", Units = "cm"))
+	float LaneCarrierAggroRadius = 6000.0f;
+
+	/** True while the waves come down lanes. */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	bool IsLaneSiege() const;
+
+	/** The health multiplier a creep spawned now gets from the upgrades so far. */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	float GetCreepHealthMultiplier() const;
+
+	/** Minutes since the siege started, the clock the pack counts are read on. */
+	UFUNCTION(BlueprintPure, Category = "Siege")
+	float GetSiegeMinutes() const;
 
 	// ==================== Endless waves ====================
 
@@ -262,6 +402,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Siege|State")
 	int32 AliveEnemies = 0;
 
+	/** Server world time the siege started at. The lane packs grow on the clock from here. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Siege|State")
+	float SiegeStartServerTime = 0.0f;
+
 	UFUNCTION(BlueprintPure, Category = "Siege")
 	float GetSecondsToNextWave() const;
 
@@ -340,6 +484,34 @@ private:
 	 *  cost then went to the living carriers). */
 	bool SpawnOne(TSubclassOf<AShooterNPC> NPCClass);
 	AArenaSpawnPoint* PickSpawnPoint(TSubclassOf<AShooterNPC> NPCClass);
+
+	// ---- Lanes ----
+
+	/** One pack on every open lane. */
+	void SpawnLaneWave(int32 WaveNumber);
+
+	/** Put Member of a pack down on Lane now. False = no free spot this time, try again later. */
+	bool SpawnOnLane(TSubclassOf<AShooterNPC> NPCClass, ASiegeLane* Lane, int32 Member);
+
+	/** Where a lane creep enters: its pack slot, on the ground (a walker) or LaneAirHeight above it. */
+	bool FindLaneSpawn(TSubclassOf<AShooterNPC> NPCClass, const ASiegeLane* Lane, int32 Member, FTransform& OutTransform);
+
+	/** Work the lane queue: spawn what can go down, drop what waited too long. */
+	void TickLaneQueue(float Now);
+
+	/** The spawn ring's choices, shared by the ring and the lanes: the new NPC is the director's to
+	 *  count, pace and send at the base. */
+	void AdoptSpawned(AShooterNPC* NPC, TSubclassOf<AShooterNPC> NPCClass, const FVector& Where);
+
+	struct FLaneSpawn
+	{
+		TSubclassOf<AShooterNPC> NPCClass;
+		TWeakObjectPtr<ASiegeLane> Lane;
+		int32 Member = 0;
+		/** Not out before this server time; the retry clock runs from it. */
+		float QueuedAt = 0.0f;
+	};
+	TArray<FLaneSpawn> LaneQueue;
 
 	// ---- Spawn ring ----
 

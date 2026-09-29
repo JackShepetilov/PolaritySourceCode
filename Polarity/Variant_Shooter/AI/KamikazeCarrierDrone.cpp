@@ -20,6 +20,8 @@
 #include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Variant_Shooter/Siege/SiegeDirector.h"
+#include "Variant_Shooter/Siege/SiegeLaneFollower.h"
+#include "EngineUtils.h"
 
 namespace
 {
@@ -44,11 +46,40 @@ namespace
 		return false;
 	}
 
-	/** A core that is gone, or that a player has come home to defend: back to the pawns. */
+	/** A core that is gone, or that a player has come home to defend: back to the pawns. A lane
+	 *  carrier also takes on the player's other buildings in its way (a turret on its lane), and one
+	 *  of those stays a target while it stands, defended or not: creeps hit towers. */
 	bool IsGoneCore(const AActor* Core)
 	{
 		const ABuildableActor* const Building = Cast<ABuildableActor>(Core);
-		return !IsValid(Building) || !Building->IsSiegeCore() || Building->IsDestroyed() || Building->IsDefended();
+		if (!IsValid(Building) || Building->IsDestroyed())
+		{
+			return true;
+		}
+		return Building->IsSiegeCore() ? Building->IsDefended() : !Building->IsActive();
+	}
+
+	/** The nearest standing building hostile to this carrier within Radius, or null. A handful of
+	 *  buildings per map and once a second per carrier: a plain walk. */
+	ABuildableActor* FindLaneBuilding(const AActor* Carrier, float Radius)
+	{
+		ABuildableActor* Nearest = nullptr;
+		float NearestDistSq = FMath::Square(Radius);
+		for (TActorIterator<ABuildableActor> It(Carrier->GetWorld()); It; ++It)
+		{
+			ABuildableActor* const Building = *It;
+			if (!IsValid(Building) || !Building->IsActive() || !PolarityTeams::AreHostile(Carrier, Building))
+			{
+				continue;
+			}
+			const float DistSq = FVector::DistSquared2D(Carrier->GetActorLocation(), Building->GetActorLocation());
+			if (DistSq < NearestDistSq)
+			{
+				NearestDistSq = DistSq;
+				Nearest = Building;
+			}
+		}
+		return Nearest;
 	}
 
 	FVector FeetOf(const APawn* Pawn)
@@ -223,22 +254,19 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 
 	// Target: the base's core while nobody is defending it, else the nearest live hostile. Re-picked
 	// once a second. A new target means a new side.
+	//
+	// On a lane (USiegeLaneFollower, Docs/MOBA_Lanes_Concept_2026-09-29.md) the carrier is a creep of
+	// its pack: until the lane is walked it only takes on what is near it, a pawn first, else one of
+	// the player's buildings, and with nothing near it flies on down the lane.
+	USiegeLaneFollower* const LaneFollower = FindComponentByClass<USiegeLaneFollower>();
+	const bool bOnLane = LaneFollower && LaneFollower->GetLane() && !LaneFollower->IsLaneWalked();
 	TargetReacquireTimer -= DeltaTime;
 	APawn* Target = StandoffTarget.Get();
 	AActor* Core = SiegeCore.Get();
-	if (IsGoneTarget(Target) || (Core && IsGoneCore(Core)) || TargetReacquireTimer <= 0.0f)
+	// A lane carrier with nothing near is marching, not lost: it looks again on the timer only.
+	if (((Target || !bOnLane) && IsGoneTarget(Target)) || (Core && IsGoneCore(Core)) || TargetReacquireTimer <= 0.0f)
 	{
 		TargetReacquireTimer = CarrierReacquireInterval;
-
-		AActor* const FreshCore = ABuildableActor::FindUndefendedCore(GetWorld(), GetActorLocation());
-		if (FreshCore != Core)
-		{
-			SiegeCore = FreshCore;
-			bHasStandoffBearing = false;
-			Core = FreshCore;
-			UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] Carrier %s target: %s"), *GetName(),
-				Core ? *FString::Printf(TEXT("core %s (undefended)"), *Core->GetName()) : TEXT("pawns"));
-		}
 
 		APawn* Fresh = nullptr;
 		if (const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(this))
@@ -253,6 +281,30 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 		{
 			Fresh = nullptr;
 		}
+		if (bOnLane && Fresh
+			&& FVector::DistSquared2D(Fresh->GetActorLocation(), GetActorLocation()) > FMath::Square(LaneFollower->CarrierAggroRadius))
+		{
+			Fresh = nullptr;
+		}
+
+		AActor* FreshCore = nullptr;
+		if (!bOnLane)
+		{
+			FreshCore = ABuildableActor::FindUndefendedCore(GetWorld(), GetActorLocation());
+		}
+		else if (!Fresh)
+		{
+			FreshCore = FindLaneBuilding(this, LaneFollower->CarrierAggroRadius);
+		}
+		if (FreshCore != Core)
+		{
+			SiegeCore = FreshCore;
+			bHasStandoffBearing = false;
+			Core = FreshCore;
+			UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] Carrier %s target: %s"), *GetName(),
+				Core ? *FString::Printf(TEXT("%s %s"), bOnLane ? TEXT("lane building") : TEXT("core (undefended)"), *Core->GetName()) : TEXT("pawns"));
+		}
+
 		if (Fresh != Target)
 		{
 			StandoffTarget = Fresh;
@@ -265,8 +317,24 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 	}
 
 	UFlyingAIMovementComponent* const Mover = GetFlyingMovement();
-	if ((!Target && !Core) || !Mover)
+	if (!Mover)
 	{
+		return;
+	}
+	if (!Target && !Core)
+	{
+		// A lane carrier with nothing near it keeps flying down its lane, at its standoff height.
+		FVector LaneGoal;
+		bInDropPosition = false;
+		if (bOnLane && LaneFollower->GetFlightGoal(GetActorLocation(), LaneGoal))
+		{
+			MoveOrderTimer -= DeltaTime;
+			if (MoveOrderTimer <= 0.0f)
+			{
+				MoveOrderTimer = CarrierMoveOrderInterval;
+				Mover->FlyToLocationUnclamped(LaneGoal + FVector(0.0f, 0.0f, StandoffHeight), StandoffTolerance * 0.5f);
+			}
+		}
 		return;
 	}
 

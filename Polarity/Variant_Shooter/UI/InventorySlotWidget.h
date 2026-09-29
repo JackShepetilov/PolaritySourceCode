@@ -120,7 +120,17 @@ public:
 	 *  square is either a cell of the bag or a slot on a gun, never both. Mounted is what is fitted
 	 *  in it right now, or null for an empty slot, and it is what decides whether this square can
 	 *  START a drag -- an empty slot has nothing to take off. */
-	void SetAttachmentTarget(AShooterWeapon* InWeapon, UWeaponAttachmentDefinition* Mounted);
+	void SetAttachmentTarget(AShooterWeapon* InWeapon, UWeaponAttachmentDefinition* Mounted,
+		EWeaponAttachmentType InSlotType);
+
+	/** Draw this square as Weapon's slot of type Type: what is mounted in it (its icon, tinted by
+	 *  rarity), or the type's dimmed icon when empty; Paid instead of Empty once the gun has used
+	 *  its FreeSlots free mounts. Used by the overlay and the corner alike. */
+	void SetFromWeaponSlot(AShooterWeapon* Weapon, EWeaponAttachmentType Type, int32 FreeSlots);
+
+	/** Tint the icon with a rarity colour instead of the kind colour, until told otherwise. Called
+	 *  before SetCell by whoever knows the rarity; SetFromSlot works it out by itself. */
+	void SetRarityTint(bool bInUse, EUpgradeRarity InRarity = EUpgradeRarity::Common);
 
 	/** Tell the square it is action slot InSlotIndex of Layout (jump, slide...), and what is in it.
 	 *  The third identity, beside a grid cell and a weapon's attachment slot. Equipped decides
@@ -260,6 +270,15 @@ private:
 	 *  the same gate GridIndex is: exactly one of the two is ever set. */
 	UPROPERTY(Transient)
 	TObjectPtr<AShooterWeapon> AttachmentWeapon;
+
+	/** Which type of attachment this weapon square takes. Only meaningful with AttachmentWeapon. */
+	EWeaponAttachmentType AttachmentSlotType = EWeaponAttachmentType::Optic;
+
+	/** True when the dragged attachment may go in this weapon square: its type and its whitelist. */
+	bool AcceptsAttachment(const UWeaponAttachmentDefinition* Attachment) const;
+
+	bool bUseRarityTint = false;
+	EUpgradeRarity TintRarity = EUpgradeRarity::Common;
 
 	/** What is fitted in this attachment slot right now. Null means the slot is empty, and an empty
 	 *  slot has nothing to drag off. */

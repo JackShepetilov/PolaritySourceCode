@@ -58,6 +58,7 @@
 #include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "../../AI/Components/CoverFinderComponent.h"
 #include "Variant_Shooter/Buildables/TurretBuildable.h"
+#include "Variant_Shooter/Siege/SiegeLaneFollower.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
@@ -465,6 +466,7 @@ void AShooterNPC::BeginPlay()
 	if (Weapon)
 	{
 		Weapon->OnShotFired.AddDynamic(this, &AShooterNPC::OnWeaponShotFired);
+		Weapon->PushInfimaThirdPersonProfile(GetMesh() ? GetMesh()->GetAnimInstance() : nullptr);
 	}
 
 	// Register with combat coordinator
@@ -566,7 +568,7 @@ void AShooterNPC::Tick(float DeltaTime)
 		FTransform LeftHandTarget = FTransform::Identity;
 		float LeftHandAlpha = 0.0f;
 
-		if (Weapon)
+		if (Weapon && !Weapon->bThirdPersonWeaponPoseFromAnimation)
 		{
 			if (USkeletalMeshComponent* WeaponTPMesh = Weapon->GetThirdPersonMesh())
 			{
@@ -606,6 +608,10 @@ void AShooterNPC::Tick(float DeltaTime)
 	}
 
 	Super::Tick(DeltaTime);
+	if (Weapon && GetMesh())
+	{
+		Weapon->UpdateInfimaThirdPersonShotState(GetMesh()->GetAnimInstance());
+	}
 
 	// Dead NPCs: skip all NPC-specific logic (character movement still ticks via Super)
 	if (bIsDead)
@@ -1066,9 +1072,22 @@ void AShooterNPC::TickSiegeMarch(float DeltaTime)
 		SiegeMoveReissueTimer = SiegeCoreMoveReissueInterval;
 		const float Acceptance = FMath::Max(0.0f, SiegeCoreEngageDistance - 100.0f);
 		FVector Goal;
-		const EPathFollowingRequestResult::Type Request = ResolveSiegeMoveGoal(GetWorld(), CurrentTarget, Goal)
-			? AIController->MoveToLocation(Goal, Acceptance)
-			: AIController->MoveToActor(CurrentTarget, Acceptance);
+		// A lane creep walks its lane to the core, not the straight line: the next bit of road ahead
+		// until the lane is walked (Docs/MOBA_Lanes_Concept_2026-09-29.md).
+		USiegeLaneFollower* const LaneFollower = FindComponentByClass<USiegeLaneFollower>();
+		EPathFollowingRequestResult::Type Request;
+		if (LaneFollower && LaneFollower->GetMarchGoal(GetActorLocation(), Goal))
+		{
+			Request = AIController->MoveToLocation(Goal, 100.0f);
+		}
+		else if (ResolveSiegeMoveGoal(GetWorld(), CurrentTarget, Goal))
+		{
+			Request = AIController->MoveToLocation(Goal, Acceptance);
+		}
+		else
+		{
+			Request = AIController->MoveToActor(CurrentTarget, Acceptance);
+		}
 		if (Request == EPathFollowingRequestResult::Failed)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[SIEGE_DEBUG] %s: no path to %s"), *GetName(), *CurrentTarget->GetName());
@@ -2200,7 +2219,6 @@ void AShooterNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 	USkeletalMeshComponent* TPMesh = GetMesh();
 	USkeletalMeshComponent* NPCFPMesh = GetFirstPersonMesh();
 	USkeletalMeshComponent* WeaponFPMesh = WeaponToAttach->GetFirstPersonMesh();
-	USkeletalMeshComponent* WeaponTPMesh = WeaponToAttach->GetThirdPersonMesh();
 
 	// --- TP mesh attach ---
 	// Verify socket exists on TP skeleton before attaching. If missing,
@@ -2213,13 +2231,7 @@ void AShooterNPC::AttachWeaponMeshes(AShooterWeapon* WeaponToAttach)
 			*ThirdPersonWeaponSocket.ToString(),
 			*GetNameSafe(TPMesh->GetSkeletalMeshAsset()));
 	}
-	WeaponTPMesh->AttachToComponent(TPMesh, AttachmentRule, ThirdPersonWeaponSocket);
-
-	// Hold it the way the player holds it. Without this the NPC's weapon hangs by the mesh origin
-	// with the raw hand rotation, which is why an NPC's gun sat differently in the hand than the
-	// same gun on a player, and why NPCs could not be used to check a grip.
-	AShooterWeapon::AlignMeshToGripSocket(WeaponTPMesh,
-		AShooterWeapon::PickThirdPersonSocket(WeaponTPMesh, AShooterWeapon::OptionalGripSocketName));
+	WeaponToAttach->AttachThirdPersonWeaponMesh(TPMesh, ThirdPersonWeaponSocket);
 
 	// --- FP mesh attach ---
 	// NPCs usually have no FP skeletal mesh assigned (player never views them in 1st person).
@@ -3185,6 +3197,7 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 		if (Weapon)
 		{
 			Weapon->OnShotFired.AddDynamic(this, &AShooterNPC::OnWeaponShotFired);
+			Weapon->PushInfimaThirdPersonProfile(GetMesh() ? GetMesh()->GetAnimInstance() : nullptr);
 		}
 	}
 
@@ -3631,6 +3644,18 @@ void AShooterNPC::TryStartShooting()
 		ReportShootGate(2, TEXT("BLOCKED no target"));
 		StopPermissionRetryTimer();
 		CurrentAimTarget = nullptr;
+		return;
+	}
+
+	// A lane creep hits the core when it gets there, not down the length of an open lane: the
+	// straight mid lane of a lane map sees the base from 400 m, and a hitscan rifle reaches it.
+	// The march brings it into SiegeCoreEngageDistance; the ring siege (no lane) keeps its old rule.
+	if (const ABuildableActor* const Core = Cast<ABuildableActor>(CurrentAimTarget.Get());
+		Core && Core->IsSiegeCore() && FindComponentByClass<USiegeLaneFollower>()
+		&& FVector::Dist2D(GetActorLocation(), Core->GetActorLocation()) > SiegeCoreEngageDistance + 300.0f)
+	{
+		ReportShootGate(10, TEXT("BLOCKED core out of reach (lane creep)"));
+		StopShooting();
 		return;
 	}
 
@@ -6090,7 +6115,7 @@ void AShooterNPC::BeginReload()
 
 	const float ReloadTime = Weapon->GetReloadTime();
 
-	if (NPCReloadMontage)
+	if (NPCReloadMontage && !Weapon->GetThirdPersonReloadMontage(EWeaponReloadStage::Primary))
 	{
 		// One rate for both ends, so the animation and the magazine finish together whatever the
 		// weapon's ReloadTime is set to.

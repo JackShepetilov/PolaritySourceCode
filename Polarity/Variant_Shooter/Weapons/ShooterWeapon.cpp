@@ -8,6 +8,7 @@
 #include "Animation/AnimSequenceBase.h"
 #include "AudioDevice.h"
 #include "Coop/CoopPlayers.h"
+#include "Engine/DataTable.h"
 #include "Sound/SoundBase.h"
 #include "UObject/FieldIterator.h"
 #include "UObject/SoftObjectPtr.h"
@@ -65,6 +66,7 @@ static TAutoConsoleVariable<int32> CVarNoVFX(
 #include "Animation/AnimSingleNodeInstance.h"
 #include "AlphaBlend.h"
 #include "Engine/DataAsset.h"
+#include "Engine/DataTable.h"
 #include "Curves/CurveVector.h"
 #include "Curves/CurveFloat.h"
 #include "Sound/SoundBase.h"
@@ -115,40 +117,255 @@ void AShooterWeapon::PlayFireEffectsLocally(bool bLastRound)
 		? WeaponMeshLastShotAnimation
 		: WeaponMeshFireAnimation;
 
-	PlayWeaponMeshAnimation(FireAnimation);
+	PlayWeaponMeshAnimation(FirstPersonMesh, FireAnimation);
+	PlayWeaponMeshAnimation(ThirdPersonMesh, bLastRound && WeaponMeshLastShotAnimationTP
+		? WeaponMeshLastShotAnimationTP.Get() : WeaponMeshFireAnimationTP.Get());
+
+	// A shot out of a per round reload: the stage that was holding its pose lets go now rather than
+	// at its timeout, whether or not this weapon has a body montage of its own to take the slot.
+	ReleaseHeldReloadStagePoses();
+
+	// The round that just left the tube is not in it any more. The pack's own grenade launcher
+	// Blueprint hides its rocket bone right here; until this existed our copy of that gun showed a
+	// rocket in the tube from the shot to the next reload. Every machine runs this function, so the
+	// rocket goes for everyone watching, not only for the shooter.
+	if (bLastRound && !LoadedRoundBoneName.IsNone())
+	{
+		GetWorldTimerManager().ClearTimer(LoadedRoundRevealTimer);
+		GetWorldTimerManager().ClearTimer(LoadedRoundRevealTimerTP);
+		SetLoadedRoundVisible(/*bFirstPerson*/ true, /*bThirdPerson*/ true, /*bVisible*/ false);
+	}
+
+	PlayThirdPersonWeaponMontage(FiringMontageTP);
+	PlayThirdPersonWeaponMontage(CycleActionMontageTP);
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastThirdPersonShotTime > FMath::Max(0.3f, GetCurrentRefireRate() * 2.0f))
+	{
+		ThirdPersonShotCount = 0;
+	}
+	LastThirdPersonShotTime = Now;
+	++ThirdPersonShotCount;
 }
 
-void AShooterWeapon::PlayWeaponMeshAnimation(UAnimationAsset* Animation)
+void AShooterWeapon::PlayWeaponMeshAnimation(USkeletalMeshComponent* Mesh, UAnimationAsset* Animation, float Duration)
 {
-	if (!Animation)
+	if (!Animation || !Mesh || !Mesh->GetSkeletalMeshAsset())
 	{
 		return;
 	}
 
-	USkeletalMeshComponent* Meshes[] = { FirstPersonMesh, ThirdPersonMesh };
-	for (USkeletalMeshComponent* Mesh : Meshes)
+	const float PlayRate = Duration > KINDA_SMALL_NUMBER ? Animation->GetPlayLength() / Duration : 1.0f;
 	{
-		if (!Mesh || !Mesh->GetSkeletalMeshAsset())
-		{
-			continue;
-		}
-
 		// A weapon that runs an anim blueprint of its own keeps it: play the montage through the
 		// instance so the graph can blend it and its notifies still fire. PlayAnimation would throw
 		// the graph away for a single-node player and the weapon would freeze in that pose.
 		if (UAnimMontage* AsMontage = Cast<UAnimMontage>(Animation))
 		{
-			if (UAnimInstance* MeshAnimInstance = Mesh->GetAnimInstance())
+			if (UAnimInstance* MeshAnimInstance = Mesh->GetAnimInstance();
+				MeshAnimInstance && Mesh->GetAnimationMode() == EAnimationMode::AnimationBlueprint)
 			{
-				MeshAnimInstance->Montage_Play(AsMontage);
-				continue;
+				MeshAnimInstance->Montage_Play(AsMontage, PlayRate);
+				return;
 			}
 		}
 
 		// No graph, or a plain sequence: play it straight on the component. This is the usual case
 		// for a weapon mesh, which has nothing else to animate it.
 		Mesh->PlayAnimation(Animation, /*bLooping*/ false);
+		Mesh->SetPlayRate(PlayRate);
 	}
+}
+
+bool AShooterWeapon::IsThirdPersonAimingAfterShot() const
+{
+	const APolarityCharacter* Holder = Cast<APolarityCharacter>(GetOwner());
+	const UApexMovementComponent* Movement = Holder ? Holder->GetApexMovement() : nullptr;
+	return (Movement && Movement->IsAiming())
+		|| (GetWorld() && GetWorld()->GetTimeSeconds() - LastThirdPersonShotTime <= ThirdPersonAimHoldTime);
+}
+
+int32 AShooterWeapon::GetThirdPersonShotCount() const
+{
+	return GetWorld() && GetWorld()->GetTimeSeconds() - LastThirdPersonShotTime
+		<= FMath::Max(0.3f, GetCurrentRefireRate() * 2.0f) ? ThirdPersonShotCount : 0;
+}
+
+UAnimInstance* AShooterWeapon::PlayThirdPersonWeaponMontage(UAnimMontage* Montage, float Duration, float BlendInTime)
+{
+	// Called by cosmetic fire/reload effects, already delivered to every machine.
+	ACharacter* Holder = Cast<ACharacter>(GetOwner());
+	UAnimInstance* const BodyAnim = (Montage && Holder && Holder->GetMesh()) ? Holder->GetMesh()->GetAnimInstance() : nullptr;
+	if (!BodyAnim)
+	{
+		return nullptr;
+	}
+
+	const float PlayRate = Duration > KINDA_SMALL_NUMBER ? Montage->GetPlayLength() / Duration : 1.0f;
+	if (BlendInTime >= 0.0f)
+	{
+		// The montage that was in the slot fades out over this same time, so this is a crossfade
+		// between the two rather than a fade up from the base pose.
+		BodyAnim->Montage_PlayWithBlendIn(Montage, FAlphaBlendArgs(BlendInTime), PlayRate);
+	}
+	else
+	{
+		BodyAnim->Montage_Play(Montage, PlayRate);
+	}
+	return BodyAnim;
+}
+
+void AShooterWeapon::HoldReloadStagePose(UAnimInstance* Anim, UAnimMontage* Montage)
+{
+	if (!Anim || !Montage)
+	{
+		return;
+	}
+
+	// The same switch the engine flips for Sequencer's montages: at its end the montage keeps its last
+	// pose instead of blending out, until something stops it.
+	if (FAnimMontageInstance* const Instance = Anim->GetActiveInstanceForMontage(Montage))
+	{
+		Instance->bEnableAutoBlendOut = false;
+		HeldReloadStageInstances.Emplace(Anim, Instance->GetInstanceID());
+	}
+}
+
+void AShooterWeapon::ReleaseHeldReloadStagePoses()
+{
+	if (UWorld* const World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HeldReloadStageReleaseTimer);
+	}
+
+	// By ID, not by montage: the shell loop plays the same montage again, and the new instance of it
+	// must not be the one that gets stopped. An instance the next stage already replaced is stopped
+	// by now and skipped.
+	for (const TPair<TWeakObjectPtr<UAnimInstance>, int32>& Held : HeldReloadStageInstances)
+	{
+		UAnimInstance* const Anim = Held.Key.Get();
+		FAnimMontageInstance* const Instance = Anim ? Anim->GetMontageInstanceForID(Held.Value) : nullptr;
+		if (Instance && Instance->IsActive() && !Instance->IsStopped())
+		{
+			Instance->Stop(FAlphaBlend(ThirdPersonReloadStageBlendTime), /*bInterrupt*/ false);
+		}
+	}
+	HeldReloadStageInstances.Reset();
+}
+
+void AShooterWeapon::SetLoadedRoundVisible(bool bFirstPerson, bool bThirdPerson, bool bVisible)
+{
+	if (LoadedRoundBoneName.IsNone())
+	{
+		return;
+	}
+
+	// Render only: a hidden bone keeps its transform, so a muzzle socket on it (the RPG7 fires from
+	// "Rocket") still answers where the tube is.
+	auto Apply = [this, bVisible](USkeletalMeshComponent* Mesh)
+	{
+		if (!Mesh || Mesh->GetBoneIndex(LoadedRoundBoneName) == INDEX_NONE)
+		{
+			return;
+		}
+		if (bVisible)
+		{
+			Mesh->UnHideBoneByName(LoadedRoundBoneName);
+		}
+		else
+		{
+			Mesh->HideBoneByName(LoadedRoundBoneName, PBO_None);
+		}
+	};
+
+	if (bFirstPerson)
+	{
+		bLoadedRoundHiddenFP = !bVisible;
+		Apply(FirstPersonMesh);
+	}
+	if (bThirdPerson)
+	{
+		bLoadedRoundHiddenTP = !bVisible;
+		Apply(ThirdPersonMesh);
+
+		// Infima's launcher draws its rocket as the magazine part, a separate static mesh on a socket
+		// under the rocket bone. Hiding the bone does not hide an attached component.
+		if (ThirdPersonMagazineMesh && IsThirdPersonMagazineTheRound())
+		{
+			ThirdPersonMagazineMesh->SetVisibility(bVisible
+				&& GetAttachmentOfType(EWeaponAttachmentType::Magazine) == nullptr, /*bPropagateToChildren*/ true);
+		}
+	}
+}
+
+void AShooterWeapon::ScheduleLoadedRoundReveal(float ThirdPersonStretch)
+{
+	if (LoadedRoundBoneName.IsNone() || !GetWorld())
+	{
+		return;
+	}
+
+	// A zero delay has to be done now: SetTimer drops a timer whose rate is not positive.
+	FTimerManager& Timers = GetWorldTimerManager();
+	if (LoadedRoundRevealTime > KINDA_SMALL_NUMBER)
+	{
+		Timers.SetTimer(LoadedRoundRevealTimer, FTimerDelegate::CreateUObject(this,
+			&AShooterWeapon::SetLoadedRoundVisible, true, false, true), LoadedRoundRevealTime, false);
+	}
+	else
+	{
+		Timers.ClearTimer(LoadedRoundRevealTimer);
+		SetLoadedRoundVisible(true, false, true);
+	}
+
+	// The third person reload is stretched to the first person one's length, and its own reveal
+	// moment with it.
+	const float ThirdPersonDelay = LoadedRoundRevealTimeTP * FMath::Max(ThirdPersonStretch, 0.0f);
+	if (ThirdPersonDelay > KINDA_SMALL_NUMBER)
+	{
+		Timers.SetTimer(LoadedRoundRevealTimerTP, FTimerDelegate::CreateUObject(this,
+			&AShooterWeapon::SetLoadedRoundVisible, false, true, true), ThirdPersonDelay, false);
+	}
+	else
+	{
+		Timers.ClearTimer(LoadedRoundRevealTimerTP);
+		SetLoadedRoundVisible(false, true, true);
+	}
+}
+
+bool AShooterWeapon::IsThirdPersonMagazineTheRound() const
+{
+	if (LoadedRoundBoneName.IsNone() || !ThirdPersonMesh || !ThirdPersonMagazineMesh)
+	{
+		return false;
+	}
+	const int32 RoundIndex = ThirdPersonMesh->GetBoneIndex(LoadedRoundBoneName);
+	if (RoundIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	// The mesh's own spelling of the bone, and the bone the part's socket really sits on (on RL_01
+	// "SOCKET_Magazine" is itself a bone, a child of "rocket").
+	const FName RoundBone = ThirdPersonMesh->GetBoneName(RoundIndex);
+	const FName PartBone = ThirdPersonMesh->GetSocketBoneName(ThirdPersonMagazineMesh->GetAttachSocketName());
+	return PartBone == RoundBone || ThirdPersonMesh->BoneIsChildOf(PartBone, RoundBone);
+}
+
+void AShooterWeapon::SetDebugDamageScale(float Scale)
+{
+	// Latch the authored number the first time, so repeated calls stay reversible and 1.0 restores
+	// exactly what the Blueprint was tuned to.
+	static TMap<TWeakObjectPtr<AShooterWeapon>, float> AuthoredDamage;
+	if (!AuthoredDamage.Contains(this))
+	{
+		AuthoredDamage.Add(this, HitscanDamage);
+	}
+
+	const float Authored = AuthoredDamage[this];
+	const float ClampedScale = FMath::Max(0.0f, Scale);
+	HitscanDamage = Authored * ClampedScale;
+	UE_LOG(LogTemp, Log, TEXT("[NPC_DEBUG] %s: shot damage %.2f (authored %.2f, debug scale %.2f)"),
+		*GetName(), HitscanDamage, Authored, ClampedScale);
 }
 
 void AShooterWeapon::ResolveADSAnchorAttachment()
@@ -388,6 +605,14 @@ bool AShooterWeapon::InstallAttachment(UWeaponAttachmentDefinition* Attachment)
 		return false;
 	}
 
+	// No slot of that type on this gun at all. @see AttachmentSlots
+	if (!HasAttachmentSlot(Attachment->Type))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ATTACH] %s has no %s slot (AttachmentSlots on the weapon Blueprint)."),
+			*GetClass()->GetName(), *UEnum::GetValueAsString(Attachment->Type));
+		return false;
+	}
+
 	// The attachment says which guns it fits, and an empty list fits none. Refused here rather than
 	// only greyed out in the inventory screen, because this is the one door every mount goes through.
 	if (!Attachment->FitsWeapon(GetClass()))
@@ -560,24 +785,39 @@ void AShooterWeapon::RebuildAttachmentMeshes()
 		DefaultOpticComponent->SetVisibility(!bHasRealOptic, /*bPropagateToChildren*/ true);
 	}
 
+	// A real magazine attachment replaces the pack's own magazine part, the same rule the optic follows.
+	RefreshThirdPersonMagazine();
+
 	// The eye point may have just moved, and the new components start with default render
 	// visibility and tick order, which would draw a first person scope in the world pass.
 	ResolveADSAnchorAttachment();
 	ApplyChildComponentSetup();
 }
 
-UAnimationAsset* AShooterWeapon::GetReloadWeaponAnimation(EWeaponReloadStage Stage) const
+UAnimationAsset* AShooterWeapon::GetReloadWeaponAnimation(EWeaponReloadStage Stage, bool bThirdPerson) const
 {
-	UAnimationAsset* Animation = WeaponMeshReloadAnimation;
+	UAnimationAsset* Animation = bThirdPerson ? WeaponMeshReloadAnimationTP.Get() : WeaponMeshReloadAnimation.Get();
+	UAnimationAsset* Secondary = bThirdPerson ? WeaponMeshSecondaryReloadAnimationTP.Get() : WeaponMeshSecondaryReloadAnimation.Get();
+	UAnimationAsset* End = bThirdPerson ? WeaponMeshReloadEndAnimationTP.Get() : WeaponMeshReloadEndAnimation.Get();
 	if (Stage == EWeaponReloadStage::Secondary || Stage == EWeaponReloadStage::ShellLoop)
 	{
-		Animation = WeaponMeshSecondaryReloadAnimation ? WeaponMeshSecondaryReloadAnimation.Get() : Animation;
+		Animation = Secondary ? Secondary : Animation;
 	}
-	else if (Stage == EWeaponReloadStage::ShellEnd && WeaponMeshReloadEndAnimation)
+	else if (Stage == EWeaponReloadStage::ShellEnd && End)
 	{
-		Animation = WeaponMeshReloadEndAnimation;
+		Animation = End;
 	}
 	return Animation;
+}
+
+UAnimMontage* AShooterWeapon::GetThirdPersonReloadMontage(EWeaponReloadStage Stage) const
+{
+	if (Stage == EWeaponReloadStage::ShellEnd) return ReloadEndMontageTP;
+	if (Stage == EWeaponReloadStage::Secondary || Stage == EWeaponReloadStage::ShellLoop)
+	{
+		return SecondaryReloadMontageTP ? SecondaryReloadMontageTP.Get() : ReloadMontageTP.Get();
+	}
+	return ReloadMontageTP;
 }
 
 void AShooterWeapon::StopReloadAudio()
@@ -933,16 +1173,14 @@ UAnimMontage* AShooterWeapon::GetArmsMontageForStage(EWeaponReloadStage Stage) c
 	return ReloadMontage.Get();
 }
 
-void AShooterWeapon::PauseWeaponReloadAnimation(UAnimationAsset* Animation, float& InOutProgress)
+void AShooterWeapon::PauseWeaponReloadAnimation(USkeletalMeshComponent* Mesh, UAnimationAsset* Animation, float& InOutProgress)
 {
-	if (!Animation)
+	if (!Animation || !Mesh)
 	{
 		return;
 	}
 	const float Length = FMath::Max(Animation->GetPlayLength(), KINDA_SMALL_NUMBER);
-	for (USkeletalMeshComponent* Mesh : { FirstPersonMesh, ThirdPersonMesh })
 	{
-		if (!Mesh) continue;
 		if (UAnimMontage* Montage = Cast<UAnimMontage>(Animation))
 		{
 			if (UAnimInstance* Anim = Mesh->GetAnimInstance(); Anim && Anim->Montage_IsPlaying(Montage))
@@ -953,7 +1191,7 @@ void AShooterWeapon::PauseWeaponReloadAnimation(UAnimationAsset* Animation, floa
 				Anim->Montage_Stop(KINDA_SMALL_NUMBER, Montage);
 			}
 		}
-		else if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance())
+		else if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance(); SingleNode && SingleNode->GetCurrentAsset() == Animation)
 		{
 			InOutProgress = FMath::Clamp(SingleNode->GetCurrentTime() / Length, 0.0f, 1.0f);
 			SingleNode->SetPlaying(false);
@@ -961,16 +1199,14 @@ void AShooterWeapon::PauseWeaponReloadAnimation(UAnimationAsset* Animation, floa
 	}
 }
 
-void AShooterWeapon::ResumeWeaponReloadAnimation(UAnimationAsset* Animation, float Progress)
+void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, UAnimationAsset* Animation, float Progress)
 {
-	if (!Animation)
+	if (!Animation || !Mesh)
 	{
 		return;
 	}
 	const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * Animation->GetPlayLength();
-	for (USkeletalMeshComponent* Mesh : { FirstPersonMesh, ThirdPersonMesh })
 	{
-		if (!Mesh) continue;
 		if (UAnimMontage* Montage = Cast<UAnimMontage>(Animation))
 		{
 			if (UAnimInstance* Anim = Mesh->GetAnimInstance())
@@ -1008,13 +1244,45 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(UAnimationAsset* Animation, flo
 
 void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 {
-	// Both meshes: PlayWeaponMeshAnimation already covers first and third person, so the machine
-	// that runs this shows the reload on whichever copy of the weapon it can see.
-	//
-	// Fallbacks rather than a table, because an unfilled slot has to mean "use the one this weapon
-	// always used" and not "play nothing": that is what keeps every weapon written before the pack
-	// reloading exactly as it did.
-	PlayWeaponMeshAnimation(GetReloadWeaponAnimation(Stage));
+	// Stage fallbacks stay within each perspective. The FP montage still owns gameplay timing.
+	PlayWeaponMeshAnimation(FirstPersonMesh, GetReloadWeaponAnimation(Stage));
+	const UAnimMontage* FirstPersonReload = GetArmsMontageForStage(Stage);
+	const float Duration = FirstPersonReload ? FirstPersonReload->GetPlayLength() : ReloadTime;
+
+	// The per round stages crossfade into each other; a magazine reload keeps its montage's own blend.
+	const bool bShellStage = Stage == EWeaponReloadStage::ShellStart || Stage == EWeaponReloadStage::ShellLoop
+		|| Stage == EWeaponReloadStage::ShellEnd;
+	UAnimationAsset* const WeaponAnimTP = GetReloadWeaponAnimation(Stage, true);
+	UAnimMontage* const BodyMontageTP = GetThirdPersonReloadMontage(Stage);
+	PlayWeaponMeshAnimation(ThirdPersonMesh, WeaponAnimTP, Duration);
+	UAnimInstance* const BodyAnim = PlayThirdPersonWeaponMontage(BodyMontageTP, Duration,
+		bShellStage ? ThirdPersonReloadStageBlendTime : -1.0f);
+
+	// Whatever the previous stage held has been taken over by now. Release what is left of it (a stage
+	// with no montage of its own replaces nothing), then hold this stage if another one follows it.
+	ReleaseHeldReloadStagePoses();
+	if (Stage == EWeaponReloadStage::ShellStart || Stage == EWeaponReloadStage::ShellLoop)
+	{
+		HoldReloadStagePose(BodyAnim, BodyMontageTP);
+		HoldReloadStagePose(ThirdPersonMesh ? ThirdPersonMesh->GetAnimInstance() : nullptr,
+			Cast<UAnimMontage>(WeaponAnimTP));
+		if (!HeldReloadStageInstances.IsEmpty())
+		{
+			GetWorldTimerManager().SetTimer(HeldReloadStageReleaseTimer, this,
+				&AShooterWeapon::ReleaseHeldReloadStagePoses,
+				FMath::Max(Duration, 0.01f) + ThirdPersonReloadStageHoldTimeout, false);
+		}
+	}
+
+	// The start of a reload brings the next round out. The third person animation is stretched from its
+	// own length to Duration, and its reveal moment is stretched with it.
+	if (Stage == EWeaponReloadStage::Primary || Stage == EWeaponReloadStage::Secondary
+		|| Stage == EWeaponReloadStage::ShellStart)
+	{
+		const UAnimationAsset* const TimedTP = BodyMontageTP ? static_cast<const UAnimationAsset*>(BodyMontageTP) : WeaponAnimTP;
+		const float LengthTP = TimedTP ? TimedTP->GetPlayLength() : 0.0f;
+		ScheduleLoadedRoundReveal(LengthTP > KINDA_SMALL_NUMBER ? Duration / LengthTP : 1.0f);
+	}
 
 	// One sound per reload, not one per shell: the loop stage runs once for every round going in,
 	// and firing the magazine cue eight times over is a rattle rather than a reload. The shells
@@ -1093,7 +1361,8 @@ float AShooterWeapon::GetActiveReloadTime() const
 	// secondary slot holds the LOOP instead, so that question does not apply and its override must
 	// not be consulted either. What this function answers for such a weapon is the length of the
 	// opening stage, which is all that is scheduled when the reload starts.
-	const bool bSecondary = !bPerRoundReload && UsesSecondaryReload() && SecondaryReloadMontage != nullptr;
+	const bool bSecondary = !bPerRoundReload && UsesSecondaryReload()
+		&& (SecondaryReloadMontage != nullptr || SecondaryReloadMontageTP != nullptr);
 
 	// An explicit number wins: some weapons want the magazine to land earlier than the animation
 	// ends, and that is a deliberate feel decision rather than a mistake.
@@ -1837,6 +2106,314 @@ namespace PackProfile
 	}
 }
 
+void AShooterWeapon::PushInfimaThirdPersonProfile(UAnimInstance* BodyAnim) const
+{
+	if (!BodyAnim || !PackProfile::WriteObject(BodyAnim, TEXT("Actor Weapon"),
+		const_cast<AShooterWeapon*>(this)))
+	{
+		return; // This character does not use the Infima-derived TP graph.
+	}
+
+	const UObject* const AnimDefaults = BodyAnim->GetClass()->GetDefaultObject();
+	const UObject* const Donor = InfimaTPDonorClass.GetDefaultObject();
+	const UObject* const SettingsSource = Donor ? Donor : AnimDefaults;
+
+	auto CopyStruct = [BodyAnim](const TCHAR* SourceName,
+		const void* SourceContainer, const UStruct* SourceOwner, const TCHAR* DestinationName)
+	{
+		const FStructProperty* From = CastField<FStructProperty>(
+			PackProfile::FindMember(SourceOwner, SourceName));
+		FStructProperty* To = CastField<FStructProperty>(
+			PackProfile::FindByName(BodyAnim->GetClass(), DestinationName));
+		if (!From || !To || From->Struct != To->Struct || !SourceContainer)
+		{
+			return false;
+		}
+		const void* FromValue = From->ContainerPtrToValuePtr<void>(SourceContainer);
+		void* ToValue = To->ContainerPtrToValuePtr<void>(BodyAnim);
+		To->CopyCompleteValue(ToValue, FromValue);
+		return true;
+	};
+
+	UObject* Poses = InfimaTPPosesTable;
+	if (!Poses)
+	{
+		Poses = PackProfile::ReadObject(AnimDefaults, AnimDefaults->GetClass(),
+			TEXT("Data Table Animation Poses"));
+	}
+	const bool bPosesSet = PackProfile::WriteObject(BodyAnim, TEXT("Data Table Animation Poses"), Poses);
+	const bool bSettingsSet = CopyStruct(TEXT("Settings Animation"),
+		SettingsSource, SettingsSource->GetClass(), TEXT("Settings Animation"));
+
+	// The donor's Settings Animation does NOT carry the sequence and blendspace tables: in the pack those
+	// are AnimBP defaults, the same asset for every weapon. Copying the donor struct wipes them, the graph
+	// then finds no table and leaves jog and look on the AnimBP's own defaults, which belong to another
+	// family. Put this weapon's tables back in, by field name prefix because the pack struct's members
+	// carry generated GUID suffixes.
+	auto WriteSettingsTable = [BodyAnim](const TCHAR* FieldPrefix, UDataTable* Table) -> bool
+	{
+		if (!Table)
+		{
+			return false;
+		}
+
+		const void* SettingsAddr = nullptr;
+		const UStruct* SettingsType = nullptr;
+		if (!PackProfile::OpenStruct(BodyAnim, BodyAnim->GetClass(), TEXT("Settings Animation"),
+			SettingsAddr, SettingsType))
+		{
+			return false;
+		}
+
+		for (TFieldIterator<FObjectProperty> It(SettingsType); It; ++It)
+		{
+			if (!It->GetName().StartsWith(FieldPrefix))
+			{
+				continue;
+			}
+			if (Table->IsA(It->PropertyClass))
+			{
+				It->SetObjectPropertyValue(It->ContainerPtrToValuePtr<void>(const_cast<void*>(SettingsAddr)),
+					Table);
+				return true;
+			}
+			return false;
+		}
+		return false;
+	};
+
+	const bool bSequencesSet = WriteSettingsTable(TEXT("DataTableSequences"), InfimaTPSequencesTable);
+	const bool bBlendspacesSet = WriteSettingsTable(TEXT("DataTableBlendspaces"), InfimaTPBlendspacesTable);
+
+	bool bRecoilSet = false;
+	if (Donor && !bUseTPAnimBPDefaultRecoil)
+	{
+		const void* Settings = nullptr;
+		const UStruct* SettingsType = nullptr;
+		if (PackProfile::OpenStruct(Donor, Donor->GetClass(), TEXT("Weapon Settings"),
+			Settings, SettingsType))
+		{
+			const TCHAR* const Path[] = { TEXT("RecoilProperties"),
+				TEXT("RecoilStatesViewmodel"), TEXT("RecoilStateStanding") };
+			constexpr int32 PathCount = static_cast<int32>(UE_ARRAY_COUNT(Path));
+			for (int32 Index = 0; Index < PathCount - 1 && Settings; ++Index)
+			{
+				const FStructProperty* Member = CastField<FStructProperty>(
+					PackProfile::FindMember(SettingsType, Path[Index]));
+				Settings = Member ? Member->ContainerPtrToValuePtr<void>(Settings) : nullptr;
+				SettingsType = Member ? Member->Struct : nullptr;
+			}
+			if (Settings)
+			{
+				bRecoilSet = CopyStruct(Path[PathCount - 1], Settings,
+					SettingsType, TEXT("Recoil State Weapon"));
+			}
+		}
+	}
+	else
+	{
+		bRecoilSet = CopyStruct(TEXT("Recoil State Weapon"),
+			AnimDefaults, AnimDefaults->GetClass(), TEXT("Recoil State Weapon"));
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TP_ANIM] %s: body=%s donor=%s poses=%s profile=%d/%d/%d tables=%d/%d"),
+		*GetName(), *GetNameSafe(BodyAnim), *GetNameSafe(Donor), *GetNameSafe(Poses),
+		bPosesSet ? 1 : 0, bSettingsSet ? 1 : 0, bRecoilSet ? 1 : 0,
+		bSequencesSet ? 1 : 0, bBlendspacesSet ? 1 : 0);
+}
+
+void AShooterWeapon::RefreshThirdPersonMagazine()
+{
+	if (!ThirdPersonMesh)
+	{
+		return;
+	}
+
+	const FName Socket = ResolveAttachmentSocket(EWeaponAttachmentType::Magazine, ThirdPersonMesh);
+	UStaticMesh* const Mesh = GetMagazineMesh();
+	if (Socket.IsNone() || !Mesh)
+	{
+		if (ThirdPersonMagazineMesh)
+		{
+			ThirdPersonMagazineMesh->SetVisibility(false, /*bPropagateToChildren*/ true);
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[TP_MAG] %s: magazine part skipped. socket='%s' mesh=%s "
+			"(donor's magazine row, or InfimaTPMagazineRowOverride)"),
+			*GetName(), *Socket.ToString(), *GetNameSafe(Mesh));
+		return;
+	}
+
+	if (!ThirdPersonMagazineMesh)
+	{
+		ThirdPersonMagazineMesh = NewObject<UStaticMeshComponent>(this);
+		if (!ThirdPersonMagazineMesh)
+		{
+			return;
+		}
+		ThirdPersonMagazineMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		ThirdPersonMagazineMesh->SetupAttachment(ThirdPersonMesh, Socket);
+		ThirdPersonMagazineMesh->RegisterComponent();
+	}
+
+	ThirdPersonMagazineMesh->SetStaticMesh(Mesh);
+	// A rebuild must not bring back a round that was fired: on a launcher this part IS the rocket.
+	const bool bFiredRound = bLoadedRoundHiddenTP && IsThirdPersonMagazineTheRound();
+	ThirdPersonMagazineMesh->SetVisibility(GetAttachmentOfType(EWeaponAttachmentType::Magazine) == nullptr
+		&& !bFiredRound, /*bPropagateToChildren*/ true);
+	UE_LOG(LogTemp, Verbose, TEXT("[TP_MAG] %s: magazine part %s at '%s'"),
+		*GetName(), *GetNameSafe(Mesh), *Socket.ToString());
+}
+
+void AShooterWeapon::SetMagazineVisible(bool bVisible)
+{
+	if (ThirdPersonMagazineMesh)
+	{
+		ThirdPersonMagazineMesh->SetVisibility(bVisible, /*bPropagateToChildren*/ true);
+	}
+
+	// A fresh magazine can appear while the old one is still falling. Release the old prop so the
+	// next reload can spawn another; BP_ALPW_Magazine destroys itself after its own delay.
+	if (bVisible)
+	{
+		SpawnedMagazineProp = nullptr;
+	}
+}
+
+void AShooterWeapon::DropMagazineProp()
+{
+	SetMagazineVisible(false);
+
+	if (SpawnedMagazineProp || !InfimaTPMagazineDropClass || !ThirdPersonMagazineMesh || !GetWorld())
+	{
+		return;
+	}
+
+	UStaticMesh* const Mesh = GetMagazineMesh();
+	const FTransform Where = ThirdPersonMagazineMesh->GetComponentTransform();
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* const Prop = GetWorld()->SpawnActor<AActor>(InfimaTPMagazineDropClass, Where, SpawnParams);
+	if (!Prop)
+	{
+		return;
+	}
+	SpawnedMagazineProp = Prop;
+
+	// The prop carries the same mesh the weapon's own part does, so the two look identical mid-reload.
+	// In the pack "Mesh Magazine" is a StaticMeshComponent, not a UStaticMesh property.
+	if (Mesh)
+	{
+		FObjectProperty* const MeshProp = CastField<FObjectProperty>(
+			PackProfile::FindMember(Prop->GetClass(), TEXT("Mesh Magazine")));
+		UStaticMeshComponent* PropMesh = MeshProp && MeshProp->PropertyClass &&
+			MeshProp->PropertyClass->IsChildOf(UStaticMeshComponent::StaticClass())
+			? Cast<UStaticMeshComponent>(MeshProp->GetObjectPropertyValue_InContainer(Prop)) : nullptr;
+		if (!PropMesh)
+		{
+			// Blueprint SCS components can exist on the spawned actor even when its generated
+			// component variable reads null through reflection. This prop has one static mesh.
+			PropMesh = Prop->FindComponentByClass<UStaticMeshComponent>();
+		}
+		if (PropMesh)
+		{
+			PropMesh->SetStaticMesh(Mesh);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TP_MAG] %s: dropped prop %s has no usable Mesh Magazine "
+				"component, it will show its own default mesh."), *GetName(), *GetNameSafe(Prop));
+		}
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[TP_MAG] %s: dropped magazine prop %s at %s"),
+		*GetName(), *GetNameSafe(Prop), *Where.GetLocation().ToString());
+}
+
+UStaticMesh* AShooterWeapon::GetMagazineMesh() const
+{
+	const UObject* const Donor = InfimaTPDonorClass.GetDefaultObject();
+	if (!Donor)
+	{
+		return nullptr;
+	}
+
+	// The pack names its magazine row on the weapon CDO; its own struct field name has a generated
+	// suffix, the property name here does not.
+	FStructProperty* const HandleProp = CastField<FStructProperty>(
+		PackProfile::FindByName(Donor->GetClass(), TEXT("Row Handle Settings Magazine")));
+	if (!HandleProp || HandleProp->Struct != FDataTableRowHandle::StaticStruct())
+	{
+		return nullptr;
+	}
+
+	FDataTableRowHandle Handle = *HandleProp->ContainerPtrToValuePtr<FDataTableRowHandle>(Donor);
+	if (!InfimaTPMagazineRowOverride.IsNone())
+	{
+		Handle.RowName = InfimaTPMagazineRowOverride;
+	}
+	if (!Handle.DataTable || Handle.RowName.IsNone())
+	{
+		return nullptr;
+	}
+
+	const uint8* const Row = Handle.DataTable->FindRowUnchecked(Handle.RowName);
+	const UScriptStruct* const RowStruct = Handle.DataTable->GetRowStruct();
+	if (!Row || !RowStruct)
+	{
+		return nullptr;
+	}
+
+	// The row carries exactly one static mesh, and its field is named Mesh_23_<GUID>, so it is found by
+	// type rather than by name: renaming the field in the pack must not break this.
+	for (TFieldIterator<FObjectProperty> It(RowStruct); It; ++It)
+	{
+		if (It->PropertyClass && It->PropertyClass->IsChildOf(UStaticMesh::StaticClass()))
+		{
+			return Cast<UStaticMesh>(It->GetObjectPropertyValue(It->ContainerPtrToValuePtr<void>(Row)));
+		}
+	}
+	return nullptr;
+}
+
+FTransform AShooterWeapon::GetMagazineDropTransform() const
+{
+	if (ThirdPersonMagazineMesh)
+	{
+		return ThirdPersonMagazineMesh->GetComponentTransform();
+	}
+	return ThirdPersonMesh ? ThirdPersonMesh->GetComponentTransform() : FTransform::Identity;
+}
+
+void AShooterWeapon::UpdateInfimaThirdPersonShotState(UAnimInstance* BodyAnim) const
+{
+	if (!BodyAnim)
+	{
+		return;
+	}
+
+	const FObjectProperty* WeaponProperty = CastField<FObjectProperty>(
+		PackProfile::FindByName(BodyAnim->GetClass(), TEXT("Actor Weapon")));
+	if (!WeaponProperty)
+	{
+		return;
+	}
+	if (WeaponProperty->GetObjectPropertyValue_InContainer(BodyAnim) != this)
+	{
+		PushInfimaThirdPersonProfile(BodyAnim);
+	}
+
+	if (FBoolProperty* Aiming = CastField<FBoolProperty>(
+		PackProfile::FindByName(BodyAnim->GetClass(), TEXT("Aiming"))))
+	{
+		Aiming->SetPropertyValue_InContainer(BodyAnim, IsThirdPersonAimingAfterShot());
+	}
+	if (FIntProperty* Shots = CastField<FIntProperty>(
+		PackProfile::FindByName(BodyAnim->GetClass(), TEXT("Shot Count"))))
+	{
+		Shots->SetPropertyValue_InContainer(BodyAnim, GetThirdPersonShotCount());
+	}
+}
+
 void AShooterWeapon::PushPackViewmodelSettings()
 {
 	if (!PackWeaponSettings || !PawnOwner)
@@ -1998,6 +2575,15 @@ void AShooterWeapon::ApplyPackWeaponSettings()
 				*GetName(), bManual ? TEXT("true") : TEXT("false"), *PackWeaponClass->GetName());
 		}
 		bPerRoundReload = bManual;
+
+		// Their grenade launcher class hides the "Rocket" bone on the shot and shows it on the reload
+		// in its own graph, which we do not run. Same fact, taken from the same place.
+		if (LoadedRoundBoneName.IsNone() && PackWeaponClass->GetName().StartsWith(TEXT("BP_GrenadeLauncher")))
+		{
+			LoadedRoundBoneName = TEXT("Rocket");
+			UE_LOG(LogTemp, Log, TEXT("[PACK] %s: LoadedRoundBoneName <- Rocket (their class is %s)"),
+				*GetName(), *PackWeaponClass->GetName());
+		}
 	}
 
 	// --- The anim blueprint the gun mesh runs (their ABP_<gun>). ---
@@ -2334,6 +2920,19 @@ const FName AShooterWeapon::ThirdPersonSocketSuffix(TEXT("_TP"));
 // hand that holds it, and both hands are then keyed against it.
 const FName AShooterWeapon::AnimatedWeaponSocketName(TEXT("ik_hand_gun"));
 
+void AShooterWeapon::AttachThirdPersonWeaponMesh(USkeletalMeshComponent* BodyMesh, FName LegacySocket)
+{
+	if (!ThirdPersonMesh || !BodyMesh) return;
+	const FName Socket = bThirdPersonWeaponPoseFromAnimation ? AnimatedWeaponSocketName : LegacySocket;
+	const FAttachmentTransformRules Rules(EAttachmentRule::SnapToTarget,
+		EAttachmentRule::SnapToTarget, EAttachmentRule::KeepRelative, false);
+	ThirdPersonMesh->AttachToComponent(BodyMesh, Rules, Socket);
+	if (!bThirdPersonWeaponPoseFromAnimation)
+	{
+		AlignMeshToGripSocket(ThirdPersonMesh, PickThirdPersonSocket(ThirdPersonMesh, OptionalGripSocketName));
+	}
+}
+
 FName AShooterWeapon::PickThirdPersonSocket(const USkeletalMeshComponent* WeaponMesh, const FName BaseSocket)
 {
 	if (!WeaponMesh || BaseSocket.IsNone())
@@ -2597,6 +3196,16 @@ void AShooterWeapon::ActivateWeapon()
 {
 	// unhide this weapon
 	SetActorHiddenInGame(false);
+
+	// A gun that comes out empty (picked up that way, or put away empty before this) shows no round.
+	// Only where the ammo count is true: the machine that fires it, or the server for an NPC.
+	// CurrentBullets is not replicated, so every other machine keeps what the fire and reload
+	// effects told it.
+	if (!LoadedRoundBoneName.IsNone() && UsesReload() && !bReloadResumePending && PawnOwner
+		&& (PawnOwner->IsLocallyControlled() || (HasAuthority() && !PawnOwner->IsPlayerControlled())))
+	{
+		SetLoadedRoundVisible(true, true, CurrentBullets > 0 || bIsReloading);
+	}
 
 	// Before the owner is told, because OnWeaponActivated is what swaps the arms anim class over,
 	// and the graph reads the hold pose out of ActiveSettings on its first update.
@@ -5179,7 +5788,8 @@ bool AShooterWeapon::StartReload()
 	// Decided once, here, and carried everywhere else. Recomputing it further down would read an
 	// ammo count that the reload is in the middle of changing, and the two halves of the animation
 	// could then disagree about which reload this is.
-	const bool bSecondary = UsesSecondaryReload() && SecondaryReloadMontage != nullptr;
+	const bool bSecondary = UsesSecondaryReload()
+		&& (SecondaryReloadMontage != nullptr || SecondaryReloadMontageTP != nullptr);
 	const float ThisReloadTime = GetActiveReloadTime();
 
 	ShellStage = bSecondary ? EWeaponReloadStage::Secondary : EWeaponReloadStage::Primary;
@@ -5473,7 +6083,9 @@ void AShooterWeapon::SuspendReloadForHolster()
 	}
 	SuspendedReloadProgress = Progress;
 	SuspendedReloadWeaponProgress = Progress;
-	PauseWeaponReloadAnimation(GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
+	PauseWeaponReloadAnimation(FirstPersonMesh, GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
+	SuspendedReloadWeaponProgressTP = Progress;
+	PauseWeaponReloadAnimation(ThirdPersonMesh, GetReloadWeaponAnimation(ShellStage, true), SuspendedReloadWeaponProgressTP);
 
 	// The audio's own clock, in seconds, is the only honest answer to "where did the sound stop":
 	// ReloadSound may be a cue or metasound whose GetDuration does not describe its content, and
@@ -5498,6 +6110,15 @@ void AShooterWeapon::SuspendReloadForHolster()
 	bReloadResumePending = true;
 	bIsReloading = false;
 	GetWorld()->GetTimerManager().ClearTimer(ReloadTimer);
+
+	// The round is not in the gun until the reload finishes. Put away mid-reload, the gun goes back
+	// to empty; ResumeReloadAfterEquip brings the round out again with the resumed animation.
+	if (!LoadedRoundBoneName.IsNone())
+	{
+		GetWorldTimerManager().ClearTimer(LoadedRoundRevealTimer);
+		GetWorldTimerManager().ClearTimer(LoadedRoundRevealTimerTP);
+		SetLoadedRoundVisible(true, true, false);
+	}
 }
 
 void AShooterWeapon::ResumeReloadAfterEquip()
@@ -5534,7 +6155,12 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 			}
 		}
 	}
-	ResumeWeaponReloadAnimation(GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
+	ResumeWeaponReloadAnimation(FirstPersonMesh, GetReloadWeaponAnimation(ShellStage), SuspendedReloadWeaponProgress);
+	ResumeWeaponReloadAnimation(ThirdPersonMesh, GetReloadWeaponAnimation(ShellStage, true), SuspendedReloadWeaponProgressTP);
+
+	// Resumed part way through, so the reveal moment is behind us on both sides.
+	SetLoadedRoundVisible(true, true, true);
+
 	if (ShellStage != EWeaponReloadStage::ShellLoop && ShellStage != EWeaponReloadStage::ShellEnd)
 	{
 		// The reload's audio lives in a montage notify we have taken over: the resumed montage

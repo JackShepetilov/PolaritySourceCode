@@ -1102,6 +1102,7 @@ void UApexMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	// move. This copy exists purely for the machines that only watch this character.
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bWantsToSprint, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsSliding, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsAiming, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsWallRunning, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsMantling, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsAirDashing, COND_SimulatedOnly);

@@ -71,9 +71,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment")
 	FText DisplayName;
 
-	/** The square in the grid and the square beside the weapon draw this. */
+	/** Its own picture: set it for an attachment that is one of a kind (a scope, a flashlight).
+	 *  Leave empty for a tier of a family, which then wears the family's or the type's picture.
+	 *  A white silhouette: the UI tints it by Rarity. Draw with GetDisplayIcon, not this. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment")
 	TObjectPtr<UTexture2D> Icon;
+
+	/** What the UI draws: Icon, else the family's icon, else the type's
+	 *  (Project Settings -> Polarity -> Inventory Icons). */
+	UFUNCTION(BlueprintPure, Category = "Attachment")
+	UTexture2D* GetDisplayIcon() const;
 
 	// ==================== Dispenser ====================
 	// Docs/Dispenser_Upgrade_SlotMachine_Spec_2026-09-25.md.

@@ -4386,6 +4386,10 @@ namespace
 void AShooterCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	if (CurrentWeapon && GetMesh())
+	{
+		CurrentWeapon->UpdateInfimaThirdPersonShotState(GetMesh()->GetAnimInstance());
+	}
 
 	// First of the three that borrow the brackets, so the other two always get the last word on them.
 	UpdateGrappleFetchAiming();
@@ -6442,7 +6446,7 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 
 	// attach the weapon meshes
 	Weapon->GetFirstPersonMesh()->AttachToComponent(GetFirstPersonMesh(), AttachmentRule, FirstPersonSocket);
-	Weapon->GetThirdPersonMesh()->AttachToComponent(GetMesh(), AttachmentRule, ThirdPersonWeaponSocket);
+	Weapon->AttachThirdPersonWeaponMesh(GetMesh(), ThirdPersonWeaponSocket);
 
 	// If the weapon mesh has an OptionalGrip socket, shift the mesh's relative transform so
 	// that this socket lands exactly at the origin of the parent attach socket (the hand).
@@ -6486,9 +6490,6 @@ void AShooterCharacter::AttachWeaponMeshes(AShooterWeapon* Weapon)
 		AShooterWeapon::AlignMeshToGripSocket(Weapon->GetFirstPersonMesh(), FName("OptionalGrip"));
 	}
 
-	USkeletalMeshComponent* ThirdPersonWeaponMesh = Weapon->GetThirdPersonMesh();
-	AShooterWeapon::AlignMeshToGripSocket(ThirdPersonWeaponMesh,
-		AShooterWeapon::PickThirdPersonSocket(ThirdPersonWeaponMesh, AShooterWeapon::OptionalGripSocketName));
 
 	// Blueprint-added attachments under the weapon's first-person mesh (sights, lasers, anything
 	// bolted on in the BP) do not inherit its owner-only rendering and would otherwise show up on
@@ -6509,9 +6510,6 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 	{
 		return;
 	}
-
-	// Play on third-person mesh (visible to other players)
-	PlayThirdPersonMontageLocal(Montage, 1.0f);
 
 	// Play on first-person mesh (visible to local player)
 	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
@@ -6539,8 +6537,7 @@ void AShooterCharacter::PlayReloadMontage(UAnimMontage* Montage)
 		}
 	}
 
-	// The body everyone else is looking at, on every machine.
-	PlayThirdPersonMontageEverywhere(Montage, 1.0f);
+	// Body montages belong to the weapon's TP set and travel with its reload/fire effects.
 }
 
 void AShooterCharacter::PlayThirdPersonMontageEverywhere(UAnimMontage* Montage, float PlayRate)
@@ -7920,6 +7917,7 @@ void AShooterCharacter::OnWeaponActivated(AShooterWeapon* Weapon)
 	{
 		GetMesh()->SetAnimInstanceClass(TPAnimClass);
 	}
+	Weapon->PushInfimaThirdPersonProfile(GetMesh()->GetAnimInstance());
 
 	// Which recoil system this weapon uses is decided here, once per equip, not per shot.
 	RefreshPackRecoil(Weapon);
@@ -8186,7 +8184,11 @@ AShooterWeapon* AShooterCharacter::FindWeaponOfType(TSubclassOf<AShooterWeapon> 
 {
 	for (AShooterWeapon* Weapon : OwnedWeapons)
 	{
-		if (Weapon->IsA(WeaponClass))
+		// OwnedWeapons can contain a null and this function used to dereference it: the array is
+		// replicated, so a client can hold an entry whose object never resolved (or a weapon destroyed
+		// while still listed). ShooterPickup::OnOverlap calls this right after AddWeaponClass, so the
+		// null crashed the game on pickup. CountYankedCopiesOfClass guards the same loop the same way.
+		if (Weapon && Weapon->IsA(WeaponClass))
 		{
 			return Weapon;
 		}
@@ -9361,7 +9363,7 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 		FTransform TPTransform = FTransform::Identity;
 		float TPAlpha = 0.0f;
 
-		if (CurrentWeapon)
+		if (CurrentWeapon && !CurrentWeapon->bThirdPersonWeaponPoseFromAnimation)
 		{
 			if (USkeletalMeshComponent* WeaponTPMesh = CurrentWeapon->GetThirdPersonMesh())
 			{

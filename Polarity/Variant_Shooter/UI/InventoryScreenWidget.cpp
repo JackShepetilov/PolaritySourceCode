@@ -14,6 +14,7 @@
 #include "Components/UniformGridSlot.h"
 #include "GameFramework/PlayerController.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
+#include "Variant_Shooter/Inventory/InventoryIconSettings.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/UI/InventoryDragDropOperation.h"
 #include "Variant_Shooter/UI/InventorySlotWidget.h"
@@ -286,16 +287,13 @@ void UInventoryScreenWidget::Rebuild()
 	RebuildWeaponPanels(*Inventory);
 	RebuildActionSlots();
 
-	// Attachment slots are per weapon and the count is the same for both, so both columns get the
-	// same numbers. What is mounted differs, so each column is given its own weapon.
+	// The free mount count is per weapon and the same for both; which slots each gun has, and
+	// what is in them, is the gun's own.
 	const int32 FreeSlots = Inventory->GetFreeAttachmentSlots();
-	const int32 MaxSlots = Inventory->GetMaxFreeAttachmentSlots();
 	const TArray<AShooterWeapon*>& Weapons = Character->GetOwnedWeapons();
 
-	RebuildAttachmentSlots(FirstWeaponAttachments,
-		Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, FreeSlots, MaxSlots);
-	RebuildAttachmentSlots(SecondWeaponAttachments,
-		Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, FreeSlots, MaxSlots);
+	RebuildAttachmentSlots(FirstWeaponAttachments, Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, FreeSlots);
+	RebuildAttachmentSlots(SecondWeaponAttachments, Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, FreeSlots);
 }
 
 void UInventoryScreenWidget::RebuildWeaponPanels(const UInventoryComponent& Inventory)
@@ -423,21 +421,19 @@ void UInventoryScreenWidget::RebuildGrid(const UInventoryComponent& Inventory)
 	}
 }
 
-void UInventoryScreenWidget::RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon,
-	int32 FreeSlots, int32 MaxSlots)
+void UInventoryScreenWidget::RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots)
 {
 	if (!Container || !AttachmentSlotClass)
 	{
 		return;
 	}
 
-	// What is fitted, in mount order. That order is also the order the cost falls in: the first
-	// FreeSlots parts are free and the rest are paying for a cell, which is the same subtraction
-	// the inventory does, read the same way round.
-	const TArray<TObjectPtr<UWeaponAttachmentDefinition>>* Mounted =
-		Weapon ? &Weapon->GetInstalledAttachments() : nullptr;
+	// One square per slot the gun HAS, in the one order the whole game uses (Apex: muzzle,
+	// magazine, optic, stock). @see UInventoryIconSettings
+	TArray<EWeaponAttachmentType> Types;
+	UInventoryIconSettings::GetWeaponSlotTypes(Weapon, Types);
 
-	for (int32 Index = 0; Index < MaxSlots; ++Index)
+	for (int32 Index = 0; Index < Types.Num(); ++Index)
 	{
 		UInventorySlotWidget* Square = GetOrCreateSquare(Container, Index, AttachmentSlotClass);
 		if (!Square)
@@ -445,31 +441,20 @@ void UInventoryScreenWidget::RebuildAttachmentSlots(UPanelWidget* Container, ASh
 			continue;
 		}
 
-		UWeaponAttachmentDefinition* Here =
-			(Mounted && Mounted->IsValidIndex(Index)) ? (*Mounted)[Index].Get() : nullptr;
-
-		// Three states and no fourth. Filled when something is in it; free when it is one of the
-		// squares the meta has paid for; Paid otherwise, which is usable but takes a cell out of
-		// the bag. Nothing here is ever Locked: a slot beyond the free ones is a price, not a wall.
-		EInventoryCellVisual CellVisual = EInventoryCellVisual::Paid;
-		if (Here)
-		{
-			CellVisual = EInventoryCellVisual::Filled;
-		}
-		else if (Index < FreeSlots)
-		{
-			CellVisual = EInventoryCellVisual::Empty;
-		}
-
-		Square->SetCell(CellVisual, Here ? EInventorySlotKind::Attachment : EInventorySlotKind::Empty,
-			Here ? Here->Icon.Get() : nullptr, Here ? 1 : 0, Here ? 1 : 0);
+		Square->SetFromWeaponSlot(Weapon, Types[Index], FreeSlots);
 
 		// The square's identity. A weapon square never gets a grid index, so it can neither be
 		// confused for a cell of the bag nor start a drag out of one.
-		Square->SetAttachmentTarget(Weapon, Here);
+		Square->SetAttachmentTarget(Weapon, Weapon ? Weapon->GetAttachmentOfType(Types[Index]) : nullptr, Types[Index]);
 
 		Square->OnAttachmentInstall.BindUObject(this, &UInventoryScreenWidget::HandleAttachmentInstall);
 		Square->OnAttachmentRemove.BindUObject(this, &UInventoryScreenWidget::HandleAttachmentRemove);
+	}
+
+	// A gun with fewer slots than the last one drawn here.
+	while (Container->GetChildrenCount() > Types.Num())
+	{
+		Container->RemoveChildAt(Container->GetChildrenCount() - 1);
 	}
 }
 
@@ -608,6 +593,7 @@ void UInventoryScreenWidget::RebuildActionSlots()
 		int32 Level = 0;
 		UUpgradeDefinition* Equipped = Upgrades->GetOwnedInSlot(Layout, ActionSquareSlotIndices[Index], Level);
 		UTexture2D* Icon = Equipped ? (Equipped->Icon ? Equipped->Icon.Get() : AbilityUpgradeIcon.Get()) : nullptr;
+		Square->SetRarityTint(Equipped != nullptr, Equipped ? Equipped->GetLevelRarity(Level) : EUpgradeRarity::Common);
 		Square->SetCell(Equipped ? EInventoryCellVisual::Filled : EInventoryCellVisual::Empty,
 			Equipped ? EInventorySlotKind::AbilityUpgrade : EInventorySlotKind::Empty,
 			Icon, Level, Level);
@@ -715,7 +701,7 @@ UTexture2D* UInventoryScreenWidget::IconForSlot(const FInventorySlot& InSlot) co
 	{
 		if (const UWeaponAttachmentDefinition* Def = Cast<UWeaponAttachmentDefinition>(InSlot.Payload))
 		{
-			if (UTexture2D* AttachIcon = Def->Icon.Get())
+			if (UTexture2D* AttachIcon = Def->GetDisplayIcon())
 			{
 				return AttachIcon;
 			}

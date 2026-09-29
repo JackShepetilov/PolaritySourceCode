@@ -29,6 +29,7 @@ class UCameraComponent;
 class UAnimMontage;
 class UAnimSequenceBase;
 class UAnimInstance;
+class UDataTable;
 class UAnimationAsset;
 class UNiagaraSystem;
 class UNiagaraComponent;
@@ -654,12 +655,101 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshLastShotAnimation;
 
-	/** Runs one of the above on both weapon meshes: the first person one the shooter sees and the
-	 *  third person one everybody else sees. Does nothing when the asset is not set. */
-	void PlayWeaponMeshAnimation(UAnimationAsset* Animation);
-	UAnimationAsset* GetReloadWeaponAnimation(EWeaponReloadStage Stage) const;
-	void PauseWeaponReloadAnimation(UAnimationAsset* Animation, float& InOutProgress);
-	void ResumeWeaponReloadAnimation(UAnimationAsset* Animation, float Progress);
+	/** Each mesh receives only its own animation set. Empty TP slots never fall back to FP. */
+	void PlayWeaponMeshAnimation(USkeletalMeshComponent* Mesh, UAnimationAsset* Animation, float Duration = 0.0f);
+	UAnimationAsset* GetReloadWeaponAnimation(EWeaponReloadStage Stage, bool bThirdPerson = false) const;
+	void PauseWeaponReloadAnimation(USkeletalMeshComponent* Mesh, UAnimationAsset* Animation, float& InOutProgress);
+	void ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, UAnimationAsset* Animation, float Progress);
+
+	/** Plays a montage on the holder's body. BlendInTime < 0 keeps the montage's own blend in.
+	 *  Returns the anim instance it went to, or null when nothing played. */
+	UAnimInstance* PlayThirdPersonWeaponMontage(UAnimMontage* Montage, float Duration = 0.0f, float BlendInTime = -1.0f);
+
+	/** Crossfade between the third person stages of a per round reload (open, each shell, close).
+	 *
+	 *  The pack's TP stage montages blend in and out in zero time, and each stage ends exactly when
+	 *  the next one is due: for a frame, or for a whole network delay on another machine, nothing was
+	 *  playing and the body snapped to its base pose between two shells. Now a stage that is followed
+	 *  by another holds its last pose instead of ending, and the next one crossfades over it. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character", meta = (ClampMin = 0.0))
+	float ThirdPersonReloadStageBlendTime = 0.15f;
+
+	/** How long a held stage may wait for the next one before it lets go by itself. Covers a reload
+	 *  cut short without any montage taking over the slot, and a stage lost on the network. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character", meta = (ClampMin = 0.0))
+	float ThirdPersonReloadStageHoldTimeout = 0.5f;
+
+	/** The held stage instances (body and TP weapon mesh), released by the next stage or the timeout. */
+	TArray<TPair<TWeakObjectPtr<UAnimInstance>, int32>> HeldReloadStageInstances;
+	FTimerHandle HeldReloadStageReleaseTimer;
+
+	/** Holds the montage's last pose on that anim instance until the next stage or the timeout. */
+	void HoldReloadStagePose(UAnimInstance* Anim, UAnimMontage* Montage);
+	void ReleaseHeldReloadStagePoses();
+
+	// ==================== Loaded round ====================
+
+	/** Bone of the round that sits in the weapon while it is loaded: the rocket in an RPG's tube.
+	 *
+	 *  Hidden on the shot that empties the magazine and shown again when a reload starts, on the
+	 *  first and third person weapon meshes alike (a mesh without the bone is skipped; bone names
+	 *  do not care about case). When the third person magazine part hangs off this bone, that part is
+	 *  the round too and follows it. None: the weapon shows no round.
+	 *
+	 *  Filled from the animation pack for their grenade launcher class, which does exactly this with
+	 *  its Rocket bone in its own Blueprint. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Loaded Round")
+	FName LoadedRoundBoneName;
+
+	/** Seconds into the first person reload before the round appears. 0 suits a reload whose first
+	 *  frame already has the round in the hand, as the pack's RPG7 does. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Loaded Round", meta = (ClampMin = 0.0))
+	float LoadedRoundRevealTime = 0.0f;
+
+	/** The same for the third person reload, in that animation's own seconds, before it is stretched
+	 *  to the reload's length. Infima RL_01 keeps the rocket in the tube for its first 0.3 s and hides
+	 *  it until 0.35 s itself, so its value is 0.35. */
+	UPROPERTY(EditAnywhere, Category = "Animation|Loaded Round", meta = (ClampMin = 0.0))
+	float LoadedRoundRevealTimeTP = 0.0f;
+
+	/** Cosmetic, per machine and per perspective: set by the fire and reload effects every machine
+	 *  already plays, so nothing here is replicated. */
+	bool bLoadedRoundHiddenFP = false;
+	bool bLoadedRoundHiddenTP = false;
+	FTimerHandle LoadedRoundRevealTimer;
+	FTimerHandle LoadedRoundRevealTimerTP;
+
+	void SetLoadedRoundVisible(bool bFirstPerson, bool bThirdPerson, bool bVisible);
+	void ScheduleLoadedRoundReveal(float ThirdPersonStretch);
+
+	/** True when the third person magazine part is attached to the loaded round's bone or below it. */
+	bool IsThirdPersonMagazineTheRound() const;
+
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshFireAnimationTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshLastShotAnimationTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshReloadAnimationTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshSecondaryReloadAnimationTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	TObjectPtr<UAnimationAsset> WeaponMeshReloadEndAnimationTP;
+
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	TObjectPtr<UAnimMontage> FiringMontageTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	TObjectPtr<UAnimMontage> CycleActionMontageTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	TObjectPtr<UAnimMontage> ReloadMontageTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	TObjectPtr<UAnimMontage> SecondaryReloadMontageTP;
+	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	TObjectPtr<UAnimMontage> ReloadEndMontageTP;
+
+	// Cosmetic state updated by the existing fire-effects multicast on each machine.
+	double LastThirdPersonShotTime = -1000.0;
+	int32 ThirdPersonShotCount = 0;
 	void StopReloadAudio();
 	void PlayReloadAudioAtProgress(float Progress);
 	/** Restart the reload audio from OffsetSeconds into the track, with no duration-fraction
@@ -787,6 +877,11 @@ protected:
 	// The two questions the CHARACTER asks about this weapon's recoil, so both are public. The
 	// fields and the filling above stay protected: they are the weapon's own business.
 public:
+
+	/** Debug only, driven by the polarity.npc.damage console command (NPCDebugCommands.cpp): scale
+	 *  this weapon's shot damage on the live weapon. The authored number is remembered the first
+	 *  time, so 1.0 puts it back exactly and 0 makes the weapon harmless without touching assets. */
+	void SetDebugDamageScale(float Scale);
 
 	/** The PRAS recoil asset this weapon should drive, or null when it has none.
 	 *
@@ -981,6 +1076,13 @@ protected:
 	 *  socket name. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachments")
 	TMap<EWeaponAttachmentType, FName> AttachmentSockets;
+
+	/** Which attachment slots this gun has, Apex-style: an R-301 has all four, a shotgun no
+	 *  magazine. The ORDER they are drawn in is one for the whole game (Project Settings ->
+	 *  Polarity -> Inventory Icons); whether a particular attachment fits is its own whitelist.
+	 *  An attachment of a type missing here is refused. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachments")
+	TArray<EWeaponAttachmentType> AttachmentSlots;
 
 	/** Name of a component in this weapon's Blueprint that IS the built-in sight, when the weapon
 	 *  carries one as its own component rather than as part of the mesh.
@@ -1285,6 +1387,7 @@ protected:
 	bool bReloadCommitted = false;
 	float SuspendedReloadProgress = 0.0f;
 	float SuspendedReloadWeaponProgress = 0.0f;
+	float SuspendedReloadWeaponProgressTP = 0.0f;
 	/** Where the reload AUDIO left off when it was suspended, in SECONDS into the track. Measured
 	 *  from the component's own playback clock (world time), not from a montage fraction: ReloadSound
 	 *  may be a cue or metasound whose GetDuration is misleading, and a fraction of a wrong duration
@@ -2317,6 +2420,96 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
 	bool bWeaponPoseFromAnimation = false;
 
+	/** LPSP body animations place the gun on ik_hand_gun and author both hands in the pose. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	bool bThirdPersonWeaponPoseFromAnimation = false;
+
+	/** Infima source weapon for the shared TP AnimBP's animation settings and recoil data. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	TSubclassOf<AActor> InfimaTPDonorClass;
+
+	/** Infima character pose table paired with InfimaTPDonorClass. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	TObjectPtr<UDataTable> InfimaTPPosesTable;
+
+	/** Infima character sequence table (jog, jumps, landings) paired with InfimaTPDonorClass.
+	 *
+	 *  It has to be named here because the donor's own Settings Animation does NOT carry it: in the pack
+	 *  that table lives on the AnimBP defaults and is the same asset for every weapon. Copying the donor
+	 *  struct therefore clears the field, the graph finds no table and leaves Sequence Loop Weapon Jog
+	 *  on the AnimBP's own default, which is another family's animation. @see PushInfimaThirdPersonProfile. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	TObjectPtr<UDataTable> InfimaTPSequencesTable;
+
+	/** Infima character blendspace table (aim offsets, look) for the same reason as the sequences. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	TObjectPtr<UDataTable> InfimaTPBlendspacesTable;
+
+	/** Row of the pack's magazine table to use instead of the one the donor names. Empty: the donor's. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	FName InfimaTPMagazineRowOverride;
+
+	/** The third person magazine part, built in code from the pack's magazine row.
+	 *
+	 *  Created here rather than authored in each weapon Blueprint so that transferring a weapon is data
+	 *  only: the donor names the table and the row, the socket comes from AttachmentSockets, and the mesh
+	 *  comes out of the row. First person is not touched, its model carries its own magazine. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Animation|Third Person")
+	TObjectPtr<UStaticMeshComponent> ThirdPersonMagazineMesh;
+
+	/** (Re)build the magazine part. Idempotent, called from RebuildAttachmentMeshes. */
+	void RefreshThirdPersonMagazine();
+
+	/** Interface helpers for the events the pack's animations call on the weapon. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Third Person")
+	void SetMagazineVisible(bool bVisible);
+
+	UFUNCTION(BlueprintPure, Category = "Animation|Third Person")
+	UStaticMesh* GetMagazineMesh() const;
+
+	UFUNCTION(BlueprintPure, Category = "Animation|Third Person")
+	FTransform GetMagazineDropTransform() const;
+
+	/** The pack's magazine prop to drop during a reload, when this weapon has one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	TSubclassOf<AActor> InfimaTPMagazineDropClass;
+
+	/** The prop that is currently on the floor or in the hand during a reload. */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> SpawnedMagazineProp;
+
+	/** What the pack's magazine-drop notify asks for: hide the part and put its prop in the world.
+	 *
+	 *  Idempotent per reload: a repeated notify does not spawn a second prop. The old prop follows
+	 *  the Infima actor's own cleanup timer after the fresh magazine appears. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Third Person")
+	void DropMagazineProp();
+
+
+
+
+	/** The AR_02 adapter has authored body recoil curves that its Infima weapon CDO lacks. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Third Person")
+	bool bUseTPAnimBPDefaultRecoil = false;
+
+	/** Feed the active weapon and its Infima profile to the character's current TP AnimBP. */
+	void PushInfimaThirdPersonProfile(UAnimInstance* BodyAnim) const;
+	void UpdateInfimaThirdPersonShotState(UAnimInstance* BodyAnim) const;
+
+	/** Seconds the third-person pose keeps aiming after the latest shot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Animation|Third Person", meta = (ClampMin = "0.0", Units = "s"))
+	float ThirdPersonAimHoldTime = 3.0f;
+
+	void AttachThirdPersonWeaponMesh(USkeletalMeshComponent* BodyMesh, FName LegacySocket);
+
+	UFUNCTION(BlueprintPure, Category = "Animation|Third Person")
+	bool IsThirdPersonAimingAfterShot() const;
+
+	UFUNCTION(BlueprintPure, Category = "Animation|Third Person")
+	int32 GetThirdPersonShotCount() const;
+
+	UAnimMontage* GetThirdPersonReloadMontage(EWeaponReloadStage Stage) const;
+
 	/** Bone the first person mesh hangs on when bWeaponPoseFromAnimation is set. */
 	static const FName AnimatedWeaponSocketName;
 
@@ -2639,6 +2832,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
 	UWeaponAttachmentDefinition* GetAttachmentOfType(EWeaponAttachmentType InType) const;
+
+	/** True when this gun has a slot of that type. @see AttachmentSlots */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	bool HasAttachmentSlot(EWeaponAttachmentType InType) const { return AttachmentSlots.Contains(InType); }
 
 	/** Everything mounted, in the order it was mounted. That order is what decides which ones are
 	 *  free and which ones cost a cell, so it is deliberately not sorted. */

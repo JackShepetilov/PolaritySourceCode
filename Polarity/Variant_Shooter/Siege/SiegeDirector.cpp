@@ -11,10 +11,14 @@
 #include "EngineUtils.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/GameStateBase.h"
+#include "GameFramework/PlayerState.h"
+#include "HAL/IConsoleManager.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
 #include "Net/UnrealNetwork.h"
 #include "SiegeCoreBuildable.h"
+#include "SiegeLane.h"
+#include "SiegeLaneFollower.h"
 #include "TimerManager.h"
 #include "Variant_Shooter/AI/FlyingDrone.h"
 #include "Variant_Shooter/AI/KamikazeCarrierDrone.h"
@@ -105,6 +109,25 @@ namespace
 	}
 }
 
+int32 FSiegeCreepKind::CountFor(int32 WaveNumber, float Minutes, int32 NumPlayers, FName LaneName) const
+{
+	if (!NPCClass || WaveNumber < FirstWave || (LastWave > 0 && WaveNumber > LastWave))
+	{
+		return 0;
+	}
+	if ((WaveNumber - FirstWave) % FMath::Max(EveryNthWave, 1) != 0)
+	{
+		return 0;
+	}
+	if (OnlyLanes.Num() > 0 && !OnlyLanes.Contains(LaneName))
+	{
+		return 0;
+	}
+	const FRichCurve* const Curve = CountByMinute.GetRichCurveConst();
+	const float Base = (Curve && Curve->GetNumKeys() > 0) ? Curve->Eval(Minutes) : static_cast<float>(BaseCount);
+	return FMath::Max(0, FMath::RoundToInt(Base + CountPerPlayer * NumPlayers));
+}
+
 ASiegeDirector::ASiegeDirector()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -129,6 +152,7 @@ void ASiegeDirector::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME(ASiegeDirector, bSiegeActive);
 	DOREPLIFETIME(ASiegeDirector, bBaseLost);
 	DOREPLIFETIME(ASiegeDirector, AliveEnemies);
+	DOREPLIFETIME(ASiegeDirector, SiegeStartServerTime);
 }
 
 ASiegeDirector* ASiegeDirector::Get(const UWorld* World)
@@ -305,15 +329,18 @@ void ASiegeDirector::StartSiege()
 	}
 	bSiegeActive = true;
 	CurrentWave = 0;
+	SiegeStartServerTime = GetServerNow();
 	SpawnQueue.Reset();
+	LaneQueue.Reset();
 	RecentSpawns.Reset();
 	PacedSalvoCredit = 0.0f;
 	bBaseQuiet = false;
 	LastPulseTime = GetServerNow();
 	GetWorldTimerManager().SetTimer(PulseTimer, this, &ASiegeDirector::Pulse, SiegePulseInterval, true);
 	OnSiegeStarted.Broadcast();
-	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: siege started, first wave in %.0fs, spawn ring %s, carrier cap %d, paced drops %s"),
-		*GetName(), FirstWaveDelay, bUseSpawnRing ? TEXT("on") : TEXT("off"), MaxCarriersAlive,
+	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: siege started, first wave in %.0fs, %s, carrier cap %d, paced drops %s"),
+		*GetName(), FirstWaveDelay,
+		IsLaneSiege() ? TEXT("lanes") : (bUseSpawnRing ? TEXT("spawn ring") : TEXT("spawn points")), MaxCarriersAlive,
 		bPaceCarrierSalvos ? TEXT("on") : TEXT("off"));
 	ScheduleNextWave(FirstWaveDelay);
 }
@@ -329,6 +356,7 @@ void ASiegeDirector::StopSiege()
 	// Enemies not out yet never come; the carriers go back to their own cooldowns
 	// (IsPacingCarriers is false from here).
 	SpawnQueue.Reset();
+	LaneQueue.Reset();
 	bSiegeActive = false;
 	NextWaveServerTime = 0.0f;
 	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: siege stopped at wave %d"), *GetName(), CurrentWave);
@@ -386,9 +414,10 @@ void ASiegeDirector::StartWave()
 
 	const int32 WaveNumber = CurrentWave + 1;
 	const int32 AuthoredIndex = WaveNumber - 1;
-	const bool bAuthored = AuthoredWaves.IsValidIndex(AuthoredIndex);
+	const bool bLanes = IsLaneSiege();
+	const bool bAuthored = !bLanes && AuthoredWaves.IsValidIndex(AuthoredIndex);
 
-	if (!bAuthored && EndlessPool.Num() == 0)
+	if (!bLanes && !bAuthored && EndlessPool.Num() == 0)
 	{
 		// Nothing left to send: the author wrote a finite siege.
 		UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: authored waves spent and no endless pool, siege over after wave %d"), *GetName(), CurrentWave);
@@ -406,8 +435,12 @@ void ASiegeDirector::StartWave()
 		ApplyDronesPerTarget(Carrier);
 	}
 
-	const int32 QueuedBefore = SpawnQueue.Num();
-	if (bAuthored)
+	const int32 QueuedBefore = SpawnQueue.Num() + LaneQueue.Num();
+	if (bLanes)
+	{
+		SpawnLaneWave(WaveNumber);
+	}
+	else if (bAuthored)
 	{
 		SpawnAuthoredWave(AuthoredWaves[AuthoredIndex]);
 	}
@@ -416,16 +449,28 @@ void ASiegeDirector::StartWave()
 		SpawnEndlessWave(WaveNumber);
 	}
 	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: wave %d queued %d (%d still waiting from before), %d alive, alive cost %.2f, %d carriers, drones per player %d"),
-		*GetName(), WaveNumber, SpawnQueue.Num() - QueuedBefore, QueuedBefore, AliveEnemies, GetAliveCost(),
+		*GetName(), WaveNumber, SpawnQueue.Num() + LaneQueue.Num() - QueuedBefore, QueuedBefore, AliveEnemies, GetAliveCost(),
 		Carriers.Num(), GetDronesPerTargetForWave(WaveNumber));
 
-	// The first one comes out now, the rest on the trickle.
+	// The first one comes out now, the rest on the trickle; a lane pack comes out whole.
 	TickSpawnQueue(GetServerNow());
+	TickLaneQueue(GetServerNow());
 	RefreshAliveCount();
 	OnWaveStarted.Broadcast(WaveNumber);
 
 	// The clock runs from the start of this wave, not from its death. A lull can bring it forward.
-	ScheduleNextWave(WaveInterval + GetExtraDelayBefore(WaveNumber + 1));
+	// A staggered lane wave is one pass round the cycle: the next starts one interval after the last
+	// lane's pack, so the rhythm between packs never changes at the seam.
+	if (bLanes && bStaggerLanes)
+	{
+		TArray<ASiegeLane*> Lanes;
+		GetCycleLanes(Lanes);
+		ScheduleNextWave(FMath::Max(Lanes.Num(), 1) * GetLanePackInterval());
+	}
+	else
+	{
+		ScheduleNextWave(WaveInterval + GetExtraDelayBefore(WaveNumber + 1));
+	}
 }
 
 float ASiegeDirector::GetExtraDelayBefore(int32 WaveNumber) const
@@ -628,11 +673,20 @@ bool ASiegeDirector::SpawnOne(TSubclassOf<AShooterNPC> NPCClass)
 		return false;
 	}
 
+	AdoptSpawned(NPC, NPCClass, SpawnTransform.GetLocation());
+	UE_LOG(LogTemp, Verbose, TEXT("[SIEGE_DEBUG] %s: spawned %s at %s (%.0f, %.0f, %.0f)"), *GetName(), *NPC->GetName(), *SpawnSource,
+		SpawnTransform.GetLocation().X, SpawnTransform.GetLocation().Y, SpawnTransform.GetLocation().Z);
+	return true;
+}
+
+void ASiegeDirector::AdoptSpawned(AShooterNPC* NPC, TSubclassOf<AShooterNPC> NPCClass, const FVector& Where)
+{
+	UWorld* const World = GetWorld();
 	Alive.Add(NPC);
 	NPC->OnNPCDeath.AddDynamic(this, &ASiegeDirector::OnEnemyDied);
 
 	FRecentSpawn& Recent = RecentSpawns.AddDefaulted_GetRef();
-	Recent.Location = SpawnTransform.GetLocation();
+	Recent.Location = Where;
 	Recent.Time = GetServerNow();
 	Recent.bAir = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
 
@@ -670,8 +724,252 @@ bool ASiegeDirector::SpawnOne(TSubclassOf<AShooterNPC> NPCClass)
 			}
 		}
 	}
-	UE_LOG(LogTemp, Verbose, TEXT("[SIEGE_DEBUG] %s: spawned %s at %s (%.0f, %.0f, %.0f)"), *GetName(), *NPC->GetName(), *SpawnSource,
-		SpawnTransform.GetLocation().X, SpawnTransform.GetLocation().Y, SpawnTransform.GetLocation().Z);
+}
+
+// ==================== Lanes ====================
+
+bool ASiegeDirector::IsLaneSiege() const
+{
+	if (!bUseLanes || LanePack.Num() == 0)
+	{
+		return false;
+	}
+	for (TActorIterator<ASiegeLane> It(GetWorld()); It; ++It)
+	{
+		if (IsValid(*It))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+float ASiegeDirector::GetSiegeMinutes() const
+{
+	return bSiegeActive ? FMath::Max(0.0f, GetServerNow() - SiegeStartServerTime) / 60.0f : 0.0f;
+}
+
+float ASiegeDirector::GetCreepHealthMultiplier() const
+{
+	if (CreepUpgradeInterval <= KINDA_SMALL_NUMBER || CreepHealthPerUpgrade <= 1.0f)
+	{
+		return 1.0f;
+	}
+	const int32 Upgrades = FMath::FloorToInt(GetSiegeMinutes() * 60.0f / CreepUpgradeInterval);
+	return FMath::Pow(CreepHealthPerUpgrade, static_cast<float>(Upgrades));
+}
+
+int32 ASiegeDirector::GetHumanPlayerCount() const
+{
+	// People only: an AI controller that wants a player state (the PushTest shooters do) puts one in
+	// the same array, and the opening pack read "4 players" on a solo run.
+	int32 NumPlayers = 0;
+	if (const AGameStateBase* const GameState = GetWorld() ? GetWorld()->GetGameState() : nullptr)
+	{
+		for (const APlayerState* const PlayerState : GameState->PlayerArray)
+		{
+			if (PlayerState && !PlayerState->IsABot() && !PlayerState->IsSpectator())
+			{
+				++NumPlayers;
+			}
+		}
+	}
+	return FMath::Max(1, NumPlayers);
+}
+
+float ASiegeDirector::GetLanePackIntervalFor(int32 NumPlayers) const
+{
+	const float Base = FMath::Max(LanePackInterval, 1.0f);
+	return bPackRatePerPlayer ? Base / FMath::Max(NumPlayers, 1) : Base;
+}
+
+void ASiegeDirector::GetCycleLanes(TArray<ASiegeLane*>& OutLanes) const
+{
+	// By name first (GetOpenLanes sorts so), then the listed ones pulled to the front in list order.
+	ASiegeLane::GetOpenLanes(GetWorld(), OutLanes);
+	if (LaneOrder.Num() == 0)
+	{
+		return;
+	}
+	auto Rank = [this](const ASiegeLane& Lane)
+	{
+		const int32 Index = LaneOrder.IndexOfByKey(Lane.LaneName);
+		return Index == INDEX_NONE ? LaneOrder.Num() : Index;
+	};
+	OutLanes.StableSort([&Rank](const ASiegeLane& A, const ASiegeLane& B) { return Rank(A) < Rank(B); });
+}
+
+void ASiegeDirector::SpawnLaneWave(int32 WaveNumber)
+{
+	TArray<ASiegeLane*> Lanes;
+	GetCycleLanes(Lanes);
+
+	const int32 NumPlayers = GetHumanPlayerCount();
+	const float Minutes = GetSiegeMinutes();
+	const float Now = GetServerNow();
+	// Staggered: lane k of the cycle goes out k intervals into the wave. Together: all now.
+	const float Interval = bStaggerLanes ? GetLanePackIntervalFor(NumPlayers) : 0.0f;
+
+	for (int32 LaneIndex = 0; LaneIndex < Lanes.Num(); ++LaneIndex)
+	{
+		ASiegeLane* const Lane = Lanes[LaneIndex];
+		const float OutAt = Now + LaneIndex * Interval;
+		// Members in the order of the rows: the author lists the front of the column first.
+		int32 Member = 0;
+		FString Composition;
+		for (const FSiegeCreepKind& Kind : LanePack)
+		{
+			const int32 Count = Kind.CountFor(WaveNumber, Minutes, NumPlayers, Lane->LaneName);
+			for (int32 i = 0; i < Count; ++i)
+			{
+				FLaneSpawn& Entry = LaneQueue.AddDefaulted_GetRef();
+				Entry.NPCClass = Kind.NPCClass;
+				Entry.Lane = Lane;
+				Entry.Member = Member++;
+				Entry.QueuedAt = OutAt;
+			}
+			if (Count > 0)
+			{
+				Composition += FString::Printf(TEXT(" %dx%s"), Count, *GetNameSafe(Kind.NPCClass));
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s: wave %d lane %s out in %.0fs (min %.1f, %d players, hp x%.2f):%s"),
+			*GetName(), WaveNumber, *Lane->LaneName.ToString(), OutAt - Now, Minutes, NumPlayers, GetCreepHealthMultiplier(),
+			Composition.IsEmpty() ? TEXT(" nothing") : *Composition);
+	}
+	if (Lanes.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LANE_DEBUG] %s: wave %d, but every lane is closed"), *GetName(), WaveNumber);
+	}
+}
+
+void ASiegeDirector::TickLaneQueue(float Now)
+{
+	bool bSpawnedAny = false;
+	for (int32 i = 0; i < LaneQueue.Num(); )
+	{
+		FLaneSpawn& Entry = LaneQueue[i];
+		ASiegeLane* const Lane = Entry.Lane.Get();
+		if (Lane && Now < Entry.QueuedAt)
+		{
+			// A later lane of a staggered wave: not its turn yet.
+			++i;
+			continue;
+		}
+		if (!Lane || SpawnOnLane(Entry.NPCClass, Lane, Entry.Member))
+		{
+			bSpawnedAny |= Lane != nullptr;
+			LaneQueue.RemoveAt(i);
+			continue;
+		}
+		if (Now - Entry.QueuedAt > LaneSpawnRetrySeconds)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[LANE_DEBUG] %s: %s found no spot on lane %s for %.0fs, dropped"),
+				*GetName(), *GetNameSafe(Entry.NPCClass), *Lane->LaneName.ToString(), LaneSpawnRetrySeconds);
+			LaneQueue.RemoveAt(i);
+			continue;
+		}
+		++i;
+	}
+	if (bSpawnedAny)
+	{
+		RefreshAliveCount();
+	}
+}
+
+bool ASiegeDirector::FindLaneSpawn(TSubclassOf<AShooterNPC> NPCClass, const ASiegeLane* Lane, int32 Member, FTransform& OutTransform)
+{
+	const ACharacter* const CDO = NPCClass->GetDefaultObject<ACharacter>();
+	const UCapsuleComponent* const Capsule = CDO ? CDO->GetCapsuleComponent() : nullptr;
+	const bool bAir = NPCClass->IsChildOf(AFlyingDrone::StaticClass());
+	const float Radius = Capsule ? Capsule->GetUnscaledCapsuleRadius() : (bAir ? 100.0f : 34.0f);
+	const float HalfHeight = Capsule ? Capsule->GetUnscaledCapsuleHalfHeight() : (bAir ? 100.0f : 96.0f);
+
+	// Facing in: along the lane, towards the base.
+	const float Along = FMath::Min(Member * Lane->PackSpacing, Lane->GetLength());
+	const FVector Ahead = Lane->GetLocationAtDistance(Along + 200.0f) - Lane->GetLocationAtDistance(Along);
+	const FRotator Facing(0.0f, Ahead.Rotation().Yaw, 0.0f);
+
+	// A few jitters of the same slot before giving up for this pulse.
+	for (int32 Try = 0; Try < 4; ++Try)
+	{
+		const FVector Slot = Lane->GetPackSlot(Member);
+		FVector Ground;
+		if (!TraceGroundAt(Slot, Ground))
+		{
+			continue;
+		}
+		FVector Location;
+		if (bAir)
+		{
+			Location = Ground + FVector(0.0f, 0.0f, LaneAirHeight);
+		}
+		else
+		{
+			UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+			FNavLocation Nav;
+			if (!NavSys || !NavSys->ProjectPointToNavigation(Ground, Nav, FVector(300.0f, 300.0f, 500.0f)))
+			{
+				continue;
+			}
+			Location = Nav.Location + FVector(0.0f, 0.0f, HalfHeight + 20.0f);
+		}
+		if (!IsSpawnSpotFree(Location, Radius, HalfHeight))
+		{
+			continue;
+		}
+		OutTransform = FTransform(Facing, Location);
+		return true;
+	}
+	return false;
+}
+
+bool ASiegeDirector::SpawnOnLane(TSubclassOf<AShooterNPC> NPCClass, ASiegeLane* Lane, int32 Member)
+{
+	UWorld* const World = GetWorld();
+	if (!World || !NPCClass || !Lane)
+	{
+		return true;
+	}
+	if (TryAbsorbCarrierOverflow(NPCClass))
+	{
+		// Its cost went to the living carriers: done, nothing to retry.
+		return true;
+	}
+
+	FTransform SpawnTransform;
+	if (!FindLaneSpawn(NPCClass, Lane, Member, SpawnTransform))
+	{
+		return false;
+	}
+
+	APawn* const SpawnedPawn = UAIBlueprintHelperLibrary::SpawnAIFromClass(
+		World, NPCClass, nullptr, SpawnTransform.GetLocation(), SpawnTransform.Rotator(), true);
+	AShooterNPC* const NPC = Cast<AShooterNPC>(SpawnedPawn);
+	if (!NPC)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LANE_DEBUG] %s: spawn of %s on lane %s failed"), *GetName(), *GetNameSafe(NPCClass), *Lane->LaneName.ToString());
+		return false;
+	}
+
+	// The lane before the march target: the first march tick already asks it for the road.
+	USiegeLaneFollower* const Follower = NewObject<USiegeLaneFollower>(NPC, TEXT("SiegeLaneFollower"));
+	Follower->EndDistance = LaneEndDistance;
+	Follower->CarrierAggroRadius = LaneCarrierAggroRadius;
+	Follower->RegisterComponent();
+	NPC->AddInstanceComponent(Follower);
+	Follower->SetLane(Lane);
+
+	// The upgrades so far. BeginPlay has already set the Blueprint's health, this scales it.
+	const float HealthMultiplier = GetCreepHealthMultiplier();
+	if (HealthMultiplier > 1.0f + KINDA_SMALL_NUMBER)
+	{
+		NPC->CurrentHP *= HealthMultiplier;
+	}
+
+	AdoptSpawned(NPC, NPCClass, SpawnTransform.GetLocation());
+	UE_LOG(LogTemp, Verbose, TEXT("[LANE_DEBUG] %s: %s on lane %s as member %d, hp %.0f"),
+		*GetName(), *NPC->GetName(), *Lane->LaneName.ToString(), Member, NPC->CurrentHP);
 	return true;
 }
 
@@ -964,6 +1262,7 @@ void ASiegeDirector::Pulse()
 	RefreshAliveCount();
 
 	TickSpawnQueue(Now);
+	TickLaneQueue(Now);
 	TickCarrierPacing(DeltaTime);
 	TickBreakLog(Now);
 	TickLull(Now);
@@ -1005,7 +1304,7 @@ float ASiegeDirector::GetAliveCost() const
 
 void ASiegeDirector::TickLull(float Now)
 {
-	if (!bEarlyWaveOnLull || CurrentWave <= 0 || SpawnQueue.Num() > 0)
+	if (!bEarlyWaveOnLull || CurrentWave <= 0 || SpawnQueue.Num() > 0 || LaneQueue.Num() > 0)
 	{
 		return;
 	}
@@ -1157,3 +1456,104 @@ void ASiegeDirector::OnCoreChanged(ABuildableActor* Core)
 	StopSiege();
 	OnBaseLost.Broadcast();
 }
+
+// ==================== Console ====================
+
+namespace SiegeDebug
+{
+	ASiegeDirector* ServerDirector(UWorld* World)
+	{
+		ASiegeDirector* const Director = ASiegeDirector::Get(World);
+		if (!Director || !Director->HasAuthority())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SIEGE_DEBUG] no siege director here, or not the server"));
+			return nullptr;
+		}
+		return Director;
+	}
+
+	void CmdStart(const TArray<FString>& Args, UWorld* World)
+	{
+		if (ASiegeDirector* const Director = ServerDirector(World))
+		{
+			Director->StartSiege();
+		}
+	}
+
+	void CmdNext(const TArray<FString>& Args, UWorld* World)
+	{
+		if (ASiegeDirector* const Director = ServerDirector(World))
+		{
+			Director->CallNextWaveNow();
+		}
+	}
+
+	/** The packs a lane map would send, without playing: wave, minute, one line per lane. */
+	void CmdPacks(const TArray<FString>& Args, UWorld* World)
+	{
+		const ASiegeDirector* const Director = ServerDirector(World);
+		if (!Director)
+		{
+			return;
+		}
+		const int32 Waves = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 400) : 20;
+		const int32 Players = Args.Num() > 1 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 4) : 1;
+		TArray<ASiegeLane*> Lanes;
+		Director->GetCycleLanes(Lanes);
+		// The same clock the director keeps: staggered, lane k of wave w goes out at
+		// (w - 1) x lanes x interval + k x interval; together, every lane at (w - 1) x WaveInterval.
+		const bool bStagger = Director->bStaggerLanes;
+		const float Interval = Director->GetLanePackIntervalFor(Players);
+		const float WaveLength = bStagger ? FMath::Max(Lanes.Num(), 1) * Interval : Director->WaveInterval;
+		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] packs for %d waves, %d players, %d open lanes, %s, upgrade every %.0fs x%.2f"),
+			Waves, Players, Lanes.Num(),
+			*(bStagger ? FString::Printf(TEXT("one lane at a time every %.1fs (a lane every %.0fs)"), Interval, WaveLength)
+				: FString::Printf(TEXT("all lanes every %.0fs"), WaveLength)),
+			Director->CreepUpgradeInterval, Director->CreepHealthPerUpgrade);
+		for (int32 Wave = 1; Wave <= Waves; ++Wave)
+		{
+			for (int32 LaneIndex = 0; LaneIndex < Lanes.Num(); ++LaneIndex)
+			{
+				const ASiegeLane* const Lane = Lanes[LaneIndex];
+				const float Seconds = Director->FirstWaveDelay + (Wave - 1) * WaveLength + (bStagger ? LaneIndex * Interval : 0.0f);
+				const float Minutes = Seconds / 60.0f;
+				const int32 Upgrades = Director->CreepUpgradeInterval > KINDA_SMALL_NUMBER
+					? FMath::FloorToInt(Seconds / Director->CreepUpgradeInterval) : 0;
+				FString Line;
+				int32 Total = 0;
+				for (const FSiegeCreepKind& Kind : Director->LanePack)
+				{
+					// The composition is rolled when the wave starts, on the wave's clock.
+					const float WaveMinutes = (Director->FirstWaveDelay + (Wave - 1) * WaveLength) / 60.0f;
+					const int32 Count = Kind.CountFor(Wave, WaveMinutes, Players, Lane->LaneName);
+					if (Count > 0)
+					{
+						Line += FString::Printf(TEXT(" %dx%s"), Count, *GetNameSafe(Kind.NPCClass));
+						Total += Count;
+					}
+				}
+				UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] wave %3d  %6.0fs %5.1f min  hp x%.2f  %-6s %2d:%s"), Wave, Seconds, Minutes,
+					FMath::Pow(FMath::Max(Director->CreepHealthPerUpgrade, 1.0f), static_cast<float>(Upgrades)),
+					*Lane->LaneName.ToString(), Total, Line.IsEmpty() ? TEXT(" -") : *Line);
+			}
+		}
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs CmdSiegeStart(
+	TEXT("polarity.siege.start"),
+	TEXT("Start the siege now, without a dispenser. Host or standalone only. Usage: polarity.siege.start"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SiegeDebug::CmdStart)
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdSiegeNext(
+	TEXT("polarity.siege.next"),
+	TEXT("Send the next wave now. Host or standalone only. Usage: polarity.siege.next"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SiegeDebug::CmdNext)
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdSiegePacks(
+	TEXT("polarity.siege.packs"),
+	TEXT("Log the lane packs the director would send, without playing. Usage: polarity.siege.packs [waves=20] [players=1]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SiegeDebug::CmdPacks)
+);
