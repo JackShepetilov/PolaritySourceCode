@@ -65,6 +65,8 @@ COLORS = {
     # Кемпы (step_camps): ландмарк читается цветом и силуэтом издалека.
     "container": (0.55, 0.25, 0.12), "tarp": (0.25, 0.35, 0.22), "lamp_red": (1.0, 0.05, 0.03),
     "beam": (1.0, 0.95, 0.70),
+    # Флаг и плёнка корпорации (автор 2026-09-30: белый с чёрным).
+    "corp_white": (0.92, 0.92, 0.95), "corp_black": (0.04, 0.04, 0.05),
 }
 
 
@@ -1056,7 +1058,8 @@ def camp_guards(tier):
         return [_guard(grunt, 2, every=10.0, cap=5, per_extra=1.0)]
     if tier == "medium":
         return [_guard(grunt, 3, every=10.0, per_extra=1.0), _guard(carrier, 1, every=20.0, cap=2)]
-    return [_guard(tank, 1), _guard(tank, 1, first=25.0), _guard(grunt, 3, every=8.0, per_extra=1.0)]
+    # Грунты первыми: первые точки охраны у кусков бывают наверху, туда встают они, не танкетки.
+    return [_guard(grunt, 3, every=8.0, per_extra=1.0), _guard(tank, 1), _guard(tank, 1, first=25.0)]
 
 
 def mech_parts():
@@ -1095,6 +1098,466 @@ def _fx(label, ns_path, loc, scale, folder):
     return act
 
 
+# ---- Кемпы по местам (дизайн §9, референсы Docs/Lane_Camps_References_2026-09-30.md) ----
+# Каждый кусок: (акторы ландмарка, где лежит деталь (u, v, z), точки охраны [(u, v)]). u вперёд, к нашей
+# базе, v вправо. Размеры из референсов, укрытия по правилам карты: низкое 115, высокое 230.
+
+def _piece_apiary(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleBot_1, easy: пасека. Медовый сарай открыт к нашей базе, деталь в нём; ульи рядами по бокам,
+    костёр у сарая."""
+    box("ShedBack", -250.0, 0.0, 0.0, (20.0, 520.0, 280.0))
+    box("ShedL", 0.0, -250.0, 0.0, (500.0, 20.0, 280.0))
+    box("ShedR", 0.0, 250.0, 0.0, (500.0, 20.0, 280.0))
+    box("ShedRoof", 0.0, 0.0, 280.0, (580.0, 580.0, 20.0), mat="roof")
+    box("Crate", -60.0, 0.0, 0.0, (140.0, 140.0, 100.0))
+    box("Extractor", -150.0, 160.0, 0.0, (70.0, 70.0, 110.0), mat="metal", mesh=CYL)
+    box("HoneyDrums", -150.0, -160.0, 0.0, (60.0, 60.0, 90.0), mat="fuel", mesh=CYL)
+    # Ульи: улей 50 x 41, три корпуса = 73 см, на подставке 20: сидя за ним видно, это не укрытие.
+    for side, sname in ((-1.0, "L"), (1.0, "R")):
+        for row, off in enumerate((1250.0, 1550.0)):
+            for k in range(8):
+                u = -875.0 + k * 250.0
+                box("Hive{}{}_{}Stand".format(sname, row, k), u, side * off, 0.0, (60.0, 50.0, 20.0))
+                box("Hive{}{}_{}".format(sname, row, k), u, side * off, 20.0, (50.0, 41.0, 73.0), mat="house")
+    fire(600.0, -450.0)
+    box("Bench", 600.0, -150.0, 0.0, (200.0, 40.0, 45.0))
+    flag(-330.0, 330.0, 0.0)
+    posts = [(600.0 + 300.0 * math.cos(math.radians(t)), -450.0 + 300.0 * math.sin(math.radians(t)))
+             for t in (0.0, 72.0, 144.0, 216.0, 288.0)] + [(400.0, 150.0), (900.0, 0.0)]
+    return lit, (-60.0, 0.0, 170.0), posts
+
+
+def _piece_silage(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleTop_3, medium, яма: силосная траншея. Бетонные стенки 3 м, между ними 9 м, куча под чёрной
+    плёнкой с шинами. Въезд к нашей базе, деталь у въезда под краем плёнки, охрана там же."""
+    L, W, H = 2400.0, 900.0, 300.0
+    for side, sname in ((-1.0, "L"), (1.0, "R")):
+        box("Wall" + sname, 0.0, side * (W * 0.5 + 20.0), 0.0, (L, 40.0, H), mat="concrete")
+    box("Silage", -200.0, 0.0, 0.0, (L - 400.0, W - 20.0, 200.0), mat="soil")
+    box("Tarp", -200.0, 0.0, 200.0, (L - 380.0, W - 10.0, 8.0), mat="corp_black", collision=False)
+    for i in range(5):
+        for j in range(3):
+            box("Tire{}{}".format(i, j), -1100.0 + i * 450.0, -300.0 + j * 300.0, 208.0, (80.0, 80.0, 22.0),
+                mat="tire", collision=False, mesh=CYL)
+    # Край плёнки свисает у въезда: низкий навес над ящиком с деталью.
+    box("TarpFlap", 1050.0, 0.0, 180.0, (300.0, W - 10.0, 8.0), mat="corp_black", collision=False)
+    box("Crate", 1300.0, 0.0, 0.0, (140.0, 140.0, 100.0))
+    box("TireStack", 1500.0, -600.0, 0.0, (90.0, 90.0, 110.0), mat="tire", mesh=CYL)
+    box("TireStack2", 1500.0, 650.0, 0.0, (90.0, 90.0, 110.0), mat="tire", mesh=CYL)
+    mast(-1500.0, 800.0)
+    flag(-1180.0, -470.0, H)
+    posts = [(1600.0, -350.0), (1600.0, 350.0), (1900.0, 0.0), (1350.0, -700.0), (1350.0, 700.0),
+             (2100.0, -500.0), (2100.0, 500.0), (-1500.0, 0.0)]
+    return lit, (1300.0, 0.0, 170.0), posts
+
+
+def _piece_lookout(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleBot_4, hard, холм: две вышки и мост (автор 2026-09-30). Низкая бетонная 8 x 8 м, верх на 6 м,
+    к ней пандус; с неё наклонный мост на галерею высокой деревянной вышки, кабина на 12 м. Всё ходибельно
+    по навмешу (уклон 29 градусов при пределе агента 44): наверх ходят и игрок, и охрана. Деталь в кабине
+    высокой, двое охранников на низкой, остальные внизу. Низкая к нашей базе пандусом (u+), обе по оси v."""
+    def slab(label, u0, v0, z0, u1, v1, z1, width, thick=30.0, mat="concrete"):
+        """Наклонная плита от точки к точке (z абсолютные, по верхней грани)."""
+        x0, y0 = at(u0, v0)
+        x1, y1 = at(u1, v1)
+        run = math.hypot(x1 - x0, y1 - y0)
+        shape(KIT_BOX, "Camp_{}_{}".format(s["name"], label),
+              ((x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5 - thick * 0.5),
+              (math.hypot(run, z1 - z0) + 20.0, width, thick),
+              yaw=math.degrees(math.atan2(y1 - y0, x1 - x0)), pitch=math.degrees(math.atan2(z1 - z0, run)),
+              mat=mat, folder=folder, collision=True, tag=TAG_CAMP)
+
+    # ---- Низкая: бетонный блок, верх 600, парапет по пояс с проходами к пандусу и к мосту ----
+    lv, lh, half = -600.0, 600.0, 400.0
+    box("LowBlock", 0.0, lv, 0.0, (2.0 * half, 2.0 * half, lh), mat="concrete")
+    gap = 150.0
+    for k, (u0, v0, su, sv) in enumerate((
+            (half - 15.0, lv - (half + gap) * 0.5, 30.0, half - gap),     # перед, слева от пандуса
+            (half - 15.0, lv + (half + gap) * 0.5, 30.0, half - gap),     # перед, справа
+            (-half + 15.0, lv, 30.0, 2.0 * half),                         # зад
+            (0.0, lv - half + 15.0, 2.0 * half, 30.0),                    # левый бок
+            ((half + 125.0) * -0.5, lv + half - 15.0, half - 125.0, 30.0),    # правый бок до проёма моста
+            ((half + 125.0) * 0.5, lv + half - 15.0, half - 125.0, 30.0))):   # и после
+        box("LowParapet{}".format(k), u0, v0, lh, (su, sv, 100.0), mat="concrete")
+    # Пандус к нашей базе: 6 м на 11 м.
+    ru = half + 1100.0
+    px, py = at(ru, lv)
+    foot = _ground_z(px, py, z)
+    slab("LowRamp", ru, lv, foot, half, lv, z + lh, 300.0)
+    for side in (-1.0, 1.0):
+        slab("LowRampRail{:+.0f}".format(side), ru, lv + side * 160.0, foot + 100.0, half, lv + side * 160.0, z + lh + 100.0,
+             10.0, thick=100.0, mat="metal")
+
+    # ---- Высокая: деревянная, галерея 700 x 700 на 1200, кабина 430 с проёмом к мосту ----
+    hv, hh, leg, cab = 1250.0, 1200.0, 300.0, 430.0
+    for k, (du, dv) in enumerate(((-leg, -leg), (leg, -leg), (-leg, leg), (leg, leg))):
+        box("HighLeg{}".format(k), du, hv + dv, 0.0, (50.0, 50.0, hh), mat="wood", mesh=CYL)
+    for lvl in (400.0, 800.0):
+        for side in (-1.0, 1.0):
+            box("HighBeamU{:.0f}{:+.0f}".format(lvl, side), side * leg, hv, lvl, (20.0, 2.0 * leg + 50.0, 20.0))
+            box("HighBeamV{:.0f}{:+.0f}".format(lvl, side), 0.0, hv + side * leg, lvl, (2.0 * leg + 50.0, 20.0, 20.0))
+    box("HighDeck", 0.0, hv, hh, (700.0, 700.0, 30.0))
+    top = hh + 30.0
+    door = 220.0
+    seg = (cab - door) * 0.5
+    box("CabWallF", cab * 0.5, hv, top, (20.0, cab, 100.0))
+    box("CabWallB", -cab * 0.5, hv, top, (20.0, cab, 100.0))
+    box("CabWallR", 0.0, hv + cab * 0.5, top, (cab, 20.0, 100.0))
+    for side in (-1.0, 1.0):                                    # к мосту: проём 2.2 м в полный рост
+        box("CabWallL{:+.0f}".format(side), side * (door + seg) * 0.5, hv - cab * 0.5, top, (seg, 20.0, 100.0))
+    for k, (du, dv) in enumerate(((-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0))):
+        box("CabPost{}".format(k), du * (cab * 0.5 - 10.0), hv + dv * (cab * 0.5 - 10.0), top, (20.0, 20.0, 260.0))
+    box("CabRoof", 0.0, hv, top + 260.0, (560.0, 560.0, 20.0), mat="roof")
+    box("CabCap", 0.0, hv, top + 280.0, (560.0, 560.0, 180.0), mat="roof", mesh=CONE)
+    box("Crate", 60.0, hv + 60.0, top, (100.0, 100.0, 80.0))
+    box("Searchlight", 300.0, hv + 250.0, top, (60.0, 60.0, 100.0), mat="metal", mesh=CYL)   # свет потом, не мешем
+    flag(0.0, hv, top + 460.0, pole=600.0)
+
+    # ---- Мост: с правого края низкой (v = lv + half) на галерею высокой (v = hv - 350), подъём 6 м ----
+    b0, b1 = lv + half, hv - 350.0
+    slab("Bridge", 0.0, b0, z + lh, 0.0, b1, z + top, 250.0, mat="wood")
+    for side in (-1.0, 1.0):
+        slab("BridgeRail{:+.0f}".format(side), side * 135.0, b0, z + lh + 100.0, side * 135.0, b1, z + top + 100.0,
+             10.0, thick=100.0, mat="wood")
+
+    # У подножия: мешки, укрытие охраны.
+    for k, (su, sv, dy) in enumerate(((1700.0, 400.0, -20.0), (900.0, 1300.0, 60.0), (-900.0, 300.0, 90.0))):
+        box("Sacks{}".format(k), su, sv, 0.0, (250.0, 70.0, 90.0), dyaw=dy, mat="sacks")
+    # Точки: первые две на низкой вышке (трасса сверху попадает на её верх), дальше земля с запасом под
+    # танкетку. Грунты в списке охраны идут первыми (camp_guards), так на вышку встают они.
+    posts = [(-150.0, lv - 150.0), (-150.0, lv + 150.0), (1800.0, 900.0), (1900.0, -300.0), (1200.0, 1900.0),
+             (-1300.0, 0.0), (-1300.0, 1300.0), (600.0, -1600.0)]
+    return lit, (60.0, hv + 60.0, top + 80.0 + 60.0), posts
+
+
+class _Kit(object):
+    """Помощники кусков поверх box/at: плита, лежачий цилиндр, сарай, кольцо точек."""
+
+    def __init__(self, s, box, at, z, a, folder):
+        self.s, self.box, self.at, self.z, self.a, self.folder = s, box, at, z, a, folder
+
+    def slab(self, label, u0, v0, z0, u1, v1, z1, width, thick=30.0, mat="concrete", collision=True):
+        """Наклонная плита от точки к точке, z абсолютные по верхней грани. Пандус, мост, транспортёр."""
+        x0, y0 = self.at(u0, v0)
+        x1, y1 = self.at(u1, v1)
+        run = math.hypot(x1 - x0, y1 - y0)
+        return shape(KIT_BOX, "Camp_{}_{}".format(self.s["name"], label),
+                     ((x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5 - thick * 0.5),
+                     (math.hypot(run, z1 - z0) + 20.0, width, thick),
+                     yaw=math.degrees(math.atan2(y1 - y0, x1 - x0)), pitch=math.degrees(math.atan2(z1 - z0, run)),
+                     mat=mat, folder=self.folder, collision=collision, tag=TAG_CAMP)
+
+    def lying(self, label, u, v, z0, d, length, dyaw=0.0, mat="trunk", collision=True):
+        """Лежачий цилиндр осью вдоль u (плюс dyaw): бревно, бочка, барабан. Как в step_base."""
+        x, y = self.at(u, v)
+        return shape(CYL, "Camp_{}_{}".format(self.s["name"], label), (x, y, self.z + z0 + d * 0.5), (d, d, length),
+                     yaw=math.degrees(self.a) + dyaw - 90.0, roll=90.0, mat=mat, folder=self.folder,
+                     collision=collision, tag=TAG_CAMP)
+
+    def shed(self, name, cu, cv, du, dv, h, mat="wood", roof="roof", open_front=True):
+        """Сарай du x dv высотой h с центром (cu, cv): задняя и боковые стены, крыша; фасад (+u) открыт."""
+        b = self.box
+        b(name + "Back", cu - du * 0.5 + 10.0, cv, 0.0, (20.0, dv, h), mat=mat)
+        b(name + "L", cu, cv - dv * 0.5 + 10.0, 0.0, (du, 20.0, h), mat=mat)
+        b(name + "R", cu, cv + dv * 0.5 - 10.0, 0.0, (du, 20.0, h), mat=mat)
+        if not open_front:
+            b(name + "Front", cu + du * 0.5 - 10.0, cv, 0.0, (20.0, dv, h), mat=mat)
+        b(name + "Roof", cu, cv, h, (du + 60.0, dv + 60.0, 20.0), mat=roof)
+
+    @staticmethod
+    def ring(cu, cv, r, n, phase=0.0):
+        return [(cu + r * math.cos(math.radians(phase + 360.0 * k / n)),
+                 cv + r * math.sin(math.radians(phase + 360.0 * k / n))) for k in range(n)]
+
+
+def _piece_hay(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """BehindTop_1, easy: сенокос. Крепость из квадратных тюков 245 x 120 x 90 (задняя стена в три яруса,
+    боковые в два), открыта к нашей базе; внутри прицеп с сеном, деталь на прицепе. Пресс-подборщик рядом."""
+    for layer in range(3):
+        for k in range(6):
+            box("BaleB{}{}".format(layer, k), -700.0, -612.5 + k * 245.0, layer * 90.0, (120.0, 245.0, 90.0), mat="hay")
+    for side, sname in ((-1.0, "L"), (1.0, "R")):
+        for layer in range(2):
+            for k in range(4):
+                box("Bale{}{}{}".format(sname, layer, k), -517.5 + k * 245.0, side * 795.0, layer * 90.0,
+                    (245.0, 120.0, 90.0), mat="hay")
+    box("TrailerDeck", 0.0, 0.0, 80.0, (600.0, 240.0, 30.0), mat="wood")
+    for k, (du, dv) in enumerate(((-200.0, -130.0), (-200.0, 130.0), (200.0, -130.0), (200.0, 130.0))):
+        box("TrailerWheel{}".format(k), du, dv, 0.0, (80.0, 30.0, 80.0), mat="tire")
+    box("TrailerBale", -150.0, 0.0, 110.0, (245.0, 120.0, 90.0), dyaw=90.0, mat="hay")
+    box("Crate", 170.0, 0.0, 110.0, (140.0, 140.0, 100.0))
+    box("Baler", 500.0, 1150.0, 0.0, (400.0, 250.0, 220.0), mat="car_red")
+    fire(450.0, -550.0)
+    flag(-700.0, 0.0, 270.0)
+    return lit, (170.0, 0.0, 280.0), _Kit.ring(450.0, -550.0, 300.0, 6) + [(250.0, 400.0)]
+
+
+def _piece_machine_yard(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """BehindTop_2, easy: машинный двор. Открытый навес 12 x 18 м, свес 4.3 м, задняя стена глухая; внутри
+    комбайн, деталь на верстаке. Бак с топливом, костёр у навеса."""
+    du, dv, h = 1220.0, 1830.0, 430.0
+    box("ShedBack", -du * 0.5, 0.0, 0.0, (20.0, dv, h), mat="metal")
+    for k in range(4):
+        v = -dv * 0.5 + k * dv / 3.0
+        box("ShedPostF{}".format(k), du * 0.5, v, 0.0, (30.0, 30.0, h), mat="wood", mesh=CYL)
+    box("ShedRoof", 0.0, 0.0, h, (du + 100.0, dv + 60.0, 20.0), mat="roof")
+    box("CombineBody", 50.0, -350.0, 80.0, (650.0, 330.0, 280.0), mat="tractor")
+    box("CombineCab", 250.0, -350.0, 360.0, (180.0, 180.0, 60.0), mat="metal")
+    box("CombineHeader", 450.0, -350.0, 30.0, (180.0, 600.0, 90.0), mat="metal")
+    for k, dv2 in enumerate((-190.0, 190.0)):
+        box("CombineWheel{}".format(k), 150.0, -350.0 + dv2, 0.0, (160.0, 40.0, 160.0), mat="tire")
+    box("Workbench", -450.0, 500.0, 0.0, (200.0, 80.0, 90.0))
+    box("FuelTank", 800.0, 1200.0, 100.0, (120.0, 120.0, 200.0), mat="fuel", mesh=CYL)
+    fire(1000.0, 0.0)
+    flag(-500.0, -800.0, h + 20.0)
+    return lit, (-450.0, 500.0, 160.0), _Kit.ring(1000.0, 0.0, 300.0, 6) + [(-300.0, 300.0)]
+
+
+def _piece_pump(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """BehindTop_3, medium: насосная орошения. Будка с насосом у пруда, деталь в будке; пролёт поливалки
+    35 м боком наружу за край площадки, на треугольных опорах: это силуэт."""
+    K = _Kit(s, box, at, z, a, folder)
+    box("Pond", -700.0, -500.0, 0.0, (1200.0, 900.0, 5.0), mat="pool", collision=False)
+    K.shed("Pump", 0.0, 500.0, 400.0, 300.0, 280.0, mat="concrete")
+    box("PumpMotor", -80.0, 500.0, 0.0, (120.0, 90.0, 110.0), mat="metal")
+    box("Crate", 80.0, 500.0, 0.0, (100.0, 100.0, 80.0))
+    box("PumpPipe", -350.0, 150.0, 30.0, (20.0, 700.0, 20.0), mat="metal", dyaw=0.0)
+    # Поливалка: центр у будки, труба на 3.5 м вбок, опоры A-формы до своей земли.
+    pv0, pv1, ph = 700.0, 4200.0, 350.0
+    box("PivotBase", -400.0, pv0, 0.0, (80.0, 80.0, ph + 60.0), mat="metal", mesh=CYL)
+    K.slab("PivotPipe", -400.0, pv0, z + ph + 20.0, -400.0, pv1, z + ph + 20.0, 25.0, thick=25.0, mat="metal",
+           collision=False)
+    for k, tv in enumerate((pv0 + (pv1 - pv0) * 0.5, pv1)):
+        gx, gy = at(-400.0, tv)
+        g = _ground_z(gx, gy, z)
+        for side in (-1.0, 1.0):
+            K.slab("PivotLeg{}{:+.0f}".format(k, side), -400.0 + side * 180.0, tv, g, -400.0, tv, z + ph, 15.0,
+                   thick=15.0, mat="metal", collision=False)
+    mast(-1300.0, -300.0)
+    flag(0.0, 500.0, 300.0)
+    return lit, (80.0, 500.0, 150.0), [(350.0, 450.0), (350.0, 700.0), (500.0, 250.0), (-200.0, 0.0),
+                                       (600.0, -300.0), (-600.0, 900.0)]
+
+
+def _piece_speeder(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """BehindBot_1, easy: будка обходчика. Тупик пути заходит в сарай для дрезин 7.3 x 3.7 м, дрезина на
+    пути перед сараем, деталь на дрезине. Костёр у будки."""
+    K = _Kit(s, box, at, z, a, folder)
+    tv = -300.0
+    for side in (-1.0, 1.0):
+        box("Rail{:+.0f}".format(side), 0.0, tv + side * 72.0, 15.0, (2400.0, 10.0, 15.0), mat="metal")
+    for k in range(10):
+        box("Sleeper{}".format(k), -1100.0 + k * 240.0, tv, 0.0, (25.0, 250.0, 15.0), mat="trunk")
+    box("BufferStop", -1220.0, tv, 0.0, (40.0, 250.0, 120.0), mat="car_red")
+    K.shed("Speeder", -800.0, tv, 730.0, 370.0, 300.0, mat="wood")
+    box("SpeederDeck", 100.0, tv, 40.0, (180.0, 150.0, 25.0), mat="car_red")
+    box("SpeederSeat", 50.0, tv, 65.0, (60.0, 150.0, 40.0), mat="metal")
+    box("ToolRack", -500.0, 300.0, 0.0, (40.0, 200.0, 180.0))
+    fire(300.0, 550.0)
+    flag(-800.0, tv, 320.0)
+    return lit, (130.0, tv, 65.0 + 70.0), _Kit.ring(300.0, 550.0, 300.0, 6) + [(300.0, -700.0)]
+
+
+def _piece_loading(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """BehindBot_2, easy: разгрузочная площадка. Рампа 1.2 м вдоль пути, пандус к ней, ящики на ней,
+    платформа-вагон рядом; деталь на рампе. Костёр у рампы."""
+    K = _Kit(s, box, at, z, a, folder)
+    dv, dh = -400.0, 120.0
+    box("Dock", -200.0, dv, 0.0, (1600.0, 400.0, dh), mat="concrete")
+    K.slab("DockRamp", 1000.0, dv, z, 600.0, dv, z + dh, 300.0)
+    for k, (cu, cz) in enumerate(((-700.0, 0.0), (-700.0, 150.0), (-500.0, 0.0), (-300.0, 0.0))):
+        box("DockCrate{}".format(k), cu, dv - 60.0, dh + cz, (150.0, 150.0, 150.0), mat="wood")
+    box("Crate", 250.0, dv, dh, (140.0, 140.0, 100.0))
+    for side in (-1.0, 1.0):
+        box("Rail{:+.0f}".format(side), 0.0, -850.0 + side * 72.0, 0.0, (2400.0, 10.0, 15.0), mat="metal")
+    box("Flatcar", -300.0, -850.0, 60.0, (1500.0, 280.0, 60.0), mat="container")
+    for k in range(4):
+        box("FlatcarWheel{}".format(k), -900.0 + k * 400.0, -850.0, 0.0, (80.0, 260.0, 60.0), mat="tire")
+    fire(350.0, 500.0)
+    flag(-950.0, dv + 150.0, dh)
+    return lit, (250.0, dv, dh + 100.0 + 70.0), _Kit.ring(350.0, 500.0, 300.0, 6) + [(700.0, -100.0)]
+
+
+def _piece_sawmill(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """BehindBot_3, medium: лесопилка. Навес 14 x 5 м над пилой, бревно на станке, деталь на станке;
+    штабель брёвен за навесом, стопки досок, мачта."""
+    K = _Kit(s, box, at, z, a, folder)
+    du, dv, h = 1400.0, 500.0, 370.0
+    for k in range(3):
+        u = -du * 0.5 + k * du * 0.5
+        for side in (-1.0, 1.0):
+            box("ShedPost{}{:+.0f}".format(k, side), u, side * dv * 0.5, 0.0, (25.0, 25.0, h), mesh=CYL)
+    box("ShedRoof", 0.0, 0.0, h, (du + 80.0, dv + 120.0, 20.0), mat="roof")
+    box("SawBed", 0.0, 0.0, 0.0, (900.0, 80.0, 60.0), mat="metal")
+    box("SawHead", 200.0, 0.0, 60.0, (60.0, 160.0, 150.0), mat="car_red")
+    K.lying("SawLog", -150.0, 0.0, 60.0, 55.0, 500.0)
+    for k in range(3):
+        for j in range(2 - (k // 2)):
+            K.lying("DeckLog{}{}".format(k, j), -100.0, 900.0 + (k - 1) * 65.0 + j * 30.0, j * 55.0, 60.0, 900.0)
+    for k, cu in enumerate((-500.0, 100.0)):
+        box("Lumber{}".format(k), cu, -950.0, 0.0, (500.0, 120.0, 110.0))
+    mast(-1000.0, 1000.0)
+    flag(700.0, 250.0, h + 20.0)
+    return lit, (320.0, 0.0, 130.0), [(300.0, 350.0), (-300.0, -350.0), (900.0, 0.0), (-900.0, 0.0),
+                                      (500.0, -700.0), (-400.0, 700.0)]
+
+
+def _piece_autoyard(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleTop_1, easy: двор автомастерской. Остовы машин рядами, часть в два яруса, шины стопками,
+    эвакуатор, деталь на его платформе. Огонь в бочке."""
+    K = _Kit(s, box, at, z, a, folder)
+    cols = ("car_red", "car_white", "car_green", "truck")
+    for side in (-1.0, 1.0):
+        for k in range(4):
+            u = -900.0 + k * 520.0
+            box("Wreck{:+.0f}{}".format(side, k), u, side * 950.0, 0.0, (450.0, 180.0, 140.0), dyaw=(k % 2) * 6.0,
+                mat=cols[k % 4])
+            if k % 2 == 0:
+                box("WreckTop{:+.0f}{}".format(side, k), u + 30.0, side * 950.0, 140.0, (430.0, 175.0, 120.0),
+                    dyaw=-8.0, mat=cols[(k + 1) % 4])
+    for k, (tu, tv, n) in enumerate(((-1100.0, 0.0, 4), (-800.0, -350.0, 3), (900.0, 700.0, 5))):
+        box("Tires{}".format(k), tu, tv, 0.0, (80.0, 80.0, 22.0 * n), mat="tire", mesh=CYL)
+    box("TowBed", 50.0, 0.0, 80.0, (500.0, 230.0, 30.0), mat="metal")
+    box("TowCab", 400.0, 0.0, 60.0, (200.0, 230.0, 180.0), mat="truck")
+    box("TowChassis", 150.0, 0.0, 30.0, (700.0, 200.0, 50.0), mat="tire")
+    K.slab("TowBoom", -150.0, 0.0, z + 110.0, -350.0, 0.0, z + 280.0, 30.0, thick=30.0, mat="metal", collision=False)
+    box("FireBarrel", 700.0, -450.0, 0.0, (70.0, 70.0, 90.0), mat="metal", mesh=CYL)
+    px, py = at(700.0, -450.0)
+    lit.append(_fx("Camp_{}_Fire".format(s["name"]), NS_FIRE, (px, py, z + 95.0), 0.8, folder))
+    lit.append(_fx("Camp_{}_Smoke".format(s["name"]), NS_SMOKE, (px, py, z + 150.0), 3.0, folder))
+    flag(-1100.0, 400.0, 0.0)
+    return lit, (100.0, 0.0, 110.0 + 70.0), _Kit.ring(700.0, -450.0, 280.0, 6) + [(400.0, 400.0)]
+
+
+def _piece_foundation(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleTop_2, medium, яма: котлован недостроя. Недолитый фундамент по пояс с арматурой, поддоны
+    блоков, бетономешалка; деталь на поддоне. Мачта из ямы."""
+    K = _Kit(s, box, at, z, a, folder)
+    fu, fv, fh = 1400.0, 1000.0, 120.0
+    box("FoundBack", -fu * 0.5, 0.0, 0.0, (30.0, fv, fh), mat="concrete")
+    box("FoundL", 0.0, -fv * 0.5, 0.0, (fu, 30.0, fh), mat="concrete")
+    box("FoundR", -200.0, fv * 0.5, 0.0, (fu - 400.0, 30.0, fh), mat="concrete")
+    for k in range(8):
+        u = -fu * 0.5 + 100.0 + k * 170.0
+        box("Rebar{}".format(k), u, -fv * 0.5, fh, (8.0, 8.0, 140.0), mat="metal", mesh=CYL, collision=False)
+    for k, (bu, bv, n) in enumerate(((900.0, 600.0, 1), (900.0, -700.0, 2), (-1000.0, 900.0, 2))):
+        box("Pallet{}".format(k), bu, bv, 0.0, (130.0, 130.0, 15.0), mat="wood")
+        for j in range(n):
+            box("Blocks{}{}".format(k, j), bu, bv, 15.0 + j * 100.0, (120.0, 120.0, 100.0), mat="concrete")
+    box("MixerFrame", -500.0, -1000.0, 0.0, (250.0, 150.0, 80.0), mat="metal")
+    K.lying("MixerDrum", -500.0, -1000.0, 80.0, 140.0, 200.0, dyaw=0.0, mat="car_red")
+    mast(-900.0, 800.0)
+    flag(-fu * 0.5, -fv * 0.5, fh)
+    return lit, (900.0, 600.0, 115.0 + 70.0), [(600.0, 300.0), (600.0, -300.0), (-300.0, 0.0), (1100.0, 0.0),
+                                               (-500.0, -700.0), (300.0, 900.0)]
+
+
+def _piece_celltower(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleTop_4, hard, холм: вышка связи корпорации и серверный модуль. Решётчатая вышка 30 м (ландмарк,
+    не лазить); модуль: платформа из двух контейнеров, на ней короткий контейнер с открытым торцом, к крыше
+    пандус 26 градусов. Деталь в верхнем контейнере, по навмешу (урок вышки лесничества)."""
+    K = _Kit(s, box, at, z, a, folder)
+    # Вышка связи: три ноги треугольником, пояса через 5 м, антенны наверху.
+    tu, tv, th = -300.0, 900.0, 3000.0
+    legs = [(tu + 160.0 * math.cos(math.radians(t)), tv + 160.0 * math.sin(math.radians(t))) for t in (0.0, 120.0, 240.0)]
+    for k, (lu, lv) in enumerate(legs):
+        box("TowerLeg{}".format(k), lu, lv, 0.0, (25.0, 25.0, th), mat="metal", mesh=CYL)
+    for lvl in range(500, int(th), 500):
+        for k in range(3):
+            (u0, v0), (u1, v1) = legs[k], legs[(k + 1) % 3]
+            K.slab("TowerBrace{}_{}".format(lvl, k), u0, v0, z + lvl, u1, v1, z + lvl, 10.0, thick=10.0, mat="metal",
+                   collision=False)
+    for k in range(3):
+        box("Antenna{}".format(k), tu + 100.0 * math.cos(math.radians(k * 120.0 + 60.0)),
+            tv + 100.0 * math.sin(math.radians(k * 120.0 + 60.0)), th - 400.0, (30.0, 60.0, 250.0), mat="corp_white")
+    # Серверный модуль.
+    mu, mv, ph = 0.0, -800.0, 260.0
+    box("PlatformA", mu, mv - 122.0, 0.0, (610.0, 245.0, ph), mat="container")
+    box("PlatformB", mu, mv + 122.0, 0.0, (610.0, 245.0, ph), mat="corp_white")
+    cu0, cu1, ch = -305.0, -5.0, 250.0     # верхний контейнер 3 м, торец к +u открыт
+    box("UpperBack", cu0 + 10.0, mv, ph, (20.0, 245.0, ch), mat="corp_black")
+    for side in (-1.0, 1.0):
+        box("UpperSide{:+.0f}".format(side), (cu0 + cu1) * 0.5, mv + side * 112.0, ph, (cu1 - cu0, 20.0, ch), mat="corp_black")
+    box("UpperRoof", (cu0 + cu1) * 0.5, mv, ph + ch, (cu1 - cu0 + 20.0, 265.0, 20.0), mat="corp_black")
+    box("ServerRack", cu0 + 60.0, mv, ph, (60.0, 200.0, 200.0), mat="metal")
+    box("Crate", -150.0, mv, ph, (100.0, 100.0, 80.0))
+    K.slab("ModuleRamp", 850.0, mv, z, 305.0, mv, z + ph, 200.0, mat="metal")
+    for side in (-1.0, 1.0):
+        K.slab("ModuleRampRail{:+.0f}".format(side), 850.0, mv + side * 110.0, z + 100.0, 305.0, mv + side * 110.0,
+               z + ph + 100.0, 8.0, thick=100.0, mat="metal")
+    box("Searchlight", 250.0, mv + 180.0, ph, (60.0, 60.0, 100.0), mat="metal", mesh=CYL)   # свет потом, не мешем
+    box("Generator", 400.0, 200.0, 0.0, (300.0, 150.0, 160.0), mat="fuel")
+    for k, (su, sv, dy) in enumerate(((1600.0, 300.0, -20.0), (900.0, -1600.0, 60.0), (-1200.0, -300.0, 90.0))):
+        box("Sacks{}".format(k), su, sv, 0.0, (250.0, 70.0, 90.0), dyaw=dy, mat="sacks")
+    flag(-150.0, mv, ph + ch + 20.0)
+    # Первые две точки на крыше платформы перед верхним контейнером (грунты идут первыми).
+    posts = [(150.0, mv - 70.0), (150.0, mv + 70.0), (1800.0, -600.0), (1600.0, 900.0), (-1300.0, -1200.0),
+             (-1300.0, 400.0), (700.0, 1600.0), (1900.0, 300.0)]
+    return lit, (-150.0, mv, ph + 80.0 + 60.0), posts
+
+
+def _piece_gravel(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleBot_2, medium, яма: гравийный карьер. Кучи щебня, наклонный транспортёр от грохота (по нему можно
+    забраться, 20 градусов), экскаватор; деталь у ковша. Мачта."""
+    K = _Kit(s, box, at, z, a, folder)
+    for k, (gu, gv, d, hh) in enumerate(((-600.0, -700.0, 900.0, 400.0), (-1100.0, 300.0, 700.0, 300.0),
+                                        (-300.0, 800.0, 500.0, 220.0))):
+        box("Pile{}".format(k), gu, gv, 0.0, (d, d, hh), mat="rock", mesh=CONE)
+    box("Screener", 900.0, -700.0, 0.0, (400.0, 250.0, 250.0), mat="bus")
+    K.slab("Conveyor", 700.0, -700.0, z + 250.0, -300.0, -700.0, z + 620.0, 100.0, thick=20.0, mat="tire")
+    for k, cu in enumerate((400.0, 50.0)):
+        box("ConveyorLeg{}".format(k), cu, -700.0, 0.0, (20.0, 80.0, 250.0 + (700.0 - cu) * 0.37 - 20.0), mat="metal")
+    box("ExcTracks", 300.0, 700.0, 0.0, (450.0, 300.0, 100.0), mat="tire")
+    box("ExcBody", 300.0, 700.0, 100.0, (350.0, 280.0, 200.0), mat="fuel")
+    K.slab("ExcBoom", 450.0, 700.0, z + 280.0, 850.0, 700.0, z + 420.0, 40.0, thick=40.0, mat="fuel", collision=False)
+    K.slab("ExcArm", 850.0, 700.0, z + 420.0, 1000.0, 700.0, z + 100.0, 30.0, thick=30.0, mat="fuel", collision=False)
+    box("ExcBucket", 1050.0, 700.0, 0.0, (150.0, 150.0, 70.0), mat="metal")
+    mast(-1200.0, -1100.0)
+    flag(900.0, -700.0, 250.0)
+    return lit, (1050.0, 700.0, 70.0 + 70.0), [(700.0, 300.0), (700.0, 1100.0), (1300.0, 700.0), (0.0, 0.0),
+                                               (1300.0, -300.0), (-800.0, 1100.0)]
+
+
+def _piece_drypond(s, box, at, flag, fire, mast, lit, z, a, folder):
+    """JungleBot_3, medium, яма: высохший пруд. Мостки на сваях над сухим дном, лодка у их конца, деталь в
+    лодке; лодочный сарай на дне. Мачта."""
+    K = _Kit(s, box, at, z, a, folder)
+    box("Mud", 0.0, 0.0, 0.0, (1800.0, 1400.0, 4.0), mat="soil", collision=False)
+    dv, dz = 600.0, 150.0
+    box("Dock", -600.0, dv, dz, (1300.0, 250.0, 20.0))
+    for k in range(5):
+        for side in (-1.0, 1.0):
+            box("Pile{}{:+.0f}".format(k, side), -1200.0 + k * 300.0, dv + side * 110.0, 0.0, (25.0, 25.0, dz), mesh=CYL,
+                mat="trunk")
+    K.slab("DockSteps", 350.0, dv, z, 50.0, dv, z + dz + 20.0, 200.0, mat="wood")
+    box("BoatHull", 350.0, 100.0, 0.0, (500.0, 170.0, 60.0), dyaw=15.0, mat="car_white")
+    box("BoatSeat", 330.0, 100.0, 30.0, (40.0, 150.0, 40.0), dyaw=15.0)
+    K.shed("Boathouse", -900.0, -600.0, 600.0, 450.0, 350.0, mat="wood")
+    K.lying("OldCanoe", -300.0, -900.0, 0.0, 70.0, 450.0, dyaw=40.0, mat="car_green")
+    mast(-500.0, -1300.0)
+    flag(-900.0, -600.0, 370.0)
+    return lit, (400.0, 100.0, 60.0 + 70.0), [(700.0, 400.0), (700.0, -200.0), (100.0, -300.0), (-300.0, 300.0),
+                                              (1000.0, 100.0), (-500.0, 1000.0)]
+
+
+CAMP_PIECES = {
+    "BehindTop_1": _piece_hay,
+    "BehindTop_2": _piece_machine_yard,
+    "BehindTop_3": _piece_pump,
+    "BehindBot_1": _piece_speeder,
+    "BehindBot_2": _piece_loading,
+    "BehindBot_3": _piece_sawmill,
+    "JungleTop_1": _piece_autoyard,
+    "JungleTop_2": _piece_foundation,
+    "JungleTop_3": _piece_silage,
+    "JungleTop_4": _piece_celltower,
+    "JungleBot_1": _piece_apiary,
+    "JungleBot_2": _piece_gravel,
+    "JungleBot_3": _piece_drypond,
+    "JungleBot_4": _piece_lookout,
+}
+
+
 def _camp_piece(s, x, y, z, yaw, folder):
     """Ландмарк и укрытия одного кемпа. u вперёд (к нашей базе), v вправо. Возвращает акторы ландмарка."""
     a = math.radians(yaw)
@@ -1111,6 +1574,34 @@ def _camp_piece(s, x, y, z, yaw, folder):
         return act
 
     lit = []
+
+    def flag(u, v, z0, pole=1000.0):
+        """Флаг корпорации (автор 2026-09-30: белый с чёрным) над постом. Полотно гаснет с кемпом (CampLit)."""
+        box("FlagPole", u, v, z0, (14.0, 14.0, pole), mat="metal", mesh=CYL)
+        lit.append(box("Flag", u, v + 100.0, z0 + pole - 140.0, (8.0, 200.0, 130.0), mat="corp_white",
+                       collision=False, lit=True))
+        lit.append(box("FlagBand", u, v + 100.0, z0 + pole - 90.0, (10.0, 202.0, 30.0), mat="corp_black",
+                       collision=False, lit=True))
+
+    def fire(fu, fv):
+        """Костёр с дымом: знак easy-кемпа."""
+        box("FireRing", fu, fv, 0.0, (220.0, 220.0, 30.0), mat="rock", collision=False, mesh=CYL)
+        box("Log1", fu, fv, 30.0, (180.0, 30.0, 30.0), dyaw=30.0, collision=False)
+        box("Log2", fu, fv, 30.0, (180.0, 30.0, 30.0), dyaw=-30.0, collision=False)
+        px, py = at(fu, fv)
+        lit.append(_fx("Camp_{}_Fire".format(s["name"]), NS_FIRE, (px, py, z + 40.0), 1.5, folder))
+        lit.append(_fx("Camp_{}_Smoke".format(s["name"]), NS_SMOKE, (px, py, z + 120.0), 3.0, folder))
+
+    def mast(mu, mv, z0=0.0):
+        """Мачта ретранслятора 18 м с красной лампой: знак medium-кемпа."""
+        box("Mast", mu, mv, z0, (35.0, 35.0, 1800.0), mat="metal", mesh=CYL)
+        lit.append(box("MastLamp", mu, mv, z0 + 1800.0, (90.0, 90.0, 90.0), mat="lamp_red", collision=False,
+                       mesh=SPHERE, lit=True))
+
+    special = CAMP_PIECES.get(s["name"])
+    if special:
+        return special(s, box, at, flag, fire, mast, lit, z, a, folder)
+
     # Общее: ящик с деталью в центре (деталь рисует сам кемп) и низкие мешки по кругу, 6 м.
     box("Crate", 0.0, 0.0, 0.0, (140.0, 140.0, 100.0))
     for k, ang in enumerate((45.0, 165.0, 285.0)):
@@ -1121,13 +1612,7 @@ def _camp_piece(s, x, y, z, yaw, folder):
     tier = s["tier"]
     if tier == "easy":
         # Костёр у ящика, над ним столб дыма; рядом машина охраны.
-        fu, fv = -300.0, 250.0
-        box("FireRing", fu, fv, 0.0, (220.0, 220.0, 30.0), mat="rock", collision=False, mesh=CYL)
-        box("Log1", fu, fv, 30.0, (180.0, 30.0, 30.0), dyaw=30.0, collision=False)
-        box("Log2", fu, fv, 30.0, (180.0, 30.0, 30.0), dyaw=-30.0, collision=False)
-        px, py = at(fu, fv)
-        lit.append(_fx("Camp_{}_Fire".format(s["name"]), NS_FIRE, (px, py, z + 40.0), 1.5, folder))
-        lit.append(_fx("Camp_{}_Smoke".format(s["name"]), NS_SMOKE, (px, py, z + 120.0), 3.0, folder))
+        fire(-300.0, 250.0)
         box("TruckBody", 200.0, -650.0, 50.0, (500.0, 220.0, 110.0), dyaw=15.0, mat="truck")
         box("TruckCab", 330.0, -615.0, 160.0, (180.0, 210.0, 110.0), dyaw=15.0, mat="truck")
     elif tier == "medium":
@@ -1137,11 +1622,9 @@ def _camp_piece(s, x, y, z, yaw, folder):
         for k, (pu, pv) in enumerate(((-300.0, -450.0), (100.0, -450.0), (-300.0, -150.0), (100.0, -150.0))):
             box("TentPost{}".format(k), pu, pv, 0.0, (15.0, 15.0, 250.0), mesh=CYL)
         box("TentRoof", -100.0, -300.0, 250.0, (460.0, 360.0, 15.0), mat="tarp")
-        box("Mast", -250.0, -750.0, 0.0, (35.0, 35.0, 1800.0), mat="metal", mesh=CYL)
-        lit.append(box("MastLamp", -250.0, -750.0, 1800.0, (90.0, 90.0, 90.0), mat="lamp_red", collision=False,
-                       mesh=SPHERE, lit=True))
+        mast(-250.0, -750.0)
     else:
-        # Вышка 14 м с прожектором, луч наружу и вниз; контейнер и мешки у подножия.
+        # Вышка 14 м с прожектором; контейнер и мешки у подножия.
         tu, tv, h = -450.0, 0.0, 1400.0
         for k, (du, dv) in enumerate(((-250.0, -250.0), (250.0, -250.0), (-250.0, 250.0), (250.0, 250.0))):
             box("TowerLeg{}".format(k), tu + du, tv + dv, 0.0, (40.0, 40.0, h), mat="metal", mesh=CYL)
@@ -1151,19 +1634,9 @@ def _camp_piece(s, x, y, z, yaw, folder):
         for k, (du, dv, rot) in enumerate(((300.0, 0.0, 90.0), (-300.0, 0.0, 90.0), (0.0, 300.0, 0.0), (0.0, -300.0, 0.0))):
             box("TowerRail{}".format(k), tu + du, tv + dv, h + 30.0, (600.0, 20.0, 100.0), dyaw=rot, mat="wood")
         box("Searchlight", tu + 250.0, tv, h + 30.0, (80.0, 80.0, 120.0), mat="metal", mesh=CYL)
-        # Луч: конус движка (вершина сверху по +Z), вершиной к прожектору, ось вперёд и на 20 градусов вниз.
-        dirv = unreal.Vector(math.cos(a) * math.cos(math.radians(20.0)), math.sin(a) * math.cos(math.radians(20.0)),
-                             -math.sin(math.radians(20.0)))
-        rot = unreal.MathLibrary.make_rot_from_z(unreal.Vector(-dirv.x, -dirv.y, -dirv.z))
-        lx, ly = at(tu + 250.0, tv)
-        ln = 3000.0
-        beam = shape(CONE, "Camp_{}_Beam".format(s["name"]),
-                     (lx + dirv.x * ln * 0.5, ly + dirv.y * ln * 0.5, z + h + 90.0 + dirv.z * ln * 0.5), (500.0, 500.0, ln),
-                     yaw=rot.yaw, pitch=rot.pitch, roll=rot.roll, mat="beam", folder=folder, tag=TAG_CAMP)
-        beam.set_editor_property("tags", [unreal.Name(TAG_CAMP), unreal.Name("CampLit")])
-        lit.append(beam)
         box("ContainerA", 300.0, 550.0, 0.0, (610.0, 245.0, 260.0), dyaw=70.0, mat="container")
-    return lit
+    flag(-700.0, 700.0, 0.0)
+    return lit, (0.0, 0.0, 170.0), []
 
 
 def _forest_side(zone):
@@ -1177,6 +1650,11 @@ def step_camps():
     lay = layout()
     eas = _eas()
     _clear(TAG_CAMP)
+    # Кемпы и сарай ставит только этот шаг: остатки без тега (упавший прогон) тоже его.
+    for act in eas.get_all_level_actors():
+        if isinstance(act, (unreal.SiegeCampSite, unreal.SiegeMechBay)):
+            log("DELETED: без тега " + act.get_actor_label())
+            act.destroy_actor()
     parts = mech_parts()
     c = lay["corner"]
     n0 = _count["n"]
@@ -1185,16 +1663,19 @@ def step_camps():
         z = _ground_z(s["x"], s["y"], s["z"])
         yaw = math.degrees(math.atan2(-c - s["y"], -c - s["x"]))    # фасадом к нашей базе
         folder = "Lanes/Camps/" + s["name"]
-        lit = _camp_piece(s, s["x"], s["y"], z, yaw, folder)
+        lit, part_at, posts = _camp_piece(s, s["x"], s["y"], z, yaw, folder)
         camp = eas.spawn_actor_from_class(unreal.SiegeCampSite, unreal.Vector(s["x"], s["y"], z),
                                           unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
+        _tag(camp, TAG_CAMP, "LN_Camp_" + s["name"], folder)   # сразу: упавший прогон иначе оставит актор без тега
+        # Деталь лежит там, где её положил кусок (в сарае, у въезда траншеи, в кабине вышки).
+        camp.get_editor_property("part_display").set_relative_location(unreal.Vector(*part_at), False, False)
+        camp.set_editor_property("guard_posts", [unreal.Vector(pu, pv, 0.0) for pu, pv in posts])
         camp.set_editor_property("slot_name", unreal.Name(s["name"]))
         camp.set_editor_property("forest_side", unreal.Name(_forest_side(s["zone"])))
         camp.set_editor_property("tier", getattr(unreal.SiegeCampTier, TIER_ENUM[s["tier"]]))
         camp.set_editor_property("landmark_actors", lit)
         camp.set_editor_property("guards", camp_guards(s["tier"]))
         camp.set_editor_property("part_pool", parts)
-        _tag(camp, TAG_CAMP, "LN_Camp_" + s["name"], folder)
 
     # Разметку мест (кольца и подписи из step_markup) в игре не видно: у кемпов нет значков (автор).
     hidden = 0
