@@ -21,6 +21,7 @@
 #include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Variant_Shooter/Siege/SiegeDirector.h"
 #include "Variant_Shooter/Siege/SiegeLaneFollower.h"
+#include "Variant_Shooter/Siege/SiegeCampGuard.h"
 #include "EngineUtils.h"
 
 namespace
@@ -260,11 +261,16 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 	// the player's buildings, and with nothing near it flies on down the lane.
 	USiegeLaneFollower* const LaneFollower = FindComponentByClass<USiegeLaneFollower>();
 	const bool bOnLane = LaneFollower && LaneFollower->GetLane() && !LaneFollower->IsLaneWalked();
+	// A forest camp's carrier (Docs/Lane_Camps_Design_2026-09-30.md) guards its camp: it takes on only
+	// what its leash allows, never the base, and with nothing to fight hangs over its post.
+	const USiegeCampGuard* const CampGuard = FindComponentByClass<USiegeCampGuard>();
 	TargetReacquireTimer -= DeltaTime;
 	APawn* Target = StandoffTarget.Get();
 	AActor* Core = SiegeCore.Get();
 	// A lane carrier with nothing near is marching, not lost: it looks again on the timer only.
-	if (((Target || !bOnLane) && IsGoneTarget(Target)) || (Core && IsGoneCore(Core)) || TargetReacquireTimer <= 0.0f)
+	// A camp carrier with nothing near is at home, the same way.
+	if (((Target || (!bOnLane && !CampGuard)) && IsGoneTarget(Target)) || (Core && IsGoneCore(Core)) || TargetReacquireTimer <= 0.0f
+		|| (CampGuard && Target && !CampGuard->IsWithinLeash(Target)))
 	{
 		TargetReacquireTimer = CarrierReacquireInterval;
 
@@ -286,9 +292,17 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 		{
 			Fresh = nullptr;
 		}
+		if (CampGuard && Fresh && !CampGuard->IsWithinLeash(Fresh))
+		{
+			Fresh = nullptr;
+		}
 
 		AActor* FreshCore = nullptr;
-		if (!bOnLane)
+		if (CampGuard)
+		{
+			// A camp's carrier has no business with the base.
+		}
+		else if (!bOnLane)
 		{
 			FreshCore = ABuildableActor::FindUndefendedCore(GetWorld(), GetActorLocation());
 		}
@@ -333,6 +347,16 @@ void AKamikazeCarrierDrone::TickSelfDriven(float DeltaTime)
 			{
 				MoveOrderTimer = CarrierMoveOrderInterval;
 				Mover->FlyToLocationUnclamped(LaneGoal + FVector(0.0f, 0.0f, StandoffHeight), StandoffTolerance * 0.5f);
+			}
+		}
+		// A camp carrier with nothing to fight goes back over its post.
+		else if (CampGuard)
+		{
+			MoveOrderTimer -= DeltaTime;
+			if (MoveOrderTimer <= 0.0f)
+			{
+				MoveOrderTimer = CarrierMoveOrderInterval;
+				Mover->FlyToLocationUnclamped(CampGuard->GetPost(), StandoffTolerance * 0.5f);
 			}
 		}
 		return;

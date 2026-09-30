@@ -18,6 +18,7 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/UI/InventoryDragDropOperation.h"
 #include "Variant_Shooter/UI/InventorySlotWidget.h"
+#include "Variant_Shooter/Siege/MechPartDefinition.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
 namespace
@@ -218,12 +219,69 @@ bool UInventoryScreenWidget::NativeOnDrop(const FGeometry& InGeometry, const FDr
 		return Super::NativeOnDrop(InGeometry, InDragDropEvent, InOperation);
 	}
 
-	// Dragged off a weapon and let go anywhere that is not a cell. That is "take it off", not
-	// "throw it away": the part is not in the bag yet, so there is nothing to throw, and the
-	// component finds it the first cell that will have it. A full bag refuses and says so.
+	AShooterCharacter* const Character = BoundCharacter.Get();
+	const int32 Panel = FindPanelUnder(InDragDropEvent.GetScreenSpacePosition());
+	AShooterWeapon* const PanelWeapon = GetWeaponInPanel(Panel);
+
+	// A whole gun: onto the other panel it trades slots, onto its own it stays, anywhere else it goes
+	// on the floor, Apex-style.
+	if (Dragged->DraggedWeapon)
+	{
+		if (!Character)
+		{
+			return true;
+		}
+		if (Panel != INDEX_NONE)
+		{
+			if (PanelWeapon != Dragged->DraggedWeapon)
+			{
+				if (Character->HasAuthority())
+				{
+					Character->SwapWeaponSlots();
+				}
+				else
+				{
+					Character->Server_SwapWeaponSlots();
+				}
+			}
+			return true;
+		}
+		if (Character->HasAuthority())
+		{
+			Character->DropWeaponFromInventory(Dragged->DraggedWeapon);
+		}
+		else
+		{
+			Character->Server_DropWeaponFromInventory(Dragged->DraggedWeapon);
+		}
+		return true;
+	}
+
+	// A part off a gun: onto the other gun's panel it moves there (into the slot of its type),
+	// onto its own panel nothing happens, anywhere else it goes on the floor. The bag's cells catch
+	// their own drops, so reaching here means the cursor was not over the bag.
 	if (Dragged->SourceWeapon)
 	{
-		HandleAttachmentRemove(Dragged->SourceWeapon, Dragged->SourceAttachmentType, INDEX_NONE);
+		if (Panel != INDEX_NONE)
+		{
+			if (PanelWeapon && PanelWeapon != Dragged->SourceWeapon)
+			{
+				HandleAttachmentMove(Dragged->SourceWeapon, Dragged->SourceAttachmentType, PanelWeapon);
+			}
+			return true;
+		}
+		RequestDropMountedAttachment(Dragged->SourceWeapon, Dragged->SourceAttachmentType);
+		return true;
+	}
+
+	// A bag cell over a weapon panel: an attachment goes into the slot of its type on that gun;
+	// anything else is not for a gun, and the drop is swallowed rather than read as "throw away".
+	if (Dragged->SourceIndex != INDEX_NONE && Panel != INDEX_NONE)
+	{
+		if (PanelWeapon && Dragged->DraggedAttachment)
+		{
+			HandleAttachmentInstall(Dragged->SourceIndex, PanelWeapon);
+		}
 		return true;
 	}
 
@@ -290,10 +348,119 @@ void UInventoryScreenWidget::Rebuild()
 	// The free mount count is per weapon and the same for both; which slots each gun has, and
 	// what is in them, is the gun's own.
 	const int32 FreeSlots = Inventory->GetFreeAttachmentSlots();
-	const TArray<AShooterWeapon*>& Weapons = Character->GetOwnedWeapons();
 
-	RebuildAttachmentSlots(FirstWeaponAttachments, Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, FreeSlots);
-	RebuildAttachmentSlots(SecondWeaponAttachments, Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, FreeSlots);
+	RebuildAttachmentSlots(FirstWeaponAttachments, GetWeaponInPanel(0), FreeSlots);
+	RebuildAttachmentSlots(SecondWeaponAttachments, GetWeaponInPanel(1), FreeSlots);
+}
+
+AShooterWeapon* UInventoryScreenWidget::GetWeaponInPanel(int32 PanelIndex) const
+{
+	const AShooterCharacter* const Character = BoundCharacter.Get();
+	return (Character && PanelIndex != INDEX_NONE) ? Character->FindOwnedWeaponInHotkeySlot(PanelIndex) : nullptr;
+}
+
+int32 UInventoryScreenWidget::FindPanelUnder(const FVector2D& ScreenPosition) const
+{
+	const UWidget* const Panels[2] = { WeaponPanel1.Get(), WeaponPanel2.Get() };
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		if (Panels[Index] && Panels[Index]->IsVisible() && Panels[Index]->GetCachedGeometry().IsUnderLocation(ScreenPosition))
+		{
+			return Index;
+		}
+	}
+	return INDEX_NONE;
+}
+
+void UInventoryScreenWidget::GatherAttachmentSquares(TArray<UInventorySlotWidget*>& OutSquares) const
+{
+	OutSquares.Reset();
+	for (const UPanelWidget* const Container : { FirstWeaponAttachments.Get(), SecondWeaponAttachments.Get() })
+	{
+		if (!Container)
+		{
+			continue;
+		}
+		for (int32 Index = 0; Index < Container->GetChildrenCount(); ++Index)
+		{
+			if (UInventorySlotWidget* const Square = Cast<UInventorySlotWidget>(Container->GetChildAt(Index)))
+			{
+				OutSquares.Add(Square);
+			}
+		}
+	}
+}
+
+FReply UInventoryScreenWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	// Squares handle their own presses; what reaches the screen was on a panel's plate or on nothing.
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		const int32 Panel = FindPanelUnder(InMouseEvent.GetScreenSpacePosition());
+		if (GetWeaponInPanel(Panel))
+		{
+			PressedWeaponPanel = Panel;
+			return FReply::Handled().DetectDrag(TakeWidget(), EKeys::LeftMouseButton);
+		}
+	}
+	PressedWeaponPanel = INDEX_NONE;
+	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
+}
+
+void UInventoryScreenWidget::NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent,
+	UDragDropOperation*& OutOperation)
+{
+	Super::NativeOnDragDetected(InGeometry, InMouseEvent, OutOperation);
+
+	AShooterWeapon* const Weapon = GetWeaponInPanel(PressedWeaponPanel);
+	PressedWeaponPanel = INDEX_NONE;
+	if (!Weapon)
+	{
+		return;
+	}
+
+	UInventoryDragDropOperation* const Operation = NewObject<UInventoryDragDropOperation>(GetTransientPackage());
+	Operation->Pivot = EDragPivot::CenterCenter;
+	Operation->DraggedWeapon = Weapon;
+
+	// The gun's own picture on a grid square, so the thing under the cursor reads as that gun.
+	if (GridCellClass)
+	{
+		if (UInventorySlotWidget* const Ghost = CreateWidget<UInventorySlotWidget>(this, GridCellClass))
+		{
+			Ghost->SetRarityTint(false);
+			Ghost->SetCell(EInventoryCellVisual::Filled, EInventorySlotKind::Empty, Weapon->GetIcon(), 1, 1);
+			Operation->DefaultDragVisual = Ghost;
+		}
+	}
+	OutOperation = Operation;
+}
+
+void UInventoryScreenWidget::HandleDragStarted(UDragDropOperation* Operation)
+{
+	if (!Operation)
+	{
+		return;
+	}
+	Operation->OnDrop.AddUniqueDynamic(this, &UInventoryScreenWidget::HandleDragEnded);
+	Operation->OnDragCancelled.AddUniqueDynamic(this, &UInventoryScreenWidget::HandleDragEnded);
+
+	TArray<UInventorySlotWidget*> Squares;
+	GatherAttachmentSquares(Squares);
+	for (UInventorySlotWidget* const Square : Squares)
+	{
+		Square->SetCompatibleHint(Square->WouldAcceptDrag(Operation));
+	}
+}
+
+void UInventoryScreenWidget::HandleDragEnded(UDragDropOperation* Operation)
+{
+	TArray<UInventorySlotWidget*> Squares;
+	GatherAttachmentSquares(Squares);
+	for (UInventorySlotWidget* const Square : Squares)
+	{
+		Square->SetCompatibleHint(false);
+	}
 }
 
 void UInventoryScreenWidget::RebuildWeaponPanels(const UInventoryComponent& Inventory)
@@ -304,17 +471,12 @@ void UInventoryScreenWidget::RebuildWeaponPanels(const UInventoryComponent& Inve
 		return;
 	}
 
-	// Same rule as the corner: a panel is a SLOT. Panel 0 is the first weapon owned and panel 1 the
-	// second, and neither moves when the player switches - the labels on the reference screen read
-	// "1 WEAPON" and "2 WEAPON", which only means anything if the slots stay put. bIsEquipped is
-	// what says which one is in hand.
-	const TArray<AShooterWeapon*>& Weapons = Character->GetOwnedWeapons();
+	// A panel is a SLOT: panel 0 is key 1 and panel 1 key 2, and neither moves when the player
+	// switches - the labels read "1 WEAPON" and "2 WEAPON", which only means anything if the slots
+	// stay put. bIsEquipped is what says which one is in hand.
 	const AShooterWeapon* Equipped = Character->GetCurrentWeapon();
 
-	AShooterWeapon* Panels[2] = {
-		Weapons.IsValidIndex(0) ? Weapons[0] : nullptr,
-		Weapons.IsValidIndex(1) ? Weapons[1] : nullptr
-	};
+	AShooterWeapon* Panels[2] = { GetWeaponInPanel(0), GetWeaponInPanel(1) };
 	for (int32 Index = 0; Index < 2; ++Index)
 	{
 		AShooterWeapon* Weapon = Panels[Index];
@@ -392,6 +554,8 @@ void UInventoryScreenWidget::RebuildGrid(const UInventoryComponent& Inventory)
 			// are deliberately never told, so they neither start a drag nor accept one.
 			Square->SetGridIndex(Index);
 			Square->OnCellDropped.BindUObject(this, &UInventoryScreenWidget::HandleCellDropped);
+			Square->OnCellClicked.BindUObject(this, &UInventoryScreenWidget::HandleCellClicked);
+			Square->OnDragStarted.BindUObject(this, &UInventoryScreenWidget::HandleDragStarted);
 
 			GridSquares[Index] = Square;
 		}
@@ -449,6 +613,11 @@ void UInventoryScreenWidget::RebuildAttachmentSlots(UPanelWidget* Container, ASh
 
 		Square->OnAttachmentInstall.BindUObject(this, &UInventoryScreenWidget::HandleAttachmentInstall);
 		Square->OnAttachmentRemove.BindUObject(this, &UInventoryScreenWidget::HandleAttachmentRemove);
+		Square->OnAttachmentMove.BindUObject(this, &UInventoryScreenWidget::HandleAttachmentMove);
+		Square->OnAttachmentClicked.BindUObject(this, &UInventoryScreenWidget::HandleAttachmentClicked);
+		Square->OnDragStarted.BindUObject(this, &UInventoryScreenWidget::HandleDragStarted);
+		// Hit-testable, or the cursor passes through and neither drag nor drop works. @see RebuildGrid
+		Square->SetVisibility(ESlateVisibility::Visible);
 	}
 
 	// A gun with fewer slots than the last one drawn here.
@@ -468,14 +637,88 @@ void UInventoryScreenWidget::HandleAttachmentInstall(int32 FromIndex, AShooterWe
 	}
 
 	// Same rule as every other write from this screen: the grid is the server's, so a client asks
-	// and the host calls straight through. @see RequestMove.
+	// and the host calls straight through. @see RequestMove. The Apex version: a part already in that
+	// slot swaps back into the bag instead of refusing.
 	if (Character->HasAuthority())
 	{
-		Inventory->InstallAttachmentFromSlot(FromIndex, Weapon);
+		Inventory->PlaceAttachmentFromSlot(FromIndex, Weapon);
 	}
 	else
 	{
-		Inventory->Server_InstallAttachmentFromSlot(FromIndex, Weapon);
+		Inventory->Server_PlaceAttachmentFromSlot(FromIndex, Weapon);
+	}
+}
+
+void UInventoryScreenWidget::HandleAttachmentMove(AShooterWeapon* From, EWeaponAttachmentType InType, AShooterWeapon* To)
+{
+	AShooterCharacter* Character = BoundCharacter.Get();
+	UInventoryComponent* Inventory = Character ? Character->GetInventoryComponent() : nullptr;
+	if (!Inventory || !From || !To)
+	{
+		return;
+	}
+	if (Character->HasAuthority())
+	{
+		Inventory->MoveAttachmentBetweenWeapons(From, InType, To);
+	}
+	else
+	{
+		Inventory->Server_MoveAttachmentBetweenWeapons(From, InType, To);
+	}
+}
+
+void UInventoryScreenWidget::RequestDropMountedAttachment(AShooterWeapon* Weapon, EWeaponAttachmentType InType)
+{
+	AShooterCharacter* Character = BoundCharacter.Get();
+	UInventoryComponent* Inventory = Character ? Character->GetInventoryComponent() : nullptr;
+	if (!Inventory || !Weapon)
+	{
+		return;
+	}
+	if (Character->HasAuthority())
+	{
+		Inventory->DropMountedAttachmentToWorld(Weapon, InType);
+	}
+	else
+	{
+		Inventory->Server_DropMountedAttachmentToWorld(Weapon, InType);
+	}
+}
+
+void UInventoryScreenWidget::HandleCellClicked(int32 GridIndex, bool bRight)
+{
+	AShooterCharacter* Character = BoundCharacter.Get();
+	UInventoryComponent* Inventory = Character ? Character->GetInventoryComponent() : nullptr;
+	if (!Inventory || !Inventory->GetSlots().IsValidIndex(GridIndex))
+	{
+		return;
+	}
+
+	if (bRight)
+	{
+		RequestDropToWorld(GridIndex);
+		return;
+	}
+
+	// Left click on an attachment puts it on a gun that takes it. Nothing else has a use on click.
+	if (Inventory->GetSlots()[GridIndex].Kind == EInventorySlotKind::Attachment)
+	{
+		if (Character->HasAuthority())
+		{
+			Inventory->QuickEquipAttachmentFromSlot(GridIndex);
+		}
+		else
+		{
+			Inventory->Server_QuickEquipAttachmentFromSlot(GridIndex);
+		}
+	}
+}
+
+void UInventoryScreenWidget::HandleAttachmentClicked(AShooterWeapon* Weapon, EWeaponAttachmentType InType, bool bRight)
+{
+	if (bRight)
+	{
+		HandleAttachmentRemove(Weapon, InType, INDEX_NONE);
 	}
 }
 
@@ -488,19 +731,15 @@ void UInventoryScreenWidget::HandleAttachmentRemove(AShooterWeapon* Weapon, EWea
 		return;
 	}
 
-	// ToIndex is deliberately not used yet. The component puts a removed part in the first cell
-	// that will take it, and honouring an exact cell would mean a second decision -- what to do
-	// when that one is occupied -- that nothing has asked for. The parameter stays in the signature
-	// because the gesture carries it and dropping it here would be the harder thing to add back.
-	(void)ToIndex;
-
+	// Into the cell it was dropped on: an empty one takes it, one holding a part of the same type
+	// that fits trades places with it, anything else falls back to the first empty cell.
 	if (Character->HasAuthority())
 	{
-		Inventory->UninstallAttachment(Weapon, InType);
+		Inventory->UnmountAttachmentToSlot(Weapon, InType, ToIndex);
 	}
 	else
 	{
-		Inventory->Server_UninstallAttachment(Weapon, InType);
+		Inventory->Server_UnmountAttachmentToSlot(Weapon, InType, ToIndex);
 	}
 }
 
@@ -704,6 +943,18 @@ UTexture2D* UInventoryScreenWidget::IconForSlot(const FInventorySlot& InSlot) co
 			if (UTexture2D* AttachIcon = Def->GetDisplayIcon())
 			{
 				return AttachIcon;
+			}
+		}
+	}
+
+	// A mech part wears its own picture: which slot it fills is the whole question for the barn.
+	if (InSlot.Kind == EInventorySlotKind::MechPart)
+	{
+		if (const UMechPartDefinition* Def = Cast<UMechPartDefinition>(InSlot.Payload))
+		{
+			if (UTexture2D* PartIcon = Def->Icon.LoadSynchronous())
+			{
+				return PartIcon;
 			}
 		}
 	}

@@ -53,9 +53,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lane")
 	float GetDistanceClosestTo(const FVector& Location) const;
 
-	/** Where member Index of a pack stands at spawn: a column back from the lane's start, jittered
-	 *  sideways. Flat XY only, the director finds the ground under it. */
-	FVector GetPackSlot(int32 Index) const;
+	/** Where member Index of a pack stands at spawn: a column from StartDistance along the lane
+	 *  (0 = the lane's start) towards the base, jittered sideways. Flat XY only, the director finds
+	 *  the ground under it. */
+	FVector GetPackSlot(int32 Index, float StartDistance = 0.0f) const;
 
 	/** Every open lane of this world. */
 	static void GetOpenLanes(const UWorld* World, TArray<ASiegeLane*>& OutLanes);

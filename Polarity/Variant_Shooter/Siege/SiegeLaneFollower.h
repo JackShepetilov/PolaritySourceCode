@@ -41,6 +41,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lane", meta = (ClampMin = "0.0", Units = "cm"))
 	float CarrierAggroRadius = 6000.0f;
 
+	/** The leash of a walker (author 2026-09-30): it takes on only what stands within this distance of
+	 *  its lane (cm). A player in a camp behind the lane is not its business, and a target that walks
+	 *  off past it is dropped, so the creep goes back to the march. 0 = no leash. Not applied once the
+	 *  lane is walked: at the base everything is its business. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lane", meta = (ClampMin = "0.0", Units = "cm"))
+	float WalkerLeashRadius = 4000.0f;
+
+	/** True if Target stands close enough to the lane for this creep to take it on. The answer for one
+	 *  target is kept a quarter of a second: the controller asks every frame. */
+	bool IsWithinLeash(const AActor* Target) const;
+
 	void SetLane(ASiegeLane* InLane);
 
 	UFUNCTION(BlueprintPure, Category = "Lane")
@@ -70,4 +81,13 @@ private:
 	TWeakObjectPtr<ASiegeLane> Lane;
 	float Progress = 0.0f;
 	bool bLaneWalked = false;
+
+	// Leash answers (IsWithinLeash) per target: the controller weighs several intents a frame.
+	struct FLeashAnswer
+	{
+		TWeakObjectPtr<const AActor> Target;
+		float CheckedAt = -1.0f;
+		bool bInside = true;
+	};
+	mutable TArray<FLeashAnswer, TInlineAllocator<4>> LeashAnswers;
 };

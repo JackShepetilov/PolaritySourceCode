@@ -195,6 +195,12 @@ public:
 	 *  empty. Read by the movement simulation on the owning client and on the server. */
 	bool GetJumpSlotParams(FJumpSlotParams& Out) const;
 
+	/** True when an upgrade lets this shot come out of the reserve. @see UUpgradeComponent::TryTakeShotFromReserve */
+	bool TryTakeShotFromReserve(const AShooterWeapon* Weapon);
+
+	/** Product of every upgrade's slide friction multiplier while firing without a break. */
+	float GetSlideFireFrictionScale() const;
+
 	// ==================== Persistence ====================
 
 	/** Get list of upgrade tags for checkpoint/save serialization */

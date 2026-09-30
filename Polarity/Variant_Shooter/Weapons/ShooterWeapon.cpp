@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterWeapon.h"
+#include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
 #include "AI/PolarityTeams.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifies/AnimNotify_PlaySound.h"
@@ -654,6 +655,14 @@ UWeaponAttachmentDefinition* AShooterWeapon::UninstallAttachmentOfType(EWeaponAt
 
 	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: removed %s."), *GetName(), *GetNameSafe(Removed));
 	return Removed;
+}
+
+void AShooterWeapon::OnRep_HotkeySlot()
+{
+	if (AShooterCharacter* const Character = Cast<AShooterCharacter>(GetOwner()))
+	{
+		Character->OnWeaponInventoryChanged.Broadcast();
+	}
 }
 
 void AShooterWeapon::OnRep_InstalledAttachments()
@@ -2721,22 +2730,29 @@ void AShooterWeapon::BeginPlay()
 	BaseMagazineSize = MagazineSize;
 	ApplyMagazineModifiers();
 
-	// Pay for the pool here rather than on the first trigger pull. Above the owner check on purpose:
-	// a weapon with no owner still knows what it fires, and warming the pool is the one useful thing
-	// it can do. @see PrewarmProjectilePool.
-	PrewarmProjectilePool();
-
-	// A weapon belongs to whoever is holding it, and every spawn path sets that owner. One thing
-	// does not: a weapon actor dragged straight into a level. It has nobody to attach its meshes
-	// to, nobody to fire it, and no HUD to update, so the only sane thing it can do is sit there
-	// and say so instead of taking the editor down on the null owner.
+	// A weapon belongs to whoever is holding it, and every spawn path sets that owner through the
+	// spawn parameters. One thing does not: a weapon blueprint dragged straight into a level, or a
+	// loot row naming one. Nobody holds it, so it becomes what an unheld gun is, a drop of itself
+	// [author, 2026-09-29]. The server puts the drop down and removes this actor; a client only hides
+	// its copy, and the server's removal of a level actor reaches it on its own.
 	AActor* OwningActor = GetOwner();
 	if (!OwningActor)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[WEAPON] %s has no owner. A weapon has to be given to a character, "
-			"not placed in the level: use a pickup for that. This one will do nothing."), *GetName());
+		SetActorHiddenInGame(true);
+		SetActorEnableCollision(false);
+		SetActorTickEnabled(false);
+		if (HasAuthority())
+		{
+			ADroppedRangedWeapon* const Drop = ADroppedRangedWeapon::SpawnFor(GetWorld(), GetClass(), GetActorTransform());
+			UE_LOG(LogTemp, Log, TEXT("[WEAPON_DROP] %s has no owner: became %s"), *GetName(), *GetNameSafe(Drop));
+			Destroy();
+		}
 		return;
 	}
+
+	// Pay for the pool here rather than on the first trigger pull. Below the owner check: an unheld
+	// weapon has just turned into a drop and will never fire. @see PrewarmProjectilePool.
+	PrewarmProjectilePool();
 
 	// subscribe to the owner's destroyed delegate
 	OwningActor->OnDestroyed.AddDynamic(this, &AShooterWeapon::OnOwnerDestroyed);
@@ -3482,11 +3498,24 @@ void AShooterWeapon::Fire()
 		}
 	}
 
+	// A slide-slot upgrade may take this round out of the reserve and leave the magazine alone
+	// (UUpgrade_SwordSlide). Asked only when the reserve has one, because a yes is counted against
+	// the upgrade's limit. Decided before bLastRound: a round that is not leaving the magazine cannot
+	// be its last.
+	bShotFromReserve = false;
+	if (PawnOwner && HasSpareReserveRound())
+	{
+		if (UUpgradeManagerComponent* UpgradeMgr = PawnOwner->FindComponentByClass<UUpgradeManagerComponent>())
+		{
+			bShotFromReserve = UpgradeMgr->TryTakeShotFromReserve(this);
+		}
+	}
+
 	// Worked out here, before the round is spent: ConsumeRoundAfterShot runs later in this same call,
 	// so CurrentBullets is still the count BEFORE this shot. One left means this shot empties it.
 	// Only a weapon with a real magazine can run out; an energy weapon refills itself and never
 	// locks its action back.
-	const bool bLastRound = UsesReload() && CurrentBullets <= 1;
+	const bool bLastRound = UsesReload() && !bShotFromReserve && CurrentBullets <= 1;
 
 	PlayFireEffectsLocally(bLastRound);
 
@@ -3536,6 +3565,9 @@ void AShooterWeapon::Fire()
 	// shotgun puts several pellets in the air per pull, and charging them each with a full bloom
 	// would make it the widest weapon in the game after two shots.
 	AddShotSpread();
+
+	// Spent by ConsumeRoundAfterShot; cleared here too in case this weapon's fire path never called it.
+	bShotFromReserve = false;
 
 	// Notify listeners that a shot was fired (for NPC burst counting)
 	OnShotFired.Broadcast();
@@ -4236,7 +4268,22 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 
 	WeaponOwner->AddWeaponRecoil(FiringRecoil);
 
-	--CurrentBullets;
+	if (bShotFromReserve)
+	{
+		// The magazine keeps its round. Cells need nothing more here: SpendPooledRound below takes the
+		// cell, and the cells were holding a spare one beyond the loaded rounds. An endless reserve has
+		// nothing to take. Only the energy reserve is counted apart from the magazine.
+		bShotFromReserve = false;
+		if (UsesEnergyReserve())
+		{
+			DrawEnergyReserve(1);
+			RefreshOwnerAmmoHUD();
+		}
+	}
+	else
+	{
+		--CurrentBullets;
+	}
 
 	// The round leaves the magazine cells too. The cells hold everything the player owns for this
 	// gun and the magazine is the loaded part of it, so a shot has to come off both or the reserve
@@ -5945,6 +5992,25 @@ int32 AShooterWeapon::GetPooledAmmo() const
 	// No inventory at all - an NPC holding this gun. They are not on the cell economy, so the
 	// magazine behaves as it always did.
 	return MagazineSize;
+}
+
+bool AShooterWeapon::HasSpareReserveRound() const
+{
+	if (UsesEnergyReserve())
+	{
+		return EnergyReserve > 0;
+	}
+	if (HasInfiniteReserve())
+	{
+		return true;
+	}
+	if (OwnsAmmoCells())
+	{
+		// The cells count the loaded rounds too, so only what is beyond the magazine is spare.
+		return GetPooledAmmo() > CurrentBullets;
+	}
+	// No reserve at all: a magazine that refills itself has nothing to save.
+	return false;
 }
 
 void AShooterWeapon::SpendPooledRound()

@@ -147,6 +147,11 @@ enum class EPolarityMoveFlag : uint32
 	 *  to let go and press again in the air, which is not what the reference does and not what
 	 *  anybody's hands do. */
 	SlideInputHeld       = 1 << 18,
+	/** The owner keeps firing: each shot came within the refire window of the one before it. The
+	 *  slide-slot upgrade UUpgrade_SlideFireFriction turns it into less slide friction. The owning
+	 *  client decides it, because only that machine runs Fire() for its own gun; the receiving side
+	 *  still applies nothing without the upgrade. */
+	SlideFireStreak      = 1 << 19,
 };
 ENUM_CLASS_FLAGS(EPolarityMoveFlag);
 
@@ -683,6 +688,12 @@ public:
 	 *  saved move, so the server caps a remote pawn's speed on the same frames the client did. */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void SetAiming(bool bNewAiming);
+
+	/** Told by UUpgrade_SlideFireFriction on the owning client: on at a shot, off when the next shot
+	 *  did not come in time. Travels as EPolarityMoveFlag::SlideFireStreak, like SetAiming. */
+	void SetSlideFireStreak(bool bNewStreak) { bSlideFireStreak = bNewStreak; }
+
+	bool IsSlideFireStreak() const { return bSlideFireStreak; }
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsAiming() const { return bIsAiming; }
@@ -1308,6 +1319,13 @@ protected:
 	 *  server and on replay. Observers receive it for third-person animation. */
 	UPROPERTY(Replicated)
 	bool bIsAiming = false;
+
+	/** Firing without a break. Written by SetSlideFireStreak on the owning client, restored from the
+	 *  move flags on the server and on replay. Observers never need it. */
+	bool bSlideFireStreak = false;
+
+	/** Multiplier on slide friction from the slide-slot upgrade while bSlideFireStreak; 1 without it. */
+	float GetSlideFireFrictionScale() const;
 
 	// Saved default values (restored after slide)
 	float DefaultGroundFriction = 8.0f;

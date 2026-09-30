@@ -25,18 +25,16 @@
 
 /** Index (0=X, 1=Y, 2=Z) of the mesh's longest LOCAL axis = the spear / spin axis. Read from the
  *  local bounding box (largest half-extent, scaled by the component; GetAbs() guards mirrored scale). */
-inline int32 AirMailLongAxisIndex(const UStaticMeshComponent* Mesh)
+inline int32 AirMailLongAxisIndex(const UPrimitiveComponent* Mesh)
 {
 	int32 LongAxis = 0;
 	if (Mesh)
 	{
-		if (const UStaticMesh* SM = Mesh->GetStaticMesh())
-		{
-			const FVector Ext = (SM->GetBoundingBox().GetExtent() * Mesh->GetComponentScale()).GetAbs();
-			float MaxExt = Ext.X;
-			if (Ext.Y > MaxExt) { MaxExt = Ext.Y; LongAxis = 1; }
-			if (Ext.Z > MaxExt) { MaxExt = Ext.Z; LongAxis = 2; }
-		}
+		// Local bounds work for any body: a prop's static mesh and a dropped gun's box alike.
+		const FVector Ext = (Mesh->CalcBounds(FTransform::Identity).BoxExtent * Mesh->GetComponentScale()).GetAbs();
+		float MaxExt = Ext.X;
+		if (Ext.Y > MaxExt) { MaxExt = Ext.Y; LongAxis = 1; }
+		if (Ext.Z > MaxExt) { MaxExt = Ext.Z; LongAxis = 2; }
 	}
 	return LongAxis;
 }
@@ -54,7 +52,7 @@ inline FQuat AirMailSpearBasis(int32 LongAxis, const FVector& Dir)
 
 /** One-shot: snap the body so its longest local axis points along MoveDir and clear any spin.
  *  Used at launch (bounce / kick) for an immediately correct frame; AirMailTickSpear maintains it. */
-inline void AirMailOrientSpear(UStaticMeshComponent* Mesh, const FVector& MoveDir)
+inline void AirMailOrientSpear(UPrimitiveComponent* Mesh, const FVector& MoveDir)
 {
 	if (!Mesh)
 	{
@@ -78,7 +76,7 @@ inline void AirMailOrientSpear(UStaticMeshComponent* Mesh, const FVector& MoveDi
  *  and roll the body around that axis at RollDegPerSec. Kinematic (teleport rotation + zeroed
  *  angular velocity) so the body cannot precess/tumble. No-ops once the body slows below MinSpeed
  *  (landed / stopped), so physics resumes naturally. */
-inline void AirMailTickSpear(UStaticMeshComponent* Mesh, float RollDegPerSec, float MinSpeed = 200.0f)
+inline void AirMailTickSpear(UPrimitiveComponent* Mesh, float RollDegPerSec, float MinSpeed = 200.0f)
 {
 	if (!Mesh)
 	{

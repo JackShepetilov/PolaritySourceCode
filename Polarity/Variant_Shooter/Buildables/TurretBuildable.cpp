@@ -623,40 +623,6 @@ float ATurretBuildable::ExplosionRadiusOf(const AShooterWeapon* Weapon)
 	return CDO ? CDO->GetExplosionRadius() : 0.0f;
 }
 
-TSubclassOf<ADroppedRangedWeapon> ATurretBuildable::ResolveDropClass(const AShooterWeapon* Weapon) const
-{
-	if (!Weapon)
-	{
-		return nullptr;
-	}
-	if (Weapon->SourceYankDropClass)
-	{
-		return Weapon->SourceYankDropClass;
-	}
-	// Nearest ancestor in the fallback table wins, so a table entry for a base class covers the
-	// family while a specific entry still beats it.
-	TSubclassOf<ADroppedRangedWeapon> Best;
-	int32 BestDepth = -1;
-	for (const TPair<TSubclassOf<AShooterWeapon>, TSubclassOf<ADroppedRangedWeapon>>& Pair : DropClassFallbacks)
-	{
-		if (!Pair.Key || !Pair.Value || !Weapon->GetClass()->IsChildOf(Pair.Key))
-		{
-			continue;
-		}
-		int32 Depth = 0;
-		for (const UClass* Walk = Pair.Key; Walk; Walk = Walk->GetSuperClass())
-		{
-			++Depth;
-		}
-		if (Depth > BestDepth)
-		{
-			BestDepth = Depth;
-			Best = Pair.Value;
-		}
-	}
-	return Best;
-}
-
 // ==================== Feeding ====================
 
 bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 ReportedLoadedRounds, AShooterWeapon* Weapon)
@@ -726,7 +692,6 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 
 	// Everything the new copy has to inherit, read before the donor's gun is destroyed.
 	const TSubclassOf<AShooterWeapon> WeaponClass = Held->GetClass();
-	const TSubclassOf<ADroppedRangedWeapon> DropClass = ResolveDropClass(Held);
 	const float DropCharge = Held->SourceDropCharge;
 	const int32 Magazine = FMath::Max(1, Held->GetMagazineSize());
 
@@ -765,7 +730,6 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 		return false;
 	}
 	Mounted->SetMounted(true);
-	Mounted->SourceYankDropClass = DropClass;
 	Mounted->SourceDropCharge = DropCharge;
 	ViceWeapons[ViceIndex] = Mounted;
 	Mounted->FinishSpawning(SpawnTransform);
@@ -775,16 +739,15 @@ bool ATurretBuildable::AcceptWeaponFrom(AShooterCharacter* Donor, int32 Reported
 	Vice.Range = ComputeRangeFor(Mounted);
 	Vice.NextShotTime = 0.0f;
 	Vice.ReloadEndTime = -1.0f;
-	Vice.DropClass = DropClass;
 	Vice.DropCharge = DropCharge;
 	ViceRounds[ViceIndex] = Loaded;
 	// No ceiling: every round the gun brought is kept, the same as a looted gun in the hands.
 	ViceReserve[ViceIndex] = FMath::Max(0, Reserve);
 
-	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s took %s from %s into vice %d: %d loaded, %d reserve, range %.0f cm, %s, refire %.2f s, drop %s"),
+	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s took %s from %s into vice %d: %d loaded, %d reserve, range %.0f cm, %s, refire %.2f s"),
 		*GetName(), *WeaponClass->GetName(), *Donor->GetName(), ViceIndex, ViceRounds[ViceIndex], ViceReserve[ViceIndex],
 		Vice.Range, Mounted->IsHitscan() ? TEXT("hitscan") : TEXT("projectile"),
-		Mounted->GetActualRefireRate(), *GetNameSafe(DropClass));
+		Mounted->GetActualRefireRate());
 
 	OnBuildableChanged.Broadcast(this);
 	return true;
@@ -951,14 +914,12 @@ void ATurretBuildable::DropViceWeapon(int32 ViceIndex)
 		return;
 	}
 	const FTurretVice& Vice = Vices[ViceIndex];
-	const TSubclassOf<ADroppedRangedWeapon> DropClass = Vice.DropClass ? Vice.DropClass : ResolveDropClass(Weapon);
-	if (DropClass)
+	// Every gun has a floor version now: the drop is built from the gun's own class.
 	{
 		const USceneComponent* const Mount = ViceMounts.IsValidIndex(ViceIndex) ? ViceMounts[ViceIndex] : nullptr;
 		const FVector SpawnLocation = (Mount ? Mount->GetComponentLocation() : GetActorLocation()) + FVector(0.0f, 0.0f, 30.0f);
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		ADroppedRangedWeapon* const Drop = GetWorld()->SpawnActor<ADroppedRangedWeapon>(DropClass, SpawnLocation, GetActorRotation(), Params);
+		ADroppedRangedWeapon* const Drop = ADroppedRangedWeapon::SpawnFor(GetWorld(), Weapon->GetClass(),
+			FTransform(GetActorRotation(), SpawnLocation));
 		if (Drop)
 		{
 			// The rounds go with the gun, written the way the pickup reads them: an energy gun takes
@@ -978,18 +939,18 @@ void ATurretBuildable::DropViceWeapon(int32 ViceIndex)
 			{
 				WidgetSub->UnregisterDroppedRangedWeapon(Drop);
 			}
-			if (UStaticMeshComponent* const DropMesh = Drop->WeaponMesh)
+			if (UPrimitiveComponent* const DropBody = Drop->GetBody())
 			{
-				DropMesh->AddImpulse(FVector(FMath::FRandRange(-150.0f, 150.0f), FMath::FRandRange(-150.0f, 150.0f), 250.0f), NAME_None, true);
+				DropBody->AddImpulse(FVector(FMath::FRandRange(-150.0f, 150.0f), FMath::FRandRange(-150.0f, 150.0f), 250.0f), NAME_None, true);
 			}
 			UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s put %s down as %s with %d + %d rounds"),
 				*GetName(), *Weapon->GetClass()->GetName(), *Drop->GetName(), ViceRounds[ViceIndex], ViceReserve[ViceIndex]);
 		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: no drop class for %s (no SourceYankDropClass and no DropClassFallbacks entry), the gun is lost"),
-			*GetName(), *Weapon->GetClass()->GetName());
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TURRET_DEBUG] %s: could not put %s down, the gun is lost"),
+				*GetName(), *Weapon->GetClass()->GetName());
+		}
 	}
 
 	Weapon->Destroy();
@@ -1004,32 +965,9 @@ void ATurretBuildable::EjectViceWeapon(int32 ViceIndex, AShooterCharacter* Donor
 		return;
 	}
 
-	// A gun with a floor version goes down next to the turret with its rounds, the same way a
-	// destroyed turret lets its guns go.
-	const TSubclassOf<ADroppedRangedWeapon> DropClass = Vices[ViceIndex].DropClass ? Vices[ViceIndex].DropClass : ResolveDropClass(Weapon);
-	if (DropClass || !Donor)
-	{
-		DropViceWeapon(ViceIndex);
-		return;
-	}
-
-	// No floor version (a gun that only ever came from a level pickup): it would vanish, so it goes
-	// back into the donor's hands instead, as loot, with every round it had left.
-	const TSubclassOf<AShooterWeapon> WeaponClass = Weapon->GetClass();
-	const int32 Loaded = ViceRounds[ViceIndex];
-	const int32 Reserve = ViceReserve[ViceIndex];
-	Weapon->Destroy();
-	ClearVice(ViceIndex);
-
-	Donor->AddWeaponClass(WeaponClass);
-	if (AShooterWeapon* const Returned = Donor->FindWeaponOfType(WeaponClass))
-	{
-		Returned->ConfigureFiniteEnergyReserve();
-		Returned->SetBulletCount(Loaded);
-		Returned->SetEnergyReserve(Reserve);
-	}
-	UE_LOG(LogTemp, Log, TEXT("[TURRET_DEBUG] %s: swapped %s out of vice %d back to %s's hands (no floor version) with %d + %d rounds"),
-		*GetName(), *WeaponClass->GetName(), ViceIndex, *Donor->GetName(), Loaded, Reserve);
+	// Every gun has a floor version now, so it goes down next to the turret with its rounds, the same
+	// way a destroyed turret lets its guns go.
+	DropViceWeapon(ViceIndex);
 }
 
 bool ATurretBuildable::TopUpVice(AShooterCharacter* Donor, AShooterWeapon* Weapon, int32 ViceIndex, int32 ReportedLoadedRounds)
@@ -1091,7 +1029,6 @@ void ATurretBuildable::ClearVice(int32 ViceIndex)
 	ViceReserve[ViceIndex] = 0;
 	Vices[ViceIndex].Range = 0.0f;
 	Vices[ViceIndex].ReloadEndTime = -1.0f;
-	Vices[ViceIndex].DropClass = nullptr;
 	OnBuildableChanged.Broadcast(this);
 }
 

@@ -10,6 +10,47 @@
 #include "ShooterAIController.h"
 #include "AI/SmokeVisionSubsystem.h"
 #include "StateTreeAsyncExecutionContext.h"
+#include "Variant_Shooter/Siege/SiegeCampGuard.h"
+#include "Variant_Shooter/Siege/SiegeCampSite.h"
+#include "Variant_Shooter/Siege/SiegeLaneFollower.h"
+
+namespace SenseLeash
+{
+	// The sense task keeps its own copy of the target and an investigate spot straight from perception.
+	// A leashed NPC (a lane creep, a camp guard) must not take either from past its leash: the
+	// controller already refuses such a target, and without this the tree would still walk to it.
+
+	bool Allows(const AActor* Pawn, const AActor* Target)
+	{
+		if (!Pawn || !Target)
+		{
+			return true;
+		}
+		const USiegeLaneFollower* const LaneFollower = Pawn->FindComponentByClass<USiegeLaneFollower>();
+		if (LaneFollower && !LaneFollower->IsWithinLeash(Target))
+		{
+			return false;
+		}
+		const USiegeCampGuard* const CampGuard = Pawn->FindComponentByClass<USiegeCampGuard>();
+		return !CampGuard || CampGuard->IsWithinLeash(Target);
+	}
+
+	/** Camp guards only: an investigate spot must lie inside the camp's leash, and none while walking home. */
+	bool AllowsLocation(const AActor* Pawn, const FVector& Where)
+	{
+		const USiegeCampGuard* const CampGuard = Pawn ? Pawn->FindComponentByClass<USiegeCampGuard>() : nullptr;
+		if (!CampGuard)
+		{
+			return true;
+		}
+		if (CampGuard->IsReturning())
+		{
+			return false;
+		}
+		const ASiegeCampSite* const Camp = CampGuard->GetCamp();
+		return !Camp || FVector::DistSquared2D(Where, Camp->GetActorLocation()) <= FMath::Square(CampGuard->LeashRadius);
+	}
+}
 
 bool FStateTreeLineOfSightToTargetCondition::TestCondition(FStateTreeExecutionContext& Context) const
 {
@@ -248,7 +289,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				const FStateTreeStrongExecutionContext StrongContext = WeakContext.MakeStrongExecutionContext();
 				FInstanceDataType* InstanceData = StrongContext.IsValid() ? StrongContext.GetInstanceDataPtr<FInstanceDataType>() : nullptr;
 
-				if (Controller->IsHostileTo(SensedActor))
+				if (Controller->IsHostileTo(SensedActor) && SenseLeash::Allows(Character, SensedActor))
 				{
 					// Run a line trace between the character and the sensed actor
 					FCollisionQueryParams QueryParams;
@@ -364,7 +405,7 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				}
 
 				// Проверяем сторону, а не тег
-				if (!InstanceData.Controller->IsHostileTo(KnownActor))
+				if (!InstanceData.Controller->IsHostileTo(KnownActor) || !SenseLeash::Allows(InstanceData.Character, KnownActor))
 				{
 					continue;
 				}
@@ -440,6 +481,13 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 		InstanceData.Controller->ClearCurrentTarget();
 	}
 
+	// A camp guard does not go looking past its leash, nor while it walks home.
+	if (InstanceData.bHasInvestigateLocation && !SenseLeash::AllowsLocation(InstanceData.Character, InstanceData.InvestigateLocation))
+	{
+		InstanceData.bHasInvestigateLocation = false;
+		InstanceData.LastStimulusStrength = 0.0f;
+	}
+
 	// Periodic perception polling - backup mechanism in case delegates don't fire reliably
 	InstanceData.TimeSinceLastPoll += DeltaTime;
 	if (InstanceData.TimeSinceLastPoll >= InstanceData.PerceptionPollInterval)
@@ -467,7 +515,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 
 				for (AActor* KnownActor : KnownActors)
 				{
-					if (!KnownActor || !InstanceData.Controller->IsHostileTo(KnownActor))
+					if (!KnownActor || !InstanceData.Controller->IsHostileTo(KnownActor)
+						|| !SenseLeash::Allows(InstanceData.Character, KnownActor))
 					{
 						continue;
 					}

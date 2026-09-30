@@ -843,6 +843,8 @@ uint32 UApexMovementComponent::PackPolarityMoveFlags() const
 	Set(bJumpInputHeld,           EPolarityMoveFlag::JumpInputHeld);
 	Set(bWantsJumpCharge,        EPolarityMoveFlag::JumpCharging);
 
+	Set(bSlideFireStreak,        EPolarityMoveFlag::SlideFireStreak);
+
 	return Flags;
 }
 
@@ -867,6 +869,10 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint32 Flags)
 	// and this side cannot answer either better than it did.
 	bJumpInputHeld    = Has(EPolarityMoveFlag::JumpInputHeld);
 	bWantsJumpCharge = Has(EPolarityMoveFlag::JumpCharging);
+
+	// Only the client runs Fire() for its own gun, so only it knows whether the shots come without a
+	// break. What that is worth is asked of this side's own upgrade in UpdateSlide.
+	bSlideFireStreak = Has(EPolarityMoveFlag::SlideFireStreak);
 
 	// States that need a real entry. Each Start* sets up friction, gravity, direction and speed;
 	// a side that only flipped the bool kept simulating normally and finished the move somewhere
@@ -970,6 +976,8 @@ void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint32 Flags)
 
 	bJumpInputHeld    = Has(EPolarityMoveFlag::JumpInputHeld);
 	bWantsJumpCharge = Has(EPolarityMoveFlag::JumpCharging);
+
+	bSlideFireStreak  = Has(EPolarityMoveFlag::SlideFireStreak);
 
 	bMeleeLungeWanted       = Has(EPolarityMoveFlag::MeleeLunging);
 	bMeleeLungeHasTarget    = Has(EPolarityMoveFlag::MeleeLungeHasTarget);
@@ -1953,6 +1961,13 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 		{
 			const float Control = FMath::Max(HorizontalSpeed, SlideMinSpeed);
 			DecelAmount += MovementSettings->SlideFrictionPerSecond * Control * DeltaTime;
+		}
+
+		// Firing without a break takes a share of the flat-ground friction off (slide-slot upgrade).
+		// Only the flat terms: the slope below is gravity, not friction.
+		if (bSlideFireStreak)
+		{
+			DecelAmount *= GetSlideFireFrictionScale();
 		}
 
 		if (SlopeAngle > 3.0f)
@@ -4120,6 +4135,14 @@ bool UApexMovementComponent::GetJumpSlotParams(FJumpSlotParams& Out) const
 	return Upgrades && Upgrades->GetJumpSlotParams(Out);
 }
 
+float UApexMovementComponent::GetSlideFireFrictionScale() const
+{
+	// Same road as GetJumpSlotParams: the upgrade exists on the server and on the owning client.
+	const AActor* Owner = GetOwner();
+	const UUpgradeManagerComponent* Upgrades = Owner ? Owner->FindComponentByClass<UUpgradeManagerComponent>() : nullptr;
+	return Upgrades ? Upgrades->GetSlideFireFrictionScale() : 1.0f;
+}
+
 float UApexMovementComponent::GetJumpSlotCooldownFraction() const
 {
 	FJumpSlotParams Slot;
@@ -4747,6 +4770,7 @@ void UApexMovementComponent::ResetMovementState()
 
 	// A player who died holding ADS respawns without the speed cap; the next press sets it again.
 	bIsAiming = false;
+	bSlideFireStreak = false;
 
 	// Reset jump count
 	CurrentJumpCount = 0;

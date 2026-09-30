@@ -82,17 +82,14 @@ void AShooterPickup::OnOverlap(UPrimitiveComponent* OverlappedComponent, AActor*
 	{
 		WeaponHolder->AddWeaponClass(WeaponClass);
 
-		// A gun off the floor is loot, the same as one taken from an enemy: its reserve is what it
-		// came with and never refills. Only the player's class weapon refills itself. Without this
-		// a picked-up gun could top a turret up forever (Docs/Dispenser_Core_Refinery_Plan_2026-09-22.md).
+		// A gun off the floor is loot: its reserve is what it came with and never refills. No gun
+		// refills itself any more [author, 2026-09-29]; the grant already does this, and this stays
+		// for a weapon the player already owned (the top-up branch never reaches the grant).
 		if (AShooterCharacter* const Player = Cast<AShooterCharacter>(OtherActor))
 		{
-			if (Player->ResolveHotkeySlotForWeaponClass(WeaponClass) != AShooterCharacter::ClassWeaponHotkeySlot)
+			if (AShooterWeapon* const Granted = Player->FindWeaponOfType(WeaponClass))
 			{
-				if (AShooterWeapon* const Granted = Player->FindWeaponOfType(WeaponClass))
-				{
-					Granted->ConfigureFiniteEnergyReserve();
-				}
+				Granted->ConfigureFiniteEnergyReserve();
 			}
 		}
 

@@ -2,6 +2,7 @@
 
 #include "SiegeLaneFollower.h"
 
+#include "Engine/World.h"
 #include "NavigationSystem.h"
 #include "SiegeLane.h"
 
@@ -59,6 +60,42 @@ bool USiegeLaneFollower::GetMarchGoal(const FVector& From, FVector& OutGoal)
 		}
 	}
 	return true;
+}
+
+bool USiegeLaneFollower::IsWithinLeash(const AActor* Target) const
+{
+	const ASiegeLane* const LanePtr = Lane.Get();
+	const UWorld* const World = GetWorld();
+	if (WalkerLeashRadius <= 0.0f || !Target || !LanePtr || bLaneWalked || !World)
+	{
+		return true;
+	}
+	const float Now = World->GetTimeSeconds();
+	LeashAnswers.RemoveAll([](const FLeashAnswer& A) { return !A.Target.IsValid(); });
+	FLeashAnswer* Answer = LeashAnswers.FindByPredicate([Target](const FLeashAnswer& A) { return A.Target.Get() == Target; });
+	if (Answer && Now - Answer->CheckedAt < 0.25f)
+	{
+		return Answer->bInside;
+	}
+
+	// Two spline lookups, four times a second per creep and target: cheap next to the pathing.
+	const FVector Where = Target->GetActorLocation();
+	const FVector OnLane = LanePtr->GetLocationAtDistance(LanePtr->GetDistanceClosestTo(Where));
+	const float Off = FVector::Dist2D(OnLane, Where);
+	const bool bInside = Off <= WalkerLeashRadius;
+	if (!Answer)
+	{
+		Answer = &LeashAnswers.AddDefaulted_GetRef();
+		Answer->Target = Target;
+	}
+	else if (Answer->bInside && !bInside)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s drops %s: %.0f m off lane %s, leash %.0f m"),
+			*GetNameSafe(GetOwner()), *Target->GetName(), Off / 100.0f, *LanePtr->LaneName.ToString(), WalkerLeashRadius / 100.0f);
+	}
+	Answer->CheckedAt = Now;
+	Answer->bInside = bInside;
+	return bInside;
 }
 
 bool USiegeLaneFollower::GetFlightGoal(const FVector& From, FVector& OutGoal)

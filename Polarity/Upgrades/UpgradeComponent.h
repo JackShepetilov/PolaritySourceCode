@@ -151,6 +151,20 @@ public:
 	 */
 	virtual bool GetJumpSlotParams(FJumpSlotParams& Out) const { return false; }
 
+	/**
+	 * Slide slot: may this shot come out of the reserve instead of the magazine? Asked by the weapon
+	 * on the machine that fires, once per shot and only when the reserve has a round to give, so a
+	 * true here is a round actually taken and may be counted against a limit.
+	 */
+	virtual bool TryTakeShotFromReserve(const AShooterWeapon* Weapon) { return false; }
+
+	/**
+	 * Slide slot: multiplier on slide friction while the owner fires without a break
+	 * (UApexMovementComponent::bSlideFireStreak). 1 = no change. Asked by the movement simulation on
+	 * the owning client, the server and every replay, so it must be a pure read of the level data.
+	 */
+	virtual float GetSlideFireFrictionScale() const { return 1.0f; }
+
 private:
 
 	/** Cached owner reference */

@@ -44,7 +44,8 @@ public:
 	/** Overrides AShooterNPC::WeaponClass when set. The point of putting it here rather than leaving
 	 *  it on the blueprint is that a class IS its weapon: the rocketeer is the enemy who drops a
 	 *  rocket launcher for your sniper, and splitting that fact across two assets invites a
-	 *  juggernaut that fights like a juggernaut while dropping a pistol. */
+	 *  juggernaut that fights like a juggernaut while dropping a pistol.
+	 *  AShooterNPC::WeaponOptions wins over this: when the enemy has rows there, this is ignored. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Equipment")
 	TSubclassOf<AShooterWeapon> WeaponClass;
 

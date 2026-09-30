@@ -17,6 +17,8 @@
 #include "Coop/CoopPlayers.h"
 #include "AI/PolarityTeams.h"
 #include "Variant_Shooter/Buildables/BuildableActor.h"
+#include "Variant_Shooter/Siege/SiegeLaneFollower.h"
+#include "Variant_Shooter/Siege/SiegeCampGuard.h"
 
 AShooterAIController::AShooterAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPolarityPathFollowingComponent>(TEXT("PathFollowingComponent")))
@@ -255,12 +257,29 @@ void AShooterAIController::ResolveTargetIntents()
 	// thing on the battlefield.
 	const bool bIgnorePlayers = PolarityTeams::ShouldIgnorePlayers();
 
+	// A lane creep is on a leash (author 2026-09-30): what stands too far from its lane is not its
+	// business, and a target that walks off past the leash drops out here, so the answer falls back to
+	// the core and the march takes the creep back to the lane.
+	const USiegeLaneFollower* const LaneFollower = GetPawn() ? GetPawn()->FindComponentByClass<USiegeLaneFollower>() : nullptr;
+
+	// A forest camp's guard is on a leash around its camp (Docs/Lane_Camps_Design_2026-09-30.md), and
+	// never marches on the base: with nothing to fight it keeps to its post (USiegeCampGuard).
+	const USiegeCampGuard* const CampGuard = GetPawn() ? GetPawn()->FindComponentByClass<USiegeCampGuard>() : nullptr;
+
 	// Highest priority wins; equal priorities go to whoever asked most recently, which is how
 	// perception and the arena behaved back when they simply overwrote each other.
 	const FTargetIntent* Winner = nullptr;
 	for (const FTargetIntent& Intent : Intents)
 	{
 		if (bIgnorePlayers && CoopPlayers::IsPlayer(Intent.Target.Get()))
+		{
+			continue;
+		}
+		if (LaneFollower && !LaneFollower->IsWithinLeash(Intent.Target.Get()))
+		{
+			continue;
+		}
+		if (CampGuard && !CampGuard->IsWithinLeash(Intent.Target.Get()))
 		{
 			continue;
 		}
@@ -279,7 +298,7 @@ void AShooterAIController::ResolveTargetIntents()
 	// the moment perception, script or anything else names a target, that request wins back — which
 	// is the "a visible player matters, the core is the default" rule the siege wants. No core on the
 	// map means SiegeCore is null and every non-siege fight behaves exactly as before.
-	if (!NewTarget)
+	if (!NewTarget && !CampGuard)
 	{
 		NewTarget = SiegeCore.Get();
 	}

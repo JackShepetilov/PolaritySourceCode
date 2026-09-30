@@ -8,7 +8,8 @@
     import unreal
     p = r"C:/.../Source/Tools/Lanes/build_lanes" + "." + "py"
     g = {"__name__": "lanes"}; exec(compile(open(p, encoding="utf-8").read(), p, "exec"), g)
-    g["step_level"]()   затем step_light, step_fog, step_landscape, step_markup, step_gameplay, step_navdata
+    g["step_level"]()   затем step_light, step_fog, step_landscape, step_markup, step_base, step_gameplay,
+                        step_camps, step_navdata
 
 Идемпотентно: всё сгенерированное помечено тегом и пересоздаётся заново; ландшафт создаётся один
 раз, дальше только переимпорт высот. Чужие акторы и чужие уровни не трогаются (гард уровня).
@@ -29,12 +30,16 @@ GAMEMODE = "/Game/Variant_Shooter/Blueprints/BP_ShooterGameMode"
 TAG_GEO = "LanesGen"
 TAG_ENV = "LanesEnv"
 TAG_GAME = "LanesGame"
+ROAD_MAT = {"Mid": "asphalt", "Top": "dirt", "Bot": "trail"}   # улица, грунтовка, тропинка
+TAG_DRESS = "LanesDress"             # посёлок, поля, лес по линиям и между ними (lanes_content.py)
+TAG_BASE = "LanesBase"               # ферма на плато: постройки и укрытия (base_layout.py)
 OLD_LANDSCAPES = ("LanesTerrain",)   # 630 м, до растяжки вдвое 2026-09-29
 NAV_TILE_UU = 4000.0                 # карта 1260 м: при 2000 вышло бы 4000 тайлов, строятся минутами (П30)
 
 KIT_BOX = "/Game/LevelPrototyping/PolygonPrototype/Meshes/Buildings/Simple/SM_Bld_Block_1x1_01"
 FLAT_MAT = "/Game/LevelPrototyping/Materials/M_FlatCol"
 CYL = "/Engine/BasicShapes/Cylinder"
+SPHERE = "/Engine/BasicShapes/Sphere"
 
 GRUNT_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_ShooterNPC"
 CARRIER_BP = "/Game/Prototype/HomeBase/BP_KamikazeCarrierDrone"
@@ -43,6 +48,23 @@ TANK_BP = "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_TrackedTank"
 COLORS = {
     "road": (0.42, 0.34, 0.22), "river": (0.12, 0.25, 0.55), "pad": (0.95, 0.85, 0.10),
     "camp": (0.05, 0.75, 0.75), "base": (0.15, 0.55, 0.20), "enemy": (0.65, 0.12, 0.10),
+    # Ферма (base_layout.py): цвета читаются издалека и отличают вид укрытия.
+    "wood": (0.45, 0.30, 0.18), "house": (0.85, 0.83, 0.78), "barn": (0.62, 0.13, 0.11),
+    "roof": (0.30, 0.30, 0.33), "metal": (0.58, 0.62, 0.66), "hay": (0.85, 0.72, 0.30),
+    "truck": (0.22, 0.34, 0.58), "tractor": (0.22, 0.55, 0.22), "tire": (0.08, 0.08, 0.08),
+    "fuel": (0.80, 0.78, 0.22), "concrete": (0.68, 0.68, 0.66), "sacks": (0.74, 0.66, 0.50),
+    "fence": (0.92, 0.92, 0.90),
+    "rock": (0.33, 0.30, 0.27),
+    # Посёлок, поля, лес (lanes_content.py).
+    "siding_blue": (0.45, 0.55, 0.65), "siding_yellow": (0.80, 0.72, 0.45), "brick": (0.50, 0.25, 0.18),
+    "brick_dark": (0.36, 0.20, 0.16), "awning": (0.20, 0.40, 0.45), "bus": (0.90, 0.70, 0.10),
+    "car_red": (0.60, 0.12, 0.10), "car_white": (0.85, 0.85, 0.85), "car_green": (0.20, 0.35, 0.22),
+    "trunk": (0.30, 0.20, 0.12), "leaf": (0.25, 0.45, 0.18), "leaf_dark": (0.15, 0.32, 0.13),
+    "pine": (0.10, 0.28, 0.18), "soil": (0.30, 0.22, 0.14), "pool": (0.30, 0.60, 0.80),
+    "asphalt": (0.16, 0.16, 0.17), "dirt": (0.45, 0.36, 0.24), "trail": (0.55, 0.50, 0.38),
+    # Кемпы (step_camps): ландмарк читается цветом и силуэтом издалека.
+    "container": (0.55, 0.25, 0.12), "tarp": (0.25, 0.35, 0.22), "lamp_red": (1.0, 0.05, 0.03),
+    "beam": (1.0, 0.95, 0.70),
 }
 
 
@@ -223,8 +245,9 @@ def kit_pivot(center, size, rot):
 _count = {"n": 0}
 
 
-def shape(mesh_path, label, center, size, yaw=0.0, pitch=0.0, mat="road", folder="Lanes", collision=False):
-    rot = unreal.Rotator(roll=0.0, pitch=pitch, yaw=yaw)
+def shape(mesh_path, label, center, size, yaw=0.0, pitch=0.0, mat="road", folder="Lanes", collision=False,
+          roll=0.0, tag=None):
+    rot = unreal.Rotator(roll=roll, pitch=pitch, yaw=yaw)
     loc = kit_pivot(center, size, rot) if mesh_path == KIT_BOX else unreal.Vector(*center)
     act = _eas().spawn_actor_from_class(unreal.StaticMeshActor, loc, rot)
     comp = act.static_mesh_component
@@ -233,7 +256,7 @@ def shape(mesh_path, label, center, size, yaw=0.0, pitch=0.0, mat="road", folder
     act.set_actor_scale3d(unreal.Vector(size[0] / 100.0, size[1] / 100.0, size[2] / 100.0))
     if not collision:
         comp.set_collision_profile_name("NoCollision")
-    _tag(act, TAG_GEO, label, folder)
+    _tag(act, tag or TAG_GEO, label, folder)
     _count["n"] += 1
     return act
 
@@ -285,37 +308,514 @@ def _ground_z(x, y, default=0.0):
     return default
 
 
-def ramp_walls(lay):
-    """Стенки вдоль пандусов хайграунда, с коллизией: бок пандуса это обрыв, который у подножия
-    сходит на нет, и эти несколько треугольников в полосе 30-50 (П19) закрывает стенка."""
-    half_w = lay["hg"]["ramp_half"]
-    seg = 300.0
+def _load_hill():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("base_layout", os.path.join(HERE, "base_layout" + "." + "py"))
+    bl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bl)
+    return bl
+
+
+def _path_at(pts, dist):
+    """Точка, направление и путь до конца вдоль ломаной [(x, y), ...]."""
+    acc = 0.0
+    for (x0, y0), (x1, y1) in zip(pts[:-1], pts[1:]):
+        L = math.hypot(x1 - x0, y1 - y0)
+        if dist <= acc + L or (x1, y1) == tuple(pts[-1]):
+            t = min(max((dist - acc) / max(L, 1.0), 0.0), 1.0)
+            return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t), ((x1 - x0) / L, (y1 - y0) / L)
+        acc += L
+    return tuple(pts[-1]), (1.0, 0.0)
+
+
+def _path_len(pts):
+    return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts[:-1], pts[1:]))
+
+
+def _dist_to_path(x, y, pts):
+    best = 1e18
+    for (x0, y0), (x1, y1) in zip(pts[:-1], pts[1:]):
+        vx, vy = x1 - x0, y1 - y0
+        t = max(0.0, min(1.0, ((x - x0) * vx + (y - y0) * vy) / max(vx * vx + vy * vy, 1.0)))
+        best = min(best, math.hypot(x - x0 - t * vx, y - y0 - t * vy))
+    return best
+
+
+def hill_dressing(lay):
+    """Холм под фермой: камни по склону обрыва и у подножия (обрыв неровный, не стена), и у каждого
+    подъёма своё обустройство по лору захода (автор 2026-09-30):
+      Mid  подъездная дорожка с улицы: забор из жердей по бокам, ворота и почтовый ящик внизу;
+      Top  полевой въезд с грунтовки: решётка от скота и открытые полевые ворота, отбойные камни;
+      Bot  тропа: ступени из брёвен поперёк, столбики с верёвкой по краю обрыва."""
+    import random
+    bl = _load_hill()
+    rng = random.Random(11)
+    c = lay["corner"]
+    ramps = lay["ramps"]
     n = 0
-    for r in lay["ramps"]:
-        ux, uy = r["ux"], r["uy"]
-        nx, ny = -uy, ux
-        L = math.hypot(r["x1"] - r["x0"], r["y1"] - r["y0"])
-        k = 0
-        s_ = -200.0
-        while s_ < L:
-            s1 = min(s_ + seg, L)
-            sm = (s_ + s1) * 0.5
-            for side in (-1.0, 1.0):
-                cx = r["x0"] + ux * sm + nx * side * (half_w + 30.0)
-                cy = r["y0"] + uy * sm + ny * side * (half_w + 30.0)
-                top = _ground_z(r["x0"] + ux * sm + nx * side * (half_w - 60.0),
-                                r["y0"] + uy * sm + ny * side * (half_w - 60.0)) + 150.0
-                low = _ground_z(r["x0"] + ux * sm + nx * side * (half_w + 250.0),
-                                r["y0"] + uy * sm + ny * side * (half_w + 250.0)) - 20.0
-                h = max(top - low, 60.0)
-                shape(KIT_BOX, "RampWall_{}_{}_{:02d}_{}".format(r["base"], r["lane"], k, "L" if side < 0 else "R"),
-                      (cx, cy, low + h * 0.5), (s1 - s_ + 20.0, 60.0, h),
-                      yaw=math.degrees(math.atan2(uy, ux)), mat="base" if r["base"] == "Base" else "enemy",
-                      folder="Lanes/RampWalls", collision=True)
+    for base, bx, by, turn in (("Base", -c, -c, 0.0), ("Enemy", c, c, 180.0)):
+        paths = [[tuple(p) for p in r["points"]] for r in ramps if r["base"] == base]
+        a = 0.0
+        while a < 360.0:
+            own = (a - turn) % 360.0
+            rE = bl.hg_edge_r(own)
+            fw = bl.hg_face_w(own)
+            ex, ey = bx + rE * math.cos(math.radians(a)), by + rE * math.sin(math.radians(a))
+            if all(_dist_to_path(ex, ey, pts) > 2500.0 for pts in paths):
+                # Два-три камня по склону и валун у подножия: ломают ровную линию обрыва.
+                for k in range(rng.choice((2, 3))):
+                    r = rE + fw * rng.uniform(0.2, 1.1)
+                    x = bx + r * math.cos(math.radians(a + rng.uniform(-1.5, 1.5)))
+                    y = by + r * math.sin(math.radians(a + rng.uniform(-1.5, 1.5)))
+                    sz = rng.uniform(250.0, 650.0)
+                    zg = _ground_z(x, y, 0.0)
+                    shape(KIT_BOX, "Rock_{}_{:04d}_{}".format(base, int(a * 10), k), (x, y, zg + sz * 0.15),
+                          (sz * rng.uniform(0.8, 1.6), sz * rng.uniform(0.8, 1.4), sz), yaw=rng.uniform(0, 360),
+                          pitch=rng.uniform(-15, 15), mat="rock", folder="Lanes/Hill/Rocks", collision=True)
+                    n += 1
+            a += rng.uniform(2.5, 4.5)
+
+        for r in ramps:
+            if r["base"] != base:
+                continue
+            pts = [tuple(p) for p in r["points"]]
+            half = r["half"]
+            total = _path_len(pts)
+            kind = r["kind"]
+            folder = "Lanes/Hill/{}_{}".format(base, kind)
+            if kind == "Mid":
+                # Забор из жердей по обеим сторонам дорожки, от кромки до подножия.
+                d = 600.0
+                while d < total - 200.0:
+                    (x, y), (ux, uy) = _path_at(pts, d)
+                    for side in (-1.0, 1.0):
+                        px, py = x - uy * side * (half + 80.0), y + ux * side * (half + 80.0)
+                        zg = _ground_z(px, py, 0.0)
+                        shape(KIT_BOX, "Drive_Post_{}_{:04d}_{}".format(base, int(d), int(side)), (px, py, zg + 60.0),
+                              (18.0, 18.0, 130.0), mat="wood", folder=folder, collision=True)
+                        (x2, y2), _ = _path_at(pts, d + 300.0)
+                        qx, qy = x2 - uy * side * (half + 80.0), y2 + ux * side * (half + 80.0)
+                        zq = _ground_z(qx, qy, 0.0)
+                        L = math.hypot(qx - px, qy - py)
+                        shape(KIT_BOX, "Drive_Rail_{}_{:04d}_{}".format(base, int(d), int(side)),
+                              ((px + qx) * 0.5, (py + qy) * 0.5, (zg + zq) * 0.5 + 95.0), (L + 10.0, 10.0, 12.0),
+                              yaw=math.degrees(math.atan2(qy - py, qx - px)),
+                              pitch=math.degrees(math.atan2(zq - zg, max(L, 1.0))), mat="wood", folder=folder)
+                        n += 2
+                    d += 300.0
+                (x, y), (ux, uy) = _path_at(pts, total - 150.0)
+                for side in (-1.0, 1.0):
+                    px, py = x - uy * side * (half + 120.0), y + ux * side * (half + 120.0)
+                    zg = _ground_z(px, py, 0.0)
+                    shape(KIT_BOX, "Drive_GatePost_{}_{}".format(base, int(side)), (px, py, zg + 140.0),
+                          (40.0, 40.0, 280.0), mat="wood", folder=folder, collision=True)
+                mx, my = x - uy * (half + 300.0), y + ux * (half + 300.0)
+                zg = _ground_z(mx, my, 0.0)
+                shape(KIT_BOX, "Drive_Mailbox_{}".format(base), (mx, my, zg + 60.0), (15.0, 15.0, 120.0), mat="wood", folder=folder)
+                shape(KIT_BOX, "Drive_MailboxBox_{}".format(base), (mx, my, zg + 135.0), (50.0, 25.0, 30.0), mat="metal", folder=folder)
+                n += 4
+            elif kind == "Top":
+                # Решётка от скота у подножия и распахнутые полевые ворота, отбойные камни по краю.
+                (x, y), (ux, uy) = _path_at(pts, total - 300.0)
+                zg = _ground_z(x, y, 0.0)
+                shape(KIT_BOX, "Field_CattleGuard_{}".format(base), (x, y, zg + 4.0), (250.0, half * 2.0, 8.0),
+                      yaw=math.degrees(math.atan2(uy, ux)), mat="tire", folder=folder)
+                for side in (-1.0, 1.0):
+                    px, py = x - uy * side * (half + 60.0), y + ux * side * (half + 60.0)
+                    zp = _ground_z(px, py, 0.0)
+                    shape(KIT_BOX, "Field_GatePost_{}_{}".format(base, int(side)), (px, py, zp + 75.0),
+                          (25.0, 25.0, 150.0), mat="wood", folder=folder, collision=True)
+                gx, gy = x - uy * (half + 60.0) + ux * 200.0, y + ux * (half + 60.0) + uy * 200.0
+                zq = _ground_z(gx, gy, 0.0)
+                shape(KIT_BOX, "Field_Gate_{}".format(base), (gx, gy, zq + 70.0), (400.0, 8.0, 110.0),
+                      yaw=math.degrees(math.atan2(uy, ux)), mat="metal", folder=folder, collision=True)
+                n += 4
+                d = 900.0
+                while d < total - 500.0:
+                    (x, y), (ux, uy) = _path_at(pts, d)
+                    for side in (-1.0, 1.0):
+                        if rng.random() < 0.5:
+                            px, py = x - uy * side * (half + 100.0), y + ux * side * (half + 100.0)
+                            zp = _ground_z(px, py, 0.0)
+                            sz = rng.uniform(90.0, 150.0)
+                            shape(KIT_BOX, "Field_Stone_{}_{:04d}_{}".format(base, int(d), int(side)), (px, py, zp + sz * 0.3),
+                                  (sz * 1.3, sz, sz), yaw=rng.uniform(0, 360), mat="rock", folder=folder, collision=True)
+                            n += 1
+                    d += 450.0
+            else:
+                # Ступени из брёвен поперёк тропы и столбики с верёвкой по краю.
+                d = 600.0
+                k = 0
+                while d < total - 150.0:
+                    (x, y), (ux, uy) = _path_at(pts, d)
+                    zg = _ground_z(x, y, 0.0)
+                    shape(KIT_BOX, "Trail_Step_{}_{:03d}".format(base, k), (x, y, zg + 6.0), (25.0, half * 1.8, 18.0),
+                          yaw=math.degrees(math.atan2(uy, ux)), mat="wood", folder=folder)
+                    if k % 2 == 0:
+                        for side in (-1.0, 1.0):
+                            px, py = x - uy * side * (half + 50.0), y + ux * side * (half + 50.0)
+                            zp = _ground_z(px, py, 0.0)
+                            shape(KIT_BOX, "Trail_Post_{}_{:03d}_{}".format(base, k, int(side)), (px, py, zp + 50.0),
+                                  (14.0, 14.0, 100.0), mat="wood", folder=folder, collision=True)
+                            n += 1
+                    n += 1
+                    k += 1
+                    d += 150.0
+    log("ADDED: холм, {} камней и обустройства подъёмов".format(n))
+
+
+def step_lanes():
+    """Посёлок по Mid, поля по Top, лес по Bot, задворки и природа между ними (lanes_content.py).
+    Отдельные постройки и укрытия ставятся акторами, массовое (деревья, столбики, шпалы) одним
+    актором на вид с экземплярами: тысячи акторов тормозят редактор."""
+    import importlib.util
+    import sys
+    guard()
+    lay = layout()
+    _clear(TAG_DRESS)
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    spec = importlib.util.spec_from_file_location("lanes_content", os.path.join(HERE, "lanes_content" + "." + "py"))
+    lc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lc)
+    items = lc.build(lay)
+
+    zcache = {}
+
+    def ground(it):
+        key = (round(it.get("ax", it["x"])), round(it.get("ay", it["y"])))
+        if key not in zcache:
+            zcache[key] = _ground_z(key[0], key[1], 0.0)
+        return zcache[key]
+
+    def xform(it):
+        """Мировая трансформация и путь к мешу, как у shape()."""
+        z0 = ground(it) + it["z0"]
+        if it["kind"] == "box":
+            rot = unreal.Rotator(roll=0.0, pitch=it.get("pitch", 0.0), yaw=it["yaw"])
+            size = (it["sx"], it["sy"], it["sz"])
+            loc = kit_pivot((it["x"], it["y"], z0 + it["sz"] * 0.5), size, rot)
+            return KIT_BOX, loc, rot, size
+        if it["kind"] == "cyl":
+            if it["lying_yaw"] is None:
+                return CYL, unreal.Vector(it["x"], it["y"], z0 + it["h"] * 0.5), unreal.Rotator(), (it["d"], it["d"], it["h"])
+            return (CYL, unreal.Vector(it["x"], it["y"], z0 + it["d"] * 0.5),
+                    unreal.Rotator(roll=90.0, pitch=0.0, yaw=it["lying_yaw"] - 90.0), (it["d"], it["d"], it["h"]))
+        return SPHERE, unreal.Vector(it["x"], it["y"], z0 + it["h"] * 0.5), unreal.Rotator(), (it["d"], it["d"], it["h"])
+
+    solo = 0
+    groups = {}
+    for it in items:
+        if it.get("ism"):
+            groups.setdefault((it["kind"], it["mat"], it.get("collision", True)), []).append(it)
+            continue
+        mesh, loc, rot, size = xform(it)
+        act = _eas().spawn_actor_from_class(unreal.StaticMeshActor, loc, rot)
+        comp = act.static_mesh_component
+        comp.set_static_mesh(_mesh(mesh))
+        comp.set_material(0, material(it["mat"]))
+        act.set_actor_scale3d(unreal.Vector(size[0] / 100.0, size[1] / 100.0, size[2] / 100.0))
+        if not it.get("collision", it["kind"] != "sphere"):
+            comp.set_collision_profile_name("NoCollision")
+        _tag(act, TAG_DRESS, it["label"], "Lanes/Dress/" + it["label"].split("_")[0])
+        solo += 1
+
+    sds = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+    inst = 0
+    for (kind, mat, collide), group in sorted(groups.items()):
+        host = _eas().spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(0.0, 0.0, 0.0), unreal.Rotator())
+        _tag(host, TAG_DRESS, "LN_Instances_{}_{}".format(kind, mat), "Lanes/Dress/Instances")
+        # Экземпляры: компонент через SubobjectDataSubsystem (приём из ArenaBlockout/apply_biome1_art_pass).
+        roots = sds.k2_gather_subobject_data_for_instance(host)
+        handle, _ = sds.add_new_subobject(unreal.AddNewSubobjectParams(parent_handle=roots[0],
+                                                                        new_class=unreal.InstancedStaticMeshComponent))
+        comp = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(sds.k2_find_subobject_data_from_handle(handle))
+        mesh = {"box": KIT_BOX, "cyl": CYL, "sphere": SPHERE}[kind]
+        comp.set_static_mesh(_mesh(mesh))
+        comp.set_material(0, material(mat))
+        if not collide or kind == "sphere":
+            comp.set_collision_profile_name("NoCollision")
+        for it in group:
+            m, loc, rot, size = xform(it)
+            comp.add_instance(unreal.Transform(location=loc, rotation=rot,
+                                               scale=unreal.Vector(size[0] / 100.0, size[1] / 100.0, size[2] / 100.0)), True)
+            inst += 1
+    log("ADDED: посёлок, поля и лес: {} акторов, {} экземпляров в {} группах".format(solo, inst, len(groups)))
+    _les().save_current_level()
+
+
+def step_base():
+    """Ферма на нашем плато: дом, сарай под мех, вышка, силосы, стога, техника, баррикады.
+    Раскладка и проверки проходов в base_layout.py (его же можно нарисовать вне редактора)."""
+    import importlib.util
+    guard()
+    lay = layout()
+    _clear(TAG_BASE)
+    spec = importlib.util.spec_from_file_location("base_layout", os.path.join(HERE, "base_layout" + "." + "py"))
+    bl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bl)
+    items = bl.build()
+    bad = bl.check(items)
+    if bad:
+        raise RuntimeError("раскладка базы не прошла проверку: {}".format(bad[:5]))
+    c = lay["corner"]
+    top = _ground_z(-c, -c, lay["base_z"])
+    n = 0
+    for it in items:
+        x, y = -c + it["x"], -c + it["y"]
+        z0 = top + it["z0"]
+        folder = "Lanes/Base/" + it["label"].split("_")[0]
+        if it["kind"] == "box":
+            shape(KIT_BOX, it["label"], (x, y, z0 + it["sz"] * 0.5), (it["sx"], it["sy"], it["sz"]),
+                  yaw=it["yaw"], pitch=it.get("pitch", 0.0), mat=it["mat"], folder=folder, collision=True, tag=TAG_BASE)
+        elif it["lying_yaw"] is None:
+            shape(CYL, it["label"], (x, y, z0 + it["h"] * 0.5), (it["d"], it["d"], it["h"]),
+                  mat=it["mat"], folder=folder, collision=True, tag=TAG_BASE)
+        else:
+            # Лёжа: roll 90 кладёт ось цилиндра вдоль локального Y, yaw поворачивает её на lying_yaw.
+            shape(CYL, it["label"], (x, y, z0 + it["d"] * 0.5), (it["d"], it["d"], it["h"]),
+                  yaw=it["lying_yaw"] - 90.0, roll=90.0, mat=it["mat"], folder=folder, collision=True, tag=TAG_BASE)
+        n += 1
+    log("ADDED: ферма на плато, {} примитивов ({} укрытий), верх плато {:.0f}".format(
+        n, sum(1 for i in items if i["cover"]), top))
+    _les().save_current_level()
+
+
+LAND_LABEL = "LanesTerrain2x"
+ROAD_STRIP = "/Game/Prototype/Lanes/Meshes/SM_LN_RoadStrip"
+ROAD_PIECE = 10.0          # длина одного куска меша вдоль дороги, м (полоса 1 м, растягивается)
+ROAD_MESH_LIFT = 5.0       # Mesh Vertical Offset точки сплайна: штатный зазор меша над подогнанной землёй
+RAMP_MAT = {"Mid": "dirt", "Top": "dirt", "Bot": "trail"}   # подъёмы на холм: подъездная, полевой въезд, тропа
+
+
+def road_strip_mesh():
+    """Плоская полоса 1 x 1 м, разбитая вдоль на 10 рядов: сплайн-меш гнётся только по вершинам, а
+    плоскость движка это один квадрат на весь кусок. Геометрия пересобирается каждый прогон."""
+    if unreal.EditorAssetLibrary.does_asset_exist(ROAD_STRIP):
+        mesh = unreal.load_asset(ROAD_STRIP)
+    else:
+        mesh = unreal.EditorAssetLibrary.duplicate_asset("/Engine/BasicShapes/Plane", ROAD_STRIP)
+        log("CREATED: " + ROAD_STRIP)
+    md = mesh.create_static_mesh_description()
+    grp = md.create_polygon_group()
+    md.set_polygon_group_material_slot_name(grp, mesh.static_materials[0].material_slot_name)
+    nx, ny = 10, 2
+    grid = []
+    for i in range(nx + 1):
+        row = []
+        for j in range(ny + 1):
+            v = md.create_vertex()
+            md.set_vertex_position(v, unreal.Vector(-50.0 + 100.0 * i / nx, -50.0 + 100.0 * j / ny, 0.0))
+            row.append((v, (i / float(nx), j / float(ny))))
+        grid.append(row)
+
+    def inst(vuv):
+        vi = md.create_vertex_instance(vuv[0])
+        md.set_vertex_instance_uv(vi, unreal.Vector2D(vuv[1][0], vuv[1][1]), 0)
+        return vi
+    for i in range(nx):
+        for j in range(ny):
+            a, b, c, d = grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]
+            md.create_triangle(grp, [inst(a), inst(d), inst(c)])
+            md.create_triangle(grp, [inst(a), inst(c), inst(b)])
+    mesh.build_from_static_mesh_descriptions([md], False, False)
+    unreal.EditorAssetLibrary.save_loaded_asset(mesh)
+    return ROAD_STRIP
+
+
+def _land_z(x, y, default):
+    """Высота самого ландшафта, без луча: луч цеплял бы камни, деревья и постройки."""
+    s = unreal.LandscapeService.get_height_at_location(LAND_LABEL, x, y)
+    return s.height if s.valid else default
+
+
+_gen = {}
+
+
+def _gen_z(x, y):
+    """Высота рельефа из heightmap.png генератора, билинейно. Не из ландшафта: сплайны его двигают, и
+    точка, снятая с уже подогнанной земли, гоняла бы дорогу по кругу. PNG пишет MapEventBench/terrain.py:
+    16 бит, строки без фильтра, raw = 32768 + z * 128 / z_scale."""
+    import struct
+    import zlib
+    if not _gen:
+        lay = layout()
+        data = open(os.path.join(HERE, "heightmap.png"), "rb").read()
+        w, h = struct.unpack(">II", data[16:24])
+        pos, idat = 8, b""
+        while pos < len(data):
+            ln, tag = struct.unpack(">I4s", data[pos:pos + 8])
+            if tag == b"IDAT":
+                idat += data[pos + 8:pos + 8 + ln]
+            pos += 12 + ln
+        raw = zlib.decompress(idat)
+        _gen.update(w=w, h=h, raw=raw, half=lay["half_extent"], step=lay["world"]["vertex_spacing_uu"],
+                    zs=lay["world"]["z_scale"])
+    g = _gen
+
+    def px(ix, iy):
+        ix = min(max(ix, 0), g["w"] - 1)
+        iy = min(max(iy, 0), g["h"] - 1)
+        o = iy * (g["w"] * 2 + 1) + 1 + ix * 2
+        return (struct.unpack(">H", g["raw"][o:o + 2])[0] - 32768) * g["zs"] / 128.0
+    fx, fy = (x + g["half"]) / g["step"], (y + g["half"]) / g["step"]
+    ix, iy = int(math.floor(fx)), int(math.floor(fy))
+    tx, ty = fx - ix, fy - iy
+    z0 = px(ix, iy) * (1 - tx) + px(ix + 1, iy) * tx
+    z1 = px(ix, iy + 1) * (1 - tx) + px(ix + 1, iy + 1) * tx
+    return z0 * (1 - ty) + z1 * ty
+
+
+def _road_paths(lay, name):
+    """Путь дороги линии кусками (точки, полуширина, материал, шаг точек): наш подъём сверху вниз, полотно
+    между подножиями, вражеский подъём снизу вверх. Плато (участок) без дороги."""
+    pts = lay["lanes_full"][name]
+    our = [r for r in lay["ramps"] if r["base"] == "Base" and r["lane"] == name][0]
+    enemy = [r for r in lay["ramps"] if r["base"] == "Enemy" and r["lane"] == name][0]
+    nb, ne = len(our["points"]), len(enemy["points"])
+    half = lay.get("lane_width", {}).get(name, lay["lane_w"]) * 0.5
+    return [
+        (pts[1:nb + 1], our["half"], RAMP_MAT[name], 1500.0),
+        (pts[nb:len(pts) - ne], half, ROAD_MAT.get(name, "road"), 3000.0),
+        (pts[len(pts) - ne - 1:len(pts) - 1], enemy["half"], RAMP_MAT[enemy["kind"]], 1500.0),
+    ]
+
+
+def _clear_roads():
+    """Сплайны ландшафта и их меши. Удаление точек в LandscapeService не сносит меши сегментов, поэтому
+    сплайн-меши на ландшафте убираются отдельно, иначе остаются висеть."""
+    unreal.LandscapeService.delete_all_splines(LAND_LABEL)
+    n = 0
+    for a in _eas().get_all_level_actors():
+        if isinstance(a, (unreal.Landscape, unreal.LandscapeProxy)):
+            for c in a.get_components_by_class(unreal.SplineMeshComponent):
+                c.destroy_component(c)
                 n += 1
-            s_ = s1
-            k += 1
-    log("стенок вдоль пандусов: {}".format(n))
+    old = 0
+    for a in _eas().get_all_level_actors():
+        if a.actor_has_tag(TAG_GEO) and str(a.get_folder_path()) == "Lanes/Roads":
+            a.destroy_actor()
+            old += 1
+    log("DELETED: сплайны дорог, {} сплайн-мешей, {} старых полос-коробок".format(n, old))
+
+
+def _land():
+    for a in _eas().get_all_level_actors():
+        if isinstance(a, unreal.Landscape) and a.get_actor_label() == LAND_LABEL:
+            return a
+    return None
+
+
+def step_roads(lanes=None):
+    """Дороги сплайнами ландшафта, штатным инструментом движка для дорог. Землю под дорогой двигает
+    отдельный слой редактирования типа Splines (LandscapeEditLayerSplines): основной рельеф не
+    трогается, сплайн можно тянуть руками, и земля пересчитается сама. Без этого слоя шаг не идёт:
+    кнопка Apply Splines писала бы в основной слой и портила рельеф при каждом прогоне."""
+    guard()
+    lay = layout()
+    LS = unreal.LandscapeService
+    land = _land()
+    if not land or not any(isinstance(l, unreal.LandscapeEditLayerSplines) for l in land.get_edit_layers_bp()):
+        raise RuntimeError("у {} нет слоя Splines: Landscape mode, Edit Layers, добавить слой типа Splines".format(LAND_LABEL))
+    _clear_roads()
+    for name in (lanes or sorted(lay["lanes_full"])):
+        prev = None
+        for k, (pts, half, mat, step) in enumerate(_road_paths(lay, name)):
+            dense = densify(pts, step)
+            if k > 0:
+                dense = dense[1:]   # подножие подъёма уже стоит точкой: сплайн линии один, без стыка
+            for x, y, z in dense:
+                r = LS.create_spline_point(LAND_LABEL, unreal.Vector(x, y, _gen_z(x, y)),
+                                           half, 300.0, 300.0, "", True, True)
+                if not r.success:
+                    log("FAIL: точка дороги {} {}".format(name, r.error_message))
+                    continue
+                if prev is not None:
+                    LS.connect_spline_points(LAND_LABEL, prev, r.point_index, 0.0, 0.0, "", True, True)
+                prev = r.point_index
+            log("ADDED: дорога {} {} ({} точек, полуширина {:.0f})".format(name, mat, len(dense), half))
+    info = LS.get_spline_info(LAND_LABEL)
+    by_mat = {}
+    for name in (lanes or sorted(lay["lanes_full"])):
+        for pts, half, mat, step in _road_paths(lay, name):
+            by_mat.setdefault(mat, []).append(pts)
+    # Меш на сегмент: полоса по ширине сплайна, материал по ближайшему куску пути.
+    strip_mesh = road_strip_mesh()
+    for seg in info.segments:
+        a = info.control_points[seg.start_point_index].location
+        b = info.control_points[seg.end_point_index].location
+        mx, my = (a.x + b.x) * 0.5, (a.y + b.y) * 0.5
+        mat = min(((_dist_to_path(mx, my, [(p[0], p[1]) for p in pts]), m)
+                   for m, group in by_mat.items() for pts in group))[1]
+        entry = unreal.LandscapeSplineMeshEntryInfo()
+        entry.mesh_path = strip_mesh
+        entry.scale = unreal.Vector(ROAD_PIECE, 1.0, 1.0)
+        entry.scale_to_width = True
+        entry.material_override_paths = [material(mat).get_path_name()]
+        entry.forward_axis = 0
+        entry.up_axis = 2
+        LS.set_spline_segment_meshes(LAND_LABEL, seg.segment_index, [entry])
+    for pt in info.control_points:
+        LS.set_spline_point_mesh(LAND_LABEL, pt.point_index, "", unreal.Vector(1.0, 1.0, 1.0), ROAD_MESH_LIFT)
+    # Слой Splines пересчитывается по запросу обновления слоёв; красок на ландшафте нет, стирать нечего.
+    land.force_layers_full_update()
+    log("ADDED: {} точек, {} сегментов с мешами".format(info.num_control_points, info.num_segments))
+    _les().save_current_level()
+
+
+def _ism(label, folder, mesh, mat, transforms, collide=True):
+    """Один актор с экземплярами вместо сотен акторов (как step_lanes). transforms: [(loc, rot, size)]."""
+    sds = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+    host = _eas().spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(0.0, 0.0, 0.0), unreal.Rotator())
+    _tag(host, TAG_GEO, label, folder)
+    roots = sds.k2_gather_subobject_data_for_instance(host)
+    handle, _ = sds.add_new_subobject(unreal.AddNewSubobjectParams(parent_handle=roots[0],
+                                                                    new_class=unreal.InstancedStaticMeshComponent))
+    comp = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(sds.k2_find_subobject_data_from_handle(handle))
+    comp.set_static_mesh(_mesh(mesh))
+    comp.set_material(0, material(mat))
+    if not collide:
+        comp.set_collision_profile_name("NoCollision")
+    for loc, rot, size in transforms:
+        comp.add_instance(unreal.Transform(location=loc, rotation=rot,
+                                           scale=unreal.Vector(size[0] / 100.0, size[1] / 100.0, size[2] / 100.0)), True)
+    return len(transforms)
+
+
+def edge_dressing(lay):
+    """Камни на скальном склоне гряды по краю карты и на склонах холмов тяжёлых кемпов: скала читается
+    скалой, а не гладким склоном ландшафта. Подъём на холм свободен."""
+    import random
+    rng = random.Random(23)
+    rocks = []
+
+    def rock(x, y, sz, zlift=0.15):
+        zg = _land_z(x, y, 0.0)
+        rot = unreal.Rotator(roll=rng.uniform(-12, 12), pitch=rng.uniform(-15, 15), yaw=rng.uniform(0, 360))
+        size = (sz * rng.uniform(0.9, 1.7), sz * rng.uniform(0.8, 1.4), sz * rng.uniform(0.7, 1.2))
+        rocks.append((kit_pivot((x, y, zg + size[2] * (0.5 - zlift)), size, rot), rot, size))
+
+    for x, y, ix, iy, fw in lay.get("ridge", {}).get("face", []):
+        for k in range(rng.choice((2, 3))):
+            t = rng.uniform(-0.5, 0.6) * fw
+            j = rng.uniform(-500.0, 500.0)
+            rock(x + ix * t + iy * j, y + iy * t + ix * j, rng.uniform(500.0, 1300.0))
+    ridge_n = len(rocks)
+    for s in lay["poi_slots"]:
+        kn = s.get("knoll")
+        if not kn:
+            continue
+        (x0, y0), (x1, y1) = kn["ramp"]
+        ramp_ang = math.atan2(y1 - y0, x1 - x0)
+        for i, rE in enumerate(kn["edge_r"]):
+            b = -math.pi + 2.0 * math.pi * i / len(kn["edge_r"])
+            gap = abs((b - ramp_ang + math.pi) % (2.0 * math.pi) - math.pi)
+            if gap < math.radians(14.0):
+                continue            # подъём
+            r = rE + rng.uniform(100.0, 350.0)
+            rock(s["x"] + r * math.cos(b), s["y"] + r * math.sin(b), rng.uniform(250.0, 500.0), zlift=0.3)
+    n = _ism("LN_Rocks_Edge", "Lanes/Edge", KIT_BOX, "rock", rocks)
+    log("ADDED: камни гряды {} и холмов кемпов {}".format(ridge_n, n - ridge_n))
 
 
 def step_markup():
@@ -324,12 +824,10 @@ def step_markup():
     lay = layout()
     _clear(TAG_GEO)
     _count["n"] = 0
-    for name, pts in lay["lanes_full"].items():
-        # Шаг 5 м: на бродах и пандусах отрезок в 15 м уходил под землю, полотно рвалось.
-        dense = [(x, y, _ground_z(x, y, z)) for x, y, z in densify(pts, 500.0)]
-        strip("Road_" + name, dense, lay["lane_w"], "road", "Lanes/Roads")
+    # Полотна линий теперь сплайны ландшафта (step_roads), полос-коробок больше нет (автор 2026-09-30).
     # Реки полосой больше нет: русло с дном это сам ландшафт (автор 2026-09-29).
-    ramp_walls(lay)
+    hill_dressing(lay)
+    edge_dressing(lay)
     for p in lay["turret_pads"]:
         z = _ground_z(p["x"], p["y"], p["z"])
         a = shape(CYL, "TurretPad_" + p["name"], (p["x"], p["y"], z + 10.0), (300.0, 300.0, 20.0), mat="pad",
@@ -344,15 +842,12 @@ def step_markup():
             shape(KIT_BOX, "Camp_{}_{:02d}".format(s["name"], k),
                   (s["x"] + s["r"] * math.cos(a), s["y"] + s["r"] * math.sin(a), z + 15.0),
                   (600.0, 60.0, 30.0), yaw=k * 30.0 + 90.0, mat="camp", folder="Lanes/CampSlots")
-        text("Camp_{}_Label".format(s["name"]), s["x"], s["y"], z + 400.0, s["name"])
+        text("Camp_{}_Label".format(s["name"]), s["x"], s["y"], z + 400.0,
+             "{} {} {}".format(s["name"], s.get("tier", ""), s.get("terrain", "")))
     c = lay["corner"]
     for key, x, y, msg in (("base", -c, -c, "BASE"), ("enemy", c, c, "ENEMY BASE")):
+        # Кольца по краю плато больше нет: край неровный, его читают забор фермы и камни обрыва.
         z = _ground_z(x, y, 0.0)
-        for k in range(24):
-            a = math.radians(k * 15.0)
-            shape(KIT_BOX, "Ring_{}_{:02d}".format(key, k),
-                  (x + lay["base_r"] * math.cos(a), y + lay["base_r"] * math.sin(a), z + 15.0),
-                  (1500.0, 80.0, 30.0), yaw=k * 15.0 + 90.0, mat=key, folder="Lanes/Bases")
         text("Label_" + key, x, y, z + 800.0, msg, size=300.0)
     log("ADDED: {} мешей разметки".format(_count["n"]))
     _les().save_current_level()
@@ -363,7 +858,8 @@ def step_markup():
 WAVE_INTERVAL = 30.0          # только для режима «все линии разом» (bStaggerLanes выкл)
 PACK_INTERVAL = 30.0          # по линии за раз, по кругу: соло пачка раз в 30 с, на каждой линии раз в 90 с;
                               # делится на число игроков (автор 2026-09-29), у троих выходит темп доты
-LANE_ORDER = ("Mid", "Top", "Bot")   # открывающая на Mid идёт первой, пустые Top и Bot дают паузу 60 с
+LANE_ORDER = ("Mid", "Top", "Bot")   # открывающая на Mid идёт первой
+PREWARM_FIRST_ARRIVAL = 10.0         # осада «шла до игрока»: первый крип у базы через 10 с после раздатчика
 FIRST_WAVE_DELAY = 0.0        # поставил раздатчик, первая пачка сразу (автор 2026-09-23)
 CARRIER_CAP = 6               # по две матки на линию; лишние усиливают живых
 
@@ -377,13 +873,17 @@ def _curve(keys, step=True):
     return rc
 
 
-def _kind(cls, base=1, count_keys=None, per_player=0.0, first=1, every=1, last=0, lanes=()):
+def _kind(cls, base=1, count_keys=None, per_player=0.0, first=1, every=1, last=0, lanes=(),
+          plus_one_every=0.0, lane_cycle=0.0, lane_cycle_first=3.0):
     k = unreal.SiegeCreepKind()
     k.set_editor_property("npc_class", cls)
     k.set_editor_property("base_count", base)
     if count_keys:
         k.set_editor_property("count_by_minute", _curve(count_keys))
     k.set_editor_property("count_per_player", per_player)
+    k.set_editor_property("add_one_every_minutes", plus_one_every)
+    k.set_editor_property("lane_cycle_minutes", lane_cycle)
+    k.set_editor_property("lane_cycle_first_minute", lane_cycle_first)
     k.set_editor_property("first_wave", first)
     k.set_editor_property("every_nth_wave", every)
     k.set_editor_property("last_wave", last)
@@ -391,21 +891,47 @@ def _kind(cls, base=1, count_keys=None, per_player=0.0, first=1, every=1, last=0
     return k
 
 
+GRUNT_PLUS_ONE_MIN = 10.0     # +1 грунт в пачке каждые 10 мин, линейно и бесконечно (автор 2026-09-30)
+CARRIER_PLUS_ONE_MIN = 15.0   # +1 матка каждые 15 мин
+TANK_LANE_CYCLE_MIN = 9.0     # танкетка на каждой линии раз в 9 мин, линии со сдвигом: игроку раз в 3 мин
+# Часы пачек идут от выхода первой пачки, это ~1.4 мин до раздатчика (прогрев): первая танкетка у базы
+# примерно через 3 мин после раздатчика.
+TANK_FIRST_MIN = 4.5
+CREEP_HP_INTERVAL = 300.0     # HP крипов +10% от базы каждые 5 мин, плавно: x1.9 к 45-й минуте
+CREEP_HP_PER_INTERVAL = 1.10
+
+
 def lane_pack():
-    """Пачка по доте (числа в FSiegeCreepKind), со сдвигом на открывающую волну автора.
+    """Пачка по решению автора 2026-09-30 (числа в FSiegeCreepKind, правятся в Details директора).
 
     Волна 1: только открывающая, по грунту на игрока, на средней линии (ближний бой за стволы).
-    Дальше: 3 грунта (+1 на 15, 30, 45 мин), матка каждую вторую волну (+1 на 40 мин), танкетка
-    с 11-й волны каждую 10-ю (5 мин), вторая с 35 мин. Всё это правится в Details директора."""
+    Дальше каждая пачка: 3 грунта и 1 матка, число тех и других растёт линейно. Танкетка по своим
+    часам, по линиям по очереди. Без рывков и без таймера конца."""
     grunt = unreal.EditorAssetLibrary.load_blueprint_class(GRUNT_BP)
     carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
     tank = unreal.EditorAssetLibrary.load_blueprint_class(TANK_BP)
     return [
         _kind(grunt, base=0, per_player=1.0, first=1, last=1, lanes=("Mid",)),
-        _kind(grunt, count_keys=[(0, 3), (15, 4), (30, 5), (45, 6)], first=2),
-        _kind(carrier, count_keys=[(0, 1), (40, 2)], first=3, every=2),
-        _kind(tank, count_keys=[(0, 1), (35, 2)], first=11, every=10),
+        _kind(grunt, base=3, first=2, plus_one_every=GRUNT_PLUS_ONE_MIN),
+        _kind(carrier, base=1, first=2, plus_one_every=CARRIER_PLUS_ONE_MIN),
+        _kind(tank, base=1, lane_cycle=TANK_LANE_CYCLE_MIN, lane_cycle_first=TANK_FIRST_MIN),
     ]
+
+
+def apply_waves():
+    """Только пачка и рост HP на живом директоре L_Lanes: остальное автор мог подкрутить руками."""
+    guard()
+    sd = [a for a in _eas().get_all_level_actors() if isinstance(a, unreal.SiegeDirector)]
+    if len(sd) != 1:
+        raise RuntimeError("директоров осады на уровне: {}".format(len(sd)))
+    sd = sd[0]
+    log("OLD: пачка {} строк, HP интервал {} x{}".format(len(sd.get_editor_property("lane_pack")),
+        sd.get_editor_property("creep_upgrade_interval"), sd.get_editor_property("creep_health_per_upgrade")))
+    sd.set_editor_property("lane_pack", lane_pack())
+    sd.set_editor_property("creep_upgrade_interval", CREEP_HP_INTERVAL)
+    sd.set_editor_property("creep_health_per_upgrade", CREEP_HP_PER_INTERVAL)
+    log("MODIFIED: пачка и рост HP на " + sd.get_actor_label())
+    _les().save_current_level()
 
 
 def step_gameplay():
@@ -450,7 +976,16 @@ def step_gameplay():
     sd.set_editor_property("lane_pack_interval", PACK_INTERVAL)
     sd.set_editor_property("pack_rate_per_player", True)
     sd.set_editor_property("lane_order", [unreal.Name(n) for n in LANE_ORDER])
+    # Начало (автор 2026-09-30): часы осады отмотаны назад, настоящие волны уже в пути по линиям.
+    # До раздатчика их нет, появляются в момент старта там, куда успели бы дойти.
+    sd.set_editor_property("prewarm", True)
+    sd.set_editor_property("prewarm_first_arrival", PREWARM_FIRST_ARRIVAL)
+    # 750, а не 420: крипы на линии бегут (замер 2026-09-30, 7.4-7.6 м/с на Top и Bot). Прежние 420
+    # сняты с грунта, который стоял и стрелял, и расписание приходов сжималось почти вдвое.
+    sd.set_editor_property("creep_lane_speed", 750.0)
     sd.set_editor_property("max_carriers_alive", CARRIER_CAP)
+    sd.set_editor_property("creep_upgrade_interval", CREEP_HP_INTERVAL)
+    sd.set_editor_property("creep_health_per_upgrade", CREEP_HP_PER_INTERVAL)
     sd.set_editor_property("start_when_dispenser_built", True)
     sd.set_editor_property("auto_collect_spawn_points", False)
     sd.set_editor_property("cores", [])
@@ -473,4 +1008,213 @@ def step_navdata():
         r.set_editor_property("tile_size_uu", NAV_TILE_UU)
         r.set_editor_property("runtime_generation", unreal.RuntimeGenerationType.DYNAMIC)
         log("MODIFIED: {} tile {:.0f}, DYNAMIC".format(r.get_actor_label(), NAV_TILE_UU))
+    _les().save_current_level()
+
+
+# ==================== лесные кемпы и сборка меха ====================
+# Дизайн: Docs/Lane_Camps_Design_2026-09-30.md. Кемп это ASiegeCampSite в месте из layout.json
+# (poi_slots) плюс ландмарк по тиру: костёр с дымом (easy), склад с мачтой и красной лампой (medium),
+# вышка с прожектором (hard). Детали меха: 5 слотов x 3 редкости, data asset'ы в PART_DIR.
+# Сарай фермы: ASiegeMechBay, триггер во всю коробку сарая.
+
+TAG_CAMP = "LanesCamp"
+CONE = "/Engine/BasicShapes/Cone"
+CUBE = "/Engine/BasicShapes/Cube"
+PART_DIR = "/Game/Prototype/Lanes/MechParts"
+NS_FIRE = "/Game/NiagaraExamples/FX_Misc/NS_Fire"
+NS_SMOKE = "/Game/NiagaraExamples/FX_Smoke/NS_Smoke_Plume"
+
+# Слот: (меш на ящике, масштаб). Форма говорит слот издалека.
+PART_LOOK = {
+    "CHASSIS": (CUBE, (1.2, 1.2, 0.6)),
+    "MAIN_WEAPON": (CYL, (0.25, 0.25, 1.4)),
+    "TACTICAL": (SPHERE, (0.8, 0.8, 0.8)),
+    "HEAVY": (CONE, (0.8, 0.8, 1.0)),
+    "CORE": (CYL, (0.9, 0.9, 0.25)),
+}
+RARITIES = ("COMMON", "RARE", "EPIC")        # easy, medium, hard
+TIER_ENUM = {"easy": "EASY", "medium": "MEDIUM", "hard": "HARD"}
+
+
+def _guard(cls, base, every=0.0, first=0.0, cap=0, per_extra=0.0):
+    k = unreal.SiegeCampGuardKind()
+    k.set_editor_property("npc_class", cls)
+    k.set_editor_property("base_count", base)
+    k.set_editor_property("add_one_every_minutes", every)
+    k.set_editor_property("first_minute", first)
+    k.set_editor_property("max_count", cap)
+    k.set_editor_property("count_per_extra_player", per_extra)
+    return k
+
+
+def camp_guards(tier):
+    """Охрана по тиру (дизайн, §5). Числа правятся в Details кемпа."""
+    grunt = unreal.EditorAssetLibrary.load_blueprint_class(GRUNT_BP)
+    carrier = unreal.EditorAssetLibrary.load_blueprint_class(CARRIER_BP)
+    tank = unreal.EditorAssetLibrary.load_blueprint_class(TANK_BP)
+    if tier == "easy":
+        return [_guard(grunt, 2, every=10.0, cap=5, per_extra=1.0)]
+    if tier == "medium":
+        return [_guard(grunt, 3, every=10.0, per_extra=1.0), _guard(carrier, 1, every=20.0, cap=2)]
+    return [_guard(tank, 1), _guard(tank, 1, first=25.0), _guard(grunt, 3, every=8.0, per_extra=1.0)]
+
+
+def mech_parts():
+    """15 деталей: 5 слотов x 3 редкости. Есть ассет: обновить на месте, не пересоздавать."""
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    out = []
+    for slot, (mesh, scale) in PART_LOOK.items():
+        for rarity in RARITIES:
+            name = "DA_MechPart_{}_{}".format(slot.title().replace("_", ""), rarity.title())
+            path = PART_DIR + "/" + name
+            if unreal.EditorAssetLibrary.does_asset_exist(path):
+                da = unreal.load_asset(path)
+            else:
+                fac = unreal.DataAssetFactory()
+                fac.set_editor_property("data_asset_class", unreal.MechPartDefinition)
+                da = tools.create_asset(name, PART_DIR, unreal.MechPartDefinition, fac)
+                log("CREATED: " + path)
+            da.set_editor_property("slot", getattr(unreal.MechPartSlot, slot))
+            da.set_editor_property("rarity", getattr(unreal.UpgradeRarity, rarity))
+            da.set_editor_property("display_name", unreal.Text("{} ({})".format(slot.title().replace("_", " "), rarity.title())))
+            da.set_editor_property("display_mesh", _mesh(mesh))
+            da.set_editor_property("display_scale", unreal.Vector(*scale))
+            unreal.EditorAssetLibrary.save_loaded_asset(da)
+            out.append(da)
+    log("MODIFIED: {} деталей меха в {}".format(len(out), PART_DIR))
+    return out
+
+
+def _fx(label, ns_path, loc, scale, folder):
+    act = _eas().spawn_actor_from_class(unreal.NiagaraActor, unreal.Vector(*loc))
+    act.get_editor_property("niagara_component").set_asset(unreal.load_asset(ns_path))
+    act.set_actor_scale3d(unreal.Vector(scale, scale, scale))
+    act.set_editor_property("tags", [unreal.Name(TAG_CAMP), unreal.Name("CampLit")])
+    act.set_actor_label(label)
+    act.set_folder_path(folder)
+    return act
+
+
+def _camp_piece(s, x, y, z, yaw, folder):
+    """Ландмарк и укрытия одного кемпа. u вперёд (к нашей базе), v вправо. Возвращает акторы ландмарка."""
+    a = math.radians(yaw)
+
+    def at(u, v):
+        return x + u * math.cos(a) - v * math.sin(a), y + u * math.sin(a) + v * math.cos(a)
+
+    def box(tag_label, u, v, z0, size, dyaw=0.0, mat="wood", collision=True, mesh=KIT_BOX, lit=False):
+        px, py = at(u, v)
+        act = shape(mesh, "Camp_{}_{}".format(s["name"], tag_label), (px, py, z + z0 + size[2] * 0.5), size,
+                    yaw=yaw + dyaw, mat=mat, folder=folder, collision=collision, tag=TAG_CAMP)
+        if lit:
+            act.set_editor_property("tags", [unreal.Name(TAG_CAMP), unreal.Name("CampLit")])
+        return act
+
+    lit = []
+    # Общее: ящик с деталью в центре (деталь рисует сам кемп) и низкие мешки по кругу, 6 м.
+    box("Crate", 0.0, 0.0, 0.0, (140.0, 140.0, 100.0))
+    for k, ang in enumerate((45.0, 165.0, 285.0)):
+        r = math.radians(ang)
+        box("Sacks{}".format(k), 600.0 * math.cos(r), 600.0 * math.sin(r), 0.0, (250.0, 70.0, 90.0),
+            dyaw=ang + 90.0, mat="sacks")
+
+    tier = s["tier"]
+    if tier == "easy":
+        # Костёр у ящика, над ним столб дыма; рядом машина охраны.
+        fu, fv = -300.0, 250.0
+        box("FireRing", fu, fv, 0.0, (220.0, 220.0, 30.0), mat="rock", collision=False, mesh=CYL)
+        box("Log1", fu, fv, 30.0, (180.0, 30.0, 30.0), dyaw=30.0, collision=False)
+        box("Log2", fu, fv, 30.0, (180.0, 30.0, 30.0), dyaw=-30.0, collision=False)
+        px, py = at(fu, fv)
+        lit.append(_fx("Camp_{}_Fire".format(s["name"]), NS_FIRE, (px, py, z + 40.0), 1.5, folder))
+        lit.append(_fx("Camp_{}_Smoke".format(s["name"]), NS_SMOKE, (px, py, z + 120.0), 3.0, folder))
+        box("TruckBody", 200.0, -650.0, 50.0, (500.0, 220.0, 110.0), dyaw=15.0, mat="truck")
+        box("TruckCab", 330.0, -615.0, 160.0, (180.0, 210.0, 110.0), dyaw=15.0, mat="truck")
+    elif tier == "medium":
+        # Склад: два контейнера, тент, мачта 18 м с красной лампой (видна из ямы над лесом).
+        box("ContainerA", -500.0, 550.0, 0.0, (610.0, 245.0, 260.0), dyaw=20.0, mat="container")
+        box("ContainerB", 400.0, -600.0, 0.0, (610.0, 245.0, 260.0), dyaw=-10.0, mat="container")
+        for k, (pu, pv) in enumerate(((-300.0, -450.0), (100.0, -450.0), (-300.0, -150.0), (100.0, -150.0))):
+            box("TentPost{}".format(k), pu, pv, 0.0, (15.0, 15.0, 250.0), mesh=CYL)
+        box("TentRoof", -100.0, -300.0, 250.0, (460.0, 360.0, 15.0), mat="tarp")
+        box("Mast", -250.0, -750.0, 0.0, (35.0, 35.0, 1800.0), mat="metal", mesh=CYL)
+        lit.append(box("MastLamp", -250.0, -750.0, 1800.0, (90.0, 90.0, 90.0), mat="lamp_red", collision=False,
+                       mesh=SPHERE, lit=True))
+    else:
+        # Вышка 14 м с прожектором, луч наружу и вниз; контейнер и мешки у подножия.
+        tu, tv, h = -450.0, 0.0, 1400.0
+        for k, (du, dv) in enumerate(((-250.0, -250.0), (250.0, -250.0), (-250.0, 250.0), (250.0, 250.0))):
+            box("TowerLeg{}".format(k), tu + du, tv + dv, 0.0, (40.0, 40.0, h), mat="metal", mesh=CYL)
+            box("TowerRoofPost{}".format(k), tu + du, tv + dv, h + 30.0, (20.0, 20.0, 220.0), mat="metal", mesh=CYL)
+        box("TowerDeck", tu, tv, h, (600.0, 600.0, 30.0), mat="wood")
+        box("TowerRoof", tu, tv, h + 250.0, (650.0, 650.0, 20.0), mat="roof")
+        for k, (du, dv, rot) in enumerate(((300.0, 0.0, 90.0), (-300.0, 0.0, 90.0), (0.0, 300.0, 0.0), (0.0, -300.0, 0.0))):
+            box("TowerRail{}".format(k), tu + du, tv + dv, h + 30.0, (600.0, 20.0, 100.0), dyaw=rot, mat="wood")
+        box("Searchlight", tu + 250.0, tv, h + 30.0, (80.0, 80.0, 120.0), mat="metal", mesh=CYL)
+        # Луч: конус движка (вершина сверху по +Z), вершиной к прожектору, ось вперёд и на 20 градусов вниз.
+        dirv = unreal.Vector(math.cos(a) * math.cos(math.radians(20.0)), math.sin(a) * math.cos(math.radians(20.0)),
+                             -math.sin(math.radians(20.0)))
+        rot = unreal.MathLibrary.make_rot_from_z(unreal.Vector(-dirv.x, -dirv.y, -dirv.z))
+        lx, ly = at(tu + 250.0, tv)
+        ln = 3000.0
+        beam = shape(CONE, "Camp_{}_Beam".format(s["name"]),
+                     (lx + dirv.x * ln * 0.5, ly + dirv.y * ln * 0.5, z + h + 90.0 + dirv.z * ln * 0.5), (500.0, 500.0, ln),
+                     yaw=rot.yaw, pitch=rot.pitch, roll=rot.roll, mat="beam", folder=folder, tag=TAG_CAMP)
+        beam.set_editor_property("tags", [unreal.Name(TAG_CAMP), unreal.Name("CampLit")])
+        lit.append(beam)
+        box("ContainerA", 300.0, 550.0, 0.0, (610.0, 245.0, 260.0), dyaw=70.0, mat="container")
+    return lit
+
+
+def _forest_side(zone):
+    return "Top" if zone.endswith("Top") else "Bot"
+
+
+def step_camps():
+    """14 кемпов по layout.json, детали меха, сарай-сборщик. Идемпотентно по тегу LanesCamp."""
+    import importlib.util
+    guard()
+    lay = layout()
+    eas = _eas()
+    _clear(TAG_CAMP)
+    parts = mech_parts()
+    c = lay["corner"]
+    n0 = _count["n"]
+
+    for s in lay["poi_slots"]:
+        z = _ground_z(s["x"], s["y"], s["z"])
+        yaw = math.degrees(math.atan2(-c - s["y"], -c - s["x"]))    # фасадом к нашей базе
+        folder = "Lanes/Camps/" + s["name"]
+        lit = _camp_piece(s, s["x"], s["y"], z, yaw, folder)
+        camp = eas.spawn_actor_from_class(unreal.SiegeCampSite, unreal.Vector(s["x"], s["y"], z),
+                                          unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
+        camp.set_editor_property("slot_name", unreal.Name(s["name"]))
+        camp.set_editor_property("forest_side", unreal.Name(_forest_side(s["zone"])))
+        camp.set_editor_property("tier", getattr(unreal.SiegeCampTier, TIER_ENUM[s["tier"]]))
+        camp.set_editor_property("landmark_actors", lit)
+        camp.set_editor_property("guards", camp_guards(s["tier"]))
+        camp.set_editor_property("part_pool", parts)
+        _tag(camp, TAG_CAMP, "LN_Camp_" + s["name"], folder)
+
+    # Разметку мест (кольца и подписи из step_markup) в игре не видно: у кемпов нет значков (автор).
+    hidden = 0
+    for act in eas.get_all_level_actors():
+        if act.actor_has_tag(TAG_GEO) and act.get_actor_label().startswith("Camp_"):
+            act.set_actor_hidden_in_game(True)
+            hidden += 1
+
+    # Сарай: триггер во всю коробку, мех собирается, когда вошёл игрок с полным набором у команды.
+    spec = importlib.util.spec_from_file_location("base_layout", os.path.join(HERE, "base_layout" + "." + "py"))
+    bl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bl)
+    bx, by = bl.polar(275.0, 3900.0)
+    byaw = bl.facing_center(bx, by)
+    top = _ground_z(-c, -c, lay["base_z"])
+    bay = eas.spawn_actor_from_class(unreal.SiegeMechBay, unreal.Vector(-c + bx, -c + by, top + 300.0),
+                                     unreal.Rotator(roll=0.0, pitch=0.0, yaw=byaw))
+    bay.get_editor_property("trigger").set_box_extent(unreal.Vector(600.0, 1000.0, 300.0), False)
+    _tag(bay, TAG_CAMP, "LN_MechBay", "Lanes/Camps")
+
+    log("ADDED: {} кемпов ({} мешей), сарай-сборщик; скрыто в игре {} меток разметки".format(
+        len(lay["poi_slots"]), _count["n"] - n0, hidden))
     _les().save_current_level()

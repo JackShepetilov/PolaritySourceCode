@@ -42,8 +42,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Humanoid|Inventory")
 	TArray<TSubclassOf<AShooterWeapon>> WeaponInventory;
 
-	/** 1:1 mapping with WeaponInventory — which ADroppedRangedWeapon to spawn on yank.
-	 *  If arrays differ in length, missing entries result in yank without spawn (weapon just despawns). */
+	/** UNUSED since 2026-09-29: a yank drops the gun in hand through ADroppedRangedWeapon::SpawnFor.
+	 *  Kept only so blueprints that filled it still load; safe to clear. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Humanoid|Inventory")
 	TArray<TSubclassOf<ADroppedRangedWeapon>> WeaponDropMapping;
 

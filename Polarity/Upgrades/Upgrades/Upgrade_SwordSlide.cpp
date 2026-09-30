@@ -1,121 +1,68 @@
 // Copyright 2025 Suspended Caterpillar. All Rights Reserved.
 
 #include "Upgrade_SwordSlide.h"
+#include "UpgradeDefinition_SwordSlide.h"
 #include "ApexMovementComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
+UUpgrade_SwordSlide::UUpgrade_SwordSlide()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+}
+
 void UUpgrade_SwordSlide::OnUpgradeActivated()
-{
-	CachedDef = Cast<UUpgradeDefinition_SwordSlide>(UpgradeDefinition);
-	if (!CachedDef.IsValid())
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SWORD_SLIDE] Activation failed: definition is not UUpgradeDefinition_SwordSlide"));
-		return;
-	}
-
-	BindMovement();
-	ApplySlideOverrideIfEligible();
-
-	UE_LOG(LogTemp, Warning, TEXT("[SWORD_SLIDE] Activated Lv%d/%d"),
-		CurrentLevel, CachedDef->MaxLevel);
-}
-
-void UUpgrade_SwordSlide::OnUpgradeDeactivated()
-{
-	ClearSlideOverride();
-	CachedMovement.Reset();
-
-	UE_LOG(LogTemp, Warning, TEXT("[SWORD_SLIDE] Deactivated"));
-}
-
-void UUpgrade_SwordSlide::OnLevelChanged(int32 OldLevel, int32 NewLevel)
-{
-	ClearSlideOverride();
-	ApplySlideOverrideIfEligible();
-
-	UE_LOG(LogTemp, Warning, TEXT("[SWORD_SLIDE] Level %d -> %d"), OldLevel, NewLevel);
-}
-
-void UUpgrade_SwordSlide::OnWeaponChanged(AShooterWeapon* /*OldWeapon*/, AShooterWeapon* /*NewWeapon*/)
-{
-	ClearSlideOverride();
-	ApplySlideOverrideIfEligible();
-}
-
-float UUpgrade_SwordSlide::GetMeleeDamageMultiplier(AActor* /*Target*/) const
-{
-	if (!IsSlidingWithEligibleWeapon())
-	{
-		return 1.0f;
-	}
-
-	return GetCurrentLevelData().SlidingDamageMultiplier;
-}
-
-void UUpgrade_SwordSlide::BindMovement()
 {
 	if (AShooterCharacter* Character = GetShooterCharacter())
 	{
 		CachedMovement = Cast<UApexMovementComponent>(Character->GetCharacterMovement());
 	}
-}
 
-void UUpgrade_SwordSlide::ApplySlideOverrideIfEligible()
-{
-	UApexMovementComponent* Movement = CachedMovement.Get();
-	if (!Movement || !IsEligibleWeapon(GetCurrentWeapon()))
+	if (UApexMovementComponent* Movement = CachedMovement.Get())
 	{
-		return;
+		Movement->OnSlideStarted.AddUniqueDynamic(this, &UUpgrade_SwordSlide::HandleSlideStarted);
 	}
 
-	const FSwordSlideLevelData& Data = GetCurrentLevelData();
-	Movement->SetExternalSlideSpeedBurstOverride(Data.SlideMinSpeedBurst, Data.SlideMaxSpeedBurst);
-	bAppliedSlideOverride = true;
-
-	UE_LOG(LogTemp, Warning, TEXT("[SWORD_SLIDE] Applied slide burst override min=%.1f max=%.1f"),
-		Data.SlideMinSpeedBurst, Data.SlideMaxSpeedBurst);
+	ReserveShotsThisSlide = 0;
+	UE_LOG(LogTemp, Log, TEXT("[SLIDE_SLOT] Sliding Shooter activated Lv%d"), CurrentLevel);
 }
 
-void UUpgrade_SwordSlide::ClearSlideOverride()
+void UUpgrade_SwordSlide::OnUpgradeDeactivated()
 {
 	if (UApexMovementComponent* Movement = CachedMovement.Get())
 	{
-		if (bAppliedSlideOverride)
-		{
-			Movement->ClearExternalSlideSpeedBurstOverride();
-		}
+		Movement->OnSlideStarted.RemoveDynamic(this, &UUpgrade_SwordSlide::HandleSlideStarted);
 	}
-
-	bAppliedSlideOverride = false;
+	CachedMovement.Reset();
 }
 
-bool UUpgrade_SwordSlide::IsEligibleWeapon(const AShooterWeapon* Weapon) const
+void UUpgrade_SwordSlide::HandleSlideStarted()
 {
-	if (!Weapon || !Weapon->IsMeleeWeapon())
+	ReserveShotsThisSlide = 0;
+}
+
+bool UUpgrade_SwordSlide::TryTakeShotFromReserve(const AShooterWeapon* Weapon)
+{
+	const UUpgradeDefinition_SwordSlide* Def = Cast<UUpgradeDefinition_SwordSlide>(UpgradeDefinition);
+	const UApexMovementComponent* Movement = CachedMovement.Get();
+	if (!Def || !Weapon || !Movement || !Movement->IsSliding())
 	{
 		return false;
 	}
 
-	const FSwordSlideLevelData& Data = GetCurrentLevelData();
-	return !Data.RequiredWeaponClass || Weapon->IsA(Data.RequiredWeaponClass);
-}
-
-bool UUpgrade_SwordSlide::IsSlidingWithEligibleWeapon() const
-{
-	const UApexMovementComponent* Movement = CachedMovement.Get();
-	return Movement
-		&& Movement->IsSliding()
-		&& IsEligibleWeapon(GetCurrentWeapon());
-}
-
-const FSwordSlideLevelData& UUpgrade_SwordSlide::GetCurrentLevelData() const
-{
-	if (const UUpgradeDefinition_SwordSlide* Def = CachedDef.Get())
+	const FSwordSlideLevelData& Data = Def->GetLevelData(CurrentLevel);
+	if (Movement->Velocity.Size2D() < Data.MinSlideSpeed)
 	{
-		return Def->GetLevelData(CurrentLevel);
+		return false;
 	}
 
-	static const FSwordSlideLevelData DefaultData;
-	return DefaultData;
+	const int32 Allowance = FMath::Max(1, FMath::FloorToInt(Weapon->GetMagazineSize() * Data.MagazineFraction));
+	if (ReserveShotsThisSlide >= Allowance)
+	{
+		return false;
+	}
+
+	++ReserveShotsThisSlide;
+	UE_LOG(LogTemp, Verbose, TEXT("[SLIDE_SLOT] Sliding Shooter: shot %d/%d from the reserve"), ReserveShotsThisSlide, Allowance);
+	return true;
 }

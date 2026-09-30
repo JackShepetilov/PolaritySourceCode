@@ -1,8 +1,13 @@
 // DroppedRangedWeapon.h
-// World actor for a ranged weapon dropped by an NPC on death.
+// World actor for a ranged weapon lying on the floor: dropped by an NPC on death, thrown away by a
+// player, put down by a turret, or placed in a level as the weapon blueprint itself.
 // Player fetches it with the grapple from a fixed radius (UAbilityHandler_Grapple::FindFetchTarget);
 // the hook starts a scripted pull to a camera-relative point, then it equips as a permanent
 // ShooterWeapon. The EMF charge it still carries no longer decides whether it can be taken.
+//
+// ONE drop actor for every gun [author, 2026-09-29]. The look is built from WeaponClass (the third
+// person mesh of the weapon's defaults), so there is no BP_Dropped_<Gun> per weapon any more. Every
+// spawn goes through SpawnFor, which picks the actor class from UWeaponDropSettings.
 
 #pragma once
 
@@ -12,6 +17,8 @@
 #include "DroppedRangedWeapon.generated.h"
 
 class UStaticMeshComponent;
+class USkeletalMeshComponent;
+class UBoxComponent;
 class UEMF_FieldComponent;
 class AShooterWeapon;
 class AShooterCharacter;
@@ -37,11 +44,35 @@ public:
 	virtual bool IsGrappleFetchDone() const override { return bPullComplete || IsHidden(); }
 	virtual bool FinishesFetchItself() const override { return true; }
 
+	// ==================== Spawning ====================
+
+	/** Put WeaponClass on the floor at Where. The only way code should make a drop: the actor class
+	 *  comes from UWeaponDropSettings, and WeaponClass is set before BeginPlay (deferred spawn), so the
+	 *  drop builds its look and replicates the class in its first packet. Server only; returns null on
+	 *  a client or without a class. The caller sets charge, rounds and impulse as before. */
+	static ADroppedRangedWeapon* SpawnFor(UWorld* World, TSubclassOf<AShooterWeapon> InWeaponClass, const FTransform& Where);
+
+	/** What every enemy-dropped gun gets, whichever way it left the enemy (loot list or death drop):
+	 *  the enemy's charge, and the killer's upgrades told a gun came out of their kill. Server only. */
+	static void ApplyEnemyDropHooks(ADroppedRangedWeapon* Drop, float Charge, AActor* KillingDamageCauser, AActor* DroppedBy);
+
 	// ==================== Components ====================
 
-	/** Visible weapon mesh — root, physics-simulated */
+	/** Physics body and root: a box sized to the gun's mesh. Collision and impulses go here. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UBoxComponent> Body;
+
+	/** The look: the weapon's third person mesh, no collision, riding on Body. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<USkeletalMeshComponent> WeaponVisual;
+
+	/** Legacy. The old per-gun drop blueprints set a static mesh here; it is kept only so they still
+	 *  load and compile, and is hidden with no collision. The look comes from WeaponVisual. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> WeaponMesh;
+
+	/** The body that simulates and takes impulses. Use this, not a mesh. */
+	UPrimitiveComponent* GetBody() const;
 
 	/** EMF field component (charge storage for capture detection) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "EMF")
@@ -49,9 +80,28 @@ public:
 
 	// ==================== Weapon Data ====================
 
-	/** Weapon class to grant when player captures this */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon")
+	/** Weapon class to grant when player captures this, and the one the drop looks like. Replicated
+	 *  once: without it a client would see an empty box. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing = OnRep_WeaponClass, Category = "Weapon")
 	TSubclassOf<AShooterWeapon> WeaponClass;
+
+	/** Rebuild the look and the body size from WeaponClass. Safe to call again: it does nothing when
+	 *  the look already matches. */
+	void RefreshVisualFromWeaponClass();
+
+	// ==================== Ammo: enemy drop roll ====================
+
+	/** Pick a value from a probability DENSITY curve: X is the value, Y is how likely it is (not
+	 *  normalised, negative counts as zero). The range is the curve's own first and last key.
+	 *  Returns false and leaves OutValue alone when there is no curve or its area is zero. */
+	static bool SampleDensityCurve(const UCurveFloat* Curve, float& OutValue);
+
+	/** Roll this drop's rounds from two density curves: MagazineDensity over the fraction of a
+	 *  magazine loaded (0..1), ReserveDensity over spare magazines. The answer is written as exact
+	 *  rounds the way a pickup reads them. A null curve leaves that part at the drop's defaults
+	 *  (full magazine, EnergyReserveMagazines). Server only. One function on purpose: a later
+	 *  multiplier by player strength or by gun goes here. */
+	void RollDropAmmo(const UCurveFloat* MagazineDensity, const UCurveFloat* ReserveDensity);
 
 	// ==================== Ammo (yanked-source weapons only) ====================
 
@@ -209,8 +259,12 @@ public:
 	void SpawnLeftoverDrop(AShooterCharacter* Player, int32 Rounds);
 
 protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	UFUNCTION()
+	void OnRep_WeaponClass();
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -227,6 +281,10 @@ protected:
 		UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
 
 private:
+	/** Which class the look was last built for, so rebuilding is skipped when nothing changed. */
+	UPROPERTY(Transient)
+	TSubclassOf<AShooterWeapon> VisualBuiltFor;
+
 	/** Time of last stun event for cooldown checking (world seconds). */
 	float LastStunTime = -10.0f;
 

@@ -246,10 +246,68 @@ public:
 	 *  weapon is what holds it -- it only stops the player paying for it. */
 	void RebalanceAttachmentCells(AShooterWeapon* Weapon);
 
-	/** Stop paying for every attachment on this weapon. Used when the weapon leaves the player:
-	 *  attachments travel with the gun, so the cells they held come back empty. */
+	/** The weapon is leaving the player: take every attachment off it and keep them [author,
+	 *  2026-09-29]. A paid one already has its cell and simply stops being fitted; a free one goes
+	 *  into the first empty cell, and onto the floor when the bag is full. Paid ones first, so the
+	 *  free ones cannot take a cell a paid one already owns. Server only. Call BEFORE the weapon is
+	 *  destroyed: it reads the weapon's list. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory")
-	void ReleaseAttachmentCellsFor(const AShooterWeapon* Weapon);
+	void ReturnAttachmentsToBag(AShooterWeapon* Weapon);
+
+	/** A weapon just arrived: fit it with every attachment in the bag that suits it and whose type is
+	 *  still free on it, in cell order. The free-or-paid bill is settled the usual way. Server only. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	void AutoInstallLooseAttachments(AShooterWeapon* Weapon);
+
+	/** Fit the attachment in one cell onto the weapon in hand, else onto the other one. Nothing when
+	 *  it suits neither. What a pickup calls for the attachment it just put in the bag, and ONLY for
+	 *  that one: a part the player took off by hand stays off. Server only. */
+	bool TryInstallFromSlotOnOwnerWeapons(int32 SlotIndex);
+
+	// ==================== Attachments: the inventory screen, Apex-style [author, 2026-09-29] ====================
+	//
+	// Every gesture the screen offers, each one a single server call so a half-done move is never
+	// left behind. A part displaced by any of them swaps into the bag (the cell the other one came
+	// from when it can), and a full bag puts it on the floor rather than refusing.
+
+	/** A cell dropped on a weapon: fit it. A part of that type already fitted swaps into this cell. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	bool PlaceAttachmentFromSlot(int32 SlotIndex, AShooterWeapon* Weapon);
+
+	UFUNCTION(Server, Reliable)
+	void Server_PlaceAttachmentFromSlot(int32 SlotIndex, AShooterWeapon* Weapon);
+
+	/** A fitted part dragged onto the other gun. What that gun had of the type goes back to the first
+	 *  gun when it fits there, else into the bag. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	bool MoveAttachmentBetweenWeapons(AShooterWeapon* From, EWeaponAttachmentType InType, AShooterWeapon* To);
+
+	UFUNCTION(Server, Reliable)
+	void Server_MoveAttachmentBetweenWeapons(AShooterWeapon* From, EWeaponAttachmentType InType, AShooterWeapon* To);
+
+	/** A fitted part dragged into the bag. ToIndex: an empty cell takes it; a cell holding a part of
+	 *  the same type that fits the gun swaps with it; INDEX_NONE or anything else means the first
+	 *  empty cell, then the floor. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	bool UnmountAttachmentToSlot(AShooterWeapon* Weapon, EWeaponAttachmentType InType, int32 ToIndex);
+
+	UFUNCTION(Server, Reliable)
+	void Server_UnmountAttachmentToSlot(AShooterWeapon* Weapon, EWeaponAttachmentType InType, int32 ToIndex);
+
+	/** A fitted part dragged out of the screen: onto the floor. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	bool DropMountedAttachmentToWorld(AShooterWeapon* Weapon, EWeaponAttachmentType InType);
+
+	UFUNCTION(Server, Reliable)
+	void Server_DropMountedAttachmentToWorld(AShooterWeapon* Weapon, EWeaponAttachmentType InType);
+
+	/** A click on an attachment in the bag: onto the gun in hand, else the other; an empty slot of
+	 *  its type first, else it swaps with what the first gun it fits carries. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	bool QuickEquipAttachmentFromSlot(int32 SlotIndex);
+
+	UFUNCTION(Server, Reliable)
+	void Server_QuickEquipAttachmentFromSlot(int32 SlotIndex);
 
 	// ==================== Events ====================
 
@@ -284,9 +342,10 @@ protected:
 
 	// ==================== Configuration ====================
 
-	/** Cells the player starts a run with, before the meta has bought anything. */
+	/** Cells the player starts a run with, before the meta has bought anything. Every cell is open
+	 *  from the start [author, 2026-09-29], so this equals MaxSlotCount. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory", meta = (ClampMin = "1"))
-	int32 StartingSlotCount = 4;
+	int32 StartingSlotCount = 10;
 
 	/** The ceiling. Reaching it is what opens the final mission, so it is a design number rather
 	 *  than a technical one.
@@ -349,4 +408,19 @@ private:
 
 	/** Where a thrown-away cell should land, in world space. */
 	FTransform GetDropTransform() const;
+
+	// Attachment primitives the gestures above are made of. None of them broadcasts or rebalances;
+	// the gesture does both once at the end.
+
+	/** Take a part off a gun, emptying the cell it was paying for. The part is then in nobody's
+	 *  hands until MountRaw or StowLoose puts it somewhere. */
+	UWeaponAttachmentDefinition* TakeOffRaw(AShooterWeapon* Weapon, EWeaponAttachmentType InType);
+
+	/** Fit a part that is in nobody's hands. Free while the gun has free mounts, else it takes an
+	 *  empty cell as its bill. False, with nothing changed, when it does not fit or no cell is free. */
+	bool MountRaw(UWeaponAttachmentDefinition* Def, AShooterWeapon* Weapon);
+
+	/** Put a part in nobody's hands into the bag: PreferredCell when empty, else the first empty cell,
+	 *  else on the floor. */
+	void StowLoose(UWeaponAttachmentDefinition* Def, int32 PreferredCell);
 };

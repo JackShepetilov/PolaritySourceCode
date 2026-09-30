@@ -290,7 +290,7 @@ bool UUpgrade_AirKick::ExecuteKick(AActor* HitActor, const FVector& ContactPoint
 
 	if (ADroppedRangedWeapon* Weapon = Cast<ADroppedRangedWeapon>(HitActor))
 	{
-		if (UStaticMeshComponent* Mesh = Weapon->WeaponMesh)
+		if (UPrimitiveComponent* Mesh = Weapon->GetBody())
 		{
 			Mesh->SetPhysicsLinearVelocity(KickDir * KickSpeed);
 			AirMailOrientSpear(Mesh, KickDir);
@@ -470,7 +470,7 @@ static FVector GetAirMailBodyVelocity(AActor* Target)
 {
 	if (ADroppedRangedWeapon* Weapon = Cast<ADroppedRangedWeapon>(Target))
 	{
-		return Weapon->WeaponMesh ? Weapon->WeaponMesh->GetPhysicsLinearVelocity() : FVector::ZeroVector;
+		return Weapon->GetBody() ? Weapon->GetBody()->GetPhysicsLinearVelocity() : FVector::ZeroVector;
 	}
 	if (AEMFPhysicsProp* Prop = Cast<AEMFPhysicsProp>(Target))
 	{
@@ -487,9 +487,9 @@ static void SetAirMailBodyVelocity(AActor* Target, const FVector& NewVelocity)
 {
 	if (ADroppedRangedWeapon* Weapon = Cast<ADroppedRangedWeapon>(Target))
 	{
-		if (Weapon->WeaponMesh)
+		if (UPrimitiveComponent* const WeaponBody = Weapon->GetBody())
 		{
-			Weapon->WeaponMesh->SetPhysicsLinearVelocity(NewVelocity);
+			WeaponBody->SetPhysicsLinearVelocity(NewVelocity);
 		}
 		return;
 	}

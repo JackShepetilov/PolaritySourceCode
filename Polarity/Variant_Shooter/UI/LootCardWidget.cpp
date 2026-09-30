@@ -346,8 +346,8 @@ namespace LootCardFill
 		}
 
 		// What pressing the key would do, by the same rules the grant follows: a gun already carried is
-		// worth its rounds, and a new one lands in its hotkey slot and pushes out whatever was there.
-		// @see AShooterCharacter::ResolveHotkeySlotForWeaponClass
+		// worth its rounds, and a new one takes an empty slot or pushes out the one in hand.
+		// @see AShooterCharacter::ChooseSlotForIncomingWeapon
 		if (Viewer)
 		{
 			if (Viewer->FindWeaponOfType(Drop->WeaponClass))
@@ -355,7 +355,7 @@ namespace LootCardFill
 				Data.TakeKind = ELootTakeKind::AmmoOnly;
 			}
 			else if (const AShooterWeapon* Occupant = Viewer->FindOwnedWeaponInHotkeySlot(
-				Viewer->ResolveHotkeySlotForWeaponClass(Drop->WeaponClass)))
+				Viewer->ChooseSlotForIncomingWeapon()))
 			{
 				Data.TakeKind = ELootTakeKind::Replace;
 				Data.ReplacedName = Occupant->GetWeaponDisplayName();

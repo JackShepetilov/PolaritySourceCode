@@ -43,7 +43,11 @@ enum class EInventorySlotKind : uint8
 	/** Weapon attachment. See bInstalled on the slot: a loose one is simply being carried, an
 	 *  installed one is already mounted on a weapon and is still holding this cell because the
 	 *  player's free attachment slots are used up. */
-	Attachment
+	Attachment,
+
+	/** A mech part from a forest camp (UMechPartDefinition). Never stacks. Kept through death: the
+	 *  respawned body gets it back (AShooterPlayerController::OnPawnDestroyed). */
+	MechPart
 };
 
 /**

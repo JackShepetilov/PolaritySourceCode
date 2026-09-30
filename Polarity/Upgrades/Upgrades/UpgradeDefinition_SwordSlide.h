@@ -4,29 +4,28 @@
 
 #include "CoreMinimal.h"
 #include "UpgradeDefinition.h"
-#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "UpgradeDefinition_SwordSlide.generated.h"
 
+/**
+ * Slide-slot upgrade (DA_SwordSlide): shots fired while sliding come out of the reserve instead of
+ * the magazine. Reference: Axle's Sliding Shooter in Apex Legends (season 29), "bullets shot while
+ * sliding come straight from inventory, up to 50% of the magazine". The class keeps its old name so
+ * the asset keeps working; it no longer has anything to do with swords or damage.
+ */
 USTRUCT(BlueprintType)
 struct FSwordSlideLevelData
 {
 	GENERATED_BODY()
 
-	/** Specific weapon class this upgrade applies to. Null means any melee weapon. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sword Slide")
-	TSubclassOf<AShooterWeapon> RequiredWeaponClass;
+	/** How many shots per slide may come out of the reserve, as a share of the magazine. Apex: 0.5.
+	 *  Rounded down, at least one. Counted again from zero on every new slide. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sliding Shooter", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float MagazineFraction = 0.5f;
 
-	/** Overrides MovementSettings->SlideMinSpeedBurst while the required weapon is equipped. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sword Slide|Movement", meta = (ClampMin = "0.0", ClampMax = "5000.0"))
-	float SlideMinSpeedBurst = 200.0f;
-
-	/** Overrides MovementSettings->SlideMaxSpeedBurst while the required weapon is equipped. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sword Slide|Movement", meta = (ClampMin = "0.0", ClampMax = "5000.0"))
-	float SlideMaxSpeedBurst = 650.0f;
-
-	/** Melee weapon damage multiplier while sliding with the required weapon equipped. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sword Slide|Damage", meta = (ClampMin = "1.0", ClampMax = "10.0"))
-	float SlidingDamageMultiplier = 1.35f;
+	/** The slide has to be at least this fast for a shot to count. Apex: 200 in its units, times the
+	 *  project's 1.96 for its own. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sliding Shooter", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float MinSlideSpeed = 392.0f;
 };
 
 UCLASS(BlueprintType)
@@ -35,10 +34,12 @@ class POLARITY_API UUpgradeDefinition_SwordSlide : public UUpgradeDefinition
 	GENERATED_BODY()
 
 public:
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sword Slide")
+
+	/** One entry per level (index 0 = Lv 1). Length defines MaxLevel. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Sliding Shooter")
 	TArray<FSwordSlideLevelData> LevelData;
 
-	UFUNCTION(BlueprintPure, Category = "Sword Slide")
+	/** Data for Level (1-based); the last entry past the end, defaults when empty. */
 	const FSwordSlideLevelData& GetLevelData(int32 Level) const;
 
 #if WITH_EDITOR

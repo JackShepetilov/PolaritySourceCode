@@ -46,6 +46,20 @@ DECLARE_DELEGATE_TwoParams(FOnInventoryUpgradeEquip, int32 /*FromIndex*/, int32 
  *  (INDEX_NONE: the first free cell). */
 DECLARE_DELEGATE_TwoParams(FOnInventoryUpgradeUnequip, int32 /*SlotIndex*/, int32 /*ToIndex*/);
 
+/** A mounted attachment was dragged from one gun onto a slot of the other. */
+DECLARE_DELEGATE_ThreeParams(FOnInventoryAttachmentMove, AShooterWeapon* /*From*/,
+	EWeaponAttachmentType /*Type*/, AShooterWeapon* /*To*/);
+
+/** A grid cell was clicked without dragging. bRight: right button (throw away), else left (use). */
+DECLARE_DELEGATE_TwoParams(FOnInventoryCellClicked, int32 /*GridIndex*/, bool /*bRight*/);
+
+/** A weapon's attachment square was clicked without dragging. */
+DECLARE_DELEGATE_ThreeParams(FOnInventoryAttachmentClicked, AShooterWeapon* /*Weapon*/,
+	EWeaponAttachmentType /*Type*/, bool /*bRight*/);
+
+/** A drag has just started from this square, so the screen can light up where it may go. */
+DECLARE_DELEGATE_OneParam(FOnInventoryDragStarted, UDragDropOperation* /*Operation*/);
+
 /** How the square should read. Independent of what is in it: an empty grid cell and an empty
  *  attachment slot are the same state wearing two different Blueprints. */
 UENUM(BlueprintType)
@@ -154,11 +168,29 @@ public:
 	 *  screen background. */
 	FOnInventoryAttachmentRemove OnAttachmentRemove;
 
+	/** Fired on a weapon's square when a part mounted on the OTHER gun is dropped on it. */
+	FOnInventoryAttachmentMove OnAttachmentMove;
+
+	FOnInventoryCellClicked OnCellClicked;
+	FOnInventoryAttachmentClicked OnAttachmentClicked;
+	FOnInventoryDragStarted OnDragStarted;
+
+	/** Light this square up (or not) for the whole of a drag, because what is being carried would
+	 *  go here. Survives the cursor passing over and leaving. Cleared by the screen when the drag ends. */
+	void SetCompatibleHint(bool bInHint);
+
+	/** True when this square is a weapon slot that would take what Operation is carrying. */
+	bool WouldAcceptDrag(const UDragDropOperation* Operation) const;
+
+	/** The gun this square is a slot on, or null. */
+	AShooterWeapon* GetAttachmentWeapon() const { return AttachmentWeapon; }
+
 protected:
 
 	// ==================== Slate input ====================
 
 	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
+	virtual FReply NativeOnMouseButtonUp(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 	virtual void NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent,
 		UDragDropOperation*& OutOperation) override;
 	virtual bool NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent,
@@ -307,5 +339,11 @@ private:
 
 	/** True when Upgrade belongs in this action slot. */
 	bool AcceptsUpgrade(const UUpgradeDefinition* Upgrade) const;
+
+	/** The whole-drag hint. @see SetCompatibleHint */
+	bool bCompatibleHint = false;
+
+	/** A left press that has not turned into a drag yet: releasing it is a click. */
+	bool bLeftPressPending = false;
 
 };

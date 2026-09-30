@@ -13,7 +13,11 @@
 #include "Upgrades/UpgradeManagerComponent.h"
 #include "Upgrades/Upgrades/Upgrade_AirKick.h"
 #include "Upgrades/Upgrades/AirMailSpear.h"
+#include "Variant_Shooter/Weapons/WeaponDropSettings.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/BoxComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Curves/CurveFloat.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
@@ -37,15 +41,35 @@ ADroppedRangedWeapon::ADroppedRangedWeapon()
 	bReplicates = true;
 	SetReplicateMovement(true);
 
-	// Weapon mesh — root, physics-simulated
+	// Body — root, physics-simulated. A box rather than the gun's own mesh: the look is a skeletal
+	// mesh taken from whatever weapon class this drop carries, and a skeletal mesh without a physics
+	// asset has nothing to simulate. The box is sized to that mesh in RefreshVisualFromWeaponClass.
+	Body = CreateDefaultSubobject<UBoxComponent>(TEXT("Body"));
+	SetRootComponent(Body);
+	Body->InitBoxExtent(FVector(35.0f, 5.0f, 12.0f));
+	Body->SetSimulatePhysics(true);
+	Body->SetCollisionProfileName(FName("PhysicsActor"));
+	Body->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	Body->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	Body->SetGenerateOverlapEvents(true);
+	Body->BodyInstance.bUseCCD = true;
+
+	// The look. No collision of its own: the box is the body.
+	WeaponVisual = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("WeaponVisual"));
+	WeaponVisual->SetupAttachment(Body);
+	WeaponVisual->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WeaponVisual->SetGenerateOverlapEvents(false);
+	WeaponVisual->SetCanEverAffectNavigation(false);
+	WeaponVisual->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+
+	// Legacy, kept so the old per-gun drop blueprints still load. Never seen, never collides.
 	WeaponMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
-	SetRootComponent(WeaponMesh);
-	WeaponMesh->SetSimulatePhysics(true);
-	WeaponMesh->SetCollisionProfileName(FName("PhysicsActor"));
-	WeaponMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-	WeaponMesh->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-	WeaponMesh->SetGenerateOverlapEvents(true);
-	WeaponMesh->BodyInstance.bUseCCD = true;
+	WeaponMesh->SetupAttachment(Body);
+	WeaponMesh->SetSimulatePhysics(false);
+	WeaponMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WeaponMesh->SetGenerateOverlapEvents(false);
+	WeaponMesh->SetVisibility(false);
+	WeaponMesh->SetHiddenInGame(true);
 
 	// EMF field component for charge storage
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
@@ -58,6 +82,135 @@ void ADroppedRangedWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME(ADroppedRangedWeapon, bIsBeingPulled);
 	DOREPLIFETIME(ADroppedRangedWeapon, bPullComplete);
 	DOREPLIFETIME(ADroppedRangedWeapon, ReplicatedCharge);
+	// Set before FinishSpawning and never changed after, so the first packet is enough.
+	DOREPLIFETIME_CONDITION(ADroppedRangedWeapon, WeaponClass, COND_InitialOnly);
+}
+
+UPrimitiveComponent* ADroppedRangedWeapon::GetBody() const
+{
+	return Body;
+}
+
+ADroppedRangedWeapon* ADroppedRangedWeapon::SpawnFor(UWorld* World, TSubclassOf<AShooterWeapon> InWeaponClass, const FTransform& Where)
+{
+	if (!World || !InWeaponClass || World->GetNetMode() == NM_Client)
+	{
+		return nullptr;
+	}
+
+	UClass* const DropClass = UWeaponDropSettings::GetDropActorClass();
+
+	// Deferred, so WeaponClass is on the actor before BeginPlay and before the first replication.
+	ADroppedRangedWeapon* const Drop = World->SpawnActorDeferred<ADroppedRangedWeapon>(DropClass, Where, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!Drop)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[WEAPON_DROP] could not spawn %s for %s"), *GetNameSafe(DropClass), *GetNameSafe(InWeaponClass));
+		return nullptr;
+	}
+	Drop->WeaponClass = InWeaponClass;
+	Drop->FinishSpawning(Where);
+
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_DROP] %s spawned as %s"), *GetNameSafe(InWeaponClass), *Drop->GetName());
+	return Drop;
+}
+
+namespace
+{
+	/** The player behind a killing blow: the causer itself, its owner chain, or an instigator on
+	 *  the way. */
+	AShooterCharacter* ResolveDropKiller(AActor* DamageCauser)
+	{
+		for (AActor* Candidate = DamageCauser; Candidate; Candidate = Candidate->GetOwner())
+		{
+			if (AShooterCharacter* Character = Cast<AShooterCharacter>(Candidate))
+			{
+				return Character;
+			}
+			if (AShooterCharacter* InstigatorCharacter = Cast<AShooterCharacter>(Candidate->GetInstigator()))
+			{
+				return InstigatorCharacter;
+			}
+		}
+		return nullptr;
+	}
+}
+
+void ADroppedRangedWeapon::ApplyEnemyDropHooks(ADroppedRangedWeapon* Drop, float Charge, AActor* KillingDamageCauser, AActor* DroppedBy)
+{
+	if (!Drop || !Drop->HasAuthority())
+	{
+		return;
+	}
+
+	if (!FMath::IsNearlyZero(Charge))
+	{
+		Drop->SetCharge(Charge);
+	}
+
+	// The killer's upgrades may want to know a gun came out of their kill.
+	if (AShooterCharacter* Killer = ResolveDropKiller(KillingDamageCauser))
+	{
+		if (UUpgradeManagerComponent* Upgrades = Killer->GetUpgradeManager())
+		{
+			Upgrades->NotifyEnemyDroppedRangedWeapon(Drop, DroppedBy);
+		}
+	}
+}
+
+void ADroppedRangedWeapon::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	// Seen in the editor too: a drop placed in a level shows its gun without pressing Play.
+	RefreshVisualFromWeaponClass();
+}
+
+void ADroppedRangedWeapon::OnRep_WeaponClass()
+{
+	RefreshVisualFromWeaponClass();
+}
+
+void ADroppedRangedWeapon::RefreshVisualFromWeaponClass()
+{
+	if (!WeaponVisual || !Body || VisualBuiltFor == WeaponClass)
+	{
+		return;
+	}
+	VisualBuiltFor = WeaponClass;
+
+	const AShooterWeapon* const CDO = WeaponClass ? WeaponClass->GetDefaultObject<AShooterWeapon>() : nullptr;
+	const USkeletalMeshComponent* const SourceMesh = CDO ? CDO->GetThirdPersonMesh() : nullptr;
+	USkeletalMesh* const Mesh = SourceMesh ? SourceMesh->GetSkeletalMeshAsset() : nullptr;
+	if (!Mesh)
+	{
+		// An old drop blueprint without a class, or a class with no third person mesh. Nothing to
+		// show, and saying so is more useful than an invisible pickup.
+		WeaponVisual->SetSkeletalMeshAsset(nullptr);
+		if (WeaponClass)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[WEAPON_DROP] %s: %s has no third person mesh, the drop is invisible"),
+				*GetName(), *GetNameSafe(WeaponClass));
+		}
+		return;
+	}
+
+	// Same scale as in the hands, so a gun on the floor is the size the player saw it.
+	const FVector Scale = SourceMesh->GetRelativeScale3D();
+	WeaponVisual->SetSkeletalMeshAsset(Mesh);
+	WeaponVisual->SetRelativeRotation(FRotator::ZeroRotator);
+	WeaponVisual->SetRelativeScale3D(Scale);
+
+	// The box is the mesh's bounds, and the mesh is moved so those bounds sit centred in the box.
+	const FBoxSphereBounds Bounds = Mesh->GetBounds();
+	const FVector Extent = (Bounds.BoxExtent * Scale).GetAbs().ComponentMax(FVector(3.0f));
+	WeaponVisual->SetRelativeLocation(-Bounds.Origin * Scale);
+	Body->SetBoxExtent(Extent);
+
+	// Mass and inertia come from the shape, and the old ones belong to the default box.
+	if (Body->IsPhysicsStateCreated())
+	{
+		Body->RecreatePhysicsState();
+	}
 }
 
 void ADroppedRangedWeapon::OnRep_DropCharge()
@@ -69,7 +222,7 @@ void ADroppedRangedWeapon::OnRep_DropCharge()
 
 void ADroppedRangedWeapon::PostNetReceivePhysicState()
 {
-	if (WeaponMesh && !WeaponMesh->IsSimulatingPhysics())
+	if (Body && !Body->IsSimulatingPhysics())
 	{
 		const FRepMovement& RepMove = GetReplicatedMovement();
 		SetActorLocationAndRotation(
@@ -87,21 +240,33 @@ void ADroppedRangedWeapon::BeginPlay()
 	// On every machine: the owning client's brackets search this list, the server's claim check too.
 	GrappleFetch::Register(this);
 
-	// Only the authority simulates the drop; everyone else is shown where it landed.
-	if (!HasAuthority() && WeaponMesh)
+	// The look, on every machine. A client normally gets it from OnRep_WeaponClass, but a class that
+	// equals the blueprint default never arrives as a change, so it is built here as well.
+	RefreshVisualFromWeaponClass();
+
+	// Old per-gun drop blueprints may have tuned the legacy mesh; it must stay out of the way.
+	if (WeaponMesh)
 	{
 		WeaponMesh->SetSimulatePhysics(false);
+		WeaponMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		WeaponMesh->SetHiddenInGame(true);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[DroppedRangedWeapon] %s BeginPlay: Charge=%.2f, bCanBeCaptured=%d"),
-		*GetName(), GetCharge(), bCanBeCaptured);
+	// Only the authority simulates the drop; everyone else is shown where it landed.
+	if (!HasAuthority() && Body)
+	{
+		Body->SetSimulatePhysics(false);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[DroppedRangedWeapon] %s BeginPlay: Weapon=%s, Charge=%.2f, bCanBeCaptured=%d"),
+		*GetName(), *GetNameSafe(WeaponClass), GetCharge(), bCanBeCaptured);
 
 	// Bind hit callback for stun-on-impact. The callback gates on bCanStunOnImpact at runtime,
 	// so we always bind (cheap) regardless of whether stun is currently enabled.
-	if (WeaponMesh)
+	if (Body)
 	{
-		WeaponMesh->SetNotifyRigidBodyCollision(true);
-		WeaponMesh->OnComponentHit.AddDynamic(this, &ADroppedRangedWeapon::OnWeaponMeshHit);
+		Body->SetNotifyRigidBodyCollision(true);
+		Body->OnComponentHit.AddDynamic(this, &ADroppedRangedWeapon::OnWeaponMeshHit);
 	}
 
 	// Opt-in yank-style limited ammo for death drops. Skip if the yank path already rolled
@@ -118,7 +283,7 @@ void ADroppedRangedWeapon::BeginPlay()
 void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	if (!OtherActor || !WeaponMesh) return;
+	if (!OtherActor || !Body) return;
 
 	// ==================== Air Mail: kicked flight resolves on first impact ====================
 	// The kicked weapon deals the upgrade's KickDamage to the NPC it slams into (plus the
@@ -191,10 +356,10 @@ void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AA
 			if (AirMail->TryComputeBounce(GetActorLocation(), ImpactVelocity, Hit.ImpactNormal, ReturnVelocity, bCharacterImpact))
 			{
 				bAirMailBounceConsumed = true;
-				WeaponMesh->SetPhysicsLinearVelocity(ReturnVelocity);
+				Body->SetPhysicsLinearVelocity(ReturnVelocity);
 				if (AirMail->GetReturnSpinSpeed() > 0.0f)
 				{
-					AirMailOrientSpear(WeaponMesh, ReturnVelocity);
+					AirMailOrientSpear(Body, ReturnVelocity);
 				}
 				Tags.Add(UUpgrade_AirKick::TAG_AirMailIncoming);
 				AirMail->PlayBounceFeedback(Hit.ImpactPoint);
@@ -212,9 +377,9 @@ void ADroppedRangedWeapon::Tick(float DeltaTime)
 
 	// Cache pre-contact velocity for OnWeaponMeshHit — at hit-callback time the physics solver
 	// has already altered the velocity, which breaks the Air Mail incidence-angle test.
-	if (WeaponMesh && WeaponMesh->IsSimulatingPhysics())
+	if (Body && Body->IsSimulatingPhysics())
 	{
-		PreImpactVelocity = WeaponMesh->GetPhysicsLinearVelocity();
+		PreImpactVelocity = Body->GetPhysicsLinearVelocity();
 	}
 
 	// Air Mail spear: while kicked, drive orientation kinematically (nose along velocity + roll)
@@ -222,7 +387,7 @@ void ADroppedRangedWeapon::Tick(float DeltaTime)
 	if (ActorHasTag(UUpgrade_AirKick::TAG_AirMailKicked))
 	{
 		UUpgrade_AirKick* AirMail = UUpgrade_AirKick::FindActiveAirMail(this);
-		AirMailTickSpear(WeaponMesh, AirMail ? AirMail->GetKickSpinSpeed() : 720.0f);
+		AirMailTickSpear(Body, AirMail ? AirMail->GetKickSpinSpeed() : 720.0f);
 	}
 
 	// Mirror the authority's charge out to clients — their capture scan gates on it, and the value
@@ -489,6 +654,111 @@ void ADroppedRangedWeapon::RollSpawnedBulletCount()
 	SpawnedBulletCount = FMath::Clamp(RolledCount, 1, MagSize);
 }
 
+bool ADroppedRangedWeapon::SampleDensityCurve(const UCurveFloat* Curve, float& OutValue)
+{
+	if (!Curve || Curve->FloatCurve.GetNumKeys() == 0)
+	{
+		return false;
+	}
+
+	float MinX = 0.0f;
+	float MaxX = 0.0f;
+	Curve->GetTimeRange(MinX, MaxX);
+	if (MaxX - MinX <= KINDA_SMALL_NUMBER)
+	{
+		// One key, or all keys on one X: that value, always.
+		OutValue = MinX;
+		return true;
+	}
+
+	// Walk the curve in equal steps and add up the area (trapezoids). Picking a point uniformly under
+	// that area and reading its X is what "sample from the density" means. 64 steps is plenty for a
+	// hand-drawn curve and costs nothing once per death.
+	constexpr int32 Steps = 64;
+	const float Step = (MaxX - MinX) / Steps;
+	float Cumulative[Steps + 1];
+	Cumulative[0] = 0.0f;
+	float PrevY = FMath::Max(0.0f, Curve->GetFloatValue(MinX));
+	for (int32 Index = 1; Index <= Steps; ++Index)
+	{
+		const float Y = FMath::Max(0.0f, Curve->GetFloatValue(MinX + Step * Index));
+		Cumulative[Index] = Cumulative[Index - 1] + 0.5f * (PrevY + Y) * Step;
+		PrevY = Y;
+	}
+
+	const float Total = Cumulative[Steps];
+	if (Total <= KINDA_SMALL_NUMBER)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[WEAPON_ROLL] density curve %s has no area above zero, ignored"), *GetNameSafe(Curve));
+		return false;
+	}
+
+	const float Target = FMath::FRand() * Total;
+	for (int32 Index = 1; Index <= Steps; ++Index)
+	{
+		if (Cumulative[Index] >= Target)
+		{
+			const float SegmentArea = Cumulative[Index] - Cumulative[Index - 1];
+			const float Alpha = SegmentArea > KINDA_SMALL_NUMBER ? (Target - Cumulative[Index - 1]) / SegmentArea : 0.5f;
+			OutValue = MinX + Step * (Index - 1 + Alpha);
+			return true;
+		}
+	}
+	OutValue = MaxX;
+	return true;
+}
+
+void ADroppedRangedWeapon::RollDropAmmo(const UCurveFloat* MagazineDensity, const UCurveFloat* ReserveDensity)
+{
+	if (!HasAuthority() || !WeaponClass)
+	{
+		return;
+	}
+
+	const AShooterWeapon* const CDO = WeaponClass->GetDefaultObject<AShooterWeapon>();
+	const int32 MagSize = CDO ? FMath::Max(1, CDO->GetMagazineSize()) : 1;
+
+	// Unset parts stay at what the drop would hand out anyway: a full magazine, and the drop's own
+	// EnergyReserveMagazines of spare.
+	int32 Loaded = MagSize;
+	int32 Reserve = FMath::Max(0, FMath::RoundToInt(EnergyReserveMagazines * MagSize));
+
+	float Fraction = 1.0f;
+	const bool bRolledMagazine = SampleDensityCurve(MagazineDensity, Fraction);
+	if (bRolledMagazine)
+	{
+		Loaded = FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Fraction, 0.0f, 1.0f) * MagSize), 1, MagSize);
+	}
+
+	float SpareMagazines = 0.0f;
+	const bool bRolledReserve = SampleDensityCurve(ReserveDensity, SpareMagazines);
+	if (bRolledReserve)
+	{
+		Reserve = FMath::Max(0, FMath::RoundToInt(SpareMagazines * MagSize));
+	}
+
+	if (!bRolledMagazine && !bRolledReserve)
+	{
+		// Nothing rolled: leave the drop exactly as it was, so its defaults apply the usual way.
+		return;
+	}
+
+	// Written the way the pickup reads it: an energy gun takes a loaded count and a reserve, a cells
+	// gun one number for everything. By class, not by owner (Docs/Gotchas/Weapons.md).
+	if (CDO && CDO->IsEnergyClass())
+	{
+		SpawnedBulletCount = Loaded;
+		CarriedEnergyReserve = Reserve;
+	}
+	else
+	{
+		SpawnedBulletCount = Loaded + Reserve;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_ROLL] %s (%s): %d loaded (%.2f of %d), %d reserve (%.2f magazines)"),
+		*GetName(), *GetNameSafe(WeaponClass), Loaded, Fraction, MagSize, Reserve, SpareMagazines);
+}
+
 // ==================== Capture Range ====================
 
 float ADroppedRangedWeapon::CalculateCaptureRange() const
@@ -520,8 +790,8 @@ void ADroppedRangedWeapon::StartPull(AShooterCharacter* InPullingPlayer)
 	}
 
 	// Disable physics — we drive position directly
-	WeaponMesh->SetSimulatePhysics(false);
-	WeaponMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Body->SetSimulatePhysics(false);
+	Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	// Stop exerting EMF force while under scripted pull. The drop spawns at its charged origin —
 	// a yank spawns it AT the boss carrying the boss's charge — and is flown to the player by
@@ -542,8 +812,8 @@ void ADroppedRangedWeapon::UpdatePull(float DeltaTime)
 	{
 		// Player gone — drop the weapon back
 		bIsBeingPulled = false;
-		WeaponMesh->SetSimulatePhysics(true);
-		WeaponMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Body->SetSimulatePhysics(true);
+		Body->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 		// Restore EMF source registration (unregistered in StartPull) now that it's a world drop again.
 		if (FieldComponent)
 		{
@@ -727,11 +997,9 @@ void ADroppedRangedWeapon::CompletePull()
 			const int32 Left = (OfferedLoaded + OfferedReserve) - AddReserve;
 			if (Left > 0)
 			{
-				ADroppedRangedWeapon* Leftover = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-					GetClass(), Player->GetActorLocation(), Player->GetActorRotation());
+				ADroppedRangedWeapon* Leftover = SpawnFor(GetWorld(), WeaponClass, Player->GetActorTransform());
 				if (Leftover)
 				{
-					Leftover->WeaponClass = WeaponClass;
 					Leftover->EnergyMagazineFill = 0.0f;
 					Leftover->EnergyReserveMagazines = static_cast<float>(Left) / FMath::Max(1, Mag);
 					Leftover->bCanBeCaptured = true;

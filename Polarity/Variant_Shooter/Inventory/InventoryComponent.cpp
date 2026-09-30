@@ -9,6 +9,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Net/UnrealNetwork.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
+#include "Variant_Shooter/Pickups/AttachmentPickup.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Upgrades/UpgradeManagerComponent.h"
@@ -41,7 +42,9 @@ void UInventoryComponent::BeginPlay()
 	// briefly draw a grid the server has not agreed to yet.
 	if (GetOwnerRole() == ROLE_Authority)
 	{
-		SetSlotCount(StartingSlotCount);
+		// Every cell open from the start [author, 2026-09-29], even where a blueprint still carries
+		// an older, smaller StartingSlotCount.
+		SetSlotCount(FMath::Max(StartingSlotCount, MaxSlotCount));
 		SetFreeAttachmentSlots(StartingFreeAttachmentSlots);
 	}
 }
@@ -297,30 +300,445 @@ void UInventoryComponent::RebalanceAttachmentCells(AShooterWeapon* Weapon)
 	}
 }
 
-void UInventoryComponent::ReleaseAttachmentCellsFor(const AShooterWeapon* Weapon)
+void UInventoryComponent::ReturnAttachmentsToBag(AShooterWeapon* Weapon)
 {
 	if (!Weapon || GetOwnerRole() != ROLE_Authority)
 	{
 		return;
 	}
 
-	bool bChanged = false;
-	for (FInventorySlot& Slot : Slots)
+	// Attachments no longer travel with the gun [author, 2026-09-29]: they are the player's, and they
+	// come back to the bag to go onto the next gun that suits them.
+	const TArray<TObjectPtr<UWeaponAttachmentDefinition>> Mounted = Weapon->GetInstalledAttachments();
+	if (Mounted.Num() == 0)
 	{
-		if (Slot.Kind == EInventorySlotKind::Attachment && Slot.bInstalled
-			&& Slot.InstalledOnWeapon == Weapon)
+		return;
+	}
+
+	// Paid first: their cells are already theirs, so they just stop being fitted.
+	TArray<UWeaponAttachmentDefinition*> Free;
+	for (UWeaponAttachmentDefinition* Def : Mounted)
+	{
+		if (!Def)
 		{
-			// Attachments travel with the gun (contract section 4), so handing the weapon over
-			// frees its cells as well. The parts themselves stay bolted to the weapon that left.
-			Slot = FInventorySlot();
-			bChanged = true;
+			continue;
+		}
+		const int32 HeldCell = FindHeldAttachmentCell(Weapon, Def->Type);
+		Weapon->UninstallAttachmentOfType(Def->Type);
+		if (HeldCell != INDEX_NONE)
+		{
+			Slots[HeldCell].bInstalled = false;
+			Slots[HeldCell].InstalledOnWeapon = nullptr;
+		}
+		else
+		{
+			Free.Add(Def);
 		}
 	}
 
-	if (bChanged)
+	// Then the free ones, into empty cells, and onto the floor when there is none.
+	for (UWeaponAttachmentDefinition* Def : Free)
 	{
-		OnInventoryChanged.Broadcast();
+		const int32 Landing = FindEmptyCell();
+		if (Landing != INDEX_NONE)
+		{
+			FInventorySlot& Cell = Slots[Landing];
+			Cell = FInventorySlot();
+			Cell.Kind = EInventorySlotKind::Attachment;
+			Cell.Payload = Def;
+			Cell.Count = 1;
+			Cell.StackMax = 1;
+			Cell.PickupClass = AAttachmentPickup::StaticClass();
+			continue;
+		}
+
+		FInventoryItem Item;
+		Item.Kind = EInventorySlotKind::Attachment;
+		Item.Payload = Def;
+		Item.Count = 1;
+		Item.StackMax = 1;
+		Item.PickupClass = AAttachmentPickup::StaticClass();
+		const bool bDropped = DropItemToWorld(Item);
+		UE_LOG(LogInventory, Log, TEXT("[ATTACH] bag full: %s from %s %s"), *GetNameSafe(Def), *Weapon->GetName(),
+			bDropped ? TEXT("dropped on the floor") : TEXT("could not be dropped and is LOST"));
 	}
+
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s left %s: %d attachment(s) back to the bag"),
+		*Weapon->GetName(), *GetNameSafe(GetOwner()), Mounted.Num());
+	OnInventoryChanged.Broadcast();
+}
+
+void UInventoryComponent::AutoInstallLooseAttachments(AShooterWeapon* Weapon)
+{
+	if (!Weapon || GetOwnerRole() != ROLE_Authority || Weapon->IsMeleeWeapon())
+	{
+		return;
+	}
+
+	for (int32 Index = 0; Index < Slots.Num(); ++Index)
+	{
+		const FInventorySlot& Cell = Slots[Index];
+		if (Cell.Kind != EInventorySlotKind::Attachment || Cell.bInstalled)
+		{
+			continue;
+		}
+		const UWeaponAttachmentDefinition* const Def = Cast<UWeaponAttachmentDefinition>(Cell.Payload);
+		if (!Def || !Def->FitsWeapon(Weapon->GetClass()) || Weapon->GetAttachmentOfType(Def->Type))
+		{
+			continue;
+		}
+		// A free mount empties the cell it came from, so this index is not revisited.
+		InstallAttachmentFromSlot(Index, Weapon);
+	}
+}
+
+bool UInventoryComponent::TryInstallFromSlotOnOwnerWeapons(int32 SlotIndex)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Slots.IsValidIndex(SlotIndex))
+	{
+		return false;
+	}
+	const FInventorySlot& Cell = Slots[SlotIndex];
+	const UWeaponAttachmentDefinition* const Def = Cast<UWeaponAttachmentDefinition>(Cell.Payload);
+	const AShooterCharacter* const Character = Cast<AShooterCharacter>(GetOwner());
+	if (Cell.Kind != EInventorySlotKind::Attachment || Cell.bInstalled || !Def || !Character)
+	{
+		return false;
+	}
+
+	// The gun in hand first, then the other one.
+	TArray<AShooterWeapon*, TInlineAllocator<2>> Candidates;
+	if (AShooterWeapon* const Current = Character->GetCurrentWeapon())
+	{
+		Candidates.Add(Current);
+	}
+	for (AShooterWeapon* const Owned : Character->GetOwnedWeapons())
+	{
+		if (Owned)
+		{
+			Candidates.AddUnique(Owned);
+		}
+	}
+
+	for (AShooterWeapon* const Candidate : Candidates)
+	{
+		if (Candidate->IsMeleeWeapon() || !Def->FitsWeapon(Candidate->GetClass()))
+		{
+			continue;
+		}
+		if (Candidate->GetAttachmentOfType(Def->Type))
+		{
+			// The author's call: this does not happen. If it ever does, the part waits in the bag.
+			UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s fits %s but that slot is taken, left in the bag"),
+				*GetNameSafe(Def), *Candidate->GetName());
+			continue;
+		}
+		if (InstallAttachmentFromSlot(SlotIndex, Candidate))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// ==================== Attachments: primitives ====================
+
+UWeaponAttachmentDefinition* UInventoryComponent::TakeOffRaw(AShooterWeapon* Weapon, EWeaponAttachmentType InType)
+{
+	if (!Weapon)
+	{
+		return nullptr;
+	}
+	const int32 HeldCell = FindHeldAttachmentCell(Weapon, InType);
+	UWeaponAttachmentDefinition* const Def = Weapon->UninstallAttachmentOfType(InType);
+	if (Def && Slots.IsValidIndex(HeldCell))
+	{
+		Slots[HeldCell] = FInventorySlot();
+	}
+	return Def;
+}
+
+bool UInventoryComponent::MountRaw(UWeaponAttachmentDefinition* Def, AShooterWeapon* Weapon)
+{
+	if (!Def || !Weapon || Weapon->IsMeleeWeapon() || Weapon->GetAttachmentOfType(Def->Type)
+		|| !Weapon->HasAttachmentSlot(Def->Type) || !Def->FitsWeapon(Weapon->GetClass()))
+	{
+		return false;
+	}
+
+	// Free while the gun has free mounts left, otherwise it needs a cell to hold as its bill.
+	const bool bFree = Weapon->GetInstalledAttachmentCount() < FreeAttachmentSlots;
+	const int32 BillCell = bFree ? INDEX_NONE : FindEmptyCell();
+	if (!bFree && BillCell == INDEX_NONE)
+	{
+		return false;
+	}
+
+	if (!Weapon->InstallAttachment(Def))
+	{
+		return false;
+	}
+
+	if (!bFree)
+	{
+		FInventorySlot& Cell = Slots[BillCell];
+		Cell = FInventorySlot();
+		Cell.Kind = EInventorySlotKind::Attachment;
+		Cell.Payload = Def;
+		Cell.Count = 1;
+		Cell.StackMax = 1;
+		Cell.PickupClass = AAttachmentPickup::StaticClass();
+		Cell.bInstalled = true;
+		Cell.InstalledOnWeapon = Weapon;
+	}
+	return true;
+}
+
+void UInventoryComponent::StowLoose(UWeaponAttachmentDefinition* Def, int32 PreferredCell)
+{
+	if (!Def)
+	{
+		return;
+	}
+
+	const int32 Landing = (Slots.IsValidIndex(PreferredCell) && Slots[PreferredCell].IsEmpty()) ? PreferredCell : FindEmptyCell();
+	if (Landing != INDEX_NONE)
+	{
+		FInventorySlot& Cell = Slots[Landing];
+		Cell = FInventorySlot();
+		Cell.Kind = EInventorySlotKind::Attachment;
+		Cell.Payload = Def;
+		Cell.Count = 1;
+		Cell.StackMax = 1;
+		Cell.PickupClass = AAttachmentPickup::StaticClass();
+		return;
+	}
+
+	FInventoryItem Item;
+	Item.Kind = EInventorySlotKind::Attachment;
+	Item.Payload = Def;
+	Item.Count = 1;
+	Item.StackMax = 1;
+	Item.PickupClass = AAttachmentPickup::StaticClass();
+	const bool bDropped = DropItemToWorld(Item);
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] bag full: %s %s"), *GetNameSafe(Def),
+		bDropped ? TEXT("put on the floor") : TEXT("could not be dropped and is LOST"));
+}
+
+// ==================== Attachments: screen gestures ====================
+
+bool UInventoryComponent::PlaceAttachmentFromSlot(int32 SlotIndex, AShooterWeapon* Weapon)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Weapon || Weapon->GetOwner() != GetOwner() || !Slots.IsValidIndex(SlotIndex))
+	{
+		return false;
+	}
+	const FInventorySlot& Source = Slots[SlotIndex];
+	UWeaponAttachmentDefinition* const Def = Cast<UWeaponAttachmentDefinition>(Source.Payload);
+	if (Source.Kind != EInventorySlotKind::Attachment || Source.bInstalled || !Def
+		|| !Weapon->HasAttachmentSlot(Def->Type) || !Def->FitsWeapon(Weapon->GetClass()))
+	{
+		UE_LOG(LogInventory, Log, TEXT("[ATTACH] cell %d does not go on %s"), SlotIndex, *Weapon->GetName());
+		return false;
+	}
+
+	// Out of the bag first, so the cell it leaves is free for whatever it displaces.
+	const FInventorySlot Saved = Source;
+	Slots[SlotIndex] = FInventorySlot();
+	UWeaponAttachmentDefinition* const Old = Weapon->GetAttachmentOfType(Def->Type) ? TakeOffRaw(Weapon, Def->Type) : nullptr;
+
+	if (!MountRaw(Def, Weapon))
+	{
+		// Put everything back the way it was.
+		Slots[SlotIndex] = Saved;
+		if (Old && !MountRaw(Old, Weapon))
+		{
+			StowLoose(Old, INDEX_NONE);
+		}
+		OnInventoryChanged.Broadcast();
+		return false;
+	}
+
+	if (Old)
+	{
+		StowLoose(Old, SlotIndex);
+	}
+
+	RebalanceAttachmentCells(Weapon);
+	OnInventoryChanged.Broadcast();
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s onto %s from cell %d%s"), *GetNameSafe(Def), *Weapon->GetName(), SlotIndex,
+		Old ? *FString::Printf(TEXT(", %s back to the bag"), *GetNameSafe(Old)) : TEXT(""));
+	return true;
+}
+
+void UInventoryComponent::Server_PlaceAttachmentFromSlot_Implementation(int32 SlotIndex, AShooterWeapon* Weapon)
+{
+	PlaceAttachmentFromSlot(SlotIndex, Weapon);
+}
+
+bool UInventoryComponent::MoveAttachmentBetweenWeapons(AShooterWeapon* From, EWeaponAttachmentType InType, AShooterWeapon* To)
+{
+	if (GetOwnerRole() != ROLE_Authority || !From || !To || From == To || From->GetOwner() != GetOwner() || To->GetOwner() != GetOwner())
+	{
+		return false;
+	}
+	UWeaponAttachmentDefinition* const Def = From->GetAttachmentOfType(InType);
+	if (!Def || !To->HasAttachmentSlot(InType) || !Def->FitsWeapon(To->GetClass()))
+	{
+		return false;
+	}
+
+	TakeOffRaw(From, InType);
+	UWeaponAttachmentDefinition* const Old = To->GetAttachmentOfType(InType) ? TakeOffRaw(To, InType) : nullptr;
+
+	if (!MountRaw(Def, To))
+	{
+		if (!MountRaw(Def, From))
+		{
+			StowLoose(Def, INDEX_NONE);
+		}
+		if (Old && !MountRaw(Old, To))
+		{
+			StowLoose(Old, INDEX_NONE);
+		}
+		RebalanceAttachmentCells(From);
+		RebalanceAttachmentCells(To);
+		OnInventoryChanged.Broadcast();
+		return false;
+	}
+
+	// The part that was there goes to the gun the new one came from, when it fits it.
+	if (Old && !MountRaw(Old, From))
+	{
+		StowLoose(Old, INDEX_NONE);
+	}
+
+	RebalanceAttachmentCells(From);
+	RebalanceAttachmentCells(To);
+	OnInventoryChanged.Broadcast();
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s moved from %s to %s%s"), *GetNameSafe(Def), *From->GetName(), *To->GetName(),
+		Old ? *FString::Printf(TEXT(", %s swapped back"), *GetNameSafe(Old)) : TEXT(""));
+	return true;
+}
+
+void UInventoryComponent::Server_MoveAttachmentBetweenWeapons_Implementation(AShooterWeapon* From, EWeaponAttachmentType InType, AShooterWeapon* To)
+{
+	MoveAttachmentBetweenWeapons(From, InType, To);
+}
+
+bool UInventoryComponent::UnmountAttachmentToSlot(AShooterWeapon* Weapon, EWeaponAttachmentType InType, int32 ToIndex)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Weapon || Weapon->GetOwner() != GetOwner() || !Weapon->GetAttachmentOfType(InType))
+	{
+		return false;
+	}
+
+	// Onto a cell holding a loose part of the same type that fits this gun: the two trade places.
+	if (Slots.IsValidIndex(ToIndex))
+	{
+		const FInventorySlot& Target = Slots[ToIndex];
+		const UWeaponAttachmentDefinition* const TargetDef = Cast<UWeaponAttachmentDefinition>(Target.Payload);
+		if (Target.Kind == EInventorySlotKind::Attachment && !Target.bInstalled && TargetDef
+			&& TargetDef->Type == InType && TargetDef->FitsWeapon(Weapon->GetClass()))
+		{
+			return PlaceAttachmentFromSlot(ToIndex, Weapon);
+		}
+	}
+
+	UWeaponAttachmentDefinition* const Def = TakeOffRaw(Weapon, InType);
+	StowLoose(Def, ToIndex);
+	RebalanceAttachmentCells(Weapon);
+	OnInventoryChanged.Broadcast();
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s off %s into the bag"), *GetNameSafe(Def), *Weapon->GetName());
+	return true;
+}
+
+void UInventoryComponent::Server_UnmountAttachmentToSlot_Implementation(AShooterWeapon* Weapon, EWeaponAttachmentType InType, int32 ToIndex)
+{
+	UnmountAttachmentToSlot(Weapon, InType, ToIndex);
+}
+
+bool UInventoryComponent::DropMountedAttachmentToWorld(AShooterWeapon* Weapon, EWeaponAttachmentType InType)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Weapon || Weapon->GetOwner() != GetOwner() || !Weapon->GetAttachmentOfType(InType))
+	{
+		return false;
+	}
+
+	UWeaponAttachmentDefinition* const Def = TakeOffRaw(Weapon, InType);
+	FInventoryItem Item;
+	Item.Kind = EInventorySlotKind::Attachment;
+	Item.Payload = Def;
+	Item.Count = 1;
+	Item.StackMax = 1;
+	Item.PickupClass = AAttachmentPickup::StaticClass();
+	if (!DropItemToWorld(Item))
+	{
+		// Could not be put down: it stays the player's rather than vanishing.
+		StowLoose(Def, INDEX_NONE);
+	}
+
+	RebalanceAttachmentCells(Weapon);
+	OnInventoryChanged.Broadcast();
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s off %s onto the floor"), *GetNameSafe(Def), *Weapon->GetName());
+	return true;
+}
+
+void UInventoryComponent::Server_DropMountedAttachmentToWorld_Implementation(AShooterWeapon* Weapon, EWeaponAttachmentType InType)
+{
+	DropMountedAttachmentToWorld(Weapon, InType);
+}
+
+bool UInventoryComponent::QuickEquipAttachmentFromSlot(int32 SlotIndex)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Slots.IsValidIndex(SlotIndex))
+	{
+		return false;
+	}
+	const FInventorySlot& Cell = Slots[SlotIndex];
+	const UWeaponAttachmentDefinition* const Def = Cast<UWeaponAttachmentDefinition>(Cell.Payload);
+	const AShooterCharacter* const Character = Cast<AShooterCharacter>(GetOwner());
+	if (Cell.Kind != EInventorySlotKind::Attachment || Cell.bInstalled || !Def || !Character)
+	{
+		return false;
+	}
+
+	TArray<AShooterWeapon*, TInlineAllocator<2>> Candidates;
+	if (AShooterWeapon* const Current = Character->GetCurrentWeapon())
+	{
+		Candidates.Add(Current);
+	}
+	for (AShooterWeapon* const Owned : Character->GetOwnedWeapons())
+	{
+		if (Owned)
+		{
+			Candidates.AddUnique(Owned);
+		}
+	}
+
+	// An empty slot it fits first; then a swap on the first gun it fits.
+	for (const bool bNeedEmpty : { true, false })
+	{
+		for (AShooterWeapon* const Candidate : Candidates)
+		{
+			if (Candidate->IsMeleeWeapon() || !Candidate->HasAttachmentSlot(Def->Type) || !Def->FitsWeapon(Candidate->GetClass()))
+			{
+				continue;
+			}
+			if (bNeedEmpty && Candidate->GetAttachmentOfType(Def->Type))
+			{
+				continue;
+			}
+			return PlaceAttachmentFromSlot(SlotIndex, Candidate);
+		}
+	}
+	UE_LOG(LogInventory, Log, TEXT("[ATTACH] %s fits neither gun"), *GetNameSafe(Def));
+	return false;
+}
+
+void UInventoryComponent::Server_QuickEquipAttachmentFromSlot_Implementation(int32 SlotIndex)
+{
+	QuickEquipAttachmentFromSlot(SlotIndex);
 }
 
 bool UInventoryComponent::InstallAttachmentFromSlot(int32 SlotIndex, AShooterWeapon* Weapon)

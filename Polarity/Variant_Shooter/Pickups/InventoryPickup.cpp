@@ -268,11 +268,25 @@ void AInventoryPickup::CompletePull()
 		return;
 	}
 
+	// An attachment does not stack, so it lands in the first empty cell. Remember which, to fit it
+	// straight onto a gun that suits it [author, 2026-09-29].
+	int32 LandingCell = INDEX_NONE;
+	const bool bAttachment = Offered.Kind == EInventorySlotKind::Attachment;
+	if (bAttachment)
+	{
+		Inventory->CanAccept(Offered, LandingCell);
+	}
+
 	const int32 Left = Inventory->TryAdd(Offered);
 	const int32 Taken = Offered.Count - Left;
 
 	UE_LOG(LogInventoryPickup, Log, TEXT("[INV_PICKUP] %s offered %d, %d taken, %d left over"),
 		*GetName(), Offered.Count, Taken, Left);
+
+	if (bAttachment && Taken > 0 && LandingCell != INDEX_NONE)
+	{
+		Inventory->TryInstallFromSlotOnOwnerWeapons(LandingCell);
+	}
 
 	if (Taken > 0)
 	{

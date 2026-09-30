@@ -340,8 +340,8 @@ protected:
 	/** The number keys, IN SLOT ORDER: element 0 is key 1, element 1 is key 2, and so on.
 	 *
 	 *  THE ORDER IS THE MEANING [author, 2026-09-05]. A weapon no longer brings its own key: the
-	 *  character places it in a slot (class weapon → 0, anything looted → 1, @see
-	 *  ResolveHotkeySlotForWeapon) and the slot indexes this array. Reordering it in the Blueprint
+	 *  character places it in a slot (first empty, else the one in hand, @see
+	 *  ChooseSlotForIncomingWeapon) and the slot indexes this array. Reordering it in the Blueprint
 	 *  therefore moves the whole inventory, which is the point — it is the one place the layout is
 	 *  written down. AShooterWeapon::SwitchAction survives only as the fallback for a weapon nobody
 	 *  placed. */
@@ -2117,32 +2117,43 @@ public:
 
 	// ==================== Weapon hotkey slots ====================
 	//
-	// Two slots, and which weapon lands in which is decided by where the weapon CAME FROM, not by
-	// the weapon asset [author, 2026-09-05]:
+	// Two equal slots, Apex-style [author, 2026-09-29]. The weapon the run starts with is not special
+	// and owns no slot: it can be thrown away, fed to a turret or the dispenser, or replaced.
 	//
-	//   slot 0 (key 1) — the class weapon, StartingWeaponClass. Never evicted by a pickup.
-	//   slot 1 (key 2) — whatever was picked up last. A new pickup throws the old one on the ground.
-	//
-	// This matches the two-weapon inventory the cell contract already assumes ("базовый и
-	// подобранный", Docs/Inventory_Slot_Contract_2026-08-28.md §4), and it means a gun is on key 2
-	// when looted even if the class that starts with it has it on key 1.
+	//   An arriving weapon takes the first empty slot.
+	//   Both taken: it replaces the one in hand, and that one goes on the floor.
 
-	/** Key 1: the weapon the run starts with. */
-	static constexpr int32 ClassWeaponHotkeySlot = 0;
+	/** How many weapons the player carries. Slot N is key N+1 (WeaponSwitchActions[N]). */
+	static constexpr int32 WeaponSlotCount = 2;
 
-	/** Key 2: the looted weapon, of which there is at most one. */
-	static constexpr int32 PickedUpWeaponHotkeySlot = 1;
+	/** Where a weapon arriving now would go: the first empty slot, else the slot of the weapon in
+	 *  hand. Safe on any machine (reads replicated state), which is what lets the loot card say what
+	 *  a pickup would replace before the server is asked. */
+	int32 ChooseSlotForIncomingWeapon() const;
 
-	/** Which slot a weapon belongs in. Exact class match against StartingWeaponClass rather than
-	 *  IsA: a subclass of the class weapon is a different gun and is looted like any other. */
-	int32 ResolveHotkeySlotForWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) const;
+	/** Put a weapon in Slot, or in ChooseSlotForIncomingWeapon() when Slot is INDEX_NONE. Server only
+	 *  (the field replicates). Call before the weapon joins OwnedWeapons. */
+	void PlaceWeaponInHotkeySlot(AShooterWeapon* Weapon, int32 Slot = INDEX_NONE);
 
-	/** @see ResolveHotkeySlotForWeaponClass. INDEX_NONE for a null weapon. */
-	int32 ResolveHotkeySlotForWeapon(const AShooterWeapon* Weapon) const;
+	/** Everything a weapon joining the player's hands needs, whichever path brought it: a finite
+	 *  reserve (no weapon refills itself any more, the starting one included [author, 2026-09-29])
+	 *  and every attachment in the bag that suits it. Server only. */
+	void OnWeaponJoinedInventory(AShooterWeapon* Weapon);
 
-	/** Put a weapon in the slot it belongs in. Server only (the field replicates); safe to call on a
-	 *  weapon that is already placed, which is what re-equipping the class weapon does. */
-	void PlaceWeaponInHotkeySlot(AShooterWeapon* Weapon);
+	/** The inventory screen threw a weapon out: onto the floor with its rounds, its attachments back
+	 *  to the bag, and the other gun into the hands when this one was there. Refused mid-switch and
+	 *  for melee. Server only; the screen asks through the RPC. */
+	bool DropWeaponFromInventory(AShooterWeapon* Weapon);
+
+	UFUNCTION(Server, Reliable)
+	void Server_DropWeaponFromInventory(AShooterWeapon* Weapon);
+
+	/** The inventory screen dragged one weapon panel onto the other: the two trade slots (keys).
+	 *  With one gun, it moves to the other slot. Server only; the screen asks through the RPC. */
+	void SwapWeaponSlots();
+
+	UFUNCTION(Server, Reliable)
+	void Server_SwapWeaponSlots();
 
 	/** The owned weapon currently sitting in Slot, or null. */
 	AShooterWeapon* FindOwnedWeaponInHotkeySlot(int32 Slot) const;

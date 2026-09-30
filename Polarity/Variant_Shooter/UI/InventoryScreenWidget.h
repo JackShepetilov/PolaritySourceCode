@@ -32,6 +32,8 @@ class UPanelWidget;
 class UTexture2D;
 class UUniformGridPanel;
 class UUpgradeDefinition;
+class UDragDropOperation;
+class UWidget;
 
 /**
  * Full-screen inventory. Inherit in Blueprint (WBP_InventoryScreen), give it the containers below
@@ -79,6 +81,12 @@ protected:
 	virtual bool NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent,
 		UDragDropOperation* InOperation) override;
 
+	/** A press on a weapon panel starts dragging the whole gun, Apex-style [author, 2026-09-29]:
+	 *  onto the other panel it trades slots, anywhere that is not a panel it goes on the floor. */
+	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
+	virtual void NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent,
+		UDragDropOperation*& OutOperation) override;
+
 	/** Turn a drag that ends outside the grid into a drop on the floor.
 	 *
 	 *  On by default because throwing things away is half of rule 2 in the contract and there is no
@@ -100,6 +108,14 @@ protected:
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UPanelWidget> SecondWeaponAttachments;
+
+	/** The whole panel of weapon slot 0 / 1: what a gun is dragged from, and what an attachment or a
+	 *  gun is dropped on. Found by name; only their on-screen rectangle is used. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> WeaponPanel1;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> WeaponPanel2;
 
 	/** The action slots (jump, aim, slide...): one labelled square per exclusive slot of the
 	 *  upgrade layout, holding the equipped upgrade. Upgrades are dragged here from the grid and
@@ -174,8 +190,40 @@ private:
 	/** A grid cell was dropped on a weapon's square. */
 	void HandleAttachmentInstall(int32 FromIndex, AShooterWeapon* Weapon);
 
-	/** A mounted attachment was dragged off a weapon, onto a cell or onto the background. */
+	/** A mounted attachment was dragged off a weapon onto a cell (or INDEX_NONE: any cell). */
 	void HandleAttachmentRemove(AShooterWeapon* Weapon, EWeaponAttachmentType InType, int32 ToIndex);
+
+	/** A mounted attachment was dragged onto a slot of the other gun. */
+	void HandleAttachmentMove(AShooterWeapon* From, EWeaponAttachmentType InType, AShooterWeapon* To);
+
+	/** A mounted attachment was dragged out of the screen: onto the floor. */
+	void RequestDropMountedAttachment(AShooterWeapon* Weapon, EWeaponAttachmentType InType);
+
+	/** Click on a grid cell: right throws it away, left puts an attachment on a gun. */
+	void HandleCellClicked(int32 GridIndex, bool bRight);
+
+	/** Click on a fitted part: right takes it off into the bag. */
+	void HandleAttachmentClicked(AShooterWeapon* Weapon, EWeaponAttachmentType InType, bool bRight);
+
+	/** Light every weapon slot that would take what just started being dragged. */
+	void HandleDragStarted(UDragDropOperation* Operation);
+
+	/** Any drag from this screen ended, dropped or cancelled: every hint off. */
+	UFUNCTION()
+	void HandleDragEnded(UDragDropOperation* Operation);
+
+	/** The gun in weapon slot 0 or 1, or null. Panels are SLOTS: they do not move when the player
+	 *  switches, and they follow the keys. */
+	AShooterWeapon* GetWeaponInPanel(int32 PanelIndex) const;
+
+	/** Which weapon panel (0/1) is under a screen position, or INDEX_NONE. */
+	int32 FindPanelUnder(const FVector2D& ScreenPosition) const;
+
+	/** Every attachment square under both guns, for the drag hints. */
+	void GatherAttachmentSquares(TArray<UInventorySlotWidget*>& OutSquares) const;
+
+	/** The panel a left press landed on, until the drag starts or the press ends. */
+	int32 PressedWeaponPanel = INDEX_NONE;
 
 	/** Draw the action slots from the layout and what is equipped in each. */
 	void RebuildActionSlots();

@@ -54,4 +54,9 @@ public:
 	 *  an action slot lights up only for an upgrade of its own. The server re-reads everything. */
 	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
 	TObjectPtr<UUpgradeDefinition> DraggedUpgrade = nullptr;
+
+	/** Set when the drag started on a weapon panel: the whole gun is being carried. Dropped on the
+	 *  other panel it trades slots, dropped anywhere that is not a panel it goes on the floor. */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	TObjectPtr<AShooterWeapon> DraggedWeapon = nullptr;
 };

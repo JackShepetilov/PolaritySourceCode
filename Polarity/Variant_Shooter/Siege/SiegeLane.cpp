@@ -47,7 +47,7 @@ float ASiegeLane::GetDistanceClosestTo(const FVector& Location) const
 	return Path->GetDistanceAlongSplineAtSplineInputKey(Key);
 }
 
-FVector ASiegeLane::GetPackSlot(int32 Index) const
+FVector ASiegeLane::GetPackSlot(int32 Index, float StartDistance) const
 {
 	if (!Path)
 	{
@@ -55,7 +55,7 @@ FVector ASiegeLane::GetPackSlot(int32 Index) const
 	}
 	// Column along the first stretch of the lane: the pack is born already walking in file, and a
 	// long pack reaches further in rather than further back off the map.
-	const float Distance = FMath::Min(Index * PackSpacing, Path->GetSplineLength());
+	const float Distance = FMath::Clamp(StartDistance + Index * PackSpacing, 0.0f, Path->GetSplineLength());
 	const FVector Along = Path->GetLocationAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World);
 	const FVector Right = Path->GetRightVectorAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World).GetSafeNormal2D();
 	return Along + Right * FMath::FRandRange(-PackSideJitter, PackSideJitter);

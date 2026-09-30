@@ -6,31 +6,11 @@
 #include "MetalPickup.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
 #include "Variant_Shooter/Weapons/DroppedRangedWeapon.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
-
-namespace
-{
-	/** The player behind a killing blow: the causer itself, its owner chain, or an instigator on
-	 *  the way. Same walk the enemies used before the loot moved here. */
-	AShooterCharacter* ResolveKiller(AActor* DamageCauser)
-	{
-		for (AActor* Candidate = DamageCauser; Candidate; Candidate = Candidate->GetOwner())
-		{
-			if (AShooterCharacter* Character = Cast<AShooterCharacter>(Candidate))
-			{
-				return Character;
-			}
-			if (AShooterCharacter* InstigatorCharacter = Cast<AShooterCharacter>(Candidate->GetInstigator()))
-			{
-				return InstigatorCharacter;
-			}
-		}
-		return nullptr;
-	}
-}
 
 bool FLootDropContext::Passes(ELootKillCondition Condition) const
 {
@@ -196,6 +176,16 @@ void ULootDropComponent::SpawnEntry(UWorld* World, const FLootDropEntry& Entry, 
 
 	for (int32 Index = 0; Index < Entry.Count; ++Index)
 	{
+		// A row naming the weapon blueprint itself becomes a drop of that weapon. Without this the
+		// weapon would spawn with no owner and turn itself into a drop anyway, a frame later.
+		if (Class->IsChildOf(AShooterWeapon::StaticClass()))
+		{
+			ADroppedRangedWeapon* const Ranged = ADroppedRangedWeapon::SpawnFor(World,
+				TSubclassOf<AShooterWeapon>(Class), FTransform(Context.Rotation, Where));
+			ADroppedRangedWeapon::ApplyEnemyDropHooks(Ranged, Context.Charge, Context.KillingDamageCauser, DroppedBy);
+			continue;
+		}
+
 		AActor* Spawned = World->SpawnActor<AActor>(Class, Where, Context.Rotation, Params);
 		if (!Spawned)
 		{
@@ -212,19 +202,7 @@ void ULootDropComponent::SpawnEntry(UWorld* World, const FLootDropEntry& Entry, 
 		}
 		else if (ADroppedRangedWeapon* Ranged = Cast<ADroppedRangedWeapon>(Spawned))
 		{
-			if (!FMath::IsNearlyZero(Context.Charge))
-			{
-				Ranged->SetCharge(Context.Charge);
-			}
-
-			// The killer's upgrades may want to know a gun came out of their kill.
-			if (AShooterCharacter* Killer = ResolveKiller(Context.KillingDamageCauser))
-			{
-				if (UUpgradeManagerComponent* Upgrades = Killer->GetUpgradeManager())
-				{
-					Upgrades->NotifyEnemyDroppedRangedWeapon(Ranged, DroppedBy);
-				}
-			}
+			ADroppedRangedWeapon::ApplyEnemyDropHooks(Ranged, Context.Charge, Context.KillingDamageCauser, DroppedBy);
 		}
 	}
 }

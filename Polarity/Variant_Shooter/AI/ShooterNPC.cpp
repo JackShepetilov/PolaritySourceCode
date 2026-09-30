@@ -59,6 +59,8 @@
 #include "../../AI/Components/CoverFinderComponent.h"
 #include "Variant_Shooter/Buildables/TurretBuildable.h"
 #include "Variant_Shooter/Siege/SiegeLaneFollower.h"
+#include "Variant_Shooter/Siege/SiegeDirector.h"
+#include "EngineUtils.h"
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
@@ -418,6 +420,20 @@ void AShooterNPC::BeginPlay()
 			{
 				Modifier->MaxBaseCharge = CombatProfile->ShieldCharge;
 			}
+		}
+	}
+
+	// The weapon options win over both of the above. The server rolls; a client already has the
+	// rolled index from the first packet, which arrives before its BeginPlay.
+	if (WeaponOptions.Num() > 0)
+	{
+		if (HasAuthority())
+		{
+			RollWeaponOption();
+		}
+		if (WeaponOptions.IsValidIndex(SelectedWeaponOption) && WeaponOptions[SelectedWeaponOption].Weapon)
+		{
+			WeaponClass = WeaponOptions[SelectedWeaponOption].Weapon;
 		}
 	}
 
@@ -2584,6 +2600,12 @@ void AShooterNPC::Die()
 		LootDrop->DropLoot(MakeLootContext(CachedNPCCharge));
 	}
 
+	// The gun in its hands falls too, always, when it came from WeaponOptions [author, 2026-09-29].
+	if (!bSuppressDeathDrops)
+	{
+		DropSelectedWeapon(CachedNPCCharge);
+	}
+
 	// The mode is chosen here, on the authority, and published so every machine plays the same one.
 	// It cannot be re-derived on the other side: TriggerCinematicDismemberment can force it.
 	{
@@ -3037,6 +3059,119 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, bDistracted);
 	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
 	DOREPLIFETIME(AShooterNPC, PledgedShieldLoan);
+	// Rolled once at spawn and read once in BeginPlay; a pool respawn keeps it.
+	DOREPLIFETIME_CONDITION(AShooterNPC, SelectedWeaponOption, COND_InitialOnly);
+}
+
+void AShooterNPC::RollWeaponOption()
+{
+	if (!HasAuthority() || WeaponOptions.Num() == 0)
+	{
+		return;
+	}
+
+	// The wave the siege is in. No director (an enemy placed in a level) counts as wave 1.
+	int32 Wave = 1;
+	if (UWorld* const World = GetWorld())
+	{
+		for (TActorIterator<ASiegeDirector> It(World); It; ++It)
+		{
+			Wave = FMath::Max(1, It->CurrentWave);
+			break;
+		}
+	}
+
+	float TotalWeight = 0.0f;
+	FString Weights;
+	for (int32 Index = 0; Index < WeaponOptions.Num(); ++Index)
+	{
+		const FEnemyWeaponOption& Option = WeaponOptions[Index];
+		const bool bAvailable = Option.Weapon && Option.Weight > 0.0f && Wave >= Option.FirstWave
+			&& (Option.LastWave <= 0 || Wave <= Option.LastWave);
+		if (bAvailable)
+		{
+			TotalWeight += Option.Weight;
+			Weights += FString::Printf(TEXT(" [%d]%s=%.2f"), Index, *GetNameSafe(Option.Weapon), Option.Weight);
+		}
+	}
+
+	int32 Picked = INDEX_NONE;
+	if (TotalWeight > 0.0f)
+	{
+		float Roll = FMath::FRand() * TotalWeight;
+		for (int32 Index = 0; Index < WeaponOptions.Num(); ++Index)
+		{
+			const FEnemyWeaponOption& Option = WeaponOptions[Index];
+			const bool bAvailable = Option.Weapon && Option.Weight > 0.0f && Wave >= Option.FirstWave
+				&& (Option.LastWave <= 0 || Wave <= Option.LastWave);
+			if (!bAvailable)
+			{
+				continue;
+			}
+			Picked = Index;
+			Roll -= Option.Weight;
+			if (Roll <= 0.0f)
+			{
+				break;
+			}
+		}
+	}
+	else
+	{
+		// Nothing available in this wave: the first switched-on row rather than no gun at all.
+		for (int32 Index = 0; Index < WeaponOptions.Num(); ++Index)
+		{
+			if (WeaponOptions[Index].Weapon && WeaponOptions[Index].Weight > 0.0f)
+			{
+				Picked = Index;
+				break;
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[WEAPON_ROLL] %s: no row available in wave %d, falling back to row %d"),
+			*GetName(), Wave, Picked);
+	}
+
+	SelectedWeaponOption = static_cast<int8>(FMath::Clamp(Picked, -1, 127));
+
+	if ((CombatProfile && CombatProfile->WeaponClass) || GetClass()->GetDefaultObject<AShooterNPC>()->WeaponClass)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[WEAPON_ROLL] %s: WeaponOptions set, so WeaponClass and the combat profile's weapon are ignored"),
+			*GetName());
+	}
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_ROLL] %s wave %d picked [%d] %s from:%s"),
+		*GetClass()->GetName(), Wave, Picked,
+		WeaponOptions.IsValidIndex(Picked) ? *GetNameSafe(WeaponOptions[Picked].Weapon) : TEXT("none"), *Weights);
+}
+
+void AShooterNPC::DropSelectedWeapon(float Charge)
+{
+	if (!HasAuthority() || !WeaponOptions.IsValidIndex(SelectedWeaponOption))
+	{
+		return;
+	}
+	const FEnemyWeaponOption& Option = WeaponOptions[SelectedWeaponOption];
+	if (!Option.Weapon)
+	{
+		return;
+	}
+
+	// From where the gun is seen in the hands, else a little above the body.
+	FTransform Where(GetActorRotation(), GetActorLocation() + FVector(0.0f, 0.0f, 50.0f));
+	if (Weapon)
+	{
+		if (const USkeletalMeshComponent* const TPMesh = Weapon->GetThirdPersonMesh())
+		{
+			Where = FTransform(TPMesh->GetComponentRotation(), TPMesh->GetComponentLocation());
+		}
+	}
+
+	ADroppedRangedWeapon* const Drop = ADroppedRangedWeapon::SpawnFor(GetWorld(), Option.Weapon, Where);
+	if (!Drop)
+	{
+		return;
+	}
+	Drop->RollDropAmmo(Option.MagazineDensity, Option.ReserveDensity);
+	ADroppedRangedWeapon::ApplyEnemyDropHooks(Drop, Charge, LastKillingDamageCauser, this);
 }
 
 void AShooterNPC::TriggerCinematicDismemberment(AActor* DamageCauser, float ImpulseMultiplier)

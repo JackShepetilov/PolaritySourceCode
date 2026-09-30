@@ -22,7 +22,7 @@ BUFF_FOLDER = FOLDER + "/Buffs"
 SLOTS = [
     ("Jump", True, ["Boring/DA_Upgrade_AirDash", "Boring/DA_Upgrade_ExtraJump", "Boring/DA_Upgrade_ChargedJump"]),
     ("Aim", True, []),
-    ("Slide", True, ["WeaponUpgrades/DA_SwordSlide"]),
+    ("Slide", True, ["Slide/DA_Slidemaxxing", "Slide/DA_Upgrade_SlideFireFriction"]),
     ("Sprint", True, []),
     ("Grapple", True, []),
     ("Melee", True, ["Fun/DA_Upgrade_DropKick", "Fun/DA_UpgradeDefinition_ChargedPunch",

@@ -64,6 +64,41 @@ class AHealthPickup;
 class AArmorPickup;
 class UGeometryCollection;
 
+// ==================== Weapon options ====================
+
+/** One gun this enemy may come out with. What is in its hands is what drops [author, 2026-09-29]. */
+USTRUCT(BlueprintType)
+struct FEnemyWeaponOption
+{
+	GENERATED_BODY()
+
+	/** What the enemy fires, and what falls when it dies. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
+	TSubclassOf<AShooterWeapon> Weapon;
+
+	/** Chance against the other available rows: weight / sum of weights. 0 = switched off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (ClampMin = "0.0"))
+	float Weight = 1.0f;
+
+	/** First siege wave this row is available in. An enemy placed in a level counts as wave 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (ClampMin = "1"))
+	int32 FirstWave = 1;
+
+	/** Last wave it is available in. 0 = no end. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (ClampMin = "0"))
+	int32 LastWave = 0;
+
+	/** Density of how full the dropped gun's magazine is. X = fraction of a magazine (0..1), Y = how
+	 *  likely. The curve's first and last keys are the range. Empty = a full magazine. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo")
+	TObjectPtr<UCurveFloat> MagazineDensity;
+
+	/** Density of the dropped gun's spare rounds. X = spare magazines (fractions allowed), Y = how
+	 *  likely. The curve's first and last keys are the range. Empty = the drop's own default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo")
+	TObjectPtr<UCurveFloat> ReserveDensity;
+};
+
 // ==================== Death Effects Types ====================
 
 /** How the NPC visually dies */
@@ -329,9 +364,26 @@ protected:
 	/** Pointer to the equipped weapon */
 	TObjectPtr<AShooterWeapon> Weapon;
 
-	/** Type of weapon to spawn for this character */
+	/** Type of weapon to spawn for this character. Ignored when WeaponOptions has rows. */
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	TSubclassOf<AShooterWeapon> WeaponClass;
+
+	/** The guns this enemy may come out with, rolled by weight on the server at spawn. Not empty =
+	 *  the gun comes only from here (WeaponClass and the combat profile's are ignored), and that gun
+	 *  drops on death. Empty = WeaponClass as before, and nothing extra drops. */
+	UPROPERTY(EditAnywhere, Category = "Weapon|Options", meta = (TitleProperty = "Weapon"))
+	TArray<FEnemyWeaponOption> WeaponOptions;
+
+	/** Which row of WeaponOptions was rolled; INDEX_NONE when none. The index travels, not the class:
+	 *  the array is the same on every machine, and each one spawns its own copy of the gun. */
+	UPROPERTY(Replicated)
+	int8 SelectedWeaponOption = INDEX_NONE;
+
+	/** Server: pick a row by weight among those available in the current wave. */
+	void RollWeaponOption();
+
+	/** Server, on death: put the rolled gun on the floor with rolled rounds. */
+	void DropSelectedWeapon(float Charge);
 
 	/** What kind of enemy this is: weapon, shield, and how it is allowed to fight.
 	 *

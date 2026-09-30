@@ -496,6 +496,31 @@ bool UUpgradeManagerComponent::GetJumpSlotParams(FJumpSlotParams& Out) const
 	return false;
 }
 
+bool UUpgradeManagerComponent::TryTakeShotFromReserve(const AShooterWeapon* Weapon)
+{
+	for (const TPair<FGameplayTag, TObjectPtr<UUpgradeComponent>>& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value && Pair.Value->TryTakeShotFromReserve(Weapon))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+float UUpgradeManagerComponent::GetSlideFireFrictionScale() const
+{
+	float Scale = 1.0f;
+	for (const TPair<FGameplayTag, TObjectPtr<UUpgradeComponent>>& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Scale *= Pair.Value->GetSlideFireFrictionScale();
+		}
+	}
+	return Scale;
+}
+
 void UUpgradeManagerComponent::BeginPlay()
 {
 	Super::BeginPlay();

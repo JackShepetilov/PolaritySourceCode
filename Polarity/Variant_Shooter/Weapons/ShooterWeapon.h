@@ -101,8 +101,12 @@ protected:
 	 *  Written on every path that puts a weapon into AShooterCharacter::OwnedWeapons; replicated
 	 *  because the key is pressed on the owning client, which is looking at a replicated copy of
 	 *  that array. SwitchAction above stays as the fallback for weapons nobody placed (NPC guns). */
-	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(ReplicatedUsing = OnRep_HotkeySlot, BlueprintReadOnly, Category = "Input")
 	int32 HotkeySlot = INDEX_NONE;
+
+	/** Slots can now trade places (the inventory screen), so the owner's screens are told. */
+	UFUNCTION()
+	void OnRep_HotkeySlot();
 
 	// ==================== Firing Mode ====================
 
@@ -1944,6 +1948,14 @@ protected:
 	 *  a round out of the magazine (refilled or discarded when it runs out) and the HUD that shows
 	 *  it. Called ONCE per shot -- a shotgun's pellets are one shot, not three. */
 	void ConsumeRoundAfterShot();
+
+	/** True when the reserve behind the magazine has a round to give right now: an unloaded energy
+	 *  round, a cell round beyond the loaded ones, or an endless reserve. */
+	bool HasSpareReserveRound() const;
+
+	/** This shot comes out of the reserve, not the magazine (slide-slot upgrade). Decided at the top
+	 *  of Fire(), spent by ConsumeRoundAfterShot, cleared at the end of Fire(). */
+	bool bShotFromReserve = false;
 
 	void PerformHitscan(const FVector& Start, const FVector& Direction, float RemainingEnergy, int32 ReflectionCount);
 

@@ -226,17 +226,12 @@ bool AHumanoidNPC::YankCurrentWeapon(AShooterCharacter* Puller)
 	const FVector WeaponLocation = TPMesh ? TPMesh->GetComponentLocation() : Weapon->GetActorLocation();
 	const FRotator WeaponRotation = TPMesh ? TPMesh->GetComponentRotation() : Weapon->GetActorRotation();
 
+	// The drop is the gun in hand: one drop actor for every weapon (ADroppedRangedWeapon::SpawnFor),
+	// so WeaponDropMapping is no longer read.
 	ADroppedRangedWeapon* Dropped = nullptr;
-	if (WeaponDropMapping.IsValidIndex(CurrentWeaponIndex) && WeaponDropMapping[CurrentWeaponIndex])
+	if (Weapon)
 	{
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-		Dropped = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-			WeaponDropMapping[CurrentWeaponIndex],
-			WeaponLocation,
-			WeaponRotation,
-			Params);
+		Dropped = ADroppedRangedWeapon::SpawnFor(GetWorld(), Weapon->GetClass(), FTransform(WeaponRotation, WeaponLocation));
 
 		if (Dropped)
 		{

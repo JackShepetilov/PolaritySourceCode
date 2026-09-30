@@ -243,24 +243,77 @@ bool UInventorySlotWidget::AcceptsUpgrade(const UUpgradeDefinition* Upgrade) con
 
 FReply UInventorySlotWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
-	const bool bHasSomethingToDrag = (GridIndex != INDEX_NONE && Visual == EInventoryCellVisual::Filled)
-		|| (AttachmentWeapon && MountedAttachment)
-		|| (UpgradeSlotIndex != INDEX_NONE && EquippedUpgrade);
+	const bool bGridItem = GridIndex != INDEX_NONE && Visual == EInventoryCellVisual::Filled;
+	const bool bMounted = AttachmentWeapon && MountedAttachment;
+	const bool bHasSomethingToDrag = bGridItem || bMounted || (UpgradeSlotIndex != INDEX_NONE && EquippedUpgrade);
+
+	// Right click, Apex-style: a bag item goes on the floor, a fitted part goes back to the bag.
+	if (InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton && (bGridItem || bMounted))
+	{
+		if (bGridItem)
+		{
+			OnCellClicked.ExecuteIfBound(GridIndex, true);
+		}
+		else
+		{
+			OnAttachmentClicked.ExecuteIfBound(AttachmentWeapon, MountedAttachment->Type, true);
+		}
+		return FReply::Handled();
+	}
 
 	if (bHasSomethingToDrag && InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
 		// Handled plus DetectDrag rather than starting one here: a click that never moves is not a
-		// drag, and Slate is what knows the difference.
+		// drag, and Slate is what knows the difference. A release before it becomes one is a click.
+		bLeftPressPending = true;
 		return FReply::Handled().DetectDrag(TakeWidget(), EKeys::LeftMouseButton);
 	}
 
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
 }
 
+FReply UInventorySlotWidget::NativeOnMouseButtonUp(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (bLeftPressPending && InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		bLeftPressPending = false;
+		if (GridIndex != INDEX_NONE && Visual == EInventoryCellVisual::Filled)
+		{
+			OnCellClicked.ExecuteIfBound(GridIndex, false);
+		}
+		else if (AttachmentWeapon && MountedAttachment)
+		{
+			OnAttachmentClicked.ExecuteIfBound(AttachmentWeapon, MountedAttachment->Type, false);
+		}
+		return FReply::Handled();
+	}
+	return Super::NativeOnMouseButtonUp(InGeometry, InMouseEvent);
+}
+
+void UInventorySlotWidget::SetCompatibleHint(bool bInHint)
+{
+	bCompatibleHint = bInHint;
+	BP_SetDropTargetHighlight(bInHint);
+}
+
+bool UInventorySlotWidget::WouldAcceptDrag(const UDragDropOperation* Operation) const
+{
+	const UInventoryDragDropOperation* Dragged = Cast<UInventoryDragDropOperation>(Operation);
+	if (!Dragged || !AttachmentWeapon || Visual == EInventoryCellVisual::Locked || Dragged->DraggedWeapon)
+	{
+		return false;
+	}
+	// A part from the bag, or from the other gun; never back onto the slot it came from.
+	const bool bFromBag = Dragged->SourceIndex != INDEX_NONE;
+	const bool bFromOtherGun = Dragged->SourceWeapon && Dragged->SourceWeapon != AttachmentWeapon;
+	return (bFromBag || bFromOtherGun) && AcceptsAttachment(Dragged->DraggedAttachment);
+}
+
 void UInventorySlotWidget::NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent,
 	UDragDropOperation*& OutOperation)
 {
 	Super::NativeOnDragDetected(InGeometry, InMouseEvent, OutOperation);
+	bLeftPressPending = false;
 
 	const bool bFromGrid = GridIndex != INDEX_NONE && Visual == EInventoryCellVisual::Filled;
 	const bool bFromWeapon = AttachmentWeapon != nullptr && MountedAttachment != nullptr;
@@ -305,6 +358,7 @@ void UInventorySlotWidget::NativeOnDragDetected(const FGeometry& InGeometry, con
 	}
 
 	OutOperation = Operation;
+	OnDragStarted.ExecuteIfBound(Operation);
 }
 
 bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent,
@@ -328,15 +382,20 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
 			return true;
 		}
 
-		// Only from the bag. Moving a part straight from one gun to the other would be a removal
-		// and a mount in one gesture, and the removal can be refused (a full bag), which would
-		// leave the player watching an attachment go nowhere with no way to see why.
-		//
-		// And only onto a gun it fits. The server checks the same thing and has the last word; this
+		// Apex-style [author, 2026-09-29]: from the bag it fits, and a part already in this slot
+		// swaps back into the bag; from the other gun it moves across, and what was here goes back to
+		// that gun. Only onto a gun it fits: the server checks the same and has the last word, this
 		// just saves a round trip that was always going to be refused.
-		if (Dragged->SourceIndex != INDEX_NONE && AcceptsAttachment(Dragged->DraggedAttachment))
+		if (WouldAcceptDrag(Dragged))
 		{
-			OnAttachmentInstall.ExecuteIfBound(Dragged->SourceIndex, AttachmentWeapon);
+			if (Dragged->SourceIndex != INDEX_NONE)
+			{
+				OnAttachmentInstall.ExecuteIfBound(Dragged->SourceIndex, AttachmentWeapon);
+			}
+			else if (Dragged->SourceWeapon)
+			{
+				OnAttachmentMove.ExecuteIfBound(Dragged->SourceWeapon, Dragged->SourceAttachmentType, AttachmentWeapon);
+			}
 		}
 		return true;
 	}
@@ -359,8 +418,9 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
 		return Super::NativeOnDrop(InGeometry, InDragDropEvent, InOperation);
 	}
 
-	// A cell the meta has not bought is a wall, not a destination.
-	if (Visual == EInventoryCellVisual::Locked)
+	// A cell the meta has not bought is a wall, not a destination. A whole gun has no business in a
+	// cell either: swallowed, so it is not read as thrown on the floor.
+	if (Visual == EInventoryCellVisual::Locked || Dragged->DraggedWeapon)
 	{
 		return true;
 	}
@@ -398,10 +458,9 @@ void UInventorySlotWidget::NativeOnDragEnter(const FGeometry& InGeometry, const 
 
 	const UInventoryDragDropOperation* Dragged = Cast<UInventoryDragDropOperation>(InOperation);
 
-	// A gun's square lights up only for an attachment that fits that gun, so a 4x scope dragged over
-	// the pistol stays dark instead of promising a mount the server will refuse.
-	// A gun's square lights up only for an attachment of its own type that fits the gun.
-	bool bFits = !AttachmentWeapon || (Dragged && AcceptsAttachment(Dragged->DraggedAttachment));
+	// A gun's square lights up only for an attachment of its own type that fits the gun, so a 4x
+	// scope dragged over the pistol stays dark instead of promising a mount the server will refuse.
+	bool bFits = AttachmentWeapon ? WouldAcceptDrag(Dragged) : (Dragged && !Dragged->DraggedWeapon);
 
 	// An action slot lights up only for an upgrade of its own, dragged out of the bag.
 	if (UpgradeSlotIndex != INDEX_NONE)
@@ -418,5 +477,6 @@ void UInventorySlotWidget::NativeOnDragEnter(const FGeometry& InGeometry, const 
 void UInventorySlotWidget::NativeOnDragLeave(const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation)
 {
 	Super::NativeOnDragLeave(InDragDropEvent, InOperation);
-	BP_SetDropTargetHighlight(false);
+	// Back to the whole-drag hint rather than dark: the slot still would take what is being carried.
+	BP_SetDropTargetHighlight(bCompatibleHint);
 }

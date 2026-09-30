@@ -6939,7 +6939,7 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 
 	const FTransform RefTransform = Self->GetActorTransform();
 
-	if (WeaponToDrop->SourceYankDropClass)
+	// Every gun has a floor version now (ADroppedRangedWeapon::SpawnFor), so this always drops.
 	{
 		static const FName OptionalGripSocket(TEXT("OptionalGrip"));
 		FVector RefLocation;
@@ -6967,11 +6967,8 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 		const FVector SpawnLoc = RefLocation + RefRotation.RotateVector(LocalSpawnOffset);
 		const FRotator SpawnRot = RefRotation;
 
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-		ADroppedRangedWeapon* Discarded = Self->GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-			WeaponToDrop->SourceYankDropClass, SpawnLoc, SpawnRot, Params);
+		ADroppedRangedWeapon* Discarded = ADroppedRangedWeapon::SpawnFor(Self->GetWorld(),
+			WeaponToDrop->GetClass(), FTransform(SpawnRot, SpawnLoc));
 
 		if (Discarded)
 		{
@@ -6997,9 +6994,8 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 					Discarded->CarryEnergyAmmoFrom(WeaponToDrop);
 				}
 
-				// Attachments travel with the gun, so the cells they were paying for come back
-				// empty. The parts stay bolted to the weapon that just left.
-				Inv->ReleaseAttachmentCellsFor(WeaponToDrop);
+				// Attachments stay with the player: back to the bag, onto the next gun that suits them.
+				Inv->ReturnAttachmentsToBag(WeaponToDrop);
 			}
 			Discarded->SetCharge(WeaponToDrop->SourceDropCharge);
 			if (UEMFChargeWidgetSubsystem* WidgetSub = Self->GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
@@ -7007,23 +7003,23 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 				WidgetSub->UnregisterDroppedRangedWeapon(Discarded);
 			}
 
-			if (UStaticMeshComponent* DiscardedMesh = Discarded->WeaponMesh)
+			if (UPrimitiveComponent* DiscardedBody = Discarded->GetBody())
 			{
 				const FVector WorldLinearImpulse = RefTransform.TransformVector(LocalLinearImpulse);
-				DiscardedMesh->AddImpulse(WorldLinearImpulse, NAME_None, /*bVelChange=*/ true);
-				DiscardedMesh->AddAngularImpulseInDegrees(AngularImpulse, NAME_None, /*bVelChange=*/ true);
+				DiscardedBody->AddImpulse(WorldLinearImpulse, NAME_None, /*bVelChange=*/ true);
+				DiscardedBody->AddAngularImpulseInDegrees(AngularImpulse, NAME_None, /*bVelChange=*/ true);
 			}
 		}
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: could not spawn dropped copy for %s"),
 				*GetNameSafe(WeaponToDrop));
+			// No drop to carry them, but the attachments are the player's either way.
+			if (UInventoryComponent* Inv = Self->GetInventoryComponent())
+			{
+				Inv->ReturnAttachmentsToBag(WeaponToDrop);
+			}
 		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Slot replacement: %s has no SourceYankDropClass; removing without dropped copy"),
-			*GetNameSafe(WeaponToDrop));
 	}
 
 	const bool bWasCurrent = (CurrentWeapon == WeaponToDrop);
@@ -7073,10 +7069,9 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 
 	if (!OwnedWeapon)
 	{
-		// One weapon per slot, same rule as the animated path: this arrival evicts whoever holds the
-		// slot it resolves to. Without this a melee pickup and a gun pickup would both claim the
-		// loot slot and only one of them would answer to the key.
-		const int32 IncomingSlot = ResolveHotkeySlotForWeaponClass(WeaponClass);
+		// One weapon per slot, same rule as the animated path: the first empty slot, else the one in
+		// hand, whose weapon goes on the floor.
+		const int32 IncomingSlot = ChooseSlotForIncomingWeapon();
 		if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponInHotkeySlot(IncomingSlot))
 		{
 			if (!DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
@@ -7102,8 +7097,9 @@ void AShooterCharacter::AddWeaponClass(const TSubclassOf<AShooterWeapon>& Weapon
 			UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] Spawned new %s: MagazineSize=%d, bHasLimitedAmmo=%d"),
 				*GetNameSafe(AddedWeapon), AddedWeapon->GetMagazineSize(), AddedWeapon->bHasLimitedAmmo ? 1 : 0);
 
-			PlaceWeaponInHotkeySlot(AddedWeapon);
+			PlaceWeaponInHotkeySlot(AddedWeapon, IncomingSlot);
 			OwnedWeapons.Add(AddedWeapon);
+			OnWeaponJoinedInventory(AddedWeapon);
 			OnWeaponInventoryChanged.Broadcast();
 
 			if (CurrentWeapon)
@@ -7185,11 +7181,9 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 		return nullptr;
 	}
 
-	// One weapon per slot: the arrival evicts whoever is standing there. For a pickup that is the
-	// previous trophy going back on the ground; the class weapon is never the one evicted, because
-	// the only thing that resolves to its slot is the class weapon itself, and owning it already
-	// returned above.
-	const int32 IncomingSlot = ResolveHotkeySlotForWeaponClass(WeaponClass);
+	// One weapon per slot: the first empty slot, else the one in hand, whose weapon goes back on
+	// the ground [author, 2026-09-29].
+	const int32 IncomingSlot = ChooseSlotForIncomingWeapon();
 	if (AShooterWeapon* ConflictingWeapon = FindOwnedWeaponInHotkeySlot(IncomingSlot))
 	{
 		if (!DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
@@ -7212,8 +7206,9 @@ AShooterWeapon* AShooterCharacter::AddWeaponClassAnimated(const TSubclassOf<ASho
 	}
 
 	const bool bWasUnarmed = (OwnedWeapons.Num() == 0);
-	PlaceWeaponInHotkeySlot(AddedWeapon);
+	PlaceWeaponInHotkeySlot(AddedWeapon, IncomingSlot);
 	OwnedWeapons.Add(AddedWeapon);
+	OnWeaponJoinedInventory(AddedWeapon);
 	OnWeaponInventoryChanged.Broadcast();
 
 	if (PendingYankThrowWeapon.IsValid() &&
@@ -7368,7 +7363,7 @@ static void DiscardYankedWeaponShared(
 		return;
 	}
 
-	if (YankedWeapon->SourceYankDropClass)
+	// Every gun has a floor version now (ADroppedRangedWeapon::SpawnFor).
 	{
 		// RefTransform = source frame for IMPULSE direction.
 		// Throw uses camera transform (so vertical aim is respected); passive drop uses actor
@@ -7419,11 +7414,8 @@ static void DiscardYankedWeaponShared(
 		const FVector SpawnLoc = RefLocation + RefRotation.RotateVector(LocalSpawnOffset);
 		const FRotator SpawnRot = RefRotation;
 
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-		ADroppedRangedWeapon* Discarded = Self->GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-			YankedWeapon->SourceYankDropClass, SpawnLoc, SpawnRot, Params);
+		ADroppedRangedWeapon* Discarded = ADroppedRangedWeapon::SpawnFor(Self->GetWorld(),
+			YankedWeapon->GetClass(), FTransform(SpawnRot, SpawnLoc));
 
 		if (Discarded)
 		{
@@ -7441,9 +7433,8 @@ static void DiscardYankedWeaponShared(
 					Discarded->CarryEnergyAmmoFrom(YankedWeapon);
 				}
 
-				// Same as the slot-replacement drop above: the attachments go with the gun and stop
-				// costing this player anything.
-				Inv->ReleaseAttachmentCellsFor(YankedWeapon);
+				// Same as the slot-replacement drop above: the attachments stay with the player.
+				Inv->ReturnAttachmentsToBag(YankedWeapon);
 			}
 			Discarded->SetCharge(YankedWeapon->SourceDropCharge);
 
@@ -7457,7 +7448,7 @@ static void DiscardYankedWeaponShared(
 			// Enable stun-on-impact for thrown variant — drop variant leaves it false (default).
 			Discarded->bCanStunOnImpact = bEnableStunOnImpact;
 
-			if (UStaticMeshComponent* DiscardedMesh = Discarded->WeaponMesh)
+			if (UPrimitiveComponent* DiscardedMesh = Discarded->GetBody())
 			{
 				// For thrown variant: enable Pawn collision so weapon hits NPCs. Constructor
 				// sets Pawn=Ignore so passively-dropped weapons don't push characters around;
@@ -7603,12 +7594,6 @@ void AShooterCharacter::OnYankThrowDiscardNotify()
 		return;
 	}
 
-	if (!Yanked->SourceYankDropClass)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[YANK_THROW] OnYankThrowDiscardNotify: yanked weapon has no SourceYankDropClass — can't spawn dropped version"));
-		return;
-	}
-
 	// Spawn position: FP weapon mesh's VISUAL grip — uses OptionalGrip socket world LOCATION
 	// when present (matches HandGrip_R thanks to the alignment in AttachWeaponMeshes), so the
 	// dropped mesh's pivot lands exactly where the held mesh's grip is.
@@ -7655,10 +7640,14 @@ void AShooterCharacter::OnYankThrowDiscardNotify()
 		ImpulseRef = GetActorTransform();
 	}
 
-	FActorSpawnParameters Params;
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	ADroppedRangedWeapon* Discarded = GetWorld()->SpawnActor<ADroppedRangedWeapon>(
-		Yanked->SourceYankDropClass, SpawnLoc, SpawnRot, Params);
+	// The attachments stay with the player, the same as on every other way a gun leaves the hands.
+	if (UInventoryComponent* Inv = GetInventoryComponent())
+	{
+		Inv->ReturnAttachmentsToBag(Yanked);
+	}
+
+	ADroppedRangedWeapon* Discarded = ADroppedRangedWeapon::SpawnFor(GetWorld(), Yanked->GetClass(),
+		FTransform(SpawnRot, SpawnLoc));
 
 	if (Discarded)
 	{
@@ -7670,7 +7659,7 @@ void AShooterCharacter::OnYankThrowDiscardNotify()
 		}
 		Discarded->bCanStunOnImpact = true;
 
-		if (UStaticMeshComponent* DiscardedMesh = Discarded->WeaponMesh)
+		if (UPrimitiveComponent* DiscardedMesh = Discarded->GetBody())
 		{
 			DiscardedMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 			const FVector WorldLinearImpulse = ImpulseRef.TransformVector(YankThrowLinearImpulse);
@@ -8197,45 +8186,144 @@ AShooterWeapon* AShooterCharacter::FindWeaponOfType(TSubclassOf<AShooterWeapon> 
 	return nullptr;
 }
 
-int32 AShooterCharacter::ResolveHotkeySlotForWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) const
+int32 AShooterCharacter::ChooseSlotForIncomingWeapon() const
 {
-	if (!WeaponClass)
+	// First empty slot.
+	for (int32 Slot = 0; Slot < WeaponSlotCount; ++Slot)
 	{
-		return INDEX_NONE;
+		if (!FindOwnedWeaponInHotkeySlot(Slot))
+		{
+			return Slot;
+		}
 	}
 
-	if (StartingWeaponClass)
+	// Both taken: the one in hand makes room. CurrentWeapon still points at a gun the player put away
+	// by hand, and that is the one in hand for this purpose.
+	if (CurrentWeapon && CurrentWeapon->GetHotkeySlot() != INDEX_NONE)
 	{
-		// Exact class, not IsA: a subclass of the class weapon is a different gun, and if it turned
-		// up on the ground it was looted like anything else.
-		return (WeaponClass == StartingWeaponClass) ? ClassWeaponHotkeySlot : PickedUpWeaponHotkeySlot;
+		return CurrentWeapon->GetHotkeySlot();
 	}
 
-	// No class weapon configured — the maps and tests that predate classes. There is no "the one you
-	// started with" to point at, so the first weapon to arrive takes key 1 and everything after it is
-	// loot. Without this every weapon on such a map would resolve to the same slot and evict the last
-	// one, leaving the player with exactly one gun.
-	return FindOwnedWeaponInHotkeySlot(ClassWeaponHotkeySlot) ? PickedUpWeaponHotkeySlot : ClassWeaponHotkeySlot;
+	UE_LOG(LogTemp, Warning, TEXT("[WEAPON_SLOT] %s: both slots taken and nothing in hand, using slot 0"), *GetName());
+	return 0;
 }
 
-int32 AShooterCharacter::ResolveHotkeySlotForWeapon(const AShooterWeapon* Weapon) const
-{
-	return Weapon ? ResolveHotkeySlotForWeaponClass(Weapon->GetClass()) : INDEX_NONE;
-}
-
-void AShooterCharacter::PlaceWeaponInHotkeySlot(AShooterWeapon* Weapon)
+void AShooterCharacter::PlaceWeaponInHotkeySlot(AShooterWeapon* Weapon, int32 Slot)
 {
 	if (!Weapon)
 	{
 		return;
 	}
 
-	const int32 Slot = ResolveHotkeySlotForWeapon(Weapon);
+	if (Slot == INDEX_NONE)
+	{
+		Slot = ChooseSlotForIncomingWeapon();
+	}
 	Weapon->SetHotkeySlot(Slot);
 
-	UE_LOG(LogTemp, Verbose, TEXT("[WEAPON_SLOT] %s placed in slot %d (%s)"),
-		*GetNameSafe(Weapon), Slot,
-		Slot == ClassWeaponHotkeySlot ? TEXT("class weapon") : TEXT("looted"));
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s placed in slot %d"), *GetNameSafe(Weapon), Slot);
+}
+
+void AShooterCharacter::OnWeaponJoinedInventory(AShooterWeapon* Weapon)
+{
+	if (!Weapon || !HasAuthority())
+	{
+		return;
+	}
+
+	// No gun refills itself in the player's hands any more, the one the run starts with included.
+	Weapon->ConfigureFiniteEnergyReserve();
+
+	if (UInventoryComponent* const Inv = GetInventoryComponent())
+	{
+		Inv->AutoInstallLooseAttachments(Weapon);
+	}
+}
+
+bool AShooterCharacter::DropWeaponFromInventory(AShooterWeapon* Weapon)
+{
+	if (!HasAuthority() || !Weapon || !OwnedWeapons.Contains(Weapon))
+	{
+		return false;
+	}
+	if (Weapon->IsMeleeWeapon())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s: melee %s is not thrown from the inventory"), *GetName(), *Weapon->GetName());
+		return false;
+	}
+
+	// The gun in hand only while nothing is happening to the hands: mid-swap, mid-holster or with the
+	// hands deliberately empty the switch machinery points at it, and pulling it out would strand that.
+	const bool bInHand = (Weapon == CurrentWeapon);
+	if (bInHand && WeaponSwitchPhase != EWeaponSwitchPhase::None)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s: cannot throw %s during switch phase %d"),
+			*GetName(), *Weapon->GetName(), static_cast<int32>(WeaponSwitchPhase));
+		return false;
+	}
+	if (bInHand)
+	{
+		Weapon->StopFiring();
+	}
+
+	if (!DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager,
+		Weapon, YankDropSpawnOffset, YankDropLinearImpulse, YankDropAngularImpulse))
+	{
+		return false;
+	}
+
+	// Threw the gun in hand: the other one comes up, the way Apex does it.
+	if (!CurrentWeapon)
+	{
+		AShooterWeapon* Next = nullptr;
+		for (AShooterWeapon* const Owned : OwnedWeapons)
+		{
+			if (Owned)
+			{
+				Next = Owned;
+				break;
+			}
+		}
+		if (Next)
+		{
+			EquipWeaponImmediate(Next);
+		}
+		else
+		{
+			UpdateFirstPersonMeshVisibility();
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s threw away %s from the inventory"), *GetName(), *GetNameSafe(Weapon));
+	return true;
+}
+
+void AShooterCharacter::Server_DropWeaponFromInventory_Implementation(AShooterWeapon* Weapon)
+{
+	DropWeaponFromInventory(Weapon);
+}
+
+void AShooterCharacter::SwapWeaponSlots()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	for (AShooterWeapon* const Owned : OwnedWeapons)
+	{
+		if (Owned && (Owned->GetHotkeySlot() == 0 || Owned->GetHotkeySlot() == 1))
+		{
+			Owned->SetHotkeySlot(1 - Owned->GetHotkeySlot());
+		}
+	}
+	OnWeaponInventoryChanged.Broadcast();
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s swapped weapon slots"), *GetName());
+}
+
+void AShooterCharacter::Server_SwapWeaponSlots_Implementation()
+{
+	SwapWeaponSlots();
 }
 
 AShooterWeapon* AShooterCharacter::FindOwnedWeaponInHotkeySlot(int32 Slot) const
@@ -8441,10 +8529,11 @@ AShooterWeapon* AShooterCharacter::PromoteReserveCopyOfClass(TSubclassOf<AShoote
 	if (!Promoted) return nullptr;
 
 	ReserveWeapons.Remove(Promoted);
-	// A reserve copy was never placed while it was hidden; it takes the slot of the copy it is
-	// replacing, which the caller has already removed from OwnedWeapons.
+	// A reserve copy was never placed while it was hidden; it takes the first empty slot, which is
+	// the one of the copy it replaces, already removed from OwnedWeapons by the caller.
 	PlaceWeaponInHotkeySlot(Promoted);
 	OwnedWeapons.Add(Promoted);
+	OnWeaponJoinedInventory(Promoted);
 	OnWeaponInventoryChanged.Broadcast();
 
 	// ActivateWeapon (called by the equip path right after this) will SetActorHiddenInGame(false)
@@ -8480,7 +8569,8 @@ bool AShooterCharacter::ReleaseWeaponToMount(AShooterWeapon* Weapon, int32& OutL
 		{
 			OutReserveRounds = Weapon->GetEnergyReserve();
 		}
-		Inv->ReleaseAttachmentCellsFor(Weapon);
+		// The gun goes to a turret or the dispenser; its attachments stay with the player.
+		Inv->ReturnAttachmentsToBag(Weapon);
 	}
 
 	const bool bWasCurrent = (CurrentWeapon == Weapon);

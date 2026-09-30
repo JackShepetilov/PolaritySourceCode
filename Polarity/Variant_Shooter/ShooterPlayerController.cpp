@@ -10,6 +10,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerStart.h"
 #include "ShooterCharacter.h"
+#include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/UI/Hud/HudRegistry.h"
 #include "Variant_Shooter/UI/InventoryScreenWidget.h"
 #include "Variant_Shooter/Map/MapScreenWidget.h"
@@ -447,6 +448,25 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 
 void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 {
+	// Mech parts survive death (author 2026-09-30, Docs/Lane_Camps_Design_2026-09-30.md). The body and
+	// its bag die together, so the parts are read off the old bag here and put into the new one below.
+	TArray<FInventoryItem> KeptParts;
+	if (const AShooterCharacter* const DeadCharacter = Cast<AShooterCharacter>(DestroyedActor))
+	{
+		if (const UInventoryComponent* const DeadInventory = DeadCharacter->GetInventoryComponent())
+		{
+			for (const FInventorySlot& Cell : DeadInventory->GetSlots())
+			{
+				if (Cell.Kind == EInventorySlotKind::MechPart && Cell.Payload)
+				{
+					FInventoryItem& Kept = KeptParts.AddDefaulted_GetRef();
+					Kept.Kind = EInventorySlotKind::MechPart;
+					Kept.Payload = Cell.Payload;
+				}
+			}
+		}
+	}
+
 	// find the player start
 	TArray<AActor*> ActorList;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerStart::StaticClass(), ActorList);
@@ -463,6 +483,22 @@ void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 		{
 			// possess the character
 			Possess(RespawnedCharacter);
+
+			if (UInventoryComponent* const NewInventory = RespawnedCharacter->GetInventoryComponent())
+			{
+				for (const FInventoryItem& Kept : KeptParts)
+				{
+					if (NewInventory->TryAdd(Kept) > 0)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[CAMP_DEBUG] %s: no cell for kept mech part %s after respawn"),
+							*GetName(), *GetNameSafe(Kept.Payload));
+					}
+				}
+				if (KeptParts.Num() > 0)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[CAMP_DEBUG] %s: %d mech parts carried into the new body"), *GetName(), KeptParts.Num());
+				}
+			}
 		}
 	}
 }

@@ -96,18 +96,27 @@ void UInventoryBarWidget::Rebuild()
 	//
 	// Anything past the second weapon is not drawn: the corner has two slots, and a third gun is a
 	// design question nobody has asked yet.
-	const TArray<AShooterWeapon*>& Weapons = Character->GetOwnedWeapons();
+	// Rows are weapon SLOTS (keys 1 and 2), the same as the inventory screen's panels.
+	AShooterWeapon* const First = Character->FindOwnedWeaponInHotkeySlot(0);
+	AShooterWeapon* const Second = Character->FindOwnedWeaponInHotkeySlot(1);
 
-	RebuildWeaponRow(0, Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, Inventory);
-	RebuildWeaponRow(1, Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, Inventory);
+	RebuildWeaponRow(0, First, Inventory);
+	RebuildWeaponRow(1, Second, Inventory);
 
 	if (Inventory)
 	{
 		// The free mount count is the same for both guns; the slots and what is in them are each
 		// gun's own.
+		//
+		// The corner's big plate is the gun IN HAND (its ammo is what the plate shows), and
+		// FirstWeaponAttachments sits inside that plate, so it follows the gun in hand too; the other
+		// container shows the other gun. Drawing slot 0 here put the pistol's scope on the SMG.
+		AShooterWeapon* const InHand = Character->GetCurrentWeapon();
+		AShooterWeapon* const Active = (InHand && (InHand == First || InHand == Second)) ? InHand : First;
+		AShooterWeapon* const Other = (Active == First) ? Second : First;
 		const int32 FreeSlots = Inventory->GetFreeAttachmentSlots();
-		RebuildAttachmentSlots(FirstWeaponAttachments, Weapons.IsValidIndex(0) ? Weapons[0] : nullptr, FreeSlots);
-		RebuildAttachmentSlots(SecondWeaponAttachments, Weapons.IsValidIndex(1) ? Weapons[1] : nullptr, FreeSlots);
+		RebuildAttachmentSlots(FirstWeaponAttachments, Active, FreeSlots);
+		RebuildAttachmentSlots(SecondWeaponAttachments, Other, FreeSlots);
 	}
 }
 

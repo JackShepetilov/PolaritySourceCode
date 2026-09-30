@@ -10,6 +10,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
 #include "HAL/IConsoleManager.h"
@@ -109,23 +110,46 @@ namespace
 	}
 }
 
-int32 FSiegeCreepKind::CountFor(int32 WaveNumber, float Minutes, int32 NumPlayers, FName LaneName) const
+int32 FSiegeCreepKind::CountFor(const FSiegePackSlot& Slot) const
 {
-	if (!NPCClass || WaveNumber < FirstWave || (LastWave > 0 && WaveNumber > LastWave))
+	if (!NPCClass || (OnlyLanes.Num() > 0 && !OnlyLanes.Contains(Slot.LaneName)))
 	{
 		return 0;
 	}
-	if ((WaveNumber - FirstWave) % FMath::Max(EveryNthWave, 1) != 0)
+	if (LaneCycleMinutes > KINDA_SMALL_NUMBER)
 	{
-		return 0;
+		// This lane's times: first + its share of the period + whole periods. The pack carries it when
+		// one of them fell between the previous pack on this lane reaching the base and this one.
+		const float Offset = LaneCycleFirstMinute + LaneCycleMinutes * Slot.LaneIndex / FMath::Max(Slot.NumLanes, 1);
+		const float Since = Slot.ArriveMinutes - Offset;
+		if (Since < 0.0f)
+		{
+			return 0;
+		}
+		const float Before = Since - FMath::Max(Slot.LanePeriodMinutes, KINDA_SMALL_NUMBER);
+		if (FMath::FloorToInt(Since / LaneCycleMinutes) == FMath::FloorToInt(Before / LaneCycleMinutes))
+		{
+			return 0;
+		}
 	}
-	if (OnlyLanes.Num() > 0 && !OnlyLanes.Contains(LaneName))
+	else
 	{
-		return 0;
+		if (Slot.Wave < FirstWave || (LastWave > 0 && Slot.Wave > LastWave))
+		{
+			return 0;
+		}
+		if ((Slot.Wave - FirstWave) % FMath::Max(EveryNthWave, 1) != 0)
+		{
+			return 0;
+		}
 	}
 	const FRichCurve* const Curve = CountByMinute.GetRichCurveConst();
-	const float Base = (Curve && Curve->GetNumKeys() > 0) ? Curve->Eval(Minutes) : static_cast<float>(BaseCount);
-	return FMath::Max(0, FMath::RoundToInt(Base + CountPerPlayer * NumPlayers));
+	float Count = (Curve && Curve->GetNumKeys() > 0) ? Curve->Eval(Slot.Minutes) : static_cast<float>(BaseCount);
+	if (AddOneEveryMinutes > KINDA_SMALL_NUMBER)
+	{
+		Count += FMath::FloorToFloat(FMath::Max(Slot.Minutes, 0.0f) / AddOneEveryMinutes);
+	}
+	return FMath::Max(0, FMath::RoundToInt(Count + CountPerPlayer * Slot.NumPlayers));
 }
 
 ASiegeDirector::ASiegeDirector()
@@ -340,8 +364,17 @@ void ASiegeDirector::StartSiege()
 	OnSiegeStarted.Broadcast();
 	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: siege started, first wave in %.0fs, %s, carrier cap %d, paced drops %s"),
 		*GetName(), FirstWaveDelay,
-		IsLaneSiege() ? TEXT("lanes") : (bUseSpawnRing ? TEXT("spawn ring") : TEXT("spawn points")), MaxCarriersAlive,
+		IsLaneSiege() ? (bStaggerLanes ? TEXT("lanes by arrival") : TEXT("lanes all at once"))
+			: (bUseSpawnRing ? TEXT("spawn ring") : TEXT("spawn points")), MaxCarriersAlive,
 		bPaceCarrierSalvos ? TEXT("on") : TEXT("off"));
+
+	// Lanes by arrival keep their own schedule in the pulse, no wave timer.
+	bLanePlanActive = false;
+	if (IsLaneSiege() && bStaggerLanes)
+	{
+		StartLanePlan();
+		return;
+	}
 	ScheduleNextWave(FirstWaveDelay);
 }
 
@@ -357,6 +390,7 @@ void ASiegeDirector::StopSiege()
 	// (IsPacingCarriers is false from here).
 	SpawnQueue.Reset();
 	LaneQueue.Reset();
+	bLanePlanActive = false;
 	bSiegeActive = false;
 	NextWaveServerTime = 0.0f;
 	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: siege stopped at wave %d"), *GetName(), CurrentWave);
@@ -366,6 +400,31 @@ void ASiegeDirector::CallNextWaveNow()
 {
 	if (!HasAuthority() || !bSiegeActive)
 	{
+		return;
+	}
+	if (bLanePlanActive)
+	{
+		// Skip the wait on the arrival schedule: everything queued moves up so the next pack leaves
+		// now, and the slots after it keep their spacing.
+		float Soonest = TNumericLimits<float>::Max();
+		const float Now = GetServerNow();
+		for (const FLaneSpawn& Entry : LaneQueue)
+		{
+			if (Entry.LeaveAt > Now)
+			{
+				Soonest = FMath::Min(Soonest, Entry.LeaveAt);
+			}
+		}
+		if (Soonest < TNumericLimits<float>::Max())
+		{
+			const float Shift = Soonest - Now;
+			for (FLaneSpawn& Entry : LaneQueue)
+			{
+				Entry.LeaveAt -= Shift;
+			}
+			LanePlan.NextArrival -= Shift;
+			UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s: next pack called now, schedule moved up %.0fs"), *GetName(), Shift);
+		}
 		return;
 	}
 	GetWorldTimerManager().ClearTimer(WaveTimer);
@@ -426,6 +485,8 @@ void ASiegeDirector::StartWave()
 	}
 
 	CurrentWave = WaveNumber;
+	const float Now = GetServerNow();
+	const float WaveStart = Now;
 
 	// The drone cap is the wave's, so the carriers already up take it before anything new arrives.
 	TArray<AKamikazeCarrierDrone*> Carriers;
@@ -438,7 +499,7 @@ void ASiegeDirector::StartWave()
 	const int32 QueuedBefore = SpawnQueue.Num() + LaneQueue.Num();
 	if (bLanes)
 	{
-		SpawnLaneWave(WaveNumber);
+		SpawnLaneWave(WaveNumber, WaveStart);
 	}
 	else if (bAuthored)
 	{
@@ -461,11 +522,9 @@ void ASiegeDirector::StartWave()
 	// The clock runs from the start of this wave, not from its death. A lull can bring it forward.
 	// A staggered lane wave is one pass round the cycle: the next starts one interval after the last
 	// lane's pack, so the rhythm between packs never changes at the seam.
-	if (bLanes && bStaggerLanes)
+	if (bLanes)
 	{
-		TArray<ASiegeLane*> Lanes;
-		GetCycleLanes(Lanes);
-		ScheduleNextWave(FMath::Max(Lanes.Num(), 1) * GetLanePackInterval());
+		ScheduleNextWave(WaveInterval);
 	}
 	else
 	{
@@ -751,12 +810,17 @@ float ASiegeDirector::GetSiegeMinutes() const
 
 float ASiegeDirector::GetCreepHealthMultiplier() const
 {
+	return GetCreepHealthMultiplierAt(GetSiegeMinutes() * 60.0f);
+}
+
+float ASiegeDirector::GetCreepHealthMultiplierAt(float SiegeSeconds) const
+{
 	if (CreepUpgradeInterval <= KINDA_SMALL_NUMBER || CreepHealthPerUpgrade <= 1.0f)
 	{
 		return 1.0f;
 	}
-	const int32 Upgrades = FMath::FloorToInt(GetSiegeMinutes() * 60.0f / CreepUpgradeInterval);
-	return FMath::Pow(CreepHealthPerUpgrade, static_cast<float>(Upgrades));
+	// Linear and smooth (author 2026-09-30): no steps to brace for, no exponent.
+	return 1.0f + (CreepHealthPerUpgrade - 1.0f) * FMath::Max(SiegeSeconds, 0.0f) / CreepUpgradeInterval;
 }
 
 int32 ASiegeDirector::GetHumanPlayerCount() const
@@ -799,42 +863,71 @@ void ASiegeDirector::GetCycleLanes(TArray<ASiegeLane*>& OutLanes) const
 	OutLanes.StableSort([&Rank](const ASiegeLane& A, const ASiegeLane& B) { return Rank(A) < Rank(B); });
 }
 
-void ASiegeDirector::SpawnLaneWave(int32 WaveNumber)
+float ASiegeDirector::GetCreepLaneSpeed() const
+{
+	if (CreepLaneSpeed > KINDA_SMALL_NUMBER)
+	{
+		return CreepLaneSpeed;
+	}
+	float Slowest = TNumericLimits<float>::Max();
+	for (const FSiegeCreepKind& Kind : LanePack)
+	{
+		if (!Kind.NPCClass || Kind.NPCClass->IsChildOf(AFlyingDrone::StaticClass()))
+		{
+			continue;
+		}
+		const ACharacter* const CDO = Kind.NPCClass->GetDefaultObject<ACharacter>();
+		const UCharacterMovementComponent* const Move = CDO ? CDO->GetCharacterMovement() : nullptr;
+		if (Move && Move->MaxWalkSpeed > KINDA_SMALL_NUMBER)
+		{
+			Slowest = FMath::Min(Slowest, Move->MaxWalkSpeed);
+		}
+	}
+	return Slowest < TNumericLimits<float>::Max() ? Slowest : 420.0f;
+}
+
+void ASiegeDirector::SpawnLaneWave(int32 WaveNumber, float WaveStart)
 {
 	TArray<ASiegeLane*> Lanes;
 	GetCycleLanes(Lanes);
-
 	const int32 NumPlayers = GetHumanPlayerCount();
-	const float Minutes = GetSiegeMinutes();
-	const float Now = GetServerNow();
-	// Staggered: lane k of the cycle goes out k intervals into the wave. Together: all now.
-	const float Interval = bStaggerLanes ? GetLanePackIntervalFor(NumPlayers) : 0.0f;
+	const float Minutes = FMath::Max(0.0f, WaveStart - SiegeStartServerTime) / 60.0f;
 
 	for (int32 LaneIndex = 0; LaneIndex < Lanes.Num(); ++LaneIndex)
 	{
 		ASiegeLane* const Lane = Lanes[LaneIndex];
-		const float OutAt = Now + LaneIndex * Interval;
+		FSiegePackSlot Slot;
+		Slot.Wave = WaveNumber;
+		Slot.Minutes = Minutes;
+		Slot.ArriveMinutes = Minutes;
+		Slot.LanePeriodMinutes = FMath::Max(WaveInterval, 1.0f) / 60.0f;
+		Slot.LaneIndex = LaneIndex;
+		Slot.NumLanes = Lanes.Num();
+		Slot.NumPlayers = NumPlayers;
+		Slot.LaneName = Lane->LaneName;
+
 		// Members in the order of the rows: the author lists the front of the column first.
 		int32 Member = 0;
 		FString Composition;
 		for (const FSiegeCreepKind& Kind : LanePack)
 		{
-			const int32 Count = Kind.CountFor(WaveNumber, Minutes, NumPlayers, Lane->LaneName);
+			const int32 Count = Kind.CountFor(Slot);
 			for (int32 i = 0; i < Count; ++i)
 			{
 				FLaneSpawn& Entry = LaneQueue.AddDefaulted_GetRef();
 				Entry.NPCClass = Kind.NPCClass;
 				Entry.Lane = Lane;
 				Entry.Member = Member++;
-				Entry.QueuedAt = OutAt;
+				Entry.Wave = WaveNumber;
+				Entry.LeaveAt = WaveStart;
 			}
 			if (Count > 0)
 			{
 				Composition += FString::Printf(TEXT(" %dx%s"), Count, *GetNameSafe(Kind.NPCClass));
 			}
 		}
-		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s: wave %d lane %s out in %.0fs (min %.1f, %d players, hp x%.2f):%s"),
-			*GetName(), WaveNumber, *Lane->LaneName.ToString(), OutAt - Now, Minutes, NumPlayers, GetCreepHealthMultiplier(),
+		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s: wave %d lane %s (min %.1f, %d players, hp x%.2f):%s"),
+			*GetName(), WaveNumber, *Lane->LaneName.ToString(), Minutes, NumPlayers, GetCreepHealthMultiplier(),
 			Composition.IsEmpty() ? TEXT(" nothing") : *Composition);
 	}
 	if (Lanes.Num() == 0)
@@ -843,26 +936,216 @@ void ASiegeDirector::SpawnLaneWave(int32 WaveNumber)
 	}
 }
 
+float ASiegeDirector::GetLaneWalkSeconds(const ASiegeLane* Lane) const
+{
+	return Lane ? Lane->GetLength() / FMath::Max(GetCreepLaneSpeed(), 1.0f) : 0.0f;
+}
+
+bool ASiegeDirector::PlanNextPack(FLanePlanCursor& Cursor, const TArray<ASiegeLane*>& Lanes, int32 NumPlayers, float ClockStart, FPlannedPack& Out) const
+{
+	if (Lanes.Num() == 0)
+	{
+		return false;
+	}
+	// Enough steps to cross a long run of empty packs (the opening's Top and Bot, a kind that has not
+	// started yet), not so many that an empty LanePack spins.
+	for (int32 Step = 0; Step < Lanes.Num() * 64; ++Step)
+	{
+		const int32 LaneIndex = Cursor.LaneIndex % Lanes.Num();
+		ASiegeLane* const Lane = Lanes[LaneIndex];
+		const int32 Wave = Cursor.Wave;
+		if (++Cursor.LaneIndex >= Lanes.Num())
+		{
+			Cursor.LaneIndex = 0;
+			++Cursor.Wave;
+		}
+
+		const float LeaveAt = Cursor.NextArrival - GetLaneWalkSeconds(Lane);
+		FSiegePackSlot Slot;
+		Slot.Wave = Wave;
+		Slot.Minutes = FMath::Max(0.0f, LeaveAt - ClockStart) / 60.0f;
+		Slot.ArriveMinutes = FMath::Max(0.0f, Cursor.NextArrival - ClockStart) / 60.0f;
+		Slot.LanePeriodMinutes = GetLanePackIntervalFor(NumPlayers) * Lanes.Num() / 60.0f;
+		Slot.LaneIndex = LaneIndex;
+		Slot.NumLanes = Lanes.Num();
+		Slot.NumPlayers = NumPlayers;
+		Slot.LaneName = Lane->LaneName;
+		Out.Counts.Reset();
+		Out.Total = 0;
+		for (const FSiegeCreepKind& Kind : LanePack)
+		{
+			const int32 Count = Kind.CountFor(Slot);
+			Out.Counts.Add(Count);
+			Out.Total += Count;
+		}
+		if (Out.Total == 0)
+		{
+			// Nobody in it: no slot taken, the next lane of the cycle arrives when this one would have.
+			continue;
+		}
+		Out.Wave = Wave;
+		Out.Lane = Lane;
+		Out.LeaveAt = LeaveAt;
+		Out.ArriveAt = Cursor.NextArrival;
+		Cursor.NextArrival += GetLanePackIntervalFor(NumPlayers);
+		return true;
+	}
+	return false;
+}
+
+void ASiegeDirector::StartLanePlan()
+{
+	TArray<ASiegeLane*> Lanes;
+	GetCycleLanes(Lanes);
+	const float Now = GetServerNow();
+	const int32 NumPlayers = GetHumanPlayerCount();
+
+	// Find the first pack with anybody in it to know its lane, then pin the schedule on it: with the
+	// prewarm it reaches the base PrewarmFirstArrival from now, without it it leaves now.
+	FLanePlanCursor Probe;
+	Probe.NextArrival = Now;
+	FPlannedPack First;
+	if (!PlanNextPack(Probe, Lanes, NumPlayers, Now, First))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LANE_DEBUG] %s: the lane pack gives nobody on any lane, no schedule"), *GetName());
+		return;
+	}
+	const float Walk = GetLaneWalkSeconds(First.Lane);
+	const float FirstArrival = bPrewarm ? Now + PrewarmFirstArrival : Now + FirstWaveDelay + Walk;
+
+	LanePlan = FLanePlanCursor();
+	LanePlan.NextArrival = FirstArrival;
+	// The run's clock starts when its first pack left: the packs' counts and the upgrades read the
+	// same clock the creeps "lived" on.
+	SiegeStartServerTime = FMath::Min(Now, FirstArrival - Walk);
+	bLanePlanActive = true;
+	UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s: arrival schedule, first pack on %s at the base in %.0fs (left %.0fs ago), then one every %.1fs, %d players, %.0f cm/s"),
+		*GetName(), *First.Lane->LaneName.ToString(), FirstArrival - Now, Now - (FirstArrival - Walk),
+		GetLanePackIntervalFor(NumPlayers), NumPlayers, GetCreepLaneSpeed());
+	TickLanePlan(Now);
+	TickLaneQueue(Now);
+}
+
+void ASiegeDirector::TickLanePlan(float Now)
+{
+	if (!bLanePlanActive)
+	{
+		return;
+	}
+	TArray<ASiegeLane*> Lanes;
+	GetCycleLanes(Lanes);
+	float LongestWalk = 0.0f;
+	for (const ASiegeLane* const Lane : Lanes)
+	{
+		LongestWalk = FMath::Max(LongestWalk, GetLaneWalkSeconds(Lane));
+	}
+	const int32 NumPlayers = GetHumanPlayerCount();
+
+	// Every slot whose pack could have to leave by the next pulse is planned now: the next slot's
+	// arrival minus the longest walk is the soonest any lane could need it out. Packs on shorter
+	// lanes wait in the queue for their own leave time.
+	for (int32 Guard = 0; Guard < 32 && LanePlan.NextArrival - LongestWalk <= Now + SiegePulseInterval; ++Guard)
+	{
+		FPlannedPack Pack;
+		if (!PlanNextPack(LanePlan, Lanes, NumPlayers, SiegeStartServerTime, Pack))
+		{
+			break;
+		}
+		FString Composition;
+		int32 Member = 0;
+		for (int32 Row = 0; Row < LanePack.Num(); ++Row)
+		{
+			for (int32 i = 0; i < Pack.Counts[Row]; ++i)
+			{
+				FLaneSpawn& Entry = LaneQueue.AddDefaulted_GetRef();
+				Entry.NPCClass = LanePack[Row].NPCClass;
+				Entry.Lane = Pack.Lane;
+				Entry.Member = Member++;
+				Entry.Wave = Pack.Wave;
+				Entry.LeaveAt = Pack.LeaveAt;
+			}
+			if (Pack.Counts[Row] > 0)
+			{
+				Composition += FString::Printf(TEXT(" %dx%s"), Pack.Counts[Row], *GetNameSafe(LanePack[Row].NPCClass));
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] %s: wave %d lane %s %s %.0fs, at the base in %.0fs (min %.1f):%s"),
+			*GetName(), Pack.Wave, *Pack.Lane->LaneName.ToString(),
+			Pack.LeaveAt < Now ? TEXT("left") : TEXT("leaves in"), FMath::Abs(Pack.LeaveAt - Now), Pack.ArriveAt - Now,
+			FMath::Max(0.0f, Pack.LeaveAt - SiegeStartServerTime) / 60.0f, *Composition);
+	}
+
+	// The HUD's countdown: to the next pack of a wave that has not started yet.
+	float NextNewWave = TNumericLimits<float>::Max();
+	for (const FLaneSpawn& Entry : LaneQueue)
+	{
+		if (Entry.Wave > CurrentWave)
+		{
+			NextNewWave = FMath::Min(NextNewWave, Entry.LeaveAt);
+		}
+	}
+	if (NextNewWave < TNumericLimits<float>::Max())
+	{
+		NextWaveServerTime = FMath::Max(NextNewWave, Now);
+	}
+}
+
+void ASiegeDirector::NoteLaneWaveStarted(int32 Wave)
+{
+	if (Wave <= CurrentWave)
+	{
+		return;
+	}
+	CurrentWave = Wave;
+	TArray<AKamikazeCarrierDrone*> Carriers;
+	GatherLiveCarriers(Carriers);
+	for (AKamikazeCarrierDrone* const Carrier : Carriers)
+	{
+		ApplyDronesPerTarget(Carrier);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[SIEGE_DEBUG] %s: wave %d started (lanes by arrival), %d alive"), *GetName(), Wave, AliveEnemies);
+	OnWaveStarted.Broadcast(Wave);
+}
 void ASiegeDirector::TickLaneQueue(float Now)
 {
 	bool bSpawnedAny = false;
+	const float Speed = FMath::Max(GetCreepLaneSpeed(), 1.0f);
 	for (int32 i = 0; i < LaneQueue.Num(); )
 	{
 		FLaneSpawn& Entry = LaneQueue[i];
 		ASiegeLane* const Lane = Entry.Lane.Get();
-		if (Lane && Now < Entry.QueuedAt)
+		if (Lane && Now < Entry.LeaveAt)
 		{
-			// A later lane of a staggered wave: not its turn yet.
+			// Not its time to leave yet.
 			++i;
 			continue;
 		}
-		if (!Lane || SpawnOnLane(Entry.NPCClass, Lane, Entry.Member))
+		if (Entry.FirstTryAt < 0.0f)
 		{
-			bSpawnedAny |= Lane != nullptr;
+			Entry.FirstTryAt = Now;
+		}
+		// Left in the past (the prewarm, or a retry): it appears where the column has walked to, and
+		// never past the base's end of the lane.
+		float StartDistance = 0.0f;
+		if (Lane && Now - Entry.LeaveAt > SiegePulseInterval)
+		{
+			const float MaxStart = FMath::Max(0.0f, Lane->GetLength() - LaneEndDistance - Entry.Member * Lane->PackSpacing);
+			StartDistance = FMath::Min(Speed * (Now - Entry.LeaveAt), MaxStart);
+		}
+		if (!Lane || SpawnOnLane(Entry.NPCClass, Lane, Entry.Member, StartDistance))
+		{
+			if (Lane)
+			{
+				bSpawnedAny = true;
+				if (bLanePlanActive)
+				{
+					NoteLaneWaveStarted(Entry.Wave);
+				}
+			}
 			LaneQueue.RemoveAt(i);
 			continue;
 		}
-		if (Now - Entry.QueuedAt > LaneSpawnRetrySeconds)
+		if (Now - Entry.FirstTryAt > LaneSpawnRetrySeconds)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[LANE_DEBUG] %s: %s found no spot on lane %s for %.0fs, dropped"),
 				*GetName(), *GetNameSafe(Entry.NPCClass), *Lane->LaneName.ToString(), LaneSpawnRetrySeconds);
@@ -876,8 +1159,7 @@ void ASiegeDirector::TickLaneQueue(float Now)
 		RefreshAliveCount();
 	}
 }
-
-bool ASiegeDirector::FindLaneSpawn(TSubclassOf<AShooterNPC> NPCClass, const ASiegeLane* Lane, int32 Member, FTransform& OutTransform)
+bool ASiegeDirector::FindLaneSpawn(TSubclassOf<AShooterNPC> NPCClass, const ASiegeLane* Lane, int32 Member, float StartDistance, FTransform& OutTransform)
 {
 	const ACharacter* const CDO = NPCClass->GetDefaultObject<ACharacter>();
 	const UCapsuleComponent* const Capsule = CDO ? CDO->GetCapsuleComponent() : nullptr;
@@ -886,14 +1168,14 @@ bool ASiegeDirector::FindLaneSpawn(TSubclassOf<AShooterNPC> NPCClass, const ASie
 	const float HalfHeight = Capsule ? Capsule->GetUnscaledCapsuleHalfHeight() : (bAir ? 100.0f : 96.0f);
 
 	// Facing in: along the lane, towards the base.
-	const float Along = FMath::Min(Member * Lane->PackSpacing, Lane->GetLength());
+	const float Along = FMath::Clamp(StartDistance + Member * Lane->PackSpacing, 0.0f, Lane->GetLength());
 	const FVector Ahead = Lane->GetLocationAtDistance(Along + 200.0f) - Lane->GetLocationAtDistance(Along);
 	const FRotator Facing(0.0f, Ahead.Rotation().Yaw, 0.0f);
 
 	// A few jitters of the same slot before giving up for this pulse.
 	for (int32 Try = 0; Try < 4; ++Try)
 	{
-		const FVector Slot = Lane->GetPackSlot(Member);
+		const FVector Slot = Lane->GetPackSlot(Member, StartDistance);
 		FVector Ground;
 		if (!TraceGroundAt(Slot, Ground))
 		{
@@ -924,7 +1206,7 @@ bool ASiegeDirector::FindLaneSpawn(TSubclassOf<AShooterNPC> NPCClass, const ASie
 	return false;
 }
 
-bool ASiegeDirector::SpawnOnLane(TSubclassOf<AShooterNPC> NPCClass, ASiegeLane* Lane, int32 Member)
+bool ASiegeDirector::SpawnOnLane(TSubclassOf<AShooterNPC> NPCClass, ASiegeLane* Lane, int32 Member, float StartDistance)
 {
 	UWorld* const World = GetWorld();
 	if (!World || !NPCClass || !Lane)
@@ -938,7 +1220,7 @@ bool ASiegeDirector::SpawnOnLane(TSubclassOf<AShooterNPC> NPCClass, ASiegeLane* 
 	}
 
 	FTransform SpawnTransform;
-	if (!FindLaneSpawn(NPCClass, Lane, Member, SpawnTransform))
+	if (!FindLaneSpawn(NPCClass, Lane, Member, StartDistance, SpawnTransform))
 	{
 		return false;
 	}
@@ -956,6 +1238,8 @@ bool ASiegeDirector::SpawnOnLane(TSubclassOf<AShooterNPC> NPCClass, ASiegeLane* 
 	USiegeLaneFollower* const Follower = NewObject<USiegeLaneFollower>(NPC, TEXT("SiegeLaneFollower"));
 	Follower->EndDistance = LaneEndDistance;
 	Follower->CarrierAggroRadius = LaneCarrierAggroRadius;
+	// Carriers keep their own reach (CarrierAggroRadius); the leash is the walkers'.
+	Follower->WalkerLeashRadius = IsCarrierClass(NPCClass) ? 0.0f : LaneWalkerLeashRadius;
 	Follower->RegisterComponent();
 	NPC->AddInstanceComponent(Follower);
 	Follower->SetLane(Lane);
@@ -1262,6 +1546,7 @@ void ASiegeDirector::Pulse()
 	RefreshAliveCount();
 
 	TickSpawnQueue(Now);
+	TickLanePlan(Now);
 	TickLaneQueue(Now);
 	TickCarrierPacing(DeltaTime);
 	TickBreakLog(Now);
@@ -1488,7 +1773,8 @@ namespace SiegeDebug
 		}
 	}
 
-	/** The packs a lane map would send, without playing: wave, minute, one line per lane. */
+	/** The arrival schedule a lane map would run, without playing. Times from the dispenser going
+	 *  down: "leaves" below zero is before it (the prewarm), "at base" is when the pack gets there. */
 	void CmdPacks(const TArray<FString>& Args, UWorld* World)
 	{
 		const ASiegeDirector* const Director = ServerDirector(World);
@@ -1496,46 +1782,49 @@ namespace SiegeDebug
 		{
 			return;
 		}
-		const int32 Waves = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 400) : 20;
+		const int32 Packs = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 400) : 20;
 		const int32 Players = Args.Num() > 1 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 4) : 1;
 		TArray<ASiegeLane*> Lanes;
 		Director->GetCycleLanes(Lanes);
-		// The same clock the director keeps: staggered, lane k of wave w goes out at
-		// (w - 1) x lanes x interval + k x interval; together, every lane at (w - 1) x WaveInterval.
-		const bool bStagger = Director->bStaggerLanes;
-		const float Interval = Director->GetLanePackIntervalFor(Players);
-		const float WaveLength = bStagger ? FMath::Max(Lanes.Num(), 1) * Interval : Director->WaveInterval;
-		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] packs for %d waves, %d players, %d open lanes, %s, upgrade every %.0fs x%.2f"),
-			Waves, Players, Lanes.Num(),
-			*(bStagger ? FString::Printf(TEXT("one lane at a time every %.1fs (a lane every %.0fs)"), Interval, WaveLength)
-				: FString::Printf(TEXT("all lanes every %.0fs"), WaveLength)),
-			Director->CreepUpgradeInterval, Director->CreepHealthPerUpgrade);
-		for (int32 Wave = 1; Wave <= Waves; ++Wave)
+
+		// The same pinning StartLanePlan does, with the dispenser at time 0.
+		ASiegeDirector::FLanePlanCursor Cursor;
+		ASiegeDirector::FPlannedPack Pack;
+		ASiegeDirector::FLanePlanCursor Probe;
+		if (!Director->PlanNextPack(Probe, Lanes, Players, 0.0f, Pack))
 		{
-			for (int32 LaneIndex = 0; LaneIndex < Lanes.Num(); ++LaneIndex)
+			UE_LOG(LogTemp, Warning, TEXT("[LANE_DEBUG] the lane pack gives nobody on any lane"));
+			return;
+		}
+		const float Walk = Director->GetLaneWalkSeconds(Pack.Lane);
+		Cursor.NextArrival = Director->bPrewarm ? Director->PrewarmFirstArrival : Director->FirstWaveDelay + Walk;
+		const float ClockStart = FMath::Min(0.0f, Cursor.NextArrival - Walk);
+		UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] schedule for %d packs, %d players, %d open lanes, a pack at the base every %.1fs, prewarm %s, upgrade every %.0fs x%.2f"),
+			Packs, Players, Lanes.Num(), Director->GetLanePackIntervalFor(Players), Director->bPrewarm ? TEXT("on") : TEXT("off"),
+			Director->CreepUpgradeInterval, Director->CreepHealthPerUpgrade);
+		for (const ASiegeLane* const Lane : Lanes)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG]   lane %s: %.0f m, %.0fs of walk"), *Lane->LaneName.ToString(),
+				Lane->GetLength() / 100.0f, Director->GetLaneWalkSeconds(Lane));
+		}
+		for (int32 i = 0; i < Packs; ++i)
+		{
+			if (!Director->PlanNextPack(Cursor, Lanes, Players, ClockStart, Pack))
 			{
-				const ASiegeLane* const Lane = Lanes[LaneIndex];
-				const float Seconds = Director->FirstWaveDelay + (Wave - 1) * WaveLength + (bStagger ? LaneIndex * Interval : 0.0f);
-				const float Minutes = Seconds / 60.0f;
-				const int32 Upgrades = Director->CreepUpgradeInterval > KINDA_SMALL_NUMBER
-					? FMath::FloorToInt(Seconds / Director->CreepUpgradeInterval) : 0;
-				FString Line;
-				int32 Total = 0;
-				for (const FSiegeCreepKind& Kind : Director->LanePack)
-				{
-					// The composition is rolled when the wave starts, on the wave's clock.
-					const float WaveMinutes = (Director->FirstWaveDelay + (Wave - 1) * WaveLength) / 60.0f;
-					const int32 Count = Kind.CountFor(Wave, WaveMinutes, Players, Lane->LaneName);
-					if (Count > 0)
-					{
-						Line += FString::Printf(TEXT(" %dx%s"), Count, *GetNameSafe(Kind.NPCClass));
-						Total += Count;
-					}
-				}
-				UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] wave %3d  %6.0fs %5.1f min  hp x%.2f  %-6s %2d:%s"), Wave, Seconds, Minutes,
-					FMath::Pow(FMath::Max(Director->CreepHealthPerUpgrade, 1.0f), static_cast<float>(Upgrades)),
-					*Lane->LaneName.ToString(), Total, Line.IsEmpty() ? TEXT(" -") : *Line);
+				break;
 			}
+			FString Line;
+			for (int32 Row = 0; Row < Director->LanePack.Num(); ++Row)
+			{
+				if (Pack.Counts[Row] > 0)
+				{
+					Line += FString::Printf(TEXT(" %dx%s"), Pack.Counts[Row], *GetNameSafe(Director->LanePack[Row].NPCClass));
+				}
+			}
+			const float Minutes = FMath::Max(0.0f, Pack.LeaveAt - ClockStart) / 60.0f;
+			UE_LOG(LogTemp, Log, TEXT("[LANE_DEBUG] wave %3d  %-4s  leaves %6.0fs  at base %6.0fs  %5.1f min  hp x%.2f  %2d:%s"),
+				Pack.Wave, *Pack.Lane->LaneName.ToString(), Pack.LeaveAt, Pack.ArriveAt, Minutes,
+				Director->GetCreepHealthMultiplierAt(Pack.LeaveAt - ClockStart), Pack.Total, *Line);
 		}
 	}
 }
@@ -1554,6 +1843,6 @@ static FAutoConsoleCommandWithWorldAndArgs CmdSiegeNext(
 
 static FAutoConsoleCommandWithWorldAndArgs CmdSiegePacks(
 	TEXT("polarity.siege.packs"),
-	TEXT("Log the lane packs the director would send, without playing. Usage: polarity.siege.packs [waves=20] [players=1]"),
+	TEXT("Log the lane arrival schedule, without playing. Usage: polarity.siege.packs [packs=20] [players=1]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SiegeDebug::CmdPacks)
 );

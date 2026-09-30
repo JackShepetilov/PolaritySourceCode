@@ -62,11 +62,6 @@ struct FTurretVice
 	/** World time the current reload finishes, or below zero when not reloading. */
 	float ReloadEndTime = -1.0f;
 
-	/** What to put on the floor when the gun comes back out. From the donor's SourceYankDropClass,
-	 *  else the turret's fallback table; null means the gun is lost with the turret. */
-	UPROPERTY()
-	TSubclassOf<ADroppedRangedWeapon> DropClass;
-
 	/** The drop's EMF charge, carried through so the pickup comes back the way it went in. */
 	float DropCharge = 0.0f;
 
@@ -248,12 +243,6 @@ public:
 	 *  authored. A cue this set leaves empty falls back on the owner's ordinary sound. */
 	UPROPERTY(EditDefaultsOnly, Category = "Turret|Feedback")
 	TObjectPtr<UHitFeedbackSet> OwnerFeedbackSet;
-
-	/** Drop class for a gun that arrived without one (a class weapon has no SourceYankDropClass).
-	 *  Keyed by weapon class, parents covering children. A gun found in neither is lost with the
-	 *  turret, and says so in the log. */
-	UPROPERTY(EditDefaultsOnly, Category = "Turret|Feedback")
-	TMap<TSubclassOf<AShooterWeapon>, TSubclassOf<ADroppedRangedWeapon>> DropClassFallbacks;
 
 	// ==================== Queries ====================
 
@@ -441,7 +430,6 @@ private:
 	float ComputeRangeFor(const AShooterWeapon* Weapon) const;
 	static float ProjectileSpeedOf(const AShooterWeapon* Weapon);
 	static float ExplosionRadiusOf(const AShooterWeapon* Weapon);
-	TSubclassOf<ADroppedRangedWeapon> ResolveDropClass(const AShooterWeapon* Weapon) const;
 	APawn* GetOwnerPawn() const;
 	AShooterCharacter* GetOwnerCharacter() const;
 	void SyncNetOwner();

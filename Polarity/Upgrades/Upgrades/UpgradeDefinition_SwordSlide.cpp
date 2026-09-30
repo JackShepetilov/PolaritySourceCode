@@ -4,14 +4,12 @@
 
 const FSwordSlideLevelData& UUpgradeDefinition_SwordSlide::GetLevelData(int32 Level) const
 {
+	static const FSwordSlideLevelData Fallback;
 	if (LevelData.Num() == 0)
 	{
-		static const FSwordSlideLevelData DefaultData;
-		return DefaultData;
+		return Fallback;
 	}
-
-	const int32 Index = FMath::Clamp(Level - 1, 0, LevelData.Num() - 1);
-	return LevelData[Index];
+	return LevelData[FMath::Clamp(Level - 1, 0, LevelData.Num() - 1)];
 }
 
 #if WITH_EDITOR
