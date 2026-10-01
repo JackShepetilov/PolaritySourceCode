@@ -33,8 +33,55 @@ void UEnemyBeamBoltSubsystem::RegisterBolt(AShooterWeapon* Weapon, AActor* Victi
 	Bolt.bHasImpact = bHasImpact;
 	Bolt.Tracer = Tracer;
 	Bolt.Age = 0.0f;
+	Bolt.Travelled = 0.0f;
 
 	ActiveBolts.Add(Bolt);
+}
+
+void UEnemyBeamBoltSubsystem::SetSlowZone(const UObject* Key, const FVector& Origin, const FVector& Dir,
+	float HalfAngleDegrees, float Range, float SpeedMultiplier)
+{
+	if (!Key)
+	{
+		return;
+	}
+	FBoltSlowZone& Zone = SlowZones.FindOrAdd(Key);
+	Zone.Origin = Origin;
+	Zone.Dir = Dir.GetSafeNormal();
+	Zone.CosHalfAngle = FMath::Cos(FMath::DegreesToRadians(HalfAngleDegrees));
+	Zone.RangeSquared = FMath::Square(Range);
+	Zone.SpeedMultiplier = FMath::Clamp(SpeedMultiplier, 0.01f, 1.0f);
+}
+
+void UEnemyBeamBoltSubsystem::ClearSlowZone(const UObject* Key)
+{
+	SlowZones.Remove(Key);
+}
+
+float UEnemyBeamBoltSubsystem::GetSlowAt(const FVector& Point)
+{
+	float Slowest = 1.0f;
+	for (auto It = SlowZones.CreateIterator(); It; ++It)
+	{
+		// A zone whose owner went away without clearing it is dropped here.
+		if (!It.Key().IsValid())
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+		const FBoltSlowZone& Zone = It.Value();
+		const FVector ToPoint = Point - Zone.Origin;
+		const float DistSq = ToPoint.SizeSquared();
+		if (DistSq > Zone.RangeSquared || DistSq < KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		if (FVector::DotProduct(ToPoint / FMath::Sqrt(DistSq), Zone.Dir) >= Zone.CosHalfAngle)
+		{
+			Slowest = FMath::Min(Slowest, Zone.SpeedMultiplier);
+		}
+	}
+	return Slowest;
 }
 
 void UEnemyBeamBoltSubsystem::Tick(float DeltaTime)
@@ -52,7 +99,11 @@ void UEnemyBeamBoltSubsystem::Tick(float DeltaTime)
 			continue;
 		}
 
-		const float Front = Bolt.RandSpeed * Bolt.Age;
+		// The leading edge advances by its own speed, slowed inside any freezer cone it is passing
+		// through right now. Accumulated rather than RandSpeed * Age so a slow only costs the time
+		// spent inside the cone.
+		Bolt.Travelled += Bolt.RandSpeed * DeltaTime * GetSlowAt(Bolt.Start + Bolt.Dir * Bolt.Travelled);
+		const float Front = Bolt.Travelled;
 
 		// Arrived at the end of its line without anybody intercepting it. THIS is when a shot that
 		// hit nothing but scenery is allowed to mark the wall, and when a prop takes the damage:

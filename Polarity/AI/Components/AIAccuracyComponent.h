@@ -219,6 +219,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppressive Fire")
 	bool IsFiringSuppressive() const { return bSuppressiveFire; }
 
+	// ==================== Dazzle ====================
+
+	/** Spread multiplier while this NPC is blinded by a tactical light (AShooterNPC::ApplyDazzle).
+	 *  1 = not dazzled. Set and cleared by the NPC, which owns how long the dazzle lasts. */
+	void SetDazzleSpreadMultiplier(float Multiplier) { DazzleSpreadMultiplier = FMath::Max(1.0f, Multiplier); }
+
+	float GetDazzleSpreadMultiplier() const { return DazzleSpreadMultiplier; }
+
 protected:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -247,4 +255,7 @@ private:
 
 	/** Number of suppression applications during current suppression (for diminishing returns) */
 	int32 SuppressionStackCount = 0;
+
+	/** @see SetDazzleSpreadMultiplier */
+	float DazzleSpreadMultiplier = 1.0f;
 };

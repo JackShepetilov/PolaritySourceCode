@@ -55,6 +55,7 @@
 #include "FlyingDrone.h"
 #include "KamikazeDroneNPC.h"
 #include "SniperTurretNPC.h"
+#include "TrackedTankNPC.h"
 #include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "../../AI/Components/CoverFinderComponent.h"
 #include "Variant_Shooter/Buildables/TurretBuildable.h"
@@ -639,6 +640,10 @@ void AShooterNPC::Tick(float DeltaTime)
 	// the tree only reacts to its own perception events, so the march must be driven from here.
 	TickSiegeMarch(DeltaTime);
 
+	// Lit in the face by a tactical light: backs off firing blind, then hides. Outranks the turret
+	// corner game and the siege march for as long as it runs (both yield to it below).
+	TickDazzle(DeltaTime);
+
 	// A turret under the hat overrides everything the NPC was doing, the march included: it plays
 	// the corner until the turret is gone.
 	TickTurretCover(DeltaTime);
@@ -1055,6 +1060,12 @@ void AShooterNPC::TickSiegeMarch(float DeltaTime)
 		return;
 	}
 
+	// A dazzled soldier is backing off from the light; the march picks up again after.
+	if (DazzlePhase != EDazzlePhase::Inactive)
+	{
+		return;
+	}
+
 	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
 	if (!AIController)
 	{
@@ -1149,6 +1160,12 @@ void AShooterNPC::TickTurretCover(float DeltaTime)
 
 	// Movement-locked states own the body; the machine holds its position and resumes after.
 	if (bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled)
+	{
+		return;
+	}
+
+	// The dazzle owns the body while it runs (TickDazzle ended any corner game when it started).
+	if (DazzlePhase != EDazzlePhase::Inactive)
 	{
 		return;
 	}
@@ -1904,6 +1921,490 @@ void AShooterNPC::SetTurretPeekCrouch(bool bCrouched)
 	{
 		Apex->StopCrouching();
 	}
+}
+
+// ==================== Tactical devices: dazzle and freeze ====================
+// Docs/TacticalAttachment_Plan_2026-10-01.md. Everything here is authority only: the effects move
+// and aim the enemy, and the enemy is simulated on the server alone.
+
+namespace DazzleOwnership
+{
+	/** Two above Gameplay: outranks the StateTree's stance tasks and the turret corner game's focus. */
+	static const EAIFocusPriority::Type FocusPriority = static_cast<EAIFocusPriority::Type>(EAIFocusPriority::Gameplay + 2);
+
+	/** NPCs whose tree the dazzle paused, so only those are resumed. */
+	static TSet<TWeakObjectPtr<const AActor>> PausedTrees;
+
+	static void PauseTree(AShooterNPC* NPC, AAIController* Controller)
+	{
+		if (!Controller)
+		{
+			return;
+		}
+		if (UStateTreeAIComponent* const Tree = Controller->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			if (!Tree->IsPaused())
+			{
+				Tree->PauseLogic(TEXT("Dazzle"));
+				PausedTrees.Add(NPC);
+			}
+		}
+	}
+
+	static void ResumeTree(AShooterNPC* NPC, AAIController* Controller)
+	{
+		if (!PausedTrees.Remove(NPC) || !Controller)
+		{
+			return;
+		}
+		if (UStateTreeAIComponent* const Tree = Controller->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			if (Tree->IsPaused())
+			{
+				Tree->ResumeLogic(TEXT("Dazzle"));
+			}
+		}
+	}
+}
+
+bool AShooterNPC::IsDazzled() const
+{
+	const UWorld* const World = GetWorld();
+	return World && DazzleEndTime > World->GetTimeSeconds();
+}
+
+void AShooterNPC::ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay)
+{
+	if (!HasAuthority() || bIsDead || Duration <= 0.0f || !GetWorld())
+	{
+		return;
+	}
+
+	const bool bWasDazzled = IsDazzled();
+	DazzleEndTime = FMath::Max(DazzleEndTime, GetWorld()->GetTimeSeconds() + Duration);
+	if (Source)
+	{
+		DazzleSource = Source;
+	}
+	DazzleOverlay = Overlay;
+
+	if (AccuracyComponent)
+	{
+		AccuracyComponent->SetDazzleSpreadMultiplier(SpreadMultiplier);
+	}
+
+	if (!bWasDazzled)
+	{
+		RefreshTacticalOverlay();
+		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s dazzled by %s for %.2fs (spread x%.1f)"),
+			*GetName(), *GetNameSafe(Source), Duration, SpreadMultiplier);
+	}
+}
+
+void AShooterNPC::TickDazzle(float DeltaTime)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (!IsDazzled())
+	{
+		if (DazzlePhase != EDazzlePhase::Inactive || DazzleEndTime > 0.0f)
+		{
+			EndDazzle();
+		}
+		return;
+	}
+
+	// Only a walker acts it out. A drone, a turret or a tank just shoots worse (the spread set in
+	// ApplyDazzle) until the time is up; the kamikaze has its own reaction.
+	if (IsA<AFlyingDrone>() || IsA<AKamikazeDroneNPC>() || IsA<ASniperTurretNPC>() || IsA<ATrackedTankNPC>())
+	{
+		return;
+	}
+
+	// Movement-locked states own the body; the dazzle keeps counting and picks up after.
+	if (bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled)
+	{
+		return;
+	}
+
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	AActor* const Source = DazzleSource.Get();
+	if (!AIController || !Source)
+	{
+		EndDazzle();
+		return;
+	}
+
+	UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>();
+	const bool bHasGun = Weapon && !Weapon->IsMeleeWeapon();
+
+	if (DazzlePhase == EDazzlePhase::Inactive)
+	{
+		// Take the body over: the corner game ends, the tree stops issuing its own orders, and the
+		// body things a frozen task would leave behind (sprint, facing the way it runs) are undone.
+		// The same reasons as the turret corner game, see TickTurretCover.
+		if (TurretCoverPhase != ETurretCoverPhase::Inactive)
+		{
+			EndTurretCover();
+		}
+		DazzleOwnership::PauseTree(this, AIController);
+		if (UApexMovementComponent* const Apex = GetApexMovement())
+		{
+			Apex->StopSprint();
+		}
+		RestoreGroundCombatRotation(this);
+
+		DazzlePhase = EDazzlePhase::Retreating;
+		DazzleScanTimer = 0.0f;
+		DazzleRetreatClock = 0.0f;
+		bDazzleBackingOff = false;
+
+		if (Finder)
+		{
+			Finder->ReleaseCover();
+			Finder->RequestCover(Source);
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s backs off from %s (cover finder: %s)"),
+			*GetName(), *GetNameSafe(Source), Finder ? TEXT("yes") : TEXT("no"));
+	}
+
+	// Eyes on the light the whole time: it walks backwards out of it, it does not turn its back.
+	if (AIController->GetFocusActorForPriority(DazzleOwnership::FocusPriority) != Source)
+	{
+		AIController->SetFocus(Source, DazzleOwnership::FocusPriority);
+	}
+
+	DazzleScanTimer -= DeltaTime;
+	const bool bScan = DazzleScanTimer <= 0.0f;
+	if (bScan)
+	{
+		DazzleScanTimer = DazzleScanInterval;
+	}
+
+	if (DazzlePhase == EDazzlePhase::Retreating)
+	{
+		DazzleRetreatClock += DeltaTime;
+
+		// Firing at the glare without pausing (OnWeaponShotFired skips the burst cooldown while
+		// retreating). External permission: a blinded soldier does not queue for an attack token.
+		if (bHasGun && bScan && (!bWantsToShoot || CurrentAimTarget.Get() != Source))
+		{
+			StartShooting(Source, /*bHasExternalPermission*/ true);
+		}
+
+		FVector Goal = FVector::ZeroVector;
+		bool bHaveGoal = false;
+		if (Finder && Finder->HasCover())
+		{
+			Goal = Finder->GetCover().HideLocation;
+			bHaveGoal = true;
+		}
+		else
+		{
+			if (Finder && bScan && !bDazzleBackingOff && !Finder->IsSearching())
+			{
+				Finder->RequestCover(Source);
+			}
+
+			// No corner in time (or no way to look for one): straight back, away from the light.
+			if (!bDazzleBackingOff && (!Finder || DazzleRetreatClock >= DazzleCoverWaitTime))
+			{
+				FVector Away = GetActorLocation() - Source->GetActorLocation();
+				Away.Z = 0.0f;
+				if (!Away.Normalize())
+				{
+					Away = -GetActorForwardVector();
+				}
+				FVector Wanted = GetActorLocation() + Away * DazzleRetreatDistance;
+				if (UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+				{
+					FNavLocation Projected;
+					if (NavSys->ProjectPointToNavigation(Wanted, Projected, FVector(250.0f, 250.0f, 300.0f)))
+					{
+						Wanted = Projected.Location;
+					}
+				}
+				DazzleBackOffPoint = Wanted;
+				bDazzleBackingOff = true;
+				UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s no cover in %.2fs, backing straight off to %s"),
+					*GetName(), DazzleRetreatClock, *Wanted.ToCompactString());
+			}
+
+			if (bDazzleBackingOff)
+			{
+				Goal = DazzleBackOffPoint;
+				bHaveGoal = true;
+			}
+		}
+
+		if (bHaveGoal)
+		{
+			// Re-issued only while the path follower is not already taking it there: a move order to
+			// where the NPC stands, repeated, is the spin on the spot (Docs/Gotchas/AI_StateTree.md).
+			const UPathFollowingComponent* const Path = AIController->GetPathFollowingComponent();
+			const bool bMovingThere = Path && Path->GetStatus() == EPathFollowingStatus::Moving
+				&& FVector::Dist2D(Path->GetPathDestination(), Goal) < 50.0f;
+			if (bScan && !bMovingThere)
+			{
+				AIController->MoveToLocation(Goal, DazzleArriveRadius * 0.5f);
+			}
+
+			// Same widening the engine applies to "reached" (Docs/Gotchas/AI_StateTree.md).
+			const float Arrive = DazzleArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+			if (FVector::Dist2D(GetActorLocation(), Goal) <= Arrive)
+			{
+				DazzlePhase = EDazzlePhase::Hiding;
+				DazzleEndTime = FMath::Max(DazzleEndTime, GetWorld()->GetTimeSeconds() + DazzleMinHideTime);
+				if (bWantsToShoot && CurrentAimTarget.Get() == Source)
+				{
+					StopShooting();
+				}
+				if (Finder && Finder->HasCover() && Finder->GetCover().bLowCover)
+				{
+					SetTurretPeekCrouch(/*bCrouched*/ true);
+				}
+				UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s reached %s, hiding %.2fs"),
+					*GetName(), bDazzleBackingOff ? TEXT("back-off point") : TEXT("cover"),
+					DazzleEndTime - GetWorld()->GetTimeSeconds());
+			}
+		}
+	}
+	else if (DazzlePhase == EDazzlePhase::Hiding)
+	{
+		// Down and quiet until the time is up. A shot the retreat left queued is dropped.
+		if (bWantsToShoot && CurrentAimTarget.Get() == Source)
+		{
+			StopShooting();
+		}
+	}
+}
+
+void AShooterNPC::EndDazzle()
+{
+	const bool bWasActing = DazzlePhase != EDazzlePhase::Inactive;
+
+	if (DazzleSource.IsValid() && bWantsToShoot && CurrentAimTarget.Get() == DazzleSource.Get())
+	{
+		StopShooting();
+	}
+
+	if (AShooterAIController* const AIController = Cast<AShooterAIController>(GetController()))
+	{
+		AIController->ClearFocus(DazzleOwnership::FocusPriority);
+		if (bWasActing)
+		{
+			AIController->StopMovement();
+		}
+		DazzleOwnership::ResumeTree(this, AIController);
+	}
+
+	if (bWasActing)
+	{
+		if (UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>())
+		{
+			Finder->ReleaseCover();
+		}
+		SetTurretPeekCrouch(/*bCrouched*/ false);
+	}
+
+	if (AccuracyComponent)
+	{
+		AccuracyComponent->SetDazzleSpreadMultiplier(1.0f);
+	}
+
+	if (bWasActing || DazzleEndTime > 0.0f)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s dazzle over"), *GetName());
+	}
+
+	DazzlePhase = EDazzlePhase::Inactive;
+	DazzleEndTime = -1.0f;
+	DazzleSource = nullptr;
+	DazzleOverlay = nullptr;
+	bDazzleBackingOff = false;
+	RefreshTacticalOverlay();
+}
+
+void AShooterNPC::ApplyTacticalFreeze(AActor* Source, float MoveMultiplier, float TurnMultiplier,
+	float FlyerTimeMultiplier, UMaterialInterface* Overlay)
+{
+	if (!HasAuthority() || !Source || bIsDead)
+	{
+		return;
+	}
+
+	const bool bNew = !TacticalFreezeSources.Contains(Source);
+	TacticalFreezeSources.Add(Source, Overlay);
+
+	if (IsA<AFlyingDrone>() || IsA<AKamikazeDroneNPC>())
+	{
+		// A flyer drives its own flight off its tick, so the walk slow does not reach it. Its whole
+		// clock runs slower instead: flight, turns, fire rate. The same lever UUpgrade_LowHealthDefense
+		// pulls; the two write the same field, the last writer wins while both are on.
+		TacticalFreezeFlyerTime.Add(Source, FMath::Clamp(FlyerTimeMultiplier, 0.05f, 1.0f));
+		float Slowest = 1.0f;
+		for (const TPair<TWeakObjectPtr<AActor>, float>& Pair : TacticalFreezeFlyerTime)
+		{
+			Slowest = FMath::Min(Slowest, Pair.Value);
+		}
+		CustomTimeDilation = Slowest;
+	}
+	else
+	{
+		AddMovementSlow(Source, MoveMultiplier);
+		AddTurnSlow(Source, TurnMultiplier);
+	}
+
+	if (bNew)
+	{
+		RefreshTacticalOverlay();
+	}
+}
+
+void AShooterNPC::RemoveTacticalFreeze(AActor* Source)
+{
+	if (!HasAuthority() || !Source || TacticalFreezeSources.Remove(Source) == 0)
+	{
+		return;
+	}
+
+	RemoveMovementSlow(Source);
+	RemoveTurnSlow(Source);
+
+	if (TacticalFreezeFlyerTime.Remove(Source) > 0)
+	{
+		float Slowest = 1.0f;
+		for (auto It = TacticalFreezeFlyerTime.CreateIterator(); It; ++It)
+		{
+			if (!It.Key().IsValid())
+			{
+				It.RemoveCurrent();
+				continue;
+			}
+			Slowest = FMath::Min(Slowest, It.Value());
+		}
+		CustomTimeDilation = Slowest;
+	}
+
+	RefreshTacticalOverlay();
+}
+
+void AShooterNPC::ApplyTimedSlow(AActor* Source, float Duration, float MoveMultiplier, float TurnMultiplier,
+	float FlyerTimeMultiplier, UMaterialInterface* Overlay)
+{
+	if (!HasAuthority() || !Source || bIsDead || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	ApplyTacticalFreeze(Source, MoveMultiplier, TurnMultiplier, FlyerTimeMultiplier, Overlay);
+	TimedSlowEnds.Add(Source, GetWorld()->GetTimeSeconds() + Duration);
+
+	if (!GetWorldTimerManager().IsTimerActive(TimedSlowTimer))
+	{
+		GetWorldTimerManager().SetTimer(TimedSlowTimer, this, &AShooterNPC::TickTimedSlows, 0.1f, true);
+	}
+}
+
+void AShooterNPC::TickTimedSlows()
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	TArray<TWeakObjectPtr<AActor>> Expired;
+	for (const TPair<TWeakObjectPtr<AActor>, float>& Pair : TimedSlowEnds)
+	{
+		if (!Pair.Key.IsValid() || Now >= Pair.Value)
+		{
+			Expired.Add(Pair.Key);
+		}
+	}
+	for (const TWeakObjectPtr<AActor>& Source : Expired)
+	{
+		TimedSlowEnds.Remove(Source);
+		if (AActor* const Alive = Source.Get())
+		{
+			RemoveTacticalFreeze(Alive);
+		}
+		else
+		{
+			// The source is gone (the gun was destroyed): its entries in the freeze maps are dead
+			// keys now, and RemoveTacticalFreeze cannot be called with them. Drop the dead keys and
+			// put the slows back together from what is left.
+			for (auto It = TacticalFreezeSources.CreateIterator(); It; ++It)
+			{
+				if (!It.Key().IsValid())
+				{
+					It.RemoveCurrent();
+				}
+			}
+			// Both recomputes drop dead keys themselves.
+			RecomputeMovementSlow();
+			RecomputeTurnSlow();
+			float Slowest = 1.0f;
+			for (auto It = TacticalFreezeFlyerTime.CreateIterator(); It; ++It)
+			{
+				if (!It.Key().IsValid())
+				{
+					It.RemoveCurrent();
+					continue;
+				}
+				Slowest = FMath::Min(Slowest, It.Value());
+			}
+			if (IsA<AFlyingDrone>() || IsA<AKamikazeDroneNPC>())
+			{
+				CustomTimeDilation = Slowest;
+			}
+			RefreshTacticalOverlay();
+		}
+	}
+	if (TimedSlowEnds.IsEmpty())
+	{
+		GetWorldTimerManager().ClearTimer(TimedSlowTimer);
+	}
+}
+
+void AShooterNPC::RefreshTacticalOverlay()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	UMaterialInterface* Desired = nullptr;
+	if (IsDazzled() && DazzleOverlay.IsValid())
+	{
+		Desired = DazzleOverlay.Get();
+	}
+	else
+	{
+		for (auto It = TacticalFreezeSources.CreateIterator(); It; ++It)
+		{
+			if (!It.Key().IsValid())
+			{
+				It.RemoveCurrent();
+				continue;
+			}
+			if (It.Value().IsValid())
+			{
+				Desired = It.Value().Get();
+				break;
+			}
+		}
+	}
+
+	if (Desired != TacticalOverlayMaterial)
+	{
+		TacticalOverlayMaterial = Desired;
+		RefreshStatusOverlay();
+	}
+}
+
+void AShooterNPC::OnRep_TacticalOverlay()
+{
+	RefreshStatusOverlay();
 }
 
 void AShooterNPC::Landed(const FHitResult& Hit)
@@ -2983,6 +3484,11 @@ void AShooterNPC::RefreshStatusOverlay()
 	{
 		Desired = ShieldBypassOverlayMaterial;
 	}
+	else if (TacticalOverlayMaterial)
+	{
+		// Lit or frozen by a player's rail device: the player has to see it took.
+		Desired = TacticalOverlayMaterial;
+	}
 	else if (bDistracted && DistractedOverlayMaterial)
 	{
 		Desired = DistractedOverlayMaterial;
@@ -3059,6 +3565,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, bDistracted);
 	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
 	DOREPLIFETIME(AShooterNPC, PledgedShieldLoan);
+	DOREPLIFETIME(AShooterNPC, TacticalOverlayMaterial);
 	// Rolled once at spawn and read once in BeginPlay; a pool respawn keeps it.
 	DOREPLIFETIME_CONDITION(AShooterNPC, SelectedWeaponOption, COND_InitialOnly);
 }
@@ -3233,6 +3740,22 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	CurrentBurstShots = 0;
 	CurrentAimTarget = nullptr;
 	AbortReload();
+
+	// Tactical devices: a body recycled while lit or frozen comes back clean, its tree running.
+	EndDazzle();
+	{
+		TArray<TWeakObjectPtr<AActor>> FreezeSources;
+		TacticalFreezeSources.GetKeys(FreezeSources);
+		for (const TWeakObjectPtr<AActor>& FreezeSource : FreezeSources)
+		{
+			RemoveTacticalFreeze(FreezeSource.Get());
+		}
+		TacticalFreezeSources.Reset();
+		TacticalFreezeFlyerTime.Reset();
+		TimedSlowEnds.Reset();
+		GetWorldTimerManager().ClearTimer(TimedSlowTimer);
+		RefreshTacticalOverlay();
+	}
 
 	// The aiming speed cap is combat state too: a body recycled mid-burst would otherwise come back
 	// out of the pool still walking at ADS pace with nothing left to explain why.
@@ -6158,8 +6681,9 @@ void AShooterNPC::OnWeaponShotFired()
 		return;
 	}
 
-	// Check if burst complete
-	if (CurrentBurstShots >= BurstShotCount)
+	// Check if burst complete. A dazzled soldier does not pause between bursts: it holds the trigger
+	// down at the glare until it is behind cover.
+	if (CurrentBurstShots >= BurstShotCount && DazzlePhase != EDazzlePhase::Retreating)
 	{
 		// Stop shooting and enter cooldown
 		if (Weapon)

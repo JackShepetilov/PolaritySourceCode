@@ -52,6 +52,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHeatChanged, float, NewHeat);
 // Delegate called when weapon fires a shot (for NPC burst counting)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponShotFired);
 
+/** Which part of the target a muzzle stagger hit landed on. Travels as a byte. Not reflected. */
+enum class EMuzzleHitZone : uint8 { None, Chest, Center };
+
 /**
  *  Base class for a first person shooter weapon
  *
@@ -892,7 +895,7 @@ public:
 	 *  Null is the signal that OUR WeaponRecoilComponent stays in charge, so this is the one
 	 *  question the character asks to decide which recoil system runs. */
 	UFUNCTION(BlueprintPure, Category = "FPS Animation Pack")
-	URecoilData* GetPackRecoilData() const { return ResolvedPackRecoilData; }
+	URecoilData* GetPackRecoilData() const { return MuzzlePackRecoilData ? MuzzlePackRecoilData : ResolvedPackRecoilData; }
 
 	/** Rounds per minute for PRAS, which wants a rate rather than an interval. Taken from the
 	 *  profile when it has one, otherwise derived from our own RefireRate so a weapon with a hand
@@ -922,6 +925,12 @@ protected:
 	 *  Kept rather than re-derived because it is asked once per shot. */
 	UPROPERTY(Transient)
 	TObjectPtr<URecoilData> ResolvedPackRecoilData;
+
+	/** ResolvedPackRecoilData with the muzzle's recoil multipliers applied, or null with no muzzle
+	 *  (or one that changes nothing). A private copy: the PRAS asset is shared by every gun of the
+	 *  model, and writing into it would change recoil for everybody. @see ApplyMuzzleModifiers */
+	UPROPERTY(Transient)
+	TObjectPtr<URecoilData> MuzzlePackRecoilData;
 
 	/** Rounds per minute read out of the profile, 0 when it had none. */
 	UPROPERTY(Transient)
@@ -1339,6 +1348,78 @@ protected:
 	 *  machine, from the server's own install and from OnRep, the same way the meshes are rebuilt,
 	 *  because MagazineSize itself is not replicated and every copy of the gun needs the right one. */
 	void ApplyMagazineModifiers();
+
+	// ==================== Muzzle attachment ====================
+	// Docs/Muzzle_Attachment_Plan_2026-10-01.md.
+
+	/** Recoil half of the muzzle: rebuild MuzzlePackRecoilData and re-arm PRAS when this is the gun
+	 *  in hand. Same callers as ApplyMagazineModifiers, on every machine. */
+	void ApplyMuzzleModifiers();
+
+	/** Where muzzle VFX start on the first or third person gun: the FX socket of a mounted muzzle
+	 *  attachment when it has one, else the gun's MuzzleSocketName. VFX only: traces and projectiles
+	 *  keep leaving from the gun's socket. */
+	USceneComponent* GetMuzzleFXAnchor(bool bFirstPerson, FName& OutSocket) const;
+
+	/** World location of GetMuzzleFXAnchor. */
+	FVector GetMuzzleFXLocation(bool bFirstPerson) const;
+
+	/** Hit half of the muzzle, called from ApplyWeaponHit for a direct hit (not an explosion, not a
+	 *  ricochet). Runs on the machine that resolved the hit: the stagger meter goes to the server,
+	 *  the ricochet is traced here and its damage goes through the usual ApplyDamageToTarget road. */
+	void ApplyMuzzleHit(const FHitResult& Hit, AActor* HitActor, float ActualDamage,
+		float ShotDamage, const FVector& HitDirection, TSubclassOf<UDamageType> DamageType);
+
+	/** Chest, centre or neither, read off the hit on the machine that has the real hit result. */
+	EMuzzleHitZone ClassifyMuzzleHitZone(const UWeaponAttachmentDefinition* Muzzle, const FHitResult& Hit,
+		const AActor* HitActor) const;
+
+	/** Server: add Damage to Target's meter for this zone and stun or slow it when the meter fills. */
+	void ResolveMuzzleStagger(AActor* Target, EMuzzleHitZone Zone, float Damage);
+
+	/** Ricochet chain from the first hit. Shooter's machine. */
+	void RunRicochet(const UWeaponAttachmentDefinition* Muzzle, const FHitResult& FirstHit, AActor* FirstTarget,
+		float JumpDamage, TSubclassOf<UDamageType> DamageType);
+
+	/** A ricochet tracer and sound on this machine. */
+	void PlayRicochetLocally(const FVector& Start, const FVector& End);
+
+	/** Stun or slow feedback on this machine. Kind: 0 stun, 1 slow. */
+	void PlayMuzzleProcLocally(AActor* Target, uint8 Kind);
+
+	/** One target's stagger meter, server only. */
+	struct FMuzzleMeter
+	{
+		float Damage = 0.0f;
+		float LastHitTime = -1000.0f;
+		float ImmuneUntil = -1000.0f;
+	};
+	TMap<TWeakObjectPtr<AActor>, FMuzzleMeter> MuzzleChestMeters;
+	TMap<TWeakObjectPtr<AActor>, FMuzzleMeter> MuzzleCenterMeters;
+
+	/** Set while a ricochet's own hits go through ApplyWeaponHit, so they do not start chains of
+	 *  their own or fill the stagger meter. */
+	bool bApplyingRicochet = false;
+
+public:
+	/** A client's stagger hit, for the server's meter. Reliable: a lost one is a stun that never
+	 *  came. The client resolved the zone because only it has the bone the round went through. */
+	UFUNCTION(Server, Reliable)
+	void Server_ReportMuzzleHit(AActor* Target, uint8 Zone, float Damage);
+
+	/** A client's ricochet tracer, for everybody else. */
+	UFUNCTION(Server, Unreliable)
+	void Server_ReportRicochet(FVector_NetQuantize Start, FVector_NetQuantize End);
+
+	/** bShooterHasIt: the shooter resolved this jump on their own machine and already drew it. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayRicochet(FVector_NetQuantize Start, FVector_NetQuantize End, bool bShooterHasIt);
+
+	/** Stun or slow landed on Target: feedback on every machine. Kind: 0 stun, 1 slow. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayMuzzleProc(AActor* Target, uint8 Kind);
+
+protected:
 
 	/** Gold perk. Polled rather than hooked into the dozen places that put a weapon away: all it asks
 	 *  is "is this still the gun in hand", on the machine that counts the rounds. */
@@ -2844,6 +2925,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
 	UWeaponAttachmentDefinition* GetAttachmentOfType(EWeaponAttachmentType InType) const;
+
+	/** The mesh drawn for the mounted attachment of this type, on the first or the third person
+	 *  weapon mesh. Null when nothing of that type is mounted or its socket was missing. What a rail
+	 *  device's beam starts from. */
+	UStaticMeshComponent* GetAttachmentMeshComponent(EWeaponAttachmentType InType, bool bFirstPerson) const;
 
 	/** True when this gun has a slot of that type. @see AttachmentSlots */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")

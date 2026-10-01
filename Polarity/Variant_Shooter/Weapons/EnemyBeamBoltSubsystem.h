@@ -35,6 +35,10 @@ struct FEnemyBeamBolt
 	float EnergyMultiplier = 1.0f;
 	float Age = 0.0f;
 
+	/** How far the leading edge has come down the line. Grows by RandSpeed, slowed inside any
+	 *  freezer cone (UEnemyBeamBoltSubsystem::SetSlowZone). */
+	float Travelled = 0.0f;
+
 	/** Everything about the damage that was true when the trigger was pulled and cannot be worked
 	 *  out on arrival: heat, height advantage, target tags, the shooter's upgrades. Folded into one
 	 *  number at registration because that is the moment those things applied. */
@@ -81,6 +85,15 @@ public:
 		const FHitResult& ImpactHit = FHitResult(), bool bHasImpact = false,
 		UNiagaraComponent* Tracer = nullptr);
 
+	/** A cone where every bolt's leading edge moves at SpeedMultiplier of its speed: the tactical
+	 *  freezer. Keyed by whoever owns it; calling again moves it. Runs on every machine that ticks
+	 *  bolts, from that machine's own copy of the device state. */
+	void SetSlowZone(const UObject* Key, const FVector& Origin, const FVector& Dir,
+		float HalfAngleDegrees, float Range, float SpeedMultiplier);
+
+	/** Remove Key's cone. Safe for a key that never set one. */
+	void ClearSlowZone(const UObject* Key);
+
 	// UTickableWorldSubsystem interface
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
@@ -88,5 +101,19 @@ public:
 
 private:
 
+	struct FBoltSlowZone
+	{
+		FVector Origin = FVector::ZeroVector;
+		FVector Dir = FVector::ForwardVector;
+		float CosHalfAngle = 1.0f;
+		float RangeSquared = 0.0f;
+		float SpeedMultiplier = 1.0f;
+	};
+
+	/** The slowest zone covering Point, 1 when none does. */
+	float GetSlowAt(const FVector& Point);
+
 	TArray<FEnemyBeamBolt> ActiveBolts;
+
+	TMap<TWeakObjectPtr<const UObject>, FBoltSlowZone> SlowZones;
 };

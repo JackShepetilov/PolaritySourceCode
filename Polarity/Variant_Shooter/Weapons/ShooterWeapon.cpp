@@ -588,6 +588,24 @@ UWeaponAttachmentDefinition* AShooterWeapon::GetAttachmentOfType(EWeaponAttachme
 	return nullptr;
 }
 
+UStaticMeshComponent* AShooterWeapon::GetAttachmentMeshComponent(EWeaponAttachmentType InType, bool bFirstPerson) const
+{
+	const UWeaponAttachmentDefinition* const Def = GetAttachmentOfType(InType);
+	if (!Def || !Def->Mesh)
+	{
+		return nullptr;
+	}
+	const USceneComponent* const WantedParent = bFirstPerson ? FirstPersonMesh : ThirdPersonMesh;
+	for (UStaticMeshComponent* const Comp : AttachmentMeshComponents)
+	{
+		if (Comp && Comp->GetAttachParent() == WantedParent && Comp->GetStaticMesh() == Def->Mesh)
+		{
+			return Comp;
+		}
+	}
+	return nullptr;
+}
+
 bool AShooterWeapon::InstallAttachment(UWeaponAttachmentDefinition* Attachment)
 {
 	if (!HasAuthority() || !Attachment)
@@ -630,6 +648,7 @@ bool AShooterWeapon::InstallAttachment(UWeaponAttachmentDefinition* Attachment)
 	// which is what keeps the host's gun and a client's copy of it identical.
 	RebuildAttachmentMeshes();
 	ApplyMagazineModifiers();
+	ApplyMuzzleModifiers();
 
 	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: mounted %s (%s)."),
 		*GetName(), *GetNameSafe(Attachment), *UEnum::GetValueAsString(Attachment->Type));
@@ -652,6 +671,7 @@ UWeaponAttachmentDefinition* AShooterWeapon::UninstallAttachmentOfType(EWeaponAt
 	InstalledAttachments.Remove(Removed);
 	RebuildAttachmentMeshes();
 	ApplyMagazineModifiers();
+	ApplyMuzzleModifiers();
 
 	UE_LOG(LogTemp, Log, TEXT("[ATTACH] %s: removed %s."), *GetName(), *GetNameSafe(Removed));
 	return Removed;
@@ -669,6 +689,7 @@ void AShooterWeapon::OnRep_InstalledAttachments()
 {
 	RebuildAttachmentMeshes();
 	ApplyMagazineModifiers();
+	ApplyMuzzleModifiers();
 
 	// The HUD redraws from the inventory's delegate, and the two halves of a mount arrive as two
 	// separate replicated properties -- this array, and the cell that is or is not paying for it.
@@ -1879,8 +1900,10 @@ AShooterWeapon::AShooterWeapon()
 	// simply cannot be mounted on this weapon, which is a legitimate answer for a gun with no rail.
 	AttachmentSockets.Add(EWeaponAttachmentType::Optic, FName("SOCKET_Scope"));
 	AttachmentSockets.Add(EWeaponAttachmentType::Magazine, FName("SOCKET_Magazine"));
-	AttachmentSockets.Add(EWeaponAttachmentType::Muzzle, FName("SOCKET_Muzzle"));
+	// The barrel's own Muzzle socket, the one the flash used to come from [author, 2026-10-01].
+	AttachmentSockets.Add(EWeaponAttachmentType::Muzzle, FName("Muzzle"));
 	AttachmentSockets.Add(EWeaponAttachmentType::Stock, FName("SOCKET_Stock"));
+	AttachmentSockets.Add(EWeaponAttachmentType::Tactical, FName("SOCKET_Tactical"));
 
 	// create the root
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
@@ -2729,6 +2752,7 @@ void AShooterWeapon::BeginPlay()
 	// no-op in that case and gets its real run now, before the first magazine is filled below.
 	BaseMagazineSize = MagazineSize;
 	ApplyMagazineModifiers();
+	ApplyMuzzleModifiers();
 
 	// A weapon belongs to whoever is holding it, and every spawn path sets that owner through the
 	// spawn parameters. One thing does not: a weapon blueprint dragged straight into a level, or a
@@ -4190,7 +4214,7 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 FVector AShooterWeapon::GetFirstPersonMuzzleRenderLocation() const
 {
 	const FVector MuzzleWorld = FirstPersonMesh
-		? FirstPersonMesh->GetSocketLocation(MuzzleSocketName)
+		? GetMuzzleFXLocation(/*bFirstPerson*/ true)
 		: GetActorLocation();
 
 	const APlayerController* PC = PawnOwner ? Cast<APlayerController>(PawnOwner->GetController()) : nullptr;
@@ -5055,6 +5079,14 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 
 	// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
 	const bool bIonized = ApplyHitscanIonization(HitActor, Hit.GetComponent());
+
+	// Muzzle attachment: stagger meter, ricochet. Direct hits only: an explosion arrives with its own
+	// event, and a ricochet's own hits are kept out inside ApplyMuzzleHit.
+	if (!OverrideDamageEvent)
+	{
+		ApplyMuzzleHit(Hit, HitActor, ActualDamage, BaseDamage * ExtraDamageMultiplier, ImpulseDirection,
+			OverrideDamageType ? OverrideDamageType : HitscanDamageType);
+	}
 
 	// One door for every kind of connection this shot could have been: damage, a headshot, a kill,
 	// a shield taken down, or the ionizer's zero-damage charge transfer. Landing on a shield counts
@@ -6854,11 +6886,14 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 		return;
 	}
 
-	// Spawn attached to muzzle socket so VFX follows weapon movement
+	// Spawn attached to muzzle socket so VFX follows weapon movement. A mounted muzzle attachment
+	// moves it to the end of the attachment.
+	FName FlashSocket;
+	USceneComponent* const FlashAnchor = GetMuzzleFXAnchor(/*bFirstPerson*/ true, FlashSocket);
 	UNiagaraComponent* MuzzleComp = UNiagaraFunctionLibrary::SpawnSystemAttached(
 		VFXToSpawn,
-		FirstPersonMesh,
-		MuzzleSocketName,
+		FlashAnchor,
+		FlashSocket,
 		FVector::ZeroVector,
 		FRotator::ZeroRotator,
 		FVector(MuzzleFlashScale),
@@ -6928,7 +6963,7 @@ void AShooterWeapon::Multicast_PlayBeamEffect_Implementation(const FVector& Star
 	FVector ObserverStart = Start;
 	if (ThirdPersonMesh)
 	{
-		ObserverStart = ThirdPersonMesh->GetSocketLocation(MuzzleSocketName);
+		ObserverStart = GetMuzzleFXLocation(/*bFirstPerson*/ false);
 	}
 
 	SpawnBeamEffectLocally(ObserverStart, End, EnergyMultiplier,

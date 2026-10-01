@@ -370,6 +370,13 @@ void AKamikazeDroneNPC::SetState(EKamikazeState NewState)
 	CurrentState = NewState;
 	StateTimer = 0.0f;
 
+	// A blind strike belongs to the one run it happened in.
+	if (NewState != EKamikazeState::Attacking)
+	{
+		bBlindStrike = false;
+		BlindStrikeTime = 0.0f;
+	}
+
 	// Every arrival at the hold starts the wait from zero: a strike is always announced by a full hold.
 	if (NewState == EKamikazeState::Orbiting)
 	{
@@ -781,6 +788,35 @@ void AKamikazeDroneNPC::UpdateStrike(float DeltaTime)
 		return;
 	}
 
+	// Blinded mid-run (ApplyDazzle): the pilot lost the picture. Same heading, no correction, sinking,
+	// and no way out of the run: it ends on whatever it flies into.
+	if (bBlindStrike)
+	{
+		BlindStrikeTime += DeltaTime;
+		FVector BlindVelocity = CMC->Velocity;
+		if (BlindVelocity.IsNearlyZero(10.0f))
+		{
+			BlindVelocity = GetActorForwardVector() * StrikeSpeed;
+		}
+		BlindVelocity.Z -= BlindStrikeGravity * DeltaTime;
+		const FHitResult BlindHit = FlyMove(BlindVelocity, DeltaTime);
+
+		if (CheckContact())
+		{
+			return;
+		}
+
+		if (BlindHit.IsValidBlockingHit() || BlindStrikeTime >= BlindStrikeMaxTime)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s blind strike ends on %s after %.2fs"),
+				*GetName(), *GetNameSafe(BlindHit.GetActor()), BlindStrikeTime);
+			CurrentState = EKamikazeState::Dead;
+			TriggerCollisionExplosion();
+			KamikazeDie();
+		}
+		return;
+	}
+
 	const bool bDirect = (AttackPattern == EAttackPattern::Direct && BuildingTarget);
 
 	// Live aim every frame, never switched off before impact.
@@ -1129,6 +1165,26 @@ void AKamikazeDroneNPC::UpdateParried(float DeltaTime)
 	}
 }
 
+void AKamikazeDroneNPC::ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay)
+{
+	if (!HasAuthority() || bIsDead)
+	{
+		return;
+	}
+
+	// Already in the run, wind-up included: blind for the rest of it, however briefly it was lit.
+	if (CurrentState == EKamikazeState::Attacking && !bBlindStrike)
+	{
+		bBlindStrike = true;
+		BlindStrikeTime = 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s blinded mid-strike by %s, flying on blind"),
+			*GetName(), *GetNameSafe(Source));
+	}
+
+	// The timer (IsDazzled, which BeginAttack checks) and the overlay come from the base.
+	Super::ApplyDazzle(Source, Duration, SpreadMultiplier, Overlay);
+}
+
 void AKamikazeDroneNPC::BeginAttack(bool bRetaliation)
 {
 	// The StateTree calls this, and so does the drone itself when bSelfStrike is on; both go through
@@ -1139,6 +1195,12 @@ void AKamikazeDroneNPC::BeginAttack(bool bRetaliation)
 	// queue has said yes: whoever calls this, the player gets one strike at a time.
 	const bool bFromHold = CurrentState == EKamikazeState::Orbiting && bProximityTimedOut && bStrikeGranted;
 	if (!HasAuthority() || !bFromHold)
+	{
+		return;
+	}
+
+	// Lit by a tactical light while holding: it cannot line the strike up until the dazzle is over.
+	if (IsDazzled())
 	{
 		return;
 	}

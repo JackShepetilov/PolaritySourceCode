@@ -252,6 +252,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Strike", meta = (ClampMin = "0", ClampMax = "1"))
 	float StrikeArc = 0.0f;
 
+	// ==================== Blind strike (tactical light) ====================
+
+	/** Downward pull on a strike blinded by a tactical light, cm/s per second: it keeps its heading
+	 *  and sinks until it hits the floor or a wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Blind Strike", meta = (ClampMin = "0"))
+	float BlindStrikeGravity = 600.0f;
+
+	/** A blinded strike that has hit nothing after this long blows up where it is. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Kamikaze|Blind Strike", meta = (ClampMin = "0.5", Units = "s"))
+	float BlindStrikeMaxTime = 6.0f;
+
 	// ==================== Strike schedule ====================
 	// What the strike schedule assumes about the player when it spaces this drone's strike from the
 	// one before it. Deliberately constants on the drone, not read off the player's weapon: the
@@ -434,6 +445,10 @@ protected:
 	virtual void EnterCapturedState(UAnimMontage* OverrideMontage = nullptr) override;
 	virtual void ExitCapturedState() override;
 
+	/** Lit by a tactical light. Holding: cannot start a strike until the dazzle is over. Already
+	 *  striking: flies on blind, straight, sinking, until it hits something. */
+	virtual void ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay) override;
+
 public:
 
 	// ==================== Public Interface ====================
@@ -583,6 +598,10 @@ protected:
 
 	/** The strike queue said yes; consumed by BeginAttack. */
 	bool bStrikeGranted = false;
+
+	/** Lit during the strike: no steering, no miss check, flies on until it hits. */
+	bool bBlindStrike = false;
+	float BlindStrikeTime = 0.0f;
 
 	/** The player the strike queue handed this drone, refreshed every frame on the authority. */
 	TWeakObjectPtr<APawn> QueueTarget;

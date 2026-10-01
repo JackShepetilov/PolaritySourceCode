@@ -1086,6 +1086,10 @@ void AShooterProjectile::ResetProjectileState()
 	SourceWeapon = nullptr;
 	DirectHit = FHitResult();
 
+	// A tactical freezer slows a round by its time rate (UTacticalDeviceHandler_Freeze) and lets go
+	// when the round leaves the cone. A round that died inside it never left, so the pool resets it.
+	CustomTimeDilation = 1.0f;
+
 	// Reset hit flag
 	bHit = false;
 

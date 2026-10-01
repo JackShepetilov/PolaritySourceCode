@@ -15,6 +15,7 @@ UInventoryIconSettings::UInventoryIconSettings()
 		EWeaponAttachmentType::Magazine,
 		EWeaponAttachmentType::Optic,
 		EWeaponAttachmentType::Stock,
+		EWeaponAttachmentType::Tactical,
 	};
 }
 

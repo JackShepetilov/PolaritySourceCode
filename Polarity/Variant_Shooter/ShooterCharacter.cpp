@@ -23,6 +23,8 @@
 #include "ShooterWeapon.h"
 #include "Upgrades/Upgrades/Upgrade_ChargedPunch.h"
 #include "Weapons/ShooterWeapon_Melee.h"
+#include "Weapons/WeaponAttachmentDefinition.h"
+#include "Tactical/TacticalDeviceComponent.h"
 #include "Weapons/DroppedRangedWeapon.h"
 #include "Abilities/GrappleFetchable.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
@@ -102,6 +104,26 @@
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "Variant_Shooter/ShooterPlayerController.h"
 #include "PlayerDeathSequenceComponent.h"
+
+// How far off the view ray the scope may drift, in cm, before the magnified-optic cut closes.
+// See the optic cut in UpdateADS: below "aligned" the tube is fully open, past "lost" it is shut.
+static TAutoConsoleVariable<float> CVarOpticCutAlignedCm(
+	TEXT("polarity.optic.cutaligned"),
+	0.5f,
+	TEXT("Scope drift off the view ray (cm) up to which a magnified optic stays fully cut open."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarOpticCutLostCm(
+	TEXT("polarity.optic.cutlost"),
+	1.5f,
+	TEXT("Scope drift off the view ray (cm) at which the magnified optic cut is fully closed."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarOpticCutDebug(
+	TEXT("polarity.optic.cutdebug"),
+	0,
+	TEXT("Log [OPTIC_CUT] lines: how far the eye point and the optic sit off the view ray while aiming."),
+	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarMeleeLungeDebug(
 	TEXT("polarity.melee.lungedebug"),
@@ -271,6 +293,9 @@ AShooterCharacter::AShooterCharacter()
 
 	// create the cell grid (currency, magazines, ability upgrades, paid attachments)
 	InventoryComponent = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory Component"));
+
+	// the side rail device (flashlight, laser, gun shield, freezer) on whatever gun is in hand
+	TacticalDeviceComponent = CreateDefaultSubobject<UTacticalDeviceComponent>(TEXT("Tactical Device"));
 
 	// the engineer's kit: build menu, placement ghost, demolish
 	BuilderComponent = CreateDefaultSubobject<UBuilderComponent>(TEXT("Builder Component"));
@@ -2177,6 +2202,18 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 					}
 				}
 			}
+		}
+	}
+
+	// The gun shield on the rail, while aiming: hits from the front come off its pool first. After
+	// the slide block for the same reason the block sits before the armour: everything below reads
+	// the hit that actually got through.
+	if (Damage > 0.0f && TacticalDeviceComponent)
+	{
+		Damage = TacticalDeviceComponent->AbsorbIncomingDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+		if (Damage <= 0.0f)
+		{
+			return 0.0f;
 		}
 	}
 
@@ -4897,6 +4934,69 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	);
 
 	DumpADSDiagnostics(this, CurrentADSAlpha, CurrentWeapon);
+
+	// A magnifying scope is a tube, and its walls would hide most of the view. There is no second
+	// camera behind the eyepiece: the world zoom IS the picture in the scope, so the scope body and
+	// the gun under it are cut open around the screen centre instead (M_OpticBody_Cut reads this
+	// alpha from custom primitive data 0). Only materials built for it react, and only while a
+	// magnifying optic is fitted, so iron sights and red dots are never cut.
+	if (IsLocallyControlled() && CurrentWeapon)
+	{
+		const UWeaponAttachmentDefinition* Optic = CurrentWeapon->GetAttachmentOfType(EWeaponAttachmentType::Optic);
+		const bool bMagnified = Optic
+			&& (Optic->bOverrideADSZoom ? Optic->ADSZoomOverride : Optic->ADSZoomMultiplier) > 1.0f;
+
+		// Aiming is not the same as looking down the tube. A bolt cycle or a reload plays while the
+		// aim is held and swings the scope off the eye, and a hole left at the screen centre then
+		// cuts straight through the hands and the gun. So the cut also asks where the scope IS:
+		// both the eye point and the middle of the optic must sit on the view ray. Real component
+		// transforms, not rendered ones; the first person projection scales about the camera, so a
+		// point on the ray stays on the ray.
+		float Alignment = 0.0f;
+		const UCameraComponent* ViewCam = GetFirstPersonCameraComponent();
+		const USceneComponent* EyePoint = CurrentWeapon->GetADSCamera();
+		const USceneComponent* OpticPart = EyePoint ? EyePoint->GetAttachParent() : nullptr;
+		if (bMagnified && ViewCam && OpticPart)
+		{
+			const FVector RayStart = ViewCam->GetComponentLocation();
+			const FVector RayDir = GetViewRotation().Vector();
+			const auto OffRay = [&RayStart, &RayDir](const FVector& Point)
+			{
+				const FVector ToPoint = Point - RayStart;
+				return (ToPoint - RayDir * FVector::DotProduct(ToPoint, RayDir)).Size();
+			};
+			const float EyeDrift = OffRay(EyePoint->GetComponentLocation());
+			const float OpticDrift = OffRay(OpticPart->Bounds.Origin);
+			const float Drift = FMath::Max(EyeDrift, OpticDrift);
+			Alignment = 1.0f - FMath::SmoothStep(
+				CVarOpticCutAlignedCm.GetValueOnGameThread(), CVarOpticCutLostCm.GetValueOnGameThread(), Drift);
+			UE_CLOG(CVarOpticCutDebug.GetValueOnGameThread() && CurrentADSAlpha > 0.01f, LogTemp, Log,
+				TEXT("[OPTIC_CUT] ads %.2f eye %.2f optic %.2f cm -> alignment %.2f"),
+				CurrentADSAlpha, EyeDrift, OpticDrift, Alignment);
+		}
+		const float CutAlpha = bMagnified ? CurrentADSAlpha * Alignment : 0.0f;
+
+		if (USkeletalMeshComponent* WeaponFPMesh = CurrentWeapon->GetFirstPersonMesh())
+		{
+			TArray<USceneComponent*> Parts;
+			WeaponFPMesh->GetChildrenComponents(true, Parts);
+			Parts.Add(WeaponFPMesh);
+			for (USceneComponent* Part : Parts)
+			{
+				UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Part);
+				if (!Prim)
+				{
+					continue;
+				}
+				// Every write re-sends the render state, so write only on change.
+				const TArray<float>& Data = Prim->GetCustomPrimitiveData().Data;
+				if (!Data.IsValidIndex(0) || !FMath::IsNearlyEqual(Data[0], CutAlpha, 0.001f))
+				{
+					Prim->SetCustomPrimitiveDataFloat(0, CutAlpha);
+				}
+			}
+		}
+	}
 
 	// Hand the alpha to the FP anim graph. Nothing in animation knew about aiming before this:
 	// the whole difference between hip and aimed was a component transform, so the arms kept

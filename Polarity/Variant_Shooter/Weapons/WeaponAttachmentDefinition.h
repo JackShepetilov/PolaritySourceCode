@@ -28,6 +28,27 @@
 class UStaticMesh;
 class UTexture2D;
 class AShooterWeapon;
+class UTacticalDeviceDefinition;
+class UAnimMontage;
+class UMaterialInterface;
+class UNiagaraSystem;
+class USoundBase;
+
+/** What a muzzle does to the shots, on top of the recoil it changes. Docs/Muzzle_Attachment_Plan_2026-10-01.md.
+ *  Append only, like EWeaponAttachmentType. */
+UENUM(BlueprintType)
+enum class EMuzzleEffect : uint8
+{
+	/** Recoil only. */
+	None,
+
+	/** Chest hits fill a meter on the target; full meter stuns it. A target with no chest bone is
+	 *  slowed by hits near its middle instead. */
+	Stagger,
+
+	/** A round that hits an enemy jumps on to the nearest other enemy for part of its damage. */
+	Ricochet
+};
 
 /** What kind of attachment this is. One of each per weapon: mounting a second sight replaces the
  *  first rather than stacking, which is the whole reason this is an enum and not a free-form tag.
@@ -48,7 +69,11 @@ enum class EWeaponAttachmentType : uint8
 	Muzzle,
 
 	/** Stock, grip. */
-	Stock
+	Stock,
+
+	/** Side rail device: flashlight, laser, gun shield, freezer. Runs while the owner aims down
+	 *  sights and spends its own charge. What it does is the Device asset below. */
+	Tactical
 };
 
 /**
@@ -197,4 +222,136 @@ public:
 	/** Seconds in the holster before the gold perk reloads. Apex: 4 (was 2 before September 2025). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Modifiers", meta = (EditCondition = "Type == EWeaponAttachmentType::Magazine && bReloadsWhileHolstered", ClampMin = "0.0", Units = "s"))
 	float HolsteredReloadDelay = 4.0f;
+
+	// ---------- Tactical ----------
+	//
+	// Read by UTacticalDeviceComponent on the character holding the gun. The attachment is only the
+	// thing on the rail; the device asset is what it does and what it costs, so one device (a
+	// flashlight) can be sold as several attachments without its numbers being copied.
+
+	/** What this rail device does while the owner aims. Tactical only. Empty = a dead part. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Tactical", meta = (EditCondition = "Type == EWeaponAttachmentType::Tactical", EditConditionHides))
+	TObjectPtr<UTacticalDeviceDefinition> Device;
+
+	// ---------- Muzzle ----------
+	//
+	// Docs/Muzzle_Attachment_Plan_2026-10-01.md. Recoil: multipliers on the gun's own PRAS asset
+	// (RecoilData -> Controller Recoil), applied in AShooterWeapon::ApplyMuzzleModifiers on a private
+	// copy, so the shared asset is never written. Only pack (PRAS) guns read them; a gun on our own
+	// WeaponRecoilComponent ignores them. The hit effects run in AShooterWeapon::ApplyMuzzleHit.
+
+	/** Multiplies Controller Recoil -> Horizontal Recoil Step (both ends of the range). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides, ClampMin = "0.0", ClampMax = "4.0"))
+	float HorizontalRecoilMultiplier = 1.0f;
+
+	/** Multiplies Controller Recoil -> Vertical Recoil Step (both ends of the range). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides, ClampMin = "0.0", ClampMax = "4.0"))
+	float VerticalRecoilMultiplier = 1.0f;
+
+	/** Socket on THIS attachment's mesh where the muzzle flash and the tracer start (the end of the
+	 *  flash hider). None or missing = the first socket with "Muzzle" in its name, else the mesh's
+	 *  only socket, else the gun's own Muzzle socket. Shots themselves still leave from the gun. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides))
+	FName FXSocketName;
+
+	/** What the muzzle does to the hits. None = recoil only. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides))
+	EMuzzleEffect MuzzleEffect = EMuzzleEffect::None;
+
+	// --- Stagger: chest ---
+
+	/** Bones that count as the chest. A target whose mesh has none of them is handled by the
+	 *  centre rule below instead. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides))
+	TArray<FName> StaggerBoneNames = { FName("spine_03"), FName("spine_04"), FName("spine_05") };
+
+	/** Chest damage that has to pile up on one target before it is stunned. Damage after shields. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.0"))
+	float StaggerDamageThreshold = 60.0f;
+
+	/** The meter empties when the target goes this long without a chest hit from this gun. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.1", Units = "s"))
+	float StaggerMemory = 2.0f;
+
+	/** How long the stun lasts (AShooterNPC::ApplyExplosionStun). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.1", Units = "s"))
+	float StaggerStunDuration = 1.2f;
+
+	/** After a stun the meter stays shut for this long, so a long burst is not a stun lock. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.0", Units = "s"))
+	float StaggerImmunityTime = 3.0f;
+
+	/** Played for the stun. Empty = the enemy's own KnockbackMontage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides))
+	TObjectPtr<UAnimMontage> StaggerStunMontage;
+
+	// --- Stagger: no chest (drones, the carrier, the tank) ---
+
+	/** A hit counts as central when the shot's line passes within this fraction of the hit part's
+	 *  half-size (its largest bounding box half-extent) from the part's centre. Measured across the
+	 *  line, not to the impact point, so a round sphere is not "never central". 0.5 = the inner half. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.05", ClampMax = "1.0"))
+	float CenterRadiusFraction = 0.5f;
+
+	/** Central damage that has to pile up before the slow lands. 0 = every central hit slows. Uses
+	 *  StaggerMemory too. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.0"))
+	float CenterSlowDamageThreshold = 0.0f;
+
+	/** How long the slow lasts. Another central hit restarts it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.1", Units = "s"))
+	float CenterSlowDuration = 1.5f;
+
+	/** Walk speed multiplier on a ground enemy (the tank). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.05", ClampMax = "1.0"))
+	float CenterSlowMoveMultiplier = 0.5f;
+
+	/** Turn rate multiplier on a ground enemy. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.05", ClampMax = "1.0"))
+	float CenterSlowTurnMultiplier = 0.5f;
+
+	/** Time rate of a flyer (drones, kamikaze, carrier): flight, turns and fire all run this much slower. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides, ClampMin = "0.05", ClampMax = "1.0"))
+	float CenterSlowFlyerTimeMultiplier = 0.5f;
+
+	/** Overlay on a slowed enemy. Empty = none. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides))
+	TObjectPtr<UMaterialInterface> CenterSlowOverlay;
+
+	// --- Stagger: feedback, on every machine ---
+
+	/** Spawned on the target when a stun or a slow lands. Gets User.Color (red for stun, blue for slow). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides))
+	TObjectPtr<UNiagaraSystem> StaggerFX;
+
+	/** Played at the target when a stun lands. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides))
+	TObjectPtr<USoundBase> StaggerSound;
+
+	/** Played at the target when a slow lands. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Stagger", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Stagger", EditConditionHides))
+	TObjectPtr<USoundBase> CenterSlowSound;
+
+	// --- Ricochet ---
+
+	/** How many times one round jumps. Each jump goes to the nearest enemy not yet hit by this round. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Ricochet", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Ricochet", EditConditionHides, ClampMin = "1", ClampMax = "8"))
+	int32 RicochetCount = 2;
+
+	/** Each jump deals this fraction of the damage the round did to the first target. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Ricochet", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Ricochet", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float RicochetDamageFraction = 0.5f;
+
+	/** How far a jump can reach from the last hit. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Ricochet", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Ricochet", EditConditionHides, ClampMin = "100.0", Units = "cm"))
+	float RicochetRange = 1500.0f;
+
+	/** Tracer for a jump. Gets the same parameters as the gun's BeamFX (BeamStart, BeamEnd,
+	 *  Distance, BeamColor). Empty = the gun's own tracer. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Ricochet", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Ricochet", EditConditionHides))
+	TObjectPtr<UNiagaraSystem> RicochetTracerFX;
+
+	/** Played where a jump leaves from. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Ricochet", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Ricochet", EditConditionHides))
+	TObjectPtr<USoundBase> RicochetSound;
 };

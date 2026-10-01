@@ -93,6 +93,9 @@ float UAIAccuracyComponent::GetCurrentSpread(AActor* Target) const
 	// target's movement), while this is a different thing entirely.
 	FinalSpread *= GetSelfMovementSpreadMultiplier();
 
+	// Blinded by a tactical light: firing at where the glare is, not at the person.
+	FinalSpread *= DazzleSpreadMultiplier;
+
 	return FinalSpread;
 }
 

@@ -29,6 +29,7 @@ class UUpgradeManagerComponent;
 class UUpgradeRegistry;
 class UAbilityComponent;
 class UInventoryComponent;
+class UTacticalDeviceComponent;
 class UBuilderComponent;
 class UPlayerDeathSequenceComponent;
 class UAudioComponent;
@@ -302,6 +303,11 @@ private:
 	 *  A ledger of capacity only - weapons keep living in OwnedWeapons and cost the grid nothing. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UInventoryComponent> InventoryComponent;
+
+	/** The side rail device on the gun in hand: its charge, when it runs, what it does.
+	 *  Docs/TacticalAttachment_Plan_2026-10-01.md. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UTacticalDeviceComponent> TacticalDeviceComponent;
 
 	/** The engineer's kit: build menu, placement ghost, the request to the server. The buildings it
 	 *  puts down belong to the PlayerState, not to this character (see UBuilderComponent). */
@@ -2063,6 +2069,8 @@ public:
 	/** Returns the cell grid (currency, magazines, ability upgrades, paid attachments). */
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	UInventoryComponent* GetInventoryComponent() const { return InventoryComponent; }
+
+	UTacticalDeviceComponent* GetTacticalDeviceComponent() const { return TacticalDeviceComponent; }
 
 	/** Returns the builder (build menu, placement ghost, demolish). */
 	UFUNCTION(BlueprintPure, Category = "Builder")

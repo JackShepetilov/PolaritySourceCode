@@ -58,6 +58,7 @@ namespace LootCardFill
 		case EWeaponAttachmentType::Magazine: return LOCTEXT("TypeMagazine", "MAGAZINE");
 		case EWeaponAttachmentType::Muzzle:   return LOCTEXT("TypeMuzzle", "MUZZLE");
 		case EWeaponAttachmentType::Stock:    return LOCTEXT("TypeStock", "STOCK");
+		case EWeaponAttachmentType::Tactical: return LOCTEXT("TypeTactical", "TACTICAL");
 		default:                              return LOCTEXT("TypeOptic", "OPTIC");
 		}
 	}

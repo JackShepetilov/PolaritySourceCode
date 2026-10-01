@@ -273,6 +273,33 @@ public:
 	/** Let go of Source's turn slow. Safe to call for a source that never applied one. */
 	void RemoveTurnSlow(AActor* Source);
 
+	// ==================== Tactical devices (side rail) ====================
+	// Docs/TacticalAttachment_Plan_2026-10-01.md. Authority only, like the slows above.
+
+	/** Lit in the face by a tactical light held by Source. Lasts at least Duration from now; calling
+	 *  again while lit pushes the end out, never pulls it in. A soldier fires at Source without
+	 *  pausing, with its spread multiplied, backs off to cover from Source and sits there until the
+	 *  time is up. A kamikaze overrides this (KamikazeDroneNPC). */
+	virtual void ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay);
+
+	/** True while a tactical light's dazzle is running on this enemy. */
+	UFUNCTION(BlueprintPure, Category = "AI|Dazzle")
+	bool IsDazzled() const;
+
+	/** Inside Source's freezer cone: walk and turn slower, or for a flyer, run on slower time. Same
+	 *  source again replaces its numbers. */
+	void ApplyTacticalFreeze(AActor* Source, float MoveMultiplier, float TurnMultiplier, float FlyerTimeMultiplier,
+		UMaterialInterface* Overlay);
+
+	/** Out of Source's freezer cone. Safe for a source that never froze it. */
+	void RemoveTacticalFreeze(AActor* Source);
+
+	/** The freezer's slow, on a clock: lasts Duration from now, and the same source again restarts
+	 *  it with its new numbers. The muzzle's centre-hit slow (AShooterWeapon::ResolveMuzzleStagger).
+	 *  Source must not be a tactical freezer at the same time: they share the keyed maps. */
+	void ApplyTimedSlow(AActor* Source, float Duration, float MoveMultiplier, float TurnMultiplier,
+		float FlyerTimeMultiplier, UMaterialInterface* Overlay);
+
 	// ==================== Distraction (Tank's decoy) ====================
 
 	/** True while a decoy is holding this enemy's attention.
@@ -508,6 +535,83 @@ protected:
 	 *  orders from pulling the NPC away mid-cover. */
 	UPROPERTY(EditAnywhere, Category = "AI|Turret Cover", meta = (ClampMin = "0.1", Units = "s"))
 	float TurretCoverMoveReissueInterval = 0.5f;
+
+	// ==================== Dazzle (tactical light) ====================
+	// How a soldier reacts to being lit in the face. The light decides HOW LONG (its curve); the
+	// enemy decides WHAT it does with that time, so these numbers are per enemy class.
+
+	/** Once at cover, the soldier stays down at least this long, even if the dazzle runs out sooner. */
+	UPROPERTY(EditAnywhere, Category = "AI|Dazzle", meta = (ClampMin = "0.0", Units = "s"))
+	float DazzleMinHideTime = 1.5f;
+
+	/** No cover found within DazzleCoverWaitTime: back straight off from the light this far. */
+	UPROPERTY(EditAnywhere, Category = "AI|Dazzle", meta = (ClampMin = "0.0", Units = "cm"))
+	float DazzleRetreatDistance = 700.0f;
+
+	/** How long the soldier waits for the cover search before simply backing off. */
+	UPROPERTY(EditAnywhere, Category = "AI|Dazzle", meta = (ClampMin = "0.0", Units = "s"))
+	float DazzleCoverWaitTime = 0.6f;
+
+	/** How often the retreat re-issues its move order and re-checks its target. */
+	UPROPERTY(EditAnywhere, Category = "AI|Dazzle", meta = (ClampMin = "0.05", Units = "s"))
+	float DazzleScanInterval = 0.25f;
+
+	/** Arrival radius at the hide spot or the back-off point. */
+	UPROPERTY(EditAnywhere, Category = "AI|Dazzle", meta = (ClampMin = "20.0", Units = "cm"))
+	float DazzleArriveRadius = 90.0f;
+
+	enum class EDazzlePhase : uint8
+	{
+		Inactive,
+		Retreating,	// Backing off toward cover (or straight away), firing at the light.
+		Hiding,		// At cover, down, not firing, until the time is up.
+	};
+	EDazzlePhase DazzlePhase = EDazzlePhase::Inactive;
+
+	/** World time the dazzle ends. */
+	float DazzleEndTime = -1.0f;
+
+	/** Who is holding the light. Also what the soldier fires at and hides from. */
+	TWeakObjectPtr<AActor> DazzleSource;
+
+	TWeakObjectPtr<UMaterialInterface> DazzleOverlay;
+
+	float DazzleScanTimer = 0.0f;
+	float DazzleRetreatClock = 0.0f;
+	bool bDazzleBackingOff = false;
+	FVector DazzleBackOffPoint = FVector::ZeroVector;
+
+	/** Drive the dazzle reaction. Called from Tick. */
+	void TickDazzle(float DeltaTime);
+
+	/** Leave the dazzle, whatever phase it is in. */
+	void EndDazzle();
+
+	/** Freezer cones this enemy is standing in, with the overlay each wants shown. */
+	TMap<TWeakObjectPtr<AActor>, TWeakObjectPtr<UMaterialInterface>> TacticalFreezeSources;
+
+	/** Strongest flyer time rate among TacticalFreezeSources. */
+	TMap<TWeakObjectPtr<AActor>, float> TacticalFreezeFlyerTime;
+
+	/** When each ApplyTimedSlow source runs out, in world seconds. */
+	TMap<TWeakObjectPtr<AActor>, float> TimedSlowEnds;
+
+	/** Polls TimedSlowEnds while it is not empty. */
+	FTimerHandle TimedSlowTimer;
+
+	/** Let go of every timed slow that has run out. */
+	void TickTimedSlows();
+
+	/** The overlay the tactical devices want on this enemy, replicated so every player sees who is
+	 *  lit or frozen. Folded into RefreshStatusOverlay with the other status overlays. */
+	UPROPERTY(ReplicatedUsing = OnRep_TacticalOverlay)
+	TObjectPtr<UMaterialInterface> TacticalOverlayMaterial;
+
+	UFUNCTION()
+	void OnRep_TacticalOverlay();
+
+	/** Work out TacticalOverlayMaterial from the dazzle and the freezer sources. Authority. */
+	void RefreshTacticalOverlay();
 
 	// ==================== Hit Reactions ====================
 

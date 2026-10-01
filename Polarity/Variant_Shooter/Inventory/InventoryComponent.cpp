@@ -1464,7 +1464,7 @@ namespace InventoryDebug
 		if (!Inventory || Args.Num() < 2)
 		{
 			UE_LOG(LogInventory, Warning,
-				TEXT("[INV_DEBUG] usage: polarity.attach.remove <weapon 0|1> <optic|magazine|muzzle|stock>"));
+				TEXT("[INV_DEBUG] usage: polarity.attach.remove <weapon 0|1> <optic|magazine|muzzle|stock|tactical>"));
 			return;
 		}
 
@@ -1472,6 +1472,7 @@ namespace InventoryDebug
 		if (Args[1].Equals(TEXT("magazine"), ESearchCase::IgnoreCase)) { Type = EWeaponAttachmentType::Magazine; }
 		else if (Args[1].Equals(TEXT("muzzle"), ESearchCase::IgnoreCase)) { Type = EWeaponAttachmentType::Muzzle; }
 		else if (Args[1].Equals(TEXT("stock"), ESearchCase::IgnoreCase)) { Type = EWeaponAttachmentType::Stock; }
+		else if (Args[1].Equals(TEXT("tactical"), ESearchCase::IgnoreCase)) { Type = EWeaponAttachmentType::Tactical; }
 
 		AShooterWeapon* Weapon = FindLocalWeapon(World, FCString::Atoi(*Args[0]));
 		const bool bDone = Inventory->UninstallAttachment(Weapon, Type);
@@ -1584,7 +1585,7 @@ static FAutoConsoleCommandWithWorldAndArgs CmdAttachInstallCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs CmdAttachRemoveCmd(
 	TEXT("polarity.attach.remove"),
-	TEXT("Take an attachment off. Usage: polarity.attach.remove <weapon 0|1> <optic|magazine|muzzle|stock>"),
+	TEXT("Take an attachment off. Usage: polarity.attach.remove <weapon 0|1> <optic|magazine|muzzle|stock|tactical>"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&InventoryDebug::CmdAttachRemove)
 );
 
